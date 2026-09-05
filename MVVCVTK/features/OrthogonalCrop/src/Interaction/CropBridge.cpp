@@ -635,6 +635,8 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
         return false;
     }
 
+    m_boxWidget.SetReferenceWorldBounds(worldBounds);
+    m_planeWidget.SetReferenceWorldBounds(worldBounds);
     bool isEnabled = false;
     if (geometryType == CropShape::Box) {
         m_planeWidget.SetEnabled(false);
@@ -746,7 +748,11 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
         return;
     }
     if (phase == CropInteractionPhase::Dragging) {
-        (void)SetInteraction(m_boxSource, true);
+        if (!SetInteraction(m_boxSource, true)) {
+            m_hasDrag = false;
+            m_dragStart.reset();
+            return;
+        }
         m_hasDrag = true;
         return;
     }
@@ -792,7 +798,11 @@ void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
         return;
     }
     if (phase == CropInteractionPhase::Dragging) {
-        (void)SetInteraction(m_planeSource, true);
+        if (!SetInteraction(m_planeSource, true)) {
+            m_hasDrag = false;
+            m_dragStart.reset();
+            return;
+        }
         m_hasDrag = true;
         return;
     }

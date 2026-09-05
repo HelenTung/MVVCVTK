@@ -1,6 +1,7 @@
 #pragma once
 #include "IInteractionHandler.h"
 #include "Interaction/InteractionPorts.h"
+#include <cstdint>
 
 class vtkPropPicker;
 class vtkRenderer;
@@ -27,6 +28,7 @@ public:
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
+    InteractionResult SetModelDrag(const InteractionEvent& event);
     // 非拥有观察指针；StdViewContext 持有 ports 与 VTK 对象，Router 重建会先销毁本 Handler。
     InteractionStatePort* m_statePort = nullptr;
     SliceInputPort* m_slicePort = nullptr;
@@ -41,4 +43,14 @@ private:
     // 上一帧 VTK display 坐标，单位像素、左下角为原点；用于反投影鼠标增量。
     int  m_lastMouseX = 0;
     int  m_lastMouseY = 0;
+    bool m_isModelDrag = false;
+    bool m_isModelScale = false;
+    bool m_isModelSecondary = false;
+    std::uint64_t m_modelToken = 0;
+    std::uint64_t m_modelSequence = 0;
+    std::array<double, 16> m_modelStart{};
+    std::array<double, 3> m_modelCenter{};
+    std::array<double, 3> m_panStart{};
+    double m_modelDepth = 0;
+    int m_modelStartY = 0;
 };

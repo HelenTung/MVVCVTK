@@ -1,4 +1,5 @@
 #include "Render/Strategies/PartOverlayStrategies.h"
+#include "Render/Contracts/SlicePlaneState.h"
 
 #include <vtkActor.h>
 #include <vtkDataArray.h>
@@ -24,36 +25,6 @@
 namespace {
 
 constexpr std::uint32_t maxOverlayPartCount = 4096;
-
-std::array<double, 3> GetImageNormal(
-    vtkImageData& image,
-    const Orientation orientation)
-{
-    int column = 0;
-    if (orientation == Orientation::Top_down) column = 2;
-    else if (orientation == Orientation::Front_back) column = 1;
-    std::array<double, 3> normal{};
-    const auto* direction = image.GetDirectionMatrix();
-    if (direction) {
-        for (std::size_t row = 0; row < normal.size(); ++row) {
-            normal[row] = direction->GetElement(
-                static_cast<int>(row), column);
-        }
-        const double length = std::sqrt(
-            normal[0] * normal[0]
-            + normal[1] * normal[1]
-            + normal[2] * normal[2]);
-        if (std::isfinite(length)
-            && length > std::numeric_limits<double>::epsilon()) {
-            for (double& value : normal) value /= length;
-            return normal;
-        }
-    }
-
-    normal = { 0.0, 0.0, 0.0 };
-    normal[static_cast<std::size_t>(column)] = 1.0;
-    return normal;
-}
 
 bool SetLookupTable(
     vtkLookupTable& table,
@@ -232,23 +203,19 @@ void PartSliceOverlayStrategy::SetInputData(
     double center[3]{};
     image->GetCenter(center);
     m_plane->SetOrigin(center);
-    m_normal = GetImageNormal(*image, m_orientation);
+    m_normal = SlicePlaneState::Build(m_orientation, {}).worldNormal;
     m_plane->SetNormal(m_normal.data());
 }
 
 void PartSliceOverlayStrategy::SetOverlayState(
     const FeatureOverlayState& state)
 {
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(state.modelToWorld.data());
-    m_slice->SetUserMatrix(matrix);
+    Set3DPropsTransform(state.modelToWorld);
 
     constexpr double sliceOffset = 0.001;
-    m_plane->SetOrigin(
-        state.cursor[0] + m_normal[0] * sliceOffset,
-        state.cursor[1] + m_normal[1] * sliceOffset,
-        state.cursor[2] + m_normal[2] * sliceOffset);
-    m_plane->SetNormal(m_normal.data());
+    const auto plane = SlicePlaneState::Build(m_orientation, state.cursor, sliceOffset);
+    m_plane->SetOrigin(plane.worldOrigin.data());
+    m_plane->SetNormal(plane.worldNormal.data());
 }
 
 bool PartSliceOverlayStrategy::SetPartStates(

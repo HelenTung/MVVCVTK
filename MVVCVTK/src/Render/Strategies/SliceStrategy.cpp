@@ -1,4 +1,5 @@
 #include "SliceStrategy.h"
+#include "Render/Contracts/SlicePlaneState.h"
 #include <vtkCamera.h>
 #include <vtkImageData.h>
 #include <vtkImageMask.h>
@@ -801,24 +802,15 @@ bool SliceStrategy::SetVisualState(
             ++m_inverseBuildCount;
         }
 
-        double worldNormal[3] = { 0.0, 0.0, 0.0 };
-        if (m_orientation == Orientation::Top_down) {
-            worldNormal[2] = 1.0;
-        }
-        else if (m_orientation == Orientation::Front_back) {
-            worldNormal[1] = 1.0;
-        }
-        else {
-            worldNormal[0] = 1.0;
-        }
+        const auto planeState = SlicePlaneState::Build(m_orientation, params.cursor);
         auto* slicePlane = resliceMapper->GetSlicePlane();
         if (!slicePlane) {
             auto nextPlane = vtkSmartPointer<vtkPlane>::New();
             resliceMapper->SetSlicePlane(nextPlane);
             slicePlane = nextPlane;
         }
-        slicePlane->SetOrigin(params.cursor.data());
-        slicePlane->SetNormal(worldNormal);
+        slicePlane->SetOrigin(planeState.worldOrigin.data());
+        slicePlane->SetNormal(planeState.worldNormal.data());
 
         const double safeOffset = std::min({
             m_inputSpacing[0],

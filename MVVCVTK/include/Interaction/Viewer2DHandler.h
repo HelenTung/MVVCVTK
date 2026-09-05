@@ -11,7 +11,7 @@ class vtkRenderer;
 // 支持的交互：
 //   滚轮前/后         → 切片步进
 //   isShiftDown + 左键拖拽  → 拖拽十字线定位
-//   isCtrlDown + 左键拖拽   → 定轴旋转
+//   定轴旋转由 ModelRotation Feature 通过统一输入绑定接管。
 //   左键拖拽          → 调窗
 //   右键拖拽          → 缩放
 // ─────────────────────────────────────────────────────────────────────
@@ -39,14 +39,11 @@ private:
     vtkRenderer* m_renderer = nullptr;
     InteractionSource m_source;
 
-    // 四种拖拽状态分别在对应 press 置位、release 清零，并驱动 SharedState 的 interacting 状态。
+    // 三种拖拽状态分别在对应 press 置位、release 清零，并驱动自身 interaction source。
     bool m_isDragCrosshair = false;  // Shift+左键：拖拽十字线
-    bool m_isDragSlice = false;      // Ctrl+左键：绕当前十字线定轴旋转
     bool m_isDragWindowLevel = false; // 普通左键：调窗
     bool m_isRightZoom = false;       // 右键：修改平行投影缩放
     // VTK display 坐标，单位像素、左下角为原点；每次旋转或调窗 MouseMove 后更新。
-    int  m_lastRotateX = 0;
-    int  m_lastRotateY = 0;
     int  m_lastDragX = 0;
     int  m_lastDragY = 0;
     

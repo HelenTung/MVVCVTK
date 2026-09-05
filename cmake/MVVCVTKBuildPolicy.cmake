@@ -8,6 +8,7 @@ option(
 )
 option(MVVCVTK_BUILD_ORTHOGONAL_CROP "Build OrthogonalCrop feature" ON)
 option(MVVCVTK_BUILD_GAP_ANALYSIS "Build GapAnalysis feature" ON)
+option(MVVCVTK_BUILD_MODEL_ROTATION "Build repository-only ModelRotation feature" OFF)
 option(
     MVVCVTK_BUILD_PART_SEGMENTATION
     "Build repository-only PartSegmentation feature"

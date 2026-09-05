@@ -8,7 +8,7 @@
 
 #include <vtkCellArray.h>
 #include <vtkImageData.h>
-#include <vtkMatrix3x3.h>
+#include "Render/Contracts/SlicePlaneState.h"
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
@@ -133,38 +133,14 @@ bool GetConfigValid(const SurfaceDeterminationConfig& config)
     return GetStartValid(params);
 }
 
-std::array<double, 3> GetSliceNormal(
-    vtkImageData& image,
-    const HostRenderViewRole role)
+std::array<double, 3> GetSliceNormal(const HostRenderViewRole role)
 {
-    int column = 0;
-    if (role == HostRenderViewRole::TopDownSlice) column = 2;
-    else if (role == HostRenderViewRole::FrontBackSlice) column = 1;
-    std::array<double, 3> normal{};
-    const auto* direction = image.GetDirectionMatrix();
-    if (direction) {
-        for (std::size_t row = 0; row < 3; ++row) {
-            normal[row] = direction->GetElement(
-                static_cast<int>(row), column);
-        }
-        const double length = std::sqrt(
-            normal[0] * normal[0]
-            + normal[1] * normal[1]
-            + normal[2] * normal[2]);
-        if (std::isfinite(length)
-            && length > std::numeric_limits<double>::epsilon()) {
-            for (double& value : normal) value /= length;
-            return normal;
-        }
-    }
-    normal = { 0.0, 0.0, 0.0 };
-    normal[static_cast<std::size_t>(column)] = 1.0;
-    return normal;
+    const auto orientation = role == HostRenderViewRole::TopDownSlice ? Orientation::Top_down
+        : role == HostRenderViewRole::FrontBackSlice ? Orientation::Front_back : Orientation::Left_right;
+    return SlicePlaneState::Build(orientation, {}).worldNormal;
 }
-
 std::shared_ptr<FeatureOverlay> CreateOverlay(
-    const HostRenderViewRole role,
-    vtkImageData& source)
+    const HostRenderViewRole role)
 {
     if (role == HostRenderViewRole::Primary3D
         || role == HostRenderViewRole::Composite3D) {
@@ -174,7 +150,7 @@ std::shared_ptr<FeatureOverlay> CreateOverlay(
         || role == HostRenderViewRole::FrontBackSlice
         || role == HostRenderViewRole::LeftRightSlice) {
         return std::make_shared<SurfaceSliceOverlayStrategy>(
-            GetSliceNormal(source, role));
+            GetSliceNormal(role));
     }
     return nullptr;
 }
@@ -729,7 +705,7 @@ bool SurfaceDeterminationHostFeature::Impl::BuildBindings(
     for (const HostFeatureView& view : views) {
         auto service = m_views->GetOverlayPort(view.id);
         auto overlay = service
-            ? CreateOverlay(view.role, *source->image) : nullptr;
+            ? CreateOverlay(view.role) : nullptr;
         if (!service || !overlay) {
             RemoveBindings(bindings);
             return false;

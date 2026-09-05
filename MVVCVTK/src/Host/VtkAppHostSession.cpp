@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -97,6 +98,7 @@ public:
         std::shared_ptr<HostFeature> feature;
         // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
         bool isHostDetached = false;
+        std::shared_ptr<std::atomic<bool>> transformLease;
     };
 
     class InputEndpoint final : public HostInputEndpoint {
@@ -133,6 +135,11 @@ public:
     // StopOwner 后所有跨层调用稳定返回失败。
     class FeatureHostBridge final {
     public:
+        bool GetIsOwnerActive() const noexcept
+        {
+            return GetOwnerPorts().views != nullptr;
+        }
+
         bool StartOwner(
             HostViewRuntimeRegistry& views,
             HostInputPort& input,
@@ -539,16 +546,56 @@ public:
     };
 
     class FeatureHostControlPort final
-        : public FeatureHostControl {
+        : public FeatureHostControl, public FeatureModelTransformPort {
     public:
         FeatureHostControlPort(
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
-            std::weak_ptr<OwnerCompleteState> completeState)
+            std::weak_ptr<OwnerCompleteState> completeState,
+            std::weak_ptr<SharedInteractionState> state,
+            std::shared_ptr<std::atomic<bool>> lease)
             : m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_completeState(std::move(completeState))
+            , m_state(std::move(state))
+            , m_transformLease(std::move(lease))
         {
+        }
+
+        std::optional<ModelTransformSnapshot> GetTransformState() const override
+        {
+            const auto state = GetStateOwner();
+            return state ? std::optional<ModelTransformSnapshot>(
+                state->GetTransformState()) : std::nullopt;
+        }
+
+        std::optional<std::uint64_t> StartTransform(
+            const ModelTransformSnapshot& expected) override
+        {
+            const auto state = GetStateOwner();
+            return state ? state->StartTransform(m_featureId, expected) : std::nullopt;
+        }
+
+        bool SetTransformPreview(std::uint64_t token, std::uint64_t sequence,
+            const std::array<double, 16>& matrix) override
+        {
+            const auto state = GetStateOwner();
+            return state && state->SetTransformPreview(
+                m_featureId, token, sequence, matrix);
+        }
+
+        bool SetTransformCommit(std::uint64_t token, std::uint64_t sequence,
+            const std::array<double, 16>& matrix) override
+        {
+            const auto state = GetStateOwner();
+            return state && state->SetTransformPreview(
+                m_featureId, token, sequence, matrix, true);
+        }
+
+        bool StopTransform(std::uint64_t token) override
+        {
+            const auto state = GetStateOwner();
+            return state && state->StopTransform(m_featureId, token);
         }
 
         bool SetActiveViews(
@@ -613,9 +660,18 @@ public:
         }
 
     private:
+        std::shared_ptr<SharedInteractionState> GetStateOwner() const
+        {
+            const auto bridge = m_bridge.lock();
+            return bridge && bridge->GetIsOwnerActive()
+                && m_transformLease && m_transformLease->load() ? m_state.lock() : nullptr;
+        }
+
         std::weak_ptr<FeatureHostBridge> m_bridge;
         std::string m_featureId;
         std::weak_ptr<OwnerCompleteState> m_completeState;
+        std::weak_ptr<SharedInteractionState> m_state;
+        std::shared_ptr<std::atomic<bool>> m_transformLease;
     };
 
     explicit Impl(HostSessionConfig sessionConfig)
@@ -856,6 +912,7 @@ bool VtkAppHostSession::Impl::BuildSession()
             sessionGeneration = nextSessionGeneration++;
         }
         if (nextSessionGeneration == 0) nextSessionGeneration = 1;
+        core.sharedState->SetTransformGeneration(sessionGeneration);
         HostFrameCoordinator::Callbacks frameCallbacks;
         frameCallbacks.collectUpdates = [this]() {
             return renderViews.CollectFrameUpdates();
@@ -868,13 +925,22 @@ bool VtkAppHostSession::Impl::BuildSession()
             return renderViews.SetFrameIntents(intents);
         };
         frameCallbacks.applyFeatureUpdates = [this]() {
-            return renderViews.ApplyFrameUpdates();
+            return core.sharedState->StartTransformFrame()
+                && renderViews.ApplyFrameUpdates();
         };
         frameCallbacks.buildStage = [this](
             const std::uint64_t epoch) {
-            return renderViews.BuildFrameStage(epoch);
+            const auto status = renderViews.BuildFrameStage(epoch);
+            if (!core.sharedState->GetTransformFrameValid())
+                return HostFrameStageStatus::Failed;
+            if (status == HostFrameStageStatus::Unchanged
+                && !core.sharedState->SetTransformFrameCommit())
+                return HostFrameStageStatus::Failed;
+            return status;
         };
         frameCallbacks.setCommit = [this](const std::uint64_t epoch) {
+            if (!core.sharedState->SetTransformFrameCommit())
+                throw std::runtime_error("Model transform input changed before frame commit");
             renderViews.SetFrameCommit(epoch);
         };
         frameCallbacks.sendRender = [this](const std::uint64_t epoch) {
@@ -890,6 +956,10 @@ bool VtkAppHostSession::Impl::BuildSession()
         };
         frameCallbacks.clearStage = [this]() {
             renderViews.ClearFrameStage();
+            if (core.sharedState->ClearTransformFrame()) {
+                // 切回已发布姿态后恢复所有投影；失败仍保留 dirty，帧屏障禁止提前 Render。
+                (void)renderViews.ApplyFrameUpdates();
+            }
         };
         frameCoordinator = std::make_shared<HostFrameCoordinator>(
             sessionGeneration, std::move(frameCallbacks));
@@ -1505,7 +1575,9 @@ bool VtkAppHostSession::Impl::AttachFeature(
     const std::weak_ptr<FeatureHostBridge> weakBridge =
         featureBridge;
     HostFeatureContext context;
+    std::shared_ptr<std::atomic<bool>> transformLease;
     try {
+        transformLease = std::make_shared<std::atomic<bool>>(true);
         context.views =
             std::make_shared<FeatureViewDirectoryPort>(weakBridge);
         context.read = std::make_shared<FeatureReadPort>(core);
@@ -1513,7 +1585,9 @@ bool VtkAppHostSession::Impl::AttachFeature(
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            ownerCompleteState);
+            ownerCompleteState,
+            core.sharedState,
+            transformLease);
     }
     catch (...) {
         return false;
@@ -1525,6 +1599,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         }
         catch (...) {
         }
+        *transformLease = false;
         try {
             (void)inputRegistry->GetFeaturePort().DetachInput(id);
         }
@@ -1547,7 +1622,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
             [](const FeatureEntry& entry, const std::string& value) {
                 return entry.id < value;
             });
-        features.insert(insertAt, FeatureEntry{ id, feature, false });
+        features.insert(insertAt, FeatureEntry{ id, feature, false, transformLease });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1597,6 +1672,7 @@ bool VtkAppHostSession::Impl::DetachFeature(
             return false;
         }
         entry->isHostDetached = true;
+        if (entry->transformLease) *entry->transformLease = false;
     }
     if (!inputRegistry
         || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
@@ -1625,6 +1701,7 @@ bool VtkAppHostSession::Impl::DetachFeatures()
                 return false;
             }
             entry.isHostDetached = true;
+            if (entry.transformLease) *entry.transformLease = false;
         }
         if (!inputRegistry
             || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {

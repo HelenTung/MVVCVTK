@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Render/Contracts/SlicePlaneState.h"
 #include "App/ViewTypes.h"
 #include "Render/Support/FeatureOverlayBase.h"
 #include <vtkActor.h>
@@ -101,9 +102,8 @@ public:
         auto plane = vtkSmartPointer<vtkPlane>::New();
         double center[3]; img->GetCenter(center);
         plane->SetOrigin(center);
-        if (m_orientation == Orientation::Top_down) plane->SetNormal(0, 0, 1);
-        else if (m_orientation == Orientation::Front_back) plane->SetNormal(0, 1, 0);
-        else plane->SetNormal(1, 0, 0);
+        const auto planeState = SlicePlaneState::Build(m_orientation, {});
+        plane->SetNormal(planeState.worldNormal.data());
         m_mapper->SetSlicePlane(plane);
     }
 
@@ -111,25 +111,14 @@ public:
     void SetOverlayState(
         const FeatureOverlayState& state) override {
         // 自动跟随主视图的切片滚动和模型变换。
-        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        modelToWorldMatrix->DeepCopy(state.modelToWorld.data());
-        m_slice->SetUserMatrix(modelToWorldMatrix);
+        Set3DPropsTransform(state.modelToWorld);
 
         auto plane = m_mapper->GetSlicePlane();
         if (plane) {
             constexpr double sliceOffset = 0.001; // VTK world 坐标偏移，避免标签与原切片共面。
-            double worldNormal[3] = { 0.0, 0.0, 0.0 };
-            if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
-            else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
-            else worldNormal[0] = 1.0;
-            double offsetOrigin[3] = {
-                state.cursor[0] + worldNormal[0] * sliceOffset,
-                state.cursor[1] + worldNormal[1] * sliceOffset,
-                state.cursor[2] + worldNormal[2] * sliceOffset
-            };
-
-            plane->SetOrigin(offsetOrigin[0], offsetOrigin[1], offsetOrigin[2]);
-            plane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
+            const auto planeState = SlicePlaneState::Build(m_orientation, state.cursor, sliceOffset);
+            plane->SetOrigin(planeState.worldOrigin.data());
+            plane->SetNormal(planeState.worldNormal.data());
         }
     }
 };

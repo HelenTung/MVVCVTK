@@ -3,6 +3,7 @@
 #include "AppStateEvents.h"
 #include "AppTypes.h"
 #include "App/Services/DataCommitTypes.h"
+#include "Host/FeatureModelTransformPort.h"
 
 #include <array>
 #include <cstdint>
@@ -107,8 +108,21 @@ public:
     bool SetFileLoadFailed();
     bool SetReloadLoadFailed();
     void SetPreInitConfig(const PreInitConfig& config);
-    void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix);
+    bool SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix);
     std::array<double, 16> GetModelMatrix() const;
+    ModelTransformSnapshot GetTransformState() const;
+    void SetTransformGeneration(std::uint64_t generation);
+    std::optional<std::uint64_t> StartTransform(
+        const std::string& owner, const ModelTransformSnapshot& expected);
+    bool SetTransformPreview(const std::string& owner, std::uint64_t token,
+        std::uint64_t sequence, const std::array<double, 16>& matrix,
+        bool isCommit = false);
+    bool StopTransform(const std::string& owner, std::uint64_t token);
+    bool StartTransformFrame();
+    bool GetTransformFrameValid() const;
+    bool SetTransformFrameCommit() noexcept;
+    bool ClearTransformFrame() noexcept;
+    bool GetTransformBusy() const;
     void SetScalarRange(double rangeMin, double rangeMax);
     std::array<double, 2> GetScalarRange() const;
     // 兼容既有调用方；新代码应使用与 SetScalarRange 对称的 GetScalarRange。
