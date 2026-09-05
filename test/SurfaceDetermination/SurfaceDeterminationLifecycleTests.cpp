@@ -128,7 +128,9 @@ public:
     bool SendSceneDelta(FeatureSceneDelta delta) override
     {
         ++sceneCount;
-        return !isSceneRejected && delta.requestId != 0 && !delta.viewIds.empty();
+        if (isSceneRejected || delta.requestId == 0 || delta.viewIds.empty()) return false;
+        lastDelta = std::move(delta);
+        return true;
     }
 
     bool SendOwnerComplete(std::function<void()> complete) override
@@ -139,6 +141,7 @@ public:
     }
 
     std::vector<std::string> activeViews;
+    FeatureSceneDelta lastDelta;
     bool isActiveViewsRejected = false;
     bool isSceneRejected = false;
     int sceneCount = 0;
@@ -238,6 +241,16 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         "start completes on owner tick");
     const auto state = feature->GetState();
     const auto snapshot = feature->GetSurfaceSnapshot();
+    const auto operations = feature->GetOperationStates();
+    const auto repeated = feature->GetOperationStates();
+    checks.Get(operations.size() == 1 && repeated.size() == 1
+        && operations.front().operation.requestId == admission.requestId
+        && operations.front().status == FeatureRunStatus::Succeeded
+        && operations.front().stateRevision == repeated.front().stateRevision
+        && operations.front().inputs.size() == 1 && operations.front().outputs.size() == 2
+        && testHost.host->lastDelta.hasDisplayUpdate && testHost.host->lastDelta.displays.size() == 1
+        && testHost.host->lastDelta.displays.front().operation == operations.front().operation,
+        "Surface operation and adopted mesh share a stable execution identity");
     checks.Get(
         completed.status == SurfaceResultStatus::Succeeded
             && state.stage == SurfaceDeterminationStage::Ready,
@@ -548,6 +561,7 @@ void TestBindingProjection(Checks& checks)
     const auto firstState = feature.GetState();
     checks.Get(start() && WaitUntil(feature, [&] { return completed == 2; }), "binding B publishes");
     const auto second = feature.GetSurfaceSnapshot();
+    const auto secondDisplays = testHost.host->lastDelta.displays;
     if (!first || !second) { checks.Get(false, "binding fixtures have results"); return; }
     checks.Get(SetBinding(*testHost.data, surfaceResultBinding, first->dataRevision), "activate historical A");
     checks.Get(feature.GetSurfaceSnapshot().get() == first.get(), "current query follows binding before tick without mutation");
@@ -558,6 +572,20 @@ void TestBindingProjection(Checks& checks)
             && testHost.views->overlay->overlays.size() == 1
             && testHost.data->GetDataGraph().commitId == commitId,
         "owner projection follows A without publishing a new version");
+    const auto historicalDisplays = testHost.host->lastDelta.displays;
+    const auto operations = feature.GetOperationStates();
+    const auto activation = std::find_if(operations.begin(), operations.end(), [&](const auto& operation) {
+        return !historicalDisplays.empty() && operation.operation == historicalDisplays.front().operation;
+    });
+    checks.Get(historicalDisplays.size() == 1 && secondDisplays.size() == 1
+            && historicalDisplays.front().data == first->meshRevision
+            && !(historicalDisplays.front().operation == secondDisplays.front().operation)
+            && activation != operations.end()
+            && std::find(activation->outputs.begin(), activation->outputs.end(), first->dataRevision)
+                != activation->outputs.end()
+            && std::find(activation->outputs.begin(), activation->outputs.end(), second->dataRevision)
+                == activation->outputs.end(),
+        "historical display activation identifies A without reusing B operation or outputs");
     checks.Get(SetBinding(*testHost.data, surfaceResultBinding, second->dataRevision)
             && SetBinding(*testHost.data, surfaceResultBinding, first->dataRevision)
             && feature.OnHostTick() && testHost.views->overlay->overlays.size() == 1,

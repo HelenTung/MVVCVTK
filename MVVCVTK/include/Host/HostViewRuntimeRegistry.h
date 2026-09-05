@@ -93,7 +93,7 @@ public:
     std::optional<HostSceneViewState> GetSceneViewState(
         const HostViewTarget& target);
     // 按 topology 顺序返回全部 View；不可用项不读取 App 或 VTK 状态。
-    std::vector<HostSceneViewState> GetSceneViewStates();
+    std::vector<HostSceneViewState> GetSceneViewStates() const;
     std::weak_ptr<IHostViewDirectory> GetViewDirectory() const;
     std::vector<HostFeatureView> GetFeatureViews(
         const HostViewTargets& targets) const;

@@ -360,6 +360,7 @@ struct PartSegmentationConfig final {
     PartSegmentationStartParams defaultStart;
     std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
     bool isOverlayVisible = true;
+    bool isSelectionEnabled = false;
 };
 
 struct PartSegmentationRequest final {

@@ -770,6 +770,34 @@ bool GetDisplayUnchangedValid()
         && completed == 2 && probe.renderAttemptCount == 1;
 }
 
+bool GetCorrelationIntentValid()
+{
+    FrameProbe probe;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    auto delta = GetDelta(1);
+    delta.inputs = { { "source-volume", { { 1, 2 }, 1 } } };
+    auto invalid = delta;
+    invalid.inputs.push_back(invalid.inputs.front());
+    if (coordinator.Enqueue("feature", invalid)) return false;
+    invalid = delta;
+    invalid.expectations.push_back({});
+    if (coordinator.Enqueue("feature", invalid)) return false;
+    invalid.expectations.front().kind = DataExpectationKind::Binding;
+    invalid.expectations.front().binding = "primary";
+    invalid.expectations.front().use = static_cast<DataExpectationUse>(99);
+    if (coordinator.Enqueue("feature", invalid)) return false;
+    probe.stageStatus = HostFrameStageStatus::Failed;
+    if (!coordinator.Enqueue("feature", delta)
+        || coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Failed) return false;
+    delta.requestId = 2;
+    delta.inputs.front().source.generation = 2;
+    if (!coordinator.Enqueue("feature", delta)) return false;
+    probe.stageStatus = HostFrameStageStatus::Ready;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
+        && probe.intents.size() == 1 && probe.intents.front().delta.requestId == 2
+        && probe.intents.front().delta.inputs.front().source.generation == 2;
+}
+
 } // namespace
 
 int main()
@@ -796,7 +824,8 @@ int main()
         && GetDisplayCapacityValid()
         && GetDisplayApplyFailureValid()
         && GetDisplayUnchangedValid()
-        && GetDisplayReentryBounded();
+        && GetDisplayReentryBounded()
+        && GetCorrelationIntentValid();
     std::cout << (isValid
         ? "PASS: Host frame coordinator protocol\n"
         : "FAIL: Host frame coordinator protocol\n");

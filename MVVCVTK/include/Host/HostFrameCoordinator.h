@@ -26,6 +26,8 @@ struct HostFrameIntent final {
     FeatureSceneDelta delta;
     std::uint64_t sessionGeneration = 0;
     std::uint64_t baseSceneEpoch = 0;
+    std::uint64_t attachmentId = 0;
+    std::shared_ptr<const std::atomic<bool>> attachment;
 };
 
 class HostFrameCoordinator final {
@@ -64,7 +66,9 @@ public:
     HostFrameCoordinator& operator=(HostFrameCoordinator&&) = delete;
 
     // 任意线程只可提交纯值意图；此调用不读取 View，也不触碰 VTK。
-    bool Enqueue(std::string featureId, FeatureSceneDelta delta);
+    bool Enqueue(std::string featureId, FeatureSceneDelta delta,
+        std::uint64_t attachmentId = 0,
+        std::shared_ptr<const std::atomic<bool>> attachment = {});
 
     // owner thread 专用；nullopt 表示目标尚在准备，false 表示失败或已被替代。
     bool SendDisplayComplete(

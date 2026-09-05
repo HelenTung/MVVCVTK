@@ -46,6 +46,10 @@ struct HostInputBinding final {
     std::string featureId;
     HostViewTargets targetViews;
     std::function<InteractionResult(const InteractionEvent&)> onInput;
+    // 成对提供；Press 命中一次，捕获期保留同一纯值目标；Cancel 必须能清预览。
+    std::function<std::optional<HostSemanticTarget>(const InteractionEvent&)> getTarget;
+    std::function<InteractionResult(const InteractionEvent&,
+        const HostSemanticTarget&)> onTargetInput;
 };
 
 class HostInputPort {
@@ -106,6 +110,11 @@ struct FeatureSceneDelta final {
     std::uint64_t requestId = 0;
     FeatureScenePriority priority = FeatureScenePriority::Scene;
     FeatureSceneScope scope = FeatureSceneScope::RequiredAllViews;
+    std::vector<DataInputRef> inputs;
+    std::vector<DataExpectation> expectations;
+    // true 替换该 Feature 在目标 View 的完整描述，空 displays 表示移除。
+    bool hasDisplayUpdate = false;
+    std::vector<HostDisplayRef> displays;
 };
 
 class FeatureHostControl : public HostInputPort {
@@ -124,6 +133,11 @@ public:
     // worker 可以通知 owner 有待消费工作；不执行业务 callback、不触碰 VTK。
     // Session/Feature 失效后拒绝；独立测试端口可明确不支持通知。
     virtual bool SendWorkAvailable() { return false; }
+    virtual std::uint64_t GetAttachmentId() const noexcept { return 0; }
+    virtual std::optional<HostSemanticTarget> GetDisplayTarget(
+        const std::string&, const std::string&) const { return {}; }
+    // 只检查通用展示身份；objectId/resultRevision 仍由对应 Feature 核验。
+    virtual bool GetSemanticTargetValid(const HostSemanticTarget&) const { return false; }
 };
 
 struct HostFeatureContext final {
@@ -140,6 +154,8 @@ public:
     virtual std::string_view GetFeatureId() const noexcept = 0;
     // 纯控制/展示 Feature 可以没有数据契约；产生或消费正式数据的 Feature 显式覆盖。
     virtual FeatureDataContract GetDataContract() const { return {}; }
+    // 只投影实际执行事实；不得 tick、发布数据、执行回调或修改 VTK。
+    virtual std::vector<FeatureOperationState> GetOperationStates() const { return {}; }
     virtual bool AttachHost(const HostFeatureContext& context) = 0;
     virtual bool DetachHost() = 0;
     virtual bool OnHostTick() = 0;

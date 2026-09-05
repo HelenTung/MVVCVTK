@@ -28,6 +28,7 @@ public:
         const FeatureOverlayState& state) override;
     bool SetPartStates(
         const PartRenderStateTable& states) noexcept override;
+    std::optional<PartLabelId> GetPickedLabel(int x, int y, vtkRenderer* renderer) const override;
 
 private:
     vtkSmartPointer<vtkActor> m_actor;
@@ -47,6 +48,7 @@ public:
         const FeatureOverlayState& state) override;
     bool SetPartStates(
         const PartRenderStateTable& states) noexcept override;
+    std::optional<PartLabelId> GetPickedLabel(int x, int y, vtkRenderer* renderer) const override;
 
 private:
     vtkSmartPointer<vtkImageSlice> m_slice;

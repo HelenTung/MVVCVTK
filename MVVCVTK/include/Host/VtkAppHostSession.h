@@ -80,6 +80,8 @@ public:
         const HostViewTarget& target);
     // 仅 owner thread 可读；按配置顺序返回全部 View，包括当前不可用的 View。
     std::vector<HostSceneViewState> GetSceneViewStates();
+    // Running Session 的 owner-thread 纯值读取；不要求画面已完成绘制。
+    std::optional<HostStateSnapshot> GetStateSnapshot() const;
     // 深拷贝当前体素为不含 VTK identity 的只读值；无有效体数据时返回空。
     // metadata-only 查询不复制体素；几何为加载边界转换后的规范 RAS。
     std::optional<ImageDescriptor> GetImageDescriptor();

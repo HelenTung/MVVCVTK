@@ -77,6 +77,9 @@ struct HostRenderViewConfig {
     vtkSmartPointer<vtkRenderWindow> renderWindow; // 可选外部窗口；为空时 session 自建并拥有窗口。
     bool isEventLoopEnabled = false; // standalone Start 候选；一个会话必须能解析出唯一启动窗口。
     HostInputMode inputMode = HostInputMode::NativeInteractor; // 构建时冻结；默认由 VTK interactor 接收原生输入。
+    // 空组沿用默认同源组；不同组分别核验，不能据此放宽组内来源约束。
+    std::string synchronizationGroup;
+    HostViewSyncPolicy syncPolicy = HostViewSyncPolicy::SamePrimary;
 };
 
 // 上位机读取单视图当前状态的值快照；所有容器均为独立副本，不暴露 VizService/SharedState。
@@ -123,10 +126,21 @@ struct HostSceneViewState final {
     // 仅表示 App presentation 事务，不覆盖 Camera、Feature 或 Overlay。
     std::uint64_t presentationRevision = 0;
     std::vector<std::string> activeFeatureIds;
-    // sceneEpoch 是该值快照的 Session 逻辑提交；renderedEpoch 表示该 View
-    // 已完成 Render() 的最近提交。后者较小时，状态已提交但帧仍待重试。
+    // sceneEpoch 是该值快照的 Session 逻辑提交。
+    // renderedEpoch 表示画面已覆盖该提交的变化；无 dirty 时也可推进，不是 Render 调用次数。
     std::uint64_t sceneEpoch = 0;
     std::uint64_t renderedEpoch = 0;
+    DataCommitId graphCommitId = 0;
+    std::vector<DataInputRef> inputs;
+    std::vector<HostDisplayRef> displays;
+};
+
+// 每域保持自己的版本依据；最新运行状态不被解释为旧场景提交的一部分。
+struct HostStateSnapshot final {
+    std::uint64_t sessionGeneration = 0;
+    DataCommitId graphCommitId = 0;
+    std::vector<HostSceneViewState> scenes;
+    std::vector<FeatureOperationState> operations;
 };
 
 struct HostRenderViewEndpoint {

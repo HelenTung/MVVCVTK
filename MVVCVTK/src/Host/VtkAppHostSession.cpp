@@ -23,6 +23,8 @@
 #include <functional>
 #include <iostream>
 #include <list>
+#include <limits>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -86,6 +88,7 @@ public:
     std::optional<HostSceneViewState> GetSceneViewState(
         const HostViewTarget& target);
     std::vector<HostSceneViewState> GetSceneViewStates();
+    std::optional<HostStateSnapshot> GetStateSnapshot() const;
     std::optional<ImageDescriptor> GetImageDescriptor();
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
     std::optional<LabelMapDescriptor> GetLabelMapDescriptor(const std::string& id);
@@ -688,6 +691,36 @@ VtkAppHostSession::Impl::GetSceneViewStates()
         return {};
     }
     return renderViews.GetSceneViewStates();
+}
+
+std::optional<HostStateSnapshot> VtkAppHostSession::Impl::GetStateSnapshot() const
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!isBuilt || ownerThread != std::this_thread::get_id()
+        || stopState.load() != HostStopState::Running || !frameCoordinator
+        || !core.sharedDataMgr) return std::nullopt;
+    try {
+        HostStateSnapshot snapshot;
+        snapshot.sessionGeneration = frameCoordinator->GetSessionGeneration();
+        const auto operations = featureRuntime.GetOperationStates();
+        if (!operations || !isBuilt || stopState.load() != HostStopState::Running
+            || !frameCoordinator || snapshot.sessionGeneration != frameCoordinator->GetSessionGeneration())
+            return std::nullopt;
+        snapshot.operations = *operations;
+        snapshot.scenes = renderViews.GetSceneViewStates();
+        const auto graph = core.sharedDataMgr->GetDataGraph();
+        snapshot.graphCommitId = graph.commitId;
+        for (const auto& operation : snapshot.operations) {
+            for (const auto& output : operation.outputs) {
+                const auto data = graph.view ? graph.view->GetData(output) : nullptr;
+                if (!data || data->self != output) return std::nullopt;
+            }
+        }
+        return snapshot;
+    }
+    catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool VtkAppHostSession::Impl::DetachTimer()
@@ -1367,6 +1400,11 @@ VtkAppHostSession::GetSceneViewStates()
     return m_impl
         ? m_impl->GetSceneViewStates()
         : std::vector<HostSceneViewState>{};
+}
+
+std::optional<HostStateSnapshot> VtkAppHostSession::GetStateSnapshot() const
+{
+    return m_impl ? m_impl->GetStateSnapshot() : std::nullopt;
 }
 
 std::optional<ImageReadState>

@@ -268,6 +268,7 @@ public:
         SurfaceDeterminationRequest request,
         SurfaceDeterminationCallback onComplete);
     SurfaceDeterminationState GetState() const;
+    std::vector<FeatureOperationState> GetOperationStates() const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetSurfaceSnapshot() const;
 
@@ -285,6 +286,7 @@ private:
         bool isSourceChanged = false;
         DataBinding resultBinding;
         std::shared_ptr<std::atomic<bool>> completeActive;
+        FeatureOperationState operation;
     };
 
     bool GetIsOwnerThread() const noexcept;
@@ -313,6 +315,7 @@ private:
     static void RemoveBindings(
         std::vector<OverlayBinding>& bindings) noexcept;
     bool RemoveDisplay();
+    bool SendDisplayDelta();
     bool SetVisibility(bool isVisible);
     bool ClearResult();
     bool ClearResultBinding();
@@ -334,6 +337,8 @@ private:
     mutable std::mutex m_stateMutex;
     SurfaceDeterminationState m_state;
     SurfaceDeterminationState m_stateBeforeRequest;
+    FeatureOperationState m_lastOperation;
+    FeatureOperationState m_displayOperation;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
@@ -388,6 +393,8 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
     m_completeActive = std::make_shared<std::atomic<bool>>(true);
+    m_lastOperation = {};
+    m_displayOperation = {};
     m_isAttached = true;
     return true;
 }
@@ -525,6 +532,11 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             return admission;
         }
         admission.requestId = requestId;
+        requestItem->second.operation.operation = {
+            std::string(featureId), m_host->GetAttachmentId(), requestId };
+        requestItem->second.operation.inputs = { { "source-volume", source->data->self } };
+        requestItem->second.operation.status = FeatureRunStatus::Preparing;
+        requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
         SetRequestRunning(
             requestId,
@@ -792,6 +804,52 @@ bool SurfaceDeterminationHostFeature::Impl::RemoveDisplay()
     return !m_host || m_host->SetActiveViews({});
 }
 
+bool SurfaceDeterminationHostFeature::Impl::SendDisplayDelta()
+{
+    if (m_bindings.empty()) return true;
+    try {
+        const auto generation = m_store.GetGeneration();
+        if (!m_host || !m_activeSource || !m_activeSource->data || !generation) return false;
+        FeatureSceneDelta delta;
+        delta.requestId = GetNextRequestId();
+        delta.priority = FeatureScenePriority::Scene;
+        delta.scope = FeatureSceneScope::RequiredAllViews;
+        delta.inputStamp = { m_activeSource->data->self };
+        delta.viewIds = GetViewIds(m_activeViews);
+        delta.hasDisplayUpdate = true;
+        delta.inputs = { { "source-volume", m_activeSource->data->self },
+            { "mesh", generation->meshRevision } };
+        for (const auto& binding : m_bindings) {
+            delta.displays.push_back({ binding.viewId, std::string(featureId), "surface",
+                generation->meshRevision, m_displayOperation.operation });
+        }
+        return m_host->SendSceneDelta(std::move(delta));
+    }
+    catch (...) { return false; }
+}
+
+std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::Impl::GetOperationStates() const
+{
+    if (!m_isAttached || !GetIsOwnerThread() || !m_service) return {};
+    std::vector<FeatureOperationState> states;
+    for (const auto& [id, request] : m_requests) {
+        auto state = request.operation;
+        const auto execution = m_service->GetExecutionState(id);
+        state.stateRevision += execution.stateRevision;
+        state.status = execution.status;
+        state.progress = execution.progress;
+        states.push_back(std::move(state));
+    }
+    if (m_lastOperation.operation.requestId != 0
+        && m_requests.find(m_lastOperation.operation.requestId) == m_requests.end())
+        states.push_back(m_lastOperation);
+    if (!m_bindings.empty() && m_displayOperation.operation.requestId != 0
+        && m_displayOperation.operation.requestId != m_lastOperation.operation.requestId
+        && m_requests.find(m_displayOperation.operation.requestId) == m_requests.end())
+        states.push_back(m_displayOperation);
+    return states;
+}
+
 bool SurfaceDeterminationHostFeature::Impl::SetVisibility(
     const bool isVisible)
 {
@@ -824,6 +882,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetVisibility(
     RemoveBindings(m_bindings);
     m_bindings = std::move(bindings);
     m_displayData = std::move(displayData);
+    m_isDisplayPending = !SendDisplayDelta();
     const std::lock_guard<std::mutex> lock(m_stateMutex);
     m_state.isOverlayVisible = true;
     return true;
@@ -904,13 +963,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
         RemoveBindings(m_bindings);
         m_bindings = std::move(bindings);
     }
-    FeatureSceneDelta delta;
-    delta.requestId = GetNextRequestId();
-    delta.priority = FeatureScenePriority::Scene;
-    delta.scope = FeatureSceneScope::RequiredAllViews;
-    delta.inputStamp = { generation->sourceRevision };
-    delta.viewIds = GetViewIds(m_activeViews);
-    return m_host->SendSceneDelta(std::move(delta));
+    return SendDisplayDelta();
 }
 
 void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
@@ -954,6 +1007,16 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
                 return;
             }
             m_store.SetGeneration(snapshot);
+            // Historical activation is a new display attempt; it does not rewrite graph history.
+            m_displayOperation = {};
+            m_displayOperation.operation = { std::string(featureId), m_host->GetAttachmentId(), GetNextRequestId() };
+            m_displayOperation.stateRevision = 1;
+            m_displayOperation.status = FeatureRunStatus::Succeeded;
+            m_displayOperation.progress = 1.0;
+            m_displayOperation.inputs = { { "source-volume", generation->sourceRevision } };
+            if (GetDataRevisionRefValid(generation->meshRevision))
+                m_displayOperation.outputs.push_back(generation->meshRevision);
+            m_displayOperation.outputs.push_back(snapshot->self);
             m_activeSource = source;
             if (m_activeViews.empty()) {
                 auto targets = m_config.defaultStart.targetViews;
@@ -1027,6 +1090,9 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
     if (requestItem == m_requests.end()) return;
     RequestEntry request = std::move(requestItem->second);
     m_requests.erase(requestItem);
+    // Freeze execution revision before publication observers can detach or start another request.
+    request.operation.stateRevision += m_service->GetExecutionState(complete.requestId).stateRevision;
+    auto operation = request.operation;
     const bool isLatest = complete.requestId == m_latestRequestId;
     if (request.isSourceChanged || !GetSourceSame(request.source)) {
         complete.result.status = SurfaceResultStatus::Failed;
@@ -1093,6 +1159,19 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
     }
 
     const auto state = GetState();
+    operation.status = published ? FeatureRunStatus::Succeeded
+        : callbackStatus == SurfaceResultStatus::Cancelled ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
+    operation.progress = published ? 1.0 : 0.0;
+    operation.stateRevision += 2;
+    if (published) {
+        const auto* payload = dynamic_cast<const SurfaceGenerationPayload*>(published->payload.get());
+        const auto generation = payload ? payload->GetGeneration() : nullptr;
+        if (generation && GetDataRevisionRefValid(generation->meshRevision))
+            operation.outputs.push_back(generation->meshRevision);
+        operation.outputs.push_back(published->self);
+    }
+    if (m_isAttached && operation.operation.requestId >= m_lastOperation.operation.requestId)
+        m_lastOperation = operation;
     if (isLatest && published) {
         callbackStatus = SurfaceResultStatus::Succeeded;
         callbackReason = state.failureReason;
@@ -1237,6 +1316,11 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     try {
         m_resultBinding = std::move(committed.bindings.back());
         m_store.SetGeneration(published);
+        m_displayOperation = request.operation;
+        m_displayOperation.status = FeatureRunStatus::Succeeded;
+        m_displayOperation.progress = 1.0;
+        m_displayOperation.stateRevision += 2;
+        for (const auto& output : committed.published) m_displayOperation.outputs.push_back(output->self);
         RemoveBindings(m_bindings);
         m_displayData = nullptr;
         m_activeSource = request.source;
@@ -1272,6 +1356,11 @@ FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
     return { { { "source-volume", DataFacets::scalarGrid3D, true } },
         { { "mesh", DataTypes::surfaceMesh, { DataFacets::surfaceMesh } },
           { "generation", surfaceGenerationType, { surfaceGenerationFacet } } } };
+}
+
+std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::GetOperationStates() const
+{
+    return m_impl ? m_impl->GetOperationStates() : std::vector<FeatureOperationState>{};
 }
 
 SurfaceDeterminationHostFeature::SurfaceDeterminationHostFeature(

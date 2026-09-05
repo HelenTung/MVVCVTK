@@ -31,11 +31,15 @@ inline bool operator==(
     return left.statesByLabel == right.statesByLabel;
 }
 
+class vtkRenderer;
+
 class PartOverlayControl {
 public:
     virtual ~PartOverlayControl() noexcept = default;
     virtual bool SetPartStates(
         const PartRenderStateTable& states) noexcept = 0;
+    virtual std::optional<PartLabelId> GetPickedLabel(int, int, vtkRenderer*) const
+    { return std::nullopt; }
 };
 
 std::optional<PartRenderStateTable> BuildPartRenderStateTable(

@@ -1242,6 +1242,14 @@ int GetCropFailCount()
     const auto primaryAfterBuild =
         contextProbe->m_data->GetPrimaryImage();
     const auto resultGraph = contextProbe->m_data->GetDataGraph();
+    const auto cropOperations = feature->GetOperationStates();
+    failureCount += GetCaseResult(!cropOperations.empty()
+        && cropOperations.front().status == FeatureRunStatus::Succeeded
+        && cropOperations.front().inputs.size() == 1
+        && publishExpected && cropOperations.front().inputs.front().source == publishExpected->data->self
+        && cropOperations.front().outputs == std::vector<DataRevisionRef>{ publishResult.recipeRevision,
+            publishResult.outputRevision },
+        "Crop operation preserves materialization inputs and actual published outputs") ? 0 : 1;
     const auto derivedCrop = publishResult.isSucceeded
         ? contextProbe->m_data->GetImageGrid(
             resultGraph, publishResult.outputRevision)

@@ -2,6 +2,8 @@
 #include "Host/HostFeature.h"
 #include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 #include <thread>
 
 class AbstractDataManager;
@@ -35,6 +37,7 @@ public:
     DetachResult DetachFeature(const HostFeature& feature);
     bool DetachFeatures();
     void SendFeatureTicks() noexcept;
+    std::optional<std::vector<FeatureOperationState>> GetOperationStates() const;
     bool GetIsEmpty() const noexcept;
     bool GetIsChanging() const noexcept;
 private:

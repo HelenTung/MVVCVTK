@@ -44,6 +44,7 @@ public:
     std::optional<SurfaceRequestProgress> GetProgress(
         std::uint64_t requestId) const noexcept;
     bool GetIsBusy() const;
+    FeatureOperationState GetExecutionState(std::uint64_t requestId) const;
     bool Stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
 private:
@@ -78,4 +79,5 @@ private:
         static_cast<std::uint8_t>(SurfaceDeterminationStage::Preparing) };
     bool m_isStopping = false;
     bool m_hasExited = false;
+    std::uint64_t m_executionRevision = 0;
 };

@@ -34,6 +34,8 @@ bool GetIntentSame(
     const HostFrameIntent& right) noexcept
 {
     return left.featureId == right.featureId
+        && left.attachmentId == right.attachmentId
+        && left.delta.hasDisplayUpdate == right.delta.hasDisplayUpdate
         && left.delta.priority == right.delta.priority
         && left.delta.scope == right.delta.scope
         && left.delta.viewIds == right.delta.viewIds;
@@ -116,7 +118,9 @@ HostFrameCoordinator::HostFrameCoordinator(
 
 bool HostFrameCoordinator::Enqueue(
     std::string featureId,
-    FeatureSceneDelta delta)
+    FeatureSceneDelta delta,
+    const std::uint64_t attachmentId,
+    std::shared_ptr<const std::atomic<bool>> attachment)
 {
     const bool hasStampIdentity = GetDataEntityIdValid(
         delta.inputStamp.dataRevision.entityId);
@@ -145,14 +149,52 @@ bool HostFrameCoordinator::Enqueue(
     // latest-request 合并并在同一 epoch 重复置脏。
     std::sort(delta.viewIds.begin(), delta.viewIds.end());
 
+    std::vector<std::string> roles;
+    for (const auto& input : delta.inputs) {
+        if (input.role.empty() || !GetDataRevisionRefValid(input.source)
+            || std::find(roles.begin(), roles.end(), input.role) != roles.end())
+            return false;
+        roles.push_back(input.role);
+    }
+    for (const auto& expected : delta.expectations) {
+        if (expected.use != DataExpectationUse::Required
+            && expected.use != DataExpectationUse::Activation) return false;
+        if (expected.expectedTarget && !GetDataRevisionRefValid(*expected.expectedTarget)) return false;
+        if (expected.kind == DataExpectationKind::Binding) {
+            if (expected.binding.empty()) return false;
+        }
+        else if (expected.kind == DataExpectationKind::EntityHead) {
+            if (!GetDataEntityIdValid(expected.entityId)) return false;
+        }
+        else return false;
+    }
+    if (!delta.hasDisplayUpdate && !delta.displays.empty()) return false;
+    for (std::size_t index = 0; index < delta.displays.size(); ++index) {
+        const auto& display = delta.displays[index];
+        if (display.featureId != featureId || display.localId.empty()
+            || display.operation.featureId != featureId
+            || display.operation.attachmentId != attachmentId
+            || display.operation.requestId == 0
+            || !GetDataRevisionRefValid(display.data)
+            || !std::binary_search(delta.viewIds.begin(), delta.viewIds.end(), display.viewId))
+            return false;
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            if (delta.displays[previous].viewId == display.viewId
+                && delta.displays[previous].localId == display.localId) return false;
+        }
+    }
+
     HostFrameIntent intent;
     intent.featureId = std::move(featureId);
     intent.delta = std::move(delta);
     intent.sessionGeneration = m_sessionGeneration;
+    intent.attachmentId = attachmentId;
+    intent.attachment = std::move(attachment);
 
     try {
         const std::lock_guard<std::mutex> lock(m_intentMutex);
-        if (m_isStopped.load(std::memory_order_acquire)) return false;
+        if (m_isStopped.load(std::memory_order_acquire)
+            || (intent.attachment && !intent.attachment->load())) return false;
         // 与 commit 后的 pending epoch 晋级使用同一把锁，消除“先读旧 epoch、
         // commit 晋级完成后才入队”的 TOCTOU 窗口。
         intent.baseSceneEpoch =
@@ -171,6 +213,21 @@ void HostFrameCoordinator::FreezeIntents(
     {
         const std::lock_guard<std::mutex> lock(m_intentMutex);
         if (!m_retryIntents.empty()) {
+            // 只用较新的同目标请求纠正旧依赖；无关新请求仍留给下一个 batch。
+            std::size_t retained = 0;
+            for (std::size_t index = 0; index < m_pendingIntents.size(); ++index) {
+                auto& pending = m_pendingIntents[index];
+                const auto previous = std::find_if(m_retryIntents.begin(), m_retryIntents.end(),
+                    [&](const auto& retry) { return GetIntentSame(retry, pending); });
+                if (previous != m_retryIntents.end()) {
+                    if (pending.delta.requestId >= previous->delta.requestId) *previous = std::move(pending);
+                }
+                else {
+                    if (retained != index) m_pendingIntents[retained] = std::move(pending);
+                    ++retained;
+                }
+            }
+            m_pendingIntents.resize(retained);
             intents.swap(m_retryIntents);
         }
         else {

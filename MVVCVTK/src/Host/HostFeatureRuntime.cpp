@@ -7,6 +7,8 @@
 #include "Data/DataService.h"
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <limits>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -29,6 +31,7 @@ public:
     };
 
     struct FeatureLifetime final {
+        std::uint64_t id = 0;
         std::atomic<bool> isActive{ true };
         std::weak_ptr<AbstractDataManager> data;
         // 仅 owner thread 修改；完成队列可跨线程读取 isActive。
@@ -159,7 +162,8 @@ public:
 
         bool SendSceneDelta(
             const std::string& featureId,
-            FeatureSceneDelta delta)
+            FeatureSceneDelta delta,
+            const std::shared_ptr<FeatureLifetime>& lifetime)
         {
             std::shared_ptr<HostFrameCoordinator> frames;
             {
@@ -168,7 +172,16 @@ public:
                 frames = m_frames.lock();
             }
             return frames
-                && frames->Enqueue(featureId, std::move(delta));
+                && lifetime && lifetime->isActive.load()
+                && frames->Enqueue(featureId, std::move(delta), lifetime->id,
+                    std::shared_ptr<const std::atomic<bool>>(lifetime, &lifetime->isActive));
+        }
+
+        std::optional<HostSceneViewState> GetSceneViewState(const std::string& viewId) const
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->GetSceneViewState(
+                { viewId, false, HostRenderViewRole::Auxiliary }) : std::nullopt;
         }
 
         bool AttachInput(HostInputBinding binding)
@@ -512,19 +525,70 @@ public:
 
         bool SendSceneDelta(FeatureSceneDelta delta) override
         {
-            if (!m_lifetime->isActive.load()) return false;
+            if (!m_lifetime || !m_lifetime->isActive.load()) return false;
+            for (auto& display : delta.displays) {
+                if ((!display.featureId.empty() && display.featureId != m_featureId)
+                    || (!display.operation.featureId.empty()
+                        && display.operation.featureId != m_featureId)
+                    || (display.operation.attachmentId != 0
+                        && display.operation.attachmentId != m_lifetime->id)) return false;
+                display.featureId = m_featureId;
+                display.operation.featureId = m_featureId;
+                display.operation.attachmentId = m_lifetime->id;
+            }
             const auto bridge = m_bridge.lock();
             const bool isSent = bridge
-                && bridge->SendSceneDelta(m_featureId, std::move(delta));
+                && bridge->SendSceneDelta(m_featureId, std::move(delta), m_lifetime);
             if (isSent) (void)SendWorkAvailable();
             return isSent;
         }
 
+        std::uint64_t GetAttachmentId() const noexcept override
+        {
+            return m_lifetime && m_lifetime->isActive.load() ? m_lifetime->id : 0;
+        }
+
+        std::optional<HostSemanticTarget> GetDisplayTarget(
+            const std::string& viewId, const std::string& localId) const override
+        {
+            const auto bridge = m_bridge.lock();
+            const auto scene = GetAttachmentId() != 0 && bridge
+                ? bridge->GetSceneViewState(viewId) : std::nullopt;
+            if (!scene || !scene->isAvailable || scene->sceneEpoch == 0
+                || scene->renderedEpoch < scene->sceneEpoch) return std::nullopt;
+            for (const auto& display : scene->displays) {
+                if (display.featureId == m_featureId && display.localId == localId
+                    && display.operation.attachmentId == GetAttachmentId()) {
+                    return HostSemanticTarget{ display, {}, scene->sceneEpoch, 0 };
+                }
+            }
+            return std::nullopt;
+        }
+
+        bool GetSemanticTargetValid(const HostSemanticTarget& target) const override
+        {
+            return GetTargetValid(m_bridge, m_lifetime, m_featureId, target);
+        }
+
         bool AttachInput(HostInputBinding binding) override
         {
-            if (!m_lifetime->isActive.load()) return false;
-            if (binding.featureId != m_featureId) {
+            if (GetAttachmentId() == 0 || binding.featureId != m_featureId) {
                 return false;
+            }
+            if (binding.getTarget && binding.onTargetInput) {
+                binding.onTargetInput = [callback = std::move(binding.onTargetInput),
+                    bridge = m_bridge, lifetime = m_lifetime, id = m_featureId](
+                    const InteractionEvent& event, const HostSemanticTarget& target) {
+                    if (event.eventKind == InteractionEventKind::Cancel)
+                        return callback(event, target);
+                    if (!GetTargetValid(bridge, lifetime, id, target)) {
+                        auto cancel = event;
+                        cancel.eventKind = InteractionEventKind::Cancel;
+                        (void)callback(cancel, target);
+                        return InteractionResult{ true, true, false, InteractionFailureReason::StateRejected };
+                    }
+                    return callback(event, target);
+                };
             }
             const auto bridge = m_bridge.lock();
             return bridge
@@ -577,6 +641,19 @@ public:
         }
 
     private:
+        static bool GetTargetValid(const std::weak_ptr<FeatureHostBridge>& weakBridge,
+            const std::shared_ptr<FeatureLifetime>& lifetime, const std::string& id,
+            const HostSemanticTarget& target)
+        {
+            if (!lifetime || !lifetime->isActive.load() || target.display.featureId != id
+                || target.sceneEpoch == 0 || target.objectId.empty() || target.resultRevision == 0
+                || target.display.operation.attachmentId != lifetime->id) return false;
+            const auto bridge = weakBridge.lock();
+            const auto scene = bridge ? bridge->GetSceneViewState(target.display.viewId) : std::nullopt;
+            return scene && scene->isAvailable && target.sceneEpoch <= scene->sceneEpoch
+                && std::find(scene->displays.begin(), scene->displays.end(), target.display)
+                    != scene->displays.end();
+        }
         std::weak_ptr<FeatureHostBridge> m_bridge;
         std::string m_featureId;
         std::function<bool(std::function<void()>)> m_onOwnerComplete;
@@ -584,6 +661,8 @@ public:
         std::weak_ptr<HostWorkSignal> m_workSignal;
     };
 
+    static std::atomic<std::uint64_t> s_nextAttachmentId;
+    std::optional<std::vector<FeatureOperationState>> GetOperationStates() const;
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     DetachResult DetachFeature(const HostFeature& feature);
     bool DetachFeatures();
@@ -600,6 +679,51 @@ public:
     std::vector<FeatureEntry> features;
     std::shared_ptr<FeatureHostBridge> featureBridge;
 };
+
+std::atomic<std::uint64_t> HostFeatureRuntime::Impl::s_nextAttachmentId{ 1 };
+
+std::optional<std::vector<FeatureOperationState>> HostFeatureRuntime::Impl::GetOperationStates() const
+{
+    if (m_isChanging || !featureBridge || m_ports.ownerThread != std::this_thread::get_id())
+        return std::nullopt;
+    try {
+        const auto bridge = featureBridge;
+        std::vector<FeatureOperationState> result;
+        const auto entries = features;
+        for (const auto& entry : entries) {
+            if (entry.isHostDetached || !entry.feature || !entry.lifetime
+                || !entry.lifetime->isActive.load()) continue;
+            auto operations = entry.feature->GetOperationStates();
+            if (!entry.lifetime->isActive.load() || bridge != featureBridge) return std::nullopt;
+            std::vector<std::uint64_t> requestIds;
+            for (auto& state : operations) {
+                if (state.operation.requestId == 0 || state.stateRevision == 0
+                    || static_cast<unsigned>(state.status) > static_cast<unsigned>(FeatureRunStatus::Stopping)
+                    || (!state.operation.featureId.empty() && state.operation.featureId != entry.id)
+                    || (state.operation.attachmentId != 0
+                        && state.operation.attachmentId != entry.lifetime->id)
+                    || !std::isfinite(state.progress) || state.progress < 0.0 || state.progress > 1.0
+                    || std::find(requestIds.begin(), requestIds.end(), state.operation.requestId)
+                        != requestIds.end()) return std::nullopt;
+                std::vector<std::string> roles;
+                for (const auto& input : state.inputs) {
+                    if (input.role.empty() || !GetDataRevisionRefValid(input.source)
+                        || std::find(roles.begin(), roles.end(), input.role) != roles.end()) return std::nullopt;
+                    roles.push_back(input.role);
+                }
+                if (std::any_of(state.outputs.begin(), state.outputs.end(),
+                    [](const auto& output) { return !GetDataRevisionRefValid(output); })) return std::nullopt;
+                requestIds.push_back(state.operation.requestId);
+                state.operation.featureId = entry.id;
+                state.operation.attachmentId = entry.lifetime->id;
+                result.push_back(std::move(state));
+            }
+        }
+        if (features.size() != entries.size()) return std::nullopt;
+        return result;
+    }
+    catch (...) { return std::nullopt; }
+}
 
 void HostFeatureRuntime::Impl::SendFeatureTicks() noexcept
 {
@@ -660,8 +784,13 @@ bool HostFeatureRuntime::Impl::AttachFeature(
         featureBridge;
     HostFeatureContext context;
     std::shared_ptr<FeatureLifetime> lifetime;
+    auto attachmentId = s_nextAttachmentId.load();
+    do {
+        if (attachmentId == std::numeric_limits<std::uint64_t>::max()) return false;
+    } while (!s_nextAttachmentId.compare_exchange_weak(attachmentId, attachmentId + 1));
     try {
         lifetime = std::make_shared<FeatureLifetime>();
+        lifetime->id = attachmentId;
         lifetime->data = m_ports.data;
         context.views =
             std::make_shared<FeatureViewDirectoryPort>(weakBridge, lifetime);
@@ -830,3 +959,6 @@ bool HostFeatureRuntime::DetachFeatures() { return m_impl->DetachFeatures(); }
 void HostFeatureRuntime::SendFeatureTicks() noexcept { m_impl->SendFeatureTicks(); }
 bool HostFeatureRuntime::GetIsEmpty() const noexcept { return m_impl->features.empty(); }
 bool HostFeatureRuntime::GetIsChanging() const noexcept { return m_impl->m_isChanging; }
+
+std::optional<std::vector<FeatureOperationState>> HostFeatureRuntime::GetOperationStates() const
+{ return m_impl->GetOperationStates(); }

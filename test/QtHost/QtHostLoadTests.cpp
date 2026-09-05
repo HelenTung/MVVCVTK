@@ -2,7 +2,9 @@
 
 #include "App/AppState.h"
 #include "App/Services/AppPorts.h"
+#include "App/Services/FeatureViewService.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
@@ -10,6 +12,7 @@
 #include "Host/LoadCommitCoordinator.h"
 #include "Host/VtkAppHostSession.h"
 #include "Host/Types/HostRequestTypes.h"
+#include "Interaction/InteractionPorts.h"
 
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
@@ -29,9 +32,11 @@
 #include <functional>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -54,6 +59,29 @@ public:
 
 private:
     mutable std::atomic<int> m_pendingReadCount{ 0 };
+};
+
+class SceneProbeDataManager final : public RawVolumeDataManager {
+public:
+    DataGraphSnapshot GetDataGraph() const override
+    {
+        if (!isProbeEnabled) return RawVolumeDataManager::GetDataGraph();
+        ++graphReadCount;
+        if (isGraphFailing) throw std::runtime_error("scene graph probe");
+        auto graph = graphOverride ? *graphOverride
+            : RawVolumeDataManager::GetDataGraph();
+        // 独立控制块仅包住原图，既不复制数据，也不受 Store 自身引用保留影响。
+        auto owner = std::make_shared<DataGraphSnapshot>(graph);
+        graph.view = std::shared_ptr<const DataGraphView>(owner, graph.view.get());
+        lastGraph = graph.view;
+        return graph;
+    }
+
+    bool isProbeEnabled = false;
+    bool isGraphFailing = false;
+    std::optional<DataGraphSnapshot> graphOverride;
+    mutable int graphReadCount = 0;
+    mutable std::weak_ptr<const DataGraphView> lastGraph;
 };
 ImageMetadata GetLoadMetadata(
     const ImageSourceKind kind = ImageSourceKind::Memory)
@@ -201,6 +229,388 @@ bool SetPrimaryBaseline(HostCoreServices& core)
     std::copy_n(center, 3, ready.cursorWorld.begin());
     core.sharedState->SetDataReady(ready);
     return true;
+}
+
+bool SendSceneReady(HostViewRuntimeRegistry& views,
+    const DataRevisionRef& input, std::uint64_t& epoch)
+{
+    for (int poll = 0; poll < 1000; ++poll) {
+        if (!SendFrame(views, epoch)) return false;
+        const auto scenes = views.GetSceneViewStates();
+        if (!views.GetFrameRenderPending() && epoch != 0
+            && scenes.size() == 2
+            && std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
+                return scene.presentation && scene.presentation->dataRevision == input;
+            })) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::cerr << "Scene fixture did not become ready; epoch=" << epoch << '\n';
+    for (const auto& state : views.GetViewStates()) {
+        std::cerr << state.id << " generation=" << state.dataRevision.generation
+            << " binding=" << state.bindingRevision << '\n';
+    }
+    return false;
+}
+
+bool GetSceneGraphRetryValid()
+{
+    auto data = std::make_shared<SceneProbeDataManager>();
+    const auto emptyGraph = data->GetDataGraph();
+    auto core = GetLoadCore(data);
+    if (!SetPrimaryBaseline(core)) return false;
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, GetLoadViews()) || !views.SetInteractorsReady())
+        return false;
+    // 数据在 View 建立前已提交；observer 建立后再发送一次现有就绪通知。
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::DataReady);
+    std::uint64_t epoch = 0;
+    const auto input = data->GetPrimaryImage();
+    const auto port = views.GetFeaturePort("load-primary");
+    if (!input || !port || !SendSceneReady(views, input->data->self, epoch)
+        || !port->SetRenderNeeded()) return false;
+    const auto firstEpoch = epoch + 1;
+    const auto nextEpoch = firstEpoch + 1;
+
+    data->isProbeEnabled = true;
+    const auto firstStatus = views.BuildFrameStage(firstEpoch);
+    data->isProbeEnabled = false;
+    const auto firstGraph = data->lastGraph;
+    if (firstStatus != HostFrameStageStatus::Ready
+        || firstGraph.expired() || data->graphReadCount != 1) {
+        std::cerr << "Scene first stage=" << static_cast<int>(firstStatus)
+            << " expired=" << firstGraph.expired()
+            << " reads=" << data->graphReadCount << '\n';
+        return false;
+    }
+    views.SetFrameCommit(firstEpoch);
+    if (!views.SendFrameRender(firstEpoch)) return false;
+    views.SendFrameCompletions();
+    const auto initial = views.GetSceneViewStates();
+    if (!port || !port->SetRenderNeeded()) return false;
+
+    // 已应用 A，但本批图不含 A：失败不能发布 scene，也不能吞掉 dirty。
+    data->graphOverride = emptyGraph;
+    data->isProbeEnabled = true;
+    const auto missingStatus = views.BuildFrameStage(nextEpoch);
+    data->isProbeEnabled = false;
+    views.ClearFrameStage();
+    if (missingStatus != HostFrameStageStatus::Failed
+        || !data->lastGraph.expired() || firstGraph.expired()
+        || GetCommittedEpoch(views) != firstEpoch) return false;
+
+    data->graphOverride.reset();
+    data->isGraphFailing = true;
+    data->isProbeEnabled = true;
+    const auto throwingStatus = views.BuildFrameStage(nextEpoch);
+    data->isProbeEnabled = false;
+    data->isGraphFailing = false;
+    views.ClearFrameStage();
+    const auto afterFailure = views.GetSceneViewStates();
+    if (throwingStatus != HostFrameStageStatus::Failed
+        || initial.size() != 2 || afterFailure.size() != 2
+        || !initial[0].presentation || !afterFailure[0].presentation
+        || GetCommittedEpoch(views) != firstEpoch || firstGraph.expired()
+        || initial[0].presentation->dataRevision
+            != afterFailure[0].presentation->dataRevision) return false;
+
+    data->isProbeEnabled = true;
+    const auto retryStatus = views.BuildFrameStage(nextEpoch);
+    data->isProbeEnabled = false;
+    const auto candidateGraph = data->lastGraph;
+    if (retryStatus != HostFrameStageStatus::Ready
+        || candidateGraph.expired()) return false;
+    views.ClearFrameStage();
+    if (!candidateGraph.expired() || firstGraph.expired()) return false;
+
+    data->isProbeEnabled = true;
+    const auto finalStatus = views.BuildFrameStage(nextEpoch);
+    data->isProbeEnabled = false;
+    const auto finalGraph = data->lastGraph;
+    if (finalStatus != HostFrameStageStatus::Ready) return false;
+    views.SetFrameCommit(nextEpoch);
+    if (!firstGraph.expired() || finalGraph.expired()
+        || !views.SendFrameRender(nextEpoch)) return false;
+    views.SendFrameCompletions();
+    if (!views.SetFeatureViews("scene-probe", { "load-primary" })
+        || views.StopLease() || finalGraph.expired()
+        || !views.SetFeatureViews("scene-probe", {})) return false;
+    return views.StopLease() && finalGraph.expired()
+        && views.GetSceneViewStates().empty();
+}
+
+bool GetSceneHistoryValid()
+{
+    auto data = std::make_shared<SceneProbeDataManager>();
+    auto core = GetLoadCore(data);
+    if (!SetPrimaryBaseline(core)) return false;
+    const auto original = data->GetPrimaryImage();
+    HostViewRuntimeRegistry views;
+    if (!original || !views.Build(core, GetLoadViews())
+        || !views.SetInteractorsReady()) return false;
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::DataReady);
+    std::uint64_t epoch = 0;
+    if (!SendSceneReady(views, original->data->self, epoch)) return false;
+
+    // 正式图发布 B，而已应用场景仍使用历史 A；历史存在即可，不能要求 A 是 head。
+    if (!SetPrimaryBaseline(*data)) return false;
+    const auto latest = data->GetPrimaryImage();
+    if (!latest || latest->data->self == original->data->self) return false;
+    const auto before = views.GetSceneViewStates();
+    data->isProbeEnabled = true;
+    const auto idleStatus = views.BuildFrameStage(epoch + 1);
+    data->isProbeEnabled = false;
+    if (idleStatus != HostFrameStageStatus::Unchanged
+        || data->graphReadCount != 0 || GetCommittedEpoch(views) != epoch)
+        return false;
+
+    const auto port = views.GetFeaturePort("load-primary");
+    if (!port || !port->SetRenderNeeded()) return false;
+    data->isProbeEnabled = true;
+    const auto status = views.BuildFrameStage(epoch + 1);
+    data->isProbeEnabled = false;
+    if (status != HostFrameStageStatus::Ready
+        || data->graphReadCount != 1) return false;
+    views.SetFrameCommit(++epoch);
+    const auto committedGraph = data->lastGraph;
+    const auto after = views.GetSceneViewStates();
+    if (committedGraph.expired() || after.size() != 2 || before.size() != 2
+        || !after[0].presentation || !after[1].presentation
+        || after[0].presentation->dataRevision != original->data->self
+        || after[1].presentation->dataRevision != original->data->self
+        || after[0].presentation->bindingRevision
+            != original->binding->revision) return false;
+
+    // 逻辑提交后的 graph 变化不能替换正在等待绘制的场景依据。
+    if (!SetPrimaryBaseline(*data) || committedGraph.expired()
+        || !views.SendFrameRender(epoch)) return false;
+    views.SendFrameCompletions();
+    return views.StopLease() && committedGraph.expired();
+}
+
+bool GetStateAttachmentValid()
+{
+    class StateFeature final : public HostFeature {
+    public:
+        std::string_view GetFeatureId() const noexcept override { return "state-probe"; }
+        bool AttachHost(const HostFeatureContext& context) override { host = context.host; return true; }
+        bool DetachHost() override { return host && host->SetActiveViews({}); }
+        bool OnHostTick() override { ++tickCount; return true; }
+        std::vector<FeatureOperationState> GetOperationStates() const override { return { operation }; }
+        std::shared_ptr<FeatureHostControl> host;
+        FeatureOperationState operation{ { {}, 0, 1 }, 1, FeatureRunStatus::Preparing, {}, {}, 0.0 };
+        int tickCount = 0;
+    };
+    HostSessionConfig config;
+    config.renderViews = GetLoadViews();
+    VtkAppHostSession session(config);
+    if (session.GetStateSnapshot() || !session.BuildSession()) return false;
+    auto first = std::make_shared<StateFeature>();
+    if (!session.AttachFeature(first)) return false;
+    const auto initial = session.GetStateSnapshot();
+    const auto repeated = session.GetStateSnapshot();
+    if (!initial || !repeated || initial->operations.size() != 1
+        || first->tickCount != 0 || initial->graphCommitId != repeated->graphCommitId
+        || initial->operations.front().stateRevision != repeated->operations.front().stateRevision) return false;
+    const auto retiredPort = first->host;
+    const auto attachment = retiredPort->GetAttachmentId();
+    if (attachment == 0 || !session.DetachFeature(*first)) return false;
+    auto second = std::make_shared<StateFeature>();
+    if (!session.AttachFeature(second) || second->host->GetAttachmentId() == attachment
+        || retiredPort->GetAttachmentId() != 0 || retiredPort->SetActiveViews({ "load-primary" })
+        || retiredPort->SetViewStatus({ "load-primary" }, "retired")
+        || retiredPort->SendOwnerComplete([] {})) return false;
+    second->operation.operation.requestId = 0;
+    if (session.GetStateSnapshot()) return false;
+    second->operation.operation.requestId = 1;
+    second->operation.outputs.push_back({ { 123, 124 }, 1 });
+    if (session.GetStateSnapshot()) return false;
+    second->operation.outputs.clear();
+    const auto current = session.GetStateSnapshot();
+    return current && current->operations.size() == 1
+        && current->operations.front().operation.attachmentId == second->host->GetAttachmentId()
+        && session.DetachFeature(*second) && session.Stop() && !session.GetStateSnapshot();
+}
+
+bool GetExplicitSceneInputsValid()
+{
+    auto core = GetLoadCore();
+    if (!SetPrimaryBaseline(core)) return false;
+    auto data = core.sharedDataMgr;
+    const auto source = data->GetPrimaryImage();
+    const auto* image = source && source->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(source->data->payload.get()) : nullptr;
+    if (!image) return false;
+    auto configs = GetLoadViews();
+    for (auto& config : configs) config.syncPolicy = HostViewSyncPolicy::ExplicitInputs;
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, configs) || !views.SetInteractorsReady()
+        || !views.SetFrameGeneration(33)) return false;
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::DataReady);
+    std::uint64_t epoch = 0;
+    if (!SendSceneReady(views, source->data->self, epoch)
+        || !views.SetFeatureViews("correlation", { "load-primary", "load-aux" })) return false;
+    const auto publish = [&](std::shared_ptr<const IDataPayload> payload,
+        std::vector<DataInputRef> inputs) {
+        const DataRevisionRef ref{ data->CreateDataEntityId(), 1 };
+        DataTransaction transaction;
+        transaction.outputs.push_back({ ref.entityId, 0, payload->GetDataType(),
+            std::move(inputs), std::move(payload), {} });
+        return data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded
+            ? ref : DataRevisionRef{};
+    };
+    auto cropGeometry = image->GetGeometry();
+    cropGeometry.dimensions[0] = 1;
+    cropGeometry.extent[1] = cropGeometry.extent[0];
+    auto bytes = std::make_shared<const std::vector<std::uint8_t>>(4 * sizeof(float), 0);
+    const auto crop = publish(std::make_shared<const ImageGrid3DPayload>(cropGeometry,
+        ImageValueType::Float32, 1, bytes), { { "source-volume", source->data->self } });
+    const auto labels = publish(std::make_shared<const LabelMap3DPayload>(cropGeometry,
+        LabelMapValues{ std::make_shared<const std::vector<std::int32_t>>(4, 1) }),
+        { { "source-volume", crop } });
+    if (!GetDataRevisionRefValid(crop) || !GetDataRevisionRefValid(labels)) return false;
+    const auto deltaFor = [&](const DataRevisionRef ref) {
+        FeatureSceneDelta delta;
+        delta.requestId = 1;
+        delta.viewIds = { "load-primary", "load-aux" };
+        delta.inputStamp = { source->data->self };
+        delta.hasDisplayUpdate = true;
+        delta.inputs = { { "source-volume", source->data->self }, { "crop", crop }, { "labels", ref } };
+        const FeatureOperationId operation{ "correlation", 7, 1 };
+        delta.displays = {
+            { "load-primary", "correlation", "original", source->data->self, operation },
+            { "load-aux", "correlation", "crop", crop, operation },
+            { "load-aux", "correlation", "labels", ref, operation } };
+        return delta;
+    };
+    const auto stage = [&](FeatureSceneDelta delta) {
+        HostFrameIntent intent;
+        intent.featureId = "correlation";
+        intent.delta = std::move(delta);
+        intent.sessionGeneration = 33;
+        intent.baseSceneEpoch = epoch;
+        intent.attachmentId = 7;
+        if (!views.SetFrameIntents({ intent })) return HostFrameStageStatus::Unchanged;
+        return views.BuildFrameStage(epoch + 1);
+    };
+    auto delta = deltaFor(labels);
+    DataExpectation expected;
+    expected.kind = DataExpectationKind::Binding;
+    expected.binding = std::string(primaryVolumeBinding);
+    expected.expectedBindingRevision = source->binding->revision;
+    expected.isTargetChecked = true;
+    expected.expectedTarget = source->data->self;
+    delta.expectations = { expected };
+    if (stage(delta) != HostFrameStageStatus::Ready) return false;
+    views.SetFrameCommit(++epoch);
+    if (!views.SendFrameRender(epoch)) return false;
+    views.SendFrameCompletions();
+    const auto committed = views.GetSceneViewStates();
+    if (committed.size() != 2 || committed[0].displays.size() != 1
+        || committed[1].displays.size() != 2
+        || committed[0].graphCommitId != committed[1].graphCommitId) return false;
+
+    // 同源 binding ABA 拒绝新激活；已提交描述仍可作为固定历史使用。
+    DataTransaction rebind;
+    rebind.bindings.push_back({ std::string(primaryVolumeBinding), source->binding->revision,
+        true, source->data->self, source->data->self });
+    if (data->SetDataCommit(std::move(rebind)).status != DataCommitStatus::Succeeded) return false;
+    delta.hasDisplayUpdate = false;
+    delta.displays.clear();
+    if (stage(delta) != HostFrameStageStatus::Failed || GetCommittedEpoch(views) != epoch) return false;
+    views.ClearFrameStage();
+    if (views.BuildFrameStage(epoch + 1) != HostFrameStageStatus::Ready) return false;
+    views.SetFrameCommit(++epoch);
+    if (!views.SendFrameRender(epoch)) return false;
+    views.SendFrameCompletions();
+
+    // 外观 dirty 不修改数据图，也不重新激活历史 expectation。
+    const auto graphBefore = data->GetDataGraph().commitId;
+    const auto port = views.GetFeaturePort("load-aux");
+    if (!port || !port->SetRenderNeeded()
+        || views.BuildFrameStage(epoch + 1) != HostFrameStageStatus::Ready) return false;
+    views.SetFrameCommit(++epoch);
+    if (!views.SendFrameRender(epoch) || data->GetDataGraph().commitId != graphBefore) return false;
+    views.SendFrameCompletions();
+
+    const auto otherSource = publish(source->data->payload, {});
+    const auto otherLabels = publish(std::make_shared<const LabelMap3DPayload>(image->GetGeometry(),
+        LabelMapValues{ std::make_shared<const std::vector<std::int32_t>>(8, 1) }),
+        { { "source-volume", otherSource } });
+    if (stage(deltaFor(otherLabels)) != HostFrameStageStatus::Failed
+        || views.GetSceneViewStates()[1].displays != committed[1].displays) return false;
+    views.ClearFrameStage();
+    cropGeometry.origin[0] += 0.5;
+    const auto misaligned = publish(std::make_shared<const ImageGrid3DPayload>(cropGeometry,
+        ImageValueType::Float32, 1, bytes), { { "source-volume", source->data->self } });
+    auto invalid = deltaFor(labels);
+    invalid.displays[1].data = misaligned;
+    if (stage(invalid) != HostFrameStageStatus::Failed) return false;
+    views.ClearFrameStage();
+    if (stage(deltaFor(labels)) != HostFrameStageStatus::Ready) return false;
+    views.SetFrameCommit(++epoch);
+    if (!views.SendFrameRender(epoch)) return false;
+    views.SendFrameCompletions();
+    return views.SetFeatureViews("correlation", {}) && views.StopLease();
+}
+
+bool GetSceneBindingValid()
+{
+    auto core = GetLoadCore();
+    if (!SetPrimaryBaseline(core)) return false;
+    const auto original = core.sharedDataMgr->GetPrimaryImage();
+    HostViewRuntimeRegistry views;
+    if (!original || !views.Build(core, GetLoadViews())
+        || !views.SetInteractorsReady()) return false;
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::DataReady);
+    std::uint64_t epoch = 0;
+    if (!SendSceneReady(views, original->data->self, epoch)) return false;
+
+    // 同一数据重新绑定产生新 binding 代次，只让一个 View 先应用，制造真实混批。
+    DataTransaction transaction;
+    transaction.bindings.push_back({ std::string(primaryVolumeBinding),
+        original->binding->revision, true, original->data->self,
+        original->data->self });
+    const auto rebound = core.sharedDataMgr->SetDataCommit(std::move(transaction));
+    if (rebound.status != DataCommitStatus::Succeeded
+        || rebound.bindings.size() != 1) return false;
+    DataReadyState ready;
+    ready.dataRevision = original->data->self;
+    ready.bindingRevision = rebound.bindings.front().revision;
+    original->image->GetScalarRange(ready.scalarRange.data());
+    original->image->GetSpacing(ready.spacing.data());
+    original->image->GetCenter(ready.cursorWorld.data());
+    core.sharedState->SetDataReady(ready);
+
+    const auto directory = views.GetViewDirectory().lock();
+    const auto route = directory ? directory->GetViewRoute({
+        "load-primary", false, HostRenderViewRole::Primary3D })
+        : std::optional<HostViewRoute>{};
+    const auto update = route ? route->update.lock() : nullptr;
+    const auto view = route ? route->view.lock() : nullptr;
+    if (!update || !view) return false;
+    for (int poll = 0; poll < 1000
+        && view->GetViewState().bindingRevision != ready.bindingRevision; ++poll) {
+        if (!update->SendUpdates()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto mixed = views.GetViewStates();
+    if (mixed.size() != 2
+        || mixed[0].dataRevision != mixed[1].dataRevision
+        || mixed[0].bindingRevision != ready.bindingRevision
+        || mixed[1].bindingRevision != original->binding->revision)
+        return false;
+    const auto rejected = views.BuildFrameStage(epoch + 1);
+    views.ClearFrameStage();
+    if (rejected != HostFrameStageStatus::Failed
+        || GetCommittedEpoch(views) != epoch) return false;
+
+    if (!SendFrame(views, epoch) || views.GetFrameRenderPending()) return false;
+    const auto scenes = views.GetSceneViewStates();
+    return scenes.size() == 2 && scenes[0].presentation && scenes[1].presentation
+        && scenes[0].presentation->bindingRevision == ready.bindingRevision
+        && scenes[1].presentation->bindingRevision == ready.bindingRevision
+        && scenes[0].sceneEpoch == scenes[1].sceneEpoch
+        && views.StopLease();
 }
 
 bool SendReload(
@@ -2115,6 +2525,10 @@ int GetLoadFailCount()
     int failureCount = 0;
     failureCount += GetCaseResult(GetDataSelectionValid(),
         "Generic primary selection preserves history, CAS, load admission, reentry and scene sync") ? 0 : 1;
+    failureCount += GetCaseResult(GetExplicitSceneInputsValid(),
+        "Explicit scene inputs validate original/crop/labels, binding ABA and historical appearance") ? 0 : 1;
+    failureCount += GetCaseResult(GetStateAttachmentValid(),
+        "State queries are pure, validate outputs and reject retired same-ID attachments") ? 0 : 1;
     HostLoadRequest missingLoad;
     missingLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
@@ -2153,6 +2567,15 @@ int GetLoadFailCount()
     failureCount += GetCaseResult(
         GetMultiViewLoadValid(false),
         "Multi-view reload publishes one shared version after every stage is ready") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetSceneGraphRetryValid(),
+        "Scene graph rejection preserves the committed pair and dirty retry") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetSceneHistoryValid(),
+        "Scene uses one frozen graph and retains valid historical inputs") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetSceneBindingValid(),
+        "Scene rejects mixed applied binding revisions for the same data") ? 0 : 1;
     failureCount += GetCaseResult(
         GetReloadReplacementValid(),
         "Reload during prepare cancels the old revision and publishes only the latest") ? 0 : 1;

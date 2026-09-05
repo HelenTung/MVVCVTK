@@ -99,6 +99,9 @@ public:
     bool GetDoneEvent();
     void SendCallback();
     GapAnalysisState GetAnalysisState() const;
+    FeatureOperationState GetExecutionState() const;
+    void SetExecutionState(FeatureRunStatus status);
+    bool GetDisplayOn() const { return GetViewThread() && !m_displayOverlayBindings.empty(); }
     std::vector<VoidRegion> GetVoidRegions() const;
     GapStatistics GetStatistics() const;
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
@@ -316,6 +319,8 @@ private:
     std::atomic<bool> m_isStopping{ false };
     // 分析执行轴：入口发布 Idle/Running/前置失败，worker 发布终态；它不表达 view/overlay 是否开启。
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
+    mutable std::mutex m_executionMutex;
+    FeatureOperationState m_execution;
 
     // 显示会话只允许绑定的宿主线程访问；线程 id 由独立 mutex 保护，VTK/overlay 调用不持该锁。
     mutable std::mutex m_viewThreadMutex;
@@ -602,6 +607,16 @@ GapAnalysisState GapAnalysisService::GetAnalysisState() const
     return m_impl->GetAnalysisState();
 }
 
+FeatureOperationState GapAnalysisService::GetExecutionState() const
+{
+    return m_impl->GetExecutionState();
+}
+
+bool GapAnalysisService::GetDisplayOn() const
+{
+    return m_impl->GetDisplayOn();
+}
+
 std::vector<VoidRegion> GapAnalysisService::GetVoidRegions() const
 {
     return m_impl->GetVoidRegions();
@@ -804,6 +819,24 @@ void GapAnalysisService::Impl::StopAsync() {
     // 取消与 worker 的成功发布线性化；返回仍不表示线程已退出。
     std::lock_guard<std::mutex> stopLock(m_stopMutex);
     m_isStopping.store(true);
+    const auto state = GetExecutionState().status;
+    if (state == FeatureRunStatus::Preparing || state == FeatureRunStatus::Running)
+        SetExecutionState(FeatureRunStatus::Stopping);
+}
+
+FeatureOperationState GapAnalysisService::Impl::GetExecutionState() const
+{
+    const std::lock_guard<std::mutex> lock(m_executionMutex);
+    return m_execution;
+}
+
+void GapAnalysisService::Impl::SetExecutionState(const FeatureRunStatus status)
+{
+    const std::lock_guard<std::mutex> lock(m_executionMutex);
+    if (m_execution.status == status) return;
+    m_execution.status = status;
+    m_execution.progress = status == FeatureRunStatus::Ready ? 1.0 : 0.0;
+    ++m_execution.stateRevision;
 }
 
 GapAnalysisState GapAnalysisService::Impl::GetAnalysisState() const {
@@ -1263,6 +1296,11 @@ GapAnalysisService::Impl::GapParamSnapshot GapAnalysisService::Impl::GetParamSna
 void GapAnalysisService::Impl::StartWorker(
     InputSnapshot inputSnapshot,
     GapParamSnapshot params) {
+    {
+        const std::lock_guard<std::mutex> lock(m_stopMutex);
+        SetExecutionState(m_isStopping.load()
+            ? FeatureRunStatus::Stopping : FeatureRunStatus::Running);
+    }
     // worker 只使用按值参数和共享只读输入快照；中间产物保持局部，完整结果在 resultMutex 下单次发布。
     // DefX 同步调用前后及 DTO 投影阶段观察取消；取消和算法异常都映射为 Failed。
     bool isSuccess = false;
@@ -1271,6 +1309,7 @@ void GapAnalysisService::Impl::StartWorker(
     if (!inputSnapshot || !inputSnapshot->volume.GetVoxelReady()
         || !inputSnapshot->image || m_isStopping.load()) {
         SetAnalysisState(GapAnalysisState::Idle);
+        SetExecutionState(m_isStopping.load() ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed);
         SetCallbackReady(false);
         return;
     }
@@ -1364,6 +1403,8 @@ void GapAnalysisService::Impl::StartWorker(
             m_result = std::move(result);
         }
         SetAnalysisState(isSuccess ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
+        SetExecutionState(isSuccess ? FeatureRunStatus::Ready
+            : m_isStopping.load() ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed);
         SetCallbackReady(isSuccess);
     }
 }
@@ -1376,6 +1417,7 @@ void GapAnalysisService::Impl::StopWorker() {
 }
 
 void GapAnalysisService::Impl::SetAnalysisState(GapAnalysisState state) {
+    if (state == GapAnalysisState::Running) SetExecutionState(FeatureRunStatus::Preparing);
     m_analysisState.store(static_cast<int>(state));
 }
 

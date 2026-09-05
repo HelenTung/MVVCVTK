@@ -722,8 +722,14 @@ bool HostViewRuntimeRegistry::Impl::Build(
     const std::vector<HostRenderViewConfig>& configs)
 {
     std::vector<std::string> viewIds;
+    std::map<std::string, HostViewSyncPolicy> policies;
     viewIds.reserve(configs.size());
     for (const auto& config : configs) {
+        if (config.syncPolicy != HostViewSyncPolicy::SamePrimary
+            && config.syncPolicy != HostViewSyncPolicy::ExplicitInputs) return false;
+        const auto policy = policies.find(config.synchronizationGroup);
+        if (policy != policies.end() && policy->second != config.syncPolicy) return false;
+        policies[config.synchronizationGroup] = config.syncPolicy;
         if (config.id.empty()
             || std::find(viewIds.begin(), viewIds.end(), config.id)
                 != viewIds.end()) {
@@ -806,6 +812,7 @@ bool HostViewRuntimeRegistry::Impl::Build(
     m_loadCommit = std::make_unique<LoadCommitCoordinator>(
         core.sharedDataMgr);
     m_frameRuntime->BuildSceneStates();
+    m_frameRuntime->SetDataRead(core.sharedDataMgr);
     return true;
 }
 
@@ -1860,7 +1867,7 @@ HostViewRuntimeRegistry::GetSceneViewState(
 }
 
 std::vector<HostSceneViewState>
-HostViewRuntimeRegistry::GetSceneViewStates()
+HostViewRuntimeRegistry::GetSceneViewStates() const
 {
     return m_impl
         ? m_impl->GetSceneViewStates()

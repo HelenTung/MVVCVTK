@@ -275,6 +275,8 @@ public:
         return m_sceneDeltas.size();
     }
 
+    const FeatureSceneDelta& GetLastSceneDelta() const { return m_sceneDeltas.back(); }
+
     bool SendOwnerComplete(
         std::function<void()> complete) override
     {
@@ -670,6 +672,37 @@ bool GetSurfaceRetentionValid()
 
 int GetPartLifecycleFailCount()
 {
+    const auto getDisplayFailureValid = [] {
+        TestHost test;
+        if (!test.Attach()) return false;
+        std::optional<PartSegmentationResult> result;
+        const auto start = [&] {
+            result.reset();
+            return test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+                [&](PartSegmentationResult value) { result = std::move(value); }).status
+                == PartAdmissionStatus::Accepted
+                && SendTicks(*test.feature, [&] { return result.has_value(); });
+        };
+        if (!start() || result->status != PartResultStatus::Succeeded) return false;
+        const auto oldOperations = test.feature->GetOperationStates();
+        const auto oldLabels = test.feature->GetState().labelMap;
+        const auto overlayCount = test.views->GetOverlayCount();
+        test.host->SetSceneRejected(true);
+        if (!start() || result->status != PartResultStatus::SucceededWithDisplayFailure) return false;
+        const auto operations = test.feature->GetOperationStates();
+        const bool isOldDisplayRetained = operations.size() == 2 && !oldOperations.empty()
+            && operations.front().status == FeatureRunStatus::Succeeded
+            && operations.front().outputs.front() != oldLabels
+            && operations.back().operation == oldOperations.front().operation
+            && operations.back().stateRevision == oldOperations.front().stateRevision
+            && test.views->GetOverlayCount() == overlayCount;
+        test.host->SetSceneRejected(false);
+        PartSegmentationRequest show = GetRequest(PartSegmentationAction::SetVisibility);
+        show.isVisible = true;
+        if (test.feature->SendRequest(show).status != PartAdmissionStatus::Accepted) return false;
+        return isOldDisplayRetained && test.feature->GetOperationStates().size() == 1
+            && test.feature->DetachHost();
+    };
     int failureCount = GetPreviousPartFailCount();
     {
         TestHost test;
@@ -717,6 +750,8 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(isValid,
             "Part result binding ABA retires display and preserves external binding/history") ? 0 : 1;
     }
+    failureCount += GetCaseResult(getDisplayFailureValid(),
+        "Rejected Part display keeps old resources and operation while new outputs remain readable") ? 0 : 1;
     failureCount += GetCaseResult(
         GetSurfaceRetentionValid(),
         "Retained surface consumes recompute budget while preserving the active Part result")
@@ -833,10 +868,10 @@ int GetPartLifecycleFailCount()
                 && restoredSnapshot->partSetId == firstSnapshot->partSetId
                 && restored.resultSet != firstResultSet
                 && GetDataRevisionRefValid(restored.labelMap)
-                && restoredLabel == nullptr
-                && test.views->GetOverlayCount() == 0
-                && test.host->GetActiveViews().empty(),
-            "Display failure preserves the newly committed data") ? 0 : 1;
+                && restoredLabel == firstLabel
+                && test.views->GetOverlayCount() == 4
+                && test.host->GetActiveViews().size() == 4,
+            "Display failure preserves new committed data and the previous display") ? 0 : 1;
 
         auto hide = GetRequest(PartSegmentationAction::SetVisibility);
         hide.isVisible = false;
@@ -1046,7 +1081,9 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(
             selectedFirst.status == PartMutationStatus::Succeeded
                 && selectedSecond.status == PartMutationStatus::Succeeded
-                && test.host->GetSceneDeltaCount() == previousDeltaCount + 2
+                && test.host->GetSceneDeltaCount() == previousDeltaCount + 4
+                && test.host->GetLastSceneDelta().inputs.back().role == "result-set"
+                && test.host->GetLastSceneDelta().inputs.back().source == test.feature->GetState().resultSet
                 && finalSelection
                 && !finalSelection->parts[0].presentation.isSelected
                 && finalSelection->parts[1].presentation.isSelected

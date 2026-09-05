@@ -262,6 +262,50 @@ void StartExceptionAndReentrancyCase(int& failureCount)
         "Exception fixture should stop cleanly.", failureCount);
 }
 
+void StartSemanticCaptureCase(int& failureCount)
+{
+    auto views = std::make_shared<HostRouteStub>();
+    auto context = std::make_shared<ViewContextStub>();
+    views->CreateView("primary", HostRenderViewRole::Primary3D, context);
+    HostInputRegistry registry(views->GetViewDirectory());
+    HostViewTargets targets;
+    targets.viewIds = { "primary" };
+    registry.Start(targets);
+    HostSemanticTarget current;
+    current.display = { "primary", "feature.semantic", "parts", { { 1, 2 }, 1 },
+        { "feature.semantic", 3, 4 } };
+    current.objectId = "part-a";
+    current.sceneEpoch = 5;
+    current.resultRevision = 6;
+    int pickCount = 0;
+    std::vector<HostSemanticTarget> captured;
+    int cancelCount = 0;
+    HostInputBinding binding;
+    binding.featureId = "feature.semantic";
+    binding.targetViews = targets;
+    binding.getTarget = [&](const auto&) { ++pickCount; return std::optional<HostSemanticTarget>{ current }; };
+    SetExpect(!registry.GetFeaturePort().AttachInput(binding),
+        "Semantic resolver and input callback must be paired.", failureCount);
+    binding.onTargetInput = [&](const auto& event, const auto& target) {
+        captured.push_back(target);
+        if (event.eventKind == InteractionEventKind::Cancel) ++cancelCount;
+        return InteractionResult{ true, true };
+    };
+    registry.GetFeaturePort().AttachInput(std::move(binding));
+    context->OnInput(BuildEvent(InteractionEventKind::PrimaryPress));
+    current.objectId = "part-b";
+    ++current.resultRevision;
+    context->OnInput(BuildEvent(InteractionEventKind::PointerMove));
+    context->OnInput(BuildEvent(InteractionEventKind::PrimaryRelease));
+    SetExpect(pickCount == 1 && captured.size() == 3
+        && captured.back().objectId == "part-a" && captured.back().resultRevision == 6,
+        "Captured semantic identity must stay frozen through Move and Release.", failureCount);
+    context->OnInput(BuildEvent(InteractionEventKind::PrimaryPress));
+    SetExpect(registry.GetFeaturePort().DetachInput("feature.semantic") && cancelCount == 1
+        && captured.back().objectId == "part-b", "Detach cancels the exact semantic preview.", failureCount);
+    registry.Stop();
+}
+
 void StartCaptureAndDetachCase(int& failureCount)
 {
     auto views = std::make_shared<HostRouteStub>();
@@ -544,6 +588,7 @@ int HostInputRegistrySuite::GetFailCount() const
     StartBindingAndPhaseCase(failureCount);
     StartExceptionAndReentrancyCase(failureCount);
     StartCaptureAndDetachCase(failureCount);
+    StartSemanticCaptureCase(failureCount);
     StartAtomicPressCase(failureCount);
     StartStableCallbackLifecycleCase(failureCount);
     StartEndpointMappingCase(failureCount);
