@@ -60,6 +60,11 @@ set_property(
     PROPERTY PASS_REGULAR_EXPRESSION
         "\\[GapAnalysis\\]\\[DefX\\] labels ready \\| scalar=int \\| transfer=borrowed"
 )
+set_property(
+    TEST GapAnalysis.All
+    PROPERTY FAIL_REGULAR_EXPRESSION
+        "GapAnalysisAlgorithmTests failed:"
+)
 
 # 路径回归测试把测试程序放到独立目录，并在当前工作目录放置同名伪 DLL。
 # 生产加载器必须忽略当前目录，只从 Feature 专属的绝对目录加载 runtime 对。

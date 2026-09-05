@@ -216,7 +216,8 @@ private:
     bool BuildInputSnapshot(
         vtkSmartPointer<vtkImageData> image,
         vtkSmartPointer<vtkImageData> validityMask,
-        InputSnapshot& out) const;
+        InputSnapshot& out,
+        VtkImageGridSnapshot graphOwner = nullptr) const;
     bool BuildInputSnapshot(
         VtkImageGridSnapshot graphInput,
         InputSnapshot& out) const;
@@ -1521,7 +1522,8 @@ double GapAnalysisService::Impl::GetDisplayIso(
 bool GapAnalysisService::Impl::BuildInputSnapshot(
     vtkSmartPointer<vtkImageData> image,
     vtkSmartPointer<vtkImageData> validityMask,
-    InputSnapshot& out) const
+    InputSnapshot& out,
+    VtkImageGridSnapshot graphOwner) const
 {
     out.reset();
     if (!image
@@ -1578,6 +1580,7 @@ bool GapAnalysisService::Impl::BuildInputSnapshot(
         snapshot->volume = std::move(volume);
         snapshot->image = std::move(workerImage);
         snapshot->validityMask = std::move(workerMask);
+        snapshot->graphOwner = std::move(graphOwner);
         out = std::move(snapshot);
         return out && out->volume.GetVoxelReady() && out->image;
     }
@@ -1615,10 +1618,10 @@ bool GapAnalysisService::Impl::BuildInputSnapshot(
         return false;
     }
     if (sourceScalars->GetDataType() != VTK_FLOAT) {
-        return BuildInputSnapshot(
-            graphInput->image,
-            graphInput->validityMask,
-            out);
+        // 转换仅替换计算缓冲；正式结果仍使用原始图快照的几何和生命周期。
+        const auto image = graphInput->image;
+        const auto validityMask = graphInput->validityMask;
+        return BuildInputSnapshot(image, validityMask, out, std::move(graphInput));
     }
 
     const auto& geometry = payload->GetGeometry();

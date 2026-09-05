@@ -636,6 +636,45 @@ int GapDisplaySuite::GetFailCount() const
             && static_cast<const short*>(
                 maskedShortImage->GetScalarPointer())[0] == 1000,
         "Masked conversion must preserve the caller image and the float-path result.");
+
+    // 非 float 的正式图输入在转换后仍须产出可发布的全部 payload。
+    auto graphShortInput = BuildGraphInput(maskedShortImage, validityMask);
+    GapAnalysisService graphShortService;
+    GapViewRequest graphShortRequest;
+    graphShortRequest.graphInput = graphShortInput;
+    graphShortRequest.surface = maskedSurface;
+    graphShortRequest.voidParams = voidParams;
+    graphShortRequest.sliceTargets.emplace_back(
+        Orientation::Top_down, std::make_shared<OverlayStub>());
+    int graphShortCompleteCount = 0;
+    bool isGraphShortSucceeded = false;
+    expect(graphShortService.StartView(std::move(graphShortRequest),
+        [&](const bool isSucceeded) {
+            ++graphShortCompleteCount;
+            isGraphShortSucceeded = isSucceeded;
+        }), "A non-float graph input must be admitted.");
+    const auto graphShortDeadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds(5);
+    while (graphShortService.GetAnalysisState() == GapAnalysisState::Running
+        && std::chrono::steady_clock::now() < graphShortDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    graphShortService.OnDisplayTick(maskedShortImage);
+    GapAnalysisResult graphShortResult;
+    const bool hasGraphShortResult = graphShortService.GetCompletedResult(graphShortResult);
+    const auto& graphShortPayloads = graphShortResult.payloads;
+    expect(hasGraphShortResult && graphShortPayloads
+        && graphShortPayloads->labels && graphShortPayloads->labels->GetValid()
+        && graphShortPayloads->mesh && graphShortPayloads->mesh->GetValid()
+        && graphShortPayloads->voids && graphShortPayloads->voids->GetValid()
+        && graphShortPayloads->statistics && graphShortPayloads->statistics->GetValid(),
+        "Non-float graph conversion must preserve publication payloads.");
+    expect(CommitDisplayResult(graphShortService)
+        && graphShortCompleteCount == 1 && isGraphShortSucceeded,
+        "Non-float graph publication must complete exactly once.");
+    expect(graphShortService.ExitView(), "Non-float graph view must exit cleanly.");
+    graphShortService.OnDisplayTick(nullptr);
+
     expect(maskedLowService.ExitView()
             && maskedHighService.ExitView()
             && maskedNanService.ExitView()
