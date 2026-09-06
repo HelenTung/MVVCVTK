@@ -983,6 +983,9 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
 {
     bytes = 0;
     if (!m_data) return false;
+    m_previewRetained.erase(std::remove_if(m_previewRetained.begin(), m_previewRetained.end(),
+        [](const auto& item) { return item.labels.expired() && item.parts.expired(); }), m_previewRetained.end());
+    if (m_previewRetained.size() >= 4096) return false;
     // 只扫有界修订 metadata，不扫描任何体素。历史即使已被 Undo 栈弹出仍计费。
     DataQuery query;
     query.producerId = std::string(featureId);
@@ -995,15 +998,25 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
         bytes += count * width;
         return bytes <= m_config.maxHistoryBytes;
     };
+    // 撤销/重做修订和外部候选可共享同一不可变标签缓冲，只计费一次。
+    // 去重表由既有修订/候选数量上限约束；不同分配仍独立计费。
+    std::vector<const void*> countedLabels;
+    countedLabels.reserve(data.data.size() + m_previewRetained.size());
+    if (!add(countedLabels.capacity(), sizeof(const void*))) return false;
+    const auto addLabels = [&](const auto& values) {
+        using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
+        if (!values) return false;
+        const auto* identity = static_cast<const void*>(values.get());
+        if (std::find(countedLabels.begin(), countedLabels.end(), identity) != countedLabels.end()) return true;
+        countedLabels.push_back(identity);
+        return add(values->capacity(), sizeof(Item));
+    };
     for (const auto& revision : data.data) {
         if (!revision || !revision->payload || !add(1, 2048)
             || !add(revision->inputs.capacity(), sizeof(DataInputRef) + 128)
             || (revision->provenance && !add(revision->provenance->canonicalParameters.capacity(), 1))) return false;
         if (const auto labels = std::dynamic_pointer_cast<const LabelMap3DPayload>(revision->payload)) {
-            const bool fits = std::visit([&](const auto& values) {
-                using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
-                return values && add(values->capacity(), sizeof(Item));
-            }, labels->GetValues());
+            const bool fits = std::visit(addLabels, labels->GetValues());
             if (!fits) return false;
         }
         else if (const auto catalog = std::dynamic_pointer_cast<const PartCatalogPayload>(revision->payload)) {
@@ -1029,12 +1042,10 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
         }
         else return false;
     }
-    m_previewRetained.erase(std::remove_if(m_previewRetained.begin(), m_previewRetained.end(),
-        [](const auto& item) { return item.labels.expired() && item.parts.expired(); }), m_previewRetained.end());
-    if (m_previewRetained.size() >= 4096 || !add(m_previewRetained.capacity(), sizeof(PreviewRetention))) return false;
+    if (!add(m_previewRetained.capacity(), sizeof(PreviewRetention))) return false;
     for (const auto& item : m_previewRetained) {
         const auto labels = item.labels.lock();
-        if (labels && !add(labels->capacity(), sizeof(PartLabelId))) return false;
+        if (labels && !addLabels(labels)) return false;
         if (!item.parts.expired() && !add(1, item.partBytes)) return false;
     }
     if (!add(m_undo.capacity() + m_redo.capacity() + m_commitUndo.capacity() + m_commitRedo.capacity(), sizeof(HistoryEntry))) return false;

@@ -1,3 +1,13 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "Interaction/AbstractViewContext.h"
 
 #include <vtkCamera.h>
@@ -6,8 +16,12 @@
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
+#if defined(_WIN32)
+#include <vtkWin32OpenGLRenderWindow.h>
+#endif
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -181,6 +195,27 @@ bool AbstractViewContext::SetWindowPosition(
 bool AbstractViewContext::SetWindowTitle(const std::string& title)
 {
     if (!GetIsOwnerThread() || !m_renderWindow) return false;
+#if defined(_WIN32)
+    auto* nativeWindow = vtkWin32OpenGLRenderWindow::SafeDownCast(m_renderWindow);
+    if (nativeWindow && nativeWindow->GetWindowId()) {
+        if (title.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) return false;
+        std::wstring wideTitle;
+        if (!title.empty()) {
+            const auto length = static_cast<int>(title.size());
+            const auto wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                title.data(), length, nullptr, 0);
+            if (wideLength == 0) return false;
+            wideTitle.resize(static_cast<std::size_t>(wideLength));
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                title.data(), length, wideTitle.data(), wideLength) != wideLength) return false;
+        }
+        // VTK 9.4 的 WM_SETTEXT 分支把消息参数当作 UTF-8 再解码。
+        // 直接交给 Unicode 默认处理器，避免 A/W 消息转换后被二次解码。
+        nativeWindow->vtkWindow::SetWindowName(title.c_str());
+        return DefWindowProcW(nativeWindow->GetWindowId(), WM_SETTEXT, 0,
+            reinterpret_cast<LPARAM>(wideTitle.c_str())) != 0;
+    }
+#endif
     m_renderWindow->SetWindowName(title.c_str());
     return true;
 }

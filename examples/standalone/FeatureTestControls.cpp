@@ -118,6 +118,7 @@ void PrintFeatureTestHelp() {
         << "请先按 N 选择零件（可用 --part-picking 启用点击选择）；未选择时使用第一个零件。合并对象为所选零件及其下一个零件。\n"
         << "涂绘/擦除使用零件边界内的体素；填充/区域生长使用有限邻域；拆分使用两端的零件体素作为种子。\n"
         << "候选结果的统计信息会输出到控制台；确认后才更新正式显示。\n";
+    std::cout << "裁剪生效期间临时隐藏旧零件叠加；退出控件仍保留裁剪，撤销全部裁剪后恢复叠加。切换输入后需重新分割。\n";
 #endif
 #if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
     std::cout << "F9 / Shift+F9：环形伪影校正/扩散滤波/两者组合 | F10：准备候选结果 | Ctrl+F10：发布\n"
@@ -191,6 +192,7 @@ public:
     bool StartAlignment(bool bestFit);
     bool AlignmentActionRequest(int action);
     void Tick();
+    void UpdateCropPartVisibility();
     VtkAppHostSession& session;
     FeatureTestBindings bindings;
     FeatureTestOptions options;
@@ -207,6 +209,7 @@ public:
     std::uint64_t alignmentCompletions = 0;
     bool alignmentMatched = false;
     std::optional<DataRevisionRef> artifactInput;
+    std::optional<bool> partVisibilityBeforeCrop;
 #if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
     AlignmentMatrix expectedTransform = alignmentIdentity;
     std::optional<AlignmentResult> lastAlignment;
@@ -257,6 +260,29 @@ bool FeatureTestControls::Impl::Dispatch(const int key, const bool ctrl, const b
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
 namespace {
 using Voxel = std::array<int, 3>;
+std::string PartEditResultText(const PartSegmentationResult& result) {
+    if (result.status == PartResultStatus::PreviewReady) return "候选结果已就绪，请按 Ctrl+F7 确认";
+    if (result.status == PartResultStatus::Succeeded) return "已确认，正式结果已更新";
+    if (result.status == PartResultStatus::SucceededWithDisplayFailure) return "数据已更新，但显示失败";
+    switch (result.failureReason) {
+    case PartFailureReason::None: return "编辑已结束";
+    case PartFailureReason::InvalidSource: return "输入数据不可用";
+    case PartFailureReason::InvalidGeometry: return "数据网格或几何信息无效";
+    case PartFailureReason::UnsupportedScalar: return "不支持此体素数值类型";
+    case PartFailureReason::BudgetExceeded: return "编辑工作区或历史结果超出内存预算";
+    case PartFailureReason::Cancelled: return "编辑已取消";
+    case PartFailureReason::SourceChanged: return "输入数据已切换，候选结果已失效";
+    case PartFailureReason::DisplayFailed: return "编辑结果显示失败";
+    case PartFailureReason::InternalError: return "编辑处理发生内部错误";
+    case PartFailureReason::InvalidEdit: return "编辑参数或标签数据无效";
+    case PartFailureReason::ConstraintConflict: return "编辑与保护范围、作用域或种子位置冲突";
+    case PartFailureReason::UnassignedVoxels: return "拆分后仍有体素未连接到种子";
+    case PartFailureReason::RevisionConflict: return "数据版本已变化，请重新生成候选结果";
+    case PartFailureReason::NoChange: return "本次操作未改变体素归属";
+    case PartFailureReason::TimedOut: return "编辑超时";
+    }
+    return "编辑未完成";
+}
 std::uint64_t LabelAt(const LabelMap3DPayload& labels, const Voxel& point) {
     const auto& geometry = labels.GetGeometry();
     const auto x = static_cast<std::size_t>(static_cast<std::int64_t>(point[0]) - geometry.extent[0]);
@@ -385,9 +411,10 @@ bool FeatureTestControls::Impl::PreparePart(const int mode) {
         if (!self || !self->m_impl->context.host) return;
         auto& tools = *self->m_impl;
         ++tools.partCompletions;
+        const auto message = PartEditResultText(result);
         if (result.status != PartResultStatus::PreviewReady && result.status != PartResultStatus::Cancelled)
-            tools.failure = result.message;
-        tools.Status("编辑请求=" + std::to_string(result.requestId) + " | " + result.message);
+            tools.failure = message;
+        tools.Status("编辑请求=" + std::to_string(result.requestId) + " | " + message);
         tools.Report();
     });
     if (admission.status != PartAdmissionStatus::Accepted)
@@ -409,8 +436,9 @@ bool FeatureTestControls::Impl::ConfirmPart() {
         if (!self || !self->m_impl->context.host) return;
         auto& tools = *self->m_impl;
         ++tools.partCompletions;
-        if (result.status != PartResultStatus::Succeeded) tools.failure = result.message;
-        tools.Status("编辑确认请求=" + std::to_string(result.requestId) + " | " + result.message);
+        const auto message = PartEditResultText(result);
+        if (result.status != PartResultStatus::Succeeded) tools.failure = message;
+        tools.Status("编辑确认请求=" + std::to_string(result.requestId) + " | " + message);
         tools.Report();
     });
     return admission.status == PartAdmissionStatus::Accepted || Fail("编辑确认被拒绝");
@@ -781,7 +809,35 @@ void FeatureTestControls::Impl::Report() {
     std::cout << std::flush;
 }
 
+void FeatureTestControls::Impl::UpdateCropPartVisibility() {
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    const auto parts = bindings.parts.lock();
+    if (!parts) return;
+    const auto crop = bindings.crop.lock();
+    const auto cropState = crop ? crop->GetState() : CropHostState{};
+    // Exit 只关闭控件；当前前缀仍有节点时，底层模型继续受裁剪影响。
+    // baseNodeCount 已物化进当前输入的 mask，针对该输入重新分割的零件可以显示。
+    const bool isCropping = cropState.isActive || cropState.history.nodeCount != 0;
+    const auto state = parts->GetState();
+    if (isCropping && !partVisibilityBeforeCrop) partVisibilityBeforeCrop = state.isOverlayVisible;
+    if (!partVisibilityBeforeCrop) return;
+    // 切换源数据后保持旧叠加隐藏；待当前输入重新生成结果后再恢复显示偏好。
+    if (!isCropping && state.status == PartSegmentationStatus::Stale) return;
+    const bool isVisible = !isCropping && *partVisibilityBeforeCrop;
+    if (state.isOverlayVisible != isVisible) {
+        PartSegmentationRequest request;
+        request.action = PartSegmentationAction::SetVisibility;
+        request.isVisible = isVisible;
+        if (parts->SendRequest(request).status != PartAdmissionStatus::Accepted) return;
+        if (parts->GetState().isOverlayVisible != isVisible) return;
+        Status(isCropping ? "裁剪生效期间已临时隐藏旧零件叠加" : "已恢复零件叠加可见状态");
+    }
+    if (!isCropping) partVisibilityBeforeCrop.reset();
+#endif
+}
+
 void FeatureTestControls::Impl::Tick() {
+    UpdateCropPartVisibility();
 #if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
     const auto feature = bindings.artifact.lock();
     if (!feature) return;

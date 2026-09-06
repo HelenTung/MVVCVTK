@@ -113,8 +113,7 @@ public:
         // 1. 校验完整输入与预算后，才创建独占的可写标签候选。
         SetInput();
         m_labels = std::make_shared<std::vector<PartLabelId>>(*m_input.previous.labels);
-        m_domain.resize(m_count);
-        m_protected.resize(m_count);
+        m_editable.resize(m_count);
         m_changed.resize(m_old->partsByLabel.size(), false);
         for (std::size_t i = 0; i < m_count; ++i) {
             CheckStop(i);
@@ -122,15 +121,17 @@ public:
             const auto index = GetIndex(i);
             const double validity = m_input.volume.validity
                 ? GetScalar(*m_input.volume.validity, i) : 1.0;
-            m_protected[i] = m_locked[label]
+            const bool isProtected = m_locked[label]
                 || (m_input.protectionMask && GetMaskPoint(*m_input.protectionMask, i));
-            m_domain[i] = std::isfinite(validity) && validity != 0.0
+            m_editable[i] = !isProtected && std::isfinite(validity) && validity != 0.0
                 && GetInside(index, m_extent)
                 && (!m_input.roiMask || GetMaskPoint(*m_input.roiMask, i));
         }
         // 2. 每个工具只改变候选；不执行初始阈值分割，也不触碰原始 scalar。
         std::visit([this](const auto& operation) { SetOperation(operation); },
             m_input.request.operation);
+        // 编辑结束后目录重建不再读取限制标记，及时释放整卷临时缓冲。
+        std::vector<std::uint8_t>{}.swap(m_editable);
         if (*m_labels == *m_input.previous.labels) {
             SetFailure(PartFailureReason::NoChange, "Edit changes no voxel ownership.");
         }
@@ -264,8 +265,23 @@ private:
             }
         }
         m_count = *count;
-        // 包含候选、域、访问标记、最多 N 项的索引堆/队列、指标/目录暂存。
-        constexpr std::size_t voxelBytes = 80;
+        // 按操作的最大同时存活缓冲计费；简单编辑不承担拆分的整卷索引堆。
+        // queue/heap 均预留 N 项且同时最多保留 N 个索引，不存在扩容重叠。
+        const auto voxelBytes = std::visit([](const auto& operation) -> std::size_t {
+            using Operation = std::decay_t<decltype(operation)>;
+            constexpr auto base = sizeof(PartLabelId) + sizeof(std::uint8_t);
+            if constexpr (std::is_same_v<Operation, PartSplitEdit>) {
+                return base + sizeof(std::uint32_t) + 2 * sizeof(std::uint8_t)
+                    + sizeof(double) + 2 * sizeof(std::size_t);
+            }
+            else if constexpr (std::is_same_v<Operation, PartFillEdit>
+                || std::is_same_v<Operation, PartGrowEdit>
+                || std::is_same_v<Operation, PartIslandEdit>) {
+                return base + sizeof(std::uint8_t) + sizeof(std::size_t);
+            }
+            else return base;
+        }, m_input.request.operation);
+        // 目录、指标、映射、请求派生的小容器及分配器余量。
         constexpr std::size_t catalogReserve = (maxParts * 2 + 1) * 2048;
         if (m_count > (std::numeric_limits<std::size_t>::max() - catalogReserve) / voxelBytes) {
             m_requiredBytes = std::numeric_limits<std::size_t>::max();
@@ -306,7 +322,7 @@ private:
         }
     }
 
-    bool GetEditable(std::size_t i) const { return m_domain[i] && !m_protected[i]; }
+    bool GetEditable(std::size_t i) const { return m_editable[i] != 0; }
 
     PartLabelId GetWritableLabel(const PartBindingRef& binding) const
     {
@@ -693,7 +709,7 @@ private:
     std::array<double, 3> m_edgeLength{};
     std::size_t m_count = 0, m_requiredBytes = 0, m_newCount = 0;
     std::shared_ptr<std::vector<PartLabelId>> m_labels;
-    std::vector<std::uint8_t> m_domain, m_protected;
+    std::vector<std::uint8_t> m_editable;
     std::vector<bool> m_locked, m_changed;
     std::vector<PartLabelId> m_sources;
 };
