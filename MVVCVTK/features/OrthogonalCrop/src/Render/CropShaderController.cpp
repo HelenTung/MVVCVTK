@@ -176,8 +176,10 @@ bool CropShaderController::Impl::SetShaderTarget(
             ? "//VTK::PositionVC::Impl\nmvvcvtk_cropPointMC = (mvvcvtk_localToInput * vertexMC).xyz;\n"
             : "//VTK::PositionVC::Impl\nmvvcvtk_cropPointMC = vertexMC.xyz;\n";
         const std::string fragmentDec = GetPolyDec("//VTK::PositionVC::Dec", false);
+        // 深度剥离的初始化阶段会在 Color 之前返回；裁切必须位于它之前，
+        // 同时保留 UniformFlow 中的导数计算先执行，避免 discard 破坏导数。
         const std::string fragmentImpl =
-            "//VTK::Color::Impl\n"
+            "//VTK::UniformFlow::Impl\n"
             "if (!mvvcvtkCropKept(mvvcvtk_cropPointMC)) { discard; }\n";
         shaderProperty->AddVertexShaderReplacement(
             "//VTK::PositionVC::Dec", true, vertexDec, false);
@@ -186,7 +188,7 @@ bool CropShaderController::Impl::SetShaderTarget(
         shaderProperty->AddFragmentShaderReplacement(
             "//VTK::PositionVC::Dec", true, fragmentDec, false);
         shaderProperty->AddFragmentShaderReplacement(
-            "//VTK::Color::Impl", true, fragmentImpl, false);
+            "//VTK::UniformFlow::Impl", true, fragmentImpl, false);
     }
 
     m_observer = vtkSmartPointer<vtkCallbackCommand>::New();

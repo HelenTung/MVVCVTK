@@ -50,19 +50,42 @@ FeatureTestOptions GetFeatureTestOptions(const int argc, char* argv[]) {
         if (equal == std::string::npos) continue;
         const auto key = argument.substr(0, equal);
         const auto text = argument.substr(equal + 1);
+        if (key == "--input") {
+            if (text.empty()) throw std::invalid_argument("输入文件路径不能为空");
+            options.inputPath = text;
+            continue;
+        }
+        if (key == "--dimensions") {
+            std::istringstream dimensions(text);
+            std::string component;
+            for (auto& dimension : options.dimensions) {
+                if (!std::getline(dimensions, component, ','))
+                    throw std::invalid_argument("体数据尺寸需要三个整数，例如 600,1800,600");
+                const auto value = Number(component);
+                if (value < 1 || value > std::numeric_limits<int>::max() || value != std::floor(value))
+                    throw std::invalid_argument("体数据各轴尺寸必须为有效正整数");
+                dimension = static_cast<int>(value);
+            }
+            if (!dimensions.eof()) throw std::invalid_argument("体数据尺寸只能包含三个整数");
+            continue;
+        }
         if (key == "--artifact-center") {
             const auto comma = text.find(',');
             if (comma == std::string::npos) throw std::invalid_argument("--artifact-center 需要两个以逗号分隔的索引 a,b");
             options.ringCenter = std::array<double, 2>{Number(text.substr(0, comma)), Number(text.substr(comma + 1))};
             continue;
         }
-        if (key != "--tool-budget-mib" && key != "--edit-radius-mm" && key != "--edit-island-voxels"
+        if (key != "--tool-budget-mib" && key != "--tool-timeout-ms" && key != "--edit-radius-mm" && key != "--edit-island-voxels"
             && key != "--artifact-axis" && key != "--artifact-ring-width" && key != "--artifact-strength"
             && key != "--artifact-iterations") continue;
         const auto value = Number(text);
         if (key == "--tool-budget-mib") {
             if (value < 16 || value > 131072 || value != std::floor(value)) throw std::invalid_argument("工具内存预算必须为 16..131072 MiB");
             options.budgetBytes = static_cast<std::size_t>(value) * 1024 * 1024;
+        } else if (key == "--tool-timeout-ms") {
+            if (value < 1 || value > 3600000 || value != std::floor(value))
+                throw std::invalid_argument("工具超时必须为 1..3600000 毫秒");
+            options.timeoutMs = static_cast<std::uint32_t>(value);
         } else if (key == "--edit-radius-mm") {
             if (value <= 0) throw std::invalid_argument("编辑半径必须为正数");
             options.editRadius = value;
@@ -111,7 +134,10 @@ void PrintFeatureTestHelp() {
     std::cout << "F12：全局预览网格 | Shift+F12：局部自适应网格 | Alt+F12：取消网格任务\n";
 #endif
     std::cout << "Ctrl+F12：输出工具状态及结果引用 | --feature-audit：使用演示数据验证上述快捷键\n"
-        << "选项：--tool-budget-mib=1024 --edit-radius-mm=... --edit-island-voxels=2\n"
+        << "真实数据：--input=文件路径 --dimensions=600,1800,600（原始浮点体数据）\n"
+        << "工具预算默认取可用物理内存的一半，上限 64 GiB；可用 --tool-budget-mib=... 显式指定\n"
+        << "编辑/伪影处理超时：--tool-timeout-ms=300000（毫秒），可按真实数据规模调整\n"
+        << "选项：--edit-radius-mm=... --edit-island-voxels=2\n"
         << "         --artifact-axis=2 --artifact-center=a,b --artifact-ring-width=1\n"
         << "         --artifact-strength=0.5 --artifact-iterations=1\n" << std::flush;
 }
@@ -424,7 +450,7 @@ bool FeatureTestControls::Impl::PrepareArtifact() {
     const auto span = std::max(1e-6, range[1] - range[0]);
     ArtifactRequest request;
     request.source = data->self;
-    request.timeoutMs = 300000;
+    request.timeoutMs = options.timeoutMs;
     if (artifactMode != 1) {
         ArtifactRingParams ring;
         ring.axis = options.ringAxis;
@@ -450,9 +476,14 @@ bool FeatureTestControls::Impl::PrepareArtifact() {
         request.diffusion = diffusion;
     }
     const auto admission = feature->SendRequest({ArtifactAction::Prepare, request, 0});
+    if (admission.error == ArtifactError::TooLarge) {
+        return Fail("伪影处理超出预算：输入字节数=" + std::to_string(image->GetValues()->size())
+            + "，工作预算字节数=" + std::to_string(options.budgetBytes)
+            + "。算法还需要完整输出和工作缓冲；请显式调整 --tool-budget-mib 或选择较小的真实体数据。");
+    }
     if (admission.error != ArtifactError::None)
         return Fail("伪影处理准备请求被拒绝，错误=" + std::to_string(static_cast<int>(admission.error))
-            + "（预算/类型/几何/有效性）；请尝试 --demo 或裁剪后的主图像");
+            + "；请检查输入类型、几何与有效性。裁切掩码仍保留原网格尺寸，不能减少整卷工作预算。");
     artifactInput = data->self;
     Status(std::string("伪影处理 ") + artifactNames[artifactMode] + " 已请求 | 请求编号=" + std::to_string(admission.requestId));
     return true;

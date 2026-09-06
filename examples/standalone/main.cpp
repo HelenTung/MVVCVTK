@@ -405,16 +405,6 @@ namespace {
         };
         config.defaultStart.threshold = 0.5;
         config.defaultStart.minPartVoxels = 8;
-        constexpr std::size_t gibibyte = std::size_t{1} << 30U;
-        config.maxWorkingBytes = 32U * gibibyte;
-#if defined(_WIN32)
-        MEMORYSTATUSEX memory{};
-        memory.dwLength = sizeof(memory);
-        if (GlobalMemoryStatusEx(&memory))
-            config.maxWorkingBytes = static_cast<std::size_t>(std::min<ULONGLONG>(
-                48U * gibibyte, memory.ullAvailPhys / 2U));
-#endif
-        std::cout << "[零件分割] 工作内存预算（字节）=" << config.maxWorkingBytes << '\n';
         return config;
     }
 
@@ -550,6 +540,7 @@ namespace {
     void PrintDemoHelp()
     {
         std::cout << "\n=== 集成功能演示（请先激活任一视图窗口）===\n"
+            << "字母快捷键需英文输入状态；出现拼音候选框时可按 Shift 切换。F1 被其他软件占用时可用 Ctrl+F1 查看帮助。\n"
             << "F1 帮助 | F2 图像描述与数据图 | F3 标签图与采样值 | F4 场景与帧状态 | F5 适配视图\n"
             << "裁剪：O 方框，P 平面，1 保留内部，2 移除内部；生成结果前先拖动控件\n"
             << "      Ctrl+7 生成结果，Ctrl+8 显示结果，Ctrl+9 恢复源数据，4/5 撤销/重做\n"
@@ -786,6 +777,8 @@ namespace {
         std::optional<ControlAction> GetAction(
             const InteractionEvent& event) const
         {
+            if (event.keySym == "F1" && event.isCtrlDown
+                && !event.isAltDown && !event.isShiftDown) return ControlAction::Help;
             for (std::size_t index = 0;
                 index < m_keys.size(); ++index) {
                 if (GetChordMatched(event, m_keys[index])) {
@@ -2433,6 +2426,20 @@ int main(int argc, char* argv[])
         PrintFeatureTestHelp();
         return 2;
     }
+    if (toolOptions.budgetBytes == 0) {
+        toolOptions.budgetBytes = std::size_t{1} << 30U;
+#if defined(_WIN32)
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        if (GlobalMemoryStatusEx(&memory)) {
+            toolOptions.budgetBytes = static_cast<std::size_t>(std::min<ULONGLONG>(
+                std::uint64_t{64} << 30U, memory.ullAvailPhys / 2U));
+        }
+#endif
+    }
+    std::cout << "[运行配置] 工具内存预算（MiB）="
+        << toolOptions.budgetBytes / (1024U * 1024U)
+        << " 编辑/伪影超时（毫秒）=" << toolOptions.timeoutMs << '\n' << std::flush;
     const bool isFeatureAudit = GetArgFound(argc, argv, "--feature-audit");
 
     const bool isHostDriven = GetArgFound(argc, argv, "--host-driven");
@@ -2549,7 +2556,8 @@ int main(int argc, char* argv[])
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     auto partConfig = GetPartConfig();
     partConfig.maxHistoryBytes = toolOptions.budgetBytes;
-    partConfig.maxWorkingBytes = std::max(partConfig.maxWorkingBytes, toolOptions.budgetBytes);
+    partConfig.maxWorkingBytes = toolOptions.budgetBytes;
+    partConfig.editTimeoutMs = toolOptions.timeoutMs;
     partConfig.isSelectionEnabled = GetArgFound(argc, argv, "--part-picking");
     auto partStart = partConfig.defaultStart;
     auto partFeature = std::make_shared<PartSegmentationHostFeature>(
@@ -2874,9 +2882,11 @@ int main(int argc, char* argv[])
     bool isPartPassed = false;
     bool isPartManualReady = false;
     bool isDemoReady = false;
+    bool isLoadFailed = false;
 
     HostResultCallback onDataReady =
         [&](HostResult result) {
+        isLoadFailed = !result.isSucceeded;
         if (result.isSucceeded) controlFeature->StartDemoFit();
         if (isDemo || isDemoAudit || isRealAudit) {
             if (!result.isSucceeded) {
@@ -2963,6 +2973,13 @@ int main(int argc, char* argv[])
         }
 #endif
         else {
+            if (!result.isSucceeded) {
+                std::cerr << "[数据加载] 失败：" << result.message << '\n' << std::flush;
+                (void)StopEventLoop(session);
+            }
+            else {
+                std::cout << "[数据加载] 真实数据已就绪；按 U 自动估计表面阈值。\n" << std::flush;
+            }
             return;
         }
         (void)StopEventLoop(session);
@@ -2977,15 +2994,21 @@ int main(int argc, char* argv[])
     else
     {
         HostLoadRequest load;
-        load.filePath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
-        load.geometry.dimensions = { 1536, 1536, 1536 };
+        load.filePath = toolOptions.inputPath;
+        load.geometry.dimensions = toolOptions.dimensions;
         load.geometry.spacing = {
             0.1537f, 0.1537f, 0.1537f };
         load.geometry.origin = { 0.0f, 0.0f, 0.0f };
-        load.metadata.identity.datasetId =
-            "standalone-ct-1536x1536x1536";
+        load.metadata.identity.datasetId = "standalone-ct-"
+            + std::to_string(toolOptions.dimensions[0]) + "x"
+            + std::to_string(toolOptions.dimensions[1]) + "x"
+            + std::to_string(toolOptions.dimensions[2]);
         load.metadata.source.kind = ImageSourceKind::RawFile;
         load.metadata.source.uri = load.filePath;
+        std::cout << "[运行配置] 真实输入=" << load.filePath
+            << " 尺寸=" << toolOptions.dimensions[0] << 'x'
+            << toolOptions.dimensions[1] << 'x' << toolOptions.dimensions[2]
+            << '\n' << std::flush;
         isDataAccepted = session.SendRequestResult(
             std::move(load), onDataReady);
     }
@@ -3015,6 +3038,7 @@ int main(int argc, char* argv[])
     const bool isStopped = session.Stop();
     if (!isStarted) return 6;
     if (!isStopped) return 26;
+    if (isLoadFailed) return 5;
     if ((isDragAudit || isQualityAudit)
         && (!isAuditComplete || !isAuditPassed)) {
         return 7;

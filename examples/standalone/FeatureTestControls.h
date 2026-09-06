@@ -19,7 +19,11 @@ class ArtifactReductionHostFeature;
 
 // Application choices for manual experiments, separate from Feature/SDK defaults.
 struct FeatureTestOptions final {
-    std::size_t budgetBytes = std::size_t{1024} * 1024 * 1024;
+    // 0 由应用按当前可用内存决定；显式命令行预算始终优先。
+    std::size_t budgetBytes = 0;
+    std::uint32_t timeoutMs = 300000;
+    std::string inputPath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
+    std::array<int, 3> dimensions{1536, 1536, 1536};
     double editRadius = 0.0; // 0 selects 1.5 times the largest voxel spacing.
     std::uint64_t islandVoxels = 2;
     int ringAxis = 2;
