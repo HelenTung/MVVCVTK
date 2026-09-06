@@ -9,6 +9,7 @@
 #include <vtkIdList.h>
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
+#include <vtkMarchingCubesTriangleCases.h>
 #include <vtkNew.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -1147,17 +1148,6 @@ SurfaceFailureReason ResolveParams(
         volume, params, getCancelled, params.initialIsoValue, message, params.isoEstimate);
 }
 
-bool GetBudgetEstimate(
-    const VolumeView& volume,
-    std::size_t& requiredBytes)
-{
-    // FlyingEdges 最坏输出依赖数据；以每体素 64 字节作为启动前保守门禁，
-    // 后续在取得真实 point/cell 数后再次核对预算。
-    return GetProduct(volume.voxelCount, 64U, requiredBytes)
-        && GetSum(requiredBytes, histogramBinCount * sizeof(std::uint64_t),
-            requiredBytes);
-}
-
 bool AddWorkingBytes(
     const std::size_t count,
     const std::size_t itemBytes,
@@ -1166,6 +1156,98 @@ bool AddWorkingBytes(
     std::size_t bytes = 0;
     return GetProduct(count, itemBytes, bytes)
         && GetSum(workingBytes, bytes, workingBytes);
+}
+
+SurfaceFailureReason GetBudgetEstimate(
+    const VolumeView& volume, const ResolvedParams& params,
+    const std::size_t maxWorkingBytes, const SurfaceCancelCheck& getCancelled,
+    const SurfaceProgressCallback& onProgress, std::size_t& requiredBytes,
+    std::string& message)
+{
+    const auto& dims = volume.geometry.dimensions;
+    if (dims[0] < 2 || dims[1] < 2 || dims[2] < 2) {
+        message = "Surface input has no three-dimensional cells.";
+        return SurfaceFailureReason::NoSurface;
+    }
+    const auto width = static_cast<std::size_t>(dims[0]);
+    std::size_t planeCount = 0, rowCount = 0;
+    const auto overflow = [&] {
+        requiredBytes = std::numeric_limits<std::size_t>::max();
+        message = "Surface topology workspace estimate overflows.";
+        return SurfaceFailureReason::BudgetExceeded;
+    };
+    // VTK 9.4.2 FlyingEdges: 每条 X 边一个 case 字节，每条 X 行六个 vtkIdType。
+    // 加上本次计数扫描的两张分类切片，先检查后分配，不创建整卷副本或网格。
+    requiredBytes = 1024U * 1024U;
+    if (!GetProduct(width, static_cast<std::size_t>(dims[1]), planeCount)
+        || !GetProduct(static_cast<std::size_t>(dims[1]), static_cast<std::size_t>(dims[2]), rowCount)
+        || !AddWorkingBytes(volume.voxelCount, sizeof(std::uint8_t), requiredBytes)
+        || !AddWorkingBytes(rowCount, 6U * sizeof(vtkIdType), requiredBytes)
+        || !AddWorkingBytes(planeCount, 2U * sizeof(std::uint8_t), requiredBytes)) return overflow();
+    const auto fixedBytes = requiredBytes;
+    const auto exceedsBudget = [&] {
+        message = "Surface topology working-set budget is exceeded: requiredBytes="
+            + std::to_string(requiredBytes) + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
+        return SurfaceFailureReason::BudgetExceeded;
+    };
+    if (requiredBytes > maxWorkingBytes) return exceedsBudget();
+
+    std::array<std::uint8_t, 256> triangleCounts{};
+    const auto* cases = vtkMarchingCubesTriangleCases::GetCases();
+    for (std::size_t i = 0; i < triangleCounts.size(); ++i) {
+        for (std::size_t edge = 0; edge < 15 && cases[i].edges[edge] >= 0; edge += 3) ++triangleCounts[i];
+    }
+    std::vector<std::uint8_t> previous(planeCount), current(planeCount);
+    std::size_t pointCount = 0, triangleCount = 0;
+    for (int z = 0; z < dims[2]; ++z) {
+        const auto offset = static_cast<std::size_t>(z) * planeCount;
+        for (std::size_t i = 0; i < planeCount; ++i) {
+            if ((i & 4095U) == 0 && GetCancelled(getCancelled)) {
+                message = "Surface topology counting was cancelled.";
+                return SurfaceFailureReason::Cancelled;
+            }
+            // 与 FlyingEdges 相同的 >= 分类；这里不剔除 validity，否则可能少算原始等值面。
+            current[i] = volume.scalars.GetValue(offset + i) >= params.initialIsoValue;
+            const bool hasX = i % width != 0;
+            const bool hasY = i >= width;
+            pointCount += hasX && current[i] != current[i - 1];
+            pointCount += hasY && current[i] != current[i - width];
+            pointCount += z != 0 && current[i] != previous[i];
+            if (z != 0 && hasX && hasY) {
+                // MC 顶点顺序：000,100,110,010,001,101,111,011。
+                const unsigned int code = previous[i - width - 1] | (previous[i - width] << 1)
+                    | (previous[i] << 2) | (previous[i - 1] << 3)
+                    | (current[i - width - 1] << 4) | (current[i - width] << 5)
+                    | (current[i] << 6) | (current[i - 1] << 7);
+                if (!GetSum(triangleCount, triangleCounts[code], triangleCount)) return overflow();
+            }
+            if (pointCount > std::numeric_limits<std::uint32_t>::max()) return overflow();
+        }
+        std::size_t boundedPoints = pointCount, boundedTriangles = triangleCount;
+        // 三角形与六个半空间的交最多九个顶点、七个三角形；
+        // 即使后置 clip 不共享新交点，也按该上界预留。
+        if (params.roiModelBounds
+            && (!AddWorkingBytes(triangleCount, 9U, boundedPoints)
+                || !GetProduct(triangleCount, 7U, boundedTriangles))) return overflow();
+        if (boundedPoints > std::numeric_limits<std::uint32_t>::max()) return overflow();
+        // 覆盖 VTK 输出、原始/分量/局部网格、法向、records 与 generation 扩容，
+        // 以及连通性/拓扑 map 的节点和分配器余量；不按体素数量臆测网格大小。
+        constexpr std::size_t pointBytes = 8U * sizeof(Point3) + 4U * sizeof(SurfacePointRecord)
+            + 12U * sizeof(vtkIdType) + sizeof(SurfaceObjectRecord) + 128U;
+        constexpr std::size_t triangleBytes = 8U * sizeof(Triangle) + 16U * sizeof(vtkIdType) + 256U;
+        requiredBytes = fixedBytes;
+        if (!AddWorkingBytes(boundedPoints, pointBytes, requiredBytes)
+            || !AddWorkingBytes(boundedTriangles, triangleBytes, requiredBytes)) return overflow();
+        if (requiredBytes > maxWorkingBytes) return exceedsBudget();
+        previous.swap(current);
+        SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
+            0.08 + 0.1 * static_cast<double>(z + 1) / dims[2]);
+    }
+    if (triangleCount == 0) {
+        message = "Surface initial ISO did not produce a surface.";
+        return SurfaceFailureReason::NoSurface;
+    }
+    return SurfaceFailureReason::None;
 }
 
 SurfaceFailureReason BuildInitialMesh(
@@ -1186,6 +1268,8 @@ SurfaceFailureReason BuildInitialMesh(
     surface->SetValue(0, params.initialIsoValue);
     surface->ComputeNormalsOff();
     surface->ComputeGradientsOff();
+    surface->ComputeScalarsOff();
+    surface->InterpolateAttributesOff();
 
     vtkNew<vtkTriangleFilter> triangleFilter;
     vtkNew<vtkBox> roiBox;
@@ -2177,9 +2261,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
 
     const bool isThresholdOnly = inputParams.method == SurfaceDeterminationMethod::AutomaticIso50;
     // 直方图、平滑值和峰候选均有固定上限，不套用完整网格的每体素预算。
-    if (isThresholdOnly) result.requiredBytes = 64U * 1024U;
-    if (maxWorkingBytes == 0
-        || (!isThresholdOnly && !GetBudgetEstimate(volume, result.requiredBytes))) {
+    result.requiredBytes = 64U * 1024U;
+    if (maxWorkingBytes == 0) {
         result.failureReason = SurfaceFailureReason::BudgetExceeded;
         result.message = "Surface working-set estimate overflows.";
         return result;
@@ -2223,6 +2306,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
         return result;
     }
 
+    result.failureReason = GetBudgetEstimate(volume, params, maxWorkingBytes,
+        getCancelled, onProgress, result.requiredBytes, result.message);
+    if (result.failureReason != SurfaceFailureReason::None) {
+        result.status = result.failureReason == SurfaceFailureReason::Cancelled
+            ? SurfaceResultStatus::Cancelled : SurfaceResultStatus::Failed;
+        return result;
+    }
     SendProgress(
         onProgress, SurfaceDeterminationStage::SeedExtraction, 0.20);
     std::vector<Point3> meshPoints;

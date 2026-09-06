@@ -560,6 +560,28 @@ bool FeatureTestControls::Impl::SelectArtifact(const bool restore) {
 #endif
 }
 
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+namespace {
+std::string SurfaceResultText(const SurfaceDeterminationResult& result) {
+    switch (result.failureReason) {
+    case SurfaceFailureReason::None: return "网格已生成";
+    case SurfaceFailureReason::InvalidSource: return "输入数据不可用";
+    case SurfaceFailureReason::InvalidGeometry: return "数据网格或几何信息无效";
+    case SurfaceFailureReason::UnsupportedScalar: return "不支持此体素数值类型";
+    case SurfaceFailureReason::InvalidRoi: return "局部范围无效";
+    case SurfaceFailureReason::ThresholdUnreliable: return "自动阈值不可靠，请调整阈值后重试";
+    case SurfaceFailureReason::NoSurface: return "当前阈值和范围内没有可用表面";
+    case SurfaceFailureReason::BudgetExceeded: return "表面网格及工作区超出内存预算";
+    case SurfaceFailureReason::Cancelled: return "网格提取已取消";
+    case SurfaceFailureReason::SourceChanged: return "输入数据已切换，网格结果已失效";
+    case SurfaceFailureReason::DisplayFailed: return "网格数据已生成，但显示失败";
+    case SurfaceFailureReason::InternalError: return "网格提取发生内部错误";
+    }
+    return "网格提取未完成";
+}
+}
+#endif
+
 bool FeatureTestControls::Impl::StartSurface(const bool local) {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
     const auto feature = bindings.surface.lock();
@@ -578,9 +600,10 @@ bool FeatureTestControls::Impl::StartSurface(const bool local) {
         const auto self = weak.lock();
         if (!self || !self->m_impl->context.host) return;
         auto& tools = *self->m_impl;
-        if (result.status == SurfaceResultStatus::Failed) tools.failure = result.message;
+        const auto message = SurfaceResultText(result);
+        if (result.status == SurfaceResultStatus::Failed) tools.failure = message;
         tools.Status("网格请求=" + std::to_string(result.requestId) + " 点数=" + std::to_string(result.pointCount)
-            + " | " + result.message);
+            + " | " + message);
     });
     if (admission.status != SurfaceAdmissionStatus::Accepted) return Fail("网格提取被拒绝");
     Status(std::string(local ? "局部自适应网格" : "全局预览网格") + " 已请求 | 等值面阈值=" + std::to_string(view->isoThreshold));

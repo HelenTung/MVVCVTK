@@ -697,9 +697,13 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         admission.status = PartAdmissionStatus::Unavailable;
         return admission;
     }
+    // 隐藏只移除 owner 线程上的显示绑定，不修改 worker 输入或候选数据。
+    // 裁切等显示联动必须能在编辑运行和候选待确认期间立即隐藏旧结果。
+    const bool isHideRequest = request.action == PartSegmentationAction::SetVisibility
+        && request.isVisible.has_value() && !*request.isVisible;
     if (m_isPublishing.load(std::memory_order_acquire)
         || (m_editCandidate && request.action != PartSegmentationAction::Stop
-            && request.action != PartSegmentationAction::Clear)) {
+            && request.action != PartSegmentationAction::Clear && !isHideRequest)) {
         admission.status = PartAdmissionStatus::Busy;
         return admission;
     }
@@ -793,7 +797,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
                 "Part stop was requested."));
         return admission;
     }
-    if (m_service->GetIsBusy() || m_activeRequestId != 0) {
+    if ((m_service->GetIsBusy() || m_activeRequestId != 0) && !isHideRequest) {
         admission.status = PartAdmissionStatus::Busy;
         return admission;
     }
@@ -2027,6 +2031,11 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
     if (!isVisible) {
         const bool isDisplayRemoved = RemoveDisplay();
         state.isOverlayVisible = false;
+        if (m_activeRequestId != 0 || m_editCandidate) {
+            // 完成、失败或取消会恢复请求前状态，也必须保留新的显示偏好。
+            const std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_stateBeforeRequest.isOverlayVisible = false;
+        }
         SetState(std::move(state));
         return isDisplayRemoved;
     }

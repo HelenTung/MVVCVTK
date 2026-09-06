@@ -150,7 +150,9 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
         RingLayout layout;
         const auto error = GetRingLayout(grid, *request.ring, layout);
         if (error != ArtifactError::None) return error;
-        if (request.ring->strength > 0.0) ringBytes = layout.native.workspace_bytes;
+        if (request.ring->strength > 0.0
+            && !AddBytes(ringBytes, layout.native.workspace_bytes, static_cast<std::size_t>(layout.workerCount)))
+            return ArtifactError::TooLarge;
     }
     std::size_t diffusionCount = 0;
     if (request.diffusion) {
@@ -164,7 +166,7 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
     const auto count = *GetGridVoxelCount(grid);
     const auto validityBytes = input.image->GetValidityMask() ? input.image->GetValidityMask()->size() : 0;
     if (!AddBytes(requiredBytes, input.image->GetValues()->size(), 1)
-        || !AddBytes(requiredBytes, count, 12) || !AddBytes(requiredBytes, validityBytes, 3)
+        || !AddBytes(requiredBytes, count, 2 * sizeof(float)) || !AddBytes(requiredBytes, validityBytes, 3)
         || !AddBytes(requiredBytes, ringBytes, 1) || !AddBytes(requiredBytes, diffusionCount, 24)
         || !AddBytes(requiredBytes, 1, 1024 * 1024)) return ArtifactError::TooLarge;
     for (const auto& mask : { input.processing, input.protection, input.material }) {
@@ -228,6 +230,8 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
         metadata.source = { ImageSourceKind::Memory, {}, values.size() * sizeof(float), {} };
         auto bytes = std::make_shared<std::vector<std::uint8_t>>(values.size() * sizeof(float));
         std::memcpy(bytes->data(), values.data(), bytes->size());
+        // 质量评估已结束；冻结 payload 前释放 float 工作卷，避免三份输出整卷重叠。
+        std::vector<float>{}.swap(values);
         result.publishBytes = bytes->size();
         if (!AddBytes(result.publishBytes, input.image->GetValidityMask() ? input.image->GetValidityMask()->size() : 0, 1)
             || !AddBytes(result.publishBytes, 1, 64 * 1024)) { result.error = ArtifactError::TooLarge; return result; }

@@ -549,16 +549,19 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         }
 
         std::size_t historyBytes = 0;
+        // 编辑的 retainedBytes 已包含 Host 统计的全部历史（含 previous）；
+        // 普通分割只传旧 surface，因此仅普通分割需要在此追加 previous。
         if (!GetHistoryBytes(job.previous, historyBytes)
-            || job.retainedSurfaceBytes
-                > std::numeric_limits<std::size_t>::max() - historyBytes) {
+            || (!job.edit && job.retainedSurfaceBytes
+                > std::numeric_limits<std::size_t>::max() - historyBytes)) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
             candidate.message = BuildBudgetMessage(
                 candidate.requiredBytes, job.maxWorkingBytes);
             return candidate;
         }
-        historyBytes += job.retainedSurfaceBytes;
+        historyBytes = job.edit ? std::max(historyBytes, job.retainedSurfaceBytes)
+            : historyBytes + job.retainedSurfaceBytes;
         if (historyBytes >= job.maxWorkingBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.requiredBytes = historyBytes;
@@ -701,7 +704,9 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         candidate.direction = volume.direction;
         // 旧标签/目录/表面和新目录在表面提取期间仍存活，先从预算中保留。
         std::size_t catalogBytes = 0;
-        if (!GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
+        std::size_t labelBytes = 0;
+        if (!GetProduct(candidate.labels->size(), sizeof(PartLabelId), labelBytes)
+            || !GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
             || catalogBytes > std::numeric_limits<std::size_t>::max() - historyBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
@@ -712,6 +717,13 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
         const std::size_t retainedBytes = historyBytes + catalogBytes;
+        // 撤销/重做复用 Host 历史中的不可变标签；表面提取器自身也会
+        // 计入这份借用输入，因此从外层保留量中扣除一次，避免重复计费。
+        const bool reusesRetainedLabels = job.edit && job.edit->restoredPayload
+            && candidate.labels == job.edit->restoredPayload->GetLabels()
+            && labelBytes <= historyBytes;
+        const std::size_t surfaceRetainedBytes = reusesRetainedLabels
+            ? retainedBytes - labelBytes : retainedBytes;
         if (retainedBytes >= job.maxWorkingBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.requiredBytes = std::max(candidate.requiredBytes, retainedBytes);
@@ -740,7 +752,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
                 bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], extent[axis * 2 + 1]);
             }
         }
-        surfaceRequest.maxWorkingBytes = job.maxWorkingBytes - retainedBytes;
+        surfaceRequest.maxWorkingBytes = job.maxWorkingBytes - surfaceRetainedBytes;
         const auto surfaceStarted = std::chrono::steady_clock::now();
         auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
             surfaceRequest,
@@ -750,9 +762,9 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             });
         const auto surfaceMs = elapsedMs(surfaceStarted);
         const auto systemPeakBytes = surfaceResult.requiredBytes
-            > std::numeric_limits<std::size_t>::max() - retainedBytes
+            > std::numeric_limits<std::size_t>::max() - surfaceRetainedBytes
             ? std::numeric_limits<std::size_t>::max()
-            : surfaceResult.requiredBytes + retainedBytes;
+            : surfaceResult.requiredBytes + surfaceRetainedBytes;
         candidate.requiredBytes = std::max(candidate.requiredBytes, systemPeakBytes);
         if (surfaceResult.failureReason != PartFailureReason::None
             || !surfaceResult.product
@@ -783,18 +795,19 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         }
         candidate.surface = std::move(surfaceResult.product);
         candidate.surfaceBytes = candidate.surface->actualBytes;
-        // 冻结期间只有源标签和一个不可变副本共存；VTK 私有显示视图借用冻结数组。
+        // 新编辑冻结时有候选标签和一个不可变副本；历史恢复直接复用 payload，
+        // 不产生新的整卷标签。VTK 私有显示视图始终借用冻结数组。
         std::size_t freezeBytes = retainedBytes;
-        std::size_t labelBytes = 0;
+        std::size_t addedLabelBytes = 0;
         const auto limit = std::numeric_limits<std::size_t>::max();
-        if (!GetProduct(candidate.labels->size(), sizeof(PartLabelId), labelBytes)
-            || labelBytes > (limit - freezeBytes) / 2U
-            || candidate.surfaceBytes > limit - freezeBytes - labelBytes * 2U) {
+        if (!GetProduct(labelBytes, reusesRetainedLabels ? 0U : 2U, addedLabelBytes)
+            || addedLabelBytes > limit - freezeBytes
+            || candidate.surfaceBytes > limit - freezeBytes - addedLabelBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.message = "Part label publication size overflows.";
             return candidate;
         }
-        freezeBytes += labelBytes * 2U + candidate.surfaceBytes;
+        freezeBytes += addedLabelBytes + candidate.surfaceBytes;
         candidate.requiredBytes = std::max(candidate.requiredBytes, freezeBytes);
         if (candidate.requiredBytes > job.maxWorkingBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;

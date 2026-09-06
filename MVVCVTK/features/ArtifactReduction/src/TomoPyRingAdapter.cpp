@@ -1,8 +1,11 @@
 #include "TomoPyRingAdapter.h"
+#include <vtkSMPTools.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <vector>
 
 namespace ArtifactReduction {
@@ -32,9 +35,12 @@ ArtifactError GetRingLayout(const GridGeometry3D& grid,
     const auto v = layout.planeAxes[1];
     if (std::abs(grid.spacing[u] - grid.spacing[v]) > 1e-6 * std::max(grid.spacing[u], grid.spacing[v]))
         return ArtifactError::UnsupportedGeometry;
-    return mvvcvtk_tomopy_get_layout(grid.dimensions[u], grid.dimensions[v], layout.center[0], layout.center[1],
-        params.angularMin, params.ringWidth, static_cast<int>(params.mode), &layout.native) == MVVCVTK_TOMOPY_OK
-        ? ArtifactError::None : ArtifactError::UnsupportedGeometry;
+    if (mvvcvtk_tomopy_get_layout(grid.dimensions[u], grid.dimensions[v], layout.center[0], layout.center[1],
+        params.angularMin, params.ringWidth, static_cast<int>(params.mode), &layout.native) != MVVCVTK_TOMOPY_OK)
+        return ArtifactError::UnsupportedGeometry;
+    // 固定并行上限，预检与执行一致，不依赖其他功能对全局 SMP 线程数的设置。
+    layout.workerCount = std::min(8, grid.dimensions[params.axis]);
+    return ArtifactError::None;
 }
 
 ArtifactError BuildRingCorrection(const GridGeometry3D& grid,
@@ -46,7 +52,15 @@ ArtifactError BuildRingCorrection(const GridGeometry3D& grid,
     if (const auto error = GetRingLayout(grid, params, layout); error != ArtifactError::None) return error;
     const int width = grid.dimensions[layout.planeAxes[0]];
     const int height = grid.dimensions[layout.planeAxes[1]];
-    std::vector<float> slice(static_cast<std::size_t>(width) * height);
+    struct WorkerResult final {
+        ArtifactQuality quality;
+        ArtifactError error = ArtifactError::None;
+        double squaredCorrection = 0.0;
+        double compensation = 0.0;
+    };
+    std::vector<WorkerResult> workers(static_cast<std::size_t>(layout.workerCount));
+    std::atomic<bool> stopped{false};
+    std::atomic<unsigned int> completed{0};
     const auto indexOf = [&](int x, int y, int s) {
         std::array<int, 3> position{};
         position[layout.planeAxes[0]] = x;
@@ -54,40 +68,79 @@ ArtifactError BuildRingCorrection(const GridGeometry3D& grid,
         position[params.axis] = s;
         return (static_cast<std::size_t>(position[2]) * grid.dimensions[1] + position[1]) * grid.dimensions[0] + position[0];
     };
-    for (int s = 0; s < grid.dimensions[params.axis]; ++s) {
-        if (const auto error = control.GetError(); error != ArtifactError::None) return error;
-        for (int y = 0; y < height; ++y)
-            for (int x = 0; x < width; ++x) slice[static_cast<std::size_t>(y) * width + x] = values[indexOf(x, y, s)];
-        control.progress.store(1 + static_cast<unsigned int>(39.0 * s / grid.dimensions[params.axis]), std::memory_order_relaxed);
-        const auto status = mvvcvtk_tomopy_remove_ring(slice.data(), width, height, layout.center[0], layout.center[1],
-            static_cast<float>(params.threshMax), static_cast<float>(params.threshMin), static_cast<float>(params.threshold),
-            params.angularMin, params.ringWidth, static_cast<int>(params.mode), nullptr);
-        if (status != MVVCVTK_TOMOPY_OK) return status == MVVCVTK_TOMOPY_ALLOCATION_FAILED ? ArtifactError::TooLarge : ArtifactError::KernelFailed;
-        if (const auto error = control.GetError(); error != ArtifactError::None) return error;
-        quality.ringSampleCount += static_cast<std::size_t>(layout.native.polar_width) * layout.native.polar_height;
-        quality.ringRadiusCount += layout.native.polar_width;
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const auto index = indexOf(x, y, s);
-                const double oldValue = values[index];
-                const double delta = static_cast<double>(slice[static_cast<std::size_t>(y) * width + x]) - oldValue;
-                const double correction = params.strength * std::clamp(delta, -params.maxCorrection, params.maxCorrection);
-                const double candidate = oldValue + correction;
-                if (!std::isfinite(candidate) || std::abs(candidate) > std::numeric_limits<float>::max()) {
-                    ++quality.guardedCount;
-                    continue;
-                }
-                values[index] = static_cast<float>(candidate);
-                if (values[index] != oldValue) {
-                    ++quality.ringVoxelCount;
-                    const double ratio = 1.0 / static_cast<double>(quality.ringVoxelCount);
-                    quality.ringCorrectionRms = std::hypot(quality.ringCorrectionRms * std::sqrt(1.0 - ratio),
-                        (values[index] - oldValue) * std::sqrt(ratio));
+    vtkSMPTools::For(0, layout.workerCount, 1, [&](vtkIdType first, vtkIdType last) {
+        for (auto workerIndex = first; workerIndex < last; ++workerIndex) {
+            auto& worker = workers[static_cast<std::size_t>(workerIndex)];
+            auto& local = worker.quality;
+            const auto fail = [&](ArtifactError error) {
+                worker.error = error;
+                stopped.store(true, std::memory_order_relaxed);
+            };
+            try {
+                std::vector<float> slice(static_cast<std::size_t>(width) * height);
+                for (int s = static_cast<int>(workerIndex); s < grid.dimensions[params.axis]; s += layout.workerCount) {
+                    if (stopped.load(std::memory_order_relaxed)) break;
+                    if (const auto error = control.GetError(); error != ArtifactError::None) { fail(error); break; }
+                    for (int y = 0; y < height; ++y)
+                        for (int x = 0; x < width; ++x) slice[static_cast<std::size_t>(y) * width + x] = values[indexOf(x, y, s)];
+                    const auto status = mvvcvtk_tomopy_remove_ring(slice.data(), width, height, layout.center[0], layout.center[1],
+                        static_cast<float>(params.threshMax), static_cast<float>(params.threshMin), static_cast<float>(params.threshold),
+                        params.angularMin, params.ringWidth, static_cast<int>(params.mode), nullptr);
+                    if (status != MVVCVTK_TOMOPY_OK) {
+                        fail(status == MVVCVTK_TOMOPY_ALLOCATION_FAILED ? ArtifactError::TooLarge : ArtifactError::KernelFailed); break;
+                    }
+                    if (const auto error = control.GetError(); error != ArtifactError::None) { fail(error); break; }
+                    local.ringSampleCount += static_cast<std::size_t>(layout.native.polar_width) * layout.native.polar_height;
+                    local.ringRadiusCount += layout.native.polar_width;
+                    for (int y = 0; y < height; ++y) {
+                        for (int x = 0; x < width; ++x) {
+                            const auto index = indexOf(x, y, s);
+                            const double oldValue = values[index];
+                            const double delta = static_cast<double>(slice[static_cast<std::size_t>(y) * width + x]) - oldValue;
+                            const double correction = params.strength * std::clamp(delta, -params.maxCorrection, params.maxCorrection);
+                            const double candidate = oldValue + correction;
+                            if (!std::isfinite(candidate) || std::abs(candidate) > std::numeric_limits<float>::max()) {
+                                ++local.guardedCount;
+                                continue;
+                            }
+                            values[index] = static_cast<float>(candidate);
+                            if (values[index] != oldValue) {
+                                ++local.ringVoxelCount;
+                                const double change = values[index] - oldValue;
+                                // float32 差值平方及网格上限内的总和均在 double 范围内。
+                                // 补偿求和避免每个变化体素都执行 sqrt/hypot。
+                                const double term = change * change - worker.compensation;
+                                const double sum = worker.squaredCorrection + term;
+                                worker.compensation = (sum - worker.squaredCorrection) - term;
+                                worker.squaredCorrection = sum;
+                            }
+                        }
+                    }
+                    const auto done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+                    const auto progress = static_cast<unsigned int>(40.0 * done / grid.dimensions[params.axis]);
+                    auto prior = control.progress.load(std::memory_order_relaxed);
+                    while (prior < progress && !control.progress.compare_exchange_weak(prior, progress, std::memory_order_relaxed)) {}
                 }
             }
+            catch (const std::bad_alloc&) { fail(ArtifactError::TooLarge); }
+            catch (...) { fail(ArtifactError::KernelFailed); }
         }
-        control.progress.store(static_cast<unsigned int>(40.0 * (s + 1) / grid.dimensions[params.axis]), std::memory_order_relaxed);
+    });
+    // 固定 worker 顺序归并统计；不同切片写回的体素互不重叠。
+    for (const auto& worker : workers) {
+        if (worker.error != ArtifactError::None) return worker.error;
+        const auto& local = worker.quality;
+        quality.ringSampleCount += local.ringSampleCount;
+        quality.ringRadiusCount += local.ringRadiusCount;
+        quality.guardedCount += local.guardedCount;
+        const auto total = quality.ringVoxelCount + local.ringVoxelCount;
+        if (total != 0) {
+            quality.ringCorrectionRms = std::hypot(
+                quality.ringCorrectionRms * std::sqrt(static_cast<double>(quality.ringVoxelCount) / total),
+                std::sqrt(worker.squaredCorrection / static_cast<double>(total)));
+        }
+        quality.ringVoxelCount = total;
     }
-    return ArtifactError::None;
+    return control.GetError();
 }
 } // namespace ArtifactReduction
