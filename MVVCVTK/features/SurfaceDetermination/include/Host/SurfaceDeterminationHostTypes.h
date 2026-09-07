@@ -20,6 +20,12 @@ enum class SurfaceDeterminationMethod : std::uint8_t {
     AutomaticIso50
 };
 
+enum class SurfaceTaskPurpose : std::uint8_t {
+    Estimate,
+    Preview,
+    Determine
+};
+
 enum class SurfaceComponentSelection : std::uint8_t {
     Largest,
     Seeded,
@@ -102,6 +108,7 @@ struct SurfaceObjectRecord final {
     std::uint64_t firstTriangle = 0;
     std::uint64_t triangleCount = 0;
     std::array<double, 6> boundsModel{};
+    double validAreaRatio = 0.0;
     bool isClosed = false;
     bool isManifold = false;
     bool isTruncated = false;
@@ -121,21 +128,6 @@ struct SurfaceIsoEstimate final {
     std::uint64_t sampleCount = 0;
 };
 
-struct SurfaceGenerationSnapshot final {
-    DataRevisionRef dataRevision;
-    DataRevisionRef meshRevision;
-    DataRevisionRef sourceRevision;
-    std::uint64_t resultRevision = 0;
-    std::uint64_t parameterFingerprint = 0;
-    std::uint32_t algorithmRevision = 0;
-    SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::LocalAdaptiveIso50;
-    std::shared_ptr<const std::vector<SurfacePointRecord>> points;
-    std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
-    std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
-    std::optional<SurfaceIsoEstimate> isoEstimate;
-};
-
 struct SurfaceDeterminationStartParams final {
     HostViewTargets targetViews;
     SurfaceDeterminationMethod method =
@@ -152,6 +144,42 @@ struct SurfaceDeterminationStartParams final {
     // 闭合初始表面按体积/体素体积估计；开放/截断表面不伪造 voxel count。
     std::uint64_t minimumObjectVoxels = 1;
     double minimumContrast = 0.0;
+    // 省略只在接纳时解析主卷，计算不再查询当前选择。
+    std::optional<DataRevisionRef> sourceVolume;
+    // 省略沿用方法的既有用途：Automatic→Estimate、Global→Preview。
+    std::optional<SurfaceTaskPurpose> purpose;
+    std::string resultScope;
+    DataPublishPolicy sourcePolicy = DataPublishPolicy::RequireCurrentInputs;
+    // 调用方对几何长度单位的声明；空表示未知，绝不借用灰度单位。
+    std::string modelUnit;
+};
+
+struct SurfaceGenerationSnapshot final {
+    // Preview 的两个图引用为空；requestId 标识临时候选。
+    std::uint64_t requestId = 0;
+    SurfaceTaskPurpose purpose = SurfaceTaskPurpose::Determine;
+    std::string resultScope;
+    std::string coordinateFrame;
+    std::string modelUnit;
+    SurfaceDeterminationStartParams requestedParams;
+    SurfaceDeterminationStartParams resolvedParams;
+    std::string canonicalParameters;
+    // 仅便利主卷入口保存该期望；显式输入不绑定当前主卷。
+    std::optional<DataBinding> sourceBinding;
+    DataRevisionRef dataRevision;
+    DataRevisionRef meshRevision;
+    DataRevisionRef sourceRevision;
+    std::uint64_t resultRevision = 0;
+    std::uint64_t parameterFingerprint = 0;
+    std::uint32_t algorithmRevision = 0;
+    SurfaceDeterminationMethod method =
+        SurfaceDeterminationMethod::LocalAdaptiveIso50;
+    std::shared_ptr<const std::vector<SurfacePointRecord>> points;
+    std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
+    std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
+    // 每三角形一个值；仅证明本 Feature 明确检查的有效性条件。
+    std::shared_ptr<const std::vector<std::uint8_t>> triangleValidity;
 };
 
 struct SurfaceDeterminationConfig final {
@@ -165,7 +193,8 @@ enum class SurfaceDeterminationAction : std::uint8_t {
     Start,
     Stop,
     SetVisibility,
-    Clear
+    Clear,
+    ClearPreview
 };
 
 struct SurfaceDeterminationRequest final {
@@ -207,7 +236,8 @@ enum class SurfaceFailureReason : std::uint8_t {
     Cancelled,
     SourceChanged,
     DisplayFailed,
-    InternalError
+    InternalError,
+    PublishFailed
 };
 
 enum class SurfaceDeterminationStage : std::uint8_t {
@@ -226,6 +256,12 @@ enum class SurfaceDeterminationStage : std::uint8_t {
 };
 
 struct SurfaceDeterminationResult final {
+    SurfaceTaskPurpose purpose = SurfaceTaskPurpose::Determine;
+    std::string resultScope;
+    DataRevisionRef dataRevision;
+    DataRevisionRef meshRevision;
+    bool isPublished = false;
+    bool isActivated = false;
     std::uint64_t requestId = 0;
     SurfaceResultStatus status = SurfaceResultStatus::Failed;
     SurfaceFailureReason failureReason = SurfaceFailureReason::InternalError;
@@ -242,6 +278,9 @@ using SurfaceDeterminationCallback =
     std::function<void(SurfaceDeterminationResult)>;
 
 struct SurfaceDeterminationState final {
+    SurfaceTaskPurpose purpose = SurfaceTaskPurpose::Determine;
+    std::string resultScope;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
     SurfaceDeterminationStage stage = SurfaceDeterminationStage::Idle;
     SurfaceFailureReason failureReason = SurfaceFailureReason::None;
     std::uint64_t requestId = 0;

@@ -4,3 +4,5 @@ int GetSurfaceAlgorithmFailCount();
 int GetSurfaceGeometryFailCount();
 int GetSurfaceLifecycleFailCount();
 int GetSurfaceDisplayFailCount();
+
+int GetSurfaceContractFailCount();

@@ -44,7 +44,8 @@ private:
 class SurfaceGenerationStore final {
 public:
     void SetDataPort(std::weak_ptr<TrustedDataReadPort> data);
-    std::shared_ptr<const SurfaceGenerationSnapshot> GetCurrentGeneration() const;
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetCurrentGeneration(std::string_view scope = {}) const;
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetGeneration(DataRevisionRef revision) const;
     void SetGeneration(
         DataSnapshot generation);
     std::shared_ptr<const SurfaceGenerationSnapshot>

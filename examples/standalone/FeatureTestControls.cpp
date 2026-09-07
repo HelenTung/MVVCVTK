@@ -169,7 +169,7 @@ void PrintFeatureTestHelp() {
         << "  K：提取全局等值面预览网格；Shift+K：使用局部自适应 ISO50 方法细化网格。\n"
         << "  “局部自适应”是算法方式；此快捷键仍使用当前输入，没有另外指定鼠标选框范围。\n"
         << "  Alt+K：请求取消；成功后终端显示网格点数，Ctrl+K 可查看网格版本。\n"
-        << "  K 的“预览网格”成功后即成为表面结果，无需使用零件编辑的 Ctrl+F7 确认。\n"
+        << "  K 只生成调参预览；Shift+K 生成供下游读取的正式表面。\n"
         << "  原 F12 / Shift+F12 / Alt+F12 / Ctrl+F12 保留兼容；Visual Studio 调试时请使用 K 组合。\n"
         << "  Windows 会将实体 F12 用于调试中断，可能停在 ntdll 并提示缺少 ntdll.pdb；这是系统符号提示。\n"
         << "  若在这种中断处暂停，回到 VS 按 F5 继续，再激活 main 视图使用 K；其他异常应检查调用堆栈。\n";
@@ -189,7 +189,7 @@ void PrintFeatureTestHelp() {
 #endif
 #if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
     std::cout << "\n【对齐验证】\n"
-        << "  前置：先按 K 并等待生成当前输入的有效网格；切换输入后要重新提取网格。\n"
+        << "  前置：先按 Shift+K 并等待生成当前输入的正式网格；切换输入后要重新提取网格。\n"
         << "  F11：参考点系统对齐验证；Shift+F11：最佳拟合对齐验证。\n"
         << "  Ctrl+F11：隐藏/显示对齐结果；Alt+F11：请求取消对齐任务；Ctrl+Shift+F11：输出报告数值。\n"
         << "  此入口从当前网格采样，并生成绕 Z 轴旋转 10 度、平移 (2,-3,4) 的内置参考。\n"
@@ -688,6 +688,7 @@ std::string SurfaceResultText(const SurfaceDeterminationResult& result) {
     case SurfaceFailureReason::Cancelled: return "网格提取已取消";
     case SurfaceFailureReason::SourceChanged: return "输入数据已切换，网格结果已失效";
     case SurfaceFailureReason::DisplayFailed: return "网格数据已生成，但显示失败";
+    case SurfaceFailureReason::PublishFailed: return "网格候选未能发布，请重新执行";
     case SurfaceFailureReason::InternalError: return "网格提取发生内部错误";
     }
     return "网格提取未完成";
@@ -705,6 +706,7 @@ bool FeatureTestControls::Impl::StartSurface(const bool local) {
     SurfaceDeterminationStartParams params;
     params.targetViews.viewIds = {primaryView};
     params.method = local ? SurfaceDeterminationMethod::LocalAdaptiveIso50 : SurfaceDeterminationMethod::GlobalIsoPreview;
+    params.sourceVolume = view->dataRevision;
     params.initialIsoValue = view->isoThreshold;
     SurfaceDeterminationRequest request;
     request.action = SurfaceDeterminationAction::Start;
@@ -733,10 +735,10 @@ bool FeatureTestControls::Impl::StartAlignment(const bool bestFit) {
     if (!feature || !surface || !context.data) return Fail("对齐或表面确定功能不可用");
     if (feature->GetState().isBusy) return Fail("对齐任务正在运行；按 Alt+F11 取消");
     const auto generation = surface->GetSurfaceSnapshot();
-    if (!generation || !GetDataRevisionRefValid(generation->meshRevision)) return Fail("请先按 K 并等待网格生成");
+    if (!generation || !GetDataRevisionRefValid(generation->meshRevision)) return Fail("请先按 Shift+K 并等待正式表面生成");
     const auto graph = context.data->GetDataGraph();
     const auto primary = context.data->GetDataBinding(graph, primaryVolumeBinding);
-    if (!primary || primary->target != generation->sourceRevision) return Fail("网格源数据已过期；请按 K 提取当前网格");
+    if (!primary || primary->target != generation->sourceRevision) return Fail("网格源数据已过期；请按 Shift+K 提取当前正式表面");
     const auto meshData = context.data->GetData(graph, generation->meshRevision);
     const auto* mesh = meshData ? dynamic_cast<const SurfaceMeshPayload*>(meshData->payload.get()) : nullptr;
     if (!mesh || mesh->GetVertices().size() < 9) return Fail("网格几何数据不足，无法进行参考验证");
@@ -1065,7 +1067,7 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
     steps.push_back({"工具：丢弃涂绘", {0,"F7",false,true}, [partCount] { return partCount(1); }});
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-    steps.push_back({"工具：表面网格", {'k'}, [weak = m_impl->bindings.surface] {
+    steps.push_back({"工具：正式表面", {'k', {}, true}, [weak = m_impl->bindings.surface] {
         const auto feature = weak.lock();
         const auto result = feature ? feature->GetSurfaceSnapshot() : nullptr;
         return result && GetDataRevisionRefValid(result->meshRevision) && result->points && !result->points->empty();

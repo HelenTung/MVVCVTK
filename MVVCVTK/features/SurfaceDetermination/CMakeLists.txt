@@ -3,6 +3,8 @@ set(MVVCVTK_SURFACE_API_HEADERS
     include/Host/SurfaceDeterminationHostTypes.h
 )
 set(MVVCVTK_SURFACE_SOURCES
+    src/SurfaceContracts.h
+    src/SurfaceContracts.cpp
     src/SurfaceDeterminationAlgorithm.h
     src/SurfaceDeterminationAlgorithm.cpp
     src/SurfaceDeterminationHostFeature.cpp

@@ -1,4 +1,5 @@
 #include "SurfaceDeterminationAlgorithm.h"
+#include "SurfaceContracts.h"
 #include "Data/DataPayloads.h"
 
 #include <vtkBox.h>
@@ -2097,7 +2098,6 @@ SurfaceMetricValidity GetVolumeValidity(
     const bool isTruncated,
     const bool hasQuality)
 {
-    if (!hasQuality) return SurfaceMetricValidity::InsufficientQuality;
     if (topology.nonManifoldEdgeCount != 0) {
         return SurfaceMetricValidity::NonManifold;
     }
@@ -2109,6 +2109,7 @@ SurfaceMetricValidity GetVolumeValidity(
         || topology.degenerateTriangleCount != 0) {
         return SurfaceMetricValidity::NonManifold;
     }
+    if (!hasQuality || !std::isfinite(topology.signedVolume)) return SurfaceMetricValidity::InsufficientQuality;
     return SurfaceMetricValidity::Valid;
 }
 
@@ -2169,7 +2170,7 @@ void AddObjectResult(
     };
     for (SurfacePointRecord& record : records) {
         record.objectIndex = objectIndex;
-        if (!GetFatalPointFlags(record.flags)) ++acceptedCount;
+        if (SurfaceContract::GetPointValid(record, params.method)) ++acceptedCount;
         if (GetSurfaceFlag(
                 record.flags, SurfacePointFlags::LowContrast)) {
             ++lowContrastCount;
@@ -2194,10 +2195,28 @@ void AddObjectResult(
                 bounds[axis * 2 + 1], record.positionModel[axis]);
         }
     }
-    const bool hasQuality = !records.empty()
-        && static_cast<double>(acceptedCount)
-            / static_cast<double>(records.size())
-            >= qualityRatioThreshold;
+    double validArea = 0.0;
+    double totalArea = 0.0;
+    bool hasCompleteSupport = !triangles.empty();
+    for (const auto& triangle : triangles) {
+        const auto& ids = triangle.vertices;
+        const auto edgeA = Subtract(records[ids[1]].positionModel, records[ids[0]].positionModel);
+        const auto edgeB = Subtract(records[ids[2]].positionModel, records[ids[0]].positionModel);
+        const double area = 0.5 * GetLength(Cross(edgeA, edgeB));
+        bool isValid = std::isfinite(area) && area > geometryEpsilon;
+        for (const auto id : ids) {
+            isValid = isValid && SurfaceContract::GetPointValid(records[id], params.method)
+                && !GetPointAtDataBoundary(volume.geometry, records[id].positionModel, boundaryTolerance)
+                && !GetPointAtRoiBoundary(params.roiModelBounds, records[id].positionModel, boundaryTolerance);
+        }
+        if (std::isfinite(area)) { totalArea += area; if (isValid) validArea += area; }
+        hasCompleteSupport = hasCompleteSupport && isValid;
+        result.triangleValidity.push_back(isValid ? 1 : 0);
+    }
+    const bool hasFiniteArea = std::isfinite(totalArea) && std::isfinite(validArea);
+    const double validAreaRatio = hasFiniteArea && totalArea > 0.0 ? validArea / totalArea : 0.0;
+    hasCompleteSupport = hasCompleteSupport && hasFiniteArea;
+    const bool hasQuality = hasFiniteArea && validAreaRatio >= qualityRatioThreshold;
 
     SurfaceObjectRecord object;
     object.objectIndex = objectIndex;
@@ -2206,6 +2225,7 @@ void AddObjectResult(
     object.firstTriangle = result.triangleIndices.size() / 3U;
     object.triangleCount = triangles.size();
     object.boundsModel = bounds;
+    object.validAreaRatio = validAreaRatio;
     object.isClosed = topology.boundaryEdgeCount == 0;
     object.isManifold = topology.nonManifoldEdgeCount == 0
         && topology.degenerateTriangleCount == 0;
@@ -2215,10 +2235,10 @@ void AddObjectResult(
         topology, isTruncated, hasQuality);
     if (object.areaValidity != SurfaceMetricValidity::InsufficientQuality
         && object.areaValidity != SurfaceMetricValidity::NonManifold) {
-        object.areaModelUnit2 = topology.area;
+        object.areaModelUnit2 = validArea;
     }
     object.volumeValidity = GetVolumeValidity(
-        topology, isTruncated, hasQuality);
+        topology, isTruncated, hasCompleteSupport);
     if (object.volumeValidity == SurfaceMetricValidity::Valid) {
         object.volumeModelUnit3 = std::abs(topology.signedVolume);
     }
@@ -2286,6 +2306,15 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
             : SurfaceResultStatus::Failed;
         return result;
     }
+    result.resolvedParams = inputParams;
+    result.resolvedParams.targetViews = {};
+    result.resolvedParams.purpose = SurfaceContract::GetPurpose(inputParams);
+    result.resolvedParams.sourceVolume = result.sourceRevision;
+    result.resolvedParams.initialIsoValue = params.initialIsoValue;
+    result.resolvedParams.profileHalfLengthModel = params.profileHalfLengthModel;
+    result.resolvedParams.profileSampleStepModel = params.profileSampleStepModel;
+    result.resolvedParams.maximumOffsetModel = params.maximumOffsetModel;
+    result.resolvedParams.profileSmoothingSigmaModel = params.profileSmoothingSigmaModel;
     result.initialIsoValue = params.initialIsoValue;
     result.isoEstimate = params.isoEstimate;
     result.parameterFingerprint = GetFingerprint(params);
@@ -2365,7 +2394,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
             + sizeof(std::uint32_t);
         constexpr std::size_t triangleWorkspaceBytes =
             sizeof(Triangle) * 2U
-            + sizeof(std::uint32_t) * 3U;
+            + sizeof(std::uint32_t) * 3U + sizeof(std::uint8_t);
         if (!AddWorkingBytes(
                 component.sourcePointIds.size(),
                 pointWorkspaceBytes,

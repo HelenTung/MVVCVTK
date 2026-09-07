@@ -1,6 +1,7 @@
 add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
+    SurfaceDeterminationContractTests.cpp
     SurfaceDeterminationDisplayTests.cpp
     SurfaceDeterminationGeometryTests.cpp
     SurfaceDeterminationLifecycleTests.cpp

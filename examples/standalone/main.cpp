@@ -1435,9 +1435,8 @@ namespace {
             m_surfaceProgress = progress;
             std::ostringstream status;
             status << "表面确定：" << GetMethodName(m_surfaceRunningMethod) << " | " << progress << "%";
-            const auto generation = feature->GetSurfaceSnapshot();
-            if (generation && generation->isoEstimate)
-                status << " | 等值面阈值=" << generation->isoEstimate->isoValue;
+            if (state.isoEstimate)
+                status << " | 等值面阈值=" << state.isoEstimate->isoValue;
             else if (m_surfaceRunningMethod != SurfaceDeterminationMethod::AutomaticIso50)
                 status << " | 点数=" << state.pointCount << " | 对象数=" << state.objectCount;
             if (!state.errorMessage.empty()) status << " | " << state.errorMessage;
@@ -2735,11 +2734,11 @@ int main(int argc, char* argv[])
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
-            const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
+            const auto state = surfaceFeature->GetState();
             const auto view = session.GetRenderViewState(primaryTarget);
-            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
-                && snapshot && snapshot->isoEstimate && view
-                && view->isoThreshold == snapshot->isoEstimate->isoValue;
+            return state.stage == SurfaceDeterminationStage::Ready
+                && state.purpose == SurfaceTaskPurpose::Estimate && state.isoEstimate && view
+                && view->isoThreshold == state.isoEstimate->isoValue;
         });
         demoAudit->AddStep("清除表面估计", {'u', {}, true}, [surfaceFeature] { return !surfaceFeature->GetSurfaceSnapshot(); });
 #endif
@@ -2790,11 +2789,11 @@ int main(int argc, char* argv[])
         demoAudit->AddStep("真实图像", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
-            const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
+            const auto state = surfaceFeature->GetState();
             const auto view = session.GetRenderViewState(primaryTarget);
-            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
-                && snapshot && snapshot->isoEstimate && view
-                && view->isoThreshold == snapshot->isoEstimate->isoValue;
+            return state.stage == SurfaceDeterminationStage::Ready
+                && state.purpose == SurfaceTaskPurpose::Estimate && state.isoEstimate && view
+                && view->isoThreshold == state.isoEstimate->isoValue;
         });
 #endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)

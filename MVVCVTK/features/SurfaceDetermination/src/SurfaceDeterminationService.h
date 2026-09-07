@@ -6,6 +6,7 @@
 #include <functional>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -67,7 +68,9 @@ private:
     mutable std::mutex m_mutex;
     std::condition_variable m_workReady;
     std::condition_variable m_workerExited;
-    std::optional<Job> m_pendingJob;
+    std::deque<Job> m_pendingJobs;
+    std::string m_activeScope;
+    SurfaceTaskPurpose m_activePurpose = SurfaceTaskPurpose::Determine;
     std::vector<SurfaceJobComplete> m_complete;
     std::thread m_worker;
     std::shared_ptr<std::atomic<bool>> m_activeCancel;

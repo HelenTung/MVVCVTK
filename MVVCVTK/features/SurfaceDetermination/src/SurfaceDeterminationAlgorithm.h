@@ -23,7 +23,9 @@ struct SurfaceAlgorithmResult final {
     std::string message;
     DataRevisionRef sourceRevision;
     std::uint64_t parameterFingerprint = 0;
-    std::uint32_t algorithmRevision = 1;
+    std::uint32_t algorithmRevision = 2;
+    SurfaceDeterminationStartParams resolvedParams;
+    std::vector<std::uint8_t> triangleValidity;
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::LocalAdaptiveIso50;
     double initialIsoValue = 0.0;
