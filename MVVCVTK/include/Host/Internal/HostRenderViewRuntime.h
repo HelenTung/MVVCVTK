@@ -28,7 +28,8 @@ struct HostRenderViewRuntime final {
     bool isAvailable = false;
     HostRenderViewState BuildViewState() const;
     HostRenderViewState BuildViewState(const AppViewState& appState) const;
-    HostSceneViewState BuildSceneViewState(std::vector<std::string> featureIds) const;
+    HostSceneViewState BuildSceneViewState(std::vector<std::string> featureIds,
+        const HostSceneViewState* previous = nullptr) const;
     bool GetIntentStampValid(const RenderInputStamp& expected) const;
     bool CollectUpdates() const;
     bool SendPendingUpdates() const;
@@ -38,5 +39,7 @@ struct HostRenderViewRuntime final {
     void SendCompletions() const noexcept;
     static std::optional<HostRenderMode> GetHostViewMode(VizMode mode);
 private:
+    static bool GetPresentationEqual(const AppViewState& appState,
+        const HostRenderViewState& previous);
     static HostCameraState GetHostCamera(const ViewCameraState& source);
 };

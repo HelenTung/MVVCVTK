@@ -42,7 +42,7 @@ class ContextProbe final : public AbstractViewContext {
 public:
     bool SendRender() override { ++renderCount; if (onRender) onRender(); return isRenderAccepted; }
     std::optional<ViewCameraState> GetCameraState() const override {
-        return hasCamera ? std::optional<ViewCameraState>{ViewCameraState{}} : std::nullopt;
+        return hasCamera ? std::optional<ViewCameraState>{camera} : std::nullopt;
     }
     bool SetCameraStyle(VizMode) override { return true; }
     bool SetInteractorReady() override { return true; }
@@ -50,7 +50,7 @@ public:
     bool Start() override { return true; }
     bool StopInput() override { return true; }
     bool SetOrientationAxesVisible(bool) override { return true; }
-    bool GetOrientationAxesVisible() const override { return false; }
+    bool GetOrientationAxesVisible() const override { return areAxesVisible; }
     bool SetToolMode(ToolMode) override { return true; }
     ToolMode GetToolMode() const override { return ToolMode::Navigation; }
     bool SetInputHandler(InteractionRouteCallback, std::vector<InteractionEventKind>) override { return true; }
@@ -63,6 +63,8 @@ public:
     int renderCount = 0;
     bool isRenderAccepted = true;
     bool hasCamera = true;
+    bool areAxesVisible = false;
+    ViewCameraState camera;
     std::function<void()> onRender;
 };
 struct FrameFixture final {
@@ -73,7 +75,9 @@ struct FrameFixture final {
         std::make_shared<UpdateProbe>(), std::make_shared<UpdateProbe>() };
     std::shared_ptr<ContextProbe> contexts[2] = {
         std::make_shared<ContextProbe>(), std::make_shared<ContextProbe>() };
-    HostFrameRuntime frames{views, lease, [](const HostRenderViewRuntime&) {
+    int featureReadCount = 0;
+    HostFrameRuntime frames{views, lease, [this](const HostRenderViewRuntime&) {
+        ++featureReadCount;
         return std::vector<std::string>{}; }};
     FrameFixture() {
         for (int i = 0; i < 2; ++i) {
@@ -150,6 +154,59 @@ bool GetStoppedStageValid()
     (void)f.lease->StopLease();
     return isStopped && !f.frames.CollectFrameUpdates();
 }
+bool GetProjectionReuseValid()
+{
+    FrameFixture f;
+    if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(1);
+    if (!f.frames.SendFrameRender(1)) return false;
+    f.featureReadCount = 0;
+    f.updates[0]->SetRenderNeeded();
+    // 同 revision 下，camera、axes、cursor、scalar/binding 等不能被错误缓存。
+    f.contexts[1]->camera.position = {4, 5, 6};
+    f.contexts[1]->areAxesVisible = true;
+    auto view = std::static_pointer_cast<ViewProbe>(f.views[1].app.view);
+    view->state.cursorWorld = {7, 8, 9};
+    view->state.isInteracting = true;
+    view->state.scalarRange = {-3, 17};
+    view->state.volumeTransferFunction.colorNodes = {{0, 0, 0, 0}, {1, 1, 1, 1}};
+    if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready || f.featureReadCount != 2) return false;
+    f.frames.SetFrameCommit(2);
+    const auto state = f.frames.GetSceneState(1);
+    if (!state || !state->camera || !state->presentation || state->sceneEpoch != 2
+        || state->camera->position != f.contexts[1]->camera.position
+        || !state->presentation->isAxesVisible || !state->presentation->isInteracting
+        || state->presentation->cursorWorld != view->state.cursorWorld
+        || state->presentation->scalarRange != view->state.scalarRange
+        || state->presentation->volumeTransferFunction.colorNodes.size() != 2) return false;
+    if (!f.frames.SendFrameRender(2)) return false;
+    f.updates[0]->SetRenderNeeded();
+    f.contexts[1]->hasCamera = false;
+    return f.frames.BuildFrameStage(3) == HostFrameStageStatus::Failed
+        && f.updates[0]->isDirty && f.frames.GetSceneState(1)->sceneEpoch == 2;
+}
+
+bool GetPendingRollbackValid()
+{
+    FrameFixture f;
+    f.frames.SetDriveMode(HostDriveMode::HostDriven);
+    if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(1);
+    f.updates[0]->SetRenderNeeded();
+    f.contexts[1]->hasCamera = false;
+    if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Failed
+        || !f.updates[0]->isDirty || f.updates[1]->isDirty
+        || f.views[0].pendingRenderEpoch != 1 || f.views[1].pendingRenderEpoch != 1) return false;
+    f.contexts[1]->hasCamera = true;
+    if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
+    f.frames.ClearFrameStage();
+    if (!f.updates[0]->isDirty || f.updates[1]->isDirty
+        || f.views[0].pendingRenderEpoch != 1 || f.views[1].pendingRenderEpoch != 1) return false;
+    if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(2);
+    return f.views[0].pendingRenderEpoch == 2 && f.views[1].pendingRenderEpoch == 2;
+}
+
 class ReadyProbe final : public IStateEventSink {
 public:
     void SendFlags(UpdateFlags flags) override {
@@ -225,6 +282,8 @@ int main()
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
+    check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");
+    check(GetPendingRollbackValid(), "stage rollback preserves inherited pending renders");
     check(GetActivationValid(), "primary activation cursor and publication ownership");
     return failures;
 }

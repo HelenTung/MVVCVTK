@@ -62,7 +62,8 @@ std::optional<PartLabelId> GetPickedLabel(vtkProp3D& prop, vtkDataSet* data,
 
 bool SetLookupTable(
     vtkLookupTable& table,
-    const PartRenderStateTable& states)
+    const PartRenderStateTable& states,
+    PartRenderStateTable& previous)
 {
     if (states.statesByLabel.empty()
         || states.statesByLabel.size() - 1U > maxOverlayPartCount
@@ -71,20 +72,32 @@ bool SetLookupTable(
                 std::numeric_limits<vtkIdType>::max())) {
         return false;
     }
-    table.SetNumberOfTableValues(
-        static_cast<vtkIdType>(states.statesByLabel.size()));
-    table.SetTableRange(
-        0.0,
-        static_cast<double>(std::max<std::size_t>(
-            1U, states.statesByLabel.size() - 1U)));
-    for (std::size_t index = 0;
-        index < states.statesByLabel.size(); ++index) {
-        const auto& color = states.statesByLabel[index].color;
-        table.SetTableValue(
-            static_cast<vtkIdType>(index),
-            color[0], color[1], color[2], color[3]);
+    for (const auto& state : states.statesByLabel) {
+        if (!std::all_of(state.color.begin(), state.color.end(), [](double value) {
+            return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+        })) return false;
     }
-    table.Build();
+    if (states == previous) return true;
+    // 先完成可能失败的分配，再触碰 VTK；previous 始终描述最后成功应用的表。
+    auto next = states;
+    const bool hasSizeChange = previous.statesByLabel.size() != states.statesByLabel.size();
+    // VTK 写入若抛异常，清空成功缓存，使完整 previous 重放能够修复半更新。
+    auto applied = std::move(previous);
+    previous.statesByLabel.clear();
+    if (hasSizeChange) {
+        table.SetNumberOfTableValues(static_cast<vtkIdType>(states.statesByLabel.size()));
+        table.SetTableRange(0.0, static_cast<double>(std::max<std::size_t>(
+            1U, states.statesByLabel.size() - 1U)));
+    }
+    bool hasColorChange = hasSizeChange;
+    for (std::size_t index = 0; index < states.statesByLabel.size(); ++index) {
+        const auto& color = states.statesByLabel[index].color;
+        if (!hasSizeChange && color == applied.statesByLabel[index].color) continue;
+        table.SetTableValue(static_cast<vtkIdType>(index), color.data());
+        hasColorChange = true;
+    }
+    if (hasColorChange) table.Build();
+    previous = std::move(next);
     return true;
 }
 
@@ -195,7 +208,7 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
     const PartRenderStateTable& states) noexcept
 {
     try {
-        if (!m_mapper->GetInput() || !SetLookupTable(*m_lut, states)) return false;
+        if (!m_mapper->GetInput() || !SetLookupTable(*m_lut, states, m_partStates)) return false;
         const auto partCount = static_cast<std::uint32_t>(
             states.statesByLabel.size() - 1U);
         m_mapper->SetScalarRange(
@@ -262,7 +275,7 @@ bool PartSliceOverlayStrategy::SetPartStates(
     const PartRenderStateTable& states) noexcept
 {
     try {
-        return SetLookupTable(*m_lut, states);
+        return SetLookupTable(*m_lut, states, m_partStates);
     }
     catch (...) {
         return false;

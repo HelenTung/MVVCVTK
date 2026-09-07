@@ -34,6 +34,7 @@ private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
+    PartRenderStateTable m_partStates;
 };
 
 class PartSliceOverlayStrategy final
@@ -54,6 +55,7 @@ private:
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
+    PartRenderStateTable m_partStates;
     vtkSmartPointer<vtkPlane> m_plane;
     std::array<double, 3> m_normal{ 0.0, 0.0, 1.0 };
     Orientation m_orientation;
