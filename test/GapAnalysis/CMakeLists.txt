@@ -88,7 +88,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${_mvvcvtk_gap_decoy_dir}"
     COMMAND "${CMAKE_COMMAND}" -E touch
-        "${_mvvcvtk_gap_decoy_dir}/MVVCVTKGapKernel.dll"
+        "${_mvvcvtk_gap_decoy_dir}/GapKernel.dll"
     VERBATIM
 )
 add_test(
@@ -103,7 +103,7 @@ set_property(
 set_property(
     TEST GapAnalysis.KernelPath
     APPEND PROPERTY ENVIRONMENT_MODIFICATION
-        "MVVCVTK_GAP_RUNTIME_DIR=set:$<TARGET_FILE_DIR:mvvcvtk_gap_kernel>"
+        "MVVCVTK_GAP_RUNTIME_DIR=set:$<TARGET_FILE_DIR:gap_kernel>"
 )
 set_property(
     TEST GapAnalysis.KernelPath

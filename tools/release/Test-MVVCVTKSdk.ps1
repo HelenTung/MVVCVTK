@@ -344,9 +344,9 @@ if (@(Compare-Object `
 $defxRoot = Join-Path $thirdPartyRoot 'defx'
 $expectedDefXFiles = @(
     'bin/Debug/DefXAnalysis.dll'
-    'bin/Debug/MVVCVTKGapKernel.dll'
+    'bin/Debug/GapKernel.dll'
     'bin/Release/DefXAnalysis.dll'
-    'bin/Release/MVVCVTKGapKernel.dll'
+    'bin/Release/GapKernel.dll'
 )
 $actualDefXFiles = @(
     Get-ChildItem -LiteralPath $defxRoot -Recurse -File |
@@ -360,9 +360,9 @@ if (@(Compare-Object `
 
 foreach ($requiredDependencyPath in @(
         'deps/third_party/defx/bin/Debug/DefXAnalysis.dll',
-        'deps/third_party/defx/bin/Debug/MVVCVTKGapKernel.dll',
+        'deps/third_party/defx/bin/Debug/GapKernel.dll',
         'deps/third_party/defx/bin/Release/DefXAnalysis.dll',
-        'deps/third_party/defx/bin/Release/MVVCVTKGapKernel.dll',
+        'deps/third_party/defx/bin/Release/GapKernel.dll',
         'deps/official/vtk/lib/cmake/vtk-9.4/vtk-config.cmake',
         'deps/official/opencv/x64/vc16/lib/OpenCVConfig.cmake')) {
     if (-not [IO.File]::Exists(

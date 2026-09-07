@@ -18,7 +18,7 @@ target_include_directories(mvvcvtk_artifact_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ArtifactReduction/third_party/tomopy")
 target_link_libraries(mvvcvtk_artifact_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTK::ArtifactReduction
-    mvvcvtk_tomopy_ring mvvcvtk_tomopy_reference VTK::ImagingGeneral ${MVVCVTK_VTK_TARGETS})
+    tomopy_ring mvvcvtk_tomopy_reference VTK::ImagingGeneral ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_artifact_tests)
 set_target_properties(mvvcvtk_artifact_tests PROPERTIES FOLDER "MVVCVTK/Tests")
 vtk_module_autoinit(TARGETS mvvcvtk_artifact_tests MODULES ${MVVCVTK_VTK_TARGETS})

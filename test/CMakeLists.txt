@@ -179,7 +179,7 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
                 _mvvcvtk_defx_index
             )
             if(NOT _mvvcvtk_defx_index EQUAL -1)
-                if(_mvvcvtk_build_target STREQUAL "mvvcvtk_gap_kernel"
+                if(_mvvcvtk_build_target STREQUAL "gap_kernel"
                     AND _mvvcvtk_target_property STREQUAL "LINK_LIBRARIES")
                     set(_mvvcvtk_has_private_defx TRUE)
                 else()
@@ -204,7 +204,7 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     endforeach()
     if(NOT _mvvcvtk_has_private_defx)
         message(FATAL_ERROR
-            "mvvcvtk_gap_kernel must link DefX::Analysis directly and privately."
+            "gap_kernel must link DefX::Analysis directly and privately."
         )
     endif()
 

@@ -1,9 +1,11 @@
-add_library(mvvcvtk_tomopy_ring STATIC third_party/tomopy/remove_ring.c)
-target_include_directories(mvvcvtk_tomopy_ring PUBLIC
+add_library(tomopy_ring STATIC third_party/tomopy/remove_ring.c)
+target_include_directories(tomopy_ring PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomopy>")
 # 上游数值路径含有有意的double到float舍入；仅此C目标保留该转换语义。
-target_compile_options(mvvcvtk_tomopy_ring PRIVATE /W3 /utf-8 /sdl /wd4244)
-set_target_properties(mvvcvtk_tomopy_ring PROPERTIES
+target_compile_options(tomopy_ring PRIVATE /W3 /utf-8 /sdl /wd4244)
+set_target_properties(tomopy_ring PROPERTIES
+    OUTPUT_NAME TomoPyRing
+    PROJECT_LABEL TomoPyRing
     C_STANDARD 11 C_STANDARD_REQUIRED YES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     MSVC_DEBUG_INFORMATION_FORMAT Embedded
@@ -36,7 +38,7 @@ target_include_directories(artifact_reduction
 )
 target_link_libraries(artifact_reduction
     PUBLIC MVVCVTK::FeatureSPI
-    PRIVATE mvvcvtk_tomopy_ring VTK::ImagingGeneral)
+    PRIVATE tomopy_ring VTK::ImagingGeneral)
 SetTargetDefaults(artifact_reduction)
 set_target_properties(artifact_reduction PROPERTIES
     OUTPUT_NAME ArtifactReduction

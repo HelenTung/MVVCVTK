@@ -12,38 +12,38 @@ set(MVVCVTK_GAP_KERNEL_SOURCES
     src/Services/GapKernelLabelView.h
 )
 
-add_library(mvvcvtk_gap_kernel MODULE ${MVVCVTK_GAP_KERNEL_SOURCES})
+add_library(gap_kernel MODULE ${MVVCVTK_GAP_KERNEL_SOURCES})
 target_include_directories(
-    mvvcvtk_gap_kernel
+    gap_kernel
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/Services"
 )
 target_compile_definitions(
-    mvvcvtk_gap_kernel
+    gap_kernel
     PRIVATE MVVCVTK_GAP_KERNEL_EXPORTS=1
 )
 target_link_libraries(
-    mvvcvtk_gap_kernel
+    gap_kernel
     PRIVATE
         DefX::Analysis
         ${MVVCVTK_VTK_TARGETS}
 )
-SetTargetDefaults(mvvcvtk_gap_kernel)
+SetTargetDefaults(gap_kernel)
 set_target_properties(
-    mvvcvtk_gap_kernel
+    gap_kernel
     PROPERTIES
-        OUTPUT_NAME MVVCVTKGapKernel
-        PROJECT_LABEL MVVCVTKGapKernel
+        OUTPUT_NAME GapKernel
+        PROJECT_LABEL GapKernel
         FOLDER "MVVCVTK/Host/Features/Private"
 )
 # build tree 与 SDK install tree 都让私有 kernel 和 DefX runtime 成对出现；
 # C++ 加载器据此解析唯一绝对路径，不修改外部供应商根中的原始工件。
 add_custom_command(
-    TARGET mvvcvtk_gap_kernel
+    TARGET gap_kernel
     POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "$<TARGET_FILE:DefX::Analysis>"
-        "$<TARGET_FILE_DIR:mvvcvtk_gap_kernel>"
+        "$<TARGET_FILE_DIR:gap_kernel>"
     VERBATIM
 )
 source_group(
@@ -147,7 +147,7 @@ target_link_libraries(
         "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>"
         ${MVVCVTK_VTK_TARGETS}
 )
-add_dependencies(gap_analysis mvvcvtk_gap_kernel)
+add_dependencies(gap_analysis gap_kernel)
 
 install(
     TARGETS gap_analysis
@@ -158,7 +158,7 @@ install(
         COMPONENT Host
 )
 install(
-    TARGETS mvvcvtk_gap_kernel
+    TARGETS gap_kernel
     LIBRARY DESTINATION "deps/third_party/defx/bin/$<CONFIG>"
         COMPONENT Host
     RUNTIME DESTINATION "deps/third_party/defx/bin/$<CONFIG>"

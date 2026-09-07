@@ -448,7 +448,7 @@ GapAnalysisService::Impl::GetRuntimePath(
 
     std::error_code error;
     const auto kernelCandidate =
-        directory / L"MVVCVTKGapKernel.dll";
+        directory / L"GapKernel.dll";
     if (!std::filesystem::is_regular_file(kernelCandidate, error)
         || error) {
         return std::nullopt;
