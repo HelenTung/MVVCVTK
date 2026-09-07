@@ -55,7 +55,7 @@ private:
 
 ArtifactError GetInputError(const AlgorithmInput& input,
     const ArtifactRequest& request, const ArtifactConfig& config,
-    std::size_t& requiredBytes) noexcept;
+    std::size_t& requiredBytes, int* diffusionWorkerCount = nullptr) noexcept;
 AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
     const ArtifactRequest& request, const ArtifactConfig& config,
     TaskControl& control) noexcept;

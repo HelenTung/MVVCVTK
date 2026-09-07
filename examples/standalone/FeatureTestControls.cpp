@@ -16,6 +16,7 @@
 #include "Host/ArtifactReductionHostFeature.h"
 #endif
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -28,6 +29,37 @@ constexpr auto controlId = "main.feature-tools";
 constexpr auto primaryView = "primary-3d";
 constexpr std::array<const char*, 7> editNames{"涂绘", "擦除", "填充", "孤岛处理", "区域生长", "拆分", "合并"};
 constexpr std::array<const char*, 3> artifactNames{"环形伪影校正", "扩散滤波", "环形伪影校正与扩散滤波"};
+#if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
+const char* ArtifactErrorText(const ArtifactError error) {
+    switch (error) {
+    case ArtifactError::None: return "无错误";
+    case ArtifactError::Unavailable: return "功能不可用";
+    case ArtifactError::WrongThread: return "调用线程不正确";
+    case ArtifactError::Busy: return "已有任务或结果正在处理";
+    case ArtifactError::InvalidRequest: return "参数无效";
+    case ArtifactError::InvalidData: return "输入或结果数据无效";
+    case ArtifactError::UnsupportedType: return "不支持该体素类型";
+    case ArtifactError::SourceChanged: return "处理期间输入数据已切换";
+    case ArtifactError::TooLarge: return "内存预算不足或分配失败";
+    case ArtifactError::Cancelled: return "已取消";
+    case ArtifactError::TimedOut: return "超过处理时间上限";
+    case ArtifactError::InsufficientEvidence: return "缺少处理所需的有效上下文";
+    case ArtifactError::CommitFailed: return "发布结果失败";
+    case ArtifactError::UnsupportedGeometry: return "不支持该网格几何";
+    case ArtifactError::UnsupportedValidity: return "输入包含算法不支持的无效体素";
+    case ArtifactError::KernelFailed: return "滤波计算失败";
+    }
+    return "未知错误";
+}
+const char* ArtifactStageText(const unsigned int progress) {
+    if (progress < 10) return "检查并准备输入";
+    if (progress < 40) return "环形校正";
+    if (progress < 75) return "扩散滤波";
+    if (progress < 80) return "处理写回范围";
+    if (progress < 95) return "统计质量指标";
+    return "冻结候选结果";
+}
+#endif
 double Number(const std::string& text) {
     std::size_t end = 0;
     const double value = std::stod(text, &end);
@@ -110,37 +142,99 @@ FeatureTestOptions GetFeatureTestOptions(const int argc, char* argv[]) {
 }
 
 void PrintFeatureTestHelp() {
-    std::cout << "\n=== 扩展功能工具 ===\n";
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-    std::cout << "F6 / Shift+F6：切换标签编辑方式（涂绘/擦除/填充/孤岛处理/区域生长/拆分/合并；默认合并）\n"
-        << "F7：计算编辑候选结果 | Ctrl+F7：确认 | Alt+F7：取消/丢弃\n"
-        << "F8：预览撤销 | Shift+F8：预览重做；均使用 Ctrl+F7 确认\n"
-        << "请先按 N 选择零件（可用 --part-picking 启用点击选择）；未选择时使用第一个零件。合并对象为所选零件及其下一个零件。\n"
-        << "涂绘/擦除使用零件边界内的体素；填充/区域生长使用有限邻域；拆分使用两端的零件体素作为种子。\n"
-        << "候选结果的统计信息会输出到控制台；确认后才更新正式显示。\n";
-    std::cout << "裁剪生效期间临时隐藏旧零件叠加；退出控件仍保留裁剪，撤销全部裁剪后恢复叠加。切换输入后需重新分割。\n";
-#endif
-#if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
-    std::cout << "F9 / Shift+F9：环形伪影校正/扩散滤波/两者组合 | F10：准备候选结果 | Ctrl+F10：发布\n"
-        << "Alt+F10：取消/丢弃 | Shift+F10：显示已发布的校正体数据\n"
-        << "Ctrl+Shift+F10：恢复输入体数据。环形中心默认取网格中点（演示预设）。\n";
-#endif
-#if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
-    std::cout << "F11：已知变换的参考点系统对齐验证 | Shift+F11：已知变换的最佳拟合对齐验证\n"
-        << "Ctrl+F11：显示/隐藏对齐结果 | Alt+F11：取消 | Ctrl+Shift+F11：输出报告/归档数值\n"
-        << "验证使用网格采样几何，预设变换为绕 Z 轴旋转 10 度并平移 (2,-3,4)。\n"
-        << "此验证检查模型单位下的几何变换恢复能力，不评估检测精度或测量点有效性。\n";
+    std::cout << "\n【零件标签编辑：计算候选与确认分两步】\n"
+        << "  前置：先按 B 并等待成功，再按 N 选择目标零件；未选择时使用第一个零件。\n"
+        << "  F6 / Shift+F6：下一种/上一种编辑方式；启动时默认“合并”。切换后窗口标题显示当前方式。\n"
+        << "  循环顺序：涂绘 → 擦除 → 填充 → 孤岛处理 → 区域生长 → 拆分 → 合并 → 涂绘。\n"
+        << "  F7：计算候选，完成后在终端输出候选零件数、体素数；正式显示此时尚未替换。\n"
+        << "  Ctrl+F7：确认当前候选并更新正式结果；必须先等“候选结果已就绪”。\n"
+        << "  Alt+F7：计算中请求取消，候选就绪后丢弃；保留确认前的正式结果。\n"
+        << "  F8：准备撤销候选；Shift+F8：准备重做候选；两者都要等待完成后再按 Ctrl+F7 确认。\n"
+        << "  例：B → 等待成功 → N → F7 → 等待候选 → Ctrl+F7 → F8 → 等待候选 → Ctrl+F7。\n"
+        << "  本工具使用以下固定操作预设，种子由所选零件的真实标签自动查找：\n"
+        << "    涂绘/擦除：在自动找到的一个零件体素处使用球形笔刷；此入口不采集鼠标绘制轨迹。\n"
+        << "    填充：从种子旁的一个背景体素开始，填充种子附近的有限盒形区域。\n"
+        << "    孤岛处理：处理所选零件中小于体素数量阈值的连通区域；阈值默认 2。\n"
+        << "    区域生长：从一个种子在有限盒形区域内生长，灰度下限取 A 的阈值，上限取输入最大值。\n"
+        << "    拆分：从所选零件包围范围的正向和反向各找一个属于该零件的体素，作为两个种子。\n"
+        << "    合并：合并“所选零件”和“目录中的下一个零件”；在末尾时，下一个回到第一个。\n"
+        << "  涂绘/擦除半径默认 1.5 倍最大体素间距；可用 --edit-radius-mm 调整。\n"
+        << "  填充/生长的盒形范围由同一半径计算，每轴从种子向两侧最多扩展 16 个体素。\n"
+        << "  若提示种子搜索超限或没有相邻背景，改选合适零件；连续按 F7 不会改变这些预设。\n";
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-    std::cout << "F12：全局预览网格 | Shift+F12：局部自适应网格 | Alt+F12：取消网格任务\n";
+    std::cout << "\n【表面网格】\n"
+        << "  前置：加载当前图像，建议先按 U 并等待完成。K 使用 A 窗口当前阈值。\n"
+        << "  K：提取全局等值面预览网格；Shift+K：使用局部自适应 ISO50 方法细化网格。\n"
+        << "  “局部自适应”是算法方式；此快捷键仍使用当前输入，没有另外指定鼠标选框范围。\n"
+        << "  Alt+K：请求取消；成功后终端显示网格点数，Ctrl+K 可查看网格版本。\n"
+        << "  K 的“预览网格”成功后即成为表面结果，无需使用零件编辑的 Ctrl+F7 确认。\n"
+        << "  原 F12 / Shift+F12 / Alt+F12 / Ctrl+F12 保留兼容；Visual Studio 调试时请使用 K 组合。\n"
+        << "  Windows 会将实体 F12 用于调试中断，可能停在 ntdll 并提示缺少 ntdll.pdb；这是系统符号提示。\n"
+        << "  若在这种中断处暂停，回到 VS 按 F5 继续，再激活 main 视图使用 K；其他异常应检查调用堆栈。\n";
 #endif
-    std::cout << "Ctrl+F12：输出工具状态及结果引用 | --feature-audit：使用演示数据验证上述快捷键\n"
-        << "真实数据：--input=文件路径 --dimensions=600,1800,600（原始浮点体数据）\n"
-        << "工具预算默认取可用物理内存的一半，上限 64 GiB；可用 --tool-budget-mib=... 显式指定\n"
-        << "编辑/伪影处理超时：--tool-timeout-ms=300000（毫秒），可按真实数据规模调整\n"
-        << "选项：--edit-radius-mm=... --edit-island-voxels=2\n"
-        << "         --artifact-axis=2 --artifact-center=a,b --artifact-ring-width=1\n"
-        << "         --artifact-strength=0.5 --artifact-iterations=1\n" << std::flush;
+#if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
+    std::cout << "\n【伪影校正：准备 → 发布 → 选择输入】\n"
+        << "  F9 / Shift+F9：下一种/上一种模式；顺序为环形校正 → 扩散滤波 → 两者组合，默认环形校正。\n"
+        << "  F10：读取当前输入并计算候选；等待进度完成及“候选结果已就绪”。\n"
+        << "  运行中标题显示当前阶段、总体进度和耗时；混合模式依次进行环形校正、扩散滤波、质量统计。\n"
+        << "  Ctrl+F10：将候选发布为正式校正体数据；此步骤保留当前显示输入。\n"
+        << "  Shift+F10：发布成功后，将校正体设为当前输入，同时影响显示和之后启动的算法。\n"
+        << "  Ctrl+Shift+F10：重新选择最近一次成功接纳的 F10 请求所记录的输入版本。\n"
+        << "  Alt+F10：运行中请求取消，候选就绪后丢弃；已发布的数据仍可能由历史记录保留。\n"
+        << "  例：F9 选模式 → F10 → 等待候选 → Ctrl+F10 → Shift+F10 → 查看校正体。\n"
+        << "  环形中心默认取垂直于处理轴的截面中点；强度、环宽、中心及扩散迭代数见下方参数。\n"
+        << "  处理中的输入若被切换，旧候选可能失效；请对新输入重新按 F10 计算。\n";
+#endif
+#if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
+    std::cout << "\n【对齐验证】\n"
+        << "  前置：先按 K 并等待生成当前输入的有效网格；切换输入后要重新提取网格。\n"
+        << "  F11：参考点系统对齐验证；Shift+F11：最佳拟合对齐验证。\n"
+        << "  Ctrl+F11：隐藏/显示对齐结果；Alt+F11：请求取消对齐任务；Ctrl+Shift+F11：输出报告数值。\n"
+        << "  此入口从当前网格采样，并生成绕 Z 轴旋转 10 度、平移 (2,-3,4) 的内置参考。\n"
+        << "  结果用于核对已知几何变换的恢复，单位随模型；它不代表另一个实测模型的配准精度。\n";
+#endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    std::cout << "\n【多功能一起使用时】\n"
+        << "  裁切生效时旧零件覆盖层会临时隐藏，避免完整零件遮住裁切画面；正式标签仍保留。\n"
+        << "  退出裁切控件会保留裁切效果；当前可编辑裁切已撤销且控件退出后，才恢复原可见偏好。\n"
+        << "  切换到裁切或校正数据后，旧零件/网格结果可能过期；先 U，再按 B/K 重新生成。\n"
+        << "  F7、F10、K 会先结束裁切控件编辑；仅退出控件不会把裁切预览变成新的算法输入。\n";
+#endif
+    const FeatureTestOptions defaults;
+    std::cout << "\n【状态、内存与等待】\n"
+        << "  Ctrl+K：输出零件、表面、伪影和对齐的状态、请求编号及结果版本。\n"
+        << "  候选就绪后再确认；取消请求发出后也需等待任务停止，旧正式结果才会稳定保留。\n"
+        << "  工具预算分别约束零件、表面、伪影任务；它不是进程总内存上限，也不约束孔隙分析。\n"
+        << "  加载缓存、历史结果和多个并行任务会叠加。隐藏覆盖层通常不会释放整卷标签。\n"
+        << "  1536×1536×1536 的一份 32 位体数据就是 13.5 GiB，算法还需要输出和工作缓冲。\n"
+        << "\n【真实数据启动参数：使用 --参数=值 的形式】\n"
+        << "  --input=路径：单分量、32 位浮点原始体数据文件。默认路径：" << defaults.inputPath << '\n'
+        << "  --dimensions=X,Y,Z：与文件匹配的三个正整数；默认 "
+        << defaults.dimensions[0] << ',' << defaults.dimensions[1] << ',' << defaults.dimensions[2] << "。\n"
+        << "  当前 main 固定体素间距为 0.1537、原点为 (0,0,0)；--dimensions 只设置体素数量。\n"
+        << "  路径含空格时，将整个参数放入双引号，例如 \"--input=F:/CT data/scan.raw\"。\n"
+        << "  1536 数据：MVVCVTK.exe --input=F:/data/ct/1536x1536x1536_1440.raw --dimensions=1536,1536,1536\n"
+        << "  600 数据： MVVCVTK.exe --input=F:/data/ct/600x1800x600.raw --dimensions=600,1800,600\n"
+        << "  --tool-budget-mib=整数：16..131072 MiB；默认取启动时可用物理内存一半，上限 64 GiB。\n"
+        << "    例如 --tool-budget-mib=49152 表示 48 GiB；启动时终端会打印实际配置的预算。\n"
+        << "  --tool-timeout-ms=整数：零件编辑和伪影处理的超时，范围 1..3600000，默认 "
+        << defaults.timeoutMs << " 毫秒（5 分钟）；不控制 B 分割、K 网格或 G 孔隙任务。\n"
+        << "  --edit-radius-mm=正数：笔刷半径，也用于计算填充/生长的邻域；默认随体素间距计算。\n"
+        << "  --edit-island-voxels=整数：孤岛体素数量阈值，1..1000000000，默认 " << defaults.islandVoxels << "。\n"
+        << "  --artifact-axis=0|1|2：沿 X/Y/Z 轴逐截面处理环形伪影，默认 " << defaults.ringAxis << "（Z）。\n"
+        << "  --artifact-center=a,b：截面内其余两轴的中心索引，按 X/Y/Z 剩余轴顺序填写；不是毫米。\n"
+        << "    例如 axis=2 时 a,b 分别为 X/Y 索引；省略时自动取截面中点。\n"
+        << "  --artifact-ring-width=整数：环宽参数，1..64，默认 " << defaults.ringWidth << "。\n"
+        << "  --artifact-strength=数值：环形校正强度，0..1，默认 " << defaults.ringStrength << "。\n"
+        << "  --artifact-iterations=整数：扩散滤波迭代次数，1..16，默认 " << defaults.diffusionIterations << "。\n"
+        << "\n【其他运行入口】\n"
+        << "  --help：输出本帮助后退出；--part-picking：启用鼠标点击选件。\n"
+        << "  --real-audit：使用 --input 指定的真实数据自动执行 U、B，并记录主线程响应时间。\n"
+        << "  --demo：使用内置小体数据交互演示；--demo-audit：使用内置数据自动验证基础操作。\n"
+        << "  --feature-audit：使用内置数据自动验证扩展工具。测试真实数据时请勿添加这三个演示选项。\n"
+        << "==================================\n" << std::flush;
 }
 
 class FeatureTestControls::Impl final {
@@ -161,11 +255,15 @@ public:
     bool Dispatch(int key, bool ctrl, bool alt, bool shift);
     InteractionResult OnInput(const InteractionEvent& event) {
         if (event.eventKind == InteractionEventKind::Cancel) { down.fill(false); return {}; }
-        int key = 0;
+        // Windows 将 F12 保留给调试器；K 及其修饰键复用同一组表面动作。
+        const bool isSurfaceAlias = event.keyCode == 'k' || event.keyCode == 'K'
+            || event.keySym == "k" || event.keySym == "K";
+        int key = isSurfaceAlias ? 12 : 0;
         for (int candidate = 6; candidate <= 12; ++candidate)
             if (event.keySym == "F" + std::to_string(candidate)) key = candidate;
         if (key == 0) return {};
-        auto& pressed = down[static_cast<std::size_t>(key - 6)];
+        // 别名使用独立的按下状态，避免 K 与 F12 的释放事件互相干扰。
+        auto& pressed = isSurfaceAlias ? down.back() : down[static_cast<std::size_t>(key - 6)];
         if (event.eventKind == InteractionEventKind::KeyRelease) {
             const bool handled = std::exchange(pressed, false);
             return handled ? InteractionResult{true, true, true, InteractionFailureReason::None} : InteractionResult{};
@@ -199,16 +297,20 @@ public:
     HostViewTargets views;
     HostFeatureContext context;
     std::weak_ptr<FeatureTestControls> owner;
-    std::array<bool, 7> down{};
+    std::array<bool, 8> down{}; // F6..F12，以及 K。
     std::string failure;
     int editMode = 6;
     int artifactMode = 0;
     int artifactProgress = -1;
     int artifactStatus = -1;
+    int artifactRunMode = 0;
+    std::int64_t artifactElapsedSeconds = -1;
+    std::chrono::steady_clock::time_point artifactStarted{};
     std::uint64_t partCompletions = 0;
     std::uint64_t alignmentCompletions = 0;
     bool alignmentMatched = false;
     std::optional<DataRevisionRef> artifactInput;
+    std::optional<DataRevisionRef> artifactPublished;
     std::optional<bool> partVisibilityBeforeCrop;
 #if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
     AlignmentMatrix expectedTransform = alignmentIdentity;
@@ -503,6 +605,7 @@ bool FeatureTestControls::Impl::PrepareArtifact() {
         diffusion.threshold = span * 0.1;
         request.diffusion = diffusion;
     }
+    const auto started = std::chrono::steady_clock::now();
     const auto admission = feature->SendRequest({ArtifactAction::Prepare, request, 0});
     if (admission.error == ArtifactError::TooLarge) {
         return Fail("伪影处理超出预算：输入字节数=" + std::to_string(image->GetValues()->size())
@@ -513,6 +616,9 @@ bool FeatureTestControls::Impl::PrepareArtifact() {
         return Fail("伪影处理准备请求被拒绝，错误=" + std::to_string(static_cast<int>(admission.error))
             + "；请检查输入类型、几何与有效性。裁切掩码仍保留原网格尺寸，不能减少整卷工作预算。");
     artifactInput = data->self;
+    artifactStarted = started;
+    artifactRunMode = artifactMode;
+    artifactElapsedSeconds = -1;
     Status(std::string("伪影处理 ") + artifactNames[artifactMode] + " 已请求 | 请求编号=" + std::to_string(admission.requestId));
     return true;
 #else
@@ -534,7 +640,12 @@ bool FeatureTestControls::Impl::ArtifactActionRequest(const int action) {
     const auto admission = feature->SendRequest(request);
     if (admission.error != ArtifactError::None)
         return Fail("伪影处理操作被拒绝，错误=" + std::to_string(static_cast<int>(admission.error)));
-    Status(action == 0 ? "校正体数据已发布；按 Shift+F10 选择显示" : "伪影处理候选结果已取消/丢弃");
+    // Feature 状态随下一次 Prepare/Discard 重置；应用的“查看上次结果”
+    // 仍应指向最后一次成功发布的图版本，不持有或复制整卷数据。
+    if (action == 0) artifactPublished = feature->GetState().correctedVolume;
+    Status(action == 0 ? "校正体数据已发布；按 Shift+F10 选择显示"
+        : request.action == ArtifactAction::Cancel ? "已请求取消伪影处理，正在等待当前分块结束"
+        : "伪影处理候选结果已丢弃");
     Report(); return true;
 #else
     (void)action; return Fail("伪影处理功能未启用");
@@ -544,7 +655,9 @@ bool FeatureTestControls::Impl::ArtifactActionRequest(const int action) {
 bool FeatureTestControls::Impl::SelectArtifact(const bool restore) {
 #if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
     const auto feature = bindings.artifact.lock();
-    const auto revision = restore ? artifactInput : feature ? feature->GetState().correctedVolume : std::nullopt;
+    const auto published = artifactPublished ? artifactPublished
+        : feature ? feature->GetState().correctedVolume : std::nullopt;
+    const auto revision = restore ? artifactInput : published;
     if (!revision || !context.data) return Fail("没有可选择的已发布校正数据或输入数据");
     if (!EndCrop()) return Fail("选择数据版本前请先结束裁剪");
     const auto binding = context.data->GetDataBinding(context.data->GetDataGraph(), primaryVolumeBinding);
@@ -620,10 +733,10 @@ bool FeatureTestControls::Impl::StartAlignment(const bool bestFit) {
     if (!feature || !surface || !context.data) return Fail("对齐或表面确定功能不可用");
     if (feature->GetState().isBusy) return Fail("对齐任务正在运行；按 Alt+F11 取消");
     const auto generation = surface->GetSurfaceSnapshot();
-    if (!generation || !GetDataRevisionRefValid(generation->meshRevision)) return Fail("请先按 F12 并等待网格生成");
+    if (!generation || !GetDataRevisionRefValid(generation->meshRevision)) return Fail("请先按 K 并等待网格生成");
     const auto graph = context.data->GetDataGraph();
     const auto primary = context.data->GetDataBinding(graph, primaryVolumeBinding);
-    if (!primary || primary->target != generation->sourceRevision) return Fail("网格源数据已过期；请按 F12 提取当前网格");
+    if (!primary || primary->target != generation->sourceRevision) return Fail("网格源数据已过期；请按 K 提取当前网格");
     const auto meshData = context.data->GetData(graph, generation->meshRevision);
     const auto* mesh = meshData ? dynamic_cast<const SurfaceMeshPayload*>(meshData->payload.get()) : nullptr;
     if (!mesh || mesh->GetVertices().size() < 9) return Fail("网格几何数据不足，无法进行参考验证");
@@ -867,12 +980,33 @@ void FeatureTestControls::Impl::Tick() {
     const auto state = feature->GetState();
     const auto status = static_cast<int>(state.status);
     const auto progress = static_cast<int>(state.progressPercent / 10);
-    if (status == artifactStatus && progress == artifactProgress) return;
+    const bool isRunning = state.status == ArtifactStatus::Running || state.status == ArtifactStatus::Cancelling;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - artifactStarted).count();
+    const bool reportChanged = status != artifactStatus || progress != artifactProgress;
+    if (!reportChanged && (!isRunning || elapsed == artifactElapsedSeconds)) return;
     artifactStatus = status; artifactProgress = progress;
-    if (state.status == ArtifactStatus::Failed && state.error != ArtifactError::Cancelled)
-        failure = "伪影处理失败，错误=" + std::to_string(static_cast<int>(state.error));
-    if (state.status == ArtifactStatus::Ready) Status("伪影处理候选结果已就绪 | Ctrl+F10 发布，Alt+F10 丢弃");
-    Report();
+    artifactElapsedSeconds = elapsed;
+    if (isRunning) {
+        std::string message = state.status == ArtifactStatus::Cancelling ? "伪影正在取消，等待分块结束"
+            : std::string(artifactNames[artifactRunMode]) + " | " + ArtifactStageText(state.progressPercent);
+        message += " | " + std::to_string(state.progressPercent) + "% | " + std::to_string(elapsed) + " 秒";
+        if (state.status == ArtifactStatus::Running) message += " | Alt+F10 取消";
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        const auto parts = bindings.parts.lock();
+        if (parts && parts->GetEditPreview()) message += " | 零件候选：Ctrl+F7 确认";
+#endif
+        Status(message);
+    }
+    else if (state.status == ArtifactStatus::Failed) {
+        std::string message = std::string("伪影处理：") + ArtifactErrorText(state.error);
+        if (state.error == ArtifactError::TimedOut) message += "（" + std::to_string(options.timeoutMs / 1000.0) + " 秒）";
+        if (state.error != ArtifactError::Cancelled) failure = message;
+        Status(message + "；未生成候选，正式结果保留");
+    }
+    else if (state.status == ArtifactStatus::Ready)
+        Status("伪影处理候选结果已就绪 | 耗时 " + std::to_string(elapsed) + " 秒 | Ctrl+F10 发布，Alt+F10 丢弃");
+    if (reportChanged) Report();
 #endif
 }
 
@@ -931,7 +1065,7 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
     steps.push_back({"工具：丢弃涂绘", {0,"F7",false,true}, [partCount] { return partCount(1); }});
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-    steps.push_back({"工具：表面网格", {0,"F12"}, [weak = m_impl->bindings.surface] {
+    steps.push_back({"工具：表面网格", {'k'}, [weak = m_impl->bindings.surface] {
         const auto feature = weak.lock();
         const auto result = feature ? feature->GetSurfaceSnapshot() : nullptr;
         return result && GetDataRevisionRefValid(result->meshRevision) && result->points && !result->points->empty();
@@ -984,6 +1118,6 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
         return state.status != ArtifactStatus::Running && state.status != ArtifactStatus::Cancelling && state.status != ArtifactStatus::Ready;
     }});
 #endif
-    steps.push_back({"工具：输出报告", {0,"F12",true}, [] { return true; }});
+    steps.push_back({"工具：输出报告", {'k',{},true}, [] { return true; }});
     return steps;
 }

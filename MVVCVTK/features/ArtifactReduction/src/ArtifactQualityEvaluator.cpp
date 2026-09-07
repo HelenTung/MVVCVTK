@@ -26,11 +26,19 @@ struct Moments final {
     }
 };
 
-double AddRms(double rms, double value, std::size_t count) noexcept
-{
-    const double ratio = 1.0 / static_cast<double>(count);
-    return std::hypot(rms * std::sqrt(1.0 - ratio), value * std::sqrt(ratio));
-}
+// 已接纳的输入最多 2^42 个 float32 体素，spacing >= 1e-12；
+// 连同梯度差的平方和也在 double 范围内，无需逐样本 sqrt/hypot。
+struct CompensatedSum final {
+    double value = 0.0;
+    double correction = 0.0;
+    bool Add(const double term) noexcept {
+        const double adjusted = term - correction;
+        const double next = value + adjusted;
+        correction = (next - value) - adjusted;
+        value = next;
+        return std::isfinite(value) && std::isfinite(correction);
+    }
+};
 } // namespace
 
 ArtifactError BuildQuality(const AlgorithmInput& input,
@@ -42,6 +50,11 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
     after.SetValues(output);
     Moments materialBefore;
     Moments materialAfter;
+    CompensatedSum sumBefore;
+    CompensatedSum sumAfter;
+    CompensatedSum sumDelta;
+    CompensatedSum squaredDelta;
+    CompensatedSum squaredGradientDelta;
     scalarRange = { std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest() };
     const auto& grid = before.GetGeometry();
     const auto& dims = grid.dimensions;
@@ -61,11 +74,9 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
                 if (!std::isfinite(delta)) return ArtifactError::InvalidData;
                 ++quality.validCount;
                 if (delta != 0.0) ++quality.changedCount;
-                const double ratio = 1.0 / static_cast<double>(quality.validCount);
-                quality.meanBefore = quality.meanBefore * (1.0 - ratio) + oldValue * ratio;
-                quality.meanAfter = quality.meanAfter * (1.0 - ratio) + newValue * ratio;
-                quality.meanDelta = quality.meanDelta * (1.0 - ratio) + delta * ratio;
-                quality.rmsDelta = AddRms(quality.rmsDelta, delta, quality.validCount);
+                if (!sumBefore.Add(oldValue) || !sumAfter.Add(newValue)
+                    || !sumDelta.Add(delta) || !squaredDelta.Add(delta * delta))
+                    return ArtifactError::InvalidData;
                 quality.maxDelta = std::max(quality.maxDelta, std::abs(delta));
                 scalarRange[0] = std::min(scalarRange[0], newValue);
                 scalarRange[1] = std::max(scalarRange[1], newValue);
@@ -81,12 +92,21 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
                     const double gradientDelta = (nextDelta - delta) / grid.spacing[axis];
                     if (!std::isfinite(gradientDelta)) return ArtifactError::InvalidData;
                     ++quality.gradientCount;
-                    quality.gradientDeltaRms = AddRms(quality.gradientDeltaRms, gradientDelta, quality.gradientCount);
+                    if (!squaredGradientDelta.Add(gradientDelta * gradientDelta))
+                        return ArtifactError::InvalidData;
                 }
             }
         }
         control.progress.store(80 + static_cast<unsigned int>(15.0 * (z + 1) / dims[2]), std::memory_order_relaxed);
     }
+    if (quality.validCount == 0) return ArtifactError::InvalidData;
+    const double count = static_cast<double>(quality.validCount);
+    quality.meanBefore = sumBefore.value / count;
+    quality.meanAfter = sumAfter.value / count;
+    quality.meanDelta = sumDelta.value / count;
+    quality.rmsDelta = std::sqrt(std::max(0.0, squaredDelta.value / count));
+    quality.gradientDeltaRms = quality.gradientCount == 0 ? 0.0
+        : std::sqrt(std::max(0.0, squaredGradientDelta.value / static_cast<double>(quality.gradientCount)));
     quality.materialCount = materialBefore.count;
     quality.hasMaterial = quality.materialCount != 0;
     quality.materialMeanBefore = materialBefore.mean;

@@ -120,9 +120,10 @@ const GridGeometry3D& VolumeView::GetGeometry() const noexcept { return m_input.
 std::size_t VolumeView::GetCount() const noexcept { return *GetGridVoxelCount(GetGeometry()); }
 
 ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& request,
-    const ArtifactConfig& config, std::size_t& requiredBytes) noexcept
+    const ArtifactConfig& config, std::size_t& requiredBytes, int* diffusionWorkerCount) noexcept
 {
     requiredBytes = 0;
+    if (diffusionWorkerCount) *diffusionWorkerCount = 1;
     if (!input.image || !input.image->GetValid() || input.image->GetComponentCount() != 1) return ArtifactError::InvalidData;
     const auto type = input.image->GetValueType();
     if (type != ImageValueType::UInt8 && type != ImageValueType::UInt16
@@ -167,10 +168,23 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
     const auto validityBytes = input.image->GetValidityMask() ? input.image->GetValidityMask()->size() : 0;
     if (!AddBytes(requiredBytes, input.image->GetValues()->size(), 1)
         || !AddBytes(requiredBytes, count, 2 * sizeof(float)) || !AddBytes(requiredBytes, validityBytes, 3)
-        || !AddBytes(requiredBytes, ringBytes, 1) || !AddBytes(requiredBytes, diffusionCount, 24)
+        || !AddBytes(requiredBytes, ringBytes, 1)
         || !AddBytes(requiredBytes, 1, 1024 * 1024)) return ArtifactError::TooLarge;
     for (const auto& mask : { input.processing, input.protection, input.material }) {
         if (mask && !AddBytes(requiredBytes, mask->GetValues()->size(), 1)) return ArtifactError::TooLarge;
+    }
+    if (diffusionCount != 0) {
+        // 每个独立 VTK 块：float 输入/输出 + 两份 double 迭代缓冲。
+        std::size_t workerBytes = 0;
+        if (!AddBytes(workerBytes, diffusionCount, 24)) return ArtifactError::TooLarge;
+        const auto& d = *request.diffusion;
+        const auto slabCount = static_cast<std::size_t>(1 + (grid.dimensions[2] - 1) / d.slabDepth);
+        const auto available = config.memoryBudgetBytes > requiredBytes
+            ? config.memoryBudgetBytes - requiredBytes : 0;
+        const auto workers = std::max<std::size_t>(1,
+            std::min({std::size_t{8}, slabCount, available / workerBytes}));
+        if (diffusionWorkerCount) *diffusionWorkerCount = static_cast<int>(workers);
+        if (!AddBytes(requiredBytes, workerBytes, workers)) return ArtifactError::TooLarge;
     }
     return requiredBytes > config.memoryBudgetBytes ? ArtifactError::TooLarge : ArtifactError::None;
 }
@@ -180,7 +194,8 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
 {
     AlgorithmResult result;
     try {
-        result.error = GetInputError(input, request, config, result.requiredBytes);
+        int diffusionWorkers = 1;
+        result.error = GetInputError(input, request, config, result.requiredBytes, &diffusionWorkers);
         if (result.error != ArtifactError::None) return result;
         const VolumeView source(input);
         const bool hasProcessing = (request.ring && request.ring->strength > 0.0)
@@ -191,6 +206,7 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
             if ((i & 4095) == 0) {
                 result.error = control.GetError();
                 if (result.error != ArtifactError::None) return result;
+                control.progress.store(static_cast<unsigned int>(10.0 * i / values.size()), std::memory_order_relaxed);
             }
             if (hasProcessing && !source.GetValid(i)) { result.error = ArtifactError::UnsupportedValidity; return result; }
             if (input.image->GetValueType() == ImageValueType::Float32)
@@ -198,19 +214,23 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
             else values[i] = static_cast<float>(source.GetValue(i));
         }
         if (request.ring && request.ring->strength > 0.0) {
+            control.progress.store(10, std::memory_order_relaxed);
             result.error = BuildRingCorrection(source.GetGeometry(), *request.ring, values, control, result.quality);
             if (result.error != ArtifactError::None) return result;
         }
         if (request.diffusion && request.diffusion->factor > 0.0) {
-            result.error = BuildDiffusion(source.GetGeometry(), *request.diffusion, values, control);
+            control.progress.store(40, std::memory_order_relaxed);
+            result.error = BuildDiffusion(source.GetGeometry(), *request.diffusion, values, control, diffusionWorkers);
             if (result.error != ArtifactError::None) return result;
         }
         // 2. 两种算法均使用完整阶段上下文，最后才限制写回；新无效值回退并报告。
+        control.progress.store(75, std::memory_order_relaxed);
         const auto& noData = input.image->GetMetadata().scalar.noData;
         for (std::size_t i = 0; i < values.size(); ++i) {
             if ((i & 4095) == 0) {
                 result.error = control.GetError();
                 if (result.error != ArtifactError::None) return result;
+                control.progress.store(75 + static_cast<unsigned int>(5.0 * i / values.size()), std::memory_order_relaxed);
             }
             const bool isCollision = source.GetValid(i)
                 && (!std::isfinite(values[i]) || (noData && values[i] == *noData));
@@ -222,16 +242,19 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
             }
         }
         std::array<double, 2> range{};
+        control.progress.store(80, std::memory_order_relaxed);
         result.error = BuildQuality(input, values, control, result.quality, range);
         if (result.error != ArtifactError::None) return result;
         result.report = CreateQualityReport(result.quality);
         result.parameters = CreateParameters(request);
         auto metadata = input.image->GetMetadata();
         metadata.source = { ImageSourceKind::Memory, {}, values.size() * sizeof(float), {} };
+        control.progress.store(95, std::memory_order_relaxed);
         auto bytes = std::make_shared<std::vector<std::uint8_t>>(values.size() * sizeof(float));
         std::memcpy(bytes->data(), values.data(), bytes->size());
         // 质量评估已结束；冻结 payload 前释放 float 工作卷，避免三份输出整卷重叠。
         std::vector<float>{}.swap(values);
+        control.progress.store(97, std::memory_order_relaxed);
         result.publishBytes = bytes->size();
         if (!AddBytes(result.publishBytes, input.image->GetValidityMask() ? input.image->GetValidityMask()->size() : 0, 1)
             || !AddBytes(result.publishBytes, 1, 64 * 1024)) { result.error = ArtifactError::TooLarge; return result; }

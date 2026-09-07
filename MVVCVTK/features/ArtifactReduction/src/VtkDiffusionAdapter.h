@@ -4,5 +4,5 @@
 namespace ArtifactReduction {
 ArtifactError BuildDiffusion(const GridGeometry3D& grid,
     const ArtifactDiffusionParams& params, std::vector<float>& values,
-    TaskControl& control);
+    TaskControl& control, int workerCount = 1);
 }

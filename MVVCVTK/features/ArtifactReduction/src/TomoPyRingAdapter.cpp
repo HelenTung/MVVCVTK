@@ -117,7 +117,7 @@ ArtifactError BuildRingCorrection(const GridGeometry3D& grid,
                         }
                     }
                     const auto done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
-                    const auto progress = static_cast<unsigned int>(40.0 * done / grid.dimensions[params.axis]);
+                    const auto progress = 10 + static_cast<unsigned int>(30.0 * done / grid.dimensions[params.axis]);
                     auto prior = control.progress.load(std::memory_order_relaxed);
                     while (prior < progress && !control.progress.compare_exchange_weak(prior, progress, std::memory_order_relaxed)) {}
                 }

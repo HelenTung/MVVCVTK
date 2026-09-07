@@ -539,29 +539,72 @@ namespace {
 
     void PrintDemoHelp()
     {
-        std::cout << "\n=== 集成功能演示（请先激活任一视图窗口）===\n"
-            << "字母快捷键需英文输入状态；出现拼音候选框时可按 Shift 切换。F1 被其他软件占用时可用 Ctrl+F1 查看帮助。\n"
-            << "F1 帮助 | F2 图像描述与数据图 | F3 标签图与采样值 | F4 场景与帧状态 | F5 适配视图\n"
-            << "裁剪：O 方框，P 平面，1 保留内部，2 移除内部；生成结果前先拖动控件\n"
-            << "      Ctrl+7 生成结果，Ctrl+8 显示结果，Ctrl+9 恢复源数据，4/5 撤销/重做\n"
-            << "孔隙分析：G 开始分析，H 隐藏/显示\n"
-            << "渲染：L/Shift+L 体渲染质量，I/Shift+I 等值面质量，C/Shift+C 颜色，V/Shift+V 不透明度\n";
+        std::cout << "\n========== main 操作帮助 ==========\n"
+            << "完整帮助和详细结果输出到启动程序的终端；窗口标题只显示简短状态。\n"
+            << "运行 MVVCVTK.exe --help 可只查看帮助，不加载体数据、不创建视图窗口。\n"
+            << "操作前先点击任一视图窗口。字母键使用英文输入状态；有拼音候选框时按 Shift 切换。\n"
+            << "下文的大写字母表示键名，单按 B 即可；只有明确写出 Shift+B 时才需要按住 Shift。\n"
+            << "F1 或 Ctrl+F1：重新输出本帮助；F1 被其他软件占用时使用 Ctrl+F1。\n"
+            << "\n【先完成一条真实数据流程】\n"
+            << "  1. 用 --input=路径 和 --dimensions=X,Y,Z 启动，等待“真实数据已就绪”。\n";
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        std::cout << "  2. 按 U，等待阈值估计完成；A 窗口会应用估计出的等值面阈值。\n";
+#endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-        std::cout << "零件分割：B 开始分析，Shift+B 隐藏/显示全部，Ctrl+B 清除，Alt+B 取消\n"
-            << "          N/Shift+N 选择下一个/上一个，Ctrl+H 隐藏/显示所选零件，Ctrl+R 标记已审核\n";
+        std::cout << "  3. 按 B，等待“零件分割：成功”；再用 N 选择零件，按 F7 准备默认合并候选。\n"
+            << "  4. 等待“候选结果已就绪”，核对终端中的零件数，再按 Ctrl+F7 确认。\n";
+#endif
+        std::cout << "  裁切、伪影校正和网格提取可分别按下面的流程使用。任务已请求不等于任务已完成。\n"
+            << "\n【窗口、查看状态与渲染】\n"
+            << "  A：三维等值面；E：体渲染；B/C/D：上下、前后、左右方向切片。\n"
+            << "  F2：输出当前图像的尺寸、间距、数据版本和数据图信息。\n"
+            << "  F3：输出标签数据与采样值；F4：输出场景、渲染帧及就绪状态。\n"
+            << "  F5：重置所有视图，使模型重新适配窗口。\n"
+            << "  L / Shift+L：E 窗口体渲染质量升/降一档。I / Shift+I：A 窗口等值面质量升/降一档。\n"
+            << "  C / Shift+C：调整显示颜色；V / Shift+V：提高/降低不透明度。\n"
+            << "  显示质量档位只调整渲染，不会把算法输入改成较小的体数据。\n"
+            << "\n【裁切：先预览，再生成并选择算法输入】\n"
+            << "  预览：按 O 创建方框，或按 P 创建平面；按 1 保留内部，按 2 移除内部，然后拖动控件。\n"
+            << "  0：将当前裁切编辑模式设为不移除；它不会清空已提交的裁切历史。\n"
+            << "  4 / 5：撤销/重做当前裁切历史中的一步；Alt+0..9：跳到已存在的对应历史节点。\n"
+            << "  历史跳转只改变裁切步骤；恢复裁切源输入使用 Ctrl+9。\n"
+            << "  Escape：退出裁切控件，已生效的裁切仍保留；退出控件不等于恢复完整输入。\n"
+            << "  Ctrl+7：根据已提交的裁切步骤生成结果；选择保留/移除模式，拖动后松开鼠标并等待提交。\n"
+            << "  Ctrl+8：生成成功后，将裁切结果设为当前输入，后续分割/网格/校正才会读取该结果。\n"
+            << "  Ctrl+9：重新选择本次裁切记录的源数据；需要该源版本仍可用。\n"
+            << "  兼容快捷键：Ctrl+3 等同 Ctrl+7，普通数字 6 等同 Ctrl+9。\n"
+            << "  例：O → 1 → 拖动右侧控件 → Ctrl+7 → 等待完成 → Ctrl+8 → U → B。\n"
+            << "  裁切结果保留原网格尺寸，并用有效性掩码记录保留区域；不会按框大小减少整卷内存。\n"
+            << "\n【孔隙分析】\n"
+            << "  G：对当前输入启动分析；进度和孔隙统计显示在 E 窗口标题及终端中。\n"
+            << "  H：隐藏/显示孔隙覆盖层，保留分析数据。\n"
+            << "  孔隙交互状态下按 Escape：退出孔隙显示、清除当前孔隙结果选择，并请求停止运行中的任务。\n"
+            << "  G 使用 main 预设参数，真实数据的绝对阈值为 0.172；U 不会自动修改这个阈值。\n";
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        std::cout << "\n【零件分割与选择】\n"
+            << "  B：按 A 窗口当前等值面阈值重新分割当前输入；建议先按 U 并等待阈值估计完成。\n"
+            << "  N / Shift+N：选择下一个/上一个零件；未选择时从第一个零件开始。\n"
+            << "  --part-picking：启动时额外启用鼠标点击选件；键盘 N 选择无需此选项。\n"
+            << "  Ctrl+H：切换所选零件的可见性；Ctrl+R：切换所选零件的已审核标记。\n"
+            << "  Shift+B：隐藏/显示全部零件覆盖层；Alt+B：请求停止正在运行的零件任务。\n"
+            << "  Ctrl+B：清除当前零件功能结果和显示。隐藏、清除均不保证数据图历史立即释放内存。\n";
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-        std::cout << "表面确定：U 估计 ISO50 并应用等值面阈值，Ctrl+U 清除估计，Alt+U 取消\n";
+        std::cout << "\n【自动阈值】\n"
+            << "  U：估计 ISO50 等值面阈值，成功后应用到 A 窗口；此操作只估计阈值。\n"
+            << "  Ctrl+U：清除表面确定功能结果和网格覆盖层，保留已应用的视图阈值；Alt+U：取消当前任务。\n"
+            << "  需要网格时，在阈值就绪后按 K；详见下方“表面网格”。VS 调试时用 K 避开系统 F12 中断。\n";
 #endif
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
-        std::cout << "模型旋转：J 启用/退出 | 拖动旋转 | Shift+J 绕 Z 轴旋转 +15 度 | Ctrl+J 绕 Z 轴旋转 -15 度 | Alt+J 撤销\n"
-            << "旋转工具：Shift+拖动平移，Ctrl+Shift+拖动缩放；Escape 取消当前拖动\n";
+        std::cout << "\n【模型旋转】\n"
+            << "  J：启用/退出旋转工具；启用后拖动旋转，Shift+拖动平移，Ctrl+Shift+拖动缩放。\n"
+            << "  Shift+J / Ctrl+J：绕 Z 轴旋转 +15 / -15 度；Alt+J：撤销上一次模型变换。\n"
+            << "  Escape：取消尚未结束的拖动。旋转入口会先关闭裁切控件，保留已经提交的裁切。\n";
 #endif
-        std::cout << "M 切换视图模式 | S 导出数据 | T 导出切片 | Escape 退出当前工具/退出程序\n"
-            << "--demo：使用包含两个对象的小型体数据进行交互演示\n"
-            << "--demo-audit：通过上述快捷键执行验证后退出\n"
-            << "--real-audit：使用主程序的真实输入数据依次执行 U、B，并测量主线程响应时间\n"
-            << "结果和进度显示在窗口标题中；按 F2/F3/F4 可在此处输出详情。\n" << std::flush;
+        std::cout << "\n【其他操作】\n"
+            << "  M：切换当前视图的交互模式。S：导出数据（PLY）；T：导出切片。导出目标按 main 配置为 F:\\data。\n"
+            << "  Escape 优先交给当前工具处理；无活动工具时将当前视图切回导航模式。\n"
+            << "  Escape 不用于关闭程序；关闭程序使用窗口关闭按钮。\n";
         PrintFeatureTestHelp();
     }
 
@@ -1486,7 +1529,7 @@ namespace {
                 return SwitchQuality(m_isoTarget, -1);
             case ControlAction::Help:
                 PrintDemoHelp();
-                (void)SetDemoStatus("F1 帮助 | F2 数据 | F3 标签 | F4 帧状态 | F5 适配视图 | U 表面 | B 零件 | G 孔隙");
+                (void)SetDemoStatus("完整操作帮助已输出到启动终端；包含操作顺序、候选确认、裁切与内存说明");
                 return true;
             case ControlAction::Data: return PrintData();
             case ControlAction::Labels: return PrintLabels();
@@ -2419,6 +2462,10 @@ int main(int argc, char* argv[])
     // 源码与窄字符串均使用 UTF-8，控制台采用相同编码显示中文。
     (void)SetConsoleOutputCP(CP_UTF8);
 #endif
+    if (GetArgFound(argc, argv, "--help")) {
+        PrintDemoHelp();
+        return 0;
+    }
     FeatureTestOptions toolOptions;
     try { toolOptions = GetFeatureTestOptions(argc, argv); }
     catch (const std::exception& error) {
