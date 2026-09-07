@@ -32,7 +32,7 @@
 
 namespace {
 
-constexpr std::string_view featureId = "SurfaceDetermination";
+constexpr std::string_view featureId = "surface-determination";
 constexpr std::size_t completionBatchLimit = 8;
 
 bool GetTargetsUsed(const HostViewTargets& targets)

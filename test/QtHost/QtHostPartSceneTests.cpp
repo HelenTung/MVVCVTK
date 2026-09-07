@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr auto featureId = "PartSegmentation";
+constexpr auto featureId = "part-segmentation";
 constexpr auto primaryViewId = "part-scene-primary";
 constexpr auto timerViewId = "part-scene-timer";
 

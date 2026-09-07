@@ -108,7 +108,7 @@ ArtifactReductionHostFeature::~ArtifactReductionHostFeature() noexcept = default
 
 std::string_view ArtifactReductionHostFeature::GetFeatureId() const noexcept
 {
-    return "ArtifactReduction";
+    return "artifact-reduction";
 }
 
 FeatureDataContract ArtifactReductionHostFeature::GetDataContract() const

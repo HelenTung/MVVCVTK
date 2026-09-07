@@ -35,7 +35,7 @@
 
 namespace {
 
-constexpr std::string_view featureId = "PartSegmentation";
+constexpr std::string_view featureId = "part-segmentation";
 constexpr std::string_view partResultBinding =
     "analysis.parts.active";
 const DataTypeId partTableType{

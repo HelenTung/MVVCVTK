@@ -31,19 +31,19 @@ BuildSourceHeaders(
     ${MVVCVTK_PART_API_HEADERS}
 )
 
-add_library(mvvcvtk_part_segmentation STATIC)
+add_library(part_segmentation STATIC)
 add_library(
     MVVCVTK::PartSegmentation
-    ALIAS mvvcvtk_part_segmentation
+    ALIAS part_segmentation
 )
 target_sources(
-    mvvcvtk_part_segmentation
+    part_segmentation
     PRIVATE
         ${MVVCVTK_PART_SOURCES}
         ${MVVCVTK_PART_API_HEADERS}
 )
 target_include_directories(
-    mvvcvtk_part_segmentation
+    part_segmentation
     PUBLIC
         "$<BUILD_INTERFACE:${MVVCVTK_PART_SOURCE_API_INCLUDE_DIR}>"
     PRIVATE
@@ -56,19 +56,19 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Services"
 )
 target_link_libraries(
-    mvvcvtk_part_segmentation
+    part_segmentation
     PUBLIC MVVCVTK::FeatureSPI
     PRIVATE
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
 )
-SetTargetDefaults(mvvcvtk_part_segmentation)
-SetApiDefaults(mvvcvtk_part_segmentation)
+SetTargetDefaults(part_segmentation)
+SetApiDefaults(part_segmentation)
 set_target_properties(
-    mvvcvtk_part_segmentation
+    part_segmentation
     PROPERTIES
-        OUTPUT_NAME MVVCVTKPartSegmentation
-        PROJECT_LABEL MVVCVTKPartSegmentation
+        OUTPUT_NAME PartSegmentation
+        PROJECT_LABEL PartSegmentation
         FOLDER "MVVCVTK/Host/Features"
 )
 source_group(

@@ -9,10 +9,10 @@ set_target_properties(mvvcvtk_tomopy_ring PROPERTIES
     MSVC_DEBUG_INFORMATION_FORMAT Embedded
     FOLDER "MVVCVTK/Host/Features/Private")
 
-add_library(mvvcvtk_artifact_reduction STATIC)
-add_library(MVVCVTK::ArtifactReduction ALIAS mvvcvtk_artifact_reduction)
+add_library(artifact_reduction STATIC)
+add_library(MVVCVTK::ArtifactReduction ALIAS artifact_reduction)
 
-target_sources(mvvcvtk_artifact_reduction
+target_sources(artifact_reduction
     PRIVATE
         src/ArtifactReductionAlgorithm.h
         src/ArtifactReductionAlgorithm.cpp
@@ -30,17 +30,17 @@ target_sources(mvvcvtk_artifact_reduction
             include/Host/ArtifactReductionHostFeature.h
             include/Host/ArtifactReductionHostTypes.h
 )
-target_include_directories(mvvcvtk_artifact_reduction
+target_include_directories(artifact_reduction
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
-target_link_libraries(mvvcvtk_artifact_reduction
+target_link_libraries(artifact_reduction
     PUBLIC MVVCVTK::FeatureSPI
     PRIVATE mvvcvtk_tomopy_ring VTK::ImagingGeneral)
-SetTargetDefaults(mvvcvtk_artifact_reduction)
-set_target_properties(mvvcvtk_artifact_reduction PROPERTIES
-    OUTPUT_NAME MVVCVTKArtifactReduction
-    PROJECT_LABEL MVVCVTKArtifactReduction
+SetTargetDefaults(artifact_reduction)
+set_target_properties(artifact_reduction PROPERTIES
+    OUTPUT_NAME ArtifactReduction
+    PROJECT_LABEL ArtifactReduction
     FOLDER "MVVCVTK/Host/Features"
 )
 # 仓内目标：不 staging 到 SDK，不 install/export，不添加 package component。

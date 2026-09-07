@@ -14,13 +14,13 @@ set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceOverlayStrategy.cpp
 )
 
-add_library(mvvcvtk_surface_determination STATIC)
+add_library(surface_determination STATIC)
 add_library(
     MVVCVTK::SurfaceDetermination
-    ALIAS mvvcvtk_surface_determination
+    ALIAS surface_determination
 )
 target_sources(
-    mvvcvtk_surface_determination
+    surface_determination
     PRIVATE ${MVVCVTK_SURFACE_SOURCES}
     PUBLIC
         FILE_SET api_headers
@@ -29,14 +29,14 @@ target_sources(
         FILES ${MVVCVTK_SURFACE_API_HEADERS}
 )
 target_include_directories(
-    mvvcvtk_surface_determination
+    surface_determination
     PUBLIC
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 target_link_libraries(
-    mvvcvtk_surface_determination
+    surface_determination
     PUBLIC MVVCVTK::FeatureSPI
     PRIVATE
         MVVCVTKInternal::FeatureSupport
@@ -46,12 +46,12 @@ target_link_libraries(
         VTK::FiltersGeneral
         VTK::RenderingCore
 )
-SetTargetDefaults(mvvcvtk_surface_determination)
+SetTargetDefaults(surface_determination)
 set_target_properties(
-    mvvcvtk_surface_determination
+    surface_determination
     PROPERTIES
-        OUTPUT_NAME MVVCVTKSurfaceDetermination
-        PROJECT_LABEL MVVCVTKSurfaceDetermination
+        OUTPUT_NAME SurfaceDetermination
+        PROJECT_LABEL SurfaceDetermination
         FOLDER "MVVCVTK/Host/Features"
 )
 source_group(

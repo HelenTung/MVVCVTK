@@ -45,7 +45,7 @@ public:
     bool ClearSource()
     {
         if (!m_sourcePort) return true;
-        if (!m_sourcePort->SetInteracting({ "ModelRotation", "drag" }, false)) return false;
+        if (!m_sourcePort->SetInteracting({ "model-rotation", "drag" }, false)) return false;
         m_sourcePort.reset();
         return true;
     }
@@ -269,7 +269,7 @@ public:
         auto gesture = BuildGesture(event);
         if (!gesture || !StartEdit()) return result(false);
         m_sourcePort = m_context.views->GetFeaturePort(event.viewId);
-        if (!m_sourcePort || !m_sourcePort->SetInteracting({ "ModelRotation", "drag" }, true)) {
+        if (!m_sourcePort || !m_sourcePort->SetInteracting({ "model-rotation", "drag" }, true)) {
             (void)StopGesture();
             return result(false);
         }
@@ -294,7 +294,7 @@ public:
 ModelRotationHostFeature::ModelRotationHostFeature(ModelRotationConfig config)
     : m_impl(std::make_unique<Impl>(std::move(config))) {}
 ModelRotationHostFeature::~ModelRotationHostFeature() noexcept = default;
-std::string_view ModelRotationHostFeature::GetFeatureId() const noexcept { return "ModelRotation"; }
+std::string_view ModelRotationHostFeature::GetFeatureId() const noexcept { return "model-rotation"; }
 
 bool ModelRotationHostFeature::AttachHost(const HostFeatureContext& context)
 {
