@@ -18,11 +18,13 @@
 #include <vtkActor.h>
 #include <vtkAlgorithmOutput.h>
 #include <vtkCellArray.h>
+#include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkDataObject.h>
 #include <vtkDoubleArray.h>
 #include <vtkFlyingEdges3D.h>
+#include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkIdTypeArray.h>
 #include <vtkImageResample.h>
@@ -86,7 +88,7 @@ static_assert(static_cast<int>(VolumeQuality::Ultra) == 4);
 
 class GpuProbeStrategy final : public VolumeStrategy {
 public:
-    bool SetProbeBytes(const std::uint64_t freeBytes) noexcept
+    bool SetProbeBytes(const std::optional<std::uint64_t> freeBytes) noexcept
     {
         m_freeBytes = freeBytes;
         return true;
@@ -107,9 +109,25 @@ private:
         return m_freeBytes;
     }
 
-    std::uint64_t m_freeBytes = 0;
+    std::optional<std::uint64_t> m_freeBytes = 1024ULL * 1024ULL * 1024ULL;
     mutable std::uint64_t m_lastQueryReleaseCount = 0;
     mutable bool m_isQueryOrderValid = true;
+};
+
+// 与 QVTK 一样由宿主持有/激活 context，保留 Generic 的 readiness 门禁。
+class ExternalContextProbe final : public vtkGenericOpenGLRenderWindow {
+public:
+    static ExternalContextProbe* New() { return new ExternalContextProbe; }
+    vtkTypeMacro(ExternalContextProbe, vtkGenericOpenGLRenderWindow);
+    vtkRenderWindow* externalContext = nullptr;
+    void MakeCurrent() override
+    {
+        if (externalContext) externalContext->MakeCurrent();
+    }
+    bool IsCurrent() override
+    {
+        return externalContext && externalContext->IsCurrent();
+    }
 };
 
 double GetRenderRate(const bool isInteracting) noexcept
@@ -618,6 +636,164 @@ int GetIsoLodControlFailCount()
                 == stableProfile.outputDimensions
             && controller.GetQuality() == VolumeQuality::Auto,
         "Iso LOD rejects overflow and invalid quality without mutation") ? 0 : 1;
+    return failureCount;
+}
+
+int GetColdVolumeGpuFailCount()
+{
+    int failureCount = 0;
+    const std::array<unsigned short, 3> singleBlock{ 1, 1, 1 };
+    const std::array<int, 3> dimensions{ 64, 64, 64 };
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(dimensions.data());
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),
+        image->GetNumberOfPoints(), static_cast<unsigned char>(128));
+
+    // 小输入配小 mapper 回退预算，稳定复现冷窗口的过度分块；
+    // 驱动余量由 probe 控制，测试不依赖 CI 显卡容量。
+    const std::array<std::optional<std::uint64_t>, 4> freeBytes{
+        1024ULL * 1024ULL, 64ULL * 1024ULL, std::nullopt, 1024ULL * 1024ULL
+    };
+    for (std::size_t index = 0; index < freeBytes.size(); ++index) {
+        GpuProbeStrategy strategy;
+        (void)strategy.SetProbeBytes(freeBytes[index]);
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        vtkSmartPointer<vtkRenderWindow> externalContext;
+        auto window = vtkSmartPointer<vtkRenderWindow>::New();
+        if (index == 3) {
+            externalContext = vtkSmartPointer<vtkRenderWindow>::New();
+            externalContext->SetOffScreenRendering(1);
+            externalContext->SetSize(64, 64);
+            externalContext->Render();
+            auto generic = vtkSmartPointer<ExternalContextProbe>::New();
+            generic->externalContext = externalContext;
+            generic->SetReadyForRendering(false);
+            window = generic;
+        }
+        window->SetOffScreenRendering(1);
+        window->SetSize(64, 64);
+        window->AddRenderer(renderer);
+        strategy.AttachRenderer(renderer);
+        auto* volume = vtkVolume::SafeDownCast(strategy.GetMainProp());
+        auto* mapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper());
+        mapper->SetMaxMemoryInBytes(64ULL * 1024ULL);
+        RenderParams params;
+        params.volumeQuality = VolumeQuality::Ultra;
+        params.volumeTransferFunction.colorNodes = {
+            { 0.0, 0.0, 0.0, 0.0 }, { 255.0, 1.0, 1.0, 1.0 }
+        };
+        params.volumeTransferFunction.opacityNodes = { { 0.0, 0.0 }, { 255.0, 1.0 } };
+        bool valid = strategy.SetVisualState(params,
+            UpdateFlags::Quality | UpdateFlags::VolumeTransfer)
+            && strategy.SetInputData(image, nullptr);
+        const auto input = mapper->GetInput();
+        const auto revision = strategy.GetTransitionState().stats.activeRevision;
+        const auto builds = strategy.GetResampleBuildCount();
+        valid = valid && window->GetNeverRendered() != 0
+            && strategy.GetGpuQueryCount() == 0
+            && strategy.GetGpuPartitions() != singleBlock;
+        params.isInteracting = true;
+        valid = strategy.SetVisualState(params, UpdateFlags::RenderRate) && valid;
+        const double ray = mapper->GetSampleDistance();
+        const double screenSample = mapper->GetImageSampleDistance();
+        renderer->ResetCamera();
+        if (auto* generic = vtkGenericOpenGLRenderWindow::SafeDownCast(window)) {
+            generic->Render();
+            valid = valid && generic->GetNeverRendered() != 0
+                && strategy.GetGpuQueryCount() == 0;
+            generic->SetReadyForRendering(true);
+        }
+        window->Render();
+        window->WaitForCompletion();
+        const auto partitions = strategy.GetGpuPartitions();
+        const auto state = strategy.GetTransitionState();
+        const auto releases = strategy.GetGpuReleaseCount();
+        window->Render();
+        window->WaitForCompletion();
+        valid = valid && strategy.GetGpuQueryCount() == 1
+            && strategy.GetQueryOrderValid()
+            && (index == 0 || index == 3
+                ? partitions == singleBlock : partitions != singleBlock)
+            && strategy.GetGpuPartitions() == partitions
+            && state.stats.partitions == partitions
+            && state.status == RenderProductStatus::Active
+            && state.stats.activeRevision == revision
+            && state.stats.resolvedDimensions == dimensions
+            && state.stats.isPreview
+            && mapper->GetInput() == input
+            && mapper->GetSampleDistance() == ray
+            && mapper->GetImageSampleDistance() == screenSample
+            && strategy.GetMapperInputCount() == 1
+            && strategy.GetResampleBuildCount() == builds
+            && strategy.GetGpuReleaseCount() == releases
+            && strategy.GetGpuPreloadCount() == 0;
+        failureCount += GetCaseResult(valid, index == 0
+            ? "Cold volume resolves GPU budget on first draw without rebuilding LOD"
+            : index == 1 ? "Cold volume retains blocks when driver VRAM is limited"
+            : index == 2 ? "Cold volume retains fallback without repeated queries when extension is absent"
+            : "Generic volume waits for host readiness before first GPU admission") ? 0 : 1;
+
+        if (index == 0) {
+            // 同一个 window 对象也可能重建 OpenGL context。预算为零时
+            // 必须报告本帧失败、保留 CPU 产品，并允许下次正常 draw 重试。
+            window->Finalize();
+            (void)strategy.SetProbeBytes(0);
+            int renderErrors = 0;
+            auto errorCallback = vtkSmartPointer<vtkCallbackCommand>::New();
+            errorCallback->SetClientData(&renderErrors);
+            errorCallback->SetCallback([](vtkObject*, unsigned long, void* data, void*) {
+                ++*static_cast<int*>(data);
+            });
+            const auto errorTag = window->AddObserver(vtkCommand::ErrorEvent, errorCallback);
+            window->Render();
+            valid = renderErrors == 1 && strategy.GetGpuQueryCount() == 2
+                && mapper->GetInput() == input
+                && strategy.GetGpuPartitions() == singleBlock
+                && strategy.GetTransitionState().stats.activeRevision == revision;
+            (void)strategy.SetProbeBytes(1024ULL * 1024ULL);
+            window->Render();
+            window->WaitForCompletion();
+            window->RemoveObserver(errorTag);
+            errorCallback->SetClientData(nullptr);
+            valid = valid && renderErrors == 1 && strategy.GetGpuQueryCount() == 3
+                && strategy.GetGpuPartitions() == singleBlock
+                && strategy.GetMapperInputCount() == 1;
+            failureCount += GetCaseResult(valid,
+                "Recreated volume context reports admission failure and retries without a new LOD") ? 0 : 1;
+            auto replacementRenderer = vtkSmartPointer<vtkRenderer>::New();
+            auto replacementWindow = vtkSmartPointer<vtkRenderWindow>::New();
+            replacementWindow->SetOffScreenRendering(1);
+            replacementWindow->SetSize(64, 64);
+            replacementWindow->AddRenderer(replacementRenderer);
+            strategy.DetachRenderer(renderer);
+            strategy.AttachRenderer(replacementRenderer);
+            (void)strategy.SetProbeBytes(64ULL * 1024ULL);
+            replacementRenderer->ResetCamera();
+            replacementWindow->Render();
+            replacementWindow->WaitForCompletion();
+            valid = strategy.GetGpuQueryCount() == 4
+                && strategy.GetGpuPartitions() != singleBlock
+                && mapper->GetInput() == input;
+            auto reloaded = vtkSmartPointer<vtkImageData>::New();
+            reloaded->ShallowCopy(image);
+            (void)strategy.SetProbeBytes(1024ULL * 1024ULL);
+            valid = strategy.SetInputData(reloaded, nullptr) && valid;
+            replacementWindow->Render();
+            replacementWindow->WaitForCompletion();
+            valid = valid && strategy.GetGpuQueryCount() == 5
+                && strategy.GetGpuPartitions() == singleBlock
+                && strategy.GetMapperInputCount() == 2
+                && strategy.GetQueryOrderValid();
+            failureCount += GetCaseResult(valid,
+                "Volume rechecks a replacement context and keeps warm reload admission") ? 0 : 1;
+            strategy.DetachRenderer(replacementRenderer);
+        }
+        else {
+            strategy.DetachRenderer(renderer);
+        }
+        window->Finalize();
+    }
     return failureCount;
 }
 
@@ -3208,6 +3384,7 @@ int GetViewFailCount()
     failureCount += GetResampleFailCount();
     failureCount += GetLodControlFailCount();
     failureCount += GetIsoLodControlFailCount();
+    failureCount += GetColdVolumeGpuFailCount();
     failureCount += GetRenderContractFailCount();
     return failureCount;
 }

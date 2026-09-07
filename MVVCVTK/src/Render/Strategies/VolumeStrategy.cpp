@@ -96,6 +96,8 @@ public:
     static Mapper* New();
     vtkTypeMacro(Mapper, vtkOpenGLGPUVolumeRayCastMapper);
 
+    void SetOwner(VolumeStrategy* owner) { m_owner = owner; }
+
     bool SetEffectVolume(vtkVolume* volume)
     {
         if (m_effectVolume.GetPointer() == volume) {
@@ -148,6 +150,20 @@ protected:
 
     void GPURender(vtkRenderer* renderer, vtkVolume* volume) override
     {
+        // 此时原生/Qt 窗口已建立并激活 OpenGL context，而 VTK 尚未
+        // 创建本次 volume texture。只补做 GPU 准入，不递归 Render/PreLoadData。
+        bool isGpuReady = false;
+        try { isGpuReady = !m_owner || m_owner->PrepareGpuRender(renderer); }
+        catch (...) {}
+        if (!isGpuReady) {
+            constexpr char message[] = "The volume GPU admission failed; render deferred.";
+            if (renderer && renderer->GetRenderWindow()) {
+                renderer->GetRenderWindow()->InvokeEvent(
+                    vtkCommand::ErrorEvent, const_cast<char*>(message));
+            }
+            vtkErrorMacro(<< message);
+            return;
+        }
         if (m_binding) {
             (void)m_binding->OnRenderStart(renderer);
         }
@@ -284,6 +300,7 @@ private:
         return true;
     }
 
+    VolumeStrategy* m_owner = nullptr;
     RenderEffectBinding* m_binding = nullptr;
     vtkWeakPointer<vtkVolume> m_effectVolume;
     vtkSmartPointer<EffectPass> m_effectPass;
@@ -355,6 +372,7 @@ VolumeStrategy::VolumeStrategy(
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
+    m_mapper->SetOwner(this);
     // 体渲染的材质、gradient opacity 与前向透明度曲线都以 Composite 合成为契约；
     // 显式固定默认值，避免 VTK 默认策略变化时静默切换显示语义。
     m_mapper->SetBlendModeToComposite();
@@ -381,6 +399,8 @@ VolumeStrategy::VolumeStrategy(
 
 VolumeStrategy::~VolumeStrategy()
 {
+    // endpoint/renderer 可能继续持有 volume/mapper，不能保留已析构的 Strategy。
+    if (m_mapper) m_mapper->SetOwner(nullptr);
     auto* renderer = m_renderer.GetPointer();
     auto* context = renderer ? renderer->GetRenderWindow() : nullptr;
     if (m_resources && context) {
@@ -735,6 +755,7 @@ std::optional<std::uint64_t> VolumeStrategy::GetGpuFreeBytes() const
         return std::nullopt;
     }
     renderWindow->MakeCurrent();
+    if (!renderWindow->IsCurrent()) return std::nullopt;
 
     // 清除早先命令留下的 error，随后只判断本次显存查询是否有效。
     for (int index = 0;
@@ -1329,7 +1350,24 @@ bool VolumeStrategy::SwitchLod(
         || (m_lastMask && !next->mask)) {
         return false;
     }
-    auto& nextLod = *next;
+    if (m_lodController
+        && !m_lodController->SetActiveRatio(next->dimensionRatio)) {
+        return false;
+    }
+    if (!SetGpuInput(*next, false, gpuReleaseUs, gpuUploadUs)) return false;
+    m_activeLod = std::move(next);
+    ++m_mapperInputCount;
+    return true;
+}
+
+bool VolumeStrategy::SetGpuInput(
+    LodEntry& nextLod,
+    const bool isRendering,
+    std::uint64_t& gpuReleaseUs,
+    std::uint64_t& gpuUploadUs)
+{
+    gpuReleaseUs = 0;
+    gpuUploadUs = 0;
 
     auto* oldLod = m_activeLod.get();
     const auto restore = [&]() {
@@ -1455,7 +1493,9 @@ bool VolumeStrategy::SwitchLod(
     }
     bool isGpuBuilt = false;
     try {
-        isGpuBuilt = BuildGpuInput(*nextPartitions);
+        // GPURender 前的补准入直接交给接下来的正常 draw 上传，
+        // 不能在 VTK 的绘制栈中预加载或重入另一帧。
+        isGpuBuilt = isRendering || BuildGpuInput(*nextPartitions);
     }
     catch (const std::exception& error) {
         std::cerr
@@ -1475,22 +1515,36 @@ bool VolumeStrategy::SwitchLod(
         setUploadDuration();
         return false;
     }
-    if (m_lodController
-        && !m_lodController->SetActiveRatio(
-            nextLod.dimensionRatio)) {
-        if (hasGpuLease) (void)restoreGpuLease();
-        if (!restore() && oldLod) {
-            std::cerr
-                << "[VolumeRollback] active mapper restore failed"
-                << '\n';
-        }
-        setUploadDuration();
-        return false;
-    }
     nextLod.partitions = *nextPartitions;
-    m_activeLod = std::move(next);
-    ++m_mapperInputCount;
+    m_gpuContext = vtkOpenGLRenderWindow::SafeDownCast(renderWindow);
+    m_gpuContextTime = m_gpuContext
+        ? m_gpuContext->GetContextCreationTime() : 0;
+    m_isGpuAdmissionPending = !hasRenderedWindow;
     setUploadDuration();
+    return true;
+}
+
+bool VolumeStrategy::PrepareGpuRender(vtkRenderer* renderer)
+{
+    if (!m_activeLod) return true;
+    auto* context = renderer
+        ? vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow()) : nullptr;
+    if (!context || renderer != m_renderer.GetPointer()) return false;
+    if (!m_isGpuAdmissionPending && m_gpuContext.GetPointer() == context
+        && m_gpuContextTime == context->GetContextCreationTime()) {
+        return true;
+    }
+    context->MakeCurrent();
+    if (!context->IsCurrent()) return false;
+    if (m_resources && m_gpuContext && m_gpuContext.GetPointer() != context) {
+        (void)m_resources->ClearGpuReservation(m_gpuContext, this);
+    }
+    std::uint64_t releaseUs = 0;
+    std::uint64_t uploadUs = 0;
+    if (!SetGpuInput(*m_activeLod, true, releaseUs, uploadUs)) return false;
+    m_transition.stats.partitions = m_activeLod->partitions;
+    m_transition.stats.gpuReleaseUs += releaseUs;
+    m_transition.stats.gpuUploadUs += uploadUs;
     return true;
 }
 
@@ -1589,6 +1643,7 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     if (m_resources && oldContext && oldContext != nextContext) {
         (void)m_resources->ClearGpuReservation(oldContext, this);
     }
+    if (oldContext != nextContext) m_isGpuAdmissionPending = true;
     BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren ? ren->GetActiveCamera() : nullptr);
@@ -1605,6 +1660,7 @@ void VolumeStrategy::DetachRenderer(
     BaseVisualStrategy::DetachRenderer(renderer);
     if (current == renderer.GetPointer()) {
         m_renderer = nullptr;
+        m_isGpuAdmissionPending = true;
     }
 }
 

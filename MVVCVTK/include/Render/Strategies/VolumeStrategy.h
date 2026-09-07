@@ -14,6 +14,7 @@
 
 class vtkColorTransferFunction;
 class vtkPiecewiseFunction;
+class vtkOpenGLRenderWindow;
 class VolumeLodController;
 
 // --- 策略 B: 体渲染 ---
@@ -131,6 +132,12 @@ private:
         std::unique_ptr<LodEntry> lod,
         std::uint64_t& gpuReleaseUs,
         std::uint64_t& gpuUploadUs);
+    bool SetGpuInput(
+        LodEntry& lod,
+        bool isRendering,
+        std::uint64_t& gpuReleaseUs,
+        std::uint64_t& gpuUploadUs);
+    bool PrepareGpuRender(vtkRenderer* renderer);
     bool SetVolumeInput(
         vtkSmartPointer<vtkDataObject> data,
         vtkSmartPointer<vtkImageData> validityMask);
@@ -159,8 +166,12 @@ private:
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
     vtkSmartPointer<vtkDataObject> m_lastInput;
     vtkSmartPointer<vtkImageData> m_lastMask;
-    // 非拥有 renderer 弱引用，仅用于相机与 clipping range；renderer 销毁后自动为空。
+    // 非拥有 renderer 弱引用，用于相机及 GPU context；renderer 销毁后自动为空。
     vtkWeakPointer<vtkRenderer> m_renderer;
+    // 冷窗口的分块仅为候选；首个实际 GPU draw 必须补做真实预算准入。
+    vtkWeakPointer<vtkOpenGLRenderWindow> m_gpuContext;
+    vtkMTimeType m_gpuContextTime = 0;
+    bool m_isGpuAdmissionPending = true;
     // 最后一次已折算进 OTF 的全局透明度，通常取 [0,1]；TF 重建或 opacity 更新时同步。
     double m_opacity = 1.0;
     // 当前输入在 input model 坐标中的中心 [x,y,z]；Transform 时提升到 world 作为相机焦点。
