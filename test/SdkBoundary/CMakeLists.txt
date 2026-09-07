@@ -479,29 +479,29 @@ SetHostBinaryGuard(mvvcvtk_host_api)
 SetHostBinaryGuard(mvvcvtk_feature_spi)
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     SetSourceRootGuard(
-        mvvcvtk_orthogonal_crop
+        orthogonal_crop
         INTERFACE_INCLUDE_DIRECTORIES
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include"
     )
     SetSourceRootGuard(
-        mvvcvtk_orthogonal_crop
+        orthogonal_crop
         INCLUDE_DIRECTORIES
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
     )
-    SetHostBinaryGuard(mvvcvtk_orthogonal_crop)
+    SetHostBinaryGuard(orthogonal_crop)
 endif()
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     SetSourceRootGuard(
-        mvvcvtk_gap_analysis
+        gap_analysis
         INTERFACE_INCLUDE_DIRECTORIES
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
     )
     SetSourceRootGuard(
-        mvvcvtk_gap_analysis
+        gap_analysis
         INCLUDE_DIRECTORIES
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
     )
-    SetHostBinaryGuard(mvvcvtk_gap_analysis)
+    SetHostBinaryGuard(gap_analysis)
 endif()
 SetHeaderGuard(
     "${MVVCVTK_FORBID_DATA_PROBE}"

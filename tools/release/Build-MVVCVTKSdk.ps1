@@ -781,8 +781,8 @@ try {
                 '--config', $configuration,
                 '--target',
                 'mvvcvtk_host',
-                'mvvcvtk_orthogonal_crop',
-                'mvvcvtk_gap_analysis',
+                'orthogonal_crop',
+                'gap_analysis',
                 '--parallel'
             )
         }

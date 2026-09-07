@@ -211,12 +211,12 @@ if ($actualHeaders.Count -ne $expectedHeaders.Count -or
 }
 
 $expectedLibraries = @(
-    'Debug/MVVCVTKGapAnalysis.lib'
+    'Debug/GapAnalysis.lib'
     'Debug/MVVCVTKHost.lib'
-    'Debug/MVVCVTKOrthogonalCrop.lib'
-    'Release/MVVCVTKGapAnalysis.lib'
+    'Debug/OrthogonalCrop.lib'
+    'Release/GapAnalysis.lib'
     'Release/MVVCVTKHost.lib'
-    'Release/MVVCVTKOrthogonalCrop.lib'
+    'Release/OrthogonalCrop.lib'
 )
 $libraryRoot = Join-Path $stageRoot 'lib'
 $actualLibraries = @(

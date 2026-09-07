@@ -37,15 +37,15 @@ BuildSourceHeaders(
     ${MVVCVTK_CROP_API_HEADERS}
 )
 
-add_library(mvvcvtk_orthogonal_crop STATIC)
+add_library(orthogonal_crop STATIC)
 target_sources(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PRIVATE
         ${MVVCVTK_CROP_SOURCES}
         ${MVVCVTK_CROP_API_HEADERS}
 )
 target_include_directories(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Algorithms"
@@ -54,18 +54,18 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Routing"
 )
-SetTargetDefaults(mvvcvtk_orthogonal_crop)
-add_library(MVVCVTK::OrthogonalCrop ALIAS mvvcvtk_orthogonal_crop)
+SetTargetDefaults(orthogonal_crop)
+add_library(MVVCVTK::OrthogonalCrop ALIAS orthogonal_crop)
 set_target_properties(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PROPERTIES
-        OUTPUT_NAME MVVCVTKOrthogonalCrop
+        OUTPUT_NAME OrthogonalCrop
         EXPORT_NAME OrthogonalCrop
-        PROJECT_LABEL MVVCVTKOrthogonalCrop
+        PROJECT_LABEL OrthogonalCrop
         FOLDER "MVVCVTK/Host/Features"
 )
 target_sources(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PUBLIC
         FILE_SET api_headers
         TYPE HEADERS
@@ -92,14 +92,14 @@ unset(MVVCVTK_CROP_API_HEADERS)
 unset(MVVCVTK_CROP_SOURCE_API_HEADERS)
 unset(MVVCVTK_CROP_STAGED_API_HEADERS)
 target_include_directories(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PUBLIC
         "$<BUILD_INTERFACE:${MVVCVTK_CROP_SOURCE_API_INCLUDE_DIR}>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
-SetApiDefaults(mvvcvtk_orthogonal_crop)
+SetApiDefaults(orthogonal_crop)
 target_link_libraries(
-    mvvcvtk_orthogonal_crop
+    orthogonal_crop
     PUBLIC
         MVVCVTK::FeatureSPI
         ${MVVCVTK_VTK_PUBLIC_TARGETS}
@@ -107,7 +107,7 @@ target_link_libraries(
         ${MVVCVTK_VTK_TARGETS}
 )
 install(
-    TARGETS mvvcvtk_orthogonal_crop
+    TARGETS orthogonal_crop
     EXPORT MVVCVTKTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/$<CONFIG>"
         COMPONENT Host

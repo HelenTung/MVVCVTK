@@ -74,16 +74,16 @@ BuildSourceHeaders(
     ${MVVCVTK_GAP_API_HEADERS}
 )
 
-add_library(mvvcvtk_gap_analysis STATIC)
+add_library(gap_analysis STATIC)
 target_sources(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PRIVATE
         ${MVVCVTK_GAP_SOURCES}
         include/GapAnalysisTypes.h
         ${MVVCVTK_GAP_API_HEADERS}
 )
 target_include_directories(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Host"
@@ -92,18 +92,18 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Services"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/Services"
 )
-SetTargetDefaults(mvvcvtk_gap_analysis)
-add_library(MVVCVTK::GapAnalysis ALIAS mvvcvtk_gap_analysis)
+SetTargetDefaults(gap_analysis)
+add_library(MVVCVTK::GapAnalysis ALIAS gap_analysis)
 set_target_properties(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PROPERTIES
-        OUTPUT_NAME MVVCVTKGapAnalysis
+        OUTPUT_NAME GapAnalysis
         EXPORT_NAME GapAnalysis
-        PROJECT_LABEL MVVCVTKGapAnalysis
+        PROJECT_LABEL GapAnalysis
         FOLDER "MVVCVTK/Host/Features"
 )
 target_sources(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PUBLIC
         FILE_SET api_headers
         TYPE HEADERS
@@ -132,14 +132,14 @@ unset(MVVCVTK_GAP_API_HEADERS)
 unset(MVVCVTK_GAP_SOURCE_API_HEADERS)
 unset(MVVCVTK_GAP_STAGED_API_HEADERS)
 target_include_directories(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PUBLIC
         "$<BUILD_INTERFACE:${MVVCVTK_GAP_SOURCE_API_INCLUDE_DIR}>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
-SetApiDefaults(mvvcvtk_gap_analysis)
+SetApiDefaults(gap_analysis)
 target_link_libraries(
-    mvvcvtk_gap_analysis
+    gap_analysis
     PUBLIC
         MVVCVTK::FeatureSPI
         ${MVVCVTK_VTK_PUBLIC_TARGETS}
@@ -147,10 +147,10 @@ target_link_libraries(
         "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>"
         ${MVVCVTK_VTK_TARGETS}
 )
-add_dependencies(mvvcvtk_gap_analysis mvvcvtk_gap_kernel)
+add_dependencies(gap_analysis mvvcvtk_gap_kernel)
 
 install(
-    TARGETS mvvcvtk_gap_analysis
+    TARGETS gap_analysis
     EXPORT MVVCVTKTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/$<CONFIG>"
         COMPONENT Host
