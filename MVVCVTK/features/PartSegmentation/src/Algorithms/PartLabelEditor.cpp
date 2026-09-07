@@ -1,4 +1,5 @@
 #include "Algorithms/PartLabelEditor.h"
+#include "Model/LabelMapBuilder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +22,7 @@ public:
     PartFailureReason reason;
 };
 
-void SetFailure(PartFailureReason reason, const char* text)
+[[noreturn]] void SetFailure(PartFailureReason reason, const char* text)
 {
     throw EditFailure(reason, text);
 }
@@ -112,13 +113,21 @@ public:
     {
         // 1. 校验完整输入与预算后，才创建独占的可写标签候选。
         SetInput();
-        m_labels = std::make_shared<std::vector<PartLabelId>>(*m_input.previous.labels);
+        m_labels = std::make_unique<std::vector<PartLabelId>>(*m_input.previous.labels);
         m_editable.resize(m_count);
         m_changed.resize(m_old->partsByLabel.size(), false);
+        std::optional<std::array<int, 6>> actualSplitExtent;
         for (std::size_t i = 0; i < m_count; ++i) {
             CheckStop(i);
             const auto label = (*m_labels)[i];
             const auto index = GetIndex(i);
+            if (m_splitLabel != 0 && label == m_splitLabel) {
+                if (!actualSplitExtent) actualSplitExtent = { index[0], index[0], index[1], index[1], index[2], index[2] };
+                else for (std::size_t axis = 0; axis < 3; ++axis) {
+                    (*actualSplitExtent)[axis * 2] = std::min((*actualSplitExtent)[axis * 2], index[axis]);
+                    (*actualSplitExtent)[axis * 2 + 1] = std::max((*actualSplitExtent)[axis * 2 + 1], index[axis]);
+                }
+            }
             const double validity = m_input.volume.validity
                 ? GetScalar(*m_input.volume.validity, i) : 1.0;
             const bool isProtected = m_locked[label]
@@ -127,12 +136,38 @@ public:
                 && GetInside(index, m_extent)
                 && (!m_input.roiMask || GetMaskPoint(*m_input.roiMask, i));
         }
+        if (m_splitLabel != 0) {
+            if (!actualSplitExtent) SetFailure(PartFailureReason::InvalidEdit, "Split parent has no voxels.");
+            // labels 是归属真源；既有指标未承诺与调用者的当前几何绑定，不能拿旧 bounds 截断父零件。
+            m_splitExtent = *actualSplitExtent;
+            m_splitCount = 1;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                const auto size = static_cast<std::int64_t>(m_splitExtent[axis * 2 + 1])
+                    - m_splitExtent[axis * 2] + 1;
+                m_splitStride[axis] = m_splitCount;
+                if (size <= 0 || static_cast<std::uint64_t>(size)
+                    > std::numeric_limits<std::size_t>::max() / m_splitCount) {
+                    SetFailure(PartFailureReason::InvalidEdit, "Split parent extent is invalid.");
+                }
+                m_splitCount *= static_cast<std::size_t>(size);
+            }
+            constexpr auto splitBytes = sizeof(std::uint32_t) + 2 * sizeof(std::uint8_t)
+                + sizeof(double) + 2 * sizeof(std::size_t);
+            if (m_splitCount > (std::numeric_limits<std::size_t>::max() - m_requiredBytes) / splitBytes) {
+                m_requiredBytes = std::numeric_limits<std::size_t>::max();
+                SetFailure(PartFailureReason::BudgetExceeded, "Split size overflows.");
+            }
+            m_requiredBytes += m_splitCount * splitBytes;
+            if (m_requiredBytes > m_input.maxWorkingBytes) {
+                SetFailure(PartFailureReason::BudgetExceeded, "Split workspace budget exceeded.");
+            }
+        }
         // 2. 每个工具只改变候选；不执行初始阈值分割，也不触碰原始 scalar。
         std::visit([this](const auto& operation) { SetOperation(operation); },
             m_input.request.operation);
         // 编辑结束后目录重建不再读取限制标记，及时释放整卷临时缓冲。
         std::vector<std::uint8_t>{}.swap(m_editable);
-        if (*m_labels == *m_input.previous.labels) {
+        if (m_changeCount == 0) {
             SetFailure(PartFailureReason::NoChange, "Edit changes no voxel ownership.");
         }
         // 3. 统一紧凑编号、重算指标及目录，再验证标签与身份的一致性。
@@ -141,8 +176,13 @@ public:
             CheckStop(0);
             SetFailure(PartFailureReason::InternalError, "Edited catalog is inconsistent.");
         }
+        auto payload = LabelMapBuilder::Build(m_geometry, std::move(m_labels), m_stop);
+        if (!payload) {
+            CheckStop(0);
+            SetFailure(PartFailureReason::InvalidGeometry, "Edited label payload is invalid.");
+        }
         return { PartFailureReason::None, "Label edit candidate is ready.",
-            m_requiredBytes, m_labels, std::move(catalog) };
+            m_requiredBytes, payload->GetLabels(), std::move(catalog), std::move(payload) };
     }
 
     std::size_t GetRequiredBytes() const noexcept { return m_requiredBytes; }
@@ -191,6 +231,21 @@ private:
         for (std::size_t a = 0; a < 3; ++a) {
             if (index[a] > m_geometry.extent[a * 2]) callback(offset - m_stride[a], a);
             if (index[a] < m_geometry.extent[a * 2 + 1]) callback(offset + m_stride[a], a);
+        }
+    }
+
+    template<class Callback>
+    void SendExtentVoxels(const std::array<int, 6>& extent, const Callback& callback) const
+    {
+        std::size_t visited = 0;
+        for (std::int64_t z = extent[4]; z <= extent[5]; ++z) {
+            for (std::int64_t y = extent[2]; y <= extent[3]; ++y) {
+                auto offset = GetOffset({ extent[0], static_cast<int>(y), static_cast<int>(z) });
+                for (std::int64_t x = extent[0]; x <= extent[1]; ++x, ++offset) {
+                    CheckStop(visited++);
+                    callback(offset);
+                }
+            }
         }
     }
 
@@ -265,40 +320,39 @@ private:
             }
         }
         m_count = *count;
-        // 按操作的最大同时存活缓冲计费；简单编辑不承担拆分的整卷索引堆。
-        // queue/heap 均预留 N 项且同时最多保留 N 个索引，不存在扩容重叠。
-        const auto voxelBytes = std::visit([](const auto& operation) -> std::size_t {
-            using Operation = std::decay_t<decltype(operation)>;
-            constexpr auto base = sizeof(PartLabelId) + sizeof(std::uint8_t);
-            if constexpr (std::is_same_v<Operation, PartSplitEdit>) {
-                return base + sizeof(std::uint32_t) + 2 * sizeof(std::uint8_t)
-                    + sizeof(double) + 2 * sizeof(std::size_t);
-            }
-            else if constexpr (std::is_same_v<Operation, PartFillEdit>
-                || std::is_same_v<Operation, PartGrowEdit>
-                || std::is_same_v<Operation, PartIslandEdit>) {
-                return base + sizeof(std::uint8_t) + sizeof(std::size_t);
-            }
-            else return base;
-        }, m_input.request.operation);
-        // 目录、指标、映射、请求派生的小容器及分配器余量。
-        constexpr std::size_t catalogReserve = (maxParts * 2 + 1) * 2048;
-        if (m_count > (std::numeric_limits<std::size_t>::max() - catalogReserve) / voxelBytes) {
-            m_requiredBytes = std::numeric_limits<std::size_t>::max();
-            SetFailure(PartFailureReason::BudgetExceeded, "Edit size overflows.");
-        }
-        const auto requestBytes = GetPartEditBytes(m_input.request);
-        if (!requestBytes || *requestBytes > (std::numeric_limits<std::size_t>::max()
-            - m_count * voxelBytes - catalogReserve) / 3U) {
-            SetFailure(PartFailureReason::BudgetExceeded, "Edit request storage exceeds the bounded limit.");
-        }
-        m_requiredBytes = m_count * voxelBytes + catalogReserve + *requestBytes * 3U;
-        if (m_requiredBytes > m_input.maxWorkingBytes) {
-            SetFailure(PartFailureReason::BudgetExceeded, "Edit workspace budget exceeded.");
-        }
         if (!GetPartCatalogValid(*m_old, *m_input.previous.labels, m_stop)) {
             CheckStop(0);
             SetFailure(PartFailureReason::InvalidEdit, "Edit input labels and catalog disagree.");
+        }
+        m_splitCount = 0;
+        if (const auto* split = std::get_if<PartSplitEdit>(&m_input.request.operation)) {
+            m_splitLabel = GetLabel(split->target);
+        }
+        // 1. 候选与 editable 为 5N；拆分专用缓冲为 30R（Windows x64）。
+        // 2. 其他工具保留原预算，目录和请求按同阶段容量计费。
+        constexpr std::size_t catalogReserve = (maxParts * 2 + 1) * 2048;
+        m_requiredBytes = catalogReserve;
+        const auto addStorage = [this](std::size_t count, std::size_t itemBytes) {
+            if (count > (std::numeric_limits<std::size_t>::max() - m_requiredBytes) / itemBytes) {
+                m_requiredBytes = std::numeric_limits<std::size_t>::max();
+                SetFailure(PartFailureReason::BudgetExceeded, "Edit size overflows.");
+            }
+            m_requiredBytes += count * itemBytes;
+        };
+        addStorage(m_count, sizeof(PartLabelId) + sizeof(std::uint8_t));
+        std::visit([&](const auto& operation) {
+            using Operation = std::decay_t<decltype(operation)>;
+            if constexpr (std::is_same_v<Operation, PartFillEdit>
+                || std::is_same_v<Operation, PartGrowEdit>
+                || std::is_same_v<Operation, PartIslandEdit>) {
+                addStorage(m_count, sizeof(std::uint8_t) + sizeof(std::size_t));
+            }
+        }, m_input.request.operation);
+        const auto requestBytes = GetPartEditBytes(m_input.request);
+        if (!requestBytes) SetFailure(PartFailureReason::BudgetExceeded, "Edit request storage exceeds the bounded limit.");
+        addStorage(*requestBytes, 3U);
+        if (m_requiredBytes > m_input.maxWorkingBytes) {
+            SetFailure(PartFailureReason::BudgetExceeded, "Edit workspace budget exceeded.");
         }
         m_stride = { 1, static_cast<std::size_t>(v.dimensions[0]),
             static_cast<std::size_t>(v.dimensions[0]) * static_cast<std::size_t>(v.dimensions[1]) };
@@ -347,6 +401,9 @@ private:
         if (old == target) return;
         if (old < m_changed.size()) m_changed[old] = true;
         if (target < m_changed.size()) m_changed[target] = true;
+        const auto original = (*m_input.previous.labels)[i];
+        if (old == original) ++m_changeCount;
+        else if (target == original) --m_changeCount;
         (*m_labels)[i] = target;
     }
 
@@ -382,15 +439,14 @@ private:
             for (auto& x : normal) x /= length;
         }
         const auto allowed = GetAllowed(target, op.overwriteParts, op.isBackgroundAllowed);
-        for (std::size_t i = 0; i < m_count; ++i) {
-            CheckStop(i);
+        SendExtentVoxels(m_extent, [&](std::size_t i) {
             if (!GetEditable(i) || !allowed[(*m_labels)[i]]
-                || (op.isErase && (*m_labels)[i] != target)) continue;
+                || (op.isErase && (*m_labels)[i] != target)) return;
             const auto point = GetPhysical(GetIndex(i));
             if (op.slice) {
                 std::array<double, 3> delta{};
                 for (std::size_t a = 0; a < 3; ++a) delta[a] = point[a] - op.slice->origin[a];
-                if (std::abs(GetDot(delta, normal)) > op.slice->thicknessMM / 2.0) continue;
+                if (std::abs(GetDot(delta, normal)) > op.slice->thicknessMM / 2.0) return;
             }
             for (std::size_t s = 0; s < op.sourcePoints.size(); ++s) {
                 CheckStop(s);
@@ -420,7 +476,7 @@ private:
                     break;
                 }
             }
-        }
+        });
     }
 
     template<class Predicate>
@@ -533,23 +589,55 @@ private:
         }
     }
 
+    std::size_t GetSplitOffset(const std::array<int, 3>& index) const
+    {
+        std::size_t result = 0;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            result += static_cast<std::size_t>(static_cast<std::int64_t>(index[axis])
+                - m_splitExtent[axis * 2]) * m_splitStride[axis];
+        }
+        return result;
+    }
+
+    std::size_t GetSplitGlobal(std::size_t local) const
+    {
+        std::array<int, 3> index{};
+        for (std::size_t axis = 3; axis-- > 0;) {
+            index[axis] = static_cast<int>(static_cast<std::int64_t>(m_splitExtent[axis * 2])
+                + local / m_splitStride[axis]);
+            local %= m_splitStride[axis];
+        }
+        return GetOffset(index);
+    }
+
     void SetOperation(const PartSplitEdit& op)
     {
         const auto parent = GetLabel(op.target);
         m_sources = { parent };
-        SetWholeParts(m_sources);
+        for (std::size_t local = 0; local < m_splitCount; ++local) {
+            CheckStop(local);
+            const auto global = GetSplitGlobal(local);
+            if ((*m_labels)[global] == parent && !GetEditable(global)) {
+                SetFailure(PartFailureReason::ConstraintConflict,
+                    "Split/merge requires every source voxel to be editable and inside the scope.");
+            }
+        }
         std::vector<bool> targets(maxParts + 1, false);
-        std::vector<std::uint32_t> owner(m_count, 0);
-        std::vector<std::uint8_t> fixed(m_count, 0), barriers(m_count, 0);
-        std::vector<double> distance(m_count, std::numeric_limits<double>::infinity());
+        std::vector<std::uint32_t> owner(m_splitCount, 0);
+        std::vector<std::uint8_t> fixed(m_splitCount, 0), barriers(m_splitCount, 0);
+        std::vector<double> distance(m_splitCount, std::numeric_limits<double>::infinity());
         for (std::size_t seedIndex = 0; seedIndex < op.seeds.size(); ++seedIndex) {
             CheckStop(seedIndex);
             const auto& seed = op.seeds[seedIndex];
-            const auto i = GetOffset(seed.imageIndex);
+            const auto global = GetOffset(seed.imageIndex);
             if (seed.target == 0 || seed.target > maxParts) {
                 SetFailure(PartFailureReason::InvalidEdit, "Split target is outside 1..4096.");
             }
-            if ((*m_labels)[i] != parent || !GetEditable(i)
+            if (!GetInside(seed.imageIndex, m_splitExtent)) {
+                SetFailure(PartFailureReason::ConstraintConflict, "Split seeds lie outside the parent.");
+            }
+            const auto i = GetSplitOffset(seed.imageIndex);
+            if ((*m_labels)[global] != parent || !GetEditable(global)
                 || (owner[i] != 0 && owner[i] != seed.target)) {
                 SetFailure(PartFailureReason::ConstraintConflict, "Split seeds conflict or lie outside the parent.");
             }
@@ -570,16 +658,19 @@ private:
         for (std::size_t edgeIndex = 0; edgeIndex < op.barriers.size(); ++edgeIndex) {
             CheckStop(edgeIndex);
             const auto& edge = op.barriers[edgeIndex];
-            const auto i = GetOffset(edge.imageIndex);
+            (void)GetOffset(edge.imageIndex);
             if (edge.axis > 2 || edge.imageIndex[edge.axis] >= m_geometry.extent[edge.axis * 2 + 1]) {
                 SetFailure(PartFailureReason::InvalidEdit, "Split barrier is not a grid adjacency edge.");
             }
-            barriers[i] |= static_cast<std::uint8_t>(1U << edge.axis);
+            // 合法但不接触父零件的屏障仍接受；只记录局部范围内的正向边。
+            if (GetInside(edge.imageIndex, m_splitExtent)) {
+                barriers[GetSplitOffset(edge.imageIndex)] |= static_cast<std::uint8_t>(1U << edge.axis);
+            }
         }
         // 索引堆每体素最多一个节点，decrease-key 保证队列内存不随松弛次数增长。
         std::vector<std::size_t> heap;
-        heap.reserve(m_count);
-        std::vector<std::size_t> position(m_count, noIndex);
+        heap.reserve(m_splitCount);
+        std::vector<std::size_t> position(m_splitCount, noIndex);
         const auto less = [&](std::size_t a, std::size_t b) {
             if (distance[a] != distance[b]) return distance[a] < distance[b];
             if (owner[a] != owner[b]) return owner[a] < owner[b];
@@ -595,7 +686,7 @@ private:
                 const auto parentPos = (p - 1) / 2; exchange(p, parentPos); p = parentPos;
             }
         };
-        for (std::size_t i = 0; i < m_count; ++i) { CheckStop(i); if (fixed[i]) raise(i); }
+        for (std::size_t i = 0; i < m_splitCount; ++i) { CheckStop(i); if (fixed[i]) raise(i); }
         std::size_t processed = 0;
         while (!heap.empty()) {
             CheckStop(processed++);
@@ -608,8 +699,10 @@ private:
                 if (!less(heap[child], heap[p])) break;
                 exchange(child, p); p = child;
             }
-            SendNeighbors(current, [&](std::size_t next, std::size_t axis) {
-                if ((*m_labels)[next] != parent || fixed[next]
+            const auto currentGlobal = GetSplitGlobal(current);
+            const auto currentIndex = GetIndex(currentGlobal);
+            const auto relax = [&](std::size_t next, std::size_t global, std::size_t axis) {
+                if ((*m_labels)[global] != parent || fixed[next]
                     || (barriers[std::min(current, next)] & (1U << axis))) return;
                 const double candidate = distance[current] + m_edgeLength[axis];
                 if (!std::isfinite(candidate)) SetFailure(PartFailureReason::InvalidGeometry, "Split distance overflows.");
@@ -617,14 +710,21 @@ private:
                     || (candidate == distance[next] && owner[current] < owner[next])) {
                     distance[next] = candidate; owner[next] = owner[current]; raise(next);
                 }
-            });
+            };
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                if (currentIndex[axis] > m_splitExtent[axis * 2])
+                    relax(current - m_splitStride[axis], currentGlobal - m_stride[axis], axis);
+                if (currentIndex[axis] < m_splitExtent[axis * 2 + 1])
+                    relax(current + m_splitStride[axis], currentGlobal + m_stride[axis], axis);
+            }
         }
         const auto first = static_cast<PartLabelId>(m_old->partsByLabel.size() - 1);
-        for (std::size_t i = 0; i < m_count; ++i) {
+        for (std::size_t i = 0; i < m_splitCount; ++i) {
             CheckStop(i);
-            if ((*m_labels)[i] != parent) continue;
+            const auto global = GetSplitGlobal(i);
+            if ((*m_labels)[global] != parent) continue;
             if (owner[i] == 0) SetFailure(PartFailureReason::UnassignedVoxels, "A parent component has no reachable seed.");
-            SetVoxel(i, first + owner[i]);
+            SetVoxel(global, first + owner[i]);
         }
     }
 
@@ -648,8 +748,8 @@ private:
             if (mapping[label] != 0) mapping[label] = ++count;
         }
         if (count > maxParts) SetFailure(PartFailureReason::BudgetExceeded, "Edited part count exceeds 4096.");
-        for (std::size_t i = 0; i < m_count; ++i) { CheckStop(i); (*m_labels)[i] = mapping[(*m_labels)[i]]; }
-        const auto metrics = ClassicalPartSegmenter::BuildLabelMetrics(m_input.volume, *m_labels, count, m_stop);
+        const auto metrics = ClassicalPartSegmenter::BuildRemappedMetrics(
+            m_input.volume, *m_labels, mapping, count, m_stop);
         if (!metrics) { CheckStop(0); SetFailure(PartFailureReason::InvalidGeometry, "Edited metrics are invalid."); }
         auto catalog = std::make_shared<PartCatalog>();
         catalog->partSetId = m_old->partSetId;
@@ -708,7 +808,11 @@ private:
     std::array<std::size_t, 3> m_stride{};
     std::array<double, 3> m_edgeLength{};
     std::size_t m_count = 0, m_requiredBytes = 0, m_newCount = 0;
-    std::shared_ptr<std::vector<PartLabelId>> m_labels;
+    std::unique_ptr<std::vector<PartLabelId>> m_labels;
+    std::size_t m_changeCount = 0, m_splitCount = 0;
+    PartLabelId m_splitLabel = 0;
+    std::array<int, 6> m_splitExtent{};
+    std::array<std::size_t, 3> m_splitStride{};
     std::vector<std::uint8_t> m_editable;
     std::vector<bool> m_locked, m_changed;
     std::vector<PartLabelId> m_sources;

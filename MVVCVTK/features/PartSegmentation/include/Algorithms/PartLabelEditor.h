@@ -22,6 +22,7 @@ struct PartEditBuildResult final {
     std::size_t requiredBytes = 0;
     std::shared_ptr<const std::vector<PartLabelId>> labels;
     std::shared_ptr<const PartCatalog> catalog;
+    std::shared_ptr<const LabelMap3DPayload> labelPayload;
 };
 
 class PartLabelEditor final {

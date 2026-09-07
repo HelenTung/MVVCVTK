@@ -1,4 +1,5 @@
 #include "Services/PartSegmentationService.h"
+#include "Model/LabelMapBuilder.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
@@ -395,24 +396,18 @@ void PartSegmentationService::SetProgress(
     const std::uint64_t requestId,
     const double progress) noexcept
 {
-    const std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_progressRequestId.load(std::memory_order_acquire)
-        != requestId) {
-        return;
-    }
-    const double bounded = std::clamp(progress, 0.0, 1.0);
+    if (!std::isfinite(progress)
+        || m_progressRequestId.load(std::memory_order_acquire) != requestId) return;
     const auto target = static_cast<std::uint32_t>(
-        std::lround(bounded * 1000.0));
-    std::uint32_t current =
-        m_progressPermille.load(std::memory_order_relaxed);
-    while (current < target
-        && !m_progressPermille.compare_exchange_weak(
-            current,
-            target,
-            std::memory_order_release,
-            std::memory_order_relaxed)) {
+        std::lround(std::clamp(progress, 0.0, 1.0) * 1000.0));
+    if (m_progressPermille.load(std::memory_order_relaxed) >= target) return;
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    // 原子读只作无变化过滤；请求替换与正式发布仍在同一把锁下复核。
+    if (m_progressRequestId.load(std::memory_order_acquire) != requestId) return;
+    if (m_progressPermille.load(std::memory_order_relaxed) < target) {
+        m_progressPermille.store(target, std::memory_order_release);
+        ++m_executionRevision;
     }
-    if (current < target) ++m_executionRevision;
 }
 
 void PartSegmentationService::WorkerLoop() noexcept
@@ -582,6 +577,12 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         };
         std::int64_t labelMs = 0;
         std::int64_t lineageMs = 0;
+        std::int64_t freezeMs = 0;
+        GridGeometry3D geometry{ volume.extent, volume.dimensions, volume.spacing,
+            volume.origin, volume.direction, "RAS" };
+        const auto sourcePayload = job.source->data
+            ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
+        if (sourcePayload) geometry.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
         if (job.edit) {
             PartEditBuildResult edited;
             if (std::holds_alternative<PartHistoryEdit>(job.edit->request.operation)) {
@@ -591,9 +592,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             else {
                 PartEditInput editInput;
                 editInput.volume = volume;
-                const auto sourcePayload = job.source->data
-                    ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
-                if (sourcePayload) editInput.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
+                editInput.coordinateFrame = geometry.coordinateFrame;
                 editInput.previous = job.previous;
                 editInput.request = job.edit->request;
                 editInput.roiMask = job.edit->roiMask;
@@ -610,6 +609,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
                 candidate.message = edited.message;
                 return candidate;
             }
+            candidate.labelPayload = std::move(edited.labelPayload);
             candidate.labels = std::move(edited.labels);
             candidate.catalog = std::move(edited.catalog);
             labelMs = elapsedMs(started);
@@ -656,9 +656,18 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
 
-        candidate.labels =
-            std::make_shared<std::vector<PartLabelId>>(
-                std::move(result.labels));
+        const auto freezeStarted = std::chrono::steady_clock::now();
+        candidate.labelPayload = LabelMapBuilder::Build(geometry,
+            std::make_unique<std::vector<PartLabelId>>(std::move(result.labels)), getStopped);
+        freezeMs = elapsedMs(freezeStarted);
+        if (!candidate.labelPayload) {
+            candidate.status = getStopped() ? PartResultStatus::Cancelled : PartResultStatus::Failed;
+            candidate.failureReason = candidate.status == PartResultStatus::Cancelled
+                ? PartFailureReason::Cancelled : PartFailureReason::InvalidGeometry;
+            candidate.message = "Part label freezing did not complete.";
+            return candidate;
+        }
+        candidate.labels = candidate.labelPayload->GetLabels();
         PartLineageRequest lineageRequest;
         lineageRequest.previous = job.previous;
         lineageRequest.currentLabels = candidate.labels;
@@ -696,6 +705,33 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
         candidate.catalog = std::move(lineage.catalog);
+        }
+        if (!candidate.labelPayload) {
+            const auto freezeStarted = std::chrono::steady_clock::now();
+            if (job.edit && job.edit->restoredPayload
+                && candidate.labels == job.edit->restoredPayload->GetLabels()) {
+                candidate.labelPayload = job.edit->restoredPayload;
+            }
+            else {
+                std::size_t catalogBytes = 0, copyBytes = 0;
+                if (!GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
+                    || catalogBytes > std::numeric_limits<std::size_t>::max() - historyBytes
+                    || !GetProduct(candidate.labels->size(), 2U * sizeof(PartLabelId), copyBytes)
+                    || copyBytes > std::numeric_limits<std::size_t>::max() - historyBytes - catalogBytes) {
+                    candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
+                }
+                else candidate.requiredBytes = std::max(candidate.requiredBytes, historyBytes + catalogBytes + copyBytes);
+                if (candidate.requiredBytes > job.maxWorkingBytes) {
+                    candidate.failureReason = PartFailureReason::BudgetExceeded;
+                    candidate.message = BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes);
+                    return candidate;
+                }
+                candidate.labelPayload = std::make_shared<const LabelMap3DPayload>(
+                    geometry, LabelMapValues{candidate.labels}, std::vector<LabelDefinition>{},
+                    "PartSegmentation.labels", "Part segmentation");
+            }
+            candidate.labels = candidate.labelPayload->GetLabels();
+            freezeMs += elapsedMs(freezeStarted);
         }
         candidate.extent = volume.extent;
         candidate.dimensions = volume.dimensions;
@@ -795,12 +831,12 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         }
         candidate.surface = std::move(surfaceResult.product);
         candidate.surfaceBytes = candidate.surface->actualBytes;
-        // 新编辑冻结时有候选标签和一个不可变副本；历史恢复直接复用 payload，
-        // 不产生新的整卷标签。VTK 私有显示视图始终借用冻结数组。
+        // 内部候选在交给 lineage/surface 前已转移所有权；这里仅计一份标签。
+        // 历史恢复复用 payload，VTK 私有显示视图始终借用冻结数组。
         std::size_t freezeBytes = retainedBytes;
         std::size_t addedLabelBytes = 0;
         const auto limit = std::numeric_limits<std::size_t>::max();
-        if (!GetProduct(labelBytes, reusesRetainedLabels ? 0U : 2U, addedLabelBytes)
+        if (!GetProduct(labelBytes, reusesRetainedLabels ? 0U : 1U, addedLabelBytes)
             || addedLabelBytes > limit - freezeBytes
             || candidate.surfaceBytes > limit - freezeBytes - addedLabelBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
@@ -820,21 +856,6 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
         const auto freezeStarted = std::chrono::steady_clock::now();
-        GridGeometry3D geometry;
-        geometry.extent = candidate.extent;
-        geometry.dimensions = candidate.dimensions;
-        geometry.spacing = candidate.spacing;
-        geometry.origin = candidate.origin;
-        geometry.direction = candidate.direction;
-        const auto sourcePayload = job.source->data
-            ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
-        if (sourcePayload) geometry.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
-        candidate.labelPayload = job.edit && job.edit->restoredPayload
-            ? job.edit->restoredPayload
-            : std::make_shared<const LabelMap3DPayload>(
-                geometry, LabelMapValues{candidate.labels}, std::vector<LabelDefinition>{},
-                "PartSegmentation.labels", "Part segmentation");
-        candidate.labels = candidate.labelPayload->GetLabels();
         surfaceRequest.labels.reset();
         candidate.labelImage = vtkSmartPointer<vtkImageData>::New();
         candidate.labelImage->SetExtent(candidate.extent.data());
@@ -864,7 +885,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             + " labelsMs=" + std::to_string(labelMs)
             + " lineageMs=" + std::to_string(lineageMs)
             + " surfaceMs=" + std::to_string(surfaceMs)
-            + " freezeMs=" + std::to_string(elapsedMs(freezeStarted)) + ".";
+            + " freezeMs=" + std::to_string(freezeMs + elapsedMs(freezeStarted)) + ".";
         SetProgress(job.requestId, 1.0);
         return candidate;
     }
