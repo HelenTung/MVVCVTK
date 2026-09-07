@@ -500,7 +500,8 @@ namespace {
                 HostKeyChord{ 'l', {}, false, false, true },
                 HostKeyChord{ 'i' },
                 HostKeyChord{ 'i', {}, false, false, true },
-                HostKeyChord{ 'g' }
+                HostKeyChord{ 'g' },
+                HostKeyChord{ 'g', {}, true }
             }
         {
         }
@@ -582,6 +583,7 @@ namespace {
             IsoQualityNext,
             IsoQualityPrevious,
             StartGap,
+            ExportGap,
             Count
         };
 
@@ -956,6 +958,19 @@ namespace {
         }
 
     private:
+        bool ExportGap()
+        {
+            const auto feature = m_gapFeature.lock();
+            GapHostRequest request;
+            request.action = GapHostAction::Export;
+            request.outputPath = "F:\\data\\gap-results.csv";
+            const bool isSaved = feature && feature->SendRequest(std::move(request));
+            (void)SetGapStatus(isSaved ? "Gap: results saved" : "Gap: save failed");
+            std::cerr << "[GapAnalysis] save F:\\data\\gap-results.csv: "
+                << (isSaved ? "succeeded" : "failed") << '\n' << std::flush;
+            return isSaved;
+        }
+
         bool SendControl(const ControlAction action)
         {
             switch (action) {
@@ -974,6 +989,8 @@ namespace {
                 return SwitchQuality(m_isoTarget, -1);
             case ControlAction::StartGap:
                 return StartGap();
+            case ControlAction::ExportGap:
+                return ExportGap();
             default:
                 return false;
             }
@@ -1798,6 +1815,7 @@ int main(int argc, char* argv[])
         << "  L / Shift+L: composite-volume quality next / previous\n"
         << "  I / Shift+I: CompositeIsoSurface quality next / previous\n"
         << "GapAnalysis controls:\n"
+        << "  Ctrl+G: save current Gap results to F:\\data\\gap-results.csv\n"
         << "  G: analyze and show the result in Window A (3D) "
         "and Window B (slice)\n"
         << "  J: start if inactive; otherwise hide/show Gap overlays\n"

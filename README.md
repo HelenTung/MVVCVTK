@@ -60,6 +60,13 @@ Standalone 加载数据后可按 `g` 显式发送一次 `GapHostAction::Start`�
 
 仓库不维护手写 `.sln`、生产 `.vcxproj` 或测试 `.vcxproj`。`cmake --preset vs2026-x64` 是唯一工程生成入口，Visual Studio 2026 generator 会在 `out/build/vs2026-x64/MVVCVTK.slnx` 生成现代 Solution 文件及其项目。Solution 顶层只保留一个 `MVVCVTK` 组，下面包含默认启动的 `Application/MVVCVTK`、主干 `Host`、Host API/Feature SPI 接口目标、位于 `Host/Features` 的两个扩展库、边界与行为测试以及 CMake 内建目标；三库项目显示各自完整的实现源码和私有头，但 SDK 安装仍只取批准的公开头与单独维护的物理闭包。静态库统一输出到 `lib/<配置>`，应用和测试程序统一输出到 `bin/<配置>`。Windows CI 应在带桌面 OpenGL、v145 和内部依赖访问权的受控 runner 上运行 Debug/Release 全套测试。
 
+Gap 分析成功后，standalone 可用 `Ctrl+G` 将当前孔隙区域明细保存到
+`F:\data\gap-results.csv`。Qt/SDK 调用方在 owner thread 发送 `GapHostAction::Export`，
+并填写 `GapHostRequest::outputPath`；该动作同步返回保存结果，不接受 callback，父目录须已存在，
+同名文件会覆盖。数据重载或退出后旧结果不可导出。CSV 格式由私有 DefX `SaveResults` 提供，
+不包含标签体、网格或工程恢复数据。此次请求结构和私有 bridge ABI 更新后，调用方须重新编译并
+配套更新 GapAnalysis 库与 kernel DLL。
+
 ## SDK 构建与验证
 
 ```powershell

@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,8 @@ public:
     GapAnalysisState GetAnalysisState() const;
     std::vector<VoidRegion> GetVoidRegions() const;
     GapStatistics GetStatistics() const;
+    // 同步导出调用时领取的成功结果；文件 I/O 在结果锁外执行，失败保留原结果。
+    bool ExportResults(const std::string& filePath) const;
 
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;

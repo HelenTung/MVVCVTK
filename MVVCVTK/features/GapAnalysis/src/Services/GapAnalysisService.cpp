@@ -93,6 +93,7 @@ public:
     GapAnalysisState GetAnalysisState() const;
     std::vector<VoidRegion> GetVoidRegions() const;
     GapStatistics GetStatistics() const;
+    bool ExportResults(const std::string& filePath) const;
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;
     bool GetLabelStorageTransferred() const;
@@ -144,6 +145,7 @@ private:
     using InputSnapshot = std::shared_ptr<const InputData>;
 
     struct KernelBatch final {
+        std::function<bool(const std::string&)> exportResults;
         GapKernelHeader header{};
         std::vector<GapKernelRegion> regions;
         vtkSmartPointer<vtkImageData> labelImage;
@@ -589,6 +591,11 @@ GapStatistics GapAnalysisService::GetStatistics() const
     return m_impl->GetStatistics();
 }
 
+bool GapAnalysisService::ExportResults(const std::string& filePath) const
+{
+    return m_impl->ExportResults(filePath);
+}
+
 vtkSmartPointer<vtkPolyData> GapAnalysisService::BuildVoidMesh() const
 {
     return m_impl->BuildVoidMesh();
@@ -779,6 +786,25 @@ GapStatistics GapAnalysisService::Impl::GetStatistics() const
     std::lock_guard<std::mutex> lock(m_resultMutex);
     return m_result.isSucceeded
         ? m_result.statistics : GapStatistics{};
+}
+
+bool GapAnalysisService::Impl::ExportResults(const std::string& filePath) const
+{
+    if (filePath.empty() || filePath.find('\0') != std::string::npos) {
+        return false;
+    }
+    std::function<bool(const std::string&)> exportResults;
+    {
+        const std::lock_guard<std::mutex> lock(m_resultMutex);
+        if (!m_result.isSucceeded) return false;
+        exportResults = m_result.exportResults;
+    }
+    try {
+        return exportResults && exportResults(filePath);
+    }
+    catch (...) {
+        return false;
+    }
 }
 
 vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh() const {
@@ -1663,6 +1689,7 @@ GapAnalysisService::Impl::SetKernelResult(
         || result->headerSize != sizeof(GapKernelHeader)
         || result->regionSize != sizeof(GapKernelRegion)
         || !result->header
+        || !result->exportResults
         || (result->regionCount != 0 && !result->regions)
         || (result->labelCount != 0 && !result->labels)
         || (result->labelCount != 0
@@ -1704,6 +1731,10 @@ GapAnalysisService::Impl::SetKernelResult(
                     release(const_cast<void*>(owner));
                     (void)moduleOwner;
                 });
+            batch.exportResults = [labelOwner, exportResults = result->exportResults](
+                const std::string& filePath) {
+                return exportResults(labelOwner.get(), filePath.c_str()) != 0;
+            };
             batch.labelImage = sinkContext->owner->BuildLabelImage(
                 result->labels,
                 static_cast<std::size_t>(result->labelCount),
@@ -2117,6 +2148,7 @@ bool GapAnalysisService::Impl::BuildResultPayload(
         return false;
     }
 
+    candidate.exportResults = batch.exportResults;
     candidate.labelImage = batch.labelImage;
     candidate.statistics.objectVoxelCount =
         static_cast<std::size_t>(

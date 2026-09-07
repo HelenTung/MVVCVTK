@@ -14,6 +14,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <functional>
+#include <string>
 
 // ── 表面参数（外部手动传入 isoValue，不在此自动估算）───────────────
 struct GapSurfaceParams {
@@ -68,5 +70,7 @@ struct GapAnalysisResult {
     vtkSmartPointer<vtkPolyData> voidMesh;
     // 只由私有内核 header/region 投影，禁止扫描 label 后重算算法统计。
     GapStatistics statistics;
+    // 私有导出能力与本次结果共同发布/失效；捕获 kernel owner 和 DLL 生命周期。
+    std::function<bool(const std::string&)> exportResults;
     bool                    isSucceeded = false; // 只表示分析 payload 有效，不代表 display/overlay 已显示。
 };

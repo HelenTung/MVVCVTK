@@ -54,6 +54,9 @@ add_test(
     COMMAND mvvcvtk_gap_main_tests
 )
 SetTestRuntime(GapAnalysis.All mvvcvtk_gap_main_tests)
+# 成功日志只证明真实 kernel 被调用，不能覆盖测试程序的失败结果。
+set_property(TEST GapAnalysis.All PROPERTY FAIL_REGULAR_EXPRESSION
+    "GapAnalysisAlgorithmTests failed:")
 set_property(
     TEST GapAnalysis.All
     PROPERTY PASS_REGULAR_EXPRESSION

@@ -18,6 +18,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -229,12 +230,29 @@ struct GapLabelData final {
         analysis.ReleaseLabelImage();
     }
 
+    std::mutex exportMutex;
     DefXAnalysisService analysis;
     vtkSmartPointer<vtkImageData> labelImage;
     GapKernelLabelView labelView;
 };
 
 using GapLabelOwner = std::shared_ptr<GapLabelData>;
+
+std::int32_t MVVCVTK_GAP_KERNEL_CALL ExportResults(
+    const void* owner, const char* filePath) noexcept
+{
+    if (!owner || !filePath || !*filePath) return 0;
+    try {
+        const auto& data = *static_cast<const GapLabelOwner*>(owner);
+        if (!data) return 0;
+        // 同一结果的供应商实例不并发执行文件写入。
+        const std::lock_guard<std::mutex> lock(data->exportMutex);
+        return data->analysis.SaveResults(filePath) ? 1 : 0;
+    }
+    catch (...) {
+        return 0;
+    }
+}
 
 void* MVVCVTK_GAP_KERNEL_CALL CloneLabelOwner(
     const void* owner) noexcept
@@ -381,7 +399,8 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
                 labelData->labelView.GetCount()),
             &labelData,
             &CloneLabelOwner,
-            &ReleaseLabelOwner
+            &ReleaseLabelOwner,
+            &ExportResults
         };
         const std::int32_t isConsumed = sink(&result, context);
         return isConsumed != 0 ? 1 : 0;

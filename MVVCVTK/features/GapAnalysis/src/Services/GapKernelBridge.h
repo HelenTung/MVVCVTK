@@ -12,7 +12,7 @@
 
 #define MVVCVTK_GAP_KERNEL_CALL __cdecl
 
-inline constexpr std::uint32_t GapKernelAbiVersion = 4;
+inline constexpr std::uint32_t GapKernelAbiVersion = 5;
 
 // GapAnalysis 与私有算法 DLL 之间只交换固定宽度 POD 和调用方持有的原始缓冲区；
 // 供应商 C++/STL/VTK 类型不得越过此边界，bridge 也不得重算供应商输出。
@@ -91,6 +91,9 @@ using GapKernelLabelOwnerClone = void* (
 using GapKernelLabelOwnerRelease = void (
     MVVCVTK_GAP_KERNEL_CALL*)(void* owner) noexcept;
 
+using GapKernelResultExport = std::int32_t (
+    MVVCVTK_GAP_KERNEL_CALL*)(const void* owner, const char* filePath) noexcept;
+
 // header/regions 仅在同步 callback 返回前有效。labels 可在 callback 内克隆 opaque owner；
 // 克隆成功后 labels 保持有效，直到调用方用配对 release 释放 owner。
 struct GapKernelResultView final {
@@ -106,6 +109,7 @@ struct GapKernelResultView final {
     const void* labelOwner;
     GapKernelLabelOwnerClone cloneLabelOwner;
     GapKernelLabelOwnerRelease releaseLabelOwner;
+    GapKernelResultExport exportResults;
 };
 
 using GapKernelResultSink = std::int32_t (
@@ -137,5 +141,5 @@ static_assert(std::is_trivially_copyable_v<GapKernelRegion>);
 static_assert(sizeof(GapKernelRegion) == 192);
 static_assert(std::is_standard_layout_v<GapKernelResultView>);
 static_assert(std::is_trivially_copyable_v<GapKernelResultView>);
-static_assert(sizeof(GapKernelResultView) == 80);
+static_assert(sizeof(GapKernelResultView) == 88);
 static_assert(offsetof(GapKernelResultView, labelOwner) == 56);

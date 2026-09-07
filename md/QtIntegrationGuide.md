@@ -2061,6 +2061,28 @@ const bool isAccepted = // 保存退出接纳结果。
 
 Exit 接纳后继续处理 `TimerEvent`，直到 `isExitPending == false`。
 
+### 5.6.1 `GapHostAction::Export`
+
+在 GUI/owner thread 同步保存当前成功分析的孔隙区域 CSV，返回 `true` 表示供应商
+`SaveResults` 已报告保存成功。该请求不接受 callback，不重新运行分析，也不改变显示状态。
+
+```cpp
+GapHostRequest request;
+request.action = GapHostAction::Export;
+request.outputPath = "F:\\data\\gap-results.csv";
+const bool isSaved = gap->SendRequest(std::move(request));
+```
+
+`outputPath` 必须非空且不含内嵌 NUL，父目录须已存在，同名文件会覆盖。只允许 Export
+携带 `outputPath`，只允许 Start 携带 `start`，两者不能混用。未挂载、线程错误、分析未成功、
+数据版本已变化、退出中、携带 callback 或写文件失败时返回 `false`；保存失败保留当前分析结果，
+可以修正路径后重试。同步文件 I/O 会占用调用线程，调用方应按实际区域数量评估 UI 等待时间。
+
+CSV 保留 DefX 的区域字段与格式；这条接口保存区域明细，不包含标签体、三维网格或可恢复工程。
+standalone 使用 `Ctrl+G` 保存到 `F:\data\gap-results.csv`，窗口状态和控制台会显示成功/失败。
+重新编译使用 `GapHostRequest` 的调用方，并成套部署本次 GapAnalysis 库与私有 kernel；私有 ABI
+由 4 更新为 5，不能混用旧 bridge。公开头数量、产品组件与依赖来源未增加。
+
 ### 5.7 `GapHostFeature::GetState`
 
 | 项目     | 内容                                                |
@@ -2143,7 +2165,7 @@ primaryWindow = nullptr; // 最后释放 Qt adapter 持有的 VTK smart pointer�
 | Export 结果失败 | 输出目录为空、来源模式不支持、slice 目标或异步写出无效 |
 | `AttachFeature` | 未先 Build、Feature 为空/配置非法、id 或对象重复、Feature 拒绝挂载 |
 | Crop | 未挂载、正在 publishing、Action 字段缺失、没有已绑定 history 或回调规则错误 |
-| Gap | 未挂载、Start 参数非法、已有活动/退出 pending、Overlay/Exit 携带回调 |
+| Gap | 未挂载、Start 参数非法、已有活动/退出 pending、Overlay/Exit/Export 携带回调、Export 路径无效或结果已失效 |
 | Gap 回调为 false | 私有双 DLL 缺失、runtime 目录非法、模块身份不一致、DefX/结果校验或 overlay 显示失败 |
 | `StartImageRead` 未接纳 | callback 为空、已有读取、队列满、正在 Stop 或 Session 不可用 |
 | Image Read 结果失败 | 无 image、region/类型无效、预算不足、复制失败或取消 |

@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -518,6 +520,15 @@ int GetGapFailCount()
                 == sliceBaseImageCount,
         "Gap Start reuses one result in mesh and slice views, then Exit removes both") ? 0 : 1;
 
+    const auto exportPath = std::filesystem::temp_directory_path()
+        / ("gap-host-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
+    auto exportRequest = GetGapRequest(GapHostAction::Export);
+    exportRequest.outputPath = exportPath.string();
+    failureCount += GetCaseResult(!feature->SendRequest(exportRequest)
+            && !std::filesystem::exists(exportPath),
+        "Gap Export rejects an idle feature without creating a file") ? 0 : 1;
+
     int firstCompleteCount = 0;
     bool isFirstSucceeded = false;
     const auto ownerThread = std::this_thread::get_id();
@@ -572,6 +583,24 @@ int GetGapFailCount()
                 == GapAnalysisState::Succeeded,
         "Rejected Gap Start preserves the accepted analysis result") ? 0 : 1;
 
+    bool exportCallback = false;
+    auto invalidExport = exportRequest;
+    invalidExport.start = start;
+    bool wrongThreadExport = true;
+    std::thread exportThread([&] {
+        wrongThreadExport = feature->SendRequest(exportRequest);
+    });
+    exportThread.join();
+    failureCount += GetCaseResult(
+        !wrongThreadExport
+            && !feature->SendRequest(invalidExport)
+            && !feature->SendRequest(exportRequest, [&](bool) { exportCallback = true; })
+            && !exportCallback
+            && feature->SendRequest(exportRequest)
+            && std::filesystem::file_size(exportPath) > 0
+            && feature->GetState().analysisState == GapAnalysisState::Succeeded,
+        "Gap Export reaches the DefX writer and rejects mixed fields, callbacks and wrong threads") ? 0 : 1;
+
     endpoint->interactor->SetKeyEventInformation(
         0, 0, 'j', 0, "j");
     const bool isOverlayKeyHandled =
@@ -591,8 +620,13 @@ int GetGapFailCount()
 
     const bool isNextReloadReady =
         GetReloadReady(session, *endpoint);
+    failureCount += GetCaseResult(!feature->SendRequest(exportRequest),
+        "Gap Export rejects a replaced input before display tick cleanup") ? 0 : 1;
     SendTicks(*endpoint, 2);
     const auto staleState = feature->GetState();
+    failureCount += GetCaseResult(!feature->SendRequest(exportRequest),
+        "Reloaded input invalidates Gap export") ? 0 : 1;
+    std::filesystem::remove(exportPath);
     const bool isStaleOverlayRejected =
         !feature->SendRequest(GetGapRequest(
             GapHostAction::Overlay));

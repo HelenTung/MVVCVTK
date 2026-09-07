@@ -448,6 +448,10 @@ bool GapHostFeature::Impl::SendRequest(
         return false;
     }
 
+    if ((request.action != GapHostAction::Start && request.start)
+        || (request.action != GapHostAction::Export && request.outputPath)) {
+        return false;
+    }
     switch (request.action) {
     case GapHostAction::Start:
         if (!request.start) {
@@ -466,6 +470,15 @@ bool GapHostFeature::Impl::SendRequest(
             return false;
         }
         return ExitView();
+    case GapHostAction::Export: {
+        if (onComplete || !request.outputPath || !m_activeVersion
+            || m_isExitPending || !m_data) {
+            return false;
+        }
+        const auto snapshot = m_data->GetImageSnapshot();
+        return snapshot && snapshot->version == *m_activeVersion
+            && m_service->ExportResults(*request.outputPath);
+    }
     case GapHostAction::None:
         return false;
     }

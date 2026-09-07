@@ -17,6 +17,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 #include <limits>
 #include <string>
 #include <thread>
@@ -322,6 +326,73 @@ public:
         }
     }
 
+    void SetExportExpect(GapAnalysisService& service, int& failureCount) const
+    {
+        const auto directory = std::filesystem::temp_directory_path()
+            / ("gap-export-" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directory(directory);
+        const auto filePath = directory / "results.txt";
+        GapAnalysisService idle;
+        SetExpect(!idle.ExportResults(filePath.string())
+                && !std::filesystem::exists(filePath),
+            "Idle service must not export a stale or empty result.", failureCount);
+        SetExpect(!service.ExportResults("")
+                && !service.ExportResults(directory.string())
+                && !service.ExportResults(std::string("bad\0path", 8)),
+            "Invalid export paths should fail without changing the result.", failureCount);
+        SetExpect(service.ExportResults(filePath.string()),
+            "Published result must retain the DefX writer after the worker returns.", failureCount);
+        std::ifstream stream(filePath, std::ios::binary);
+        const std::string first{ std::istreambuf_iterator<char>(stream), {} };
+        stream.close();
+        std::istringstream csv(first);
+        std::string line;
+        std::getline(csv, line);
+        SetExpect(line.find("ID,VoxelCount,Volume(mm3)") == 0,
+            "Export must retain the vendor CSV schema.", failureCount);
+        const auto regions = service.GetVoidRegions();
+        std::size_t row = 0;
+        while (std::getline(csv, line)) {
+            if (line.empty() || line == "\r") continue;
+            std::istringstream values(line);
+            std::string id, count, volume;
+            std::getline(values, id, ',');
+            std::getline(values, count, ',');
+            std::getline(values, volume, ',');
+            const bool hasRow = row < regions.size();
+            SetExpect(hasRow && std::stoi(id) == regions[row].id
+                    && std::stoll(count) == regions[row].voxelCount
+                    && std::abs(std::stod(volume) - regions[row].volumeMM3)
+                        <= 1e-5 * std::max(1.0, static_cast<double>(regions[row].volumeMM3)),
+                "CSV rows must match the currently published region IDs, counts and volumes.", failureCount);
+            ++row;
+        }
+        SetExpect(row == regions.size(),
+            "CSV must contain exactly the published regions, including an empty batch.", failureCount);
+        SetExpect(service.ExportResults(filePath.string()),
+            "Export should support writing the same result again.", failureCount);
+        std::ifstream repeated(filePath, std::ios::binary);
+        const std::string second{ std::istreambuf_iterator<char>(repeated), {} };
+        repeated.close();
+        SetExpect(first == second && service.GetAnalysisState() == GapAnalysisState::Succeeded,
+            "Export must preserve the analysis payload and write repeatable content.", failureCount);
+        bool firstExport = false, secondExport = false;
+        const auto otherPath = directory / "parallel.csv";
+        std::thread firstWriter([&] { firstExport = service.ExportResults(otherPath.string()); });
+        std::thread secondWriter([&] { secondExport = service.ExportResults(filePath.string()); });
+        firstWriter.join();
+        secondWriter.join();
+        SetExpect(firstExport && secondExport,
+            "Concurrent saves of one result must retain and serialize its kernel owner.", failureCount);
+        std::filesystem::remove(otherPath);
+        service.ClearView();
+        SetExpect(!service.ExportResults(filePath.string()),
+            "Cleared results must lose their export capability.", failureCount);
+        std::filesystem::remove(filePath);
+        std::filesystem::remove(directory);
+    }
+
     void StartSnapCase(int& failureCount) const
     {
         auto image = BuildTestImage();
@@ -374,6 +445,7 @@ public:
             "Explicit callback consumption should report DefX success.",
             failureCount);
         SetResultExpect(service, true, failureCount);
+        SetExportExpect(service, failureCount);
     }
 
     void StartConvertCase(int& failureCount) const
@@ -435,12 +507,33 @@ public:
             failureCount);
     }
 
+    void StartEmptyExport(int& failureCount) const
+    {
+        GapAnalysisService service;
+        auto image = BuildTestImage();
+        SetSolidImage(image);
+        service.SetGapInput(image);
+        GapSurfaceParams surface;
+        surface.isoValue = 0.5f;
+        surface.material = 1.0f;
+        service.SetSurface(surface);
+        auto params = BuildVoidParams();
+        params.isFilterEnabled = false;
+        service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr)
+                && GetServiceState(service) == GapAnalysisState::Succeeded
+                && service.GetVoidRegions().empty(),
+            "Solid input should produce a successful empty region batch.", failureCount);
+        SetExportExpect(service, failureCount);
+    }
+
     int GetFailCount() const
     {
         int failureCount = 0;
         StartSnapCase(failureCount);
         StartConvertCase(failureCount);
         StartFilterCase(failureCount);
+        StartEmptyExport(failureCount);
         return failureCount;
     }
 };
