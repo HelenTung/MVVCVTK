@@ -174,26 +174,10 @@ void TestQualityFlags(Checks& checks)
                 return point[0] < 14.0 || point[0] > 17.0;
             }),
         invalidParams);
-    const bool hasInvalid = std::any_of(
-        invalidResult.points.begin(), invalidResult.points.end(),
-        [](const SurfacePointRecord& point) {
-            return GetSurfaceFlag(
-                point.flags, SurfacePointFlags::InvalidSupport);
-        });
-    checks.Get(hasInvalid, "invalid mask support is flagged");
-    const std::uint64_t invalidCount = static_cast<std::uint64_t>(
-        std::count_if(
-            invalidResult.points.begin(), invalidResult.points.end(),
-            [](const SurfacePointRecord& point) {
-                return GetSurfaceFlag(
-                    point.flags, SurfacePointFlags::InvalidSupport);
-            }));
-    checks.Get(
-        invalidCount > invalidResult.points.size() / 2U
-            && invalidResult.acceptedPointCount
-                + invalidResult.rejectedPointCount
-                == invalidResult.points.size(),
-        "invalid support affects the expected band and counters stay consistent");
+    checks.Get(invalidResult.failureReason == SurfaceFailureReason::NoSurface && invalidResult.points.empty(),
+               "fully invalid interface support produces no invented surface");
+    checks.Get(invalidResult.execution.skippedCellCount > 0 && invalidResult.acceptedPointCount == 0,
+               "invalid cells are counted and cannot become accepted seeds");
 
     auto clippedParams = GetParams();
     clippedParams.profileHalfLengthModel = 3.0;
@@ -257,15 +241,11 @@ void TestQualityFlags(Checks& checks)
               0.0, 0.0, 1.0 },
             [](const Point3& point) { return point[1] > 12.0; }),
         previewParams);
-    const bool previewHasInvalid = std::any_of(
-        previewResult.points.begin(), previewResult.points.end(),
-        [](const SurfacePointRecord& point) {
-            return GetSurfaceFlag(
-                point.flags, SurfacePointFlags::InvalidSupport);
-        });
-    checks.Get(
-        previewHasInvalid,
-        "GlobalIsoPreview still reports invalid mask support");
+    bool supported = !previewResult.points.empty();
+    for (const auto &point : previewResult.points)
+        supported = supported && point.positionModel[1] >= 13;
+    checks.Get(supported && previewResult.execution.skippedCellCount > 0,
+               "preview leaves invalid-mask cells empty without adding a cap");
 }
 
 void TestNoiseAndParameterValidation(Checks& checks)

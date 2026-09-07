@@ -1,22 +1,16 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
+#include "SurfaceProfileSolver.h"
+#include "SurfaceSeedBuilder.h"
+#include <vtkSMPThreadLocal.h>
+#include <chrono>
 #include "Data/DataPayloads.h"
 
-#include <vtkBox.h>
-#include <vtkCellArray.h>
-#include <vtkClipPolyData.h>
 #include <vtkDataArray.h>
-#include <vtkFlyingEdges3D.h>
-#include <vtkIdList.h>
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
-#include <vtkMarchingCubesTriangleCases.h>
-#include <vtkNew.h>
 #include <vtkPointData.h>
-#include <vtkPoints.h>
-#include <vtkPolyData.h>
 #include <vtkSMPTools.h>
-#include <vtkTriangleFilter.h>
 #include <vtkType.h>
 
 #include <algorithm>
@@ -42,15 +36,21 @@ namespace {
 
 using Point3 = std::array<double, 3>;
 
-constexpr std::uint32_t algorithmRevision = 1;
+constexpr std::uint32_t algorithmRevision = 3;
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
 constexpr std::size_t maxProfileSampleCount = 4097;
 
-struct Triangle final {
-    std::array<std::uint32_t, 3> vertices{};
+using Triangle = SurfaceSeedTriangle;
+struct SurfaceCancelled final
+{
 };
+void CheckCancellation(std::size_t &count, const SurfaceCancelCheck &cancelled)
+{
+    if ((count++ & 1023U) == 0 && cancelled && cancelled())
+        throw SurfaceCancelled{};
+}
 
 struct ImageGeometry final {
     std::array<int, 6> extent{};
@@ -63,82 +63,86 @@ struct ImageGeometry final {
     double voxelVolume = 0.0;
 };
 
+template <class T> double ReadScalar(const void *values, const std::size_t index)
+{
+    return static_cast<double>(static_cast<const T *>(values)[index]);
+}
+
 struct ScalarView final {
     const void* values = nullptr;
     std::size_t valueCount = 0;
     int vtkType = VTK_VOID;
-
-    double GetValue(const std::size_t index) const noexcept
+    double (*read)(const void *, std::size_t) = nullptr;
+    double GetValue(std::size_t index) const noexcept
     {
-        if (!values || index >= valueCount) return 0.0;
-        switch (vtkType) {
+        return read(values, index);
+    }
+    void SetReader()
+    {
+        switch (vtkType)
+        {
         case VTK_CHAR:
-            return static_cast<double>(
-                static_cast<const char*>(values)[index]);
+            read = ReadScalar<char>;
+            break;
         case VTK_SIGNED_CHAR:
-            return static_cast<double>(
-                static_cast<const signed char*>(values)[index]);
+            read = ReadScalar<signed char>;
+            break;
         case VTK_UNSIGNED_CHAR:
-            return static_cast<double>(
-                static_cast<const unsigned char*>(values)[index]);
+            read = ReadScalar<unsigned char>;
+            break;
         case VTK_SHORT:
-            return static_cast<double>(
-                static_cast<const short*>(values)[index]);
+            read = ReadScalar<short>;
+            break;
         case VTK_UNSIGNED_SHORT:
-            return static_cast<double>(
-                static_cast<const unsigned short*>(values)[index]);
+            read = ReadScalar<unsigned short>;
+            break;
         case VTK_INT:
-            return static_cast<double>(
-                static_cast<const int*>(values)[index]);
+            read = ReadScalar<int>;
+            break;
         case VTK_UNSIGNED_INT:
-            return static_cast<double>(
-                static_cast<const unsigned int*>(values)[index]);
+            read = ReadScalar<unsigned int>;
+            break;
         case VTK_LONG:
-            return static_cast<double>(
-                static_cast<const long*>(values)[index]);
+            read = ReadScalar<long>;
+            break;
         case VTK_UNSIGNED_LONG:
-            return static_cast<double>(
-                static_cast<const unsigned long*>(values)[index]);
+            read = ReadScalar<unsigned long>;
+            break;
         case VTK_LONG_LONG:
-            return static_cast<double>(
-                static_cast<const long long*>(values)[index]);
+            read = ReadScalar<long long>;
+            break;
         case VTK_UNSIGNED_LONG_LONG:
-            return static_cast<double>(
-                static_cast<const unsigned long long*>(values)[index]);
+            read = ReadScalar<unsigned long long>;
+            break;
         case VTK_FLOAT:
-            return static_cast<double>(
-                static_cast<const float*>(values)[index]);
+            read = ReadScalar<float>;
+            break;
         case VTK_DOUBLE:
-            return static_cast<const double*>(values)[index];
-        default:
-            return 0.0;
+            read = ReadScalar<double>;
+            break;
         }
     }
 };
 
 struct VolumeView final {
+    const LabelMap3DPayload *labels = nullptr;
+    const SurfaceMeshPayload *initialMesh = nullptr;
     ImageGeometry geometry;
     ScalarView scalars;
     const unsigned char* validity = nullptr;
     std::size_t voxelCount = 0;
 };
 
-struct ResolvedParams final {
-    SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::LocalAdaptiveIso50;
-    SurfaceComponentSelection componentSelection =
-        SurfaceComponentSelection::Largest;
-    double initialIsoValue = 0.0;
+struct ResolvedParams final : SurfaceLocalParams
+{
+    SurfaceComponentSelection componentSelection = SurfaceComponentSelection::Largest;
     bool isAutomaticIso = false;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::optional<Point3> seedModelPoint;
     std::optional<std::array<double, 6>> roiModelBounds;
-    double profileHalfLengthModel = 0.0;
-    double profileSampleStepModel = 0.0;
-    double maximumOffsetModel = 0.0;
-    double profileSmoothingSigmaModel = 0.0;
     std::uint64_t minimumObjectVoxels = 1;
-    double minimumContrast = 0.0;
+    double sharpCornerAngleDeg = 75.0;
+    std::vector<SurfaceRegionOverride> regionOverrides;
 };
 
 enum class SampleStatus : std::uint8_t {
@@ -150,15 +154,6 @@ enum class SampleStatus : std::uint8_t {
 struct ScalarSample final {
     SampleStatus status = SampleStatus::Clipped;
     double value = 0.0;
-};
-
-struct Profile final {
-    std::vector<double> offsets;
-    std::vector<double> values;
-    double step = 0.0;
-    double validRatio = 0.0;
-    bool isClipped = false;
-    bool hasInvalidSupport = false;
 };
 
 struct MeshComponent final {
@@ -414,18 +409,14 @@ SurfaceFailureReason BuildVolumeView(
         const std::int64_t extentSize =
             static_cast<std::int64_t>(extent[axis * 2 + 1])
             - static_cast<std::int64_t>(extent[axis * 2]) + 1;
-        if (dimensions[axis] < 2
-            || extentSize != dimensions[axis]
-            || sourceGeometry.dimensions[axis] != dimensions[axis]
-            || !std::isfinite(spacing[axis])
-            || spacing[axis] <= 0.0
-            || !std::isfinite(origin[axis])
-            || spacing[axis] != sourceGeometry.spacing[axis]
-            || origin[axis] != sourceGeometry.origin[axis]
-            || !GetProduct(
-                voxelCount,
-                static_cast<std::size_t>(dimensions[axis]),
-                voxelCount)) {
+        if (dimensions[axis] < 2 || extentSize != dimensions[axis] ||
+            sourceGeometry.dimensions[axis] != dimensions[axis] ||
+            sourceGeometry.extent[axis * 2] != extent[axis * 2] ||
+            sourceGeometry.extent[axis * 2 + 1] != extent[axis * 2 + 1] || !std::isfinite(spacing[axis]) ||
+            spacing[axis] <= 0.0 || !std::isfinite(origin[axis]) ||
+            spacing[axis] != sourceGeometry.spacing[axis] || origin[axis] != sourceGeometry.origin[axis] ||
+            !GetProduct(voxelCount, static_cast<std::size_t>(dimensions[axis]), voxelCount))
+        {
             message = "Surface source geometry is invalid.";
             return SurfaceFailureReason::InvalidGeometry;
         }
@@ -445,7 +436,8 @@ SurfaceFailureReason BuildVolumeView(
         for (std::size_t column = 0; column < 3; ++column) {
             const double value = direction->GetElement(
                 static_cast<int>(row), static_cast<int>(column));
-            if (!std::isfinite(value)) {
+            if (!std::isfinite(value) || value != sourceGeometry.direction[row * 3 + column])
+            {
                 message = "Surface source direction is invalid.";
                 return SurfaceFailureReason::InvalidGeometry;
             }
@@ -487,6 +479,7 @@ SurfaceFailureReason BuildVolumeView(
         return SurfaceFailureReason::UnsupportedScalar;
     }
     volume.scalars = { values, voxelCount, scalars->GetDataType() };
+    volume.scalars.SetReader();
     volume.voxelCount = voxelCount;
 
     if (source->validityMask) {
@@ -701,114 +694,104 @@ bool GetGradient(
     return std::isfinite(magnitude) && magnitude > geometryEpsilon;
 }
 
-double GetMedian(std::vector<double> values)
+std::uint64_t GetLabelAtModel(const VolumeView &volume, const Point3 &point)
 {
-    if (values.empty()) return 0.0;
-    const std::size_t middle = values.size() / 2;
-    std::nth_element(
-        values.begin(), values.begin() + middle, values.end());
-    const double upper = values[middle];
-    if ((values.size() & 1U) != 0U) return upper;
-    const double lower = *std::max_element(
-        values.begin(), values.begin() + middle);
-    return 0.5 * (lower + upper);
+    if (!volume.labels)
+        return UINT64_MAX;
+    const auto index = GetContinuousIndex(volume.geometry, point);
+    std::array<int, 3> nearest{};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        if (!std::isfinite(index[a]) || index[a] < volume.geometry.extent[a * 2] ||
+            index[a] > volume.geometry.extent[a * 2 + 1])
+            return UINT64_MAX;
+        nearest[a] = static_cast<int>(std::floor(index[a] + 0.5));
+    }
+    return SurfaceSeedBuilder::GetLabel(*volume.labels,
+                                        GetTupleIndex(volume.geometry, nearest[0], nearest[1], nearest[2]));
 }
 
-double GetMad(
-    const std::vector<double>& values,
-    const double median)
+void BuildProfile(const VolumeView &volume, const Point3 &center, const Point3 &normal,
+                  const SurfaceLocalParams &params, SurfaceProfileWorkspace &p)
 {
-    std::vector<double> deviations;
-    deviations.reserve(values.size());
-    for (const double value : values) {
-        deviations.push_back(std::abs(value - median));
+    auto intervals =
+        std::max<std::size_t>(8, static_cast<std::size_t>(std::ceil(2 * params.profileHalfLengthModel /
+                                                                    params.profileSampleStepModel)));
+    if (intervals % 2)
+        ++intervals;
+    p.Reserve(intervals + 1);
+    p.offsets.clear();
+    p.raw.clear();
+    p.support.clear();
+    p.labels.clear();
+    p.step = 2 * params.profileHalfLengthModel / intervals;
+    std::size_t valid = 0;
+    for (std::size_t i = 0; i <= intervals; ++i)
+    {
+        const double offset = -params.profileHalfLengthModel + i * p.step;
+        const auto point = Add(center, Scale(normal, offset));
+        const auto sample = GetScalarAtModel(volume, point);
+        auto support = sample.status == SampleStatus::Valid
+                           ? SurfaceSampleStatus::Valid
+                           : (sample.status == SampleStatus::Clipped ? SurfaceSampleStatus::Clipped
+                                                                     : SurfaceSampleStatus::InvalidSupport);
+        if (volume.labels && params.materials)
+        {
+            const auto label = GetLabelAtModel(volume, point);
+            p.labels.push_back(static_cast<std::uint32_t>(label));
+            if (support == SurfaceSampleStatus::Valid && label != params.materials->materialA &&
+                label != params.materials->materialB)
+                support = label == UINT64_MAX ? SurfaceSampleStatus::InvalidSupport
+                                              : SurfaceSampleStatus::OtherMaterial;
+        }
+        p.offsets.push_back(offset);
+        p.raw.push_back(sample.value);
+        p.support.push_back(support);
+        valid += support == SurfaceSampleStatus::Valid;
     }
-    return 1.4826 * GetMedian(std::move(deviations));
+    p.validRatio = double(valid) / (intervals + 1);
+    ++p.sampledProfileCount;
+    p.sampledValueCount += intervals + 1;
 }
 
-std::vector<double> GetSmoothedValues(
-    const std::vector<double>& values,
-    const double sigma,
-    const double step)
+SurfaceLocalParams GetLocalParams(const ResolvedParams &params, const Point3 &point, std::uint32_t &ruleIndex)
 {
-    if (values.size() < 3 || sigma <= geometryEpsilon
-        || step <= geometryEpsilon) {
-        return values;
-    }
-    const std::size_t radius = std::min<std::size_t>(
-        8,
-        std::max<std::size_t>(
-            1,
-            static_cast<std::size_t>(std::ceil(3.0 * sigma / step))));
-    std::vector<double> weights(radius + 1, 0.0);
-    for (std::size_t offset = 0; offset <= radius; ++offset) {
-        const double distance = static_cast<double>(offset) * step;
-        weights[offset] = std::exp(
-            -0.5 * distance * distance / (sigma * sigma));
-    }
-    std::vector<double> smoothed(values.size(), 0.0);
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        double weighted = 0.0;
-        double totalWeight = 0.0;
-        const std::size_t begin = index > radius ? index - radius : 0;
-        const std::size_t end = std::min(
-            values.size() - 1, index + radius);
-        for (std::size_t sample = begin; sample <= end; ++sample) {
-            const std::size_t offset = sample > index
-                ? sample - index : index - sample;
-            weighted += values[sample] * weights[offset];
-            totalWeight += weights[offset];
-        }
-        smoothed[index] = weighted / totalWeight;
-    }
-    return smoothed;
-}
-
-Profile BuildProfile(
-    const VolumeView& volume,
-    const Point3& center,
-    const Point3& normal,
-    const ResolvedParams& params)
-{
-    Profile profile;
-    std::size_t intervalCount = static_cast<std::size_t>(std::ceil(
-        2.0 * params.profileHalfLengthModel
-        / params.profileSampleStepModel));
-    intervalCount = std::max<std::size_t>(8, intervalCount);
-    if ((intervalCount & 1U) != 0U) ++intervalCount;
-    if (intervalCount + 1 > maxProfileSampleCount) {
-        profile.isClipped = true;
-        return profile;
-    }
-    profile.step = 2.0 * params.profileHalfLengthModel
-        / static_cast<double>(intervalCount);
-    profile.offsets.reserve(intervalCount + 1);
-    profile.values.reserve(intervalCount + 1);
-    std::size_t validCount = 0;
-    for (std::size_t index = 0; index <= intervalCount; ++index) {
-        const double offset = -params.profileHalfLengthModel
-            + static_cast<double>(index) * profile.step;
-        const ScalarSample sample = GetScalarAtModel(
-            volume, Add(center, Scale(normal, offset)));
-        profile.offsets.push_back(offset);
-        profile.values.push_back(sample.value);
-        if (sample.status == SampleStatus::Valid) ++validCount;
-        else if (sample.status == SampleStatus::Clipped) {
-            profile.isClipped = true;
-        }
-        else {
-            profile.hasInvalidSupport = true;
+    SurfaceLocalParams local = params;
+    ruleIndex = 0;
+    const SurfaceRegionOverride *selected = nullptr;
+    for (std::size_t i = 0; i < params.regionOverrides.size(); ++i)
+    {
+        const auto &rule = params.regionOverrides[i];
+        bool inside = true;
+        for (unsigned a = 0; a < 3; ++a)
+            inside = inside && point[a] >= rule.boundsModel[a * 2] && point[a] < rule.boundsModel[a * 2 + 1];
+        if (inside && (!selected || rule.priority > selected->priority))
+        {
+            selected = &rule;
+            ruleIndex = static_cast<std::uint32_t>(i + 1);
         }
     }
-    profile.validRatio = static_cast<double>(validCount)
-        / static_cast<double>(intervalCount + 1);
-    if (!profile.isClipped && !profile.hasInvalidSupport) {
-        profile.values = GetSmoothedValues(
-            profile.values,
-            params.profileSmoothingSigmaModel,
-            profile.step);
+    if (selected)
+    {
+        const auto &r = *selected;
+        if (r.method)
+            local.method = *r.method;
+        if (r.localFraction)
+            local.localFraction = *r.localFraction;
+        if (r.profileHalfLengthModel)
+            local.profileHalfLengthModel = *r.profileHalfLengthModel;
+        if (r.profileSampleStepModel)
+            local.profileSampleStepModel = *r.profileSampleStepModel;
+        if (r.maximumOffsetModel)
+            local.maximumOffsetModel = *r.maximumOffsetModel;
+        if (r.profileSmoothingSigmaModel)
+            local.profileSmoothingSigmaModel = *r.profileSmoothingSigmaModel;
+        if (r.minimumContrast)
+            local.minimumContrast = *r.minimumContrast;
+        if (r.minimumCnr)
+            local.minimumCnr = *r.minimumCnr;
     }
-    return profile;
+    return local;
 }
 
 bool GetVoxelUsed(
@@ -839,43 +822,41 @@ SurfaceFailureReason GetAutomaticIso(
     std::string& message,
     std::optional<SurfaceIsoEstimate>& estimate)
 {
-    double minimum = std::numeric_limits<double>::max();
-    double maximum = std::numeric_limits<double>::lowest();
-    std::uint64_t validCount = 0;
-    const auto& extent = volume.geometry.extent;
-    std::array<std::int64_t, 3> sampleSteps{1, 1, 1};
-    if (params.method == SurfaceDeterminationMethod::AutomaticIso50) {
-        // 最多 128^3 个原始标量样本；两遍共享同一采样格，内存与体积无关。
-        for (std::size_t axis = 0; axis < sampleSteps.size(); ++axis)
-            sampleSteps[axis] = (static_cast<std::int64_t>(volume.geometry.dimensions[axis]) + 127) / 128;
+    double minimum = std::numeric_limits<double>::max(), maximum = std::numeric_limits<double>::lowest();
+    std::uint64_t validCount = 0, excludedCount = 0;
+    const auto &extent = volume.geometry.extent;
+    std::array<std::int64_t, 3> sampleSteps{}, pilotSteps{};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        sampleSteps[a] = (static_cast<std::int64_t>(volume.geometry.dimensions[a]) + 127) / 128;
+        pilotSteps[a] = (static_cast<std::int64_t>(volume.geometry.dimensions[a]) + 15) / 16;
     }
-    for (std::int64_t zValue = extent[4] + sampleSteps[2] / 2;
-        zValue <= static_cast<std::int64_t>(extent[5]); zValue += sampleSteps[2]) {
-        const int z = static_cast<int>(zValue);
-        if (GetCancelled(getCancelled)) {
-            message = "Surface threshold estimation was cancelled.";
-            return SurfaceFailureReason::Cancelled;
-        }
-        for (std::int64_t yValue = extent[2] + sampleSteps[1] / 2;
-            yValue <= static_cast<std::int64_t>(extent[3]); yValue += sampleSteps[1]) {
-            const int y = static_cast<int>(yValue);
-            for (std::int64_t xValue = extent[0] + sampleSteps[0] / 2;
-                xValue <= static_cast<std::int64_t>(extent[1]); xValue += sampleSteps[0]) {
-                const int x = static_cast<int>(xValue);
-                const std::size_t tupleIndex = GetTupleIndex(
-                    volume.geometry, x, y, z);
-                if (!GetVoxelUsed(
-                        volume, params, x, y, z, tupleIndex)) {
-                    continue;
-                }
-                const double value = volume.scalars.GetValue(tupleIndex);
-                if (!std::isfinite(value)) continue;
-                minimum = std::min(minimum, value);
-                maximum = std::max(maximum, value);
-                ++validCount;
+    std::array<double, 4096> pilot{};
+    std::size_t pilotCount = 0;
+    for (std::int64_t z = extent[4] + pilotSteps[2] / 2; z <= extent[5]; z += pilotSteps[2])
+        for (std::int64_t y = extent[2] + pilotSteps[1] / 2; y <= extent[3]; y += pilotSteps[1])
+        {
+            if (GetCancelled(getCancelled))
+                return SurfaceFailureReason::Cancelled;
+            for (std::int64_t x = extent[0] + pilotSteps[0] / 2; x <= extent[1]; x += pilotSteps[0])
+            {
+                const auto id = GetTupleIndex(volume.geometry, static_cast<int>(x), static_cast<int>(y),
+                                              static_cast<int>(z));
+                const auto value = volume.scalars.GetValue(id);
+                if (GetVoxelUsed(volume, params, static_cast<int>(x), static_cast<int>(y),
+                                 static_cast<int>(z), id) &&
+                    std::isfinite(value))
+                    pilot[pilotCount++] = value;
             }
         }
+    if (pilotCount >= 64)
+    {
+        std::sort(pilot.begin(), pilot.begin() + pilotCount);
+        const auto trim = pilotCount / 1000;
+        minimum = pilot[trim];
+        maximum = pilot[pilotCount - 1 - trim];
     }
+    validCount = pilotCount;
     if (validCount < 64 || !std::isfinite(minimum)
         || !std::isfinite(maximum)
         || maximum - minimum <= geometryEpsilon
@@ -884,6 +865,7 @@ SurfaceFailureReason GetAutomaticIso(
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
+    validCount = 0;
     std::array<std::uint64_t, histogramBinCount> histogram{};
     const double scale = static_cast<double>(histogramBinCount - 1)
         / (maximum - minimum);
@@ -907,7 +889,12 @@ SurfaceFailureReason GetAutomaticIso(
                     continue;
                 }
                 const double value = volume.scalars.GetValue(tupleIndex);
-                if (!std::isfinite(value)) continue;
+                if (!std::isfinite(value) || value < minimum || value > maximum)
+                {
+                    ++excludedCount;
+                    continue;
+                }
+                ++validCount;
                 const auto bin = static_cast<std::size_t>(std::clamp(
                     std::llround((value - minimum) * scale),
                     0LL,
@@ -995,6 +982,19 @@ SurfaceFailureReason GetAutomaticIso(
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
+    for (const auto &peak : peaks)
+    {
+        const auto distanceA = peak.index > selected->first.index ? peak.index - selected->first.index
+                                                                  : selected->first.index - peak.index;
+        const auto distanceB = peak.index > selected->second.index ? peak.index - selected->second.index
+                                                                   : selected->second.index - peak.index;
+        if (distanceA >= minimumSeparation && distanceB >= minimumSeparation &&
+            peak.height >= 0.2 * std::min(selected->first.height, selected->second.height))
+        {
+            message = "Surface automatic seed is ambiguous between more than two significant peaks.";
+            return SurfaceFailureReason::ThresholdUnreliable;
+        }
+    }
     const double binWidth = (maximum - minimum)
         / static_cast<double>(histogramBinCount - 1);
     const double background = minimum
@@ -1006,16 +1006,11 @@ SurfaceFailureReason GetAutomaticIso(
         message = "Surface automatic ISO50 produced an invalid threshold.";
         return SurfaceFailureReason::ThresholdUnreliable;
     }
-    estimate = SurfaceIsoEstimate{isoValue, background, material, validCount};
+    estimate = SurfaceIsoEstimate{
+        isoValue,      background,
+        material,      validCount,
+        excludedCount, double(selected->second.index - selected->first.index) / (histogramBinCount - 1)};
     return SurfaceFailureReason::None;
-}
-
-std::uint64_t GetDoubleBits(const double value)
-{
-    std::uint64_t bits = 0;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
 }
 
 void AddFingerprint(
@@ -1029,38 +1024,6 @@ void AddFingerprint(
     }
 }
 
-std::uint64_t GetFingerprint(const ResolvedParams& params)
-{
-    std::uint64_t fingerprint = 1469598103934665603ULL;
-    AddFingerprint(fingerprint, static_cast<std::uint64_t>(params.method));
-    AddFingerprint(
-        fingerprint,
-        static_cast<std::uint64_t>(params.componentSelection));
-    AddFingerprint(fingerprint, GetDoubleBits(params.initialIsoValue));
-    AddFingerprint(fingerprint, params.isAutomaticIso ? 1U : 0U);
-    AddFingerprint(fingerprint, GetDoubleBits(params.profileHalfLengthModel));
-    AddFingerprint(fingerprint, GetDoubleBits(params.profileSampleStepModel));
-    AddFingerprint(fingerprint, GetDoubleBits(params.maximumOffsetModel));
-    AddFingerprint(
-        fingerprint,
-        GetDoubleBits(params.profileSmoothingSigmaModel));
-    AddFingerprint(fingerprint, params.minimumObjectVoxels);
-    AddFingerprint(fingerprint, GetDoubleBits(params.minimumContrast));
-    AddFingerprint(fingerprint, params.seedModelPoint ? 1U : 0U);
-    if (params.seedModelPoint) {
-        for (const double value : *params.seedModelPoint) {
-            AddFingerprint(fingerprint, GetDoubleBits(value));
-        }
-    }
-    AddFingerprint(fingerprint, params.roiModelBounds ? 1U : 0U);
-    if (params.roiModelBounds) {
-        for (const double value : *params.roiModelBounds) {
-            AddFingerprint(fingerprint, GetDoubleBits(value));
-        }
-    }
-    return fingerprint;
-}
-
 SurfaceFailureReason ResolveParams(
     const VolumeView& volume,
     const SurfaceDeterminationStartParams& input,
@@ -1068,6 +1031,17 @@ SurfaceFailureReason ResolveParams(
     ResolvedParams& params,
     std::string& message)
 {
+    message = SurfaceRecipeCodec::GetError(input);
+    if (!message.empty() || input.seedBlockDepth == 0 || input.seedBlockDepth > 4096)
+        return SurfaceFailureReason::InvalidGeometry;
+    params.localFraction = input.localFraction;
+    params.grayPair = input.grayPair;
+    params.minimumCnr = input.minimumCnr;
+    params.maximumPlateauNoiseRatio = input.maximumPlateauNoiseRatio;
+    params.maximumNormalizedResidual = input.maximumNormalizedResidual;
+    params.maximumNormalTurnDeg = input.maximumNormalTurnDeg;
+    params.sharpCornerAngleDeg = input.sharpCornerAngleDeg;
+    params.regionOverrides = input.regionOverrides;
     params.method = input.method;
     params.componentSelection = input.componentSelection;
     params.seedModelPoint = input.seedModelPoint;
@@ -1123,20 +1097,51 @@ SurfaceFailureReason ResolveParams(
         params.profileSmoothingSigmaModel
     };
     for (const double value : profileValues) {
-        if (!std::isfinite(value) || value <= 0.0) {
-            message = "Surface profile parameters must be finite and positive.";
+        if (!std::isfinite(value) || value < 0.0)
+        {
+            message = "Surface profile parameters must be finite and nonnegative.";
             return SurfaceFailureReason::InvalidGeometry;
         }
     }
-    if (params.maximumOffsetModel > params.profileHalfLengthModel
-        || 2.0 * params.profileHalfLengthModel
-            / params.profileSampleStepModel
-            > static_cast<double>(maxProfileSampleCount - 1)) {
+    if (params.profileHalfLengthModel <= 0 || params.profileSampleStepModel <= 0 ||
+        params.maximumOffsetModel > params.profileHalfLengthModel ||
+        2.0 * params.profileHalfLengthModel / params.profileSampleStepModel >
+            static_cast<double>(maxProfileSampleCount - 1))
+    {
         message = "Surface profile bounds are inconsistent or exceed the sample limit.";
         return SurfaceFailureReason::InvalidGeometry;
     }
 
+    params.minimumEdgeWidthModel = input.minimumEdgeWidthModel.value_or(params.profileSampleStepModel * 0.25);
+    params.maximumEdgeWidthModel = input.maximumEdgeWidthModel.value_or(params.profileHalfLengthModel);
+    params.minimumEdgeSeparationModel =
+        input.minimumEdgeSeparationModel.value_or(params.profileSampleStepModel * 2);
+    if (params.minimumEdgeWidthModel > params.maximumEdgeWidthModel)
+        return SurfaceFailureReason::InvalidGeometry;
+    for (const auto &rule : params.regionOverrides)
+    {
+        const auto half = rule.profileHalfLengthModel.value_or(params.profileHalfLengthModel);
+        const auto step = rule.profileSampleStepModel.value_or(params.profileSampleStepModel);
+        const auto offset = rule.maximumOffsetModel.value_or(params.maximumOffsetModel);
+        if (offset > half || 2 * half / step > maxProfileSampleCount - 1)
+        {
+            message = "Surface override exceeds the resolved profile bounds.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+    }
     params.isAutomaticIso = !input.initialIsoValue.has_value();
+    if (volume.labels || volume.initialMesh)
+    {
+        params.initialIsoValue = input.initialIsoValue.value_or(0.0);
+        return SurfaceFailureReason::None;
+    }
+    if (input.grayPair && !input.initialIsoValue)
+    {
+        const double a = 0.5 * input.grayPair->sideA[0] + 0.5 * input.grayPair->sideA[1];
+        const double b = 0.5 * input.grayPair->sideB[0] + 0.5 * input.grayPair->sideB[1];
+        params.initialIsoValue = (1 - input.seedFraction) * a + input.seedFraction * b;
+        return SurfaceFailureReason::None;
+    }
     if (input.initialIsoValue) {
         if (!std::isfinite(*input.initialIsoValue)) {
             message = "Surface initial ISO value is not finite.";
@@ -1145,8 +1150,13 @@ SurfaceFailureReason ResolveParams(
         params.initialIsoValue = *input.initialIsoValue;
         return SurfaceFailureReason::None;
     }
-    return GetAutomaticIso(
-        volume, params, getCancelled, params.initialIsoValue, message, params.isoEstimate);
+    const auto status =
+        GetAutomaticIso(volume, params, getCancelled, params.initialIsoValue, message, params.isoEstimate);
+    if (status == SurfaceFailureReason::None && params.isoEstimate &&
+        input.method != SurfaceDeterminationMethod::AutomaticIso50)
+        params.initialIsoValue = (1 - input.seedFraction) * params.isoEstimate->backgroundValue +
+                                 input.seedFraction * params.isoEstimate->materialValue;
+    return status;
 }
 
 bool AddWorkingBytes(
@@ -1157,197 +1167,6 @@ bool AddWorkingBytes(
     std::size_t bytes = 0;
     return GetProduct(count, itemBytes, bytes)
         && GetSum(workingBytes, bytes, workingBytes);
-}
-
-SurfaceFailureReason GetBudgetEstimate(
-    const VolumeView& volume, const ResolvedParams& params,
-    const std::size_t maxWorkingBytes, const SurfaceCancelCheck& getCancelled,
-    const SurfaceProgressCallback& onProgress, std::size_t& requiredBytes,
-    std::string& message)
-{
-    const auto& dims = volume.geometry.dimensions;
-    if (dims[0] < 2 || dims[1] < 2 || dims[2] < 2) {
-        message = "Surface input has no three-dimensional cells.";
-        return SurfaceFailureReason::NoSurface;
-    }
-    const auto width = static_cast<std::size_t>(dims[0]);
-    std::size_t planeCount = 0, rowCount = 0;
-    const auto overflow = [&] {
-        requiredBytes = std::numeric_limits<std::size_t>::max();
-        message = "Surface topology workspace estimate overflows.";
-        return SurfaceFailureReason::BudgetExceeded;
-    };
-    // VTK 9.4.2 FlyingEdges: 每条 X 边一个 case 字节，每条 X 行六个 vtkIdType。
-    // 加上本次计数扫描的两张分类切片，先检查后分配，不创建整卷副本或网格。
-    requiredBytes = 1024U * 1024U;
-    if (!GetProduct(width, static_cast<std::size_t>(dims[1]), planeCount)
-        || !GetProduct(static_cast<std::size_t>(dims[1]), static_cast<std::size_t>(dims[2]), rowCount)
-        || !AddWorkingBytes(volume.voxelCount, sizeof(std::uint8_t), requiredBytes)
-        || !AddWorkingBytes(rowCount, 6U * sizeof(vtkIdType), requiredBytes)
-        || !AddWorkingBytes(planeCount, 2U * sizeof(std::uint8_t), requiredBytes)) return overflow();
-    const auto fixedBytes = requiredBytes;
-    const auto exceedsBudget = [&] {
-        message = "Surface topology working-set budget is exceeded: requiredBytes="
-            + std::to_string(requiredBytes) + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
-        return SurfaceFailureReason::BudgetExceeded;
-    };
-    if (requiredBytes > maxWorkingBytes) return exceedsBudget();
-
-    std::array<std::uint8_t, 256> triangleCounts{};
-    const auto* cases = vtkMarchingCubesTriangleCases::GetCases();
-    for (std::size_t i = 0; i < triangleCounts.size(); ++i) {
-        for (std::size_t edge = 0; edge < 15 && cases[i].edges[edge] >= 0; edge += 3) ++triangleCounts[i];
-    }
-    std::vector<std::uint8_t> previous(planeCount), current(planeCount);
-    std::size_t pointCount = 0, triangleCount = 0;
-    for (int z = 0; z < dims[2]; ++z) {
-        const auto offset = static_cast<std::size_t>(z) * planeCount;
-        for (std::size_t i = 0; i < planeCount; ++i) {
-            if ((i & 4095U) == 0 && GetCancelled(getCancelled)) {
-                message = "Surface topology counting was cancelled.";
-                return SurfaceFailureReason::Cancelled;
-            }
-            // 与 FlyingEdges 相同的 >= 分类；这里不剔除 validity，否则可能少算原始等值面。
-            current[i] = volume.scalars.GetValue(offset + i) >= params.initialIsoValue;
-            const bool hasX = i % width != 0;
-            const bool hasY = i >= width;
-            pointCount += hasX && current[i] != current[i - 1];
-            pointCount += hasY && current[i] != current[i - width];
-            pointCount += z != 0 && current[i] != previous[i];
-            if (z != 0 && hasX && hasY) {
-                // MC 顶点顺序：000,100,110,010,001,101,111,011。
-                const unsigned int code = previous[i - width - 1] | (previous[i - width] << 1)
-                    | (previous[i] << 2) | (previous[i - 1] << 3)
-                    | (current[i - width - 1] << 4) | (current[i - width] << 5)
-                    | (current[i] << 6) | (current[i - 1] << 7);
-                if (!GetSum(triangleCount, triangleCounts[code], triangleCount)) return overflow();
-            }
-            if (pointCount > std::numeric_limits<std::uint32_t>::max()) return overflow();
-        }
-        std::size_t boundedPoints = pointCount, boundedTriangles = triangleCount;
-        // 三角形与六个半空间的交最多九个顶点、七个三角形；
-        // 即使后置 clip 不共享新交点，也按该上界预留。
-        if (params.roiModelBounds
-            && (!AddWorkingBytes(triangleCount, 9U, boundedPoints)
-                || !GetProduct(triangleCount, 7U, boundedTriangles))) return overflow();
-        if (boundedPoints > std::numeric_limits<std::uint32_t>::max()) return overflow();
-        // 覆盖 VTK 输出、原始/分量/局部网格、法向、records 与 generation 扩容，
-        // 以及连通性/拓扑 map 的节点和分配器余量；不按体素数量臆测网格大小。
-        constexpr std::size_t pointBytes = 8U * sizeof(Point3) + 4U * sizeof(SurfacePointRecord)
-            + 12U * sizeof(vtkIdType) + sizeof(SurfaceObjectRecord) + 128U;
-        constexpr std::size_t triangleBytes = 8U * sizeof(Triangle) + 16U * sizeof(vtkIdType) + 256U;
-        requiredBytes = fixedBytes;
-        if (!AddWorkingBytes(boundedPoints, pointBytes, requiredBytes)
-            || !AddWorkingBytes(boundedTriangles, triangleBytes, requiredBytes)) return overflow();
-        if (requiredBytes > maxWorkingBytes) return exceedsBudget();
-        previous.swap(current);
-        SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
-            0.08 + 0.1 * static_cast<double>(z + 1) / dims[2]);
-    }
-    if (triangleCount == 0) {
-        message = "Surface initial ISO did not produce a surface.";
-        return SurfaceFailureReason::NoSurface;
-    }
-    return SurfaceFailureReason::None;
-}
-
-SurfaceFailureReason BuildInitialMesh(
-    vtkImageData& image,
-    const ResolvedParams& params,
-    const SurfaceCancelCheck& getCancelled,
-    std::vector<Point3>& points,
-    std::vector<Triangle>& triangles,
-    std::string& message)
-{
-    if (GetCancelled(getCancelled)) {
-        message = "Surface seed extraction was cancelled.";
-        return SurfaceFailureReason::Cancelled;
-    }
-
-    vtkNew<vtkFlyingEdges3D> surface;
-    surface->SetInputData(&image);
-    surface->SetValue(0, params.initialIsoValue);
-    surface->ComputeNormalsOff();
-    surface->ComputeGradientsOff();
-    surface->ComputeScalarsOff();
-    surface->InterpolateAttributesOff();
-
-    vtkNew<vtkTriangleFilter> triangleFilter;
-    vtkNew<vtkBox> roiBox;
-    vtkNew<vtkClipPolyData> roiClip;
-    if (params.roiModelBounds) {
-        roiBox->SetBounds(params.roiModelBounds->data());
-        roiClip->SetInputConnection(surface->GetOutputPort());
-        roiClip->SetClipFunction(roiBox);
-        roiClip->InsideOutOn();
-        roiClip->GenerateClippedOutputOff();
-        triangleFilter->SetInputConnection(roiClip->GetOutputPort());
-    }
-    else {
-        triangleFilter->SetInputConnection(surface->GetOutputPort());
-    }
-    triangleFilter->PassLinesOff();
-    triangleFilter->PassVertsOff();
-    triangleFilter->Update();
-
-    if (GetCancelled(getCancelled)) {
-        message = "Surface seed extraction was cancelled.";
-        return SurfaceFailureReason::Cancelled;
-    }
-    auto* output = triangleFilter->GetOutput();
-    if (!output || !output->GetPoints() || !output->GetPolys()
-        || output->GetNumberOfPoints() <= 0
-        || output->GetNumberOfPolys() <= 0) {
-        message = "Surface initial ISO did not produce a surface.";
-        return SurfaceFailureReason::NoSurface;
-    }
-    if (static_cast<unsigned long long>(output->GetNumberOfPoints())
-        > std::numeric_limits<std::uint32_t>::max()) {
-        message = "Surface point count exceeds the uint32 topology limit.";
-        return SurfaceFailureReason::BudgetExceeded;
-    }
-
-    points.resize(static_cast<std::size_t>(output->GetNumberOfPoints()));
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        output->GetPoint(static_cast<vtkIdType>(index), points[index].data());
-        if (!std::all_of(
-                points[index].begin(), points[index].end(),
-                [](const double value) { return std::isfinite(value); })) {
-            message = "Surface seed mesh contains a non-finite point.";
-            return SurfaceFailureReason::InvalidGeometry;
-        }
-    }
-
-    vtkNew<vtkIdList> pointIds;
-    auto* cells = output->GetPolys();
-    cells->InitTraversal();
-    while (cells->GetNextCell(pointIds)) {
-        if (pointIds->GetNumberOfIds() != 3) continue;
-        Triangle triangle;
-        bool isValid = true;
-        for (std::size_t vertex = 0; vertex < 3; ++vertex) {
-            const vtkIdType pointId = pointIds->GetId(
-                static_cast<vtkIdType>(vertex));
-            if (pointId < 0
-                || static_cast<unsigned long long>(pointId)
-                    >= points.size()) {
-                isValid = false;
-                break;
-            }
-            triangle.vertices[vertex] = static_cast<std::uint32_t>(pointId);
-        }
-        if (isValid
-            && triangle.vertices[0] != triangle.vertices[1]
-            && triangle.vertices[1] != triangle.vertices[2]
-            && triangle.vertices[2] != triangle.vertices[0]) {
-            triangles.push_back(triangle);
-        }
-    }
-    if (triangles.empty()) {
-        message = "Surface seed mesh does not contain valid triangles.";
-        return SurfaceFailureReason::NoSurface;
-    }
-    return SurfaceFailureReason::None;
 }
 
 class DisjointSet final {
@@ -1399,10 +1218,10 @@ std::uint64_t GetEdgeKey(
         | static_cast<std::uint64_t>(maximum);
 }
 
-TopologyMetrics GetTopologyMetrics(
-    const std::vector<Point3>& points,
-    const std::vector<Triangle>& triangles)
+TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
+                                   const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     struct EdgeRecord final {
         std::uint32_t count = 0;
         int directionSum = 0;
@@ -1414,6 +1233,7 @@ TopologyMetrics GetTopologyMetrics(
     }
     TopologyMetrics metrics;
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
         if (ids[0] >= points.size()
             || ids[1] >= points.size()
@@ -1436,6 +1256,7 @@ TopologyMetrics GetTopologyMetrics(
                 Cross(points[ids[1]], points[ids[2]])) / 6.0;
         }
         for (std::size_t edge = 0; edge < 3; ++edge) {
+            CheckCancellation(cancellationBatch, cancelled);
             const std::uint32_t from = ids[edge];
             const std::uint32_t to = ids[(edge + 1) % 3];
             auto& record = edges[GetEdgeKey(from, to)];
@@ -1444,6 +1265,7 @@ TopologyMetrics GetTopologyMetrics(
         }
     }
     for (const auto& item : edges) {
+        CheckCancellation(cancellationBatch, cancelled);
         const EdgeRecord& edge = item.second;
         if (edge.count == 1) ++metrics.boundaryEdgeCount;
         else if (edge.count > 2) ++metrics.nonManifoldEdgeCount;
@@ -1458,18 +1280,20 @@ TopologyMetrics GetTopologyMetrics(
     return metrics;
 }
 
-std::vector<MeshComponent> BuildComponents(
-    const std::vector<Point3>& points,
-    const std::vector<Triangle>& triangles,
-    const double voxelVolume)
+std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
+                                           const std::vector<Triangle> &triangles, const double voxelVolume,
+                                           const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     DisjointSet sets(points.size());
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         sets.SetJoined(triangle.vertices[0], triangle.vertices[1]);
         sets.SetJoined(triangle.vertices[1], triangle.vertices[2]);
     }
     std::map<std::uint32_t, std::vector<Triangle>> groupedTriangles;
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         groupedTriangles[sets.GetRoot(triangle.vertices[0])]
             .push_back(triangle);
     }
@@ -1477,11 +1301,13 @@ std::vector<MeshComponent> BuildComponents(
     std::vector<MeshComponent> components;
     components.reserve(groupedTriangles.size());
     for (auto& item : groupedTriangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         MeshComponent component;
         component.triangles = std::move(item.second);
         std::vector<std::uint32_t> pointIds;
         pointIds.reserve(component.triangles.size());
         for (const Triangle& triangle : component.triangles) {
+            CheckCancellation(cancellationBatch, cancelled);
             pointIds.insert(
                 pointIds.end(),
                 triangle.vertices.begin(),
@@ -1500,6 +1326,7 @@ std::vector<MeshComponent> BuildComponents(
         localPoints.reserve(component.sourcePointIds.size());
         for (std::size_t index = 0;
             index < component.sourcePointIds.size(); ++index) {
+            CheckCancellation(cancellationBatch, cancelled);
             remap.emplace(
                 component.sourcePointIds[index],
                 static_cast<std::uint32_t>(index));
@@ -1507,12 +1334,13 @@ std::vector<MeshComponent> BuildComponents(
         }
         std::vector<Triangle> localTriangles = component.triangles;
         for (Triangle& triangle : localTriangles) {
+            CheckCancellation(cancellationBatch, cancelled);
             for (std::uint32_t& pointId : triangle.vertices) {
+                CheckCancellation(cancellationBatch, cancelled);
                 pointId = remap.at(pointId);
             }
         }
-        const TopologyMetrics topology = GetTopologyMetrics(
-            localPoints, localTriangles);
+        const TopologyMetrics topology = GetTopologyMetrics(localPoints, localTriangles, cancelled);
         component.isClosed = topology.boundaryEdgeCount == 0
             && topology.nonManifoldEdgeCount == 0;
         if (component.isClosed && voxelVolume > geometryEpsilon) {
@@ -1531,26 +1359,28 @@ std::vector<MeshComponent> BuildComponents(
     return components;
 }
 
-double GetComponentDistanceSquared(
-    const MeshComponent& component,
-    const std::vector<Point3>& points,
-    const Point3& seed)
+double GetComponentDistanceSquared(const MeshComponent &component, const std::vector<Point3> &points,
+                                   const Point3 &seed, const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     double distance = std::numeric_limits<double>::max();
     for (const std::uint32_t pointId : component.sourcePointIds) {
+        CheckCancellation(cancellationBatch, cancelled);
         const Point3 delta = Subtract(points[pointId], seed);
         distance = std::min(distance, Dot(delta, delta));
     }
     return distance;
 }
 
-std::vector<std::size_t> GetSelectedComponents(
-    const std::vector<MeshComponent>& components,
-    const std::vector<Point3>& points,
-    const ResolvedParams& params)
+std::vector<std::size_t> GetSelectedComponents(const std::vector<MeshComponent> &components,
+                                               const std::vector<Point3> &points,
+                                               const ResolvedParams &params,
+                                               const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     std::vector<std::size_t> eligible;
     for (std::size_t index = 0; index < components.size(); ++index) {
+        CheckCancellation(cancellationBatch, cancelled);
         const MeshComponent& component = components[index];
         // 开放表面没有可信体积，不伪造 voxel count；保留它并由 truncated
         // 与 metric validity 向调用方表达限制。
@@ -1582,14 +1412,13 @@ std::vector<std::size_t> GetSelectedComponents(
         const Point3& seed = *params.seedModelPoint;
         const auto selected = std::min_element(
             eligible.begin(), eligible.end(),
-            [&components, &points, &seed](
-                const std::size_t left,
-                const std::size_t right) {
-                const double leftDistance = GetComponentDistanceSquared(
-                    components[left], points, seed);
-                const double rightDistance = GetComponentDistanceSquared(
-                    components[right], points, seed);
-                if (leftDistance != rightDistance) {
+            [&components, &points, &seed, &cancelled](const std::size_t left, const std::size_t right) {
+                const double leftDistance =
+                    GetComponentDistanceSquared(components[left], points, seed, cancelled);
+                const double rightDistance =
+                    GetComponentDistanceSquared(components[right], points, seed, cancelled);
+                if (leftDistance != rightDistance)
+                {
                     return leftDistance < rightDistance;
                 }
                 return components[left].minimumPointId
@@ -1600,35 +1429,39 @@ std::vector<std::size_t> GetSelectedComponents(
     return eligible;
 }
 
-void GetLocalMesh(
-    const MeshComponent& component,
-    const std::vector<Point3>& sourcePoints,
-    std::vector<Point3>& points,
-    std::vector<Triangle>& triangles)
+void GetLocalMesh(const MeshComponent &component, const std::vector<Point3> &sourcePoints,
+                  std::vector<Point3> &points, std::vector<Triangle> &triangles,
+                  const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     std::unordered_map<std::uint32_t, std::uint32_t> remap;
     remap.reserve(component.sourcePointIds.size());
     points.reserve(component.sourcePointIds.size());
     for (std::size_t index = 0;
         index < component.sourcePointIds.size(); ++index) {
+        CheckCancellation(cancellationBatch, cancelled);
         const std::uint32_t sourceId = component.sourcePointIds[index];
         remap.emplace(sourceId, static_cast<std::uint32_t>(index));
         points.push_back(sourcePoints[sourceId]);
     }
     triangles = component.triangles;
     for (Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         for (std::uint32_t& pointId : triangle.vertices) {
+            CheckCancellation(cancellationBatch, cancelled);
             pointId = remap.at(pointId);
         }
     }
 }
 
-std::vector<Point3> GetVertexNormals(
-    const std::vector<Point3>& points,
-    const std::vector<Triangle>& triangles)
+std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
+                                     const std::vector<Triangle> &triangles,
+                                     const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     std::vector<Point3> normals(points.size(), Point3{});
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         const Point3 normal = Cross(
             Subtract(
                 points[triangle.vertices[1]],
@@ -1637,10 +1470,12 @@ std::vector<Point3> GetVertexNormals(
                 points[triangle.vertices[2]],
                 points[triangle.vertices[0]]));
         for (const std::uint32_t pointId : triangle.vertices) {
+            CheckCancellation(cancellationBatch, cancelled);
             normals[pointId] = Add(normals[pointId], normal);
         }
     }
     for (Point3& normal : normals) {
+        CheckCancellation(cancellationBatch, cancelled);
         if (!Normalize(normal)) normal = { 0.0, 0.0, 1.0 };
     }
     return normals;
@@ -1691,341 +1526,143 @@ float GetFiniteFloat(const double value)
     return static_cast<float>(bounded);
 }
 
-bool GetFatalPointFlags(const SurfacePointFlags flags)
+bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, const Point3 &initialPoint,
+                     const Point3 &initialNormal, SurfacePointRecord &record,
+                     SurfaceProfileWorkspace &workspace, SurfaceProfileDiagnostic *diagnostic = nullptr)
 {
-    constexpr SurfacePointFlags fatal =
-        SurfacePointFlags::LowContrast
-        | SurfacePointFlags::InvalidSupport
-        | SurfacePointFlags::ProfileClipped
-        | SurfacePointFlags::ExcessiveOffset
-        | SurfacePointFlags::FitRejected
-        | SurfacePointFlags::TriangleFlipRisk;
-    return (flags & fatal) != SurfacePointFlags::None;
-}
-
-double GetLineResidual(
-    const Profile& profile,
-    const std::size_t leftIndex)
-{
-    if (profile.values.size() < 4
-        || leftIndex == 0
-        || leftIndex + 2 >= profile.values.size()) {
-        return 0.0;
-    }
-    const double slope = (profile.values[leftIndex + 1]
-        - profile.values[leftIndex]) / profile.step;
-    const double beforePrediction = profile.values[leftIndex]
-        - slope * profile.step;
-    const double afterPrediction = profile.values[leftIndex + 1]
-        + slope * profile.step;
-    const double beforeResidual = profile.values[leftIndex - 1]
-        - beforePrediction;
-    const double afterResidual = profile.values[leftIndex + 2]
-        - afterPrediction;
-    return std::sqrt(0.5 * (
-        beforeResidual * beforeResidual
-        + afterResidual * afterResidual));
-}
-
-bool GetPlateauValues(
-    const Profile& profile,
-    std::vector<double>& insideValues,
-    std::vector<double>& outsideValues)
-{
-    if (profile.values.size() < 9) return false;
-    const std::size_t plateauCount = std::max<std::size_t>(
-        2, profile.values.size() / 5U);
-    insideValues.assign(
-        profile.values.begin(),
-        profile.values.begin() + static_cast<std::ptrdiff_t>(plateauCount));
-    outsideValues.assign(
-        profile.values.end() - static_cast<std::ptrdiff_t>(plateauCount),
-        profile.values.end());
-    return true;
-}
-
-bool GetLocalAdaptiveOffset(
-    const Profile& profile,
-    const double threshold,
-    double& offset,
-    std::uint32_t& crossingCount,
-    double& gradientMagnitude,
-    double& fitResidual)
-{
-    std::optional<std::size_t> selected;
-    double selectedDistance = std::numeric_limits<double>::max();
-    crossingCount = 0;
-    for (std::size_t index = 0;
-        index + 1 < profile.values.size(); ++index) {
-        const double left = profile.values[index];
-        const double right = profile.values[index + 1];
-        const bool hasCrossing =
-            ((left >= threshold && right < threshold)
-                || (left <= threshold && right > threshold))
-            && std::abs(left - right) > geometryEpsilon;
-        if (hasCrossing) ++crossingCount;
-        if (left >= threshold && right < threshold
-            && std::abs(left - right) > geometryEpsilon) {
-            const double fraction = (threshold - left) / (right - left);
-            const double candidate = profile.offsets[index]
-                + fraction * profile.step;
-            const double distance = std::abs(candidate);
-            if (distance < selectedDistance) {
-                selected = index;
-                selectedDistance = distance;
-                offset = candidate;
-            }
+    record.seedPositionModel = initialPoint;
+    record.positionModel = initialPoint;
+    Point3 normal = initialNormal, current = initialPoint, gradient{};
+    double magnitude = 0;
+    auto params = GetLocalParams(global, initialPoint, record.overrideIndex);
+    if (global.roiModelBounds)
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            const auto low = (*global.roiModelBounds)[2 * axis],
+                       high = (*global.roiModelBounds)[2 * axis + 1];
+            const auto tolerance =
+                32 * std::numeric_limits<double>::epsilon() * std::max({1.0, std::abs(low), std::abs(high)});
+            if (std::abs(initialPoint[axis] - low) <= tolerance ||
+                std::abs(initialPoint[axis] - high) <= tolerance)
+                record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
         }
+    if (!params.materials && GetGradient(volume, current, gradient, magnitude) && Normalize(gradient))
+    {
+        double sign = -1;
+        if (params.grayPair)
+            sign = params.grayPair->sideB[0] > params.grayPair->sideA[1] ? 1 : -1;
+        normal = Scale(gradient, sign);
     }
-    if (!selected) return false;
-    gradientMagnitude = std::abs(
-        profile.values[*selected + 1] - profile.values[*selected])
-        / profile.step;
-    fitResidual = GetLineResidual(profile, *selected);
-    return std::isfinite(offset) && std::isfinite(gradientMagnitude);
-}
-
-bool GetGradientPeakOffset(
-    const Profile& profile,
-    const double maximumOffset,
-    double& offset,
-    std::uint32_t& peakCount,
-    double& gradientMagnitude,
-    double& fitResidual,
-    double& localThreshold)
-{
-    if (profile.values.size() < 7) return false;
-    std::vector<double> derivatives(profile.values.size(), 0.0);
-    for (std::size_t index = 1;
-        index + 1 < profile.values.size(); ++index) {
-        derivatives[index] = std::abs(
-            profile.values[index + 1] - profile.values[index - 1])
-            / (2.0 * profile.step);
-    }
-    std::optional<std::size_t> selected;
-    double maximum = 0.0;
-    for (std::size_t index = 2;
-        index + 2 < derivatives.size(); ++index) {
-        if (std::abs(profile.offsets[index]) > maximumOffset
-            || derivatives[index] < derivatives[index - 1]
-            || derivatives[index] < derivatives[index + 1]) {
-            continue;
-        }
-        if (derivatives[index] > maximum) {
-            maximum = derivatives[index];
-            selected = index;
-        }
-    }
-    if (!selected || maximum <= geometryEpsilon) return false;
-
-    peakCount = 0;
-    for (std::size_t index = 2;
-        index + 2 < derivatives.size(); ++index) {
-        if (std::abs(profile.offsets[index]) <= maximumOffset
-            && derivatives[index] >= 0.5 * maximum
-            && derivatives[index] >= derivatives[index - 1]
-            && derivatives[index] >= derivatives[index + 1]) {
-            ++peakCount;
-        }
-    }
-    const std::size_t index = *selected;
-    const double before = derivatives[index - 1];
-    const double center = derivatives[index];
-    const double after = derivatives[index + 1];
-    const double denominator = before - 2.0 * center + after;
-    double sampleOffset = 0.0;
-    if (std::abs(denominator) > geometryEpsilon) {
-        sampleOffset = 0.5 * (before - after) / denominator;
-        sampleOffset = std::clamp(sampleOffset, -1.0, 1.0);
-    }
-    offset = profile.offsets[index] + sampleOffset * profile.step;
-    gradientMagnitude = center
-        - 0.25 * (before - after) * sampleOffset;
-    fitResidual = std::abs(before - after)
-        / std::max(center, geometryEpsilon);
-    const double valueSlope = 0.5
-        * (profile.values[index + 1] - profile.values[index - 1]);
-    localThreshold = profile.values[index] + sampleOffset * valueSlope;
-    return std::isfinite(offset)
-        && std::isfinite(gradientMagnitude)
-        && gradientMagnitude > geometryEpsilon;
-}
-
-bool SetRefinedPoint(
-    const VolumeView& volume,
-    const ResolvedParams& params,
-    const Point3& initialPoint,
-    const Point3& initialNormal,
-    SurfacePointRecord& record)
-{
-    Point3 current = initialPoint;
-    Point3 normal = initialNormal;
-    Point3 gradient{};
-    double gradientMagnitude = 0.0;
-    if (GetGradient(volume, current, gradient, gradientMagnitude)
-        && Normalize(gradient)) {
-        normal = Scale(gradient, -1.0);
-    }
-    if (!Normalize(normal)) {
-        record.flags |= SurfacePointFlags::FitRejected;
+    if (!Normalize(normal))
+    {
+        record.flags |= SurfacePointFlags::FitRejected | SurfacePointFlags::SeedRetained;
         return false;
     }
-
-    if (params.method == SurfaceDeterminationMethod::GlobalIsoPreview) {
-        record.positionModel = current;
-        record.normalModel = {
-            GetFiniteFloat(normal[0]),
-            GetFiniteFloat(normal[1]),
-            GetFiniteFloat(normal[2])
-        };
-        record.localThreshold = GetFiniteFloat(params.initialIsoValue);
-        record.gradientMagnitude = GetFiniteFloat(gradientMagnitude);
-        const ScalarSample support = GetScalarAtModel(volume, current);
-        if (support.status == SampleStatus::Clipped) {
-            record.flags |= SurfacePointFlags::ProfileClipped;
-        }
-        else if (support.status == SampleStatus::InvalidSupport) {
-            record.flags |= SurfacePointFlags::InvalidSupport;
-        }
-        record.validSupportRatio = support.status == SampleStatus::Valid
-            ? 1.0F : 0.0F;
-        return !GetFatalPointFlags(record.flags);
+    record.seedNormalModel = normal;
+    if (GetGradient(volume, current, gradient, magnitude))
+    {
+        const auto projected = Dot(gradient, normal);
+        params.expectedDerivativeSign = projected > geometryEpsilon    ? 1
+                                        : projected < -geometryEpsilon ? -1
+                                                                       : 0;
     }
-
-    double lastNoise = 0.0;
-    double lastResidual = 0.0;
-    double lastGradient = 0.0;
-    double lastThreshold = params.initialIsoValue;
-    double minimumValidRatio = 1.0;
-    std::uint32_t lastCrossingCount = 0;
-    for (int iteration = 0; iteration < 2; ++iteration) {
-        Profile profile = BuildProfile(volume, current, normal, params);
-        minimumValidRatio = std::min(
-            minimumValidRatio, profile.validRatio);
-        if (profile.isClipped) {
-            record.flags |= SurfacePointFlags::ProfileClipped;
-        }
-        if (profile.hasInvalidSupport) {
+    record.normalModel = {GetFiniteFloat(record.seedNormalModel[0]),
+                          GetFiniteFloat(record.seedNormalModel[1]),
+                          GetFiniteFloat(record.seedNormalModel[2])};
+    if (params.method == SurfaceDeterminationMethod::GlobalIsoPreview)
+    {
+        record.localThreshold = GetFiniteFloat(params.initialIsoValue);
+        record.gradientMagnitude = GetFiniteFloat(magnitude);
+        const auto sample = GetScalarAtModel(volume, current);
+        record.validSupportRatio = sample.status == SampleStatus::Valid ? 1.0F : 0.0F;
+        if (sample.status != SampleStatus::Valid)
             record.flags |= SurfacePointFlags::InvalidSupport;
+        if (diagnostic)
+        {
+            diagnostic->isAvailable = true;
+            diagnostic->point = record;
+            diagnostic->message = "Preview has no local refinement profile.";
         }
-        if (profile.isClipped || profile.hasInvalidSupport
-            || profile.values.empty()) {
+        return true;
+    }
+    double supportRatio = 1;
+    SurfaceProfileFit fit;
+    for (unsigned iteration = 0; iteration < 2; ++iteration)
+    {
+        BuildProfile(volume, current, normal, params, workspace);
+        fit = SurfaceProfileSolver::BuildFit(workspace, params);
+        supportRatio = std::min(supportRatio, workspace.validRatio);
+        record.flags |= fit.flags;
+        if (diagnostic)
+        {
+            diagnostic->profileCenterModel = current;
+            diagnostic->directionModel = normal;
+            diagnostic->offsetsModel = workspace.offsets;
+            diagnostic->rawValues = workspace.raw;
+            diagnostic->filteredValues = workspace.values;
+            diagnostic->support = workspace.support;
+            diagnostic->materialLabels = workspace.labels;
+            diagnostic->candidates = workspace.candidates;
+            diagnostic->sideA = fit.sideA;
+            diagnostic->sideB = fit.sideB;
+            diagnostic->noiseSigma = fit.noise;
+            diagnostic->normalizedResidual = fit.normalizedResidual;
+            diagnostic->minimumOffsetModel = -params.maximumOffsetModel;
+            diagnostic->maximumOffsetModel = params.maximumOffsetModel;
+        }
+        if (record.flags != SurfacePointFlags::None)
+            break;
+        const auto next = Add(current, Scale(normal, fit.offset));
+        if (global.roiModelBounds && !GetPointInBounds(next, *global.roiModelBounds))
+        {
+            record.flags |= SurfacePointFlags::RoiBoundary;
             break;
         }
-
-        std::vector<double> insideValues;
-        std::vector<double> outsideValues;
-        if (!GetPlateauValues(
-                profile, insideValues, outsideValues)) {
-            record.flags |= SurfacePointFlags::FitRejected;
-            break;
-        }
-        double inside = GetMedian(insideValues);
-        double outside = GetMedian(outsideValues);
-        if (inside < outside) {
-            normal = Scale(normal, -1.0);
-            profile = BuildProfile(volume, current, normal, params);
-            minimumValidRatio = std::min(
-                minimumValidRatio, profile.validRatio);
-            if (profile.isClipped) {
-                record.flags |= SurfacePointFlags::ProfileClipped;
-            }
-            if (profile.hasInvalidSupport) {
-                record.flags |= SurfacePointFlags::InvalidSupport;
-            }
-            if (profile.isClipped || profile.hasInvalidSupport
-                || !GetPlateauValues(
-                    profile, insideValues, outsideValues)) {
-                break;
-            }
-            inside = GetMedian(insideValues);
-            outside = GetMedian(outsideValues);
-        }
-        const double contrast = inside - outside;
-        record.contrast = GetFiniteFloat(std::max(0.0, contrast));
-        const double contrastThreshold = std::max(
-            params.minimumContrast,
-            geometryEpsilon * std::max({
-                1.0, std::abs(inside), std::abs(outside) }));
-        if (!std::isfinite(contrast) || contrast < contrastThreshold) {
-            record.flags |= SurfacePointFlags::LowContrast;
-            break;
-        }
-
-        const double insideNoise = GetMad(insideValues, inside);
-        const double outsideNoise = GetMad(outsideValues, outside);
-        lastNoise = std::sqrt(0.5 * (
-            insideNoise * insideNoise
-            + outsideNoise * outsideNoise));
-        double localOffset = 0.0;
-        bool hasFit = false;
-        if (params.method
-            == SurfaceDeterminationMethod::LocalAdaptiveIso50) {
-            lastThreshold = 0.5 * (inside + outside);
-            hasFit = GetLocalAdaptiveOffset(
-                profile,
-                lastThreshold,
-                localOffset,
-                lastCrossingCount,
-                lastGradient,
-                lastResidual);
-        }
-        else {
-            hasFit = GetGradientPeakOffset(
-                profile,
-                params.maximumOffsetModel,
-                localOffset,
-                lastCrossingCount,
-                lastGradient,
-                lastResidual,
-                lastThreshold);
-        }
-        if (!hasFit) {
-            record.flags |= SurfacePointFlags::FitRejected;
-            break;
-        }
-        if (lastCrossingCount > 1) {
-            record.flags |= SurfacePointFlags::MultipleCrossings;
-        }
-        const Point3 next = Add(current, Scale(normal, localOffset));
-        const double totalOffset = GetLength(Subtract(next, initialPoint));
-        if (!std::isfinite(totalOffset)
-            || totalOffset > params.maximumOffsetModel) {
+        if (GetLength(Subtract(next, initialPoint)) > params.maximumOffsetModel + geometryEpsilon)
+        {
             record.flags |= SurfacePointFlags::ExcessiveOffset;
             break;
         }
         current = next;
-        if (GetGradient(volume, current, gradient, gradientMagnitude)
-            && Normalize(gradient)) {
-            normal = Scale(gradient, -1.0);
+        if (GetGradient(volume, current, gradient, magnitude) && Normalize(gradient))
+        {
+            if (Dot(gradient, normal) < 0)
+                gradient = Scale(gradient, -1);
+            if (Dot(gradient, normal) < std::cos(params.maximumNormalTurnDeg * 3.141592653589793 / 180))
+            {
+                record.flags |= SurfacePointFlags::SharpCorner;
+                break;
+            }
+            normal = gradient;
         }
     }
-
-    record.localThreshold = GetFiniteFloat(lastThreshold);
-    record.gradientMagnitude = GetFiniteFloat(lastGradient);
-    record.fitResidual = GetFiniteFloat(lastResidual);
-    record.crossingCount = lastCrossingCount;
-    record.validSupportRatio = GetFiniteFloat(minimumValidRatio);
-    record.offsetFromSeed = GetFiniteFloat(
-        GetLength(Subtract(current, initialPoint)));
-    const double safeGradient = std::max(lastGradient, geometryEpsilon);
-    const double noiseSigma = lastNoise / safeGradient;
-    const double residualSigma = lastResidual / safeGradient;
-    const double quantizationSigma = params.profileSampleStepModel
-        / std::sqrt(12.0);
-    record.estimatedLocalizationSigma = GetFiniteFloat(std::sqrt(
-        noiseSigma * noiseSigma
-        + residualSigma * residualSigma
-        + quantizationSigma * quantizationSigma));
-
-    const bool isAccepted = !GetFatalPointFlags(record.flags);
-    record.positionModel = isAccepted ? current : initialPoint;
-    record.normalModel = {
-        GetFiniteFloat(normal[0]),
-        GetFiniteFloat(normal[1]),
-        GetFiniteFloat(normal[2])
-    };
-    return isAccepted;
+    record.localThreshold = GetFiniteFloat(fit.threshold);
+    record.contrast = GetFiniteFloat(fit.contrast);
+    record.gradientMagnitude = GetFiniteFloat(fit.gradient);
+    record.fitResidual = GetFiniteFloat(fit.residual);
+    record.validSupportRatio = GetFiniteFloat(supportRatio);
+    record.crossingCount = fit.crossingCount;
+    record.transitionWidthModel = GetFiniteFloat(fit.width);
+    record.pairedSeparationModel = GetFiniteFloat(fit.separation);
+    record.estimatedLocalizationSigma = GetFiniteFloat(
+        std::hypot(std::hypot(fit.noise, fit.residual) / std::max(fit.gradient, geometryEpsilon),
+                   workspace.step / std::sqrt(12.0)));
+    const bool accepted = record.flags == SurfacePointFlags::None;
+    if (!accepted)
+        record.flags |= SurfacePointFlags::SeedRetained;
+    record.positionModel = accepted ? current : initialPoint;
+    record.offsetFromSeed = GetFiniteFloat(GetLength(Subtract(record.positionModel, initialPoint)));
+    record.normalModel = accepted ? std::array<float, 3>{GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]),
+                                                         GetFiniteFloat(normal[2])}
+                                  : std::array<float, 3>{GetFiniteFloat(record.seedNormalModel[0]),
+                                                         GetFiniteFloat(record.seedNormalModel[1]),
+                                                         GetFiniteFloat(record.seedNormalModel[2])};
+    if (diagnostic)
+    {
+        diagnostic->isAvailable = true;
+        diagnostic->point = record;
+    }
+    return accepted;
 }
 
 bool GetPointAtDataBoundary(
@@ -2065,13 +1702,13 @@ bool GetPointAtRoiBoundary(
     return false;
 }
 
-void SetTriangleFlipFlags(
-    const std::vector<Point3>& originalPoints,
-    const std::vector<Point3>& refinedPoints,
-    const std::vector<Triangle>& triangles,
-    std::vector<SurfacePointRecord>& records)
+void SetTriangleFlipFlags(const std::vector<Point3> &originalPoints, const std::vector<Point3> &refinedPoints,
+                          const std::vector<Triangle> &triangles, std::vector<SurfacePointRecord> &records,
+                          const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
         const Point3 originalNormal = Cross(
             Subtract(originalPoints[ids[1]], originalPoints[ids[0]]),
@@ -2085,9 +1722,14 @@ void SetTriangleFlipFlags(
             || refinedLength <= geometryEpsilon
             || Dot(originalNormal, refinedNormal) <= 0.0) {
             for (const std::uint32_t pointId : ids) {
+                CheckCancellation(cancellationBatch, cancelled);
                 records[pointId].flags |=
-                    SurfacePointFlags::TriangleFlipRisk;
+                    SurfacePointFlags::TriangleFlipRisk | SurfacePointFlags::SeedRetained;
                 records[pointId].positionModel = originalPoints[pointId];
+                records[pointId].offsetFromSeed = 0;
+                records[pointId].normalModel = {GetFiniteFloat(records[pointId].seedNormalModel[0]),
+                                                GetFiniteFloat(records[pointId].seedNormalModel[1]),
+                                                GetFiniteFloat(records[pointId].seedNormalModel[2])};
             }
         }
     }
@@ -2131,29 +1773,26 @@ SurfaceMetricValidity GetAreaValidity(
     return SurfaceMetricValidity::Valid;
 }
 
-void AddObjectResult(
-    const VolumeView& volume,
-    const ResolvedParams& params,
-    const std::uint32_t objectIndex,
-    const std::vector<Point3>& originalPoints,
-    const std::vector<Triangle>& triangles,
-    std::vector<SurfacePointRecord> records,
-    SurfaceAlgorithmResult& result)
+void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, const std::uint32_t objectIndex,
+                     const std::vector<Point3> &originalPoints, const std::vector<Triangle> &triangles,
+                     std::vector<SurfacePointRecord> records, SurfaceAlgorithmResult &result,
+                     const SurfaceCancelCheck &cancelled = {})
 {
+    std::size_t cancellationBatch = 0;
     std::vector<Point3> refinedPoints;
     refinedPoints.reserve(records.size());
     for (const SurfacePointRecord& record : records) {
+        CheckCancellation(cancellationBatch, cancelled);
         refinedPoints.push_back(record.positionModel);
     }
-    SetTriangleFlipFlags(
-        originalPoints, refinedPoints, triangles, records);
+    SetTriangleFlipFlags(originalPoints, refinedPoints, triangles, records, cancelled);
     refinedPoints.clear();
     refinedPoints.reserve(records.size());
     for (const SurfacePointRecord& record : records) {
+        CheckCancellation(cancellationBatch, cancelled);
         refinedPoints.push_back(record.positionModel);
     }
-    const TopologyMetrics topology = GetTopologyMetrics(
-        refinedPoints, triangles);
+    const TopologyMetrics topology = GetTopologyMetrics(refinedPoints, triangles, cancelled);
 
     std::uint64_t acceptedCount = 0;
     std::uint64_t lowContrastCount = 0;
@@ -2169,26 +1808,23 @@ void AddObjectResult(
         std::numeric_limits<double>::lowest()
     };
     for (SurfacePointRecord& record : records) {
+        CheckCancellation(cancellationBatch, cancelled);
         record.objectIndex = objectIndex;
         if (SurfaceContract::GetPointValid(record, params.method)) ++acceptedCount;
         if (GetSurfaceFlag(
                 record.flags, SurfacePointFlags::LowContrast)) {
             ++lowContrastCount;
         }
-        if (GetSurfaceFlag(
-                record.flags, SurfacePointFlags::ProfileClipped)
-            || GetPointAtDataBoundary(
-                volume.geometry,
-                record.positionModel,
-                boundaryTolerance)
-            || GetPointAtRoiBoundary(
-                params.roiModelBounds,
-                record.positionModel,
-                boundaryTolerance)) {
+        if (GetSurfaceFlag(record.flags, SurfacePointFlags::ProfileClipped) ||
+            GetSurfaceFlag(record.flags, SurfacePointFlags::RoiBoundary) ||
+            GetPointAtDataBoundary(volume.geometry, record.positionModel, boundaryTolerance) ||
+            GetPointAtRoiBoundary(params.roiModelBounds, record.positionModel, boundaryTolerance))
+        {
             isTruncated = true;
             ++result.truncatedPointCount;
         }
         for (std::size_t axis = 0; axis < 3; ++axis) {
+            CheckCancellation(cancellationBatch, cancelled);
             bounds[axis * 2] = std::min(
                 bounds[axis * 2], record.positionModel[axis]);
             bounds[axis * 2 + 1] = std::max(
@@ -2199,12 +1835,14 @@ void AddObjectResult(
     double totalArea = 0.0;
     bool hasCompleteSupport = !triangles.empty();
     for (const auto& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
         const auto edgeA = Subtract(records[ids[1]].positionModel, records[ids[0]].positionModel);
         const auto edgeB = Subtract(records[ids[2]].positionModel, records[ids[0]].positionModel);
         const double area = 0.5 * GetLength(Cross(edgeA, edgeB));
         bool isValid = std::isfinite(area) && area > geometryEpsilon;
         for (const auto id : ids) {
+            CheckCancellation(cancellationBatch, cancelled);
             isValid = isValid && SurfaceContract::GetPointValid(records[id], params.method)
                 && !GetPointAtDataBoundary(volume.geometry, records[id].positionModel, boundaryTolerance)
                 && !GetPointAtRoiBoundary(params.roiModelBounds, records[id].positionModel, boundaryTolerance);
@@ -2254,301 +1892,386 @@ void AddObjectResult(
         std::make_move_iterator(records.begin()),
         std::make_move_iterator(records.end()));
     for (const Triangle& triangle : triangles) {
+        CheckCancellation(cancellationBatch, cancelled);
         for (const std::uint32_t pointId : triangle.vertices) {
+            CheckCancellation(cancellationBatch, cancelled);
             result.triangleIndices.push_back(pointOffset + pointId);
         }
     }
     result.objects.push_back(std::move(object));
 }
 
-SurfaceAlgorithmResult BuildSurfaceImpl(
-    const VtkImageGridSnapshot& source,
-    const SurfaceDeterminationStartParams& inputParams,
-    const std::size_t maxWorkingBytes,
-    const SurfaceCancelCheck& getCancelled,
-    const SurfaceProgressCallback& onProgress)
+SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
+                                         const SurfaceDeterminationStartParams &params,
+                                         const SurfaceAlgorithmInputs &inputs, VolumeView &volume,
+                                         std::string &message)
+{
+    const auto *image = dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get());
+    const auto &geometry = image->GetGeometry();
+    const auto matches = [&](const DataSnapshot &snapshot, const std::optional<DataRevisionRef> &expected) {
+        return snapshot && expected && snapshot->self == *expected &&
+               std::any_of(snapshot->inputs.begin(), snapshot->inputs.end(), [&](const auto &input) {
+                   return input.role == "source-volume" && input.source == source->data->self;
+               });
+    };
+    if (bool(params.materialLabels) != bool(inputs.materialLabels) ||
+        bool(params.initialSurface) != bool(inputs.initialSurface) ||
+        bool(params.materialLabels) != !params.materialPairs.empty())
+    {
+        message = "Surface optional input snapshots do not match the request.";
+        return SurfaceFailureReason::InvalidSource;
+    }
+    if (inputs.materialLabels)
+    {
+        const auto *labels = dynamic_cast<const LabelMap3DPayload *>(inputs.materialLabels->payload.get());
+        if (!matches(inputs.materialLabels, params.materialLabels) || !labels || !labels->GetValid())
+        {
+            message = "Surface material labels require the exact source-volume revision.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        const auto &other = labels->GetGeometry();
+        if (other.extent != geometry.extent || other.dimensions != geometry.dimensions ||
+            other.spacing != geometry.spacing || other.origin != geometry.origin ||
+            other.direction != geometry.direction || other.coordinateFrame != geometry.coordinateFrame)
+        {
+            message = "Surface material labels must have the source geometry and frame.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+        if (labels->GetScalarRange()[0] < 0 || labels->GetScalarRange()[1] > UINT32_MAX)
+        {
+            message = "Surface material identities must fit uint32.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        volume.labels = labels;
+    }
+    if (inputs.initialSurface)
+    {
+        const auto *mesh = dynamic_cast<const SurfaceMeshPayload *>(inputs.initialSurface->payload.get());
+        if (!matches(inputs.initialSurface, params.initialSurface) || !mesh || !mesh->GetValid() ||
+            mesh->GetCoordinateFrame() != geometry.coordinateFrame)
+        {
+            message = "Surface initial mesh requires the exact source-volume revision and frame.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        volume.initialMesh = mesh;
+    }
+    return SurfaceFailureReason::None;
+}
+
+void SetInterfaceWinding(const VolumeView &volume, const ResolvedParams &params,
+                         const std::vector<Point3> &points, std::vector<Triangle> &triangles)
+{
+    if (!params.materials)
+    {
+        SetOutwardWinding(volume, points, triangles);
+        if (params.grayPair && params.grayPair->sideB[0] > params.grayPair->sideA[1])
+            for (auto &t : triangles)
+                std::swap(t.vertices[1], t.vertices[2]);
+        return;
+    }
+    double score = 0;
+    const double probe = *std::max_element(volume.geometry.spacing.begin(), volume.geometry.spacing.end());
+    const auto stride = std::max<std::size_t>(1, triangles.size() / 256);
+    for (std::size_t i = 0; i < triangles.size(); i += stride)
+    {
+        const auto &ids = triangles[i].vertices;
+        const auto center = Scale(Add(Add(points[ids[0]], points[ids[1]]), points[ids[2]]), 1.0 / 3);
+        auto normal =
+            Cross(Subtract(points[ids[1]], points[ids[0]]), Subtract(points[ids[2]], points[ids[0]]));
+        if (!Normalize(normal))
+            continue;
+        const auto a = GetLabelAtModel(volume, Add(center, Scale(normal, -probe)));
+        const auto b = GetLabelAtModel(volume, Add(center, Scale(normal, probe)));
+        if (a == params.materials->materialA && b == params.materials->materialB)
+            score += 1;
+        if (a == params.materials->materialB && b == params.materials->materialA)
+            score -= 1;
+    }
+    if (score < 0)
+        for (auto &t : triangles)
+            std::swap(t.vertices[1], t.vertices[2]);
+}
+
+SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
+                                        const SurfaceDeterminationStartParams &inputParams,
+                                        const std::size_t maxWorkingBytes,
+                                        const SurfaceCancelCheck &getCancelled,
+                                        const SurfaceProgressCallback &onProgress,
+                                        const SurfaceAlgorithmInputs &inputs)
 {
     SurfaceAlgorithmResult result;
     result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
     result.method = inputParams.method;
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::Preparing, 0.01);
-
-    VolumeView volume;
-    result.failureReason = BuildVolumeView(
-        source, volume, result.message);
-    if (result.failureReason != SurfaceFailureReason::None) return result;
-
-    const bool isThresholdOnly = inputParams.method == SurfaceDeterminationMethod::AutomaticIso50;
-    // 直方图、平滑值和峰候选均有固定上限，不套用完整网格的每体素预算。
-    result.requiredBytes = 64U * 1024U;
-    if (maxWorkingBytes == 0) {
-        result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface working-set estimate overflows.";
-        return result;
-    }
-    if (result.requiredBytes > maxWorkingBytes) {
-        result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface working-set budget is exceeded: requiredBytes="
-            + std::to_string(result.requiredBytes)
-            + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
-        return result;
-    }
-
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
-    ResolvedParams params;
-    result.failureReason = ResolveParams(
-        volume, inputParams, getCancelled, params, result.message);
-    if (result.failureReason != SurfaceFailureReason::None) {
-        result.status = result.failureReason == SurfaceFailureReason::Cancelled
-            ? SurfaceResultStatus::Cancelled
-            : SurfaceResultStatus::Failed;
-        return result;
-    }
-    result.resolvedParams = inputParams;
-    result.resolvedParams.targetViews = {};
-    result.resolvedParams.purpose = SurfaceContract::GetPurpose(inputParams);
-    result.resolvedParams.sourceVolume = result.sourceRevision;
-    result.resolvedParams.initialIsoValue = params.initialIsoValue;
-    result.resolvedParams.profileHalfLengthModel = params.profileHalfLengthModel;
-    result.resolvedParams.profileSampleStepModel = params.profileSampleStepModel;
-    result.resolvedParams.maximumOffsetModel = params.maximumOffsetModel;
-    result.resolvedParams.profileSmoothingSigmaModel = params.profileSmoothingSigmaModel;
-    result.initialIsoValue = params.initialIsoValue;
-    result.isoEstimate = params.isoEstimate;
-    result.parameterFingerprint = GetFingerprint(params);
-    if (isThresholdOnly) {
-        if (!result.isoEstimate) {
-            result.failureReason = SurfaceFailureReason::ThresholdUnreliable;
-            result.message = "Automatic ISO50 requires automatic threshold estimation.";
-            return result;
-        }
-        result.status = SurfaceResultStatus::Succeeded;
-        result.failureReason = SurfaceFailureReason::None;
-        result.message = "Automatic ISO50 succeeded: iso=" + std::to_string(result.initialIsoValue)
-            + ", background=" + std::to_string(result.isoEstimate->backgroundValue)
-            + ", material=" + std::to_string(result.isoEstimate->materialValue)
-            + ", samples=" + std::to_string(result.isoEstimate->sampleCount)
-            + ", workingBytes=" + std::to_string(result.requiredBytes) + ".";
-        SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 1.0);
-        return result;
-    }
-
-    result.failureReason = GetBudgetEstimate(volume, params, maxWorkingBytes,
-        getCancelled, onProgress, result.requiredBytes, result.message);
-    if (result.failureReason != SurfaceFailureReason::None) {
-        result.status = result.failureReason == SurfaceFailureReason::Cancelled
-            ? SurfaceResultStatus::Cancelled : SurfaceResultStatus::Failed;
-        return result;
-    }
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::SeedExtraction, 0.20);
-    std::vector<Point3> meshPoints;
-    std::vector<Triangle> meshTriangles;
-    result.failureReason = BuildInitialMesh(
-        *source->image,
-        params,
-        getCancelled,
-        meshPoints,
-        meshTriangles,
-        result.message);
-    if (result.failureReason != SurfaceFailureReason::None) {
-        result.status = result.failureReason == SurfaceFailureReason::Cancelled
-            ? SurfaceResultStatus::Cancelled
-            : SurfaceResultStatus::Failed;
-        return result;
-    }
-    std::size_t actualBytes = 0;
-    std::size_t pointBytes = 0;
-    std::size_t triangleBytes = 0;
-    if (!GetProduct(meshPoints.size(), sizeof(Point3), pointBytes)
-        || !GetProduct(
-            meshTriangles.size(), sizeof(Triangle), triangleBytes)
-        || !GetSum(pointBytes, triangleBytes, actualBytes)
-        || actualBytes > maxWorkingBytes) {
-        result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface seed mesh exceeds the working-set budget.";
-        return result;
-    }
-
-    auto components = BuildComponents(
-        meshPoints, meshTriangles, volume.geometry.voxelVolume);
-    const auto selected = GetSelectedComponents(
-        components, meshPoints, params);
-    if (selected.empty()) {
-        result.failureReason = SurfaceFailureReason::NoSurface;
-        result.message = "Surface component selection produced no object.";
-        return result;
-    }
-
-    // 取得真实 topology 后，对同时存活的原始 mesh、局部 workspace 和
-    // immutable generation 再做一次 checked 预算；拒绝发生在 point refine
-    // 和结果 vector 扩容之前。
-    std::size_t refinedWorkingBytes = actualBytes;
-    for (const std::size_t componentIndex : selected) {
-        const auto& component = components[componentIndex];
-        constexpr std::size_t pointWorkspaceBytes =
-            sizeof(Point3) * 4U
-            + sizeof(SurfacePointRecord)
-            + sizeof(std::uint32_t);
-        constexpr std::size_t triangleWorkspaceBytes =
-            sizeof(Triangle) * 2U
-            + sizeof(std::uint32_t) * 3U + sizeof(std::uint8_t);
-        if (!AddWorkingBytes(
-                component.sourcePointIds.size(),
-                pointWorkspaceBytes,
-                refinedWorkingBytes)
-            || !AddWorkingBytes(
-                component.triangles.size(),
-                triangleWorkspaceBytes,
-                refinedWorkingBytes)
-            || !AddWorkingBytes(
-                1U,
-                sizeof(SurfaceObjectRecord),
-                refinedWorkingBytes)) {
-            result.failureReason = SurfaceFailureReason::BudgetExceeded;
-            result.message = "Surface refined working-set estimate overflows.";
-            return result;
-        }
-    }
-    result.requiredBytes = std::max(
-        result.requiredBytes, refinedWorkingBytes);
-    if (result.requiredBytes > maxWorkingBytes) {
-        result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface refined working-set budget is exceeded: requiredBytes="
-            + std::to_string(result.requiredBytes)
-            + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
-        return result;
-    }
-
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::SubvoxelRefinement, 0.35);
-    for (std::size_t selectedIndex = 0;
-        selectedIndex < selected.size(); ++selectedIndex) {
-        if (GetCancelled(getCancelled)) {
-            result.status = SurfaceResultStatus::Cancelled;
-            result.failureReason = SurfaceFailureReason::Cancelled;
-            result.message = "Surface subvoxel refinement was cancelled.";
-            result.points.clear();
-            result.triangleIndices.clear();
-            result.objects.clear();
-            return result;
-        }
-        std::vector<Point3> points;
-        std::vector<Triangle> triangles;
-        GetLocalMesh(
-            components[selected[selectedIndex]],
-            meshPoints,
-            points,
-            triangles);
-        SetOutwardWinding(volume, points, triangles);
-        const auto normals = GetVertexNormals(points, triangles);
-        std::vector<SurfacePointRecord> records(points.size());
-        std::atomic<bool> isRefinementCancelled{ false };
-        const auto setPointBlock = [
-            &volume,
-            &params,
-            &points,
-            &normals,
-            &records,
-            &getCancelled,
-            &isRefinementCancelled](
-                const vtkIdType begin,
-                const vtkIdType end) {
-            if (isRefinementCancelled.load(std::memory_order_acquire)) return;
-            for (vtkIdType pointId = begin; pointId < end; ++pointId) {
-                if (((pointId - begin) & 31) == 0
-                    && GetCancelled(getCancelled)) {
-                    isRefinementCancelled.store(
-                        true, std::memory_order_release);
-                    return;
-                }
-                const auto pointIndex = static_cast<std::size_t>(pointId);
-                SetRefinedPoint(
-                    volume,
-                    params,
-                    points[pointIndex],
-                    normals[pointIndex],
-                    records[pointIndex]);
-            }
-        };
-        vtkSMPTools::For(
-            0,
-            static_cast<vtkIdType>(points.size()),
-            128,
-            setPointBlock);
-        if (isRefinementCancelled.load(std::memory_order_acquire)) {
-            result.status = SurfaceResultStatus::Cancelled;
-            result.failureReason = SurfaceFailureReason::Cancelled;
-            result.message = "Surface subvoxel refinement was cancelled.";
-            result.points.clear();
-            result.triangleIndices.clear();
-            result.objects.clear();
-            return result;
-        }
-        AddObjectResult(
-            volume,
-            params,
-            static_cast<std::uint32_t>(selectedIndex),
-            points,
-            triangles,
-            std::move(records),
-            result);
-        const double objectProgress = static_cast<double>(selectedIndex + 1)
-            / static_cast<double>(selected.size());
-        SendProgress(
-            onProgress,
-            SurfaceDeterminationStage::SubvoxelRefinement,
-            0.35 + 0.50 * objectProgress);
-    }
-
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::TopologyValidation, 0.90);
-    if (result.points.empty() || result.triangleIndices.empty()
-        || result.objects.empty()) {
-        result.failureReason = SurfaceFailureReason::NoSurface;
-        result.message = "Surface output is empty after topology validation.";
-        return result;
-    }
-    if (GetCancelled(getCancelled)) {
-        result.status = SurfaceResultStatus::Cancelled;
-        result.failureReason = SurfaceFailureReason::Cancelled;
-        result.message = "Surface topology validation was cancelled.";
+    result.algorithmRevision = algorithmRevision;
+    const auto fail = [&](SurfaceFailureReason reason, const std::string &message) {
+        result.failureReason = reason;
+        result.message = message;
+        result.status = reason == SurfaceFailureReason::Cancelled ? SurfaceResultStatus::Cancelled
+                                                                  : SurfaceResultStatus::Failed;
         result.points.clear();
         result.triangleIndices.clear();
+        result.triangleValidity.clear();
         result.objects.clear();
+        result.interfaces.clear();
+        result.acceptedPointCount = 0;
+        result.rejectedPointCount = 0;
+        result.lowContrastPointCount = 0;
+        result.truncatedPointCount = 0;
+        result.nonManifoldObjectCount = 0;
+        return result;
+    };
+    SendProgress(onProgress, SurfaceDeterminationStage::Preparing, 0.01);
+    VolumeView volume;
+    auto reason = BuildVolumeView(source, volume, result.message);
+    if (reason != SurfaceFailureReason::None)
+        return fail(reason, result.message);
+    reason = SetAdditionalInputs(source, inputParams, inputs, volume, result.message);
+    if (reason != SurfaceFailureReason::None)
+        return fail(reason, result.message);
+    result.requiredBytes = 64 * 1024;
+    if (maxWorkingBytes < result.requiredBytes)
+        return fail(SurfaceFailureReason::BudgetExceeded, "Surface fixed workspace exceeds the budget.");
+    SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
+    ResolvedParams params;
+    reason = ResolveParams(volume, inputParams, getCancelled, params, result.message);
+    if (reason != SurfaceFailureReason::None)
+        return fail(reason, result.message);
+    result.resolvedParams = inputParams;
+    result.resolvedParams.targetViews = {};
+    auto &resolved = result.resolvedParams;
+    resolved.purpose = SurfaceContract::GetPurpose(inputParams);
+    resolved.sourceVolume = result.sourceRevision;
+    resolved.initialIsoValue = params.initialIsoValue;
+    resolved.profileHalfLengthModel = params.profileHalfLengthModel;
+    resolved.profileSampleStepModel = params.profileSampleStepModel;
+    resolved.maximumOffsetModel = params.maximumOffsetModel;
+    resolved.profileSmoothingSigmaModel = params.profileSmoothingSigmaModel;
+    resolved.minimumEdgeWidthModel = params.minimumEdgeWidthModel;
+    resolved.maximumEdgeWidthModel = params.maximumEdgeWidthModel;
+    resolved.minimumEdgeSeparationModel = params.minimumEdgeSeparationModel;
+    result.initialIsoValue = params.initialIsoValue;
+    result.isoEstimate = params.isoEstimate;
+    result.parameterFingerprint = 1469598103934665603ULL;
+    AddFingerprint(result.parameterFingerprint, algorithmRevision);
+    for (const unsigned char c : SurfaceRecipeCodec::BuildText(resolved))
+        AddFingerprint(result.parameterFingerprint, c);
+    if (inputParams.method == SurfaceDeterminationMethod::AutomaticIso50)
+    {
+        if (!params.isoEstimate)
+            return fail(SurfaceFailureReason::ThresholdUnreliable,
+                        "Automatic ISO50 requires an estimated bimodal threshold.");
+        result.status = SurfaceResultStatus::Succeeded;
+        result.failureReason = SurfaceFailureReason::None;
+        result.execution.estimatedWorkingBytes = result.requiredBytes;
+        result.message = "Automatic ISO50 succeeded.";
+        SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 1);
         return result;
     }
+    double halo = params.profileHalfLengthModel + params.maximumOffsetModel;
+    std::size_t sampleCount = static_cast<std::size_t>(std::ceil(2 * params.profileHalfLengthModel /
+                                                                 params.profileSampleStepModel)) +
+                              2;
+    for (const auto &rule : params.regionOverrides)
+    {
+        const double half = rule.profileHalfLengthModel.value_or(params.profileHalfLengthModel);
+        halo = std::max(halo, half + rule.maximumOffsetModel.value_or(params.maximumOffsetModel));
+        sampleCount =
+            std::max(sampleCount,
+                     static_cast<std::size_t>(std::ceil(
+                         2 * half / rule.profileSampleStepModel.value_or(params.profileSampleStepModel))) +
+                         2);
+    }
+    // VTK SMP 的上界只用于 workspace 预算，不修改宿主的并发配置。
+    std::size_t profileBytes = 0;
+    if (!GetProduct(sampleCount,
+                    2 * (8 * sizeof(double) + sizeof(SurfaceSampleStatus) + sizeof(std::uint32_t) +
+                         sizeof(SurfaceEdgeCandidate)),
+                    profileBytes) ||
+        !GetProduct(profileBytes,
+                    static_cast<std::size_t>(std::max(1, vtkSMPTools::GetEstimatedNumberOfThreads())),
+                    profileBytes) ||
+        profileBytes > maxWorkingBytes - result.requiredBytes)
+        return fail(SurfaceFailureReason::BudgetExceeded,
+                    "Surface parallel profile workspace exceeds the budget.");
+    SurfaceSeedGrid grid;
+    grid.extent = volume.geometry.extent;
+    grid.dimensions = volume.geometry.dimensions;
+    grid.origin = volume.geometry.origin;
+    grid.indexToModel = volume.geometry.indexToModel;
+    grid.modelToIndex = volume.geometry.modelToIndex;
+    grid.values = volume.scalars.values;
+    grid.readScalar = volume.scalars.read;
+    grid.validity = volume.validity;
+    grid.labels = volume.labels;
+    grid.initialMesh = volume.initialMesh;
+    const auto pairCount = std::max<std::size_t>(1, inputParams.materialPairs.size());
+    for (std::size_t pairIndex = 0; pairIndex < pairCount; ++pairIndex)
+    {
+        params.materials = inputParams.materialPairs.empty() ? std::optional<SurfaceMaterialPair>{}
+                                                             : inputParams.materialPairs[pairIndex];
+        SurfaceInterfaceRecord interfaceRecord;
+        if (params.materials)
+        {
+            interfaceRecord.materials = *params.materials;
+            interfaceRecord.canonicalId =
+                std::to_string(std::min(params.materials->materialA, params.materials->materialB)) + ":" +
+                std::to_string(std::max(params.materials->materialA, params.materials->materialB));
+        }
+        else
+            interfaceRecord.canonicalId = "gray";
+        interfaceRecord.firstPoint = result.points.size();
+        interfaceRecord.firstTriangle = result.triangleIndices.size() / 3;
+        std::size_t retained = 0;
+        if (!AddWorkingBytes(result.points.capacity(), sizeof(SurfacePointRecord), retained) ||
+            !AddWorkingBytes(result.triangleIndices.capacity(), sizeof(std::uint32_t), retained) ||
+            !AddWorkingBytes(result.triangleValidity.capacity(), sizeof(std::uint8_t), retained) ||
+            !AddWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained) ||
+            retained > maxWorkingBytes - profileBytes)
+            return fail(SurfaceFailureReason::BudgetExceeded,
+                        "Surface retained interfaces exceed the budget.");
+        std::vector<Point3> meshPoints;
+        std::vector<Triangle> meshTriangles;
+        SurfaceExecutionStats statistics;
+        SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
+                     0.1 + 0.8 * pairIndex / pairCount);
+        const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
+            grid, params.initialIsoValue, params.materials, params.roiModelBounds, halo,
+            inputParams.seedBlockDepth, maxWorkingBytes - retained - profileBytes, getCancelled, meshPoints,
+            meshTriangles, statistics);
+        result.requiredBytes =
+            std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained + profileBytes);
+        result.execution.scannedCellCount += statistics.scannedCellCount;
+        result.execution.skippedCellCount += statistics.skippedCellCount;
+        result.execution.blockCount += statistics.blockCount;
+        result.execution.processedExtent = statistics.processedExtent;
+        result.execution.seedMs += statistics.seedMs;
+        if (seedStatus != SurfaceSeedStatus::Succeeded)
+        {
+            if (seedStatus == SurfaceSeedStatus::NoSurface && params.materials)
+            {
+                result.interfaces.push_back(interfaceRecord);
+                continue;
+            }
+            return fail(seedStatus == SurfaceSeedStatus::Cancelled ? SurfaceFailureReason::Cancelled
+                        : seedStatus == SurfaceSeedStatus::BudgetExceeded
+                            ? SurfaceFailureReason::BudgetExceeded
+                        : seedStatus == SurfaceSeedStatus::NoSurface ? SurfaceFailureReason::NoSurface
+                                                                     : SurfaceFailureReason::InvalidGeometry,
+                        "Surface seed extraction failed (status=" +
+                            std::to_string(static_cast<unsigned>(seedStatus)) + ").");
+        }
+        if (meshPoints.size() > UINT32_MAX - result.points.size())
+            return fail(SurfaceFailureReason::BudgetExceeded, "Surface output exceeds uint32 topology.");
+        const auto started = std::chrono::steady_clock::now();
+        SendProgress(onProgress, SurfaceDeterminationStage::SubvoxelRefinement,
+                     .1 + .8 * (pairIndex + .25) / pairCount);
+        auto components =
+            BuildComponents(meshPoints, meshTriangles, volume.geometry.voxelVolume, getCancelled);
+        const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled);
+        for (const auto selectedIndex : selected)
+        {
+            if (GetCancelled(getCancelled))
+                return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+            std::vector<Point3> points;
+            std::vector<Triangle> triangles;
+            GetLocalMesh(components[selectedIndex], meshPoints, points, triangles, getCancelled);
+            SetInterfaceWinding(volume, params, points, triangles);
+            const auto normals = GetVertexNormals(points, triangles, getCancelled);
+            std::vector<SurfacePointRecord> records(points.size());
+            const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
+            for (const auto &triangle : triangles)
+            {
+                const auto &ids = triangle.vertices;
+                auto face =
+                    Cross(Subtract(points[ids[1]], points[ids[0]]), Subtract(points[ids[2]], points[ids[0]]));
+                if (!Normalize(face))
+                    continue;
+                for (auto id : ids)
+                    if (Dot(face, normals[id]) < cornerCosine)
+                        records[id].flags |= SurfacePointFlags::SharpCorner;
+            }
+            vtkSMPThreadLocal<SurfaceProfileWorkspace> workspaces;
+            std::atomic<bool> cancelled{false};
+            vtkSMPTools::For(
+                0, static_cast<vtkIdType>(points.size()), 128, [&](vtkIdType begin, vtkIdType end) {
+                    auto &workspace = workspaces.Local();
+                    workspace.Reserve(sampleCount);
+                    for (auto i = begin; i < end; ++i)
+                    {
+                        if (cancelled.load(std::memory_order_acquire))
+                            return;
+                        if (((i - begin) & 31) == 0 && GetCancelled(getCancelled))
+                        {
+                            cancelled.store(true, std::memory_order_release);
+                            return;
+                        }
+                        const auto id = static_cast<std::size_t>(i);
+                        SetRefinedPoint(volume, params, points[id], normals[id], records[id], workspace);
+                        records[id].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+                    }
+                });
+            if (cancelled.load())
+                return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+            for (const auto &t : triangles)
+            {
+                const auto &ids = t.vertices;
+                if (records[ids[0]].overrideIndex != records[ids[1]].overrideIndex ||
+                    records[ids[0]].overrideIndex != records[ids[2]].overrideIndex)
+                    for (auto id : ids)
+                        records[id].flags |= SurfacePointFlags::OverrideBoundary;
+            }
+            for (auto &workspace : workspaces)
+            {
+                result.execution.sampledProfileCount += workspace.sampledProfileCount;
+                result.execution.sampledValueCount += workspace.sampledValueCount;
+            }
+            SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
+                         .1 + .8 * (pairIndex + .85) / pairCount);
+            AddObjectResult(volume, params, static_cast<std::uint32_t>(result.objects.size()), points,
+                            triangles, std::move(records), result, getCancelled);
+            result.objects.back().interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+        }
+        result.execution.refinementMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        interfaceRecord.pointCount = result.points.size() - interfaceRecord.firstPoint;
+        interfaceRecord.triangleCount = result.triangleIndices.size() / 3 - interfaceRecord.firstTriangle;
+        result.interfaces.push_back(std::move(interfaceRecord));
+    }
+    if (GetCancelled(getCancelled))
+        return fail(SurfaceFailureReason::Cancelled, "Surface validation was cancelled.");
+    if (result.points.empty() || result.triangleIndices.empty())
+        return fail(SurfaceFailureReason::NoSurface, "Surface output is empty.");
+    result.execution.estimatedWorkingBytes = result.requiredBytes;
+    result.execution.retainedBytes = result.points.capacity() * sizeof(SurfacePointRecord) +
+                                     result.triangleIndices.capacity() * sizeof(std::uint32_t) +
+                                     result.triangleValidity.capacity() +
+                                     result.objects.capacity() * sizeof(SurfaceObjectRecord);
     result.status = SurfaceResultStatus::Succeeded;
     result.failureReason = SurfaceFailureReason::None;
-    result.algorithmRevision = algorithmRevision;
-    result.message = "Surface determination succeeded: points="
-        + std::to_string(result.points.size())
-        + ", objects=" + std::to_string(result.objects.size())
-        + ", accepted=" + std::to_string(result.acceptedPointCount)
-        + ".";
-    SendProgress(
-        onProgress, SurfaceDeterminationStage::TopologyValidation, 1.0);
+    result.message = "Surface determination succeeded: points=" + std::to_string(result.points.size()) +
+                     ", accepted=" + std::to_string(result.acceptedPointCount) + ".";
+    SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation, 1);
     return result;
 }
 
 } // namespace
 
 SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
-    const VtkImageGridSnapshot& source,
-    const SurfaceDeterminationStartParams& params,
-    const std::size_t maxWorkingBytes,
-    const SurfaceCancelCheck& getCancelled,
-    const SurfaceProgressCallback& onProgress)
+    const VtkImageGridSnapshot &source, const SurfaceDeterminationStartParams &params,
+    const std::size_t maxWorkingBytes, const SurfaceCancelCheck &getCancelled,
+    const SurfaceProgressCallback &onProgress, const SurfaceAlgorithmInputs &inputs)
 {
     try {
-        return BuildSurfaceImpl(
-            source,
-            params,
-            maxWorkingBytes,
-            getCancelled,
-            onProgress);
+        return BuildSurfaceImpl(source, params, maxWorkingBytes, getCancelled, onProgress, inputs);
+    }
+    catch (const SurfaceCancelled &)
+    {
+        SurfaceAlgorithmResult result;
+        result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
+        result.status = SurfaceResultStatus::Cancelled;
+        result.failureReason = SurfaceFailureReason::Cancelled;
+        result.message = "Surface topology operation was cancelled.";
+        return result;
     }
     catch (const std::bad_alloc&) {
         SurfaceAlgorithmResult result;
@@ -2565,5 +2288,76 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
         result.failureReason = SurfaceFailureReason::InternalError;
         result.message = "Surface determination raised an internal error.";
         return result;
+    }
+}
+
+SurfaceProfileDiagnostic SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+    const VtkImageGridSnapshot &source, const SurfaceDeterminationStartParams &resolved,
+    const SurfacePointRecord &point, const SurfaceAlgorithmInputs &inputs)
+{
+    SurfaceProfileDiagnostic diagnostic;
+    try
+    {
+        VolumeView volume;
+        if (BuildVolumeView(source, volume, diagnostic.message) != SurfaceFailureReason::None)
+            return diagnostic;
+        if (SetAdditionalInputs(source, resolved, inputs, volume, diagnostic.message) !=
+            SurfaceFailureReason::None)
+            return diagnostic;
+        if (!resolved.initialIsoValue)
+        {
+            diagnostic.message = "Diagnostic replay requires a resolved recipe.";
+            return diagnostic;
+        }
+        ResolvedParams params;
+        if (ResolveParams(volume, resolved, {}, params, diagnostic.message) != SurfaceFailureReason::None)
+            return diagnostic;
+        if (!resolved.materialPairs.empty())
+        {
+            if (point.interfaceIndex >= resolved.materialPairs.size())
+            {
+                diagnostic.message = "Invalid interface index.";
+                return diagnostic;
+            }
+            params.materials = resolved.materialPairs[point.interfaceIndex];
+        }
+        SurfacePointRecord replay;
+        SurfaceProfileWorkspace workspace;
+        const Point3 normal{point.seedNormalModel[0], point.seedNormalModel[1], point.seedNormalModel[2]};
+        SetRefinedPoint(volume, params, point.seedPositionModel, normal, replay, workspace, &diagnostic);
+        // 拓扑/覆盖区边界是网格级判定；保留发布记录，使调用方能区分局部拟合与最终质量。
+        diagnostic.point = point;
+        diagnostic.message = "Profile replay uses the frozen source, resolved recipe and original seed; "
+                             "point includes final mesh quality flags.";
+    }
+    catch (const std::bad_alloc &)
+    {
+        diagnostic = {};
+        diagnostic.message = "Diagnostic workspace allocation failed.";
+    }
+    catch (...)
+    {
+        diagnostic = {};
+        diagnostic.message = "Diagnostic replay failed.";
+    }
+    return diagnostic;
+}
+
+SurfaceFailureReason SurfaceDeterminationAlgorithm::GetInputFailure(
+    const VtkImageGridSnapshot &source, const SurfaceDeterminationStartParams &params,
+    const SurfaceAlgorithmInputs &inputs)
+{
+    try
+    {
+        VolumeView volume;
+        std::string message;
+        const auto reason = BuildVolumeView(source, volume, message);
+        return reason == SurfaceFailureReason::None
+                   ? SetAdditionalInputs(source, params, inputs, volume, message)
+                   : reason;
+    }
+    catch (...)
+    {
+        return SurfaceFailureReason::InvalidSource;
     }
 }

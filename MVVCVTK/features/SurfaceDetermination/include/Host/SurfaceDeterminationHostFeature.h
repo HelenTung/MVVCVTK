@@ -41,8 +41,10 @@ public:
         GetSurfaceSnapshot(DataRevisionRef revision) const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetPreviewSnapshot() const;
+    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef generation, std::uint64_t pointIndex) const;
+    SurfaceRestoreState GetResultValidity(DataRevisionRef generation) const;
 
-private:
+  private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };

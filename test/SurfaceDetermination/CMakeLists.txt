@@ -1,6 +1,7 @@
 add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
+    SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
     SurfaceDeterminationDisplayTests.cpp
     SurfaceDeterminationGeometryTests.cpp
@@ -65,3 +66,26 @@ foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display)
     )
 endforeach()
 unset(_mvvcvtk_surface_suite)
+
+# Pure business header probe deliberately has no Host/VTK/Qt include or link dependency.
+add_library(mvvcvtk_surface_recipe_header_probe OBJECT SurfaceRecipeHeaderProbe.cpp)
+target_include_directories(mvvcvtk_surface_recipe_header_probe PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include")
+SetTargetDefaults(mvvcvtk_surface_recipe_header_probe)
+
+# Repository acceptance tool; file I/O stays in the test harness, never in the Feature.
+add_executable(mvvcvtk_surface_business_acceptance SurfaceBusinessAcceptance.cpp)
+set_target_properties(mvvcvtk_surface_business_acceptance PROPERTIES OUTPUT_NAME SurfaceBusinessAcceptance FOLDER "MVVCVTK/Tests")
+target_include_directories(mvvcvtk_surface_business_acceptance PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+target_link_libraries(mvvcvtk_surface_business_acceptance PRIVATE mvvcvtk_host_test_internal
+    MVVCVTK::Host MVVCVTK::SurfaceDetermination MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+SetTargetDefaults(mvvcvtk_surface_business_acceptance)
+vtk_module_autoinit(TARGETS mvvcvtk_surface_business_acceptance MODULES ${MVVCVTK_VTK_TARGETS})
+add_test(NAME SurfaceDetermination.acceptance-schema COMMAND mvvcvtk_surface_business_acceptance --describe)
+SetTestRuntime(SurfaceDetermination.acceptance-schema mvvcvtk_surface_business_acceptance)
+set(MVVCVTK_SURFACE_ACCEPTANCE_MANIFEST "" CACHE FILEPATH "Optional traceable real RAW acceptance manifest")
+if(MVVCVTK_SURFACE_ACCEPTANCE_MANIFEST)
+    add_test(NAME SurfaceDetermination.real-input COMMAND mvvcvtk_surface_business_acceptance "${MVVCVTK_SURFACE_ACCEPTANCE_MANIFEST}")
+    SetTestRuntime(SurfaceDetermination.real-input mvvcvtk_surface_business_acceptance)
+endif()

@@ -100,6 +100,19 @@ public:
 class DataPortStub final : public TestDataPort {
 public:
     explicit DataPortStub(VtkImageGridSnapshot initial) { SetCurrent(std::move(initial)); }
+    std::function<void()> beforeSurfaceCommit;
+    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    {
+        if (beforeSurfaceCommit &&
+            std::any_of(transaction.outputs.begin(), transaction.outputs.end(),
+                        [](const auto &output) { return output.type == DataTypes::surfaceMesh; }))
+        {
+            auto before = std::move(beforeSurfaceCommit);
+            beforeSurfaceCommit = {};
+            before();
+        }
+        return TestDataPort::SetDataCommit(std::move(transaction));
+    }
     void SetCurrent(VtkImageGridSnapshot next)
     {
         if (next) (void)SetPrimaryImage(next->image, next->validityMask);
@@ -266,9 +279,10 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         const auto mesh = data
             ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
             : nullptr;
-        checks.Get(mesh && mesh->GetPointAttributes().size() == 5,
-            "generic mesh publishes measurement quality attributes");
-        if (mesh && mesh->GetPointAttributes().size() == 5) {
+        checks.Get(mesh && mesh->GetPointAttributes().size() == 8,
+                   "generic mesh publishes measurement quality attributes");
+        if (mesh && mesh->GetPointAttributes().size() == 8)
+        {
             const auto& attributes = mesh->GetPointAttributes();
             checks.Get(attributes[0].name == "measurement.valid"
                 && attributes[0].values.size() == snapshot->points->size()
@@ -871,9 +885,10 @@ void TestExplicitScopesAndHistory(Checks& checks)
         "non-primary current input publishes independent explicit scopes with provenance");
     if (!first || !second) { (void)feature.DetachHost(); return; }
     const auto meshData = host.data->GetData(host.data->GetDataGraph(), first->meshRevision);
-    checks.Get(meshData->provenance && meshData->provenance->canonicalParameters == first->canonicalParameters
-        && first->canonicalParameters.find("surface-parameters 1") == 0,
-        "full canonical recipe is the mesh provenance");
+    checks.Get(meshData->provenance &&
+                   meshData->provenance->canonicalParameters == first->canonicalParameters &&
+                   first->canonicalParameters.find("surface-parameters 2") == 0,
+               "full canonical recipe is the mesh provenance");
     DataTransaction revise;
     revise.outputs.push_back({source->data->self.entityId,source->data->self.generation,
         DataTypes::imageGrid3D,{},source->data->payload,{}});
@@ -1017,11 +1032,138 @@ void TestClearedResultFailure(Checks& checks)
     checks.Get(feature.DetachHost(), "clear failure fixture detaches");
 }
 
+void TestBusinessInputLifecycle(Checks &checks)
+{
+    TestHost host(BuildPlane());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "business input fixture attaches");
+    const auto source = host.data->GetPrimaryImage();
+    const auto geometry =
+        dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get())->GetGeometry();
+    auto values = std::make_shared<std::vector<std::uint16_t>>();
+    for (int z = 0; z < geometry.dimensions[2]; ++z)
+        for (int y = 0; y < geometry.dimensions[1]; ++y)
+            for (int x = 0; x < geometry.dimensions[0]; ++x)
+                values->push_back(x <= 15 ? 2 : 7);
+    const DataRevisionRef labelRef{host.data->CreateDataEntityId(), 1};
+    DataTransaction labels;
+    labels.outputs.push_back({labelRef.entityId,
+                              0,
+                              DataTypes::labelMap3D,
+                              {{"source-volume", source->data->self}},
+                              std::make_shared<const LabelMap3DPayload>(geometry, LabelMapValues{values}),
+                              {}});
+    checks.Get(host.data->SetDataCommit(std::move(labels)).status == DataCommitStatus::Succeeded,
+               "business labels enter the real DataGraph");
+    auto request = GetStartRequest();
+    request.start->targetViews = {};
+    request.start->sourceVolume = source->data->self;
+    request.start->materialLabels = labelRef;
+    request.start->materialPairs = {{2, 7}};
+    request.start->componentSelection = SurfaceComponentSelection::All;
+    request.start->resultScope = "material/part";
+    request.start->modelUnit = "mm";
+    request.start->initialIsoValue.reset();
+    std::optional<SurfaceDeterminationResult> result;
+    const auto run = [&](SurfaceDeterminationRequest next) {
+        result.reset();
+        return feature.SendRequest(std::move(next), [&](auto value) { result = std::move(value); }).status ==
+                   SurfaceAdmissionStatus::Accepted &&
+               WaitUntil(feature, [&] { return result.has_value(); });
+    };
+    checks.Get(run(request) && result->isPublished && result->status == SurfaceResultStatus::Succeeded,
+               "label-to-surface completes without windows");
+    const auto generation = feature.GetSurfaceSnapshot("material/part");
+    if (!generation)
+    {
+        (void)feature.DetachHost();
+        return;
+    }
+    const auto mesh = host.data->GetData(host.data->GetDataGraph(), generation->meshRevision);
+    const auto *payload = dynamic_cast<const SurfaceMeshPayload *>(mesh->payload.get());
+    checks.Get(mesh->inputs.size() == 2 && generation->inputs.size() == 2 && generation->interfaces &&
+                   generation->interfaces->at(0).canonicalId == "2:7",
+               "generic consumer can trace scalar and label revisions plus stable interface identity");
+    checks.Get(payload && payload->GetPointAttributes().size() == 8 &&
+                   payload->GetPointAttributes()[5].name == "measurement.flags",
+               "generic mesh exposes quality reasons and interface/override indexes");
+    const auto valid = feature.GetResultValidity(generation->dataRevision);
+    checks.Get(valid.status == SurfaceRestoreStatus::Current && valid.canDisplay && valid.canRecompute &&
+                   valid.canMeasure,
+               "current frozen business result supports replay and quality-gated measurement");
+    const auto accepted =
+        std::find_if(generation->points->begin(), generation->points->end(),
+                     [](const auto &point) { return point.flags == SurfacePointFlags::None; });
+    if (accepted != generation->points->end())
+    {
+        const auto diagnostic = feature.GetProfileDiagnostic(
+            generation->dataRevision, static_cast<std::uint64_t>(accepted - generation->points->begin()));
+        checks.Get(diagnostic.isAvailable && diagnostic.point.positionModel == accepted->positionModel &&
+                       !diagnostic.candidates.empty(),
+                   "public diagnostic uses the generation's saved source and recipe");
+    }
+    const auto labelData = host.data->GetData(host.data->GetDataGraph(), labelRef);
+    DataTransaction revise;
+    revise.outputs.push_back(
+        {labelRef.entityId, 1, DataTypes::labelMap3D, labelData->inputs, labelData->payload, {}});
+    checks.Get(host.data->SetDataCommit(std::move(revise)).status == DataCommitStatus::Succeeded,
+               "label revision advances independently of source");
+    const auto historical = feature.GetResultValidity(generation->dataRevision);
+    checks.Get(!feature.GetSurfaceSnapshot("material/part") &&
+                   feature.GetSurfaceSnapshot(generation->dataRevision) &&
+                   historical.status == SurfaceRestoreStatus::Historical && historical.canDisplay &&
+                   historical.canRecompute && !historical.canMeasure,
+               "label changes invalidate current measurement while exact history remains reviewable");
+    auto historicalRequest = request;
+    historicalRequest.start->sourcePolicy = DataPublishPolicy::AllowHistoricalResult;
+    checks.Get(run(historicalRequest) && result->isPublished && !result->isActivated,
+               "explicit historical label recipe computes without activation");
+    auto currentRequest = request;
+    currentRequest.start->materialLabels = DataRevisionRef{labelRef.entityId, 2};
+    const auto label2 = host.data->GetData(host.data->GetDataGraph(), *currentRequest.start->materialLabels);
+    host.data->beforeSurfaceCommit = [&] {
+        DataTransaction race;
+        race.outputs.push_back(
+            {labelRef.entityId, 2, DataTypes::labelMap3D, label2->inputs, label2->payload, {}});
+        checks.Get(host.data->TestDataPort::SetDataCommit(std::move(race)).status ==
+                       DataCommitStatus::Succeeded,
+                   "publication race advances the label head");
+    };
+    checks.Get(run(currentRequest) && result->status == SurfaceResultStatus::Failed && !result->isPublished,
+               "label CAS refuses a race between final validation and DataGraph commit");
+    auto initial = GetStartRequest();
+    initial.start->targetViews = {};
+    initial.start->sourceVolume = source->data->self;
+    initial.start->initialSurface = generation->meshRevision;
+    initial.start->resultScope = "initial/part";
+    checks.Get(run(initial) && result->isPublished, "generic initial surface is a frozen business input");
+    const auto imported = feature.GetSurfaceSnapshot("initial/part");
+    DataTransaction meshRevise;
+    meshRevise.outputs.push_back({mesh->self.entityId,
+                                  mesh->self.generation,
+                                  DataTypes::surfaceMesh,
+                                  mesh->inputs,
+                                  mesh->payload,
+                                  {}});
+    checks.Get(host.data->SetDataCommit(std::move(meshRevise)).status == DataCommitStatus::Succeeded,
+               "initial mesh revision advances");
+    checks.Get(imported && !feature.GetSurfaceSnapshot("initial/part") &&
+                   feature.GetResultValidity(imported->dataRevision).status ==
+                       SurfaceRestoreStatus::Historical,
+               "initial mesh changes invalidate downstream current surface");
+    auto wrong = request;
+    wrong.start->materialLabels = source->data->self;
+    checks.Get(feature.SendRequest(wrong).status == SurfaceAdmissionStatus::InvalidRequest,
+               "wrong dependency payload is rejected at admission");
+    checks.Get(feature.DetachHost(), "business input fixture detaches");
+}
+
 } // namespace
 
 int GetSurfaceLifecycleFailCount()
 {
     Checks checks;
+    TestBusinessInputLifecycle(checks);
     TestAttachAndOwnerThread(checks);
     TestSuccessVisibilityAndClear(checks);
     TestThresholdPublication(checks);

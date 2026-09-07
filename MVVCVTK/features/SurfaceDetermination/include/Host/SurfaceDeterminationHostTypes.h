@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/DataGraphTypes.h"
+#include "SurfaceRecipe.h"
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
@@ -12,140 +13,15 @@
 #include <string>
 #include <vector>
 
-enum class SurfaceDeterminationMethod : std::uint8_t {
-    GlobalIsoPreview,
-    LocalAdaptiveIso50,
-    GradientPeak,
-    // 仅估计空气/单材料双峰 ISO50，不构造测量网格。
-    AutomaticIso50
-};
-
-enum class SurfaceTaskPurpose : std::uint8_t {
-    Estimate,
-    Preview,
-    Determine
-};
-
-enum class SurfaceComponentSelection : std::uint8_t {
-    Largest,
-    Seeded,
-    All
-};
-
-enum class SurfacePointFlags : std::uint32_t {
-    None = 0,
-    LowContrast = 1U << 0,
-    MultipleCrossings = 1U << 1,
-    InvalidSupport = 1U << 2,
-    ProfileClipped = 1U << 3,
-    ExcessiveOffset = 1U << 4,
-    FitRejected = 1U << 5,
-    TriangleFlipRisk = 1U << 6
-};
-
-constexpr SurfacePointFlags operator|(
-    const SurfacePointFlags left,
-    const SurfacePointFlags right) noexcept
+struct SurfaceDeterminationStartParams final : SurfaceRecipe
 {
-    return static_cast<SurfacePointFlags>(
-        static_cast<std::uint32_t>(left)
-        | static_cast<std::uint32_t>(right));
-}
-
-constexpr SurfacePointFlags operator&(
-    const SurfacePointFlags left,
-    const SurfacePointFlags right) noexcept
-{
-    return static_cast<SurfacePointFlags>(
-        static_cast<std::uint32_t>(left)
-        & static_cast<std::uint32_t>(right));
-}
-
-inline SurfacePointFlags& operator|=(
-    SurfacePointFlags& left,
-    const SurfacePointFlags right) noexcept
-{
-    left = left | right;
-    return left;
-}
-
-constexpr bool GetSurfaceFlag(
-    const SurfacePointFlags value,
-    const SurfacePointFlags flag) noexcept
-{
-    return (value & flag) != SurfacePointFlags::None;
-}
-
-enum class SurfaceMetricValidity : std::uint8_t {
-    Valid,
-    OpenSurface,
-    NonManifold,
-    Truncated,
-    UnitUnknown,
-    InsufficientQuality
-};
-
-struct SurfacePointRecord final {
-    std::array<double, 3> positionModel{};
-    std::array<float, 3> normalModel{};
-    float localThreshold = 0.0F;
-    float contrast = 0.0F;
-    float gradientMagnitude = 0.0F;
-    float fitResidual = 0.0F;
-    float offsetFromSeed = 0.0F;
-    float validSupportRatio = 0.0F;
-    // 只表示局部定位稳定性估计，不等于完整计量不确定度。
-    float estimatedLocalizationSigma = 0.0F;
-    std::uint32_t crossingCount = 0;
-    std::uint32_t objectIndex = 0;
-    SurfacePointFlags flags = SurfacePointFlags::None;
-};
-
-struct SurfaceObjectRecord final {
-    std::uint32_t objectIndex = 0;
-    std::uint64_t firstPoint = 0;
-    std::uint64_t pointCount = 0;
-    std::uint64_t firstTriangle = 0;
-    std::uint64_t triangleCount = 0;
-    std::array<double, 6> boundsModel{};
-    double validAreaRatio = 0.0;
-    bool isClosed = false;
-    bool isManifold = false;
-    bool isTruncated = false;
-    bool isOrientationValid = false;
-    SurfaceMetricValidity areaValidity =
-        SurfaceMetricValidity::InsufficientQuality;
-    SurfaceMetricValidity volumeValidity =
-        SurfaceMetricValidity::InsufficientQuality;
-    std::optional<double> areaModelUnit2;
-    std::optional<double> volumeModelUnit3;
-};
-
-struct SurfaceIsoEstimate final {
-    double isoValue = 0.0;
-    double backgroundValue = 0.0;
-    double materialValue = 0.0;
-    std::uint64_t sampleCount = 0;
-};
-
-struct SurfaceDeterminationStartParams final {
     HostViewTargets targetViews;
-    SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::LocalAdaptiveIso50;
-    SurfaceComponentSelection componentSelection =
-        SurfaceComponentSelection::Largest;
-    std::optional<double> initialIsoValue;
-    std::optional<std::array<double, 3>> seedModelPoint;
-    std::optional<std::array<double, 6>> roiModelBounds;
-    std::optional<double> profileHalfLengthModel;
-    std::optional<double> profileSampleStepModel;
-    std::optional<double> maximumOffsetModel;
-    std::optional<double> profileSmoothingSigmaModel;
-    // 闭合初始表面按体积/体素体积估计；开放/截断表面不伪造 voxel count。
-    std::uint64_t minimumObjectVoxels = 1;
-    double minimumContrast = 0.0;
     // 省略只在接纳时解析主卷，计算不再查询当前选择。
     std::optional<DataRevisionRef> sourceVolume;
+    std::optional<DataRevisionRef> materialLabels;
+    std::optional<DataRevisionRef> initialSurface;
+    // 执行分块不降低分辨率，不影响算法结果的参数指纹。
+    std::uint32_t seedBlockDepth = 16;
     // 省略沿用方法的既有用途：Automatic→Estimate、Global→Preview。
     std::optional<SurfaceTaskPurpose> purpose;
     std::string resultScope;
@@ -180,6 +56,9 @@ struct SurfaceGenerationSnapshot final {
     std::optional<SurfaceIsoEstimate> isoEstimate;
     // 每三角形一个值；仅证明本 Feature 明确检查的有效性条件。
     std::shared_ptr<const std::vector<std::uint8_t>> triangleValidity;
+    std::vector<DataInputRef> inputs;
+    SurfaceExecutionStats execution;
+    std::shared_ptr<const std::vector<SurfaceInterfaceRecord>> interfaces;
 };
 
 struct SurfaceDeterminationConfig final {
@@ -296,4 +175,23 @@ struct SurfaceDeterminationState final {
     std::uint32_t nonManifoldObjectCount = 0;
     bool isOverlayVisible = true;
     std::string errorMessage;
+};
+
+enum class SurfaceRestoreStatus : std::uint8_t
+{
+    Current,
+    Historical,
+    MissingInput,
+    IncompatibleRecipe,
+    MissingResult
+};
+
+struct SurfaceRestoreState final
+{
+    SurfaceRestoreStatus status = SurfaceRestoreStatus::MissingResult;
+    bool canDisplay = false;
+    bool canRecompute = false;
+    bool canMeasure = false;
+    std::vector<DataInputRef> inputs;
+    std::string message;
 };

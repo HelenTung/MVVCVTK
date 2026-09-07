@@ -33,11 +33,6 @@ bool GetScopeValid(const std::string& scope)
     return true;
 }
 
-template<class T> void WriteOptional(std::ostream& out, const std::optional<T>& value)
-{
-    out << bool(value) << ' ';
-    if (value) out << *value << ' ';
-}
 template<class T> bool ReadOptional(std::istream& in, std::optional<T>& value)
 {
     int present = 0;
@@ -45,12 +40,6 @@ template<class T> bool ReadOptional(std::istream& in, std::optional<T>& value)
     value.reset();
     if (present) { T item{}; if (!(in >> item)) return false; value = item; }
     return true;
-}
-template<std::size_t N> void WriteArray(std::ostream& out,
-    const std::optional<std::array<double, N>>& value)
-{
-    out << bool(value) << ' ';
-    if (value) for (const auto item : *value) out << item << ' ';
 }
 template<std::size_t N> bool ReadArray(std::istream& in,
     std::optional<std::array<double, N>>& value)
@@ -64,18 +53,6 @@ template<std::size_t N> bool ReadArray(std::istream& in,
         value = items;
     }
     return true;
-}
-void WriteParams(std::ostream& out, const SurfaceDeterminationStartParams& p)
-{
-    out << unsigned(p.method) << ' ' << unsigned(p.componentSelection) << ' '
-        << unsigned(GetPurpose(p)) << ' ' << unsigned(p.sourcePolicy) << ' '
-        << std::quoted(p.resultScope) << ' ' << std::quoted(p.modelUnit) << ' ';
-    // 源引用在图 inputs 和快照中保存；配方文本不重复序列化实体 ID。
-    WriteOptional(out, p.initialIsoValue);
-    WriteArray(out, p.seedModelPoint); WriteArray(out, p.roiModelBounds);
-    WriteOptional(out, p.profileHalfLengthModel); WriteOptional(out, p.profileSampleStepModel);
-    WriteOptional(out, p.maximumOffsetModel); WriteOptional(out, p.profileSmoothingSigmaModel);
-    out << p.minimumObjectVoxels << ' ' << p.minimumContrast << '\n';
 }
 bool ReadParams(std::istream& in, SurfaceDeterminationStartParams& p)
 {
@@ -113,14 +90,20 @@ SurfaceTaskPurpose GetPurpose(const SurfaceDeterminationStartParams& params)
 
 bool GetInputValid(const SurfaceDeterminationStartParams& p)
 {
+    if (!SurfaceRecipeCodec::GetError(p).empty() || p.seedBlockDepth == 0 || p.seedBlockDepth > 4096 ||
+        (p.materialLabels && !GetDataRevisionRefValid(*p.materialLabels)) ||
+        (p.initialSurface && !GetDataRevisionRefValid(*p.initialSurface)) ||
+        (p.materialLabels.has_value() != !p.materialPairs.empty()))
+        return false;
     const auto purpose = GetPurpose(p);
     if (purpose != SurfaceTaskPurpose::Estimate && purpose != SurfaceTaskPurpose::Preview
         && purpose != SurfaceTaskPurpose::Determine) return false;
-    if (static_cast<unsigned>(p.method) > 3 || static_cast<unsigned>(p.componentSelection) > 2
-        || static_cast<unsigned>(p.sourcePolicy) > 1 || !GetScopeValid(p.resultScope)
-        || (p.sourceVolume && !GetDataRevisionRefValid(*p.sourceVolume))
-        || (p.modelUnit != "" && p.modelUnit != "mm" && p.modelUnit != "cm"
-            && p.modelUnit != "m" && p.modelUnit != "um")) return false;
+    if (static_cast<unsigned>(p.method) > 6 || static_cast<unsigned>(p.componentSelection) > 2 ||
+        static_cast<unsigned>(p.sourcePolicy) > 1 || !GetScopeValid(p.resultScope) ||
+        (p.sourceVolume && !GetDataRevisionRefValid(*p.sourceVolume)) ||
+        (p.modelUnit != "" && p.modelUnit != "mm" && p.modelUnit != "cm" && p.modelUnit != "m" &&
+         p.modelUnit != "um"))
+        return false;
     if ((purpose == SurfaceTaskPurpose::Estimate) != (p.method == SurfaceDeterminationMethod::AutomaticIso50)
         || (purpose == SurfaceTaskPurpose::Determine && p.method == SurfaceDeterminationMethod::GlobalIsoPreview)) return false;
     return true;
@@ -169,29 +152,76 @@ bool GetSourceCurrent(const TrustedDataReadPort& data, const DataGraphSnapshot& 
     return true;
 }
 
+bool GetInputsCurrent(const TrustedDataReadPort &data, const DataGraphSnapshot &graph,
+                      const std::vector<DataInputRef> &inputs)
+{
+    return std::all_of(inputs.begin(), inputs.end(),
+                       [&](const auto &input) { return GetSourceCurrent(data, graph, input.source); });
+}
+
 std::string BuildParameters(const SurfaceDeterminationStartParams& requested,
     const SurfaceDeterminationStartParams& resolved, const std::string& frame, const std::size_t workingBytes)
 {
     std::ostringstream out; out.imbue(std::locale::classic());
-    out << std::setprecision(std::numeric_limits<double>::max_digits10)
-        << "surface-parameters 1 " << std::quoted(frame) << ' ' << workingBytes << '\n';
-    WriteParams(out, requested); WriteParams(out, resolved);
+    out << "surface-parameters 2 " << std::quoted(frame) << ' ' << workingBytes << '\n';
+    for (const auto *p : {&requested, &resolved})
+    {
+        out << unsigned(GetPurpose(*p)) << ' ' << unsigned(p->sourcePolicy) << ' '
+            << std::quoted(p->resultScope) << ' ' << std::quoted(p->modelUnit) << ' ' << p->seedBlockDepth
+            << ' ' << std::quoted(SurfaceRecipeCodec::BuildText(*p)) << '\n';
+    }
     return out.str();
 }
 
 bool GetParameters(const std::string& text, SurfaceDeterminationStartParams& requested,
     SurfaceDeterminationStartParams& resolved, std::string& frame, std::size_t& workingBytes)
 {
-    if (text.size() > 8192) return false;
+    if (text.size() > 2U * 1024U * 1024U)
+        return false;
     std::istringstream in(text); in.imbue(std::locale::classic());
-    std::string tag, nextFrame; unsigned version = 0; std::size_t nextBytes = 0;
+    std::string tag, nextFrame;
+    unsigned version = 0;
+    std::size_t nextBytes = 0;
     SurfaceDeterminationStartParams nextRequested, nextResolved;
-    if (!(in >> tag >> version >> std::quoted(nextFrame) >> nextBytes)
-        || tag != "surface-parameters" || version != 1 || nextFrame.empty() || !nextBytes
-        || !ReadParams(in, nextRequested) || !ReadParams(in, nextResolved)) return false;
+    if (!(in >> tag >> version >> std::quoted(nextFrame) >> nextBytes) || tag != "surface-parameters" ||
+        (version != 1 && version != 2) || nextFrame.empty() || !nextBytes)
+        return false;
+    if (version == 1)
+    {
+        if (!ReadParams(in, nextRequested) || !ReadParams(in, nextResolved))
+            return false;
+    }
+    else
+        for (auto *p : {&nextRequested, &nextResolved})
+        {
+            unsigned purpose = 0, policy = 0;
+            std::string recipeText;
+            if (!(in >> purpose >> policy >> std::quoted(p->resultScope) >> std::quoted(p->modelUnit) >>
+                  p->seedBlockDepth >> std::quoted(recipeText)) ||
+                purpose > 2 || policy > 1)
+                return false;
+            const auto decoded = SurfaceRecipeCodec::GetRecipe(recipeText);
+            if (!decoded.recipe)
+                return false;
+            static_cast<SurfaceRecipe &>(*p) = *decoded.recipe;
+            p->purpose = static_cast<SurfaceTaskPurpose>(purpose);
+            p->sourcePolicy = static_cast<DataPublishPolicy>(policy);
+            if ((purpose == unsigned(SurfaceTaskPurpose::Estimate)) !=
+                    (p->method == SurfaceDeterminationMethod::AutomaticIso50) ||
+                (purpose == unsigned(SurfaceTaskPurpose::Determine) &&
+                 p->method == SurfaceDeterminationMethod::GlobalIsoPreview))
+                return false;
+            // 修订引用只来自图 inputs；配方中不得伪造实体身份。
+            if (!GetScopeValid(p->resultScope) || p->seedBlockDepth == 0 || p->seedBlockDepth > 4096 ||
+                (p->modelUnit != "" && p->modelUnit != "mm" && p->modelUnit != "cm" && p->modelUnit != "m" &&
+                 p->modelUnit != "um"))
+                return false;
+        }
     in >> std::ws; if (!in.eof()) return false;
-    requested = std::move(nextRequested); resolved = std::move(nextResolved);
-    frame = std::move(nextFrame); workingBytes = nextBytes;
+    requested = std::move(nextRequested);
+    resolved = std::move(nextResolved);
+    frame = std::move(nextFrame);
+    workingBytes = nextBytes;
     return true;
 }
 }

@@ -35,21 +35,21 @@ public:
     SurfaceDeterminationService& operator=(
         const SurfaceDeterminationService&) = delete;
 
-    SurfaceAdmissionStatus Start(
-        VtkImageGridSnapshot source,
-        SurfaceDeterminationStartParams params,
-        std::size_t maxWorkingBytes,
-        std::uint64_t requestId);
+    SurfaceAdmissionStatus Start(VtkImageGridSnapshot source, SurfaceDeterminationStartParams params,
+                                 std::size_t maxWorkingBytes, std::uint64_t requestId,
+                                 SurfaceAlgorithmInputs inputs = {});
     bool StopRequest(std::uint64_t requestId) noexcept;
-    std::optional<SurfaceJobComplete> GetComplete();
+    std::optional<SurfaceJobComplete> GetComplete(bool retainForPublication = false);
     std::optional<SurfaceRequestProgress> GetProgress(
         std::uint64_t requestId) const noexcept;
     bool GetIsBusy() const;
+    void SetRetainedBytes(std::size_t bytes, bool releaseHandoff = false);
     FeatureOperationState GetExecutionState(std::uint64_t requestId) const;
     bool Stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
 private:
     struct Job final {
+        SurfaceAlgorithmInputs inputs;
         VtkImageGridSnapshot source;
         SurfaceDeterminationStartParams params;
         std::size_t maxWorkingBytes = 0;
@@ -80,6 +80,8 @@ private:
     std::atomic<std::uint32_t> m_progressPermille{ 0 };
     std::atomic<std::uint8_t> m_progressStage{
         static_cast<std::uint8_t>(SurfaceDeterminationStage::Preparing) };
+    std::size_t m_retainedBytes = 0;
+    std::size_t m_handoffBytes = 0;
     bool m_isStopping = false;
     bool m_hasExited = false;
     std::uint64_t m_executionRevision = 0;

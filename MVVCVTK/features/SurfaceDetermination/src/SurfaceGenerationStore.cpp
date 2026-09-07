@@ -25,10 +25,13 @@ SurfaceGenerationStore::GetCurrentGeneration(const std::string_view scope) const
     const auto* payload = current
         ? dynamic_cast<const SurfaceGenerationPayload*>(current->payload.get()) : nullptr;
     const auto generation = payload ? payload->GetGeneration() : nullptr;
-    return generation && generation->dataRevision == current->self
-        && generation->purpose == SurfaceTaskPurpose::Determine && generation->resultScope == scope
-        && SurfaceContract::GetSourceCurrent(*data, graph, generation->sourceRevision, generation->sourceBinding)
-        ? generation : nullptr;
+    return generation && generation->dataRevision == current->self &&
+                   generation->purpose == SurfaceTaskPurpose::Determine && generation->resultScope == scope &&
+                   SurfaceContract::GetSourceCurrent(*data, graph, generation->sourceRevision,
+                                                     generation->sourceBinding) &&
+                   SurfaceContract::GetInputsCurrent(*data, graph, generation->inputs)
+               ? generation
+               : nullptr;
 }
 
 void SurfaceGenerationStore::SetGeneration(

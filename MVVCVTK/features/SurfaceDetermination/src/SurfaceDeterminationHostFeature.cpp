@@ -58,6 +58,9 @@ bool GetMethodValid(const SurfaceDeterminationMethod method)
     case SurfaceDeterminationMethod::LocalAdaptiveIso50:
     case SurfaceDeterminationMethod::GradientPeak:
     case SurfaceDeterminationMethod::AutomaticIso50:
+    case SurfaceDeterminationMethod::LocalRelativeIso:
+    case SurfaceDeterminationMethod::EdgeModelFit:
+    case SurfaceDeterminationMethod::PairedEdgeModelFit:
         return true;
     default:
         return false;
@@ -83,19 +86,18 @@ bool GetOptionalPositive(const std::optional<double>& value)
 
 bool GetStartValid(const SurfaceDeterminationStartParams& params)
 {
-    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue)
-        || !SurfaceContract::GetInputValid(params)
-        || !GetMethodValid(params.method)
-        || !GetSelectionValid(params.componentSelection)
-        || params.minimumObjectVoxels == 0
-        || !std::isfinite(params.minimumContrast)
-        || params.minimumContrast < 0.0
-        || (params.initialIsoValue
-            && !std::isfinite(*params.initialIsoValue))
-        || !GetOptionalPositive(params.profileHalfLengthModel)
-        || !GetOptionalPositive(params.profileSampleStepModel)
-        || !GetOptionalPositive(params.maximumOffsetModel)
-        || !GetOptionalPositive(params.profileSmoothingSigmaModel)) {
+    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue) ||
+        !SurfaceContract::GetInputValid(params) || !GetMethodValid(params.method) ||
+        !GetSelectionValid(params.componentSelection) || params.minimumObjectVoxels == 0 ||
+        !std::isfinite(params.minimumContrast) || params.minimumContrast < 0.0 ||
+        (params.initialIsoValue && !std::isfinite(*params.initialIsoValue)) ||
+        !GetOptionalPositive(params.profileHalfLengthModel) ||
+        !GetOptionalPositive(params.profileSampleStepModel) ||
+        (params.maximumOffsetModel &&
+         (!std::isfinite(*params.maximumOffsetModel) || *params.maximumOffsetModel < 0.0)) ||
+        (params.profileSmoothingSigmaModel &&
+         (!std::isfinite(*params.profileSmoothingSigmaModel) || *params.profileSmoothingSigmaModel < 0.0)))
+    {
         return false;
     }
     if (params.componentSelection == SurfaceComponentSelection::Seeded
@@ -247,6 +249,8 @@ public:
         SurfaceDeterminationRequest request,
         SurfaceDeterminationCallback onComplete);
     SurfaceDeterminationState GetState() const;
+    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef revision, std::uint64_t pointIndex) const;
+    SurfaceRestoreState GetResultValidity(DataRevisionRef revision) const;
     std::vector<FeatureOperationState> GetOperationStates() const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetSurfaceSnapshot() const;
@@ -274,14 +278,18 @@ private:
         FeatureOperationState operation;
         SurfaceDeterminationStartParams params;
         bool isSuperseded = false;
+        SurfaceAlgorithmInputs inputs;
     };
 
     bool GetIsOwnerThread() const noexcept;
     std::uint64_t GetNextRequestId() noexcept;
     bool GetSourceSame(const VtkImageGridSnapshot& source,
         DataPublishPolicy policy = DataPublishPolicy::RequireCurrentInputs) const;
-    std::shared_ptr<const SurfaceGenerationSnapshot> BuildGeneration(
-        const RequestEntry& request, SurfaceAlgorithmResult& result, std::uint64_t requestId, bool isFormal);
+    bool GetRequestInputsSame(const RequestEntry &request) const;
+    std::size_t GetRetainedBytes() const;
+    std::shared_ptr<SurfaceGenerationSnapshot> BuildGeneration(const RequestEntry &request,
+                                                               SurfaceAlgorithmResult &result,
+                                                               std::uint64_t requestId, bool isFormal);
     void SetTransientResult(const RequestEntry& request, SurfaceAlgorithmResult& result, std::uint64_t requestId);
     bool ClearPreview();
     std::shared_ptr<const SurfaceGenerationSnapshot> GetDisplayGeneration() const;
@@ -446,14 +454,23 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
     if (m_isStaleCleanupPending && RemoveDisplay()) {
         m_isStaleCleanupPending = false;
     }
-    if (m_previewSource && !GetSourceSame(m_previewSource)) (void)ClearPreview();
-    if (m_activeSource && !GetSourceSame(m_activeSource)) {
+    if (m_previewSource && (!GetSourceSame(m_previewSource) ||
+                            (m_preview && !SurfaceContract::GetInputsCurrent(*m_data, m_data->GetDataGraph(),
+                                                                             m_preview->inputs))))
+        (void)ClearPreview();
+    const auto activeGeneration = m_store.GetGeneration();
+    if (m_activeSource &&
+        (!GetSourceSame(m_activeSource) ||
+         (activeGeneration &&
+          !SurfaceContract::GetInputsCurrent(*m_data, m_data->GetDataGraph(), activeGeneration->inputs))))
+    {
         SetSourceStale();
     }
     SetBindingProjection();
     for (auto& item : m_requests) {
         RequestEntry& request = item.second;
-        if (!request.isSourceChanged && !GetSourceSame(request.source, request.params.sourcePolicy)) {
+        if (!request.isSourceChanged && !GetRequestInputsSame(request))
+        {
             request.isSourceChanged = true;
             m_service->StopRequest(item.first);
             // 完成时只更新该请求；不能清除另一个来源/作用域的正式结果。
@@ -466,9 +483,11 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
     for (std::size_t index = 0;
         index < completionBatchLimit; ++index) {
         if (!m_isAttached || !m_service) break;
-        auto complete = m_service->GetComplete();
+        auto complete = m_service->GetComplete(true);
         if (!complete) break;
         SetRequestComplete(std::move(*complete));
+        if (m_service)
+            m_service->SetRetainedBytes(GetRetainedBytes(), true);
     }
     return true;
 }
@@ -506,6 +525,23 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             admission.status = SurfaceAdmissionStatus::Unavailable;
             return admission;
         }
+        const auto graph = m_data->GetDataGraph();
+        SurfaceAlgorithmInputs inputs;
+        if (params.materialLabels)
+            inputs.materialLabels = m_data->GetData(graph, *params.materialLabels);
+        if (params.initialSurface)
+            inputs.initialSurface = m_data->GetData(graph, *params.initialSurface);
+        for (const auto &ref : {params.materialLabels, params.initialSurface})
+            if (ref && (!m_data->GetData(graph, *ref) ||
+                        (params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
+                         !SurfaceContract::GetSourceCurrent(*m_data, graph, *ref))))
+            {
+                admission.status = SurfaceAdmissionStatus::Unavailable;
+                return admission;
+            }
+        if (SurfaceDeterminationAlgorithm::GetInputFailure(source, params, inputs) !=
+            SurfaceFailureReason::None)
+            return admission;
         params.sourceVolume = source->data->self;
         params.purpose = SurfaceContract::GetPurpose(params);
         const std::uint64_t requestId = GetNextRequestId();
@@ -525,8 +561,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             if (!inserted.second) return admission;
             requestItem = inserted.first;
             requestItem->second.params = params;
-            admission.status = m_service->Start(
-                source, params, m_config.maxWorkingBytes, requestId);
+            requestItem->second.inputs = inputs;
+            m_service->SetRetainedBytes(GetRetainedBytes());
+            admission.status = m_service->Start(source, params, m_config.maxWorkingBytes, requestId, inputs);
         }
         catch (...) {
             if (requestItem != m_requests.end()) {
@@ -546,6 +583,10 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         requestItem->second.operation.operation = {
             std::string(featureId), m_host->GetAttachmentId(), requestId };
         requestItem->second.operation.inputs = { { "source-volume", source->data->self } };
+        if (inputs.materialLabels)
+            requestItem->second.operation.inputs.push_back({"material-labels", inputs.materialLabels->self});
+        if (inputs.initialSurface)
+            requestItem->second.operation.inputs.push_back({"initial-surface", inputs.initialSurface->self});
         requestItem->second.operation.status = FeatureRunStatus::Preparing;
         requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
@@ -657,6 +698,163 @@ bool SurfaceDeterminationHostFeature::Impl::GetSourceSame(
     if (policy == DataPublishPolicy::AllowHistoricalResult)
         return bool(m_data->GetData(graph, source->data->self));
     return SurfaceContract::GetSourceCurrent(*m_data, graph, source->data->self, source->binding);
+}
+
+std::size_t SurfaceDeterminationHostFeature::Impl::GetRetainedBytes() const
+{
+    std::size_t bytes = 0;
+    const auto active = m_store.GetGeneration();
+    for (const auto &generation : {active, m_preview})
+        if (generation)
+        {
+            const auto add = [&](std::size_t count, std::size_t width) {
+                if (count > (SIZE_MAX - bytes) / width)
+                {
+                    bytes = SIZE_MAX;
+                    return;
+                }
+                bytes += count * width;
+            };
+            if (generation->points)
+                add(generation->points->capacity(), sizeof(SurfacePointRecord));
+            if (generation->triangleIndices)
+                add(generation->triangleIndices->capacity(), sizeof(std::uint32_t));
+            if (generation->triangleValidity)
+                add(generation->triangleValidity->capacity(), sizeof(std::uint8_t));
+            if (generation->objects)
+                add(generation->objects->capacity(), sizeof(SurfaceObjectRecord));
+            // 活跃通用网格及显示缓存保守覆盖；DataGraph 独立持有的历史与借用的源卷不在本工作集内。
+            if (generation->points)
+                add(generation->points->size(), 16 * sizeof(double));
+            if (generation->triangleIndices)
+                add(generation->triangleIndices->size(), 2 * sizeof(std::uint64_t));
+        }
+    return bytes;
+}
+
+bool SurfaceDeterminationHostFeature::Impl::GetRequestInputsSame(const RequestEntry &request) const
+{
+    if (!GetSourceSame(request.source, request.params.sourcePolicy))
+        return false;
+    const auto graph = m_data->GetDataGraph();
+    for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
+        if (input)
+        {
+            if (!m_data->GetData(graph, input->self))
+                return false;
+            if (request.params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
+                !SurfaceContract::GetSourceCurrent(*m_data, graph, input->self))
+                return false;
+        }
+    return true;
+}
+
+SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagnostic(
+    const DataRevisionRef revision, const std::uint64_t pointIndex) const
+{
+    const auto generation = m_store.GetGeneration(revision);
+    if (!m_data || !generation || !generation->points || pointIndex >= generation->points->size())
+    {
+        SurfaceProfileDiagnostic result;
+        result.message = "Surface generation or point is unavailable.";
+        return result;
+    }
+    if (generation->algorithmRevision != 3)
+    {
+        SurfaceProfileDiagnostic result;
+        result.message = "Surface algorithm revision is incompatible with diagnostic replay.";
+        return result;
+    }
+    const auto graph = m_data->GetDataGraph();
+    SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.materialLabels)
+        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
+    if (generation->resolvedParams.initialSurface)
+        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
+    return SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+        m_data->GetImageGrid(graph, generation->sourceRevision), generation->resolvedParams,
+        (*generation->points)[static_cast<std::size_t>(pointIndex)], inputs);
+}
+
+SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
+    const DataRevisionRef revision) const
+{
+    SurfaceRestoreState state;
+    const auto generation = m_store.GetGeneration(revision);
+    if (!m_data || !generation)
+    {
+        state.message = "Surface result is unavailable.";
+        return state;
+    }
+    state.inputs = generation->inputs;
+    const auto graph = m_data->GetDataGraph();
+    const auto mesh = m_data->GetData(graph, generation->meshRevision);
+    const auto *payload = mesh ? dynamic_cast<const SurfaceMeshPayload *>(mesh->payload.get()) : nullptr;
+    state.canDisplay = payload && payload->GetValid();
+    if (!state.canDisplay)
+    {
+        state.message = "Surface mesh is unavailable.";
+        return state;
+    }
+    if (generation->algorithmRevision != 3 ||
+        !SurfaceRecipeCodec::GetError(generation->resolvedParams).empty())
+    {
+        state.status = SurfaceRestoreStatus::IncompatibleRecipe;
+        state.message = "Surface recipe requires explicit version migration.";
+        return state;
+    }
+    if (!m_data->GetData(graph, generation->sourceRevision))
+    {
+        state.status = SurfaceRestoreStatus::MissingInput;
+        state.message = "The frozen source volume is unavailable.";
+        return state;
+    }
+    for (const auto &input : state.inputs)
+        if (!m_data->GetData(graph, input.source))
+        {
+            state.status = SurfaceRestoreStatus::MissingInput;
+            state.message = "A frozen surface input is unavailable.";
+            return state;
+        }
+    SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.materialLabels)
+        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
+    if (generation->resolvedParams.initialSurface)
+        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
+    if ((generation->resolvedParams.materialLabels && !inputs.materialLabels) ||
+        (generation->resolvedParams.initialSurface && !inputs.initialSurface))
+    {
+        state.status = SurfaceRestoreStatus::MissingInput;
+        state.message = "A recipe input is unavailable.";
+        return state;
+    }
+    const auto source = m_data->GetImageGrid(graph, generation->sourceRevision);
+    const auto *image = source && source->data
+                            ? dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get())
+                            : nullptr;
+    if (!image || image->GetGeometry().coordinateFrame != generation->coordinateFrame ||
+        payload->GetCoordinateFrame() != generation->coordinateFrame ||
+        generation->resolvedParams.sourceVolume != generation->sourceRevision ||
+        SurfaceDeterminationAlgorithm::GetInputFailure(source, generation->resolvedParams, inputs) !=
+            SurfaceFailureReason::None)
+    {
+        state.status = SurfaceRestoreStatus::IncompatibleRecipe;
+        state.message = "Surface recipe references, input geometry or coordinate frame are inconsistent.";
+        return state;
+    }
+    state.canRecompute = true;
+    const bool current = SurfaceContract::GetSourceCurrent(*m_data, graph, generation->sourceRevision,
+                                                           generation->sourceBinding) &&
+                         SurfaceContract::GetInputsCurrent(*m_data, graph, state.inputs);
+    state.status = current ? SurfaceRestoreStatus::Current : SurfaceRestoreStatus::Historical;
+    state.canMeasure =
+        current && generation->points &&
+        std::any_of(generation->points->begin(), generation->points->end(), [&](const auto &point) {
+            return SurfaceContract::GetPointValid(point, generation->method);
+        });
+    state.message = current ? "Surface inputs are current; measurement requires valid point and face quality."
+                            : "Surface inputs are historical; recomputation uses explicit frozen inputs.";
+    return state;
 }
 
 std::vector<HostFeatureView>
@@ -1003,10 +1201,13 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
                 ? dynamic_cast<const SurfaceGenerationPayload*>(snapshot->payload.get()) : nullptr;
             const auto generation = payload ? payload->GetGeneration() : nullptr;
             const auto source = generation ? m_data->GetImageGrid(graph, generation->sourceRevision) : nullptr;
-            if (!generation || !source || !source->data
-                || generation->dataRevision != snapshot->self || generation->resultScope != m_activeScope
-                || generation->purpose != SurfaceTaskPurpose::Determine
-                || !SurfaceContract::GetSourceCurrent(*m_data, graph, generation->sourceRevision, generation->sourceBinding)) {
+            if (!generation || !source || !source->data || generation->dataRevision != snapshot->self ||
+                generation->resultScope != m_activeScope ||
+                generation->purpose != SurfaceTaskPurpose::Determine ||
+                !SurfaceContract::GetSourceCurrent(*m_data, graph, generation->sourceRevision,
+                                                   generation->sourceBinding) ||
+                !SurfaceContract::GetInputsCurrent(*m_data, graph, generation->inputs))
+            {
                 m_store.ClearGeneration();
                 m_activeSource.reset();
                 m_isDisplayPending = false;
@@ -1032,7 +1233,7 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             m_displayOperation.stateRevision = 1;
             m_displayOperation.status = FeatureRunStatus::Succeeded;
             m_displayOperation.progress = 1.0;
-            m_displayOperation.inputs = { { "source-volume", generation->sourceRevision } };
+            m_displayOperation.inputs = generation->inputs;
             if (GetDataRevisionRefValid(generation->meshRevision))
                 m_displayOperation.outputs.push_back(generation->meshRevision);
             m_displayOperation.outputs.push_back(snapshot->self);
@@ -1116,7 +1317,8 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(SurfaceJobComplet
     const bool isLatest = complete.requestId == m_latestRequestId;
     auto& result = complete.result;
     const auto purpose = SurfaceContract::GetPurpose(request.params);
-    if (request.isSourceChanged || !GetSourceSame(request.source, request.params.sourcePolicy)) {
+    if (request.isSourceChanged || !GetRequestInputsSame(request))
+    {
         result.status = SurfaceResultStatus::Failed;
         result.failureReason = SurfaceFailureReason::SourceChanged;
         result.message = "Surface source changed before commit.";
@@ -1198,8 +1400,8 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestFailed(
     const RequestEntry& request,
     const SurfaceAlgorithmResult& result)
 {
-    if (result.failureReason == SurfaceFailureReason::SourceChanged
-        || !GetSourceSame(request.source, request.params.sourcePolicy)) {
+    if (result.failureReason == SurfaceFailureReason::SourceChanged || !GetRequestInputsSame(request))
+    {
         if (m_activeSource && !GetSourceSame(m_activeSource)) SetSourceStale();
         else {
             auto state = m_stateBeforeRequest;
@@ -1228,15 +1430,19 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestFailed(
     m_state.errorMessage = result.message;
 }
 
-std::shared_ptr<const SurfaceGenerationSnapshot>
-SurfaceDeterminationHostFeature::Impl::BuildGeneration(const RequestEntry& request,
-    SurfaceAlgorithmResult& result, const std::uint64_t requestId, const bool isFormal)
+std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl::BuildGeneration(
+    const RequestEntry &request, SurfaceAlgorithmResult &result, const std::uint64_t requestId,
+    const bool isFormal)
 {
     if (result.points.empty() || result.triangleIndices.empty() || result.objects.empty()
         || result.triangleValidity.size() != result.triangleIndices.size() / 3) return {};
     const auto* image = dynamic_cast<const ImageGrid3DPayload*>(request.source->data->payload.get());
     if (!image || image->GetGeometry().coordinateFrame.empty()) return {};
     SurfaceGenerationSnapshot generation;
+    generation.inputs = request.operation.inputs;
+    generation.execution = result.execution;
+    generation.interfaces =
+        std::make_shared<const std::vector<SurfaceInterfaceRecord>>(std::move(result.interfaces));
     generation.requestId = requestId;
     generation.purpose = SurfaceContract::GetPurpose(request.params);
     generation.resultScope = request.params.resultScope;
@@ -1262,7 +1468,7 @@ SurfaceDeterminationHostFeature::Impl::BuildGeneration(const RequestEntry& reque
     generation.triangleIndices = std::make_shared<const std::vector<std::uint32_t>>(std::move(result.triangleIndices));
     generation.triangleValidity = std::make_shared<const std::vector<std::uint8_t>>(std::move(result.triangleValidity));
     generation.objects = std::make_shared<const std::vector<SurfaceObjectRecord>>(std::move(result.objects));
-    return std::make_shared<const SurfaceGenerationSnapshot>(std::move(generation));
+    return std::make_shared<SurfaceGenerationSnapshot>(std::move(generation));
 }
 
 void SurfaceDeterminationHostFeature::Impl::SetTransientResult(const RequestEntry& request,
@@ -1295,8 +1501,25 @@ void SurfaceDeterminationHostFeature::Impl::SetTransientResult(const RequestEntr
 DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     const RequestEntry& request, SurfaceAlgorithmResult result, const std::uint64_t requestId)
 {
-    if (!GetSourceSame(request.source, request.params.sourcePolicy)
-        || m_resultRevision == std::numeric_limits<std::uint64_t>::max()) return {};
+    if (!GetRequestInputsSame(request) || m_resultRevision == std::numeric_limits<std::uint64_t>::max())
+        return {};
+    const auto publicationStarted = std::chrono::steady_clock::now();
+    std::size_t publicationBytes = GetRetainedBytes();
+    const auto charge = [&](std::size_t count, std::size_t width) {
+        if (count > (SIZE_MAX - publicationBytes) / width)
+            return false;
+        publicationBytes += count * width;
+        return publicationBytes <= m_config.maxWorkingBytes;
+    };
+    if (!charge(result.points.capacity(), sizeof(SurfacePointRecord)) ||
+        !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
+        !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
+        !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
+        !charge(result.points.size(), 2 * 13 * sizeof(double)) ||
+        !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
+        throw std::bad_alloc{};
+    result.execution.estimatedWorkingBytes =
+        std::max(result.execution.estimatedWorkingBytes, publicationBytes);
     const auto stagedGeneration = BuildGeneration(request, result, requestId, true);
     if (!stagedGeneration) return {};
     const auto meshRef = stagedGeneration->meshRevision;
@@ -1305,7 +1528,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     vertices.reserve(stagedGeneration->points->size() * 3U);
     // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
     // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
-    constexpr std::size_t qualityBytesPerPoint = 7U * sizeof(double) * 2U;
+    constexpr std::size_t qualityBytesPerPoint = 10U * sizeof(double) * 2U;
     if (stagedGeneration->points->size()
         > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
     std::vector<MeshAttribute> attributes{
@@ -1315,6 +1538,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         { "measurement.localization-sigma", 1, {} },
         { "measurement.normal", 3, {} }
     };
+    attributes.push_back({"measurement.flags", 1, {}});
+    attributes.push_back({"surface.interface-index", 1, {}});
+    attributes.push_back({"surface.override-index", 1, {}});
     for (auto& attribute : attributes) {
         attribute.values.reserve(
             stagedGeneration->points->size() * attribute.componentCount);
@@ -1334,6 +1560,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
             && point.validSupportRatio > 0.0F && point.validSupportRatio <= 1.0F
             && point.estimatedLocalizationSigma >= 0.0F;
         const bool isValid = SurfaceContract::GetPointValid(point, stagedGeneration->method);
+        attributes[5].values.push_back(static_cast<std::uint32_t>(point.flags));
+        attributes[6].values.push_back(point.interfaceIndex);
+        attributes[7].values.push_back(point.overrideIndex);
         attributes[0].values.push_back(isValid ? 1.0 : 0.0);
         attributes[1].values.push_back(hasQuality ? point.fitResidual : 0.0);
         attributes[2].values.push_back(hasQuality ? point.validSupportRatio : 0.0);
@@ -1352,6 +1581,15 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     transaction.policy = request.params.sourcePolicy;
     const bool isHistorical = request.params.sourcePolicy == DataPublishPolicy::AllowHistoricalResult;
     if (!isHistorical) {
+        for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
+            if (input)
+            {
+                DataExpectation expectation;
+                expectation.kind = DataExpectationKind::EntityHead;
+                expectation.entityId = input->self.entityId;
+                expectation.expectedGeneration = input->self.generation;
+                transaction.expectations.push_back(expectation);
+            }
         DataExpectation sourceExpected;
         sourceExpected.kind = DataExpectationKind::EntityHead;
         sourceExpected.entityId = request.source->data->self.entityId;
@@ -1367,16 +1605,18 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
             transaction.expectations.push_back(sourceExpected);
         }
     }
-    const DataInputRef sourceInput{ "source-volume", request.source->data->self };
     const DataProvenance provenance{ std::string(featureId), "determine-surface",
         std::to_string(stagedGeneration->algorithmRevision),
         stagedGeneration->canonicalParameters };
-    std::vector<DataInputRef> generationInputs{sourceInput};
+    std::vector<DataInputRef> generationInputs = request.operation.inputs;
     {
-        transaction.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
-            {sourceInput}, mesh, provenance});
+        transaction.outputs.push_back(
+            {meshRef.entityId, 0, DataTypes::surfaceMesh, request.operation.inputs, mesh, provenance});
         generationInputs.push_back({"mesh", meshRef});
     }
+    stagedGeneration->execution.publicationPreparationMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - publicationStarted)
+            .count();
     transaction.outputs.push_back({generationRef.entityId, 0, surfaceGenerationType,
         std::move(generationInputs),
         std::make_shared<const SurfaceGenerationPayload>(stagedGeneration,
@@ -1455,9 +1695,11 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
 
 FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
 {
-    return { { { "source-volume", DataFacets::scalarGrid3D, true } },
-        { { "mesh", DataTypes::surfaceMesh, { DataFacets::surfaceMesh } },
-          { "generation", surfaceGenerationType, { surfaceGenerationFacet } } } };
+    return {{{"source-volume", DataFacets::scalarGrid3D, true},
+             {"material-labels", DataFacets::labelMap3D, false},
+             {"initial-surface", DataFacets::surfaceMesh, false}},
+            {{"mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},
+             {"generation", surfaceGenerationType, {surfaceGenerationFacet}}}};
 }
 
 std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::GetOperationStates() const
@@ -1531,3 +1773,14 @@ SurfaceDeterminationHostFeature::GetSurfaceSnapshot(const DataRevisionRef revisi
 std::shared_ptr<const SurfaceGenerationSnapshot>
 SurfaceDeterminationHostFeature::GetPreviewSnapshot() const
 { return m_impl ? m_impl->GetPreviewSnapshot() : nullptr; }
+
+SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::GetProfileDiagnostic(
+    const DataRevisionRef revision, const std::uint64_t pointIndex) const
+{
+    return m_impl ? m_impl->GetProfileDiagnostic(revision, pointIndex) : SurfaceProfileDiagnostic{};
+}
+
+SurfaceRestoreState SurfaceDeterminationHostFeature::GetResultValidity(const DataRevisionRef revision) const
+{
+    return m_impl ? m_impl->GetResultValidity(revision) : SurfaceRestoreState{};
+}

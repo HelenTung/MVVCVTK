@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <limits>
 
 namespace {
 
@@ -47,11 +48,11 @@ SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
     }
 }
 
-SurfaceAdmissionStatus SurfaceDeterminationService::Start(
-    VtkImageGridSnapshot source,
-    SurfaceDeterminationStartParams params,
-    const std::size_t maxWorkingBytes,
-    const std::uint64_t requestId)
+SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot source,
+                                                          SurfaceDeterminationStartParams params,
+                                                          const std::size_t maxWorkingBytes,
+                                                          const std::uint64_t requestId,
+                                                          SurfaceAlgorithmInputs inputs)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return SurfaceAdmissionStatus::Stopping;
@@ -67,13 +68,8 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
     }
 
     auto cancel = std::make_shared<std::atomic<bool>>(false);
-    Job nextJob{
-        std::move(source),
-        std::move(params),
-        maxWorkingBytes,
-        requestId,
-        std::move(cancel)
-    };
+    Job nextJob{std::move(inputs), std::move(source), std::move(params),
+                maxWorkingBytes,   requestId,         std::move(cancel)};
 
     // 同通道替代，其余工件/用途保持 FIFO；分配成功后才取消旧任务。
     const auto scope = nextJob.params.resultScope;
@@ -95,8 +91,12 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
             && SurfaceContract::GetPurpose(complete.result.resolvedParams) == purpose) {
             complete.result.status = SurfaceResultStatus::Cancelled;
             complete.result.failureReason = SurfaceFailureReason::Cancelled;
-            complete.result.points.clear(); complete.result.triangleIndices.clear();
-            complete.result.triangleValidity.clear(); complete.result.objects.clear();
+            complete.result.points = {};
+            std::vector<SurfacePointRecord>().swap(complete.result.points);
+            std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
+            std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
+            std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
+            complete.result.requiredBytes = 0;
         }
     }
     m_latestRequestId = requestId;
@@ -128,8 +128,11 @@ bool SurfaceDeterminationService::StopRequest(
     for (auto& complete : m_complete) if (complete.requestId == requestId) {
         complete.result.status = SurfaceResultStatus::Cancelled;
         complete.result.failureReason = SurfaceFailureReason::Cancelled;
-        complete.result.points.clear(); complete.result.triangleIndices.clear();
-        complete.result.triangleValidity.clear(); complete.result.objects.clear();
+        std::vector<SurfacePointRecord>().swap(complete.result.points);
+        std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
+        std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
+        std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
+        complete.result.requiredBytes = 0;
         didStop = true;
     }
     if (didStop) ++m_executionRevision;
@@ -162,12 +165,13 @@ FeatureOperationState SurfaceDeterminationService::GetExecutionState(const std::
     return state;
 }
 
-std::optional<SurfaceJobComplete>
-SurfaceDeterminationService::GetComplete()
+std::optional<SurfaceJobComplete> SurfaceDeterminationService::GetComplete(const bool retainForPublication)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_complete.empty()) return std::nullopt;
     SurfaceJobComplete complete = std::move(m_complete.front());
+    if (retainForPublication)
+        m_handoffBytes = complete.result.requiredBytes;
     m_complete.erase(m_complete.begin());
     ++m_executionRevision;
     return complete;
@@ -285,6 +289,18 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
             ++m_executionRevision;
         }
 
+        std::size_t available = job.maxWorkingBytes;
+        {
+            const std::lock_guard<std::mutex> lock(m_mutex);
+            const auto subtract = [&](std::size_t amount) {
+                available = amount >= available ? 0 : available - amount;
+            };
+            subtract(m_retainedBytes);
+            subtract(m_handoffBytes);
+            for (const auto &pending : m_complete)
+                if (pending.result.status == SurfaceResultStatus::Succeeded)
+                    subtract(pending.result.requiredBytes);
+        }
         SurfaceJobComplete complete;
         complete.requestId = job.requestId;
         if (job.isCancelled->load(std::memory_order_acquire)) {
@@ -292,17 +308,13 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         }
         else {
             complete.result = SurfaceDeterminationAlgorithm::BuildSurface(
-                job.source,
-                job.params,
-                job.maxWorkingBytes,
-                [cancel = job.isCancelled] {
-                    return cancel->load(std::memory_order_acquire);
-                },
-                [this, requestId = job.requestId](
-                    const SurfaceDeterminationStage stage,
-                    const double progress) {
+                job.source, job.params, available,
+                [cancel = job.isCancelled] { return cancel->load(std::memory_order_acquire); },
+                [this, requestId = job.requestId](const SurfaceDeterminationStage stage,
+                                                  const double progress) {
                     SetProgress(requestId, stage, progress);
-                });
+                },
+                job.inputs);
         }
 
         {
@@ -329,4 +341,12 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         m_hasExited = true;
     }
     m_workerExited.notify_all();
+}
+
+void SurfaceDeterminationService::SetRetainedBytes(const std::size_t bytes, const bool releaseHandoff)
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_retainedBytes = bytes;
+    if (releaseHandoff)
+        m_handoffBytes = 0;
 }
