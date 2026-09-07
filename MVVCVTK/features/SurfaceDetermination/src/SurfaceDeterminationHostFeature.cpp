@@ -263,6 +263,7 @@ private:
         DataBinding resultBinding;
         std::shared_ptr<std::atomic<bool>> completeActive;
         FeatureOperationState operation;
+        bool hasCompleteBoundary = false;
     };
 
     bool GetIsOwnerThread() const noexcept;
@@ -493,6 +494,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 });
             if (!inserted.second) return admission;
             requestItem = inserted.first;
+            requestItem->second.hasCompleteBoundary = params.componentSelection
+                    == SurfaceComponentSelection::All
+                && !params.roiModelBounds && params.minimumObjectVoxels <= 1;
             admission.status = m_service->Start(
                 source, params, m_config.maxWorkingBytes, requestId);
         }
@@ -1245,7 +1249,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     vertices.reserve(stagedGeneration->points->size() * 3U);
     // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
     // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
-    constexpr std::size_t qualityBytesPerPoint = 7U * sizeof(double) * 2U;
+    constexpr std::size_t qualityBytesPerPoint = 8U * sizeof(double) * 2U;
     if (stagedGeneration->points->size()
         > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
     std::vector<MeshAttribute> attributes{
@@ -1253,7 +1257,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         { "measurement.fit-residual", 1, {} },
         { "measurement.support-ratio", 1, {} },
         { "measurement.localization-sigma", 1, {} },
-        { "measurement.normal", 3, {} }
+        { "measurement.normal", 3, {} },
+        // 只证明生成时未按分量/ROI裁剪；消费者仍需核对材料域、拓扑与路径。
+        { "measurement.boundary-complete", 1, {} }
     };
     for (auto& attribute : attributes) {
         attribute.values.reserve(
@@ -1279,6 +1285,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         attributes[1].values.push_back(hasQuality ? point.fitResidual : 0.0);
         attributes[2].values.push_back(hasQuality ? point.validSupportRatio : 0.0);
         attributes[3].values.push_back(hasQuality ? point.estimatedLocalizationSigma : 0.0);
+        attributes[5].values.push_back(request.hasCompleteBoundary ? 1.0 : 0.0);
         for (const auto value : point.normalModel) {
             attributes[4].values.push_back(hasQuality ? value / normalLength : 0.0);
         }

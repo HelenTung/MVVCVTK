@@ -32,6 +32,10 @@ else()
     ResetSdkStage("${CMAKE_CURRENT_BINARY_DIR}/ModelRotation/mvvcvtk-source-api-include")
 endif()
 
+if(MVVCVTK_BUILD_WALL_THICKNESS)
+    add_subdirectory(WallThickness)
+endif()
+
 if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
     add_subdirectory(MetrologyAlignment)
 endif()

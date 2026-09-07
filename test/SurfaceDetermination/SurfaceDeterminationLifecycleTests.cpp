@@ -265,15 +265,20 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         const auto mesh = data
             ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
             : nullptr;
-        checks.Get(mesh && mesh->GetPointAttributes().size() == 5,
+        checks.Get(mesh && mesh->GetPointAttributes().size() == 6,
             "generic mesh publishes measurement quality attributes");
-        if (mesh && mesh->GetPointAttributes().size() == 5) {
+        if (mesh && mesh->GetPointAttributes().size() == 6) {
             const auto& attributes = mesh->GetPointAttributes();
             checks.Get(attributes[0].name == "measurement.valid"
                 && attributes[0].values.size() == snapshot->points->size()
                 && attributes[4].componentCount == 3
                 && attributes[4].values.size() == snapshot->points->size() * 3,
                 "quality schema aligns with exact measurement vertices");
+            checks.Get(attributes[5].name == "measurement.boundary-complete"
+                && attributes[5].componentCount == 1
+                && std::all_of(attributes[5].values.begin(), attributes[5].values.end(),
+                    [](double value) { return value == 0.0; }),
+                "Largest does not claim a complete material boundary");
             for (std::size_t index = 0; index < snapshot->points->size(); ++index) {
                 if (attributes[0].values[index] != 1.0) continue;
                 checks.Get(attributes[1].values[index] == (*snapshot->points)[index].fitResidual

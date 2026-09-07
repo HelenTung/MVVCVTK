@@ -31,3 +31,4 @@ set_target_properties(
     PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph"
 )
 add_test(NAME DataGraph.VtkBridge COMMAND mvvcvtk_vtk_data_bridge_tests)
+SetTestRuntime(DataGraph.VtkBridge mvvcvtk_vtk_data_bridge_tests)
