@@ -413,11 +413,13 @@ set(MVVCVTK_HOST_SOURCES
     include/App/Tasks/AppDataExportTaskService.h
     include/App/Tasks/AppDataLoadTaskService.h
     include/Data/DataConverters.h
+    include/Data/DataGraphStore.h
     include/Data/DataManager.h
     include/Data/DataService.h
     include/Data/ImageProcessor.h
     include/Data/LabelMapReader.h
     include/Data/VolumeTypes.h
+    include/Data/VtkDataBridge.h
     include/Geometry/InteractionComputeService.h
     include/Host/HostCommandRouter.h
     include/Host/HostCoreServices.h
@@ -457,10 +459,12 @@ set(MVVCVTK_HOST_SOURCES
     src/App/Tasks/AppDataExportTaskService.cpp
     src/App/Tasks/AppDataLoadTaskService.cpp
     src/Data/DataConverters.cpp
+    src/Data/DataGraphStore.cpp
     src/Data/DataManager.cpp
     src/Data/ImageProcessor.cpp
     src/Data/LabelMapReader.cpp
     src/Data/VolumeTypes.cpp
+    src/Data/VtkDataBridge.cpp
     src/Host/HostTransferCodec.cpp
     include/Host/Internal/HostTransferCodec.h
     src/Host/HostCommandRouter.cpp
@@ -689,57 +693,11 @@ ExportHeaders(
 )
 add_subdirectory(features/Support)
 
-# DataCore 统一数据身份、修订、DAG、Binding 与事务；它是仓内实现依赖，
-# 不安装、不导出，也不改变三个 SDK 产品 component 与库闭包。
-add_library(mvvcvtk_data_core OBJECT
-    include/Data/DataGraphTypes.h
-    include/Data/DataPayloads.h
-    include/Data/DataGraphStore.h
-    src/Data/DataGraphStore.cpp
-)
-add_library(MVVCVTKInternal::DataCore ALIAS mvvcvtk_data_core)
-target_include_directories(
-    mvvcvtk_data_core
-    PUBLIC "$<BUILD_INTERFACE:${MVVCVTK_HOST_INCLUDE_DIR}>"
-)
-SetTargetDefaults(mvvcvtk_data_core)
-set_target_properties(
-    mvvcvtk_data_core
-    PROPERTIES
-        PROJECT_LABEL MVVCVTKDataCore
-        FOLDER "MVVCVTK/Host/Internal"
-)
-
-add_library(mvvcvtk_vtk_data_bridge OBJECT
-    include/Data/VtkDataBridge.h
-    include/Host/TrustedDataPort.h
-    src/Data/VtkDataBridge.cpp
-)
-add_library(
-    MVVCVTKInternal::VtkDataBridge ALIAS mvvcvtk_vtk_data_bridge
-)
-target_include_directories(
-    mvvcvtk_vtk_data_bridge
-    PUBLIC "$<BUILD_INTERFACE:${MVVCVTK_HOST_INCLUDE_DIR}>"
-)
-SetTargetDefaults(mvvcvtk_vtk_data_bridge)
-target_link_libraries(
-    mvvcvtk_vtk_data_bridge
-    PRIVATE ${MVVCVTK_VTK_TARGETS}
-)
-set_target_properties(
-    mvvcvtk_vtk_data_bridge
-    PROPERTIES
-        PROJECT_LABEL MVVCVTKVtkDataBridge
-        FOLDER "MVVCVTK/Host/Internal"
-)
-
+# 数据核心与 VTK 桥直接编入 Host，按原源码目录组织为一个主体工程。
 add_library(mvvcvtk_host STATIC)
 target_sources(
     mvvcvtk_host
     PRIVATE
-        $<TARGET_OBJECTS:mvvcvtk_data_core>
-        $<TARGET_OBJECTS:mvvcvtk_vtk_data_bridge>
         ${MVVCVTK_HOST_SOURCES}
         ${MVVCVTK_HOST_PUBLIC_HEADERS}
         ${MVVCVTK_HOST_CLOSURE_HEADERS}
@@ -759,7 +717,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME MVVCVTKHost
         EXPORT_NAME Host
-        PROJECT_LABEL MVVCVTKHost
+        PROJECT_LABEL Host
         FOLDER "MVVCVTK/Host"
 )
 set(

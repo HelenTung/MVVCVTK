@@ -1,6 +1,7 @@
+# 独立编译纯值数据核心，保持测试不依赖 Host 实现或 VTK。
 add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
-    $<TARGET_OBJECTS:mvvcvtk_data_core>
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
 )
 target_include_directories(
     mvvcvtk_data_graph_tests
