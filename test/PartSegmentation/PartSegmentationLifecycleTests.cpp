@@ -906,6 +906,8 @@ int GetEditLifecycleFailCount()
     stroke.target = timeout.feature->GetPartSetSnapshot()->parts[0].binding;
     stroke.radiusMM = 0.01;
     stroke.sourcePoints.resize(5000, { -1000, -1000, -1000 });
+    // 末端跨过源网格，确保测试执行受deadline约束的求交，而非域外笔刷的NoChange快路径。
+    stroke.sourcePoints.back() = {1000, 1000, 1000};
     timedRequest.operation = std::move(stroke);
     result.reset(); callbackCount = 0;
     check(timeout.feature->SendEditRequest(std::move(timedRequest), [&](auto value) {

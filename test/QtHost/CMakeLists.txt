@@ -98,6 +98,11 @@ if(MVVCVTK_BUILD_PART_SEGMENTATION)
     )
 endif()
 
+if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
+    target_compile_definitions(mvvcvtk_host_method_tests PRIVATE MVVCVTK_HAS_SURFACE_DETERMINATION=1)
+    target_link_libraries(mvvcvtk_host_method_tests PRIVATE MVVCVTK::SurfaceDetermination)
+endif()
+
 SetTargetDefaults(mvvcvtk_host_method_tests)
 vtk_module_autoinit(
     TARGETS mvvcvtk_host_method_tests

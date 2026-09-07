@@ -775,5 +775,79 @@ int GapDisplaySuite::GetFailCount() const
     expect(callbackService.StartView(std::move(retryRequest)),
         "ClearView should release worker and callback slots for a new view.");
     callbackService.ClearView();
+
+    // G1限定审计：记录5种域情形；验证兼容桥与显式填充输入一致。
+    // 相同结果只证明转换/统计投影一致，不证明DefX将NoData当作真实分析域。
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        auto source = vtkSmartPointer<vtkImageData>::New();
+        source->SetDimensions(7, 7, 7);
+        source->AllocateScalars(VTK_FLOAT, 1);
+        auto* scalar = static_cast<float*>(source->GetScalarPointer());
+        std::fill_n(scalar, 343, 100.0f);
+        const auto index = [](int x, int y, int z) { return x + 7*(y + 7*z); };
+        if (scenario < 3) {
+            for (int z = 2; z <= 4; ++z)
+                for (int y = 2; y <= 4; ++y)
+                    for (int x = 2; x <= 4; ++x) scalar[index(x,y,z)] = 0;
+        }
+        if (scenario == 1) for (int z = 0; z < 3; ++z) scalar[index(3,3,z)] = 0;
+        if (scenario == 4) { scalar[index(2,3,3)] = 0; scalar[index(4,3,3)] = 0; }
+        auto mask = GetMask(source);
+        auto* validity = static_cast<unsigned char*>(mask->GetScalarPointer());
+        if (scenario == 2 || scenario == 4) {
+            for (int z = 0; z < 7; ++z)
+                for (int y = 0; y < 7; ++y)
+                    for (int x = 4; x < 7; ++x) validity[index(x,y,z)] = 0;
+        }
+        if (scenario == 3) for (int z = 0; z < 7; ++z)
+            for (int y = 0; y < 7; ++y) validity[index(0,y,z)] = 0;
+        const std::vector<float> before(scalar, scalar+343);
+        const std::vector<unsigned char> maskBefore(validity, validity+343);
+        float minimum = 100;
+        for (int i = 0; i < 343; ++i) if (validity[i]) minimum = std::min(minimum, scalar[i]);
+        auto filled = vtkSmartPointer<vtkImageData>::New();
+        filled->DeepCopy(source);
+        auto* values = static_cast<float*>(filled->GetScalarPointer());
+        for (int i = 0; i < 343; ++i) if (!validity[i]) values[i] = minimum;
+        source->Modified(); mask->Modified(); filled->Modified();
+        GapAnalysisService masked, explicitFill;
+        GapViewRequest left;
+        left.inputImage = source;
+        left.validityMask = mask;
+        left.surface = surfaceConfig;
+        left.voidParams = voidParams;
+        left.meshTargets = {std::make_shared<OverlayStub>()};
+        left.sliceTargets = {{Orientation::Top_down, std::make_shared<OverlayStub>()}};
+        GapViewRequest right;
+        right.inputImage = filled;
+        right.surface = surfaceConfig;
+        right.voidParams = voidParams;
+        right.meshTargets = {std::make_shared<OverlayStub>()};
+        right.sliceTargets = {{Orientation::Top_down, std::make_shared<OverlayStub>()}};
+        const bool started = StartDisplay(masked, std::move(left), source)
+            && StartDisplay(explicitFill, std::move(right), filled);
+        expect(started, "Validity compatibility scenarios must execute real DefX");
+        if (started) {
+            const auto a = masked.BuildLabelImage(), b = explicitFill.BuildLabelImage();
+            const auto av = a ? static_cast<const int*>(a->GetScalarPointer()) : nullptr;
+            const auto bv = b ? static_cast<const int*>(b->GetScalarPointer()) : nullptr;
+            const auto sa = masked.GetStatistics(), sb = explicitFill.GetStatistics();
+            expect(av && bv && a->GetNumberOfPoints() == 343 && b->GetNumberOfPoints() == 343
+                && std::equal(av,av+343,bv)
+                && sa.objectVoxelCount == sb.objectVoxelCount && sa.voidVoxelCount == sb.voidVoxelCount
+                && sa.objectVolumeMM3 == sb.objectVolumeMM3 && sa.voidVolumeMM3 == sb.voidVolumeMM3
+                && sa.porosityRatio == sb.porosityRatio,
+                "Mask compatibility must preserve complete supplier labels/header without independent label filtering");
+            std::size_t outside = 0;
+            if (av) for (int i = 0; i < 343; ++i) if (!validity[i] && av[i] != 0) ++outside;
+            std::cout << "GAP_DOMAIN_COMPAT scenario=" << scenario << " void_voxels=" << sa.voidVoxelCount
+                << " outside_labeled_voxels=" << outside << " metrology_verified=0\n";
+        }
+        expect(std::equal(before.begin(),before.end(),scalar)
+            && std::equal(maskBefore.begin(),maskBefore.end(),validity),
+            "Gap validity conversion does not mutate source scalar or mask");
+        masked.ClearView();
+        explicitFill.ClearView();
+    }
     return failureCount;
 }

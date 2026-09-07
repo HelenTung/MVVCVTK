@@ -11,6 +11,8 @@
 #include <vector>
 
 class VtkAppHostSession;
+struct HostLoadRequest;
+struct ImageDescriptor;
 class CropHostFeature;
 class PartSegmentationHostFeature;
 class SurfaceDeterminationHostFeature;
@@ -24,6 +26,15 @@ struct FeatureTestOptions final {
     std::uint32_t timeoutMs = 300000;
     std::string inputPath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
     std::array<int, 3> dimensions{1536, 1536, 1536};
+    bool hasDimensions = false;
+    std::optional<std::array<float, 3>> spacing;
+    std::optional<std::array<float, 3>> origin;
+    std::optional<std::array<double, 9>> direction;
+    std::string inputFrame;
+    std::string inputUnit;
+    std::string inputFormat;
+    std::string datasetId;
+    std::string inputDigest;
     double editRadius = 0.0; // 0 selects 1.5 times the largest voxel spacing.
     std::uint64_t islandVoxels = 2;
     int ringAxis = 2;
@@ -35,6 +46,8 @@ struct FeatureTestOptions final {
 
 FeatureTestOptions GetFeatureTestOptions(int argc, char* argv[]);
 void PrintFeatureTestHelp();
+HostLoadRequest GetFeatureLoadRequest(const FeatureTestOptions& options, bool isAudit);
+bool GetFeatureInputValid(const HostLoadRequest& request, const ImageDescriptor& descriptor);
 
 struct FeatureTestBindings final {
     std::weak_ptr<CropHostFeature> crop;
@@ -61,7 +74,7 @@ public:
     bool DetachHost() override;
     bool OnHostTick() override;
     std::string GetFailure() const;
-    std::vector<FeatureTestStep> GetAuditSteps();
+    std::vector<FeatureTestStep> GetAuditSteps(bool isReal = false);
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;

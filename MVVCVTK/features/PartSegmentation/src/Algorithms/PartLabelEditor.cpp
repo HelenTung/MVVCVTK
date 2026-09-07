@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -111,38 +112,45 @@ public:
     PartEditBuildResult Build()
     {
         // 1. 校验完整输入与预算后，才创建独占的可写标签候选。
+        auto phaseStart = std::chrono::steady_clock::now();
+        const auto elapsed = [&phaseStart] {
+            const auto now = std::chrono::steady_clock::now();
+            const double duration = std::chrono::duration<double, std::milli>(now - phaseStart).count();
+            phaseStart = now;
+            return duration;
+        };
         SetInput();
-        m_labels = std::make_shared<std::vector<PartLabelId>>(*m_input.previous.labels);
-        m_editable.resize(m_count);
-        m_changed.resize(m_old->partsByLabel.size(), false);
-        for (std::size_t i = 0; i < m_count; ++i) {
-            CheckStop(i);
-            const auto label = (*m_labels)[i];
-            const auto index = GetIndex(i);
-            const double validity = m_input.volume.validity
-                ? GetScalar(*m_input.volume.validity, i) : 1.0;
-            const bool isProtected = m_locked[label]
-                || (m_input.protectionMask && GetMaskPoint(*m_input.protectionMask, i));
-            m_editable[i] = !isProtected && std::isfinite(validity) && validity != 0.0
-                && GetInside(index, m_extent)
-                && (!m_input.roiMask || GetMaskPoint(*m_input.roiMask, i));
+        m_profile.inputMs = elapsed();
+        m_labels = std::make_shared<std::vector<PartLabelId>>();
+        m_labels->reserve(m_count);
+        // 分块复制保留独占候选，取消时丢弃候选；不改写任何已发布载荷。
+        for (std::size_t offset = 0; offset < m_count;) {
+            CheckStop(offset);
+            const auto length = std::min(cancelBatch, m_count - offset);
+            const auto first = m_input.previous.labels->begin() + static_cast<std::ptrdiff_t>(offset);
+            m_labels->insert(m_labels->end(), first, first + static_cast<std::ptrdiff_t>(length));
+            offset += length;
         }
+        m_profile.copyMs = elapsed();
+        m_changed.resize(m_old->partsByLabel.size(), false);
+        m_profile.editableMs = elapsed();
         // 2. 每个工具只改变候选；不执行初始阈值分割，也不触碰原始 scalar。
         std::visit([this](const auto& operation) { SetOperation(operation); },
             m_input.request.operation);
-        // 编辑结束后目录重建不再读取限制标记，及时释放整卷临时缓冲。
-        std::vector<std::uint8_t>{}.swap(m_editable);
-        if (*m_labels == *m_input.previous.labels) {
+        m_profile.operationMs = elapsed();
+        if (m_changedCount == 0) {
             SetFailure(PartFailureReason::NoChange, "Edit changes no voxel ownership.");
         }
         // 3. 统一紧凑编号、重算指标及目录，再验证标签与身份的一致性。
         auto catalog = BuildCatalog();
+        m_profile.catalogMs = elapsed();
         if (!GetPartCatalogValid(*catalog, *m_labels, m_stop)) {
             CheckStop(0);
             SetFailure(PartFailureReason::InternalError, "Edited catalog is inconsistent.");
         }
+        m_profile.validationMs = elapsed();
         return { PartFailureReason::None, "Label edit candidate is ready.",
-            m_requiredBytes, m_labels, std::move(catalog) };
+            m_requiredBytes, m_labels, std::move(catalog), m_profile };
     }
 
     std::size_t GetRequiredBytes() const noexcept { return m_requiredBytes; }
@@ -269,7 +277,7 @@ private:
         // queue/heap 均预留 N 项且同时最多保留 N 个索引，不存在扩容重叠。
         const auto voxelBytes = std::visit([](const auto& operation) -> std::size_t {
             using Operation = std::decay_t<decltype(operation)>;
-            constexpr auto base = sizeof(PartLabelId) + sizeof(std::uint8_t);
+            constexpr auto base = sizeof(PartLabelId);
             if constexpr (std::is_same_v<Operation, PartSplitEdit>) {
                 return base + sizeof(std::uint32_t) + 2 * sizeof(std::uint8_t)
                     + sizeof(double) + 2 * sizeof(std::size_t);
@@ -322,7 +330,16 @@ private:
         }
     }
 
-    bool GetEditable(std::size_t i) const { return m_editable[i] != 0; }
+    bool GetEditable(std::size_t i) const
+    {
+        // 保护身份必须取编辑开始时的标签，不能随候选标签变化。
+        const auto label = (*m_input.previous.labels)[i];
+        if (m_locked[label] || !GetInside(GetIndex(i), m_extent)
+            || (m_input.protectionMask && GetMaskPoint(*m_input.protectionMask, i))
+            || (m_input.roiMask && !GetMaskPoint(*m_input.roiMask, i))) return false;
+        const double validity = m_input.volume.validity ? GetScalar(*m_input.volume.validity, i) : 1.0;
+        return std::isfinite(validity) && validity != 0.0;
+    }
 
     PartLabelId GetWritableLabel(const PartBindingRef& binding) const
     {
@@ -345,6 +362,9 @@ private:
     {
         const auto old = (*m_labels)[i];
         if (old == target) return;
+        const auto original = (*m_input.previous.labels)[i];
+        if (old == original) ++m_changedCount;
+        if (target == original) --m_changedCount;
         if (old < m_changed.size()) m_changed[old] = true;
         if (target < m_changed.size()) m_changed[target] = true;
         (*m_labels)[i] = target;
@@ -353,6 +373,59 @@ private:
     static double GetDot(const std::array<double, 3>& a, const std::array<double, 3>& b)
     {
         return std::inner_product(a.begin(), a.end(), b.begin(), 0.0);
+    }
+
+    std::optional<std::array<int, 6>> GetBrushExtent(const PartBrushEdit& op,
+        const std::array<double, 3>& normal) const
+    {
+        const auto& d = m_geometry.direction;
+        const double determinant = d[0] * (d[4] * d[8] - d[5] * d[7])
+            - d[1] * (d[3] * d[8] - d[5] * d[6]) + d[2] * (d[3] * d[7] - d[4] * d[6]);
+        // direction允许有限正交容差，使用实际逆矩阵，不用转置近似截掉边界体素。
+        const std::array<double, 9> inverse{
+            (d[4]*d[8]-d[5]*d[7])/determinant, (d[2]*d[7]-d[1]*d[8])/determinant, (d[1]*d[5]-d[2]*d[4])/determinant,
+            (d[5]*d[6]-d[3]*d[8])/determinant, (d[0]*d[8]-d[2]*d[6])/determinant, (d[2]*d[3]-d[0]*d[5])/determinant,
+            (d[3]*d[7]-d[4]*d[6])/determinant, (d[1]*d[6]-d[0]*d[7])/determinant, (d[0]*d[4]-d[1]*d[3])/determinant};
+        std::array<double, 3> minimum{}, maximum{};
+        minimum.fill(std::numeric_limits<double>::infinity());
+        maximum.fill(-std::numeric_limits<double>::infinity());
+        for (std::size_t sample = 0; sample < op.sourcePoints.size(); ++sample) {
+            CheckStop(sample);
+            auto point = op.sourcePoints[sample];
+            if (op.slice) {
+                std::array<double, 3> delta{};
+                for (std::size_t row = 0; row < 3; ++row) delta[row] = point[row] - op.slice->origin[row];
+                const auto height = GetDot(delta, normal);
+                for (std::size_t row = 0; row < 3; ++row) point[row] -= height * normal[row];
+            }
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                double index = 0;
+                for (std::size_t row = 0; row < 3; ++row)
+                    index += inverse[axis * 3 + row] * (point[row] - m_geometry.origin[row]) / m_geometry.spacing[axis];
+                if (!std::isfinite(index)) SetFailure(PartFailureReason::InvalidEdit, "Brush bounds overflow.");
+                minimum[axis] = std::min(minimum[axis], index);
+                maximum[axis] = std::max(maximum[axis], index);
+            }
+        }
+        auto extent = m_extent;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            std::array<double, 3> row{};
+            for (std::size_t r = 0; r < 3; ++r) row[r] = inverse[axis * 3 + r] / m_geometry.spacing[axis];
+            const double norm2 = GetDot(row, row), alongNormal = GetDot(row, normal);
+            const double margin = op.slice
+                ? op.radiusMM * std::sqrt(std::max(0.0, norm2 - alongNormal * alongNormal))
+                    + op.slice->thicknessMM * 0.5 * std::abs(alongNormal)
+                : op.radiusMM * std::sqrt(norm2);
+            if (!std::isfinite(margin)) SetFailure(PartFailureReason::InvalidEdit, "Brush radius overflows.");
+            // 向外取整并保留浮点余量；精确球/胶囊/切片判定仍在原物理坐标中执行。
+            const double tolerance = 1e-6 * std::max({1.0, std::abs(minimum[axis]), std::abs(maximum[axis]), margin});
+            const double lower = std::max(static_cast<double>(extent[axis * 2]), std::floor(minimum[axis] - margin - tolerance));
+            const double upper = std::min(static_cast<double>(extent[axis * 2 + 1]), std::ceil(maximum[axis] + margin + tolerance));
+            if (lower > upper) return std::nullopt;
+            extent[axis * 2] = static_cast<int>(lower);
+            extent[axis * 2 + 1] = static_cast<int>(upper);
+        }
+        return extent;
     }
 
     void SetOperation(const PartBrushEdit& op)
@@ -382,8 +455,19 @@ private:
             for (auto& x : normal) x /= length;
         }
         const auto allowed = GetAllowed(target, op.overwriteParts, op.isBackgroundAllowed);
-        for (std::size_t i = 0; i < m_count; ++i) {
-            CheckStop(i);
+        const auto extent = GetBrushExtent(op, normal);
+        if (!extent) return;
+        const auto width = static_cast<std::size_t>(static_cast<std::int64_t>((*extent)[1]) - (*extent)[0] + 1);
+        const auto height = static_cast<std::size_t>(static_cast<std::int64_t>((*extent)[3]) - (*extent)[2] + 1);
+        const auto depth = static_cast<std::size_t>(static_cast<std::int64_t>((*extent)[5]) - (*extent)[4] + 1);
+        for (std::size_t local = 0; local < width * height * depth; ++local) {
+            CheckStop(local);
+            const std::array<int, 3> index{
+                static_cast<int>(static_cast<std::int64_t>((*extent)[0]) + local % width),
+                static_cast<int>(static_cast<std::int64_t>((*extent)[2]) + (local / width) % height),
+                static_cast<int>(static_cast<std::int64_t>((*extent)[4]) + local / (width * height))};
+            const auto i = GetOffset(index);
+            ++m_profile.visitedVoxels;
             if (!GetEditable(i) || !allowed[(*m_labels)[i]]
                 || (op.isErase && (*m_labels)[i] != target)) continue;
             const auto point = GetPhysical(GetIndex(i));
@@ -709,9 +793,10 @@ private:
     std::array<double, 3> m_edgeLength{};
     std::size_t m_count = 0, m_requiredBytes = 0, m_newCount = 0;
     std::shared_ptr<std::vector<PartLabelId>> m_labels;
-    std::vector<std::uint8_t> m_editable;
+    std::size_t m_changedCount = 0;
     std::vector<bool> m_locked, m_changed;
     std::vector<PartLabelId> m_sources;
+    PartEditProfile m_profile;
 };
 
 } // namespace

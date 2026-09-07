@@ -49,6 +49,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <iomanip>
 #include <memory>
 #include <optional>
@@ -2119,7 +2120,8 @@ namespace {
     class DemoAuditFeature final : public HostFeature,
         public std::enable_shared_from_this<DemoAuditFeature> {
     public:
-        explicit DemoAuditFeature(VtkAppHostSession& session) : m_session(session) {}
+        explicit DemoAuditFeature(VtkAppHostSession& session, bool isReal = false)
+            : m_session(session), m_isReal(isReal) {}
         std::string_view GetFeatureId() const noexcept override { return "main.demo-audit"; }
         bool AttachHost(const HostFeatureContext& context) override { m_host = context.host; return m_host != nullptr; }
         bool DetachHost() override { m_isActive = false; m_host.reset(); return true; }
@@ -2179,7 +2181,7 @@ namespace {
                 std::cout << "[DemoAudit] owner_tick_p95_ms=" << m_tickGapsMs[m_tickGapsMs.size() * 95 / 100]
                     << " owner_tick_max_ms=" << m_tickGapsMs.back() << " samples=" << m_tickGapsMs.size() << '\n';
             }
-            std::cout << "AUDIT_DEMO: passed=" << passed << " completed=" << m_index
+            std::cout << (m_isReal ? "AUDIT_REAL: passed=" : "AUDIT_DEMO: passed=") << passed << " completed=" << m_index
                 << '/' << m_steps.size() << '\n' << std::flush;
             (void)StopEventLoop(m_session);
         }
@@ -2236,6 +2238,7 @@ namespace {
             if (std::chrono::steady_clock::now() > m_deadline) Finish(false);
         }
         VtkAppHostSession& m_session;
+        bool m_isReal = false;
         std::shared_ptr<FeatureHostControl> m_host;
         std::vector<Step> m_steps;
         std::function<std::string()> m_getFailure;
@@ -2494,6 +2497,22 @@ int main(int argc, char* argv[])
     const bool isDemo = GetArgFound(argc, argv, "--demo");
     const bool isDemoAudit = GetArgFound(argc, argv, "--demo-audit") || isFeatureAudit;
     const bool isRealAudit = GetArgFound(argc, argv, "--real-audit");
+    const bool isSyntheticInput = isDemo || isDemoAudit
+        || GetArgFound(argc, argv, "--part-auto") || GetArgFound(argc, argv, "--part-manual");
+    std::optional<HostLoadRequest> realLoad;
+    try {
+#if !defined(MVVCVTK_HAS_PART_SEGMENTATION) || !defined(MVVCVTK_HAS_SURFACE_DETERMINATION) \
+    || !defined(MVVCVTK_HAS_MODEL_ROTATION) || !defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT) \
+    || !defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
+        if (isRealAudit) throw std::invalid_argument("真实Feature审计要求七个Feature全部启用，不能静默跳过");
+#endif
+        if (isRealAudit && isSyntheticInput)
+            throw std::invalid_argument("真实审计不能与合成演示模式组合");
+        if (!isSyntheticInput) realLoad = GetFeatureLoadRequest(toolOptions, isRealAudit);
+    } catch (const std::exception& error) {
+        std::cerr << "INPUT_BLOCKED: " << error.what() << '\n';
+        return 2;
+    }
     // 后端切换和初始化都不是线程安全 API；必须在任何 Feature worker 启动前完成。
     // 构建若未包含 STDThread，则显式回退 Sequential，保持功能可用。
     const bool isThreaded =
@@ -2672,9 +2691,9 @@ int main(int argc, char* argv[])
 #endif
     auto featureTools = std::make_shared<FeatureTestControls>(session, toolBindings, toolOptions, allViews);
     features.push_back(featureTools);
-    auto demoAudit = std::make_shared<DemoAuditFeature>(session);
+    auto demoAudit = std::make_shared<DemoAuditFeature>(session, isRealAudit);
     demoAudit->SetFailureCheck([&]() -> std::string {
-        if (isFeatureAudit && !featureTools->GetFailure().empty()) return featureTools->GetFailure();
+        if ((isFeatureAudit || isRealAudit) && !featureTools->GetFailure().empty()) return featureTools->GetFailure();
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         if (surfaceFeature->GetState().stage == SurfaceDeterminationStage::Failed)
             return surfaceFeature->GetState().errorMessage;
@@ -2737,9 +2756,15 @@ int main(int argc, char* argv[])
         demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
             const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
             const auto view = session.GetRenderViewState(primaryTarget);
-            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
+            const bool ready = surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
                 && snapshot && snapshot->isoEstimate && view
+                && snapshot->method == SurfaceDeterminationMethod::AutomaticIso50
+                && (!snapshot->points || snapshot->points->empty())
+                && !GetDataRevisionRefValid(snapshot->meshRevision)
                 && view->isoThreshold == snapshot->isoEstimate->isoValue;
+            if (ready) std::cout << "AUDIT_THRESHOLD value=" << snapshot->isoEstimate->isoValue
+                << " source_generation=" << snapshot->sourceRevision.generation << '\n';
+            return ready;
         });
         demoAudit->AddStep("清除表面估计", {'u', {}, true}, [surfaceFeature] { return !surfaceFeature->GetSurfaceSnapshot(); });
 #endif
@@ -2787,14 +2812,23 @@ int main(int argc, char* argv[])
     }
 
     if (isRealAudit) {
-        demoAudit->AddStep("真实图像", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
+        demoAudit->AddStep("真实图像", {0, "F2"}, [&session, realLoad] {
+            const auto descriptor = session.GetImageDescriptor();
+            return descriptor && realLoad && GetFeatureInputValid(*realLoad, *descriptor);
+        });
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
             const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
             const auto view = session.GetRenderViewState(primaryTarget);
-            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
+            const bool ready = surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
                 && snapshot && snapshot->isoEstimate && view
+                && snapshot->method == SurfaceDeterminationMethod::AutomaticIso50
+                && (!snapshot->points || snapshot->points->empty())
+                && !GetDataRevisionRefValid(snapshot->meshRevision)
                 && view->isoThreshold == snapshot->isoEstimate->isoValue;
+            if (ready) std::cout << "AUDIT_THRESHOLD value=" << snapshot->isoEstimate->isoValue
+                << " source_generation=" << snapshot->sourceRevision.generation << '\n';
+            return ready;
         });
 #endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
@@ -2817,7 +2851,53 @@ int main(int argc, char* argv[])
                 && partFeature->GetPartSetSnapshot() && state.partCount > 0;
         });
 #endif
-        demoAudit->AddStep("真实数据帧状态", {0, "F4"}, [] { return true; });
+        demoAudit->AddStep("real-gap-uncropped", {'g'}, [gapFeature, &session] {
+            const auto state = gapFeature->GetState();
+            const auto image = session.GetImageDescriptor();
+            const bool ready = image && state.analysisState == GapAnalysisState::Succeeded
+                && state.sourceRevision == image->dataRevision && GetDataRevisionRefValid(state.labelMap)
+                && GetDataRevisionRefValid(state.statisticsData)
+                && std::isfinite(state.statistics.porosityRatio);
+            if (ready) std::cout << "AUDIT_GAP object_voxels=" << state.statistics.objectVoxelCount
+                << " void_voxels=" << state.statistics.voidVoxelCount
+                << " void_volume_mm3=" << state.statistics.voidVolumeMM3
+                << " porosity=" << state.statistics.porosityRatio << '\n';
+            return ready;
+        });
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        demoAudit->AddStep("real-rotation", {'j',{},false,false,true}, [rotationFeature, realLoad, &session] {
+            const auto image = session.GetImageDescriptor();
+            return image && realLoad && GetFeatureInputValid(*realLoad, *image)
+                && rotationFeature->GetState().status == ModelRotationStatus::Succeeded
+                && rotationFeature->GetState().undoCount == 1;
+        });
+        demoAudit->AddStep("real-rotation-undo", {'j',{},false,true}, [rotationFeature, realLoad, &session] {
+            const auto image = session.GetImageDescriptor();
+            return image && realLoad && GetFeatureInputValid(*realLoad, *image)
+                && rotationFeature->GetState().undoCount == 0
+                && rotationFeature->GetState().status == ModelRotationStatus::Succeeded;
+        });
+#endif
+        // 此入口只验证裁切工具/姿态切换。非空裁切有效域的G1验收仍需已定义ROI和参考；
+        // 不用空配方或零交互操作冒充真实裁切结果。
+        demoAudit->AddStep("real-crop-entry", {'o'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("real-crop-keep-mode", {'1'}, [cropFeature] {
+            return cropFeature->GetState().history.editMode == CropRemovalMode::KeepInside;
+        });
+        for (auto& step : featureTools->GetAuditSteps(true))
+            demoAudit->AddStep(std::move(step.name), std::move(step.key), std::move(step.ready));
+        std::cout << "AUDIT_SCOPE crop_domain=BLOCKED reference_required=1 measurement_accuracy=NOT_VERIFIED\n";
+        demoAudit->AddStep("真实数据帧状态", {0, "F4"}, [&session] {
+            const auto image = session.GetImageDescriptor();
+            const auto scenes = session.GetSceneViewStates();
+            if (!image || scenes.size() != 5) return false;
+            return std::all_of(scenes.begin(), scenes.end(), [&image](const auto& scene) {
+                return scene.isAvailable && scene.presentation && scene.camera
+                    && scene.presentation->dataRevision == image->dataRevision
+                    && scene.renderedEpoch >= scene.sceneEpoch
+                    && std::isfinite(scene.camera->parallelScale) && scene.camera->parallelScale > 0;
+            });
+        });
         features.push_back(demoAudit);
     }
 
@@ -3040,18 +3120,7 @@ int main(int argc, char* argv[])
     }
     else
     {
-        HostLoadRequest load;
-        load.filePath = toolOptions.inputPath;
-        load.geometry.dimensions = toolOptions.dimensions;
-        load.geometry.spacing = {
-            0.1537f, 0.1537f, 0.1537f };
-        load.geometry.origin = { 0.0f, 0.0f, 0.0f };
-        load.metadata.identity.datasetId = "standalone-ct-"
-            + std::to_string(toolOptions.dimensions[0]) + "x"
-            + std::to_string(toolOptions.dimensions[1]) + "x"
-            + std::to_string(toolOptions.dimensions[2]);
-        load.metadata.source.kind = ImageSourceKind::RawFile;
-        load.metadata.source.uri = load.filePath;
+        auto load = *realLoad;
         std::cout << "[运行配置] 真实输入=" << load.filePath
             << " 尺寸=" << toolOptions.dimensions[0] << 'x'
             << toolOptions.dimensions[1] << 'x' << toolOptions.dimensions[2]

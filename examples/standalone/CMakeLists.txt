@@ -3,6 +3,7 @@ add_executable(
     main.cpp
     FeatureTestControls.h
     FeatureTestControls.cpp
+    FeatureTestOptions.cpp
 )
 set_target_properties(
     MVVCVTKStandalone

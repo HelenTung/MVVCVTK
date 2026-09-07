@@ -60,85 +60,12 @@ const char* ArtifactStageText(const unsigned int progress) {
     return "冻结候选结果";
 }
 #endif
-double Number(const std::string& text) {
-    std::size_t end = 0;
-    const double value = std::stod(text, &end);
-    if (end != text.size() || !std::isfinite(value)) throw std::invalid_argument("工具选项数值无效：" + text);
-    return value;
-}
 std::string Ref(const DataRevisionRef& ref) {
     constexpr char digits[] = "0123456789abcdef";
     std::string value;
     for (const auto byte : ref.entityId.bytes) { value += digits[byte >> 4]; value += digits[byte & 15]; }
     return value + ":" + std::to_string(ref.generation);
 }
-}
-
-FeatureTestOptions GetFeatureTestOptions(const int argc, char* argv[]) {
-    FeatureTestOptions options;
-    for (int index = 1; index < argc; ++index) {
-        const std::string argument = argv[index] ? argv[index] : "";
-        const auto equal = argument.find('=');
-        if (equal == std::string::npos) continue;
-        const auto key = argument.substr(0, equal);
-        const auto text = argument.substr(equal + 1);
-        if (key == "--input") {
-            if (text.empty()) throw std::invalid_argument("输入文件路径不能为空");
-            options.inputPath = text;
-            continue;
-        }
-        if (key == "--dimensions") {
-            std::istringstream dimensions(text);
-            std::string component;
-            for (auto& dimension : options.dimensions) {
-                if (!std::getline(dimensions, component, ','))
-                    throw std::invalid_argument("体数据尺寸需要三个整数，例如 600,1800,600");
-                const auto value = Number(component);
-                if (value < 1 || value > std::numeric_limits<int>::max() || value != std::floor(value))
-                    throw std::invalid_argument("体数据各轴尺寸必须为有效正整数");
-                dimension = static_cast<int>(value);
-            }
-            if (!dimensions.eof()) throw std::invalid_argument("体数据尺寸只能包含三个整数");
-            continue;
-        }
-        if (key == "--artifact-center") {
-            const auto comma = text.find(',');
-            if (comma == std::string::npos) throw std::invalid_argument("--artifact-center 需要两个以逗号分隔的索引 a,b");
-            options.ringCenter = std::array<double, 2>{Number(text.substr(0, comma)), Number(text.substr(comma + 1))};
-            continue;
-        }
-        if (key != "--tool-budget-mib" && key != "--tool-timeout-ms" && key != "--edit-radius-mm" && key != "--edit-island-voxels"
-            && key != "--artifact-axis" && key != "--artifact-ring-width" && key != "--artifact-strength"
-            && key != "--artifact-iterations") continue;
-        const auto value = Number(text);
-        if (key == "--tool-budget-mib") {
-            if (value < 16 || value > 131072 || value != std::floor(value)) throw std::invalid_argument("工具内存预算必须为 16..131072 MiB");
-            options.budgetBytes = static_cast<std::size_t>(value) * 1024 * 1024;
-        } else if (key == "--tool-timeout-ms") {
-            if (value < 1 || value > 3600000 || value != std::floor(value))
-                throw std::invalid_argument("工具超时必须为 1..3600000 毫秒");
-            options.timeoutMs = static_cast<std::uint32_t>(value);
-        } else if (key == "--edit-radius-mm") {
-            if (value <= 0) throw std::invalid_argument("编辑半径必须为正数");
-            options.editRadius = value;
-        } else if (key == "--edit-island-voxels") {
-            if (value < 1 || value > 1e9 || value != std::floor(value)) throw std::invalid_argument("孤岛体素数量无效");
-            options.islandVoxels = static_cast<std::uint64_t>(value);
-        } else if (key == "--artifact-axis") {
-            if (value < 0 || value > 2 || value != std::floor(value)) throw std::invalid_argument("伪影处理轴必须为 0、1 或 2");
-            options.ringAxis = static_cast<int>(value);
-        } else if (key == "--artifact-ring-width") {
-            if (value < 1 || value > 64 || value != std::floor(value)) throw std::invalid_argument("环宽必须为 1..64");
-            options.ringWidth = static_cast<int>(value);
-        } else if (key == "--artifact-strength") {
-            if (value < 0 || value > 1) throw std::invalid_argument("伪影校正强度必须为 0..1");
-            options.ringStrength = value;
-        } else {
-            if (value < 1 || value > 16 || value != std::floor(value)) throw std::invalid_argument("扩散迭代次数必须为 1..16");
-            options.diffusionIterations = static_cast<int>(value);
-        }
-    }
-    return options;
 }
 
 void PrintFeatureTestHelp() {
@@ -166,7 +93,7 @@ void PrintFeatureTestHelp() {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
     std::cout << "\n【表面网格】\n"
         << "  前置：加载当前图像，建议先按 U 并等待完成。K 使用 A 窗口当前阈值。\n"
-        << "  K：提取全局等值面预览网格；Shift+K：使用局部自适应 ISO50 方法细化网格。\n"
+        << "  K：全局等值面预览；Shift+K：局部自适应 ISO50；Ctrl+Shift+K：梯度峰值测量网格。\n"
         << "  “局部自适应”是算法方式；此快捷键仍使用当前输入，没有另外指定鼠标选框范围。\n"
         << "  Alt+K：请求取消；成功后终端显示网格点数，Ctrl+K 可查看网格版本。\n"
         << "  K 的“预览网格”成功后即成为表面结果，无需使用零件编辑的 Ctrl+F7 确认。\n"
@@ -213,10 +140,13 @@ void PrintFeatureTestHelp() {
         << "  --input=路径：单分量、32 位浮点原始体数据文件。默认路径：" << defaults.inputPath << '\n'
         << "  --dimensions=X,Y,Z：与文件匹配的三个正整数；默认 "
         << defaults.dimensions[0] << ',' << defaults.dimensions[1] << ',' << defaults.dimensions[2] << "。\n"
-        << "  当前 main 固定体素间距为 0.1537、原点为 (0,0,0)；--dimensions 只设置体素数量。\n"
+        << "  真实输入必须显式提供 --dimensions、--spacing=X,Y,Z、--origin=X,Y,Z（毫米）。\n"
+        << "  --direction=九个逗号分隔值：行主序3x3；--input-frame=LPS --input-unit=mm。\n"
+        << "  --input-format=float32-le-xfastest：仅支持单分量float32、小端、X最快、无头无padding的RAW。\n"
+        << "  --dataset-id=来源标识；--input-digest=64位SHA256（真实审计必填，由仓内运行脚本核验）。\n"
+        << "  RAW 输入extent从零开始；已有裁切数据应提供对应的新origin，不能只裁数组。\n"
         << "  路径含空格时，将整个参数放入双引号，例如 \"--input=F:/CT data/scan.raw\"。\n"
-        << "  1536 数据：MVVCVTK.exe --input=F:/data/ct/1536x1536x1536_1440.raw --dimensions=1536,1536,1536\n"
-        << "  600 数据： MVVCVTK.exe --input=F:/data/ct/600x1800x600.raw --dimensions=600,1800,600\n"
+        << "  文件名和尺寸不能证明采集几何；缺少上述信息时真实加载拒绝，不沿用旧样本间距。\n"
         << "  --tool-budget-mib=整数：16..131072 MiB；默认取启动时可用物理内存一半，上限 64 GiB。\n"
         << "    例如 --tool-budget-mib=49152 表示 48 GiB；启动时终端会打印实际配置的预算。\n"
         << "  --tool-timeout-ms=整数：零件编辑和伪影处理的超时，范围 1..3600000，默认 "
@@ -286,7 +216,7 @@ public:
     bool PrepareArtifact();
     bool ArtifactActionRequest(int action);
     bool SelectArtifact(bool restore);
-    bool StartSurface(bool local);
+    bool StartSurface(bool local, bool gradient = false);
     bool StartAlignment(bool bestFit);
     bool AlignmentActionRequest(int action);
     void Tick();
@@ -319,6 +249,7 @@ public:
 };
 
 bool FeatureTestControls::Impl::Dispatch(const int key, const bool ctrl, const bool alt, const bool shift) {
+    if (key == 12 && ctrl && shift && !alt) return StartSurface(true, true);
     if (key == 12 && ctrl && !alt && !shift) { Report(); return true; }
     if (key == 6 && !ctrl && !alt) {
         editMode = (editMode + (shift ? 6 : 1)) % 7;
@@ -695,7 +626,7 @@ std::string SurfaceResultText(const SurfaceDeterminationResult& result) {
 }
 #endif
 
-bool FeatureTestControls::Impl::StartSurface(const bool local) {
+bool FeatureTestControls::Impl::StartSurface(const bool local, const bool gradient) {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
     const auto feature = bindings.surface.lock();
     if (!feature) return Fail("表面确定功能不可用");
@@ -704,7 +635,8 @@ bool FeatureTestControls::Impl::StartSurface(const bool local) {
     if (!view || !GetDataRevisionRefValid(view->dataRevision)) return Fail("请先加载当前图像");
     SurfaceDeterminationStartParams params;
     params.targetViews.viewIds = {primaryView};
-    params.method = local ? SurfaceDeterminationMethod::LocalAdaptiveIso50 : SurfaceDeterminationMethod::GlobalIsoPreview;
+    params.method = gradient ? SurfaceDeterminationMethod::GradientPeak
+        : local ? SurfaceDeterminationMethod::LocalAdaptiveIso50 : SurfaceDeterminationMethod::GlobalIsoPreview;
     params.initialIsoValue = view->isoThreshold;
     SurfaceDeterminationRequest request;
     request.action = SurfaceDeterminationAction::Start;
@@ -715,14 +647,22 @@ bool FeatureTestControls::Impl::StartSurface(const bool local) {
         auto& tools = *self->m_impl;
         const auto message = SurfaceResultText(result);
         if (result.status == SurfaceResultStatus::Failed) tools.failure = message;
+        if (const auto surface = tools.bindings.surface.lock()) {
+            const auto state = surface->GetState();
+            const auto snapshot = surface->GetSurfaceSnapshot();
+            std::cout << "AUDIT_SURFACE method=" << (snapshot ? static_cast<int>(snapshot->method) : -1)
+                << " points=" << state.pointCount << " accepted=" << state.acceptedPointCount
+                << " rejected=" << state.rejectedPointCount << " truncated=" << state.truncatedPointCount
+                << " nonmanifold=" << state.nonManifoldObjectCount << " source_generation=" << state.sourceRevision.generation << '\n';
+        }
         tools.Status("网格请求=" + std::to_string(result.requestId) + " 点数=" + std::to_string(result.pointCount)
             + " | " + message);
     });
     if (admission.status != SurfaceAdmissionStatus::Accepted) return Fail("网格提取被拒绝");
-    Status(std::string(local ? "局部自适应网格" : "全局预览网格") + " 已请求 | 等值面阈值=" + std::to_string(view->isoThreshold));
+    Status(std::string(gradient ? "梯度峰值网格" : local ? "局部自适应网格" : "全局预览网格") + " 已请求 | 等值面阈值=" + std::to_string(view->isoThreshold));
     return true;
 #else
-    (void)local; return Fail("请使用 MVVCVTK_BUILD_SURFACE_DETERMINATION=ON 构建");
+    (void)local; (void)gradient; return Fail("请使用 MVVCVTK_BUILD_SURFACE_DETERMINATION=ON 构建");
 #endif
 }
 
@@ -862,6 +802,8 @@ bool FeatureTestControls::Impl::StartAlignment(const bool bestFit) {
             app.alignmentMatched = transform && result.status == AlignmentStatus::FullyDetermined
                 && result.diagnostics.isQualityPassed && error < 1e-5;
             if (!app.alignmentMatched && result.status != AlignmentStatus::Cancelled) app.failure = "已知变换验证不匹配：" + result.message;
+            std::cout << "AUDIT_ALIGNMENT matrix_max_error=" << error
+                << " rms=" << result.diagnostics.rms << " remaining_dof=" << result.diagnostics.remaining << '\n';
             app.Status("对齐验证 | 已匹配=" + std::to_string(app.alignmentMatched)
                 + " 矩阵最大误差=" + std::to_string(error) + " 均方根误差=" + std::to_string(result.diagnostics.rms));
             app.Report();
@@ -896,6 +838,8 @@ void FeatureTestControls::Impl::Report() {
     if (const auto feature = bindings.parts.lock()) {
         const auto state = feature->GetState();
         const auto preview = feature->GetEditPreview();
+        std::cout << "AUDIT_PART count=" << state.partCount << " result_revision=" << state.resultRevision
+            << " source_generation=" << state.sourceRevision.generation << '\n';
         std::cout << "[工具·零件] 模式=" << editNames[editMode] << " 零件数=" << state.partCount
             << " 标签=" << Ref(state.labelMap) << " 目录版本=" << state.catalogRevision;
         if (preview) std::cout << " 候选结果=" << preview->previewId
@@ -915,6 +859,10 @@ void FeatureTestControls::Impl::Report() {
 #if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
     if (const auto feature = bindings.artifact.lock()) {
         const auto state = feature->GetState();
+        if (state.status == ArtifactStatus::Idle && state.commitStatus == DataCommitStatus::Succeeded) {
+            std::cout << "AUDIT_ARTIFACT mode=" << artifactMode << " changed=" << state.quality.changedCount
+                << " rms_delta=" << state.quality.rmsDelta << " fidelity_verified=" << state.quality.fidelityVerified << '\n';
+        }
         std::cout << "[工具·伪影] 模式=" << artifactNames[artifactMode] << " 状态=" << static_cast<int>(state.status)
             << " 错误=" << static_cast<int>(state.error) << " 进度=" << state.progressPercent
             << " 所需字节数=" << state.requiredBytes << " 变化体素数=" << state.quality.changedCount
@@ -1041,7 +989,8 @@ bool FeatureTestControls::OnHostTick() {
 }
 std::string FeatureTestControls::GetFailure() const { return m_impl->failure; }
 
-std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
+std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps(const bool isReal) {
+    (void)isReal;
     std::vector<FeatureTestStep> steps;
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     const auto partReady = [weak = m_impl->bindings.parts] {
@@ -1052,6 +1001,66 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
         const auto snapshot = feature ? feature->GetPartSetSnapshot() : nullptr;
         return snapshot && snapshot->parts.size() == count && !feature->GetEditPreview();
     };
+    if (isReal) {
+        const auto baseline = std::make_shared<std::shared_ptr<const PartSetSnapshot>>();
+        const auto painted = std::make_shared<std::shared_ptr<const PartSetSnapshot>>();
+        const auto restored = [weak = m_impl->bindings.parts, baseline] {
+            const auto feature = weak.lock();
+            const auto current = feature ? feature->GetPartSetSnapshot() : nullptr;
+            if (!current || !*baseline || feature->GetEditPreview()
+                || current->resultRevision <= (*baseline)->resultRevision
+                || current->parts.size() != (*baseline)->parts.size()) return false;
+            for (std::size_t i = 0; i < current->parts.size(); ++i) {
+                const auto& a = current->parts[i];
+                const auto& b = (*baseline)->parts[i];
+                if (a.binding.object.objectId != b.binding.object.objectId
+                    || a.labelId != b.labelId || a.metrics != b.metrics || a.userState != b.userState) return false;
+            }
+            return true;
+        };
+        steps.push_back({"real-edit-select", {0,"F6"}, [weak = m_impl->bindings.parts, baseline] {
+            const auto feature = weak.lock();
+            *baseline = feature ? feature->GetPartSetSnapshot() : nullptr;
+            return *baseline && !(*baseline)->isStale && !(*baseline)->parts.empty();
+        }});
+        // 擦除已占用种子保证存在可测的标签变化；涂绘内部点可能合法地NoChange。
+        steps.push_back({"real-edit-erase", {0,"F6"}, [weak = weak_from_this()] {
+            const auto self = weak.lock(); return self && self->m_impl->editMode == 1;
+        }});
+        steps.push_back({"real-edit-preview", {0,"F7"}, partReady});
+        steps.push_back({"real-edit-commit", {0,"F7",true}, [weak = m_impl->bindings.parts, baseline, painted] {
+            const auto feature = weak.lock();
+            const auto current = feature ? feature->GetPartSetSnapshot() : nullptr;
+            if (!current || !*baseline || feature->GetEditPreview()
+                || current->resultRevision <= (*baseline)->resultRevision
+                || current->sourceRevision != (*baseline)->sourceRevision) return false;
+            std::uint64_t before = 0, after = 0;
+            for (const auto& part : (*baseline)->parts) before += part.metrics.voxelCount;
+            for (const auto& part : current->parts) after += part.metrics.voxelCount;
+            if (after >= before) return false;
+            std::cout << "AUDIT_EDIT erased_voxels=" << before - after << '\n';
+            *painted = current;
+            return true;
+        }});
+        steps.push_back({"real-edit-undo-preview", {0,"F8"}, partReady});
+        steps.push_back({"real-edit-undo", {0,"F7",true}, restored});
+        steps.push_back({"real-edit-redo-preview", {0,"F8",false,false,true}, partReady});
+        steps.push_back({"real-edit-redo", {0,"F7",true}, [weak = m_impl->bindings.parts, painted] {
+            const auto feature = weak.lock();
+            const auto current = feature ? feature->GetPartSetSnapshot() : nullptr;
+            if (!current || !*painted || feature->GetEditPreview()
+                || current->resultRevision <= (*painted)->resultRevision
+                || current->parts.size() != (*painted)->parts.size()) return false;
+            for (std::size_t i = 0; i < current->parts.size(); ++i) {
+                if (current->parts[i].binding.object.objectId != (*painted)->parts[i].binding.object.objectId
+                    || current->sourceRevision != (*painted)->sourceRevision
+                    || current->parts[i].labelId != (*painted)->parts[i].labelId
+                    || current->parts[i].metrics != (*painted)->parts[i].metrics
+                    || current->parts[i].userState != (*painted)->parts[i].userState) return false;
+            }
+            return true;
+        }});
+    } else {
     steps.push_back({"工具：合并预览", {0,"F7"}, partReady});
     steps.push_back({"工具：确认合并", {0,"F7",true}, [partCount] { return partCount(1); }});
     steps.push_back({"工具：撤销预览", {0,"F8"}, partReady});
@@ -1063,12 +1072,24 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
     }});
     steps.push_back({"工具：涂绘预览", {0,"F7"}, partReady});
     steps.push_back({"工具：丢弃涂绘", {0,"F7",false,true}, [partCount] { return partCount(1); }});
+    }
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-    steps.push_back({"工具：表面网格", {'k'}, [weak = m_impl->bindings.surface] {
+    const auto surfaceReady = [weak = m_impl->bindings.surface](SurfaceDeterminationMethod method) {
         const auto feature = weak.lock();
         const auto result = feature ? feature->GetSurfaceSnapshot() : nullptr;
-        return result && GetDataRevisionRefValid(result->meshRevision) && result->points && !result->points->empty();
+        return feature && feature->GetState().stage == SurfaceDeterminationStage::Ready
+            && result && result->method == method && GetDataRevisionRefValid(result->meshRevision)
+            && result->points && !result->points->empty() && result->triangleIndices && !result->triangleIndices->empty();
+    };
+    steps.push_back({"surface-global", {'k'}, [surfaceReady] {
+        return surfaceReady(SurfaceDeterminationMethod::GlobalIsoPreview);
+    }});
+    steps.push_back({"surface-local", {'k',{},false,false,true}, [surfaceReady] {
+        return surfaceReady(SurfaceDeterminationMethod::LocalAdaptiveIso50);
+    }});
+    steps.push_back({"surface-gradient", {'k',{},true,false,true}, [surfaceReady] {
+        return surfaceReady(SurfaceDeterminationMethod::GradientPeak);
     }});
 #endif
 #if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT) && defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
@@ -1090,8 +1111,11 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
         const auto feature = weak.lock(); return feature && feature->GetState().status == ArtifactStatus::Ready;
     };
     const auto artifactPublished = [weak = m_impl->bindings.artifact] {
-        const auto feature = weak.lock(); return feature && feature->GetState().correctedVolume.has_value()
-            && feature->GetState().qualityReport.has_value();
+        const auto feature = weak.lock(); return feature && feature->GetState().status == ArtifactStatus::Idle
+            && feature->GetState().commitStatus == DataCommitStatus::Succeeded
+            && feature->GetState().correctedVolume.has_value()
+            && feature->GetState().qualityReport.has_value()
+            && !feature->GetState().quality.fidelityVerified;
     };
     for (const auto* name : artifactNames) {
         if (name != artifactNames.front()) steps.push_back({std::string("工具：选择 ") + name, {0,"F9"}, [] { return true; }});
@@ -1103,7 +1127,17 @@ std::vector<FeatureTestStep> FeatureTestControls::GetAuditSteps() {
         if (!self) return false;
         const auto feature = self->m_impl->bindings.artifact.lock();
         const auto image = self->m_impl->session.GetImageDescriptor();
-        return feature && image && feature->GetState().correctedVolume == image->dataRevision;
+        if (!feature || !image || feature->GetState().correctedVolume != image->dataRevision) return false;
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        const auto parts = self->m_impl->bindings.parts.lock();
+        if (parts && parts->GetPartSetSnapshot() && !parts->GetPartSetSnapshot()->isStale) return false;
+#endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        const auto surface = self->m_impl->bindings.surface.lock();
+        if (surface && surface->GetSurfaceSnapshot()
+            && surface->GetState().stage != SurfaceDeterminationStage::Stale) return false;
+#endif
+        return true;
     }});
     steps.push_back({"工具：恢复校正输入", {0,"F10",true,false,true}, [weak = weak_from_this()] {
         const auto self = weak.lock();
