@@ -145,9 +145,22 @@ bool CommitDisplayResult(GapAnalysisService& service)
 {
     GapAnalysisResult candidate;
     if (!service.GetCompletedResult(candidate)) return false;
+    auto labels = candidate.payloads ? candidate.payloads->labels : nullptr;
+    auto mesh = candidate.payloads ? candidate.payloads->mesh : nullptr;
+    if (!candidate.payloads) {
+        // The legacy raw-input service has no graph publication payloads.
+        // Project its surface geometry, matching Gap's formal mesh contract;
+        // contour display arrays are not published Gap mesh attributes.
+        VtkDataBridge bridge;
+        labels = bridge.CreateLabelPayload(candidate.labelImage);
+        if (!candidate.voidMesh) return false;
+        auto geometry = vtkSmartPointer<vtkPolyData>::New();
+        geometry->SetPoints(candidate.voidMesh->GetPoints());
+        geometry->SetPolys(candidate.voidMesh->GetPolys());
+        mesh = bridge.CreateMeshPayload(geometry);
+    }
     TestDataPort committedData;
-    auto views = committedData.SetLabelAndMesh(
-        candidate.labelImage, candidate.voidMesh);
+    auto views = committedData.SetLabelAndMesh(std::move(labels), std::move(mesh));
     return views.first && views.second
         && service.SetCommittedView(
             std::move(views.first), std::move(views.second));

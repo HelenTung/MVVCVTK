@@ -46,6 +46,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <memory>
 #include <vector>
@@ -355,6 +356,49 @@ bool StartCachedProgramZeroCase()
     }
     queueFailure=0;isPassed=draw()&&isPassed;finish(30);
     isPassed=SetExpect(controller.GetRenderedNode()==701,"A later certified frame should restore picking after queue failure.")&&isPassed;
+
+    const auto identity=CropAlgorithm::GetIdentityMatrix();
+    auto translated=identity;translated[3]=10;
+    const auto expectBothDomains=[&] {
+        const auto precision=controller.GetPreviewPrecision({{0,0,0},{10,0,0}});
+        return precision.coordinates.isAvailable&&precision.keptCount==2&&precision.precisionNotMetCount==0;
+    };
+    isPassed=controller.StartRender(renderer)&&isPassed;
+    mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+    controller.SetLocalToInput(translated);
+    mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+    isPassed=controller.StopRender()&&isPassed;finish(31);
+    isPassed=SetExpect(expectBothDomains(),"All shader events must contribute their coordinate bounds.")&&isPassed;
+    controller.SetLocalToInput(identity);isPassed=draw()&&isPassed;
+    controller.SetLocalToInput(translated);isPassed=draw()&&isPassed;finish(32);
+    isPassed=SetExpect(expectBothDomains(),"Draw completions sharing one presented frame must union their domains.")&&isPassed;
+
+    auto unknown=identity;unknown[3]=std::numeric_limits<double>::quiet_NaN();
+    const auto drawWithUnknownEvent=[&] {
+        controller.SetLocalToInput(identity);
+        if(!controller.StartRender(renderer))return false;
+        controller.SetLocalToInput(unknown);
+        mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+        controller.SetLocalToInput(identity);
+        mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+        return controller.StopRender();
+    };
+    isPassed=drawWithUnknownEvent()&&isPassed;finish(33);
+    isPassed=SetExpect(controller.GetRenderedNode()==701&&!controller.GetCoordinatePrecision().isAvailable,
+        "Root draws with any unknown coordinate event must report unavailable precision.")&&isPassed;
+    auto nonzero=activePayload;nonzero.revision=72;nonzero.nodeId=702;
+    isPassed=controller.SetCropParams(nonzero)&&draw()&&controller.SetCropCommit(72)
+        &&controller.SetCropComplete(72)&&isPassed;finish(34);
+    auto staged=nonzero;staged.revision=73;staged.nodeId=703;
+    isPassed=controller.SetCropParams(staged)&&isPassed;
+    isPassed=drawWithUnknownEvent()&&isPassed;finish(35);
+    isPassed=SetExpect(controller.GetRenderedNode()==0&&!controller.GetCoordinatePrecision().isAvailable
+        &&!controller.GetPointVisible(nonzero.sourceStamp,{0,0,0}),
+        "Staging another crop must not hide an unknown active draw or allow later events to restore its proof.")&&isPassed;
+    controller.ClearCropStage(73);
+    isPassed=draw()&&isPassed;finish(36);
+    isPassed=SetExpect(controller.GetRenderedNode()==702&&controller.GetCoordinatePrecision().isAvailable,
+        "A later fully certified frame must recover after incomplete draw coordinates.")&&isPassed;
 
     mapper->RemoveObserver(captureTag);
     // controller 必须先在有效 context 上释放 texture；renderWindow 由声明逆序随后析构。

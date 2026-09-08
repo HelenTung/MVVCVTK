@@ -317,6 +317,7 @@ private:
     std::uint64_t m_drawRevision=0;
     CropNodeId m_drawNode=0;
     bool m_drawValid=false,m_drawIsCurrent=false;
+    bool m_drawFailed=false,m_drawCoordinatesIncomplete=false;
     RenderTargetKind m_targetKind;
     RenderEffectState m_state;
     Resource m_previous;
@@ -481,6 +482,7 @@ void CropShaderController::Impl::ClearDeferred(vtkOpenGLRenderWindow* context)
 bool CropShaderController::Impl::StartRender(vtkRenderer* renderer,bool isCurrent)
 {
     m_drawValid=false;m_drawIsCurrent=isCurrent;m_drawCoordinates={};
+    m_drawFailed=false;m_drawCoordinatesIncomplete=false;
     auto* context = renderer
         ? vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow())
         : nullptr;
@@ -531,7 +533,9 @@ bool CropShaderController::Impl::StopRender()
         const auto state=m_frameState;
         const std::weak_ptr<FrameState> weak=state;
         const auto revision=m_drawRevision,node=m_drawNode,generation=state->generation;
-        const auto payload=m_drawPayload;const bool drawValid=m_drawValid;const auto coordinates=m_drawCoordinates;
+        const auto payload=m_drawPayload;const bool drawValid=m_drawValid&&!m_drawFailed;
+        auto coordinates=m_drawCoordinates;
+        coordinates.precision.isAvailable=coordinates.precision.isAvailable&&!m_drawCoordinatesIncomplete;
         bool queued=false;
         try {queued=m_frameQueue([weak,revision,node,generation,payload,drawValid,coordinates](RenderFrameOutcome frame) {
             const auto state=weak.lock();if(!state)return;
@@ -544,7 +548,11 @@ bool CropShaderController::Impl::StopRender()
             else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;state->presented=payload;state->precision=coordinates.precision;state->bounds=coordinates.bounds;}
             else if(frame.frameId==state->frameId) {
                 state->precision.isAvailable=state->precision.isAvailable&&coordinates.precision.isAvailable;
-                for(int axis=0;axis<3;++axis)state->precision.inputError[axis]=std::max(state->precision.inputError[axis],coordinates.precision.inputError[axis]);
+                for(int axis=0;axis<3;++axis) {
+                    state->precision.inputError[axis]=std::max(state->precision.inputError[axis],coordinates.precision.inputError[axis]);
+                    state->bounds[axis*2]=std::min(state->bounds[axis*2],coordinates.bounds[axis*2]);
+                    state->bounds[axis*2+1]=std::max(state->bounds[axis*2+1],coordinates.bounds[axis*2+1]);
+                }
             }
         });}catch(...){}
         if(queued)++state->pending;
@@ -584,6 +592,7 @@ void CropShaderController::Impl::OnShader(
 bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program,bool isShaderEvent)
 {
     if (!program) {
+        if(isShaderEvent)m_drawFailed=true;
         return false;
     }
     m_program = program;
@@ -619,6 +628,7 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program,bool isSha
             "mvvcvtk_cropNodeCount", nodeCount);
     }
     if (!hasUniforms) {
+        if(isShaderEvent)m_drawFailed=true;
         m_state.status = RenderEffectStatus::Failed;
         m_state.failureReason = RenderEffectFailure::CompileFailed;
         m_state.message = "The crop shader program is missing a required uniform.";
@@ -628,9 +638,19 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program,bool isSha
     m_drawValid=true;m_drawPayload=m_active.payload;m_drawRevision=m_active.payload.revision;m_drawNode=m_active.payload.nodeId;
     if(coordinates.precision.isAvailable) {
         if(!m_drawCoordinates.precision.isAvailable)m_drawCoordinates=coordinates;
-        else for(int axis=0;axis<3;++axis)m_drawCoordinates.precision.inputError[axis]=
-            std::max(m_drawCoordinates.precision.inputError[axis],coordinates.precision.inputError[axis]);
+        else for(int axis=0;axis<3;++axis) {
+            m_drawCoordinates.precision.inputError[axis]=std::max(m_drawCoordinates.precision.inputError[axis],coordinates.precision.inputError[axis]);
+            m_drawCoordinates.bounds[axis*2]=std::min(m_drawCoordinates.bounds[axis*2],coordinates.bounds[axis*2]);
+            m_drawCoordinates.bounds[axis*2+1]=std::max(m_drawCoordinates.bounds[axis*2+1],coordinates.bounds[axis*2+1]);
+        }
+    } else if(isShaderEvent) {
+        // A later successful event cannot certify an earlier unknown draw.
+        // Cached-program sync before VBO creation is not itself a draw.
+        m_drawCoordinatesIncomplete=true;
+        if(m_active.payload.nodeCount)m_drawFailed=true;
     }
+    if(isShaderEvent&&m_staged.payload.revision&&m_active.payload.nodeCount
+        &&!GetPrecisionValid(m_active.payload,coordinates))m_drawFailed=true;
     if(m_staged.payload.revision&&!m_staged.texture&&m_state.status==RenderEffectStatus::Failed)return true;
     const auto& toValidate=m_staged.payload.revision?m_staged.payload:m_active.payload;
     if(toValidate.revision&&(coordinates.precision.isAvailable||isShaderEvent)) {
@@ -643,7 +663,7 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program,bool isSha
         if(!m_precisionValid) {
             m_state.status=RenderEffectStatus::Failed;m_state.failureReason=RenderEffectFailure::PrecisionNotMet;
             m_state.message="Crop preview cannot resolve this geometry within its coordinate arithmetic error bound.";
-            if(!m_staged.payload.revision)m_drawValid=false;
+            if(!m_staged.payload.revision){m_drawValid=false;if(isShaderEvent)m_drawFailed=true;}
             return false;
         }
     } else if(toValidate.nodeCount&&!coordinates.precision.isAvailable)return true;

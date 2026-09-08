@@ -180,10 +180,9 @@ public:
     }
 
     std::pair<VtkLabelMapSnapshot, VtkSurfaceMeshSnapshot>
-    SetLabelAndMesh(vtkImageData* labels, vtkPolyData* mesh)
+    SetLabelAndMesh(std::shared_ptr<const LabelMap3DPayload> labelPayload,
+        std::shared_ptr<const SurfaceMeshPayload> meshPayload)
     {
-        auto labelPayload = m_bridge.CreateLabelPayload(labels);
-        auto meshPayload = m_bridge.CreateMeshPayload(mesh);
         if (!labelPayload || !meshPayload) return {};
         const auto labelEntity = CreateDataEntityId();
         const auto meshEntity = CreateDataEntityId();
