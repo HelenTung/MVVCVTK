@@ -1,3 +1,4 @@
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 #include "../TestDataPort.h"
 
@@ -259,15 +260,7 @@ void SendTicks(
     const HostRenderViewEndpoint& endpoint,
     const int tickCount)
 {
-    int timerId = endpoint.interactor->GetTimerEventId();
-    if (timerId == 0) {
-        for (int candidate = 1; candidate <= 64; ++candidate) {
-            if (endpoint.interactor->GetTimerDuration(candidate) != 0) {
-                timerId = candidate;
-                break;
-            }
-        }
-    }
+    int timerId = GetTestTimerId(endpoint.interactor);
     if (timerId == 0) return;
     for (int tick = 0; tick < tickCount; ++tick) {
         endpoint.interactor->InvokeEvent(

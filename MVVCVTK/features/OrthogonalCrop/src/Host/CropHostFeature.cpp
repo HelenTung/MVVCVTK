@@ -146,6 +146,7 @@ class CropHostFeature::Impl::Document final {
 public:
     struct CompleteItem final {
         std::optional<CropBuildRequest> request;
+        std::optional<DataBinding> primaryBinding;
         CropResultId resultId=0;
         bool isDelivered=false;
         CropBuildCallback onComplete;
@@ -573,6 +574,9 @@ bool CropHostFeature::Impl::Document::StartCrop(
         return false;
     }
     const auto targetViews = m_views->GetViews(requestedTargets);
+    // Legacy widget commands resume the established target only. Cross-document
+    // source/view changes use Create/Activate's atomic data/effect candidate.
+    if(m_activeTarget&&!GetTargetsSame(m_activeTarget,target))return false;
     auto input = m_bridge->GetSource().data ? std::optional<CropInputSnapshot>{m_bridge->GetSource()} : GetCropInput(target);
     if (targetViews.empty() || !input || !input->binding || input->binding->name!=target.inputBinding) {
         return false;
@@ -608,21 +612,25 @@ bool CropHostFeature::Impl::Document::StartCrop(
             == activeViewIds.end()) {
         activeViewIds.push_back(referenceView->view.id);
     }
+    const auto referenceStamp=referencePort->GetRenderInputStamp();
+    const bool needsRoot=!referenceStamp||referenceStamp->dataRevision!=input->data->self
+        ||std::any_of(request.targetServices.begin(),request.targetServices.end(),[&](const auto& service) {
+        const auto stamp=service->GetRenderInputStamp();return !stamp||stamp->dataRevision!=input->data->self;
+    });
+    // Widget admission never performs a data transition. Create/Activate or an
+    // explicit node preview prepares Root and all required views beforehand.
+    if(needsRoot)return false;
+    const auto previousActive=m_bridge->GetCropActive()?m_activeViewIds:std::vector<std::string>{};
+    if(!SetActiveViews(activeViewIds))return false;
+    const bool hadDocument=m_bridge->GetCropHistory().documentId!=0;
     const bool isStarted = m_bridge->StartView(
         request, std::move(*input));
     if (isStarted) {
-        if (!SetActiveViews(activeViewIds)) {
-            (void)m_bridge->ExitCrop();
-            (void)m_bridge->ClearBindings();
-            return false;
-        }
         m_activeTarget = target;
         m_activeViewIds = std::move(activeViewIds);
-        const auto source=m_bridge->GetSource();
-        const bool needsRoot=std::any_of(request.targetServices.begin(),request.targetServices.end(),[&](const auto& service) {
-            const auto input=service->GetRenderInputStamp();return !input||input->dataRevision!=source.data->self;
-        });
-        if(needsRoot&&!m_sourceTransition&&!StartSourcePreview(false,true))return false;
+    } else {
+        (void)SetActiveViews(previousActive);
+        if(!hadDocument){(void)m_bridge->ClearBindings();(void)m_bridge->ClearDocument();}
     }
     return isStarted;
 }
@@ -742,6 +750,13 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         return result;
     }
     DataTransaction transaction;
+    if(completeItem->primaryBinding) {
+        const auto& binding=*completeItem->primaryBinding;
+        DataExpectation expected;expected.kind=DataExpectationKind::Binding;
+        expected.binding=binding.name;expected.expectedBindingRevision=binding.revision;
+        expected.isTargetChecked=true;expected.expectedTarget=binding.target;
+        transaction.expectations.push_back(std::move(expected));
+    }
     transaction.outputs = {
         DataRevisionDraft{
             recipeEntity, 0, DataTypes::roiGeometry,
@@ -816,8 +831,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         // No observable Root binding change may precede the retirement checks.
         if ((!source.image&&!source.mesh) || m_sourceTransition) return failed(CropFailure::PreviewNotReady);
         const auto graph = m_data->GetDataGraph();
-        const auto binding = m_data->GetDataBinding(graph, primaryVolumeBinding)
-            .value_or(DataBinding{std::string(primaryVolumeBinding)});
+        const auto binding = completeItem->primaryBinding.value_or(DataBinding{std::string(primaryVolumeBinding)});
         const auto id = GetNextSceneRequestId();
         if (!id || binding.revision == std::numeric_limits<DataBindingRevision>::max())
             return failed(CropFailure::ResourceLimit);
@@ -1174,6 +1188,8 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     const auto state = m_completeState;
     const auto item = completeItem?std::move(completeItem):std::make_shared<CompleteItem>();
     item->resultId=building.resultId;
+    item->primaryBinding=m_data->GetDataBinding(m_data->GetDataGraph(),primaryVolumeBinding)
+        .value_or(DataBinding{std::string(primaryVolumeBinding)});
     item->onComplete = std::move(onComplete);
     {
         const std::lock_guard<std::mutex> lock(state->mutex);

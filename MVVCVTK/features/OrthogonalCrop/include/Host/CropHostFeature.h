@@ -37,6 +37,8 @@ struct CropHostTarget {
     HostViewTargets targetViews;
 };
 
+// Widget actions resume an established target with Root already displayed.
+// Use Create/Activate for source/view changes and Select for preview changes.
 struct CropHostRequest {
     CropHostAction action = CropHostAction::None;
     std::optional<CropHostTarget> target;

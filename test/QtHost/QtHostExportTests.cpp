@@ -1,3 +1,4 @@
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
 #include "Host/VtkAppHostSession.h"
@@ -54,15 +55,7 @@ int GetExportFailCount()
     const auto* endpoint = unicodeSession.GetPrimaryEndpoint();
     const auto sendTimer = [endpoint]() {
         if (!endpoint || !endpoint->interactor) return false;
-        int timerId = endpoint->interactor->GetTimerEventId();
-        if (timerId == 0) {
-            for (int candidate = 1; candidate <= 64; ++candidate) {
-                if (endpoint->interactor->GetTimerDuration(candidate) != 0) {
-                    timerId = candidate;
-                    break;
-                }
-            }
-        }
+        int timerId = GetTestTimerId(endpoint->interactor);
         if (timerId == 0) return false;
         endpoint->interactor->InvokeEvent(
             vtkCommand::TimerEvent, &timerId);

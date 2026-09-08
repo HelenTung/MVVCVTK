@@ -198,7 +198,7 @@ bool GetPrecisionValid(const CropShaderPayload& payload,const CoordinateFrame& c
             std::abs(coordinates.bounds[axis*2+1]-domainCenter[axis]))+coordinates.precision.inputError[axis],INFINITY);
     }
     for(std::size_t index=0;index<payload.nodeCount;++index) {
-        const auto& geometry=payload.predicateTable->geometry[index];bool hasCertifiedCorner=false;
+        const auto& geometry=payload.predicateTable->geometry[index];
         // Domain interval checks arithmetic range, not uniform sign: surfaces
         // legitimately cross the boundary band. Point queries certify signs.
         if(geometry.GetFloatBounds(domainCenter,domainError).classification==CropPointClassification::PrecisionNotMet)return false;
@@ -206,10 +206,12 @@ bool GetPrecisionValid(const CropShaderPayload& payload,const CoordinateFrame& c
             CropVectorDouble3Array point{};for(int axis=0;axis<3;++axis)point[axis]=coordinates.bounds[axis*2+((corner>>axis)&1)];
             const auto classification=geometry.GetFloatBounds(point,coordinates.precision.inputError).classification;
             if(classification==CropPointClassification::PrecisionNotMet)return false;
-            hasCertifiedCorner=hasCertifiedCorner||classification!=CropPointClassification::BoundaryBand;
         }
         const auto& operation=geometry.GetOperation();CropVectorDouble3Array center{};
-        if(operation.geometryType==CropShape::Plane){if(!hasCertifiedCorner)return false;continue;}
+        // A valid plane may coincide with an entire 2-D slice. Its samples are
+        // then BoundaryBand, not an unrepresentable geometry. Range/encoding
+        // checks still apply; point diagnostics retain their uncertainty.
+        if(operation.geometryType==CropShape::Plane)continue;
         if(operation.geometryType==CropShape::Box)center={operation.boxToInputModelMatrix[3],operation.boxToInputModelMatrix[7],operation.boxToInputModelMatrix[11]};
         else center=operation.centerInInputModel;
         if(Contains(coordinates.bounds,center)) {

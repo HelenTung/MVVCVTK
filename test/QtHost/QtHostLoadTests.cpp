@@ -1,3 +1,4 @@
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
 #include "App/AppState.h"
@@ -2330,15 +2331,7 @@ bool GetHostResultValid()
     timer.targetView.viewId = "load-primary";
     if (!session.AttachTimer(timer) || !session.Start()) return false;
     const auto sendTimer = [&]() {
-        int timerId = endpoint->interactor->GetTimerEventId();
-        if (timerId == 0) {
-            for (int candidate = 1; candidate <= 64; ++candidate) {
-                if (endpoint->interactor->GetTimerDuration(candidate) != 0) {
-                    timerId = candidate;
-                    break;
-                }
-            }
-        }
+        int timerId = GetTestTimerId(endpoint->interactor);
         if (timerId == 0) return false;
         endpoint->interactor->InvokeEvent(
             vtkCommand::TimerEvent, &timerId);

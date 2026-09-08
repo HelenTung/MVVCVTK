@@ -1,3 +1,4 @@
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
 #include "App/AppState.h"
@@ -172,15 +173,7 @@ bool SendTimer(
     const int idOffset = 0)
 {
     if (!interactor) return false;
-    int timerId = interactor->GetTimerEventId();
-    if (timerId == 0) {
-        for (int candidate = 1; candidate <= 64; ++candidate) {
-            if (interactor->GetTimerDuration(candidate) != 0) {
-                timerId = candidate;
-                break;
-            }
-        }
-    }
+    int timerId = GetTestTimerId(interactor);
 
     if (timerId == 0) return false;
     timerId += idOffset;

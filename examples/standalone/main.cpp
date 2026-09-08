@@ -55,6 +55,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -566,12 +567,13 @@ namespace {
             << "\n【裁切：先预览，再生成并选择算法输入】\n"
             << "  预览：O 方框、P 平面、Shift+O 有限圆柱、Shift+P 球体；按 1 保留内部，按 2 移除内部，然后拖动控件。\n"
             << "  0：将当前裁切编辑模式设为不移除；它不会清空已提交的裁切历史。\n"
-            << "  4 / 5：撤销/重做当前裁切历史中的一步；Alt+0..9：跳到已存在的对应历史节点。\n"
-            << "  历史跳转只改变裁切步骤；恢复裁切源输入使用 Ctrl+9。\n"
+            << "  4 / 5：翻阅历史树的上一页/下一页；Alt+1..9：预览终端本页列出的明确节点。\n"
+            << "  Alt+0：只高亮 Root，不改预览或结果；Ctrl+9：返回源数据，等待结果实际释放。\n"
+            << "  Ctrl+Delete：修剪高亮子树；Alt+Delete：修剪后代；Shift+Delete：仅保留高亮路径。受保护节点会拒绝。\n"
             << "  Escape：退出裁切控件，已生效的裁切仍保留；退出控件不等于恢复完整输入。\n"
-            << "  Ctrl+7：根据已提交的裁切步骤生成结果；选择保留/移除模式，拖动后松开鼠标并等待提交。\n"
+            << "  Ctrl+7：对高亮的正式节点生成结果；选择保留/移除模式，拖动后松开鼠标并等待提交。\n"
             << "  Ctrl+8：生成成功后，将裁切结果设为当前输入，后续分割/网格/校正才会读取该结果。\n"
-            << "  Ctrl+9：重新选择本次裁切记录的源数据；需要该源版本仍可用。\n"
+            << "  Ctrl+O：从当前输入创建独立文档；Ctrl+Tab：切换文档；Ctrl+Shift+Delete：关闭文档。\n"
             << "  兼容快捷键：Ctrl+3 等同 Ctrl+7，普通数字 6 等同 Ctrl+9。\n"
             << "  例：O → 1 → 拖动右侧控件 → Ctrl+7 → 等待完成 → Ctrl+8 → U → B。\n"
             << "  裁切结果保留原网格尺寸，并用有效性掩码记录保留区域；不会按框大小减少整卷内存。\n"
@@ -665,7 +667,11 @@ namespace {
                 HostKeyChord{ '6', {}, false, true },
                 HostKeyChord{ '7', {}, false, true },
                 HostKeyChord{ '8', {}, false, true },
-                HostKeyChord{ '9', {}, false, true }
+                HostKeyChord{ '9', {}, false, true },
+                HostKeyChord{ 'o', {}, true }, HostKeyChord{ 0, "Tab", true },
+                HostKeyChord{ 0, "Delete", true, false, true },
+                HostKeyChord{ 0, "Delete", true }, HostKeyChord{ 0, "Delete", false, true },
+                HostKeyChord{ 0, "Delete", false, false, true }
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
                 , HostKeyChord{ 'j' }
                 , HostKeyChord{ 'j', {}, false, false, true }
@@ -716,7 +722,8 @@ namespace {
             }
             m_isKeyDown.fill(false);
             m_appKeyDown.fill(false);
-            m_cropStatus.clear();
+            m_cropStatus.clear();m_cropRequestPending=false;m_cropUiDocument=0;m_cropHighlighted=0;
+            m_cropPageNodes.clear();m_cropPageStarts.clear();
             m_host.reset();
             m_data.reset();
             m_isAttached = false;
@@ -791,9 +798,10 @@ namespace {
             Help, Data, Labels, Scenes, FitViews,
             SurfaceStart, SurfaceClear, SurfaceStop,
             CropBox, CropPlane, CropCylinder, CropSphere, CropNoMode, CropKeepMode, CropRemoveMode,
-            CropPrevious, CropNext, CropBuildAlias, CropRestoreAlias, CropExit,
+            CropPagePrevious, CropPageNext, CropBuildAlias, CropRestoreAlias, CropExit,
             CropNode0, CropNode1, CropNode2, CropNode3, CropNode4,
             CropNode5, CropNode6, CropNode7, CropNode8, CropNode9,
+            CropCreate, CropDocumentNext, CropClose, CropPruneSubtree, CropPruneDescendants, CropPruneOutside,
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
             RotationTool, RotationPlus, RotationMinus, RotationUndo,
 #endif
@@ -1174,67 +1182,149 @@ namespace {
             return isAccepted;
         }
 
-        void SendCropStatus()
+        static const char* GetCropFailureText(CropFailure failure)
         {
-            const auto crop = m_cropFeature.lock();
-            if (!m_isAttached || !crop || !m_host) return;
-            const auto state = crop->GetState();
-            if (!state.isActive) {
-                m_cropStatus.clear();
-                return;
+            switch(failure) {
+            case CropFailure::None:return "完成";
+            case CropFailure::Busy:return "请等待当前任务完成";
+            case CropFailure::StateVersionMismatch:return "历史已更新，请重新选择";
+            case CropFailure::PublishedResultDependency:return "节点仍被结果保护";
+            case CropFailure::ReturnToSourceRequired:return "请先返回源数据并释放结果";
+            case CropFailure::ResultInUse:return "结果仍被其他任务或读者使用";
+            case CropFailure::ResultReleasing:return "正在等待结果资源释放";
+            case CropFailure::ResourceLimit:return "达到资源预算上限";
+            case CropFailure::PrecisionNotMet:return "无法满足指定精度";
+            case CropFailure::NoCropOperations:return "请选择一个裁切节点";
+            case CropFailure::EmptyResult:return "裁切结果为空，原结果保留";
+            case CropFailure::Cancelled:return "已取消";
+            default:return "请求失败，请检查所选文档和节点";
             }
-            const auto& history = state.history;
-            const char* mode = !history.isEditing ? "已冻结"
-                : history.editMode == CropRemovalMode::KeepInside ? "保留内部"
-                : history.editMode == CropRemovalMode::RemoveInside ? "移除内部" : "空闲";
+        }
+
+        CropHostTarget GetCropTarget() const
+        {
+            CropHostTarget target;target.inputBinding=std::string(primaryVolumeBinding);
+            target.referenceView=m_isoTarget;target.targetViews=m_inputViews;return target;
+        }
+
+        void SendCropStatus(bool printPage=false)
+        {
+            const auto crop=m_cropFeature.lock();if(!m_isAttached||!crop||!m_host)return;
+            const auto state=crop->GetState();const auto history=crop->GetHistory(0,0,1);
+            if(!history.documentId){m_cropUiDocument=0;m_cropHighlighted=0;m_cropPageNodes.clear();m_cropStatus.clear();return;}
+            if(m_cropUiDocument!=history.documentId||m_cropUiRevision!=history.stateRevision) {
+                if(m_cropUiDocument!=history.documentId||m_cropHighlighted==m_cropLastApplied)m_cropHighlighted=history.appliedHead;
+                m_cropLastApplied=history.appliedHead;
+                m_cropUiDocument=history.documentId;m_cropUiRevision=history.stateRevision;
+                m_cropPageStarts={history.rootNodeId};m_cropPageIndex=0;printPage=true;
+                if(m_cropHighlighted) {
+                    const auto selected=crop->GetHistory(history.documentId,m_cropHighlighted-1,1);
+                    if(selected.nodes.empty()||selected.nodes.front().nodeId!=m_cropHighlighted)m_cropHighlighted=history.appliedHead;
+                }
+            }
+            const auto page=crop->GetHistory(history.documentId,m_cropPageStarts[m_cropPageIndex],9);
+            m_cropPageNodes=page.nodes;m_cropPageNext=page.nextPageAfter;
             std::ostringstream status;
-            status << "裁剪已激活 " << history.nodeCount << '/' << history.operationCount
-                << " | 文档 " << history.documentId << " | 节点 " << history.appliedHead
-                << " | " << mode;
-            if (history.hasEditableOp) status << " | 可编辑";
-            if (status.str() != m_cropStatus && SetDemoStatus(status.str())) {
-                m_cropStatus = status.str();
+            status<<"裁切文档 "<<history.documentId<<" | 高亮 "<<m_cropHighlighted<<" | 预览 "<<history.appliedHead;
+            for(const auto& result:history.results)if(result.status==CropResultStatus::Published)status<<" | 结果节点 "<<result.nodeId;
+            if(state.documentStatus==CropDocumentStatus::Building)status<<" | 生成中";
+            if(state.documentStatus==CropDocumentStatus::Returning||state.documentStatus==CropDocumentStatus::Releasing||state.documentStatus==CropDocumentStatus::Closing)
+                status<<" | 等待释放，阻塞 "<<state.blockers.size();
+            status<<" | 历史页 "<<(m_cropPageIndex+1)<<"，4/5 翻页，Alt+数字选节点";
+            if(status.str()!=m_cropStatus&&SetDemoStatus(status.str()))m_cropStatus=status.str();
+            if(!printPage)return;
+            std::cout<<"\n[裁切历史] 文档 "<<history.documentId<<"，共 "<<history.totalNodeCount<<" 节点，第 "<<(m_cropPageIndex+1)<<" 页\n"
+                <<"  Alt+0  Root #"<<history.rootNodeId<<"（仅高亮；Ctrl+9 才返回源数据）\n";
+            for(std::size_t index=0;index<page.nodes.size();++index) {
+                const auto& node=page.nodes[index];const char* shape="Root";
+                if(node.operation){switch(node.operation->geometryType){case CropShape::Box:shape="盒";break;case CropShape::Plane:shape="平面";break;
+                    case CropShape::Cylinder:shape="圆柱";break;case CropShape::Sphere:shape="球";break;}}
+                std::cout<<"  Alt+"<<(index+1)<<"  #"<<node.nodeId<<" <- #"<<node.parentNodeId<<"  "<<shape
+                    <<(node.nodeId==m_cropHighlighted?" [高亮]":"")<<(node.nodeId==history.appliedHead?" [预览]":"")<<'\n';
             }
+            std::cout<<"  每行列出父节点；所有分支均可翻页选择。Ctrl+Tab 切换文档。\n"<<std::flush;
         }
 
-        bool SetCropData(const bool useResult)
+        bool ChangeCropPage(bool next)
         {
-            const auto crop = m_cropFeature.lock();
-            const auto descriptor = m_session.GetImageDescriptor();
-            if (!crop || !descriptor) return false;
-            const auto state = crop->GetState();
-            HostDataSelectRequest request;
-            request.dataRevision = useResult ? state.outputRevision : state.sourceRevision;
-            request.expectedBindingRevision = descriptor->bindingRevision;
-            const bool isSucceeded = m_session.SendRequest(std::move(request));
-            (void)SetDemoStatus(isSucceeded
-                ? (useResult ? "已选择裁剪结果" : "已选择裁剪源数据")
-                : "数据选择被拒绝");
-            return isSucceeded;
+            SendCropStatus();if(!m_cropUiDocument)return false;
+            if(next){if(!m_cropPageNext)return false;
+                if(m_cropPageStarts.size()==m_cropPageIndex+1)m_cropPageStarts.push_back(m_cropPageNext);
+                else m_cropPageStarts[m_cropPageIndex+1]=m_cropPageNext;++m_cropPageIndex;}
+            else {if(!m_cropPageIndex)return false;--m_cropPageIndex;}
+            SendCropStatus(true);return true;
         }
 
-        bool SelectCropDepth(std::size_t depth)
+        bool SelectCropRow(std::size_t row)
         {
-            const auto crop=m_cropFeature.lock();if(!crop)return false;
-            const auto history=crop->GetHistory(0,0,0);
-            std::vector<CropNodeId> path;
-            auto node=history.appliedHead;
-            while(node) {
-                const auto found=std::find_if(history.nodes.begin(),history.nodes.end(),[&](const auto& entry){return entry.nodeId==node;});
-                if(found==history.nodes.end())return false;
-                path.push_back(node);node=found->parentNodeId;
-            }
-            std::reverse(path.begin(),path.end());
-            while(path.size()<=depth) {
-                std::vector<CropNodeId> children;
-                for(const auto& entry:history.nodes)if(!path.empty()&&entry.parentNodeId==path.back())children.push_back(entry.nodeId);
-                if(children.size()!=1) { (void)SetDemoStatus("请通过历史节点选择明确的分支");return false; }
-                path.push_back(children.front());
-            }
-            CropEditRequest request;request.documentId=history.documentId;
+            const auto crop=m_cropFeature.lock();if(!crop||m_cropRequestPending)return false;
+            SendCropStatus();const auto history=crop->GetHistory(0,0,1);if(!history.documentId)return false;
+            if(!row){m_cropHighlighted=history.rootNodeId;SendCropStatus(true);return true;}
+            if(row>m_cropPageNodes.size())return false;
+            const auto node=m_cropPageNodes[row-1].nodeId;
+            CropEditRequest request;request.documentId=history.documentId;request.nodeId=node;request.kind=CropEditKind::Select;
             request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;
-            request.kind=CropEditKind::Select;request.nodeId=path[depth];
-            return crop->SendRequest(std::move(request)).isAccepted;
+            const auto weak=weak_from_this();const auto accepted=crop->SendRequest(request,[weak,node](auto outcome) {
+                if(const auto owner=weak.lock()){owner->m_cropRequestPending=false;
+                    if(outcome.status==CropEditStatus::Succeeded)owner->m_cropHighlighted=node;
+                    owner->SendCropStatus(true);(void)owner->SetDemoStatus(GetCropFailureText(outcome.failureReason));}
+            });
+            m_cropRequestPending=accepted.isAccepted;
+            if(!accepted)(void)SetDemoStatus(GetCropFailureText(accepted.failureReason));return accepted.isAccepted;
+        }
+
+        bool SendCropDocument(CropDocumentAction action,std::optional<CropHostAction> after={},std::optional<CropRemovalMode> afterMode={})
+        {
+            const auto crop=m_cropFeature.lock();if(!crop||!m_data||m_cropRequestPending)return false;
+            const auto history=crop->GetHistory(0,0,1);
+            CropDocumentRequest request;request.action=action;request.requestId=CropHostFeature::CreateRequestId();
+            if(action==CropDocumentAction::CreateDocument) {
+                const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),primaryVolumeBinding);
+                if(!binding||!binding->target)return false;request.sourceRevision=*binding->target;request.target=GetCropTarget();
+            } else {
+                request.documentId=history.documentId;request.expectedRevision=history.stateRevision;
+                if(action==CropDocumentAction::ActivateDocument) {
+                    const auto docs=crop->GetDocuments();if(docs.empty()||(docs.size()==1&&docs.front()==history.documentId))return false;
+                    const auto found=std::find(docs.begin(),docs.end(),history.documentId);
+                    request.documentId=found==docs.end()||found+1==docs.end()?docs.front():*(found+1);
+                    request.expectedRevision=crop->GetHistory(request.documentId,0,1).stateRevision;request.target=GetCropTarget();
+                }
+            }
+            const auto weak=weak_from_this();const auto accepted=crop->SendRequest(request,[weak,after,afterMode](auto outcome) {
+                if(const auto owner=weak.lock()) {owner->m_cropRequestPending=false;
+                    if(!owner->m_isAttached)return;owner->SendCropStatus(true);
+                    (void)owner->SetDemoStatus(GetCropFailureText(outcome.failureReason));
+                    if(after&&outcome.status==CropEditStatus::Succeeded)(void)owner->SendCrop(*after,afterMode);
+                }
+            });
+            m_cropRequestPending=accepted.isAccepted;
+            if(!accepted)(void)SetDemoStatus(GetCropFailureText(accepted.failureReason));return accepted.isAccepted;
+        }
+
+        bool PruneCrop(CropPruneScope scope)
+        {
+            const auto crop=m_cropFeature.lock();if(!crop||m_cropRequestPending)return false;SendCropStatus();
+            const auto history=crop->GetHistory(0,0,1);if(!history.documentId||!m_cropHighlighted)return false;
+            CropEditRequest request;request.kind=CropEditKind::Prune;request.documentId=history.documentId;
+            request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;
+            request.prune.scope=scope;request.prune.nodeIds={m_cropHighlighted};request.prune.fallback=CropPruneFallback::NearestSurvivingAncestor;
+            const auto impact=crop->GetPruneImpact(history.documentId,request.prune);
+            if(impact.failureReason!=CropFailure::None){(void)SetDemoStatus(GetCropFailureText(impact.failureReason));return false;}
+            const auto weak=weak_from_this();const auto accepted=crop->SendRequest(request,[weak](auto result) {
+                if(const auto owner=weak.lock()){owner->m_cropRequestPending=false;owner->SendCropStatus(true);
+                    (void)owner->SetDemoStatus(GetCropFailureText(result.failureReason));}
+            });
+            m_cropRequestPending=accepted.isAccepted;if(!accepted)(void)SetDemoStatus(GetCropFailureText(accepted.failureReason));return accepted.isAccepted;
+        }
+
+        bool SetCropData(bool useResult)
+        {
+            if(!useResult)return SendCropDocument(CropDocumentAction::ReturnToSource);
+            const auto crop=m_cropFeature.lock();const auto descriptor=m_session.GetImageDescriptor();
+            if(!crop||!descriptor||m_cropRequestPending)return false;
+            HostDataSelectRequest request;request.dataRevision=crop->GetState().outputRevision;request.expectedBindingRevision=descriptor->bindingRevision;
+            const bool accepted=m_session.SendRequest(std::move(request));
+            (void)SetDemoStatus(accepted?"已选择裁切结果":"数据选择被拒绝");return accepted;
         }
 
         bool SendCrop(
@@ -1242,7 +1332,23 @@ namespace {
             std::optional<CropRemovalMode> removalMode = {})
         {
             const auto crop = m_cropFeature.lock();
-            if (!crop) return false;
+            if (!crop || m_cropRequestPending) return false;
+            const auto history=crop->GetHistory(0,0,1);
+            if(!history.documentId&&action!=CropHostAction::Exit)
+                return SendCropDocument(CropDocumentAction::CreateDocument,action,removalMode);
+            if(action!=CropHostAction::Exit&&action!=CropHostAction::BuildResult&&m_data) {
+                const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),primaryVolumeBinding);
+                if(binding&&binding->target!=std::optional<DataRevisionRef>{history.sourceRevision}) {
+                    if(history.appliedHead==history.rootNodeId)return SendCropDocument(CropDocumentAction::ReturnToSource,action,removalMode);
+                    CropEditRequest select;select.documentId=history.documentId;select.nodeId=history.appliedHead;
+                    select.requestId=CropHostFeature::CreateRequestId();select.expectedRevision=history.stateRevision;
+                    const auto weak=weak_from_this();const auto accepted=crop->SendRequest(select,[weak,action,removalMode](auto outcome) {
+                        if(const auto owner=weak.lock()){owner->m_cropRequestPending=false;if(!owner->m_isAttached)return;
+                            if(outcome.status==CropEditStatus::Succeeded)(void)owner->SendCrop(action,removalMode);
+                            else (void)owner->SetDemoStatus(GetCropFailureText(outcome.failureReason));}
+                    });m_cropRequestPending=accepted.isAccepted;return accepted.isAccepted;
+                }
+            }
             CropHostRequest request;
             request.action = action;
             request.removalMode = removalMode;
@@ -1277,7 +1383,14 @@ namespace {
                     std::cout << "[正交裁剪] " << status.str() << '\n';
                 };
             }
-            const bool isAccepted = crop->SendRequest(std::move(request), std::move(onComplete));
+            bool isAccepted=false;
+            if(action==CropHostAction::BuildResult) {
+                SendCropStatus();CropBuildRequest build;build.documentId=history.documentId;
+                build.nodeId=m_cropHighlighted?m_cropHighlighted:history.appliedHead;
+                build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=history.stateRevision;
+                const auto accepted=crop->SendRequest(build,std::move(onComplete));isAccepted=accepted.isAccepted;
+                if(!accepted)(void)SetDemoStatus(GetCropFailureText(accepted.failureReason));
+            } else isAccepted=crop->SendRequest(std::move(request),std::move(onComplete));
             std::cout << "[正交裁剪] 操作=" << static_cast<int>(action)
                 << " 已接受=" << isAccepted << '\n';
             if (!isAccepted) (void)SetDemoStatus("裁剪请求被拒绝");
@@ -1592,15 +1705,21 @@ namespace {
             case ControlAction::CropNoMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::None);
             case ControlAction::CropKeepMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::KeepInside);
             case ControlAction::CropRemoveMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::RemoveInside);
-            case ControlAction::CropPrevious: return SendCrop(CropHostAction::Previous);
-            case ControlAction::CropNext: return SendCrop(CropHostAction::Next);
+            case ControlAction::CropPagePrevious: return ChangeCropPage(false);
+            case ControlAction::CropPageNext: return ChangeCropPage(true);
             case ControlAction::CropExit: return SendCrop(CropHostAction::Exit);
+            case ControlAction::CropCreate: return SendCropDocument(CropDocumentAction::CreateDocument);
+            case ControlAction::CropDocumentNext: return SendCropDocument(CropDocumentAction::ActivateDocument);
+            case ControlAction::CropClose: return SendCropDocument(CropDocumentAction::CloseDocument);
+            case ControlAction::CropPruneSubtree: return PruneCrop(CropPruneScope::Subtrees);
+            case ControlAction::CropPruneDescendants: return PruneCrop(CropPruneScope::Descendants);
+            case ControlAction::CropPruneOutside: return PruneCrop(CropPruneScope::OutsidePaths);
             case ControlAction::CropNode0: case ControlAction::CropNode1:
             case ControlAction::CropNode2: case ControlAction::CropNode3:
             case ControlAction::CropNode4: case ControlAction::CropNode5:
             case ControlAction::CropNode6: case ControlAction::CropNode7:
             case ControlAction::CropNode8: case ControlAction::CropNode9:
-                return SelectCropDepth(
+                return SelectCropRow(
                     static_cast<std::size_t>(action) - static_cast<std::size_t>(ControlAction::CropNode0));
             default:
                 return false;
@@ -1747,6 +1866,13 @@ namespace {
         HostViewTargets m_inputViews;
         std::weak_ptr<CropHostFeature> m_cropFeature;
         std::string m_cropStatus;
+        CropDocumentId m_cropUiDocument=0;
+        CropNodeId m_cropHighlighted=0,m_cropPageNext=0,m_cropLastApplied=0;
+        std::uint64_t m_cropUiRevision=0;
+        std::size_t m_cropPageIndex=0;
+        std::vector<CropNodeId> m_cropPageStarts;
+        std::vector<CropNodeSnapshot> m_cropPageNodes;
+        bool m_cropRequestPending=false;
         std::uint64_t m_controlRevision = 0;
         std::weak_ptr<GapHostFeature> m_gapFeature;
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
@@ -2697,8 +2823,10 @@ int main(int argc, char* argv[])
 #endif
     auto featureTools = std::make_shared<FeatureTestControls>(session, toolBindings, toolOptions, allViews);
     features.push_back(featureTools);
+    std::string cropAuditFailure;
     auto demoAudit = std::make_shared<DemoAuditFeature>(session);
     demoAudit->SetFailureCheck([&]() -> std::string {
+        if(!cropAuditFailure.empty())return cropAuditFailure;
         if (isFeatureAudit && !featureTools->GetFailure().empty()) return featureTools->GetFailure();
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         if (surfaceFeature->GetState().stage == SurfaceDeterminationStage::Failed)
@@ -2787,6 +2915,69 @@ int main(int argc, char* argv[])
         demoAudit->AddStep("裁剪移除模式", {'2'}, [cropFeature] {
             return cropFeature->GetState().history.editMode == CropRemovalMode::RemoveInside;
         });
+        struct CropUiAudit {
+            CropDocumentId document=0;CropNodeId root=0;std::vector<CropNodeId> nodes;
+            CropRequestId pending=0;std::uint64_t revision=0;CropNodeId applied=0;int polls=0;
+            CropVectorDouble3Array center{};
+        };
+        const auto cropUi=std::make_shared<CropUiAudit>();
+        demoAudit->AddStep("准备裁切分支", {0,"F2"}, [cropFeature,cropUi,&cropAuditFailure] {
+            const auto history=cropFeature->GetHistory(0,0,1);
+            if(++cropUi->polls==1||cropUi->polls==100)std::cout<<"[CropAudit] setup doc="<<history.documentId<<" revision="<<history.stateRevision
+                <<" pending="<<cropFeature->GetState().history.pendingRequestCount<<" request="<<cropUi->pending<<" nodes="<<cropUi->nodes.size()<<std::endl;
+            if(!cropUi->document) {
+                const auto archive=cropFeature->GetArchive(history.documentId);if(!archive||!archive->imageGeometry)return false;
+                cropUi->document=history.documentId;cropUi->root=history.rootNodeId;const auto& g=*archive->imageGeometry;cropUi->center=g.origin;
+                for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+                    cropUi->center[row]+=g.direction[row*3+column]*g.spacing[column]*(0.5*g.extent[2*column]+0.5*g.extent[2*column+1]);
+            }
+            if(cropUi->pending) {
+                const auto out=cropFeature->GetOutcome(cropUi->document,cropUi->pending);
+                if(!out||out->status==CropEditStatus::Queued)return false;
+                if(out->status!=CropEditStatus::Succeeded){cropAuditFailure="裁切分支准备失败："+std::to_string(static_cast<int>(out->failureReason));return false;}
+                cropUi->nodes.push_back(out->nodeId);cropUi->pending=0;
+            }
+            if(cropUi->nodes.size()==12){cropUi->revision=history.stateRevision;cropUi->applied=history.appliedHead;return true;}
+            CropEditRequest append;append.documentId=cropUi->document;append.requestId=CropHostFeature::CreateRequestId();
+            append.expectedRevision=history.stateRevision;append.kind=CropEditKind::Append;append.nodeId=cropUi->root;
+            append.operation.geometryType=CropShape::Plane;append.operation.planeNormalInInputModel={1,0,0};
+            append.operation.planeCenterInInputModel=cropUi->center;append.operation.planeCenterInInputModel[0]+=cropUi->nodes.size()*0.01;
+            const auto admitted=cropFeature->SendRequest(append);
+            if(admitted)cropUi->pending=append.requestId;
+            else cropAuditFailure="裁切分支接纳失败："+std::to_string(static_cast<int>(admitted.failureReason));return false;
+        });
+        demoAudit->AddStep("Root 仅高亮", {'0',{},false,true}, [cropFeature,cropUi] {
+            const auto history=cropFeature->GetHistory(0,0,1);
+            return history.documentId==cropUi->document&&history.stateRevision==cropUi->revision&&history.appliedHead==cropUi->applied;
+        });
+        demoAudit->AddStep("历史下一页", {'5'}, ready);
+        demoAudit->AddStep("选择另一分支", {'1',{},false,true}, [cropFeature,cropUi] {
+            return cropFeature->GetHistory(0,0,1).appliedHead==cropUi->nodes[9];
+        });
+        demoAudit->AddStep("物化明确节点", {'7',{},true}, [cropFeature,cropUi] {
+            const auto history=cropFeature->GetHistory(0,0,1);
+            if(history.results.size()!=1||history.results.front().status!=CropResultStatus::Published||history.results.front().nodeId!=cropUi->nodes[9])return false;
+            CropPruneRequest prune;prune.scope=CropPruneScope::Descendants;prune.nodeIds={cropUi->root};
+            if(cropFeature->GetPruneImpact(cropUi->document,prune).blockers.empty())return false;
+            cropUi->revision=history.stateRevision;cropUi->applied=history.appliedHead;return true;
+        });
+        demoAudit->AddStep("结果存在时 Root 仅高亮", {'0',{},false,true}, [cropFeature,cropUi] {
+            const auto history=cropFeature->GetHistory(0,0,1);return history.stateRevision==cropUi->revision
+                &&history.appliedHead==cropUi->applied&&history.results.size()==1;
+        });
+        demoAudit->AddStep("返回并释放裁切结果", {'9',{},true}, [cropFeature,cropUi] {
+            const auto history=cropFeature->GetHistory(0,0,1);return history.results.empty()&&history.appliedHead==cropUi->root
+                &&cropFeature->GetState().documentStatus==CropDocumentStatus::Ready;
+        });
+        demoAudit->AddStep("修剪 Root 后代", {0,"Delete",false,true}, [cropFeature] {return cropFeature->GetHistory(0,0,1).totalNodeCount==1;});
+        demoAudit->AddStep("新建独立裁切文档", {'o',{},true}, [cropFeature,cropUi] {
+            return cropFeature->GetDocuments().size()==2&&cropFeature->GetHistory(0,0,1).documentId!=cropUi->document;
+        });
+        demoAudit->AddStep("切换回原裁切文档", {0,"Tab",true}, [cropFeature,cropUi] {return cropFeature->GetHistory(0,0,1).documentId==cropUi->document;});
+        demoAudit->AddStep("关闭原裁切文档", {0,"Delete",true,false,true}, [cropFeature] {return cropFeature->GetDocuments().size()==1&&!cropFeature->GetHistory().documentId;});
+        demoAudit->AddStep("激活唯一剩余文档", {0,"Tab",true}, [cropFeature,cropUi] {
+            const auto history=cropFeature->GetHistory(0,0,1);return history.documentId&&history.documentId!=cropUi->document;
+        });
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
         demoAudit->AddStep("数值旋转", {'j', {}, false, false, true}, [rotationFeature, cropFeature] {
             return rotationFeature->GetState().status == ModelRotationStatus::Succeeded
@@ -2852,33 +3043,15 @@ int main(int argc, char* argv[])
     bool isHotkeyAttached = false;
 
     const auto clearAttached = [&]() {
-        bool isCleared = true;
-        if (isHotkeyAttached) {
-            if (session.AttachHotkeys({})) {
-                isHotkeyAttached = false;
-            }
-            else {
-                isCleared = false;
-            }
-        }
-        if (isTimerAttached) {
-            if (session.AttachTimer({})) {
-                isTimerAttached = false;
-            }
-            else {
-                isCleared = false;
-            }
-        }
-        while (attachedCount > 0) {
-            if (!session.DetachFeature(
-                *features[attachedCount - 1])) {
-                isCleared = false;
-                break;
-            }
-            --attachedCount;
-        }
-        return isCleared;
-        };
+        // Stop owns the dependency order and keeps its render drain alive until
+        // every Feature and result resource has actually finished releasing.
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(toolOptions.timeoutMs);
+        do {
+            if(session.Stop()){attachedCount=0;isTimerAttached=false;isHotkeyAttached=false;return true;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }while(std::chrono::steady_clock::now()<deadline);
+        std::cerr<<"[退出] 资源释放仍未完成，Session 保持 StopPending。\n";return false;
+    };
 
     for (const auto& feature : features) {
         if (!feature || !session.AttachFeature(feature)) {
