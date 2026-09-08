@@ -52,7 +52,7 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
     VtkImageGridSnapshot source,
     SurfaceDeterminationStartParams params,
     const std::size_t maxWorkingBytes,
-    const std::uint64_t requestId)
+    const std::uint64_t requestId, RoiReadSnapshot roi)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return SurfaceAdmissionStatus::Stopping;
@@ -70,6 +70,7 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
     auto cancel = std::make_shared<std::atomic<bool>>(false);
     Job nextJob{
         std::move(source),
+        std::move(roi),
         std::move(params),
         maxWorkingBytes,
         requestId,
@@ -283,7 +284,7 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
                     const SurfaceDeterminationStage stage,
                     const double progress) {
                     SetProgress(requestId, stage, progress);
-                });
+                }, job.roi);
         }
 
         {

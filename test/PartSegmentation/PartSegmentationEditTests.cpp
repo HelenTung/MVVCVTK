@@ -1,5 +1,8 @@
 #include "PartSegmentationTestCases.h"
 #include "Algorithms/PartLabelEditor.h"
+#include "Data/DataGraphStore.h"
+#include "Geometry/RoiEvaluator.h"
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -44,7 +47,50 @@ public:
         const auto& c = *input.previous.catalog;
         return { { c.partSetId, c.partsByLabel[label].objectId }, c.resultRevision };
     }
+    RoiReadSnapshot GetRegion(RoiNode node, std::shared_ptr<const IDataPayload> mask = {})
+    {
+        GridGeometry3D grid{input.volume.extent,input.volume.dimensions,input.volume.spacing,
+            input.volume.origin,input.volume.direction,input.coordinateFrame};
+        if (!GetDataRevisionRefValid(input.sourceRevision)) {
+            input.sourceRevision={roiStore.CreateDataEntityId(),1};
+            auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(double));
+            std::memcpy(bytes->data(),values.data(),bytes->size());
+            DataTransaction source;
+            source.outputs.push_back({input.sourceRevision.entityId,0,DataTypes::imageGrid3D,{},
+                std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::Float64,1,bytes)});
+            if (roiStore.SetDataCommit(source).status!=DataCommitStatus::Succeeded) return {};
+        }
+        DataTransaction transaction;
+        if (mask) {
+            const DataRevisionRef ref{roiStore.CreateDataEntityId(),1};
+            transaction.outputs.push_back({ref.entityId,0,mask->GetDataType(),{},mask});
+            node.primitive.shape=RoiShape::MaskReference; node.primitive.mask=ref;
+        }
+        const DataRevisionRef ref{roiStore.CreateDataEntityId(),1};
+        RoiDefinition definition{input.sourceRevision,{node}};
+        transaction.outputs.push_back({ref.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),
+            std::make_shared<const RoiGeometryPayload>(definition)});
+        const auto committed=roiStore.SetDataCommit(transaction);
+        return committed.status==DataCommitStatus::Succeeded
+            ? RoiEvaluator::GetRoi(committed.graph,ref,input.sourceRevision).roi : RoiReadSnapshot{};
+    }
+    void SetExtentRoi(const std::array<int,6>& extent)
+    {
+        RoiNode node;
+        for (int r=0;r<3;++r) {
+            node.primitive.localToSource[r*4+3]=input.volume.origin[r];
+            for (int a=0;a<3;++a) {
+                const double center=(static_cast<double>(extent[a*2])+extent[a*2+1])*0.5;
+                const double half=std::max(0.25,(static_cast<double>(extent[a*2+1])-extent[a*2])*0.5);
+                node.primitive.localToSource[r*4+a]=input.volume.direction[r*3+a]*input.volume.spacing[a]*half;
+                node.primitive.localToSource[r*4+3]+=input.volume.direction[r*3+a]*input.volume.spacing[a]*center;
+            }
+        }
+        input.editRoi=GetRegion(node);
+        input.request.scope.editRoi=input.editRoi ? std::optional<DataRevisionRef>{input.editRoi->GetRevision()}:std::nullopt;
+    }
     PartEditBuildResult Build() { return PartLabelEditor::BuildLabels(input, identities); }
+    DataGraphStore roiStore;
     std::vector<double> values;
     PartEditInput input;
     PartIdentityFactory identities;
@@ -97,10 +143,10 @@ int GetPartEditFailCount()
         "Missing target number is rejected");
     split.seeds.back().target = 2;
     splitCase.input.request.operation = split;
-    splitCase.input.request.scope.extent = std::array<int, 6>{ 0, 3, 0, 0, 0, 0 };
+    splitCase.SetExtentRoi({0,3,0,0,0,0});
     check(splitCase.Build().failureReason == PartFailureReason::ConstraintConflict,
         "ROI-truncated split does not relabel outside its scope");
-    splitCase.input.request.scope.extent.reset();
+    splitCase.input.request.scope.editRoi.reset(); splitCase.input.editRoi.reset();
     splitCase.input.request.scope.protectedParts = { splitCase.GetPart(1) };
     check(splitCase.Build().failureReason == PartFailureReason::ConstraintConflict,
         "Protected parent cannot be split");
@@ -214,10 +260,10 @@ int GetPartEditFailCount()
         std::vector<std::uint8_t>{ 1, 1, 1, 1, 0 });
     auto protectedValues = std::make_shared<const std::vector<std::int16_t>>(
         std::vector<std::int16_t>{ 0, 0, 1, 0, 0 });
-    masked.input.roiMask = std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{roiValues});
-    masked.input.protectionMask = std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{protectedValues});
-    masked.input.request.scope.roiMask = DataRevisionRef{};
-    masked.input.request.scope.protectionMask = DataRevisionRef{};
+    masked.input.editRoi = masked.GetRegion({}, std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{roiValues}));
+    masked.input.protectionRoi = masked.GetRegion({}, std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{protectedValues}));
+    masked.input.request.scope.editRoi = masked.input.editRoi->GetRevision();
+    masked.input.request.scope.protectionRoi = masked.input.protectionRoi->GetRevision();
     masked.input.request.operation = PartFillEdit{ masked.GetPart(1), { 1, 0, 0 } };
     const auto protectedFill = masked.Build();
     check(protectedFill.labels && *protectedFill.labels == std::vector<PartLabelId>({ 1, 1, 0, 0, 0 }),
@@ -226,8 +272,7 @@ int GetPartEditFailCount()
     check(masked.Build().failureReason == PartFailureReason::ConstraintConflict,
         "A seed in a protected voxel is rejected");
     grid.spacing[0] = 2;
-    masked.input.roiMask = std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{roiValues});
-    check(masked.Build().failureReason == PartFailureReason::InvalidGeometry,
+    check(!masked.GetRegion({}, std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{roiValues})),
         "Mask geometry mismatch is rejected without implicit resampling");
 
     EditCase anisotropic(std::vector<PartLabelId>(9, 1));
@@ -251,7 +296,7 @@ int GetPartEditFailCount()
     const auto cleaned = islandCase.Build();
     check(cleaned.labels && *cleaned.labels == std::vector<PartLabelId>({ 0, 0, 1, 1, 1 }),
         "Island cleanup removes only small complete components");
-    islandCase.input.request.scope.extent = std::array<int, 6>{ 2, 2, 0, 0, 0, 0 };
+    islandCase.SetExtentRoi({2,2,0,0,0,0});
     check(islandCase.Build().failureReason == PartFailureReason::NoChange,
         "ROI-truncated large object is not a small island");
 

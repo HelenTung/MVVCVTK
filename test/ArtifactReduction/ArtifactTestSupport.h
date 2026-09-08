@@ -1,5 +1,7 @@
 #pragma once
 #include "ArtifactReductionAlgorithm.h"
+#include "Data/DataGraphStore.h"
+#include "Geometry/RoiEvaluator.h"
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -33,9 +35,37 @@ inline std::shared_ptr<const BinaryMask3DPayload> CreateMask(const GridGeometry3
         std::make_shared<const std::vector<std::uint8_t>>(std::move(values)));
 }
 
-inline ArtifactReduction::AlgorithmResult BuildCandidate(const ArtifactReduction::AlgorithmInput& input,
-    const ArtifactRequest& request = {}, const ArtifactConfig& config = {})
+inline DataRevisionRef GetAlgorithmSource()
 {
+    DataEntityId id; id.bytes[0]=1; return {id,1};
+}
+
+inline RoiReadSnapshot CreateRegion(const std::shared_ptr<const ImageGrid3DPayload>& image,
+    const GridGeometry3D& maskGrid, const std::vector<std::uint8_t>& values)
+{
+    DataGraphStore store;
+    const auto source=GetAlgorithmSource();
+    const DataRevisionRef mask{store.CreateDataEntityId(),1};
+    const DataRevisionRef roi{store.CreateDataEntityId(),1};
+    RoiNode node; node.primitive.shape=RoiShape::MaskReference; node.primitive.mask=mask;
+    RoiDefinition definition{source,{node}};
+    DataTransaction transaction;
+    transaction.outputs={
+        {source.entityId,0,DataTypes::imageGrid3D,{},image},
+        {mask.entityId,0,DataTypes::binaryMask3D,{},CreateMask(maskGrid,values)},
+        {roi.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition)}};
+    const auto committed=store.SetDataCommit(std::move(transaction));
+    if (committed.status!=DataCommitStatus::Succeeded) return {};
+    return RoiEvaluator::GetRoi(committed.graph,roi,source).roi;
+}
+
+inline ArtifactReduction::AlgorithmResult BuildCandidate(const ArtifactReduction::AlgorithmInput& input,
+    ArtifactRequest request = {}, const ArtifactConfig& config = {})
+{
+    if (input.processing || input.protection || input.material) request.source=GetAlgorithmSource();
+    if (input.processing) request.processingRoi=input.processing->GetRevision();
+    if (input.protection) request.protectionRoi=input.protection->GetRevision();
+    if (input.material) request.qualityRoi=input.material->GetRevision();
     ArtifactReduction::TaskControl control;
     control.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     return ArtifactReduction::BuildArtifactCandidate(input, request, config, control);

@@ -27,6 +27,11 @@ public:
     BaseDataManager();
     ~BaseDataManager() noexcept override;
 
+    RoiReadResult GetRoi(const DataGraphSnapshot& graph,
+        const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const override;
+    RoiResult SetRoi(const RoiRequest& request) override;
+    RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes) override;
     DataGraphSnapshot GetDataGraph() const override;
     DataSnapshot GetData(
         const DataGraphSnapshot& graph,

@@ -43,6 +43,23 @@ DataRevisionRef Publish(TestDataPort& port, std::shared_ptr<const IDataPayload> 
     return ref;
 }
 
+DataRevisionRef PublishRoi(TestDataPort& port,const DataRevisionRef& source,const DataRevisionRef& mask,
+    std::optional<DataRevisionRef> previous={})
+{
+    const auto graph=port.GetDataGraph();
+    const auto catalog=graph.view->GetDataBinding(roiCatalogBinding);
+    RoiNode node; node.primitive.shape=RoiShape::MaskReference; node.primitive.mask=mask;
+    RoiRequest request;
+    request.action=previous ? RoiAction::SetGeometry:RoiAction::Create;
+    request.definition={source,{node}};
+    request.expectedRoi=previous;
+    request.expectedCatalogRevision=catalog ? catalog->revision:0;
+    if (!previous) request.metadata.name="Artifact test ROI";
+    const auto result=port.SetRoi(request);
+    Require(result.error==RoiError::None && result.roi,"public ROI transaction");
+    return result.roi->revision;
+}
+
 ArtifactAdmission Prepare(ArtifactReductionHostFeature& feature, const ArtifactRequest& request)
 {
     return feature.SendRequest({ ArtifactAction::Prepare, request, 0 });
@@ -69,7 +86,8 @@ void TestLifecycle()
     const auto source = Publish(*port, image, true);
     const auto mask = Publish(*port, CreateMask(grid, std::vector<std::uint8_t>(336, 1)));
     ArtifactReductionHostFeature feature;
-    ArtifactRequest request; request.source = source; request.processingMask = mask;
+    const auto roi = PublishRoi(*port, source, mask);
+    ArtifactRequest request; request.source = source; request.processingRoi = roi;
     Require(Prepare(feature, request).error == ArtifactError::Unavailable, "not attached");
     HostFeatureContext context; context.data = port;
     {
@@ -136,14 +154,14 @@ void TestLifecycle()
     Require(published.correctedVolume && published.qualityReport, "both output refs");
     Require(port->GetDataBinding(port->GetDataGraph(), primaryVolumeBinding)->target == before->target, "no primary activation");
     const auto output = port->GetData(port->GetDataGraph(), *published.correctedVolume);
-    Require(output && output->inputs.size() == 2 && output->provenance->canonicalParameters.find("3377fed") != std::string::npos, "complete provenance");
+    Require(output && output->inputs.size() == 3 && output->inputs[1].role == "processing-roi" && output->inputs[1].source == roi && output->provenance->canonicalParameters.find("3377fed") != std::string::npos, "complete provenance");
     Require(feature.SendRequest({ ArtifactAction::Commit, {}, admission.requestId }).error == ArtifactError::InvalidRequest, "no duplicate publication");
     const auto maskCandidate = Prepare(feature, request);
     Require(WaitResult(feature).status == ArtifactStatus::Ready, "mask CAS candidate");
     const auto nextMask = Publish(*port, CreateMask(grid, std::vector<std::uint8_t>(336, 1)), false, mask);
     Require(feature.SendRequest({ ArtifactAction::Commit, {}, maskCandidate.requestId }).error == ArtifactError::SourceChanged, "mask head CAS");
     feature.SendRequest({ ArtifactAction::Discard, {}, 0 });
-    request.processingMask = nextMask;
+    request.processingRoi = PublishRoi(*port, source, nextMask, roi);
     const auto next = Prepare(feature, request);
     Require(WaitResult(feature).status == ArtifactStatus::Ready, "second candidate");
     Publish(*port, image, false, source); // head改变，binding仍指原修订。

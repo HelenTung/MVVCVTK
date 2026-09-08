@@ -2,6 +2,7 @@
 add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
 target_include_directories(
     mvvcvtk_data_graph_tests
@@ -31,3 +32,15 @@ set_target_properties(
     PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph"
 )
 add_test(NAME DataGraph.VtkBridge COMMAND mvvcvtk_vtk_data_bridge_tests)
+
+add_executable(mvvcvtk_roi_tests
+    RoiTests.cpp
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiService.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiArchive.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
+)
+target_include_directories(mvvcvtk_roi_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
+SetTargetDefaults(mvvcvtk_roi_tests)
+set_target_properties(mvvcvtk_roi_tests PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph")
+add_test(NAME DataGraph.Roi COMMAND mvvcvtk_roi_tests)

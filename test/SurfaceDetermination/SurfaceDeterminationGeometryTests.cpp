@@ -22,14 +22,31 @@ using namespace SurfaceTest;
 
 SurfaceAlgorithmResult Build(
     const VtkImageGridSnapshot& source,
-    const SurfaceDeterminationStartParams& params)
+    const SurfaceDeterminationStartParams& params, RoiReadSnapshot roi = {})
 {
     return SurfaceDeterminationAlgorithm::BuildSurface(
         source,
         params,
         128U * 1024U * 1024U,
         [] { return false; },
-        {});
+        {}, std::move(roi));
+}
+
+RoiReadSnapshot BuildRoi(const VtkImageGridSnapshot& source,const std::array<double,6>& bounds)
+{
+    DataGraphStore store;
+    RoiNode node;
+    for (int a=0;a<3;++a) {
+        node.primitive.localToSource[a*4+a]=(bounds[a*2+1]-bounds[a*2])*0.5;
+        node.primitive.localToSource[a*4+3]=(bounds[a*2+1]+bounds[a*2])*0.5;
+    }
+    RoiDefinition definition{source->data->self,{node}};
+    const DataRevisionRef ref{store.CreateDataEntityId(),1};
+    DataTransaction transaction;
+    transaction.outputs={{source->data->self.entityId,0,DataTypes::imageGrid3D,{},source->data->payload},
+        {ref.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition)}};
+    const auto committed=store.SetDataCommit(transaction);
+    return RoiEvaluator::GetRoi(committed.graph,ref,source->data->self).roi;
 }
 
 double GetPlaneMeanError(
@@ -305,10 +322,10 @@ void TestComponentSelection(Checks& checks)
 void TestRoiAndInvalidGeometry(Checks& checks)
 {
     auto roiParams = GetParams();
-    roiParams.roiModelBounds = std::array<double, 6>{
-        0.0, 15.5, 0.0, 31.0, 0.0, 31.0
-    };
-    const auto truncated = Build(BuildSphere(), roiParams);
+    const auto source=BuildSphere();
+    const auto roi=BuildRoi(source,{0,15.5,0,31,0,31});
+    roiParams.analysisRoi=roi->GetRevision();
+    const auto truncated = Build(source, roiParams, roi);
     checks.Get(
         truncated.status == SurfaceResultStatus::Succeeded
             && !truncated.objects.empty(),
@@ -338,10 +355,9 @@ void TestRoiAndInvalidGeometry(Checks& checks)
     checks.Get(allPointsInRoi, "all ROI output points remain inside model bounds");
 
     auto outsideParams = GetParams();
-    outsideParams.roiModelBounds = std::array<double, 6>{
-        100.0, 110.0, 100.0, 110.0, 100.0, 110.0
-    };
-    const auto outside = Build(BuildSphere(), outsideParams);
+    const auto outsideRoi=BuildRoi(source,{100,110,100,110,100,110});
+    outsideParams.analysisRoi=outsideRoi->GetRevision();
+    const auto outside = Build(source, outsideParams, outsideRoi);
     checks.Get(
         outside.failureReason == SurfaceFailureReason::InvalidRoi,
         "non-intersecting ROI is rejected");

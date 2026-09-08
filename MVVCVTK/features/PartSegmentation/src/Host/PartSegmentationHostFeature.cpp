@@ -1084,9 +1084,7 @@ DataProvenance PartSegmentationHostFeature::Impl::BuildEditProvenance(const Part
         json << ']';
     };
     DataProvenance result{ std::string(featureId), "", "label-edit-1", "" };
-    json << "{\"scopeExtent\":";
-    if (request.scope.extent) array(*request.scope.extent); else json << "null";
-    json << ",\"protectedParts\":"; bindings(request.scope.protectedParts);
+    json << "{\"protectedParts\":"; bindings(request.scope.protectedParts);
     json << ",\"operation\":{";
     std::visit([&](const auto& op) {
         using Op = std::decay_t<decltype(op)>;
@@ -1190,22 +1188,27 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendEditRequest(
         addExpected(state.sourceRevision);
         addExpected(state.labelMap);
         addExpected(history->catalogRef);
-        const auto mask = [&](const std::optional<DataRevisionRef>& ref, const char* role,
-            std::shared_ptr<const LabelMap3DPayload>& payload) {
+        const auto region = [&](const std::optional<DataRevisionRef>& ref, const char* role,
+            RoiReadSnapshot& roi) {
             if (!ref) return true;
-            const auto data = m_data->GetData(graph, *ref);
-            payload = data ? std::dynamic_pointer_cast<const LabelMap3DPayload>(data->payload) : nullptr;
-            if (!payload || !payload->GetValid()) return false;
-            inputs.push_back({ role, *ref });
-            addExpected(*ref);
+            const auto resolved=m_data->GetRoi(graph,*ref,state.sourceRevision);
+            if (resolved.error!=RoiError::None || !resolved.roi) return false;
+            roi=resolved.roi;
+            inputs.push_back({role,*ref});
+            std::size_t index=0;
+            for (const auto& dependency:roi->GetDependencies()) {
+                addExpected(dependency);
+                if (dependency!=*ref && dependency!=state.sourceRevision)
+                    inputs.push_back({std::string(role)+".input-"+std::to_string(index++),dependency});
+            }
             return true;
         };
-        if (!mask(request.scope.roiMask, "roi-mask", job.roiMask)
-            || !mask(request.scope.protectionMask, "protection-mask", job.protectionMask)) {
-            return { PartAdmissionStatus::InvalidRequest, 0 };
+        if (!region(request.scope.editRoi,"edit-roi",job.editRoi)
+            || !region(request.scope.protectionRoi,"protection-roi",job.protectionRoi)) {
+            return {PartAdmissionStatus::InvalidRequest,0};
         }
         if (const auto restore = std::get_if<PartHistoryEdit>(&request.operation)) {
-            if (request.scope.extent || request.scope.roiMask || request.scope.protectionMask
+            if (request.scope.editRoi || request.scope.protectionRoi
                 || !request.scope.protectedParts.empty()) return { PartAdmissionStatus::InvalidRequest, 0 };
             const auto& stack = restore->isRedo ? m_redo : m_undo;
             if (stack.empty()) return { PartAdmissionStatus::Unavailable, 0 };
@@ -1232,11 +1235,19 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendEditRequest(
             || !addRetained(1, m_surfaceProduct ? m_surfaceProduct->actualBytes : 0)) {
             return { PartAdmissionStatus::InvalidRequest, 0 };
         }
-        for (const auto& payload : { job.roiMask, job.protectionMask }) {
-            if (payload && !std::visit([&](const auto& values) {
-                using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
-                return values && addRetained(values->capacity(), sizeof(Item));
-            }, payload->GetValues())) return { PartAdmissionStatus::InvalidRequest, 0 };
+        for (const auto& roi : { job.editRoi, job.protectionRoi }) {
+            if (!roi) continue;
+            if (!addRetained(roi->GetDefinition().nodes.size(),sizeof(RoiNode))) return {PartAdmissionStatus::BudgetExceeded,0};
+            for (const auto& ref:roi->GetDependencies()) {
+                if (ref==roi->GetRevision() || ref==state.sourceRevision) continue;
+                const auto payload=m_data->GetData(graph,ref)->payload;
+                if (const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(payload.get())) {
+                    if (!addRetained(mask->GetValues()->size(),1)) return {PartAdmissionStatus::BudgetExceeded,0};
+                } else if (const auto* labels=dynamic_cast<const LabelMap3DPayload*>(payload.get())) {
+                    if (!std::visit([&](const auto& values){return addRetained(values->size(),sizeof((*values)[0]));},labels->GetValues()))
+                        return {PartAdmissionStatus::BudgetExceeded,0};
+                }
+            }
         }
         const auto requestId = GetNextRequestId();
         job.requestId = requestId;
@@ -2421,7 +2432,9 @@ std::string_view PartSegmentationHostFeature::GetFeatureId() const noexcept
 FeatureDataContract PartSegmentationHostFeature::GetDataContract() const
 {
     return FeatureDataContract{
-        { DataInputSpec{ "source-volume", DataFacets::scalarGrid3D, true } },
+        { DataInputSpec{ "source-volume", DataFacets::scalarGrid3D, true },
+          { "edit-roi", DataFacets::roiGeometry, false },
+          { "protection-roi", DataFacets::roiGeometry, false } },
         { DataOutputSpec{
               "labels", DataTypes::labelMap3D,
               { DataFacets::labelMap3D } },

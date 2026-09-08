@@ -479,7 +479,25 @@ bool FeatureTestControls::Impl::PreparePart(const int mode) {
                 box[axis * 2] = static_cast<int>(std::max<std::int64_t>(geometry.extent[axis * 2], static_cast<std::int64_t>(seed[axis]) - padding));
                 box[axis * 2 + 1] = static_cast<int>(std::min<std::int64_t>(geometry.extent[axis * 2 + 1], static_cast<std::int64_t>(seed[axis]) + padding));
             }
-            request.scope.extent = box;
+            RoiNode node;
+            std::array<double,3> center{};
+            for (int a=0;a<3;++a) center[a]=0.5*(static_cast<double>(box[a*2])+box[a*2+1]);
+            for (int r=0;r<3;++r) {
+                node.primitive.localToSource[r*4+3]=geometry.origin[r];
+                for (int a=0;a<3;++a) {
+                    const double half=std::max(0.25,0.5*(static_cast<double>(box[a*2+1])-box[a*2]));
+                    node.primitive.localToSource[r*4+a]=geometry.direction[r*3+a]*geometry.spacing[a]*half;
+                    node.primitive.localToSource[r*4+3]+=geometry.direction[r*3+a]*geometry.spacing[a]*center[a];
+                }
+            }
+            RoiRequest roiRequest;
+            roiRequest.definition={state.sourceRevision,{node}};
+            roiRequest.metadata.name="Part edit region";
+            const auto catalog=context.data->GetDataBinding(graph,roiCatalogBinding);
+            roiRequest.expectedCatalogRevision=catalog ? catalog->revision:0;
+            const auto roi=context.data->SetRoi(roiRequest);
+            if (roi.error!=RoiError::None || !roi.roi) return Fail("编辑 ROI 创建失败");
+            request.scope.editRoi=roi.roi->revision;
             if (mode == 2) {
                 auto fillSeed = seed;
                 bool found = false;

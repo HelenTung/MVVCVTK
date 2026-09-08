@@ -46,5 +46,6 @@ public:
         const SurfaceDeterminationStartParams& params,
         std::size_t maxWorkingBytes,
         const SurfaceCancelCheck& getCancelled,
-        const SurfaceProgressCallback& onProgress);
+        const SurfaceProgressCallback& onProgress,
+        RoiReadSnapshot roi = {});
 };

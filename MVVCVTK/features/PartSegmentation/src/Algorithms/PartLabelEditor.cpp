@@ -50,12 +50,6 @@ double GetScalar(const PartScalarView& values, std::size_t index)
     return 0.0;
 }
 
-bool GetMaskPoint(const LabelMap3DPayload& mask, std::size_t index)
-{
-    return std::visit([index](const auto& values) {
-        return values && index < values->size() && (*values)[index] != 0;
-    }, mask.GetValues());
-}
 
 template<class Scalar>
 bool GetGrayInRange(Scalar value, double minimum, double maximum)
@@ -122,10 +116,10 @@ public:
             const double validity = m_input.volume.validity
                 ? GetScalar(*m_input.volume.validity, i) : 1.0;
             const bool isProtected = m_locked[label]
-                || (m_input.protectionMask && GetMaskPoint(*m_input.protectionMask, i));
+                || (m_input.protectionRoi && m_input.protectionRoi->GetContains(GetPhysical(index)));
             m_editable[i] = !isProtected && std::isfinite(validity) && validity != 0.0
                 && GetInside(index, m_extent)
-                && (!m_input.roiMask || GetMaskPoint(*m_input.roiMask, i));
+                && (!m_input.editRoi || m_input.editRoi->GetContains(GetPhysical(index)));
         }
         // 2. 每个工具只改变候选；不执行初始阈值分割，也不触碰原始 scalar。
         std::visit([this](const auto& operation) { SetOperation(operation); },
@@ -219,16 +213,11 @@ private:
         return found->second;
     }
 
-    void SetMaskGeometry(const std::shared_ptr<const LabelMap3DPayload>& mask) const
+    void SetRoiInput(const RoiReadSnapshot& roi, const std::optional<DataRevisionRef>& ref) const
     {
-        if (!mask) return;
-        const auto& g = mask->GetGeometry();
-        if (!mask->GetValid() || g.extent != m_geometry.extent
-            || g.dimensions != m_geometry.dimensions || g.spacing != m_geometry.spacing
-            || g.origin != m_geometry.origin || g.direction != m_geometry.direction
-            || g.coordinateFrame != m_geometry.coordinateFrame) {
-            SetFailure(PartFailureReason::InvalidGeometry, "Edit mask grid does not match labels.");
-        }
+        if (static_cast<bool>(roi)!=ref.has_value()) SetFailure(PartFailureReason::InvalidEdit,"Edit ROI was not resolved.");
+        if (roi && (roi->GetRevision()!=*ref || roi->GetSource()!=m_input.sourceRevision))
+            SetFailure(PartFailureReason::InvalidGeometry,"Edit ROI does not match the source revision.");
     }
 
     void SetInput()
@@ -302,20 +291,9 @@ private:
         }
         m_stride = { 1, static_cast<std::size_t>(v.dimensions[0]),
             static_cast<std::size_t>(v.dimensions[0]) * static_cast<std::size_t>(v.dimensions[1]) };
-        m_extent = m_input.request.scope.extent.value_or(v.extent);
-        for (std::size_t a = 0; a < 3; ++a) {
-            if (m_extent[a * 2] > m_extent[a * 2 + 1]
-                || m_extent[a * 2] < v.extent[a * 2]
-                || m_extent[a * 2 + 1] > v.extent[a * 2 + 1]) {
-                SetFailure(PartFailureReason::InvalidEdit, "Edit scope extent is invalid.");
-            }
-        }
-        if (m_input.request.scope.roiMask.has_value() != static_cast<bool>(m_input.roiMask)
-            || m_input.request.scope.protectionMask.has_value() != static_cast<bool>(m_input.protectionMask)) {
-            SetFailure(PartFailureReason::InvalidEdit, "Edit mask was not resolved.");
-        }
-        SetMaskGeometry(m_input.roiMask);
-        SetMaskGeometry(m_input.protectionMask);
+        m_extent = v.extent;
+        SetRoiInput(m_input.editRoi,m_input.request.scope.editRoi);
+        SetRoiInput(m_input.protectionRoi,m_input.request.scope.protectionRoi);
         m_locked.resize(m_old->partsByLabel.size(), false);
         for (std::size_t i = 0; i < m_input.request.scope.protectedParts.size(); ++i) {
             CheckStop(i); m_locked[GetLabel(m_input.request.scope.protectedParts[i])] = true;

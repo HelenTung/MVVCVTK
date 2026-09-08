@@ -1,7 +1,7 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "Data/DataPayloads.h"
 
-#include <vtkBox.h>
+#include <vtkCleanPolyData.h>
 #include <vtkCellArray.h>
 #include <vtkClipPolyData.h>
 #include <vtkDataArray.h>
@@ -41,7 +41,7 @@ namespace {
 
 using Point3 = std::array<double, 3>;
 
-constexpr std::uint32_t algorithmRevision = 1;
+constexpr std::uint32_t algorithmRevision = 2;
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
@@ -131,7 +131,8 @@ struct ResolvedParams final {
     bool isAutomaticIso = false;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::optional<Point3> seedModelPoint;
-    std::optional<std::array<double, 6>> roiModelBounds;
+    RoiReadSnapshot roi;
+    std::vector<RoiPlane> clipPlanes;
     double profileHalfLengthModel = 0.0;
     double profileSampleStepModel = 0.0;
     double maximumOffsetModel = 0.0;
@@ -515,34 +516,6 @@ SurfaceFailureReason BuildVolumeView(
     return SurfaceFailureReason::None;
 }
 
-bool GetBoundsValid(const std::array<double, 6>& bounds)
-{
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double minimum = bounds[axis * 2];
-        const double maximum = bounds[axis * 2 + 1];
-        if (!std::isfinite(minimum)
-            || !std::isfinite(maximum)
-            || minimum >= maximum) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool GetPointInBounds(
-    const Point3& point,
-    const std::array<double, 6>& bounds,
-    const double tolerance = 0.0)
-{
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        if (point[axis] < bounds[axis * 2] - tolerance
-            || point[axis] > bounds[axis * 2 + 1] + tolerance) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::array<double, 6> GetDataBounds(const ImageGeometry& geometry)
 {
     std::array<double, 6> bounds{
@@ -819,7 +792,7 @@ bool GetVoxelUsed(
     const std::size_t tupleIndex)
 {
     if (volume.validity && volume.validity[tupleIndex] == 0) return false;
-    if (!params.roiModelBounds) return true;
+    if (!params.roi) return true;
     const Point3 point = GetModelPoint(
         volume.geometry,
         Point3{
@@ -827,7 +800,7 @@ bool GetVoxelUsed(
             static_cast<double>(y),
             static_cast<double>(z)
         });
-    return GetPointInBounds(point, *params.roiModelBounds);
+    return params.roi->GetContains(point);
 }
 
 SurfaceFailureReason GetAutomaticIso(
@@ -1051,11 +1024,11 @@ std::uint64_t GetFingerprint(const ResolvedParams& params)
             AddFingerprint(fingerprint, GetDoubleBits(value));
         }
     }
-    AddFingerprint(fingerprint, params.roiModelBounds ? 1U : 0U);
-    if (params.roiModelBounds) {
-        for (const double value : *params.roiModelBounds) {
-            AddFingerprint(fingerprint, GetDoubleBits(value));
-        }
+    AddFingerprint(fingerprint, params.roi ? 1U : 0U);
+    if (params.roi) {
+        AddFingerprint(fingerprint,roiSchemaVersion);
+        for (const auto byte:params.roi->GetRevision().entityId.bytes) AddFingerprint(fingerprint,byte);
+        AddFingerprint(fingerprint,params.roi->GetRevision().generation);
     }
     return fingerprint;
 }
@@ -1070,7 +1043,7 @@ SurfaceFailureReason ResolveParams(
     params.method = input.method;
     params.componentSelection = input.componentSelection;
     params.seedModelPoint = input.seedModelPoint;
-    params.roiModelBounds = input.roiModelBounds;
+
     params.minimumObjectVoxels = input.minimumObjectVoxels;
     params.minimumContrast = input.minimumContrast;
     if (params.minimumObjectVoxels == 0
@@ -1092,12 +1065,12 @@ SurfaceFailureReason ResolveParams(
             }
         }
     }
-    if (params.roiModelBounds) {
-        if (!GetBoundsValid(*params.roiModelBounds)
-            || !GetBoundsIntersect(
-                *params.roiModelBounds,
-                GetDataBounds(volume.geometry))) {
-            message = "Surface ROI does not intersect the source data.";
+    if (params.roi) {
+        const auto planes=params.roi->GetClipPlanes();
+        if (planes.error!=RoiError::None) return SurfaceFailureReason::UnsupportedRoi;
+        params.clipPlanes=planes.planes;
+        if (!GetBoundsIntersect(params.roi->GetBounds(),GetDataBounds(volume.geometry))) {
+            message="Surface ROI does not intersect the source data.";
             return SurfaceFailureReason::InvalidRoi;
         }
     }
@@ -1224,11 +1197,10 @@ SurfaceFailureReason GetBudgetEstimate(
             if (pointCount > std::numeric_limits<std::uint32_t>::max()) return overflow();
         }
         std::size_t boundedPoints = pointCount, boundedTriangles = triangleCount;
-        // 三角形与六个半空间的交最多九个顶点、七个三角形；
-        // 即使后置 clip 不共享新交点，也按该上界预留。
-        if (params.roiModelBounds
-            && (!AddWorkingBytes(triangleCount, 9U, boundedPoints)
-                || !GetProduct(triangleCount, 7U, boundedTriangles))) return overflow();
+        // 每个原始三角形独立完成全部凸裁切，最后才三角化；n 个平面最多 n+3 顶点。
+        if (params.roi
+            && (!AddWorkingBytes(triangleCount, params.clipPlanes.size()+3U, boundedPoints)
+                || !GetProduct(triangleCount, params.clipPlanes.size()+1U, boundedTriangles))) return overflow();
         if (boundedPoints > std::numeric_limits<std::uint32_t>::max()) return overflow();
         // 覆盖 VTK 输出、原始/分量/局部网格、法向、records 与 generation 扩容，
         // 以及连通性/拓扑 map 的节点和分配器余量；不按体素数量臆测网格大小。
@@ -1272,19 +1244,37 @@ SurfaceFailureReason BuildInitialMesh(
     surface->InterpolateAttributesOff();
 
     vtkNew<vtkTriangleFilter> triangleFilter;
-    vtkNew<vtkBox> roiBox;
-    vtkNew<vtkClipPolyData> roiClip;
-    if (params.roiModelBounds) {
-        roiBox->SetBounds(params.roiModelBounds->data());
-        roiClip->SetInputConnection(surface->GetOutputPort());
-        roiClip->SetClipFunction(roiBox);
-        roiClip->InsideOutOn();
-        roiClip->GenerateClippedOutputOff();
-        triangleFilter->SetInputConnection(roiClip->GetOutputPort());
-    }
-    else {
-        triangleFilter->SetInputConnection(surface->GetOutputPort());
-    }
+    vtkNew<vtkPolyData> clipped;
+    vtkNew<vtkPoints> clippedPoints;
+    vtkNew<vtkCellArray> clippedCells;
+    vtkNew<vtkCleanPolyData> clean;
+    if (params.roi) {
+        surface->Update();
+        auto* seed=surface->GetOutput();
+        vtkNew<vtkIdList> ids;
+        clippedPoints->SetDataTypeToDouble();
+        seed->GetPolys()->InitTraversal();
+        std::size_t cellIndex=0;
+        while (seed->GetPolys()->GetNextCell(ids)) {
+            if ((cellIndex++ & 255)==0 && GetCancelled(getCancelled)) return SurfaceFailureReason::Cancelled;
+            if (ids->GetNumberOfIds()!=3) return SurfaceFailureReason::InvalidGeometry;
+            std::array<Point3,3> triangle;
+            for (vtkIdType i=0;i<3;++i) seed->GetPoint(ids->GetId(i),triangle[static_cast<std::size_t>(i)].data());
+            const auto clippedTriangle=params.roi->GetClippedTriangle(triangle);
+            if (clippedTriangle.error!=RoiError::None) return SurfaceFailureReason::InvalidRoi;
+            const auto& polygon=clippedTriangle.points;
+            if (polygon.size()<3) continue;
+            clippedCells->InsertNextCell(static_cast<int>(polygon.size()));
+            for (const auto& point:polygon) clippedCells->InsertCellPoint(clippedPoints->InsertNextPoint(point.data()));
+        }
+        clipped->SetPoints(clippedPoints); clipped->SetPolys(clippedCells);
+        clean->SetInputData(clipped);
+        clean->ToleranceIsAbsoluteOn();
+        double spacing[3]; image.GetSpacing(spacing);
+        clean->SetAbsoluteTolerance(*std::min_element(spacing,spacing+3)*1e-9);
+        clean->ConvertLinesToPointsOff(); clean->ConvertPolysToLinesOff();
+        triangleFilter->SetInputConnection(clean->GetOutputPort());
+    } else triangleFilter->SetInputConnection(surface->GetOutputPort());
     triangleFilter->PassLinesOff();
     triangleFilter->PassVertsOff();
     triangleFilter->Update();
@@ -2048,20 +2038,9 @@ bool GetPointAtDataBoundary(
     return false;
 }
 
-bool GetPointAtRoiBoundary(
-    const std::optional<std::array<double, 6>>& bounds,
-    const Point3& point,
-    const double tolerance)
+bool GetPointAtRoiBoundary(const RoiReadSnapshot& roi, const Point3& point, double tolerance)
 {
-    if (!bounds) return false;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        if (std::abs(point[axis] - (*bounds)[axis * 2]) <= tolerance
-            || std::abs(point[axis] - (*bounds)[axis * 2 + 1])
-                <= tolerance) {
-            return true;
-        }
-    }
-    return false;
+    return roi && roi->GetBoundaryDistance(point)<=tolerance;
 }
 
 void SetTriangleFlipFlags(
@@ -2181,7 +2160,7 @@ void AddObjectResult(
                 record.positionModel,
                 boundaryTolerance)
             || GetPointAtRoiBoundary(
-                params.roiModelBounds,
+                params.roi,
                 record.positionModel,
                 boundaryTolerance)) {
             isTruncated = true;
@@ -2246,7 +2225,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
     const SurfaceDeterminationStartParams& inputParams,
     const std::size_t maxWorkingBytes,
     const SurfaceCancelCheck& getCancelled,
-    const SurfaceProgressCallback& onProgress)
+    const SurfaceProgressCallback& onProgress,
+    RoiReadSnapshot roi)
 {
     SurfaceAlgorithmResult result;
     result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
@@ -2278,6 +2258,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
     SendProgress(
         onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
+    if (inputParams.analysisRoi.has_value()!=static_cast<bool>(roi)
+        || (roi && (roi->GetRevision()!=*inputParams.analysisRoi || roi->GetSource()!=result.sourceRevision))) {
+        result.failureReason=SurfaceFailureReason::InvalidRoi;
+        result.message="Surface ROI snapshot does not match the request/source.";
+        return result;
+    }
+    params.roi=std::move(roi);
     result.failureReason = ResolveParams(
         volume, inputParams, getCancelled, params, result.message);
     if (result.failureReason != SurfaceFailureReason::None) {
@@ -2442,6 +2429,10 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
                     points[pointIndex],
                     normals[pointIndex],
                     records[pointIndex]);
+                if (params.roi && !params.roi->GetContains(records[pointIndex].positionModel)) {
+                    records[pointIndex].positionModel=points[pointIndex];
+                    records[pointIndex].flags|=SurfacePointFlags::FitRejected|SurfacePointFlags::ProfileClipped;
+                }
             }
         };
         vtkSMPTools::For(
@@ -2511,7 +2502,8 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     const SurfaceDeterminationStartParams& params,
     const std::size_t maxWorkingBytes,
     const SurfaceCancelCheck& getCancelled,
-    const SurfaceProgressCallback& onProgress)
+    const SurfaceProgressCallback& onProgress,
+    RoiReadSnapshot roi)
 {
     try {
         return BuildSurfaceImpl(
@@ -2519,7 +2511,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
             params,
             maxWorkingBytes,
             getCancelled,
-            onProgress);
+            onProgress, std::move(roi));
     }
     catch (const std::bad_alloc&) {
         SurfaceAlgorithmResult result;

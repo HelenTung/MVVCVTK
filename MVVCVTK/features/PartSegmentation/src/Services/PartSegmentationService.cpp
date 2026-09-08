@@ -591,13 +591,14 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             else {
                 PartEditInput editInput;
                 editInput.volume = volume;
+                editInput.sourceRevision = job.source->data->self;
                 const auto sourcePayload = job.source->data
                     ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
                 if (sourcePayload) editInput.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
                 editInput.previous = job.previous;
                 editInput.request = job.edit->request;
-                editInput.roiMask = job.edit->roiMask;
-                editInput.protectionMask = job.edit->protectionMask;
+                editInput.editRoi = job.edit->editRoi;
+                editInput.protectionRoi = job.edit->protectionRoi;
                 editInput.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
                 edited = PartLabelEditor::BuildLabels(editInput, m_identities, getStopped);
             }

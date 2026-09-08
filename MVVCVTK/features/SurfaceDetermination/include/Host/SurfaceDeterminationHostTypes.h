@@ -144,7 +144,7 @@ struct SurfaceDeterminationStartParams final {
         SurfaceComponentSelection::Largest;
     std::optional<double> initialIsoValue;
     std::optional<std::array<double, 3>> seedModelPoint;
-    std::optional<std::array<double, 6>> roiModelBounds;
+    std::optional<DataRevisionRef> analysisRoi;
     std::optional<double> profileHalfLengthModel;
     std::optional<double> profileSampleStepModel;
     std::optional<double> maximumOffsetModel;
@@ -178,6 +178,7 @@ struct SurfaceDeterminationRequest final {
 
 enum class SurfaceAdmissionStatus : std::uint8_t {
     Accepted,
+    UnsupportedRoi,
     InvalidRequest,
     Busy,
     Stopping,
@@ -201,6 +202,7 @@ enum class SurfaceFailureReason : std::uint8_t {
     InvalidGeometry,
     UnsupportedScalar,
     InvalidRoi,
+    UnsupportedRoi,
     ThresholdUnreliable,
     NoSurface,
     BudgetExceeded,

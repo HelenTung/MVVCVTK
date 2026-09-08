@@ -107,17 +107,7 @@ bool GetStartValid(const SurfaceDeterminationStartParams& params)
             [](const double value) { return std::isfinite(value); })) {
         return false;
     }
-    if (params.roiModelBounds) {
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const double minimum = (*params.roiModelBounds)[axis * 2];
-            const double maximum = (*params.roiModelBounds)[axis * 2 + 1];
-            if (!std::isfinite(minimum)
-                || !std::isfinite(maximum)
-                || minimum >= maximum) {
-                return false;
-            }
-        }
-    }
+    if (params.analysisRoi && !GetDataRevisionRefValid(*params.analysisRoi)) return false;
     return true;
 }
 
@@ -263,11 +253,13 @@ private:
         DataBinding resultBinding;
         std::shared_ptr<std::atomic<bool>> completeActive;
         FeatureOperationState operation;
+        RoiReadSnapshot roi;
     };
 
     bool GetIsOwnerThread() const noexcept;
     std::uint64_t GetNextRequestId() noexcept;
     bool GetSourceSame(const VtkImageGridSnapshot& source) const;
+    bool GetRoiCurrent(const RoiReadSnapshot& roi) const;
     std::vector<HostFeatureView> GetTargetViews(
         const HostViewTargets& targets) const;
     static std::vector<std::string> GetViewIds(
@@ -322,6 +314,7 @@ private:
     SurfaceGenerationStore m_store;
     std::map<std::uint64_t, RequestEntry> m_requests;
     VtkImageGridSnapshot m_activeSource;
+    RoiReadSnapshot m_activeRoi;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
     vtkSmartPointer<vtkPolyData> m_displayData;
@@ -406,6 +399,7 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
     m_latestRequestId = 0;
     if (!ClearResult()) return false;
     m_activeSource.reset();
+    m_activeRoi.reset();
     m_activeViews.clear();
     m_service.reset();
     m_views.reset();
@@ -429,7 +423,8 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
     if (m_isStaleCleanupPending && RemoveDisplay()) {
         m_isStaleCleanupPending = false;
     }
-    if (m_activeSource && !GetSourceSame(m_activeSource)) {
+    if (m_activeSource && (!GetSourceSame(m_activeSource)
+        || !GetRoiCurrent(m_activeRoi))) {
         SetSourceStale();
     }
     SetBindingProjection();
@@ -477,6 +472,17 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             admission.status = SurfaceAdmissionStatus::Unavailable;
             return admission;
         }
+        RoiReadSnapshot roi;
+        if (params.analysisRoi) {
+            const auto result=m_data->GetRoi(m_data->GetDataGraph(),*params.analysisRoi,source->data->self);
+            if (result.error!=RoiError::None || !result.roi) return admission;
+            roi=result.roi;
+            if (roi->GetClipPlanes().error!=RoiError::None) {
+                admission.status=SurfaceAdmissionStatus::UnsupportedRoi;
+                return admission;
+            }
+            if (!GetRoiCurrent(roi)) return admission;
+        }
         const std::uint64_t requestId = GetNextRequestId();
         const bool isFirstRequest = m_requests.empty();
         auto requestItem = m_requests.end();
@@ -493,8 +499,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 });
             if (!inserted.second) return admission;
             requestItem = inserted.first;
+            requestItem->second.roi=roi;
             admission.status = m_service->Start(
-                source, params, m_config.maxWorkingBytes, requestId);
+                source, params, m_config.maxWorkingBytes, requestId, roi);
         }
         catch (...) {
             if (requestItem != m_requests.end()) {
@@ -511,6 +518,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         requestItem->second.operation.operation = {
             std::string(featureId), m_host->GetAttachmentId(), requestId };
         requestItem->second.operation.inputs = { { "source-volume", source->data->self } };
+        if (roi) requestItem->second.operation.inputs.push_back({"analysis-roi",roi->GetRevision()});
         requestItem->second.operation.status = FeatureRunStatus::Preparing;
         requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
@@ -607,6 +615,20 @@ SurfaceDeterminationHostFeature::Impl::GetNextRequestId() noexcept
     const std::uint64_t requestId = m_nextRequestId++;
     if (m_nextRequestId == 0) m_nextRequestId = 1;
     return requestId == 0 ? m_nextRequestId++ : requestId;
+}
+
+bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot& roi) const
+{
+    if (!roi) return true;
+    if (!m_data) return false;
+    const auto graph=m_data->GetDataGraph();
+    for (const auto& ref:roi->GetDependencies()) {
+        DataQuery query; query.entityId=ref.entityId;
+        DataGeneration head=0;
+        for (const auto& item:m_data->GetDataQuery(graph,query).data) if (item) head=std::max(head,item->self.generation);
+        if (head!=ref.generation) return false;
+    }
+    return true;
 }
 
 bool SurfaceDeterminationHostFeature::Impl::GetSourceSame(
@@ -870,6 +892,7 @@ bool SurfaceDeterminationHostFeature::Impl::ClearResult()
     if (!RemoveDisplay()) return false;
     m_store.ClearGeneration();
     m_activeSource.reset();
+    m_activeRoi.reset();
     m_activeViews.clear();
     m_isDisplayPending = false;
     SurfaceDeterminationState idle;
@@ -961,9 +984,10 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             const auto source = m_data->GetPrimaryImage();
             if (!generation || !source || !source->data
                 || generation->dataRevision != snapshot->self
-                || generation->sourceRevision != source->data->self) {
+                || generation->sourceRevision != source->data->self || !m_store.GetCurrentGeneration()) {
                 m_store.ClearGeneration();
                 m_activeSource.reset();
+    m_activeRoi.reset();
                 m_isDisplayPending = false;
                 auto state = GetState();
                 if (m_latestRequestId != 0) {
@@ -994,6 +1018,9 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
                 m_displayOperation.outputs.push_back(generation->meshRevision);
             m_displayOperation.outputs.push_back(snapshot->self);
             m_activeSource = source;
+            m_activeRoi.reset();
+            for (const auto& input:snapshot->inputs) if (input.role=="analysis-roi")
+                m_activeRoi=m_data->GetRoi(graph,input.source,source->data->self).roi;
             if (m_activeViews.empty()) {
                 auto targets = m_config.defaultStart.targetViews;
                 if (!GetTargetsUsed(targets)) targets.viewRoles = { HostRenderViewRole::Primary3D };
@@ -1043,6 +1070,7 @@ void SurfaceDeterminationHostFeature::Impl::SetSourceStale()
     const auto previousState = GetState();
     m_store.ClearGeneration();
     m_activeSource.reset();
+    m_activeRoi.reset();
     m_activeViews.clear();
     m_isDisplayPending = false;
     if (!RemoveDisplay()) m_isStaleCleanupPending = true;
@@ -1070,7 +1098,7 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
     request.operation.stateRevision += m_service->GetExecutionState(complete.requestId).stateRevision;
     auto operation = request.operation;
     const bool isLatest = complete.requestId == m_latestRequestId;
-    if (request.isSourceChanged || !GetSourceSame(request.source)) {
+    if (request.isSourceChanged || !GetSourceSame(request.source) || !GetRoiCurrent(request.roi)) {
         complete.result.status = SurfaceResultStatus::Failed;
         complete.result.failureReason = SurfaceFailureReason::SourceChanged;
         complete.result.message = "Surface source changed before commit.";
@@ -1301,10 +1329,22 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     const DataProvenance provenance{ std::string(featureId), "determine-surface",
         std::to_string(stagedGeneration->algorithmRevision),
         std::to_string(stagedGeneration->parameterFingerprint) };
-    std::vector<DataInputRef> generationInputs{sourceInput};
+    std::vector<DataInputRef> analysisInputs{sourceInput};
+    if (request.roi) {
+        analysisInputs.push_back({"analysis-roi",request.roi->GetRevision()});
+        std::size_t index=0;
+        for (const auto& ref:request.roi->GetDependencies()) {
+            DataExpectation expectation;
+            expectation.entityId=ref.entityId; expectation.expectedGeneration=ref.generation;
+            transaction.expectations.push_back(expectation);
+            if (ref!=request.roi->GetRevision() && ref!=request.source->data->self)
+                analysisInputs.push_back({"analysis-roi.input-"+std::to_string(index++),ref});
+        }
+    }
+    std::vector<DataInputRef> generationInputs=analysisInputs;
     if (!isThresholdOnly) {
         transaction.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
-            {sourceInput}, mesh, provenance});
+            analysisInputs, mesh, provenance});
         generationInputs.push_back({"mesh", meshRef});
     }
     transaction.outputs.push_back({generationRef.entityId, 0, surfaceGenerationType,
@@ -1337,6 +1377,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         RemoveBindings(m_bindings);
         m_displayData = nullptr;
         m_activeSource = request.source;
+        m_activeRoi = request.roi;
         m_activeViews = std::move(nextViews);
         m_resultRevision = std::max(m_resultRevision, stagedGeneration->resultRevision);
         SurfaceDeterminationState ready;
@@ -1366,7 +1407,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
 
 FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
 {
-    return { { { "source-volume", DataFacets::scalarGrid3D, true } },
+    return { { { "source-volume", DataFacets::scalarGrid3D, true }, {"analysis-roi",DataFacets::roiGeometry,false} },
         { { "mesh", DataTypes::surfaceMesh, { DataFacets::surfaceMesh } },
           { "generation", surfaceGenerationType, { surfaceGenerationFacet } } } };
 }

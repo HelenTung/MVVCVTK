@@ -83,13 +83,14 @@ public:
     // binding 生命周期独立于 widget 编辑态；Exit 后仍可导航 committed history。
     bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
+    std::optional<std::vector<CropOpItem>> GetCropOperations() const;
 
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
     // 从 rootInput 对完整 allHistory 前缀做一次融合物化，不生成节点级中间 mask。
     bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropCandidateCallback onComplete);
+        CropCandidateCallback onComplete, RoiReadSnapshot roi = {});
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();

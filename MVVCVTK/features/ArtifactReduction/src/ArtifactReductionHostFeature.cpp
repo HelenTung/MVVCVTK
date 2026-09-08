@@ -49,19 +49,31 @@ public:
         input.image = source ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload) : nullptr;
         if (!input.image) return ArtifactError::InvalidData;
         inputs.push_back({ "source-volume", request.source });
-        const auto mask = [&](const char* role, const std::optional<DataRevisionRef>& ref,
-            std::shared_ptr<const BinaryMask3DPayload>& target) {
+        const auto region = [&](const char* role, const std::optional<DataRevisionRef>& ref,
+            RoiReadSnapshot& target) {
             if (!ref) return true;
-            if (!GetDataRevisionRefValid(*ref)) return false;
-            const auto snapshot = m_data->GetData(graph, *ref);
-            target = snapshot ? std::dynamic_pointer_cast<const BinaryMask3DPayload>(snapshot->payload) : nullptr;
-            if (!target) return false;
-            inputs.push_back({ role, *ref });
+            const auto resolved=m_data->GetRoi(graph,*ref,request.source);
+            if (resolved.error!=RoiError::None || !resolved.roi) return false;
+            target=resolved.roi;
+            inputs.push_back({role,*ref});
+            std::size_t index=0;
+            for (const auto& dependency:target->GetDependencies()) {
+                if (dependency==*ref || dependency==request.source) continue;
+                inputs.push_back({std::string(role)+".input-"+std::to_string(index++),dependency});
+                const auto data=m_data->GetData(graph,dependency);
+                if (!data) return false;
+                std::size_t bytes=0;
+                if (const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(data->payload.get())) bytes=mask->GetValues()->size();
+                if (const auto* labels=dynamic_cast<const LabelMap3DPayload*>(data->payload.get()))
+                    bytes=std::visit([](const auto& values){return values->size()*sizeof((*values)[0]);},labels->GetValues());
+                if (bytes>std::numeric_limits<std::size_t>::max()-input.roiBytes) return false;
+                input.roiBytes+=bytes;
+            }
             return true;
         };
-        if (!mask("processing-roi", request.processingMask, input.processing)
-            || !mask("protection-mask", request.protectionMask, input.protection)
-            || !mask("material-mask", request.materialMask, input.material)) return ArtifactError::InvalidData;
+        if (!region("processing-roi", request.processingRoi, input.processing)
+            || !region("protection-roi", request.protectionRoi, input.protection)
+            || !region("quality-roi", request.qualityRoi, input.material)) return ArtifactError::InvalidData;
         for (const auto& entry : inputs) {
             if (request.inputMode == ArtifactInputMode::CurrentPrimary && !GetHeadMatched(graph, entry.source))
                 return ArtifactError::SourceChanged;
@@ -115,9 +127,9 @@ FeatureDataContract ArtifactReductionHostFeature::GetDataContract() const
 {
     return {
         { { "source-volume", DataFacets::scalarGrid3D, true },
-          { "processing-roi", DataFacets::binaryMask3D, false },
-          { "protection-mask", DataFacets::binaryMask3D, false },
-          { "material-mask", DataFacets::binaryMask3D, false } },
+          { "processing-roi", DataFacets::roiGeometry, false },
+          { "protection-roi", DataFacets::roiGeometry, false },
+          { "quality-roi", DataFacets::roiGeometry, false } },
         { { "corrected-volume", DataTypes::imageGrid3D, { DataFacets::scalarGrid3D } },
           { "quality-report", DataTypes::recordTable, { DataFacets::tabularRecords } } }
     };

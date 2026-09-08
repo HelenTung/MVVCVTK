@@ -1066,6 +1066,29 @@ int GetCropFailCount()
             && committedState.history.hasEditableOp,
         "Box interaction creates one committed Crop operation") ? 0 : 1;
 
+    // 已完成的交互历史可独立保存为公共 ROI；不触发物化或改写绑定。
+    const auto beforeRoiSave=contextProbe->m_data->GetDataGraph();
+    const auto catalogBefore=contextProbe->m_data->GetDataBinding(beforeRoiSave,roiCatalogBinding);
+    const auto primaryBefore=session.GetImageDescriptor();
+    const auto cropBefore=feature->GetState();
+    auto saveRoi=GetTargetRequest(CropHostAction::SaveRoi,target);
+    saveRoi.roiMetadata=RoiMetadata{"crop-saved"};
+    saveRoi.expectedCatalogRevision=catalogBefore ? catalogBefore->revision:0;
+    int saveCount=0; CropBuildResult savedRoi;
+    const bool saveAccepted=feature->SendRequest(saveRoi,[&](CropBuildResult value) {
+        savedRoi=std::move(value); ++saveCount;
+        (void)session.GetRoiDescriptors();
+    });
+    const auto afterRoiSave=contextProbe->m_data->GetDataGraph();
+    const auto primaryAfter=session.GetImageDescriptor();
+    failureCount += GetCaseResult(saveAccepted && saveCount==1 && savedRoi.isSucceeded
+        && GetDataRevisionRefValid(savedRoi.recipeRevision) && !GetDataRevisionRefValid(savedRoi.outputRevision)
+        && session.GetRoiDescriptor(savedRoi.recipeRevision).has_value()
+        && afterRoiSave.commitId==beforeRoiSave.commitId+1 && primaryBefore && primaryAfter
+        && primaryBefore->dataRevision==primaryAfter->dataRevision && primaryBefore->bindingRevision==primaryAfter->bindingRevision
+        && feature->GetState().outputRevision==cropBefore.outputRevision,
+        "Crop SaveRoi commits only ROI/catalog and permits callback reentry") ? 0 : 1;
+
     const bool isPrevious = feature->SendRequest(
         GetCropRequest(CropHostAction::Previous));
     const bool isPreviousCommitted = isPrevious

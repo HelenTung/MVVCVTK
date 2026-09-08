@@ -38,7 +38,7 @@ public:
         VtkImageGridSnapshot source,
         SurfaceDeterminationStartParams params,
         std::size_t maxWorkingBytes,
-        std::uint64_t requestId);
+        std::uint64_t requestId, RoiReadSnapshot roi = {});
     bool StopRequest(std::uint64_t requestId) noexcept;
     std::optional<SurfaceJobComplete> GetComplete();
     std::optional<SurfaceRequestProgress> GetProgress(
@@ -50,6 +50,7 @@ public:
 private:
     struct Job final {
         VtkImageGridSnapshot source;
+        RoiReadSnapshot roi;
         SurfaceDeterminationStartParams params;
         std::size_t maxWorkingBytes = 0;
         std::uint64_t requestId = 0;

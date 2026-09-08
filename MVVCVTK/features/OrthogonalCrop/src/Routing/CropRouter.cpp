@@ -69,3 +69,15 @@ CropRouter::BuildResultTask(
                 payload, getStopRequested);
         });
 }
+
+std::optional<std::packaged_task<CropMaterializationCandidate()>> CropRouter::BuildRoiTask(
+    CropInputSnapshot input, RoiReadSnapshot roi, std::function<bool()> getStopRequested) const
+{
+    if (!CropAlgorithm::GetInputValid(input) || !input.data || !roi || roi->GetSource()!=input.data->self) return {};
+    if (input.mesh && roi->GetClipPlanes().error!=RoiError::None) return {};
+    const auto budget=GetRamBytes();
+    return std::packaged_task<CropMaterializationCandidate()>(
+        [input=std::move(input),roi=std::move(roi),budget,getStopRequested=std::move(getStopRequested)] {
+            return CropAlgorithm::GetRoiResult(input,roi,budget,getStopRequested);
+        });
+}

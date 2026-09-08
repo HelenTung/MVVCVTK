@@ -26,7 +26,8 @@ enum class CropHostAction {
     BuildResult,
     SetPolyData = 10,
     ClearPolyData,
-    Exit = 13
+    Exit = 13,
+    SaveRoi
 };
 
 struct CropHostTarget {
@@ -42,6 +43,11 @@ struct CropHostRequest {
     std::optional<CropRemovalMode> removalMode;
     std::optional<std::size_t> nodeCount;
     vtkSmartPointer<vtkPolyData> polyData;
+    // BuildResult 可显式采用公共 ROI；此时不消费裁切历史。
+    std::optional<DataRevisionRef> inputRoi;
+    // SaveRoi 独占字段；只保存当前历史，不生成派生图像/网格。
+    std::optional<RoiMetadata> roiMetadata;
+    DataBindingRevision expectedCatalogRevision = 0;
 };
 
 using CropBuildCallback =
@@ -76,6 +82,7 @@ public:
     bool DetachHost() override;
     bool OnHostTick() override;
 
+    // SaveRoi 的已接纳请求同步完成 callback；BuildResult 沿用 owner tick 完成。
     bool SendRequest(
         CropHostRequest request,
         CropBuildCallback onComplete = nullptr);

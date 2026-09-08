@@ -106,32 +106,32 @@ DataBytes CreateMaskBytes(vtkImageData* mask)
 }
 
 std::shared_ptr<const RoiGeometryPayload> CreateRecipePayload(
-    const std::vector<CropOpItem>& operations)
+    const std::vector<CropOpItem>& operations, const DataRevisionRef& source)
 {
-    std::vector<RoiPrimitive> primitives;
-    primitives.reserve(operations.size());
+    if (operations.size() > (roiNodeLimit - 1) / 2) return {};
+    RoiDefinition definition;
+    definition.source = source;
+    definition.nodes.push_back({ RoiNodeKind::SourceDomain });
     for (const auto& operation : operations) {
-        RoiPrimitive primitive;
-        primitive.operation = operation.removalMode
-            == CropRemovalMode::KeepInside
-            ? "keep-inside" : "remove-inside";
+        RoiNode node;
         if (operation.geometryType == CropShape::Box) {
-            primitive.shape = RoiShape::Box;
-            primitive.localToSource = operation.boxToInputModelMatrix;
-        }
-        else if (operation.geometryType == CropShape::Plane) {
-            primitive.shape = RoiShape::Plane;
-            primitive.origin = operation.planeCenterInInputModel;
-            primitive.normal = operation.planeNormalInInputModel;
-        }
-        else {
-            return {};
-        }
-        primitives.push_back(std::move(primitive));
+            node.primitive.shape = RoiShape::Box;
+            node.primitive.localToSource = operation.boxToInputModelMatrix;
+        } else if (operation.geometryType == CropShape::Plane) {
+            node.primitive.shape = RoiShape::HalfSpace;
+            node.primitive.origin = operation.planeCenterInInputModel;
+            node.primitive.normal = operation.planeNormalInInputModel;
+        } else return {};
+        const auto previous = static_cast<std::uint32_t>(definition.nodes.size() - 1);
+        definition.nodes.push_back(std::move(node));
+        RoiNode combine;
+        combine.kind = operation.removalMode == CropRemovalMode::KeepInside
+            ? RoiNodeKind::Intersection : RoiNodeKind::Difference;
+        combine.left = previous;
+        combine.right = previous + 1;
+        definition.nodes.push_back(combine);
     }
-    auto payload = std::make_shared<const RoiGeometryPayload>(
-        std::move(primitives));
-    return payload->GetValid() ? payload : nullptr;
+    return std::make_shared<const RoiGeometryPayload>(std::move(definition));
 }
 
 bool GetImageReady(vtkImageData* image)
@@ -214,7 +214,8 @@ private:
     bool ClearResultBinding();
     bool BuildCropResult(
         const CropHostTarget& target,
-        CropBuildCallback onComplete);
+        CropBuildCallback onComplete, std::optional<DataRevisionRef> inputRoi = {});
+    bool SaveRoi(const CropHostRequest& request, CropBuildCallback onComplete);
     static bool RemoveComplete(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item);
@@ -610,7 +611,8 @@ CropBuildResult CropHostFeature::Impl::SetBuildResult(
         return result;
     }
 
-    auto recipe = CreateRecipePayload(candidate.operations);
+    auto recipe = candidate.roi ? std::shared_ptr<const RoiGeometryPayload>{}
+        : CreateRecipePayload(candidate.operations, source.data->self);
     std::shared_ptr<const IDataPayload> output;
     DataTypeId outputType;
     if (source.image && candidate.imageData && candidate.maskImage) {
@@ -631,15 +633,15 @@ CropBuildResult CropHostFeature::Impl::SetBuildResult(
             outputType = DataTypes::surfaceMesh;
         }
     }
-    if (!recipe || !output || !GetDataTypeIdValid(outputType)) {
+    if ((!recipe && !candidate.roi) || !output || !GetDataTypeIdValid(outputType)) {
         result.failureReason = CropFailure::BadInput;
         result.message = "Crop formal payload construction failed.";
         return result;
     }
 
-    const auto recipeEntity = m_data->CreateDataEntityId();
+    const auto recipeEntity = candidate.roi ? candidate.roi->GetRevision().entityId:m_data->CreateDataEntityId();
     const auto outputEntity = m_data->CreateDataEntityId();
-    const DataRevisionRef recipeRef{ recipeEntity, 1 };
+    const DataRevisionRef recipeRef=candidate.roi ? candidate.roi->GetRevision():DataRevisionRef{recipeEntity,1};
     const DataRevisionRef outputRef{ outputEntity, 1 };
     DataExpectation sourceExpectation;
     sourceExpectation.kind = DataExpectationKind::Binding;
@@ -650,21 +652,23 @@ CropBuildResult CropHostFeature::Impl::SetBuildResult(
 
     DataTransaction transaction;
     transaction.expectations.push_back(std::move(sourceExpectation));
-    transaction.outputs = {
-        DataRevisionDraft{
-            recipeEntity, 0, DataTypes::roiGeometry,
-            { DataInputRef{ "source-data", source.data->self } },
-            std::move(recipe),
-            DataProvenance{
-                std::string(kFeatureId), "capture-recipe", "1", "{}" } },
-        DataRevisionDraft{
-            outputEntity, 0, outputType,
-            { DataInputRef{ "source-data", source.data->self },
-              DataInputRef{ "crop-recipe", recipeRef } },
-            std::move(output),
-            DataProvenance{
-                std::string(kFeatureId), "materialize-crop", "1", "{}" } }
-    };
+    std::vector<DataInputRef> inputs{{"source-data",source.data->self},
+        {candidate.roi ? "crop-roi":"crop-recipe",recipeRef}};
+    if (candidate.roi) {
+        std::size_t index=0;
+        for (const auto& ref:candidate.roi->GetDependencies()) {
+            DataExpectation expectation; expectation.entityId=ref.entityId; expectation.expectedGeneration=ref.generation;
+            transaction.expectations.push_back(expectation);
+            if (ref!=source.data->self && ref!=recipeRef)
+                inputs.push_back({"crop-roi.input-"+std::to_string(index++),ref});
+        }
+    } else {
+        transaction.outputs.push_back({recipeEntity,0,DataTypes::roiGeometry,
+            {{"source-data",source.data->self}},std::move(recipe),
+            DataProvenance{std::string(kFeatureId),"capture-recipe","2","{}"}});
+    }
+    transaction.outputs.push_back({outputEntity,0,outputType,std::move(inputs),std::move(output),
+        DataProvenance{std::string(kFeatureId),"materialize-crop","2","{}"}});
     transaction.bindings.push_back(DataBindingUpdate{
         std::string(cropResultBinding),
         resultBinding.revision,
@@ -975,7 +979,7 @@ bool CropHostFeature::Impl::SendReadyCompletes()
 
 bool CropHostFeature::Impl::BuildCropResult(
     const CropHostTarget& target,
-    CropBuildCallback onComplete)
+    CropBuildCallback onComplete, std::optional<DataRevisionRef> inputRoi)
 {
     if (!onComplete
         || !m_bridge
@@ -988,6 +992,13 @@ bool CropHostFeature::Impl::BuildCropResult(
     if (!source || !source->binding || !source->data
         || !m_bridge->SetCropInput(*source)) {
         return false;
+    }
+    RoiReadSnapshot roi;
+    if (inputRoi) {
+        const auto result=m_data->GetRoi(source->graph,*inputRoi,source->data->self);
+        if (result.error!=RoiError::None || !result.roi) return false;
+        roi=result.roi;
+        if (source->mesh && roi->GetClipPlanes().error!=RoiError::None) return false;
     }
     DataBinding resultBinding;
     resultBinding.name = std::string(cropResultBinding);
@@ -1015,9 +1026,10 @@ bool CropHostFeature::Impl::BuildCropResult(
     m_operation.stateRevision = 1;
     m_operation.status = FeatureRunStatus::Preparing;
     m_operation.inputs = { { source->image ? "source-volume" : "source-mesh", source->data->self } };
+    if (roi) m_operation.inputs.push_back({"crop-roi",roi->GetRevision()});
     m_isBuildPending = true;
     auto onResult =
-        [this, source = *source, resultBinding,
+        [this, source = *source, resultBinding, roi,
             weakState, weakItem](
             CropMaterializationCandidate candidate) mutable {
             const auto state = weakState.lock();
@@ -1029,7 +1041,8 @@ bool CropHostFeature::Impl::BuildCropResult(
             m_operation.stateRevision = 4;
             m_operation.progress = result.isSucceeded ? 1.0 : 0.0;
             if (result.isSucceeded) {
-                m_operation.outputs = { result.recipeRevision, result.outputRevision };
+                m_operation.outputs = roi ? std::vector<DataRevisionRef>{result.outputRevision}
+                    : std::vector<DataRevisionRef>{result.recipeRevision,result.outputRevision};
                 m_resultOperation = m_operation;
             }
             if (!Impl::SetCompleteResult(
@@ -1041,7 +1054,7 @@ bool CropHostFeature::Impl::BuildCropResult(
         };
     const bool isAccepted = m_bridge->BuildCropResult(
         std::move(*source),
-        std::move(onResult));
+        std::move(onResult), std::move(roi));
     if (!isAccepted) {
         // Bridge 可以在同步校验失败时先回传内部结果；入口返回 false 时必须丢弃，
         // 保证未接纳请求的外部 callback 永远不会在后续 tick 泄漏。
@@ -1052,6 +1065,37 @@ bool CropHostFeature::Impl::BuildCropResult(
     return isAccepted;
 }
 
+bool CropHostFeature::Impl::SaveRoi(const CropHostRequest& request,CropBuildCallback onComplete)
+{
+    if (!onComplete || !m_bridge || !m_data || m_isBuildPending) return false;
+    const auto source=GetCropInput(*request.target);
+    if (!source || !source->data || !m_bridge->SetCropInput(*source)) return false;
+    const auto operations=m_bridge->GetCropOperations();
+    if (!operations) return false;
+    const auto payload=CreateRecipePayload(*operations,source->data->self);
+    if (!payload) return false;
+    RoiRequest write;
+    write.definition=payload->GetDefinition(); write.metadata=*request.roiMetadata;
+    write.expectedCatalogRevision=request.expectedCatalogRevision;
+    write.expectedSourceBinding=source->binding;
+    RoiResult saved;
+    {
+        const PublishGuard guard(m_isPublishing);
+        saved=m_data->SetRoi(write);
+    }
+    CropBuildResult result;
+    result.isSucceeded=saved.error==RoiError::None;
+    result.failureReason=result.isSucceeded ? CropFailure::None
+        : saved.error==RoiError::RevisionConflict ? CropFailure::VersionMismatch:CropFailure::BadInput;
+    result.sourceRevision=source->data->self; result.nodeCount=operations->size();
+    result.commitId=saved.commitId;
+    if (saved.roi) result.recipeRevision=saved.roi->revision;
+    result.message=std::move(saved.message);
+    // 正式 ROI 不归 Crop 状态所有；回调前已结束发布门，允许调用方重入查询/退出。
+    try { onComplete(std::move(result)); } catch (...) {}
+    return true;
+}
+
 bool CropHostFeature::Impl::SendRequest(
     CropHostRequest request,
     CropBuildCallback onComplete)
@@ -1059,7 +1103,7 @@ bool CropHostFeature::Impl::SendRequest(
     if (!m_isAttached
         || m_ownerThread != std::this_thread::get_id()
         || m_isPublishing
-        || ((request.action == CropHostAction::BuildResult)
+        || ((request.action == CropHostAction::BuildResult || request.action == CropHostAction::SaveRoi)
             != static_cast<bool>(onComplete))) {
         return false;
     }
@@ -1068,8 +1112,11 @@ bool CropHostFeature::Impl::SendRequest(
         || request.action == CropHostAction::Box
         || request.action == CropHostAction::Plane
         || request.action == CropHostAction::Mode
-        || request.action == CropHostAction::BuildResult;
-    if (needsTarget != request.target.has_value()
+        || request.action == CropHostAction::BuildResult || request.action == CropHostAction::SaveRoi;
+    if ((request.action==CropHostAction::SaveRoi)!=request.roiMetadata.has_value()
+        || (request.action!=CropHostAction::SaveRoi && request.expectedCatalogRevision!=0)
+        || (request.inputRoi && request.action!=CropHostAction::BuildResult)
+        || needsTarget != request.target.has_value()
         || (request.action == CropHostAction::Mode) != request.removalMode.has_value()
         || (request.action == CropHostAction::Node) != request.nodeCount.has_value()
         || (request.action == CropHostAction::SetPolyData) != static_cast<bool>(request.polyData)) {
@@ -1108,7 +1155,9 @@ bool CropHostFeature::Impl::SendRequest(
     case CropHostAction::Node:
         return m_bridge->GetCropBound() && m_bridge->SetCropNode(*request.nodeCount);
     case CropHostAction::BuildResult:
-        return BuildCropResult(*request.target, std::move(onComplete));
+        return BuildCropResult(*request.target, std::move(onComplete),request.inputRoi);
+    case CropHostAction::SaveRoi:
+        return SaveRoi(request,std::move(onComplete));
     case CropHostAction::SetPolyData:
         return SetPolyData(std::move(request.polyData));
     case CropHostAction::ClearPolyData:
