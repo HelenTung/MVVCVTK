@@ -10,7 +10,7 @@
 #include <QJsonDocument>
 namespace Manual {
 std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRevisionRef source,
-    const QJsonValue& extentValue, const QJsonValue& maskValue, const char* name)
+    const QJsonValue& extentValue, const QJsonValue& maskValue, const char* name, bool isPhysicalBounds)
 {
     const bool hasExtent = !extentValue.isNull() && !extentValue.isUndefined();
     const bool hasMask = !maskValue.isNull() && !maskValue.isUndefined();
@@ -18,7 +18,16 @@ std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRe
     RoiRequest request;
     request.definition.source = source;
     request.metadata.name = name;
-    if (hasExtent) {
+    if (hasExtent && isPhysicalBounds) {
+        const auto bounds = GetArray<double, 6>(extentValue);
+        RoiNode node;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (bounds[axis*2] >= bounds[axis*2+1]) throw std::invalid_argument("物理范围必须有正长度");
+            node.primitive.localToSource[axis*4+axis] = (bounds[axis*2+1]-bounds[axis*2])*0.5;
+            node.primitive.localToSource[axis*4+3] = (bounds[axis*2+1]+bounds[axis*2])*0.5;
+        }
+        request.definition.nodes.push_back(node);
+    } else if (hasExtent) {
         const auto grid = session.GetImageDescriptor();
         if (!grid || grid->dataRevision != source) throw std::invalid_argument("索引范围需要对应源图像几何");
         const auto extent = GetArray<int, 6>(extentValue);

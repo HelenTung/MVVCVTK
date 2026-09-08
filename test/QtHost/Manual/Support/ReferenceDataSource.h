@@ -9,7 +9,7 @@ class VtkAppHostSession;
 namespace Manual {
 // 将测试页面的索引范围/掩码显式发布成统一 ROI，不给生产入口保留旧字段。
 std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRevisionRef source,
-    const QJsonValue& extent, const QJsonValue& mask, const char* name);
+    const QJsonValue& extent, const QJsonValue& mask, const char* name, bool isPhysicalBounds = false);
 struct ReferenceInput {
     DataRevisionRef source;
     DataRevisionRef mesh;

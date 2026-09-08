@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "Support/ParameterEditor.h"
+#include "Support/ReferenceDataSource.h"
 #include <QPointer>
 namespace Manual {
 namespace {
@@ -57,7 +58,12 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 {"Largest", SurfaceComponentSelection::Largest}, {"Seeded", SurfaceComponentSelection::Seeded}, {"All", SurfaceComponentSelection::All}});
             if (params.contains("initialIsoValue") && !params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
-            if (!params["roiModelBounds"].isNull()) start.roiModelBounds = GetArray<double, 6>(params["roiModelBounds"]);
+            if (!params["roiModelBounds"].isNull()) {
+                const auto source = panel->GetSession()->GetImageDescriptor();
+                if (!source) throw std::invalid_argument("表面范围需要源图像");
+                start.analysisRoi = CreateInputRoi(*panel->GetSession(), source->dataRevision,
+                    params["roiModelBounds"], QJsonValue(), "Surface analysis region", true);
+            }
             if (params.contains("profileHalfLengthModel") && !params["profileHalfLengthModel"].isNull()) start.profileHalfLengthModel = GetNumber(params, "profileHalfLengthModel");
             if (params.contains("profileSampleStepModel") && !params["profileSampleStepModel"].isNull()) start.profileSampleStepModel = GetNumber(params, "profileSampleStepModel");
             if (params.contains("maximumOffsetModel") && !params["maximumOffsetModel"].isNull()) start.maximumOffsetModel = GetNumber(params, "maximumOffsetModel");
