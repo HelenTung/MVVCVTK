@@ -1,5 +1,7 @@
 // 测试用途：为功能测试受控发布名义参考和二值掩码，保持真实数据图修订链。
 #include "ReferenceDataSource.h"
+#include "Host/VtkAppHostSession.h"
+#include <algorithm>
 #include "JsonInput.h"
 #include "Data/DataPayloads.h"
 #include <QCryptographicHash>
@@ -7,6 +9,59 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 namespace Manual {
+std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRevisionRef source,
+    const QJsonValue& extentValue, const QJsonValue& maskValue, const char* name, bool isPhysicalBounds)
+{
+    const bool hasExtent = !extentValue.isNull() && !extentValue.isUndefined();
+    const bool hasMask = !maskValue.isNull() && !maskValue.isUndefined();
+    if (!hasExtent && !hasMask) return std::nullopt;
+    RoiRequest request;
+    request.definition.source = source;
+    request.metadata.name = name;
+    if (hasExtent && isPhysicalBounds) {
+        const auto bounds = GetArray<double, 6>(extentValue);
+        RoiNode node;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (bounds[axis*2] >= bounds[axis*2+1]) throw std::invalid_argument("物理范围必须有正长度");
+            node.primitive.localToSource[axis*4+axis] = (bounds[axis*2+1]-bounds[axis*2])*0.5;
+            node.primitive.localToSource[axis*4+3] = (bounds[axis*2+1]+bounds[axis*2])*0.5;
+        }
+        request.definition.nodes.push_back(node);
+    } else if (hasExtent) {
+        const auto grid = session.GetImageDescriptor();
+        if (!grid || grid->dataRevision != source) throw std::invalid_argument("索引范围需要对应源图像几何");
+        const auto extent = GetArray<int, 6>(extentValue);
+        RoiNode node;
+        for (int axis = 0; axis < 3; ++axis)
+            if (extent[axis*2] < grid->extent[axis*2] || extent[axis*2+1] > grid->extent[axis*2+1]
+                || extent[axis*2] > extent[axis*2+1]) throw std::invalid_argument("编辑范围超出源网格");
+        for (int row = 0; row < 3; ++row) {
+            node.primitive.localToSource[row*4+3] = grid->origin[row];
+            for (int axis = 0; axis < 3; ++axis) {
+                const double center = (static_cast<double>(extent[axis*2])+extent[axis*2+1])*0.5;
+                // 单体素轴使用小于半间距的厚度，保持含端点的体素中心集合。
+                const double half = std::max(0.25,(static_cast<double>(extent[axis*2+1])-extent[axis*2])*0.5);
+                node.primitive.localToSource[row*4+axis] = grid->direction[row*3+axis]*grid->spacing[axis]*half;
+                node.primitive.localToSource[row*4+3] += grid->direction[row*3+axis]*grid->spacing[axis]*center;
+            }
+        }
+        request.definition.nodes.push_back(node);
+    }
+    if (hasMask) {
+        RoiNode node; node.primitive.shape = RoiShape::MaskReference; node.primitive.mask = GetRef(maskValue);
+        request.definition.nodes.push_back(node);
+    }
+    if (hasExtent && hasMask) {
+        RoiNode intersection; intersection.kind = RoiNodeKind::Intersection; intersection.left = 0; intersection.right = 1;
+        request.definition.nodes.push_back(intersection);
+    }
+    const auto catalog = session.GetRoiDescriptors(true);
+    request.expectedCatalogRevision = catalog.empty() ? 0 : catalog.front().catalogRevision;
+    const auto result = session.SetRoi(request);
+    if (result.error != RoiError::None || !result.roi) throw std::invalid_argument("测试输入 ROI 发布失败: " + result.message);
+    return result.roi->revision;
+}
+
 bool ReferenceDataSource::AttachHost(const HostFeatureContext& context)
 {
     m_data = context.data;

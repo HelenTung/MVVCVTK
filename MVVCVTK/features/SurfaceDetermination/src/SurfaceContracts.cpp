@@ -57,6 +57,7 @@ template<std::size_t N> bool ReadArray(std::istream& in,
 bool ReadParams(std::istream& in, SurfaceDeterminationStartParams& p)
 {
     unsigned method, selection, purpose, policy;
+    std::optional<std::array<double, 6>> legacyBounds;
     if (!(in >> method >> selection >> purpose >> policy
         >> std::quoted(p.resultScope) >> std::quoted(p.modelUnit))
         || method > 3 || selection > 2 || purpose > 2 || policy > 1) return false;
@@ -65,7 +66,7 @@ bool ReadParams(std::istream& in, SurfaceDeterminationStartParams& p)
     p.purpose = static_cast<SurfaceTaskPurpose>(purpose);
     p.sourcePolicy = static_cast<DataPublishPolicy>(policy);
     if (!ReadOptional(in, p.initialIsoValue) || !ReadArray(in, p.seedModelPoint)
-        || !ReadArray(in, p.roiModelBounds) || !ReadOptional(in, p.profileHalfLengthModel)
+        || !ReadArray(in, legacyBounds) || legacyBounds.has_value() || !ReadOptional(in, p.profileHalfLengthModel)
         || !ReadOptional(in, p.profileSampleStepModel) || !ReadOptional(in, p.maximumOffsetModel)
         || !ReadOptional(in, p.profileSmoothingSigmaModel)
         || !(in >> p.minimumObjectVoxels >> p.minimumContrast)) return false;
@@ -75,8 +76,6 @@ bool ReadParams(std::istream& in, SurfaceDeterminationStartParams& p)
         || !positive(p.profileHalfLengthModel) || !positive(p.profileSampleStepModel)
         || !positive(p.maximumOffsetModel) || !positive(p.profileSmoothingSigmaModel)
         || (p.componentSelection == SurfaceComponentSelection::Seeded && !p.seedModelPoint)) return false;
-    if (p.roiModelBounds) for (unsigned axis=0;axis<3;++axis)
-        if ((*p.roiModelBounds)[axis*2] >= (*p.roiModelBounds)[axis*2+1]) return false;
     return true;
 }
 }
@@ -91,6 +90,7 @@ SurfaceTaskPurpose GetPurpose(const SurfaceDeterminationStartParams& params)
 bool GetInputValid(const SurfaceDeterminationStartParams& p)
 {
     if (!SurfaceRecipeCodec::GetError(p).empty() || p.seedBlockDepth == 0 || p.seedBlockDepth > 4096 ||
+        (p.analysisRoi && !GetDataRevisionRefValid(*p.analysisRoi)) ||
         (p.materialLabels && !GetDataRevisionRefValid(*p.materialLabels)) ||
         (p.initialSurface && !GetDataRevisionRefValid(*p.initialSurface)) ||
         (p.materialLabels.has_value() != !p.materialPairs.empty()))

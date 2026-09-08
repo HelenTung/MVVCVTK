@@ -56,7 +56,7 @@ bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, co
     stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, estimate);
     return estimate <= budget;
 }
-SurfaceSeedStatus ClipMesh(const std::array<double, 6> &roi, const std::size_t budget,
+SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const std::size_t budget,
                            const std::function<bool()> &cancelled, std::vector<Point> &points,
                            std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
@@ -70,12 +70,14 @@ SurfaceSeedStatus ClipMesh(const std::array<double, 6> &roi, const std::size_t b
         if ((t & 255U) == 0 && cancelled && cancelled())
             return SurfaceSeedStatus::Cancelled;
         polygon.assign(triangles[t].vertices.begin(), triangles[t].vertices.end());
-        for (unsigned plane = 0; plane < 6 && polygon.size() >= 3; ++plane)
+        for (unsigned plane = 0; plane < planes.size() && polygon.size() >= 3; ++plane)
         {
-            const unsigned axis = plane / 2;
-            const double bound = roi[plane];
+            const auto& clipping = planes[plane];
             const auto distance = [&](std::uint32_t id) {
-                return (points[id][axis] - bound) * (plane % 2 ? -1.0 : 1.0);
+                double value = 0;
+                for (unsigned axis = 0; axis < 3; ++axis)
+                    value += (points[id][axis] - clipping.origin[axis]) * clipping.normal[axis];
+                return value;
             };
             next.clear();
             for (std::size_t i = 0; i < polygon.size(); ++i)
@@ -93,12 +95,19 @@ SurfaceSeedStatus ClipMesh(const std::array<double, 6> &roi, const std::size_t b
                 {
                     if (!GetBudget(points.size() + 1, triangles.size() + clipped.size(), budget, stats))
                         return SurfaceSeedStatus::BudgetExceeded;
-                    const double fraction =
-                        (bound - points[low][axis]) / (points[high][axis] - points[low][axis]);
+                    const double dLow = distance(low), dHigh = distance(high);
+                    const double fraction = dLow / (dLow - dHigh);
                     Point point{};
                     for (unsigned c = 0; c < 3; ++c)
                         point[c] = points[low][c] + fraction * (points[high][c] - points[low][c]);
-                    point[axis] = bound;
+                    double residual = 0, normal2 = 0;
+                    for (unsigned c = 0; c < 3; ++c) {
+                        residual += (point[c] - clipping.origin[c]) * clipping.normal[c];
+                        normal2 += clipping.normal[c] * clipping.normal[c];
+                    }
+                    if (!std::isfinite(normal2) || normal2 <= 0) return SurfaceSeedStatus::InvalidInput;
+                    for (unsigned c = 0; c < 3; ++c)
+                        point[c] -= residual * clipping.normal[c] / normal2;
                     const auto id = static_cast<std::uint32_t>(points.size());
                     points.push_back(point);
                     found = intersections.emplace(key, id).first;
@@ -139,7 +148,7 @@ std::uint64_t SurfaceSeedBuilder::GetLabel(const LabelMap3DPayload &labels, cons
 
 SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     const SurfaceSeedGrid &grid, const double iso, const std::optional<SurfaceMaterialPair> &materials,
-    const std::optional<std::array<double, 6>> &roi, const double haloModel, const std::uint32_t blockDepth,
+    const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
     const std::size_t budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
     std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
@@ -150,14 +159,21 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
         return SurfaceSeedStatus::BudgetExceeded;
     if (materials && !grid.labels)
         return SurfaceSeedStatus::InvalidInput;
+    std::vector<RoiPlane> planes;
+    if (roi) {
+        auto clip = roi->GetClipPlanes();
+        if (clip.error != RoiError::None) return SurfaceSeedStatus::InvalidInput;
+        planes = std::move(clip.planes);
+    }
     std::array<int, 6> range = grid.extent;
     if (roi)
     {
+        const auto roiBounds = roi->GetBounds();
         std::array<double, 6> bounds{DBL_MAX, -DBL_MAX, DBL_MAX, -DBL_MAX, DBL_MAX, -DBL_MAX};
         for (unsigned i = 0; i < 8; ++i)
         {
             const auto index =
-                ToIndex(grid, {(*roi)[(i & 1) ? 1 : 0], (*roi)[(i & 2) ? 3 : 2], (*roi)[(i & 4) ? 5 : 4]});
+                ToIndex(grid, {roiBounds[(i & 1) ? 1 : 0], roiBounds[(i & 2) ? 3 : 2], roiBounds[(i & 4) ? 5 : 4]});
             for (unsigned a = 0; a < 3; ++a)
             {
                 bounds[a * 2] = std::min(bounds[a * 2], index[a]);
@@ -361,7 +377,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     }
     if (roi)
     {
-        const auto status = ClipMesh(*roi, budget, cancelled, points, triangles, stats);
+        const auto status = ClipMesh(planes, budget, cancelled, points, triangles, stats);
         if (status != SurfaceSeedStatus::Succeeded)
             return status;
     }

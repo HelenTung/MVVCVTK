@@ -846,8 +846,16 @@ int GetEditLifecycleFailCount()
                 DataProvenance{"external-test", "mask", "1", "{}"} });
             check(stale.data->SetDataCommit(std::move(mask)).status == DataCommitStatus::Succeeded,
                 "Formal typed mask is available for the edit");
-            if (changedInput == 3) editRequest.scope.roiMask = changedRef;
-            else editRequest.scope.protectionMask = changedRef;
+            RoiNode node; node.primitive.shape=RoiShape::MaskReference; node.primitive.mask=changedRef;
+            RoiRequest roiRequest; roiRequest.definition={before.sourceRevision,{node}}; roiRequest.metadata.name="Part edit ROI";
+            const auto catalogBinding=stale.data->GetDataBinding(stale.data->GetDataGraph(),roiCatalogBinding);
+            roiRequest.expectedCatalogRevision=catalogBinding ? catalogBinding->revision:0;
+            const auto region=stale.data->SetRoi(roiRequest);
+            check(region.error==RoiError::None && region.roi,"Shared ROI is available for the edit");
+            if (region.roi) {
+                if (changedInput == 3) editRequest.scope.editRoi = region.roi->revision;
+                else editRequest.scope.protectionRoi = region.roi->revision;
+            }
         }
         const auto pending = preview(stale, editRequest);
         const auto graph = stale.data->GetDataGraph();

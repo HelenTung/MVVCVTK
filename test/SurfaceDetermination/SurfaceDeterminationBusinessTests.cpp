@@ -186,6 +186,30 @@ void TestMaterialsAndReplay(Checks &c)
                   "diagnostic replays the actual frozen labeled profile and final point");
         }
     }
+    {
+        auto combinedInputs = inputs;
+        auto combinedParams = forward.resolvedParams;
+        combinedInputs.roi = BuildRoi(source, {10, 20, 4, 18, 4, 18});
+        combinedParams.analysisRoi = combinedInputs.roi->GetRevision();
+        std::vector<double> vertices;
+        for (const auto& point : forward.points)
+            vertices.insert(vertices.end(), point.positionModel.begin(), point.positionModel.end());
+        combinedInputs.initialSurface = std::make_shared<const DataRevision>(DataRevision{
+            GetTestDataRef(93), DataTypes::surfaceMesh, {{"source-volume", source->data->self}},
+            std::make_shared<const SurfaceMeshPayload>(vertices,
+                std::vector<std::uint64_t>(forward.triangleIndices.begin(), forward.triangleIndices.end())), {}});
+        combinedParams.initialSurface = combinedInputs.initialSurface->self;
+        const auto combined = Run(source, combinedParams, combinedInputs);
+        c.Get(combined.status == SurfaceResultStatus::Succeeded && combined.acceptedPointCount > 0
+            && combined.execution.scannedCellCount == 0 && combined.interfaces.size() == 1
+            && combined.interfaces.front().canonicalId == "2:7"
+            && std::all_of(combined.points.begin(), combined.points.end(), [&](const auto& point) {
+                return combinedInputs.roi->GetContains(point.positionModel);
+            }), "frozen ROI, labels and initial mesh jointly constrain the same surface task");
+        combinedInputs.roi.reset();
+        c.Get(Run(source, combinedParams, combinedInputs).failureReason == SurfaceFailureReason::InvalidRoi,
+            "a missing frozen ROI cannot silently replay the labeled initial mesh without clipping");
+    }
     inputs.materialLabels = Labels(source, true);
     params.materialPairs = {{2, 7}};
     const auto junction = Run(source, params, inputs);
@@ -207,10 +231,13 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
     auto params = GetParams();
     params.targetViews = {};
     params.seedBlockDepth = 1;
-    params.roiModelBounds = std::array<double, 6>{9.25, 22.75, 9.1, 23.1, 9.2, 23.2};
-    const auto first = Run(source, params);
+    const std::array<double, 6> roiBounds{9.25, 22.75, 9.1, 23.1, 9.2, 23.2};
+    SurfaceAlgorithmInputs roiInputs;
+    roiInputs.roi = BuildRoi(source, roiBounds);
+    params.analysisRoi = roiInputs.roi->GetRevision();
+    const auto first = Run(source, params, roiInputs);
     params.seedBlockDepth = 4096;
-    const auto second = Run(source, params);
+    const auto second = Run(source, params, roiInputs);
     bool same = first.status == SurfaceResultStatus::Succeeded && first.points.size() == second.points.size();
     if (same)
         for (std::size_t i = 0; i < first.points.size(); ++i)
@@ -224,8 +251,8 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
     bool keptBoundary = false;
     for (const auto &point : first.points)
         for (unsigned a = 0; a < 3; ++a)
-            inside = inside && point.positionModel[a] >= (*params.roiModelBounds)[a * 2] - 1e-10 &&
-                     point.positionModel[a] <= (*params.roiModelBounds)[a * 2 + 1] + 1e-10;
+            inside = inside && point.positionModel[a] >= roiBounds[a * 2] - 1e-10 &&
+                     point.positionModel[a] <= roiBounds[a * 2 + 1] + 1e-10;
     c.Get(inside && !first.objects.empty() && !first.objects[0].isClosed,
           "final refined geometry stays inside ROI and adds no caps");
     for (const auto &point : first.points)
@@ -234,6 +261,16 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
                                             GetSurfaceFlag(point.flags, SurfacePointFlags::SeedRetained));
     c.Get(keptBoundary,
           "artificial ROI boundary retains its seed and explicit nonmeasurement quality reason");
+    auto otherRoiInputs = roiInputs;
+    otherRoiInputs.roi = BuildRoi(source, roiBounds);
+    c.Get(Run(source, params, otherRoiInputs).failureReason == SurfaceFailureReason::InvalidRoi,
+          "equal ROI geometry cannot substitute a different frozen revision identity");
+    auto otherRoiParams = params;
+    otherRoiParams.analysisRoi = otherRoiInputs.roi->GetRevision();
+    const auto otherRoiResult = Run(source, otherRoiParams, otherRoiInputs);
+    c.Get(otherRoiResult.status == SurfaceResultStatus::Succeeded
+        && otherRoiResult.parameterFingerprint != first.parameterFingerprint,
+        "ROI identity participates in the surface fingerprint even for equal geometry");
     params = GetParams();
     params.targetViews = {};
     params.method = SurfaceDeterminationMethod::LocalRelativeIso;
@@ -420,8 +457,10 @@ void TestMultipleInterfacesAndLocality(Checks &c)
                       [](const Point3 &p) { return GetSmoothInside(p[0] - 31.35); });
     auto roi = GetParams();
     roi.targetViews = {};
-    roi.roiModelBounds = std::array<double, 6>{30, 32, 30, 32, 30, 32};
-    const auto local = Run(large, roi);
+    SurfaceAlgorithmInputs roiInputs;
+    roiInputs.roi = BuildRoi(large, {30, 32, 30, 32, 30, 32});
+    roi.analysisRoi = roiInputs.roi->GetRevision();
+    const auto local = Run(large, roi, roiInputs);
     c.Get(local.status == SurfaceResultStatus::Succeeded &&
               local.execution.scannedCellCount < 63U * 63U * 63U / 4 &&
               local.execution.processedExtent[0] > 0 && local.execution.processedExtent[1] < 63,

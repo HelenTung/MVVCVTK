@@ -1,5 +1,6 @@
 // 测试用途：通过伪影页面测试环形校正、扩散、候选发布与校正数据选择。
 #include "ModuleFactories.h"
+#include "Support/ReferenceDataSource.h"
 #include "Host/ArtifactReductionHostFeature.h"
 namespace Manual {
 namespace {
@@ -66,9 +67,9 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
                 if (!descriptor) throw std::invalid_argument("未加载输入");
                 prepare.source = descriptor->dataRevision;
             } else { prepare.source = GetRef(p["source"]); prepare.inputMode = ArtifactInputMode::ExplicitRevision; }
-            if (!p["processingMask"].isNull()) prepare.processingMask = GetRef(p["processingMask"]);
-            if (!p["protectionMask"].isNull()) prepare.protectionMask = GetRef(p["protectionMask"]);
-            if (!p["materialMask"].isNull()) prepare.materialMask = GetRef(p["materialMask"]);
+            prepare.processingRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["processingMask"], "Artifact processingRoi");
+            prepare.protectionRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["protectionMask"], "Artifact protectionRoi");
+            prepare.qualityRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["materialMask"], "Artifact qualityRoi");
             prepare.timeoutMs = GetInt(p, "timeoutMs");
             if (combination != "Diffusion") {
                 const auto r = p["ring"].toObject();

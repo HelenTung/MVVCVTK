@@ -22,11 +22,6 @@ double ReadScalar(const std::vector<std::uint8_t>& bytes, std::size_t index) noe
     return static_cast<double>(value);
 }
 
-bool GetSameGrid(const GridGeometry3D& a, const GridGeometry3D& b) noexcept
-{
-    return a.extent == b.extent && a.dimensions == b.dimensions && a.spacing == b.spacing
-        && a.origin == b.origin && a.direction == b.direction && a.coordinateFrame == b.coordinateFrame;
-}
 
 bool AddBytes(std::size_t& total, std::size_t count, std::size_t size) noexcept
 {
@@ -93,20 +88,35 @@ bool VolumeView::GetValid(std::size_t index) const noexcept
     return std::isfinite(value) && (!noData || value != *noData);
 }
 
+std::array<double,3> VolumeView::GetPoint(std::size_t index) const noexcept
+{
+    const auto& grid=GetGeometry();
+    const auto x=index%static_cast<std::size_t>(grid.dimensions[0]);
+    const auto y=(index/static_cast<std::size_t>(grid.dimensions[0]))%static_cast<std::size_t>(grid.dimensions[1]);
+    const auto z=index/(static_cast<std::size_t>(grid.dimensions[0])*grid.dimensions[1]);
+    const std::array<double,3> scaled{
+        (static_cast<double>(grid.extent[0])+x)*grid.spacing[0],
+        (static_cast<double>(grid.extent[2])+y)*grid.spacing[1],
+        (static_cast<double>(grid.extent[4])+z)*grid.spacing[2]};
+    std::array<double,3> point=grid.origin;
+    for (int r=0;r<3;++r) for (int c=0;c<3;++c) point[r]+=grid.direction[r*3+c]*scaled[c];
+    return point;
+}
+
 bool VolumeView::GetProtected(std::size_t index) const noexcept
 {
-    return m_input.protection && (*m_input.protection->GetValues())[index] != 0;
+    return m_input.protection && m_input.protection->GetContains(GetPoint(index));
 }
 
 bool VolumeView::GetWritable(std::size_t index) const noexcept
 {
-    return (!m_input.processing || (*m_input.processing->GetValues())[index] != 0)
+    return (!m_input.processing || m_input.processing->GetContains(GetPoint(index)))
         && !GetProtected(index) && GetValid(index);
 }
 
 bool VolumeView::GetMaterial(std::size_t index) const noexcept
 {
-    return m_input.material && (*m_input.material->GetValues())[index] != 0;
+    return m_input.material && m_input.material->GetContains(GetPoint(index));
 }
 
 void VolumeView::SetValues(const std::vector<float>& values) noexcept { m_values = &values; }
@@ -139,8 +149,11 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
             if (!std::isfinite(dot) || std::abs(dot - (i == j ? 1.0 : 0.0)) > 1e-6) return ArtifactError::UnsupportedGeometry;
         }
     }
-    for (const auto& mask : { input.processing, input.protection, input.material }) {
-        if (mask && (!mask->GetValid() || !GetSameGrid(grid, mask->GetGeometry()))) return ArtifactError::InvalidData;
+    const std::array<RoiReadSnapshot,3> regions{input.processing,input.protection,input.material};
+    const std::array<std::optional<DataRevisionRef>,3> refs{request.processingRoi,request.protectionRoi,request.qualityRoi};
+    for (std::size_t i=0;i<regions.size();++i) {
+        if (static_cast<bool>(regions[i])!=refs[i].has_value()) return ArtifactError::InvalidData;
+        if (regions[i] && (regions[i]->GetRevision()!=*refs[i] || regions[i]->GetSource()!=request.source)) return ArtifactError::InvalidData;
     }
     if (request.timeoutMs == 0 || request.timeoutMs > 3600000 || config.stopTimeoutMs > 60000
         || config.memoryBudgetBytes == 0 || config.publishBudgetBytes == 0
@@ -170,9 +183,7 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
         || !AddBytes(requiredBytes, count, 2 * sizeof(float)) || !AddBytes(requiredBytes, validityBytes, 3)
         || !AddBytes(requiredBytes, ringBytes, 1)
         || !AddBytes(requiredBytes, 1, 1024 * 1024)) return ArtifactError::TooLarge;
-    for (const auto& mask : { input.processing, input.protection, input.material }) {
-        if (mask && !AddBytes(requiredBytes, mask->GetValues()->size(), 1)) return ArtifactError::TooLarge;
-    }
+    if (!AddBytes(requiredBytes, input.roiBytes, 1)) return ArtifactError::TooLarge;
     if (diffusionCount != 0) {
         // 每个独立 VTK 块：float 输入/输出 + 两份 double 迭代缓冲。
         std::size_t workerBytes = 0;
