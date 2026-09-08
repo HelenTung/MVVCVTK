@@ -115,6 +115,7 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         && (!request.renderInput || (request.ownerId!=0 && !request.pending))
         && m_dataManager
         && !request.stages.empty()
+        && (request.effects.empty()||(request.ownerId!=0&&request.effects.size()==request.stages.size()))
         && std::all_of(
             request.stages.begin(), request.stages.end(),
             [](const auto& stage) { return stage != nullptr; });
@@ -137,10 +138,10 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         auto transaction = std::make_unique<Transaction>();
         transaction->request = request;
         m_transaction = std::move(transaction);
-        for (const auto& stage : m_transaction->request.stages) {
-            const auto status = stage->StartRenderInputStage(
-                input,
-                m_transaction->request.transactionRevision);
+        for (std::size_t index=0;index<m_transaction->request.stages.size();++index) {
+            const auto& stage=m_transaction->request.stages[index];
+            const auto effect=m_transaction->request.effects.empty()?std::optional<RenderEffectChange>{}:m_transaction->request.effects[index];
+            const auto status = stage->StartRenderInputStage(input,m_transaction->request.transactionRevision,effect);
             if (status == DataStageStatus::Failed
                 || status == DataStageStatus::Cancelled
                 || status == DataStageStatus::Idle) {
@@ -169,7 +170,7 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         m_transaction.reset();
         return AdvanceLoadCommit(request);
     }
-    if (active.pending != request.pending || active.renderInput != request.renderInput
+    if (active.effects!=request.effects || active.pending != request.pending || active.renderInput != request.renderInput
         || active.sourceRevision != request.sourceRevision
         || !GetSameStages(active.stages, request.stages)) {
         const auto stale = active;

@@ -127,3 +127,14 @@ public:
         const RenderEffectTarget& target,
         RenderBindingUse bindingUse) = 0;
 };
+
+// Conditional replacement carried by one data transaction. Null replacement
+// removes the effect; null expected requires a view with no current effect.
+struct RenderEffectChange final {
+    std::shared_ptr<RenderEffect> expected;
+    std::shared_ptr<RenderEffect> replacement;
+    bool operator==(const RenderEffectChange& other) const noexcept {
+        return expected==other.expected&&replacement==other.replacement;
+    }
+    bool operator!=(const RenderEffectChange& other) const noexcept {return !(*this==other);}
+};

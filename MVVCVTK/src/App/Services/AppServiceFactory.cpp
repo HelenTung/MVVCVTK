@@ -164,7 +164,7 @@ public:
     bool DetachRenderEffect(const RenderEffect* effect);
     DataStageStatus StartDataStage(
         const VtkRenderInputSnapshot& snapshot,
-        std::uint64_t transactionRevision);
+        std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effect={});
     DataStageStatus SetDataStageReady(
         const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
@@ -211,6 +211,8 @@ private:
     };
 
     struct DataStage final {
+        std::optional<RenderEffectChange> effectChange;
+        std::shared_ptr<RenderEffect> oldEffect,nextEffect;
         std::array<double,16> oldModelMatrix{};
         VtkRenderInputSnapshot oldSnapshot;
         VtkRenderInputSnapshot nextSnapshot;
@@ -1204,7 +1206,8 @@ void AppRuntime::SetCurrentStrategy(
     if (m_currentStrategy) {
         (void)m_currentStrategy->SetRenderInputStamp(
             GetRenderInputStamp());
-        if (effect) {
+        const auto nextEffect=m_dataStage&&m_dataStage->nextStrategy==m_currentStrategy?m_dataStage->nextEffect:effect;
+        if (nextEffect) {
             const auto state = m_currentStrategy->GetRenderEffectState();
             const bool hasBinding =
                 state.failureReason != RenderEffectFailure::Unsupported;
@@ -1214,7 +1217,7 @@ void AppRuntime::SetCurrentStrategy(
             }
             else {
                 (void)m_currentStrategy->AttachRenderEffect(
-                    effect, RenderBindingUse::Current);
+                    nextEffect, RenderBindingUse::Current);
             }
         }
         if (m_renderer && !isRendererAttached) {
@@ -1351,7 +1354,7 @@ bool AppRuntime::GetPointVisible(const std::array<double,3>& world) const
 bool AppRuntime::AttachRenderEffect(
     std::shared_ptr<RenderEffect> effect)
 {
-    if (!effect || !m_renderEffect.expired()) {
+    if (!GetIsOwnerThread() || m_dataStage || !effect || !m_renderEffect.expired()) {
         return false;
     }
     m_renderEffect = effect;
@@ -1371,7 +1374,7 @@ bool AppRuntime::AttachRenderEffect(
 bool AppRuntime::DetachRenderEffect(const RenderEffect* effect)
 {
     auto currentEffect = m_renderEffect.lock();
-    if (!effect || currentEffect.get() != effect) {
+    if (!GetIsOwnerThread() || m_dataStage || !effect || currentEffect.get() != effect) {
         return false;
     }
     if (m_currentStrategy
@@ -3063,7 +3066,7 @@ DataStageStatus AppRuntime::BuildPipeline()
 
 DataStageStatus AppRuntime::StartDataStage(
     const VtkRenderInputSnapshot& snapshot,
-    const std::uint64_t transactionRevision)
+    const std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effectChange)
 {
     if (!GetIsOwnerThread() || transactionRevision == 0
         || !snapshot || !snapshot->GetValid()
@@ -3077,16 +3080,19 @@ DataStageStatus AppRuntime::StartDataStage(
     }
     if (m_dataStage) {
         return m_dataStage->transactionRevision == transactionRevision
-            && GetSameInput(m_dataStage->nextSnapshot, snapshot)
+            && GetSameInput(m_dataStage->nextSnapshot, snapshot) && m_dataStage->effectChange==effectChange
             ? m_dataStage->status : DataStageStatus::Failed;
     }
 
+    if(effectChange&&m_renderEffect.lock()!=effectChange->expected)return DataStageStatus::Failed;
     if(snapshot->image) {
         int dimensions[3]={};snapshot->image->GetDimensions(dimensions);
         if(dimensions[0]<=0||dimensions[1]<=0||dimensions[2]<=0||!snapshot->imageView)return DataStageStatus::Failed;
     } else if(!snapshot->meshView||snapshot->mesh->GetNumberOfPoints()==0)return DataStageStatus::Failed;
 
     DataStage stage;
+    stage.effectChange=effectChange;stage.oldEffect=m_renderEffect.lock();
+    stage.nextEffect=effectChange?effectChange->replacement:stage.oldEffect;
     stage.oldSnapshot = m_renderSnapshot;
     stage.oldModelMatrix=m_renderModelMatrix;
     stage.nextSnapshot = snapshot;
@@ -3145,7 +3151,7 @@ DataStageStatus AppRuntime::StartDataStage(
     }
 
     }
-    const auto effect = m_renderEffect.lock();
+    const auto effect = stage.nextEffect;
     if (stage.oldStrategy && effect
         && (!stage.oldSnapshot || !stage.oldSnapshot->data
             || stage.oldSnapshot->data->self != snapshot->data->self)) {
@@ -3217,9 +3223,10 @@ DataStageStatus AppRuntime::SetDataStageReady(
     if (m_dataStage->isCommitted) return m_dataStage->status;
     if (!GetStageCurrent(*m_dataStage)) {
         const bool isRefresh = m_dataStage->isRefresh;
+        const auto effectChange=m_dataStage->effectChange;
         if (!ClearDataStage(transactionRevision)) return DataStageStatus::Failed;
         // Load 只替换显示候选，保留原事务号/输入和最终 callback。
-        const auto status = StartDataStage(snapshot, transactionRevision);
+        const auto status = StartDataStage(snapshot, transactionRevision,effectChange);
         if (m_dataStage) m_dataStage->isRefresh = isRefresh;
         return status;
     }
@@ -3247,7 +3254,7 @@ DataStageStatus AppRuntime::SetDataStageReady(
         return stage.status;
     }
 
-    const auto effect = m_renderEffect.lock();
+    const auto effect = stage.nextEffect;
     try {
         stage.nextStrategy->AttachRenderer(m_renderer);
         stage.isRendererAttached = true;
@@ -3372,6 +3379,7 @@ bool AppRuntime::SetViewStage(
         m_renderSnapshot = snapshot;
         SetCurrentStrategy(
             m_dataStage->nextStrategy, m_dataStage->mode, false);
+        m_renderEffect=m_dataStage->nextEffect;
         m_renderModelMatrix=m_dataStage->nextParams.modelMatrix;
         {
             std::lock_guard<std::mutex> lock(m_viewConfigMutex);
@@ -3402,7 +3410,7 @@ bool AppRuntime::ResetViewStage(
         return false;
     }
     auto& stage = *m_dataStage;
-    const auto effect = m_renderEffect.lock();
+    const auto effect = stage.nextEffect;
     const bool isCandidateCurrent =
         m_currentStrategy == stage.nextStrategy;
     bool isReset = true;
@@ -3417,6 +3425,7 @@ bool AppRuntime::ResetViewStage(
         }
 
         if (isCandidateCurrent) {
+            m_renderEffect=stage.oldEffect;
             m_renderSnapshot = stage.oldSnapshot;
             m_renderModelMatrix=stage.oldModelMatrix;
             m_currentStrategy = stage.oldStrategy;
@@ -3424,9 +3433,9 @@ bool AppRuntime::ResetViewStage(
             if (stage.oldStrategy) {
                 isReset = stage.oldStrategy->SetRenderInputStamp(
                     GetRenderInputStamp()) && isReset;
-                if (effect) {
+                if (stage.oldEffect) {
                     isReset = stage.oldStrategy->AttachRenderEffect(
-                        effect, RenderBindingUse::Current) && isReset;
+                        stage.oldEffect, RenderBindingUse::Current) && isReset;
                 }
                 if (m_renderer) {
                     stage.oldStrategy->AttachRenderer(m_renderer);
@@ -3459,7 +3468,7 @@ bool AppRuntime::ClearDataStage(
         return false;
     }
 
-    const auto effect = m_renderEffect.lock();
+    const auto effect = m_dataStage->nextEffect;
     bool isCleared = true;
     try {
         if (m_dataStage->nextStrategy && m_renderer) {
@@ -3953,6 +3962,10 @@ public:
 
     DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) override {
         return m_service?m_service->StartDataStage(input,revision):DataStageStatus::Failed;
+    }
+    DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision,
+        const std::optional<RenderEffectChange>& effect) override {
+        return m_service?m_service->StartDataStage(input,revision,effect):DataStageStatus::Failed;
     }
     DataStageStatus SetRenderInputStageReady(const VtkRenderInputSnapshot& input,std::uint64_t revision) override {
         return m_service?m_service->SetDataStageReady(input,revision):DataStageStatus::Failed;

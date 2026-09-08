@@ -1094,6 +1094,11 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
         || request.renderInput->binding->target != primary->target
         || primary->expectedRevision == std::numeric_limits<DataBindingRevision>::max()
         || request.renderInput->binding->revision != primary->expectedRevision + 1) return {};
+    for(std::size_t index=0;index<request.effects.size();++index) {
+        const auto& effect=request.effects[index];
+        if(effect.viewId.empty()||!GetViewById(effect.viewId)
+            ||std::any_of(request.effects.begin(),request.effects.begin()+index,[&](const auto& prior){return prior.viewId==effect.viewId;}))return {};
+    }
     auto transition = std::make_shared<FeatureTransition>();
     transition->ownerId = ownerId;
     transition->request = std::move(request);
@@ -1126,6 +1131,9 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
     for (const auto& view : m_views) {
         if (!view.isAvailable || !view.dataStage) return {};
         transition->load.stages.push_back(view.dataStage);
+        const auto effect=std::find_if(transition->request.effects.begin(),transition->request.effects.end(),
+            [&](const auto& item){return item.viewId==view.config.id;});
+        transition->load.effects.push_back(effect==transition->request.effects.end()?std::optional<RenderEffectChange>{}:effect->change);
     }
     transition->load.stopViews = [this] {
         bool stopped = true;
@@ -1154,7 +1162,10 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
     transition->isAdvancing = false;
     if (result.status != LoadCommitStatus::Preparing) {
         m_featureTransition.reset();
-        return {};
+        FeatureDataTransitionState failure;
+        failure.status=result.status==LoadCommitStatus::Cancelled?FeatureRunStatus::Cancelled:FeatureRunStatus::Failed;
+        failure.commitFailure=DataCommitFailure::None;failure.effectFailure=result.effectFailure;
+        return failure;
     }
     return transition->state;
 }

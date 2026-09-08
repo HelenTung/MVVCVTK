@@ -165,6 +165,10 @@ public:
     virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
         return input&&input->imageView?StartDataStage(input->imageView,revision):DataStageStatus::Failed;
     }
+    virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision,
+        const std::optional<RenderEffectChange>& effect) {
+        return effect?DataStageStatus::Failed:StartRenderInputStage(input,revision);
+    }
     virtual DataStageStatus SetRenderInputStageReady(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
         return input&&input->imageView?SetDataStageReady(input->imageView,revision):DataStageStatus::Failed;
     }

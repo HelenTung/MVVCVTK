@@ -23,6 +23,8 @@ struct LoadCommitRequest final {
     std::uint64_t ownerId = 0;
     std::function<bool()> onPublish;
     VtkRenderInputSnapshot renderInput;
+    // Empty retains each current effect; otherwise one optional change per stage.
+    std::vector<std::optional<RenderEffectChange>> effects;
 };
 
 // 多 View 数据提交事务：所有 View 先建立候选，再统一切换，最后发布 DataManager current。

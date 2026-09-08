@@ -126,6 +126,10 @@ public:
     virtual void SetDataCommitted(const DataCommitResult&) noexcept { SetCommit(); }
 };
 
+struct FeatureRenderEffectChange final {
+    std::string viewId;
+    RenderEffectChange change;
+};
 struct FeatureDataTransitionRequest final {
     std::uint64_t requestId = 0;
     VtkImageGridSnapshot input;
@@ -133,6 +137,7 @@ struct FeatureDataTransitionRequest final {
     std::shared_ptr<FeatureDataCommit> commit;
     // Use either the legacy image input or this generic render input, never both.
     VtkRenderInputSnapshot renderInput;
+    std::vector<FeatureRenderEffectChange> effects;
 };
 
 struct FeatureDataTransitionState final {

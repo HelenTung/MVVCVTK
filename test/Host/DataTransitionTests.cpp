@@ -156,6 +156,83 @@ bool GetRealMeshTransitions()
     return Check(passed,"mesh-to-image restoration did not complete the real view transaction");
 }
 
+// Generic Host test double: the product layer never includes a Crop type.
+class PickEffect final : public RenderEffect {
+public:
+    class Binding final : public RenderEffectBinding {
+    public:
+        RenderInputStamp input;RenderBindingUse use;
+        explicit Binding(RenderInputStamp stamp,RenderBindingUse role):input(stamp),use(role){}
+        RenderInputStamp GetInputStamp() const override {return input;}
+        RenderBindingUse GetBindingUse() const override {return use;}
+        RenderEffectState GetEffectState() const override {return {};}
+        bool SetBindingUse(RenderBindingUse role) override {use=role;return true;}
+        bool SetEffectCommit(std::uint64_t) override {return true;}
+        bool ClearEffectStage(std::uint64_t) override {return true;}
+        bool ResetEffect() override {return true;}
+        bool SetLocalToInput(const std::array<double,16>&) override {return true;}
+        bool SetRenderInput(RenderInputStamp stamp) override {input=stamp;return true;}
+        bool OnRenderStart(vtkRenderer*) override {return true;}
+        bool OnRenderStop() override {return true;}
+    };
+    bool visible=false,fail=false;
+    bool GetPointVisible(RenderInputStamp,const std::array<double,3>&) const override {return visible;}
+    std::shared_ptr<RenderEffectBinding> BuildEffectBinding(const RenderEffectTarget& target,RenderBindingUse use) override {
+        return fail?nullptr:std::make_shared<Binding>(target.inputStamp,use);
+    }
+};
+
+bool GetEffectTransitions()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();auto image=BuildInput(data);if(!image)return false;
+    auto events=std::make_shared<SharedStateBroadcaster>();auto state=std::make_shared<SharedInteractionState>(events);
+    std::vector<AppFactoryResult> views;std::vector<vtkSmartPointer<vtkRenderWindow>> windows;
+    auto oldEffect=std::make_shared<PickEffect>(),newEffect=std::make_shared<PickEffect>();newEffect->visible=true;
+    for(int i=0;i<2;++i) {
+        AppServiceArgs args;args.dataManager=data;args.interactionState=state;args.eventSource=events;
+        auto ports=CreateAppPorts(std::move(args));auto renderer=vtkSmartPointer<vtkRenderer>::New();
+        auto window=vtkSmartPointer<vtkRenderWindow>::New();window->SetOffScreenRendering(1);window->SetSize(40,40);
+        if(!ports.renderBind->SetRenderTarget(window,renderer))return false;
+        AppViewUpdate update;update.mode=VizMode::SliceTop_down;
+        if(!ports.app.view->SendViewUpdate(update)||!ports.interaction.update->SendUpdates()
+            ||!ports.featureView->AttachRenderEffect(oldEffect))return false;
+        views.push_back(std::move(ports));windows.push_back(std::move(window));
+    }
+    LoadCommitCoordinator coordinator(data);
+    LoadCommitRequest request;request.ownerId=7;request.transactionRevision=140;request.sourceRevision=image->data->self;
+    request.renderInput=VtkRenderInputView::FromImage(image);for(const auto& view:views)request.stages.push_back(view.dataStage);
+    request.effects={RenderEffectChange{oldEffect,newEffect},RenderEffectChange{oldEffect,newEffect}};
+    int publications=0;
+    request.onPublish=[&] {++publications;for(const auto& view:views)if(!view.interaction.model->GetPointVisible({0,0,0}))return false;return false;};
+    // A mismatched second view must roll back the first prepared candidate.
+    auto bad=request;bad.effects[1]->expected=newEffect;
+    if(!Check(coordinator.SetLoadCommit(bad).status==LoadCommitStatus::Failed&&!coordinator.GetIsPending(),
+        "effect compare-and-swap accepted a stale owner"))return false;
+    if(coordinator.SetLoadCommit(request).status!=LoadCommitStatus::Preparing)return false;
+    for(const auto& view:views)if(!Check(!view.interaction.model->GetPointVisible({0,0,0})
+        &&!view.featureView->DetachRenderEffect(oldEffect.get()),"prepared effect changed current picks or allowed detach"))return false;
+    auto result=coordinator.SetLoadCommit(request);
+    if(!Check(result.status==LoadCommitStatus::Failed&&publications==1,"effect candidate did not reach publication failure"))return false;
+    for(const auto& view:views)if(!Check(!view.interaction.model->GetPointVisible({0,0,0}),"rollback did not restore the old picking effect"))return false;
+    ++request.transactionRevision;request.onPublish=[&]{++publications;return true;};
+    if(coordinator.SetLoadCommit(request).status!=LoadCommitStatus::Preparing)return false;
+    // View configuration changes must restart with the same frozen replacement.
+    AppViewUpdate changed;changed.background=BackgroundColor{0.1,0.2,0.3};
+    if(!views.front().app.view->SendViewUpdate(changed))return false;
+    result=coordinator.SetLoadCommit(request);
+    for(int tick=0;tick<50&&result.status==LoadCommitStatus::Preparing;++tick)result=coordinator.SetLoadCommit(request);
+    if(!Check(result.status==LoadCommitStatus::Succeeded,"effect candidate did not survive view-intent refresh"))return false;
+    for(const auto& view:views)if(!Check(view.interaction.model->GetPointVisible({0,0,0})
+        &&!view.featureView->DetachRenderEffect(oldEffect.get()),"successful replacement retained the old effect identity"))return false;
+    ++request.transactionRevision;
+    request.effects={RenderEffectChange{newEffect,nullptr},RenderEffectChange{newEffect,nullptr}};
+    if(coordinator.SetLoadCommit(request).status!=LoadCommitStatus::Preparing||coordinator.SetLoadCommit(request).status!=LoadCommitStatus::Succeeded)return false;
+    for(const auto& view:views)if(!Check(view.featureView->AttachRenderEffect(oldEffect)
+        &&!view.interaction.model->GetPointVisible({0,0,0}),"null replacement silently reattached the previous effect"))return false;
+    for(auto& view:views)view.taskControl->StopTasks(std::chrono::steady_clock::now()+std::chrono::seconds(3));
+    for(const auto& window:windows)window->Finalize();return true;
+}
+
 bool GetMaskedPickCoordinates()
 {
     auto image=vtkSmartPointer<vtkImageData>::New();image->SetExtent(4,5,-2,-2,1,1);
@@ -261,6 +338,7 @@ bool GetDataTransitionTests()
     bool passed=GetLoadedSnapshotIdentity();
     passed=GetRealMeshTransitions()&&passed;
     passed=GetMaskedPickCoordinates()&&passed;
+    passed=GetEffectTransitions()&&passed;
     for(int failure=0;failure<=10;++failure)passed=GetTransitionCase(failure)&&passed;
     return passed;
 }
