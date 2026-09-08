@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SurfaceRecipe.h"
+#include "Host/RoiReadTypes.h"
 #include "Data/DataPayloads.h"
 #include <functional>
 
@@ -36,7 +37,7 @@ class SurfaceSeedBuilder final
   public:
     static SurfaceSeedStatus BuildMesh(const SurfaceSeedGrid &grid, double iso,
                                        const std::optional<SurfaceMaterialPair> &materials,
-                                       const std::optional<std::array<double, 6>> &roi, double haloModel,
+                                       const RoiReadSnapshot &roi, double haloModel,
                                        std::uint32_t blockDepth, std::size_t budgetBytes,
                                        const std::function<bool()> &cancelled,
                                        std::vector<std::array<double, 3>> &points,

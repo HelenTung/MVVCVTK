@@ -15,6 +15,7 @@
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
 #include "Data/LabelMapReader.h"
+#include "Data/RoiService.h"
 
 #include <algorithm>
 #include <atomic>
@@ -91,6 +92,12 @@ public:
     std::vector<HostSceneViewState> GetSceneViewStates();
     std::optional<HostStateSnapshot> GetStateSnapshot() const;
     std::optional<ImageDescriptor> GetImageDescriptor();
+    RoiResult SetRoi(const RoiRequest& request);
+    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey,std::size_t maxBytes);
+    RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes);
+    std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived);
+    std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
     std::optional<LabelMapDescriptor> GetLabelMapDescriptor(const std::string& id);
     LabelMapReadResult GetLabelMapReadResult(const LabelMapReadRequest& request);
@@ -585,6 +592,46 @@ std::optional<ImageDescriptor> VtkAppHostSession::Impl::GetImageDescriptor()
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
     if (!GetIsReady() || !core.sharedDataMgr) return {};
     return core.sharedDataMgr->GetImageDescriptor();
+}
+
+RoiArchiveResult VtkAppHostSession::Impl::GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey,std::size_t maxBytes)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return RoiService::GetArchive(core.sharedDataMgr->GetDataGraph(),ref,sourceKey,maxBytes);
+}
+RoiResult VtkAppHostSession::Impl::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
+    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision,std::size_t maxBytes)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    const auto data=core.sharedDataMgr;
+    return data->LoadRoiArchive(archive,sourceKey,sourceRef,expectedCatalogRevision,maxBytes);
+}
+
+RoiResult VtkAppHostSession::Impl::SetRoi(const RoiRequest& request)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread != std::thread::id{} && ownerThread != std::this_thread::get_id()) return {RoiError::WrongThread};
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    const auto data = core.sharedDataMgr;
+    return data->SetRoi(request);
+}
+
+std::vector<RoiDescriptor> VtkAppHostSession::Impl::GetRoiDescriptors(bool includeArchived)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return RoiService::GetDescriptors(core.sharedDataMgr->GetDataGraph(), includeArchived);
+}
+
+std::optional<RoiDescriptor> VtkAppHostSession::Impl::GetRoiDescriptor(const DataRevisionRef& ref)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return RoiService::GetDescriptor(core.sharedDataMgr->GetDataGraph(), ref);
 }
 
 std::vector<LabelMapDescriptor> VtkAppHostSession::Impl::GetLabelMapDescriptors()
@@ -1470,6 +1517,21 @@ std::optional<ImageDescriptor> VtkAppHostSession::GetImageDescriptor()
     return m_impl ? m_impl->GetImageDescriptor() : std::optional<ImageDescriptor>{};
 }
 
+RoiResult VtkAppHostSession::SetRoi(const RoiRequest& request)
+{
+    return m_impl ? m_impl->SetRoi(request) : RoiResult{};
+}
+
+std::vector<RoiDescriptor> VtkAppHostSession::GetRoiDescriptors(bool includeArchived)
+{
+    return m_impl ? m_impl->GetRoiDescriptors(includeArchived) : std::vector<RoiDescriptor>{};
+}
+
+std::optional<RoiDescriptor> VtkAppHostSession::GetRoiDescriptor(const DataRevisionRef& ref)
+{
+    return m_impl ? m_impl->GetRoiDescriptor(ref) : std::optional<RoiDescriptor>{};
+}
+
 std::vector<LabelMapDescriptor> VtkAppHostSession::GetLabelMapDescriptors()
 {
     return m_impl ? m_impl->GetLabelMapDescriptors() : std::vector<LabelMapDescriptor>{};
@@ -1571,4 +1633,14 @@ HostUpdateResult VtkAppHostSession::SendUpdates()
 HostRenderResult VtkAppHostSession::SendRender(const HostRenderRequest& request)
 {
     return m_impl ? m_impl->SendRender(request) : HostRenderResult{HostRenderStatus::Stopped};
+}
+
+RoiArchiveResult VtkAppHostSession::GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey,std::size_t maxBytes)
+{
+    return m_impl ? m_impl->GetRoiArchive(ref,sourceKey,maxBytes):RoiArchiveResult{};
+}
+RoiResult VtkAppHostSession::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
+    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision,std::size_t maxBytes)
+{
+    return m_impl ? m_impl->LoadRoiArchive(archive,sourceKey,sourceRef,expectedCatalogRevision,maxBytes):RoiResult{};
 }

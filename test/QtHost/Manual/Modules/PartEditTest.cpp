@@ -1,6 +1,7 @@
 // 测试用途：通过编辑页面测试标签候选、确认、丢弃、撤销重做及编辑约束。
 #include "ModuleFactories.h"
 #include "PartInput.h"
+#include "Support/ReferenceDataSource.h"
 #include <QPointer>
 #include <type_traits>
 namespace Manual {
@@ -65,9 +66,10 @@ ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegment
             request.expectedLabelMap = GetText(p, "expectedLabelMap") == "current" ? feature->GetState().labelMap : GetRef(p["expectedLabelMap"]);
             request.expectedCatalogRevision = GetText(p, "expectedCatalogRevision") == "current" ? catalog->catalogRevision : GetId(p["expectedCatalogRevision"]);
             if (operation != "Undo" && operation != "Redo") {
-                if (!p["extent"].isNull()) request.scope.extent = GetArray<int, 6>(p["extent"]);
-                if (!p["roiMask"].isNull()) request.scope.roiMask = GetRef(p["roiMask"]);
-                if (!p["protectionMask"].isNull()) request.scope.protectionMask = GetRef(p["protectionMask"]);
+                request.scope.editRoi = CreateInputRoi(*panel->GetSession(), feature->GetState().sourceRevision,
+                    p["extent"], p["roiMask"], "Part edit region");
+                request.scope.protectionRoi = CreateInputRoi(*panel->GetSession(), feature->GetState().sourceRevision,
+                    QJsonValue(), p["protectionMask"], "Part protection region");
                 request.scope.protectedParts = GetParts(p["protectedParts"], *catalog);
             }
             if (operation == "Paint" || operation == "Erase") {

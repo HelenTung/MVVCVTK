@@ -3,6 +3,11 @@
 #include "Data/DataPayloads.h"
 
 #include <vtkClipPolyData.h>
+#include <vtkCleanPolyData.h>
+#include <vtkCellArray.h>
+#include <vtkIdList.h>
+#include <vtkPoints.h>
+#include <vtkTriangleFilter.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkImageData.h>
@@ -959,5 +964,103 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     auto result = BuildResultBase(params);
     result.isSucceeded = true;
     result.polyData = std::move(output);
+    return result;
+}
+
+CropMaterializationCandidate CropAlgorithm::GetRoiResult(
+    const CropInputSnapshot& input, RoiReadSnapshot roi,
+    std::size_t availableRamBytes, const std::function<bool()>& getStopRequested)
+{
+    CropMaterializationCandidate result;
+    result.failureReason=CropFailure::BadInput;
+    if (!input.data || !GetInputValid(input) || !roi || roi->GetSource()!=input.data->self) return result;
+    result.sourceRevision=input.data->self;
+    result.roi=std::move(roi);
+    const auto cancelled=[&] {
+        if (getStopRequested && getStopRequested()) {
+            result.isCancelled=true; result.failureReason=CropFailure::WorkerFailed;
+            result.message="ROI crop cancelled."; return true;
+        }
+        return false;
+    };
+    try {
+        if (cancelled()) return result;
+        if (input.image) {
+            const auto* image=dynamic_cast<const ImageGrid3DPayload*>(input.data->payload.get());
+            if (!image || !image->GetValid()) return result;
+            const auto count=*GetGridVoxelCount(image->GetGeometry());
+            const auto reserve=roiCopyLimit+16ULL*1024*1024;
+            if (availableRamBytes<reserve || count>(availableRamBytes-reserve)/3) {
+                result.failureReason=CropFailure::LowRam; return result;
+            }
+            auto mask=vtkSmartPointer<vtkImageData>::New();
+            mask->CopyStructure(input.image->image); mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+            auto* values=static_cast<unsigned char*>(mask->GetScalarPointer());
+            if (!values) { result.failureReason=CropFailure::MaskFailed; return result; }
+            RoiMaskRequest request;
+            for (int a=0;a<3;++a) request.region.size[a]=static_cast<std::size_t>(image->GetGeometry().dimensions[a]);
+            request.getCancelled=getStopRequested;
+            std::size_t selected=0;
+            for (;;) {
+                const auto chunk=result.roi->GetMaskChunk(request);
+                if (chunk.error!=RoiError::None) {
+                    result.isCancelled=chunk.error==RoiError::Cancelled;
+                    result.failureReason=chunk.error==RoiError::TooLarge ? CropFailure::LowRam:CropFailure::MaskFailed;
+                    return result;
+                }
+                for (std::size_t i=0;i<chunk.values.size();++i) {
+                    const auto index=request.voxelOffset+i;
+                    const bool valid=(!image->GetValidityMask() || (*image->GetValidityMask())[index]!=0) && chunk.values[i]!=0;
+                    values[index]=valid ? 255:0; selected+=valid;
+                }
+                if (chunk.isComplete) break;
+                request.voxelOffset=chunk.nextOffset;
+            }
+            if (!selected) { result.failureReason=CropFailure::EmptyResult; return result; }
+            if (cancelled()) return result;
+            result.imageData=vtkSmartPointer<vtkImageData>::New();
+            result.imageData->ShallowCopy(input.image->image); result.maskImage=std::move(mask);
+        } else if (input.mesh && input.mesh->mesh) {
+            const auto planes=result.roi->GetClipPlanes();
+            if (planes.error!=RoiError::None) { result.failureReason=CropFailure::BadBuildMode; return result; }
+            const auto* mesh=dynamic_cast<const SurfaceMeshPayload*>(input.data->payload.get());
+            if (!mesh || !mesh->GetValid()) return result;
+            const auto triangles=mesh->GetTriangles().size()/3;
+            const auto perTriangle=(planes.planes.size()+3)*256;
+            const auto reserve=16ULL*1024*1024;
+            if (availableRamBytes<reserve || triangles>(availableRamBytes-reserve)/perTriangle) {
+                result.failureReason=CropFailure::LowRam; return result;
+            }
+            vtkNew<vtkPoints> points; points->SetDataTypeToDouble();
+            vtkNew<vtkCellArray> cells;
+            const auto& vertices=mesh->GetVertices();
+            const auto& topology=mesh->GetTriangles();
+            for (std::size_t i=0;i<triangles;++i) {
+                if ((i&127)==0 && cancelled()) return result;
+                std::array<std::array<double,3>,3> triangle;
+                for (std::size_t j=0;j<3;++j) {
+                    const auto index=static_cast<std::size_t>(topology[i*3+j])*3;
+                    triangle[j]={vertices[index],vertices[index+1],vertices[index+2]};
+                }
+                const auto polygon=result.roi->GetClippedTriangle(triangle);
+                if (polygon.error!=RoiError::None) { result.failureReason=CropFailure::ClipFailed; return result; }
+                if (polygon.points.size()<3) continue;
+                cells->InsertNextCell(static_cast<int>(polygon.points.size()));
+                for (const auto& point:polygon.points) cells->InsertCellPoint(points->InsertNextPoint(point.data()));
+            }
+            vtkNew<vtkPolyData> clipped; clipped->SetPoints(points); clipped->SetPolys(cells);
+            vtkNew<vtkCleanPolyData> clean; clean->SetInputData(clipped); clean->ToleranceIsAbsoluteOn();
+            const auto bounds=result.roi->GetBounds();
+            const double scale=std::max({bounds[1]-bounds[0],bounds[3]-bounds[2],bounds[5]-bounds[4],1e-12});
+            clean->SetAbsoluteTolerance(scale*1e-12); clean->ConvertLinesToPointsOff(); clean->ConvertPolysToLinesOff();
+            vtkNew<vtkTriangleFilter> filter; filter->SetInputConnection(clean->GetOutputPort());
+            filter->PassLinesOff(); filter->PassVertsOff(); filter->Update();
+            if (cancelled()) return result;
+            if (!filter->GetOutput()->GetNumberOfPolys()) { result.failureReason=CropFailure::EmptyResult; return result; }
+            result.polyData=vtkSmartPointer<vtkPolyData>::New(); result.polyData->ShallowCopy(filter->GetOutput());
+        } else return result;
+        result.isSucceeded=true; result.failureReason=CropFailure::None; result.message="ROI crop candidate ready.";
+    } catch (const std::bad_alloc&) { result.failureReason=CropFailure::LowRam; }
+    catch (...) { result.failureReason=CropFailure::WorkerFailed; }
     return result;
 }

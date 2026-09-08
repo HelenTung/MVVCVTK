@@ -18,6 +18,7 @@ struct SurfaceDeterminationStartParams final : SurfaceRecipe
     HostViewTargets targetViews;
     // 省略只在接纳时解析主卷，计算不再查询当前选择。
     std::optional<DataRevisionRef> sourceVolume;
+    std::optional<DataRevisionRef> analysisRoi;
     std::optional<DataRevisionRef> materialLabels;
     std::optional<DataRevisionRef> initialSurface;
     // 执行分块不降低分辨率，不影响算法结果的参数指纹。
@@ -86,6 +87,7 @@ struct SurfaceDeterminationRequest final {
 
 enum class SurfaceAdmissionStatus : std::uint8_t {
     Accepted,
+    UnsupportedRoi,
     InvalidRequest,
     Busy,
     Stopping,
@@ -109,6 +111,7 @@ enum class SurfaceFailureReason : std::uint8_t {
     InvalidGeometry,
     UnsupportedScalar,
     InvalidRoi,
+    UnsupportedRoi,
     ThresholdUnreliable,
     NoSurface,
     BudgetExceeded,

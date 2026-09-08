@@ -362,12 +362,11 @@ enum class PartSegmentationStatus : std::uint8_t {
     Committing
 };
 
-// 编辑坐标均属于原始数据网格；extent 含端点，物理位置使用 mm。
+// 编辑区域引用公共 ROI；点/种子仍使用原始网格或源物理坐标（mm）。
 struct PartEditScope final {
-    std::optional<std::array<int, 6>> extent;
-    std::optional<DataRevisionRef> roiMask;
+    std::optional<DataRevisionRef> editRoi;
     std::vector<PartBindingRef> protectedParts;
-    std::optional<DataRevisionRef> protectionMask;
+    std::optional<DataRevisionRef> protectionRoi;
 };
 
 struct PartBrushPlane final {

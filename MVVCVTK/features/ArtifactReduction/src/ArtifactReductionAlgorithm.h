@@ -2,6 +2,7 @@
 
 #include "Host/ArtifactReductionHostTypes.h"
 #include "Data/DataPayloads.h"
+#include "Host/RoiReadTypes.h"
 
 #include <atomic>
 #include <chrono>
@@ -20,9 +21,10 @@ struct TaskControl final {
 
 struct AlgorithmInput final {
     std::shared_ptr<const ImageGrid3DPayload> image;
-    std::shared_ptr<const BinaryMask3DPayload> processing;
-    std::shared_ptr<const BinaryMask3DPayload> protection;
-    std::shared_ptr<const BinaryMask3DPayload> material;
+    RoiReadSnapshot processing;
+    RoiReadSnapshot protection;
+    RoiReadSnapshot material;
+    std::size_t roiBytes = 0;
 };
 
 struct AlgorithmResult final {
@@ -49,6 +51,7 @@ public:
     const GridGeometry3D& GetGeometry() const noexcept;
     std::size_t GetCount() const noexcept;
 private:
+    std::array<double, 3> GetPoint(std::size_t index) const noexcept;
     const AlgorithmInput& m_input;
     const std::vector<float>* m_values = nullptr;
 };

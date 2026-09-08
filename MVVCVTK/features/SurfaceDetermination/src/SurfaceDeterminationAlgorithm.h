@@ -20,6 +20,7 @@ struct SurfaceAlgorithmInputs final
 {
     DataSnapshot materialLabels;
     DataSnapshot initialSurface;
+    RoiReadSnapshot roi;
 };
 
 struct SurfaceAlgorithmResult final {
@@ -31,7 +32,7 @@ struct SurfaceAlgorithmResult final {
     std::string message;
     DataRevisionRef sourceRevision;
     std::uint64_t parameterFingerprint = 0;
-    std::uint32_t algorithmRevision = 3;
+    std::uint32_t algorithmRevision = 4;
     SurfaceDeterminationStartParams resolvedParams;
     std::vector<std::uint8_t> triangleValidity;
     SurfaceDeterminationMethod method =

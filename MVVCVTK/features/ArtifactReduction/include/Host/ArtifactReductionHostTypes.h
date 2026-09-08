@@ -56,11 +56,11 @@ struct ArtifactRingParams final {
 struct ArtifactRequest final {
     DataRevisionRef source;
     ArtifactInputMode inputMode = ArtifactInputMode::CurrentPrimary;
-    // 三种掩码均为明确修订的同网格 BinaryMask3DPayload。
-    std::optional<DataRevisionRef> processingMask;
-    std::optional<DataRevisionRef> protectionMask;
-    std::optional<DataRevisionRef> materialMask;
-    // materialMask仅用于质量统计；两种算法都不是掩码感知滤波器。
+    // 三种区域均为绑定 source 精确修订的公共 ROI。
+    std::optional<DataRevisionRef> processingRoi;
+    std::optional<DataRevisionRef> protectionRoi;
+    std::optional<DataRevisionRef> qualityRoi;
+    // qualityRoi仅用于区域（material）质量统计，整体输出统计仍覆盖有效数据；两种算法都不是掩码感知滤波器。
     std::optional<ArtifactDiffusionParams> diffusion;
     std::optional<ArtifactRingParams> ring;
     std::uint32_t timeoutMs = 60000;

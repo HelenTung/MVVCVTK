@@ -175,7 +175,6 @@ struct SurfaceRecipe
     SurfaceComponentSelection componentSelection = SurfaceComponentSelection::Largest;
     std::optional<double> initialIsoValue;
     std::optional<std::array<double, 3>> seedModelPoint;
-    std::optional<std::array<double, 6>> roiModelBounds;
     std::optional<double> profileHalfLengthModel;
     std::optional<double> profileSampleStepModel;
     std::optional<double> maximumOffsetModel;
