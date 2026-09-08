@@ -15,7 +15,9 @@ public:
     bool SetViewConfig(const PreInitConfig&) override { return true; }
     bool SendViewUpdate(const AppViewUpdate&) override { return true; }
     bool SetViewState(const AppViewState&, std::uint64_t) override { return true; }
-    AppViewState GetViewState() const override { return state; }
+    AppViewState GetViewState() const override { ++viewReads; return state; }
+    RulerState GetRulerState() const override { return state.rulerState; }
+    mutable int viewReads = 0;
     AppViewState state;
 };
 class UpdateProbe final : public RenderUpdatePort {
@@ -87,6 +89,25 @@ struct FrameFixture final {
         (void)frames.SetFrameGeneration(17);
     }
 };
+bool GetRulerCopyValid()
+{
+    FrameFixture fixture;
+    auto view = std::dynamic_pointer_cast<ViewProbe>(fixture.views[0].app.view);
+    if (!view || !fixture.frames.CollectFrameUpdates()
+        || fixture.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
+    fixture.frames.SetFrameCommit(1);
+    const int readsBefore = view->viewReads;
+    // 模拟实际 draw 才产生标尺结果，旧 scene 的缓存仍是 NoData。
+    view->state.rulerState.status = RulerStatus::Visible;
+    view->state.rulerState.lengthMm = 2.0;
+    view->state.rulerState.lengthPixels = 100.0;
+    if (!fixture.frames.SendFrameRender(1)) return false;
+    const auto scenes = fixture.frames.GetSceneStates();
+    return view->viewReads == readsBefore && scenes.size() == 2 && scenes[0].presentation
+        && scenes[0].presentation->rulerState.status == HostRulerStatus::Visible
+        && scenes[0].presentation->rulerState.lengthMm == 2.0;
+}
+
 bool GetFrameFailuresValid()
 {
     FrameFixture f;
@@ -222,6 +243,7 @@ int main()
         std::cout << (value ? "[PASS] " : "[FAIL] ") << name << '\n';
         if (!value) ++failures;
     };
+    check(GetRulerCopyValid(), "draw publishes ruler without copying full presentation state");
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");

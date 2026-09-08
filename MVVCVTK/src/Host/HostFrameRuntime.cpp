@@ -662,8 +662,7 @@ void HostFrameRuntime::SetRulerState(const std::size_t index) noexcept
     // 场景值在提交时冻结，但标尺只有真正 draw 后才有尺度；这里只补齐该绘制结果，
     // 不重新采集场景图、不改变 presentationRevision，也不让查询产生副作用。
     try {
-        const auto state = m_views[index].app.view->GetViewState();
-        auto ruler = HostRulerCodec::GetState(state.rulerState);
+        auto ruler = HostRulerCodec::GetState(m_views[index].app.view->GetRulerState());
         if (ruler.dataRevision == presentation.dataRevision
             && ruler.bindingRevision == presentation.bindingRevision) {
             presentation.rulerState = std::move(ruler);

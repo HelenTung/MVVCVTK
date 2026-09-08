@@ -4084,6 +4084,12 @@ public:
         return GetState();
     }
 
+    RulerState GetRulerState() const override
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        return m_service ? m_service->m_ruler.GetState() : RulerState{};
+    }
+
 private:
     bool GetUpdateValid(const AppViewUpdate& update) const
     {

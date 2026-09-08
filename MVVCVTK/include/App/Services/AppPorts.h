@@ -147,6 +147,9 @@ public:
         const AppViewState& state,
         std::uint64_t expectedRevision) = 0;
     virtual AppViewState GetViewState() const = 0;
+    // draw 完成阶段只读取有界标尺值，避免为标尺复制整组传输函数。
+    // 未提供标尺的内部 View 实现返回 NoData。
+    virtual RulerState GetRulerState() const { return {}; }
 };
 
 class AppFeaturePort {
