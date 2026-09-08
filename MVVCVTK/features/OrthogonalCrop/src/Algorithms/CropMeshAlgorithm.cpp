@@ -55,40 +55,51 @@ std::vector<Face> Faces(const CropGeometry& geometry)
 class Engine final {
 public:
     Engine(vtkPolyData* source,const CropBuildParams& params,const std::vector<CropGeometry>& geometry,
-        const std::function<bool()>& stop,std::uint64_t& operation)
-        :m_source(source),m_params(params),m_geometry(geometry),m_stop(stop),m_operation(operation)
+        const std::function<bool()>& stop,std::uint64_t& operation,std::shared_ptr<const SurfaceMeshPayload> canonicalSource)
+        :m_source(source),m_canonical(std::move(canonicalSource)),m_params(params),m_geometry(geometry),m_stop(stop),m_operation(operation)
     {
         m_limit=params.availableRamBytes?params.availableRamBytes:512ULL*1024*1024;
         if(!std::isfinite(params.meshTolerance)||params.meshTolerance<=0||!params.maxCells
             ||!params.maxDepth||params.maxDepth>128||std::fegetround()!=FE_TONEAREST)
             throw Failure{CropFailure::BadInput,"Mesh tolerance, cell/depth limits or floating-point mode is invalid."};
         m_fixed=16ULL*1024*1024;
-        const auto memory=static_cast<std::uint64_t>(source->GetActualMemorySize());
-        if(memory>std::numeric_limits<std::size_t>::max()/5120)throw Failure{CropFailure::LowRam,"Mesh input size overflows."};
-        AddBytes(m_fixed,static_cast<std::size_t>(memory)*1024*5); // VTK reports KiB; reserve five coexisting input representations.
-        std::size_t pointComponents=0,cellComponents=0;
-        for(auto* data:{static_cast<vtkDataSetAttributes*>(source->GetPointData()),static_cast<vtkDataSetAttributes*>(source->GetCellData())}) {
-            for(int i=0;i<data->GetNumberOfArrays();++i) {
-                auto* array=vtkDataArray::SafeDownCast(data->GetAbstractArray(i));
-                if(!array||!array->GetName()||array->GetNumberOfComponents()<=0
-                    ||array->GetNumberOfTuples()!=(data==source->GetPointData()?source->GetNumberOfPoints():source->GetNumberOfCells()))
-                    throw Failure{CropFailure::BadInput,"Mesh attributes must be named numeric arrays."};
-                auto& components=data==source->GetPointData()?pointComponents:cellComponents;
-                AddBytes(components,static_cast<std::size_t>(array->GetNumberOfComponents()));
-                AddBytes(m_fixed,4096+4*std::char_traits<char>::length(array->GetName()));
-            }
-        }
         const auto multiply=[](std::size_t a,std::size_t b) {
             if(b&&a>std::numeric_limits<std::size_t>::max()/b)throw Failure{CropFailure::LowRam,"Mesh canonical layout overflows."};
             return a*b;
         };
-        std::size_t pointBytes=24,cellBytes=32;
-        AddBytes(pointBytes,multiply(pointComponents,8));AddBytes(cellBytes,multiply(cellComponents,8));
-        std::size_t triangleUpper=0;
-        for(auto* cells:{source->GetPolys(),source->GetStrips()})
-            if(cells)AddBytes(triangleUpper,static_cast<std::size_t>(cells->GetNumberOfConnectivityIds()));
-        std::size_t canonical=multiply(static_cast<std::size_t>(source->GetNumberOfPoints()),pointBytes);
-        AddBytes(canonical,multiply(triangleUpper,cellBytes));
+        std::size_t pointComponents=0,cellComponents=0,canonical=0;
+        if(m_canonical) {
+            if(!m_canonical->GetValid())throw Failure{CropFailure::BadInput,"Canonical Root mesh is invalid."};
+            AddBytes(canonical,multiply(m_canonical->GetVertices().size(),sizeof(double)));
+            AddBytes(canonical,multiply(m_canonical->GetTriangles().size(),sizeof(std::uint64_t)));
+            for(const auto* attributes:{&m_canonical->GetPointAttributes(),&m_canonical->GetCellAttributes()})
+                for(const auto& attribute:*attributes) {
+                    AddBytes(attributes==&m_canonical->GetPointAttributes()?pointComponents:cellComponents,attribute.componentCount);
+                    AddBytes(canonical,multiply(attribute.values.size(),sizeof(double)));
+                    AddBytes(m_fixed,4096+4*attribute.name.size());
+                }
+            AddBytes(m_fixed,multiply(canonical,5));
+        } else {
+            const auto memory=static_cast<std::uint64_t>(source->GetActualMemorySize());
+            if(memory>std::numeric_limits<std::size_t>::max()/5120)throw Failure{CropFailure::LowRam,"Mesh input size overflows."};
+            AddBytes(m_fixed,static_cast<std::size_t>(memory)*1024*5);
+            for(auto* data:{static_cast<vtkDataSetAttributes*>(source->GetPointData()),static_cast<vtkDataSetAttributes*>(source->GetCellData())}) {
+                for(int i=0;i<data->GetNumberOfArrays();++i) {
+                    auto* array=vtkDataArray::SafeDownCast(data->GetAbstractArray(i));
+                    if(!array||!array->GetName()||array->GetNumberOfComponents()<=0
+                        ||array->GetNumberOfTuples()!=(data==source->GetPointData()?source->GetNumberOfPoints():source->GetNumberOfCells()))
+                        throw Failure{CropFailure::BadInput,"Mesh attributes must be named numeric arrays."};
+                    AddBytes(data==source->GetPointData()?pointComponents:cellComponents,static_cast<std::size_t>(array->GetNumberOfComponents()));
+                    AddBytes(m_fixed,4096+4*std::char_traits<char>::length(array->GetName()));
+                }
+            }
+            std::size_t pointBytes=24,cellBytes=32;
+            AddBytes(pointBytes,multiply(pointComponents,8));AddBytes(cellBytes,multiply(cellComponents,8));
+            std::size_t triangleUpper=0;
+            for(auto* cells:{source->GetPolys(),source->GetStrips()})if(cells)AddBytes(triangleUpper,static_cast<std::size_t>(cells->GetNumberOfConnectivityIds()));
+            canonical=multiply(static_cast<std::size_t>(source->GetNumberOfPoints()),pointBytes);
+            AddBytes(canonical,multiply(triangleUpper,cellBytes));
+        }
         // Numeric attributes become doubles. A byte-sized source array must be
         // budgeted at the canonical size before either factory allocates it.
         AddBytes(m_fixed,multiply(canonical,4));
@@ -110,7 +121,7 @@ public:
     {
         CheckStop();
         // The trusted worker factory validates lossless attributes and isolates VTK traversal state.
-        const auto input=VtkPreparedDataView::BuildDataView(m_source);
+        const auto input=m_canonical?VtkPreparedDataView::BuildDataView(m_canonical):VtkPreparedDataView::BuildDataView(m_source);
         if(!input||!input->mesh||!input->mesh->mesh)throw Failure{CropFailure::BadInput,"Mesh input cannot be frozen without attribute or geometry loss."};
         m_input=input->mesh->mesh;
         m_output->GetPointData()->InterpolateAllocate(m_input->GetPointData());
@@ -529,7 +540,7 @@ private:
         }
         Split(triangle,seed,hasSeed);
     }
-    vtkPolyData* m_source;const CropBuildParams& m_params;const std::vector<CropGeometry>& m_geometry;
+    vtkPolyData* m_source;std::shared_ptr<const SurfaceMeshPayload> m_canonical;const CropBuildParams& m_params;const std::vector<CropGeometry>& m_geometry;
     const std::function<bool()>& m_stop;std::uint64_t& m_operation;
     vtkPolyData* m_input=nullptr;vtkIdList* m_ids=nullptr;vtkIdType m_cell=0;
     std::array<P,3> m_root{};std::vector<std::vector<Face>> m_faces;std::vector<Triangle> m_stack;
@@ -540,11 +551,11 @@ private:
 }
 
 CropMaterializationCandidate CropMeshAlgorithm::GetResult(vtkPolyData* mesh,const CropBuildParams& params,
-    const std::vector<CropGeometry>& geometry,const std::function<bool()>& getStopRequested)
+    const std::vector<CropGeometry>& geometry,const std::function<bool()>& getStopRequested,std::shared_ptr<const SurfaceMeshPayload> sourcePayload)
 {
     std::uint64_t operation=0;
     CropMaterializationCandidate failure;failure.sourceRevision=params.sourceRevision;failure.operations=params.operations;failure.nodeCount=params.nodeCount;
-    try {return Engine(mesh,params,geometry,getStopRequested,operation).Run();}
+    try {return Engine(mesh,params,geometry,getStopRequested,operation,std::move(sourcePayload)).Run();}
     catch(const Failure& error){failure.failureReason=error.reason;failure.message=error.message;failure.isCancelled=error.reason==CropFailure::Cancelled;}
     catch(const std::bad_alloc&){failure.failureReason=CropFailure::LowRam;failure.message="Mesh allocation failed.";}
     catch(...){failure.failureReason=CropFailure::WorkerFailed;failure.message="Mesh clipping failed before publication.";}

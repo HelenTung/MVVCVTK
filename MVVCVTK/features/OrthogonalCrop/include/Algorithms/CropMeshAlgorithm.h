@@ -5,5 +5,5 @@ class CropMeshAlgorithm final {
 public:
     static CropMaterializationCandidate GetResult(vtkPolyData* mesh,
         const CropBuildParams& params,const std::vector<CropGeometry>& geometry,
-        const std::function<bool()>& getStopRequested);
+        const std::function<bool()>& getStopRequested,std::shared_ptr<const SurfaceMeshPayload> sourcePayload = {});
 };

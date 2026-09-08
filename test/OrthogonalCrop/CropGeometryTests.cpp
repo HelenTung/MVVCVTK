@@ -103,5 +103,19 @@ int GetCropGeometryFailures()
         if (std::abs(std::abs(dx)-cylinder.radius)<1e-12||std::abs(std::abs(dz)-cylinder.height/2)<1e-12)continue;
         check(reference&&reference->GetInside({dx,0,dz})==expected,"independent cylinder reference");
     }
+    for(const auto axis:{CropVectorDouble3Array{2,-3,1},CropVectorDouble3Array{1e308,1e308,1e308},CropVectorDouble3Array{1e-320,2e-320,3e-320}}) {
+        CropOpItem input;input.geometryType=CropShape::Cylinder;input.axisInInputModel=axis;
+        auto first=CropGeometry::Build(input);check(first.has_value(),"finite nonzero extreme axis rejected");
+        if(!first)continue;
+        const auto frozen=first->GetOperation().axisInInputModel;
+        for(int repeat=0;repeat<1000;++repeat) {
+            first=CropGeometry::Build(first->GetOperation());
+            if(!first||first->GetOperation().axisInInputModel!=frozen){check(false,"canonical axis drifted across repeated serialization/rebuild");break;}
+        }
+    }
+    for(auto shape:{CropShape::Box,CropShape::Plane,CropShape::Cylinder,CropShape::Sphere}) {
+        CropOpItem invalid;invalid.geometryType=shape;invalid.planeCenterInInputModel[0]=std::numeric_limits<double>::quiet_NaN();
+        check(!CropGeometry::Build(invalid),"NaN in an inactive serialized field accepted");
+    }
     return failures + GetFloatIntervalFailures();
 }

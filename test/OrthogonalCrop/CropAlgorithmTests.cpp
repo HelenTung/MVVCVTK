@@ -8,6 +8,7 @@
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
@@ -653,6 +654,47 @@ bool StartPolyBuildCase()
         "PolyData build should DeepCopy one clipped kept half from the temporary pipeline.");
 }
 
+bool StartCanonicalRootCase()
+{
+    TestDataPort data;
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(3,1,1);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    image->GetPointData()->GetScalars()->FillComponent(0,7);
+    auto mask=vtkSmartPointer<vtkImageData>::New();mask->CopyStructure(image);mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* bytes=static_cast<unsigned char*>(mask->GetScalarPointer());bytes[0]=0;bytes[1]=255;bytes[2]=255;
+    const auto view=data.SetPrimaryImage(image,mask);
+    CropInputSnapshot input;input.graph=view->graph;input.binding=view->binding;input.data=view->data;input.image=view;
+    input.inputModelBounds={0,2,0,0,0,0};
+    auto operation=BuildPlane(1);operation.planeCenterInInputModel={0.5,0,0};operation.planeNormalInInputModel={1,0,0};
+    auto params=BuildParams(operation);params.sourceRevision=view->data->self;
+    auto task=CropRouter{}.BuildResultTask(input,params,BuildPayload(params.operations,1,1,params.sourceRevision));if(!task)return false;
+    // A writable rendering wrapper is not authority for frozen Root geometry or M0.
+    view->image->SetOrigin(1000,0,0);view->validityMask->GetPointData()->GetScalars()->FillComponent(0,0);
+    auto future=task->get_future();(*task)();const auto output=future.get();
+    const auto source=std::dynamic_pointer_cast<const ImageGrid3DPayload>(view->data->payload);
+    const auto payload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(output.outputPayload);
+    if(!SetExpect(output.isSucceeded&&payload&&payload->GetValues()==source->GetValues()
+        &&payload->GetGeometry().origin==std::array<double,3>{0,0,0}
+        &&*payload->GetValidityMask()==std::vector<std::uint8_t>{0,255,255}
+        &&output.preparedView->image->image->GetOrigin()[0]==0,
+        "Materialization read mutable VTK geometry/mask instead of canonical Root."))return false;
+    const auto entity=data.CreateDataEntityId();const DataRevisionRef ref{entity,1};
+    auto meshPayload=std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{100000000.125,0,0,100000000.375,0,0,100000000.125,0.25,0},
+        std::vector<std::uint64_t>{0,1,2});
+    DataTransaction create;create.outputs.push_back({entity,0,DataTypes::surfaceMesh,{},meshPayload,{}});
+    if(data.SetDataCommit(std::move(create)).status!=DataCommitStatus::Succeeded)return false;
+    input={};input.graph=data.GetDataGraph();input.data=data.GetData(input.graph,ref);input.mesh=data.GetSurfaceMesh(input.graph,ref);
+    input.mesh->mesh->GetBounds(input.inputModelBounds.data());double point[3]={};input.mesh->mesh->GetPoint(0,point);
+    if(!SetExpect(point[0]==100000000.125,"Canonical double mesh coordinates were rounded by the VTK bridge."))return false;
+    operation.planeCenterInInputModel={100000000,0,0};params=BuildParams(operation);params.sourceRevision=ref;
+    task=CropRouter{}.BuildResultTask(input,params,BuildPayload(params.operations,1,1,ref));if(!task)return false;
+    for(vtkIdType i=0;i<3;++i)input.mesh->mesh->GetPoints()->SetPoint(i,0,0,0);
+    auto meshFuture=task->get_future();(*task)();const auto cropped=meshFuture.get();
+    double bounds[6]={};if(cropped.polyData)cropped.polyData->GetBounds(bounds);
+    return SetExpect(cropped.isSucceeded&&bounds[0]==100000000.125&&bounds[1]==100000000.375,
+        "Materialization read mutable VTK points instead of canonical Root mesh.");
+}
+
 bool StartRouterTaskCase()
 {
     auto image = vtkSmartPointer<vtkImageData>::New();
@@ -718,5 +760,6 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartCurvedRecipeCase() ? 0 : 1;
     failureCount += StartPolyBuildCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
+    failureCount += StartCanonicalRootCase() ? 0 : 1;
     return failureCount;
 }

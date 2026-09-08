@@ -102,7 +102,7 @@ CropRouter::BuildResultTask(
                     params, payload, 0, getStopRequested, source);
             } else {
                 result = CropAlgorithm::GetResult(input.mesh ? input.mesh->mesh.GetPointer() : nullptr,
-                    params, payload, getStopRequested);
+                    params, payload, getStopRequested,std::dynamic_pointer_cast<const SurfaceMeshPayload>(input.data->payload));
                 if (result.isSucceeded) {
                     const auto* source=dynamic_cast<const SurfaceMeshPayload*>(input.data->payload.get());
                     result.preparedView = source?VtkPreparedDataView::BuildDataView(result.polyData,source->GetCoordinateFrame()):nullptr;

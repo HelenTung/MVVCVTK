@@ -517,7 +517,9 @@ std::shared_ptr<const VtkPreparedDataView> VtkDataBridge::BuildDataView(
             auto view = std::make_shared<VtkImageGridView>();
             view->data = draft;
             view->image = vtkSmartPointer<vtkImageData>::New();
-            view->image->CopyStructure(source->image);
+            const auto& geometry=image->GetGeometry();
+            view->image->SetExtent(geometry.extent[0],geometry.extent[1],geometry.extent[2],geometry.extent[3],geometry.extent[4],geometry.extent[5]);view->image->SetOrigin(geometry.origin.data());
+            view->image->SetSpacing(geometry.spacing.data());view->image->SetDirectionMatrix(geometry.direction.data());
             view->image->GetPointData()->SetScalars(source->image->GetPointData()->GetScalars());
             // The scalar allocation belongs to Root. Only this result's shell and mask carry its lease.
             VtkDataResourceLease::Attach(view->image, result->resourceUse.lease);
@@ -675,6 +677,7 @@ VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
     if (!payload || !payload->GetValid()) return {};
 
     auto points = vtkSmartPointer<vtkPoints>::New();
+    points->SetDataTypeToDouble();
     const auto& vertices = payload->GetVertices();
     points->SetNumberOfPoints(static_cast<vtkIdType>(vertices.size() / 3));
     for (std::size_t index = 0; index < vertices.size() / 3; ++index) {

@@ -97,5 +97,6 @@ public:
         vtkPolyData* polyData,
         const CropBuildParams& params,
         const CropShaderPayload& payload,
-        const std::function<bool()>& getStopRequested = {});
+        const std::function<bool()>& getStopRequested = {},
+        std::shared_ptr<const SurfaceMeshPayload> sourcePayload = {});
 };

@@ -309,7 +309,8 @@ bool GetRamValid(
     vtkImageData* image,
     const CropBuildParams& params,
     const CropShaderPayload& payload,
-    const std::size_t fallbackAvailableRamBytes)
+    const std::size_t fallbackAvailableRamBytes,
+    const ImageGrid3DPayload* sourcePayload)
 {
     const std::size_t availableRamBytes = params.availableRamBytes != 0
         ? params.availableRamBytes
@@ -318,8 +319,9 @@ bool GetRamValid(
         return true;
     }
 
-    const vtkIdType pointCount = image
-        ? image->GetNumberOfPoints() : 0;
+    const vtkIdType pointCount = sourcePayload
+        ? static_cast<vtkIdType>(GetGridVoxelCount(sourcePayload->GetGeometry()).value_or(0))
+        : image?image->GetNumberOfPoints():0;
     if (pointCount < 0) {
         return false;
     }
@@ -327,7 +329,8 @@ bool GetRamValid(
     if (static_cast<std::uint64_t>(pointCount) > std::numeric_limits<std::size_t>::max() / 2) return false;
     const std::size_t maskBytes = static_cast<std::size_t>(pointCount) * 2;
     int dimensions[3] = {};
-    image->GetDimensions(dimensions);
+    if(sourcePayload)std::copy(sourcePayload->GetGeometry().dimensions.begin(),sourcePayload->GetGeometry().dimensions.end(),dimensions);
+    else image->GetDimensions(dimensions);
     const std::size_t sliceBytes = static_cast<std::size_t>(std::max(0, dimensions[2])) * sizeof(std::size_t);
     const std::size_t tableBytes = payload.predicateTable
         ? payload.predicateTable->rgbaValues.size() * sizeof(float)
@@ -534,7 +537,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
             CropFailure::NoImage,
             "Crop result build requires image scalars.");
     }
-    if (!GetMaskValid(image, validityMask)
+    if ((sourcePayload?!sourcePayload->GetValid():!GetMaskValid(image,validityMask))
         || !GetPayloadValid(params, payload)) {
         return BuildResultFailure(
             params,
@@ -543,7 +546,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     }
 
     int extent[6] = {};
-    image->GetExtent(extent);
+    if(sourcePayload)std::copy(sourcePayload->GetGeometry().extent.begin(),sourcePayload->GetGeometry().extent.end(),extent);
+    else image->GetExtent(extent);
     const vtkIdType xCount =
         static_cast<vtkIdType>(extent[1])
         - static_cast<vtkIdType>(extent[0]) + 1;
@@ -556,7 +560,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     if (xCount <= 0
         || yCount <= 0
         || zCount <= 0
-        || image->GetNumberOfPoints() <= 0) {
+        || (!sourcePayload&&image->GetNumberOfPoints()<=0)) {
         return BuildResultFailure(
             params,
             CropFailure::EmptyResult,
@@ -566,7 +570,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     std::array<double, 12> indexToModel = {};
     const auto* indexMatrix =
         image->GetIndexToPhysicalMatrix();
-    if (!indexMatrix) {
+    if (!sourcePayload&&!indexMatrix) {
         return BuildResultFailure(
             params,
             CropFailure::BadInput,
@@ -576,8 +580,10 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
         for (int column = 0;
             column < 4;
             ++column) {
-            const double value =
-                indexMatrix->GetElement(row, column);
+            const double value=sourcePayload
+                ? column==3?sourcePayload->GetGeometry().origin[row]
+                    :sourcePayload->GetGeometry().direction[row*3+column]*sourcePayload->GetGeometry().spacing[column]
+                :indexMatrix->GetElement(row,column);
             if (!vtkMath::IsFinite(value)) {
                 return BuildResultFailure(
                     params,
@@ -593,8 +599,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     const double linear[9]={indexToModel[0],indexToModel[1],indexToModel[2],
         indexToModel[4],indexToModel[5],indexToModel[6],indexToModel[8],indexToModel[9],indexToModel[10]};
     const double determinant=vtkMatrix3x3::Determinant(linear);
-    if(!std::isfinite(determinant)||determinant==0 || indexMatrix->GetElement(3,0)!=0
-        ||indexMatrix->GetElement(3,1)!=0||indexMatrix->GetElement(3,2)!=0||indexMatrix->GetElement(3,3)!=1)
+    if(!std::isfinite(determinant)||determinant==0 || (!sourcePayload&&(indexMatrix->GetElement(3,0)!=0
+        ||indexMatrix->GetElement(3,1)!=0||indexMatrix->GetElement(3,2)!=0||indexMatrix->GetElement(3,3)!=1)))
         return BuildResultFailure(params,CropFailure::BadInput,"Crop image lattice must be an invertible affine transform.");
     for (int cornerIndex = 0;
         cornerIndex < 8;
@@ -606,8 +612,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
         const int k = extent[
             (cornerIndex & 4) != 0 ? 5 : 4];
         double point[3] = {};
-        image->TransformIndexToPhysicalPoint(
-            i, j, k, point);
+        for(int row=0;row<3;++row)point[row]=indexToModel[row*4]*i+indexToModel[row*4+1]*j
+            +indexToModel[row*4+2]*k+indexToModel[row*4+3];
         for (const double value : point) {
             if (!vtkMath::IsFinite(value)
                 || std::abs(value)
@@ -625,7 +631,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
             image,
             params,
             payload,
-            fallbackAvailableRamBytes)) {
+            fallbackAvailableRamBytes,sourcePayload)) {
         return BuildResultFailure(
             params,
             CropFailure::LowRam,
@@ -637,15 +643,20 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     // scalar 真源不可变；新快照只创建 VTK 外壳并共享 scalar storage，
     // 真实裁切域由独立 mask 表达，避免复制整卷 float 数据。
     outputImage->ShallowCopy(image);
-    std::vector<std::uint8_t> maskValues(static_cast<std::size_t>(image->GetNumberOfPoints()));
+    if(sourcePayload) {
+        const auto& geometry=sourcePayload->GetGeometry();
+        outputImage->SetExtent(geometry.extent[0],geometry.extent[1],geometry.extent[2],geometry.extent[3],geometry.extent[4],geometry.extent[5]);outputImage->SetOrigin(geometry.origin.data());
+        outputImage->SetSpacing(geometry.spacing.data());outputImage->SetDirectionMatrix(geometry.direction.data());
+    }
+    const auto pointCount=sourcePayload?GetGridVoxelCount(sourcePayload->GetGeometry()).value_or(0)
+        :static_cast<std::size_t>(image->GetNumberOfPoints());
+    std::vector<std::uint8_t> maskValues(pointCount);
 
-    const auto* inputMask = validityMask
-        ? static_cast<const unsigned char*>(
-            validityMask->GetScalarPointer(
-                extent[0], extent[2], extent[4]))
-        : nullptr;
+    const auto* inputMask=sourcePayload
+        ? sourcePayload->GetValidityMask()?sourcePayload->GetValidityMask()->data():nullptr
+        :validityMask?static_cast<const unsigned char*>(validityMask->GetScalarPointer(extent[0],extent[2],extent[4])):nullptr;
     auto* outputMask = maskValues.data();
-    if ((validityMask && !inputMask)
+    if ((!sourcePayload && validityMask && !inputMask)
         || !outputMask) {
         return BuildResultFailure(
             params,
@@ -655,9 +666,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
 
     vtkIdType inputInc[3] = { 1, 0, 0 };
     vtkIdType outputInc[3] = { 1, 0, 0 };
-    if (validityMask) {
-        validityMask->GetIncrements(inputInc);
-    }
+    if(sourcePayload){inputInc[1]=xCount;inputInc[2]=xCount*yCount;}
+    else if(validityMask)validityMask->GetIncrements(inputInc);
     outputInc[1] = xCount;
     outputInc[2] = xCount * yCount;
 
@@ -772,7 +782,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     vtkPolyData* polyData,
     const CropBuildParams& params,
     const CropShaderPayload& payload,
-    const std::function<bool()>& getStopRequested)
+    const std::function<bool()>& getStopRequested,
+    std::shared_ptr<const SurfaceMeshPayload> sourcePayload)
 {
     const auto getCancelled = [&] {
         auto result = BuildResultFailure(params, CropFailure::Cancelled,
@@ -794,5 +805,5 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
             "Crop PolyData build parameters are invalid.");
     }
 
-    return CropMeshAlgorithm::GetResult(polyData,params,payload.predicateTable->geometry,getStopRequested);
+    return CropMeshAlgorithm::GetResult(polyData,params,payload.predicateTable->geometry,getStopRequested,std::move(sourcePayload));
 }

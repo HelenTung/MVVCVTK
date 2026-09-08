@@ -23,10 +23,16 @@ CropVectorDouble3Array GetOffset(const CropVectorDouble3Array& p, const CropVect
 
 bool SetUnitVector(CropVectorDouble3Array& value)
 {
-    const auto length=std::hypot(value[0],value[1],value[2]);
-    if (!std::isfinite(length) || length<=0) return false;
-    for (auto& component:value) component/=length;
-    return true;
+    const double scale=std::max({std::abs(value[0]),std::abs(value[1]),std::abs(value[2])});
+    if(!std::isfinite(scale)||scale==0)return false;
+    const double length=std::hypot(value[0],value[1],value[2]);
+    // A normalized binary64 vector has a rounding envelope around unit length.
+    // Preserve that frozen value on every archive/table/worker reconstruction.
+    if(std::isfinite(length)&&std::abs(length-1)<=4*std::numeric_limits<double>::epsilon())return true;
+    for(auto& component:value)component/=scale;
+    const double scaledLength=std::hypot(value[0],value[1],value[2]);
+    for(auto& component:value)component/=scaledLength;
+    return GetFinite(value);
 }
 
 bool BuildInverse(const CropMatrixDouble16Array& input, CropMatrixDouble16Array& inverse)
@@ -61,6 +67,14 @@ std::optional<CropGeometry> CropGeometry::Build(CropOpItem operation)
 {
     if (operation.recipeVersion!=1 || operation.boundaryPolicyVersion!=1
         || (operation.removalMode!=CropRemovalMode::KeepInside && operation.removalMode!=CropRemovalMode::RemoveInside)) return {};
+    // Inactive fields are still serialized request content and must be valid
+    // finite values; selecting another shape must not reveal hidden NaNs.
+    if(!GetFinite(operation.boxToInputModelMatrix)||!GetFinite(operation.planeCenterInInputModel)
+        ||!GetFinite(operation.planeNormalInInputModel)||!GetFinite(operation.centerInInputModel)||!GetFinite(operation.axisInInputModel)
+        ||!std::isfinite(operation.radius)||operation.radius<=0||!std::isfinite(operation.height)||operation.height<=0
+        ||operation.boxToInputModelMatrix[12]!=0||operation.boxToInputModelMatrix[13]!=0
+        ||operation.boxToInputModelMatrix[14]!=0||operation.boxToInputModelMatrix[15]!=1
+        ||(operation.planeNormalInInputModel==CropVectorDouble3Array{})||(operation.axisInInputModel==CropVectorDouble3Array{}))return {};
     CropGeometry result;
     switch (operation.geometryType) {
     case CropShape::Box:
