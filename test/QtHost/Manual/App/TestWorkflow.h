@@ -12,6 +12,7 @@ enum class TestPolicy { Read, View, Stop, Change, Compute, Input, Interaction };
 class TestWorkflow final {
 public:
     TestResources resources;
+    QJsonObject partEditContext;
     bool StartOperation(std::uint64_t id, TestPolicy policy, bool exitTools, const QString& module = {});
     void SetComplete(std::uint64_t id);
     void Stop() { m_isClosing = true; }

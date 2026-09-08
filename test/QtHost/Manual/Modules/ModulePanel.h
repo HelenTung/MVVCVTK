@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QWidget>
 #include <QMap>
+#include <QSet>
 #include <functional>
 #include <map>
 #include <set>
@@ -21,6 +22,7 @@ class QGroupBox;
 class QScrollArea;
 class QVBoxLayout;
 class QSplitter;
+class QLineEdit;
 
 namespace Manual {
 class ParameterEditor;
@@ -47,6 +49,8 @@ public:
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
     void SelectAction(const QString& action);
+    bool SelectNodeGroup(const QString& id);
+    bool SelectPartTarget(const QJsonObject& binding);
     void RefreshWorkflow();
     void Observe(bool refresh = true);
     bool GetHasPending() const { return !m_pending.empty(); }
@@ -73,6 +77,9 @@ private:
     std::set<std::uint64_t> m_pending;
     QJsonObject m_observed;
     QTreeWidget* m_nodes = nullptr;
+    QLineEdit* m_nodeSearch = nullptr;
+    QSet<QString> m_searchExpanded;
+    bool m_isSearching = false;
     QVBoxLayout* m_actionLayout = nullptr;
     QGridLayout* m_quickLayout = nullptr;
     QWidget* m_quickActions = nullptr;
@@ -100,6 +107,8 @@ private:
     bool m_parameterFocusQueued = false;
     void QueueParameterFocus();
     void SetNode(QTreeWidgetItem* item);
+    void SelectSceneItem(QTreeWidgetItem* item);
+    void FilterNodes();
     void SendButton(const QString& action, const QJsonObject& context = {});
 };
 HostViewTargets GetAllViews();

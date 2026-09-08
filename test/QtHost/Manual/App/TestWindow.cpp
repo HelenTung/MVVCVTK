@@ -194,7 +194,11 @@ void TestWindow::BuildSession()
         m_workflow.onNavigate = [this](const QString& module, const QString& action, const QJsonObject& patch) {
             auto* page = GetModule(module);
             if (!page || !page->GetActions().contains(action)) { AppendLog("当前构建未启用目标步骤：" + GetModuleText(module)); return; }
-            try { page->SetParameterPatch(action, patch); m_pages->setCurrentWidget(page); }
+            try {
+                page->SetParameterPatch(action, patch); m_pages->setCurrentWidget(page);
+                if ((module == "Part" || module == "PartEdit") && patch["target"].isObject())
+                    page->SelectPartTarget(patch["target"].toObject());
+            }
             catch (const std::exception& error) { AppendLog("切换步骤失败：" + QString::fromUtf8(error.what())); }
         };
         m_workflow.getActionAvailable = [this](const QString& module, const QString& action) {

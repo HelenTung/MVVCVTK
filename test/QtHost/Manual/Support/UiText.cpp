@@ -230,6 +230,7 @@ QString GetFlowText(const QJsonObject& record)
     static const QHash<QString, QString> statuses{
         {"Sending", "提交操作"}, {"AcceptedPending", "已接纳，等待执行结果"}, {"Accepted", "请求已接纳"},
         {"Succeeded", "操作成功"}, {"Failed", "操作失败"}, {"Rejected", "操作被拒绝"}, {"InvalidInput", "参数无效"},
+        {"Unchanged", "无标签变化"},
         {"Observed", "查询完成"}, {"Published", "结果已发布"}, {"MaskPublished", "掩码已发布"},
         {"PreviewReady", "编辑候选已就绪，请确认编辑或丢弃候选"}, {"Ready", "校正候选已就绪，请发布校正结果"},
         {"Discarded", "候选已丢弃"}, {"Cancelled", "已取消"}, {"CancelledOrInvalidated", "已取消或输入已失效"},

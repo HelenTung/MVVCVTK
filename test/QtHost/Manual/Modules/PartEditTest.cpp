@@ -2,22 +2,44 @@
 #include "ModuleFactories.h"
 #include "PartInput.h"
 #include <QPointer>
+#include <type_traits>
 namespace Manual {
 ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegmentationHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "PartEdit", parent);
-    panel->SetNotice("种子位置使用源网格体素索引；笔刷点和半径以毫米计。编辑候选就绪后，请选择“确认编辑”或“丢弃候选”，候选不会自动替换正式结果。");
+    panel->SetNotice("种子使用源网格体素索引，笔刷点和半径以毫米计。高亮零件、编辑对象和候选在顶部单列，可按名称或标签检索。单次编辑的 120 秒预算包含表面重建及标签冻结；候选需确认后才替换正式结果。");
     const auto complete = [owner = QPointer<ModulePanel>(panel), feature](std::uint64_t id, PartSegmentationResult result) {
         if (!owner) return;
         auto summary = GetPartResult(result);
         if (result.status == PartResultStatus::PreviewReady) {
             const auto preview = feature->GetEditPreview();
             if (preview) summary["previewId"] = QString::number(preview->previewId);
+            if (preview && preview->parts) if (const auto current = feature->GetPartSetSnapshot()) {
+                QJsonArray outputs;
+                for (const auto value : GetPreviewChanges(*current, *preview->parts)["changed"].toArray()) outputs.append(value.toObject()["binding"]);
+                owner->GetContext().workflow.partEditContext["candidateTargets"] = outputs;
+            }
         }
-        owner->SetComplete(id, result.status == PartResultStatus::PreviewReady ? "PreviewReady"
+        auto& editContext = owner->GetContext().workflow.partEditContext;
+        const bool unchanged = result.failureReason == PartFailureReason::NoChange;
+        editContext["status"] = result.status == PartResultStatus::PreviewReady ? "候选待确认"
+            : result.status == PartResultStatus::Succeeded ? "已完成" : unchanged ? "无标签变化" : "本次编辑未完成";
+        if (result.status == PartResultStatus::Succeeded) if (const auto catalog = feature->GetPartSetSnapshot()) {
+            if (owner->GetContext().records.GetRecord(id)["action"] == "Commit")
+                editContext["targets"] = editContext["candidateTargets"];
+            const auto currentParts = GetEditingParts(editContext, *catalog); QJsonArray targets;
+            for (const auto value : currentParts) targets.append(value.toObject()["binding"]);
+            editContext["targets"] = targets;
+            editContext.remove("candidateTargets");
+        }
+        if (unchanged) summary["message"] = "没有标签发生变化：区域可能已属于目标零件，或没有符合操作条件的体素。正式结果保持不变。";
+        owner->SetComplete(id, unchanged ? "Unchanged" : result.status == PartResultStatus::PreviewReady ? "PreviewReady"
             : result.status == PartResultStatus::Succeeded ? "Succeeded"
             : result.status == PartResultStatus::SucceededWithDisplayFailure ? "SucceededWithDisplayFailure"
             : result.status == PartResultStatus::Cancelled ? "Cancelled" : "Failed", summary);
+        owner->Observe();
+        owner->SelectNodeGroup(result.status == PartResultStatus::PreviewReady
+            ? "edit-preview:" + summary["previewId"].toString() : "part-edit-targets");
     };
     for (const QString operation : {QString("Paint"), QString("Erase"), QString("Fill"), QString("Island"),
         QString("Grow"), QString("Split"), QString("Merge"), QString("Undo"), QString("Redo")}) {
@@ -83,7 +105,18 @@ ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegment
             else request.operation = PartHistoryEdit{operation == "Redo"};
             panel->GetContext().records.SetAdmission(id, {{"expectedLabelMap", GetRefText(request.expectedLabelMap)},
                 {"expectedCatalogRevision", QString::number(request.expectedCatalogRevision)}});
+            QJsonArray targets;
+            std::visit([&](const auto& edit) {
+                using Edit = std::decay_t<decltype(edit)>;
+                if constexpr (std::is_same_v<Edit, PartMergeEdit>) for (const auto& part : edit.parts) targets.append(GetPartRef(part));
+                else if constexpr (!std::is_same_v<Edit, PartHistoryEdit>) targets.append(GetPartRef(edit.target));
+            }, request.operation);
             const auto admission = feature->SendEditRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
+            if (admission.status == PartAdmissionStatus::Accepted && !targets.isEmpty())
+                panel->GetContext().workflow.partEditContext = {{"source", GetRefText(catalog->sourceRevision)},
+                    {"targets", targets}, {"status", "正在计算"}, {"operation", operation}};
+            else if (admission.status == PartAdmissionStatus::Accepted)
+                panel->GetContext().workflow.partEditContext["status"] = "正在计算";
             panel->SetAdmission(id, admission.status == PartAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
         }, TestPolicy::Compute, true);
@@ -99,6 +132,11 @@ ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegment
             } else {
                 const auto result = feature->ClearEditPreview(previewId);
                 panel->SetComplete(id, result.status == PartMutationStatus::Succeeded ? "Discarded" : "Failed", {{"status", static_cast<int>(result.status)}});
+                if (result.status == PartMutationStatus::Succeeded) {
+                    panel->GetContext().workflow.partEditContext["status"] = "候选已丢弃";
+                    panel->GetContext().workflow.partEditContext.remove("candidateTargets");
+                }
+                panel->Observe(); panel->SelectNodeGroup("part-edit-targets");
             }
         });
     panel->onObserve = [panel, feature] {
@@ -109,14 +147,18 @@ ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegment
         QJsonObject summary{{"hasPreview", preview && input && preview->sourceRevision == input->dataRevision}, {"formalLabelMap", GetRefText(feature->GetState().labelMap)}};
         const auto detail = GetCatalog(*feature);
         summary["parts"] = detail["parts"]; summary["relations"] = detail["relations"];
+        summary["source"] = detail["source"]; summary["isOverlayVisible"] = current.isOverlayVisible;
+        summary["editingParts"] = catalog ? GetEditingParts(panel->GetContext().workflow.partEditContext, *catalog) : QJsonArray{};
+        summary["editingStatus"] = panel->GetContext().workflow.partEditContext["status"];
         summary["hasCurrentParts"] = catalog && !catalog->isStale && !catalog->parts.empty() && input && catalog->sourceRevision == input->dataRevision;
         summary["isBusy"] = current.status == PartSegmentationStatus::Running || current.status == PartSegmentationStatus::Stopping || current.status == PartSegmentationStatus::Committing;
         summary["requestId"] = QString::number(current.requestId); summary["progress"] = current.progress;
-        if (preview) {
+        if (summary["hasPreview"].toBool()) {
             summary["previewId"] = QString::number(preview->previewId);
             summary["source"] = GetRefText(preview->sourceRevision);
             summary["baseLabels"] = GetRefText(preview->baseLabels);
             summary["candidatePartCount"] = QString::number(preview->parts ? preview->parts->parts.size() : 0);
+            if (preview->parts && catalog) summary["previewChanges"] = GetPreviewChanges(*catalog, *preview->parts);
         }
         panel->SetState(summary);
     };

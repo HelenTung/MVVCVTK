@@ -905,8 +905,9 @@ int GetEditLifecycleFailCount()
     timedRequest.expectedCatalogRevision = timedState.catalogRevision;
     PartBrushEdit stroke;
     stroke.target = timeout.feature->GetPartSetSnapshot()->parts[0].binding;
-    stroke.radiusMM = 0.01;
-    stroke.sourcePoints.resize(5000, { -1000, -1000, -1000 });
+    // 超时负例执行网格内工作；离界笔刷现在会快速拒绝，不能再依赖其旧整卷扫描耗时。
+    stroke.radiusMM = 8;
+    stroke.sourcePoints.resize(5000, { 12, 12, 12 });
     timedRequest.operation = std::move(stroke);
     result.reset(); callbackCount = 0;
     check(timeout.feature->SendEditRequest(std::move(timedRequest), [&](auto value) {
@@ -918,6 +919,36 @@ int GetEditLifecycleFailCount()
         && !timeout.feature->GetEditPreview(),
         "Deadline failure preserves formal labels and finishes exactly once");
     (void)timeout.feature->DetachHost();
+
+    // 两份 64^3 标签可容纳，第三份无法容纳：候选发布与撤销重做不得重复计费共享缓冲。
+    TestHost sharedBudget(64);
+    auto sharedConfig = GetConfig();
+    sharedConfig.maxHistoryBytes = 5U * 1024U * 1024U / 2U;
+    sharedBudget.feature = std::make_shared<PartSegmentationHostFeature>(sharedConfig);
+    check(start(sharedBudget), "Shared-label history budget fixture starts");
+    const auto sharedPreview = preview(sharedBudget, mergeRequest(sharedBudget));
+    const auto sharedCommit = sharedPreview ? commit(sharedBudget, sharedPreview->previewId) : std::nullopt;
+    check(sharedCommit && sharedCommit->status == PartResultStatus::Succeeded,
+        "Publishing a retained preview charges its immutable label buffer only once");
+    if (sharedCommit && sharedCommit->status == PartResultStatus::Succeeded) {
+        for (const bool isRedo : {false, true, false}) {
+            const auto restoredPreview = preview(sharedBudget, historyRequest(sharedBudget, isRedo));
+            const auto restoredCommit = restoredPreview ? commit(sharedBudget, restoredPreview->previewId) : std::nullopt;
+            check(restoredCommit && restoredCommit->status == PartResultStatus::Succeeded,
+                "History preview and publication reuse already charged immutable labels");
+        }
+        const auto beforeRejected = sharedBudget.feature->GetState().labelMap;
+        std::optional<PartSegmentationResult> rejected;
+        const auto admission = sharedBudget.feature->SendEditRequest(mergeRequest(sharedBudget),
+            [&](auto value) { rejected = std::move(value); });
+        check(admission.status == PartAdmissionStatus::Accepted
+            && SendTicks(*sharedBudget.feature, [&] { return rejected.has_value(); })
+            && rejected->failureReason == PartFailureReason::BudgetExceeded
+            && sharedBudget.feature->GetState().labelMap == beforeRejected
+            && !sharedBudget.feature->GetEditPreview(),
+            "A genuinely new third label allocation still exceeds retained history budget");
+    }
+    (void)sharedBudget.feature->DetachHost();
 
     TestHost budget;
     auto budgetConfig = GetConfig();

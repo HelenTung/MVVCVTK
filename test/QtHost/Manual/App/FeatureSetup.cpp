@@ -57,6 +57,8 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     PartSegmentationConfig partConfig; partConfig.defaultStart.targetViews = GetPartViews();
     partConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     partConfig.maxHistoryBytes = context.workflow.resources.publishBytes;
+    // 整卷编辑的时限包含表面重建和不可变标签冻结，测试宿主显式给出完整阶段预算。
+    partConfig.editTimeoutMs = 120000;
     auto part = std::make_shared<PartSegmentationHostFeature>(partConfig); attach(part);
     modules.push_back(CreatePartTest(context, part, parent)); modules.push_back(CreatePartEditTest(context, part, parent));
 #else

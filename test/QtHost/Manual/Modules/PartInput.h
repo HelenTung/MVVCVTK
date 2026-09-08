@@ -7,5 +7,8 @@ QJsonObject GetPartRef(const PartBindingRef& part);
 PartBindingRef GetPart(const QJsonValue& value, const PartSetSnapshot& catalog);
 std::vector<PartBindingRef> GetParts(const QJsonValue& value, const PartSetSnapshot& catalog);
 QJsonObject GetPartResult(const PartSegmentationResult& result);
+QJsonObject GetPartJson(const PartSnapshot& part);
+QJsonArray GetEditingParts(const QJsonObject& context, const PartSetSnapshot& catalog);
+QJsonObject GetPreviewChanges(const PartSetSnapshot& previous, const PartSetSnapshot& candidate);
 QJsonObject GetCatalog(const PartSegmentationHostFeature& feature);
 }

@@ -159,7 +159,9 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
         PartStatePatch patch; patch.isSelected = true;
         const auto result = feature->SetPartState(target, patch, catalog->catalogRevision);
         if (result.status != PartMutationStatus::Succeeded) throw std::runtime_error("选择目标时目录已变化，请重新选择零件");
-        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("PartEdit", "Paint", {{"target", "selected"}});
+        panel->GetContext().workflow.partEditContext = {{"source", GetRefText(catalog->sourceRevision)},
+            {"targets", QJsonArray{GetPartRef(target)}}, {"status", "待编辑"}};
+        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("PartEdit", "Paint", {{"target", GetPartRef(target)}});
         panel->SetComplete(id, "ParametersCopied", {{"message", "已选择唯一编辑目标并进入零件编辑"}, {"binding", GetPartRef(target)}});
     });
     panel->onObserve = [panel, feature, preview] {
@@ -167,6 +169,8 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
         const auto input = panel->GetSession()->GetImageDescriptor();
         summary["hasCurrentParts"] = summary["hasCurrentParts"].toBool() && input && GetRefText(input->dataRevision) == summary["source"].toString();
         const auto catalog = feature->GetPartSetSnapshot();
+        summary["editingParts"] = catalog ? GetEditingParts(panel->GetContext().workflow.partEditContext, *catalog) : QJsonArray{};
+        summary["editingStatus"] = panel->GetContext().workflow.partEditContext["status"];
         auto* form = panel->GetParameterEditor("SetState");
         QJsonObject target; QString targetKey;
         if (catalog && summary["hasCurrentParts"].toBool()) try {

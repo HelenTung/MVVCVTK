@@ -23,7 +23,7 @@ QJsonArray Quality(const QJsonObject& quality)
     return {Node("quality-change", "变化体素", quality["changedCount"].toString()), Node("quality-mean", "平均灰度变化", QString::number(quality["meanDelta"].toDouble(), 'g', 6)),
         Node("quality-rms", "灰度变化 RMS", QString::number(quality["rmsDelta"].toDouble(), 'g', 6)), Node("quality-fidelity", "校正保真", quality["fidelityVerified"].toBool() ? "已核验" : "待核验")};
 }
-QJsonObject PartNode(const QJsonObject& part, bool current, bool edit)
+QJsonObject PartNode(const QJsonObject& part, bool current, bool edit, const QString& prefix = "part:")
 {
     const auto binding = part["binding"].toObject();
     const auto id = QString::fromUtf8(QJsonDocument(binding).toJson(QJsonDocument::Compact));
@@ -32,7 +32,7 @@ QJsonObject PartNode(const QJsonObject& part, bool current, bool edit)
     const QStringList targeted = edit ? QStringList{"Paint", "Erase", "Fill", "Island", "Grow", "Split"} : QStringList{"Highlight", "ClearHighlight", "EditSelected", "SetState"};
     for (const auto& action : targeted) patches[action] = QJsonObject{{"target", binding}};
     const auto name = part["name"].toString().isEmpty() ? "零件 " + part["labelId"].toString() : part["name"].toString();
-    auto node = Node("part:" + id, name + " · 标签 " + part["labelId"].toString(),
+    auto node = Node(prefix + id, name + " · 标签 " + part["labelId"].toString(),
         current ? (part["selected"].toBool() ? "视图中高亮" : part["voxelCount"].toString() + " 体素") : "已过期", actions, patches);
     node["binding"] = binding; return node;
 }
@@ -130,6 +130,20 @@ QJsonArray GetSceneNodes(const QString& module, const QJsonObject& s, const QJso
         if (!Ref(s["output"]).isEmpty()) children.append(Node("crop-output:" + Ref(s["output"]), "裁剪结果", s["isOutputCurrent"].toBool() ? "当前输入" : "已发布", {"SelectOutput", "RestoreSource"}));
     }
     if (module == "Part" || module == "PartEdit") {
+        const bool current = s["hasCurrentParts"].toBool();
+        QJsonArray highlighted, editing;
+        if (current) {
+            for (const auto value : s["parts"].toArray()) if (value.toObject()["selected"].toBool())
+                highlighted.append(PartNode(value.toObject(), true, module == "PartEdit", "highlight-part:"));
+            for (const auto value : s["editingParts"].toArray())
+                editing.append(PartNode(value.toObject(), true, module == "PartEdit", "editing-part:"));
+        }
+        children.append(Node("part-highlights", QString("高亮零件 · %1").arg(highlighted.size()),
+            highlighted.isEmpty() ? "当前没有高亮" : s["isOverlayVisible"].toBool() ? "视图中高亮" : "预览已关闭", {}, {}, highlighted));
+        auto editGroup = Node("part-edit-targets", QString("编辑对象 · %1").arg(editing.size()),
+            editing.isEmpty() ? "尚无当前目标" : s["editingStatus"].toString(), {}, {}, editing);
+        editGroup["description"] = "这里保留已进入编辑或已接纳操作的实际对象，与临时选中、高亮状态分别显示。";
+        children.append(editGroup);
         QJsonArray parts;
         QMap<QString, QJsonObject> previous;
         QMap<QString, QJsonArray> parents;
@@ -151,9 +165,32 @@ QJsonArray GetSceneNodes(const QString& module, const QJsonObject& s, const QJso
             parts.append(node);
         }
         for (const auto& node : previous) parts.append(node);
-        if (!parts.isEmpty()) children.append(Node("parts:" + Ref(module == "Part" ? s["labelMap"] : s["formalLabelMap"]), "零件目录", s["hasCurrentParts"].toBool() ? "当前目录" : "已过期", actions, {}, parts));
-        if (s["hasPreview"].toBool()) children.append(Node("edit-preview:" + s["previewId"].toString(), "编辑候选 · " + s["candidatePartCount"].toString() + " 个零件", "待确认",
-            {"Commit", "Discard"}, {{"Commit", QJsonObject{{"previewId", s["previewId"]}}}, {"Discard", QJsonObject{{"previewId", s["previewId"]}}}}));
+        if (s["hasPreview"].toBool()) {
+            QJsonArray candidates;
+            const QJsonObject patches{{"Commit", QJsonObject{{"previewId", s["previewId"]}}}, {"Discard", QJsonObject{{"previewId", s["previewId"]}}}};
+            const auto append = [&](const QJsonArray& values, bool removed) {
+                for (const auto value : values) {
+                    const auto part = value.toObject();
+                    auto node = PartNode(part, true, true, "candidate-part:" + s["previewId"].toString() + ":");
+                    node.remove("binding"); node["candidateBinding"] = part["binding"];
+                    node["actions"] = QJsonArray{"Commit", "Discard"}; node["patches"] = patches;
+                    node["status"] = removed ? QString("将移除") : QString("候选 · %1 体素").arg(part["voxelCount"].toString());
+                    node["pending"] = true;
+                    node["description"] = "候选尚未替换正式结果；确认或丢弃作用于这一次完整编辑。";
+                    candidates.append(node);
+                }
+            };
+            append(s["previewChanges"].toObject()["changed"].toArray(), false);
+            append(s["previewChanges"].toObject()["removed"].toArray(), true);
+            children.append(Node("edit-preview:" + s["previewId"].toString(),
+                QString("编辑候选 · 影响 %1 件 / 结果共 %2 件").arg(candidates.size()).arg(s["candidatePartCount"].toString()),
+                "待确认", {"Commit", "Discard"}, patches, candidates));
+        }
+        if (!parts.isEmpty()) {
+            auto all = Node("parts-all", QString("全部零件 · %1").arg(s["parts"].toArray().size()),
+                current ? "当前目录与来源" : "已过期", actions, {}, parts);
+            all["defaultExpanded"] = false; children.append(all);
+        }
     }
     if (module == "Artifact") {
         if (s["hasCandidate"].toBool()) children.append(Node("artifact-candidate:" + s["requestId"].toString(), "校正候选", s["isCandidateCurrent"].toBool() ? "待发布" : "源输入已变化", {"Commit", "Discard"}, {{"Commit", QJsonObject{{"requestId", s["requestId"]}}}}, Quality(s["quality"].toObject())));

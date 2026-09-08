@@ -149,9 +149,9 @@ std::array<double, 4> GetPartStableColor(
     return { 0.72, 0.72, 0.72, 1.0 };
 }
 
-bool GetPartCatalogValid(
+bool GetPartCatalogCountsValid(
     const PartCatalog& catalog,
-    const std::vector<PartLabelId>& labels,
+    const std::vector<std::uint64_t>& histogram,
     const std::function<bool()>& getStopRequested) noexcept
 {
     try {
@@ -159,27 +159,12 @@ bool GetPartCatalogValid(
             || catalog.resultRevision == 0
             || catalog.catalogRevision == 0
             || catalog.partsByLabel.empty()
+            || histogram.size() != catalog.partsByLabel.size()
             || catalog.partsByLabel[0].labelId != 0
             || GetPartObjectIdValid(catalog.partsByLabel[0].objectId)
             || catalog.labelByObject.size() + 1
                 != catalog.partsByLabel.size()) {
             return false;
-        }
-
-        std::vector<std::uint64_t> histogram(
-            catalog.partsByLabel.size(), 0);
-        for (std::size_t index = 0; index < labels.size(); ++index) {
-            if (index % cancelBatch == 0
-                && getStopRequested && getStopRequested()) {
-                return false;
-            }
-            const PartLabelId label = labels[index];
-            if (label >= histogram.size()
-                || histogram[label]
-                    == std::numeric_limits<std::uint64_t>::max()) {
-                return false;
-            }
-            ++histogram[label];
         }
 
         std::size_t selectedCount = 0;
@@ -253,6 +238,27 @@ bool GetPartCatalogValid(
     catch (...) {
         return false;
     }
+}
+
+bool GetPartCatalogValid(const PartCatalog& catalog, const std::vector<PartLabelId>& labels,
+    const std::function<bool()>& getStopRequested, std::vector<std::uint64_t>* labelCounts) noexcept
+{
+    try {
+        if (!GetPartSetIdValid(catalog.partSetId) || !catalog.resultRevision || !catalog.catalogRevision
+            || catalog.partsByLabel.empty() || catalog.partsByLabel[0].labelId != 0
+            || GetPartObjectIdValid(catalog.partsByLabel[0].objectId)
+            || catalog.labelByObject.size()+1 != catalog.partsByLabel.size()) return false;
+        std::vector<std::uint64_t> histogram(catalog.partsByLabel.size(), 0);
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            if (index % cancelBatch == 0 && getStopRequested && getStopRequested()) return false;
+            const auto label = labels[index];
+            if (label >= histogram.size() || histogram[label] == std::numeric_limits<std::uint64_t>::max()) return false;
+            ++histogram[label];
+        }
+        if (!GetPartCatalogCountsValid(catalog, histogram, getStopRequested)) return false;
+        if (labelCounts) *labelCounts = std::move(histogram);
+        return true;
+    } catch (...) { return false; }
 }
 
 bool GetPartCatalogStorageBytes(

@@ -42,6 +42,11 @@ std::array<double, 4> GetPartStableColor(
 bool GetPartCatalogValid(
     const PartCatalog& catalog,
     const std::vector<PartLabelId>& labels,
+    const std::function<bool()>& getStopRequested = nullptr,
+    std::vector<std::uint64_t>* labelCounts = nullptr) noexcept;
+bool GetPartCatalogCountsValid(
+    const PartCatalog& catalog,
+    const std::vector<std::uint64_t>& labelCounts,
     const std::function<bool()>& getStopRequested = nullptr) noexcept;
 bool GetPartCatalogStorageBytes(
     const PartCatalog& catalog,

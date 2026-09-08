@@ -42,6 +42,21 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
 {
     setAcceptDrops(true);
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(12,12,12,12); layout->setSpacing(10);
+    if (m_name == "Part" || m_name == "PartEdit") {
+        auto* tools = new QHBoxLayout;
+        m_nodeSearch = new QLineEdit(this); m_nodeSearch->setObjectName("nodeSearch");
+        m_nodeSearch->setPlaceholderText("搜索零件名称或标签"); m_nodeSearch->setClearButtonEnabled(true);
+        tools->addWidget(m_nodeSearch, 1);
+        for (const auto& entry : {std::pair<QString,QString>{"高亮零件", "part-highlights"}, {"编辑对象", "part-edit-targets"}}) {
+            auto* button = new QPushButton(entry.first, this); button->setObjectName("focus_" + entry.second);
+            tools->addWidget(button);
+            connect(button, &QPushButton::clicked, this, [this, entry] {
+                if (!SelectNodeGroup(entry.second) && onMessage) onMessage("当前没有可定位的" + entry.first + "。");
+            });
+        }
+        layout->addLayout(tools);
+        connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { FilterNodes(); });
+    }
     m_parameterSplitter = new QSplitter(Qt::Vertical, this); m_parameterSplitter->setObjectName("parameterSplitter");
     m_parameterSplitter->setChildrenCollapsible(false); m_parameterSplitter->setHandleWidth(8);
     m_parameterSplitter->setStyleSheet("QSplitter::handle:vertical { background: #cedbe8; border-top: 1px solid #b2c3d5; border-bottom: 1px solid #b2c3d5; } QSplitter::handle:vertical:hover { background: #8bb6e2; }");
@@ -82,6 +97,62 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_parameterSplitter->setStretchFactor(0, 1); m_parameterSplitter->setStretchFactor(1, 2);
     m_parameterSplitter->setSizes({230, 500});
     m_parameterSplitter->handle(1)->setToolTip("上下拖动，调整场景节点与操作参数区的高度");
+}
+void ModulePanel::SelectSceneItem(QTreeWidgetItem* item)
+{
+    if (!item || m_context.workflow.GetIsClosing()) return;
+    if (m_nodeSearch) m_nodeSearch->clear();
+    for (auto* parent = item->parent(); parent; parent = parent->parent()) parent->setExpanded(true);
+    m_nodes->clearSelection(); m_nodes->setCurrentItem(item); item->setSelected(true);
+    m_nodes->doItemsLayout();
+    m_nodes->scrollToItem(item, QAbstractItemView::PositionAtCenter); SetNode(item);
+}
+bool ModulePanel::SelectNodeGroup(const QString& id)
+{
+    if (m_context.workflow.GetIsClosing()) return false;
+    for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["id"] == id) {
+        auto* item = *it;
+        if (!item->childCount() && !id.startsWith("edit-preview:")) return false;
+        item->setExpanded(true);
+        SelectSceneItem(item->childCount() == 1 ? item->child(0) : item);
+        return true;
+    }
+    return false;
+}
+bool ModulePanel::SelectPartTarget(const QJsonObject& binding)
+{
+    if (m_name != "Part" && m_name != "PartEdit") return false;
+    Observe(); QTreeWidgetItem* target = nullptr;
+    for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
+        const auto node = (*it)->data(0, Qt::UserRole).toJsonObject();
+        if (node["binding"] != binding) continue;
+        if (!target) target = *it;
+        if (node["id"].toString().startsWith("editing-part:")) { target = *it; break; }
+    }
+    if (!target) return false;
+    SelectSceneItem(target); return true;
+}
+void ModulePanel::FilterNodes()
+{
+    if (!m_nodeSearch || !m_nodes) return;
+    const auto query = m_nodeSearch->text().trimmed(); const bool searching = !query.isEmpty();
+    if (searching && !m_isSearching) {
+        m_searchExpanded.clear();
+        for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) if ((*it)->isExpanded())
+            m_searchExpanded.insert((*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString());
+    }
+    const std::function<bool(QTreeWidgetItem*)> filter = [&](QTreeWidgetItem* item) {
+        bool hasChild = false;
+        for (int i = 0; i < item->childCount(); ++i) hasChild = filter(item->child(i)) || hasChild;
+        const bool visible = !searching || hasChild || item->text(0).contains(query, Qt::CaseInsensitive);
+        item->setHidden(!visible);
+        if (searching && hasChild) item->setExpanded(true);
+        else if (!searching && m_isSearching)
+            item->setExpanded(m_searchExpanded.contains(item->data(0, Qt::UserRole).toJsonObject()["id"].toString()));
+        return visible;
+    };
+    for (int i = 0; i < m_nodes->topLevelItemCount(); ++i) filter(m_nodes->topLevelItem(i));
+    m_isSearching = searching; m_nodes->viewport()->update();
 }
 void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults, Action action, TestPolicy policy, bool exitTools)
 {
@@ -177,7 +248,11 @@ void ModulePanel::SetNode(QTreeWidgetItem* item)
         QJsonArray parts;
         for (auto* selected : m_nodes->selectedItems()) {
             const auto binding = selected->data(0, Qt::UserRole).toJsonObject()["binding"].toObject();
-            if (!binding.isEmpty()) parts.append(binding);
+            if (!binding.isEmpty() && !parts.contains(binding)) parts.append(binding);
+        }
+        if (m_entries.count("Merge") && m_entries.at("Merge").defaults.contains("parts")) {
+            auto patches = node["patches"].toObject(); patches["Merge"] = QJsonObject{{"parts", parts}};
+            node["patches"] = patches;
         }
         if (parts.size() > 1) node = {{"id", "part-selection"}, {"actions", QJsonArray{"Merge"}}, {"patches", QJsonObject{{"Merge", QJsonObject{{"parts", parts}}}}}};
     }
@@ -232,66 +307,51 @@ void ModulePanel::RefreshWorkflow()
     if (nodes != m_sceneNodes) {
         const TestTiming treeTiming(m_context.records, "Tree.Update." + m_name);
         m_sceneNodes = nodes; const QSignalBlocker blocker(m_nodes);
-        const std::function<bool(QTreeWidgetItem*, const QJsonArray&)> sameShape = [&](QTreeWidgetItem* parent, const QJsonArray& values) {
-            if (parent->childCount() != values.size()) return false;
-            for (int i = 0; i < values.size(); ++i) {
-                const auto node = values[i].toObject(); const auto* item = parent->child(i);
-                if (item->data(0, Qt::UserRole).toJsonObject()["id"] != node["id"]
-                    || !sameShape(parent->child(i), node["children"].toArray())) return false;
-            }
-            return true;
-        };
-        if (sameShape(m_nodes->invisibleRootItem(), nodes)) {
-            // 状态/名称变化只修改原节点；保留选择、滚动位置及图标。
-            const std::function<void(QTreeWidgetItem*, const QJsonArray&)> update = [&](QTreeWidgetItem* parent, const QJsonArray& values) {
-                for (int i = 0; i < values.size(); ++i) {
-                    const auto node = values[i].toObject(); auto* item = parent->child(i);
-                    if (item->data(0, Qt::UserRole).toJsonObject() != node) {
-                        item->setText(0, node["title"].toString()); item->setText(1, node["status"].toString());
-                        item->setToolTip(0, node["title"].toString()); item->setToolTip(1, node["status"].toString());
-                        item->setData(0, Qt::UserRole, node);
-                    }
-                    update(item, node["children"].toArray());
-                }
-            };
-            update(m_nodes->invisibleRootItem(), nodes);
-            if (m_nodes->currentItem()) m_node = m_nodes->currentItem()->data(0, Qt::UserRole).toJsonObject();
-        } else {
-        const TestTiming rebuildTiming(m_context.records, "Tree.Rebuild." + m_name);
         const auto selected = m_nodes->currentItem() ? m_nodes->currentItem()->data(0, Qt::UserRole).toJsonObject()["id"].toString() : "root";
-        QSet<QString> expanded, selectedKeys, knownKeys;
+        QSet<QString> selectedKeys;
         for (auto* item : m_nodes->selectedItems()) selectedKeys.insert(item->data(0, Qt::UserRole).toJsonObject()["id"].toString());
-        for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
-            const auto id = (*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString(); knownKeys.insert(id);
-            if ((*it)->isExpanded()) expanded.insert(id);
-        }
-        m_nodes->clear(); QTreeWidgetItem* selection = nullptr;
-        const std::function<void(QTreeWidgetItem*, const QJsonArray&)> add = [&](QTreeWidgetItem* parent, const QJsonArray& values) {
-            for (const auto value : values) {
-                const auto node = value.toObject();
-                auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(m_nodes);
-                item->setText(0, node["title"].toString()); item->setText(1, node["status"].toString()); item->setData(0, Qt::UserRole, node);
-                item->setToolTip(0, node["title"].toString());
-                item->setToolTip(1, node["status"].toString());
-                const auto childNodes = node["children"].toArray();
-                add(item, childNodes); item->setExpanded(node["id"] == "root" || expanded.contains(node["id"].toString()) || (!childNodes.isEmpty() && !knownKeys.contains(node["id"].toString())));
-                item->setSelected(selectedKeys.contains(node["id"].toString()));
-                if (node["id"].toString() == selected) selection = item;
+        const auto scroll = m_nodes->verticalScrollBar()->value();
+        // 按稳定 ID 原位协调子节点；增加一个高亮投影不重建全部零件目录。
+        const std::function<void(QTreeWidgetItem*, const QJsonArray&)> reconcile = [&](QTreeWidgetItem* parent, const QJsonArray& values) {
+            QMap<QString,QTreeWidgetItem*> previous;
+            for (int i = 0; i < parent->childCount(); ++i) {
+                auto* item = parent->child(i); previous[item->data(0, Qt::UserRole).toJsonObject()["id"].toString()] = item;
             }
+            for (int i = 0; i < values.size(); ++i) {
+                const auto node = values[i].toObject();
+                auto* item = previous.take(node["id"].toString()); const bool created = !item;
+                if (!item) { item = new QTreeWidgetItem; parent->insertChild(i, item); }
+                else if (parent->indexOfChild(item) != i) { parent->takeChild(parent->indexOfChild(item)); parent->insertChild(i, item); }
+                if (item->data(0, Qt::UserRole).toJsonObject() != node) {
+                    item->setText(0, node["title"].toString()); item->setText(1, node["status"].toString());
+                    item->setToolTip(0, node["title"].toString()); item->setToolTip(1, node["status"].toString());
+                    item->setData(0, Qt::UserRole, node);
+                }
+                reconcile(item, node["children"].toArray());
+                if (created) item->setExpanded(node["id"] == "root" || (item->childCount() && node["defaultExpanded"].toBool(true)));
+            }
+            for (auto* item : previous) delete item;
         };
-        add(nullptr, nodes); if (!selection) selection = m_nodes->topLevelItem(0);
+        reconcile(m_nodes->invisibleRootItem(), nodes);
+        QTreeWidgetItem* selection = nullptr;
+        for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
+            const auto id = (*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString();
+            (*it)->setSelected(selectedKeys.contains(id)); if (id == selected) selection = *it;
+        }
+        if (!selection) selection = m_nodes->topLevelItem(0);
         if (selection) {
             m_nodes->setCurrentItem(selection, 0, QItemSelectionModel::NoUpdate);
             if (m_nodes->selectedItems().isEmpty()) selection->setSelected(true);
             m_node = selection->data(0, Qt::UserRole).toJsonObject();
         }
-        }
+        m_nodes->verticalScrollBar()->setValue(scroll);
         static_cast<SceneGraphTree*>(m_nodes)->SetGraph(nodes);
+        FilterNodes();
         if (m_name == "PartEdit") {
             QJsonArray parts;
             for (auto* item : m_nodes->selectedItems()) {
                 const auto binding = item->data(0, Qt::UserRole).toJsonObject()["binding"].toObject();
-                if (!binding.isEmpty()) parts.append(binding);
+                if (!binding.isEmpty() && !parts.contains(binding)) parts.append(binding);
             }
             if (parts.size() > 1) m_node = {{"id", "part-selection"}, {"actions", QJsonArray{"Merge"}}, {"patches", QJsonObject{{"Merge", QJsonObject{{"parts", parts}}}}}};
         }

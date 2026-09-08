@@ -36,6 +36,7 @@
 #include <QContextMenuEvent>
 #include <iostream>
 #include <functional>
+#include <cstring>
 #include <set>
 #include <vtkCommand.h>
 #include <vtkRenderer.h>
@@ -112,6 +113,7 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
     item = nullptr;
     for (QTreeWidgetItemIterator it(tree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString() == key) { item = *it; break; }
     Check(item != nullptr, "scene selection resolves stable ID after pending updates");
+    for (auto* parent = item->parent(); parent; parent = parent->parent()) parent->setExpanded(true);
     tree->scrollToItem(item); tree->doItemsLayout();
     const auto point = tree->visualItemRect(item).center();
     QMouseEvent press(QEvent::MouseButtonPress, point, Qt::LeftButton, Qt::LeftButton, modifiers);
@@ -341,6 +343,118 @@ void CheckPartHighlightSwitches(TestWindow& window, int count)
             }
         }
     }
+}
+QJsonObject BuildPartSeeds(TestWindow& window, const QJsonObject& catalog)
+{
+    std::optional<LabelMapDescriptor> descriptor;
+    for (const auto& item : window.GetSession()->GetLabelMapDescriptors())
+        if (GetRefText(item.dataRevision) == catalog["labelMap"].toString()) descriptor = item;
+    Check(descriptor && descriptor->valueType == ImageValueType::UInt32, "formal part labels are available through the public read API");
+    QJsonArray seeds; const auto parts = catalog["parts"].toArray();
+    Check(parts.size() >= 2, "real edit seed audit has two source parts");
+    for (int p = 0; p < 2; ++p) {
+        const auto part = parts[p].toObject(); const auto extent = GetArray<int,6>(part["extent"]);
+        const auto wantedLabel = GetId(part["labelId"]);
+        ImageReadRegion region;
+        for (int a = 0; a < 3; ++a) { region.offset[a] = static_cast<std::size_t>(extent[a*2]-descriptor->extent[a*2]); region.size[a] = static_cast<std::size_t>(extent[a*2+1]-extent[a*2]+1); }
+        LabelMapReadRequest request; request.id = descriptor->id; request.expectedRevision = descriptor->dataRevision;
+        request.region = region; request.maxBytes = 1024U*1024U;
+        std::size_t offset = 0; std::optional<std::array<int,3>> seed;
+        while (!seed) {
+            const auto chunk = window.GetSession()->GetLabelMapReadChunk(request, offset);
+            Check(chunk.error == LabelMapError::None && chunk.state && chunk.state->values, "read actual source labels in bounded chunks");
+            Check(chunk.state->voxelCount <= request.maxBytes/sizeof(std::uint32_t)
+                && chunk.state->values->size() == chunk.state->voxelCount*sizeof(std::uint32_t), "label chunk byte count matches its typed values");
+            for (std::size_t i = 0; i < chunk.state->voxelCount; ++i) {
+                std::uint32_t label = 0; std::memcpy(&label, chunk.state->values->data()+i*sizeof(label), sizeof(label));
+                if (label != wantedLabel) continue;
+                const auto local = chunk.state->voxelOffset+i;
+                seed = std::array<int,3>{extent[0]+static_cast<int>(local%region.size[0]),
+                    extent[2]+static_cast<int>((local/region.size[0])%region.size[1]),
+                    extent[4]+static_cast<int>(local/(static_cast<std::size_t>(region.size[0])*region.size[1]))};
+                break;
+            }
+            if (seed || chunk.isDone) break;
+            Check(chunk.nextVoxelOffset > offset, "bounded label reader advances"); offset = chunk.nextVoxelOffset;
+        }
+        Check(seed.has_value(), "seed belongs to the exact requested part label, not an assumed centroid");
+        seeds.append(QJsonObject{{"binding", part["binding"]}, {"labelId", part["labelId"]}, {"seed", GetValues(*seed)}});
+    }
+    return {{"source", GetRefText(descriptor->sourceRevision)}, {"labelMap", GetRefText(descriptor->dataRevision)},
+        {"dimensions", GetValues(descriptor->dims)}, {"voxelCount", QString::number(descriptor->voxelCount)}, {"parts", seeds}};
+}
+QJsonObject CheckPartDirectories(TestWindow& window)
+{
+    auto* panel = window.GetModule("Part"); panel->Observe();
+    const auto parts = panel->GetObservedState()["parts"].toArray(); Check(parts.size() >= 2, "directory audit has two real parts");
+    const auto a = parts[0].toObject()["binding"].toObject(), b = parts[1].toObject()["binding"].toObject();
+    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+    const auto nodeId = [](const QString& prefix, const QJsonObject& binding) { return prefix+QString::fromUtf8(QJsonDocument(binding).toJson(QJsonDocument::Compact)); };
+    auto* all = FindNode(tree, "parts-all"); auto* first = FindNode(tree, nodeId("part:",a));
+    int resets = 0; QObject receiver;
+    QObject::connect(tree->model(), &QAbstractItemModel::modelReset, &receiver, [&] { ++resets; });
+    ClickPartNode(window, 0);
+    const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()+1);
+    panel->findChild<QPushButton*>("action_EditSelected")->click(); GetComplete(window, id, "ParametersCopied");
+    auto* edit = window.GetModule("PartEdit");
+    for (const auto* action : {"Paint","Erase","Fill","Island","Grow","Split"})
+        Check(edit->GetParameterEditor(action)->GetField("target")->GetValue() == a, "entering edit binds every tool to the exact chosen scene object");
+    ClickPartNode(window, 1);
+    const auto highlightId = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()+1);
+    panel->findChild<QPushButton*>("action_Highlight")->click(); GetComplete(window, highlightId, "Succeeded"); panel->Observe();
+    auto* highlights = FindNode(tree, "part-highlights"); auto* editing = FindNode(tree, "part-edit-targets");
+    Check(highlights && highlights->childCount() == 1 && highlights->child(0)->data(0, Qt::UserRole).toJsonObject()["binding"] == b
+        && editing && editing->childCount() == 1 && editing->child(0)->data(0, Qt::UserRole).toJsonObject()["binding"] == a,
+        "highlight and actual editing targets remain in separate truthful directories");
+    Check(FindNode(tree,"parts-all") == all && FindNode(tree,nodeId("part:",a)) == first && resets == 0,
+        "highlight projection changes preserve the complete catalog items without model reset");
+    auto* search = panel->findChild<QLineEdit*>("nodeSearch"); search->setText(first->text(0));
+    Check(!first->isHidden() && FindNode(tree,nodeId("part:",b))->isHidden(), "part name/label search filters scene items");
+    panel->findChild<QPushButton*>("focus_part-highlights")->click();
+    Check(search->text().isEmpty() && tree->currentItem()->data(0, Qt::UserRole).toJsonObject()["binding"] == b
+        && tree->viewport()->rect().intersects(tree->visualItemRect(tree->currentItem())), "highlight locator reveals the actual selected part in the viewport");
+    window.GetWorkflow().onNavigate("PartEdit","Paint",{{"target",a}}); edit->Observe();
+    auto* editTree = edit->findChild<QTreeWidget*>("sceneNodes");
+    ClickNode(editTree,FindNode(editTree,nodeId("editing-part:",a)));
+    ClickNode(editTree,FindNode(editTree,nodeId("part:",a)),Qt::ControlModifier);
+    Check(edit->GetParameterEditor("Merge")->GetField("parts")->GetValue().toArray().size() == 1,
+        "two projections of one part cannot become two merge sources or retain stale merge targets");
+    GetComplete(window, Send(window,"Part","ClearHighlight",{{"target",b}}), "Succeeded");
+    return {{"partCount",parts.size()},{"modelResets",resets},{"editingTarget",a},{"highlightTarget",b}};
+}
+QJsonObject CheckPartEditPreview(TestWindow& window, const QJsonObject& spec)
+{
+    auto* panel = window.GetModule("PartEdit"); panel->Observe(); const auto state = panel->GetObservedState();
+    Check(state["hasPreview"].toBool(), "real edit has an unpublished candidate");
+    const auto base = spec["base"].toObject(); const auto parts = base["parts"].toArray();
+    QMap<QString,QJsonObject> before;
+    const auto key = [](QJsonObject binding) { binding.remove("resultRevision"); return QString::fromUtf8(QJsonDocument(binding).toJson(QJsonDocument::Compact)); };
+    qint64 total = 0;
+    for (const auto value : parts) { const auto p = value.toObject(); before[key(p["binding"].toObject())] = p; total += static_cast<qint64>(GetId(p["voxelCount"])); }
+    const auto previousTotal = total; const auto changes = state["previewChanges"].toObject();
+    for (const auto value : changes["changed"].toArray()) {
+        const auto p = value.toObject(); const auto old = before.value(key(p["binding"].toObject()));
+        if (!old.isEmpty()) total -= static_cast<qint64>(GetId(old["voxelCount"]));
+        total += static_cast<qint64>(GetId(p["voxelCount"]));
+    }
+    for (const auto value : changes["removed"].toArray()) total -= static_cast<qint64>(GetId(value.toObject()["voxelCount"]));
+    Check(static_cast<int>(GetId(state["candidatePartCount"])) == spec["partCount"].toInt()
+        && changes["changed"].toArray().size() == spec["changed"].toInt()
+        && changes["removed"].toArray().size() == spec["removed"].toInt()
+        && total-previousTotal == static_cast<qint64>(spec["foregroundDelta"].toDouble()),
+        "real edit changes exactly the expected parts and foreground voxel ownership");
+    window.GetModule("Part")->Observe();
+    Check(window.GetModule("Part")->GetObservedState()["labelMap"] == base["labelMap"], "preview preserves formal label revision");
+    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+    auto* group = FindNode(tree,"edit-preview:"+state["previewId"].toString());
+    Check(group && group->childCount() == changes["changed"].toArray().size()+changes["removed"].toArray().size(),
+        "candidate directory lists only changed and removed objects");
+    for (int i = 0; i < group->childCount(); ++i) {
+        const auto node = group->child(i)->data(0, Qt::UserRole).toJsonObject();
+        Check(!node.contains("binding") && node["actions"] == QJsonArray{"Commit","Discard"}, "candidate nodes cannot be used as formal edit inputs");
+    }
+    return {{"formalLabelMap",base["labelMap"]},{"foregroundBefore",QString::number(previousTotal)},
+        {"foregroundCandidate",QString::number(total)},{"state",state}};
 }
 void CheckNodeParameters(TestWindow& window)
 {
@@ -1185,6 +1299,32 @@ void StartSequence(TestWindow& window, const QString& path)
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
         const auto id = Send(window, GetText(step, "module"), GetText(step, "action"), params);
         const auto record = GetComplete(window, id, expected, static_cast<int>(timeout));
+        if (step.contains("savePartSeeds")) {
+            const auto seedKey = GetText(step,"savePartSeeds"); results[seedKey] = BuildPartSeeds(window,record["result"].toObject());
+            if (step.contains("partSeedAudit")) ExportJson(GetText(step,"partSeedAudit"),results[seedKey].toObject());
+        }
+        if (step.contains("partDirectoryAudit")) ExportJson(GetText(step,"partDirectoryAudit"),CheckPartDirectories(window));
+        if (step.contains("partEditAudit")) {
+            const auto spec = GetResolved(step["partEditAudit"],results).toObject();
+            ExportJson(GetText(spec,"path"),CheckPartEditPreview(window,spec));
+        }
+        if (step.contains("expectPartCount")) Check(record["result"].toObject()["partCount"].toInt() == step["expectPartCount"].toInt(), "formal catalog has the expected part count");
+        if (step.contains("expectEditingCount")) {
+            auto* panel = window.GetModule("PartEdit"); panel->Observe();
+            Check(panel->GetObservedState()["editingParts"].toArray().size() == step["expectEditingCount"].toInt(), "editing directory follows committed split/merge/history outputs");
+        }
+        if (step.contains("expectLabelDimensions")) {
+            const auto dimensions = GetArray<int,3>(step["expectLabelDimensions"]); bool matched = false;
+            for (const auto& descriptor : window.GetSession()->GetLabelMapDescriptors())
+                if (GetRefText(descriptor.dataRevision) == record["result"].toObject()["labelMap"].toString()) matched = descriptor.dims == dimensions;
+            Check(matched,"edited labels retain the complete original grid dimensions");
+        }
+        if (step.contains("directoryScreenshot")) {
+            auto* panel = window.GetModule(GetText(step,"module"));
+            window.GetWorkflow().onNavigate(GetText(step,"module"),GetText(step,"action"),{});
+            panel->Observe(); QCoreApplication::processEvents();
+            Check(panel->grab().save(GetText(step,"directoryScreenshot")), "actual directory and operation panel screenshot saved");
+        }
         if (step.contains("selectPartNode")) ClickPartNode(window, step["selectPartNode"].toInt(-1));
         if (step.contains("highlightSwitches")) CheckPartHighlightSwitches(window, step["highlightSwitches"].toInt());
         if (step["selectAllPartNodes"].toBool()) {
