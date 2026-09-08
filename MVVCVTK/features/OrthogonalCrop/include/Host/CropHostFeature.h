@@ -141,6 +141,10 @@ public:
     CropDocumentAdmission SendRequest(CropDocumentRequest request,CropDocumentCallback onComplete={});
     std::optional<CropDocumentOutcome> GetDocumentOutcome(CropDocumentId documentId,CropRequestId requestId) const;
     CropHostState GetState() const;
+    // At most 256 input-model sample points; classification uses the last
+    // presented predicate and the coordinate-conversion bound from actual input data.
+    CropPreviewPrecision GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,
+        const std::vector<CropVectorDouble3Array>& points) const;
     static CropRequestId CreateRequestId() noexcept;
     CropEditAdmission SendRequest(CropEditRequest request,CropEditCallback onComplete={});
     CropHistorySnapshot GetHistory(CropDocumentId documentId = 0,CropNodeId after = 0,std::size_t limit = 1000) const;

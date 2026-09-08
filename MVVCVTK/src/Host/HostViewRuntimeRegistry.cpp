@@ -1179,6 +1179,7 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::SetDataTransition(
     if (!batch) return {};
     const auto result = m_loadCommit->SetLoadCommit(active->load);
     if (result.status == LoadCommitStatus::Preparing) return active->state;
+    active->state.effectFailure=result.effectFailure;
     active->state.status = result.status == LoadCommitStatus::Succeeded ? FeatureRunStatus::Succeeded
         : result.status == LoadCommitStatus::Cancelled ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
     m_featureTransition.reset();

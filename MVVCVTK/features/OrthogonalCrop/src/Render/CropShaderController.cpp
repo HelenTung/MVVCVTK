@@ -5,6 +5,15 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkObject.h>
+#include <vtkImageData.h>
+#include <vtkMatrix3x3.h>
+#include <vtkMatrix4x4.h>
+#include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLVertexBufferObject.h>
+#include <vtkOpenGLVertexBufferObjectGroup.h>
+#include <vtkPolyData.h>
+#include <cmath>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLShaderCache.h>
 #include <vtkRenderer.h>
@@ -80,6 +89,138 @@ std::string GetPolyDec(const char* marker, const bool hasMatrix)
 }
 }
 
+namespace {
+constexpr double FloatU=0x1p-24,DoubleU=0x1p-53;
+constexpr double FloatFloor=std::numeric_limits<float>::min();
+double Gamma(double count,double unit){return count*unit/(1-count*unit);}
+bool ValidBounds(const CropBoundsDouble6Array& bounds) {
+    for(int i=0;i<3;++i)if(!std::isfinite(bounds[i*2])||!std::isfinite(bounds[i*2+1])||bounds[i*2]>bounds[i*2+1])return false;
+    return true;
+}
+bool Contains(const CropBoundsDouble6Array& bounds,const CropVectorDouble3Array& point) {
+    for(int i=0;i<3;++i)if(!std::isfinite(point[i])||point[i]<bounds[i*2]||point[i]>bounds[i*2+1])return false;
+    return true;
+}
+CropBoundsDouble6Array TransformBounds(const CropMatrixDouble16Array& matrix,const CropBoundsDouble6Array& bounds) {
+    CropBoundsDouble6Array result{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
+    for(int corner=0;corner<8;++corner)for(int row=0;row<3;++row) {
+        double value=matrix[row*4+3];for(int col=0;col<3;++col)value+=matrix[row*4+col]*bounds[col*2+((corner>>col)&1)];
+        result[row*2]=std::min(result[row*2],value);result[row*2+1]=std::max(result[row*2+1],value);
+    }
+    return result;
+}
+struct CoordinateFrame final {
+    CropCoordinatePrecision precision;
+    CropMatrixDouble16Array vertexToInput=CropAlgorithm::GetIdentityMatrix();
+    CropBoundsDouble6Array bounds{};
+};
+CoordinateFrame GetCoordinateFrame(vtkObject* object,RenderTargetKind kind,const CropMatrixDouble16Array& localToInput) {
+    CoordinateFrame result;result.vertexToInput=localToInput;
+    if(kind==RenderTargetKind::Volume) {
+        auto* mapper=vtkGPUVolumeRayCastMapper::SafeDownCast(object);
+        auto* input=mapper?vtkImageData::SafeDownCast(mapper->GetInput()):nullptr;
+        if(!input)return result;
+        input->GetBounds(result.bounds.data());if(!ValidBounds(result.bounds))return result;
+        const auto* extent=input->GetExtent();const auto* spacing=input->GetSpacing();const auto* origin=input->GetOrigin();
+        const auto* direction=input->GetDirectionMatrix();if(!direction)return result;
+        CropVectorDouble3Array maxIndex{},translation{},width{};
+        for(int axis=0;axis<3;++axis) {
+            if(!std::isfinite(spacing[axis])||spacing[axis]<=0||!std::isfinite(origin[axis]))return result;
+            maxIndex[axis]=std::max(std::abs(double(extent[axis*2])),std::abs(double(extent[axis*2+1])))+1;
+        }
+        for(int row=0;row<3;++row) {
+            translation[row]=std::abs(origin[row]);
+            for(int col=0;col<3;++col)translation[row]+=std::abs(direction->GetElement(row,col))*spacing[col]*maxIndex[col];
+            translation[row]*=1+Gamma(16,DoubleU);
+        }
+        // VTK 9.4.2 uploads each block matrix AFTER UpdateShaderEvent. A
+        // current-block read here would miss other blocks (and may be unsorted).
+        // Bound every block: each width is at most the full extent width;
+        // every block origin is within the input's physical-coordinate envelope.
+        // The 32 binary64 steps cover bounds/reciprocal/matrix construction;
+        // 16 binary32 steps cover coefficient/sample rounding and the 4-term dot.
+        for(int axis=0;axis<3;++axis)width[axis]=spacing[axis]*(double(extent[axis*2+1])-extent[axis*2]+1)
+            +Gamma(32,DoubleU)*(2*translation[axis]+2*spacing[axis]*maxIndex[axis]);
+        for(int row=0;row<3;++row) {
+            double magnitude=translation[row];
+            for(int col=0;col<3;++col)magnitude+=std::abs(direction->GetElement(row,col))*width[col];
+            if(!std::isfinite(magnitude)||magnitude>std::numeric_limits<float>::max())return result;
+            result.precision.inputError[row]=std::nextafter(
+                (Gamma(16,FloatU)+Gamma(64,DoubleU))*magnitude+FloatFloor*(16+magnitude),INFINITY);
+            if(!std::isfinite(result.precision.inputError[row]))return result;
+        }
+        result.precision.isAvailable=true;return result;
+    }
+    auto* mapper=vtkOpenGLPolyDataMapper::SafeDownCast(object);auto* input=mapper?mapper->GetInput():nullptr;
+    if(!input||!input->GetNumberOfPoints()||!mapper->GetVBOs())return result;
+    auto* vertices=mapper->GetVBOs()->GetVBO("vertexMC");if(!vertices)return result;
+    CropBoundsDouble6Array sourceBounds{},bufferBounds{};input->GetBounds(sourceBounds.data());if(!ValidBounds(sourceBounds))return result;
+    CropVectorDouble3Array bufferError{},sourceMagnitude{};
+    auto undo=CropAlgorithm::GetIdentityMatrix();
+    for(int axis=0;axis<3;++axis) {
+        double shift=0,scale=1;
+        if(vertices->GetCoordShiftAndScaleEnabled()) {
+            if(vertices->GetShift().size()!=3||vertices->GetScale().size()!=3)return result;
+            shift=vertices->GetShift()[axis];scale=vertices->GetScale()[axis];
+        }
+        if(!std::isfinite(shift)||!std::isfinite(scale)||scale==0)return result;
+        undo[axis*4+axis]=1/scale;undo[axis*4+3]=shift;
+        const double a=(sourceBounds[axis*2]-shift)*scale,b=(sourceBounds[axis*2+1]-shift)*scale;
+        bufferBounds[axis*2]=std::min(a,b);bufferBounds[axis*2+1]=std::max(a,b);
+        sourceMagnitude[axis]=std::max(std::abs(sourceBounds[axis*2]),std::abs(sourceBounds[axis*2+1]));
+        const double maximum=std::max(std::abs(a),std::abs(b));
+        bufferError[axis]=Gamma(4,DoubleU)*(sourceMagnitude[axis]+std::abs(shift))*std::abs(scale)+FloatU*maximum+FloatFloor;
+    }
+    vtkMatrix4x4::Multiply4x4(localToInput.data(),undo.data(),result.vertexToInput.data());
+    const auto transformed=CropGeometry::GetAffineFloatErrorOnBounds(result.vertexToInput,bufferBounds,bufferError);
+    if(!transformed)return result;
+    result.bounds=TransformBounds(localToInput,sourceBounds);if(!ValidBounds(result.bounds))return result;
+    for(int row=0;row<3;++row) {
+        double conditioning=std::abs(localToInput[row*4+3])+std::abs(result.vertexToInput[row*4+3]);
+        for(int col=0;col<3;++col)conditioning+=std::abs(localToInput[row*4+col])*sourceMagnitude[col]
+            +std::abs(result.vertexToInput[row*4+col])*std::max(std::abs(bufferBounds[col*2]),std::abs(bufferBounds[col*2+1]));
+        const double magnitude=std::max(std::abs(result.bounds[row*2]),std::abs(result.bounds[row*2+1]));
+        // Positive perspective interpolation weights: include their normalization,
+        // three weighted terms, output rounding and FTZ (32 binary32 operations).
+        result.precision.inputError[row]=std::nextafter((*transformed)[row]+Gamma(32,DoubleU)*conditioning
+            +Gamma(32,FloatU)*(magnitude+(*transformed)[row])+32*FloatFloor,INFINITY);
+        if(!std::isfinite(result.precision.inputError[row]))return result;
+    }
+    result.precision.isAvailable=true;return result;
+}
+bool GetPrecisionValid(const CropShaderPayload& payload,const CoordinateFrame& coordinates) {
+    if(!payload.nodeCount)return true;
+    if(!coordinates.precision.isAvailable||!payload.predicateTable)return false;
+    CropVectorDouble3Array domainCenter{},domainError{};
+    for(int axis=0;axis<3;++axis) {
+        domainCenter[axis]=coordinates.bounds[axis*2]*0.5+coordinates.bounds[axis*2+1]*0.5;
+        domainError[axis]=std::nextafter(std::max(std::abs(coordinates.bounds[axis*2]-domainCenter[axis]),
+            std::abs(coordinates.bounds[axis*2+1]-domainCenter[axis]))+coordinates.precision.inputError[axis],INFINITY);
+    }
+    for(std::size_t index=0;index<payload.nodeCount;++index) {
+        const auto& geometry=payload.predicateTable->geometry[index];bool hasCertifiedCorner=false;
+        // Domain interval checks arithmetic range, not uniform sign: surfaces
+        // legitimately cross the boundary band. Point queries certify signs.
+        if(geometry.GetFloatBounds(domainCenter,domainError).classification==CropPointClassification::PrecisionNotMet)return false;
+        for(int corner=0;corner<8;++corner) {
+            CropVectorDouble3Array point{};for(int axis=0;axis<3;++axis)point[axis]=coordinates.bounds[axis*2+((corner>>axis)&1)];
+            const auto classification=geometry.GetFloatBounds(point,coordinates.precision.inputError).classification;
+            if(classification==CropPointClassification::PrecisionNotMet)return false;
+            hasCertifiedCorner=hasCertifiedCorner||classification!=CropPointClassification::BoundaryBand;
+        }
+        const auto& operation=geometry.GetOperation();CropVectorDouble3Array center{};
+        if(operation.geometryType==CropShape::Plane){if(!hasCertifiedCorner)return false;continue;}
+        if(operation.geometryType==CropShape::Box)center={operation.boxToInputModelMatrix[3],operation.boxToInputModelMatrix[7],operation.boxToInputModelMatrix[11]};
+        else center=operation.centerInInputModel;
+        if(Contains(coordinates.bounds,center)) {
+            const auto classification=geometry.GetFloatBounds(center,coordinates.precision.inputError).classification;
+            if(classification==CropPointClassification::BoundaryBand||classification==CropPointClassification::PrecisionNotMet)return false;
+        }
+    }
+    return true;
+}
+}
+
 class CropShaderController::Impl final {
 public:
     struct Resource final {
@@ -127,6 +268,8 @@ public:
         std::size_t pending=0;
         bool conflict=false;
         CropShaderPayload presented;
+        CropCoordinatePrecision precision;
+        CropBoundsDouble6Array bounds{};
     };
     RenderEffectState GetState() const {
         auto state=m_state;state.renderedRevision=m_frameState->conflict?0:m_frameState->revision;
@@ -142,6 +285,8 @@ public:
         return std::all_of(shown.predicateTable->geometry.begin(),shown.predicateTable->geometry.begin()+shown.nodeCount,
             [&](const auto& geometry){return geometry.GetKept(point);});
     }
+    CropCoordinatePrecision GetCoordinatePrecision() const {return m_frameState->conflict?CropCoordinatePrecision{}:m_frameState->precision;}
+    CropPreviewPrecision GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const;
     void SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue){m_frameQueue=std::move(queue);}
     bool SetCropCommit(std::uint64_t revision);
     bool GetCropCommitReady(std::uint64_t revision) const;
@@ -155,13 +300,18 @@ public:
 
 private:
     static void OnShader(vtkObject*, unsigned long, void* clientData, void* callData);
-    bool SetProgram(vtkShaderProgram* program);
+    bool SetProgram(vtkShaderProgram* program,bool isShaderEvent=false);
     bool BuildTexture(vtkOpenGLRenderWindow* context);
     void ClearDeferred(vtkOpenGLRenderWindow* context);
 
     std::shared_ptr<FrameState> m_frameState=std::make_shared<FrameState>();
     std::function<bool(std::function<void(RenderFrameOutcome)>)> m_frameQueue;
     CropShaderPayload m_drawPayload;
+    CoordinateFrame m_drawCoordinates;
+    std::uint64_t m_precisionRevision=0;
+    CropVectorDouble3Array m_provedError{};
+    CropBoundsDouble6Array m_provedBounds{};
+    bool m_precisionValid=false;
     std::uint64_t m_drawRevision=0;
     CropNodeId m_drawNode=0;
     bool m_drawValid=false,m_drawIsCurrent=false;
@@ -206,7 +356,7 @@ bool CropShaderController::Impl::SetShaderTarget(
             "//VTK::Cropping::Impl", true, implementation, false);
     }
     else {
-        const bool hasMatrix = m_targetKind == RenderTargetKind::Slice;
+        const bool hasMatrix = true;
         std::string vertexDec = "//VTK::PositionVC::Dec\nout vec3 mvvcvtk_cropPointMC;\n";
         if (hasMatrix) {
             vertexDec += "uniform mat4 mvvcvtk_localToInput;\n";
@@ -290,7 +440,7 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     const std::size_t width = std::max(std::size_t{1},values.size() / 4);
     if (width > static_cast<std::size_t>(vtkTextureObject::GetMaximumTextureSize(context))) {
         m_state.status = RenderEffectStatus::Failed;
-        m_state.failureReason = RenderEffectFailure::TextureFailed;
+        m_state.failureReason = RenderEffectFailure::ResourceLimit;
         m_state.message = "The crop table exceeds the context texture-width limit.";
         return false;
     }
@@ -328,7 +478,7 @@ void CropShaderController::Impl::ClearDeferred(vtkOpenGLRenderWindow* context)
 
 bool CropShaderController::Impl::StartRender(vtkRenderer* renderer,bool isCurrent)
 {
-    m_drawValid=false;m_drawIsCurrent=isCurrent;
+    m_drawValid=false;m_drawIsCurrent=isCurrent;m_drawCoordinates={};
     auto* context = renderer
         ? vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow())
         : nullptr;
@@ -379,17 +529,21 @@ bool CropShaderController::Impl::StopRender()
         const auto state=m_frameState;
         const std::weak_ptr<FrameState> weak=state;
         const auto revision=m_drawRevision,node=m_drawNode,generation=state->generation;
-        const auto payload=m_drawPayload;const bool drawValid=m_drawValid;
+        const auto payload=m_drawPayload;const bool drawValid=m_drawValid;const auto coordinates=m_drawCoordinates;
         bool queued=false;
-        try {queued=m_frameQueue([weak,revision,node,generation,payload,drawValid](RenderFrameOutcome frame) {
+        try {queued=m_frameQueue([weak,revision,node,generation,payload,drawValid,coordinates](RenderFrameOutcome frame) {
             const auto state=weak.lock();if(!state)return;
             if(state->pending)--state->pending;
             if(state->generation!=generation||!frame.isPresented||frame.frameId<state->frameId)return;
             if(!frame.isSucceeded||!drawValid) {
-                state->frameId=frame.frameId;state->revision=0;state->nodeId=0;state->presented={};state->conflict=true;return;
+                state->frameId=frame.frameId;state->revision=0;state->nodeId=0;state->presented={};state->precision={};state->conflict=true;return;
             }
             if(frame.frameId==state->frameId&&(state->revision!=revision||state->nodeId!=node))state->conflict=true;
-            else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;state->presented=payload;}
+            else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;state->presented=payload;state->precision=coordinates.precision;state->bounds=coordinates.bounds;}
+            else if(frame.frameId==state->frameId) {
+                state->precision.isAvailable=state->precision.isAvailable&&coordinates.precision.isAvailable;
+                for(int axis=0;axis<3;++axis)state->precision.inputError[axis]=std::max(state->precision.inputError[axis],coordinates.precision.inputError[axis]);
+            }
         });}catch(...){}
         if(queued)++state->pending;
         else {
@@ -397,7 +551,7 @@ bool CropShaderController::Impl::StopRender()
             // and exclude older pending callbacks from restoring it later.
             if(state->generation!=std::numeric_limits<std::uint64_t>::max())++state->generation;
             else state->frameId=std::numeric_limits<std::uint64_t>::max();
-            state->revision=0;state->nodeId=0;state->presented={};state->conflict=true;
+            state->revision=0;state->nodeId=0;state->presented={};state->precision={};state->conflict=true;
         }
     }
     m_drawValid=false;m_drawIsCurrent=false;
@@ -422,16 +576,17 @@ void CropShaderController::Impl::OnShader(
     vtkObject*, unsigned long, void* clientData, void* callData)
 {
     auto* self = static_cast<Impl*>(clientData);
-    (void)self->SetProgram(static_cast<vtkShaderProgram*>(callData));
+    (void)self->SetProgram(static_cast<vtkShaderProgram*>(callData),true);
 }
 
-bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
+bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program,bool isShaderEvent)
 {
     if (!program) {
         return false;
     }
     m_program = program;
     m_hasProgramSync = true;
+    const auto coordinates=GetCoordinateFrame(m_mapper,m_targetKind,m_localToInput);
     const int nodeCount = m_isActive
         ? static_cast<int>(m_active.payload.nodeCount)
         : 0;
@@ -444,14 +599,14 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
         hasUniforms = program->SetUniformi(
             "mvvcvtk_cropTable", m_boundTexture->GetTextureUnit());
     }
-    if (hasUniforms && m_targetKind == RenderTargetKind::Slice) {
+    if (hasUniforms && m_targetKind != RenderTargetKind::Volume) {
         float localToInput[16] = {};
         // 矩阵按 VTK row-major 保存；glUniformMatrix4fv 的
         // transpose 参数固定为 false，因此上传前必须显式转成 column-major。
         for (int row = 0; row < 4; ++row) {
             for (int column = 0; column < 4; ++column) {
                 localToInput[column * 4 + row] = static_cast<float>(
-                    m_localToInput[row * 4 + column]);
+                    coordinates.vertexToInput[row * 4 + column]);
             }
         }
         hasUniforms = program->SetUniformMatrix4x4(
@@ -469,6 +624,27 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
     }
 
     m_drawValid=true;m_drawPayload=m_active.payload;m_drawRevision=m_active.payload.revision;m_drawNode=m_active.payload.nodeId;
+    if(coordinates.precision.isAvailable) {
+        if(!m_drawCoordinates.precision.isAvailable)m_drawCoordinates=coordinates;
+        else for(int axis=0;axis<3;++axis)m_drawCoordinates.precision.inputError[axis]=
+            std::max(m_drawCoordinates.precision.inputError[axis],coordinates.precision.inputError[axis]);
+    }
+    if(m_staged.payload.revision&&!m_staged.texture&&m_state.status==RenderEffectStatus::Failed)return true;
+    const auto& toValidate=m_staged.payload.revision?m_staged.payload:m_active.payload;
+    if(toValidate.revision&&(coordinates.precision.isAvailable||isShaderEvent)) {
+        bool covered=coordinates.precision.isAvailable&&m_precisionRevision==toValidate.revision&&m_provedBounds==coordinates.bounds;
+        for(int axis=0;axis<3;++axis)covered=covered&&coordinates.precision.inputError[axis]<=m_provedError[axis];
+        if(!covered) {
+            m_precisionRevision=toValidate.revision;m_provedBounds=coordinates.bounds;m_provedError=coordinates.precision.inputError;
+            m_precisionValid=GetPrecisionValid(toValidate,coordinates);
+        }
+        if(!m_precisionValid) {
+            m_state.status=RenderEffectStatus::Failed;m_state.failureReason=RenderEffectFailure::PrecisionNotMet;
+            m_state.message="Crop preview cannot resolve this geometry within its coordinate arithmetic error bound.";
+            if(!m_staged.payload.revision)m_drawValid=false;
+            return false;
+        }
+    } else if(toValidate.nodeCount&&!coordinates.precision.isAvailable)return true;
 
     if (m_staged.payload.revision != 0
         && m_staged.texture
@@ -562,7 +738,7 @@ bool CropShaderController::Impl::ClearCropParams()
 {
     // Old frames keep their resource holds, but cannot label a new input as rendered.
     if(m_frameState->generation==std::numeric_limits<std::uint64_t>::max())return false;
-    ++m_frameState->generation;m_frameState->presented={};m_drawPayload={};m_frameState->frameId=0;m_frameState->revision=0;m_frameState->nodeId=0;m_frameState->conflict=false;
+    ++m_frameState->generation;m_frameState->presented={};m_frameState->precision={};m_precisionRevision=0;m_drawPayload={};m_frameState->frameId=0;m_frameState->revision=0;m_frameState->nodeId=0;m_frameState->conflict=false;
     m_drawValid=false;
     if (m_previous.texture
         && m_previous.texture != m_active.texture
@@ -757,6 +933,9 @@ public:
         return input==m_inputStamp&&m_controller.GetPointVisible(input,point);
     }
 
+    CropCoordinatePrecision GetCoordinatePrecision() const {return m_controller.GetCoordinatePrecision();}
+    CropPreviewPrecision GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const {return m_controller.GetPreviewPrecision(points);}
+
     bool OnRenderStart(vtkRenderer* renderer) override
     {
         return m_controller.StartRender(renderer,m_bindingUse==RenderBindingUse::Current);
@@ -799,6 +978,8 @@ public:
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
     CropNodeId GetRenderedNode() const;
+    CropCoordinatePrecision GetCoordinatePrecision() const;
+    CropPreviewPrecision GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const;
     bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const;
     bool SetSourcePreview(CropShaderPayload payload);
     void SetSourcePreviewComplete(std::uint64_t revision) noexcept;
@@ -1307,3 +1488,63 @@ bool CropShaderEffect::Impl::GetPointVisible(RenderInputStamp input,const std::a
 bool CropShaderEffect::GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
     return m_impl->GetPointVisible(input,point);
 }
+
+CropPreviewPrecision CropShaderController::Impl::GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const {
+    CropPreviewPrecision result;result.renderedHead=GetRenderedNode();result.coordinates=GetCoordinatePrecision();
+    if(points.size()>256){result.failureReason=CropFailure::ResourceLimit;return result;}
+    if(!result.renderedHead||!result.coordinates.isAvailable)return result;
+    result.failureReason=CropFailure::None;result.samples.reserve(points.size());
+    const auto& payload=m_frameState->presented;
+    for(const auto& point:points) {
+        auto classification=Contains(m_frameState->bounds,point)?CropPointClassification::Kept:CropPointClassification::PrecisionNotMet;
+        if(classification!=CropPointClassification::PrecisionNotMet)for(std::size_t index=0;index<payload.nodeCount;++index) {
+            const auto value=payload.predicateTable->geometry[index].GetFloatBounds(point,result.coordinates.inputError).classification;
+            if(value==CropPointClassification::Removed){classification=value;break;}
+            if(value==CropPointClassification::PrecisionNotMet){classification=value;break;}
+            if(value==CropPointClassification::BoundaryBand)classification=value;
+        }
+        result.samples.push_back(classification);
+        switch(classification) {
+        case CropPointClassification::Kept:++result.keptCount;break;
+        case CropPointClassification::Removed:++result.removedCount;break;
+        case CropPointClassification::BoundaryBand:++result.boundaryBandCount;break;
+        case CropPointClassification::PrecisionNotMet:++result.precisionNotMetCount;break;
+        }
+    }
+    return result;
+}
+CropCoordinatePrecision CropShaderController::GetCoordinatePrecision() const {return m_impl->GetCoordinatePrecision();}
+CropPreviewPrecision CropShaderController::GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const {return m_impl->GetPreviewPrecision(points);}
+CropCoordinatePrecision CropShaderEffect::Impl::GetCoordinatePrecision() const {
+    CropCoordinatePrecision result;const auto bindings=GetCurrentBindings();if(bindings.empty()||!GetRenderedNode())return result;
+    result.isAvailable=true;
+    for(const auto& binding:bindings) {
+        const auto value=binding->GetCoordinatePrecision();result.isAvailable=result.isAvailable&&value.isAvailable;
+        for(int axis=0;axis<3;++axis)result.inputError[axis]=std::max(result.inputError[axis],value.inputError[axis]);
+    }
+    return result;
+}
+CropPreviewPrecision CropShaderEffect::Impl::GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const {
+    CropPreviewPrecision result;result.renderedHead=GetRenderedNode();result.coordinates=GetCoordinatePrecision();
+    if(points.size()>256){result.failureReason=CropFailure::ResourceLimit;return result;}
+    if(!result.renderedHead||!result.coordinates.isAvailable)return result;
+    bool first=true;
+    for(const auto& binding:GetCurrentBindings()) {
+        const auto value=binding->GetPreviewPrecision(points);if(value.failureReason!=CropFailure::None)return value;
+        if(first){result.samples=value.samples;first=false;}
+        else for(std::size_t i=0;i<points.size();++i)if(result.samples[i]!=value.samples[i]) {
+            result.samples[i]=result.samples[i]==CropPointClassification::PrecisionNotMet||value.samples[i]==CropPointClassification::PrecisionNotMet
+                ?CropPointClassification::PrecisionNotMet:CropPointClassification::BoundaryBand;
+        }
+    }
+    result.failureReason=CropFailure::None;
+    for(auto value:result.samples)switch(value) {
+        case CropPointClassification::Kept:++result.keptCount;break;
+        case CropPointClassification::Removed:++result.removedCount;break;
+        case CropPointClassification::BoundaryBand:++result.boundaryBandCount;break;
+        case CropPointClassification::PrecisionNotMet:++result.precisionNotMetCount;break;
+    }
+    return result;
+}
+CropCoordinatePrecision CropShaderEffect::GetCoordinatePrecision() const {return m_impl->GetCoordinatePrecision();}
+CropPreviewPrecision CropShaderEffect::GetPreviewPrecision(const std::vector<CropVectorDouble3Array>& points) const {return m_impl->GetPreviewPrecision(points);}

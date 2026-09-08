@@ -4,7 +4,6 @@
 
 #include <optional>
 
-enum class CropPointClassification { Kept, Removed, BoundaryBand, PrecisionNotMet };
 struct CropFloatBounds final {
     CropPointClassification classification = CropPointClassification::PrecisionNotMet;
     std::array<std::array<double,2>,3> predicates{};
@@ -29,6 +28,9 @@ public:
     static std::optional<CropVectorDouble3Array> GetAffineFloatError(
         const CropMatrixDouble16Array& matrix, const CropVectorDouble3Array& point,
         const CropVectorDouble3Array& inputError = {}) noexcept;
+    static std::optional<CropVectorDouble3Array> GetAffineFloatErrorOnBounds(
+        const CropMatrixDouble16Array& matrix,const CropBoundsDouble6Array& bounds,
+        const CropVectorDouble3Array& inputError={}) noexcept;
     static bool GetOperationsSame(const CropOpItem& a, const CropOpItem& b) noexcept;
 
 private:

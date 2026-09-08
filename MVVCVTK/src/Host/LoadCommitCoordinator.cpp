@@ -144,16 +144,13 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
             if (status == DataStageStatus::Failed
                 || status == DataStageStatus::Cancelled
                 || status == DataStageStatus::Idle) {
+                const auto effectFailure=stage->GetDataStageFailure(request.transactionRevision);
                 (void)ClearStages(m_transaction->request, false, 0);
                 m_transaction.reset();
-                return GetResult(
-                    request,
-                    status == DataStageStatus::Cancelled
-                        ? LoadCommitStatus::Cancelled
-                        : LoadCommitStatus::Failed,
-                    status == DataStageStatus::Cancelled
-                        ? LoadCommitFailure::Cancelled
-                        : LoadCommitFailure::StageFailed);
+                auto result=GetResult(request,
+                    status==DataStageStatus::Cancelled?LoadCommitStatus::Cancelled:LoadCommitStatus::Failed,
+                    status==DataStageStatus::Cancelled?LoadCommitFailure::Cancelled:LoadCommitFailure::StageFailed);
+                result.effectFailure=effectFailure;return result;
             }
         }
         return GetResult(
@@ -191,16 +188,12 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         if (status == DataStageStatus::Failed
             || status == DataStageStatus::Cancelled) {
             const auto terminal = active;
+            const auto effectFailure=stage->GetDataStageFailure(active.transactionRevision);
             (void)ClearStages(terminal, false, 0);
             m_transaction.reset();
-            return GetResult(
-                terminal,
-                status == DataStageStatus::Cancelled
-                    ? LoadCommitStatus::Cancelled
-                    : LoadCommitStatus::Failed,
-                status == DataStageStatus::Cancelled
-                    ? LoadCommitFailure::Cancelled
-                    : LoadCommitFailure::StageFailed);
+            auto failure=GetResult(terminal,status==DataStageStatus::Cancelled?LoadCommitStatus::Cancelled:LoadCommitStatus::Failed,
+                status==DataStageStatus::Cancelled?LoadCommitFailure::Cancelled:LoadCommitFailure::StageFailed);
+            failure.effectFailure=effectFailure;return failure;
         }
         areReady = areReady && status == DataStageStatus::Ready;
     }

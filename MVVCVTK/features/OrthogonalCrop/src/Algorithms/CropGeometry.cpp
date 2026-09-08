@@ -308,3 +308,35 @@ bool CropGeometry::GetOperationsSame(const CropOpItem& a,const CropOpItem& b) no
     default: return false;
     }
 }
+
+std::optional<CropVectorDouble3Array> CropGeometry::GetAffineFloatErrorOnBounds(
+    const CropMatrixDouble16Array& matrix,const CropBoundsDouble6Array& bounds,const CropVectorDouble3Array& inputError) noexcept
+{
+    for(int axis=0;axis<3;++axis)if(!std::isfinite(bounds[axis*2])||!std::isfinite(bounds[axis*2+1])||bounds[axis*2]>bounds[axis*2+1])return {};
+    if(!GetFinite(matrix)||matrix[12]!=0||matrix[13]!=0||matrix[14]!=0||matrix[15]!=1)return {};
+    constexpr double unit=0x1p-24,floor=std::numeric_limits<float>::min();
+    constexpr double gamma=8*unit/(1-8*unit),doubleGuard=32*0x1p-53;
+    std::array<double,4> magnitude{0,0,0,1},error{};
+    for(int axis=0;axis<3;++axis) {
+        if(!std::isfinite(inputError[axis])||inputError[axis]<0)return {};
+        magnitude[axis]=std::max(std::abs(bounds[axis*2]),std::abs(bounds[axis*2+1]));
+        error[axis]=inputError[axis]+unit*(magnitude[axis]+inputError[axis])+floor;
+    }
+    CropVectorDouble3Array result{};
+    // Coefficient and coordinate quantization are bounded over the entire
+    // domain. Exactly representable endpoints alone do not bound interior casts.
+    for(int row=0;row<3;++row) {
+        double perturbation=0,products=0;
+        for(int col=0;col<4;++col) {
+            const double coefficient=matrix[row*4+col];
+            const float encoded=static_cast<float>(coefficient);if(!std::isfinite(encoded))return {};
+            const double coefficientError=std::abs(double(encoded)-coefficient)+floor;
+            perturbation+=std::abs(coefficient)*error[col]+coefficientError*(magnitude[col]+error[col]);
+            products+=(std::abs(coefficient)+coefficientError)*(magnitude[col]+error[col]);
+        }
+        if(!std::isfinite(products)||products>std::numeric_limits<float>::max())return {};
+        result[row]=std::nextafter((perturbation+gamma*products+16*floor)*(1+doubleGuard),INFINITY);
+        if(!std::isfinite(result[row]))return {};
+    }
+    return result;
+}

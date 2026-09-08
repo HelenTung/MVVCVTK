@@ -525,6 +525,10 @@ bool GetActualRenderedHead() {
     if(!Check(f.bridge.GetHistory().appliedHead==b.nodeId&&f.bridge.GetHistory().renderedHead==a.nodeId,
         "applied head did not remain separate from the last rendered head"))return false;
     if(!Check(f.service->GetPointVisible({0.25,0,0}),"unpresented edit changed business picking before its frame"))return false;
+    const std::vector<CropVectorDouble3Array> samples{{0.2,0,0},{0.3,0,0},{0.4,0,0}};
+    const auto oldPrecision=f.bridge.GetPreviewPrecision(f.service.get(),samples);
+    if(!Check(oldPrecision.failureReason==CropFailure::None&&oldPrecision.renderedHead==a.nodeId
+        &&oldPrecision.keptCount==3,"precision query adopted an unpresented node"))return false;
     f.window->SwapBuffersOff();f.window->Render();
     if(!wait([&]{return !f.service->GetEffectState().isRenderPending;}))return false;
     if(!Check(f.bridge.GetHistory().renderedHead==a.nodeId,"back-buffer validation was reported as presented"))return false;
@@ -533,6 +537,20 @@ bool GetActualRenderedHead() {
     if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
     if(!Check(!f.service->GetPointVisible({0.25,0,0})&&f.service->GetPointVisible({0.4,0,0}),
         "presented crop did not reject its hidden side for business picking"))return false;
+    const auto precision=f.bridge.GetPreviewPrecision(f.service.get(),samples);
+    if(!Check(precision.failureReason==CropFailure::None&&precision.renderedHead==b.nodeId
+        &&precision.coordinates.isAvailable&&precision.keptCount==1&&precision.removedCount==1
+        &&precision.boundaryBandCount==1&&precision.precisionNotMetCount==0
+        &&f.bridge.GetPreviewPrecision(f.service.get(),std::vector<CropVectorDouble3Array>(257)).failureReason==CropFailure::ResourceLimit,
+        "presented precision query failed kept/removed/band or sample budget"))return false;
+    auto tiny=Request(f.bridge,CropEditKind::Append,b.nodeId);tiny.operation.geometryType=CropShape::Sphere;
+    tiny.operation.centerInInputModel={0.4,0,0};tiny.operation.radius=1e-10;
+    const auto rejected=f.bridge.SendRequest(tiny);if(!rejected)return false;
+    f.window->Render();(void)f.bridge.SendShaderCommit();
+    const auto outcome=f.bridge.GetOutcome(rejected.requestId);
+    if(!Check(outcome&&outcome->failureReason==CropFailure::PrecisionNotMet
+        &&!f.bridge.GetNode(rejected.nodeId)&&f.bridge.GetHistory().appliedHead==b.nodeId,
+        "unresolvable preview advanced history or lost PrecisionNotMet"))return false;
     auto failFrame=vtkSmartPointer<vtkCallbackCommand>::New();
     failFrame->SetCallback([](vtkObject* source,unsigned long,void*,void*){source->InvokeEvent(vtkCommand::ErrorEvent);});
     const auto failedTag=f.window->AddObserver(vtkCommand::EndEvent,failFrame,1.0);

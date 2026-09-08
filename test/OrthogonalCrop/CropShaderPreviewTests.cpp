@@ -11,6 +11,9 @@
 #include <vtkCommand.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLVertexBufferObject.h>
+#include <vtkOpenGLVertexBufferObjectGroup.h>
+#include <vtkOpenGLGPUVolumeRayCastMapper.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkShaderProperty.h>
@@ -1333,6 +1336,11 @@ bool StartVolumeCoordinateCase()
             && keptPixel != std::array<unsigned char, 3>{ 0, 0, 0 }
             && rejectedPixel == std::array<unsigned char, 3>{ 0, 0, 0 },
         "Volume texture-to-dataset mapping should honor direction/extent/origin and exclude the prop model matrix.") && isPassed;
+    auto* blockMapper=vtkOpenGLGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper());
+    if(!blockMapper)return false;
+    blockMapper->SetPartitions(2,2,2);renderWindow->Render();
+    isPassed=SetExpect(GetCenterPixel(renderWindow)==std::array<unsigned char,3>{0,0,0},
+        "streamed volume blocks lost the input-model crop predicate")&&isPassed;
     const auto mapperInputCount = strategy->GetMapperInputCount();
     const auto resampleUpdateCount =
         strategy->GetResampleUpdateCount();
@@ -1681,6 +1689,20 @@ bool StartCurvedPointGridCase()
         passed=GetPointGridMatched({op},1,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
     }
     passed=GetPointGridMatched({sphere,cylinder},2,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    // Force a nontrivial VBO coordinate frame; the same input-model predicates
+    // and independent pixel oracle must still hold after mapper preprocessing.
+    auto* mapper=vtkOpenGLPolyDataMapper::SafeDownCast(actor->GetMapper());
+    auto* vertices=mapper?mapper->GetVBOs()->GetVBO("vertexMC"):nullptr;
+    if(!vertices)return false;
+    mapper->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::MANUAL_SHIFT_SCALE);
+    vertices->SetShift(std::vector<double>{100,-30,40});vertices->SetScale(std::vector<double>{2,3,4});
+    append->GetOutput()->GetPoints()->Modified();mapper->Modified();
+    for(auto op:{sphere,cylinder})for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        op.removalMode=mode;
+        passed=GetPointGridMatched({op},1,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    }
+    passed=SetExpect(vertices->GetCoordShiftAndScaleEnabled()&&vertices->GetShift()==std::vector<double>{100,-30,40}
+        &&vertices->GetScale()==std::vector<double>{2,3,4},"manual VBO precision test did not activate shift/scale")&&passed;
     window->Finalize();
     return SetExpect(passed,"Curved GPU pixels differ from the independent reference for sphere/cylinder side/caps/complements.");
 }

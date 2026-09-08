@@ -170,6 +170,10 @@ public:
         std::uint64_t transactionRevision);
     DataStageStatus GetDataStageStatus(
         std::uint64_t transactionRevision) const;
+    RenderEffectFailure GetDataStageFailure(std::uint64_t revision) const {
+        return m_dataStage&&m_dataStage->transactionRevision==revision&&m_dataStage->nextStrategy
+            ?m_dataStage->nextStrategy->GetRenderEffectState().failureReason:RenderEffectFailure::None;
+    }
     bool SetViewStage(
         const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
@@ -3981,6 +3985,10 @@ public:
         return m_service
             ? m_service->GetDataStageStatus(transactionRevision)
             : DataStageStatus::Idle;
+    }
+
+    RenderEffectFailure GetDataStageFailure(std::uint64_t revision) const override {
+        return m_service?m_service->GetDataStageFailure(revision):RenderEffectFailure::None;
     }
 
     bool SetViewStage(

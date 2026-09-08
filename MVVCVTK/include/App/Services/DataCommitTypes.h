@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/AppTypes.h"
+#include "Render/Contracts/RenderEffect.h"
 
 #include <array>
 #include <cstdint>
@@ -36,6 +37,7 @@ struct LoadCommitResult final {
     LoadCommitFailure failureReason = LoadCommitFailure::InvalidRequest;
     std::uint64_t transactionRevision = 0;
     DataRevisionRef sourceRevision;
+    RenderEffectFailure effectFailure=RenderEffectFailure::None;
 };
 
 // DataManager 最终发布成功后一次写入共享状态的值快照。

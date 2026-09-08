@@ -41,6 +41,7 @@ public:
     bool ResetViewStage(std::uint64_t) override { committed=false; ++resets; return true; }
     bool ClearDataStage(std::uint64_t) override { ++clears; return true; }
     void SetDataStageComplete(std::uint64_t) noexcept override { ++completes; }
+    RenderEffectFailure GetDataStageFailure(std::uint64_t) const override {return failReady?RenderEffectFailure::PrecisionNotMet:RenderEffectFailure::None;}
     bool failStart=false,failReady=false,failCommit=false,committed=false;
     int starts=0,resets=0,clears=0,completes=0;
     bool throwStart=false,throwReady=false,throwCommit=false;
@@ -244,7 +245,7 @@ bool GetTransitionCase(int failure)
     if(failure>=8)return Check(result.status==LoadCommitStatus::Failed&&!coordinator.GetIsPending()
         &&!first->committed&&!second->committed&&first->clears==1&&second->clears==1&&notifications==0,
         "throwing stage/publication did not rollback completely");
-    if(failure==2)return Check(result.status==LoadCommitStatus::Failed&&publications==0
+    if(failure==2)return Check(result.status==LoadCommitStatus::Failed&&result.effectFailure==RenderEffectFailure::PrecisionNotMet&&publications==0
         &&first->clears==1&&second->clears==1,"ready failure changed graph");
     if(failure==3)return Check(result.status==LoadCommitStatus::Failed&&publications==0
         &&first->resets==1&&!first->committed,"partial View commit did not rollback");

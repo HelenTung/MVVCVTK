@@ -180,6 +180,7 @@ public:
         std::uint64_t transactionRevision) = 0;
     virtual DataStageStatus GetDataStageStatus(
         std::uint64_t transactionRevision) const = 0;
+    virtual RenderEffectFailure GetDataStageFailure(std::uint64_t) const {return RenderEffectFailure::None;}
     virtual bool SetViewStage(
         const VtkImageGridSnapshot& snapshot,
         std::uint64_t transactionRevision) = 0;

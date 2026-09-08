@@ -52,6 +52,12 @@ VtkRenderInputSnapshot BuildRootRenderInput(const CropInputSnapshot& source,
     return {};
 }
 
+CropFailure GetCropPreviewFailure(RenderEffectFailure failure) {
+    if(failure==RenderEffectFailure::PrecisionNotMet)return CropFailure::PrecisionNotMet;
+    if(failure==RenderEffectFailure::ResourceLimit)return CropFailure::ResourceLimit;
+    return CropFailure::PreviewNotReady;
+}
+
 bool GetFacetUsed(
     const DataGraphSnapshot& graph,
     const DataTypeId& type,
@@ -156,6 +162,7 @@ public:
         CropHostRequest request,
         CropBuildCallback onComplete);
     CropHostState GetState() const;
+    CropPreviewPrecision GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,const std::vector<CropVectorDouble3Array>& points) const;
     std::vector<FeatureOperationState> GetOperationStates() const;
 
 private:
@@ -1350,7 +1357,7 @@ bool CropHostFeature::Impl::StartSourcePreview(bool isDocument,bool isActivation
     const PublishGuard guard(m_isPublishing);
     const auto state=m_host->StartDataTransition(std::move(request));
     if (state.status!=FeatureRunStatus::Preparing && state.status!=FeatureRunStatus::Running) {
-        m_bridge->SetSourceCommitFailed(std::move(participant->prepared),CropFailure::PreviewNotReady);
+        m_bridge->SetSourceCommitFailed(std::move(participant->prepared),GetCropPreviewFailure(state.effectFailure));
         m_sourceTransition.reset();
         return false;
     }
@@ -1367,13 +1374,13 @@ bool CropHostFeature::Impl::SendSourcePreview()
     if (state.status==FeatureRunStatus::Preparing || state.status==FeatureRunStatus::Running) return false;
     if (!participant->isCommitted)
         m_bridge->SetSourceCommitFailed(std::move(participant->prepared),
-            state.status==FeatureRunStatus::Cancelled?CropFailure::Cancelled:CropFailure::PreviewNotReady);
+            state.status==FeatureRunStatus::Cancelled?CropFailure::Cancelled:GetCropPreviewFailure(state.effectFailure));
     if (participant->isDocument && !participant->isCommitted)
-        SetDocumentComplete(state.commitFailure==DataCommitFailure::None?CropFailure::PreviewNotReady:GetCropFailure(state.commitFailure),state.blockers);
+        SetDocumentComplete(state.commitFailure==DataCommitFailure::None?GetCropPreviewFailure(state.effectFailure):GetCropFailure(state.commitFailure),state.blockers);
     if (participant->publication && !participant->isCommitted) {
         auto& publication = *participant->publication;
         publication.result.failureReason = state.status==FeatureRunStatus::Cancelled ? CropFailure::Cancelled :
-            state.commitFailure==DataCommitFailure::None ? CropFailure::PreviewNotReady : GetCropFailure(state.commitFailure);
+            state.commitFailure==DataCommitFailure::None ? GetCropPreviewFailure(state.effectFailure) : GetCropFailure(state.commitFailure);
         publication.result.blockers = state.blockers;
         publication.result.message = "Crop publication was rejected; previous binding and result are preserved.";
         SetBuildFailed(publication.completeState, publication.completeItem, std::move(publication.result));
@@ -1944,3 +1951,14 @@ CropFailure CropHostFeature::Impl::GetRequestFailure(CropDocumentId documentId,C
     const auto expired=m_expiredRequests.find(documentId);
     return expired!=m_expiredRequests.end()&&requestId<=expired->second?CropFailure::RequestExpired:CropFailure::None;
 }
+
+CropPreviewPrecision CropHostFeature::Impl::GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,
+    const std::vector<CropVectorDouble3Array>& points) const {
+    CropPreviewPrecision result;
+    if(!GetOwnerReady()||!m_isAttached||!m_bridge||!m_views)return result;
+    if(points.size()>256){result.failureReason=CropFailure::ResourceLimit;return result;}
+    if(documentId!=m_bridge->GetCropHistory().documentId){result.failureReason=CropFailure::SourceMismatch;return result;}
+    const auto port=m_views->GetFeaturePort(viewId);result=m_bridge->GetPreviewPrecision(port.get(),points);result.viewId=viewId;return result;
+}
+CropPreviewPrecision CropHostFeature::GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,
+    const std::vector<CropVectorDouble3Array>& points) const {return m_impl->GetPreviewPrecision(documentId,viewId,points);}

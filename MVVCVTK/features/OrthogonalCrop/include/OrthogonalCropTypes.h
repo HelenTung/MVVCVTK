@@ -250,12 +250,29 @@ struct CropNodeSnapshot final {
 
 // Values describe one target view at the owner-thread query instant. A committed
 // node may still await its first presented frame; 0 means no known rendered node.
+enum class CropPointClassification { Kept, Removed, BoundaryBand, PrecisionNotMet };
+struct CropCoordinatePrecision final {
+    bool isAvailable=false;
+    CropVectorDouble3Array inputError{};
+};
+struct CropPreviewPrecision final {
+    CropFailure failureReason=CropFailure::PreviewNotReady;
+    CropDocumentId documentId=0;
+    CropNodeId renderedHead=0;
+    std::uint64_t stateRevision=0;
+    std::string viewId;
+    CropCoordinatePrecision coordinates;
+    std::vector<CropPointClassification> samples;
+    std::size_t keptCount=0,removedCount=0,boundaryBandCount=0,precisionNotMetCount=0;
+};
+
 struct CropViewPreviewState final {
     std::string viewId;
     CropNodeId requestedHead=0;
     CropNodeId appliedHead=0;
     CropNodeId renderedHead=0;
     RenderEffectState effect;
+    CropCoordinatePrecision precision;
     bool isRenderPending=false;
 };
 

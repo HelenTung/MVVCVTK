@@ -11,6 +11,7 @@
 
 #include <vtkMath.h>
 #include <vtkMatrix4x4.h>
+#include <vtkMatrix3x3.h>
 #include <vtkNew.h>
 
 #include <algorithm>
@@ -49,6 +50,54 @@ RenderInputStamp GetInputStamp(const CropInputSnapshot& input)
     }
     return stamp;
 }
+CropPointClassification GetRootMaskClass(const CropInputSnapshot& input,const CropVectorDouble3Array& point,const CropVectorDouble3Array& error)
+{
+    if(!input.data)return CropPointClassification::PrecisionNotMet;
+    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(input.data->payload.get());
+    if(!image)return CropPointClassification::Kept;
+    const auto& geometry=image->GetGeometry();double matrix[9],inverse[9];
+    for(int row=0;row<3;++row)for(int col=0;col<3;++col)matrix[row*3+col]=geometry.direction[row*3+col]*geometry.spacing[col];
+    const auto determinant=vtkMatrix3x3::Determinant(matrix);
+    if(!std::isfinite(determinant)||determinant==0)return CropPointClassification::PrecisionNotMet;
+    vtkMatrix3x3::Invert(matrix,inverse);std::array<std::int64_t,3> low{},high{};bool outside=false;
+    std::size_t cells=1;
+    for(int row=0;row<3;++row) {
+        double index=0,uncertainty=0;
+        for(int col=0;col<3;++col) {
+            if(!std::isfinite(point[col])||!std::isfinite(error[col])||error[col]<0)return CropPointClassification::PrecisionNotMet;
+            index+=inverse[row*3+col]*(point[col]-geometry.origin[col]);
+            uncertainty+=std::abs(inverse[row*3+col])*(error[col]+32*std::numeric_limits<double>::epsilon()
+                *(std::abs(point[col])+std::abs(geometry.origin[col])));
+        }
+        const double a=std::nextafter(index-uncertainty,-INFINITY),b=std::nextafter(index+uncertainty,INFINITY);
+        if(!std::isfinite(a)||!std::isfinite(b))return CropPointClassification::PrecisionNotMet;
+        const double minimum=double(geometry.extent[row*2])-0.5,maximum=double(geometry.extent[row*2+1])+0.5;
+        if(b<minimum||a>maximum)return CropPointClassification::Removed;
+        outside=outside||a<minimum||b>maximum;
+        low[row]=static_cast<std::int64_t>(std::clamp(std::floor(a+0.5),double(geometry.extent[row*2]),double(geometry.extent[row*2+1])));
+        high[row]=static_cast<std::int64_t>(std::clamp(std::floor(b+0.5),double(geometry.extent[row*2]),double(geometry.extent[row*2+1])));
+        const auto count=static_cast<std::size_t>(high[row]-low[row]+1);
+        if(count>4096/cells)cells=4097;else cells*=count;
+    }
+    const auto& mask=image->GetValidityMask();
+    if(!mask)return outside?CropPointClassification::BoundaryBand:CropPointClassification::Kept;
+    if(cells>4096)return CropPointClassification::PrecisionNotMet;
+    bool kept=false,removed=outside;
+    for(auto z=low[2];z<=high[2];++z)for(auto y=low[1];y<=high[1];++y)for(auto x=low[0];x<=high[0];++x) {
+        const auto offset=(static_cast<std::size_t>(z-geometry.extent[4])*geometry.dimensions[1]
+            +static_cast<std::size_t>(y-geometry.extent[2]))*geometry.dimensions[0]+static_cast<std::size_t>(x-geometry.extent[0]);
+        if(offset>=mask->size())return CropPointClassification::PrecisionNotMet;
+        if((*mask)[offset])kept=true;else removed=true;
+        if(kept&&removed)return CropPointClassification::BoundaryBand;
+    }
+    return kept?CropPointClassification::Kept:CropPointClassification::Removed;
+}
+CropFailure GetPreviewFailure(RenderEffectFailure failure) {
+    if(failure==RenderEffectFailure::PrecisionNotMet)return CropFailure::PrecisionNotMet;
+    if(failure==RenderEffectFailure::ResourceLimit)return CropFailure::ResourceLimit;
+    return CropFailure::PreviewNotReady;
+}
+
 }
 
 
@@ -117,7 +166,36 @@ public:
         const auto history=m_tree.GetSnapshot(0,0);
         CropViewPreviewState result;result.requestedHead=history.requestedHead;result.appliedHead=history.appliedHead;
         result.renderedHead=target->effect->GetRenderedNode();result.effect=target->effect->GetState();
+        if(result.renderedHead&&!m_tree.GetNode(result.renderedHead))result.renderedHead=0;
+        result.precision=target->effect->GetCoordinatePrecision();
         result.isRenderPending=result.effect.isRenderPending||result.renderedHead!=result.appliedHead;
+        return result;
+    }
+    CropPreviewPrecision GetPreviewPrecision(const FeatureViewService* service,const std::vector<CropVectorDouble3Array>& points) const {
+        CropPreviewPrecision result;result.documentId=m_tree.GetDocumentId();result.stateRevision=m_tree.GetRevision();
+        if(points.size()>256){result.failureReason=CropFailure::ResourceLimit;return result;}
+        const auto target=std::find_if(m_targets.begin(),m_targets.end(),[service](const auto& value){return value.service.get()==service;});
+        if(target==m_targets.end()||!target->effect)return result;
+        const auto stamp=target->service->GetRenderInputStamp();
+        if(!stamp||!m_input.data||stamp->dataRevision!=m_input.data->self){result.failureReason=CropFailure::SourceMismatch;return result;}
+        result=target->effect->GetPreviewPrecision(points);result.documentId=m_tree.GetDocumentId();result.stateRevision=m_tree.GetRevision();
+        if(!m_tree.GetNode(result.renderedHead)){result.failureReason=CropFailure::PreviewNotReady;result.renderedHead=0;result.samples.clear();return result;}
+        if(result.failureReason!=CropFailure::None)return result;
+        result.keptCount=result.removedCount=result.boundaryBandCount=result.precisionNotMetCount=0;
+        for(std::size_t i=0;i<points.size();++i) {
+            const auto root=GetRootMaskClass(m_input,points[i],result.coordinates.inputError);auto& value=result.samples[i];
+            if(root==CropPointClassification::Removed)value=root;
+            else if(value!=CropPointClassification::Removed) {
+                if(root==CropPointClassification::PrecisionNotMet)value=root;
+                else if(root==CropPointClassification::BoundaryBand&&value!=CropPointClassification::PrecisionNotMet)value=root;
+            }
+            switch(value) {
+                case CropPointClassification::Kept:++result.keptCount;break;
+                case CropPointClassification::Removed:++result.removedCount;break;
+                case CropPointClassification::BoundaryBand:++result.boundaryBandCount;break;
+                case CropPointClassification::PrecisionNotMet:++result.precisionNotMetCount;break;
+            }
+        }
         return result;
     }
     CropNodeId GetRenderedHead() const {
@@ -126,7 +204,7 @@ public:
             const auto node=target.effect?target.effect->GetRenderedNode():0;
             if(first){result=node;first=false;}else if(result!=node)return 0;
         }
-        return result;
+        return result&&m_tree.GetNode(result)?result:0;
     }
     CropHistorySnapshot GetHistory(CropNodeId after,std::size_t limit) const {
         auto history=m_tree.GetSnapshot(after,limit);history.renderedHead=GetRenderedHead();return history;
@@ -177,6 +255,7 @@ private:
     bool SetCandidate(CropOpItem operation);
     bool SendNextOp();
     bool SetShader(CropHistory::Stage stage);
+    CropFailure m_previewFailure=CropFailure::PreviewNotReady;
     void FailPending(CropFailure failure);
     CropEditRequest BuildEditRequest(CropEditKind kind,CropNodeId node) const;
     std::uint64_t CreateShaderRevision() noexcept;
@@ -907,7 +986,7 @@ bool CropBridge::Impl::SendNextOp()
         return true;
     }
     if (!SetShader(std::move(stage))) {
-        m_commands.SetFailed(m_tree,CropFailure::PreviewNotReady);
+        m_commands.SetFailed(m_tree,m_previewFailure);
         (void)SetInteraction(m_commitSource,!m_commands.GetIsEmpty());
         return false;
     }
@@ -916,9 +995,10 @@ bool CropBridge::Impl::SendNextOp()
 
 bool CropBridge::Impl::SetShader(CropHistory::Stage stage)
 {
+    m_previewFailure=CropFailure::PreviewNotReady;
     if (!m_tree.GetStageReady(stage)) return false;
     const auto table=CropAlgorithm::BuildPredicateTable(stage.operations,stage.operations.size());
-    if (!table.isSucceeded || !table.predicateTable) return false;
+    if (!table.isSucceeded || !table.predicateTable) {m_previewFailure=table.failureReason;return false;}
     const auto revision=CreateShaderRevision();if(!revision)return false;
     PendingShader pending;pending.payload={revision,GetInputStamp(m_input),stage.operations.size(),table.predicateTable};
     pending.payload.nodeId=stage.head;
@@ -984,7 +1064,7 @@ bool CropBridge::Impl::SendShaderCommit()
         const auto stamp=target.service->GetRenderInputStamp();
         if(!stamp || *stamp!=pending.payload.sourceStamp) {FailPending(CropFailure::SourceMismatch);return false;}
         const auto state=target.effect->GetState();
-        if(state.status==RenderEffectStatus::Failed) {FailPending(CropFailure::PreviewNotReady);return false;}
+        if(state.status==RenderEffectStatus::Failed) {FailPending(GetPreviewFailure(state.failureReason));return false;}
         if(state.stagedRevision!=pending.payload.revision || state.status!=RenderEffectStatus::Ready) {
             ready=false;(void)target.service->SetRenderNeeded();
         }
@@ -1670,3 +1750,7 @@ bool CropBridge::Impl::RefreshWidgetTransform()
     (void)m_referenceService->SetRenderNeeded();return true;
 }
 bool CropBridge::RefreshWidgetTransform(){return m_impl&&m_impl->RefreshWidgetTransform();}
+
+CropPreviewPrecision CropBridge::GetPreviewPrecision(const FeatureViewService* service,const std::vector<CropVectorDouble3Array>& points) const {
+    return m_impl->GetOwnerReady()?m_impl->GetPreviewPrecision(service,points):CropPreviewPrecision{};
+}

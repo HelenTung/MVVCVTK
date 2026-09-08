@@ -57,7 +57,9 @@ enum class RenderEffectFailure {
     InputMismatch,
     ContextLost,
     CompileFailed,
-    TextureFailed
+    TextureFailed,
+    PrecisionNotMet,
+    ResourceLimit
 };
 
 struct RenderEffectState final {

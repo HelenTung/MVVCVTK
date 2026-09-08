@@ -139,6 +139,7 @@ struct FeatureDataTransitionState final {
     FeatureRunStatus status = FeatureRunStatus::Failed;
     DataCommitFailure commitFailure = DataCommitFailure::InvalidTransaction;
     std::vector<DataLifetimeBlocker> blockers;
+    RenderEffectFailure effectFailure=RenderEffectFailure::None;
 };
 
 class FeatureHostControl : public HostInputPort {
