@@ -1119,6 +1119,7 @@ bool CropHostFeature::Impl::SendRequest(
         || needsTarget != request.target.has_value()
         || (request.action == CropHostAction::Mode) != request.removalMode.has_value()
         || (request.action == CropHostAction::Node) != request.nodeCount.has_value()
+        || (request.action == CropHostAction::DeleteNode) != request.operationIndex.has_value()
         || (request.action == CropHostAction::SetPolyData) != static_cast<bool>(request.polyData)) {
         return false;
     }
@@ -1136,7 +1137,8 @@ bool CropHostFeature::Impl::SendRequest(
     // 历史动作也必须先检查输入换代，不能依赖应用按钮置灰或下一次 tick。
     if (request.action == CropHostAction::Previous
         || request.action == CropHostAction::Next
-        || request.action == CropHostAction::Node) {
+        || request.action == CropHostAction::Node
+        || request.action == CropHostAction::DeleteNode) {
         if (!m_activeTarget || !SetCropInput(*m_activeTarget)) return false;
     }
     switch (request.action) {
@@ -1154,6 +1156,8 @@ bool CropHostFeature::Impl::SendRequest(
         return m_bridge->GetCropBound() && m_bridge->NextCrop();
     case CropHostAction::Node:
         return m_bridge->GetCropBound() && m_bridge->SetCropNode(*request.nodeCount);
+    case CropHostAction::DeleteNode:
+        return m_bridge->GetCropBound() && m_bridge->DeleteCropNode(*request.operationIndex);
     case CropHostAction::BuildResult:
         return BuildCropResult(*request.target, std::move(onComplete),request.inputRoi);
     case CropHostAction::SaveRoi:

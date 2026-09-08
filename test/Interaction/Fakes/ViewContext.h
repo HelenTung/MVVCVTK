@@ -1,3 +1,4 @@
+// 测试用途：提供视图上下文测试替身，用于交互与命令路由验证。
 #pragma once
 
 #include "Interaction/AbstractViewContext.h"

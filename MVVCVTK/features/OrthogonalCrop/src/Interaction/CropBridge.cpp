@@ -83,6 +83,7 @@ public:
         std::shared_ptr<FeatureViewService> nextReferenceService;
         vtkRenderWindowInteractor* nextInteractor = nullptr;
         bool isTargetRebind = false;
+        std::vector<bool> renderRequested;
     };
 
     struct BuildTask final {
@@ -114,6 +115,7 @@ public:
     bool PreviousCrop();
     bool NextCrop();
     bool SetCropNode(std::size_t nodeCount);
+    bool DeleteCropNode(std::uint64_t operationIndex);
     bool ExitCrop();
     bool GetCropActive() const;
     bool GetCropBound() const;
@@ -1074,6 +1076,23 @@ bool CropBridge::Impl::SetCropNode(const std::size_t nodeCount)
     return nodeCount == m_cursor || SetPrefix(nodeCount);
 }
 
+bool CropBridge::Impl::DeleteCropNode(const std::uint64_t operationIndex)
+{
+    if (!GetCropBound() || !GetTargetsReady() || operationIndex == 0
+        || m_buildTask || m_pendingShader || m_pendingMode || m_hasBaseShader
+        || !m_pendingOps.empty() || m_hasDrag) return false;
+    const auto found = std::find_if(m_history.begin(), m_history.end(),
+        [operationIndex](const auto& operation) { return operation.operationIndex == operationIndex; });
+    // 已物化基线不在 m_history 中，禁止把其删除伪装为对当前 image 的预览修改。
+    if (found == m_history.end()) return false;
+    const auto index = static_cast<std::size_t>(std::distance(m_history.begin(), found));
+    auto candidate = m_history;
+    candidate.erase(candidate.begin() + index);
+    const auto cursor = m_cursor - (index < m_cursor ? 1 : 0);
+    // 重建不可变谓词表；只有全部目标完成两阶段提交后才替换历史和游标。
+    return SetShader(ShaderCandidate{std::move(candidate), cursor, std::nullopt, {}});
+}
+
 bool CropBridge::Impl::GetShaderTickNeeded() const
 {
     return m_pendingShader.has_value()
@@ -1114,7 +1133,9 @@ bool CropBridge::Impl::SendShaderCommit()
     }
     bool isReady = true;
     bool hasFailure = false;
-    for (const auto& target : m_pendingShader->targets) {
+    m_pendingShader->renderRequested.resize(m_pendingShader->targets.size(), false);
+    for (std::size_t index = 0; index < m_pendingShader->targets.size(); ++index) {
+        const auto& target = m_pendingShader->targets[index];
         const auto state = target.effect->GetState();
         hasFailure = hasFailure
             || state.status == RenderEffectStatus::Failed;
@@ -1122,8 +1143,10 @@ bool CropBridge::Impl::SendShaderCommit()
             isReady = false;
             continue;
         }
-        if (state.status == RenderEffectStatus::Staged) {
-            (void)target.service->SetRenderNeeded();
+        if (state.status == RenderEffectStatus::Staged && !m_pendingShader->renderRequested[index]) {
+            // HostDriven 中重复置脏会再次发工作通知，形成 Update -> dirty -> Update 忙循环。
+            // 每个修订/目标只提交一次；隐藏/延迟绘制由 Host 保留 pending，真实 Render 后再收取 Ready。
+            m_pendingShader->renderRequested[index] = target.service->SetRenderNeeded();
         }
         isReady = isReady
             && (state.status == RenderEffectStatus::Ready
@@ -1930,7 +1953,7 @@ bool CropBridge::Impl::GetCropBound() const
 
 CropHistoryState CropBridge::Impl::GetCropHistory() const
 {
-    return CropHistoryState{
+    auto state = CropHistoryState{
         m_cursor,
         m_history.size(),
         m_removalMode,
@@ -1939,6 +1962,9 @@ CropHistoryState CropBridge::Impl::GetCropHistory() const
         m_baseNodeCount,
         m_allHistory.size()
     };
+    state.operationIndices.reserve(m_history.size());
+    for (const auto& operation : m_history) state.operationIndices.push_back(operation.operationIndex);
+    return state;
 }
 
 CropBridge::PreparedCommit::PreparedCommit(
@@ -2019,6 +2045,10 @@ bool CropBridge::SetCropNode(const std::size_t nodeCount)
 {
     return m_impl->GetLeaseReady()
         && m_impl->SetCropNode(nodeCount);
+}
+bool CropBridge::DeleteCropNode(const std::uint64_t operationIndex)
+{
+    return m_impl->GetLeaseReady() && m_impl->DeleteCropNode(operationIndex);
 }
 bool CropBridge::ExitCrop()
 {

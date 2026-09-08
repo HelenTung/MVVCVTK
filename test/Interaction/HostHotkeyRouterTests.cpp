@@ -1,3 +1,4 @@
+// 测试用途：验证快捷键到宿主命令的映射、触发和路由行为。
 #include "HostHotkeyRouterTests.h"
 
 #include "Host/HostCommandRouter.h"

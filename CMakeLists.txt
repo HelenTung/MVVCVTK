@@ -40,24 +40,25 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+if(MVVCVTK_BUILD_TESTING)
+    enable_testing()
+else()
+    # 复用曾启用自动化测试的构建目录时，移除过期的根测试清单。
+    file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/CTestTestfile.cmake")
+endif()
+
 add_subdirectory(MVVCVTK)
-if(MVVCVTK_BUILD_STANDALONE
-    AND MVVCVTK_BUILD_ORTHOGONAL_CROP
-    AND MVVCVTK_BUILD_GAP_ANALYSIS)
-    add_subdirectory(examples/standalone)
-    set_property(
-        DIRECTORY
-        PROPERTY VS_STARTUP_PROJECT MVVCVTKStandalone
-    )
-elseif(MVVCVTK_BUILD_STANDALONE)
-    message(STATUS
-        "Skipping standalone: it composes both OrthogonalCrop and GapAnalysis."
-    )
+
+if(MVVCVTK_BUILD_QT_MANUAL OR MVVCVTK_BUILD_QT_TESTING)
+    add_subdirectory(test/QtHost/Manual)
 endif()
 
 if(MVVCVTK_BUILD_TESTING)
-    enable_testing()
     add_subdirectory(test)
+endif()
+
+if(TARGET qt_feature_manual)
+    set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT qt_feature_manual)
 endif()
 
 include(MVVCVTKInstall)

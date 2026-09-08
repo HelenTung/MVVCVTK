@@ -1,3 +1,4 @@
+// 测试用途：验证宿主会话的正交裁剪请求、状态、结果发布和视图集成。
 #include "QtHostMethodCases.h"
 #include "../TestDataPort.h"
 
@@ -821,7 +822,13 @@ int GetCropFailCount()
     polyWithoutVersion.polyData =
         vtkSmartPointer<vtkPolyData>::New();
     int rejectedBuildCount = 0;
+    auto invalidDelete = GetCropRequest(CropHostAction::DeleteNode); invalidDelete.operationIndex = 0;
+    auto unrelatedDeleteField = GetCropRequest(CropHostAction::Previous); unrelatedDeleteField.operationIndex = 1;
     const bool isStrict =
+        !feature->SendRequest(GetCropRequest(CropHostAction::DeleteNode))
+        && !feature->SendRequest(std::move(invalidDelete))
+        && !feature->SendRequest(std::move(unrelatedDeleteField))
+        &&
         !feature->SendRequest(std::move(invalidMode))
         && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(9)))
         && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(12)))

@@ -1,3 +1,4 @@
+// 测试用途：验证裁剪着色器、纹理能力、预览生命周期、坐标变换及像素事务。
 #include "PlanarTestSuites.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "Render/CropShaderController.h"

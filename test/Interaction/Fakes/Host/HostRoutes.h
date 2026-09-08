@@ -1,3 +1,4 @@
+// 测试用途：提供宿主路由测试替身与路由状态容器。
 #pragma once
 
 #include "AppPorts.h"

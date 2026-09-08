@@ -1,3 +1,4 @@
+// 测试用途：验证零件目录快照、稳定身份、重复与范围校验以及稳定颜色。
 #include "../TestDataPort.h"
 #include "PartSegmentationTestCases.h"
 
@@ -178,8 +179,9 @@ int GetPartCatalogFailCount()
     const auto sameColor = GetPartStableColor({ 1, 2 });
     const auto otherColor = GetPartStableColor({ 2, 1 });
     failureCount += GetCaseResult(
-        firstColor == sameColor && firstColor != otherColor,
-        "Stable color depends only on object identity") ? 0 : 1;
+        firstColor == sameColor && firstColor == otherColor
+            && firstColor[0] == firstColor[1] && firstColor[1] == firstColor[2],
+        "Default part color is neutral and independent of object identity") ? 0 : 1;
 
     auto mutableCatalog = catalog;
     PartStatePatch namePatch;

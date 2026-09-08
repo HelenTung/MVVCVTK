@@ -1,3 +1,4 @@
+// 测试用途：验证约束优先级、最佳拟合、质量判定、尺度退化与几何歧义。
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
 #include <iostream>

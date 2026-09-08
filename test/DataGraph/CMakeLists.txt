@@ -11,7 +11,7 @@ target_include_directories(
 SetTargetDefaults(mvvcvtk_data_graph_tests)
 set_target_properties(
     mvvcvtk_data_graph_tests
-    PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph"
+    PROPERTIES PROJECT_LABEL DataGraphTests FOLDER "MVVCVTK/test/Automation/DataGraph"
 )
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
 
@@ -29,7 +29,7 @@ target_link_libraries(
 SetTargetDefaults(mvvcvtk_vtk_data_bridge_tests)
 set_target_properties(
     mvvcvtk_vtk_data_bridge_tests
-    PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph"
+    PROPERTIES PROJECT_LABEL VtkDataBridgeTests FOLDER "MVVCVTK/test/Automation/DataGraph"
 )
 add_test(NAME DataGraph.VtkBridge COMMAND mvvcvtk_vtk_data_bridge_tests)
 

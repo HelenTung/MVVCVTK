@@ -1,3 +1,4 @@
+// 测试用途：验证零件分割在不同体素规模、物理尺寸和内存预算下的行为。
 #include "PartSegmentationTestCases.h"
 
 #include "Algorithms/ClassicalPartSegmenter.h"

@@ -27,7 +27,8 @@ enum class CropHostAction {
     SetPolyData = 10,
     ClearPolyData,
     Exit = 13,
-    SaveRoi
+    DeleteNode = 14,
+    SaveRoi = 15
 };
 
 struct CropHostTarget {
@@ -48,6 +49,8 @@ struct CropHostRequest {
     // SaveRoi 独占字段；只保存当前历史，不生成派生图像/网格。
     std::optional<RoiMetadata> roiMetadata;
     DataBindingRevision expectedCatalogRevision = 0;
+    // DeleteNode 专用：GetState().history.operationIndices 返回的稳定操作标识；不能用显示行号代替。
+    std::optional<std::uint64_t> operationIndex;
 };
 
 using CropBuildCallback =

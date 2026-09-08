@@ -30,7 +30,7 @@ bool AddStorageBytes(
 
 std::uint64_t GetMixed(std::uint64_t value) noexcept
 {
-    // SplitMix64 finalizer：只用于稳定展示色与哈希，不承担身份生成。
+    // SplitMix64 finalizer：只用于目录键哈希，不承担身份生成。
     value ^= value >> 30;
     value *= 0xbf58476d1ce4e5b9ULL;
     value ^= value >> 27;
@@ -142,20 +142,16 @@ bool GetPartObjectIdValid(const PartObjectId& value) noexcept
 }
 
 std::array<double, 4> GetPartStableColor(
-    const PartObjectId& value) noexcept
+    const PartObjectId&) noexcept
 {
-    const std::uint64_t hash = GetMixed(value.high)
-        ^ GetMixed(value.low + 0x9e3779b97f4a7c15ULL);
-    const auto getChannel = [hash](const unsigned shift) {
-        const auto byte = static_cast<unsigned>((hash >> shift) & 0xffULL);
-        return 0.25 + 0.75 * static_cast<double>(byte) / 255.0;
-    };
-    return { getChannel(16), getChannel(8), getChannel(0), 0.85 };
+    // 身份由稳定绑定区分；默认展示采用统一中性色，避免标签编号造成彩虹配色。
+    // 显式 Custom 颜色仍由目录保存，选择高亮仅在渲染投影中应用。
+    return { 0.72, 0.72, 0.72, 1.0 };
 }
 
-bool GetPartCatalogValid(
+bool GetPartCatalogCountsValid(
     const PartCatalog& catalog,
-    const std::vector<PartLabelId>& labels,
+    const std::vector<std::uint64_t>& histogram,
     const std::function<bool()>& getStopRequested) noexcept
 {
     try {
@@ -163,27 +159,12 @@ bool GetPartCatalogValid(
             || catalog.resultRevision == 0
             || catalog.catalogRevision == 0
             || catalog.partsByLabel.empty()
+            || histogram.size() != catalog.partsByLabel.size()
             || catalog.partsByLabel[0].labelId != 0
             || GetPartObjectIdValid(catalog.partsByLabel[0].objectId)
             || catalog.labelByObject.size() + 1
                 != catalog.partsByLabel.size()) {
             return false;
-        }
-
-        std::vector<std::uint64_t> histogram(
-            catalog.partsByLabel.size(), 0);
-        for (std::size_t index = 0; index < labels.size(); ++index) {
-            if (index % cancelBatch == 0
-                && getStopRequested && getStopRequested()) {
-                return false;
-            }
-            const PartLabelId label = labels[index];
-            if (label >= histogram.size()
-                || histogram[label]
-                    == std::numeric_limits<std::uint64_t>::max()) {
-                return false;
-            }
-            ++histogram[label];
         }
 
         std::size_t selectedCount = 0;
@@ -257,6 +238,27 @@ bool GetPartCatalogValid(
     catch (...) {
         return false;
     }
+}
+
+bool GetPartCatalogValid(const PartCatalog& catalog, const std::vector<PartLabelId>& labels,
+    const std::function<bool()>& getStopRequested, std::vector<std::uint64_t>* labelCounts) noexcept
+{
+    try {
+        if (!GetPartSetIdValid(catalog.partSetId) || !catalog.resultRevision || !catalog.catalogRevision
+            || catalog.partsByLabel.empty() || catalog.partsByLabel[0].labelId != 0
+            || GetPartObjectIdValid(catalog.partsByLabel[0].objectId)
+            || catalog.labelByObject.size()+1 != catalog.partsByLabel.size()) return false;
+        std::vector<std::uint64_t> histogram(catalog.partsByLabel.size(), 0);
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            if (index % cancelBatch == 0 && getStopRequested && getStopRequested()) return false;
+            const auto label = labels[index];
+            if (label >= histogram.size() || histogram[label] == std::numeric_limits<std::uint64_t>::max()) return false;
+            ++histogram[label];
+        }
+        if (!GetPartCatalogCountsValid(catalog, histogram, getStopRequested)) return false;
+        if (labelCounts) *labelCounts = std::move(histogram);
+        return true;
+    } catch (...) { return false; }
 }
 
 bool GetPartCatalogStorageBytes(

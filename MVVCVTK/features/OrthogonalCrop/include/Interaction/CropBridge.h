@@ -78,6 +78,8 @@ public:
     bool PreviousCrop();
     bool NextCrop();
     bool SetCropNode(std::size_t nodeCount);
+    // 只删除当前未物化历史中的指定操作；其余操作身份和 redo 顺序保持不变。
+    bool DeleteCropNode(std::uint64_t operationIndex);
     bool ExitCrop();
     bool GetCropActive() const;
     // binding 生命周期独立于 widget 编辑态；Exit 后仍可导航 committed history。

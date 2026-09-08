@@ -758,6 +758,8 @@ bool IsoSurfaceStrategy::SetVisualState(
         property->SetSpecular(params.material.specular);
         property->SetSpecularPower(params.material.specularPower);
         property->SetOpacity(params.material.opacity);
+        // 零透明度几何仍可能消耗深度剥离层，遮掉独立的 Feature 网格。
+        m_actor->SetVisibility(params.material.opacity > 0.0 ? 1 : 0);
         if (params.material.isShadeOn) {
             property->SetInterpolationToPhong();
         }

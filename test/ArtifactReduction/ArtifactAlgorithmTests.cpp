@@ -1,3 +1,4 @@
+// 测试用途：验证伪影处理的标量类型、掩码、扩散滤波、环形校正与组合算法。
 #include "ArtifactTestSupport.h"
 #include "TomoPyRingAdapter.h"
 
