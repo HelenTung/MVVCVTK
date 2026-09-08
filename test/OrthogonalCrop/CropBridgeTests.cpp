@@ -1,3 +1,4 @@
+// 测试用途：验证裁剪桥接层的视图启动、数据切换、阻塞恢复、重复请求和结果提交。
 #include "CropBridgeTests.h"
 #include "../TestDataPort.h"
 
@@ -511,6 +512,33 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.GetCropActive(), "Input invalidation should not reactivate crop editing.");
     expect(bridge.ClearBindings(), "Bridge should clear all view bindings.");
 
+    // 删除是稳定操作的移除，不能用移动历史游标或截断 redo 分支代替。
+    auto deleteService = std::make_shared<CropServiceStub>(inputStamp, renderer);
+    auto deleteView = view; deleteView.referenceService = deleteService; deleteView.targetServices = {deleteService};
+    CropBridge deleteBridge;
+    expect(deleteBridge.StartView(deleteView) && deleteBridge.SetCropInput(input) && deleteBridge.SwitchCropBox()
+        && deleteBridge.SetCropMode(CropRemovalMode::KeepInside), "Deletion fixture starts box editing.");
+    renderer->ResetCamera(input.inputModelBounds.data()); renderWindow->Render();
+    for (int i = 0; i < 3; ++i) expect(SendWidgetInput(renderer, interactor) && SendShaderCommit(deleteBridge, renderWindow), "Deletion fixture commits independent operations.");
+    expect(deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,2,3}, "History exposes stable operation identities.");
+    expect(deleteBridge.SetCropNode(1) && SendShaderCommit(deleteBridge, renderWindow), "Deletion fixture retains a redo tail.");
+    expect(deleteBridge.DeleteCropNode(2) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,2,3}
+        && !deleteBridge.DeleteCropNode(1), "Deletion stages atomically and rejects another deletion while pending.");
+    expect(SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,3}
+        && deleteBridge.GetCropHistory().nodeCount == 1, "Deleting redo preserves current prefix and subsequent node identity.");
+    expect(deleteBridge.NextCrop() && SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.DeleteCropNode(1)
+        && SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{3}
+        && deleteBridge.GetCropHistory().nodeCount == 1, "Deleting an applied predecessor preserves the remaining active operation.");
+    expect(!deleteBridge.DeleteCropNode(0) && !deleteBridge.DeleteCropNode(2), "Root and already deleted identities are rejected.");
+    expect(deleteBridge.DeleteCropNode(3) && SendShaderCommit(deleteBridge, renderWindow)
+        && deleteBridge.GetCropHistory().operationIndices.empty() && deleteBridge.GetCropHistory().nodeCount == 0
+        && deleteService->GetEffectState().status == RenderEffectStatus::Committed && !deleteBridge.NextCrop(),
+        "Deleting the last node commits an empty shader table and restores the uncut preview.");
+    expect(SendWidgetInput(renderer, interactor) && SendShaderCommit(deleteBridge, renderWindow)
+        && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{4} && !deleteBridge.DeleteCropNode(3),
+        "New operations never reuse a deleted identity.");
+    expect(deleteBridge.ClearBindings(), "Deletion fixture releases its view binding.");
+
     auto repeatService = std::make_shared<CropServiceStub>(
         inputStamp, renderer);
     auto repeatView = view;
@@ -744,6 +772,7 @@ int CropBridgeSuite::GetFailCount() const
         "The retained F redo should rebuild on the materialized input stamp.");
     const auto redoneHistory =
         repeatBridge.GetCropHistory();
+    expect(!repeatBridge.DeleteCropNode(1) && !repeatBridge.DeleteCropNode(2), "Materialized baseline nodes cannot be deleted as preview operations.");
     expect(redoneHistory.nodeCount == 1
             && redoneHistory.operationCount == 1
             && redoneHistory.baseNodeCount == 2

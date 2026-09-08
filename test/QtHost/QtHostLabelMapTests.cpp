@@ -1,3 +1,4 @@
+// 测试用途：验证标签图读取、VTK 桥接和宿主标签显示流程。
 #include "QtHostMethodCases.h"
 
 #include "Host/HostFeature.h"

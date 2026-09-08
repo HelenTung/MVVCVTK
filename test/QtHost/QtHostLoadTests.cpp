@@ -1,3 +1,4 @@
+// 测试用途：验证宿主数据加载、提交协调、路由、源切换和加载失败处理。
 #include "QtHostMethodCases.h"
 
 #include "App/AppState.h"

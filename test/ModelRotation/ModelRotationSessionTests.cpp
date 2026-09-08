@@ -1,3 +1,4 @@
+// 测试用途：验证旋转会话的输入、帧提交、取消、恢复以及宿主驱动失败路径。
 #include "Host/ModelRotationHostFeature.h"
 #include "Host/FeatureModelTransformPort.h"
 #include "Host/VtkAppHostSession.h"

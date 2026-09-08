@@ -9,7 +9,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME HostFrameCoordinatorTests
         PROJECT_LABEL HostFrameCoordinatorTests
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_link_libraries(
@@ -36,7 +36,7 @@ add_executable(mvvcvtk_host_runtime_tests HostRuntimeTests.cpp)
 target_link_libraries(mvvcvtk_host_runtime_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_host_runtime_tests)
-set_target_properties(mvvcvtk_host_runtime_tests PROPERTIES FOLDER "MVVCVTK/Tests")
+set_target_properties(mvvcvtk_host_runtime_tests PROPERTIES PROJECT_LABEL HostRuntimeTests FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS mvvcvtk_host_runtime_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME Host.Runtime COMMAND mvvcvtk_host_runtime_tests)
 SetTestRuntime(Host.Runtime mvvcvtk_host_runtime_tests)

@@ -159,13 +159,21 @@ bool HostRenderViewRuntime::SendPendingUpdates() const
     try { return interaction.update->SendPendingUpdates(); }
     catch (...) { return false; }
 }
-bool HostRenderViewRuntime::SetRenderNeeded() const
+bool HostRenderViewRuntime::SetRenderNeeded()
 {
-    return interaction.update && interaction.update->SetRenderNeeded();
+    if (!interaction.update) return false;
+    isFrameRenderNeeded = true;
+    return true;
 }
-bool HostRenderViewRuntime::ResetRenderNeeded() const
+bool HostRenderViewRuntime::ResetRenderNeeded()
 {
-    return isAvailable && interaction.update && interaction.update->ResetRenderNeeded();
+    if (!isAvailable || !interaction.update) return false;
+    const bool isAppDirty = interaction.update->ResetRenderNeeded();
+    return std::exchange(isFrameRenderNeeded, false) || isAppDirty;
+}
+bool HostRenderViewRuntime::GetRenderNeeded() const
+{
+    return isFrameRenderNeeded || (interaction.update && interaction.update->GetRenderNeeded());
 }
 bool HostRenderViewRuntime::SendRender(const std::uint64_t epoch)
 {

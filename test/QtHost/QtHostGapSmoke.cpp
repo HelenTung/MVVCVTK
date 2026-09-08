@@ -1,3 +1,4 @@
+// 测试用途：验证 Qt、VTK 和孔隙分析在图形会话中的基础集成。
 #include "Host/GapHostFeature.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"

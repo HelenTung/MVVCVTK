@@ -1,3 +1,4 @@
+// 测试用途：调度伪影校正的参考实现、算法和生命周期回归。
 #include "ArtifactTestSupport.h"
 #include <iostream>
 

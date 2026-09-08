@@ -1,3 +1,4 @@
+// 测试用途：验证零件谱系、身份继承和展示属性的稳定性。
 #include "PartSegmentationTestCases.h"
 
 #include "Model/PartCatalog.h"

@@ -20,7 +20,7 @@ class PartSurfaceOverlayStrategy final
     : public FeatureOverlayBase
     , public PartOverlayControl {
 public:
-    PartSurfaceOverlayStrategy();
+    explicit PartSurfaceOverlayStrategy(bool isSelectionOnly = false);
 
     void SetInputData(
         vtkSmartPointer<vtkDataObject> data) override;
@@ -34,6 +34,8 @@ private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
+    vtkSmartPointer<vtkLookupTable> m_pickLut;
+    bool m_isSelectionOnly = false;
 };
 
 class PartSliceOverlayStrategy final
