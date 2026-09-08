@@ -74,6 +74,11 @@ public:
     ImageReadResult GetImageReadResult(
         const ImageReadRequest& request,
         const TaskStopToken& stopToken) const override;
+    // 后台任务只能读取 admission 时固定的快照。
+    ImageReadResult GetImageReadResult(
+        const VtkImageGridSnapshot& imageSnapshot,
+        const ImageReadRequest& request,
+        const TaskStopToken& stopToken) const override;
     ImageReadChunkResult GetImageReadChunk(
         const ImageReadRequest& request,
         std::size_t voxelOffset,
@@ -94,6 +99,13 @@ public:
         const VtkImageGridSnapshot& imageSnapshot,
         const std::string& outputDir,
         const DataExportParams& params,
+        const TaskStopToken& stopToken) override;
+    bool ExportSlices(
+        const VtkImageGridSnapshot& imageSnapshot,
+        const std::string& dirPath,
+        Orientation orientation,
+        const WindowLevelParams& windowLevel,
+        const std::array<double, 16>& modelToWorldMatrix,
         const TaskStopToken& stopToken) override;
     bool ExportSlices(
         const std::string& dirPath,

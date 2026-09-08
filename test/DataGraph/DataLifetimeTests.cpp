@@ -97,6 +97,10 @@ bool GetDependenciesProtected()
     if (!Check(rejected.failureReason==DataCommitFailure::ResultInUse && rejected.blockers.size()==1
         && rejected.blockers[0].owner=="ExportTask" && store.GetDataGraph().commitId==before,
         "lease retirement rejection not atomic")) return false;
+    auto transitioning=BuildRetirement(scope,ref);
+    transitioning.retireScopes.front().isResourceTransition=true;
+    if (!Check(store.SetDataCommit(std::move(transitioning)).failureReason==DataCommitFailure::ResultInUse,
+        "render transition bypassed a Reader lease")) return false;
     lease.reset();
     const auto dependencyId=store.CreateDataEntityId();
     DataTransaction derive;

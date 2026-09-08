@@ -758,7 +758,7 @@ AppRuntime::AppRuntime(AppServiceArgs args)
                 [weakExecutor](RenderLaneWork work) {
                     return SendRenderTask(
                         weakExecutor.lock(), std::move(work));
-                });
+                }, m_dataManager);
         m_ownsRenderResources = true;
     }
     if (!m_strategyCreate) {

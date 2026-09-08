@@ -23,6 +23,7 @@ public:
         DataRevisionRef revision;
         std::string owner;
         std::weak_ptr<const void> resource;
+        DataResourceKind kind = DataResourceKind::Reader;
     };
 
     bool GetIsPublished() const override
@@ -32,16 +33,17 @@ public:
     }
 
     std::shared_ptr<const DataResourceLease> StartResourceUse(
-        const DataRevisionRef& revision, std::string owner) override
+        const DataRevisionRef& revision, std::string owner, DataResourceKind kind) override
     {
         const std::lock_guard<std::mutex> lock(mutex);
         if (status != DataLifetimeStatus::Published || owner.empty()
+            || (kind != DataResourceKind::Reader && kind != DataResourceKind::RenderObject)
             || std::find(revisions.begin(), revisions.end(), revision)
                 == revisions.end()) return {};
         auto lease = std::make_shared<const ResourceUse>();
         uses.erase(std::remove_if(uses.begin(), uses.end(),
             [](const Probe& probe) { return probe.resource.expired(); }), uses.end());
-        uses.push_back({ revision, std::move(owner), lease });
+        uses.push_back({ revision, std::move(owner), lease, kind });
         return lease;
     }
 
@@ -819,7 +821,9 @@ DataCommitResult DataGraphStore::SetDataCommit(
             }
             retiredRefs.insert(actual.begin(), actual.end());
             for (const auto& use : scope->uses) {
-                if (!use.resource.expired()) result.blockers.push_back({ use.revision, use.owner });
+                if (!use.resource.expired() && (!retirement.isResourceTransition || use.kind == DataResourceKind::Reader)) {
+                    result.blockers.push_back({ use.revision, use.owner });
+                }
             }
         }
         // 2. 依赖、绑定与本事务输入共同检查；集合内相互依赖不阻塞自己的退役。

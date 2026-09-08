@@ -1,4 +1,5 @@
 #include "Data/VtkDataBridge.h"
+#include "Data/Internal/VtkDataResourceLease.h"
 
 #include <vtkCellArray.h>
 #include <vtkCommand.h>
@@ -24,38 +25,10 @@
 
 namespace {
 
-// 租约随实际 VTK 对象结束；单独保留数组/points/cells 同样阻塞退役。
-class DataLeaseObserver final : public vtkCommand {
-public:
-    static DataLeaseObserver* New() { return new DataLeaseObserver; }
-    void Execute(vtkObject*, unsigned long, void*) override {}
-    std::shared_ptr<const DataResourceLease> lease;
-};
-
-void AttachDataLease(vtkObject* object,
-    const std::shared_ptr<const DataResourceLease>& lease)
-{
-    if (!object || !lease) return;
-    auto observer = vtkSmartPointer<DataLeaseObserver>::New();
-    observer->lease = lease;
-    object->AddObserver(vtkCommand::DeleteEvent, observer);
-}
-
 std::shared_ptr<const DataResourceLease> StartDataUse(const DataSnapshot& data)
 {
     const auto lifetime = data->lifetime.lock();
-    return lifetime ? lifetime->StartResourceUse(data->self, "VtkDataBridge") : nullptr;
-}
-
-void AttachImageLease(vtkImageData* image,
-    const std::shared_ptr<const DataResourceLease>& lease)
-{
-    if (!image || !lease) return;
-    AttachDataLease(image, lease);
-    if (auto* pointData = image->GetPointData()) {
-        AttachDataLease(pointData, lease);
-        AttachDataLease(pointData->GetScalars(), lease);
-    }
+    return lifetime ? lifetime->StartResourceUse(data->self, "VtkDataBridge", DataResourceKind::RenderObject) : nullptr;
 }
 
 ImageValueType GetImageValueType(const int vtkType) noexcept
@@ -413,8 +386,8 @@ VtkImageGridSnapshot VtkDataBridge::GetImageGrid(DataSnapshot data) const
             payload->GetValidityMask()->size());
         if (!mask) return {};
     }
-    AttachImageLease(image, lease);
-    AttachImageLease(mask, lease);
+    VtkDataResourceLease::AttachImage(image, lease);
+    VtkDataResourceLease::AttachImage(mask, lease);
     auto view = std::make_shared<const VtkImageGridView>(VtkImageGridView{
         {}, {}, std::move(data), image, mask });
     {
@@ -451,7 +424,7 @@ VtkLabelMapSnapshot VtkDataBridge::GetLabelMap(DataSnapshot data) const
         static_cast<const std::uint8_t*>(payload->GetValueData()),
         byteCount);
     if (!labels) return {};
-    AttachImageLease(labels, lease);
+    VtkDataResourceLease::AttachImage(labels, lease);
     auto view = std::make_shared<const VtkLabelMapView>(VtkLabelMapView{
         std::move(data), labels });
     {
@@ -509,16 +482,7 @@ VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
             attribute.values.size() * sizeof(double));
         mesh->GetPointData()->AddArray(array);
     }
-    AttachDataLease(mesh, lease);
-    AttachDataLease(points, lease);
-    AttachDataLease(points->GetData(), lease);
-    AttachDataLease(cells, lease);
-    AttachDataLease(cells->GetOffsetsArray(), lease);
-    AttachDataLease(cells->GetConnectivityArray(), lease);
-    AttachDataLease(mesh->GetPointData(), lease);
-    for (int index = 0; index < mesh->GetPointData()->GetNumberOfArrays(); ++index) {
-        AttachDataLease(mesh->GetPointData()->GetArray(index), lease);
-    }
+    VtkDataResourceLease::AttachMesh(mesh, lease);
     auto view = std::make_shared<const VtkSurfaceMeshView>(
         VtkSurfaceMeshView{ std::move(data), mesh });
     {

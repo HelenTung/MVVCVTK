@@ -146,6 +146,22 @@ public:
                 : std::optional<HostInputView>{};
         }
 
+        FeatureDataTransitionState StartDataTransition(std::uint64_t ownerId, FeatureDataTransitionRequest request)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->StartDataTransition(ownerId, std::move(request)) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState SetDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->SetDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->StopDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+        }
+
         bool SetActiveViews(
             const std::string& featureId,
             const std::vector<std::string>& viewIds)
@@ -570,6 +586,24 @@ public:
             const bool isSet = state && state->StopTransform(m_featureId, token);
             if (isSet) (void)SendWorkAvailable();
             return isSet;
+        }
+
+        FeatureDataTransitionState StartDataTransition(FeatureDataTransitionRequest request) override
+        {
+            const auto bridge = m_bridge.lock();
+            return m_lifetime->isActive.load() && bridge
+                ? bridge->StartDataTransition(m_lifetime->id, std::move(request)) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState SetDataTransition(std::uint64_t requestId) override
+        {
+            const auto bridge = m_bridge.lock();
+            return m_lifetime->isActive.load() && bridge
+                ? bridge->SetDataTransition(m_lifetime->id, requestId) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState StopDataTransition(std::uint64_t requestId) override
+        {
+            const auto bridge = m_bridge.lock();
+            return bridge ? bridge->StopDataTransition(m_lifetime->id, requestId) : FeatureDataTransitionState{};
         }
 
         bool SetActiveViews(

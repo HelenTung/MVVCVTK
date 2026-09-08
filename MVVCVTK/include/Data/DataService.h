@@ -33,6 +33,11 @@ public:
     virtual ImageReadResult GetImageReadResult(
         const ImageReadRequest& request,
         const TaskStopToken& stopToken) const = 0;
+    // 后台任务只能读取 admission 时固定的快照。
+    virtual ImageReadResult GetImageReadResult(
+        const VtkImageGridSnapshot& imageSnapshot,
+        const ImageReadRequest& request,
+        const TaskStopToken& stopToken) const = 0;
     virtual ImageReadChunkResult GetImageReadChunk(
         const ImageReadRequest& request,
         std::size_t voxelOffset,
@@ -84,6 +89,13 @@ public:
             && ExportData(imageSnapshot, outputDir, params)
             && !stopToken.GetIsStopped();
     }
+    virtual bool ExportSlices(
+        const VtkImageGridSnapshot& imageSnapshot,
+        const std::string& dirPath,
+        Orientation orientation,
+        const WindowLevelParams& windowLevel,
+        const std::array<double, 16>& modelToWorldMatrix,
+        const TaskStopToken& stopToken) = 0;
     virtual bool ExportSlices(
         const std::string& dirPath,
         Orientation orientation,

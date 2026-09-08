@@ -117,9 +117,38 @@ struct FeatureSceneDelta final {
     std::vector<HostDisplayRef> displays;
 };
 
+// 仅保存已经完成全部分配/校验的 Feature 状态；Host 发布成功后无失败接管。
+class FeatureDataCommit {
+public:
+    virtual ~FeatureDataCommit() noexcept = default;
+    virtual void SetCommit() noexcept = 0;
+};
+
+struct FeatureDataTransitionRequest final {
+    std::uint64_t requestId = 0;
+    VtkImageGridSnapshot input;
+    DataTransaction transaction;
+    std::shared_ptr<FeatureDataCommit> commit;
+};
+
+struct FeatureDataTransitionState final {
+    FeatureRunStatus status = FeatureRunStatus::Failed;
+    DataCommitFailure commitFailure = DataCommitFailure::InvalidTransaction;
+    std::vector<DataLifetimeBlocker> blockers;
+};
+
 class FeatureHostControl : public HostInputPort {
 public:
     ~FeatureHostControl() noexcept override = default;
+
+    // 全部 Session View 的候选输入事务；不取得 AppRuntime/Strategy identity。
+    // 首次 Start 冻结请求；后续 Set 只推进同一身份。未支持的端口明确拒绝。
+    virtual FeatureDataTransitionState StartDataTransition(FeatureDataTransitionRequest)
+    { return {}; }
+    virtual FeatureDataTransitionState SetDataTransition(std::uint64_t)
+    { return {}; }
+    virtual FeatureDataTransitionState StopDataTransition(std::uint64_t)
+    { return {}; }
 
     // Feature 只提交稳定 view id；Host 验证归属并维护活动来源事务。
     virtual bool SetActiveViews(

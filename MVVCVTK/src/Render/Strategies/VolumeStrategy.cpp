@@ -987,6 +987,11 @@ VolumeStrategy::BuildRequest(
     if (denoiseThreshold < 0.0) return std::nullopt;
 
     VolumeLodBuildRequest request;
+    if (m_resources) {
+        auto use = m_resources->StartDataUse(m_renderInputStamp);
+        if (!use) return std::nullopt;
+        request.inputUse = std::move(*use);
+    }
     request.requestRevision = requestRevision;
     request.requestedQuality = requestedQuality;
     request.input = image;
@@ -1174,7 +1179,7 @@ bool VolumeStrategy::SetProduct(
         return false;
     }
     const std::uint64_t activeRevision = requestRevision;
-    if (!GetKeyCurrent(key) || activeRevision == 0) {
+    if (!result.product->inputUse.GetIsPublished() || !GetKeyCurrent(key) || activeRevision == 0) {
         m_transition.status = RenderProductStatus::Failed;
         m_transition.failureReason = RenderProductFailure::StaleInput;
         m_transition.message =

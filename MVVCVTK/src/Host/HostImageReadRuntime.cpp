@@ -1,6 +1,7 @@
 #include "Host/Internal/HostImageReadRuntime.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataService.h"
+#include "Data/Internal/DataResourceUse.h"
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -29,8 +30,16 @@ ImageReadAdmission HostImageReadRuntime::StartImageRead(
 {
     if (!onComplete) return ImageReadAdmission::InvalidRequest;
     if (!data || !executor) return ImageReadAdmission::Unavailable;
+    VtkImageGridSnapshot input;
+    std::shared_ptr<const DataResourceLease> readLease;
     std::shared_ptr<State::ImageReadEntry> entry;
     try {
+        input = data->GetPrimaryImage();
+        if (input) {
+            auto lease = StartDataResourceUse(input->data, "queued-image-read");
+            if (!lease) return ImageReadAdmission::Unavailable;
+            readLease = std::move(*lease);
+        }
         entry = std::make_shared<
             State::ImageReadEntry>();
         entry->callback = std::move(onComplete);
@@ -56,13 +65,18 @@ ImageReadAdmission HostImageReadRuntime::StartImageRead(
     try {
         work = AppTaskWork([
             data,
+            input = std::move(input),
+            readLease = std::move(readLease),
             request = std::move(request),
             weakComplete,
             entry](const TaskStopToken stopToken) mutable {
+            // callable 在完成结果消费前可能仍存活，工作结束即可归还源读取占用。
+            const auto activeInput = std::move(input);
+            const auto activeLease = std::move(readLease);
             ImageReadResult result;
             try {
                 result = data->GetImageReadResult(
-                    request, stopToken);
+                    activeInput, request, stopToken);
             }
             catch (...) {
                 result.error = stopToken.GetIsStopped()

@@ -215,13 +215,19 @@ bool GetActivationValid()
         && sink->readyCount == 3;
 }
 }
-int main()
+bool GetDataTransitionTests();
+bool GetResourceLifetimeTests();
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "transition") return GetDataTransitionTests() ? 0 : 1;
+    if (argc == 2 && std::string(argv[1]) == "resources") return GetResourceLifetimeTests() ? 0 : 1;
     int failures = 0;
     const auto check = [&](bool value, const char* name) {
         std::cout << (value ? "[PASS] " : "[FAIL] ") << name << '\n';
         if (!value) ++failures;
     };
+    check(GetResourceLifetimeTests(), "queued readers and derived allocation retirement");
+    check(GetDataTransitionTests(), "candidate input transition and publication rollback");
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");

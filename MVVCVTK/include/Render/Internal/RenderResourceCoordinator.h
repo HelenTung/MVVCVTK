@@ -11,7 +11,16 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
+
+class AbstractDataManager;
+
+struct RenderInputUse final {
+    std::shared_ptr<DataLifetimeAccess> lifetime;
+    std::shared_ptr<const DataResourceLease> resource;
+    bool GetIsPublished() const { return !lifetime || lifetime->GetIsPublished(); }
+};
 
 struct VolumeLodKey;
 struct VolumeLodProduct;
@@ -160,7 +169,10 @@ struct RenderGpuResourceState final {
 
 class RenderResourceCoordinator final {
 public:
-    explicit RenderResourceCoordinator(RenderLaneStart onTaskStart);
+    explicit RenderResourceCoordinator(RenderLaneStart onTaskStart,
+        std::weak_ptr<AbstractDataManager> data = {});
+    // 请求、后台工作、完成邮箱和派生产品共同持有同一输入租约。
+    std::optional<RenderInputUse> StartDataUse(const RenderInputStamp& input) const;
     ~RenderResourceCoordinator() noexcept;
 
     RenderResourceCoordinator(

@@ -213,6 +213,8 @@ struct DataLifetimeState final {
     std::vector<DataLifetimeBlocker> blockers;
 };
 
+enum class DataResourceKind : std::uint8_t { Reader, RenderObject };
+
 class DataResourceLease {
 public:
     virtual ~DataResourceLease() noexcept = default;
@@ -224,7 +226,8 @@ public:
     virtual bool GetIsPublished() const = 0;
     // 取得后由实际资源 owner 持有；退役后不得再取得新租约。
     virtual std::shared_ptr<const DataResourceLease> StartResourceUse(
-        const DataRevisionRef& revision, std::string owner) = 0;
+        const DataRevisionRef& revision, std::string owner,
+        DataResourceKind kind = DataResourceKind::Reader) = 0;
 };
 
 class DataChangeBatch {
@@ -307,6 +310,9 @@ struct DataLifetimeRetirement final {
     DataEntityId scopeId;
     DataLifetimeStatus expectedStatus = DataLifetimeStatus::Published;
     std::vector<DataRevisionRef> expectedRevisions;
+    // View 过渡已准备好：渲染对象可进入延迟清理；Reader/下游依赖仍严格阻塞。
+    // 此标记不等于释放完成；RenderObject 租约全部结束前状态保持 Releasing。
+    bool isResourceTransition = false;
 };
 
 struct DataBindingUpdate final {

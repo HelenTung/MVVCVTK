@@ -259,11 +259,14 @@ bool GetArrayLeaseValid()
     const auto blocked = store.SetDataCommit(retire);
     if (!Check(blocked.failureReason == DataCommitFailure::ResultInUse,
         "array-only VTK owner escaped retirement check")) return false;
-    heldArray = nullptr;
+    retire.retireScopes.front().isResourceTransition = true;
     if (!Check(store.SetDataCommit(std::move(retire)).status == DataCommitStatus::Succeeded,
-        "VTK lease remained after final array release")) return false;
+        "prepared resource transition could not retire the result")) return false;
     if (!Check(!bridge.GetImageGrid(snapshot), "old DataSnapshot recreated retired VTK resources")) return false;
     snapshot.reset();
+    if (!Check(store.SetDataRelease(scope).status == DataLifetimeStatus::Releasing,
+        "resource transition ignored its live VTK array")) return false;
+    heldArray = nullptr;
     return Check(store.SetDataRelease(scope).status == DataLifetimeStatus::Released,
         "scoped VTK payload did not release");
 }

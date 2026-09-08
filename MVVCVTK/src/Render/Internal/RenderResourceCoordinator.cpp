@@ -1,4 +1,6 @@
 #include "Render/Internal/RenderResourceCoordinator.h"
+#include "Data/DataService.h"
+#include "Data/Internal/DataResourceUse.h"
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 #include "Render/Internal/VolumeLodProductBuilder.h"
 
@@ -10,6 +12,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -93,6 +96,9 @@ struct RenderCoordinatorState final {
     mutable std::mutex mutex;
     std::condition_variable stopped;
     RenderLaneStart onTaskStart;
+    std::weak_ptr<AbstractDataManager> data;
+    bool hasDataSource = false;
+    DataObserverId dataObserver = 0;
     std::vector<std::weak_ptr<RenderChannelState>> channels;
     std::deque<std::weak_ptr<RenderChannelState>> readyChannels;
     std::optional<RenderRunningTask> running;
@@ -1057,15 +1063,74 @@ bool RenderTaskChannel::Stop()
 }
 
 RenderResourceCoordinator::RenderResourceCoordinator(
-    RenderLaneStart onTaskStart)
+    RenderLaneStart onTaskStart, std::weak_ptr<AbstractDataManager> data)
     : m_impl(std::make_unique<Impl>(std::move(onTaskStart)))
 {
+    const auto source = data.lock();
+    auto& state = *m_impl->state;
+    state.data = std::move(data);
+    state.hasDataSource = source != nullptr;
+    if (!source) return;
+    const std::weak_ptr<RenderCoordinatorState> weak = m_impl->state;
+    state.dataObserver = source->AttachDataChange([weak](const DataChangeSet& change) {
+        if (change.retiredScopes.empty()) return;
+        const auto current = weak.lock();
+        const auto source = current ? current->data.lock() : nullptr;
+        if (!source) return;
+        std::vector<DataRevisionRef> retired;
+        for (const auto& scope : change.retiredScopes) {
+            const auto state = source->GetDataLifetime(scope);
+            retired.insert(retired.end(), state.ownedRevisions.begin(), state.ownedRevisions.end());
+        }
+        // 将强所有权移出锁后释放，VTK DeleteEvent 不得在协调器锁内回调。
+        std::vector<std::shared_ptr<const VolumeLodProduct>> volumes;
+        std::vector<std::shared_ptr<const IsoSurfaceProduct>> surfaces;
+        {
+            std::lock_guard<std::mutex> lock(current->mutex);
+            volumes.reserve(current->volumeCache.size());
+            surfaces.reserve(current->isoCache.size());
+            const auto remove = [&](auto& entries, auto& owners) {
+                for (auto it = entries.begin(); it != entries.end();) {
+                    if (std::find(retired.begin(), retired.end(), it->key.inputStamp.dataRevision) == retired.end()) {
+                        ++it; continue;
+                    }
+                    current->cacheBytes -= it->bytes;
+                    owners.push_back(std::move(it->product));
+                    it = entries.erase(it);
+                }
+            };
+            remove(current->volumeCache, volumes);
+            remove(current->isoCache, surfaces);
+        }
+    });
+    if (!state.dataObserver) throw std::runtime_error("Render data lifetime observer unavailable.");
+}
+
+std::optional<RenderInputUse> RenderResourceCoordinator::StartDataUse(const RenderInputStamp& input) const
+{
+    if (!m_impl || !m_impl->state) return std::nullopt;
+    const auto& state = *m_impl->state;
+    if (!state.hasDataSource) return RenderInputUse{};
+    const auto source = state.data.lock();
+    if (!source) return std::nullopt;
+    // 无图身份的私有策略输入不属于可撤销数据；正式输入必须解析确定的修订。
+    if (!GetDataRevisionRefValid(input.dataRevision)) return RenderInputUse{};
+    auto data = source->GetData(source->GetDataGraph(), input.dataRevision);
+    if (!data) {
+        const auto pending = source->GetLoadStage();
+        if (pending && pending->image && pending->image->data
+            && pending->image->data->self == input.dataRevision) data = pending->image->data;
+    }
+    auto lease = StartDataResourceUse(data, "render-product", DataResourceKind::RenderObject);
+    if (!lease) return std::nullopt;
+    return RenderInputUse{data->lifetime.lock(), std::move(*lease)};
 }
 
 RenderResourceCoordinator::~RenderResourceCoordinator() noexcept
 {
     if (m_impl) {
-        (void)m_impl->state;
+        const auto source = m_impl->state->data.lock();
+        if (source && m_impl->state->dataObserver) source->DetachDataChange(m_impl->state->dataObserver);
         (void)Stop(
             std::chrono::steady_clock::time_point::max());
     }
@@ -1189,6 +1254,7 @@ RenderResourceCoordinator::GetVolumeProduct(
         state.volumeCache.begin(), state.volumeCache.end(),
         [&key](const VolumeCacheEntry& candidate) {
             return candidate.product
+                && candidate.product->inputUse.GetIsPublished()
                 && GetVolumeKeyEqual(candidate.key, key);
         });
     if (entry == state.volumeCache.end()) return nullptr;
@@ -1201,15 +1267,18 @@ bool RenderResourceCoordinator::SetVolumeProduct(
     std::shared_ptr<const VolumeLodProduct> product)
 {
     if (!m_impl || !m_impl->state || !product || !product->volume
-        || product->actualBytes == 0) {
+        || product->actualBytes == 0 || !product->inputUse.GetIsPublished()
+        || product->inputStamp != key.inputStamp) {
         return false;
     }
     std::lock_guard<std::mutex> lock(m_impl->state->mutex);
     auto& state = *m_impl->state;
+    if (!product->inputUse.GetIsPublished()) return false;
     const auto existing = std::find_if(
         state.volumeCache.begin(), state.volumeCache.end(),
         [&key](const VolumeCacheEntry& candidate) {
             return candidate.product
+                && candidate.product->inputUse.GetIsPublished()
                 && GetVolumeKeyEqual(candidate.key, key);
         });
     if (existing != state.volumeCache.end()) {
@@ -1259,6 +1328,7 @@ RenderResourceCoordinator::GetIsoSurfaceProduct(
         state.isoCache.begin(), state.isoCache.end(),
         [&key](const IsoCacheEntry& candidate) {
             return candidate.product
+                && candidate.product->inputUse.GetIsPublished()
                 && GetIsoKeyEqual(candidate.key, key);
         });
     if (entry == state.isoCache.end()) return nullptr;
@@ -1271,15 +1341,18 @@ bool RenderResourceCoordinator::SetIsoSurfaceProduct(
     std::shared_ptr<const IsoSurfaceProduct> product)
 {
     if (!m_impl || !m_impl->state || !product || !product->surface
-        || product->actualBytes == 0) {
+        || product->actualBytes == 0 || !product->inputUse.GetIsPublished()
+        || product->inputStamp != key.inputStamp) {
         return false;
     }
     std::lock_guard<std::mutex> lock(m_impl->state->mutex);
     auto& state = *m_impl->state;
+    if (!product->inputUse.GetIsPublished()) return false;
     const auto existing = std::find_if(
         state.isoCache.begin(), state.isoCache.end(),
         [&key](const IsoCacheEntry& candidate) {
             return candidate.product
+                && candidate.product->inputUse.GetIsPublished()
                 && GetIsoKeyEqual(candidate.key, key);
         });
     if (existing != state.isoCache.end()) {

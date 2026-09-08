@@ -1,5 +1,6 @@
 #include "Data/LabelMapReader.h"
 #include "Data/DataPayloads.h"
+#include "Data/Internal/DataResourceUse.h"
 
 #include <algorithm>
 #include <cstring>
@@ -112,6 +113,7 @@ bool GetCheckedProduct(
 
 struct ReadPlan final {
     LabelSnapshot snapshot;
+    std::shared_ptr<const DataResourceLease> readLease;
     const void* values = nullptr;
     ImageReadRegion region;
     std::size_t regionVoxels = 0;
@@ -141,10 +143,13 @@ ReadPlanResult GetReadPlan(
         return result;
     }
 
+    auto readLease = StartDataResourceUse(snapshot->data, "label-read");
+    if (!readLease) { result.error = LabelMapError::ResultRetired; return result; }
     const auto* values = snapshot->payload->GetValueData();
     if (!snapshot->payload->GetValid() || !values) return result;
 
     ReadPlan plan;
+    plan.readLease = std::move(*readLease);
     plan.snapshot = std::move(snapshot);
     plan.values = values;
     plan.voxelBytes = plan.snapshot->descriptor.componentBytes;
