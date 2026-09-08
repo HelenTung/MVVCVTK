@@ -10,7 +10,7 @@ set(MVVCVTK_HOST_METHOD_SOURCES
     RenderProductTestSupport.h
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
-    list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostCropTests.cpp)
+    list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostCropTests.cpp QtHostCropRealTests.cpp)
 endif()
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostGapTests.cpp)

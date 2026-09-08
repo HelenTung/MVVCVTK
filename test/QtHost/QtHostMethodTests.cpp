@@ -60,7 +60,7 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
 constexpr std::string_view methodCaseNames =
     "load|render|label-map|view"
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
-    "|crop|crop-lifecycle|crop-archive"
+    "|crop|crop-lifecycle|crop-archive|crop-real"
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     "|gap"
@@ -132,6 +132,11 @@ int main(int argc, char* argv[])
 
     const std::string_view selectedCase =
         isSingleCase ? std::string_view(argv[2]) : std::string_view{};
+#if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
+    // Real production inputs are explicit; absence is NOT RUN with a nonzero
+    // exit status, never a passing synthetic/default test case.
+    if(isSingleCase&&selectedCase=="crop-real")return GetCropRealFailCount();
+#endif
     int failureCount{0};
     bool hasSelectedCase{isAllCases};
     for (const auto& methodCase : methodCases) {
