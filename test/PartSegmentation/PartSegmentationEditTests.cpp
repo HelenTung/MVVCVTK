@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -333,6 +334,95 @@ int GetPartEditFailCount()
         && std::abs(physical.catalog->partsByLabel[1].metrics.physicalVolumeMM3 - 72.0) < 1e-9
         && physical.catalog->partsByLabel[1].metrics.centroidInputPhysical == std::array<double, 3>{ 6, 22, 12 },
         "Brush and metrics support nonzero extent, anisotropy, and rotated direction");
+    // 独立全网格参考用例：投影端点和体素后求线段距离，不使用候选包围范围。
+    // 重点检出局部化遗漏：斜切片、非零extent、各向异性、反射/旋转direction和离面笔迹。
+    for (int variant = 0; variant < 4; ++variant) {
+        constexpr std::size_t n = 8U * 7U * 6U;
+        std::vector<PartLabelId> source(n, 0);
+        source[0] = 1;
+        EditCase swept(source);
+        auto& volume = swept.input.volume;
+        volume.dimensions = {8, 7, 6};
+        volume.extent = {-4, 3, 10, 16, -3, 2};
+        volume.origin = {17, -29, 11};
+        volume.spacing = {0.3, 1.7, 2.5};
+        volume.direction = {0.6, -0.8, 0, 0.8, 0.6, 0, 0, 0, variant == 3 ? -1.0 : 1.0};
+        const auto physicalPoint = [&](std::size_t offset) {
+            const std::array<double, 3> index{
+                static_cast<double>(offset % 8) - 4,
+                static_cast<double>((offset / 8) % 7) + 10,
+                static_cast<double>(offset / 56) - 3};
+            auto point = volume.origin;
+            for (std::size_t row = 0; row < 3; ++row)
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    point[row] += volume.direction[row * 3 + axis] * volume.spacing[axis] * index[axis];
+            return point;
+        };
+        PartBrushEdit sweep;
+        sweep.target = swept.GetPart(1);
+        sweep.radiusMM = 1.8;
+        sweep.sourcePoints = {physicalPoint(65), physicalPoint(179), physicalPoint(260)};
+        std::array<double, 3> normal{1.0/3, 2.0/3, 2.0/3};
+        if (variant != 0) {
+            sweep.slice = PartBrushPlane{physicalPoint(179), normal, 2.1};
+            if (variant == 2) {
+                for (auto& point : sweep.sourcePoints)
+                    for (std::size_t row = 0; row < 3; ++row) point[row] += normal[row] * 1000.0;
+            }
+        }
+        const auto project = [&](std::array<double, 3> point) {
+            if (sweep.slice) {
+                double height = 0;
+                for (std::size_t row = 0; row < 3; ++row) height += (point[row] - sweep.slice->origin[row]) * normal[row];
+                for (std::size_t row = 0; row < 3; ++row) point[row] -= height * normal[row];
+            }
+            return point;
+        };
+        auto expected = source;
+        for (std::size_t voxel = 0; voxel < n; ++voxel) {
+            const auto physicalPointValue = physicalPoint(voxel);
+            if (sweep.slice) {
+                double height = 0;
+                for (std::size_t row = 0; row < 3; ++row)
+                    height += (physicalPointValue[row] - sweep.slice->origin[row]) * normal[row];
+                if (std::abs(height) > sweep.slice->thicknessMM / 2) continue;
+            }
+            const auto point = project(physicalPointValue);
+            for (std::size_t segment = 0; segment < sweep.sourcePoints.size(); ++segment) {
+                const auto a = project(sweep.sourcePoints[segment == 0 ? 0 : segment - 1]);
+                const auto b = project(sweep.sourcePoints[segment]);
+                double denominator = 0, numerator = 0;
+                for (std::size_t row = 0; row < 3; ++row) {
+                    denominator += (b[row]-a[row]) * (b[row]-a[row]);
+                    numerator += (point[row]-a[row]) * (b[row]-a[row]);
+                }
+                const double parameter = denominator == 0 ? 0 : std::clamp(numerator / denominator, 0.0, 1.0);
+                double distance2 = 0;
+                for (std::size_t row = 0; row < 3; ++row) {
+                    const double difference = point[row] - (a[row] + parameter * (b[row]-a[row]));
+                    distance2 += difference * difference;
+                }
+                if (distance2 <= sweep.radiusMM * sweep.radiusMM) { expected[voxel] = 1; break; }
+            }
+        }
+        swept.SetGeometryMetrics();
+        swept.input.request.operation = sweep;
+        const auto result = swept.Build();
+        check(result.labels && *result.labels == expected && *swept.input.previous.labels == source,
+            "Bounded brush matches a full-grid physical reference without altering source");
+        if (result.labels) {
+            swept.input.maxWorkingBytes = result.requiredBytes;
+            check(swept.Build().failureReason == PartFailureReason::None, "Exact editor budget succeeds");
+            --swept.input.maxWorkingBytes;
+            check(swept.Build().failureReason == PartFailureReason::BudgetExceeded, "One byte below editor budget is rejected");
+        }
+        swept.input.maxWorkingBytes = 128U * 1024U * 1024U;
+        sweep.sourcePoints = {{1e8, 1e8, 1e8}};
+        sweep.slice.reset();
+        swept.input.request.operation = sweep;
+        check(swept.Build().failureReason == PartFailureReason::NoChange,
+            "Disjoint brush publishes no empty candidate");
+    }
     if (physical.labels) {
         const auto measured = ClassicalPartSegmenter::BuildLabelMetrics(geometryCase.input.volume, *physical.labels, 1);
         check(measured && (*measured)[1] == physical.catalog->partsByLabel[1].metrics,
@@ -355,4 +445,37 @@ int GetPartEditFailCount()
     check(sparse.Build().failureReason == PartFailureReason::InvalidGeometry,
         "Incomplete catalog bounds cannot silently omit source voxels during a bounded split");
     return failures;
+}
+
+int GetPartEditProfileFailCount()
+{
+    // 固定合成数据，仅用于同条件性能对照；不冒充真实 CT 或 Host 全链验收。
+    constexpr int side = 128;
+    constexpr std::size_t count = std::size_t{side} * side * side;
+    std::vector<PartLabelId> labels(count, 0);
+    labels[0] = 1;
+    EditCase fixture(std::move(labels));
+    fixture.input.volume.dimensions = {side, side, side};
+    fixture.input.volume.extent = {0, side - 1, 0, side - 1, 0, side - 1};
+    fixture.SetGeometryMetrics();
+    PartBrushEdit brush;
+    brush.target = fixture.GetPart(1);
+    brush.radiusMM = 2.0;
+    for (int i = 0; i < 32; ++i) brush.sourcePoints.push_back({60.0 + i / 8.0, 64.0, 64.0});
+    fixture.input.request.operation = brush;
+    for (int run = 0; run < 4; ++run) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = fixture.Build();
+        if (!result.labels || result.failureReason != PartFailureReason::None) return 1;
+        const auto& p = result.profile;
+        std::cout << "EDIT_PROFILE sample=synthetic-128-cube run=" << run
+            << " voxels=" << count << " segments=" << brush.sourcePoints.size()
+            << " visited=" << p.visitedVoxels << " required_bytes=" << result.requiredBytes
+            << " input_ms=" << p.inputMs << " copy_ms=" << p.copyMs
+            << " editable_ms=" << p.editableMs << " operation_ms=" << p.operationMs
+            << " catalog_ms=" << p.catalogMs << " validation_ms=" << p.validationMs
+            << " total_ms=" << std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count() << '\n';
+    }
+    return 0;
 }

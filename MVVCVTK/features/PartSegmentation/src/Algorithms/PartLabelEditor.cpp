@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -105,23 +106,45 @@ public:
     PartEditBuildResult Build()
     {
         // 1. 校验完整输入与预算后，才创建独占的可写标签候选。
+        auto phaseStart = std::chrono::steady_clock::now();
+        const auto elapsed = [&phaseStart] {
+            const auto now = std::chrono::steady_clock::now();
+            const double duration = std::chrono::duration<double, std::milli>(now - phaseStart).count();
+            phaseStart = now;
+            return duration;
+        };
         SetInput();
-        m_labels = std::make_shared<std::vector<PartLabelId>>(*m_input.previous.labels);
+        m_profile.inputMs = elapsed();
+        m_labels = std::make_shared<std::vector<PartLabelId>>();
+        m_labels->reserve(m_count);
+        // 分块复制保留独占候选，取消时丢弃候选；不改写任何已发布载荷。
+        for (std::size_t offset = 0; offset < m_count;) {
+            CheckStop(offset);
+            const auto length = std::min(cancelBatch, m_count - offset);
+            const auto first = m_input.previous.labels->begin() + static_cast<std::ptrdiff_t>(offset);
+            m_labels->insert(m_labels->end(), first, first + static_cast<std::ptrdiff_t>(length));
+            offset += length;
+        }
+        m_profile.copyMs = elapsed();
         m_changed.resize(m_old->partsByLabel.size(), false);
+        m_profile.editableMs = elapsed();
         // 2. 每个工具只改变候选；不执行初始阈值分割，也不触碰原始 scalar。
         std::visit([this](const auto& operation) { SetOperation(operation); },
             m_input.request.operation);
-        if (!m_changedExtent) {
+        m_profile.operationMs = elapsed();
+        if (m_changedCount == 0) {
             SetFailure(PartFailureReason::NoChange, "Edit changes no voxel ownership.");
         }
         // 3. 统一紧凑编号、重算指标及目录，再验证标签与身份的一致性。
         auto catalog = BuildCatalog();
+        m_profile.catalogMs = elapsed();
         if (!GetPartCatalogCountsValid(*catalog, m_counts, m_stop)) {
             CheckStop(0);
             SetFailure(PartFailureReason::InternalError, "Edited catalog is inconsistent.");
         }
+        m_profile.validationMs = elapsed();
         return { PartFailureReason::None, "Label edit candidate is ready.",
-            m_requiredBytes, m_labels, std::move(catalog) };
+            m_requiredBytes, m_labels, std::move(catalog), m_profile };
     }
 
     std::size_t GetRequiredBytes() const noexcept { return m_requiredBytes; }
@@ -358,6 +381,7 @@ private:
 
     bool GetEditable(std::size_t i) const
     {
+        // 保护身份必须取编辑开始时的标签，不能随候选标签变化。
         const auto label = (*m_input.previous.labels)[i];
         if (m_locked[label] || !GetInside(GetIndex(i), m_extent)
             || (m_input.protectionRoi && m_input.protectionRoi->GetContains(GetPhysical(GetIndex(i))))
@@ -387,6 +411,9 @@ private:
     {
         const auto old = (*m_labels)[i];
         if (old == target) return;
+        const auto original = (*m_input.previous.labels)[i];
+        if (old == original) ++m_changedCount;
+        if (target == original) --m_changedCount;
         if (target >= m_counts.size()) m_counts.resize(static_cast<std::size_t>(target)+1, 0);
         if (!m_counts[old]) SetFailure(PartFailureReason::InternalError, "Edit label count underflows.");
         --m_counts[old]; ++m_counts[target];
@@ -404,6 +431,58 @@ private:
     static double GetDot(const std::array<double, 3>& a, const std::array<double, 3>& b)
     {
         return std::inner_product(a.begin(), a.end(), b.begin(), 0.0);
+    }
+
+    std::optional<std::array<int, 6>> GetBrushExtent(const PartBrushEdit& op,
+        const std::array<double, 3>& normal, std::size_t segment) const
+    {
+        const auto& d = m_geometry.direction;
+        const double determinant = d[0] * (d[4] * d[8] - d[5] * d[7])
+            - d[1] * (d[3] * d[8] - d[5] * d[6]) + d[2] * (d[3] * d[7] - d[4] * d[6]);
+        // direction允许有限正交容差，使用实际逆矩阵，不用转置近似截掉边界体素。
+        const std::array<double, 9> inverse{
+            (d[4]*d[8]-d[5]*d[7])/determinant, (d[2]*d[7]-d[1]*d[8])/determinant, (d[1]*d[5]-d[2]*d[4])/determinant,
+            (d[5]*d[6]-d[3]*d[8])/determinant, (d[0]*d[8]-d[2]*d[6])/determinant, (d[2]*d[3]-d[0]*d[5])/determinant,
+            (d[3]*d[7]-d[4]*d[6])/determinant, (d[1]*d[6]-d[0]*d[7])/determinant, (d[0]*d[4]-d[1]*d[3])/determinant};
+        std::array<double, 3> minimum{}, maximum{};
+        minimum.fill(std::numeric_limits<double>::infinity());
+        maximum.fill(-std::numeric_limits<double>::infinity());
+        for (const auto& endpoint : {op.sourcePoints[segment == 0 ? 0 : segment-1], op.sourcePoints[segment]}) {
+            auto point = endpoint;
+            if (op.slice) {
+                std::array<double, 3> delta{};
+                for (std::size_t row = 0; row < 3; ++row) delta[row] = point[row] - op.slice->origin[row];
+                const auto height = GetDot(delta, normal);
+                for (std::size_t row = 0; row < 3; ++row) point[row] -= height * normal[row];
+            }
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                double index = 0;
+                for (std::size_t row = 0; row < 3; ++row)
+                    index += inverse[axis * 3 + row] * (point[row] - m_geometry.origin[row]) / m_geometry.spacing[axis];
+                if (!std::isfinite(index)) SetFailure(PartFailureReason::InvalidEdit, "Brush bounds overflow.");
+                minimum[axis] = std::min(minimum[axis], index);
+                maximum[axis] = std::max(maximum[axis], index);
+            }
+        }
+        auto extent = m_extent;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            std::array<double, 3> row{};
+            for (std::size_t r = 0; r < 3; ++r) row[r] = inverse[axis * 3 + r] / m_geometry.spacing[axis];
+            const double norm2 = GetDot(row, row), alongNormal = GetDot(row, normal);
+            const double margin = op.slice
+                ? op.radiusMM * std::sqrt(std::max(0.0, norm2 - alongNormal * alongNormal))
+                    + op.slice->thicknessMM * 0.5 * std::abs(alongNormal)
+                : op.radiusMM * std::sqrt(norm2);
+            if (!std::isfinite(margin)) SetFailure(PartFailureReason::InvalidEdit, "Brush radius overflows.");
+            // 向外取整并保留浮点余量；精确球/胶囊/切片判定仍在原物理坐标中执行。
+            const double tolerance = 1e-6 * std::max({1.0, std::abs(minimum[axis]), std::abs(maximum[axis]), margin});
+            const double lower = std::max(static_cast<double>(extent[axis * 2]), std::floor(minimum[axis] - margin - tolerance));
+            const double upper = std::min(static_cast<double>(extent[axis * 2 + 1]), std::ceil(maximum[axis] + margin + tolerance));
+            if (lower > upper) return std::nullopt;
+            extent[axis * 2] = static_cast<int>(lower);
+            extent[axis * 2 + 1] = static_cast<int>(upper);
+        }
+        return extent;
     }
 
     void SetOperation(const PartBrushEdit& op)
@@ -442,28 +521,13 @@ private:
                 const auto distance = GetDot(delta, normal);
                 for (std::size_t a = 0; a < 3; ++a) (*p)[a] -= distance*normal[a];
             }
-            auto extent = m_extent;
-            bool intersects = true;
-            const double radius = op.radiusMM + (op.slice ? op.slice->thicknessMM/2 : 0);
-            for (std::size_t a = 0; a < 3; ++a) {
-                double first = 0, last = 0;
-                for (std::size_t r = 0; r < 3; ++r) {
-                    first += m_geometry.direction[r*3+a]*(start[r]-m_geometry.origin[r]);
-                    last += m_geometry.direction[r*3+a]*(end[r]-m_geometry.origin[r]);
-                }
-                first /= m_geometry.spacing[a]; last /= m_geometry.spacing[a];
-                const auto lower = std::floor(std::min(first,last)-radius/m_geometry.spacing[a]);
-                const auto upper = std::ceil(std::max(first,last)+radius/m_geometry.spacing[a]);
-                if (!std::isfinite(lower) || !std::isfinite(upper)) SetFailure(PartFailureReason::InvalidEdit, "Brush bounds overflow.");
-                if (lower > extent[a*2+1] || upper < extent[a*2]) { intersects = false; break; }
-                extent[a*2] = static_cast<int>(std::max(lower, static_cast<double>(extent[a*2])));
-                extent[a*2+1] = static_cast<int>(std::min(upper, static_cast<double>(extent[a*2+1])));
-            }
-            if (!intersects) continue;
+            const auto extent = GetBrushExtent(op, normal, s);
+            if (!extent) continue;
             std::array<double,3> line{};
             for (std::size_t a = 0; a < 3; ++a) line[a] = end[a]-start[a];
             const double length2 = GetDot(line,line);
-            SendExtentVoxels(extent, [&](std::size_t i) {
+            SendExtentVoxels(*extent, [&](std::size_t i) {
+                ++m_profile.visitedVoxels;
                 if (!GetEditable(i) || !allowed[(*m_labels)[i]] || (op.isErase && (*m_labels)[i] != target)) return;
                 const auto point = GetPhysical(GetIndex(i));
                 std::array<double,3> delta{};
@@ -799,9 +863,11 @@ private:
     std::array<std::size_t,3> m_splitDimensions{}, m_splitStride{};
     std::optional<std::array<int,6>> m_changedExtent;
     std::shared_ptr<std::vector<PartLabelId>> m_labels;
+    std::size_t m_changedCount = 0;
     std::vector<std::uint64_t> m_counts;
     std::vector<bool> m_locked, m_changed;
     std::vector<PartLabelId> m_sources;
+    PartEditProfile m_profile;
 };
 
 } // namespace
