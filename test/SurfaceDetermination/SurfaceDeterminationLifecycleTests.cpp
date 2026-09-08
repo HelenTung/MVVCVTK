@@ -4,6 +4,7 @@
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceGenerationStore.h"
+#include "SurfaceContracts.h"
 #include "SurfaceDeterminationTestSupport.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -100,6 +101,19 @@ public:
 class DataPortStub final : public TestDataPort {
 public:
     explicit DataPortStub(VtkImageGridSnapshot initial) { SetCurrent(std::move(initial)); }
+    std::function<void()> beforeSurfaceCommit;
+    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    {
+        if (beforeSurfaceCommit &&
+            std::any_of(transaction.outputs.begin(), transaction.outputs.end(),
+                        [](const auto &output) { return output.type == DataTypes::surfaceMesh; }))
+        {
+            auto before = std::move(beforeSurfaceCommit);
+            beforeSurfaceCommit = {};
+            before();
+        }
+        return TestDataPort::SetDataCommit(std::move(transaction));
+    }
     void SetCurrent(VtkImageGridSnapshot next)
     {
         if (next) (void)SetPrimaryImage(next->image, next->validityMask);
@@ -266,9 +280,10 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         const auto mesh = data
             ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
             : nullptr;
-        checks.Get(mesh && mesh->GetPointAttributes().size() == 5,
-            "generic mesh publishes measurement quality attributes");
-        if (mesh && mesh->GetPointAttributes().size() == 5) {
+        checks.Get(mesh && mesh->GetPointAttributes().size() == 8,
+                   "generic mesh publishes measurement quality attributes");
+        if (mesh && mesh->GetPointAttributes().size() == 8)
+        {
             const auto& attributes = mesh->GetPointAttributes();
             checks.Get(attributes[0].name == "measurement.valid"
                 && attributes[0].values.size() == snapshot->points->size()
@@ -343,12 +358,11 @@ void TestThresholdPublication(Checks& checks)
     const auto graph = testHost.data->GetDataGraph();
     const auto binding = testHost.data->GetDataBinding(graph, "analysis.surface-determination.active");
     checks.Get(completed && completed->status == SurfaceResultStatus::Succeeded
-        && completed->isoEstimate && generation && generation->isoEstimate
-        && completed->isoEstimate->isoValue == generation->isoEstimate->isoValue
-        && binding && binding->target == std::optional<DataRevisionRef>{generation->dataRevision}
-        && !GetDataRevisionRefValid(generation->meshRevision)
+        && completed->isoEstimate && !generation && !completed->isPublished
+        && completed->purpose == SurfaceTaskPurpose::Estimate
+        && (!binding || !binding->target) && feature->GetState().isoEstimate
         && testHost.views->overlay->overlays.empty(),
-        "threshold is a committed DataGraph result and does not attach a mesh overlay");
+        "threshold is transient and never replaces a formal graph binding");
     // 可靠估计之后的新估计失败，不得替换上一正式修订。
     testHost.data->SetCurrent(BuildSnapshot({16,16,16}, {1,1,1}, {0,0,0},
         {1,0,0,0,1,0,0,0,1}, VTK_FLOAT, [](const Point3&) { return 1.0; }));
@@ -419,7 +433,7 @@ void TestCancelAndSupersede(Checks& checks)
             ++firstCount;
         });
     const auto second = supersedeFeature->SendRequest(
-        GetStartRequest(SurfaceDeterminationMethod::GlobalIsoPreview),
+        GetStartRequest(SurfaceDeterminationMethod::LocalAdaptiveIso50),
         [&](SurfaceDeterminationResult result) {
             secondResult = std::move(result);
             ++secondCount;
@@ -445,7 +459,7 @@ void TestCancelAndSupersede(Checks& checks)
             && supersedeFeature->GetSurfaceSnapshot()
             && supersedeFeature->GetSurfaceSnapshot()->resultRevision == 1
             && supersedeFeature->GetSurfaceSnapshot()->method
-                == SurfaceDeterminationMethod::GlobalIsoPreview,
+                == SurfaceDeterminationMethod::LocalAdaptiveIso50,
         "callbacks keep request identity and only latest publishes revision one");
     checks.Get(supersedeFeature->DetachHost(), "supersede test detaches");
 }
@@ -488,7 +502,7 @@ void TestSourceStaleAndRollback(Checks& checks)
         "active stale test attaches");
     std::atomic<int> activeReady{ 0 };
     activeStaleFeature->SendRequest(
-        GetStartRequest(SurfaceDeterminationMethod::GlobalIsoPreview),
+        GetStartRequest(SurfaceDeterminationMethod::LocalAdaptiveIso50),
         [&](SurfaceDeterminationResult) { ++activeReady; });
     checks.Get(
         WaitUntil(
@@ -530,7 +544,7 @@ void TestSourceStaleAndRollback(Checks& checks)
     std::atomic<int> failureCount{ 0 };
     SurfaceDeterminationResult failed;
     rollbackFeature->SendRequest(
-        GetStartRequest(SurfaceDeterminationMethod::GlobalIsoPreview),
+        GetStartRequest(SurfaceDeterminationMethod::LocalAdaptiveIso50),
         [&](SurfaceDeterminationResult result) {
             failed = std::move(result);
             ++failureCount;
@@ -800,11 +814,357 @@ void TestCompletionCapacity(Checks& checks)
         "capacity test worker stops cleanly");
 }
 
+
+void TestPurposeIsolation(Checks& checks)
+{
+    TestHost host(BuildSphere());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "purpose fixture attaches");
+    std::optional<SurfaceDeterminationResult> completed;
+    const auto run = [&](SurfaceDeterminationRequest request) {
+        completed.reset();
+        return feature.SendRequest(std::move(request), [&](auto value) { completed = std::move(value); }).status
+            == SurfaceAdmissionStatus::Accepted && WaitUntil(feature, [&] { return completed.has_value(); });
+    };
+    checks.Get(run(GetStartRequest()), "purpose formal baseline completes");
+    const auto formal = feature.GetSurfaceSnapshot();
+    const auto commit = host.data->GetDataGraph().commitId;
+    auto estimate = GetStartRequest(SurfaceDeterminationMethod::AutomaticIso50);
+    estimate.start->initialIsoValue.reset();
+    checks.Get(run(estimate) && completed->isoEstimate && !completed->isPublished
+        && feature.GetSurfaceSnapshot() == formal && host.data->GetDataGraph().commitId == commit,
+        "estimate preserves formal identity and graph commit");
+    auto preview = GetStartRequest(SurfaceDeterminationMethod::GlobalIsoPreview);
+    checks.Get(run(preview) && !completed->isPublished && feature.GetPreviewSnapshot()
+        && !GetDataRevisionRefValid(feature.GetPreviewSnapshot()->dataRevision)
+        && feature.GetSurfaceSnapshot() == formal && host.data->GetDataGraph().commitId == commit
+        && host.host->lastDelta.hasDisplayUpdate && host.host->lastDelta.displays.empty(),
+        "preview has transient identity and removes formal picking description");
+    SurfaceDeterminationRequest clear; clear.action = SurfaceDeterminationAction::ClearPreview;
+    checks.Get(feature.SendRequest(clear).status == SurfaceAdmissionStatus::Accepted
+        && !feature.GetPreviewSnapshot() && feature.GetSurfaceSnapshot() == formal
+        && host.host->lastDelta.displays.size() == 1 && host.data->GetDataGraph().commitId == commit,
+        "clearing preview restores formal display without graph writes");
+    checks.Get(run(preview) && run(preview), "repeated previews complete");
+    checks.Get(feature.SendRequest(clear).status == SurfaceAdmissionStatus::Accepted
+        && feature.GetState().pointCount == formal->points->size()
+        && feature.GetState().purpose == SurfaceTaskPurpose::Determine,
+        "repeated previews do not overwrite formal restore state");
+    auto headless = GetStartRequest(); headless.start->targetViews = {};
+    checks.Get(run(headless) && completed->isPublished && completed->isActivated
+        && completed->failureReason == SurfaceFailureReason::None && host.views->overlay->overlays.empty(),
+        "headless formal completes without render objects");
+    const auto batch = feature.GetSurfaceSnapshot();
+    bool same = batch && formal && batch->points->size() == formal->points->size();
+    if (same) for (std::size_t i=0;i<batch->points->size();++i)
+        same = same && (*batch->points)[i].positionModel == (*formal->points)[i].positionModel;
+    checks.Get(same, "headless and displayed computation produce identical positions");
+    checks.Get(feature.DetachHost(), "purpose fixture detaches");
+}
+
+void TestExplicitScopesAndHistory(Checks& checks)
+{
+    TestHost host(BuildSphere());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "scope fixture attaches");
+    const auto source = host.data->GetPrimaryImage();
+    host.data->SetCurrent(BuildPlane());
+    auto a = GetStartRequest(); a.start->sourceVolume = source->data->self;
+    a.start->resultScope = "part/A"; a.start->targetViews = {}; a.start->modelUnit = "mm";
+    auto b = a; b.start->resultScope = "part/B";
+    std::vector<SurfaceDeterminationResult> results;
+    const auto onComplete = [&](auto value) { results.push_back(std::move(value)); };
+    checks.Get(feature.SendRequest(a,onComplete).status == SurfaceAdmissionStatus::Accepted
+        && feature.SendRequest(b,onComplete).status == SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature,[&]{return results.size()==2;}), "two scopes queue without cancelling each other");
+    const auto first = feature.GetSurfaceSnapshot("part/A");
+    const auto second = feature.GetSurfaceSnapshot("part/B");
+    checks.Get(first && second && first->dataRevision != second->dataRevision
+        && results[0].status == SurfaceResultStatus::Succeeded && results[1].status == SurfaceResultStatus::Succeeded
+        && !feature.GetSurfaceSnapshot() && first->sourceRevision == source->data->self
+        && first->modelUnit == "mm" && first->resolvedParams.initialIsoValue,
+        "non-primary current input publishes independent explicit scopes with provenance");
+    if (!first || !second) { (void)feature.DetachHost(); return; }
+    const auto meshData = host.data->GetData(host.data->GetDataGraph(), first->meshRevision);
+    checks.Get(meshData->provenance &&
+                   meshData->provenance->canonicalParameters == first->canonicalParameters &&
+                   first->canonicalParameters.find("surface-parameters 2") == 0,
+               "full canonical recipe is the mesh provenance");
+    DataTransaction revise;
+    revise.outputs.push_back({source->data->self.entityId,source->data->self.generation,
+        DataTypes::imageGrid3D,{},source->data->payload,{}});
+    checks.Get(host.data->SetDataCommit(std::move(revise)).status == DataCommitStatus::Succeeded,
+        "source entity advances without changing primary");
+    checks.Get(!feature.GetSurfaceSnapshot("part/A") && feature.GetSurfaceSnapshot(first->dataRevision) == first,
+        "current scope rejects stale head while explicit history remains readable");
+    const auto graphBefore = host.data->GetDataGraph();
+    auto historical=a; historical.start->sourcePolicy=DataPublishPolicy::AllowHistoricalResult;
+    results.clear();
+    checks.Get(feature.SendRequest(historical,onComplete).status == SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature,[&]{return results.size()==1;}),"historical computation admitted");
+    checks.Get(results.size()==1 && results[0].isPublished && !results[0].isActivated
+        && results[0].status == SurfaceResultStatus::Succeeded
+        && feature.GetSurfaceSnapshot(results[0].dataRevision)
+        && feature.GetState().stage==SurfaceDeterminationStage::Ready,
+        "historical calculation records terminal state and immutable output without activation");
+    const auto bindingName=SurfaceContract::GetBindingName("part/A");
+    const auto previous=host.data->GetDataBinding(graphBefore,bindingName);
+    const auto current=host.data->GetDataBinding(host.data->GetDataGraph(),bindingName);
+    checks.Get(previous && current && previous->revision==current->revision && previous->target==current->target,
+        "historical publication leaves the exact prior scope binding unchanged");
+    checks.Get(feature.DetachHost(),"scope fixture detaches");
+}
+
+void TestPurposeChannelsAndAdmission(Checks& checks)
+{
+    TestHost host(BuildSphere()); SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context),"channels attach");
+    std::vector<SurfaceDeterminationResult> results;
+    auto formal=GetStartRequest(); formal.start->targetViews={};
+    auto preview=GetStartRequest(SurfaceDeterminationMethod::GlobalIsoPreview); preview.start->targetViews={};
+    const auto receive=[&](auto result){results.push_back(std::move(result));};
+    const auto f=feature.SendRequest(formal,receive);
+    const auto p=feature.SendRequest(preview,receive);
+    const auto q=feature.SendRequest(preview,receive);
+    checks.Get(f.status==SurfaceAdmissionStatus::Accepted && p.status==SurfaceAdmissionStatus::Accepted
+        && q.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return results.size()==3;}),
+        "formal and preview channels complete once");
+    const auto find=[&](std::uint64_t id){return std::find_if(results.begin(),results.end(),[&](const auto& r){return r.requestId==id;});};
+    checks.Get(find(f.requestId)!=results.end() && find(f.requestId)->isPublished
+        && find(p.requestId)!=results.end() && find(p.requestId)->status==SurfaceResultStatus::Cancelled
+        && find(q.requestId)!=results.end() && find(q.requestId)->status==SurfaceResultStatus::Succeeded
+        && feature.GetSurfaceSnapshot() && feature.GetPreviewSnapshot(),
+        "new preview supersedes only its own channel and retains concurrent formal publication");
+    int refused=0;
+    auto invalid=preview; invalid.start->purpose=SurfaceTaskPurpose::Determine;
+    checks.Get(feature.SendRequest(invalid,[&](auto){++refused;}).status==SurfaceAdmissionStatus::InvalidRequest,
+        "global preview cannot be mislabeled as formal");
+    invalid=formal; invalid.start->resultScope=std::string("\xC0\xAF",2);
+    checks.Get(feature.SendRequest(invalid,[&](auto){++refused;}).status==SurfaceAdmissionStatus::InvalidRequest && refused==0,
+        "invalid UTF8 scope is rejected without callback");
+    invalid=formal; invalid.start->modelUnit="gray";
+    checks.Get(feature.SendRequest(invalid).status==SurfaceAdmissionStatus::InvalidRequest,"gray unit cannot label geometry");
+    checks.Get(feature.DetachHost(),"channels detach");
+}
+
+void TestCoordinateFramePropagation(Checks& checks)
+{
+    TestHost host(BuildSphere()); SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context),"frame attaches");
+    const auto source=host.data->GetPrimaryImage();
+    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(source->data->payload.get());
+    auto geometry=image->GetGeometry(); geometry.coordinateFrame="LPS";
+    const auto entity=host.data->CreateDataEntityId(); const DataRevisionRef ref{entity,1};
+    DataTransaction transaction;
+    transaction.outputs.push_back({entity,0,DataTypes::imageGrid3D,{},image->CreateGeometrySnapshot(geometry),{}});
+    checks.Get(host.data->SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded,"explicit LPS source is registered");
+    auto request=GetStartRequest();request.start->sourceVolume=ref;request.start->targetViews={};
+    std::optional<SurfaceDeterminationResult> result;
+    checks.Get(feature.SendRequest(request,[&](auto r){result=std::move(r);}).status==SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature,[&]{return bool(result);}),"LPS source computes");
+    const auto generation=feature.GetSurfaceSnapshot();
+    const auto meshData=generation?host.data->GetData(host.data->GetDataGraph(),generation->meshRevision):DataSnapshot{};
+    const auto* mesh=meshData?dynamic_cast<const SurfaceMeshPayload*>(meshData->payload.get()):nullptr;
+    checks.Get(generation && mesh && generation->coordinateFrame=="LPS" && mesh->GetCoordinateFrame()=="LPS"
+        && generation->modelUnit.empty() && generation->points->front().positionModel[0]>0,
+        "LPS coordinates propagate without sign reversal or invented length unit");
+    checks.Get(feature.DetachHost(),"frame detaches");
+}
+
+void TestCancelBeforeOwnerCommit(Checks& checks)
+{
+    SurfaceDeterminationService service;
+    checks.Get(service.Start(BuildSphere(),GetParams(),128U*1024U*1024U,1)==SurfaceAdmissionStatus::Accepted,
+        "ready cancellation is admitted");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
+    while(service.GetIsBusy() && std::chrono::steady_clock::now()<deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    checks.Get(!service.GetIsBusy() && service.StopRequest(1),"cancel covers completed but unpublished candidates");
+    const auto result=service.GetComplete();
+    checks.Get(result && result->result.status==SurfaceResultStatus::Cancelled && result->result.points.empty()
+        && !service.GetComplete(),"ready cancellation produces exactly one empty cancelled completion");
+    checks.Get(service.Stop(std::chrono::steady_clock::now()+std::chrono::seconds(2)),"ready cancellation stops worker");
+}
+
+void TestDetachCallbackReentry(Checks& checks)
+{
+    TestHost host(BuildSphere()); SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "detach reentry attaches");
+    bool ready = false;
+    checks.Get(feature.SendRequest(GetStartRequest(), [&](auto) { ready = true; }).status == SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature, [&] { return ready; }), "detach observer has an active formal binding");
+    bool sawTeardown = false;
+    const auto observer = host.data->AttachDataChange([&](const DataChangeSet& change) {
+        if (!change.published.empty() || change.bindings.empty()) return;
+        sawTeardown = true;
+        checks.Get(feature.SendRequest(GetStartRequest()).status == SurfaceAdmissionStatus::Stopping
+            && !feature.OnHostTick(), "teardown observer cannot admit work or advance display state");
+    });
+    int count = 0;
+    auto request = GetStartRequest(); request.start->targetViews = {};
+    const auto callback = [&](SurfaceDeterminationResult result) {
+        ++count;
+        checks.Get(result.status == SurfaceResultStatus::Cancelled && feature.DetachHost(),
+            "detach callback observes completed teardown and may detach again");
+    };
+    checks.Get(feature.SendRequest(request, callback).status == SurfaceAdmissionStatus::Accepted,
+        "first detach candidate admitted");
+    request.start->resultScope = "second";
+    checks.Get(feature.SendRequest(request, callback).status == SurfaceAdmissionStatus::Accepted
+        && feature.DetachHost() && count == 2 && sawTeardown, "teardown completes both callbacks once without map reentry");
+    checks.Get(host.data->DetachDataChange(observer), "teardown observer removed");
+    checks.Get(feature.AttachHost(host.context) && feature.DetachHost(), "feature can reattach after callback teardown");
+}
+
+void TestClearedResultFailure(Checks& checks)
+{
+    TestHost host(BuildSphere()); SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "clear failure fixture attaches");
+    int count = 0;
+    checks.Get(feature.SendRequest(GetStartRequest(), [&](auto) { ++count; }).status == SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature, [&] { return count == 1; }), "clear failure baseline completes");
+    SurfaceDeterminationRequest clear; clear.action = SurfaceDeterminationAction::Clear;
+    checks.Get(feature.SendRequest(clear).status == SurfaceAdmissionStatus::Accepted, "formal result is cleared");
+    auto empty = GetStartRequest(); empty.start->initialIsoValue = 1e9;
+    checks.Get(feature.SendRequest(empty, [&](auto) { ++count; }).status == SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature, [&] { return count == 2; }) && !feature.GetSurfaceSnapshot()
+        && feature.GetState().stage == SurfaceDeterminationStage::Failed && feature.GetState().pointCount == 0,
+        "later failure cannot restore a cleared formal summary");
+    checks.Get(feature.DetachHost(), "clear failure fixture detaches");
+}
+
+void TestBusinessInputLifecycle(Checks &checks)
+{
+    TestHost host(BuildPlane());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "business input fixture attaches");
+    const auto source = host.data->GetPrimaryImage();
+    const auto geometry =
+        dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get())->GetGeometry();
+    auto values = std::make_shared<std::vector<std::uint16_t>>();
+    for (int z = 0; z < geometry.dimensions[2]; ++z)
+        for (int y = 0; y < geometry.dimensions[1]; ++y)
+            for (int x = 0; x < geometry.dimensions[0]; ++x)
+                values->push_back(x <= 15 ? 2 : 7);
+    const DataRevisionRef labelRef{host.data->CreateDataEntityId(), 1};
+    DataTransaction labels;
+    labels.outputs.push_back({labelRef.entityId,
+                              0,
+                              DataTypes::labelMap3D,
+                              {{"source-volume", source->data->self}},
+                              std::make_shared<const LabelMap3DPayload>(geometry, LabelMapValues{values}),
+                              {}});
+    checks.Get(host.data->SetDataCommit(std::move(labels)).status == DataCommitStatus::Succeeded,
+               "business labels enter the real DataGraph");
+    auto request = GetStartRequest();
+    request.start->targetViews = {};
+    request.start->sourceVolume = source->data->self;
+    request.start->materialLabels = labelRef;
+    request.start->materialPairs = {{2, 7}};
+    request.start->componentSelection = SurfaceComponentSelection::All;
+    request.start->resultScope = "material/part";
+    request.start->modelUnit = "mm";
+    request.start->initialIsoValue.reset();
+    std::optional<SurfaceDeterminationResult> result;
+    const auto run = [&](SurfaceDeterminationRequest next) {
+        result.reset();
+        return feature.SendRequest(std::move(next), [&](auto value) { result = std::move(value); }).status ==
+                   SurfaceAdmissionStatus::Accepted &&
+               WaitUntil(feature, [&] { return result.has_value(); });
+    };
+    checks.Get(run(request) && result->isPublished && result->status == SurfaceResultStatus::Succeeded,
+               "label-to-surface completes without windows");
+    const auto generation = feature.GetSurfaceSnapshot("material/part");
+    if (!generation)
+    {
+        (void)feature.DetachHost();
+        return;
+    }
+    const auto mesh = host.data->GetData(host.data->GetDataGraph(), generation->meshRevision);
+    const auto *payload = dynamic_cast<const SurfaceMeshPayload *>(mesh->payload.get());
+    checks.Get(mesh->inputs.size() == 2 && generation->inputs.size() == 2 && generation->interfaces &&
+                   generation->interfaces->at(0).canonicalId == "2:7",
+               "generic consumer can trace scalar and label revisions plus stable interface identity");
+    checks.Get(payload && payload->GetPointAttributes().size() == 8 &&
+                   payload->GetPointAttributes()[5].name == "measurement.flags",
+               "generic mesh exposes quality reasons and interface/override indexes");
+    const auto valid = feature.GetResultValidity(generation->dataRevision);
+    checks.Get(valid.status == SurfaceRestoreStatus::Current && valid.canDisplay && valid.canRecompute &&
+                   valid.canMeasure,
+               "current frozen business result supports replay and quality-gated measurement");
+    const auto accepted =
+        std::find_if(generation->points->begin(), generation->points->end(),
+                     [](const auto &point) { return point.flags == SurfacePointFlags::None; });
+    if (accepted != generation->points->end())
+    {
+        const auto diagnostic = feature.GetProfileDiagnostic(
+            generation->dataRevision, static_cast<std::uint64_t>(accepted - generation->points->begin()));
+        checks.Get(diagnostic.isAvailable && diagnostic.point.positionModel == accepted->positionModel &&
+                       !diagnostic.candidates.empty(),
+                   "public diagnostic uses the generation's saved source and recipe");
+    }
+    const auto labelData = host.data->GetData(host.data->GetDataGraph(), labelRef);
+    DataTransaction revise;
+    revise.outputs.push_back(
+        {labelRef.entityId, 1, DataTypes::labelMap3D, labelData->inputs, labelData->payload, {}});
+    checks.Get(host.data->SetDataCommit(std::move(revise)).status == DataCommitStatus::Succeeded,
+               "label revision advances independently of source");
+    const auto historical = feature.GetResultValidity(generation->dataRevision);
+    checks.Get(!feature.GetSurfaceSnapshot("material/part") &&
+                   feature.GetSurfaceSnapshot(generation->dataRevision) &&
+                   historical.status == SurfaceRestoreStatus::Historical && historical.canDisplay &&
+                   historical.canRecompute && !historical.canMeasure,
+               "label changes invalidate current measurement while exact history remains reviewable");
+    auto historicalRequest = request;
+    historicalRequest.start->sourcePolicy = DataPublishPolicy::AllowHistoricalResult;
+    checks.Get(run(historicalRequest) && result->isPublished && !result->isActivated,
+               "explicit historical label recipe computes without activation");
+    auto currentRequest = request;
+    currentRequest.start->materialLabels = DataRevisionRef{labelRef.entityId, 2};
+    const auto label2 = host.data->GetData(host.data->GetDataGraph(), *currentRequest.start->materialLabels);
+    host.data->beforeSurfaceCommit = [&] {
+        DataTransaction race;
+        race.outputs.push_back(
+            {labelRef.entityId, 2, DataTypes::labelMap3D, label2->inputs, label2->payload, {}});
+        checks.Get(host.data->TestDataPort::SetDataCommit(std::move(race)).status ==
+                       DataCommitStatus::Succeeded,
+                   "publication race advances the label head");
+    };
+    checks.Get(run(currentRequest) && result->status == SurfaceResultStatus::Failed && !result->isPublished,
+               "label CAS refuses a race between final validation and DataGraph commit");
+    auto initial = GetStartRequest();
+    initial.start->targetViews = {};
+    initial.start->sourceVolume = source->data->self;
+    initial.start->initialSurface = generation->meshRevision;
+    initial.start->resultScope = "initial/part";
+    checks.Get(run(initial) && result->isPublished, "generic initial surface is a frozen business input");
+    const auto imported = feature.GetSurfaceSnapshot("initial/part");
+    DataTransaction meshRevise;
+    meshRevise.outputs.push_back({mesh->self.entityId,
+                                  mesh->self.generation,
+                                  DataTypes::surfaceMesh,
+                                  mesh->inputs,
+                                  mesh->payload,
+                                  {}});
+    checks.Get(host.data->SetDataCommit(std::move(meshRevise)).status == DataCommitStatus::Succeeded,
+               "initial mesh revision advances");
+    checks.Get(imported && !feature.GetSurfaceSnapshot("initial/part") &&
+                   feature.GetResultValidity(imported->dataRevision).status ==
+                       SurfaceRestoreStatus::Historical,
+               "initial mesh changes invalidate downstream current surface");
+    auto wrong = request;
+    wrong.start->materialLabels = source->data->self;
+    checks.Get(feature.SendRequest(wrong).status == SurfaceAdmissionStatus::InvalidRequest,
+               "wrong dependency payload is rejected at admission");
+    checks.Get(feature.DetachHost(), "business input fixture detaches");
+}
+
 } // namespace
 
 int GetSurfaceLifecycleFailCount()
 {
     Checks checks;
+    TestBusinessInputLifecycle(checks);
     TestAttachAndOwnerThread(checks);
     TestSuccessVisibilityAndClear(checks);
     TestThresholdPublication(checks);
@@ -814,5 +1174,12 @@ int GetSurfaceLifecycleFailCount()
     TestBindingAbaAndDisplayRetry(checks);
     TestCommitObserverReentry(checks);
     TestCompletionCapacity(checks);
+    TestPurposeIsolation(checks);
+    TestExplicitScopesAndHistory(checks);
+    TestPurposeChannelsAndAdmission(checks);
+    TestCoordinateFramePropagation(checks);
+    TestCancelBeforeOwnerCommit(checks);
+    TestDetachCallbackReentry(checks);
+    TestClearedResultFailure(checks);
     return checks.failureCount;
 }
