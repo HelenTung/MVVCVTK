@@ -27,7 +27,7 @@ struct MethodCase {
 constexpr std::size_t methodCaseCount =
     6
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
-    + 1
+    + 2
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     + 1
@@ -44,6 +44,7 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
     { "view", &GetViewFailCount },
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     { "crop", &GetCropFailCount },
+    { "crop-lifecycle", &GetCropLifecycleFailCount },
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     { "gap", &GetGapFailCount },
@@ -58,7 +59,7 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
 constexpr std::string_view methodCaseNames =
     "load|render|label-map|view"
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
-    "|crop"
+    "|crop|crop-lifecycle"
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     "|gap"

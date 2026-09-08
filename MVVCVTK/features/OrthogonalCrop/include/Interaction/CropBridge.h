@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OrthogonalCropTypes.h"
+#include "Interaction/CropHistoryQueue.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "App/Services/FeatureViewService.h"
 #include "Host/Types/HostViewTypes.h"
@@ -30,26 +31,20 @@ private:
     class Impl;
 
 public:
-    // 发布令牌只拥有已完成分配和验证的历史候选；销毁令牌等价于放弃提交。
-    class PreparedCommit final {
+    class SourceCommit final {
     public:
-        ~PreparedCommit();
-        PreparedCommit(PreparedCommit&&) noexcept;
-        PreparedCommit& operator=(PreparedCommit&&) noexcept;
-
-        PreparedCommit(const PreparedCommit&) = delete;
-        PreparedCommit& operator=(const PreparedCommit&) = delete;
-
+        ~SourceCommit();
+        SourceCommit(SourceCommit&&) noexcept;
+        SourceCommit& operator=(SourceCommit&&) noexcept;
+        SourceCommit(const SourceCommit&) = delete;
+        SourceCommit& operator=(const SourceCommit&) = delete;
     private:
         friend class CropBridge;
         friend class CropBridge::Impl;
-
         class Impl;
-        explicit PreparedCommit(std::unique_ptr<Impl> impl) noexcept;
-
+        explicit SourceCommit(std::unique_ptr<Impl> impl) noexcept;
         std::unique_ptr<Impl> m_impl;
     };
-
     CropBridge();
     void SetWorkAvailable(std::function<void()> onWorkAvailable);
     ~CropBridge();
@@ -64,20 +59,29 @@ public:
         CropInputSnapshot input);
     bool ClearBindings();
     bool SetCropInput(CropInputSnapshot input);
-    // DataManager 发布前完成全部可失败准备；baseNodeCount=0 表示显式恢复原始基线。
-    std::optional<PreparedCommit> BuildCropCommit(
-        CropInputSnapshot input,
-        std::size_t baseNodeCount);
-    // 外部快照成功发布后接管准备令牌；这里只移动内部状态，不检查 lease，也不调用外部端口。
-    void SetCropCommit(PreparedCommit&& prepared) noexcept;
-    // 状态接管后的渲染通知可以延迟重试，不参与数据/历史提交结果。
-    bool SendCropCommit() noexcept;
+    CropEditAdmission SendRequest(CropEditRequest request);
+    CropHistorySnapshot GetHistory(CropNodeId after = 0,std::size_t limit = 1000) const;
+    CropPruneImpact GetPruneImpact(const CropPruneRequest& request) const;
+    std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const;
+    std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const;
+    CropInputSnapshot GetSource() const;
+    bool GetResultsValid(const std::vector<CropResultRecord>& results) const;
+    void SetResults(std::vector<CropResultRecord>&& results) noexcept;
+    CropDocumentArchive GetArchive() const;
+    bool CancelPending();
+    bool ClearDocument();
+    bool GetSourceTransitionNeeded() const;
+    // isQueued=true 时准备队首命令；否则为显式 Root 返回/已有节点选择。
+    std::optional<SourceCommit> BuildSourceCommit(CropNodeId nodeId,bool isQueued);
+    bool GetSourceCommitReady(const SourceCommit& prepared) const noexcept;
+    void SetSourceCommit(SourceCommit&& prepared) noexcept;
+    void SetSourceCommitFailed(SourceCommit&& prepared,CropFailure failure);
     bool SwitchCropBox();
     bool SwitchCropPlane();
     bool SetCropMode(CropRemovalMode removalMode);
     bool PreviousCrop();
     bool NextCrop();
-    bool SetCropNode(std::size_t nodeCount);
+    bool SetCropNode(CropNodeId nodeId);
     bool ExitCrop();
     bool GetCropActive() const;
     // binding 生命周期独立于 widget 编辑态；Exit 后仍可导航 committed history。
@@ -86,10 +90,11 @@ public:
 
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
-    // 从 rootInput 对完整 allHistory 前缀做一次融合物化，不生成节点级中间 mask。
+    // 从固定 Root 的明确节点路径做融合物化，不生成节点级中间 mask。
     bool BuildCropResult(
         CropInputSnapshot rootInput,
         CropCandidateCallback onComplete);
+    bool BuildCropResult(CropNodeId nodeId,CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();

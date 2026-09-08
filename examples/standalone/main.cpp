@@ -1188,7 +1188,7 @@ namespace {
                 : history.editMode == CropRemovalMode::RemoveInside ? "移除内部" : "空闲";
             std::ostringstream status;
             status << "裁剪已激活 " << history.nodeCount << '/' << history.operationCount
-                << " | 基础节点数 " << history.baseNodeCount << " | 全部操作数 " << history.allOperationCount
+                << " | 文档 " << history.documentId << " | 节点 " << history.appliedHead
                 << " | " << mode;
             if (history.hasEditableOp) status << " | 可编辑";
             if (status.str() != m_cropStatus && SetDemoStatus(status.str())) {
@@ -1212,17 +1212,39 @@ namespace {
             return isSucceeded;
         }
 
+        bool SelectCropDepth(std::size_t depth)
+        {
+            const auto crop=m_cropFeature.lock();if(!crop)return false;
+            const auto history=crop->GetHistory(0,0,0);
+            std::vector<CropNodeId> path;
+            auto node=history.appliedHead;
+            while(node) {
+                const auto found=std::find_if(history.nodes.begin(),history.nodes.end(),[&](const auto& entry){return entry.nodeId==node;});
+                if(found==history.nodes.end())return false;
+                path.push_back(node);node=found->parentNodeId;
+            }
+            std::reverse(path.begin(),path.end());
+            while(path.size()<=depth) {
+                std::vector<CropNodeId> children;
+                for(const auto& entry:history.nodes)if(!path.empty()&&entry.parentNodeId==path.back())children.push_back(entry.nodeId);
+                if(children.size()!=1) { (void)SetDemoStatus("请通过历史节点选择明确的分支");return false; }
+                path.push_back(children.front());
+            }
+            CropEditRequest request;request.documentId=history.documentId;
+            request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;
+            request.kind=CropEditKind::Select;request.nodeId=path[depth];
+            return crop->SendRequest(std::move(request)).isAccepted;
+        }
+
         bool SendCrop(
             const CropHostAction action,
-            std::optional<CropRemovalMode> removalMode = {},
-            std::optional<std::size_t> nodeCount = {})
+            std::optional<CropRemovalMode> removalMode = {})
         {
             const auto crop = m_cropFeature.lock();
             if (!crop) return false;
             CropHostRequest request;
             request.action = action;
             request.removalMode = removalMode;
-            request.nodeCount = nodeCount;
             if (action == CropHostAction::Start || action == CropHostAction::Box
                 || action == CropHostAction::Plane || action == CropHostAction::Mode
                 || action == CropHostAction::BuildResult) {
@@ -1575,7 +1597,7 @@ namespace {
             case ControlAction::CropNode4: case ControlAction::CropNode5:
             case ControlAction::CropNode6: case ControlAction::CropNode7:
             case ControlAction::CropNode8: case ControlAction::CropNode9:
-                return SendCrop(CropHostAction::Node, {},
+                return SelectCropDepth(
                     static_cast<std::size_t>(action) - static_cast<std::size_t>(ControlAction::CropNode0));
             default:
                 return false;

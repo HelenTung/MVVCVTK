@@ -2,6 +2,9 @@ add_executable(
     mvvcvtk_crop_tests
     AppTaskServiceTests.cpp
     CropAlgorithmTests.cpp
+    CropHistoryTests.cpp
+    CropHistoryQueueTests.cpp
+    CropGeometryTests.cpp
     CropBridgeTests.cpp
     CropBridgeTests.h
     CropShaderPreviewTests.cpp
@@ -49,3 +52,11 @@ add_test(
     COMMAND mvvcvtk_crop_tests all
 )
 SetTestRuntime(OrthogonalCrop.All mvvcvtk_crop_tests)
+
+add_test(NAME OrthogonalCrop.History COMMAND mvvcvtk_crop_tests history)
+SetTestRuntime(OrthogonalCrop.History mvvcvtk_crop_tests)
+add_test(NAME OrthogonalCrop.Geometry COMMAND mvvcvtk_crop_tests geometry)
+SetTestRuntime(OrthogonalCrop.Geometry mvvcvtk_crop_tests)
+
+add_test(NAME OrthogonalCrop.Bridge COMMAND mvvcvtk_crop_tests bridge)
+SetTestRuntime(OrthogonalCrop.Bridge mvvcvtk_crop_tests)

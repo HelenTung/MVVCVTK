@@ -952,7 +952,7 @@ void FeatureTestControls::Impl::UpdateCropPartVisibility() {
     const auto crop = bindings.crop.lock();
     const auto cropState = crop ? crop->GetState() : CropHostState{};
     // Exit 只关闭控件；当前前缀仍有节点时，底层模型继续受裁剪影响。
-    // baseNodeCount 已物化进当前输入的 mask，针对该输入重新分割的零件可以显示。
+    // 文档始终使用固定 Root；结果显示与预览路径由 Host 的输入/展示状态区分。
     const bool isCropping = cropState.isActive || cropState.history.nodeCount != 0;
     const auto state = parts->GetState();
     if (isCropping && !partVisibilityBeforeCrop) partVisibilityBeforeCrop = state.isOverlayVisible;

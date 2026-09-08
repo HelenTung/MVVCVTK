@@ -37,6 +37,9 @@ struct CropMaterializationCandidate final {
     DataRevisionRef sourceRevision;
     std::size_t nodeCount = 0;
     std::string message;
+    std::shared_ptr<const IDataPayload> outputPayload;
+    std::shared_ptr<const RoiGeometryPayload> recipePayload;
+    std::shared_ptr<const VtkPreparedDataView> preparedView;
     vtkSmartPointer<vtkImageData> imageData;
     vtkSmartPointer<vtkImageData> maskImage;
     vtkSmartPointer<vtkPolyData> polyData;
@@ -75,7 +78,8 @@ public:
         const CropBuildParams& params,
         const CropShaderPayload& payload,
         std::size_t fallbackAvailableRamBytes = 0,
-        const std::function<bool()>& getStopRequested = {});
+        const std::function<bool()>& getStopRequested = {},
+        const ImageGrid3DPayload* sourcePayload = nullptr);
 
     static CropMaterializationCandidate GetResult(
         vtkPolyData* polyData,

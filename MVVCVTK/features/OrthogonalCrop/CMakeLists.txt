@@ -1,11 +1,17 @@
 set(MVVCVTK_CROP_SOURCES
     include/Algorithms/CropAlgorithm.h
+    include/Algorithms/CropGeometry.h
+    include/Interaction/CropHistory.h
+    include/Interaction/CropHistoryQueue.h
     include/Interaction/CropBoxWidget.h
     include/Interaction/CropBridge.h
     include/Interaction/CropPlaneWidget.h
     include/Render/CropShaderController.h
     include/Routing/CropRouter.h
     src/Algorithms/CropAlgorithm.cpp
+    src/Algorithms/CropGeometry.cpp
+    src/Interaction/CropHistory.cpp
+    src/Interaction/CropHistoryQueue.cpp
     src/Host/CropHostFeature.cpp
     src/Interaction/CropBoxWidget.cpp
     src/Interaction/CropBridge.cpp

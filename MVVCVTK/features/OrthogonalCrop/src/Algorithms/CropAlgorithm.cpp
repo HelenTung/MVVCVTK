@@ -23,6 +23,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -411,8 +412,12 @@ bool GetRamValid(
     if (pointCount < 0) {
         return false;
     }
-    const std::size_t maskBytes =
-        static_cast<std::size_t>(pointCount);
+    // One formal result mask plus its isolated trusted VTK bridge copy. Root scalars are shared.
+    if (static_cast<std::uint64_t>(pointCount) > std::numeric_limits<std::size_t>::max() / 2) return false;
+    const std::size_t maskBytes = static_cast<std::size_t>(pointCount) * 2;
+    int dimensions[3] = {};
+    image->GetDimensions(dimensions);
+    const std::size_t sliceBytes = static_cast<std::size_t>(std::max(0, dimensions[2])) * sizeof(std::size_t);
     const std::size_t tableBytes = payload.predicateTable
         ? payload.predicateTable->rgbaValues.size() * sizeof(float)
         : 0;
@@ -423,8 +428,9 @@ bool GetRamValid(
             > std::numeric_limits<std::size_t>::max() - kRamMargin) {
         return false;
     }
-    return maskBytes + tableBytes
-        + kRamMargin <= availableRamBytes;
+    const auto fixedBytes = maskBytes + tableBytes + kRamMargin;
+    return sliceBytes <= std::numeric_limits<std::size_t>::max() - fixedBytes
+        && fixedBytes + sliceBytes <= availableRamBytes;
 }
 
 class CropImplicit final : public vtkImplicitFunction {
@@ -637,7 +643,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     const CropBuildParams& params,
     const CropShaderPayload& payload,
     const std::size_t fallbackAvailableRamBytes,
-    const std::function<bool()>& getStopRequested)
+    const std::function<bool()>& getStopRequested,
+    const ImageGrid3DPayload* sourcePayload)
 {
     std::atomic<bool> isCancelled{ false };
     const auto getStopped = [&]() noexcept {
@@ -652,8 +659,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
         return true;
     };
     const auto getCancelled = [&] {
-        auto result = BuildResultFailure(params, CropFailure::VersionMismatch,
-            "The crop build input or owner is no longer active.");
+        auto result = BuildResultFailure(params, CropFailure::Cancelled,
+            "The crop build was cancelled before publication.");
         result.isCancelled = true;
         return result;
     };
@@ -761,19 +768,14 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     // scalar 真源不可变；新快照只创建 VTK 外壳并共享 scalar storage，
     // 真实裁切域由独立 mask 表达，避免复制整卷 float 数据。
     outputImage->ShallowCopy(image);
-    auto maskImage = vtkSmartPointer<vtkImageData>::New();
-    maskImage->CopyStructure(image);
-    maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::vector<std::uint8_t> maskValues(static_cast<std::size_t>(image->GetNumberOfPoints()));
 
     const auto* inputMask = validityMask
         ? static_cast<const unsigned char*>(
             validityMask->GetScalarPointer(
                 extent[0], extent[2], extent[4]))
         : nullptr;
-    auto* outputMask =
-        static_cast<unsigned char*>(
-            maskImage->GetScalarPointer(
-                extent[0], extent[2], extent[4]));
+    auto* outputMask = maskValues.data();
     if ((validityMask && !inputMask)
         || !outputMask) {
         return BuildResultFailure(
@@ -787,7 +789,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     if (validityMask) {
         validityMask->GetIncrements(inputInc);
     }
-    maskImage->GetIncrements(outputInc);
+    outputInc[1] = xCount;
+    outputInc[2] = xCount * yCount;
 
     const CropPredicatePlan predicatePlan(
         *payload.predicateTable,
@@ -888,7 +891,20 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     auto result = BuildResultBase(params);
     result.isSucceeded = true;
     result.imageData = std::move(outputImage);
-    result.maskImage = std::move(maskImage);
+    if (sourcePayload) {
+        auto output = sourcePayload->CreateMaskSnapshot(std::move(maskValues));
+        if (!output || !output->GetValid())
+            return BuildResultFailure(params, CropFailure::BadInput, "Crop formal image payload is invalid.");
+        result.outputPayload = std::move(output);
+    } else {
+        auto maskImage = vtkSmartPointer<vtkImageData>::New();
+        maskImage->CopyStructure(image);
+        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+        if (!maskImage->GetScalarPointer())
+            return BuildResultFailure(params, CropFailure::MaskFailed, "Crop mask view allocation failed.");
+        std::memcpy(maskImage->GetScalarPointer(), maskValues.data(), maskValues.size());
+        result.maskImage = std::move(maskImage);
+    }
     return result;
 }
 
@@ -899,8 +915,8 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     const std::function<bool()>& getStopRequested)
 {
     const auto getCancelled = [&] {
-        auto result = BuildResultFailure(params, CropFailure::VersionMismatch,
-            "The crop build input or owner is no longer active.");
+        auto result = BuildResultFailure(params, CropFailure::Cancelled,
+            "The crop build was cancelled before publication.");
         result.isCancelled = true;
         return result;
     };

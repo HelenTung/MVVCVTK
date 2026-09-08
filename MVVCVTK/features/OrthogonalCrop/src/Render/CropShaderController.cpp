@@ -244,9 +244,11 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     }
 
     const auto& values = m_staged.payload.predicateTable->rgbaValues;
-    const std::size_t width = values.size() / 4;
-    if (width == 0
-        || width > static_cast<std::size_t>(vtkTextureObject::GetMaximumTextureSize(context))) {
+    // Root 的业务表为空；绑定一个中性 texel，仍每帧同步 nodeCount=0。
+    // 不复用其它历史分支的业务表，也不让零宽纹理导致 Root 事务失败。
+    const std::array<float,4> emptyTexel{};
+    const std::size_t width = std::max(std::size_t{1},values.size() / 4);
+    if (width > static_cast<std::size_t>(vtkTextureObject::GetMaximumTextureSize(context))) {
         m_state.status = RenderEffectStatus::Failed;
         m_state.failureReason = RenderEffectFailure::TextureFailed;
         m_state.message = "The crop table exceeds the context texture-width limit.";
@@ -262,7 +264,7 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     texture->SetMinificationFilter(vtkTextureObject::Nearest);
     texture->SetMagnificationFilter(vtkTextureObject::Nearest);
     // VTK 9.4 的上传 API 错误地把只读源声明为 void*；实现只读取该缓冲区。
-    auto* uploadValues = const_cast<float*>(values.data());
+    auto* uploadValues = const_cast<float*>(values.empty() ? emptyTexel.data() : values.data());
     if (!texture->Create1DFromRaw(
             static_cast<unsigned int>(width), 4, VTK_FLOAT, uploadValues)) {
         m_state.status = RenderEffectStatus::Failed;
@@ -715,6 +717,9 @@ public:
     bool ClearCropCommit(std::uint64_t revision);
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
+    bool SetSourcePreview(CropShaderPayload payload);
+    void SetSourcePreviewComplete(std::uint64_t revision) noexcept;
+    void ClearSourcePreview(std::uint64_t revision) noexcept;
     std::shared_ptr<RenderEffectBinding> BuildEffectBinding(
         const RenderEffectTarget& target,
         RenderBindingUse bindingUse);
@@ -729,6 +734,7 @@ private:
     mutable std::vector<std::weak_ptr<CropEffectBinding>> m_bindings;
     std::vector<std::weak_ptr<CropEffectBinding>> m_stagedBindings;
     std::vector<std::weak_ptr<CropEffectBinding>> m_commitBindings;
+    CropShaderPayload m_sourcePreview;
     CropShaderPayload m_previous;
     CropShaderPayload m_active;
     CropShaderPayload m_staged;
@@ -1091,14 +1097,41 @@ CropShaderEffect::Impl::BuildEffectBinding(
     if (!binding->GetTargetReady()) {
         return {};
     }
-    if (m_active.revision != 0
-        && m_active.sourceStamp == target.inputStamp
-        && !binding->SetCommittedReplay(m_active)) {
+    const auto& replay = bindingUse==RenderBindingUse::Candidate && m_sourcePreview.revision
+        ? m_sourcePreview : m_active;
+    if (replay.revision != 0
+        && replay.sourceStamp == target.inputStamp
+        && !binding->SetCommittedReplay(replay)) {
         return {};
     }
     m_bindings.push_back(binding);
     return binding;
 }
+
+bool CropShaderEffect::Impl::SetSourcePreview(CropShaderPayload payload)
+{
+    if(!payload.revision || payload.revision<=m_active.revision || m_sourcePreview.revision
+        || m_staged.revision || m_commitRevision || !GetDataRevisionRefValid(payload.sourceStamp.dataRevision)
+        || !payload.predicateTable || payload.nodeCount!=payload.predicateTable->operationCount) return false;
+    m_sourcePreview=std::move(payload);return true;
+}
+
+void CropShaderEffect::Impl::SetSourcePreviewComplete(std::uint64_t revision) noexcept
+{
+    if(!revision || revision!=m_sourcePreview.revision)std::terminate();
+    m_active=std::move(m_sourcePreview);m_sourcePreview={};
+    m_state.status=RenderEffectStatus::Committed;m_state.failureReason=RenderEffectFailure::None;
+    m_state.activeRevision=revision;m_state.stagedRevision=0;m_state.message.clear();
+}
+
+void CropShaderEffect::Impl::ClearSourcePreview(std::uint64_t revision) noexcept
+{
+    if(m_sourcePreview.revision==revision)m_sourcePreview={};
+}
+
+bool CropShaderEffect::SetSourcePreview(CropShaderPayload payload) {return m_impl->SetSourcePreview(std::move(payload));}
+void CropShaderEffect::SetSourcePreviewComplete(std::uint64_t revision) noexcept {m_impl->SetSourcePreviewComplete(revision);}
+void CropShaderEffect::ClearSourcePreview(std::uint64_t revision) noexcept {m_impl->ClearSourcePreview(revision);}
 
 CropShaderEffect::CropShaderEffect()
     : m_impl(std::make_unique<Impl>())

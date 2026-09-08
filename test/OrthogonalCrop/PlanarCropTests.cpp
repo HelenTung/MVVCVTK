@@ -4,10 +4,15 @@
 #include <iostream>
 #include <string_view>
 
+int GetCropHistoryFailures();
+int GetCropGeometryFailures();
+
 int main(int argc, char* argv[])
 {
     const std::string_view suite =
         argc > 1 && argv[1] ? argv[1] : "all";
+    if (suite == "history") return GetCropHistoryFailures() == 0 ? 0 : 1;
+    if (suite == "geometry") return GetCropGeometryFailures() == 0 ? 0 : 1;
     if (suite == "algorithm") {
         return CropAlgorithmSuite().GetFailCount() == 0
             ? 0 : 1;
@@ -29,7 +34,8 @@ int main(int argc, char* argv[])
         return 2;
     }
 
-    int failureCount = CropAlgorithmSuite().GetFailCount();
+    int failureCount = GetCropHistoryFailures() + GetCropGeometryFailures();
+    failureCount += CropAlgorithmSuite().GetFailCount();
     failureCount += CropBridgeSuite().GetFailCount();
     failureCount += CropShaderPreviewSuite().GetFailCount();
     failureCount += AppTaskSuite().GetFailCount();

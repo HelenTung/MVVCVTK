@@ -62,6 +62,11 @@ public:
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
 
+    // 仅为 Host 候选 View 准备重放；当前 binding 继续显示旧已应用状态。
+    bool SetSourcePreview(CropShaderPayload payload);
+    void SetSourcePreviewComplete(std::uint64_t revision) noexcept;
+    void ClearSourcePreview(std::uint64_t revision) noexcept;
+
     std::shared_ptr<RenderEffectBinding> BuildEffectBinding(
         const RenderEffectTarget& target,
         RenderBindingUse bindingUse) override;
