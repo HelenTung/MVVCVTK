@@ -1,5 +1,6 @@
 #include "App/Services/FeatureViewService.h"
 #include "Host/Internal/HostFrameRuntime.h"
+#include "Host/Internal/HostRulerCodec.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Data/DataPayloads.h"
 #include <vtkMatrix3x3.h>
@@ -653,6 +654,28 @@ void HostFrameRuntime::SetFrameCommit(
     m_frameStage.reset();
 }
 
+void HostFrameRuntime::SetRulerState(const std::size_t index) noexcept
+{
+    if (index >= m_sceneStates.size() || index >= m_views.size()
+        || !m_sceneStates[index].presentation || !m_views[index].app.view) return;
+    auto& presentation = *m_sceneStates[index].presentation;
+    // 场景值在提交时冻结，但标尺只有真正 draw 后才有尺度；这里只补齐该绘制结果，
+    // 不重新采集场景图、不改变 presentationRevision，也不让查询产生副作用。
+    try {
+        const auto state = m_views[index].app.view->GetViewState();
+        auto ruler = HostRulerCodec::GetState(state.rulerState);
+        if (ruler.dataRevision == presentation.dataRevision
+            && ruler.bindingRevision == presentation.bindingRevision) {
+            presentation.rulerState = std::move(ruler);
+            return;
+        }
+    } catch (...) {}
+    presentation.rulerState = {};
+    presentation.rulerState.status = HostRulerStatus::Pending;
+    presentation.rulerState.dataRevision = presentation.dataRevision;
+    presentation.rulerState.bindingRevision = presentation.bindingRevision;
+}
+
 bool HostFrameRuntime::SendFrameRender(
     const std::uint64_t epoch)
 {
@@ -671,6 +694,7 @@ bool HostFrameRuntime::SendFrameRender(
         if (!view.SendRender(epoch)) continue;
         if (index < m_sceneStates.size()) {
             m_sceneStates[index].renderedEpoch = epoch;
+            SetRulerState(index);
         }
     }
 
@@ -760,6 +784,7 @@ HostRenderResult HostFrameRuntime::SendFrameRender(
                 view.pendingRenderEpoch = 0;
                 view.renderedEpoch = epoch;
                 m_sceneStates[index].renderedEpoch = epoch;
+                SetRulerState(index);
                 if (view.interaction.update) view.interaction.update->SetRenderComplete(
                     std::max<std::uint64_t>(1, output.durationUs));
             }

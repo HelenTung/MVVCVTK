@@ -203,6 +203,8 @@ void TestRender() {
         Check(ruler.GetState().status==RulerStatus::Hidden && ruler.GetState().lengthMm==0,"visibility clears values");
         ruler.ClearInput();
         Check(ruler.GetState().status==RulerStatus::NoData,"cleared input immediate");
+        window->Render();
+        Check(ruler.GetState().status==RulerStatus::NoData,"empty draw preserves no-data reason");
         ruler.DetachRenderer(); ruler.AttachRenderer(view);
         Check(view->GetViewProps()->GetNumberOfItems()==propsBefore+1,"rebind does not grow props");
     }
@@ -251,6 +253,14 @@ void TestHost() {
     HostViewTarget target; target.viewId="primary";
     auto state=session.GetRenderViewState(target);
     if(!Check(state && state->rulerState.status==HostRulerStatus::Visible,"Host physical ruler drawn")) {session.Stop();return;}
+    auto scene=session.GetSceneViewState(target);
+    Check(scene && scene->presentation && scene->presentation->rulerState.status==HostRulerStatus::Visible
+        && scene->presentation->rulerState.dataRevision==state->rulerState.dataRevision,
+        "completed scene snapshot includes drawn ruler result");
+    const auto snapshot=session.GetStateSnapshot();
+    Check(snapshot && !snapshot->scenes.empty() && snapshot->scenes[0].presentation
+        && snapshot->scenes[0].presentation->rulerState.status==HostRulerStatus::Visible,
+        "session snapshot includes drawn ruler result without a second update");
     auto descriptor=session.GetImageDescriptor();
     Check(descriptor && descriptor->dataRevision==state->rulerState.dataRevision,"ruler committed input identity");
     const auto originalRevision=state->rulerState.dataRevision;
@@ -277,6 +287,10 @@ void TestHost() {
     session.SendRender({{"primary","slice"}});
     state=session.GetRenderViewState(target);
     Check(state->rulerState.dataRevision==state->dataRevision,"A/B switch same draw identity");
+    scene=session.GetSceneViewState(target);
+    Check(scene && scene->presentation && scene->presentation->rulerState.status==HostRulerStatus::Visible
+        && scene->presentation->rulerState.dataRevision==state->dataRevision,
+        "A/B scene snapshot refreshes only after matching draw");
     HostSessionSetRequest calibration;calibration.spacing=std::array<double,3>{0.2,0.3,0.4};
     SendRequest(session,std::move(calibration));
     for(int i=0;i<10;++i)session.SendUpdates();

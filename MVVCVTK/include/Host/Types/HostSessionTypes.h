@@ -83,7 +83,8 @@ struct HostRenderViewConfig {
 };
 
 // 上位机读取单视图当前状态的值快照；所有容器均为独立副本，不暴露 VizService/SharedState。
-// 最近一次 draw 的标尺计算结果；Visible 不替代 Session 的 renderedEpoch 完成门。
+// 单视图查询读取最近一次 draw 结果；Scene 快照在 Session 完成绘制后冻结该值。
+// 外部直接 VTK 截图的即时结果通过 GetRenderViewState 读取；Visible 不替代 renderedEpoch。
 // 3D 平行视图仅表示 primary 数据的视平面水平尺度；透视和斜视切片隐藏。
 struct HostRulerState final {
     HostRulerStatus status = HostRulerStatus::NoData;

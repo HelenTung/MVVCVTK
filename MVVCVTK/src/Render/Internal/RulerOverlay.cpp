@@ -68,8 +68,8 @@ public:
         state = {};
         state.dataRevision = input.dataRevision;
         state.bindingRevision = input.bindingRevision;
-        if (!input.isVisible) { state.status = RulerStatus::Hidden; return 0; }
         if (!input.hasData) return 0;
+        if (!input.isVisible) { state.status = RulerStatus::Hidden; return 0; }
         if (!RulerMetrics::GetGeometryValid(input.geometry)) {
             state.status = RulerStatus::InvalidGeometry; return 0;
         }
