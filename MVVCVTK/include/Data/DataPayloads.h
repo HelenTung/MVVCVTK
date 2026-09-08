@@ -58,6 +58,8 @@ inline DataBytes GetDataBytesSnapshot(const DataBytes& values)
         : DataBytes{};
 }
 
+// SDK 统一空间长度为 mm，direction 无量纲；origin 对应连续索引 0，非 extent 起点。
+// 无已确认长度单位的数据不能作为物理几何发布；输入方须先换算 spacing/origin。
 struct GridGeometry3D final {
     std::array<int, 6> extent = { 0, -1, 0, -1, 0, -1 };
     std::array<int, 3> dimensions = { 0, 0, 0 };

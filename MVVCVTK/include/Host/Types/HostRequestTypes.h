@@ -125,12 +125,13 @@ struct HostViewSetRequest final : HostRequest {
     std::optional<HostWindowLevelParams> windowLevel;
     std::optional<HostVolumeQuality> volumeQuality;
     std::optional<HostVisibilityParams> visibility;
+    std::optional<HostRulerParams> ruler; // 缺省保留配置；非法字段使整个请求失败。
     std::optional<bool> isAxesVisible; // 目标 context 的世界方向轴 marker。
 };
 
 // 数据物理元信息与 world cursor 是 Session 真源；命令不接收 targetView，避免伪装成单 View 写入。
 struct HostSessionSetRequest final : HostRequest {
-    std::optional<std::array<double, 3>> spacing;
+    std::optional<std::array<double, 3>> spacing; // 数据几何校准，单位 mm；不用于标尺显示单位转换。
     std::optional<HostCursorParams> cursor;
 };
 

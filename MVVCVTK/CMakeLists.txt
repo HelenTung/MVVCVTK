@@ -394,6 +394,11 @@ set_property(
 )
 
 set(MVVCVTK_HOST_SOURCES
+    include/Host/Internal/HostRulerCodec.h
+    include/Render/Internal/RulerMetrics.h
+    include/Render/Internal/RulerOverlay.h
+    src/Render/Internal/RulerMetrics.cpp
+    src/Render/Internal/RulerOverlay.cpp
     include/Host/Internal/HostRenderViewRuntime.h
     src/Host/HostRenderViewRuntime.cpp
     include/Host/Internal/HostFrameRuntime.h

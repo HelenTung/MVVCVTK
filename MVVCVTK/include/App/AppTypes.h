@@ -121,7 +121,7 @@ inline UpdateFlags& operator|=(UpdateFlags& a, UpdateFlags b) {
 namespace VisFlags {
     constexpr uint32_t Planes3D = 1 << 0;   // 3D 彩色切平面
     constexpr uint32_t Crosshair = 1 << 1;  // 2D 十字线
-    constexpr uint32_t Ruler = 1 << 2;      // 3D 标尺
+    constexpr uint32_t Ruler = 1 << 2;      // 单 View 物理比例尺
 }
 
 // --- 渲染参数结构体（Strategy 的唯一输入，不含 VTK 指针）---

@@ -83,6 +83,18 @@ struct HostRenderViewConfig {
 };
 
 // 上位机读取单视图当前状态的值快照；所有容器均为独立副本，不暴露 VizService/SharedState。
+// 单视图查询读取最近一次 draw 结果；Scene 快照在 Session 完成绘制后冻结该值。
+// 外部直接 VTK 截图的即时结果通过 GetRenderViewState 读取；Visible 不替代 renderedEpoch。
+// 3D 平行视图仅表示 primary 数据的视平面水平尺度；透视和斜视切片隐藏。
+struct HostRulerState final {
+    HostRulerStatus status = HostRulerStatus::NoData;
+    double lengthMm = 0.0;
+    double lengthPixels = 0.0;
+    std::string label;
+    DataRevisionRef dataRevision;
+    DataBindingRevision bindingRevision = 0;
+};
+
 struct HostRenderViewState final {
     std::string id;
     HostRenderViewRole role = HostRenderViewRole::Auxiliary;
@@ -100,6 +112,8 @@ struct HostRenderViewState final {
     std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };
     uint32_t visibilityMask = 0;
     bool isAxesVisible = false;
+    HostRulerParams ruler;
+    HostRulerState rulerState;
     // View 当前渲染输入的确定修订与 primary Binding 时钟。
     DataRevisionRef dataRevision;
     DataBindingRevision bindingRevision = 0;

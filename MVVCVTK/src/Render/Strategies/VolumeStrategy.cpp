@@ -370,14 +370,12 @@ VolumeStrategy::VolumeStrategy(
     }
     m_lodController = std::make_unique<VolumeLodController>();
     m_volume = vtkSmartPointer<vtkVolume>::New();
-    m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
     m_mapper->SetOwner(this);
     // 体渲染的材质、gradient opacity 与前向透明度曲线都以 Composite 合成为契约；
     // 显式固定默认值，避免 VTK 默认策略变化时静默切换显示语义。
     m_mapper->SetBlendModeToComposite();
     m_volume->SetPickable(false); // 体渲染不可拾取
-    m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
     m_mapper->SetAutoAdjustSampleDistances(false);
     m_mapper->SetImageSampleDistance(1.0);
     m_mapper->SetMinimumImageSampleDistance(1.0);
@@ -394,7 +392,6 @@ VolumeStrategy::VolumeStrategy(
     m_volume->SetProperty(volumeProperty);
 
     AttachProp(m_volume);
-    AttachProp(m_cubeAxes);
 }
 
 VolumeStrategy::~VolumeStrategy()
@@ -525,8 +522,7 @@ bool VolumeStrategy::SetVolumeInput(
         return false;
     }
     image->GetCenter(m_dataCenter);
-    // 坐标轴始终反映原始输入的物理空间，不跟随 LOD dimensions 缩放。
-    m_cubeAxes->SetBounds(image->GetBounds());
+
     return true;
 }
 
@@ -1646,7 +1642,6 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     if (oldContext != nextContext) m_isGpuAdmissionPending = true;
     BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
-    m_cubeAxes->SetCamera(ren ? ren->GetActiveCamera() : nullptr);
 }
 
 void VolumeStrategy::DetachRenderer(
@@ -1956,11 +1951,6 @@ bool VolumeStrategy::SetVisualState(
         Set3DPropsTransform(params.modelMatrix);
     }
 
-    if (((flags & UpdateFlags::Visibility) != UpdateFlags::None)) {
-        if (m_cubeAxes)
-            m_cubeAxes->SetVisibility(
-                (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
-    }
     return true;
 }
 

@@ -3,7 +3,6 @@
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 #include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
-#include <vtkCubeAxesActor.h>
 #include <vtkRenderer.h>
 #include <vtkType.h>
 
@@ -74,7 +73,6 @@ private:
     unsigned int GetCpuThreadCount() const noexcept;
     // 等值面主 prop 与坐标轴 prop 均由策略强持有，并登记到基类 m_managedProps 统一挂载。
     vtkSmartPointer<vtkActor> m_actor;
-    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     // actor 使用唯一 mapper；质量切换只事务替换 mapper 背后的完整候选管线。
     vtkSmartPointer<Mapper> m_mapper;
     std::unique_ptr<IsoLodController> m_lodController;

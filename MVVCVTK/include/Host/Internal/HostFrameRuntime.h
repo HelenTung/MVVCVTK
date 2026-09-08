@@ -39,6 +39,7 @@ public:
     void ClearFrameStage() noexcept;
 private:
     class RenderObserver;
+    void SetRulerState(std::size_t index) noexcept;
     bool m_isHostDriven = false;
     // 同线程 callback 可重入 Stop；阶段执行期间资源拓扑必须保留。
     class PhaseGuard final {
