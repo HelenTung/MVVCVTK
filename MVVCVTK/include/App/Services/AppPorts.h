@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/AppTypes.h"
+#include "Render/Internal/RulerMetrics.h"
 #include "App/Services/DataCommitTypes.h"
 #include "Host/TrustedDataPort.h"
 #include "Data/VolumeTypes.h"
@@ -84,6 +85,7 @@ struct AppViewUpdate final {
     std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
     std::optional<bool> isDenoiseOn;
     std::optional<AppVisibilityUpdate> visibility;
+    std::optional<RulerParams> ruler;
 };
 
 struct AppViewState final {
@@ -105,6 +107,8 @@ struct AppViewState final {
     std::array<double, 3> cursorWorld{};
     AppCursorAxis cursorAxis = AppCursorAxis::Free;
     std::uint32_t visibilityMask = 0;
+    RulerParams ruler;
+    RulerState rulerState;
     // 当前 View 已提交 Strategy 使用的数据版本；允许 Host 诊断发布顺序，不暴露 Strategy 对象。
     DataRevisionRef dataRevision;
     DataBindingRevision bindingRevision = 0;

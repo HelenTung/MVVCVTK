@@ -1,6 +1,7 @@
 #include "App/Services/FeatureViewService.h"
 #include "Host/Internal/HostRenderViewRuntime.h"
 #include "Host/Internal/HostTransferCodec.h"
+#include "Host/Internal/HostRulerCodec.h"
 #include "Interaction/AbstractViewContext.h"
 #include <algorithm>
 #include <chrono>
@@ -89,6 +90,8 @@ HostRenderViewState HostRenderViewRuntime::BuildViewState(
     state.isInteracting = appState.isInteracting;
     state.cursorWorld = appState.cursorWorld;
     state.visibilityMask = appState.visibilityMask;
+    state.ruler = HostRulerCodec::GetParams(appState.ruler);
+    state.rulerState = HostRulerCodec::GetState(appState.rulerState);
     state.dataRevision = appState.dataRevision;
     state.bindingRevision = appState.bindingRevision;
     state.isAxesVisible = context

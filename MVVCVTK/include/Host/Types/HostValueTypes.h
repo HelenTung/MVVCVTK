@@ -33,7 +33,7 @@ struct HostVolumeTransferFunction final {
 struct HostVolumeGeometry {
     std::array<int, 3> dimensions{ 0, 0, 0 }; // 体素数，顺序固定为 X/Y/Z。
     std::array<float, 3> spacing{};            // 相邻体素的物理间距，单位 mm。
-    std::array<float, 3> origin{};             // 输入 ITK/LPS 体数据的物理原点。
+    std::array<float, 3> origin{};             // 输入 ITK/LPS 体数据的物理原点，单位 mm；origin 对应索引 0。
     // 输入 ITK/LPS direction，行主序 3x3；Host 在加载边界一次转换为内部 RAS。
     std::array<double, 9> direction = {
         1.0, 0.0, 0.0,
@@ -95,6 +95,23 @@ struct HostWindowLevelParams {
 struct HostCursorParams {
     std::array<double, 3> world{}; // VTK world 坐标；axis=-1 时三轴全部写入。
     int axis = -1; // -1 为自由点；0/1/2 保持对应轴的当前联动位置。
+};
+
+enum class HostRulerUnit { Auto, Millimeter, Micrometer };
+enum class HostRulerPosition { BottomLeft, BottomRight, TopLeft, TopRight };
+enum class HostRulerStatus {
+    Pending, Visible, Hidden, NoData, InvalidGeometry,
+    InvalidTransform, UnsupportedProjection, ViewportTooSmall, InvalidScale
+};
+
+// 完整替换的单 View 显示参数。输入几何始终是 mm，Micrometer 只转换标签。
+// 可见性仍只使用 HostVisibilityParams::isRulerVisible。
+struct HostRulerParams final {
+    HostRulerUnit unit = HostRulerUnit::Auto;
+    HostRulerPosition position = HostRulerPosition::BottomRight;
+    double targetPixels = 150.0; // VTK 渲染像素，范围 [40,2000]；空间不足时自动缩短。
+    int fontSize = 16; // VTK 字体大小，范围 [8,64]。
+    std::array<double, 3> color{ 1.0, 1.0, 1.0 }; // RGB，各分量 [0,1]。
 };
 
 struct HostVisibilityParams {

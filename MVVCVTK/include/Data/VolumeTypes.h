@@ -10,7 +10,7 @@
 // 所有请求与可信发布入口共用同一 metadata 约束；byteSize 为 0 仍表示待加载边界解析。
 bool GetImageMetadataValid(const ImageMetadata& metadata) noexcept;
 
-// float32 三维输入的已验证 LPS 几何与 metadata；两者作为一个值沿异步加载链传递。
+// float32 三维输入的已验证 LPS 几何与 metadata；spacing/origin 单位 mm，沿异步加载链传递。
 class VolumeLayout final {
 public:
     static std::optional<VolumeLayout> Create(

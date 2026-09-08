@@ -3309,7 +3309,8 @@ int GetViewFailCount()
         && std::abs(linkedState->spacing[2] - 1.0) < 1e-12
         && linkedState->cursorWorld
             == std::array<double, 3>{ 1.0, 2.0, 3.0 }
-        && linkedState->visibilityMask == VisFlags::Crosshair
+        // 统一物理比例尺在各 View 默认启用；设置另一 View 不改变此默认位。
+        && linkedState->visibilityMask == (VisFlags::Crosshair | VisFlags::Ruler)
         && !linkedState->isAxesVisible;
     failureCount += GetCaseResult(
         isStateReadBack,
