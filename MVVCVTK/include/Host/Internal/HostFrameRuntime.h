@@ -52,10 +52,11 @@ private:
         std::size_t& m_depth;
     };
     std::size_t m_executionDepth = 0;
+    using SceneBindings = std::map<std::pair<std::string, std::string>, std::shared_ptr<const HostFrameIntent>>;
     struct FrameStage final {
         std::uint64_t epoch = 0;
         DataGraphSnapshot graph;
-        std::map<std::pair<std::string, std::string>, HostFrameIntent> bindings;
+        std::shared_ptr<const SceneBindings> bindings;
         std::vector<HostSceneViewState> sceneStates;
         std::vector<std::size_t> renderOrder;
         std::vector<bool> renderNeeded;
@@ -79,7 +80,7 @@ private:
     std::optional<FrameStage> m_frameStage;
     std::shared_ptr<const TrustedDataReadPort> m_dataRead;
     DataGraphSnapshot m_sceneGraph;
-    std::map<std::pair<std::string, std::string>, HostFrameIntent> m_sceneBindings;
+    std::shared_ptr<const SceneBindings> m_sceneBindings;
     std::vector<HostSceneViewState> m_sceneStates;
     std::vector<std::size_t> m_renderOrder;
     std::uint64_t m_sessionGeneration = 0;

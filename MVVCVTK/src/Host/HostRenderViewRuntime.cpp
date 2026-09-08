@@ -113,8 +113,52 @@ HostCameraState HostRenderViewRuntime::GetHostCamera(
     return target;
 }
 
+bool HostRenderViewRuntime::GetPresentationEqual(
+    const AppViewState& appState, const HostRenderViewState& previous)
+{
+    static_assert(static_cast<int>(VolumeQuality::Auto) == static_cast<int>(HostVolumeQuality::Auto)
+        && static_cast<int>(VolumeQuality::Low) == static_cast<int>(HostVolumeQuality::Low)
+        && static_cast<int>(VolumeQuality::High) == static_cast<int>(HostVolumeQuality::High)
+        && static_cast<int>(VolumeQuality::XHigh) == static_cast<int>(HostVolumeQuality::XHigh)
+        && static_cast<int>(VolumeQuality::Ultra) == static_cast<int>(HostVolumeQuality::Ultra));
+    const auto mode = GetHostViewMode(appState.mode);
+    const auto& material = appState.material;
+    const auto& transfer = appState.volumeTransferFunction;
+    const auto& oldTransfer = previous.volumeTransferFunction;
+    return mode && *mode == previous.viewMode
+        && material.ambient == previous.material.ambient
+        && material.diffuse == previous.material.diffuse
+        && material.specular == previous.material.specular
+        && material.specularPower == previous.material.specularPower
+        && material.opacity == previous.material.opacity
+        && material.isShadeOn == previous.material.isShadeOn
+        && appState.isoThreshold == previous.isoThreshold
+        && appState.background.r == previous.background.r
+        && appState.background.g == previous.background.g
+        && appState.background.b == previous.background.b
+        && appState.spacing == previous.spacing
+        && appState.windowLevel.windowWidth == previous.windowLevel.windowWidth
+        && appState.windowLevel.windowCenter == previous.windowLevel.windowCenter
+        && appState.scalarRange == previous.scalarRange
+        && static_cast<int>(appState.volumeQuality) == static_cast<int>(previous.volumeQuality)
+        && appState.isFeatureActive == previous.isFeatureActive
+        && appState.isInteracting == previous.isInteracting
+        && appState.cursorWorld == previous.cursorWorld
+        && appState.visibilityMask == previous.visibilityMask
+        && appState.dataRevision == previous.dataRevision
+        && appState.bindingRevision == previous.bindingRevision
+        && std::equal(transfer.colorNodes.begin(), transfer.colorNodes.end(),
+            oldTransfer.colorNodes.begin(), oldTransfer.colorNodes.end(), [](const auto& a, const auto& b) {
+                return a.scalar == b.scalar && a.r == b.r && a.g == b.g && a.b == b.b;
+            })
+        && std::equal(transfer.opacityNodes.begin(), transfer.opacityNodes.end(),
+            oldTransfer.opacityNodes.begin(), oldTransfer.opacityNodes.end(), [](const auto& a, const auto& b) {
+                return a.scalar == b.scalar && a.opacity == b.opacity;
+            });
+}
+
 HostSceneViewState HostRenderViewRuntime::BuildSceneViewState(
-    std::vector<std::string> featureIds) const
+    std::vector<std::string> featureIds, const HostSceneViewState* previous) const
 {
     HostSceneViewState state;
     state.id = config.id;
@@ -125,7 +169,14 @@ HostSceneViewState HostRenderViewRuntime::BuildSceneViewState(
     if (!isAvailable || !app.view) return state;
 
     const auto appState = app.view->GetViewState();
-    state.presentation = BuildViewState(appState);
+    if (previous && previous->id == config.id && previous->role == config.role
+        && previous->isAvailable && previous->presentation
+        && previous->presentationRevision == appState.revision
+        && GetPresentationEqual(appState, *previous->presentation)) {
+        state.presentation = previous->presentation;
+        state.presentation->isAxesVisible = context && context->GetOrientationAxesVisible();
+    }
+    else state.presentation = BuildViewState(appState);
     state.presentationRevision = appState.revision;
     if (context) {
         const auto camera = context->GetCameraState();

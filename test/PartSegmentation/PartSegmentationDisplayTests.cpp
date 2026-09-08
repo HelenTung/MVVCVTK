@@ -7,6 +7,9 @@
 #include "Render/Internal/PartSurfaceProductBuilder.h"
 
 #include <vtkActor.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
+#include <stdexcept>
 #include <vtkImageData.h>
 #include <vtkImageProperty.h>
 #include <vtkImageResliceMapper.h>
@@ -31,6 +34,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -514,6 +518,47 @@ int GetPartDisplayFailCount()
             && hiddenColor[3] == 0.0,
         "Concrete aggregate overlay consumes the explicit state table")
         ? 0 : 1;
+    if (lut) {
+        const auto originalTime = lut->GetMTime();
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates)
+            && lut->GetMTime() == originalTime, "Unchanged LUT does not mark VTK data modified") ? 0 : 1;
+        auto changed = *firstStates;
+        changed.statesByLabel[1].color = {0.2, 0.4, 0.6, 0.8};
+        const auto oldHidden = std::array<double, 4>{hiddenColor[0], hiddenColor[1], hiddenColor[2], hiddenColor[3]};
+        const bool isChanged = lutSlice->SetPartStates(changed);
+        double actual[4]{}, stillHidden[4]{};
+        lut->GetTableValue(1, actual);
+        lut->GetTableValue(2, stillHidden);
+        failureCount += GetCaseResult(isChanged && lut->GetMTime() > originalTime
+            && std::abs(actual[0] - 0.2) <= 1.0 / 255.0
+            && std::abs(actual[3] - 0.8 * 0.18) <= 1.0 / 255.0
+            && std::equal(oldHidden.begin(), oldHidden.end(), stillHidden),
+            "One changed label preserves unrelated LUT entries") ? 0 : 1;
+        auto invalid = changed;
+        invalid.statesByLabel[2].color[0] = std::numeric_limits<double>::quiet_NaN();
+        const auto changedTime = lut->GetMTime();
+        failureCount += GetCaseResult(!lutSlice->SetPartStates(invalid)
+            && lut->GetMTime() == changedTime, "Invalid LUT is rejected before any VTK mutation") ? 0 : 1;
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates),
+            "Complete previous table restores an incrementally updated LUT") ? 0 : 1;
+        vtkNew<vtkCallbackCommand> rejectWrite;
+        rejectWrite->SetCallback([](vtkObject*, unsigned long, void*, void*) {
+            throw std::runtime_error("Injected LUT write failure");
+        });
+        const auto observerTag = lut->AddObserver(vtkCommand::ModifiedEvent, rejectWrite);
+        const bool isWriteRejected = !lutSlice->SetPartStates(changed);
+        lut->RemoveObserver(observerTag);
+        const bool isRestored = lutSlice->SetPartStates(*firstStates);
+        double restoredColor[4]{};
+        lut->GetTableValue(1, restoredColor);
+        failureCount += GetCaseResult(isWriteRejected && isRestored
+            && std::abs(restoredColor[0] - firstStates->statesByLabel[1].color[0]) <= 1.0 / 255.0
+            && std::abs(restoredColor[3] - firstStates->statesByLabel[1].color[3] * 0.18) <= 1.0 / 255.0,
+            "Partial VTK write failure invalidates cache so complete rollback repairs the LUT") ? 0 : 1;
+        const auto restoredTime = lut->GetMTime();
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates)
+            && lut->GetMTime() == restoredTime, "Restored LUT cache describes the last successful table") ? 0 : 1;
+    }
     double idleColor[4]{}, selectedColor[4]{};
     if (lut) lut->GetTableValue(1, idleColor);
     const bool didSelectSlice = selectedStates && lutSlice->SetPartStates(*selectedStates);

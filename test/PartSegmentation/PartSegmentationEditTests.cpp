@@ -1,6 +1,7 @@
 // 测试用途：验证涂绘、擦除、填充、生长、孤岛、拆分、合并及保护范围和掩码约束。
 #include "PartSegmentationTestCases.h"
 #include "Algorithms/PartLabelEditor.h"
+#include "Model/LabelMapBuilder.h"
 #include "Data/DataGraphStore.h"
 #include "Geometry/RoiEvaluator.h"
 #include <cstring>
@@ -334,6 +335,95 @@ int GetPartEditFailCount()
         && std::abs(physical.catalog->partsByLabel[1].metrics.physicalVolumeMM3 - 72.0) < 1e-9
         && physical.catalog->partsByLabel[1].metrics.centroidInputPhysical == std::array<double, 3>{ 6, 22, 12 },
         "Brush and metrics support nonzero extent, anisotropy, and rotated direction");
+
+    // 固定解析 oracle：3D 包围盒、负 extent 和不等物理边长下的 Manhattan 最短路。
+    std::vector<PartLabelId> paddedLabels(9U * 8U * 7U, 0);
+    for (int z = 2; z <= 4; ++z) for (int y = 2; y <= 5; ++y) for (int x = 3; x <= 6; ++x)
+        paddedLabels[(z * 8 + y) * 9 + x] = 1;
+    EditCase padded(paddedLabels);
+    padded.input.volume.dimensions = {9, 8, 7};
+    padded.input.volume.extent = {-4, 4, 10, 17, -9, -3};
+    padded.input.volume.spacing = {2, 3, 5};
+    padded.input.volume.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+    padded.SetGeometryMetrics();
+    PartSplitEdit boundedSplit;
+    boundedSplit.target = padded.GetPart(1);
+    boundedSplit.seeds = {{{-1, 12, -7}, 2}, {{2, 15, -5}, 1}};
+    // 全卷合法但父零件范围外的 barrier 不能污染局部索引。
+    boundedSplit.barriers = {{{-4, 10, -9}, 0}};
+    padded.input.request.operation = boundedSplit;
+    auto bounded = padded.Build();
+    bool isOracleEqual = bounded.labels != nullptr;
+    for (int z = 0; z < 7 && isOracleEqual; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 9; ++x) {
+        const auto index = static_cast<std::size_t>((z * 8 + y) * 9 + x);
+        const auto d2 = 2 * std::abs(x - 3) + 3 * std::abs(y - 2) + 5 * std::abs(z - 2);
+        const auto d1 = 2 * std::abs(x - 6) + 3 * std::abs(y - 5) + 5 * std::abs(z - 4);
+        const PartLabelId expected = paddedLabels[index] == 0 ? 0U : (d1 <= d2 ? 1U : 2U);
+        isOracleEqual = isOracleEqual && (*bounded.labels)[index] == expected;
+    }
+    check(isOracleEqual, "Bounded split matches the independent anisotropic 3D distance oracle");
+    const auto requestBytes = GetPartEditBytes(padded.input.request);
+    const std::size_t expectedBytes = 4U * paddedLabels.size() + 30U * 4U * 4U * 3U
+        + (4096U * 2U + 1U) * 2048U + (requestBytes ? *requestBytes * 3U : 0U);
+    check(bounded.requiredBytes == expectedBytes, "Split capacity follows 4N+30R without a full-grid editable buffer");
+    padded.input.maxWorkingBytes = bounded.requiredBytes;
+    check(padded.Build().labels != nullptr, "Exact local workspace budget is sufficient");
+    --padded.input.maxWorkingBytes;
+    const auto underBudget = padded.Build();
+    check(underBudget.failureReason == PartFailureReason::BudgetExceeded && !underBudget.labels
+        && *padded.input.previous.labels == paddedLabels, "One byte below local workspace rejects before split allocation");
+    padded.input.maxWorkingBytes = 128U * 1024U * 1024U;
+    std::reverse(boundedSplit.seeds.begin(), boundedSplit.seeds.end());
+    padded.input.request.operation = boundedSplit;
+    const auto reordered = padded.Build();
+    check(reordered.labels && bounded.labels && *reordered.labels == *bounded.labels,
+        "Local heap preserves target and index tie ordering under seed permutation");
+    boundedSplit.barriers.front().axis = 3;
+    padded.input.request.operation = boundedSplit;
+    check(padded.Build().failureReason == PartFailureReason::InvalidEdit,
+        "Out-of-range barrier axis is rejected even outside the parent");
+    if (bounded.labels && bounded.catalog) {
+        const auto expectedMetrics = ClassicalPartSegmenter::BuildLabelMetrics(
+            padded.input.volume, *bounded.labels, 2);
+        bool areMetricsEqual = expectedMetrics.has_value();
+        for (std::size_t label = 1; label <= 2 && areMetricsEqual; ++label) {
+            const auto& a = (*expectedMetrics)[label];
+            const auto& b = bounded.catalog->partsByLabel[label].metrics;
+            areMetricsEqual = a.voxelCount == b.voxelCount && a.voxelExtent == b.voxelExtent
+                && a.physicalVolumeMM3 == b.physicalVolumeMM3
+                && a.centroidInputPhysical == b.centroidInputPhysical
+                && a.inputPhysicalBounds == b.inputPhysicalBounds;
+        }
+        check(areMetricsEqual, "Bounded catalog updates preserve independently scanned metrics exactly");
+        check(bounded.labelPayload && bounded.labelPayload->GetLabels() == bounded.labels,
+            "Edited payload and result share the same frozen owner");
+    }
+    EditCase noChange({1, 1, 0});
+    noChange.input.request.operation = PartFillEdit{noChange.GetPart(1), {0, 0, 0}};
+    check(noChange.Build().failureReason == PartFailureReason::NoChange,
+        "Writing an unchanged region does not publish a new catalog");
+
+    GridGeometry3D ownedGrid;
+    ownedGrid.dimensions = {4, 1, 1};
+    ownedGrid.extent = {0, 3, 0, 0, 0, 0};
+    auto writable = std::make_shared<std::vector<std::uint32_t>>(std::initializer_list<std::uint32_t>{0, 4, 2, 1});
+    LabelMap3DPayload defensive(ownedGrid, LabelMapValues{writable});
+    (*writable)[1] = 99;
+    check((*defensive.GetLabels())[1] == 4 && defensive.GetLabels()->data() != writable->data(),
+        "External shared mutable labels retain defensive copy isolation");
+    auto owned = std::make_unique<std::vector<std::uint32_t>>(std::initializer_list<std::uint32_t>{0, 4, 2, 1});
+    const auto* ownedAddress = owned->data();
+    auto frozen = LabelMapBuilder::Build(ownedGrid, std::move(owned));
+    auto snapshot = frozen ? std::dynamic_pointer_cast<const LabelMap3DPayload>(frozen->CreateSnapshot()) : nullptr;
+    check(!owned && frozen && frozen->GetLabels()->data() == ownedAddress
+        && frozen->GetScalarRange() == std::array<double, 2>{0, 4}
+        && snapshot && snapshot->GetLabels() == frozen->GetLabels(),
+        "Exclusive freezing consumes the writable owner without copying and snapshots share storage");
+    frozen.reset();
+    check(snapshot && (*snapshot->GetLabels())[1] == 4,
+        "Frozen labels remain alive after the producer payload is released");
+    check(!LabelMapBuilder::Build(ownedGrid, std::make_unique<std::vector<std::uint32_t>>(4, 1), [] { return true; }),
+        "Cancelled freeze does not publish partial labels");
     // 独立全网格参考用例：投影端点和体素后求线段距离，不使用候选包围范围。
     // 重点检出局部化遗漏：斜切片、非零extent、各向异性、反射/旋转direction和离面笔迹。
     for (int variant = 0; variant < 4; ++variant) {

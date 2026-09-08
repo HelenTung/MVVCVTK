@@ -37,6 +37,7 @@ struct PartEditBuildResult final {
     std::shared_ptr<const std::vector<PartLabelId>> labels;
     std::shared_ptr<const PartCatalog> catalog;
     PartEditProfile profile;
+    std::shared_ptr<const LabelMap3DPayload> labelPayload;
 };
 
 class PartLabelEditor final {

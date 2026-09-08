@@ -359,6 +359,9 @@ public:
     }
 
 private:
+    // 仅仓内候选构建器可消耗独占存储；公开输入仍执行防御复制。
+    friend class LabelMapBuilder;
+
     GridGeometry3D m_geometry;
     LabelMapValues m_labels;
     std::vector<LabelDefinition> m_definitions;
