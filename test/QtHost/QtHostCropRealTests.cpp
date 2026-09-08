@@ -6,6 +6,9 @@
 #include "Data/DataPayloads.h"
 
 #include <vtkCommand.h>
+#include <vtkVolume.h>
+#include <vtkPropCollection.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
@@ -107,7 +110,19 @@ public:
     bool Wait(const std::function<bool()>& ready){const auto limit=Clock::now()+std::chrono::minutes(10);while(!ready()){if(Clock::now()>limit)return false;Tick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}return true;}
     bool Stop(){const auto limit=Clock::now()+std::chrono::seconds(30);do{if(session.Stop())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<limit);return false;}
     CropHostTarget Target() const {CropHostTarget target;target.inputBinding=std::string(primaryVolumeBinding);target.referenceView.viewId="real-volume";target.targetViews.viewIds={"real-volume","real-slice"};return target;}
-    void Save(const std::filesystem::path& path){const auto* view=session.GetRenderViewEndpoint("real-volume");view->renderWindow->Render();view->renderWindow->WaitForCompletion();vtkNew<vtkWindowToImageFilter> pixels;pixels->SetInput(view->renderWindow);pixels->ReadFrontBufferOff();pixels->ShouldRerenderOff();vtkNew<vtkPNGWriter> writer;writer->SetFileName(path.string().c_str());writer->SetInputConnection(pixels->GetOutputPort());writer->Write();Require(writer->GetErrorCode()==0,"real PNG output");metrics.SampleGpu(view->renderWindow);}
+    void Save(const std::filesystem::path& path){const auto* view=session.GetRenderViewEndpoint("real-volume");view->renderWindow->Render();view->renderWindow->WaitForCompletion();vtkNew<vtkWindowToImageFilter> pixels;pixels->SetInput(view->renderWindow);pixels->ReadFrontBufferOff();pixels->ShouldRerenderOff();vtkNew<vtkPNGWriter> writer;writer->SetFileName(path.string().c_str());writer->SetInputConnection(pixels->GetOutputPort());writer->Write();Require(writer->GetErrorCode()==0,"real PNG output");metrics.SampleGpu(view->renderWindow);
+        HostViewTarget target;target.viewId="real-volume";
+        const auto state=session.GetRenderViewState(target);
+        std::cout<<"AUDIT RENDER "<<path.filename().string()<<" quality="<<(state?static_cast<int>(state->volumeQuality):-1);
+        auto* props=view->renderer->GetViewProps();props->InitTraversal();
+        while(auto* prop=props->GetNextProp()) {
+            auto* volume=vtkVolume::SafeDownCast(prop);if(!volume)continue;
+            auto* mapper=vtkGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper());
+            auto* input=mapper?vtkImageData::SafeDownCast(mapper->GetInput()):nullptr;
+            if(input){const auto* dims=input->GetDimensions();std::cout<<" mapper_dims="<<dims[0]<<','<<dims[1]<<','<<dims[2];}
+        }
+        std::cout<<'\n';
+    }
 };
 struct OracleResult {std::uint64_t kept=0,expected=0,mismatch=0;std::string sha;};
 OracleResult VerifyMask(DataBytes mask,std::array<int,3> dims,const std::filesystem::path& artifact){
@@ -256,7 +271,7 @@ int GetCropRealFailCount()
         report<<"  \"select_result_ms\": "<<Millis(selectAt)<<",\n";
         const auto returnAt=Clock::now();CropDocumentRequest returning;returning.documentId=document;returning.requestId=CropHostFeature::CreateRequestId();returning.expectedRevision=fixture.crop->GetHistory(document,0,1).stateRevision;const auto returned=std::make_shared<Completion<CropDocumentOutcome>>();
         Require(bool(fixture.crop->SendRequest(returning,[returned](auto result){returned->Set(std::move(result));})),"real Return admission");
-        Require(fixture.Wait([&]{return fixture.probe->data->GetDataLifetime(built.scopeId).status==DataLifetimeStatus::Releasing;}),"held mask did not enter Releasing");Require(!returned->Ready()&&!fixture.crop->GetHistory().results.empty(),"Return completed while a real full mask was held");
+        Require(fixture.Wait([&]{return returned->Ready()||fixture.probe->data->GetDataLifetime(built.scopeId).status==DataLifetimeStatus::Releasing;}),"held mask did not enter Releasing");Require(!returned->Ready()&&!fixture.crop->GetHistory().results.empty(),"Return rejected or completed while a real full mask was held");
         heldMask.reset();Require(fixture.Wait([&]{return returned->Ready();}),"real Return release timeout");Require(returned->Once()&&returned->value.status==CropEditStatus::Succeeded&&fixture.probe->data->GetDataLifetime(built.scopeId).status==DataLifetimeStatus::Released&&!fixture.probe->data->GetData(graph,built.outputRevision),"real result release/old graph revocation");
         report<<"  \"return_release_ms\": "<<Millis(returnAt)<<",\n";
         const auto cancelAt=Clock::now();build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=fixture.crop->GetHistory().stateRevision;const auto cancelled=std::make_shared<Completion<CropBuildResult>>();

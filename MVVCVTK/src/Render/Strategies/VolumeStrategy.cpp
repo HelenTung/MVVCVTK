@@ -1454,8 +1454,7 @@ bool VolumeStrategy::SetGpuInput(
 
     const void* contextIdentity = renderWindow;
     RenderGpuResourceState oldGpuState;
-    const std::uint64_t oldGpuBytes = oldLod
-        ? GetLodBlockBytes(*oldLod, oldLod->partitions) : 0;
+    std::uint64_t oldGpuBytes = 0;
     bool hasGpuLease = false;
     const auto restoreGpuLease = [&]() {
         if (!m_resources || !contextIdentity) return true;
@@ -1474,8 +1473,28 @@ bool VolumeStrategy::SetGpuInput(
             contextIdentity);
         (void)m_resources->ClearGpuReservation(
             contextIdentity, this);
-        const std::uint64_t contextBudget = blockBudget;
-        hasGpuLease = contextBudget > 0
+        const auto otherBytes = m_resources->GetGpuResourceState(
+            contextIdentity).reservedBytes;
+        // GPU mutations are serialized by the context owner. Restore the
+        // reservation that actually existed, not a CPU LOD which may never
+        // have been admitted into this newly attached context.
+        oldGpuBytes = oldGpuState.reservedBytes >= otherBytes
+            ? oldGpuState.reservedBytes - otherBytes : 0;
+        std::uint64_t contextBudget = blockBudget;
+        bool isBudgetValid = contextBudget > 0;
+        if (freeBytes.has_value()) {
+            // Driver free bytes already exclude other strategies' resident
+            // textures. blockBudget limits this upload's additional space;
+            // the coordinator budget limits total reservations in the context.
+            // Only our own old reservation was removed above. Keep all other
+            // owners charged while translating headroom to that total limit.
+            isBudgetValid = isBudgetValid && contextBudget
+                <= (std::numeric_limits<std::uint64_t>::max)() - otherBytes;
+            if (isBudgetValid) contextBudget += otherBytes;
+        }
+        // Without a driver sample the configured fallback is a total cap,
+        // not evidence of additional free memory. Do not expand it.
+        hasGpuLease = isBudgetValid
             && m_resources->SetGpuContextBudget(
                 contextIdentity, contextBudget)
             && m_resources->SetGpuReservation(
