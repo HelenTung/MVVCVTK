@@ -1546,7 +1546,7 @@ int GetCropFailCount()
         // 中央裁切穿过此 4^3 夹具的每个插值单元；不能把无效支持伪造成表面。
         std::size_t supportedCells = 0;
         if (activeCropSnapshot && activeCropSnapshot->validityMask) {
-            const auto* mask = activeCropSnapshot->validityMask;
+            auto* mask = activeCropSnapshot->validityMask.GetPointer();
             const auto* extent = mask->GetExtent();
             for (int z = extent[4]; z < extent[5]; ++z)
                 for (int y = extent[2]; y < extent[3]; ++y)
