@@ -150,6 +150,7 @@ public:
     // 仅供 Session 提交有界后台读取；调用方不能直接管理 worker 生命周期。
     std::shared_ptr<AppTaskExecutor> GetTaskExecutor() const;
     // Feature 已清理全部借用对象后，由 owner thread 失效本轮 view lease。
+    bool SetDataTasksStopping();
     bool StopLease();
 
     bool SetInitialVisibility() const;

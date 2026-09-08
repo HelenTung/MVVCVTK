@@ -122,6 +122,8 @@ class FeatureDataCommit {
 public:
     virtual ~FeatureDataCommit() noexcept = default;
     virtual void SetCommit() noexcept = 0;
+    // Receives the actual commit identity without a post-publication allocation/query.
+    virtual void SetDataCommitted(const DataCommitResult&) noexcept { SetCommit(); }
 };
 
 struct FeatureDataTransitionRequest final {

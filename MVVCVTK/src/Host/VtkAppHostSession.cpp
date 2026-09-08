@@ -925,7 +925,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             stopState = HostStopState::StopPending;
             return false;
         }
-        if (!DetachFeatures()) {
+        if (!renderViews.SetDataTasksStopping() || !DetachFeatures()) {
             stopState = HostStopState::StopPending;
             return false;
         }

@@ -226,6 +226,12 @@ void BaseVisualStrategy::AttachRenderer(
     }
 }
 
+void BaseVisualStrategy::DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer)
+{
+    if (!renderer) return;
+    for (const auto& prop:m_managedProps) renderer->RemoveViewProp(prop);
+}
+
 void BaseVisualStrategy::DetachRenderer(
     vtkSmartPointer<vtkRenderer> renderer)
 {

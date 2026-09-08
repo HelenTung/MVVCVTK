@@ -46,6 +46,11 @@ struct VtkPreparedDataView final {
     static std::shared_ptr<const VtkPreparedDataView> BuildDataView(
         std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source = {});
     static std::shared_ptr<const VtkPreparedDataView> BuildDataView(vtkPolyData* mesh);
+    // Attach a prepublication use to exclusively owned render arrays. Borrowed array memory
+    // must be retained by backingOwner, which must not own either VTK container (no cycle).
+    // Register the returned use in the output draft before publishing these objects.
+    static DataPreparedResource BuildResourceUse(vtkImageData* image, vtkPolyData* mesh,
+        std::shared_ptr<const void> backingOwner = {});
     std::shared_ptr<const IDataPayload> payload;
     VtkImageGridSnapshot image;
     VtkSurfaceMeshSnapshot mesh;

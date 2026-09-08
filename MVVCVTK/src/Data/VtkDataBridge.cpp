@@ -396,6 +396,21 @@ std::shared_ptr<const VtkPreparedDataView> VtkPreparedDataView::BuildDataView(vt
     return VtkDataBridge::BuildDataView(bridge.CreateMeshPayload(mesh));
 }
 
+DataPreparedResource VtkPreparedDataView::BuildResourceUse(
+    vtkImageData* image, vtkPolyData* mesh, std::shared_ptr<const void> backingOwner)
+{
+    if (!image && !mesh) return {};
+    struct ResourceLease final : DataResourceLease {
+        explicit ResourceLease(std::shared_ptr<const void> owner) : backing(std::move(owner)) {}
+        std::shared_ptr<const void> backing;
+    };
+    DataPreparedResource resource{std::make_shared<const ResourceLease>(std::move(backingOwner)),
+        "prepared-render-arrays", DataResourceKind::RenderObject};
+    VtkDataResourceLease::AttachImage(image, resource.lease);
+    VtkDataResourceLease::AttachMesh(mesh, resource.lease);
+    return resource;
+}
+
 std::shared_ptr<const VtkPreparedDataView> VtkDataBridge::BuildDataView(
     std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source)
 {

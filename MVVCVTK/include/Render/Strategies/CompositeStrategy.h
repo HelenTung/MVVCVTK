@@ -32,6 +32,7 @@ public:
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer) override;
     bool SetVisualState(
         const RenderParams& params,
         UpdateFlags flags) override;

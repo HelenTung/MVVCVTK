@@ -50,6 +50,8 @@ class AppTaskControlPort {
 public:
     virtual ~AppTaskControlPort() = default;
 
+    // Stop ordinary data consumers before Feature cleanup; render preparation remains available.
+    virtual bool SetDataTaskStopping() { return true; }
     virtual bool SetTaskStopping() = 0;
     virtual bool StopTasks(
         std::chrono::steady_clock::time_point deadline) = 0;

@@ -122,6 +122,7 @@ public:
     bool SendViewUpdates(const HostViewTarget& target) const;
     bool StartStandaloneView() const;
     std::shared_ptr<AppTaskExecutor> GetTaskExecutor() const;
+    bool SetDataTasksStopping();
     bool StopLease();
     bool StopRoutes();
     bool SetInitialVisibility() const;
@@ -1128,7 +1129,7 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
         active->state.commitFailure = result.failureReason;
         active->state.blockers = std::move(result.blockers);
         if (result.status != DataCommitStatus::Succeeded) return false;
-        active->request.commit->SetCommit();
+        active->request.commit->SetDataCommitted(result);
         state->SetImageDataReady(active->ready);
         return true;
     };
@@ -1775,6 +1776,15 @@ HostViewRuntimeRegistry::Impl::GetTaskExecutor() const
         ? m_taskExecutor : nullptr;
 }
 
+bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
+{
+    if (m_lease && !m_lease->GetIsOwnerThread()) return false;
+    bool stopping=true;
+    for (const auto& view:m_views)
+        stopping=view.taskControl && view.taskControl->SetDataTaskStopping() && stopping;
+    return stopping;
+}
+
 bool HostViewRuntimeRegistry::Impl::StopLease()
 {
     if (m_lease && !m_lease->GetIsOwnerThread()) return false;
@@ -2206,6 +2216,11 @@ std::shared_ptr<AppTaskExecutor>
 HostViewRuntimeRegistry::GetTaskExecutor() const
 {
     return m_impl ? m_impl->GetTaskExecutor() : nullptr;
+}
+
+bool HostViewRuntimeRegistry::SetDataTasksStopping()
+{
+    return m_impl && m_impl->SetDataTasksStopping();
 }
 
 bool HostViewRuntimeRegistry::StopLease()

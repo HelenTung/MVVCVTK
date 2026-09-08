@@ -1015,33 +1015,29 @@ HostFeatureRuntime::DetachResult HostFeatureRuntime::Impl::DetachFeature(
 bool HostFeatureRuntime::Impl::DetachFeatures()
 {
     if (m_isChanging) return false;
+    if (features.empty()) return true;
+    if (m_ports.ownerThread!=std::this_thread::get_id()) return false;
     const MutationGuard mutation(m_isChanging);
-    while (!features.empty()) {
-        auto& entry = features.back();
-        if (!entry.isHostDetached) {
-            if (!m_ports.views->SetFeatureViews(entry.id, {})) {
-                return false;
+    bool progressed=true;
+    while (!features.empty() && progressed) {
+        progressed=false;
+        // A producer may be blocked by a consumer later in this pass. Attempt every Feature;
+        // retry producers only after another cleanup actually advanced, never spin on blockers.
+        for (std::size_t index=features.size();index>0;--index) {
+            auto& entry=features[index-1];
+            if (!entry.isHostDetached) {
+                if (!m_ports.views || !m_ports.views->SetFeatureViews(entry.id,{}) || !entry.feature) continue;
+                bool detached=false;
+                try {detached=entry.feature->DetachHost();} catch (...) {}
+                if (!detached) continue;
+                entry.isHostDetached=true;entry.lifetime->Stop(true);progressed=true;
             }
-            const auto& feature = entry.feature;
-            if (!feature) return false;
-            try {
-                if (!feature->DetachHost()) {
-                    return false;
-                }
-            }
-            catch (...) {
-                return false;
-            }
-            entry.isHostDetached = true;
-            entry.lifetime->Stop(true);
+            if (!m_ports.input || !m_ports.input->DetachInput(entry.id)) continue;
+            features.erase(features.begin()+static_cast<std::ptrdiff_t>(index-1));
+            progressed=true;
         }
-        if (!m_ports.input
-            || !m_ports.input->DetachInput(entry.id)) {
-            return false;
-        }
-        features.pop_back();
     }
-    return true;
+    return features.empty();
 }
 
 HostFeatureRuntime::HostFeatureRuntime() : m_impl(std::make_unique<Impl>()) {}

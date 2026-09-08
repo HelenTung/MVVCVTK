@@ -1,4 +1,5 @@
 #include "Data/DataManager.h"
+#include "App/AppStateEvents.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
 #include "App/Tasks/AppDataExportTaskService.h"
@@ -136,6 +137,43 @@ bool GetQueuedReadProtected()
     return Check(data->SetDataRelease(source.scope).status==DataLifetimeStatus::Released,"image reader source not released");
 }
 
+bool GetConsumerStopKeepsRenderReady()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();
+    const auto source=Publish(data,true),root=Publish(data,false);
+    if(!SetPrimary(data,root))return false;
+    auto input=data->GetImageGrid(data->GetDataGraph(),source.ref);
+    auto lease=input->data->lifetime.lock()->StartResourceUse(source.ref,"stopping-reader");
+    auto executor=CreateAppTaskExecutor();
+    auto broadcaster=std::make_shared<SharedStateBroadcaster>();
+    AppServiceArgs args;args.dataManager=data;args.interactionState=std::make_shared<SharedInteractionState>(broadcaster);
+    args.eventSource=broadcaster;args.taskExecutor=executor;
+    auto ports=CreateAppPorts(std::move(args));
+    if(!ports.taskControl)return false;
+    AppTaskWork reader([input=std::move(input),lease=std::move(lease)](TaskStopToken stop) mutable {
+        auto held=std::move(input);auto use=std::move(lease);
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        while(!stop.GetIsStopped()&&std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return stop.GetIsStopped();
+    });
+    auto readDone=reader.get_future();
+    if(!Check(SendReadTask(executor,std::move(reader))==TaskAdmissionResult::Accepted,
+        "consumer stop reader admission"))return false;
+    if(!Check(ports.taskControl->SetDataTaskStopping()&&readDone.wait_for(std::chrono::seconds(3))==std::future_status::ready
+        &&readDone.get(),"consumer stop did not cancel an active/queued Reader"))return false;
+    if(!Check(Retire(data,source).status==DataCommitStatus::Succeeded
+        &&data->SetDataRelease(source.scope).status==DataLifetimeStatus::Released,
+        "stopped reader kept its source lease"))return false;
+    AppTaskWork rejected([](TaskStopToken){return true;});
+    if(!Check(SendReadTask(executor,std::move(rejected))==TaskAdmissionResult::Stopping,"consumer stop admitted new read work"))return false;
+    RenderLaneWork render([](TaskStopToken stop){return !stop.GetIsStopped();});auto rendered=render.get_future();
+    const bool renderReady=SendRenderTask(executor,std::move(render))
+        &&rendered.wait_for(std::chrono::seconds(3))==std::future_status::ready&&rendered.get();
+    const bool stopped=ports.taskControl->StopTasks(std::chrono::steady_clock::now()+std::chrono::seconds(3));
+    return Check(renderReady&&stopped,"data consumer stop disabled Root candidate rendering or prevented final stop");
+}
+
 bool GetDerivedProductsProtected()
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -191,5 +229,6 @@ bool GetResourceLifetimeTests()
     bool passed=GetQueuedExportsProtected();
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;
+    passed=GetConsumerStopKeepsRenderReady()&&passed;
     return GetDerivedProductsProtected()&&passed;
 }

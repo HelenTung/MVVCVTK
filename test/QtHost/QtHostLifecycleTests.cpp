@@ -322,9 +322,31 @@ int StartLifecycleDeathCase(
     return 16;
 }
 
+bool GetDependentFeaturesStopped()
+{
+    struct Feature final:HostFeature {
+        std::string id;bool& consumerGone;bool producer;int attempts=0;
+        Feature(std::string name,bool& gone,bool isProducer):id(std::move(name)),consumerGone(gone),producer(isProducer){}
+        std::string_view GetFeatureId() const noexcept override {return id;}
+        bool AttachHost(const HostFeatureContext&) override {return true;}
+        bool DetachHost() override {
+            ++attempts;
+            if(producer)return consumerGone;
+            consumerGone=true;return true;
+        }
+        bool OnHostTick() override {return true;}
+    };
+    bool consumerGone=false;VtkAppHostSession session(GetSessionConfig());
+    auto producer=std::make_shared<Feature>("z-producer",consumerGone,true);
+    auto consumer=std::make_shared<Feature>("a-consumer",consumerGone,false);
+    return session.BuildSession()&&session.AttachFeature(producer)&&session.AttachFeature(consumer)&&session.Stop()
+        &&consumer->attempts==1&&producer->attempts==2;
+}
+
 int GetLifecycleFailCount()
 {
-    int failureCount = 0;
+    int failureCount = GetCaseResult(GetDependentFeaturesStopped(),
+        "Session Stop closes consumers after a blocked producer and retries only after progress")?0:1;
     std::weak_ptr<IHostViewDirectory> staleDirectory;
     std::optional<HostDataRoute> retainedDataRoute;
     std::optional<HostViewRoute> retainedViewRoute;

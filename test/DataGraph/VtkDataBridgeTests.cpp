@@ -9,6 +9,7 @@
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+#include <vtkUnsignedIntArray.h>
 
 #include <array>
 #include <cstdint>
@@ -271,6 +272,35 @@ bool GetArrayLeaseValid()
         "scoped VTK payload did not release");
 }
 
+bool GetBorrowedRenderResourceReleased()
+{
+    DataGraphStore store;
+    GridGeometry3D geometry; geometry.dimensions={2,1,1}; geometry.extent={0,1,0,0,0,0};
+    auto payload=std::make_shared<const LabelMap3DPayload>(geometry,
+        LabelMapValues{std::make_shared<const std::vector<std::uint32_t>>(std::vector<std::uint32_t>{7,42})});
+    auto backing=payload->GetLabels();
+    if(!payload->GetValid()||!backing)return false;
+    std::weak_ptr<const std::vector<std::uint32_t>> probe=backing;
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(2,1,1);
+    auto array=vtkSmartPointer<vtkUnsignedIntArray>::New();
+    array->SetArray(const_cast<std::uint32_t*>(backing->data()),2,1);
+    image->GetPointData()->SetScalars(array);
+    auto resource=VtkPreparedDataView::BuildResourceUse(image,nullptr,backing);
+    const auto scope=store.CreateDataEntityId(),id=store.CreateDataEntityId();const DataRevisionRef ref{id,1};
+    DataTransaction transaction;
+    transaction.outputs.push_back({id,0,DataTypes::labelMap3D,{},payload,{},scope,{resource}});
+    auto committed=store.SetDataCommit(std::move(transaction));
+    if(committed.status!=DataCommitStatus::Succeeded)return false;
+    DataTransaction retirement;retirement.retireScopes.push_back({scope,DataLifetimeStatus::Published,{ref},true});
+    if(store.SetDataCommit(std::move(retirement)).status!=DataCommitStatus::Succeeded)return false;
+    committed={};payload.reset();backing.reset();image=nullptr;resource={};
+    if(!Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Releasing
+        &&!probe.expired()&&array->GetValue(1)==42,"borrowed bare array lost its backing allocation or release probe"))return false;
+    array=nullptr;
+    return Check(probe.expired()&&store.SetDataRelease(scope).status==DataLifetimeStatus::Released,
+        "borrowed array backing remained pinned after its last VTK owner ended");
+}
+
 bool GetPreparedResultReleased()
 {
     DataGraphStore store;
@@ -318,7 +348,7 @@ bool GetPreparedResultReleased()
 
 int main()
 {
-    return GetPreparedResultReleased() && GetArrayLeaseValid()
+    return GetBorrowedRenderResourceReleased() && GetPreparedResultReleased() && GetArrayLeaseValid()
         && GetImageRoundTripValid()
         && GetLabelRoundTripValid()
         && GetMeshRoundTripValid()

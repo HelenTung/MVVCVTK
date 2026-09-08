@@ -129,6 +129,7 @@ private:
     bool GetSourceSame() const;
     bool SetCompletedResult(const GapAnalysisResult& candidate);
     bool ClearResultBinding();
+    bool ClearResultScopes();
     bool GetResultCurrent() const;
     void SetBindingStale();
     void SetFailedResult(GapResultStatus status, std::string message);
@@ -151,6 +152,8 @@ private:
     VtkImageGridSnapshot m_requestSource;
     DataBinding m_requestResultBinding;
     DataBinding m_resultBinding;
+    std::vector<DataLifetimeRetirement> m_resultScopes;
+    bool m_isClosing=false;
     GapHostState m_state;
     FeatureOperationState m_operation;
     std::string m_requestParameters;
@@ -424,9 +427,18 @@ GapHostFeature::Impl::GetViewCandidate(
         return std::nullopt;
     }
 
-    const auto snapshot = m_data->GetPrimaryImage();
+    auto snapshot = m_data->GetPrimaryImage();
     if (!GetSnapshotValid(snapshot)) {
         return std::nullopt;
+    }
+    if (GetDataEntityIdValid(snapshot->data->lifetimeScope)) {
+        const auto lifetime=snapshot->data->lifetime.lock();
+        auto lease=lifetime?lifetime->StartResourceUse(snapshot->data->self,"gap-analysis-reader"):nullptr;
+        if (!lease) return std::nullopt;
+        auto retained=std::make_shared<std::pair<VtkImageGridSnapshot,std::shared_ptr<const DataResourceLease>>>(snapshot,std::move(lease));
+        auto input=std::make_shared<VtkImageGridView>(*snapshot);
+        input->data=DataSnapshot(retained,retained->first->data.get());
+        snapshot=std::move(input);
     }
     const auto views = m_views->GetViews(start.targetViews);
     if (views.empty()) {
@@ -533,7 +545,7 @@ bool GapHostFeature::Impl::AttachHost(
     }
 
     m_isInputAttached = true;
-    m_isAttached = true;
+    m_isAttached = true;m_isClosing=false;
     m_isSwitchDown = false;
     m_isExitDown = false;
     m_isExitPending = false;
@@ -567,26 +579,19 @@ bool GapHostFeature::Impl::DetachHost()
         }
     }
 
-    // 即使输入端口暂时拒绝移除，也必须先完成强清理；失败重试只保留 Host 控制能力和 owner thread。
+    m_isClosing=true;
     ClearComplete();
     if (m_service) {
+        m_service->StopAsync();
+        // DefX has no in-call cancellation. Retain the Feature and retry instead of blocking owner join.
+        if (m_service->GetAnalysisState()==GapAnalysisState::Running) return false;
         m_service->ClearView();
     }
-    (void)SetActiveViews({});
-    (void)ClearResultBinding();
     m_requestSource.reset();
-    m_requestResultBinding = {};
-    m_state = {};
-    m_isRequestPending = false;
-    m_views.reset();
-    m_data.reset();
-    m_isSwitchDown = false;
-    m_isExitDown = false;
-    m_isExitPending = false;
-
-    if (!isInputDetached) {
-        return false;
-    }
+    if (!SetActiveViews({}) || !ClearResultScopes()) return false;
+    m_requestResultBinding={};m_state={};m_isRequestPending=false;
+    m_isSwitchDown=false;m_isExitDown=false;m_isExitPending=false;
+    if (!isInputDetached) return false;
 
     m_isAttached = false;
     ClearBorrowed();
@@ -601,6 +606,17 @@ bool GapHostFeature::Impl::OnHostTick()
         return false;
     }
 
+    if (m_isClosing) {
+        m_service->StopAsync();
+        if (m_service->GetAnalysisState()!=GapAnalysisState::Running) {
+            m_service->ClearView();m_requestSource.reset();
+            if (SetActiveViews({}) && ClearResultScopes()) {
+                m_state={};m_requestResultBinding={};m_isRequestPending=false;
+            }
+        }
+        // Only the registry's Detach retry revokes Host ports and ends the attachment.
+        return true;
+    }
     SetBindingStale();
     if (m_service->GetDisplayTickNeeded()) {
         m_service->OnDisplayTick(nullptr);
@@ -663,6 +679,7 @@ bool GapHostFeature::Impl::SendRequest(
         return false;
     }
 
+    if (m_isClosing) return false;
     SetBindingStale();
     switch (request.action) {
     case GapHostAction::Start:
@@ -958,6 +975,17 @@ bool GapHostFeature::Impl::SetCompletedResult(
         m_requestResultBinding.target,
         resultRef });
 
+    auto scopes=m_resultScopes;
+    if (GetDataEntityIdValid(m_requestSource->data->lifetimeScope)) {
+        if (scopes.size()>=1024) {
+            SetFailedResult(GapResultStatus::Failed,"Controlled Gap result history limit reached.");return false;
+        }
+        const auto scope=m_data->CreateDataEntityId();
+        for (auto& draft:transaction.outputs) draft.lifetimeScope=scope;
+        scopes.push_back({scope,DataLifetimeStatus::Published,{labelRef,voidRef,meshRef,statisticsRef,resultRef},true});
+    }
+    auto batch=m_data->StartDataChanges();
+    if (!batch) {SetFailedResult(GapResultStatus::Failed,"Gap publication batch is unavailable.");return false;}
     const auto commit = m_data->SetDataCommit(std::move(transaction));
     if (commit.status != DataCommitStatus::Succeeded) {
         SetFailedResult(
@@ -970,6 +998,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
         return false;
     }
 
+    m_resultScopes.swap(scopes);
     m_resultBinding = commit.bindings.back();
     GapHostState state;
     state.analysisState = GapAnalysisState::Succeeded;
@@ -1010,6 +1039,34 @@ bool GapHostFeature::Impl::SetCompletedResult(
         (void)QueueComplete(callback);
     }
     return true;
+}
+
+bool GapHostFeature::Impl::ClearResultScopes()
+{
+    if (!m_data) return m_resultScopes.empty();
+    if (m_resultScopes.empty()) return ClearResultBinding();
+    auto batch=m_data->StartDataChanges();if(!batch)return false;
+    DataTransaction transaction;
+    for (const auto& scope:m_resultScopes) {
+        const auto state=m_data->GetDataLifetime(scope.scopeId);
+        if (state.status==DataLifetimeStatus::Published) transaction.retireScopes.push_back(scope);
+        else if (state.status!=DataLifetimeStatus::Releasing && state.status!=DataLifetimeStatus::Released) return false;
+    }
+    const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),gapResultBinding);
+    if (binding && binding->target
+        && ((binding->revision==m_resultBinding.revision && binding->target==m_resultBinding.target)
+            || (binding->revision==m_requestResultBinding.revision && binding->target==m_requestResultBinding.target)))
+        transaction.bindings.push_back({std::string(gapResultBinding),binding->revision,true,binding->target,{}});
+    if (!transaction.retireScopes.empty() || !transaction.bindings.empty()) {
+        const auto committed=m_data->SetDataCommit(std::move(transaction));
+        if (committed.status!=DataCommitStatus::Succeeded)return false;
+        if (!committed.bindings.empty())m_resultBinding=committed.bindings.back();
+    }
+    for (auto scope=m_resultScopes.begin();scope!=m_resultScopes.end();) {
+        if (m_data->SetDataRelease(scope->scopeId).status==DataLifetimeStatus::Released) scope=m_resultScopes.erase(scope);
+        else ++scope;
+    }
+    return m_resultScopes.empty();
 }
 
 bool GapHostFeature::Impl::ClearResultBinding()
@@ -1255,11 +1312,13 @@ bool GapHostFeature::AttachHost(
 
 bool GapHostFeature::DetachHost()
 {
+    const auto keepAlive=weak_from_this().lock();
     return !m_impl || m_impl->DetachHost();
 }
 
 bool GapHostFeature::OnHostTick()
 {
+    const auto keepAlive=weak_from_this().lock();
     return m_impl && m_impl->OnHostTick();
 }
 
@@ -1267,6 +1326,7 @@ bool GapHostFeature::SendRequest(
     GapHostRequest request,
     GapHostCallback onComplete)
 {
+    const auto keepAlive=weak_from_this().lock();
     return m_impl
         && m_impl->SendRequest(
             std::move(request),

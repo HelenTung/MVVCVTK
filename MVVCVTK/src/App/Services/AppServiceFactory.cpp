@@ -20,6 +20,7 @@
 #include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkImageData.h>
+#include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkMatrix4x4.h>
 #include <vtkProp3D.h>
 #include <vtkRenderer.h>
@@ -181,6 +182,7 @@ public:
     bool SetPrimaryData(
         const DataRevisionRef& dataRevision,
         DataBindingRevision expectedBindingRevision);
+    bool SetDataTaskStopping();
     bool SetTaskStopping();
     bool StopTasks(
         std::chrono::steady_clock::time_point deadline);
@@ -671,6 +673,13 @@ public:
         return m_renderLane.SendTask(std::move(work));
     }
 
+    bool StartDataStop()
+    {
+        const bool isLoadSet=m_loadLane.StartStop();
+        const bool isExportSet=m_exportLane.StartStop();
+        return isLoadSet&&isExportSet;
+    }
+
     bool StartStop()
     {
         const bool isLoadSet = m_loadLane.StartStop();
@@ -812,7 +821,7 @@ AppRuntime::~AppRuntime()
     }
 }
 
-bool AppRuntime::SetTaskStopping()
+bool AppRuntime::SetDataTaskStopping()
 {
     m_isAccepting = false;
     if (m_pendingLoadCommit) {
@@ -826,13 +835,19 @@ bool AppRuntime::SetTaskStopping()
         if (m_dataManager) (void)m_dataManager->ClearLoadStage();
         SetCompletion(false, std::move(pending.callback));
     }
+    return !m_taskExecutor || m_taskExecutor->StartDataStop();
+}
+
+bool AppRuntime::SetTaskStopping()
+{
+    const bool areDataTasksSet=SetDataTaskStopping();
     const bool areRenderTasksSet = !m_ownsRenderResources
         || !m_renderServices
         || !m_renderServices->resources
         || m_renderServices->resources->StartStop();
     const bool areAppTasksSet =
         !m_taskExecutor || m_taskExecutor->StartStop();
-    return areRenderTasksSet && areAppTasksSet;
+    return areDataTasksSet && areRenderTasksSet && areAppTasksSet;
 }
 
 bool AppRuntime::StopTasks(
@@ -3194,8 +3209,41 @@ DataStageStatus AppRuntime::SetDataStageReady(
                 "Candidate visual state was rejected.");
         }
         if (effect) {
-            const auto effectState =
-                stage.nextStrategy->GetRenderEffectState();
+            auto effectState = stage.nextStrategy->GetRenderEffectState();
+            if (effectState.status==RenderEffectStatus::Staged) {
+                auto window=m_renderWindow;
+                auto* generic=vtkGenericOpenGLRenderWindow::SafeDownCast(window);
+                if (!window || window->CheckInRenderStatus() || (!window->GetDoubleBuffer() && !window->GetOffScreenRendering())
+                    || (generic && !generic->GetReadyForRendering()))
+                    throw std::runtime_error("Candidate render context is unavailable.");
+                struct RenderWatch final {
+                    vtkSmartPointer<vtkRenderWindow> window;
+                    vtkSmartPointer<vtkCallbackCommand> callback;
+                    unsigned long endTag=0,errorTag=0;
+                    bool ended=false,failed=false;
+                    int swapBuffers=0;
+                    ~RenderWatch() {
+                        window->SetSwapBuffers(swapBuffers);
+                        if(endTag)window->RemoveObserver(endTag);
+                        if(errorTag)window->RemoveObserver(errorTag);
+                        if(callback)callback->SetClientData(nullptr);
+                    }
+                } watch;
+                watch.window=window;watch.swapBuffers=window->GetSwapBuffers();
+                watch.callback=vtkSmartPointer<vtkCallbackCommand>::New();
+                watch.callback->SetClientData(&watch);
+                watch.callback->SetCallback([](vtkObject*,unsigned long event,void* data,void*) {
+                    auto& value=*static_cast<RenderWatch*>(data);
+                    if(event==vtkCommand::EndEvent)value.ended=true;
+                    if(event==vtkCommand::ErrorEvent)value.failed=true;
+                });
+                watch.endTag=window->AddObserver(vtkCommand::EndEvent,watch.callback);
+                watch.errorTag=window->AddObserver(vtkCommand::ErrorEvent,watch.callback);
+                // Prepare shader resources in the back buffer; no candidate frame is presented.
+                window->SwapBuffersOff();window->Render();
+                if(!watch.ended || watch.failed) throw std::runtime_error("Candidate shader render failed.");
+                effectState=stage.nextStrategy->GetRenderEffectState();
+            }
             const bool hasNoReplay =
                 effectState.status == RenderEffectStatus::Idle;
             const bool isCommitted =
@@ -3212,7 +3260,7 @@ DataStageStatus AppRuntime::SetDataStageReady(
                     "Candidate render effect commit failed.");
             }
         }
-        stage.nextStrategy->DetachRenderer(m_renderer);
+        stage.nextStrategy->DetachRendererForStage(m_renderer);
         stage.isRendererAttached = false;
         stage.isPrepared = true;
         stage.status = DataStageStatus::Ready;
@@ -4649,6 +4697,11 @@ public:
         std::shared_ptr<AppRuntime> service)
         : m_service(std::move(service))
     {
+    }
+
+    bool SetDataTaskStopping() override
+    {
+        return m_service && m_service->SetDataTaskStopping();
     }
 
     bool SetTaskStopping() override

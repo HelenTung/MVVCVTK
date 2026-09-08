@@ -394,8 +394,13 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         product->mask = std::move(mask);
         product->actualBytes = actualBytes;
 
-        VtkDataResourceLease::AttachImage(product->volume, product->inputUse.resource);
-        VtkDataResourceLease::AttachImage(product->mask, product->inputUse.resource);
+        // Native products borrow the already tracked input allocation. Attaching a new result
+        // lease to its shared Root scalar would keep that result alive for the entire Root lifetime.
+        // New resampled/denoised allocations own the product lease down to their arrays.
+        if (product->volume!=request.input)
+            VtkDataResourceLease::AttachImage(product->volume, product->inputUse.resource);
+        if (product->mask!=request.mask)
+            VtkDataResourceLease::AttachImage(product->mask, product->inputUse.resource);
 
         if (!stopToken.SetProductOwner(product, actualBytes)) {
             return GetFailure(RenderProductFailure::ResourceRejected,

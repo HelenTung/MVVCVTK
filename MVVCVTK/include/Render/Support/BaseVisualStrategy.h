@@ -59,4 +59,5 @@ public:
         vtkSmartPointer<vtkRenderer> renderer) override;
     void DetachRenderer(
         vtkSmartPointer<vtkRenderer> renderer) override;
+    void DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer) override;
 };

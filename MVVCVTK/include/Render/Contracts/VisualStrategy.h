@@ -33,6 +33,8 @@ public:
     }
     virtual void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
     virtual void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
+    // Hide a prepared candidate while retaining its validated binding in the same context.
+    virtual void DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer) { DetachRenderer(std::move(renderer)); }
     virtual bool SetVisualState(
         const RenderParams&,
         UpdateFlags = UpdateFlags::All) { return true; }

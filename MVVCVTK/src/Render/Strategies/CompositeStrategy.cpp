@@ -35,6 +35,11 @@ void CompositeStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
     if (m_referencePlanes) m_referencePlanes->DetachRenderer(renderer);
 }
 
+void CompositeStrategy::DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->DetachRendererForStage(renderer);
+    if (m_referencePlanes) m_referencePlanes->DetachRendererForStage(renderer);
+}
+
 int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
     return m_referencePlanes->GetPlaneAxis(actor);
 }

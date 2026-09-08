@@ -799,8 +799,11 @@ int GetGapFailCount()
                 ++detachedCallbackCount;
                 isDetachedCallbackSucceeded = result.status == GapResultStatus::Succeeded;
             });
-    const bool isDetached =
-        session.DetachFeature(*pendingFeature);
+    bool isDetached = false;
+    for (int retry=0; !isDetached && retry<2000; ++retry) {
+        isDetached=session.DetachFeature(*pendingFeature);
+        if (!isDetached) {SendTicks(*endpoint,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    }
     const auto detachedState = pendingFeature->GetState();
     SendTicks(*endpoint, 2);
     int detachedSendCount = 0;
