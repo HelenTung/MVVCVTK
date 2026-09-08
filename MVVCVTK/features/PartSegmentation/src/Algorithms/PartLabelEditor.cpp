@@ -185,21 +185,6 @@ private:
         }
     }
 
-    template<class Callback>
-    void SendExtentVoxels(const std::array<int, 6>& extent, const Callback& callback) const
-    {
-        std::size_t visited = 0;
-        for (std::int64_t z = extent[4]; z <= extent[5]; ++z) {
-            for (std::int64_t y = extent[2]; y <= extent[3]; ++y) {
-                auto offset = GetOffset({ extent[0], static_cast<int>(y), static_cast<int>(z) });
-                for (std::int64_t x = extent[0]; x <= extent[1]; ++x, ++offset) {
-                    CheckStop(visited++);
-                    callback(offset);
-                }
-            }
-        }
-    }
-
     std::array<double, 3> GetPhysical(const std::array<int, 3>& index) const
     {
         auto point = m_geometry.origin;
@@ -732,13 +717,7 @@ private:
                     || (candidate == distance[next] && owner[current] < owner[next])) {
                     distance[next] = candidate; owner[next] = owner[current]; raise(next);
                 }
-            };
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-                if (currentIndex[axis] > m_splitExtent[axis * 2])
-                    relax(current - m_splitStride[axis], currentGlobal - m_stride[axis], axis);
-                if (currentIndex[axis] < m_splitExtent[axis * 2 + 1])
-                    relax(current + m_splitStride[axis], currentGlobal + m_stride[axis], axis);
-            }
+            });
         }
         const auto first = static_cast<PartLabelId>(m_old->partsByLabel.size() - 1);
         for (std::size_t i = 0; i < m_splitCount; ++i) {
