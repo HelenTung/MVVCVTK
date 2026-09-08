@@ -43,6 +43,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <memory>
 #include <vector>
 
@@ -297,6 +298,7 @@ bool StartCachedProgramZeroCase()
 
     auto zeroPayload = activePayload;
     zeroPayload.revision = 71;
+    zeroPayload.nodeId = 701;
     zeroPayload.nodeCount = 0;
     isPassed = SetExpect(
         controller.SetCropParams(zeroPayload)
@@ -328,6 +330,28 @@ bool StartCachedProgramZeroCase()
         "nodeCount=0 should refresh a cached shader program without a new shader event.")
         && isPassed;
     isPassed = controller.StopRender() && isPassed;
+
+    std::vector<std::function<void(RenderFrameOutcome)>> frameCallbacks;
+    int queueFailure=0;
+    controller.SetFrameCompletionQueue([&](auto callback) {
+        if(queueFailure==2)throw std::runtime_error("injected frame queue failure");
+        if(queueFailure==1)return false;
+        frameCallbacks.push_back(std::move(callback));return true;
+    });
+    const auto draw=[&] {return controller.StartRender(renderer)&&(renderWindow->Render(),controller.StopRender());};
+    const auto finish=[&](std::uint64_t frame) {auto callbacks=std::move(frameCallbacks);frameCallbacks.clear();for(auto& callback:callbacks)callback({frame,true,true});};
+    for(int failure=1;failure<=2;++failure) {
+        queueFailure=0;isPassed=draw()&&isPassed;finish(10*failure);
+        isPassed=SetExpect(controller.GetRenderedNode()==701&&controller.GetPointVisible(zeroPayload.sourceStamp,{0,0,0}),
+            "Injected frame queue should establish a known presented Root.")&&isPassed;
+        isPassed=draw()&&isPassed; // retain an older accepted callback
+        queueFailure=failure;isPassed=draw()&&isPassed;
+        finish(10*failure+1);
+        isPassed=SetExpect(controller.GetRenderedNode()==0&&!controller.GetPointVisible(zeroPayload.sourceStamp,{0,0,0})
+            &&!controller.GetState().isRenderPending,"Rejected/throwing frame queue must revoke picks and ignore older completions.")&&isPassed;
+    }
+    queueFailure=0;isPassed=draw()&&isPassed;finish(30);
+    isPassed=SetExpect(controller.GetRenderedNode()==701,"A later certified frame should restore picking after queue failure.")&&isPassed;
 
     mapper->RemoveObserver(captureTag);
     // controller 必须先在有效 context 上释放 texture；renderWindow 由声明逆序随后析构。

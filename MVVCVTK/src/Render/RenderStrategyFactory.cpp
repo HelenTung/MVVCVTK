@@ -53,7 +53,7 @@ public:
     vtkTypeMacro(MeshEffectMapper,vtkOpenGLPolyDataMapper);
     RenderEffectBinding* binding=nullptr;
     void RenderPiece(vtkRenderer* renderer,vtkActor* actor) override {
-        if(binding&&!binding->OnRenderStart(renderer))return;
+        if(binding&&!binding->OnRenderStart(renderer)){(void)binding->OnRenderStop();return;}
         this->Superclass::RenderPiece(renderer,actor);
         if(binding)(void)binding->OnRenderStop();
     }

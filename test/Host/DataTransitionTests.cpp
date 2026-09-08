@@ -4,6 +4,8 @@
 #include "App/AppState.h"
 #include "App/AppStateEvents.h"
 #include <vtkPlaneSource.h>
+#include <vtkPointData.h>
+#include <vtkDataArray.h>
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -153,6 +155,37 @@ bool GetRealMeshTransitions()
     return Check(passed,"mesh-to-image restoration did not complete the real view transaction");
 }
 
+bool GetMaskedPickCoordinates()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetExtent(4,5,-2,-2,1,1);
+    image->SetSpacing(2,3,4);image->SetOrigin(10,20,30);
+    const double direction[9]={0,-1,0,1,0,0,0,0,1};image->SetDirectionMatrix(direction);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);image->GetPointData()->GetScalars()->FillComponent(0,1);
+    auto mask=vtkSmartPointer<vtkImageData>::New();mask->CopyStructure(image);mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* bytes=static_cast<unsigned char*>(mask->GetScalarPointer());bytes[0]=0;bytes[1]=255;
+    auto data=std::make_shared<RawVolumeDataManager>();const auto entity=data->CreateDataEntityId();const DataRevisionRef ref{entity,1};
+    DataTransaction tx;tx.outputs.push_back({entity,0,DataTypes::imageGrid3D,{},VtkDataBridge{}.CreateImagePayload(image,mask),{}});
+    tx.bindings.push_back({std::string(primaryVolumeBinding),0,true,{},ref});
+    if(data->SetDataCommit(std::move(tx)).status!=DataCommitStatus::Succeeded)return false;
+    auto events=std::make_shared<SharedStateBroadcaster>();auto state=std::make_shared<SharedInteractionState>(events);
+    state->SetImageDataReady({ref,1,{1,1},{2,3,4},{16,30,34}});
+    AppServiceArgs args;args.dataManager=data;args.interactionState=state;args.eventSource=events;
+    auto ports=CreateAppPorts(std::move(args));auto renderer=vtkSmartPointer<vtkRenderer>::New();auto window=vtkSmartPointer<vtkRenderWindow>::New();
+    window->SetOffScreenRendering(1);window->SetSize(64,64);
+    AppViewUpdate view;view.mode=VizMode::SliceTop_down;
+    if(!ports.renderBind->SetRenderTarget(window,renderer)||!ports.app.view->SendViewUpdate(view)||!ports.interaction.update->SendUpdates())return false;
+    const auto& model=ports.interaction.model;
+    if(!Check(!model->GetPointVisible({16,28,34})&&model->GetPointVisible({16,30,34})&&!model->GetPointVisible({16,100,34}),
+        "picking did not honor canonical mask, direction, spacing and nonzero extent"))return false;
+    const std::array<double,16> transform{-2,0.5,0,100,0,3,0,-40,0,0,1.5,7,0,0,0,1};
+    if(!model->SetModelMatrix(transform))return false;
+    if(!Check(model->GetPointVisible({16,30,34}),"pending transform changed picking before visual state applied"))return false;
+    if(!ports.interaction.update->SendUpdates())return false;
+    const bool passed=!model->GetPointVisible({82,44,58})&&model->GetPointVisible({83,50,58});
+    ports.taskControl->StopTasks(std::chrono::steady_clock::now()+std::chrono::seconds(3));window->Finalize();
+    return Check(passed,"reflected/sheared display picking did not invert the applied model transform");
+}
+
 bool GetTransitionCase(int failure)
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -226,6 +259,7 @@ bool GetDataTransitionTests()
 {
     bool passed=GetLoadedSnapshotIdentity();
     passed=GetRealMeshTransitions()&&passed;
+    passed=GetMaskedPickCoordinates()&&passed;
     for(int failure=0;failure<=10;++failure)passed=GetTransitionCase(failure)&&passed;
     return passed;
 }

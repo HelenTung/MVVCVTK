@@ -24,6 +24,7 @@
 #include <vtkPolyData.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkMatrix4x4.h>
+#include <vtkMatrix3x3.h>
 #include <vtkProp3D.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -145,6 +146,7 @@ public:
     void SendCompletions();
     bool SendReloadUpdate();
     bool GetDirty() const;
+    bool GetPointVisible(const std::array<double,3>& world) const;
     void SetDirty();
     bool ResetDirty();
     bool SetInteractionPhase();
@@ -205,6 +207,7 @@ private:
     };
 
     struct DataStage final {
+        std::array<double,16> oldModelMatrix{};
         VtkRenderInputSnapshot oldSnapshot;
         VtkRenderInputSnapshot nextSnapshot;
         std::shared_ptr<AbstractVisualStrategy> oldStrategy;
@@ -371,6 +374,7 @@ private:
     StrategyCreate m_strategyCreate;
     // 本 service 持有 DataManager 当前批次 owner；各 view 共享只读 image/scalars，旧批次随最后一个 owner 释放。
     VtkRenderInputSnapshot m_renderSnapshot;
+    std::array<double,16> m_renderModelMatrix{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     // observer 把 kind/result 作为一个完整终态 payload 入队；锁只保护队列，不覆盖 VTK 或 callback 调用。
     std::deque<LoadNotice> m_loadNotices;
     mutable std::mutex m_loadNoticeMutex;
@@ -1308,6 +1312,36 @@ RenderInputStamp AppRuntime::GetRenderInputStamp() const
         stamp.dataRevision = m_renderSnapshot->data->self;
     }
     return stamp;
+}
+
+bool AppRuntime::GetPointVisible(const std::array<double,3>& world) const
+{
+    if(!GetIsOwnerThread()||!m_renderSnapshot||!m_renderSnapshot->data||!m_currentStrategy
+        ||!std::all_of(world.begin(),world.end(),[](double value){return std::isfinite(value);}))return false;
+    if(m_dataManager&&!m_dataManager->GetData(m_dataManager->GetDataGraph(),m_renderSnapshot->data->self))return false;
+    auto inverse=vtkSmartPointer<vtkMatrix4x4>::New();inverse->DeepCopy(m_renderModelMatrix.data());
+    const double determinant=inverse->Determinant();if(!std::isfinite(determinant)||determinant==0)return false;
+    inverse->Invert();std::array<double,3> point{};
+    InteractionComputeService::GetModelPositionFromWorld(inverse,world.data(),point.data());
+    if(!std::all_of(point.begin(),point.end(),[](double value){return std::isfinite(value);}))return false;
+    if(const auto* image=dynamic_cast<const ImageGrid3DPayload*>(m_renderSnapshot->data->payload.get())) {
+        const auto& geometry=image->GetGeometry();double linear[9],inverted[9];
+        for(int row=0;row<3;++row)for(int column=0;column<3;++column)linear[row*3+column]=geometry.direction[row*3+column]*geometry.spacing[column];
+        const double det=vtkMatrix3x3::Determinant(linear);if(!std::isfinite(det)||det==0)return false;
+        vtkMatrix3x3::Invert(linear,inverted);std::array<std::size_t,3> index{};
+        for(int row=0;row<3;++row) {
+            double value=0;for(int column=0;column<3;++column)value+=inverted[row*3+column]*(point[column]-geometry.origin[column]);
+            if(!std::isfinite(value)||value<double(geometry.extent[row*2])-0.5||value>double(geometry.extent[row*2+1])+0.5)return false;
+            const double nearest=std::clamp(std::floor(value+0.5),double(geometry.extent[row*2]),double(geometry.extent[row*2+1]));
+            index[row]=static_cast<std::size_t>(nearest-geometry.extent[row*2]);
+        }
+        if(const auto& mask=image->GetValidityMask()) {
+            const auto offset=(index[2]*geometry.dimensions[1]+index[1])*geometry.dimensions[0]+index[0];
+            if(offset>=mask->size()||(*mask)[offset]==0)return false;
+        }
+    }
+    const auto effect=m_renderEffect.lock();
+    return !effect||effect->GetPointVisible(GetRenderInputStamp(),point);
 }
 
 bool AppRuntime::AttachRenderEffect(
@@ -3050,6 +3084,7 @@ DataStageStatus AppRuntime::StartDataStage(
 
     DataStage stage;
     stage.oldSnapshot = m_renderSnapshot;
+    stage.oldModelMatrix=m_renderModelMatrix;
     stage.nextSnapshot = snapshot;
     stage.oldStrategy = m_currentStrategy;
     stage.oldMode = m_currentMode;
@@ -3333,6 +3368,7 @@ bool AppRuntime::SetViewStage(
         m_renderSnapshot = snapshot;
         SetCurrentStrategy(
             m_dataStage->nextStrategy, m_dataStage->mode, false);
+        m_renderModelMatrix=m_dataStage->nextParams.modelMatrix;
         {
             std::lock_guard<std::mutex> lock(m_viewConfigMutex);
             m_appliedQuality =
@@ -3378,6 +3414,7 @@ bool AppRuntime::ResetViewStage(
 
         if (isCandidateCurrent) {
             m_renderSnapshot = stage.oldSnapshot;
+            m_renderModelMatrix=stage.oldModelMatrix;
             m_currentStrategy = stage.oldStrategy;
             m_currentMode = stage.oldMode;
             if (stage.oldStrategy) {
@@ -3680,6 +3717,8 @@ bool AppRuntime::SetStrategyState()
             }
         }
     }
+
+    if((strategyFlags&UpdateFlags::Transform)!=UpdateFlags::None)m_renderModelMatrix=params.modelMatrix;
 
     // 背景与主体视觉状态属于同一帧提交；策略拒绝时不得先暴露新背景。
     if (hasBackgroundChanged && m_renderer) {
@@ -4571,6 +4610,9 @@ public:
     vtkProp3D* GetMainProp() const override
     {
         return m_service ? m_service->GetMainProp() : nullptr;
+    }
+    bool GetPointVisible(const std::array<double,3>& world) const override {
+        return m_service&&m_service->GetPointVisible(world);
     }
 
     std::array<double, 16> GetModelMatrix() const override

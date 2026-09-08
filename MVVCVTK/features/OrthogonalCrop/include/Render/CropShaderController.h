@@ -34,6 +34,7 @@ public:
         const std::array<double, 16>& localToInput);
     void SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue);
     CropNodeId GetRenderedNode() const;
+    bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const;
     bool StartRender(vtkRenderer* renderer,bool isCurrent=true);
     bool StopRender();
 
@@ -65,6 +66,7 @@ public:
     bool ClearCropParams();
 
     CropNodeId GetRenderedNode() const;
+    bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const override;
 
     // 仅为 Host 候选 View 准备重放；当前 binding 继续显示旧已应用状态。
     bool SetSourcePreview(CropShaderPayload payload);

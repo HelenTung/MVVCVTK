@@ -10,6 +10,7 @@
 #include <vtkCubeSource.h>
 #include <vtkImageData.h>
 #include <vtkCommand.h>
+#include <vtkCallbackCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
@@ -134,6 +135,9 @@ public:
     {
         const auto effect = m_effect.lock();
         return effect ? effect->GetState() : RenderEffectState{};
+    }
+    bool GetPointVisible(const std::array<double,3>& point) const {
+        const auto effect=m_effect.lock();return !effect||effect->GetPointVisible(m_inputStamp,point);
     }
     bool SetRenderNeeded() override
     {
@@ -515,14 +519,27 @@ bool GetActualRenderedHead() {
     const auto presented=f.bridge.GetViewState(f.service.get());
     if(!Check(presented&&presented->renderedHead==a.nodeId&&!presented->isRenderPending,
         "per-view state did not observe its completed frame"))return false;
-    const auto b=Append(f.bridge,a.nodeId);if(!Flush(f.bridge,f.window))return false;
+    auto editB=Request(f.bridge,CropEditKind::Append,a.nodeId);editB.operation.geometryType=CropShape::Plane;
+    editB.operation.planeNormalInInputModel={1,0,0};editB.operation.planeCenterInInputModel={0.3,0,0};
+    const auto b=f.bridge.SendRequest(editB);if(!b||!Flush(f.bridge,f.window))return false;
     if(!Check(f.bridge.GetHistory().appliedHead==b.nodeId&&f.bridge.GetHistory().renderedHead==a.nodeId,
         "applied head did not remain separate from the last rendered head"))return false;
+    if(!Check(f.service->GetPointVisible({0.25,0,0}),"unpresented edit changed business picking before its frame"))return false;
     f.window->SwapBuffersOff();f.window->Render();
     if(!wait([&]{return !f.service->GetEffectState().isRenderPending;}))return false;
     if(!Check(f.bridge.GetHistory().renderedHead==a.nodeId,"back-buffer validation was reported as presented"))return false;
+    if(!Check(f.service->GetPointVisible({0.25,0,0}),"candidate/back-buffer frame changed picking"))return false;
     f.window->SwapBuffersOn();f.window->Render();
     if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
+    if(!Check(!f.service->GetPointVisible({0.25,0,0})&&f.service->GetPointVisible({0.4,0,0}),
+        "presented crop did not reject its hidden side for business picking"))return false;
+    auto failFrame=vtkSmartPointer<vtkCallbackCommand>::New();
+    failFrame->SetCallback([](vtkObject* source,unsigned long,void*,void*){source->InvokeEvent(vtkCommand::ErrorEvent);});
+    const auto failedTag=f.window->AddObserver(vtkCommand::EndEvent,failFrame,1.0);
+    f.window->Render();f.window->RemoveObserver(failedTag);
+    if(!Check(wait([&]{return f.bridge.GetHistory().renderedHead==0;})&&!f.service->GetPointVisible({0.4,0,0}),
+        "failed presented frame retained a stale known predicate for picking"))return false;
+    f.window->Render();if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
     auto different=f.input.data->self;++different.generation;
     if(!f.service->SetRenderInputStamp({different}))return false;
     auto prepared=f.bridge.BuildSourceCommit(root,false);
@@ -533,8 +550,9 @@ bool GetActualRenderedHead() {
     f.bridge.SetSourceCommit(std::move(*prepared));f.service->CompleteCandidate();
     if(!Check(f.bridge.GetHistory().appliedHead==root&&f.bridge.GetHistory().renderedHead!=root,
         "candidate replay incorrectly became a rendered Root on adoption"))return false;
+    if(!Check(!f.service->GetPointVisible({0.25,0,0}),"Root adoption opened picking before a Root frame was presented"))return false;
     f.window->Render();
-    return Check(wait([&]{return f.bridge.GetHistory().renderedHead==root;}),"zero-node Root uniform did not produce a completed Root frame");
+    return Check(wait([&]{return f.bridge.GetHistory().renderedHead==root;})&&f.service->GetPointVisible({0.25,0,0}),"zero-node Root uniform did not produce a completed Root frame");
 }
 
 bool GetSourcePreviewCommit() {

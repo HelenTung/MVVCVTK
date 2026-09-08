@@ -126,12 +126,22 @@ public:
         CropNodeId nodeId=0;
         std::size_t pending=0;
         bool conflict=false;
+        CropShaderPayload presented;
     };
     RenderEffectState GetState() const {
         auto state=m_state;state.renderedRevision=m_frameState->conflict?0:m_frameState->revision;
         state.isRenderPending=m_frameState->pending!=0;return state;
     }
     CropNodeId GetRenderedNode() const {return m_frameState->conflict?0:m_frameState->nodeId;}
+    bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
+        if(m_frameState->conflict)return false;
+        const auto& shown=m_frameState->presented;
+        if(!shown.revision)return m_active.payload.revision==0;
+        if(shown.sourceStamp!=input)return false;
+        if(!shown.predicateTable||shown.nodeCount>shown.predicateTable->geometry.size())return false;
+        return std::all_of(shown.predicateTable->geometry.begin(),shown.predicateTable->geometry.begin()+shown.nodeCount,
+            [&](const auto& geometry){return geometry.GetKept(point);});
+    }
     void SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue){m_frameQueue=std::move(queue);}
     bool SetCropCommit(std::uint64_t revision);
     bool GetCropCommitReady(std::uint64_t revision) const;
@@ -151,6 +161,7 @@ private:
 
     std::shared_ptr<FrameState> m_frameState=std::make_shared<FrameState>();
     std::function<bool(std::function<void(RenderFrameOutcome)>)> m_frameQueue;
+    CropShaderPayload m_drawPayload;
     std::uint64_t m_drawRevision=0;
     CropNodeId m_drawNode=0;
     bool m_drawValid=false,m_drawIsCurrent=false;
@@ -364,19 +375,32 @@ bool CropShaderController::Impl::StartRender(vtkRenderer* renderer,bool isCurren
 
 bool CropShaderController::Impl::StopRender()
 {
-    if(m_drawValid&&m_drawIsCurrent&&m_frameQueue) {
+    if(m_drawIsCurrent&&m_frameQueue) {
         const auto state=m_frameState;
         const std::weak_ptr<FrameState> weak=state;
         const auto revision=m_drawRevision,node=m_drawNode,generation=state->generation;
-        if(m_frameQueue([weak,revision,node,generation](RenderFrameOutcome frame) {
+        const auto payload=m_drawPayload;const bool drawValid=m_drawValid;
+        bool queued=false;
+        try {queued=m_frameQueue([weak,revision,node,generation,payload,drawValid](RenderFrameOutcome frame) {
             const auto state=weak.lock();if(!state)return;
             if(state->pending)--state->pending;
-            if(state->generation!=generation||!frame.isSucceeded||!frame.isPresented||frame.frameId<state->frameId)return;
+            if(state->generation!=generation||!frame.isPresented||frame.frameId<state->frameId)return;
+            if(!frame.isSucceeded||!drawValid) {
+                state->frameId=frame.frameId;state->revision=0;state->nodeId=0;state->presented={};state->conflict=true;return;
+            }
             if(frame.frameId==state->frameId&&(state->revision!=revision||state->nodeId!=node))state->conflict=true;
-            else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;}
-        }))++state->pending;
+            else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;state->presented=payload;}
+        });}catch(...){}
+        if(queued)++state->pending;
+        else {
+            // No completion can certify this frame. Revoke the old predicate
+            // and exclude older pending callbacks from restoring it later.
+            if(state->generation!=std::numeric_limits<std::uint64_t>::max())++state->generation;
+            else state->frameId=std::numeric_limits<std::uint64_t>::max();
+            state->revision=0;state->nodeId=0;state->presented={};state->conflict=true;
+        }
     }
-    m_drawValid=false;
+    m_drawValid=false;m_drawIsCurrent=false;
     if (m_isActive && m_boundTexture) {
         m_boundTexture->Deactivate();
     }
@@ -444,7 +468,7 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
         return false;
     }
 
-    m_drawValid=true;m_drawRevision=m_active.payload.revision;m_drawNode=m_active.payload.nodeId;
+    m_drawValid=true;m_drawPayload=m_active.payload;m_drawRevision=m_active.payload.revision;m_drawNode=m_active.payload.nodeId;
 
     if (m_staged.payload.revision != 0
         && m_staged.texture
@@ -538,7 +562,7 @@ bool CropShaderController::Impl::ClearCropParams()
 {
     // Old frames keep their resource holds, but cannot label a new input as rendered.
     if(m_frameState->generation==std::numeric_limits<std::uint64_t>::max())return false;
-    ++m_frameState->generation;m_frameState->frameId=0;m_frameState->revision=0;m_frameState->nodeId=0;m_frameState->conflict=false;
+    ++m_frameState->generation;m_frameState->presented={};m_drawPayload={};m_frameState->frameId=0;m_frameState->revision=0;m_frameState->nodeId=0;m_frameState->conflict=false;
     m_drawValid=false;
     if (m_previous.texture
         && m_previous.texture != m_active.texture
@@ -729,6 +753,10 @@ public:
         return true;
     }
 
+    bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
+        return input==m_inputStamp&&m_controller.GetPointVisible(input,point);
+    }
+
     bool OnRenderStart(vtkRenderer* renderer) override
     {
         return m_controller.StartRender(renderer,m_bindingUse==RenderBindingUse::Current);
@@ -771,6 +799,7 @@ public:
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
     CropNodeId GetRenderedNode() const;
+    bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const;
     bool SetSourcePreview(CropShaderPayload payload);
     void SetSourcePreviewComplete(std::uint64_t revision) noexcept;
     void ClearSourcePreview(std::uint64_t revision) noexcept;
@@ -1265,3 +1294,16 @@ CropNodeId CropShaderEffect::Impl::GetRenderedNode() const
     return result;
 }
 CropNodeId CropShaderEffect::GetRenderedNode() const {return m_impl->GetRenderedNode();}
+
+bool CropShaderController::GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
+    return m_impl->GetPointVisible(input,point);
+}
+bool CropShaderEffect::Impl::GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
+    if(!m_active.revision||m_active.sourceStamp!=input)return true;
+    const auto bindings=GetCurrentBindings();
+    if(bindings.empty()||!GetRenderedNode())return false;
+    return std::all_of(bindings.begin(),bindings.end(),[&](const auto& binding){return binding->GetPointVisible(input,point);});
+}
+bool CropShaderEffect::GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
+    return m_impl->GetPointVisible(input,point);
+}

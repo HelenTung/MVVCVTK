@@ -204,6 +204,8 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             double* worldPos = m_picker->GetPickPosition();
 
             if (worldPos) {
+                if(!m_modelPort->GetPointVisible({worldPos[0],worldPos[1],worldPos[2]}))
+                    return getResult(false,InteractionFailureReason::StateRejected);
                 // 这里直接写 CursorWorldPosition，让服务层统一完成轴约束、状态广播和后续渲染刷新。
                 bool isCursorSet = false;
                 if (eve.vizMode == VizMode::SliceTop_down) {

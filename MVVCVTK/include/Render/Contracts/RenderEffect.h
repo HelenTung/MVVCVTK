@@ -117,6 +117,9 @@ public:
 class RenderEffect {
 public:
     virtual ~RenderEffect() = default;
+    // Business picks follow the last presented predicate for this input.
+    // A temporarily unproven/mixed preview may reject a pick until rendered.
+    virtual bool GetPointVisible(RenderInputStamp,const std::array<double,3>&) const { return true; }
 
     virtual std::shared_ptr<RenderEffectBinding> BuildEffectBinding(
         const RenderEffectTarget& target,
