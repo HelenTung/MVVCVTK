@@ -19,7 +19,8 @@ struct PartEntry final {
     PartLabelId labelId = 0;
     PartMetrics metrics;
     PartUserState userState;
-    PartPresentation presentation;
+    // 新生成零件采用实体预览，避免相邻标签的内部表面半透明叠加。
+    PartPresentation presentation{true, false, 1.0};
     bool isEdited = false;
 };
 

@@ -26,7 +26,7 @@ set(_mvvcvtk_required_paths
     "vtk/lib/cmake/vtk-9.4/vtk-config.cmake"
     "opencv/x64/vc16/lib/OpenCVConfig.cmake"
 )
-if(MVVCVTK_BUILD_QT_TESTING)
+if(MVVCVTK_BUILD_QT_TESTING OR MVVCVTK_BUILD_QT_MANUAL)
     list(APPEND _mvvcvtk_required_paths
         "qt/lib/cmake/Qt5/Qt5Config.cmake"
     )
@@ -93,7 +93,7 @@ set(MVVCVTK_VTK_PUBLIC_TARGETS
 )
 
 set(_mvvcvtk_needs_qt FALSE)
-if(MVVCVTK_BUILD_QT_TESTING)
+if(MVVCVTK_BUILD_QT_TESTING OR MVVCVTK_BUILD_QT_MANUAL)
     set(_mvvcvtk_needs_qt TRUE)
     find_package(
         Qt5 5.14.2 EXACT

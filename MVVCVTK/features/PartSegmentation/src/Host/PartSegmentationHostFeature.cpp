@@ -73,6 +73,7 @@ bool GetTargetsUsed(const HostViewTargets& targets)
 bool GetRoleSupported(const HostRenderViewRole role)
 {
     return role == HostRenderViewRole::Primary3D
+        || role == HostRenderViewRole::Composite3D
         || role == HostRenderViewRole::TopDownSlice
         || role == HostRenderViewRole::FrontBackSlice
         || role == HostRenderViewRole::LeftRightSlice;
@@ -121,8 +122,9 @@ struct PartOverlayCandidate final {
 PartOverlayCandidate CreateOverlay(
     const HostRenderViewRole role)
 {
-    if (role == HostRenderViewRole::Primary3D) {
-        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>();
+    if (role == HostRenderViewRole::Primary3D
+        || role == HostRenderViewRole::Composite3D) {
+        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>(role == HostRenderViewRole::Composite3D);
         return { overlay, overlay };
     }
     if (role == HostRenderViewRole::TopDownSlice) {
@@ -1963,7 +1965,9 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
                 RemoveBindings(nextBindings);
                 return false;
             }
-            if (view.role == HostRenderViewRole::Primary3D) {
+            if (view.role == HostRenderViewRole::Primary3D
+                || view.role == HostRenderViewRole::Composite3D) {
+                // 体渲染背景上的分割预览复用同一份精确标签表面，不复制体数据。
                 candidate.overlay->SetInputData(surfaceProduct->surface);
             }
             else {

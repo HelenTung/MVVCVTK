@@ -1,3 +1,4 @@
+// 测试用途：提供环形伪影校正的第三方参考实现或声明；本行是仓内新增用途说明，原版权许可与算法内容保留。
 // Copyright (c) 2015, UChicago Argonne, LLC. All rights reserved.
 
 // Copyright 2015. UChicago Argonne, LLC. This software was produced

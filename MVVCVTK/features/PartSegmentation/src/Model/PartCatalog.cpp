@@ -30,7 +30,7 @@ bool AddStorageBytes(
 
 std::uint64_t GetMixed(std::uint64_t value) noexcept
 {
-    // SplitMix64 finalizer：只用于稳定展示色与哈希，不承担身份生成。
+    // SplitMix64 finalizer：只用于目录键哈希，不承担身份生成。
     value ^= value >> 30;
     value *= 0xbf58476d1ce4e5b9ULL;
     value ^= value >> 27;
@@ -142,15 +142,11 @@ bool GetPartObjectIdValid(const PartObjectId& value) noexcept
 }
 
 std::array<double, 4> GetPartStableColor(
-    const PartObjectId& value) noexcept
+    const PartObjectId&) noexcept
 {
-    const std::uint64_t hash = GetMixed(value.high)
-        ^ GetMixed(value.low + 0x9e3779b97f4a7c15ULL);
-    const auto getChannel = [hash](const unsigned shift) {
-        const auto byte = static_cast<unsigned>((hash >> shift) & 0xffULL);
-        return 0.25 + 0.75 * static_cast<double>(byte) / 255.0;
-    };
-    return { getChannel(16), getChannel(8), getChannel(0), 0.85 };
+    // 身份由稳定绑定区分；默认展示采用统一中性色，避免标签编号造成彩虹配色。
+    // 显式 Custom 颜色仍由目录保存，选择高亮仅在渲染投影中应用。
+    return { 0.72, 0.72, 0.72, 1.0 };
 }
 
 bool GetPartCatalogValid(

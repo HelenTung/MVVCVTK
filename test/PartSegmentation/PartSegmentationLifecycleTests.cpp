@@ -1,3 +1,4 @@
+// 测试用途：验证分割请求的启动、取消、超时、预算、回调和编辑提交生命周期。
 #include "PartSegmentationTestCases.h"
 #include "../TestDataPort.h"
 

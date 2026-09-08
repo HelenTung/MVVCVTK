@@ -1,3 +1,4 @@
+// 测试用途：验证阈值估计、等值面和梯度定位、质量标志、参数校验、取消与预算。
 #include "SurfaceDeterminationTestCases.h"
 
 #include "SurfaceDeterminationAlgorithm.h"

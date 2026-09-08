@@ -1,3 +1,4 @@
+// 测试用途：验证涂绘、擦除、填充、生长、孤岛、拆分、合并及保护范围和掩码约束。
 #include "PartSegmentationTestCases.h"
 #include "Algorithms/PartLabelEditor.h"
 

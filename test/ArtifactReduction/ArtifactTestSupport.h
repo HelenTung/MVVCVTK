@@ -1,3 +1,4 @@
+// 测试用途：为伪影校正回归提供共享断言、数据准备和测试套件声明。
 #pragma once
 #include "ArtifactReductionAlgorithm.h"
 #include <cstring>
