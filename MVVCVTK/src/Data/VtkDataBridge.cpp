@@ -19,6 +19,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <set>
 #include <utility>
 
 namespace {
@@ -322,6 +323,9 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
         }
 
         std::vector<double> vertices;
+        if (points->GetNumberOfPoints() < 0
+            || static_cast<std::uint64_t>(points->GetNumberOfPoints())
+                > std::numeric_limits<std::size_t>::max() / 3U) return {};
         vertices.resize(static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
         for (vtkIdType index = 0; index < points->GetNumberOfPoints(); ++index) {
             points->GetPoint(index, vertices.data() + static_cast<std::size_t>(index) * 3);
@@ -337,8 +341,34 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
                 cells.push_back(static_cast<std::uint64_t>(value));
             }
         }
+        // MeshAttribute 只表达命名数值点属性；在三角化后复制，保持点号对应。
+        // 不以丢弃异常数组的方式发布一份缺少测量质量的“成功”结果。
+        std::vector<MeshAttribute> attributes;
+        std::set<std::string> names;
+        auto* pointData = output->GetPointData();
+        for (int index = 0; pointData && index < pointData->GetNumberOfArrays(); ++index) {
+            auto* array = pointData->GetArray(index);
+            if (!array || !array->GetName() || array->GetName()[0] == '\0') continue;
+            const int components = array->GetNumberOfComponents();
+            if (components <= 0 || array->GetNumberOfTuples() != points->GetNumberOfPoints()
+                || !names.emplace(array->GetName()).second) return {};
+            const auto count = static_cast<std::size_t>(points->GetNumberOfPoints());
+            if (count > std::numeric_limits<std::size_t>::max()
+                    / static_cast<std::size_t>(components)) return {};
+            MeshAttribute attribute{array->GetName(), static_cast<std::size_t>(components), {}};
+            attribute.values.resize(count * attribute.componentCount);
+            for (vtkIdType tuple = 0; tuple < array->GetNumberOfTuples(); ++tuple) {
+                for (int component = 0; component < components; ++component) {
+                    const double value = array->GetComponent(tuple, component);
+                    if (!std::isfinite(value)) return {};
+                    attribute.values[static_cast<std::size_t>(tuple) * attribute.componentCount
+                        + static_cast<std::size_t>(component)] = value;
+                }
+            }
+            attributes.push_back(std::move(attribute));
+        }
         auto payload = std::make_shared<const SurfaceMeshPayload>(
-            std::move(vertices), std::move(cells));
+            std::move(vertices), std::move(cells), std::move(attributes));
         return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {
@@ -435,8 +465,16 @@ VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
         data->payload.get());
     if (!payload || !payload->GetValid()) return {};
 
-    auto points = vtkSmartPointer<vtkPoints>::New();
     const auto& vertices = payload->GetVertices();
+    if (vertices.size() / 3U > static_cast<std::size_t>(
+            std::numeric_limits<vtkIdType>::max())) return {};
+    for (const auto& attribute : payload->GetPointAttributes()) {
+        if (attribute.componentCount > static_cast<std::size_t>(
+                std::numeric_limits<int>::max())) return {};
+    }
+    // 公共测量网格为 double；默认 vtkPoints(float) 会在大原点处吞掉薄壁。
+    auto points = vtkSmartPointer<vtkPoints>::New();
+    points->SetDataTypeToDouble();
     points->SetNumberOfPoints(static_cast<vtkIdType>(vertices.size() / 3));
     for (std::size_t index = 0; index < vertices.size() / 3; ++index) {
         points->SetPoint(

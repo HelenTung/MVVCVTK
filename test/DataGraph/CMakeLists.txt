@@ -32,6 +32,7 @@ set_target_properties(
     PROPERTIES PROJECT_LABEL VtkDataBridgeTests FOLDER "MVVCVTK/test/Automation/DataGraph"
 )
 add_test(NAME DataGraph.VtkBridge COMMAND mvvcvtk_vtk_data_bridge_tests)
+SetTestRuntime(DataGraph.VtkBridge mvvcvtk_vtk_data_bridge_tests)
 
 add_executable(mvvcvtk_roi_tests
     RoiTests.cpp
