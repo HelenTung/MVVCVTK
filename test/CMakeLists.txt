@@ -78,6 +78,10 @@ endif()
 if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
     add_subdirectory(ArtifactReduction)
 endif()
+if(MVVCVTK_BUILD_WALL_THICKNESS)
+    add_subdirectory(WallThickness)
+endif()
+
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP AND MVVCVTK_BUILD_ARTIFACT_REDUCTION
         AND MVVCVTK_BUILD_PART_SEGMENTATION AND MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_subdirectory(RoiIntegration)

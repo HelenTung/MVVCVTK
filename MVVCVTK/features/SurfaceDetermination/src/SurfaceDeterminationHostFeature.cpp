@@ -266,6 +266,7 @@ private:
         DataBinding resultBinding;
         std::shared_ptr<std::atomic<bool>> completeActive;
         FeatureOperationState operation;
+        bool hasCompleteBoundary = false;
         SurfaceDeterminationStartParams params;
         bool isSuperseded = false;
         SurfaceAlgorithmInputs inputs;
@@ -561,6 +562,10 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 });
             if (!inserted.second) return admission;
             requestItem = inserted.first;
+            requestItem->second.hasCompleteBoundary = params.componentSelection
+                    == SurfaceComponentSelection::All
+                && !params.analysisRoi && params.minimumObjectVoxels <= 1
+                && !params.initialSurface && !params.materialLabels;
             requestItem->second.params = params;
             requestItem->second.inputs = inputs;
             m_service->SetRetainedBytes(GetRetainedBytes());
@@ -1550,7 +1555,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
         !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
         !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
-        !charge(result.points.size(), 2 * 13 * sizeof(double)) ||
+        !charge(result.points.size(), 2 * 14 * sizeof(double)) ||
         !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
         throw std::bad_alloc{};
     result.execution.estimatedWorkingBytes =
@@ -1563,7 +1568,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     vertices.reserve(stagedGeneration->points->size() * 3U);
     // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
     // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
-    constexpr std::size_t qualityBytesPerPoint = 10U * sizeof(double) * 2U;
+    constexpr std::size_t qualityBytesPerPoint = 11U * sizeof(double) * 2U;
     if (stagedGeneration->points->size()
         > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
     std::vector<MeshAttribute> attributes{
@@ -1571,7 +1576,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         { "measurement.fit-residual", 1, {} },
         { "measurement.support-ratio", 1, {} },
         { "measurement.localization-sigma", 1, {} },
-        { "measurement.normal", 3, {} }
+        { "measurement.normal", 3, {} },
+        // 只证明生成时未按分量/ROI裁剪；消费者仍需核对材料域、拓扑与路径。
+        { "measurement.boundary-complete", 1, {} }
     };
     attributes.push_back({"measurement.flags", 1, {}});
     attributes.push_back({"surface.interface-index", 1, {}});
@@ -1595,13 +1602,14 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
             && point.validSupportRatio > 0.0F && point.validSupportRatio <= 1.0F
             && point.estimatedLocalizationSigma >= 0.0F;
         const bool isValid = SurfaceContract::GetPointValid(point, stagedGeneration->method);
-        attributes[5].values.push_back(static_cast<std::uint32_t>(point.flags));
-        attributes[6].values.push_back(point.interfaceIndex);
-        attributes[7].values.push_back(point.overrideIndex);
+        attributes[6].values.push_back(static_cast<std::uint32_t>(point.flags));
+        attributes[7].values.push_back(point.interfaceIndex);
+        attributes[8].values.push_back(point.overrideIndex);
         attributes[0].values.push_back(isValid ? 1.0 : 0.0);
         attributes[1].values.push_back(hasQuality ? point.fitResidual : 0.0);
         attributes[2].values.push_back(hasQuality ? point.validSupportRatio : 0.0);
         attributes[3].values.push_back(hasQuality ? point.estimatedLocalizationSigma : 0.0);
+        attributes[5].values.push_back(request.hasCompleteBoundary ? 1.0 : 0.0);
         for (const auto value : point.normalModel) {
             attributes[4].values.push_back(hasQuality ? value / normalLength : 0.0);
         }
