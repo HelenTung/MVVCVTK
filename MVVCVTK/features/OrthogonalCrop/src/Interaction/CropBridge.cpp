@@ -115,6 +115,7 @@ public:
     std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const { return m_commands.GetNode(m_tree,node); }
     std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const { return m_commands.GetOutcome(id); }
     const CropInputSnapshot& GetSource() const { return m_input; }
+    void ForgetOutcome(CropRequestId id) { m_commands.ForgetOutcome(id); }
     bool GetResultsValid(const std::vector<CropResultRecord>& results) const { return m_tree.GetResultsValid(results); }
     void SetResults(std::vector<CropResultRecord>&& results) noexcept { m_tree.SetResults(std::move(results)); }
     void SetSourceCommitFailed(std::unique_ptr<SourceCommit::Impl> prepared,CropFailure failure);
@@ -139,7 +140,7 @@ public:
     bool SendShaderCommit();
     bool BuildCropResult(
         CropNodeId nodeId,
-        CropCandidateCallback onComplete);
+        CropCandidateCallback onComplete,CropBuildOptions options={},CropRequestId requestId=0);
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();
@@ -615,6 +616,10 @@ CropEditAdmission CropBridge::Impl::SendRequest(CropEditRequest request)
 {
     if (!GetLeaseReady() || !GetCropBound() || !m_isAccepting) {
         CropEditAdmission rejected;rejected.failureReason=CropFailure::PreviewNotReady;return rejected;
+    }
+    if(m_buildTask&&!m_commands.GetOutcome(request.requestId)) {
+        CropEditAdmission rejected;rejected.requestId=request.requestId;rejected.stateRevision=m_tree.GetRevision();
+        rejected.failureReason=CropFailure::Busy;return rejected;
     }
     auto result=m_commands.StartRequest(m_tree,std::move(request));
     if (result.isAccepted && !result.isReplay) {
@@ -1103,6 +1108,7 @@ CropMaterializationCandidate CropBridge::Impl::BuildResultFailure(
     const char* message) const
 {
     CropMaterializationCandidate result;
+    result.documentId=params.documentId;result.nodeId=params.nodeId;result.requestId=params.requestId;
     result.failureReason = failureReason;
     result.sourceRevision = params.sourceRevision;
     result.nodeCount = params.nodeCount;
@@ -1113,7 +1119,7 @@ CropMaterializationCandidate CropBridge::Impl::BuildResultFailure(
 
 bool CropBridge::Impl::BuildCropResult(
     CropNodeId nodeId,
-    CropCandidateCallback onComplete)
+    CropCandidateCallback onComplete,CropBuildOptions options,CropRequestId requestId)
 {
     if (!onComplete) {
         return false;
@@ -1121,6 +1127,9 @@ bool CropBridge::Impl::BuildCropResult(
 
     const auto input=m_input;
     CropBuildParams params;
+    params.documentId=m_tree.GetDocumentId();params.nodeId=nodeId;params.requestId=requestId;
+    params.availableRamBytes=options.availableRamBytes;params.meshTolerance=options.meshTolerance;
+    params.maxCells=options.maxCells;params.maxDepth=options.maxDepth;
     if(input.data)params.sourceRevision=input.data->self;
     params.operations=m_tree.GetPath(nodeId);params.nodeCount=params.operations.size();
     if(m_buildTask) {onComplete(BuildResultFailure(params,CropFailure::Busy,"A crop result build is already running."));return false;}
@@ -1598,3 +1607,8 @@ void CropBridge::SetWorkAvailable(std::function<void()> onWorkAvailable)
 {
     m_impl->onWorkAvailable = std::move(onWorkAvailable);
 }
+
+bool CropBridge::BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete)
+{ return m_impl&&m_impl->GetLeaseReady()&&m_impl->BuildCropResult(nodeId,std::move(onComplete),options,requestId); }
+
+void CropBridge::ForgetOutcome(CropRequestId id) { if(m_impl&&m_impl->GetOwnerReady())m_impl->ForgetOutcome(id); }

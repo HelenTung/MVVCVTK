@@ -1,8 +1,69 @@
 #include "Algorithms/CropGeometry.h"
+#include "Algorithms/CropAlgorithm.h"
 
 #include <cmath>
 #include <iostream>
 #include <limits>
+
+namespace {
+int GetFloatIntervalFailures()
+{
+    int failures=0;std::size_t certified=0,boundary=0;
+    const auto check=[&](bool ok,const char* message){if(!ok){++failures;std::cerr<<"Float interval: "<<message<<'\n';}};
+    for(auto shape:{CropShape::Box,CropShape::Plane,CropShape::Sphere,CropShape::Cylinder})
+        for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        CropOpItem op;op.operationIndex=1;op.geometryType=shape;op.removalMode=mode;
+        op.radius=1.25;op.height=2;op.axisInInputModel={2,-3,1};op.planeNormalInInputModel={1,2,-1};
+        const auto geometry=CropGeometry::Build(op);const auto table=CropAlgorithm::BuildPredicateTable({op},1);
+        if(!geometry||!table.isSucceeded)return failures+1;
+        for(int z=-6;z<=6;++z)for(int y=-7;y<=7;++y)for(int x=-9;x<=9;++x) {
+            const CropVectorDouble3Array point{double(x)/4,double(y)/4,double(z)/4};
+            const auto bounds=geometry->GetFloatBounds(point);
+            const int square=x*x+y*y+z*z,axial=2*x-3*y+z;
+            // Exact integer oracle, avoiding MSVC's 64-bit long-double precision limitation.
+            bool inside=false;
+            switch(shape) {
+            case CropShape::Box:inside=std::abs(x)<=4&&std::abs(y)<=4&&std::abs(z)<=4;break;
+            case CropShape::Plane:inside=x+2*y-z>0;break;
+            case CropShape::Sphere:inside=square<=25;break;
+            case CropShape::Cylinder:inside=14*square-axial*axial<=350&&axial*axial<=224;break;
+            }
+            const bool expected=mode==CropRemovalMode::KeepInside?inside:!inside;
+            if(bounds.classification==CropPointClassification::BoundaryBand){++boundary;continue;}
+            ++certified;
+            if(bounds.classification==CropPointClassification::PrecisionNotMet
+                ||(bounds.classification==CropPointClassification::Kept)!=expected
+                ||geometry->GetKept(point)!=expected
+                ||CropAlgorithm::GetPointKept(*table.predicateTable,1,{float(point[0]),float(point[1]),float(point[2])})!=expected) {
+                check(false,"certified sign differs from exact rational geometry or float evaluation");return failures;
+            }
+        }
+    }
+    check(certified>20000&&boundary>0,"certification and boundary-band coverage are missing");
+    CropOpItem plane;plane.geometryType=CropShape::Plane;plane.planeNormalInInputModel={1,0,0};
+    plane.planeCenterInInputModel={100000000.125,0,0};const auto geometry=CropGeometry::Build(plane);
+    check(geometry->GetFloatBounds({100000000.25,0,0}).classification==CropPointClassification::BoundaryBand,
+        "large-origin quantization must be reported as a boundary band");
+    check(geometry->GetFloatBounds({0,0,0},{-1,0,0}).classification==CropPointClassification::PrecisionNotMet,
+        "negative coordinate uncertainty was accepted");
+    check(geometry->GetFloatBounds({std::numeric_limits<double>::infinity(),0,0}).classification==CropPointClassification::PrecisionNotMet,
+        "non-finite interval was accepted");
+    plane.planeCenterInInputModel={0,0,0};
+    check(CropGeometry::Build(plane)->GetFloatBounds({1e-46,0,0}).classification==CropPointClassification::BoundaryBand,
+        "conversion to zero and subnormal flushing must remain in the interval");
+    CropOpItem thinBox;thinBox.boxToInputModelMatrix={1,1,0,0, 1,1+1e-10,0,0, 0,0,1,0, 0,0,0,1};
+    const auto thin=CropGeometry::Build(thinBox);
+    check(thin&&thin->GetFloatBounds({0.25,0.25,0}).classification==CropPointClassification::BoundaryBand,
+        "near-singular affine precision must be bounded without a condition-number cutoff");
+    const CropMatrixDouble16Array matrix{1e10,1e10,1,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const auto error=CropGeometry::GetAffineFloatError(matrix,{1,-1,1});
+    const float left=1e10f,small=1,right=-1e10f;
+    const float reordered=(left+small)+right;
+    check(error&&(*error)[0]>=std::abs(double(reordered)-1.0),"affine dot error omitted cancellation/reordering");
+    std::cout<<"Float interval certified="<<certified<<" boundary-band="<<boundary<<'\n';
+    return failures;
+}
+}
 
 int GetCropGeometryFailures()
 {
@@ -42,5 +103,5 @@ int GetCropGeometryFailures()
         if (std::abs(std::abs(dx)-cylinder.radius)<1e-12||std::abs(std::abs(dz)-cylinder.height/2)<1e-12)continue;
         check(reference&&reference->GetInside({dx,0,dz})==expected,"independent cylinder reference");
     }
-    return failures;
+    return failures + GetFloatIntervalFailures();
 }

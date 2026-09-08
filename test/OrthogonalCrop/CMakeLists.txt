@@ -5,6 +5,7 @@ add_executable(
     CropHistoryTests.cpp
     CropHistoryQueueTests.cpp
     CropGeometryTests.cpp
+    CropMeshTests.cpp
     CropBridgeTests.cpp
     CropBridgeTests.h
     CropShaderPreviewTests.cpp
@@ -60,3 +61,10 @@ SetTestRuntime(OrthogonalCrop.Geometry mvvcvtk_crop_tests)
 
 add_test(NAME OrthogonalCrop.Bridge COMMAND mvvcvtk_crop_tests bridge)
 SetTestRuntime(OrthogonalCrop.Bridge mvvcvtk_crop_tests)
+
+add_test(NAME OrthogonalCrop.Mesh COMMAND mvvcvtk_crop_tests mesh)
+SetTestRuntime(OrthogonalCrop.Mesh mvvcvtk_crop_tests)
+
+if(MSVC)
+    set_source_files_properties(CropMeshTests.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+endif()

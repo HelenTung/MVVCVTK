@@ -173,14 +173,33 @@ struct CropInputSnapshot final {
     VtkSurfaceMeshSnapshot mesh;
 };
 
+struct CropBuildOptions final {
+    std::size_t availableRamBytes = 512ULL * 1024 * 1024;
+    double meshTolerance = 0.05;
+    std::size_t maxCells = 1000000;
+    std::uint32_t maxDepth = 64;
+    bool operator==(const CropBuildOptions& other) const noexcept {
+        return availableRamBytes==other.availableRamBytes && meshTolerance==other.meshTolerance
+            && maxCells==other.maxCells && maxDepth==other.maxDepth;
+    }
+};
+
 struct CropBuildParams final {
+    CropDocumentId documentId = 0;
+    CropNodeId nodeId = 0;
+    CropRequestId requestId = 0;
     DataRevisionRef sourceRevision;
     std::vector<CropOpItem> operations;
     std::size_t nodeCount = 0;
     std::size_t availableRamBytes = 0;
+    double meshTolerance = 0.05;
+    std::size_t maxCells = 1000000;
+    std::uint32_t maxDepth = 64;
 };
 
 struct CropBuildResult final {
+    CropRequestId requestId = 0;
+    std::uint64_t stateRevision = 0;
     CropDocumentId documentId = 0;
     CropNodeId nodeId = 0;
     CropResultId resultId = 0;
@@ -195,6 +214,9 @@ struct CropBuildResult final {
     DataRevisionRef recipeRevision;
     DataRevisionRef outputRevision;
     std::string message;
+    double meshErrorBound = 0;
+    double meshAreaErrorBound = 0;
+    std::size_t meshTriangleCount = 0;
 };
 
 enum class CropDocumentStatus : std::uint8_t {

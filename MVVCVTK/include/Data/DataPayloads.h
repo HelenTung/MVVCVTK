@@ -383,10 +383,16 @@ private:
     std::array<double, 2> m_scalarRange;
 };
 
+namespace MeshAttributeRoles {
+inline constexpr std::uint32_t scalars=1, vectors=2, normals=4, textureCoordinates=8, tensors=16;
+inline constexpr std::uint32_t all=scalars|vectors|normals|textureCoordinates|tensors;
+}
+
 struct MeshAttribute final {
     std::string name;
     std::size_t componentCount = 0;
     std::vector<double> values;
+    std::uint32_t activeRoles = 0;
 };
 
 class SurfaceMeshPayload final : public IDataPayload {
@@ -394,15 +400,17 @@ class SurfaceMeshPayload final : public IDataPayload {
         std::vector<double> vertices;
         std::vector<std::uint64_t> triangles;
         std::vector<MeshAttribute> pointAttributes;
+        std::vector<MeshAttribute> cellAttributes;
     };
 public:
     SurfaceMeshPayload(
         std::vector<double> vertices,
         std::vector<std::uint64_t> triangles,
         std::vector<MeshAttribute> pointAttributes = {},
-        std::string coordinateFrame = "RAS")
+        std::string coordinateFrame = "RAS",
+        std::vector<MeshAttribute> cellAttributes = {})
         : m_mesh(std::make_shared<const MeshData>(MeshData{
-            std::move(vertices), std::move(triangles), std::move(pointAttributes)}))
+            std::move(vertices), std::move(triangles), std::move(pointAttributes),std::move(cellAttributes)}))
         , m_coordinateFrame(std::move(coordinateFrame))
         , m_isValid(GetMeshValid())
     {
@@ -428,6 +436,7 @@ public:
     {
         return m_mesh->pointAttributes;
     }
+    const std::vector<MeshAttribute>& GetCellAttributes() const noexcept { return m_mesh->cellAttributes; }
     const std::string& GetCoordinateFrame() const noexcept
     {
         return m_coordinateFrame;
@@ -458,18 +467,26 @@ private:
                 })) {
             return false;
         }
-        for (const auto& attribute : m_mesh->pointAttributes) {
-            if (attribute.name.empty() || attribute.componentCount == 0
-                || pointCount > std::numeric_limits<std::size_t>::max()
-                    / attribute.componentCount
-                || attribute.values.size()
-                    != pointCount * attribute.componentCount
-                || !std::all_of(
-                    attribute.values.begin(), attribute.values.end(),
-                    [](const double value) { return std::isfinite(value); })) {
-                return false;
+        const auto validAttributes=[](const std::vector<MeshAttribute>& attributes,std::size_t tuples) noexcept {
+            std::uint32_t roles=0;
+            for(std::size_t index=0;index<attributes.size();++index) {
+                const auto& attribute=attributes[index];
+                if(attribute.name.empty()||attribute.componentCount==0
+                    ||attribute.componentCount>static_cast<std::size_t>(std::numeric_limits<int>::max())
+                    ||tuples>std::numeric_limits<std::size_t>::max()/attribute.componentCount
+                    ||attribute.values.size()!=tuples*attribute.componentCount
+                    ||(attribute.activeRoles&~MeshAttributeRoles::all)||(roles&attribute.activeRoles)
+                    ||!std::all_of(attribute.values.begin(),attribute.values.end(),[](double v){return std::isfinite(v);}))return false;
+                for(std::size_t prior=0;prior<index;++prior)if(attributes[prior].name==attribute.name)return false;
+                if((attribute.activeRoles&(MeshAttributeRoles::normals|MeshAttributeRoles::vectors))&&attribute.componentCount!=3)return false;
+                if((attribute.activeRoles&MeshAttributeRoles::tensors)&&attribute.componentCount!=9)return false;
+                if((attribute.activeRoles&MeshAttributeRoles::textureCoordinates)&&attribute.componentCount>3)return false;
+                roles|=attribute.activeRoles;
             }
-        }
+            return true;
+        };
+        if(!validAttributes(m_mesh->pointAttributes,pointCount)
+            ||!validAttributes(m_mesh->cellAttributes,m_mesh->triangles.size()/3))return false;
         return true;
     }
 
@@ -566,7 +583,9 @@ enum class RoiShape : std::uint8_t {
     Plane,
     Polyline,
     Contour,
-    MaskReference
+    MaskReference,
+    Cylinder,
+    Sphere
 };
 
 struct RoiPrimitive final {
@@ -582,6 +601,12 @@ struct RoiPrimitive final {
     std::vector<std::array<double, 3>> points;
     std::optional<DataRevisionRef> mask;
     std::string operation;
+    std::array<double,3> center = {0.0,0.0,0.0};
+    std::array<double,3> axis = {0.0,0.0,1.0};
+    double radius = 1.0;
+    double height = 1.0;
+    std::uint32_t recipeVersion = 1;
+    std::uint32_t boundaryPolicyVersion = 1;
 };
 
 class RoiGeometryPayload final : public IDataPayload {
@@ -608,7 +633,7 @@ public:
     {
         if (m_primitives.empty()) return false;
         for (const auto& primitive : m_primitives) {
-            if (primitive.operation.empty()
+            if (primitive.recipeVersion!=1 || primitive.boundaryPolicyVersion!=1 || primitive.operation.empty()
                 || !std::all_of(
                     primitive.localToSource.begin(),
                     primitive.localToSource.end(),
@@ -620,6 +645,26 @@ public:
                     primitive.normal.begin(), primitive.normal.end(),
                     [](const double value) { return std::isfinite(value); })) {
                 return false;
+            }
+            if (!std::all_of(primitive.center.begin(),primitive.center.end(),[](double v){return std::isfinite(v);})
+                ||!std::all_of(primitive.axis.begin(),primitive.axis.end(),[](double v){return std::isfinite(v);})
+                ||!std::isfinite(primitive.radius)||!std::isfinite(primitive.height))return false;
+            switch(primitive.shape) {
+            case RoiShape::Box: {
+                const auto& m=primitive.localToSource;
+                const auto det=m[0]*(m[5]*m[10]-m[6]*m[9])-m[1]*(m[4]*m[10]-m[6]*m[8])+m[2]*(m[4]*m[9]-m[5]*m[8]);
+                if(m[12]!=0||m[13]!=0||m[14]!=0||m[15]!=1||!std::isfinite(det)||det==0)return false;
+                break;
+            }
+            case RoiShape::Plane:
+                if(std::hypot(primitive.normal[0],primitive.normal[1],primitive.normal[2])<=0)return false;
+                break;
+            case RoiShape::Sphere: if(primitive.radius<=0)return false;break;
+            case RoiShape::Cylinder:
+                if(primitive.radius<=0||primitive.height<=0||std::hypot(primitive.axis[0],primitive.axis[1],primitive.axis[2])<=0)return false;
+                break;
+            case RoiShape::Polyline: case RoiShape::Contour: case RoiShape::MaskReference: break;
+            default:return false;
             }
             if (primitive.shape == RoiShape::MaskReference
                 && (!primitive.mask

@@ -3,6 +3,10 @@
 #include "Data/VtkDataBridge.h"
 
 #include <vtkCellArray.h>
+#include <vtkCellData.h>
+#include <vtkDoubleArray.h>
+#include <vtkFloatArray.h>
+#include <vtkUnsignedLongLongArray.h>
 #include <vtkImageData.h>
 #include <vtkPointData.h>
 #include <vtkDataArray.h>
@@ -144,10 +148,20 @@ bool GetMeshRoundTripValid()
     auto mesh = vtkSmartPointer<vtkPolyData>::New();
     mesh->SetPoints(points);
     mesh->SetPolys(polys);
+    auto normals=vtkSmartPointer<vtkDoubleArray>::New();normals->SetName("Normals");
+    normals->SetNumberOfComponents(3);normals->SetNumberOfTuples(3);
+    normals->FillComponent(0,0);normals->FillComponent(1,0);normals->FillComponent(2,1);
+    mesh->GetPointData()->SetNormals(normals);
+    auto temperatures=vtkSmartPointer<vtkFloatArray>::New();temperatures->SetName("Temperature");
+    temperatures->InsertNextValue(0.5f);temperatures->InsertNextValue(1.5f);temperatures->InsertNextValue(2.5f);
+    mesh->GetPointData()->SetScalars(temperatures);
+    auto materials=vtkSmartPointer<vtkUnsignedIntArray>::New();materials->SetName("Material");materials->InsertNextValue(17);
+    mesh->GetCellData()->SetScalars(materials);
 
     VtkDataBridge bridge;
     const auto payload = bridge.CreateMeshPayload(mesh);
     points->SetPoint(0, 9.0, 9.0, 9.0);
+    normals->SetComponent(0,2,-1);temperatures->SetValue(2,100);materials->SetValue(0,99);
     DataGraphStore store;
     const auto snapshot = SetPayload(store, payload);
     const auto view = bridge.GetSurfaceMesh(snapshot);
@@ -159,7 +173,22 @@ bool GetMeshRoundTripValid()
     if (view && view->mesh && view->mesh->GetPoints()) {
         view->mesh->GetPoint(0, first);
     }
-    return Check(
+    auto wide=vtkSmartPointer<vtkUnsignedLongLongArray>::New();wide->SetName("WideId");wide->SetNumberOfTuples(3);
+    for(vtkIdType i=0;i<3;++i)wide->SetValue(i,9007199254740993ULL);
+    mesh->GetPointData()->AddArray(wide);
+    const bool rejectsLoss=!bridge.CreateMeshPayload(mesh);mesh->GetPointData()->RemoveArray("WideId");
+    auto duplicate=payload?payload->GetPointAttributes():std::vector<MeshAttribute>{};
+    if(!duplicate.empty())duplicate.push_back(duplicate.front());
+    const SurfaceMeshPayload invalidAttributes(payload->GetVertices(),payload->GetTriangles(),std::move(duplicate));
+    return Check(rejectsLoss&&!invalidAttributes.GetValid(),"mesh integer precision loss or ambiguous attributes were accepted")
+        &&Check(payload&&payload->GetPointAttributes().size()==2&&payload->GetCellAttributes().size()==1
+            &&view&&view->mesh->GetPointData()->GetNormals()&&view->mesh->GetPointData()->GetScalars()
+            &&view->mesh->GetCellData()->GetScalars()
+            &&view->mesh->GetPointData()->GetNormals()->GetComponent(0,2)==1
+            &&view->mesh->GetPointData()->GetScalars()->GetComponent(2,0)==2.5
+            &&view->mesh->GetCellData()->GetScalars()->GetComponent(0,0)==17,
+            "mesh point/cell values or active normal/scalar roles were not isolated and restored")
+        && Check(
         payload && view && view->mesh->GetNumberOfPolys() == 1
             && first[0] == 0.0 && first[1] == 0.0 && first[2] == 0.0,
         "surface mesh isolation or round trip failed")

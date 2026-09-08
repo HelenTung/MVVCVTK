@@ -14,6 +14,10 @@
 
 #include <cstddef>
 #include <utility>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
 
 namespace {
 std::shared_ptr<const RoiGeometryPayload> CreateRecipePayload(
@@ -35,9 +39,14 @@ std::shared_ptr<const RoiGeometryPayload> CreateRecipePayload(
             primitive.origin = operation.planeCenterInInputModel;
             primitive.normal = operation.planeNormalInInputModel;
         }
-        else {
-            return {};
-        }
+        else if (operation.geometryType == CropShape::Sphere || operation.geometryType == CropShape::Cylinder) {
+            primitive.shape = operation.geometryType == CropShape::Sphere ? RoiShape::Sphere : RoiShape::Cylinder;
+            primitive.center = operation.centerInInputModel;
+            primitive.axis = operation.axisInInputModel;
+            primitive.radius = operation.radius; primitive.height = operation.height;
+        } else return {};
+        primitive.recipeVersion = operation.recipeVersion;
+        primitive.boundaryPolicyVersion = operation.boundaryPolicyVersion;
         primitives.push_back(std::move(primitive));
     }
     auto payload = std::make_shared<const RoiGeometryPayload>(
@@ -95,11 +104,20 @@ CropRouter::BuildResultTask(
                 result = CropAlgorithm::GetResult(input.mesh ? input.mesh->mesh.GetPointer() : nullptr,
                     params, payload, getStopRequested);
                 if (result.isSucceeded) {
-                    result.preparedView = VtkPreparedDataView::BuildDataView(result.polyData);
+                    const auto* source=dynamic_cast<const SurfaceMeshPayload*>(input.data->payload.get());
+                    result.preparedView = source?VtkPreparedDataView::BuildDataView(result.polyData,source->GetCoordinateFrame()):nullptr;
                     if (result.preparedView) result.outputPayload = result.preparedView->payload;
                 }
             }
+            result.documentId=params.documentId;result.nodeId=params.nodeId;result.requestId=params.requestId;
             if (!result.isSucceeded) return result;
+            std::ostringstream parameters;parameters.imbue(std::locale::classic());
+            parameters<<std::setprecision(std::numeric_limits<double>::max_digits10)
+                <<"{\"schemaVersion\":1,\"geometryVersion\":1,\"boundaryPolicyVersion\":1,\"meshBackendVersion\":1,\"meshTolerance\":"<<params.meshTolerance
+                <<",\"maxCells\":"<<params.maxCells<<",\"maxDepth\":"<<params.maxDepth
+                <<",\"availableRamBytes\":"<<params.availableRamBytes
+                <<",\"meshErrorBound\":"<<result.meshErrorBound<<",\"meshAreaErrorBound\":"<<result.meshAreaErrorBound<<"}";
+            result.buildParameters=parameters.str();
             result.recipePayload = CreateRecipePayload(result.operations);
             if (!result.preparedView) result.preparedView = VtkPreparedDataView::BuildDataView(result.outputPayload, input.image);
             if (!result.recipePayload || !result.preparedView) {

@@ -65,6 +65,7 @@ public:
     std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const;
     std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const;
     CropInputSnapshot GetSource() const;
+    void ForgetOutcome(CropRequestId requestId);
     bool GetResultsValid(const std::vector<CropResultRecord>& results) const;
     void SetResults(std::vector<CropResultRecord>&& results) noexcept;
     CropDocumentArchive GetArchive() const;
@@ -95,6 +96,7 @@ public:
         CropInputSnapshot rootInput,
         CropCandidateCallback onComplete);
     bool BuildCropResult(CropNodeId nodeId,CropCandidateCallback onComplete);
+    bool BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();

@@ -170,3 +170,12 @@ void CropHistoryQueue::SetCancelled(CropHistory& history) noexcept
 {
     while(!m_pending.empty())SetFailed(history,CropFailure::Cancelled);
 }
+
+bool CropHistoryQueue::GetRequestsSame(const CropEditRequest& a,const CropEditRequest& b) { return GetSame(a,b); }
+void CropHistoryQueue::ForgetOutcome(CropRequestId id) noexcept
+{
+    const auto found=m_entries.find(id);
+    if(found!=m_entries.end()&&found->second.outcome.status!=CropEditStatus::Queued) {
+        m_expiredThrough=std::max(m_expiredThrough,id);m_entries.erase(found);
+    }
+}

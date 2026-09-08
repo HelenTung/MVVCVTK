@@ -7,6 +7,8 @@
 // 一个文档的已接纳命令。只保存不可变请求/预留身份，正式节点仍仅由 CropHistory 拥有。
 class CropHistoryQueue final {
 public:
+    static bool GetRequestsSame(const CropEditRequest& a,const CropEditRequest& b);
+    void ForgetOutcome(CropRequestId requestId) noexcept;
     CropEditAdmission StartRequest(CropHistory& history, CropEditRequest request);
     std::optional<CropEditOutcome> GetOutcome(CropRequestId requestId) const;
     std::optional<CropNodeSnapshot> GetNode(const CropHistory& history,CropNodeId nodeId) const;

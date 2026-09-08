@@ -728,15 +728,62 @@ int GetCropLifecycleFailCount()
     const auto accepted=feature->SendRequest(append);
     if (!accepted || !wait([&]{auto out=feature->GetOutcome(append.documentId,append.requestId);return out&&out->status==CropEditStatus::Succeeded;}))
         return GetCaseResult(false,"Crop lifecycle explicit node preview")?0:1;
-    CropBuildResult built;int builds=0;
-    if (!feature->SendRequest(GetTargetRequest(CropHostAction::BuildResult,target),[&](auto value){built=std::move(value);++builds;})
-        || !wait([&]{return builds!=0;})) return GetCaseResult(false,"Crop lifecycle build completed")?0:1;
+    CropEditRequest selectRoot;selectRoot.documentId=history.documentId;selectRoot.requestId=CropHostFeature::CreateRequestId();
+    selectRoot.expectedRevision=feature->GetState().history.stateRevision;selectRoot.kind=CropEditKind::Select;selectRoot.nodeId=history.rootNodeId;
+    if(!feature->SendRequest(selectRoot)||!wait([&]{const auto out=feature->GetOutcome(selectRoot.documentId,selectRoot.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return 1;
+    CropBuildRequest request;request.documentId=history.documentId;request.nodeId=accepted.nodeId;
+    request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=feature->GetState().history.stateRevision;
+    auto invalid=request;invalid.nodeId=history.rootNodeId;
+    int rejectedCallbacks=0;
+    if(!GetCaseResult(feature->SendRequest(invalid,[&](auto){++rejectedCallbacks;}).failureReason==CropFailure::NoCropOperations,
+        "Explicit Root materialization returns NoCropOperations without admission"))return 1;
+    CropBuildResult built;int builds=0,replayBuilds=0;
+    const auto buildAdmission=feature->SendRequest(request,[&](auto value){built=std::move(value);++builds;});
+    const auto buildReplay=feature->SendRequest(request,[&](auto){++replayBuilds;});
+    CropEditRequest whileBuilding;whileBuilding.documentId=request.documentId;whileBuilding.nodeId=request.nodeId;
+    whileBuilding.requestId=CropHostFeature::CreateRequestId();whileBuilding.expectedRevision=feature->GetState().history.stateRevision;
+    if(!GetCaseResult(feature->SendRequest(whileBuilding).failureReason==CropFailure::Busy
+        &&feature->SendRequest(append).isReplay,"Building rejects new edits while preserving replay of accepted edits"))return 1;
+    invalid=request;invalid.options.maxDepth-=1;
+    const auto conflictingBuild=feature->SendRequest(invalid);
+    if(!buildAdmission||!buildReplay||!buildReplay.isReplay||buildReplay.resultId!=buildAdmission.resultId
+        ||conflictingBuild.failureReason!=CropFailure::InvalidRequest||!wait([&]{return builds!=0;}))return 1;
+    const auto terminal=feature->GetBuildOutcome(request.documentId,request.requestId);
+    if(!GetCaseResult(builds==1&&replayBuilds==0&&rejectedCallbacks==0&&built.isSucceeded
+        &&built.requestId==request.requestId&&built.nodeId==accepted.nodeId
+        &&feature->GetState().history.appliedHead==history.rootNodeId
+        &&terminal&&terminal->status==CropEditStatus::Succeeded&&terminal->result.commitId==built.commitId
+        &&feature->SendRequest(request).isReplay,
+        "Explicit-node build freezes its target independently of preview and replays one retained terminal"))return 1;
+    CropEditRequest selectBuilt;selectBuilt.documentId=request.documentId;selectBuilt.nodeId=accepted.nodeId;
+    selectBuilt.kind=CropEditKind::Select;selectBuilt.requestId=CropHostFeature::CreateRequestId();
+    selectBuilt.expectedRevision=feature->GetState().history.stateRevision;
+    if(!feature->SendRequest(selectBuilt)||!wait([&]{const auto out=feature->GetOutcome(selectBuilt.documentId,selectBuilt.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return 1;
     history=feature->GetHistory();
     if (!built.isSucceeded) std::cerr<<"Crop build failure="<<static_cast<int>(built.failureReason)<<" message="<<built.message<<'\n';
 
     if (!GetCaseResult(builds==1&&built.isSucceeded&&built.documentId==history.documentId&&built.nodeId==accepted.nodeId
         &&built.sourceRevision==root->data->self&&history.results.size()==1&&history.results[0].status==CropResultStatus::Published,
         "Crop publication joins one scoped result to its fixed Root and protected node")) return 1;
+    int editCallbacks=0,duplicateEditCallbacks=0;CropEditRequest oldestEdit;
+    for(int index=0;index<1030;++index) {
+        CropEditRequest edit;edit.documentId=request.documentId;edit.nodeId=accepted.nodeId;
+        edit.requestId=CropHostFeature::CreateRequestId();edit.expectedRevision=feature->GetState().history.stateRevision;
+        const auto admission=feature->SendRequest(edit,[&](CropEditOutcome value){if(value.status==CropEditStatus::Succeeded)++editCallbacks;});
+        if(!admission)return GetCaseResult(false,"Shared request ledger stress admission")?0:1;
+        if(!index) {
+            oldestEdit=edit;
+            if(!feature->SendRequest(edit,[&](auto){++duplicateEditCallbacks;}).isReplay)return 1;
+        }
+        if(index%16==15&&!wait([&]{return editCallbacks==index+1;}))return 1;
+    }
+    if(!wait([&]{return editCallbacks==1030;}))return 1;
+    const auto expiredBuild=feature->GetBuildOutcome(request.documentId,request.requestId);
+    const auto expiredEdit=feature->GetOutcome(oldestEdit.documentId,oldestEdit.requestId);
+    if(!GetCaseResult(duplicateEditCallbacks==0&&expiredBuild&&expiredBuild->result.failureReason==CropFailure::RequestExpired
+        &&expiredEdit&&expiredEdit->failureReason==CropFailure::RequestExpired
+        &&feature->SendRequest(request).failureReason==CropFailure::RequestExpired,
+        "Editing and materialization share 1024 terminal slots and expired requests cannot execute again"))return 1;
     CropPruneRequest prune;prune.nodeIds={accepted.nodeId};
     const auto protectedImpact=feature->GetPruneImpact(history.documentId,prune);
     if (!GetCaseResult(!protectedImpact.blockers.empty(),"Published crop result protects its node path")) return 1;

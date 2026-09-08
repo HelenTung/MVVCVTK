@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -1498,6 +1499,26 @@ bool StartLargeTableCase()
     return isPassed;
 }
 
+bool GetIndependentCurveKept(const std::vector<CropOpItem>& operations,std::size_t count,
+    const CropPointFloat3Array& point)
+{
+    for(std::size_t index=0;index<count;++index) {
+        const auto& op=operations[index];
+        const long double x=static_cast<long double>(point[0])-op.centerInInputModel[0];
+        const long double y=static_cast<long double>(point[1])-op.centerInInputModel[1];
+        const long double z=static_cast<long double>(point[2])-op.centerInInputModel[2];
+        long double squared=x*x+y*y+z*z;bool cap=true;
+        if(op.geometryType==CropShape::Cylinder) {
+            const long double ax=op.axisInInputModel[0],ay=op.axisInInputModel[1],az=op.axisInInputModel[2];
+            const long double t=(x*ax+y*ay+z*az)/std::sqrt(ax*ax+ay*ay+az*az);
+            squared-=t*t;cap=std::abs(t)<=static_cast<long double>(op.height)/2;
+        }
+        const bool inside=cap&&squared<=static_cast<long double>(op.radius)*op.radius;
+        if(op.removalMode==CropRemovalMode::KeepInside?!inside:inside)return false;
+    }
+    return true;
+}
+
 bool GetPointGridMatched(
     const std::vector<CropOpItem>& operations,
     const std::size_t nodeCount,
@@ -1507,7 +1528,8 @@ bool GetPointGridMatched(
     vtkRenderer* renderer,
     vtkRenderWindow* renderWindow,
     const std::vector<CropPointFloat3Array>& modelPoints,
-    const CropMatrixDouble16Array& modelToWorld)
+    const CropMatrixDouble16Array& modelToWorld,
+    const CropVectorDouble3Array& sampleError = {})
 {
     const auto table = CropAlgorithm::BuildPredicateTable(
         operations,
@@ -1568,8 +1590,26 @@ bool GetPointGridMatched(
             pixels->GetScalarPointer(x, y, 0));
         const bool isGpuKept = pixel
             && (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0);
-        const bool isCpuKept = CropAlgorithm::GetPointKept(
-            *table.predicateTable, nodeCount, modelPoint);
+        const bool curved=std::all_of(operations.begin(),operations.begin()+nodeCount,[](const auto& op) {
+            return op.geometryType==CropShape::Sphere||op.geometryType==CropShape::Cylinder;
+        });
+        const bool isCpuKept = curved ? GetIndependentCurveKept(operations,nodeCount,modelPoint)
+            : CropAlgorithm::GetPointKept(*table.predicateTable, nodeCount, modelPoint);
+        if(curved) {
+            bool removed=false,band=false;
+            for(std::size_t i=0;i<nodeCount;++i) {
+                const auto bounds=table.predicateTable->geometry[i].GetFloatBounds(
+                    {modelPoint[0],modelPoint[1],modelPoint[2]},sampleError);
+                if(bounds.classification==CropPointClassification::PrecisionNotMet)return false;
+                removed=removed||bounds.classification==CropPointClassification::Removed;
+                band=band||bounds.classification==CropPointClassification::BoundaryBand;
+            }
+            if(band&&!removed) {
+                std::cout<<"GPU sample boundary-band revision="<<revision<<" point="<<modelPoint[0]<<','<<modelPoint[1]<<'\n';
+                continue;
+            }
+            if(isCpuKept==removed)return false;
+        }
         if (isGpuKept != isCpuKept) {
             std::cerr << "Point-grid mismatch revision=" << revision
                       << " point=(" << modelPoint[0] << ',' << modelPoint[1]
@@ -1582,6 +1622,43 @@ bool GetPointGridMatched(
         }
     }
     return true;
+}
+
+bool StartCurvedPointGridCase()
+{
+    std::vector<CropPointFloat3Array> points;
+    vtkNew<vtkAppendPolyData> append;
+    for(float y:{-1.6f,-0.8f,0.0f,0.8f,1.6f})for(float x:{-1.6f,-0.8f,0.0f,0.8f,1.6f}) {
+        points.push_back({x,y,0});vtkNew<vtkCubeSource> marker;
+        marker->SetBounds(x-0.025,x+0.025,y-0.025,y+0.025,-0.02,0.02);marker->Update();
+        append->AddInputData(marker->GetOutput());
+    }
+    append->Update();
+    auto strategy=std::make_shared<IsoSurfaceStrategy>();auto effect=std::make_shared<CropShaderEffect>();
+    strategy->SetInputData(append->GetOutput());
+    auto renderer=vtkSmartPointer<vtkRenderer>::New();renderer->SetBackground(0,0,0);
+    auto window=vtkSmartPointer<vtkRenderWindow>::New();window->SetOffScreenRendering(1);
+    window->SetSize(600,600);window->AddRenderer(renderer);
+    if(!strategy->SetRenderInputStamp({GetRenderRevision(1)})||!strategy->AttachRenderEffect(effect,RenderBindingUse::Current))return false;
+    strategy->AttachRenderer(renderer);
+    // The source cylinder remains circular under a reflected/sheared display pose.
+    const CropMatrixDouble16Array modelToWorld={-1,0.2,0,0, 0.1,1,0,0, 0,0,1,0, 0,0,0,1};
+    RenderParams visual;visual.modelMatrix=modelToWorld;strategy->SetVisualState(visual,UpdateFlags::Transform);
+    auto* actor=vtkActor::SafeDownCast(strategy->GetMainProp());if(!actor)return false;
+    actor->GetProperty()->SetColor(1,1,1);actor->GetProperty()->SetAmbient(1);actor->GetProperty()->LightingOff();
+    auto* camera=renderer->GetActiveCamera();camera->ParallelProjectionOn();camera->SetPosition(0,0,10);
+    camera->SetFocalPoint(0,0,0);camera->SetViewUp(0,1,0);camera->SetParallelScale(2.4);renderer->ResetCameraClippingRange();
+    CropOpItem sphere;sphere.operationIndex=1;sphere.geometryType=CropShape::Sphere;sphere.radius=1.2;
+    CropOpItem cylinder;cylinder.operationIndex=2;cylinder.geometryType=CropShape::Cylinder;
+    cylinder.radius=1.05;cylinder.height=1.5;cylinder.axisInInputModel={1,1,1};
+    std::uint64_t revision=1;bool passed=true;
+    for(auto op:{sphere,cylinder})for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        op.removalMode=mode;
+        passed=GetPointGridMatched({op},1,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    }
+    passed=GetPointGridMatched({sphere,cylinder},2,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    window->Finalize();
+    return SetExpect(passed,"Curved GPU pixels differ from the independent reference for sphere/cylinder side/caps/complements.");
 }
 
 bool StartPointGridTruthCase()
@@ -1714,5 +1791,6 @@ int CropShaderPreviewSuite::GetFailCount() const
     failureCount += StartPixelTransactionCase() ? 0 : 1;
     failureCount += StartLargeTableCase() ? 0 : 1;
     failureCount += StartPointGridTruthCase() ? 0 : 1;
+    failureCount += StartCurvedPointGridCase() ? 0 : 1;
     return failureCount;
 }

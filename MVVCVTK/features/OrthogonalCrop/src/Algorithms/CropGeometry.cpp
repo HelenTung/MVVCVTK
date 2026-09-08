@@ -134,6 +134,154 @@ bool CropGeometry::GetKept(const CropVectorDouble3Array& point) const noexcept
     return m_operation.removalMode==CropRemovalMode::KeepInside ? inside : !inside;
 }
 
+namespace {
+struct FloatRange final { double lo=0,hi=0; };
+class FloatIntervals final {
+public:
+    bool valid=true;
+    std::size_t operations=0;
+    FloatRange Value(double value,double error=0) noexcept {
+        if(!std::isfinite(value)||!std::isfinite(error)||error<0)return Invalid();
+        const double lo=value-error,hi=value+error;
+        if(!Finite(lo,hi))return Invalid();
+        const double flo=static_cast<float>(lo),fhi=static_cast<float>(hi);
+        auto result=FloatRange{std::min(lo,flo),std::max(hi,fhi)};
+        // GPUs may flush a subnormal operand to signed zero.
+        if((flo!=0&&std::abs(flo)<std::numeric_limits<float>::min())
+            ||(fhi!=0&&std::abs(fhi)<std::numeric_limits<float>::min())) {
+            result.lo=std::min(result.lo,0.0);result.hi=std::max(result.hi,0.0);
+        }
+        return result;
+    }
+    FloatRange Add(FloatRange a,FloatRange b) noexcept {
+        const FloatRange sum{a.lo+b.lo,a.hi+b.hi};
+        return Round(sum,std::max(std::abs(sum.lo),std::abs(sum.hi)),1);
+    }
+    FloatRange Neg(FloatRange a) noexcept {return {-a.hi,-a.lo};}
+    FloatRange Sub(FloatRange a,FloatRange b) noexcept {return Add(a,Neg(b));}
+    FloatRange Mul(FloatRange a,FloatRange b) noexcept {
+        const std::array<double,4> values{a.lo*b.lo,a.lo*b.hi,a.hi*b.lo,a.hi*b.hi};
+        const auto range=std::minmax_element(values.begin(),values.end());
+        return Round({*range.first,*range.second},std::max(std::abs(*range.first),std::abs(*range.second)),1);
+    }
+    FloatRange Square(FloatRange a) noexcept {
+        const double largest=std::max(a.lo*a.lo,a.hi*a.hi);
+        const double smallest=a.lo<=0&&a.hi>=0?0:std::min(a.lo*a.lo,a.hi*a.hi);
+        return Round({smallest,largest},largest,1);
+    }
+    FloatRange Abs(FloatRange a) noexcept {
+        return {a.lo<=0&&a.hi>=0?0:std::min(std::abs(a.lo),std::abs(a.hi)),std::max(std::abs(a.lo),std::abs(a.hi))};
+    }
+    template<std::size_t count>
+    FloatRange Dot(const std::array<FloatRange,count>& a,const std::array<FloatRange,count>& b) noexcept {
+        FloatRange sum{};double magnitude=0;
+        for(std::size_t i=0;i<count;++i) {
+            const auto product=Mul(a[i],b[i]);sum.lo+=product.lo;sum.hi+=product.hi;
+            magnitude+=std::max(std::abs(product.lo),std::abs(product.hi));
+        }
+        // sum(abs(products)), rather than abs(sum), covers cancellation and any dot/FMA order.
+        return Round(sum,magnitude,2*count);
+    }
+    template<std::size_t count>
+    FloatRange NormSquared(const std::array<FloatRange,count>& value) noexcept {
+        FloatRange sum{};double magnitude=0;
+        for(const auto& component:value) {
+            const auto squared=Square(component);sum.lo+=squared.lo;sum.hi+=squared.hi;
+            magnitude+=std::max(std::abs(squared.lo),std::abs(squared.hi));
+        }
+        return Round(sum,magnitude,2*count);
+    }
+private:
+    FloatRange Invalid() noexcept {valid=false;return {};}
+    bool Finite(double lo,double hi) const noexcept {
+        return std::isfinite(lo)&&std::isfinite(hi)&&lo<=hi
+            &&std::max(std::abs(lo),std::abs(hi))<=std::numeric_limits<float>::max();
+    }
+    FloatRange Round(FloatRange value,double magnitude,std::size_t count) noexcept {
+        constexpr double u=0x1p-24;
+        if(count>std::numeric_limits<std::size_t>::max()-operations)return Invalid();
+        operations+=count;
+        if(!valid||static_cast<double>(operations)*u>=1||!Finite(value.lo,value.hi)||!std::isfinite(magnitude))return Invalid();
+        const double nu=static_cast<double>(count)*u;
+        const double error=(nu/(1-nu))*magnitude+(magnitude==0?0:std::numeric_limits<float>::min());
+        value.lo=std::nextafter(value.lo-error,-std::numeric_limits<double>::infinity());
+        value.hi=std::nextafter(value.hi+error,std::numeric_limits<double>::infinity());
+        if(!Finite(value.lo,value.hi))return Invalid();
+        return value;
+    }
+};
+}
+
+CropFloatBounds CropGeometry::GetFloatBounds(const CropVectorDouble3Array& point,
+    const CropVectorDouble3Array& inputError) const noexcept
+{
+    CropFloatBounds result;FloatIntervals math;
+    std::array<FloatRange,3> p;
+    for(int i=0;i<3;++i)p[i]=math.Value(point[i],inputError[i]);
+    std::array<FloatRange,3> signs{};
+    const auto& op=m_operation;
+    switch(op.geometryType) {
+    case CropShape::Box: {
+        const std::array<FloatRange,4> position{p[0],p[1],p[2],math.Value(1)};
+        const auto threshold=math.Value(1.0+1.0e-6);
+        for(int row=0;row<3;++row) {
+            std::array<FloatRange,4> coefficients;
+            for(int i=0;i<4;++i)coefficients[i]=math.Value(m_boxInverse[row*4+i]);
+            signs[row]=math.Sub(math.Abs(math.Dot(coefficients,position)),threshold);
+        }
+        result.predicateCount=3;break;
+    }
+    case CropShape::Plane: {
+        std::array<FloatRange,3> d,n;
+        for(int i=0;i<3;++i) {d[i]=math.Sub(p[i],math.Value(op.planeCenterInInputModel[i]));n[i]=math.Value(op.planeNormalInInputModel[i]);}
+        signs[0]=math.Neg(math.Dot(d,n));result.predicateCount=1;break;
+    }
+    case CropShape::Sphere: case CropShape::Cylinder: {
+        std::array<FloatRange,3> d,axis;
+        for(int i=0;i<3;++i) {d[i]=math.Sub(p[i],math.Value(op.centerInInputModel[i]));axis[i]=math.Value(op.axisInInputModel[i]);}
+        result.predicateCount=1;
+        if(op.geometryType==CropShape::Cylinder) {
+            const auto axial=math.Dot(d,axis);
+            for(int i=0;i<3;++i)d[i]=math.Sub(d[i],math.Mul(axial,axis[i]));
+            signs[1]=math.Sub(math.Abs(axial),math.Value(op.height*0.5));result.predicateCount=2;
+        }
+        signs[0]=math.Sub(math.NormSquared(d),math.Square(math.Value(op.radius)));break;
+    }
+    default:return result;
+    }
+    result.operationCount=math.operations;
+    if(!math.valid)return result;
+    bool inside=true,outside=false;
+    for(std::size_t i=0;i<result.predicateCount;++i) {
+        result.predicates[i]={signs[i].lo,signs[i].hi};
+        if(op.geometryType==CropShape::Plane) {inside=inside&&signs[i].hi<0;outside=outside||signs[i].lo>=0;}
+        else {inside=inside&&signs[i].hi<=0;outside=outside||signs[i].lo>0;}
+    }
+    if(!inside&&!outside)result.classification=CropPointClassification::BoundaryBand;
+    else result.classification=(op.removalMode==CropRemovalMode::KeepInside?inside:outside)
+        ?CropPointClassification::Kept:CropPointClassification::Removed;
+    return result;
+}
+
+std::optional<CropVectorDouble3Array> CropGeometry::GetAffineFloatError(
+    const CropMatrixDouble16Array& matrix,const CropVectorDouble3Array& point,
+    const CropVectorDouble3Array& inputError) noexcept
+{
+    if(!GetFinite(matrix)||matrix[12]!=0||matrix[13]!=0||matrix[14]!=0||matrix[15]!=1)return {};
+    FloatIntervals math;std::array<FloatRange,4> position;
+    for(int i=0;i<3;++i)position[i]=math.Value(point[i],inputError[i]);position[3]=math.Value(1);
+    CropVectorDouble3Array error;
+    for(int row=0;row<3;++row) {
+        std::array<FloatRange,4> coefficients;
+        for(int i=0;i<4;++i)coefficients[i]=math.Value(matrix[row*4+i]);
+        const auto bounds=math.Dot(coefficients,position);
+        const double exact=matrix[row*4]*point[0]+matrix[row*4+1]*point[1]+matrix[row*4+2]*point[2]+matrix[row*4+3];
+        error[row]=std::max(std::abs(bounds.lo-exact),std::abs(bounds.hi-exact));
+        if(!std::isfinite(exact)||!std::isfinite(error[row]))return {};
+    }
+    return math.valid?std::optional<CropVectorDouble3Array>{error}:std::nullopt;
+}
+
 bool CropGeometry::GetOperationsSame(const CropOpItem& a,const CropOpItem& b) noexcept
 {
     if (a.geometryType!=b.geometryType || a.removalMode!=b.removalMode

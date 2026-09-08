@@ -26,7 +26,7 @@ public:
     std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
         vtkImageData* labels) const;
     std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
-        vtkPolyData* mesh) const;
+        vtkPolyData* mesh, std::string coordinateFrame = "RAS") const;
 
     // Large copies/array enumeration run on the worker. A matching image source shares its scalar array.
     static std::shared_ptr<const VtkPreparedDataView> BuildDataView(

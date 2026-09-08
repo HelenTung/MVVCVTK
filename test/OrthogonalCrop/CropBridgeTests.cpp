@@ -324,9 +324,12 @@ bool GetBranchesAndFrozenBuilds() {
             &&result.operations[0].operationIndex==a.nodeId&&result.operations[1].operationIndex==b.nodeId
             &&result.operations[2].operationIndex==c.nodeId;
     }))return false;
+    const auto busy=Append(f.bridge,d.nodeId);
+    if(!Check(!busy.isAccepted&&busy.failureReason==CropFailure::Busy&&Deliver(f.bridge)&&captured
+        &&f.bridge.GetHistory().appliedHead==d.nodeId,"explicit build freezes branch C while editing branch D is locked"))return false;
     const auto e=Append(f.bridge,d.nodeId);
-    if(!Check(e.isAccepted&&Flush(f.bridge,f.window)&&Deliver(f.bridge)&&captured
-        &&f.bridge.GetHistory().appliedHead==e.nodeId,"build path changed while another branch was edited"))return false;
+    if(!Check(e.isAccepted&&Flush(f.bridge,f.window)&&f.bridge.GetHistory().appliedHead==e.nodeId,
+        "branch editing resumes after build completion"))return false;
     bool noOperations=false;
     if(!Check(!f.bridge.BuildCropResult(root,[&](CropMaterializationCandidate result) {noOperations=result.failureReason==CropFailure::NoCropOperations;})
         &&noOperations,"Root build did not distinguish NoCropOperations"))return false;

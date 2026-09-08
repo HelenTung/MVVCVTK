@@ -43,10 +43,21 @@ bool mvvcvtkCropKept(vec3 pointMC)
         dot(texelFetch(mvvcvtk_cropTable, cropBase + 3, 0), cropPoint),
         dot(texelFetch(mvvcvtk_cropTable, cropBase + 4, 0), cropPoint));
       cropInside = all(lessThanEqual(abs(cropBox.xyz), vec3(1.000001)));
-    } else {
+    } else if (int(cropMeta.x + 0.5) == 1) {
       vec3 cropCenter = texelFetch(mvvcvtk_cropTable, cropBase + 1, 0).xyz;
       vec3 cropNormal = texelFetch(mvvcvtk_cropTable, cropBase + 2, 0).xyz;
       cropInside = dot(pointMC - cropCenter, cropNormal) > 0.0;
+    } else {
+      vec4 cropCenterRadius = texelFetch(mvvcvtk_cropTable, cropBase + 1, 0);
+      vec3 cropOffset = pointMC - cropCenterRadius.xyz;
+      bool cropCap = true;
+      if (int(cropMeta.x + 0.5) == 2) {
+        vec4 cropAxisHeight = texelFetch(mvvcvtk_cropTable, cropBase + 2, 0);
+        float cropAxial = dot(cropOffset, cropAxisHeight.xyz);
+        cropOffset -= cropAxial * cropAxisHeight.xyz;
+        cropCap = abs(cropAxial) <= cropAxisHeight.w;
+      }
+      cropInside = cropCap && dot(cropOffset, cropOffset) <= cropCenterRadius.w * cropCenterRadius.w;
     }
     bool cropKept = int(cropMeta.y + 0.5) == 0 ? cropInside : !cropInside;
     if (!cropKept) { return false; }
@@ -204,6 +215,7 @@ bool CropShaderController::Impl::SetCropParams(CropShaderPayload payload)
     if (payload.revision == 0
         || !GetDataRevisionRefValid(payload.sourceStamp.dataRevision)
         || !payload.predicateTable
+        || !CropAlgorithm::GetTableValid(*payload.predicateTable,payload.nodeCount)
         || payload.nodeCount > payload.predicateTable->operationCount
         || payload.predicateTable->rgbaValues.size()
             != payload.predicateTable->operationCount
@@ -1112,7 +1124,7 @@ bool CropShaderEffect::Impl::SetSourcePreview(CropShaderPayload payload)
 {
     if(!payload.revision || payload.revision<=m_active.revision || m_sourcePreview.revision
         || m_staged.revision || m_commitRevision || !GetDataRevisionRefValid(payload.sourceStamp.dataRevision)
-        || !payload.predicateTable || payload.nodeCount!=payload.predicateTable->operationCount) return false;
+        || !payload.predicateTable || !CropAlgorithm::GetTableValid(*payload.predicateTable,payload.nodeCount)) return false;
     m_sourcePreview=std::move(payload);return true;
 }
 

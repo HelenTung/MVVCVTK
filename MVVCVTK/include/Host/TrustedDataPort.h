@@ -12,6 +12,7 @@
 
 class vtkImageData;
 class vtkPolyData;
+class SurfaceMeshPayload;
 
 struct VtkImageGridView final {
     DataGraphSnapshot graph;
@@ -45,7 +46,8 @@ using VtkSurfaceMeshSnapshot =
 struct VtkPreparedDataView final {
     static std::shared_ptr<const VtkPreparedDataView> BuildDataView(
         std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source = {});
-    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(vtkPolyData* mesh);
+    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(vtkPolyData* mesh, std::string coordinateFrame = "RAS");
+    static std::shared_ptr<const SurfaceMeshPayload> BuildMeshPayload(vtkPolyData* mesh, std::string coordinateFrame = "RAS");
     // Attach a prepublication use to exclusively owned render arrays. Borrowed array memory
     // must be retained by backingOwner, which must not own either VTK container (no cycle).
     // Register the returned use in the output draft before publishing these objects.

@@ -45,6 +45,31 @@ struct CropHostRequest {
 using CropBuildCallback =
     std::function<void(CropBuildResult)>;
 
+struct CropBuildRequest final {
+    CropDocumentId documentId = 0;
+    CropNodeId nodeId = 0;
+    CropRequestId requestId = 0;
+    std::uint64_t expectedRevision = 0;
+    CropBuildOptions options;
+    bool operator==(const CropBuildRequest& other) const noexcept {
+        return documentId==other.documentId && nodeId==other.nodeId && requestId==other.requestId
+            && expectedRevision==other.expectedRevision && options==other.options;
+    }
+};
+struct CropBuildAdmission final {
+    explicit operator bool() const noexcept { return isAccepted; }
+    bool isAccepted = false;
+    bool isReplay = false;
+    CropRequestId requestId = 0;
+    CropResultId resultId = 0;
+    std::uint64_t stateRevision = 0;
+    CropFailure failureReason = CropFailure::None;
+};
+struct CropBuildOutcome final {
+    CropEditStatus status = CropEditStatus::Queued;
+    CropBuildResult result;
+};
+
 enum class CropDocumentAction : std::uint8_t { ReturnToSource, CloseDocument };
 struct CropDocumentRequest final {
     CropDocumentAction action=CropDocumentAction::ReturnToSource;
@@ -70,6 +95,7 @@ struct CropDocumentAdmission final {
     std::uint64_t stateRevision=0;
     CropFailure failureReason=CropFailure::None;
 };
+using CropEditCallback=std::function<void(CropEditOutcome)>;
 using CropDocumentCallback=std::function<void(CropDocumentOutcome)>;
 
 struct CropHostState final {
@@ -107,11 +133,13 @@ public:
     bool SendRequest(
         CropHostRequest request,
         CropBuildCallback onComplete = nullptr);
+    CropBuildAdmission SendRequest(CropBuildRequest request,CropBuildCallback onComplete={});
+    std::optional<CropBuildOutcome> GetBuildOutcome(CropDocumentId documentId,CropRequestId requestId) const;
     CropDocumentAdmission SendRequest(CropDocumentRequest request,CropDocumentCallback onComplete={});
     std::optional<CropDocumentOutcome> GetDocumentOutcome(CropDocumentId documentId,CropRequestId requestId) const;
     CropHostState GetState() const;
     static CropRequestId CreateRequestId() noexcept;
-    CropEditAdmission SendRequest(CropEditRequest request);
+    CropEditAdmission SendRequest(CropEditRequest request,CropEditCallback onComplete={});
     CropHistorySnapshot GetHistory(CropDocumentId documentId = 0,CropNodeId after = 0,std::size_t limit = 1000) const;
     std::optional<CropEditOutcome> GetOutcome(CropDocumentId documentId,CropRequestId requestId) const;
     CropPruneImpact GetPruneImpact(CropDocumentId documentId,const CropPruneRequest& request) const;
