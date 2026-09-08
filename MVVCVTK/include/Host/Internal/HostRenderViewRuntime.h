@@ -26,14 +26,17 @@ struct HostRenderViewRuntime final {
     std::uint64_t renderedEpoch = 0;
     std::uint64_t pendingRenderEpoch = 0;
     bool isAvailable = false;
+    bool isFrameRenderNeeded = false;
     HostRenderViewState BuildViewState() const;
     HostRenderViewState BuildViewState(const AppViewState& appState) const;
     HostSceneViewState BuildSceneViewState(std::vector<std::string> featureIds) const;
     bool GetIntentStampValid(const RenderInputStamp& expected) const;
     bool CollectUpdates() const;
     bool SendPendingUpdates() const;
-    bool SetRenderNeeded() const;
-    bool ResetRenderNeeded() const;
+    // 帧内 intent/回滚只保留需求；新工作仍由 App port 发出外部唤醒。
+    bool SetRenderNeeded();
+    bool ResetRenderNeeded();
+    bool GetRenderNeeded() const;
     bool SendRender(std::uint64_t epoch);
     void SendCompletions() const noexcept;
     static std::optional<HostRenderMode> GetHostViewMode(VizMode mode);

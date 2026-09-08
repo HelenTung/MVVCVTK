@@ -1,3 +1,4 @@
+// 测试用途：验证应用状态的读写与状态转换。
 #include "AppStateTests.h"
 
 #include "App/AppState.h"

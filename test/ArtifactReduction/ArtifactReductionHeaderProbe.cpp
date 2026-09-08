@@ -1,3 +1,4 @@
+// 测试用途：编译检查伪影校正公开头的自足性。
 #include "Host/ArtifactReductionHostFeature.h"
 #include <type_traits>
 #if __has_include("remove_ring.h") || __has_include("ArtifactReductionAlgorithm.h") || __has_include("Data/DataManager.h")

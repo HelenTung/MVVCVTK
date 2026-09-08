@@ -1,3 +1,4 @@
+// 测试用途：验证零件分割算法结果及参数和输入约束。
 #include "PartSegmentationTestCases.h"
 
 #include "Algorithms/ClassicalPartSegmenter.h"

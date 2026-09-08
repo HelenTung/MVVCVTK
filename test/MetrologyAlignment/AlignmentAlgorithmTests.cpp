@@ -1,3 +1,4 @@
+// 测试用途：验证顺序平面、参考点系统对齐和几何形状处理。
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
 #include <cmath>

@@ -21,8 +21,8 @@ set_target_properties(
     mvvcvtk_interaction_tests
     PROPERTIES
         OUTPUT_NAME InteractionRouterTests
-        PROJECT_LABEL InteractionTests
-        FOLDER "MVVCVTK/Tests"
+        PROJECT_LABEL InteractionRouterTests
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_include_directories(

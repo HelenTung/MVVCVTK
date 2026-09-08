@@ -1,3 +1,4 @@
+// 测试用途：声明 Qt 宿主方法回归的共享辅助及各套件入口。
 #pragma once
 
 #include <string>

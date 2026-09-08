@@ -2,11 +2,13 @@
 .SYNOPSIS
 使用可追溯RAW输入运行仓内Feature审计，结果留在本工作树out目录。
 .DESCRIPTION
-InputManifest为JSON，schemaVersion=1，dataKind="real"。
+InputManifest为JSON，schemaVersion=2，dataKind="real"。
 必需字段：sampleId、provenance、path、sha256、dimensions[3]、spacing[3]、
 origin[3]、direction[9]、coordinateFrame="LPS"、unit="mm"、
 storage="float32-le-xfastest"。
-metricChecks数组每项：record、key、minimum、maximum、referencePath、referenceSha256。
+caseFile/caseSha256 指向现有 Qt 自动化 JSON 用例及其哈希；第一步必须是当前 RAW 的 Data.Load。
+metricChecks数组每项：record、operationId、key、minimum、maximum、referencePath、referenceSha256。
+key 是该操作 result 中的点分路径；不再解析已删除的 standalone 控制台输出。
 record使用AUDIT_THRESHOLD/PART/GAP/SURFACE/ALIGNMENT/ARTIFACT。
 无参考时仅显式AllowIntrinsicOnly可运行，仍不产生精度验收通过声明。
 #>
@@ -32,7 +34,7 @@ $outputRoot = Join-Path $RepoRoot ('out/feature-real-audit/' + (Get-Date -Format
 [void](New-Item -ItemType Directory -Path $outputRoot)
 $reportPath = Join-Path $outputRoot 'result.json'
 $report = [ordered]@{
-    schemaVersion=1; status='BLOCKED'; sourceHead=''; sourceStatus=@()
+    schemaVersion=2; status='BLOCKED'; sourceHead=''; sourceStatus=@()
     manifest=''; manifestHash=''; inputHash=''; configuration=$Configuration
     processExit=$null; elapsedMs=0; sampleIntervalMs=25; memorySamples=0
     peakPrivateBytes=0L; peakWorkingSetBytes=0L; metricChecks=@()
@@ -46,6 +48,7 @@ $process = $null
 $inputLease = $null
 $referenceLeases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
 $originalPath = $env:PATH
+$originalQtPluginPath = $env:QT_PLUGIN_PATH
 $exitCode = 3
 function Require([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Read-Numbers($Values, [int]$Count, [bool]$Positive) {
@@ -67,7 +70,7 @@ try {
     Require (Test-Path -LiteralPath $manifestPath -PathType Leaf) 'Acquisition manifest is missing'
     $referenceLeases.Add([IO.File]::Open($manifestPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read))
     $manifest = Get-Content -LiteralPath $manifestPath -Encoding UTF8 -Raw | ConvertFrom-Json
-    Require ($manifest.schemaVersion -eq 1 -and $manifest.dataKind -eq 'real') 'Manifest must identify an actual real acquisition'
+    Require ($manifest.schemaVersion -eq 2 -and $manifest.dataKind -eq 'real') 'Manifest must identify an actual real acquisition'
     Require (-not [string]::IsNullOrWhiteSpace($manifest.sampleId) -and
         -not [string]::IsNullOrWhiteSpace($manifest.provenance)) 'Sample identity and acquisition provenance are required'
     Require ($manifest.coordinateFrame -eq 'LPS' -and $manifest.unit -eq 'mm') 'Host input geometry must be LPS/mm'
@@ -103,6 +106,27 @@ try {
     $report.manifest = $manifestPath
     $report.manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
     $report.inputHash = $actualHash
+    $casePath = Resolve-InputPath $manifest.caseFile (Split-Path -Parent $manifestPath)
+    Require (Test-Path -LiteralPath $casePath -PathType Leaf) 'Qt automation case is missing'
+    $referenceLeases.Add([IO.File]::Open($casePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read))
+    Require ($manifest.caseSha256 -match '^[0-9A-Fa-f]{64}$' -and
+        (Get-FileHash -LiteralPath $casePath -Algorithm SHA256).Hash -eq $manifest.caseSha256) 'Qt case hash mismatch'
+    $case = Get-Content -LiteralPath $casePath -Encoding UTF8 -Raw | ConvertFrom-Json
+    Require (@($case.steps).Count -gt 0) 'Qt case must contain actual operations'
+    $first = $case.steps[0]
+    Require ($first.module -eq 'Data' -and $first.action -eq 'Load' -and $first.expectStatus -eq 'Succeeded') 'First operation must load the declared real input'
+    $input = $first.parameters
+    Require ([IO.Path]::GetFullPath($input.filePath) -ieq $inputPath -and
+        $input.datasetId -eq $manifest.sampleId -and $input.sourceDigest -eq $actualHash -and
+        $input.evidenceKind -in @('real-data','real-data-derived-roi')) 'Case acquisition identity mismatch'
+    foreach ($pair in @(@('dimensions','dimensions'),@('spacingLPS','spacing'),@('originLPS','origin'),@('directionLPS','direction'))) {
+        Require ((Join-Numbers $input.($pair[0])) -ceq (Join-Numbers $manifest.($pair[1]))) "Case geometry mismatch: $($pair[0])"
+    }
+    foreach ($module in @('Crop','Gap','Part','PartEdit','Surface','Rotation','Alignment','Artifact')) {
+        Require (@($case.steps | Where-Object { $_.module -eq $module }).Count -gt 0) "Case omits a required Feature: $module"
+    }
+    $report['casePath'] = $casePath
+    $report['caseHash'] = $manifest.caseSha256
     $checks = @()
     if ($manifest.PSObject.Properties.Name -contains 'metricChecks') { $checks = @($manifest.metricChecks) }
     $records = @('AUDIT_THRESHOLD','AUDIT_PART','AUDIT_GAP','AUDIT_SURFACE','AUDIT_ALIGNMENT','AUDIT_ARTIFACT')
@@ -113,7 +137,8 @@ try {
     }
     foreach ($check in $checks) {
         Require ($records -contains $check.record) 'Unknown metric record'
-        Require ($check.key -match '^[a-z_]+$') 'Invalid metric key'
+        Require ($check.key -match '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\.[0-9]+)*$') 'Invalid metric path'
+        Require ([string]$check.operationId -match '^[1-9][0-9]*$') 'Metric operationId is required'
         $limits = @(Read-Numbers @($check.minimum,$check.maximum) 2 $false)
         Require ($limits[0] -le $limits[1]) 'Invalid reference tolerance interval'
         $reference = Resolve-InputPath $check.referencePath (Split-Path -Parent $manifestPath)
@@ -148,8 +173,8 @@ try {
         Require ($cache.ContainsKey('MVVCVTK_DEPS_ROOT') -and
             [IO.Path]::GetFullPath($cache['MVVCVTK_DEPS_ROOT']) -ieq $DepsRoot.TrimEnd('\','/')) 'Build dependency root mismatch'
         foreach ($feature in @('ORTHOGONAL_CROP','GAP_ANALYSIS','MODEL_ROTATION','PART_SEGMENTATION',
-            'SURFACE_DETERMINATION','METROLOGY_ALIGNMENT','ARTIFACT_REDUCTION','STANDALONE')) {
-            Require ($cache.ContainsKey("MVVCVTK_BUILD_$feature") -and $cache["MVVCVTK_BUILD_$feature"] -eq 'ON') "Required Feature is not configured: $feature"
+            'SURFACE_DETERMINATION','METROLOGY_ALIGNMENT','ARTIFACT_REDUCTION','QT_TESTING')) {
+            Require ($cache.ContainsKey("MVVCVTK_BUILD_$feature") -and $cache["MVVCVTK_BUILD_$feature"] -in @('ON','TRUE','1')) "Required Feature is not configured: $feature"
         }
         # 先从已核验的配置源码重建公共入口，再记录二进制哈希。
         # 旧可执行文件与新源码diff并列不能构成当前实现的运行证据。
@@ -157,21 +182,18 @@ try {
         $previousPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            & cmake --build $binaryDir --config $Configuration --target MVVCVTKStandalone --parallel 6 *> $buildLog
+            & cmake --build $binaryDir --config $Configuration --target qt_feature_tests --parallel 6 *> $buildLog
             $buildExit = $LASTEXITCODE
         } finally { $ErrorActionPreference = $previousPreference }
-        Require ($buildExit -eq 0) "Standalone rebuild failed: $buildLog"
+        Require ($buildExit -eq 0) "Qt automation rebuild failed: $buildLog"
         $report['cacheHash'] = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash
         $report['dependencyLockHash'] = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'tools/MVVCVTK.Dependencies.lock.psd1') -Algorithm SHA256).Hash
-        $executable = Join-Path $binaryDir "bin/$Configuration/MVVCVTK.exe"
-        Require (Test-Path -LiteralPath $executable -PathType Leaf) 'Build the configured Standalone first'
+        $executable = Join-Path $binaryDir "bin/$Configuration/QtFeatureTests.exe"
+        Require (Test-Path -LiteralPath $executable -PathType Leaf) 'Build the configured Qt automation first'
         $report['executableHash'] = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash
-        $arguments = @('--real-audit','--host-driven',"--input=$inputPath",
-            "--dimensions=$(Join-Numbers $dimensions)","--spacing=$(Join-Numbers $spacing)",
-            "--origin=$(Join-Numbers $origin)","--direction=$(Join-Numbers $direction)",
-            '--input-frame=LPS','--input-unit=mm','--input-format=float32-le-xfastest',
-            "--dataset-id=$($manifest.sampleId)","--input-digest=$actualHash",
-            "--tool-budget-mib=$ToolBudgetMiB")
+        $recordPath = Join-Path $outputRoot 'operations.json'
+        $arguments = @('--case',$casePath,'--record',$recordPath,'--memory-budget-mib',"$ToolBudgetMiB")
+        $env:QT_PLUGIN_PATH = Join-Path $DepsRoot 'qt/plugins'
         foreach ($argument in $arguments) { Require ($argument -notmatch '["\r\n]') 'Quotes/control characters are not supported in audit arguments' }
         $quoted = @($arguments | ForEach-Object { '"' + $_ + '"' })
         $env:PATH = (Join-Path $DepsRoot 'vtk/bin') + ';' + (Join-Path $DepsRoot 'opencv/x64/vc16/bin') + ';' +
@@ -199,20 +221,36 @@ try {
         $report.status = 'FAILED'
         $exitCode = 1
         Require ($process.ExitCode -eq 0) 'Feature audit process failed'
-        $output = Get-Content -LiteralPath (Join-Path $outputRoot 'stdout.log') -Encoding UTF8 -Raw
-        Require ($output -match 'AUDIT_REAL: passed=1 completed=(\d+)/(\d+)' -and $Matches[1] -eq $Matches[2] -and [int]$Matches[1] -gt 0) 'Missing or incomplete real audit completion'
-        foreach ($check in $checks) {
-            $pattern = '(?m)^' + [regex]::Escape($check.record) + ' [^\r\n]*\b' + [regex]::Escape($check.key) + '=([-+0-9.eE]+)'
-            $matchesForMetric = [regex]::Matches($output,$pattern)
-            Require ($matchesForMetric.Count -gt 0) "Metric was not emitted: $($check.record).$($check.key)"
-            foreach ($match in $matchesForMetric) {
-                $value = [double]::Parse($match.Groups[1].Value,$culture)
-                $passed = -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and
-                    $value -ge [double]$check.minimum -and $value -le [double]$check.maximum
-                $report.metricChecks += @{ record=$check.record; key=$check.key; value=$value; passed=$passed }
-                Require $passed "Reference mismatch: $($check.record).$($check.key)=$value"
-            }
+        $actual = Get-Content -LiteralPath $recordPath -Encoding UTF8 -Raw | ConvertFrom-Json
+        Require ($actual.codeHead -eq $report.sourceHead -and $actual.buildConfig -eq $Configuration) 'Qt record belongs to another source/configuration'
+        $completed = @($actual.records)
+        Require ($completed.Count -ge $case.steps.Count -and $completed.Count -gt 0) 'Missing operation records'
+        foreach ($entry in $completed) {
+            Require ($entry.isTerminal -and $entry.completeCount -eq 1) 'Operation did not finish exactly once'
         }
+        $modules = @{AUDIT_THRESHOLD='Surface';AUDIT_PART='Part';AUDIT_GAP='Gap';AUDIT_SURFACE='Surface';AUDIT_ALIGNMENT='Alignment';AUDIT_ARTIFACT='Artifact'}
+        foreach ($check in $checks) {
+            $entries = @($completed | Where-Object { $_.operationId -eq [string]$check.operationId })
+            Require ($entries.Count -eq 1 -and $entries[0].module -eq $modules[$check.record]) 'Metric does not identify its actual Feature operation'
+            Require ($entries[0].status -in @('Succeeded','Observed','Ready','PreviewReady','FullyDetermined')) 'Metric operation did not succeed'
+            $value = $entries[0].result
+            foreach ($component in ($check.key -split '\.')) {
+                if ($value -is [array] -and $component -match '^[0-9]+$') {
+                    Require ([int]$component -lt $value.Count) 'Metric array index is missing'
+                    $value = $value[[int]$component]
+                } else {
+                    Require ($null -ne $value -and $value.PSObject.Properties.Name -contains $component) 'Metric field is missing'
+                    $value = $value.$component
+                }
+            }
+            $number = [double]::Parse([string]$value,$culture)
+            $passed = -not [double]::IsNaN($number) -and -not [double]::IsInfinity($number) -and
+                $number -ge [double]$check.minimum -and $number -le [double]$check.maximum
+            $report.metricChecks += @{record=$check.record;operationId=$check.operationId;key=$check.key;value=$number;passed=$passed}
+            Require $passed "Reference mismatch: $($check.record).$($check.key)=$number"
+        }
+        $report['operations'] = $completed.Count
+        $report['operationRecordHash'] = (Get-FileHash -LiteralPath $recordPath -Algorithm SHA256).Hash
         $report.status = if ($AllowIntrinsicOnly) { 'INTRINSIC PASSED; ACCURACY NOT VERIFIED' } else { 'DECLARED METRIC CHECKS PASSED; LIMITED SCOPE' }
         $exitCode = 0
     }
@@ -228,6 +266,7 @@ try {
     if ($inputLease) { $inputLease.Dispose() }
     foreach ($lease in $referenceLeases) { $lease.Dispose() }
     $env:PATH = $originalPath
+    $env:QT_PLUGIN_PATH = $originalQtPluginPath
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding UTF8
     Write-Output "REAL_AUDIT_REPORT=$reportPath"
 }

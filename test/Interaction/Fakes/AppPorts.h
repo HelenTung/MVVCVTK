@@ -1,3 +1,4 @@
+// 测试用途：提供应用和交互端口的测试替身，隔离交互单测的运行依赖。
 #pragma once
 
 #include "App/Services/AppPorts.h"

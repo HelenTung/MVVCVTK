@@ -22,14 +22,14 @@ target_link_libraries(
 SetTargetDefaults(mvvcvtk_surface_header_probe)
 set_target_properties(
     mvvcvtk_surface_header_probe
-    PROPERTIES FOLDER "MVVCVTK/Tests/HeaderProbes"
+    PROPERTIES PROJECT_LABEL SurfaceDeterminationHeaderProbe FOLDER "MVVCVTK/test/Automation/HeaderProbes"
 )
 set_target_properties(
     mvvcvtk_surface_determination_tests
     PROPERTIES
         OUTPUT_NAME SurfaceDeterminationTests
         PROJECT_LABEL SurfaceDeterminationTests
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/test/Automation"
 )
 target_include_directories(
     mvvcvtk_surface_determination_tests

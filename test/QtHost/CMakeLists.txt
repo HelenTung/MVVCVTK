@@ -29,8 +29,8 @@ set_target_properties(
     mvvcvtk_host_method_tests
     PROPERTIES
         OUTPUT_NAME QtHostMethodTests
-        PROJECT_LABEL HostMethodTests
-        FOLDER "MVVCVTK/Tests"
+        PROJECT_LABEL QtHostMethodTests
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_include_directories(
@@ -124,8 +124,8 @@ set_target_properties(
     mvvcvtk_qt_host_smoke
     PROPERTIES
         OUTPUT_NAME QtHostSmoke
-        PROJECT_LABEL QtHostSmoke
-        FOLDER "MVVCVTK/Tests"
+        PROJECT_LABEL QtHostSmokeTests
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_link_libraries(
@@ -159,8 +159,8 @@ target_link_libraries(mvvcvtk_qt_host_scheduling_tests PRIVATE
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL
     VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
 SetQtTargetDefaults(mvvcvtk_qt_host_scheduling_tests)
-set_target_properties(mvvcvtk_qt_host_scheduling_tests PROPERTIES
-    FOLDER "MVVCVTK/Tests")
+set_target_properties(mvvcvtk_qt_host_scheduling_tests PROPERTIES PROJECT_LABEL QtHostSchedulingTests
+    FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS mvvcvtk_qt_host_scheduling_tests
     MODULES ${MVVCVTK_QT_VTK_TARGETS})
 add_test(NAME QtHost.Scheduling COMMAND mvvcvtk_qt_host_scheduling_tests)
@@ -184,8 +184,8 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
         mvvcvtk_qt_gap_smoke
         PROPERTIES
             OUTPUT_NAME QtHostGapSmoke
-            PROJECT_LABEL QtGapSmoke
-            FOLDER "MVVCVTK/Tests"
+            PROJECT_LABEL QtGapSmokeTests
+            FOLDER "MVVCVTK/test/Automation"
     )
 
     target_link_libraries(
@@ -224,8 +224,8 @@ set_target_properties(
     mvvcvtk_qt_session_smoke
     PROPERTIES
         OUTPUT_NAME QtHostSessionSmoke
-        PROJECT_LABEL QtSessionSmoke
-        FOLDER "MVVCVTK/Tests"
+        PROJECT_LABEL QtSessionSmokeTests
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_link_libraries(
@@ -253,3 +253,5 @@ add_test(
     COMMAND mvvcvtk_qt_session_smoke
 )
 SetTestRuntime(QtHost.SessionSmoke mvvcvtk_qt_session_smoke)
+
+add_subdirectory(Automation)

@@ -114,15 +114,15 @@ try {
         $binaryDir = if ($name -eq 'all') { Join-Path $RepoRoot 'out/build/vs2026-x64' }
             else { Join-Path $RepoRoot ('out/matrix/' + $featureMask.ToString('x2')) }
         $testFlag = if ($enabled.Count) { 'ON' } else { 'OFF' }
-        $standalone = if ($name -eq 'all') { 'ON' } else { 'OFF' }
+        $manual = if ($name -eq 'all') { 'ON' } else { 'OFF' }
         $qt = if ($name -eq 'all') { 'ON' } else { 'OFF' }
         $arguments = @('--preset','vs2026-x64','-B',$binaryDir,
             "-DMVVCVTK_DEPS_ROOT=$DepsRoot","-DMVVCVTK_DEFX_ROOT=$DefXRoot",
             "-DMVVCVTK_BUILD_TESTING=$testFlag","-DMVVCVTK_BUILD_QT_TESTING=$qt",
-            "-DMVVCVTK_BUILD_STANDALONE=$standalone",'-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=','-DMVVCVTK_REAL_AUDIT_MANIFEST=')
+            "-DMVVCVTK_BUILD_QT_MANUAL=$manual",'-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=','-DMVVCVTK_REAL_AUDIT_MANIFEST=')
         $expected = @{
             MVVCVTK_BUILD_TESTING=$testFlag; MVVCVTK_BUILD_QT_TESTING=$qt
-            MVVCVTK_BUILD_STANDALONE=$standalone; MVVCVTK_ALIGNMENT_REFERENCE_ROOT=''
+            MVVCVTK_BUILD_QT_MANUAL=$manual; MVVCVTK_ALIGNMENT_REFERENCE_ROOT=''
             MVVCVTK_REAL_AUDIT_MANIFEST=''
         }
         foreach ($feature in $features.Keys) {
@@ -157,7 +157,7 @@ try {
                 } elseif ($registered -ne 0) { throw "Disabled feature has tests: $feature" }
             }
             foreach ($required in @('Host.StandaloneInput') + $(if($name -eq 'all') {
-                @('Host.StandaloneFeatures.Native','Host.StandaloneFeatures.HostDriven')
+                @('QtFeature.Automation','QtHost.Methods','QtHost.Scheduling')
             } else { @() })) {
                 if (@($inventory.tests | Where-Object { $_.name -eq $required }).Count -ne 1) { throw "Missing test: $required" }
             }

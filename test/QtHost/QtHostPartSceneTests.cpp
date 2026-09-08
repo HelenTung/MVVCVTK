@@ -1,3 +1,4 @@
+// 测试用途：验证零件分割结果在宿主多视图场景中的显示、关联和交互。
 #include "QtHostMethodCases.h"
 
 #include "Host/PartSegmentationHostFeature.h"

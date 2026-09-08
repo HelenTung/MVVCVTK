@@ -1,3 +1,4 @@
+// 测试用途：验证表面与切片叠加以及旋转切片法向的显示行为。
 #include "SurfaceDeterminationTestCases.h"
 
 #include "SurfaceDeterminationTestSupport.h"

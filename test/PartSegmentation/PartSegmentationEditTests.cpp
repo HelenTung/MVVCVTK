@@ -1,3 +1,4 @@
+// 测试用途：验证涂绘、擦除、填充、生长、孤岛、拆分、合并及保护范围和掩码约束。
 #include "PartSegmentationTestCases.h"
 #include "Algorithms/PartLabelEditor.h"
 
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 
@@ -46,6 +48,20 @@ public:
         return { { c.partSetId, c.partsByLabel[label].objectId }, c.resultRevision };
     }
     PartEditBuildResult Build() { return PartLabelEditor::BuildLabels(input, identities); }
+    void SetGeometryMetrics()
+    {
+        // 几何夹具修改网格后同步原目录指标，保持与真实不可变输入相同的约束。
+        auto catalog = std::make_shared<PartCatalog>(*input.previous.catalog);
+        const auto metrics = ClassicalPartSegmenter::BuildLabelMetrics(input.volume, *input.previous.labels,
+            static_cast<std::uint32_t>(catalog->partsByLabel.size()-1));
+        if (!metrics) throw std::runtime_error("Invalid edit fixture geometry");
+        for (std::size_t i = 1; i < catalog->partsByLabel.size(); ++i) {
+            const auto confidence = catalog->partsByLabel[i].metrics.confidence;
+            catalog->partsByLabel[i].metrics = (*metrics)[i];
+            catalog->partsByLabel[i].metrics.confidence = confidence;
+        }
+        input.previous.catalog = std::move(catalog);
+    }
     std::vector<double> values;
     PartEditInput input;
     PartIdentityFactory identities;
@@ -197,6 +213,7 @@ int GetPartEditFailCount()
     slab.input.volume.dimensions = { 3, 1, 2 };
     slab.input.volume.extent = { 0, 2, 0, 0, 0, 1 };
     slab.input.volume.spacing = { 1, 1, 4 };
+    slab.SetGeometryMetrics();
     PartBrushEdit slabBrush;
     slabBrush.target = slab.GetPart(1);
     slabBrush.radiusMM = 0.1;
@@ -235,6 +252,7 @@ int GetPartEditFailCount()
     anisotropic.input.volume.dimensions = { 3, 3, 1 };
     anisotropic.input.volume.extent = { 0, 2, 0, 2, 0, 0 };
     anisotropic.input.volume.spacing = { 10, 1, 1 };
+    anisotropic.SetGeometryMetrics();
     PartSplitEdit metricSplit;
     metricSplit.target = anisotropic.GetPart(1);
     metricSplit.seeds = { { { 2, 0, 0 }, 1 }, { { 0, 2, 0 }, 2 } };
@@ -260,6 +278,7 @@ int GetPartEditFailCount()
     geometryCase.input.volume.extent = { 10, 12, -2, -2, 3, 3 };
     geometryCase.input.volume.spacing = { 2, 3, 4 };
     geometryCase.input.volume.direction = { 0, -1, 0, 1, 0, 0, 0, 0, 1 };
+    geometryCase.SetGeometryMetrics();
     PartBrushEdit physicalBrush;
     physicalBrush.target = geometryCase.GetPart(1);
     physicalBrush.radiusMM = 0.1;
@@ -341,6 +360,7 @@ int GetPartEditFailCount()
                 if (distance2 <= sweep.radiusMM * sweep.radiusMM) { expected[voxel] = 1; break; }
             }
         }
+        swept.SetGeometryMetrics();
         swept.input.request.operation = sweep;
         const auto result = swept.Build();
         check(result.labels && *result.labels == expected && *swept.input.previous.labels == source,
@@ -358,6 +378,27 @@ int GetPartEditFailCount()
         check(swept.Build().failureReason == PartFailureReason::NoChange,
             "Disjoint brush publishes no empty candidate");
     }
+    if (physical.labels) {
+        const auto measured = ClassicalPartSegmenter::BuildLabelMetrics(geometryCase.input.volume, *physical.labels, 1);
+        check(measured && (*measured)[1] == physical.catalog->partsByLabel[1].metrics,
+            "Bounded edited metrics equal a full-grid recomputation in transformed coordinates");
+    }
+    std::vector<PartLabelId> sparseLabels(64U*64U*64U, 0);
+    for (int z = 28; z <= 35; ++z) for (int y = 28; y <= 35; ++y) for (int x = 28; x <= 35; ++x)
+        sparseLabels[x+64*(y+64*z)] = 1;
+    EditCase sparse(std::move(sparseLabels));
+    sparse.input.volume.dimensions = {64,64,64}; sparse.input.volume.extent = {0,63,0,63,0,63};
+    sparse.SetGeometryMetrics(); sparse.input.maxWorkingBytes = 18U*1024U*1024U;
+    PartSplitEdit localSplit; localSplit.target = sparse.GetPart(1);
+    localSplit.seeds = {{{28,28,28},1},{{35,35,35},2}}; sparse.input.request.operation = localSplit;
+    const auto local = sparse.Build();
+    check(local.labels && local.catalog->partsByLabel.size() == 3 && local.requiredBytes <= sparse.input.maxWorkingBytes
+        && local.catalog->partsByLabel[1].metrics.voxelCount + local.catalog->partsByLabel[2].metrics.voxelCount == 512,
+        "Full-grid labels split a bounded parent within a budget that cannot hold whole-grid split arrays");
+    auto badBounds = std::make_shared<PartCatalog>(*sparse.input.previous.catalog);
+    badBounds->partsByLabel[1].metrics.voxelExtent = {29,34,29,34,29,34}; sparse.input.previous.catalog = badBounds;
+    check(sparse.Build().failureReason == PartFailureReason::InvalidGeometry,
+        "Incomplete catalog bounds cannot silently omit source voxels during a bounded split");
     return failures;
 }
 
@@ -371,6 +412,7 @@ int GetPartEditProfileFailCount()
     EditCase fixture(std::move(labels));
     fixture.input.volume.dimensions = {side, side, side};
     fixture.input.volume.extent = {0, side - 1, 0, side - 1, 0, side - 1};
+    fixture.SetGeometryMetrics();
     PartBrushEdit brush;
     brush.target = fixture.GetPart(1);
     brush.radiusMM = 2.0;

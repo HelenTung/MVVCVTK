@@ -1,3 +1,4 @@
+// 测试用途：验证裁剪布局、参数校验、合成真值、历史快照、结果构建与取消。
 #include "Algorithms/CropAlgorithm.h"
 #include "PlanarTestSuites.h"
 #include "Routing/CropRouter.h"

@@ -15,7 +15,7 @@ function(BuildGapTests target outputName projectLabel)
         PROPERTIES
             OUTPUT_NAME ${outputName}
             PROJECT_LABEL ${projectLabel}
-            FOLDER "MVVCVTK/Tests"
+            FOLDER "MVVCVTK/test/Automation"
     )
 
     target_include_directories(
