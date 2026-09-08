@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <vtkImageData.h>
+#include <vtkPolyData.h>
 #include <iostream>
 #include <utility>
 
@@ -102,16 +103,16 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
 
 LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitRequest& request)
 {
+    const auto input=request.renderInput?request.renderInput:VtkRenderInputView::FromImage(request.pending);
     const bool hasValidRequest =
         ((request.ownerId == 0 && !request.onPublish
             && (request.loadKind == LoadEventKind::File || request.loadKind == LoadEventKind::Reload))
             || (request.ownerId != 0 && request.onPublish && request.loadKind == LoadEventKind::None))
         && request.transactionRevision != 0
         && GetDataRevisionRefValid(request.sourceRevision)
-        && request.pending
-        && request.pending->image
-        && request.pending->data
-        && request.pending->data->self == request.sourceRevision
+        && input && input->GetValid()
+        && input->data && input->data->self == request.sourceRevision
+        && (!request.renderInput || (request.ownerId!=0 && !request.pending))
         && m_dataManager
         && !request.stages.empty()
         && std::all_of(
@@ -137,8 +138,8 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         transaction->request = request;
         m_transaction = std::move(transaction);
         for (const auto& stage : m_transaction->request.stages) {
-            const auto status = stage->StartDataStage(
-                m_transaction->request.pending,
+            const auto status = stage->StartRenderInputStage(
+                input,
                 m_transaction->request.transactionRevision);
             if (status == DataStageStatus::Failed
                 || status == DataStageStatus::Cancelled
@@ -171,7 +172,7 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         m_transaction.reset();
         return AdvanceLoadCommit(request);
     }
-    if (active.pending != request.pending
+    if (active.pending != request.pending || active.renderInput != request.renderInput
         || active.sourceRevision != request.sourceRevision
         || !GetSameStages(active.stages, request.stages)) {
         const auto stale = active;
@@ -185,8 +186,8 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
 
     bool areReady = true;
     for (const auto& stage : active.stages) {
-        const auto status = stage->SetDataStageReady(
-            active.pending, active.transactionRevision);
+        const auto status = stage->SetRenderInputStageReady(
+            input, active.transactionRevision);
         if (status == DataStageStatus::Failed
             || status == DataStageStatus::Cancelled) {
             const auto terminal = active;
@@ -215,8 +216,8 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
     std::size_t committedCount = 0;
     for (const auto& stage : active.stages) {
         ++m_transaction->attemptedCommits;
-        if (!stage->SetViewStage(
-                active.pending, active.transactionRevision)) {
+        if (!stage->SetRenderInputViewStage(
+                input, active.transactionRevision)) {
             break;
         }
         ++committedCount;

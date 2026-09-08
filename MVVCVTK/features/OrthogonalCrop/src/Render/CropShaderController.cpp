@@ -886,6 +886,7 @@ RenderEffectState CropShaderEffect::Impl::GetState() const
     auto state=m_state;state.renderedRevision=0;state.isRenderPending=false;bool first=true,mixed=false;
     for(const auto& binding:currentBindings) {
         const auto value=binding->GetEffectState();state.isRenderPending=state.isRenderPending||value.isRenderPending;
+        if(value.status==RenderEffectStatus::Failed){state.status=value.status;state.failureReason=value.failureReason;state.message=value.message;}
         if(first){state.renderedRevision=value.renderedRevision;first=false;}
         else mixed=mixed||state.renderedRevision!=value.renderedRevision;
     }

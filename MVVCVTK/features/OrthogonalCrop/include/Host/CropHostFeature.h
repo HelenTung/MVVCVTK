@@ -105,6 +105,7 @@ struct CropHostState final {
     CropFailure failureReason = CropFailure::None;
     std::vector<DataLifetimeBlocker> blockers;
     CropHistoryState history;
+    std::vector<CropViewPreviewState> views;
     DataCommitId commitId = 0;
     DataRevisionRef sourceRevision;
     DataRevisionRef recipeRevision;

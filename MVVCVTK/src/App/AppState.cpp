@@ -672,7 +672,11 @@ void SharedInteractionState::SetDataReady(
     }
 }
 
-void SharedInteractionState::SetImageDataReady(
+void SharedInteractionState::SetImageDataReady(const DataReadyState& state) noexcept {
+    SetRenderDataReady(state);
+}
+
+void SharedInteractionState::SetRenderDataReady(
     const DataReadyState& state) noexcept
 {
     bool hasTransformChanged = false;
@@ -682,9 +686,9 @@ void SharedInteractionState::SetImageDataReady(
         hasTransformChanged = m_impl->ClearTransformForData(state);
         m_impl->m_dataRevision = state.dataRevision;
         m_impl->m_bindingRevision = state.bindingRevision;
-        m_impl->m_dataRange = state.scalarRange;
+        m_impl->m_dataRange = state.hasImageGeometry?state.scalarRange:std::array<double,2>{0,0};
         auto& view = m_impl->m_viewValues;
-        const bool hasSpacingChanged = Impl::SetArray(view.spacing, state.spacing);
+        const bool hasSpacingChanged = state.hasImageGeometry && Impl::SetArray(view.spacing, state.spacing);
         const bool hasRawCursorChanged = Impl::SetArray(
             view.cursorRawWorld, state.cursorWorld, 1e-9);
         const bool hasCursorChanged = Impl::SetArray(
@@ -698,7 +702,8 @@ void SharedInteractionState::SetImageDataReady(
         m_impl->SetRealViewChanged(UpdateFlags::Cursor,
             hasRawCursorChanged || hasCursorChanged || hasAxisChanged);
     }
-    auto flags = UpdateFlags::DataReady | UpdateFlags::Cursor | UpdateFlags::Spacing;
+    auto flags = UpdateFlags::DataReady | UpdateFlags::Cursor;
+    if(state.hasImageGeometry)flags|=UpdateFlags::Spacing;
     if (hasTransformChanged) flags |= UpdateFlags::Transform;
     m_impl->SendFlags(flags);
 }

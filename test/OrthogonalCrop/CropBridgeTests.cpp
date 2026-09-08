@@ -506,8 +506,15 @@ bool GetActualRenderedHead() {
     if(!Flush(f.bridge,f.window))return false;
     if(!Check(f.bridge.GetHistory().appliedHead==a.nodeId&&f.bridge.GetHistory().renderedHead!=a.nodeId,
         "shader commit was mistaken for a rendered frame"))return false;
+    const auto pending=f.bridge.GetViewState(f.service.get());
+    if(!Check(pending&&pending->appliedHead==a.nodeId&&pending->requestedHead==a.nodeId
+        &&pending->renderedHead!=a.nodeId&&pending->isRenderPending&&!f.bridge.GetViewState(nullptr),
+        "per-view state reported a committed node as already presented"))return false;
     f.window->Render();
     if(!Check(wait([&]{return f.bridge.GetHistory().renderedHead==a.nodeId;}),"presented GPU frame did not map back to its node"))return false;
+    const auto presented=f.bridge.GetViewState(f.service.get());
+    if(!Check(presented&&presented->renderedHead==a.nodeId&&!presented->isRenderPending,
+        "per-view state did not observe its completed frame"))return false;
     const auto b=Append(f.bridge,a.nodeId);if(!Flush(f.bridge,f.window))return false;
     if(!Check(f.bridge.GetHistory().appliedHead==b.nodeId&&f.bridge.GetHistory().renderedHead==a.nodeId,
         "applied head did not remain separate from the last rendered head"))return false;

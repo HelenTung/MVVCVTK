@@ -26,6 +26,7 @@
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
 #include <vtkPointData.h>
+#include <vtkPoints.h>
 #include <vtkDataArray.h>
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
@@ -691,6 +692,57 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
     return false;
 }
 
+bool GetMeshRootLifecycle()
+{
+    VtkAppHostSession session(GetCropSessionConfig());auto feature=std::make_shared<CropHostFeature>();
+    auto probe=std::make_shared<ContextProbeFeature>();
+    if(!session.BuildSession()||!session.AttachFeature(feature)||!session.AttachFeature(probe))return false;
+    const auto* primary=session.GetPrimaryEndpoint();const auto* timer=session.GetRenderViewEndpoint("crop-timer");
+    if(!primary||!timer)return false;
+    for(const auto* endpoint:{primary,timer}){endpoint->renderWindow->SetOffScreenRendering(1);endpoint->renderWindow->SetSize(120,120);}
+    HostTimerConfig config;config.isTimerEnabled=true;config.targetView={"crop-timer",false,HostRenderViewRole::Auxiliary};
+    if(!session.AttachTimer(config)||!session.Start())return false;
+    const auto wait=[&](const std::function<bool()>& done) {
+        for(int poll=0;poll<2000;++poll){if(done())return true;SendTicks(*timer,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+        return done();
+    };
+    bool loaded=false,loadOk=false;if(!SendReload(session,loaded,loadOk)||!wait([&]{return loaded;})||!loadOk)return false;
+    auto cube=vtkSmartPointer<vtkCubeSource>::New();cube->SetXLength(4);cube->SetYLength(4);cube->SetZLength(4);cube->Update();
+    if(!feature->SendRequest(GetPolyRequest(cube->GetOutput())))return false;
+    auto target=GetCropTarget();target.inputBinding=std::string(cropInputBinding);target.targetViews.viewIds.push_back("crop-timer");
+    if(!feature->SendRequest(GetTargetRequest(CropHostAction::Start,target)))return false;
+    const auto initial=feature->GetHistory();
+    if(!wait([&]{for(const auto& id:target.targetViews.viewIds){const auto input=probe->GetViewService(id)->GetRenderInputStamp();if(!input||input->dataRevision!=initial.sourceRevision)return false;}return true;}))return false;
+    CropEditRequest append;append.documentId=initial.documentId;append.requestId=CropHostFeature::CreateRequestId();
+    append.expectedRevision=feature->GetState().history.stateRevision;append.kind=CropEditKind::Append;append.nodeId=initial.rootNodeId;
+    append.operation.geometryType=CropShape::Plane;append.operation.planeNormalInInputModel={1,0,0};
+    const auto edit=feature->SendRequest(append);
+    if(!edit||!wait([&]{const auto out=feature->GetOutcome(initial.documentId,append.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return false;
+    if(!wait([&]{const auto views=feature->GetState().views;return views.size()==2&&std::all_of(views.begin(),views.end(),
+        [&](const auto& view){return view.renderedHead==edit.nodeId;});}))return false;
+    CropBuildResult built;
+    for(int round=0;round<2;++round) {
+        CropBuildRequest build;build.documentId=initial.documentId;build.nodeId=edit.nodeId;build.requestId=CropHostFeature::CreateRequestId();
+        build.expectedRevision=feature->GetState().history.stateRevision;int count=0;
+        if(!feature->SendRequest(build,[&](auto value){built=std::move(value);++count;})||!wait([&]{return count!=0;})
+            ||count!=1||!built.isSucceeded||built.sourceRevision!=initial.sourceRevision)return false;
+    }
+    auto output=probe->m_data->GetSurfaceMesh(probe->m_data->GetDataGraph(),built.outputRevision);
+    if(!output||!output->mesh||output->mesh->GetNumberOfCells()==0)return false;
+    vtkSmartPointer<vtkDataArray> points=output->mesh->GetPoints()->GetData();output.reset();
+    CropDocumentRequest returning;returning.documentId=initial.documentId;returning.requestId=CropHostFeature::CreateRequestId();
+    returning.expectedRevision=feature->GetState().history.stateRevision;int returned=0;CropDocumentOutcome terminal;
+    if(!feature->SendRequest(returning,[&](auto value){terminal=std::move(value);++returned;})
+        ||!wait([&]{return probe->m_data->GetDataLifetime(built.scopeId).status==DataLifetimeStatus::Releasing;}))return false;
+    if(returned||feature->GetHistory().results.empty())return false;
+    points=nullptr;
+    if(!wait([&]{return returned!=0;})||returned!=1||terminal.status!=CropEditStatus::Succeeded
+        ||feature->GetHistory().appliedHead!=initial.rootNodeId||!feature->GetHistory().results.empty())return false;
+    for(const auto& view:feature->GetState().views)if(view.appliedHead!=initial.rootNodeId)return false;
+    const bool detached=wait([&]{return session.DetachFeature(*feature);});
+    return detached&&session.DetachFeature(*probe)&&session.Stop();
+}
+
 int GetCropLifecycleFailCount()
 {
     VtkAppHostSession session(GetCropSessionConfig());
@@ -845,6 +897,7 @@ int GetCropLifecycleFailCount()
         &&feature->GetHistory().documentId==0&&session.DetachFeature(*feature)&&session.DetachFeature(*probe)&&session.Stop();
     if(!GetCaseResult(closedOk,"CloseDocument destroys history only after release and remains detachable"))return 1;
     int failures=0;
+    failures+=GetCaseResult(GetMeshRootLifecycle(),"Mesh Root uses real dual-view preview, repeated publication and allocation-aware Return/Close")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true,3),"Repeated build preserves binding on retirement failure and publishes Root plus replacement atomically")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(false),"Detach cancels Building exactly once and retries the same close before releasing ports")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true),"Session Stop keeps Crop owned while a bare result array prevents release")?0:1;

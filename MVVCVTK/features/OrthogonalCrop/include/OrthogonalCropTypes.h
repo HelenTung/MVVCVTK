@@ -248,6 +248,17 @@ struct CropNodeSnapshot final {
     std::optional<CropOpItem> operation;
 };
 
+// Values describe one target view at the owner-thread query instant. A committed
+// node may still await its first presented frame; 0 means no known rendered node.
+struct CropViewPreviewState final {
+    std::string viewId;
+    CropNodeId requestedHead=0;
+    CropNodeId appliedHead=0;
+    CropNodeId renderedHead=0;
+    RenderEffectState effect;
+    bool isRenderPending=false;
+};
+
 struct CropHistorySnapshot final {
     CropDocumentId documentId = 0;
     CropNodeId rootNodeId = 0;

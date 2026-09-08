@@ -131,6 +131,8 @@ struct FeatureDataTransitionRequest final {
     VtkImageGridSnapshot input;
     DataTransaction transaction;
     std::shared_ptr<FeatureDataCommit> commit;
+    // Use either the legacy image input or this generic render input, never both.
+    VtkRenderInputSnapshot renderInput;
 };
 
 struct FeatureDataTransitionState final {

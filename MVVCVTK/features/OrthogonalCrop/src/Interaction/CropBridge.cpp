@@ -111,6 +111,15 @@ public:
     bool SetCropInput(CropInputSnapshot input);
     bool GetOwnerReady() const { return m_ownerThread == std::this_thread::get_id(); }
     CropEditAdmission SendRequest(CropEditRequest request);
+    std::optional<CropViewPreviewState> GetViewState(const FeatureViewService* service) const {
+        const auto target=std::find_if(m_targets.begin(),m_targets.end(),[service](const auto& value){return value.service.get()==service;});
+        if(target==m_targets.end()||!target->effect)return std::nullopt;
+        const auto history=m_tree.GetSnapshot(0,0);
+        CropViewPreviewState result;result.requestedHead=history.requestedHead;result.appliedHead=history.appliedHead;
+        result.renderedHead=target->effect->GetRenderedNode();result.effect=target->effect->GetState();
+        result.isRenderPending=result.effect.isRenderPending||result.renderedHead!=result.appliedHead;
+        return result;
+    }
     CropNodeId GetRenderedHead() const {
         CropNodeId result=0;bool first=true;
         for(const auto& target:m_targets) {
@@ -1498,6 +1507,10 @@ CropHistoryState CropBridge::Impl::GetCropHistory() const
     state.documentId=m_tree.GetDocumentId();state.stateRevision=m_tree.GetRevision();
     state.requestedHead=m_tree.GetRequestedHead();state.appliedHead=m_tree.GetAppliedHead();state.renderedHead=GetRenderedHead();
     return state;
+}
+
+std::optional<CropViewPreviewState> CropBridge::GetViewState(const FeatureViewService* service) const {
+    return m_impl->GetOwnerReady()?m_impl->GetViewState(service):std::nullopt;
 }
 
 CropBridge::CropBridge()

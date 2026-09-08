@@ -1,4 +1,5 @@
 #include "Data/VtkDataBridge.h"
+
 #include "Data/Internal/VtkDataResourceLease.h"
 
 #include <vtkCellArray.h>
@@ -25,6 +26,32 @@
 #include <mutex>
 #include <new>
 #include <utility>
+
+bool VtkRenderInputView::GetValid() const noexcept {
+    if(!data||bool(image)==bool(mesh))return false;
+    const auto sameData=[this](const DataSnapshot& typed) {
+        return typed&&typed->self==data->self&&typed->payload==data->payload;
+    };
+    if(image) {
+        if(meshView||!imageView||!sameData(imageView->data)||imageView->image!=image
+            ||imageView->validityMask!=validityMask||imageView->binding.has_value()!=binding.has_value())return false;
+        return !binding||(imageView->binding->name==binding->name&&imageView->binding->revision==binding->revision
+            &&imageView->binding->target==binding->target);
+    }
+    return !imageView&&!validityMask&&meshView&&sameData(meshView->data)&&meshView->mesh==mesh;
+}
+
+VtkRenderInputSnapshot VtkRenderInputView::FromImage(VtkImageGridSnapshot image) {
+    if(!image)return {};
+    auto value=std::make_shared<VtkRenderInputView>();value->graph=image->graph;value->binding=image->binding;
+    value->data=image->data;value->image=image->image;value->validityMask=image->validityMask;
+    value->imageView=std::move(image);return value;
+}
+VtkRenderInputSnapshot VtkRenderInputView::FromMesh(DataGraphSnapshot graph,std::optional<DataBinding> binding,VtkSurfaceMeshSnapshot mesh) {
+    if(!mesh)return {};
+    auto value=std::make_shared<VtkRenderInputView>();value->graph=std::move(graph);value->binding=std::move(binding);
+    value->data=mesh->data;value->mesh=mesh->mesh;value->meshView=std::move(mesh);return value;
+}
 
 namespace {
 

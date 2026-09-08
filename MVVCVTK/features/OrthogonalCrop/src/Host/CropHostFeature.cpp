@@ -40,6 +40,18 @@ CropFailure GetCropFailure(DataCommitFailure failure)
     return CropFailure::VersionMismatch;
 }
 
+VtkRenderInputSnapshot BuildRootRenderInput(const CropInputSnapshot& source,
+    const DataGraphSnapshot& graph,const DataBinding& binding)
+{
+    if(source.image) {
+        auto image=std::make_shared<VtkImageGridView>(*source.image);
+        image->graph=graph;image->data=source.data;image->binding=binding;
+        return VtkRenderInputView::FromImage(std::move(image));
+    }
+    if(source.mesh)return VtkRenderInputView::FromMesh(graph,binding,source.mesh);
+    return {};
+}
+
 bool GetFacetUsed(
     const DataGraphSnapshot& graph,
     const DataTypeId& type,
@@ -148,7 +160,7 @@ public:
 
 private:
     bool StartCrop(const CropHostTarget& target);
-    bool StartSourcePreview(bool isDocument=false);
+    bool StartSourcePreview(bool isDocument=false,bool isActivation=false);
     void SetBuildPublished(BuildPublication& publication, const DataCommitResult& commit) noexcept;
     void SetBuildFailed(const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item, CropBuildResult result);
@@ -518,6 +530,11 @@ bool CropHostFeature::Impl::StartCrop(
         }
         m_activeTarget = target;
         m_activeViewIds = std::move(activeViewIds);
+        const auto source=m_bridge->GetSource();
+        const bool needsRoot=std::any_of(request.targetServices.begin(),request.targetServices.end(),[&](const auto& service) {
+            const auto input=service->GetRenderInputStamp();return !input||input->dataRevision!=source.data->self;
+        });
+        if(needsRoot&&!m_sourceTransition&&!StartSourcePreview(false,true))return false;
     }
     return isStarted;
 }
@@ -741,7 +758,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::SetBuildResult(
     if (!transaction.retireScopes.empty()) {
         // Source input, outputs and retirement share one coordinator transaction.
         // No observable Root binding change may precede the retirement checks.
-        if (!source.image || m_sourceTransition) return failed(CropFailure::PreviewNotReady);
+        if ((!source.image&&!source.mesh) || m_sourceTransition) return failed(CropFailure::PreviewNotReady);
         const auto graph = m_data->GetDataGraph();
         const auto binding = m_data->GetDataBinding(graph, primaryVolumeBinding)
             .value_or(DataBinding{std::string(primaryVolumeBinding)});
@@ -760,12 +777,11 @@ std::optional<CropBuildResult> CropHostFeature::Impl::SetBuildResult(
         };
         transaction.bindings.push_back({std::string(primaryVolumeBinding), binding.revision,
             true, binding.target, source.data->self});
-        auto view = std::make_shared<VtkImageGridView>(*source.image);
-        view->graph = graph; view->data = source.data;
-        view->binding = DataBinding{std::string(primaryVolumeBinding),source.data->self,binding.revision+1};
+        auto view=BuildRootRenderInput(source,graph,
+            DataBinding{std::string(primaryVolumeBinding),source.data->self,binding.revision+1});
         FeatureDataTransitionRequest request;
         request.requestId = id; request.commit = participant;
-        request.transaction = std::move(transaction); request.input = std::move(view);
+        request.transaction = std::move(transaction); request.renderInput = std::move(view);
         m_sourceTransition = participant;
         const PublishGuard guard(m_isPublishing);
         const auto started = m_host->StartDataTransition(std::move(request));
@@ -1254,6 +1270,11 @@ CropHostState CropHostFeature::Impl::GetState() const
 
     // owner thread 上连续读取 history、active 和发布屏障，形成同一时刻的只读快照。
     state.history = m_bridge->GetCropHistory();
+    state.views.clear();
+    if(m_views)for(const auto& viewId:m_activeViewIds) {
+        const auto port=m_views->GetFeaturePort(viewId);
+        if(auto view=m_bridge->GetViewState(port.get())){view->viewId=viewId;state.views.push_back(std::move(*view));}
+    }
     state.isActive = m_activeTarget.has_value()
         && m_bridge->GetCropActive();
     state.isPublishing = m_isPublishing;
@@ -1282,18 +1303,18 @@ std::vector<FeatureOperationState> CropHostFeature::Impl::GetOperationStates() c
     return states;
 }
 
-bool CropHostFeature::Impl::StartSourcePreview(bool isDocument)
+bool CropHostFeature::Impl::StartSourcePreview(bool isDocument,bool isActivation)
 {
-    if (m_sourceTransition || (!isDocument && !m_bridge->GetSourceTransitionNeeded())) return false;
+    if (m_sourceTransition || (!isDocument && !isActivation && !m_bridge->GetSourceTransitionNeeded())) return false;
     const auto source=m_bridge->GetSource();
-    if (!source.image || !source.data) return false;
+    if ((!source.image&&!source.mesh) || !source.data) return false;
     const auto graph=m_data->GetDataGraph();
     auto binding=m_data->GetDataBinding(graph,primaryVolumeBinding).value_or(DataBinding{std::string(primaryVolumeBinding)});
     const auto id=GetNextSceneRequestId();
     if (!id || binding.revision==std::numeric_limits<DataBindingRevision>::max()) return false;
     const auto history=m_bridge->GetHistory(0,1);
     if (history.stateRevision >= std::numeric_limits<std::uint64_t>::max()-1) return false;
-    auto prepared=m_bridge->BuildSourceCommit(isDocument?history.rootNodeId:history.appliedHead,!isDocument);
+    auto prepared=m_bridge->BuildSourceCommit(isDocument?history.rootNodeId:history.appliedHead,!isDocument&&!isActivation);
     if (!prepared) return false;
     auto participant=std::make_shared<SourceTransition>(m_bridge.get(),std::move(*prepared),id);
     participant->isDocument=isDocument;
@@ -1323,10 +1344,8 @@ bool CropHostFeature::Impl::StartSourcePreview(bool isDocument)
             m_documentSourceCommitted=true;
         };
     }
-    auto view=std::make_shared<VtkImageGridView>(*source.image);
-    view->graph=graph;view->data=source.data;
-    view->binding=DataBinding{std::string(primaryVolumeBinding),source.data->self,binding.revision+1};
-    request.input=std::move(view);
+    request.renderInput=BuildRootRenderInput(source,graph,
+        DataBinding{std::string(primaryVolumeBinding),source.data->self,binding.revision+1});
     m_sourceTransition=participant;
     const PublishGuard guard(m_isPublishing);
     const auto state=m_host->StartDataTransition(std::move(request));

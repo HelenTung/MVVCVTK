@@ -41,6 +41,24 @@ struct VtkSurfaceMeshView final {
 using VtkSurfaceMeshSnapshot =
     std::shared_ptr<const VtkSurfaceMeshView>;
 
+// Render-stage input. Exactly one geometry kind is present; mesh input is never
+// represented as an ImageGrid payload. Factories retain the original typed view.
+struct VtkRenderInputView final {
+    DataGraphSnapshot graph;
+    std::optional<DataBinding> binding;
+    DataSnapshot data;
+    vtkSmartPointer<vtkImageData> image;
+    vtkSmartPointer<vtkImageData> validityMask;
+    vtkSmartPointer<vtkPolyData> mesh;
+    VtkImageGridSnapshot imageView;
+    VtkSurfaceMeshSnapshot meshView;
+    bool GetValid() const noexcept;
+    static std::shared_ptr<const VtkRenderInputView> FromImage(VtkImageGridSnapshot image);
+    static std::shared_ptr<const VtkRenderInputView> FromMesh(
+        DataGraphSnapshot graph,std::optional<DataBinding> binding,VtkSurfaceMeshSnapshot mesh);
+};
+using VtkRenderInputSnapshot=std::shared_ptr<const VtkRenderInputView>;
+
 // Worker-prepared trusted views. No graph identity is usable until the matching payload is published.
 // Register resourceUse in that output draft; keep the returned cache owner while the result is published.
 struct VtkPreparedDataView final {

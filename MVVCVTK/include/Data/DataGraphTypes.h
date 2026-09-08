@@ -53,6 +53,8 @@ inline std::size_t GetImageValueBytes(
     }
 }
 
+// Historical binding spelling retained for compatibility. Trusted render-stage
+// transitions may select a surface mesh; image APIs still require ImageGrid3D.
 inline constexpr std::string_view primaryVolumeBinding =
     "session.primary.volume";
 

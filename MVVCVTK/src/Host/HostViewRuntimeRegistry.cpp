@@ -18,6 +18,7 @@
 #include "Render/Contracts/RenderBindPort.h"
 
 #include <vtkRenderer.h>
+#include <vtkPolyData.h>
 #include <vtkRenderWindow.h>
 
 #include <algorithm>
@@ -1073,43 +1074,55 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
 FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
     const std::uint64_t ownerId, FeatureDataTransitionRequest request)
 {
+    if(request.input&&request.renderInput)return {};
+    if(!request.renderInput)request.renderInput=VtkRenderInputView::FromImage(request.input);
+    request.input.reset();
     const auto data = m_transitionData.lock();
     const auto state = m_transitionState.lock();
     if (!m_lease || !m_lease->GetIsOwnerThread() || !m_lease->GetIsActive()
-        || !ownerId || !request.requestId || !request.input || !request.input->data
-        || !request.input->binding || !request.commit || !m_loadCommit || m_loadCommit->GetIsPending()
+        || !ownerId || !request.requestId || !request.renderInput || !request.renderInput->data
+        || !request.renderInput->GetValid()
+        || !request.renderInput->binding || !request.commit || !m_loadCommit || m_loadCommit->GetIsPending()
         || m_featureTransition || !data || !state || m_views.empty()) return {};
     // primary 是 Session 级输入，必须准备全部必要 View，不能只切 Feature 的局部目标。
     const auto primary = std::find_if(request.transaction.bindings.begin(), request.transaction.bindings.end(),
         [](const auto& binding) { return binding.binding == primaryVolumeBinding; });
     if (request.transaction.policy != DataPublishPolicy::RequireCurrentInputs
         || primary == request.transaction.bindings.end() || !primary->isTargetChecked
-        || primary->target != std::optional<DataRevisionRef>{request.input->data->self}
-        || request.input->binding->name != primaryVolumeBinding
-        || request.input->binding->target != primary->target
+        || primary->target != std::optional<DataRevisionRef>{request.renderInput->data->self}
+        || request.renderInput->binding->name != primaryVolumeBinding
+        || request.renderInput->binding->target != primary->target
         || primary->expectedRevision == std::numeric_limits<DataBindingRevision>::max()
-        || request.input->binding->revision != primary->expectedRevision + 1) return {};
+        || request.renderInput->binding->revision != primary->expectedRevision + 1) return {};
     auto transition = std::make_shared<FeatureTransition>();
     transition->ownerId = ownerId;
     transition->request = std::move(request);
-    const auto canonical = data->GetData(data->GetDataGraph(), transition->request.input->data->self);
-    if (!canonical || canonical->payload != transition->request.input->data->payload) return {};
+    const auto canonical = data->GetData(data->GetDataGraph(), transition->request.renderInput->data->self);
+    if (!canonical || canonical->payload != transition->request.renderInput->data->payload) return {};
     if (GetDataEntityIdValid(canonical->lifetimeScope)) {
         const auto lifetime = canonical->lifetime.lock();
         transition->sourceLease = lifetime ? lifetime->StartResourceUse(canonical->self, "input-transition") : nullptr;
         if (!transition->sourceLease) return {FeatureRunStatus::Failed, DataCommitFailure::ResultRetired, {}};
     }
-    const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(transition->request.input->data->payload);
-    if (!payload || !payload->GetValid()) return {};
-    transition->ready.dataRevision = transition->request.input->data->self;
-    transition->ready.bindingRevision = transition->request.input->binding->revision;
-    transition->ready.scalarRange = payload->GetScalarRange();
-    transition->ready.spacing = payload->GetGeometry().spacing;
-    transition->ready.cursorWorld = state->GetCursorWorld();
+    const auto& input=transition->request.renderInput;
+    transition->ready.dataRevision=input->data->self;
+    transition->ready.bindingRevision=input->binding->revision;
+    transition->ready.cursorWorld=state->GetCursorWorld();
+    if(input->image) {
+        const auto payload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(input->data->payload);
+        if(!payload||!payload->GetValid()||!input->imageView)return {};
+        transition->ready.scalarRange=payload->GetScalarRange();
+        transition->ready.spacing=payload->GetGeometry().spacing;
+    } else {
+        const auto payload=std::dynamic_pointer_cast<const SurfaceMeshPayload>(input->data->payload);
+        if(!payload||!payload->GetValid()||!input->meshView||input->mesh->GetNumberOfPoints()==0)return {};
+        transition->ready.hasImageGeometry=false;
+        input->mesh->GetCenter(transition->ready.cursorWorld.data());
+    }
     transition->load.ownerId = ownerId;
     transition->load.transactionRevision = transition->request.requestId;
-    transition->load.sourceRevision = transition->request.input->data->self;
-    transition->load.pending = transition->request.input;
+    transition->load.sourceRevision = transition->request.renderInput->data->self;
+    transition->load.renderInput = transition->request.renderInput;
     for (const auto& view : m_views) {
         if (!view.isAvailable || !view.dataStage) return {};
         transition->load.stages.push_back(view.dataStage);
@@ -1131,7 +1144,7 @@ FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
         active->state.blockers = std::move(result.blockers);
         if (result.status != DataCommitStatus::Succeeded) return false;
         active->request.commit->SetDataCommitted(result);
-        state->SetImageDataReady(active->ready);
+        state->SetRenderDataReady(active->ready);
         return true;
     };
     transition->state = {FeatureRunStatus::Preparing, DataCommitFailure::None, {}};

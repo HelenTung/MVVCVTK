@@ -21,6 +21,7 @@
 #include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkImageData.h>
+#include <vtkPolyData.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkMatrix4x4.h>
 #include <vtkProp3D.h>
@@ -160,15 +161,15 @@ public:
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
     bool DetachRenderEffect(const RenderEffect* effect);
     DataStageStatus StartDataStage(
-        const VtkImageGridSnapshot& snapshot,
+        const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
     DataStageStatus SetDataStageReady(
-        const VtkImageGridSnapshot& snapshot,
+        const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
     DataStageStatus GetDataStageStatus(
         std::uint64_t transactionRevision) const;
     bool SetViewStage(
-        const VtkImageGridSnapshot& snapshot,
+        const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
     bool ResetViewStage(std::uint64_t transactionRevision);
     bool ClearDataStage(std::uint64_t transactionRevision);
@@ -204,8 +205,8 @@ private:
     };
 
     struct DataStage final {
-        VtkImageGridSnapshot oldSnapshot;
-        VtkImageGridSnapshot nextSnapshot;
+        VtkRenderInputSnapshot oldSnapshot;
+        VtkRenderInputSnapshot nextSnapshot;
         std::shared_ptr<AbstractVisualStrategy> oldStrategy;
         std::shared_ptr<AbstractVisualStrategy> nextStrategy;
         std::optional<VizMode> oldMode;
@@ -293,11 +294,12 @@ private:
     bool SetPreparingLoadReplaced(
         LoadEventKind loadEventKind,
         bool& isReplaced);
+    VtkRenderInputSnapshot GetPrimaryRenderInput() const;
     DataStageStatus BuildPipeline();
     bool GetStageCurrent(const DataStage& stage) const;
     static bool GetSameInput(
-        const VtkImageGridSnapshot& left,
-        const VtkImageGridSnapshot& right)
+        const VtkRenderInputSnapshot& left,
+        const VtkRenderInputSnapshot& right)
     {
         if (!left || !right || !left->data || !right->data
             || left->data->self != right->data->self
@@ -308,7 +310,7 @@ private:
                 && left->binding->target == right->binding->target);
     }
     std::optional<VolumeTransferFunction> GetDefaultVolumeTransfer(
-        const VtkImageGridSnapshot& snapshot);
+        const VtkRenderInputSnapshot& snapshot);
     bool GetVolumeTransferValid(
         const VolumeTransferFunction& function) const;
     bool GetTransferRangeValid(
@@ -323,10 +325,10 @@ private:
     std::shared_ptr<AbstractVisualStrategy> CreateStrategy(VizMode mode);
     CameraState GetCameraState() const;
     bool SetCameraState(const CameraState& state);
-    bool SetModeCamera(VizMode mode, const VtkImageGridSnapshot& snapshot);
+    bool SetModeCamera(VizMode mode, const VtkRenderInputSnapshot& snapshot);
     bool SetCameraCenter(
         const std::array<double, 16>& modelToWorld,
-        const VtkImageGridSnapshot& snapshot);
+        const VtkRenderInputSnapshot& snapshot);
     void SetRendererBg();
     void ClearStrategies();
     std::optional<WindowLevelParams> GetAutoWindowLevel(
@@ -368,7 +370,7 @@ private:
     // 构造期冻结 Strategy 创建入口；生产默认进入 Render 层唯一工厂，测试可注入失败路径。
     StrategyCreate m_strategyCreate;
     // 本 service 持有 DataManager 当前批次 owner；各 view 共享只读 image/scalars，旧批次随最后一个 owner 释放。
-    VtkImageGridSnapshot m_renderSnapshot;
+    VtkRenderInputSnapshot m_renderSnapshot;
     // observer 把 kind/result 作为一个完整终态 payload 入队；锁只保护队列，不覆盖 VTK 或 callback 调用。
     std::deque<LoadNotice> m_loadNotices;
     mutable std::mutex m_loadNoticeMutex;
@@ -1049,7 +1051,7 @@ bool AppRuntime::SetCameraState(const CameraState& state)
 
 bool AppRuntime::SetModeCamera(
     const VizMode mode,
-    const VtkImageGridSnapshot& snapshot)
+    const VtkRenderInputSnapshot& snapshot)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) {
         return false;
@@ -1074,12 +1076,12 @@ bool AppRuntime::SetModeCamera(
     }
 
     camera->ParallelProjectionOn();
-    if (!snapshot || !snapshot->image) {
+    if (!snapshot || (!snapshot->image&&!snapshot->mesh)) {
         return false;
     }
 
     double imageCenter[3] = { 0.0, 0.0, 0.0 };
-    snapshot->image->GetCenter(imageCenter);
+    if(snapshot->image)snapshot->image->GetCenter(imageCenter);else snapshot->mesh->GetCenter(imageCenter);
     const double distance = (std::max)(camera->GetDistance(), 1e-6);
     camera->SetFocalPoint(imageCenter);
     if (mode == VizMode::SliceTop_down) {
@@ -1104,15 +1106,15 @@ bool AppRuntime::SetModeCamera(
 
 bool AppRuntime::SetCameraCenter(
     const std::array<double, 16>& modelToWorld,
-    const VtkImageGridSnapshot& snapshot)
+    const VtkRenderInputSnapshot& snapshot)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()
-        || !snapshot || !snapshot->image) {
+        || !snapshot || (!snapshot->image&&!snapshot->mesh)) {
         return false;
     }
 
     double modelCenter[3] = { 0.0, 0.0, 0.0 };
-    snapshot->image->GetCenter(modelCenter);
+    if(snapshot->image)snapshot->image->GetCenter(modelCenter);else snapshot->mesh->GetCenter(modelCenter);
     const double sourceCenter[4] = {
         modelCenter[0], modelCenter[1], modelCenter[2], 1.0
     };
@@ -2245,7 +2247,8 @@ void AppRuntime::SetSliceScroll(int delta)
 
 void AppRuntime::SetCursorWorldPosition(double worldPos[3], int axis)
 {
-    if (!m_sharedState || !m_renderSnapshot || !m_renderSnapshot->image) return;
+    if (!m_sharedState || !m_renderSnapshot || (!m_renderSnapshot->image&&!m_renderSnapshot->mesh)) return;
+    if(m_renderSnapshot->mesh)axis=-1;
     auto currentPos = m_sharedState->GetCursorWorld();
     m_sharedState->SetCursorRawWorld(worldPos[0], worldPos[1], worldPos[2]);
     m_sharedState->SetCursorAxis(axis);
@@ -2503,9 +2506,7 @@ bool AppRuntime::SendPendingUpdates()
     while (RemoveLoadNotice(loadNotice)) {
         if (!loadNotice.isStateSet) {
             if (loadNotice.isSucceeded) {
-                const auto current = m_dataManager
-                    ? m_dataManager->GetPrimaryImage()
-                    : VtkImageGridSnapshot{};
+                const auto current=GetPrimaryRenderInput();
                 const auto status = GetSameInput(current, m_renderSnapshot)
                     ? DataStageStatus::Ready : BuildPipeline();
                 if (status == DataStageStatus::Preparing) {
@@ -2982,12 +2983,21 @@ bool AppRuntime::GetStageCurrent(const DataStage& stage) const
         && stage.nextParams.isoValue == GetIsoThreshold();
 }
 
+VtkRenderInputSnapshot AppRuntime::GetPrimaryRenderInput() const {
+    if(!m_dataManager)return {};
+    if(auto image=m_dataManager->GetPrimaryImage())return VtkRenderInputView::FromImage(std::move(image));
+    const auto graph=m_dataManager->GetDataGraph();
+    const auto binding=m_dataManager->GetDataBinding(graph,primaryVolumeBinding);
+    if(!binding||!binding->target)return {};
+    return VtkRenderInputView::FromMesh(graph,binding,m_dataManager->GetSurfaceMesh(graph,*binding->target));
+}
+
 DataStageStatus AppRuntime::BuildPipeline()
 {
     if (!GetIsOwnerThread() || !m_dataManager) return DataStageStatus::Failed;
     // 跨 View load 事务只能由它自己的 coordinator 准备/提交；普通刷新等待它结束。
     if (m_dataStage && !m_dataStage->isRefresh) return DataStageStatus::Preparing;
-    const auto snapshot = m_dataManager->GetPrimaryImage();
+    const auto snapshot = GetPrimaryRenderInput();
     if (!snapshot) return DataStageStatus::Idle;
     if (m_dataStage && (!GetSameInput(m_dataStage->nextSnapshot, snapshot)
             || !GetStageCurrent(*m_dataStage))) {
@@ -3014,11 +3024,11 @@ DataStageStatus AppRuntime::BuildPipeline()
 }
 
 DataStageStatus AppRuntime::StartDataStage(
-    const VtkImageGridSnapshot& snapshot,
+    const VtkRenderInputSnapshot& snapshot,
     const std::uint64_t transactionRevision)
 {
     if (!GetIsOwnerThread() || transactionRevision == 0
-        || !snapshot || !snapshot->image || !snapshot->data
+        || !snapshot || !snapshot->GetValid()
         || !m_sharedState || !m_viewState || !m_renderer) {
         return DataStageStatus::Failed;
     }
@@ -3033,12 +3043,10 @@ DataStageStatus AppRuntime::StartDataStage(
             ? m_dataStage->status : DataStageStatus::Failed;
     }
 
-    int dimensions[3] = {};
-    snapshot->image->GetDimensions(dimensions);
-    if (dimensions[0] <= 0 || dimensions[1] <= 0
-        || dimensions[2] <= 0) {
-        return DataStageStatus::Failed;
-    }
+    if(snapshot->image) {
+        int dimensions[3]={};snapshot->image->GetDimensions(dimensions);
+        if(dimensions[0]<=0||dimensions[1]<=0||dimensions[2]<=0||!snapshot->imageView)return DataStageStatus::Failed;
+    } else if(!snapshot->meshView||snapshot->mesh->GetNumberOfPoints()==0)return DataStageStatus::Failed;
 
     DataStage stage;
     stage.oldSnapshot = m_renderSnapshot;
@@ -3054,11 +3062,16 @@ DataStageStatus AppRuntime::StartDataStage(
     }
     stage.transactionRevision = transactionRevision;
     stage.status = DataStageStatus::Preparing;
-    if (!stage.oldCamera.isValid
-        || !PrimaryDataActivation::GetDataReadyState(
-            snapshot, m_sharedState.get(), stage.readyState)) {
-        return DataStageStatus::Failed;
+    if(!stage.oldCamera.isValid)return DataStageStatus::Failed;
+    if(snapshot->image) {
+        if(!PrimaryDataActivation::GetDataReadyState(snapshot->imageView,m_sharedState.get(),stage.readyState))return DataStageStatus::Failed;
+    } else {
+        if(!snapshot->binding)return DataStageStatus::Failed;
+        stage.readyState.hasImageGeometry=false;stage.readyState.dataRevision=snapshot->data->self;
+        stage.readyState.bindingRevision=snapshot->binding->revision;
+        snapshot->mesh->GetCenter(stage.readyState.cursorWorld.data());
     }
+    if(snapshot->image) {
     stage.nextParams.scalarRange[0] = stage.readyState.scalarRange[0];
     stage.nextParams.scalarRange[1] = stage.readyState.scalarRange[1];
     stage.nextParams.cursor = stage.readyState.cursorWorld;
@@ -3092,6 +3105,7 @@ DataStageStatus AppRuntime::StartDataStage(
         stage.nextParams.windowLevel = stage.autoWindowLevel;
     }
 
+    }
     const auto effect = m_renderEffect.lock();
     if (stage.oldStrategy && effect
         && (!stage.oldSnapshot || !stage.oldSnapshot->data
@@ -3105,7 +3119,7 @@ DataStageStatus AppRuntime::StartDataStage(
         }
     }
 
-    stage.nextStrategy = CreateStrategy(stage.mode);
+    stage.nextStrategy = snapshot->mesh?CreateMeshRenderStrategy():CreateStrategy(stage.mode);
     if (!stage.nextStrategy
         || stage.nextStrategy == stage.oldStrategy) {
         return DataStageStatus::Failed;
@@ -3121,7 +3135,7 @@ DataStageStatus AppRuntime::StartDataStage(
             || !stage.nextStrategy->SetRenderInputStamp({
                 snapshot->data->self })
             || !stage.nextStrategy->SetInputData(
-                snapshot->image, snapshot->validityMask)) {
+                snapshot->image?vtkSmartPointer<vtkDataObject>(snapshot->image):vtkSmartPointer<vtkDataObject>(snapshot->mesh), snapshot->validityMask)) {
             throw std::runtime_error(
                 "Candidate rejected its product request.");
         }
@@ -3151,7 +3165,7 @@ DataStageStatus AppRuntime::StartDataStage(
 }
 
 DataStageStatus AppRuntime::SetDataStageReady(
-    const VtkImageGridSnapshot& snapshot,
+    const VtkRenderInputSnapshot& snapshot,
     const std::uint64_t transactionRevision)
 {
     if (!GetIsOwnerThread() || !m_dataStage
@@ -3298,11 +3312,11 @@ DataStageStatus AppRuntime::GetDataStageStatus(
 }
 
 bool AppRuntime::SetViewStage(
-    const VtkImageGridSnapshot& snapshot,
+    const VtkRenderInputSnapshot& snapshot,
     const std::uint64_t transactionRevision)
 {
     if (!GetIsOwnerThread() || !m_dataStage || !snapshot
-        || !snapshot->image || m_dataStage->isCommitted
+        || !snapshot->GetValid() || m_dataStage->isCommitted
         || m_dataStage->status != DataStageStatus::Ready
         || !GetStageCurrent(*m_dataStage)
         || m_dataStage->transactionRevision != transactionRevision
@@ -3442,7 +3456,7 @@ void AppRuntime::SetDataStageComplete(
     if (m_setLoadCommit) {
         m_readyState = m_dataStage->readyState;
     }
-    if (m_viewState
+    if (m_dataStage->nextSnapshot->image && m_viewState
         && m_viewState->GetWindowLevelMode()
             == WindowLevelMode::Auto) {
         // 候选阶段不改展示真源；只有数据已不可逆发布后才提交自动值。
@@ -3461,7 +3475,7 @@ void AppRuntime::SetDataStageComplete(
 
 std::optional<VolumeTransferFunction>
 AppRuntime::GetDefaultVolumeTransfer(
-    const VtkImageGridSnapshot& snapshot)
+    const VtkRenderInputSnapshot& snapshot)
 {
     if (!snapshot || !snapshot->image || !snapshot->data) {
         return std::nullopt;
@@ -3894,12 +3908,22 @@ public:
     {
     }
 
+    DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) override {
+        return m_service?m_service->StartDataStage(input,revision):DataStageStatus::Failed;
+    }
+    DataStageStatus SetRenderInputStageReady(const VtkRenderInputSnapshot& input,std::uint64_t revision) override {
+        return m_service?m_service->SetDataStageReady(input,revision):DataStageStatus::Failed;
+    }
+    bool SetRenderInputViewStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) override {
+        return m_service&&m_service->SetViewStage(input,revision);
+    }
+
     DataStageStatus StartDataStage(
         const VtkImageGridSnapshot& snapshot,
         const std::uint64_t transactionRevision) override
     {
         return m_service
-            ? m_service->StartDataStage(snapshot, transactionRevision)
+            ? m_service->StartDataStage(VtkRenderInputView::FromImage(snapshot), transactionRevision)
             : DataStageStatus::Failed;
     }
 
@@ -3908,7 +3932,7 @@ public:
         const std::uint64_t transactionRevision) override
     {
         return m_service
-            ? m_service->SetDataStageReady(snapshot, transactionRevision)
+            ? m_service->SetDataStageReady(VtkRenderInputView::FromImage(snapshot), transactionRevision)
             : DataStageStatus::Failed;
     }
 
@@ -3925,7 +3949,7 @@ public:
         const std::uint64_t transactionRevision) override
     {
         return m_service
-            && m_service->SetViewStage(snapshot, transactionRevision);
+            && m_service->SetViewStage(VtkRenderInputView::FromImage(snapshot), transactionRevision);
     }
 
     bool ResetViewStage(

@@ -65,6 +65,7 @@ public:
     std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const;
     std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const;
     CropInputSnapshot GetSource() const;
+    std::optional<CropViewPreviewState> GetViewState(const FeatureViewService* service) const;
     void ForgetOutcome(CropRequestId requestId);
     bool GetResultsValid(const std::vector<CropResultRecord>& results) const;
     void SetResults(std::vector<CropResultRecord>&& results) noexcept;

@@ -22,6 +22,7 @@ struct LoadCommitRequest final {
     // 0 为原有加载；非0为可信 Feature attachment。回调只在所有 View 已切换后执行。
     std::uint64_t ownerId = 0;
     std::function<bool()> onPublish;
+    VtkRenderInputSnapshot renderInput;
 };
 
 // 多 View 数据提交事务：所有 View 先建立候选，再统一切换，最后发布 DataManager current。

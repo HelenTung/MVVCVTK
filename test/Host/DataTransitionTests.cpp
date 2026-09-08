@@ -1,5 +1,12 @@
 #include "Host/LoadCommitCoordinator.h"
 #include "App/Services/AppPorts.h"
+#include "App/Services/AppServiceFactory.h"
+#include "App/AppState.h"
+#include "App/AppStateEvents.h"
+#include <vtkPlaneSource.h>
+#include <vtkPolyData.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include "Data/DataManager.h"
 #include "Data/VtkDataBridge.h"
 
@@ -78,6 +85,74 @@ bool GetLoadedSnapshotIdentity()
         "loaded VTK cache leaked the pre-publication data identity or rebuilt the volume");
 }
 
+bool GetRealMeshTransitions()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();auto image=BuildInput(data);if(!image)return false;
+    auto plane=vtkSmartPointer<vtkPlaneSource>::New();plane->SetOrigin(-1,-1,-1);plane->SetPoint1(1,-1,0);plane->SetPoint2(-1,1,1);plane->Update();
+    const auto entity=data->CreateDataEntityId();const DataRevisionRef meshRef{entity,1};
+    DataTransaction create;create.outputs.push_back({entity,0,DataTypes::surfaceMesh,{},VtkPreparedDataView::BuildMeshPayload(plane->GetOutput()),{}});
+    if(data->SetDataCommit(std::move(create)).status!=DataCommitStatus::Succeeded)return false;
+    auto events=std::make_shared<SharedStateBroadcaster>();auto state=std::make_shared<SharedInteractionState>(events);
+    std::vector<AppFactoryResult> views;std::vector<vtkSmartPointer<vtkRenderWindow>> windows;
+    for(int i=0;i<2;++i) {
+        AppServiceArgs args;args.dataManager=data;args.interactionState=state;args.eventSource=events;
+        auto ports=CreateAppPorts(std::move(args));auto renderer=vtkSmartPointer<vtkRenderer>::New();
+        auto window=vtkSmartPointer<vtkRenderWindow>::New();window->SetOffScreenRendering(1);window->SetSize(80,80);
+        if(!ports.renderBind->SetRenderTarget(window,renderer))return false;
+        AppViewUpdate update;update.mode=VizMode::SliceTop_down;
+        if(!ports.app.view->SendViewUpdate(update)||!ports.interaction.update->SendUpdates())return false;
+        views.push_back(std::move(ports));windows.push_back(std::move(window));
+    }
+    const auto graph=data->GetDataGraph();
+    const auto mesh=VtkRenderInputView::FromMesh(graph,
+        DataBinding{std::string(primaryVolumeBinding),meshRef,image->binding->revision+1},data->GetSurfaceMesh(graph,meshRef));
+    if(!mesh||!mesh->mesh||mesh->image||mesh->imageView)return false;
+    LoadCommitCoordinator coordinator(data);
+    auto inconsistent=std::make_shared<VtkRenderInputView>(*mesh);inconsistent->data=image->data;
+    if(!Check(!inconsistent->GetValid()&&views.front().dataStage->StartRenderInputStage(inconsistent,79)==DataStageStatus::Failed,
+        "mesh stage accepted a different typed-view payload identity"))return false;
+    // Existing image-only adapters must explicitly reject mesh candidates.
+    LoadCommitRequest unsupported;unsupported.ownerId=5;unsupported.transactionRevision=80;unsupported.sourceRevision=meshRef;
+    unsupported.renderInput=mesh;unsupported.stages={std::make_shared<StageProbe>()};unsupported.onPublish=[] {return true;};
+    if(!Check(coordinator.SetLoadCommit(unsupported).status==LoadCommitStatus::Failed,"image-only stage accepted a mesh input"))return false;
+    for(int failure=1;failure>=0;--failure) {
+        LoadCommitRequest request;request.ownerId=5;request.transactionRevision=81+failure;request.sourceRevision=meshRef;
+        request.renderInput=mesh;for(const auto& view:views)request.stages.push_back(view.dataStage);
+        request.onPublish=[&] {
+            for(const auto& view:views)if(view.featureView->GetRenderInputStamp()->dataRevision!=meshRef)return false;
+            if(failure)return false;
+            DataTransaction tx;tx.bindings.push_back({std::string(primaryVolumeBinding),image->binding->revision,true,image->data->self,meshRef});
+            return data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+        };
+        if(coordinator.SetLoadCommit(request).status!=LoadCommitStatus::Preparing)return false;
+        auto result=coordinator.SetLoadCommit(request);
+        if(!Check(result.status==(failure?LoadCommitStatus::Failed:LoadCommitStatus::Succeeded),"real mesh candidate completion"))return false;
+        for(const auto& view:views)if(!Check(view.featureView->GetRenderInputStamp()->dataRevision==(failure?image->data->self:meshRef),
+            "real mesh view switch/rollback input identity"))return false;
+    }
+    for(const auto& window:windows)window->Render();
+    for(auto& view:views) {
+        AppViewUpdate mode;mode.mode=VizMode::Volume;
+        if(!view.app.view->SendViewUpdate(mode)||!view.interaction.update->SendUpdates()
+            ||view.featureView->GetRenderInputStamp()->dataRevision!=meshRef)return false;
+    }
+    auto restored=std::make_shared<VtkImageGridView>(*image);restored->binding->revision=mesh->binding->revision+1;
+    LoadCommitRequest restore;restore.ownerId=5;restore.transactionRevision=84;restore.sourceRevision=image->data->self;
+    restore.renderInput=VtkRenderInputView::FromImage(restored);for(const auto& view:views)restore.stages.push_back(view.dataStage);
+    restore.onPublish=[&] {DataTransaction tx;tx.bindings.push_back({std::string(primaryVolumeBinding),mesh->binding->revision,true,meshRef,image->data->self});
+        return data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;};
+    if(coordinator.SetLoadCommit(restore).status!=LoadCommitStatus::Preparing)return false;
+    auto result=coordinator.SetLoadCommit(restore);
+    for(int tick=0;tick<1000&&result.status==LoadCommitStatus::Preparing;++tick) {
+        for(auto& view:views)view.interaction.update->SendUpdates();
+        result=coordinator.SetLoadCommit(restore);
+    }
+    const bool passed=result.status==LoadCommitStatus::Succeeded&&data->GetPrimaryImage()!=nullptr;
+    for(auto& view:views)view.taskControl->StopTasks(std::chrono::steady_clock::now()+std::chrono::seconds(3));
+    for(const auto& window:windows)window->Finalize();
+    return Check(passed,"mesh-to-image restoration did not complete the real view transaction");
+}
+
 bool GetTransitionCase(int failure)
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -150,6 +225,7 @@ bool GetTransitionCase(int failure)
 bool GetDataTransitionTests()
 {
     bool passed=GetLoadedSnapshotIdentity();
+    passed=GetRealMeshTransitions()&&passed;
     for(int failure=0;failure<=10;++failure)passed=GetTransitionCase(failure)&&passed;
     return passed;
 }

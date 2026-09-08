@@ -46,4 +46,5 @@ struct DataReadyState final {
     std::array<double, 2> scalarRange = { 0.0, 0.0 };
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
     std::array<double, 3> cursorWorld = { 0.0, 0.0, 0.0 };
+    bool hasImageGeometry = true;
 };

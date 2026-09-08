@@ -160,6 +160,17 @@ public:
 class AppDataStagePort {
 public:
     virtual ~AppDataStagePort() = default;
+    // Existing image participants remain source-compatible and reject mesh
+    // explicitly until they implement the generic candidate protocol.
+    virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView?StartDataStage(input->imageView,revision):DataStageStatus::Failed;
+    }
+    virtual DataStageStatus SetRenderInputStageReady(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView?SetDataStageReady(input->imageView,revision):DataStageStatus::Failed;
+    }
+    virtual bool SetRenderInputViewStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView&&SetViewStage(input->imageView,revision);
+    }
 
     virtual DataStageStatus StartDataStage(
         const VtkImageGridSnapshot& snapshot,
