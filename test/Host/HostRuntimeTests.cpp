@@ -211,7 +211,7 @@ bool GetProjectionReuseValid()
     f.updates[0]->SetRenderNeeded();
     f.contexts[1]->hasCamera = false;
     return f.frames.BuildFrameStage(3) == HostFrameStageStatus::Failed
-        && f.updates[0]->isDirty && f.frames.GetSceneState(1)->sceneEpoch == 2;
+        && f.views[0].GetRenderNeeded() && f.frames.GetSceneState(1)->sceneEpoch == 2;
 }
 
 bool GetPendingRollbackValid()
@@ -223,12 +223,12 @@ bool GetPendingRollbackValid()
     f.updates[0]->SetRenderNeeded();
     f.contexts[1]->hasCamera = false;
     if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Failed
-        || !f.updates[0]->isDirty || f.updates[1]->isDirty
+        || !f.views[0].GetRenderNeeded() || f.views[1].GetRenderNeeded()
         || f.views[0].pendingRenderEpoch != 1 || f.views[1].pendingRenderEpoch != 1) return false;
     f.contexts[1]->hasCamera = true;
     if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
     f.frames.ClearFrameStage();
-    if (!f.updates[0]->isDirty || f.updates[1]->isDirty
+    if (!f.views[0].GetRenderNeeded() || f.views[1].GetRenderNeeded()
         || f.views[0].pendingRenderEpoch != 1 || f.views[1].pendingRenderEpoch != 1) return false;
     if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
     f.frames.SetFrameCommit(2);
