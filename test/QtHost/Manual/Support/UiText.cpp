@@ -70,7 +70,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"EditSelected", "编辑选定零件"}, {"OpenAlignment", "进入计量对齐"},
         {"KeepInside", "保留内部"}, {"RemoveInside", "移除内部"}, {"PositionOnly", "仅定位"},
         {"Overlay", "切换结果叠加显示"}, {"Stop", "停止计算"},
-        {"Visibility", "设置结果可见性"}, {"Clear", "清除结果"}, {"SetState", "设置零件状态"}, {"Catalog", "查看零件目录"},
+        {"Visibility", "设置结果可见性"}, {"Clear", "清除结果"}, {"ClearPreview", "清除表面预览"}, {"SetState", "设置零件状态"}, {"Catalog", "查看零件目录"},
         {"Highlight", "高亮此零件"}, {"ClearHighlight", "取消此零件高亮"},
         {"Paint", "涂绘标签"}, {"Erase", "擦除标签"}, {"Fill", "填充区域"}, {"Island", "处理孤岛"},
         {"Grow", "区域生长"}, {"Split", "拆分零件"}, {"Merge", "合并零件"}, {"Undo", "撤销"}, {"Redo", "重做"},

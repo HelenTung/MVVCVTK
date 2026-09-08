@@ -231,6 +231,10 @@ void TestSession(Acceptance c)
     Require(determined->status == SurfaceResultStatus::Succeeded, "Surface determination failed.");
     const auto mesh = surface->GetSurfaceSnapshot();
     Require(bool(mesh), "Surface snapshot missing.");
+    Require(determined->isPublished && mesh->purpose == SurfaceTaskPurpose::Determine &&
+                mesh->sourceRevision == parts->sourceRevision &&
+                surface->GetResultValidity(mesh->dataRevision).status == SurfaceRestoreStatus::Current,
+            "Wall input requires a current formal Surface generation from the Part source.");
     std::size_t accepted = 0;
     double maxResidual = 0, maxSigma = 0;
     for (const auto &point : *mesh->points)

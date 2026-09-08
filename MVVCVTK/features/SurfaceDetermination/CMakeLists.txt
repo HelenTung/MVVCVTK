@@ -1,8 +1,16 @@
 set(MVVCVTK_SURFACE_API_HEADERS
+    include/SurfaceRecipe.h
     include/Host/SurfaceDeterminationHostFeature.h
     include/Host/SurfaceDeterminationHostTypes.h
 )
 set(MVVCVTK_SURFACE_SOURCES
+    src/SurfaceSeedBuilder.h
+    src/SurfaceSeedBuilder.cpp
+    src/SurfaceProfileSolver.h
+    src/SurfaceProfileSolver.cpp
+    src/SurfaceRecipeCodec.cpp
+    src/SurfaceContracts.h
+    src/SurfaceContracts.cpp
     src/SurfaceDeterminationAlgorithm.h
     src/SurfaceDeterminationAlgorithm.cpp
     src/SurfaceDeterminationHostFeature.cpp

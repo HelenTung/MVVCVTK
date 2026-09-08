@@ -202,14 +202,7 @@ inline SurfaceDeterminationStartParams GetParams(
 
 inline bool GetPointAccepted(const SurfacePointRecord& point)
 {
-    constexpr SurfacePointFlags rejected =
-        SurfacePointFlags::LowContrast
-        | SurfacePointFlags::InvalidSupport
-        | SurfacePointFlags::ProfileClipped
-        | SurfacePointFlags::ExcessiveOffset
-        | SurfacePointFlags::FitRejected
-        | SurfacePointFlags::TriangleFlipRisk;
-    return (point.flags & rejected) == SurfacePointFlags::None;
+    return point.flags == SurfacePointFlags::None;
 }
 
 } // namespace SurfaceTest

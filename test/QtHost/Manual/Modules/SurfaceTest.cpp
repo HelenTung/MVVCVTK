@@ -14,12 +14,18 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
         {"points", QString::number(state.pointCount)}, {"acceptedPoints", QString::number(state.acceptedPointCount)},
         {"lowContrastPoints", QString::number(state.lowContrastPointCount)}, {"rejectedPoints", QString::number(state.rejectedPointCount)},
         {"truncatedPoints", QString::number(state.truncatedPointCount)}, {"error", QString::fromStdString(state.errorMessage)}};
-    // 只在当前调用范围持有共享网格；结果面板只保留对象摘要。
+    summary["purpose"] = static_cast<int>(state.purpose);
+    if (state.isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", state.isoEstimate->isoValue},
+        {"background", state.isoEstimate->backgroundValue}, {"material", state.isoEstimate->materialValue},
+        {"samples", QString::number(state.isoEstimate->sampleCount)}};
+    const auto preview = feature->GetPreviewSnapshot();
+    summary["previewRequestId"] = preview ? QString::number(preview->requestId) : QString();
+    // 只在当前调用范围持有正式网格；预览和估计不替换正式结果身份。
     const auto snapshot = feature->GetSurfaceSnapshot();
     if (!snapshot) return summary;
     summary["mesh"] = GetRefText(snapshot->meshRevision);
     summary["method"] = static_cast<int>(snapshot->method);
-    if (snapshot->isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", snapshot->isoEstimate->isoValue},
+    if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", snapshot->isoEstimate->isoValue},
         {"background", snapshot->isoEstimate->backgroundValue}, {"material", snapshot->isoEstimate->materialValue},
         {"samples", QString::number(snapshot->isoEstimate->sampleCount)}};
     QJsonArray objects;
@@ -53,6 +59,8 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->AttachAction(method.first, parameters, [panel, feature, method](auto id, const auto& params) {
             SurfaceDeterminationStartParams start;
             start.method = method.second; start.targetViews = GetMainViews();
+            start.modelUnit = "mm";
+            if (const auto source = panel->GetSession()->GetImageDescriptor()) start.sourceVolume = source->dataRevision;
             if (params.contains("componentSelection")) start.componentSelection = GetEnum<SurfaceComponentSelection>(params, "componentSelection", {
                 {"Largest", SurfaceComponentSelection::Largest}, {"Seeded", SurfaceComponentSelection::Seeded}, {"All", SurfaceComponentSelection::All}});
             if (params.contains("initialIsoValue") && !params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
@@ -73,7 +81,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 summary["message"] = QString::fromStdString(result.message);
                 const auto snapshot = feature->GetSurfaceSnapshot();
                 if (result.status == SurfaceResultStatus::Succeeded && snapshot && GetDataRevisionRefValid(snapshot->meshRevision)
-                    && snapshot->method != SurfaceDeterminationMethod::GlobalIsoPreview && feature->GetState().acceptedPointCount > 0)
+                    && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure)
                     owner->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision);
                 else owner->GetContext().workflow.SetSurfaceInput({}, {});
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
@@ -84,7 +92,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         }, TestPolicy::Compute, true);
     }
     for (const auto& action : std::vector<std::pair<QString, SurfaceDeterminationAction>>{
-        {"Stop", SurfaceDeterminationAction::Stop}, {"Visibility", SurfaceDeterminationAction::SetVisibility}, {"Clear", SurfaceDeterminationAction::Clear}}) {
+        {"Stop", SurfaceDeterminationAction::Stop}, {"Visibility", SurfaceDeterminationAction::SetVisibility}, {"Clear", SurfaceDeterminationAction::Clear}, {"ClearPreview", SurfaceDeterminationAction::ClearPreview}}) {
         QJsonObject defaults;
         if (action.second == SurfaceDeterminationAction::SetVisibility) defaults = {{"isVisible", true}};
         if (action.second == SurfaceDeterminationAction::Stop) defaults = {{"targetRequestId", "0"}};
@@ -101,11 +109,11 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     }
     for (const QString destination : {QString("Display"), QString("Gap"), QString("Part")})
         panel->AttachAction("CopyIsoTo" + destination, {}, [panel, feature, destination](auto id, const auto&) {
-            const auto snapshot = feature->GetSurfaceSnapshot();
+            const auto state = feature->GetState();
             const auto current = panel->GetSession()->GetImageDescriptor();
-            if (!snapshot || !snapshot->isoEstimate || !current || snapshot->sourceRevision != current->dataRevision)
+            if (!state.isoEstimate || !current || state.sourceRevision != current->dataRevision)
                 throw std::invalid_argument("当前输入没有有效 ISO 估计");
-            const auto iso = snapshot->isoEstimate->isoValue;
+            const auto iso = state.isoEstimate->isoValue;
             if (destination == "Display") {
                 HostViewSetRequest request; request.targetView.viewId = "primary-3d"; request.iso = iso;
                 panel->SendHost(id, std::move(request));
@@ -119,8 +127,12 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     panel->AttachAction("SamplePoints", {{"maxPoints", "128"}}, [panel, feature](auto id, const auto& p) {
         const auto limit = GetId(p["maxPoints"]);
         if (limit == 0 || limit > 4096) throw std::invalid_argument("最大采样点数必须为 1～4096");
-        const auto snapshot = feature->GetSurfaceSnapshot();
-        if (!snapshot || !snapshot->points) throw std::invalid_argument("没有网格点");
+        const auto input = panel->GetSession()->GetImageDescriptor();
+        auto snapshot = feature->GetSurfaceSnapshot();
+        if (!snapshot || !input || snapshot->sourceRevision != input->dataRevision)
+            snapshot = feature->GetPreviewSnapshot();
+        if (!snapshot || !snapshot->points || !input || snapshot->sourceRevision != input->dataRevision)
+            throw std::invalid_argument("当前输入没有网格点");
         const auto& points = *snapshot->points;
         const auto stride = std::max<std::size_t>(1, (points.size() + limit - 1) / limit);
         QJsonArray samples;
@@ -144,14 +156,18 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         const auto state = feature->GetState();
         const auto snapshot = feature->GetSurfaceSnapshot();
         const auto input = panel->GetSession()->GetImageDescriptor();
-        const bool current = input && snapshot && snapshot->sourceRevision == input->dataRevision && state.stage == SurfaceDeterminationStage::Ready;
+        const auto preview = feature->GetPreviewSnapshot();
+        const bool current = input && snapshot && snapshot->sourceRevision == input->dataRevision;
+        const bool hasPreview = input && preview && preview->sourceRevision == input->dataRevision;
         const bool measured = current && GetDataRevisionRefValid(snapshot->meshRevision)
-            && snapshot->method != SurfaceDeterminationMethod::GlobalIsoPreview && state.acceptedPointCount > 0;
-        summary["hasResult"] = current;
-        summary["hasMesh"] = current && GetDataRevisionRefValid(snapshot->meshRevision);
+            && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure;
+        summary["hasIso"] = input && state.isoEstimate && state.sourceRevision == input->dataRevision;
+        summary["hasPreview"] = hasPreview;
+        summary["hasResult"] = current || hasPreview || summary["hasIso"].toBool();
+        summary["hasMesh"] = (current && GetDataRevisionRefValid(snapshot->meshRevision)) || hasPreview;
         summary["isOverlayVisible"] = state.isOverlayVisible;
-        panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasMesh"].toBool() ? QJsonValue(state.isOverlayVisible) : QJsonValue(), summary["mesh"].toString(), summary["hasMesh"].toBool() ? QString() : "当前没有可用表面");
-        summary["hasIso"] = current && snapshot->isoEstimate.has_value();
+        const auto displayKey = hasPreview ? QString::number(preview->requestId) : summary["mesh"].toString();
+        panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasMesh"].toBool() ? QJsonValue(state.isOverlayVisible) : QJsonValue(), displayKey, summary["hasMesh"].toBool() ? QString() : "当前没有可用表面");
         summary["hasMeasurement"] = measured;
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement
