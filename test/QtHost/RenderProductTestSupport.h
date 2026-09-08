@@ -1,3 +1,4 @@
+// 测试用途：提供渲染策略探针与手动渲染通道，辅助验证调度和产品行为。
 #pragma once
 
 #include "Render/Support/BaseVisualStrategy.h"

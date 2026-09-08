@@ -22,6 +22,7 @@
 #include <vtk_glad.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -244,9 +245,10 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     }
 
     const auto& values = m_staged.payload.predicateTable->rgbaValues;
-    const std::size_t width = values.size() / 4;
-    if (width == 0
-        || width > static_cast<std::size_t>(vtkTextureObject::GetMaximumTextureSize(context))) {
+    // 删除最后一个节点也走正常的 staged/ready/commit。零操作的 shader 不采样，仍绑定一个合法空纹素。
+    const std::array<float, 4> emptyValues{};
+    const std::size_t width = std::max<std::size_t>(1, values.size() / 4);
+    if (width > static_cast<std::size_t>(vtkTextureObject::GetMaximumTextureSize(context))) {
         m_state.status = RenderEffectStatus::Failed;
         m_state.failureReason = RenderEffectFailure::TextureFailed;
         m_state.message = "The crop table exceeds the context texture-width limit.";
@@ -262,7 +264,7 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     texture->SetMinificationFilter(vtkTextureObject::Nearest);
     texture->SetMagnificationFilter(vtkTextureObject::Nearest);
     // VTK 9.4 的上传 API 错误地把只读源声明为 void*；实现只读取该缓冲区。
-    auto* uploadValues = const_cast<float*>(values.data());
+    auto* uploadValues = const_cast<float*>(values.empty() ? emptyValues.data() : values.data());
     if (!texture->Create1DFromRaw(
             static_cast<unsigned int>(width), 4, VTK_FLOAT, uploadValues)) {
         m_state.status = RenderEffectStatus::Failed;

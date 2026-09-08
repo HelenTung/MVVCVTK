@@ -1,3 +1,4 @@
+// 测试用途：验证 VTK 对象与数据图之间的冻结快照、桥接和类型转换。
 #include "Data/DataGraphStore.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"

@@ -1,3 +1,4 @@
+// 测试用途：为表面确定回归提供检查、失败统计和共享测试辅助。
 #pragma once
 
 #include "../TestDataPort.h"

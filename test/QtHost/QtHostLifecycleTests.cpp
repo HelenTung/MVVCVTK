@@ -1,3 +1,4 @@
+// 测试用途：验证宿主会话、视图与观察者的创建、挂载、停止和资源释放。
 #include "QtHostMethodCases.h"
 
 #include "App/AppState.h"

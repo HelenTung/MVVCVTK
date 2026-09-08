@@ -1,3 +1,4 @@
+// 测试用途：对照第三方参考实现验证原生环形伪影校正函数的结果。
 #include "ArtifactTestSupport.h"
 #include "remove_ring.h"
 

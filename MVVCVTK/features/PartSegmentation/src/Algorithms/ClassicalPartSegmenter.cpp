@@ -675,6 +675,39 @@ std::optional<std::vector<PartMetrics>> BuildLabelStats(
 
 } // namespace
 
+std::optional<PartMetrics> ClassicalPartSegmenter::BuildPartMetrics(
+    const PartVolumeView& volume, const std::vector<PartLabelId>& labels,
+    const PartLabelId label, const std::array<int, 6>& extent,
+    const std::function<bool()>& getStopRequested)
+{
+    std::size_t count = 1;
+    for (std::size_t a = 0; a < 3; ++a) {
+        if (volume.dimensions[a] <= 0 || extent[a*2] > extent[a*2+1]
+            || extent[a*2] < volume.extent[a*2] || extent[a*2+1] > volume.extent[a*2+1]
+            || static_cast<std::int64_t>(volume.extent[a*2+1]) - volume.extent[a*2] + 1 != volume.dimensions[a]
+            || !GetProduct(count, static_cast<std::size_t>(volume.dimensions[a]), count)) return {};
+    }
+    if (label == 0 || labels.size() != count) return {};
+    PartStats stats; std::size_t found = 0, visited = 0;
+    const auto width = static_cast<std::size_t>(volume.dimensions[0]);
+    const auto plane = width * static_cast<std::size_t>(volume.dimensions[1]);
+    // 使用源网格的含端点索引，保留非零 extent、方向与各向异性间距。
+    for (std::int64_t z = extent[4]; z <= extent[5]; ++z)
+        for (std::int64_t y = extent[2]; y <= extent[3]; ++y) {
+            auto offset = static_cast<std::size_t>(z-volume.extent[4])*plane
+                + static_cast<std::size_t>(y-volume.extent[2])*width
+                + static_cast<std::size_t>(static_cast<std::int64_t>(extent[0])-volume.extent[0]);
+            for (std::int64_t x = extent[0]; x <= extent[1]; ++x, ++offset) {
+                if (visited++ % cancelBatch == 0 && GetStopped(getStopRequested)) return {};
+                if (labels[offset] != label) continue;
+                ++found; SetStats(stats, {static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)});
+            }
+        }
+    if (!found) return {};
+    auto metrics = BuildMetrics(volume, found, stats);
+    return GetMetricsValid(metrics) ? std::optional<PartMetrics>(metrics) : std::nullopt;
+}
+
 std::optional<std::vector<PartMetrics>> ClassicalPartSegmenter::BuildLabelMetrics(
     const PartVolumeView& volume, const std::vector<PartLabelId>& labels,
     const std::uint32_t partCount, const std::function<bool()>& getStopRequested)

@@ -1,3 +1,4 @@
+// 测试用途：验证伪影任务启动、通知、候选发布、取消与生命周期清理。
 #include "ArtifactTestSupport.h"
 #include "Host/ArtifactReductionHostFeature.h"
 #include "TestDataPort.h"

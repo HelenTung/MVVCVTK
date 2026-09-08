@@ -89,7 +89,8 @@ public:
     ArtifactConfig m_config;
     std::thread::id m_owner;
     std::shared_ptr<TrustedDataPort> m_data;
-    std::weak_ptr<FeatureHostControl> m_host;
+    // 挂载上下文是临时值；Feature 必须持有通知端口直到成功解绑。
+    std::shared_ptr<FeatureHostControl> m_host;
     ArtifactState m_state;
     ArtifactInputMode m_inputMode = ArtifactInputMode::CurrentPrimary;
     std::shared_ptr<ArtifactReduction::TaskControl> m_control;
@@ -205,7 +206,7 @@ ArtifactAdmission ArtifactReductionHostFeature::StartCandidate(ArtifactRequest r
                 return ArtifactReduction::BuildArtifactCandidate(input, request, config, *control);
             });
         auto future = task.get_future();
-        std::thread worker([task = std::move(task), host = state.m_host]() mutable {
+        std::thread worker([task = std::move(task), host = std::weak_ptr<FeatureHostControl>(state.m_host)]() mutable {
             task();
             try { if (const auto controlPort = host.lock()) (void)controlPort->SendWorkAvailable(); }
             catch (...) {}

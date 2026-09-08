@@ -31,13 +31,15 @@ namespace {
 constexpr std::uint32_t maxOverlayPartCount = 4096;
 
 std::optional<PartLabelId> GetPickedLabel(vtkProp3D& prop, vtkDataSet* data,
-    vtkLookupTable& table, const int x, const int y, vtkRenderer* renderer)
+    vtkLookupTable& table, const int x, const int y, vtkRenderer* renderer,
+    const bool useHiddenGeometry = false)
 {
-    if (!renderer || !data || !prop.GetVisibility()) return std::nullopt;
+    if (!renderer || !data || (!prop.GetVisibility() && !useHiddenGeometry)) return std::nullopt;
     // picker 只观察本 Feature 的临时 prop 壳，不遍历 renderer，也不改原 prop 的可拾取状态。
     vtkSmartPointer<vtkProp3D> candidate;
     candidate.TakeReference(prop.NewInstance());
     candidate->ShallowCopy(&prop);
+    candidate->VisibilityOn();
     candidate->PickableOn();
     auto picker = vtkSmartPointer<vtkCellPicker>::New();
     picker->PickFromListOn();
@@ -63,7 +65,9 @@ std::optional<PartLabelId> GetPickedLabel(vtkProp3D& prop, vtkDataSet* data,
 bool SetLookupTable(
     vtkLookupTable& table,
     const PartRenderStateTable& states,
-    PartRenderStateTable& previous)
+    PartRenderStateTable& previous,
+    const bool isSlice = false,
+    const bool isSelectionOnly = false)
 {
     if (states.statesByLabel.empty()
         || states.statesByLabel.size() - 1U > maxOverlayPartCount
@@ -92,8 +96,11 @@ bool SetLookupTable(
     bool hasColorChange = hasSizeChange;
     for (std::size_t index = 0; index < states.statesByLabel.size(); ++index) {
         const auto& color = states.statesByLabel[index].color;
-        if (!hasSizeChange && color == applied.statesByLabel[index].color) continue;
-        table.SetTableValue(static_cast<vtkIdType>(index), color.data());
+        if (!hasSizeChange && color == applied.statesByLabel[index].color
+            && (!(isSlice || isSelectionOnly) || states.statesByLabel[index].isSelected == applied.statesByLabel[index].isSelected)) continue;
+        table.SetTableValue(static_cast<vtkIdType>(index), color[0], color[1], color[2], color[3] * (isSelectionOnly
+            ? (states.statesByLabel[index].isSelected ? 0.35 : 0.0)
+            : isSlice ? (states.statesByLabel[index].isSelected ? 0.8 : 0.18) : 1.0));
         hasColorChange = true;
     }
     if (hasColorChange) table.Build();
@@ -129,11 +136,10 @@ std::optional<PartRenderStateTable> BuildPartRenderStateTable(
                 ? state.color[3] * entry.presentation.opacity : 0.0;
             state.isSelected = entry.presentation.isSelected;
             if (state.isSelected && state.color[3] > 0.0) {
-                // 选择高亮只改变本次 LUT 投影，不改变目录中的稳定颜色。
-                for (std::size_t channel = 0; channel < 3; ++channel) {
-                    state.color[channel] =
-                        0.5 + 0.5 * state.color[channel];
-                }
+                // 所有视图用同一种选择色；取消选择恢复目录色，不改标签与身份。
+                state.color[0] = 1.0;
+                state.color[1] = 0.68;
+                state.color[2] = 0.16;
             }
         }
         return table;
@@ -176,16 +182,22 @@ bool SetPartStates(
     return true;
 }
 
-PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
+PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnly)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
+    , m_pickLut(vtkSmartPointer<vtkLookupTable>::New())
+    , m_isSelectionOnly(isSelectionOnly)
 {
     m_mapper->SetLookupTable(m_lut);
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetOpacity(1.0);
-    m_actor->GetProperty()->SetLighting(false);
+    m_actor->GetProperty()->SetLighting(true);
+    m_actor->GetProperty()->SetAmbient(0.35);
+    m_actor->GetProperty()->SetDiffuse(0.65);
+    m_actor->GetProperty()->SetSpecular(0.12);
+    m_actor->GetProperty()->SetSpecularPower(20.0);
     m_actor->SetPickable(false);
     AttachProp(m_actor);
 }
@@ -208,7 +220,12 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
     const PartRenderStateTable& states) noexcept
 {
     try {
-        if (!m_mapper->GetInput() || !SetLookupTable(*m_lut, states, m_partStates)) return false;
+        if (!m_mapper->GetInput() || !SetLookupTable(*m_lut, states, m_partStates, false, m_isSelectionOnly)
+            || !SetLookupTable(*m_pickLut, states, m_pickStates)) return false;
+        // DVR 仅叠加选中位置，不以整套不透明表面覆盖真实体渲染。
+        // 拾取仍使用完整目录的可见性，不能把“未高亮”误判为“业务隐藏”。
+        m_actor->SetVisibility(!m_isSelectionOnly || std::any_of(states.statesByLabel.begin(), states.statesByLabel.end(),
+            [](const auto& state) { return state.isSelected && state.color[3] > 0.0; }));
         const auto partCount = static_cast<std::uint32_t>(
             states.statesByLabel.size() - 1U);
         m_mapper->SetScalarRange(
@@ -224,7 +241,7 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
 std::optional<PartLabelId> PartSurfaceOverlayStrategy::GetPickedLabel(
     const int x, const int y, vtkRenderer* renderer) const
 {
-    return ::GetPickedLabel(*m_actor, m_mapper->GetInput(), *m_lut, x, y, renderer);
+    return ::GetPickedLabel(*m_actor, m_mapper->GetInput(), *m_pickLut, x, y, renderer, m_isSelectionOnly);
 }
 
 PartSliceOverlayStrategy::PartSliceOverlayStrategy(
@@ -275,7 +292,8 @@ bool PartSliceOverlayStrategy::SetPartStates(
     const PartRenderStateTable& states) noexcept
 {
     try {
-        return SetLookupTable(*m_lut, states, m_partStates);
+        // 保留灰度切片细节，选中零件才加强填充。
+        return SetLookupTable(*m_lut, states, m_partStates, true);
     }
     catch (...) {
         return false;
