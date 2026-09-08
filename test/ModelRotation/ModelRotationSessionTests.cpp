@@ -180,7 +180,10 @@ void TestRotationSession()
         bool hasMatrix = false;
         auto* props = endpoint.renderer->GetViewProps();
         props->InitTraversal();
-        while (auto* prop = vtkProp3D::SafeDownCast(props->GetNextProp())) {
+        while (auto* item = props->GetNextProp()) {
+            // 标尺等二维 prop 也在同一集合内；继续遍历，检查实际三维模型的矩阵。
+            auto* prop = vtkProp3D::SafeDownCast(item);
+            if (!prop) continue;
             if (auto* matrix = prop->GetUserMatrix()) {
                 bool same = true;
                 for (int index=0; index<16; ++index)
