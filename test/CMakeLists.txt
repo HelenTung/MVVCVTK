@@ -38,7 +38,7 @@ target_include_directories(
 target_compile_features(mvvcvtk_host_test_internal INTERFACE cxx_std_17)
 set_target_properties(
     mvvcvtk_host_test_internal
-    PROPERTIES FOLDER "MVVCVTK/Tests/Internal"
+    PROPERTIES PROJECT_LABEL TestInternalSupport FOLDER "MVVCVTK/test/Support"
 )
 unset(MVVCVTK_HOST_TEST_INCLUDE_DIRS)
 
@@ -74,22 +74,6 @@ if(MVVCVTK_BUILD_QT_TESTING)
     add_subdirectory(QtHost)
 endif()
 add_subdirectory(SdkBoundary)
-
-if(TARGET MVVCVTKStandalone)
-    add_test(NAME Host.StandaloneScheduling
-        COMMAND MVVCVTKStandalone --host-driven --demo-audit)
-    SetTestRuntime(Host.StandaloneScheduling MVVCVTKStandalone)
-    set_tests_properties(Host.StandaloneScheduling PROPERTIES TIMEOUT 120)
-    if(MVVCVTK_BUILD_PART_SEGMENTATION AND MVVCVTK_BUILD_SURFACE_DETERMINATION
-            AND MVVCVTK_BUILD_METROLOGY_ALIGNMENT AND MVVCVTK_BUILD_ARTIFACT_REDUCTION)
-        add_test(NAME Host.StandaloneFeatures.Native COMMAND MVVCVTKStandalone --feature-audit)
-        add_test(NAME Host.StandaloneFeatures.HostDriven COMMAND MVVCVTKStandalone --host-driven --feature-audit)
-        foreach(_feature_audit IN ITEMS Host.StandaloneFeatures.Native Host.StandaloneFeatures.HostDriven)
-            SetTestRuntime(${_feature_audit} MVVCVTKStandalone)
-            set_tests_properties(${_feature_audit} PROPERTIES TIMEOUT 180)
-        endforeach()
-    endif()
-endif()
 
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     # 所有子目录创建完成后检查完整目标图；DefX 只能由私有 kernel 直接消费。

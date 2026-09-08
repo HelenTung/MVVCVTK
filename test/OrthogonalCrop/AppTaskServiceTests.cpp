@@ -1,3 +1,4 @@
+// 测试用途：验证应用任务接纳、快照导出、边界回滚、质量切换和渲染线程归属。
 #include "Tasks/AppDataExportTaskService.h"
 #include "Tasks/AppDataLoadTaskService.h"
 #include "../TestDataPort.h"

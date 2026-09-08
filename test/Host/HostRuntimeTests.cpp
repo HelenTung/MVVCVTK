@@ -1,3 +1,4 @@
+// 测试用途：验证宿主运行时的视图上下文、帧租约、渲染更新与完成通知。
 #include "Host/Internal/HostFrameRuntime.h"
 #include "App/Services/PrimaryDataActivation.h"
 #include "App/Services/FeatureViewService.h"
@@ -23,7 +24,8 @@ public:
     bool SendUpdates() override { ++applyCount; return isApplyAccepted; }
     bool SendPendingUpdates() override { ++pendingCount; return isApplyAccepted; }
     void SendCompletions() override { ++completeCount; if (onComplete) onComplete(); }
-    bool SetRenderNeeded() override { isDirty = true; return true; }
+    bool SetRenderNeeded() override { isDirty = true; ++notifications; return true; }
+    bool GetRenderNeeded() const override { return isDirty; }
     bool ResetRenderNeeded() override {
         if (isClaimThrowing) throw std::runtime_error("claim rejected");
         const bool previous = isDirty;
@@ -36,6 +38,7 @@ public:
     int applyCount = 0;
     int pendingCount = 0;
     int completeCount = 0;
+    int notifications = 0;
     std::function<void()> onComplete;
 };
 class ContextProbe final : public AbstractViewContext {
@@ -101,16 +104,41 @@ bool GetFrameFailuresValid()
     if (!f.frames.CollectFrameUpdates() || !f.frames.ApplyFrameUpdates()) return false;
     f.updates[1]->isClaimThrowing = true;
     if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Failed
-        || !f.updates[0]->isDirty || !f.updates[1]->isDirty) return false;
+        || !f.views[0].GetRenderNeeded() || !f.views[1].GetRenderNeeded()) return false;
     f.updates[1]->isClaimThrowing = false;
     f.contexts[1]->hasCamera = false;
     if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Failed
-        || !f.updates[0]->isDirty || !f.updates[1]->isDirty) return false;
+        || !f.views[0].GetRenderNeeded() || !f.views[1].GetRenderNeeded()) return false;
     f.contexts[1]->hasCamera = true;
     if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
     f.frames.ClearFrameStage();
-    return f.updates[0]->isDirty && f.updates[1]->isDirty
+    return f.views[0].GetRenderNeeded() && f.views[1].GetRenderNeeded()
         && f.frames.GetSceneStates()[0].sceneEpoch == 0;
+}
+bool GetFailedFrameWakeValid()
+{
+    FrameFixture f;
+    f.frames.SetDriveMode(HostDriveMode::HostDriven);
+    if (f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(1);
+    f.contexts[1]->hasCamera = false;
+    (void)f.updates[0]->SetRenderNeeded();
+    for (int retry = 0; retry < 100; ++retry) {
+        if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Failed) return false;
+        f.frames.ClearFrameStage();
+        if (!f.views[0].GetRenderNeeded() || f.updates[0]->notifications != 1
+            || f.updates[1]->notifications != 0) return false;
+    }
+    const auto deferred = f.frames.SendFrameRender({{"0"}, .001}, [] { return true; });
+    if (deferred.status != HostRenderStatus::Deferred || f.contexts[0]->renderCount != 0) return false;
+    // 模拟异步产品完成的新事件；恢复领取保留需求并提交，无需周期重试。
+    f.contexts[1]->hasCamera = true;
+    (void)f.updates[1]->SetRenderNeeded();
+    if (f.updates[1]->notifications != 1
+        || f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(2);
+    return f.frames.GetSceneStates()[0].sceneEpoch == 2
+        && !f.views[0].GetRenderNeeded() && !f.views[1].GetRenderNeeded();
 }
 bool GetRenderRetryValid()
 {
@@ -223,6 +251,7 @@ int main()
         if (!value) ++failures;
     };
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");
+    check(GetFailedFrameWakeValid(), "failed frame retains changes without self-waking and resumes on new work");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
     check(GetActivationValid(), "primary activation cursor and publication ownership");

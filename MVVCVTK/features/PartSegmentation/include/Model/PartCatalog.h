@@ -19,7 +19,8 @@ struct PartEntry final {
     PartLabelId labelId = 0;
     PartMetrics metrics;
     PartUserState userState;
-    PartPresentation presentation;
+    // 新生成零件采用实体预览，避免相邻标签的内部表面半透明叠加。
+    PartPresentation presentation{true, false, 1.0};
     bool isEdited = false;
 };
 
@@ -41,6 +42,11 @@ std::array<double, 4> GetPartStableColor(
 bool GetPartCatalogValid(
     const PartCatalog& catalog,
     const std::vector<PartLabelId>& labels,
+    const std::function<bool()>& getStopRequested = nullptr,
+    std::vector<std::uint64_t>* labelCounts = nullptr) noexcept;
+bool GetPartCatalogCountsValid(
+    const PartCatalog& catalog,
+    const std::vector<std::uint64_t>& labelCounts,
     const std::function<bool()>& getStopRequested = nullptr) noexcept;
 bool GetPartCatalogStorageBytes(
     const PartCatalog& catalog,

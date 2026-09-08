@@ -1,3 +1,4 @@
+// 测试用途：用合成球体和圆柱验证表面指标、分量选择、作用范围和坐标方向。
 #include "SurfaceDeterminationTestCases.h"
 
 #include "SurfaceDeterminationAlgorithm.h"

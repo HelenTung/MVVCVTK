@@ -1,3 +1,4 @@
+// 测试用途：为功能测试提供基于真实数据图与 VTK 桥接的数据端口，验证冻结数据与修订事务。
 #pragma once
 
 #include "Data/DataGraphStore.h"

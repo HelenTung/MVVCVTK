@@ -26,7 +26,8 @@ enum class CropHostAction {
     BuildResult,
     SetPolyData = 10,
     ClearPolyData,
-    Exit = 13
+    Exit = 13,
+    DeleteNode
 };
 
 struct CropHostTarget {
@@ -42,6 +43,8 @@ struct CropHostRequest {
     std::optional<CropRemovalMode> removalMode;
     std::optional<std::size_t> nodeCount;
     vtkSmartPointer<vtkPolyData> polyData;
+    // DeleteNode 专用：GetState().history.operationIndices 返回的稳定操作标识；不能用显示行号代替。
+    std::optional<std::uint64_t> operationIndex;
 };
 
 using CropBuildCallback =

@@ -15,7 +15,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME PartSegmentationTests
         PROJECT_LABEL PartSegmentationTests
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/test/Automation"
 )
 target_include_directories(
     mvvcvtk_part_segmentation_tests

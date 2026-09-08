@@ -75,7 +75,7 @@ function(BuildHeaderProbes outputSources outputDependencies surfaceName dependen
         BuildProbe(
             generatedProbe
             "${probeFile}"
-            "#include \"${headerName}\"\n"
+            "// 测试用途：验证 ${headerName} 可以独立包含，不依赖实现层头文件。\n#include \"${headerName}\"\n"
         )
         list(APPEND probeSources "${generatedProbe}")
         list(APPEND dependencyFiles "${dependencyDir}/${probeFile}.json")
@@ -85,7 +85,7 @@ function(BuildHeaderProbes outputSources outputDependencies surfaceName dependen
 endfunction()
 
 function(BuildAggregateProbe outputName fileName)
-    set(probeSource)
+    set(probeSource "// 测试用途：验证批准的 SDK 公开头可以组合包含，且声明之间没有冲突。\n")
     foreach(headerName IN LISTS ARGN)
         string(APPEND probeSource "#include \"${headerName}\"\n")
     endforeach()
@@ -94,7 +94,7 @@ function(BuildAggregateProbe outputName fileName)
 endfunction()
 
 function(BuildForbiddenProbe outputName fileName)
-    set(probeSource)
+    set(probeSource "// 测试用途：验证接口目标无法越界消费未授权头文件；此探针预期编译失败。\n")
     foreach(headerName IN LISTS ARGN)
         string(APPEND probeSource "#include \"${headerName}\"\n")
     endforeach()
@@ -210,8 +210,8 @@ target_compile_options(
 set_target_properties(
     mvvcvtk_host_header_probes
     PROPERTIES
-        PROJECT_LABEL MVVCVTKHostHeaderProbes
-        FOLDER "MVVCVTK/Tests/HeaderProbes"
+        PROJECT_LABEL HostHeaderProbes
+        FOLDER "MVVCVTK/test/Automation/HeaderProbes"
 )
 
 add_library(mvvcvtk_feature_spi_header_probes OBJECT
@@ -229,8 +229,8 @@ target_compile_options(
 set_target_properties(
     mvvcvtk_feature_spi_header_probes
     PROPERTIES
-        PROJECT_LABEL MVVCVTKFeatureSpiHeaderProbes
-        FOLDER "MVVCVTK/Tests/HeaderProbes"
+        PROJECT_LABEL FeatureSpiHeaderProbes
+        FOLDER "MVVCVTK/test/Automation/HeaderProbes"
 )
 
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
@@ -249,8 +249,8 @@ if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     set_target_properties(
         mvvcvtk_crop_header_probes
         PROPERTIES
-            PROJECT_LABEL MVVCVTKCropHeaderProbes
-            FOLDER "MVVCVTK/Tests/HeaderProbes"
+            PROJECT_LABEL CropHeaderProbes
+            FOLDER "MVVCVTK/test/Automation/HeaderProbes"
     )
 endif()
 
@@ -270,8 +270,8 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     set_target_properties(
         mvvcvtk_gap_header_probes
         PROPERTIES
-            PROJECT_LABEL MVVCVTKGapHeaderProbes
-            FOLDER "MVVCVTK/Tests/HeaderProbes"
+            PROJECT_LABEL GapHeaderProbes
+            FOLDER "MVVCVTK/test/Automation/HeaderProbes"
     )
 endif()
 
@@ -300,8 +300,8 @@ endif()
 set_target_properties(
     mvvcvtk_sdk_header_aggregate
     PROPERTIES
-        PROJECT_LABEL MVVCVTKSdkHeaderAggregate
-        FOLDER "MVVCVTK/Tests/HeaderProbes"
+        PROJECT_LABEL SdkHeaderAggregate
+        FOLDER "MVVCVTK/test/Automation/HeaderProbes"
 )
 
 function(SetClosureTest testName dependencyFiles stagingRoot)

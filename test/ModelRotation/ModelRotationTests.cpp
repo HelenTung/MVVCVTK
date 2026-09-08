@@ -1,3 +1,4 @@
+// 测试用途：汇总模型旋转数学、状态机、帧失败和会话驱动回归。
 #include "App/AppState.h"
 #include "Algorithms/ModelRotationAlgorithm.h"
 #include "Host/ModelRotationHostFeature.h"

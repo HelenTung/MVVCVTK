@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,8 @@ struct CropHistoryState final {
     std::size_t baseNodeCount = 0;
     // 从原始根数据开始的完整参数历史；包含当前 active history。
     std::size_t allOperationCount = 0;
+    // 当前未物化历史（含 redo）的稳定操作标识，顺序与 nodeCount 前缀一致；删除后不重新编号。
+    std::vector<std::uint64_t> operationIndices;
 };
 
 // 裁切几何类型；router 用它和数据源、动作一起决定可执行路径。

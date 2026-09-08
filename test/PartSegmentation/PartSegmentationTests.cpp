@@ -1,3 +1,4 @@
+// 测试用途：调度零件分割的算法、目录、谱系、显示、规模、编辑和生命周期测试。
 #include "PartSegmentationTestCases.h"
 
 #include <iostream>

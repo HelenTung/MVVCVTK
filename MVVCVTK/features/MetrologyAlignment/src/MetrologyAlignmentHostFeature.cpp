@@ -264,7 +264,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                 m_state.isBusy = true;
                 m_state.requestId = id;
                 try {
-                    task->worker = std::thread([task, host = m_host] {
+                    task->worker = std::thread([task, host = std::weak_ptr<FeatureHostControl>(m_host)] {
                         try {
                             task->candidate = AlignmentSolver::BuildResult(task->work);
                         } catch (...) {
@@ -697,7 +697,8 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::thread::id m_owner;
     std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::weak_ptr<FeatureHostControl> m_host;
+    // 持有挂载端口；worker/observer 仍只捕获弱引用，解绑后不延长其生命期。
+    std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_dirty;
     DataObserverId m_observer = 0;
     std::uint64_t m_nextRequest = 0;
