@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
 #include <QFileInfo>
+#include "../../../Host/FeatureInput.h"
 namespace Manual {
 ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSource> reference, QWidget* parent)
 {
@@ -9,20 +10,21 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
     panel->AttachAction("Load", GetJson(R"({"filePath":"","datasetId":"","dimensions":[1,1,1],"spacingLPS":[1,1,1],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
         [panel](auto id, const auto& params) {
-            HostLoadRequest request;
+            FeatureTestOptions options;
             const auto path = GetText(params, "filePath");
             if (!QFileInfo::exists(path)) throw std::invalid_argument("输入文件不存在");
-            request.filePath = path.toUtf8().toStdString();
-            request.geometry.dimensions = GetArray<int, 3>(params["dimensions"]);
-            request.geometry.spacing = GetArray<float, 3>(params["spacingLPS"]);
-            request.geometry.origin = GetArray<float, 3>(params["originLPS"]);
-            request.geometry.direction = GetArray<double, 9>(params["directionLPS"]);
-            request.metadata.identity.datasetId = GetText(params, "datasetId").toStdString();
-            if (request.metadata.identity.datasetId.empty()) throw std::invalid_argument("数据集标识不能为空");
-            request.metadata.source.kind = ImageSourceKind::RawFile;
-            request.metadata.source.uri = request.filePath;
-            const auto digest = GetText(params, "sourceDigest");
-            if (!digest.isEmpty()) request.metadata.source.digest = digest.toStdString();
+            options.inputPath = path.toUtf8().toStdString();
+            options.hasDimensions = true;
+            options.dimensions = GetArray<int, 3>(params["dimensions"]);
+            options.spacing = GetArray<float, 3>(params["spacingLPS"]);
+            options.origin = GetArray<float, 3>(params["originLPS"]);
+            options.direction = GetArray<double, 9>(params["directionLPS"]);
+            options.datasetId = GetText(params, "datasetId").toStdString();
+            options.inputDigest = GetText(params, "sourceDigest").toStdString();
+            options.inputFrame = "LPS";
+            options.inputUnit = "mm";
+            options.inputFormat = "float32-le-xfastest";
+            auto request = GetFeatureLoadRequest(options, false);
             request.metadata.attributes.push_back({"manual.evidence", GetText(params, "evidenceKind").toStdString()});
             panel->SendHost(id, std::move(request));
         }, TestPolicy::Input, true);
