@@ -280,16 +280,27 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         const auto mesh = data
             ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
             : nullptr;
-        checks.Get(mesh && mesh->GetPointAttributes().size() == 8,
+        checks.Get(mesh && mesh->GetPointAttributes().size() == 9,
                    "generic mesh publishes measurement quality attributes");
-        if (mesh && mesh->GetPointAttributes().size() == 8)
+        if (mesh && mesh->GetPointAttributes().size() == 9)
         {
             const auto& attributes = mesh->GetPointAttributes();
+            checks.Get(std::all_of(attributes.begin(), attributes.end(), [&](const auto& attribute) {
+                return attribute.values.size() == snapshot->points->size() * attribute.componentCount;
+            }) && attributes[6].name == "measurement.flags"
+                && attributes[7].name == "surface.interface-index"
+                && attributes[8].name == "surface.override-index",
+                "combined boundary and recipe quality attributes retain one value per point");
             checks.Get(attributes[0].name == "measurement.valid"
                 && attributes[0].values.size() == snapshot->points->size()
                 && attributes[4].componentCount == 3
                 && attributes[4].values.size() == snapshot->points->size() * 3,
                 "quality schema aligns with exact measurement vertices");
+            checks.Get(attributes[5].name == "measurement.boundary-complete"
+                && attributes[5].componentCount == 1
+                && std::all_of(attributes[5].values.begin(), attributes[5].values.end(),
+                    [](double value) { return value == 0.0; }),
+                "Largest does not claim a complete material boundary");
             for (std::size_t index = 0; index < snapshot->points->size(); ++index) {
                 if (attributes[0].values[index] != 1.0) continue;
                 checks.Get(attributes[1].values[index] == (*snapshot->points)[index].fitResidual
@@ -1085,8 +1096,12 @@ void TestBusinessInputLifecycle(Checks &checks)
     checks.Get(mesh->inputs.size() == 2 && generation->inputs.size() == 2 && generation->interfaces &&
                    generation->interfaces->at(0).canonicalId == "2:7",
                "generic consumer can trace scalar and label revisions plus stable interface identity");
-    checks.Get(payload && payload->GetPointAttributes().size() == 8 &&
-                   payload->GetPointAttributes()[5].name == "measurement.flags",
+    checks.Get(payload && payload->GetPointAttributes().size() == 9 &&
+                   payload->GetPointAttributes()[6].name == "measurement.flags" &&
+                   payload->GetPointAttributes()[5].name == "measurement.boundary-complete" &&
+                   std::all_of(payload->GetPointAttributes()[5].values.begin(),
+                               payload->GetPointAttributes()[5].values.end(),
+                               [](double value) { return value == 0.0; }),
                "generic mesh exposes quality reasons and interface/override indexes");
     const auto valid = feature.GetResultValidity(generation->dataRevision);
     checks.Get(valid.status == SurfaceRestoreStatus::Current && valid.canDisplay && valid.canRecompute &&
