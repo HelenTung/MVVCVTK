@@ -152,6 +152,9 @@ public:
     Impl();
     ~Impl();
 
+    std::shared_ptr<RenderEffect> GetViewEffect(const FeatureViewService* service) const {
+        for(const auto& target:m_targets)if(target.service.get()==service)return target.effect;return {};
+    }
     bool StartView(const CropViewRequest& request);
     bool StartView(
         const CropViewRequest& request,
@@ -408,6 +411,7 @@ bool CropBridge::Impl::StartViewInput(
         return false;
     }
     m_lease = lease;
+    if(request.isCandidateOnly&&!m_targets.empty())return false;
     const bool isInputChanged = input && !m_input.data;
     if (input && m_input.data && input->data->self != m_input.data->self) return false;
     if (isInputChanged && !SetCropInput(*input)) return false;
@@ -484,7 +488,7 @@ bool CropBridge::Impl::StartViewInput(
         TargetBinding target;
         target.service = service;
         target.effect = std::make_shared<CropShaderEffect>();
-        if (!target.service->AttachRenderEffect(target.effect)) {
+        if (!request.isCandidateOnly&&!target.service->AttachRenderEffect(target.effect)) {
             for (const auto& created : createdTargets) {
                 (void)created.service->DetachRenderEffect(
                     created.effect.get());
@@ -510,7 +514,7 @@ bool CropBridge::Impl::StartViewInput(
 
     // 有已提交前缀时，新增目标以同一 table handle 建立新 revision 的 staged/ready/commit；
     // 只有整体成功后才清退旧目标，避免重绑定中出现部分窗口先失去裁切。
-    if (!isInputChanged && isShaderCommitted) {
+    if (!request.isCandidateOnly && !isInputChanged && isShaderCommitted) {
         const std::uint64_t revision = CreateShaderRevision();
         if (!revision) return false;
         CropShaderPayload payload = m_activePayload;
@@ -587,7 +591,7 @@ bool CropBridge::Impl::ClearBindings()
 {
     const auto lease = m_lease.lock();
     // StopLease 先关闭业务入口，owner thread 随后仍必须能够完成确定性清理。
-    if (!lease || !lease->GetIsOwnerThread() || m_sourceGate->isPending) {
+    if (!GetOwnerReady() || (lease&&!lease->GetIsOwnerThread()) || (!lease&&!m_targets.empty()) || m_sourceGate->isPending) {
         return false;
     }
     if (m_buildTask) {
@@ -662,8 +666,9 @@ bool CropBridge::Impl::ClearDocument()
 
 std::unique_ptr<CropBridge::SourceCommit::Impl> CropBridge::Impl::BuildSourceCommit(CropNodeId nodeId,bool isQueued)
 {
-    if(!GetLeaseReady() || m_sourceGate->isPending || m_pendingShader || m_targets.empty()
-        || (!isQueued && !m_commands.GetIsEmpty()))return {};
+    const bool offline=m_targets.empty()&&!isQueued&&nodeId==m_tree.GetRootId();
+    if(!GetOwnerReady() || (!offline&&!GetLeaseReady()) || m_sourceGate->isPending || m_pendingShader
+        || (m_targets.empty()&&!offline) || (!isQueued && !m_commands.GetIsEmpty()))return {};
     auto stage=isQueued?m_commands.BuildNext(m_tree):m_tree.BuildSelection(nodeId);
     if (stage.failureReason!=CropFailure::None && isQueued) {
         m_commands.SetFailed(m_tree,stage.failureReason,std::move(stage.impact));
@@ -1623,6 +1628,9 @@ std::optional<CropNodeSnapshot> CropBridge::GetNode(CropNodeId node) const
 std::optional<CropEditOutcome> CropBridge::GetOutcome(CropRequestId id) const
 { return m_impl->GetOwnerReady()?m_impl->GetOutcome(id):std::nullopt; }
 CropInputSnapshot CropBridge::GetSource() const { return m_impl->GetOwnerReady()?m_impl->GetSource():CropInputSnapshot{}; }
+std::shared_ptr<RenderEffect> CropBridge::GetViewEffect(const FeatureViewService* service) const {
+    return m_impl->GetOwnerReady()?m_impl->GetViewEffect(service):nullptr;
+}
 bool CropBridge::GetResultsValid(const std::vector<CropResultRecord>& results) const { return m_impl->GetOwnerReady()&&m_impl->GetResultsValid(results); }
 void CropBridge::SetResults(std::vector<CropResultRecord>&& results) noexcept { m_impl->SetResults(std::move(results)); }
 CropDocumentArchive CropBridge::GetArchive() const { return m_impl->GetOwnerReady()?m_impl->GetArchive():CropDocumentArchive{}; }

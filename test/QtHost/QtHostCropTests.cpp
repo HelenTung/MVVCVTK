@@ -181,6 +181,43 @@ private:
     std::vector<FeatureSceneDelta> m_sceneDeltas;
 };
 
+class DocumentControlGate final : public FeatureHostControl {
+public:
+    explicit DocumentControlGate(std::shared_ptr<FeatureHostControl> value):next(std::move(value)){}
+    int activeFailures=0;bool rejectTransition=false;
+    bool AttachInput(HostInputBinding value) override {return next->AttachInput(std::move(value));}
+    bool DetachInput(std::string_view value) override {return next->DetachInput(value);}
+    bool SetActiveViews(const std::vector<std::string>& ids) override {if(activeFailures){--activeFailures;return false;}return next->SetActiveViews(ids);}
+    bool SetViewStatus(const std::vector<std::string>& ids,const std::string& value) override {return next->SetViewStatus(ids,value);}
+    bool SendSceneDelta(FeatureSceneDelta value) override {return next->SendSceneDelta(std::move(value));}
+    bool SendOwnerComplete(std::function<void()> value) override {return next->SendOwnerComplete(std::move(value));}
+    bool SendWorkAvailable() override {return next->SendWorkAvailable();}
+    std::uint64_t GetAttachmentId() const noexcept override {return next->GetAttachmentId();}
+    FeatureDataTransitionState StartDataTransition(FeatureDataTransitionRequest value) override {
+        if(rejectTransition){FeatureDataTransitionState result;result.commitFailure=DataCommitFailure::None;result.effectFailure=RenderEffectFailure::PrecisionNotMet;return result;}
+        return next->StartDataTransition(std::move(value));
+    }
+    FeatureDataTransitionState SetDataTransition(std::uint64_t id) override {return next->SetDataTransition(id);}
+    FeatureDataTransitionState StopDataTransition(std::uint64_t id) override {return next->StopDataTransition(id);}
+private:
+    std::shared_ptr<FeatureHostControl> next;
+};
+class DocumentFeatureGate final : public HostFeature {
+public:
+    explicit DocumentFeatureGate(std::shared_ptr<CropHostFeature> value):feature(std::move(value)){}
+    std::shared_ptr<DocumentControlGate> control;
+    std::string_view GetFeatureId() const noexcept override {return feature->GetFeatureId();}
+    FeatureDataContract GetDataContract() const override {return feature->GetDataContract();}
+    std::vector<FeatureOperationState> GetOperationStates() const override {return feature->GetOperationStates();}
+    bool AttachHost(const HostFeatureContext& value) override {
+        auto context=value;control=std::make_shared<DocumentControlGate>(context.host);context.host=control;return feature->AttachHost(context);
+    }
+    bool DetachHost() override {return feature->DetachHost();}
+    bool OnHostTick() override {return feature->OnHostTick();}
+private:
+    std::shared_ptr<CropHostFeature> feature;
+};
+
 class ViewPortProbe final : public FeatureViewDirectory {
 public:
     std::vector<HostFeatureView> GetViews(
@@ -743,6 +780,149 @@ bool GetMeshRootLifecycle()
     return detached&&session.DetachFeature(*probe)&&session.Stop();
 }
 
+bool GetMultiDocumentLifecycle(bool dependencyStop=false)
+{
+    VtkAppHostSession session(GetCropSessionConfig());auto feature=std::make_shared<CropHostFeature>();
+    auto probe=std::make_shared<ContextProbeFeature>();auto gate=std::make_shared<DocumentFeatureGate>(feature);
+    if(!session.BuildSession()||!session.AttachFeature(gate)||!session.AttachFeature(probe))return false;
+    const auto* primary=session.GetPrimaryEndpoint();const auto* timer=session.GetRenderViewEndpoint("crop-timer");
+    if(!primary||!timer)return false;
+    for(const auto* endpoint:{primary,timer}){endpoint->renderWindow->SetOffScreenRendering(1);endpoint->renderWindow->SetSize(100,100);}
+    HostTimerConfig config;config.isTimerEnabled=true;config.targetView={"crop-timer",false,HostRenderViewRole::Auxiliary};
+    if(!session.AttachTimer(config)||!session.Start())return false;
+    const auto wait=[&](const std::function<bool()>& done) {
+        for(int poll=0;poll<2500;++poll){if(done())return true;SendTicks(*timer,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+        return done();
+    };
+    const auto check=[](bool value,const char* text){return GetCaseResult(value,text);};
+    bool loaded=false,loadOk=false;if(!SendReload(session,loaded,loadOk)||!wait([&]{return loaded;})||!loadOk)return false;
+    const auto root=probe->m_data->GetPrimaryImage();auto imageTarget=GetCropTarget();imageTarget.targetViews.viewIds.push_back("crop-timer");
+    const auto open=[&](CropDocumentRequest request) {
+        const auto admission=feature->SendRequest(request);
+        if(!admission){std::cerr<<"multi-document admission failure="<<int(admission.failureReason)<<" action="<<int(request.action)<<'\n';return CropDocumentId{};}
+        const auto replay=feature->SendRequest(request);
+        if(!replay.isReplay||replay.documentId!=admission.documentId||!wait([&]{const auto out=feature->GetDocumentOutcome(admission.documentId,request.requestId);
+            return out&&out->status!=CropEditStatus::Queued;})){std::cerr<<"multi-document replay/wait failure action="<<int(request.action)<<" replay="<<replay.isReplay<<'\n';return CropDocumentId{};}
+        const auto outcome=feature->GetDocumentOutcome(admission.documentId,request.requestId);
+        if(!outcome||outcome->status!=CropEditStatus::Succeeded) {
+            std::cerr<<"multi-document open failure="<<(outcome?int(outcome->failureReason):-1)<<'\n';return CropDocumentId{};
+        }
+        return admission.documentId;
+    };
+    CropDocumentRequest createA;createA.action=CropDocumentAction::CreateDocument;createA.requestId=CropHostFeature::CreateRequestId();
+    createA.target=imageTarget;createA.sourceRevision=root->data->self;
+    const auto a=open(createA);if(!check(a&&feature->GetDocuments()==std::vector<CropDocumentId>{a},"Explicit CreateDocument adopts one frozen image Root"))return false;
+    const auto edit=[&](CropDocumentId id,double center) {
+        const auto history=feature->GetHistory(id);CropEditRequest request;request.documentId=id;request.requestId=CropHostFeature::CreateRequestId();
+        request.expectedRevision=history.stateRevision;request.kind=CropEditKind::Append;request.nodeId=history.rootNodeId;
+        request.operation.geometryType=CropShape::Plane;request.operation.planeNormalInInputModel={1,0,0};request.operation.planeCenterInInputModel={center,0,0};
+        const auto accepted=feature->SendRequest(request);if(!accepted||!wait([&]{const auto out=feature->GetOutcome(id,request.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return CropNodeId{};
+        return accepted.nodeId;
+    };
+    const auto build=[&](CropDocumentId id,CropNodeId node,CropBuildRequest& request,CropBuildResult& result) {
+        request.documentId=id;request.nodeId=node;request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=feature->GetHistory(id).stateRevision;
+        if(!feature->SendRequest(request)||!wait([&]{const auto out=feature->GetBuildOutcome(id,request.requestId);return out&&out->status!=CropEditStatus::Queued;}))return false;
+        const auto out=feature->GetBuildOutcome(id,request.requestId);result=out->result;return result.isSucceeded;
+    };
+    double bounds[6];root->image->GetBounds(bounds);const auto nodeA=edit(a,(bounds[0]+bounds[1])*0.5);
+    CropBuildRequest buildA,buildB;CropBuildResult resultA,resultB;
+    if(!check(nodeA&&build(a,nodeA,buildA,resultA),"First document publishes its protected result"))return false;
+    auto cube=vtkSmartPointer<vtkCubeSource>::New();cube->SetXLength(4);cube->SetYLength(4);cube->SetZLength(4);cube->Update();
+    if(!feature->SendRequest(GetPolyRequest(cube->GetOutput())))return false;
+    auto meshTarget=imageTarget;meshTarget.inputBinding=std::string(cropInputBinding);
+    const auto meshBinding=probe->m_data->GetDataBinding(probe->m_data->GetDataGraph(),cropInputBinding);
+    CropDocumentRequest createB;createB.action=CropDocumentAction::CreateDocument;createB.requestId=CropHostFeature::CreateRequestId();
+    createB.target=meshTarget;createB.sourceRevision=meshBinding->target;
+    auto stale=createB;++stale.sourceRevision->generation;
+    const auto before=feature->GetHistory(a);
+    if(!check(feature->SendRequest(stale).failureReason==CropFailure::SourceMismatch&&feature->GetHistory().documentId==a
+        &&feature->GetHistory(a).stateRevision==before.stateRevision,"Rejected CreateDocument preserves the existing tree and result"))return false;
+    if(!dependencyStop) {
+        // The first failure rejects activity preparation; the second rejects its
+        // immediate compensation. No success is allowed until rollback retries.
+        gate->control->activeFailures=2;
+        const auto failed=feature->SendRequest(createB);
+        const auto pending=feature->GetDocumentOutcome(failed.documentId,createB.requestId);
+        if(!check(failed&&pending&&pending->status==CropEditStatus::Queued&&feature->GetHistory().documentId==a,
+            "Failed activity preparation retains a pending operation until compensation can run"))return false;
+        if(!wait([&]{const auto out=feature->GetDocumentOutcome(failed.documentId,createB.requestId);return out&&out->status==CropEditStatus::Failed;}))return false;
+        if(!check(feature->GetDocuments().size()==1&&feature->GetHistory(a).stateRevision==before.stateRevision,
+            "Activity compensation preserves the old document and discards the failed candidate"))return false;
+        createB.requestId=CropHostFeature::CreateRequestId();gate->control->rejectTransition=true;
+        const auto denied=feature->SendRequest(createB);gate->control->rejectTransition=false;
+        const auto terminal=feature->GetDocumentOutcome(denied.documentId,createB.requestId);
+        if(!check(denied&&terminal&&terminal->status==CropEditStatus::Failed&&terminal->failureReason==CropFailure::PrecisionNotMet
+            &&feature->GetHistory().documentId==a&&feature->GetHistory(a).results.size()==1,
+            "Synchronous candidate failure restores activity and preserves the specific precision error"))return false;
+        createB.requestId=CropHostFeature::CreateRequestId();
+    }
+    const auto b=open(createB);
+    if(!check(b&&b!=a&&feature->GetDocuments().size()==2&&feature->GetHistory(a).appliedHead==nodeA
+        &&feature->GetHistory(a).results.size()==1&&probe->m_data->GetDataLifetime(resultA.scopeId).status==DataLifetimeStatus::Published,
+        "Switching to a mesh document preserves the first document's protected result"))return false;
+    const auto nodeB=edit(b,0);
+    if(!check(nodeB&&build(b,nodeB,buildB,resultB)&&resultB.sourceRevision==*meshBinding->target,"Second document materializes from its own mesh Root"))return false;
+    if(!check(feature->SendRequest(buildA).isReplay,"Inactive document replays its retained build without another publication"))return false;
+    if(dependencyStop) {
+        auto derivedTarget=meshTarget;derivedTarget.inputBinding="analysis.crop.active";
+        CropDocumentRequest consumer;consumer.action=CropDocumentAction::CreateDocument;consumer.requestId=CropHostFeature::CreateRequestId();
+        consumer.target=derivedTarget;consumer.sourceRevision=resultB.outputRevision;
+        const auto c=open(consumer);
+        if(!check(c&&feature->GetDocuments().size()==3&&feature->GetHistory(c).sourceRevision==resultB.outputRevision,
+            "A third document holds a registered Root dependency on the second result"))return false;
+        bool stopped=false;
+        for(int poll=0;poll<2500&&!stopped;++poll){stopped=session.Stop();if(!stopped)std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+        return check(stopped&&feature->GetDocuments().empty(),"Session Stop resolves dependent document roots and their remaining primary bindings");
+    }
+    auto output=probe->m_data->GetSurfaceMesh(probe->m_data->GetDataGraph(),resultB.outputRevision);
+    if(!output)return false;vtkSmartPointer<vtkDataArray> held=output->mesh->GetPoints()->GetData();output.reset();
+    CropDocumentRequest activate;activate.action=CropDocumentAction::ActivateDocument;activate.documentId=a;
+    activate.expectedRevision=feature->GetHistory(a).stateRevision;activate.requestId=CropHostFeature::CreateRequestId();activate.target=imageTarget;
+    auto wrong=activate;++wrong.expectedRevision;
+    if(!check(feature->SendRequest(wrong).failureReason==CropFailure::StateVersionMismatch&&feature->GetHistory().documentId==b,
+        "Stale ActivateDocument leaves the current document visible"))return false;
+    if(!check(open(activate)==a&&feature->GetHistory().appliedHead==nodeA&&feature->GetHistory(b).results.size()==1,
+        "ActivateDocument restores the fixed Root path while retaining both result owners"))return false;
+    CropPruneRequest prune;prune.nodeIds={nodeB};
+    CropDocumentRequest returning;returning.documentId=b;returning.requestId=CropHostFeature::CreateRequestId();returning.expectedRevision=feature->GetHistory(b).stateRevision;
+    if(!feature->SendRequest(returning)||!wait([&]{return probe->m_data->GetDataLifetime(resultB.scopeId).status==DataLifetimeStatus::Releasing;}))return false;
+    if(!check(feature->GetHistory().documentId==a&&!feature->GetPruneImpact(b,prune).blockers.empty()
+        &&probe->GetViewService("crop-primary")->GetRenderInputStamp()->dataRevision==root->data->self,
+        "Inactive Return waits for its bare array without taking over the current views"))return false;
+    held=nullptr;
+    if(!wait([&]{const auto out=feature->GetDocumentOutcome(b,returning.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return false;
+    if(!check(feature->GetHistory(b).results.empty()&&feature->GetHistory(a).results.size()==1,
+        "Inactive resource release removes only its own result protection"))return false;
+    for(const auto id:{b,a}) {
+        CropDocumentRequest close;close.action=CropDocumentAction::CloseDocument;close.documentId=id;
+        close.requestId=CropHostFeature::CreateRequestId();close.expectedRevision=feature->GetHistory(id).stateRevision;
+        if(!feature->SendRequest(close)||!wait([&]{const auto out=feature->GetDocumentOutcome(id,close.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return false;
+    }
+    if(!check(feature->GetDocuments().empty(),"Both materialized documents closed independently"))return false;
+    std::vector<CropDocumentId> documents;
+    for(int index=0;index<32;++index) {
+        auto request=createA;request.requestId=CropHostFeature::CreateRequestId();const auto id=open(request);
+        if(!id)return false;documents.push_back(id);
+    }
+    auto overflow=createA;overflow.requestId=CropHostFeature::CreateRequestId();
+    if(!check(feature->SendRequest(overflow).failureReason==CropFailure::ResourceLimit&&feature->GetDocuments().size()==32,
+        "The 33rd live document is rejected without evicting another Root"))return false;
+    for(int index=0;index<18;++index) {
+        CropDocumentRequest close;close.action=CropDocumentAction::CloseDocument;close.documentId=documents[index];
+        close.requestId=CropHostFeature::CreateRequestId();close.expectedRevision=feature->GetHistory(close.documentId).stateRevision;
+        if(!feature->SendRequest(close)||!wait([&]{const auto out=feature->GetDocumentOutcome(close.documentId,close.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return false;
+    }
+    const auto oldOpen=feature->GetDocumentOutcome(a,createA.requestId);
+    const auto oldBuild=feature->GetBuildOutcome(a,buildA.requestId);
+    if(!check(oldOpen&&oldOpen->failureReason==CropFailure::RequestExpired&&oldBuild&&oldBuild->result.failureReason==CropFailure::RequestExpired
+        &&feature->SendRequest(createA).failureReason==CropFailure::RequestExpired,
+        "Evicting closed document ledgers retains request tombstones across command kinds"))return false;
+    overflow.requestId=CropHostFeature::CreateRequestId();
+    if(!check(open(overflow)!=0&&feature->GetDocuments().size()==15,"Closing a document frees live capacity with a fresh identity"))return false;
+    return check(wait([&]{return session.DetachFeature(*gate);})&&session.DetachFeature(*probe)&&session.Stop(),
+        "Closing all documents releases their trees and leaves the Feature detachable");
+}
+
 int GetCropLifecycleFailCount()
 {
     VtkAppHostSession session(GetCropSessionConfig());
@@ -897,6 +1077,8 @@ int GetCropLifecycleFailCount()
         &&feature->GetHistory().documentId==0&&session.DetachFeature(*feature)&&session.DetachFeature(*probe)&&session.Stop();
     if(!GetCaseResult(closedOk,"CloseDocument destroys history only after release and remains detachable"))return 1;
     int failures=0;
+    failures+=GetCaseResult(GetMultiDocumentLifecycle(),"Multi-document Create/Activate preserves independent roots, results, replays and release ownership")?0:1;
+    failures+=GetCaseResult(GetMultiDocumentLifecycle(true),"Dependent document Roots close before their producer scopes and render inputs")?0:1;
     failures+=GetCaseResult(GetMeshRootLifecycle(),"Mesh Root uses real dual-view preview, repeated publication and allocation-aware Return/Close")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true,3),"Repeated build preserves binding on retirement failure and publishes Root plus replacement atomically")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(false),"Detach cancels Building exactly once and retries the same close before releasing ports")?0:1;

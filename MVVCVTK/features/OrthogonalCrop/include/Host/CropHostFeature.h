@@ -72,12 +72,16 @@ struct CropBuildOutcome final {
     CropBuildResult result;
 };
 
-enum class CropDocumentAction : std::uint8_t { ReturnToSource, CloseDocument };
+enum class CropDocumentAction : std::uint8_t { ReturnToSource, CloseDocument, CreateDocument, ActivateDocument };
 struct CropDocumentRequest final {
     CropDocumentAction action=CropDocumentAction::ReturnToSource;
     CropDocumentId documentId=0;
     CropRequestId requestId=0;
     std::uint64_t expectedRevision=0;
+    // Create: documentId/expectedRevision are 0 and sourceRevision pins target's
+    // binding. Activate: explicit existing document/version; source stays fixed.
+    std::optional<CropHostTarget> target;
+    std::optional<DataRevisionRef> sourceRevision;
 };
 struct CropDocumentOutcome final {
     CropDocumentId documentId=0;
@@ -96,6 +100,8 @@ struct CropDocumentAdmission final {
     CropRequestId requestId=0;
     std::uint64_t stateRevision=0;
     CropFailure failureReason=CropFailure::None;
+    CropDocumentId documentId=0;
+    CropNodeId rootNodeId=0;
 };
 using CropEditCallback=std::function<void(CropEditOutcome)>;
 using CropDocumentCallback=std::function<void(CropDocumentOutcome)>;
@@ -141,6 +147,9 @@ public:
     CropDocumentAdmission SendRequest(CropDocumentRequest request,CropDocumentCallback onComplete={});
     std::optional<CropDocumentOutcome> GetDocumentOutcome(CropDocumentId documentId,CropRequestId requestId) const;
     CropHostState GetState() const;
+    CropHostState GetState(CropDocumentId documentId) const;
+    // At most 32 live documents; closed documents are not included.
+    std::vector<CropDocumentId> GetDocuments() const;
     // At most 256 input-model sample points; classification uses the last
     // presented predicate and the coordinate-conversion bound from actual input data.
     CropPreviewPrecision GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,

@@ -21,6 +21,9 @@ struct CropViewRequest final {
     std::weak_ptr<const FeatureViewLease> lease;
     std::shared_ptr<FeatureViewService> referenceService;
     std::vector<std::shared_ptr<FeatureViewService>> targetServices;
+    // Build effects for an explicit Host data candidate without attaching them
+    // to the currently visible strategies. Only valid with no existing bindings.
+    bool isCandidateOnly=false;
 };
 
 using CropCandidateCallback =
@@ -65,6 +68,7 @@ public:
     std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const;
     std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const;
     CropInputSnapshot GetSource() const;
+    std::shared_ptr<RenderEffect> GetViewEffect(const FeatureViewService* service) const;
     std::optional<CropViewPreviewState> GetViewState(const FeatureViewService* service) const;
     CropPreviewPrecision GetPreviewPrecision(const FeatureViewService* service,const std::vector<CropVectorDouble3Array>& points) const;
     void ForgetOutcome(CropRequestId requestId);
