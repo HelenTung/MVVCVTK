@@ -72,6 +72,7 @@ public:
         const DataGraphSnapshot& graph,
         std::string_view name) const = 0;
     virtual ProjectDataSnapshot GetProjectData() const = 0;
+    virtual DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const = 0;
     virtual DataRelationStatus GetDataRelation(
         const DataGraphSnapshot& graph,
         const DataRevisionRef& data,
@@ -96,6 +97,8 @@ public:
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
     virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;
+    virtual DataLifetimeState SetDataRelease(const DataEntityId& scopeId) = 0;
+    virtual std::unique_ptr<DataChangeBatch> StartDataChanges() = 0;
     virtual DataObserverId AttachDataChange(DataChangeCallback callback) = 0;
     virtual bool DetachDataChange(DataObserverId observerId) = 0;
 };

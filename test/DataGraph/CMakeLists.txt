@@ -1,6 +1,7 @@
 # 独立编译纯值数据核心，保持测试不依赖 Host 实现或 VTK。
 add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
+    DataLifetimeTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
 )
 target_include_directories(
@@ -13,6 +14,7 @@ set_target_properties(
     PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph"
 )
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
+add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp

@@ -103,6 +103,19 @@ public:
         return m_bridge.GetSurfaceMesh(GetData(graph, ref));
     }
 
+    DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override
+    {
+        return m_store.GetDataLifetime(scopeId);
+    }
+    DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override
+    {
+        return m_store.SetDataRelease(scopeId);
+    }
+    std::unique_ptr<DataChangeBatch> StartDataChanges() override
+    {
+        return m_store.StartDataChanges();
+    }
+
     DataEntityId CreateDataEntityId() override
     {
         return m_store.CreateDataEntityId();

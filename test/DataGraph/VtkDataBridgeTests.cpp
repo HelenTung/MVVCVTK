@@ -4,6 +4,8 @@
 
 #include <vtkCellArray.h>
 #include <vtkImageData.h>
+#include <vtkPointData.h>
+#include <vtkDataArray.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
@@ -231,11 +233,47 @@ bool GetRecordTableValidationValid()
         "record table did not enforce equal strongly typed columns");
 }
 
+bool GetArrayLeaseValid()
+{
+    DataGraphStore store;
+    VtkDataBridge bridge;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 1, 1);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    auto* values = static_cast<unsigned char*>(image->GetScalarPointer());
+    values[0] = 1; values[1] = 2;
+    const auto scope = store.CreateDataEntityId();
+    const auto id = store.CreateDataEntityId();
+    const DataRevisionRef ref{id, 1};
+    DataTransaction create;
+    create.outputs.push_back({id, 0, DataTypes::imageGrid3D, {}, bridge.CreateImagePayload(image), {}, scope});
+    auto commit = store.SetDataCommit(std::move(create));
+    auto snapshot = commit.published.at(0);
+    auto view = bridge.GetImageGrid(snapshot);
+    if (!Check(view != nullptr, "scoped VTK image")) return false;
+    vtkSmartPointer<vtkDataArray> heldArray = view->image->GetPointData()->GetScalars();
+    view.reset();
+    commit = {};
+    DataTransaction retire;
+    retire.retireScopes.push_back({scope, DataLifetimeStatus::Published, {ref}});
+    const auto blocked = store.SetDataCommit(retire);
+    if (!Check(blocked.failureReason == DataCommitFailure::ResultInUse,
+        "array-only VTK owner escaped retirement check")) return false;
+    heldArray = nullptr;
+    if (!Check(store.SetDataCommit(std::move(retire)).status == DataCommitStatus::Succeeded,
+        "VTK lease remained after final array release")) return false;
+    if (!Check(!bridge.GetImageGrid(snapshot), "old DataSnapshot recreated retired VTK resources")) return false;
+    snapshot.reset();
+    return Check(store.SetDataRelease(scope).status == DataLifetimeStatus::Released,
+        "scoped VTK payload did not release");
+}
+
 } // namespace
 
 int main()
 {
-    return GetImageRoundTripValid()
+    return GetArrayLeaseValid()
+        && GetImageRoundTripValid()
         && GetLabelRoundTripValid()
         && GetMeshRoundTripValid()
         && GetCacheIdentityValid()

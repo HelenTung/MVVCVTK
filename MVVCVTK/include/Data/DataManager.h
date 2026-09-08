@@ -53,6 +53,9 @@ public:
     VtkSurfaceMeshSnapshot GetSurfaceMesh(
         const DataGraphSnapshot& graph,
         const DataRevisionRef& ref) const override;
+    DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override;
+    DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override;
+    std::unique_ptr<DataChangeBatch> StartDataChanges() override;
     DataEntityId CreateDataEntityId() override;
     bool SetDataType(DataTypeDescriptor descriptor) override;
     DataCommitResult SetDataCommit(DataTransaction transaction) override;

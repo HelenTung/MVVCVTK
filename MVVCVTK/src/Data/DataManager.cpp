@@ -830,6 +830,21 @@ VtkSurfaceMeshSnapshot BaseDataManager::GetSurfaceMesh(
     return m_impl->m_vtk->GetSurfaceMesh(GetData(graph, ref));
 }
 
+DataLifetimeState BaseDataManager::GetDataLifetime(const DataEntityId& scopeId) const
+{
+    return m_impl->m_graph->GetDataLifetime(scopeId);
+}
+
+DataLifetimeState BaseDataManager::SetDataRelease(const DataEntityId& scopeId)
+{
+    return m_impl->m_graph->SetDataRelease(scopeId);
+}
+
+std::unique_ptr<DataChangeBatch> BaseDataManager::StartDataChanges()
+{
+    return m_impl->m_graph->StartDataChanges();
+}
+
 DataEntityId BaseDataManager::CreateDataEntityId()
 {
     return m_impl->m_graph->CreateDataEntityId();

@@ -382,6 +382,24 @@ public:
             return data ? data->GetSurfaceMesh(graph, ref) : nullptr;
         }
 
+        DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override
+        {
+            const auto data = GetReadData();
+            return data ? data->GetDataLifetime(scopeId) : DataLifetimeState{};
+        }
+
+        DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override
+        {
+            const auto data = GetWriteData();
+            return data ? data->SetDataRelease(scopeId) : DataLifetimeState{};
+        }
+
+        std::unique_ptr<DataChangeBatch> StartDataChanges() override
+        {
+            const auto data = GetWriteData();
+            return data ? data->StartDataChanges() : nullptr;
+        }
+
         DataEntityId CreateDataEntityId() override
         {
             const auto data = GetWriteData();

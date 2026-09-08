@@ -27,6 +27,10 @@ public:
         std::string_view name) const;
     ProjectDataSnapshot GetProjectData() const;
 
+    DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const;
+    DataLifetimeState SetDataRelease(const DataEntityId& scopeId);
+    std::unique_ptr<DataChangeBatch> StartDataChanges();
+
     DataEntityId CreateDataEntityId();
     bool SetDataType(DataTypeDescriptor descriptor);
     DataCommitResult SetDataCommit(DataTransaction transaction);
@@ -36,5 +40,5 @@ public:
 
 private:
     class Impl;
-    std::unique_ptr<Impl> m_impl;
+    std::shared_ptr<Impl> m_impl;
 };
