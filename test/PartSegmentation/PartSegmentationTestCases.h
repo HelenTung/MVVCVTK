@@ -8,3 +8,4 @@ int GetPartLineageFailCount();
 int GetPartDisplayFailCount();
 int GetPartScaleFailCount();
 int GetPartEditFailCount();
+int GetPartEditProfileFailCount();
