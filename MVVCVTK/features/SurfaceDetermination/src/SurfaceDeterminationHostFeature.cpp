@@ -4,6 +4,7 @@
 #include "Render/Contracts/OverlayService.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceGenerationStore.h"
+#include "SurfaceContracts.h"
 #include "SurfaceOverlayStrategy.h"
 
 #include <vtkCellArray.h>
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -56,6 +58,9 @@ bool GetMethodValid(const SurfaceDeterminationMethod method)
     case SurfaceDeterminationMethod::LocalAdaptiveIso50:
     case SurfaceDeterminationMethod::GradientPeak:
     case SurfaceDeterminationMethod::AutomaticIso50:
+    case SurfaceDeterminationMethod::LocalRelativeIso:
+    case SurfaceDeterminationMethod::EdgeModelFit:
+    case SurfaceDeterminationMethod::PairedEdgeModelFit:
         return true;
     default:
         return false;
@@ -81,19 +86,18 @@ bool GetOptionalPositive(const std::optional<double>& value)
 
 bool GetStartValid(const SurfaceDeterminationStartParams& params)
 {
-    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue)
-        || !GetTargetsUsed(params.targetViews)
-        || !GetMethodValid(params.method)
-        || !GetSelectionValid(params.componentSelection)
-        || params.minimumObjectVoxels == 0
-        || !std::isfinite(params.minimumContrast)
-        || params.minimumContrast < 0.0
-        || (params.initialIsoValue
-            && !std::isfinite(*params.initialIsoValue))
-        || !GetOptionalPositive(params.profileHalfLengthModel)
-        || !GetOptionalPositive(params.profileSampleStepModel)
-        || !GetOptionalPositive(params.maximumOffsetModel)
-        || !GetOptionalPositive(params.profileSmoothingSigmaModel)) {
+    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue) ||
+        !SurfaceContract::GetInputValid(params) || !GetMethodValid(params.method) ||
+        !GetSelectionValid(params.componentSelection) || params.minimumObjectVoxels == 0 ||
+        !std::isfinite(params.minimumContrast) || params.minimumContrast < 0.0 ||
+        (params.initialIsoValue && !std::isfinite(*params.initialIsoValue)) ||
+        !GetOptionalPositive(params.profileHalfLengthModel) ||
+        !GetOptionalPositive(params.profileSampleStepModel) ||
+        (params.maximumOffsetModel &&
+         (!std::isfinite(*params.maximumOffsetModel) || *params.maximumOffsetModel < 0.0)) ||
+        (params.profileSmoothingSigmaModel &&
+         (!std::isfinite(*params.profileSmoothingSigmaModel) || *params.profileSmoothingSigmaModel < 0.0)))
+    {
         return false;
     }
     if (params.componentSelection == SurfaceComponentSelection::Seeded
@@ -225,6 +229,7 @@ public:
         : m_config(std::move(config))
     {
         m_state.isOverlayVisible = m_config.isOverlayVisible;
+        m_stateBeforeRequest = m_state;
     }
 
     bool AttachHost(const HostFeatureContext& context);
@@ -234,9 +239,17 @@ public:
         SurfaceDeterminationRequest request,
         SurfaceDeterminationCallback onComplete);
     SurfaceDeterminationState GetState() const;
+    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef revision, std::uint64_t pointIndex) const;
+    SurfaceRestoreState GetResultValidity(DataRevisionRef revision) const;
     std::vector<FeatureOperationState> GetOperationStates() const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetSurfaceSnapshot() const;
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetSurfaceSnapshot(std::string_view scope) const
+        { return m_store.GetCurrentGeneration(scope); }
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetSurfaceSnapshot(DataRevisionRef revision) const
+        { return m_store.GetGeneration(revision); }
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetPreviewSnapshot() const
+        { const std::lock_guard<std::mutex> lock(m_stateMutex); return m_preview; }
 
 private:
     struct OverlayBinding final {
@@ -253,13 +266,24 @@ private:
         DataBinding resultBinding;
         std::shared_ptr<std::atomic<bool>> completeActive;
         FeatureOperationState operation;
-        RoiReadSnapshot roi;
+        SurfaceDeterminationStartParams params;
+        bool isSuperseded = false;
+        SurfaceAlgorithmInputs inputs;
     };
 
     bool GetIsOwnerThread() const noexcept;
     std::uint64_t GetNextRequestId() noexcept;
-    bool GetSourceSame(const VtkImageGridSnapshot& source) const;
-    bool GetRoiCurrent(const RoiReadSnapshot& roi) const;
+    bool GetSourceSame(const VtkImageGridSnapshot& source,
+        DataPublishPolicy policy = DataPublishPolicy::RequireCurrentInputs) const;
+    bool GetRequestInputsSame(const RequestEntry &request) const;
+    std::size_t GetRetainedBytes() const;
+    std::shared_ptr<SurfaceGenerationSnapshot> BuildGeneration(const RequestEntry &request,
+                                                               SurfaceAlgorithmResult &result,
+                                                               std::uint64_t requestId, bool isFormal);
+    void SetTransientResult(const RequestEntry& request, SurfaceAlgorithmResult& result, std::uint64_t requestId);
+    bool ClearPreview();
+    std::shared_ptr<const SurfaceGenerationSnapshot> GetDisplayGeneration() const;
+    bool GetRoiCurrent(const RoiReadSnapshot& roi, DataPublishPolicy policy) const;
     std::vector<HostFeatureView> GetTargetViews(
         const HostViewTargets& targets) const;
     static std::vector<std::string> GetViewIds(
@@ -288,6 +312,7 @@ private:
     bool ClearResult();
     bool ClearResultBinding();
     DataBinding GetResultBinding() const;
+    DataBinding GetResultBinding(std::string_view scope) const;
     void SetBindingProjection();
     bool SetDisplayProjection();
     void SetDisplayFailure(std::uint64_t requestId = 0);
@@ -313,8 +338,11 @@ private:
     std::unique_ptr<SurfaceDeterminationService> m_service;
     SurfaceGenerationStore m_store;
     std::map<std::uint64_t, RequestEntry> m_requests;
+    std::string m_activeScope;
+    std::shared_ptr<const SurfaceGenerationSnapshot> m_preview;
+    VtkImageGridSnapshot m_previewSource;
+    std::vector<HostFeatureView> m_previewViews;
     VtkImageGridSnapshot m_activeSource;
-    RoiReadSnapshot m_activeRoi;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
     vtkSmartPointer<vtkPolyData> m_displayData;
@@ -325,6 +353,7 @@ private:
     DataBinding m_resultBinding;
     bool m_isDisplayPending = false;
     bool m_isAttached = false;
+    bool m_isDetaching = false;
     bool m_isStaleCleanupPending = false;
     std::shared_ptr<std::atomic<bool>> m_completeActive;
 };
@@ -371,69 +400,71 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
 bool SurfaceDeterminationHostFeature::Impl::DetachHost()
 {
     if (!m_isAttached) return true;
-    if (!GetIsOwnerThread() || !m_service) return false;
+    if (!GetIsOwnerThread() || !m_service || m_isDetaching) return false;
+    m_isDetaching = true;
     if (m_completeActive) m_completeActive->store(false);
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
         m_state.stage = SurfaceDeterminationStage::Stopping;
     }
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    if (!m_service->Stop(deadline)) return false;
-
-    for (auto& item : m_requests) {
-        RequestEntry& request = item.second;
-        SendComplete(
-            std::move(request.onComplete),
-            BuildResult(
-                item.first,
-                SurfaceResultStatus::Cancelled,
-                SurfaceFailureReason::Cancelled,
-                request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
-                m_resultRevision,
-                0,
-                0,
-                "Surface request was cancelled by detach."));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    if (!m_service->Stop(deadline) || !ClearResult()) {
+        m_isDetaching = false;
+        return false;
     }
+    // 先完成解绑并取走回调，用户代码才可重入 Detach/Attach；不迭代可重入的成员 map。
+    auto requests = std::move(m_requests);
     m_requests.clear();
+    const auto resultRevision = m_resultRevision;
     m_latestRequestId = 0;
-    if (!ClearResult()) return false;
-    m_activeSource.reset();
-    m_activeRoi.reset();
-    m_activeViews.clear();
-    m_service.reset();
-    m_views.reset();
-    m_data.reset();
-    m_store.SetDataPort({});
-    m_host.reset();
-    m_ownerThread = {};
-    m_isAttached = false;
-    m_isStaleCleanupPending = false;
+    m_activeSource.reset(); m_activeViews.clear();
+    m_service.reset(); m_views.reset(); m_data.reset();
+    m_store.SetDataPort({}); m_host.reset(); m_ownerThread = {};
+    m_isAttached = false; m_isDetaching = false; m_isStaleCleanupPending = false;
     SurfaceDeterminationState idle;
     idle.isOverlayVisible = m_config.isOverlayVisible;
     SetState(std::move(idle));
+    for (auto& item : requests) {
+        auto& request = item.second;
+        auto result = BuildResult(item.first, SurfaceResultStatus::Cancelled,
+            SurfaceFailureReason::Cancelled, request.source && request.source->data
+                ? request.source->data->self : DataRevisionRef{}, resultRevision, 0, 0,
+            "Surface request was cancelled by detach.");
+        result.purpose = SurfaceContract::GetPurpose(request.params);
+        result.resultScope = request.params.resultScope;
+        SendComplete(std::move(request.onComplete), std::move(result));
+    }
     return true;
 }
 
 bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
 {
-    if (!m_isAttached || !GetIsOwnerThread() || !m_service || !m_data) {
+    if (!m_isAttached || m_isDetaching || !GetIsOwnerThread() || !m_service || !m_data) {
         return false;
     }
     if (m_isStaleCleanupPending && RemoveDisplay()) {
         m_isStaleCleanupPending = false;
     }
-    if (m_activeSource && (!GetSourceSame(m_activeSource)
-        || !GetRoiCurrent(m_activeRoi))) {
+    if (m_previewSource && (!GetSourceSame(m_previewSource) ||
+                            (m_preview && !SurfaceContract::GetInputsCurrent(*m_data, m_data->GetDataGraph(),
+                                                                             m_preview->inputs))))
+        (void)ClearPreview();
+    const auto activeGeneration = m_store.GetGeneration();
+    if (m_activeSource &&
+        (!GetSourceSame(m_activeSource) ||
+         (activeGeneration &&
+          !SurfaceContract::GetInputsCurrent(*m_data, m_data->GetDataGraph(), activeGeneration->inputs))))
+    {
         SetSourceStale();
     }
     SetBindingProjection();
     for (auto& item : m_requests) {
         RequestEntry& request = item.second;
-        if (!request.isSourceChanged && !GetSourceSame(request.source)) {
+        if (!request.isSourceChanged && !GetRequestInputsSame(request))
+        {
             request.isSourceChanged = true;
             m_service->StopRequest(item.first);
-            if (item.first == m_latestRequestId) SetSourceStale();
+            // 完成时只更新该请求；不能清除另一个来源/作用域的正式结果。
         }
     }
     if (m_latestRequestId != 0) {
@@ -443,9 +474,11 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
     for (std::size_t index = 0;
         index < completionBatchLimit; ++index) {
         if (!m_isAttached || !m_service) break;
-        auto complete = m_service->GetComplete();
+        auto complete = m_service->GetComplete(true);
         if (!complete) break;
         SetRequestComplete(std::move(*complete));
+        if (m_service)
+            m_service->SetRetainedBytes(GetRetainedBytes(), true);
     }
     return true;
 }
@@ -460,29 +493,58 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         admission.status = SurfaceAdmissionStatus::Unavailable;
         return admission;
     }
+    if (m_isDetaching) {
+        admission.status = SurfaceAdmissionStatus::Stopping;
+        return admission;
+    }
     SetBindingProjection();
 
     if (request.action == SurfaceDeterminationAction::Start) {
-        const auto params = request.start.value_or(m_config.defaultStart);
+        auto params = request.start.value_or(m_config.defaultStart);
+        if (request.isVisible || request.targetRequestId != 0) return admission;
         if (!GetStartValid(params)) return admission;
         auto targetViews = GetTargetViews(params.targetViews);
-        if (targetViews.empty()) return admission;
-        auto source = m_data ? m_data->GetPrimaryImage() : nullptr;
-        if (!source || !source->image) {
+        if (GetTargetsUsed(params.targetViews) && targetViews.empty()) return admission;
+        if (params.sourcePolicy == DataPublishPolicy::AllowHistoricalResult
+            && (!params.sourceVolume || GetTargetsUsed(params.targetViews)
+                || SurfaceContract::GetPurpose(params) != SurfaceTaskPurpose::Determine)) return admission;
+        auto source = m_data ? (params.sourceVolume
+            ? m_data->GetImageGrid(m_data->GetDataGraph(), *params.sourceVolume)
+            : m_data->GetPrimaryImage()) : nullptr;
+        if (!source || !source->image || !source->data
+            || !GetSourceSame(source, params.sourcePolicy)) {
             admission.status = SurfaceAdmissionStatus::Unavailable;
             return admission;
         }
-        RoiReadSnapshot roi;
+        const auto graph = m_data->GetDataGraph();
+        SurfaceAlgorithmInputs inputs;
         if (params.analysisRoi) {
-            const auto result=m_data->GetRoi(m_data->GetDataGraph(),*params.analysisRoi,source->data->self);
-            if (result.error!=RoiError::None || !result.roi) return admission;
-            roi=result.roi;
-            if (roi->GetClipPlanes().error!=RoiError::None) {
-                admission.status=SurfaceAdmissionStatus::UnsupportedRoi;
+            const auto resolved = m_data->GetRoi(graph, *params.analysisRoi, source->data->self);
+            if (resolved.error != RoiError::None || !resolved.roi) return admission;
+            inputs.roi = resolved.roi;
+            if (inputs.roi->GetClipPlanes().error != RoiError::None) {
+                admission.status = SurfaceAdmissionStatus::UnsupportedRoi;
                 return admission;
             }
-            if (!GetRoiCurrent(roi)) return admission;
+            if (!GetRoiCurrent(inputs.roi, params.sourcePolicy)) return admission;
         }
+        if (params.materialLabels)
+            inputs.materialLabels = m_data->GetData(graph, *params.materialLabels);
+        if (params.initialSurface)
+            inputs.initialSurface = m_data->GetData(graph, *params.initialSurface);
+        for (const auto &ref : {params.materialLabels, params.initialSurface})
+            if (ref && (!m_data->GetData(graph, *ref) ||
+                        (params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
+                         !SurfaceContract::GetSourceCurrent(*m_data, graph, *ref))))
+            {
+                admission.status = SurfaceAdmissionStatus::Unavailable;
+                return admission;
+            }
+        if (SurfaceDeterminationAlgorithm::GetInputFailure(source, params, inputs) !=
+            SurfaceFailureReason::None)
+            return admission;
+        params.sourceVolume = source->data->self;
+        params.purpose = SurfaceContract::GetPurpose(params);
         const std::uint64_t requestId = GetNextRequestId();
         const bool isFirstRequest = m_requests.empty();
         auto requestItem = m_requests.end();
@@ -494,14 +556,15 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                     targetViews,
                     std::move(onComplete),
                     false,
-                    GetResultBinding(),
+                    GetResultBinding(params.resultScope),
                     m_completeActive
                 });
             if (!inserted.second) return admission;
             requestItem = inserted.first;
-            requestItem->second.roi=roi;
-            admission.status = m_service->Start(
-                source, params, m_config.maxWorkingBytes, requestId, roi);
+            requestItem->second.params = params;
+            requestItem->second.inputs = inputs;
+            m_service->SetRetainedBytes(GetRetainedBytes());
+            admission.status = m_service->Start(source, params, m_config.maxWorkingBytes, requestId, inputs);
         }
         catch (...) {
             if (requestItem != m_requests.end()) {
@@ -515,10 +578,24 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             return admission;
         }
         admission.requestId = requestId;
+        for (auto& item : m_requests) if (item.first != requestId
+            && item.second.params.resultScope == params.resultScope
+            && item.second.params.purpose == params.purpose) item.second.isSuperseded = true;
         requestItem->second.operation.operation = {
             std::string(featureId), m_host->GetAttachmentId(), requestId };
         requestItem->second.operation.inputs = { { "source-volume", source->data->self } };
-        if (roi) requestItem->second.operation.inputs.push_back({"analysis-roi",roi->GetRevision()});
+        if (inputs.roi) {
+            auto& operationInputs = requestItem->second.operation.inputs;
+            operationInputs.push_back({"analysis-roi", inputs.roi->GetRevision()});
+            std::size_t index = 0;
+            for (const auto& ref : inputs.roi->GetDependencies())
+                if (ref != inputs.roi->GetRevision() && ref != source->data->self)
+                    operationInputs.push_back({"analysis-roi.input-" + std::to_string(index++), ref});
+        }
+        if (inputs.materialLabels)
+            requestItem->second.operation.inputs.push_back({"material-labels", inputs.materialLabels->self});
+        if (inputs.initialSurface)
+            requestItem->second.operation.inputs.push_back({"initial-surface", inputs.initialSurface->self});
         requestItem->second.operation.status = FeatureRunStatus::Preparing;
         requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
@@ -530,6 +607,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     }
 
     if (request.action == SurfaceDeterminationAction::Stop) {
+        if (request.start || request.isVisible) return admission;
         const std::uint64_t targetRequestId = request.targetRequestId == 0
             ? m_latestRequestId : request.targetRequestId;
         if (targetRequestId == 0
@@ -566,6 +644,10 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     if (request.action == SurfaceDeterminationAction::SetVisibility
         && request.isVisible
         && SetVisibility(*request.isVisible)) {
+        admission = { SurfaceAdmissionStatus::Accepted, requestId };
+    }
+    else if (request.action == SurfaceDeterminationAction::ClearPreview
+        && !request.start && !request.isVisible && request.targetRequestId == 0 && ClearPreview()) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
     else if (request.action == SurfaceDeterminationAction::Clear
@@ -617,12 +699,16 @@ SurfaceDeterminationHostFeature::Impl::GetNextRequestId() noexcept
     return requestId == 0 ? m_nextRequestId++ : requestId;
 }
 
-bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot& roi) const
+bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot& roi, const DataPublishPolicy policy) const
 {
     if (!roi) return true;
     if (!m_data) return false;
     const auto graph=m_data->GetDataGraph();
-    for (const auto& ref:roi->GetDependencies()) {
+    auto dependencies = roi->GetDependencies();
+    dependencies.push_back(roi->GetRevision());
+    for (const auto& ref:dependencies) {
+        if (!m_data->GetData(graph, ref)) return false;
+        if (policy == DataPublishPolicy::AllowHistoricalResult) continue;
         DataQuery query; query.entityId=ref.entityId;
         DataGeneration head=0;
         for (const auto& item:m_data->GetDataQuery(graph,query).data) if (item) head=std::max(head,item->self.generation);
@@ -632,13 +718,178 @@ bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot&
 }
 
 bool SurfaceDeterminationHostFeature::Impl::GetSourceSame(
-    const VtkImageGridSnapshot& source) const
+    const VtkImageGridSnapshot& source, const DataPublishPolicy policy) const
 {
-    const auto current = m_data ? m_data->GetPrimaryImage() : nullptr;
-    return current && source
-        && current->data && source->data && current->binding && source->binding
-        && current->data->self == source->data->self
-        && current->binding->revision == source->binding->revision;
+    if (!m_data || !source || !source->data) return false;
+    const auto graph = m_data->GetDataGraph();
+    if (policy == DataPublishPolicy::AllowHistoricalResult)
+        return bool(m_data->GetData(graph, source->data->self));
+    return SurfaceContract::GetSourceCurrent(*m_data, graph, source->data->self, source->binding);
+}
+
+std::size_t SurfaceDeterminationHostFeature::Impl::GetRetainedBytes() const
+{
+    std::size_t bytes = 0;
+    const auto active = m_store.GetGeneration();
+    for (const auto &generation : {active, m_preview})
+        if (generation)
+        {
+            const auto add = [&](std::size_t count, std::size_t width) {
+                if (count > (SIZE_MAX - bytes) / width)
+                {
+                    bytes = SIZE_MAX;
+                    return;
+                }
+                bytes += count * width;
+            };
+            if (generation->points)
+                add(generation->points->capacity(), sizeof(SurfacePointRecord));
+            if (generation->triangleIndices)
+                add(generation->triangleIndices->capacity(), sizeof(std::uint32_t));
+            if (generation->triangleValidity)
+                add(generation->triangleValidity->capacity(), sizeof(std::uint8_t));
+            if (generation->objects)
+                add(generation->objects->capacity(), sizeof(SurfaceObjectRecord));
+            // 活跃通用网格及显示缓存保守覆盖；DataGraph 独立持有的历史与借用的源卷不在本工作集内。
+            if (generation->points)
+                add(generation->points->size(), 16 * sizeof(double));
+            if (generation->triangleIndices)
+                add(generation->triangleIndices->size(), 2 * sizeof(std::uint64_t));
+        }
+    return bytes;
+}
+
+bool SurfaceDeterminationHostFeature::Impl::GetRequestInputsSame(const RequestEntry &request) const
+{
+    if (!GetSourceSame(request.source, request.params.sourcePolicy)
+        || !GetRoiCurrent(request.inputs.roi, request.params.sourcePolicy))
+        return false;
+    const auto graph = m_data->GetDataGraph();
+    for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
+        if (input)
+        {
+            if (!m_data->GetData(graph, input->self))
+                return false;
+            if (request.params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
+                !SurfaceContract::GetSourceCurrent(*m_data, graph, input->self))
+                return false;
+        }
+    return true;
+}
+
+SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagnostic(
+    const DataRevisionRef revision, const std::uint64_t pointIndex) const
+{
+    const auto generation = m_store.GetGeneration(revision);
+    if (!m_data || !generation || !generation->points || pointIndex >= generation->points->size())
+    {
+        SurfaceProfileDiagnostic result;
+        result.message = "Surface generation or point is unavailable.";
+        return result;
+    }
+    if (generation->algorithmRevision != 4)
+    {
+        SurfaceProfileDiagnostic result;
+        result.message = "Surface algorithm revision is incompatible with diagnostic replay.";
+        return result;
+    }
+    const auto graph = m_data->GetDataGraph();
+    SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.analysisRoi)
+        inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
+                                  generation->sourceRevision).roi;
+    if (generation->resolvedParams.materialLabels)
+        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
+    if (generation->resolvedParams.initialSurface)
+        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
+    return SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+        m_data->GetImageGrid(graph, generation->sourceRevision), generation->resolvedParams,
+        (*generation->points)[static_cast<std::size_t>(pointIndex)], inputs);
+}
+
+SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
+    const DataRevisionRef revision) const
+{
+    SurfaceRestoreState state;
+    const auto generation = m_store.GetGeneration(revision);
+    if (!m_data || !generation)
+    {
+        state.message = "Surface result is unavailable.";
+        return state;
+    }
+    state.inputs = generation->inputs;
+    const auto graph = m_data->GetDataGraph();
+    const auto mesh = m_data->GetData(graph, generation->meshRevision);
+    const auto *payload = mesh ? dynamic_cast<const SurfaceMeshPayload *>(mesh->payload.get()) : nullptr;
+    state.canDisplay = payload && payload->GetValid();
+    if (!state.canDisplay)
+    {
+        state.message = "Surface mesh is unavailable.";
+        return state;
+    }
+    if (generation->algorithmRevision != 4 ||
+        !SurfaceRecipeCodec::GetError(generation->resolvedParams).empty())
+    {
+        state.status = SurfaceRestoreStatus::IncompatibleRecipe;
+        state.message = "Surface recipe requires explicit version migration.";
+        return state;
+    }
+    if (!m_data->GetData(graph, generation->sourceRevision))
+    {
+        state.status = SurfaceRestoreStatus::MissingInput;
+        state.message = "The frozen source volume is unavailable.";
+        return state;
+    }
+    for (const auto &input : state.inputs)
+        if (!m_data->GetData(graph, input.source))
+        {
+            state.status = SurfaceRestoreStatus::MissingInput;
+            state.message = "A frozen surface input is unavailable.";
+            return state;
+        }
+    SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.analysisRoi)
+        inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
+                                  generation->sourceRevision).roi;
+    if (generation->resolvedParams.materialLabels)
+        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
+    if (generation->resolvedParams.initialSurface)
+        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
+    if ((generation->resolvedParams.analysisRoi && !inputs.roi) ||
+        (generation->resolvedParams.materialLabels && !inputs.materialLabels) ||
+        (generation->resolvedParams.initialSurface && !inputs.initialSurface))
+    {
+        state.status = SurfaceRestoreStatus::MissingInput;
+        state.message = "A recipe input is unavailable.";
+        return state;
+    }
+    const auto source = m_data->GetImageGrid(graph, generation->sourceRevision);
+    const auto *image = source && source->data
+                            ? dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get())
+                            : nullptr;
+    if (!image || image->GetGeometry().coordinateFrame != generation->coordinateFrame ||
+        payload->GetCoordinateFrame() != generation->coordinateFrame ||
+        generation->resolvedParams.sourceVolume != generation->sourceRevision ||
+        SurfaceDeterminationAlgorithm::GetInputFailure(source, generation->resolvedParams, inputs) !=
+            SurfaceFailureReason::None)
+    {
+        state.status = SurfaceRestoreStatus::IncompatibleRecipe;
+        state.message = "Surface recipe references, input geometry or coordinate frame are inconsistent.";
+        return state;
+    }
+    state.canRecompute = true;
+    const bool current = SurfaceContract::GetSourceCurrent(*m_data, graph, generation->sourceRevision,
+                                                           generation->sourceBinding) &&
+                         SurfaceContract::GetInputsCurrent(*m_data, graph, state.inputs);
+    state.status = current ? SurfaceRestoreStatus::Current : SurfaceRestoreStatus::Historical;
+    state.canMeasure =
+        current && generation->points &&
+        std::any_of(generation->points->begin(), generation->points->end(), [&](const auto &point) {
+            return SurfaceContract::GetPointValid(point, generation->method);
+        });
+    state.message = current ? "Surface inputs are current; measurement requires valid point and face quality."
+                            : "Surface inputs are historical; recomputation uses explicit frozen inputs.";
+    return state;
 }
 
 std::vector<HostFeatureView>
@@ -692,7 +943,7 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestRunning(
     const bool isFirstRequest)
 {
     const std::lock_guard<std::mutex> lock(m_stateMutex);
-    if (isFirstRequest) m_stateBeforeRequest = m_state;
+    (void)isFirstRequest; // 只在正式结果采用/绑定投影时更新恢复状态。
     m_state.stage = SurfaceDeterminationStage::Preparing;
     m_state.failureReason = SurfaceFailureReason::None;
     m_state.requestId = requestId;
@@ -721,18 +972,22 @@ void SurfaceDeterminationHostFeature::Impl::SendComplete(
         const auto active = requestActive ? std::move(requestActive) : m_completeActive;
         const std::weak_ptr<TrustedDataPort> data = m_data;
         const auto pending = std::make_shared<SurfaceDeterminationResult>(std::move(result));
-        const auto send = [active, data, pending, bindingRevision, callback = std::move(callback)]() mutable {
+        const auto once = std::make_shared<std::atomic<bool>>(false);
+        const auto send = [active, data, pending, once, bindingRevision, callback = std::move(callback)]() mutable {
+            if (once->exchange(true)) return;
             if (pending->status == SurfaceResultStatus::Succeeded) {
                 if (!active || !active->load()) {
                     pending->status = SurfaceResultStatus::Cancelled;
                     pending->failureReason = SurfaceFailureReason::Cancelled;
                 }
-                else if (GetDataRevisionRefValid(pending->sourceRevision)) {
+                else if (!pending->isPublished && GetDataRevisionRefValid(pending->sourceRevision)) {
                     const auto port = data.lock();
-                    const auto source = port ? port->GetPrimaryImage() : nullptr;
-                    if (!source || !source->data || source->data->self != pending->sourceRevision
-                        || (bindingRevision != 0 && (!source->binding
-                            || source->binding->revision != bindingRevision))) {
+                    const auto graph = port ? port->GetDataGraph() : DataGraphSnapshot{};
+                    const auto binding = port && bindingRevision != 0
+                        ? port->GetDataBinding(graph, primaryVolumeBinding) : std::optional<DataBinding>{};
+                    if (!port || !SurfaceContract::GetSourceCurrent(*port, graph, pending->sourceRevision)
+                        || (bindingRevision != 0 && (!binding || binding->revision != bindingRevision
+                            || binding->target != pending->sourceRevision))) {
                         pending->status = SurfaceResultStatus::Failed;
                         pending->failureReason = SurfaceFailureReason::SourceChanged;
                     }
@@ -802,24 +1057,35 @@ bool SurfaceDeterminationHostFeature::Impl::RemoveDisplay()
     return !m_host || m_host->SetActiveViews({});
 }
 
+std::shared_ptr<const SurfaceGenerationSnapshot>
+SurfaceDeterminationHostFeature::Impl::GetDisplayGeneration() const
+{
+    const auto preview = GetPreviewSnapshot();
+    return preview ? preview : m_store.GetGeneration();
+}
+
 bool SurfaceDeterminationHostFeature::Impl::SendDisplayDelta()
 {
     if (m_bindings.empty()) return true;
     try {
-        const auto generation = m_store.GetGeneration();
-        if (!m_host || !m_activeSource || !m_activeSource->data || !generation) return false;
+        const auto generation = GetDisplayGeneration();
+        const bool isPreview = generation && generation->purpose == SurfaceTaskPurpose::Preview;
+        const auto source = isPreview ? m_previewSource : m_activeSource;
+        const auto& views = isPreview ? m_previewViews : m_activeViews;
+        if (!m_host || !source || !source->data || !generation) return false;
         FeatureSceneDelta delta;
         delta.requestId = GetNextRequestId();
         delta.priority = FeatureScenePriority::Scene;
         delta.scope = FeatureSceneScope::RequiredAllViews;
-        delta.inputStamp = { m_activeSource->data->self };
-        delta.viewIds = GetViewIds(m_activeViews);
+        delta.inputStamp = { source->data->self };
+        delta.viewIds = GetViewIds(views);
         delta.hasDisplayUpdate = true;
-        delta.inputs = { { "source-volume", m_activeSource->data->self },
-            { "mesh", generation->meshRevision } };
-        for (const auto& binding : m_bindings) {
-            delta.displays.push_back({ binding.viewId, std::string(featureId), "surface",
-                generation->meshRevision, m_displayOperation.operation });
+        delta.inputs = { { "source-volume", source->data->self } };
+        if (!isPreview) {
+            delta.inputs.push_back({ "mesh", generation->meshRevision });
+            for (const auto& binding : m_bindings)
+                delta.displays.push_back({ binding.viewId, std::string(featureId), "surface",
+                    generation->meshRevision, m_displayOperation.operation });
         }
         return m_host->SendSceneDelta(std::move(delta));
     }
@@ -848,55 +1114,44 @@ std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::Impl::GetOpe
     return states;
 }
 
-bool SurfaceDeterminationHostFeature::Impl::SetVisibility(
-    const bool isVisible)
+bool SurfaceDeterminationHostFeature::Impl::SetVisibility(const bool isVisible)
 {
-    const auto state = GetState();
-    if (state.isOverlayVisible == isVisible) return true;
-    if (!isVisible) {
-        if (!RemoveDisplay()) return false;
-        m_isDisplayPending = false;
+    {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_state.isOverlayVisible = false;
-        return true;
+        m_state.isOverlayVisible = isVisible;
+        m_stateBeforeRequest.isOverlayVisible = isVisible;
     }
+    if (!isVisible) { m_isDisplayPending = false; return RemoveDisplay(); }
+    m_isDisplayPending = !SetDisplayProjection();
+    return !m_isDisplayPending;
+}
 
-    const auto generation = m_store.GetGeneration();
-    if (!generation) {
-        const std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_state.isOverlayVisible = true;
-        return true;
-    }
-    auto displayData = BuildDisplayData(*generation);
-    std::vector<OverlayBinding> bindings;
-    if (!BuildBindings(
-            displayData, m_activeViews, m_activeSource, bindings)) {
-        return false;
-    }
-    if (!m_host || !m_host->SetActiveViews(GetViewIds(m_activeViews))) {
-        RemoveBindings(bindings);
-        return false;
-    }
-    RemoveBindings(m_bindings);
-    m_bindings = std::move(bindings);
-    m_displayData = std::move(displayData);
-    m_isDisplayPending = !SendDisplayDelta();
-    const std::lock_guard<std::mutex> lock(m_stateMutex);
-    m_state.isOverlayVisible = true;
-    return true;
+bool SurfaceDeterminationHostFeature::Impl::ClearPreview()
+{
+    { const std::lock_guard<std::mutex> lock(m_stateMutex); m_preview.reset(); }
+    m_previewSource.reset(); m_previewViews.clear();
+    if (!RemoveDisplay()) return false;
+    m_isDisplayPending = !SetDisplayProjection();
+    const bool visible = GetState().isOverlayVisible;
+    auto restored = m_store.GetGeneration() ? m_stateBeforeRequest : SurfaceDeterminationState{};
+    restored.isOverlayVisible = visible;
+    SetState(std::move(restored));
+    if (m_isDisplayPending) SetDisplayFailure();
+    return !m_isDisplayPending;
 }
 
 bool SurfaceDeterminationHostFeature::Impl::ClearResult()
 {
     if (!ClearResultBinding()) return false;
     if (!RemoveDisplay()) return false;
+    { const std::lock_guard<std::mutex> lock(m_stateMutex); m_preview.reset(); }
+    m_previewSource.reset(); m_previewViews.clear();
     m_store.ClearGeneration();
-    m_activeSource.reset();
-    m_activeRoi.reset();
-    m_activeViews.clear();
+    m_activeSource.reset(); m_activeViews.clear();
     m_isDisplayPending = false;
     SurfaceDeterminationState idle;
     idle.isOverlayVisible = GetState().isOverlayVisible;
+    m_stateBeforeRequest = idle;
     SetState(std::move(idle));
     return true;
 }
@@ -905,19 +1160,23 @@ bool SurfaceDeterminationHostFeature::Impl::ClearResultBinding()
 {
     const auto generation = m_store.GetGeneration();
     if (!generation || !m_data) return true;
-    const auto binding = m_data->GetDataBinding(m_data->GetDataGraph(), surfaceResultBinding);
+    const auto binding = m_data->GetDataBinding(m_data->GetDataGraph(), SurfaceContract::GetBindingName(m_activeScope));
     if (!binding || binding->revision != m_resultBinding.revision
         || binding->target != m_resultBinding.target) return true;
     DataTransaction transaction;
-    transaction.bindings.push_back({ std::string(surfaceResultBinding),
+    transaction.bindings.push_back({ binding->name,
         binding->revision, true, binding->target, {} });
     return m_data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
 }
 
 DataBinding SurfaceDeterminationHostFeature::Impl::GetResultBinding() const
+{ return GetResultBinding(m_activeScope); }
+
+DataBinding SurfaceDeterminationHostFeature::Impl::GetResultBinding(const std::string_view scope) const
 {
-    return m_data ? m_data->GetDataBinding(m_data->GetDataGraph(), surfaceResultBinding)
-        .value_or(DataBinding{ std::string(surfaceResultBinding), {}, 0 }) : DataBinding{};
+    const auto name = SurfaceContract::GetBindingName(scope);
+    return m_data ? m_data->GetDataBinding(m_data->GetDataGraph(), name)
+        .value_or(DataBinding{ name, {}, 0 }) : DataBinding{};
 }
 
 void SurfaceDeterminationHostFeature::Impl::SetDisplayFailure(const std::uint64_t requestId)
@@ -935,31 +1194,27 @@ void SurfaceDeterminationHostFeature::Impl::SetDisplayFailure(const std::uint64_
         m_state.objectCount = static_cast<std::uint32_t>(generation->objects->size());
     }
     m_state.failureReason = SurfaceFailureReason::DisplayFailed;
-    m_state.errorMessage = "Surface data committed; display is pending and will be retried.";
+    m_state.errorMessage = "Surface candidate is ready; display is pending and will be retried.";
 }
 
 bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
 {
-    const auto generation = m_store.GetGeneration();
+    const auto generation = GetDisplayGeneration();
     if (!generation || !m_host) return RemoveDisplay();
-    const bool isVisible = GetState().isOverlayVisible
-        && generation->method != SurfaceDeterminationMethod::AutomaticIso50;
-    if (!isVisible) return RemoveDisplay();
+    const bool isPreview = generation->purpose == SurfaceTaskPurpose::Preview;
+    const auto& views = isPreview ? m_previewViews : m_activeViews;
+    const auto source = isPreview ? m_previewSource : m_activeSource;
+    if (!GetState().isOverlayVisible || views.empty()) return RemoveDisplay();
     if (!m_displayData) m_displayData = BuildDisplayData(*generation);
     if (m_bindings.empty()) {
         std::vector<OverlayBinding> bindings;
         try {
-            if (!BuildBindings(m_displayData, m_activeViews, m_activeSource, bindings)
-                || !m_host->SetActiveViews(GetViewIds(m_activeViews))) {
-                RemoveBindings(bindings);
-                return false;
+            if (!BuildBindings(m_displayData, views, source, bindings)
+                || !m_host->SetActiveViews(GetViewIds(views))) {
+                RemoveBindings(bindings); return false;
             }
         }
-        catch (...) {
-            RemoveBindings(bindings);
-            return false;
-        }
-        RemoveBindings(m_bindings);
+        catch (...) { RemoveBindings(bindings); return false; }
         m_bindings = std::move(bindings);
     }
     return SendDisplayDelta();
@@ -967,11 +1222,10 @@ bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
 
 void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
 {
-    if (!m_isAttached || !m_data) return;
+    if (!m_isAttached || m_isDetaching || !m_data) return;
     try {
         const auto graph = m_data->GetDataGraph();
-        const auto binding = m_data->GetDataBinding(graph, surfaceResultBinding)
-            .value_or(DataBinding{ std::string(surfaceResultBinding), {}, 0 });
+        const auto binding = GetResultBinding();
         if (binding.revision != m_resultBinding.revision
             || binding.target != m_resultBinding.target) {
             // 外部重新激活（包括 ABA）是新的业务意图；退休旧展示但不写图。
@@ -981,19 +1235,20 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             const auto* payload = snapshot
                 ? dynamic_cast<const SurfaceGenerationPayload*>(snapshot->payload.get()) : nullptr;
             const auto generation = payload ? payload->GetGeneration() : nullptr;
-            const auto source = m_data->GetPrimaryImage();
-            if (!generation || !source || !source->data
-                || generation->dataRevision != snapshot->self
-                || generation->sourceRevision != source->data->self || !m_store.GetCurrentGeneration()) {
+            const auto source = generation ? m_data->GetImageGrid(graph, generation->sourceRevision) : nullptr;
+            if (!generation || !source || !source->data || generation->dataRevision != snapshot->self ||
+                generation->resultScope != m_activeScope ||
+                generation->purpose != SurfaceTaskPurpose::Determine ||
+                !SurfaceContract::GetSourceCurrent(*m_data, graph, generation->sourceRevision,
+                                                   generation->sourceBinding) ||
+                !SurfaceContract::GetInputsCurrent(*m_data, graph, generation->inputs))
+            {
                 m_store.ClearGeneration();
                 m_activeSource.reset();
-    m_activeRoi.reset();
                 m_isDisplayPending = false;
                 auto state = GetState();
-                if (m_latestRequestId != 0) {
-                    m_stateBeforeRequest = {};
-                    m_stateBeforeRequest.isOverlayVisible = state.isOverlayVisible;
-                }
+                m_stateBeforeRequest = {};
+                m_stateBeforeRequest.isOverlayVisible = state.isOverlayVisible;
                 if (state.stage == SurfaceDeterminationStage::Ready) {
                     const bool isVisible = state.isOverlayVisible;
                     state = {};
@@ -1013,14 +1268,13 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             m_displayOperation.stateRevision = 1;
             m_displayOperation.status = FeatureRunStatus::Succeeded;
             m_displayOperation.progress = 1.0;
-            m_displayOperation.inputs = { { "source-volume", generation->sourceRevision } };
+            m_displayOperation.inputs = generation->inputs;
             if (GetDataRevisionRefValid(generation->meshRevision))
                 m_displayOperation.outputs.push_back(generation->meshRevision);
             m_displayOperation.outputs.push_back(snapshot->self);
-            m_activeSource = source;
-            m_activeRoi.reset();
-            for (const auto& input:snapshot->inputs) if (input.role=="analysis-roi")
-                m_activeRoi=m_data->GetRoi(graph,input.source,source->data->self).roi;
+            auto activeSource = std::make_shared<VtkImageGridView>(*source);
+            activeSource->binding = generation->sourceBinding;
+            m_activeSource = std::move(activeSource);
             if (m_activeViews.empty()) {
                 auto targets = m_config.defaultStart.targetViews;
                 if (!GetTargetsUsed(targets)) targets.viewRoles = { HostRenderViewRole::Primary3D };
@@ -1042,7 +1296,8 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             ready.truncatedPointCount = statistics.truncatedPointCount;
             ready.nonManifoldObjectCount = statistics.nonManifoldObjectCount;
             ready.isOverlayVisible = GetState().isOverlayVisible;
-            if (m_latestRequestId == 0 || GetState().stage == SurfaceDeterminationStage::Ready) SetState(ready);
+            if (!GetPreviewSnapshot() && (m_latestRequestId == 0
+                || GetState().stage == SurfaceDeterminationStage::Ready)) SetState(ready);
             m_stateBeforeRequest = std::move(ready);
             m_isDisplayPending = true;
         }
@@ -1070,7 +1325,6 @@ void SurfaceDeterminationHostFeature::Impl::SetSourceStale()
     const auto previousState = GetState();
     m_store.ClearGeneration();
     m_activeSource.reset();
-    m_activeRoi.reset();
     m_activeViews.clear();
     m_isDisplayPending = false;
     if (!RemoveDisplay()) m_isStaleCleanupPending = true;
@@ -1087,130 +1341,111 @@ void SurfaceDeterminationHostFeature::Impl::SetSourceStale()
     SetState(std::move(stale));
 }
 
-void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
-    SurfaceJobComplete complete)
+void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(SurfaceJobComplete complete)
 {
-    const auto requestItem = m_requests.find(complete.requestId);
-    if (requestItem == m_requests.end()) return;
-    RequestEntry request = std::move(requestItem->second);
-    m_requests.erase(requestItem);
-    // Freeze execution revision before publication observers can detach or start another request.
+    const auto item = m_requests.find(complete.requestId);
+    if (item == m_requests.end()) return;
+    RequestEntry request = std::move(item->second);
+    m_requests.erase(item);
     request.operation.stateRevision += m_service->GetExecutionState(complete.requestId).stateRevision;
     auto operation = request.operation;
     const bool isLatest = complete.requestId == m_latestRequestId;
-    if (request.isSourceChanged || !GetSourceSame(request.source) || !GetRoiCurrent(request.roi)) {
-        complete.result.status = SurfaceResultStatus::Failed;
-        complete.result.failureReason = SurfaceFailureReason::SourceChanged;
-        complete.result.message = "Surface source changed before commit.";
-        complete.result.points.clear();
-        complete.result.triangleIndices.clear();
-        complete.result.objects.clear();
+    auto& result = complete.result;
+    const auto purpose = SurfaceContract::GetPurpose(request.params);
+    if (request.isSourceChanged || !GetRequestInputsSame(request))
+    {
+        result.status = SurfaceResultStatus::Failed;
+        result.failureReason = SurfaceFailureReason::SourceChanged;
+        result.message = "Surface source changed before commit.";
     }
-    else if (!isLatest
-        && complete.result.status == SurfaceResultStatus::Succeeded) {
-        complete.result.status = SurfaceResultStatus::Cancelled;
-        complete.result.failureReason = SurfaceFailureReason::Cancelled;
-        complete.result.message = "Surface request was superseded.";
-        complete.result.points.clear();
-        complete.result.triangleIndices.clear();
-        complete.result.objects.clear();
+    else if (request.isSuperseded) {
+        result.status = SurfaceResultStatus::Cancelled;
+        result.failureReason = SurfaceFailureReason::Cancelled;
+        result.message = "Surface request was superseded in its scope and purpose.";
     }
-    else if (complete.result.status == SurfaceResultStatus::Succeeded) {
-        const auto current = GetResultBinding();
-        if (current.revision != request.resultBinding.revision
-            || current.target != request.resultBinding.target) {
-            complete.result.status = SurfaceResultStatus::Cancelled;
-            complete.result.failureReason = SurfaceFailureReason::Cancelled;
-            complete.result.message = "Surface result binding changed before commit.";
+    else if (result.status == SurfaceResultStatus::Succeeded && purpose == SurfaceTaskPurpose::Determine
+        && request.params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs) {
+        const auto current = GetResultBinding(request.params.resultScope);
+        if (current.revision != request.resultBinding.revision || current.target != request.resultBinding.target) {
+            result.status = SurfaceResultStatus::Cancelled;
+            result.failureReason = SurfaceFailureReason::Cancelled;
+            result.message = "Surface result binding changed before commit.";
         }
     }
-
-    SurfaceResultStatus callbackStatus = complete.result.status;
-    SurfaceFailureReason callbackReason = complete.result.failureReason;
-    std::string callbackMessage = complete.result.message;
-    if (callbackMessage.empty()
-        && callbackStatus == SurfaceResultStatus::Cancelled) {
-        callbackMessage = "Surface request was superseded or cancelled.";
-    }
+    auto callbackResult = BuildResult(complete.requestId, result.status, result.failureReason,
+        result.sourceRevision, 0, result.points.size(), static_cast<std::uint32_t>(result.objects.size()), result.message);
+    callbackResult.purpose = purpose;
+    callbackResult.resultScope = request.params.resultScope;
+    callbackResult.isoEstimate = result.isoEstimate;
     DataSnapshot published;
-    if (isLatest) {
-        if (complete.result.status == SurfaceResultStatus::Succeeded) {
-            published = SetRequestSucceeded(
-                    request,
-                    std::move(complete.result),
-                    complete.requestId);
-            if (!published) {
-                SurfaceAlgorithmResult displayFailure;
-                displayFailure.status = SurfaceResultStatus::Failed;
-                displayFailure.failureReason =
-                    SurfaceFailureReason::DisplayFailed;
-                displayFailure.message =
-                    "Surface display candidate could not be committed.";
-                callbackStatus = displayFailure.status;
-                callbackReason = displayFailure.failureReason;
-                callbackMessage = displayFailure.message;
-                SetRequestFailed(request, displayFailure);
+    if (result.status == SurfaceResultStatus::Succeeded) {
+        try {
+            if (purpose == SurfaceTaskPurpose::Determine) {
+                published = SetRequestSucceeded(request, std::move(result), complete.requestId);
+                if (!published) {
+                    callbackResult.status = SurfaceResultStatus::Failed;
+                    callbackResult.failureReason = SurfaceFailureReason::PublishFailed;
+                    callbackResult.message = "Surface candidate could not be published.";
+                }
             }
-            else {
-                callbackStatus = SurfaceResultStatus::Succeeded;
-                callbackReason = SurfaceFailureReason::None;
-            }
+            else if (isLatest) SetTransientResult(request, result, complete.requestId);
         }
-        else {
-            SetRequestFailed(request, complete.result);
+        catch (...) {
+            callbackResult.status = SurfaceResultStatus::Failed;
+            callbackResult.failureReason = SurfaceFailureReason::BudgetExceeded;
+            callbackResult.message = "Surface candidate allocation failed.";
         }
-        if (m_latestRequestId == complete.requestId) m_latestRequestId = 0;
     }
-
-    const auto state = GetState();
-    operation.status = published ? FeatureRunStatus::Succeeded
-        : callbackStatus == SurfaceResultStatus::Cancelled ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
-    operation.progress = published ? 1.0 : 0.0;
+    if (callbackResult.status != SurfaceResultStatus::Succeeded && isLatest && m_isAttached) {
+        SurfaceAlgorithmResult failure;
+        failure.status = callbackResult.status; failure.failureReason = callbackResult.failureReason;
+        failure.message = callbackResult.message;
+        SetRequestFailed(request, failure);
+    }
+    if (published) {
+        const auto* payload = dynamic_cast<const SurfaceGenerationPayload*>(published->payload.get());
+        const auto generation = payload->GetGeneration();
+        callbackResult.isPublished = true;
+        callbackResult.isActivated = request.params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs;
+        callbackResult.dataRevision = generation->dataRevision;
+        callbackResult.meshRevision = generation->meshRevision;
+        callbackResult.resultRevision = generation->resultRevision;
+        callbackResult.pointCount = generation->points->size();
+        callbackResult.objectCount = static_cast<std::uint32_t>(generation->objects->size());
+        operation.outputs = { generation->meshRevision, generation->dataRevision };
+    }
+    if (isLatest && m_isAttached && callbackResult.status == SurfaceResultStatus::Succeeded
+        && request.params.sourcePolicy != DataPublishPolicy::AllowHistoricalResult
+        && purpose != SurfaceTaskPurpose::Estimate && (m_isDisplayPending
+            || (published && GetResultBinding(request.params.resultScope).target != published->self))) {
+        callbackResult.failureReason = SurfaceFailureReason::DisplayFailed;
+        callbackResult.message = "Surface calculation completed; display has not followed the result.";
+    }
+    operation.status = callbackResult.status == SurfaceResultStatus::Succeeded ? FeatureRunStatus::Succeeded
+        : callbackResult.status == SurfaceResultStatus::Cancelled ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
+    operation.progress = callbackResult.status == SurfaceResultStatus::Succeeded ? 1.0 : 0.0;
     operation.stateRevision += 2;
-    if (published) {
-        const auto* payload = dynamic_cast<const SurfaceGenerationPayload*>(published->payload.get());
-        const auto generation = payload ? payload->GetGeneration() : nullptr;
-        if (generation && GetDataRevisionRefValid(generation->meshRevision))
-            operation.outputs.push_back(generation->meshRevision);
-        operation.outputs.push_back(published->self);
-    }
-    if (m_isAttached && operation.operation.requestId >= m_lastOperation.operation.requestId)
-        m_lastOperation = operation;
-    if (isLatest && published) {
-        callbackStatus = SurfaceResultStatus::Succeeded;
-        callbackReason = state.failureReason;
-        callbackMessage = state.errorMessage;
-    }
-    auto callbackResult = BuildResult(
-        complete.requestId, callbackStatus, callbackReason,
-        request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
-        state.resultRevision, state.pointCount, state.objectCount, std::move(callbackMessage));
-    if (published) {
-        const auto* payload = dynamic_cast<const SurfaceGenerationPayload*>(published->payload.get());
-        const auto generation = payload ? payload->GetGeneration() : nullptr;
-        if (generation) {
-            callbackResult.resultRevision = generation->resultRevision;
-            callbackResult.pointCount = generation->points->size();
-            callbackResult.objectCount = static_cast<std::uint32_t>(generation->objects->size());
-            callbackResult.isoEstimate = generation->isoEstimate;
-        }
-        if (m_isDisplayPending || GetResultBinding().target != published->self) {
-            callbackResult.failureReason = SurfaceFailureReason::DisplayFailed;
-            callbackResult.message = "Surface data committed; display has not followed this result.";
-        }
-    }
+    if (m_isAttached && operation.operation.requestId >= m_lastOperation.operation.requestId) m_lastOperation = operation;
+    if (m_latestRequestId == complete.requestId) m_latestRequestId = 0;
     SendComplete(std::move(request.onComplete), std::move(callbackResult),
-        request.source && request.source->binding ? request.source->binding->revision : 0,
-        std::move(request.completeActive));
+        request.source->binding ? request.source->binding->revision : 0, std::move(request.completeActive));
 }
 
 void SurfaceDeterminationHostFeature::Impl::SetRequestFailed(
     const RequestEntry& request,
     const SurfaceAlgorithmResult& result)
 {
-    if (result.failureReason == SurfaceFailureReason::SourceChanged
-        || !GetSourceSame(request.source)) {
-        SetSourceStale();
+    if (result.failureReason == SurfaceFailureReason::SourceChanged || !GetRequestInputsSame(request))
+    {
+        if (m_activeSource && !GetSourceSame(m_activeSource)) SetSourceStale();
+        else {
+            auto state = m_stateBeforeRequest;
+            state.stage = SurfaceDeterminationStage::Stale;
+            state.failureReason = SurfaceFailureReason::SourceChanged;
+            state.requestId = GetState().requestId;
+            state.sourceRevision = request.source->data->self;
+            SetState(std::move(state));
+        }
         return;
     }
     const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -1230,50 +1465,105 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestFailed(
     m_state.errorMessage = result.message;
 }
 
-DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
-    const RequestEntry& request,
-    SurfaceAlgorithmResult result,
-    const std::uint64_t requestId)
+std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl::BuildGeneration(
+    const RequestEntry &request, SurfaceAlgorithmResult &result, const std::uint64_t requestId,
+    const bool isFormal)
 {
-    const bool isThresholdOnly = result.method == SurfaceDeterminationMethod::AutomaticIso50;
-    if (!GetSourceSame(request.source)
-        || (isThresholdOnly && (!result.isoEstimate || !std::isfinite(result.isoEstimate->isoValue)))
-        || (!isThresholdOnly && (result.points.empty()
-            || result.triangleIndices.empty() || result.objects.empty()))
-        || m_resultRevision == std::numeric_limits<std::uint64_t>::max()) {
-        return {};
-    }
-
+    if (result.points.empty() || result.triangleIndices.empty() || result.objects.empty()
+        || result.triangleValidity.size() != result.triangleIndices.size() / 3) return {};
+    const auto* image = dynamic_cast<const ImageGrid3DPayload*>(request.source->data->payload.get());
+    if (!image || image->GetGeometry().coordinateFrame.empty()) return {};
     SurfaceGenerationSnapshot generation;
-    const DataRevisionRef meshRef = isThresholdOnly ? DataRevisionRef{}
-        : DataRevisionRef{ m_data->CreateDataEntityId(), 1 };
-    const DataRevisionRef generationRef{ m_data->CreateDataEntityId(), 1 };
-    generation.dataRevision = generationRef;
-    generation.meshRevision = meshRef;
+    generation.inputs = request.operation.inputs;
+    generation.execution = result.execution;
+    generation.interfaces =
+        std::make_shared<const std::vector<SurfaceInterfaceRecord>>(std::move(result.interfaces));
+    generation.requestId = requestId;
+    generation.purpose = SurfaceContract::GetPurpose(request.params);
+    generation.resultScope = request.params.resultScope;
+    generation.coordinateFrame = image->GetGeometry().coordinateFrame;
+    generation.modelUnit = request.params.modelUnit;
+    generation.requestedParams = request.params;
+    generation.requestedParams.targetViews = {};
+    generation.resolvedParams = result.resolvedParams;
+    generation.canonicalParameters = SurfaceContract::BuildParameters(
+        generation.requestedParams, generation.resolvedParams, generation.coordinateFrame, m_config.maxWorkingBytes);
+    generation.sourceBinding = request.source->binding;
+    if (isFormal) {
+        generation.meshRevision = { m_data->CreateDataEntityId(), 1 };
+        generation.dataRevision = { m_data->CreateDataEntityId(), 1 };
+        generation.resultRevision = m_resultRevision + 1;
+    }
     generation.sourceRevision = result.sourceRevision;
-    generation.resultRevision = m_resultRevision + 1;
     generation.parameterFingerprint = result.parameterFingerprint;
     generation.algorithmRevision = result.algorithmRevision;
     generation.method = result.method;
     generation.isoEstimate = result.isoEstimate;
-    generation.points =
-        std::make_shared<const std::vector<SurfacePointRecord>>(
-            std::move(result.points));
-    generation.triangleIndices =
-        std::make_shared<const std::vector<std::uint32_t>>(
-            std::move(result.triangleIndices));
-    generation.objects =
-        std::make_shared<const std::vector<SurfaceObjectRecord>>(
-            std::move(result.objects));
-    auto stagedGeneration =
-        std::make_shared<const SurfaceGenerationSnapshot>(
-            std::move(generation));
+    generation.points = std::make_shared<const std::vector<SurfacePointRecord>>(std::move(result.points));
+    generation.triangleIndices = std::make_shared<const std::vector<std::uint32_t>>(std::move(result.triangleIndices));
+    generation.triangleValidity = std::make_shared<const std::vector<std::uint8_t>>(std::move(result.triangleValidity));
+    generation.objects = std::make_shared<const std::vector<SurfaceObjectRecord>>(std::move(result.objects));
+    return std::make_shared<SurfaceGenerationSnapshot>(std::move(generation));
+}
 
+void SurfaceDeterminationHostFeature::Impl::SetTransientResult(const RequestEntry& request,
+    SurfaceAlgorithmResult& result, const std::uint64_t requestId)
+{
+    const auto purpose = SurfaceContract::GetPurpose(request.params);
+    SetBindingProjection(); // 先吸收其他通道刚发布的正式槽，供预览退出时恢复。
+    SurfaceDeterminationState ready = m_stateBeforeRequest;
+    ready.stage = SurfaceDeterminationStage::Ready;
+    ready.failureReason = SurfaceFailureReason::None;
+    ready.errorMessage.clear(); ready.requestId = requestId;
+    ready.sourceRevision = result.sourceRevision; ready.progress01 = 1.0;
+    ready.purpose = purpose; ready.resultScope = request.params.resultScope;
+    ready.isoEstimate = result.isoEstimate;
+    if (purpose == SurfaceTaskPurpose::Preview) {
+        const auto preview = BuildGeneration(request, result, requestId, false);
+        if (!preview) throw std::runtime_error("Invalid surface preview");
+        ready.pointCount = preview->points->size(); ready.objectCount = static_cast<std::uint32_t>(preview->objects->size());
+        ready.acceptedPointCount = 0; ready.rejectedPointCount = ready.pointCount;
+        { const std::lock_guard<std::mutex> lock(m_stateMutex); m_preview = preview; }
+        m_previewSource = request.source; m_previewViews = request.views;
+        RemoveBindings(m_bindings); m_displayData = nullptr;
+        SetState(ready);
+        m_isDisplayPending = !SetDisplayProjection();
+        if (m_isDisplayPending) SetDisplayFailure();
+    }
+    else SetState(std::move(ready));
+}
+
+DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
+    const RequestEntry& request, SurfaceAlgorithmResult result, const std::uint64_t requestId)
+{
+    if (!GetRequestInputsSame(request) || m_resultRevision == std::numeric_limits<std::uint64_t>::max())
+        return {};
+    const auto publicationStarted = std::chrono::steady_clock::now();
+    std::size_t publicationBytes = GetRetainedBytes();
+    const auto charge = [&](std::size_t count, std::size_t width) {
+        if (count > (SIZE_MAX - publicationBytes) / width)
+            return false;
+        publicationBytes += count * width;
+        return publicationBytes <= m_config.maxWorkingBytes;
+    };
+    if (!charge(result.points.capacity(), sizeof(SurfacePointRecord)) ||
+        !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
+        !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
+        !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
+        !charge(result.points.size(), 2 * 13 * sizeof(double)) ||
+        !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
+        throw std::bad_alloc{};
+    result.execution.estimatedWorkingBytes =
+        std::max(result.execution.estimatedWorkingBytes, publicationBytes);
+    const auto stagedGeneration = BuildGeneration(request, result, requestId, true);
+    if (!stagedGeneration) return {};
+    const auto meshRef = stagedGeneration->meshRevision;
+    const auto generationRef = stagedGeneration->dataRevision;
     std::vector<double> vertices;
     vertices.reserve(stagedGeneration->points->size() * 3U);
     // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
     // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
-    constexpr std::size_t qualityBytesPerPoint = 7U * sizeof(double) * 2U;
+    constexpr std::size_t qualityBytesPerPoint = 10U * sizeof(double) * 2U;
     if (stagedGeneration->points->size()
         > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
     std::vector<MeshAttribute> attributes{
@@ -1283,6 +1573,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         { "measurement.localization-sigma", 1, {} },
         { "measurement.normal", 3, {} }
     };
+    attributes.push_back({"measurement.flags", 1, {}});
+    attributes.push_back({"surface.interface-index", 1, {}});
+    attributes.push_back({"surface.override-index", 1, {}});
     for (auto& attribute : attributes) {
         attribute.values.reserve(
             stagedGeneration->points->size() * attribute.componentCount);
@@ -1301,8 +1594,10 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
             && point.fitResidual >= 0.0F
             && point.validSupportRatio > 0.0F && point.validSupportRatio <= 1.0F
             && point.estimatedLocalizationSigma >= 0.0F;
-        const bool isValid = hasQuality && point.flags == SurfacePointFlags::None
-            && stagedGeneration->method != SurfaceDeterminationMethod::GlobalIsoPreview;
+        const bool isValid = SurfaceContract::GetPointValid(point, stagedGeneration->method);
+        attributes[5].values.push_back(static_cast<std::uint32_t>(point.flags));
+        attributes[6].values.push_back(point.interfaceIndex);
+        attributes[7].values.push_back(point.overrideIndex);
         attributes[0].values.push_back(isValid ? 1.0 : 0.0);
         attributes[1].values.push_back(hasQuality ? point.fitResidual : 0.0);
         attributes[2].values.push_back(hasQuality ? point.validSupportRatio : 0.0);
@@ -1314,59 +1609,85 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     std::vector<std::uint64_t> triangles(stagedGeneration->triangleIndices->begin(),
         stagedGeneration->triangleIndices->end());
     const auto mesh = std::make_shared<const SurfaceMeshPayload>(
-        std::move(vertices), std::move(triangles), std::move(attributes));
-    if (!isThresholdOnly && !mesh->GetValid()) return {};
+        std::move(vertices), std::move(triangles), std::move(attributes), stagedGeneration->coordinateFrame);
+    if (!mesh->GetValid()) return {};
     const auto& expected = request.resultBinding;
-    DataExpectation sourceExpected;
-    sourceExpected.kind = DataExpectationKind::Binding;
-    sourceExpected.binding = std::string(primaryVolumeBinding);
-    sourceExpected.expectedBindingRevision = request.source->binding->revision;
-    sourceExpected.isTargetChecked = true;
-    sourceExpected.expectedTarget = request.source->data->self;
     DataTransaction transaction;
-    transaction.expectations.push_back(std::move(sourceExpected));
-    const DataInputRef sourceInput{ "source-volume", request.source->data->self };
-    const DataProvenance provenance{ std::string(featureId), "determine-surface",
-        std::to_string(stagedGeneration->algorithmRevision),
-        std::to_string(stagedGeneration->parameterFingerprint) };
-    std::vector<DataInputRef> analysisInputs{sourceInput};
-    if (request.roi) {
-        analysisInputs.push_back({"analysis-roi",request.roi->GetRevision()});
-        std::size_t index=0;
-        for (const auto& ref:request.roi->GetDependencies()) {
+    transaction.policy = request.params.sourcePolicy;
+    const bool isHistorical = request.params.sourcePolicy == DataPublishPolicy::AllowHistoricalResult;
+    if (!isHistorical) {
+        for (const auto& input : request.operation.inputs) {
+            if (input.source == request.source->data->self) continue;
             DataExpectation expectation;
-            expectation.entityId=ref.entityId; expectation.expectedGeneration=ref.generation;
+            expectation.kind = DataExpectationKind::EntityHead;
+            expectation.entityId = input.source.entityId;
+            expectation.expectedGeneration = input.source.generation;
             transaction.expectations.push_back(expectation);
-            if (ref!=request.roi->GetRevision() && ref!=request.source->data->self)
-                analysisInputs.push_back({"analysis-roi.input-"+std::to_string(index++),ref});
+        }
+        DataExpectation sourceExpected;
+        sourceExpected.kind = DataExpectationKind::EntityHead;
+        sourceExpected.entityId = request.source->data->self.entityId;
+        sourceExpected.expectedGeneration = request.source->data->self.generation;
+        transaction.expectations.push_back(sourceExpected);
+        if (request.source->binding) {
+            sourceExpected = {};
+            sourceExpected.kind = DataExpectationKind::Binding;
+            sourceExpected.binding = request.source->binding->name;
+            sourceExpected.expectedBindingRevision = request.source->binding->revision;
+            sourceExpected.isTargetChecked = true;
+            sourceExpected.expectedTarget = request.source->data->self;
+            transaction.expectations.push_back(sourceExpected);
         }
     }
-    std::vector<DataInputRef> generationInputs=analysisInputs;
-    if (!isThresholdOnly) {
-        transaction.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
-            analysisInputs, mesh, provenance});
+    const DataProvenance provenance{ std::string(featureId), "determine-surface",
+        std::to_string(stagedGeneration->algorithmRevision),
+        stagedGeneration->canonicalParameters };
+    std::vector<DataInputRef> generationInputs = request.operation.inputs;
+    {
+        transaction.outputs.push_back(
+            {meshRef.entityId, 0, DataTypes::surfaceMesh, request.operation.inputs, mesh, provenance});
         generationInputs.push_back({"mesh", meshRef});
     }
+    stagedGeneration->execution.publicationPreparationMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - publicationStarted)
+            .count();
     transaction.outputs.push_back({generationRef.entityId, 0, surfaceGenerationType,
         std::move(generationInputs),
         std::make_shared<const SurfaceGenerationPayload>(stagedGeneration,
             SurfaceGenerationPayload::Statistics{result.acceptedPointCount, result.lowContrastPointCount,
                 result.rejectedPointCount, result.truncatedPointCount, result.nonManifoldObjectCount}), provenance});
-    transaction.bindings.push_back({ std::string(surfaceResultBinding),
+    if (!isHistorical) transaction.bindings.push_back({ expected.name,
         expected.revision, true, expected.target, generationRef });
 
-    const bool isVisible = !isThresholdOnly && GetState().isOverlayVisible;
+    const bool isVisible = GetState().isOverlayVisible;
     auto nextViews = request.views;
     const auto data = m_data;
     auto committed = data->SetDataCommit(std::move(transaction));
-    if (committed.status != DataCommitStatus::Succeeded) {
+    if (committed.status != DataCommitStatus::Succeeded
+        && committed.status != DataCommitStatus::SucceededHistorical) {
         return {};
     }
     // 从这里起正式结果已经有效；显示失败不回滚业务数据。
     const auto published = committed.published.back();
+    m_resultRevision = std::max(m_resultRevision, stagedGeneration->resultRevision);
+    if (isHistorical || requestId != m_latestRequestId) {
+        if (isHistorical && m_isAttached && requestId == m_latestRequestId) {
+            auto ready = GetState();
+            ready.stage = SurfaceDeterminationStage::Ready; ready.progress01 = 1.0;
+            ready.purpose = SurfaceTaskPurpose::Determine; ready.resultScope = request.params.resultScope;
+            ready.resultRevision = stagedGeneration->resultRevision;
+            ready.pointCount = stagedGeneration->points->size(); ready.objectCount = static_cast<std::uint32_t>(stagedGeneration->objects->size());
+            ready.acceptedPointCount = result.acceptedPointCount; ready.rejectedPointCount = result.rejectedPointCount;
+            SetState(std::move(ready));
+        }
+        return published;
+    }
     if (!m_isAttached || !m_data || !request.completeActive
         || !request.completeActive->load()) return published;
     try {
+        m_activeScope = request.params.resultScope;
+        { const std::lock_guard<std::mutex> lock(m_stateMutex); m_preview.reset(); }
+        m_previewSource.reset(); m_previewViews.clear();
         m_resultBinding = std::move(committed.bindings.back());
         m_store.SetGeneration(published);
         m_displayOperation = request.operation;
@@ -1377,12 +1698,13 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         RemoveBindings(m_bindings);
         m_displayData = nullptr;
         m_activeSource = request.source;
-        m_activeRoi = request.roi;
         m_activeViews = std::move(nextViews);
         m_resultRevision = std::max(m_resultRevision, stagedGeneration->resultRevision);
         SurfaceDeterminationState ready;
         ready.stage = SurfaceDeterminationStage::Ready;
         ready.requestId = requestId;
+        ready.purpose = SurfaceTaskPurpose::Determine;
+        ready.resultScope = request.params.resultScope;
         ready.sourceRevision = stagedGeneration->sourceRevision;
         ready.resultRevision = stagedGeneration->resultRevision;
         ready.progress01 = 1.0;
@@ -1407,9 +1729,12 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
 
 FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
 {
-    return { { { "source-volume", DataFacets::scalarGrid3D, true }, {"analysis-roi",DataFacets::roiGeometry,false} },
-        { { "mesh", DataTypes::surfaceMesh, { DataFacets::surfaceMesh } },
-          { "generation", surfaceGenerationType, { surfaceGenerationFacet } } } };
+    return {{{"source-volume", DataFacets::scalarGrid3D, true},
+             {"analysis-roi", DataFacets::roiGeometry, false},
+             {"material-labels", DataFacets::labelMap3D, false},
+             {"initial-surface", DataFacets::surfaceMesh, false}},
+            {{"mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},
+             {"generation", surfaceGenerationType, {surfaceGenerationFacet}}}};
 }
 
 std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::GetOperationStates() const
@@ -1470,4 +1795,27 @@ std::shared_ptr<const SurfaceGenerationSnapshot>
 SurfaceDeterminationHostFeature::GetSurfaceSnapshot() const
 {
     return m_impl ? m_impl->GetSurfaceSnapshot() : nullptr;
+}
+
+std::shared_ptr<const SurfaceGenerationSnapshot>
+SurfaceDeterminationHostFeature::GetSurfaceSnapshot(const std::string_view scope) const
+{ return m_impl ? m_impl->GetSurfaceSnapshot(scope) : nullptr; }
+
+std::shared_ptr<const SurfaceGenerationSnapshot>
+SurfaceDeterminationHostFeature::GetSurfaceSnapshot(const DataRevisionRef revision) const
+{ return m_impl ? m_impl->GetSurfaceSnapshot(revision) : nullptr; }
+
+std::shared_ptr<const SurfaceGenerationSnapshot>
+SurfaceDeterminationHostFeature::GetPreviewSnapshot() const
+{ return m_impl ? m_impl->GetPreviewSnapshot() : nullptr; }
+
+SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::GetProfileDiagnostic(
+    const DataRevisionRef revision, const std::uint64_t pointIndex) const
+{
+    return m_impl ? m_impl->GetProfileDiagnostic(revision, pointIndex) : SurfaceProfileDiagnostic{};
+}
+
+SurfaceRestoreState SurfaceDeterminationHostFeature::GetResultValidity(const DataRevisionRef revision) const
+{
+    return m_impl ? m_impl->GetResultValidity(revision) : SurfaceRestoreState{};
 }

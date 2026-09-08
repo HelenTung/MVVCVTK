@@ -30,25 +30,9 @@ SurfaceAlgorithmResult Build(
         params,
         128U * 1024U * 1024U,
         [] { return false; },
-        {}, std::move(roi));
+        {}, {{}, {}, std::move(roi)});
 }
 
-RoiReadSnapshot BuildRoi(const VtkImageGridSnapshot& source,const std::array<double,6>& bounds)
-{
-    DataGraphStore store;
-    RoiNode node;
-    for (int a=0;a<3;++a) {
-        node.primitive.localToSource[a*4+a]=(bounds[a*2+1]-bounds[a*2])*0.5;
-        node.primitive.localToSource[a*4+3]=(bounds[a*2+1]+bounds[a*2])*0.5;
-    }
-    RoiDefinition definition{source->data->self,{node}};
-    const DataRevisionRef ref{store.CreateDataEntityId(),1};
-    DataTransaction transaction;
-    transaction.outputs={{source->data->self.entityId,0,DataTypes::imageGrid3D,{},source->data->payload},
-        {ref.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition)}};
-    const auto committed=store.SetDataCommit(transaction);
-    return RoiEvaluator::GetRoi(committed.graph,ref,source->data->self).roi;
-}
 
 double GetPlaneMeanError(
     const SurfaceAlgorithmResult& result,

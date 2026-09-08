@@ -169,7 +169,7 @@ void Run(const char* sample)
     graph=probe->data->GetDataGraph();
     Check(partResult.status==PartResultStatus::Succeeded && HasInput(probe->data->GetData(graph,partResult.labelMap),"edit-roi",ref),"Part 正式标签追溯同一 ROI");
     SurfaceDeterminationStartParams surfaceParams; surfaceParams.targetViews=targets; surfaceParams.analysisRoi=ref;
-    surfaceParams.method=SurfaceDeterminationMethod::GlobalIsoPreview; surfaceParams.componentSelection=SurfaceComponentSelection::All;
+    surfaceParams.method=SurfaceDeterminationMethod::LocalAdaptiveIso50; surfaceParams.componentSelection=SurfaceComponentSelection::All;
     double minimum=INFINITY,maximum=-INFINITY;
     for (std::size_t i=0;i<count;++i) if (Selected(i,n)) { minimum=std::min(minimum,double(originalValues[i])); maximum=std::max(maximum,double(originalValues[i])); }
     surfaceParams.initialIsoValue=(minimum+maximum)*.5;
@@ -178,7 +178,8 @@ void Run(const char* sample)
     Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult r) { surfaceResult=std::move(r); surfaced=true; }).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳同一凸 ROI");
     Pump(session,[&] { return surfaced; });
     const auto mesh=surface->GetSurfaceSnapshot();
-    Check(surfaceResult.status==SurfaceResultStatus::Succeeded && mesh && mesh->points && !mesh->points->empty(),"Surface 生成局部表面："+surfaceResult.message);
+    Check(surfaceResult.status==SurfaceResultStatus::Succeeded && surfaceResult.isPublished
+        && mesh && mesh->purpose==SurfaceTaskPurpose::Determine && mesh->points && !mesh->points->empty(),"Surface 生成局部表面："+surfaceResult.message);
     exact=true; for (const auto& p:*mesh->points) if (!frozen.roi->GetContains(p.positionModel)) exact=false;
     graph=probe->data->GetDataGraph();
     Check(exact && HasInput(probe->data->GetData(graph,mesh->meshRevision),"analysis-roi",ref),"Surface 所有点位于同一精确 ROI 并记录修订");
@@ -197,6 +198,8 @@ void Run(const char* sample)
     Check(session.SetRoi(change).error==RoiError::None,"公共几何修改创建新修订");
     commit.requestId=artifact->GetState().requestId;
     Check(artifact->SendRequest(commit).error==ArtifactError::SourceChanged,"旧 ROI 候选在提交时拒绝过期头");
+    Check(surface->GetResultValidity(mesh->dataRevision).status==SurfaceRestoreStatus::Historical,
+        "ROI 几何更新使冻结表面成为历史结果");
     Check(frozen.roi->GetMaskChunk(maskRequest).values==mask.values,"旧 ROI 读取快照保持不变");
     Check(session.Stop(),"Session 停止完整释放消费者");
     std::cout << "EVIDENCE voxels=" << count << " selected=" << count/8 << " artifactChanged=" << changed

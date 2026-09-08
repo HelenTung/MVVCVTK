@@ -1,9 +1,11 @@
 #include "SurfaceDeterminationService.h"
+#include "SurfaceContracts.h"
 #include <vtkImageData.h>
 
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <limits>
 
 namespace {
 
@@ -21,9 +23,10 @@ std::vector<SurfaceJobComplete> BuildCompletionQueue()
 SurfaceDeterminationService::SurfaceDeterminationService(std::function<void()> onWorkAvailable)
     : m_onWorkAvailable(std::move(onWorkAvailable))
     , m_complete(BuildCompletionQueue())
-    , m_worker([this] { WorkerLoop(); })
 {
-    // completion 槽在 worker 启动前一次性分配；运行期间不再扩容。
+    // 所有成员和有界存储就绪后才启动线程，不能从成员初始化中提前访问 this。
+    m_activeScope.reserve(128);
+    m_worker = std::thread([this] { WorkerLoop(); });
 }
 
 SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
@@ -37,22 +40,19 @@ SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
             if (m_activeCancel) {
                 m_activeCancel->store(true, std::memory_order_release);
             }
-            if (m_pendingJob && m_pendingJob->isCancelled) {
-                m_pendingJob->isCancelled->store(
-                    true, std::memory_order_release);
-            }
-            m_pendingJob.reset();
+            for (auto& job : m_pendingJobs) job.isCancelled->store(true);
+            m_pendingJobs.clear();
         }
         m_workReady.notify_all();
         if (m_worker.joinable()) m_worker.join();
     }
 }
 
-SurfaceAdmissionStatus SurfaceDeterminationService::Start(
-    VtkImageGridSnapshot source,
-    SurfaceDeterminationStartParams params,
-    const std::size_t maxWorkingBytes,
-    const std::uint64_t requestId, RoiReadSnapshot roi)
+SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot source,
+                                                          SurfaceDeterminationStartParams params,
+                                                          const std::size_t maxWorkingBytes,
+                                                          const std::uint64_t requestId,
+                                                          SurfaceAlgorithmInputs inputs)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return SurfaceAdmissionStatus::Stopping;
@@ -62,31 +62,43 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
     }
     const std::size_t outstandingCount = m_complete.size()
         + (m_activeRequestId != 0 ? 1U : 0U)
-        + (m_pendingJob ? 1U : 0U);
+        + m_pendingJobs.size();
     if (outstandingCount >= completionLimit) {
         return SurfaceAdmissionStatus::Unavailable;
     }
 
     auto cancel = std::make_shared<std::atomic<bool>>(false);
-    Job nextJob{
-        std::move(source),
-        std::move(roi),
-        std::move(params),
-        maxWorkingBytes,
-        requestId,
-        std::move(cancel)
-    };
+    Job nextJob{std::move(inputs), std::move(source), std::move(params),
+                maxWorkingBytes,   requestId,         std::move(cancel)};
 
-    if (m_activeCancel) {
+    // 同通道替代，其余工件/用途保持 FIFO；分配成功后才取消旧任务。
+    const auto scope = nextJob.params.resultScope;
+    const auto purpose = SurfaceContract::GetPurpose(nextJob.params);
+    m_pendingJobs.push_back(std::move(nextJob));
+    if (m_activeCancel && m_activeScope == scope && m_activePurpose == purpose)
         m_activeCancel->store(true, std::memory_order_release);
+    for (auto item = m_pendingJobs.begin(); item != m_pendingJobs.end();) {
+        if (item->requestId != requestId && item->params.resultScope == scope
+            && SurfaceContract::GetPurpose(item->params) == purpose) {
+            m_complete.push_back(BuildCancelled(*item));
+            item = m_pendingJobs.erase(item);
+        }
+        else ++item;
     }
-    if (m_pendingJob) {
-        m_pendingJob->isCancelled->store(
-            true, std::memory_order_release);
-        m_complete.push_back(BuildCancelled(*m_pendingJob));
-        m_pendingJob.reset();
+    for (auto& complete : m_complete) {
+        if (complete.result.status == SurfaceResultStatus::Succeeded
+            && complete.result.resolvedParams.resultScope == scope
+            && SurfaceContract::GetPurpose(complete.result.resolvedParams) == purpose) {
+            complete.result.status = SurfaceResultStatus::Cancelled;
+            complete.result.failureReason = SurfaceFailureReason::Cancelled;
+            complete.result.points = {};
+            std::vector<SurfacePointRecord>().swap(complete.result.points);
+            std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
+            std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
+            std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
+            complete.result.requiredBytes = 0;
+        }
     }
-    m_pendingJob = std::move(nextJob);
     m_latestRequestId = requestId;
     m_progressPermille.store(0, std::memory_order_relaxed);
     m_progressStage.store(
@@ -108,9 +120,19 @@ bool SurfaceDeterminationService::StopRequest(
         m_activeCancel->store(true, std::memory_order_release);
         didStop = true;
     }
-    if (m_pendingJob && m_pendingJob->requestId == requestId) {
-        m_pendingJob->isCancelled->store(
-            true, std::memory_order_release);
+    for (auto& job : m_pendingJobs) if (job.requestId == requestId) {
+        job.isCancelled->store(true, std::memory_order_release);
+        didStop = true;
+    }
+    // 计算已完成但 owner 尚未消费时，仍允许取消尚未发布的候选。
+    for (auto& complete : m_complete) if (complete.requestId == requestId) {
+        complete.result.status = SurfaceResultStatus::Cancelled;
+        complete.result.failureReason = SurfaceFailureReason::Cancelled;
+        std::vector<SurfacePointRecord>().swap(complete.result.points);
+        std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
+        std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
+        std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
+        complete.result.requiredBytes = 0;
         didStop = true;
     }
     if (didStop) ++m_executionRevision;
@@ -136,19 +158,20 @@ FeatureOperationState SurfaceDeterminationService::GetExecutionState(const std::
         state.status = m_activeCancel && m_activeCancel->load()
             ? FeatureRunStatus::Stopping : FeatureRunStatus::Running;
     }
-    else if (m_pendingJob && m_pendingJob->requestId == requestId) {
-        state.status = m_pendingJob->isCancelled->load()
-            ? FeatureRunStatus::Stopping : FeatureRunStatus::Preparing;
+    else {
+        for (const auto& job : m_pendingJobs) if (job.requestId == requestId)
+            state.status = job.isCancelled->load() ? FeatureRunStatus::Stopping : FeatureRunStatus::Preparing;
     }
     return state;
 }
 
-std::optional<SurfaceJobComplete>
-SurfaceDeterminationService::GetComplete()
+std::optional<SurfaceJobComplete> SurfaceDeterminationService::GetComplete(const bool retainForPublication)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_complete.empty()) return std::nullopt;
     SurfaceJobComplete complete = std::move(m_complete.front());
+    if (retainForPublication)
+        m_handoffBytes = complete.result.requiredBytes;
     m_complete.erase(m_complete.begin());
     ++m_executionRevision;
     return complete;
@@ -178,7 +201,7 @@ SurfaceDeterminationService::GetProgress(
 bool SurfaceDeterminationService::GetIsBusy() const
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    return m_activeRequestId != 0 || m_pendingJob.has_value();
+    return m_activeRequestId != 0 || !m_pendingJobs.empty();
 }
 
 bool SurfaceDeterminationService::Stop(
@@ -191,11 +214,8 @@ bool SurfaceDeterminationService::Stop(
         if (m_activeCancel) {
             m_activeCancel->store(true, std::memory_order_release);
         }
-        if (m_pendingJob && m_pendingJob->isCancelled) {
-            m_pendingJob->isCancelled->store(
-                true, std::memory_order_release);
-        }
-        m_pendingJob.reset();
+        for (auto& job : m_pendingJobs) job.isCancelled->store(true);
+        m_pendingJobs.clear();
     }
     m_workReady.notify_all();
 
@@ -257,16 +277,30 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_workReady.wait(lock, [this] {
-                return m_isStopping || m_pendingJob.has_value();
+                return m_isStopping || !m_pendingJobs.empty();
             });
-            if (m_isStopping && !m_pendingJob) break;
-            job = std::move(*m_pendingJob);
-            m_pendingJob.reset();
+            if (m_isStopping && m_pendingJobs.empty()) break;
+            job = std::move(m_pendingJobs.front());
+            m_pendingJobs.pop_front();
+            m_activeScope = job.params.resultScope;
+            m_activePurpose = SurfaceContract::GetPurpose(job.params);
             m_activeRequestId = job.requestId;
             m_activeCancel = job.isCancelled;
             ++m_executionRevision;
         }
 
+        std::size_t available = job.maxWorkingBytes;
+        {
+            const std::lock_guard<std::mutex> lock(m_mutex);
+            const auto subtract = [&](std::size_t amount) {
+                available = amount >= available ? 0 : available - amount;
+            };
+            subtract(m_retainedBytes);
+            subtract(m_handoffBytes);
+            for (const auto &pending : m_complete)
+                if (pending.result.status == SurfaceResultStatus::Succeeded)
+                    subtract(pending.result.requiredBytes);
+        }
         SurfaceJobComplete complete;
         complete.requestId = job.requestId;
         if (job.isCancelled->load(std::memory_order_acquire)) {
@@ -274,22 +308,18 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         }
         else {
             complete.result = SurfaceDeterminationAlgorithm::BuildSurface(
-                job.source,
-                job.params,
-                job.maxWorkingBytes,
-                [cancel = job.isCancelled] {
-                    return cancel->load(std::memory_order_acquire);
-                },
-                [this, requestId = job.requestId](
-                    const SurfaceDeterminationStage stage,
-                    const double progress) {
+                job.source, job.params, available,
+                [cancel = job.isCancelled] { return cancel->load(std::memory_order_acquire); },
+                [this, requestId = job.requestId](const SurfaceDeterminationStage stage,
+                                                  const double progress) {
                     SetProgress(requestId, stage, progress);
-                }, job.roi);
+                },
+                job.inputs);
         }
 
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
-            if (job.requestId != m_latestRequestId
+            if (job.isCancelled->load(std::memory_order_acquire)
                 && complete.result.status
                     == SurfaceResultStatus::Succeeded) {
                 complete = BuildCancelled(job);
@@ -311,4 +341,12 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         m_hasExited = true;
     }
     m_workerExited.notify_all();
+}
+
+void SurfaceDeterminationService::SetRetainedBytes(const std::size_t bytes, const bool releaseHandoff)
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_retainedBytes = bytes;
+    if (releaseHandoff)
+        m_handoffBytes = 0;
 }

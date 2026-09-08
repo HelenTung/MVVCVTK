@@ -26,6 +26,23 @@ using Point3 = std::array<double, 3>;
 using ScalarField = std::function<double(const Point3&)>;
 using ValidityField = std::function<bool(const Point3&)>;
 
+inline RoiReadSnapshot BuildRoi(const VtkImageGridSnapshot& source,const std::array<double,6>& bounds)
+{
+    DataGraphStore store;
+    RoiNode node;
+    for (int a=0;a<3;++a) {
+        node.primitive.localToSource[a*4+a]=(bounds[a*2+1]-bounds[a*2])*0.5;
+        node.primitive.localToSource[a*4+3]=(bounds[a*2+1]+bounds[a*2])*0.5;
+    }
+    RoiDefinition definition{source->data->self,{node}};
+    const DataRevisionRef ref{store.CreateDataEntityId(),1};
+    DataTransaction transaction;
+    transaction.outputs={{source->data->self.entityId,0,DataTypes::imageGrid3D,{},source->data->payload},
+        {ref.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition)}};
+    const auto committed=store.SetDataCommit(transaction);
+    return RoiEvaluator::GetRoi(committed.graph,ref,source->data->self).roi;
+}
+
 struct Checks final {
     int failureCount = 0;
 
@@ -202,14 +219,7 @@ inline SurfaceDeterminationStartParams GetParams(
 
 inline bool GetPointAccepted(const SurfacePointRecord& point)
 {
-    constexpr SurfacePointFlags rejected =
-        SurfacePointFlags::LowContrast
-        | SurfacePointFlags::InvalidSupport
-        | SurfacePointFlags::ProfileClipped
-        | SurfacePointFlags::ExcessiveOffset
-        | SurfacePointFlags::FitRejected
-        | SurfacePointFlags::TriangleFlipRisk;
-    return (point.flags & rejected) == SurfacePointFlags::None;
+    return point.flags == SurfacePointFlags::None;
 }
 
 } // namespace SurfaceTest
