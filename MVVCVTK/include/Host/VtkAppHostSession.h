@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/ImageReadTypes.h"
+#include "Data/RoiTypes.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/Types/HostSessionTypes.h"
 
@@ -100,6 +101,18 @@ public:
     ImageReadAdmission StartImageRead(
         ImageReadRequest request,
         ImageReadCallback onComplete);
+    // Running/owner thread 的有界同步 ROI 事务；成功返回正式修订。
+    RoiResult SetRoi(const RoiRequest& request);
+    std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
+    std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
+    // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
+    // 同步复制最多 8 MiB 工作集；超限明确拒绝，不在 owner thread 扫整卷。
+    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey,
+        std::size_t maxBytes = roiCopyLimit);
+    RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision,
+        std::size_t maxBytes = roiCopyLimit);
+
     // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
     std::optional<LabelMapDescriptor> GetLabelMapDescriptor(

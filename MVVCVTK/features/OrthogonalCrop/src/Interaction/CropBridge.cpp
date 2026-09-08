@@ -120,17 +120,20 @@ public:
     bool GetCropActive() const;
     bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
+    std::optional<std::vector<CropOpItem>> GetCropOperations() const;
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
     bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropCandidateCallback onComplete);
+        CropCandidateCallback onComplete, RoiReadSnapshot roi = {});
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();
     bool GetLeaseReady() const;
 
 private:
+    bool StartBuildTask(std::packaged_task<CropMaterializationCandidate()> task,
+        CropBuildParams params, std::shared_ptr<std::atomic<bool>> isCancelled, CropCandidateCallback onComplete);
     bool StartViewInput(
         const CropViewRequest& request,
         std::optional<CropInputSnapshot> input);
@@ -1482,7 +1485,7 @@ CropMaterializationCandidate CropBridge::Impl::BuildResultFailure(
 
 bool CropBridge::Impl::BuildCropResult(
     CropInputSnapshot input,
-    CropCandidateCallback onComplete)
+    CropCandidateCallback onComplete, RoiReadSnapshot roi)
 {
     if (!onComplete) {
         return false;
@@ -1507,6 +1510,13 @@ bool CropBridge::Impl::BuildCropResult(
             CropFailure::Busy,
             "A crop result build is already running."));
         return false;
+    }
+    if (roi) {
+        if (m_hasDrag || m_pendingShader || m_pendingMode) return false;
+        params.operations.clear(); params.nodeCount=0;
+        auto isCancelled=std::make_shared<std::atomic<bool>>(false);
+        auto task=m_buildRouter.BuildRoiTask(input,std::move(roi),[isCancelled]{return isCancelled->load(std::memory_order_acquire);});
+        return task && StartBuildTask(std::move(*task),std::move(params),std::move(isCancelled),std::move(onComplete));
     }
     if (m_pendingShader
         || m_pendingMode
@@ -1563,15 +1573,21 @@ bool CropBridge::Impl::BuildCropResult(
         return false;
     }
 
+    return StartBuildTask(std::move(*task),std::move(params),std::move(isCancelled),std::move(onComplete));
+}
+
+bool CropBridge::Impl::StartBuildTask(std::packaged_task<CropMaterializationCandidate()> task,
+    CropBuildParams params, std::shared_ptr<std::atomic<bool>> isCancelled, CropCandidateCallback onComplete)
+{
     BuildTask active;
     active.isCancelled = std::move(isCancelled);
-    active.result = task->get_future().share();
+    active.result = task.get_future().share();
     active.callback = std::move(onComplete);
     active.params = std::move(params);
     active.phase = std::make_shared<std::atomic<std::uint64_t>>(1);
     try {
         active.worker = std::thread(
-            [task = std::move(*task), phase = active.phase, onWork = onWorkAvailable]() mutable {
+            [task = std::move(task), phase = active.phase, onWork = onWorkAvailable]() mutable {
                 phase->store(2, std::memory_order_release);
                 task();
                 phase->store(3, std::memory_order_release);
@@ -2064,12 +2080,12 @@ bool CropBridge::SendShaderCommit()
 }
 bool CropBridge::BuildCropResult(
     CropInputSnapshot rootInput,
-    CropCandidateCallback onComplete)
+    CropCandidateCallback onComplete, RoiReadSnapshot roi)
 {
     return m_impl->GetLeaseReady()
         && m_impl->BuildCropResult(
         std::move(rootInput),
-        std::move(onComplete));
+        std::move(onComplete), std::move(roi));
 }
 bool CropBridge::GetBuildTickNeeded() const
 {
@@ -2085,4 +2101,15 @@ bool CropBridge::SendBuildResult()
 void CropBridge::SetWorkAvailable(std::function<void()> onWorkAvailable)
 {
     m_impl->onWorkAvailable = std::move(onWorkAvailable);
+}
+
+std::optional<std::vector<CropOpItem>> CropBridge::Impl::GetCropOperations() const
+{
+    const auto count=m_baseNodeCount+m_cursor;
+    if (m_buildTask || m_pendingShader || m_pendingMode || m_hasDrag || count==0 || count>m_allHistory.size()) return {};
+    return std::vector<CropOpItem>(m_allHistory.begin(),m_allHistory.begin()+count);
+}
+std::optional<std::vector<CropOpItem>> CropBridge::GetCropOperations() const
+{
+    return m_impl ? m_impl->GetCropOperations():std::nullopt;
 }

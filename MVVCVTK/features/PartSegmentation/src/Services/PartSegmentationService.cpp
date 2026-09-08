@@ -593,10 +593,11 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
                 PartEditInput editInput;
                 editInput.volume = volume;
                 editInput.coordinateFrame = geometry.coordinateFrame;
+                editInput.sourceRevision = job.source->data->self;
                 editInput.previous = job.previous;
                 editInput.request = job.edit->request;
-                editInput.roiMask = job.edit->roiMask;
-                editInput.protectionMask = job.edit->protectionMask;
+                editInput.editRoi = job.edit->editRoi;
+                editInput.protectionRoi = job.edit->protectionRoi;
                 editInput.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
                 edited = PartLabelEditor::BuildLabels(editInput, m_identities, getStopped);
             }

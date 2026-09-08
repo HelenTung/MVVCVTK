@@ -111,17 +111,7 @@ bool GetStartValid(const SurfaceDeterminationStartParams& params)
             [](const double value) { return std::isfinite(value); })) {
         return false;
     }
-    if (params.roiModelBounds) {
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const double minimum = (*params.roiModelBounds)[axis * 2];
-            const double maximum = (*params.roiModelBounds)[axis * 2 + 1];
-            if (!std::isfinite(minimum)
-                || !std::isfinite(maximum)
-                || minimum >= maximum) {
-                return false;
-            }
-        }
-    }
+    if (params.analysisRoi && !GetDataRevisionRefValid(*params.analysisRoi)) return false;
     return true;
 }
 
@@ -293,6 +283,7 @@ private:
     void SetTransientResult(const RequestEntry& request, SurfaceAlgorithmResult& result, std::uint64_t requestId);
     bool ClearPreview();
     std::shared_ptr<const SurfaceGenerationSnapshot> GetDisplayGeneration() const;
+    bool GetRoiCurrent(const RoiReadSnapshot& roi, DataPublishPolicy policy) const;
     std::vector<HostFeatureView> GetTargetViews(
         const HostViewTargets& targets) const;
     static std::vector<std::string> GetViewIds(
@@ -527,6 +518,16 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         }
         const auto graph = m_data->GetDataGraph();
         SurfaceAlgorithmInputs inputs;
+        if (params.analysisRoi) {
+            const auto resolved = m_data->GetRoi(graph, *params.analysisRoi, source->data->self);
+            if (resolved.error != RoiError::None || !resolved.roi) return admission;
+            inputs.roi = resolved.roi;
+            if (inputs.roi->GetClipPlanes().error != RoiError::None) {
+                admission.status = SurfaceAdmissionStatus::UnsupportedRoi;
+                return admission;
+            }
+            if (!GetRoiCurrent(inputs.roi, params.sourcePolicy)) return admission;
+        }
         if (params.materialLabels)
             inputs.materialLabels = m_data->GetData(graph, *params.materialLabels);
         if (params.initialSurface)
@@ -583,6 +584,14 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         requestItem->second.operation.operation = {
             std::string(featureId), m_host->GetAttachmentId(), requestId };
         requestItem->second.operation.inputs = { { "source-volume", source->data->self } };
+        if (inputs.roi) {
+            auto& operationInputs = requestItem->second.operation.inputs;
+            operationInputs.push_back({"analysis-roi", inputs.roi->GetRevision()});
+            std::size_t index = 0;
+            for (const auto& ref : inputs.roi->GetDependencies())
+                if (ref != inputs.roi->GetRevision() && ref != source->data->self)
+                    operationInputs.push_back({"analysis-roi.input-" + std::to_string(index++), ref});
+        }
         if (inputs.materialLabels)
             requestItem->second.operation.inputs.push_back({"material-labels", inputs.materialLabels->self});
         if (inputs.initialSurface)
@@ -690,6 +699,24 @@ SurfaceDeterminationHostFeature::Impl::GetNextRequestId() noexcept
     return requestId == 0 ? m_nextRequestId++ : requestId;
 }
 
+bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot& roi, const DataPublishPolicy policy) const
+{
+    if (!roi) return true;
+    if (!m_data) return false;
+    const auto graph=m_data->GetDataGraph();
+    auto dependencies = roi->GetDependencies();
+    dependencies.push_back(roi->GetRevision());
+    for (const auto& ref:dependencies) {
+        if (!m_data->GetData(graph, ref)) return false;
+        if (policy == DataPublishPolicy::AllowHistoricalResult) continue;
+        DataQuery query; query.entityId=ref.entityId;
+        DataGeneration head=0;
+        for (const auto& item:m_data->GetDataQuery(graph,query).data) if (item) head=std::max(head,item->self.generation);
+        if (head!=ref.generation) return false;
+    }
+    return true;
+}
+
 bool SurfaceDeterminationHostFeature::Impl::GetSourceSame(
     const VtkImageGridSnapshot& source, const DataPublishPolicy policy) const
 {
@@ -734,7 +761,8 @@ std::size_t SurfaceDeterminationHostFeature::Impl::GetRetainedBytes() const
 
 bool SurfaceDeterminationHostFeature::Impl::GetRequestInputsSame(const RequestEntry &request) const
 {
-    if (!GetSourceSame(request.source, request.params.sourcePolicy))
+    if (!GetSourceSame(request.source, request.params.sourcePolicy)
+        || !GetRoiCurrent(request.inputs.roi, request.params.sourcePolicy))
         return false;
     const auto graph = m_data->GetDataGraph();
     for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
@@ -759,7 +787,7 @@ SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagno
         result.message = "Surface generation or point is unavailable.";
         return result;
     }
-    if (generation->algorithmRevision != 3)
+    if (generation->algorithmRevision != 4)
     {
         SurfaceProfileDiagnostic result;
         result.message = "Surface algorithm revision is incompatible with diagnostic replay.";
@@ -767,6 +795,9 @@ SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagno
     }
     const auto graph = m_data->GetDataGraph();
     SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.analysisRoi)
+        inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
+                                  generation->sourceRevision).roi;
     if (generation->resolvedParams.materialLabels)
         inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
     if (generation->resolvedParams.initialSurface)
@@ -796,7 +827,7 @@ SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
         state.message = "Surface mesh is unavailable.";
         return state;
     }
-    if (generation->algorithmRevision != 3 ||
+    if (generation->algorithmRevision != 4 ||
         !SurfaceRecipeCodec::GetError(generation->resolvedParams).empty())
     {
         state.status = SurfaceRestoreStatus::IncompatibleRecipe;
@@ -817,11 +848,15 @@ SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
             return state;
         }
     SurfaceAlgorithmInputs inputs;
+    if (generation->resolvedParams.analysisRoi)
+        inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
+                                  generation->sourceRevision).roi;
     if (generation->resolvedParams.materialLabels)
         inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
     if (generation->resolvedParams.initialSurface)
         inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
-    if ((generation->resolvedParams.materialLabels && !inputs.materialLabels) ||
+    if ((generation->resolvedParams.analysisRoi && !inputs.roi) ||
+        (generation->resolvedParams.materialLabels && !inputs.materialLabels) ||
         (generation->resolvedParams.initialSurface && !inputs.initialSurface))
     {
         state.status = SurfaceRestoreStatus::MissingInput;
@@ -1581,15 +1616,14 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     transaction.policy = request.params.sourcePolicy;
     const bool isHistorical = request.params.sourcePolicy == DataPublishPolicy::AllowHistoricalResult;
     if (!isHistorical) {
-        for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
-            if (input)
-            {
-                DataExpectation expectation;
-                expectation.kind = DataExpectationKind::EntityHead;
-                expectation.entityId = input->self.entityId;
-                expectation.expectedGeneration = input->self.generation;
-                transaction.expectations.push_back(expectation);
-            }
+        for (const auto& input : request.operation.inputs) {
+            if (input.source == request.source->data->self) continue;
+            DataExpectation expectation;
+            expectation.kind = DataExpectationKind::EntityHead;
+            expectation.entityId = input.source.entityId;
+            expectation.expectedGeneration = input.source.generation;
+            transaction.expectations.push_back(expectation);
+        }
         DataExpectation sourceExpected;
         sourceExpected.kind = DataExpectationKind::EntityHead;
         sourceExpected.entityId = request.source->data->self.entityId;
@@ -1696,6 +1730,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
 FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
 {
     return {{{"source-volume", DataFacets::scalarGrid3D, true},
+             {"analysis-roi", DataFacets::roiGeometry, false},
              {"material-labels", DataFacets::labelMap3D, false},
              {"initial-surface", DataFacets::surfaceMesh, false}},
             {{"mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},

@@ -2,17 +2,19 @@
 
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Data/DataPayloads.h"
+#include "Host/RoiReadTypes.h"
 #include "Model/PartLineageMatcher.h"
 
 std::optional<std::size_t> GetPartEditBytes(const PartEditRequest& request);
 
 struct PartEditInput final {
     PartVolumeView volume;
+    DataRevisionRef sourceRevision;
     std::string coordinateFrame = "RAS";
     PartHistorySnapshot previous;
     PartEditRequest request;
-    std::shared_ptr<const LabelMap3DPayload> roiMask;
-    std::shared_ptr<const LabelMap3DPayload> protectionMask;
+    RoiReadSnapshot editRoi;
+    RoiReadSnapshot protectionRoi;
     std::size_t maxWorkingBytes = 0;
 };
 

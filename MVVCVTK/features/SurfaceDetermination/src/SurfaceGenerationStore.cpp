@@ -2,6 +2,7 @@
 #include "SurfaceContracts.h"
 
 #include <utility>
+#include <algorithm>
 
 void SurfaceGenerationStore::SetDataPort(std::weak_ptr<TrustedDataReadPort> data)
 {

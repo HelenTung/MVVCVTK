@@ -2,6 +2,7 @@
 
 #include "Data/DataGraphTypes.h"
 #include "Data/ImageReadTypes.h"
+#include "Data/RoiTypes.h"
 
 #include <algorithm>
 #include <array>
@@ -27,7 +28,8 @@ inline const DataTypeId surfaceMesh{
 inline const DataTypeId recordTable{
     "org.mvvcvtk.record-table", 1 };
 inline const DataTypeId roiGeometry{
-    "org.mvvcvtk.roi-geometry", 1 };
+    "org.mvvcvtk.roi-geometry", roiSchemaVersion };
+inline const DataTypeId roiCatalog{ "org.mvvcvtk.roi-catalog", 1 };
 inline const DataTypeId transform3D{
     "org.mvvcvtk.transform-3d", 1 };
 inline const DataTypeId dataCollection{
@@ -534,77 +536,57 @@ private:
     std::vector<RecordColumn> m_columns;
 };
 
-enum class RoiShape : std::uint8_t {
-    Box,
-    Plane,
-    Polyline,
-    Contour,
-    MaskReference
-};
-
-struct RoiPrimitive final {
-    RoiShape shape = RoiShape::Box;
-    std::array<double, 16> localToSource = {
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0
-    };
-    std::array<double, 3> origin = { 0.0, 0.0, 0.0 };
-    std::array<double, 3> normal = { 0.0, 0.0, 1.0 };
-    std::vector<std::array<double, 3>> points;
-    std::optional<DataRevisionRef> mask;
-    std::string operation;
-};
-
 class RoiGeometryPayload final : public IDataPayload {
 public:
-    explicit RoiGeometryPayload(std::vector<RoiPrimitive> primitives)
-        : m_primitives(std::move(primitives))
-    {
-    }
+    explicit RoiGeometryPayload(RoiDefinition definition)
+        : m_definition(std::move(definition)) {}
     DataTypeId GetDataType() const override { return DataTypes::roiGeometry; }
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
-        try {
-            return std::make_shared<const RoiGeometryPayload>(m_primitives);
-        }
-        catch (...) {
-            return {};
-        }
+        try { return std::make_shared<const RoiGeometryPayload>(m_definition); }
+        catch (...) { return {}; }
     }
-    const std::vector<RoiPrimitive>& GetPrimitives() const noexcept
-    {
-        return m_primitives;
-    }
+    const RoiDefinition& GetDefinition() const noexcept { return m_definition; }
+    // 这里只检查封装；完整局部/关系校验由 Store 的 Host 私有求值器执行。
     bool GetValid() const noexcept
     {
-        if (m_primitives.empty()) return false;
-        for (const auto& primitive : m_primitives) {
-            if (primitive.operation.empty()
-                || !std::all_of(
-                    primitive.localToSource.begin(),
-                    primitive.localToSource.end(),
-                    [](const double value) { return std::isfinite(value); })
-                || !std::all_of(
-                    primitive.origin.begin(), primitive.origin.end(),
-                    [](const double value) { return std::isfinite(value); })
-                || !std::all_of(
-                    primitive.normal.begin(), primitive.normal.end(),
-                    [](const double value) { return std::isfinite(value); })) {
-                return false;
-            }
-            if (primitive.shape == RoiShape::MaskReference
-                && (!primitive.mask
-                    || !GetDataRevisionRefValid(*primitive.mask))) {
-                return false;
-            }
+        return GetDataRevisionRefValid(m_definition.source)
+            && !m_definition.nodes.empty() && m_definition.nodes.size() <= roiNodeLimit;
+    }
+private:
+    RoiDefinition m_definition;
+};
+
+struct RoiCatalogEntry final {
+    DataRevisionRef geometry;
+    RoiMetadata metadata;
+};
+
+class RoiCatalogPayload final : public IDataPayload {
+public:
+    explicit RoiCatalogPayload(std::vector<RoiCatalogEntry> entries)
+        : m_entries(std::move(entries)) {}
+    DataTypeId GetDataType() const override { return DataTypes::roiCatalog; }
+    std::shared_ptr<const IDataPayload> CreateSnapshot() const override
+    {
+        try { return std::make_shared<const RoiCatalogPayload>(m_entries); }
+        catch (...) { return {}; }
+    }
+    const std::vector<RoiCatalogEntry>& GetEntries() const noexcept { return m_entries; }
+    bool GetValid() const noexcept
+    {
+        if (m_entries.size() > roiCatalogLimit) return false;
+        for (std::size_t i = 0; i < m_entries.size(); ++i) {
+            const auto& entry = m_entries[i];
+            if (!GetDataRevisionRefValid(entry.geometry)
+                || entry.metadata.name.empty() || entry.metadata.name.size() > 256
+                || entry.metadata.group.size() > 256 || entry.metadata.description.size() > 4096
+                || (i && !(m_entries[i - 1].geometry.entityId < entry.geometry.entityId))) return false;
         }
         return true;
     }
-
 private:
-    std::vector<RoiPrimitive> m_primitives;
+    std::vector<RoiCatalogEntry> m_entries;
 };
 
 class Transform3DPayload final : public IDataPayload {
@@ -812,6 +794,16 @@ inline std::vector<DataTypeDescriptor> GetBuiltInDataTypes()
                     dynamic_cast<const RoiGeometryPayload*>(&payload);
                 if (!roi || !roi->GetValid()) {
                     message = "RoiGeometry payload is invalid.";
+                    return false;
+                }
+                return true;
+            } },
+        DataTypeDescriptor{
+            DataTypes::roiCatalog, {},
+            [](const IDataPayload& payload, std::string& message) {
+                const auto* catalog = dynamic_cast<const RoiCatalogPayload*>(&payload);
+                if (!catalog || !catalog->GetValid()) {
+                    message = "RoiCatalog payload is invalid.";
                     return false;
                 }
                 return true;
