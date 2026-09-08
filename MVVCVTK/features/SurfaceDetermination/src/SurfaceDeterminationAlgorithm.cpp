@@ -36,7 +36,7 @@ namespace {
 
 using Point3 = std::array<double, 3>;
 
-constexpr std::uint32_t algorithmRevision = 3;
+constexpr std::uint32_t algorithmRevision = 4;
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
@@ -139,7 +139,8 @@ struct ResolvedParams final : SurfaceLocalParams
     bool isAutomaticIso = false;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::optional<Point3> seedModelPoint;
-    std::optional<std::array<double, 6>> roiModelBounds;
+    RoiReadSnapshot roi;
+    std::vector<RoiPlane> clipPlanes;
     std::uint64_t minimumObjectVoxels = 1;
     double sharpCornerAngleDeg = 75.0;
     std::vector<SurfaceRegionOverride> regionOverrides;
@@ -509,34 +510,6 @@ SurfaceFailureReason BuildVolumeView(
     return SurfaceFailureReason::None;
 }
 
-bool GetBoundsValid(const std::array<double, 6>& bounds)
-{
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double minimum = bounds[axis * 2];
-        const double maximum = bounds[axis * 2 + 1];
-        if (!std::isfinite(minimum)
-            || !std::isfinite(maximum)
-            || minimum >= maximum) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool GetPointInBounds(
-    const Point3& point,
-    const std::array<double, 6>& bounds,
-    const double tolerance = 0.0)
-{
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        if (point[axis] < bounds[axis * 2] - tolerance
-            || point[axis] > bounds[axis * 2 + 1] + tolerance) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::array<double, 6> GetDataBounds(const ImageGeometry& geometry)
 {
     std::array<double, 6> bounds{
@@ -803,7 +776,7 @@ bool GetVoxelUsed(
     const std::size_t tupleIndex)
 {
     if (volume.validity && volume.validity[tupleIndex] == 0) return false;
-    if (!params.roiModelBounds) return true;
+    if (!params.roi) return true;
     const Point3 point = GetModelPoint(
         volume.geometry,
         Point3{
@@ -811,7 +784,7 @@ bool GetVoxelUsed(
             static_cast<double>(y),
             static_cast<double>(z)
         });
-    return GetPointInBounds(point, *params.roiModelBounds);
+    return params.roi->GetContains(point);
 }
 
 SurfaceFailureReason GetAutomaticIso(
@@ -1045,7 +1018,7 @@ SurfaceFailureReason ResolveParams(
     params.method = input.method;
     params.componentSelection = input.componentSelection;
     params.seedModelPoint = input.seedModelPoint;
-    params.roiModelBounds = input.roiModelBounds;
+
     params.minimumObjectVoxels = input.minimumObjectVoxels;
     params.minimumContrast = input.minimumContrast;
     if (params.minimumObjectVoxels == 0
@@ -1067,12 +1040,12 @@ SurfaceFailureReason ResolveParams(
             }
         }
     }
-    if (params.roiModelBounds) {
-        if (!GetBoundsValid(*params.roiModelBounds)
-            || !GetBoundsIntersect(
-                *params.roiModelBounds,
-                GetDataBounds(volume.geometry))) {
-            message = "Surface ROI does not intersect the source data.";
+    if (params.roi) {
+        const auto planes=params.roi->GetClipPlanes();
+        if (planes.error!=RoiError::None) return SurfaceFailureReason::UnsupportedRoi;
+        params.clipPlanes=planes.planes;
+        if (!GetBoundsIntersect(params.roi->GetBounds(),GetDataBounds(volume.geometry))) {
+            message="Surface ROI does not intersect the source data.";
             return SurfaceFailureReason::InvalidRoi;
         }
     }
@@ -1535,17 +1508,13 @@ bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, con
     Point3 normal = initialNormal, current = initialPoint, gradient{};
     double magnitude = 0;
     auto params = GetLocalParams(global, initialPoint, record.overrideIndex);
-    if (global.roiModelBounds)
-        for (unsigned axis = 0; axis < 3; ++axis)
-        {
-            const auto low = (*global.roiModelBounds)[2 * axis],
-                       high = (*global.roiModelBounds)[2 * axis + 1];
-            const auto tolerance =
-                32 * std::numeric_limits<double>::epsilon() * std::max({1.0, std::abs(low), std::abs(high)});
-            if (std::abs(initialPoint[axis] - low) <= tolerance ||
-                std::abs(initialPoint[axis] - high) <= tolerance)
-                record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
-        }
+    if (global.roi) {
+        const auto tolerance = 32 * std::numeric_limits<double>::epsilon()
+            * std::max({1.0, std::abs(initialPoint[0]), std::abs(initialPoint[1]), std::abs(initialPoint[2])});
+        const auto distance = global.roi->GetBoundaryDistance(initialPoint);
+        if (std::isfinite(distance) && distance <= tolerance)
+            record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
+    }
     if (!params.materials && GetGradient(volume, current, gradient, magnitude) && Normalize(gradient))
     {
         double sign = -1;
@@ -1613,7 +1582,7 @@ bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, con
         if (record.flags != SurfacePointFlags::None)
             break;
         const auto next = Add(current, Scale(normal, fit.offset));
-        if (global.roiModelBounds && !GetPointInBounds(next, *global.roiModelBounds))
+        if (global.roi && !global.roi->GetContains(next))
         {
             record.flags |= SurfacePointFlags::RoiBoundary;
             break;
@@ -1686,20 +1655,9 @@ bool GetPointAtDataBoundary(
     return false;
 }
 
-bool GetPointAtRoiBoundary(
-    const std::optional<std::array<double, 6>>& bounds,
-    const Point3& point,
-    const double tolerance)
+bool GetPointAtRoiBoundary(const RoiReadSnapshot& roi, const Point3& point, double tolerance)
 {
-    if (!bounds) return false;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        if (std::abs(point[axis] - (*bounds)[axis * 2]) <= tolerance
-            || std::abs(point[axis] - (*bounds)[axis * 2 + 1])
-                <= tolerance) {
-            return true;
-        }
-    }
-    return false;
+    return roi && roi->GetBoundaryDistance(point)<=tolerance;
 }
 
 void SetTriangleFlipFlags(const std::vector<Point3> &originalPoints, const std::vector<Point3> &refinedPoints,
@@ -1818,7 +1776,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
         if (GetSurfaceFlag(record.flags, SurfacePointFlags::ProfileClipped) ||
             GetSurfaceFlag(record.flags, SurfacePointFlags::RoiBoundary) ||
             GetPointAtDataBoundary(volume.geometry, record.positionModel, boundaryTolerance) ||
-            GetPointAtRoiBoundary(params.roiModelBounds, record.positionModel, boundaryTolerance))
+            GetPointAtRoiBoundary(params.roi, record.positionModel, boundaryTolerance))
         {
             isTruncated = true;
             ++result.truncatedPointCount;
@@ -1845,7 +1803,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
             CheckCancellation(cancellationBatch, cancelled);
             isValid = isValid && SurfaceContract::GetPointValid(records[id], params.method)
                 && !GetPointAtDataBoundary(volume.geometry, records[id].positionModel, boundaryTolerance)
-                && !GetPointAtRoiBoundary(params.roiModelBounds, records[id].positionModel, boundaryTolerance);
+                && !GetPointAtRoiBoundary(params.roi, records[id].positionModel, boundaryTolerance);
         }
         if (std::isfinite(area)) { totalArea += area; if (isValid) validArea += area; }
         hasCompleteSupport = hasCompleteSupport && isValid;
@@ -1908,6 +1866,16 @@ SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
 {
     const auto *image = dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get());
     const auto &geometry = image->GetGeometry();
+    if (params.analysisRoi.has_value() != static_cast<bool>(inputs.roi)
+        || (inputs.roi && (inputs.roi->GetRevision() != *params.analysisRoi
+                           || inputs.roi->GetSource() != source->data->self))) {
+        message = "Surface ROI snapshot does not match the request/source.";
+        return SurfaceFailureReason::InvalidRoi;
+    }
+    if (inputs.roi && inputs.roi->GetClipPlanes().error != RoiError::None) {
+        message = "Surface requires a convex ROI with exact clipping planes.";
+        return SurfaceFailureReason::UnsupportedRoi;
+    }
     const auto matches = [&](const DataSnapshot &snapshot, const std::optional<DataRevisionRef> &expected) {
         return snapshot && expected && snapshot->self == *expected &&
                std::any_of(snapshot->inputs.begin(), snapshot->inputs.end(), [&](const auto &input) {
@@ -2033,6 +2001,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         return fail(SurfaceFailureReason::BudgetExceeded, "Surface fixed workspace exceeds the budget.");
     SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
+    params.roi = inputs.roi;
     reason = ResolveParams(volume, inputParams, getCancelled, params, result.message);
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
@@ -2055,6 +2024,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     AddFingerprint(result.parameterFingerprint, algorithmRevision);
     for (const unsigned char c : SurfaceRecipeCodec::BuildText(resolved))
         AddFingerprint(result.parameterFingerprint, c);
+    AddFingerprint(result.parameterFingerprint, params.roi ? 1U : 0U);
+    if (params.roi) {
+        AddFingerprint(result.parameterFingerprint, roiSchemaVersion);
+        for (const auto byte : params.roi->GetRevision().entityId.bytes)
+            AddFingerprint(result.parameterFingerprint, byte);
+        AddFingerprint(result.parameterFingerprint, params.roi->GetRevision().generation);
+    }
     if (inputParams.method == SurfaceDeterminationMethod::AutomaticIso50)
     {
         if (!params.isoEstimate)
@@ -2135,7 +2111,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
                      0.1 + 0.8 * pairIndex / pairCount);
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
-            grid, params.initialIsoValue, params.materials, params.roiModelBounds, halo,
+            grid, params.initialIsoValue, params.materials, params.roi, halo,
             inputParams.seedBlockDepth, maxWorkingBytes - retained - profileBytes, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
@@ -2310,6 +2286,7 @@ SurfaceProfileDiagnostic SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
             return diagnostic;
         }
         ResolvedParams params;
+        params.roi = inputs.roi;
         if (ResolveParams(volume, resolved, {}, params, diagnostic.message) != SurfaceFailureReason::None)
             return diagnostic;
         if (!resolved.materialPairs.empty())

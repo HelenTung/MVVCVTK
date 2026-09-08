@@ -79,7 +79,6 @@ void WriteRecipe(std::ostream &out, const SurfaceRecipe &p)
     out << unsigned(p.method) << ' ' << unsigned(p.componentSelection) << ' ';
     WriteValue(out, p.initialIsoValue);
     WriteArray(out, p.seedModelPoint);
-    WriteArray(out, p.roiModelBounds);
     WriteValue(out, p.profileHalfLengthModel);
     WriteValue(out, p.profileSampleStepModel);
     WriteValue(out, p.maximumOffsetModel);
@@ -125,7 +124,7 @@ bool ReadRecipe(std::istream &in, SurfaceRecipe &p)
     p.method = static_cast<SurfaceDeterminationMethod>(method);
     p.componentSelection = static_cast<SurfaceComponentSelection>(selection);
     if (!ReadValue(in, p.initialIsoValue) || !ReadArray(in, p.seedModelPoint) ||
-        !ReadArray(in, p.roiModelBounds) || !ReadValue(in, p.profileHalfLengthModel) ||
+        !ReadValue(in, p.profileHalfLengthModel) ||
         !ReadValue(in, p.profileSampleStepModel) || !ReadValue(in, p.maximumOffsetModel) ||
         !ReadValue(in, p.profileSmoothingSigmaModel) ||
         !(in >> p.minimumObjectVoxels >> p.minimumContrast >> p.seedFraction >> p.localFraction >> gray) ||
@@ -212,8 +211,6 @@ std::string SurfaceRecipeCodec::GetError(const SurfaceRecipe &p)
         !std::isfinite(p.sharpCornerAngleDeg) || p.sharpCornerAngleDeg <= 0 || p.sharpCornerAngleDeg > 180 ||
         !std::isfinite(p.maximumNormalTurnDeg) || p.maximumNormalTurnDeg <= 0 || p.maximumNormalTurnDeg > 180)
         return "Invalid quality or normal-turn limit.";
-    if (p.roiModelBounds && !GetBoundsValid(*p.roiModelBounds))
-        return "Invalid model ROI.";
     if (p.componentSelection == SurfaceComponentSelection::Seeded && !p.seedModelPoint)
         return "Seeded selection needs a model point.";
     if (p.seedModelPoint && !std::all_of(p.seedModelPoint->begin(), p.seedModelPoint->end(),
@@ -280,7 +277,7 @@ std::string SurfaceRecipeCodec::BuildText(const SurfaceRecipe &recipe)
         return {};
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << std::setprecision(std::numeric_limits<double>::max_digits10) << "surface-recipe 1\n";
+    out << std::setprecision(std::numeric_limits<double>::max_digits10) << "surface-recipe 2\n";
     WriteRecipe(out, recipe);
     return out.str();
 }
@@ -294,7 +291,7 @@ SurfaceRecipeReadResult SurfaceRecipeCodec::GetRecipe(const std::string_view tex
     std::string tag;
     unsigned version = 0;
     SurfaceRecipe recipe;
-    if (!(in >> tag >> version) || tag != "surface-recipe" || version != 1)
+    if (!(in >> tag >> version) || tag != "surface-recipe" || version != 2)
         return {{}, "Unsupported recipe schema."};
     if (!ReadRecipe(in, recipe))
         return {{}, "Malformed recipe."};

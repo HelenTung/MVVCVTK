@@ -55,8 +55,8 @@ struct PartEditJob final {
     VtkImageGridSnapshot source;
     PartHistorySnapshot previous;
     PartEditRequest request;
-    std::shared_ptr<const LabelMap3DPayload> roiMask;
-    std::shared_ptr<const LabelMap3DPayload> protectionMask;
+    RoiReadSnapshot editRoi;
+    RoiReadSnapshot protectionRoi;
     PartHistorySnapshot restored;
     std::shared_ptr<const LabelMap3DPayload> restoredPayload;
     std::size_t maxWorkingBytes = 0;

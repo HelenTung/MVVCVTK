@@ -645,6 +645,35 @@ bool StartRouterTaskCase()
         "Router should reject params/snapshot revision mismatch before worker creation.") && isPassed;
     return isPassed;
 }
+bool StartPublicRoiExtentCase()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();
+    image->SetExtent(10,12,-4,-3,7,8); image->SetSpacing(.5,2,3); image->SetOrigin(1,2,3);
+    const double direction[9]={0,-1,0,1,0,0,0,0,1}; image->SetDirectionMatrix(direction);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* values=static_cast<unsigned char*>(image->GetScalarPointer());
+    for (int i=0;i<12;++i) values[i]=static_cast<unsigned char>(i+1);
+    auto validity=vtkSmartPointer<vtkImageData>::New(); validity->CopyStructure(image); validity->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* valid=static_cast<unsigned char*>(validity->GetScalarPointer()); std::fill(valid,valid+12,1); valid[0]=0;
+    TestDataPort data; const auto view=data.SetPrimaryImage(image,validity);
+    if (!view) return SetExpect(false,"nonzero extent fixture failed");
+    RoiRequest request; request.definition.source=view->data->self; request.metadata.name="extent";
+    RoiNode node; node.primitive.shape=RoiShape::HalfSpace; node.primitive.origin={8,0,0}; node.primitive.normal={1,0,0}; request.definition.nodes={node};
+    const auto made=data.SetRoi(request);
+    if (!made.roi) return SetExpect(false,"nonzero extent ROI failed");
+    const auto roi=data.GetRoi(data.GetDataGraph(),made.roi->revision,view->data->self);
+    CropInputSnapshot input; input.graph=view->graph; input.binding=view->binding; input.data=view->data; input.image=view;
+    image->GetBounds(input.inputModelBounds.data());
+    const auto result=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,{});
+    if (!SetExpect(result.isSucceeded && result.maskImage && result.imageData,"nonzero extent ROI crop failed")) return false;
+    const auto* mask=static_cast<const unsigned char*>(result.maskImage->GetScalarPointer());
+    const auto* copied=static_cast<const unsigned char*>(result.imageData->GetScalarPointer());
+    for (int i=0;i<12;++i) if ((mask[i]!=0)!=(i/3%2==0 && i!=0) || copied[i]!=values[i])
+        return SetExpect(false,"nonzero extent/rotated physical mapping or existing validity changed");
+    const auto cancelled=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[]{return true;});
+    return SetExpect(!cancelled.isSucceeded && cancelled.isCancelled && !cancelled.imageData,"cancelled public ROI crop leaked output");
+}
+
 }
 
 int CropAlgorithmSuite::GetFailCount() const
@@ -658,6 +687,7 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartImageBuildCase() ? 0 : 1;
     failureCount += StartCancelledBuildCase() ? 0 : 1;
     failureCount += StartPolyBuildCase() ? 0 : 1;
+    failureCount += StartPublicRoiExtentCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
     return failureCount;
 }
