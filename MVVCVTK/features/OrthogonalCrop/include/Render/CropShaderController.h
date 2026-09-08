@@ -32,7 +32,9 @@ public:
     bool ClearCropParams();
     bool SetLocalToInput(
         const std::array<double, 16>& localToInput);
-    bool StartRender(vtkRenderer* renderer);
+    void SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue);
+    CropNodeId GetRenderedNode() const;
+    bool StartRender(vtkRenderer* renderer,bool isCurrent=true);
     bool StopRender();
 
 private:
@@ -61,6 +63,8 @@ public:
     bool ClearCropCommit(std::uint64_t revision);
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
+
+    CropNodeId GetRenderedNode() const;
 
     // 仅为 Host 候选 View 准备重放；当前 binding 继续显示旧已应用状态。
     bool SetSourcePreview(CropShaderPayload payload);

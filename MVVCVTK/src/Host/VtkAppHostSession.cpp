@@ -15,6 +15,7 @@
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
 #include "Data/LabelMapReader.h"
+#include "Render/Support/RenderFrameLifetime.h"
 
 #include <algorithm>
 #include <atomic>
@@ -918,6 +919,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
     }
     stopState = HostStopState::Stopping;
     try {
+        (void)RenderFrameLifetime::PollAll();
         // P0 首先关闭普通 frame admission 与输入 gate；清理失败时保持
         // StopPending，但不再恢复可交互状态。
         if (frameCoordinator) frameCoordinator->Stop();

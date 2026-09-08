@@ -13,6 +13,7 @@
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Contracts/RenderBindPort.h"
 #include "Render/Contracts/RenderEffect.h"
+#include "Render/Support/RenderFrameLifetime.h"
 #include "Render/Contracts/RenderStrategyFactory.h"
 #include "Render/Contracts/VisualStrategy.h"
 #include <vtkActor.h>
@@ -4596,6 +4597,7 @@ private:
 
 class FeatureViewAdapter final : public FeatureViewService {
 public:
+    bool PollRenderResources() override {return m_service&&RenderFrameLifetime::PollAll();}
     explicit FeatureViewAdapter(std::shared_ptr<AppRuntime> service)
         : m_service(std::move(service))
     {

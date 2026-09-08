@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -65,6 +66,14 @@ struct RenderEffectState final {
     std::uint64_t stagedRevision = 0;
     std::uint64_t activeRevision = 0;
     std::string message;
+    std::uint64_t renderedRevision = 0;
+    bool isRenderPending = false;
+};
+
+struct RenderFrameOutcome final {
+    std::uint64_t frameId = 0;
+    bool isSucceeded = false;
+    bool isPresented = false;
 };
 
 struct RenderEffectTarget final {
@@ -78,6 +87,9 @@ struct RenderEffectTarget final {
         0.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 1.0
     };
+    // Accepted completions run once after the real window frame and GPU fence.
+    // Candidate/back-buffer validation reports isPresented=false.
+    std::function<bool(std::function<void(RenderFrameOutcome)>)> queueFrameCompletion;
 };
 
 // 一个 binding 只服务一个 mapper/context。context 或 window 替换时，

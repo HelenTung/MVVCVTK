@@ -29,6 +29,8 @@ public:
         const RenderEffect* effect) = 0;
     // Widget/effect 只投递一次重绘门铃，不接触 App 的完整 dirty 状态。
     virtual bool SetRenderNeeded() = 0;
+    // Owner-thread cleanup only; never waits for GPU completion.
+    virtual bool PollRenderResources() { return false; }
 };
 
 // Lease 仅证明 owner-thread session 仍有效；它不是互斥锁。

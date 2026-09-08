@@ -1182,6 +1182,8 @@ bool CropHostFeature::Impl::SendRequest(
     const bool needsTarget = request.action == CropHostAction::Start
         || request.action == CropHostAction::Box
         || request.action == CropHostAction::Plane
+        || request.action == CropHostAction::Cylinder
+        || request.action == CropHostAction::Sphere
         || request.action == CropHostAction::Mode
         || request.action == CropHostAction::BuildResult;
     if (needsTarget != request.target.has_value()
@@ -1207,6 +1209,10 @@ bool CropHostFeature::Impl::SendRequest(
         return StartCrop(*request.target) && m_bridge->SwitchCropBox();
     case CropHostAction::Plane:
         return StartCrop(*request.target) && m_bridge->SwitchCropPlane();
+    case CropHostAction::Cylinder:
+        return StartCrop(*request.target) && m_bridge->SwitchCropCylinder();
+    case CropHostAction::Sphere:
+        return StartCrop(*request.target) && m_bridge->SwitchCropSphere();
     case CropHostAction::Mode:
         return StartCrop(*request.target) && m_bridge->SetCropMode(*request.removalMode);
     case CropHostAction::Previous:
@@ -1558,6 +1564,10 @@ bool CropHostFeature::Impl::OnHostTick()
         || m_isPublishing) {
         return false;
     }
+    for(const auto& view:m_activeViewIds) {
+        const auto port=m_views->GetFeaturePort(view);if(port)(void)port->PollRenderResources();
+    }
+    (void)m_bridge->RefreshWidgetTransform();
     if (m_sourceTransition) (void)SendSourcePreview();
     if (m_pendingDocumentRequest) {
         (void)SendDocumentRequest();
@@ -1772,7 +1782,7 @@ CropBuildAdmission CropHostFeature::Impl::SendRequest(CropBuildRequest request,C
     if(const auto edit=m_bridge->GetOutcome(request.requestId);edit&&edit->failureReason!=CropFailure::RequestExpired)return reject(CropFailure::InvalidRequest);
     if(const auto failure=GetRequestFailure(request.documentId,request.requestId,RequestKind::Build);failure!=CropFailure::None)return reject(failure);
     if(request.expectedRevision!=history.stateRevision)return reject(CropFailure::StateVersionMismatch);
-    if(m_buildRecord||m_pendingDocumentRequest||m_sourceTransition||history.pendingRequestCount)return reject(CropFailure::Busy);
+    if(m_buildRecord||m_pendingDocumentRequest||m_sourceTransition||history.pendingRequestCount||history.isDragging)return reject(CropFailure::Busy);
     if(m_dataState.documentStatus!=CropDocumentStatus::Ready)return reject(CropFailure::ResultReleasing);
     const auto node=m_bridge->GetNode(request.nodeId);
     if(!node)return reject(CropFailure::NodeNotFound);

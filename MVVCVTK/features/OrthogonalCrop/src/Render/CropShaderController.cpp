@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -120,7 +121,18 @@ public:
 
     bool SetShaderTarget(vtkObject* mapper, vtkShaderProperty* shaderProperty);
     bool SetCropParams(CropShaderPayload payload);
-    RenderEffectState GetState() const { return m_state; }
+    struct FrameState final {
+        std::uint64_t frameId=0,revision=0,generation=0;
+        CropNodeId nodeId=0;
+        std::size_t pending=0;
+        bool conflict=false;
+    };
+    RenderEffectState GetState() const {
+        auto state=m_state;state.renderedRevision=m_frameState->conflict?0:m_frameState->revision;
+        state.isRenderPending=m_frameState->pending!=0;return state;
+    }
+    CropNodeId GetRenderedNode() const {return m_frameState->conflict?0:m_frameState->nodeId;}
+    void SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue){m_frameQueue=std::move(queue);}
     bool SetCropCommit(std::uint64_t revision);
     bool GetCropCommitReady(std::uint64_t revision) const;
     bool SetCropComplete(std::uint64_t revision);
@@ -128,7 +140,7 @@ public:
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
     bool SetLocalToInput(const std::array<double, 16>& localToInput);
-    bool StartRender(vtkRenderer* renderer);
+    bool StartRender(vtkRenderer* renderer,bool isCurrent);
     bool StopRender();
 
 private:
@@ -137,6 +149,11 @@ private:
     bool BuildTexture(vtkOpenGLRenderWindow* context);
     void ClearDeferred(vtkOpenGLRenderWindow* context);
 
+    std::shared_ptr<FrameState> m_frameState=std::make_shared<FrameState>();
+    std::function<bool(std::function<void(RenderFrameOutcome)>)> m_frameQueue;
+    std::uint64_t m_drawRevision=0;
+    CropNodeId m_drawNode=0;
+    bool m_drawValid=false,m_drawIsCurrent=false;
     RenderTargetKind m_targetKind;
     RenderEffectState m_state;
     Resource m_previous;
@@ -298,8 +315,9 @@ void CropShaderController::Impl::ClearDeferred(vtkOpenGLRenderWindow* context)
     m_deferred.clear();
 }
 
-bool CropShaderController::Impl::StartRender(vtkRenderer* renderer)
+bool CropShaderController::Impl::StartRender(vtkRenderer* renderer,bool isCurrent)
 {
+    m_drawValid=false;m_drawIsCurrent=isCurrent;
     auto* context = renderer
         ? vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow())
         : nullptr;
@@ -346,6 +364,19 @@ bool CropShaderController::Impl::StartRender(vtkRenderer* renderer)
 
 bool CropShaderController::Impl::StopRender()
 {
+    if(m_drawValid&&m_drawIsCurrent&&m_frameQueue) {
+        const auto state=m_frameState;
+        const std::weak_ptr<FrameState> weak=state;
+        const auto revision=m_drawRevision,node=m_drawNode,generation=state->generation;
+        if(m_frameQueue([weak,revision,node,generation](RenderFrameOutcome frame) {
+            const auto state=weak.lock();if(!state)return;
+            if(state->pending)--state->pending;
+            if(state->generation!=generation||!frame.isSucceeded||!frame.isPresented||frame.frameId<state->frameId)return;
+            if(frame.frameId==state->frameId&&(state->revision!=revision||state->nodeId!=node))state->conflict=true;
+            else if(frame.frameId>state->frameId){state->frameId=frame.frameId;state->revision=revision;state->nodeId=node;state->conflict=false;}
+        }))++state->pending;
+    }
+    m_drawValid=false;
     if (m_isActive && m_boundTexture) {
         m_boundTexture->Deactivate();
     }
@@ -412,6 +443,8 @@ bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
         m_state.message = "The crop shader program is missing a required uniform.";
         return false;
     }
+
+    m_drawValid=true;m_drawRevision=m_active.payload.revision;m_drawNode=m_active.payload.nodeId;
 
     if (m_staged.payload.revision != 0
         && m_staged.texture
@@ -503,6 +536,10 @@ bool CropShaderController::Impl::ClearCropStage(const std::uint64_t revision)
 
 bool CropShaderController::Impl::ClearCropParams()
 {
+    // Old frames keep their resource holds, but cannot label a new input as rendered.
+    if(m_frameState->generation==std::numeric_limits<std::uint64_t>::max())return false;
+    ++m_frameState->generation;m_frameState->frameId=0;m_frameState->revision=0;m_frameState->nodeId=0;m_frameState->conflict=false;
+    m_drawValid=false;
     if (m_previous.texture
         && m_previous.texture != m_active.texture
         && m_previous.texture != m_staged.texture) {
@@ -554,7 +591,9 @@ bool CropShaderController::ClearCropCommit(const std::uint64_t revision) { retur
 bool CropShaderController::ClearCropStage(const std::uint64_t revision) { return m_impl->ClearCropStage(revision); }
 bool CropShaderController::ClearCropParams() { return m_impl->ClearCropParams(); }
 bool CropShaderController::SetLocalToInput(const std::array<double, 16>& matrix) { return m_impl->SetLocalToInput(matrix); }
-bool CropShaderController::StartRender(vtkRenderer* renderer) { return m_impl->StartRender(renderer); }
+void CropShaderController::SetFrameCompletionQueue(std::function<bool(std::function<void(RenderFrameOutcome)>)> queue){m_impl->SetFrameCompletionQueue(std::move(queue));}
+CropNodeId CropShaderController::GetRenderedNode() const{return m_impl->GetRenderedNode();}
+bool CropShaderController::StartRender(vtkRenderer* renderer,bool isCurrent) { return m_impl->StartRender(renderer,isCurrent); }
 bool CropShaderController::StopRender() { return m_impl->StopRender(); }
 
 namespace {
@@ -567,6 +606,7 @@ public:
         , m_inputStamp(target.inputStamp)
         , m_bindingUse(bindingUse)
     {
+        m_controller.SetFrameCompletionQueue(target.queueFrameCompletion);
         m_isTargetReady = m_controller.SetShaderTarget(
             target.mapper, target.shaderProperty);
         m_isTargetReady = m_isTargetReady
@@ -575,6 +615,7 @@ public:
     }
 
     bool GetTargetReady() const { return m_isTargetReady; }
+    CropNodeId GetRenderedNode() const {return m_controller.GetRenderedNode();}
 
     bool SetCropParams(CropShaderPayload payload)
     {
@@ -690,7 +731,7 @@ public:
 
     bool OnRenderStart(vtkRenderer* renderer) override
     {
-        return m_controller.StartRender(renderer);
+        return m_controller.StartRender(renderer,m_bindingUse==RenderBindingUse::Current);
     }
 
     bool OnRenderStop() override
@@ -729,6 +770,7 @@ public:
     bool ClearCropCommit(std::uint64_t revision);
     bool ClearCropStage(std::uint64_t revision);
     bool ClearCropParams();
+    CropNodeId GetRenderedNode() const;
     bool SetSourcePreview(CropShaderPayload payload);
     void SetSourcePreviewComplete(std::uint64_t revision) noexcept;
     void ClearSourcePreview(std::uint64_t revision) noexcept;
@@ -840,11 +882,15 @@ bool CropShaderEffect::Impl::SetCropParams(CropShaderPayload payload)
 
 RenderEffectState CropShaderEffect::Impl::GetState() const
 {
-    if (m_staged.revision == 0) {
-        return m_state;
-    }
-    auto state = m_state;
     const auto currentBindings = GetCurrentBindings();
+    auto state=m_state;state.renderedRevision=0;state.isRenderPending=false;bool first=true,mixed=false;
+    for(const auto& binding:currentBindings) {
+        const auto value=binding->GetEffectState();state.isRenderPending=state.isRenderPending||value.isRenderPending;
+        if(first){state.renderedRevision=value.renderedRevision;first=false;}
+        else mixed=mixed||state.renderedRevision!=value.renderedRevision;
+    }
+    if(mixed)state.renderedRevision=0;
+    if(m_staged.revision==0)return state;
     const auto stagedBindings = GetStagedBindings();
     const bool isComplete =
         stagedBindings.size() == m_stagedBindings.size()
@@ -1208,3 +1254,13 @@ CropShaderEffect::BuildEffectBinding(
 {
     return m_impl->BuildEffectBinding(target, bindingUse);
 }
+
+CropNodeId CropShaderEffect::Impl::GetRenderedNode() const
+{
+    CropNodeId result=0;bool first=true;
+    for(const auto& binding:GetCurrentBindings()) {
+        const auto node=binding->GetRenderedNode();if(first){result=node;first=false;}else if(result!=node)return 0;
+    }
+    return result;
+}
+CropNodeId CropShaderEffect::GetRenderedNode() const {return m_impl->GetRenderedNode();}

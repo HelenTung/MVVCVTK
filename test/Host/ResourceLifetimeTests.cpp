@@ -7,8 +7,14 @@
 #include "Host/Internal/HostImageReadRuntime.h"
 #include "Render/Internal/VolumeLodProductBuilder.h"
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
+#include "Render/Support/RenderFrameLifetime.h"
 
 #include <vtkImageData.h>
+#include <vtkImageActor.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
 #include <vtkDataArray.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -174,6 +180,78 @@ bool GetConsumerStopKeepsRenderReady()
     return Check(renderReady&&stopped,"data consumer stop disabled Root candidate rendering or prevented final stop");
 }
 
+bool GetGpuFrameResourcesProtected()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();const auto source=Publish(data,true);
+    auto image=data->GetImageGrid(data->GetDataGraph(),source.ref);
+    if(!image)return false;
+    auto renderer=vtkSmartPointer<vtkRenderer>::New();auto window=vtkSmartPointer<vtkRenderWindow>::New();
+    window->SetOffScreenRendering(1);window->SetSize(100,100);window->AddRenderer(renderer);
+    auto actor=vtkSmartPointer<vtkImageActor>::New();actor->SetInputData(image->image);renderer->AddActor(actor);renderer->ResetCamera();
+    auto frames=RenderFrameLifetime::Create(renderer);
+    struct EndProbe final {
+        std::shared_ptr<RawVolumeDataManager> data;Source source;
+        VtkImageGridSnapshot* image=nullptr;vtkSmartPointer<vtkImageActor>* actor=nullptr;vtkRenderer* renderer=nullptr;
+        bool retired=false,held=false;
+    } probe{data,source,&image,&actor,renderer};
+    auto observer=vtkSmartPointer<vtkCallbackCommand>::New();observer->SetClientData(&probe);
+    observer->SetCallback([](vtkObject*,unsigned long,void* pointer,void*) {
+        auto& value=*static_cast<EndProbe*>(pointer);
+        value.retired=Retire(value.data,value.source).status==DataCommitStatus::Succeeded;
+        (*value.actor)->SetInputData(nullptr);value.renderer->RemoveViewProp(*value.actor);*value.actor=nullptr;value.image->reset();
+        value.held=value.data->GetDataLifetime(value.source.scope).status==DataLifetimeStatus::Releasing;
+    });
+    // Retire and remove the actual input before the generic frame-end observer.
+    const auto tag=window->AddObserver(vtkCommand::EndEvent,observer,1.0);
+    window->Render();window->RemoveObserver(tag);
+    if(!Check(probe.retired&&probe.held,"draw arrays disappeared before the GPU frame lifetime could finish"))return false;
+    bool released=false;
+    for(int poll=0;poll<1000&&!released;++poll) {
+        RenderFrameLifetime::PollAll();released=data->SetDataRelease(source.scope).status==DataLifetimeStatus::Released;
+        if(!released)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if(!released)for(const auto& blocker:data->GetDataLifetime(source.scope).blockers)std::cerr<<"Frame release blocker: "<<blocker.owner<<'\n';
+    frames.reset();window->Finalize();RenderFrameLifetime::PollAll();
+    return Check(released,"GPU fence completion did not release the retired draw allocations");
+}
+
+bool GetNestedFrameCompletions()
+{
+    auto first=vtkSmartPointer<vtkRenderer>::New(),second=vtkSmartPointer<vtkRenderer>::New();
+    auto a=vtkSmartPointer<vtkRenderWindow>::New(),b=vtkSmartPointer<vtkRenderWindow>::New();
+    a->SetOffScreenRendering(1);b->SetOffScreenRendering(1);a->SetSize(32,32);b->SetSize(32,32);
+    a->AddRenderer(first);b->AddRenderer(second);
+    auto fa=RenderFrameLifetime::Create(first),fb=RenderFrameLifetime::Create(second);
+    if(!Check(fa==RenderFrameLifetime::Create(first),"duplicate renderer frame trackers"))return false;
+    struct Probe final {
+        std::shared_ptr<RenderFrameLifetime> frames;vtkRenderWindow* nested=nullptr;
+        int queued=0,completed=0;std::uint64_t id=0;bool valid=true;
+    } pa{fa,b},pb{fb};
+    const auto observe=[](vtkRenderer* renderer,Probe* value) {
+        auto observer=vtkSmartPointer<vtkCallbackCommand>::New();observer->SetClientData(value);
+        observer->SetCallback([](vtkObject*,unsigned long,void* data,void*) {
+            auto* probe=static_cast<Probe*>(data);
+            probe->valid=probe->frames->QueueCompletion([probe](RenderFrameOutcome outcome) {
+                ++probe->completed;probe->valid=probe->valid&&outcome.isSucceeded&&outcome.isPresented&&outcome.frameId>probe->id;
+                probe->id=outcome.frameId;
+                RenderFrameLifetime::PollAll();
+                if(probe->nested)probe->nested->Render();
+            })&&probe->valid;
+            ++probe->queued;
+        });
+        return renderer->AddObserver(vtkCommand::EndEvent,observer);
+    };
+    const auto ta=observe(first,&pa),tb=observe(second,&pb);
+    for(int i=0;i<4;++i)a->Render();
+    for(int poll=0;poll<1000&&(pa.completed<pa.queued||pb.completed<pb.queued);++poll) {
+        RenderFrameLifetime::PollAll();std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    first->RemoveObserver(ta);second->RemoveObserver(tb);
+    const bool passed=pa.valid&&pb.valid&&pa.queued==4&&pa.completed==4&&pb.queued==4&&pb.completed==4;
+    fa.reset();fb.reset();a->Finalize();b->Finalize();RenderFrameLifetime::PollAll();
+    return Check(passed,"nested render completion lost identity, repeated callback or invalidated its observer");
+}
+
 bool GetDerivedProductsProtected()
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -230,5 +308,7 @@ bool GetResourceLifetimeTests()
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;
     passed=GetConsumerStopKeepsRenderReady()&&passed;
-    return GetDerivedProductsProtected()&&passed;
+    passed=GetDerivedProductsProtected()&&passed;
+    passed=GetGpuFrameResourcesProtected()&&passed;
+    return GetNestedFrameCompletions()&&passed;
 }

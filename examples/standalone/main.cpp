@@ -564,7 +564,7 @@ namespace {
             << "  C / Shift+C：调整显示颜色；V / Shift+V：提高/降低不透明度。\n"
             << "  显示质量档位只调整渲染，不会把算法输入改成较小的体数据。\n"
             << "\n【裁切：先预览，再生成并选择算法输入】\n"
-            << "  预览：按 O 创建方框，或按 P 创建平面；按 1 保留内部，按 2 移除内部，然后拖动控件。\n"
+            << "  预览：O 方框、P 平面、Shift+O 有限圆柱、Shift+P 球体；按 1 保留内部，按 2 移除内部，然后拖动控件。\n"
             << "  0：将当前裁切编辑模式设为不移除；它不会清空已提交的裁切历史。\n"
             << "  4 / 5：撤销/重做当前裁切历史中的一步；Alt+0..9：跳到已存在的对应历史节点。\n"
             << "  历史跳转只改变裁切步骤；恢复裁切源输入使用 Ctrl+9。\n"
@@ -651,6 +651,7 @@ namespace {
                 HostKeyChord{ 'u', {}, true },
                 HostKeyChord{ 'u', {}, false, true },
                 HostKeyChord{ 'o' }, HostKeyChord{ 'p' },
+                HostKeyChord{ 'o', {}, false, false, true }, HostKeyChord{ 'p', {}, false, false, true },
                 HostKeyChord{ '0' }, HostKeyChord{ '1' }, HostKeyChord{ '2' },
                 HostKeyChord{ '4' }, HostKeyChord{ '5' },
                 HostKeyChord{ '3', {}, true }, HostKeyChord{ '6' },
@@ -789,7 +790,7 @@ namespace {
             RestoreCropSource,
             Help, Data, Labels, Scenes, FitViews,
             SurfaceStart, SurfaceClear, SurfaceStop,
-            CropBox, CropPlane, CropNoMode, CropKeepMode, CropRemoveMode,
+            CropBox, CropPlane, CropCylinder, CropSphere, CropNoMode, CropKeepMode, CropRemoveMode,
             CropPrevious, CropNext, CropBuildAlias, CropRestoreAlias, CropExit,
             CropNode0, CropNode1, CropNode2, CropNode3, CropNode4,
             CropNode5, CropNode6, CropNode7, CropNode8, CropNode9,
@@ -1246,7 +1247,7 @@ namespace {
             request.action = action;
             request.removalMode = removalMode;
             if (action == CropHostAction::Start || action == CropHostAction::Box
-                || action == CropHostAction::Plane || action == CropHostAction::Mode
+                || action == CropHostAction::Plane || action == CropHostAction::Cylinder || action == CropHostAction::Sphere || action == CropHostAction::Mode
                 || action == CropHostAction::BuildResult) {
                 CropHostTarget target;
                 target.inputBinding = std::string(primaryVolumeBinding);
@@ -1586,6 +1587,8 @@ namespace {
                 return SetCropData(false);
             case ControlAction::CropBox: return SendCrop(CropHostAction::Box);
             case ControlAction::CropPlane: return SendCrop(CropHostAction::Plane);
+            case ControlAction::CropCylinder: return SendCrop(CropHostAction::Cylinder);
+            case ControlAction::CropSphere: return SendCrop(CropHostAction::Sphere);
             case ControlAction::CropNoMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::None);
             case ControlAction::CropKeepMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::KeepInside);
             case ControlAction::CropRemoveMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::RemoveInside);

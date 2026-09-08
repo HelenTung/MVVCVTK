@@ -4,6 +4,7 @@
 #include "Algorithms/CropAlgorithm.h"
 #include "App/Services/FeatureViewService.h"
 #include "Interaction/CropBoxWidget.h"
+#include "Interaction/CropCurveWidget.h"
 #include "Interaction/CropPlaneWidget.h"
 #include "Render/CropShaderController.h"
 #include "Routing/CropRouter.h"
@@ -32,7 +33,6 @@
 
 namespace {
 constexpr double kVectorTolerance = 1.0e-12;
-constexpr double kGeometryTolerance = 1.0e-9;
 
 bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
 {
@@ -88,6 +88,7 @@ public:
         std::shared_ptr<FeatureViewService> nextReferenceService;
         vtkRenderWindowInteractor* nextInteractor = nullptr;
         bool isTargetRebind = false;
+        vtkRenderer* nextRenderer = nullptr;
     };
 
     struct BuildTask final {
@@ -110,7 +111,17 @@ public:
     bool SetCropInput(CropInputSnapshot input);
     bool GetOwnerReady() const { return m_ownerThread == std::this_thread::get_id(); }
     CropEditAdmission SendRequest(CropEditRequest request);
-    CropHistorySnapshot GetHistory(CropNodeId after,std::size_t limit) const { return m_tree.GetSnapshot(after,limit); }
+    CropNodeId GetRenderedHead() const {
+        CropNodeId result=0;bool first=true;
+        for(const auto& target:m_targets) {
+            const auto node=target.effect?target.effect->GetRenderedNode():0;
+            if(first){result=node;first=false;}else if(result!=node)return 0;
+        }
+        return result;
+    }
+    CropHistorySnapshot GetHistory(CropNodeId after,std::size_t limit) const {
+        auto history=m_tree.GetSnapshot(after,limit);history.renderedHead=GetRenderedHead();return history;
+    }
     CropPruneImpact GetPruneImpact(const CropPruneRequest& request) const { return m_tree.GetPruneImpact(request); }
     std::optional<CropNodeSnapshot> GetNode(CropNodeId node) const { return m_commands.GetNode(m_tree,node); }
     std::optional<CropEditOutcome> GetOutcome(CropRequestId id) const { return m_commands.GetOutcome(id); }
@@ -127,6 +138,7 @@ public:
     bool GetSourceCommitReady(const SourceCommit::Impl& prepared) const noexcept;
     void SetSourceCommit(std::unique_ptr<SourceCommit::Impl> prepared) noexcept;
 
+    bool RefreshWidgetTransform();
     bool SwitchCrop(CropShape geometryType);
     bool SetCropMode(CropRemovalMode removalMode);
     bool PreviousCrop();
@@ -152,6 +164,7 @@ private:
         std::optional<CropInputSnapshot> input);
     void OnBoxWidget(CropInteractionPhase phase);
     void OnPlaneWidget(CropInteractionPhase phase);
+    void OnCurveWidget(CropInteractionPhase phase);
     bool SetCandidate(CropOpItem operation);
     bool SendNextOp();
     bool SetShader(CropHistory::Stage stage);
@@ -160,10 +173,12 @@ private:
     std::uint64_t CreateShaderRevision() noexcept;
     std::optional<CropOpItem> BuildBoxOp();
     std::optional<CropOpItem> BuildPlaneOp();
+    std::optional<CropOpItem> BuildCurveOp();
     bool GetOpSame(
         const CropOpItem& first,
         const CropOpItem& second) const;
     CropBoundsDouble6Array GetWorldBounds() const;
+    CropBoundsDouble6Array GetWidgetWorldBounds() const;
     std::optional<CropMatrixDouble16Array> GetWorldToInput() const;
     bool GetShaderCommitted() const;
     bool GetTargetsReady() const;
@@ -182,6 +197,7 @@ private:
         const char* message) const;
 
     CropRouter m_buildRouter;
+    CropCurveWidget m_curveWidget;
     CropBoxWidget m_boxWidget;
     CropPlaneWidget m_planeWidget;
     CropInputSnapshot m_input;
@@ -206,6 +222,7 @@ private:
     CropRemovalMode m_removalMode = CropRemovalMode::None;
     InteractionSource m_boxSource{ "OrthogonalCrop", "" };
     InteractionSource m_planeSource{ "OrthogonalCrop", "" };
+    InteractionSource m_curveSource{ "OrthogonalCrop", "" };
     InteractionSource m_commitSource{ "OrthogonalCrop", "" };
     bool m_hasDrag = false;
     std::uint64_t m_nextRevision = 1;
@@ -220,6 +237,13 @@ CropBridge::Impl::Impl()
         reinterpret_cast<std::uintptr_t>(this));
     m_boxSource.channelId = bridgeId + ":Box";
     m_planeSource.channelId = bridgeId + ":Plane";
+    m_curveSource.channelId = bridgeId + ":Curve";
+    m_curveWidget.SetCallback([this](CropInteractionPhase phase){OnCurveWidget(phase);});
+    m_curveWidget.SetContextGate([this] {
+        if(!GetLeaseReady()||!m_isActive||m_buildTask||m_sourceGate->isPending)return false;
+        for(const auto& result:m_tree.GetResults())if(result.status==CropResultStatus::Building)return false;
+        return !RefreshWidgetTransform();
+    });
     m_commitSource.channelId = bridgeId + ":Commit";
     m_boxWidget.SetBoundsCallback(
         [this](const CropBoundsDouble6Array&, const CropInteractionPhase phase) {
@@ -242,6 +266,8 @@ CropBridge::Impl::~Impl()
         (void)ClearInteractions();
         m_boxWidget.SetEnabled(false);
         m_planeWidget.SetEnabled(false);
+        m_curveWidget.SetEnabled(false);
+        m_curveWidget.SetContext(nullptr,nullptr);
         m_boxWidget.SetInteractor(nullptr);
         m_planeWidget.SetInteractor(nullptr);
         ClearShader();
@@ -345,6 +371,7 @@ bool CropBridge::Impl::StartViewInput(
             m_dragStart.reset();
             m_boxWidget.SetInteractor(request.interactor);
             m_planeWidget.SetInteractor(request.interactor);
+            m_curveWidget.SetContext(request.interactor,request.renderer);
             m_isActive = true;
             return true;
         }
@@ -387,6 +414,7 @@ bool CropBridge::Impl::StartViewInput(
         (void)ClearInteractions();
         m_boxWidget.SetInteractor(request.interactor);
         m_planeWidget.SetInteractor(request.interactor);
+        m_curveWidget.SetContext(request.interactor,request.renderer);
         m_isActive = true;
         try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
         return true;
@@ -426,7 +454,8 @@ bool CropBridge::Impl::StartViewInput(
             m_targets,
             request.referenceService,
             request.interactor,
-            true
+            true,
+            request.renderer
         };
         m_isActive = true;
         try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
@@ -455,7 +484,8 @@ bool CropBridge::Impl::StartViewInput(
     m_targets = std::move(targets);
     m_boxWidget.SetInteractor(request.interactor);
     m_planeWidget.SetInteractor(request.interactor);
-    const auto worldBounds = GetWorldBounds();
+    m_curveWidget.SetContext(request.interactor,request.renderer);
+    const auto worldBounds = GetWidgetWorldBounds();
     if (GetBoundsValid(worldBounds)) {
         m_boxWidget.SetReferenceWorldBounds(worldBounds);
         m_boxWidget.SetWidgetWorldBounds(worldBounds);
@@ -483,6 +513,8 @@ bool CropBridge::Impl::ClearBindings()
     (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
+    m_curveWidget.SetEnabled(false);
+    m_curveWidget.SetContext(nullptr,nullptr);
     m_boxWidget.SetInteractor(nullptr);
     m_planeWidget.SetInteractor(nullptr);
     ClearShader();
@@ -515,7 +547,7 @@ bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
         if (!sourceLease) return false;
     }
     m_tree = std::move(history);m_input = std::move(input);m_sourceLease = std::move(sourceLease);
-    const auto bounds=GetWorldBounds();
+    const auto bounds=GetWidgetWorldBounds();
     if (GetBoundsValid(bounds)) {
         m_boxWidget.SetReferenceWorldBounds(bounds);m_boxWidget.SetWidgetWorldBounds(bounds);
         m_planeWidget.SetReferenceWorldBounds(bounds);
@@ -556,6 +588,7 @@ std::unique_ptr<CropBridge::SourceCommit::Impl> CropBridge::Impl::BuildSourceCom
     const auto revision=CreateShaderRevision();if(!revision)return {};
     auto prepared=std::make_unique<SourceCommit::Impl>();
     prepared->payload={revision,GetInputStamp(m_input),stage.operations.size(),std::move(table.predicateTable)};
+    prepared->payload.nodeId=stage.head;
     prepared->stage=std::move(stage);prepared->isQueued=isQueued;
     prepared->effects.reserve(m_targets.size());
     for(const auto& target:m_targets) {
@@ -617,7 +650,9 @@ CropEditAdmission CropBridge::Impl::SendRequest(CropEditRequest request)
     if (!GetLeaseReady() || !GetCropBound() || !m_isAccepting) {
         CropEditAdmission rejected;rejected.failureReason=CropFailure::PreviewNotReady;return rejected;
     }
-    if(m_buildTask&&!m_commands.GetOutcome(request.requestId)) {
+    const bool building=m_buildTask.has_value()||std::any_of(m_tree.GetResults().begin(),m_tree.GetResults().end(),
+        [](const auto& result){return result.status==CropResultStatus::Building;});
+    if(building&&!m_commands.GetOutcome(request.requestId)) {
         CropEditAdmission rejected;rejected.requestId=request.requestId;rejected.stateRevision=m_tree.GetRevision();
         rejected.failureReason=CropFailure::Busy;return rejected;
     }
@@ -636,7 +671,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     if (!m_isActive
         || m_buildTask
         || !CropAlgorithm::GetInputValid(m_input)
-        || (geometryType != CropShape::Box && geometryType != CropShape::Plane)) {
+        || (geometryType != CropShape::Box && geometryType != CropShape::Plane && geometryType != CropShape::Cylinder && geometryType != CropShape::Sphere)) {
         return false;
     }
     m_geometryType = geometryType;
@@ -645,7 +680,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     (void)ClearDragSources();
     // Switch 结束上一条操作的模式编辑权；下一次有效 Released 会追加历史。
     m_editNode = 0;
-    const auto worldBounds = GetWorldBounds();
+    const auto worldBounds = GetWidgetWorldBounds();
     if (!GetBoundsValid(worldBounds)) {
         return false;
     }
@@ -653,7 +688,21 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     m_boxWidget.SetReferenceWorldBounds(worldBounds);
     m_planeWidget.SetReferenceWorldBounds(worldBounds);
     bool isEnabled = false;
-    if (geometryType == CropShape::Box) {
+    (void)m_curveWidget.SetEnabled(false);
+    if(geometryType==CropShape::Sphere||geometryType==CropShape::Cylinder) {
+        m_boxWidget.SetEnabled(false);m_planeWidget.SetEnabled(false);
+        const auto modelToWorld=m_referenceService?m_referenceService->GetModelToWorld():std::optional<CropMatrixDouble16Array>{};
+        if(!modelToWorld)return false;
+        CropOpItem operation;operation.geometryType=geometryType;
+        double size=0;
+        for(int i=0;i<3;++i) {
+            operation.centerInInputModel[i]=m_input.inputModelBounds[2*i]*0.5+m_input.inputModelBounds[2*i+1]*0.5;
+            size=std::max(size,m_input.inputModelBounds[2*i+1]-m_input.inputModelBounds[2*i]);
+        }
+        operation.radius=size>0?size*0.25:1;operation.height=size>0?size*0.5:2;
+        isEnabled=m_curveWidget.SetGeometry(operation,*modelToWorld)&&m_curveWidget.SetEnabled(true);
+    }
+    else if (geometryType == CropShape::Box) {
         m_planeWidget.SetEnabled(false);
         m_boxWidget.SetWidgetWorldBounds(worldBounds);
         isEnabled = m_boxWidget.SetEnabled(true);
@@ -800,6 +849,30 @@ void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
     (void)SetInteraction(m_planeSource, false);
 }
 
+std::optional<CropOpItem> CropBridge::Impl::BuildCurveOp()
+{
+    auto operation=m_curveWidget.GetGeometry();operation.removalMode=m_removalMode;
+    const auto geometry=CropGeometry::Build(operation);return geometry?std::optional<CropOpItem>{geometry->GetOperation()}:std::nullopt;
+}
+void CropBridge::Impl::OnCurveWidget(CropInteractionPhase phase)
+{
+    if(!GetLeaseReady())return;
+    if(!m_isActive||(m_geometryType!=CropShape::Sphere&&m_geometryType!=CropShape::Cylinder)||m_removalMode==CropRemovalMode::None) {
+        (void)SetInteraction(m_curveSource,false);m_hasDrag=false;m_dragStart.reset();return;
+    }
+    if(phase==CropInteractionPhase::Hover) {m_hasDrag=false;m_dragStart=BuildCurveOp();(void)SetInteraction(m_curveSource,false);return;}
+    if(phase==CropInteractionPhase::Dragging) {
+        if(!SetInteraction(m_curveSource,true)){m_hasDrag=false;m_dragStart.reset();return;}
+        if(!m_hasDrag)m_dragParent=m_tree.GetRequestedHead();m_hasDrag=true;
+        (void)m_referenceService->SetRenderNeeded();return;
+    }
+    if(phase!=CropInteractionPhase::Released)return;
+    const bool dragged=m_hasDrag;m_hasDrag=false;auto before=std::move(m_dragStart);m_dragStart.reset();
+    const auto operation=BuildCurveOp();
+    if(dragged&&before&&operation&&!GetOpSame(*before,*operation))(void)SetCandidate(*operation);
+    (void)SetInteraction(m_curveSource,false);(void)m_referenceService->SetRenderNeeded();
+}
+
 bool CropBridge::Impl::SetCandidate(CropOpItem operation)
 {
     if (m_removalMode==CropRemovalMode::None || !m_dragParent) return false;
@@ -839,6 +912,7 @@ bool CropBridge::Impl::SetShader(CropHistory::Stage stage)
     if (!table.isSucceeded || !table.predicateTable) return false;
     const auto revision=CreateShaderRevision();if(!revision)return false;
     PendingShader pending;pending.payload={revision,GetInputStamp(m_input),stage.operations.size(),table.predicateTable};
+    pending.payload.nodeId=stage.head;
     pending.stage=std::move(stage);pending.targets.reserve(m_targets.size());
     for (const auto& target:m_targets) {
         if (!target.effect || !target.effect->SetCropParams(pending.payload)) {
@@ -935,6 +1009,7 @@ bool CropBridge::Impl::SendShaderCommit()
         (void)ClearInteractions();m_targets=std::move(pending.targets);
         m_referenceService=std::move(pending.nextReferenceService);
         m_boxWidget.SetInteractor(pending.nextInteractor);m_planeWidget.SetInteractor(pending.nextInteractor);
+        m_curveWidget.SetContext(pending.nextInteractor,pending.nextRenderer);
     }
     m_pendingShader.reset();
     for(const auto& target:m_targets)if(target.service)(void)target.service->SetRenderNeeded();
@@ -1017,44 +1092,21 @@ std::optional<CropOpItem> CropBridge::Impl::BuildPlaneOp()
     return operation;
 }
 
-bool CropBridge::Impl::GetOpSame(
-    const CropOpItem& first,
-    const CropOpItem& second) const
+bool CropBridge::Impl::GetOpSame(const CropOpItem& first,const CropOpItem& second) const
+{ return CropGeometry::GetOperationsSame(first,second); }
+
+CropBoundsDouble6Array CropBridge::Impl::GetWidgetWorldBounds() const
 {
-    if (first.geometryType != second.geometryType) {
-        return false;
+    auto bounds=GetWorldBounds();if(!m_referenceService)return {};
+    double span=0;
+    for(int i=0;i<3;++i) {
+        if(!std::isfinite(bounds[2*i])||!std::isfinite(bounds[2*i+1])||bounds[2*i]>bounds[2*i+1])return {};
+        span=std::max(span,bounds[2*i+1]-bounds[2*i]);
     }
-    const auto getValuesSame = [](const auto& firstValues,
-                                   const auto& secondValues) {
-        return std::equal(
-            firstValues.begin(),
-            firstValues.end(),
-            secondValues.begin(),
-            [](const double firstValue,
-                const double secondValue) {
-                const double scale = std::max({
-                    1.0,
-                    std::abs(firstValue),
-                    std::abs(secondValue)
-                });
-                return std::abs(firstValue - secondValue)
-                    <= kGeometryTolerance * scale;
-            });
-    };
-    if (first.geometryType == CropShape::Box) {
-        return getValuesSame(
-            first.boxToInputModelMatrix,
-            second.boxToInputModelMatrix);
-    }
-    if (first.geometryType == CropShape::Plane) {
-        return getValuesSame(
-                first.planeCenterInInputModel,
-                second.planeCenterInInputModel)
-            && getValuesSame(
-                first.planeNormalInInputModel,
-                second.planeNormalInInputModel);
-    }
-    return false;
+    const double padding=span>0?span*0.1:1;
+    // Widget placement may pad a flat source, while the frozen Root AABB stays exact.
+    for(int i=0;i<3;++i)if(bounds[2*i]==bounds[2*i+1]) {bounds[2*i]-=padding;bounds[2*i+1]+=padding;}
+    return bounds;
 }
 
 CropBoundsDouble6Array CropBridge::Impl::GetWorldBounds() const
@@ -1132,7 +1184,7 @@ bool CropBridge::Impl::BuildCropResult(
     params.maxCells=options.maxCells;params.maxDepth=options.maxDepth;
     if(input.data)params.sourceRevision=input.data->self;
     params.operations=m_tree.GetPath(nodeId);params.nodeCount=params.operations.size();
-    if(m_buildTask) {onComplete(BuildResultFailure(params,CropFailure::Busy,"A crop result build is already running."));return false;}
+    if(m_buildTask||m_hasDrag) {onComplete(BuildResultFailure(params,CropFailure::Busy,"A crop result build is already running."));return false;}
     if(!m_tree.GetNode(nodeId)) {onComplete(BuildResultFailure(params,CropFailure::NodeNotFound,"The requested crop node does not exist."));return false;}
     if(nodeId==m_tree.GetRootId()) {onComplete(BuildResultFailure(params,CropFailure::NoCropOperations,"Root has no crop operations."));return false;}
     if(!CropAlgorithm::GetInputValid(input)||params.operations.empty()) {
@@ -1300,39 +1352,14 @@ bool CropBridge::Impl::GetTargetsReady() const
 
 
 
-bool CropBridge::Impl::SetWidgetActive(
-    const bool isActive)
+bool CropBridge::Impl::SetWidgetActive(const bool isActive)
 {
-    bool isSet = true;
-    if (!isActive) {
-        (void)ClearInteractions();
-        const bool isBoxSet =
-            m_boxWidget.SetEnabled(false);
-        const bool isPlaneSet =
-            m_planeWidget.SetEnabled(false);
-        isSet = isBoxSet && isPlaneSet;
-    }
-    else if (m_geometryType == CropShape::Box) {
-        const bool isPlaneSet =
-            m_planeWidget.SetEnabled(false);
-        const bool isBoxSet =
-            m_boxWidget.SetEnabled(true);
-        isSet = isPlaneSet && isBoxSet;
-    }
-    else if (m_geometryType == CropShape::Plane) {
-        const bool isBoxSet =
-            m_boxWidget.SetEnabled(false);
-        const bool isPlaneSet =
-            m_planeWidget.SetEnabled(true);
-        isSet = isBoxSet && isPlaneSet;
-    }
-    else {
-        isSet = false;
-    }
-    if (m_referenceService) {
-        (void)m_referenceService->SetRenderNeeded();
-    }
-    return isSet;
+    if(!isActive)(void)ClearInteractions();
+    const bool box=m_boxWidget.SetEnabled(isActive&&m_geometryType==CropShape::Box);
+    const bool plane=m_planeWidget.SetEnabled(isActive&&m_geometryType==CropShape::Plane);
+    const bool curve=m_curveWidget.SetEnabled(isActive&&(m_geometryType==CropShape::Sphere||m_geometryType==CropShape::Cylinder));
+    if(m_referenceService)(void)m_referenceService->SetRenderNeeded();
+    return box&&plane&&curve;
 }
 
 void CropBridge::Impl::ClearShaderStage()
@@ -1404,6 +1431,7 @@ bool CropBridge::Impl::ExitCrop()
     (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
+    m_curveWidget.SetEnabled(false);
     // 已接纳命令继续完成；Exit 只关闭控件和模式编辑权。
     m_editNode=0;
     if(!m_commands.GetIsEmpty())(void)SetInteraction(m_commitSource,true);
@@ -1444,7 +1472,8 @@ bool CropBridge::Impl::ClearDragSources()
         m_referenceService->SetInteracting(m_boxSource, false);
     const bool isPlaneCleared =
         m_referenceService->SetInteracting(m_planeSource, false);
-    return isBoxCleared && isPlaneCleared;
+    const bool isCurveCleared=m_referenceService->SetInteracting(m_curveSource,false);
+    return isBoxCleared && isPlaneCleared && isCurveCleared;
 }
 
 bool CropBridge::Impl::GetCropActive() const
@@ -1464,10 +1493,10 @@ CropHistoryState CropBridge::Impl::GetCropHistory() const
 {
     CropHistoryState state;
     state.nodeCount=m_activePath.size();state.operationCount=m_tree.GetNodeCount()?m_tree.GetNodeCount()-1:0;
-    state.editMode=m_removalMode;state.hasEditableOp=m_editNode!=0;state.isEditing=m_isActive;
+    state.editMode=m_removalMode;state.hasEditableOp=m_editNode!=0;state.isEditing=m_isActive;state.isDragging=m_hasDrag;
     state.lastRequestId=m_lastRequestId;state.pendingRequestCount=m_commands.GetPendingCount();
     state.documentId=m_tree.GetDocumentId();state.stateRevision=m_tree.GetRevision();
-    state.requestedHead=m_tree.GetRequestedHead();state.appliedHead=m_tree.GetAppliedHead();
+    state.requestedHead=m_tree.GetRequestedHead();state.appliedHead=m_tree.GetAppliedHead();state.renderedHead=GetRenderedHead();
     return state;
 }
 
@@ -1612,3 +1641,19 @@ bool CropBridge::BuildCropResult(CropNodeId nodeId,CropBuildOptions options,Crop
 { return m_impl&&m_impl->GetLeaseReady()&&m_impl->BuildCropResult(nodeId,std::move(onComplete),options,requestId); }
 
 void CropBridge::ForgetOutcome(CropRequestId id) { if(m_impl&&m_impl->GetOwnerReady())m_impl->ForgetOutcome(id); }
+
+bool CropBridge::SwitchCropCylinder(){return m_impl->GetLeaseReady()&&m_impl->SwitchCrop(CropShape::Cylinder);}
+bool CropBridge::SwitchCropSphere(){return m_impl->GetLeaseReady()&&m_impl->SwitchCrop(CropShape::Sphere);}
+
+bool CropBridge::Impl::RefreshWidgetTransform()
+{
+    if(!GetLeaseReady()||!m_isActive||(m_geometryType!=CropShape::Sphere&&m_geometryType!=CropShape::Cylinder))return false;
+    const auto matrix=m_referenceService->GetModelToWorld();
+    if(matrix&&m_curveWidget.GetTransformSame(*matrix))return false;
+    const auto operation=m_curveWidget.GetGeometry();const bool enabled=m_curveWidget.GetEnabled();
+    m_hasDrag=false;m_dragStart.reset();m_dragParent=0;(void)SetInteraction(m_curveSource,false);
+    m_curveWidget.SetEnabled(false);
+    if(matrix&&m_curveWidget.SetGeometry(operation,*matrix)&&enabled)m_curveWidget.SetEnabled(true);
+    (void)m_referenceService->SetRenderNeeded();return true;
+}
+bool CropBridge::RefreshWidgetTransform(){return m_impl&&m_impl->RefreshWidgetTransform();}

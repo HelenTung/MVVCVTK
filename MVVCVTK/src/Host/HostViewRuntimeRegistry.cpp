@@ -190,6 +190,7 @@ private:
         bool DetachRenderEffect(
             const RenderEffect* effect) override;
         bool SetRenderNeeded() override;
+        bool PollRenderResources() override;
 
     private:
         std::shared_ptr<FeatureViewService> GetPort() const;
@@ -2287,4 +2288,11 @@ FeatureDataTransitionState HostViewRuntimeRegistry::SetDataTransition(std::uint6
 FeatureDataTransitionState HostViewRuntimeRegistry::StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
 {
     return m_impl ? m_impl->StopDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+}
+
+bool HostViewRuntimeRegistry::Impl::FeatureLeasePort::PollRenderResources()
+{
+    // Stopping closes ordinary admissions but keeps owner cleanup available.
+    const auto lease=m_lease.lock();const auto port=m_port.lock();
+    return lease&&lease->GetIsOwnerThread()&&port&&port->PollRenderResources();
 }

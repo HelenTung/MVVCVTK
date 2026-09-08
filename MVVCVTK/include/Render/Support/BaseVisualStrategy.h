@@ -10,12 +10,15 @@
 #include <memory>
 #include <vector>
 
+class RenderFrameLifetime;
+
 // Host 内部主体策略基类；Feature overlay 不继承或接触该完整渲染契约。
 class BaseVisualStrategy : public AbstractVisualStrategy {
 protected:
     std::vector<vtkSmartPointer<vtkProp>> m_managedProps;
     std::weak_ptr<RenderEffect> m_renderEffect;
     std::shared_ptr<RenderEffectBinding> m_renderBinding;
+    std::shared_ptr<RenderFrameLifetime> m_frameLifetime;
     vtkWeakPointer<vtkRenderer> m_effectRenderer;
     RenderInputStamp m_renderInputStamp;
     RenderBindingUse m_bindingUse = RenderBindingUse::Current;

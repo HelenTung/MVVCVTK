@@ -25,7 +25,9 @@ enum class CropHostAction {
     BuildResult = 8,
     SetPolyData = 10,
     ClearPolyData,
-    Exit = 13
+    Exit = 13,
+    Cylinder = 14,
+    Sphere = 15
 };
 
 struct CropHostTarget {

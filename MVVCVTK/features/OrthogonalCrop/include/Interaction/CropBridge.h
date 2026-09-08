@@ -79,6 +79,8 @@ public:
     void SetSourceCommitFailed(SourceCommit&& prepared,CropFailure failure);
     bool SwitchCropBox();
     bool SwitchCropPlane();
+    bool SwitchCropCylinder();
+    bool SwitchCropSphere();
     bool SetCropMode(CropRemovalMode removalMode);
     bool PreviousCrop();
     bool NextCrop();
@@ -89,6 +91,7 @@ public:
     bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
 
+    bool RefreshWidgetTransform();
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
     // 从固定 Root 的明确节点路径做融合物化，不生成节点级中间 mask。

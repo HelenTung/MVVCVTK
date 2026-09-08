@@ -30,6 +30,7 @@ struct CropShaderPayload final {
     RenderInputStamp sourceStamp;
     std::size_t nodeCount = 0;
     std::shared_ptr<const CropPredicateTable> predicateTable;
+    CropNodeId nodeId = 0;
 };
 
 // active input model AABB，布局固定为 [minX, maxX, minY, maxY, minZ, maxZ]。
@@ -57,11 +58,13 @@ struct CropHistoryState final {
     std::uint64_t stateRevision = 0;
     CropNodeId requestedHead = 0;
     CropNodeId appliedHead = 0;
+    CropNodeId renderedHead = 0;
     std::size_t nodeCount = 0;
     std::size_t operationCount = 0;
     CropRemovalMode editMode = CropRemovalMode::None;
     bool hasEditableOp = false;
     bool isEditing = false;
+    bool isDragging = false;
     CropRequestId lastRequestId = 0;
     std::size_t pendingRequestCount = 0;
 };
@@ -252,6 +255,7 @@ struct CropHistorySnapshot final {
     std::uint64_t stateRevision = 0;
     CropNodeId requestedHead = 0;
     CropNodeId appliedHead = 0;
+    CropNodeId renderedHead = 0;
     std::size_t totalNodeCount = 0;
     std::vector<CropNodeSnapshot> nodes;
     std::vector<CropResultRecord> results;

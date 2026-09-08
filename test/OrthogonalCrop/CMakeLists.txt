@@ -6,6 +6,7 @@ add_executable(
     CropHistoryQueueTests.cpp
     CropGeometryTests.cpp
     CropMeshTests.cpp
+    CropCurveWidgetTests.cpp
     CropBridgeTests.cpp
     CropBridgeTests.h
     CropShaderPreviewTests.cpp
@@ -68,3 +69,6 @@ SetTestRuntime(OrthogonalCrop.Mesh mvvcvtk_crop_tests)
 if(MSVC)
     set_source_files_properties(CropMeshTests.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
+
+add_test(NAME OrthogonalCrop.Widgets COMMAND mvvcvtk_crop_tests widgets)
+SetTestRuntime(OrthogonalCrop.Widgets mvvcvtk_crop_tests)

@@ -460,7 +460,10 @@ bool CropAlgorithm::GetInputValid(const CropInputSnapshot& input)
 {
     if (!input.graph.view || !input.data
         || !GetDataRevisionRefValid(input.data->self)
-        || !GetBoundsValid(input.inputModelBounds)
+        || !std::all_of(input.inputModelBounds.begin(),input.inputModelBounds.end(),GetFinite)
+        || input.inputModelBounds[0]>input.inputModelBounds[1]
+        || input.inputModelBounds[2]>input.inputModelBounds[3]
+        || input.inputModelBounds[4]>input.inputModelBounds[5]
         || (input.binding
             && (!input.binding->target
                 || *input.binding->target != input.data->self))) {

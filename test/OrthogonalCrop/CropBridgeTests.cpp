@@ -5,6 +5,7 @@
 #include "Interaction/CropBridge.h"
 #include "Render/CropShaderController.h"
 #include "Render/Strategies/IsoSurfaceStrategy.h"
+#include "Render/Support/RenderFrameLifetime.h"
 
 #include <vtkCubeSource.h>
 #include <vtkImageData.h>
@@ -312,6 +313,29 @@ bool GetWidgetAndSiblingEdits() {
     return true;
 }
 
+bool GetCurvedWidgetHistory() {
+    for(const auto shape:{CropShape::Sphere,CropShape::Cylinder}) {
+        Fixture f;if(!f.ready)return false;
+        const bool switched=shape==CropShape::Sphere?f.bridge.SwitchCropSphere():f.bridge.SwitchCropCylinder();
+        if(!switched||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+        f.window->Render();
+        f.renderer->SetWorldPoint(1.5,shape==CropShape::Sphere?1.5:2.25,1.5,1);f.renderer->WorldToDisplay();
+        const auto* point=f.renderer->GetDisplayPoint();const int x=static_cast<int>(point[0]),y=static_cast<int>(point[1]);
+        f.interactor->SetEventPosition(x,y);f.interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
+        f.interactor->SetEventPosition(x+10,y);f.interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
+        f.interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
+        if(!Flush(f.bridge,f.window))return false;
+        const auto history=f.bridge.GetHistory();const auto node=f.bridge.GetNode(history.appliedHead);
+        if(!Check(node&&node->operation&&node->operation->geometryType==shape&&history.totalNodeCount==2
+            &&!f.service->GetIsInteracting(),"curve mouse release did not enter the common immutable history pipeline"))return false;
+        if(!f.bridge.SetCropMode(CropRemovalMode::RemoveInside)||!Flush(f.bridge,f.window))return false;
+        const auto sibling=f.bridge.GetNode(f.bridge.GetHistory().appliedHead);
+        if(!Check(sibling&&sibling->parentNodeId==history.rootNodeId&&sibling->nodeId!=node->nodeId
+            &&node->operation->removalMode==CropRemovalMode::KeepInside&&f.bridge.ExitCrop(),"curve mode replacement overwrote its original branch"))return false;
+    }
+    return true;
+}
+
 bool GetBranchesAndFrozenBuilds() {
     Fixture f;if(!f.ready)return false;const auto root=f.bridge.GetHistory().rootNodeId;
     const auto a=Append(f.bridge,root),b=Append(f.bridge,a.nodeId),c=Append(f.bridge,b.nodeId),d=Append(f.bridge,a.nodeId);
@@ -469,6 +493,43 @@ bool GetPruneAndMultiviewFailure() {
         "all-View Root fallback/prune commit failed");
 }
 
+bool GetActualRenderedHead() {
+    Fixture f;if(!f.ready)return false;
+    const auto wait=[&](const std::function<bool()>& done) {
+        for(int poll=0;poll<1000;++poll) {
+            RenderFrameLifetime::PollAll();if(done())return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return done();
+    };
+    const auto root=f.bridge.GetHistory().rootNodeId;const auto a=Append(f.bridge,root);
+    if(!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==a.nodeId&&f.bridge.GetHistory().renderedHead!=a.nodeId,
+        "shader commit was mistaken for a rendered frame"))return false;
+    f.window->Render();
+    if(!Check(wait([&]{return f.bridge.GetHistory().renderedHead==a.nodeId;}),"presented GPU frame did not map back to its node"))return false;
+    const auto b=Append(f.bridge,a.nodeId);if(!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==b.nodeId&&f.bridge.GetHistory().renderedHead==a.nodeId,
+        "applied head did not remain separate from the last rendered head"))return false;
+    f.window->SwapBuffersOff();f.window->Render();
+    if(!wait([&]{return !f.service->GetEffectState().isRenderPending;}))return false;
+    if(!Check(f.bridge.GetHistory().renderedHead==a.nodeId,"back-buffer validation was reported as presented"))return false;
+    f.window->SwapBuffersOn();f.window->Render();
+    if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
+    auto different=f.input.data->self;++different.generation;
+    if(!f.service->SetRenderInputStamp({different}))return false;
+    auto prepared=f.bridge.BuildSourceCommit(root,false);
+    if(!prepared||!f.service->StartCandidate({f.input.data->self}))return false;
+    f.window->SwapBuffersOff();f.window->Render();f.window->SwapBuffersOn();
+    RenderFrameLifetime::PollAll();
+    if(!f.service->SetCandidateView()||!f.bridge.GetSourceCommitReady(*prepared))return false;
+    f.bridge.SetSourceCommit(std::move(*prepared));f.service->CompleteCandidate();
+    if(!Check(f.bridge.GetHistory().appliedHead==root&&f.bridge.GetHistory().renderedHead!=root,
+        "candidate replay incorrectly became a rendered Root on adoption"))return false;
+    f.window->Render();
+    return Check(wait([&]{return f.bridge.GetHistory().renderedHead==root;}),"zero-node Root uniform did not produce a completed Root frame");
+}
+
 bool GetSourcePreviewCommit() {
     Fixture f;if(!f.ready)return false;
     const auto root=f.bridge.GetHistory().rootNodeId;
@@ -514,11 +575,13 @@ int CropBridgeSuite::GetFailCount() const
     int failures=0;
     const auto run=[&](bool result,const char* name){if(!result){std::cerr<<"Bridge scenario failed: "<<name<<'\n';++failures;}};
     run(GetWidgetAndSiblingEdits(),"widget edits and sibling replacement");
+    run(GetCurvedWidgetHistory(),"curved widgets and immutable history");
     run(GetBranchesAndFrozenBuilds(),"branches and fixed Root materialization");
     run(GetExitAndRebind(),"Exit, reentry and transactional target replacement");
     run(GetQueuedModesAndLag(),"pending release and every queued mode");
     run(GetShapeSequenceAndRoot(),"mixed shape sequence and Root redo preservation");
     run(GetPruneAndMultiviewFailure(),"protected prune and required View failure");
+    run(GetActualRenderedHead(),"applied, back-buffer and GPU-rendered node identities");
     run(GetSourcePreviewCommit(),"candidate source replay and no-fail adoption");
     run(GetStoppedLeaseCleanup(),"stopped lease cancellation and document cleanup");
     return failures;
