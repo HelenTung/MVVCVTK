@@ -1,4 +1,6 @@
 #include "Host/CropHostFeature.h"
+#include "Routing/CropRouter.h"
+#include <stdexcept>
 
 #include "App/Services/FeatureViewService.h"
 #include "Data/DataPayloads.h"
@@ -92,7 +94,9 @@ bool GetTargetsSame(const std::optional<CropHostTarget>& a,const std::optional<C
 }
 bool GetDocumentRequestsSame(const CropDocumentRequest& a,const CropDocumentRequest& b) {
     return a.action==b.action&&a.documentId==b.documentId&&a.requestId==b.requestId&&a.expectedRevision==b.expectedRevision
-        &&a.sourceRevision==b.sourceRevision&&GetTargetsSame(a.target,b.target);
+        &&a.sourceRevision==b.sourceRevision&&GetTargetsSame(a.target,b.target)&&a.restoreResult==b.restoreResult
+        &&a.availableRamBytes==b.availableRamBytes&&bool(a.archive)==bool(b.archive)
+        &&(!a.archive||CropHistory::GetArchivesSame(*a.archive,*b.archive));
 }
 }
 
@@ -109,6 +113,7 @@ public:
     CropHostState GetState() const;
     CropHostState GetState(CropDocumentId id) const;
     std::vector<CropDocumentId> GetDocuments() const;
+    std::optional<CropDocumentArchive> GetArchive(CropDocumentId id) const;
     CropHistorySnapshot GetHistory(CropDocumentId id,CropNodeId after,std::size_t limit) const;
     std::optional<CropEditOutcome> GetOutcome(CropDocumentId id,CropRequestId request) const;
     std::optional<CropBuildOutcome> GetBuildOutcome(CropDocumentId id,CropRequestId request) const;
@@ -119,10 +124,11 @@ public:
 private:
     bool GetOwnerReady() const noexcept;
     std::shared_ptr<Document> GetDocument(CropDocumentId id) const;
+    struct DocumentOpen;
     CropDocumentAdmission StartDocument(CropDocumentRequest request,CropDocumentCallback callback);
     bool SendDocumentOpen(bool cancel=false);
+    void StartDocumentView(const std::shared_ptr<DocumentOpen>& open);
     CropFailure GetRequestFailure(CropDocumentId id,CropRequestId request) const;
-    struct DocumentOpen;
     std::shared_ptr<DocumentOpen> m_open;
     CropRequestId m_expiredRequest=0;
     bool m_isPublishing=false;
@@ -182,6 +188,7 @@ public:
         std::shared_ptr<CompleteItem> completeItem;
     };
 
+    std::function<void(DataTransaction,std::shared_ptr<BuildPublication>)> m_publicationSink;
     struct SourceTransition final : FeatureDataCommit {
         CropBridge* bridge;
         CropBridge::SourceCommit prepared;
@@ -338,8 +345,20 @@ struct CropHostFeature::Impl::DocumentOpen final {
     std::shared_ptr<Document> previous,next;
     std::shared_ptr<Document::SourceTransition> transition;
     CropRequestId requestId=0;
+    CropRequestId closeRequest=0;
     bool isNew=false;
     std::optional<FeatureDataTransitionState> terminal;
+    std::optional<FeatureDataTransitionRequest> pendingView;
+    CropFailure preparationFailure=CropFailure::None;
+    struct RestoreWork final {
+        std::future<CropMaterializationCandidate> result;
+        std::thread worker;
+        std::shared_ptr<std::atomic<bool>> cancelled;
+        ~RestoreWork(){if(cancelled)cancelled->store(true);if(worker.joinable())worker.join();}
+    };
+    std::unique_ptr<RestoreWork> restore;
+    std::shared_ptr<Document::CompleteItem> restoreItem;
+    DataBinding resultBinding;
 };
 
 bool CropHostFeature::Impl::Document::AttachHost(
@@ -753,6 +772,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         if (record.resultId==m_buildRecord->resultId && record.status==CropResultStatus::Building) {
             hasBuilding=true;record.status=CropResultStatus::Published;
             record.recipeRevision=recipeRef;record.outputRevision=outputRef;
+            record.meshErrorBound=candidate.meshErrorBound;record.meshAreaErrorBound=candidate.meshAreaErrorBound;record.meshTriangleCount=candidate.meshTriangleCount;
         } else if (record.status==CropResultStatus::Published) {
             transaction.retireScopes.push_back({record.scopeId,DataLifetimeStatus::Published,
                 {record.recipeRevision,record.outputRevision},true});
@@ -790,6 +810,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         value.message = "Crop publication could not prepare all Root views.";
         return value;
     };
+    if(m_publicationSink){m_publicationSink(std::move(transaction),publication);return std::nullopt;}
     if (!transaction.retireScopes.empty()) {
         // Source input, outputs and retirement share one coordinator transaction.
         // No observable Root binding change may precede the retirement checks.
@@ -1134,7 +1155,7 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     const auto history=m_bridge->GetHistory(0,1);
     if(!nodeId)nodeId=history.appliedHead;
     if (!history.documentId || nodeId==history.rootNodeId || !m_bridge->GetNode(nodeId)) return false;
-    CropResultRecord building;
+    CropResultRecord building;building.options=options;
     building.resultId=CropHistory::CreateNodeId();building.nodeId=nodeId;
     building.scopeId=m_data->CreateDataEntityId();building.sourceRevision=history.sourceRevision;
     building.publicationGeneration=building.resultId;
@@ -1503,7 +1524,8 @@ CropDocumentAdmission CropHostFeature::Impl::Document::SendRequest(CropDocumentR
     const bool isClosed=request.documentId==m_lastClosedDocument && request.documentId!=0
         && m_dataState.documentStatus==CropDocumentStatus::Closed && request.action==CropDocumentAction::CloseDocument;
     if (isClosed) admission.stateRevision=m_lastClosedRevision;
-    if (request.target || request.sourceRevision || !request.requestId || !request.documentId || (request.documentId!=history.documentId && !isClosed)
+    if (request.target || request.sourceRevision || request.archive || !request.restoreResult
+        || request.availableRamBytes!=512ULL*1024*1024 || !request.requestId || !request.documentId || (request.documentId!=history.documentId && !isClosed)
         || (request.action!=CropDocumentAction::ReturnToSource && request.action!=CropDocumentAction::CloseDocument)) {
         admission.failureReason=CropFailure::InvalidRequest;return admission;
     }
@@ -2088,17 +2110,41 @@ CropEditAdmission CropHostFeature::Impl::SendRequest(CropEditRequest request,Cro
     result.failureReason=failure!=CropFailure::None?failure:document?CropFailure::Busy:CropFailure::InvalidRequest;return result;
 }
 CropDocumentAdmission CropHostFeature::Impl::SendRequest(CropDocumentRequest request,CropDocumentCallback callback) {
-    if(request.action==CropDocumentAction::CreateDocument||request.action==CropDocumentAction::ActivateDocument)
+    if(request.action==CropDocumentAction::CreateDocument||request.action==CropDocumentAction::ActivateDocument||request.action==CropDocumentAction::RestoreDocument)
         return StartDocument(std::move(request),std::move(callback));
     const auto document=GetDocument(request.documentId);
     const auto failure=GetRequestFailure(request.documentId,request.requestId);
     const bool replay=document&&document->m_requests.count(request.requestId)!=0;
+    // A new document under restoration has no published tree yet. Closing its
+    // admitted identity cancels that candidate through the same request ledger.
+    if(document&&failure==CropFailure::None&&!m_isPublishing&&m_open&&m_open->isNew
+        &&m_open->next==document&&!replay&&request.action==CropDocumentAction::CloseDocument) {
+        CropDocumentAdmission result;result.requestId=request.requestId;result.documentId=request.documentId;
+        const auto history=document->m_bridge->GetHistory(0,1);
+        result.rootNodeId=history.rootNodeId;result.stateRevision=history.stateRevision;
+        if(request.target||request.sourceRevision||request.archive||!request.restoreResult
+            ||request.availableRamBytes!=512ULL*1024*1024)result.failureReason=CropFailure::InvalidRequest;
+        else if(request.expectedRevision!=history.stateRevision)result.failureReason=CropFailure::StateVersionMismatch;
+        else if(m_open->closeRequest)result.failureReason=CropFailure::Busy;
+        else result.failureReason=document->ReserveRequest(request.documentId,request.requestId,Document::RequestKind::Document);
+        if(result.failureReason!=CropFailure::None)return result;
+        Document::RequestReservation reservation{document.get(),request.requestId};
+        Document::DocumentCommand command;command.request=request;command.onComplete=std::move(callback);
+        command.outcome.documentId=request.documentId;command.outcome.requestId=request.requestId;
+        command.outcome.rootNodeId=history.rootNodeId;command.outcome.stateRevision=history.stateRevision;
+        command.outcome.documentStatus=CropDocumentStatus::Closing;
+        document->m_documentCommands.emplace(request.requestId,std::move(command));
+        reservation.committed=true;m_open->closeRequest=request.requestId;
+        document->m_dataState.documentStatus=CropDocumentStatus::Closing;result.isAccepted=true;
+        (void)SendDocumentOpen(true);(void)m_context.host->SendWorkAvailable();return result;
+    }
     if(document&&failure==CropFailure::None&&!m_isPublishing&&(!m_open||replay))return document->SendRequest(std::move(request),std::move(callback));
     CropDocumentAdmission result;result.requestId=request.requestId;
     result.failureReason=failure!=CropFailure::None?failure:document?CropFailure::Busy:CropFailure::InvalidRequest;return result;
 }
 CropHostState CropHostFeature::Impl::GetState() const {
-    const auto document=GetDocument(0);return document?document->GetState():CropHostState{};
+    const auto document=GetDocument(0);auto state=document?document->GetState():CropHostState{};
+    state.isPublishing=state.isPublishing||m_isPublishing;return state;
 }
 CropHistorySnapshot CropHostFeature::Impl::GetHistory(CropDocumentId id,CropNodeId after,std::size_t limit) const {
     const auto document=GetDocument(id);return document&&document->m_isVisible?document->GetHistory(id,after,limit):CropHistorySnapshot{};
@@ -2137,7 +2183,8 @@ std::vector<FeatureOperationState> CropHostFeature::Impl::GetOperationStates() c
 }
 
 CropHostState CropHostFeature::Impl::GetState(CropDocumentId id) const {
-    const auto document=GetDocument(id);return document&&document->m_isVisible?document->GetState():CropHostState{};
+    const auto document=GetDocument(id);auto state=document&&document->m_isVisible?document->GetState():CropHostState{};
+    state.isPublishing=state.isPublishing||m_isPublishing;return state;
 }
 CropHostState CropHostFeature::GetState(CropDocumentId id) const {return m_impl->GetState(id);}
 std::vector<CropDocumentId> CropHostFeature::Impl::GetDocuments() const {
@@ -2175,7 +2222,11 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     for(const auto& document:m_documents)if(document->m_isPublishing||document->m_isBuildPending||document->m_buildRecord
         ||document->m_sourceTransition||document->m_pendingDocumentRequest||document->m_bridge->GetShaderTickNeeded())return reject(CropFailure::Busy);
     if(!request.target)return reject(CropFailure::InvalidRequest);
-    const bool create=request.action==CropDocumentAction::CreateDocument;
+    const bool restoring=request.action==CropDocumentAction::RestoreDocument;
+    const bool create=request.action==CropDocumentAction::CreateDocument||restoring;
+    if(bool(request.archive)!=restoring||(!restoring&&(!request.restoreResult||request.availableRamBytes!=512ULL*1024*1024)))return reject(CropFailure::InvalidRequest);
+    if(restoring&&!request.availableRamBytes)return reject(CropFailure::BadInput);
+    std::vector<CropNodeMapping> mappings;
     auto next=create?std::make_shared<Document>():GetDocument(request.documentId);
     if(!next)return reject(CropFailure::InvalidRequest);
     if(create) {
@@ -2186,6 +2237,10 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
         auto input=next->GetCropInput(*request.target);
         if(!input||input->data->self!=*request.sourceRevision)return reject(CropFailure::SourceMismatch);
         if(!next->m_bridge->SetCropInput(std::move(*input)))return reject(CropFailure::BadInput);
+        if(restoring) {
+            const auto failure=next->m_bridge->SetArchive(*request.archive,mappings);
+            if(failure!=CropFailure::None)return reject(failure);
+        }
     } else {
         const auto history=next->m_bridge->GetCropHistory();admission.stateRevision=history.stateRevision;
         if(!history.documentId||request.sourceRevision)return reject(CropFailure::InvalidRequest);
@@ -2210,6 +2265,8 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     Document::DocumentCommand command;command.request=request;command.onComplete=std::move(callback);
     command.outcome.documentId=history.documentId;command.outcome.rootNodeId=history.rootNodeId;
     command.outcome.requestId=request.requestId;command.outcome.stateRevision=history.stateRevision;
+    command.outcome.nodeMappings=std::move(mappings);
+    if(restoring)command.outcome.restoreStatus=CropRestoreStatus::HistoryOnly;
     next->m_documentCommands.emplace(request.requestId,std::move(command));
     if(next==m_current) {
         auto& value=next->m_documentCommands.at(request.requestId).outcome;value.status=CropEditStatus::Succeeded;
@@ -2221,8 +2278,47 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
             document->m_activeTarget=std::move(target);document->m_activeViewIds=std::move(viewIds);}}
     } viewReservation{next.get(),next->m_activeTarget,next->m_activeViewIds};
     if(!next->m_bridge->StartView(view))return reject(CropFailure::PreviewNotReady);
+    DataSnapshot restoreOutput;std::shared_ptr<const DataResourceLease> restoreReader;
+    CropResultRecord archivedResult;CropBuildParams restoreParams;
+    if(restoring&&request.restoreResult&&request.archive->result) {
+        archivedResult=*request.archive->result;
+        bool owned=false;
+        for(const auto& document:m_documents)for(const auto& record:document->m_bridge->GetHistory(0,1).results)
+            owned=owned||(record.status==CropResultStatus::Published&&CropHistory::GetRecordsSame(record,archivedResult));
+        const auto& map=next->m_documentCommands.at(request.requestId).outcome.nodeMappings;
+        const auto mapped=std::find_if(map.begin(),map.end(),[&](const auto& item){return item.archivedNodeId==archivedResult.nodeId;});
+        if(owned&&mapped!=map.end()&&m_context.data->GetDataLifetime(archivedResult.scopeId).status==DataLifetimeStatus::Published) {
+            const auto graph=m_context.data->GetDataGraph();
+            auto output=m_context.data->GetData(graph,archivedResult.outputRevision);const auto recipe=m_context.data->GetData(graph,archivedResult.recipeRevision);
+            std::vector<CropOpItem> operations;
+            auto node=next->m_bridge->GetNode(mapped->nodeId);
+            while(node&&node->operation){operations.push_back(*node->operation);node=next->m_bridge->GetNode(node->parentNodeId);}
+            std::reverse(operations.begin(),operations.end());
+            const auto roi=recipe?std::dynamic_pointer_cast<const RoiGeometryPayload>(recipe->payload):nullptr;
+            const auto hasInput=[](const DataSnapshot& data,std::string_view role,DataRevisionRef ref) {
+                return data&&std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input){return input.role==role&&input.source==ref;});
+            };
+            if(output&&roi&&output->lifetimeScope==archivedResult.scopeId&&recipe->lifetimeScope==archivedResult.scopeId
+                &&hasInput(output,"source-data",history.sourceRevision)&&hasInput(output,"crop-recipe",recipe->self)
+                &&hasInput(recipe,"source-data",history.sourceRevision)&&CropRouter::GetRecipeSame(*roi,operations)) {
+                const auto access=output->lifetime.lock();restoreReader=access?access->StartResourceUse(output->self,"crop-archive-restore"):nullptr;
+                if(restoreReader) {
+                    restoreOutput=std::move(output);restoreParams.documentId=history.documentId;restoreParams.nodeId=mapped->nodeId;
+                    restoreParams.requestId=request.requestId;restoreParams.sourceRevision=history.sourceRevision;
+                    restoreParams.operations=std::move(operations);restoreParams.nodeCount=restoreParams.operations.size();restoreParams.availableRamBytes=request.availableRamBytes;
+                    restoreParams.meshTolerance=archivedResult.options.meshTolerance;restoreParams.maxCells=archivedResult.options.maxCells;restoreParams.maxDepth=archivedResult.options.maxDepth;
+                    CropResultRecord building=archivedResult;building.resultId=CropHistory::CreateNodeId();building.nodeId=mapped->nodeId;
+                    building.scopeId=m_context.data->CreateDataEntityId();building.status=CropResultStatus::Building;
+                    building.recipeRevision={};building.outputRevision={};building.publicationGeneration=history.stateRevision+1;
+                    if(!building.resultId||!GetDataEntityIdValid(building.scopeId))return reject(CropFailure::ResourceLimit);
+                    next->m_buildRecord=building;next->m_bridge->SetResults({building});next->m_isBuildPending=true;
+                    next->m_dataState.documentStatus=CropDocumentStatus::Building;
+                }
+            }
+        }
+    }
     auto prepared=next->m_bridge->BuildSourceCommit(history.appliedHead,false);
-    if(!prepared){(void)next->m_bridge->ClearBindings();return reject(CropFailure::PreviewNotReady);}
+    if(!prepared){const auto failure=next->m_bridge->GetPreparationFailure();(void)next->m_bridge->ClearBindings();return reject(failure);}
     const auto transitionId=next->GetNextSceneRequestId();
     const auto graph=m_context.data->GetDataGraph();
     const auto binding=m_context.data->GetDataBinding(graph,primaryVolumeBinding).value_or(DataBinding{std::string(primaryVolumeBinding)});
@@ -2235,6 +2331,7 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     transition.transaction.bindings.push_back({std::string(primaryVolumeBinding),binding.revision,true,binding.target,source.data->self});
     transition.renderInput=BuildRootRenderInput(source,graph,DataBinding{std::string(primaryVolumeBinding),source.data->self,binding.revision+1});
     const auto resultBinding=m_context.data->GetDataBinding(graph,cropResultBinding).value_or(DataBinding{std::string(cropResultBinding)});
+    open->resultBinding=resultBinding;
     std::optional<DataRevisionRef> selectedResult;
     for(const auto& result:history.results)if(result.status==CropResultStatus::Published)selectedResult=result.outputRevision;
     if(resultBinding.target!=selectedResult)
@@ -2247,8 +2344,11 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
         const auto newEffect=next->m_bridge->GetViewEffect(port.get());
         if(oldEffect||newEffect)transition.effects.push_back({id,{oldEffect,newEffect}});
     }
-    open->transition->onCommit=[this,next,previous=open->previous](const DataCommitResult&) noexcept {
-        if(previous)previous->m_isEditingDocument=false;
+    const std::weak_ptr<DocumentOpen> weakOpen=open;
+    open->transition->onCommit=[this,next,previous=open->previous,weakOpen](const DataCommitResult& committed) noexcept {
+        const auto value=weakOpen.lock();if(!value)std::terminate();
+        if(value->transition->publication)next->SetBuildPublished(*value->transition->publication,committed);
+        if(previous){previous->m_isEditingDocument=false;previous->m_activeViewIds.clear();}
         next->m_isEditingDocument=true;next->m_isVisible=true;m_current=next;
     };
     if(create)m_documents.push_back(next);
@@ -2256,21 +2356,62 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     // Accepting the explicit switch ends the old gesture; no old predicate or
     // result is removed until the full data/effect candidate commits.
     if(open->previous)(void)open->previous->m_bridge->ExitCrop();
-    FeatureDataTransitionState started;started.commitFailure=DataCommitFailure::None;
-    try {
-        Document::PublishGuard guard(m_isPublishing);
-        // Activity is a fallible part of preparation. If it or any later
-        // candidate fails, retain this open operation until compensation works.
-        if(m_context.host->SetActiveViews(next->m_activeViewIds))started=m_context.host->StartDataTransition(std::move(transition));
-    } catch(...) {}
-    if(started.status!=FeatureRunStatus::Preparing&&started.status!=FeatureRunStatus::Running) {
-        open->terminal=std::move(started);(void)SendDocumentOpen();
-    }
+    open->pendingView=std::move(transition);
+    if(restoreOutput) {
+        try {
+            open->restoreItem=std::make_shared<Document::CompleteItem>();open->restoreItem->resultId=next->m_buildRecord->resultId;
+            next->m_completeState->items.push_back(open->restoreItem);
+            next->m_operation.operation={std::string(kFeatureId),m_context.host->GetAttachmentId(),request.requestId};
+            next->m_operation.status=FeatureRunStatus::Running;next->m_operation.stateRevision=1;
+            next->m_operation.inputs={{"source-data",history.sourceRevision}};
+            open->restore=std::make_unique<DocumentOpen::RestoreWork>();open->restore->cancelled=std::make_shared<std::atomic<bool>>(false);
+            const auto cancelled=open->restore->cancelled;
+            auto task=CropRouter{}.BuildRestoreTask(source,std::move(restoreParams),std::move(restoreOutput),std::move(restoreReader),archivedResult,
+                [cancelled]{return cancelled->load(std::memory_order_acquire);});
+            open->restore->result=task.get_future();
+            const std::weak_ptr<FeatureHostControl> host=m_context.host;
+            open->restore->worker=std::thread([task=std::move(task),host]() mutable {task();try{if(const auto value=host.lock())(void)value->SendWorkAvailable();}catch(...){}});
+        }catch(...) {open->restore.reset();open->preparationFailure=CropFailure::WorkerStartFailed;open->terminal=FeatureDataTransitionState{};}
+    } else StartDocumentView(open);
+    admission.stateRevision=next->m_bridge->GetCropHistory().stateRevision;
+    next->m_documentCommands.at(request.requestId).outcome.stateRevision=admission.stateRevision;
+    if(open->terminal)(void)SendDocumentOpen();
     (void)m_context.host->SendWorkAvailable();return admission;
 }
 
 bool CropHostFeature::Impl::SendDocumentOpen(bool cancel) {
     const auto open=m_open;if(!open)return true;
+    cancel=cancel||open->closeRequest!=0;
+    if(open->restore) {
+        if(cancel)open->restore->cancelled->store(true,std::memory_order_release);
+        if(open->restore->result.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return false;
+        const bool cancelled=open->restore->cancelled->load(std::memory_order_acquire);
+        CropMaterializationCandidate candidate;
+        try {candidate=open->restore->result.get();}catch(...){candidate.failureReason=CropFailure::WorkerFailed;}
+        open->restore.reset();
+        if(cancelled||!candidate.isSucceeded) {
+            open->preparationFailure=cancelled?CropFailure::Cancelled:candidate.failureReason;open->terminal=FeatureDataTransitionState{};
+        } else {
+            const std::weak_ptr<DocumentOpen> weak=open;
+            open->next->m_publicationSink=[weak](DataTransaction transaction,std::shared_ptr<Document::BuildPublication> publication) {
+                const auto value=weak.lock();if(!value||!value->pendingView)throw std::runtime_error("Restore publication lost its candidate.");
+                auto& target=value->pendingView->transaction;target.outputs=std::move(transaction.outputs);
+                for(auto& binding:transaction.bindings) {
+                    const auto found=std::find_if(target.bindings.begin(),target.bindings.end(),[&](const auto& item){return item.binding==binding.binding;});
+                    if(found==target.bindings.end())target.bindings.push_back(std::move(binding));else *found=std::move(binding);
+                }
+                target.retireScopes=std::move(transaction.retireScopes);value->transition->publication=std::move(publication);
+            };
+            try {
+                const auto failed=open->next->SetBuildResult(open->next->m_bridge->GetSource(),open->resultBinding,std::move(candidate),
+                    open->next->m_completeState,open->restoreItem);
+                if(failed){open->preparationFailure=failed->failureReason;open->terminal=FeatureDataTransitionState{};}
+            }catch(...){open->preparationFailure=CropFailure::WorkerFailed;open->terminal=FeatureDataTransitionState{};}
+            open->next->m_publicationSink={};
+            if(!open->terminal)StartDocumentView(open);
+        }
+    }
+    if(cancel&&open->pendingView&&!open->terminal){open->preparationFailure=CropFailure::Cancelled;open->terminal=FeatureDataTransitionState{};}
     if(!open->terminal) {
         FeatureDataTransitionState state;
         try {Document::PublishGuard guard(m_isPublishing);state=cancel?m_context.host->StopDataTransition(open->transition->requestId)
@@ -2288,15 +2429,52 @@ bool CropHostFeature::Impl::SendDocumentOpen(bool cancel) {
     if(open->transition->isCommitted) {
         if(open->previous){(void)open->previous->m_bridge->ClearBindings();open->previous->m_activeViewIds.clear();}
         result.status=CropEditStatus::Succeeded;result.stateRevision=open->next->m_bridge->GetCropHistory().stateRevision;
+        if(open->transition->publication)result.restoreStatus=CropRestoreStatus::ResultRestored;
     } else {
-        const auto failure=state.status==FeatureRunStatus::Cancelled?CropFailure::Cancelled:
+        const auto failure=open->preparationFailure!=CropFailure::None?open->preparationFailure:state.status==FeatureRunStatus::Cancelled?CropFailure::Cancelled:
             state.commitFailure==DataCommitFailure::None?GetCropPreviewFailure(state.effectFailure):GetCropFailure(state.commitFailure);
         open->next->m_bridge->SetSourceCommitFailed(std::move(open->transition->prepared),failure);
+        open->next->ClearBuildingResult();open->next->m_isBuildPending=false;
+        if(open->restoreItem){open->next->m_operation.status=failure==CropFailure::Cancelled?FeatureRunStatus::Cancelled:FeatureRunStatus::Failed;
+            open->next->m_operation.stateRevision=4;open->next->m_operation.progress=0;}
+        if(open->restoreItem)(void)Document::RemoveComplete(open->next->m_completeState,open->restoreItem);
         (void)open->next->m_bridge->ClearBindings();open->next->m_activeViewIds.clear();open->next->m_activeTarget.reset();
         result.status=failure==CropFailure::Cancelled?CropEditStatus::Cancelled:CropEditStatus::Failed;
-        result.failureReason=failure;result.blockers=std::move(state.blockers);
+        result.failureReason=failure;result.blockers=std::move(state.blockers);result.restoreStatus=CropRestoreStatus::None;
+        result.stateRevision=open->next->m_bridge->GetCropHistory().stateRevision;
         if(open->isNew){open->next->m_lastClosedDocument=result.documentId;open->next->m_lastClosedRevision=result.stateRevision;
             (void)open->next->m_bridge->ClearDocument();open->next->m_dataState.documentStatus=CropDocumentStatus::Closed;open->next->m_isVisible=true;}
     }
+    result.documentStatus=open->next->m_dataState.documentStatus;
+    if(open->closeRequest) {
+        auto& closed=open->next->m_documentCommands.at(open->closeRequest).outcome;
+        closed.status=CropEditStatus::Succeeded;closed.documentStatus=CropDocumentStatus::Closed;
+        closed.stateRevision=result.stateRevision;
+    }
     m_open.reset();return true;
+}
+
+std::optional<CropDocumentArchive> CropHostFeature::Impl::GetArchive(CropDocumentId id) const {
+    const auto document=GetDocument(id);
+    if(!document||!document->m_isVisible||!document->m_bridge->GetCropHistory().documentId||document->m_isBuildPending
+        ||document->m_pendingDocumentRequest||document->m_sourceTransition||document->m_bridge->GetShaderTickNeeded())return {};
+    auto archive=document->m_bridge->GetArchive();
+    if(archive.result) {
+        const auto& result=*archive.result;const auto graph=m_context.data->GetDataGraph();
+        if(m_context.data->GetDataLifetime(result.scopeId).status!=DataLifetimeStatus::Published
+            ||!m_context.data->GetData(graph,result.recipeRevision)||!m_context.data->GetData(graph,result.outputRevision))archive.result.reset();
+    }
+    return archive;
+}
+std::optional<CropDocumentArchive> CropHostFeature::GetArchive(CropDocumentId id) const {return m_impl->GetArchive(id);}
+
+void CropHostFeature::Impl::StartDocumentView(const std::shared_ptr<DocumentOpen>& open) {
+    FeatureDataTransitionState started;started.commitFailure=DataCommitFailure::None;
+    try {
+        Document::PublishGuard guard(m_isPublishing);
+        if(open->pendingView&&m_context.host->SetActiveViews(open->next->m_activeViewIds)) {
+            auto request=std::move(*open->pendingView);open->pendingView.reset();started=m_context.host->StartDataTransition(std::move(request));
+        }
+    }catch(...) {}
+    if(started.status!=FeatureRunStatus::Preparing&&started.status!=FeatureRunStatus::Running)open->terminal=std::move(started);
 }

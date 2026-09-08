@@ -239,6 +239,9 @@ struct CropResultRecord final {
     DataRevisionRef recipeRevision;
     DataRevisionRef outputRevision;
     std::uint64_t publicationGeneration = 0;
+    CropBuildOptions options;
+    double meshErrorBound=0,meshAreaErrorBound=0;
+    std::size_t meshTriangleCount=0;
 };
 
 struct CropNodeSnapshot final {
@@ -314,6 +317,10 @@ struct CropPruneImpact final {
     CropNodeId fallbackNode = 0;
 };
 
+struct CropNodeMapping final {
+    CropNodeId archivedNodeId=0;
+    CropNodeId nodeId=0;
+};
 struct CropDocumentArchive final {
     std::uint32_t schemaVersion = 1;
     DataRevisionRef sourceRevision;
@@ -323,6 +330,11 @@ struct CropDocumentArchive final {
     CropNodeId requestedHead = 0;
     CropNodeId appliedHead = 0;
     std::optional<CropResultRecord> result;
+    DataTypeId sourceType;
+    std::string coordinateFrame;
+    // A mask belongs to its immutable formal source revision, never a mutable
+    // VTK allocation address. Empty means the Root has no validity mask.
+    std::optional<DataRevisionRef> maskSourceRevision;
 };
 
 enum class CropEditKind : std::uint8_t { Append, Replace, Select, Prune };

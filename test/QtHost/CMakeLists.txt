@@ -112,6 +112,8 @@ SetTestRuntime(QtHost.Methods mvvcvtk_host_method_tests)
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_test(NAME OrthogonalCrop.Lifecycle COMMAND mvvcvtk_host_method_tests --case crop-lifecycle)
     SetTestRuntime(OrthogonalCrop.Lifecycle mvvcvtk_host_method_tests)
+    add_test(NAME OrthogonalCrop.Archive COMMAND mvvcvtk_host_method_tests --case crop-archive)
+    SetTestRuntime(OrthogonalCrop.Archive mvvcvtk_host_method_tests)
 endif()
 
 add_executable(

@@ -220,10 +220,12 @@ public:
     bool GetResultsValid(const std::vector<CropResultRecord>& results) const { return m_tree.GetResultsValid(results); }
     void SetResults(std::vector<CropResultRecord>&& results) noexcept { m_tree.SetResults(std::move(results)); }
     void SetSourceCommitFailed(std::unique_ptr<SourceCommit::Impl> prepared,CropFailure failure);
-    CropDocumentArchive GetArchive() const { return m_tree.GetArchive(); }
+    CropDocumentArchive GetArchive() const;
+    CropFailure SetArchive(const CropDocumentArchive& archive,std::vector<CropNodeMapping>& mappings);
     bool ClearDocument();
     bool CancelPending();
     bool GetSourceTransitionNeeded() const { return !m_commands.GetIsEmpty() && !m_pendingShader && !GetTargetsReady() && !m_sourceGate->isPending; }
+    CropFailure preparationFailure=CropFailure::PreviewNotReady;
     std::unique_ptr<SourceCommit::Impl> BuildSourceCommit(CropNodeId nodeId,bool isQueued);
     bool GetSourceCommitReady(const SourceCommit::Impl& prepared) const noexcept;
     void SetSourceCommit(std::unique_ptr<SourceCommit::Impl> prepared) noexcept;
@@ -656,6 +658,32 @@ bool CropBridge::Impl::CancelPending()
     return true;
 }
 
+CropDocumentArchive CropBridge::Impl::GetArchive() const {
+    auto archive=m_tree.GetArchive();if(!m_input.data)return archive;
+    archive.sourceType=m_input.data->type;
+    if(const auto image=std::dynamic_pointer_cast<const ImageGrid3DPayload>(m_input.data->payload)) {
+        archive.imageGeometry=image->GetGeometry();archive.coordinateFrame=image->GetGeometry().coordinateFrame;
+        if(image->GetValidityMask())archive.maskSourceRevision=m_input.data->self;
+    } else if(const auto mesh=std::dynamic_pointer_cast<const SurfaceMeshPayload>(m_input.data->payload))archive.coordinateFrame=mesh->GetCoordinateFrame();
+    return archive;
+}
+CropFailure CropBridge::Impl::SetArchive(const CropDocumentArchive& archive,std::vector<CropNodeMapping>& mappings) {
+    mappings.clear();
+    if(!GetOwnerReady()||!m_input.data||m_tree.GetNodeCount()!=1||!m_tree.GetResults().empty()||GetCropBound()
+        ||m_buildTask||m_sourceGate->isPending||!m_commands.GetIsEmpty())return CropFailure::Busy;
+    const auto expected=GetArchive();
+    const auto canonical=m_input.graph.view?m_input.graph.view->GetData(m_input.data->self):nullptr;
+    if(!canonical||canonical->payload!=m_input.data->payload||archive.sourceRevision!=expected.sourceRevision
+        ||archive.sourceType!=expected.sourceType||archive.coordinateFrame!=expected.coordinateFrame
+        ||archive.maskSourceRevision!=expected.maskSourceRevision||bool(archive.imageGeometry)!=bool(expected.imageGeometry)
+        ||(archive.imageGeometry&&!CropHistory::GetGeometrySame(*archive.imageGeometry,*expected.imageGeometry)))return CropFailure::SourceMismatch;
+    if(archive.requestedHead!=archive.appliedHead)return CropFailure::BadInput;
+    CropFailure failure;auto history=CropHistory::CreateFromArchive(archive,failure,&mappings);
+    if(!history)return failure;
+    auto path=history->GetPath(history->GetAppliedHead());
+    m_tree=std::move(*history);m_activePath=std::move(path);m_activePayload={};return CropFailure::None;
+}
+
 bool CropBridge::Impl::ClearDocument()
 {
     if (!GetOwnerReady() || !m_tree.GetResults().empty() || m_buildTask || m_sourceGate->isPending) return false;
@@ -666,6 +694,7 @@ bool CropBridge::Impl::ClearDocument()
 
 std::unique_ptr<CropBridge::SourceCommit::Impl> CropBridge::Impl::BuildSourceCommit(CropNodeId nodeId,bool isQueued)
 {
+    preparationFailure=CropFailure::PreviewNotReady;
     const bool offline=m_targets.empty()&&!isQueued&&nodeId==m_tree.GetRootId();
     if(!GetOwnerReady() || (!offline&&!GetLeaseReady()) || m_sourceGate->isPending || m_pendingShader
         || (m_targets.empty()&&!offline) || (!isQueued && !m_commands.GetIsEmpty()))return {};
@@ -675,10 +704,10 @@ std::unique_ptr<CropBridge::SourceCommit::Impl> CropBridge::Impl::BuildSourceCom
         (void)SetInteraction(m_commitSource,!m_commands.GetIsEmpty());
         return {};
     }
-    if(!m_tree.GetStageReady(stage))return {};
+    if(!m_tree.GetStageReady(stage)){if(stage.failureReason!=CropFailure::None)preparationFailure=stage.failureReason;return {};}
     auto table=CropAlgorithm::BuildPredicateTable(stage.operations,stage.operations.size());
-    if(!table.isSucceeded||!table.predicateTable)return {};
-    const auto revision=CreateShaderRevision();if(!revision)return {};
+    if(!table.isSucceeded||!table.predicateTable){preparationFailure=table.failureReason;return {};}
+    const auto revision=CreateShaderRevision();if(!revision){preparationFailure=CropFailure::ResourceLimit;return {};}
     auto prepared=std::make_unique<SourceCommit::Impl>();
     prepared->payload={revision,GetInputStamp(m_input),stage.operations.size(),std::move(table.predicateTable)};
     prepared->payload.nodeId=stage.head;
@@ -688,7 +717,7 @@ std::unique_ptr<CropBridge::SourceCommit::Impl> CropBridge::Impl::BuildSourceCom
         if(!target.effect || !target.effect->SetSourcePreview(prepared->payload))return {};
         prepared->effects.push_back(target.effect);
     }
-    prepared->gate=m_sourceGate;m_sourceGate->isPending=true;
+    prepared->gate=m_sourceGate;m_sourceGate->isPending=true;preparationFailure=CropFailure::None;
     return prepared;
 }
 
@@ -1634,6 +1663,7 @@ std::shared_ptr<RenderEffect> CropBridge::GetViewEffect(const FeatureViewService
 bool CropBridge::GetResultsValid(const std::vector<CropResultRecord>& results) const { return m_impl->GetOwnerReady()&&m_impl->GetResultsValid(results); }
 void CropBridge::SetResults(std::vector<CropResultRecord>&& results) noexcept { m_impl->SetResults(std::move(results)); }
 CropDocumentArchive CropBridge::GetArchive() const { return m_impl->GetOwnerReady()?m_impl->GetArchive():CropDocumentArchive{}; }
+CropFailure CropBridge::SetArchive(const CropDocumentArchive& archive,std::vector<CropNodeMapping>& mappings) {return m_impl->SetArchive(archive,mappings);}
 bool CropBridge::CancelPending() { return m_impl->CancelPending(); }
 bool CropBridge::ClearDocument() { return m_impl->ClearDocument(); }
 
@@ -1649,6 +1679,7 @@ std::optional<CropBridge::SourceCommit> CropBridge::BuildSourceCommit(CropNodeId
     if(!prepared)return std::nullopt;
     return SourceCommit(std::move(prepared));
 }
+CropFailure CropBridge::GetPreparationFailure() const {return m_impl->GetOwnerReady()?m_impl->preparationFailure:CropFailure::PreviewNotReady;}
 bool CropBridge::GetSourceCommitReady(const SourceCommit& prepared) const noexcept
 {return prepared.m_impl && m_impl->GetSourceCommitReady(*prepared.m_impl);}
 void CropBridge::SetSourceCommit(SourceCommit&& prepared) noexcept {m_impl->SetSourceCommit(std::move(prepared.m_impl));}

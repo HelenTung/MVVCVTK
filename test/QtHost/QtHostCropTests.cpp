@@ -185,6 +185,7 @@ class DocumentControlGate final : public FeatureHostControl {
 public:
     explicit DocumentControlGate(std::shared_ptr<FeatureHostControl> value):next(std::move(value)){}
     int activeFailures=0;bool rejectTransition=false;
+    std::vector<std::weak_ptr<const IDataPayload>> rejectedPayloads;
     bool AttachInput(HostInputBinding value) override {return next->AttachInput(std::move(value));}
     bool DetachInput(std::string_view value) override {return next->DetachInput(value);}
     bool SetActiveViews(const std::vector<std::string>& ids) override {if(activeFailures){--activeFailures;return false;}return next->SetActiveViews(ids);}
@@ -194,7 +195,7 @@ public:
     bool SendWorkAvailable() override {return next->SendWorkAvailable();}
     std::uint64_t GetAttachmentId() const noexcept override {return next->GetAttachmentId();}
     FeatureDataTransitionState StartDataTransition(FeatureDataTransitionRequest value) override {
-        if(rejectTransition){FeatureDataTransitionState result;result.commitFailure=DataCommitFailure::None;result.effectFailure=RenderEffectFailure::PrecisionNotMet;return result;}
+        if(rejectTransition){for(const auto& output:value.transaction.outputs)rejectedPayloads.push_back(output.payload);FeatureDataTransitionState result;result.commitFailure=DataCommitFailure::None;result.effectFailure=RenderEffectFailure::PrecisionNotMet;return result;}
         return next->StartDataTransition(std::move(value));
     }
     FeatureDataTransitionState SetDataTransition(std::uint64_t id) override {return next->SetDataTransition(id);}
@@ -921,6 +922,160 @@ bool GetMultiDocumentLifecycle(bool dependencyStop=false)
     if(!check(open(overflow)!=0&&feature->GetDocuments().size()==15,"Closing a document frees live capacity with a fresh identity"))return false;
     return check(wait([&]{return session.DetachFeature(*gate);})&&session.DetachFeature(*probe)&&session.Stop(),
         "Closing all documents releases their trees and leaves the Feature detachable");
+}
+
+bool GetArchiveRestoreCase(bool meshCase)
+{
+    VtkAppHostSession session(GetCropSessionConfig());auto feature=std::make_shared<CropHostFeature>();
+    auto probe=std::make_shared<ContextProbeFeature>();auto gate=std::make_shared<DocumentFeatureGate>(feature);
+    if(!session.BuildSession()||!session.AttachFeature(gate)||!session.AttachFeature(probe))return false;
+    const auto* primary=session.GetPrimaryEndpoint();const auto* timer=session.GetRenderViewEndpoint("crop-timer");if(!primary||!timer)return false;
+    for(const auto* endpoint:{primary,timer}){endpoint->renderWindow->SetOffScreenRendering(1);endpoint->renderWindow->SetSize(100,100);}
+    HostTimerConfig config;config.isTimerEnabled=true;config.targetView={"crop-timer",false,HostRenderViewRole::Auxiliary};
+    if(!session.AttachTimer(config)||!session.Start())return false;
+    const auto wait=[&](const std::function<bool()>& done){for(int poll=0;poll<2500;++poll){if(done())return true;SendTicks(*timer,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}return done();};
+    const auto check=[](bool value,const char* text){return GetCaseResult(value,text);};
+    bool loaded=false,loadOk=false;if(!SendReload(session,loaded,loadOk)||!wait([&]{return loaded;})||!loadOk)return false;
+    auto target=GetCropTarget();target.targetViews.viewIds.push_back("crop-timer");
+    if(meshCase){auto cube=vtkSmartPointer<vtkCubeSource>::New();cube->SetXLength(4);cube->SetYLength(4);cube->SetZLength(4);cube->Update();
+        if(!feature->SendRequest(GetPolyRequest(cube->GetOutput())))return false;target.inputBinding=std::string(cropInputBinding);}
+    if(!feature->SendRequest(GetTargetRequest(CropHostAction::Start,target)))return false;
+    auto initial=feature->GetHistory();
+    if(!wait([&]{return probe->GetViewService("crop-primary")->GetRenderInputStamp()->dataRevision==initial.sourceRevision;}))return false;
+    CropVectorDouble3Array center{};
+    if(!meshCase) {
+        const auto data=probe->m_data->GetData(probe->m_data->GetDataGraph(),initial.sourceRevision);
+        const auto payload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload);
+        const auto& geometry=payload->GetGeometry();center=geometry.origin;
+        for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+            center[row]+=geometry.direction[row*3+column]*geometry.spacing[column]
+                *(0.5*geometry.extent[2*column]+0.5*geometry.extent[2*column+1]);
+    }
+    const auto edit=[&](int axis) {
+        CropEditRequest request;request.documentId=initial.documentId;request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=feature->GetHistory().stateRevision;
+        request.kind=CropEditKind::Append;request.nodeId=initial.rootNodeId;request.operation.geometryType=CropShape::Plane;
+        request.operation.planeNormalInInputModel={0,0,0};request.operation.planeNormalInInputModel[axis]=1;
+        request.operation.planeCenterInInputModel=center;
+        const auto accepted=feature->SendRequest(request);if(!accepted)return CropNodeId{};
+        if(!check(!feature->GetArchive(initial.documentId),"Archive query excludes an uncommitted edit"))return CropNodeId{};
+        if(!wait([&]{const auto out=feature->GetOutcome(initial.documentId,request.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return CropNodeId{};
+        return accepted.nodeId;
+    };
+    const auto resultNode=edit(0),previewNode=edit(1);if(!resultNode||!previewNode)return false;
+    CropBuildRequest build;build.documentId=initial.documentId;build.nodeId=resultNode;build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=feature->GetHistory().stateRevision;
+    const auto buildAdmission=feature->SendRequest(build);
+    if(!buildAdmission||!wait([&]{const auto out=feature->GetBuildOutcome(initial.documentId,build.requestId);return out&&out->status!=CropEditStatus::Queued;})) {
+        std::cerr<<"Archive fixture build admission/finalization: "<<static_cast<int>(buildAdmission.failureReason)<<"\n";return false;
+    }
+    const auto buildOutcome=feature->GetBuildOutcome(initial.documentId,build.requestId);
+    if(!buildOutcome||buildOutcome->status!=CropEditStatus::Succeeded){std::cerr<<"Archive fixture build failure: "
+        <<(buildOutcome?static_cast<int>(buildOutcome->result.failureReason):-1)<<"\n";return false;}
+    const auto saved=feature->GetArchive(initial.documentId);if(!saved||!saved->result){std::cerr<<"Archive fixture snapshot absent\n";return false;}
+    const auto makeRestore=[&] {
+        CropDocumentRequest request;request.action=CropDocumentAction::RestoreDocument;request.requestId=CropHostFeature::CreateRequestId();
+        request.target=target;request.sourceRevision=saved->sourceRevision;request.archive=*saved;return request;
+    };
+    const auto awaitOutcome=[&](CropDocumentId id,CropRequestId request) {
+        return wait([&]{const auto out=feature->GetDocumentOutcome(id,request);return out&&out->status!=CropEditStatus::Queued;});
+    };
+    auto bad=makeRestore();bad.archive->coordinateFrame="wrong-frame";
+    const auto unchanged=feature->GetHistory();
+    if(!check(feature->SendRequest(bad).failureReason==CropFailure::SourceMismatch&&feature->GetHistory().stateRevision==unchanged.stateRevision,
+        "Archive source mismatch leaves the old tree and result untouched"))return false;
+    bad=makeRestore();bad.archive->nodes.front().parentNodeId=bad.archive->nodes.front().nodeId;
+    if(!check(feature->SendRequest(bad).failureReason==CropFailure::BadInput,"Archive parent-cycle rejection is atomic"))return false;
+    bad=makeRestore();bad.archive->result->meshErrorBound=std::numeric_limits<double>::quiet_NaN();
+    if(!check(feature->SendRequest(bad).failureReason==CropFailure::BadInput,"Archive rejects non-finite result metadata"))return false;
+    bad=makeRestore();bad.archive->result.reset();bad.restoreResult=false;
+    for(auto& node:bad.archive->nodes)if(node.nodeId==bad.archive->appliedHead){node.operation->geometryType=CropShape::Sphere;node.operation->centerInInputModel={1e300,0,0};}
+    if(!check(feature->SendRequest(bad).failureReason==CropFailure::PrecisionNotMet,"Archive predicate encoding failure preserves PrecisionNotMet"))return false;
+    auto limited=makeRestore();limited.availableRamBytes=1;
+    const auto limitedAdmission=feature->SendRequest(limited);
+    if(!limitedAdmission||!awaitOutcome(limitedAdmission.documentId,limited.requestId))return false;
+    const auto limitedOutcome=feature->GetDocumentOutcome(limitedAdmission.documentId,limited.requestId);
+    if(!check(limitedOutcome->failureReason==CropFailure::ResourceLimit&&feature->GetHistory().documentId==initial.documentId
+        &&feature->GetHistory().stateRevision==unchanged.stateRevision&&feature->GetDocuments().size()==1,
+        "Restore allocation budget failure publishes neither the document nor result"))return false;
+    auto cancelledRestore=makeRestore();int cancelledCallbacks=0,closedCallbacks=0;
+    const auto cancelling=feature->SendRequest(cancelledRestore,[&](auto){++cancelledCallbacks;});
+    if(!cancelling)return false;
+    CropDocumentRequest close;close.action=CropDocumentAction::CloseDocument;close.documentId=cancelling.documentId;
+    close.requestId=CropHostFeature::CreateRequestId();close.expectedRevision=cancelling.stateRevision;
+    auto staleClose=close;staleClose.expectedRevision+=1;
+    if(!check(feature->SendRequest(staleClose).failureReason==CropFailure::StateVersionMismatch,
+        "Closing an unpublished restore still checks its admitted revision"))return false;
+    if(!feature->SendRequest(close,[&](auto){++closedCallbacks;})||!feature->SendRequest(close).isReplay
+        ||!awaitOutcome(cancelling.documentId,close.requestId)||!wait([&]{return cancelledCallbacks==1&&closedCallbacks==1;}))return false;
+    SendTicks(*timer,8);
+    if(!check(feature->GetDocumentOutcome(cancelling.documentId,cancelledRestore.requestId)->status==CropEditStatus::Cancelled
+        &&feature->GetDocumentOutcome(cancelling.documentId,close.requestId)->status==CropEditStatus::Succeeded
+        &&feature->GetDocumentOutcome(cancelling.documentId,close.requestId)->documentStatus==CropDocumentStatus::Closed
+        &&cancelledCallbacks==1&&closedCallbacks==1&&feature->SendRequest(cancelledRestore).isReplay
+        &&feature->GetDocuments().size()==1&&feature->GetHistory().documentId==initial.documentId,
+        "Close cancels a pending restore and late worker completion cannot publish it"))return false;
+    gate->control->rejectTransition=true;
+    const auto rejectedRequest=makeRestore();const auto rejected=feature->SendRequest(rejectedRequest);
+    const bool rejectedDone=rejected&&awaitOutcome(rejected.documentId,rejectedRequest.requestId);
+    gate->control->rejectTransition=false;
+    if(!check(rejectedDone&&feature->GetDocumentOutcome(rejected.documentId,rejectedRequest.requestId)->failureReason==CropFailure::PrecisionNotMet
+        &&gate->control->rejectedPayloads.size()==2&&std::all_of(gate->control->rejectedPayloads.begin(),gate->control->rejectedPayloads.end(),[](const auto& value){return value.expired();})
+        &&feature->GetHistory().documentId==initial.documentId&&feature->GetDocuments().size()==1
+        &&probe->m_data->GetDataLifetime(saved->result->scopeId).status==DataLifetimeStatus::Published,
+        "View rejection after worker preparation releases every candidate payload and preserves the original result"))return false;
+    auto restore=makeRestore();int callbacks=0,replays=0;CropDocumentOutcome restored;
+    bool observed=false,atomic=true;CropDocumentId expectedDocument=0;
+    const auto observer=probe->m_data->AttachDataChange([&](const DataChangeSet&) {
+        if(!expectedDocument||feature->GetHistory().documentId!=expectedDocument)return;
+        observed=true;const auto state=feature->GetState();const auto history=feature->GetHistory();
+        atomic=atomic&&state.isPublishing&&history.results.size()==1&&history.results.front().status==CropResultStatus::Published;
+        if(!history.results.empty()){CropPruneRequest prune;prune.nodeIds={history.results.front().nodeId};atomic=atomic&&!feature->GetPruneImpact(expectedDocument,prune).blockers.empty();}
+        for(const auto& id:target.targetViews.viewIds)atomic=atomic&&probe->GetViewService(id)->GetRenderInputStamp()->dataRevision==saved->sourceRevision;
+    });
+    const auto accepted=feature->SendRequest(restore,[&](auto value){restored=std::move(value);++callbacks;});expectedDocument=accepted.documentId;
+    const auto replay=feature->SendRequest(restore,[&](auto){++replays;});
+    auto conflict=restore;conflict.archive->nodes.back().operation->height+=1;
+    if(!accepted||!replay.isReplay||feature->SendRequest(conflict).failureReason!=CropFailure::InvalidRequest
+        ||!check(feature->GetHistory().documentId==initial.documentId,"Restore remains a candidate before worker/view completion")
+        ||!wait([&]{return callbacks!=0;}))return false;
+    if(!probe->m_data->DetachDataChange(observer))return false;
+    if(!check(callbacks==1&&replays==0&&restored.status==CropEditStatus::Succeeded&&restored.restoreStatus==CropRestoreStatus::ResultRestored
+        &&observed&&atomic&&feature->GetDocuments().size()==2,"Archive result and Root views publish together and complete exactly once"))return false;
+    const auto current=feature->GetHistory();
+    const auto mapped=[&](CropNodeId id){for(const auto& item:restored.nodeMappings)if(item.archivedNodeId==id)return item.nodeId;return CropNodeId{};};
+    if(!check(current.documentId!=initial.documentId&&current.totalNodeCount==3&&current.appliedHead==mapped(previewNode)
+        &&current.results.size()==1&&current.results.front().nodeId==mapped(resultNode),"Archive remaps both branches and restores the independent result target"))return false;
+    const auto record=current.results.front();
+    if(!check(record.scopeId!=saved->result->scopeId&&record.outputRevision!=saved->result->outputRevision,
+        "Restored result receives a fresh scope and formal revisions"))return false;
+    {
+        const auto graph=probe->m_data->GetDataGraph();const auto old=probe->m_data->GetData(graph,saved->result->outputRevision),copy=probe->m_data->GetData(graph,record.outputRevision);
+        if(!old||!copy)return false;
+        if(meshCase){const auto first=std::dynamic_pointer_cast<const SurfaceMeshPayload>(old->payload),second=std::dynamic_pointer_cast<const SurfaceMeshPayload>(copy->payload);
+            if(!check(first&&second&&&first->GetVertices()!=&second->GetVertices()&&first->GetVertices()==second->GetVertices()
+                &&first->GetTriangles()==second->GetTriangles(),"Restored mesh preserves geometry in independent arrays"))return false;
+        } else {const auto first=std::dynamic_pointer_cast<const ImageGrid3DPayload>(old->payload),second=std::dynamic_pointer_cast<const ImageGrid3DPayload>(copy->payload);
+            if(!check(first&&second&&first->GetValues()==second->GetValues()&&first->GetValidityMask()!=second->GetValidityMask()
+                &&*first->GetValidityMask()==*second->GetValidityMask(),"Restored volume shares fixed scalars and owns an identical independent mask"))return false;}
+    }
+    CropDocumentRequest returning;returning.documentId=initial.documentId;returning.requestId=CropHostFeature::CreateRequestId();returning.expectedRevision=feature->GetHistory(initial.documentId).stateRevision;
+    if(!feature->SendRequest(returning)||!awaitOutcome(initial.documentId,returning.requestId))return false;
+    if(!check(feature->GetDocumentOutcome(initial.documentId,returning.requestId)->status==CropEditStatus::Succeeded
+        &&probe->m_data->GetDataLifetime(saved->result->scopeId).status==DataLifetimeStatus::Released
+        &&probe->m_data->GetDataLifetime(record.scopeId).status==DataLifetimeStatus::Published,
+        "Releasing the original result leaves its restored copy valid"))return false;
+    const auto afterReturn=feature->GetArchive(initial.documentId);if(!afterReturn||afterReturn->result)return false;
+    auto historyOnly=makeRestore();
+    const auto historyAdmission=feature->SendRequest(historyOnly);
+    if(!historyAdmission||!awaitOutcome(historyAdmission.documentId,historyOnly.requestId))return false;
+    const auto historyOutcome=feature->GetDocumentOutcome(historyAdmission.documentId,historyOnly.requestId);
+    if(!check(historyOutcome->status==CropEditStatus::Succeeded&&historyOutcome->restoreStatus==CropRestoreStatus::HistoryOnly
+        &&feature->GetHistory().results.empty()&&!probe->m_data->GetData(probe->m_data->GetDataGraph(),saved->result->outputRevision),
+        "Retired archived result refs restore history only and cannot be resurrected"))return false;
+    return wait([&]{return session.DetachFeature(*gate);})&&session.DetachFeature(*probe)&&session.Stop();
+}
+int GetCropArchiveFailCount() {
+    return (GetCaseResult(GetArchiveRestoreCase(false),"Image archive restore validates source, copies authorized results and rejects retired resurrection")?0:1)
+        +(GetCaseResult(GetArchiveRestoreCase(true),"Mesh archive restore preserves topology and independent resource ownership")?0:1);
 }
 
 int GetCropLifecycleFailCount()

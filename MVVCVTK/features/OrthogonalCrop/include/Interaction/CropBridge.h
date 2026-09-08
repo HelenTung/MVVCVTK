@@ -75,11 +75,15 @@ public:
     bool GetResultsValid(const std::vector<CropResultRecord>& results) const;
     void SetResults(std::vector<CropResultRecord>&& results) noexcept;
     CropDocumentArchive GetArchive() const;
+    // Restore only into a fresh, unbound Root; publication/activation remains a
+    // separate Host candidate transaction. No result authority is inferred here.
+    CropFailure SetArchive(const CropDocumentArchive& archive,std::vector<CropNodeMapping>& mappings);
     bool CancelPending();
     bool ClearDocument();
     bool GetSourceTransitionNeeded() const;
     // isQueued=true 时准备队首命令；否则为显式 Root 返回/已有节点选择。
     std::optional<SourceCommit> BuildSourceCommit(CropNodeId nodeId,bool isQueued);
+    CropFailure GetPreparationFailure() const;
     bool GetSourceCommitReady(const SourceCommit& prepared) const noexcept;
     void SetSourceCommit(SourceCommit&& prepared) noexcept;
     void SetSourceCommitFailed(SourceCommit&& prepared,CropFailure failure);

@@ -50,7 +50,10 @@ public:
     void SetResults(std::vector<CropResultRecord>&& results) noexcept;
     CropDocumentArchive GetArchive() const;
     static std::optional<CropHistory> CreateFromArchive(const CropDocumentArchive& archive,
-        CropFailure& failure);
+        CropFailure& failure,std::vector<CropNodeMapping>* mappings=nullptr);
+    static bool GetRecordsSame(const CropResultRecord& first,const CropResultRecord& second) noexcept;
+    static bool GetArchivesSame(const CropDocumentArchive& first,const CropDocumentArchive& second);
+    static bool GetGeometrySame(const GridGeometry3D& first,const GridGeometry3D& second) noexcept;
 
 private:
     Stage BuildStage(CropNodeId head) const;

@@ -573,6 +573,56 @@ bool GetActualRenderedHead() {
     return Check(wait([&]{return f.bridge.GetHistory().renderedHead==root;})&&f.service->GetPointVisible({0.25,0,0}),"zero-node Root uniform did not produce a completed Root frame");
 }
 
+bool GetArchiveSourceValidation() {
+    Fixture f;if(!f.ready)return false;
+    const auto originalRoot=f.bridge.GetHistory().rootNodeId;
+    const auto a=Append(f.bridge,originalRoot);if(!a||!Flush(f.bridge,f.window))return false;
+    const auto archive=f.bridge.GetArchive();
+    if(!archive.imageGeometry||archive.sourceType!=f.input.data->type||archive.coordinateFrame.empty()||archive.maskSourceRevision)return false;
+    const auto rejected=[&](CropDocumentArchive bad,CropFailure expected) {
+        CropBridge candidate;if(!candidate.SetCropInput(f.input))return false;const auto before=candidate.GetHistory();
+        std::vector<CropNodeMapping> mappings;
+        return candidate.SetArchive(bad,mappings)==expected&&candidate.GetHistory().documentId==before.documentId
+            &&candidate.GetHistory().rootNodeId==before.rootNodeId&&candidate.GetHistory().totalNodeCount==1&&mappings.empty();
+    };
+    auto bad=archive;bad.imageGeometry->spacing[0]*=2;
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed Root geometry was accepted"))return false;
+    bad=archive;bad.maskSourceRevision=archive.sourceRevision;
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed Root mask identity was accepted"))return false;
+    bad=archive;bad.coordinateFrame="LPS";
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed coordinate frame was accepted"))return false;
+    bad=archive;bad.nodes.back().operation->geometryType=static_cast<CropShape>(99);
+    if(!Check(rejected(bad,CropFailure::BadInput),"archive with unknown geometry was accepted"))return false;
+    CropBridge restored;if(!restored.SetCropInput(f.input))return false;std::vector<CropNodeMapping> mappings;
+    if(restored.SetArchive(archive,mappings)!=CropFailure::None)return false;
+    const auto history=restored.GetHistory();
+    const auto mapped=std::find_if(mappings.begin(),mappings.end(),[&](const auto& item){return item.archivedNodeId==a.nodeId;});
+    if(!Check(history.documentId!=f.bridge.GetHistory().documentId&&history.rootNodeId!=originalRoot
+        &&mappings.size()==archive.nodes.size()&&mapped!=mappings.end()&&mapped->nodeId==history.appliedHead
+        &&restored.GetNode(mapped->nodeId)->parentNodeId==history.rootNodeId&&history.results.empty(),
+        "archive did not allocate fresh runtime identities and preserve its parent relation"))return false;
+    auto same=archive;
+    if(!CropHistory::GetArchivesSame(archive,same))return false;
+    same.nodes.back().operation->height+=1;
+    if(!Check(!CropHistory::GetArchivesSame(archive,same),"archive request equality ignored a serialized geometry field"))return false;
+    auto mask=vtkSmartPointer<vtkImageData>::New();mask->CopyStructure(f.input.image->image);mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    const auto count=static_cast<std::size_t>(mask->GetNumberOfPoints());auto* bytes=static_cast<unsigned char*>(mask->GetScalarPointer());
+    std::fill(bytes,bytes+count,255);bytes[0]=0;
+    TestDataPort maskedData;const auto maskedView=maskedData.SetPrimaryImage(f.input.image->image,mask);
+    if(!maskedView)return false;
+    auto maskedInput=f.input;maskedInput.graph=maskedView->graph;maskedInput.binding=maskedView->binding;
+    maskedInput.data=maskedView->data;maskedInput.image=maskedView;
+    CropBridge maskedSource,maskedRestored;
+    if(!maskedSource.SetCropInput(maskedInput)||!maskedRestored.SetCropInput(maskedInput))return false;
+    const auto maskedArchive=maskedSource.GetArchive();
+    std::vector<CropNodeMapping> maskedMappings;
+    return Check(maskedArchive.maskSourceRevision==maskedArchive.sourceRevision
+        &&maskedRestored.SetArchive(maskedArchive,maskedMappings)==CropFailure::None
+        &&maskedRestored.GetArchive().maskSourceRevision==maskedArchive.maskSourceRevision
+        &&maskedRestored.GetSource().image->validityMask->GetScalarComponentAsDouble(0,0,0,0)==0,
+        "masked Root archive failed to preserve its exact mask identity and domain");
+}
+
 bool GetSourcePreviewCommit() {
     Fixture f;if(!f.ready)return false;
     const auto root=f.bridge.GetHistory().rootNodeId;
@@ -625,6 +675,7 @@ int CropBridgeSuite::GetFailCount() const
     run(GetShapeSequenceAndRoot(),"mixed shape sequence and Root redo preservation");
     run(GetPruneAndMultiviewFailure(),"protected prune and required View failure");
     run(GetActualRenderedHead(),"applied, back-buffer and GPU-rendered node identities");
+    run(GetArchiveSourceValidation(),"archive source validation and runtime node mapping");
     run(GetSourcePreviewCommit(),"candidate source replay and no-fail adoption");
     run(GetStoppedLeaseCleanup(),"stopped lease cancellation and document cleanup");
     return failures;

@@ -72,7 +72,7 @@ struct CropBuildOutcome final {
     CropBuildResult result;
 };
 
-enum class CropDocumentAction : std::uint8_t { ReturnToSource, CloseDocument, CreateDocument, ActivateDocument };
+enum class CropDocumentAction : std::uint8_t { ReturnToSource, CloseDocument, CreateDocument, ActivateDocument, RestoreDocument };
 struct CropDocumentRequest final {
     CropDocumentAction action=CropDocumentAction::ReturnToSource;
     CropDocumentId documentId=0;
@@ -82,7 +82,11 @@ struct CropDocumentRequest final {
     // binding. Activate: explicit existing document/version; source stays fixed.
     std::optional<CropHostTarget> target;
     std::optional<DataRevisionRef> sourceRevision;
+    std::optional<CropDocumentArchive> archive;
+    bool restoreResult=true;
+    std::size_t availableRamBytes=512ULL*1024*1024;
 };
+enum class CropRestoreStatus : std::uint8_t { None, HistoryOnly, ResultRestored };
 struct CropDocumentOutcome final {
     CropDocumentId documentId=0;
     CropNodeId rootNodeId=0;
@@ -92,6 +96,8 @@ struct CropDocumentOutcome final {
     CropDocumentStatus documentStatus=CropDocumentStatus::Ready;
     CropFailure failureReason=CropFailure::None;
     std::vector<DataLifetimeBlocker> blockers;
+    CropRestoreStatus restoreStatus=CropRestoreStatus::None;
+    std::vector<CropNodeMapping> nodeMappings;
 };
 struct CropDocumentAdmission final {
     explicit operator bool() const noexcept { return isAccepted; }
@@ -150,6 +156,8 @@ public:
     CropHostState GetState(CropDocumentId documentId) const;
     // At most 32 live documents; closed documents are not included.
     std::vector<CropDocumentId> GetDocuments() const;
+    // Empty while the requested document has an uncommitted edit/build/return.
+    std::optional<CropDocumentArchive> GetArchive(CropDocumentId documentId) const;
     // At most 256 input-model sample points; classification uses the last
     // presented predicate and the coordinate-conversion bound from actual input data.
     CropPreviewPrecision GetPreviewPrecision(CropDocumentId documentId,const std::string& viewId,

@@ -12,6 +12,7 @@ int GetRenderProductFailCount();
 int GetViewFailCount();
 int GetCropFailCount();
 int GetCropLifecycleFailCount();
+int GetCropArchiveFailCount();
 int GetGapFailCount();
 int GetPartSceneFailCount();
 int GetExportFailCount();

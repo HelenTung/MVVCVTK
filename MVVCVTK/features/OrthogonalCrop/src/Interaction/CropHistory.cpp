@@ -1,4 +1,5 @@
 #include "Interaction/CropHistory.h"
+#include <cmath>
 #include "Algorithms/CropGeometry.h"
 
 #include <algorithm>
@@ -319,9 +320,12 @@ CropDocumentArchive CropHistory::GetArchive() const
     return archive;
 }
 
-std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArchive& archive,CropFailure& failure)
+std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArchive& archive,CropFailure& failure,
+    std::vector<CropNodeMapping>* mappings)
 {
     failure=CropFailure::BadInput;
+    if(mappings)mappings->clear();
+    if(archive.nodes.size()>nodeLimit){failure=CropFailure::ResourceLimit;return {};}
     if (archive.schemaVersion!=1 || !GetDataRevisionRefValid(archive.sourceRevision)
         || archive.nodes.empty() || archive.nodes.size()>nodeLimit) return {};
     std::map<CropNodeId,CropNodeSnapshot> nodes;
@@ -359,7 +363,10 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
         if (!result.resultId || result.nodeId==archive.rootNodeId || !nodes.count(result.nodeId)
             || result.status!=CropResultStatus::Published || result.sourceRevision!=archive.sourceRevision
             || !GetDataEntityIdValid(result.scopeId) || !GetDataRevisionRefValid(result.recipeRevision)
-            || !GetDataRevisionRefValid(result.outputRevision)) return {};
+            || !GetDataRevisionRefValid(result.outputRevision)||!result.options.availableRamBytes
+            ||!std::isfinite(result.options.meshTolerance)||result.options.meshTolerance<=0||!result.options.maxCells
+            ||!result.options.maxDepth||result.options.maxDepth>128||!std::isfinite(result.meshErrorBound)||result.meshErrorBound<0
+            ||!std::isfinite(result.meshAreaErrorBound)||result.meshAreaErrorBound<0) return {};
     }
     auto history=Create(archive.sourceRevision);
     if (!history.m_root) { failure=CropFailure::ResourceLimit; return {}; }
@@ -382,6 +389,43 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
     history.m_requestedHead=identities.at(archive.requestedHead);
     history.m_appliedHead=identities.at(archive.appliedHead);
     // 这里只恢复历史；有效结果的载荷授权及关联由 Host 原子验证后另行接管。
+    if(mappings){mappings->reserve(identities.size());for(const auto& item:identities)mappings->push_back({item.first,item.second});}
     failure=CropFailure::None;
     return history;
+}
+
+bool CropHistory::GetGeometrySame(const GridGeometry3D& a,const GridGeometry3D& b) noexcept {
+    return a.extent==b.extent&&a.dimensions==b.dimensions&&a.spacing==b.spacing&&a.origin==b.origin
+        &&a.direction==b.direction&&a.coordinateFrame==b.coordinateFrame;
+}
+bool CropHistory::GetArchivesSame(const CropDocumentArchive& a,const CropDocumentArchive& b) {
+    if(a.schemaVersion!=b.schemaVersion||a.sourceRevision!=b.sourceRevision||a.sourceType!=b.sourceType
+        ||a.coordinateFrame!=b.coordinateFrame||a.maskSourceRevision!=b.maskSourceRevision
+        ||a.rootNodeId!=b.rootNodeId||a.requestedHead!=b.requestedHead||a.appliedHead!=b.appliedHead
+        ||a.nodes.size()!=b.nodes.size()||bool(a.imageGeometry)!=bool(b.imageGeometry)||bool(a.result)!=bool(b.result))return false;
+    if(a.imageGeometry&&!GetGeometrySame(*a.imageGeometry,*b.imageGeometry))return false;
+    for(std::size_t index=0;index<a.nodes.size();++index) {
+        const auto& x=a.nodes[index];const auto& y=b.nodes[index];
+        if(x.nodeId!=y.nodeId||x.parentNodeId!=y.parentNodeId||bool(x.operation)!=bool(y.operation))return false;
+        if(x.operation) {
+            const auto& p=*x.operation;const auto& q=*y.operation;
+            if(p.operationIndex!=q.operationIndex||p.geometryType!=q.geometryType||p.removalMode!=q.removalMode
+                ||p.boxToInputModelMatrix!=q.boxToInputModelMatrix||p.planeCenterInInputModel!=q.planeCenterInInputModel
+                ||p.planeNormalInInputModel!=q.planeNormalInInputModel||p.centerInInputModel!=q.centerInInputModel
+                ||p.axisInInputModel!=q.axisInInputModel||p.radius!=q.radius||p.height!=q.height
+                ||p.recipeVersion!=q.recipeVersion||p.boundaryPolicyVersion!=q.boundaryPolicyVersion)return false;
+        }
+    }
+    if(a.result) {
+        const auto& x=*a.result;const auto& y=*b.result;
+        if(!GetRecordsSame(x,y))return false;
+    }
+    return true;
+}
+
+bool CropHistory::GetRecordsSame(const CropResultRecord& x,const CropResultRecord& y) noexcept {
+    return x.resultId==y.resultId&&x.nodeId==y.nodeId&&x.status==y.status&&x.scopeId==y.scopeId
+        &&x.sourceRevision==y.sourceRevision&&x.recipeRevision==y.recipeRevision&&x.outputRevision==y.outputRevision
+        &&x.publicationGeneration==y.publicationGeneration&&x.options==y.options
+        &&x.meshErrorBound==y.meshErrorBound&&x.meshAreaErrorBound==y.meshAreaErrorBound&&x.meshTriangleCount==y.meshTriangleCount;
 }
