@@ -25,7 +25,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     if (!snapshot) return summary;
     summary["mesh"] = GetRefText(snapshot->meshRevision);
     summary["method"] = static_cast<int>(snapshot->method);
-    if (snapshot->isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", snapshot->isoEstimate->isoValue},
+    if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", snapshot->isoEstimate->isoValue},
         {"background", snapshot->isoEstimate->backgroundValue}, {"material", snapshot->isoEstimate->materialValue},
         {"samples", QString::number(snapshot->isoEstimate->sampleCount)}};
     QJsonArray objects;
@@ -127,9 +127,12 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     panel->AttachAction("SamplePoints", {{"maxPoints", "128"}}, [panel, feature](auto id, const auto& p) {
         const auto limit = GetId(p["maxPoints"]);
         if (limit == 0 || limit > 4096) throw std::invalid_argument("最大采样点数必须为 1～4096");
+        const auto input = panel->GetSession()->GetImageDescriptor();
         auto snapshot = feature->GetSurfaceSnapshot();
-        if (!snapshot) snapshot = feature->GetPreviewSnapshot();
-        if (!snapshot || !snapshot->points) throw std::invalid_argument("没有网格点");
+        if (!snapshot || !input || snapshot->sourceRevision != input->dataRevision)
+            snapshot = feature->GetPreviewSnapshot();
+        if (!snapshot || !snapshot->points || !input || snapshot->sourceRevision != input->dataRevision)
+            throw std::invalid_argument("当前输入没有网格点");
         const auto& points = *snapshot->points;
         const auto stride = std::max<std::size_t>(1, (points.size() + limit - 1) / limit);
         QJsonArray samples;
