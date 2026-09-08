@@ -6,7 +6,14 @@
 #include "AppStateEvents.h"
 #include "App/Services/FeatureViewService.h"
 #include "DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Host/CropHostFeature.h"
+#ifdef MVVCVTK_HAS_PART_SEGMENTATION
+#include "Host/PartSegmentationHostFeature.h"
+#endif
+#ifdef MVVCVTK_HAS_SURFACE_DETERMINATION
+#include "Host/SurfaceDeterminationHostFeature.h"
+#endif
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
 #include "Host/GapHostFeature.h"
 #endif
@@ -32,6 +39,8 @@
 #include <vtkVolumeCollection.h>
 
 #include <chrono>
+#include <cmath>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -1466,6 +1475,85 @@ int GetCropFailCount()
     failureCount += GetCaseResult(
         activeCropSnapshot && activeCropSnapshot->validityMask && checkPosePreservesCrop(),
         "Model rotation reuses the materialized Crop validity mask without rebuilding data") ? 0 : 1;
+
+    // 在同一个真实Host会话中串联已物化的非空Crop结果，不能重新从未裁切源启动下游。
+#ifdef MVVCVTK_HAS_PART_SEGMENTATION
+    {
+        PartSegmentationConfig partConfig;
+        partConfig.defaultStart.targetViews = target.targetViews;
+        partConfig.defaultStart.threshold = 0.5;
+        partConfig.defaultStart.minPartVoxels = 1;
+        auto parts = std::make_shared<PartSegmentationHostFeature>(partConfig);
+        const bool attached = session.AttachFeature(parts);
+        PartSegmentationRequest request;
+        request.action = PartSegmentationAction::Start;
+        request.start = partConfig.defaultStart;
+        std::optional<PartSegmentationResult> result;
+        int completions = 0;
+        const auto admission = parts->SendRequest(request, [&](PartSegmentationResult value) {
+            result = std::move(value); ++completions;
+        });
+        for (int poll = 0; !result && poll < 2000; ++poll) {
+            SendHostTick(*endpoint,*timerEndpoint);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto data = result ? contextProbe->m_data->GetData(contextProbe->m_data->GetDataGraph(),result->labelMap) : DataSnapshot{};
+        const auto* labels = data ? dynamic_cast<const LabelMap3DPayload*>(data->payload.get()) : nullptr;
+        bool agrees = attached && admission.status == PartAdmissionStatus::Accepted && completions == 1
+            && result && result->sourceRevision == publishResult.outputRevision && labels
+            && activeCropSnapshot && activeCropSnapshot->validityMask;
+        if (agrees) {
+            const auto* scalar = static_cast<const float*>(activeCropSnapshot->image->GetScalarPointer());
+            const auto* mask = static_cast<const unsigned char*>(activeCropSnapshot->validityMask->GetScalarPointer());
+            const auto count = static_cast<std::size_t>(activeCropSnapshot->image->GetNumberOfPoints());
+            agrees = std::visit([&](const auto& values) {
+                if (!values || values->size() != count) return false;
+                for (std::size_t i = 0; i < count; ++i) {
+                    const bool foreground = mask[i] != 0 && std::isfinite(scalar[i]) && scalar[i] >= 0.5f;
+                    if (((*values)[i] != 0) != foreground) return false;
+                }
+                return true;
+            }, labels->GetValues());
+            agrees = agrees && contextProbe->m_data->GetPrimaryImage()->data->self == publishResult.outputRevision;
+        }
+        failureCount += GetCaseResult(agrees,
+            "Crop to Part public workflow preserves source revision and excludes every invalid voxel") ? 0 : 1;
+        failureCount += GetCaseResult(session.DetachFeature(*parts),
+            "Crop to Part consumer detaches without altering Crop source") ? 0 : 1;
+    }
+#endif
+#ifdef MVVCVTK_HAS_SURFACE_DETERMINATION
+    {
+        SurfaceDeterminationConfig surfaceConfig;
+        surfaceConfig.defaultStart.targetViews = target.targetViews;
+        surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::GlobalIsoPreview;
+        surfaceConfig.defaultStart.initialIsoValue = 0.5;
+        auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
+        const bool attached = session.AttachFeature(surface);
+        SurfaceDeterminationRequest request;
+        request.action = SurfaceDeterminationAction::Start;
+        request.start = surfaceConfig.defaultStart;
+        std::optional<SurfaceDeterminationResult> result;
+        int completions = 0;
+        const auto admission = surface->SendRequest(request, [&](SurfaceDeterminationResult value) {
+            result = std::move(value); ++completions;
+        });
+        for (int poll = 0; !result && poll < 2000; ++poll) {
+            SendHostTick(*endpoint,*timerEndpoint);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto snapshot = surface->GetSurfaceSnapshot();
+        const bool matched = attached && admission.status == SurfaceAdmissionStatus::Accepted
+            && completions == 1 && result && snapshot && snapshot->points && !snapshot->points->empty()
+            && result->sourceRevision == publishResult.outputRevision
+            && snapshot->sourceRevision == publishResult.outputRevision
+            && contextProbe->m_data->GetPrimaryImage()->data->self == publishResult.outputRevision;
+        failureCount += GetCaseResult(matched,
+            "Crop to Surface public workflow consumes the materialized revision without selecting the original volume") ? 0 : 1;
+        failureCount += GetCaseResult(session.DetachFeature(*surface),
+            "Crop to Surface consumer detaches without changing primary data") ? 0 : 1;
+    }
+#endif
 
     const auto exportId =
         std::chrono::steady_clock::now()
