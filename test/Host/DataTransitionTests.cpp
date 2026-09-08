@@ -59,6 +59,25 @@ VtkImageGridSnapshot BuildInput(const std::shared_ptr<BaseDataManager>& data)
     return data->GetPrimaryImage();
 }
 
+bool GetLoadedSnapshotIdentity()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(2,1,1);image->AllocateScalars(VTK_FLOAT,1);
+    auto* values=static_cast<float*>(image->GetScalarPointer());values[0]=1;values[1]=3;
+    ImageMetadata metadata;
+    metadata.identity.datasetId="loaded-identity";
+    metadata.source.kind=ImageSourceKind::Memory;
+    metadata.source.uri="memory://loaded-identity";
+    if(!Check(data->SetImageSnapshot(image,metadata),"loaded image stage"))return false;
+    const auto stage=data->GetLoadStage();VtkImageGridSnapshot published;
+    if(!data->SetLoadCommit(stage,published)||!published)return false;
+    const auto graph=data->GetDataGraph();const auto canonical=data->GetData(graph,published->data->self);
+    const auto read=data->GetPrimaryImage(),byRef=data->GetImageGrid(graph,published->data->self);
+    return Check(canonical&&read&&byRef&&read->data.get()==canonical.get()&&byRef->data.get()==canonical.get()
+        &&read->image==published->image&&byRef->image==published->image,
+        "loaded VTK cache leaked the pre-publication data identity or rebuilt the volume");
+}
+
 bool GetTransitionCase(int failure)
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -130,7 +149,7 @@ bool GetTransitionCase(int failure)
 
 bool GetDataTransitionTests()
 {
-    bool passed=true;
+    bool passed=GetLoadedSnapshotIdentity();
     for(int failure=0;failure<=10;++failure)passed=GetTransitionCase(failure)&&passed;
     return passed;
 }

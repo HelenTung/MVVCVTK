@@ -798,11 +798,13 @@ VtkImageGridSnapshot BaseDataManager::GetImageGrid(
     const DataGraphSnapshot& graph,
     const DataRevisionRef& ref) const
 {
-    auto view = m_impl->m_vtk->GetImageGrid(GetData(graph, ref));
+    auto data = GetData(graph, ref);
+    auto view = m_impl->m_vtk->GetImageGrid(data);
     if (!view) return {};
-    // 别名 owner 同时保留 bridge View 与其 DataRevision，避免包装视图使弱缓存过早失效。
+    // 缓存可能源于发布前的 LoadStage；VTK 对象可复用，数据身份必须来自本次正式图。
+    auto retained=std::make_shared<std::pair<DataSnapshot,VtkImageGridSnapshot>>(std::move(data),view);
     return std::make_shared<const VtkImageGridView>(VtkImageGridView{
-        graph, {}, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+        graph, {}, DataSnapshot(retained, retained->first.get()), view->image, view->validityMask });
 }
 
 VtkImageGridSnapshot BaseDataManager::GetPrimaryImage() const
@@ -810,11 +812,12 @@ VtkImageGridSnapshot BaseDataManager::GetPrimaryImage() const
     const auto graph = GetDataGraph();
     const auto binding = GetDataBinding(graph, primaryVolumeBinding);
     if (!binding || !binding->target) return {};
-    auto view = m_impl->m_vtk->GetImageGrid(
-        GetData(graph, *binding->target));
+    auto data=GetData(graph,*binding->target);
+    auto view = m_impl->m_vtk->GetImageGrid(data);
     if (!view) return {};
+    auto retained=std::make_shared<std::pair<DataSnapshot,VtkImageGridSnapshot>>(std::move(data),view);
     return std::make_shared<const VtkImageGridView>(VtkImageGridView{
-        graph, binding, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+        graph, binding, DataSnapshot(retained, retained->first.get()), view->image, view->validityMask });
 }
 
 VtkLabelMapSnapshot BaseDataManager::GetLabelMap(
@@ -854,6 +857,12 @@ DataEntityId BaseDataManager::CreateDataEntityId()
 bool BaseDataManager::SetDataType(DataTypeDescriptor descriptor)
 {
     return m_impl->m_graph->SetDataType(std::move(descriptor));
+}
+
+std::shared_ptr<const VtkPreparedDataView> BaseDataManager::SetPreparedDataView(
+    const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared)
+{
+    return m_impl->m_vtk->SetPreparedDataView(ref, std::move(prepared));
 }
 
 DataCommitResult BaseDataManager::SetDataCommit(DataTransaction transaction)

@@ -416,6 +416,13 @@ public:
             return data ? data->StartDataChanges() : nullptr;
         }
 
+        std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+            const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override
+        {
+            const auto data = GetWriteData();
+            return data ? data->SetPreparedDataView(ref, std::move(prepared)) : nullptr;
+        }
+
         DataEntityId CreateDataEntityId() override
         {
             const auto data = GetWriteData();

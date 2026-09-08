@@ -271,11 +271,54 @@ bool GetArrayLeaseValid()
         "scoped VTK payload did not release");
 }
 
+bool GetPreparedResultReleased()
+{
+    DataGraphStore store;
+    VtkDataBridge bridge;
+    auto image=vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2,1,1);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* values=static_cast<unsigned char*>(image->GetScalarPointer());values[0]=3;values[1]=8;
+    const auto source=SetPayload(store,bridge.CreateImagePayload(image));
+    const auto root=bridge.GetImageGrid(source);
+    const auto rootPayload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload);
+    auto output=rootPayload->CreateMaskSnapshot(std::vector<std::uint8_t>{255,0});
+    auto prepared=VtkDataBridge::BuildDataView(output,root);
+    if (!Check(prepared && prepared->image
+        && prepared->image->image->GetScalarPointer()==root->image->GetScalarPointer()
+        && prepared->image->validityMask->GetScalarPointer()!=output->GetValidityMask()->data(),
+        "prepared result copied Root scalars or exposed mutable formal mask bytes")) return false;
+    const auto scope=store.CreateDataEntityId(),id=store.CreateDataEntityId();
+    const DataRevisionRef ref{id,1};
+    prepared=bridge.SetPreparedDataView(ref,std::move(prepared));
+    if(!prepared)return false;
+    DataTransaction transaction;
+    transaction.outputs.push_back({id,0,DataTypes::imageGrid3D,{{"root",source->self}},output,{},scope,{prepared->resourceUse}});
+    auto committed=store.SetDataCommit(std::move(transaction));
+    if(!Check(committed.status==DataCommitStatus::Succeeded,"prepared result publication"))return false;
+    auto view=bridge.GetImageGrid(committed.published.at(0));
+    if(!Check(view&&view->data.get()==committed.published.at(0).get()
+        &&view->image==prepared->image->image&&view->validityMask==prepared->image->validityMask,
+        "prepared cache rebuilt the image or leaked provisional identity"))return false;
+    vtkSmartPointer<vtkDataArray> heldMask=view->validityMask->GetPointData()->GetScalars();
+    DataTransaction retire;
+    retire.retireScopes.push_back({scope,DataLifetimeStatus::Published,{ref}});
+    if(!Check(store.SetDataCommit(retire).failureReason==DataCommitFailure::ResultInUse,
+        "prepared array lease was not registered at publication"))return false;
+    retire.retireScopes.front().isResourceTransition=true;
+    if(!Check(store.SetDataCommit(std::move(retire)).status==DataCommitStatus::Succeeded,"prepared retirement"))return false;
+    if(!Check(!bridge.GetImageGrid(committed.published.at(0)),"retired prepared cache remained readable"))return false;
+    view.reset();prepared.reset();output.reset();committed={};
+    if(!Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Releasing,"bare prepared mask did not retain scope"))return false;
+    heldMask=nullptr;
+    return Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Released
+        &&static_cast<unsigned char*>(root->image->GetScalarPointer())[1]==8,
+        "Root scalar incorrectly retained the prepared result scope");
+}
 } // namespace
 
 int main()
 {
-    return GetArrayLeaseValid()
+    return GetPreparedResultReleased() && GetArrayLeaseValid()
         && GetImageRoundTripValid()
         && GetLabelRoundTripValid()
         && GetMeshRoundTripValid()

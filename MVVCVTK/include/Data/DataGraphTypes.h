@@ -295,6 +295,14 @@ struct DataExpectation final {
     std::optional<DataRevisionRef> expectedTarget;
 };
 
+// Candidate resources are created before publication and registered atomically with their revision.
+// The concrete objects retain the lease; the graph retains only a weak probe.
+struct DataPreparedResource final {
+    std::shared_ptr<const DataResourceLease> lease;
+    std::string owner;
+    DataResourceKind kind = DataResourceKind::RenderObject;
+};
+
 struct DataRevisionDraft final {
     DataEntityId entityId;
     DataGeneration expectedGeneration = 0;
@@ -304,6 +312,7 @@ struct DataRevisionDraft final {
     std::optional<DataProvenance> provenance;
     // 同一事务内以新身份创建；已发布或退役的作用域均不能追加输出。
     std::optional<DataEntityId> lifetimeScope;
+    std::vector<DataPreparedResource> preparedResources;
 };
 
 struct DataLifetimeRetirement final {

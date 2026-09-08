@@ -116,6 +116,12 @@ public:
         return m_store.StartDataChanges();
     }
 
+    std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+        const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override
+    {
+        return m_bridge.SetPreparedDataView(ref, std::move(prepared));
+    }
+
     DataEntityId CreateDataEntityId() override
     {
         return m_store.CreateDataEntityId();

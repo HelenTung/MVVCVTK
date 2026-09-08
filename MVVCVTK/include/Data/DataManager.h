@@ -56,6 +56,8 @@ public:
     DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override;
     DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override;
     std::unique_ptr<DataChangeBatch> StartDataChanges() override;
+    std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+        const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override;
     DataEntityId CreateDataEntityId() override;
     bool SetDataType(DataTypeDescriptor descriptor) override;
     DataCommitResult SetDataCommit(DataTransaction transaction) override;

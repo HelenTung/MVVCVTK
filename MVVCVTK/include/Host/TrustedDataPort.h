@@ -40,6 +40,18 @@ struct VtkSurfaceMeshView final {
 using VtkSurfaceMeshSnapshot =
     std::shared_ptr<const VtkSurfaceMeshView>;
 
+// Worker-prepared trusted views. No graph identity is usable until the matching payload is published.
+// Register resourceUse in that output draft; keep the returned cache owner while the result is published.
+struct VtkPreparedDataView final {
+    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(
+        std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source = {});
+    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(vtkPolyData* mesh);
+    std::shared_ptr<const IDataPayload> payload;
+    VtkImageGridSnapshot image;
+    VtkSurfaceMeshSnapshot mesh;
+    DataPreparedResource resourceUse;
+};
+
 struct DataInputSpec final {
     std::string role;
     DataFacetId requiredFacet;
@@ -94,6 +106,8 @@ class TrustedDataWritePort {
 public:
     virtual ~TrustedDataWritePort() noexcept = default;
 
+    virtual std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+        const DataRevisionRef&, std::shared_ptr<const VtkPreparedDataView>) { return {}; }
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
     virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;

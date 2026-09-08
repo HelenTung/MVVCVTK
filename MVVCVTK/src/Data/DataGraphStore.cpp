@@ -586,6 +586,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
         std::optional<DataProvenance> provenance;
         std::optional<DataEntityId> lifetimeScope;
         std::vector<std::shared_ptr<const void>> resources;
+        std::vector<DataPreparedResource> preparedResources;
     };
 
     std::shared_ptr<const GraphState> validationState;
@@ -627,6 +628,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
             if (output.lifetimeScope && !GetDataEntityIdValid(*output.lifetimeScope)) {
                 return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid lifetime scope.");
             }
+            for (const auto& resource : output.preparedResources) {
+                if (!resource.lease || resource.owner.empty()
+                    || (resource.kind != DataResourceKind::Reader && resource.kind != DataResourceKind::RenderObject))
+                    return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid prepared resource.");
+            }
             drafts.push_back(FrozenDraft{
                 output.entityId,
                 output.expectedGeneration,
@@ -635,7 +641,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 std::move(payload),
                 std::move(output.provenance),
                 output.lifetimeScope,
-                std::move(resources) });
+                std::move(resources), std::move(output.preparedResources) });
         }
     }
     catch (...) {
@@ -886,6 +892,8 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 entry.value = snapshot;
                 scope->revisions.push_back(ref);
                 scope->owned.push_back(snapshot);
+                for (const auto& resource : draft.preparedResources)
+                    scope->uses.push_back({ref, resource.owner, resource.lease, resource.kind});
                 scope->probes.push_back({ ref, "LegacyOwner:revision", snapshot });
                 scope->probes.push_back({ ref, "LegacyOwner:payload", draft.payload });
                 std::vector<std::weak_ptr<const void>> sharedInputs;
