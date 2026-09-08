@@ -34,8 +34,17 @@ public:
     SurfaceDeterminationState GetState() const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetSurfaceSnapshot() const;
+    std::shared_ptr<const SurfaceGenerationSnapshot>
+        GetSurfaceSnapshot(std::string_view scope) const;
+    // 精确历史读取不隐含对当前输入仍适用。
+    std::shared_ptr<const SurfaceGenerationSnapshot>
+        GetSurfaceSnapshot(DataRevisionRef revision) const;
+    std::shared_ptr<const SurfaceGenerationSnapshot>
+        GetPreviewSnapshot() const;
+    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef generation, std::uint64_t pointIndex) const;
+    SurfaceRestoreState GetResultValidity(DataRevisionRef generation) const;
 
-private:
+  private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
