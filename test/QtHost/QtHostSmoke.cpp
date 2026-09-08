@@ -1,3 +1,4 @@
+// 测试用途：验证 Qt 与 VTK OpenGL 窗口的创建、会话接入和基础渲染。
 #include "App/Services/FeatureViewService.h"
 #include "Host/HostFeature.h"
 #include "Host/VtkAppHostSession.h"

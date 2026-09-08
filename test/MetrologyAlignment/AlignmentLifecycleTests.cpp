@@ -1,3 +1,4 @@
+// 测试用途：验证计量对齐的生命周期、输入当前性、显示、重入、故障恢复与工作通知。
 #include "../TestDataPort.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "AlignmentData.h"

@@ -1,3 +1,4 @@
+// 测试用途：调度表面确定的算法、几何、显示与生命周期回归。
 #include "SurfaceDeterminationTestCases.h"
 
 #include <iostream>

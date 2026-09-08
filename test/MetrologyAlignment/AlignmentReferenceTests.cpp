@@ -1,3 +1,4 @@
+// 测试用途：读取指定 NIST 参考点对执行对齐核验，不代表真实 CT 业务验收。
 #include "AlignmentGeometry.h"
 #include "AlignmentMath.h"
 #include <filesystem>

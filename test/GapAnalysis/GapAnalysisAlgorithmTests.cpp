@@ -1,3 +1,4 @@
+// 测试用途：通过合成体数据验证孔隙分析的快照、转换、过滤和算法结果，不代表真实 CT 验收。
 // 合成体数据只通过 GapAnalysisService 进入私有 DefX bridge；
 // 测试不得直接包含或调用已退役的本地孔隙算法。
 #include "Services/GapAnalysisService.h"

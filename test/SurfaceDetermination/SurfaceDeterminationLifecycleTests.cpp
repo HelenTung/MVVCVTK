@@ -1,3 +1,4 @@
+// 测试用途：验证表面请求的线程归属、取消替换、输入过期、绑定投影和结果提交。
 #include "SurfaceDeterminationTestCases.h"
 
 #include "Host/SurfaceDeterminationHostFeature.h"

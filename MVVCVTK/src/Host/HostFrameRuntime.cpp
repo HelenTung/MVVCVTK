@@ -50,6 +50,7 @@ void HostFrameRuntime::BuildSceneStates()
 }
 void HostFrameRuntime::Clear() noexcept
 {
+    for (auto& view : m_views) view.isFrameRenderNeeded = false;
     m_frameIntents.clear();
     m_frameStage.reset();
     m_sceneStates.clear();
@@ -73,6 +74,7 @@ void HostFrameRuntime::SetViewUnavailable(const std::size_t index) noexcept
 {
     if (index >= m_views.size()) return;
     auto& view = m_views[index];
+    view.isFrameRenderNeeded = false;
     view.pendingRenderEpoch = 0;
     view.renderedEpoch = view.appliedEpoch;
     const auto setUnavailable = [&view](HostSceneViewState& state) {
@@ -299,6 +301,7 @@ bool HostFrameRuntime::SetFrameGeneration(
     m_sessionGeneration = sessionGeneration;
     m_committedEpoch = 0;
     for (auto& view : m_views) {
+        view.isFrameRenderNeeded = false;
         view.appliedEpoch = 0;
         view.renderedEpoch = 0;
         view.pendingRenderEpoch = 0;
@@ -715,8 +718,7 @@ HostRenderResult HostFrameRuntime::SendFrameRender(
     // 任一 View 存在尚未提交的更改时，不绘制混合状态。
     const bool hasUncommitted = std::any_of(m_views.begin(), m_views.end(),
         [](const HostRenderViewRuntime& view) {
-            return view.isAvailable && view.interaction.update
-                && view.interaction.update->GetRenderNeeded();
+            return view.isAvailable && view.GetRenderNeeded();
         });
     for (const auto index : indices) {
         auto& view = m_views[index];
