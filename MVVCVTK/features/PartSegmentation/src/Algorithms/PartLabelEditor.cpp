@@ -1,4 +1,5 @@
 #include "Algorithms/PartLabelEditor.h"
+#include "Model/LabelMapBuilder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,7 @@ public:
     PartFailureReason reason;
 };
 
-void SetFailure(PartFailureReason reason, const char* text)
+[[noreturn]] void SetFailure(PartFailureReason reason, const char* text)
 {
     throw EditFailure(reason, text);
 }
@@ -115,7 +116,7 @@ public:
         };
         SetInput();
         m_profile.inputMs = elapsed();
-        m_labels = std::make_shared<std::vector<PartLabelId>>();
+        m_labels = std::make_unique<std::vector<PartLabelId>>();
         m_labels->reserve(m_count);
         // 分块复制保留独占候选，取消时丢弃候选；不改写任何已发布载荷。
         for (std::size_t offset = 0; offset < m_count;) {
@@ -142,9 +143,14 @@ public:
             CheckStop(0);
             SetFailure(PartFailureReason::InternalError, "Edited catalog is inconsistent.");
         }
+        auto payload = LabelMapBuilder::Build(m_geometry, std::move(m_labels), m_stop);
+        if (!payload) {
+            CheckStop(0);
+            SetFailure(PartFailureReason::InvalidGeometry, "Edited label payload is invalid.");
+        }
         m_profile.validationMs = elapsed();
         return { PartFailureReason::None, "Label edit candidate is ready.",
-            m_requiredBytes, m_labels, std::move(catalog), m_profile };
+            m_requiredBytes, payload->GetLabels(), std::move(catalog), m_profile, std::move(payload) };
     }
 
     std::size_t GetRequiredBytes() const noexcept { return m_requiredBytes; }
@@ -368,8 +374,6 @@ private:
             CheckStop(0);
             SetFailure(PartFailureReason::InvalidEdit, "Edit input labels and catalog disagree.");
         }
-        m_stride = { 1, static_cast<std::size_t>(v.dimensions[0]),
-            static_cast<std::size_t>(v.dimensions[0]) * static_cast<std::size_t>(v.dimensions[1]) };
         m_extent = v.extent;
         SetRoiInput(m_input.editRoi,m_input.request.scope.editRoi);
         SetRoiInput(m_input.protectionRoi,m_input.request.scope.protectionRoi);
@@ -862,7 +866,7 @@ private:
     std::array<int,6> m_splitExtent{};
     std::array<std::size_t,3> m_splitDimensions{}, m_splitStride{};
     std::optional<std::array<int,6>> m_changedExtent;
-    std::shared_ptr<std::vector<PartLabelId>> m_labels;
+    std::unique_ptr<std::vector<PartLabelId>> m_labels;
     std::size_t m_changedCount = 0;
     std::vector<std::uint64_t> m_counts;
     std::vector<bool> m_locked, m_changed;
