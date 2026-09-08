@@ -1096,8 +1096,12 @@ void TestBusinessInputLifecycle(Checks &checks)
     checks.Get(mesh->inputs.size() == 2 && generation->inputs.size() == 2 && generation->interfaces &&
                    generation->interfaces->at(0).canonicalId == "2:7",
                "generic consumer can trace scalar and label revisions plus stable interface identity");
-    checks.Get(payload && payload->GetPointAttributes().size() == 8 &&
-                   payload->GetPointAttributes()[5].name == "measurement.flags",
+    checks.Get(payload && payload->GetPointAttributes().size() == 9 &&
+                   payload->GetPointAttributes()[6].name == "measurement.flags" &&
+                   payload->GetPointAttributes()[5].name == "measurement.boundary-complete" &&
+                   std::all_of(payload->GetPointAttributes()[5].values.begin(),
+                               payload->GetPointAttributes()[5].values.end(),
+                               [](double value) { return value == 0.0; }),
                "generic mesh exposes quality reasons and interface/override indexes");
     const auto valid = feature.GetResultValidity(generation->dataRevision);
     checks.Get(valid.status == SurfaceRestoreStatus::Current && valid.canDisplay && valid.canRecompute &&
