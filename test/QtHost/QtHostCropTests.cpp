@@ -1543,15 +1543,34 @@ int GetCropFailCount()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const auto snapshot = surface->GetPreviewSnapshot();
+        // 中央裁切穿过此 4^3 夹具的每个插值单元；不能把无效支持伪造成表面。
+        std::size_t supportedCells = 0;
+        if (activeCropSnapshot && activeCropSnapshot->validityMask) {
+            const auto* mask = activeCropSnapshot->validityMask;
+            const auto* extent = mask->GetExtent();
+            for (int z = extent[4]; z < extent[5]; ++z)
+                for (int y = extent[2]; y < extent[3]; ++y)
+                    for (int x = extent[0]; x < extent[1]; ++x) {
+                        bool supported = true;
+                        for (int dz = 0; dz < 2; ++dz)
+                            for (int dy = 0; dy < 2; ++dy)
+                                for (int dx = 0; dx < 2; ++dx)
+                                    supported = supported && mask->GetScalarComponentAsDouble(
+                                        x + dx, y + dy, z + dz, 0) != 0.0;
+                        supportedCells += supported ? 1 : 0;
+                    }
+        }
         const bool matched = attached && admission.status == SurfaceAdmissionStatus::Accepted
-            && completions == 1 && result && snapshot && snapshot->points && !snapshot->points->empty()
+            && activeCropSnapshot && activeCropSnapshot->validityMask && supportedCells == 0
+            && completions == 1 && result && !snapshot && !surface->GetSurfaceSnapshot()
+            && result->status == SurfaceResultStatus::Failed
+            && result->failureReason == SurfaceFailureReason::NoSurface
             && result->purpose == SurfaceTaskPurpose::Preview && !result->isPublished
-            && !GetDataRevisionRefValid(snapshot->meshRevision)
+            && !GetDataRevisionRefValid(result->meshRevision)
             && result->sourceRevision == publishResult.outputRevision
-            && snapshot->sourceRevision == publishResult.outputRevision
             && contextProbe->m_data->GetPrimaryImage()->data->self == publishResult.outputRevision;
         failureCount += GetCaseResult(matched,
-            "Crop to Surface public workflow consumes the materialized revision without selecting the original volume") ? 0 : 1;
+            "Crop to Surface preserves the materialized revision and rejects a mask with no supported cells") ? 0 : 1;
         failureCount += GetCaseResult(session.DetachFeature(*surface),
             "Crop to Surface consumer detaches without changing primary data") ? 0 : 1;
     }
