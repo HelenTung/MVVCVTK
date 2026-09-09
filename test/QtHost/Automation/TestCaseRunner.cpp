@@ -140,6 +140,14 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     button->click(); return id;
 }
+std::uint64_t SendUnavailable(TestWindow& window, const QString& module, const QString& action)
+{
+    auto* panel = window.GetModule(module); panel->Observe();
+    auto* button = panel->findChild<QPushButton*>("action_" + action);
+    Check(button && !button->isEnabled() && !button->toolTip().isEmpty(),
+        "unavailable business commands are disabled with an explanation");
+    return Send(window, module, action);
+}
 void DropFile(QWidget* widget, const QString& path)
 {
     QMimeData mime; mime.setUrls({QUrl::fromLocalFile(path)});
@@ -179,6 +187,8 @@ void CheckUiAndRecords(TestWindow& window)
     Check(tabs && tabs->count() == 11 && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
     Check(window.GetSession()->GetRenderViewStates().size() == 4 && window.findChildren<QVTKOpenGLNativeWidget*>().size() == 4,
         "manual workspace contains one 3D viewport and three slice viewports");
+    Check(!window.findChild<QComboBox*>("renderMode")->isEnabled() && !window.findChild<QPushButton*>("fitView")->isEnabled(),
+        "3D toolbar waits for input before offering display operations");
     auto* dataDefaults = window.GetModule("Data")->GetParameterEditor("Load");
     const auto defaults = dataDefaults->GetValue().toObject();
     Check(defaults["datasetId"] == "1" && defaults["dimensions"] == QJsonArray{1536,1536,1536}
@@ -596,11 +606,9 @@ void CheckParameterLayout(TestWindow& window)
     view->SetParameterPatch("Set", {{"windowLevel", QJsonValue()}});
     view->SetParameterPatch("Visibility", {{"planes", QJsonValue()}});
     view->SetParameterPatch("Set", {{"viewId", "primary-3d"}}); view->SelectAction("Set");
-    const auto directId = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    view->findChild<QPushButton*>("action_Set")->click();
-    const auto direct = GetComplete(window, directId);
+    const auto direct = GetComplete(window, SendUnavailable(window, "View", "Set"), "Rejected");
     Check(direct["action"] == "Set" && direct["parameters"].toObject()["viewId"] == "primary-3d",
-        "card executes its own inputs without selecting its settings operation first");
+        "disabled display command still rejects programmatic input before data is loaded");
     view->SetParameterPatch("Set", {{"viewId", "primary-3d"}});
 
     const auto identity = QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -758,6 +766,44 @@ void CheckOverlaySwitch(TestWindow& window, const QString& module,
             const auto state = window.GetSession()->GetRenderViewState({original.first});
             Check(state && state->material.opacity == original.second, "disabling part preview restores each user's original source opacity");
         }
+    }
+}
+void CheckViewCapabilities(TestWindow& window)
+{
+    auto* panel = window.GetModule("View"); auto* form = panel->GetParameterEditor("Set");
+    const auto original = form->GetValue().toObject();
+    const auto hasField = [&](const char* key, bool expected) {
+        Check(form->GetField(key)->isHidden() != expected
+            && form->GetValue().toObject().contains(key) == expected,
+            "view fields and submitted parameters follow the effective rendering mode");
+    };
+    for (const auto* mode : {"CompositeVolume", "CompositeIsoSurface", "Volume", "IsoSurface"}) {
+        GetComplete(window, Click(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", mode}}), "Succeeded");
+        panel->Observe(); const bool volume = QString(mode).endsWith("Volume");
+        hasField("iso", !volume); hasField("transfer", volume); hasField("windowLevel", false);
+        hasField("quality", true); hasField("opacity", true); hasField("mode", true);
+        const auto threshold = window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold;
+        const auto invalid = volume ? QJsonObject{{"viewId", "primary-3d"}, {"iso", 123.}}
+            : QJsonObject{{"viewId", "primary-3d"}, {"transfer", QJsonObject{}}};
+        GetComplete(window, panel->SendAction("Set", invalid), "InvalidInput");
+        Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == threshold,
+            "direct requests cannot apply fields unsupported by the current manual view");
+    }
+    for (const auto* view : {"slice-top-down", "slice-front-back", "slice-left-right"}) {
+        panel->SetParameterPatch("Set", {{"viewId", view}}); panel->Observe();
+        for (const auto* key : {"mode", "iso", "transfer", "quality", "opacity"}) hasField(key, false);
+        hasField("windowLevel", true);
+    }
+    panel->SetParameters("Set", original);
+    // 工具栏直接发请求，不经过参数页；参数显隐仍须立即跟随实际模式。
+    panel->SetParameterPatch("Set", {{"mode", "invalid-imported-mode"}});
+    GetComplete(window, Send(window, "View", "Set"), "InvalidInput");
+    auto* toolbar = window.findChild<QComboBox*>("renderMode");
+    for (const int index : {1, 0}) {
+        const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
+        toolbar->setCurrentIndex(index); toolbar->activated(index); GetComplete(window, id, "Succeeded");
+        panel->Observe(); hasField("iso", index == 0); hasField("transfer", index == 1); hasField("quality", true);
+        QCoreApplication::processEvents(); window.grab().save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
     }
 }
 void CheckCropWorkflow(TestWindow& window)
@@ -1122,10 +1168,10 @@ void StartSelfTest(TestWindow& window)
     CheckBooleanControls(window);
     auto* view = window.GetModule("View");
     view->SetParameterPatch("Reset", {{"viewId", "missing"}});
-    GetComplete(window, Click(window, "View", "Reset", {{"viewId", "missing"}}), "Rejected");
+    GetComplete(window, SendUnavailable(window, "View", "Reset"), "Rejected");
     const auto* log = window.findChild<QPlainTextEdit*>("businessLog");
     Check(log && log->toPlainText().contains("视图显示 · 重置视图") && log->toPlainText().contains("操作被拒绝"),
-        "Chinese dropdown and execute button dispatch the original action and render the business flow");
+        "unavailable display commands retain Chinese rejection details for programmatic requests");
     Check(log->toPlainText().contains(QRegularExpression("\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\]")),
         "business timestamps use readable ASCII digits regardless of system locale");
     QTemporaryDir directory;
@@ -1174,6 +1220,7 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, Send(window, "Data", "Select", {{"revision", GetRefText(original.dataRevision)}, {"expectedBindingRevision", "0"}}), "Failed");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"iso", 50.0}}), "Succeeded");
     CheckBooleanRequests(window);
+    CheckViewCapabilities(window);
     const auto burstStart = window.GetUpdateCount();
     std::vector<std::uint64_t> burst;
     for (int index = 0; index < 10; ++index) burst.push_back(Send(window, "View", "Set", {{"iso", 41.0 + index}}));
@@ -1223,7 +1270,7 @@ void StartSelfTest(TestWindow& window)
         Check(Wait([&] { const auto* item = partNode(target["binding"].toObject()); return item && item->text(0).contains("节点刷新测试零件") && editTree->selectedItems().size() == 2; }),
             "scene rebuild preserves multi-selection by stable part identity");
         QCoreApplication::processEvents(); window.grab().save("scene-ui-parts.png");
-        GetComplete(window, Click(window, "PartEdit", "Commit"), "Rejected");
+        GetComplete(window, SendUnavailable(window, "PartEdit", "Commit"), "Rejected");
         GetComplete(window, Click(window, "Part", "EditSelected", {{"target", target["binding"]}}), "ParametersCopied");
         GetComplete(window, Send(window, "Part", "SetState", {{"target", target["binding"]}}), "Succeeded");
         const auto formal = window.GetSession()->GetLabelMapDescriptors(); Check(!formal.empty(), "formal label descriptor exists");
@@ -1269,7 +1316,7 @@ void StartSelfTest(TestWindow& window)
         editPanel->Observe(); SaveScene(window, editTree, "scene-ui-split-graph.png");
     }
     if (GetEnabled(window, "Artifact")) {
-        GetComplete(window, Click(window, "Artifact", "Commit"), "Rejected");
+        GetComplete(window, SendUnavailable(window, "Artifact", "Commit"), "Rejected");
         GetComplete(window, Send(window, "Artifact", "Diffusion"), "Ready");
         GetComplete(window, Send(window, "Artifact", "Diffusion"), "Rejected");
         GetComplete(window, Click(window, "Artifact", "Commit"), "Published");
@@ -1301,13 +1348,19 @@ void StartSelfTest(TestWindow& window)
     }
     if (GetEnabled(window, "Surface")) {
         GetComplete(window, Send(window, "Surface", "AutomaticIso50"), "Succeeded");
+        GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeVolume"}}), "Succeeded");
+        GetComplete(window, SendUnavailable(window, "Surface", "CopyIsoToDisplay"), "Rejected");
+        GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
+        window.GetModule("Surface")->Observe();
+        Check(window.GetModule("Surface")->findChild<QPushButton*>("action_CopyIsoToDisplay")->isEnabled(),
+            "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalIsoPreview", {{"initialIsoValue", 50.0}}), "Succeeded");
         CheckOverlaySwitch(window, "Surface");
         Check(!GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()), "preview mesh is not promoted to metrology input");
 #if defined(MANUAL_ALIGNMENT)
         if (GetEnabled(window, "Alignment")) {
             GetComplete(window, Send(window, "Alignment", "SaveRecipe"), "Rejected");
-            GetComplete(window, Click(window, "Surface", "OpenAlignment"), "Rejected");
+            GetComplete(window, SendUnavailable(window, "Surface", "OpenAlignment"), "Rejected");
             GetComplete(window, Send(window, "Surface", "LocalAdaptiveIso50", {{"initialIsoValue", 50.0}}), "Succeeded");
             const auto samples = GetComplete(window, Send(window, "Surface", "SamplePoints"), "Observed")["result"].toObject()["samples"].toArray();
             GetComplete(window, Click(window, "Surface", "OpenAlignment"), "ParametersCopied");
@@ -1359,7 +1412,7 @@ void StartSelfTest(TestWindow& window)
             const auto archivePath = directory.filePath("alignment-archive.json");
             GetComplete(window, Send(window, "Alignment", "ExportArchive", {{"outputPath", archivePath}}), "ArchiveExported");
             GetComplete(window, Send(window, "Alignment", "Restore", {{"archivePath", archivePath}}), "FullyDetermined");
-            GetComplete(window, Click(window, "Alignment", "Result"), "Rejected");
+            GetComplete(window, SendUnavailable(window, "Alignment", "Result"), "Rejected");
             GetComplete(window, Send(window, "Alignment", "Start"), "FullyDetermined");
         }
 #endif

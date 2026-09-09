@@ -794,7 +794,7 @@ SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagno
         result.message = "Surface generation or point is unavailable.";
         return result;
     }
-    if (generation->algorithmRevision != 4)
+    if (generation->algorithmRevision != surfaceAlgorithmRevision)
     {
         SurfaceProfileDiagnostic result;
         result.message = "Surface algorithm revision is incompatible with diagnostic replay.";
@@ -834,7 +834,7 @@ SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
         state.message = "Surface mesh is unavailable.";
         return state;
     }
-    if (generation->algorithmRevision != 4 ||
+    if (generation->algorithmRevision != surfaceAlgorithmRevision ||
         !SurfaceRecipeCodec::GetError(generation->resolvedParams).empty())
     {
         state.status = SurfaceRestoreStatus::IncompatibleRecipe;

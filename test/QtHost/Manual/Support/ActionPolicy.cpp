@@ -17,6 +17,8 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     }
     if (module == "Surface") {
         if (action.startsWith("CopyIsoTo") && !s["hasIso"].toBool()) return "当前输入还没有有效阈值估计。";
+        if (action == "CopyIsoToDisplay" && !s["canApplyIsoToDisplay"].toBool()) return "主三维当前不是等值面模式，请先切换显示模式。";
+        if (action == "Visibility" && !s["hasMesh"].toBool()) return "当前没有可显示的表面网格。";
         if (action == "SamplePoints" && !s["hasMesh"].toBool()) return "请先生成当前输入的表面网格。";
         if (action == "OpenAlignment" && !s["hasMeasurement"].toBool()) return "请先生成局部自适应或梯度峰值测量表面。";
     }

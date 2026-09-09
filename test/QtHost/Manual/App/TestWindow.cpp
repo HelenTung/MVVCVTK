@@ -80,7 +80,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_renderMode = new QComboBox(m_viewArea); m_renderMode->setObjectName("renderMode");
     m_renderMode->addItem("等值面", "CompositeIsoSurface"); m_renderMode->addItem("体渲染", "CompositeVolume");
     m_renderMode->setEnabled(false); viewToolbar->addWidget(m_renderMode);
-    auto* fit = new QPushButton("适配视图", m_viewArea); fit->setObjectName("fitView"); viewToolbar->addWidget(fit);
+    auto* fit = new QPushButton("适配视图", m_viewArea); fit->setObjectName("fitView"); fit->setEnabled(false); viewToolbar->addWidget(fit);
     primaryLayout->addWidget(primaryHeader);
     viewGrid->addWidget(primaryFrame, 0, 0);
     auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
@@ -135,12 +135,13 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
             if (view.id.toStdString() == id) return view.widget->isVisible() && view.window->GetReadyForRendering();
         return false;
     };
-    m_pump.onUpdated = [this] {
+    m_pump.onUpdated = [this, fit] {
         const auto session = m_runtime.GetSession(); if (!session) return;
         const auto applied = session->GetRenderViewState({"primary-3d"});
         if (applied) { const QSignalBlocker blocker(m_renderMode); m_renderMode->setCurrentIndex(
             applied->viewMode == HostRenderMode::Volume || applied->viewMode == HostRenderMode::CompositeVolume ? 1 : 0); }
         const auto descriptor = session->GetImageDescriptor();
+        m_renderMode->setEnabled(descriptor.has_value()); fit->setEnabled(descriptor.has_value());
         const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "拖入文件开始，或在数据页选择路径";
         if (m_status->text() != text) m_status->setText(text);
         QueueObserve();
@@ -253,7 +254,7 @@ void TestWindow::BuildSession()
         m_workflow.getActionAvailable = [this](const QString& module, const QString& action) {
             const auto* page = GetModule(module); return page && page->GetActions().contains(action);
         };
-        m_isReady = true; m_renderMode->setEnabled(true);
+        m_isReady = true;
         QStringList enabled;
         for (auto* page : m_modules) if (!page->GetActions().isEmpty()) enabled.append(page->GetDisplayName());
         AppendLog("测试会话已就绪：" + enabled.join("、") + "。请选择“数据输入 → 加载体数据”开始测试。");

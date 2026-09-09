@@ -47,7 +47,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
 ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeterminationHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
-    panel->SetNotice("自动 ISO50 仅估计阈值；全局等值面预览点不能直接用于测量。对齐请使用局部自适应或梯度峰值方法的有效点，定位稳定性不等于计量不确定度。");
+    panel->SetNotice("自动 ISO50 从空气背景与占比最多的非空气材料群估计阈值；全局等值面预览点不能直接用于测量。对齐请使用局部自适应或梯度峰值方法的有效点，定位稳定性不等于计量不确定度。");
     const auto defaults = GetJson(R"({"componentSelection":"Largest","initialIsoValue":null,"seedModelPoint":null,"roiModelBounds":null,"profileHalfLengthModel":null,"profileSampleStepModel":null,"maximumOffsetModel":null,"profileSmoothingSigmaModel":null,"minimumObjectVoxels":"1","minimumContrast":0})");
     for (const auto& method : std::vector<std::pair<QString, SurfaceDeterminationMethod>>{
         {"AutomaticIso50", SurfaceDeterminationMethod::AutomaticIso50}, {"GlobalIsoPreview", SurfaceDeterminationMethod::GlobalIsoPreview},
@@ -121,6 +121,9 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 throw std::invalid_argument("当前输入没有有效 ISO 估计");
             const auto iso = state.isoEstimate->isoValue;
             if (destination == "Display") {
+                const auto view = panel->GetSession()->GetRenderViewState({"primary-3d"});
+                if (!view || (view->viewMode != HostRenderMode::IsoSurface && view->viewMode != HostRenderMode::CompositeIsoSurface))
+                    throw std::invalid_argument("主三维当前不是等值面模式，请先切换显示模式");
                 HostViewSetRequest request; request.targetView.viewId = "primary-3d"; request.iso = iso;
                 panel->SendHost(id, std::move(request));
             } else {
@@ -168,6 +171,8 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         const bool measured = current && GetDataRevisionRefValid(snapshot->meshRevision)
             && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure;
         summary["hasIso"] = input && state.isoEstimate && state.sourceRevision == input->dataRevision;
+        const auto display = panel->GetSession()->GetRenderViewState({"primary-3d"});
+        summary["canApplyIsoToDisplay"] = display && (display->viewMode == HostRenderMode::IsoSurface || display->viewMode == HostRenderMode::CompositeIsoSurface);
         summary["hasPreview"] = hasPreview;
         summary["hasResult"] = current || hasPreview || summary["hasIso"].toBool();
         summary["hasMesh"] = (current && GetDataRevisionRefValid(snapshot->meshRevision)) || hasPreview;

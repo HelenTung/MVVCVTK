@@ -149,6 +149,37 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
     checks.Get(cancelled.status == SurfaceResultStatus::Cancelled && !cancelled.isoEstimate,
         "threshold cancellation publishes no estimate");
 
+    const auto thinMaterial = BuildSnapshot(
+        {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
+        [](const Point3& point) { return point[0] == 61 || point[0] == 62 ? 1000.0 : point[0] >= 112 ? 0.0 : -100.0; });
+    const auto thinEstimate = Build(thinMaterial, threshold, 64U * 1024U);
+    checks.Get(thinEstimate.status == SurfaceResultStatus::Succeeded && thinEstimate.isoEstimate
+        && std::abs(thinEstimate.isoEstimate->isoValue-450.0) < 3.0
+        && thinEstimate.isoEstimate->materialValue > 990.0,
+        "histogram range retains thin material missed by the old coarse pilot instead of selecting a background secondary peak");
+    const auto multipleMaterials = BuildSnapshot(
+        {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
+        [](const Point3& point) { return point[0] < 80 ? -100.0 : point[0] < 112
+            ? 600.0 + .8*(point[1]+point[2]-127.0) : 2000.0; });
+    const auto dominantEstimate = Build(multipleMaterials, threshold, 64U*1024U);
+    checks.Get(dominantEstimate.status == SurfaceResultStatus::Succeeded && dominantEstimate.isoEstimate
+        && std::abs(dominantEstimate.isoEstimate->isoValue-250.0) < 5.0,
+        "automatic ISO50 selects the largest material population instead of a sharper brighter minority peak");
+    const auto materialDominated = BuildSnapshot(
+        {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
+        [](const Point3& point) { return point[0] < 32 ? 0.0 : point[0] < 116 ? 800.0 : 1200.0; });
+    const auto materialDominatedEstimate = Build(materialDominated, threshold, 64U*1024U);
+    checks.Get(materialDominatedEstimate.status == SurfaceResultStatus::Succeeded && materialDominatedEstimate.isoEstimate
+        && std::abs(materialDominatedEstimate.isoEstimate->isoValue-400.0) < 3.0,
+        "the tallest material peak is not mistaken for air when material occupies most of the input");
+    const auto negativeMaterial = BuildSnapshot(
+        {32,32,32}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
+        [](const Point3& point) { return point[0] < 24 ? -1000.0 : -200.0; });
+    const auto negativeEstimate = Build(negativeMaterial, threshold, 64U*1024U);
+    checks.Get(negativeEstimate.status == SurfaceResultStatus::Succeeded && negativeEstimate.isoEstimate
+        && std::abs(negativeEstimate.isoEstimate->isoValue+600.0) < 2.0,
+        "ISO50 remains in the input scalar domain and never clamps or takes the absolute value of valid negative thresholds");
+
     constexpr double boundary = 15.35;
     auto peakParams = GetParams(SurfaceDeterminationMethod::GradientPeak);
     const auto peakResult = Build(BuildPlane(VTK_FLOAT, boundary), peakParams);

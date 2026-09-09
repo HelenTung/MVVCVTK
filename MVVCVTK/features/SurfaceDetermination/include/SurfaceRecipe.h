@@ -14,7 +14,7 @@ enum class SurfaceDeterminationMethod : std::uint8_t
     GlobalIsoPreview,
     LocalAdaptiveIso50,
     GradientPeak,
-    // 仅估计空气/单材料双峰 ISO50，不构造测量网格。
+    // 从空气背景与占比最多的非空气材料群估计 ISO50，不构造测量网格。
     AutomaticIso50,
     LocalRelativeIso,
     EdgeModelFit,

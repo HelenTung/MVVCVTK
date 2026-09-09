@@ -36,7 +36,7 @@ namespace {
 
 using Point3 = std::array<double, 3>;
 
-constexpr std::uint32_t algorithmRevision = 4;
+constexpr std::uint32_t algorithmRevision = surfaceAlgorithmRevision;
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
@@ -798,38 +798,49 @@ SurfaceFailureReason GetAutomaticIso(
     double minimum = std::numeric_limits<double>::max(), maximum = std::numeric_limits<double>::lowest();
     std::uint64_t validCount = 0, excludedCount = 0;
     const auto &extent = volume.geometry.extent;
-    std::array<std::int64_t, 3> sampleSteps{}, pilotSteps{};
+    std::array<std::int64_t, 3> sampleSteps{};
     for (unsigned a = 0; a < 3; ++a)
     {
         sampleSteps[a] = (static_cast<std::int64_t>(volume.geometry.dimensions[a]) + 127) / 128;
-        pilotSteps[a] = (static_cast<std::int64_t>(volume.geometry.dimensions[a]) + 15) / 16;
     }
-    std::array<double, 4096> pilot{};
-    std::size_t pilotCount = 0;
-    for (std::int64_t z = extent[4] + pilotSteps[2] / 2; z <= extent[5]; z += pilotSteps[2])
-        for (std::int64_t y = extent[2] + pilotSteps[1] / 2; y <= extent[3]; y += pilotSteps[1])
+    // 范围和直方图使用同一采样集合。独立的 16^3 预采样会避开薄壁材料，
+    // 随后把真正的材料峰作为越界值丢弃，并把背景附近的次峰误认作材料。
+    // 只保留每侧 17 个极值，以固定空间排除最多 16 个孤立极端样本。
+    constexpr std::size_t tailCapacity = 17;
+    std::array<double, tailCapacity> lowest{}, highest{};
+    lowest.fill(std::numeric_limits<double>::max());
+    highest.fill(std::numeric_limits<double>::lowest());
+    for (std::int64_t z = extent[4] + sampleSteps[2] / 2; z <= extent[5]; z += sampleSteps[2])
+        for (std::int64_t y = extent[2] + sampleSteps[1] / 2; y <= extent[3]; y += sampleSteps[1])
         {
             if (GetCancelled(getCancelled))
                 return SurfaceFailureReason::Cancelled;
-            for (std::int64_t x = extent[0] + pilotSteps[0] / 2; x <= extent[1]; x += pilotSteps[0])
+            for (std::int64_t x = extent[0] + sampleSteps[0] / 2; x <= extent[1]; x += sampleSteps[0])
             {
                 const auto id = GetTupleIndex(volume.geometry, static_cast<int>(x), static_cast<int>(y),
                                               static_cast<int>(z));
                 const auto value = volume.scalars.GetValue(id);
                 if (GetVoxelUsed(volume, params, static_cast<int>(x), static_cast<int>(y),
                                  static_cast<int>(z), id) &&
-                    std::isfinite(value))
-                    pilot[pilotCount++] = value;
+                    std::isfinite(value)) {
+                    ++validCount;
+                    if (value < lowest.back()) {
+                        const auto at = std::lower_bound(lowest.begin(), lowest.end(), value);
+                        std::move_backward(at, lowest.end()-1, lowest.end()); *at = value;
+                    }
+                    if (value > highest.back()) {
+                        const auto at = std::lower_bound(highest.begin(), highest.end(), value, std::greater<double>{});
+                        std::move_backward(at, highest.end()-1, highest.end()); *at = value;
+                    }
+                }
             }
         }
-    if (pilotCount >= 64)
+    if (validCount >= 64)
     {
-        std::sort(pilot.begin(), pilot.begin() + pilotCount);
-        const auto trim = pilotCount / 1000;
-        minimum = pilot[trim];
-        maximum = pilot[pilotCount - 1 - trim];
+        const auto trim = std::min<std::uint64_t>(tailCapacity-1, validCount / 1000);
+        minimum = lowest[trim];
+        maximum = highest[trim];
     }
-    validCount = pilotCount;
     if (validCount < 64 || !std::isfinite(minimum)
         || !std::isfinite(maximum)
         || maximum - minimum <= geometryEpsilon
@@ -918,35 +929,70 @@ SurfaceFailureReason GetAutomaticIso(
     const std::size_t minimumSeparation = histogramBinCount / 10;
     const double minimumPeakHeight = std::max(
         2.0, static_cast<double>(validCount) * 1.0e-5);
-    const std::size_t candidateCount = std::min<std::size_t>(32, peaks.size());
-    for (std::size_t first = 0; first < candidateCount; ++first) {
-        for (std::size_t second = first + 1;
-            second < candidateCount; ++second) {
-            Peak low = peaks[first];
-            Peak high = peaks[second];
-            if (low.index > high.index) std::swap(low, high);
-            // 快速空气/单材料估计使用占主导的空气峰及其右侧材料峰。
-            // 不允许两个次要伪影峰绕过真实背景峰而产生看似可靠的阈值。
-            if (params.method == SurfaceDeterminationMethod::AutomaticIso50
-                && low.index != peaks.front().index) continue;
-            if (high.index - low.index < minimumSeparation
-                || low.height < minimumPeakHeight
-                || high.height < minimumPeakHeight) {
-                continue;
+    if (params.method == SurfaceDeterminationMethod::AutomaticIso50 && !peaks.empty()) {
+        // 按谷分群；近背景起伏和同一材料上的小尖峰合并，
+        // 非空气材料按原始直方图积分样本数比较，而不是按峰高或离背景的距离比较。
+        std::vector<Peak> groups;
+        for (const auto& peak : peaks) {
+            if (peak.height < minimumPeakHeight) continue;
+            const bool separated = std::all_of(groups.begin(), groups.end(), [&](const Peak& group) {
+                const auto low = std::min(peak.index, group.index), high = std::max(peak.index, group.index);
+                if (high-low < minimumSeparation) return false;
+                const auto valley = *std::min_element(smooth.begin()+low, smooth.begin()+high+1);
+                return valley <= 0.7 * std::min(peak.height, group.height);
+            });
+            if (separated) groups.push_back(peak);
+        }
+        std::sort(groups.begin(), groups.end(), [](const Peak& a, const Peak& b) { return a.index < b.index; });
+        std::vector<std::uint64_t> counts;
+        for (std::size_t i = 0; i < groups.size(); ++i) {
+            const auto left = i == 0 ? std::ptrdiff_t{0}
+                : std::min_element(smooth.begin()+groups[i-1].index, smooth.begin()+groups[i].index+1)-smooth.begin();
+            const auto right = i+1 < groups.size()
+                ? std::min_element(smooth.begin()+groups[i].index, smooth.begin()+groups[i+1].index+1)-smooth.begin()
+                : static_cast<std::ptrdiff_t>(histogramBinCount);
+            counts.push_back(std::accumulate(histogram.begin()+left, histogram.begin()+right, std::uint64_t{0}));
+        }
+        if (!counts.empty()) {
+            // 背景取有显著峰高与样本支持的最低灰度群；最高峰可能属于材料。
+            // 低值小伪影不能顶替空气。范围需包含足够背景，才能识别这对灰度群。
+            const auto maximumCount = *std::max_element(counts.begin(), counts.end());
+            std::size_t background = 0;
+            while (background < groups.size()
+                && (groups[background].height < 0.01*peaks.front().height || counts[background] < 0.05*maximumCount)) ++background;
+            std::uint64_t largestCount = 0;
+            for (std::size_t i = background+1; i < groups.size(); ++i) {
+                if (counts[i] > largestCount) { largestCount = counts[i]; selected = std::make_pair(groups[background], groups[i]); }
             }
-            const auto valley = std::min_element(
-                smooth.begin() + static_cast<std::ptrdiff_t>(low.index),
-                smooth.begin() + static_cast<std::ptrdiff_t>(high.index + 1));
-            const double valleyHeight = *valley;
-            const double smallerPeak = std::min(low.height, high.height);
-            if (valleyHeight > 0.85 * smallerPeak) continue;
-            const double separation = static_cast<double>(
-                high.index - low.index);
-            const double score = separation * smallerPeak
-                * (1.0 - valleyHeight / smallerPeak);
-            if (score > selectedScore) {
-                selected = std::make_pair(low, high);
-                selectedScore = score;
+        }
+    }
+    else {
+        const std::size_t candidateCount = std::min<std::size_t>(32, peaks.size());
+        for (std::size_t first = 0; first < candidateCount; ++first) {
+            for (std::size_t second = first + 1;
+                second < candidateCount; ++second) {
+                Peak low = peaks[first];
+                Peak high = peaks[second];
+                if (low.index > high.index) std::swap(low, high);
+                if (high.index - low.index < minimumSeparation
+                    || low.height < minimumPeakHeight
+                    || high.height < minimumPeakHeight) {
+                    continue;
+                }
+                const auto valley = std::min_element(
+                    smooth.begin() + static_cast<std::ptrdiff_t>(low.index),
+                    smooth.begin() + static_cast<std::ptrdiff_t>(high.index + 1));
+                const double valleyHeight = *valley;
+                const double smallerPeak = std::min(low.height, high.height);
+                if (valleyHeight > 0.85 * smallerPeak) continue;
+                const double separation = static_cast<double>(
+                    high.index - low.index);
+                const double score = separation * smallerPeak
+                    * (1.0 - valleyHeight / smallerPeak);
+                if (score > selectedScore) {
+                    selected = std::make_pair(low, high);
+                    selectedScore = score;
+                }
             }
         }
     }
@@ -955,7 +1001,7 @@ SurfaceFailureReason GetAutomaticIso(
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
-    for (const auto &peak : peaks)
+    if (params.method != SurfaceDeterminationMethod::AutomaticIso50) for (const auto &peak : peaks)
     {
         const auto distanceA = peak.index > selected->first.index ? peak.index - selected->first.index
                                                                   : selected->first.index - peak.index;

@@ -8,6 +8,24 @@ namespace Manual {
 namespace {
 // HostRenderViewState 的三个可见性位，分别对应 HostVisibilityParams 的三个字段。
 constexpr std::uint32_t planesBit = 1U, crosshairBit = 2U, rulerBit = 4U;
+HostRenderMode GetMode(const QJsonObject& params)
+{
+    return GetEnum<HostRenderMode>(params, "mode", {
+        {"Volume", HostRenderMode::Volume}, {"IsoSurface", HostRenderMode::IsoSurface},
+        {"CompositeVolume", HostRenderMode::CompositeVolume}, {"CompositeIsoSurface", HostRenderMode::CompositeIsoSurface},
+        {"SliceTopDown", HostRenderMode::SliceTopDown}, {"SliceFrontBack", HostRenderMode::SliceFrontBack}, {"SliceLeftRight", HostRenderMode::SliceLeftRight}});
+}
+bool IsDisplayFieldApplicable(HostRenderMode mode, const QString& key, bool primary)
+{
+    const bool volume = mode == HostRenderMode::Volume || mode == HostRenderMode::CompositeVolume;
+    const bool iso = mode == HostRenderMode::IsoSurface || mode == HostRenderMode::CompositeIsoSurface;
+    if (key == "mode") return primary;
+    if (key == "iso") return iso;
+    if (key == "transfer") return volume;
+    if (key == "quality" || key == "opacity") return volume || iso;
+    if (key == "windowLevel") return !volume && !iso;
+    return true;
+}
 bool IsApplicable(HostRenderMode mode, std::uint32_t bit)
 {
     const bool slice = mode == HostRenderMode::SliceTopDown || mode == HostRenderMode::SliceFrontBack || mode == HostRenderMode::SliceLeftRight;
@@ -41,17 +59,22 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         [panel](auto id, const auto& params) {
             HostViewSetRequest request;
             request.targetView.viewId = GetText(params, "viewId").toStdString();
-            if (params.contains("mode") && !params["mode"].isNull()) request.mode = GetEnum<HostRenderMode>(params, "mode", {
-                {"Volume", HostRenderMode::Volume}, {"IsoSurface", HostRenderMode::IsoSurface},
-                {"CompositeVolume", HostRenderMode::CompositeVolume}, {"CompositeIsoSurface", HostRenderMode::CompositeIsoSurface},
-                {"SliceTopDown", HostRenderMode::SliceTopDown}, {"SliceFrontBack", HostRenderMode::SliceFrontBack}, {"SliceLeftRight", HostRenderMode::SliceLeftRight}});
+            const auto current = panel->GetSession()->GetRenderViewState(request.targetView);
+            if (!current) throw std::invalid_argument("当前没有可用视图");
+            if (params.contains("mode") && !params["mode"].isNull()) request.mode = GetMode(params);
+            const auto effectiveMode = request.mode.value_or(current->viewMode);
+            for (const auto* key : {"mode", "iso", "opacity", "quality", "windowLevel", "transfer"}) {
+                if (params.contains(key) && !params[key].isNull()
+                    && !IsDisplayFieldApplicable(effectiveMode, key, request.targetView.viewId == "primary-3d"))
+                    throw std::invalid_argument((GetParameterText(key) + "不适用于当前视图模式").toStdString());
+            }
             if (params.contains("iso") && !params["iso"].isNull()) request.iso = GetNumber(params, "iso");
-            if (!params["opacity"].isNull()) request.opacity = GetNumber(params, "opacity");
-            if (!params["axes"].isNull()) request.isAxesVisible = GetBool(params, "axes");
+            if (params.contains("opacity") && !params["opacity"].isNull()) request.opacity = GetNumber(params, "opacity");
+            if (params.contains("axes") && !params["axes"].isNull()) request.isAxesVisible = GetBool(params, "axes");
             if (params.contains("quality") && !params["quality"].isNull()) request.volumeQuality = GetEnum<HostVolumeQuality>(params, "quality", {
                 {"Auto", HostVolumeQuality::Auto}, {"Low", HostVolumeQuality::Low}, {"High", HostVolumeQuality::High},
                 {"XHigh", HostVolumeQuality::XHigh}, {"Ultra", HostVolumeQuality::Ultra}});
-            if (!params["windowLevel"].isNull()) {
+            if (params.contains("windowLevel") && !params["windowLevel"].isNull()) {
                 const auto value = GetArray<double, 2>(params["windowLevel"]);
                 request.windowLevel = HostWindowLevelParams{value[0], value[1]};
             }
@@ -129,7 +152,9 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
                 {"sceneEpoch", QString::number(view.sceneEpoch)}, {"renderedEpoch", QString::number(view.renderedEpoch)}});
         panel->SetComplete(id, "Observed", {{"views", views}});
     }, TestPolicy::Read);
-    panel->onObserve = [panel] {
+    struct DisplayContext { QString viewId; std::optional<HostRenderMode> mode; };
+    auto displayContext = std::make_shared<DisplayContext>();
+    panel->onObserve = [panel, displayContext] {
         QJsonArray views;
         const auto labels = GetParameterChoices("View", "viewId");
         for (const auto& scene : panel->GetSession()->GetSceneViewStates()) {
@@ -147,6 +172,21 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         auto* display = panel->GetParameterEditor("Set");
         const auto viewId = display->GetField("viewId")->GetValue().toString();
         const auto applied = panel->GetSession()->GetRenderViewState({viewId.toStdString()});
+        auto* modeField = display->GetField("mode");
+        if (applied && (displayContext->viewId != viewId || displayContext->mode != applied->viewMode)) {
+            // 外部工具栏切换或改选目标后，不把上一视图的模式草稿重新带回请求。
+            modeField->SetValue(QJsonValue());
+            displayContext->viewId = viewId; displayContext->mode = applied->viewMode;
+        }
+        auto effectiveMode = applied ? applied->viewMode : HostRenderMode::CompositeIsoSurface;
+        if (!modeField->GetValue().isNull()) {
+            try { effectiveMode = GetMode({{"mode", modeField->GetValue()}}); }
+            catch (const std::invalid_argument&) { /* 非法导入草稿在提交时报告，观察仍使用当前模式。 */ }
+        }
+        QJsonObject applicability;
+        for (const auto* key : {"mode", "iso", "opacity", "quality", "windowLevel", "transfer", "axes"})
+            applicability[key] = applied && IsDisplayFieldApplicable(effectiveMode, key, viewId == "primary-3d");
+        display->SetFieldApplicability(applicability);
         display->GetField("axes")->SetAppliedBoolean(applied ? QJsonValue(applied->isAxesVisible) : QJsonValue(), viewId, applied ? QString() : "当前没有可用视图");
         auto* visibility = panel->GetParameterEditor("Visibility");
         const auto scope = visibility->GetField("viewScope")->GetValue().toString();
@@ -157,7 +197,7 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
             const bool available = std::any_of(targets.begin(), targets.end(), [&](const auto& target) { return IsApplicable(target.viewMode, entry.second); });
             visibility->GetField(entry.first)->SetAppliedBoolean(GetVisibility(targets, entry.second), context, available ? QString() : "当前视图模式不支持此项");
         }
-        panel->SetState({{"views", views}});
+        panel->SetState({{"views", views}, {"displayMode", int(effectiveMode)}, {"displayView", viewId}});
     };
     return panel;
 }

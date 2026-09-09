@@ -101,6 +101,8 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
             const auto action = v.toString(); if (!m_entries.count(action)) continue;
             auto* entry = menu.addAction(GetActionText(m_name, action), this, [this, action, context] { SendButton(action, context); });
             entry->setObjectName("node_" + action);
+            entry->setEnabled(m_buttons.at(action)->isEnabled());
+            entry->setToolTip(m_buttons.at(action)->toolTip());
         }
         menu.addSeparator(); menu.addAction("复制节点信息", this, [copyText] { QApplication::clipboard()->setText(copyText); });
         menu.exec(m_nodes->viewport()->mapToGlobal(point));
@@ -443,8 +445,8 @@ void ModulePanel::RefreshWorkflow()
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
-        // 前置条件失败仍允许点击并给出明确原因；不再把整个业务页静默锁死。
-        button->setEnabled(!m_context.workflow.GetIsClosing());
+        // 按业务能力禁用命令并说明原因；参数页仍可浏览，后台完成后自动恢复。
+        button->setEnabled(!m_context.workflow.GetIsClosing() && reason.isEmpty());
         button->setToolTip(GetActionDescription(m_name, name) + (reason.isEmpty() ? "" : "\n" + reason));
         button->setProperty("selectedOperation", name == m_currentAction);
         if (m_name == "Crop" && (name == "KeepInside" || name == "RemoveInside" || name == "PositionOnly")) {

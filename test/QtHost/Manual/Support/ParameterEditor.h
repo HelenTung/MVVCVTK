@@ -24,6 +24,7 @@ public:
     ParameterEditor* GetElement(int index) const;
     int GetCount() const;
     bool GetHasInputs() const;
+    void SetFieldApplicability(QJsonObject fields);
     void SetAppliedBoolean(QJsonValue value, const QString& context, const QString& unavailableReason = {});
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
@@ -38,6 +39,7 @@ private:
     void SetFieldVisibility();
     QString m_module, m_action, m_key, m_title;
     QJsonValue m_schema, m_itemTemplate;
+    QJsonObject m_applicableFields;
     QJsonValue::Type m_type = QJsonValue::Null;
     bool m_listItem = false, m_isList = false, m_optional = false, m_boolean = false, m_booleanSpecified = false;
     bool m_stateBound = false, m_booleanEdited = false;
