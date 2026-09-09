@@ -51,7 +51,8 @@ add_executable(mvvcvtk_ruler_tests RulerTests.cpp RulerStateTests.cpp)
 target_link_libraries(mvvcvtk_ruler_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_ruler_tests)
-set_target_properties(mvvcvtk_ruler_tests PROPERTIES FOLDER "MVVCVTK/Tests")
+set_target_properties(mvvcvtk_ruler_tests PROPERTIES
+    PROJECT_LABEL RulerTests FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS mvvcvtk_ruler_tests MODULES ${MVVCVTK_VTK_TARGETS})
 foreach(ruler_case IN ITEMS metrics render host state)
     add_test(NAME Ruler.${ruler_case} COMMAND mvvcvtk_ruler_tests ${ruler_case})

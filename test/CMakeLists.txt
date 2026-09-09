@@ -51,6 +51,8 @@ target_include_directories(mvvcvtk_standalone_input_tests PRIVATE
 target_link_libraries(mvvcvtk_standalone_input_tests PRIVATE
     MVVCVTK::HostAPI MVVCVTK::FeatureSPI)
 SetTargetDefaults(mvvcvtk_standalone_input_tests)
+set_target_properties(mvvcvtk_standalone_input_tests PROPERTIES
+    PROJECT_LABEL StandaloneInputTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME Host.StandaloneInput COMMAND mvvcvtk_standalone_input_tests)
 SetTestRuntime(Host.StandaloneInput mvvcvtk_standalone_input_tests)
 

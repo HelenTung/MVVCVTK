@@ -45,5 +45,6 @@ add_executable(mvvcvtk_roi_tests
 )
 target_include_directories(mvvcvtk_roi_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
 SetTargetDefaults(mvvcvtk_roi_tests)
-set_target_properties(mvvcvtk_roi_tests PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph")
+set_target_properties(mvvcvtk_roi_tests PROPERTIES
+    PROJECT_LABEL RoiTests FOLDER "MVVCVTK/test/Automation/DataGraph")
 add_test(NAME DataGraph.Roi COMMAND mvvcvtk_roi_tests)

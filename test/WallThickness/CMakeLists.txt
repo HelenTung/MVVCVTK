@@ -4,7 +4,8 @@ target_include_directories(wall_thickness_tests PRIVATE
 target_link_libraries(wall_thickness_tests PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
     MVVCVTK::WallThickness MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(wall_thickness_tests)
-set_target_properties(wall_thickness_tests PROPERTIES OUTPUT_NAME WallThicknessTests FOLDER "MVVCVTK/Tests")
+set_target_properties(wall_thickness_tests PROPERTIES
+    OUTPUT_NAME WallThicknessTests PROJECT_LABEL WallThicknessTests FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS wall_thickness_tests MODULES ${MVVCVTK_VTK_TARGETS})
 foreach(_suite IN ITEMS algorithm evaluation lifecycle display)
     add_test(NAME "WallThickness.${_suite}" COMMAND wall_thickness_tests ${_suite})
@@ -14,13 +15,15 @@ endforeach()
 add_library(wall_thickness_header_probe OBJECT ThicknessHeaderProbe.cpp)
 target_link_libraries(wall_thickness_header_probe PRIVATE MVVCVTK::WallThickness)
 SetTargetDefaults(wall_thickness_header_probe)
-set_target_properties(wall_thickness_header_probe PROPERTIES FOLDER "MVVCVTK/Tests/HeaderProbes")
+set_target_properties(wall_thickness_header_probe PROPERTIES
+    PROJECT_LABEL WallThicknessHeaderProbe FOLDER "MVVCVTK/test/Automation/HeaderProbes")
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION AND MVVCVTK_BUILD_PART_SEGMENTATION)
     add_executable(wall_thickness_session_tests ThicknessSessionTests.cpp)
     target_link_libraries(wall_thickness_session_tests PRIVATE MVVCVTK::Host MVVCVTK::WallThickness
         MVVCVTK::SurfaceDetermination MVVCVTK::PartSegmentation ${MVVCVTK_VTK_TARGETS})
     SetTargetDefaults(wall_thickness_session_tests)
-    set_target_properties(wall_thickness_session_tests PROPERTIES OUTPUT_NAME WallThicknessSessionTests FOLDER "MVVCVTK/Tests")
+    set_target_properties(wall_thickness_session_tests PROPERTIES
+        OUTPUT_NAME WallThicknessSessionTests PROJECT_LABEL WallThicknessSessionTests FOLDER "MVVCVTK/test/Automation")
     vtk_module_autoinit(TARGETS wall_thickness_session_tests MODULES ${MVVCVTK_VTK_TARGETS})
     add_test(NAME WallThickness.PublicSession COMMAND wall_thickness_session_tests --synthetic)
     SetTestRuntime(WallThickness.PublicSession wall_thickness_session_tests)

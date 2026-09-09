@@ -60,7 +60,8 @@ unset(_mvvcvtk_part_suite)
 add_executable(part_performance_audit PartPerformanceAudit.cpp)
 target_link_libraries(part_performance_audit PRIVATE MVVCVTK::Host MVVCVTK::PartSegmentation ${MVVCVTK_VTK_TARGETS} Psapi)
 SetTargetDefaults(part_performance_audit)
-set_target_properties(part_performance_audit PROPERTIES FOLDER "MVVCVTK/Tests" OUTPUT_NAME PartPerformanceAudit)
+set_target_properties(part_performance_audit PROPERTIES
+    OUTPUT_NAME PartPerformanceAudit PROJECT_LABEL PartPerformanceAudit FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS part_performance_audit MODULES ${MVVCVTK_VTK_TARGETS})
 
 # 仅显式提供同配置、同依赖的已归档基线库时构建 A/B 对照；不链接当前实现。
@@ -78,6 +79,7 @@ if(PART_PERFORMANCE_BASELINE_DIR)
         "${PART_PERFORMANCE_BASELINE_DIR}/PartSegmentation.lib"
         ${MVVCVTK_VTK_TARGETS} Psapi)
     SetTargetDefaults(part_performance_audit_baseline)
-    set_target_properties(part_performance_audit_baseline PROPERTIES FOLDER "MVVCVTK/Tests" OUTPUT_NAME PartPerformanceBaseline)
+    set_target_properties(part_performance_audit_baseline PROPERTIES
+        OUTPUT_NAME PartPerformanceBaseline PROJECT_LABEL PartPerformanceBaseline FOLDER "MVVCVTK/test/Automation")
     vtk_module_autoinit(TARGETS part_performance_audit_baseline MODULES ${MVVCVTK_VTK_TARGETS})
 endif()
