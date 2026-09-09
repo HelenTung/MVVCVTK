@@ -744,6 +744,7 @@ void CheckCropWorkflow(TestWindow& window)
     GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
     GetComplete(window, Click(window, "Crop", "RemoveInside"), "Succeeded");
     GetComplete(window, Click(window, "Crop", "KeepInside"), "Succeeded");
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"crop mode changes settle before finishing editing");
     GetComplete(window, Click(window, "Crop", "FinishEditing"), "Exited");
     GetComplete(window, Click(window, "Crop", "Plane"), "Succeeded");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "plane tool renders");
