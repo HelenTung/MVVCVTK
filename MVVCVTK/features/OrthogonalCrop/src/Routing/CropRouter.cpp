@@ -22,41 +22,58 @@
 #include <locale>
 #include <sstream>
 
-namespace {
-std::shared_ptr<const RoiGeometryPayload> CreateRecipePayload(
-    const std::vector<CropOpItem>& operations)
+std::shared_ptr<const RoiGeometryPayload> CropRouter::CreateRecipePayload(
+    const std::vector<CropOpItem>& operations, const DataRevisionRef& source)
 {
-    std::vector<RoiPrimitive> primitives;
-    primitives.reserve(operations.size());
-    for (const auto& operation : operations) {
-        RoiPrimitive primitive;
-        primitive.operation = operation.removalMode
-            == CropRemovalMode::KeepInside
-            ? "keep-inside" : "remove-inside";
-        if (operation.geometryType == CropShape::Box) {
-            primitive.shape = RoiShape::Box;
-            primitive.localToSource = operation.boxToInputModelMatrix;
+    if (!GetDataRevisionRefValid(source)) return {};
+    RoiDefinition definition; definition.source=source;
+    definition.nodes.push_back({RoiNodeKind::SourceDomain});
+    std::vector<std::uint32_t> leaves{0};
+    for (const auto& raw:operations) {
+        const auto geometry=CropGeometry::Build(raw);
+        if (!geometry) return {};
+        const auto& operation=geometry->GetOperation();
+        RoiNode node; auto& primitive=node.primitive;
+        primitive.boundaryPolicy=RoiBoundaryPolicy::CropV1;
+        switch (operation.geometryType) {
+        case CropShape::Box:
+            primitive.localToSource=operation.boxToInputModelMatrix; break;
+        case CropShape::Plane:
+            primitive.shape=RoiShape::HalfSpace;
+            primitive.origin=operation.planeCenterInInputModel;
+            primitive.normal=operation.planeNormalInInputModel; break;
+        case CropShape::Sphere: case CropShape::Cylinder:
+            primitive.shape=operation.geometryType==CropShape::Sphere ? RoiShape::Sphere:RoiShape::Cylinder;
+            primitive.origin=operation.centerInInputModel; primitive.radius=operation.radius;
+            if (operation.geometryType==CropShape::Cylinder) {
+                primitive.normal=operation.axisInInputModel; primitive.height=operation.height;
+            }
+            break;
+        default: return {};
         }
-        else if (operation.geometryType == CropShape::Plane) {
-            primitive.shape = RoiShape::Plane;
-            primitive.origin = operation.planeCenterInInputModel;
-            primitive.normal = operation.planeNormalInInputModel;
+        auto index=static_cast<std::uint32_t>(definition.nodes.size());
+        definition.nodes.push_back(std::move(node));
+        if (operation.removalMode==CropRemovalMode::RemoveInside) {
+            RoiNode difference; difference.kind=RoiNodeKind::Difference; difference.left=0; difference.right=index;
+            index=static_cast<std::uint32_t>(definition.nodes.size()); definition.nodes.push_back(difference);
         }
-        else if (operation.geometryType == CropShape::Sphere || operation.geometryType == CropShape::Cylinder) {
-            primitive.shape = operation.geometryType == CropShape::Sphere ? RoiShape::Sphere : RoiShape::Cylinder;
-            primitive.center = operation.centerInInputModel;
-            primitive.axis = operation.axisInInputModel;
-            primitive.radius = operation.radius; primitive.height = operation.height;
-        } else return {};
-        primitive.recipeVersion = operation.recipeVersion;
-        primitive.boundaryPolicyVersion = operation.boundaryPolicyVersion;
-        primitives.push_back(std::move(primitive));
+        leaves.push_back(index);
     }
-    auto payload = std::make_shared<const RoiGeometryPayload>(
-        std::move(primitives));
-    return payload->GetValid() ? payload : nullptr;
+    // 逐步裁切等价于各保留区域与补集的交集，平衡表达式避免无谓增加 ROI 深度。
+    while (leaves.size()>1) {
+        std::vector<std::uint32_t> next;
+        for (std::size_t i=0;i<leaves.size();i+=2) {
+            if (i+1==leaves.size()) { next.push_back(leaves[i]); continue; }
+            RoiNode node; node.kind=RoiNodeKind::Intersection; node.left=leaves[i]; node.right=leaves[i+1];
+            next.push_back(static_cast<std::uint32_t>(definition.nodes.size())); definition.nodes.push_back(node);
+        }
+        leaves=std::move(next);
+    }
+    if (definition.nodes.size()>roiNodeLimit) return {};
+    return std::make_shared<const RoiGeometryPayload>(std::move(definition));
 }
 
+namespace {
 std::size_t GetRamBytes()
 {
 #ifdef _WIN32
@@ -121,7 +138,7 @@ CropRouter::BuildResultTask(
                 <<",\"availableRamBytes\":"<<params.availableRamBytes
                 <<",\"meshErrorBound\":"<<result.meshErrorBound<<",\"meshAreaErrorBound\":"<<result.meshAreaErrorBound<<"}";
             result.buildParameters=parameters.str();
-            result.recipePayload = CreateRecipePayload(result.operations);
+            result.recipePayload = CreateRecipePayload(result.operations,result.sourceRevision);
             if (!result.preparedView) result.preparedView = VtkPreparedDataView::BuildDataView(result.outputPayload, input.image);
             if (!result.recipePayload || !result.preparedView) {
                 result.isSucceeded = false;
@@ -146,16 +163,20 @@ CropRouter::BuildResultTask(
 }
 
 bool CropRouter::GetRecipeSame(const RoiGeometryPayload& recipe,const std::vector<CropOpItem>& operations) {
-    const auto expected=CreateRecipePayload(operations);if(!expected||!recipe.GetValid())return false;
-    const auto& first=recipe.GetPrimitives();const auto& second=expected->GetPrimitives();if(first.size()!=second.size())return false;
+    const auto expected=CreateRecipePayload(operations,recipe.GetDefinition().source);
+    if(!expected||!recipe.GetValid())return false;
+    const auto& first=recipe.GetDefinition().nodes;const auto& second=expected->GetDefinition().nodes;
+    if(first.size()!=second.size())return false;
     for(std::size_t index=0;index<first.size();++index) {
-        const auto& a=first[index];const auto& b=second[index];
-        if(a.shape!=b.shape||a.operation!=b.operation||a.localToSource!=b.localToSource||a.origin!=b.origin||a.normal!=b.normal
-            ||a.points!=b.points||a.mask!=b.mask||a.center!=b.center||a.axis!=b.axis||a.radius!=b.radius||a.height!=b.height
-            ||a.recipeVersion!=b.recipeVersion||a.boundaryPolicyVersion!=b.boundaryPolicyVersion)return false;
+        const auto& x=first[index];const auto& y=second[index];
+        const auto& a=x.primitive;const auto& b=y.primitive;
+        if(x.kind!=y.kind||x.left!=y.left||x.right!=y.right||a.shape!=b.shape||a.localToSource!=b.localToSource
+            ||a.origin!=b.origin||a.normal!=b.normal||a.mask!=b.mask||a.radius!=b.radius||a.height!=b.height
+            ||a.boundaryPolicy!=b.boundaryPolicy)return false;
     }
     return true;
 }
+
 namespace {
 struct RestoreCancelled final {};
 template<class T> std::vector<T> CopyRestoreArray(const std::vector<T>& source,const std::function<bool()>& stop) {
@@ -175,9 +196,9 @@ bool AddRestoreBytes(std::size_t count,std::size_t size,std::size_t& bytes) {
 }
 std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
     CropInputSnapshot input,CropBuildParams params,DataSnapshot output,
-    std::shared_ptr<const DataResourceLease> reader,CropResultRecord record,std::function<bool()> stop) const {
+    std::shared_ptr<const DataResourceLease> reader,CropResultRecord record,std::shared_ptr<const RoiGeometryPayload> recipe,std::function<bool()> stop) const {
     return std::packaged_task<CropMaterializationCandidate()>(
-        [input=std::move(input),params=std::move(params),output=std::move(output),reader=std::move(reader),record,stop=std::move(stop)]() mutable {
+        [input=std::move(input),params=std::move(params),output=std::move(output),reader=std::move(reader),record,recipe=std::move(recipe),stop=std::move(stop)]() mutable {
         // Move scoped reads out of the packaged callable so its retained future
         // cannot keep the original result alive after the worker finishes.
         const auto original=std::move(output);const auto use=std::move(reader);
@@ -185,7 +206,7 @@ std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
         result.sourceRevision=params.sourceRevision;result.operations=params.operations;result.nodeCount=params.operations.size();
         try {
             if(stop&&stop())throw RestoreCancelled{};
-            if(!original||!input.data||result.operations.empty()||!params.availableRamBytes){result.failureReason=CropFailure::BadInput;return result;}
+            if(!original||!input.data||!recipe||(result.operations.empty()&&!record.inputRoi)||!params.availableRamBytes){result.failureReason=CropFailure::BadInput;return result;}
             constexpr std::size_t margin=16*1024*1024;
             if(const auto image=std::dynamic_pointer_cast<const ImageGrid3DPayload>(original->payload)) {
                 const auto source=std::dynamic_pointer_cast<const ImageGrid3DPayload>(input.data->payload);
@@ -215,7 +236,8 @@ std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
                 auto points=copyAttributes(mesh->GetPointAttributes());auto cells=copyAttributes(mesh->GetCellAttributes());
                 result.outputPayload=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),std::move(triangles),std::move(points),mesh->GetCoordinateFrame(),std::move(cells));
             } else {result.failureReason=CropFailure::BadInput;return result;}
-            result.recipePayload=CreateRecipePayload(result.operations);
+            result.inputRoi=record.inputRoi;
+            result.recipePayload=std::make_shared<const RoiGeometryPayload>(recipe->GetDefinition());
             if(stop&&stop())throw RestoreCancelled{};
             result.preparedView=VtkPreparedDataView::BuildDataView(result.outputPayload,input.image);
             if(!result.recipePayload||!result.preparedView){result.failureReason=CropFailure::BadInput;return result;}
@@ -231,4 +253,18 @@ std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
         result.outputPayload.reset();result.recipePayload.reset();result.preparedView.reset();result.imageData=nullptr;result.maskImage=nullptr;result.polyData=nullptr;
         return result;
     });
+}
+
+std::optional<std::packaged_task<CropMaterializationCandidate()>> CropRouter::BuildRoiTask(
+    CropInputSnapshot input, CropBuildParams params, RoiReadSnapshot roi, std::function<bool()> getStopRequested) const
+{
+    if (!CropAlgorithm::GetInputValid(input) || !input.data || !roi || roi->GetSource()!=input.data->self) return {};
+    if (input.mesh && roi->GetClipPlanes().error!=RoiError::None) return {};
+    const auto budget=params.availableRamBytes ? params.availableRamBytes:GetRamBytes();
+    return std::packaged_task<CropMaterializationCandidate()>(
+        [input=std::move(input),params=std::move(params),roi=std::move(roi),budget,getStopRequested=std::move(getStopRequested)] {
+            auto result=CropAlgorithm::GetRoiResult(input,roi,budget,getStopRequested);
+            result.documentId=params.documentId;result.nodeId=params.nodeId;result.requestId=params.requestId;
+            return result;
+        });
 }

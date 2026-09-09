@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -240,6 +241,7 @@ struct CropResultRecord final {
     DataRevisionRef outputRevision;
     std::uint64_t publicationGeneration = 0;
     CropBuildOptions options;
+    std::optional<DataRevisionRef> inputRoi;
     double meshErrorBound=0,meshAreaErrorBound=0;
     std::size_t meshTriangleCount=0;
 };

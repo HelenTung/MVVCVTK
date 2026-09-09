@@ -1,3 +1,4 @@
+// 测试用途：编译检查表面确定公开头的自足性和接口类型声明。
 #include "Host/SurfaceDeterminationHostFeature.h"
 
 #include <memory>

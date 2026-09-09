@@ -1,3 +1,4 @@
+// 测试用途：验证宿主数据加载、提交协调、路由、源切换和加载失败处理。
 #include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
@@ -15,7 +16,9 @@
 #include "Host/Types/HostRequestTypes.h"
 #include "Interaction/InteractionPorts.h"
 
+#include <vtkCamera.h>
 #include <vtkCallbackCommand.h>
+#include <vtkRenderer.h>
 #include <vtkCommand.h>
 #include <vtkImageData.h>
 #include <vtkRenderWindow.h>
@@ -1485,6 +1488,9 @@ bool GetPublishLastValid()
         || !views.SetInteractorsReady()) {
         return false;
     }
+    // 基线必须已经实际显示，才能验证发布失败后旧主图与标尺共同恢复。
+    HostCommandRouter baselineRouter(views.GetViewDirectory());
+    if (!SendReload(baselineRouter, views, GetReload())) return false;
     auto committedEpoch = GetCommittedEpoch(views);
 
     const HostViewTarget primary{
@@ -1532,6 +1538,15 @@ bool GetPublishLastValid()
     DataBindingRevision maxRevision = initial->binding->revision;
     bool hasRevisionDrop = false;
 
+    // 先实际绘制旧图及标尺，再安装 warmup 观察；候选发布不得提前绘制。
+    const auto rulerEndpoints = views.BuildEndpoints();
+    for (const auto& endpoint : rulerEndpoints) {
+        endpoint.renderer->GetActiveCamera()->ParallelProjectionOn();
+        endpoint.renderWindow->SetSize(400, 300);
+        endpoint.renderWindow->Render();
+    }
+    const auto oldRulerStates = views.GetViewStates();
+    bool hasRulersCommitted = false;
     int warmupCount = 0;
     auto warmupObserver = vtkSmartPointer<vtkCallbackCommand>::New();
     warmupObserver->SetClientData(&warmupCount);
@@ -1565,6 +1580,11 @@ bool GetPublishLastValid()
                 == initial->binding->revision + 1
             && states[1].bindingRevision
                 == initial->binding->revision + 1;
+        hasRulersCommitted = states.size() == 2
+            && states[0].rulerState.dataRevision == states[0].dataRevision
+            && states[1].rulerState.dataRevision == states[1].dataRevision
+            && states[0].rulerState.status == HostRulerStatus::Pending
+            && states[1].rulerState.status == HostRulerStatus::Pending;
         hasNoGpuWarmup = warmupCount == 0;
         hasSharedUnchangedAtGate =
             core.sharedState->GetDataBindingRevision()
@@ -1629,6 +1649,17 @@ bool GetPublishLastValid()
     }
     warmupObserver->SetClientData(nullptr);
 
+    for (const auto& endpoint : rulerEndpoints) endpoint.renderWindow->Render();
+    const auto restoredRulers = views.GetViewStates();
+    const bool hasRulersReset = restoredRulers.size() == 2 && oldRulerStates.size() == 2
+        && std::equal(restoredRulers.begin(), restoredRulers.end(), oldRulerStates.begin(),
+            [](const HostRenderViewState& current, const HostRenderViewState& previous) {
+                return current.rulerState.status == HostRulerStatus::Visible
+                    && current.rulerState.dataRevision == previous.rulerState.dataRevision
+                    && current.rulerState.bindingRevision == previous.rulerState.bindingRevision
+                    && std::abs(current.rulerState.lengthMm / current.rulerState.lengthPixels
+                        - previous.rulerState.lengthMm / previous.rulerState.lengthPixels) < 1e-9;
+            });
     const auto current = dataManager->GetPrimaryImage();
     const auto states = views.GetViewStates();
     const bool hasViewsReset = states.size() == 2
@@ -1645,6 +1676,8 @@ bool GetPublishLastValid()
         && !isSucceeded
         && hasPublishGate
         && hasViewsCommitted
+        && hasRulersCommitted
+        && hasRulersReset
         && hasNoGpuWarmup
         && hasSharedUnchangedAtGate
         && hasViewsReset

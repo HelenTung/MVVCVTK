@@ -259,7 +259,7 @@ int GetCropRealFailCount()
             Require(fixture.Wait([&]{return worker.wait_for(std::chrono::milliseconds(0))==std::future_status::ready;}),"oracle timeout");const auto oracle=worker.get();
             report<<"  \"oracle_ms\": "<<Millis(verifyAt)<<",\n  \"kept\": "<<oracle.kept<<",\n  \"expected_kept\": "<<oracle.expected<<",\n  \"mismatch\": "<<oracle.mismatch<<",\n  \"mask_sha256\": "<<Quote(oracle.sha)<<",\n";
             Require(oracle.kept>0&&oracle.kept<count&&oracle.mismatch==0,"integer lattice oracle mismatch");
-            const auto recipe=fixture.probe->data->GetData(graph,built.recipeRevision);const auto roi=recipe?std::dynamic_pointer_cast<const RoiGeometryPayload>(recipe->payload):nullptr;Require(roi&&roi->GetPrimitives().size()==4,"formal four-shape recipe");
+            const auto recipe=fixture.probe->data->GetData(graph,built.recipeRevision);const auto roi=recipe?std::dynamic_pointer_cast<const RoiGeometryPayload>(recipe->payload):nullptr;Require(roi&&std::count_if(roi->GetDefinition().nodes.begin(),roi->GetDefinition().nodes.end(),[](const RoiNode& node){return node.kind==RoiNodeKind::Primitive;})==4,"formal four-shape recipe");
         }
         fixture.Save(output/"alternate-preview.png");
         std::vector<CropVectorDouble3Array> samples{center,center};for(int row=0;row<3;++row){samples[0][row]-=geometry.direction[row*3]*geometry.spacing[0]*dims[0]/4.0;samples[1][row]+=geometry.direction[row*3]*geometry.spacing[0]*dims[0]/4.0;}

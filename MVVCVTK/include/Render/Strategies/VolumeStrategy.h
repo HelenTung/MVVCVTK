@@ -3,7 +3,6 @@
 #include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
-#include <vtkCubeAxesActor.h>
 #include <vtkRenderer.h>
 
 #include <array>
@@ -153,7 +152,6 @@ private:
     vtkSmartPointer<vtkPiecewiseFunction> BuildOpacityTransfer(
         const RenderParams& params) const;
     // 坐标轴与体渲染主 prop 均由策略强持有，并登记到 m_managedProps 统一挂载。
-    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     vtkSmartPointer<vtkVolume> m_volume;
     // volume 使用的唯一 GPU mapper；质量档位只影响内部 LOD 与采样策略。
     vtkSmartPointer<Mapper> m_mapper;

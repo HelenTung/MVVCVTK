@@ -1,3 +1,4 @@
+// 测试用途：验证数据图节点、载荷、数据修订、写入事务与图关系。
 #include "Data/DataGraphStore.h"
 #include "Data/DataPayloads.h"
 

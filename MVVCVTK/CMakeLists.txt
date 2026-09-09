@@ -104,6 +104,8 @@ SetSdkHeaderMap(
     "include/Host/Types/HostViewTypes.h|MVVCVTK/API/Host/Types/HostViewTypes.h"
     "include/Data/DataGraphTypes.h|MVVCVTK/API/Data/DataGraphTypes.h"
     "include/Data/ImageReadTypes.h|MVVCVTK/API/Data/ImageReadTypes.h"
+    "include/Data/RoiTypes.h|MVVCVTK/API/Data/RoiTypes.h"
+    "include/Host/RoiReadTypes.h|MVVCVTK/SPI/Host/RoiReadTypes.h"
     "include/Host/HostFeature.h|MVVCVTK/SPI/Host/HostFeature.h"
     "include/App/Services/FeatureViewService.h|MVVCVTK/SPI/App/Services/FeatureViewService.h"
     "include/Render/Contracts/FeatureOverlay.h|MVVCVTK/SPI/Render/Contracts/FeatureOverlay.h"
@@ -392,6 +394,11 @@ set_property(
 )
 
 set(MVVCVTK_HOST_SOURCES
+    include/Host/Internal/HostRulerCodec.h
+    include/Render/Internal/RulerMetrics.h
+    include/Render/Internal/RulerOverlay.h
+    src/Render/Internal/RulerMetrics.cpp
+    src/Render/Internal/RulerOverlay.cpp
     include/Host/Internal/HostRenderViewRuntime.h
     src/Host/HostRenderViewRuntime.cpp
     include/Host/Internal/HostFrameRuntime.h
@@ -460,6 +467,11 @@ set(MVVCVTK_HOST_SOURCES
     src/App/Tasks/AppDataLoadTaskService.cpp
     src/Data/DataConverters.cpp
     src/Data/DataGraphStore.cpp
+    include/Data/RoiService.h
+    src/Data/RoiService.cpp
+    src/Data/RoiArchive.cpp
+    include/Geometry/RoiEvaluator.h
+    src/Geometry/RoiEvaluator.cpp
     src/Data/DataManager.cpp
     src/Data/ImageProcessor.cpp
     src/Data/LabelMapReader.cpp
@@ -513,6 +525,7 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Data/DataGraphTypes.h
     include/Data/ImageReadTypes.h
+    include/Data/RoiTypes.h
     include/Host/Types/HostSessionTypes.h
     include/Host/Types/HostViewTypes.h
     include/Host/Types/HostValueTypes.h
@@ -523,6 +536,7 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/HostFeature.h
     include/Host/TrustedDataPort.h
+    include/Host/RoiReadTypes.h
     include/App/Services/FeatureViewService.h
     include/Render/Contracts/FeatureOverlay.h
     include/Render/Contracts/OverlayService.h
@@ -537,6 +551,7 @@ SetHeaderSurface(
     include/Data/DataGraphTypes.h
     include/Data/DataPayloads.h
     include/Data/ImageReadTypes.h
+    include/Data/RoiTypes.h
     include/Host/Types/HostViewTypes.h
     include/Interaction/InteractionTypes.h
 )

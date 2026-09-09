@@ -16,6 +16,7 @@
 #include "Render/Support/RenderFrameLifetime.h"
 #include "Render/Contracts/RenderStrategyFactory.h"
 #include "Render/Contracts/VisualStrategy.h"
+#include "Render/Internal/RulerOverlay.h"
 #include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCamera.h>
@@ -216,6 +217,7 @@ private:
         std::array<double,16> oldModelMatrix{};
         VtkRenderInputSnapshot oldSnapshot;
         VtkRenderInputSnapshot nextSnapshot;
+        RulerInput oldRulerInput;
         std::shared_ptr<AbstractVisualStrategy> oldStrategy;
         std::shared_ptr<AbstractVisualStrategy> nextStrategy;
         std::optional<VizMode> oldMode;
@@ -328,6 +330,7 @@ private:
     double GetRenderRate(bool isInteracting) const noexcept;
     VolumeQuality GetTargetQuality() const;
     bool SetProductState();
+    void SetRulerInput(const RenderParams& params, UpdateFlags flags);
     bool SetStrategyState();
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
@@ -381,6 +384,9 @@ private:
     // 本 service 持有 DataManager 当前批次 owner；各 view 共享只读 image/scalars，旧批次随最后一个 owner 释放。
     VtkRenderInputSnapshot m_renderSnapshot;
     std::array<double,16> m_renderModelMatrix{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    RulerOverlay m_ruler;
+    RulerInput m_rulerInput;
+    RulerParams m_rulerParams;
     // observer 把 kind/result 作为一个完整终态 payload 入队；锁只保护队列，不覆盖 VTK 或 callback 调用。
     std::deque<LoadNotice> m_loadNotices;
     mutable std::mutex m_loadNoticeMutex;
@@ -935,6 +941,7 @@ bool AppRuntime::StopTasks(
         sendCancelled(std::move(completion.callback));
     }
     sendCancelled(std::move(ownedCallback));
+    m_ruler.DetachRenderer();
     return true;
 }
 
@@ -1401,6 +1408,8 @@ void AppRuntime::ClearStrategies()
     m_currentStrategy.reset();
     m_renderNeededProductRevision = 0;
     m_currentMode.reset();
+    m_rulerInput = {};
+    m_ruler.ClearInput();
 
     ClearOverlays();
 }
@@ -1490,6 +1499,7 @@ bool AppRuntime::SetRenderBinding(
                     "Renderer rebind mode camera initialization failed.");
             }
         }
+        m_ruler.AttachRenderer(m_renderer);
         SetDirty();
         return true;
     }
@@ -3370,6 +3380,8 @@ bool AppRuntime::SetViewStage(
         return false;
     }
 
+    // 候选准备期间旧主图仍可接受展示变换；回滚值必须在真正切换前冻结。
+    m_dataStage->oldRulerInput = m_rulerInput;
     try {
         if (!m_dataStage->nextStrategy->SetRenderInputStamp({
                 snapshot->data->self })) {
@@ -3390,6 +3402,7 @@ bool AppRuntime::SetViewStage(
         SetPendingFlags(UpdateFlags::All);
         SetSyncNeeded();
         m_dataStage->isCommitted = true;
+        SetRulerInput(m_dataStage->nextParams, UpdateFlags::All);
         return true;
     }
     catch (const std::exception& error) {
@@ -3448,6 +3461,9 @@ bool AppRuntime::ResetViewStage(
         isReset = false;
     }
     stage.isCommitted = false;
+    if (isCandidateCurrent) m_rulerInput = stage.oldRulerInput;
+    if (!isReset) m_rulerInput.hasData = false;
+    m_ruler.SetInput(m_rulerInput, m_rulerParams);
     SetDirty();
     return isReset;
 }
@@ -3681,6 +3697,8 @@ bool AppRuntime::SetStrategyState()
         isVisualSet = false;
     }
     if (!isVisualSet) {
+        // 自定义策略可能已部分应用状态，无法证明匹配时隐藏比例尺。
+        m_ruler.ClearInput();
         if (m_renderWindow && !m_renderServices->isHostDriven) {
             m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
         }
@@ -3749,9 +3767,33 @@ bool AppRuntime::SetStrategyState()
         }
     }
 
+    if (strategyFlags != UpdateFlags::None) SetRulerInput(params, strategyFlags);
+
     // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
     SetDirty();
     return true;
+}
+
+void AppRuntime::SetRulerInput(const RenderParams& params, const UpdateFlags flags)
+{
+    // snapshot 只从本 View 已提交输入读取；绝不使用 DataManager 的最新 primary。
+    const auto payload = m_renderSnapshot && m_renderSnapshot->data
+        ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(m_renderSnapshot->data->payload)
+        : nullptr;
+    m_rulerInput.hasData = payload && m_currentStrategy && m_currentMode.has_value();
+    if (payload) m_rulerInput.geometry = payload->GetGeometry();
+    m_rulerInput.dataRevision = GetRenderInputStamp().dataRevision;
+    m_rulerInput.bindingRevision = m_renderSnapshot && m_renderSnapshot->binding
+        ? m_renderSnapshot->binding->revision : 0;
+    if (m_currentMode) m_rulerInput.mode = *m_currentMode;
+    // RenderParams 是增量快照，未携带的字段不能用默认值覆盖已应用的变换/显隐。
+    if ((flags & UpdateFlags::Transform) != UpdateFlags::None) {
+        m_rulerInput.modelToWorld = params.modelMatrix;
+    }
+    if ((flags & UpdateFlags::Visibility) != UpdateFlags::None) {
+        m_rulerInput.isVisible = (params.visibilityMask & VisFlags::Ruler) != 0;
+    }
+    m_ruler.SetInput(m_rulerInput, m_rulerParams);
 }
 
 bool AppRuntime::SetProductState()
@@ -4175,9 +4217,16 @@ public:
         return GetState();
     }
 
+    RulerState GetRulerState() const override
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        return m_service ? m_service->m_ruler.GetState() : RulerState{};
+    }
+
 private:
     bool GetUpdateValid(const AppViewUpdate& update) const
     {
+        if (update.ruler && !RulerMetrics::GetParamsValid(*update.ruler)) return false;
         const auto isUnit = [](const double value) {
             return std::isfinite(value) && value >= 0.0 && value <= 1.0;
         };
@@ -4286,6 +4335,11 @@ private:
                 update.windowLevel->windowCenter);
         }
 
+        if (update.ruler) {
+            m_service->m_rulerParams = *update.ruler;
+            m_service->SendViewUpdateFlags(UpdateFlags::Visibility);
+        }
+
         // 其余写入只在所有可失败字段通过后提交；optional 缺省保持当前状态。
         if (update.mode) m_service->SetVizMode(*update.mode);
         if (update.material) m_service->SetMaterial(*update.material);
@@ -4338,6 +4392,7 @@ private:
         update.volumeQuality = state.volumeQuality;
         update.gradientOpacity = state.gradientOpacity;
         update.isDenoiseOn = state.isDenoiseOn;
+        update.ruler = state.ruler;
         AppVisibilityUpdate visibility;
         visibility.isPlanes3DVisible =
             (state.visibilityMask & VisFlags::Planes3D) != 0;
@@ -4377,6 +4432,8 @@ private:
         state.cursorWorld = m_service->GetCursorWorld();
         state.cursorAxis = m_service->GetCursorAxis();
         state.visibilityMask = m_service->GetVisibilityMask();
+        state.ruler = m_service->m_rulerParams;
+        state.rulerState = m_service->m_ruler.GetState();
         state.dataRevision = m_service->GetRenderInputStamp().dataRevision;
         state.bindingRevision = m_service->m_renderSnapshot
             && m_service->m_renderSnapshot->binding

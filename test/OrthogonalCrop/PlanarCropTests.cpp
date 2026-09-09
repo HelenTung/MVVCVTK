@@ -1,3 +1,4 @@
+// 测试用途：汇总正交裁剪的算法、着色器预览、桥接与应用任务回归。
 #include "CropBridgeTests.h"
 #include "PlanarTestSuites.h"
 

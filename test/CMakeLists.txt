@@ -38,12 +38,27 @@ target_include_directories(
 target_compile_features(mvvcvtk_host_test_internal INTERFACE cxx_std_17)
 set_target_properties(
     mvvcvtk_host_test_internal
-    PROPERTIES FOLDER "MVVCVTK/Tests/Internal"
+    PROPERTIES PROJECT_LABEL TestInternalSupport FOLDER "MVVCVTK/test/Support"
 )
 unset(MVVCVTK_HOST_TEST_INCLUDE_DIRS)
 
+# 仓内输入契约测试：不链接可选业务Feature，不进入安装包。
+add_executable(mvvcvtk_standalone_input_tests
+    Host/StandaloneInputTests.cpp
+    Host/FeatureInput.cpp)
+target_include_directories(mvvcvtk_standalone_input_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/test/Host")
+target_link_libraries(mvvcvtk_standalone_input_tests PRIVATE
+    MVVCVTK::HostAPI MVVCVTK::FeatureSPI)
+SetTargetDefaults(mvvcvtk_standalone_input_tests)
+add_test(NAME Host.StandaloneInput COMMAND mvvcvtk_standalone_input_tests)
+SetTestRuntime(Host.StandaloneInput mvvcvtk_standalone_input_tests)
+
 add_subdirectory(Host)
 add_subdirectory(DataGraph)
+if(MVVCVTK_BUILD_ROI_EDITING)
+    add_subdirectory(RoiEditing)
+endif()
 if(MVVCVTK_BUILD_MODEL_ROTATION)
     add_subdirectory(ModelRotation)
 endif()
@@ -63,6 +78,14 @@ endif()
 if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
     add_subdirectory(ArtifactReduction)
 endif()
+if(MVVCVTK_BUILD_WALL_THICKNESS)
+    add_subdirectory(WallThickness)
+endif()
+
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP AND MVVCVTK_BUILD_ARTIFACT_REDUCTION
+        AND MVVCVTK_BUILD_PART_SEGMENTATION AND MVVCVTK_BUILD_SURFACE_DETERMINATION)
+    add_subdirectory(RoiIntegration)
+endif()
 add_subdirectory(Interaction)
 if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
     add_subdirectory(MetrologyAlignment)
@@ -71,22 +94,6 @@ if(MVVCVTK_BUILD_QT_TESTING)
     add_subdirectory(QtHost)
 endif()
 add_subdirectory(SdkBoundary)
-
-if(TARGET MVVCVTKStandalone)
-    add_test(NAME Host.StandaloneScheduling
-        COMMAND MVVCVTKStandalone --host-driven --demo-audit)
-    SetTestRuntime(Host.StandaloneScheduling MVVCVTKStandalone)
-    set_tests_properties(Host.StandaloneScheduling PROPERTIES TIMEOUT 120)
-    if(MVVCVTK_BUILD_PART_SEGMENTATION AND MVVCVTK_BUILD_SURFACE_DETERMINATION
-            AND MVVCVTK_BUILD_METROLOGY_ALIGNMENT AND MVVCVTK_BUILD_ARTIFACT_REDUCTION)
-        add_test(NAME Host.StandaloneFeatures.Native COMMAND MVVCVTKStandalone --feature-audit)
-        add_test(NAME Host.StandaloneFeatures.HostDriven COMMAND MVVCVTKStandalone --host-driven --feature-audit)
-        foreach(_feature_audit IN ITEMS Host.StandaloneFeatures.Native Host.StandaloneFeatures.HostDriven)
-            SetTestRuntime(${_feature_audit} MVVCVTKStandalone)
-            set_tests_properties(${_feature_audit} PROPERTIES TIMEOUT 180)
-        endforeach()
-    endif()
-endif()
 
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     # 所有子目录创建完成后检查完整目标图；DefX 只能由私有 kernel 直接消费。
@@ -217,4 +224,24 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     unset(_mvvcvtk_has_private_defx)
     unset(_mvvcvtk_target_property)
     unset(_mvvcvtk_target_value)
+endif()
+
+# 真实验收是显式外部输入；缺少配置时不注册，更不能用合成用例替代其通过记录。
+set(MVVCVTK_REAL_AUDIT_MANIFEST "" CACHE FILEPATH "Verified real CT acquisition/reference manifest for repository audit")
+if(MVVCVTK_REAL_AUDIT_MANIFEST)
+    if(NOT TARGET qt_feature_tests
+        OR NOT MVVCVTK_BUILD_ORTHOGONAL_CROP OR NOT MVVCVTK_BUILD_GAP_ANALYSIS
+        OR NOT MVVCVTK_BUILD_PART_SEGMENTATION
+        OR NOT MVVCVTK_BUILD_SURFACE_DETERMINATION OR NOT MVVCVTK_BUILD_MODEL_ROTATION
+        OR NOT MVVCVTK_BUILD_METROLOGY_ALIGNMENT OR NOT MVVCVTK_BUILD_ARTIFACT_REDUCTION)
+        message(FATAL_ERROR "Real Feature audit requires Qt automation and all seven Features")
+    endif()
+    add_test(NAME Host.RealFeatures
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tools/Invoke-FeatureRealAudit.ps1"
+            -RepoRoot "${PROJECT_SOURCE_DIR}"
+            -DepsRoot "${MVVCVTK_DEPS_ROOT}"
+            -InputManifest "${MVVCVTK_REAL_AUDIT_MANIFEST}"
+            -Configuration "$<CONFIG>")
+    set_tests_properties(Host.RealFeatures PROPERTIES TIMEOUT 900 LABELS "real-data")
 endif()

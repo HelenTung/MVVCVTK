@@ -31,6 +31,7 @@
 #include <vtk_glad.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -275,7 +276,8 @@ public:
     };
     RenderEffectState GetState() const {
         auto state=m_state;state.renderedRevision=m_frameState->conflict?0:m_frameState->revision;
-        state.isRenderPending=m_frameState->pending!=0;return state;
+        state.isRenderPending=m_frameState->pending!=0;
+        return state;
     }
     CropNodeId GetRenderedNode() const {return m_frameState->conflict?0:m_frameState->nodeId;}
     bool GetPointVisible(RenderInputStamp input,const std::array<double,3>& point) const {
@@ -409,7 +411,10 @@ bool CropShaderController::Impl::SetCropParams(CropShaderPayload payload)
 
     m_staged = {};
     m_staged.payload = std::move(payload);
-    m_state.status = RenderEffectStatus::Staged;
+    // 新绑定或既有 Root 均无裁切谓词，不依赖空等值面永远不会触发的着色器事件。
+    // Ready 只表示效果准备完成；已呈现节点仍只能由真实帧完成通知更新。
+    m_state.status = m_staged.payload.nodeCount==0 && m_active.payload.nodeCount==0
+        ? RenderEffectStatus::Ready : RenderEffectStatus::Staged;
     m_state.failureReason = RenderEffectFailure::None;
     m_state.stagedRevision = m_staged.payload.revision;
     m_state.message.clear();
@@ -419,7 +424,9 @@ bool CropShaderController::Impl::SetCropParams(CropShaderPayload payload)
 
 bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
 {
-    if (m_staged.payload.revision == 0 || m_staged.texture) {
+    // Root 可在首帧前提交；首次实际绘制仍需独立中性纹理，避免 sampler 单元冲突。
+    auto& resource=m_staged.payload.revision ? m_staged:m_active;
+    if (resource.payload.revision == 0 || resource.texture) {
         return true;
     }
     if (!context
@@ -430,13 +437,13 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
         return false;
     }
 
-    if (m_staged.payload.predicateTable == m_active.payload.predicateTable
+    if (resource.payload.predicateTable == m_active.payload.predicateTable
         && m_active.texture) {
-        m_staged.texture = m_active.texture;
+        resource.texture = m_active.texture;
         return true;
     }
 
-    const auto& values = m_staged.payload.predicateTable->rgbaValues;
+    const auto& values = resource.payload.predicateTable->rgbaValues;
     // Root 的业务表为空；绑定一个中性 texel，仍每帧同步 nodeCount=0。
     // 不复用其它历史分支的业务表，也不让零宽纹理导致 Root 事务失败。
     const std::array<float,4> emptyTexel{};
@@ -465,7 +472,7 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
         m_state.message = "The RGBA32F crop table upload failed.";
         return false;
     }
-    m_staged.texture = std::move(texture);
+    resource.texture = std::move(texture);
     return true;
 }
 
@@ -1116,8 +1123,10 @@ RenderEffectState CropShaderEffect::Impl::GetState() const
 {
     const auto currentBindings = GetCurrentBindings();
     auto state=m_state;state.renderedRevision=0;state.isRenderPending=false;bool first=true,mixed=false;
+    if(currentBindings.empty()&&state.activeRevision)state.message="No current crop render binding.";
     for(const auto& binding:currentBindings) {
         const auto value=binding->GetEffectState();state.isRenderPending=state.isRenderPending||value.isRenderPending;
+        if(state.message.empty())state.message=value.message;
         if(value.status==RenderEffectStatus::Failed){state.status=value.status;state.failureReason=value.failureReason;state.message=value.message;}
         if(first){state.renderedRevision=value.renderedRevision;first=false;}
         else mixed=mixed||state.renderedRevision!=value.renderedRevision;

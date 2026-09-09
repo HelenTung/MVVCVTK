@@ -1,3 +1,5 @@
+#include "../TestDataPort.h"
+#include "../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include "Data/DataManager.h"
 #include "App/AppStateEvents.h"
 #include "Data/DataPayloads.h"
@@ -300,11 +302,45 @@ bool GetDerivedProductsProtected()
     return Check(data->SetDataRelease(source.scope).status==DataLifetimeStatus::Released,
         "last derived allocation release not acknowledged");
 }
+bool GetScopedConsumerChainReleased()
+{
+    TestDataPort data;FeatureInternal::ResultScopes surface,wall;
+    const auto mesh=[](double z){return std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{0,0,z,1,0,z,0,1,z},std::vector<std::uint64_t>{0,1,2});};
+    const DataRevisionRef root{data.CreateDataEntityId(),1};const auto rootScope=data.CreateDataEntityId();
+    DataTransaction setup;setup.outputs.push_back({root.entityId,0,DataTypes::surfaceMesh,{},mesh(0),{},rootScope});
+    if(data.SetDataCommit(std::move(setup)).status!=DataCommitStatus::Succeeded)return false;
+    const auto publish=[&](FeatureInternal::ResultScopes& owner,DataRevisionRef source,const char* binding,double z){
+        const DataRevisionRef ref{data.CreateDataEntityId(),1};DataTransaction tx;
+        tx.outputs.push_back({ref.entityId,0,DataTypes::surfaceMesh,{{"source",source}},mesh(z)});
+        tx.bindings.push_back({binding,0,true,{},ref});
+        const auto committed=owner.Commit(data,std::move(tx));
+        return committed.status==DataCommitStatus::Succeeded?ref:DataRevisionRef{};
+    };
+    const auto surfaceRef=publish(surface,root,"test.surface",1);
+    const auto wallRef=publish(wall,surfaceRef,"test.wall",2);
+    if(!Check(GetDataRevisionRefValid(surfaceRef)&&GetDataRevisionRefValid(wallRef),"scoped consumer chain publication"))return false;
+    DataTransaction retire;retire.retireScopes.push_back({rootScope,DataLifetimeStatus::Published,{root},true});
+    if(!Check(data.SetDataCommit(retire).failureReason==DataCommitFailure::ResultInUse&&!surface.Clear(data),"downstream dependency must block upstream retirement"))return false;
+    auto held=data.GetData(data.GetDataGraph(),wallRef)->payload;
+    if(!Check(!wall.Clear(data)&&!data.GetData(data.GetDataGraph(),wallRef),"retired consumer must await held allocation and revoke new reads"))return false;
+    held.reset();if(!Check(wall.Clear(data)&&surface.Clear(data),"consumers release in dependency order"))return false;
+    if(!Check(data.SetDataCommit(retire).status==DataCommitStatus::Succeeded
+        &&data.SetDataRelease(rootScope).status==DataLifetimeStatus::Released,"consumer graph edges must not permanently block Crop"))return false;
+    // 普通输入的结果不会因该功能关闭而丢失。
+    const DataRevisionRef persistent{data.CreateDataEntityId(),1};DataTransaction ordinary;
+    ordinary.outputs.push_back({persistent.entityId,0,DataTypes::surfaceMesh,{},mesh(3)});
+    if(data.SetDataCommit(std::move(ordinary)).status!=DataCommitStatus::Succeeded)return false;
+    const auto saved=publish(surface,persistent,"test.persistent",4);
+    return Check(surface.Clear(data)&&bool(data.GetData(data.GetDataGraph(),saved)),"ordinary feature results remain persistent");
+}
+
 }
 
 bool GetResourceLifetimeTests()
 {
-    bool passed=GetQueuedExportsProtected();
+    bool passed=GetScopedConsumerChainReleased();
+    passed=GetQueuedExportsProtected()&&passed;
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;
     passed=GetConsumerStopKeepsRenderReady()&&passed;

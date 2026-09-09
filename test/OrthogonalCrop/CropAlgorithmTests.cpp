@@ -1,3 +1,4 @@
+// 测试用途：验证裁剪布局、参数校验、合成真值、历史快照、结果构建与取消。
 #include "Algorithms/CropAlgorithm.h"
 #include "PlanarTestSuites.h"
 #include "Routing/CropRouter.h"
@@ -614,13 +615,20 @@ bool StartCurvedRecipeCase()
         auto task=CropRouter{}.BuildResultTask(input,params,payload);if(!task)return false;
         auto future=task->get_future();(*task)();const auto candidate=future.get();
         if(!SetExpect(candidate.isSucceeded&&candidate.recipePayload&&candidate.preparedView,"Curved worker recipe preparation failed."))return false;
-        const auto& primitive=candidate.recipePayload->GetPrimitives().front();
+        const auto& primitive=candidate.recipePayload->GetDefinition().nodes.at(1).primitive;
         if(!SetExpect(primitive.shape==(shape==CropShape::Sphere?RoiShape::Sphere:RoiShape::Cylinder)
-            &&primitive.center==operation.centerInInputModel&&primitive.radius==operation.radius
-            &&primitive.recipeVersion==1&&primitive.boundaryPolicyVersion==1
-            &&(shape==CropShape::Sphere||primitive.axis==std::array<double,3>{1,0,0}),
+            &&primitive.origin==operation.centerInInputModel&&primitive.radius==operation.radius
+            &&primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1
+            &&(shape==CropShape::Sphere||primitive.normal==std::array<double,3>{1,0,0}),
             "Published curved recipe must carry normalized source geometry and versions."))return false;
     }
+    std::vector<CropOpItem> deep(4096);
+    for(std::size_t i=0;i<deep.size();++i){deep[i].operationIndex=i+1;deep[i].removalMode=CropRemovalMode::RemoveInside;}
+    const auto recipe=CropRouter::CreateRecipePayload(deep,view->data->self);
+    if(!SetExpect(recipe&&recipe->GetDefinition().nodes.size()==roiNodeLimit,"Maximum history path must fit the bounded unified ROI expression."))return false;
+    DataTransaction transaction;transaction.outputs.push_back({data.CreateDataEntityId(),0,DataTypes::roiGeometry,
+        {{"source-data",view->data->self}},recipe});
+    if(!SetExpect(data.SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded,"Deep balanced recipe must satisfy unified ROI validation."))return false;
     return true;
 }
 
@@ -744,6 +752,38 @@ bool StartRouterTaskCase()
         "Router should reject params/snapshot revision mismatch before worker creation.") && isPassed;
     return isPassed;
 }
+bool StartPublicRoiExtentCase()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();
+    image->SetExtent(10,12,-4,-3,7,8); image->SetSpacing(.5,2,3); image->SetOrigin(1,2,3);
+    const double direction[9]={0,-1,0,1,0,0,0,0,1}; image->SetDirectionMatrix(direction);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* values=static_cast<unsigned char*>(image->GetScalarPointer());
+    for (int i=0;i<12;++i) values[i]=static_cast<unsigned char>(i+1);
+    auto validity=vtkSmartPointer<vtkImageData>::New(); validity->CopyStructure(image); validity->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* valid=static_cast<unsigned char*>(validity->GetScalarPointer()); std::fill(valid,valid+12,1); valid[0]=0;
+    TestDataPort data; const auto view=data.SetPrimaryImage(image,validity);
+    if (!view) return SetExpect(false,"nonzero extent fixture failed");
+    RoiRequest request; request.definition.source=view->data->self; request.metadata.name="extent";
+    RoiNode node; node.primitive.shape=RoiShape::HalfSpace; node.primitive.origin={8,0,0}; node.primitive.normal={1,0,0}; request.definition.nodes={node};
+    const auto made=data.SetRoi(request);
+    if (!made.roi) return SetExpect(false,"nonzero extent ROI failed");
+    const auto roi=data.GetRoi(data.GetDataGraph(),made.roi->revision,view->data->self);
+    CropInputSnapshot input; input.graph=view->graph; input.binding=view->binding; input.data=view->data; input.image=view;
+    image->GetBounds(input.inputModelBounds.data());
+    const auto result=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,{});
+    if (!SetExpect(result.isSucceeded && result.maskImage && result.imageData,"nonzero extent ROI crop failed")) return false;
+    const auto* mask=static_cast<const unsigned char*>(result.maskImage->GetScalarPointer());
+    const auto* copied=static_cast<const unsigned char*>(result.imageData->GetScalarPointer());
+    for (int i=0;i<12;++i) if ((mask[i]!=0)!=(i/3%2==0 && i!=0) || copied[i]!=values[i])
+        return SetExpect(false,"nonzero extent/rotated physical mapping or existing validity changed");
+    const auto cancelled=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[]{return true;});
+    if(!SetExpect(!cancelled.isSucceeded && cancelled.isCancelled && !cancelled.imageData,"cancelled public ROI crop leaked output"))return false;
+    int polls=0;const auto midChunk=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[&]{return ++polls>2;});
+    return SetExpect(midChunk.isCancelled&&!midChunk.isSucceeded&&midChunk.failureReason==CropFailure::Cancelled&&!midChunk.outputPayload,
+        "ROI chunk cancellation must use the public Cancelled terminal without publishing a partial mask.");
+}
+
 }
 
 int CropAlgorithmSuite::GetFailCount() const
@@ -759,6 +799,7 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartFourShapeImageCase() ? 0 : 1;
     failureCount += StartCurvedRecipeCase() ? 0 : 1;
     failureCount += StartPolyBuildCase() ? 0 : 1;
+    failureCount += StartPublicRoiExtentCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
     failureCount += StartCanonicalRootCase() ? 0 : 1;
     return failureCount;

@@ -1,3 +1,4 @@
+// 测试用途：验证零件叠加显示、选择状态和颜色投影。
 #include "PartSegmentationTestCases.h"
 
 #include "Model/PartCatalog.h"
@@ -6,6 +7,9 @@
 #include "Render/Internal/PartSurfaceProductBuilder.h"
 
 #include <vtkActor.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
+#include <stdexcept>
 #include <vtkImageData.h>
 #include <vtkImageProperty.h>
 #include <vtkImageResliceMapper.h>
@@ -18,6 +22,7 @@
 #include <vtkPointData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <vtkUnsignedIntArray.h>
 
 #include <windows.h>
@@ -29,6 +34,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -425,6 +431,32 @@ int GetPartDisplayFailCount()
     auto selectedCatalog = BuildRenderCatalog();
     selectedCatalog.partsByLabel[1].presentation.isSelected = true;
     const auto selectedStates = BuildPartRenderStateTable(selectedCatalog);
+    // 体渲染仅显示半透明选择标记；无选择时不覆盖原始灰度体。
+    auto marker = std::make_shared<PartSurfaceOverlayStrategy>(true);
+    marker->SetInputData(sharedSurface);
+    vtkNew<vtkRenderer> markerRenderer; marker->AttachRenderer(markerRenderer);
+    auto* markerProps = markerRenderer->GetViewProps(); markerProps->InitTraversal();
+    auto* markerActor = vtkActor::SafeDownCast(markerProps->GetNextProp());
+    auto* markerMapper = vtkPolyDataMapper::SafeDownCast(markerActor->GetMapper());
+    auto* markerLut = vtkLookupTable::SafeDownCast(markerMapper->GetLookupTable());
+    const bool noSelection = marker->SetPartStates(*reorderedStates) && !markerActor->GetVisibility();
+    const bool hasSelection = marker->SetPartStates(*selectedStates) && markerActor->GetVisibility();
+    double markerColor[4]{}, otherColor[4]{};
+    markerLut->GetTableValue(1, markerColor); markerLut->GetTableValue(2, otherColor);
+    failureCount += GetCaseResult(noSelection && hasSelection && markerColor[3] > 0 && markerColor[3] < 0.4
+        && otherColor[3] == 0 && markerMapper->GetInput() == sharedSurface
+        && marker->SetPartStates(*hiddenStates) && !markerActor->GetVisibility(),
+        "DVR selection marker preserves source volume, shares geometry, and retires when hidden") ? 0 : 1;
+    vtkNew<vtkRenderWindow> pickWindow; pickWindow->SetSize(256, 256); pickWindow->AddRenderer(markerRenderer);
+    if (sharedSurface) markerRenderer->ResetCamera(sharedSurface->GetBounds());
+    const bool pickedUnselected = marker->SetPartStates(*reorderedStates)
+        && marker->GetPickedLabel(128, 128, markerRenderer) == std::optional<PartLabelId>(1);
+    const bool rejectedHidden = marker->SetPartStates(*hiddenStates)
+        && !marker->GetPickedLabel(128, 128, markerRenderer);
+    failureCount += GetCaseResult(pickedUnselected && rejectedHidden && !markerActor->GetVisibility(),
+        "DVR geometry picking accepts unselected labels and rejects business-hidden parts without mutating the actor") ? 0 : 1;
+    pickWindow->RemoveRenderer(markerRenderer);
+    marker->DetachRenderer(markerRenderer);
     failureCount += GetCaseResult(
         selectedStates
             && selectedStates->statesByLabel[1].isSelected
@@ -486,6 +518,69 @@ int GetPartDisplayFailCount()
             && hiddenColor[3] == 0.0,
         "Concrete aggregate overlay consumes the explicit state table")
         ? 0 : 1;
+    if (lut) {
+        const auto originalTime = lut->GetMTime();
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates)
+            && lut->GetMTime() == originalTime, "Unchanged LUT does not mark VTK data modified") ? 0 : 1;
+        auto changed = *firstStates;
+        changed.statesByLabel[1].color = {0.2, 0.4, 0.6, 0.8};
+        const auto oldHidden = std::array<double, 4>{hiddenColor[0], hiddenColor[1], hiddenColor[2], hiddenColor[3]};
+        const bool isChanged = lutSlice->SetPartStates(changed);
+        double actual[4]{}, stillHidden[4]{};
+        lut->GetTableValue(1, actual);
+        lut->GetTableValue(2, stillHidden);
+        failureCount += GetCaseResult(isChanged && lut->GetMTime() > originalTime
+            && std::abs(actual[0] - 0.2) <= 1.0 / 255.0
+            && std::abs(actual[3] - 0.8 * 0.18) <= 1.0 / 255.0
+            && std::equal(oldHidden.begin(), oldHidden.end(), stillHidden),
+            "One changed label preserves unrelated LUT entries") ? 0 : 1;
+        auto invalid = changed;
+        invalid.statesByLabel[2].color[0] = std::numeric_limits<double>::quiet_NaN();
+        const auto changedTime = lut->GetMTime();
+        failureCount += GetCaseResult(!lutSlice->SetPartStates(invalid)
+            && lut->GetMTime() == changedTime, "Invalid LUT is rejected before any VTK mutation") ? 0 : 1;
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates),
+            "Complete previous table restores an incrementally updated LUT") ? 0 : 1;
+        vtkNew<vtkCallbackCommand> rejectWrite;
+        rejectWrite->SetCallback([](vtkObject*, unsigned long, void*, void*) {
+            throw std::runtime_error("Injected LUT write failure");
+        });
+        const auto observerTag = lut->AddObserver(vtkCommand::ModifiedEvent, rejectWrite);
+        const bool isWriteRejected = !lutSlice->SetPartStates(changed);
+        lut->RemoveObserver(observerTag);
+        const bool isRestored = lutSlice->SetPartStates(*firstStates);
+        double restoredColor[4]{};
+        lut->GetTableValue(1, restoredColor);
+        failureCount += GetCaseResult(isWriteRejected && isRestored
+            && std::abs(restoredColor[0] - firstStates->statesByLabel[1].color[0]) <= 1.0 / 255.0
+            && std::abs(restoredColor[3] - firstStates->statesByLabel[1].color[3] * 0.18) <= 1.0 / 255.0,
+            "Partial VTK write failure invalidates cache so complete rollback repairs the LUT") ? 0 : 1;
+        const auto restoredTime = lut->GetMTime();
+        failureCount += GetCaseResult(lutSlice->SetPartStates(*firstStates)
+            && lut->GetMTime() == restoredTime, "Restored LUT cache describes the last successful table") ? 0 : 1;
+    }
+    double idleColor[4]{}, selectedColor[4]{};
+    if (lut) lut->GetTableValue(1, idleColor);
+    const bool didSelectSlice = selectedStates && lutSlice->SetPartStates(*selectedStates);
+    if (lut) lut->GetTableValue(1, selectedColor);
+    failureCount += GetCaseResult(didSelectSlice
+        && idleColor[0] == idleColor[1] && idleColor[1] == idleColor[2]
+        && idleColor[3] < 0.2 && selectedColor[3] > 0.5
+        && selectedColor[0] > selectedColor[1] && selectedColor[1] > selectedColor[2],
+        "Slice preview preserves source greyscale and uses one selection accent") ? 0 : 1;
+    auto customCatalog = BuildRenderCatalog();
+    customCatalog.partsByLabel[1].presentation.colorUse = PartColorUse::Custom;
+    customCatalog.partsByLabel[1].presentation.color = {0.2, 0.4, 0.6, 1.0};
+    const auto customStates = BuildPartRenderStateTable(customCatalog);
+    customCatalog.partsByLabel[1].presentation.isSelected = true;
+    const auto customSelected = BuildPartRenderStateTable(customCatalog);
+    customCatalog.partsByLabel[1].presentation.isSelected = false;
+    const auto customRestored = BuildPartRenderStateTable(customCatalog);
+    failureCount += GetCaseResult(customStates && customSelected && customRestored
+        && *customStates == *customRestored
+        && customSelected->statesByLabel[1].color != customStates->statesByLabel[1].color
+        && customStates->statesByLabel[1].color[0] == 0.2,
+        "Explicit custom colour survives selection and deselection") ? 0 : 1;
     lutSlice->DetachRenderer(lutRenderer);
     return failureCount;
 }

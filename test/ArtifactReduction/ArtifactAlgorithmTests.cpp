@@ -1,3 +1,4 @@
+// 测试用途：验证伪影处理的标量类型、掩码、扩散滤波、环形校正与组合算法。
 #include "ArtifactTestSupport.h"
 #include "TomoPyRingAdapter.h"
 
@@ -48,8 +49,7 @@ void TestTypesAndMasks()
     request.diffusion = ArtifactDiffusionParams{};
     Require(BuildCandidate(input, request).error == ArtifactError::UnsupportedValidity, "invalid data never filled for diffusion");
     auto wrongMaskGrid = grid; wrongMaskGrid.origin[0] += 1;
-    input.processing = CreateMask(wrongMaskGrid, std::vector<std::uint8_t>(105, 1));
-    Require(BuildCandidate(input).error == ArtifactError::InvalidData, "mask physical geometry mismatch");
+    Require(!CreateRegion(input.image, wrongMaskGrid, std::vector<std::uint8_t>(105, 1)), "ROI rejects mismatched mask physical geometry before computation");
     input.processing.reset();
     input.image = CreateImage(grid, ImageValueType::UInt8, std::vector<std::uint8_t>(105, 255));
     Require(GetValues(*BuildCandidate(input).image)[0] == 255, "uint8 conversion");
@@ -98,7 +98,7 @@ void TestDiffusion()
     }
     ArtifactReduction::AlgorithmInput input;
     input.image = CreateImage(grid, ImageValueType::Float32, values);
-    input.material = CreateMask(grid, material);
+    input.material = CreateRegion(input.image, grid, material);
     ArtifactRequest request;
     request.diffusion = ArtifactDiffusionParams{ 3, 4.0, 0.5, 13 };
     const auto full = BuildCandidate(input, request);
@@ -125,8 +125,8 @@ void TestDiffusion()
         "direct VTK full-volume reference");
     std::vector<std::uint8_t> protection(count, 0), processing(count, 1);
     for (std::size_t i = 0; i < count; ++i) { if (i % 7 == 0) protection[i] = 1; if (i % 11 == 0) processing[i] = 0; }
-    input.protection = CreateMask(grid, protection);
-    input.processing = CreateMask(grid, processing);
+    input.protection = CreateRegion(input.image, grid, protection);
+    input.processing = CreateRegion(input.image, grid, processing);
     const auto masked = BuildCandidate(input, request);
     const auto actual = GetValues(*masked.image);
     const auto expected = GetValues(*full.image);
@@ -152,8 +152,8 @@ void TestRing()
     }
     ArtifactReduction::AlgorithmInput input;
     input.image = CreateImage(grid, ImageValueType::Float32, values);
-    input.protection = CreateMask(grid, protect);
-    input.material = CreateMask(grid, material);
+    input.protection = CreateRegion(input.image, grid, protect);
+    input.material = CreateRegion(input.image, grid, material);
     ArtifactRequest request;
     ArtifactRingParams ring;
     ring.centerIndex = { 25, 44 }; ring.threshMin = 0; ring.threshMax = 200; ring.threshold = 50; ring.ringWidth = 1; ring.maxCorrection = 20;

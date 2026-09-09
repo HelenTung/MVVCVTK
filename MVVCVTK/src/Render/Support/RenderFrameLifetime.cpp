@@ -96,6 +96,12 @@ std::uint64_t CreateFrameId() noexcept {
     while(value&&!next.compare_exchange_weak(value,value==std::numeric_limits<std::uint64_t>::max()?0:value+1)){}
     return value;
 }
+bool SetCurrentContext(vtkOpenGLRenderWindow* window,vtkMTimeType creation) {
+    if(!window||window->GetContextCreationTime()!=creation)return false;
+    // Qt 托管的窗口没有原生上下文指针，必须通过宿主激活并查询当前上下文。
+    window->MakeCurrent();
+    return window->IsCurrent()&&window->GetContextCreationTime()==creation;
+}
 struct FrameFence final : std::enable_shared_from_this<FrameFence> {
     vtkWeakPointer<vtkOpenGLRenderWindow> context;
     vtkMTimeType creation=0;GLsync fence=nullptr;
@@ -108,9 +114,7 @@ struct FrameFence final : std::enable_shared_from_this<FrameFence> {
     ~FrameFence() {
         if(auto* window=context.GetPointer()) {
             window->RemoveObserver(endTag);window->RemoveObserver(deleteTag);
-            if(fence&&window->GetContextCreationTime()==creation&&window->GetGenericContext()) {
-                window->MakeCurrent();glDeleteSync(fence);
-            }
+            if(fence&&SetCurrentContext(window,creation))glDeleteSync(fence);
         }
     }
     void Finish(bool succeeded) {
@@ -121,10 +125,10 @@ struct FrameFence final : std::enable_shared_from_this<FrameFence> {
     bool Poll(bool deleted=false) {
         if(complete)return false;
         auto* window=context.GetPointer();
-        if(deleted||!window||!window->GetGenericContext()||window->GetContextCreationTime()!=creation) {
+        if(deleted||!SetCurrentContext(window,creation)) {
             fence=nullptr;Finish(false);return true;
         }
-        window->MakeCurrent();const auto result=glClientWaitSync(fence,GL_SYNC_FLUSH_COMMANDS_BIT,0);
+        const auto result=glClientWaitSync(fence,GL_SYNC_FLUSH_COMMANDS_BIT,0);
         if(result==GL_TIMEOUT_EXPIRED)return false;
         if(result==GL_WAIT_FAILED)glFinish();
         glDeleteSync(fence);fence=nullptr;Finish(result!=GL_WAIT_FAILED);return true;
@@ -224,15 +228,13 @@ public:
             for(auto& callback:completions)try {callback(outcome);}catch(...){}
             completions.clear();owned.reset();
         };
-        if(!context||!context->GetGenericContext()||context->GetContextCreationTime()!=creation){complete(false);return;}
-        context->MakeCurrent();
+        if(!SetCurrentContext(context,creation)){complete(false);return;}
         std::shared_ptr<FrameFence> record;
         try {
             // Poll may deliver callbacks and nested frames; this frame is already
             // detached from mutable tracker fields before any callback can run.
             (void)RenderFrameLifetime::PollAll();
-            if(!context->GetGenericContext()||context->GetContextCreationTime()!=creation){complete(false);return;}
-            context->MakeCurrent();
+            if(!SetCurrentContext(context,creation)){complete(false);return;}
             if(mustFinish||!result.frameId)throw std::bad_alloc{};
             record=std::make_shared<FrameFence>();record->context=context;
             record->creation=creation;record->outcome=result;
@@ -242,8 +244,8 @@ public:
             record->resources=std::move(owned);record->callbacks=std::move(completions);
             record->Observe();(void)record->Poll();
         } catch(...) {
-            if(context->GetGenericContext()&&context->GetContextCreationTime()==creation) {
-                context->MakeCurrent();glFinish();
+            if(SetCurrentContext(context,creation)) {
+                glFinish();
                 if(record&&record->fence){glDeleteSync(record->fence);record->fence=nullptr;}
             }
             if(record)record->Finish(false);
@@ -283,3 +285,8 @@ bool RenderFrameLifetime::PollAll() {
     return changed;
 }
 bool RenderFrameLifetime::QueueCompletion(std::function<void(RenderFrameOutcome)> callback){return m_impl->Queue(std::move(callback));}
+bool RenderFrameLifetime::GetHasPending(vtkRenderWindow* window) {
+    return window&&std::any_of(frames.begin(),frames.end(),[window](const auto& frame) {
+        return !frame->complete&&frame->context.GetPointer()==window;
+    });
+}

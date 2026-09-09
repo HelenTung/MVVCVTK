@@ -41,6 +41,8 @@ struct CropMaterializationCandidate final {
     CropFailure failureReason = CropFailure::None;
     std::uint64_t failureOperationIndex = 0;
     std::vector<CropOpItem> operations;
+    RoiReadSnapshot roi;
+    std::optional<DataRevisionRef> inputRoi;
     DataRevisionRef sourceRevision;
     std::size_t nodeCount = 0;
     std::string message;
@@ -83,6 +85,10 @@ public:
     static bool GetInputSame(
         const CropInputSnapshot& left,
         const CropInputSnapshot& right);
+
+    static CropMaterializationCandidate GetRoiResult(
+        const CropInputSnapshot& input, RoiReadSnapshot roi,
+        std::size_t availableRamBytes, const std::function<bool()>& getStopRequested);
 
     static CropMaterializationCandidate GetResult(
         vtkImageData* image,

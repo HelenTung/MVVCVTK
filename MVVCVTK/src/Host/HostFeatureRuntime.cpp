@@ -317,6 +317,20 @@ public:
         {
         }
 
+        RoiReadResult GetRoi(const DataGraphSnapshot& graph,
+            const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const override
+        {
+            const auto data = GetReadData();
+            return data ? data->GetRoi(graph, roiRef, sourceRef) : RoiReadResult{};
+        }
+
+        RoiResult SetRoi(const RoiRequest& request) override
+        {
+            if (m_ownerThread != std::this_thread::get_id()) return {RoiError::WrongThread};
+            const auto data = GetWriteData();
+            return data ? data->SetRoi(request) : RoiResult{};
+        }
+
         DataGraphSnapshot GetDataGraph() const override
         {
             const auto data = GetReadData();

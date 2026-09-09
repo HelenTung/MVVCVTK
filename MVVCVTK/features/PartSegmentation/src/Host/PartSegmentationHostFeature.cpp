@@ -77,6 +77,7 @@ bool GetTargetsUsed(const HostViewTargets& targets)
 bool GetRoleSupported(const HostRenderViewRole role)
 {
     return role == HostRenderViewRole::Primary3D
+        || role == HostRenderViewRole::Composite3D
         || role == HostRenderViewRole::TopDownSlice
         || role == HostRenderViewRole::FrontBackSlice
         || role == HostRenderViewRole::LeftRightSlice;
@@ -125,8 +126,9 @@ struct PartOverlayCandidate final {
 PartOverlayCandidate CreateOverlay(
     const HostRenderViewRole role)
 {
-    if (role == HostRenderViewRole::Primary3D) {
-        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>();
+    if (role == HostRenderViewRole::Primary3D
+        || role == HostRenderViewRole::Composite3D) {
+        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>(role == HostRenderViewRole::Composite3D);
         return { overlay, overlay };
     }
     if (role == HostRenderViewRole::TopDownSlice) {
@@ -309,7 +311,8 @@ private:
         const DataProvenance* editProvenance = nullptr,
         DataSnapshot* publishedLabels = nullptr,
         DataPreparedResource resource = {});
-    bool GetHistoryBytes(std::size_t& bytes);
+    bool GetHistoryBytes(std::size_t& bytes,
+        const std::shared_ptr<const std::vector<PartLabelId>>& additionalLabels = {});
     std::optional<HistoryEntry> GetHistoryEntry() const;
     static DataProvenance BuildEditProvenance(const PartEditRequest& request);
     void ClearEditState();
@@ -1010,7 +1013,8 @@ PartSegmentationHostFeature::Impl::GetHistoryEntry() const
     return HistoryEntry{ m_activeLabels->data, found->data, m_catalogView };
 }
 
-bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
+bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes,
+    const std::shared_ptr<const std::vector<PartLabelId>>& additionalLabels)
 {
     bytes = 0;
     if (!m_data) return false;
@@ -1032,7 +1036,7 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
     // 撤销/重做修订和外部候选可共享同一不可变标签缓冲，只计费一次。
     // 去重表由既有修订/候选数量上限约束；不同分配仍独立计费。
     std::vector<const void*> countedLabels;
-    countedLabels.reserve(data.data.size() + m_previewRetained.size());
+    countedLabels.reserve(data.data.size() + m_previewRetained.size() + (additionalLabels ? 1U : 0U));
     if (!add(countedLabels.capacity(), sizeof(const void*))) return false;
     const auto addLabels = [&](const auto& values) {
         using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
@@ -1079,6 +1083,8 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes)
         if (labels && !addLabels(labels)) return false;
         if (!item.parts.expired() && !add(1, item.partBytes)) return false;
     }
+    // 新候选、恢复的历史与待发布 payload 使用同一去重表，按实际不同分配计费。
+    if (additionalLabels && !addLabels(additionalLabels)) return false;
     if (!add(m_undo.capacity() + m_redo.capacity() + m_commitUndo.capacity() + m_commitRedo.capacity(), sizeof(HistoryEntry))) return false;
     return true;
 }
@@ -1111,9 +1117,7 @@ DataProvenance PartSegmentationHostFeature::Impl::BuildEditProvenance(const Part
         json << ']';
     };
     DataProvenance result{ std::string(featureId), "", "label-edit-1", "" };
-    json << "{\"scopeExtent\":";
-    if (request.scope.extent) array(*request.scope.extent); else json << "null";
-    json << ",\"protectedParts\":"; bindings(request.scope.protectedParts);
+    json << "{\"protectedParts\":"; bindings(request.scope.protectedParts);
     json << ",\"operation\":{";
     std::visit([&](const auto& op) {
         using Op = std::decay_t<decltype(op)>;
@@ -1217,22 +1221,27 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendEditRequest(
         addExpected(state.sourceRevision);
         addExpected(state.labelMap);
         addExpected(history->catalogRef);
-        const auto mask = [&](const std::optional<DataRevisionRef>& ref, const char* role,
-            std::shared_ptr<const LabelMap3DPayload>& payload) {
+        const auto region = [&](const std::optional<DataRevisionRef>& ref, const char* role,
+            RoiReadSnapshot& roi) {
             if (!ref) return true;
-            const auto data = m_data->GetData(graph, *ref);
-            payload = data ? std::dynamic_pointer_cast<const LabelMap3DPayload>(data->payload) : nullptr;
-            if (!payload || !payload->GetValid()) return false;
-            inputs.push_back({ role, *ref });
-            addExpected(*ref);
+            const auto resolved=m_data->GetRoi(graph,*ref,state.sourceRevision);
+            if (resolved.error!=RoiError::None || !resolved.roi) return false;
+            roi=resolved.roi;
+            inputs.push_back({role,*ref});
+            std::size_t index=0;
+            for (const auto& dependency:roi->GetDependencies()) {
+                addExpected(dependency);
+                if (dependency!=*ref && dependency!=state.sourceRevision)
+                    inputs.push_back({std::string(role)+".input-"+std::to_string(index++),dependency});
+            }
             return true;
         };
-        if (!mask(request.scope.roiMask, "roi-mask", job.roiMask)
-            || !mask(request.scope.protectionMask, "protection-mask", job.protectionMask)) {
-            return { PartAdmissionStatus::InvalidRequest, 0 };
+        if (!region(request.scope.editRoi,"edit-roi",job.editRoi)
+            || !region(request.scope.protectionRoi,"protection-roi",job.protectionRoi)) {
+            return {PartAdmissionStatus::InvalidRequest,0};
         }
         if (const auto restore = std::get_if<PartHistoryEdit>(&request.operation)) {
-            if (request.scope.extent || request.scope.roiMask || request.scope.protectionMask
+            if (request.scope.editRoi || request.scope.protectionRoi
                 || !request.scope.protectedParts.empty()) return { PartAdmissionStatus::InvalidRequest, 0 };
             const auto& stack = restore->isRedo ? m_redo : m_undo;
             if (stack.empty()) return { PartAdmissionStatus::Unavailable, 0 };
@@ -1259,11 +1268,19 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendEditRequest(
             || !addRetained(1, m_surfaceProduct ? m_surfaceProduct->actualBytes : 0)) {
             return { PartAdmissionStatus::InvalidRequest, 0 };
         }
-        for (const auto& payload : { job.roiMask, job.protectionMask }) {
-            if (payload && !std::visit([&](const auto& values) {
-                using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
-                return values && addRetained(values->capacity(), sizeof(Item));
-            }, payload->GetValues())) return { PartAdmissionStatus::InvalidRequest, 0 };
+        for (const auto& roi : { job.editRoi, job.protectionRoi }) {
+            if (!roi) continue;
+            if (!addRetained(roi->GetDefinition().nodes.size(),sizeof(RoiNode))) return {PartAdmissionStatus::BudgetExceeded,0};
+            for (const auto& ref:roi->GetDependencies()) {
+                if (ref==roi->GetRevision() || ref==state.sourceRevision) continue;
+                const auto payload=m_data->GetData(graph,ref)->payload;
+                if (const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(payload.get())) {
+                    if (!addRetained(mask->GetValues()->size(),1)) return {PartAdmissionStatus::BudgetExceeded,0};
+                } else if (const auto* labels=dynamic_cast<const LabelMap3DPayload*>(payload.get())) {
+                    if (!std::visit([&](const auto& values){return addRetained(values->size(),sizeof((*values)[0]));},labels->GetValues()))
+                        return {PartAdmissionStatus::BudgetExceeded,0};
+                }
+            }
         }
         const auto requestId = GetNextRequestId();
         job.requestId = requestId;
@@ -1318,8 +1335,7 @@ void PartSegmentationHostFeature::Impl::SetEditComplete(PartLabelCandidate candi
             if (!GetPartCatalogStorageBytes(*candidate.catalog, partBytes)) throw std::runtime_error("Invalid preview storage.");
             partBytes += preview->parts->parts.capacity() * sizeof(PartSnapshot);
             std::size_t retained = 0;
-            if (!GetHistoryBytes(retained) || partBytes > m_config.maxHistoryBytes - retained
-                || preview->labels->capacity() > (m_config.maxHistoryBytes - retained - partBytes) / sizeof(PartLabelId)) {
+            if (!GetHistoryBytes(retained, preview->labels) || partBytes > m_config.maxHistoryBytes - retained) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
                 throw std::runtime_error("Retained preview budget exceeded.");
             }
@@ -1383,7 +1399,8 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SetEditCommit(
     try {
         std::size_t retained = 0, catalogBytes = 0;
         const auto& candidate = *m_editCandidate;
-        if (!GetHistoryBytes(retained) || !candidate.catalog || !candidate.labels
+        if (!GetHistoryBytes(retained, candidate.labelPayload ? candidate.labelPayload->GetLabels() : nullptr)
+            || !candidate.catalog || !candidate.labels || !candidate.labelPayload
             || !GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)) failure = PartFailureReason::BudgetExceeded;
         else {
             const auto add = [&](std::size_t count, std::size_t width) {
@@ -1391,8 +1408,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SetEditCommit(
                 retained += count * width;
                 return retained <= m_config.maxHistoryBytes;
             };
-            if (!add(candidate.labels->capacity(), sizeof(PartLabelId))
-                || !add(3, catalogBytes) || !add(candidate.catalog->partsByLabel.size(), 512)
+            if (!add(3, catalogBytes) || !add(candidate.catalog->partsByLabel.size(), 512)
                 || !add(1, 16384)
                 || !add(m_editProvenance ? m_editProvenance->canonicalParameters.capacity() : 0, 4)) {
                 failure = PartFailureReason::BudgetExceeded;
@@ -2012,7 +2028,9 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
                 RemoveBindings(nextBindings);
                 return false;
             }
-            if (view.role == HostRenderViewRole::Primary3D) {
+            if (view.role == HostRenderViewRole::Primary3D
+                || view.role == HostRenderViewRole::Composite3D) {
+                // 体渲染背景上的分割预览复用同一份精确标签表面，不复制体数据。
                 candidate.overlay->SetInputData(surfaceProduct->surface);
             }
             else {
@@ -2496,7 +2514,9 @@ std::string_view PartSegmentationHostFeature::GetFeatureId() const noexcept
 FeatureDataContract PartSegmentationHostFeature::GetDataContract() const
 {
     return FeatureDataContract{
-        { DataInputSpec{ "source-volume", DataFacets::scalarGrid3D, true } },
+        { DataInputSpec{ "source-volume", DataFacets::scalarGrid3D, true },
+          { "edit-roi", DataFacets::roiGeometry, false },
+          { "protection-roi", DataFacets::roiGeometry, false } },
         { DataOutputSpec{
               "labels", DataTypes::labelMap3D,
               { DataFacets::labelMap3D } },

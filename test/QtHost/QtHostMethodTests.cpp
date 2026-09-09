@@ -1,3 +1,4 @@
+// 测试用途：统一调度加载、渲染、标签、视图、功能集成、导出和生命周期方法回归。
 #include "QtHostMethodCases.h"
 
 #include <array>

@@ -1,4 +1,5 @@
 #include "../TestTimer.h"
+// 测试用途：验证宿主会话的正交裁剪请求、状态、结果发布和视图集成。
 #include "QtHostMethodCases.h"
 #include "../TestDataPort.h"
 
@@ -6,7 +7,14 @@
 #include "AppStateEvents.h"
 #include "App/Services/FeatureViewService.h"
 #include "DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Host/CropHostFeature.h"
+#ifdef MVVCVTK_HAS_PART_SEGMENTATION
+#include "Host/PartSegmentationHostFeature.h"
+#endif
+#ifdef MVVCVTK_HAS_SURFACE_DETERMINATION
+#include "Host/SurfaceDeterminationHostFeature.h"
+#endif
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
 #include "Host/GapHostFeature.h"
 #endif
@@ -38,6 +46,8 @@
 #include <vtkVolumeCollection.h>
 
 #include <chrono>
+#include <cmath>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -1552,7 +1562,12 @@ int GetCropFailCount()
     polyWithoutVersion.polyData =
         vtkSmartPointer<vtkPolyData>::New();
     int rejectedBuildCount = 0;
-    const bool isStrict =
+    CropEditRequest invalidPrune;invalidPrune.kind=CropEditKind::Prune;
+    invalidPrune.documentId=feature->GetState().history.documentId;
+    invalidPrune.requestId=CropHostFeature::CreateRequestId();
+    invalidPrune.expectedRevision=feature->GetState().history.stateRevision;
+    invalidPrune.prune.nodeIds={0};
+    const bool isStrict = !feature->SendRequest(invalidPrune) &&
         !feature->SendRequest(std::move(invalidMode))
         && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(9)))
         && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(12)))
@@ -1803,6 +1818,31 @@ int GetCropFailCount()
             && committedState.history.operationCount == 1
             && committedState.history.hasEditableOp,
         "Box interaction creates one committed Crop operation") ? 0 : 1;
+
+    // 已完成的交互历史可独立保存为公共 ROI；不触发物化或改写绑定。
+    const auto beforeRoiSave=contextProbe->m_data->GetDataGraph();
+    const auto catalogBefore=contextProbe->m_data->GetDataBinding(beforeRoiSave,roiCatalogBinding);
+    const auto primaryBefore=session.GetImageDescriptor();
+    const auto cropBefore=feature->GetState();
+    auto saveRoi=GetTargetRequest(CropHostAction::SaveRoi,target);
+    saveRoi.roiMetadata=RoiMetadata{"crop-saved"};
+    saveRoi.expectedCatalogRevision=catalogBefore ? catalogBefore->revision:0;
+    int saveCount=0; CropBuildResult savedRoi;
+    const bool saveAccepted=feature->SendRequest(saveRoi,[&](CropBuildResult value) {
+        savedRoi=std::move(value); ++saveCount;
+        (void)session.GetRoiDescriptors();
+    });
+    const auto afterRoiSave=contextProbe->m_data->GetDataGraph();
+    const auto primaryAfter=session.GetImageDescriptor();
+    if (!saveAccepted || !savedRoi.isSucceeded || saveCount!=1) std::cerr << "Crop SaveRoi diagnostics accepted=" << saveAccepted
+        << " count=" << saveCount << " succeeded=" << savedRoi.isSucceeded << " failure=" << int(savedRoi.failureReason) << " message=" << savedRoi.message << '\n';
+    failureCount += GetCaseResult(saveAccepted && saveCount==1 && savedRoi.isSucceeded
+        && GetDataRevisionRefValid(savedRoi.recipeRevision) && !GetDataRevisionRefValid(savedRoi.outputRevision)
+        && session.GetRoiDescriptor(savedRoi.recipeRevision).has_value()
+        && afterRoiSave.commitId==beforeRoiSave.commitId+1 && primaryBefore && primaryAfter
+        && primaryBefore->dataRevision==primaryAfter->dataRevision && primaryBefore->bindingRevision==primaryAfter->bindingRevision
+        && feature->GetState().outputRevision==cropBefore.outputRevision,
+        "Crop SaveRoi commits only ROI/catalog and permits callback reentry") ? 0 : 1;
 
     const bool isPrevious = feature->SendRequest(
         GetCropRequest(CropHostAction::Previous));
@@ -2198,6 +2238,109 @@ int GetCropFailCount()
     failureCount += GetCaseResult(
         activeCropSnapshot && activeCropSnapshot->validityMask && checkPosePreservesCrop(),
         "Model rotation reuses the materialized Crop validity mask without rebuilding data") ? 0 : 1;
+
+    // 在同一个真实Host会话中串联已物化的非空Crop结果，不能重新从未裁切源启动下游。
+#ifdef MVVCVTK_HAS_PART_SEGMENTATION
+    {
+        PartSegmentationConfig partConfig;
+        partConfig.defaultStart.targetViews = target.targetViews;
+        partConfig.defaultStart.threshold = 0.5;
+        partConfig.defaultStart.minPartVoxels = 1;
+        auto parts = std::make_shared<PartSegmentationHostFeature>(partConfig);
+        const bool attached = session.AttachFeature(parts);
+        PartSegmentationRequest request;
+        request.action = PartSegmentationAction::Start;
+        request.start = partConfig.defaultStart;
+        std::optional<PartSegmentationResult> result;
+        int completions = 0;
+        const auto admission = parts->SendRequest(request, [&](PartSegmentationResult value) {
+            result = std::move(value); ++completions;
+        });
+        for (int poll = 0; !result && poll < 2000; ++poll) {
+            SendHostTick(*endpoint,*timerEndpoint);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto data = result ? contextProbe->m_data->GetData(contextProbe->m_data->GetDataGraph(),result->labelMap) : DataSnapshot{};
+        const auto* labels = data ? dynamic_cast<const LabelMap3DPayload*>(data->payload.get()) : nullptr;
+        bool agrees = attached && admission.status == PartAdmissionStatus::Accepted && completions == 1
+            && result && result->sourceRevision == publishResult.outputRevision && labels
+            && activeCropSnapshot && activeCropSnapshot->validityMask;
+        if (agrees) {
+            const auto* scalar = static_cast<const float*>(activeCropSnapshot->image->GetScalarPointer());
+            const auto* mask = static_cast<const unsigned char*>(activeCropSnapshot->validityMask->GetScalarPointer());
+            const auto count = static_cast<std::size_t>(activeCropSnapshot->image->GetNumberOfPoints());
+            agrees = std::visit([&](const auto& values) {
+                if (!values || values->size() != count) return false;
+                for (std::size_t i = 0; i < count; ++i) {
+                    const bool foreground = mask[i] != 0 && std::isfinite(scalar[i]) && scalar[i] >= 0.5f;
+                    if (((*values)[i] != 0) != foreground) return false;
+                }
+                return true;
+            }, labels->GetValues());
+            agrees = agrees && contextProbe->m_data->GetPrimaryImage()->data->self == publishResult.outputRevision;
+        }
+        failureCount += GetCaseResult(agrees,
+            "Crop to Part public workflow preserves source revision and excludes every invalid voxel") ? 0 : 1;
+        data.reset();
+        bool detached=false;
+        for(int poll=0;!detached&&poll<2000;++poll){detached=session.DetachFeature(*parts);if(!detached){SendHostTick(*endpoint,*timerEndpoint);std::this_thread::sleep_for(std::chrono::milliseconds(1));}}
+        failureCount += GetCaseResult(detached,
+            "Crop to Part consumer detaches without altering Crop source") ? 0 : 1;
+    }
+#endif
+#ifdef MVVCVTK_HAS_SURFACE_DETERMINATION
+    {
+        SurfaceDeterminationConfig surfaceConfig;
+        surfaceConfig.defaultStart.targetViews = target.targetViews;
+        surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::GlobalIsoPreview;
+        surfaceConfig.defaultStart.initialIsoValue = 0.5;
+        auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
+        const bool attached = session.AttachFeature(surface);
+        SurfaceDeterminationRequest request;
+        request.action = SurfaceDeterminationAction::Start;
+        request.start = surfaceConfig.defaultStart;
+        std::optional<SurfaceDeterminationResult> result;
+        int completions = 0;
+        const auto admission = surface->SendRequest(request, [&](SurfaceDeterminationResult value) {
+            result = std::move(value); ++completions;
+        });
+        for (int poll = 0; !result && poll < 2000; ++poll) {
+            SendHostTick(*endpoint,*timerEndpoint);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto snapshot = surface->GetPreviewSnapshot();
+        // 中央裁切穿过此 4^3 夹具的每个插值单元；不能把无效支持伪造成表面。
+        std::size_t supportedCells = 0;
+        if (activeCropSnapshot && activeCropSnapshot->validityMask) {
+            auto* mask = activeCropSnapshot->validityMask.GetPointer();
+            const auto* extent = mask->GetExtent();
+            for (int z = extent[4]; z < extent[5]; ++z)
+                for (int y = extent[2]; y < extent[3]; ++y)
+                    for (int x = extent[0]; x < extent[1]; ++x) {
+                        bool supported = true;
+                        for (int dz = 0; dz < 2; ++dz)
+                            for (int dy = 0; dy < 2; ++dy)
+                                for (int dx = 0; dx < 2; ++dx)
+                                    supported = supported && mask->GetScalarComponentAsDouble(
+                                        x + dx, y + dy, z + dz, 0) != 0.0;
+                        supportedCells += supported ? 1 : 0;
+                    }
+        }
+        const bool matched = attached && admission.status == SurfaceAdmissionStatus::Accepted
+            && activeCropSnapshot && activeCropSnapshot->validityMask && supportedCells == 0
+            && completions == 1 && result && !snapshot && !surface->GetSurfaceSnapshot()
+            && result->status == SurfaceResultStatus::Failed
+            && result->failureReason == SurfaceFailureReason::NoSurface
+            && result->purpose == SurfaceTaskPurpose::Preview && !result->isPublished
+            && !GetDataRevisionRefValid(result->meshRevision)
+            && result->sourceRevision == publishResult.outputRevision
+            && contextProbe->m_data->GetPrimaryImage()->data->self == publishResult.outputRevision;
+        failureCount += GetCaseResult(matched,
+            "Crop to Surface preserves the materialized revision and rejects a mask with no supported cells") ? 0 : 1;
+        failureCount += GetCaseResult(session.DetachFeature(*surface),
+            "Crop to Surface consumer detaches without changing primary data") ? 0 : 1;
+    }
+#endif
 
     const auto exportId =
         std::chrono::steady_clock::now()

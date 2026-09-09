@@ -1,3 +1,4 @@
+// 测试用途：验证孔隙请求、结果叠加、视图注册和退出清理。
 #include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 #include "../TestDataPort.h"

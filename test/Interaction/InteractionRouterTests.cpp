@@ -1,3 +1,4 @@
+// 测试用途：汇总交互路由、命令、快捷键、输入注册和应用状态测试。
 #include "InputCallbackHandler.h"
 #include "InteractionRouter.h"
 #include "Interaction/AbstractViewContext.h"

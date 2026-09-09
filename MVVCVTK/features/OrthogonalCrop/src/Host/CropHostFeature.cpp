@@ -258,7 +258,8 @@ private:
     bool BuildCropResult(
         const CropHostTarget& target,
         CropBuildCallback onComplete,CropNodeId nodeId=0,CropBuildOptions options={},
-        std::shared_ptr<CompleteItem> completeItem={});
+        std::shared_ptr<CompleteItem> completeItem={},std::optional<DataRevisionRef> inputRoi={});
+    bool SaveRoi(const CropHostRequest& request,CropBuildCallback onComplete);
     static bool RemoveComplete(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item);
@@ -741,7 +742,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
 
     const auto recipeEntity = m_data->CreateDataEntityId();
     const auto outputEntity = m_data->CreateDataEntityId();
-    const DataRevisionRef recipeRef{ recipeEntity, 1 };
+    const DataRevisionRef recipeRef{recipeEntity,1};
     const DataRevisionRef outputRef{ outputEntity, 1 };
     auto prepared = m_data->SetPreparedDataView(outputRef, std::move(candidate.preparedView));
     if (!prepared) {
@@ -757,13 +758,20 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         expected.isTargetChecked=true;expected.expectedTarget=binding.target;
         transaction.expectations.push_back(std::move(expected));
     }
+    std::vector<DataInputRef> recipeInputs{{"source-data",recipe->GetDefinition().source}};
+    std::vector<DataRevisionRef> masks;
+    for(const auto& node:recipe->GetDefinition().nodes)if(node.kind==RoiNodeKind::Primitive&&node.primitive.mask)
+        masks.push_back(*node.primitive.mask);
+    std::sort(masks.begin(),masks.end());masks.erase(std::unique(masks.begin(),masks.end()),masks.end());
+    for(const auto& mask:masks)recipeInputs.push_back({"mask-"+std::to_string(recipeInputs.size()-1),mask});
+    if(candidate.inputRoi) recipeInputs.push_back({"copy-source",*candidate.inputRoi});
     transaction.outputs = {
         DataRevisionDraft{
             recipeEntity, 0, DataTypes::roiGeometry,
-            { DataInputRef{ "source-data", source.data->self } },
+            std::move(recipeInputs),
             std::move(recipe),
             DataProvenance{
-                std::string(kFeatureId), "capture-recipe", "1", "{}" } },
+                std::string(kFeatureId), "capture-recipe", "2", "{}" } },
         DataRevisionDraft{
             outputEntity, 0, outputType,
             { DataInputRef{ "source-data", source.data->self },
@@ -779,6 +787,7 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
         resultBinding.target,
         outputRef });
 
+    if (candidate.inputRoi) transaction.outputs.back().inputs.push_back({"crop-roi",*candidate.inputRoi});
     for (auto& outputDraft:transaction.outputs) outputDraft.lifetimeScope=m_buildRecord->scopeId;
     transaction.outputs.back().preparedResources.push_back(prepared->resourceUse);
     auto records=m_bridge->GetHistory(0,1).results;
@@ -1156,7 +1165,7 @@ bool CropHostFeature::Impl::Document::SendReadyCompletes()
 
 bool CropHostFeature::Impl::Document::BuildCropResult(
     const CropHostTarget& target,
-    CropBuildCallback onComplete,CropNodeId nodeId,CropBuildOptions options,std::shared_ptr<CompleteItem> completeItem)
+    CropBuildCallback onComplete,CropNodeId nodeId,CropBuildOptions options,std::shared_ptr<CompleteItem> completeItem,std::optional<DataRevisionRef> inputRoi)
 {
     if (!onComplete
         || !m_bridge
@@ -1168,8 +1177,9 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     }
     const auto history=m_bridge->GetHistory(0,1);
     if(!nodeId)nodeId=history.appliedHead;
-    if (!history.documentId || nodeId==history.rootNodeId || !m_bridge->GetNode(nodeId)) return false;
-    CropResultRecord building;building.options=options;
+    if (!history.documentId || (!inputRoi && nodeId==history.rootNodeId)
+        || (inputRoi && nodeId!=history.rootNodeId) || !m_bridge->GetNode(nodeId)) return false;
+    CropResultRecord building;building.options=options;building.inputRoi=inputRoi;
     building.resultId=CropHistory::CreateNodeId();building.nodeId=nodeId;
     building.scopeId=m_data->CreateDataEntityId();building.sourceRevision=history.sourceRevision;
     building.publicationGeneration=building.resultId;
@@ -1178,6 +1188,13 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     auto source = std::optional<CropInputSnapshot>{m_bridge->GetSource()};
     if (!source->binding || !source->data || source->binding->name!=target.inputBinding) {
         return false;
+    }
+    RoiReadSnapshot roi;
+    if (inputRoi) {
+        const auto result=m_data->GetRoi(m_data->GetDataGraph(),*inputRoi,source->data->self);
+        if (result.error!=RoiError::None || !result.roi) return false;
+        roi=result.roi;
+        if (source->mesh && roi->GetClipPlanes().error!=RoiError::None) return false;
     }
     DataBinding resultBinding;
     resultBinding.name = std::string(cropResultBinding);
@@ -1208,6 +1225,7 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     m_operation.stateRevision = 1;
     m_operation.status = FeatureRunStatus::Preparing;
     m_operation.inputs = { { source->image ? "source-volume" : "source-mesh", source->data->self } };
+    if (roi) m_operation.inputs.push_back({"crop-roi",roi->GetRevision()});
     m_isBuildPending = true;
     m_buildRecord=building;
     auto onResult =
@@ -1235,7 +1253,7 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
                 SetBuildFailed(state,item,std::move(result));
             }
         };
-    const bool isAccepted = m_bridge->BuildCropResult(building.nodeId,options,item->request?item->request->requestId:0,std::move(onResult));
+    const bool isAccepted = m_bridge->BuildCropResult(building.nodeId,options,item->request?item->request->requestId:0,std::move(onResult),std::move(roi));
     if (isAccepted) {
         m_bridge->SetResults(std::move(buildingRecords));
         m_dataState.documentStatus=CropDocumentStatus::Building;
@@ -1252,6 +1270,33 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
     return isAccepted;
 }
 
+bool CropHostFeature::Impl::Document::SaveRoi(const CropHostRequest& request,CropBuildCallback onComplete)
+{
+    if (!onComplete || !m_bridge || !m_data || m_isBuildPending || m_pendingDocumentRequest) return false;
+    const auto source=m_bridge->GetSource();
+    const auto operations=m_bridge->GetCropOperations();
+    if (!source.data || !source.binding || !operations || source.binding->name!=request.target->inputBinding) return false;
+    const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),request.target->inputBinding);
+    if(!binding || binding->target!=source.data->self)return false;
+    const auto payload=CropRouter::CreateRecipePayload(*operations,source.data->self);
+    if (!payload) return false;
+    RoiRequest write; write.definition=payload->GetDefinition(); write.metadata=*request.roiMetadata;
+    write.expectedCatalogRevision=request.expectedCatalogRevision;write.expectedSourceBinding=binding;
+    RoiResult saved;
+    { const PublishGuard guard(m_isPublishing); saved=m_data->SetRoi(write); }
+    CropBuildResult result; const auto history=m_bridge->GetCropHistory();
+    result.documentId=history.documentId; result.nodeId=history.appliedHead;
+    result.isSucceeded=saved.error==RoiError::None;
+    result.failureReason=result.isSucceeded ? CropFailure::None
+        : saved.error==RoiError::RevisionConflict ? CropFailure::VersionMismatch:CropFailure::BadInput;
+    result.sourceRevision=source.data->self; result.nodeCount=operations->size(); result.commitId=saved.commitId;
+    if (saved.roi) result.recipeRevision=saved.roi->revision;
+    result.message=std::move(saved.message);
+    // 公共 ROI 独立保存，发布门结束后再通知调用方。
+    try { onComplete(std::move(result)); } catch (...) {}
+    return true;
+}
+
 bool CropHostFeature::Impl::Document::SendRequest(
     CropHostRequest request,
     CropBuildCallback onComplete)
@@ -1260,7 +1305,7 @@ bool CropHostFeature::Impl::Document::SendRequest(
         || !m_isAttached
         || m_isPublishing || m_pendingDocumentRequest
         || m_dataState.documentStatus==CropDocumentStatus::Closing || m_dataState.documentStatus==CropDocumentStatus::Closed
-        || ((request.action == CropHostAction::BuildResult)
+        || ((request.action == CropHostAction::BuildResult || request.action == CropHostAction::SaveRoi)
             != static_cast<bool>(onComplete))) {
         return false;
     }
@@ -1271,8 +1316,11 @@ bool CropHostFeature::Impl::Document::SendRequest(
         || request.action == CropHostAction::Cylinder
         || request.action == CropHostAction::Sphere
         || request.action == CropHostAction::Mode
-        || request.action == CropHostAction::BuildResult;
-    if (needsTarget != request.target.has_value()
+        || request.action == CropHostAction::BuildResult || request.action == CropHostAction::SaveRoi;
+    if ((request.action==CropHostAction::SaveRoi)!=request.roiMetadata.has_value()
+        || (request.action!=CropHostAction::SaveRoi && request.expectedCatalogRevision!=0)
+        || (request.inputRoi && request.action!=CropHostAction::BuildResult)
+        || needsTarget != request.target.has_value()
         || (request.action == CropHostAction::Mode) != request.removalMode.has_value()
         || (request.action == CropHostAction::SetPolyData) != static_cast<bool>(request.polyData)) {
         return false;
@@ -1315,7 +1363,10 @@ bool CropHostFeature::Impl::Document::SendRequest(
     case CropHostAction::Next:
         return m_bridge->GetCropBound() && m_bridge->NextCrop();
     case CropHostAction::BuildResult:
-        return BuildCropResult(*request.target, std::move(onComplete));
+        return BuildCropResult(*request.target, std::move(onComplete),
+            request.inputRoi ? m_bridge->GetHistory(0,1).rootNodeId:0,{},nullptr,request.inputRoi);
+    case CropHostAction::SaveRoi:
+        return SaveRoi(request,std::move(onComplete));
     case CropHostAction::SetPolyData:
         return SetPolyData(std::move(request.polyData));
     case CropHostAction::ClearPolyData:
@@ -1442,6 +1493,8 @@ bool CropHostFeature::Impl::Document::StartSourcePreview(bool isDocument,bool is
         m_sourceTransition.reset();
         return false;
     }
+    // 缓存命中的候选没有 worker 完成事件，仍须在下一次 owner 更新推进提交。
+    (void)m_host->SendWorkAvailable();
     return true;
 }
 
@@ -1900,7 +1953,8 @@ CropBuildAdmission CropHostFeature::Impl::Document::SendRequest(CropBuildRequest
     if(m_dataState.documentStatus!=CropDocumentStatus::Ready)return reject(CropFailure::ResultReleasing);
     const auto node=m_bridge->GetNode(request.nodeId);
     if(!node)return reject(CropFailure::NodeNotFound);
-    if(!node->operation)return reject(CropFailure::NoCropOperations);
+    if(!node->operation && !request.inputRoi)return reject(CropFailure::NoCropOperations);
+    if(request.inputRoi && (!GetDataRevisionRefValid(*request.inputRoi) || node->operation))return reject(CropFailure::InvalidRequest);
     if(!request.options.availableRamBytes||!std::isfinite(request.options.meshTolerance)||request.options.meshTolerance<=0
         ||!request.options.maxCells||!request.options.maxDepth||request.options.maxDepth>128)return reject(CropFailure::BadInput);
     const auto source=m_bridge->GetSource();if(!source.binding)return reject(CropFailure::SourceMismatch);
@@ -1910,7 +1964,7 @@ CropBuildAdmission CropHostFeature::Impl::Document::SendRequest(CropBuildRequest
     m_buildCommands.emplace(request.requestId,item);
     CropHostTarget target;target.inputBinding=source.binding->name;
     if(!onComplete)onComplete=[](CropBuildResult){};
-    if(!BuildCropResult(target,std::move(onComplete),request.nodeId,request.options,item)) {
+    if(!BuildCropResult(target,std::move(onComplete),request.nodeId,request.options,item,request.inputRoi)) {
         const auto reason=item->result?item->result->failureReason:CropFailure::PreviewNotReady;
         return reject(reason);
     }
@@ -2295,6 +2349,7 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     } viewReservation{next.get(),next->m_activeTarget,next->m_activeViewIds};
     if(!next->m_bridge->StartView(view))return reject(CropFailure::PreviewNotReady);
     DataSnapshot restoreOutput;std::shared_ptr<const DataResourceLease> restoreReader;
+    std::shared_ptr<const RoiGeometryPayload> restoreRecipe;
     CropResultRecord archivedResult;CropBuildParams restoreParams;
     if(restoring&&request.restoreResult&&request.archive->result) {
         archivedResult=*request.archive->result;
@@ -2316,10 +2371,12 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
             };
             if(output&&roi&&output->lifetimeScope==archivedResult.scopeId&&recipe->lifetimeScope==archivedResult.scopeId
                 &&hasInput(output,"source-data",history.sourceRevision)&&hasInput(output,"crop-recipe",recipe->self)
-                &&hasInput(recipe,"source-data",history.sourceRevision)&&CropRouter::GetRecipeSame(*roi,operations)) {
+                &&hasInput(recipe,"source-data",history.sourceRevision)
+                && (archivedResult.inputRoi ? hasInput(recipe,"copy-source",*archivedResult.inputRoi)
+                    : CropRouter::GetRecipeSame(*roi,operations))) {
                 const auto access=output->lifetime.lock();restoreReader=access?access->StartResourceUse(output->self,"crop-archive-restore"):nullptr;
                 if(restoreReader) {
-                    restoreOutput=std::move(output);restoreParams.documentId=history.documentId;restoreParams.nodeId=mapped->nodeId;
+                    restoreRecipe=roi;restoreOutput=std::move(output);restoreParams.documentId=history.documentId;restoreParams.nodeId=mapped->nodeId;
                     restoreParams.requestId=request.requestId;restoreParams.sourceRevision=history.sourceRevision;
                     restoreParams.operations=std::move(operations);restoreParams.nodeCount=restoreParams.operations.size();restoreParams.availableRamBytes=request.availableRamBytes;
                     restoreParams.meshTolerance=archivedResult.options.meshTolerance;restoreParams.maxCells=archivedResult.options.maxCells;restoreParams.maxDepth=archivedResult.options.maxDepth;
@@ -2382,7 +2439,7 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
             next->m_operation.inputs={{"source-data",history.sourceRevision}};
             open->restore=std::make_unique<DocumentOpen::RestoreWork>();open->restore->cancelled=std::make_shared<std::atomic<bool>>(false);
             const auto cancelled=open->restore->cancelled;
-            auto task=CropRouter{}.BuildRestoreTask(source,std::move(restoreParams),std::move(restoreOutput),std::move(restoreReader),archivedResult,
+            auto task=CropRouter{}.BuildRestoreTask(source,std::move(restoreParams),std::move(restoreOutput),std::move(restoreReader),archivedResult,std::move(restoreRecipe),
                 [cancelled]{return cancelled->load(std::memory_order_acquire);});
             open->restore->result=task.get_future();
             const std::weak_ptr<FeatureHostControl> host=m_context.host;

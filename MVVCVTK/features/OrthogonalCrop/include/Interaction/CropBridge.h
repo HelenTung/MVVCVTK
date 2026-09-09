@@ -100,6 +100,7 @@ public:
     // binding 生命周期独立于 widget 编辑态；Exit 后仍可导航 committed history。
     bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
+    std::optional<std::vector<CropOpItem>> GetCropOperations() const;
 
     bool RefreshWidgetTransform();
     bool GetShaderTickNeeded() const;
@@ -109,7 +110,7 @@ public:
         CropInputSnapshot rootInput,
         CropCandidateCallback onComplete);
     bool BuildCropResult(CropNodeId nodeId,CropCandidateCallback onComplete);
-    bool BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete);
+    bool BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete,RoiReadSnapshot roi={});
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();

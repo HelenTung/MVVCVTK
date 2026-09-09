@@ -25,6 +25,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <set>
 #include <utility>
 
 bool VtkRenderInputView::GetValid() const noexcept {
@@ -440,6 +441,9 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
         }
 
         std::vector<double> vertices;
+        if (points->GetNumberOfPoints() < 0
+            || static_cast<std::uint64_t>(points->GetNumberOfPoints())
+                > std::numeric_limits<std::size_t>::max() / 3U) return {};
         vertices.resize(static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
         for (vtkIdType index = 0; index < points->GetNumberOfPoints(); ++index) {
             points->GetPoint(index, vertices.data() + static_cast<std::size_t>(index) * 3);
@@ -676,9 +680,16 @@ VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
         data->payload.get());
     if (!payload || !payload->GetValid()) return {};
 
+    const auto& vertices = payload->GetVertices();
+    if (vertices.size() / 3U > static_cast<std::size_t>(
+            std::numeric_limits<vtkIdType>::max())) return {};
+    for (const auto& attribute : payload->GetPointAttributes()) {
+        if (attribute.componentCount > static_cast<std::size_t>(
+                std::numeric_limits<int>::max())) return {};
+    }
+    // 公共测量网格为 double；默认 vtkPoints(float) 会在大原点处吞掉薄壁。
     auto points = vtkSmartPointer<vtkPoints>::New();
     points->SetDataTypeToDouble();
-    const auto& vertices = payload->GetVertices();
     points->SetNumberOfPoints(static_cast<vtkIdType>(vertices.size() / 3));
     for (std::size_t index = 0; index < vertices.size() / 3; ++index) {
         points->SetPoint(

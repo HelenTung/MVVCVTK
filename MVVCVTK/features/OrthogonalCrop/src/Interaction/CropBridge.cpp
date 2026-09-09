@@ -138,6 +138,7 @@ public:
         vtkRenderWindowInteractor* nextInteractor = nullptr;
         bool isTargetRebind = false;
         vtkRenderer* nextRenderer = nullptr;
+        std::vector<bool> renderRequested;
     };
 
     struct BuildTask final {
@@ -240,17 +241,20 @@ public:
     bool GetCropActive() const;
     bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
+    std::optional<std::vector<CropOpItem>> GetCropOperations() const;
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
     bool BuildCropResult(
         CropNodeId nodeId,
-        CropCandidateCallback onComplete,CropBuildOptions options={},CropRequestId requestId=0);
+        CropCandidateCallback onComplete,CropBuildOptions options={},CropRequestId requestId=0,RoiReadSnapshot roi={});
     bool GetBuildTickNeeded() const;
     FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();
     bool GetLeaseReady() const;
 
 private:
+    bool StartBuildTask(std::packaged_task<CropMaterializationCandidate()> task,
+        CropBuildParams params, std::shared_ptr<std::atomic<bool>> isCancelled, CropCandidateCallback onComplete);
     bool StartViewInput(
         const CropViewRequest& request,
         std::optional<CropInputSnapshot> input);
@@ -1094,13 +1098,17 @@ bool CropBridge::Impl::SendShaderCommit()
         return SendNextOp();
     }
     bool ready=true;
-    for(const auto& target:pending.targets) {
+    pending.renderRequested.resize(pending.targets.size(),false);
+    for(std::size_t index=0;index<pending.targets.size();++index) {
+        const auto& target=pending.targets[index];
         const auto stamp=target.service->GetRenderInputStamp();
         if(!stamp || *stamp!=pending.payload.sourceStamp) {FailPending(CropFailure::SourceMismatch);return false;}
         const auto state=target.effect->GetState();
         if(state.status==RenderEffectStatus::Failed) {FailPending(GetPreviewFailure(state.failureReason));return false;}
         if(state.stagedRevision!=pending.payload.revision || state.status!=RenderEffectStatus::Ready) {
-            ready=false;(void)target.service->SetRenderNeeded();
+            ready=false;
+            // 每个修订、每个目标只请求一次；隐藏视图保留 pending，等待真实绘制。
+            if(!pending.renderRequested[index])pending.renderRequested[index]=target.service->SetRenderNeeded();
         }
     }
     if(!ready)return false;
@@ -1294,7 +1302,7 @@ CropMaterializationCandidate CropBridge::Impl::BuildResultFailure(
 
 bool CropBridge::Impl::BuildCropResult(
     CropNodeId nodeId,
-    CropCandidateCallback onComplete,CropBuildOptions options,CropRequestId requestId)
+    CropCandidateCallback onComplete,CropBuildOptions options,CropRequestId requestId,RoiReadSnapshot roi)
 {
     if (!onComplete) {
         return false;
@@ -1309,6 +1317,13 @@ bool CropBridge::Impl::BuildCropResult(
     params.operations=m_tree.GetPath(nodeId);params.nodeCount=params.operations.size();
     if(m_buildTask||m_hasDrag) {onComplete(BuildResultFailure(params,CropFailure::Busy,"A crop result build is already running."));return false;}
     if(!m_tree.GetNode(nodeId)) {onComplete(BuildResultFailure(params,CropFailure::NodeNotFound,"The requested crop node does not exist."));return false;}
+    if (roi) {
+        if (nodeId!=m_tree.GetRootId() || m_pendingShader) return false;
+        params.operations.clear(); params.nodeCount=0;
+        auto cancelled=std::make_shared<std::atomic<bool>>(false);
+        auto task=m_buildRouter.BuildRoiTask(input,params,std::move(roi),[cancelled]{return cancelled->load(std::memory_order_acquire);});
+        return task && StartBuildTask(std::move(*task),std::move(params),std::move(cancelled),std::move(onComplete));
+    }
     if(nodeId==m_tree.GetRootId()) {onComplete(BuildResultFailure(params,CropFailure::NoCropOperations,"Root has no crop operations."));return false;}
     if(!CropAlgorithm::GetInputValid(input)||params.operations.empty()) {
         onComplete(BuildResultFailure(params,CropFailure::BadInput,"The frozen crop source is invalid."));return false;
@@ -1346,15 +1361,21 @@ bool CropBridge::Impl::BuildCropResult(
         return false;
     }
 
+    return StartBuildTask(std::move(*task),std::move(params),std::move(isCancelled),std::move(onComplete));
+}
+
+bool CropBridge::Impl::StartBuildTask(std::packaged_task<CropMaterializationCandidate()> task,
+    CropBuildParams params, std::shared_ptr<std::atomic<bool>> isCancelled, CropCandidateCallback onComplete)
+{
     BuildTask active;
     active.isCancelled = std::move(isCancelled);
-    active.result = task->get_future().share();
+    active.result = task.get_future().share();
     active.callback = std::move(onComplete);
     active.params = std::move(params);
     active.phase = std::make_shared<std::atomic<std::uint64_t>>(1);
     try {
         active.worker = std::thread(
-            [task = std::move(*task), phase = active.phase, onWork = onWorkAvailable]() mutable {
+            [task = std::move(task), phase = active.phase, onWork = onWorkAvailable]() mutable {
                 phase->store(2, std::memory_order_release);
                 task();
                 phase->store(3, std::memory_order_release);
@@ -1769,8 +1790,8 @@ void CropBridge::SetWorkAvailable(std::function<void()> onWorkAvailable)
     m_impl->onWorkAvailable = std::move(onWorkAvailable);
 }
 
-bool CropBridge::BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete)
-{ return m_impl&&m_impl->GetLeaseReady()&&m_impl->BuildCropResult(nodeId,std::move(onComplete),options,requestId); }
+bool CropBridge::BuildCropResult(CropNodeId nodeId,CropBuildOptions options,CropRequestId requestId,CropCandidateCallback onComplete,RoiReadSnapshot roi)
+{ return m_impl&&m_impl->GetLeaseReady()&&m_impl->BuildCropResult(nodeId,std::move(onComplete),options,requestId,std::move(roi)); }
 
 void CropBridge::ForgetOutcome(CropRequestId id) { if(m_impl&&m_impl->GetOwnerReady())m_impl->ForgetOutcome(id); }
 
@@ -1792,4 +1813,12 @@ bool CropBridge::RefreshWidgetTransform(){return m_impl&&m_impl->RefreshWidgetTr
 
 CropPreviewPrecision CropBridge::GetPreviewPrecision(const FeatureViewService* service,const std::vector<CropVectorDouble3Array>& points) const {
     return m_impl->GetOwnerReady()?m_impl->GetPreviewPrecision(service,points):CropPreviewPrecision{};
+}
+
+std::optional<std::vector<CropOpItem>> CropBridge::Impl::GetCropOperations() const {
+    if (!GetLeaseReady() || m_buildTask || m_pendingShader || m_hasDrag) return {};
+    return m_tree.GetPath(m_tree.GetAppliedHead());
+}
+std::optional<std::vector<CropOpItem>> CropBridge::GetCropOperations() const {
+    return m_impl ? m_impl->GetCropOperations():std::nullopt;
 }

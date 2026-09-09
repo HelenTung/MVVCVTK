@@ -1,3 +1,4 @@
+// 测试用途：验证视图状态、直方图、重采样、显示质量、GPU 准入和渲染契约。
 #include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
@@ -2072,6 +2073,25 @@ int GetRenderContractFailCount()
                 == VTK_FLAT,
         "Iso polydata input exposes the base RGB and Flat interpolation") ? 0 : 1;
 
+    RenderParams transparentIso;
+    transparentIso.material.opacity = 0.0;
+    const bool isZeroOpacityHidden = polyStrategy.SetVisualState(
+        transparentIso, UpdateFlags::Material)
+        && polyActor && !polyActor->GetVisibility();
+    transparentIso.material.opacity = -1.0;
+    const bool isInvalidOpacityUnchanged = !polyStrategy.SetVisualState(
+        transparentIso, UpdateFlags::Material)
+        && polyActor && !polyActor->GetVisibility()
+        && polyActor->GetProperty()->GetOpacity() == 0.0;
+    transparentIso.material.opacity = 0.4;
+    const bool isOpacityRestored = polyStrategy.SetVisualState(
+        transparentIso, UpdateFlags::Material)
+        && polyActor && polyActor->GetVisibility()
+        && polyActor->GetProperty()->GetOpacity() == 0.4;
+    failureCount += GetCaseResult(
+        isZeroOpacityHidden && isInvalidOpacityUnchanged && isOpacityRestored,
+        "Zero-opacity iso geometry leaves depth peeling and reappears when restored") ? 0 : 1;
+
     RenderParams params;
     params.volumeQuality = VolumeQuality::High;
     params.gradientOpacity = {
@@ -3302,7 +3322,8 @@ int GetViewFailCount()
         && std::abs(linkedState->spacing[2] - 1.0) < 1e-12
         && linkedState->cursorWorld
             == std::array<double, 3>{ 1.0, 2.0, 3.0 }
-        && linkedState->visibilityMask == VisFlags::Crosshair
+        // 统一物理比例尺在各 View 默认启用；设置另一 View 不改变此默认位。
+        && linkedState->visibilityMask == (VisFlags::Crosshair | VisFlags::Ruler)
         && !linkedState->isAxesVisible;
     failureCount += GetCaseResult(
         isStateReadBack,

@@ -1,6 +1,7 @@
 include_guard(GLOBAL)
 
 option(MVVCVTK_BUILD_TESTING "Build MVVCVTK tests" ON)
+option(MVVCVTK_BUILD_QT_MANUAL "Build the interactive Qt feature manual test application" OFF)
 option(
     MVVCVTK_BUILD_QT_TESTING
     "Build repository-only Qt integration tests"
@@ -8,6 +9,8 @@ option(
 )
 option(MVVCVTK_BUILD_ORTHOGONAL_CROP "Build OrthogonalCrop feature" ON)
 option(MVVCVTK_BUILD_GAP_ANALYSIS "Build GapAnalysis feature" ON)
+option(MVVCVTK_BUILD_WALL_THICKNESS "Build repository-only WallThickness feature" OFF)
+option(MVVCVTK_BUILD_ROI_EDITING "Build repository-only RoiEditing feature" OFF)
 option(MVVCVTK_BUILD_MODEL_ROTATION "Build repository-only ModelRotation feature" OFF)
 option(
     MVVCVTK_BUILD_PART_SEGMENTATION
@@ -19,7 +22,6 @@ option(
     "Build repository-only SurfaceDetermination feature"
     OFF
 )
-option(MVVCVTK_BUILD_STANDALONE "Build the full standalone example" ON)
 option(MVVCVTK_BUILD_METROLOGY_ALIGNMENT "Build repository-only MetrologyAlignment feature" OFF)
 option(MVVCVTK_BUILD_ARTIFACT_REDUCTION "Build repository-only ArtifactReduction feature" OFF)
 option(MVVCVTK_ENABLE_AVX2 "Enable AVX2 for Release builds" ON)

@@ -1,3 +1,4 @@
+// 测试用途：验证视图和体数据导出流程、失败处理及中文路径。
 #include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 

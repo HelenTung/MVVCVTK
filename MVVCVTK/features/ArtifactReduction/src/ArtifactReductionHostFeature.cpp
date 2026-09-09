@@ -1,4 +1,5 @@
 #include "Host/ArtifactReductionHostFeature.h"
+#include "../../common/FeatureResultScopes.h"
 #include "ArtifactReductionAlgorithm.h"
 
 #include <chrono>
@@ -49,19 +50,31 @@ public:
         input.image = source ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload) : nullptr;
         if (!input.image) return ArtifactError::InvalidData;
         inputs.push_back({ "source-volume", request.source });
-        const auto mask = [&](const char* role, const std::optional<DataRevisionRef>& ref,
-            std::shared_ptr<const BinaryMask3DPayload>& target) {
+        const auto region = [&](const char* role, const std::optional<DataRevisionRef>& ref,
+            RoiReadSnapshot& target) {
             if (!ref) return true;
-            if (!GetDataRevisionRefValid(*ref)) return false;
-            const auto snapshot = m_data->GetData(graph, *ref);
-            target = snapshot ? std::dynamic_pointer_cast<const BinaryMask3DPayload>(snapshot->payload) : nullptr;
-            if (!target) return false;
-            inputs.push_back({ role, *ref });
+            const auto resolved=m_data->GetRoi(graph,*ref,request.source);
+            if (resolved.error!=RoiError::None || !resolved.roi) return false;
+            target=resolved.roi;
+            inputs.push_back({role,*ref});
+            std::size_t index=0;
+            for (const auto& dependency:target->GetDependencies()) {
+                if (dependency==*ref || dependency==request.source) continue;
+                inputs.push_back({std::string(role)+".input-"+std::to_string(index++),dependency});
+                const auto data=m_data->GetData(graph,dependency);
+                if (!data) return false;
+                std::size_t bytes=0;
+                if (const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(data->payload.get())) bytes=mask->GetValues()->size();
+                if (const auto* labels=dynamic_cast<const LabelMap3DPayload*>(data->payload.get()))
+                    bytes=std::visit([](const auto& values){return values->size()*sizeof((*values)[0]);},labels->GetValues());
+                if (bytes>std::numeric_limits<std::size_t>::max()-input.roiBytes) return false;
+                input.roiBytes+=bytes;
+            }
             return true;
         };
-        if (!mask("processing-roi", request.processingMask, input.processing)
-            || !mask("protection-mask", request.protectionMask, input.protection)
-            || !mask("material-mask", request.materialMask, input.material)) return ArtifactError::InvalidData;
+        if (!region("processing-roi", request.processingRoi, input.processing)
+            || !region("protection-roi", request.protectionRoi, input.protection)
+            || !region("quality-roi", request.qualityRoi, input.material)) return ArtifactError::InvalidData;
         for (const auto& entry : inputs) {
             if (request.inputMode == ArtifactInputMode::CurrentPrimary && !GetHeadMatched(graph, entry.source))
                 return ArtifactError::SourceChanged;
@@ -89,7 +102,9 @@ public:
     ArtifactConfig m_config;
     std::thread::id m_owner;
     std::shared_ptr<TrustedDataPort> m_data;
-    std::weak_ptr<FeatureHostControl> m_host;
+    FeatureInternal::ResultScopes m_resultScopes;
+    // 挂载上下文是临时值；Feature 必须持有通知端口直到成功解绑。
+    std::shared_ptr<FeatureHostControl> m_host;
     ArtifactState m_state;
     ArtifactInputMode m_inputMode = ArtifactInputMode::CurrentPrimary;
     std::shared_ptr<ArtifactReduction::TaskControl> m_control;
@@ -115,9 +130,9 @@ FeatureDataContract ArtifactReductionHostFeature::GetDataContract() const
 {
     return {
         { { "source-volume", DataFacets::scalarGrid3D, true },
-          { "processing-roi", DataFacets::binaryMask3D, false },
-          { "protection-mask", DataFacets::binaryMask3D, false },
-          { "material-mask", DataFacets::binaryMask3D, false } },
+          { "processing-roi", DataFacets::roiGeometry, false },
+          { "protection-roi", DataFacets::roiGeometry, false },
+          { "quality-roi", DataFacets::roiGeometry, false } },
         { { "corrected-volume", DataTypes::imageGrid3D, { DataFacets::scalarGrid3D } },
           { "quality-report", DataTypes::recordTable, { DataFacets::tabularRecords } } }
     };
@@ -154,6 +169,7 @@ bool ArtifactReductionHostFeature::DetachHost()
     state.m_control.reset();
     state.m_inputs.clear();
     state.m_expectations.clear();
+    if (!state.m_resultScopes.Clear(*state.m_data)) return false;
     state.m_data.reset();
     state.m_host.reset();
     state.m_owner = {};
@@ -205,7 +221,7 @@ ArtifactAdmission ArtifactReductionHostFeature::StartCandidate(ArtifactRequest r
                 return ArtifactReduction::BuildArtifactCandidate(input, request, config, *control);
             });
         auto future = task.get_future();
-        std::thread worker([task = std::move(task), host = state.m_host]() mutable {
+        std::thread worker([task = std::move(task), host = std::weak_ptr<FeatureHostControl>(state.m_host)]() mutable {
             task();
             try { if (const auto controlPort = host.lock()) (void)controlPort->SendWorkAvailable(); }
             catch (...) {}
@@ -319,7 +335,7 @@ ArtifactCommitResult ArtifactReductionHostFeature::SetCandidate(std::uint64_t re
             { volumeId, 0, DataTypes::imageGrid3D, state.m_inputs, state.m_candidate.image, provenance },
             { reportId, 0, DataTypes::recordTable, state.m_inputs, state.m_candidate.report, provenance }
         };
-        const auto commit = state.m_data->SetDataCommit(std::move(transaction));
+        const auto commit = state.m_resultScopes.Commit(*state.m_data,std::move(transaction));
         result.status = commit.status;
         state.m_state.commitStatus = commit.status;
         if (commit.status == DataCommitStatus::Rejected) {

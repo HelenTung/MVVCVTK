@@ -1,3 +1,4 @@
+// 测试用途：验证宿主帧请求、更新提交、完成通知以及异常和停止协调。
 #include "Host/HostFrameCoordinator.h"
 #include "Host/HostWorkSignal.h"
 

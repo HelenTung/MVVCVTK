@@ -27,7 +27,8 @@ enum class CropHostAction {
     ClearPolyData,
     Exit = 13,
     Cylinder = 14,
-    Sphere = 15
+    Sphere = 15,
+    SaveRoi = 16
 };
 
 struct CropHostTarget {
@@ -44,6 +45,11 @@ struct CropHostRequest {
     std::optional<CropHostTarget> target;
     std::optional<CropRemovalMode> removalMode;
     vtkSmartPointer<vtkPolyData> polyData;
+    // BuildResult 可显式采用公共 ROI；此时不消费裁切历史。
+    std::optional<DataRevisionRef> inputRoi;
+    // SaveRoi 独占字段；只保存当前历史，不生成派生图像/网格。
+    std::optional<RoiMetadata> roiMetadata;
+    DataBindingRevision expectedCatalogRevision = 0;
 };
 
 using CropBuildCallback =
@@ -55,9 +61,11 @@ struct CropBuildRequest final {
     CropRequestId requestId = 0;
     std::uint64_t expectedRevision = 0;
     CropBuildOptions options;
+    // 显式 ROI 从文档 Root 构建，不消费交互历史；结果仍归该文档的独立 scope 所有。
+    std::optional<DataRevisionRef> inputRoi;
     bool operator==(const CropBuildRequest& other) const noexcept {
         return documentId==other.documentId && nodeId==other.nodeId && requestId==other.requestId
-            && expectedRevision==other.expectedRevision && options==other.options;
+            && expectedRevision==other.expectedRevision && options==other.options && inputRoi==other.inputRoi;
     }
 };
 struct CropBuildAdmission final {
@@ -147,6 +155,7 @@ public:
     bool DetachHost() override;
     bool OnHostTick() override;
 
+    // SaveRoi 的已接纳请求同步完成 callback；BuildResult 沿用 owner tick 完成。
     bool SendRequest(
         CropHostRequest request,
         CropBuildCallback onComplete = nullptr);

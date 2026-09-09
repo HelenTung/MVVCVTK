@@ -19,7 +19,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME PlanarCropTests
         PROJECT_LABEL OrthogonalCropTests
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/test/Automation"
 )
 
 target_include_directories(

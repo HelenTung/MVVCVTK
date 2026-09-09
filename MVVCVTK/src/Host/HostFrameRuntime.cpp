@@ -1,5 +1,6 @@
 #include "App/Services/FeatureViewService.h"
 #include "Host/Internal/HostFrameRuntime.h"
+#include "Host/Internal/HostRulerCodec.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Data/DataPayloads.h"
 #include <vtkMatrix3x3.h>
@@ -50,11 +51,12 @@ void HostFrameRuntime::BuildSceneStates()
 }
 void HostFrameRuntime::Clear() noexcept
 {
+    for (auto& view : m_views) view.isFrameRenderNeeded = false;
     m_frameIntents.clear();
     m_frameStage.reset();
     m_sceneStates.clear();
     m_sceneGraph = {};
-    m_sceneBindings.clear();
+    m_sceneBindings.reset();
     m_dataRead.reset();
     m_renderOrder.clear();
     m_sessionGeneration = 0;
@@ -73,6 +75,7 @@ void HostFrameRuntime::SetViewUnavailable(const std::size_t index) noexcept
 {
     if (index >= m_views.size()) return;
     auto& view = m_views[index];
+    view.isFrameRenderNeeded = false;
     view.pendingRenderEpoch = 0;
     view.renderedEpoch = view.appliedEpoch;
     const auto setUnavailable = [&view](HostSceneViewState& state) {
@@ -299,6 +302,7 @@ bool HostFrameRuntime::SetFrameGeneration(
     m_sessionGeneration = sessionGeneration;
     m_committedEpoch = 0;
     for (auto& view : m_views) {
+        view.isFrameRenderNeeded = false;
         view.appliedEpoch = 0;
         view.renderedEpoch = 0;
         view.pendingRenderEpoch = 0;
@@ -471,16 +475,29 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
         // 后续 View 只在这份图中解析已采用的修订，不能逐 View 跟随最新图。
         stage.graph = m_dataRead ? m_dataRead->GetDataGraph()
             : DataGraphSnapshot{};
+        std::vector<std::vector<std::string>> activeFeatures(m_views.size());
+        for (std::size_t index = 0; index < m_views.size(); ++index) {
+            activeFeatures[index] = m_onFeatureIds(m_views[index]);
+        }
         stage.bindings = m_sceneBindings;
-        for (auto current = stage.bindings.begin(); current != stage.bindings.end();) {
-            const auto& intent = current->second;
-            const auto index = GetViewIndexById(current->first.first);
-            const auto activeFeatures = index && m_views[*index].isAvailable
-                ? m_onFeatureIds(m_views[*index]) : std::vector<std::string>{};
-            if ((intent.attachment && !intent.attachment->load())
-                || std::find(activeFeatures.begin(), activeFeatures.end(), intent.featureId)
-                    == activeFeatures.end()) current = stage.bindings.erase(current);
-            else ++current;
+        std::shared_ptr<SceneBindings> changedBindings;
+        const auto getWritableBindings = [&]() -> SceneBindings& {
+            if (!changedBindings) {
+                changedBindings = stage.bindings ? std::make_shared<SceneBindings>(*stage.bindings)
+                    : std::make_shared<SceneBindings>();
+                stage.bindings = changedBindings;
+            }
+            return *changedBindings;
+        };
+        if (m_sceneBindings) for (const auto& [key, binding] : *m_sceneBindings) {
+            const auto& intent = *binding;
+            const auto index = GetViewIndexById(key.first);
+            const bool isAttached = index && m_views[*index].isAvailable
+                && std::find(activeFeatures[*index].begin(), activeFeatures[*index].end(), intent.featureId)
+                    != activeFeatures[*index].end();
+            if ((intent.attachment && !intent.attachment->load()) || !isAttached) {
+                getWritableBindings().erase(key);
+            }
         }
         for (const auto& intent : m_frameIntents) {
             if ((intent.attachment && !intent.attachment->load())
@@ -499,6 +516,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
                 return HostFrameStageStatus::Failed;
             }
             if (!intent.delta.hasDisplayUpdate) continue;
+            std::shared_ptr<const HostFrameIntent> frozenBinding;
             for (const auto& viewId : intent.delta.viewIds) {
                 const auto index = GetViewIndexById(viewId);
                 if (!index || !m_views[*index].isAvailable
@@ -509,18 +527,37 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
                         return display.viewId == viewId;
                     });
                 if (hasDisplay) {
-                    stage.bindings[key] = intent;
-                    // expectation 只控制本次激活；已采用历史的依据是固定 ref，不能每帧重新激活。
-                    stage.bindings[key].delta.expectations.clear();
+                    if (!frozenBinding) {
+                        auto binding = std::make_shared<HostFrameIntent>(intent);
+                        // expectation 只控制本次激活；多个 View 共享同一个已经采用的不可变意图。
+                        binding->delta.expectations.clear();
+                        frozenBinding = std::move(binding);
+                    }
+                    getWritableBindings()[key] = frozenBinding;
                 }
-                else stage.bindings.erase(key);
+                else if (stage.bindings && stage.bindings->count(key)) getWritableBindings().erase(key);
             }
         }
 
         std::map<std::string, std::pair<DataRevisionRef, DataBindingRevision>> sceneInputs;
         std::map<std::string, DataRevisionRef> sceneSources;
+        // 缓存仅存活于本次 frozen graph 校验，不能跨 epoch 或以 data 裸指针复用。
+        std::vector<const HostFrameIntent*> validatedInputs, validatedDisplays;
+        const auto bindingCount = stage.bindings ? stage.bindings->size() : 0U;
+        validatedInputs.reserve(bindingCount);
+        validatedDisplays.reserve(bindingCount);
+        std::vector<std::pair<DataRevisionRef, std::optional<DataRevisionRef>>> sources;
+        const auto getSource = [&](const DataRevisionRef& data) {
+            const auto found = std::find_if(sources.begin(), sources.end(),
+                [&](const auto& source) { return source.first == data; });
+            if (found != sources.end()) return found->second;
+            auto source = GetDataSource(stage.graph, data);
+            sources.emplace_back(data, source);
+            return source;
+        };
         for (std::size_t index = 0; index < m_views.size(); ++index) {
-            auto state = m_views[index].BuildSceneViewState(m_onFeatureIds(m_views[index]));
+            const auto* previousState = index < m_sceneStates.size() ? &m_sceneStates[index] : nullptr;
+            auto state = m_views[index].BuildSceneViewState(std::move(activeFeatures[index]), previousState);
             if (m_views[index].isAvailable
                 && (!state.presentation || !state.camera)) {
                 restoreDirty();
@@ -550,7 +587,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
                     }
                     sceneInputs[group] = currentInput;
                     if (m_views[index].config.syncPolicy == HostViewSyncPolicy::ExplicitInputs) {
-                        const auto source = GetDataSource(stage.graph, currentRevision);
+                        const auto source = getSource(currentRevision);
                         const auto previous = sceneSources.find(group);
                         if (!source || (previous != sceneSources.end() && previous->second != *source)) {
                             restoreDirty();
@@ -574,20 +611,28 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
             }
             state.sceneEpoch = nextEpoch;
             state.graphCommitId = stage.graph.commitId;
-            for (const auto& [key, binding] : stage.bindings) {
-                if (key.first != state.id) continue;
-                if (!GetSceneInputsValid(stage.graph, binding.delta)) {
-                    restoreDirty();
-                    return HostFrameStageStatus::Failed;
-                }
-                if (m_views[index].config.syncPolicy == HostViewSyncPolicy::ExplicitInputs) {
-                    if (!GetDisplayInputsValid(stage.graph, binding.delta)) {
+            if (stage.bindings) for (auto current = stage.bindings->lower_bound({ state.id, {} });
+                current != stage.bindings->end() && current->first.first == state.id; ++current) {
+                const auto& key = current->first;
+                const auto& binding = *current->second;
+                if (std::find(validatedInputs.begin(), validatedInputs.end(), &binding) == validatedInputs.end()) {
+                    if (!GetSceneInputsValid(stage.graph, binding.delta)) {
                         restoreDirty();
                         return HostFrameStageStatus::Failed;
                     }
+                    validatedInputs.push_back(&binding);
+                }
+                if (m_views[index].config.syncPolicy == HostViewSyncPolicy::ExplicitInputs) {
+                    if (std::find(validatedDisplays.begin(), validatedDisplays.end(), &binding) == validatedDisplays.end()) {
+                        if (!GetDisplayInputsValid(stage.graph, binding.delta)) {
+                            restoreDirty();
+                            return HostFrameStageStatus::Failed;
+                        }
+                        validatedDisplays.push_back(&binding);
+                    }
                     for (const auto& display : binding.delta.displays) {
                         if (display.viewId != state.id) continue;
-                        const auto source = GetDataSource(stage.graph, display.data);
+                        const auto source = getSource(display.data);
                         const auto& group = m_views[index].config.synchronizationGroup;
                         const auto previous = sceneSources.find(group);
                         if (!source || (previous != sceneSources.end() && previous->second != *source)) {
@@ -653,6 +698,27 @@ void HostFrameRuntime::SetFrameCommit(
     m_frameStage.reset();
 }
 
+void HostFrameRuntime::SetRulerState(const std::size_t index) noexcept
+{
+    if (index >= m_sceneStates.size() || index >= m_views.size()
+        || !m_sceneStates[index].presentation || !m_views[index].app.view) return;
+    auto& presentation = *m_sceneStates[index].presentation;
+    // 场景值在提交时冻结，但标尺只有真正 draw 后才有尺度；这里只补齐该绘制结果，
+    // 不重新采集场景图、不改变 presentationRevision，也不让查询产生副作用。
+    try {
+        auto ruler = HostRulerCodec::GetState(m_views[index].app.view->GetRulerState());
+        if (ruler.dataRevision == presentation.dataRevision
+            && ruler.bindingRevision == presentation.bindingRevision) {
+            presentation.rulerState = std::move(ruler);
+            return;
+        }
+    } catch (...) {}
+    presentation.rulerState = {};
+    presentation.rulerState.status = HostRulerStatus::Pending;
+    presentation.rulerState.dataRevision = presentation.dataRevision;
+    presentation.rulerState.bindingRevision = presentation.bindingRevision;
+}
+
 bool HostFrameRuntime::SendFrameRender(
     const std::uint64_t epoch)
 {
@@ -671,6 +737,7 @@ bool HostFrameRuntime::SendFrameRender(
         if (!view.SendRender(epoch)) continue;
         if (index < m_sceneStates.size()) {
             m_sceneStates[index].renderedEpoch = epoch;
+            SetRulerState(index);
         }
     }
 
@@ -715,8 +782,7 @@ HostRenderResult HostFrameRuntime::SendFrameRender(
     // 任一 View 存在尚未提交的更改时，不绘制混合状态。
     const bool hasUncommitted = std::any_of(m_views.begin(), m_views.end(),
         [](const HostRenderViewRuntime& view) {
-            return view.isAvailable && view.interaction.update
-                && view.interaction.update->GetRenderNeeded();
+            return view.isAvailable && view.GetRenderNeeded();
         });
     for (const auto index : indices) {
         auto& view = m_views[index];
@@ -760,6 +826,7 @@ HostRenderResult HostFrameRuntime::SendFrameRender(
                 view.pendingRenderEpoch = 0;
                 view.renderedEpoch = epoch;
                 m_sceneStates[index].renderedEpoch = epoch;
+                SetRulerState(index);
                 if (view.interaction.update) view.interaction.update->SetRenderComplete(
                     std::max<std::uint64_t>(1, output.durationUs));
             }

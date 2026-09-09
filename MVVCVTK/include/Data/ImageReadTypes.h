@@ -74,7 +74,7 @@ enum class ImageTupleOrder {
     XFastestInterleaved
 };
 
-// 当前已发布图像的 metadata-only 值快照；几何已经位于内部规范 RAS 空间。
+// 当前已发布图像的 metadata-only 值快照；几何位于内部 RAS 空间，spacing/origin 单位 mm。
 struct ImageDescriptor final {
     ImageMetadata metadata;
     std::array<int, 6> extent = { 0, -1, 0, -1, 0, -1 };
@@ -137,7 +137,7 @@ struct ImageReadRequest final {
 using ImageReadBytes =
     std::shared_ptr<const std::vector<std::uint8_t>>;
 
-// 普通读取结果只含值和几何，不包含 VTK identity 或可写 scalar 指针。
+// 普通读取结果只含值和几何；spacing/origin 单位 mm，不包含 VTK identity 或可写 scalar 指针。
 struct ImageReadState final {
     std::array<int, 6> extent = { 0, -1, 0, -1, 0, -1 };
     std::array<int, 3> dims = { 0, 0, 0 };

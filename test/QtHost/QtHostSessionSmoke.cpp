@@ -1,3 +1,4 @@
+// 测试用途：验证完整 Qt 宿主会话的数据、交互、渲染和停止基础流程。
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostCommandRouter.h"

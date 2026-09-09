@@ -1911,7 +1911,7 @@ bool HostViewRuntimeRegistry::Impl::SetInitialVisibility() const
         AppVisibilityUpdate visibility;
         if (GetRoleIs3DView(view.config.role)) {
             visibility.isPlanes3DVisible = false;
-            visibility.isRulerVisible = false;
+            visibility.isRulerVisible = true;
         }
         if (GetRoleIsSliceView(view.config.role)) {
             visibility.isCrosshairVisible = true;

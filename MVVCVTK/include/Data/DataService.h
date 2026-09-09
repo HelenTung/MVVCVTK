@@ -25,6 +25,8 @@ class AbstractDataManager : public TrustedDataPort {
 public:
     ~AbstractDataManager() noexcept override = default;
 
+    virtual RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual std::optional<ImageDescriptor> GetImageDescriptor() const = 0;
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;

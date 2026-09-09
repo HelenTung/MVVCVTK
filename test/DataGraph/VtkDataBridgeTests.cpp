@@ -1,3 +1,4 @@
+// 测试用途：验证 VTK 对象与数据图之间的冻结快照、桥接和类型转换。
 #include "Data/DataGraphStore.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
@@ -7,6 +8,9 @@
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkUnsignedLongLongArray.h>
+#include <vtkPointData.h>
+#include <limits>
+#include <cmath>
 #include <vtkImageData.h>
 #include <vtkPointData.h>
 #include <vtkDataArray.h>
@@ -373,6 +377,46 @@ bool GetPreparedResultReleased()
         &&static_cast<unsigned char*>(root->image->GetScalarPointer())[1]==8,
         "Root scalar incorrectly retained the prepared result scope");
 }
+
+bool GetMeasurementRoundTripValid()
+{
+    VtkDataBridge bridge;
+    DataGraphStore store;
+    const auto payload = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{1e8, 0, 0, 1e8 + 0.001, 0, 0, 1e8, 0.002, 0},
+        std::vector<std::uint64_t>{0, 1, 2},
+        std::vector<MeshAttribute>{
+            {"measurement.valid", 1, {1, 0, 1}},
+            {"measurement.normal", 3, {0,0,1, 0,0,1, 0,0,1}},
+            {"measurement.fit-residual", 1, {0.01, 0, 0.02}}});
+    const auto data = SetPayload(store, payload);
+    const auto view = bridge.GetSurfaceMesh(data);
+    const auto roundTrip = view ? bridge.CreateMeshPayload(view->mesh) : nullptr;
+    bool valid = Check(view && view->mesh->GetPoints()->GetDataType() == VTK_DOUBLE
+        && roundTrip && roundTrip->GetVertices() == payload->GetVertices()
+        && roundTrip->GetPointAttributes().size() == 3,
+        "measurement coordinates and named arrays survive VTK round trip");
+    if (roundTrip) {
+        const auto& attributes = roundTrip->GetPointAttributes();
+        for (std::size_t i = 0; i < attributes.size(); ++i) {
+            valid = Check(attributes[i].name == payload->GetPointAttributes()[i].name
+                && attributes[i].componentCount == payload->GetPointAttributes()[i].componentCount
+                && attributes[i].values == payload->GetPointAttributes()[i].values,
+                "measurement values and component shape remain exact") && valid;
+        }
+    }
+    if (view) {
+        auto* array = view->mesh->GetPointData()->GetArray("measurement.fit-residual");
+        array->SetComponent(0, 0, std::numeric_limits<double>::quiet_NaN());
+        valid = Check(!bridge.CreateMeshPayload(view->mesh),
+            "nonfinite measurement attributes fail instead of being silently discarded") && valid;
+        array->SetNumberOfTuples(1);
+        valid = Check(!bridge.CreateMeshPayload(view->mesh),
+            "malformed point attributes fail") && valid;
+    }
+    return valid;
+}
+
 } // namespace
 
 int main()
@@ -383,5 +427,6 @@ int main()
         && GetMeshRoundTripValid()
         && GetCacheIdentityValid()
         && GetRecordTableValidationValid()
+        && GetMeasurementRoundTripValid()
         ? 0 : 1;
 }

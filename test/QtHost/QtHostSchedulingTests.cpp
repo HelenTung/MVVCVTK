@@ -1,3 +1,4 @@
+// 测试用途：验证宿主驱动的更新与渲染调度、隐藏视图恢复和延迟绘制。
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostFeature.h"
 #if defined(MVVCVTK_TEST_GAP)

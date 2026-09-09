@@ -1,3 +1,4 @@
+// 测试用途：验证渲染产品构建、缓存、策略切换、任务停止和资源核算。
 #include "../TestDataPort.h"
 #include "QtHostMethodCases.h"
 #include "RenderProductTestSupport.h"

@@ -1,6 +1,8 @@
 #include "DataManager.h"
 #include "Data/DataGraphStore.h"
 #include "Data/Internal/DataResourceUse.h"
+#include "Data/RoiService.h"
+#include "Geometry/RoiEvaluator.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
 #include "Platform/Path.h"
@@ -751,6 +753,23 @@ BaseDataManager::BaseDataManager()
 }
 
 BaseDataManager::~BaseDataManager() = default;
+
+RoiReadResult BaseDataManager::GetRoi(const DataGraphSnapshot& graph,
+    const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const
+{
+    return RoiEvaluator::GetRoi(graph, roiRef, sourceRef);
+}
+
+RoiResult BaseDataManager::SetRoi(const RoiRequest& request)
+{
+    return RoiService(*m_impl->m_graph).SetRoi(request);
+}
+
+RoiResult BaseDataManager::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
+    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision,std::size_t maxBytes)
+{
+    return RoiService(*m_impl->m_graph).LoadArchive(archive,sourceKey,sourceRef,expectedCatalogRevision,maxBytes);
+}
 
 DataGraphSnapshot BaseDataManager::GetDataGraph() const
 {

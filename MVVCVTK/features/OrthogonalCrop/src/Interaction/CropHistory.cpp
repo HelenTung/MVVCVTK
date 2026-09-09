@@ -281,7 +281,7 @@ bool CropHistory::GetResultsValid(const std::vector<CropResultRecord>& results) 
     std::size_t published=0, building=0;
     for (std::size_t index=0;index<results.size();++index) {
         const auto& result=results[index];
-        if (!result.resultId || result.nodeId==m_root || !m_nodes.count(result.nodeId)
+        if (!result.resultId || (result.inputRoi && !GetDataRevisionRefValid(*result.inputRoi)) || (result.nodeId==m_root && !result.inputRoi) || !m_nodes.count(result.nodeId)
             || result.sourceRevision!=m_source) return false;
         for (std::size_t previous=0;previous<index;++previous) if (results[previous].resultId==result.resultId) return false;
         switch (result.status) {
@@ -360,7 +360,7 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
     }
     if (archive.result) {
         const auto& result=*archive.result;
-        if (!result.resultId || result.nodeId==archive.rootNodeId || !nodes.count(result.nodeId)
+        if (!result.resultId || (result.inputRoi && !GetDataRevisionRefValid(*result.inputRoi)) || (result.nodeId==archive.rootNodeId && !result.inputRoi) || !nodes.count(result.nodeId)
             || result.status!=CropResultStatus::Published || result.sourceRevision!=archive.sourceRevision
             || !GetDataEntityIdValid(result.scopeId) || !GetDataRevisionRefValid(result.recipeRevision)
             || !GetDataRevisionRefValid(result.outputRevision)||!result.options.availableRamBytes
@@ -426,6 +426,6 @@ bool CropHistory::GetArchivesSame(const CropDocumentArchive& a,const CropDocumen
 bool CropHistory::GetRecordsSame(const CropResultRecord& x,const CropResultRecord& y) noexcept {
     return x.resultId==y.resultId&&x.nodeId==y.nodeId&&x.status==y.status&&x.scopeId==y.scopeId
         &&x.sourceRevision==y.sourceRevision&&x.recipeRevision==y.recipeRevision&&x.outputRevision==y.outputRevision
-        &&x.publicationGeneration==y.publicationGeneration&&x.options==y.options
+        &&x.inputRoi==y.inputRoi &&x.publicationGeneration==y.publicationGeneration&&x.options==y.options
         &&x.meshErrorBound==y.meshErrorBound&&x.meshAreaErrorBound==y.meshAreaErrorBound&&x.meshTriangleCount==y.meshTriangleCount;
 }

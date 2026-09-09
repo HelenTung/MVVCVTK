@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/DataGraphTypes.h"
+#include "Host/RoiReadTypes.h"
 
 #include <memory>
 #include <optional>
@@ -98,6 +99,8 @@ class TrustedDataReadPort {
 public:
     virtual ~TrustedDataReadPort() noexcept = default;
 
+    virtual RoiReadResult GetRoi(const DataGraphSnapshot& graph,
+        const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const = 0;
     virtual DataGraphSnapshot GetDataGraph() const = 0;
     virtual DataSnapshot GetData(
         const DataGraphSnapshot& graph,
@@ -133,6 +136,8 @@ public:
 
     virtual std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
         const DataRevisionRef&, std::shared_ptr<const VtkPreparedDataView>) { return {}; }
+    // 仅 Host owner thread 可写；轻量同步事务，不持有完成回调。
+    virtual RoiResult SetRoi(const RoiRequest& request) = 0;
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
     virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;

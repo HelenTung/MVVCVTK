@@ -1,3 +1,4 @@
+// 测试用途：验证顺序平面、参考点系统对齐和几何形状处理。
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
 #include <cmath>
@@ -140,11 +141,47 @@ void Shapes() {
         }
     }
 }
+void LineAndContact() {
+    auto w = Work();
+    AlignmentSamples samples;
+    for (int i = -5; i <= 5; ++i) samples.points.push_back({4.0 + i, -3.0 + 2*i, 5.0 + 2*i});
+    AlignmentGeometrySpec spec;
+    spec.id = "line";
+    spec.kind = AlignmentGeometryKind::Line;
+    spec.maxFitRms = 1e-6;
+    try {
+        const auto geometry = AlignmentGeometryFit::BuildGeometry(w, spec, samples, alignmentIdentity);
+        const double alignment = std::abs(geometry.sourceDirection[0] / 3
+            + geometry.sourceDirection[1] * 2 / 3 + geometry.sourceDirection[2] * 2 / 3);
+        Check(alignment > 1 - 1e-10 && geometry.fitRms < 1e-8, "line direction and residual");
+        Check(cv::norm(Vector(geometry.sourceCenter) - Vec(4, -3, 5)) < 1e-8, "line centroid anchor");
+    } catch (const std::exception& e) {
+        Check(false, e.what());
+    }
+    samples.points.assign(6, {4, -3, 5});
+    bool isRejected = false;
+    try { (void)AlignmentGeometryFit::BuildGeometry(w, spec, samples, alignmentIdentity); }
+    catch (const std::invalid_argument&) { isRejected = true; }
+    Check(isRejected, "coincident line samples are degenerate");
+
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{0,0,0, 1,0,0, 0,1,0}, std::vector<std::uint64_t>{});
+    spec.kind = AlignmentGeometryKind::Plane;
+    spec.association = AlignmentAssociation::Contact;
+    spec.region.vertexIds = {0, 1, 2};
+    w.recipe.datumCount = 1;
+    spec.region.pinnedMesh = w.input.mesh;
+    w.recipe.geometries = {spec};
+    const auto result = AlignmentSolver::BuildResult(w);
+    Check(result.diagnostics.status == AlignmentStatus::Unsupported,
+        "contact association is explicitly unsupported before solving");
+}
 } // namespace
 int TestConstraints();
 int main() {
     Sequential();
     Rps();
     Shapes();
+    LineAndContact();
     return failures + TestConstraints() ? 1 : 0;
 }

@@ -1,5 +1,4 @@
 #include "IsoSurfaceStrategy.h"
-#include <vtkCubeAxesActor.h>
 #include <vtkImageData.h>
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLPolyDataMapper.h>
@@ -89,7 +88,6 @@ IsoSurfaceStrategy::IsoSurfaceStrategy(
             RenderProductKind::IsoSurface);
     }
     m_actor = vtkSmartPointer<vtkActor>::New();
-    m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
 
     // predicate 直接读取 vertexMC；禁用 VBO Shift/Scale 才能保持 input-model 坐标。
@@ -99,10 +97,8 @@ IsoSurfaceStrategy::IsoSurfaceStrategy(
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetInterpolationToFlat();
     m_actor->SetPickable(false);
-    m_cubeAxes->SetPickable(false);
 
     AttachProp(m_actor);
-    AttachProp(m_cubeAxes);
 }
 
 IsoSurfaceStrategy::~IsoSurfaceStrategy()
@@ -220,7 +216,6 @@ bool IsoSurfaceStrategy::SetIsoInput(
     SetInputTimes(m_lastInput, m_lastMask);
     if (StartProduct(std::move(request))) {
         m_autoTopologyRevision = topologyRevision;
-        m_cubeAxes->SetBounds(image->GetBounds());
         return true;
     }
 
@@ -252,7 +247,6 @@ bool IsoSurfaceStrategy::SetPolyInput(
     SetInputTimes(m_lastInput, nullptr);
     m_inputDimensions = {};
     m_maskDimensions = {};
-    m_cubeAxes->SetBounds(poly->GetBounds());
 
     auto* property = m_actor->GetProperty();
     property->SetColor(0.75, 0.75, 0.75);
@@ -596,7 +590,6 @@ void IsoSurfaceStrategy::AttachRenderer(
     vtkSmartPointer<vtkRenderer> renderer)
 {
     BaseVisualStrategy::AttachRenderer(renderer);
-    m_cubeAxes->SetCamera(renderer->GetActiveCamera());
 }
 
 bool IsoSurfaceStrategy::SetVisualState(
@@ -763,6 +756,8 @@ bool IsoSurfaceStrategy::SetVisualState(
         property->SetSpecular(params.material.specular);
         property->SetSpecularPower(params.material.specularPower);
         property->SetOpacity(params.material.opacity);
+        // 零透明度几何仍可能消耗深度剥离层，遮掉独立的 Feature 网格。
+        m_actor->SetVisibility(params.material.opacity > 0.0 ? 1 : 0);
         if (params.material.isShadeOn) {
             property->SetInterpolationToPhong();
         }
@@ -773,10 +768,6 @@ bool IsoSurfaceStrategy::SetVisualState(
 
     if ((flags & UpdateFlags::Transform) != UpdateFlags::None) {
         Set3DPropsTransform(params.modelMatrix);
-    }
-    if ((flags & UpdateFlags::Visibility) != UpdateFlags::None) {
-        m_cubeAxes->SetVisibility(
-            (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
     return true;
 }

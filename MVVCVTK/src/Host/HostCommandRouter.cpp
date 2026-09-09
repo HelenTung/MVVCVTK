@@ -7,6 +7,7 @@
 #include "App/Services/AppPorts.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Internal/HostTransferCodec.h"
+#include "Host/Internal/HostRulerCodec.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Interaction/InteractionPorts.h"
 #include "Data/VolumeTypes.h"
@@ -54,6 +55,7 @@ private:
         std::optional<WindowLevelParams> windowLevel;
         std::optional<VolumeQuality> volumeQuality;
         std::optional<HostVisibilityParams> visibility;
+        std::optional<RulerParams> ruler;
         std::optional<bool> isAxesVisible;
     };
 
@@ -568,6 +570,7 @@ HostCommandRouter::Impl::BuildViewCandidate(
     candidate.volumeQuality = request.volumeQuality
         ? GetAppQuality(*request.volumeQuality)
         : std::optional<VolumeQuality>{};
+    candidate.ruler = request.ruler ? HostRulerCodec::BuildParams(*request.ruler) : std::nullopt;
     candidate.visibility = request.visibility;
     candidate.isAxesVisible = request.isAxesVisible;
 
@@ -581,6 +584,7 @@ HostCommandRouter::Impl::BuildViewCandidate(
         || (request.background && !candidate.background)
         || (request.windowLevel && !candidate.windowLevel)
         || (request.volumeQuality && !candidate.volumeQuality)
+        || (request.ruler && !candidate.ruler)
         || (request.isAxesVisible && !candidate.context)) {
         return std::nullopt;
     }
@@ -679,6 +683,7 @@ bool HostCommandRouter::Impl::SetView(
     update.background = candidate->background;
     update.windowLevel = candidate->windowLevel;
     update.volumeQuality = candidate->volumeQuality;
+    update.ruler = candidate->ruler;
     if (candidate->visibility) {
         const auto& visibility = *candidate->visibility;
         AppVisibilityUpdate appVisibility;

@@ -1,6 +1,7 @@
 #include "Data/DataGraphStore.h"
 
 #include "Data/DataPayloads.h"
+#include "Geometry/RoiEvaluator.h"
 
 #include <algorithm>
 #include <atomic>
@@ -543,7 +544,9 @@ DataEntityId DataGraphStore::CreateDataEntityId()
 
 bool DataGraphStore::SetDataType(DataTypeDescriptor descriptor)
 {
-    if (!GetDataTypeIdValid(descriptor.id) || !descriptor.validate) {
+    if (!GetDataTypeIdValid(descriptor.id) || !descriptor.validate
+        || (descriptor.id.name == DataTypes::roiGeometry.name && descriptor.id != DataTypes::roiGeometry)
+        || (descriptor.id.name == DataTypes::roiCatalog.name && descriptor.id != DataTypes::roiCatalog)) {
         return false;
     }
     std::set<DataFacetId> facets;
@@ -769,6 +772,67 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 }
             }
         }
+        // 内置 ROI 规则在事务锁内查看同一 provisional 图，不能被通用写口绕过。
+        const RoiEvaluator::DataLookup getData = [&](const DataRevisionRef& ref) -> DataSnapshot {
+            const auto staged = provisional.find(ref);
+            if (staged == provisional.end()) return current->GetData(ref);
+            const auto& item = drafts[staged->second];
+            return std::make_shared<const DataRevision>(DataRevision{
+                ref, item.type, item.inputs, item.payload, item.provenance });
+        };
+        for (const auto& draft : drafts) {
+            const auto previousHead = current->heads.find(draft.entityId);
+            const auto previous = previousHead == current->heads.end() ? DataSnapshot{}
+                : current->GetData({draft.entityId, previousHead->second});
+            if (previous && (previous->type == DataTypes::roiGeometry || previous->type == DataTypes::roiCatalog
+                || draft.type == DataTypes::roiGeometry || draft.type == DataTypes::roiCatalog)) {
+                if (previous->type != draft.type) return GetRejected(DataCommitFailure::PayloadInvalid,
+                    "An ROI entity cannot change its data type.");
+                if (draft.type == DataTypes::roiGeometry
+                    && dynamic_cast<const RoiGeometryPayload&>(*previous->payload).GetDefinition().source
+                        != dynamic_cast<const RoiGeometryPayload&>(*draft.payload).GetDefinition().source)
+                    return GetRejected(DataCommitFailure::PayloadInvalid, "An ROI geometry edit cannot rebind its source.");
+            }
+            if (draft.type == DataTypes::roiGeometry) {
+                const DataRevision roi{entities.at(draft.entityId), draft.type, draft.inputs, draft.payload, draft.provenance};
+                if (RoiEvaluator::GetRelationsError(roi, getData) != RoiError::None)
+                    return GetRejected(DataCommitFailure::PayloadInvalid, "ROI geometry or source/mask relations are invalid.");
+            }
+            if (draft.type == DataTypes::roiCatalog) {
+                const auto& entries = dynamic_cast<const RoiCatalogPayload&>(*draft.payload).GetEntries();
+                if (entries.size() != draft.inputs.size()) return GetRejected(DataCommitFailure::PayloadInvalid,
+                    "ROI catalog dependencies differ from its entries.");
+                for (std::size_t i=0; i<entries.size(); ++i) {
+                    const auto& ref = entries[i].geometry;
+                    const auto geometry = getData(ref);
+                    const auto staged = entities.find(ref.entityId);
+                    const auto head = current->heads.find(ref.entityId);
+                    const auto generation = staged != entities.end() ? staged->second.generation
+                        : head != current->heads.end() ? head->second : DataGeneration{0};
+                    const auto role = "roi-" + std::to_string(i);
+                    const auto input = std::find_if(draft.inputs.begin(),draft.inputs.end(),[&](const DataInputRef& item) {
+                        return item.role == role && item.source == ref;
+                    });
+                    if (!geometry || geometry->type != DataTypes::roiGeometry || ref.generation != generation
+                        || input == draft.inputs.end()) return GetRejected(DataCommitFailure::PayloadInvalid,
+                            "ROI catalog entry must reference the matching current geometry.");
+                }
+            }
+        }
+        auto catalogBinding=current->GetDataBinding(roiCatalogBinding);
+        std::optional<DataRevisionRef> activeCatalog=catalogBinding ? catalogBinding->target:std::nullopt;
+        if (isActivated) for (const auto& update:transaction.bindings)
+            if (update.binding==roiCatalogBinding) activeCatalog=update.target;
+        if (activeCatalog) {
+            const auto catalogData=getData(*activeCatalog);
+            const auto* catalog=catalogData ? dynamic_cast<const RoiCatalogPayload*>(catalogData->payload.get()):nullptr;
+            if (!catalog) return GetRejected(DataCommitFailure::PayloadInvalid,"Invalid active ROI catalog.");
+            for (const auto& entry:catalog->GetEntries()) {
+                const auto changed=entities.find(entry.geometry.entityId);
+                if (changed!=entities.end() && changed->second!=entry.geometry)
+                    return GetRejected(DataCommitFailure::PayloadInvalid,"ROI edit must update its catalog atomically.");
+            }
+        }
         if (isActivated) {
             for (const auto& update : transaction.bindings) {
                 const auto existing = update.target ? current->revisions.find(*update.target)
@@ -776,6 +840,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 if (existing != current->revisions.end() && existing->second.scope
                     && !existing->second.scope->GetIsPublished()) {
                     return GetRejected(DataCommitFailure::ResultRetired, "Binding target has retired.");
+                }
+                if (update.binding == roiCatalogBinding) {
+                    const auto catalog = update.target ? getData(*update.target) : DataSnapshot{};
+                    if (!catalog || catalog->type != DataTypes::roiCatalog)
+                        return GetRejected(DataCommitFailure::PayloadInvalid,"ROI catalog binding requires a catalog revision.");
                 }
                 if (update.target
                     && (!GetDataRevisionRefValid(*update.target)
