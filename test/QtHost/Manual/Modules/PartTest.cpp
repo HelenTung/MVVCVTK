@@ -10,7 +10,7 @@ namespace {
 struct PartPreviewDisplay : std::enable_shared_from_this<PartPreviewDisplay> {
     struct View { std::optional<double> savedOpacity; std::optional<bool> requested; DataRevisionRef requestedSource; bool pending = false; QString error; };
     std::map<std::string, View> views;
-    void Observe(ModulePanel* panel, bool enabled)
+    void Observe(ModulePanel* panel, bool previewEnabled)
     {
         if (panel->GetContext().workflow.GetIsClosing()) return;
         for (const auto* id : {"primary-3d"}) {
@@ -18,6 +18,7 @@ struct PartPreviewDisplay : std::enable_shared_from_this<PartPreviewDisplay> {
             if (view.pending) continue;
             const auto current = panel->GetSession()->GetRenderViewState({id});
             if (!current) continue;
+            const bool enabled = previewEnabled && (current->viewMode == HostRenderMode::IsoSurface || current->viewMode == HostRenderMode::CompositeIsoSurface);
             if (view.requested == enabled && view.requestedSource == current->dataRevision) continue;
             view.requested = enabled; view.requestedSource = current->dataRevision; view.error.clear();
             double opacity = 0;
@@ -73,7 +74,7 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     auto* panel = new ModulePanel(context, "Part", parent);
     panel->observeInBackground = true;
     auto preview = std::make_shared<PartPreviewDisplay>();
-    panel->SetNotice("主三维显示浅灰零件表面，体渲染保留原始灰度并叠加选中零件的半透明定位标记，切片保留灰度细节。选中节点后点击“高亮此零件”即可切换。隐藏零件只影响分割预览，不裁去原始体数据。");
+    panel->SetNotice("等值面模式显示零件表面，体渲染模式恢复原始灰度背景。可关闭零件预览查看体数据；选中节点后点击“高亮此零件”即可定位。隐藏零件只影响预览，不裁去原始体数据。");
     panel->AttachAction("Start", GetJson(R"({"threshold":0.5,"minPartVoxels":"1000"})"), [panel, feature, preview](auto id, const auto& params) {
         PartSegmentationRequest request; request.action = PartSegmentationAction::Start;
         request.start = PartSegmentationStartParams{GetPartViews(), GetNumber(params, "threshold"), GetId(params["minPartVoxels"])};

@@ -1,4 +1,4 @@
-// 测试用途：组合十个功能页和五个视图，显示业务日志并管理窗口关闭流程。
+// 测试用途：组合场景、一个三维与三个切片视窗和功能参数，管理测试会话生命周期。
 #pragma once
 #include "TestSession.h"
 #include "TestWorkflow.h"
@@ -45,6 +45,8 @@ private:
     std::vector<View> m_views;
     std::vector<ModulePanel*> m_modules;
     QStackedWidget* m_pages = nullptr;
+    QStackedWidget* m_browsers = nullptr;
+    QComboBox* m_renderMode = nullptr;
     QTabBar* m_featureTabs = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;

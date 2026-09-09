@@ -36,26 +36,26 @@ QJsonValue GetVisibility(const std::vector<HostRenderViewState>& views, std::uin
 ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "View", parent);
-    panel->SetNotice("显示参数作用于所选视图；辅助显示可选择所有视图、三个切片或单个视图。开关旁显示当前生效值，修改后点击对应卡片按钮应用。");
+    panel->SetNotice("中央保留一个三维视窗和三个切片图。三维可切换等值面与体渲染；切片可用滚轮逐层查看，也可通过“切片位置”定位。");
     panel->AttachAction("Set", GetJson(R"({"viewId":"primary-3d","mode":null,"iso":null,"opacity":null,"quality":null,"axes":null,"windowLevel":null,"transfer":null})"),
         [panel](auto id, const auto& params) {
             HostViewSetRequest request;
             request.targetView.viewId = GetText(params, "viewId").toStdString();
-            if (!params["mode"].isNull()) request.mode = GetEnum<HostRenderMode>(params, "mode", {
+            if (params.contains("mode") && !params["mode"].isNull()) request.mode = GetEnum<HostRenderMode>(params, "mode", {
                 {"Volume", HostRenderMode::Volume}, {"IsoSurface", HostRenderMode::IsoSurface},
                 {"CompositeVolume", HostRenderMode::CompositeVolume}, {"CompositeIsoSurface", HostRenderMode::CompositeIsoSurface},
                 {"SliceTopDown", HostRenderMode::SliceTopDown}, {"SliceFrontBack", HostRenderMode::SliceFrontBack}, {"SliceLeftRight", HostRenderMode::SliceLeftRight}});
-            if (!params["iso"].isNull()) request.iso = GetNumber(params, "iso");
+            if (params.contains("iso") && !params["iso"].isNull()) request.iso = GetNumber(params, "iso");
             if (!params["opacity"].isNull()) request.opacity = GetNumber(params, "opacity");
             if (!params["axes"].isNull()) request.isAxesVisible = GetBool(params, "axes");
-            if (!params["quality"].isNull()) request.volumeQuality = GetEnum<HostVolumeQuality>(params, "quality", {
+            if (params.contains("quality") && !params["quality"].isNull()) request.volumeQuality = GetEnum<HostVolumeQuality>(params, "quality", {
                 {"Auto", HostVolumeQuality::Auto}, {"Low", HostVolumeQuality::Low}, {"High", HostVolumeQuality::High},
                 {"XHigh", HostVolumeQuality::XHigh}, {"Ultra", HostVolumeQuality::Ultra}});
             if (!params["windowLevel"].isNull()) {
                 const auto value = GetArray<double, 2>(params["windowLevel"]);
                 request.windowLevel = HostWindowLevelParams{value[0], value[1]};
             }
-            if (!params["transfer"].isNull()) {
+            if (params.contains("transfer") && !params["transfer"].isNull()) {
                 const auto value = params["transfer"].toObject();
                 HostVolumeTransferFunction transfer;
                 for (const auto node : value["colorNodes"].toArray()) {
@@ -67,6 +67,12 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
                     transfer.opacityNodes.push_back({point[0], point[1]});
                 }
                 request.volumeTransferFunction = transfer;
+            }
+            if (request.mode) {
+                const auto mode = *request.mode;
+                const bool sliceMode = mode == HostRenderMode::SliceTopDown || mode == HostRenderMode::SliceFrontBack || mode == HostRenderMode::SliceLeftRight;
+                if (request.targetView.viewId != "primary-3d" || sliceMode)
+                    throw std::invalid_argument("渲染模式仅作用于三维视窗；三个切片窗口保持各自方向");
             }
             panel->SendHost(id, std::move(request));
         }, TestPolicy::View);

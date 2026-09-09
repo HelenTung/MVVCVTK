@@ -8,6 +8,7 @@ class SurfaceDeterminationHostFeature;
 class ArtifactReductionHostFeature;
 class ModelRotationHostFeature;
 class MetrologyAlignmentHostFeature;
+class WallThicknessHostFeature;
 namespace Manual {
 class ReferenceDataSource;
 ModulePanel* CreateDataTest(TestContext, std::shared_ptr<ReferenceDataSource>, QWidget*);
@@ -18,6 +19,7 @@ ModulePanel* CreatePartTest(TestContext, std::shared_ptr<PartSegmentationHostFea
 ModulePanel* CreatePartEditTest(TestContext, std::shared_ptr<PartSegmentationHostFeature>, QWidget*);
 ModulePanel* CreateSurfaceTest(TestContext, std::shared_ptr<SurfaceDeterminationHostFeature>, QWidget*);
 ModulePanel* CreateArtifactTest(TestContext, std::shared_ptr<ArtifactReductionHostFeature>, QWidget*);
+ModulePanel* CreateWallTest(TestContext, std::shared_ptr<WallThicknessHostFeature>, QWidget*);
 ModulePanel* CreateRotationTest(TestContext, std::shared_ptr<ModelRotationHostFeature>, QWidget*);
 ModulePanel* CreateAlignmentTest(TestContext, std::shared_ptr<MetrologyAlignmentHostFeature>,
     std::shared_ptr<ReferenceDataSource>, QWidget*);

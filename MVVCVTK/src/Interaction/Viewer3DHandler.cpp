@@ -1,6 +1,10 @@
 #include "Viewer3DHandler.h"
 #include "Host/FeatureModelTransformPort.h"
 #include <vtkActor.h>
+#include <vtkBoxRepresentation.h>
+#include <vtkHandleRepresentation.h>
+#include <vtkImplicitPlaneRepresentation.h>
+#include <vtkPropCollection.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -103,6 +107,30 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     {
         if (!m_picker || !m_renderer) {
             return {};
+        }
+
+        // Host 路由先于原生 VTK widget 执行。命中控件时让事件继续传给
+        // widget，避免位于控件后方的参考切片平面抢占整段拖动。
+        auto* props = m_renderer->GetViewProps();
+        vtkCollectionSimpleIterator cursor;
+        props->InitTraversal(cursor);
+        while (auto* prop = props->GetNextProp(cursor)) {
+            if (!prop->GetVisibility() || !prop->GetPickable()) continue;
+            if (auto* handle = vtkHandleRepresentation::SafeDownCast(prop)) {
+                if (handle->ComputeInteractionState(eve.x, eve.y) != vtkHandleRepresentation::Outside) return {};
+            } else if (auto* box = vtkBoxRepresentation::SafeDownCast(prop)) {
+                if (box->ComputeInteractionState(eve.x, eve.y) != vtkBoxRepresentation::Outside) return {};
+            } else if (auto* plane = vtkImplicitPlaneRepresentation::SafeDownCast(prop)) {
+                // 平面拾取需要先声明左键 Moving 意图；探测后还原状态，
+                // 实际拖动与高亮仍由 vtkImplicitPlaneWidget2 管理。
+                const auto interaction = plane->GetInteractionState();
+                const auto representation = plane->GetRepresentationState();
+                plane->SetInteractionState(vtkImplicitPlaneRepresentation::Moving);
+                const auto hit = plane->ComputeInteractionState(eve.x, eve.y);
+                plane->SetInteractionState(interaction);
+                plane->SetRepresentationState(representation);
+                if (hit != vtkImplicitPlaneRepresentation::Outside) return {};
+            }
         }
 
         if (m_picker->Pick(eve.x, eve.y, 0, m_renderer)) {

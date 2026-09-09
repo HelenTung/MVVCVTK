@@ -22,7 +22,7 @@ bool GetFramesReady(ModulePanel* panel)
 {
     const auto input = panel->GetSession()->GetImageDescriptor();
     if (!input) return false;
-    for (const auto* id : {"primary-3d", "composite-volume", "slice-top-down", "slice-front-back", "slice-left-right"}) {
+    for (const auto& id : GetAllViews().viewIds) {
         const auto scene = panel->GetSession()->GetSceneViewState({id});
         if (!scene || !scene->isAvailable || !scene->presentation || scene->presentation->isInteracting
             || scene->presentation->dataRevision != input->dataRevision
@@ -84,7 +84,15 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         bool accepted=feature->SendRequest(request);
         if(accepted){request={};request.action=CropHostAction::Mode;request.target=GetCropTarget();request.removalMode=mode;accepted=feature->SendRequest(request);}
         flow->pending=0;flow->preferredMode=mode;flow->isConfirmed=false;
-        panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"message","请拖动主三维中的控件，并检查各视图的裁剪预览。"}});
+        const QString hint=shape==CropHostAction::Sphere
+            ? "球裁剪：拖动中心控制点移动球体，拖动绿色控制点调整半径。"
+            : shape==CropHostAction::Cylinder
+                ? "圆柱裁剪：拖动中心控制点平移，绿色控制点调整半径，两端控制点调整方向和长度。"
+                : shape==CropHostAction::Box
+                    ? "盒裁剪：拖动面中心控制点调整边界，按住 Shift 拖动可整体平移。"
+                    : "平面裁剪：拖动中心控制点移动平面，拖动法线箭头调整方向。";
+        if(accepted)panel->SetNotice(hint+" 保留或移除模式下，松开鼠标会更新各视图预览并生成历史节点；仅定位模式不生成历史。可在结果目录选择历史分支、保存 ROI 或发布结果。");
+        panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"message",hint}});
     };
     panel->AttachAction("Start",{{"shape","Box"},{"removalMode","KeepInside"}},[panel,feature,flow,startWidget](auto id,const auto& p) {
         const auto shape=GetEnum<CropHostAction>(p,"shape",{{"Box",CropHostAction::Box},{"Plane",CropHostAction::Plane},{"Sphere",CropHostAction::Sphere},{"Cylinder",CropHostAction::Cylinder}});

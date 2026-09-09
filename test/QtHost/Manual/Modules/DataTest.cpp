@@ -8,7 +8,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
 {
     auto* panel = new ModulePanel(context, "Data", parent);
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
-    panel->AttachAction("Load", GetJson(R"({"filePath":"","datasetId":"","dimensions":[1,1,1],"spacingLPS":[1,1,1],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
+    panel->AttachAction("Load", GetJson(R"({"filePath":"F:/data/ct/1536x1536x1536_1440.raw","datasetId":"1","dimensions":[1536,1536,1536],"spacingLPS":[0.1537,0.1537,0.1537],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
         [panel](auto id, const auto& params) {
             FeatureTestOptions options;
             const auto path = GetText(params, "filePath");
@@ -53,8 +53,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         }, TestPolicy::Compute);
     panel->AttachAction("ExportSlices", {{"outputDir", ""}, {"viewId", "slice-top-down"}, {"angleDeg", QJsonValue()}},
         [panel](auto id, const auto& params) {
-            HostSliceExportRequest request;
-            request.outputDir = GetText(params, "outputDir").toUtf8().toStdString();
+            HostSliceExportRequest request; request.outputDir = GetText(params, "outputDir").toUtf8().toStdString();
             request.sourceView.viewId = GetText(params, "viewId").toStdString();
             if (!params["angleDeg"].isNull()) request.angleDeg = GetNumber(params, "angleDeg");
             panel->SendHost(id, std::move(request));

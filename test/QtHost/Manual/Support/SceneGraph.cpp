@@ -11,7 +11,7 @@
 namespace Manual {
 GraphLayout GetGraphLayout(const QJsonArray& nodes)
 {
-    // 每组由 SceneNodes 保证子修订在前、父修订在后；不同组不建立连线。
+    // 每组由 CatalogNodes 保证子修订在前、父修订在后；不同组不建立连线。
     GraphLayout result;
     const std::function<void(const QJsonArray&)> visit = [&](const QJsonArray& values) {
         QSet<QString> remaining;
@@ -64,8 +64,7 @@ public:
             painter->setPen(QPen(color, found->current ? 2.2 : 1.7));
             painter->setBrush(option.palette.base()); painter->drawEllipse(center, found->current ? 6. : 4., found->current ? 6. : 4.);
             if (!found->pending) { painter->setPen(Qt::NoPen); painter->setBrush(color); painter->drawEllipse(center, 2.6, 2.6); }
-        } else {
-            painter->setPen(Qt::NoPen); painter->setBrush(QColor("#9ba9ba")); painter->drawEllipse(QPointF(x(0), mid), 3., 3.);
+
         }
         painter->restore();
     }
@@ -75,15 +74,15 @@ private:
 }
 SceneGraphTree::SceneGraphTree(QWidget* parent) : QTreeWidget(parent)
 {
-    setColumnCount(3); setHeaderLabels({"场景节点", "状态", "关系"});
+    setColumnCount(3); setHeaderLabels({"目录条目", "状态", "来源"});
     setItemDelegateForColumn(2, new GraphDelegate(this));
-    header()->moveSection(2, 0); header()->setSectionResizeMode(2, QHeaderView::Interactive); header()->resizeSection(2, 64);
+    header()->moveSection(2, 0); header()->setSectionResizeMode(2, QHeaderView::Interactive); header()->resizeSection(2, 36);
     setIndentation(14); setStyleSheet("QTreeView::item { min-height: 26px; } QHeaderView::section { padding: 5px; }");
 }
 void SceneGraphTree::SetGraph(const QJsonArray& nodes)
 {
     const auto previous = m_graph.lanes; m_graph = GetGraphLayout(nodes);
-    if (previous != m_graph.lanes) header()->resizeSection(2, std::min(220, std::max(64, m_graph.lanes*18+18)));
+    if (previous != m_graph.lanes) header()->resizeSection(2, std::min(120, std::max(36, m_graph.lanes*14+12)));
     viewport()->update();
 }
 }

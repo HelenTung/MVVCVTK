@@ -28,6 +28,7 @@ public:
     std::function<bool(const std::string&)> getRenderPending;
     std::function<bool(const std::string&)> getViewRenderPending;
     std::function<QJsonObject()> getPublishedGraph;
+    std::function<DataRevisionRef()> getPartLabels;
 private:
     bool m_isClosing = false;
     std::uint64_t m_busyId = 0;

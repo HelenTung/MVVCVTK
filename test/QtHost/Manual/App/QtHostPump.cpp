@@ -64,7 +64,7 @@ void QtHostPump::SendUpdates()
             if (m_failureSamples.size() == 8) m_failureSamples.removeFirst();
             m_failureSamples.append(sample);
         }
-        if (m_pendingUpdateFailures == 1 && onError) onError(different ? "Host 更新失败：五视图输入版本尚未一致，等待后续工作事件。" : "Host 更新失败；诊断已记录，等待后续工作或窗口事件。");
+        if (m_pendingUpdateFailures == 1 && onError) onError(different ? "Host 更新失败：视图输入版本尚未一致，等待后续工作事件。" : "Host 更新失败；诊断已记录，等待后续工作或窗口事件。");
     } else if (update.status == HostUpdateStatus::Completed && m_pendingUpdateFailures) {
         if (onError) onError(QString("Host 更新已恢复；此前连续 %1 次未提交，诊断保留在测试记录中。").arg(m_pendingUpdateFailures));
         m_pendingUpdateFailures = 0;

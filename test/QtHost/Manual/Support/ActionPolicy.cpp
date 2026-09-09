@@ -27,6 +27,8 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         if (action == "SelectOutput" && !s["canSelectOutput"].toBool()) return "当前没有匹配输入的已发布校正结果。";
         if (action == "RestoreSource" && !s["isOutputCurrent"].toBool()) return "仅在使用本次校正结果时可以恢复其源数据。";
     }
+    if (module == "Wall" && action != "Start" && action != "Cancel" && action != "Clear" && !s["hasResult"].toBool())
+        return "请先完成壁厚计算。";
     if (module == "Rotation" && action == "Undo" && s["undoCount"].toString().toULongLong() == 0) return "当前没有可撤销的旋转。";
     if (module == "Alignment") {
         if ((action == "ImportReference" || action == "SaveRecipe" || action == "Start" || action == "Restore") && s["isApplied"].toBool()) return "请先停用当前对齐结果，再准备或求解新方案。";

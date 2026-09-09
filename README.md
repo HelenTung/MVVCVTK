@@ -62,6 +62,19 @@ Standalone 加载数据后可按 `g` 显式发送一次 `GapHostAction::Start`�
 
 仓库不维护手写 `.sln`、生产 `.vcxproj` 或测试 `.vcxproj`。`cmake --preset vs2026-x64` 是唯一工程生成入口，Visual Studio 2026 generator 会在 `out/build/vs2026-x64/MVVCVTK.slnx` 生成现代 Solution 文件及其项目。Solution 顶层只保留一个 `MVVCVTK` 组，下面包含默认启动的 `Application/MVVCVTK`、主干 `Host`、Host API/Feature SPI 接口目标、位于 `Host/Features` 的两个扩展库、边界与行为测试以及 CMake 内建目标；三库项目显示各自完整的实现源码和私有头，但 SDK 安装仍只取批准的公开头与单独维护的物理闭包。静态库统一输出到 `lib/<配置>`，应用和测试程序统一输出到 `bin/<配置>`。Windows CI 应在带桌面 OpenGL、v145 和内部依赖访问权的受控 runner 上运行 Debug/Release 全套测试。
 
+## 实验分支手动测试
+
+在实验工作树执行 `cmake --build --preset vs2026-release --target qt_feature_manual`，然后运行
+`out/build/vs2026-x64/RunQtFeatureManual-Release.cmd`。
+
+手动测试在中央以等宽等高的四宫格展示一个 3D 视窗和上下、前后、左右三个切片图；3D 视窗上方可切换等值面与体渲染，切片可通过滚轮逐层查看。左侧“场景”仅展示当前体数据和可视对象，“结果目录”独立保留裁剪历史、零件目录、统计与发布来源；右侧通过标签切换参数分组，开始、停止、取消等动作使用直接按钮，停止入口独立于参数滚动区域；底部可展开操作日志。
+
+裁剪控件在主 3D 视窗中拖动：球的中心控制点负责平移、绿色控制点调整半径；圆柱另有两个端点用于调整方向和长度；盒可用 Shift 加左键拖动整体平移，平面可拖动中心与法线箭头。命中裁剪控件时，参考切片平面会让出鼠标事件。保留/移除内部在松开鼠标后生成历史，只有定位时不新增历史。自动化覆盖四种形状、三种裁剪模式及等值面/体渲染的 Qt 鼠标交互。
+
+默认输入为 `F:/data/ct/1536x1536x1536_1440.raw`，float32，尺寸 `1536×1536×1536`，间距 `0.1537 mm`，数据集标识 `1`；参数可修改，点击“加载体数据”后才加载。
+
+“壁厚分析”由 `MVVCVTK_BUILD_WALL_THICKNESS` 控制并已加入 preset。先完成同一输入的零件分割和正式测量表面（局部自适应 ISO50 或梯度峰值），再计算壁厚；默认材料标签为 `1`。页面提供取消、清除、结果查询、公差评估、显示设置、结果激活和采样定位。`ctest --preset vs2026-release -R QtFeature.Automation` 验证手动入口、四视图及 3D 模式切换、分割进行中切换 Feature，以及合成 8 mm 壁厚流程。
+
 ## SDK 构建与验证
 
 ```powershell

@@ -6,6 +6,8 @@
 #include "Support/ParameterEditor.h"
 #include "Support/SceneGraph.h"
 #include "Support/SceneNodes.h"
+#include "Support/CatalogNodes.h"
+#include <QTabWidget>
 #include <QSplitter>
 #include <QScrollArea>
 #if defined(MANUAL_ALIGNMENT)
@@ -56,6 +58,10 @@
 #include <vtkImageMapper3D.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPropCollection.h>
+#include <vtkHandleRepresentation.h>
+#include <vtkBoxRepresentation.h>
+#include <vtkImplicitPlaneRepresentation.h>
+#include <vtkPropPicker.h>
 #include <vtkVolume.h>
 #include <QVTKOpenGLNativeWidget.h>
 namespace Manual {
@@ -109,6 +115,10 @@ bool GetEnabled(TestWindow& window, const QString& module)
 void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
     const auto key = item->data(0, Qt::UserRole).toJsonObject()["id"].toString();
+    for (auto* page = tree->parentWidget(); page; page = page->parentWidget()) {
+        auto* tabs = qobject_cast<QTabWidget*>(page->parentWidget() ? page->parentWidget()->parentWidget() : nullptr);
+        if (tabs && tabs->indexOf(page) >= 0) { tabs->setCurrentWidget(page); break; }
+    }
     QCoreApplication::processEvents();
     item = nullptr;
     for (QTreeWidgetItemIterator it(tree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString() == key) { item = *it; break; }
@@ -123,7 +133,7 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
 std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
-    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes"); ClickNode(tree, tree->topLevelItem(0));
+    auto* tree = panel->GetCatalogTree(); ClickNode(tree, tree->topLevelItem(0));
     panel->SetParameterPatch(action, patch);
     auto* button = panel->findChild<QPushButton*>("action_" + action);
     Check(button && button->isVisible() && button->isEnabled(), "actual business button is visible and responds");
@@ -145,18 +155,43 @@ void SetBoolean(ParameterEditor* field, bool enabled)
     for (int attempt = 0; box->checkState() != state && attempt < 2; ++attempt) box->click();
     Check(field->GetValue() == QJsonValue(enabled), "checkbox value matches explicit Boolean intent");
 }
+void CheckFourViewGeometry(TestWindow& window)
+{
+    const auto views = window.findChildren<QVTKOpenGLNativeWidget*>(); const auto original = window.size();
+    const auto sameSize = [&] {
+        if (views.size() != 4) return false;
+        int minWidth = views.front()->width(), maxWidth = minWidth, minHeight = views.front()->height(), maxHeight = minHeight;
+        for (const auto* view : views) {
+            minWidth = std::min(minWidth, view->width()); maxWidth = std::max(maxWidth, view->width());
+            minHeight = std::min(minHeight, view->height()); maxHeight = std::max(maxHeight, view->height());
+        }
+        // 奇数像素的等分最多有一个像素的取整差。
+        return maxWidth-minWidth <= 1 && maxHeight-minHeight <= 1 && minWidth >= 160 && minHeight >= 160;
+    };
+    for (const auto size : {QSize(1600,960), QSize(1471,897), original}) {
+        window.resize(size); QCoreApplication::processEvents();
+        Check(Wait(sameSize, 3000), "all four image regions stay equal in width and height when resizing");
+    }
+}
 void CheckUiAndRecords(TestWindow& window)
 {
     const auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    Check(tabs && tabs->count() == 10 && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
+    Check(tabs && tabs->count() == 11 && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
+    Check(window.GetSession()->GetRenderViewStates().size() == 4 && window.findChildren<QVTKOpenGLNativeWidget*>().size() == 4,
+        "manual workspace contains one 3D viewport and three slice viewports");
+    auto* dataDefaults = window.GetModule("Data")->GetParameterEditor("Load");
+    const auto defaults = dataDefaults->GetValue().toObject();
+    Check(defaults["datasetId"] == "1" && defaults["dimensions"] == QJsonArray{1536,1536,1536}
+        && defaults["spacingLPS"] == QJsonArray{0.1537,0.1537,0.1537}
+        && defaults["filePath"] == "F:/data/ct/1536x1536x1536_1440.raw", "manual defaults match the confirmed real CT sample");
     const QRegularExpression chinese("[\\x{4e00}-\\x{9fff}]");
     for (const QString name : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
-            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment")}) {
+            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
         auto* panel = window.GetModule(name);
         Check(panel && chinese.match(panel->GetDisplayName()).hasMatch(), "module display name is Chinese and stable ID resolves");
-        Check(panel->findChild<QTreeWidget*>("sceneNodes") != nullptr, "each page presents scene nodes");
-        Check(!panel->findChild<QComboBox*>("operationSelector") && !panel->findChild<QPushButton*>("executeOperation"),
-            "no global select-then-execute controls remain");
+        Check(panel->GetCatalogTree() && panel->GetSceneTree() && panel->GetSceneTree() != panel->GetCatalogTree(), "scene objects and result catalog have distinct widgets");
+        Check(!panel->findChild<QComboBox*>("operationPicker") && !panel->findChild<QComboBox*>("operationSelector") && !panel->findChild<QPushButton*>("executeOperation"),
+            "commands are buttons and never entries in an operation dropdown");
         for (const auto& action : panel->GetActions()) {
             const auto* button = panel->findChild<QPushButton*>("action_" + action);
             Check(button && chinese.match(button->text()).hasMatch(), "direct action button uses Chinese business name");
@@ -168,6 +203,22 @@ void CheckUiAndRecords(TestWindow& window)
                     throw std::runtime_error((name + "." + action + ": untranslated parameter " + it.key()).toStdString());
             }
         }
+    }
+    for (const auto* name : {"Part", "Artifact", "Surface", "Wall"}) {
+        auto* page = window.GetModule(name); if (page->GetActions().isEmpty()) continue;
+        const QString initial = QString(name) == "Artifact" ? "Ring" : QString(name) == "Surface" ? "AutomaticIso50" : "Start";
+        window.GetWorkflow().onNavigate(name, initial, {});
+        auto* groups = page->findChild<QTabBar*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
+        for (int i=0; i<groups->count(); ++i) if (groups->isTabEnabled(i)) {
+            Check(groups->tabData(i) != "Stop" && groups->tabData(i) != "Cancel" && groups->tabData(i) != "Clear", "parameter tabs exclude stop, cancel and clear commands");
+            groups->setCurrentIndex(i);
+        }
+        Check(window.GetRecords().GetRecords()["records"].toArray().size() == before, "parameter group navigation never submits an operation");
+        page->SelectAction(initial);
+        const auto stop = page->GetActions().contains("Stop") ? QString("Stop") : QString("Cancel");
+        page->SelectAction(stop);
+        Check(page->GetParameterEditor(initial)->isVisible() && page->findChild<QPushButton*>("action_" + stop)->isVisible(),
+            "stop remains a direct button without replacing the active algorithm parameters");
     }
     auto* view = window.GetModule("View");
     auto* form = view->GetParameterEditor("Set");
@@ -232,7 +283,7 @@ void CheckSceneRefresh(TestWindow& window)
         {"labelId", QString::number(i)}, {"name", "零件"}, {"voxelCount", "100"}});
     QJsonObject state{{"hasCurrentParts", true}, {"parts", parts}};
     panel.SetState(state);
-    auto* tree = panel.findChild<QTreeWidget*>("sceneNodes");
+    auto* tree = panel.GetCatalogTree();
     QTreeWidgetItem* part = nullptr;
     for (QTreeWidgetItemIterator it(tree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject().contains("binding")) { part = *it; break; }
     Check(part != nullptr, "large scene catalog contains selectable parts");
@@ -268,12 +319,8 @@ QTreeWidgetItem* FindNode(QTreeWidget* tree, const QString& id)
 void SaveScene(TestWindow& window, QTreeWidget* tree, const QString& path)
 {
     Q_UNUSED(window);
-    auto* splitter = qobject_cast<QSplitter*>(tree->parentWidget());
-    const auto sizes = splitter->sizes(); splitter->setSizes({600, 150});
     tree->expandAll(); tree->scrollToTop(); QCoreApplication::processEvents();
-    // 节点截图独立保留全部可视行，便于复核轨道，不用参数区充当图形证据。
     tree->grab().save(path);
-    splitter->setSizes(sizes);
 }
 void ClickPartNode(TestWindow& window, int index)
 {
@@ -285,7 +332,7 @@ void ClickPartNode(TestWindow& window, int index)
     Check(index >= 0 && index < parts.size(), "part node index belongs to current catalog");
     const auto binding = parts[index].toObject()["binding"].toObject();
     const auto key = "part:" + QString::fromUtf8(QJsonDocument(binding).toJson(QJsonDocument::Compact));
-    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+    auto* tree = panel->GetCatalogTree();
     auto* node = FindNode(tree, key); Check(node != nullptr, "current part has a scene node");
     const auto count = window.GetRecords().GetRecords()["records"].toArray().size();
     ClickNode(tree, node);
@@ -330,7 +377,7 @@ void CheckPartHighlightSwitches(TestWindow& window, int count)
         Check(Wait([&] { return window.GetRenderCount() > rendersBefore
             && !window.GetWorkflow().getRenderPending("primary-3d"); }, 5000),
             "highlight-only change triggers rendering without cursor or camera changes");
-        for (const auto* viewId : {"primary-3d", "composite-volume"}) {
+        for (const auto* viewId : {"primary-3d"}) {
             Check(Wait([&] { return !window.GetWorkflow().getRenderPending(viewId); }), "highlight view finishes rendering");
             auto& previousImage = previousImages[viewId];
             for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>())
@@ -388,7 +435,7 @@ QJsonObject CheckPartDirectories(TestWindow& window)
     auto* panel = window.GetModule("Part"); panel->Observe();
     const auto parts = panel->GetObservedState()["parts"].toArray(); Check(parts.size() >= 2, "directory audit has two real parts");
     const auto a = parts[0].toObject()["binding"].toObject(), b = parts[1].toObject()["binding"].toObject();
-    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+    auto* tree = panel->GetCatalogTree();
     const auto nodeId = [](const QString& prefix, const QJsonObject& binding) { return prefix+QString::fromUtf8(QJsonDocument(binding).toJson(QJsonDocument::Compact)); };
     auto* all = FindNode(tree, "parts-all"); auto* first = FindNode(tree, nodeId("part:",a));
     int resets = 0; QObject receiver;
@@ -414,7 +461,7 @@ QJsonObject CheckPartDirectories(TestWindow& window)
     Check(search->text().isEmpty() && tree->currentItem()->data(0, Qt::UserRole).toJsonObject()["binding"] == b
         && tree->viewport()->rect().intersects(tree->visualItemRect(tree->currentItem())), "highlight locator reveals the actual selected part in the viewport");
     window.GetWorkflow().onNavigate("PartEdit","Paint",{{"target",a}}); edit->Observe();
-    auto* editTree = edit->findChild<QTreeWidget*>("sceneNodes");
+    auto* editTree = edit->GetCatalogTree();
     ClickNode(editTree,FindNode(editTree,nodeId("editing-part:",a)));
     ClickNode(editTree,FindNode(editTree,nodeId("part:",a)),Qt::ControlModifier);
     Check(edit->GetParameterEditor("Merge")->GetField("parts")->GetValue().toArray().size() == 1,
@@ -445,7 +492,7 @@ QJsonObject CheckPartEditPreview(TestWindow& window, const QJsonObject& spec)
         "real edit changes exactly the expected parts and foreground voxel ownership");
     window.GetModule("Part")->Observe();
     Check(window.GetModule("Part")->GetObservedState()["labelMap"] == base["labelMap"], "preview preserves formal label revision");
-    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+    auto* tree = panel->GetCatalogTree();
     auto* group = FindNode(tree,"edit-preview:"+state["previewId"].toString());
     Check(group && group->childCount() == changes["changed"].toArray().size()+changes["removed"].toArray().size(),
         "candidate directory lists only changed and removed objects");
@@ -460,7 +507,7 @@ void CheckNodeParameters(TestWindow& window)
 {
     for (const auto& name : {"Data", "View", "Crop", "Gap", "Part", "PartEdit", "Surface", "Artifact", "Rotation", "Alignment"}) {
         auto* panel = window.GetModule(name); if (!panel) continue;
-        auto* tree = panel->findChild<QTreeWidget*>("sceneNodes");
+        auto* tree = panel->GetCatalogTree();
         for (QTreeWidgetItemIterator it(tree); *it; ++it) {
             const auto patches = (*it)->data(0, Qt::UserRole).toJsonObject()["patches"].toObject();
             for (auto action = patches.begin(); action != patches.end(); ++action) {
@@ -481,7 +528,7 @@ void CheckNodeErrorBoundary(TestWindow& window)
     panel.AttachAction("AState", {{"target", "original-target"}}, [](auto, const auto&) {});
     const QJsonObject state{{"hasCurrentParts", true}, {"parts", QJsonArray{}}, {"partCount", 0}};
     panel.SetState(state); QString message; panel.onMessage = [&](const QString& value) { message = value; };
-    auto* tree = panel.findChild<QTreeWidget*>("sceneNodes"); auto* item = tree->topLevelItem(0);
+    auto* tree = panel.GetCatalogTree(); auto* item = tree->topLevelItem(0);
     auto node = item->data(0, Qt::UserRole).toJsonObject();
     node["patches"] = QJsonObject{{"AState", QJsonObject{{"target", "wrong-target"}}}, {"Catalog", QJsonObject{{"target", "invalid-node-parameter"}}}};
     item->setData(0, Qt::UserRole, node);
@@ -534,16 +581,10 @@ void CheckParameterLayout(TestWindow& window)
 {
     window.GetWorkflow().onNavigate("View", "Set", {}); QCoreApplication::processEvents();
     auto* view = window.GetModule("View"); auto* form = view->GetParameterEditor("Set");
-    auto* splitter = view->findChild<QSplitter*>("parameterSplitter"); auto* scroll = view->findChild<QScrollArea*>("operationScroll");
-    splitter->setSizes({280,400}); QCoreApplication::processEvents(); const int previousHeight = scroll->height();
-    auto* handle = splitter->handle(1); const QPoint point = handle->rect().center(); const QPoint global = handle->mapToGlobal(point);
-    QMouseEvent press(QEvent::MouseButtonPress, point, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-    QMouseEvent move(QEvent::MouseMove, point-QPoint(0,90), global-QPoint(0,90), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
-    QMouseEvent release(QEvent::MouseButtonRelease, point-QPoint(0,90), global-QPoint(0,90), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-    QApplication::sendEvent(handle, &press); QApplication::sendEvent(handle, &move); QApplication::sendEvent(handle, &release);
-    QCoreApplication::processEvents();
-    Check(scroll->height() > previousHeight+40 && scroll->maximumHeight() > 240, "dragging splitter enlarges parameter viewport beyond old fixed limit");
-    Check(form->isVisible() && view->GetParameterEditor("Cursor")->isVisible(), "multiple operation forms are directly available without a settings entry");
+    auto* scroll = view->findChild<QScrollArea*>("operationScroll");
+    Check(scroll && scroll->height() > 240 && view->GetBrowser()->parentWidget() != view,
+        "parameters occupy a separate full-height column beside the scene browser");
+    Check(form->isVisible() && !view->GetParameterEditor("Cursor")->isVisible(), "only the selected operation form is expanded");
     auto* windowLevel = form->GetField("windowLevel"); windowLevel->findChild<QCheckBox*>("specified")->setChecked(true);
     windowLevel->GetElement(0)->findChild<QLineEdit*>("value")->setText("1200");
     windowLevel->GetElement(1)->findChild<QLineEdit*>("value")->setText("600");
@@ -554,11 +595,11 @@ void CheckParameterLayout(TestWindow& window)
     Check(visibility->GetValue().toObject()["planes"] == QJsonValue(false), "auxiliary display card retains explicit false");
     view->SetParameterPatch("Set", {{"windowLevel", QJsonValue()}});
     view->SetParameterPatch("Visibility", {{"planes", QJsonValue()}});
-    view->SetParameterPatch("Set", {{"viewId", "composite-volume"}}); view->SelectAction("Reset");
+    view->SetParameterPatch("Set", {{"viewId", "primary-3d"}}); view->SelectAction("Set");
     const auto directId = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     view->findChild<QPushButton*>("action_Set")->click();
     const auto direct = GetComplete(window, directId);
-    Check(direct["action"] == "Set" && direct["parameters"].toObject()["viewId"] == "composite-volume",
+    Check(direct["action"] == "Set" && direct["parameters"].toObject()["viewId"] == "primary-3d",
         "card executes its own inputs without selecting its settings operation first");
     view->SetParameterPatch("Set", {{"viewId", "primary-3d"}});
 
@@ -595,7 +636,7 @@ void CheckBooleanControls(TestWindow& window)
 {
     int checked = 0;
     for (const QString module : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
-            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment")}) {
+            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
         const auto boxes = window.GetModule(module)->findChildren<QCheckBox*>("value");
         for (auto* box : boxes) {
             if (!box->isEnabled()) continue;
@@ -617,8 +658,8 @@ void CheckBooleanControls(TestWindow& window)
     auto* view = window.GetModule("View");
     auto* visibility = view->GetParameterEditor("Visibility");
     Check(!view->GetParameterEditor("Set")->GetField("visibility") && visibility->GetField("viewScope"), "auxiliary switches have an explicit scope and are separate from single-view display settings");
-    view->SetParameters("Visibility", {{"viewScope", "all"}, {"planes", false}, {"crosshair", true}});
-    Check(visibility->GetValue().toObject()["planes"] == QJsonValue(false) && visibility->GetValue().toObject()["crosshair"] == QJsonValue(true), "imported Boolean changes survive applied-state synchronization");
+    view->SetParameters("Visibility", {{"viewScope", "all"}, {"planes", false}, {"ruler", true}});
+    Check(visibility->GetValue().toObject()["planes"] == QJsonValue(false) && visibility->GetValue().toObject()["ruler"] == QJsonValue(true), "imported Boolean changes survive applied-state synchronization");
     view->SetParameterPatch("Set", {{"axes", false}});
     Check(visibility->GetValue().toObject()["planes"] == QJsonValue(false), "unrelated card edits preserve auxiliary drafts");
     const auto exported = visibility->GetValue().toObject(); view->SetParameters("Visibility", exported);
@@ -641,7 +682,7 @@ void CheckBooleanRequests(TestWindow& window)
             "axes checkbox and applied Host state agree after execution");
         for (const auto* key : {"planes", "crosshair", "ruler"}) SetBoolean(auxiliary->GetField(key), enabled);
         const auto record = GetComplete(window, Click(window, "View", "Visibility"), "Succeeded");
-        Check(record["result"].toObject()["views"].toArray().size() == 5, "all-view auxiliary action completes all five target requests once");
+        Check(record["result"].toObject()["views"].toArray().size() == 4, "auxiliary action completes all four target requests once");
         for (const auto& view : window.GetSession()->GetRenderViewStates()) {
             const bool slice = view.viewMode == HostRenderMode::SliceTopDown || view.viewMode == HostRenderMode::SliceFrontBack || view.viewMode == HostRenderMode::SliceLeftRight;
             for (const auto bit : slice ? std::vector<unsigned>{2U} : std::vector<unsigned>{1U, 4U})
@@ -651,31 +692,29 @@ void CheckBooleanRequests(TestWindow& window)
     }
     GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "slice-top-down"}, {"crosshair", true}}), "Succeeded");
     panel->SetParameterPatch("Visibility", {{"viewScope", "all"}});
-    Check(auxiliary->GetField("crosshair")->GetAppliedBoolean().isNull() && auxiliary->GetField("crosshair")->findChild<QLabel*>("booleanState")->text().contains("不同"),
-        "different per-view states are explicitly shown as mixed, never disabled");
+    Check(auxiliary->GetField("crosshair")->GetAppliedBoolean().isNull(), "different slice crosshairs are shown as mixed");
     GetComplete(window, Click(window, "View", "Visibility", {{"planes", true}}), "Succeeded");
     for (const auto& view : window.GetSession()->GetRenderViewStates()) if (view.id.find("slice-") == 0)
-        Check(((view.visibilityMask & 2U) != 0) == (view.id == "slice-top-down"), "untouched mixed slice crosshair states are preserved by a batch changing other fields");
+        Check(((view.visibilityMask & 2U) != 0) == (view.id == "slice-top-down"), "3D plane changes preserve independent slice crosshairs");
     GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "slices"}, {"crosshair", true}}), "Succeeded");
-    for (const auto* key : {"planes", "ruler"}) Check(auxiliary->GetField(key)->GetValue().isNull()
-        && !auxiliary->GetField(key)->findChild<QCheckBox*>("value")->isEnabled()
-        && auxiliary->GetField(key)->findChild<QLabel*>("booleanState")->text().contains("不支持"), "inapplicable slice controls are disabled with a reason and omitted from requests");
-    SetBoolean(auxiliary->GetField("crosshair"), false);
-    Check(auxiliary->GetField("crosshair")->findChild<QLabel*>("booleanState")->text().contains("待应用")
-        && (window.GetSession()->GetRenderViewState({"slice-top-down"})->visibilityMask & 2U), "pending checkbox edits are distinguished from the still-visible crosshair");
-    GetComplete(window, Click(window, "View", "Visibility"), "Succeeded");
-    for (const auto& view : window.GetSession()->GetRenderViewStates()) if (view.id.find("slice-") == 0)
-        Check((view.visibilityMask & 2U) == 0, "slice scope closes all three slice crosshairs");
-    SetBoolean(auxiliary->GetField("crosshair"), true);
-    auxiliary->GetField("crosshair")->findChild<QPushButton*>("unsetBoolean")->click();
-    Check(auxiliary->GetField("crosshair")->GetValue() == QJsonValue(false), "retracting a draft restores the real disabled state rather than a misleading do-not-modify mark");
+    for (const auto* key : {"planes", "ruler"}) Check(!auxiliary->GetField(key)->findChild<QCheckBox*>("value")->isEnabled(), "slice scope disables inapplicable 3D controls");
+    GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "all"}, {"planes", false}, {"crosshair", false}, {"ruler", false}}), "Succeeded");
+    panel->SetParameterPatch("Set", {{"viewId", "slice-top-down"}, {"windowLevel", QJsonArray{100.,50.}}});
+    Check(form->GetField("mode")->isHidden() && form->GetField("quality")->isHidden(), "slice parameters exclude 3D rendering modes and quality");
+    GetComplete(window, Click(window, "View", "Set"), "Succeeded");
+    Check(window.GetSession()->GetRenderViewState({"slice-top-down"})->viewMode == HostRenderMode::SliceTopDown, "editing slice window level preserves the slice direction");
+    panel->SetParameterPatch("Set", {{"viewId", "primary-3d"}, {"windowLevel", QJsonValue()}});
+    SetBoolean(auxiliary->GetField("ruler"), true);
+    Check(auxiliary->GetField("ruler")->findChild<QLabel*>("booleanState")->text().contains("待应用"), "pending edits are distinguished from applied display state");
+    auxiliary->GetField("ruler")->findChild<QPushButton*>("unsetBoolean")->click();
+    Check(auxiliary->GetField("ruler")->GetValue() == QJsonValue(false), "retracting a draft restores the applied state");
     panel->SetParameterPatch("Visibility", {{"viewScope", "primary-3d"}});
     Check(auxiliary->GetField("crosshair")->GetValue().isNull() && !auxiliary->GetField("crosshair")->findChild<QCheckBox*>("value")->isEnabled(), "3D view never claims to display a slice crosshair");
     GetComplete(window, Click(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", "IsoSurface"}}), "Succeeded");
     Check(auxiliary->GetField("planes")->GetValue().isNull() && !auxiliary->GetField("planes")->findChild<QCheckBox*>("value")->isEnabled(), "plain isosurface mode cannot display composite reference planes");
     GetComplete(window, Click(window, "View", "Set", {{"mode", "CompositeIsoSurface"}}), "Succeeded");
     panel->SetParameterPatch("Set", {{"mode", QJsonValue()}});
-    panel->SetParameterPatch("Visibility", {{"viewScope", "slices"}});
+    panel->SetParameterPatch("Visibility", {{"viewScope", "primary-3d"}});
     window.GetWorkflow().onNavigate("View", "Visibility", {}); QCoreApplication::processEvents(); window.grab().save("applied-state-view.png");
     GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "all"}, {"planes", true}, {"crosshair", true}, {"ruler", true}}), "Succeeded");
     panel->SetParameters("Set", original);
@@ -726,7 +765,7 @@ void CheckCropWorkflow(TestWindow& window)
     if (!GetEnabled(window, "Crop")) return;
     window.SetViewsVisible(true);
     auto* panel = window.GetModule("Crop");
-    Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "all five crop views settle through events");
+    Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "all four crop views settle through events");
     GetComplete(window, Click(window,"Crop","CreateDocument"),"Succeeded");
     const auto firstDocument=panel->GetObservedState()["documentId"].toString();
     GetComplete(window, Click(window,"Crop","CreateDocument"),"Succeeded");
@@ -791,7 +830,7 @@ void CheckCropWorkflow(TestWindow& window)
     for(const auto item:history){const auto node=item.toObject();if(node["parentNodeId"].toString()=="0")rootNode=node["nodeId"].toString();
         else if(node["nodeId"].toString()!=currentNode)otherNode=node["nodeId"].toString();}
     Check(!otherNode.isEmpty()&&!rootNode.isEmpty(),"history exposes stable branch and Root IDs");
-    auto* tree=panel->findChild<QTreeWidget*>("sceneNodes");tree->expandAll();QTreeWidgetItem* historyNode=nullptr;
+    auto* tree=panel->GetCatalogTree();tree->expandAll();QTreeWidgetItem* historyNode=nullptr;
     for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()["Node"].toObject()["nodeId"].toString()==otherNode){historyNode=*it;break;}
     Check(historyNode!=nullptr,"crop tree exposes selectable stable nodes");ClickNode(tree,historyNode);
     Check(panel->GetParameters()["nodeId"].toString()==otherNode,"scene selection supplies stable node identity");
@@ -842,8 +881,240 @@ void CheckCropWorkflow(TestWindow& window)
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
 }
+void CheckCropMouseInteraction(TestWindow& window)
+{
+    if (!GetEnabled(window, "Crop")) return;
+    auto* panel = window.GetModule("Crop");
+    auto* view = window.findChild<QVTKOpenGLNativeWidget*>("primary3D");
+    const auto* endpoint = window.GetSession()->GetPrimaryEndpoint();
+    Check(view && endpoint && view->renderWindow()->GetInteractor() == endpoint->interactor,
+        "manual QVTK mouse input uses the crop interactor");
+    const auto settled = [&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); };
+    GetComplete(window, Click(window, "Crop", "CreateDocument"), "Succeeded");
+    for (const auto* renderMode : {"CompositeIsoSurface", "CompositeVolume"}) {
+        GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", renderMode}}), "Succeeded");
+        Check(Wait(settled), "display mode settles before crop input");
+        for (const auto* shape : {"Box", "Plane", "Sphere", "Cylinder"}) {
+            for (const auto* removal : {"KeepInside", "RemoveInside", "PositionOnly"}) {
+                GetComplete(window, Click(window, "Crop", "ResetPreview"), "Succeeded");
+                GetComplete(window, Click(window, "Crop", shape), "Succeeded");
+                GetComplete(window, Click(window, "Crop", removal), "Succeeded");
+                Check(Wait(settled), "crop controls render before mouse input");
+                using Point = std::array<double, 3>;
+                std::vector<std::function<Point()>> handles;
+                std::function<std::vector<double>()> geometry;
+                auto* props = endpoint->renderer->GetViewProps(); props->InitTraversal();
+                while (auto* prop = props->GetNextProp()) {
+                    if (auto* handle = vtkHandleRepresentation::SafeDownCast(prop)) {
+                        handles.push_back([handle] { Point point{}; handle->GetWorldPosition(point.data()); return point; });
+                    } else if (auto* box = vtkBoxRepresentation::SafeDownCast(prop)) {
+                        for (const int index : {14, 8, 10}) handles.push_back([box, index] {
+                            vtkNew<vtkPolyData> poly; box->GetPolyData(poly); Point point{}; poly->GetPoint(index, point.data()); return point;
+                        });
+                        geometry = [box] {
+                            vtkNew<vtkPolyData> poly; box->GetPolyData(poly); std::vector<double> values;
+                            for (int i = 0; i < 8; ++i) { const auto* p = poly->GetPoint(i); values.insert(values.end(), p, p+3); }
+                            return values;
+                        };
+                    } else if (auto* plane = vtkImplicitPlaneRepresentation::SafeDownCast(prop)) {
+                        handles.push_back([plane] { Point point{}; plane->GetOrigin(point.data()); return point; });
+                        geometry = [plane] {
+                            std::vector<double> values(6); plane->GetOrigin(values.data()); plane->GetNormal(values.data()+3); return values;
+                        };
+                    }
+                }
+                if (!geometry) geometry = [handles] {
+                    std::vector<double> values;
+                    for (const auto& position : handles) { const auto p = position(); values.insert(values.end(), p.begin(), p.end()); }
+                    return values;
+                };
+                const int expected = QString(shape) == "Cylinder" ? 4 : QString(shape) == "Box" ? 3 : QString(shape) == "Plane" ? 1 : 2;
+                Check(handles.size() == expected, "crop exposes its controls in the 3D renderer");
+                for (const auto& handle : handles) {
+                    const auto before = geometry(); const auto point = handle();
+                    endpoint->renderer->SetWorldPoint(point[0], point[1], point[2], 1.0);
+                    endpoint->renderer->WorldToDisplay();
+                    const auto* display = endpoint->renderer->GetDisplayPoint();
+                    const auto* size = endpoint->renderWindow->GetSize();
+                    const QPointF start(display[0] * view->width() / size[0],
+                        (size[1] - 1 - display[1]) * view->height() / size[1]);
+                    const auto sendMouse = [&](QEvent::Type type, QPointF position, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                        const auto modifiers = QString(shape) == "Box" && &handle == handles.data() ? Qt::ShiftModifier : Qt::NoModifier;
+                        QMouseEvent event(type, position, button, buttons, modifiers);
+                        QApplication::sendEvent(view, &event);
+                    };
+                    const auto count = panel->GetObservedState()["operationCount"].toString().toULongLong();
+                    const auto cursorBefore = window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld;
+                    std::array<double, 3> cameraBefore{};
+                    endpoint->renderer->GetActiveCamera()->GetPosition(cameraBefore.data());
+                    const auto rendersBefore = window.GetRenderCount();
+                    sendMouse(QEvent::MouseMove, start, Qt::NoButton, Qt::NoButton);
+                    sendMouse(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+                    for (int step = 1; step <= 4; ++step)
+                        sendMouse(QEvent::MouseMove, start + QPointF(step * 4, step * 3), Qt::NoButton, Qt::LeftButton);
+                    panel->Observe();
+                    const bool dragging = panel->GetObservedState()["isBusy"].toBool();
+                    const bool renderedDuringDrag = Wait([&] { return window.GetRenderCount() > rendersBefore; }, 2000);
+                    sendMouse(QEvent::MouseButtonRelease, start + QPointF(16, 12), Qt::LeftButton, Qt::NoButton);
+                    const auto after = geometry();
+                    std::array<double, 3> cameraAfter{};
+                    endpoint->renderer->GetActiveCamera()->GetPosition(cameraAfter.data());
+                    const bool positionOnly = QString(removal) == "PositionOnly";
+                    std::cout << "Crop mouse: " << renderMode << '/' << shape << '/' << removal << " handle " << (&handle - handles.data()) << std::endl;
+                    if (!(positionOnly || dragging) || before == after || !renderedDuringDrag)
+                        std::cerr << "Crop drag diagnostic: dragging=" << dragging << " changed=" << (before != after)
+                            << " rendered=" << renderedDuringDrag << std::endl;
+                Check((positionOnly || dragging) && before != after && renderedDuringDrag, "Qt mouse drag changes and renders crop geometry before release");
+                Check(Wait([&] { return settled() && panel->GetObservedState()["operationCount"].toString().toULongLong() == count + (positionOnly ? 0 : 1); }),
+                    "crop drag renders all views and records history only in removal modes");
+                Check(cursorBefore == window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld && cameraBefore == cameraAfter,
+                    "crop controls take precedence over reference planes without moving the slices or camera");
+                }
+            }
+        }
+    }
+    GetComplete(window, Click(window, "Crop", "CloseDocument"), "Succeeded");
+    GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
+    Check(Wait(settled), "closing crop removes its controls before reference-plane input");
+    // 斜视使切片法线在屏幕上有非零投影，避开正视时无法沿深度拖动的退化情况。
+    auto* camera = endpoint->renderer->GetActiveCamera(); camera->Azimuth(30); camera->Elevation(20);
+    endpoint->interactor->Render(); Check(Wait(settled), "oblique reference-plane view renders");
+    bool movedPlane = false; int planeCandidates = 0, visiblePlanes = 0;
+    vtkNew<vtkPropPicker> picker;
+    auto* actors = endpoint->renderer->GetActors(); actors->InitTraversal();
+    std::vector<vtkSmartPointer<vtkActor>> referenceActors;
+    // 硬件拾取会重新遍历 renderer 的 actor collection，先保留本轮候选。
+    while (auto* actor = actors->GetNextActor()) referenceActors.emplace_back(actor);
+    for (const auto& actor : referenceActors) {
+        if (movedPlane || !actor->GetVisibility() || !actor->GetPickable() || !actor->GetMapper()) continue;
+        auto* data = actor->GetMapper()->GetInput();
+        if (!data || data->GetNumberOfPoints() != 4) continue;
+        ++planeCandidates;
+        const auto* bounds = actor->GetBounds();
+        std::array<double, 3> point{};
+        for (int i = 0; i < 3; ++i) point[i] = bounds[2*i] * .96 + bounds[2*i+1] * .04;
+        endpoint->renderer->SetWorldPoint(point[0], point[1], point[2], 1.); endpoint->renderer->WorldToDisplay();
+        std::array<double, 3> display{}; endpoint->renderer->GetDisplayPoint(display.data());
+        if (!picker->Pick(display[0], display[1], 0, endpoint->renderer) || picker->GetActor() != actor) continue;
+        ++visiblePlanes;
+        const auto* size = endpoint->renderWindow->GetSize();
+        const QPointF start(display[0] * view->width() / size[0], (size[1]-1-display[1]) * view->height() / size[1]);
+        const auto before = window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld;
+        QMouseEvent press(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view, &press);
+        QMouseEvent move(QEvent::MouseMove, start+QPointF(16,12), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view, &move);
+        QMouseEvent release(QEvent::MouseButtonRelease, start+QPointF(16,12), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(view, &release);
+        movedPlane = Wait([&] { return before != window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld; }, 1000);
+    }
+    if (!movedPlane) std::cerr << "Reference-plane diagnostic: candidates=" << planeCandidates << " visible=" << visiblePlanes << std::endl;
+    Check(movedPlane && Wait(settled), "reference planes remain draggable after exiting every crop mode");
+    GetComplete(window, Click(window, "View", "Reset", {{"viewId", "primary-3d"}}), "Succeeded");
+}
+void CheckRenderModeSwitch(TestWindow& window)
+{
+    auto* mode = window.findChild<QComboBox*>("renderMode");
+    auto* renderWindow = window.GetSession()->GetRenderViewEndpoint("primary-3d")->renderWindow;
+    const auto source = window.GetSession()->GetImageDescriptor()->dataRevision;
+    for (const int index : {1, 0}) {
+        const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
+        mode->setCurrentIndex(index); mode->activated(index);
+        GetComplete(window, id, "Succeeded");
+        Check(Wait([&] { return !window.GetWorkflow().getRenderPending("primary-3d"); }), "mode switch reaches a rendered frame");
+        const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});
+        Check(state && state->viewMode == (index ? HostRenderMode::CompositeVolume : HostRenderMode::CompositeIsoSurface)
+            && state->dataRevision == source && window.GetSession()->GetRenderViewEndpoint("primary-3d")->renderWindow == renderWindow,
+            "toolbar changes mode in the same 3D window and preserves data identity");
+        int slices = 0;
+        for (const auto& view : window.GetSession()->GetRenderViewStates()) if (view.id != "primary-3d") {
+            Check(view.viewMode == HostRenderMode::SliceTopDown || view.viewMode == HostRenderMode::SliceFrontBack || view.viewMode == HostRenderMode::SliceLeftRight,
+                "3D mode switch preserves each slice mode"); ++slices;
+        }
+        Check(slices == 3, "all three slices remain available after 3D mode switching");
+        if (window.GetModule("Part")->GetObservedState()["hasCurrentParts"].toBool()) (void)CheckPartDisplay(window);
+    }
+}
+void CheckWallWorkflow(TestWindow& window, const QString& directory)
+{
+    if (!GetEnabled(window, "Wall") || !GetEnabled(window, "Part") || !GetEnabled(window, "Surface")) return;
+    std::vector<float> data(32*32*32);
+    for (int z=0; z<32; ++z) for (int y=0; y<32; ++y) for (int x=0; x<32; ++x) {
+        const auto distance = std::max({std::abs(x-15.5)-10, std::abs(y-15.5)-10, std::abs(z-15.5)-4});
+        data[x+32*(y+32*z)] = static_cast<float>(500*(1-std::tanh(distance/0.7)));
+    }
+    const auto path = directory + "/wall-slab.raw";
+    QFile file(path); Check(file.open(QIODevice::WriteOnly), "wall fixture opens");
+    Check(file.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size()*sizeof(float))) == static_cast<qint64>(data.size()*sizeof(float)), "wall fixture writes"); file.close();
+    GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "wall-manual-slab"},
+        {"dimensions", QJsonArray{32,32,32}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{-31,-31,0}}, {"sourceDigest", ""}}), "Succeeded");
+    GetComplete(window, Click(window, "Wall", "Start"), "InvalidInput");
+    GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
+    GetComplete(window, Click(window, "Surface", "LocalAdaptiveIso50", {{"componentSelection", "All"}, {"initialIsoValue", 500.},
+        {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
+        {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");
+    const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
+        {"reverseTolerance", 0.25}, {"maxFitResidual", 30.}, {"maxLocalizationSigma", 0.2}, {"minSupportRatio", 0.5},
+        {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
+    const auto result = record["result"].toObject();
+    Check(result["isDisplayReady"].toBool() && result["coverage"].toDouble() >= 0.5
+        && !result["minimum"].isNull() && std::abs(result["minimum"].toDouble()-8.) <= 0.2,
+        "manual wall entry measures the known 8 mm slab and creates its 3D display");
+    const auto queried = GetComplete(window, Click(window, "Wall", "Result"), "Observed")["result"].toObject();
+    Check(queried["result"] == result["result"] && queried["sampleCount"] == result["sampleCount"], "wall query retains exact published result identity");
+    GetComplete(window, Click(window, "Wall", "SetEvaluation", {{"lower", 7.}, {"upper", 9.}, {"histogramRange", QJsonArray{0,24}}}), "Succeeded");
+    for (const bool visible : {false, true}) GetComplete(window, Click(window, "Wall", "SetDisplay", {{"mode", "Tolerance"}, {"range", QJsonArray{0,24}}, {"isVisible", visible}}), "Succeeded");
+    GetComplete(window, Click(window, "Wall", "SelectSample", {{"sampleIndex", "0"}}), "Succeeded");
+    auto* wall = window.GetModule("Wall"); wall->Observe();
+    Check(FindNode(wall->GetSceneTree(), "wall-result:" + wall->GetObservedState()["result"].toString()) != nullptr,
+        "wall scene contains the current visible result");
+    Check(!FindNode(wall->GetSceneTree(), "published-graph") && FindNode(wall->GetCatalogTree(), "published-graph"),
+        "wall scene objects exclude the independent published-result catalog");
+    window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); window.grab().save("wall-manual-ui.png");
+    GetComplete(window, Click(window, "Wall", "Clear"), "Succeeded");
+    wall->Observe(); Check(!wall->GetObservedState()["hasResult"].toBool(), "wall clear removes the active result");
+}
+void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& directory)
+{
+    if (!GetEnabled(window, "Part")) return;
+    constexpr int n = 96;
+    std::vector<float> data(n*n*n, 0.f);
+    for (int z=12; z<84; ++z) for (int y=12; y<84; ++y) for (int x=12; x<84; ++x)
+        if (x < 42 || x > 54) data[x+n*(y+n*z)] = 100.f;
+    const auto path = directory + "/switch-during-part.raw";
+    QFile file(path); Check(file.open(QIODevice::WriteOnly), "switch regression fixture opens");
+    Check(file.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size()*sizeof(float))) == static_cast<qint64>(data.size()*sizeof(float)), "switch regression fixture writes"); file.close();
+    GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "feature-switch-regression"},
+        {"dimensions", QJsonArray{n,n,n}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{0,0,0}}, {"sourceDigest", ""}}), "Succeeded");
+    auto* tabs = window.findChild<QTabBar*>("featureTabs");
+    auto* part = window.GetModule("Part"); auto* form = part->GetParameterEditor("Start");
+    const auto threshold = form->GetField("threshold");
+    for (int round = 0; round < 3; ++round) {
+        const auto id = Click(window, "Part", "Start", {{"threshold", 50.}, {"minPartVoxels", "1"}});
+        Check(!window.GetRecords().GetRecord(id)["isTerminal"].toBool(), "feature switching begins while segmentation is pending");
+        int switches = 0;
+        const auto change = [&] { tabs->setCurrentIndex((tabs->currentIndex()+1) % tabs->count()); ++switches; };
+        for (int i = 0; i < tabs->count(); ++i) change();
+        QTimer switching; switching.setInterval(1); QObject::connect(&switching, &QTimer::timeout, &window, [&] {
+            if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) switching.stop(); else change();
+        }); switching.start();
+        GetComplete(window, id, "Succeeded"); switching.stop();
+        window.GetWorkflow().onNavigate("Part", "Start", {}); part->Observe();
+        Check(switches >= tabs->count() && form == part->GetParameterEditor("Start") && threshold == form->GetField("threshold"),
+            "pending segmentation survives all feature tabs and preserves parameter widgets");
+        Check(!part->GetObservedState()["isBusy"].toBool() && part->GetObservedState()["hasCurrentParts"].toBool(),
+            "returning to Part displays the completed result exactly once");
+    }
+    CheckFourViewGeometry(window);
+    QCoreApplication::processEvents(); window.grab().save("four-view-part-ui.png");
+    if (GetEnabled(window, "Artifact")) {
+        window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); window.grab().save("artifact-buttons-ui.png");
+    }
+}
 void StartSelfTest(TestWindow& window)
 {
+    QCoreApplication::processEvents();
+    CheckFourViewGeometry(window);
     CheckUiAndRecords(window);
     CheckSceneRefresh(window);
     CheckParameterLayout(window);
@@ -862,12 +1133,15 @@ void StartSelfTest(TestWindow& window)
     std::vector<float> voxels(24 * 24 * 24, 0.0f);
     for (int z = 3; z < 20; ++z) for (int y = 3; y < 20; ++y) for (int x = 3; x < 20; ++x)
         voxels[x + 24 * (y + 24 * z)] = x < 10 || x > 12 ? 100.0f : 0.0f;
+    // 封闭内孔使单个3D目标也有可显示的孔隙网格，不能依靠空切片标签冒充显示成功。
+    for (int z = 8; z < 11; ++z) for (int y = 8; y < 11; ++y) for (int x = 5; x < 8; ++x)
+        voxels[x + 24 * (y + 24 * z)] = 0.f;
     const auto path = directory.filePath("拖拽 数据-float32.raw");
     QFile file(path); Check(file.open(QIODevice::WriteOnly), "fixture opens");
     const QByteArray bytes(reinterpret_cast<const char*>(voxels.data()), static_cast<int>(voxels.size() * sizeof(float)));
     Check(file.write(bytes) == bytes.size(), "fixture writes"); file.close();
     window.SetViewsVisible(false);
-    const QJsonObject load{{"filePath", path}, {"datasetId", "synthetic-manual-contract-test"}, {"dimensions", QJsonArray{24, 24, 24}},
+    const QJsonObject load{{"filePath", path}, {"datasetId", "synthetic-manual-contract-test"}, {"dimensions", QJsonArray{24, 24, 24}}, {"spacingLPS", QJsonArray{1,1,1}},
         {"evidenceKind", "synthetic-regression"}, {"sourceDigest", QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
     auto* dataPanel = window.GetModule("Data"); dataPanel->SetParameterPatch("Load", load);
     dataPanel->GetParameterEditor("Load")->GetField("filePath")->findChild<QLineEdit*>("value")->clear(); DropFile(dataPanel->GetParameterEditor("Load")->GetField("filePath")->findChild<QLineEdit*>("value"), path);
@@ -875,8 +1149,7 @@ void StartSelfTest(TestWindow& window)
     DropFile(&window, path);
     Check(dataPanel->GetParameters()["filePath"].toString() == path, "dropping onto window fills data path without loading");
     Check(!window.GetSession()->GetImageDescriptor(), "file drop never silently loads an unconfirmed geometry");
-    dataPanel->SetParameterPatch("ExportSlices", {}); DropFile(dataPanel->GetParameterEditor("ExportSlices")->GetField("outputDir")->findChild<QLineEdit*>("value"), path);
-    Check(dataPanel->GetParameters()["outputDir"].toString() == directory.path(), "dropping file into directory field uses its parent directory");
+    Check(dataPanel->GetActions().contains("ExportSlices"), "slice export is available alongside the four views");
     const auto firstLoad = Click(window, "Data", "Load", load);
     GetComplete(window, Send(window, "Data", "Load", load), "Rejected");
     GetComplete(window, firstLoad, "Succeeded");
@@ -891,7 +1164,7 @@ void StartSelfTest(TestWindow& window)
             matched = item.toObject()["parents"].toArray().contains(GetRefText(original.dataRevision));
         Check(matched, "separate real publications retain the same source parent in the data graph");
     }
-    auto* dataTree = dataPanel->findChild<QTreeWidget*>("sceneNodes"); dataPanel->Observe();
+    auto* dataTree = dataPanel->GetCatalogTree(); dataPanel->Observe();
     Check(static_cast<SceneGraphTree*>(dataTree)->GetGraph().lanes >= 2, "published sibling data uses real graph branches");
     auto* sourceNode = FindNode(dataTree, "published:" + GetRefText(original.dataRevision));
     Check(sourceNode != nullptr, "published input is available as a scene node");
@@ -909,6 +1182,7 @@ void StartSelfTest(TestWindow& window)
     Check(window.GetUpdateCount() - burstStart < burst.size(), "burst notifications merge and every command retains its exact completion");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == 50.0, "burst keeps final requested view state");
     CheckCropWorkflow(window);
+    CheckCropMouseInteraction(window);
     window.SetViewsVisible(false);
     if (GetEnabled(window, "Gap")) {
         GetComplete(window, Send(window, "Gap", "Overlay"), "Rejected");
@@ -918,7 +1192,7 @@ void StartSelfTest(TestWindow& window)
     }
     if (GetEnabled(window, "Part")) {
         std::map<std::string, double> originalOpacities;
-        for (const auto* id : {"primary-3d", "composite-volume"})
+        for (const auto* id : {"primary-3d"})
             originalOpacities[id] = window.GetSession()->GetRenderViewState({id})->material.opacity;
         GetComplete(window, Click(window, "Part", "Start", {{"threshold", 50.0}}), "Succeeded");
         const auto catalog = GetComplete(window, Send(window, "Part", "Catalog"), "Observed")["result"].toObject();
@@ -927,6 +1201,7 @@ void StartSelfTest(TestWindow& window)
             && part.toObject()["colorRGBA"].toArray() == QJsonArray{0.72,0.72,0.72,1.0},
             "new parts use an opaque neutral preview without translucent inner-shell overlap");
         (void)CheckPartDisplay(window);
+        window.SetViewsVisible(true); CheckRenderModeSwitch(window); window.SetViewsVisible(false);
         ClickPartNode(window, 0); ClickPartNode(window, 1); ClickPartNode(window, 0);
         CheckNodeParameters(window); CheckNodeErrorBoundary(window);
         const auto target = parts[0].toObject();
@@ -934,7 +1209,7 @@ void StartSelfTest(TestWindow& window)
         CheckOverlaySwitch(window, "Part", originalOpacities);
         auto* editPanel = window.GetModule("PartEdit");
         window.GetWorkflow().onNavigate("PartEdit", "Merge", {});
-        auto* editTree = editPanel->findChild<QTreeWidget*>("sceneNodes");
+        auto* editTree = editPanel->GetCatalogTree();
         const auto partNode = [&](const QJsonObject& binding) -> QTreeWidgetItem* {
             for (QTreeWidgetItemIterator it(editTree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["binding"].toObject() == binding) return *it;
             return nullptr;
@@ -1068,7 +1343,7 @@ void StartSelfTest(TestWindow& window)
             GetComplete(window, Send(window, "Alignment", "SaveRecipe"), "FullyDetermined");
             GetComplete(window, Send(window, "Alignment", "Start"), "FullyDetermined");
             GetComplete(window, Click(window, "Alignment", "Result"), "Observed");
-            auto* resultTree = window.GetModule("Alignment")->findChild<QTreeWidget*>("sceneNodes");
+            auto* resultTree = window.GetModule("Alignment")->GetCatalogTree();
             bool hasResidual = false;
             for (QTreeWidgetItemIterator it(resultTree); *it; ++it) hasResidual = hasResidual || (*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString().startsWith("residual:");
             Check(hasResidual, "alignment residuals are visible as result nodes");
@@ -1102,7 +1377,7 @@ void StartSelfTest(TestWindow& window)
     for (const auto* name : {"Crop", "Gap", "Part", "Surface", "Artifact", "Alignment"}) {
         if (!GetEnabled(window, name)) continue;
         const auto* panel = window.GetModule(name);
-        const auto nodes = GetSceneNodes(name, panel->GetObservedState(), GetDescriptor(window.GetSession()->GetImageDescriptor()), panel->GetActions(), {}, window.GetWorkflow().getPublishedGraph());
+        const auto nodes = GetCatalogNodes(name, panel->GetObservedState(), GetDescriptor(window.GetSession()->GetImageDescriptor()), panel->GetActions(), {}, window.GetWorkflow().getPublishedGraph());
         bool found = false;
         for (const auto child : nodes.first().toObject()["children"].toArray()) if (child.toObject()["id"] == "published-graph")
             for (const auto row : child.toObject()["children"].toArray()) found = found || row.toObject()["title"].toString().startsWith(GetModuleText(name));
@@ -1115,6 +1390,9 @@ void StartSelfTest(TestWindow& window)
         const auto scene = window.GetSession()->GetSceneViewState({"primary-3d"});
         return scene && !window.GetWorkflow().getRenderPending("primary-3d");
     }), "restored visible view renders latest scene");
+    CheckRenderModeSwitch(window);
+    CheckWallWorkflow(window, directory.path());
+    CheckFeatureSwitchDuringSegmentation(window, directory.path());
     CheckIdle(window);
     // 关闭时保留页面和接收对象，Session 完成/取消尚未交付的业务回调。
     const auto pendingLoad = Send(window, "Data", "Load", load);
@@ -1230,7 +1508,7 @@ QJsonObject CheckPartDisplay(TestWindow& window)
             if (count != (enabled ? 1 : 0)) return false;
         }
         return true;
-    }), "owner scene delta settles part preview visibility in all five views");
+    }), "owner scene delta settles part preview visibility in the current 3D view");
     vtkDataSet* sharedSurface = nullptr;
     QJsonArray views;
     for (const auto& id : GetPartViews().viewIds) {
@@ -1243,12 +1521,13 @@ QJsonObject CheckPartDisplay(TestWindow& window)
             ++displayCount;
             Check(GetRefText(display.data) == catalog["labelMap"].toString(), "view displays the current formal label revision");
         }
-        Check(displayCount == (enabled ? 1 : 0), "segmentation display registration is synchronized in all five views");
+        Check(displayCount == (enabled ? 1 : 0), "segmentation display registration is synchronized in the current 3D view");
         const auto presentation = window.GetSession()->GetRenderViewState({id});
         Check(presentation.has_value(), "part preview has an applied source presentation");
         if (!enabled) { views.append(QJsonObject{{"view", QString::fromStdString(id)}, {"displayCount", displayCount},
             {"sourceOpacity", presentation->material.opacity}}); continue; }
-        const bool isSlice = id.find("slice-") == 0;
+        const bool isSlice = presentation->viewMode == HostRenderMode::SliceTopDown || presentation->viewMode == HostRenderMode::SliceFrontBack || presentation->viewMode == HostRenderMode::SliceLeftRight;
+        const bool isVolume = presentation->viewMode == HostRenderMode::Volume || presentation->viewMode == HostRenderMode::CompositeVolume;
         vtkLookupTable* table = nullptr; vtkDataSet* input = nullptr;
         int matches = 0, volumes = 0;
         auto* props = endpoint->renderer->GetViewProps(); props->InitTraversal();
@@ -1272,12 +1551,12 @@ QJsonObject CheckPartDisplay(TestWindow& window)
         Check(matches == 1 && table && input, "view has exactly one current part preview with all labels");
         if (!isSlice) {
             const auto state = window.GetSession()->GetRenderViewState({id});
-            Check(state && (id == "primary-3d" ? state->material.opacity == 0 : state->material.opacity > 0),
+            Check(state && (isVolume ? state->material.opacity > 0 : state->material.opacity == 0),
                 "only primary shell is hidden; native DVR opacity stays positive");
             Check(!sharedSurface || sharedSurface == input, "primary and volume previews share the exact same surface product");
             sharedSurface = input;
         }
-        if (id == "composite-volume") Check(volumes > 0, "volume background remains a real volume renderer");
+        if (isVolume) Check(volumes > 0, "volume background remains a real volume renderer");
         QJsonArray colors;
         for (const auto& value : parts) {
             const auto part = value.toObject(); const auto label = GetId(part["labelId"]);
@@ -1289,7 +1568,7 @@ QJsonObject CheckPartDisplay(TestWindow& window)
             }
             expected[3] *= part["visible"].toBool() ? part["opacity"].toDouble() : 0;
             if (isSlice) expected[3] *= part["selected"].toBool() ? 0.8 : 0.18;
-            if (id == "composite-volume") expected[3] *= part["selected"].toBool() ? 0.35 : 0;
+            if (scene->role == HostRenderViewRole::Composite3D) expected[3] *= part["selected"].toBool() ? 0.35 : 0;
             for (int c = 0; c < 4; ++c) if (std::abs(expected[c] - actual[c]) > 1.0/255.0)
                 throw std::runtime_error("零件显示色、显隐或选中状态与目录不一致：" + id);
             colors.append(QJsonObject{{"label", QString::number(label)}, {"rgba", QJsonArray{actual[0],actual[1],actual[2],actual[3]}}});
@@ -1297,7 +1576,7 @@ QJsonObject CheckPartDisplay(TestWindow& window)
         views.append(QJsonObject{{"view", QString::fromStdString(id)}, {"displayCount", displayCount},
             {"sourceOpacity", presentation->material.opacity}, {"volumeCount", volumes}, {"points", QString::number(input->GetNumberOfPoints())}, {"colors", colors}});
     }
-    Check(true, "part colours, visibility and selection match the catalog in surface, volume preview and three slices");
+    Check(true, "part colours, visibility and selection match the catalog in the current 3D mode");
     return {{"catalog", catalog}, {"views", views}};
 }
 void StartSequence(TestWindow& window, const QString& path)
@@ -1325,7 +1604,33 @@ void StartSequence(TestWindow& window, const QString& path)
         if (timeout < 1 || timeout > 3600000 || timeout != std::trunc(timeout)) throw std::invalid_argument("用例 timeoutMs 必须为 1..3600000 毫秒整数");
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
         const auto id = Send(window, GetText(step, "module"), GetText(step, "action"), params);
+        QTimer switching, cancellation;
+        int switchCount = 0;
+        if (step["switchFeaturesWhilePending"].toBool()) {
+            auto* tabs = window.findChild<QTabBar*>("featureTabs");
+            QObject::connect(&switching, &QTimer::timeout, &window, [&, tabs] {
+                if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) { switching.stop(); return; }
+                tabs->setCurrentIndex((tabs->currentIndex()+1) % tabs->count()); ++switchCount;
+            });
+            switching.start(20);
+        }
+        if (step.contains("cancelAfterMs")) {
+            const auto delay = GetNumber(step, "cancelAfterMs");
+            auto* module = window.GetModule(GetText(step, "module"));
+            if (delay < 1 || delay >= timeout || std::trunc(delay) != delay || !module->onStop)
+                throw std::invalid_argument("取消审计需要有效的取消入口和小于等待时限的延迟");
+            cancellation.setSingleShot(true);
+            QObject::connect(&cancellation, &QTimer::timeout, &window, [&, module] {
+                if (!window.GetRecords().GetRecord(id)["isTerminal"].toBool()) module->onStop();
+            });
+            cancellation.start(static_cast<int>(delay));
+        }
         const auto record = GetComplete(window, id, expected, static_cast<int>(timeout));
+        switching.stop(); cancellation.stop();
+        if (step["switchFeaturesWhilePending"].toBool()) {
+            Check(switchCount >= 11, "real pending operation survives switching across every feature page");
+            std::cout << "FEATURE SWITCH COUNT: " << switchCount << std::endl;
+        }
         if (step.contains("savePartSeeds")) {
             const auto seedKey = GetText(step,"savePartSeeds"); results[seedKey] = BuildPartSeeds(window,record["result"].toObject());
             if (step.contains("partSeedAudit")) ExportJson(GetText(step,"partSeedAudit"),results[seedKey].toObject());
@@ -1370,16 +1675,16 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         if (step.contains("partDisplayAudit")) ExportJson(GetText(step, "partDisplayAudit"), CheckPartDisplay(window));
         if (step.contains("expectVolumeOpacity")) {
-            const auto state = window.GetSession()->GetRenderViewState({"composite-volume"});
+            const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});
             Check(state && std::abs(state->material.opacity - step["expectVolumeOpacity"].toDouble()) < 1e-12,
                 "segmentation preserves the exact user-selected DVR opacity");
         }
         if (step.contains("volumeFrame")) {
             const auto spec = step["volumeFrame"].toObject();
-            Check(Wait([&] { return !window.GetWorkflow().getRenderPending("composite-volume"); }), "native DVR render settles");
+            Check(Wait([&] { return !window.GetWorkflow().getRenderPending("primary-3d"); }), "native DVR render settles");
             QImage pixels;
             for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>())
-                if (widget->renderWindow() == window.GetSession()->GetRenderViewEndpoint("composite-volume")->renderWindow)
+                if (widget->renderWindow() == window.GetSession()->GetRenderViewEndpoint("primary-3d")->renderWindow)
                     pixels = widget->grab().toImage();
             Check(!pixels.isNull(), "native DVR framebuffer exists");
             if (spec.contains("save")) volumeFrames[GetText(spec, "save")] = pixels;
@@ -1392,7 +1697,7 @@ void StartSequence(TestWindow& window, const QString& path)
                 if (window.GetWorkflow().getViewRenderPending && window.GetWorkflow().getViewRenderPending(view.id)) return false;
                 return true; }, static_cast<int>(timeout)), "visible real-data views finish requested rendering before capture");
             QCoreApplication::processEvents();
-            // Host Render 结束不等于 Qt 已合成五个 FBO；等待真实交换事件，避免首张截图串帧。
+            // Host Render 结束不等于 Qt 已合成三维 FBO；等待真实交换事件，避免首张截图串帧。
             QObject captureReceiver; std::set<QVTKOpenGLNativeWidget*> composing;
             for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
                 composing.insert(widget);

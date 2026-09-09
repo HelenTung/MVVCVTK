@@ -1,4 +1,4 @@
-// 测试用途：按构建开关创建并挂载七项功能，组合手动和自动化共用的测试页面。
+// 测试用途：按构建开关创建并挂载可选功能，组合手动和自动化共用的测试页面。
 #include "FeatureSetup.h"
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
@@ -19,6 +19,9 @@
 #endif
 #if defined(MANUAL_ROTATION)
 #include "Host/ModelRotationHostFeature.h"
+#endif
+#if defined(MANUAL_WALL)
+#include "Host/WallThicknessHostFeature.h"
 #endif
 #if defined(MANUAL_ALIGNMENT)
 #include "Host/MetrologyAlignmentHostFeature.h"
@@ -60,6 +63,10 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     // 整卷编辑的时限包含表面重建和不可变标签冻结，测试宿主显式给出完整阶段预算。
     partConfig.editTimeoutMs = 120000;
     auto part = std::make_shared<PartSegmentationHostFeature>(partConfig); attach(part);
+    context.workflow.getPartLabels = [part] {
+        const auto catalog = part->GetPartSetSnapshot();
+        return catalog && !catalog->isStale ? part->GetState().labelMap : DataRevisionRef{};
+    };
     modules.push_back(CreatePartTest(context, part, parent)); modules.push_back(CreatePartEditTest(context, part, parent));
 #else
     unavailable("Part"); unavailable("PartEdit");
@@ -90,6 +97,14 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     modules.push_back(CreateAlignmentTest(context, alignment, reference, parent));
 #else
     unavailable("Alignment");
+#endif
+#if defined(MANUAL_WALL)
+    ThicknessConfig thicknessConfig; thicknessConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
+    thicknessConfig.deadlineMilliseconds = 120000;
+    auto wall = std::make_shared<WallThicknessHostFeature>(thicknessConfig); attach(wall);
+    modules.push_back(CreateWallTest(context, wall, parent));
+#else
+    unavailable("Wall");
 #endif
     return modules;
 }

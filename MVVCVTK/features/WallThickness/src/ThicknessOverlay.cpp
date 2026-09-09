@@ -153,6 +153,13 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_legend->SetWidth(0.18);
     m_legend->SetHeight(0.65);
     m_legend->SetPosition(0.81, 0.15);
+    // 在宽三维工作区中使用稳定字号，不让色标文字随整个 viewport 放大。
+    m_legend->SetMaximumWidthInPixels(120);
+    m_legend->SetMaximumHeightInPixels(320);
+    m_legend->SetUnconstrainedFontSize(true);
+    for (auto* text : {m_legend->GetTitleTextProperty(), m_legend->GetLabelTextProperty(), m_legend->GetAnnotationTextProperty()}) {
+        text->SetFontSize(13); text->BoldOff(); text->ItalicOff(); text->ShadowOff();
+    }
     m_legend->SetVisibility(display.isVisible && display.hasLegend);
     m_invalidLegend = vtkSmartPointer<vtkLegendBoxActor>::New();
     auto symbolPoints = vtkSmartPointer<vtkPoints>::New();
@@ -174,8 +181,11 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_invalidLegend->SetNumberOfEntries(1);
     m_invalidLegend->SetEntry(0, symbol, "Invalid / unmeasured", textColor);
     m_invalidLegend->ScalarVisibilityOn();
-    m_invalidLegend->SetPosition(0.54, 0.02);
-    m_invalidLegend->SetPosition2(0.45, 0.09);
+    m_invalidLegend->SetPosition(0.64, 0.02);
+    m_invalidLegend->SetPosition2(0.34, 0.035);
+    m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
+    m_invalidLegend->GetEntryTextProperty()->ItalicOff();
+    m_invalidLegend->GetEntryTextProperty()->BoldOff();
     m_invalidLegend->BorderOff();
     m_invalidLegend->SetVisibility(display.isVisible && display.hasLegend);
     AttachProp(m_actor);

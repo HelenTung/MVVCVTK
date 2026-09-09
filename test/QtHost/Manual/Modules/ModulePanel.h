@@ -23,6 +23,8 @@ class QScrollArea;
 class QVBoxLayout;
 class QSplitter;
 class QLineEdit;
+class QTabWidget;
+class QTabBar;
 
 namespace Manual {
 class ParameterEditor;
@@ -31,6 +33,9 @@ class ModulePanel : public QWidget {
 public:
     using Action = std::function<void(std::uint64_t, const QJsonObject&)>;
     ModulePanel(TestContext context, QString name, QWidget* parent = nullptr);
+    QWidget* GetBrowser() const;
+    QTreeWidget* GetCatalogTree() const { return m_nodes; }
+    QTreeWidget* GetSceneTree() const { return m_scene; }
     void AttachAction(const QString& name, const QJsonObject& defaults, Action action,
         TestPolicy policy = TestPolicy::Change, bool exitTools = false);
     std::uint64_t SendAction(const QString& name, const QJsonObject& params);
@@ -77,13 +82,17 @@ private:
     std::set<std::uint64_t> m_pending;
     QJsonObject m_observed;
     QTreeWidget* m_nodes = nullptr;
+    QTreeWidget* m_scene = nullptr;
+    QTabWidget* m_browser = nullptr;
+    QTabBar* m_parameterTabs = nullptr;
+    QString m_parameterAction;
+    QLabel* m_noticeLabel = nullptr;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
     bool m_isSearching = false;
     QVBoxLayout* m_actionLayout = nullptr;
     QGridLayout* m_quickLayout = nullptr;
     QWidget* m_quickActions = nullptr;
-    QSplitter* m_parameterSplitter = nullptr;
     QScrollArea* m_parameterScroll = nullptr;
     std::map<QString, QWidget*> m_cards;
     std::map<QString, ParameterEditor*> m_forms;
@@ -92,6 +101,7 @@ private:
     QJsonObject m_node;
     QJsonObject m_lastResult;
     QJsonArray m_sceneNodes;
+    QJsonArray m_displayNodes;
     // 分别保留 Qt 隐式共享值，避免每次把大型目录嵌入一个新 JSON 对象后再比较。
     struct RefreshState {
         QJsonObject state, input, node, result, graph;

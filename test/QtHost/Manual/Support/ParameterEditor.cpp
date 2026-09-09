@@ -39,7 +39,7 @@ bool IsList(const QString& key)
 QJsonValue Shape(const QString& key)
 {
     if (key == "worldCenter" || key == "seedModelPoint" || key == "targetNormal") return QJsonArray{0,0,0};
-    if (key == "extent" || key == "roiModelBounds" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
+    if (key == "evaluationBounds" || key == "extent" || key == "roiModelBounds" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
     if (key == "colorRGBA") return QJsonArray{1,1,1,1};
@@ -115,6 +115,11 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
 }
 bool ParameterEditor::GetFieldApplicable(const QString& key) const
 {
+    if (m_key.isEmpty() && m_module == "View" && m_action == "Set"
+        && (key == "mode" || key == "iso" || key == "quality" || key == "transfer")) {
+        const auto target = m_fields.find("viewId");
+        return target == m_fields.end() || !target->second->GetValue().toString().startsWith("slice-");
+    }
     if (m_key.isEmpty() && m_module == "Surface" && key == "seedModelPoint") {
         const auto selection = m_fields.find("componentSelection");
         return selection != m_fields.end() && selection->second->GetValue() == "Seeded";

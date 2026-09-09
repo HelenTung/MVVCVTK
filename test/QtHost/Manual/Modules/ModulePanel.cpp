@@ -3,6 +3,7 @@
 #include "Support/UiText.h"
 #include "Support/ActionPolicy.h"
 #include "Support/SceneNodes.h"
+#include "Support/CatalogNodes.h"
 #include "Support/SceneGraph.h"
 #include "Support/PathInput.h"
 #include "Support/ParameterEditor.h"
@@ -35,6 +36,8 @@
 #include <QSplitter>
 #include <QToolButton>
 #include <QScrollBar>
+#include <QTabWidget>
+#include <QTabBar>
 #include <algorithm>
 namespace Manual {
 ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
@@ -42,6 +45,26 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
 {
     setAcceptDrops(true);
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(12,12,12,12); layout->setSpacing(10);
+    auto* title = new QLabel(GetDisplayName(), this); title->setStyleSheet("font-size: 16px; font-weight: 600;"); layout->addWidget(title);
+    m_noticeLabel = new QLabel(this); m_noticeLabel->setWordWrap(true); m_noticeLabel->setStyleSheet("color: #536579;"); layout->addWidget(m_noticeLabel);
+    // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
+    m_quickActions = new QWidget(this); m_quickActions->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
+    layout->addWidget(m_quickActions);
+    m_parameterTabs = new QTabBar(this); m_parameterTabs->setObjectName("parameterTabs");
+    m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setDrawBase(false);
+    layout->addWidget(m_parameterTabs);
+    connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
+        if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
+    });
+    m_browser = new QTabWidget(this); m_browser->setObjectName("objectBrowser");
+    auto* catalogPage = new QWidget(m_browser); auto* catalogLayout = new QVBoxLayout(catalogPage);
+    catalogLayout->setContentsMargins(4, 6, 4, 4);
+    m_scene = new QTreeWidget(m_browser); m_scene->setObjectName("sceneNodes");
+    m_scene->setColumnCount(2); m_scene->setHeaderLabels({"场景对象", "显示状态"});
+    m_scene->setUniformRowHeights(true); m_scene->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_scene->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_browser->addTab(m_scene, "场景"); m_browser->addTab(catalogPage, "结果目录");
     if (m_name == "Part" || m_name == "PartEdit") {
         auto* tools = new QHBoxLayout;
         m_nodeSearch = new QLineEdit(this); m_nodeSearch->setObjectName("nodeSearch");
@@ -54,21 +77,17 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
                 if (!SelectNodeGroup(entry.second) && onMessage) onMessage("当前没有可定位的" + entry.first + "。");
             });
         }
-        layout->addLayout(tools);
+        catalogLayout->addLayout(tools);
         connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { FilterNodes(); });
     }
-    m_parameterSplitter = new QSplitter(Qt::Vertical, this); m_parameterSplitter->setObjectName("parameterSplitter");
-    m_parameterSplitter->setChildrenCollapsible(false); m_parameterSplitter->setHandleWidth(8);
-    m_parameterSplitter->setStyleSheet("QSplitter::handle:vertical { background: #cedbe8; border-top: 1px solid #b2c3d5; border-bottom: 1px solid #b2c3d5; } QSplitter::handle:vertical:hover { background: #8bb6e2; }");
-    layout->addWidget(m_parameterSplitter);
-    m_nodes = new SceneGraphTree(this); m_nodes->setObjectName("sceneNodes");
+    m_nodes = new SceneGraphTree(this); m_nodes->setObjectName("resultCatalog");
     m_nodes->setAlternatingRowColors(true);
     m_nodes->setMinimumHeight(100); m_nodes->setRootIsDecorated(true); m_nodes->setUniformRowHeights(true);
     if (m_name == "PartEdit") m_nodes->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_nodes->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_nodes->header()->setStretchLastSection(false);
-    m_nodes->header()->setSectionResizeMode(1, QHeaderView::Fixed); m_nodes->header()->resizeSection(1, 170);
-    m_parameterSplitter->addWidget(m_nodes);
+    m_nodes->header()->setSectionResizeMode(1, QHeaderView::Interactive); m_nodes->header()->resizeSection(1, 88);
+    catalogLayout->addWidget(m_nodes);
     connect(m_nodes, &QTreeWidget::itemClicked, this, [this](auto* item, int) { SetNode(item); });
     m_nodes->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_nodes, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& point) {
@@ -86,21 +105,27 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
         menu.addSeparator(); menu.addAction("复制节点信息", this, [copyText] { QApplication::clipboard()->setText(copyText); });
         menu.exec(m_nodes->viewport()->mapToGlobal(point));
     });
-    m_parameterScroll = new QScrollArea(m_parameterSplitter); m_parameterScroll->setObjectName("operationScroll");
+    m_parameterScroll = new QScrollArea(this); m_parameterScroll->setObjectName("operationScroll");
     m_parameterScroll->setWidgetResizable(true); m_parameterScroll->setFrameShape(QFrame::NoFrame);
     m_parameterScroll->setMinimumHeight(180);
     auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
+    m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
-    m_quickActions = new QWidget(operations); m_quickLayout = new QGridLayout(m_quickActions);
-    m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6); m_actionLayout->addWidget(m_quickActions);
-    m_parameterScroll->setWidget(operations); m_parameterSplitter->addWidget(m_parameterScroll);
-    m_parameterSplitter->setStretchFactor(0, 1); m_parameterSplitter->setStretchFactor(1, 2);
-    m_parameterSplitter->setSizes({230, 500});
-    m_parameterSplitter->handle(1)->setToolTip("上下拖动，调整场景节点与操作参数区的高度");
+    m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll);
+    connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
+        const auto id = item->data(0, Qt::UserRole).toJsonObject()["id"];
+        for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
+            if ((*it)->data(0, Qt::UserRole).toJsonObject()["id"] != id) continue;
+            m_nodes->clearSelection(); m_nodes->setCurrentItem(*it); (*it)->setSelected(true); SetNode(*it); return;
+        }
+    });
 }
+QWidget* ModulePanel::GetBrowser() const { return m_browser; }
+
 void ModulePanel::SelectSceneItem(QTreeWidgetItem* item)
 {
     if (!item || m_context.workflow.GetIsClosing()) return;
+    m_browser->setCurrentIndex(1);
     if (m_nodeSearch) m_nodeSearch->clear();
     for (auto* parent = item->parent(); parent; parent = parent->parent()) parent->setExpanded(true);
     m_nodes->clearSelection(); m_nodes->setCurrentItem(item); item->setSelected(true);
@@ -163,7 +188,7 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
     ParameterEditor* form = nullptr;
     if (!defaults.isEmpty()) { form = new ParameterEditor(m_name, name, {}, defaults, defaults, this); m_forms[name] = form; }
     if (form && form->GetHasInputs()) {
-        auto* card = new QGroupBox(GetActionText(m_name, name), m_parameterScroll); card->setObjectName("card_" + name);
+        auto* card = new QGroupBox(GetParameterSectionText(m_name, name), m_parameterScroll); card->setObjectName("card_" + name); card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         auto* layout = new QVBoxLayout(card); layout->setSpacing(10); layout->setContentsMargins(12,18,12,12);
         form->onEdited = [this, name] {
             if (m_currentAction != name) { m_currentAction = name; if (onMessage) onMessage(GetDisplayName() + " · " + GetActionDescription(m_name, name)); }
@@ -182,7 +207,10 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         });
         menu->addAction("恢复默认", this, [this, name] { SetParameters(name, m_entries.at(name).defaults); });
         footer->addWidget(files); footer->addStretch(); footer->addWidget(button); layout->addLayout(footer);
-        m_actionLayout->insertWidget(m_actionLayout->count()-1, card); m_cards[name] = card;
+        m_actionLayout->addWidget(card); m_cards[name] = card;
+        const QSignalBlocker blocker(m_parameterTabs);
+        const auto index = m_parameterTabs->addTab(GetParameterSectionText(m_name, name)); m_parameterTabs->setTabData(index, name);
+        if (m_parameterAction.isEmpty()) m_parameterAction = name;
     } else { m_cards[name] = button; if (form) form->hide(); }
     if (m_currentAction.isEmpty()) m_currentAction = name;
     RefreshWorkflow();
@@ -303,7 +331,31 @@ void ModulePanel::RefreshWorkflow()
         && m_refreshState.node == m_node && m_refreshState.result == m_lastResult && m_refreshState.graph == graph && m_refreshState.action == m_currentAction
         && m_refreshState.busy == busy && m_refreshState.closing == closing
         && actions.size() == m_refreshState.actions.size() && std::equal(actions.cbegin(), actions.cend(), m_refreshState.actions.cbegin())) return;
-    const auto nodes = GetSceneNodes(m_name, state, input, actions, m_lastResult, graph);
+    const auto displayNodes = GetSceneNodes(m_name, state, input, actions);
+    if (displayNodes != m_displayNodes) {
+        m_displayNodes = displayNodes;
+        const auto selected = m_scene->currentItem() ? m_scene->currentItem()->data(0, Qt::UserRole).toJsonObject()["id"].toString() : "root";
+        const auto scroll = m_scene->verticalScrollBar()->value();
+        const QSignalBlocker blocker(m_scene);
+        // 场景对象按稳定身份更新，选择/展开与目录完全独立。
+        const std::function<void(QTreeWidgetItem*, const QJsonArray&)> update = [&](QTreeWidgetItem* parent, const QJsonArray& values) {
+            QMap<QString, QTreeWidgetItem*> old;
+            for (int i = 0; i < parent->childCount(); ++i) old[parent->child(i)->data(0, Qt::UserRole).toJsonObject()["id"].toString()] = parent->child(i);
+            for (int i = 0; i < values.size(); ++i) {
+                const auto node = values[i].toObject(); auto* item = old.take(node["id"].toString());
+                const bool created = !item;
+                if (!item) { item = new QTreeWidgetItem; parent->insertChild(i, item); }
+                else if (parent->indexOfChild(item) != i) { parent->takeChild(parent->indexOfChild(item)); parent->insertChild(i, item); }
+                item->setText(0, node["title"].toString()); item->setText(1, node["status"].toString()); item->setData(0, Qt::UserRole, node);
+                update(item, node["children"].toArray());
+                if (created) item->setExpanded(true);
+                if (node["id"] == selected) m_scene->setCurrentItem(item);
+            }
+            for (auto* item : old) delete item;
+        };
+        update(m_scene->invisibleRootItem(), displayNodes); m_scene->verticalScrollBar()->setValue(scroll);
+    }
+    const auto nodes = GetCatalogNodes(m_name, state, input, actions, m_lastResult, graph);
     if (nodes != m_sceneNodes) {
         const TestTiming treeTiming(m_context.records, "Tree.Update." + m_name);
         m_sceneNodes = nodes; const QSignalBlocker blocker(m_nodes);
@@ -360,8 +412,22 @@ void ModulePanel::RefreshWorkflow()
     static const QHash<QString, QStringList> globalActions{{"Data", {"Load"}}, {"View", {"Set", "Reset", "Visibility"}},
         {"Crop", {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly"}}, {"Part", {"Start"}}, {"Gap", {"Start"}},
         {"Artifact", {"Ring", "Diffusion", "Combined"}}, {"Surface", {"AutomaticIso50", "GlobalIsoPreview", "LocalAdaptiveIso50", "GradientPeak"}},
-        {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
+        {"Wall", {"Start", "Cancel", "Result", "Clear"}}, {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
     allowed.append(globalActions.value(m_name));
+    for (const auto& entry : m_entries) if (entry.second.policy == TestPolicy::Stop) allowed.append(entry.first);
+    {
+        const QSignalBlocker blocker(m_parameterTabs);
+        int active = -1, first = -1;
+        for (int i = 0; i < m_parameterTabs->count(); ++i) {
+            const auto name = m_parameterTabs->tabData(i).toString(); const bool enabled = allowed.contains(name);
+            m_parameterTabs->setTabEnabled(i, enabled);
+            if (enabled && first < 0) first = i;
+            if (enabled && name == m_parameterAction) active = i;
+        }
+        if (active < 0) active = first;
+        if (active >= 0) m_parameterAction = m_parameterTabs->tabData(active).toString();
+        m_parameterTabs->setCurrentIndex(active); m_parameterTabs->setVisible(m_parameterTabs->count() > 1);
+    }
     QStringList visible;
     for (const auto& name : m_actionOrder) if (allowed.contains(name) && m_cards.at(name) == m_buttons.at(name)) visible.append(name);
     if (visible.size() != m_visibleActions.size() || !std::equal(visible.cbegin(), visible.cend(), m_visibleActions.cbegin())) {
@@ -373,7 +439,7 @@ void ModulePanel::RefreshWorkflow()
     const TestTiming actionTiming(m_context.records, "Actions." + m_name);
     for (const auto& name : m_actionOrder) {
         auto* button = m_buttons.at(name); const auto& entry = m_entries.at(name);
-        const bool shown = allowed.contains(name); m_cards.at(name)->setVisible(shown);
+        const bool shown = allowed.contains(name) && (m_cards.at(name) == button || name == m_parameterAction); m_cards.at(name)->setVisible(shown);
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
@@ -443,6 +509,7 @@ void ModulePanel::SetParameters(const QString& action, const QJsonObject& values
     }
     m_currentAction = action;
     if (auto* form = GetParameterEditor(action)) {
+        if (form->GetHasInputs()) m_parameterAction = action;
         form->SetValue(parameters);
         Observe(false);
         QJsonObject booleans;
@@ -458,6 +525,7 @@ void ModulePanel::SetParameterPatch(const QString& action, const QJsonObject& pa
     if (!m_entries.count(action)) throw std::invalid_argument("参数目标不存在");
     m_currentAction = action;
     if (auto* form = GetParameterEditor(action)) {
+        if (form->GetHasInputs()) m_parameterAction = action;
         auto values = patch; QJsonObject target;
         for (const auto* key : {"viewId", "viewScope", "target"}) if (values.contains(key)) { target[key] = values.take(key); }
         if (!target.isEmpty()) { form->SetPatch(target); Observe(false); }
@@ -478,8 +546,8 @@ void ModulePanel::QueueParameterFocus()
         m_actionLayout->activate();
         QMetaObject::invokeMethod(this, [this] {
             m_parameterFocusQueued = false;
-            if (!isVisible() || m_context.workflow.GetIsClosing() || !m_cards.count(m_currentAction) || !m_cards.at(m_currentAction)->isVisible()) return;
-            m_parameterScroll->verticalScrollBar()->setValue(m_cards.at(m_currentAction)->mapTo(m_parameterScroll->widget(), QPoint()).y());
+            if (!isVisible() || m_context.workflow.GetIsClosing() || !m_cards.count(m_parameterAction) || !m_cards.at(m_parameterAction)->isVisible()) return;
+            m_parameterScroll->verticalScrollBar()->setValue(m_cards.at(m_parameterAction)->mapTo(m_parameterScroll->widget(), QPoint()).y());
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);
 }
@@ -546,7 +614,7 @@ void ModulePanel::SetState(const QJsonObject& value)
     RefreshWorkflow();
 }
 QString ModulePanel::GetDisplayName() const { return GetModuleText(m_name); }
-void ModulePanel::SetNotice(const QString& text) { m_notice = text; }
+void ModulePanel::SetNotice(const QString& text) { m_notice = text; m_noticeLabel->setText(text); }
 QStringList ModulePanel::GetActions() const
 {
     QStringList result;
@@ -577,7 +645,7 @@ void ModulePanel::SetInput(std::uint64_t id, const DataRevisionRef& revision)
 }
 HostViewTargets GetAllViews()
 {
-    return {{"primary-3d", "composite-volume", "slice-top-down", "slice-front-back", "slice-left-right"}, {}};
+    return {{"primary-3d", "slice-top-down", "slice-front-back", "slice-left-right"}, {}};
 }
 HostViewTargets GetMainViews() { return {{"primary-3d"}, {}}; }
 HostViewTargets GetPartViews() { return GetAllViews(); }

@@ -10,6 +10,7 @@ namespace Manual {
 QString GetActionDescription(const QString& module, const QString& action);
 QString GetModuleText(const QString& module);
 QString GetActionText(const QString& module, const QString& action);
+QString GetParameterSectionText(const QString& module, const QString& action);
 QString GetParameterText(const QString& key);
 QString GetParameterHelp(const QString& key);
 using ParameterChoices = QVector<std::pair<QString, QString>>;

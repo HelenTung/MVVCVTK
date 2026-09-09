@@ -1,4 +1,4 @@
-// 测试用途：组合十个功能页和五个视图，显示业务日志并管理窗口关闭流程。
+// 测试用途：左侧对象、中间三维视窗、右侧功能参数，统一管理会话生命周期。
 #include "TestWindow.h"
 #include "FeatureSetup.h"
 #include "Support/JsonInput.h"
@@ -10,6 +10,7 @@
 #include <QCloseEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
@@ -19,12 +20,15 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QUrl>
+#include <QToolButton>
+#include <QSignalBlocker>
 namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
     m_workflow.resources = GetTestResources(budgetMiB);
     setWindowTitle("全功能手动测试");
     setAcceptDrops(true);
+    setFont(QFont("Microsoft YaHei UI", 9));
     setStyleSheet("QTreeWidget { border: 1px solid #d6dde5; background: white; alternate-background-color: #f5f7fa; }"
         "QTreeWidget::item { padding: 6px 3px; } QTreeWidget::item:selected { background: #dceafb; color: #152b40; }"
         "QPushButton { padding: 5px 9px; border: 1px solid #bac8d6; border-radius: 4px; background: #f7f9fc; }"
@@ -34,7 +38,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         "QPushButton:checked { background: #cce1f8; border: 1px solid #3677b5; color: #17416a; }"
         "QTabBar::tab { padding: 9px 12px; background: #e8edf3; border-bottom: 3px solid transparent; }"
         "QTabBar::tab:selected { background: #f8fbff; border-bottom: 3px solid #357fbc; color: #14558b; font-weight: 600; }");
-    resize(1500, 950);
+    resize(1560, 920);
     auto* root = new QWidget(this); auto* layout = new QVBoxLayout(root); setCentralWidget(root);
     auto* toolbar = new QHBoxLayout;
     auto* stop = new QPushButton("停止当前计算", root);
@@ -43,11 +47,14 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     performance->setObjectName("performanceCapture");
     m_status = new QLabel("正在创建测试会话", root);
     toolbar->addWidget(m_status, 1); toolbar->addWidget(stop); toolbar->addWidget(performance); toolbar->addWidget(exportRecords); layout->addLayout(toolbar);
-    m_featureTabs = new QTabBar(root); m_featureTabs->setObjectName("featureTabs");
+    m_featureTabs = new QTabBar(root); m_featureTabs->setObjectName("featureTabs"); m_featureTabs->setMinimumHeight(40);
     m_featureTabs->setExpanding(true); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
     layout->addWidget(m_featureTabs);
     auto* split = new QSplitter(root); split->setChildrenCollapsible(false); layout->addWidget(split, 1);
-    m_pages = new QStackedWidget(split); m_pages->setMinimumWidth(480);
+    m_browsers = new QStackedWidget(split); m_browsers->setObjectName("browserStack"); m_browsers->setMinimumWidth(260);
+    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(380);
+    m_pages->setObjectName("parameterPages");
+    connect(m_featureTabs, &QTabBar::currentChanged, m_browsers, &QStackedWidget::setCurrentIndex);
     connect(m_featureTabs, &QTabBar::currentChanged, m_pages, &QStackedWidget::setCurrentIndex);
     connect(m_pages, &QStackedWidget::currentChanged, m_featureTabs, &QTabBar::setCurrentIndex);
     connect(m_featureTabs, &QTabBar::currentChanged, this, [this](int index) {
@@ -57,25 +64,64 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         if (panel && m_isReady) panel->Observe();
         if (panel && !panel->GetNotice().isEmpty()) AppendLog(panel->GetNotice());
     });
-    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(350); auto* viewLayout = new QVBoxLayout(m_viewArea);
-    auto* mainViews = new QSplitter(m_viewArea); viewLayout->addWidget(mainViews, 3);
-    auto* slices = new QWidget(m_viewArea); auto* sliceLayout = new QHBoxLayout(slices); viewLayout->addWidget(slices, 1);
-    const QStringList ids{"primary-3d", "composite-volume", "slice-top-down", "slice-front-back", "slice-left-right"};
-    const QStringList labels{"主三维", "体渲染", "上下切片", "前后切片", "左右切片"};
-    for (int index = 0; index < ids.size(); ++index) {
-        auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
-        // Qt 适配器第一次接管窗口前就确定透明/多重采样配置，不能等 Host 挂载后再改。
-        window->SetAlphaBitPlanes(1); window->SetMultiSamples(0);
-        auto* widget = new QVTKOpenGLNativeWidget(m_viewArea); widget->setMinimumSize(120, 100); widget->setRenderWindow(window);
-        auto* frame = new QWidget(m_viewArea); auto* frameLayout = new QVBoxLayout(frame); frameLayout->setContentsMargins(0, 0, 0, 0);
-        frameLayout->addWidget(new QLabel(labels[index], frame)); frameLayout->addWidget(widget, 1);
-        if (index < 2) mainViews->addWidget(frame); else sliceLayout->addWidget(frame);
-        m_views.push_back({ids[index], widget, window});
-        widget->installEventFilter(this);
+    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(520); auto* viewLayout = new QVBoxLayout(m_viewArea);
+    viewLayout->setContentsMargins(0, 0, 0, 0);
+    // 四个图像区域共用同一网格和同高标题栏；窗口缩放不改变等分关系。
+    auto* viewGrid = new QGridLayout; viewGrid->setObjectName("fourViewGrid");
+    viewGrid->setContentsMargins(0,0,0,0); viewGrid->setSpacing(6);
+    for (int i = 0; i < 2; ++i) { viewGrid->setRowStretch(i, 1); viewGrid->setColumnStretch(i, 1); }
+    viewLayout->addLayout(viewGrid, 1);
+    constexpr int headerHeight = 32;
+    auto* primaryFrame = new QWidget(m_viewArea); auto* primaryLayout = new QVBoxLayout(primaryFrame);
+    primaryLayout->setContentsMargins(0,0,0,0); primaryLayout->setSpacing(6);
+    auto* primaryHeader = new QWidget(primaryFrame); primaryHeader->setFixedHeight(headerHeight);
+    auto* viewToolbar = new QHBoxLayout(primaryHeader); viewToolbar->setContentsMargins(0,0,0,0);
+    viewToolbar->addWidget(new QLabel("3D 视窗", m_viewArea)); viewToolbar->addStretch();
+    m_renderMode = new QComboBox(m_viewArea); m_renderMode->setObjectName("renderMode");
+    m_renderMode->addItem("等值面", "CompositeIsoSurface"); m_renderMode->addItem("体渲染", "CompositeVolume");
+    m_renderMode->setEnabled(false); viewToolbar->addWidget(m_renderMode);
+    auto* fit = new QPushButton("适配视图", m_viewArea); fit->setObjectName("fitView"); viewToolbar->addWidget(fit);
+    primaryLayout->addWidget(primaryHeader);
+    viewGrid->addWidget(primaryFrame, 0, 0);
+    auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
+    window->SetAlphaBitPlanes(1); window->SetMultiSamples(0);
+    auto* widget = new QVTKOpenGLNativeWidget(primaryFrame); widget->setObjectName("primary3D");
+    widget->setMinimumSize(160, 160); widget->setRenderWindow(window); primaryLayout->addWidget(widget, 1);
+    m_views.push_back({"primary-3d", widget, window}); widget->installEventFilter(this);
+    const QStringList sliceIds{"slice-top-down", "slice-front-back", "slice-left-right"};
+    const QStringList sliceLabels{"上下切片", "前后切片", "左右切片"};
+    for (int index = 0; index < 3; ++index) {
+        auto* frame = new QWidget(m_viewArea); auto* frameLayout = new QVBoxLayout(frame);
+        frameLayout->setContentsMargins(0,0,0,0); frameLayout->setSpacing(6);
+        auto* header = new QLabel(sliceLabels[index], frame); header->setFixedHeight(headerHeight); frameLayout->addWidget(header);
+        viewGrid->addWidget(frame, (index+1)/2, (index+1)%2);
+        auto sliceWindow = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New(); sliceWindow->SetAlphaBitPlanes(1); sliceWindow->SetMultiSamples(0);
+        auto* slice = new QVTKOpenGLNativeWidget(frame); slice->setObjectName(sliceIds[index]); slice->setMinimumSize(160,160);
+        slice->setRenderWindow(sliceWindow); frameLayout->addWidget(slice, 1); slice->installEventFilter(this);
+        m_views.push_back({sliceIds[index], slice, sliceWindow});
     }
-    split->setSizes({580, 920});
-    layout->addWidget(new QLabel("信息", root));
-    m_log = new QPlainTextEdit(root); m_log->setReadOnly(true); m_log->setMaximumHeight(150); m_log->setMaximumBlockCount(1000); layout->addWidget(m_log);
+    split->addWidget(m_pages); split->setStretchFactor(0, 0); split->setStretchFactor(1, 1); split->setStretchFactor(2, 0);
+    split->setSizes({300, 770, 450});
+    connect(m_renderMode, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        if (auto* page = GetModule("View")) {
+            auto parameters = GetJson(R"({"viewId":"primary-3d","mode":null,"iso":null,"opacity":null,"quality":null,"axes":null,"windowLevel":null,"transfer":null})");
+            parameters["mode"] = m_renderMode->itemData(index).toString(); page->SendAction("Set", parameters);
+            const auto state = m_runtime.GetSession()->GetRenderViewState({"primary-3d"});
+            if (state) { const QSignalBlocker blocker(m_renderMode); m_renderMode->setCurrentIndex(
+                state->viewMode == HostRenderMode::Volume || state->viewMode == HostRenderMode::CompositeVolume ? 1 : 0); }
+        }
+    });
+    connect(fit, &QPushButton::clicked, this, [this] {
+        if (auto* page = GetModule("View")) page->SendAction("Reset", {{"viewId", "primary-3d"}});
+    });
+    auto* logToggle = new QToolButton(root); logToggle->setText("操作日志"); logToggle->setCheckable(true);
+    logToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); logToggle->setArrowType(Qt::RightArrow);
+    layout->addWidget(logToggle);
+    m_log = new QPlainTextEdit(root); m_log->setReadOnly(true); m_log->setMaximumHeight(120); m_log->setMaximumBlockCount(1000);
+    layout->addWidget(m_log); m_log->hide();
+    connect(logToggle, &QToolButton::toggled, this, [this, logToggle](bool visible) {
+        m_log->setVisible(visible); logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
+    });
     m_log->setObjectName("businessLog");
     m_log->setAccessibleName("操作说明与结果信息");
     m_log->setPlaceholderText("操作提交、执行进度和结果将在这里显示。");
@@ -83,7 +129,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         AppendLog(GetFlowText(record));
         QueueObserve();
     };
-    AppendLog("正在初始化五视图和功能测试会话。");
+    AppendLog("正在初始化一个三维与三个切片视窗。");
     m_pump.getVisible = [this](const std::string& id) {
         for (const auto& view : m_views)
             if (view.id.toStdString() == id) return view.widget->isVisible() && view.window->GetReadyForRendering();
@@ -91,6 +137,9 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     };
     m_pump.onUpdated = [this] {
         const auto session = m_runtime.GetSession(); if (!session) return;
+        const auto applied = session->GetRenderViewState({"primary-3d"});
+        if (applied) { const QSignalBlocker blocker(m_renderMode); m_renderMode->setCurrentIndex(
+            applied->viewMode == HostRenderMode::Volume || applied->viewMode == HostRenderMode::CompositeVolume ? 1 : 0); }
         const auto descriptor = session->GetImageDescriptor();
         const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "拖入文件开始，或在数据页选择路径";
         if (m_status->text() != text) m_status->setText(text);
@@ -109,8 +158,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         m_records.StopTiming();
         const auto timings = m_records.GetTimings();
         const std::pair<QString, QString> labels[]{{"UI.ObserveAll", "界面观察（包含页面刷新）"}, {"Host.Update", "Host 更新"},
-            {"Host.Render", "绘制请求（包含各视图）"}, {"Render.primary-3d", "主三维绘制"}, {"Render.composite-volume", "体渲染绘制"},
-            {"Render.slice-top-down", "上下切片绘制"}, {"Render.slice-front-back", "前后切片绘制"}, {"Render.slice-left-right", "左右切片绘制"}};
+            {"Host.Render", "绘制请求"}, {"Render.primary-3d", "三维视窗绘制"}, {"Render.slice-top-down", "上下切片绘制"},
+            {"Render.slice-front-back", "前后切片绘制"}, {"Render.slice-left-right", "左右切片绘制"}};
         for (const auto& label : labels) {
             const auto value = timings[label.first].toObject();
             AppendLog(QString("性能 · %1：%2 次，累计 %3 ms，平均 %4 ms，最长 %5 ms，超过 16 ms：%6 次")
@@ -167,13 +216,13 @@ void TestWindow::BuildSession()
     if (m_isReady || m_isClosing) return;
     try {
         HostSessionConfig config;
-        const HostRenderViewRole roles[]{HostRenderViewRole::Primary3D, HostRenderViewRole::Composite3D,
-            HostRenderViewRole::TopDownSlice, HostRenderViewRole::FrontBackSlice, HostRenderViewRole::LeftRightSlice};
-        const HostRenderMode modes[]{HostRenderMode::CompositeIsoSurface, HostRenderMode::CompositeVolume,
-            HostRenderMode::SliceTopDown, HostRenderMode::SliceFrontBack, HostRenderMode::SliceLeftRight};
+        const HostRenderViewRole roles[]{HostRenderViewRole::Primary3D, HostRenderViewRole::TopDownSlice, HostRenderViewRole::FrontBackSlice, HostRenderViewRole::LeftRightSlice};
+        const HostRenderMode modes[]{HostRenderMode::CompositeIsoSurface, HostRenderMode::SliceTopDown, HostRenderMode::SliceFrontBack, HostRenderMode::SliceLeftRight};
         for (std::size_t index = 0; index < m_views.size(); ++index) {
-            HostRenderViewConfig view; view.id = m_views[index].id.toStdString(); view.role = roles[index];
-            view.renderWindow = m_views[index].window; view.window.viewInit.viewMode = modes[index];
+            const auto& target = m_views[index];
+            HostRenderViewConfig view; view.id = target.id.toStdString(); view.role = roles[index];
+            view.renderWindow = target.window; view.window.viewInit.viewMode = modes[index];
+            view.window.viewInit.hasIso = true; view.window.viewInit.isoThreshold = 0.5;
             view.window.isAxesVisible = index == 0;
             config.renderViews.push_back(std::move(view));
         }
@@ -183,7 +232,7 @@ void TestWindow::BuildSession()
         m_modules = BuildModules({m_runtime, m_workflow, m_records}, m_pages);
         AppendLog(QString("本次算法工作集上限 %1 GiB；伪影累计发布上限 %2 GiB。按启动时可用内存留出余量；可用 --memory-budget-mib 指定更小上限。").arg(m_workflow.resources.workingBytes / (1024.*1024.*1024.), 0, 'f', 2).arg(m_workflow.resources.publishBytes / (1024.*1024.*1024.), 0, 'f', 2));
         for (auto* page : m_modules) {
-            m_pages->addWidget(page); m_featureTabs->addTab(page->GetDisplayName());
+            m_pages->addWidget(page); m_browsers->addWidget(page->GetBrowser()); m_featureTabs->addTab(page->GetDisplayName());
             page->onMessage = [this](const QString& message) { AppendLog(message); };
         }
         m_workflow.onCopyParameters = [this](const QString& module, const QString& action, const QJsonObject& patch) {
@@ -204,7 +253,7 @@ void TestWindow::BuildSession()
         m_workflow.getActionAvailable = [this](const QString& module, const QString& action) {
             const auto* page = GetModule(module); return page && page->GetActions().contains(action);
         };
-        m_isReady = true;
+        m_isReady = true; m_renderMode->setEnabled(true);
         QStringList enabled;
         for (auto* page : m_modules) if (!page->GetActions().isEmpty()) enabled.append(page->GetDisplayName());
         AppendLog("测试会话已就绪：" + enabled.join("、") + "。请选择“数据输入 → 加载体数据”开始测试。");
@@ -229,7 +278,7 @@ bool TestWindow::StopSession()
     m_records.StopPending(current);
     for (auto& view : m_views) view.widget->setRenderWindow(static_cast<vtkGenericOpenGLRenderWindow*>(nullptr));
     if (m_isReady) AppendLog("测试会话已停止。");
-    m_isReady = false;
+    m_isReady = false; m_renderMode->setEnabled(false);
     return true;
 }
 void TestWindow::closeEvent(QCloseEvent* event)

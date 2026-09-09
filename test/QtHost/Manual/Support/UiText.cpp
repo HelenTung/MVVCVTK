@@ -48,7 +48,7 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件分割"}, {"PartEdit", "零件编辑"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}};
+        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -57,6 +57,8 @@ QString GetActionText(const QString& module, const QString& action)
     if (action == "GraphInfo") return "查看发布记录";
     if (module == "View" && action == "Visibility") return "应用辅助显示";
     static const QHash<QString, QString> specific{
+        {"Wall.Start", "计算壁厚"}, {"Wall.Result", "查看壁厚结果"}, {"Wall.SetEvaluation", "更新壁厚公差"},
+        {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
         {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"},
@@ -93,11 +95,31 @@ QString GetActionText(const QString& module, const QString& action)
         {"Deactivate", "停用对齐结果"}, {"ExportArchive", "导出对齐归档"}, {"Restore", "恢复对齐归档"}, {"Result", "查看对齐结果"}};
     return specific.value(module + "." + action, labels.value(action, action));
 }
+QString GetParameterSectionText(const QString& module, const QString& action)
+{
+    static const QHash<QString, QString> names{
+        {"Data.Load", "输入参数"}, {"View.Set", "显示参数"}, {"View.Visibility", "辅助显示"}, {"View.Reset", "视图定位"}, {"View.Cursor", "切片位置"},
+        {"Part.Start", "分割参数"}, {"Part.SetState", "零件属性"}, {"Gap.Start", "孔隙参数"},
+        {"Artifact.Ring", "环形校正"}, {"Artifact.Diffusion", "扩散滤波"}, {"Artifact.Combined", "组合校正"},
+        {"Surface.AutomaticIso50", "阈值估计"}, {"Surface.GlobalIsoPreview", "等值面预览"}, {"Surface.LocalAdaptiveIso50", "自适应表面"}, {"Surface.GradientPeak", "梯度峰值"},
+        {"Wall.Start", "壁厚参数"}, {"Wall.SetEvaluation", "壁厚公差"}, {"Wall.SetDisplay", "结果显示"}, {"Wall.SelectSample", "采样定位"},
+        {"Alignment.Start", "求解参数"}, {"Alignment.ImportReference", "名义参考"}, {"Alignment.SaveRecipe", "对齐方案"},
+        {"Crop.Start", "裁剪参数"}, {"Crop.Mode", "保留方式"}, {"Rotation.Rotate", "旋转参数"}};
+    if (action == "Visibility") return "结果显示";
+    return names.value(module + "." + action, GetActionText(module, action) + "参数");
+}
 QString GetParameterText(const QString& key)
 {
     if (key == "graphRevision") return "发布修订";
     if (key == "viewScope") return "辅助显示作用范围";
     static const QHash<QString, QString> labels{
+        {"labels", "材料标签图修订"}, {"materialLabel", "材料标签编号"}, {"maxDistance", "搜索距离上限"},
+        {"sampleSpacing", "采样间距"}, {"reverseTolerance", "反向验证容差"}, {"maxFitResidual", "灰度拟合残差上限"},
+        {"coneAngleDegrees", "搜索锥角（度）"}, {"directionCount", "搜索方向数量"}, {"minOppositeCosine", "对面法向余弦下限"},
+        {"sharpNormalCosine", "锐边法向余弦下限"}, {"ambiguityAbsolute", "歧义绝对容差"}, {"ambiguityRelative", "歧义相对容差"},
+        {"maxBoundaryError", "边界误差上限"}, {"evaluationBounds", "评估空间范围"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
+        {"histogramRange", "直方图范围"}, {"histogramBins", "直方图分箱数"}, {"minRegionArea", "最小异常区域面积"},
+        {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
         {"filePath", "输入文件路径"}, {"outputPath", "输出文件路径"}, {"outputDir", "输出目录"}, {"archivePath", "归档文件路径"},
         {"datasetId", "数据集标识"}, {"dimensions", "各轴体素数量"}, {"spacingLPS", "体素间距（LPS）"},
         {"originLPS", "原点坐标（LPS）"}, {"directionLPS", "方向矩阵（LPS）"}, {"sourceDigest", "源文件摘要"},
@@ -178,7 +200,10 @@ QString GetParameterHelp(const QString& key)
         {"reference", "模板必须填写实际测量选区、名义点/约束、单位和来源；导出后再导入名义参考。"},
         {"recipe", "不勾选“指定”时使用已导入参考中的方案；勾选后可分别编辑几何、约束和对应点。"},
         {"source", "current 表示当前输入；显式修订必须使用实际存在的数据引用。"},
-        {"mesh", "surface 表示最近生成且属于当前输入的表面网格。"},
+        {"labels", "parts 使用当前零件分割标签图；也可输入准确的标签图修订。"},
+        {"materialLabel", "只测量此正整数标签对应的材料；默认标签 1。"},
+        {"evaluationBounds", "按源数据物理坐标填写评估范围，顺序为 X 最小/最大、Y 最小/最大、Z 最小/最大。"},
+        {"mesh", "surface 表示最近生成且属于当前输入的正式测量表面网格。"},
         {"result", "current 表示本页最近保存的结果修订。"},
         {"targetRequestId", "十进制字符串；0 表示由功能接口选择当前请求。"},
         {"requestId", "current 表示当前计算请求；显式编号使用十进制字符串。"},
@@ -192,24 +217,25 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
     if (module == "View" && key == "viewScope") {
         auto choices = GetParameterChoices(module, "viewId");
-        choices.prepend({"slices", "三个切片"}); choices.prepend({"all", "所有视图"}); return choices;
+        choices.prepend({"slices", "三个切片"}); choices.prepend({"all", "全部四视图"}); return choices;
     }
     if (module == "Artifact" && key == "mode") return {{"Wrap", "环绕"}, {"Reflect", "反射"}};
+    if (module == "Wall" && key == "mode") return {{"Continuous", "连续色标"}, {"Tolerance", "公差分布"}};
+    if (module == "Wall" && key == "unit") return {{"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
     if (module == "Crop" && key == "shape") return {{"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"}};
-    if (key == "viewId") return {{"primary-3d", "主三维"}, {"composite-volume", "体渲染"},
-        {"slice-top-down", "上下切片"}, {"slice-front-back", "前后切片"}, {"slice-left-right", "左右切片"}};
+    if (key == "viewId") return {{"primary-3d", "三维视窗"}, {"slice-top-down", "上下切片"},
+        {"slice-front-back", "前后切片"}, {"slice-left-right", "左右切片"}};
     if (key == "componentSelection") return {{"Largest", "最大连通分量"}, {"Seeded", "种子所在分量"}, {"All", "全部分量"}};
     if (key == "isoMode") return {{"AbsoluteValue", "绝对灰度阈值"}, {"DataRangeRatio", "灰度范围比例"}};
     if (key == "removalMode") return {{"None", "不移除"}, {"KeepInside", "保留内部"}, {"RemoveInside", "移除内部"}};
     if (key == "format") return {{"Raw", "原始体数据（RAW）"}, {"Ply", "多边形网格（PLY）"}, {"Stl", "三角网格（STL）"}, {"Obj", "网格模型（OBJ）"}};
     if (key == "evidenceKind") return {{"real-data", "真实数据"}, {"synthetic-regression", "合成回归数据"}};
     if (module == "View" && key == "quality") return {{"Auto", "自动"}, {"Low", "低"}, {"High", "高"}, {"XHigh", "超高"}, {"Ultra", "原始分辨率"}};
-    if (module == "View" && key == "mode") return {{"Volume", "体渲染"}, {"IsoSurface", "等值面"},
-        {"CompositeVolume", "复合体渲染"}, {"CompositeIsoSurface", "复合等值面"},
-        {"SliceTopDown", "上下切片"}, {"SliceFrontBack", "前后切片"}, {"SliceLeftRight", "左右切片"}};
+    if (module == "View" && key == "mode") return {{"CompositeIsoSurface", "等值面"}, {"CompositeVolume", "体渲染"},
+        {"IsoSurface", "等值面（无参考平面）"}, {"Volume", "体渲染（无参考平面）"}};
     return {};
 }
 QStringList GetBoundParameters(const QString& module, const QString& action)
@@ -224,6 +250,7 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
     if (module == "Part") return {"target"};
     if (module == "Artifact") return {"source", "requestId"};
     if (module == "Surface") return {"targetRequestId"};
+    if (module == "Wall") return {"source", "labels", "mesh", "result", "targetRequestId"};
     if (module == "Alignment") return {"source", "mesh", "result", "targetRequestId"};
     if (module == "Data") return {"expectedBindingRevision"};
     return {};
