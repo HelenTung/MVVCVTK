@@ -423,7 +423,11 @@ bool TestScheduling()
         if (result.isSucceeded) ++cropCompletions;
     }) && Wait([&] { return cropCompletions == 1; }),
         "Crop worker completes without rendering");
-    valid &= Check(session->DetachFeature(*crop), "Crop detach");
+    bool cropDetached=false;
+    valid &= Check(Wait([&] {
+        if(!cropDetached)cropDetached=session->DetachFeature(*crop);
+        return cropDetached;
+    }), "Crop detach waits for asynchronous document release");
 #endif
 
     auto feature = std::make_shared<WorkFeature>();

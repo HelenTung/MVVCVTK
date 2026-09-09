@@ -1,7 +1,13 @@
 #include "Data/VtkDataBridge.h"
 
+#include "Data/Internal/VtkDataResourceLease.h"
+
 #include <vtkCellArray.h>
+#include <vtkCommand.h>
 #include <vtkDataArray.h>
+#include <vtkCellData.h>
+#include <vtkDataSetAttributes.h>
+#include <vtkVariant.h>
 #include <vtkDoubleArray.h>
 #include <vtkIdList.h>
 #include <vtkImageData.h>
@@ -22,7 +28,89 @@
 #include <set>
 #include <utility>
 
+bool VtkRenderInputView::GetValid() const noexcept {
+    if(!data||bool(image)==bool(mesh))return false;
+    const auto sameData=[this](const DataSnapshot& typed) {
+        return typed&&typed->self==data->self&&typed->payload==data->payload;
+    };
+    if(image) {
+        if(meshView||!imageView||!sameData(imageView->data)||imageView->image!=image
+            ||imageView->validityMask!=validityMask||imageView->binding.has_value()!=binding.has_value())return false;
+        return !binding||(imageView->binding->name==binding->name&&imageView->binding->revision==binding->revision
+            &&imageView->binding->target==binding->target);
+    }
+    return !imageView&&!validityMask&&meshView&&sameData(meshView->data)&&meshView->mesh==mesh;
+}
+
+VtkRenderInputSnapshot VtkRenderInputView::FromImage(VtkImageGridSnapshot image) {
+    if(!image)return {};
+    auto value=std::make_shared<VtkRenderInputView>();value->graph=image->graph;value->binding=image->binding;
+    value->data=image->data;value->image=image->image;value->validityMask=image->validityMask;
+    value->imageView=std::move(image);return value;
+}
+VtkRenderInputSnapshot VtkRenderInputView::FromMesh(DataGraphSnapshot graph,std::optional<DataBinding> binding,VtkSurfaceMeshSnapshot mesh) {
+    if(!mesh)return {};
+    auto value=std::make_shared<VtkRenderInputView>();value->graph=std::move(graph);value->binding=std::move(binding);
+    value->data=mesh->data;value->mesh=mesh->mesh;value->meshView=std::move(mesh);return value;
+}
+
 namespace {
+
+std::optional<std::vector<MeshAttribute>> BuildMeshAttributes(vtkDataSetAttributes* fields,vtkIdType tuples)
+{
+    if(!fields||tuples<0)return {};
+    std::vector<MeshAttribute> result;result.reserve(fields->GetNumberOfArrays());
+    for(int index=0;index<fields->GetNumberOfArrays();++index) {
+        auto* array=vtkDataArray::SafeDownCast(fields->GetAbstractArray(index));
+        if(!array||!array->GetName()||array->GetNumberOfTuples()!=tuples||array->GetNumberOfComponents()<=0)return {};
+        MeshAttribute attribute;attribute.name=array->GetName();attribute.componentCount=array->GetNumberOfComponents();
+        if(static_cast<std::uint64_t>(tuples)>std::numeric_limits<std::size_t>::max()/attribute.componentCount)return {};
+        attribute.values.reserve(static_cast<std::size_t>(tuples)*attribute.componentCount);
+        for(vtkIdType tuple=0;tuple<tuples;++tuple)for(int component=0;component<array->GetNumberOfComponents();++component) {
+            const auto value=array->GetComponent(tuple,component);
+            if(!std::isfinite(value))return {};
+            // The formal mesh attribute representation is double. Reject integer precision loss.
+            const auto type=array->GetDataType();
+            if(type==VTK_UNSIGNED_LONG_LONG) {
+                const auto integer=array->GetVariantValue(tuple*array->GetNumberOfComponents()+component).ToUnsignedLongLong();
+                if(value<0||value>=18446744073709551616.0||static_cast<unsigned long long>(value)!=integer)return {};
+            } else if(type==VTK_LONG_LONG||type==VTK_ID_TYPE) {
+                const auto integer=array->GetVariantValue(tuple*array->GetNumberOfComponents()+component).ToLongLong();
+                if(value< -9223372036854775808.0||value>=9223372036854775808.0||static_cast<long long>(value)!=integer)return {};
+            }
+            attribute.values.push_back(value);
+        }
+        if(fields->GetScalars()==array)attribute.activeRoles|=MeshAttributeRoles::scalars;
+        if(fields->GetVectors()==array)attribute.activeRoles|=MeshAttributeRoles::vectors;
+        if(fields->GetNormals()==array)attribute.activeRoles|=MeshAttributeRoles::normals;
+        if(fields->GetTCoords()==array)attribute.activeRoles|=MeshAttributeRoles::textureCoordinates;
+        if(fields->GetTensors()==array)attribute.activeRoles|=MeshAttributeRoles::tensors;
+        result.push_back(std::move(attribute));
+    }
+    return result;
+}
+
+void SetMeshAttributes(vtkDataSetAttributes* fields,const std::vector<MeshAttribute>& attributes)
+{
+    for(const auto& attribute:attributes) {
+        auto array=vtkSmartPointer<vtkDoubleArray>::New();array->SetName(attribute.name.c_str());
+        array->SetNumberOfComponents(static_cast<int>(attribute.componentCount));
+        array->SetNumberOfTuples(static_cast<vtkIdType>(attribute.values.size()/attribute.componentCount));
+        if(!attribute.values.empty())std::memcpy(array->GetVoidPointer(0),attribute.values.data(),attribute.values.size()*sizeof(double));
+        fields->AddArray(array);
+        if(attribute.activeRoles&MeshAttributeRoles::scalars)fields->SetActiveScalars(attribute.name.c_str());
+        if(attribute.activeRoles&MeshAttributeRoles::vectors)fields->SetActiveVectors(attribute.name.c_str());
+        if(attribute.activeRoles&MeshAttributeRoles::normals)fields->SetActiveNormals(attribute.name.c_str());
+        if(attribute.activeRoles&MeshAttributeRoles::textureCoordinates)fields->SetActiveTCoords(attribute.name.c_str());
+        if(attribute.activeRoles&MeshAttributeRoles::tensors)fields->SetActiveTensors(attribute.name.c_str());
+    }
+}
+
+std::shared_ptr<const DataResourceLease> StartDataUse(const DataSnapshot& data)
+{
+    const auto lifetime = data->lifetime.lock();
+    return lifetime ? lifetime->StartResourceUse(data->self, "VtkDataBridge", DataResourceKind::RenderObject) : nullptr;
+}
 
 ImageValueType GetImageValueType(const int vtkType) noexcept
 {
@@ -167,6 +255,36 @@ vtkSmartPointer<vtkImageData> BuildImageShell(
     return image;
 }
 
+bool GetPayloadSame(const IDataPayload* left, const IDataPayload* right)
+{
+    if (left == right) return true;
+    if (const auto* image = dynamic_cast<const ImageGrid3DPayload*>(left)) {
+        const auto* other = dynamic_cast<const ImageGrid3DPayload*>(right);
+        return other && image->GetValues() == other->GetValues()
+            && image->GetValidityMask() == other->GetValidityMask()
+            && image->GetValueType() == other->GetValueType()
+            && image->GetComponentCount() == other->GetComponentCount()
+            && GetGeometrySame(image->GetGeometry(), other->GetGeometry());
+    }
+    if (const auto* mesh = dynamic_cast<const SurfaceMeshPayload*>(left)) {
+        const auto* other = dynamic_cast<const SurfaceMeshPayload*>(right);
+        return other && &mesh->GetVertices() == &other->GetVertices()
+            && &mesh->GetTriangles() == &other->GetTriangles()
+            && &mesh->GetPointAttributes() == &other->GetPointAttributes();
+    }
+    return false;
+}
+
+template<class View>
+std::shared_ptr<const View> GetCanonicalView(std::shared_ptr<const View> cached, DataSnapshot data)
+{
+    if (!cached || !cached->data || !GetPayloadSame(cached->data->payload.get(), data->payload.get())) return {};
+    if (cached->data == data) return cached;
+    auto view = std::make_shared<View>(*cached);
+    auto retained = std::make_shared<std::pair<DataSnapshot, std::shared_ptr<const View>>>(std::move(data), std::move(cached));
+    view->data = DataSnapshot(retained, retained->first.get());
+    return view;
+}
 } // namespace
 
 class VtkDataBridge::Impl final {
@@ -297,7 +415,7 @@ VtkDataBridge::CreateLabelPayload(vtkImageData* labels) const
 }
 
 std::shared_ptr<const SurfaceMeshPayload>
-VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
+VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame) const
 {
     if (!mesh) return {};
     try {
@@ -318,7 +436,7 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
                 return {};
             }
             auto payload = std::make_shared<const SurfaceMeshPayload>(
-                std::vector<double>{}, std::vector<std::uint64_t>{});
+                std::vector<double>{}, std::vector<std::uint64_t>{},std::vector<MeshAttribute>{},std::move(coordinateFrame));
             return payload->GetValid() ? payload : nullptr;
         }
 
@@ -341,34 +459,11 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
                 cells.push_back(static_cast<std::uint64_t>(value));
             }
         }
-        // MeshAttribute 只表达命名数值点属性；在三角化后复制，保持点号对应。
-        // 不以丢弃异常数组的方式发布一份缺少测量质量的“成功”结果。
-        std::vector<MeshAttribute> attributes;
-        std::set<std::string> names;
-        auto* pointData = output->GetPointData();
-        for (int index = 0; pointData && index < pointData->GetNumberOfArrays(); ++index) {
-            auto* array = pointData->GetArray(index);
-            if (!array || !array->GetName() || array->GetName()[0] == '\0') continue;
-            const int components = array->GetNumberOfComponents();
-            if (components <= 0 || array->GetNumberOfTuples() != points->GetNumberOfPoints()
-                || !names.emplace(array->GetName()).second) return {};
-            const auto count = static_cast<std::size_t>(points->GetNumberOfPoints());
-            if (count > std::numeric_limits<std::size_t>::max()
-                    / static_cast<std::size_t>(components)) return {};
-            MeshAttribute attribute{array->GetName(), static_cast<std::size_t>(components), {}};
-            attribute.values.resize(count * attribute.componentCount);
-            for (vtkIdType tuple = 0; tuple < array->GetNumberOfTuples(); ++tuple) {
-                for (int component = 0; component < components; ++component) {
-                    const double value = array->GetComponent(tuple, component);
-                    if (!std::isfinite(value)) return {};
-                    attribute.values[static_cast<std::size_t>(tuple) * attribute.componentCount
-                        + static_cast<std::size_t>(component)] = value;
-                }
-            }
-            attributes.push_back(std::move(attribute));
-        }
+        auto pointAttributes=BuildMeshAttributes(output->GetPointData(),output->GetNumberOfPoints());
+        auto cellAttributes=BuildMeshAttributes(output->GetCellData(),output->GetNumberOfCells());
+        if(!pointAttributes||!cellAttributes)return {};
         auto payload = std::make_shared<const SurfaceMeshPayload>(
-            std::move(vertices), std::move(cells), std::move(attributes));
+            std::move(vertices), std::move(cells),std::move(*pointAttributes),std::move(coordinateFrame),std::move(*cellAttributes));
         return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {
@@ -376,14 +471,119 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh) const
     }
 }
 
+std::shared_ptr<const VtkPreparedDataView> VtkPreparedDataView::BuildDataView(
+    std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source)
+{
+    return VtkDataBridge::BuildDataView(std::move(payload), std::move(source));
+}
+
+std::shared_ptr<const VtkPreparedDataView> VtkPreparedDataView::BuildDataView(vtkPolyData* mesh, std::string coordinateFrame)
+{
+    return VtkDataBridge::BuildDataView(BuildMeshPayload(mesh,std::move(coordinateFrame)));
+}
+
+std::shared_ptr<const SurfaceMeshPayload> VtkPreparedDataView::BuildMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
+{
+    return VtkDataBridge{}.CreateMeshPayload(mesh,std::move(coordinateFrame));
+}
+
+DataPreparedResource VtkPreparedDataView::BuildResourceUse(
+    vtkImageData* image, vtkPolyData* mesh, std::shared_ptr<const void> backingOwner)
+{
+    if (!image && !mesh) return {};
+    struct ResourceLease final : DataResourceLease {
+        explicit ResourceLease(std::shared_ptr<const void> owner) : backing(std::move(owner)) {}
+        std::shared_ptr<const void> backing;
+    };
+    DataPreparedResource resource{std::make_shared<const ResourceLease>(std::move(backingOwner)),
+        "prepared-render-arrays", DataResourceKind::RenderObject};
+    VtkDataResourceLease::AttachImage(image, resource.lease);
+    VtkDataResourceLease::AttachMesh(mesh, resource.lease);
+    return resource;
+}
+
+std::shared_ptr<const VtkPreparedDataView> VtkDataBridge::BuildDataView(
+    std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source)
+{
+    if (!payload) return {};
+    auto result = std::make_shared<VtkPreparedDataView>();
+    result->payload = std::move(payload);
+    result->resourceUse = {std::make_shared<const DataResourceLease>(), "prepared-vtk-view", DataResourceKind::RenderObject};
+    auto draft = std::make_shared<const DataRevision>(DataRevision{{}, result->payload->GetDataType(), {}, result->payload});
+    VtkDataBridge worker;
+    if (const auto* image = dynamic_cast<const ImageGrid3DPayload*>(result->payload.get())) {
+        if (!image->GetValid()) return {};
+        const auto* root = source && source->data
+            ? dynamic_cast<const ImageGrid3DPayload*>(source->data->payload.get()) : nullptr;
+        if (root && source->image && source->image->GetPointData() && source->image->GetPointData()->GetScalars()
+            && root->GetValues() == image->GetValues()
+            && GetGeometrySame(root->GetGeometry(), image->GetGeometry())) {
+            auto view = std::make_shared<VtkImageGridView>();
+            view->data = draft;
+            view->image = vtkSmartPointer<vtkImageData>::New();
+            const auto& geometry=image->GetGeometry();
+            view->image->SetExtent(geometry.extent[0],geometry.extent[1],geometry.extent[2],geometry.extent[3],geometry.extent[4],geometry.extent[5]);view->image->SetOrigin(geometry.origin.data());
+            view->image->SetSpacing(geometry.spacing.data());view->image->SetDirectionMatrix(geometry.direction.data());
+            view->image->GetPointData()->SetScalars(source->image->GetPointData()->GetScalars());
+            // The scalar allocation belongs to Root. Only this result's shell and mask carry its lease.
+            VtkDataResourceLease::Attach(view->image, result->resourceUse.lease);
+            VtkDataResourceLease::Attach(view->image->GetPointData(), result->resourceUse.lease);
+            if (image->GetValidityMask()) {
+                view->validityMask = BuildImageShell(image->GetGeometry(), VTK_UNSIGNED_CHAR, 1,
+                    image->GetValidityMask()->data(), image->GetValidityMask()->size());
+                if (!view->validityMask) return {};
+                VtkDataResourceLease::AttachImage(view->validityMask, result->resourceUse.lease);
+            }
+            result->image = std::move(view);
+        } else {
+            result->image = worker.GetImageGrid(draft);
+            if (!result->image) return {};
+            VtkDataResourceLease::AttachImage(result->image->image, result->resourceUse.lease);
+            VtkDataResourceLease::AttachImage(result->image->validityMask, result->resourceUse.lease);
+        }
+    } else if (dynamic_cast<const SurfaceMeshPayload*>(result->payload.get())) {
+        result->mesh = worker.GetSurfaceMesh(draft);
+        if (!result->mesh) return {};
+        VtkDataResourceLease::AttachMesh(result->mesh->mesh, result->resourceUse.lease);
+    } else return {};
+    return result;
+}
+
+std::shared_ptr<const VtkPreparedDataView> VtkDataBridge::SetPreparedDataView(
+    const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared)
+{
+    if (!GetDataRevisionRefValid(ref) || !prepared || !prepared->payload || !prepared->resourceUse.lease
+        || static_cast<bool>(prepared->image) == static_cast<bool>(prepared->mesh)) return {};
+    auto result = std::make_shared<VtkPreparedDataView>(*prepared);
+    auto data = std::make_shared<const DataRevision>(DataRevision{ref, prepared->payload->GetDataType(), {}, prepared->payload});
+    if (prepared->image) {
+        auto view = std::make_shared<VtkImageGridView>(*prepared->image);
+        view->data = data;
+        result->image = view;
+        const std::lock_guard<std::mutex> lock(m_impl->mutex);
+        m_impl->images[ref] = std::move(view);
+    } else {
+        auto view = std::make_shared<VtkSurfaceMeshView>(*prepared->mesh);
+        view->data = data;
+        result->mesh = view;
+        const std::lock_guard<std::mutex> lock(m_impl->mutex);
+        m_impl->meshes[ref] = std::move(view);
+    }
+    return result;
+}
+
 VtkImageGridSnapshot VtkDataBridge::GetImageGrid(DataSnapshot data) const
 {
     if (!data || data->type != DataTypes::imageGrid3D) return {};
+    const auto lease = StartDataUse(data);
+    if (GetDataEntityIdValid(data->lifetimeScope) && !lease) return {};
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         const auto found = m_impl->images.find(data->self);
         if (found != m_impl->images.end()) {
-            if (auto cached = found->second.lock()) return cached;
+            if (auto cached = found->second.lock()) {
+                if (auto canonical = GetCanonicalView(std::move(cached), data)) return canonical;
+            }
         }
     }
     const auto* payload = dynamic_cast<const ImageGrid3DPayload*>(
@@ -406,12 +606,16 @@ VtkImageGridSnapshot VtkDataBridge::GetImageGrid(DataSnapshot data) const
             payload->GetValidityMask()->size());
         if (!mask) return {};
     }
+    VtkDataResourceLease::AttachImage(image, lease);
+    VtkDataResourceLease::AttachImage(mask, lease);
     auto view = std::make_shared<const VtkImageGridView>(VtkImageGridView{
         {}, {}, std::move(data), image, mask });
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         auto& cached = m_impl->images[view->data->self];
-        if (auto existing = cached.lock()) return existing;
+        if (auto existing = cached.lock()) {
+            if (auto canonical = GetCanonicalView(std::move(existing), view->data)) return canonical;
+        }
         cached = view;
     }
     return view;
@@ -420,11 +624,15 @@ VtkImageGridSnapshot VtkDataBridge::GetImageGrid(DataSnapshot data) const
 VtkLabelMapSnapshot VtkDataBridge::GetLabelMap(DataSnapshot data) const
 {
     if (!data || data->type != DataTypes::labelMap3D) return {};
+    const auto lease = StartDataUse(data);
+    if (GetDataEntityIdValid(data->lifetimeScope) && !lease) return {};
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         const auto found = m_impl->labels.find(data->self);
         if (found != m_impl->labels.end()) {
-            if (auto cached = found->second.lock()) return cached;
+            if (auto cached = found->second.lock()) {
+                if (auto canonical = GetCanonicalView(std::move(cached), data)) return canonical;
+            }
         }
     }
     const auto* payload = dynamic_cast<const LabelMap3DPayload*>(
@@ -440,12 +648,15 @@ VtkLabelMapSnapshot VtkDataBridge::GetLabelMap(DataSnapshot data) const
         static_cast<const std::uint8_t*>(payload->GetValueData()),
         byteCount);
     if (!labels) return {};
+    VtkDataResourceLease::AttachImage(labels, lease);
     auto view = std::make_shared<const VtkLabelMapView>(VtkLabelMapView{
         std::move(data), labels });
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         auto& cached = m_impl->labels[view->data->self];
-        if (auto existing = cached.lock()) return existing;
+        if (auto existing = cached.lock()) {
+            if (auto canonical = GetCanonicalView(std::move(existing), view->data)) return canonical;
+        }
         cached = view;
     }
     return view;
@@ -454,11 +665,15 @@ VtkLabelMapSnapshot VtkDataBridge::GetLabelMap(DataSnapshot data) const
 VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
 {
     if (!data || data->type != DataTypes::surfaceMesh) return {};
+    const auto lease = StartDataUse(data);
+    if (GetDataEntityIdValid(data->lifetimeScope) && !lease) return {};
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         const auto found = m_impl->meshes.find(data->self);
         if (found != m_impl->meshes.end()) {
-            if (auto cached = found->second.lock()) return cached;
+            if (auto cached = found->second.lock()) {
+                if (auto canonical = GetCanonicalView(std::move(cached), data)) return canonical;
+            }
         }
     }
     const auto* payload = dynamic_cast<const SurfaceMeshPayload*>(
@@ -492,23 +707,17 @@ VtkSurfaceMeshSnapshot VtkDataBridge::GetSurfaceMesh(DataSnapshot data) const
     auto mesh = vtkSmartPointer<vtkPolyData>::New();
     mesh->SetPoints(points);
     mesh->SetPolys(cells);
-    for (const auto& attribute : payload->GetPointAttributes()) {
-        auto array = vtkSmartPointer<vtkDoubleArray>::New();
-        array->SetName(attribute.name.c_str());
-        array->SetNumberOfComponents(static_cast<int>(attribute.componentCount));
-        array->SetNumberOfTuples(points->GetNumberOfPoints());
-        std::memcpy(
-            array->GetVoidPointer(0),
-            attribute.values.data(),
-            attribute.values.size() * sizeof(double));
-        mesh->GetPointData()->AddArray(array);
-    }
+    SetMeshAttributes(mesh->GetPointData(),payload->GetPointAttributes());
+    SetMeshAttributes(mesh->GetCellData(),payload->GetCellAttributes());
+    VtkDataResourceLease::AttachMesh(mesh, lease);
     auto view = std::make_shared<const VtkSurfaceMeshView>(
         VtkSurfaceMeshView{ std::move(data), mesh });
     {
         std::lock_guard<std::mutex> lock(m_impl->mutex);
         auto& cached = m_impl->meshes[view->data->self];
-        if (auto existing = cached.lock()) return existing;
+        if (auto existing = cached.lock()) {
+            if (auto canonical = GetCanonicalView(std::move(existing), view->data)) return canonical;
+        }
         cached = view;
     }
     return view;

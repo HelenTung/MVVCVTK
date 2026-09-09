@@ -2,7 +2,8 @@ add_executable(mvvcvtk_roi_integration_tests RoiIntegrationTests.cpp)
 target_link_libraries(mvvcvtk_roi_integration_tests PRIVATE MVVCVTK::Host MVVCVTK::OrthogonalCrop
     MVVCVTK::ArtifactReduction MVVCVTK::PartSegmentation MVVCVTK::SurfaceDetermination ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_roi_integration_tests)
-set_target_properties(mvvcvtk_roi_integration_tests PROPERTIES FOLDER "MVVCVTK/Tests")
+set_target_properties(mvvcvtk_roi_integration_tests PROPERTIES
+    PROJECT_LABEL RoiIntegrationTests FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS mvvcvtk_roi_integration_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME RoiIntegration.Synthetic COMMAND mvvcvtk_roi_integration_tests)
 SetTestRuntime(RoiIntegration.Synthetic mvvcvtk_roi_integration_tests)

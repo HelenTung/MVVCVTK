@@ -1,3 +1,4 @@
+#include "Data/Internal/VtkDataResourceLease.h"
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 
 #include "Data/ImageProcessor.h"
@@ -285,6 +286,9 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
     const IsoSurfaceBuildRequest& request,
     const RenderTaskToken& stopToken) const
 {
+    if (!request.inputUse.GetIsPublished()) {
+        return GetFailure(RenderProductFailure::StaleInput, "The product source has retired.");
+    }
     if (stopToken.GetIsStopped()) {
         return GetFailure(
             RenderProductFailure::Cancelled,
@@ -453,7 +457,12 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
                 "The iso-surface product exceeded its resource lease.");
         }
 
+
+        if (!request.inputUse.GetIsPublished()) {
+            return GetFailure(RenderProductFailure::StaleInput, "The product source retired while building.");
+        }
         auto product = std::make_shared<IsoSurfaceProduct>();
+        product->inputUse = request.inputUse;
         product->requestRevision = request.requestRevision;
         product->inputStamp = request.key.inputStamp;
         product->requestedQuality = request.requestedQuality;
@@ -462,6 +471,8 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         product->surface = std::move(surface);
         product->actualBytes = actualBytes;
         product->isPreview = request.isPreview;
+
+        VtkDataResourceLease::AttachMesh(product->surface, product->inputUse.resource);
 
         if (!stopToken.SetProductOwner(product, actualBytes)) {
             return GetFailure(RenderProductFailure::ResourceRejected,

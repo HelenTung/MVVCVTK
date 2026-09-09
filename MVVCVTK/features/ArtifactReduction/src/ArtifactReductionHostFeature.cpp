@@ -1,4 +1,5 @@
 #include "Host/ArtifactReductionHostFeature.h"
+#include "../../common/FeatureResultScopes.h"
 #include "ArtifactReductionAlgorithm.h"
 
 #include <chrono>
@@ -101,6 +102,7 @@ public:
     ArtifactConfig m_config;
     std::thread::id m_owner;
     std::shared_ptr<TrustedDataPort> m_data;
+    FeatureInternal::ResultScopes m_resultScopes;
     // 挂载上下文是临时值；Feature 必须持有通知端口直到成功解绑。
     std::shared_ptr<FeatureHostControl> m_host;
     ArtifactState m_state;
@@ -167,6 +169,7 @@ bool ArtifactReductionHostFeature::DetachHost()
     state.m_control.reset();
     state.m_inputs.clear();
     state.m_expectations.clear();
+    if (!state.m_resultScopes.Clear(*state.m_data)) return false;
     state.m_data.reset();
     state.m_host.reset();
     state.m_owner = {};
@@ -332,7 +335,7 @@ ArtifactCommitResult ArtifactReductionHostFeature::SetCandidate(std::uint64_t re
             { volumeId, 0, DataTypes::imageGrid3D, state.m_inputs, state.m_candidate.image, provenance },
             { reportId, 0, DataTypes::recordTable, state.m_inputs, state.m_candidate.report, provenance }
         };
-        const auto commit = state.m_data->SetDataCommit(std::move(transaction));
+        const auto commit = state.m_resultScopes.Commit(*state.m_data,std::move(transaction));
         result.status = commit.status;
         state.m_state.commitStatus = commit.status;
         if (commit.status == DataCommitStatus::Rejected) {

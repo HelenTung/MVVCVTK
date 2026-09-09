@@ -770,19 +770,23 @@ int GetEditLifecycleFailCount()
             "Cancelled preview token cannot commit");
     }
     const auto candidate = preview(test, request);
-    bool sawCommitting = false, nestedBusy = false, detachRejected = false, oldProjection = false;
+    bool sawCommitting = false, nestedBusy = false, detachRejected = false, joinedProjection = false;
     const auto observer = test.data->AttachDataChange([&](const auto&) {
-        sawCommitting = test.feature->GetState().status == PartSegmentationStatus::Committing;
-        oldProjection = test.feature->GetState().labelMap == initialState.labelMap
-            && test.feature->GetPartSetSnapshot()->resultRevision == initial->resultRevision;
+        const auto state = test.feature->GetState();
+        const auto snapshot = test.feature->GetPartSetSnapshot();
+        sawCommitting = state.status == PartSegmentationStatus::Committing;
+        joinedProjection = state.labelMap != initialState.labelMap && snapshot
+            && snapshot->resultRevision == state.resultRevision
+            && test.data->GetData(test.data->GetDataGraph(),state.labelMap)
+            && test.data->GetData(test.data->GetDataGraph(),state.resultSet);
         nestedBusy = test.feature->SendEditRequest(request).status == PartAdmissionStatus::Busy;
         detachRejected = !test.feature->DetachHost();
     });
     auto committed = candidate ? commit(test, candidate->previewId) : std::nullopt;
     (void)test.data->DetachDataChange(observer);
     check(committed && committed->status == PartResultStatus::Succeeded
-        && sawCommitting && oldProjection && nestedBusy && detachRejected,
-        "DataGraph observer sees documented committing projection and cannot reenter mutation/detach");
+        && sawCommitting && joinedProjection && nestedBusy && detachRejected,
+        "DataGraph observer sees joined publication and cannot reenter mutation/detach");
     const auto merged = test.feature->GetPartSetSnapshot();
     check(merged && merged->parts.size() == 1 && merged->retiredFromPrevious.size() == 2
         && test.feature->GetState().labelMap != initialState.labelMap,

@@ -91,7 +91,7 @@ QJsonArray GetSceneNodes(const QString& module, const QJsonObject& s, const QJso
 {
     auto actions = availableActions;
     actions.removeAll("UseData"); actions.removeAll("GraphInfo");
-    if (module == "Crop") { actions.removeAll("Node"); actions.removeAll("DeleteNode"); }
+    if (module == "Crop") { actions.removeAll("Node"); actions.removeAll("PruneSubtree"); actions.removeAll("PruneDescendants"); actions.removeAll("PruneOutsidePaths"); }
     QJsonArray children;
     if (input["available"].toBool()) children.append(Node("input:" + input["dataRevision"].toString(), input["datasetId"].toString("当前体数据"), "当前输入",
         module == "Data" ? QStringList{"Descriptor", "ExportData", "ExportSlices", "CreateMask", "Select"} : actions,
@@ -105,29 +105,30 @@ QJsonArray GetSceneNodes(const QString& module, const QJsonObject& s, const QJso
     }
     if (module == "Crop") {
         children.append(Node("crop-tools", "裁剪工具", s["isActive"].toBool() ? "编辑中" : "未启用",
-            {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly", "Mode", "Exit"}));
-        if (s["hasHistory"].toBool()) {
-            QJsonArray history; const auto count = s["operationCount"].toString().toULongLong(); const auto cursor = s["nodeCount"].toString().toULongLong();
-            const auto first = count > 200 && cursor > 100 ? cursor - 100 : 0;
-            const auto end = qMin(count, first + 199);
-            const auto indices = s["operationIndices"].toArray();
-            for (auto i = first; i <= end && i <= static_cast<qulonglong>(indices.size()); ++i) {
-                const auto operation = i ? indices[static_cast<int>(i-1)].toString() : QString("root");
-                QStringList nodeActions{"Node", "Previous", "Next", "ResetPreview", "FinishEditing", "BuildResult"};
-                QJsonObject patches{{"Node", QJsonObject{{"nodeCount", QString::number(i)}}}};
-                if (i) { nodeActions.append("DeleteNode"); patches["DeleteNode"] = QJsonObject{{"operationIndex", operation}}; }
-                const auto prefix = "crop-history:" + s["historySource"].toString() + ":";
-                auto node = Node(prefix + operation, i == 0 ? "原始状态" : "裁剪节点 " + operation,
-                    i == cursor ? "当前节点" : i < cursor ? "已生效" : "可重做", nodeActions, patches);
-                node["parents"] = i > first ? QJsonArray{prefix + (i == 1 ? QString("root") : indices[static_cast<int>(i-2)].toString())} : QJsonArray{};
-                node["current"] = i == cursor; node["pending"] = i > cursor;
-                node["description"] = "裁剪预览按单线保存。回退后新增裁剪会替换后续可重做节点；已发布结果保留在数据关系中。";
-                history.prepend(node);
-            }
-            children.append(Node("crop-history", QString("裁剪历史 · %1 / %2").arg(cursor).arg(count), (s["isConfirmed"].toBool() ? QString("已确认") : QString("预览")) + (first || end < count ? " · 部分历史未展开" : ""),
-                {"Previous", "Next", "ResetPreview", "FinishEditing", "BuildResult"}, {}, history));
+            {"Box", "Plane", "Sphere", "Cylinder", "KeepInside", "RemoveInside", "PositionOnly", "Mode", "Exit"}));
+        QJsonArray documents;
+        for(const auto value:s["documents"].toArray()) {
+            const auto id=value.toString();
+            documents.append(Node("crop-document:"+id,"裁剪文档 "+id,id==s["documentId"].toString()?"当前文档":"可切换",
+                {"ActivateDocument"},{{"ActivateDocument",QJsonObject{{"documentId",id}}}}));
         }
-        if (!Ref(s["output"]).isEmpty()) children.append(Node("crop-output:" + Ref(s["output"]), "裁剪结果", s["isOutputCurrent"].toBool() ? "当前输入" : "已发布", {"SelectOutput", "RestoreSource"}));
+        children.append(Node("crop-documents","裁剪文档",QString::number(documents.size()),{"CreateDocument","CloseDocument"},{},documents));
+        QJsonArray history;const auto prefix="crop-history:"+s["documentId"].toString()+":";
+        for(const auto value:s["nodes"].toArray()) {
+            const auto item=value.toObject();const auto id=item["nodeId"].toString();const auto parent=item["parentNodeId"].toString();
+            const bool root=parent=="0",current=id==s["appliedHead"].toString();
+            QStringList nodeActions{"Node","BuildResult","PruneDescendants","PruneOutsidePaths"};
+            if(!root)nodeActions.append("PruneSubtree");
+            QJsonObject patches;for(const auto& action:nodeActions)patches[action]=QJsonObject{{"nodeId",id}};
+            auto node=Node(prefix+id,root?"原始状态":"裁剪节点 "+id,current?"当前节点":"历史分支",nodeActions,patches);
+            node["parents"]=root?QJsonArray{}:QJsonArray{prefix+parent};node["current"]=current;
+            node["pending"]=current&&id!=s["renderedHead"].toString();
+            node["description"]="节点和父关系保持不变；从历史节点继续编辑会形成独立分支。";
+            history.append(node);
+        }
+        if(!history.isEmpty())children.append(Node("crop-history","裁剪历史",s["nextPageAfter"].toString()!="0"?"部分历史，后续可翻页":"当前页",
+            {"Previous","Next","ResetPreview","FinishEditing","BuildResult","SaveRoi","FirstHistoryPage","NextHistoryPage"},{},history));
+        if (!Ref(s["output"]).isEmpty()) children.append(Node("crop-output:"+Ref(s["output"]),"裁剪结果","已发布",{"SelectOutput","RestoreSource"}));
     }
     if (module == "Part" || module == "PartEdit") {
         const bool current = s["hasCurrentParts"].toBool();

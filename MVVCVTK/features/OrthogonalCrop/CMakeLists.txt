@@ -1,18 +1,32 @@
 set(MVVCVTK_CROP_SOURCES
     include/Algorithms/CropAlgorithm.h
+    include/Algorithms/CropGeometry.h
+    include/Algorithms/CropMeshAlgorithm.h
+    include/Algorithms/CropMeshExact.h
+    include/Interaction/CropHistory.h
+    include/Interaction/CropHistoryQueue.h
+    include/Interaction/CropCurveWidget.h
     include/Interaction/CropBoxWidget.h
     include/Interaction/CropBridge.h
     include/Interaction/CropPlaneWidget.h
     include/Render/CropShaderController.h
     include/Routing/CropRouter.h
     src/Algorithms/CropAlgorithm.cpp
+    src/Algorithms/CropGeometry.cpp
+    src/Algorithms/CropMeshAlgorithm.cpp
+    src/Interaction/CropHistory.cpp
+    src/Interaction/CropHistoryQueue.cpp
     src/Host/CropHostFeature.cpp
+    src/Interaction/CropCurveWidget.cpp
     src/Interaction/CropBoxWidget.cpp
     src/Interaction/CropBridge.cpp
     src/Interaction/CropPlaneWidget.cpp
     src/Render/CropShaderController.cpp
     src/Routing/CropRouter.cpp
 )
+if(MSVC)
+    set_source_files_properties(src/Algorithms/CropMeshAlgorithm.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+endif()
 # CropHostFeature 是模块入口，OrthogonalCropTypes 是其公开签名的类型闭包。
 SetHeaderSurface(
     MVVCVTK_CROP_API_HEADERS

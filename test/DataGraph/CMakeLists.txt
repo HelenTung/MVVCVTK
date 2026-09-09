@@ -1,6 +1,7 @@
 # 独立编译纯值数据核心，保持测试不依赖 Host 实现或 VTK。
 add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
+    DataLifetimeTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
@@ -14,6 +15,7 @@ set_target_properties(
     PROPERTIES PROJECT_LABEL DataGraphTests FOLDER "MVVCVTK/test/Automation/DataGraph"
 )
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
+add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp
@@ -43,5 +45,6 @@ add_executable(mvvcvtk_roi_tests
 )
 target_include_directories(mvvcvtk_roi_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
 SetTargetDefaults(mvvcvtk_roi_tests)
-set_target_properties(mvvcvtk_roi_tests PROPERTIES FOLDER "MVVCVTK/Tests/DataGraph")
+set_target_properties(mvvcvtk_roi_tests PROPERTIES
+    PROJECT_LABEL RoiTests FOLDER "MVVCVTK/test/Automation/DataGraph")
 add_test(NAME DataGraph.Roi COMMAND mvvcvtk_roi_tests)

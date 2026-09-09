@@ -9,6 +9,7 @@
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
@@ -138,7 +139,7 @@ bool StartBadInputCase()
         "Duplicate operation indices should be rejected.") && isPassed;
 
     operation = BuildBox(3);
-    operation.geometryType = CropShape::Cylinder;
+    operation.geometryType = static_cast<CropShape>(255);
     isPassed = SetExpect(
         !CropAlgorithm::BuildPredicateTable({ operation }, 1).isSucceeded,
         "Unsupported crop shapes should be rejected.") && isPassed;
@@ -566,6 +567,71 @@ bool StartCancelledBuildCase()
         "Cancellation before/during SMP publishes no partial mask and leaves input reusable.");
 }
 
+bool StartFourShapeImageCase()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetExtent(-4,4,-4,4,-4,4);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);image->GetPointData()->GetScalars()->FillComponent(0,7);
+    for(auto shape:{CropShape::Sphere,CropShape::Cylinder})for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        CropOpItem operation;operation.operationIndex=1;operation.geometryType=shape;operation.removalMode=mode;
+        operation.centerInInputModel={0.25,0,0};operation.radius=2.3;operation.height=3.2;operation.axisInInputModel={1,1,0};
+        const auto params=BuildParams(operation);const auto payload=BuildPayload(params.operations,params.nodeCount);
+        auto result=CropAlgorithm::GetResult(image,nullptr,params,payload);
+        if(!SetExpect(result.isSucceeded&&result.maskImage,"Four-shape image candidate failed."))return false;
+        const auto* mask=static_cast<const unsigned char*>(result.maskImage->GetScalarPointer());std::size_t index=0;
+        for(int z=-4;z<=4;++z)for(int y=-4;y<=4;++y)for(int x=-4;x<=4;++x,++index) {
+            const long double dx=static_cast<long double>(x)-0.25L,dy=y,dz=z;
+            long double squared=dx*dx+dy*dy+dz*dz;bool cap=true;
+            if(shape==CropShape::Cylinder) {
+                const long double axial=(dx+dy)/std::sqrt(2.0L);
+                squared-=axial*axial;cap=std::abs(axial)<=static_cast<long double>(operation.height)/2;
+            }
+            const bool inside=cap&&squared<=static_cast<long double>(operation.radius)*operation.radius;
+            const bool expected=mode==CropRemovalMode::KeepInside?inside:!inside;
+            if(!SetExpect((mask[index]!=0)==expected,"Full-resolution mask differs from independent long-double curved geometry."))return false;
+        }
+    }
+    // Quantizing both coordinates and plane center to float would remove every voxel.
+    image->SetExtent(0,2,0,0,0,0);image->SetOrigin(100000000.0,0,0);image->SetSpacing(0.25,1,1);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);image->GetPointData()->GetScalars()->FillComponent(0,7);
+    auto plane=BuildPlane(1);plane.planeCenterInInputModel={100000000.125,0,0};plane.planeNormalInInputModel={1,0,0};
+    const auto params=BuildParams(plane);auto result=CropAlgorithm::GetResult(image,nullptr,params,BuildPayload(params.operations,1));
+    const auto* mask=result.maskImage?static_cast<const unsigned char*>(result.maskImage->GetScalarPointer()):nullptr;
+    return SetExpect(result.isSucceeded&&mask&&mask[0]==0&&mask[1]==255&&mask[2]==255,
+        "CPU mask must retain double geometry and model coordinates at large origins.");
+}
+
+bool StartCurvedRecipeCase()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(3,3,3);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR,1);image->GetPointData()->GetScalars()->FillComponent(0,7);
+    TestDataPort data;auto view=data.SetPrimaryImage(image);
+    CropInputSnapshot input;input.graph=view->graph;input.binding=view->binding;input.data=view->data;
+    input.image=view;input.inputModelBounds={0,2,0,2,0,2};
+    for(auto shape:{CropShape::Sphere,CropShape::Cylinder}) {
+        CropOpItem operation;operation.operationIndex=1;operation.geometryType=shape;
+        operation.centerInInputModel={1,1,1};operation.radius=1.2;operation.height=2;operation.axisInInputModel={2,0,0};
+        auto params=BuildParams(operation);params.sourceRevision=view->data->self;
+        auto payload=BuildPayload(params.operations,1,1,params.sourceRevision);
+        auto task=CropRouter{}.BuildResultTask(input,params,payload);if(!task)return false;
+        auto future=task->get_future();(*task)();const auto candidate=future.get();
+        if(!SetExpect(candidate.isSucceeded&&candidate.recipePayload&&candidate.preparedView,"Curved worker recipe preparation failed."))return false;
+        const auto& primitive=candidate.recipePayload->GetDefinition().nodes.at(1).primitive;
+        if(!SetExpect(primitive.shape==(shape==CropShape::Sphere?RoiShape::Sphere:RoiShape::Cylinder)
+            &&primitive.origin==operation.centerInInputModel&&primitive.radius==operation.radius
+            &&primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1
+            &&(shape==CropShape::Sphere||primitive.normal==std::array<double,3>{1,0,0}),
+            "Published curved recipe must carry normalized source geometry and versions."))return false;
+    }
+    std::vector<CropOpItem> deep(4096);
+    for(std::size_t i=0;i<deep.size();++i){deep[i].operationIndex=i+1;deep[i].removalMode=CropRemovalMode::RemoveInside;}
+    const auto recipe=CropRouter::CreateRecipePayload(deep,view->data->self);
+    if(!SetExpect(recipe&&recipe->GetDefinition().nodes.size()==roiNodeLimit,"Maximum history path must fit the bounded unified ROI expression."))return false;
+    DataTransaction transaction;transaction.outputs.push_back({data.CreateDataEntityId(),0,DataTypes::roiGeometry,
+        {{"source-data",view->data->self}},recipe});
+    if(!SetExpect(data.SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded,"Deep balanced recipe must satisfy unified ROI validation."))return false;
+    return true;
+}
+
 bool StartPolyBuildCase()
 {
     vtkNew<vtkCubeSource> cube;
@@ -594,6 +660,47 @@ bool StartPolyBuildCase()
             && bounds[0] >= -1.0e-6
             && bounds[1] <= 1.0 + 1.0e-6,
         "PolyData build should DeepCopy one clipped kept half from the temporary pipeline.");
+}
+
+bool StartCanonicalRootCase()
+{
+    TestDataPort data;
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(3,1,1);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    image->GetPointData()->GetScalars()->FillComponent(0,7);
+    auto mask=vtkSmartPointer<vtkImageData>::New();mask->CopyStructure(image);mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* bytes=static_cast<unsigned char*>(mask->GetScalarPointer());bytes[0]=0;bytes[1]=255;bytes[2]=255;
+    const auto view=data.SetPrimaryImage(image,mask);
+    CropInputSnapshot input;input.graph=view->graph;input.binding=view->binding;input.data=view->data;input.image=view;
+    input.inputModelBounds={0,2,0,0,0,0};
+    auto operation=BuildPlane(1);operation.planeCenterInInputModel={0.5,0,0};operation.planeNormalInInputModel={1,0,0};
+    auto params=BuildParams(operation);params.sourceRevision=view->data->self;
+    auto task=CropRouter{}.BuildResultTask(input,params,BuildPayload(params.operations,1,1,params.sourceRevision));if(!task)return false;
+    // A writable rendering wrapper is not authority for frozen Root geometry or M0.
+    view->image->SetOrigin(1000,0,0);view->validityMask->GetPointData()->GetScalars()->FillComponent(0,0);
+    auto future=task->get_future();(*task)();const auto output=future.get();
+    const auto source=std::dynamic_pointer_cast<const ImageGrid3DPayload>(view->data->payload);
+    const auto payload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(output.outputPayload);
+    if(!SetExpect(output.isSucceeded&&payload&&payload->GetValues()==source->GetValues()
+        &&payload->GetGeometry().origin==std::array<double,3>{0,0,0}
+        &&*payload->GetValidityMask()==std::vector<std::uint8_t>{0,255,255}
+        &&output.preparedView->image->image->GetOrigin()[0]==0,
+        "Materialization read mutable VTK geometry/mask instead of canonical Root."))return false;
+    const auto entity=data.CreateDataEntityId();const DataRevisionRef ref{entity,1};
+    auto meshPayload=std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{100000000.125,0,0,100000000.375,0,0,100000000.125,0.25,0},
+        std::vector<std::uint64_t>{0,1,2});
+    DataTransaction create;create.outputs.push_back({entity,0,DataTypes::surfaceMesh,{},meshPayload,{}});
+    if(data.SetDataCommit(std::move(create)).status!=DataCommitStatus::Succeeded)return false;
+    input={};input.graph=data.GetDataGraph();input.data=data.GetData(input.graph,ref);input.mesh=data.GetSurfaceMesh(input.graph,ref);
+    input.mesh->mesh->GetBounds(input.inputModelBounds.data());double point[3]={};input.mesh->mesh->GetPoint(0,point);
+    if(!SetExpect(point[0]==100000000.125,"Canonical double mesh coordinates were rounded by the VTK bridge."))return false;
+    operation.planeCenterInInputModel={100000000,0,0};params=BuildParams(operation);params.sourceRevision=ref;
+    task=CropRouter{}.BuildResultTask(input,params,BuildPayload(params.operations,1,1,ref));if(!task)return false;
+    for(vtkIdType i=0;i<3;++i)input.mesh->mesh->GetPoints()->SetPoint(i,0,0,0);
+    auto meshFuture=task->get_future();(*task)();const auto cropped=meshFuture.get();
+    double bounds[6]={};if(cropped.polyData)cropped.polyData->GetBounds(bounds);
+    return SetExpect(cropped.isSucceeded&&bounds[0]==100000000.125&&bounds[1]==100000000.375,
+        "Materialization read mutable VTK points instead of canonical Root mesh.");
 }
 
 bool StartRouterTaskCase()
@@ -671,7 +778,10 @@ bool StartPublicRoiExtentCase()
     for (int i=0;i<12;++i) if ((mask[i]!=0)!=(i/3%2==0 && i!=0) || copied[i]!=values[i])
         return SetExpect(false,"nonzero extent/rotated physical mapping or existing validity changed");
     const auto cancelled=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[]{return true;});
-    return SetExpect(!cancelled.isSucceeded && cancelled.isCancelled && !cancelled.imageData,"cancelled public ROI crop leaked output");
+    if(!SetExpect(!cancelled.isSucceeded && cancelled.isCancelled && !cancelled.imageData,"cancelled public ROI crop leaked output"))return false;
+    int polls=0;const auto midChunk=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[&]{return ++polls>2;});
+    return SetExpect(midChunk.isCancelled&&!midChunk.isSucceeded&&midChunk.failureReason==CropFailure::Cancelled&&!midChunk.outputPayload,
+        "ROI chunk cancellation must use the public Cancelled terminal without publishing a partial mask.");
 }
 
 }
@@ -686,8 +796,11 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartSnapshotCase() ? 0 : 1;
     failureCount += StartImageBuildCase() ? 0 : 1;
     failureCount += StartCancelledBuildCase() ? 0 : 1;
+    failureCount += StartFourShapeImageCase() ? 0 : 1;
+    failureCount += StartCurvedRecipeCase() ? 0 : 1;
     failureCount += StartPolyBuildCase() ? 0 : 1;
     failureCount += StartPublicRoiExtentCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
+    failureCount += StartCanonicalRootCase() ? 0 : 1;
     return failureCount;
 }

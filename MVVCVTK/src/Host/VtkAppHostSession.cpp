@@ -15,6 +15,7 @@
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
 #include "Data/LabelMapReader.h"
+#include "Render/Support/RenderFrameLifetime.h"
 #include "Data/RoiService.h"
 
 #include <algorithm>
@@ -161,6 +162,7 @@ private:
     void SendDiagnostic(const std::string& message) const noexcept;
     void SendImageReadComplete(bool isStopping) noexcept;
     void SendFeatureTicks() noexcept;
+    void SendPendingFrameWork() noexcept;
     void SendOwnerCompletions(bool isStopping = false) noexcept;
     void OnViewTimer();
     void OnHostTimer();
@@ -965,6 +967,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
     }
     stopState = HostStopState::Stopping;
     try {
+        (void)RenderFrameLifetime::PollAll();
         // P0 首先关闭普通 frame admission 与输入 gate；清理失败时保持
         // StopPending，但不再恢复可交互状态。
         if (frameCoordinator) frameCoordinator->Stop();
@@ -972,7 +975,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             stopState = HostStopState::StopPending;
             return false;
         }
-        if (!DetachFeatures()) {
+        if (!renderViews.SetDataTasksStopping() || !DetachFeatures()) {
             stopState = HostStopState::StopPending;
             return false;
         }
@@ -1571,6 +1574,7 @@ HostUpdateResult VtkAppHostSession::Impl::SendUpdates()
     if (workSignal) workSignal->SendUpdates();
     const auto frames = frameCoordinator;
     try {
+        (void)RenderFrameLifetime::PollAll();
         const auto status = frames->SendUpdates();
         result.sceneEpoch = frames->GetCommittedEpoch();
         result.renderViewIds = renderViews.GetRenderViewIds();
@@ -1586,6 +1590,7 @@ HostUpdateResult VtkAppHostSession::Impl::SendUpdates()
         }
     }
     catch (...) { result.status = HostUpdateStatus::Failed; }
+    SendPendingFrameWork();
     isFrameExecuting = false;
     if (stopState.load() == HostStopState::StopRequested) {
         (void)Stop();
@@ -1593,6 +1598,15 @@ HostUpdateResult VtkAppHostSession::Impl::SendUpdates()
         result.renderViewIds.clear();
     }
     return result;
+}
+
+void VtkAppHostSession::Impl::SendPendingFrameWork() noexcept
+{
+    // 仅实际未完成的 GPU 栅栏续约 owner 更新，隐藏视图的待绘制需求不会触发空转。
+    if(workSignal)for(const auto& endpoint:endpoints)
+        if(RenderFrameLifetime::GetHasPending(endpoint.renderWindow)) {
+            (void)workSignal->SendWorkAvailable();break;
+        }
 }
 
 HostRenderResult VtkAppHostSession::Impl::SendRender(
@@ -1616,6 +1630,7 @@ HostRenderResult VtkAppHostSession::Impl::SendRender(
         return stopState.load() == HostStopState::Running;
     }); }
     catch (...) { result.status = HostRenderStatus::Failed; }
+    SendPendingFrameWork();
     isRendering = false;
     isFrameExecuting = false;
     if (stopState.load() == HostStopState::StopRequested) {

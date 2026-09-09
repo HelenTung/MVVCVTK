@@ -26,6 +26,7 @@ struct IsoSurfaceKey final {
 };
 
 struct IsoSurfaceProduct final {
+    RenderInputUse inputUse;
     std::uint64_t requestRevision = 0;
     RenderInputStamp inputStamp;
     VolumeQuality requestedQuality = VolumeQuality::Auto;
@@ -37,6 +38,7 @@ struct IsoSurfaceProduct final {
 };
 
 struct IsoSurfaceBuildRequest final {
+    RenderInputUse inputUse;
     IsoSurfaceKey key;
     std::uint64_t requestRevision = 0;
     VolumeQuality requestedQuality = VolumeQuality::Auto;

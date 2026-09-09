@@ -19,6 +19,8 @@
 #include "Render/Internal/RenderWorkBudget.h"
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkCommand.h>
+#include <vtkCallbackCommand.h>
+#include <vtkRenderWindow.h>
 #include <stdexcept>
 
 #include <algorithm>
@@ -85,6 +87,58 @@ public:
         if (!isSkipped) InvokeEvent(vtkCommand::EndEvent);
     }
 };
+
+class GpuHeadroomProbe final : public VolumeStrategy {
+public:
+    using VolumeStrategy::VolumeStrategy;
+    std::optional<std::uint64_t> freeBytes;
+private:
+    std::optional<std::uint64_t> GetGpuFreeBytes() const override{return freeBytes;}
+};
+
+int GetGpuHeadroomFailCount()
+{
+    int failures=0;
+    constexpr std::uint64_t MiB=1024ULL*1024;
+    for(const auto free: {std::optional<std::uint64_t>(128*MiB),std::optional<std::uint64_t>{},std::optional<std::uint64_t>(0)}) {
+        auto lane=std::make_shared<ManualRenderLane>();
+        auto resources=std::make_shared<RenderResourceCoordinator>([lane](RenderLaneWork work){return lane->Start(std::move(work));});
+        auto services=std::make_shared<RenderStrategyServices>();services->resources=resources;
+        auto renderer=vtkSmartPointer<vtkRenderer>::New();
+        auto window=vtkSmartPointer<vtkRenderWindow>::New();window->SetOffScreenRendering(1);window->SetSize(32,32);window->AddRenderer(renderer);window->Render();
+        GpuHeadroomProbe candidate(services);candidate.freeBytes=free;
+        auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(32,32,32);image->AllocateScalars(VTK_FLOAT,1);image->GetPointData()->GetScalars()->FillComponent(0,128);
+        RenderParams params;params.volumeQuality=VolumeQuality::Ultra;
+        params.volumeTransferFunction.colorNodes={{0,0,0,0},{255,1,1,1}};
+        params.volumeTransferFunction.opacityNodes={{0,0},{255,1}};
+        bool valid=candidate.SetVisualState(params,UpdateFlags::Quality|UpdateFlags::VolumeTransfer)
+            &&candidate.SetRenderInputStamp(RenderInputStamp{GetTestDataRef(1011)})
+            &&candidate.SetInputData(image,nullptr)&&lane->SendOne()&&candidate.SetProductCommit();
+        // Another strategy owns the displayed result in this same context.
+        // Its reservation is not removed by clearing the candidate's own lease.
+        int displayedOwner=0;
+        valid=resources->SetGpuContextBudget(window,128*MiB)
+            &&resources->SetGpuReservation(window,&displayedOwner,96*MiB)&&valid;
+        int errors=0;auto observer=vtkSmartPointer<vtkCallbackCommand>::New();observer->SetClientData(&errors);
+        observer->SetCallback([](vtkObject*,unsigned long,void* data,void*){++*static_cast<int*>(data);});
+        const auto tag=window->AddObserver(vtkCommand::ErrorEvent,observer);
+        candidate.AttachRenderer(renderer);renderer->ResetCamera();window->Render();window->WaitForCompletion();
+        const auto state=resources->GetGpuResourceState(window);
+        auto* volume=vtkVolume::SafeDownCast(candidate.GetMainProp());
+        auto* mapper=volume?vtkGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper()):nullptr;
+        auto* input=mapper?vtkImageData::SafeDownCast(mapper->GetInput()):nullptr;
+        const bool hasHeadroom=free&&*free!=0;
+        valid=valid&&candidate.GetGpuQueryCount()>0&&input&&input->GetDimensions()[0]==32
+            &&(hasHeadroom?(errors==0&&state.reservationCount==2&&state.reservedBytes==96*MiB+32*32*32*sizeof(float))
+                :(errors>0&&state.reservationCount==1&&state.reservedBytes==96*MiB));
+        failures+=GetCaseResult(valid,hasHeadroom?
+            "GPU driver headroom admits a Root candidate alongside another strategy's resident result":
+            "Unknown or zero GPU headroom keeps conservative admission and the displayed reservation")?0:1;
+        candidate.DetachRenderer(renderer);window->RemoveObserver(tag);
+        (void)resources->ClearGpuReservation(window,&displayedOwner);
+    }
+    return failures;
+}
 
 int GetLatestTransitionFailCount()
 {
@@ -1383,7 +1437,8 @@ int GetSliceAndPlaneCacheFailCount()
 
 int GetRenderProductFailCount()
 {
-    return GetLatestTransitionFailCount()
+    return GetGpuHeadroomFailCount()
+        + GetLatestTransitionFailCount()
         + GetWorkingSetFailCount()
         + GetTransitionValueFailCount()
         + GetDefaultStrategyFailCount()

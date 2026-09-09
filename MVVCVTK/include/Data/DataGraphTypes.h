@@ -53,6 +53,8 @@ inline std::size_t GetImageValueBytes(
     }
 }
 
+// Historical binding spelling retained for compatibility. Trusted render-stage
+// transitions may select a surface mesh; image APIs still require ImageGrid3D.
 inline constexpr std::string_view primaryVolumeBinding =
     "session.primary.volume";
 
@@ -196,6 +198,46 @@ struct DataProvenance final {
     std::string canonicalParameters;
 };
 
+// 作用域只约束可撤销数据的读取和资源持有，不包含具体 Feature 业务。
+enum class DataLifetimeStatus : std::uint8_t {
+    Unknown, Published, Releasing, Released
+};
+
+struct DataLifetimeBlocker final {
+    DataRevisionRef revision;
+    std::string owner;
+};
+
+struct DataLifetimeState final {
+    DataEntityId scopeId;
+    DataLifetimeStatus status = DataLifetimeStatus::Unknown;
+    std::vector<DataRevisionRef> ownedRevisions;
+    std::vector<DataLifetimeBlocker> blockers;
+};
+
+enum class DataResourceKind : std::uint8_t { Reader, RenderObject };
+
+class DataResourceLease {
+public:
+    virtual ~DataResourceLease() noexcept = default;
+};
+
+class DataLifetimeAccess {
+public:
+    virtual ~DataLifetimeAccess() noexcept = default;
+    virtual bool GetIsPublished() const = 0;
+    // 取得后由实际资源 owner 持有；退役后不得再取得新租约。
+    virtual std::shared_ptr<const DataResourceLease> StartResourceUse(
+        const DataRevisionRef& revision, std::string owner,
+        DataResourceKind kind = DataResourceKind::Reader) = 0;
+};
+
+class DataChangeBatch {
+public:
+    // 仅 owner thread 使用；最外层析构在完整业务状态交换后派发通知。
+    virtual ~DataChangeBatch() noexcept = default;
+};
+
 class IDataPayload {
 public:
     virtual ~IDataPayload() noexcept = default;
@@ -203,6 +245,11 @@ public:
     virtual DataTypeId GetDataType() const = 0;
     // Store 在提交锁外调用；返回值不得与原对象共享可写业务状态。
     virtual std::shared_ptr<const IDataPayload> CreateSnapshot() const = 0;
+    // 列出可被调用方单独持有的共享 allocation；内嵌值由 payload 自身覆盖。
+    virtual std::vector<std::shared_ptr<const void>> GetDataResources() const
+    {
+        return {};
+    }
 };
 
 struct DataRevision final {
@@ -211,6 +258,8 @@ struct DataRevision final {
     std::vector<DataInputRef> inputs;
     std::shared_ptr<const IDataPayload> payload;
     std::optional<DataProvenance> provenance;
+    DataEntityId lifetimeScope;
+    std::weak_ptr<DataLifetimeAccess> lifetime;
 };
 
 using DataSnapshot = std::shared_ptr<const DataRevision>;
@@ -248,6 +297,14 @@ struct DataExpectation final {
     std::optional<DataRevisionRef> expectedTarget;
 };
 
+// Candidate resources are created before publication and registered atomically with their revision.
+// The concrete objects retain the lease; the graph retains only a weak probe.
+struct DataPreparedResource final {
+    std::shared_ptr<const DataResourceLease> lease;
+    std::string owner;
+    DataResourceKind kind = DataResourceKind::RenderObject;
+};
+
 struct DataRevisionDraft final {
     DataEntityId entityId;
     DataGeneration expectedGeneration = 0;
@@ -255,6 +312,18 @@ struct DataRevisionDraft final {
     std::vector<DataInputRef> inputs;
     std::shared_ptr<const IDataPayload> payload;
     std::optional<DataProvenance> provenance;
+    // 同一事务内以新身份创建；已发布或退役的作用域均不能追加输出。
+    std::optional<DataEntityId> lifetimeScope;
+    std::vector<DataPreparedResource> preparedResources;
+};
+
+struct DataLifetimeRetirement final {
+    DataEntityId scopeId;
+    DataLifetimeStatus expectedStatus = DataLifetimeStatus::Published;
+    std::vector<DataRevisionRef> expectedRevisions;
+    // View 过渡已准备好：渲染对象可进入延迟清理；Reader/下游依赖仍严格阻塞。
+    // 此标记不等于释放完成；RenderObject 租约全部结束前状态保持 Releasing。
+    bool isResourceTransition = false;
 };
 
 struct DataBindingUpdate final {
@@ -275,6 +344,7 @@ struct DataTransaction final {
     std::vector<DataExpectation> expectations;
     std::vector<DataRevisionDraft> outputs;
     std::vector<DataBindingUpdate> bindings;
+    std::vector<DataLifetimeRetirement> retireScopes;
 };
 
 enum class DataCommitStatus : std::uint8_t {
@@ -292,7 +362,9 @@ enum class DataCommitFailure : std::uint8_t {
     CycleDetected,
     ExpectationFailed,
     Overflow,
-    OutOfMemory
+    OutOfMemory,
+    ResultInUse,
+    ResultRetired
 };
 
 struct DataBindingChange final {
@@ -305,6 +377,8 @@ struct DataChangeSet final {
     DataCommitId commitId = 0;
     std::vector<DataRevisionRef> published;
     std::vector<DataBindingChange> bindings;
+    std::vector<DataEntityId> retiredScopes;
+    std::vector<DataEntityId> releasedScopes;
 };
 
 using DataChangeCallback = std::function<void(const DataChangeSet&)>;
@@ -324,6 +398,7 @@ struct DataCommitResult final {
     std::vector<DataBinding> bindings;
     std::string message;
     DataGraphSnapshot graph;
+    std::vector<DataLifetimeBlocker> blockers;
 };
 
 struct DataQuery final {

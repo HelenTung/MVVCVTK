@@ -1,4 +1,5 @@
 // 测试用途：验证标签图读取、VTK 桥接和宿主标签显示流程。
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 
 #include "Host/HostFeature.h"
@@ -37,15 +38,7 @@ constexpr std::string_view labelMapId =
 bool SendTimer(vtkRenderWindowInteractor* interactor)
 {
     if (!interactor) return false;
-    int timerId = interactor->GetTimerEventId();
-    if (timerId == 0) {
-        for (int candidate = 1; candidate <= 64; ++candidate) {
-            if (interactor->GetTimerDuration(candidate) != 0) {
-                timerId = candidate;
-                break;
-            }
-        }
-    }
+    int timerId = GetTestTimerId(interactor);
     if (timerId == 0) return false;
     interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
     return true;

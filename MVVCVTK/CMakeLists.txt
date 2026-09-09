@@ -508,6 +508,8 @@ set(MVVCVTK_HOST_SOURCES
     src/Render/Strategies/VolumeLodController.cpp
     include/Render/Internal/VolumeLodController.h
     src/Render/Strategies/VolumeStrategy.cpp
+    include/Render/Support/RenderFrameLifetime.h
+    src/Render/Support/RenderFrameLifetime.cpp
     src/Render/Support/BaseVisualStrategy.cpp
 )
 # 普通 Host consumer 被正式允许直接包含的稳定入口与请求定义。

@@ -152,6 +152,20 @@ public:
     std::size_t GetComponentCount() const noexcept { return m_componentCount; }
     const DataBytes& GetValues() const noexcept { return m_values; }
     const DataBytes& GetValidityMask() const noexcept { return m_validityMask; }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
+    {
+        return { m_values, m_validityMask };
+    }
+    // 只接受独占字节的移交；外部 shared 输入仍使用复制构造路径。
+    std::shared_ptr<const ImageGrid3DPayload> CreateMaskSnapshot(
+        std::vector<std::uint8_t>&& validityMask) const
+    {
+        auto mask = std::make_shared<const std::vector<std::uint8_t>>(
+            std::move(validityMask));
+        return std::shared_ptr<const ImageGrid3DPayload>(new ImageGrid3DPayload(
+            m_geometry, m_valueType, m_componentCount, m_values,
+            std::move(mask), m_scalarRange, m_metadata, SnapshotUse{}));
+    }
     const ImageMetadata& GetMetadata() const noexcept { return m_metadata; }
     const std::array<double, 2>& GetScalarRange() const noexcept
     {
@@ -308,6 +322,12 @@ public:
         return values ? *values : nullptr;
     }
     const LabelMapValues& GetValues() const noexcept { return m_labels; }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
+    {
+        return { std::visit([](const auto& values) -> std::shared_ptr<const void> {
+            return values;
+        }, m_labels) };
+    }
     const std::string& GetId() const noexcept { return m_id; }
     const std::string& GetDisplayName() const noexcept { return m_displayName; }
     const std::array<double, 2>& GetScalarRange() const noexcept { return m_scalarRange; }
@@ -370,23 +390,36 @@ private:
     std::array<double, 2> m_scalarRange;
 };
 
+namespace MeshAttributeRoles {
+inline constexpr std::uint32_t scalars=1, vectors=2, normals=4, textureCoordinates=8, tensors=16;
+inline constexpr std::uint32_t all=scalars|vectors|normals|textureCoordinates|tensors;
+}
+
 struct MeshAttribute final {
     std::string name;
     std::size_t componentCount = 0;
     std::vector<double> values;
+    std::uint32_t activeRoles = 0;
 };
 
 class SurfaceMeshPayload final : public IDataPayload {
+    struct MeshData final {
+        std::vector<double> vertices;
+        std::vector<std::uint64_t> triangles;
+        std::vector<MeshAttribute> pointAttributes;
+        std::vector<MeshAttribute> cellAttributes;
+    };
 public:
     SurfaceMeshPayload(
         std::vector<double> vertices,
         std::vector<std::uint64_t> triangles,
         std::vector<MeshAttribute> pointAttributes = {},
-        std::string coordinateFrame = "RAS")
-        : m_vertices(std::move(vertices))
-        , m_triangles(std::move(triangles))
-        , m_pointAttributes(std::move(pointAttributes))
+        std::string coordinateFrame = "RAS",
+        std::vector<MeshAttribute> cellAttributes = {})
+        : m_mesh(std::make_shared<const MeshData>(MeshData{
+            std::move(vertices), std::move(triangles), std::move(pointAttributes),std::move(cellAttributes)}))
         , m_coordinateFrame(std::move(coordinateFrame))
+        , m_isValid(GetMeshValid())
     {
     }
 
@@ -394,66 +427,80 @@ public:
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
         try {
-            return std::make_shared<const SurfaceMeshPayload>(
-                m_vertices, m_triangles, m_pointAttributes, m_coordinateFrame);
+            return std::make_shared<const SurfaceMeshPayload>(*this);
         }
         catch (...) {
             return {};
         }
     }
 
-    const std::vector<double>& GetVertices() const noexcept { return m_vertices; }
+    const std::vector<double>& GetVertices() const noexcept { return m_mesh->vertices; }
     const std::vector<std::uint64_t>& GetTriangles() const noexcept
     {
-        return m_triangles;
+        return m_mesh->triangles;
     }
     const std::vector<MeshAttribute>& GetPointAttributes() const noexcept
     {
-        return m_pointAttributes;
+        return m_mesh->pointAttributes;
     }
+    const std::vector<MeshAttribute>& GetCellAttributes() const noexcept { return m_mesh->cellAttributes; }
     const std::string& GetCoordinateFrame() const noexcept
     {
         return m_coordinateFrame;
     }
-    bool GetValid() const noexcept
+    bool GetValid() const noexcept { return m_isValid; }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
     {
-        if (m_vertices.size() % 3 != 0
-            || m_triangles.size() % 3 != 0
-            || (m_vertices.empty() && !m_triangles.empty())
+        return { m_mesh };
+    }
+
+private:
+    bool GetMeshValid() const noexcept
+    {
+        if (m_mesh->vertices.size() % 3 != 0
+            || m_mesh->triangles.size() % 3 != 0
+            || (m_mesh->vertices.empty() && !m_mesh->triangles.empty())
             || m_coordinateFrame.empty()
             || !std::all_of(
-                m_vertices.begin(), m_vertices.end(),
+                m_mesh->vertices.begin(), m_mesh->vertices.end(),
                 [](const double value) { return std::isfinite(value); })) {
             return false;
         }
-        const auto pointCount = m_vertices.size() / 3;
+        const auto pointCount = m_mesh->vertices.size() / 3;
         if (!std::all_of(
-                m_triangles.begin(), m_triangles.end(),
+                m_mesh->triangles.begin(), m_mesh->triangles.end(),
                 [pointCount](const std::uint64_t value) {
                     return value < pointCount;
                 })) {
             return false;
         }
-        for (const auto& attribute : m_pointAttributes) {
-            if (attribute.name.empty() || attribute.componentCount == 0
-                || pointCount > std::numeric_limits<std::size_t>::max()
-                    / attribute.componentCount
-                || attribute.values.size()
-                    != pointCount * attribute.componentCount
-                || !std::all_of(
-                    attribute.values.begin(), attribute.values.end(),
-                    [](const double value) { return std::isfinite(value); })) {
-                return false;
+        const auto validAttributes=[](const std::vector<MeshAttribute>& attributes,std::size_t tuples) noexcept {
+            std::uint32_t roles=0;
+            for(std::size_t index=0;index<attributes.size();++index) {
+                const auto& attribute=attributes[index];
+                if(attribute.name.empty()||attribute.componentCount==0
+                    ||attribute.componentCount>static_cast<std::size_t>(std::numeric_limits<int>::max())
+                    ||tuples>std::numeric_limits<std::size_t>::max()/attribute.componentCount
+                    ||attribute.values.size()!=tuples*attribute.componentCount
+                    ||(attribute.activeRoles&~MeshAttributeRoles::all)||(roles&attribute.activeRoles)
+                    ||!std::all_of(attribute.values.begin(),attribute.values.end(),[](double v){return std::isfinite(v);}))return false;
+                for(std::size_t prior=0;prior<index;++prior)if(attributes[prior].name==attribute.name)return false;
+                if((attribute.activeRoles&(MeshAttributeRoles::normals|MeshAttributeRoles::vectors))&&attribute.componentCount!=3)return false;
+                if((attribute.activeRoles&MeshAttributeRoles::tensors)&&attribute.componentCount!=9)return false;
+                if((attribute.activeRoles&MeshAttributeRoles::textureCoordinates)&&attribute.componentCount>3)return false;
+                roles|=attribute.activeRoles;
             }
-        }
+            return true;
+        };
+        if(!validAttributes(m_mesh->pointAttributes,pointCount)
+            ||!validAttributes(m_mesh->cellAttributes,m_mesh->triangles.size()/3))return false;
         return true;
     }
 
 private:
-    std::vector<double> m_vertices;
-    std::vector<std::uint64_t> m_triangles;
-    std::vector<MeshAttribute> m_pointAttributes;
+    std::shared_ptr<const MeshData> m_mesh;
     std::string m_coordinateFrame;
+    bool m_isValid = false;
 };
 
 using RecordColumnValues = std::variant<
@@ -699,6 +746,10 @@ public:
     }
     const GridGeometry3D& GetGeometry() const noexcept { return m_geometry; }
     const DataBytes& GetValues() const noexcept { return m_values; }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
+    {
+        return { m_values };
+    }
     bool GetValid() const noexcept
     {
         const auto count = GetGridVoxelCount(m_geometry);

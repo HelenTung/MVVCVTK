@@ -30,6 +30,10 @@ class ResultPayload final : public IDataPayload
     {
         return std::make_shared<const ResultPayload>(*this);
     }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
+    {
+        return {m_record,m_record->field.samples,m_record->field.neighbors};
+    }
     const Record &GetRecord() const noexcept
     {
         return *m_record;

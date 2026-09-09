@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OrthogonalCropTypes.h"
+#include "Algorithms/CropGeometry.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,8 +14,10 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
-// 一条 history 对应一份不可变 float32 table；nodeCount 由 payload 选择有效前缀。
+// Canonical double predicates are authoritative; rgbaValues is their derived GPU encoding.
 struct CropPredicateTable final {
+    std::uint32_t schemaVersion = 1;
+    std::vector<CropGeometry> geometry;
     std::vector<float> rgbaValues;
     std::size_t operationCount = 0;
 };
@@ -29,18 +32,29 @@ struct CropTableResult final {
 
 // worker-only 候选；只有 Host 的 DataTransaction 成功后才产生公开 CropBuildResult。
 struct CropMaterializationCandidate final {
+    CropDocumentId documentId = 0;
+    CropNodeId nodeId = 0;
+    CropRequestId requestId = 0;
+    std::string buildParameters;
     bool isSucceeded = false;
     bool isCancelled = false;
     CropFailure failureReason = CropFailure::None;
     std::uint64_t failureOperationIndex = 0;
     std::vector<CropOpItem> operations;
     RoiReadSnapshot roi;
+    std::optional<DataRevisionRef> inputRoi;
     DataRevisionRef sourceRevision;
     std::size_t nodeCount = 0;
     std::string message;
+    std::shared_ptr<const IDataPayload> outputPayload;
+    std::shared_ptr<const RoiGeometryPayload> recipePayload;
+    std::shared_ptr<const VtkPreparedDataView> preparedView;
     vtkSmartPointer<vtkImageData> imageData;
     vtkSmartPointer<vtkImageData> maskImage;
     vtkSmartPointer<vtkPolyData> polyData;
+    double meshErrorBound = 0;
+    double meshAreaErrorBound = 0;
+    std::size_t meshTriangleCount = 0;
 };
 
 class CropAlgorithm final {
@@ -59,6 +73,8 @@ public:
     static CropTableResult BuildPredicateTable(
         const std::vector<CropOpItem>& operations,
         std::size_t nodeCount);
+
+    static bool GetTableValid(const CropPredicateTable& table, std::size_t nodeCount);
 
     static bool GetPointKept(
         const CropPredicateTable& predicateTable,
@@ -80,11 +96,13 @@ public:
         const CropBuildParams& params,
         const CropShaderPayload& payload,
         std::size_t fallbackAvailableRamBytes = 0,
-        const std::function<bool()>& getStopRequested = {});
+        const std::function<bool()>& getStopRequested = {},
+        const ImageGrid3DPayload* sourcePayload = nullptr);
 
     static CropMaterializationCandidate GetResult(
         vtkPolyData* polyData,
         const CropBuildParams& params,
         const CropShaderPayload& payload,
-        const std::function<bool()>& getStopRequested = {});
+        const std::function<bool()>& getStopRequested = {},
+        std::shared_ptr<const SurfaceMeshPayload> sourcePayload = {});
 };

@@ -1,4 +1,5 @@
 #include "Host/WallThicknessHostFeature.h"
+#include "../../common/FeatureResultScopes.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
 #include "App/Services/FeatureViewService.h"
@@ -92,6 +93,7 @@ class WallThicknessHostFeature::Impl final
     };
     ThicknessConfig m_config;
     HostFeatureContext m_context;
+    FeatureInternal::ResultScopes m_resultScopes;
     ThicknessState m_state;
     FeatureOperationState m_operation, m_displayOperation;
     ThicknessDisplay m_display;
@@ -453,6 +455,9 @@ class WallThicknessHostFeature::Impl final
             if (!m_task->isDone.load(std::memory_order_acquire))
                 return false;
         }
+        RemoveDisplay();
+        m_active.reset();
+        if (!m_resultScopes.Clear(*m_context.data)) return false;
         if (m_hasInput && !m_context.host->DetachInput(featureId))
             return false;
         m_hasInput = false;
@@ -598,7 +603,7 @@ class WallThicknessHostFeature::Impl final
                                                 true,
                                                 binding.target,
                                                 {}});
-                const auto committed = data->SetDataCommit(std::move(transaction));
+                const auto committed = m_resultScopes.Commit(*data,std::move(transaction));
                 succeeded = committed.status == DataCommitStatus::Succeeded;
                 controlRef = DataRevisionRef{};
                 if (succeeded)
@@ -617,6 +622,7 @@ class WallThicknessHostFeature::Impl final
                         m_state.result = {};
                         m_state.isCurrent = false;
                         m_state.selectedSample.reset();
+                        succeeded=m_resultScopes.Clear(*data);
                     }
                 }
             }
@@ -632,7 +638,7 @@ class WallThicknessHostFeature::Impl final
                 transaction.bindings.push_back({std::string(ThicknessData::bindingName),
                                                 binding.revision, true, binding.target,
                                                 *request.resultRevision});
-                succeeded = data->SetDataCommit(std::move(transaction)).status ==
+                succeeded = m_resultScopes.Commit(*data,std::move(transaction)).status ==
                             DataCommitStatus::Succeeded;
                 controlRef = *request.resultRevision;
                 if (succeeded && (!GetOwner() || generation != m_generation))
@@ -751,7 +757,7 @@ class WallThicknessHostFeature::Impl final
                 DataCommitResult committed;
                 try
                 {
-                    committed = data->SetDataCommit(std::move(transaction));
+                    committed = m_resultScopes.Commit(*data,std::move(transaction));
                 }
                 catch (...)
                 {

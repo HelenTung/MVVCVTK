@@ -4,14 +4,20 @@
 #include "Data/VtkDataBridge.h"
 
 #include <vtkCellArray.h>
+#include <vtkCellData.h>
 #include <vtkDoubleArray.h>
+#include <vtkFloatArray.h>
+#include <vtkUnsignedLongLongArray.h>
 #include <vtkPointData.h>
 #include <limits>
 #include <cmath>
 #include <vtkImageData.h>
+#include <vtkPointData.h>
+#include <vtkDataArray.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+#include <vtkUnsignedIntArray.h>
 
 #include <array>
 #include <cstdint>
@@ -146,10 +152,20 @@ bool GetMeshRoundTripValid()
     auto mesh = vtkSmartPointer<vtkPolyData>::New();
     mesh->SetPoints(points);
     mesh->SetPolys(polys);
+    auto normals=vtkSmartPointer<vtkDoubleArray>::New();normals->SetName("Normals");
+    normals->SetNumberOfComponents(3);normals->SetNumberOfTuples(3);
+    normals->FillComponent(0,0);normals->FillComponent(1,0);normals->FillComponent(2,1);
+    mesh->GetPointData()->SetNormals(normals);
+    auto temperatures=vtkSmartPointer<vtkFloatArray>::New();temperatures->SetName("Temperature");
+    temperatures->InsertNextValue(0.5f);temperatures->InsertNextValue(1.5f);temperatures->InsertNextValue(2.5f);
+    mesh->GetPointData()->SetScalars(temperatures);
+    auto materials=vtkSmartPointer<vtkUnsignedIntArray>::New();materials->SetName("Material");materials->InsertNextValue(17);
+    mesh->GetCellData()->SetScalars(materials);
 
     VtkDataBridge bridge;
     const auto payload = bridge.CreateMeshPayload(mesh);
     points->SetPoint(0, 9.0, 9.0, 9.0);
+    normals->SetComponent(0,2,-1);temperatures->SetValue(2,100);materials->SetValue(0,99);
     DataGraphStore store;
     const auto snapshot = SetPayload(store, payload);
     const auto view = bridge.GetSurfaceMesh(snapshot);
@@ -161,7 +177,22 @@ bool GetMeshRoundTripValid()
     if (view && view->mesh && view->mesh->GetPoints()) {
         view->mesh->GetPoint(0, first);
     }
-    return Check(
+    auto wide=vtkSmartPointer<vtkUnsignedLongLongArray>::New();wide->SetName("WideId");wide->SetNumberOfTuples(3);
+    for(vtkIdType i=0;i<3;++i)wide->SetValue(i,9007199254740993ULL);
+    mesh->GetPointData()->AddArray(wide);
+    const bool rejectsLoss=!bridge.CreateMeshPayload(mesh);mesh->GetPointData()->RemoveArray("WideId");
+    auto duplicate=payload?payload->GetPointAttributes():std::vector<MeshAttribute>{};
+    if(!duplicate.empty())duplicate.push_back(duplicate.front());
+    const SurfaceMeshPayload invalidAttributes(payload->GetVertices(),payload->GetTriangles(),std::move(duplicate));
+    return Check(rejectsLoss&&!invalidAttributes.GetValid(),"mesh integer precision loss or ambiguous attributes were accepted")
+        &&Check(payload&&payload->GetPointAttributes().size()==2&&payload->GetCellAttributes().size()==1
+            &&view&&view->mesh->GetPointData()->GetNormals()&&view->mesh->GetPointData()->GetScalars()
+            &&view->mesh->GetCellData()->GetScalars()
+            &&view->mesh->GetPointData()->GetNormals()->GetComponent(0,2)==1
+            &&view->mesh->GetPointData()->GetScalars()->GetComponent(2,0)==2.5
+            &&view->mesh->GetCellData()->GetScalars()->GetComponent(0,0)==17,
+            "mesh point/cell values or active normal/scalar roles were not isolated and restored")
+        && Check(
         payload && view && view->mesh->GetNumberOfPolys() == 1
             && first[0] == 0.0 && first[1] == 0.0 && first[2] == 0.0,
         "surface mesh isolation or round trip failed")
@@ -236,6 +267,117 @@ bool GetRecordTableValidationValid()
         "record table did not enforce equal strongly typed columns");
 }
 
+bool GetArrayLeaseValid()
+{
+    DataGraphStore store;
+    VtkDataBridge bridge;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 1, 1);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    auto* values = static_cast<unsigned char*>(image->GetScalarPointer());
+    values[0] = 1; values[1] = 2;
+    const auto scope = store.CreateDataEntityId();
+    const auto id = store.CreateDataEntityId();
+    const DataRevisionRef ref{id, 1};
+    DataTransaction create;
+    create.outputs.push_back({id, 0, DataTypes::imageGrid3D, {}, bridge.CreateImagePayload(image), {}, scope});
+    auto commit = store.SetDataCommit(std::move(create));
+    auto snapshot = commit.published.at(0);
+    auto view = bridge.GetImageGrid(snapshot);
+    if (!Check(view != nullptr, "scoped VTK image")) return false;
+    vtkSmartPointer<vtkDataArray> heldArray = view->image->GetPointData()->GetScalars();
+    view.reset();
+    commit = {};
+    DataTransaction retire;
+    retire.retireScopes.push_back({scope, DataLifetimeStatus::Published, {ref}});
+    const auto blocked = store.SetDataCommit(retire);
+    if (!Check(blocked.failureReason == DataCommitFailure::ResultInUse,
+        "array-only VTK owner escaped retirement check")) return false;
+    retire.retireScopes.front().isResourceTransition = true;
+    if (!Check(store.SetDataCommit(std::move(retire)).status == DataCommitStatus::Succeeded,
+        "prepared resource transition could not retire the result")) return false;
+    if (!Check(!bridge.GetImageGrid(snapshot), "old DataSnapshot recreated retired VTK resources")) return false;
+    snapshot.reset();
+    if (!Check(store.SetDataRelease(scope).status == DataLifetimeStatus::Releasing,
+        "resource transition ignored its live VTK array")) return false;
+    heldArray = nullptr;
+    return Check(store.SetDataRelease(scope).status == DataLifetimeStatus::Released,
+        "scoped VTK payload did not release");
+}
+
+bool GetBorrowedRenderResourceReleased()
+{
+    DataGraphStore store;
+    GridGeometry3D geometry; geometry.dimensions={2,1,1}; geometry.extent={0,1,0,0,0,0};
+    auto payload=std::make_shared<const LabelMap3DPayload>(geometry,
+        LabelMapValues{std::make_shared<const std::vector<std::uint32_t>>(std::vector<std::uint32_t>{7,42})});
+    auto backing=payload->GetLabels();
+    if(!payload->GetValid()||!backing)return false;
+    std::weak_ptr<const std::vector<std::uint32_t>> probe=backing;
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(2,1,1);
+    auto array=vtkSmartPointer<vtkUnsignedIntArray>::New();
+    array->SetArray(const_cast<std::uint32_t*>(backing->data()),2,1);
+    image->GetPointData()->SetScalars(array);
+    auto resource=VtkPreparedDataView::BuildResourceUse(image,nullptr,backing);
+    const auto scope=store.CreateDataEntityId(),id=store.CreateDataEntityId();const DataRevisionRef ref{id,1};
+    DataTransaction transaction;
+    transaction.outputs.push_back({id,0,DataTypes::labelMap3D,{},payload,{},scope,{resource}});
+    auto committed=store.SetDataCommit(std::move(transaction));
+    if(committed.status!=DataCommitStatus::Succeeded)return false;
+    DataTransaction retirement;retirement.retireScopes.push_back({scope,DataLifetimeStatus::Published,{ref},true});
+    if(store.SetDataCommit(std::move(retirement)).status!=DataCommitStatus::Succeeded)return false;
+    committed={};payload.reset();backing.reset();image=nullptr;resource={};
+    if(!Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Releasing
+        &&!probe.expired()&&array->GetValue(1)==42,"borrowed bare array lost its backing allocation or release probe"))return false;
+    array=nullptr;
+    return Check(probe.expired()&&store.SetDataRelease(scope).status==DataLifetimeStatus::Released,
+        "borrowed array backing remained pinned after its last VTK owner ended");
+}
+
+bool GetPreparedResultReleased()
+{
+    DataGraphStore store;
+    VtkDataBridge bridge;
+    auto image=vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2,1,1);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    auto* values=static_cast<unsigned char*>(image->GetScalarPointer());values[0]=3;values[1]=8;
+    const auto source=SetPayload(store,bridge.CreateImagePayload(image));
+    const auto root=bridge.GetImageGrid(source);
+    const auto rootPayload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload);
+    auto output=rootPayload->CreateMaskSnapshot(std::vector<std::uint8_t>{255,0});
+    auto prepared=VtkDataBridge::BuildDataView(output,root);
+    if (!Check(prepared && prepared->image
+        && prepared->image->image->GetScalarPointer()==root->image->GetScalarPointer()
+        && prepared->image->validityMask->GetScalarPointer()!=output->GetValidityMask()->data(),
+        "prepared result copied Root scalars or exposed mutable formal mask bytes")) return false;
+    const auto scope=store.CreateDataEntityId(),id=store.CreateDataEntityId();
+    const DataRevisionRef ref{id,1};
+    prepared=bridge.SetPreparedDataView(ref,std::move(prepared));
+    if(!prepared)return false;
+    DataTransaction transaction;
+    transaction.outputs.push_back({id,0,DataTypes::imageGrid3D,{{"root",source->self}},output,{},scope,{prepared->resourceUse}});
+    auto committed=store.SetDataCommit(std::move(transaction));
+    if(!Check(committed.status==DataCommitStatus::Succeeded,"prepared result publication"))return false;
+    auto view=bridge.GetImageGrid(committed.published.at(0));
+    if(!Check(view&&view->data.get()==committed.published.at(0).get()
+        &&view->image==prepared->image->image&&view->validityMask==prepared->image->validityMask,
+        "prepared cache rebuilt the image or leaked provisional identity"))return false;
+    vtkSmartPointer<vtkDataArray> heldMask=view->validityMask->GetPointData()->GetScalars();
+    DataTransaction retire;
+    retire.retireScopes.push_back({scope,DataLifetimeStatus::Published,{ref}});
+    if(!Check(store.SetDataCommit(retire).failureReason==DataCommitFailure::ResultInUse,
+        "prepared array lease was not registered at publication"))return false;
+    retire.retireScopes.front().isResourceTransition=true;
+    if(!Check(store.SetDataCommit(std::move(retire)).status==DataCommitStatus::Succeeded,"prepared retirement"))return false;
+    if(!Check(!bridge.GetImageGrid(committed.published.at(0)),"retired prepared cache remained readable"))return false;
+    view.reset();prepared.reset();output.reset();committed={};
+    if(!Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Releasing,"bare prepared mask did not retain scope"))return false;
+    heldMask=nullptr;
+    return Check(store.SetDataRelease(scope).status==DataLifetimeStatus::Released
+        &&static_cast<unsigned char*>(root->image->GetScalarPointer())[1]==8,
+        "Root scalar incorrectly retained the prepared result scope");
+}
+
 bool GetMeasurementRoundTripValid()
 {
     VtkDataBridge bridge;
@@ -279,7 +421,8 @@ bool GetMeasurementRoundTripValid()
 
 int main()
 {
-    return GetImageRoundTripValid()
+    return GetBorrowedRenderResourceReleased() && GetPreparedResultReleased() && GetArrayLeaseValid()
+        && GetImageRoundTripValid()
         && GetLabelRoundTripValid()
         && GetMeshRoundTripValid()
         && GetCacheIdentityValid()

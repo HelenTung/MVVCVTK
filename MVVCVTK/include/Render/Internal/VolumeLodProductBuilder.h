@@ -26,6 +26,7 @@ struct VolumeLodKey final {
 };
 
 struct VolumeLodProduct final {
+    RenderInputUse inputUse;
     std::uint64_t requestRevision = 0;
     RenderInputStamp inputStamp;
     VolumeQuality requestedQuality = VolumeQuality::Auto;
@@ -36,6 +37,7 @@ struct VolumeLodProduct final {
 };
 
 struct VolumeLodBuildRequest final {
+    RenderInputUse inputUse;
     VolumeLodKey key;
     std::uint64_t requestRevision = 0;
     VolumeQuality requestedQuality = VolumeQuality::Auto;

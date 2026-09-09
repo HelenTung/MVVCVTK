@@ -106,6 +106,8 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         }
 
         if (m_picker->Pick(eve.x, eve.y, 0, m_renderer)) {
+            const auto* point=m_picker->GetPickPosition();
+            if(!point||!m_modelPort->GetPointVisible({point[0],point[1],point[2]}))return {};
             vtkActor* actor = m_picker->GetActor();
             const int axis = m_slicePort->GetPlaneAxis(actor);
 

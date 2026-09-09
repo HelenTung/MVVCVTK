@@ -9,7 +9,8 @@
 #include <string>
 #include <vector>
 
-inline constexpr std::size_t roiNodeLimit = 256;
+// 4096 项裁切路径的最坏补集表达式为 3*N+1；复制仍受 8 MiB 总预算限制。
+inline constexpr std::size_t roiNodeLimit = 3 * 4096 + 1;
 inline constexpr std::size_t roiDepthLimit = 64;
 inline constexpr std::size_t roiCatalogLimit = 4096;
 inline constexpr std::uint32_t roiSchemaVersion = 2;
@@ -18,7 +19,9 @@ inline constexpr std::array<double, 16> roiIdentityMatrix = {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 inline constexpr std::string_view roiCatalogBinding = "session.roi.catalog";
 
-enum class RoiShape : std::uint8_t { Box, HalfSpace, MaskReference };
+enum class RoiShape : std::uint8_t { Box, HalfSpace, MaskReference, Sphere, Cylinder };
+// Closed 保持已有 ROI 语义；CropV1 保留裁切 Box 容差和 Plane 严格正侧。
+enum class RoiBoundaryPolicy : std::uint8_t { Closed, CropV1 };
 enum class RoiNodeKind : std::uint8_t {
     Empty, SourceDomain, Primitive, Union, Intersection, Difference
 };
@@ -32,6 +35,10 @@ struct RoiPrimitive final {
     std::array<double, 3> normal = { 0, 0, 1 };
     // 同源同网格的精确掩码修订，非零为前景；不接受额外空间变换。
     std::optional<DataRevisionRef> mask;
+    RoiBoundaryPolicy boundaryPolicy = RoiBoundaryPolicy::Closed;
+    // 曲面使用 origin 为中心、normal 为柱轴；球体 height 必须为 0。
+    double radius = 0;
+    double height = 0;
 };
 
 struct RoiNode final {

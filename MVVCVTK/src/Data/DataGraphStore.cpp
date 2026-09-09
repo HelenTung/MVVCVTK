@@ -12,16 +12,91 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <thread>
 #include <utility>
 
 namespace {
+
+class DataLifetimeScope final : public DataLifetimeAccess {
+public:
+    struct ResourceUse final : DataResourceLease {};
+    struct Probe final {
+        DataRevisionRef revision;
+        std::string owner;
+        std::weak_ptr<const void> resource;
+        DataResourceKind kind = DataResourceKind::Reader;
+    };
+
+    bool GetIsPublished() const override
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return status == DataLifetimeStatus::Published;
+    }
+
+    std::shared_ptr<const DataResourceLease> StartResourceUse(
+        const DataRevisionRef& revision, std::string owner, DataResourceKind kind) override
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (status != DataLifetimeStatus::Published || owner.empty()
+            || (kind != DataResourceKind::Reader && kind != DataResourceKind::RenderObject)
+            || std::find(revisions.begin(), revisions.end(), revision)
+                == revisions.end()) return {};
+        auto lease = std::make_shared<const ResourceUse>();
+        uses.erase(std::remove_if(uses.begin(), uses.end(),
+            [](const Probe& probe) { return probe.resource.expired(); }), uses.end());
+        uses.push_back({ revision, std::move(owner), lease, kind });
+        return lease;
+    }
+
+    DataSnapshot GetData(const std::weak_ptr<const DataRevision>& value) const
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return status == DataLifetimeStatus::Published ? value.lock() : nullptr;
+    }
+
+    // 调用方必须持 mutex；实际 allocation 的探针不持有载荷。
+    DataLifetimeState GetState() const
+    {
+        DataLifetimeState result{ id, status, revisions, {} };
+        for (const auto& use : uses) {
+            if (!use.resource.expired()) result.blockers.push_back({use.revision, use.owner});
+        }
+        if (status == DataLifetimeStatus::Releasing) {
+            for (const auto& probe : probes) {
+                if (!probe.resource.expired()) result.blockers.push_back({probe.revision, probe.owner});
+            }
+        }
+        return result;
+    }
+
+    mutable std::mutex mutex;
+    DataEntityId id;
+    DataLifetimeStatus status = DataLifetimeStatus::Published;
+    std::vector<DataRevisionRef> revisions;
+    std::vector<DataSnapshot> owned;
+    std::vector<Probe> probes;
+    std::vector<Probe> uses;
+};
+
+struct RevisionEntry final {
+    // 普通数据沿用原拥有快照；scoped metadata 不持有实际 payload。
+    DataSnapshot metadata;
+    std::weak_ptr<const DataRevision> value;
+    std::shared_ptr<DataLifetimeScope> scope;
+    std::vector<std::weak_ptr<const void>> resources;
+
+    DataSnapshot GetData() const
+    {
+        return scope ? scope->GetData(value) : metadata;
+    }
+};
 
 class GraphState final : public DataGraphView {
 public:
     DataSnapshot GetData(const DataRevisionRef& ref) const override
     {
         const auto found = revisions.find(ref);
-        return found == revisions.end() ? DataSnapshot{} : found->second;
+        return found == revisions.end() ? DataSnapshot{} : found->second.GetData();
     }
 
     std::optional<DataBinding> GetDataBinding(
@@ -46,7 +121,7 @@ public:
         DataQueryResult result;
         result.commitId = commitId;
         for (const auto& entry : revisions) {
-            const auto& snapshot = entry.second;
+            const auto snapshot = entry.second.GetData();
             if (!snapshot) continue;
             if (query.entityId && snapshot->self.entityId != *query.entityId) {
                 continue;
@@ -126,7 +201,8 @@ public:
     }
 
     DataCommitId commitId = 0;
-    std::map<DataRevisionRef, DataSnapshot> revisions;
+    std::map<DataRevisionRef, RevisionEntry> revisions;
+    std::map<DataEntityId, std::shared_ptr<DataLifetimeScope>> lifetimes;
     std::map<DataEntityId, DataGeneration> heads;
     std::map<DataRevisionRef, std::vector<DataRevisionRef>> derived;
     std::map<std::string, DataBinding> bindings;
@@ -191,8 +267,7 @@ bool GetReferenceExists(
     const std::map<DataRevisionRef, std::size_t>& provisional,
     const DataRevisionRef& ref)
 {
-    return state.revisions.find(ref) != state.revisions.end()
-        || provisional.find(ref) != provisional.end();
+    return provisional.find(ref) != provisional.end() || state.GetData(ref) != nullptr;
 }
 
 bool GetGraphAcyclic(
@@ -201,7 +276,7 @@ bool GetGraphAcyclic(
 {
     std::map<DataRevisionRef, const DataRevision*> graph;
     for (const auto& entry : state.revisions) {
-        if (entry.second) graph.emplace(entry.first, entry.second.get());
+        if (entry.second.metadata) graph.emplace(entry.first, entry.second.metadata.get());
     }
     for (const auto& output : outputs) {
         if (output) graph[output->self] = output.get();
@@ -258,11 +333,28 @@ public:
         if (m_entityPrefix == 0) m_entityPrefix = 1;
     }
 
+    class ChangeBatch final : public DataChangeBatch {
+    public:
+        explicit ChangeBatch(std::weak_ptr<Impl> owner) : m_owner(std::move(owner)) {}
+        ~ChangeBatch() noexcept override
+        {
+            const auto owner = m_owner.lock();
+            if (!owner) return;
+            {
+                const std::lock_guard<std::mutex> lock(owner->m_changeMutex);
+                if (owner->m_batchDepth != 0) --owner->m_batchDepth;
+            }
+            if (owner->m_isAlive.load()) owner->DrainChanges();
+        }
+    private:
+        std::weak_ptr<Impl> m_owner;
+    };
+
     void DrainChanges()
     {
         {
             std::lock_guard<std::mutex> lock(m_changeMutex);
-            if (m_isDraining) return;
+            if (m_isDraining || m_batchDepth != 0) return;
             m_isDraining = true;
         }
 
@@ -270,7 +362,7 @@ public:
             DataChangeSet change;
             {
                 std::lock_guard<std::mutex> lock(m_changeMutex);
-                if (m_changes.empty()) {
+                if (m_changes.empty() || m_batchDepth != 0) {
                     m_isDraining = false;
                     return;
                 }
@@ -326,14 +418,71 @@ public:
     std::mutex m_changeMutex;
     std::deque<DataChangeSet> m_changes;
     bool m_isDraining = false;
+    std::size_t m_batchDepth = 0;
+    std::thread::id m_batchOwner;
+    std::atomic<bool> m_isAlive{ true };
 };
 
 DataGraphStore::DataGraphStore()
-    : m_impl(std::make_unique<Impl>())
+    : m_impl(std::make_shared<Impl>())
 {
 }
 
-DataGraphStore::~DataGraphStore() = default;
+DataGraphStore::~DataGraphStore()
+{
+    m_impl->m_isAlive.store(false);
+}
+
+std::unique_ptr<DataChangeBatch> DataGraphStore::StartDataChanges()
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_changeMutex);
+    const auto owner = std::this_thread::get_id();
+    if ((m_impl->m_batchDepth != 0 && m_impl->m_batchOwner != owner)
+        || m_impl->m_batchDepth == std::numeric_limits<std::size_t>::max()) {
+        return {};
+    }
+    auto batch = std::make_unique<Impl::ChangeBatch>(m_impl);
+    m_impl->m_batchOwner = owner;
+    ++m_impl->m_batchDepth;
+    return batch;
+}
+
+DataLifetimeState DataGraphStore::GetDataLifetime(const DataEntityId& scopeId) const
+{
+    std::shared_ptr<DataLifetimeScope> scope;
+    {
+        const std::lock_guard<std::mutex> lock(m_impl->m_stateMutex);
+        const auto found = m_impl->m_state->lifetimes.find(scopeId);
+        if (found == m_impl->m_state->lifetimes.end()) return {};
+        scope = found->second;
+    }
+    const std::lock_guard<std::mutex> lock(scope->mutex);
+    return scope->GetState();
+}
+
+DataLifetimeState DataGraphStore::SetDataRelease(const DataEntityId& scopeId)
+{
+    DataLifetimeState result;
+    {
+        const std::lock_guard<std::mutex> stateLock(m_impl->m_stateMutex);
+        const auto found = m_impl->m_state->lifetimes.find(scopeId);
+        if (found == m_impl->m_state->lifetimes.end()) return {};
+        const auto scope = found->second;
+        const std::lock_guard<std::mutex> scopeLock(scope->mutex);
+        result = scope->GetState();
+        if (result.status != DataLifetimeStatus::Releasing || !result.blockers.empty()) return result;
+        DataChangeSet change;
+        change.commitId = m_impl->m_state->commitId;
+        change.releasedScopes.push_back(scopeId);
+        const std::lock_guard<std::mutex> changeLock(m_impl->m_changeMutex);
+        m_impl->m_changes.push_back(std::move(change));
+        scope->status = result.status = DataLifetimeStatus::Released;
+        scope->probes.clear();
+        scope->uses.clear();
+    }
+    m_impl->DrainChanges();
+    return result;
+}
 
 DataGraphSnapshot DataGraphStore::GetDataGraph() const
 {
@@ -424,7 +573,8 @@ bool DataGraphStore::SetDataType(DataTypeDescriptor descriptor)
 DataCommitResult DataGraphStore::SetDataCommit(
     DataTransaction transaction)
 {
-    if (transaction.outputs.empty() && transaction.bindings.empty()) {
+    if (transaction.outputs.empty() && transaction.bindings.empty()
+        && transaction.retireScopes.empty()) {
         return GetRejected(
             DataCommitFailure::InvalidTransaction,
             "Data transaction has no output or binding update.");
@@ -437,6 +587,9 @@ DataCommitResult DataGraphStore::SetDataCommit(
         std::vector<DataInputRef> inputs;
         std::shared_ptr<const IDataPayload> payload;
         std::optional<DataProvenance> provenance;
+        std::optional<DataEntityId> lifetimeScope;
+        std::vector<std::shared_ptr<const void>> resources;
+        std::vector<DataPreparedResource> preparedResources;
     };
 
     std::shared_ptr<const GraphState> validationState;
@@ -474,13 +627,24 @@ DataCommitResult DataGraphStore::SetDataCommit(
                     DataCommitFailure::PayloadInvalid,
                     message.empty() ? "Payload validation failed." : message);
             }
+            auto resources = payload->GetDataResources();
+            if (output.lifetimeScope && !GetDataEntityIdValid(*output.lifetimeScope)) {
+                return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid lifetime scope.");
+            }
+            for (const auto& resource : output.preparedResources) {
+                if (!resource.lease || resource.owner.empty()
+                    || (resource.kind != DataResourceKind::Reader && resource.kind != DataResourceKind::RenderObject))
+                    return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid prepared resource.");
+            }
             drafts.push_back(FrozenDraft{
                 output.entityId,
                 output.expectedGeneration,
                 std::move(output.type),
                 std::move(output.inputs),
                 std::move(payload),
-                std::move(output.provenance) });
+                std::move(output.provenance),
+                output.lifetimeScope,
+                std::move(resources), std::move(output.preparedResources) });
         }
     }
     catch (...) {
@@ -570,6 +734,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
         for (const auto& draft : drafts) {
             std::set<std::string> roles;
             for (const auto& input : draft.inputs) {
+                const auto existing = current->revisions.find(input.source);
+                if (existing != current->revisions.end() && existing->second.scope
+                    && !existing->second.scope->GetIsPublished()) {
+                    return GetRejected(DataCommitFailure::ResultRetired, "Input revision has retired.");
+                }
                 if (input.role.empty()
                     || !roles.insert(input.role).second
                     || !GetDataRevisionRefValid(input.source)
@@ -666,6 +835,12 @@ DataCommitResult DataGraphStore::SetDataCommit(
         }
         if (isActivated) {
             for (const auto& update : transaction.bindings) {
+                const auto existing = update.target ? current->revisions.find(*update.target)
+                    : current->revisions.end();
+                if (existing != current->revisions.end() && existing->second.scope
+                    && !existing->second.scope->GetIsPublished()) {
+                    return GetRejected(DataCommitFailure::ResultRetired, "Binding target has retired.");
+                }
                 if (update.binding == roiCatalogBinding) {
                     const auto catalog = update.target ? getData(*update.target) : DataSnapshot{};
                     if (!catalog || catalog->type != DataTypes::roiCatalog)
@@ -691,17 +866,126 @@ DataCommitResult DataGraphStore::SetDataCommit(
             }
         }
 
+        // 1. 冻结退役集合并锁定所有作用域，阻止校验与提交间取得新资源租约。
+        std::map<DataEntityId, std::shared_ptr<DataLifetimeScope>> retiring;
+        std::set<DataRevisionRef> retiredRefs;
+        std::vector<std::unique_lock<std::mutex>> scopeLocks;
+        if (!transaction.retireScopes.empty() && !isActivated) {
+            return GetRejected(DataCommitFailure::ExpectationFailed, "Retirement requires current bindings.");
+        }
+        for (const auto& retirement : transaction.retireScopes) {
+            const auto found = current->lifetimes.find(retirement.scopeId);
+            if (found == current->lifetimes.end()
+                || !retiring.emplace(retirement.scopeId, found->second).second) {
+                return GetRejected(DataCommitFailure::InvalidTransaction, "Unknown or duplicate retirement scope.");
+            }
+        }
+        scopeLocks.reserve(retiring.size());
+        for (const auto& entry : retiring) scopeLocks.emplace_back(entry.second->mutex);
+        for (const auto& retirement : transaction.retireScopes) {
+            const auto scope = retiring.at(retirement.scopeId);
+            if (scope->status != DataLifetimeStatus::Published) {
+                return GetRejected(DataCommitFailure::ResultRetired, "Scope has already retired.");
+            }
+            auto expected = retirement.expectedRevisions;
+            std::sort(expected.begin(), expected.end());
+            auto actual = scope->revisions;
+            std::sort(actual.begin(), actual.end());
+            if (retirement.expectedStatus != scope->status || expected != actual) {
+                return GetRejected(DataCommitFailure::ExpectationFailed, "Retirement scope expectation failed.");
+            }
+            retiredRefs.insert(actual.begin(), actual.end());
+            for (const auto& use : scope->uses) {
+                if (!use.resource.expired() && (!retirement.isResourceTransition || use.kind == DataResourceKind::Reader)) {
+                    result.blockers.push_back({ use.revision, use.owner });
+                }
+            }
+        }
+        // 2. 依赖、绑定与本事务输入共同检查；集合内相互依赖不阻塞自己的退役。
+        for (const auto& entry : current->revisions) {
+            if (retiredRefs.count(entry.first)) continue;
+            if (entry.second.scope && !entry.second.scope->GetIsPublished()) continue;
+            for (const auto& input : entry.second.metadata->inputs) {
+                if (retiredRefs.count(input.source)) result.blockers.push_back({entry.first, "DerivedRevision"});
+            }
+        }
+        for (const auto& binding : current->bindings) {
+            auto target = binding.second.target;
+            const auto update = std::find_if(transaction.bindings.begin(), transaction.bindings.end(),
+                [&binding](const DataBindingUpdate& item) { return item.binding == binding.first; });
+            if (update != transaction.bindings.end()) target = update->target;
+            if (target && retiredRefs.count(*target)) result.blockers.push_back({ *target, binding.first });
+        }
+        for (const auto& draft : drafts) {
+            if (draft.lifetimeScope && current->lifetimes.count(*draft.lifetimeScope)) {
+                return GetRejected(DataCommitFailure::ResultRetired, "A lifetime scope cannot be reused or extended.");
+            }
+            for (const auto& input : draft.inputs) {
+                if (retiredRefs.count(input.source)) return GetRejected(DataCommitFailure::ResultRetired,
+                    "A new output cannot depend on a retiring revision.");
+            }
+        }
+        for (const auto& binding : transaction.bindings) {
+            if (binding.target && retiredRefs.count(*binding.target)) {
+                result.blockers.push_back({ *binding.target, binding.binding });
+            }
+        }
+        if (!result.blockers.empty()) {
+            result.failureReason = DataCommitFailure::ResultInUse;
+            result.message = "Retirement is blocked by live consumers.";
+            return result;
+        }
+
         auto next = std::make_shared<GraphState>(*current);
         result.published.reserve(drafts.size());
         for (const auto& draft : drafts) {
             const auto ref = entities.at(draft.entityId);
+            std::shared_ptr<DataLifetimeScope> scope;
+            if (draft.lifetimeScope) {
+                auto& slot = next->lifetimes[*draft.lifetimeScope];
+                if (!slot) {
+                    slot = std::make_shared<DataLifetimeScope>();
+                    slot->id = *draft.lifetimeScope;
+                }
+                scope = slot;
+            }
             auto snapshot = std::make_shared<const DataRevision>(DataRevision{
-                ref,
-                draft.type,
-                draft.inputs,
-                draft.payload,
-                draft.provenance });
-            next->revisions.emplace(ref, snapshot);
+                ref, draft.type, draft.inputs, draft.payload, draft.provenance,
+                scope ? scope->id : DataEntityId{}, scope });
+            RevisionEntry entry{ snapshot, {}, scope, {} };
+            for (const auto& resource : draft.resources) entry.resources.push_back(resource);
+            if (scope) {
+                auto metadata = std::make_shared<DataRevision>(*snapshot);
+                metadata->payload.reset();
+                entry.metadata = std::move(metadata);
+                entry.value = snapshot;
+                scope->revisions.push_back(ref);
+                scope->owned.push_back(snapshot);
+                for (const auto& resource : draft.preparedResources)
+                    scope->uses.push_back({ref, resource.owner, resource.lease, resource.kind});
+                scope->probes.push_back({ ref, "LegacyOwner:revision", snapshot });
+                scope->probes.push_back({ ref, "LegacyOwner:payload", draft.payload });
+                std::vector<std::weak_ptr<const void>> sharedInputs;
+                for (const auto& input : draft.inputs) {
+                    const auto staged = provisional.find(input.source);
+                    if (staged != provisional.end()) {
+                        for (const auto& resource : drafts[staged->second].resources) sharedInputs.push_back(resource);
+                    }
+                    else {
+                        const auto& resources = current->revisions.at(input.source).resources;
+                        sharedInputs.insert(sharedInputs.end(), resources.begin(), resources.end());
+                    }
+                }
+                for (const auto& resource : draft.resources) {
+                    if (!resource) continue;
+                    const auto shared = std::any_of(sharedInputs.begin(), sharedInputs.end(),
+                        [&resource](const auto& input) {
+                            return !resource.owner_before(input) && !input.owner_before(resource);
+                        });
+                    if (!shared) scope->probes.push_back({ ref, "LegacyOwner:shared-bytes", resource });
+                }
+            }
+            next->revisions.emplace(ref, std::move(entry));
             next->heads[ref.entityId] = ref.generation;
             for (const auto& input : snapshot->inputs) {
                 next->derived[input.source].push_back(ref);
@@ -738,6 +1022,8 @@ DataCommitResult DataGraphStore::SetDataCommit(
                     update.binding, previousTarget, binding });
             }
         }
+        for (const auto& retirement : retiring) change.retiredScopes.push_back(retirement.first);
+        std::vector<std::vector<DataSnapshot>> retiredOwners(retiring.size());
         next->commitId = change.commitId;
         result.graph = { next->commitId, next };
 
@@ -746,6 +1032,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
         {
             std::lock_guard<std::mutex> changeLock(m_impl->m_changeMutex);
             m_impl->m_changes.push_back(change);
+            std::size_t index = 0;
+            for (const auto& retirement : retiring) {
+                retirement.second->status = DataLifetimeStatus::Releasing;
+                retiredOwners[index++].swap(retirement.second->owned);
+            }
             m_impl->m_state = std::move(next);
         }
         result.status = isActivated
@@ -754,7 +1045,10 @@ DataCommitResult DataGraphStore::SetDataCommit(
         result.failureReason = DataCommitFailure::None;
         result.commitId = change.commitId;
         result.isActivated = isActivated;
+        scopeLocks.clear();
         stateLock.unlock();
+        // 最后一个 payload owner 的析构可能重入，必须在全部内部锁外释放。
+        retiredOwners.clear();
         m_impl->DrainChanges();
         return result;
     }

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -56,7 +57,9 @@ enum class RenderEffectFailure {
     InputMismatch,
     ContextLost,
     CompileFailed,
-    TextureFailed
+    TextureFailed,
+    PrecisionNotMet,
+    ResourceLimit
 };
 
 struct RenderEffectState final {
@@ -65,6 +68,14 @@ struct RenderEffectState final {
     std::uint64_t stagedRevision = 0;
     std::uint64_t activeRevision = 0;
     std::string message;
+    std::uint64_t renderedRevision = 0;
+    bool isRenderPending = false;
+};
+
+struct RenderFrameOutcome final {
+    std::uint64_t frameId = 0;
+    bool isSucceeded = false;
+    bool isPresented = false;
 };
 
 struct RenderEffectTarget final {
@@ -78,6 +89,9 @@ struct RenderEffectTarget final {
         0.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 1.0
     };
+    // Accepted completions run once after the real window frame and GPU fence.
+    // Candidate/back-buffer validation reports isPresented=false.
+    std::function<bool(std::function<void(RenderFrameOutcome)>)> queueFrameCompletion;
 };
 
 // 一个 binding 只服务一个 mapper/context。context 或 window 替换时，
@@ -105,8 +119,22 @@ public:
 class RenderEffect {
 public:
     virtual ~RenderEffect() = default;
+    // Business picks follow the last presented predicate for this input.
+    // A temporarily unproven/mixed preview may reject a pick until rendered.
+    virtual bool GetPointVisible(RenderInputStamp,const std::array<double,3>&) const { return true; }
 
     virtual std::shared_ptr<RenderEffectBinding> BuildEffectBinding(
         const RenderEffectTarget& target,
         RenderBindingUse bindingUse) = 0;
+};
+
+// Conditional replacement carried by one data transaction. Null replacement
+// removes the effect; null expected requires a view with no current effect.
+struct RenderEffectChange final {
+    std::shared_ptr<RenderEffect> expected;
+    std::shared_ptr<RenderEffect> replacement;
+    bool operator==(const RenderEffectChange& other) const noexcept {
+        return expected==other.expected&&replacement==other.replacement;
+    }
+    bool operator!=(const RenderEffectChange& other) const noexcept {return !(*this==other);}
 };

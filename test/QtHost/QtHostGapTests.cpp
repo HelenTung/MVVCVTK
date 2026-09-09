@@ -1,4 +1,5 @@
 // 测试用途：验证孔隙请求、结果叠加、视图注册和退出清理。
+#include "../TestTimer.h"
 #include "QtHostMethodCases.h"
 #include "../TestDataPort.h"
 
@@ -260,15 +261,7 @@ void SendTicks(
     const HostRenderViewEndpoint& endpoint,
     const int tickCount)
 {
-    int timerId = endpoint.interactor->GetTimerEventId();
-    if (timerId == 0) {
-        for (int candidate = 1; candidate <= 64; ++candidate) {
-            if (endpoint.interactor->GetTimerDuration(candidate) != 0) {
-                timerId = candidate;
-                break;
-            }
-        }
-    }
+    int timerId = GetTestTimerId(endpoint.interactor);
     if (timerId == 0) return;
     for (int tick = 0; tick < tickCount; ++tick) {
         endpoint.interactor->InvokeEvent(
@@ -800,8 +793,11 @@ int GetGapFailCount()
                 ++detachedCallbackCount;
                 isDetachedCallbackSucceeded = result.status == GapResultStatus::Succeeded;
             });
-    const bool isDetached =
-        session.DetachFeature(*pendingFeature);
+    bool isDetached = false;
+    for (int retry=0; !isDetached && retry<2000; ++retry) {
+        isDetached=session.DetachFeature(*pendingFeature);
+        if (!isDetached) {SendTicks(*endpoint,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    }
     const auto detachedState = pendingFeature->GetState();
     SendTicks(*endpoint, 2);
     int detachedSendCount = 0;

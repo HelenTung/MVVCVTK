@@ -35,6 +35,12 @@ public:
     {
         return m_generation;
     }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override
+    {
+        if (!m_generation) return {};
+        return {m_generation,m_generation->points,m_generation->triangleIndices,m_generation->objects,
+            m_generation->triangleValidity,m_generation->interfaces};
+    }
     const Statistics& GetStatistics() const noexcept { return m_statistics; }
 private:
     std::shared_ptr<const SurfaceGenerationSnapshot> m_generation;

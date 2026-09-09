@@ -116,17 +116,47 @@ void Run(const char* sample)
     Check(exact,"独立整数索引基准与源物理 ROI 完全一致");
     const HostViewTargets targets{{"primary"},{}};
     CropHostTarget target; target.inputBinding=std::string(primaryVolumeBinding); target.referenceView.viewId="primary"; target.targetViews=targets;
-    CropHostRequest startCrop; startCrop.action=CropHostAction::Start; startCrop.target=target;
-    Check(crop->SendRequest(startCrop),"Crop 绑定来源与目标视图"); session.SendUpdates();
-    CropHostRequest cropRequest; cropRequest.action=CropHostAction::BuildResult; cropRequest.target=target; cropRequest.inputRoi=ref;
+    CropDocumentRequest openCrop;openCrop.action=CropDocumentAction::CreateDocument;
+    openCrop.requestId=CropHostFeature::CreateRequestId();openCrop.target=target;openCrop.sourceRevision=source;
+    bool opened=false;CropDocumentOutcome openResult;
+    Check(bool(crop->SendRequest(openCrop,[&](CropDocumentOutcome value){openResult=std::move(value);opened=true;})),"Crop 显式创建来源文档");
+    Pump(session,[&]{return opened;});Check(openResult.status==CropEditStatus::Succeeded,"Crop 文档准备全部视图");
+    const auto cropHistory=crop->GetHistory();
+    CropBuildRequest cropRequest;cropRequest.documentId=cropHistory.documentId;cropRequest.nodeId=cropHistory.rootNodeId;
+    cropRequest.requestId=CropHostFeature::CreateRequestId();cropRequest.expectedRevision=cropHistory.stateRevision;cropRequest.inputRoi=ref;
     bool cropped=false; CropBuildResult cropResult;
-    Check(crop->SendRequest(cropRequest,[&](CropBuildResult r) { cropResult=std::move(r); cropped=true; }),"Crop 接纳同一 ROI");
+    Check(bool(crop->SendRequest(cropRequest,[&](CropBuildResult r) { cropResult=std::move(r); cropped=true; })),"Crop 接纳同一 ROI");
     Pump(session,[&] { return cropped; }); Check(cropResult.isSucceeded,"Crop 生成派生结果："+cropResult.message);
-    graph=probe->data->GetDataGraph(); const auto croppedImage=probe->data->GetImageGrid(graph,cropResult.outputRevision);
+    graph=probe->data->GetDataGraph(); auto croppedImage=probe->data->GetImageGrid(graph,cropResult.outputRevision);
     exact=croppedImage && croppedImage->validityMask && std::memcmp(originalValues,croppedImage->image->GetScalarPointer(),count*sizeof(float))==0;
     const auto* validity=exact ? static_cast<const unsigned char*>(croppedImage->validityMask->GetScalarPointer()):nullptr;
     for (std::size_t i=0;exact && i<count;++i) exact=(validity[i]!=0)==Selected(i,n);
     Check(exact && HasInput(croppedImage->data,"crop-roi",ref),"Crop 保留原标量并精确裁切有效域，追溯同一修订");
+    const auto savedCrop=crop->GetArchive(cropHistory.documentId);
+    Check(savedCrop&&savedCrop->result&&savedCrop->result->inputRoi==ref,"ROI 构建归档保留精确输入身份");
+    CropDocumentRequest restoreCrop;restoreCrop.action=CropDocumentAction::RestoreDocument;
+    restoreCrop.requestId=CropHostFeature::CreateRequestId();restoreCrop.target=target;
+    restoreCrop.sourceRevision=source;restoreCrop.archive=*savedCrop;
+    bool restoredCrop=false;CropDocumentOutcome restoreCropResult;
+    Check(bool(crop->SendRequest(restoreCrop,[&](CropDocumentOutcome value){restoreCropResult=std::move(value);restoredCrop=true;})),"ROI 裁切结果归档恢复接纳");
+    Pump(session,[&]{return restoredCrop;});
+    Check(restoreCropResult.status==CropEditStatus::Succeeded&&restoreCropResult.restoreStatus==CropRestoreStatus::ResultRestored,"ROI 归档恢复独立结果");
+    {
+        const auto restoredState=crop->GetState(restoreCropResult.documentId);
+        const auto restoredImage=probe->data->GetImageGrid(probe->data->GetDataGraph(),restoredState.outputRevision);
+        Check(restoredImage&&restoredImage->validityMask&&restoredImage->validityMask->GetScalarPointer()!=croppedImage->validityMask->GetScalarPointer()
+            &&std::memcmp(restoredImage->validityMask->GetScalarPointer(),validity,count)==0,"恢复结果复制掩码，逐体素一致且生命周期独立");
+    }
+    CropDocumentRequest closeRestored;closeRestored.action=CropDocumentAction::CloseDocument;closeRestored.documentId=restoreCropResult.documentId;
+    closeRestored.requestId=CropHostFeature::CreateRequestId();closeRestored.expectedRevision=crop->GetHistory(closeRestored.documentId).stateRevision;
+    bool closedRestored=false;CropDocumentOutcome closeResult;
+    Check(bool(crop->SendRequest(closeRestored,[&](CropDocumentOutcome value){closeResult=std::move(value);closedRestored=true;})),"关闭恢复文档接纳");
+    Pump(session,[&]{return closedRestored;});Check(closeResult.status==CropEditStatus::Succeeded,"关闭恢复结果不影响原结果");
+    CropDocumentRequest activateOriginal;activateOriginal.action=CropDocumentAction::ActivateDocument;activateOriginal.documentId=cropHistory.documentId;
+    activateOriginal.requestId=CropHostFeature::CreateRequestId();activateOriginal.expectedRevision=crop->GetHistory(cropHistory.documentId).stateRevision;activateOriginal.target=target;
+    bool activatedOriginal=false;CropDocumentOutcome activateResult;
+    Check(bool(crop->SendRequest(activateOriginal,[&](CropDocumentOutcome value){activateResult=std::move(value);activatedOriginal=true;})),"重新激活原裁切文档");
+    Pump(session,[&]{return activatedOriginal;});Check(activateResult.status==CropEditStatus::Succeeded,"原裁切文档仍可独立使用");
     ArtifactRequest reduce; reduce.source=source; reduce.processingRoi=ref; reduce.qualityRoi=ref;
     ArtifactDiffusionParams diffusion; diffusion.iterations=1; diffusion.threshold=100; reduce.diffusion=diffusion;
     ArtifactHostRequest prepare; prepare.prepare=reduce;
@@ -201,6 +231,25 @@ void Run(const char* sample)
     Check(surface->GetResultValidity(mesh->dataRevision).status==SurfaceRestoreStatus::Historical,
         "ROI 几何更新使冻结表面成为历史结果");
     Check(frozen.roi->GetMaskChunk(maskRequest).values==mask.values,"旧 ROI 读取快照保持不变");
+    // 正向组合：裁切输出上的正式 Surface 必须由消费者释放，不能永久阻塞原文档。
+    bool selectedCrop=false;HostResult selectCropResult;
+    HostDataSelectRequest selectCrop;selectCrop.dataRevision=cropResult.outputRevision;
+    selectCrop.expectedBindingRevision=session.GetImageDescriptor()->bindingRevision;
+    Check(session.SendRequestResult(std::move(selectCrop),[&](HostResult value){selectCropResult=std::move(value);selectedCrop=true;}),"选择裁切结果作为 Surface 来源");
+    Pump(session,[&]{return selectedCrop;});Check(selectCropResult.isSucceeded,"裁切结果选择完成");
+    surfaceParams.analysisRoi.reset();surfaceParams.sourceVolume=cropResult.outputRevision;
+    extract.start=surfaceParams;surfaced=false;surfaceResult={};
+    Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult value){surfaceResult=std::move(value);surfaced=true;}).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳临时裁切来源");
+    Pump(session,[&]{return surfaced;});auto scopedSurface=surface->GetSurfaceSnapshot();
+    Check(surfaceResult.isPublished&&scopedSurface&&scopedSurface->points&&!scopedSurface->points->empty(),"临时裁切来源生成非空正式表面："+surfaceResult.message);
+    auto scopedData=probe->data->GetData(probe->data->GetDataGraph(),scopedSurface->dataRevision);
+    Check(scopedData&&GetDataEntityIdValid(scopedData->lifetimeScope),"正式 Surface 继承临时来源生命周期");
+    auto heldPoints=scopedSurface->points;scopedSurface.reset();scopedData.reset();
+    Check(!session.DetachFeature(*surface),"公开表面点数组仍持有时不提前报告释放");
+    heldPoints.reset();
+    bool surfaceDetached=false;Pump(session,[&]{if(!surfaceDetached)surfaceDetached=session.DetachFeature(*surface);return surfaceDetached;});
+    croppedImage.reset();
+    Pump(session,[&]{return session.Stop();});
     Check(session.Stop(),"Session 停止完整释放消费者");
     std::cout << "EVIDENCE voxels=" << count << " selected=" << count/8 << " artifactChanged=" << changed
         << " surfacePoints=" << mesh->points->size() << " real=" << bool(sample) << std::endl;

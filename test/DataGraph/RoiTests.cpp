@@ -246,8 +246,35 @@ bool GetSourceBindingCasValid()
     return Check(service.SetRoi(request).error==RoiError::None,"current source binding expectation rejected");
 }
 
+bool GetCropBoundariesValid()
+{
+    Fixture f;DataTransaction setup;setup.outputs={f.GetImage()};
+    if(f.store.SetDataCommit(setup).status!=DataCommitStatus::Succeeded)return false;
+    const auto freeze=[&](RoiPrimitive primitive) {
+        RoiDefinition definition;definition.source=f.source;definition.nodes={{RoiNodeKind::Primitive,primitive}};
+        DataTransaction tx;tx.outputs={f.GetRoi(definition)};const auto committed=f.store.SetDataCommit(tx);
+        return committed.published.empty()?RoiReadSnapshot{}:RoiEvaluator::GetRoi(committed.graph,committed.published.front()->self,f.source).roi;
+    };
+    RoiPrimitive plane;plane.shape=RoiShape::HalfSpace;plane.origin={-5,9,44};plane.normal={1,0,0};
+    const auto closed=freeze(plane);plane.boundaryPolicy=RoiBoundaryPolicy::CropV1;const auto strict=freeze(plane);
+    if(!Check(closed&&strict&&closed->GetContains({-5,9,44})&&!strict->GetContains({-5,9,44})
+        &&strict->GetContains({-4.9,9,44})&&strict->GetClipPlanes().error==RoiError::UnsupportedRoi,"Crop plane boundary migration"))return false;
+    RoiPrimitive sphere;sphere.shape=RoiShape::Sphere;sphere.origin={-5,9,44};sphere.radius=.5;sphere.boundaryPolicy=RoiBoundaryPolicy::CropV1;
+    const auto ball=freeze(sphere);
+    if(!Check(ball&&ball->GetContains({-4.5,9,44})&&!ball->GetContains({-4.499,9,44})
+        &&ball->GetClipPlanes().error==RoiError::UnsupportedRoi,"sphere exact boundary/capability"))return false;
+    auto cylinder=sphere;cylinder.shape=RoiShape::Cylinder;cylinder.normal={0,0,2};cylinder.height=2;
+    const auto tube=freeze(cylinder);
+    if(!Check(tube&&tube->GetContains({-4.5,9,45})&&!tube->GetContains({-5,9,45.01}),"finite cylinder normalized axis/caps"))return false;
+    auto box=f.GetBox().nodes.front().primitive;const auto oldBox=freeze(box);box.boundaryPolicy=RoiBoundaryPolicy::CropV1;const auto cropBox=freeze(box);
+    if(!Check(oldBox&&cropBox&&!oldBox->GetContains({-5,9.50000025,44})&&cropBox->GetContains({-5,9.50000025,44}),"Crop Box tolerance preserved without changing Closed"))return false;
+    sphere.height=1;if(!Check(!freeze(sphere),"inactive sphere height accepted"))return false;
+    plane.boundaryPolicy=static_cast<RoiBoundaryPolicy>(99);
+    return Check(!freeze(plane),"unknown boundary policy accepted");
+}
+
 }
 int main()
 {
-    return GetGeometryValid() && GetDefinitionRejected() && GetMasksAndBooleanValid() && GetServiceValid() && GetArchiveValid() && GetArchiveSourceBudgetValid() && GetSourceBindingCasValid() ? 0 : 1;
+    return GetCropBoundariesValid() && GetGeometryValid() && GetDefinitionRejected() && GetMasksAndBooleanValid() && GetServiceValid() && GetArchiveValid() && GetArchiveSourceBudgetValid() && GetSourceBindingCasValid() ? 0 : 1;
 }

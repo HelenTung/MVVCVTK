@@ -146,6 +146,22 @@ public:
                 : std::optional<HostInputView>{};
         }
 
+        FeatureDataTransitionState StartDataTransition(std::uint64_t ownerId, FeatureDataTransitionRequest request)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->StartDataTransition(ownerId, std::move(request)) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState SetDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->SetDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->StopDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+        }
+
         bool SetActiveViews(
             const std::string& featureId,
             const std::vector<std::string>& viewIds)
@@ -396,6 +412,31 @@ public:
             return data ? data->GetSurfaceMesh(graph, ref) : nullptr;
         }
 
+        DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override
+        {
+            const auto data = GetReadData();
+            return data ? data->GetDataLifetime(scopeId) : DataLifetimeState{};
+        }
+
+        DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override
+        {
+            const auto data = GetWriteData();
+            return data ? data->SetDataRelease(scopeId) : DataLifetimeState{};
+        }
+
+        std::unique_ptr<DataChangeBatch> StartDataChanges() override
+        {
+            const auto data = GetWriteData();
+            return data ? data->StartDataChanges() : nullptr;
+        }
+
+        std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+            const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override
+        {
+            const auto data = GetWriteData();
+            return data ? data->SetPreparedDataView(ref, std::move(prepared)) : nullptr;
+        }
+
         DataEntityId CreateDataEntityId() override
         {
             const auto data = GetWriteData();
@@ -566,6 +607,24 @@ public:
             const bool isSet = state && state->StopTransform(m_featureId, token);
             if (isSet) (void)SendWorkAvailable();
             return isSet;
+        }
+
+        FeatureDataTransitionState StartDataTransition(FeatureDataTransitionRequest request) override
+        {
+            const auto bridge = m_bridge.lock();
+            return m_lifetime->isActive.load() && bridge
+                ? bridge->StartDataTransition(m_lifetime->id, std::move(request)) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState SetDataTransition(std::uint64_t requestId) override
+        {
+            const auto bridge = m_bridge.lock();
+            return m_lifetime->isActive.load() && bridge
+                ? bridge->SetDataTransition(m_lifetime->id, requestId) : FeatureDataTransitionState{};
+        }
+        FeatureDataTransitionState StopDataTransition(std::uint64_t requestId) override
+        {
+            const auto bridge = m_bridge.lock();
+            return bridge ? bridge->StopDataTransition(m_lifetime->id, requestId) : FeatureDataTransitionState{};
         }
 
         bool SetActiveViews(
@@ -970,33 +1029,29 @@ HostFeatureRuntime::DetachResult HostFeatureRuntime::Impl::DetachFeature(
 bool HostFeatureRuntime::Impl::DetachFeatures()
 {
     if (m_isChanging) return false;
+    if (features.empty()) return true;
+    if (m_ports.ownerThread!=std::this_thread::get_id()) return false;
     const MutationGuard mutation(m_isChanging);
-    while (!features.empty()) {
-        auto& entry = features.back();
-        if (!entry.isHostDetached) {
-            if (!m_ports.views->SetFeatureViews(entry.id, {})) {
-                return false;
+    bool progressed=true;
+    while (!features.empty() && progressed) {
+        progressed=false;
+        // A producer may be blocked by a consumer later in this pass. Attempt every Feature;
+        // retry producers only after another cleanup actually advanced, never spin on blockers.
+        for (std::size_t index=features.size();index>0;--index) {
+            auto& entry=features[index-1];
+            if (!entry.isHostDetached) {
+                if (!m_ports.views || !m_ports.views->SetFeatureViews(entry.id,{}) || !entry.feature) continue;
+                bool detached=false;
+                try {detached=entry.feature->DetachHost();} catch (...) {}
+                if (!detached) continue;
+                entry.isHostDetached=true;entry.lifetime->Stop(true);progressed=true;
             }
-            const auto& feature = entry.feature;
-            if (!feature) return false;
-            try {
-                if (!feature->DetachHost()) {
-                    return false;
-                }
-            }
-            catch (...) {
-                return false;
-            }
-            entry.isHostDetached = true;
-            entry.lifetime->Stop(true);
+            if (!m_ports.input || !m_ports.input->DetachInput(entry.id)) continue;
+            features.erase(features.begin()+static_cast<std::ptrdiff_t>(index-1));
+            progressed=true;
         }
-        if (!m_ports.input
-            || !m_ports.input->DetachInput(entry.id)) {
-            return false;
-        }
-        features.pop_back();
     }
-    return true;
+    return features.empty();
 }
 
 HostFeatureRuntime::HostFeatureRuntime() : m_impl(std::make_unique<Impl>()) {}

@@ -51,6 +51,8 @@ class AppTaskControlPort {
 public:
     virtual ~AppTaskControlPort() = default;
 
+    // Stop ordinary data consumers before Feature cleanup; render preparation remains available.
+    virtual bool SetDataTaskStopping() { return true; }
     virtual bool SetTaskStopping() = 0;
     virtual bool StopTasks(
         std::chrono::steady_clock::time_point deadline) = 0;
@@ -165,6 +167,21 @@ public:
 class AppDataStagePort {
 public:
     virtual ~AppDataStagePort() = default;
+    // Existing image participants remain source-compatible and reject mesh
+    // explicitly until they implement the generic candidate protocol.
+    virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView?StartDataStage(input->imageView,revision):DataStageStatus::Failed;
+    }
+    virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision,
+        const std::optional<RenderEffectChange>& effect) {
+        return effect?DataStageStatus::Failed:StartRenderInputStage(input,revision);
+    }
+    virtual DataStageStatus SetRenderInputStageReady(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView?SetDataStageReady(input->imageView,revision):DataStageStatus::Failed;
+    }
+    virtual bool SetRenderInputViewStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {
+        return input&&input->imageView&&SetViewStage(input->imageView,revision);
+    }
 
     virtual DataStageStatus StartDataStage(
         const VtkImageGridSnapshot& snapshot,
@@ -174,6 +191,7 @@ public:
         std::uint64_t transactionRevision) = 0;
     virtual DataStageStatus GetDataStageStatus(
         std::uint64_t transactionRevision) const = 0;
+    virtual RenderEffectFailure GetDataStageFailure(std::uint64_t) const {return RenderEffectFailure::None;}
     virtual bool SetViewStage(
         const VtkImageGridSnapshot& snapshot,
         std::uint64_t transactionRevision) = 0;

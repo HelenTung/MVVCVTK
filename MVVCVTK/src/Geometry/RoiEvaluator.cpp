@@ -86,7 +86,8 @@ bool GetSameGrid(const GridGeometry3D& a, const GridGeometry3D& b) noexcept
 bool GetPrimitiveDefault(const RoiPrimitive& p) noexcept
 {
     return p.shape==RoiShape::Box && p.localToSource==roiIdentityMatrix
-        && p.origin==Point{0,0,0} && p.normal==Point{0,0,1} && !p.mask;
+        && p.origin==Point{0,0,0} && p.normal==Point{0,0,1} && !p.mask
+        && p.boundaryPolicy==RoiBoundaryPolicy::Closed && p.radius==0 && p.height==0;
 }
 
 const GridGeometry3D* GetMaskGrid(const DataSnapshot& data) noexcept
@@ -166,11 +167,19 @@ public:
                 const auto& p=node.primitive;
                 if (p.shape==RoiShape::Box) {
                     if (!Invert(p.localToSource,prepared.inverse)) throw std::runtime_error("Invalid box matrix.");
-                    AddBoxPlanes(m_planes.planes,prepared.inverse,{-1,1,-1,1,-1,1});
+                    const double edge=p.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? 1+1e-6:1;
+                    AddBoxPlanes(m_planes.planes,prepared.inverse,{-edge,edge,-edge,edge,-edge,edge});
                 } else if (p.shape==RoiShape::HalfSpace) {
                     const auto length=std::hypot(p.normal[0],p.normal[1],p.normal[2]);
                     prepared.normal={p.normal[0]/length,p.normal[1]/length,p.normal[2]/length};
                     m_planes.planes.push_back({p.origin,prepared.normal});
+                    if (p.boundaryPolicy==RoiBoundaryPolicy::CropV1) m_planes.error=RoiError::UnsupportedRoi;
+                } else if (p.shape==RoiShape::Sphere || p.shape==RoiShape::Cylinder) {
+                    if (p.shape==RoiShape::Cylinder) {
+                        const auto length=std::hypot(p.normal[0],p.normal[1],p.normal[2]);
+                        prepared.normal={p.normal[0]/length,p.normal[1]/length,p.normal[2]/length};
+                    }
+                    m_planes.error=RoiError::UnsupportedRoi;
                 } else {
                     prepared.mask=getData(*p.mask);
                     if (std::find(m_dependencies.begin(),m_dependencies.end(),*p.mask)==m_dependencies.end())
@@ -183,13 +192,17 @@ public:
         }
         if (m_planes.error!=RoiError::None) m_planes.planes.clear();
         // 仅作保守读取范围；精确选择始终使用表达式谓词。
-        std::array<std::array<double,6>,roiNodeLimit> bounds{};
+        std::vector<std::array<double,6>> bounds(m_definition.nodes.size());
         for (std::size_t i=0;i<m_definition.nodes.size();++i) {
             const auto& node=m_definition.nodes[i];
             auto& box=bounds[i]; box=m_bounds;
             if (node.kind==RoiNodeKind::Empty) box={1,0,1,0,1,0};
-            if (node.kind==RoiNodeKind::Primitive && node.primitive.shape==RoiShape::Box)
-                box=GetGridBounds(node.primitive.localToSource,{-1,1,-1,1,-1,1});
+            if (node.kind==RoiNodeKind::Primitive && node.primitive.shape==RoiShape::Box) {
+                auto matrix=node.primitive.localToSource;
+                if (node.primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1)
+                    for (int row=0;row<3;++row) for (int col=0;col<3;++col) matrix[row*4+col]*=1+1e-6;
+                box=GetGridBounds(matrix,{-1,1,-1,1,-1,1});
+            }
             if (node.kind==RoiNodeKind::Difference) box=bounds[node.left];
             if (node.kind==RoiNodeKind::Union || node.kind==RoiNodeKind::Intersection) {
                 for (int a=0;a<3;++a) {
@@ -263,7 +276,8 @@ public:
         } else {
             for (int a=0;a<3;++a) if (p[a]<m_bounds[a*2] || p[a]>m_bounds[a*2+1]) return false;
         }
-        bool values[roiNodeLimit]{};
+        // 定义已验证为拓扑有序；每个读取项都已在本轮写入。
+        bool values[roiNodeLimit];
         for (std::size_t i=0;i<m_definition.nodes.size();++i) {
             const auto& node=m_definition.nodes[i];
             switch (node.kind) {
@@ -276,10 +290,20 @@ public:
                 const auto& primitive=node.primitive;
                 if (primitive.shape==RoiShape::Box) {
                     const auto local=Transform(m_prepared[i].inverse,p);
-                    values[i]=GetFinite(local) && std::abs(local[0])<=1+1e-12
-                        && std::abs(local[1])<=1+1e-12 && std::abs(local[2])<=1+1e-12;
+                    const double edge=primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? 1+1e-6:1+1e-12;
+                    values[i]=GetFinite(local) && std::abs(local[0])<=edge
+                        && std::abs(local[1])<=edge && std::abs(local[2])<=edge;
                 } else if (primitive.shape==RoiShape::HalfSpace) {
-                    values[i]=Dot(m_prepared[i].normal,{p[0]-primitive.origin[0],p[1]-primitive.origin[1],p[2]-primitive.origin[2]})>=0;
+                    const double distance=Dot(m_prepared[i].normal,{p[0]-primitive.origin[0],p[1]-primitive.origin[1],p[2]-primitive.origin[2]});
+                    values[i]=primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? distance>0:distance>=0;
+                } else if (primitive.shape==RoiShape::Sphere || primitive.shape==RoiShape::Cylinder) {
+                    const Point offset{p[0]-primitive.origin[0],p[1]-primitive.origin[1],p[2]-primitive.origin[2]};
+                    if (primitive.shape==RoiShape::Sphere) values[i]=std::hypot(offset[0],offset[1],offset[2])<=primitive.radius;
+                    else {
+                        const auto& axis=m_prepared[i].normal; const double axial=Dot(offset,axis);
+                        values[i]=std::abs(axial)<=primitive.height*0.5
+                            && std::hypot(offset[0]-axial*axis[0],offset[1]-axial*axis[1],offset[2]-axial*axis[2])<=primitive.radius;
+                    }
                 } else {
                     const auto& grid=m_image->GetGeometry();
                     std::size_t offset=0, stride=1;
@@ -381,15 +405,23 @@ RoiError RoiEvaluator::GetDefinitionError(const RoiDefinition& definition) noexc
             if (n.left!=0 || n.right!=0) return RoiError::InvalidGeometry;
             depths[i]=1;
             if (n.kind==RoiNodeKind::Primitive) {
-                if (!GetFinite(p.localToSource) || !GetFinite(p.origin) || !GetFinite(p.normal)) return RoiError::InvalidGeometry;
+                if (!GetFinite(p.localToSource) || !GetFinite(p.origin) || !GetFinite(p.normal)
+                    || !std::isfinite(p.radius) || !std::isfinite(p.height)) return RoiError::InvalidGeometry;
+                if (p.boundaryPolicy!=RoiBoundaryPolicy::Closed && p.boundaryPolicy!=RoiBoundaryPolicy::CropV1) return RoiError::UnsupportedRoi;
+                if (p.shape!=RoiShape::Sphere && p.shape!=RoiShape::Cylinder && (p.radius!=0 || p.height!=0)) return RoiError::InvalidGeometry;
                 if (p.shape==RoiShape::Box) {
                     Matrix inverse;
                     if (!Invert(p.localToSource,inverse) || p.mask || p.origin!=Point{0,0,0} || p.normal!=Point{0,0,1}) return RoiError::InvalidGeometry;
                 } else if (p.shape==RoiShape::HalfSpace) {
                     const double length=std::hypot(p.normal[0],p.normal[1],p.normal[2]);
                     if (!(length>0) || !std::isfinite(length) || p.mask || p.localToSource!=roiIdentityMatrix) return RoiError::InvalidGeometry;
+                } else if (p.shape==RoiShape::Sphere || p.shape==RoiShape::Cylinder) {
+                    const double length=std::hypot(p.normal[0],p.normal[1],p.normal[2]);
+                    if (p.mask || p.localToSource!=roiIdentityMatrix || !(p.radius>0)) return RoiError::InvalidGeometry;
+                    if (p.shape==RoiShape::Sphere ? (p.height!=0 || p.normal!=Point{0,0,1})
+                        : (!(p.height>0) || !(length>0) || !std::isfinite(length))) return RoiError::InvalidGeometry;
                 } else if (p.shape==RoiShape::MaskReference) {
-                    if (!p.mask || !GetDataRevisionRefValid(*p.mask) || p.localToSource!=roiIdentityMatrix
+                    if (p.boundaryPolicy!=RoiBoundaryPolicy::Closed || !p.mask || !GetDataRevisionRefValid(*p.mask) || p.localToSource!=roiIdentityMatrix
                         || p.origin!=Point{0,0,0} || p.normal!=Point{0,0,1}) return RoiError::InvalidGeometry;
                 } else return RoiError::UnsupportedRoi;
             } else if ((n.kind!=RoiNodeKind::Empty && n.kind!=RoiNodeKind::SourceDomain) || !GetPrimitiveDefault(p)) return RoiError::InvalidGeometry;

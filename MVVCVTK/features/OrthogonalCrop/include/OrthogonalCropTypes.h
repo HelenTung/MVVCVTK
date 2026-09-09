@@ -8,6 +8,7 @@
 // 不依赖 App runtime、Renderer、Interactor、mapper 或具体窗口对象。
 
 #include "Host/TrustedDataPort.h"
+#include "Data/DataPayloads.h"
 #include "Render/Contracts/RenderEffect.h"
 
 #include <array>
@@ -18,6 +19,11 @@
 #include <string>
 #include <vector>
 
+using CropDocumentId = std::uint64_t;
+using CropNodeId = std::uint64_t;
+using CropRequestId = std::uint64_t;
+using CropResultId = std::uint64_t;
+
 struct CropPredicateTable;
 
 struct CropShaderPayload final {
@@ -25,6 +31,7 @@ struct CropShaderPayload final {
     RenderInputStamp sourceStamp;
     std::size_t nodeCount = 0;
     std::shared_ptr<const CropPredicateTable> predicateTable;
+    CropNodeId nodeId = 0;
 };
 
 // active input model AABB，布局固定为 [minX, maxX, minY, maxY, minZ, maxZ]。
@@ -48,27 +55,29 @@ enum class CropRemovalMode {
 };
 
 struct CropHistoryState final {
+    CropDocumentId documentId = 0;
+    std::uint64_t stateRevision = 0;
+    CropNodeId requestedHead = 0;
+    CropNodeId appliedHead = 0;
+    CropNodeId renderedHead = 0;
     std::size_t nodeCount = 0;
     std::size_t operationCount = 0;
     CropRemovalMode editMode = CropRemovalMode::None;
     bool hasEditableOp = false;
     bool isEditing = false;
-    // allHistory 中已经物化进当前 image+mask 基线的绝对节点数。
-    std::size_t baseNodeCount = 0;
-    // 从原始根数据开始的完整参数历史；包含当前 active history。
-    std::size_t allOperationCount = 0;
-    // 当前未物化历史（含 redo）的稳定操作标识，顺序与 nodeCount 前缀一致；删除后不重新编号。
-    std::vector<std::uint64_t> operationIndices;
+    bool isDragging = false;
+    CropRequestId lastRequestId = 0;
+    std::size_t pendingRequestCount = 0;
 };
 
 // 裁切几何类型；router 用它和数据源、动作一起决定可执行路径。
 enum class CropShape {
     // 已接入的有向盒裁切。
-    Box,
-    // 已接入的无限半空间平面裁切。
-    Plane,
-    // 预留圆柱裁切入口。
-    Cylinder
+    Box = 0,
+    // 法线正半空间，保留旧的严格边界语义。
+    Plane = 1,
+    Cylinder = 2,
+    Sphere = 3
 };
 
 // widget 生产、bridge 消费的瞬时交互轴；它与 shader revision、异步导出状态相互独立。
@@ -118,7 +127,23 @@ enum class CropFailure {
     // packaged_task 已创建，但 joinable worker 未能启动。
     WorkerStartFailed,
     // worker 已启动，但任务以异常终止。
-    WorkerFailed
+    WorkerFailed,
+    NodeNotFound,
+    StateVersionMismatch,
+    PublishedResultDependency,
+    ReturnToSourceRequired,
+    ResultInUse,
+    ResultReleasing,
+    PreviewNotReady,
+    SourceMismatch,
+    ResourceLimit,
+    ResultRetired,
+    PrecisionNotMet,
+    NoCropOperations,
+    Cancelled,
+    InvalidRequest,
+    RequestExpired,
+    ParentFailed
 };
 
 // history 的唯一节点类型；只保存可序列化数学参数，不保存 VTK 对象或 GPU 资源。
@@ -134,6 +159,12 @@ struct CropOpItem final {
     };
     CropVectorDouble3Array planeCenterInInputModel = { 0.0, 0.0, 0.0 };
     CropVectorDouble3Array planeNormalInInputModel = { 0.0, 0.0, 1.0 };
+    CropVectorDouble3Array centerInInputModel = { 0.0, 0.0, 0.0 };
+    CropVectorDouble3Array axisInInputModel = { 0.0, 0.0, 1.0 };
+    double radius = 1.0;
+    double height = 1.0;
+    std::uint32_t recipeVersion = 1;
+    std::uint32_t boundaryPolicyVersion = 1;
 };
 
 // Host 在 owner thread 从同一图快照捕获的不可拆分快照；正式 ref、binding 与 typed view 一起换代。
@@ -146,14 +177,38 @@ struct CropInputSnapshot final {
     VtkSurfaceMeshSnapshot mesh;
 };
 
+struct CropBuildOptions final {
+    std::size_t availableRamBytes = 512ULL * 1024 * 1024;
+    double meshTolerance = 0.05;
+    std::size_t maxCells = 1000000;
+    std::uint32_t maxDepth = 64;
+    bool operator==(const CropBuildOptions& other) const noexcept {
+        return availableRamBytes==other.availableRamBytes && meshTolerance==other.meshTolerance
+            && maxCells==other.maxCells && maxDepth==other.maxDepth;
+    }
+};
+
 struct CropBuildParams final {
+    CropDocumentId documentId = 0;
+    CropNodeId nodeId = 0;
+    CropRequestId requestId = 0;
     DataRevisionRef sourceRevision;
     std::vector<CropOpItem> operations;
     std::size_t nodeCount = 0;
     std::size_t availableRamBytes = 0;
+    double meshTolerance = 0.05;
+    std::size_t maxCells = 1000000;
+    std::uint32_t maxDepth = 64;
 };
 
 struct CropBuildResult final {
+    CropRequestId requestId = 0;
+    std::uint64_t stateRevision = 0;
+    CropDocumentId documentId = 0;
+    CropNodeId nodeId = 0;
+    CropResultId resultId = 0;
+    DataEntityId scopeId;
+    std::vector<DataLifetimeBlocker> blockers;
     bool isSucceeded = false;
     CropFailure failureReason = CropFailure::None;
     std::uint64_t failureOperationIndex = 0;
@@ -163,4 +218,154 @@ struct CropBuildResult final {
     DataRevisionRef recipeRevision;
     DataRevisionRef outputRevision;
     std::string message;
+    double meshErrorBound = 0;
+    double meshAreaErrorBound = 0;
+    std::size_t meshTriangleCount = 0;
+};
+
+enum class CropDocumentStatus : std::uint8_t {
+    Ready, Building, Returning, Releasing, Closing, Closed
+};
+
+enum class CropResultStatus : std::uint8_t {
+    Building, Published, Releasing
+};
+
+struct CropResultRecord final {
+    CropResultId resultId = 0;
+    CropNodeId nodeId = 0;
+    CropResultStatus status = CropResultStatus::Building;
+    DataEntityId scopeId;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef recipeRevision;
+    DataRevisionRef outputRevision;
+    std::uint64_t publicationGeneration = 0;
+    CropBuildOptions options;
+    std::optional<DataRevisionRef> inputRoi;
+    double meshErrorBound=0,meshAreaErrorBound=0;
+    std::size_t meshTriangleCount=0;
+};
+
+struct CropNodeSnapshot final {
+    CropNodeId nodeId = 0;
+    CropNodeId parentNodeId = 0;
+    // Root 没有操作；正式节点的几何/父关系从不原位改写。
+    std::optional<CropOpItem> operation;
+};
+
+// Values describe one target view at the owner-thread query instant. A committed
+// node may still await its first presented frame; 0 means no known rendered node.
+enum class CropPointClassification { Kept, Removed, BoundaryBand, PrecisionNotMet };
+struct CropCoordinatePrecision final {
+    bool isAvailable=false;
+    CropVectorDouble3Array inputError{};
+};
+struct CropPreviewPrecision final {
+    CropFailure failureReason=CropFailure::PreviewNotReady;
+    CropDocumentId documentId=0;
+    CropNodeId renderedHead=0;
+    std::uint64_t stateRevision=0;
+    std::string viewId;
+    CropCoordinatePrecision coordinates;
+    std::vector<CropPointClassification> samples;
+    std::size_t keptCount=0,removedCount=0,boundaryBandCount=0,precisionNotMetCount=0;
+};
+
+struct CropViewPreviewState final {
+    std::string viewId;
+    CropNodeId requestedHead=0;
+    CropNodeId appliedHead=0;
+    CropNodeId renderedHead=0;
+    RenderEffectState effect;
+    CropCoordinatePrecision precision;
+    bool isRenderPending=false;
+};
+
+struct CropHistorySnapshot final {
+    CropDocumentId documentId = 0;
+    CropNodeId rootNodeId = 0;
+    DataRevisionRef sourceRevision;
+    std::uint64_t stateRevision = 0;
+    CropNodeId requestedHead = 0;
+    CropNodeId appliedHead = 0;
+    CropNodeId renderedHead = 0;
+    std::size_t totalNodeCount = 0;
+    std::vector<CropNodeSnapshot> nodes;
+    std::vector<CropResultRecord> results;
+    CropNodeId nextPageAfter = 0;
+};
+
+enum class CropPruneScope : std::uint8_t { Subtrees, Descendants, OutsidePaths };
+enum class CropPruneFallback : std::uint8_t { Reject, NearestSurvivingAncestor, ExplicitNode };
+
+struct CropPruneRequest final {
+    CropPruneScope scope = CropPruneScope::Subtrees;
+    std::vector<CropNodeId> nodeIds;
+    CropPruneFallback fallback = CropPruneFallback::Reject;
+    CropNodeId explicitFallbackNode = 0;
+};
+
+struct CropPruneBlocker final {
+    CropResultId resultId = 0;
+    CropNodeId nodeId = 0;
+};
+
+struct CropPruneImpact final {
+    CropFailure failureReason = CropFailure::None;
+    std::uint64_t stateRevision = 0;
+    std::size_t deletedCount = 0;
+    std::vector<CropNodeId> subtreeRoots;
+    std::vector<CropPruneBlocker> blockers;
+    CropNodeId fallbackNode = 0;
+};
+
+struct CropNodeMapping final {
+    CropNodeId archivedNodeId=0;
+    CropNodeId nodeId=0;
+};
+struct CropDocumentArchive final {
+    std::uint32_t schemaVersion = 1;
+    DataRevisionRef sourceRevision;
+    std::optional<GridGeometry3D> imageGeometry;
+    std::vector<CropNodeSnapshot> nodes;
+    CropNodeId rootNodeId = 0;
+    CropNodeId requestedHead = 0;
+    CropNodeId appliedHead = 0;
+    std::optional<CropResultRecord> result;
+    DataTypeId sourceType;
+    std::string coordinateFrame;
+    // A mask belongs to its immutable formal source revision, never a mutable
+    // VTK allocation address. Empty means the Root has no validity mask.
+    std::optional<DataRevisionRef> maskSourceRevision;
+};
+
+enum class CropEditKind : std::uint8_t { Append, Replace, Select, Prune };
+enum class CropEditStatus : std::uint8_t { Queued, Succeeded, Failed, Cancelled };
+
+struct CropEditRequest final {
+    CropDocumentId documentId = 0;
+    CropRequestId requestId = 0;
+    std::uint64_t expectedRevision = 0;
+    CropEditKind kind = CropEditKind::Select;
+    // Append 是明确父节点；Replace/Select 是明确目标，不把数量作为身份。
+    CropNodeId nodeId = 0;
+    CropOpItem operation;
+    CropPruneRequest prune;
+};
+struct CropEditOutcome final {
+    CropRequestId requestId = 0;
+    CropNodeId nodeId = 0;
+    std::uint64_t stateRevision = 0;
+    CropEditStatus status = CropEditStatus::Queued;
+    CropFailure failureReason = CropFailure::None;
+    CropPruneImpact prune;
+};
+struct CropEditAdmission final {
+    explicit operator bool() const noexcept { return isAccepted; }
+    bool isAccepted = false;
+    bool isReplay = false;
+    CropFailure failureReason = CropFailure::None;
+    CropRequestId requestId = 0;
+    CropNodeId nodeId = 0;
+    std::uint64_t stateRevision = 0;
 };

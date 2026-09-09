@@ -115,6 +115,25 @@ public:
         return m_bridge.GetSurfaceMesh(GetData(graph, ref));
     }
 
+    DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const override
+    {
+        return m_store.GetDataLifetime(scopeId);
+    }
+    DataLifetimeState SetDataRelease(const DataEntityId& scopeId) override
+    {
+        return m_store.SetDataRelease(scopeId);
+    }
+    std::unique_ptr<DataChangeBatch> StartDataChanges() override
+    {
+        return m_store.StartDataChanges();
+    }
+
+    std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+        const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override
+    {
+        return m_bridge.SetPreparedDataView(ref, std::move(prepared));
+    }
+
     DataEntityId CreateDataEntityId() override
     {
         return m_store.CreateDataEntityId();
@@ -173,10 +192,9 @@ public:
     }
 
     std::pair<VtkLabelMapSnapshot, VtkSurfaceMeshSnapshot>
-    SetLabelAndMesh(vtkImageData* labels, vtkPolyData* mesh)
+    SetLabelAndMesh(std::shared_ptr<const LabelMap3DPayload> labelPayload,
+        std::shared_ptr<const SurfaceMeshPayload> meshPayload)
     {
-        auto labelPayload = m_bridge.CreateLabelPayload(labels);
-        auto meshPayload = m_bridge.CreateMeshPayload(mesh);
         if (!labelPayload || !meshPayload) return {};
         const auto labelEntity = CreateDataEntityId();
         const auto meshEntity = CreateDataEntityId();

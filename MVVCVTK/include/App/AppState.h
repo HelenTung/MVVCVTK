@@ -106,6 +106,7 @@ public:
     void SetDataReady(const DataReadyState& state) noexcept;
     // 非加载的绑定发布；不结束重入启动的 File/Reload，不覆盖更新的绑定状态。
     void SetImageDataReady(const DataReadyState& state) noexcept;
+    void SetRenderDataReady(const DataReadyState& state) noexcept;
     DataRevisionRef GetDataRevision() const;
     DataBindingRevision GetDataBindingRevision() const;
     bool SetFileLoadFailed();

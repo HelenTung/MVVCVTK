@@ -1,3 +1,4 @@
+#include "Data/Internal/VtkDataResourceLease.h"
 #include "Render/Internal/VolumeLodProductBuilder.h"
 
 #include "Data/ImageProcessor.h"
@@ -218,6 +219,9 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
     const VolumeLodBuildRequest& request,
     const RenderTaskToken& stopToken) const
 {
+    if (!request.inputUse.GetIsPublished()) {
+        return GetFailure(RenderProductFailure::StaleInput, "The product source has retired.");
+    }
     if (stopToken.GetIsStopped()) {
         return GetFailure(
             RenderProductFailure::Cancelled,
@@ -376,7 +380,12 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
                 "The volume LOD product exceeded its resource lease.");
         }
 
+
+        if (!request.inputUse.GetIsPublished()) {
+            return GetFailure(RenderProductFailure::StaleInput, "The product source retired while building.");
+        }
         auto product = std::make_shared<VolumeLodProduct>();
+        product->inputUse = request.inputUse;
         product->requestRevision = request.requestRevision;
         product->inputStamp = request.key.inputStamp;
         product->requestedQuality = request.requestedQuality;
@@ -384,6 +393,14 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         product->volume = std::move(volume);
         product->mask = std::move(mask);
         product->actualBytes = actualBytes;
+
+        // Native products borrow the already tracked input allocation. Attaching a new result
+        // lease to its shared Root scalar would keep that result alive for the entire Root lifetime.
+        // New resampled/denoised allocations own the product lease down to their arrays.
+        if (product->volume!=request.input)
+            VtkDataResourceLease::AttachImage(product->volume, product->inputUse.resource);
+        if (product->mask!=request.mask)
+            VtkDataResourceLease::AttachImage(product->mask, product->inputUse.resource);
 
         if (!stopToken.SetProductOwner(product, actualBytes)) {
             return GetFailure(RenderProductFailure::ResourceRejected,

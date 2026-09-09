@@ -12,6 +12,9 @@
 #include <vtkCommand.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLVertexBufferObject.h>
+#include <vtkOpenGLVertexBufferObjectGroup.h>
+#include <vtkOpenGLGPUVolumeRayCastMapper.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkShaderProperty.h>
@@ -42,7 +45,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <memory>
 #include <vector>
 
@@ -297,6 +303,7 @@ bool StartCachedProgramZeroCase()
 
     auto zeroPayload = activePayload;
     zeroPayload.revision = 71;
+    zeroPayload.nodeId = 701;
     zeroPayload.nodeCount = 0;
     isPassed = SetExpect(
         controller.SetCropParams(zeroPayload)
@@ -328,6 +335,71 @@ bool StartCachedProgramZeroCase()
         "nodeCount=0 should refresh a cached shader program without a new shader event.")
         && isPassed;
     isPassed = controller.StopRender() && isPassed;
+
+    std::vector<std::function<void(RenderFrameOutcome)>> frameCallbacks;
+    int queueFailure=0;
+    controller.SetFrameCompletionQueue([&](auto callback) {
+        if(queueFailure==2)throw std::runtime_error("injected frame queue failure");
+        if(queueFailure==1)return false;
+        frameCallbacks.push_back(std::move(callback));return true;
+    });
+    const auto draw=[&] {return controller.StartRender(renderer)&&(renderWindow->Render(),controller.StopRender());};
+    const auto finish=[&](std::uint64_t frame) {auto callbacks=std::move(frameCallbacks);frameCallbacks.clear();for(auto& callback:callbacks)callback({frame,true,true});};
+    for(int failure=1;failure<=2;++failure) {
+        queueFailure=0;isPassed=draw()&&isPassed;finish(10*failure);
+        isPassed=SetExpect(controller.GetRenderedNode()==701&&controller.GetPointVisible(zeroPayload.sourceStamp,{0,0,0}),
+            "Injected frame queue should establish a known presented Root.")&&isPassed;
+        isPassed=draw()&&isPassed; // retain an older accepted callback
+        queueFailure=failure;isPassed=draw()&&isPassed;
+        finish(10*failure+1);
+        isPassed=SetExpect(controller.GetRenderedNode()==0&&!controller.GetPointVisible(zeroPayload.sourceStamp,{0,0,0})
+            &&!controller.GetState().isRenderPending,"Rejected/throwing frame queue must revoke picks and ignore older completions.")&&isPassed;
+    }
+    queueFailure=0;isPassed=draw()&&isPassed;finish(30);
+    isPassed=SetExpect(controller.GetRenderedNode()==701,"A later certified frame should restore picking after queue failure.")&&isPassed;
+
+    const auto identity=CropAlgorithm::GetIdentityMatrix();
+    auto translated=identity;translated[3]=10;
+    const auto expectBothDomains=[&] {
+        const auto precision=controller.GetPreviewPrecision({{0,0,0},{10,0,0}});
+        return precision.coordinates.isAvailable&&precision.keptCount==2&&precision.precisionNotMetCount==0;
+    };
+    isPassed=controller.StartRender(renderer)&&isPassed;
+    mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+    controller.SetLocalToInput(translated);
+    mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+    isPassed=controller.StopRender()&&isPassed;finish(31);
+    isPassed=SetExpect(expectBothDomains(),"All shader events must contribute their coordinate bounds.")&&isPassed;
+    controller.SetLocalToInput(identity);isPassed=draw()&&isPassed;
+    controller.SetLocalToInput(translated);isPassed=draw()&&isPassed;finish(32);
+    isPassed=SetExpect(expectBothDomains(),"Draw completions sharing one presented frame must union their domains.")&&isPassed;
+
+    auto unknown=identity;unknown[3]=std::numeric_limits<double>::quiet_NaN();
+    const auto drawWithUnknownEvent=[&] {
+        controller.SetLocalToInput(identity);
+        if(!controller.StartRender(renderer))return false;
+        controller.SetLocalToInput(unknown);
+        mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+        controller.SetLocalToInput(identity);
+        mapper->InvokeEvent(vtkCommand::UpdateShaderEvent,program);
+        return controller.StopRender();
+    };
+    isPassed=drawWithUnknownEvent()&&isPassed;finish(33);
+    isPassed=SetExpect(controller.GetRenderedNode()==701&&!controller.GetCoordinatePrecision().isAvailable,
+        "Root draws with any unknown coordinate event must report unavailable precision.")&&isPassed;
+    auto nonzero=activePayload;nonzero.revision=72;nonzero.nodeId=702;
+    isPassed=controller.SetCropParams(nonzero)&&draw()&&controller.SetCropCommit(72)
+        &&controller.SetCropComplete(72)&&isPassed;finish(34);
+    auto staged=nonzero;staged.revision=73;staged.nodeId=703;
+    isPassed=controller.SetCropParams(staged)&&isPassed;
+    isPassed=drawWithUnknownEvent()&&isPassed;finish(35);
+    isPassed=SetExpect(controller.GetRenderedNode()==0&&!controller.GetCoordinatePrecision().isAvailable
+        &&!controller.GetPointVisible(nonzero.sourceStamp,{0,0,0}),
+        "Staging another crop must not hide an unknown active draw or allow later events to restore its proof.")&&isPassed;
+    controller.ClearCropStage(73);
+    isPassed=draw()&&isPassed;finish(36);
+    isPassed=SetExpect(controller.GetRenderedNode()==702&&controller.GetCoordinatePrecision().isAvailable,
+        "A later fully certified frame must recover after incomplete draw coordinates.")&&isPassed;
 
     mapper->RemoveObserver(captureTag);
     // controller 必须先在有效 context 上释放 texture；renderWindow 由声明逆序随后析构。
@@ -1309,6 +1381,11 @@ bool StartVolumeCoordinateCase()
             && keptPixel != std::array<unsigned char, 3>{ 0, 0, 0 }
             && rejectedPixel == std::array<unsigned char, 3>{ 0, 0, 0 },
         "Volume texture-to-dataset mapping should honor direction/extent/origin and exclude the prop model matrix.") && isPassed;
+    auto* blockMapper=vtkOpenGLGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper());
+    if(!blockMapper)return false;
+    blockMapper->SetPartitions(2,2,2);renderWindow->Render();
+    isPassed=SetExpect(GetCenterPixel(renderWindow)==std::array<unsigned char,3>{0,0,0},
+        "streamed volume blocks lost the input-model crop predicate")&&isPassed;
     const auto mapperInputCount = strategy->GetMapperInputCount();
     const auto resampleUpdateCount =
         strategy->GetResampleUpdateCount();
@@ -1499,6 +1576,26 @@ bool StartLargeTableCase()
     return isPassed;
 }
 
+bool GetIndependentCurveKept(const std::vector<CropOpItem>& operations,std::size_t count,
+    const CropPointFloat3Array& point)
+{
+    for(std::size_t index=0;index<count;++index) {
+        const auto& op=operations[index];
+        const long double x=static_cast<long double>(point[0])-op.centerInInputModel[0];
+        const long double y=static_cast<long double>(point[1])-op.centerInInputModel[1];
+        const long double z=static_cast<long double>(point[2])-op.centerInInputModel[2];
+        long double squared=x*x+y*y+z*z;bool cap=true;
+        if(op.geometryType==CropShape::Cylinder) {
+            const long double ax=op.axisInInputModel[0],ay=op.axisInInputModel[1],az=op.axisInInputModel[2];
+            const long double t=(x*ax+y*ay+z*az)/std::sqrt(ax*ax+ay*ay+az*az);
+            squared-=t*t;cap=std::abs(t)<=static_cast<long double>(op.height)/2;
+        }
+        const bool inside=cap&&squared<=static_cast<long double>(op.radius)*op.radius;
+        if(op.removalMode==CropRemovalMode::KeepInside?!inside:inside)return false;
+    }
+    return true;
+}
+
 bool GetPointGridMatched(
     const std::vector<CropOpItem>& operations,
     const std::size_t nodeCount,
@@ -1508,7 +1605,8 @@ bool GetPointGridMatched(
     vtkRenderer* renderer,
     vtkRenderWindow* renderWindow,
     const std::vector<CropPointFloat3Array>& modelPoints,
-    const CropMatrixDouble16Array& modelToWorld)
+    const CropMatrixDouble16Array& modelToWorld,
+    const CropVectorDouble3Array& sampleError = {})
 {
     const auto table = CropAlgorithm::BuildPredicateTable(
         operations,
@@ -1569,8 +1667,26 @@ bool GetPointGridMatched(
             pixels->GetScalarPointer(x, y, 0));
         const bool isGpuKept = pixel
             && (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0);
-        const bool isCpuKept = CropAlgorithm::GetPointKept(
-            *table.predicateTable, nodeCount, modelPoint);
+        const bool curved=std::all_of(operations.begin(),operations.begin()+nodeCount,[](const auto& op) {
+            return op.geometryType==CropShape::Sphere||op.geometryType==CropShape::Cylinder;
+        });
+        const bool isCpuKept = curved ? GetIndependentCurveKept(operations,nodeCount,modelPoint)
+            : CropAlgorithm::GetPointKept(*table.predicateTable, nodeCount, modelPoint);
+        if(curved) {
+            bool removed=false,band=false;
+            for(std::size_t i=0;i<nodeCount;++i) {
+                const auto bounds=table.predicateTable->geometry[i].GetFloatBounds(
+                    {modelPoint[0],modelPoint[1],modelPoint[2]},sampleError);
+                if(bounds.classification==CropPointClassification::PrecisionNotMet)return false;
+                removed=removed||bounds.classification==CropPointClassification::Removed;
+                band=band||bounds.classification==CropPointClassification::BoundaryBand;
+            }
+            if(band&&!removed) {
+                std::cout<<"GPU sample boundary-band revision="<<revision<<" point="<<modelPoint[0]<<','<<modelPoint[1]<<'\n';
+                continue;
+            }
+            if(isCpuKept==removed)return false;
+        }
         if (isGpuKept != isCpuKept) {
             std::cerr << "Point-grid mismatch revision=" << revision
                       << " point=(" << modelPoint[0] << ',' << modelPoint[1]
@@ -1583,6 +1699,57 @@ bool GetPointGridMatched(
         }
     }
     return true;
+}
+
+bool StartCurvedPointGridCase()
+{
+    std::vector<CropPointFloat3Array> points;
+    vtkNew<vtkAppendPolyData> append;
+    for(float y:{-1.6f,-0.8f,0.0f,0.8f,1.6f})for(float x:{-1.6f,-0.8f,0.0f,0.8f,1.6f}) {
+        points.push_back({x,y,0});vtkNew<vtkCubeSource> marker;
+        marker->SetBounds(x-0.025,x+0.025,y-0.025,y+0.025,-0.02,0.02);marker->Update();
+        append->AddInputData(marker->GetOutput());
+    }
+    append->Update();
+    auto strategy=std::make_shared<IsoSurfaceStrategy>();auto effect=std::make_shared<CropShaderEffect>();
+    strategy->SetInputData(append->GetOutput());
+    auto renderer=vtkSmartPointer<vtkRenderer>::New();renderer->SetBackground(0,0,0);
+    auto window=vtkSmartPointer<vtkRenderWindow>::New();window->SetOffScreenRendering(1);
+    window->SetSize(600,600);window->AddRenderer(renderer);
+    if(!strategy->SetRenderInputStamp({GetRenderRevision(1)})||!strategy->AttachRenderEffect(effect,RenderBindingUse::Current))return false;
+    strategy->AttachRenderer(renderer);
+    // The source cylinder remains circular under a reflected/sheared display pose.
+    const CropMatrixDouble16Array modelToWorld={-1,0.2,0,0, 0.1,1,0,0, 0,0,1,0, 0,0,0,1};
+    RenderParams visual;visual.modelMatrix=modelToWorld;strategy->SetVisualState(visual,UpdateFlags::Transform);
+    auto* actor=vtkActor::SafeDownCast(strategy->GetMainProp());if(!actor)return false;
+    actor->GetProperty()->SetColor(1,1,1);actor->GetProperty()->SetAmbient(1);actor->GetProperty()->LightingOff();
+    auto* camera=renderer->GetActiveCamera();camera->ParallelProjectionOn();camera->SetPosition(0,0,10);
+    camera->SetFocalPoint(0,0,0);camera->SetViewUp(0,1,0);camera->SetParallelScale(2.4);renderer->ResetCameraClippingRange();
+    CropOpItem sphere;sphere.operationIndex=1;sphere.geometryType=CropShape::Sphere;sphere.radius=1.2;
+    CropOpItem cylinder;cylinder.operationIndex=2;cylinder.geometryType=CropShape::Cylinder;
+    cylinder.radius=1.05;cylinder.height=1.5;cylinder.axisInInputModel={1,1,1};
+    std::uint64_t revision=1;bool passed=true;
+    for(auto op:{sphere,cylinder})for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        op.removalMode=mode;
+        passed=GetPointGridMatched({op},1,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    }
+    passed=GetPointGridMatched({sphere,cylinder},2,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    // Force a nontrivial VBO coordinate frame; the same input-model predicates
+    // and independent pixel oracle must still hold after mapper preprocessing.
+    auto* mapper=vtkOpenGLPolyDataMapper::SafeDownCast(actor->GetMapper());
+    auto* vertices=mapper?mapper->GetVBOs()->GetVBO("vertexMC"):nullptr;
+    if(!vertices)return false;
+    mapper->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::MANUAL_SHIFT_SCALE);
+    vertices->SetShift(std::vector<double>{100,-30,40});vertices->SetScale(std::vector<double>{2,3,4});
+    append->GetOutput()->GetPoints()->Modified();mapper->Modified();
+    for(auto op:{sphere,cylinder})for(auto mode:{CropRemovalMode::KeepInside,CropRemovalMode::RemoveInside}) {
+        op.removalMode=mode;
+        passed=GetPointGridMatched({op},1,revision++,strategy,effect,renderer,window,points,modelToWorld,{0.04,0.04,0.04})&&passed;
+    }
+    passed=SetExpect(vertices->GetCoordShiftAndScaleEnabled()&&vertices->GetShift()==std::vector<double>{100,-30,40}
+        &&vertices->GetScale()==std::vector<double>{2,3,4},"manual VBO precision test did not activate shift/scale")&&passed;
+    window->Finalize();
+    return SetExpect(passed,"Curved GPU pixels differ from the independent reference for sphere/cylinder side/caps/complements.");
 }
 
 bool StartPointGridTruthCase()
@@ -1715,5 +1882,6 @@ int CropShaderPreviewSuite::GetFailCount() const
     failureCount += StartPixelTransactionCase() ? 0 : 1;
     failureCount += StartLargeTableCase() ? 0 : 1;
     failureCount += StartPointGridTruthCase() ? 0 : 1;
+    failureCount += StartCurvedPointGridCase() ? 0 : 1;
     return failureCount;
 }

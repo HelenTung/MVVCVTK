@@ -1,4 +1,5 @@
 #include "Host/SurfaceDeterminationHostFeature.h"
+#include "../../common/FeatureResultScopes.h"
 #include "Data/DataPayloads.h"
 
 #include "Render/Contracts/OverlayService.h"
@@ -335,6 +336,7 @@ private:
     FeatureOperationState m_displayOperation;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<TrustedDataPort> m_data;
+    FeatureInternal::ResultScopes m_resultScopes;
     std::shared_ptr<FeatureHostControl> m_host;
     std::unique_ptr<SurfaceDeterminationService> m_service;
     SurfaceGenerationStore m_store;
@@ -1158,7 +1160,7 @@ bool SurfaceDeterminationHostFeature::Impl::ClearResult()
     idle.isOverlayVisible = GetState().isOverlayVisible;
     m_stateBeforeRequest = idle;
     SetState(std::move(idle));
-    return true;
+    return !m_data || m_resultScopes.Clear(*m_data);
 }
 
 bool SurfaceDeterminationHostFeature::Impl::ClearResultBinding()
@@ -1171,7 +1173,7 @@ bool SurfaceDeterminationHostFeature::Impl::ClearResultBinding()
     DataTransaction transaction;
     transaction.bindings.push_back({ binding->name,
         binding->revision, true, binding->target, {} });
-    return m_data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
+    return m_resultScopes.Commit(*m_data,std::move(transaction)).status == DataCommitStatus::Succeeded;
 }
 
 DataBinding SurfaceDeterminationHostFeature::Impl::GetResultBinding() const
@@ -1670,7 +1672,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     const bool isVisible = GetState().isOverlayVisible;
     auto nextViews = request.views;
     const auto data = m_data;
-    auto committed = data->SetDataCommit(std::move(transaction));
+    auto committed = m_resultScopes.Commit(*data,std::move(transaction));
     if (committed.status != DataCommitStatus::Succeeded
         && committed.status != DataCommitStatus::SucceededHistorical) {
         return {};

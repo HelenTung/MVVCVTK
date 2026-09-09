@@ -1,4 +1,5 @@
 #include "AppDataExportTaskService.h"
+#include "Data/Internal/DataResourceUse.h"
 
 #include <vtkImageData.h>
 #include "InteractionComputeService.h"
@@ -32,6 +33,8 @@ AppDataExportTaskService::BuildDataTask(
         || imageSnapshot->image->GetNumberOfPoints() == 0) {
         return std::nullopt;
     }
+    auto readLease = StartDataResourceUse(imageSnapshot->data, "queued-export");
+    if (!readLease) return std::nullopt;
     auto dataManager = m_dataManager;
     DataExportParams params;
     params.extension = std::move(extension);
@@ -41,14 +44,16 @@ AppDataExportTaskService::BuildDataTask(
     params.volumeTransferFunction =
         m_viewState->GetVolumeTransferFunction();
     return std::packaged_task<bool(TaskStopToken)>(
-        [dataManager, imageSnapshot,
+        [dataManager, imageSnapshot = imageSnapshot, readLease = std::move(*readLease),
          outputDir = std::move(outputDir),
          params = std::move(params)](
             TaskStopToken stopToken) mutable
         {
+            const auto activeInput = std::move(imageSnapshot);
+            const auto activeLease = std::move(readLease);
             try {
                 return dataManager->ExportData(
-                    imageSnapshot, outputDir, params, stopToken);
+                    activeInput, outputDir, params, stopToken);
             }
             catch (const std::exception& error) {
                 std::cerr << "[Export] Worker failed: " << error.what() << '\n';
@@ -70,6 +75,8 @@ AppDataExportTaskService::BuildSlicesTask(
         || InteractionComputeService::GetSliceAxis(currentMode) < 0) {
         return std::nullopt;
     }
+    const auto imageSnapshot = m_dataManager->GetPrimaryImage();
+    if (!imageSnapshot || !imageSnapshot->image) return std::nullopt;
     const auto windowLevel = m_viewState->GetWindowLevel();
     const auto modelToWorld = m_sharedState->GetModelMatrix();
     const auto cursorWorld = m_sharedState->GetCursorWorld();
@@ -77,15 +84,19 @@ AppDataExportTaskService::BuildSlicesTask(
         modelToWorld, currentMode, cursorWorld, rotationAngleDeg);
     if (!exportData) return std::nullopt;
 
+    auto readLease = StartDataResourceUse(imageSnapshot->data, "queued-export");
+    if (!readLease) return std::nullopt;
     auto dataManager = m_dataManager;
     return std::packaged_task<bool(TaskStopToken)>(
-        [dataManager, path = std::move(path),
+        [dataManager, imageSnapshot = imageSnapshot, readLease = std::move(*readLease), path = std::move(path),
          exportData = std::move(*exportData), windowLevel](
             TaskStopToken stopToken) mutable
         {
+            const auto activeInput = std::move(imageSnapshot);
+            const auto activeLease = std::move(readLease);
             try {
                 return dataManager->ExportSlices(
-                    path,
+                    activeInput, path,
                     exportData.orientation,
                     windowLevel,
                     exportData.matrix,

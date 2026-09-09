@@ -6,10 +6,12 @@
 #include "Interaction/CropBridge.h"
 #include "Render/CropShaderController.h"
 #include "Render/Strategies/IsoSurfaceStrategy.h"
+#include "Render/Support/RenderFrameLifetime.h"
 
 #include <vtkCubeSource.h>
 #include <vtkImageData.h>
 #include <vtkCommand.h>
+#include <vtkCallbackCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
@@ -135,11 +137,34 @@ public:
         const auto effect = m_effect.lock();
         return effect ? effect->GetState() : RenderEffectState{};
     }
+    bool GetPointVisible(const std::array<double,3>& point) const {
+        const auto effect=m_effect.lock();return !effect||effect->GetPointVisible(m_inputStamp,point);
+    }
     bool SetRenderNeeded() override
     {
         ++dirtyCount;
         return true;
     }
+
+    bool StartCandidate(RenderInputStamp stamp) {
+        const auto effect=m_effect.lock();if(!effect||m_candidate)return false;
+        auto cube=vtkSmartPointer<vtkCubeSource>::New();cube->Update();
+        auto candidate=std::make_shared<IsoSurfaceStrategy>();
+        candidate->SetInputData(cube->GetOutput());
+        if(!candidate->SetRenderInputStamp(stamp)
+            ||!candidate->AttachRenderEffect(effect,RenderBindingUse::Candidate))return false;
+        candidate->AttachRenderer(m_renderer);m_candidate=std::move(candidate);return true;
+    }
+    RenderEffectState GetCandidateState() const {return m_candidate?m_candidate->GetRenderEffectState():RenderEffectState{};}
+    RenderEffectState GetCurrentState() const {return m_strategy->GetRenderEffectState();}
+    bool SetCandidateView() {
+        if(!m_candidate||m_candidate->GetRenderEffectState().status!=RenderEffectStatus::Committed
+            ||!m_candidate->SetRenderEffectUse(RenderBindingUse::Current))return false;
+        m_strategy->DetachRenderer(m_renderer);m_retiring=std::move(m_strategy);m_strategy=std::move(m_candidate);
+        m_inputStamp=m_strategy->GetRenderInputStamp();return true;
+    }
+    void ClearCandidate() {if(m_candidate)m_candidate->DetachRenderer(m_renderer);m_candidate.reset();}
+    void CompleteCandidate() {m_retiring.reset();}
 
     int attachCount = 0;
     int detachCount = 0;
@@ -149,6 +174,7 @@ private:
     RenderInputStamp m_inputStamp;
     vtkSmartPointer<vtkRenderer> m_renderer;
     std::shared_ptr<IsoSurfaceStrategy> m_strategy;
+    std::shared_ptr<IsoSurfaceStrategy> m_candidate,m_retiring;
     std::weak_ptr<CropShaderEffect> m_effect;
     std::vector<InteractionSource> m_sources;
 };
@@ -213,909 +239,445 @@ bool SendShaderCommit(
 }
 }
 
+namespace {
+struct Fixture final {
+    TestDataPort data;
+    vtkSmartPointer<vtkImageData> image=vtkSmartPointer<vtkImageData>::New();
+    vtkSmartPointer<vtkRenderer> renderer=vtkSmartPointer<vtkRenderer>::New();
+    vtkSmartPointer<vtkRenderWindow> window=vtkSmartPointer<vtkRenderWindow>::New();
+    vtkSmartPointer<vtkRenderWindowInteractor> interactor=vtkSmartPointer<vtkRenderWindowInteractor>::New();
+    std::shared_ptr<FeatureViewLease> lease=std::make_shared<FeatureViewLease>(std::this_thread::get_id());
+    CropInputSnapshot input;
+    std::shared_ptr<CropServiceStub> service;
+    CropViewRequest view;
+    CropBridge bridge;
+    bool ready=false;
+    Fixture() {
+        image->SetDimensions(4,4,4);image->AllocateScalars(VTK_FLOAT,1);
+        std::fill_n(static_cast<float*>(image->GetScalarPointer()),64,1.0f);
+        input=BuildGraphInput(data,image,{0,3,0,3,0,3});
+        window->SetOffScreenRendering(1);window->SetSize(200,200);window->AddRenderer(renderer);
+        interactor->SetRenderWindow(window);
+        service=std::make_shared<CropServiceStub>(RenderInputStamp{input.data->self},renderer);
+        view={interactor,renderer,lease,service,{service}};
+        ready=bridge.StartView(view)&&bridge.SetCropInput(input);
+        renderer->ResetCamera(input.inputModelBounds.data());window->Render();
+    }
+    ~Fixture() {bridge.CancelPending();bridge.ClearBindings();service.reset();window->Finalize();}
+};
+bool Check(bool value,const char* message) {if(!value)std::cerr<<"Bridge: "<<message<<'\n';return value;}
+bool Flush(CropBridge& bridge,vtkRenderWindow* window) {
+    for(int frame=0;frame<40&&bridge.GetShaderTickNeeded();++frame) {window->Render();bridge.SendShaderCommit();}
+    return !bridge.GetShaderTickNeeded();
+}
+bool Deliver(CropBridge& bridge) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(!bridge.GetBuildTickNeeded()&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return bridge.SendBuildResult();
+}
+CropEditRequest Request(CropBridge& bridge,CropEditKind kind,CropNodeId node) {
+    const auto history=bridge.GetHistory();CropEditRequest request;
+    request.documentId=history.documentId;request.requestId=CropHistory::CreateNodeId();
+    request.expectedRevision=history.stateRevision;request.kind=kind;request.nodeId=node;
+    request.operation.boxToInputModelMatrix={3,0,0,1.5,0,3,0,1.5,0,0,3,1.5,0,0,0,1};
+    return request;
+}
+CropEditAdmission Append(CropBridge& bridge,CropNodeId parent) {return bridge.SendRequest(Request(bridge,CropEditKind::Append,parent));}
+
+bool GetWidgetAndSiblingEdits() {
+    Fixture f;if(!f.ready||!f.bridge.SwitchCropBox())return false;
+    if(!Check(SendWidgetInput(f.renderer,f.interactor)&&!f.bridge.GetShaderTickNeeded()
+        &&f.bridge.GetHistory().totalNodeCount==1,"None release created a node"))return false;
+    if(!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    if(!Check(SendWidgetInput(f.renderer,f.interactor,0)&&!f.bridge.GetShaderTickNeeded()
+        &&!f.service->GetIsInteracting(),"zero-distance box drag created history or retained interaction"))return false;
+    if(!SendWidgetInput(f.renderer,f.interactor))return false;
+    const auto a=f.bridge.GetHistory().requestedHead;
+    if(!Check(f.bridge.GetHistory().totalNodeCount==1&&f.bridge.GetShaderTickNeeded()&&f.service->GetIsInteracting(),
+        "Released published a node before shader preparation"))return false;
+    if(!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==a&&!f.service->GetIsInteracting(),"first release failed"))return false;
+    if(!f.bridge.SetCropMode(CropRemovalMode::None)||f.bridge.GetShaderTickNeeded())return false;
+    if(!f.bridge.SetCropMode(CropRemovalMode::RemoveInside)||!Flush(f.bridge,f.window))return false;
+    const auto b=f.bridge.GetHistory().appliedHead;const auto root=f.bridge.GetHistory().rootNodeId;
+    if(!Check(a!=b&&f.bridge.GetNode(a)->parentNodeId==root&&f.bridge.GetNode(b)->parentNodeId==root
+        &&f.bridge.GetNode(a)->operation->removalMode==CropRemovalMode::KeepInside
+        &&f.bridge.GetHistory().totalNodeCount==3,"mode change overwrote original operation"))return false;
+    if(!f.bridge.SetCropNode(root)||!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==root&&f.bridge.GetCropHistory().nodeCount==0,
+        "empty Root table was not applied"))return false;
+    if(!Check(!f.bridge.NextCrop(),"ambiguous redo silently chose a branch"))return false;
+    if(!f.bridge.SetCropNode(b)||!Flush(f.bridge,f.window))return false;
+    const auto shaderRevision=f.service->GetEffectState().activeRevision;
+    if(!Check(f.bridge.SetCropNode(b)&&!f.bridge.GetShaderTickNeeded()
+        &&f.service->GetEffectState().activeRevision==shaderRevision&&!f.bridge.SetCropNode(0),"node selection identity/no-op"))return false;
+    if(!f.bridge.PreviousCrop()||!Flush(f.bridge,f.window))return false;
+    const auto zeroRevision=f.service->GetEffectState().activeRevision;const auto attaches=f.service->attachCount;
+    if(!Check(f.bridge.ExitCrop()&&f.bridge.StartView(f.view)&&f.service->attachCount==attaches
+        &&f.service->GetEffectState().activeRevision==zeroRevision,"Root reentry lost the zero-operation binding"))return false;
+    return true;
+}
+
+bool GetCurvedWidgetHistory() {
+    for(const auto shape:{CropShape::Sphere,CropShape::Cylinder}) {
+        Fixture f;if(!f.ready)return false;
+        const bool switched=shape==CropShape::Sphere?f.bridge.SwitchCropSphere():f.bridge.SwitchCropCylinder();
+        if(!switched||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+        f.window->Render();
+        f.renderer->SetWorldPoint(1.5,shape==CropShape::Sphere?1.5:2.25,1.5,1);f.renderer->WorldToDisplay();
+        const auto* point=f.renderer->GetDisplayPoint();const int x=static_cast<int>(point[0]),y=static_cast<int>(point[1]);
+        f.interactor->SetEventPosition(x,y);f.interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
+        f.interactor->SetEventPosition(x+10,y);f.interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
+        f.interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
+        if(!Flush(f.bridge,f.window))return false;
+        const auto history=f.bridge.GetHistory();const auto node=f.bridge.GetNode(history.appliedHead);
+        if(!Check(node&&node->operation&&node->operation->geometryType==shape&&history.totalNodeCount==2
+            &&!f.service->GetIsInteracting(),"curve mouse release did not enter the common immutable history pipeline"))return false;
+        if(!f.bridge.SetCropMode(CropRemovalMode::RemoveInside)||!Flush(f.bridge,f.window))return false;
+        const auto sibling=f.bridge.GetNode(f.bridge.GetHistory().appliedHead);
+        if(!Check(sibling&&sibling->parentNodeId==history.rootNodeId&&sibling->nodeId!=node->nodeId
+            &&node->operation->removalMode==CropRemovalMode::KeepInside&&f.bridge.ExitCrop(),"curve mode replacement overwrote its original branch"))return false;
+    }
+    return true;
+}
+
+bool GetBranchesAndFrozenBuilds() {
+    Fixture f;if(!f.ready)return false;const auto root=f.bridge.GetHistory().rootNodeId;
+    const auto a=Append(f.bridge,root),b=Append(f.bridge,a.nodeId),c=Append(f.bridge,b.nodeId),d=Append(f.bridge,a.nodeId);
+    if(!Check(a.isAccepted&&b.isAccepted&&c.isAccepted&&d.isAccepted&&Flush(f.bridge,f.window),"queued branches failed"))return false;
+    if(!Check(f.bridge.GetHistory().totalNodeCount==5&&f.bridge.GetNode(c.nodeId)->parentNodeId==b.nodeId
+        &&f.bridge.GetNode(d.nodeId)->parentNodeId==a.nodeId,"GPU queue truncated a branch"))return false;
+    bool captured=false;
+    if(!f.bridge.BuildCropResult(c.nodeId,[&](CropMaterializationCandidate result) {
+        captured=result.isSucceeded&&result.sourceRevision==f.input.data->self&&result.operations.size()==3
+            &&result.operations[0].operationIndex==a.nodeId&&result.operations[1].operationIndex==b.nodeId
+            &&result.operations[2].operationIndex==c.nodeId;
+    }))return false;
+    const auto busy=Append(f.bridge,d.nodeId);
+    if(!Check(!busy.isAccepted&&busy.failureReason==CropFailure::Busy&&Deliver(f.bridge)&&captured
+        &&f.bridge.GetHistory().appliedHead==d.nodeId,"explicit build freezes branch C while editing branch D is locked"))return false;
+    const auto e=Append(f.bridge,d.nodeId);
+    if(!Check(e.isAccepted&&Flush(f.bridge,f.window)&&f.bridge.GetHistory().appliedHead==e.nodeId,
+        "branch editing resumes after build completion"))return false;
+    bool noOperations=false;
+    if(!Check(!f.bridge.BuildCropResult(root,[&](CropMaterializationCandidate result) {noOperations=result.failureReason==CropFailure::NoCropOperations;})
+        &&noOperations,"Root build did not distinguish NoCropOperations"))return false;
+    const auto count=f.bridge.GetHistory().totalNodeCount;
+    auto other=BuildGraphInput(f.data,f.image,f.input.inputModelBounds);
+    if(!Check(!f.bridge.SetCropInput(other)&&f.bridge.GetSource().data->self==f.input.data->self
+        &&f.bridge.GetHistory().totalNodeCount==count,"document Root changed to a later binding"))return false;
+    bool cancelled=false;
+    if(!f.bridge.BuildCropResult(c.nodeId,[&](CropMaterializationCandidate result) {cancelled=result.isCancelled&&!result.isSucceeded;})
+        ||!f.bridge.CancelPending()||!Deliver(f.bridge))return false;
+    return Check(cancelled&&f.bridge.GetHistory().totalNodeCount==count,"build cancellation destroyed history");
+}
+
+bool GetExitAndRebind() {
+    Fixture f;if(!f.ready||!f.bridge.SwitchCropBox()||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    if(!SendWidgetInput(f.renderer,f.interactor))return false;
+    const auto requested=f.bridge.GetHistory().requestedHead;
+    if(!Check(f.bridge.ExitCrop()&&f.bridge.GetShaderTickNeeded()&&Flush(f.bridge,f.window)
+        &&f.bridge.GetHistory().appliedHead==requested&&!f.bridge.GetCropActive(),"Exit discarded an accepted release"))return false;
+    const auto oldRevision=f.service->GetEffectState().activeRevision;const auto oldDetach=f.service->detachCount;
+    if(!Check(f.bridge.StartView(f.view)&&!f.bridge.GetShaderTickNeeded()&&f.service->GetEffectState().activeRevision==oldRevision,
+        "same-view reentry rebuilt committed history"))return false;
+    auto occupied=std::make_shared<CropServiceStub>(RenderInputStamp{f.input.data->self},f.renderer);
+    auto blockedView=f.view;blockedView.referenceService=occupied;blockedView.targetServices={occupied};
+    CropBridge blocker;
+    if(!blocker.StartView(blockedView)||!Check(!f.bridge.StartView(blockedView)&&f.service->detachCount==oldDetach
+        &&f.bridge.GetHistory().appliedHead==requested,"failed target attachment changed current history"))return false;
+    blocker.ClearBindings();
+    if(!Check(f.bridge.StartView(blockedView)&&f.service->detachCount==oldDetach&&f.bridge.GetShaderTickNeeded(),
+        "rebind retired old target before readiness"))return false;
+    if(!Check(f.bridge.CancelPending()&&occupied->detachCount==2&&f.service->detachCount==oldDetach
+        &&f.service->GetEffectState().activeRevision==oldRevision,"explicit rebind cancellation did not restore old target"))return false;
+    if(!f.bridge.StartView(blockedView)||!Flush(f.bridge,f.window))return false;
+    if(!Check(f.service->detachCount==oldDetach+1&&occupied->GetEffectState().status==RenderEffectStatus::Committed,
+        "rebind did not atomically hand over targets"))return false;
+    const auto history=f.bridge.GetHistory();
+    if(!f.bridge.ClearBindings())return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==history.appliedHead&&f.bridge.GetHistory().totalNodeCount==history.totalNodeCount,
+        "view detach destroyed the document"))return false;
+    return Check(f.bridge.StartView(blockedView)&&Flush(f.bridge,f.window),"detached document did not replay history");
+}
+
+bool GetQueuedModesAndLag() {
+    Fixture f;if(!f.ready||!f.bridge.SwitchCropBox()||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    auto foreign=f.input.data->self;++foreign.generation;f.service->SetRenderInputStamp({foreign});
+    if(!SendWidgetInput(f.renderer,f.interactor))return false;
+    const auto original=f.bridge.GetHistory().requestedHead;
+    if(!Check(f.bridge.GetHistory().totalNodeCount==1&&f.bridge.GetShaderTickNeeded()&&f.service->GetIsInteracting(),
+        "lagging render input dropped a release"))return false;
+    if(!f.bridge.SetCropMode(CropRemovalMode::RemoveInside))return false;
+    const auto removed=f.bridge.GetHistory().requestedHead;
+    if(!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    const auto kept=f.bridge.GetHistory().requestedHead;
+    if(!f.service->SetRenderInputStamp({f.input.data->self})||!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().totalNodeCount==4&&f.bridge.GetHistory().appliedHead==kept
+        &&f.bridge.GetNode(removed)->operation->removalMode==CropRemovalMode::RemoveInside
+        &&f.bridge.GetNode(original)->operation->removalMode==CropRemovalMode::KeepInside&&!f.service->GetIsInteracting(),
+        "queued modes were collapsed or mutated"))return false;
+    if(!SendWidgetInput(f.renderer,f.interactor)||!Flush(f.bridge,f.window))return false;
+    return Check(f.bridge.GetNode(f.bridge.GetHistory().appliedHead)->parentNodeId==kept,
+        "next release used a stale mode replacement parent");
+}
+
+bool GetShapeSequenceAndRoot() {
+    Fixture f;if(!f.ready||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    const std::array<bool,8> planes={true,true,false,false,true,false,true,false};
+    std::vector<CropNodeId> nodes;
+    for(std::size_t index=0;index<planes.size();++index) {
+        if(!(planes[index]?f.bridge.SwitchCropPlane():f.bridge.SwitchCropBox()))return false;
+        f.window->Render();
+        if(!(planes[index]?SendPlaneInput(f.renderer,f.interactor,8+static_cast<int>(index)):
+            SendWidgetInput(f.renderer,f.interactor,8+static_cast<int>(index)))||!Flush(f.bridge,f.window))return false;
+        nodes.push_back(f.bridge.GetHistory().appliedHead);
+        if(f.bridge.GetHistory().totalNodeCount!=index+2) {
+            std::cerr<<"Mixed sequence index="<<index<<" nodes="<<f.bridge.GetHistory().totalNodeCount
+                <<" requested="<<f.bridge.GetHistory().requestedHead<<" applied="<<f.bridge.GetHistory().appliedHead<<'\n';
+            return false;
+        }
+        if(!Check(f.bridge.GetNode(nodes.back())->operation->geometryType==(planes[index]?CropShape::Plane:CropShape::Box),
+            "mixed widget sequence lost shape ordering"))return false;
+    }
+    for(std::size_t depth=8;depth>0;--depth)if(!f.bridge.PreviousCrop()||!Flush(f.bridge,f.window)
+        ||f.bridge.GetCropHistory().nodeCount!=depth-1)return Check(false,"undo to Root skipped a node");
+    const auto root=f.bridge.GetHistory().rootNodeId;const auto zeroRevision=f.service->GetEffectState().activeRevision;
+    if(!f.bridge.ExitCrop()||!f.bridge.StartView(f.view)||!f.bridge.SwitchCropPlane()
+        ||!f.bridge.SetCropMode(CropRemovalMode::KeepInside))return false;
+    f.window->Render();
+    if(!SendPlaneInput(f.renderer,f.interactor,18)||!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().totalNodeCount==10&&f.bridge.GetNode(nodes.back()).has_value()
+        &&f.bridge.GetNode(f.bridge.GetHistory().appliedHead)->parentNodeId==root
+        &&f.service->GetEffectState().activeRevision>zeroRevision,"Root append deleted eight-node redo branch"))return false;
+    // 无有效移动、尚未 Released 的拖拽在 Exit 时不能进入命令队列。
+    if(!f.bridge.SwitchCropBox())return false;f.window->Render();
+    const auto count=f.bridge.GetHistory().totalNodeCount;
+    if(!SendWidgetInput(f.renderer,f.interactor,8,false)||!f.bridge.ExitCrop())return false;
+    f.interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
+    return Check(!f.bridge.GetShaderTickNeeded()&&f.bridge.GetHistory().totalNodeCount==count&&!f.service->GetIsInteracting(),
+        "Exit during an unfinished drag created history");
+}
+
+bool GetPruneAndMultiviewFailure() {
+    Fixture f;if(!f.ready)return false;
+    auto second=std::make_shared<CropServiceStub>(RenderInputStamp{f.input.data->self},f.renderer);
+    auto multi=f.view;multi.targetServices.push_back(second);
+    if(!f.bridge.StartView(multi))return false;
+    const auto root=f.bridge.GetHistory().rootNodeId;
+    const auto a=Append(f.bridge,root);if(!Flush(f.bridge,f.window))return false;
+    const auto aRevision=f.service->GetEffectState().activeRevision;
+    const auto b=Append(f.bridge,a.nodeId);
+    auto prune=Request(f.bridge,CropEditKind::Prune,0);prune.prune.nodeIds={a.nodeId};
+    prune.prune.fallback=CropPruneFallback::NearestSurvivingAncestor;
+    if(!Check(!f.bridge.SendRequest(prune).isAccepted,"prune bypassed an accepted preview"))return false;
+    // 一个目标在 prepare 期间失去输入；其它目标必须保持此前已应用版本。
+    auto foreign=f.input.data->self;++foreign.generation;second->SetRenderInputStamp({foreign});
+    f.window->Render();f.bridge.SendShaderCommit();
+    if(!Check(f.bridge.GetOutcome(b.requestId)->status==CropEditStatus::Failed&&!f.bridge.GetNode(b.nodeId)
+        &&f.bridge.GetHistory().appliedHead==a.nodeId&&f.service->GetEffectState().activeRevision==aRevision,
+        "failed required View partially committed history"))return false;
+    second->SetRenderInputStamp({f.input.data->self});
+    // 换一组干净 binding 重放，保留失败前树；再检查 Root 零 uniform 同步提交。
+    if(!f.bridge.ClearBindings()||!f.bridge.StartView(multi)||!Flush(f.bridge,f.window))return false;
+    CropResultRecord result;result.resultId=CropHistory::CreateNodeId();result.nodeId=a.nodeId;
+    result.status=CropResultStatus::Building;result.sourceRevision=f.input.data->self;
+    f.bridge.SetResults({result});
+    prune=Request(f.bridge,CropEditKind::Prune,0);prune.prune.nodeIds={a.nodeId};prune.prune.fallback=CropPruneFallback::NearestSurvivingAncestor;
+    if(!Check(f.bridge.GetPruneImpact(prune.prune).failureReason==CropFailure::Busy
+        &&!f.bridge.SendRequest(prune).isAccepted,"Building path allowed prune"))return false;
+    f.bridge.SetResults({});
+    prune.expectedRevision=f.bridge.GetHistory().stateRevision;prune.requestId=CropHistory::CreateNodeId();
+    const auto accepted=f.bridge.SendRequest(prune);if(!accepted.isAccepted)return false;
+    if(!Check(f.bridge.GetNode(a.nodeId).has_value(),"prune deleted before fallback preview"))return false;
+    f.window->Render();const auto dirty1=f.service->dirtyCount,dirty2=second->dirtyCount;
+    if(!f.bridge.SendShaderCommit())return false;
+    return Check(!f.bridge.GetNode(a.nodeId)&&f.bridge.GetHistory().appliedHead==root
+        &&f.service->dirtyCount==dirty1+1&&second->dirtyCount==dirty2+1
+        &&f.bridge.GetOutcome(accepted.requestId)->prune.deletedCount==1,
+        "all-View Root fallback/prune commit failed");
+}
+
+bool GetActualRenderedHead() {
+    Fixture f;if(!f.ready)return false;
+    const auto wait=[&](const std::function<bool()>& done) {
+        for(int poll=0;poll<1000;++poll) {
+            RenderFrameLifetime::PollAll();if(done())return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return done();
+    };
+    const auto root=f.bridge.GetHistory().rootNodeId;const auto a=Append(f.bridge,root);
+    if(!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==a.nodeId&&f.bridge.GetHistory().renderedHead!=a.nodeId,
+        "shader commit was mistaken for a rendered frame"))return false;
+    const auto pending=f.bridge.GetViewState(f.service.get());
+    if(!Check(pending&&pending->appliedHead==a.nodeId&&pending->requestedHead==a.nodeId
+        &&pending->renderedHead!=a.nodeId&&pending->isRenderPending&&!f.bridge.GetViewState(nullptr),
+        "per-view state reported a committed node as already presented"))return false;
+    f.window->Render();
+    if(!Check(wait([&]{return f.bridge.GetHistory().renderedHead==a.nodeId;}),"presented GPU frame did not map back to its node"))return false;
+    const auto presented=f.bridge.GetViewState(f.service.get());
+    if(!Check(presented&&presented->renderedHead==a.nodeId&&!presented->isRenderPending,
+        "per-view state did not observe its completed frame"))return false;
+    auto editB=Request(f.bridge,CropEditKind::Append,a.nodeId);editB.operation.geometryType=CropShape::Plane;
+    editB.operation.planeNormalInInputModel={1,0,0};editB.operation.planeCenterInInputModel={0.3,0,0};
+    const auto b=f.bridge.SendRequest(editB);if(!b||!Flush(f.bridge,f.window))return false;
+    if(!Check(f.bridge.GetHistory().appliedHead==b.nodeId&&f.bridge.GetHistory().renderedHead==a.nodeId,
+        "applied head did not remain separate from the last rendered head"))return false;
+    if(!Check(f.service->GetPointVisible({0.25,0,0}),"unpresented edit changed business picking before its frame"))return false;
+    const std::vector<CropVectorDouble3Array> samples{{0.2,0,0},{0.3,0,0},{0.4,0,0}};
+    const auto oldPrecision=f.bridge.GetPreviewPrecision(f.service.get(),samples);
+    if(!Check(oldPrecision.failureReason==CropFailure::None&&oldPrecision.renderedHead==a.nodeId
+        &&oldPrecision.keptCount==3,"precision query adopted an unpresented node"))return false;
+    f.window->SwapBuffersOff();f.window->Render();
+    if(!wait([&]{return !f.service->GetEffectState().isRenderPending;}))return false;
+    if(!Check(f.bridge.GetHistory().renderedHead==a.nodeId,"back-buffer validation was reported as presented"))return false;
+    if(!Check(f.service->GetPointVisible({0.25,0,0}),"candidate/back-buffer frame changed picking"))return false;
+    f.window->SwapBuffersOn();f.window->Render();
+    if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
+    if(!Check(!f.service->GetPointVisible({0.25,0,0})&&f.service->GetPointVisible({0.4,0,0}),
+        "presented crop did not reject its hidden side for business picking"))return false;
+    const auto precision=f.bridge.GetPreviewPrecision(f.service.get(),samples);
+    if(!Check(precision.failureReason==CropFailure::None&&precision.renderedHead==b.nodeId
+        &&precision.coordinates.isAvailable&&precision.keptCount==1&&precision.removedCount==1
+        &&precision.boundaryBandCount==1&&precision.precisionNotMetCount==0
+        &&f.bridge.GetPreviewPrecision(f.service.get(),std::vector<CropVectorDouble3Array>(257)).failureReason==CropFailure::ResourceLimit,
+        "presented precision query failed kept/removed/band or sample budget"))return false;
+    auto tiny=Request(f.bridge,CropEditKind::Append,b.nodeId);tiny.operation.geometryType=CropShape::Sphere;
+    tiny.operation.centerInInputModel={0.4,0,0};tiny.operation.radius=1e-10;
+    const auto rejected=f.bridge.SendRequest(tiny);if(!rejected)return false;
+    f.window->Render();(void)f.bridge.SendShaderCommit();
+    const auto outcome=f.bridge.GetOutcome(rejected.requestId);
+    if(!Check(outcome&&outcome->failureReason==CropFailure::PrecisionNotMet
+        &&!f.bridge.GetNode(rejected.nodeId)&&f.bridge.GetHistory().appliedHead==b.nodeId,
+        "unresolvable preview advanced history or lost PrecisionNotMet"))return false;
+    auto failFrame=vtkSmartPointer<vtkCallbackCommand>::New();
+    failFrame->SetCallback([](vtkObject* source,unsigned long,void*,void*){source->InvokeEvent(vtkCommand::ErrorEvent);});
+    const auto failedTag=f.window->AddObserver(vtkCommand::EndEvent,failFrame,1.0);
+    f.window->Render();f.window->RemoveObserver(failedTag);
+    if(!Check(wait([&]{return f.bridge.GetHistory().renderedHead==0;})&&!f.service->GetPointVisible({0.4,0,0}),
+        "failed presented frame retained a stale known predicate for picking"))return false;
+    f.window->Render();if(!wait([&]{return f.bridge.GetHistory().renderedHead==b.nodeId;}))return false;
+    auto different=f.input.data->self;++different.generation;
+    if(!f.service->SetRenderInputStamp({different}))return false;
+    auto prepared=f.bridge.BuildSourceCommit(root,false);
+    if(!prepared||!f.service->StartCandidate({f.input.data->self}))return false;
+    f.window->SwapBuffersOff();f.window->Render();f.window->SwapBuffersOn();
+    RenderFrameLifetime::PollAll();
+    if(!f.service->SetCandidateView()||!f.bridge.GetSourceCommitReady(*prepared))return false;
+    f.bridge.SetSourceCommit(std::move(*prepared));f.service->CompleteCandidate();
+    if(!Check(f.bridge.GetHistory().appliedHead==root&&f.bridge.GetHistory().renderedHead!=root,
+        "candidate replay incorrectly became a rendered Root on adoption"))return false;
+    if(!Check(!f.service->GetPointVisible({0.25,0,0}),"Root adoption opened picking before a Root frame was presented"))return false;
+    f.window->Render();
+    return Check(wait([&]{return f.bridge.GetHistory().renderedHead==root;})&&f.service->GetPointVisible({0.25,0,0}),"zero-node Root uniform did not produce a completed Root frame");
+}
+
+bool GetArchiveSourceValidation() {
+    Fixture f;if(!f.ready)return false;
+    const auto originalRoot=f.bridge.GetHistory().rootNodeId;
+    const auto a=Append(f.bridge,originalRoot);if(!a||!Flush(f.bridge,f.window))return false;
+    const auto archive=f.bridge.GetArchive();
+    if(!archive.imageGeometry||archive.sourceType!=f.input.data->type||archive.coordinateFrame.empty()||archive.maskSourceRevision)return false;
+    const auto rejected=[&](CropDocumentArchive bad,CropFailure expected) {
+        CropBridge candidate;if(!candidate.SetCropInput(f.input))return false;const auto before=candidate.GetHistory();
+        std::vector<CropNodeMapping> mappings;
+        return candidate.SetArchive(bad,mappings)==expected&&candidate.GetHistory().documentId==before.documentId
+            &&candidate.GetHistory().rootNodeId==before.rootNodeId&&candidate.GetHistory().totalNodeCount==1&&mappings.empty();
+    };
+    auto bad=archive;bad.imageGeometry->spacing[0]*=2;
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed Root geometry was accepted"))return false;
+    bad=archive;bad.maskSourceRevision=archive.sourceRevision;
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed Root mask identity was accepted"))return false;
+    bad=archive;bad.coordinateFrame="LPS";
+    if(!Check(rejected(bad,CropFailure::SourceMismatch),"archive with changed coordinate frame was accepted"))return false;
+    bad=archive;bad.nodes.back().operation->geometryType=static_cast<CropShape>(99);
+    if(!Check(rejected(bad,CropFailure::BadInput),"archive with unknown geometry was accepted"))return false;
+    CropBridge restored;if(!restored.SetCropInput(f.input))return false;std::vector<CropNodeMapping> mappings;
+    if(restored.SetArchive(archive,mappings)!=CropFailure::None)return false;
+    const auto history=restored.GetHistory();
+    const auto mapped=std::find_if(mappings.begin(),mappings.end(),[&](const auto& item){return item.archivedNodeId==a.nodeId;});
+    if(!Check(history.documentId!=f.bridge.GetHistory().documentId&&history.rootNodeId!=originalRoot
+        &&mappings.size()==archive.nodes.size()&&mapped!=mappings.end()&&mapped->nodeId==history.appliedHead
+        &&restored.GetNode(mapped->nodeId)->parentNodeId==history.rootNodeId&&history.results.empty(),
+        "archive did not allocate fresh runtime identities and preserve its parent relation"))return false;
+    auto same=archive;
+    if(!CropHistory::GetArchivesSame(archive,same))return false;
+    same.nodes.back().operation->height+=1;
+    if(!Check(!CropHistory::GetArchivesSame(archive,same),"archive request equality ignored a serialized geometry field"))return false;
+    auto mask=vtkSmartPointer<vtkImageData>::New();mask->CopyStructure(f.input.image->image);mask->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    const auto count=static_cast<std::size_t>(mask->GetNumberOfPoints());auto* bytes=static_cast<unsigned char*>(mask->GetScalarPointer());
+    std::fill(bytes,bytes+count,255);bytes[0]=0;
+    TestDataPort maskedData;const auto maskedView=maskedData.SetPrimaryImage(f.input.image->image,mask);
+    if(!maskedView)return false;
+    auto maskedInput=f.input;maskedInput.graph=maskedView->graph;maskedInput.binding=maskedView->binding;
+    maskedInput.data=maskedView->data;maskedInput.image=maskedView;
+    CropBridge maskedSource,maskedRestored;
+    if(!maskedSource.SetCropInput(maskedInput)||!maskedRestored.SetCropInput(maskedInput))return false;
+    const auto maskedArchive=maskedSource.GetArchive();
+    std::vector<CropNodeMapping> maskedMappings;
+    return Check(maskedArchive.maskSourceRevision==maskedArchive.sourceRevision
+        &&maskedRestored.SetArchive(maskedArchive,maskedMappings)==CropFailure::None
+        &&maskedRestored.GetArchive().maskSourceRevision==maskedArchive.maskSourceRevision
+        &&maskedRestored.GetSource().image->validityMask->GetScalarComponentAsDouble(0,0,0,0)==0,
+        "masked Root archive failed to preserve its exact mask identity and domain");
+}
+
+bool GetSourcePreviewCommit() {
+    Fixture f;if(!f.ready)return false;
+    const auto root=f.bridge.GetHistory().rootNodeId;
+    const auto a=Append(f.bridge,root);if(!Flush(f.bridge,f.window))return false;
+    auto other=f.input.data->self;++other.generation;
+    if(!f.service->SetRenderInputStamp({other}))return false;
+    const auto oldState=f.service->GetCurrentState();const auto oldHead=f.bridge.GetHistory().appliedHead;
+    auto abandoned=f.bridge.BuildSourceCommit(root,false);
+    if(!Check(abandoned&&f.bridge.GetSourceCommitReady(*abandoned)&&f.service->StartCandidate({f.input.data->self}),
+        "Root candidate preparation"))return false;
+    f.window->Render();
+    if(!Check(f.service->GetCandidateState().status==RenderEffectStatus::Committed
+        &&f.service->GetCurrentState().activeRevision==oldState.activeRevision
+        &&f.bridge.GetHistory().appliedHead==oldHead,"candidate preview changed current source/head"))return false;
+    f.service->ClearCandidate();abandoned.reset();
+    if(!Check(f.bridge.GetHistory().appliedHead==a.nodeId&&f.service->GetCurrentState().activeRevision==oldState.activeRevision,
+        "abandoned source candidate changed applied state"))return false;
+    auto prepared=f.bridge.BuildSourceCommit(root,false);
+    if(!prepared||!f.service->StartCandidate({f.input.data->self}))return false;
+    f.window->Render();
+    if(!f.service->SetCandidateView()||!f.bridge.GetSourceCommitReady(*prepared))return false;
+    // Host 的数据提交线性化点之后，即使业务 lease 刚停也必须完成无失败接管。
+    if(!f.lease->StopLease())return false;
+    f.bridge.SetSourceCommit(std::move(*prepared));f.service->CompleteCandidate();
+    return Check(f.bridge.GetHistory().appliedHead==root&&f.bridge.GetHistory().totalNodeCount==2
+        &&f.service->GetEffectState().activeRevision==f.service->GetCurrentState().activeRevision,
+        "source commit did not adopt prepared Root without discarding history");
+}
+
+bool GetStoppedLeaseCleanup() {
+    Fixture f;if(!f.ready)return false;
+    const auto a=Append(f.bridge,f.bridge.GetHistory().rootNodeId);if(!Flush(f.bridge,f.window))return false;
+    const auto b=Append(f.bridge,a.nodeId);
+    if(!f.lease->StopLease()||!f.bridge.ClearBindings())return false;
+    if(!Check(f.bridge.GetOutcome(b.requestId)->status==CropEditStatus::Cancelled&&f.bridge.GetHistory().appliedHead==a.nodeId,
+        "stopped lease could not finalize accepted request cancellation"))return false;
+    return Check(f.bridge.ClearDocument()&&f.bridge.GetHistory().documentId==0,"empty closed document retained Root");
+}
+}
+
 int CropBridgeSuite::GetFailCount() const
 {
-    int failureCount = 0;
-    const auto expect = [&failureCount](const bool isExpected, const char* message) {
-        if (!isExpected) {
-            std::cerr << message << '\n';
-            ++failureCount;
-        }
-    };
-
-    auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetDimensions(4, 4, 4);
-    image->AllocateScalars(VTK_FLOAT, 1);
-
-    auto renderer = vtkSmartPointer<vtkRenderer>::New();
-    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
-    auto interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
-    renderWindow->SetOffScreenRendering(1);
-    renderWindow->SetSize(200, 200);
-    renderWindow->AddRenderer(renderer);
-    interactor->SetRenderWindow(renderWindow);
-
-    TestDataPort data;
-    auto input = BuildGraphInput(
-        data, image, { 0.0, 3.0, 0.0, 3.0, 0.0, 3.0 });
-    const RenderInputStamp inputStamp = { input.data->self };
-    auto service = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    CropViewRequest view;
-    const auto viewLease = std::make_shared<FeatureViewLease>(
-        std::this_thread::get_id());
-    view.renderer = renderer;
-    view.interactor = interactor;
-    view.lease = viewLease;
-    view.referenceService = service;
-    view.targetServices = { service };
-
-    CropBridge bridge;
-    expect(bridge.StartView(view), "Bridge should accept a complete view request.");
-
-    expect(bridge.SetCropInput(input), "Bridge should accept an immutable input snapshot.");
-    expect(bridge.SwitchCropBox(), "Bridge should enter box editing.");
-    const int switchDirtyCount = service->dirtyCount;
-    expect(bridge.SwitchCropPlane()
-            && service->dirtyCount
-                == switchDirtyCount + 1,
-        "Switching from box to plane should request a reference-view frame.");
-    expect(bridge.SwitchCropBox()
-            && service->dirtyCount
-                == switchDirtyCount + 2,
-        "Switching from plane to box should request a reference-view frame.");
-    renderer->ResetCamera(input.inputModelBounds.data());
-    renderWindow->Render();
-    expect(bridge.GetCropHistory().editMode == CropRemovalMode::None,
-        "A new crop bridge should start in the non-cropping edit mode.");
-    expect(SendWidgetInput(renderer, interactor), "Bridge test should send one box release interaction.");
-    expect(!bridge.GetShaderTickNeeded()
-            && bridge.GetCropHistory().operationCount == 0,
-        "Releasing a widget in the non-cropping mode must not create history.");
-    expect(!service->GetIsInteracting(),
-        "A rejected widget release must not retain Interaction.");
-    expect(bridge.SetCropMode(CropRemovalMode::KeepInside),
-        "KeepInside should arm the current widget for cropping.");
-    expect(SendWidgetInput(renderer, interactor, 0),
-        "Bridge test should send a zero-distance box interaction.");
-    expect(!bridge.GetShaderTickNeeded()
-            && bridge.GetCropHistory().nodeCount == 0
-            && bridge.GetCropHistory().operationCount == 0
-            && service->GetEffectState().status
-                == RenderEffectStatus::Idle
-            && service->GetEffectState().stagedRevision == 0
-            && service->GetEffectState().activeRevision == 0,
-        "A zero-distance interaction must not create a crop history operation.");
-    expect(!service->GetIsInteracting(),
-        "A zero-distance release must restore static quality immediately.");
-    expect(SendWidgetInput(renderer, interactor),
-        "Bridge test should release the armed box once.");
-    expect(bridge.GetShaderTickNeeded()
-            && service->GetIsInteracting(),
-        "Released widget geometry should keep Interaction while its revision is pending.");
-    const auto firstStage = service->GetEffectState();
-    expect((firstStage.status == RenderEffectStatus::Staged
-                || firstStage.status == RenderEffectStatus::Ready)
-            && firstStage.stagedRevision != 0,
-        "Released geometry should stage one revision on the target.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "A ready single-target revision should commit.");
-    const auto firstCommit = service->GetEffectState();
-    expect(firstCommit.status == RenderEffectStatus::Committed
-            && firstCommit.activeRevision == firstStage.stagedRevision,
-        "The original target should expose the committed revision.");
-    expect(!service->GetIsInteracting(),
-        "A completed crop commit should restore static Feature quality.");
-    const auto firstHistory = bridge.GetCropHistory();
-    expect(firstHistory.nodeCount == 1
-            && firstHistory.operationCount == 1
-            && firstHistory.hasEditableOp,
-        "The first armed release should expose one current and one total operation.");
-    auto nextImage = vtkSmartPointer<vtkImageData>::New();
-    nextImage->ShallowCopy(image);
-    auto nextInput = BuildGraphInput(
-        data, nextImage, input.inputModelBounds);
-    auto blockedService = std::make_shared<CropServiceStub>(
-        RenderInputStamp{ nextInput.data->self },
-        renderer);
-    auto blockedView = view;
-    blockedView.referenceService = blockedService;
-    blockedView.targetServices = { blockedService };
-    CropBridge blockerBridge;
-    expect(blockerBridge.StartView(blockedView),
-        "A blocker bridge should occupy the replacement target.");
-    expect(!bridge.StartView(blockedView, nextInput)
-            && bridge.GetCropActive()
-            && bridge.GetCropHistory().nodeCount
-                == firstHistory.nodeCount
-            && bridge.GetCropHistory().operationCount
-                == firstHistory.operationCount
-            && service->GetEffectState().status
-                == RenderEffectStatus::Committed,
-        "Rejected input and target replacement should preserve the current binding and history.");
-    expect(blockerBridge.ClearBindings(),
-        "The blocker bridge should release the replacement target.");
-    expect(bridge.SetCropMode(CropRemovalMode::None)
-            && !bridge.GetShaderTickNeeded()
-            && bridge.GetCropHistory().editMode == CropRemovalMode::None,
-        "The non-cropping mode should pause editing without changing the committed prefix.");
-    expect(bridge.SetCropMode(CropRemovalMode::RemoveInside),
-        "Changing mode should stage an updated current draft immediately.");
-    const auto modeStage = service->GetEffectState();
-    expect(modeStage.status == RenderEffectStatus::Staged
-            && modeStage.stagedRevision > firstCommit.activeRevision,
-        "Mode change should stage a newer revision for the current history node.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "The mode-only draft revision should commit without another widget release.");
-
-    expect(bridge.SetCropNode(0)
-            && bridge.GetShaderTickNeeded(),
-        "An explicit history node should stage the requested zero-length prefix.");
-    const int zeroNodeDirtyCount = service->dirtyCount;
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Explicit history node zero should commit.");
-    expect(service->dirtyCount == zeroNodeDirtyCount + 1,
-        "Committing history node zero should request a frame that publishes the baseline.");
-    expect(bridge.SetCropNode(1)
-            && bridge.GetShaderTickNeeded(),
-        "An explicit history node should restore the requested committed prefix.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Explicit history node one should commit.");
-    const auto nodeRevision = service->GetEffectState().activeRevision;
-    expect(bridge.SetCropNode(1)
-            && !bridge.GetShaderTickNeeded()
-            && service->GetEffectState().activeRevision == nodeRevision,
-        "Selecting the current history node should be a successful no-op.");
-    expect(!bridge.SetCropNode(2),
-        "Selecting a history node beyond the available operation count should fail.");
-
-    expect(bridge.PreviousCrop() && bridge.GetShaderTickNeeded(),
-        "Previous should reuse the committed immutable table with a shorter prefix.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Previous prefix should commit.");
-    expect(bridge.NextCrop() && bridge.GetShaderTickNeeded(),
-        "Next should reuse the same immutable table with the restored prefix.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Next prefix should commit.");
-
-    auto reboundService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    const int retiredDetachCount = service->detachCount;
-    auto reboundView = view;
-    reboundView.referenceService = reboundService;
-    reboundView.targetServices = { reboundService };
-    expect(bridge.StartView(reboundView),
-        "An active bridge should stage the committed prefix on a replacement target.");
-    expect(bridge.GetShaderTickNeeded()
-            && reboundService->GetEffectState().status
-                == RenderEffectStatus::Staged
-            && service->detachCount == retiredDetachCount,
-        "Target rebind should keep the old target active until the replacement is ready.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "A ready replacement target should commit its replayed prefix.");
-    expect(reboundService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && service->detachCount == retiredDetachCount + 1,
-        "Successful target rebind should clear the retired target only after commit.");
-
-    const auto reboundRevision =
-        reboundService->GetEffectState().activeRevision;
-    const int reboundDetachCount = reboundService->detachCount;
-    expect(bridge.SwitchCropBox()
-            && SendWidgetInput(renderer, interactor)
-            && bridge.GetShaderTickNeeded(),
-        "A geometry update should leave one staged revision before editing exits.");
-    const auto exitHistory = bridge.GetCropHistory();
-    const auto exitEffect = reboundService->GetEffectState();
-    const int exitDirtyCount = reboundService->dirtyCount;
-    expect(bridge.ExitCrop(), "Bridge should stop crop editing.");
-    expect(!bridge.GetCropActive()
-            && reboundService->detachCount == reboundDetachCount
-            && reboundService->dirtyCount == exitDirtyCount + 1
-            && bridge.GetCropHistory().nodeCount == exitHistory.nodeCount
-            && bridge.GetCropHistory().operationCount
-                == exitHistory.operationCount
-            && reboundService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && reboundService->GetEffectState().activeRevision
-                == exitEffect.activeRevision
-            && exitEffect.activeRevision == reboundRevision,
-        "Exit should hide crop widgets while preserving the current committed history node.");
-    expect(!bridge.ExitCrop()
-            && reboundService->dirtyCount == exitDirtyCount + 1,
-        "Repeated exit should not publish another reference frame.");
-    expect(bridge.GetCropBound(),
-        "Exit should preserve the committed target binding.");
-    expect(bridge.PreviousCrop() && bridge.GetShaderTickNeeded(),
-        "Previous should remain available after editing exits.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Post-exit Previous should commit the shorter prefix.");
-    expect(bridge.NextCrop() && bridge.GetShaderTickNeeded(),
-        "Next should remain available after editing exits.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "Post-exit Next should restore the committed prefix.");
-    const auto postExitRevision =
-        reboundService->GetEffectState().activeRevision;
-
-    bool hasAsyncResult = false;
-    expect(bridge.BuildCropResult(input, [&hasAsyncResult, &input](CropMaterializationCandidate result) {
-        hasAsyncResult = result.sourceRevision == input.data->self
-            && result.nodeCount == 1
-            && result.operations.size() == 1
-            && result.operations[0].removalMode == CropRemovalMode::RemoveInside;
-    }), "A committed prefix should start one asynchronous build.");
-    for (int pollCount = 0; pollCount < 200 && !bridge.GetBuildTickNeeded(); ++pollCount) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    expect(bridge.SendBuildResult(), "A ready build future should be delivered on the owner thread.");
-    expect(hasAsyncResult,
-        "Async build should preserve the captured mode, version, and committed prefix.");
-
-    expect(bridge.StartView(reboundView)
-            && bridge.GetCropActive()
-            && !bridge.GetShaderTickNeeded()
-            && reboundService->detachCount == reboundDetachCount
-            && reboundService->GetEffectState().activeRevision
-                == postExitRevision,
-        "Restarting the same view should resume editing without clearing or replaying its committed result.");
-    expect(bridge.ExitCrop(), "Bridge should stop resumed editing without clearing its result.");
-
-    auto resumedService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto resumedView = view;
-    resumedView.referenceService = resumedService;
-    resumedView.targetServices = { resumedService };
-    expect(bridge.StartView(resumedView)
-            && bridge.GetCropActive()
-            && bridge.GetShaderTickNeeded()
-            && resumedService->GetEffectState().status
-                == RenderEffectStatus::Staged
-            && reboundService->detachCount == reboundDetachCount,
-        "Restarting with a replacement target should stage the preserved committed prefix atomically.");
-    const int resumedDetachCount = resumedService->detachCount;
-    expect(bridge.ExitCrop()
-            && resumedService->detachCount
-                == resumedDetachCount + 1
-            && reboundService->detachCount == reboundDetachCount
-            && reboundService->GetEffectState().activeRevision
-                == postExitRevision,
-        "Canceling a pending target rebind should detach its temporary effect and preserve the old target.");
-    expect(bridge.StartView(resumedView)
-            && bridge.GetCropActive()
-            && bridge.GetShaderTickNeeded(),
-        "A canceled replacement target should be attachable again for a fresh replay transaction.");
-    expect(SendShaderCommit(bridge, renderWindow),
-        "A ready replacement target should commit the preserved prefix after restart.");
-    expect(resumedService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && reboundService->detachCount == reboundDetachCount + 1,
-        "Restart target commit should retire the previous target only after the replacement is committed.");
-    expect(bridge.ExitCrop(), "Bridge should stop replacement-target editing while preserving its result.");
-
-    auto changedInput = BuildGraphInput(
-        data, image, input.inputModelBounds);
-    expect(resumedService->SetRenderInputStamp(
-        { changedInput.data->self }),
-        "Target service should publish the replacement input stamp.");
-    expect(bridge.SetCropInput(changedInput), "Input version change should publish a new snapshot.");
-    expect(resumedService->GetEffectState().status
-            == RenderEffectStatus::Idle,
-        "Input invalidation should clear the active shader target.");
-    expect(!bridge.PreviousCrop(), "An empty history should not move backward.");
-    expect(!bridge.NextCrop(), "An empty history should not move forward.");
-
-    bool hasBuildResult = false;
-    expect(!bridge.BuildCropResult(changedInput, [&hasBuildResult](CropMaterializationCandidate result) {
-        hasBuildResult = result.failureReason == CropFailure::BadInput;
-    }), "Build should reject an empty committed prefix.");
-    expect(hasBuildResult, "Rejected build should synchronously report its failure.");
-    expect(!bridge.GetCropActive(), "Input invalidation should not reactivate crop editing.");
-    expect(bridge.ClearBindings(), "Bridge should clear all view bindings.");
-
-    // 删除是稳定操作的移除，不能用移动历史游标或截断 redo 分支代替。
-    auto deleteService = std::make_shared<CropServiceStub>(inputStamp, renderer);
-    auto deleteView = view; deleteView.referenceService = deleteService; deleteView.targetServices = {deleteService};
-    CropBridge deleteBridge;
-    expect(deleteBridge.StartView(deleteView) && deleteBridge.SetCropInput(input) && deleteBridge.SwitchCropBox()
-        && deleteBridge.SetCropMode(CropRemovalMode::KeepInside), "Deletion fixture starts box editing.");
-    renderer->ResetCamera(input.inputModelBounds.data()); renderWindow->Render();
-    for (int i = 0; i < 3; ++i) expect(SendWidgetInput(renderer, interactor) && SendShaderCommit(deleteBridge, renderWindow), "Deletion fixture commits independent operations.");
-    expect(deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,2,3}, "History exposes stable operation identities.");
-    expect(deleteBridge.SetCropNode(1) && SendShaderCommit(deleteBridge, renderWindow), "Deletion fixture retains a redo tail.");
-    expect(deleteBridge.DeleteCropNode(2) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,2,3}
-        && !deleteBridge.DeleteCropNode(1), "Deletion stages atomically and rejects another deletion while pending.");
-    expect(SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{1,3}
-        && deleteBridge.GetCropHistory().nodeCount == 1, "Deleting redo preserves current prefix and subsequent node identity.");
-    expect(deleteBridge.NextCrop() && SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.DeleteCropNode(1)
-        && SendShaderCommit(deleteBridge, renderWindow) && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{3}
-        && deleteBridge.GetCropHistory().nodeCount == 1, "Deleting an applied predecessor preserves the remaining active operation.");
-    expect(!deleteBridge.DeleteCropNode(0) && !deleteBridge.DeleteCropNode(2), "Root and already deleted identities are rejected.");
-    expect(deleteBridge.DeleteCropNode(3) && SendShaderCommit(deleteBridge, renderWindow)
-        && deleteBridge.GetCropHistory().operationIndices.empty() && deleteBridge.GetCropHistory().nodeCount == 0
-        && deleteService->GetEffectState().status == RenderEffectStatus::Committed && !deleteBridge.NextCrop(),
-        "Deleting the last node commits an empty shader table and restores the uncut preview.");
-    expect(SendWidgetInput(renderer, interactor) && SendShaderCommit(deleteBridge, renderWindow)
-        && deleteBridge.GetCropHistory().operationIndices == std::vector<std::uint64_t>{4} && !deleteBridge.DeleteCropNode(3),
-        "New operations never reuse a deleted identity.");
-    expect(deleteBridge.ClearBindings(), "Deletion fixture releases its view binding.");
-
-    auto repeatService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto repeatView = view;
-    repeatView.referenceService = repeatService;
-    repeatView.targetServices = { repeatService };
-    CropBridge repeatBridge;
-    expect(repeatBridge.StartView(repeatView)
-            && repeatBridge.SetCropInput(input)
-            && repeatBridge.SwitchCropBox()
-            && repeatBridge.SetCropMode(CropRemovalMode::KeepInside),
-        "A repeated-release bridge should enter armed box editing.");
-    renderer->ResetCamera(input.inputModelBounds.data());
-    renderWindow->Render();
-    expect(SendWidgetInput(renderer, interactor)
-            && repeatBridge.GetShaderTickNeeded()
-            && repeatBridge.SetCropMode(
-                CropRemovalMode::RemoveInside)
-            && repeatBridge.GetCropHistory().editMode
-                == CropRemovalMode::RemoveInside
-            && SendShaderCommit(
-                repeatBridge, renderWindow)
-            && repeatBridge.GetShaderTickNeeded(),
-        "A mode switch before the current revision commits should be retained.");
-    expect(SendShaderCommit(repeatBridge, renderWindow),
-        "The retained RemoveInside mode should update the current draft.");
-    expect(SendWidgetInput(renderer, interactor)
-            && SendShaderCommit(repeatBridge, renderWindow),
-        "The second release of the same box widget should commit another operation.");
-    const auto repeatHistory = repeatBridge.GetCropHistory();
-    expect(repeatHistory.nodeCount == 2
-            && repeatHistory.operationCount == 2
-            && repeatHistory.hasEditableOp,
-        "Two releases of one widget should expose two independent crop operations.");
-    expect(repeatBridge.SetCropMode(CropRemovalMode::KeepInside)
-            && SendShaderCommit(repeatBridge, renderWindow)
-            && repeatBridge.GetCropHistory().operationCount == 2,
-        "Changing the latest operation mode should not increase the release count.");
-
-    for (std::size_t operationCount = 3;
-        operationCount <= 5;
-        ++operationCount) {
-        expect(SendWidgetInput(renderer, interactor)
-                && SendShaderCommit(repeatBridge, renderWindow)
-                && repeatBridge.GetCropHistory().nodeCount
-                    == operationCount
-                && repeatBridge.GetCropHistory().operationCount
-                    == operationCount,
-            "The branch test should build five committed operations.");
-    }
-    expect(repeatBridge.SetCropNode(2)
-            && repeatBridge.GetShaderTickNeeded(),
-        "Returning from A-B-C-D-E to B should stage the B prefix.");
-    const auto prefixRevision =
-        repeatService->GetEffectState().stagedRevision;
-    expect(repeatBridge.StartView(repeatView)
-            && repeatBridge.SwitchCropBox()
-            && repeatBridge.SetCropMode(
-                CropRemovalMode::RemoveInside),
-        "Reopening the same crop editor should remain accepted while the B prefix is pending.");
-    expect(SendWidgetInput(renderer, interactor, 12)
-            && repeatBridge.GetShaderTickNeeded()
-            && repeatBridge.GetCropHistory().nodeCount == 5
-            && repeatBridge.GetCropHistory().operationCount == 5,
-        "A valid F interaction should be retained until the B prefix commits.");
-    expect(SendShaderCommit(repeatBridge, renderWindow),
-        "The B prefix should commit before its retained F operation.");
-    const auto branchStage = repeatService->GetEffectState();
-    expect(repeatBridge.GetShaderTickNeeded()
-            && repeatBridge.GetCropHistory().nodeCount == 2
-            && repeatBridge.GetCropHistory().operationCount == 5
-            && (branchStage.status
-                    == RenderEffectStatus::Staged
-                || branchStage.status
-                    == RenderEffectStatus::Ready)
-            && branchStage.activeRevision == prefixRevision
-            && branchStage.stagedRevision > prefixRevision,
-        "Committing B should immediately stage retained F without exposing the old redo branch.");
-    expect(SendShaderCommit(repeatBridge, renderWindow),
-        "The retained F revision should commit.");
-    const auto branchHistory = repeatBridge.GetCropHistory();
-    const auto branchCommit = repeatService->GetEffectState();
-    expect(branchHistory.nodeCount == 3
-            && branchHistory.operationCount == 3
-            && branchHistory.hasEditableOp
-            && branchCommit.status
-                == RenderEffectStatus::Committed
-            && branchCommit.activeRevision
-                == branchStage.stagedRevision
-            && !repeatBridge.NextCrop(),
-        "Branch commit should replace A-B-C-D-E with active A-B-F and remove redo.");
-
-    bool hasBranchResult = false;
-    expect(repeatBridge.BuildCropResult(
-        input,
-        [&hasBranchResult](CropMaterializationCandidate result) {
-            hasBranchResult = result.nodeCount == 3
-                && result.operations.size() == 3
-                && result.operations[0].operationIndex == 1
-                && result.operations[1].operationIndex == 2
-                && result.operations[2].operationIndex == 6
-                && result.operations[2].removalMode
-                    == CropRemovalMode::RemoveInside;
-        }), "A-B-F should expose a three-operation build snapshot.");
-    expect(SendWidgetInput(renderer, interactor, 16)
-            && !repeatBridge.GetShaderTickNeeded()
-            && repeatBridge.GetCropHistory().nodeCount == 3
-            && repeatBridge.GetCropHistory().operationCount == 3,
-        "Materialization should freeze the active Box or Plane widget without creating another operation.");
-    expect(!repeatBridge.PreviousCrop()
-            && !repeatBridge.SetCropNode(2)
-            && !repeatBridge.SetCropMode(
-                CropRemovalMode::KeepInside),
-        "CPU materialization should freeze the captured active prefix until its result is consumed.");
-    for (int pollCount = 0;
-        pollCount < 200
-            && !repeatBridge.GetBuildTickNeeded();
-        ++pollCount) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(1));
-    }
-    expect(repeatBridge.SendBuildResult()
-            && hasBranchResult,
-        "A-B-F build should use the rebuilt three-operation predicate history.");
-    expect(repeatBridge.SetCropNode(2)
-            && SendShaderCommit(repeatBridge, renderWindow),
-        "Returning from A-B-F to B should commit the current history cursor.");
-    const auto middleHistory = repeatBridge.GetCropHistory();
-    const auto middleEffect = repeatService->GetEffectState();
-    const int middleDirty = repeatService->dirtyCount;
-    expect(middleHistory.nodeCount == 2
-            && middleHistory.operationCount == 3
-            && repeatBridge.ExitCrop()
-            && repeatService->dirtyCount == middleDirty + 1
-            && repeatBridge.GetCropHistory().nodeCount == 2
-            && repeatBridge.GetCropHistory().operationCount == 3
-            && repeatService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && repeatService->GetEffectState().activeRevision
-                == middleEffect.activeRevision,
-        "Exit should preserve the committed effect at the current history cursor.");
-    bool hasMiddleResult = false;
-    expect(repeatBridge.BuildCropResult(
-        input,
-        [&hasMiddleResult](CropMaterializationCandidate result) {
-            hasMiddleResult = result.nodeCount == 2
-                && result.operations.size() == 2
-                && result.operations[0].operationIndex == 1
-                && result.operations[1].operationIndex == 2;
-        }), "Exit at B should build the current A-B committed prefix.");
-    for (int pollCount = 0;
-        pollCount < 200
-            && !repeatBridge.GetBuildTickNeeded();
-        ++pollCount) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(1));
-    }
-    expect(repeatBridge.SendBuildResult()
-            && hasMiddleResult,
-        "Exit should keep the current A-B prefix instead of restoring A-B-F.");
-
-    auto materializedImage =
-        vtkSmartPointer<vtkImageData>::New();
-    materializedImage->ShallowCopy(image);
-    auto materializedInput = BuildGraphInput(
-        data, materializedImage, input.inputModelBounds);
-    const auto visibleRevision =
-        repeatService->GetEffectState().activeRevision;
-    auto materializedCommit = repeatBridge.BuildCropCommit(
-        materializedInput, 2);
-    expect(materializedCommit
-            && repeatBridge.GetCropHistory().nodeCount == 2
-            && repeatBridge.GetCropHistory().operationCount == 3,
-        "CPU materialization should prepare a new active baseline.");
-    if (materializedCommit) {
-        repeatBridge.SetCropCommit(std::move(*materializedCommit));
-    }
-    expect(materializedCommit && repeatBridge.SendCropCommit(),
-        "CPU materialization should publish its prepared baseline.");
-    const auto materializedHistory =
-        repeatBridge.GetCropHistory();
-    expect(materializedHistory.nodeCount == 0
-            && materializedHistory.operationCount == 1
-            && materializedHistory.baseNodeCount == 2
-            && materializedHistory.allOperationCount == 3,
-        "Materialization should keep A-B-F in allHistory while exposing only F as active redo.");
-    const auto visibleEffect =
-        repeatService->GetEffectState();
-    expect(repeatBridge.GetShaderTickNeeded()
-            && visibleEffect.status
-                == RenderEffectStatus::Committed
-            && visibleEffect.activeRevision
-                == visibleRevision,
-        "The old Strategy should keep the current committed node visible until the new render input converges.");
-    expect(repeatService->SetRenderInputStamp(
-                { materializedInput.data->self })
-            && repeatBridge.SendShaderCommit()
-            && !repeatBridge.GetShaderTickNeeded()
-            && repeatService->GetEffectState().status
-                == RenderEffectStatus::Idle,
-        "The retired shader should clear only after the materialized render input converges.");
-    const int materializedDirty =
-        repeatService->dirtyCount;
-    const auto materializedEffect =
-        repeatService->GetEffectState();
-    expect(!repeatBridge.PreviousCrop(),
-        "Previous at activeHistory node zero must not enter allHistory.");
-    const auto previousHistory =
-        repeatBridge.GetCropHistory();
-    const auto previousEffect =
-        repeatService->GetEffectState();
-    expect(previousHistory.nodeCount
-                == materializedHistory.nodeCount
-            && previousHistory.operationCount
-                == materializedHistory.operationCount
-            && previousHistory.baseNodeCount
-                == materializedHistory.baseNodeCount
-            && previousHistory.allOperationCount
-                == materializedHistory.allOperationCount
-            && repeatService->dirtyCount
-                == materializedDirty
-            && previousEffect.status
-                == materializedEffect.status
-            && previousEffect.stagedRevision
-                == materializedEffect.stagedRevision
-            && previousEffect.activeRevision
-                == materializedEffect.activeRevision,
-        "Rejected Previous must leave both history objects and render state unchanged.");
-    expect(repeatBridge.NextCrop()
-            && SendShaderCommit(
-                repeatBridge, renderWindow),
-        "The retained F redo should rebuild on the materialized input stamp.");
-    const auto redoneHistory =
-        repeatBridge.GetCropHistory();
-    expect(!repeatBridge.DeleteCropNode(1) && !repeatBridge.DeleteCropNode(2), "Materialized baseline nodes cannot be deleted as preview operations.");
-    expect(redoneHistory.nodeCount == 1
-            && redoneHistory.operationCount == 1
-            && redoneHistory.baseNodeCount == 2
-            && redoneHistory.allOperationCount == 3,
-        "Redo after materialization should not duplicate or delete allHistory nodes.");
-    bool hasRootResult = false;
-    expect(repeatBridge.BuildCropResult(
-        input,
-        [&hasRootResult, &input](CropMaterializationCandidate result) {
-            hasRootResult = result.sourceRevision == input.data->self
-                && result.nodeCount == 3
-                && result.operations.size() == 3
-                && result.operations[0].operationIndex == 1
-                && result.operations[1].operationIndex == 2
-                && result.operations[2].operationIndex == 6;
-        }),
-        "Materialized history should build the absolute prefix directly from the root input.");
-    for (int pollCount = 0;
-        pollCount < 200
-            && !repeatBridge.GetBuildTickNeeded();
-        ++pollCount) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(1));
-    }
-    expect(repeatBridge.SendBuildResult()
-            && hasRootResult,
-        "Root build should fuse A-B-F without publishing or caching intermediate masks.");
-
-    auto originalInput = BuildGraphInput(
-        data, image, input.inputModelBounds);
-    auto originalCommit = repeatBridge.BuildCropCommit(
-        originalInput, 0);
-    const bool isOriginalReady = originalCommit
-        && repeatBridge.GetCropHistory().nodeCount == 1
-        && repeatBridge.GetCropHistory().baseNodeCount == 2
-        && repeatService->SetRenderInputStamp(
-            { originalInput.data->self });
-    if (isOriginalReady) {
-        repeatBridge.SetCropCommit(std::move(*originalCommit));
-    }
-    expect(isOriginalReady && repeatBridge.SendCropCommit(),
-        "Switching back to the root snapshot should reactivate the complete history.");
-    const auto originalHistory =
-        repeatBridge.GetCropHistory();
-    expect(originalHistory.nodeCount == 0
-            && originalHistory.operationCount == 3
-            && originalHistory.baseNodeCount == 0
-            && originalHistory.allOperationCount == 3
-            && repeatService->GetEffectState().status
-                == RenderEffectStatus::Idle,
-        "The root baseline should render the original node and expose allHistory only as active redo.");
-    expect(repeatBridge.NextCrop()
-            && SendShaderCommit(
-                repeatBridge, renderWindow)
-            && repeatBridge.GetCropHistory().nodeCount == 1,
-        "Explicit root restore should allow redo from allHistory node zero.");
-    expect(repeatBridge.ClearBindings(),
-        "The repeated-release bridge should clear its bindings.");
-
-    auto lagService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto lagView = view;
-    lagView.referenceService = lagService;
-    lagView.targetServices = { lagService };
-    auto lagImage = vtkSmartPointer<vtkImageData>::New();
-    lagImage->ShallowCopy(image);
-    auto lagInput = BuildGraphInput(
-        data, lagImage, input.inputModelBounds);
-    const RenderInputStamp lagStamp = {
-        lagInput.data->self
-    };
-    CropBridge lagBridge;
-    expect(lagBridge.StartView(lagView)
-            && lagBridge.SetCropInput(lagInput)
-            && lagBridge.SwitchCropBox()
-            && lagBridge.SetCropMode(
-                CropRemovalMode::KeepInside),
-        "A render-convergence bridge should enter armed editing.");
-    renderer->ResetCamera(
-        lagInput.inputModelBounds.data());
-    renderWindow->Render();
-    expect(SendWidgetInput(renderer, interactor)
-            && lagBridge.GetShaderTickNeeded()
-            && lagService->GetIsInteracting()
-            && lagBridge.GetCropHistory().nodeCount == 0
-            && lagService->GetEffectState().status
-                == RenderEffectStatus::Idle,
-        "A release must wait instead of disappearing while the render input stamp lags.");
-    expect(!lagBridge.SendShaderCommit()
-            && lagBridge.GetShaderTickNeeded()
-            && lagService->GetIsInteracting()
-            && lagService->SetRenderInputStamp(
-                lagStamp)
-            && !lagBridge.SendShaderCommit()
-            && lagBridge.GetShaderTickNeeded()
-            && lagService->GetIsInteracting(),
-        "The retained release should stage after the render input converges.");
-    expect(lagBridge.SetCropMode(
-                CropRemovalMode::RemoveInside)
-            && SendShaderCommit(
-                lagBridge, renderWindow)
-            && lagBridge.GetShaderTickNeeded()
-            && SendShaderCommit(
-                lagBridge, renderWindow)
-            && lagBridge.GetCropHistory().nodeCount == 1
-            && lagBridge.GetCropHistory().operationCount == 1
-            && lagBridge.GetCropHistory().editMode
-                == CropRemovalMode::RemoveInside
-            && !lagService->GetIsInteracting(),
-        "The latest removal mode should commit after the retained release.");
-    expect(lagBridge.ClearBindings(),
-        "The render-convergence bridge should clear its bindings.");
-
-    auto zeroService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto zeroView = view;
-    zeroView.referenceService = zeroService;
-    zeroView.targetServices = { zeroService };
-    CropBridge zeroBridge;
-    expect(zeroBridge.StartView(zeroView)
-            && zeroBridge.SetCropInput(input)
-            && zeroBridge.SetCropMode(
-                CropRemovalMode::KeepInside),
-        "A zero-node reentry bridge should enter armed editing.");
-    const std::array<bool, 8> isPlaneOp = {
-        true, true, false, false, true, false, true, false
-    };
-    for (std::size_t index = 0;
-        index < isPlaneOp.size();
-        ++index) {
-        const bool isSwitched = isPlaneOp[index]
-            ? zeroBridge.SwitchCropPlane()
-            : zeroBridge.SwitchCropBox();
-        renderWindow->Render();
-        expect(isSwitched
-                && (isPlaneOp[index]
-                    ? SendPlaneInput(
-                        renderer,
-                        interactor,
-                        8 + static_cast<int>(index))
-                    : SendWidgetInput(
-                        renderer,
-                        interactor,
-                        8 + static_cast<int>(index)))
-                && SendShaderCommit(
-                    zeroBridge,
-                    renderWindow),
-            "AABBABAB should commit every effective crop operation.");
-    }
-    expect(zeroBridge.GetCropHistory().nodeCount == 8
-            && zeroBridge.GetCropHistory().operationCount == 8,
-        "AABBABAB should expose eight committed history operations.");
-    bool hasShapeSeq = false;
-    expect(zeroBridge.BuildCropResult(
-        input,
-        [&hasShapeSeq, &isPlaneOp](CropMaterializationCandidate result) {
-            hasShapeSeq = result.nodeCount == isPlaneOp.size()
-                && result.operations.size() == isPlaneOp.size();
-            for (std::size_t index = 0;
-                hasShapeSeq && index < isPlaneOp.size();
-                ++index) {
-                const CropShape expectedShape = isPlaneOp[index]
-                    ? CropShape::Plane
-                    : CropShape::Box;
-                hasShapeSeq = result.operations[index].geometryType
-                    == expectedShape;
-            }
-        }), "AABBABAB should start an build snapshot.");
-    for (int pollCount = 0;
-        pollCount < 200
-            && !zeroBridge.GetBuildTickNeeded();
-        ++pollCount) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(1));
-    }
-    expect(zeroBridge.SendBuildResult()
-            && hasShapeSeq,
-        "AABBABAB should preserve the exact Plane/Box operation order.");
-    for (std::size_t nodeCount = 8;
-        nodeCount > 0;
-        --nodeCount) {
-        expect(zeroBridge.PreviousCrop()
-                && SendShaderCommit(zeroBridge, renderWindow)
-                && zeroBridge.GetCropHistory().nodeCount
-                    == nodeCount - 1,
-            "Previous should commit every prefix down to node zero.");
-    }
-    const auto zeroEffect = zeroService->GetEffectState();
-    const int zeroDetach = zeroService->detachCount;
-    expect(zeroBridge.ExitCrop()
-            && zeroBridge.StartView(zeroView)
-            && zeroService->detachCount == zeroDetach
-            && zeroService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && zeroService->GetEffectState().activeRevision
-                == zeroEffect.activeRevision,
-        "Reentry at node zero should retain the committed baseline binding.");
-    expect(zeroBridge.SwitchCropPlane()
-            && zeroBridge.SetCropMode(
-                CropRemovalMode::KeepInside),
-        "Reentry at node zero should arm a new plane operation.");
-    renderWindow->Render();
-    expect(SendPlaneInput(renderer, interactor, 18)
-            && zeroBridge.GetShaderTickNeeded()
-            && SendShaderCommit(zeroBridge, renderWindow)
-            && zeroBridge.GetCropHistory().nodeCount == 1
-            && zeroBridge.GetCropHistory().operationCount == 1
-            && !zeroBridge.SetCropNode(2)
-            && zeroService->GetEffectState().status
-                == RenderEffectStatus::Committed
-            && zeroService->GetEffectState().activeRevision
-                > zeroEffect.activeRevision,
-        "A valid crop after zero-node reentry should replace redo and commit.");
-    expect(zeroBridge.ClearBindings(),
-        "The zero-node reentry bridge should clear its bindings.");
-
-    auto planeService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto planeView = view;
-    planeView.referenceService = planeService;
-    planeView.targetServices = { planeService };
-    CropBridge planeBridge;
-    expect(planeBridge.StartView(planeView)
-            && planeBridge.SetCropInput(input)
-            && planeBridge.SwitchCropPlane()
-            && planeBridge.SetCropMode(CropRemovalMode::KeepInside),
-        "A plane bridge should enter armed editing.");
-    renderWindow->Render();
-    expect(SendWidgetInput(renderer, interactor, 0)
-            && !planeBridge.GetShaderTickNeeded()
-            && planeBridge.GetCropHistory().operationCount == 0
-            && planeService->GetEffectState().status
-                == RenderEffectStatus::Idle
-            && planeService->GetEffectState().stagedRevision == 0
-            && planeService->GetEffectState().activeRevision == 0,
-        "A zero-distance plane interaction must not create crop history.");
-    expect(planeBridge.ClearBindings(),
-        "The empty plane bridge should clear its bindings.");
-
-    auto exitDragService = std::make_shared<CropServiceStub>(
-        inputStamp, renderer);
-    auto exitDragView = view;
-    exitDragView.referenceService = exitDragService;
-    exitDragView.targetServices = { exitDragService };
-    CropBridge exitDragBridge;
-    expect(exitDragBridge.StartView(exitDragView)
-            && exitDragBridge.SetCropInput(input)
-            && exitDragBridge.SwitchCropBox()
-            && exitDragBridge.SetCropMode(CropRemovalMode::KeepInside),
-        "An exit-during-drag bridge should enter armed box editing.");
-    renderWindow->Render();
-    expect(SendWidgetInput(renderer, interactor, 8, false),
-        "Bridge test should begin a box drag without releasing it.");
-    expect(exitDragBridge.ExitCrop()
-            && !exitDragBridge.GetShaderTickNeeded()
-            && exitDragBridge.GetCropHistory().operationCount == 0
-            && !exitDragService->GetIsInteracting(),
-        "Exiting during a drag must not create a staged or committed history operation.");
-    interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
-    expect(exitDragBridge.ClearBindings(),
-        "The exit-during-drag bridge should clear its bindings.");
-
-    auto multiRenderer = vtkSmartPointer<vtkRenderer>::New();
-    auto multiWindow = vtkSmartPointer<vtkRenderWindow>::New();
-    auto multiInteractor =
-        vtkSmartPointer<vtkRenderWindowInteractor>::New();
-    multiWindow->SetOffScreenRendering(1);
-    multiWindow->SetSize(200, 200);
-    multiWindow->AddRenderer(multiRenderer);
-    multiInteractor->SetRenderWindow(multiWindow);
-    auto firstTarget = std::make_shared<CropServiceStub>(
-        inputStamp, multiRenderer);
-    auto secondTarget = std::make_shared<CropServiceStub>(
-        inputStamp, multiRenderer);
-    CropViewRequest multiView;
-    multiView.renderer = multiRenderer;
-    multiView.interactor = multiInteractor;
-    multiView.lease = viewLease;
-    multiView.referenceService = firstTarget;
-    multiView.targetServices = {
-        firstTarget, secondTarget
-    };
-    CropBridge multiBridge;
-    expect(multiBridge.StartView(multiView)
-            && multiBridge.SetCropInput(input)
-            && multiBridge.SwitchCropBox()
-            && multiBridge.SetCropMode(
-                CropRemovalMode::KeepInside),
-        "A multi-target bridge should enter armed box editing.");
-    multiRenderer->ResetCamera(
-        input.inputModelBounds.data());
-    multiWindow->Render();
-    expect(SendWidgetInput(
-            multiRenderer, multiInteractor)
-            && SendShaderCommit(
-                multiBridge, multiWindow),
-        "A multi-target crop revision should commit.");
-    expect(multiBridge.SetCropNode(0),
-        "A multi-target bridge should stage history node zero.");
-    multiWindow->Render();
-    const int firstDirtyCount =
-        firstTarget->dirtyCount;
-    const int secondDirtyCount =
-        secondTarget->dirtyCount;
-    expect(multiBridge.SendShaderCommit()
-            && multiBridge.GetCropHistory().nodeCount == 0
-            && firstTarget->dirtyCount
-                == firstDirtyCount + 1
-            && secondTarget->dirtyCount
-                == secondDirtyCount + 1,
-        "Committing history node zero should request a baseline frame on every current target.");
-    expect(multiBridge.ClearBindings(),
-        "The multi-target bridge should clear its bindings.");
-
-    auto finishLease = std::make_shared<FeatureViewLease>(
-        std::this_thread::get_id());
-    auto finishService = std::make_shared<CropServiceStub>(
-        inputStamp, multiRenderer);
-    CropViewRequest finishView;
-    finishView.renderer = multiRenderer;
-    finishView.interactor = multiInteractor;
-    finishView.lease = finishLease;
-    finishView.referenceService = finishService;
-    finishView.targetServices = { finishService };
-    CropBridge finishBridge;
-    auto finishInput = BuildGraphInput(
-        data, image, input.inputModelBounds);
-    auto finishCommit = finishBridge.StartView(finishView)
-        && finishBridge.SetCropInput(input)
-        ? finishBridge.BuildCropCommit(finishInput, 0)
-        : std::optional<CropBridge::PreparedCommit>{};
-    const bool isFinishPrepared = finishCommit.has_value();
-    if (finishCommit && finishLease->StopLease()) {
-        finishBridge.SetCropCommit(std::move(*finishCommit));
-    }
-    const auto finishHistory = finishBridge.GetCropHistory();
-    expect(isFinishPrepared
-            && !finishLease->GetIsActive()
-            && finishHistory.nodeCount == 0
-            && finishHistory.baseNodeCount == 0,
-        "A prepared crop commit must finish after publish even when its lease has just stopped.");
-    expect(finishBridge.ClearBindings(),
-        "The lease owner should close crop bindings after StopLease.");
-    multiWindow->Finalize();
-    return failureCount;
+    int failures=0;
+    const auto run=[&](bool result,const char* name){if(!result){std::cerr<<"Bridge scenario failed: "<<name<<'\n';++failures;}};
+    run(GetWidgetAndSiblingEdits(),"widget edits and sibling replacement");
+    run(GetCurvedWidgetHistory(),"curved widgets and immutable history");
+    run(GetBranchesAndFrozenBuilds(),"branches and fixed Root materialization");
+    run(GetExitAndRebind(),"Exit, reentry and transactional target replacement");
+    run(GetQueuedModesAndLag(),"pending release and every queued mode");
+    run(GetShapeSequenceAndRoot(),"mixed shape sequence and Root redo preservation");
+    run(GetPruneAndMultiviewFailure(),"protected prune and required View failure");
+    run(GetActualRenderedHead(),"applied, back-buffer and GPU-rendered node identities");
+    run(GetArchiveSourceValidation(),"archive source validation and runtime node mapping");
+    run(GetSourcePreviewCommit(),"candidate source replay and no-fail adoption");
+    run(GetStoppedLeaseCleanup(),"stopped lease cancellation and document cleanup");
+    return failures;
 }

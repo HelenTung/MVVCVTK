@@ -17,3 +17,6 @@ std::shared_ptr<AbstractVisualStrategy> CreateRenderStrategy(
 std::shared_ptr<AbstractVisualStrategy> CreateRenderStrategy(
     VizMode mode,
     const std::shared_ptr<RenderStrategyServices>& services);
+
+// Direct immutable surface input; independent of image LOD and isovalue products.
+std::shared_ptr<AbstractVisualStrategy> CreateMeshRenderStrategy();

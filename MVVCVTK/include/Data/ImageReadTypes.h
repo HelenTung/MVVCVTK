@@ -104,7 +104,8 @@ enum class ImageReadError {
     InvalidRegion,
     TooLarge,
     CopyFailed,
-    Cancelled
+    Cancelled,
+    ResultRetired
 };
 
 enum class ImageReadAdmission : std::uint8_t {
@@ -201,7 +202,8 @@ enum class LabelMapError : std::uint8_t {
     Busy,
     TooLarge,
     CopyFailed,
-    Cancelled
+    Cancelled,
+    ResultRetired
 };
 
 struct LabelMapDescriptor final {

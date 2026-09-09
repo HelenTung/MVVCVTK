@@ -72,10 +72,13 @@ add_library(mvvcvtk_surface_recipe_header_probe OBJECT SurfaceRecipeHeaderProbe.
 target_include_directories(mvvcvtk_surface_recipe_header_probe PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include")
 SetTargetDefaults(mvvcvtk_surface_recipe_header_probe)
+set_target_properties(mvvcvtk_surface_recipe_header_probe PROPERTIES
+    PROJECT_LABEL SurfaceRecipeHeaderProbe FOLDER "MVVCVTK/test/Automation/HeaderProbes")
 
 # Repository acceptance tool; file I/O stays in the test harness, never in the Feature.
 add_executable(mvvcvtk_surface_business_acceptance SurfaceBusinessAcceptance.cpp)
-set_target_properties(mvvcvtk_surface_business_acceptance PROPERTIES OUTPUT_NAME SurfaceBusinessAcceptance FOLDER "MVVCVTK/Tests")
+set_target_properties(mvvcvtk_surface_business_acceptance PROPERTIES
+    OUTPUT_NAME SurfaceBusinessAcceptance PROJECT_LABEL SurfaceBusinessAcceptance FOLDER "MVVCVTK/test/Automation")
 target_include_directories(mvvcvtk_surface_business_acceptance PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
 target_link_libraries(mvvcvtk_surface_business_acceptance PRIVATE mvvcvtk_host_test_internal

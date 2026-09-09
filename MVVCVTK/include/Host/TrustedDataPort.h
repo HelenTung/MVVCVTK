@@ -13,6 +13,7 @@
 
 class vtkImageData;
 class vtkPolyData;
+class SurfaceMeshPayload;
 
 struct VtkImageGridView final {
     DataGraphSnapshot graph;
@@ -40,6 +41,42 @@ struct VtkSurfaceMeshView final {
 
 using VtkSurfaceMeshSnapshot =
     std::shared_ptr<const VtkSurfaceMeshView>;
+
+// Render-stage input. Exactly one geometry kind is present; mesh input is never
+// represented as an ImageGrid payload. Factories retain the original typed view.
+struct VtkRenderInputView final {
+    DataGraphSnapshot graph;
+    std::optional<DataBinding> binding;
+    DataSnapshot data;
+    vtkSmartPointer<vtkImageData> image;
+    vtkSmartPointer<vtkImageData> validityMask;
+    vtkSmartPointer<vtkPolyData> mesh;
+    VtkImageGridSnapshot imageView;
+    VtkSurfaceMeshSnapshot meshView;
+    bool GetValid() const noexcept;
+    static std::shared_ptr<const VtkRenderInputView> FromImage(VtkImageGridSnapshot image);
+    static std::shared_ptr<const VtkRenderInputView> FromMesh(
+        DataGraphSnapshot graph,std::optional<DataBinding> binding,VtkSurfaceMeshSnapshot mesh);
+};
+using VtkRenderInputSnapshot=std::shared_ptr<const VtkRenderInputView>;
+
+// Worker-prepared trusted views. No graph identity is usable until the matching payload is published.
+// Register resourceUse in that output draft; keep the returned cache owner while the result is published.
+struct VtkPreparedDataView final {
+    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(
+        std::shared_ptr<const IDataPayload> payload, VtkImageGridSnapshot source = {});
+    static std::shared_ptr<const VtkPreparedDataView> BuildDataView(vtkPolyData* mesh, std::string coordinateFrame = "RAS");
+    static std::shared_ptr<const SurfaceMeshPayload> BuildMeshPayload(vtkPolyData* mesh, std::string coordinateFrame = "RAS");
+    // Attach a prepublication use to exclusively owned render arrays. Borrowed array memory
+    // must be retained by backingOwner, which must not own either VTK container (no cycle).
+    // Register the returned use in the output draft before publishing these objects.
+    static DataPreparedResource BuildResourceUse(vtkImageData* image, vtkPolyData* mesh,
+        std::shared_ptr<const void> backingOwner = {});
+    std::shared_ptr<const IDataPayload> payload;
+    VtkImageGridSnapshot image;
+    VtkSurfaceMeshSnapshot mesh;
+    DataPreparedResource resourceUse;
+};
 
 struct DataInputSpec final {
     std::string role;
@@ -75,6 +112,7 @@ public:
         const DataGraphSnapshot& graph,
         std::string_view name) const = 0;
     virtual ProjectDataSnapshot GetProjectData() const = 0;
+    virtual DataLifetimeState GetDataLifetime(const DataEntityId& scopeId) const = 0;
     virtual DataRelationStatus GetDataRelation(
         const DataGraphSnapshot& graph,
         const DataRevisionRef& data,
@@ -96,11 +134,15 @@ class TrustedDataWritePort {
 public:
     virtual ~TrustedDataWritePort() noexcept = default;
 
+    virtual std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
+        const DataRevisionRef&, std::shared_ptr<const VtkPreparedDataView>) { return {}; }
     // 仅 Host owner thread 可写；轻量同步事务，不持有完成回调。
     virtual RoiResult SetRoi(const RoiRequest& request) = 0;
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
     virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;
+    virtual DataLifetimeState SetDataRelease(const DataEntityId& scopeId) = 0;
+    virtual std::unique_ptr<DataChangeBatch> StartDataChanges() = 0;
     virtual DataObserverId AttachDataChange(DataChangeCallback callback) = 0;
     virtual bool DetachDataChange(DataObserverId observerId) = 0;
 };

@@ -59,6 +59,7 @@ public:
     virtual ~ModelInputPort() = default;
 
     virtual vtkProp3D* GetMainProp() const = 0;
+    virtual bool GetPointVisible(const std::array<double,3>&) const { return true; }
     virtual std::array<double, 16> GetModelMatrix() const = 0;
     virtual bool SetModelMatrix(
         const std::array<double, 16>& modelToWorld) = 0;

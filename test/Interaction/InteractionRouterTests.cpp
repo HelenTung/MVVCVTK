@@ -6,6 +6,7 @@
 #include "Interaction/InteractionPorts.h"
 #include "Interaction/ViewContextFactory.h"
 #include "Viewer2DHandler.h"
+#include "Viewer3DHandler.h"
 #include "AppStateTests.h"
 #include "HostCommandRouterTests.h"
 #include "HostHotkeyRouterTests.h"
@@ -19,6 +20,8 @@
 #include <vector>
 
 #include <vtkCommand.h>
+#include <vtkPropPicker.h>
+#include <vtkRenderer.h>
 #include <vtkInteractorStyle.h>
 #include <vtkRenderWindowInteractor.h>
 
@@ -66,11 +69,11 @@ public:
         ++scrollCount;
         return isScrollAccepted;
     }
-    int GetPlaneAxis(vtkActor*) const override { return -1; }
+    int GetPlaneAxis(vtkActor*) const override { return planeAxis; }
     bool SetCursorWorld(
         const std::array<double, 3>&, int) override
     {
-        return true;
+        ++cursorCount;return true;
     }
     std::array<double, 3> GetCursorWorld() const override
     {
@@ -87,11 +90,14 @@ public:
     }
 
     bool isScrollAccepted = true;
-    int scrollCount = 0;
+    int scrollCount = 0,cursorCount=0,planeAxis=-1;
 };
 
 class TestModelPort final : public ModelInputPort {
 public:
+    bool isPointVisible=true;
+    mutable int pointQueries=0;
+    bool GetPointVisible(const std::array<double,3>&) const override {++pointQueries;return isPointVisible;}
     vtkProp3D* GetMainProp() const override { return nullptr; }
     std::array<double, 16> GetModelMatrix() const override
     {
@@ -365,6 +371,40 @@ void StartFailureCase(int& failureCount)
             && slice.scrollCount == 1,
         "Viewer2D should consume wheel input while reporting rejected slice state.",
         failureCount);
+}
+
+class PickPointProbe final : public vtkPropPicker {
+public:
+    static PickPointProbe* New(){return new PickPointProbe;}
+    vtkTypeMacro(PickPointProbe,vtkPropPicker);
+    int Pick(double,double,double,vtkRenderer*) override {
+        PickPosition[0]=1;PickPosition[1]=2;PickPosition[2]=3;return 1;
+    }
+};
+
+void StartHiddenPickCase(int& failureCount)
+{
+    TestStatePort state;TestSlicePort slice;TestModelPort model;TestUpdatePort update;
+    auto picker=vtkSmartPointer<PickPointProbe>::New();auto renderer=vtkSmartPointer<vtkRenderer>::New();
+    Viewer2DHandler viewer(&state,&slice,&model,&update,picker,renderer);
+    auto event=BuildEvent(InteractionEventKind::PrimaryPress);event.vizMode=VizMode::SliceTop_down;event.isShiftDown=true;
+    const auto started=viewer.Send(event);model.isPointVisible=false;event.eventKind=InteractionEventKind::PointerMove;
+    const auto rejected=viewer.Send(event);
+    SetExpect(started.isSucceeded&&rejected.isHandled&&!rejected.isSucceeded&&slice.cursorCount==0&&model.pointQueries==1,
+        "Hidden 2D pick must not update the business cursor.",failureCount);
+    model.isPointVisible=true;const auto accepted=viewer.Send(event);
+    event.eventKind=InteractionEventKind::PrimaryRelease;const auto ended=viewer.Send(event);
+    SetExpect(accepted.isSucceeded&&ended.isSucceeded&&slice.cursorCount==1&&state.stopCount==1,
+        "Visible 2D pick and cleanup must remain available.",failureCount);
+    TestStatePort state3;TestSlicePort slice3;TestModelPort model3;TestUpdatePort update3;slice3.planeAxis=1;
+    Viewer3DHandler viewer3(&state3,&slice3,&model3,&update3,picker,renderer);
+    event=BuildEvent(InteractionEventKind::PrimaryPress);event.vizMode=VizMode::CompositeVolume;
+    model3.isPointVisible=false;viewer3.Send(event);
+    SetExpect(state3.startCount==0&&model3.pointQueries==1,"Hidden 3D reference-plane pick must not start interaction.",failureCount);
+    model3.isPointVisible=true;const auto started3=viewer3.Send(event);
+    event.eventKind=InteractionEventKind::PrimaryRelease;const auto ended3=viewer3.Send(event);
+    SetExpect(started3.isSucceeded&&ended3.isSucceeded&&state3.startCount==1&&state3.stopCount==1,
+        "Visible 3D reference-plane pick must remain interactive.",failureCount);
 }
 
 void StartCaptureCase(int& failureCount)
@@ -828,6 +868,7 @@ void StartContextStyleCancelRetryCase(int& failureCount)
         StartIndependentResultCase(failureCount);
         StartHandledNoStopCase(failureCount);
         StartFailureCase(failureCount);
+        StartHiddenPickCase(failureCount);
         StartCaptureCase(failureCount);
         StartCaptureRetryCase(failureCount);
         StartCancelCase(failureCount);

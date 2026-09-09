@@ -727,18 +727,28 @@ void CheckCropWorkflow(TestWindow& window)
     window.SetViewsVisible(true);
     auto* panel = window.GetModule("Crop");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "all five crop views settle through events");
+    GetComplete(window, Click(window,"Crop","CreateDocument"),"Succeeded");
+    const auto firstDocument=panel->GetObservedState()["documentId"].toString();
+    GetComplete(window, Click(window,"Crop","CreateDocument"),"Succeeded");
+    const auto secondDocument=panel->GetObservedState()["documentId"].toString();
+    Check(firstDocument!=secondDocument,"each explicit document has a new identity");
+    GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",firstDocument}}),"Succeeded");
     GetComplete(window, Send(window, "View", "Set", {{"iso", 1000.0}}), "Succeeded");
     const auto unavailable = GetComplete(window, Click(window, "Crop", "Box"), "Rejected");
-    Check(unavailable["result"].toObject()["message"].toString().contains("显示等值阈值") && !panel->GetObservedState()["isActive"].toBool(), "empty display is rejected before enabling a crop tool or accumulating invisible previews");
+    Check(unavailable["result"].toObject()["message"].toString().contains("显示等值阈值") && panel->GetObservedState()["operationCount"].toString()=="0" && panel->GetObservedState()["editMode"].toInt()==0, "empty display is rejected before enabling a crop tool or accumulating invisible previews");
+    GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
+    Check(panel->GetObservedState()["documents"].toArray().size()==1,"empty iso display still allows document cleanup");
     GetComplete(window, Send(window, "View", "Set", {{"iso", 50.0}}), "Succeeded");
+    GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",secondDocument}}),"Succeeded");
     GetComplete(window, Click(window, "Crop", "BuildResult"), "Rejected");
-    GetComplete(window, Click(window, "Crop", "Box"), "Accepted");
-    GetComplete(window, Click(window, "Crop", "RemoveInside"), "Accepted");
-    GetComplete(window, Click(window, "Crop", "KeepInside"), "Accepted");
-    GetComplete(window, Click(window, "Crop", "FinishEditing"), "Rejected");
-    GetComplete(window, Click(window, "Crop", "Plane"), "Accepted");
+    GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
+    GetComplete(window, Click(window, "Crop", "RemoveInside"), "Succeeded");
+    GetComplete(window, Click(window, "Crop", "KeepInside"), "Succeeded");
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"crop mode changes settle before finishing editing");
+    GetComplete(window, Click(window, "Crop", "FinishEditing"), "Exited");
+    GetComplete(window, Click(window, "Crop", "Plane"), "Succeeded");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "plane tool renders");
-    GetComplete(window, Click(window, "Crop", "Box"), "Accepted");
+    GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "box tool renders");
     Check(panel->GetObservedState()["editMode"].toInt() == 1, "changing crop shape preserves KeepInside mode");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "first crop entry frames its controls through events without a separate view reset");
@@ -747,8 +757,7 @@ void CheckCropWorkflow(TestWindow& window)
     Check(endpoint && endpoint->renderer && endpoint->interactor, "public crop input endpoint exists");
     const std::array<std::array<double, 3>, 10> fractions{{
         {1,.5,.5}, {0,.5,.5}, {.5,1,.5}, {.5,0,.5}, {.5,.5,1}, {.5,.5,0}, {1,1,1}, {0,0,0}, {1,0,1}, {0,1,0}}};
-    for (const auto& fraction : fractions) {
-        const auto beforeDrag = panel->GetObservedState()["nodeCount"].toString().toULongLong();
+    const auto drag=[&](const std::array<double,3>& fraction) {
         std::array<double, 3> world = original.origin;
         for (int row = 0; row < 3; ++row) for (int axis = 0; axis < 3; ++axis)
             world[row] += original.direction[row*3+axis] * original.spacing[axis]
@@ -759,11 +768,15 @@ void CheckCropWorkflow(TestWindow& window)
         endpoint->interactor->SetEventPosition(x, y); endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
         endpoint->interactor->SetEventPosition(x+8, y); endpoint->interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
         endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
-        if (Wait([&] { return panel->GetObservedState()["nodeCount"].toString().toULongLong() > beforeDrag
+    };
+    for (const auto& fraction : fractions) {
+        const auto beforeDrag = panel->GetObservedState()["operationCount"].toString().toULongLong();
+        drag(fraction);
+        if (Wait([&] { return panel->GetObservedState()["operationCount"].toString().toULongLong() > beforeDrag
                 && panel->GetObservedState()["framesReady"].toBool(); }, 1500)
-                && panel->GetObservedState()["nodeCount"].toString().toULongLong() >= 3) break;
+                && panel->GetObservedState()["operationCount"].toString().toULongLong() >= 3) break;
     }
-    const auto count = panel->GetObservedState()["nodeCount"].toString().toULongLong();
+    const auto count = panel->GetObservedState()["operationCount"].toString().toULongLong();
     if (!count) {
         panel->onObserve();
         std::cerr << "Crop diagnostic: " << GetJsonText(panel->GetObservedState()).toStdString()
@@ -771,51 +784,63 @@ void CheckCropWorkflow(TestWindow& window)
         for (const auto& scene : window.GetSession()->GetSceneViewStates()) std::cerr << scene.id << " epoch " << scene.sceneEpoch
             << "/" << scene.renderedEpoch << " interacting=" << (scene.presentation && scene.presentation->isInteracting) << std::endl;
     }
-    Check(count >= 2, "actual VTK drags commit multiple crop nodes without periodic polling");
-    auto* tree = panel->findChild<QTreeWidget*>("sceneNodes"); tree->expandAll();
-    QTreeWidgetItem* historyNode = nullptr;
-    for (QTreeWidgetItemIterator it(tree); *it; ++it) {
-        const auto value = (*it)->data(0, Qt::UserRole).toJsonObject();
-        if (value["id"].toString().startsWith("crop-history:") && value["patches"].toObject()["Node"].toObject()["nodeCount"].toString() == QString::number(count-1)) { historyNode = *it; break; }
-    }
-    Check(historyNode != nullptr, "crop history is represented by selectable scene nodes");
-    ClickNode(tree, historyNode);
-    Check(panel->GetParameters()["nodeCount"].toString() == QString::number(count-1), "history selection supplies exact node parameter");
-    const auto selectedHistory = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    window.SetViewsVisible(false);
-    panel->findChild<QPushButton*>("action_Node")->click();
-    CheckIdle(window);
-    Check(!window.GetRecords().GetRecord(selectedHistory)["isTerminal"].toBool(), "hidden crop waits for render without notification spin");
-    window.SetViewsVisible(true); GetComplete(window, selectedHistory, "Succeeded");
-    GetComplete(window, Click(window, "Crop", "Next"), "Succeeded");
-    GetComplete(window, Click(window, "Crop", "Previous"), "Succeeded");
-    Check(panel->GetObservedState()["nodeCount"].toString().toULongLong() == count-1, "undo observes committed history cursor");
-    GetComplete(window, Click(window, "Crop", "Next"), "Succeeded");
-    GetComplete(window, Click(window, "Crop", "ResetPreview"), "Succeeded");
-    Check(panel->GetObservedState()["nodeCount"].toString() == "0", "reset preview is reversible undo-all");
-    GetComplete(window, Send(window, "Crop", "Node", {{"nodeCount", QString::number(count)}}), "Succeeded");
-    GetComplete(window, Send(window, "Crop", "Node", {{"nodeCount", "999"}}), "Rejected");
-    const auto beforeDelete = panel->GetObservedState()["operationIndices"].toArray();
-    GetComplete(window, Send(window, "Crop", "Node", {{"nodeCount", QString::number(count-1)}}), "Succeeded");
-    QTreeWidgetItem* deletedNode = nullptr;
-    for (QTreeWidgetItemIterator it(tree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["patches"].toObject()["DeleteNode"].toObject()["operationIndex"] == beforeDelete.last()) { deletedNode = *it; break; }
-    Check(deletedNode != nullptr, "redo preview node exposes deletion by stable operation identity");
-    GetComplete(window, ClickNodeAction(window, tree, deletedNode, "DeleteNode"), "Succeeded");
-    auto expectedRemaining = beforeDelete; expectedRemaining.removeLast();
-    Check(panel->GetObservedState()["operationIndices"].toArray() == expectedRemaining
-        && panel->GetObservedState()["nodeCount"].toString().toULongLong() == count-1, "context deletion preserves every other node and the current preview prefix");
-    GetComplete(window, Send(window, "Crop", "DeleteNode", {{"operationIndex", beforeDelete.last()}}), "Rejected");
+    Check(count >= 2,"actual VTK drags create immutable crop history nodes");
+    const auto history=panel->GetObservedState()["nodes"].toArray();
+    const auto currentNode=panel->GetObservedState()["appliedHead"].toString();
+    QString otherNode,rootNode;
+    for(const auto item:history){const auto node=item.toObject();if(node["parentNodeId"].toString()=="0")rootNode=node["nodeId"].toString();
+        else if(node["nodeId"].toString()!=currentNode)otherNode=node["nodeId"].toString();}
+    Check(!otherNode.isEmpty()&&!rootNode.isEmpty(),"history exposes stable branch and Root IDs");
+    auto* tree=panel->findChild<QTreeWidget*>("sceneNodes");tree->expandAll();QTreeWidgetItem* historyNode=nullptr;
+    for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()["Node"].toObject()["nodeId"].toString()==otherNode){historyNode=*it;break;}
+    Check(historyNode!=nullptr,"crop tree exposes selectable stable nodes");ClickNode(tree,historyNode);
+    Check(panel->GetParameters()["nodeId"].toString()==otherNode,"scene selection supplies stable node identity");
+    const auto selectedHistory=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+    window.SetViewsVisible(false);panel->findChild<QPushButton*>("action_Node")->click();CheckIdle(window);
+    Check(!window.GetRecords().GetRecord(selectedHistory)["isTerminal"].toBool(),"hidden crop waits for a presented frame without notification spin");
+    window.SetViewsVisible(true);GetComplete(window,selectedHistory,"Succeeded");
+    Check(panel->GetObservedState()["appliedHead"].toString()==otherNode&&panel->GetObservedState()["renderedHead"].toString()==otherNode,"selected node and presented node agree");
+    GetComplete(window,Click(window,"Crop","Previous"),"Succeeded");
+    GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
+    GetComplete(window,Click(window,"Crop","ResetPreview"),"Succeeded");
+    Check(panel->GetObservedState()["appliedHead"].toString()==rootNode,"Root selection retains the tree");
+    int rootChildren=0;for(const auto item:history)rootChildren+=item.toObject()["parentNodeId"].toString()==rootNode;
+    GetComplete(window,Click(window,"Crop","Next"),rootChildren==1?"Succeeded":"Rejected");
+    GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
+    GetComplete(window,Send(window,"Crop","Node",{{"nodeId","18446744073709551615"}}),"Rejected");
+    // 从 Root 再次开始实际拖动，显式创建分支；连续拖动可以合法地形成单条路径。
+    GetComplete(window,Click(window,"Crop","ResetPreview"),"Succeeded");
+    GetComplete(window,Click(window,"Crop","Box"),"Succeeded");
+    Check(Wait([&]{return panel->GetObservedState()["framesReady"].toBool();}),"branch widget renders");
+    for(const auto& fraction:fractions){drag(fraction);
+        if(Wait([&]{return panel->GetObservedState()["nodes"].toArray().size()>history.size()
+            &&panel->GetObservedState()["framesReady"].toBool();},1500))break;}
+    const auto pruneNode=panel->GetObservedState()["appliedHead"].toString();
+    const auto branchHistory=panel->GetObservedState()["nodes"].toArray();
+    Check(pruneNode!=rootNode&&pruneNode!=currentNode&&branchHistory.size()>history.size(),"editing Root creates an independent branch while retaining the original path");
+    GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
+    QTreeWidgetItem* prunedNode=nullptr;for(QTreeWidgetItemIterator it(tree);*it;++it)
+        if((*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()["PruneSubtree"].toObject()["nodeId"].toString()==pruneNode){prunedNode=*it;break;}
+    Check(prunedNode!=nullptr,"branch context action uses Prune with stable identity");
+    GetComplete(window,ClickNodeAction(window,tree,prunedNode,"PruneSubtree"),"Succeeded");
+    const auto remaining=panel->GetObservedState()["nodes"].toArray();bool exact=remaining.size()==branchHistory.size()-1;
+    for(const auto item:remaining)exact=exact&&item.toObject()["nodeId"].toString()!=pruneNode;
+    Check(exact&&panel->GetObservedState()["appliedHead"].toString()==currentNode,"pruning another branch preserves the current node and all other identities");
+    GetComplete(window,Send(window,"Crop","PruneSubtree",{{"nodeId",pruneNode}}),"Rejected");
     GetComplete(window, Click(window, "Crop", "FinishEditing"), "PreviewConfirmed");
-    const auto published = GetComplete(window, Click(window, "Crop", "BuildResult"), "Published")["result"].toObject();
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"widget removal finishes rendering before publication");
+    const auto published = GetComplete(window, Send(window, "Crop", "BuildResult", {{"nodeId",currentNode}}), "Published")["result"].toObject();
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "crop publish keeps source selected");
     GetComplete(window, Click(window, "Crop", "SelectOutput"), "Succeeded");
     Check(GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision) == published["output"].toString(), "select uses exact published crop output");
     GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "restore returns exact crop source");
-    GetComplete(window, Click(window, "Crop", "RestoreSource"), "Rejected");
+    GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
     window.GetWorkflow().onNavigate("Crop", "Box", {});
     QCoreApplication::processEvents(); window.grab().save("scene-ui-crop.png");
     CheckIdle(window);
+    GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
+    Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
 }
 void StartSelfTest(TestWindow& window)
 {
@@ -1081,7 +1106,9 @@ void StartSelfTest(TestWindow& window)
         bool found = false;
         for (const auto child : nodes.first().toObject()["children"].toArray()) if (child.toObject()["id"] == "published-graph")
             for (const auto row : child.toObject()["children"].toArray()) found = found || row.toObject()["title"].toString().startsWith(GetModuleText(name));
-        Check(found, "each feature graph includes its real producer records with Chinese business names");
+        if(QString(name)=="Crop")
+            Check(!found&&panel->GetObservedState()["documents"].toArray().isEmpty(),"closed crop documents release producer records from the live graph");
+        else Check(found, "each feature graph includes its real producer records with Chinese business names");
     }
     window.SetViewsVisible(true);
     Check(Wait([&] {

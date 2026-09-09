@@ -4,6 +4,8 @@
 #include "Host/Internal/HostTransferCodec.h"
 
 #include "App/AppStateEvents.h"
+#include "App/AppState.h"
+#include "Data/DataPayloads.h"
 #include "App/AppTypes.h"
 #include "App/Services/AppPorts.h"
 #include "App/Services/AppServiceFactory.h"
@@ -16,6 +18,7 @@
 #include "Render/Contracts/RenderBindPort.h"
 
 #include <vtkRenderer.h>
+#include <vtkPolyData.h>
 #include <vtkRenderWindow.h>
 
 #include <algorithm>
@@ -25,6 +28,7 @@
 #include <exception>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -58,6 +62,9 @@ public:
         const HostViewTarget& target) const;
     std::weak_ptr<AppSessionPort> GetSessionPort() const;
     bool StopView(std::string_view viewId);
+    FeatureDataTransitionState StartDataTransition(std::uint64_t ownerId, FeatureDataTransitionRequest request);
+    FeatureDataTransitionState SetDataTransition(std::uint64_t ownerId, std::uint64_t requestId);
+    FeatureDataTransitionState StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId);
     LoadCommitResult SetLoadCommit(
         LoadEventKind loadKind,
         std::uint64_t transactionRevision,
@@ -116,6 +123,7 @@ public:
     bool SendViewUpdates(const HostViewTarget& target) const;
     bool StartStandaloneView() const;
     std::shared_ptr<AppTaskExecutor> GetTaskExecutor() const;
+    bool SetDataTasksStopping();
     bool StopLease();
     bool StopRoutes();
     bool SetInitialVisibility() const;
@@ -183,6 +191,7 @@ private:
         bool DetachRenderEffect(
             const RenderEffect* effect) override;
         bool SetRenderNeeded() override;
+        bool PollRenderResources() override;
 
     private:
         std::shared_ptr<FeatureViewService> GetPort() const;
@@ -250,6 +259,18 @@ private:
         m_featureViews;
     std::shared_ptr<ViewDirectory> m_directory;
     std::unique_ptr<LoadCommitCoordinator> m_loadCommit;
+    struct FeatureTransition final {
+        std::uint64_t ownerId = 0;
+        FeatureDataTransitionRequest request;
+        LoadCommitRequest load;
+        DataReadyState ready;
+        FeatureDataTransitionState state;
+        std::shared_ptr<const DataResourceLease> sourceLease;
+        bool isAdvancing = false;
+    };
+    std::shared_ptr<FeatureTransition> m_featureTransition;
+    std::weak_ptr<AbstractDataManager> m_transitionData;
+    std::weak_ptr<SharedInteractionState> m_transitionState;
     std::shared_ptr<AppTaskExecutor> m_taskExecutor;
     std::shared_ptr<RenderStrategyServices> m_renderServices;
     std::unique_ptr<HostFrameRuntime> m_frameRuntime;
@@ -765,7 +786,7 @@ bool HostViewRuntimeRegistry::Impl::Build(
                     [weakExecutor](RenderLaneWork work) {
                         return SendRenderTask(
                             weakExecutor.lock(), std::move(work));
-                    });
+                    }, core.sharedDataMgr);
         }
     }
     catch (...) {
@@ -811,6 +832,8 @@ bool HostViewRuntimeRegistry::Impl::Build(
     }
     m_loadCommit = std::make_unique<LoadCommitCoordinator>(
         core.sharedDataMgr);
+    m_transitionData = core.sharedDataMgr;
+    m_transitionState = core.sharedState;
     m_frameRuntime->BuildSceneStates();
     m_frameRuntime->SetDataRead(core.sharedDataMgr);
     return true;
@@ -1018,6 +1041,10 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
         return {};
     }
 
+    // 显式文件加载取消尚未发布的 Feature 输入候选；晚到的 Feature poll 不重新启动它。
+    if (m_featureTransition) {
+        (void)StopDataTransition(m_featureTransition->ownerId, m_featureTransition->request.requestId);
+    }
     LoadCommitRequest request;
     request.loadKind = loadKind;
     request.transactionRevision = transactionRevision;
@@ -1042,6 +1069,148 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
         return isStopped;
     };
     return m_loadCommit->SetLoadCommit(request);
+}
+
+FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(
+    const std::uint64_t ownerId, FeatureDataTransitionRequest request)
+{
+    if(request.input&&request.renderInput)return {};
+    if(!request.renderInput)request.renderInput=VtkRenderInputView::FromImage(request.input);
+    request.input.reset();
+    const auto data = m_transitionData.lock();
+    const auto state = m_transitionState.lock();
+    if (!m_lease || !m_lease->GetIsOwnerThread() || !m_lease->GetIsActive()
+        || !ownerId || !request.requestId || !request.renderInput || !request.renderInput->data
+        || !request.renderInput->GetValid()
+        || !request.renderInput->binding || !request.commit || !m_loadCommit || m_loadCommit->GetIsPending()
+        || m_featureTransition || !data || !state || m_views.empty()) return {};
+    // primary 是 Session 级输入，必须准备全部必要 View，不能只切 Feature 的局部目标。
+    const auto primary = std::find_if(request.transaction.bindings.begin(), request.transaction.bindings.end(),
+        [](const auto& binding) { return binding.binding == primaryVolumeBinding; });
+    if (request.transaction.policy != DataPublishPolicy::RequireCurrentInputs
+        || primary == request.transaction.bindings.end() || !primary->isTargetChecked
+        || primary->target != std::optional<DataRevisionRef>{request.renderInput->data->self}
+        || request.renderInput->binding->name != primaryVolumeBinding
+        || request.renderInput->binding->target != primary->target
+        || primary->expectedRevision == std::numeric_limits<DataBindingRevision>::max()
+        || request.renderInput->binding->revision != primary->expectedRevision + 1) return {};
+    for(std::size_t index=0;index<request.effects.size();++index) {
+        const auto& effect=request.effects[index];
+        if(effect.viewId.empty()||!GetViewById(effect.viewId)
+            ||std::any_of(request.effects.begin(),request.effects.begin()+index,[&](const auto& prior){return prior.viewId==effect.viewId;}))return {};
+    }
+    auto transition = std::make_shared<FeatureTransition>();
+    transition->ownerId = ownerId;
+    transition->request = std::move(request);
+    const auto canonical = data->GetData(data->GetDataGraph(), transition->request.renderInput->data->self);
+    if (!canonical || canonical->payload != transition->request.renderInput->data->payload) return {};
+    if (GetDataEntityIdValid(canonical->lifetimeScope)) {
+        const auto lifetime = canonical->lifetime.lock();
+        transition->sourceLease = lifetime ? lifetime->StartResourceUse(canonical->self, "input-transition") : nullptr;
+        if (!transition->sourceLease) return {FeatureRunStatus::Failed, DataCommitFailure::ResultRetired, {}};
+    }
+    const auto& input=transition->request.renderInput;
+    transition->ready.dataRevision=input->data->self;
+    transition->ready.bindingRevision=input->binding->revision;
+    transition->ready.cursorWorld=state->GetCursorWorld();
+    if(input->image) {
+        const auto payload=std::dynamic_pointer_cast<const ImageGrid3DPayload>(input->data->payload);
+        if(!payload||!payload->GetValid()||!input->imageView)return {};
+        transition->ready.scalarRange=payload->GetScalarRange();
+        transition->ready.spacing=payload->GetGeometry().spacing;
+    } else {
+        const auto payload=std::dynamic_pointer_cast<const SurfaceMeshPayload>(input->data->payload);
+        if(!payload||!payload->GetValid()||!input->meshView||input->mesh->GetNumberOfPoints()==0)return {};
+        transition->ready.hasImageGeometry=false;
+        input->mesh->GetCenter(transition->ready.cursorWorld.data());
+    }
+    transition->load.ownerId = ownerId;
+    transition->load.transactionRevision = transition->request.requestId;
+    transition->load.sourceRevision = transition->request.renderInput->data->self;
+    transition->load.renderInput = transition->request.renderInput;
+    for (const auto& view : m_views) {
+        if (!view.isAvailable || !view.dataStage) return {};
+        transition->load.stages.push_back(view.dataStage);
+        const auto effect=std::find_if(transition->request.effects.begin(),transition->request.effects.end(),
+            [&](const auto& item){return item.viewId==view.config.id;});
+        transition->load.effects.push_back(effect==transition->request.effects.end()?std::optional<RenderEffectChange>{}:effect->change);
+    }
+    transition->load.stopViews = [this] {
+        bool stopped = true;
+        for (auto& view : m_views) {
+            view.isAvailable = false;
+            if (view.context) stopped = view.context->StopInput() && stopped;
+        }
+        return stopped;
+    };
+    const std::weak_ptr<FeatureTransition> weak = transition;
+    transition->load.onPublish = [weak, data, state] {
+        const auto active = weak.lock();
+        if (!active) return false;
+        auto result = data->SetDataCommit(std::move(active->request.transaction));
+        active->state.commitFailure = result.failureReason;
+        active->state.blockers = std::move(result.blockers);
+        if (result.status != DataCommitStatus::Succeeded) return false;
+        active->request.commit->SetDataCommitted(result);
+        state->SetRenderDataReady(active->ready);
+        return true;
+    };
+    transition->state = {FeatureRunStatus::Preparing, DataCommitFailure::None, {}};
+    m_featureTransition = transition;
+    transition->isAdvancing = true;
+    const auto result = m_loadCommit->SetLoadCommit(transition->load);
+    transition->isAdvancing = false;
+    if (result.status != LoadCommitStatus::Preparing) {
+        m_featureTransition.reset();
+        FeatureDataTransitionState failure;
+        failure.status=result.status==LoadCommitStatus::Cancelled?FeatureRunStatus::Cancelled:FeatureRunStatus::Failed;
+        failure.commitFailure=DataCommitFailure::None;failure.effectFailure=result.effectFailure;
+        return failure;
+    }
+    return transition->state;
+}
+
+FeatureDataTransitionState HostViewRuntimeRegistry::Impl::SetDataTransition(
+    const std::uint64_t ownerId, const std::uint64_t requestId)
+{
+    if (!m_lease || !m_lease->GetIsOwnerThread() || !m_lease->GetIsActive() || !m_loadCommit || !m_featureTransition
+        || m_featureTransition->ownerId != ownerId || m_featureTransition->request.requestId != requestId) {
+        return {FeatureRunStatus::Cancelled, DataCommitFailure::None, {}};
+    }
+    const auto active = m_featureTransition;
+    if (active->isAdvancing) return {FeatureRunStatus::Running, DataCommitFailure::None, {}};
+    struct AdvanceGuard final {
+        bool& value;
+        explicit AdvanceGuard(bool& flag) : value(flag) { value = true; }
+        ~AdvanceGuard() { value = false; }
+    } guard(active->isAdvancing);
+    const auto data = m_transitionData.lock();
+    if (!data) return {};
+    auto batch = data->StartDataChanges();
+    if (!batch) return {};
+    const auto result = m_loadCommit->SetLoadCommit(active->load);
+    if (result.status == LoadCommitStatus::Preparing) return active->state;
+    active->state.effectFailure=result.effectFailure;
+    active->state.status = result.status == LoadCommitStatus::Succeeded ? FeatureRunStatus::Succeeded
+        : result.status == LoadCommitStatus::Cancelled ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
+    m_featureTransition.reset();
+    // participant 已在 graph 交换之后、此 batch 的通知之前无失败接管状态。
+    return std::move(active->state);
+}
+
+FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StopDataTransition(
+    const std::uint64_t ownerId, const std::uint64_t requestId)
+{
+    if (!m_lease || !m_lease->GetIsOwnerThread()) return {};
+    if (!m_featureTransition || m_featureTransition->ownerId != ownerId
+        || m_featureTransition->request.requestId != requestId) {
+        return {FeatureRunStatus::Cancelled, DataCommitFailure::None, {}};
+    }
+    if (!m_loadCommit) return {};
+    if (m_featureTransition->isAdvancing) return {FeatureRunStatus::Running, DataCommitFailure::None, {}};
+    (void)m_loadCommit->SetLoadCancelled(requestId, LoadCommitFailure::Cancelled, ownerId);
+    m_featureTransition.reset();
+    return {FeatureRunStatus::Cancelled, DataCommitFailure::None, {}};
 }
 
 LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCancelled(
@@ -1633,6 +1802,15 @@ HostViewRuntimeRegistry::Impl::GetTaskExecutor() const
         ? m_taskExecutor : nullptr;
 }
 
+bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
+{
+    if (m_lease && !m_lease->GetIsOwnerThread()) return false;
+    bool stopping=true;
+    for (const auto& view:m_views)
+        stopping=view.taskControl && view.taskControl->SetDataTaskStopping() && stopping;
+    return stopping;
+}
+
 bool HostViewRuntimeRegistry::Impl::StopLease()
 {
     if (m_lease && !m_lease->GetIsOwnerThread()) return false;
@@ -1651,6 +1829,9 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
         return false;
     }
 
+    if (m_featureTransition) {
+        (void)StopDataTransition(m_featureTransition->ownerId, m_featureTransition->request.requestId);
+    }
     // 所有 lane 先同时收到取消，再共用同一个绝对 deadline；超时保留整个 aggregate。
     constexpr auto taskStopLimit = std::chrono::seconds(2);
     const auto taskDeadline =
@@ -2063,6 +2244,11 @@ HostViewRuntimeRegistry::GetTaskExecutor() const
     return m_impl ? m_impl->GetTaskExecutor() : nullptr;
 }
 
+bool HostViewRuntimeRegistry::SetDataTasksStopping()
+{
+    return m_impl && m_impl->SetDataTasksStopping();
+}
+
 bool HostViewRuntimeRegistry::StopLease()
 {
     return m_impl && m_impl->StopLease();
@@ -2113,4 +2299,25 @@ HostRenderResult HostViewRuntimeRegistry::SendFrameRender(
 std::vector<std::string> HostViewRuntimeRegistry::GetRenderViewIds() const
 {
     return m_impl ? m_impl->GetRenderViewIds() : std::vector<std::string>{};
+}
+
+FeatureDataTransitionState HostViewRuntimeRegistry::StartDataTransition(
+    std::uint64_t ownerId, FeatureDataTransitionRequest request)
+{
+    return m_impl ? m_impl->StartDataTransition(ownerId, std::move(request)) : FeatureDataTransitionState{};
+}
+FeatureDataTransitionState HostViewRuntimeRegistry::SetDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+{
+    return m_impl ? m_impl->SetDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+}
+FeatureDataTransitionState HostViewRuntimeRegistry::StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId)
+{
+    return m_impl ? m_impl->StopDataTransition(ownerId, requestId) : FeatureDataTransitionState{};
+}
+
+bool HostViewRuntimeRegistry::Impl::FeatureLeasePort::PollRenderResources()
+{
+    // Stopping closes ordinary admissions but keeps owner cleanup available.
+    const auto lease=m_lease.lock();const auto port=m_port.lock();
+    return lease&&lease->GetIsOwnerThread()&&port&&port->PollRenderResources();
 }

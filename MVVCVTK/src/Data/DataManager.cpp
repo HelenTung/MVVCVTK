@@ -1,5 +1,6 @@
 #include "DataManager.h"
 #include "Data/DataGraphStore.h"
+#include "Data/Internal/DataResourceUse.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 #include "Data/DataPayloads.h"
@@ -816,11 +817,13 @@ VtkImageGridSnapshot BaseDataManager::GetImageGrid(
     const DataGraphSnapshot& graph,
     const DataRevisionRef& ref) const
 {
-    auto view = m_impl->m_vtk->GetImageGrid(GetData(graph, ref));
+    auto data = GetData(graph, ref);
+    auto view = m_impl->m_vtk->GetImageGrid(data);
     if (!view) return {};
-    // 别名 owner 同时保留 bridge View 与其 DataRevision，避免包装视图使弱缓存过早失效。
+    // 缓存可能源于发布前的 LoadStage；VTK 对象可复用，数据身份必须来自本次正式图。
+    auto retained=std::make_shared<std::pair<DataSnapshot,VtkImageGridSnapshot>>(std::move(data),view);
     return std::make_shared<const VtkImageGridView>(VtkImageGridView{
-        graph, {}, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+        graph, {}, DataSnapshot(retained, retained->first.get()), view->image, view->validityMask });
 }
 
 VtkImageGridSnapshot BaseDataManager::GetPrimaryImage() const
@@ -828,11 +831,12 @@ VtkImageGridSnapshot BaseDataManager::GetPrimaryImage() const
     const auto graph = GetDataGraph();
     const auto binding = GetDataBinding(graph, primaryVolumeBinding);
     if (!binding || !binding->target) return {};
-    auto view = m_impl->m_vtk->GetImageGrid(
-        GetData(graph, *binding->target));
+    auto data=GetData(graph,*binding->target);
+    auto view = m_impl->m_vtk->GetImageGrid(data);
     if (!view) return {};
+    auto retained=std::make_shared<std::pair<DataSnapshot,VtkImageGridSnapshot>>(std::move(data),view);
     return std::make_shared<const VtkImageGridView>(VtkImageGridView{
-        graph, binding, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+        graph, binding, DataSnapshot(retained, retained->first.get()), view->image, view->validityMask });
 }
 
 VtkLabelMapSnapshot BaseDataManager::GetLabelMap(
@@ -849,6 +853,21 @@ VtkSurfaceMeshSnapshot BaseDataManager::GetSurfaceMesh(
     return m_impl->m_vtk->GetSurfaceMesh(GetData(graph, ref));
 }
 
+DataLifetimeState BaseDataManager::GetDataLifetime(const DataEntityId& scopeId) const
+{
+    return m_impl->m_graph->GetDataLifetime(scopeId);
+}
+
+DataLifetimeState BaseDataManager::SetDataRelease(const DataEntityId& scopeId)
+{
+    return m_impl->m_graph->SetDataRelease(scopeId);
+}
+
+std::unique_ptr<DataChangeBatch> BaseDataManager::StartDataChanges()
+{
+    return m_impl->m_graph->StartDataChanges();
+}
+
 DataEntityId BaseDataManager::CreateDataEntityId()
 {
     return m_impl->m_graph->CreateDataEntityId();
@@ -857,6 +876,12 @@ DataEntityId BaseDataManager::CreateDataEntityId()
 bool BaseDataManager::SetDataType(DataTypeDescriptor descriptor)
 {
     return m_impl->m_graph->SetDataType(std::move(descriptor));
+}
+
+std::shared_ptr<const VtkPreparedDataView> BaseDataManager::SetPreparedDataView(
+    const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared)
+{
+    return m_impl->m_vtk->SetPreparedDataView(ref, std::move(prepared));
 }
 
 DataCommitResult BaseDataManager::SetDataCommit(DataTransaction transaction)
@@ -1004,13 +1029,25 @@ ImageReadResult BaseDataManager::GetImageReadResult(
     const ImageReadRequest& request,
     const TaskStopToken& stopToken) const
 {
+    return GetImageReadResult(GetPrimaryImage(), request, stopToken);
+}
+
+ImageReadResult BaseDataManager::GetImageReadResult(
+    const VtkImageGridSnapshot& imageSnapshot,
+    const ImageReadRequest& request,
+    const TaskStopToken& stopToken) const
+{
     ImageReadResult result;
     if (stopToken.GetIsStopped()) {
         result.error = ImageReadError::Cancelled;
         return result;
     }
-    auto planResult = Impl::GetReadPlan(
-        GetPrimaryImage(), request);
+    const auto readLease = StartDataResourceUse(imageSnapshot ? imageSnapshot->data : nullptr, "image-read");
+    if (imageSnapshot && !readLease) {
+        result.error = ImageReadError::ResultRetired;
+        return result;
+    }
+    auto planResult = Impl::GetReadPlan(imageSnapshot, request);
     result.error = planResult.error;
     result.requiredBytes = planResult.requiredBytes;
     if (!planResult.plan
@@ -1068,8 +1105,13 @@ ImageReadChunkResult BaseDataManager::GetImageReadChunk(
         result.error = ImageReadError::Cancelled;
         return result;
     }
-    auto planResult = Impl::GetReadPlan(
-        GetPrimaryImage(), request);
+    const auto imageSnapshot = GetPrimaryImage();
+    const auto readLease = StartDataResourceUse(imageSnapshot ? imageSnapshot->data : nullptr, "image-read");
+    if (imageSnapshot && !readLease) {
+        result.error = ImageReadError::ResultRetired;
+        return result;
+    }
+    auto planResult = Impl::GetReadPlan(imageSnapshot, request);
     result.error = planResult.error;
     result.requiredBytes = planResult.requiredBytes;
     if (!planResult.plan
@@ -1302,6 +1344,19 @@ bool BaseDataManager::ExportSlices(
     const std::array<double, 16>& modelToWorldMatrix,
     const TaskStopToken& stopToken)
 {
+    return ExportSlices(GetPrimaryImage(), dirPath, orientation, windowLevel, modelToWorldMatrix, stopToken);
+}
+
+bool BaseDataManager::ExportSlices(
+    const VtkImageGridSnapshot& imageSnapshot,
+    const std::string& dirPath,
+    Orientation orientation,
+    const WindowLevelParams& windowLevel,
+    const std::array<double, 16>& modelToWorldMatrix,
+    const TaskStopToken& stopToken)
+{
+    const auto readLease = StartDataResourceUse(imageSnapshot ? imageSnapshot->data : nullptr, "slice-export");
+    if (!readLease) return false;
 
     // 导出路径：1. 固定 current 批次并把 modelToWorld 取逆；2. 重采样到轴对齐体数据；
     // 3. 按 Orientation 将二维像素映射回 X/Y/Z；4. 应用窗宽窗位并逐层写 PNG。
@@ -1313,7 +1368,7 @@ bool BaseDataManager::ExportSlices(
 
     auto imageCopy = vtkSmartPointer<vtkImageData>::New();
     vtkSmartPointer<vtkImageData> maskCopy;
-    const auto currentState = GetPrimaryImage();
+    const auto& currentState = imageSnapshot;
     if (!currentState || !currentState->image) return false;
     imageCopy->ShallowCopy(currentState->image);
     if (currentState->validityMask) {
@@ -1505,7 +1560,8 @@ bool BaseDataManager::ExportData(
     const DataExportParams& params,
     const TaskStopToken& stopToken)
 {
-    if (!imageSnapshot || !imageSnapshot->image
+    const auto readLease = StartDataResourceUse(imageSnapshot ? imageSnapshot->data : nullptr, "data-export");
+    if (!readLease || !imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0
         || outputDir.empty()
         || stopToken.GetIsStopped()

@@ -1,6 +1,7 @@
 #include "Render/Support/BaseVisualStrategy.h"
 
 #include "Data/ImageProcessor.h"
+#include "Render/Support/RenderFrameLifetime.h"
 
 #include <vtkMatrix4x4.h>
 #include <vtkProp3D.h>
@@ -31,6 +32,10 @@ bool BaseVisualStrategy::CreateRenderBinding()
     if (!effect || !m_effectRenderer) return false;
     auto target = GetRenderEffectTarget();
     target.inputStamp = m_renderInputStamp;
+    const std::weak_ptr<RenderFrameLifetime> frameLifetime=m_frameLifetime;
+    target.queueFrameCompletion=[frameLifetime](std::function<void(RenderFrameOutcome)> callback) {
+        const auto frames=frameLifetime.lock();return frames&&frames->QueueCompletion(std::move(callback));
+    };
     if (target.targetKind == RenderTargetKind::Unknown
         || !target.mapper || !target.shaderProperty) {
         return false;
@@ -221,9 +226,16 @@ void BaseVisualStrategy::AttachRenderer(
         renderer->AddViewProp(prop);
     }
     m_effectRenderer = renderer;
+    m_frameLifetime=RenderFrameLifetime::Create(renderer);
     if (!m_renderEffect.expired() && !m_renderBinding) {
         (void)CreateRenderBinding();
     }
+}
+
+void BaseVisualStrategy::DetachRendererForStage(vtkSmartPointer<vtkRenderer> renderer)
+{
+    if (!renderer) return;
+    for (const auto& prop:m_managedProps) renderer->RemoveViewProp(prop);
 }
 
 void BaseVisualStrategy::DetachRenderer(
@@ -234,6 +246,7 @@ void BaseVisualStrategy::DetachRenderer(
         == renderer.GetPointer()) {
         ClearRenderBinding();
         m_effectRenderer = nullptr;
+        m_frameLifetime.reset();
     }
     for (const auto& prop : m_managedProps) {
         renderer->RemoveViewProp(prop);

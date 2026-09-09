@@ -1,4 +1,5 @@
 #include "Host/MetrologyAlignmentHostFeature.h"
+#include "../../common/FeatureResultScopes.h"
 #include "AlignmentData.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
@@ -126,6 +127,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return false;
         m_observer = 0;
         ClearDisplay();
+        if (!m_resultScopes.Clear(*m_data)) return false;
         m_data.reset();
         m_views.reset();
         m_host.reset();
@@ -353,7 +355,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                 {
                     CommitGuard guard(m_isCommitting);
                     try {
-                        const auto commit = m_data->SetDataCommit(std::move(tx));
+                        const auto commit = m_resultScopes.Commit(*m_data,std::move(tx));
                         result.status = commit.status == DataCommitStatus::Succeeded
                                             ? AlignmentStatus::FullyDetermined
                                             : AlignmentStatus::Stale;
@@ -424,7 +426,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                 DataCommitResult commit;
                 {
                     CommitGuard guard(m_isCommitting);
-                    commit = m_data->SetDataCommit(std::move(tx));
+                    commit = m_resultScopes.Commit(*m_data,std::move(tx));
                 }
                 if (commit.status != DataCommitStatus::Succeeded) {
                     result.status = commit.failureReason == DataCommitFailure::ExpectationFailed
@@ -570,7 +572,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         {
             CommitGuard guard(m_isCommitting);
             try {
-                commit = m_data->SetDataCommit(std::move(tx));
+                commit = m_resultScopes.Commit(*m_data,std::move(tx));
             } catch (...) {
                 const auto published =
                     m_data->GetDataGraph().view->GetData({entity, generation + 1});
@@ -613,7 +615,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         {
             CommitGuard guard(m_isCommitting);
             try {
-                commit = m_data->SetDataCommit(std::move(tx));
+                commit = m_resultScopes.Commit(*m_data,std::move(tx));
             } catch (...) {
                 const auto current =
                     AlignmentData::GetBinding(m_data->GetDataGraph(), record.input.scope);
@@ -696,6 +698,7 @@ class MetrologyAlignmentHostFeature::Impl final {
     AlignmentState m_state;
     std::thread::id m_owner;
     std::shared_ptr<TrustedDataPort> m_data;
+    FeatureInternal::ResultScopes m_resultScopes;
     std::shared_ptr<FeatureViewDirectory> m_views;
     // 持有挂载端口；worker/observer 仍只捕获弱引用，解绑后不延长其生命期。
     std::shared_ptr<FeatureHostControl> m_host;

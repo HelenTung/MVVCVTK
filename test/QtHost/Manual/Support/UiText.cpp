@@ -18,9 +18,12 @@ QString GetActionDescription(const QString& module, const QString& action)
         {"Crop.RemoveInside", "移除盒内部或平面法线正半空间；直接切换，不需要再次执行。"},
         {"Crop.PositionOnly", "只调整工具位置，不产生裁剪历史。"},
         {"Crop.FinishEditing", "确认当前已提交的裁剪历史并关闭工具，体数据尚未发布。"},
-        {"Crop.Node", "切换到场景树选中的历史节点；后续节点保留，仍可重做。"},
-        {"Crop.DeleteNode", "删除选中的预览操作，保留其余节点与顺序；受影响的当前预览会重新计算。原始数据和已物化基线不属于可删除的预览。"},
-        {"Crop.ResetPreview", "将当前历史游标退回零，保留可重做节点。"},
+        {"Crop.Node", "切换到选中的稳定节点；已有分支保持不变。"},
+        {"Crop.PruneSubtree", "删除选中节点及其后续分支；已发布结果仍依赖该路径时拒绝删除。"},
+        {"Crop.PruneDescendants", "保留选中节点，删除其所有后续分支。"},
+        {"Crop.PruneOutsidePaths", "仅保留从原始节点到所选节点的路径；受保护的结果路径不会被删除。"},
+        {"Crop.RestoreSource", "恢复该文档的固定源数据，并等待派生结果与真实资源释放。"},
+        {"Crop.ResetPreview", "选择原始节点，保留历史分支，并释放文档的派生结果。"},
         {"Crop.BuildResult", "从已确认历史生成独立裁剪数据；发布后可选择使用结果。"},
         {"Part.EditSelected", "将场景树选中的零件设为唯一编辑目标，并打开零件编辑页。"},
         {"Part.Highlight", "显示并高亮场景树选中的零件，同时取消上一个零件的高亮；无需勾选参数。零件透明度保持原值，体渲染中显示半透明定位标记。"},
@@ -58,13 +61,16 @@ QString GetActionText(const QString& module, const QString& action)
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
         {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"},
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
-        {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.DeleteNode", "删除此预览节点"}, {"Crop.Node", "跳转到此节点"}};
+        {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
         {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
         {"ReadLabelRegion", "读取标签区域"}, {"CreateMask", "创建测试掩码"},
         {"Set", "设置视图"}, {"Cursor", "设置游标"}, {"Reset", "重置视图"}, {"State", "查看状态"},
-        {"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Mode", "设置裁剪保留模式"}, {"Node", "切换裁剪历史节点"},
+        {"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"},
+        {"CreateDocument", "新建裁剪文档"}, {"ActivateDocument", "切换裁剪文档"}, {"CloseDocument", "关闭裁剪文档"},
+        {"PruneSubtree", "删除此子树"}, {"PruneDescendants", "删除后续分支"}, {"PruneOutsidePaths", "保留指定路径"}, {"SaveRoi", "保存为区域"},
+        {"NextHistoryPage", "下一页裁剪历史"}, {"FirstHistoryPage", "回到历史首页"}, {"Mode", "设置裁剪保留模式"}, {"Node", "切换裁剪历史节点"},
         {"ClearPolyData", "清除裁剪网格"}, {"SetPolyData", "导入裁剪网格"}, {"BuildResult", "发布裁剪结果"},
         {"RestoreSource", "恢复源数据"}, {"FinishEditing", "确认裁剪预览"}, {"ResetPreview", "撤销全部裁剪"},
         {"EditSelected", "编辑选定零件"}, {"OpenAlignment", "进入计量对齐"},
@@ -102,7 +108,7 @@ QString GetParameterText(const QString& key)
         {"mode", "显示模式"}, {"iso", "显示等值阈值"}, {"opacity", "不透明度（0～1）"}, {"quality", "显示质量"},
         {"axes", "显示坐标轴"}, {"windowLevel", "窗宽与窗位"}, {"transfer", "颜色与透明度传递函数"},
         {"visibility", "辅助元素可见性"}, {"world", "游标世界坐标"}, {"axis", "作用轴"},
-        {"removalMode", "裁剪保留模式"}, {"shape", "裁剪工具"}, {"nodeCount", "保留的历史节点数"}, {"plyPath", "裁剪网格路径（PLY）"},
+        {"removalMode", "裁剪保留模式"}, {"shape", "裁剪工具"}, {"nodeId", "裁剪节点编号"}, {"documentId", "裁剪文档编号"}, {"inputRoi", "输入区域修订（可选）"}, {"plyPath", "裁剪网格路径（PLY）"},
         {"isoMode", "分析阈值方式"}, {"dataRangeRatio", "灰度范围比例"}, {"absoluteIsoValue", "绝对灰度阈值"},
         {"backgroundMean", "背景灰度均值"}, {"materialMean", "材料灰度均值"}, {"filter", "启用孔隙过滤"},
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
@@ -192,7 +198,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
-    if (module == "Crop" && key == "shape") return {{"Box", "盒裁剪"}, {"Plane", "平面裁剪"}};
+    if (module == "Crop" && key == "shape") return {{"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"}};
     if (key == "viewId") return {{"primary-3d", "主三维"}, {"composite-volume", "体渲染"},
         {"slice-top-down", "上下切片"}, {"slice-front-back", "前后切片"}, {"slice-left-right", "左右切片"}};
     if (key == "componentSelection") return {{"Largest", "最大连通分量"}, {"Seeded", "种子所在分量"}, {"All", "全部分量"}};
@@ -209,7 +215,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 QStringList GetBoundParameters(const QString& module, const QString& action)
 {
     if (action == "UseData" || action == "GraphInfo") return {"graphRevision"};
-    if (module == "Crop") return {"nodeCount", "operationIndex"};
+    if (module == "Crop") return {"nodeId", "documentId"};
     if (module == "PartEdit") {
         QStringList fields{"target", "expectedLabelMap", "expectedCatalogRevision", "previewId"};
         if (action == "Merge") fields.append("parts");

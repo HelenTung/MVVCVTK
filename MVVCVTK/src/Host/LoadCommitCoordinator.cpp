@@ -5,11 +5,13 @@
 
 #include <algorithm>
 #include <vtkImageData.h>
+#include <vtkPolyData.h>
 #include <iostream>
 #include <utility>
 
 struct LoadCommitCoordinator::Transaction final {
     LoadCommitRequest request;
+    std::size_t attemptedCommits = 0;
 };
 
 namespace {
@@ -42,23 +44,25 @@ bool GetSameStages(
 bool ClearStages(
     const LoadCommitRequest& request,
     const bool resetCommitted,
-    const std::size_t committedCount)
+    const std::size_t committedCount) noexcept
 {
     bool isClosed = true;
     if (resetCommitted) {
         for (std::size_t index = committedCount; index > 0; --index) {
-            isClosed = request.stages[index - 1]->ResetViewStage(
-                request.transactionRevision) && isClosed;
+            try {
+                isClosed = request.stages[index - 1]->ResetViewStage(request.transactionRevision) && isClosed;
+            } catch (...) { isClosed = false; }
         }
     }
     for (auto stage = request.stages.rbegin();
         stage != request.stages.rend(); ++stage) {
-        isClosed = (*stage)->ClearDataStage(
-            request.transactionRevision) && isClosed;
+        try {
+            isClosed = (*stage)->ClearDataStage(request.transactionRevision) && isClosed;
+        } catch (...) { isClosed = false; }
     }
     if (!isClosed) {
         std::cerr << "[Host] Data stage rollback did not fully close.\n";
-        if (request.stopViews) (void)request.stopViews();
+        try { if (request.stopViews) (void)request.stopViews(); } catch (...) {}
     }
     return isClosed;
 }
@@ -73,20 +77,45 @@ LoadCommitCoordinator::LoadCommitCoordinator(
 
 LoadCommitCoordinator::~LoadCommitCoordinator() = default;
 
+bool LoadCommitCoordinator::GetIsPending() const noexcept
+{
+    return m_transaction != nullptr;
+}
+
 LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
     const LoadCommitRequest& request)
 {
+    if (m_isAdvancing) return GetResult(request, LoadCommitStatus::Failed, LoadCommitFailure::InvalidRequest);
+    struct AdvanceGuard final {
+        bool& value;
+        explicit AdvanceGuard(bool& flag) : value(flag) { value = true; }
+        ~AdvanceGuard() { value = false; }
+    } guard(m_isAdvancing);
+    try { return AdvanceLoadCommit(request); }
+    catch (...) {
+        if (m_transaction) {
+            (void)ClearStages(m_transaction->request, true, m_transaction->attemptedCommits);
+            m_transaction.reset();
+        }
+        return GetResult(request, LoadCommitStatus::Failed, LoadCommitFailure::StageFailed);
+    }
+}
+
+LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitRequest& request)
+{
+    const auto input=request.renderInput?request.renderInput:VtkRenderInputView::FromImage(request.pending);
     const bool hasValidRequest =
-        (request.loadKind == LoadEventKind::File
-            || request.loadKind == LoadEventKind::Reload)
+        ((request.ownerId == 0 && !request.onPublish
+            && (request.loadKind == LoadEventKind::File || request.loadKind == LoadEventKind::Reload))
+            || (request.ownerId != 0 && request.onPublish && request.loadKind == LoadEventKind::None))
         && request.transactionRevision != 0
         && GetDataRevisionRefValid(request.sourceRevision)
-        && request.pending
-        && request.pending->image
-        && request.pending->data
-        && request.pending->data->self == request.sourceRevision
+        && input && input->GetValid()
+        && input->data && input->data->self == request.sourceRevision
+        && (!request.renderInput || (request.ownerId!=0 && !request.pending))
         && m_dataManager
         && !request.stages.empty()
+        && (request.effects.empty()||(request.ownerId!=0&&request.effects.size()==request.stages.size()))
         && std::all_of(
             request.stages.begin(), request.stages.end(),
             [](const auto& stage) { return stage != nullptr; });
@@ -98,7 +127,7 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
     }
 
     const auto currentStage = m_dataManager->GetLoadStage();
-    if (!currentStage || currentStage->image != request.pending) {
+    if (!request.onPublish && (!currentStage || currentStage->image != request.pending)) {
         return GetResult(
             request,
             LoadCommitStatus::Failed,
@@ -108,32 +137,23 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
     if (!m_transaction) {
         auto transaction = std::make_unique<Transaction>();
         transaction->request = request;
-        std::size_t startedCount = 0;
-        for (const auto& stage : transaction->request.stages) {
-            const auto status = stage->StartDataStage(
-                transaction->request.pending,
-                transaction->request.transactionRevision);
+        m_transaction = std::move(transaction);
+        for (std::size_t index=0;index<m_transaction->request.stages.size();++index) {
+            const auto& stage=m_transaction->request.stages[index];
+            const auto effect=m_transaction->request.effects.empty()?std::optional<RenderEffectChange>{}:m_transaction->request.effects[index];
+            const auto status = stage->StartRenderInputStage(input,m_transaction->request.transactionRevision,effect);
             if (status == DataStageStatus::Failed
                 || status == DataStageStatus::Cancelled
                 || status == DataStageStatus::Idle) {
-                for (std::size_t index = startedCount;
-                    index > 0; --index) {
-                    (void)transaction->request.stages[index - 1]
-                        ->ClearDataStage(
-                            transaction->request.transactionRevision);
-                }
-                return GetResult(
-                    request,
-                    status == DataStageStatus::Cancelled
-                        ? LoadCommitStatus::Cancelled
-                        : LoadCommitStatus::Failed,
-                    status == DataStageStatus::Cancelled
-                        ? LoadCommitFailure::Cancelled
-                        : LoadCommitFailure::StageFailed);
+                const auto effectFailure=stage->GetDataStageFailure(request.transactionRevision);
+                (void)ClearStages(m_transaction->request, false, 0);
+                m_transaction.reset();
+                auto result=GetResult(request,
+                    status==DataStageStatus::Cancelled?LoadCommitStatus::Cancelled:LoadCommitStatus::Failed,
+                    status==DataStageStatus::Cancelled?LoadCommitFailure::Cancelled:LoadCommitFailure::StageFailed);
+                result.effectFailure=effectFailure;return result;
             }
-            ++startedCount;
         }
-        m_transaction = std::move(transaction);
         return GetResult(
             request,
             LoadCommitStatus::Preparing,
@@ -141,13 +161,16 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
     }
 
     auto& active = m_transaction->request;
-    if (active.transactionRevision != request.transactionRevision) {
+    if (active.ownerId != request.ownerId && request.ownerId != 0) {
+        return GetResult(request, LoadCommitStatus::Failed, LoadCommitFailure::InvalidRequest);
+    }
+    if (active.transactionRevision != request.transactionRevision || active.ownerId != request.ownerId) {
         const auto stale = active;
         (void)ClearStages(stale, false, 0);
         m_transaction.reset();
-        return SetLoadCommit(request);
+        return AdvanceLoadCommit(request);
     }
-    if (active.pending != request.pending
+    if (active.effects!=request.effects || active.pending != request.pending || active.renderInput != request.renderInput
         || active.sourceRevision != request.sourceRevision
         || !GetSameStages(active.stages, request.stages)) {
         const auto stale = active;
@@ -161,21 +184,17 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
 
     bool areReady = true;
     for (const auto& stage : active.stages) {
-        const auto status = stage->SetDataStageReady(
-            active.pending, active.transactionRevision);
+        const auto status = stage->SetRenderInputStageReady(
+            input, active.transactionRevision);
         if (status == DataStageStatus::Failed
             || status == DataStageStatus::Cancelled) {
             const auto terminal = active;
+            const auto effectFailure=stage->GetDataStageFailure(active.transactionRevision);
             (void)ClearStages(terminal, false, 0);
             m_transaction.reset();
-            return GetResult(
-                terminal,
-                status == DataStageStatus::Cancelled
-                    ? LoadCommitStatus::Cancelled
-                    : LoadCommitStatus::Failed,
-                status == DataStageStatus::Cancelled
-                    ? LoadCommitFailure::Cancelled
-                    : LoadCommitFailure::StageFailed);
+            auto failure=GetResult(terminal,status==DataStageStatus::Cancelled?LoadCommitStatus::Cancelled:LoadCommitStatus::Failed,
+                status==DataStageStatus::Cancelled?LoadCommitFailure::Cancelled:LoadCommitFailure::StageFailed);
+            failure.effectFailure=effectFailure;return failure;
         }
         areReady = areReady && status == DataStageStatus::Ready;
     }
@@ -186,17 +205,20 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
             LoadCommitFailure::None);
     }
 
+    // 最终提交后只进行 noexcept 收尾，先复制终态所需的请求/闭包。
+    const auto completedRequest = active;
     std::size_t committedCount = 0;
     for (const auto& stage : active.stages) {
-        if (!stage->SetViewStage(
-                active.pending, active.transactionRevision)) {
+        ++m_transaction->attemptedCommits;
+        if (!stage->SetRenderInputViewStage(
+                input, active.transactionRevision)) {
             break;
         }
         ++committedCount;
     }
     if (committedCount != active.stages.size()) {
         const auto terminal = active;
-        (void)ClearStages(terminal, true, committedCount);
+        (void)ClearStages(terminal, true, m_transaction->attemptedCommits);
         m_transaction.reset();
         return GetResult(
             terminal,
@@ -205,11 +227,12 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
     }
 
     VtkImageGridSnapshot published;
-    if (!m_dataManager->SetLoadCommit(currentStage, published)
-        || !published || !published->data
-        || published->data->self != active.sourceRevision) {
+    const bool isPublished = active.onPublish ? active.onPublish()
+        : (m_dataManager->SetLoadCommit(currentStage, published)
+            && published && published->data && published->data->self == active.sourceRevision);
+    if (!isPublished) {
         const auto terminal = active;
-        (void)ClearStages(terminal, true, committedCount);
+        (void)ClearStages(terminal, true, m_transaction->attemptedCommits);
         m_transaction.reset();
         return GetResult(
             terminal,
@@ -217,7 +240,7 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
             LoadCommitFailure::PublishFailed);
     }
 
-    const auto terminal = active;
+    const auto& terminal = completedRequest;
     for (const auto& stage : terminal.stages) {
         stage->SetDataStageComplete(terminal.transactionRevision);
     }
@@ -230,18 +253,29 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
 
 LoadCommitResult LoadCommitCoordinator::SetLoadCancelled(
     const std::uint64_t transactionRevision,
-    const LoadCommitFailure failureReason)
+    const LoadCommitFailure failureReason,
+    const std::uint64_t ownerId)
 {
     LoadCommitResult result;
     result.status = LoadCommitStatus::Cancelled;
     result.failureReason = failureReason;
     result.transactionRevision = transactionRevision;
-    if (!m_transaction
+    if (m_isAdvancing) {
+        result.status = LoadCommitStatus::Failed;
+        result.failureReason = LoadCommitFailure::CommitFailed;
+        return result;
+    }
+    if (!m_transaction || m_transaction->request.ownerId != ownerId
         || m_transaction->request.transactionRevision
             != transactionRevision) {
         return result;
     }
-    const auto terminal = m_transaction->request;
+    struct CancelGuard final {
+        bool& value;
+        explicit CancelGuard(bool& flag) : value(flag) { value = true; }
+        ~CancelGuard() { value = false; }
+    } guard(m_isAdvancing);
+    const auto& terminal = m_transaction->request;
     result.sourceRevision = terminal.sourceRevision;
     (void)ClearStages(terminal, false, 0);
     m_transaction.reset();
