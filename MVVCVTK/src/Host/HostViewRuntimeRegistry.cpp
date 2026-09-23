@@ -42,7 +42,8 @@ public:
 
     bool Build(
         const HostCoreServices& core,
-        const std::vector<HostRenderViewConfig>& configs);
+        const std::vector<HostRenderViewConfig>& configs,
+        const NavigationBindings* bindings);
     const std::vector<HostRenderViewRuntime>& GetViews() const;
     const HostRenderViewRuntime* GetViewById(
         const std::string& id) const;
@@ -103,6 +104,7 @@ public:
     bool ClearTimerHandler(const HostViewTarget& target) const;
     bool SetFrameHandlers(std::function<void()> handler) const;
     bool SetInputsEnabled(bool isEnabled) const;
+    bool GetInputsIdle() const;
     bool SetFrameGeneration(std::uint64_t sessionGeneration);
     bool SetFrameIntents(
         const std::vector<HostFrameIntent>& intents);
@@ -234,7 +236,8 @@ private:
         HostRenderViewConfig config,
         const std::shared_ptr<AppTaskExecutor>& taskExecutor,
         const std::shared_ptr<HistogramConverter>& histogram,
-        const std::shared_ptr<RenderStrategyServices>& renderServices);
+        const std::shared_ptr<RenderStrategyServices>& renderServices,
+        const NavigationBindings* bindings);
     bool SetViewWindow(
         HostRenderViewRuntime& view,
         vtkSmartPointer<vtkRenderWindow> renderWindow);
@@ -560,7 +563,8 @@ HostViewRuntimeRegistry::Impl::BuildView(
     HostRenderViewConfig config,
     const std::shared_ptr<AppTaskExecutor>& taskExecutor,
     const std::shared_ptr<HistogramConverter>& histogram,
-    const std::shared_ptr<RenderStrategyServices>& renderServices)
+    const std::shared_ptr<RenderStrategyServices>& renderServices,
+    const NavigationBindings* bindings)
 {
     const auto appInit = BuildAppInit(config.window.viewInit);
     if (!appInit) return std::nullopt;
@@ -606,7 +610,8 @@ HostViewRuntimeRegistry::Impl::BuildView(
 
     auto context = CreateViewContext(
         ports.interaction,
-        config.inputMode == HostInputMode::HostInjected, core.isHostDriven);
+        config.inputMode == HostInputMode::HostInjected,
+        core.isHostDriven, bindings);
     if (!context) return std::nullopt;
 
     HostRenderViewRuntime view;
@@ -740,7 +745,8 @@ HostViewRuntimeRegistry::Impl::BuildAppInit(
 
 bool HostViewRuntimeRegistry::Impl::Build(
     const HostCoreServices& core,
-    const std::vector<HostRenderViewConfig>& configs)
+    const std::vector<HostRenderViewConfig>& configs,
+    const NavigationBindings* bindings)
 {
     std::vector<std::string> viewIds;
     std::map<std::string, HostViewSyncPolicy> policies;
@@ -804,7 +810,8 @@ bool HostViewRuntimeRegistry::Impl::Build(
             std::move(config),
             nextTaskExecutor,
             nextHistogram,
-            nextRenderServices);
+            nextRenderServices,
+            bindings);
         if (!view) return false;
         nextViews.push_back(std::move(*view));
 
@@ -1654,6 +1661,19 @@ bool HostViewRuntimeRegistry::Impl::SetFrameHandlers(
     return installed.size() == m_views.size();
 }
 
+bool HostViewRuntimeRegistry::Impl::GetInputsIdle() const
+{
+    if (!m_lease || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread()) return false;
+    for (const auto& view : m_views) {
+        if (view.isAvailable
+            && (!view.context || !view.context->GetIsInputIdle())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HostViewRuntimeRegistry::Impl::SetInputsEnabled(
     const bool isEnabled) const
 {
@@ -2016,9 +2036,10 @@ HostViewRuntimeRegistry& HostViewRuntimeRegistry::operator=(
 
 bool HostViewRuntimeRegistry::Build(
     const HostCoreServices& core,
-    const std::vector<HostRenderViewConfig>& configs)
+    const std::vector<HostRenderViewConfig>& configs,
+    const NavigationBindings* bindings)
 {
-    return m_impl && m_impl->Build(core, configs);
+    return m_impl && m_impl->Build(core, configs, bindings);
 }
 
 std::optional<HostRenderViewState>
@@ -2152,6 +2173,11 @@ bool HostViewRuntimeRegistry::SetFrameHandlers(
 {
     return m_impl
         && m_impl->SetFrameHandlers(std::move(handler));
+}
+
+bool HostViewRuntimeRegistry::GetInputsIdle() const
+{
+    return m_impl && m_impl->GetInputsIdle();
 }
 
 bool HostViewRuntimeRegistry::SetInputsEnabled(

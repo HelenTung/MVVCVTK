@@ -79,11 +79,13 @@ DefaultNavigationPolicy::DefaultNavigationPolicy(
     ModelInputPort* modelPort,
     RenderUpdatePort* updatePort,
     vtkPropPicker* picker,
-    vtkRenderer* renderer)
-    : m_viewer2D(
-        statePort, slicePort, modelPort, updatePort, picker, renderer)
+    vtkRenderer* renderer,
+    const NavigationBindings* bindings)
+    : m_bindings(bindings ? bindings : &m_defaultBindings)
+    , m_viewer2D(
+        statePort, slicePort, modelPort, updatePort, picker, renderer, m_bindings)
     , m_viewer3D(
-        statePort, slicePort, modelPort, updatePort, picker, renderer)
+        statePort, slicePort, modelPort, updatePort, picker, renderer, m_bindings)
 {
 }
 

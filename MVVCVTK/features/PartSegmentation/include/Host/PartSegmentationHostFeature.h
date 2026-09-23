@@ -2,9 +2,14 @@
 
 #include "Host/HostFeature.h"
 #include "Host/PartSegmentationHostTypes.h"
+#include "Interaction/InputBindings.h"
 
 #include <memory>
 #include <string_view>
+
+namespace PartSelectionBindingKeys {
+inline constexpr std::string_view Select = "partSegmentation.select.press";
+}
 
 class PartSegmentationHostFeature final
     : public HostFeature
@@ -27,6 +32,7 @@ public:
     FeatureDataContract GetDataContract() const override;
     std::vector<FeatureOperationState> GetOperationStates() const override;
     bool AttachHost(const HostFeatureContext& context) override;
+    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     bool DetachHost() override;
     bool OnHostTick() override;
 

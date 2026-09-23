@@ -505,6 +505,17 @@ void Lifecycle()
     auto data = std::make_shared<TestDataPort>();
     auto control = std::make_shared<Control>();
     auto feature = std::make_shared<WallThicknessHostFeature>();
+    ConfigurableInputBindings settings;
+    settings.SetOverride(std::string(ThicknessBindingKeys::SelectSample),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::PointerPress, InputMouseButton::Secondary, 0, 0, 0 });
+    Check(feature->SetInputBindings(settings)==InputBindingStatus::Applied,
+        "secondary sample selection binding accepted");
+    settings.SetOverride(std::string(ThicknessBindingKeys::SelectSample),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Secondary, 0, 0, 0 });
+    Check(feature->SetInputBindings(settings)==InputBindingStatus::Unsupported,
+        "drag trigger must not replace sample click");
     auto work = BuildSlab();
     ThicknessRequest request;
     request.action = ThicknessAction::Start;

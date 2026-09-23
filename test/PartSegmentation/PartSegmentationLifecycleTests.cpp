@@ -1097,6 +1097,22 @@ int GetPartLifecycleFailCount()
     };
     int failureCount = GetPreviousPartFailCount() + GetEditLifecycleFailCount();
     {
+        PartSegmentationHostFeature feature;
+        ConfigurableInputBindings settings;
+        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
+            InputBindingOverride::Replace,
+            { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
+              static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
+        const bool isValid = feature.SetInputBindings(settings)
+            == InputBindingStatus::Applied;
+        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
+            InputBindingOverride::Replace,
+            { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 65 });
+        if (!GetCaseResult(isValid && feature.SetInputBindings(settings)
+                == InputBindingStatus::Unsupported,
+                "selection input binding validation")) ++failureCount;
+    }
+    {
         TestHost test;
         bool isValid = test.Attach();
         std::optional<PartSegmentationResult> result;

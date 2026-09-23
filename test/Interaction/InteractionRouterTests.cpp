@@ -3,6 +3,8 @@
 #include "InteractionRouter.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Interaction/DefaultNavigationPolicy.h"
+#include "Interaction/InputBindings.h"
+#include "Interaction/NavigationBindings.h"
 #include "Interaction/InteractionPorts.h"
 #include "Interaction/ViewContextFactory.h"
 #include "Viewer2DHandler.h"
@@ -775,6 +777,131 @@ void StartDefaultNavigationPolicyCase(int& failureCount)
         failureCount);
 }
 
+void StartBindingOverrideCase(int& failureCount)
+{
+    TestStatePort guardedState;
+    TestSlicePort guardedSlice;
+    TestModelPort guardedModel;
+    TestUpdatePort guardedUpdate;
+    Viewer2DHandler guardedViewer(&guardedState, &guardedSlice,
+        &guardedModel, &guardedUpdate, nullptr, nullptr);
+    auto guardedPress = BuildEvent(InteractionEventKind::PrimaryPress);
+    guardedPress.vizMode = VizMode::SliceTop_down;
+    guardedPress.isCtrlDown = true;
+    const auto rejected = guardedViewer.Send(guardedPress);
+    guardedPress.eventKind = InteractionEventKind::PrimaryRelease;
+    const auto rejectedRelease = guardedViewer.Send(guardedPress);
+    SetExpect(rejected.isHandled && !rejected.isSucceeded
+            && rejectedRelease.isHandled && rejectedRelease.isSucceeded
+            && guardedState.startCount == 0,
+        "Rejected Ctrl+primary input must also intercept its release.",
+        failureCount);
+
+    const auto alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
+    ConfigurableInputBindings source;
+    NavigationBindings effective;
+    SetExpect(NavigationBindings::Build(source, effective)
+            == InputBindingStatus::Applied,
+        "Default binding snapshot should validate.", failureCount);
+
+    const InputBinding crosshair{
+        InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 };
+    const InputBinding zoom{
+        InputTriggerKind::Drag, InputMouseButton::Secondary, 0, alt, 0 };
+    source.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
+        InputBindingOverride::Replace, crosshair);
+    source.SetOverride(std::string(NavigationBindingKeys::ZoomDrag),
+        InputBindingOverride::Replace, zoom);
+    SetExpect(NavigationBindings::Build(source, effective)
+            == InputBindingStatus::Applied,
+        "Disjoint modifier rules may share a physical button.", failureCount);
+
+    TestStatePort state;
+    TestSlicePort slice;
+    TestModelPort model;
+    TestUpdatePort update;
+    Viewer2DHandler viewer(
+        &state, &slice, &model, &update, nullptr, nullptr, &effective);
+    auto press = BuildEvent(InteractionEventKind::SecondaryPress);
+    press.vizMode = VizMode::SliceTop_down;
+    press.isAltDown = true;
+    const auto started = viewer.Send(press);
+    auto oldRelease = press;
+    oldRelease.eventKind = InteractionEventKind::PrimaryRelease;
+    const auto unrelatedRelease = viewer.Send(oldRelease);
+    auto release = press;
+    release.eventKind = InteractionEventKind::SecondaryRelease;
+    const auto ended = viewer.Send(release);
+    SetExpect(started.isHandled && started.isSucceeded
+            && !unrelatedRelease.isHandled && state.stopCount == 1
+            && ended.isSucceeded,
+        "Rebound crosshair must end on its actual secondary release.",
+        failureCount);
+
+    ConfigurableInputBindings invalid;
+    invalid.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Primary, 0, 0, 0 });
+    SetExpect(NavigationBindings::Build(invalid, effective)
+            == InputBindingStatus::Conflict
+            && effective.GetMatched(
+                NavigationAction::CrosshairDrag, press),
+        "Conflicting candidate must preserve the previous snapshot.",
+        failureCount);
+    invalid.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 65 });
+    SetExpect(NavigationBindings::Build(invalid, effective)
+            == InputBindingStatus::Unsupported,
+        "Unsupported trigger must be rejected.", failureCount);
+
+    source.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
+        InputBindingOverride::Disable);
+    SetExpect(NavigationBindings::Build(source, effective)
+            == InputBindingStatus::Applied,
+        "Explicit disable should apply.", failureCount);
+    auto oldPress = BuildEvent(InteractionEventKind::PrimaryPress);
+    oldPress.vizMode = VizMode::SliceTop_down;
+    oldPress.isShiftDown = true;
+    const auto disabled = viewer.Send(oldPress);
+    SetExpect(!disabled.isHandled
+            && state.startCount == 1,
+        "Disabled crosshair must not fall back to its old gesture.",
+        failureCount);
+
+    ConfigurableInputBindings planeSource;
+    planeSource.SetOverride(std::string(NavigationBindingKeys::PlaneDrag),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 });
+    NavigationBindings planeBindings;
+    SetExpect(NavigationBindings::Build(planeSource, planeBindings)
+            == InputBindingStatus::Applied,
+        "Reference-plane binding should accept supported secondary drag.",
+        failureCount);
+    TestStatePort planeState;
+    TestSlicePort planeSlice;
+    TestModelPort planeModel;
+    TestUpdatePort planeUpdate;
+    planeSlice.planeAxis = 1;
+    auto picker = vtkSmartPointer<PickPointProbe>::New();
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    Viewer3DHandler plane(&planeState, &planeSlice, &planeModel,
+        &planeUpdate, picker, renderer, &planeBindings);
+    auto planePress = BuildEvent(InteractionEventKind::SecondaryPress);
+    planePress.vizMode = VizMode::CompositeVolume;
+    planePress.isAltDown = true;
+    const auto planeStarted = plane.Send(planePress);
+    planePress.eventKind = InteractionEventKind::PrimaryRelease;
+    (void)plane.Send(planePress);
+    planePress.eventKind = InteractionEventKind::SecondaryRelease;
+    const auto planeEnded = plane.Send(planePress);
+    SetExpect(planeStarted.isHandled && planeStarted.isSucceeded
+            && planeEnded.isSucceeded && planeState.startCount == 1
+            && planeState.stopCount == 1,
+        "Reference plane must clean up on the rebound button.",
+        failureCount);
+}
+
 void StartContextThreadCase(int& failureCount)
 {
     InteractionPorts ports;
@@ -876,6 +1003,8 @@ void StartContextStyleCancelRetryCase(int& failureCount)
         StartCaptureReentrancyCase(failureCount);
         StartAtomicCaptureCase(failureCount);
         StartDefaultNavigationPolicyCase(failureCount);
+        StartBindingOverrideCase(failureCount);
+
         StartContextThreadCase(failureCount);
         StartContextStyleCancelRetryCase(failureCount);
         return failureCount;

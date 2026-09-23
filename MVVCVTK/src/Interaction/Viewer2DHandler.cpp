@@ -15,13 +15,15 @@ Viewer2DHandler::Viewer2DHandler(
     ModelInputPort* modelPort,
     RenderUpdatePort* updatePort,
     vtkPropPicker* picker,
-    vtkRenderer* renderer)
+    vtkRenderer* renderer,
+    const NavigationBindings* bindings)
     : m_statePort(statePort)
     , m_slicePort(slicePort)
     , m_modelPort(modelPort)
     , m_updatePort(updatePort)
     , m_picker(picker)
     , m_renderer(renderer)
+    , m_bindings(bindings ? bindings : &m_defaultBindings)
 {
     m_source.ownerId = "Viewer2D";
     m_source.channelId =
@@ -49,34 +51,29 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     };
 
     // 模式可在按下与释放之间切换；Release/Cancel 必须先于模式门控清理 source。
-    const bool isPrimaryActive = m_isDragCrosshair || m_isDragWindowLevel;
-    const bool isPrimaryCleanup =
-        eve.eventKind == InteractionEventKind::PrimaryRelease
-        || eve.eventKind == InteractionEventKind::Cancel;
-    if (isPrimaryCleanup && isPrimaryActive) {
+    const bool hasDrag = m_isDragCrosshair || m_isDragWindowLevel
+        || m_isDragZoom;
+    const bool isCleanup = eve.eventKind == InteractionEventKind::Cancel
+        || eve.eventKind == m_dragReleaseKind;
+    if (hasDrag && isCleanup) {
         if (!m_statePort
             || !m_statePort->SetInteracting(m_source, false)) {
-            return getResult(
-                false, InteractionFailureReason::CleanupRejected);
+            return getResult(false, InteractionFailureReason::CleanupRejected);
         }
         m_isDragCrosshair = false;
         m_isDragWindowLevel = false;
-        return getResult(true, InteractionFailureReason::None);
-    }
-    const bool isSecondaryCleanup =
-        eve.eventKind == InteractionEventKind::SecondaryRelease
-        || eve.eventKind == InteractionEventKind::Cancel;
-    if (isSecondaryCleanup && m_isRightZoom) {
-        if (!m_statePort
-            || !m_statePort->SetInteracting(m_source, false)) {
-            return getResult(
-                false, InteractionFailureReason::CleanupRejected);
-        }
-        m_isRightZoom = false;
+        m_isDragZoom = false;
+        m_dragReleaseKind = InteractionEventKind::None;
         return getResult(true, InteractionFailureReason::None);
     }
     if (eve.eventKind == InteractionEventKind::Cancel) {
+        m_isPrimaryPressRejected = false;
         return {};
+    }
+    if (eve.eventKind == InteractionEventKind::PrimaryRelease
+        && m_isPrimaryPressRejected) {
+        m_isPrimaryPressRejected = false;
+        return getResult(true, InteractionFailureReason::None);
     }
 
     const bool isSliceMode =
@@ -96,101 +93,70 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
 
     // ── 滚轮切片 ──────────────────────────────────────────────────────
     if (eve.eventKind == InteractionEventKind::WheelForward
-        || eve.eventKind == InteractionEventKind::WheelBackward)
-    {
+        || eve.eventKind == InteractionEventKind::WheelBackward) {
+        const bool forward = m_bindings->GetMatched(
+            NavigationAction::SliceForward, eve);
+        const bool backward = m_bindings->GetMatched(
+            NavigationAction::SliceBackward, eve);
+        if (!forward && !backward) return {};
         const int step = eve.isCtrlDown ? 10 : 5;
-        const int delta = (eve.eventKind == InteractionEventKind::WheelForward)
-            ? step : -step;
         return getResult(
-            m_slicePort->SetSliceScroll(delta),
+            m_slicePort->SetSliceScroll(forward ? step : -step),
             InteractionFailureReason::StateRejected);
     }
 
-    // ── 左键按下：isShiftDown → 开始拖拽十字线 ────────────────────────────
-    if (eve.eventKind == InteractionEventKind::PrimaryPress)
-    {
-        if (eve.isCtrlDown)
-        {
-            // 未装配旋转 Feature 时也不允许底层 style 修改模型。
-            return getResult(false, InteractionFailureReason::StateRejected);
+    if (eve.eventKind == InteractionEventKind::PrimaryPress
+        || eve.eventKind == InteractionEventKind::SecondaryPress) {
+        if (eve.eventKind == InteractionEventKind::PrimaryPress)
+            m_isPrimaryPressRejected = false;
+        if (hasDrag) return { true, true };
+        const bool crosshair = m_bindings->GetMatched(
+            NavigationAction::CrosshairDrag, eve);
+        const bool windowLevel = m_bindings->GetMatched(
+            NavigationAction::WindowLevelDrag, eve);
+        const bool zoom = m_bindings->GetMatched(
+            NavigationAction::ZoomDrag, eve);
+        if (!crosshair && !windowLevel && !zoom) {
+            if (eve.eventKind == InteractionEventKind::PrimaryPress
+                && eve.isCtrlDown) {
+                // 未装配旋转 Feature 时也不允许底层 style 修改模型。
+                m_isPrimaryPressRejected = true;
+                return getResult(false, InteractionFailureReason::StateRejected);
+            }
+            return {};
         }
-        if (eve.isShiftDown) {
-            const bool isStarted =
-                m_statePort->SetInteracting(m_source, true);
-            m_isDragCrosshair = isStarted;
-            return getResult(
-                isStarted, InteractionFailureReason::StateRejected);
+        if (windowLevel) {
+            m_lastDragX = eve.x;
+            m_lastDragY = eve.y;
+            m_startDragX = eve.x;
+            m_startDragY = eve.y;
+            const auto wl = m_slicePort->GetWindowLevel();
+            m_startWW = wl.windowWidth;
+            m_startWC = wl.windowCenter;
         }
-
-        m_lastDragX = eve.x;
-        m_lastDragY = eve.y;
-        m_startDragX = eve.x;
-        m_startDragY = eve.y;
-
-        const auto wl = m_slicePort->GetWindowLevel();
-        m_startWW = wl.windowWidth;
-        m_startWC = wl.windowCenter;
-
-        const bool isStarted =
-            m_statePort->SetInteracting(m_source, true);
-        m_isDragWindowLevel = isStarted;
-        return getResult(
-            isStarted, InteractionFailureReason::StateRejected);
+        if (zoom) {
+            m_zoomStartY = eve.y;
+            m_startOriginValue = m_renderer && m_renderer->GetActiveCamera()
+                ? m_renderer->GetActiveCamera()->GetParallelScale() : 1.0;
+        }
+        const bool isStarted = m_statePort->SetInteracting(m_source, true);
+        if (isStarted) {
+            m_isDragCrosshair = crosshair;
+            m_isDragWindowLevel = windowLevel;
+            m_isDragZoom = zoom;
+            m_dragReleaseKind =
+                eve.eventKind == InteractionEventKind::PrimaryPress
+                ? InteractionEventKind::PrimaryRelease
+                : InteractionEventKind::SecondaryRelease;
+        }
+        return getResult(isStarted, InteractionFailureReason::StateRejected);
     }
-
-    // ── 左键抬起：结束交互 ─────────────────────────────────────
-    if (eve.eventKind == InteractionEventKind::PrimaryRelease)
-    {
-        if (m_isDragCrosshair) {
-            const bool isStopped =
-                m_statePort->SetInteracting(m_source, false);
-            if (isStopped) m_isDragCrosshair = false;
-            return getResult(
-                isStopped, InteractionFailureReason::CleanupRejected);
-        }
-        if (m_isDragWindowLevel) {
-            const bool isStopped =
-                m_statePort->SetInteracting(m_source, false);
-            if (isStopped) m_isDragWindowLevel = false;
-            return getResult(
-                isStopped, InteractionFailureReason::CleanupRejected);
-        }
-        return { true, true };
-    }
-
-    // ── 右键按下：开始缩放 ─────────────────────────────────────
-    if (eve.eventKind == InteractionEventKind::SecondaryPress)
-    {
-        m_zoomStartY = eve.y;
-
-        if (m_renderer && m_renderer->GetActiveCamera()) {
-            m_startOriginValue = m_renderer->GetActiveCamera()->GetParallelScale();
-        }
-        else {
-            m_startOriginValue = 1.0;
-        }
-
-        const bool isStarted =
-            m_statePort->SetInteracting(m_source, true);
-        m_isRightZoom = isStarted;
-        return getResult(
-            isStarted, InteractionFailureReason::StateRejected);
-    }
-
-    // ── 右键抬起：结束缩放 ─────────────────────────────────────────
-    if (eve.eventKind == InteractionEventKind::SecondaryRelease)
-    {
-        if (m_isRightZoom) {
-            const bool isStopped =
-                m_statePort->SetInteracting(m_source, false);
-            if (isStopped) m_isRightZoom = false;
-            return getResult(
-                isStopped, InteractionFailureReason::CleanupRejected);
-        }
+    if (eve.eventKind == InteractionEventKind::PrimaryRelease
+        || eve.eventKind == InteractionEventKind::SecondaryRelease) {
         return {};
     }
 
-    // ── 鼠标移动：十字线拖拽 / 调窗拖拽 / 缩放 / 定轴旋转 ─────────────
+    // 活动操作由按下时确定，移动期间不重新匹配配置。
     if (eve.eventKind == InteractionEventKind::PointerMove)
     {
         // 路径 A：十字线拖拽
@@ -265,7 +231,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 InteractionFailureReason::StateRejected);
         }
         // 正 totalDy 增大 parallelScale，视图缩小；负 totalDy 减小 scale，视图放大。
-        if (m_isRightZoom)
+        if (m_isDragZoom)
         {
             if (!m_renderer || !m_renderer->GetActiveCamera()) {
                 return { true, true };

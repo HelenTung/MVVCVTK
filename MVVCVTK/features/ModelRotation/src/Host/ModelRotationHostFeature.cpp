@@ -13,6 +13,73 @@
 #include <utility>
 #include <vector>
 
+namespace {
+constexpr std::uint8_t shift = static_cast<std::uint8_t>(InputModifierFlags::Shift);
+constexpr std::uint8_t ctrl = static_cast<std::uint8_t>(InputModifierFlags::Ctrl);
+constexpr std::uint8_t alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
+constexpr std::uint8_t allModifiers = shift | ctrl | alt;
+
+bool GetValidDrag(const InputBinding& binding) noexcept
+{
+    return binding.trigger == InputTriggerKind::Drag
+        && (binding.button == InputMouseButton::Primary
+            || binding.button == InputMouseButton::Secondary)
+        && binding.key == 0
+        && !((binding.requiredModifiers | binding.forbiddenModifiers)
+            & ~allModifiers)
+        && !(binding.requiredModifiers & binding.forbiddenModifiers);
+}
+
+bool GetValidKey(const InputBinding& binding) noexcept
+{
+    return binding.trigger == InputTriggerKind::KeyPress
+        && binding.button == InputMouseButton::None
+        && binding.key > 0 && binding.key <= 127
+        && !((binding.requiredModifiers | binding.forbiddenModifiers)
+            & ~allModifiers)
+        && !(binding.requiredModifiers & binding.forbiddenModifiers);
+}
+
+bool GetMatchedKey(
+    const InputBinding& binding, const InteractionEvent& event) noexcept
+{
+    if (event.eventKind != InteractionEventKind::KeyPress) return false;
+    const auto keyCode = static_cast<unsigned char>(event.keyCode);
+    if (binding.key != keyCode
+        && !(binding.key == 27 && event.keySym == "Escape")) return false;
+    const auto modifiers = (event.isShiftDown ? shift : 0)
+        | (event.isCtrlDown ? ctrl : 0)
+        | (event.isAltDown ? alt : 0);
+    return (modifiers & binding.requiredModifiers)
+            == binding.requiredModifiers
+        && !(modifiers & binding.forbiddenModifiers);
+}
+
+bool GetMatchedDrag(
+    const InputBinding& binding, const InteractionEvent& event) noexcept
+{
+    if ((binding.button == InputMouseButton::Primary
+            && event.eventKind != InteractionEventKind::PrimaryPress)
+        || (binding.button == InputMouseButton::Secondary
+            && event.eventKind != InteractionEventKind::SecondaryPress)) {
+        return false;
+    }
+    const auto modifiers = (event.isShiftDown ? shift : 0)
+        | (event.isCtrlDown ? ctrl : 0)
+        | (event.isAltDown ? alt : 0);
+    return (modifiers & binding.requiredModifiers)
+            == binding.requiredModifiers
+        && !(modifiers & binding.forbiddenModifiers);
+}
+
+bool GetOverlap(const InputBinding& a, const InputBinding& b) noexcept
+{
+    return a.button == b.button
+        && !(a.requiredModifiers & b.forbiddenModifiers)
+        && !(b.requiredModifiers & a.forbiddenModifiers);
+}
+} // namespace
+
 class ModelRotationHostFeature::Impl final {
 public:
     using Math = ModelRotationAlgorithm;
@@ -34,6 +101,61 @@ public:
     explicit Impl(ModelRotationConfig config) : m_config(std::move(config))
     {
         m_history.reserve(100);
+    }
+
+    InputBindingStatus SetInputBindings(const IInputBindings& source)
+    {
+        if (m_port && m_owner != std::this_thread::get_id())
+            return InputBindingStatus::Failed;
+        if (m_gesture || m_isSettingBindings) return InputBindingStatus::Busy;
+        m_isSettingBindings = true;
+        InputBinding enabled{ InputTriggerKind::Drag,
+            InputMouseButton::Primary, 0, allModifiers, 0 };
+        InputBinding shortcut{ InputTriggerKind::Drag,
+            InputMouseButton::Primary, ctrl,
+            static_cast<std::uint8_t>(shift | alt), 0 };
+        InputBinding cancel{ InputTriggerKind::KeyPress,
+            InputMouseButton::None, 0, 0, 27 };
+        bool isEnabled = true;
+        bool isShortcut = true;
+        bool isCancelEnabled = true;
+        const auto load = [&source](std::string_view key,
+            InputBinding& binding, bool& isActive, bool isKey) {
+            InputBinding replacement;
+            switch (source.GetOverride(key, replacement)) {
+            case InputBindingOverride::UseDefault: return InputBindingStatus::Applied;
+            case InputBindingOverride::Replace:
+                if (!(isKey ? GetValidKey(replacement) : GetValidDrag(replacement)))
+                    return InputBindingStatus::Unsupported;
+                binding = replacement;
+                isActive = true;
+                return InputBindingStatus::Applied;
+            case InputBindingOverride::Disable:
+                isActive = false;
+                return InputBindingStatus::Applied;
+            default: return InputBindingStatus::Invalid;
+            }
+        };
+        auto status = load(ModelRotationBindingKeys::EnabledDrag,
+            enabled, isEnabled, false);
+        if (status == InputBindingStatus::Applied)
+            status = load(ModelRotationBindingKeys::SliceShortcutDrag,
+                shortcut, isShortcut, false);
+        if (status == InputBindingStatus::Applied)
+            status = load(ModelRotationBindingKeys::CancelKey,
+                cancel, isCancelEnabled, true);
+        m_isSettingBindings = false;
+        if (status != InputBindingStatus::Applied) return status;
+        if (isEnabled && isShortcut && GetOverlap(enabled, shortcut))
+            return InputBindingStatus::Conflict;
+        if (m_gesture) return InputBindingStatus::Busy;
+        m_enabledBinding = enabled;
+        m_sliceBinding = shortcut;
+        m_cancelBinding = cancel;
+        m_hasEnabledBinding = isEnabled;
+        m_hasSliceBinding = isShortcut;
+        m_hasCancelBinding = isCancelEnabled;
+        return InputBindingStatus::Applied;
     }
 
     bool GetOwnerReady() const
@@ -78,6 +200,7 @@ public:
             }
             m_token = 0;
             m_gesture.reset();
+            m_releaseKind = InteractionEventKind::None;
             m_isUndo = false;
         }
         if (!m_token && !m_history.empty()) {
@@ -97,6 +220,7 @@ public:
         if (m_token && !m_port->StopTransform(m_token)) return false;
         if (!ClearSource()) return false;
         m_gesture.reset();
+        m_releaseKind = InteractionEventKind::None;
         if (m_token) m_status = ModelRotationStatus::Pending;
         return true;
     }
@@ -230,14 +354,14 @@ public:
         if (!SetCompletion()) return {};
         const bool isCancel = event.eventKind == InteractionEventKind::Cancel
             || event.eventKind == InteractionEventKind::Exit
-            || (event.eventKind == InteractionEventKind::KeyPress
-                && (event.keySym == "Escape" || event.keyCode == 27));
+            || (m_hasCancelBinding
+                && GetMatchedKey(m_cancelBinding, event));
         if (isCancel && m_gesture) return result(StopGesture());
         if (m_gesture) {
             if (event.viewId != m_gesture->viewId) return {};
             if (event.toolMode != m_gesture->toolMode || !GetGestureValid())
                 return result(StopGesture());
-            const bool isRelease = event.eventKind == InteractionEventKind::PrimaryRelease;
+            const bool isRelease = event.eventKind == m_releaseKind;
             if (event.eventKind == InteractionEventKind::KeyPress
                 || event.eventKind == InteractionEventKind::KeyRelease
                 || event.eventKind == InteractionEventKind::TextInput) return {};
@@ -254,6 +378,7 @@ public:
             if (isRelease) {
                 m_status = ModelRotationStatus::Pending;
                 m_gesture.reset();
+                m_releaseKind = InteractionEventKind::None;
                 return result(ClearSource());
             }
             return result(true);
@@ -261,11 +386,11 @@ public:
         const bool isSlice = event.vizMode == VizMode::SliceTop_down
             || event.vizMode == VizMode::SliceFront_back
             || event.vizMode == VizMode::SliceLeft_right;
-        const bool isSliceShortcut = isSlice && event.isCtrlDown;
-        if ((!m_isEnabled && !isSliceShortcut)
-            || event.eventKind != InteractionEventKind::PrimaryPress
-            || event.isShiftDown || (event.isCtrlDown && !isSliceShortcut)
-            || event.isAltDown) return {};
+        const bool isEnabledDrag = m_isEnabled && m_hasEnabledBinding
+            && GetMatchedDrag(m_enabledBinding, event);
+        const bool isSliceShortcut = isSlice && m_hasSliceBinding
+            && GetMatchedDrag(m_sliceBinding, event);
+        if (!isEnabledDrag && !isSliceShortcut) return {};
         auto gesture = BuildGesture(event);
         if (!gesture || !StartEdit()) return result(false);
         m_sourcePort = m_context.views->GetFeaturePort(event.viewId);
@@ -274,6 +399,9 @@ public:
             return result(false);
         }
         m_gesture = std::move(gesture);
+        m_releaseKind = event.eventKind == InteractionEventKind::PrimaryPress
+            ? InteractionEventKind::PrimaryRelease
+            : InteractionEventKind::SecondaryRelease;
         m_status = ModelRotationStatus::Dragging;
         return result(true);
     }
@@ -286,6 +414,18 @@ public:
     ModelTransformSnapshot m_start;
     std::uint64_t m_token = 0, m_sequence = 0;
     std::optional<Gesture> m_gesture;
+    InputBinding m_enabledBinding{ InputTriggerKind::Drag,
+        InputMouseButton::Primary, 0, allModifiers, 0 };
+    InputBinding m_sliceBinding{ InputTriggerKind::Drag,
+        InputMouseButton::Primary, ctrl,
+        static_cast<std::uint8_t>(shift | alt), 0 };
+    InputBinding m_cancelBinding{ InputTriggerKind::KeyPress,
+        InputMouseButton::None, 0, 0, 27 };
+    bool m_hasEnabledBinding = true;
+    bool m_hasSliceBinding = true;
+    bool m_hasCancelBinding = true;
+    bool m_isSettingBindings = false;
+    InteractionEventKind m_releaseKind = InteractionEventKind::None;
     std::vector<History> m_history;
     ModelRotationStatus m_status = ModelRotationStatus::Detached;
     bool m_isEnabled = false, m_isUndo = false;
@@ -294,6 +434,12 @@ public:
 ModelRotationHostFeature::ModelRotationHostFeature(ModelRotationConfig config)
     : m_impl(std::make_unique<Impl>(std::move(config))) {}
 ModelRotationHostFeature::~ModelRotationHostFeature() noexcept = default;
+InputBindingStatus ModelRotationHostFeature::SetInputBindings(
+    const IInputBindings& bindings)
+{
+    return m_impl ? m_impl->SetInputBindings(bindings)
+        : InputBindingStatus::Failed;
+}
 std::string_view ModelRotationHostFeature::GetFeatureId() const noexcept { return "model-rotation"; }
 
 bool ModelRotationHostFeature::AttachHost(const HostFeatureContext& context)
