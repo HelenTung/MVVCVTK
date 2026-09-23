@@ -182,12 +182,52 @@ void TestRealInputBindings(const std::string& rawPath)
         "Backward wheel override rejected");
     Expect(session.SetInputBindings(wheelBindings) == InputBindingStatus::Applied,
         "Real binding wheel swap not applied");
+    // SDK 保存值快照，运行时不再查询上位机提供对象。
+    wheelBindings.SetOverride(std::string(NavigationBindingKeys::SliceForward),
+        InputBindingOverride::UseDefault);
+    wheelBindings.SetOverride(std::string(NavigationBindingKeys::SliceBackward),
+        InputBindingOverride::UseDefault);
     Expect(send(HostInputKind::WheelForward).isDefaultSuppressed,
         "Swapped wheel must be handled by SDK");
     const auto reversed = getState();
     for (int axis = 0; axis < 3; ++axis)
         Expect(Near(reversed.cursorWorld[axis], before.cursorWorld[axis], 1e-3),
             "Swapped wheel did not restore real-data cursor");
+
+    ConfigurableInputBindings conflicting;
+    conflicting.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Primary, 0, 0, 0 });
+    Expect(session.SetInputBindings(conflicting) == InputBindingStatus::Conflict,
+        "Conflicting Session candidate was accepted");
+    Expect(send(HostInputKind::WheelForward).isDefaultSuppressed,
+        "Previous wheel snapshot was lost after conflict");
+    const auto afterConflict = getState();
+    const double defaultDelta = advanced.cursorWorld[2] - before.cursorWorld[2];
+    Expect(Near(afterConflict.cursorWorld[2],
+            before.cursorWorld[2] - defaultDelta, 1e-3),
+        "Conflict replaced the previous effective wheel snapshot");
+    Expect(send(HostInputKind::WheelBackward).isDefaultSuppressed,
+        "Previous backward wheel snapshot was lost after conflict");
+    Expect(Near(getState().cursorWorld[2], before.cursorWorld[2], 1e-3),
+        "Wheel cursor did not recover after conflict check");
+
+    ConfigurableInputBindings unsupported;
+    unsupported.SetOverride(std::string(NavigationBindingKeys::SliceForward),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 'x' });
+    Expect(session.SetInputBindings(unsupported)
+            == InputBindingStatus::Unsupported,
+        "Unsupported Session candidate was accepted");
+    Expect(send(HostInputKind::WheelForward).isDefaultSuppressed,
+        "Previous wheel snapshot was lost after unsupported candidate");
+    Expect(Near(getState().cursorWorld[2],
+            before.cursorWorld[2] - defaultDelta, 1e-3),
+        "Unsupported candidate replaced the previous wheel snapshot");
+    Expect(send(HostInputKind::WheelBackward).isDefaultSuppressed,
+        "Previous backward binding was lost after unsupported candidate");
+    Expect(Near(getState().cursorWorld[2], before.cursorWorld[2], 1e-3),
+        "Wheel cursor did not recover after unsupported check");
 
     ConfigurableInputBindings dragBindings;
     const auto alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
@@ -207,6 +247,9 @@ void TestRealInputBindings(const std::string& rawPath)
     Expect(send(HostInputKind::SecondaryPress, 100, 100, true).isDefaultSuppressed,
         "Rebound drag press not captured");
     Expect(getState().isInteracting, "Rebound drag did not start interaction");
+    Expect(session.SetInputBindings(ConfigurableInputBindings{})
+            == InputBindingStatus::Busy,
+        "Session accepted a binding change during a real-data drag");
     Expect(send(HostInputKind::PointerMove, 150, 120, true).isDefaultSuppressed,
         "Rebound drag move not captured");
     const auto changedWindow = getState().windowLevel;
@@ -220,6 +263,18 @@ void TestRealInputBindings(const std::string& rawPath)
         "Rebound drag release not captured");
     Expect(!getState().isInteracting,
         "Rebound drag left interaction state active");
+
+    ConfigurableInputBindings disabled;
+    disabled.SetOverride(std::string(NavigationBindingKeys::SliceForward),
+        InputBindingOverride::Disable);
+    Expect(session.SetInputBindings(disabled) == InputBindingStatus::Applied,
+        "Real binding wheel disable not applied");
+    const auto cursorBeforeDisable = getState().cursorWorld;
+    (void)send(HostInputKind::WheelForward);
+    const auto cursorAfterDisable = getState().cursorWorld;
+    for (int axis = 0; axis < 3; ++axis)
+        Expect(Near(cursorAfterDisable[axis], cursorBeforeDisable[axis], 1e-3),
+            "Disabled SDK wheel still scrolled real CT slices");
 
     ModelRotationRequest enableRotation;
     enableRotation.action = ModelRotationAction::SetEnabled;
@@ -239,6 +294,10 @@ void TestRealInputBindings(const std::string& rawPath)
     Expect(rotation->SetInputBindings(rotationBindings)
             == InputBindingStatus::Applied,
         "Real binding rotation overrides not applied");
+    rotationBindings.SetOverride(std::string(ModelRotationBindingKeys::EnabledDrag),
+        InputBindingOverride::UseDefault);
+    rotationBindings.SetOverride(std::string(ModelRotationBindingKeys::CancelKey),
+        InputBindingOverride::UseDefault);
 
     const auto send3D = [&](HostInputKind kind, int x, int y,
         bool isAlt, char keyCode = 0, const char* keySym = "") {
