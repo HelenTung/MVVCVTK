@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #define CHECK(value) do { if (!(value)) throw std::runtime_error(#value); } while (false)
@@ -166,9 +168,19 @@ void TestFrameFailure()
 
 void TestRotationSession();
 void TestRotationHostDriven();
+void TestRealInputBindings(const std::string& rawPath);
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 3 && std::string_view(argv[1]) == "--real-input-bindings") {
+        try { TestRealInputBindings(argv[2]); }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+        return 0;
+    }
+    if (argc != 1) {
+        std::cerr << "Usage: ModelRotationTests [--real-input-bindings <roi.raw>]\n";
+        return 2;
+    }
     try { TestMath(); TestState(); TestFrameFailure(); TestRotationSession(); TestRotationHostDriven(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "ModelRotation behavior passed\n";
