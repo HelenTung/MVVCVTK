@@ -24,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -144,6 +145,7 @@ public:
     bool SetRenderNeeded() override
     {
         ++dirtyCount;
+        if(isDirtyFailing)throw std::runtime_error("Injected repaint failure.");
         return true;
     }
 
@@ -170,6 +172,7 @@ public:
     int attachCount = 0;
     int detachCount = 0;
     int dirtyCount = 0;
+    bool isDirtyFailing=false;
 
 private:
     RenderInputStamp m_inputStamp;
@@ -667,10 +670,13 @@ bool GetStoppedLeaseCleanup() {
 class GeometryPort final : public OverlayService {
 public:
     bool isFailing=false;
+    std::function<void()> onFailure;
     int attachCount=0;
     std::vector<std::shared_ptr<FeatureOverlay>> attached;
     bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override {
-        ++attachCount; attached.push_back(std::move(overlay)); return !isFailing;
+        ++attachCount; attached.push_back(std::move(overlay));
+        if(isFailing && onFailure)onFailure();
+        return !isFailing;
     }
     void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override {
         attached.erase(std::remove(attached.begin(),attached.end(),overlay),attached.end());
@@ -695,9 +701,12 @@ bool GetGeometryProjectionLifecycle() {
     if(!Check(first->attached.empty() && second->attached.size()==1,
         "same view ID with a new lease retained the old geometry port"))return false;
     auto failing=std::make_shared<GeometryPort>();failing->isFailing=true;
+    failing->onFailure=[&]{f.service->isDirtyFailing=true;};
     f.view.geometryTargets.push_back({HostRenderViewRole::FrontBackSlice,f.service,failing,"other",newLease});
     const auto dirty=f.service->dirtyCount;
-    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropSphere())return false;
+    if(!f.bridge.StartView(f.view))return false;
+    try { (void)f.bridge.SwitchCropSphere(); } catch(const std::runtime_error&) {}
+    f.service->isDirtyFailing=false;
     if(!Check(second->attached.empty() && failing->attached.empty() && f.service->dirtyCount>dirty,
         "partial geometry attachment was not removed and redrawn"))return false;
     f.view.geometryTargets.resize(1);

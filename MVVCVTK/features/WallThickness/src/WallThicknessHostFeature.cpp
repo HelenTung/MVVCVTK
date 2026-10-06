@@ -218,9 +218,9 @@ class WallThicknessHostFeature::Impl final
                     throw std::runtime_error("Overlay port unavailable.");
                 auto overlay = std::make_shared<ThicknessOverlay>(
                     prepared, display, m_active->GetRecord().archive.input.unit, view.role);
+                candidate.push_back({view.id, port, overlay});
                 if (!port->AttachOverlay(overlay))
                     throw std::runtime_error("Overlay attach rejected.");
-                candidate.push_back({view.id, port, overlay});
                 if (m_state.selectedSample &&
                     *m_state.selectedSample < m_active->GetRecord().field.samples->size())
                     overlay->SetSelection(

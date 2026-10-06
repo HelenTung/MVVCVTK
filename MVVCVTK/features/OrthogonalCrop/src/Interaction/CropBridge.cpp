@@ -1015,7 +1015,7 @@ void CropBridge::Impl::ClearGeometryViews()
 {
     for (const auto& binding:m_geometryBindings) {
         binding.target.overlays->RemoveOverlay(binding.overlay);
-        (void)binding.target.view->SetRenderNeeded();
+        try { (void)binding.target.view->SetRenderNeeded(); } catch (...) {}
     }
     m_geometryBindings.clear();
 }
@@ -1038,7 +1038,7 @@ void CropBridge::Impl::SetGeometryViews()
     const auto rollback=[&candidate] {
         for (const auto& item:candidate) {
             item.target.overlays->RemoveOverlay(item.overlay);
-            (void)item.target.view->SetRenderNeeded();
+            try { (void)item.target.view->SetRenderNeeded(); } catch (...) {}
         }
     };
     try {
