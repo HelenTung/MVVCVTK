@@ -60,6 +60,7 @@ target_link_libraries(
     PUBLIC MVVCVTK::FeatureSPI
     PRIVATE
         MVVCVTKInternal::FeatureSupport
+        VTK::FiltersHybrid
         ${MVVCVTK_VTK_TARGETS}
 )
 SetTargetDefaults(part_segmentation)

@@ -7,6 +7,7 @@
 #include "Render/CropShaderController.h"
 #include "Render/Strategies/IsoSurfaceStrategy.h"
 #include "Render/Support/RenderFrameLifetime.h"
+#include "Render/Contracts/OverlayService.h"
 
 #include <vtkCubeSource.h>
 #include <vtkImageData.h>
@@ -662,6 +663,50 @@ bool GetStoppedLeaseCleanup() {
         "stopped lease could not finalize accepted request cancellation"))return false;
     return Check(f.bridge.ClearDocument()&&f.bridge.GetHistory().documentId==0,"empty closed document retained Root");
 }
+
+class GeometryPort final : public OverlayService {
+public:
+    bool isFailing=false;
+    int attachCount=0;
+    std::vector<std::shared_ptr<FeatureOverlay>> attached;
+    bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override {
+        ++attachCount; attached.push_back(std::move(overlay)); return !isFailing;
+    }
+    void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override {
+        attached.erase(std::remove(attached.begin(),attached.end(),overlay),attached.end());
+    }
+    void ClearOverlays() noexcept override { attached.clear(); }
+};
+bool GetGeometryProjectionLifecycle() {
+    Fixture f;if(!f.ready)return false;
+    auto first=std::make_shared<GeometryPort>();
+    f.view.geometryTargets={{HostRenderViewRole::TopDownSlice,f.service,first,"slice",f.lease}};
+    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropSphere())return false;
+    const auto nodes=f.bridge.GetHistory().totalNodeCount;
+    const int attached=first->attachCount;
+    if(!Check(first->attached.size()==1 && f.bridge.StartView(f.view)
+        && f.bridge.SetCropMode(CropRemovalMode::None) && first->attached.size()==1
+        && first->attachCount==attached && f.bridge.GetHistory().totalNodeCount==nodes,
+        "None-mode reentry lost geometry or changed business history"))return false;
+    auto second=std::make_shared<GeometryPort>();
+    auto newLease=std::make_shared<FeatureViewLease>(std::this_thread::get_id());
+    f.view.geometryTargets={{HostRenderViewRole::TopDownSlice,f.service,second,"slice",newLease}};
+    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropCylinder())return false;
+    if(!Check(first->attached.empty() && second->attached.size()==1,
+        "same view ID with a new lease retained the old geometry port"))return false;
+    auto failing=std::make_shared<GeometryPort>();failing->isFailing=true;
+    f.view.geometryTargets.push_back({HostRenderViewRole::FrontBackSlice,f.service,failing,"other",newLease});
+    const auto dirty=f.service->dirtyCount;
+    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropSphere())return false;
+    if(!Check(second->attached.empty() && failing->attached.empty() && f.service->dirtyCount>dirty,
+        "partial geometry attachment was not removed and redrawn"))return false;
+    f.view.geometryTargets.resize(1);
+    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropCylinder()||second->attached.empty())return false;
+    if(!newLease->StopLease())return false;
+    f.bridge.RefreshWidgetTransform();
+    return Check(second->attached.empty() && f.bridge.ClearBindings(),
+        "stopped geometry lease retained its overlay");
+}
 }
 
 int CropBridgeSuite::GetFailCount() const
@@ -679,5 +724,6 @@ int CropBridgeSuite::GetFailCount() const
     run(GetArchiveSourceValidation(),"archive source validation and runtime node mapping");
     run(GetSourcePreviewCommit(),"candidate source replay and no-fail adoption");
     run(GetStoppedLeaseCleanup(),"stopped lease cancellation and document cleanup");
+    run(GetGeometryProjectionLifecycle(),"geometry projection lease, rollback and None reentry");
     return failures;
 }

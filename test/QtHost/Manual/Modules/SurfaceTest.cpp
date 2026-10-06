@@ -59,7 +59,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         }
         panel->AttachAction(method.first, parameters, [panel, feature, method](auto id, const auto& params) {
             SurfaceDeterminationStartParams start;
-            start.method = method.second; start.targetViews = GetMainViews();
+            start.method = method.second; start.targetViews = GetAllViews();
             start.modelUnit = "mm";
             if (const auto source = panel->GetSession()->GetImageDescriptor()) start.sourceVolume = source->dataRevision;
             if (params.contains("componentSelection")) start.componentSelection = GetEnum<SurfaceComponentSelection>(params, "componentSelection", {

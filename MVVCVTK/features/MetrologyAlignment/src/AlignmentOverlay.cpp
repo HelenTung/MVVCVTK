@@ -15,7 +15,9 @@ AlignmentOverlay::AlignmentOverlay()
     m_mapper->SetScalarModeToUseCellData();
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetLighting(false);
-    m_actor->GetProperty()->SetLineWidth(2.0F);
+    m_actor->GetProperty()->SetLineWidth(2.5F);
+    m_mapper->SetColorModeToDirectScalars();
+    m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetPickable(false);
     AttachProp(m_actor);
 }
@@ -47,13 +49,37 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     for (int axis = 0; axis < 3; ++axis) {
         Vec p{};
         p[axis] = axisLength;
-        std::array<unsigned char, 3> color{50, 50, 50};
+        std::array<unsigned char, 3> color{90, 90, 90};
         color[axis] = 255;
         add(origin, Transform(inverse, p), color);
     }
     for (const auto &g : geometries) {
         const auto center = Vector(g.sourceCenter), normal = Vector(g.sourceDirection);
         const auto a = Tangent(normal) * axisLength * 0.2, b = normal.cross(a);
+        // 圆、球和圆柱的显示半径直接来自已拟合结果，不再拟合或制造残差。
+        if ((g.kind == AlignmentGeometryKind::Circle || g.kind == AlignmentGeometryKind::Sphere
+                || g.kind == AlignmentGeometryKind::Cylinder) && std::isfinite(g.radius) && g.radius > 0) {
+            const auto u = Tangent(normal) * g.radius, v = normal.cross(u);
+            const auto ring = [&](const Vec& c, const Vec& x, const Vec& y) {
+                constexpr double tau = 6.283185307179586;
+                for (int i = 0; i < 64; ++i) {
+                    const double t0 = tau * i / 64, t1 = tau * (i + 1) / 64;
+                    add(c + x * std::cos(t0) + y * std::sin(t0),
+                        c + x * std::cos(t1) + y * std::sin(t1), {70, 220, 235});
+                }
+            };
+            ring(center, u, v);
+            if (g.kind == AlignmentGeometryKind::Sphere) {
+                ring(center, u, normal * g.radius); ring(center, v, normal * g.radius);
+            } else if (g.kind == AlignmentGeometryKind::Cylinder) {
+                ring(center - normal * axisLength * 0.3, u, v);
+                ring(center + normal * axisLength * 0.3, u, v);
+                add(center - normal * axisLength * 0.3 + u,
+                    center + normal * axisLength * 0.3 + u, {70, 220, 235});
+                add(center - normal * axisLength * 0.3 - u,
+                    center + normal * axisLength * 0.3 - u, {70, 220, 235});
+            }
+        }
         if (g.kind == AlignmentGeometryKind::Plane) {
             const std::array<Vec, 4> corners{center - a - b, center + a - b, center + a + b,
                                              center - a + b};

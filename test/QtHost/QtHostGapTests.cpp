@@ -16,6 +16,7 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
+#include <vtkScalarBarActor.h>
 
 #include <algorithm>
 #include <array>
@@ -599,13 +600,14 @@ int GetGapFailCount()
             && hotkeyStartState.isViewActive
             && hasFormalGapResult
             && hotkeyPrimaryPropCount
-                == primaryBasePropCount + 1
+                == primaryBasePropCount + 2
             && hotkeySlicePropCount
-                == sliceBasePropCount + 1
+                == sliceBasePropCount + 3
             && hotkeyPrimaryActorCount
                 == primaryBaseActorCount + 1
             && hotkeySliceImageCount
                 == sliceBaseImageCount + 1
+            && GetPropCount<vtkScalarBarActor>(endpoint->renderer)==0
             && hotkeyMaps.size() == 1
             && hotkeyMaps.front().id == "GapAnalysis.labels"
             && hotkeyMaps.front().producerFeatureId == "GapAnalysis"

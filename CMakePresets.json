@@ -25,6 +25,7 @@
         "MVVCVTK_BUILD_MODEL_ROTATION": true,
         "MVVCVTK_BUILD_METROLOGY_ALIGNMENT": true,
         "MVVCVTK_BUILD_WALL_THICKNESS": true,
+        "MVVCVTK_BUILD_ROI_EDITING": true,
         "MVVCVTK_ENABLE_AVX2": true
       }
     }

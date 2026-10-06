@@ -134,17 +134,17 @@ std::array<double, 3> GetSliceNormal(const HostRenderViewRole role)
     return SlicePlaneState::Build(orientation, {}).worldNormal;
 }
 std::shared_ptr<FeatureOverlay> CreateOverlay(
-    const HostRenderViewRole role)
+    const HostRenderViewRole role, bool isPreview)
 {
     if (role == HostRenderViewRole::Primary3D
         || role == HostRenderViewRole::Composite3D) {
-        return std::make_shared<SurfaceOverlayStrategy>();
+        return std::make_shared<SurfaceOverlayStrategy>(isPreview);
     }
     if (role == HostRenderViewRole::TopDownSlice
         || role == HostRenderViewRole::FrontBackSlice
         || role == HostRenderViewRole::LeftRightSlice) {
         return std::make_shared<SurfaceSliceOverlayStrategy>(
-            GetSliceNormal(role));
+            GetSliceNormal(role), isPreview);
     }
     return nullptr;
 }
@@ -305,7 +305,7 @@ private:
         vtkSmartPointer<vtkPolyData> displayData,
         const std::vector<HostFeatureView>& views,
         const VtkImageGridSnapshot& source,
-        std::vector<OverlayBinding>& bindings);
+        std::vector<OverlayBinding>& bindings, bool isPreview);
     static void RemoveBindings(
         std::vector<OverlayBinding>& bindings) noexcept;
     bool RemoveDisplay();
@@ -1019,14 +1019,14 @@ bool SurfaceDeterminationHostFeature::Impl::BuildBindings(
     vtkSmartPointer<vtkPolyData> displayData,
     const std::vector<HostFeatureView>& views,
     const VtkImageGridSnapshot& source,
-    std::vector<OverlayBinding>& bindings)
+    std::vector<OverlayBinding>& bindings, bool isPreview)
 {
     if (!displayData || !source || !source->image || !m_views) return false;
     bindings.reserve(views.size());
     for (const HostFeatureView& view : views) {
         auto service = m_views->GetOverlayPort(view.id);
         auto overlay = service
-            ? CreateOverlay(view.role) : nullptr;
+            ? CreateOverlay(view.role, isPreview) : nullptr;
         if (!service || !overlay) {
             RemoveBindings(bindings);
             return false;
@@ -1216,7 +1216,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
     if (m_bindings.empty()) {
         std::vector<OverlayBinding> bindings;
         try {
-            if (!BuildBindings(m_displayData, views, source, bindings)
+            if (!BuildBindings(m_displayData, views, source, bindings, isPreview)
                 || !m_host->SetActiveViews(GetViewIds(views))) {
                 RemoveBindings(bindings); return false;
             }

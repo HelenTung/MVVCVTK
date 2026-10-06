@@ -1,5 +1,7 @@
 #include "ThicknessOverlay.h"
 #include "Render/Contracts/SlicePlaneState.h"
+#include "Render/Support/AnalysisColorStyle.h"
+#include "Render/Support/SliceContourPlane.h"
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkCellData.h>
@@ -23,10 +25,7 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
                                                  const SurfaceMeshPayload &mesh,
                                                  const ThicknessDisplay &display)
 {
-    auto lookup = vtkSmartPointer<vtkLookupTable>::New();
-    lookup->SetNumberOfTableValues(256);
-    lookup->SetRange(display.range[0], display.range[1]);
-    lookup->Build();
+    auto lookup = AnalysisColorStyle::BuildRamp(display.range, true);
     for (int i = 0; i < 256; ++i)
     {
         const double f = double(i) / 255;
@@ -44,9 +43,6 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
                                          : 0.8,
                                   high ? 0.9 : 0.1, 1);
         }
-        else
-            lookup->SetTableValue(i, std::min(1.0, 2 * f), 1 - std::abs(2 * f - 1),
-                                  std::min(1.0, 2 * (1 - f)), 1);
     }
     auto points = vtkSmartPointer<vtkPoints>::New();
     points->SetDataTypeToDouble();
@@ -138,6 +134,19 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_actor->GetProperty()->SetOpacity(display.opacity);
     m_actor->GetProperty()->SetLineWidth(2);
     m_actor->SetVisibility(display.isVisible);
+    if (m_isSlice) {
+        auto contourMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        contourMapper->SetInputConnection(m_cutter->GetOutputPort());
+        contourMapper->ScalarVisibilityOff();
+        m_contourActor = vtkSmartPointer<vtkActor>::New();
+        m_contourActor->SetMapper(contourMapper);
+        m_contourActor->GetProperty()->SetColor(1, 1, 1);
+        m_contourActor->GetProperty()->LightingOff();
+        m_contourActor->GetProperty()->SetLineWidth(4);
+        m_contourActor->PickableOff();
+        m_contourActor->SetVisibility(display.isVisible);
+        AttachProp(m_contourActor);
+    }
     m_lineActor->SetMapper(m_lineMapper);
     m_lineActor->PickableOff();
     m_lineActor->GetProperty()->SetColor(1, 1, 1);
@@ -145,14 +154,13 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_lineActor->GetProperty()->LightingOff();
     m_lineActor->VisibilityOff();
     m_legend->SetLookupTable(data.lookup);
-    m_legend->SetNumberOfLabels(5);
     const std::string title =
-        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Ray tol." : "Ray") +
+        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Thickness tol." : "Thickness") +
         (unit == ThicknessUnit::Millimeter ? "\n[mm]" : "\n[m]");
-    m_legend->SetTitle(title.c_str());
+    AnalysisColorStyle::SetLegend(*m_legend, title.c_str());
     m_legend->SetWidth(0.18);
     m_legend->SetHeight(0.65);
-    m_legend->SetPosition(0.81, 0.15);
+    m_legend->SetPosition(0.025, 0.20);
     // 在宽三维工作区中使用稳定字号，不让色标文字随整个 viewport 放大。
     m_legend->SetMaximumWidthInPixels(120);
     m_legend->SetMaximumHeightInPixels(320);
@@ -181,7 +189,7 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_invalidLegend->SetNumberOfEntries(1);
     m_invalidLegend->SetEntry(0, symbol, "Invalid / unmeasured", textColor);
     m_invalidLegend->ScalarVisibilityOn();
-    m_invalidLegend->SetPosition(0.64, 0.02);
+    m_invalidLegend->SetPosition(0.025, 0.06);
     m_invalidLegend->SetPosition2(0.34, 0.035);
     m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
     m_invalidLegend->GetEntryTextProperty()->ItalicOff();
@@ -207,8 +215,7 @@ void ThicknessOverlay::SetOverlayState(const FeatureOverlayState &state)
 {
     if (m_plane)
     {
-        m_plane->SetOrigin(state.cursor.data());
-        m_plane->SetNormal(m_normal.data());
+        (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normal,state.modelToWorld);
     }
     Set3DPropsTransform(state.modelToWorld);
 }

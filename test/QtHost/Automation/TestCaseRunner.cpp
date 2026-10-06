@@ -184,7 +184,13 @@ void CheckFourViewGeometry(TestWindow& window)
 void CheckUiAndRecords(TestWindow& window)
 {
     const auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    Check(tabs && tabs->count() == 11 && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
+    Check(tabs && tabs->count() ==
+#if defined(MANUAL_ROI)
+        12
+#else
+        11
+#endif
+        && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
     Check(window.GetSession()->GetRenderViewStates().size() == 4 && window.findChildren<QVTKOpenGLNativeWidget*>().size() == 4,
         "manual workspace contains one 3D viewport and three slice viewports");
     Check(!window.findChild<QComboBox*>("renderMode")->isEnabled() && !window.findChild<QPushButton*>("fitView")->isEnabled(),
@@ -1616,9 +1622,6 @@ QJsonObject CheckPartDisplay(TestWindow& window)
             Check(label > 0 && label < static_cast<std::uint64_t>(table->GetNumberOfTableValues()), "part label indexes the view lookup table");
             double actual[4]{}; table->GetTableValue(static_cast<vtkIdType>(label), actual);
             auto expected = GetArray<double, 4>(part["colorRGBA"]);
-            if (part["selected"].toBool() && part["visible"].toBool() && expected[3] * part["opacity"].toDouble() > 0) {
-                expected[0] = 1; expected[1] = 0.68; expected[2] = 0.16;
-            }
             expected[3] *= part["visible"].toBool() ? part["opacity"].toDouble() : 0;
             if (isSlice) expected[3] *= part["selected"].toBool() ? 0.8 : 0.18;
             if (scene->role == HostRenderViewRole::Composite3D) expected[3] *= part["selected"].toBool() ? 0.35 : 0;

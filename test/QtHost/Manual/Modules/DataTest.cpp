@@ -31,6 +31,9 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("Descriptor", {}, [panel](auto id, const auto&) {
         panel->SetComplete(id, "Observed", GetDescriptor(panel->GetSession()->GetImageDescriptor()));
     }, TestPolicy::Read);
+    panel->AttachAction("ResultEvidence",{},[panel,reference](auto id,const auto&) {
+        panel->SetComplete(id,"Observed",reference->GetResultEvidence());
+    },TestPolicy::Read);
     panel->AttachAction("Select", {{"revision", ""}, {"expectedBindingRevision", "current"}},
         [panel](auto id, const auto& params) {
             const auto ref = GetRef(params["revision"]);

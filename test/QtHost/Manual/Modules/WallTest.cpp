@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
+#include <QCryptographicHash>
 namespace Manual {
 namespace {
 QString Status(ThicknessStatus status)
@@ -125,6 +126,19 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if (!result) throw std::invalid_argument("所选壁厚结果不可用");
         panel->SetComplete(id, "Observed", Statistics(*result));
     }, TestPolicy::Read);
+    panel->AttachAction("ResultEvidence",{{"result","current"}},[panel,feature,resolveResult](auto id,const auto& p) {
+        const auto snapshot=feature->GetResult(resolveResult(p));
+        if(!snapshot || !snapshot->samples)throw std::invalid_argument("没有壁厚采样结果");
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        const auto add=[&](const auto& value){hash.addData(reinterpret_cast<const char*>(&value),sizeof(value));};
+        for(const auto& sample:*snapshot->samples) {
+            add(sample.sourceTriangle);add(sample.oppositeTriangle);add(sample.barycentricCorners);
+            add(sample.source);add(sample.opposite);add(sample.area);add(sample.thickness);
+            add(sample.endpointTrim);add(sample.directionIndex);add(sample.validity);
+        }
+        auto result=Statistics(*snapshot);result["samplesSha256"]=QString::fromLatin1(hash.result().toHex());
+        panel->SetComplete(id,"Observed",result);
+    },TestPolicy::Read);
     panel->onObserve = [panel, feature, visible] {
         const auto state = feature->GetState();
         QJsonObject summary{{"isBusy", state.isBusy}, {"isCurrent", state.isCurrent}, {"requestId", QString::number(state.requestId)},

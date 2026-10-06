@@ -594,6 +594,9 @@ bool CropHostFeature::Impl::Document::StartCrop(
         const auto port = m_views->GetFeaturePort(view.id);
         if (port) {
             request.targetServices.push_back(port);
+            const auto inputView=m_views->GetInputView({view.id});
+            request.geometryTargets.push_back({view.role,port,m_views->GetOverlayPort(view.id),view.id,
+                inputView ? inputView->lease : std::weak_ptr<const FeatureViewLease>{}});
             if (!view.id.empty()
                 && std::find(
                     activeViewIds.begin(),
@@ -2327,6 +2330,9 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     for(const auto& item:m_context.views->GetViews(target.targetViews)) {
         const auto port=m_context.views->GetFeaturePort(item.id);if(!port)return reject(CropFailure::PreviewNotReady);
         view.targetServices.push_back(port);ids.push_back(item.id);
+        const auto inputView=m_context.views->GetInputView({item.id});
+        view.geometryTargets.push_back({item.role,port,m_context.views->GetOverlayPort(item.id),item.id,
+            inputView ? inputView->lease : std::weak_ptr<const FeatureViewLease>{}});
     }
     if(!view.referenceService||view.targetServices.empty())return reject(CropFailure::PreviewNotReady);
     if(std::find(ids.begin(),ids.end(),reference->view.id)==ids.end())ids.push_back(reference->view.id);

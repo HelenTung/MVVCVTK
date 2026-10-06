@@ -14,6 +14,14 @@
 
 class vtkRenderWindowInteractor;
 class vtkRenderer;
+class OverlayService;
+struct CropOverlayTarget final {
+    HostRenderViewRole role;
+    std::shared_ptr<FeatureViewService> view;
+    std::shared_ptr<OverlayService> overlays;
+    std::string viewId;
+    std::weak_ptr<const FeatureViewLease> lease;
+};
 
 struct CropViewRequest final {
     vtkRenderWindowInteractor* interactor = nullptr;
@@ -21,6 +29,7 @@ struct CropViewRequest final {
     std::weak_ptr<const FeatureViewLease> lease;
     std::shared_ptr<FeatureViewService> referenceService;
     std::vector<std::shared_ptr<FeatureViewService>> targetServices;
+    std::vector<CropOverlayTarget> geometryTargets;
     // Build effects for an explicit Host data candidate without attaching them
     // to the currently visible strategies. Only valid with no existing bindings.
     bool isCandidateOnly=false;

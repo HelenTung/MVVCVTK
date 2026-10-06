@@ -48,7 +48,7 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件分割"}, {"PartEdit", "零件编辑"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}};
+        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","ROI 编辑"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -65,6 +65,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
+        {"Begin","开始编辑"},{"ResultEvidence","读取回归证据"},
         {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
         {"ReadLabelRegion", "读取标签区域"}, {"CreateMask", "创建测试掩码"},

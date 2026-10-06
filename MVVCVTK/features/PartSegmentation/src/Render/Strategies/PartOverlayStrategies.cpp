@@ -20,6 +20,16 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
+#include <vtkThreshold.h>
+#include <vtkGeometryFilter.h>
+#include <vtkPolyDataSilhouette.h>
+#include <vtkImageReslice.h>
+#include <vtkImageThreshold.h>
+#include <vtkFlyingEdges2D.h>
+#include <vtkNew.h>
+#include <vtkImageMathematics.h>
+#include <vtkInformation.h>
+#include <vtkStreamingDemandDrivenPipeline.h>
 
 #include <algorithm>
 #include <cmath>
@@ -135,12 +145,6 @@ std::optional<PartRenderStateTable> BuildPartRenderStateTable(
             state.color[3] = entry.presentation.isVisible
                 ? state.color[3] * entry.presentation.opacity : 0.0;
             state.isSelected = entry.presentation.isSelected;
-            if (state.isSelected && state.color[3] > 0.0) {
-                // 所有视图用同一种选择色；取消选择恢复目录色，不改标签与身份。
-                state.color[0] = 1.0;
-                state.color[1] = 0.68;
-                state.color[2] = 0.16;
-            }
         }
         return table;
     }
@@ -182,15 +186,18 @@ bool SetPartStates(
     return true;
 }
 
-PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnly)
+PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnly, const bool isPreview)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
     , m_pickLut(vtkSmartPointer<vtkLookupTable>::New())
     , m_isSelectionOnly(isSelectionOnly)
+    , m_isPreview(isPreview)
 {
     m_mapper->SetLookupTable(m_lut);
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
+    // 候选与正式表面可能共面；仅给显示投影偏移，不改顶点或正式标签。
+    if (isPreview) m_mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0, -4);
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetOpacity(1.0);
     m_actor->GetProperty()->SetLighting(true);
@@ -200,6 +207,38 @@ PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnl
     m_actor->GetProperty()->SetSpecularPower(20.0);
     m_actor->SetPickable(false);
     AttachProp(m_actor);
+    m_selection = vtkSmartPointer<vtkThreshold>::New();
+    m_selection->SetInputArrayToProcess(0, 0, 0, vtkDataObject::FIELD_ASSOCIATION_CELLS,
+        vtkDataSetAttributes::SCALARS);
+    m_selection->SetThresholdFunction(vtkThreshold::THRESHOLD_BETWEEN);
+    m_geometry = vtkSmartPointer<vtkGeometryFilter>::New();
+    m_geometry->SetInputConnection(m_selection->GetOutputPort());
+    m_outline = vtkSmartPointer<vtkPolyDataSilhouette>::New();
+    m_outline->SetInputConnection(m_geometry->GetOutputPort());
+    m_outline->SetEnableFeatureAngle(false);
+    m_outline->SetProp3D(m_actor);
+    auto outlineMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    outlineMapper->SetInputConnection(m_outline->GetOutputPort());
+    outlineMapper->ScalarVisibilityOff();
+    m_outlineActor = vtkSmartPointer<vtkActor>::New();
+    m_outlineActor->SetMapper(outlineMapper);
+    m_outlineActor->GetProperty()->SetColor(0.1, 0.95, 1);
+    if (isPreview) m_outlineActor->GetProperty()->SetColor(1, 0.68, 0.16);
+    m_outlineActor->GetProperty()->LightingOff();
+    m_outlineActor->GetProperty()->SetLineWidth(2.5);
+    m_outlineActor->VisibilityOff(); m_outlineActor->PickableOff();
+    AttachProp(m_outlineActor);
+}
+
+void PartSurfaceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    if (renderer) m_outline->SetCamera(renderer->GetActiveCamera());
+    FeatureOverlayBase::AttachRenderer(renderer);
+}
+void PartSurfaceOverlayStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    FeatureOverlayBase::DetachRenderer(renderer);
+    m_outline->SetCamera(nullptr);
 }
 
 void PartSurfaceOverlayStrategy::SetInputData(
@@ -208,6 +247,7 @@ void PartSurfaceOverlayStrategy::SetInputData(
     auto* surface = vtkPolyData::SafeDownCast(data);
     if (!surface) return;
     m_mapper->SetInputData(surface);
+    m_selection->SetInputData(surface);
 }
 
 void PartSurfaceOverlayStrategy::SetOverlayState(
@@ -231,6 +271,14 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
         m_mapper->SetScalarRange(
             0.0,
             static_cast<double>(std::max<std::uint32_t>(1U, partCount)));
+        int selected = -1;
+        for (std::size_t i = 1; i < states.statesByLabel.size(); ++i)
+            if ((m_isPreview || states.statesByLabel[i].isSelected) && states.statesByLabel[i].color[3] > 0) {
+                selected = static_cast<int>(i); break;
+            }
+        m_selection->SetLowerThreshold(selected);
+        m_selection->SetUpperThreshold(selected);
+        m_outlineActor->SetVisibility(selected > 0);
         return true;
     }
     catch (...) {
@@ -245,7 +293,7 @@ std::optional<PartLabelId> PartSurfaceOverlayStrategy::GetPickedLabel(
 }
 
 PartSliceOverlayStrategy::PartSliceOverlayStrategy(
-    const Orientation orientation)
+    const Orientation orientation, vtkImageData* previous)
     : m_slice(vtkSmartPointer<vtkImageSlice>::New())
     , m_mapper(vtkSmartPointer<vtkImageResliceMapper>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
@@ -261,6 +309,43 @@ PartSliceOverlayStrategy::PartSliceOverlayStrategy(
     m_mapper->SliceAtFocalPointOff();
     m_mapper->SetSlicePlane(m_plane);
     AttachProp(m_slice);
+    m_reslice = vtkSmartPointer<vtkImageReslice>::New();
+    m_reslice->SetOutputDimensionality(2);
+    m_reslice->AutoCropOutputOn();
+    m_reslice->SetInterpolationModeToNearestNeighbor();
+    m_selection = vtkSmartPointer<vtkImageThreshold>::New();
+    m_selection->SetInputConnection(m_reslice->GetOutputPort());
+    m_selection->ReplaceInOn(); m_selection->ReplaceOutOn();
+    m_selection->SetInValue(1); m_selection->SetOutValue(0);
+    m_selection->SetOutputScalarTypeToUnsignedChar();
+    if (previous) {
+        m_previousReslice=vtkSmartPointer<vtkImageReslice>::New();
+        m_previousReslice->SetInputData(previous);
+        m_previousReslice->SetOutputDimensionality(2);
+        m_previousReslice->AutoCropOutputOff();
+        m_previousReslice->SetInterpolationModeToNearestNeighbor();
+        m_difference=vtkSmartPointer<vtkImageMathematics>::New();
+        m_difference->SetOperationToSubtract();
+        m_difference->SetInputConnection(0,m_reslice->GetOutputPort());
+        m_difference->AddInputConnection(0,m_previousReslice->GetOutputPort());
+        m_selection->SetInputConnection(m_difference->GetOutputPort());
+        m_selection->ThresholdBetween(0,0);
+        m_selection->SetInValue(0);m_selection->SetOutValue(1);
+    }
+    m_outline = vtkSmartPointer<vtkFlyingEdges2D>::New();
+    m_outline->SetInputConnection(m_selection->GetOutputPort());
+    m_outline->SetValue(0, 0.5);
+    auto outlineMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    outlineMapper->SetInputConnection(m_outline->GetOutputPort());
+    outlineMapper->ScalarVisibilityOff();
+    m_outlineActor = vtkSmartPointer<vtkActor>::New();
+    m_outlineActor->SetMapper(outlineMapper);
+    m_outlineActor->GetProperty()->SetColor(0.1, 0.95, 1);
+    if (previous) m_outlineActor->GetProperty()->SetColor(1,0.68,0.16);
+    m_outlineActor->GetProperty()->LightingOff();
+    m_outlineActor->GetProperty()->SetLineWidth(2);
+    m_outlineActor->VisibilityOff(); m_outlineActor->PickableOff();
+    AttachProp(m_outlineActor);
 }
 
 void PartSliceOverlayStrategy::SetInputData(
@@ -269,6 +354,7 @@ void PartSliceOverlayStrategy::SetInputData(
     auto* image = vtkImageData::SafeDownCast(data);
     if (!image) return;
     m_mapper->SetInputData(image);
+    m_reslice->SetInputData(image);
 
     double center[3]{};
     image->GetCenter(center);
@@ -286,6 +372,29 @@ void PartSliceOverlayStrategy::SetOverlayState(
     const auto plane = SlicePlaneState::Build(m_orientation, state.cursor, sliceOffset);
     m_plane->SetOrigin(plane.worldOrigin.data());
     m_plane->SetNormal(plane.worldNormal.data());
+    // 仅重采样当前二维切面供轮廓使用；不创建整卷标签副本。
+    const int axis = m_orientation == Orientation::Top_down ? 2
+        : m_orientation == Orientation::Front_back ? 1 : 0;
+    vtkNew<vtkMatrix4x4> axes; axes->Zero(); axes->SetElement(3, 3, 1);
+    axes->SetElement((axis + 1) % 3, 0, 1);
+    axes->SetElement((axis + 2) % 3, 1, 1);
+    axes->SetElement(axis, 2, 1);
+    for (int i = 0; i < 3; ++i) axes->SetElement(i, 3, plane.worldOrigin[i]);
+    vtkNew<vtkMatrix4x4> model; model->DeepCopy(state.modelToWorld.data());
+    vtkNew<vtkMatrix4x4> inverse; vtkMatrix4x4::Invert(model, inverse);
+    vtkNew<vtkMatrix4x4> dataAxes; vtkMatrix4x4::Multiply4x4(inverse, axes, dataAxes);
+    m_reslice->SetResliceAxes(dataAxes);
+    if (m_previousReslice) {
+        m_previousReslice->SetResliceAxes(dataAxes);
+        // 两路采样必须在同一个二维网格逐点比较，不能各自推导 autocrop。
+        m_reslice->UpdateInformation();
+        auto* information = m_reslice->GetOutputInformation(0);
+        m_previousReslice->SetOutputExtent(information->Get(vtkStreamingDemandDrivenPipeline::WHOLE_EXTENT()));
+        m_previousReslice->SetOutputOrigin(information->Get(vtkDataObject::ORIGIN()));
+        m_previousReslice->SetOutputSpacing(information->Get(vtkDataObject::SPACING()));
+        m_previousReslice->SetOutputDirection(information->Get(vtkDataObject::DIRECTION()));
+    }
+    m_outlineActor->SetUserMatrix(axes);
 }
 
 bool PartSliceOverlayStrategy::SetPartStates(
@@ -293,7 +402,15 @@ bool PartSliceOverlayStrategy::SetPartStates(
 {
     try {
         // 保留灰度切片细节，选中零件才加强填充。
-        return SetLookupTable(*m_lut, states, m_partStates, true);
+        if (!SetLookupTable(*m_lut, states, m_partStates, true)) return false;
+        int selected = -1;
+        for (std::size_t i = 1; i < states.statesByLabel.size(); ++i)
+            if (states.statesByLabel[i].isSelected && states.statesByLabel[i].color[3] > 0) {
+                selected = static_cast<int>(i); break;
+            }
+        if (!m_difference) m_selection->ThresholdBetween(selected, selected);
+        m_outlineActor->SetVisibility(m_difference != nullptr || selected > 0);
+        return true;
     }
     catch (...) {
         return false;

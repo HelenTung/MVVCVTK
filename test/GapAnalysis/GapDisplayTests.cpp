@@ -89,19 +89,16 @@ private:
             return nullptr;
         }
         props->InitTraversal();
-        vtkProp* prop = nullptr;
         while (auto* nextProp = props->GetNextProp()) {
-            prop = nextProp;
-        }
-        if (auto* actor = vtkActor::SafeDownCast(prop)) {
-            auto* mapper = vtkPolyDataMapper::SafeDownCast(
-                actor->GetMapper());
-            return mapper ? mapper->GetInput() : nullptr;
-        }
-        if (auto* slice = vtkImageSlice::SafeDownCast(prop)) {
+        if (auto* slice = vtkImageSlice::SafeDownCast(nextProp)) {
             auto* mapper = vtkImageResliceMapper::SafeDownCast(
                 slice->GetMapper());
             return mapper ? mapper->GetInput() : nullptr;
+        }
+        if (auto* actor = vtkActor::SafeDownCast(nextProp)) {
+            auto* mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+            if (mapper && mapper->GetScalarVisibility()) return mapper->GetInput();
+        }
         }
         return nullptr;
     }

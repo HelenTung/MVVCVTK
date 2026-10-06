@@ -136,6 +136,13 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
         summary["source"] = GetRefText(pending->source); summary["output"] = GetRefText(pending->output);
         summary["canSelectOutput"] = input && GetDataRevisionRefValid(pending->output) && input->dataRevision == pending->source;
         summary["isOutputCurrent"] = input && GetDataRevisionRefValid(pending->output) && input->dataRevision == pending->output;
+        summary["displayedVolume"] = input ? GetRefText(input->dataRevision) : QString();
+        QJsonArray views;
+        for (const auto& view:panel->GetSession()->GetRenderViewStates())
+            views.append(QJsonObject{{"view",QString::fromStdString(view.id)},
+                {"opacity",view.material.opacity},{"iso",view.isoThreshold},
+                {"cursorWorld",GetValues(view.cursorWorld)}});
+        summary["displaySettings"]=views;
         if (pending->operation && state.status != ArtifactStatus::Running && state.status != ArtifactStatus::Cancelling) {
             panel->SetComplete(pending->operation, state.status == ArtifactStatus::Ready ? "Ready"
                 : state.error == ArtifactError::Cancelled ? "Cancelled" : "Failed", summary);

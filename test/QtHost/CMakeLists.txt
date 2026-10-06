@@ -261,3 +261,18 @@ add_test(
 SetTestRuntime(QtHost.SessionSmoke mvvcvtk_qt_session_smoke)
 
 add_subdirectory(Automation)
+
+if(TARGET MVVCVTK::GapAnalysis AND TARGET MVVCVTK::SurfaceDetermination AND TARGET MVVCVTK::OrthogonalCrop)
+    add_executable(feature_render_parity_tests FeatureRenderParityTests.cpp)
+    target_include_directories(feature_render_parity_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include")
+    target_link_libraries(feature_render_parity_tests PRIVATE MVVCVTK::Host MVVCVTK::SurfaceDetermination
+        MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+    SetTargetDefaults(feature_render_parity_tests)
+    vtk_module_autoinit(TARGETS feature_render_parity_tests MODULES ${MVVCVTK_VTK_TARGETS})
+    add_test(NAME Feature.RenderParity COMMAND feature_render_parity_tests)
+    SetTestRuntime(Feature.RenderParity feature_render_parity_tests)
+    set_tests_properties(Feature.RenderParity PROPERTIES TIMEOUT 90)
+endif()
