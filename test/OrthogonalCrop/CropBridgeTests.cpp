@@ -702,6 +702,10 @@ bool GetGeometryProjectionLifecycle() {
         "partial geometry attachment was not removed and redrawn"))return false;
     f.view.geometryTargets.resize(1);
     if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropCylinder()||second->attached.empty())return false;
+    if(!Check(f.bridge.ExitCrop() && second->attached.empty()
+        && f.bridge.GetHistory().totalNodeCount==nodes,
+        "Exit retained geometry annotations or changed business history"))return false;
+    if(!f.bridge.StartView(f.view)||!f.bridge.SwitchCropCylinder()||second->attached.empty())return false;
     if(!newLease->StopLease())return false;
     f.bridge.RefreshWidgetTransform();
     return Check(second->attached.empty() && f.bridge.ClearBindings(),

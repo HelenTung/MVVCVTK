@@ -1671,6 +1671,7 @@ bool CropBridge::Impl::ExitCrop()
     m_planeWidget.SetEnabled(false);
     m_curveWidget.SetEnabled(false);
     // 已接纳命令继续完成；Exit 只关闭控件和模式编辑权。
+    ClearGeometryViews();
     m_editNode=0;
     if(!m_commands.GetIsEmpty())(void)SetInteraction(m_commitSource,true);
     m_removalMode = CropRemovalMode::None;

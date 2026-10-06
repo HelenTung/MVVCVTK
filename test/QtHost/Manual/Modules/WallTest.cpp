@@ -29,6 +29,7 @@ QJsonObject Statistics(const ThicknessSnapshot& result)
     return {{"result", GetRefText(result.result)}, {"isCurrent", result.isCurrent},
         {"sampleCount", QString::number(s.sampleCount)}, {"validCount", QString::number(s.validCount)},
         {"coverage", s.coverage}, {"minimum", s.minimum ? QJsonValue(*s.minimum) : QJsonValue()},
+        {"minimumSampleIndex", s.minimumSample ? QJsonValue(QString::number(*s.minimumSample)) : QJsonValue()},
         {"maximum", s.maximum ? QJsonValue(*s.maximum) : QJsonValue()}, {"mean", s.mean ? QJsonValue(*s.mean) : QJsonValue()},
         {"regionCount", QString::number(result.regions.size())}};
 }
