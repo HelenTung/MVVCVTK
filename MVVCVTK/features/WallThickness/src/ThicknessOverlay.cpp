@@ -151,6 +151,10 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_lineActor->PickableOff();
     m_lineActor->GetProperty()->SetColor(1, 1, 1);
     m_lineActor->GetProperty()->SetLineWidth(3);
+    m_lineActor->GetProperty()->SetPointSize(8);
+    m_lineActor->GetProperty()->RenderPointsAsSpheresOn();
+    m_lineMapper->SetResolveCoincidentTopologyToPolygonOffset();
+    m_lineMapper->SetRelativeCoincidentTopologyPointOffsetParameter(-4);
     m_lineActor->GetProperty()->LightingOff();
     m_lineActor->VisibilityOff();
     m_legend->SetLookupTable(data.lookup);
@@ -236,6 +240,11 @@ void ThicknessOverlay::SetSelection(const ThicknessSample *sample)
     auto data = vtkSmartPointer<vtkPolyData>::New();
     data->SetPoints(points);
     data->SetLines(lines);
+    // 视线与采样方向平行时线段投影会退化；端点仍提供明确的定位反馈。
+    auto endpoints=vtkSmartPointer<vtkCellArray>::New();
+    endpoints->InsertNextCell(1,&ids[0]);
+    endpoints->InsertNextCell(1,&ids[1]);
+    data->SetVerts(endpoints);
     m_lineMapper->SetInputData(data);
     m_lineActor->SetVisibility(m_actor->GetVisibility());
 }

@@ -775,7 +775,23 @@ void Display()
         break;
     }
     if (candidate.statistics.minimumSample)
+    {
         overlay->SetSelection(&(*candidate.field.samples)[*candidate.statistics.minimumSample]);
+        bool hasExactEndpoints=false;
+        renderer->GetViewProps()->InitTraversal();
+        while(auto* prop=renderer->GetViewProps()->GetNextProp()) {
+            auto* actor=vtkActor::SafeDownCast(prop);
+            auto* mapper=actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
+            auto* data=mapper ? mapper->GetInput() : nullptr;
+            if(!data || data->GetNumberOfLines()!=1 || data->GetNumberOfVerts()!=2)continue;
+            double first[3],second[3];data->GetPoint(0,first);data->GetPoint(1,second);
+            const auto& sample=(*candidate.field.samples)[*candidate.statistics.minimumSample];
+            hasExactEndpoints=std::equal(first,first+3,sample.source.begin())
+                && std::equal(second,second+3,sample.opposite.begin());
+        }
+        Check(hasExactEndpoints,"selection vertices retain the exact source and opposite endpoints");
+        window->Render();capture("WallThickness-Selection.png");
+    }
     overlay->SetOverlayState({{0, 0, 2.5}, {}});
     overlay->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 0, "detach removes owned props");
