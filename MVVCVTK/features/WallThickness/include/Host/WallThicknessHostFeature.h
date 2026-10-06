@@ -25,6 +25,8 @@ class WallThicknessHostFeature final : public HostFeature,
     ThicknessState GetState() const;
     std::optional<ThicknessSnapshot> GetResult(const DataRevisionRef &result) const;
     std::optional<ThicknessArchive> GetArchive(const DataRevisionRef &result) const;
+    // 最近角点必须有效；按 X/Y/Z 顺序插值，单侧缺失使用另一侧。缺支持返回空。
+    std::optional<double> GetThicknessValue(const DataRevisionRef &result, const ThicknessPoint &modelPoint) const;
 
   private:
     class Impl;

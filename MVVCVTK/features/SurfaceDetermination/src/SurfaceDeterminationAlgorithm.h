@@ -12,7 +12,7 @@
 using SurfaceCancelCheck = std::function<bool()>;
 using SurfaceProgressCallback =
     std::function<void(SurfaceDeterminationStage, double)>;
-inline constexpr std::uint32_t surfaceAlgorithmRevision = 5;
+inline constexpr std::uint32_t surfaceAlgorithmRevision = 6;
 
 // 点细化可由 VTK SMP worker 并发查询取消状态；调用方必须提供可并发调用的
 // 只读检查。进度回调只在 BuildSurface 的调用线程执行。
@@ -37,7 +37,7 @@ struct SurfaceAlgorithmResult final {
     SurfaceDeterminationStartParams resolvedParams;
     std::vector<std::uint8_t> triangleValidity;
     SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::LocalAdaptiveIso50;
+        SurfaceDeterminationMethod::MaterialIso;
     double initialIsoValue = 0.0;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::size_t requiredBytes = 0;

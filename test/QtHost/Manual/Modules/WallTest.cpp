@@ -49,7 +49,7 @@ ThicknessDisplay Display(const QJsonObject& p)
 ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Wall", parent);
-    panel->SetNotice("先完成零件分割及局部自适应/梯度峰值测量表面，再计算壁厚。默认长度参数按 0.1537 mm 体素设置，可按零件尺寸调整。");
+    panel->SetNotice("先完成单一高灰度材料分割及材料等值面测定。厚度为多条有效测量贡献的节点场，选点显示查询位置；留空材料阈值时采用当前表面阈值。长度参数按 mm 设置。");
     auto visible = std::make_shared<bool>(true);
     const auto resolveResult = [feature](const QJsonObject& p) {
         return GetText(p, "result") == "current" ? feature->GetState().result : GetRef(p["result"]);
@@ -72,10 +72,9 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             {{"requestId", QString::number(admission.requestId)}, {"admissionStatus", static_cast<int>(admission.status)}});
     };
     panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabel":"1","unit":"Millimeter",
-        "maxDistance":15.37,"sampleSpacing":0.3074,"reverseTolerance":0.1537,"maxFitResidual":0.1,
-        "maxLocalizationSigma":0.1537,"minSupportRatio":0.8,"coneAngleDegrees":10,"directionCount":9,
-        "minOppositeCosine":0.5,"sharpNormalCosine":0.5,"ambiguityAbsolute":0.0,"ambiguityRelative":0.15,
-        "maxBoundaryError":0.1537,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
+        "maxDistance":5.0,"sampleSpacing":0.3074,"materialThreshold":null,
+        "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"Complete",
+        "maxBoundaryError":0.07685,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
         const auto current = panel->GetSession()->GetImageDescriptor();
         if (!current) throw std::invalid_argument("请先加载体数据");
         ThicknessInput input;
@@ -92,11 +91,13 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         input.unit = GetEnum<ThicknessUnit>(p, "unit", {{"Millimeter", ThicknessUnit::Millimeter}, {"Meter", ThicknessUnit::Meter}});
         ThicknessParams params;
         params.maxDistance = GetNumber(p, "maxDistance"); params.sampleSpacing = GetNumber(p, "sampleSpacing");
-        params.reverseTolerance = GetNumber(p, "reverseTolerance"); params.maxFitResidual = GetNumber(p, "maxFitResidual");
-        params.maxLocalizationSigma = GetNumber(p, "maxLocalizationSigma"); params.minSupportRatio = GetNumber(p, "minSupportRatio");
+        params.materialThreshold = p["materialThreshold"].isNull()
+            ? (input.mesh == workflow.GetSurfaceMesh() ? workflow.GetSurfaceThreshold() : std::optional<double>{})
+            : std::optional<double>{GetNumber(p, "materialThreshold")};
+        if (!params.materialThreshold) throw std::invalid_argument("请显式提供原始灰度材料阈值，或选择当前测量表面");
         params.coneAngleDegrees = GetNumber(p, "coneAngleDegrees"); params.directionCount = static_cast<std::uint32_t>(Count(p, "directionCount", 4096));
-        params.minOppositeCosine = GetNumber(p, "minOppositeCosine"); params.sharpNormalCosine = GetNumber(p, "sharpNormalCosine");
-        params.ambiguityAbsolute = GetNumber(p, "ambiguityAbsolute"); params.ambiguityRelative = GetNumber(p, "ambiguityRelative");
+        params.boundaryPolicy = GetEnum<ThicknessBoundaryPolicy>(p, "boundaryPolicy", {
+            {"Complete", ThicknessBoundaryPolicy::Complete}, {"SourceExtentLocal", ThicknessBoundaryPolicy::SourceExtentLocal}});
         params.maxBoundaryError = GetNumber(p, "maxBoundaryError");
         if (!p["evaluationBounds"].isNull()) params.evaluationBounds = GetArray<double, 6>(p["evaluationBounds"]);
         ThicknessRequest request; request.action = ThicknessAction::Start; request.input = input; request.params = params;

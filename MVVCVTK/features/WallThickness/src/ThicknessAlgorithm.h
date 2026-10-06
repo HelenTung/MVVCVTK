@@ -25,6 +25,9 @@ struct Field final
     std::shared_ptr<const std::vector<ThicknessSample>> samples;
     std::shared_ptr<const Neighbors> neighbors;
     std::uint32_t subdivisions = 0;
+    std::shared_ptr<const std::vector<ThicknessNode>> nodes;
+    GridGeometry3D geometry;
+    double coordinateTolerance = 0;
 };
 struct Candidate final
 {
@@ -39,6 +42,7 @@ bool GetEvaluationValid(const ThicknessEvaluation &evaluation) noexcept;
 bool GetDisplayValid(const ThicknessDisplay &display) noexcept;
 bool GetConfigValid(const ThicknessConfig &config) noexcept;
 Candidate BuildField(const Work &work) noexcept;
+std::optional<double> GetValue(const Field &field, const ThicknessPoint &modelPoint);
 Candidate BuildEvaluation(const Field &field, const ThicknessEvaluation &evaluation,
                           const ThicknessParams &params, const ThicknessConfig &config,
                           const std::shared_ptr<std::atomic<bool>> &cancelled,

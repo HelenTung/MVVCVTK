@@ -135,8 +135,14 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
     auto* tree = panel->GetCatalogTree(); ClickNode(tree, tree->topLevelItem(0));
     panel->SetParameterPatch(action, patch);
+    // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
+    const bool ready = Wait([&] {
+        const auto* current = panel->findChild<QPushButton*>("action_" + action);
+        return current && current->isVisible() && current->isEnabled();
+    }, 2000);
+    if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
+    Check(ready, "actual business button is visible and responds");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
-    Check(button && button->isVisible() && button->isEnabled(), "actual business button is visible and responds");
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     button->click(); return id;
 }
@@ -1096,11 +1102,10 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         {"dimensions", QJsonArray{32,32,32}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{-31,-31,0}}, {"sourceDigest", ""}}), "Succeeded");
     GetComplete(window, Click(window, "Wall", "Start"), "InvalidInput");
     GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
-    GetComplete(window, Click(window, "Surface", "LocalAdaptiveIso50", {{"componentSelection", "All"}, {"initialIsoValue", 500.},
+    GetComplete(window, Click(window, "Surface", "MaterialIso", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
         {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
         {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");
     const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
-        {"reverseTolerance", 0.25}, {"maxFitResidual", 30.}, {"maxLocalizationSigma", 0.2}, {"minSupportRatio", 0.5},
         {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
     const auto result = record["result"].toObject();
     Check(result["isDisplayReady"].toBool() && result["coverage"].toDouble() >= 0.5
@@ -1416,6 +1421,11 @@ void StartSelfTest(TestWindow& window)
             GetComplete(window, Send(window, "Alignment", "Start"), "FullyDetermined");
         }
 #endif
+        // 材料表面单独验证，不依赖可选对齐模块替它生成正式结果。
+        GetComplete(window, Send(window, "Surface", "MaterialIso", {{"initialIsoValue", 50.0},
+            {"materialRange", QJsonArray{0.,100.}}}), "Succeeded");
+        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()),
+            "material ISO publishes an independent formal measurement surface");
     }
     if (GetEnabled(window, "Rotation")) {
         auto* rotation = window.GetModule("Rotation");

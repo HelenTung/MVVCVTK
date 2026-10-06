@@ -4,7 +4,7 @@
 
 namespace ThicknessData
 {
-inline const DataTypeId resultType{"org.mvvcvtk.wall-thickness.result", 1};
+inline const DataTypeId resultType{"org.mvvcvtk.wall-thickness.result", 2};
 inline const DataFacetId resultFacet{"wall-thickness-result"};
 inline constexpr std::string_view bindingName = "wall-thickness.active";
 struct Record final
@@ -32,7 +32,7 @@ class ResultPayload final : public IDataPayload
     }
     std::vector<std::shared_ptr<const void>> GetDataResources() const override
     {
-        return {m_record,m_record->field.samples,m_record->field.neighbors};
+        return {m_record,m_record->field.samples,m_record->field.neighbors,m_record->field.nodes};
     }
     const Record &GetRecord() const noexcept
     {

@@ -23,7 +23,8 @@ bool SetType(TrustedDataPort &data)
                               }
                               const auto &r = p->GetRecord();
                               const bool valid =
-                                  r.field.samples && r.field.neighbors &&
+                                  r.field.samples && r.field.neighbors && r.field.nodes &&
+                                  GetGridGeometryValid(r.field.geometry) && r.archive.schemaVersion == 2 &&
                                   r.field.samples->size() == r.field.neighbors->size() &&
                                   r.field.subdivisions > 0 && r.field.subdivisions <= 64 &&
                                   ThicknessAlgorithm::GetParamsValid(r.archive.params) &&
@@ -187,11 +188,10 @@ std::string GetParameters(const ThicknessArchive &a)
         << std::quoted(a.input.meshBinding) << ';' << a.input.materialLabel << ';'
         << unsigned(a.input.unit) << ';';
     const auto &p = a.params;
-    out << p.maxDistance << ';' << p.sampleSpacing << ';' << p.reverseTolerance << ';'
-        << p.maxFitResidual << ';' << p.maxLocalizationSigma << ';' << p.minSupportRatio << ';'
-        << p.coneAngleDegrees << ';' << p.directionCount << ';' << p.minOppositeCosine << ';'
-        << p.sharpNormalCosine << ';' << p.ambiguityAbsolute << ';' << p.ambiguityRelative << ';'
-        << p.maxBoundaryError << ';' << bool(p.evaluationBounds) << ';';
+    out << p.maxDistance << ';' << p.sampleSpacing << ';' << bool(p.materialThreshold) << ';';
+    if (p.materialThreshold) out << *p.materialThreshold << ';';
+    out << p.coneAngleDegrees << ';' << p.directionCount << ';'
+        << p.maxBoundaryError << ';' << unsigned(p.boundaryPolicy) << ';' << bool(p.evaluationBounds) << ';';
     if (p.evaluationBounds)
         for (double v : *p.evaluationBounds)
             out << v << ';';

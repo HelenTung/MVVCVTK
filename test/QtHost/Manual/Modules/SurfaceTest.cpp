@@ -47,12 +47,18 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
 ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeterminationHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
-    panel->SetNotice("自动 ISO50 从空气背景与占比最多的非空气材料群估计阈值；全局等值面预览点不能直接用于测量。对齐请使用局部自适应或梯度峰值方法的有效点，定位稳定性不等于计量不确定度。");
-    const auto defaults = GetJson(R"({"componentSelection":"Largest","initialIsoValue":null,"seedModelPoint":null,"roiModelBounds":null,"profileHalfLengthModel":null,"profileSampleStepModel":null,"maximumOffsetModel":null,"profileSmoothingSigmaModel":null,"minimumObjectVoxels":"1","minimumContrast":0})");
+    panel->SetNotice("材料等值面先按背景/材料灰度饱和节点再定位表面；留空材料范围时从原始灰度估计。全局预览不发布测量网格。定位稳定性不等于计量不确定度。");
+    const auto defaults = GetJson(R"({"componentSelection":"Largest","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"profileHalfLengthModel":null,"profileSampleStepModel":null,"maximumOffsetModel":null,"profileSmoothingSigmaModel":null,"minimumObjectVoxels":"1","minimumContrast":0})");
     for (const auto& method : std::vector<std::pair<QString, SurfaceDeterminationMethod>>{
+        {"MaterialIso", SurfaceDeterminationMethod::MaterialIso},
         {"AutomaticIso50", SurfaceDeterminationMethod::AutomaticIso50}, {"GlobalIsoPreview", SurfaceDeterminationMethod::GlobalIsoPreview},
         {"LocalAdaptiveIso50", SurfaceDeterminationMethod::LocalAdaptiveIso50}, {"GradientPeak", SurfaceDeterminationMethod::GradientPeak}}) {
         auto parameters = defaults;
+        if (method.second == SurfaceDeterminationMethod::MaterialIso) {
+            parameters["componentSelection"] = "All";
+            parameters["minimumObjectVoxels"] = "0";
+        }
+        if (method.second != SurfaceDeterminationMethod::MaterialIso) parameters.remove("materialRange");
         if (method.second == SurfaceDeterminationMethod::AutomaticIso50) parameters = {{"roiModelBounds", QJsonValue()}};
         else if (method.second == SurfaceDeterminationMethod::GlobalIsoPreview) {
             for (const auto* key : {"profileHalfLengthModel", "profileSampleStepModel", "maximumOffsetModel", "profileSmoothingSigmaModel", "minimumContrast"}) parameters.remove(key);
@@ -65,6 +71,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (params.contains("componentSelection")) start.componentSelection = GetEnum<SurfaceComponentSelection>(params, "componentSelection", {
                 {"Largest", SurfaceComponentSelection::Largest}, {"Seeded", SurfaceComponentSelection::Seeded}, {"All", SurfaceComponentSelection::All}});
             if (params.contains("initialIsoValue") && !params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
+            if (params.contains("materialRange") && !params["materialRange"].isNull()) start.materialRange = GetArray<double, 2>(params["materialRange"]);
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
             if (!params["roiModelBounds"].isNull()) {
                 const auto source = panel->GetSession()->GetImageDescriptor();
@@ -88,7 +95,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 const auto snapshot = feature->GetSurfaceSnapshot();
                 if (result.status == SurfaceResultStatus::Succeeded && snapshot && GetDataRevisionRefValid(snapshot->meshRevision)
                     && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure)
-                    owner->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision);
+                    owner->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
                 else owner->GetContext().workflow.SetSurfaceInput({}, {});
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
                     : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed", summary);
@@ -183,7 +190,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement
             || state.stage == SurfaceDeterminationStage::TopologyValidation || state.stage == SurfaceDeterminationStage::Committing || state.stage == SurfaceDeterminationStage::Stopping;
-        if (measured) panel->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision);
+        if (measured) panel->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
         else panel->GetContext().workflow.SetSurfaceInput({}, {});
         panel->SetState(summary);
     };

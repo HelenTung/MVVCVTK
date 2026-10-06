@@ -18,7 +18,9 @@ enum class SurfaceDeterminationMethod : std::uint8_t
     AutomaticIso50,
     LocalRelativeIso,
     EdgeModelFit,
-    PairedEdgeModelFit
+    PairedEdgeModelFit,
+    // 先将原始节点饱和到背景/材料值，再提取等值面；不进行局部位置重拟合。
+    MaterialIso
 };
 
 enum class SurfaceTaskPurpose : std::uint8_t
@@ -171,16 +173,19 @@ struct SurfaceRegionOverride final
 
 struct SurfaceRecipe
 {
-    SurfaceDeterminationMethod method = SurfaceDeterminationMethod::LocalAdaptiveIso50;
-    SurfaceComponentSelection componentSelection = SurfaceComponentSelection::Largest;
+    SurfaceDeterminationMethod method = SurfaceDeterminationMethod::MaterialIso;
+    SurfaceComponentSelection componentSelection = SurfaceComponentSelection::All;
     std::optional<double> initialIsoValue;
+    // MaterialIso 的背景/材料灰度值（递增）；缺省时在原始灰度上估计。
+    // 与用于局部拟合约束的 grayPair 区间语义不同。
+    std::optional<std::array<double, 2>> materialRange;
     std::optional<std::array<double, 3>> seedModelPoint;
     std::optional<double> profileHalfLengthModel;
     std::optional<double> profileSampleStepModel;
     std::optional<double> maximumOffsetModel;
     std::optional<double> profileSmoothingSigmaModel;
-    // 闭合初始表面按体积/体素体积估计；开放/截断表面不伪造 voxel count。
-    std::uint64_t minimumObjectVoxels = 1;
+    // 0 保留全部分量；闭合表面按体积/体素体积估计，开放/截断表面不伪造 voxel count。
+    std::uint64_t minimumObjectVoxels = 0;
     double minimumContrast = 0.0;
 
     double seedFraction = 0.5;

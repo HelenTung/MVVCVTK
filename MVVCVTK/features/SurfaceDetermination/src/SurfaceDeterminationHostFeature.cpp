@@ -62,6 +62,7 @@ bool GetMethodValid(const SurfaceDeterminationMethod method)
     case SurfaceDeterminationMethod::LocalRelativeIso:
     case SurfaceDeterminationMethod::EdgeModelFit:
     case SurfaceDeterminationMethod::PairedEdgeModelFit:
+    case SurfaceDeterminationMethod::MaterialIso:
         return true;
     default:
         return false;
@@ -89,7 +90,7 @@ bool GetStartValid(const SurfaceDeterminationStartParams& params)
 {
     if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue) ||
         !SurfaceContract::GetInputValid(params) || !GetMethodValid(params.method) ||
-        !GetSelectionValid(params.componentSelection) || params.minimumObjectVoxels == 0 ||
+        !GetSelectionValid(params.componentSelection) ||
         !std::isfinite(params.minimumContrast) || params.minimumContrast < 0.0 ||
         (params.initialIsoValue && !std::isfinite(*params.initialIsoValue)) ||
         !GetOptionalPositive(params.profileHalfLengthModel) ||

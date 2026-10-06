@@ -31,8 +31,8 @@ class ThicknessOverlay final : public FeatureOverlayBase
     std::optional<std::size_t> GetPickedSample(int x, int y, vtkRenderer *renderer);
 
   private:
-    vtkSmartPointer<vtkActor> m_actor, m_lineActor;
-    vtkSmartPointer<vtkPolyDataMapper> m_mapper, m_lineMapper;
+    vtkSmartPointer<vtkActor> m_actor, m_selectionActor;
+    vtkSmartPointer<vtkPolyDataMapper> m_mapper, m_selectionMapper;
     vtkSmartPointer<vtkScalarBarActor> m_legend;
     vtkSmartPointer<vtkLegendBoxActor> m_invalidLegend;
     vtkSmartPointer<vtkCutter> m_cutter;
