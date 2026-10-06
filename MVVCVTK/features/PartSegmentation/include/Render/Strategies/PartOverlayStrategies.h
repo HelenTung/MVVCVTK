@@ -15,6 +15,7 @@ class vtkImageSlice;
 class vtkLookupTable;
 class vtkPlane;
 class vtkPolyDataMapper;
+class vtkPolyDataNormals;
 class vtkThreshold;
 class vtkGeometryFilter;
 class vtkPolyDataSilhouette;
@@ -42,6 +43,7 @@ public:
 private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
+    vtkSmartPointer<vtkPolyDataNormals> m_normals;
     vtkSmartPointer<vtkLookupTable> m_lut;
     PartRenderStateTable m_partStates;
     PartRenderStateTable m_pickStates;

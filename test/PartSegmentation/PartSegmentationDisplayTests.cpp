@@ -20,6 +20,9 @@
 #include <vtkNew.h>
 #include <vtkPlane.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyDataNormals.h>
+#include <vtkCellData.h>
+#include <vtkIdList.h>
 #include <vtkPointData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
@@ -149,6 +152,29 @@ std::uint64_t GetWorkingSetBytes() noexcept
         : 0;
 }
 
+vtkPolyData* GetFormalSurface(vtkPolyDataMapper* mapper)
+{
+    auto* normals=mapper ? vtkPolyDataNormals::SafeDownCast(mapper->GetInputAlgorithm()) : nullptr;
+    return normals ? vtkPolyData::SafeDownCast(normals->GetInput()) : nullptr;
+}
+
+bool GetGeometryExactlyShared(vtkPolyDataMapper* mapper,vtkPolyData* formal)
+{
+    auto* display=mapper ? mapper->GetInput() : nullptr;
+    if(!display || !formal || GetFormalSurface(mapper)!=formal
+        || display->GetPoints()!=formal->GetPoints()
+        || display->GetNumberOfCells()!=formal->GetNumberOfCells()
+        || display->GetCellData()->GetScalars()!=formal->GetCellData()->GetScalars()
+        || !display->GetPointData()->GetNormals())return false;
+    vtkNew<vtkIdList> first; vtkNew<vtkIdList> second;
+    for(vtkIdType cell=0;cell<formal->GetNumberOfCells();++cell) {
+        formal->GetCellPoints(cell,first);display->GetCellPoints(cell,second);
+        if(first->GetNumberOfIds()!=second->GetNumberOfIds())return false;
+        for(vtkIdType i=0;i<first->GetNumberOfIds();++i)if(first->GetId(i)!=second->GetId(i))return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int GetPartDisplayFailCount()
@@ -210,7 +236,7 @@ int GetPartDisplayFailCount()
         auto* mapper = actor
             ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper())
             : nullptr;
-        return mapper ? mapper->GetInput() : nullptr;
+        return GetFormalSurface(mapper);
     };
     failureCount += GetCaseResult(
         surfaceProduct.failureReason == PartFailureReason::None
@@ -392,7 +418,7 @@ int GetPartDisplayFailCount()
     auto* previewOutline=vtkActor::SafeDownCast(editRenderer->GetViewProps()->GetNextProp());
     failureCount += GetCaseResult(previewActor && previewOutline && previewOutline->GetVisibility()
         && previewOutline->GetProperty()->GetColor()[0]==1.0
-        && vtkPolyDataMapper::SafeDownCast(previewActor->GetMapper())->GetInput()==surfaceProduct.product->surface,
+        && GetGeometryExactlyShared(vtkPolyDataMapper::SafeDownCast(previewActor->GetMapper()),surfaceProduct.product->surface),
         "Edit preview has its own amber silhouette while retaining the exact candidate surface") ? 0 : 1;
     editSurface->DetachRenderer(editRenderer);
 
@@ -449,7 +475,7 @@ int GetPartDisplayFailCount()
     if (surfaceLut) surfaceLut->GetTableValue(1, hiddenSurfaceColor);
     failureCount += GetCaseResult(
         didSetSurfaceStates && sharedSurface && surfaceMapper && surfaceLut
-            && surfaceMapper->GetInput() == sharedSurface
+            && GetGeometryExactlyShared(surfaceMapper,sharedSurface)
             && sharedSurface->GetMTime() == surfaceMTime
             && hiddenSurfaceColor[3] == 0.0
             && surfaceMapper->GetScalarRange()[0] == 0.0
@@ -490,7 +516,7 @@ int GetPartDisplayFailCount()
     double markerColor[4]{}, otherColor[4]{};
     markerLut->GetTableValue(1, markerColor); markerLut->GetTableValue(2, otherColor);
     failureCount += GetCaseResult(noSelection && hasSelection && markerColor[3] > 0 && markerColor[3] < 0.4
-        && otherColor[3] == 0 && markerMapper->GetInput() == sharedSurface
+        && otherColor[3] == 0 && GetGeometryExactlyShared(markerMapper,sharedSurface)
         && marker->SetPartStates(*hiddenStates) && !markerActor->GetVisibility(),
         "DVR selection marker preserves source volume, shares geometry, and retires when hidden") ? 0 : 1;
     vtkNew<vtkRenderWindow> pickWindow; pickWindow->SetSize(256, 256); pickWindow->AddRenderer(markerRenderer);

@@ -19,6 +19,7 @@
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPolyData.h>
+#include <vtkPolyDataNormals.h>
 #include <vtkProperty.h>
 #include <vtkThreshold.h>
 #include <vtkGeometryFilter.h>
@@ -189,18 +190,27 @@ bool SetPartStates(
 PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnly, const bool isPreview)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
+    , m_normals(vtkSmartPointer<vtkPolyDataNormals>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
     , m_pickLut(vtkSmartPointer<vtkLookupTable>::New())
     , m_isSelectionOnly(isSelectionOnly)
     , m_isPreview(isPreview)
 {
     m_mapper->SetLookupTable(m_lut);
+    // 只生成显示法线；不拆点、不改三角形方向，正式产品保持只读共享。
+    m_normals->SplittingOff();
+    m_normals->ConsistencyOff();
+    m_normals->AutoOrientNormalsOff();
+    m_normals->ComputeCellNormalsOff();
+    m_normals->ComputePointNormalsOn();
+    m_mapper->SetInputConnection(m_normals->GetOutputPort());
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     // 候选与正式表面可能共面；仅给显示投影偏移，不改顶点或正式标签。
     if (isPreview) m_mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0, -4);
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetOpacity(1.0);
     m_actor->GetProperty()->SetLighting(true);
+    m_actor->GetProperty()->SetInterpolationToPhong();
     m_actor->GetProperty()->SetAmbient(0.35);
     m_actor->GetProperty()->SetDiffuse(0.65);
     m_actor->GetProperty()->SetSpecular(0.12);
@@ -246,7 +256,8 @@ void PartSurfaceOverlayStrategy::SetInputData(
 {
     auto* surface = vtkPolyData::SafeDownCast(data);
     if (!surface) return;
-    m_mapper->SetInputData(surface);
+    m_normals->SetInputData(surface);
+    m_normals->Update();
     m_selection->SetInputData(surface);
 }
 
