@@ -23,6 +23,10 @@ foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;Par
         endif()
     endif()
 endforeach()
+if(TARGET MVVCVTK::RoiEditing)
+    target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::RoiEditing)
+    target_compile_definitions(qt_feature_test_support PUBLIC MANUAL_ROI)
+endif()
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE manual_head OUTPUT_STRIP_TRAILING_WHITESPACE)
 file(GLOB_RECURSE manual_inputs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"

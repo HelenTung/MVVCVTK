@@ -4,6 +4,8 @@
 #include "Support/ParameterEditor.h"
 #include "Support/ReferenceDataSource.h"
 #include <QPointer>
+#include <QFile>
+#include <QTextStream>
 namespace Manual {
 namespace {
 QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature)
@@ -178,6 +180,18 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->SetComplete(id, "Observed", {{"mesh", GetRefText(snapshot->meshRevision)}, {"source", GetRefText(snapshot->sourceRevision)},
             {"samples", samples}, {"totalPoints", QString::number(points.size())}});
     }, TestPolicy::Read);
+    panel->AttachAction("ExportComparison", {{"outputPath",""}}, [panel,feature](auto id,const auto& p){
+        auto snapshot=feature->GetSurfaceSnapshot();
+        if(!snapshot)snapshot=feature->GetPreviewSnapshot();
+        if(!snapshot||!snapshot->points)throw std::runtime_error("surface unavailable");
+        QFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
+        QTextStream out(&file);out.setRealNumberPrecision(17);
+        out<<"vertex_id,x_mm,y_mm,z_mm,nx,ny,nz,flags,support_ratio,fit_residual,localization_sigma_mm\n";
+        std::size_t i=0;for(const auto& v:*snapshot->points){out<<qulonglong(i++);for(auto x:v.positionModel)out<<','<<x;for(auto x:v.normalModel)out<<','<<x;out<<','<<int(v.flags)<<','<<v.validSupportRatio<<','<<v.fitResidual<<','<<v.estimatedLocalizationSigma<<'\n';}
+        out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("surface write failed");
+        QJsonArray objects;if(snapshot->objects)for(const auto& o:*snapshot->objects)objects.append(QJsonObject{{"objectIndex",int(o.objectIndex)},{"area",o.areaModelUnit2?QJsonValue(*o.areaModelUnit2):QJsonValue()},{"volume",o.volumeModelUnit3?QJsonValue(*o.volumeModelUnit3):QJsonValue()},{"closed",o.isClosed},{"manifold",o.isManifold}});
+        panel->SetComplete(id,"Exported",{{"points",QString::number(i)},{"triangles",QString::number(snapshot->triangleIndices?snapshot->triangleIndices->size()/3:0)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"objects",objects},{"coordinateFrame",QString::fromStdString(snapshot->coordinateFrame)}});
+    },TestPolicy::Read);
 #if defined(MANUAL_ALIGNMENT)
     panel->AttachAction("OpenAlignment", {}, [panel](auto id, const auto&) {
         if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("Alignment", "ImportReference", {});

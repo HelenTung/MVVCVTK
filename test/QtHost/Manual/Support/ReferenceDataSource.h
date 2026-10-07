@@ -29,6 +29,8 @@ public:
     QJsonObject GetPublishedGraph();
     QJsonObject GetViewTransforms();
     QJsonObject GetResultEvidence();
+    QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
+    QJsonObject ReadTransform();
 private:
     std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureViewDirectory> m_views;
