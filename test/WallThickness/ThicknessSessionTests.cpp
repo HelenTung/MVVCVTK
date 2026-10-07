@@ -226,7 +226,8 @@ void TestSession(Acceptance c)
     const auto wait = [&](const auto &ready)
     {
         const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(std::max(90000U, c.limits.deadlineMilliseconds + 30000U));
+            std::chrono::milliseconds(std::max<std::size_t>(90000U,
+                c.limits.deadlineMilliseconds.value_or(0) + 30000U));
         while (!ready() && std::chrono::steady_clock::now() < deadline)
         {
             session.SendUpdates();

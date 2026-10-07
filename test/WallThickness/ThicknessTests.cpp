@@ -162,10 +162,9 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     w.archive.params.maxBoundaryError = 0.5;
     w.archive.params.materialThreshold = 0.5;
-    // 完整球壳现在按每原始面九点积分；采用归档已声明的默认业务 deadline，
-    // 不继承小平板辅助函数的 30 秒窗口，不降低网格分辨率或精度断言。
-    w.deadline = std::chrono::steady_clock::now() +
-                 std::chrono::milliseconds(w.archive.limits.deadlineMilliseconds);
+    // 完整球壳按每原始面九点积分，沿用归档的可选计算时限。
+    // 未配置时保持不限时，CTest 负责测试进程的运行上限。
+    w.deadline = WorkLimit(w.archive.limits.deadlineMilliseconds).GetDeadline();
     return w;
 }
 void TestRayDefinitions()
