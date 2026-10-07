@@ -19,6 +19,8 @@ struct VtkImageGridView final {
     DataGraphSnapshot graph;
     std::optional<DataBinding> binding;
     DataSnapshot data;
+    // 可信只读适配：VTK 没有 const 管线输入接口，壳可以共享不可变数组。
+    // 写入型 filter 必须分配自己的输出，不能修改借用标量。
     vtkSmartPointer<vtkImageData> image;
     vtkSmartPointer<vtkImageData> validityMask;
 };

@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Services/PartSegmentationService.h"
 #include "Model/LabelMapBuilder.h"
 
@@ -21,9 +22,6 @@
 #include <utility>
 
 namespace {
-
-// 每标签 LUT 与离散等值面均为 O(partCount)，必须保持显式上限。
-constexpr std::uint32_t maxOverlayPartCount = 4096;
 
 bool GetProduct(
     const std::size_t left,
@@ -171,11 +169,11 @@ ScalarViewStatus BuildScalarView(
 
 std::string BuildBudgetMessage(
     const std::size_t requiredBytes,
-    const std::size_t maxWorkingBytes)
+    const WorkLimit maxWorkingBytes)
 {
     return "Part working-set budget is exceeded: requiredBytes="
         + std::to_string(requiredBytes)
-        + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
+        + ", maxWorkingBytes=" + maxWorkingBytes.GetText() + ".";
 }
 
 std::string BuildSuccessMessage(const PartAlgorithmMetrics& metrics)
@@ -230,6 +228,8 @@ PartSegmentationService::~PartSegmentationService() noexcept
             const std::lock_guard<std::mutex> lock(m_mutex);
             m_isStopping = true;
             m_cancelRequested.store(true, std::memory_order_release);
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
         }
         m_workReady.notify_all();
         if (m_worker.joinable()) m_worker.join();
@@ -239,7 +239,7 @@ PartSegmentationService::~PartSegmentationService() noexcept
 PartAdmissionStatus PartSegmentationService::Start(
     VtkImageGridSnapshot source,
     PartSegmentationStartParams params,
-    const std::size_t maxWorkingBytes,
+    const WorkLimit maxWorkingBytes,
     const std::uint64_t requestId,
     PartHistorySnapshot previous,
     const std::uint64_t expectedResultRevision,
@@ -248,7 +248,7 @@ PartAdmissionStatus PartSegmentationService::Start(
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return PartAdmissionStatus::Stopping;
-    if (m_isBusy || m_job || m_complete) return PartAdmissionStatus::Busy;
+    if ((m_isBusy && !m_isSurfaceBusy) || m_job || m_complete) return PartAdmissionStatus::Busy;
     if (!source || !source->image || requestId == 0
         || !std::isfinite(params.threshold)
         || params.minPartVoxels == 0
@@ -265,6 +265,8 @@ PartAdmissionStatus PartSegmentationService::Start(
                 || expectedCatalogRevision != 0))) {
         return PartAdmissionStatus::InvalidRequest;
     }
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
     m_cancelRequested.store(false, std::memory_order_release);
     m_progressPermille.store(0, std::memory_order_relaxed);
     m_progressRequestId.store(requestId, std::memory_order_release);
@@ -287,11 +289,11 @@ PartAdmissionStatus PartSegmentationService::StartEdit(PartEditJob edit)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return PartAdmissionStatus::Stopping;
-    if (m_isBusy || m_job || m_complete) return PartAdmissionStatus::Busy;
+    if ((m_isBusy && !m_isSurfaceBusy) || m_job || m_complete) return PartAdmissionStatus::Busy;
     if (!GetPartEditBytes(edit.request)) return PartAdmissionStatus::BudgetExceeded;
     if (!edit.source || !edit.source->image || !edit.previous.labels
         || !edit.previous.catalog || edit.requestId == 0 || edit.maxWorkingBytes == 0
-        || edit.timeoutMs == 0 || edit.timeoutMs > 86400000
+        || edit.timeoutMs == 0 || (edit.timeoutMs.GetValue() && edit.timeoutMs > 86400000)
         || edit.previous.catalog->catalogRevision != edit.request.expectedCatalogRevision) {
         return PartAdmissionStatus::InvalidRequest;
     }
@@ -304,6 +306,8 @@ PartAdmissionStatus PartSegmentationService::StartEdit(PartEditJob edit)
     job.expectedCatalogRevision = job.previous.catalog->catalogRevision;
     job.retainedSurfaceBytes = edit.retainedBytes;
     job.edit = std::move(edit);
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
     m_cancelRequested.store(false, std::memory_order_release);
     m_progressPermille.store(0, std::memory_order_relaxed);
     m_progressRequestId.store(job.requestId, std::memory_order_release);
@@ -312,10 +316,43 @@ PartAdmissionStatus PartSegmentationService::StartEdit(PartEditJob edit)
     return PartAdmissionStatus::Accepted;
 }
 
+bool PartSegmentationService::StartSurface(PartSurfaceBuildRequest request,
+    DataRevisionRef labels, std::uint64_t requestId)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_isStopping || m_job || m_complete || (m_isBusy && !m_isSurfaceBusy)
+        || !GetDataRevisionRefValid(labels) || requestId == 0 || !request.labels) return false;
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_surfaceCancel = cancelled;
+    m_surfaceComplete.reset();
+    m_surfaceJob = SurfaceJob{std::move(request), labels, requestId, std::move(cancelled)};
+    m_workReady.notify_one();
+    return true;
+}
+
+std::optional<PartSurfaceCompletion> PartSegmentationService::RemoveSurfaceComplete()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto result = std::move(m_surfaceComplete);
+    m_surfaceComplete.reset();
+    return result;
+}
+
+void PartSegmentationService::StopSurface() noexcept
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
+    m_surfaceComplete.reset();
+}
+
 void PartSegmentationService::StopRequest() noexcept
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     m_cancelRequested.store(true, std::memory_order_release);
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
     ++m_executionRevision;
 }
 
@@ -366,10 +403,16 @@ std::optional<double> PartSegmentationService::GetProgress(
     return static_cast<double>(permille) / 1000.0;
 }
 
+bool PartSegmentationService::GetIsSurfaceBusy() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_isSurfaceBusy || m_surfaceJob.has_value() || m_surfaceComplete.has_value();
+}
+
 bool PartSegmentationService::GetIsBusy() const
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    return m_isBusy || m_job.has_value() || m_complete.has_value();
+    return (m_isBusy && !m_isSurfaceBusy) || m_job.has_value() || m_complete.has_value();
 }
 
 bool PartSegmentationService::Stop(
@@ -379,6 +422,8 @@ bool PartSegmentationService::Stop(
         const std::lock_guard<std::mutex> lock(m_mutex);
         m_isStopping = true;
         m_cancelRequested.store(true, std::memory_order_release);
+    if (m_surfaceCancel) m_surfaceCancel->store(true);
+    m_surfaceJob.reset();
     }
     m_workReady.notify_all();
 
@@ -414,23 +459,43 @@ void PartSegmentationService::WorkerLoop() noexcept
 {
     for (;;) {
         Job job;
+        std::optional<SurfaceJob> surface;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_workReady.wait(lock, [this] {
-                return m_isStopping || m_job.has_value();
+                return m_isStopping || m_job.has_value() || m_surfaceJob.has_value();
             });
-            if (m_isStopping && !m_job) break;
+            if (m_isStopping && !m_job && !m_surfaceJob) break;
+            if (!m_job) {
+                surface = std::move(m_surfaceJob);
+                m_surfaceJob.reset();
+                m_isSurfaceBusy = m_isBusy = true;
+            } else {
             job = std::move(*m_job);
             m_job.reset();
             m_isBusy = true;
             ++m_executionRevision;
+            }
+        }
+
+        if (surface) {
+            auto result = PartSurfaceProductBuilder::BuildProduct(surface->request,
+                [cancel = surface->cancelled] { return cancel->load(); }, {});
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_isSurfaceBusy = m_isBusy = false;
+                if (!surface->cancelled->load() && !m_isStopping)
+                    m_surfaceComplete = PartSurfaceCompletion{surface->labels, surface->requestId, std::move(result)};
+            }
+            try { if (m_onWorkAvailable) m_onWorkAvailable(); } catch (...) {}
+            continue;
         }
 
         const auto started = std::chrono::steady_clock::now();
         PartLabelCandidate candidate = BuildCandidate(job);
         if (job.edit && candidate.failureReason == PartFailureReason::Cancelled
             && !m_cancelRequested.load(std::memory_order_acquire)
-            && std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(job.edit->timeoutMs)) {
+            && std::chrono::steady_clock::now() >= job.edit->timeoutMs.GetDeadline(started)) {
             candidate.status = PartResultStatus::Failed;
             candidate.failureReason = PartFailureReason::TimedOut;
             candidate.message = "Part edit deadline was exceeded.";
@@ -469,7 +534,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
     if (!job.source || !job.source->image) return candidate;
 
     const auto deadline = job.edit
-        ? std::chrono::steady_clock::now() + std::chrono::milliseconds(job.edit->timeoutMs)
+        ? job.edit->timeoutMs.GetDeadline()
         : std::chrono::steady_clock::time_point::max();
     const auto getStopped = [this, deadline] {
         return m_cancelRequested.load(std::memory_order_acquire)
@@ -568,7 +633,6 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         PartAlgorithmParams params;
         params.threshold = job.params.threshold;
         params.minPartVoxels = job.params.minPartVoxels;
-        params.maxPartCount = maxOverlayPartCount;
         params.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
         const auto started = std::chrono::steady_clock::now();
         const auto elapsedMs = [](const auto& since) {
@@ -644,7 +708,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             else if (result.error == PartAlgorithmError::LabelOverflow) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
                 candidate.message =
-                    "Part count exceeds the bounded overlay limit.";
+                    "Part count exceeds the label representation.";
             }
             else if (result.error == PartAlgorithmError::InvalidInput) {
                 candidate.failureReason = PartFailureReason::InvalidGeometry;
@@ -739,125 +803,14 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         candidate.spacing = volume.spacing;
         candidate.origin = volume.origin;
         candidate.direction = volume.direction;
-        // 旧标签/目录/表面和新目录在表面提取期间仍存活，先从预算中保留。
-        std::size_t catalogBytes = 0;
-        std::size_t labelBytes = 0;
-        if (!GetProduct(candidate.labels->size(), sizeof(PartLabelId), labelBytes)
-            || !GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
-            || catalogBytes > std::numeric_limits<std::size_t>::max() - historyBytes) {
-            candidate.failureReason = PartFailureReason::BudgetExceeded;
-            candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
-            candidate.message = BuildBudgetMessage(
-                candidate.requiredBytes, job.maxWorkingBytes);
-            candidate.catalog.reset();
-            candidate.labels.reset();
-            return candidate;
-        }
-        const std::size_t retainedBytes = historyBytes + catalogBytes;
-        // 撤销/重做复用 Host 历史中的不可变标签；表面提取器自身也会
-        // 计入这份借用输入，因此从外层保留量中扣除一次，避免重复计费。
-        const bool reusesRetainedLabels = job.edit && job.edit->restoredPayload
-            && candidate.labels == job.edit->restoredPayload->GetLabels()
-            && labelBytes <= historyBytes;
-        const std::size_t surfaceRetainedBytes = reusesRetainedLabels
-            ? retainedBytes - labelBytes : retainedBytes;
-        if (retainedBytes >= job.maxWorkingBytes) {
-            candidate.failureReason = PartFailureReason::BudgetExceeded;
-            candidate.requiredBytes = std::max(candidate.requiredBytes, retainedBytes);
-            candidate.message = BuildBudgetMessage(
-                candidate.requiredBytes, job.maxWorkingBytes);
-            candidate.catalog.reset();
-            candidate.labels.reset();
-            return candidate;
-        }
-
-        PartSurfaceBuildRequest surfaceRequest;
-        surfaceRequest.extent = candidate.extent;
-        surfaceRequest.dimensions = candidate.dimensions;
-        surfaceRequest.spacing = candidate.spacing;
-        surfaceRequest.origin = candidate.origin;
-        surfaceRequest.direction = candidate.direction;
-        surfaceRequest.labels = candidate.labels;
-        surfaceRequest.partCount = static_cast<std::uint32_t>(
-            candidate.catalog->partsByLabel.size() - 1U);
-        for (std::size_t index = 1; index < candidate.catalog->partsByLabel.size(); ++index) {
-            const auto& extent = candidate.catalog->partsByLabel[index].metrics.voxelExtent;
-            if (!surfaceRequest.foregroundExtent) surfaceRequest.foregroundExtent = extent;
-            else for (std::size_t axis = 0; axis < 3; ++axis) {
-                auto& bounds = *surfaceRequest.foregroundExtent;
-                bounds[axis * 2] = std::min(bounds[axis * 2], extent[axis * 2]);
-                bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], extent[axis * 2 + 1]);
-            }
-        }
-        surfaceRequest.maxWorkingBytes = job.maxWorkingBytes - surfaceRetainedBytes;
-        const auto surfaceStarted = std::chrono::steady_clock::now();
-        auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
-            surfaceRequest,
-            getStopped,
-            [this, requestId = job.requestId](const double progress) {
-                SetProgress(requestId, 0.9 + progress * 0.1);
-            });
-        const auto surfaceMs = elapsedMs(surfaceStarted);
-        const auto systemPeakBytes = surfaceResult.requiredBytes
-            > std::numeric_limits<std::size_t>::max() - surfaceRetainedBytes
-            ? std::numeric_limits<std::size_t>::max()
-            : surfaceResult.requiredBytes + surfaceRetainedBytes;
-        candidate.requiredBytes = std::max(candidate.requiredBytes, systemPeakBytes);
-        if (surfaceResult.failureReason != PartFailureReason::None
-            || !surfaceResult.product
-            || !surfaceResult.product->surface) {
-            candidate.status = surfaceResult.failureReason
-                    == PartFailureReason::Cancelled
-                ? PartResultStatus::Cancelled
-                : PartResultStatus::Failed;
-            candidate.failureReason = surfaceResult.failureReason
-                    == PartFailureReason::None
-                ? PartFailureReason::InternalError
-                : surfaceResult.failureReason;
-            candidate.message = candidate.failureReason == PartFailureReason::BudgetExceeded
-                ? BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes)
-                : surfaceResult.message;
-            candidate.catalog.reset();
-            candidate.labels.reset();
-            return candidate;
-        }
-        if (systemPeakBytes > job.maxWorkingBytes) {
-            candidate.status = PartResultStatus::Failed;
-            candidate.failureReason = PartFailureReason::BudgetExceeded;
-            candidate.message = BuildBudgetMessage(
-                systemPeakBytes, job.maxWorkingBytes);
-            candidate.catalog.reset();
-            candidate.labels.reset();
-            return candidate;
-        }
-        candidate.surface = std::move(surfaceResult.product);
-        candidate.surfaceBytes = candidate.surface->actualBytes;
-        // 内部候选在交给 lineage/surface 前已转移所有权；这里仅计一份标签。
-        // 历史恢复复用 payload，VTK 私有显示视图始终借用冻结数组。
-        std::size_t freezeBytes = retainedBytes;
-        std::size_t addedLabelBytes = 0;
-        const auto limit = std::numeric_limits<std::size_t>::max();
-        if (!GetProduct(labelBytes, reusesRetainedLabels ? 0U : 1U, addedLabelBytes)
-            || addedLabelBytes > limit - freezeBytes
-            || candidate.surfaceBytes > limit - freezeBytes - addedLabelBytes) {
-            candidate.failureReason = PartFailureReason::BudgetExceeded;
-            candidate.message = "Part label publication size overflows.";
-            return candidate;
-        }
-        freezeBytes += addedLabelBytes + candidate.surfaceBytes;
-        candidate.requiredBytes = std::max(candidate.requiredBytes, freezeBytes);
-        if (candidate.requiredBytes > job.maxWorkingBytes) {
-            candidate.failureReason = PartFailureReason::BudgetExceeded;
-            candidate.message = BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes);
-            return candidate;
-        }
+        // 标签和目录构成业务结果；发布后才在既有受控 worker 上请求可选表面。
+        const std::int64_t surfaceMs = 0;
         if (getStopped()) {
             candidate.status = PartResultStatus::Cancelled;
             candidate.failureReason = PartFailureReason::Cancelled;
             return candidate;
         }
         const auto freezeStarted = std::chrono::steady_clock::now();
-        surfaceRequest.labels.reset();
         candidate.labelImage = vtkSmartPointer<vtkImageData>::New();
         candidate.labelImage->SetExtent(candidate.extent.data());
         candidate.labelImage->SetSpacing(candidate.spacing.data());

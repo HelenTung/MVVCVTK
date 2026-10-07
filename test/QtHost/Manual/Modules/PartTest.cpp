@@ -83,7 +83,6 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
             if (owner) {
                 if (result.status == PartResultStatus::Succeeded) preview->RetryFailed();
                 auto detail = GetPartResult(result);
-                if (result.status == PartResultStatus::Failed) detail["hint"] = "工作集预算充足时仍可能超过零件数量上限；可调高最小零件体素数以过滤微小噪声，或调整分割阈值。";
                 owner->SetComplete(id, result.status == PartResultStatus::Succeeded ? "Succeeded"
                     : result.status == PartResultStatus::SucceededWithDisplayFailure ? "SucceededWithDisplayFailure"
                     : result.status == PartResultStatus::Cancelled ? "Cancelled" : "Failed", detail);
@@ -186,7 +185,18 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
         } catch (const std::exception&) {}
         for (const auto* key : {"isVisible", "isSelected", "isReviewed"}) form->GetField(key)->SetAppliedBoolean(target.value(key), targetKey, target.isEmpty() ? "请选择当前零件" : QString());
         summary["isOverlayVisible"] = feature->GetState().isOverlayVisible;
-        preview->Observe(panel, summary["hasCurrentParts"].toBool() && summary["isOverlayVisible"].toBool());
+        const auto display = feature->GetState();
+        summary["isDisplayPreparing"] = display.isDisplayPreparing;
+        summary["isDisplayReady"] = display.isDisplayReady;
+        summary["displayPartCount"] = QString::number(display.displayPartCount);
+        summary["isDisplayPartial"] = display.isDisplayPartial;
+        summary["displayStatus"] = display.isDisplayPreparing ? "正在准备零件表面"
+            : display.failureReason == PartFailureReason::DisplayFailed ? "表面显示失败，标签与目录已保留，可重试显示"
+            : display.isDisplayPartial ? "当前显示部分零件表面；高亮其它零件可更新显示，完整标签与目录已保留"
+            : display.isDisplayReady ? "零件表面已就绪" : "零件表面未显示";
+        // 标签发布成功不等于后台表面已就绪；替代显示可用前保留源模型。
+        preview->Observe(panel, summary["hasCurrentParts"].toBool()
+            && summary["isOverlayVisible"].toBool() && display.isDisplayReady);
         summary["sourcePreviewReady"] = preview->GetReady();
         summary["sourcePreviewError"] = preview->GetError();
         panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasCurrentParts"].toBool() ? summary["isOverlayVisible"] : QJsonValue(), summary["labelMap"].toString(), summary["hasCurrentParts"].toBool() ? QString() : "当前没有可用零件");

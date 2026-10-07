@@ -396,7 +396,9 @@ void TestRotationHostDriven()
     config.renderViews.push_back(view);
     VtkAppHostSession session(std::move(config));
     auto probe = std::make_shared<RotationProbe>();
+    auto feature = std::make_shared<ModelRotationHostFeature>();
     VERIFY(session.BuildSession() && session.AttachFeature(probe));
+    VERIFY(session.AttachFeature(feature));
     auto port = std::dynamic_pointer_cast<FeatureModelTransformPort>(probe->context.host);
     VERIFY(port && interactor->timerId == 0);
     const auto update = [&] {
@@ -423,6 +425,7 @@ void TestRotationHostDriven()
     reload.voxels.resize(8*8*8, 0);
     for (int z=2; z<6; ++z) for (int y=2; y<6; ++y) for (int x=2; x<6; ++x)
         reload.voxels[x+8*(y+8*z)] = 100;
+    const auto reloadAgain = reload;
     bool loaded = false;
     VERIFY(session.SendRequest(std::move(reload), [&](bool value) { loaded = value; }));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -456,6 +459,68 @@ void TestRotationHostDriven()
     VERIFY(port->StopTransform(*cancel) && notifications.load() > count);
     drain();
     VERIFY(port->GetTransformState()->completion == ModelTransformStatus::Cancelled);
+    // 合法显式请求在另一工具拖动期间排队；逐次提交，撤销按同一顺序执行。
+    const auto sourcePort = probe->context.views->GetFeaturePort("rotation-driven");
+    VERIFY(sourcePort);
+    const InteractionSource source{ "rotation.test.probe", "drag" };
+    VERIFY(sourcePort->SetInteracting(source, true));
+    const auto queuedBefore = port->GetTransformState()->modelToWorld;
+    ModelRotationRequest numeric;
+    numeric.angleDeg = 10;
+    numeric.worldCenter = std::array<double, 3>{0, 0, 0};
+    for (int index = 0; index < 3; ++index) VERIFY(feature->SendRequest(numeric));
+    ModelRotationRequest undo;
+    undo.action = ModelRotationAction::Undo;
+    for (int index = 0; index < 3; ++index) VERIFY(feature->SendRequest(undo));
+    update();
+    VERIFY(feature->GetState().status == ModelRotationStatus::Pending);
+    VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
+    VERIFY(sourcePort->SetInteracting(source, false));
+    drain();
+    VERIFY(feature->GetState().status == ModelRotationStatus::Succeeded);
+    VERIFY(feature->GetState().undoCount == 0);
+    VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
+
+    // 连续用户操作不受旧的 100 次历史保留上限影响。
+    for (int index = 0; index < 101; ++index) VERIFY(feature->SendRequest(numeric));
+    for (int attempt = 0; attempt < 300
+        && feature->GetState().status == ModelRotationStatus::Pending; ++attempt) update();
+    VERIFY(feature->GetState().status == ModelRotationStatus::Succeeded);
+    VERIFY(feature->GetState().undoCount == 101);
+    for (int index = 0; index < 101; ++index) VERIFY(feature->SendRequest(undo));
+    for (int attempt = 0; attempt < 300
+        && feature->GetState().status == ModelRotationStatus::Pending; ++attempt) update();
+    VERIFY(feature->GetState().status == ModelRotationStatus::Succeeded);
+    VERIFY(feature->GetState().undoCount == 0);
+    VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
+    // Cancel 清除尚未开始的请求；非法参数仍拒绝，不占据队列。
+    VERIFY(sourcePort->SetInteracting(source, true));
+    VERIFY(feature->SendRequest(numeric));
+    auto invalid = numeric;
+    invalid.worldAxis = {0, 0, 0};
+    VERIFY(!feature->SendRequest(invalid));
+    ModelRotationRequest stop;
+    stop.action = ModelRotationAction::Cancel;
+    VERIFY(feature->SendRequest(stop));
+    VERIFY(feature->GetState().status == ModelRotationStatus::Cancelled);
+    VERIFY(sourcePort->SetInteracting(source, false));
+    drain();
+    VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
+
+    // 等待期间换源使请求失效，不把旧数据的旋转应用到新数据。
+    VERIFY(sourcePort->SetInteracting(source, true));
+    VERIFY(feature->SendRequest(numeric));
+    loaded = false;
+    auto secondReload = reloadAgain;
+    VERIFY(session.SendRequest(std::move(secondReload), [&](bool value) { loaded = value; }));
+    for (int attempt = 0; attempt < 1000 && !loaded; ++attempt) {
+        update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    VERIFY(loaded);
+    VERIFY(sourcePort->SetInteracting(source, false));
+    drain();
+    VERIFY(feature->GetState().status == ModelRotationStatus::Invalidated);
     VERIFY(session.DetachFeature(*probe));
     VERIFY(!port->GetTransformState());
     VERIFY(session.Stop());

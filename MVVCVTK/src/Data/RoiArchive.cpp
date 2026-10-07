@@ -1,5 +1,6 @@
 #include "Data/RoiService.h"
 #include "Data/DataPayloads.h"
+#include "Data/Internal/ReadBudget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -108,6 +109,7 @@ RoiArchiveResult RoiService::GetArchive(const DataGraphSnapshot& graph,const Dat
     const std::string& sourceKey,std::size_t maxBytes)
 {
     RoiArchiveResult result;
+    const auto budget=GetReadBudget(maxBytes);
     if (sourceKey.empty() || sourceKey.size()>256) { result.error=RoiError::SourceUnresolved; return result; }
     try {
         const auto descriptor=GetDescriptor(graph,ref);
@@ -115,7 +117,7 @@ RoiArchiveResult RoiService::GetArchive(const DataGraphSnapshot& graph,const Dat
         const auto source=graph.view->GetData(descriptor->definition.source);
         if (!source) { result.error=RoiError::SourceUnresolved; return result; }
         result.requiredBytes=GetSourceWorkBytes(source);
-        if (result.requiredBytes>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
+        if (result.requiredBytes==std::numeric_limits<std::size_t>::max() || result.requiredBytes>budget) { result.error=RoiError::TooLarge; return result; }
         const auto sourceWorkBytes=result.requiredBytes;
         RoiArchive archive;
         archive.sourceKey=sourceKey; archive.source=GetSourceDescriptor(source);
@@ -141,7 +143,7 @@ RoiArchiveResult RoiService::GetArchive(const DataGraphSnapshot& graph,const Dat
                 result.error=RoiError::TooLarge; return result;
             }
         }
-        if (result.requiredBytes>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
+        if (result.requiredBytes==std::numeric_limits<std::size_t>::max() || result.requiredBytes>budget) { result.error=RoiError::TooLarge; return result; }
         for (const auto& entry:masks) {
             const auto data=graph.view->GetData(entry.first);
             const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(data->payload.get());
@@ -169,8 +171,9 @@ RoiResult RoiService::LoadArchive(const RoiArchive& archive,const std::string& s
     const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision,std::size_t maxBytes)
 {
     RoiResult result;
+    const auto budget=GetReadBudget(maxBytes);
     result.requiredBytes=GetArchiveBytes(archive);
-    if (result.requiredBytes>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
+    if (result.requiredBytes==std::numeric_limits<std::size_t>::max() || result.requiredBytes>budget) { result.error=RoiError::TooLarge; return result; }
     if (sourceKey.empty() || sourceKey!=archive.sourceKey || sourceKey.size()>256) { result.error=RoiError::SourceUnresolved; return result; }
     if (archive.schemaVersion!=roiSchemaVersion || archive.nodes.empty() || archive.nodes.size()>roiNodeLimit
         || archive.masks.size()>roiNodeLimit) { result.error=RoiError::InvalidRequest; return result; }
@@ -179,7 +182,7 @@ RoiResult RoiService::LoadArchive(const RoiArchive& archive,const std::string& s
         const auto source=graph.view->GetData(sourceRef);
         if (!source) { result.error=RoiError::SourceUnresolved; return result; }
         if (!AddBytes(result.requiredBytes,GetSourceWorkBytes(source))
-            || result.requiredBytes>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
+            || result.requiredBytes==std::numeric_limits<std::size_t>::max() || result.requiredBytes>budget) { result.error=RoiError::TooLarge; return result; }
         if (!GetSameSource(archive.source,GetSourceDescriptor(source))) { result.error=RoiError::SourceMismatch; return result; }
         if (archive.source.image && (GetDataRevisionRefValid(archive.source.image->dataRevision)
             || archive.source.image->bindingRevision!=0)) { result.error=RoiError::InvalidRequest; return result; }

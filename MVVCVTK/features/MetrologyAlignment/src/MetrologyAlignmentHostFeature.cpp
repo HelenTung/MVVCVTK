@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
 #include "AlignmentData.h"
@@ -60,10 +61,8 @@ bool GetSourceRelated(const DataGraphSnapshot &graph, const DataRevisionRef &mes
 class MetrologyAlignmentHostFeature::Impl final {
   public:
     explicit Impl(AlignmentConfig config) : m_config(std::move(config)) {
-        if (m_config.pointLimit == 0 || m_config.pointLimit > 100000 ||
-            m_config.constraintLimit == 0 || m_config.constraintLimit > 4096 ||
-            m_config.workingBytes < 1024 || m_config.deadlineMs == 0 ||
-            m_config.deadlineMs > 3600000 || !std::isfinite(m_config.axisLength) ||
+        if (WorkLimit(m_config.workingBytes) < 1024 || WorkLimit(m_config.deadlineMs) == 0 ||
+            (WorkLimit(m_config.deadlineMs).GetValue() && WorkLimit(m_config.deadlineMs) > 3600000) || !std::isfinite(m_config.axisLength) ||
             m_config.axisLength <= 0)
             throw std::invalid_argument("Invalid alignment resource configuration.");
         m_state.isOverlayVisible = m_config.isOverlayVisible;
@@ -526,7 +525,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         task->work.poses = request.initialPoses;
         task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
         task->work.deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(m_config.deadlineMs);
+            WorkLimit(m_config.deadlineMs).GetDeadline();
         task->expectations = AlignmentData::BuildExpectations(
             graph, *request.input, request.recipeRef, recipe->recipe.nominalData);
         task->active = AlignmentData::GetBinding(graph, request.input->scope);

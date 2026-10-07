@@ -14,6 +14,7 @@ protected:
     std::unique_ptr<Impl> m_impl;
 
     bool SetOwnedImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata = {});
+    bool SetOwnedLoadImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata);
     bool SetLoadImage(
         vtkSmartPointer<vtkImageData> image,
         vtkSmartPointer<vtkImageData> validityMask = {},
@@ -77,7 +78,7 @@ public:
     DataBindingRevision GetPrimaryBindingRevision() const override;
     std::optional<ImageReadState> GetImageReadState() const override;
     ImageReadResult GetImageReadResult(
-        std::size_t maxReadBytes = imageReadLimit) const override;
+        std::size_t maxReadBytes = 0) const override;
     ImageReadResult GetImageReadResult(
         const ImageReadRequest& request,
         const TaskStopToken& stopToken) const override;
@@ -93,6 +94,11 @@ public:
 
     bool SetFromBuffer(const VolumeBuffer& buffer) override;
     DataLoadStageSnapshot GetLoadStage() const override;
+    // 接纳正式修订；此步骤不切换 primary binding 或视图。
+    DataLoadState GetLoadState() const override;
+    bool SetLoadActivation(const DataRevisionRef&, DataBindingRevision) override;
+    void SetLoadStatus(const DataRevisionRef&, DataLoadStatus) override;
+    bool SetLoadAccepted(const DataLoadStageSnapshot& stage) override;
     bool SetLoadCommit(
         const DataLoadStageSnapshot& expectedStage,
         VtkImageGridSnapshot& published) override;

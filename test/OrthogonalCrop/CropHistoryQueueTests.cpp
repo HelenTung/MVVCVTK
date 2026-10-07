@@ -79,15 +79,17 @@ bool GetPruneAtomic()
     return Check(!h.GetNode(b.nodeId)&&h.GetAppliedHead()==a.nodeId&&q.GetOutcome(4)->prune.deletedCount==1,
         "prune commit lost deletion/impact");
 }
-bool GetQueueBounded()
+bool GetQueueCapacity()
 {
     auto h=History();CropHistoryQueue q;const auto root=h.GetRootId();
-    for(CropRequestId id=1;id<=256;++id)if(!q.StartRequest(h,Request(h,id,root)).isAccepted)return false;
-    if(!Check(q.StartRequest(h,Request(h,257,root)).failureReason==CropFailure::ResourceLimit,"pending queue unbounded"))return false;
+    for(CropRequestId id=1;id<=512;++id)if(!q.StartRequest(h,Request(h,id,root)).isAccepted)return false;
+    if(!Check(q.GetPendingCount()==512&&h.GetNodeCount()==1,"burst requests were rejected or published before consumption"))return false;
     q.SetCancelled(h);
     if(!Check(q.GetIsEmpty()&&h.GetRequestedHead()==root&&h.GetNodeCount()==1
-        &&q.GetOutcome(256)->status==CropEditStatus::Cancelled,"cancel lost terminal outcomes"))return false;
-    for(CropRequestId id=300;id<1400;++id) {
+        &&q.GetOutcome(512)->status==CropEditStatus::Cancelled,"cancel lost terminal outcomes"))return false;
+    for(CropRequestId id=1;id<=512;++id)
+        if(!Check(q.GetOutcome(id)&&q.GetOutcome(id)->status==CropEditStatus::Cancelled,"burst cancellation lost a request"))return false;
+    for(CropRequestId id=600;id<1700;++id) {
         auto request=Request(h,id,root,CropEditKind::Select);
         if(!q.StartRequest(h,request).isAccepted||!Complete(h,q))return false;
     }
@@ -99,5 +101,5 @@ bool GetQueueBounded()
 }
 int GetCropHistoryQueueFailures()
 {
-    return !GetFrozenBranches()+!GetFailureAndReplay()+!GetPruneAtomic()+!GetQueueBounded();
+    return !GetFrozenBranches()+!GetFailureAndReplay()+!GetPruneAtomic()+!GetQueueCapacity();
 }

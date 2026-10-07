@@ -151,6 +151,7 @@ struct HostSceneViewState final {
 
 // 每域保持自己的版本依据；最新运行状态不被解释为旧场景提交的一部分。
 struct HostStateSnapshot final {
+    DataLoadState load;
     std::uint64_t sessionGeneration = 0;
     DataCommitId graphCommitId = 0;
     std::vector<HostSceneViewState> scenes;

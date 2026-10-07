@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Model/PartLineageMatcher.h"
 
 #include <algorithm>
@@ -16,7 +17,7 @@ namespace {
 
 constexpr std::size_t cancelBatch = 4096;
 constexpr std::size_t mapNodeOverhead = sizeof(void*) * 4U;
-constexpr std::size_t maxPartCount = 4096;
+constexpr std::size_t maxPartCount = std::numeric_limits<PartLabelId>::max() - 2U;
 
 bool GetProduct(
     const std::size_t left,
@@ -45,7 +46,7 @@ bool GetSum(
 
 class WorkingBudget final {
 public:
-    explicit WorkingBudget(const std::size_t limit) noexcept
+    explicit WorkingBudget(const WorkLimit limit) noexcept
         : m_limit(limit)
     {
     }
@@ -74,7 +75,7 @@ public:
     }
 
 private:
-    std::size_t m_limit = 0;
+    WorkLimit m_limit;
     std::size_t m_current = 0;
     std::size_t m_required = 0;
 };

@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "SurfaceRecipe.h"
 #include "Host/RoiReadTypes.h"
@@ -38,7 +39,7 @@ class SurfaceSeedBuilder final
     static SurfaceSeedStatus BuildMesh(const SurfaceSeedGrid &grid, double iso,
                                        const std::optional<SurfaceMaterialPair> &materials,
                                        const RoiReadSnapshot &roi, double haloModel,
-                                       std::uint32_t blockDepth, std::size_t budgetBytes,
+                                       std::uint32_t blockDepth, WorkLimit budgetBytes,
                                        const std::function<bool()> &cancelled,
                                        std::vector<std::array<double, 3>> &points,
                                        std::vector<SurfaceSeedTriangle> &triangles,

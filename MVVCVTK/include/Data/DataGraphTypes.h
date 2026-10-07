@@ -445,3 +445,13 @@ struct ProjectDataSnapshot final {
     DataCommitId commitId = 0;
     std::vector<DataBinding> bindings;
 };
+
+// 数据接纳先形成不可变修订；可选显示组通过独立事务激活。
+enum class DataLoadStatus { None, Accepted, Preparing, Active, Failed, Cancelled };
+struct DataLoadState final {
+    DataRevisionRef acceptedRevision;
+    DataRevisionRef requestedRevision;
+    DataLoadStatus status = DataLoadStatus::None;
+    DataRevisionRef activeRevision;
+    DataBindingRevision activeBindingRevision = 0;
+};

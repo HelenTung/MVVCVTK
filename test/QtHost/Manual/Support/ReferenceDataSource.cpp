@@ -71,7 +71,13 @@ bool ReferenceDataSource::AttachHost(const HostFeatureContext& context)
     m_views = context.views;
     return static_cast<bool>(m_data);
 }
-bool ReferenceDataSource::DetachHost() { m_views.reset(); m_data.reset(); m_sceneCommit.reset(); m_sceneGraph = {}; m_sceneOrder.clear(); return true; }
+bool ReferenceDataSource::DetachHost()
+{
+    // 临时输入派生的测试参考/掩码须由本生产者退休；仍有消费者时保留状态以便重试。
+    if (m_data && !m_resultScopes.Clear(*m_data)) return false;
+    m_data.reset(); m_views.reset(); m_sceneCommit.reset(); m_sceneGraph = {}; m_sceneOrder.clear();
+    return true;
+}
 QJsonObject ReferenceDataSource::GetViewTransforms()
 {
     QJsonArray values;
@@ -128,7 +134,11 @@ QJsonObject ReferenceDataSource::GetResultEvidence()
         } else if(const auto* matrix=dynamic_cast<const Transform3DPayload*>(data->payload.get())) {
             bytes(matrix->GetSourceToTarget().data(),sizeof(matrix->GetSourceToTarget()));
         } else if(const auto* image=dynamic_cast<const ImageGrid3DPayload*>(data->payload.get())) {
-            geometry(image->GetGeometry());vector(*image->GetValues());
+            geometry(image->GetGeometry());
+            const auto& values = *image->GetValues();
+            const std::uint64_t count = values.size();
+            bytes(&count, sizeof(count));
+            bytes(values.data(), values.size());
         } else supported=false;
         if(supported) outputs.append(QJsonObject{{"producer",QString::fromStdString(data->provenance->producerId)},
             {"operation",QString::fromStdString(data->provenance->operationId)},
@@ -226,7 +236,7 @@ ReferenceInput ReferenceDataSource::LoadReference(const QString& path, DataRevis
     DataTransaction transaction;
     transaction.outputs = {{nominal.entityId, 0, DataTypes::recordTable, inputs, nominalPayload, provenance},
         {scope.entityId, 0, DataTypes::recordTable, inputs, scopePayload, provenance}};
-    if (m_data->SetDataCommit(std::move(transaction)).status != DataCommitStatus::Succeeded)
+    if (m_resultScopes.Commit(*m_data, std::move(transaction)).status != DataCommitStatus::Succeeded)
         throw std::runtime_error("参考数据发布失败");
     return {source, mesh, nominal, scope, coordinateFrame, document};
 }
@@ -258,7 +268,7 @@ DataRevisionRef ReferenceDataSource::CreateMask(DataRevisionRef source, const QJ
     DataTransaction transaction;
     transaction.outputs = {{output.entityId, 0, DataTypes::binaryMask3D, {{"source-volume", source}}, payload,
         DataProvenance{"manual.reference-input", "parameterized-mask", "1", GetJsonText(params).toStdString()}}};
-    if (m_data->SetDataCommit(std::move(transaction)).status != DataCommitStatus::Succeeded) throw std::runtime_error("掩码发布失败");
+    if (m_resultScopes.Commit(*m_data, std::move(transaction)).status != DataCommitStatus::Succeeded) throw std::runtime_error("掩码发布失败");
     return output;
 }
 }

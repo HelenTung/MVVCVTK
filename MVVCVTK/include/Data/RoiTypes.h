@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-// 4096 项裁切路径的最坏补集表达式为 3*N+1；复制仍受 8 MiB 总预算限制。
+// 4096 项裁切路径的最坏补集表达式为 3*N+1；逐块读取仍受 8 MiB 单块限制。
 inline constexpr std::size_t roiNodeLimit = 3 * 4096 + 1;
 inline constexpr std::size_t roiDepthLimit = 64;
 inline constexpr std::size_t roiCatalogLimit = 4096;

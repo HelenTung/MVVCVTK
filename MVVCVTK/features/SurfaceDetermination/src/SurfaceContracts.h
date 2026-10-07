@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Host/SurfaceDeterminationHostTypes.h"
 #include "Host/TrustedDataPort.h"
@@ -14,8 +15,8 @@ bool GetInputsCurrent(const TrustedDataReadPort &data, const DataGraphSnapshot &
                       const std::vector<DataInputRef> &inputs);
 std::string BuildParameters(const SurfaceDeterminationStartParams& requested,
     const SurfaceDeterminationStartParams& resolved, const std::string& frame,
-    std::size_t workingBytes);
+    WorkLimit workingBytes);
 bool GetParameters(const std::string& text, SurfaceDeterminationStartParams& requested,
     SurfaceDeterminationStartParams& resolved, std::string& frame,
-    std::size_t& workingBytes);
+    WorkLimit& workingBytes);
 }

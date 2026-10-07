@@ -1,5 +1,6 @@
 #include "AlignmentGeometry.h"
 #include "AlignmentMath.h"
+#include "FeatureSupport/WorkLimit.h"
 #include <limits>
 #include <numeric>
 #include <set>
@@ -185,9 +186,9 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         return false;
     if (r.id.empty() || r.id.size() > 128 || r.targetFrameId.empty() ||
         r.targetFrameId.size() > 128 || static_cast<unsigned>(r.unit) > 2 ||
-        static_cast<unsigned>(r.method) > 3 || r.geometries.size() > 64 ||
-        r.constraints.size() > config.constraintLimit ||
-        r.fitPairs.size() > config.constraintLimit || r.datumCount > 3 ||
+        static_cast<unsigned>(r.method) > 3 ||
+        (config.constraintLimit && (r.constraints.size() > config.constraintLimit ||
+         r.fitPairs.size() > config.constraintLimit)) || r.datumCount > 3 ||
         r.datumCount > r.geometries.size() || r.iterationLimit == 0 || r.iterationLimit > 1000 ||
         !Positive(r.lengthScale) || !Positive(r.rankTolerance) || r.rankTolerance >= 0.01 ||
         !Positive(r.conditionLimit) || r.conditionLimit <= 1 || !Positive(r.solveTolerance) ||
@@ -230,7 +231,8 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
             return false;
         if (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh))
             return false;
-        if (region.vertexIds.size() > config.pointLimit - selected)
+        const auto pointBound = config.pointLimit ? config.pointLimit : std::numeric_limits<std::size_t>::max();
+        if (region.vertexIds.size() > pointBound - selected)
             return false;
         selected += region.vertexIds.size();
         if (region.targetBounds)
@@ -313,6 +315,12 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
     const std::size_t n = vertices.size() / 3;
     AlignmentSamples result;
     std::set<std::uint64_t> seen;
+    const auto checkStorage = [&](std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / 1024
+            || WorkLimit(work.config.workingBytes) < 65536
+            || count > (WorkLimit(work.config.workingBytes) - 65536) / 1024)
+            throw std::length_error("Selection storage exceeds working budget.");
+    };
     const auto add = [&](std::size_t index) {
         Require(index < n, "Selection index is out of bounds.");
         const Vec source(vertices[3 * index], vertices[3 * index + 1], vertices[3 * index + 2]);
@@ -328,12 +336,18 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
             ++result.rejected;
             return;
         }
-        if (result.points.size() >= work.config.pointLimit)
+        if (work.config.pointLimit && result.points.size() >= work.config.pointLimit)
             throw std::length_error("Selection exceeds point budget.");
+        if (result.points.size() == std::numeric_limits<std::size_t>::max())
+            throw std::length_error("Selection count overflows.");
+        checkStorage(result.points.size() + 1);
         result.points.push_back(Point(source));
     };
     if (!region.vertexIds.empty()) {
         for (const auto id : region.vertexIds) {
+            if (seen.size() == std::numeric_limits<std::size_t>::max())
+                throw std::length_error("Selection index count overflows.");
+            checkStorage(seen.size() + 1);
             Require(seen.insert(id).second, "Duplicate selection vertex.");
             if (GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
                 throw std::runtime_error("Cancelled extraction.");

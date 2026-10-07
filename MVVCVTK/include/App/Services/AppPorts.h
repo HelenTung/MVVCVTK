@@ -36,6 +36,8 @@ public:
     virtual TaskAdmissionResult ReloadFromBufferAsync(
         VolumeBuffer buffer,
         std::function<void(bool)> onComplete) = 0;
+    virtual TaskAdmissionResult StartDataActivation(const DataRevisionRef&, DataBindingRevision,
+        std::function<void(bool)>) { return TaskAdmissionResult::Unavailable; }
     virtual TaskAdmissionResult ExportDataAsync(
         std::string outputDir,
         std::string extension,

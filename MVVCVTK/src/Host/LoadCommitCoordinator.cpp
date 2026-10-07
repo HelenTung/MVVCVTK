@@ -91,7 +91,14 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
         explicit AdvanceGuard(bool& flag) : value(flag) { value = true; }
         ~AdvanceGuard() { value = false; }
     } guard(m_isAdvancing);
-    try { return AdvanceLoadCommit(request); }
+    try {
+        auto result = AdvanceLoadCommit(request);
+        if (!request.onPublish && m_dataManager) m_dataManager->SetLoadStatus(request.sourceRevision,
+            result.status == LoadCommitStatus::Preparing ? DataLoadStatus::Preparing
+            : result.status == LoadCommitStatus::Succeeded ? DataLoadStatus::Active
+            : result.status == LoadCommitStatus::Cancelled ? DataLoadStatus::Cancelled : DataLoadStatus::Failed);
+        return result;
+    }
     catch (...) {
         if (m_transaction) {
             (void)ClearStages(m_transaction->request, true, m_transaction->attemptedCommits);
@@ -114,7 +121,6 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
         && input->data && input->data->self == request.sourceRevision
         && (!request.renderInput || (request.ownerId!=0 && !request.pending))
         && m_dataManager
-        && !request.stages.empty()
         && (request.effects.empty()||(request.ownerId!=0&&request.effects.size()==request.stages.size()))
         && std::all_of(
             request.stages.begin(), request.stages.end(),
@@ -132,6 +138,10 @@ LoadCommitResult LoadCommitCoordinator::AdvanceLoadCommit(const LoadCommitReques
             request,
             LoadCommitStatus::Failed,
             LoadCommitFailure::StaleInput);
+    }
+
+    if (!request.onPublish && !m_dataManager->SetLoadAccepted(currentStage)) {
+        return GetResult(request, LoadCommitStatus::Failed, LoadCommitFailure::PublishFailed);
     }
 
     if (!m_transaction) {
@@ -277,6 +287,8 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCancelled(
     } guard(m_isAdvancing);
     const auto& terminal = m_transaction->request;
     result.sourceRevision = terminal.sourceRevision;
+    if (!terminal.onPublish && m_dataManager)
+        m_dataManager->SetLoadStatus(terminal.sourceRevision, DataLoadStatus::Cancelled);
     (void)ClearStages(terminal, false, 0);
     m_transaction.reset();
     return result;

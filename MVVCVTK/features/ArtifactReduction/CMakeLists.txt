@@ -38,7 +38,7 @@ target_include_directories(artifact_reduction
 )
 target_link_libraries(artifact_reduction
     PUBLIC MVVCVTK::FeatureSPI
-    PRIVATE tomopy_ring VTK::ImagingGeneral)
+    PRIVATE MVVCVTKInternal::FeatureSupport tomopy_ring VTK::ImagingGeneral)
 SetTargetDefaults(artifact_reduction)
 set_target_properties(artifact_reduction PROPERTIES
     OUTPUT_NAME ArtifactReduction

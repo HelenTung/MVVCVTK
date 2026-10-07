@@ -1,6 +1,7 @@
 // 测试用途：为功能测试受控发布名义参考和二值掩码，保持真实数据图修订链。
 #pragma once
 #include "Host/HostFeature.h"
+#include "../../../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include <QJsonObject>
 #include <QString>
 #include <map>
@@ -33,6 +34,7 @@ public:
     QJsonObject ReadTransform();
 private:
     std::shared_ptr<TrustedDataPort> m_data;
+    FeatureInternal::ResultScopes m_resultScopes;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::optional<DataCommitId> m_sceneCommit;
     QJsonObject m_sceneGraph;

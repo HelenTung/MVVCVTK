@@ -93,6 +93,15 @@ int GetCropMeshFailures()
         &&insideArea>0&&std::abs(insideArea-pi)<=2*pi*params.meshTolerance
         &&std::abs(insideArea-pi)<=inside.meshAreaErrorBound+1e-10&&Attributes(inside.polyData),
         "sphere intersects the face interior despite three outside vertices, with certified error and attributes",&inside);
+    params.availableRamBytes=0;const auto automatic=Build(source,params);
+    check(automatic.isSucceeded&&automatic.meshTriangleCount==inside.meshTriangleCount
+        &&Area(automatic.polyData)==insideArea&&Attributes(automatic.polyData),
+        "unspecified direct mesh budget preserves geometry without a fixed fallback cap",&automatic);
+    params.maxCells=0;const auto unbounded=Build(source,params);
+    check(CropBuildOptions{}.maxCells==0&&CropBuildParams{}.maxCells==0
+        &&unbounded.isSucceeded&&unbounded.meshTriangleCount==inside.meshTriangleCount
+        &&Area(unbounded.polyData)==insideArea&&Attributes(unbounded.polyData),
+        "default and zero cell policy preserve the complete certified mesh",&unbounded);
     sphere.removalMode=CropRemovalMode::RemoveInside;params=Params(sphere);auto outside=Build(source,params);
     const double outsideArea=Area(outside.polyData);
     check(outside.isSucceeded&&outsideArea>0&&std::abs(outsideArea-(32-pi))<=2*pi*params.meshTolerance

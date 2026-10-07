@@ -98,9 +98,20 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             "Part surface label bytes overflow.");
     }
     labelBytes = voxelCount * sizeof(std::uint32_t);
-    if (labelBytes > request.maxWorkingBytes) {
+    const auto idCount = request.partIds.empty() ? static_cast<std::size_t>(request.partCount) : request.partIds.size();
+    const auto sizeLimit = std::numeric_limits<std::size_t>::max();
+    std::size_t inputBytes = 0, idBytes = 0, initialBytes = 0;
+    if (idCount > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || request.partIds.capacity() > sizeLimit / sizeof(PartLabelId)
+        || idCount > sizeLimit / sizeof(PartLabelId)
+        || !GetAddValid(labelBytes, request.partIds.capacity() * sizeof(PartLabelId), inputBytes)
+        || !GetAddValid(inputBytes, idCount * sizeof(PartLabelId), initialBytes)) {
+        return GetFailure(PartFailureReason::BudgetExceeded, sizeLimit, "Part surface IDs overflow.");
+    }
+    idBytes = idCount * sizeof(PartLabelId);
+    if (initialBytes > request.maxWorkingBytes) {
         return GetFailure(
-            PartFailureReason::BudgetExceeded, labelBytes,
+            PartFailureReason::BudgetExceeded, initialBytes,
             "Part surface input exceeds the working-set budget.");
     }
 
@@ -132,7 +143,6 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             1);
         image->GetPointData()->SetScalars(scalars);
 
-        std::size_t inputBytes = labelBytes;
         auto crop = vtkSmartPointer<vtkExtractVOI>::New();
         bool hasCrop = false;
         if (request.foregroundExtent) {
@@ -157,7 +167,7 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             }
             // 范围接近全卷时，避免为了微小收益额外复制一个大体积。
             if (cropVoxels <= voxelCount - voxelCount / 4U) {
-                if (!GetAddValid(labelBytes, cropVoxels * sizeof(std::uint32_t), inputBytes)
+                if (!GetAddValid(inputBytes, cropVoxels * sizeof(std::uint32_t), inputBytes)
                     || inputBytes > request.maxWorkingBytes) {
                     return GetFailure(PartFailureReason::BudgetExceeded, inputBytes,
                         "Part bounded surface input exceeds the working-set budget.");
@@ -170,14 +180,13 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
         auto contour = vtkSmartPointer<vtkDiscreteMarchingCubes>::New();
         if (hasCrop) contour->SetInputConnection(crop->GetOutputPort());
         else contour->SetInputData(image);
-        contour->SetNumberOfContours(
-            static_cast<int>(request.partCount));
-        for (std::uint32_t partId = 1;
-            partId <= request.partCount; ++partId) {
-            contour->SetValue(
-                static_cast<int>(partId - 1),
-                static_cast<double>(partId));
-        }
+        const auto count = request.partIds.empty() ? static_cast<std::size_t>(request.partCount) : request.partIds.size();
+        if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            return GetFailure(PartFailureReason::InvalidGeometry, labelBytes, "Display contour count overflows.");
+        contour->SetNumberOfContours(static_cast<int>(count));
+        for (std::size_t index = 0; index < count; ++index)
+            contour->SetValue(static_cast<int>(index), static_cast<double>(
+                request.partIds.empty() ? index + 1 : request.partIds[index]));
 
         SurfaceWatch watch{
             &getStopRequested, &sendProgress, false
@@ -242,7 +251,9 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             ? kibibytes * bytesPerKib
             : (std::numeric_limits<std::size_t>::max)();
         std::size_t requiredBytes = 0;
-        if (!GetAddValid(inputBytes, actualBytes, requiredBytes)
+        std::size_t productBytes = 0;
+        if (!GetAddValid(actualBytes, idBytes, productBytes)
+            || !GetAddValid(inputBytes, productBytes, requiredBytes)
             || requiredBytes > request.maxWorkingBytes) {
             return GetFailure(
                 PartFailureReason::BudgetExceeded,
@@ -251,7 +262,16 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
         }
         auto product = std::make_shared<PartSurfaceProduct>();
         product->surface = std::move(surface);
-        product->actualBytes = actualBytes;
+        product->partIds.reserve(idCount);
+        product->partIds = request.partIds;
+        if (product->partIds.empty())
+            for (std::uint32_t id = 1; id <= request.partCount; ++id) product->partIds.push_back(id);
+        if (product->partIds.capacity() > sizeLimit / sizeof(PartLabelId)
+            || !GetAddValid(actualBytes, product->partIds.capacity() * sizeof(PartLabelId), productBytes)
+            || !GetAddValid(inputBytes, productBytes, requiredBytes)
+            || requiredBytes > request.maxWorkingBytes)
+            return GetFailure(PartFailureReason::BudgetExceeded, sizeLimit, "Part surface retained IDs exceed the budget.");
+        product->actualBytes = productBytes;
         PartSurfaceBuildResult result;
         result.product = std::move(product);
         result.requiredBytes = requiredBytes;
@@ -260,7 +280,7 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
     catch (const std::bad_alloc&) {
         return GetFailure(
             PartFailureReason::BudgetExceeded,
-            request.maxWorkingBytes,
+            labelBytes,
             "Part surface allocation exceeded the working-set budget.");
     }
     catch (...) {

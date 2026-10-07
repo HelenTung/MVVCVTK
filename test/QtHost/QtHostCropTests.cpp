@@ -770,6 +770,33 @@ bool GetMeshRootLifecycle()
     if(!edit||!wait([&]{const auto out=feature->GetOutcome(initial.documentId,append.requestId);return out&&out->status==CropEditStatus::Succeeded;}))return false;
     if(!wait([&]{const auto views=feature->GetState().views;return views.size()==2&&std::all_of(views.begin(),views.end(),
         [&](const auto& view){return view.renderedHead==edit.nodeId;});}))return false;
+    // 不泵送 owner tick，公共入口一次接纳超过旧 256 门槛的连续编辑。
+    const auto queuedRevision=feature->GetHistory().stateRevision;
+    struct Burst final {
+        std::vector<CropRequestId> ids;
+        std::vector<CropNodeId> nodes=std::vector<CropNodeId>(300,0);
+        std::vector<int> completed=std::vector<int>(300,0);
+        bool outcomesValid=true;
+    };
+    const auto burst=std::make_shared<Burst>();
+    for(std::size_t index=0;index<burst->completed.size();++index) {
+        CropEditRequest appending;appending.documentId=initial.documentId;
+        appending.requestId=CropHostFeature::CreateRequestId();appending.expectedRevision=queuedRevision;
+        appending.kind=CropEditKind::Append;appending.nodeId=initial.rootNodeId;
+        appending.operation=append.operation;
+        burst->ids.push_back(appending.requestId);
+        const auto admitted=feature->SendRequest(appending,[burst,index](CropEditOutcome outcome) {
+            ++burst->completed[index];
+            burst->outcomesValid=burst->outcomesValid&&outcome.requestId==burst->ids[index]&&outcome.nodeId==burst->nodes[index]
+                &&outcome.status==CropEditStatus::Succeeded;
+        });
+        if(!admitted)return GetCaseResult(false,"Crop Host accepts a burst above 256 pending edits");
+        burst->nodes[index]=admitted.nodeId;
+    }
+    if(!wait([&]{return std::all_of(burst->completed.begin(),burst->completed.end(),[](int count){return count!=0;});}))return false;
+    if(!GetCaseResult(burst->outcomesValid&&std::all_of(burst->completed.begin(),burst->completed.end(),[](int count){return count==1;})
+        &&feature->GetHistory().appliedHead==burst->nodes.back()&&feature->GetHistory().totalNodeCount==302,
+        "queued Host edits keep every outcome and the final requested branch"))return false;
     CropBuildResult built;
     for(int round=0;round<2;++round) {
         CropBuildRequest build;build.documentId=initial.documentId;build.nodeId=edit.nodeId;build.requestId=CropHostFeature::CreateRequestId();
@@ -978,6 +1005,15 @@ bool GetArchiveRestoreCase(bool meshCase)
     };
     const auto resultNode=edit(0),previewNode=edit(1);if(!resultNode||!previewNode)return false;
     CropBuildRequest build;build.documentId=initial.documentId;build.nodeId=resultNode;build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=feature->GetHistory().stateRevision;
+    if(!check(build.options.availableRamBytes==0,"Build defaults to an automatic RAM budget"))return false;
+    auto limitedBuild=build;limitedBuild.requestId=CropHostFeature::CreateRequestId();limitedBuild.options.availableRamBytes=1;
+    const auto limitedBuildAdmission=feature->SendRequest(limitedBuild);
+    if(!limitedBuildAdmission||!wait([&]{const auto out=feature->GetBuildOutcome(initial.documentId,limitedBuild.requestId);return out&&out->status!=CropEditStatus::Queued;}))return false;
+    const auto limitedBuildOutcome=feature->GetBuildOutcome(initial.documentId,limitedBuild.requestId);
+    if(!check(limitedBuildOutcome&&limitedBuildOutcome->result.failureReason==CropFailure::LowRam
+        &&!GetDataRevisionRefValid(limitedBuildOutcome->result.outputRevision)&&feature->GetHistory().results.empty(),
+        "Explicit low build budget rejects allocation without publishing a result"))return false;
+    build.expectedRevision=feature->GetHistory().stateRevision;
     const auto buildAdmission=feature->SendRequest(build);
     if(!buildAdmission||!wait([&]{const auto out=feature->GetBuildOutcome(initial.documentId,build.requestId);return out&&out->status!=CropEditStatus::Queued;})) {
         std::cerr<<"Archive fixture build admission/finalization: "<<static_cast<int>(buildAdmission.failureReason)<<"\n";return false;
@@ -986,6 +1022,8 @@ bool GetArchiveRestoreCase(bool meshCase)
     if(!buildOutcome||buildOutcome->status!=CropEditStatus::Succeeded){std::cerr<<"Archive fixture build failure: "
         <<(buildOutcome?static_cast<int>(buildOutcome->result.failureReason):-1)<<"\n";return false;}
     const auto saved=feature->GetArchive(initial.documentId);if(!saved||!saved->result){std::cerr<<"Archive fixture snapshot absent\n";return false;}
+    if(!check(saved->result->options.availableRamBytes==0&&feature->SendRequest(build).isReplay,
+        "Automatic budget policy survives archive capture and exact request replay"))return false;
     const auto makeRestore=[&] {
         CropDocumentRequest request;request.action=CropDocumentAction::RestoreDocument;request.requestId=CropHostFeature::CreateRequestId();
         request.target=target;request.sourceRevision=saved->sourceRevision;request.archive=*saved;return request;
@@ -1038,6 +1076,7 @@ bool GetArchiveRestoreCase(bool meshCase)
         &&probe->m_data->GetDataLifetime(saved->result->scopeId).status==DataLifetimeStatus::Published,
         "View rejection after worker preparation releases every candidate payload and preserves the original result"))return false;
     auto restore=makeRestore();int callbacks=0,replays=0;CropDocumentOutcome restored;
+    if(!check(restore.availableRamBytes==0,"Archive restore defaults to current available RAM"))return false;
     bool observed=false,atomic=true;CropDocumentId expectedDocument=0;
     const auto observer=probe->m_data->AttachDataChange([&](const DataChangeSet&) {
         if(!expectedDocument||feature->GetHistory().documentId!=expectedDocument)return;

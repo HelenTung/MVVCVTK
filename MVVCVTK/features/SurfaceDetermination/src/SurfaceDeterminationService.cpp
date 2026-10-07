@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceContracts.h"
 #include <vtkImageData.h>
@@ -6,25 +7,13 @@
 #include <cmath>
 #include <utility>
 #include <limits>
-
-namespace {
-
-constexpr std::size_t completionLimit = 64;
-
-std::vector<SurfaceJobComplete> BuildCompletionQueue()
-{
-    std::vector<SurfaceJobComplete> complete;
-    complete.reserve(completionLimit);
-    return complete;
-}
-
-} // namespace
+#include <new>
+#include <stdexcept>
 
 SurfaceDeterminationService::SurfaceDeterminationService(std::function<void()> onWorkAvailable)
     : m_onWorkAvailable(std::move(onWorkAvailable))
-    , m_complete(BuildCompletionQueue())
 {
-    // 所有成员和有界存储就绪后才启动线程，不能从成员初始化中提前访问 this。
+    // 所有成员就绪后才启动线程；完成槽位由 Start 在接纳前预留。
     m_activeScope.reserve(128);
     m_worker = std::thread([this] { WorkerLoop(); });
 }
@@ -50,7 +39,7 @@ SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
 
 SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot source,
                                                           SurfaceDeterminationStartParams params,
-                                                          const std::size_t maxWorkingBytes,
+                                                          const WorkLimit maxWorkingBytes,
                                                           const std::uint64_t requestId,
                                                           SurfaceAlgorithmInputs inputs)
 {
@@ -60,11 +49,22 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
         || maxWorkingBytes == 0) {
         return SurfaceAdmissionStatus::InvalidRequest;
     }
-    const std::size_t outstandingCount = m_complete.size()
-        + (m_activeRequestId != 0 ? 1U : 0U)
-        + m_pendingJobs.size();
-    if (outstandingCount >= completionLimit) {
+    const auto maxSlots = m_complete.max_size();
+    auto outstandingCount = m_complete.size();
+    if (m_activeRequestId != 0) {
+        if (outstandingCount == maxSlots) return SurfaceAdmissionStatus::Unavailable;
+        ++outstandingCount;
+    }
+    if (m_pendingJobs.size() >= maxSlots - outstandingCount)
         return SurfaceAdmissionStatus::Unavailable;
+    const auto requiredSlots = outstandingCount + m_pendingJobs.size() + 1;
+    if (m_complete.capacity() < requiredSlots) {
+        // 几何增长避免逐请求扩容；后台 noexcept 完成发布始终无需重新分配。
+        const auto grownSlots = m_complete.capacity() <= maxSlots / 2
+            ? m_complete.capacity() * 2 : maxSlots;
+        try { m_complete.reserve(std::max(requiredSlots, grownSlots)); }
+        catch (const std::bad_alloc&) { return SurfaceAdmissionStatus::Unavailable; }
+        catch (const std::length_error&) { return SurfaceAdmissionStatus::Unavailable; }
     }
 
     auto cancel = std::make_shared<std::atomic<bool>>(false);
@@ -289,7 +289,7 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
             ++m_executionRevision;
         }
 
-        std::size_t available = job.maxWorkingBytes;
+        WorkLimit available = job.maxWorkingBytes;
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
             const auto subtract = [&](std::size_t amount) {

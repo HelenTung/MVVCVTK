@@ -3,6 +3,7 @@
 namespace Manual {
 QString GetActionRequirement(const QString& module, const QString& action, const QJsonObject& s, bool hasInput)
 {
+    if (module == "Data" && action == "ActivateAccepted") return s["acceptedRevision"].toString().isEmpty() ? "没有已接纳的数据可激活。" : QString();
     if (action == "GraphInfo") return {};
     if (action == "UseData") return hasInput ? QString() : "请先加载输入数据。";
     if (!hasInput && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";

@@ -9,6 +9,8 @@
 #include <vtkRenderWindow.h>
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <new>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -20,6 +22,10 @@ public:
         ModelTransformSnapshot before;
         Math::Matrix after;
         std::uint64_t afterRevision = 0;
+    };
+    struct QueuedRequest final {
+        ModelRotationRequest request;
+        ModelTransformSnapshot source;
     };
     struct Gesture final {
         std::string viewId;
@@ -63,7 +69,6 @@ public:
                     if (!m_history.empty()) m_history.back().afterRevision = state.transformRevision;
                 }
                 else if (m_start.modelToWorld != state.modelToWorld) {
-                    if (m_history.size() == 100) m_history.erase(m_history.begin());
                     m_history.push_back({ m_start, state.modelToWorld, state.transformRevision });
                 }
                 m_status = ModelRotationStatus::Succeeded;
@@ -122,6 +127,71 @@ public:
         const auto center = Math::GetModelCenter(*image);
         return center ? std::optional<Math::Point>(
             Math::GetWorldPoint(state.modelToWorld, *center)) : std::nullopt;
+    }
+
+    bool StartNext()
+    {
+        if (m_requests.empty() || m_token || m_gesture) return true;
+        const auto state = m_port->GetTransformState();
+        const auto& queued = m_requests.front();
+        if (!state || state->sessionGeneration != queued.source.sessionGeneration
+            || state->dataRevision != queued.source.dataRevision
+            || state->bindingRevision != queued.source.bindingRevision) {
+            m_requests.clear();
+            m_status = ModelRotationStatus::Invalidated;
+            return true;
+        }
+        std::optional<Math::Matrix> matrix;
+        const bool isUndo = queued.request.action == ModelRotationAction::Undo;
+        if (isUndo) {
+            if (!m_history.empty()) matrix = m_history.back().before.modelToWorld;
+        }
+        else {
+            const auto rotation = Math::GetAxisRotation(
+                queued.request.worldAxis, queued.request.angleDeg);
+            const auto center = queued.request.worldCenter
+                ? queued.request.worldCenter : GetCenter(*state);
+            if (rotation && center)
+                matrix = Math::GetRotatedMatrix(state->modelToWorld, *center, *rotation);
+        }
+        if (!matrix) {
+            m_requests.clear();
+            m_status = ModelRotationStatus::Invalidated;
+            return true;
+        }
+        // 其他交互或帧提交暂时占用姿态时保留请求，由后续 owner tick 重试。
+        // 使用执行时的已提交矩阵，连续旋转逐次累积，不覆盖前一个候选。
+        if (!StartEdit()) return true;
+        if (!m_port->SetTransformCommit(m_token, 1, *matrix)) {
+            (void)StopGesture();
+            return false;
+        }
+        m_requests.pop_front();
+        m_isUndo = isUndo;
+        m_status = ModelRotationStatus::Pending;
+        return true;
+    }
+
+    bool SendQueued(const ModelRotationRequest& request)
+    {
+        const auto state = m_port->GetTransformState();
+        if (!state || !GetDataRevisionRefValid(state->dataRevision)) return false;
+        if (request.action == ModelRotationAction::Rotate) {
+            const auto rotation = Math::GetAxisRotation(request.worldAxis, request.angleDeg);
+            const auto center = request.worldCenter ? request.worldCenter : GetCenter(*state);
+            if (!rotation || !center
+                || !Math::GetRotatedMatrix(state->modelToWorld, *center, *rotation)) return false;
+        }
+        else if (m_history.empty() && !m_token && m_requests.empty()) return false;
+        // 不以固定请求数量设门槛；真实分配失败发生在接纳前。
+        try { m_requests.push_back({ request, *state }); }
+        catch (const std::bad_alloc&) { return false; }
+        if (!m_context.host->SendWorkAvailable()) {
+            m_requests.pop_back();
+            return false;
+        }
+        m_status = ModelRotationStatus::Pending;
+        return StartNext();
     }
 
     std::optional<Gesture> BuildGesture(const InteractionEvent& event) const
@@ -287,6 +357,7 @@ public:
     std::uint64_t m_token = 0, m_sequence = 0;
     std::optional<Gesture> m_gesture;
     std::vector<History> m_history;
+    std::deque<QueuedRequest> m_requests;
     ModelRotationStatus m_status = ModelRotationStatus::Detached;
     bool m_isEnabled = false, m_isUndo = false;
 };
@@ -329,6 +400,7 @@ bool ModelRotationHostFeature::DetachHost()
     m_impl->m_context = {};
     m_impl->m_port.reset();
     m_impl->m_history.clear();
+    m_impl->m_requests.clear();
     m_impl->m_token = 0;
     m_impl->m_isEnabled = false;
     m_impl->m_status = ModelRotationStatus::Detached;
@@ -339,7 +411,8 @@ bool ModelRotationHostFeature::OnHostTick()
 {
     if (!m_impl->SetCompletion()) return false;
     if (!m_impl->m_gesture && !m_impl->ClearSource()) return false;
-    return !m_impl->m_gesture || m_impl->GetGestureValid() || m_impl->StopGesture();
+    if (m_impl->m_gesture && !m_impl->GetGestureValid() && !m_impl->StopGesture()) return false;
+    return m_impl->StartNext();
 }
 
 bool ModelRotationHostFeature::SendRequest(const ModelRotationRequest& request)
@@ -354,32 +427,13 @@ bool ModelRotationHostFeature::SendRequest(const ModelRotationRequest& request)
         m_impl->m_isEnabled = request.isEnabled;
         return true;
     case ModelRotationAction::Cancel:
-        return m_impl->StopGesture();
+        if (!m_impl->StopGesture()) return false;
+        m_impl->m_requests.clear();
+        if (!m_impl->m_token) m_impl->m_status = ModelRotationStatus::Cancelled;
+        return true;
     case ModelRotationAction::Undo:
-        if (m_impl->m_token || m_impl->m_history.empty() || !m_impl->StartEdit()) return false;
-        if (!m_impl->m_port->SetTransformCommit(m_impl->m_token, 1,
-                m_impl->m_history.back().before.modelToWorld)) {
-            (void)m_impl->StopGesture();
-            return false;
-        }
-        m_impl->m_isUndo = true;
-        m_impl->m_status = ModelRotationStatus::Pending;
-        return true;
-    case ModelRotationAction::Rotate: {
-        const auto rotation = Impl::Math::GetAxisRotation(request.worldAxis, request.angleDeg);
-        const auto state = m_impl->m_port->GetTransformState();
-        const auto center = request.worldCenter ? request.worldCenter
-            : state ? m_impl->GetCenter(*state) : std::nullopt;
-        const auto matrix = rotation && center && state
-            ? Impl::Math::GetRotatedMatrix(state->modelToWorld, *center, *rotation) : std::nullopt;
-        if (!matrix || !m_impl->StartEdit()) return false;
-        if (!m_impl->m_port->SetTransformCommit(m_impl->m_token, 1, *matrix)) {
-            (void)m_impl->StopGesture();
-            return false;
-        }
-        m_impl->m_status = ModelRotationStatus::Pending;
-        return true;
-    }
+    case ModelRotationAction::Rotate:
+        return m_impl->SendQueued(request);
     }
     return false;
 }
@@ -402,8 +456,7 @@ ModelRotationState ModelRotationHostFeature::GetState() const
             result.status = ModelRotationStatus::Succeeded;
             result.undoCount = m_impl->m_isUndo
                 ? (result.undoCount == 0 ? 0 : result.undoCount - 1)
-                : std::min<std::size_t>(100, result.undoCount
-                    + (m_impl->m_start.modelToWorld != state.modelToWorld ? 1 : 0));
+                : result.undoCount + (m_impl->m_start.modelToWorld != state.modelToWorld ? 1 : 0);
         }
         else {
             result.status = state.completedToken == m_impl->m_token
@@ -420,5 +473,6 @@ ModelRotationState ModelRotationHostFeature::GetState() const
             || last.afterRevision != state.transformRevision
             || last.after != state.modelToWorld) result.undoCount = 0;
     }
+    if (!m_impl->m_requests.empty()) result.status = ModelRotationStatus::Pending;
     return result;
 }
