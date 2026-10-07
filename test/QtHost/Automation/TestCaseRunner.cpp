@@ -832,6 +832,10 @@ void CheckCropWorkflow(TestWindow& window)
     Check(panel->GetObservedState()["documents"].toArray().size()==1,"empty iso display still allows document cleanup");
     GetComplete(window, Send(window, "View", "Set", {{"iso", 50.0}}), "Succeeded");
     GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",secondDocument}}),"Succeeded");
+    Check(Wait([&] {
+        panel->Observe();
+        return panel->GetObservedState()["framesReady"].toBool();
+    }), "reactivated crop display settles before BuildResult input");
     GetComplete(window, Click(window, "Crop", "BuildResult"), "Rejected");
     GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
     GetComplete(window, Click(window, "Crop", "RemoveInside"), "Succeeded");
