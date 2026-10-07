@@ -76,7 +76,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabel":"1","unit":"Millimeter",
         "maxDistance":5.0,"sampleSpacing":0.3074,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"Complete",
-        "maxBoundaryError":0.07685,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
+        "maxBoundaryError":0.0768,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
         const auto current = panel->GetSession()->GetImageDescriptor();
         if (!current) throw std::invalid_argument("请先加载体数据");
         ThicknessInput input;
