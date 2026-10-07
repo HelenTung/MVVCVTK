@@ -7,6 +7,7 @@
 #include "Render/Contracts/OverlayService.h"
 
 #include <vtkActor.h>
+#include <vtkCellArray.h>
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
 #include <vtkImageResliceMapper.h>
@@ -25,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -33,6 +35,15 @@
 #include <vector>
 
 namespace {
+
+bool GetArraySame(vtkDataArray* first, vtkDataArray* second)
+{
+    return first && second && first->GetDataType() == second->GetDataType()
+        && first->GetNumberOfComponents() == second->GetNumberOfComponents()
+        && first->GetNumberOfValues() == second->GetNumberOfValues()
+        && std::memcmp(first->GetVoidPointer(0), second->GetVoidPointer(0),
+            static_cast<std::size_t>(first->GetNumberOfValues()) * first->GetDataTypeSize()) == 0;
+}
 
 static_assert(noexcept(
     std::declval<OverlayService&>().RemoveOverlay(
@@ -284,50 +295,70 @@ int GapDisplaySuite::GetFailCount() const
             && meshOverlay->GetInput(1) == firstMeshInput,
         "Show should reuse both stored display artifacts.");
 
-    const auto storedLabels = service.BuildLabelImage();
-    const auto storedMesh = service.BuildVoidMesh();
-    const auto storedStats = service.GetStatistics();
-    const auto* storedValues = static_cast<const int*>(storedLabels->GetScalarPointer());
-    const std::vector<int> labelValues(storedValues, storedValues + storedLabels->GetNumberOfPoints());
-    GapDisplayParams colors;
-    for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
-             GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
-        colors.mode = mode;
-        expect(service.SetDisplay(colors) && service.GetDisplayParams().mode == mode,
-            "Every color mode should replace the display on the owner thread.");
-        const auto statistics = service.GetStatistics();
-        expect(service.BuildLabelImage() == storedLabels && service.BuildVoidMesh() == storedMesh
-            && std::equal(labelValues.begin(), labelValues.end(), storedValues)
-            && statistics.objectVoxelCount == storedStats.objectVoxelCount
-            && statistics.voidVoxelCount == storedStats.voidVoxelCount
-            && statistics.objectVolumeMM3 == storedStats.objectVolumeMM3
-            && statistics.voidVolumeMM3 == storedStats.voidVolumeMM3
-            && statistics.porosityRatio == storedStats.porosityRatio,
-            "Color switching must preserve exact supplier labels, mesh and statistics.");
+    {
+        auto paletteSlice = std::make_shared<OverlayStub>();
+        auto paletteMesh = std::make_shared<OverlayStub>();
+        GapAnalysisService paletteService;
+        GapViewRequest paletteRequest;
+        paletteRequest.inputImage = image; paletteRequest.surface = surfaceConfig;
+        paletteRequest.voidParams = voidParams; paletteRequest.meshTargets = {paletteMesh};
+        paletteRequest.sliceTargets = {{Orientation::Top_down, paletteSlice}};
+        const bool isReady = StartDisplay(paletteService, std::move(paletteRequest), image);
+        expect(isReady, "Independent palette fixture should complete its own analysis.");
+        if (isReady) {
+            const auto storedLabels = paletteService.BuildLabelImage();
+            const auto storedMesh = paletteService.BuildVoidMesh();
+            const auto storedStats = paletteService.GetStatistics();
+            const auto* storedValues = static_cast<const int*>(storedLabels->GetScalarPointer());
+            const std::vector<int> labelValues(storedValues, storedValues + storedLabels->GetNumberOfPoints());
+            GapDisplayParams colors;
+            for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
+                     GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
+                colors.mode = mode;
+                expect(paletteService.SetDisplay(colors) && paletteService.GetDisplayParams().mode == mode,
+                    "Every color mode should replace the display on the owner thread.");
+                const auto statistics = paletteService.GetStatistics();
+                const auto labels = paletteService.BuildLabelImage();
+                const auto mesh = paletteService.BuildVoidMesh();
+                expect(labels && mesh && labels->GetNumberOfPoints() == storedLabels->GetNumberOfPoints()
+                    && GetArraySame(labels->GetPointData()->GetScalars(), storedLabels->GetPointData()->GetScalars())
+                    && std::equal(labelValues.begin(), labelValues.end(), static_cast<const int*>(labels->GetScalarPointer()))
+                    && GetArraySame(mesh->GetPoints()->GetData(), storedMesh->GetPoints()->GetData())
+                    && GetArraySame(mesh->GetPolys()->GetOffsetsArray(), storedMesh->GetPolys()->GetOffsetsArray())
+                    && GetArraySame(mesh->GetPolys()->GetConnectivityArray(), storedMesh->GetPolys()->GetConnectivityArray())
+                    && statistics.objectVoxelCount == storedStats.objectVoxelCount
+                    && statistics.voidVoxelCount == storedStats.voidVoxelCount
+                    && statistics.objectVolumeMM3 == storedStats.objectVolumeMM3
+                    && statistics.voidVolumeMM3 == storedStats.voidVolumeMM3
+                    && statistics.porosityRatio == storedStats.porosityRatio,
+                    "Color switching must preserve exact supplier labels, mesh and statistics.");
+            }
+            const auto previousSlice = paletteSlice->GetOverlay(), previousMesh = paletteMesh->GetOverlay();
+            const int sliceProps = paletteSlice->GetPropCount(), meshProps = paletteMesh->GetPropCount();
+            colors.mode = GapColorMode::Gradient;
+            paletteSlice->isAttachRejected = true;
+            expect(!paletteService.SetDisplay(colors) && paletteSlice->GetOverlay() == previousSlice
+                && paletteMesh->GetOverlay() == previousMesh
+                && paletteSlice->GetPropCount() == sliceProps && paletteMesh->GetPropCount() == meshProps
+                && paletteService.GetDisplayParams().mode == GapColorMode::HueLoop,
+                "Partially attached palette candidates must roll back without losing the prior display.");
+            paletteSlice->isAttachRejected = false;
+            expect(!paletteService.SetDisplay(colors, [] { return false; })
+                && paletteSlice->GetOverlay() == previousSlice && paletteMesh->GetOverlay() == previousMesh,
+                "Rejected scene update must retain the prior palette and props.");
+            bool isWrongThreadAccepted = true;
+            std::thread paletteThread([&] { isWrongThreadAccepted = paletteService.SetDisplay(colors); });
+            paletteThread.join();
+            expect(!isWrongThreadAccepted, "Color switching must reject a non-owner thread.");
+            expect(paletteService.SwitchOverlay(), "Palette test should hide the display.");
+            const int hiddenAttachCount = paletteSlice->GetAttachCount();
+            expect(paletteService.SetDisplay(colors) && paletteSlice->GetAttachCount() == hiddenAttachCount
+                && !paletteService.GetDisplayOn(), "Hidden palette changes must preserve the hidden state.");
+            expect(paletteService.SwitchOverlay() && paletteService.GetDisplayParams().mode == GapColorMode::Gradient,
+                "Show must use the palette selected while hidden.");
+
+        }
     }
-    const auto previousSlice = overlay->GetOverlay(), previousMesh = meshOverlay->GetOverlay();
-    const int sliceProps = overlay->GetPropCount(), meshProps = meshOverlay->GetPropCount();
-    colors.mode = GapColorMode::Gradient;
-    overlay->isAttachRejected = true;
-    expect(!service.SetDisplay(colors) && overlay->GetOverlay() == previousSlice
-        && meshOverlay->GetOverlay() == previousMesh
-        && overlay->GetPropCount() == sliceProps && meshOverlay->GetPropCount() == meshProps
-        && service.GetDisplayParams().mode == GapColorMode::HueLoop,
-        "Partially attached palette candidates must roll back without losing the prior display.");
-    overlay->isAttachRejected = false;
-    expect(!service.SetDisplay(colors, [] { return false; })
-        && overlay->GetOverlay() == previousSlice && meshOverlay->GetOverlay() == previousMesh,
-        "Rejected scene update must retain the prior palette and props.");
-    bool isWrongThreadAccepted = true;
-    std::thread paletteThread([&] { isWrongThreadAccepted = service.SetDisplay(colors); });
-    paletteThread.join();
-    expect(!isWrongThreadAccepted, "Color switching must reject a non-owner thread.");
-    expect(service.SwitchOverlay(), "Palette test should hide the display.");
-    const int hiddenAttachCount = overlay->GetAttachCount();
-    expect(service.SetDisplay(colors) && overlay->GetAttachCount() == hiddenAttachCount
-        && !service.GetDisplayOn(), "Hidden palette changes must preserve the hidden state.");
-    expect(service.SwitchOverlay() && service.GetDisplayParams().mode == GapColorMode::Gradient,
-        "Show must use the palette selected while hidden.");
 
     GapAnalysisService invalidMaskService;
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();

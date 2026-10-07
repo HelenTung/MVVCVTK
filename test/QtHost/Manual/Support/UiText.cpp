@@ -64,6 +64,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
         {"Roi.Cancel", "取消区域草稿"},
         {"Roi.SetDraft", "更新区域草稿"},
+        {"Gap.SetDisplay", "应用孔隙色带"},
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
