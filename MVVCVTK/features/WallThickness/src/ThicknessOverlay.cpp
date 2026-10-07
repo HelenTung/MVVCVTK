@@ -233,6 +233,14 @@ void ThicknessOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data)
     auto *mesh = vtkPolyData::SafeDownCast(data);
     if (!mesh)
         return;
+    const auto* previous = m_cutter ? vtkPolyData::SafeDownCast(m_cutter->GetInput()) : m_mapper->GetInput();
+    if (mesh != previous) m_lineActor->VisibilityOff();
+    if (m_pathCutter && mesh != previous) {
+        // 裸显示网格不携带对应测量路径，换入时不能继续投影旧来源的值。
+        auto empty = vtkSmartPointer<vtkPolyData>::New();
+        m_pathCutter->SetInputData(empty);
+        m_pathActor->VisibilityOff();
+    }
     if (m_cutter)
         m_cutter->SetInputData(mesh);
     else

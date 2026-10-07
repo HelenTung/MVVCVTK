@@ -827,15 +827,30 @@ void Display()
     window->Render();
     capture("WallThickness-Slice.png");
     bool hasPathIntersections=false;
+    bool hasMatchingIntersectionColors=true;
     auto* projectedActors=renderer->GetActors();projectedActors->InitTraversal();
     while(auto* actor=projectedActors->GetNextActor()) {
         auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
         if(!mapper)continue;mapper->Update();
         auto* cut=mapper->GetInput();
-        if(cut && cut->GetNumberOfVerts()>0 && cut->GetCellData()->GetArray("thickness.sample"))
+        if(cut && cut->GetNumberOfVerts()>0 && cut->GetCellData()->GetArray("thickness.sample")) {
             hasPathIntersections=true;
+            auto* cutIds=vtkIdTypeArray::SafeDownCast(cut->GetCellData()->GetArray("thickness.sample"));
+            auto* cutColors=cut->GetCellData()->GetScalars();
+            for(vtkIdType cell=0;cell<cut->GetNumberOfVerts();++cell) {
+                bool hasSameColor=false;
+                for(vtkIdType line=0;line<pathIds->GetNumberOfValues();++line) if(pathIds->GetValue(line)==cutIds->GetValue(cell)) {
+                    double first[3],second[3];pathColors->GetTuple(line,first);cutColors->GetTuple(cell,second);
+                    hasSameColor=std::equal(first,first+3,second);break;
+                }
+                hasMatchingIntersectionColors &= hasSameColor;
+                double point[3];cut->GetPoint(cut->GetCell(cell)->GetPointId(0),point);
+                hasMatchingIntersectionColors &= std::abs(point[2]-state.cursor[2])<1e-10;
+            }
+        }
     }
     Check(hasPathIntersections,"valid through-wall sample values remain visible inside the current 2D slice");
+    Check(hasMatchingIntersectionColors,"2D intersections retain exact sample IDs, RGB and the requested plane");
     bool sliceMapped = false;
     auto *sliceActors = renderer->GetActors();
     sliceActors->InitTraversal();
@@ -881,6 +896,18 @@ void Display()
     Check(sliceMapped, "actual cutter pick preserves exact sample mapping");
     slice->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 0, "slice cleanup");
+    slice->AttachRenderer(renderer);
+    auto replacement=vtkSmartPointer<vtkPolyData>::New();replacement->ShallowCopy(prepared.mesh);
+    slice->SetInputData(replacement);
+    bool hasVisibleStalePaths=false;
+    auto* replacementActors=renderer->GetActors();replacementActors->InitTraversal();
+    while(auto* actor=replacementActors->GetNextActor()) {
+        auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if(!mapper)continue;mapper->Update();auto* input=mapper->GetInput();
+        hasVisibleStalePaths |= actor->GetVisibility() && input && input->GetNumberOfVerts()>0;
+    }
+    Check(!hasVisibleStalePaths,"replacement display mesh retires prior measurement-path projections");
+    slice->DetachRenderer(renderer);
 }
 } // namespace
 int main(int argc, char **argv)
