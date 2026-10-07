@@ -126,6 +126,7 @@ public:
     static std::size_t GetPendingStopCount() noexcept;
 
     HostSessionConfig config;
+    NavigationBindings bindings;
     HostCoreServices core;
     HostViewRuntimeRegistry renderViews;
     std::shared_ptr<HostFrameCoordinator> frameCoordinator;
@@ -145,6 +146,7 @@ public:
     bool isStarted = false;
     bool isFrameExecuting = false;
     bool isRendering = false;
+    bool isSettingBindings = false;
     std::shared_ptr<HostWorkSignal> workSignal;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
     mutable std::recursive_mutex m_sessionMutex;
@@ -321,7 +323,7 @@ bool VtkAppHostSession::Impl::BuildSession()
                     (void)signal->SendWorkAvailable();
             };
         }
-        if (!renderViews.Build(core, config.renderViews)) {
+        if (!renderViews.Build(core, config.renderViews, &bindings)) {
             (void)clearBuild();
             return false;
         }
@@ -1258,6 +1260,37 @@ VtkAppHostSession& VtkAppHostSession::operator=(
 bool VtkAppHostSession::BuildSession()
 {
     return m_impl && m_impl->BuildSession();
+}
+
+InputBindingStatus VtkAppHostSession::SetInputBindings(
+    const IInputBindings& source)
+{
+    if (!m_impl) return InputBindingStatus::Failed;
+    const std::lock_guard<std::recursive_mutex> lock(
+        m_impl->m_sessionMutex);
+    const auto state = m_impl->stopState.load();
+    if ((state != HostStopState::Stopped
+            && state != HostStopState::Running)
+        || (m_impl->ownerThread != std::thread::id{}
+            && m_impl->ownerThread != std::this_thread::get_id())) {
+        return InputBindingStatus::Failed;
+    }
+    if (m_impl->isSettingBindings) return InputBindingStatus::Busy;
+    m_impl->isSettingBindings = true;
+    NavigationBindings candidate;
+    const auto status = NavigationBindings::Build(source, candidate);
+    m_impl->isSettingBindings = false;
+    if (status != InputBindingStatus::Applied) return status;
+    if (m_impl->stopState.load() != state) return InputBindingStatus::Busy;
+    if (m_impl->isBuilt
+        && (m_impl->isFrameExecuting || m_impl->isRendering
+            || !m_impl->core.sharedState
+            || m_impl->core.sharedState->GetIsInteracting()
+            || !m_impl->renderViews.GetInputsIdle())) {
+        return InputBindingStatus::Busy;
+    }
+    m_impl->bindings = candidate;
+    return InputBindingStatus::Applied;
 }
 
 bool VtkAppHostSession::AttachTimer(

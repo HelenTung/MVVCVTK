@@ -4,6 +4,7 @@
 #include "Data/RoiTypes.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/Types/HostSessionTypes.h"
+#include "Interaction/InputBindings.h"
 
 #include <memory>
 #include <cstddef>
@@ -29,6 +30,9 @@ public:
 
     // 幂等构建；首次成功后复用既有服务和窗口，空 renderViews 或任一构建步骤失败返回 false。
     bool BuildSession();
+    // 只读取导航模块声明的操作并保存值快照；可在构建前或交互空闲时调用。
+    // 拒绝时保留原来的有效绑定。
+    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     // 仅 Running/HostDriven/owner thread。只提交，不绘制；业务 callback
     // 在提交完成阶段兑现，不再等待窗口绘制。重入返回 Deferred。
     HostUpdateResult SendUpdates();

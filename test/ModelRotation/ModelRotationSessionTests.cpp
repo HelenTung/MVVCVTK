@@ -237,9 +237,10 @@ void TestRotationSession()
     enable.action = ModelRotationAction::SetEnabled;
     VERIFY(feature->SendRequest(enable));
     auto* input = session.GetInputEndpoint();
-    const auto send = [&](HostInputKind kind,int x,int y,bool isShift=false,bool isCtrl=false) {
+    const auto send = [&](HostInputKind kind,int x,int y,
+        bool isShift=false,bool isCtrl=false,bool isAlt=false) {
         HostInputEvent event; event.viewId="rotation-0"; event.kind=kind; event.x=x;event.y=y;
-        event.isShiftDown=isShift; event.isCtrlDown=isCtrl;
+        event.isShiftDown=isShift; event.isCtrlDown=isCtrl; event.isAltDown=isAlt;
         const auto result = input->SendInput(event);
         if (!result.isSucceeded || !result.isDefaultSuppressed)
             throw std::runtime_error("Input " + std::to_string(static_cast<int>(kind))
@@ -249,6 +250,8 @@ void TestRotationSession()
     send(HostInputKind::PrimaryPress,170,128);
     const auto gestureToken = port->GetTransformState()->editToken;
     VERIFY(gestureToken != 0);
+    VERIFY(session.SetInputBindings(ConfigurableInputBindings{})
+        == InputBindingStatus::Busy);
     const auto renderEpoch = session.GetSceneViewState({"rotation-0"})->renderedEpoch;
     for (int index=0;index<1000;++index) send(HostInputKind::PointerMove,180,130);
     VERIFY(port->GetTransformState()->hasPending);
@@ -268,6 +271,51 @@ void TestRotationSession()
     VERIFY(feature->SendRequest(undo));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
+
+    ConfigurableInputBindings rotationBindings;
+    const auto alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
+    rotationBindings.SetOverride(
+        std::string(ModelRotationBindingKeys::EnabledDrag),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 });
+    VERIFY(feature->SetInputBindings(rotationBindings)
+        == InputBindingStatus::Applied);
+    send(HostInputKind::SecondaryPress,170,128,false,false,true);
+    VERIFY(port->GetTransformState()->editToken != 0);
+    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
+        == InputBindingStatus::Busy);
+    send(HostInputKind::PointerMove,128,180,false,false,true);
+    tick();
+    send(HostInputKind::SecondaryRelease,128,180,false,false,true);
+    wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
+    ModelRotationRequest reboundUndo; reboundUndo.action=ModelRotationAction::Undo;
+    VERIFY(feature->SendRequest(reboundUndo));
+    wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
+    VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
+    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
+        == InputBindingStatus::Applied);
+    ConfigurableInputBindings cancelBindings;
+    cancelBindings.SetOverride(std::string(ModelRotationBindingKeys::CancelKey),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 'q' });
+    VERIFY(feature->SetInputBindings(cancelBindings)
+        == InputBindingStatus::Applied);
+    send(HostInputKind::PrimaryPress,170,128);
+    HostInputEvent key;
+    key.viewId="rotation-0";
+    key.kind=HostInputKind::KeyPress;
+    key.keyCode=27; key.keySym="Escape";
+    VERIFY(input->SendInput(key).isSucceeded);
+    VERIFY(port->GetTransformState()->editToken != 0);
+    key.keyCode='q'; key.keySym="q";
+    VERIFY(input->SendInput(key).isSucceeded);
+    wait([&]{return feature->GetState().status == ModelRotationStatus::Cancelled;});
+    HostInputEvent releaseAfterCancel;
+    releaseAfterCancel.viewId="rotation-0";
+    releaseAfterCancel.kind=HostInputKind::PrimaryRelease;
+    VERIFY(input->SendInput(releaseAfterCancel).isSucceeded);
+    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
+        == InputBindingStatus::Applied);
 
     // 原生切片 Ctrl+拖拽只由 Feature 消费；Esc 恢复开始姿态，保留既有撤销项。
     auto* native = interactors[1].GetPointer();

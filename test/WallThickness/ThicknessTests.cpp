@@ -438,6 +438,11 @@ class Control final : public FeatureHostControl
     {
         return 1;
     }
+    bool GetSemanticTargetValid(const HostSemanticTarget&) const override
+    {
+        return isSemanticTargetValid;
+    }
+    bool isSemanticTargetValid = false;
     bool isThrowAttach = false;
     HostInputBinding binding;
     FeatureSceneDelta delta;
@@ -505,6 +510,19 @@ void Lifecycle()
     auto data = std::make_shared<TestDataPort>();
     auto control = std::make_shared<Control>();
     auto feature = std::make_shared<WallThicknessHostFeature>();
+    ConfigurableInputBindings settings;
+    settings.SetOverride(std::string(ThicknessBindingKeys::SelectSample),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
+          static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
+    Check(feature->SetInputBindings(settings)==InputBindingStatus::Applied,
+        "secondary sample selection binding accepted");
+    auto invalidSettings = settings;
+    invalidSettings.SetOverride(std::string(ThicknessBindingKeys::SelectSample),
+        InputBindingOverride::Replace,
+        { InputTriggerKind::Drag, InputMouseButton::Secondary, 0, 0, 0 });
+    Check(feature->SetInputBindings(invalidSettings)==InputBindingStatus::Unsupported,
+        "drag trigger must not replace sample click");
     auto work = BuildSlab();
     ThicknessRequest request;
     request.action = ThicknessAction::Start;
@@ -536,6 +554,38 @@ void Lifecycle()
     const auto archive = feature->GetArchive(outcome.result);
     Check(archive && archive->params.maxDistance == request.params->maxDistance,
           "complete recipe recoverable");
+    const bool hasSampleTarget = snapshot
+        && snapshot->statistics.minimumSample.has_value()
+        && bool(control->binding.onTargetInput);
+    Check(hasSampleTarget, "sample target callback and valid sample available");
+    if (hasSampleTarget)
+    {
+        control->isSemanticTargetValid = true;
+        HostSemanticTarget clickTarget;
+        clickTarget.display.data = outcome.result;
+        clickTarget.objectId = std::to_string(*snapshot->statistics.minimumSample);
+        clickTarget.resultRevision = outcome.result.generation;
+        InteractionEvent click;
+        click.eventKind = InteractionEventKind::SecondaryPress;
+        click.isAltDown = true;
+        const auto pressed = control->binding.onTargetInput(click, clickTarget);
+        Check(pressed.isHandled && pressed.isSucceeded
+                && feature->GetState().selectedSample
+                    == snapshot->statistics.minimumSample,
+              "Alt+secondary sample click selects the expected sample");
+        Check(feature->SetInputBindings(settings) == InputBindingStatus::Busy,
+              "active sample click rejects rebinding");
+        click.eventKind = InteractionEventKind::PrimaryRelease;
+        Check(control->binding.onTargetInput(click, clickTarget).isSucceeded
+                && feature->SetInputBindings(settings) == InputBindingStatus::Busy,
+              "unrelated primary release leaves secondary click active");
+        click.eventKind = InteractionEventKind::SecondaryRelease;
+        Check(control->binding.onTargetInput(click, clickTarget).isSucceeded
+                && feature->SetInputBindings(settings) == InputBindingStatus::Applied
+                && feature->GetState().selectedSample
+                    == snapshot->statistics.minimumSample,
+              "secondary release clears click state and retains selection");
+    }
     ThicknessRequest eval;
     eval.action = ThicknessAction::SetEvaluation;
     eval.evaluation = work.archive.evaluation;
