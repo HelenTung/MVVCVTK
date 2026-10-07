@@ -2,11 +2,31 @@
 #include "ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
 #include <QFileInfo>
+#if defined(MANUAL_ROI)
+#include "Host/RoiEditingHostFeature.h"
+#endif
 #include "../../../Host/FeatureInput.h"
 namespace Manual {
 ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSource> reference, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Data", parent);
+#if defined(MANUAL_ROI)
+    RoiEditingConfig roiConfig;roiConfig.referenceView.viewId="primary-3d";roiConfig.targetViews=GetAllViews();
+    auto editor=std::make_shared<RoiEditingHostFeature>(roiConfig);
+    if(!context.runtime.AttachFeature(editor))throw std::runtime_error("ROI editor attach failed");
+    panel->AttachAction("EditRoiBox",{{"matrix",GetValues(roiIdentityMatrix)}},[panel,editor](auto id,const auto& p){
+        const auto source=panel->GetSession()->GetImageDescriptor();if(!source)throw std::runtime_error("source unavailable");
+        RoiRequest draft;draft.definition.source=source->dataRevision;draft.metadata.name="comparison-half-box";
+        RoiNode box;box.primitive.localToSource=GetArray<double,16>(p["matrix"]);draft.definition.nodes.push_back(box);
+        const auto catalog=panel->GetSession()->GetRoiDescriptors(true);draft.expectedCatalogRevision=catalog.empty()?0:catalog.front().catalogRevision;
+        RoiEditingRequest begin;begin.action=RoiEditingAction::Begin;begin.draft=draft;
+        const auto first=editor->SendRequest(begin);
+        if(first.error!=RoiError::None)throw std::runtime_error("ROI Begin failed");
+        const bool hadDraft=editor->GetState().hasDraft;
+        RoiEditingRequest commit;commit.action=RoiEditingAction::Commit;const auto result=editor->SendRequest(commit);
+        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"draftBeforeCommit",hadDraft},{"draftAfterCommit",editor->GetState().hasDraft},{"roi",result.roi?GetRefText(result.roi->revision):QString()},{"error",int(result.error)}});
+    },TestPolicy::Compute);
+#endif
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
     panel->AttachAction("Load", GetJson(R"({"filePath":"F:/data/ct/1536x1536x1536_1440.raw","datasetId":"1","dimensions":[1536,1536,1536],"spacingLPS":[0.1537,0.1537,0.1537],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
         [panel](auto id, const auto& params) {
@@ -101,6 +121,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
                 {"source", GetRefText(descriptor->dataRevision)}, {"validationRoute", "trusted-input"}});
         }, TestPolicy::Compute, true);
     panel->onObserve = [panel] {
+        // Comparison exports below read immutable results through the public ports.
         QJsonArray labels;
         for (const auto& label : panel->GetSession()->GetLabelMapDescriptors()) labels.append(QJsonObject{{"id", QString::fromStdString(label.id)}, {"revision", GetRefText(label.dataRevision)}, {"source", GetRefText(label.sourceRevision)}});
         QJsonObject state{{"labels", labels}};
@@ -111,6 +132,17 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         }
         panel->SetState(state);
     };
+    panel->AttachAction("ReadTransform", {}, [panel, reference](auto id,const auto&) {
+        panel->SetComplete(id,"Observed",reference->ReadTransform());
+    },TestPolicy::Read);
+    panel->AttachAction("ReadRoi", {{"roi","latest"}}, [panel, reference](auto id,const auto& p) {
+        const auto input=panel->GetSession()->GetImageDescriptor();
+        if(!input)throw std::runtime_error("source unavailable");
+        const auto catalog=panel->GetSession()->GetRoiDescriptors();
+        if(catalog.empty())throw std::runtime_error("ROI unavailable");
+        const auto ref=GetText(p,"roi")=="latest"?catalog.back().revision:GetRef(p["roi"]);
+        panel->SetComplete(id,"Observed",reference->ReadRoi(ref,input->dataRevision));
+    },TestPolicy::Read);
     return panel;
 }
 }

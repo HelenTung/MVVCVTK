@@ -2,6 +2,7 @@
 #include "FeatureSetup.h"
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
+#include <limits>
 #if defined(MANUAL_CROP)
 #include "Host/CropHostFeature.h"
 #endif
@@ -60,6 +61,15 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     PartSegmentationConfig partConfig; partConfig.defaultStart.targetViews = GetPartViews();
     if (context.workflow.resources.hasExplicitWorkingLimit) partConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     if (context.workflow.resources.hasExplicitWorkingLimit) partConfig.maxHistoryBytes = context.workflow.resources.publishBytes;
+    // 比较测试可显式覆盖历史保留预算；只有显式工作预算才参与上限校验。
+    if (const auto configured = qgetenv("MVVCVTK_TEST_HISTORY_MIB"); !configured.isEmpty()) {
+        const auto mib = configured.toULongLong();
+        if (!mib || mib > std::numeric_limits<std::uint64_t>::max() / (1024ULL*1024ULL)
+            || (context.workflow.resources.hasExplicitWorkingLimit
+                && mib > context.workflow.resources.workingBytes / (1024ULL*1024ULL)))
+            throw std::invalid_argument("history budget exceeds available working budget");
+        partConfig.maxHistoryBytes = mib * 1024ULL * 1024ULL;
+    }
     // 整卷编辑的时限包含表面重建和不可变标签冻结，测试宿主显式给出完整阶段预算。
     auto part = std::make_shared<PartSegmentationHostFeature>(partConfig); attach(part);
     context.workflow.getPartLabels = [part] {

@@ -38,6 +38,7 @@
 #include <QContextMenuEvent>
 #include <iostream>
 #include <functional>
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <vtkCommand.h>
@@ -200,6 +201,12 @@ void CheckUiAndRecords(TestWindow& window)
     Check(defaults["datasetId"] == "1" && defaults["dimensions"] == QJsonArray{1536,1536,1536}
         && defaults["spacingLPS"] == QJsonArray{0.1537,0.1537,0.1537}
         && defaults["filePath"] == "F:/data/ct/1536x1536x1536_1440.raw", "manual defaults match the confirmed real CT sample");
+    if (GetEnabled(window, "Wall")) {
+        const auto spacing = GetArray<float, 3>(defaults["spacingLPS"]);
+        const auto wallDefaults = window.GetModule("Wall")->GetParameterEditor("Start")->GetValue().toObject();
+        Check(GetNumber(wallDefaults, "maxBoundaryError") <= 0.5 * *std::min_element(spacing.begin(), spacing.end()),
+            "wall defaults respect the half-voxel endpoint-error limit for the default real CT spacing");
+    }
     const QRegularExpression chinese("[\\x{4e00}-\\x{9fff}]");
     for (const QString name : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
             QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
@@ -1108,6 +1115,12 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         {"dimensions", QJsonArray{32,32,32}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{-31,-31,0}}, {"sourceDigest", ""}}), "Succeeded");
     GetComplete(window, Click(window, "Wall", "Start"), "InvalidInput");
     GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
+    GetComplete(window, Click(window, "Surface", "LocalAdaptiveIso50", {{"componentSelection", "Largest"}, {"initialIsoValue", 500.},
+        {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
+        {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");
+    const auto incomplete = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5}}), "Failed");
+    Check(incomplete["result"].toObject()["message"] == "Mesh lacks complete-boundary provenance.",
+        "wall rejects a component-filtered surface for the complete-boundary reason");
     GetComplete(window, Click(window, "Surface", "LocalAdaptiveIso50", {{"componentSelection", "All"}, {"initialIsoValue", 500.},
         {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
         {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");

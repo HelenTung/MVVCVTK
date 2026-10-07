@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include "App/Services/FeatureViewService.h"
 namespace Manual {
 std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRevisionRef source,
     const QJsonValue& extentValue, const QJsonValue& maskValue, const char* name, bool isPhysicalBounds)
@@ -65,14 +66,48 @@ std::optional<DataRevisionRef> CreateInputRoi(VtkAppHostSession& session, DataRe
 bool ReferenceDataSource::AttachHost(const HostFeatureContext& context)
 {
     m_data = context.data;
+    m_views = context.views;
     return static_cast<bool>(m_data);
 }
 bool ReferenceDataSource::DetachHost()
 {
     // 临时输入派生的测试参考/掩码须由本生产者退休；仍被对齐等消费者持有时允许 Host 重试。
     if (m_data && !m_resultScopes.Clear(*m_data)) return false;
-    m_data.reset(); m_sceneCommit.reset(); m_sceneGraph = {}; m_sceneOrder.clear();
+    m_data.reset(); m_views.reset(); m_sceneCommit.reset(); m_sceneGraph = {}; m_sceneOrder.clear();
     return true;
+}
+QJsonObject ReferenceDataSource::ReadTransform()
+{
+    const auto view = m_views ? m_views->GetFeaturePort("primary-3d") : nullptr;
+    const auto matrix = view ? view->GetModelToWorld() : std::nullopt;
+    if (!matrix) throw std::runtime_error("model transform unavailable");
+    return {{"modelToWorld", GetValues(*matrix)}};
+}
+QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source)
+{
+    const auto graph = m_data->GetDataGraph();
+    const auto read = m_data->GetRoi(graph, ref, source);
+    const auto data = m_data->GetData(graph, source);
+    const auto image = data ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload) : nullptr;
+    if (!read.roi || !image) throw std::runtime_error("ROI/source unavailable");
+    const auto& grid = image->GetGeometry();
+    RoiMaskRequest request; request.region.offset = {0,0,0};
+    for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
+    request.maxBytes=8U*1024U*1024U;
+    std::uint64_t selected=0,total=0; QCryptographicHash hash(QCryptographicHash::Sha256);
+    for (;;) {
+        const auto chunk=read.roi->GetMaskChunk(request);
+        if (chunk.error!=RoiError::None) throw std::runtime_error("ROI read failed");
+        for (auto value:chunk.values) selected += value!=0;
+        total+=chunk.values.size();
+        hash.addData(reinterpret_cast<const char*>(chunk.values.data()),static_cast<int>(chunk.values.size()));
+        if(chunk.isComplete)break;
+        request.voxelOffset=chunk.nextOffset;
+    }
+    return {{"roi",GetRefText(ref)},{"source",GetRefText(source)}, {"bounds",GetValues(read.roi->GetBounds())},
+        {"voxelCount",QString::number(selected)},{"gridCount",QString::number(total)},
+        {"volumeMM3",selected*grid.spacing[0]*grid.spacing[1]*grid.spacing[2]},
+        {"binaryMaskSha256",QString::fromLatin1(hash.result().toHex())}};
 }
 QJsonObject ReferenceDataSource::GetPublishedGraph()
 {
