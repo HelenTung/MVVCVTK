@@ -43,11 +43,14 @@ QJsonValue Shape(const QString& key)
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
     if (key == "colorRGBA") return QJsonArray{1,1,1,1};
+    if (key == "boxToSource") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (key == "transfer") return QJsonObject{{"colorNodes", QJsonArray{}}, {"opacityNodes", QJsonArray{}}};
+    if (key == "grayPair") return QJsonObject{{"sideA", QJsonArray{-1.0, 0.0}}, {"sideB", QJsonArray{1.0, 2.0}}};
     if (key == "slice") return QJsonObject{{"origin", QJsonArray{0,0,0}}, {"normal", QJsonArray{0,0,1}}, {"thicknessMM", 1.0}};
     if (key == "axes" || (key.startsWith("is") && key.size() > 2 && key[2].isUpper()) || key == "planes" || key == "crosshair" || key == "ruler") return false;
     if (key == "iso" || key == "opacity" || key == "angleDeg" || key == "minimumContrast" || key == "initialIsoValue"
-        || key.startsWith("profile") || key == "maximumOffsetModel" || key == "minPairNormalCosine") return 0.0;
+        || key.startsWith("profile") || key == "maximumOffsetModel" || key == "minPairNormalCosine"
+        || key == "minimumEdgeWidthModel" || key == "maximumEdgeWidthModel" || key == "minimumEdgeSeparationModel") return 0.0;
 #if defined(MANUAL_ALIGNMENT)
     if (key == "recipe") return GetReferenceTemplate(AlignmentMethod::Rps)["recipe"];
 #endif

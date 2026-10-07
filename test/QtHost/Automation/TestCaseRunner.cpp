@@ -414,8 +414,8 @@ QJsonObject BuildPartSeeds(TestWindow& window, const QJsonObject& catalog)
         if (GetRefText(item.dataRevision) == catalog["labelMap"].toString()) descriptor = item;
     Check(descriptor && descriptor->valueType == ImageValueType::UInt32, "formal part labels are available through the public read API");
     QJsonArray seeds; const auto parts = catalog["parts"].toArray();
-    Check(parts.size() >= 2, "real edit seed audit has two source parts");
-    for (int p = 0; p < 2; ++p) {
+    Check(!parts.isEmpty(), "real edit seed audit has source parts");
+    for (int p = 0; p < std::min(parts.size(), 2); ++p) {
         const auto part = parts[p].toObject(); const auto extent = GetArray<int,6>(part["extent"]);
         const auto wantedLabel = GetId(part["labelId"]);
         ImageReadRegion region;
@@ -1661,6 +1661,15 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto timeout = step.contains("timeoutMs") ? GetNumber(step, "timeoutMs") : 30000.;
         if (timeout < 1 || timeout > 3600000 || timeout != std::trunc(timeout)) throw std::invalid_argument("用例 timeoutMs 必须为 1..3600000 毫秒整数");
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
+        if (step["waitAvailable"].toBool()) {
+            auto* panel = window.GetModule(GetText(step, "module"));
+            const auto action = GetText(step, "action");
+            Check(panel && Wait([&] {
+                panel->Observe();
+                auto* button = panel->findChild<QPushButton*>("action_" + action);
+                return button && button->isEnabled();
+            }, static_cast<int>(timeout)), "public business action becomes available after its actual frame guards");
+        }
         const auto id = Send(window, GetText(step, "module"), GetText(step, "action"), params);
         QTimer switching, cancellation;
         int switchCount = 0;

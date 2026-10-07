@@ -15,6 +15,21 @@
 
 namespace {
 
+std::string GetMethodCaption(SurfaceDeterminationMethod method, bool isPreview)
+{
+    const char* name = u8"表面测定";
+    switch (method) {
+    case SurfaceDeterminationMethod::GlobalIsoPreview: name = u8"全局等值面"; break;
+    case SurfaceDeterminationMethod::LocalAdaptiveIso50: name = u8"局部自适应表面"; break;
+    case SurfaceDeterminationMethod::GradientPeak: name = u8"梯度峰值表面"; break;
+    case SurfaceDeterminationMethod::LocalRelativeIso: name = u8"局部相对等值表面"; break;
+    case SurfaceDeterminationMethod::EdgeModelFit: name = u8"单边模型拟合表面"; break;
+    case SurfaceDeterminationMethod::PairedEdgeModelFit: name = u8"双边模型拟合表面"; break;
+    case SurfaceDeterminationMethod::AutomaticIso50: name = u8"自动阈值估计"; break;
+    }
+    return std::string(name) + (isPreview ? u8"：预览" : u8"：正式结果");
+}
+
 bool SetNormalized(std::array<double, 3>& normal)
 {
     const double length = std::sqrt(
@@ -33,6 +48,8 @@ void SetActorStyle(vtkActor& actor, bool isSlice, bool isPreview)
 {
     actor.GetProperty()->SetColor(isPreview ? 0.15 : isSlice ? 1.0 : 0.83,
         isPreview ? 0.85 : isSlice ? 1.0 : 0.84, isPreview ? 1.0 : isSlice ? 1.0 : 0.86);
+    // 直接参考的稳定切片预览为黄色；正式轮廓仍为白色。
+    if (isPreview && isSlice) actor.GetProperty()->SetColor(1.0, 1.0, 0.0);
     actor.GetProperty()->SetOpacity(isSlice ? 1.0 : isPreview ? 0.35 : 0.92);
     actor.GetProperty()->SetLighting(!isSlice && !isPreview);
     actor.GetProperty()->SetAmbient(0.35);
@@ -43,7 +60,7 @@ void SetActorStyle(vtkActor& actor, bool isSlice, bool isPreview)
 
 } // namespace
 
-SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview)
+SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview, SurfaceDeterminationMethod method)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
 {
@@ -52,7 +69,7 @@ SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview)
     m_actor->SetMapper(m_mapper);
     SetActorStyle(*m_actor, false, isPreview);
     AttachProp(m_actor);
-    SetCaption(isPreview ? u8"表面测定：预览" : u8"表面测定：正式结果", 0);
+    SetCaption(GetMethodCaption(method, isPreview).c_str(), 0);
     SetCaptionVisible(false);
 }
 
@@ -72,7 +89,7 @@ void SurfaceOverlayStrategy::SetOverlayState(
 }
 
 SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
-    std::array<double, 3> normalModel, bool isPreview)
+    std::array<double, 3> normalModel, bool isPreview, SurfaceDeterminationMethod method)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_cutter(vtkSmartPointer<vtkCutter>::New())
     , m_plane(vtkSmartPointer<vtkPlane>::New())
@@ -91,7 +108,7 @@ SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
     SetActorStyle(*m_actor, true, isPreview);
     m_actor->GetProperty()->SetLineWidth(2.0F);
     AttachProp(m_actor);
-    SetCaption(isPreview ? u8"表面测定：预览" : u8"表面测定：正式结果", 0);
+    SetCaption(GetMethodCaption(method, isPreview).c_str(), 0);
     SetCaptionVisible(false);
 }
 

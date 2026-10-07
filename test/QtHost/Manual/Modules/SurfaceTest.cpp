@@ -1,4 +1,4 @@
-// 测试用途：通过表面页面测试四种确定方法、结果显示、阈值复制与有界采样。
+// 测试用途：通过表面页面测试全部七种既有方法、结果用途、阈值复制与有界采样。
 #include "ModuleFactories.h"
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "Support/ParameterEditor.h"
@@ -51,11 +51,23 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     const auto defaults = GetJson(R"({"componentSelection":"Largest","initialIsoValue":null,"seedModelPoint":null,"roiModelBounds":null,"profileHalfLengthModel":null,"profileSampleStepModel":null,"maximumOffsetModel":null,"profileSmoothingSigmaModel":null,"minimumObjectVoxels":"1","minimumContrast":0})");
     for (const auto& method : std::vector<std::pair<QString, SurfaceDeterminationMethod>>{
         {"AutomaticIso50", SurfaceDeterminationMethod::AutomaticIso50}, {"GlobalIsoPreview", SurfaceDeterminationMethod::GlobalIsoPreview},
-        {"LocalAdaptiveIso50", SurfaceDeterminationMethod::LocalAdaptiveIso50}, {"GradientPeak", SurfaceDeterminationMethod::GradientPeak}}) {
+        {"LocalAdaptiveIso50", SurfaceDeterminationMethod::LocalAdaptiveIso50}, {"GradientPeak", SurfaceDeterminationMethod::GradientPeak},
+        {"LocalRelativeIso", SurfaceDeterminationMethod::LocalRelativeIso}, {"EdgeModelFit", SurfaceDeterminationMethod::EdgeModelFit},
+        {"PairedEdgeModelFit", SurfaceDeterminationMethod::PairedEdgeModelFit}}) {
         auto parameters = defaults;
         if (method.second == SurfaceDeterminationMethod::AutomaticIso50) parameters = {{"roiModelBounds", QJsonValue()}};
         else if (method.second == SurfaceDeterminationMethod::GlobalIsoPreview) {
             for (const auto* key : {"profileHalfLengthModel", "profileSampleStepModel", "maximumOffsetModel", "profileSmoothingSigmaModel", "minimumContrast"}) parameters.remove(key);
+        } else {
+            parameters["purpose"] = "Determine";
+            parameters["localFraction"] = 0.5;
+            parameters["grayPair"] = QJsonValue();
+            parameters["minimumCnr"] = 0.0;
+            parameters["maximumPlateauNoiseRatio"] = 1.0;
+            parameters["maximumNormalizedResidual"] = 0.25;
+            parameters["minimumEdgeWidthModel"] = QJsonValue();
+            parameters["maximumEdgeWidthModel"] = QJsonValue();
+            parameters["minimumEdgeSeparationModel"] = QJsonValue();
         }
         panel->AttachAction(method.first, parameters, [panel, feature, method](auto id, const auto& params) {
             SurfaceDeterminationStartParams start;
@@ -78,6 +90,19 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (params.contains("profileSmoothingSigmaModel") && !params["profileSmoothingSigmaModel"].isNull()) start.profileSmoothingSigmaModel = GetNumber(params, "profileSmoothingSigmaModel");
             if (params.contains("minimumObjectVoxels")) start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
             if (params.contains("minimumContrast")) start.minimumContrast = GetNumber(params, "minimumContrast");
+            if (params.contains("purpose")) start.purpose = GetEnum<SurfaceTaskPurpose>(params, "purpose", {
+                {"Preview", SurfaceTaskPurpose::Preview}, {"Determine", SurfaceTaskPurpose::Determine}});
+            if (params.contains("localFraction")) start.localFraction = GetNumber(params, "localFraction");
+            if (params.contains("grayPair") && !params["grayPair"].isNull()) {
+                const auto pair = params["grayPair"].toObject();
+                start.grayPair = SurfaceGrayPair{GetArray<double, 2>(pair["sideA"]), GetArray<double, 2>(pair["sideB"])};
+            }
+            if (params.contains("minimumCnr")) start.minimumCnr = GetNumber(params, "minimumCnr");
+            if (params.contains("maximumPlateauNoiseRatio")) start.maximumPlateauNoiseRatio = GetNumber(params, "maximumPlateauNoiseRatio");
+            if (params.contains("maximumNormalizedResidual")) start.maximumNormalizedResidual = GetNumber(params, "maximumNormalizedResidual");
+            if (params.contains("minimumEdgeWidthModel") && !params["minimumEdgeWidthModel"].isNull()) start.minimumEdgeWidthModel = GetNumber(params, "minimumEdgeWidthModel");
+            if (params.contains("maximumEdgeWidthModel") && !params["maximumEdgeWidthModel"].isNull()) start.maximumEdgeWidthModel = GetNumber(params, "maximumEdgeWidthModel");
+            if (params.contains("minimumEdgeSeparationModel") && !params["minimumEdgeSeparationModel"].isNull()) start.minimumEdgeSeparationModel = GetNumber(params, "minimumEdgeSeparationModel");
             SurfaceDeterminationRequest request; request.action = SurfaceDeterminationAction::Start; request.start = start;
             const QPointer<ModulePanel> owner(panel);
             const auto admission = feature->SendRequest(std::move(request), [owner, feature, id](SurfaceDeterminationResult result) {

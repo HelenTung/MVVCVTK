@@ -31,6 +31,13 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         const auto result=feature->SendRequest(request);
         panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",static_cast<int>(result.error)}});
     },TestPolicy::Interaction,true);
+    panel->AttachAction("SetDraft",{{"boxToSource",QJsonValue()}},[panel,feature](auto id,const auto& p) {
+        if (p["boxToSource"].isNull()) throw std::invalid_argument("请提供草稿区域框的变换矩阵");
+        RoiEditingRequest request; request.action=RoiEditingAction::SetDraft;
+        request.boxToSource=GetArray<double,16>(p["boxToSource"]);
+        const auto result=feature->SendRequest(request);
+        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",static_cast<int>(result.error)}});
+    },TestPolicy::Interaction,true);
     for (const auto& action:std::vector<std::pair<QString,RoiEditingAction>>{
         {"Commit",RoiEditingAction::Commit},{"Cancel",RoiEditingAction::Cancel},{"Visibility",RoiEditingAction::SetVisible}}) {
         panel->AttachAction(action.first,action.second==RoiEditingAction::SetVisible?QJsonObject{{"isVisible",true}}:QJsonObject{},
