@@ -58,10 +58,9 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
 #endif
 #if defined(MANUAL_PART)
     PartSegmentationConfig partConfig; partConfig.defaultStart.targetViews = GetPartViews();
-    partConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
-    partConfig.maxHistoryBytes = context.workflow.resources.publishBytes;
+    if (context.workflow.resources.hasExplicitWorkingLimit) partConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
+    if (context.workflow.resources.hasExplicitWorkingLimit) partConfig.maxHistoryBytes = context.workflow.resources.publishBytes;
     // 整卷编辑的时限包含表面重建和不可变标签冻结，测试宿主显式给出完整阶段预算。
-    partConfig.editTimeoutMs = 120000;
     auto part = std::make_shared<PartSegmentationHostFeature>(partConfig); attach(part);
     context.workflow.getPartLabels = [part] {
         const auto catalog = part->GetPartSetSnapshot();
@@ -73,15 +72,15 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
 #endif
 #if defined(MANUAL_SURFACE)
     SurfaceDeterminationConfig surfaceConfig; surfaceConfig.defaultStart.targetViews = GetMainViews();
-    surfaceConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
+    if (context.workflow.resources.hasExplicitWorkingLimit) surfaceConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig); attach(surface);
     modules.push_back(CreateSurfaceTest(context, surface, parent));
 #else
     unavailable("Surface");
 #endif
 #if defined(MANUAL_ARTIFACT)
-    ArtifactConfig artifactConfig; artifactConfig.memoryBudgetBytes = context.workflow.resources.workingBytes;
-    artifactConfig.publishBudgetBytes = context.workflow.resources.publishBytes;
+    ArtifactConfig artifactConfig; if (context.workflow.resources.hasExplicitWorkingLimit) artifactConfig.memoryBudgetBytes = context.workflow.resources.workingBytes;
+    if (context.workflow.resources.hasExplicitWorkingLimit) artifactConfig.publishBudgetBytes = context.workflow.resources.publishBytes;
     auto artifact = std::make_shared<ArtifactReductionHostFeature>(artifactConfig); attach(artifact); modules.push_back(CreateArtifactTest(context, artifact, parent));
 #else
     unavailable("Artifact");
@@ -99,8 +98,7 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     unavailable("Alignment");
 #endif
 #if defined(MANUAL_WALL)
-    ThicknessConfig thicknessConfig; thicknessConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
-    thicknessConfig.deadlineMilliseconds = 120000;
+    ThicknessConfig thicknessConfig; if (context.workflow.resources.hasExplicitWorkingLimit) thicknessConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     auto wall = std::make_shared<WallThicknessHostFeature>(thicknessConfig); attach(wall);
     modules.push_back(CreateWallTest(context, wall, parent));
 #else

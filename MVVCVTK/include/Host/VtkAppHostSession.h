@@ -89,7 +89,7 @@ public:
     std::optional<ImageReadState> GetImageReadState();
     // 扩展接口：在分配前检查同步复制预算，并返回稳定失败原因与所需字节数。
     ImageReadResult GetImageReadResult(
-        std::size_t maxReadBytes = imageReadLimit);
+        std::size_t maxReadBytes = 0);
     // region 使用相对源图像的半开区间；成功结果的 extent 从 0 开始。
     ImageReadResult GetImageReadResult(
         const ImageReadRequest& request);
@@ -106,12 +106,12 @@ public:
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
-    // 同步复制最多 8 MiB 工作集；超限明确拒绝，不在 owner thread 扫整卷。
+    // 归档同步复制按显式预算或当前可用内存检查；0 表示自动预算。
     RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey,
-        std::size_t maxBytes = roiCopyLimit);
+        std::size_t maxBytes = 0);
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
         const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision,
-        std::size_t maxBytes = roiCopyLimit);
+        std::size_t maxBytes = 0);
 
     // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();

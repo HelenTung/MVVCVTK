@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "ThicknessData.h"
 #include <algorithm>
 #include <iomanip>
@@ -25,7 +26,7 @@ bool SetType(TrustedDataPort &data)
                               const bool valid =
                                   r.field.samples && r.field.neighbors &&
                                   r.field.samples->size() == r.field.neighbors->size() &&
-                                  r.field.subdivisions > 0 && r.field.subdivisions <= 64 &&
+                                  r.field.subdivisions > 0 &&
                                   ThicknessAlgorithm::GetParamsValid(r.archive.params) &&
                                   ThicknessAlgorithm::GetEvaluationValid(r.archive.evaluation) &&
                                   ThicknessAlgorithm::GetConfigValid(r.archive.limits);
@@ -150,8 +151,7 @@ ThicknessAlgorithm::Work BuildWork(const DataGraphSnapshot &graph, const Thickne
     if (!GetCurrent(graph, expectations))
         throw std::invalid_argument("Input lineage is stale.");
     work.cancelled = std::make_shared<std::atomic<bool>>(false);
-    work.deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(archive.limits.deadlineMilliseconds);
+    work.deadline = WorkLimit(archive.limits.deadlineMilliseconds).GetDeadline();
     return work;
 }
 DataBinding GetBinding(const DataGraphSnapshot &graph)
@@ -197,8 +197,8 @@ std::string GetParameters(const ThicknessArchive &a)
             out << v << ';';
     const auto &e = a.evaluation;
     out << e.lower << ';' << e.upper << ';' << e.histogramRange[0] << ';' << e.histogramRange[1]
-        << ';' << e.histogramBins << ';' << e.minRegionArea << ';' << a.limits.maxWorkingBytes
-        << ';' << a.limits.maxSamples << ';' << a.limits.deadlineMilliseconds << ';'
+        << ';' << e.histogramBins << ';' << e.minRegionArea << ';' << WorkLimit(a.limits.maxWorkingBytes)
+        << ';' << WorkLimit(a.limits.maxSamples) << ';' << WorkLimit(a.limits.deadlineMilliseconds) << ';'
         << a.limits.stopTimeoutMilliseconds;
     return out.str();
 }

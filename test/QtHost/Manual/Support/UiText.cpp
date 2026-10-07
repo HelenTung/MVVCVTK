@@ -65,7 +65,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
-        {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
+        {"ActivateAccepted", "重试显示已加载数据"}, {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
         {"ReadLabelRegion", "读取标签区域"}, {"CreateMask", "创建测试掩码"},
         {"Set", "设置视图"}, {"Cursor", "设置游标"}, {"Reset", "重置视图"}, {"State", "查看状态"},

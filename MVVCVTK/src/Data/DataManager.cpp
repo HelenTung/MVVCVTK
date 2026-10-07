@@ -1,6 +1,9 @@
+#include <future>
+#include <thread>
 #include "DataManager.h"
 #include "Data/DataGraphStore.h"
 #include "Data/Internal/DataResourceUse.h"
+#include "Data/Internal/ReadBudget.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 #include "Data/DataPayloads.h"
@@ -630,6 +633,7 @@ public:
     std::shared_ptr<VtkDataBridge> m_vtk;
     mutable std::mutex m_loadMutex;
     DataLoadStageSnapshot m_loadStage;
+    DataLoadState m_loadState;
 
     bool SetRasScalars(
         const float* src,
@@ -659,19 +663,24 @@ public:
         }
 
         if (availableCount == totalCount) {
-            for (size_t z = 0; z < nz; ++z) {
-                if (stopToken.GetIsStopped()) return false;
-                const size_t srcSliceOffset = z * sliceSize;
-                const size_t dstSliceOffset = z * sliceSize;
-                for (size_t y = 0; y < ny; ++y) {
-                    const float* srcRow = src + srcSliceOffset + y * nx;
-                    float* dstRow = dst + dstSliceOffset + (ny - 1 - y) * nx;
-                    for (size_t x = 0; x < nx; ++x) {
-                        dstRow[nx - 1 - x] = srcRow[x];
-                    }
+            const auto convert = [&](std::size_t first, std::size_t last) {
+                for (auto z = first; z < last; ++z) {
+                    if (stopToken.GetIsStopped()) return false;
+                    std::reverse_copy(src + z * sliceSize, src + (z + 1) * sliceSize,
+                        dst + z * sliceSize);
                 }
-            }
-            return true;
+                return !stopToken.GetIsStopped();
+            };
+            // 有限数量的独立 Z 分块，不等待 Host 单一工作队列中的子任务。
+            const auto workers = totalCount < 4U * 1024U * 1024U ? std::size_t{1}
+                : std::min({nz, std::size_t{4},
+                    static_cast<std::size_t>(std::max(1U, std::thread::hardware_concurrency()))});
+            std::vector<std::future<bool>> work;
+            for (std::size_t i = 1; i < workers; ++i)
+                work.push_back(std::async(std::launch::async, convert, nz * i / workers, nz * (i + 1) / workers));
+            bool isSucceeded = convert(0, nz / workers);
+            for (auto& task : work) isSucceeded = task.get() && isSucceeded;
+            return isSucceeded;
         }
 
         std::fill(dst, dst + totalCount, 0.0f);
@@ -1013,7 +1022,7 @@ DataBindingRevision BaseDataManager::GetPrimaryBindingRevision() const
 std::optional<ImageReadState>
 BaseDataManager::GetImageReadState() const
 {
-    auto result = GetImageReadResult(imageReadLimit);
+    auto result = GetImageReadResult(0);
     return std::move(result.state);
 }
 
@@ -1055,7 +1064,7 @@ ImageReadResult BaseDataManager::GetImageReadResult(
         return result;
     }
     const auto& plan = *planResult.plan;
-    if (plan.requiredBytes > request.maxBytes) {
+    if (plan.requiredBytes > GetReadBudget(request.maxBytes)) {
         result.error = ImageReadError::TooLarge;
         return result;
     }
@@ -1132,8 +1141,8 @@ ImageReadChunkResult BaseDataManager::GetImageReadChunk(
 
     const std::size_t voxelBytes = plan.tupleBytes
         + (plan.mask ? 1U : 0U);
-    const std::size_t chunkBytes = std::min(
-        request.maxBytes, imageChunkLimit);
+    const std::size_t chunkBytes = request.maxBytes
+        ? std::min(request.maxBytes, imageChunkLimit) : imageChunkLimit;
     if (chunkBytes < voxelBytes) {
         result.error = ImageReadError::TooLarge;
         return result;
@@ -1190,6 +1199,80 @@ DataLoadStageSnapshot BaseDataManager::GetLoadStage() const
     return m_impl->m_loadStage;
 }
 
+DataLoadState BaseDataManager::GetLoadState() const
+{
+    DataLoadState state;
+    { std::lock_guard<std::mutex> lock(m_impl->m_loadMutex); state = m_impl->m_loadState; }
+    const auto primary = GetDataBinding(GetDataGraph(), primaryVolumeBinding);
+    if (primary) { state.activeBindingRevision = primary->revision; state.activeRevision = primary->target.value_or(DataRevisionRef{}); }
+    return state;
+}
+void BaseDataManager::SetLoadStatus(const DataRevisionRef& ref, DataLoadStatus status)
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+    if (m_impl->m_loadState.requestedRevision == ref) {
+        m_impl->m_loadState.status = status;
+    }
+}
+bool BaseDataManager::SetLoadActivation(const DataRevisionRef& ref, DataBindingRevision expectedRevision)
+{
+    const auto graph = GetDataGraph();
+    const auto primary = GetDataBinding(graph, primaryVolumeBinding).value_or(
+        DataBinding{std::string(primaryVolumeBinding), {}, 0});
+    if (primary.revision != expectedRevision || expectedRevision == std::numeric_limits<DataBindingRevision>::max()) return false;
+    auto view = GetImageGrid(graph, ref);
+    if (!view || !view->data) return false;
+    auto prepared = std::make_shared<VtkImageGridView>(*view);
+    prepared->binding = DataBinding{std::string(primaryVolumeBinding), ref, expectedRevision + 1};
+    auto stage = std::make_shared<DataLoadStage>();
+    stage->baseGraph = graph; stage->expectedPrimary = primary; stage->outputRef = ref;
+    stage->output = DataRevisionDraft{ref.entityId, ref.generation, view->data->type,
+        view->data->inputs, view->data->payload, view->data->provenance};
+    stage->image = std::move(prepared);
+    std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+    m_impl->m_loadStage = std::move(stage);
+    m_impl->m_loadState.requestedRevision = ref;
+    m_impl->m_loadState.status = DataLoadStatus::Preparing;
+    return true;
+}
+
+bool BaseDataManager::SetLoadAccepted(const DataLoadStageSnapshot& stage)
+{
+    if (!stage || !stage->image || !stage->image->data) return false;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        if (m_impl->m_loadStage != stage) return false;
+    }
+    const auto existing = GetData(GetDataGraph(), stage->outputRef);
+    if (existing) {
+        const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(existing->payload);
+        const auto staged = std::dynamic_pointer_cast<const ImageGrid3DPayload>(stage->output.payload);
+        return payload && staged && payload->GetValues() == staged->GetValues()
+            && payload->GetValidityMask() == staged->GetValidityMask()
+            && payload->GetValueType() == staged->GetValueType()
+            && payload->GetComponentCount() == staged->GetComponentCount()
+            && payload->GetGeometry().extent == staged->GetGeometry().extent
+            && payload->GetGeometry().spacing == staged->GetGeometry().spacing
+            && payload->GetGeometry().origin == staged->GetGeometry().origin
+            && payload->GetGeometry().direction == staged->GetGeometry().direction
+            && payload->GetGeometry().coordinateFrame == staged->GetGeometry().coordinateFrame;
+    }
+    auto changes = StartDataChanges();
+    if (!changes) return false;
+    DataTransaction transaction;
+    transaction.outputs.push_back(stage->output);
+    const auto result = SetDataCommit(std::move(transaction));
+    const bool isAccepted = result.status == DataCommitStatus::Succeeded && result.published.size() == 1
+        && result.published.front()->self == stage->outputRef;
+    if (isAccepted) {
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        if (m_impl->m_loadStage == stage) {
+            m_impl->m_loadState = {stage->outputRef, stage->outputRef, DataLoadStatus::Accepted};
+        }
+    }
+    return isAccepted;
+}
+
 bool BaseDataManager::SetLoadCommit(
     const DataLoadStageSnapshot& expectedStage,
     VtkImageGridSnapshot& published)
@@ -1204,6 +1287,14 @@ bool BaseDataManager::SetLoadCommit(
         if (m_impl->m_loadStage != expectedStage) return false;
     }
 
+    if (!SetLoadAccepted(expectedStage)) return false;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        if (m_impl->m_loadStage != expectedStage) return false;
+    }
+    const auto accepted = GetData(GetDataGraph(), expectedStage->outputRef);
+    if (!accepted) return false;
+
     DataExpectation expectation;
     expectation.kind = DataExpectationKind::Binding;
     expectation.binding = std::string(primaryVolumeBinding);
@@ -1213,7 +1304,6 @@ bool BaseDataManager::SetLoadCommit(
     expectation.expectedTarget = expectedStage->expectedPrimary.target;
     DataTransaction transaction;
     transaction.expectations.push_back(std::move(expectation));
-    transaction.outputs.push_back(expectedStage->output);
     transaction.bindings.push_back(DataBindingUpdate{
         std::string(primaryVolumeBinding),
         expectedStage->expectedPrimary.revision,
@@ -1226,13 +1316,11 @@ bool BaseDataManager::SetLoadCommit(
     auto retained = std::make_shared<std::pair<DataSnapshot, VtkImageGridSnapshot>>(
         DataSnapshot{}, expectedStage->image);
     const auto result = SetDataCommit(std::move(transaction));
-    if (result.status != DataCommitStatus::Succeeded
-        || result.published.size() != 1
-        || result.published.front()->self != expectedStage->outputRef) {
+    if (result.status != DataCommitStatus::Succeeded) {
         return false;
     }
     committedView->graph = result.graph;
-    retained->first = result.published.front();
+    retained->first = accepted;
     committedView->data = DataSnapshot(retained, retained->first.get());
     published = std::move(committedView);
     {
@@ -1249,6 +1337,12 @@ bool BaseDataManager::ClearLoadStage()
     std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
     m_impl->m_loadStage.reset();
     return true;
+}
+
+bool BaseDataManager::SetOwnedLoadImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata)
+{
+    auto payload = m_impl->m_vtk->BuildImagePayload(std::move(image), std::move(metadata));
+    return payload && SetLoadPayload(std::move(payload), {});
 }
 
 bool BaseDataManager::SetLoadImage(
@@ -2251,7 +2345,7 @@ bool RawVolumeDataManager::SetDataLoaded(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(newImage), {}, {}, *metadata);
+    return SetOwnedLoadImage(std::move(newImage), *metadata);
 }
 
 bool RawVolumeDataManager::SetFromBuffer(
@@ -2298,7 +2392,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(newImage), {}, {}, *metadata);
+    return SetOwnedLoadImage(std::move(newImage), *metadata);
 }
 
 bool RawVolumeDataManager::SetImageSnapshot(

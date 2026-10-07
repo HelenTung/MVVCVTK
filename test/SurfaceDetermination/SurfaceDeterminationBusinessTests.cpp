@@ -52,7 +52,7 @@ void TestPureRecipe(Checks &c)
                                "1 0 2 0 \"\" \"mm\" 1 500 0 0 0 0 0 0 1 50\n";
     SurfaceDeterminationStartParams oldRequested, oldResolved;
     std::string frame;
-    std::size_t working = 0;
+    WorkLimit working;
     c.Get(SurfaceContract::GetParameters(legacy, oldRequested, oldResolved, frame, working) &&
               oldResolved.localFraction == .5 && oldResolved.materialPairs.empty(),
           "v1 recipe decoding explicitly supplies the old ISO50 semantics");

@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
 #include <vtkCellArray.h>
@@ -187,12 +188,15 @@ class Kernel final
         const auto &limits = m_work.archive.limits;
         if (pc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
             tc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
-            pc > limits.maxWorkingBytes / 24U || tc > limits.maxWorkingBytes / 256U)
+            pc > WorkLimit(limits.maxWorkingBytes) / 24U || tc > WorkLimit(limits.maxWorkingBytes) / 256U)
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
-        if (pc * 24U > limits.maxWorkingBytes - tc * 256U)
+        if (pc > std::numeric_limits<std::size_t>::max() / 24U
+            || tc > (std::numeric_limits<std::size_t>::max() - pc * 24U) / 256U)
+            throw Failure{ThicknessStatus::InvalidInput, "Mesh byte count overflows."};
+        if (pc * 24U > WorkLimit(limits.maxWorkingBytes) - tc * 256U)
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
         const auto meshBytes = pc * 24U + tc * 256U;
-        if (meshBytes > limits.maxWorkingBytes)
+        if (meshBytes > WorkLimit(limits.maxWorkingBytes))
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
         auto points = vtkSmartPointer<vtkPoints>::New();
         points->SetDataTypeToDouble();
@@ -257,13 +261,17 @@ class Kernel final
                 throw Failure{ThicknessStatus::IncompleteBoundary,
                               "Mesh must be closed and consistently manifold."};
         const double divisions = std::ceil(maxEdge / m_params.sampleSpacing);
-        if (!std::isfinite(divisions) || divisions > 64)
+        if (!std::isfinite(divisions) || divisions >= std::numeric_limits<unsigned>::max())
             throw Failure{ThicknessStatus::BudgetExceeded, "Surface subdivision limit exceeded."};
         m_n = static_cast<unsigned>(std::max(divisions, 1.0));
-        if (tc > limits.maxSamples / (m_n * m_n))
+        const auto n = static_cast<std::size_t>(m_n);
+        if (n > std::numeric_limits<std::size_t>::max() / n
+            || tc > std::numeric_limits<std::size_t>::max() / (n * n))
+            throw Failure{ThicknessStatus::InvalidInput, "Sample count overflows."};
+        if (tc > WorkLimit(limits.maxSamples) / (n * n))
             throw Failure{ThicknessStatus::BudgetExceeded, "Sample count limit exceeded."};
-        m_sampleCount = tc * m_n * m_n;
-        if (m_sampleCount > (limits.maxWorkingBytes - meshBytes) / (sizeof(ThicknessSample) + 640U))
+        m_sampleCount = tc * n * n;
+        if (m_sampleCount > (WorkLimit(limits.maxWorkingBytes) - meshBytes) / (sizeof(ThicknessSample) + 640U))
             throw Failure{ThicknessStatus::BudgetExceeded,
                           "Sampling and topology exceed working budget."};
         m_poly = vtkSmartPointer<vtkPolyData>::New();
@@ -728,8 +736,8 @@ bool GetDisplayValid(const ThicknessDisplay &d) noexcept
 }
 bool GetConfigValid(const ThicknessConfig &c) noexcept
 {
-    return c.maxWorkingBytes >= 4096 && c.maxSamples > 0 && c.deadlineMilliseconds > 0 &&
-           c.deadlineMilliseconds <= 3600000 && c.stopTimeoutMilliseconds <= 5000;
+    return WorkLimit(c.maxWorkingBytes) >= 4096 && WorkLimit(c.maxSamples) > 0 && (!WorkLimit(c.deadlineMilliseconds).GetValue() || WorkLimit(c.deadlineMilliseconds) > 0) &&
+           (!WorkLimit(c.deadlineMilliseconds).GetValue() || WorkLimit(c.deadlineMilliseconds) <= 3600000) && c.stopTimeoutMilliseconds <= 5000;
 }
 Candidate BuildField(const Work &w) noexcept
 {

@@ -1037,7 +1037,7 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
     const std::uint64_t transactionRevision,
     const VtkImageGridSnapshot& pending)
 {
-    if (!m_loadCommit || m_views.empty()) {
+    if (!m_loadCommit) {
         return {};
     }
 

@@ -2,6 +2,7 @@
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 
 #include "Data/ImageProcessor.h"
+#include "Render/Internal/VolumeLodProductBuilder.h"
 #include "Render/Internal/RenderWorkBudget.h"
 
 #include <vtkAlgorithm.h>
@@ -307,7 +308,7 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
 
     const int* sourceDimensions = request.input->GetDimensions();
     if (!sourceDimensions
-        || request.input->GetNumberOfPoints() <= 0
+        || !RenderWorkBudget::GetScalarStorageValid(request.input)
         || !request.input->GetPointData()
         || !request.input->GetPointData()->GetScalars()) {
         return GetFailure(
@@ -326,7 +327,8 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         }
     }
     if (request.mask
-        && (request.mask->GetScalarType() != VTK_UNSIGNED_CHAR
+        && (!RenderWorkBudget::GetScalarStorageValid(request.mask)
+            || request.mask->GetScalarType() != VTK_UNSIGNED_CHAR
             || request.mask->GetNumberOfScalarComponents() != 1
             || !GetGeometryMatch(request.input, request.mask))) {
         return GetFailure(
@@ -335,7 +337,8 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
     }
 
     const auto estimate = GetEstimatedBytes(request);
-    if (!estimate || !stopToken.SetActualBytes(*estimate)) {
+    if ((!estimate && stopToken.GetIsBudgetEnforced())
+        || (estimate && !stopToken.SetEstimatedBytes(*estimate))) {
         return GetFailure(RenderProductFailure::ResourceRejected,
             "The iso image working set was rejected before allocation.");
     }
@@ -345,65 +348,43 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         isoFilter->ComputeGradientsOff();
         isoFilter->SetValue(0, request.key.isoValue);
 
-        vtkSmartPointer<vtkImageResample> imageResample;
-        if (request.key.outputDimensions == sourceSize) {
-            isoFilter->SetInputData(request.input);
-        }
-        else {
-            imageResample = ImageProcessor::CreateScaledImage(
-                request.input,
-                request.key.outputDimensions);
-            if (!imageResample) {
-                return GetFailure(
-                    RenderProductFailure::BuildFailed,
-                    "The iso-surface image resample could not be built.");
-            }
-            isoFilter->SetInputConnection(
-                imageResample->GetOutputPort());
-        }
-
-        vtkSmartPointer<vtkImageResample> maskResample;
+        VolumeLodBuildRequest scalarRequest;
+        scalarRequest.inputUse = request.inputUse;
+        scalarRequest.resources = request.resources;
+        scalarRequest.requestRevision = request.requestRevision;
+        scalarRequest.requestedQuality = request.requestedQuality;
+        scalarRequest.input = request.input; scalarRequest.mask = request.mask;
+        scalarRequest.key.inputStamp = request.key.inputStamp;
+        scalarRequest.key.inputIdentity = request.key.inputIdentity;
+        scalarRequest.key.maskIdentity = request.key.maskIdentity;
+        scalarRequest.key.inputMTime = request.key.inputMTime;
+        scalarRequest.key.inputScalarMTime = request.key.inputScalarMTime;
+        scalarRequest.key.maskMTime = request.key.maskMTime;
+        scalarRequest.key.maskScalarMTime = request.key.maskScalarMTime;
+        scalarRequest.key.outputDimensions = request.key.outputDimensions;
+        // 在同一受控执行通道直接构建依赖，避免入队后等待自身队列。
+        auto scalar = VolumeLodProductBuilder().BuildProduct(scalarRequest, stopToken);
+        if (!scalar.product) return GetFailure(scalar.failureReason, scalar.message);
+        auto* builtImage = scalar.product->volume.GetPointer();
+        isoFilter->SetInputData(builtImage);
         vtkSmartPointer<IsoMaskImplicit> maskFunction;
         vtkSmartPointer<vtkClipPolyData> clip;
         vtkAlgorithm* outputAlgorithm = isoFilter;
         VtkObserverSet observers(stopToken);
-        observers.Add(imageResample);
         observers.Add(isoFilter);
-        vtkImageData* builtImage = request.input;
-        if (imageResample) {
-            imageResample->Update();
-            builtImage = imageResample->GetOutput();
-        }
-        if (stopToken.GetIsStopped()) {
-            return GetFailure(RenderProductFailure::Cancelled, "The iso count was cancelled.");
-        }
-        if (observers.GetError() || !builtImage) {
-            return GetFailure(RenderProductFailure::BuildFailed, "The iso image preparation failed.");
-        }
-        const auto meshBytes = GetMeshBytes(builtImage, request.key.isoValue,
-            request.mask != nullptr, *estimate, stopToken);
-        if (stopToken.GetIsStopped()) {
-            return GetFailure(RenderProductFailure::Cancelled, "The iso count was cancelled.");
-        }
-        if (!meshBytes || !stopToken.SetActualBytes(*meshBytes)) {
-            return GetFailure(RenderProductFailure::ResourceRejected,
-                "The iso mesh working set was rejected before extraction.");
+        if (stopToken.GetIsBudgetEnforced()) {
+            const auto meshBytes = GetMeshBytes(builtImage, request.key.isoValue,
+                request.mask != nullptr, *estimate, stopToken);
+            if (stopToken.GetIsStopped()) {
+                return GetFailure(RenderProductFailure::Cancelled, "The iso count was cancelled.");
+            }
+            if (!meshBytes || !stopToken.SetEstimatedBytes(*meshBytes)) {
+                return GetFailure(RenderProductFailure::ResourceRejected,
+                    "The iso mesh working set was rejected before extraction.");
+            }
         }
         if (request.mask) {
-            vtkImageData* builtMask = request.mask;
-            if (request.key.outputDimensions != sourceSize) {
-                maskResample = ImageProcessor::CreateScaledMask(
-                    request.mask,
-                    request.key.outputDimensions);
-                if (!maskResample) {
-                    return GetFailure(
-                        RenderProductFailure::BuildFailed,
-                        "The iso-surface mask resample could not be built.");
-                }
-                observers.Add(maskResample);
-                maskResample->Update();
-                builtMask = maskResample->GetOutput();
-            }
+            vtkImageData* builtMask = scalar.product->mask;
             if (stopToken.GetIsStopped()) {
                 return GetFailure(
                     RenderProductFailure::Cancelled,

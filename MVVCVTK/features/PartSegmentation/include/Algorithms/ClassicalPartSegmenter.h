@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Host/PartSegmentationHostTypes.h"
 
@@ -58,7 +59,7 @@ struct PartAlgorithmParams final {
     std::uint64_t minPartVoxels = 1;
     std::uint32_t maxPartCount =
         std::numeric_limits<std::uint32_t>::max() - 2U;
-    std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
+    WorkLimit maxWorkingBytes {};
 };
 
 enum class PartAlgorithmError : std::uint8_t {

@@ -3,6 +3,7 @@
 #include "AlignmentMath.h"
 #include <iostream>
 #include <limits>
+#include <numeric>
 
 namespace {
 using namespace AlignmentMath;
@@ -187,6 +188,36 @@ void ScaleAndDegeneracy() {
         Check(rejected, "collinear plane rejected");
     }
 }
+
+void UnlimitedCapacity() {
+    auto w = Work();
+    w.recipe.method = AlignmentMethod::Rps;
+    for (std::size_t i = 0; i < 65; ++i) {
+        AlignmentGeometrySpec spec;
+        spec.id = "point-" + std::to_string(i);
+        spec.kind = AlignmentGeometryKind::Point;
+        spec.region.pinnedMesh = w.input.mesh;
+        spec.region.vertexIds = {0};
+        w.recipe.geometries.push_back(std::move(spec));
+    }
+    AlignmentConstraint constraint;
+    constraint.targetDirection = {1, 0, 0};
+    w.recipe.constraints.assign(4097, constraint);
+    auto& region = w.recipe.geometries.front().region;
+    region.vertexIds.resize(100001);
+    std::iota(region.vertexIds.begin(), region.vertexIds.end(), std::uint64_t{0});
+    Check(AlignmentGeometryFit::GetRecipeValid(w.recipe, w.config),
+        "default recipe permits more than 64 geometries, 4096 constraints and 100000 points");
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>(100001 * 3, 0), std::vector<std::uint64_t>{});
+    const auto samples = AlignmentGeometryFit::BuildSamples(w, region, alignmentIdentity);
+    Check(samples.points.size() == 100001,
+        "default extraction preserves the complete selected point set");
+    auto bounded = w.config;
+    bounded.constraintLimit = 4096;
+    Check(!AlignmentGeometryFit::GetRecipeValid(w.recipe, bounded),
+        "caller-selected constraint budget remains explicit");
+}
 } // namespace
 namespace {
 void HolesAndAmbiguity() {
@@ -270,6 +301,7 @@ int TestConstraints() {
     BestFit();
     SelectionAndQuality();
     ScaleAndDegeneracy();
+    UnlimitedCapacity();
     HolesAndAmbiguity();
     return failures;
 }

@@ -198,6 +198,8 @@ private:
     std::uint64_t m_mapperInputCount = 0;
     std::uint64_t m_resampleBuildCount = 0;
     std::uint64_t m_resampleUpdateCount = 0;
+    vtkMTimeType m_gpuInputTime = 0, m_gpuScalarTime = 0;
+    vtkMTimeType m_gpuMaskTime = 0, m_gpuMaskScalarTime = 0;
     std::uint64_t m_gpuReleaseCount = 0;
     std::uint64_t m_gpuPreloadCount = 0;
     std::uint64_t m_gpuQueryCount = 0;

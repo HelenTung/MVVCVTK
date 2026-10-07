@@ -260,10 +260,11 @@ using AlignmentCallback = std::function<void(AlignmentResult)>;
 
 struct AlignmentConfig final {
     HostViewTargets targetViews;
-    std::size_t pointLimit = 100000;
-    std::size_t constraintLimit = 4096;
-    std::size_t workingBytes = 256U * 1024U * 1024U;
-    std::uint64_t deadlineMs = 30000;
+    // 0 不启用数量预算；非零值只表示调用方显式选择的工作策略。
+    std::size_t pointLimit = 0;
+    std::size_t constraintLimit = 0;
+    std::optional<std::size_t> workingBytes {};
+    std::optional<std::size_t> deadlineMs{};
     double axisLength = 10.0;
     bool isOverlayVisible = true;
 };

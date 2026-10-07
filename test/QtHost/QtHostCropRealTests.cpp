@@ -60,7 +60,7 @@ std::string Env(const char* name){
 std::string Quote(const std::string& value){std::string text="\"";for(char c:value){if(c=='\\'||c=='\"')text+='\\';if(c=='\n')text+="\\n";else text+=c;}return text+'"';}
 std::string Ref(const DataRevisionRef& value){std::ostringstream out;out<<std::hex<<std::setfill('0');for(auto byte:value.entityId.bytes)out<<std::setw(2)<<unsigned(byte);out<<':'<<std::dec<<value.generation;return out.str();}
 double Millis(Clock::time_point start){return std::chrono::duration<double,std::milli>(Clock::now()-start).count();}
-std::array<int,3> Dims(const std::string& value){std::array<int,3> result{};std::istringstream in(value);char a=0,b=0;Require(bool(in>>result[0]>>a>>result[1]>>b>>result[2])&&a==','&&b==','&&in.eof(),"dimensions must be X,Y,Z");for(auto n:result)Require(n>=32&&n<=4096&&n%16==0,"real audit dimensions must be multiples of 16 in [32,4096]");return result;}
+std::array<int,3> Dims(const std::string& value){std::array<int,3> result{};std::istringstream in(value);char a=0,b=0;Require(bool(in>>result[0]>>a>>result[1]>>b>>result[2])&&a==','&&b==','&&in.eof(),"dimensions must be X,Y,Z");for(auto n:result)Require(n>=32&&n<=4096&&n%8==0,"real audit dimensions must be multiples of 8 in [32,4096]");return result;}
 
 template<class T> struct Completion {
     const std::thread::id owner=std::this_thread::get_id();
@@ -177,22 +177,29 @@ int GetCropRealFailCount()
     try {
         const auto dims=Dims(size);const auto count=std::uint64_t(dims[0])*dims[1]*dims[2];
         Require(std::filesystem::file_size(std::filesystem::u8path(input))==count*sizeof(float),"real float32 input size mismatch");
-        const auto budgetText=Env("MVVCVTK_CROP_REAL_RAM_MIB");const auto mib=budgetText.empty()?65536ULL:std::stoull(budgetText);
-        Require(mib>0&&mib<=131072,"real RAM MiB range");const auto budget=static_cast<std::size_t>(mib*1024*1024);
+        const auto budgetText=Env("MVVCVTK_CROP_REAL_RAM_MIB");const auto mib=budgetText.empty()?0ULL:std::stoull(budgetText);
+        Require(mib<=std::numeric_limits<std::size_t>::max()/(1024*1024),"real RAM MiB overflow");const auto budget=static_cast<std::size_t>(mib*1024*1024);
+        report<<"  \"requested_ram_bytes\": "<<budget<<",\n";
+        const auto spacingText=Env("MVVCVTK_CROP_REAL_SPACING");const float spacing=spacingText.empty()?0.1537f:std::stof(spacingText);
+        Require(std::isfinite(spacing)&&spacing>0,"real spacing must be finite and positive");
         Fixture fixture;const auto start=Clock::now();const auto loaded=std::make_shared<Completion<HostResult>>();
-        HostLoadRequest load;load.filePath=input;load.geometry.dimensions=dims;load.geometry.spacing={0.1537f,0.1537f,0.1537f};
+        // 分段日志在断言或外部隔离超时前即刻落盘，区分计算、显示等待与独立核验。
+        const auto sendPhase=[&](const char* phase){std::cout<<"AUDIT PHASE "<<phase<<" elapsed_ms="<<Millis(start)<<std::endl;};
+        sendPhase("load-start");
+        HostLoadRequest load;load.filePath=input;load.geometry.dimensions=dims;load.geometry.spacing={spacing,spacing,spacing};
         const auto originText=Env("MVVCVTK_CROP_REAL_ORIGIN");
         if(!originText.empty()){std::istringstream coordinates(originText);char a=0,b=0;Require(bool(coordinates>>load.geometry.origin[0]>>a>>load.geometry.origin[1]>>b>>load.geometry.origin[2])&&a==','&&b==','&&coordinates.eof(),"real origin must be X,Y,Z");}
         load.metadata.identity.datasetId="crop-real-"+size;load.metadata.source.kind=ImageSourceKind::RawFile;load.metadata.source.uri=input;
         const auto inputOrigin=load.geometry.origin;
         Require(fixture.session.SendRequestResult(std::move(load),[loaded](HostResult result){loaded->Set(std::move(result));}),"real load admission");
         Require(fixture.Wait([&]{return loaded->Ready();})&&loaded->Once()&&loaded->value.isSucceeded,"real load completion");report<<"  \"load_ms\": "<<Millis(start)<<",\n";
+        sendPhase("load-complete");
         const auto rootView=fixture.probe->data->GetPrimaryImage();Require(rootView&&rootView->data,"real Root read");
         const auto root=std::dynamic_pointer_cast<const ImageGrid3DPayload>(rootView->data->payload);
         Require(root&&root->GetValueType()==ImageValueType::Float32&&root->GetComponentCount()==1&&!root->GetValidityMask(),"real Root scalar format");
         const auto geometry=root->GetGeometry();Require(geometry.dimensions==dims,"real Root dimensions");
         Require(geometry.coordinateFrame=="RAS","Root coordinate frame");
-        for(int axis=0;axis<3;++axis)Require(geometry.spacing[axis]==double(0.1537f),"declared RAW spacing changed");
+        for(int axis=0;axis<3;++axis)Require(geometry.spacing[axis]==double(spacing),"declared RAW spacing changed");
         Require(geometry.spacing[0]==geometry.spacing[1]&&geometry.spacing[1]==geometry.spacing[2],"oracle requires isotropic lattice");
         for(int row=0;row<3;++row){int units=0;for(int col=0;col<3;++col)units+=geometry.direction[row*3+col]!=0;Require(units==1,"oracle direction row");}
         for(int col=0;col<3;++col){int units=0;for(int row=0;row<3;++row){const auto value=geometry.direction[row*3+col];Require(value==0||value==1||value==-1,"oracle requires axis-permutation direction");units+=value!=0;}Require(units==1,"oracle direction column");}
@@ -204,7 +211,7 @@ int GetCropRealFailCount()
             const std::array<std::int64_t,3> ijk{std::int64_t(linear%dims[0]),std::int64_t((linear/dims[0])%dims[1]),std::int64_t(linear/(std::uint64_t(dims[0])*dims[1]))};
             std::array<std::int64_t,3> original{};
             for(int row=0;row<3;++row){double point=geometry.origin[row];for(int col=0;col<3;++col)point+=geometry.direction[row*3+col]*geometry.spacing[col]*(geometry.extent[col*2]+ijk[col]);
-                const double index=((row<2?-point:point)-inputOrigin[row])/double(0.1537f);original[row]=std::llround(index);
+                const double index=((row<2?-point:point)-inputOrigin[row])/double(spacing);original[row]=std::llround(index);
                 Require(std::abs(index-original[row])<1e-7&&original[row]>=0&&original[row]<dims[row],"RAW/RAS sample geometry mismatch");}
             const auto rawIndex=(std::uint64_t(original[2])*dims[1]+original[1])*dims[0]+original[0];std::array<char,4> bytes{};
             raw.seekg(static_cast<std::streamoff>(rawIndex*4));raw.read(bytes.data(),4);Require(bool(raw)&&std::memcmp(bytes.data(),root->GetValues()->data()+linear*4,4)==0,"imported scalar bits changed");
@@ -217,9 +224,11 @@ int GetCropRealFailCount()
         Require(fixture.Wait([&]{const auto out=fixture.crop->GetDocumentOutcome(opened.documentId,create.requestId);return out&&out->status!=CropEditStatus::Queued;}),"real document timeout");
         Require(fixture.crop->GetDocumentOutcome(opened.documentId,create.requestId)->status==CropEditStatus::Succeeded,"real document prepare");
         report<<"  \"document_open_ms\": "<<Millis(openedAt)<<",\n";
+        sendPhase("document-ready");
         fixture.Save(output/"root.png");
+        sendPhase("preview-edit-start");
         const auto document=opened.documentId,rootNode=opened.rootNodeId;std::vector<CropNodeId> nodes;
-        const auto append=[&](CropNodeId parent,CropOpItem operation){CropEditRequest request;request.documentId=document;request.nodeId=parent;request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=fixture.crop->GetHistory(document,0,1).stateRevision;request.kind=CropEditKind::Append;request.operation=std::move(operation);const auto accepted=fixture.crop->SendRequest(request);Require(bool(accepted),"real edit admission");Require(fixture.Wait([&]{const auto out=fixture.crop->GetOutcome(document,request.requestId);return out&&out->status!=CropEditStatus::Queued;}),"real edit timeout");const auto done=fixture.crop->GetOutcome(document,request.requestId);if(done->status!=CropEditStatus::Succeeded)std::cerr<<"real edit failure="<<static_cast<int>(done->failureReason)<<'\n';Require(done->status==CropEditStatus::Succeeded,"real edit preparation");return accepted.nodeId;};
+        const auto append=[&](CropNodeId parent,CropOpItem operation){CropEditRequest request;request.documentId=document;request.nodeId=parent;request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=fixture.crop->GetHistory(document,0,1).stateRevision;request.kind=CropEditKind::Append;request.operation=std::move(operation);const auto accepted=fixture.crop->SendRequest(request);Require(bool(accepted),"real edit admission");Require(fixture.Wait([&]{const auto out=fixture.crop->GetOutcome(document,request.requestId);return out&&out->status!=CropEditStatus::Queued;}),"real edit timeout");const auto done=fixture.crop->GetOutcome(document,request.requestId);if(done->status!=CropEditStatus::Succeeded)std::cerr<<"real edit failure="<<static_cast<int>(done->failureReason)<<'\n';Require(done->status==CropEditStatus::Succeeded,"real edit preparation");sendPhase("preview-edit-complete");return accepted.nodeId;};
         CropOpItem box;box.geometryType=CropShape::Box;box.boxToInputModelMatrix={};box.boxToInputModelMatrix[15]=1;
         for(int row=0;row<3;++row){box.boxToInputModelMatrix[row*4+3]=center[row];for(int col=0;col<3;++col)box.boxToInputModelMatrix[row*4+col]=geometry.direction[row*3+col]*geometry.spacing[col]*(dims[col]-1)*3.0/8.0;}
         nodes.push_back(append(rootNode,box));
@@ -233,8 +242,10 @@ int GetCropRealFailCount()
         nodes.push_back(append(nodes.back(),cylinder));
         auto alternate=plane;for(auto& value:alternate.planeNormalInInputModel)value=-value;const auto alternateNode=append(rootNode,alternate);
         const auto buildAt=Clock::now();CropBuildRequest build;build.documentId=document;build.nodeId=nodes.back();build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=fixture.crop->GetHistory(document,0,1).stateRevision;build.options.availableRamBytes=budget;const auto completed=std::make_shared<Completion<CropBuildResult>>();
+        sendPhase("mask-build-start");
         const auto accepted=fixture.crop->SendRequest(build,[completed](auto result){completed->Set(std::move(result));});Require(bool(accepted),"real build admission");
         Require(fixture.Wait([&]{return completed->Ready();})&&completed->Once(),"real build timeout/owner callback");const auto built=completed->value;if(!built.isSucceeded)std::cerr<<"real build failure="<<static_cast<int>(built.failureReason)<<" "<<built.message<<'\n';Require(built.isSucceeded&&built.nodeCount==4,"real build completion");
+        sendPhase("mask-build-complete");
         report<<"  \"build_ms\": "<<Millis(buildAt)<<",\n  \"mask_bytes\": "<<count<<",\n  \"output_revision\": "<<Quote(Ref(built.outputRevision))<<",\n";
         Require(fixture.crop->GetHistory().appliedHead==alternateNode,"building C changed preview D");
         Require(fixture.crop->SendRequest(build).isReplay,"real build replay identity");
@@ -255,8 +266,10 @@ int GetCropRealFailCount()
             Require(payload&&payload->GetValues()==root->GetValues()&&payload->GetValidityMask()&&payload->GetValidityMask()->size()==count,"fixed Root scalars and full-resolution mask");
             const auto& g=payload->GetGeometry();Require(g.extent==geometry.extent&&g.dimensions==geometry.dimensions&&g.spacing==geometry.spacing&&g.origin==geometry.origin&&g.direction==geometry.direction,"result geometry changed");
             heldMask=payload->GetValidityMask();
+            sendPhase("oracle-start");
             const auto verifyAt=Clock::now();auto worker=std::async(std::launch::async,VerifyMask,heldMask,dims,output/"crop.mask");
             Require(fixture.Wait([&]{return worker.wait_for(std::chrono::milliseconds(0))==std::future_status::ready;}),"oracle timeout");const auto oracle=worker.get();
+            sendPhase("oracle-complete");
             report<<"  \"oracle_ms\": "<<Millis(verifyAt)<<",\n  \"kept\": "<<oracle.kept<<",\n  \"expected_kept\": "<<oracle.expected<<",\n  \"mismatch\": "<<oracle.mismatch<<",\n  \"mask_sha256\": "<<Quote(oracle.sha)<<",\n";
             Require(oracle.kept>0&&oracle.kept<count&&oracle.mismatch==0,"integer lattice oracle mismatch");
             const auto recipe=fixture.probe->data->GetData(graph,built.recipeRevision);const auto roi=recipe?std::dynamic_pointer_cast<const RoiGeometryPayload>(recipe->payload):nullptr;Require(roi&&std::count_if(roi->GetDefinition().nodes.begin(),roi->GetDefinition().nodes.end(),[](const RoiNode& node){return node.kind==RoiNodeKind::Primitive;})==4,"formal four-shape recipe");
@@ -281,6 +294,7 @@ int GetCropRealFailCount()
         Require(fixture.Wait([&]{const auto done=fixture.crop->GetDocumentOutcome(document,returning.requestId);return done&&done->status!=CropEditStatus::Queued&&cancelled->Ready();}),"real cancel timeout");Require(cancelled->Once()&&cancelled->value.failureReason==CropFailure::Cancelled&&fixture.crop->GetHistory().results.empty(),"real cancellation published a result");
         report<<"  \"cancel_ms\": "<<Millis(cancelAt)<<",\n";
         const auto stopAt=Clock::now();Require(fixture.Stop(),"real Session Stop");report<<"  \"stop_ms\": "<<Millis(stopAt)<<",\n";
+        sendPhase("stop-complete");
         auto& metrics=fixture.metrics;std::sort(metrics.ticks.begin(),metrics.ticks.end());report<<"  \"owner_tick_p95_ms\": "<<(metrics.ticks.empty()?0:metrics.ticks[metrics.ticks.size()*95/100])<<",\n  \"owner_tick_max_ms\": "<<(metrics.ticks.empty()?0:metrics.ticks.back())<<",\n  \"peak_working_bytes\": "<<metrics.peakWorking<<",\n  \"peak_commit_bytes\": "<<metrics.peakPrivate<<",\n  \"gpu_free_first_bytes\": "<<metrics.gpuFreeFirst<<",\n  \"gpu_free_min_bytes\": "<<metrics.gpuFreeMin<<",\n";
         report<<"  \"gpu_measurement\": \"device-wide free-memory samples after owner ticks; includes other processes\",\n";
         report<<"  \"callbacks_on_owner_exactly_once\": true,\n";

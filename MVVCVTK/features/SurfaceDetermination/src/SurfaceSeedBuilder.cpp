@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "SurfaceSeedBuilder.h"
 
 #include <vtkMarchingCubesTriangleCases.h>
@@ -42,7 +43,7 @@ std::size_t GetIndex(const SurfaceSeedGrid &grid, const int x, const int y, cons
                grid.dimensions[0] +
            (x - grid.extent[0]);
 }
-bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const std::size_t budget,
+bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const WorkLimit budget,
                SurfaceExecutionStats &stats)
 {
     // 同时覆盖 edge/clip 映射、组件、原/新网格、records 和发布载荷的保守估算。
@@ -56,7 +57,7 @@ bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, co
     stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, estimate);
     return estimate <= budget;
 }
-SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const std::size_t budget,
+SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit budget,
                            const std::function<bool()> &cancelled, std::vector<Point> &points,
                            std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
@@ -149,7 +150,7 @@ std::uint64_t SurfaceSeedBuilder::GetLabel(const LabelMap3DPayload &labels, cons
 SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     const SurfaceSeedGrid &grid, const double iso, const std::optional<SurfaceMaterialPair> &materials,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
-    const std::size_t budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
+    const WorkLimit budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
     std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
     const auto started = std::chrono::steady_clock::now();

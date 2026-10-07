@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Data/DataPayloads.h"
@@ -15,7 +16,7 @@ struct PartEditInput final {
     PartEditRequest request;
     RoiReadSnapshot editRoi;
     RoiReadSnapshot protectionRoi;
-    std::size_t maxWorkingBytes = 0;
+    WorkLimit maxWorkingBytes {};
 };
 
 // 仓内诊断：分阶段耗时不属于 SDK/Feature 公共契约；不代表进程峰值内存。
@@ -49,6 +50,6 @@ public:
     static PartEditBuildResult BuildRestore(
         const PartHistorySnapshot& current,
         const PartHistorySnapshot& restored,
-        std::size_t maxWorkingBytes,
+        WorkLimit maxWorkingBytes,
         const std::function<bool()>& getStopRequested = nullptr);
 };

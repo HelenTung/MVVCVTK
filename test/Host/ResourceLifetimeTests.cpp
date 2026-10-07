@@ -228,28 +228,48 @@ bool GetNestedFrameCompletions()
     struct Probe final {
         std::shared_ptr<RenderFrameLifetime> frames;vtkRenderWindow* nested=nullptr;
         int queued=0,completed=0;std::uint64_t id=0;bool valid=true;
+        std::vector<RenderFrameOutcome> outcomes;
+        int pendingRenders = 0;
     } pa{fa,b},pb{fb};
     const auto observe=[](vtkRenderer* renderer,Probe* value) {
         auto observer=vtkSmartPointer<vtkCallbackCommand>::New();observer->SetClientData(value);
         observer->SetCallback([](vtkObject*,unsigned long,void* data,void*) {
             auto* probe=static_cast<Probe*>(data);
             probe->valid=probe->frames->QueueCompletion([probe](RenderFrameOutcome outcome) {
+                probe->outcomes.push_back(outcome);
                 ++probe->completed;probe->valid=probe->valid&&outcome.isSucceeded&&outcome.isPresented&&outcome.frameId>probe->id;
                 probe->id=outcome.frameId;
                 RenderFrameLifetime::PollAll();
-                if(probe->nested)probe->nested->Render();
+                if (probe->nested) {
+                    // VTK 会忽略忙窗口的递归 Render；保留请求，返回外层后再执行。
+                    if (probe->nested->CheckInRenderStatus()) ++probe->pendingRenders;
+                    else probe->nested->Render();
+                }
             })&&probe->valid;
             ++probe->queued;
         });
         return renderer->AddObserver(vtkCommand::EndEvent,observer);
     };
     const auto ta=observe(first,&pa),tb=observe(second,&pb);
-    for(int i=0;i<4;++i)a->Render();
-    for(int poll=0;poll<1000&&(pa.completed<pa.queued||pb.completed<pb.queued);++poll) {
-        RenderFrameLifetime::PollAll();std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    constexpr int frameCount = 32;
+    const auto sendPending = [&] {
+        while (pa.pendingRenders > 0) { --pa.pendingRenders; b->Render(); }
+    };
+    for(int i=0;i<frameCount;++i) { a->Render(); sendPending(); }
+    for(int poll=0;poll<1000&&(pa.completed<pa.queued||pb.completed<pb.queued||pa.pendingRenders);++poll) {
+        RenderFrameLifetime::PollAll();sendPending();std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     first->RemoveObserver(ta);second->RemoveObserver(tb);
-    const bool passed=pa.valid&&pb.valid&&pa.queued==4&&pa.completed==4&&pb.queued==4&&pb.completed==4;
+    const bool passed=pa.valid&&pb.valid&&pa.queued==frameCount&&pa.completed==frameCount&&pb.queued==frameCount&&pb.completed==frameCount;
+    if (!passed) {
+        for (const auto* probe : {&pa, &pb}) {
+            std::cerr << "Nested frame probe queued=" << probe->queued << " completed=" << probe->completed
+                << " valid=" << probe->valid << " outcomes=";
+            for (const auto& outcome : probe->outcomes)
+                std::cerr << outcome.frameId << ':' << outcome.isSucceeded << ':' << outcome.isPresented << ' ';
+            std::cerr << '\n';
+        }
+    }
     fa.reset();fb.reset();a->Finalize();b->Finalize();RenderFrameLifetime::PollAll();
     return Check(passed,"nested render completion lost identity, repeated callback or invalidated its observer");
 }

@@ -634,7 +634,7 @@ int GetIsoStrategyTaskFailCount()
             && active.appliedQuality == VolumeQuality::High
             && active.stats.activeRevision
                 == active.stats.requestRevision
-            && active.stats.gpuUploadUs > 0
+            && active.stats.cpuBindUs > 0 && active.stats.gpuUploadUs == 0
             && active.stats.firstRenderUs == 17,
         "Iso Low to Ultra to High commits only the latest valid revision")
         ? 0 : 1;
@@ -836,7 +836,7 @@ int GetVolumeStrategyTaskFailCount()
             && active.requestedQuality == VolumeQuality::High
             && active.appliedQuality == VolumeQuality::High
             && active.stats.gpuReleaseUs > 0
-            && active.stats.gpuUploadUs > 0
+            && active.stats.cpuBindUs > 0 && active.stats.gpuUploadUs == 0
             && active.stats.firstRenderUs == 19,
         "Volume Low to Ultra to High commits only the latest CPU product")
         ? 0 : 1;
@@ -878,6 +878,61 @@ std::shared_ptr<VolumeLodProduct> BuildCachedVolumeProduct(
     return product;
 }
 
+int GetSharedBuildAndDefaultPolicyFailCount()
+{
+    int failures = 0;
+    auto lane = std::make_shared<ManualRenderLane>();
+    auto resources = std::make_shared<RenderResourceCoordinator>([lane](RenderLaneWork task) { return lane->Start(std::move(task)); });
+    auto image = BuildIsoImage();
+    auto first = resources->CreateTaskChannel(RenderProductKind::VolumeLod);
+    auto second = resources->CreateTaskChannel(RenderProductKind::VolumeLod);
+    auto request = GetVolumeRequest(image, nullptr, 1, VolumeQuality::High, {6, 6, 6}, false);
+    request.resources = resources;
+    int firstCalls = 0, secondCalls = 0;
+    std::shared_ptr<const VolumeLodProduct> product;
+    const auto a = resources->StartVolumeProduct(first, request, [&](auto, auto) { ++firstCalls; });
+    request.requestRevision = 2;
+    const auto b = resources->StartVolumeProduct(second, request, [&](auto result, auto) { ++secondCalls; product = result.product; });
+    first->Stop();
+    lane->SendOne();
+    failures += GetCaseResult(a == RenderTaskAdmission::Accepted && b == RenderTaskAdmission::Replaced
+        && lane->GetStartCount() == 1 && firstCalls == 0 && secondCalls == 1 && product
+        && resources->GetVolumeProduct(request.key) == product
+        && second->SetActiveBytes(2, product->actualBytes, product.get()) && second->CompleteActiveBytes(2),
+        "Equal products build once; cancelling one waiter preserves others and CPU-ready cache") ? 0 : 1;
+    auto isoRequest = GetIsoRequest(image, 3, VolumeQuality::High, 0.0);
+    isoRequest.key.outputDimensions = {6, 6, 6}; isoRequest.resources = resources;
+    auto iso = resources->CreateTaskChannel(RenderProductKind::IsoSurface);
+    std::shared_ptr<const IsoSurfaceProduct> mesh;
+    (void)resources->StartIsoSurfaceProduct(iso, isoRequest, [&](auto result, auto) { mesh = result.product; });
+    lane->SendOne();
+    auto scalar = resources->GetVolumeProduct(request.key);
+    isoRequest.key.isoValue = 2.0; isoRequest.requestRevision = 4;
+    (void)resources->StartIsoSurfaceProduct(iso, isoRequest, [&](auto result, auto) { mesh = result.product; });
+    lane->SendOne();
+    failures += GetCaseResult(mesh && scalar == product && resources->GetVolumeProduct(request.key) == product
+        && resources->GetResourceState().scalarResampleBuildCount == 1
+        && resources->GetResourceState().productBuildCount == 3
+        && resources->GetResourceState().joinedBuildCount == 1,
+        "ISO threshold changes reuse the same prepared scalar storage") ? 0 : 1;
+    auto unrestricted = resources->CreateTaskChannel(RenderProductKind::VolumeLod);
+    bool ran = false;
+    RenderTaskRequest diagnostic;
+    diagnostic.requestRevision = 1;
+    diagnostic.estimatedBytes = std::numeric_limits<std::uint64_t>::max();
+    diagnostic.work = [&](RenderTaskToken token) {
+        ran = token.SetEstimatedBytes(std::numeric_limits<std::uint64_t>::max()) && token.SetActualBytes(16);
+    };
+    const auto accepted = unrestricted->StartTask(std::move(diagnostic)); lane->SendOne();
+    failures += GetCaseResult(accepted == RenderTaskAdmission::Accepted && ran
+        && unrestricted->SetActiveBytes(1, 16) && unrestricted->CompleteActiveBytes(1)
+        && resources->GetResourceState().isCpuBudgetEnforced == false,
+        "Default estimates never veto valid work or active commits") ? 0 : 1;
+    unrestricted->Stop();
+    failures += GetCaseResult(!unrestricted->SetCachedActive(2, 16), "Stopped channels cannot commit cached products") ? 0 : 1;
+    return failures;
+}
+
 int GetResourceAccountingFailCount()
 {
     int failureCount = 0;
@@ -896,7 +951,7 @@ int GetResourceAccountingFailCount()
     firstRequest.requestRevision = 1;
     firstRequest.estimatedBytes = 400;
     firstRequest.work = [&isActualAdmitted](RenderTaskToken token) {
-        isActualAdmitted = token.SetActualBytes(800);
+        isActualAdmitted = token.SetActualBytes(1200);
     };
     RenderTaskRequest secondRequest;
     secondRequest.requestRevision = 1;
@@ -922,7 +977,7 @@ int GetResourceAccountingFailCount()
     failureCount += GetCaseResult(
         isBudgetSet && isFirstAccepted && isSecondAccepted
             && preparingResources.runningBytes == 400
-            && preparingResources.pendingBytes == 300
+            && preparingResources.pendingBytes == 0
             && preparingResources.runningBytes
                 + preparingResources.pendingBytes
                 <= preparingResources.cpuBudgetBytes
@@ -1214,6 +1269,15 @@ int GetWorkingSetFailCount()
     RenderWorkBudget overflow;
     failures += GetCaseResult(!overflow.Add((std::numeric_limits<std::uint64_t>::max)(), 2)
         && !overflow.GetBytes(), "Working-set arithmetic rejects overflow") ? 0 : 1;
+    vtkNew<vtkImageData> malformed;
+    malformed->SetDimensions(2, 2, 2); malformed->AllocateScalars(VTK_FLOAT, 1);
+    const bool validStorage = RenderWorkBudget::GetScalarStorageValid(malformed);
+    malformed->GetPointData()->GetScalars()->SetNumberOfTuples(1);
+    const bool rejectsTruncated = !RenderWorkBudget::GetScalarStorageValid(malformed);
+    malformed->SetDimensions((std::numeric_limits<int>::max)(), (std::numeric_limits<int>::max)(), 3);
+    failures += GetCaseResult(validStorage && rejectsTruncated
+        && !RenderWorkBudget::GetScalarStorageValid(malformed),
+        "Structural scalar checks reject truncated and overflowing grids without a budget cap") ? 0 : 1;
     return failures;
 }
 
@@ -1437,7 +1501,8 @@ int GetSliceAndPlaneCacheFailCount()
 
 int GetRenderProductFailCount()
 {
-    return GetGpuHeadroomFailCount()
+    return GetSharedBuildAndDefaultPolicyFailCount()
+        + GetGpuHeadroomFailCount()
         + GetLatestTransitionFailCount()
         + GetWorkingSetFailCount()
         + GetTransitionValueFailCount()

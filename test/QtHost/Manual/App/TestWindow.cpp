@@ -231,7 +231,10 @@ void TestWindow::BuildSession()
         if (!m_runtime.BuildSession(std::move(config))) throw std::runtime_error("测试会话创建失败");
         m_pump.SetSession(m_runtime.GetSession());
         m_modules = BuildModules({m_runtime, m_workflow, m_records}, m_pages);
-        AppendLog(QString("本次算法工作集上限 %1 GiB；伪影累计发布上限 %2 GiB。按启动时可用内存留出余量；可用 --memory-budget-mib 指定更小上限。").arg(m_workflow.resources.workingBytes / (1024.*1024.*1024.), 0, 'f', 2).arg(m_workflow.resources.publishBytes / (1024.*1024.*1024.), 0, 'f', 2));
+        if (m_workflow.resources.hasExplicitWorkingLimit)
+            AppendLog(QString("显式工作集上限 %1 GiB；伪影单次发布上限 %2 GiB。").arg(m_workflow.resources.workingBytes / (1024.*1024.*1024.), 0, 'f', 2).arg(m_workflow.resources.publishBytes / (1024.*1024.*1024.), 0, 'f', 2));
+        else
+            AppendLog("未设置算法工作集硬上限；内存快照仅用于诊断和可选缓存保留。");
         for (auto* page : m_modules) {
             m_pages->addWidget(page); m_browsers->addWidget(page->GetBrowser()); m_featureTabs->addTab(page->GetDisplayName());
             page->onMessage = [this](const QString& message) { AppendLog(message); };

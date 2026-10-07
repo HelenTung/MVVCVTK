@@ -38,6 +38,9 @@ public:
     VtkSurfaceMeshSnapshot GetSurfaceMesh(DataSnapshot data) const;
 
 private:
+    friend class BaseDataManager;
+    std::shared_ptr<const ImageGrid3DPayload> BuildImagePayload(
+        vtkSmartPointer<vtkImageData> image, ImageMetadata metadata) const;
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };

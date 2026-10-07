@@ -11,7 +11,7 @@
 namespace Manual {
 QJsonObject TestResources::GetJson() const
 {
-    return {{"workingBytes", QString::number(workingBytes)}, {"publishBytes", QString::number(publishBytes)},
+    return {{"isWorkingLimitExplicit", hasExplicitWorkingLimit}, {"workingBytes", QString::number(workingBytes)}, {"publishBytes", QString::number(publishBytes)},
         {"physicalBytes", QString::number(physicalBytes)}, {"availableBytes", QString::number(availableBytes)}, {"commitAvailableBytes", QString::number(commitAvailableBytes)}};
 }
 TestResources GetTestResources(std::uint64_t budgetMiB)
@@ -25,12 +25,12 @@ TestResources GetTestResources(std::uint64_t budgetMiB)
         result.workingBytes = std::min({result.physicalBytes/2, result.availableBytes/4*3, result.commitAvailableBytes/4*3}) / mib * mib;
     }
 #endif
+    result.hasExplicitWorkingLimit = budgetMiB != 0;
     if (budgetMiB) {
         if (budgetMiB > result.workingBytes/mib) throw std::invalid_argument("指定预算超过当前可用内存的保守上限，请降低 --memory-budget-mib 或释放其它任务资源");
         result.workingBytes = budgetMiB*mib;
     }
-    if (!result.workingBytes) throw std::runtime_error("当前没有可供算法使用的内存预算");
-    result.publishBytes = result.workingBytes/2;
+    result.publishBytes = result.workingBytes ? result.workingBytes/2 : 256*mib;
     return result;
 }
 }

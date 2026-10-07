@@ -47,6 +47,14 @@ SetTestRuntime(Host.DataTransition mvvcvtk_host_runtime_tests)
 add_test(NAME Host.ResourceLifetime COMMAND mvvcvtk_host_runtime_tests resources)
 SetTestRuntime(Host.ResourceLifetime mvvcvtk_host_runtime_tests)
 
+# 显式真实数据审计；仅依赖 Host，不随 Part Feature 开关消失，不安装。
+add_executable(host_load_audit HostLoadAudit.cpp)
+target_link_libraries(host_load_audit PRIVATE MVVCVTK::Host ${MVVCVTK_VTK_TARGETS} Psapi)
+SetTargetDefaults(host_load_audit)
+set_target_properties(host_load_audit PROPERTIES
+    OUTPUT_NAME HostLoadAudit PROJECT_LABEL HostLoadAudit FOLDER "MVVCVTK/test/Automation")
+vtk_module_autoinit(TARGETS host_load_audit MODULES ${MVVCVTK_VTK_TARGETS})
+
 add_executable(mvvcvtk_ruler_tests RulerTests.cpp RulerStateTests.cpp)
 target_link_libraries(mvvcvtk_ruler_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host ${MVVCVTK_VTK_TARGETS})
