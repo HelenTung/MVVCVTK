@@ -12,7 +12,8 @@ class WallThicknessHostFeature;
 class RoiEditingHostFeature;
 namespace Manual {
 class ReferenceDataSource;
-ModulePanel* CreateDataTest(TestContext, std::shared_ptr<ReferenceDataSource>, QWidget*);
+ModulePanel* CreateDataTest(TestContext, std::shared_ptr<ReferenceDataSource>, QWidget*,
+    std::shared_ptr<RoiEditingHostFeature>);
 ModulePanel* CreateViewTest(TestContext, QWidget*);
 ModulePanel* CreateCropTest(TestContext, std::shared_ptr<CropHostFeature>, QWidget*);
 ModulePanel* CreateGapTest(TestContext, std::shared_ptr<GapHostFeature>, QWidget*);
