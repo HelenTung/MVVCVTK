@@ -664,11 +664,14 @@ int mvvcvtk_tomopy_get_layout(int width, int height, float center_x, float cente
 {
     int max_r, pol_height, m_rad, m_azi;
     size_t plane, polar, pointer_rows;
-    if(!layout || width < 8 || height < 8 || width > 16384 || height > 16384
+    if(!layout || width < 8 || height < 8
         || !isfinite(center_x) || !isfinite(center_y)
         || center_x < 0 || center_x > width - 1 || center_y < 0 || center_y > height - 1
         || ring_width < 1 || ring_width > 64 || angular_min < 1 || angular_min > 180
         || (int_mode != INT_MODE_WRAP && int_mode != INT_MODE_REFLECT)) return MVVCVTK_TOMOPY_INVALID;
+    /* 内核使用 int 索引；先核对实际平面大小，再执行半径及极坐标转换。 */
+    plane = (size_t) width * height;
+    if(plane > INT_MAX) return MVVCVTK_TOMOPY_INVALID;
     max_r = min_distance_to_edge(center_x, center_y, width, height);
     m_rad = 2 * ring_width + 1;
     if(max_r < 3 * (m_rad + 1)) return MVVCVTK_TOMOPY_INVALID;
@@ -678,7 +681,6 @@ int mvvcvtk_tomopy_get_layout(int width, int height, float center_x, float cente
         || (int_mode == INT_MODE_REFLECT && m_azi >= pol_height / 2 - 1)) return MVVCVTK_TOMOPY_INVALID;
     if(m_rad / 3 >= max_r || max_r / 3 + 2 * m_rad / 3 >= max_r
         || 2 * max_r / 3 + m_rad >= max_r) return MVVCVTK_TOMOPY_INVALID;
-    plane = (size_t) width * height;
     polar = (size_t) max_r * pol_height;
     if(plane > INT_MAX || polar > INT_MAX) return MVVCVTK_TOMOPY_INVALID;
     pointer_rows = (size_t) 2 * height + (size_t) 2 * pol_height;

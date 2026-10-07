@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include <variant>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -87,6 +88,18 @@ struct RenderRunningTask final {
     const void* productIdentity = nullptr;
 };
 
+struct SharedProductWaiter final {
+    std::weak_ptr<RenderChannelState> channel;
+    std::uint64_t revision = 0;
+    std::function<void(std::shared_ptr<const void>, RenderProductFailure, const std::string&, std::uint64_t)> onComplete;
+    bool GetIsCurrent() const;
+};
+struct SharedProductBuild final {
+    std::variant<VolumeLodKey, IsoSurfaceKey> key;
+    std::shared_ptr<RenderTaskChannel> execution;
+    std::vector<SharedProductWaiter> waiters;
+};
+
 struct RenderCoordinatorState final {
     explicit RenderCoordinatorState(RenderLaneStart start)
         : onTaskStart(std::move(start))
@@ -108,8 +121,13 @@ struct RenderCoordinatorState final {
     std::vector<GpuContextEntry> gpuContexts;
     std::uint64_t cacheBytes = 0;
     std::uint64_t cacheUseStamp = 0;
+    std::uint64_t productBuildCount = 0;
+    std::uint64_t joinedBuildCount = 0;
+    std::uint64_t scalarResampleBuildCount = 0;
+    std::vector<std::shared_ptr<SharedProductBuild>> builds;
     std::uint64_t topologyRevision = 0;
     std::uint64_t cpuBudgetBytes = GetDefaultCpuBudgetBytes();
+    bool isCpuBudgetEnforced = false;
     bool isAccepting = true;
     bool isStopping = false;
 };
@@ -186,6 +204,10 @@ RenderResourceState GetResourceStateLocked(
 {
     RenderResourceState result;
     result.cpuBudgetBytes = state.cpuBudgetBytes;
+    result.isCpuBudgetEnforced = state.isCpuBudgetEnforced;
+    result.productBuildCount = state.productBuildCount;
+    result.joinedBuildCount = state.joinedBuildCount;
+    result.scalarResampleBuildCount = state.scalarResampleBuildCount;
     struct ActiveAllocation final {
         const void* identity = nullptr;
         std::uint64_t bytes = 0;
@@ -282,16 +304,6 @@ RenderResourceState GetResourceStateLocked(
     for (const auto& weakChannel : state.channels) {
         const auto channel = weakChannel.lock();
         if (!channel) continue;
-        if (channel->pending
-            && channel->pending->estimatedBytes
-                <= (std::numeric_limits<std::uint64_t>::max)()
-                    - result.pendingBytes) {
-            result.pendingBytes += channel->pending->estimatedBytes;
-        }
-        else if (channel->pending) {
-            result.pendingBytes =
-                (std::numeric_limits<std::uint64_t>::max)();
-        }
         const std::uint64_t readyBytes =
             channel->transition.status == RenderProductStatus::Ready
                 && !channel->candidateIdentity
@@ -332,18 +344,13 @@ bool GetAdmissionValidLocked(
     const RenderChannelState* replacedChannel,
     const std::uint64_t candidateBytes) noexcept
 {
+    if (!state.isCpuBudgetEnforced) return true;
     const auto resources = GetResourceStateLocked(state);
     std::uint64_t total = 0;
     if (!GetSumValid(resources.activeBytes, resources.runningBytes, total)
         || !GetSumValid(total, resources.pendingBytes, total)
         || !GetSumValid(total, resources.cacheBytes, total)) {
         return false;
-    }
-    if (replacedChannel && replacedChannel->pending) {
-        const auto replacedBytes =
-            replacedChannel->pending->estimatedBytes;
-        if (replacedBytes > total) return false;
-        total -= replacedBytes;
     }
     if (replacedChannel && !replacedChannel->candidateIdentity
         && replacedChannel->transition.status
@@ -537,6 +544,7 @@ public:
     std::shared_ptr<RenderChannelState> channel;
     std::shared_ptr<std::atomic<bool>> isCancelled;
     TaskStopToken laneToken;
+    std::function<bool()> onNeeded;
     std::uint64_t requestRevision = 0;
 };
 
@@ -556,6 +564,12 @@ public:
 
 class RenderResourceCoordinator::Impl final {
 public:
+    template<class Request, class Result, class Builder, class Equal, class Cache>
+    static RenderTaskAdmission StartProduct(const std::shared_ptr<RenderCoordinatorState>& state,
+        const std::shared_ptr<RenderChannelState>& channel,
+        const std::shared_ptr<RenderTaskChannel>& execution, Request request,
+        std::function<void(Result, std::uint64_t)> onComplete, Equal onEqual, Cache onCache);
+
     explicit Impl(RenderLaneStart onTaskStart)
         : state(std::make_shared<RenderCoordinatorState>(
             std::move(onTaskStart)))
@@ -591,8 +605,8 @@ public:
                 channel,
                 isCancelled,
                 request.requestRevision,
-                request.estimatedBytes,
-                request.estimatedBytes
+                state->isCpuBudgetEnforced ? request.estimatedBytes : 0,
+                0
             };
         }
 
@@ -608,6 +622,7 @@ public:
                 tokenImpl->channel = taskChannel;
                 tokenImpl->isCancelled = cancel;
                 tokenImpl->laneToken = laneToken;
+                tokenImpl->onNeeded = request.onNeeded;
                 tokenImpl->requestRevision = request.requestRevision;
                 RenderTaskToken token(std::move(tokenImpl));
 
@@ -622,6 +637,8 @@ public:
                     }
                 }
                 // 未释放的 callable 捕获可能含输入或临时 owner；先在锁外销毁，再退役预留。
+                if (request.onFinished) request.onFinished();
+                request.onFinished = {};
                 request.work = {};
                 SetTaskComplete(
                     coordinator,
@@ -678,6 +695,10 @@ bool RenderTaskToken::GetIsStopped() const noexcept
 {
     if (!m_impl) return false;
     if (!m_impl->state || !m_impl->isCancelled) return true;
+    if (m_impl->onNeeded && !m_impl->onNeeded()) {
+        m_impl->isCancelled->store(true, std::memory_order_release);
+        return true;
+    }
     if (m_impl->laneToken.GetIsStopped()
         || m_impl->isCancelled->load(std::memory_order_acquire)) {
         return true;
@@ -686,6 +707,27 @@ bool RenderTaskToken::GetIsStopped() const noexcept
     return m_impl->state->isStopping
         || !m_impl->channel
         || m_impl->channel->isStopped;
+}
+
+bool RenderTaskToken::GetIsBudgetEnforced() const
+{
+    if (!m_impl || !m_impl->state) return false;
+    std::lock_guard<std::mutex> lock(m_impl->state->mutex);
+    return m_impl->state->isCpuBudgetEnforced;
+}
+
+bool RenderTaskToken::SetEstimatedBytes(const std::uint64_t bytes) const
+{
+    if (!m_impl) return true;
+    if (GetIsBudgetEnforced() && !SetActualBytes(bytes)) return false;
+    if (GetIsStopped()) return false;
+    std::lock_guard<std::mutex> lock(m_impl->state->mutex);
+    const auto& running = m_impl->state->running;
+    if (!running || running->channel != m_impl->channel || running->requestRevision != m_impl->requestRevision)
+        return false;
+    auto& stats = m_impl->channel->transition.stats;
+    stats.estimatedPeakBytes = std::max(stats.estimatedPeakBytes, bytes);
+    return true;
 }
 
 bool RenderTaskToken::SetActualBytes(
@@ -713,7 +755,7 @@ bool RenderTaskToken::SetActualBytes(
         state.running->accountedBytes;
     const std::uint64_t addedBytes = actualBytes > previousBytes
         ? actualBytes - previousBytes : 0;
-    if (!TryMakeCacheSpaceLocked(state, addedBytes)) {
+    if (state.isCpuBudgetEnforced && !TryMakeCacheSpaceLocked(state, addedBytes)) {
         m_impl->isCancelled->store(true, std::memory_order_release);
         SetRequestFailureLocked(
             *m_impl->channel,
@@ -733,9 +775,9 @@ bool RenderTaskToken::SetActualBytes(
             committedBytes,
             resources.cacheBytes,
             committedBytes);
-    if (!hasCommittedSum
+    if (state.isCpuBudgetEnforced && (!hasCommittedSum
         || actualBytes > state.cpuBudgetBytes
-        || committedBytes > state.cpuBudgetBytes - actualBytes) {
+        || committedBytes > state.cpuBudgetBytes - actualBytes)) {
         m_impl->isCancelled->store(true, std::memory_order_release);
         SetRequestFailureLocked(
             *m_impl->channel,
@@ -764,7 +806,10 @@ bool RenderTaskToken::SetProductOwner(
     state.productLeases.erase(std::remove_if(state.productLeases.begin(),
         state.productLeases.end(), [](const auto& lease) { return lease.owner.expired(); }),
         state.productLeases.end());
-    state.productLeases.push_back({product, product.get(), actualBytes});
+    const auto lease = std::find_if(state.productLeases.begin(), state.productLeases.end(),
+        [&product](const auto& entry) { return entry.identity == product.get(); });
+    if (lease == state.productLeases.end()) state.productLeases.push_back({product, product.get(), actualBytes});
+    else lease->bytes = std::max(lease->bytes, actualBytes);
     state.running->productIdentity = product.get();
     m_impl->channel->candidateIdentity = product.get();
     return true;
@@ -869,7 +914,7 @@ bool RenderTaskChannel::SetActiveBytes(
     std::lock_guard<std::mutex> lock(m_impl->state->mutex);
     auto& state = *m_impl->state;
     auto& channel = *m_impl->channel;
-    if (channel.isStopped
+    if (state.isStopping || channel.isStopped
         || channel.transition.status != RenderProductStatus::Ready
         || channel.transition.stats.requestRevision != requestRevision
         || channel.retiringBytes != 0
@@ -892,8 +937,8 @@ bool RenderTaskChannel::SetActiveBytes(
     channel.transition.stats.candidateBytes = 0;
     channel.transition.message.clear();
     std::uint64_t total = 0;
-    if (!GetCpuTotalLocked(state, total)
-        || total > state.cpuBudgetBytes) {
+    if (state.isCpuBudgetEnforced && (!GetCpuTotalLocked(state, total)
+        || total > state.cpuBudgetBytes)) {
         channel.transition = previousTransition;
         channel.activeBytes = previousActiveBytes;
         channel.activeProductIdentity = previousActiveIdentity;
@@ -944,8 +989,8 @@ bool RenderTaskChannel::SetCachedActive(
         channel.transition.stats.candidateBytes = 0;
         channel.transition.message.clear();
         std::uint64_t total = 0;
-        if (!GetCpuTotalLocked(state, total)
-            || total > state.cpuBudgetBytes) {
+        if (state.isCpuBudgetEnforced && (!GetCpuTotalLocked(state, total)
+            || total > state.cpuBudgetBytes)) {
             channel.pending = std::move(discardedRequest);
             channel.transition = previousTransition;
             channel.activeBytes = previousActiveBytes;
@@ -1146,12 +1191,145 @@ RenderResourceCoordinator::CreateTaskChannel(
     {
         std::lock_guard<std::mutex> lock(m_impl->state->mutex);
         if (m_impl->state->isStopping) return nullptr;
-        m_impl->state->channels.push_back(channel);
+        auto& channels = m_impl->state->channels;
+        channels.erase(std::remove_if(channels.begin(), channels.end(),
+            [](const auto& weak) { return weak.expired(); }), channels.end());
+        channels.push_back(channel);
     }
     auto channelImpl = std::make_shared<RenderTaskChannel::Impl>(
         m_impl->state, channel);
     return std::shared_ptr<RenderTaskChannel>(
         new RenderTaskChannel(std::move(channelImpl)));
+}
+
+bool SharedProductWaiter::GetIsCurrent() const
+{
+    const auto current = channel.lock();
+    return current && !current->isStopped
+        && current->transition.status == RenderProductStatus::Preparing
+        && current->transition.stats.requestRevision == revision;
+}
+
+template<class Request, class Result, class Builder, class Equal, class Cache>
+RenderTaskAdmission RenderResourceCoordinator::Impl::StartProduct(const std::shared_ptr<RenderCoordinatorState>& state,
+    const std::shared_ptr<RenderChannelState>& channel,
+    const std::shared_ptr<RenderTaskChannel>& execution, Request request,
+    std::function<void(Result, std::uint64_t)> onComplete, Equal onEqual, Cache onCache)
+{
+    if (!channel || !execution || !onComplete || request.requestRevision == 0 || !request.input
+        || !request.inputUse.GetIsPublished()) return RenderTaskAdmission::Unavailable;
+    std::shared_ptr<SharedProductBuild> build;
+    bool isJoined = false;
+    std::optional<RenderTaskRequest> discarded;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->isStopping || channel->isStopped) return RenderTaskAdmission::Stopping;
+        for (const auto& existing : state->builds) {
+            const auto key = std::get_if<decltype(request.key)>(&existing->key);
+            if (key && onEqual(*key, request.key)
+                && std::any_of(existing->waiters.begin(), existing->waiters.end(), [](const auto& waiter) { return waiter.GetIsCurrent(); })) {
+                build = existing; isJoined = true; break;
+            }
+        }
+        if (!build) {
+            if (state->builds.size() >= 64) return RenderTaskAdmission::Unavailable;
+            build = std::make_shared<SharedProductBuild>();
+            build->key = request.key; build->execution = execution;
+            state->builds.push_back(build);
+        } else ++state->joinedBuildCount;
+        discarded = std::move(channel->pending); channel->pending.reset();
+        channel->isQueued = false;
+        if (state->running && state->running->channel == channel) state->running->isCancelled->store(true);
+        channel->candidateIdentity = nullptr;
+        channel->transition.status = RenderProductStatus::Preparing;
+        channel->transition.failureReason = RenderProductFailure::None;
+        channel->transition.stats.requestRevision = request.requestRevision;
+        channel->transition.stats.candidateBytes = 0;
+        build->waiters.erase(std::remove_if(build->waiters.begin(), build->waiters.end(),
+            [](const auto& waiter) { return !waiter.GetIsCurrent(); }), build->waiters.end());
+        build->waiters.push_back({channel, request.requestRevision,
+            [onComplete = std::move(onComplete)](std::shared_ptr<const void> product, RenderProductFailure failure,
+                const std::string& message, std::uint64_t elapsed) {
+                Result result; result.failureReason = failure; result.message = message;
+                result.product = std::static_pointer_cast<typename decltype(result.product)::element_type>(product);
+                onComplete(std::move(result), elapsed);
+            }});
+    }
+    if (isJoined) return RenderTaskAdmission::Replaced;
+    RenderTaskRequest task;
+    task.requestRevision = request.requestRevision;
+    task.estimatedBytes = Builder::GetEstimatedBytes(request).value_or(0);
+    task.onNeeded = [weak = std::weak_ptr<SharedProductBuild>(build), state] {
+        const auto current = weak.lock(); if (!current) return false;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return !state->isStopping && std::any_of(current->waiters.begin(), current->waiters.end(), [](const auto& waiter) { return waiter.GetIsCurrent(); });
+    };
+    task.work = [build, state, request = std::move(request), onCache](RenderTaskToken token) {
+        { std::lock_guard<std::mutex> lock(state->mutex); ++state->productBuildCount; }
+        const auto start = std::chrono::steady_clock::now();
+        auto result = Builder().BuildProduct(request, token);
+        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count());
+        if (result.product && !token.GetIsStopped()) onCache(request.key, result.product);
+        std::vector<SharedProductWaiter> waiters;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            for (auto& waiter : build->waiters) {
+                if (!waiter.GetIsCurrent() || state->isStopping) continue;
+                auto channel = waiter.channel.lock();
+                channel->candidateIdentity = result.product.get();
+                channel->transition.status = RenderProductStatus::Ready;
+                channel->transition.stats.candidateBytes = result.product ? result.product->actualBytes : 0;
+                waiters.push_back(std::move(waiter));
+            }
+            state->builds.erase(std::remove(state->builds.begin(), state->builds.end(), build), state->builds.end());
+        }
+        for (auto& waiter : waiters) {
+            try { waiter.onComplete(result.product, result.failureReason, result.message, elapsed); } catch (...) {}
+        }
+    };
+    task.onFinished = [build, state] {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        for (const auto& waiter : build->waiters) if (waiter.GetIsCurrent()) {
+            const auto target = waiter.channel.lock();
+            SetRequestFailureLocked(*target, waiter.revision, RenderProductFailure::Cancelled,
+                "The shared build was cancelled before completion.");
+        }
+        state->builds.erase(std::remove(state->builds.begin(), state->builds.end(), build), state->builds.end());
+    };
+    const auto admission = execution->StartTask(std::move(task));
+    if (admission != RenderTaskAdmission::Accepted && admission != RenderTaskAdmission::Replaced) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        for (const auto& waiter : build->waiters) if (waiter.GetIsCurrent()) {
+            const auto target = waiter.channel.lock();
+            SetRequestFailureLocked(*target, waiter.revision,
+                admission == RenderTaskAdmission::ResourceRejected ? RenderProductFailure::ResourceRejected
+                    : RenderProductFailure::TaskRejected, "The shared build could not start.");
+        }
+        state->builds.erase(std::remove(state->builds.begin(), state->builds.end(), build), state->builds.end());
+    }
+    return admission;
+}
+
+RenderTaskAdmission RenderResourceCoordinator::StartVolumeProduct(
+    const std::shared_ptr<RenderTaskChannel>& channel, VolumeLodBuildRequest request,
+    std::function<void(VolumeLodBuildResult, std::uint64_t)> onComplete)
+{
+    if (!channel || !channel->m_impl || channel->m_impl->state != m_impl->state) return RenderTaskAdmission::Unavailable;
+    return Impl::StartProduct<VolumeLodBuildRequest, VolumeLodBuildResult, VolumeLodProductBuilder>(
+        m_impl->state, channel->m_impl->channel, CreateTaskChannel(RenderProductKind::VolumeLod),
+        std::move(request), std::move(onComplete), GetVolumeKeyEqual,
+        [this](const auto& key, const auto& product) { (void)SetVolumeProduct(key, product); });
+}
+RenderTaskAdmission RenderResourceCoordinator::StartIsoSurfaceProduct(
+    const std::shared_ptr<RenderTaskChannel>& channel, IsoSurfaceBuildRequest request,
+    std::function<void(IsoSurfaceBuildResult, std::uint64_t)> onComplete)
+{
+    if (!channel || !channel->m_impl || channel->m_impl->state != m_impl->state) return RenderTaskAdmission::Unavailable;
+    return Impl::StartProduct<IsoSurfaceBuildRequest, IsoSurfaceBuildResult, IsoSurfaceProductBuilder>(
+        m_impl->state, channel->m_impl->channel, CreateTaskChannel(RenderProductKind::IsoSurface),
+        std::move(request), std::move(onComplete), GetIsoKeyEqual,
+        [this](const auto& key, const auto& product) { (void)SetIsoSurfaceProduct(key, product); });
 }
 
 bool RenderResourceCoordinator::SendTasks()
@@ -1166,6 +1344,7 @@ bool RenderResourceCoordinator::StartStop()
     std::vector<VolumeCacheEntry> discardedVolumeCache;
     std::vector<IsoCacheEntry> discardedIsoCache;
     std::vector<GpuContextEntry> discardedGpuContexts;
+    std::vector<std::shared_ptr<SharedProductBuild>> discardedBuilds;
     {
         std::lock_guard<std::mutex> lock(m_impl->state->mutex);
         auto& state = *m_impl->state;
@@ -1199,6 +1378,7 @@ bool RenderResourceCoordinator::StartStop()
         discardedVolumeCache = std::move(state.volumeCache);
         discardedIsoCache = std::move(state.isoCache);
         discardedGpuContexts = std::move(state.gpuContexts);
+        discardedBuilds = std::move(state.builds);
         state.cacheBytes = 0;
         state.stopped.notify_all();
     }
@@ -1229,6 +1409,12 @@ RenderResourceCoordinator::GetResourceState() const
     return GetResourceStateLocked(*m_impl->state);
 }
 
+void RenderResourceCoordinator::SetScalarBuildCount()
+{
+    std::lock_guard<std::mutex> lock(m_impl->state->mutex);
+    ++m_impl->state->scalarResampleBuildCount;
+}
+
 bool RenderResourceCoordinator::SetCpuBudgetBytes(
     const std::uint64_t budgetBytes)
 {
@@ -1240,6 +1426,7 @@ bool RenderResourceCoordinator::SetCpuBudgetBytes(
         return false;
     }
     m_impl->state->cpuBudgetBytes = budgetBytes;
+    m_impl->state->isCpuBudgetEnforced = true;
     return true;
 }
 

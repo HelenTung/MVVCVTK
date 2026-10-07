@@ -1,6 +1,8 @@
 #pragma once
 
 #include <vtkImageData.h>
+#include <vtkDataArray.h>
+#include <vtkPointData.h>
 
 #include <array>
 #include <cstdint>
@@ -50,6 +52,20 @@ public:
             count *= dimension;
         }
         return count;
+    }
+
+    // 数组结构校验不依赖可选的内存准入策略。
+    static bool GetScalarStorageValid(vtkImageData* image)
+    {
+        if (!image || !image->GetPointData()) return false;
+        auto* scalars = image->GetPointData()->GetScalars();
+        if (!scalars || scalars->GetNumberOfComponents() <= 0 || scalars->GetDataTypeSize() <= 0) return false;
+        const auto* dimensions = image->GetDimensions();
+        const auto count = GetVoxelCount({dimensions[0], dimensions[1], dimensions[2]});
+        const auto components = static_cast<std::uint64_t>(scalars->GetNumberOfComponents());
+        if (!count || *count > static_cast<std::uint64_t>((std::numeric_limits<vtkIdType>::max)()) / components
+            || *count * components > (std::numeric_limits<std::size_t>::max)() / scalars->GetDataTypeSize()) return false;
+        return scalars->GetNumberOfTuples() == static_cast<vtkIdType>(*count);
     }
 
 private:

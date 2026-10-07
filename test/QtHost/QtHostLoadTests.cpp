@@ -882,10 +882,9 @@ bool GetReentrantLoadValid()
     if (!stage) return false;
     bool didReenter = false;
     const auto observer = data.AttachDataChange([&](const DataChangeSet& change) {
-        if (didReenter || std::find(change.published.begin(), change.published.end(),
-                stage->outputRef) == change.published.end()) return;
+        if (didReenter) return;
         const auto primary = data.GetDataBinding(data.GetDataGraph(), primaryVolumeBinding);
-        if (!primary) return;
+        if (!primary || primary->target != stage->outputRef) return;
         DataTransaction transaction;
         transaction.bindings.push_back({ std::string(primaryVolumeBinding),
             primary->revision, true, primary->target, original->data->self });
@@ -1080,7 +1079,8 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
         return isComplete
             && !isSucceeded
             && current && current->data->self == initial->data->self
-            && !core.sharedDataMgr->GetLoadStage();
+            && core.sharedDataMgr->GetLoadStage()
+            && core.sharedDataMgr->GetData(core.sharedDataMgr->GetDataGraph(), core.sharedDataMgr->GetLoadState().acceptedRevision);
     }
 
     if (!SendFrame(views, committedEpoch)) return false;
@@ -1691,7 +1691,8 @@ bool GetPublishLastValid()
         && minRevision == initial->binding->revision
         && maxRevision == initial->binding->revision
         && !hasRevisionDrop
-        && !dataManager->GetLoadStage();
+        && dataManager->GetLoadStage()
+        && dataManager->GetData(dataManager->GetDataGraph(), dataManager->GetLoadState().acceptedRevision);
 }
 
 bool GetLoadWarmupSkipValid()

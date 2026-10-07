@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Algorithms/PartLabelEditor.h"
@@ -59,10 +60,16 @@ struct PartEditJob final {
     RoiReadSnapshot protectionRoi;
     PartHistorySnapshot restored;
     std::shared_ptr<const LabelMap3DPayload> restoredPayload;
-    std::size_t maxWorkingBytes = 0;
+    WorkLimit maxWorkingBytes {};
     std::size_t retainedBytes = 0;
     std::uint64_t requestId = 0;
-    std::uint64_t timeoutMs = 30000;
+    WorkLimit timeoutMs{};
+};
+
+struct PartSurfaceCompletion final {
+    DataRevisionRef labels;
+    std::uint64_t requestId = 0;
+    PartSurfaceBuildResult result;
 };
 
 class PartSegmentationService final {
@@ -77,18 +84,22 @@ public:
     PartAdmissionStatus Start(
         VtkImageGridSnapshot source,
         PartSegmentationStartParams params,
-        std::size_t maxWorkingBytes,
+        WorkLimit maxWorkingBytes,
         std::uint64_t requestId,
         PartHistorySnapshot previous = {},
         std::uint64_t expectedResultRevision = 0,
         std::uint64_t expectedCatalogRevision = 0,
         std::size_t retainedSurfaceBytes = 0);
     PartAdmissionStatus StartEdit(PartEditJob edit);
+    bool StartSurface(PartSurfaceBuildRequest request, DataRevisionRef labels, std::uint64_t requestId);
+    std::optional<PartSurfaceCompletion> RemoveSurfaceComplete();
+    void StopSurface() noexcept;
     void StopRequest() noexcept;
     std::optional<PartLabelCandidate> GetComplete();
     std::optional<double> GetProgress(
         std::uint64_t requestId) const noexcept;
-    bool GetIsBusy() const;
+    bool GetIsBusy() const; // 业务准入；可选显示工作可被后续业务替换。
+    bool GetIsSurfaceBusy() const;
     std::optional<FeatureOperationState> GetExecutionState(std::uint64_t requestId) const;
     bool Stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
@@ -96,7 +107,7 @@ private:
     struct Job final {
         VtkImageGridSnapshot source;
         PartSegmentationStartParams params;
-        std::size_t maxWorkingBytes = 0;
+        WorkLimit maxWorkingBytes {};
         std::uint64_t requestId = 0;
         PartHistorySnapshot previous;
         std::uint64_t expectedResultRevision = 0;
@@ -105,6 +116,16 @@ private:
         std::optional<PartEditJob> edit;
     };
 
+    struct SurfaceJob final {
+        PartSurfaceBuildRequest request;
+        DataRevisionRef labels;
+        std::uint64_t requestId = 0;
+        std::shared_ptr<std::atomic<bool>> cancelled;
+    };
+    std::optional<SurfaceJob> m_surfaceJob;
+    std::optional<PartSurfaceCompletion> m_surfaceComplete;
+    std::shared_ptr<std::atomic<bool>> m_surfaceCancel;
+    bool m_isSurfaceBusy = false;
     void WorkerLoop() noexcept;
     PartLabelCandidate BuildCandidate(const Job& job) noexcept;
     void SetProgress(

@@ -3,6 +3,7 @@
 #include "Data/Internal/VtkDataResourceLease.h"
 
 #include <vtkCellArray.h>
+#include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkDataArray.h>
 #include <vtkCellData.h>
@@ -11,6 +12,8 @@
 #include <vtkDoubleArray.h>
 #include <vtkIdList.h>
 #include <vtkImageData.h>
+#include <vtkInformation.h>
+#include <vtkInformationVector.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -353,21 +356,61 @@ VtkDataBridge::CreateImagePayload(
             std::memcpy(bytes->data(), mask->GetVoidPointer(0), maskByteCount);
             maskBytes = std::move(bytes);
         }
-        double range[2] = {};
-        image->GetScalarRange(range);
-        auto payload = std::make_shared<const ImageGrid3DPayload>(
+        // 外部 VTK 对象可能带有过期范围缓存；只验证已隔离的冻结副本。
+        auto frozenScalars = vtkSmartPointer<vtkDataArray>::Take(
+            vtkDataArray::CreateDataArray(scalars->GetDataType()));
+        frozenScalars->SetNumberOfComponents(scalars->GetNumberOfComponents());
+        frozenScalars->SetVoidArray(values->data(), scalars->GetNumberOfValues(), 1);
+        std::array<double, 2> range{};
+        frozenScalars->GetRange(range.data(), 0);
+        auto storage = std::shared_ptr<ImageScalarStorage>(
+            new ImageScalarStorage(values, values->data(), values->size()));
+        storage->m_verifiedRange = ImageScalarStorage::ScalarRange{
+            valueType, std::vector<std::array<double, 2>>(scalars->GetNumberOfComponents()) };
+        // 第一次 GetRange 已计算所有组件，后续读取只复制 VTK 缓存。
+        for (int component = 0; component < scalars->GetNumberOfComponents(); ++component) {
+            frozenScalars->GetRange(storage->m_verifiedRange->components[component].data(), component);
+        }
+        auto payload = std::shared_ptr<const ImageGrid3DPayload>(new ImageGrid3DPayload(
             *geometry,
             valueType,
             static_cast<std::size_t>(scalars->GetNumberOfComponents()),
-            std::move(values),
+            std::move(storage),
             std::move(maskBytes),
-            std::array<double, 2>{ range[0], range[1] },
-            std::move(metadata));
+            range,
+            std::move(metadata), ImageGrid3DPayload::SnapshotUse{}));
         return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {
         return {};
     }
+}
+
+std::shared_ptr<const ImageGrid3DPayload> VtkDataBridge::BuildImagePayload(
+    vtkSmartPointer<vtkImageData> image, ImageMetadata metadata) const
+{
+    if (!image || image->GetReferenceCount() != 1 || !image->GetPointData()) return {};
+    const auto geometry = GetGridGeometry(image);
+    auto* values = image->GetPointData()->GetScalars();
+    std::size_t bytes = 0;
+    if (!geometry || !values || values->GetReferenceCount() != 1 || !GetByteCount(values, bytes)) return {};
+    const auto type = GetImageValueType(values->GetDataType());
+    const auto components = values->GetNumberOfComponents();
+    std::array<double, 2> range{};
+    // 内部生产者已计算的范围仍在原数组上；移交时保留各组件可信结果。
+    values->GetRange(range.data(), 0);
+    auto owner = std::make_shared<vtkSmartPointer<vtkDataArray>>(values);
+    auto storage = std::shared_ptr<ImageScalarStorage>(new ImageScalarStorage(owner, values->GetVoidPointer(0), bytes));
+    storage->m_verifiedRange = ImageScalarStorage::ScalarRange{
+        type, std::vector<std::array<double, 2>>(components) };
+    for (int component = 0; component < components; ++component) {
+        values->GetRange(storage->m_verifiedRange->components[component].data(), component);
+    }
+    image->GetPointData()->SetScalars(nullptr);
+    auto payload = std::shared_ptr<const ImageGrid3DPayload>(new ImageGrid3DPayload(
+        *geometry, type, static_cast<std::size_t>(components), std::move(storage), {},
+        range, std::move(metadata), ImageGrid3DPayload::SnapshotUse{}));
+    return payload->GetValid() ? payload : nullptr;
 }
 
 std::shared_ptr<const LabelMap3DPayload>
@@ -589,12 +632,43 @@ VtkImageGridSnapshot VtkDataBridge::GetImageGrid(DataSnapshot data) const
     const auto* payload = dynamic_cast<const ImageGrid3DPayload*>(
         data->payload.get());
     if (!payload || !payload->GetValid() || !payload->GetValues()) return {};
-    const auto image = BuildImageShell(
-        payload->GetGeometry(),
-        GetVtkValueType(payload->GetValueType()),
-        payload->GetComponentCount(),
-        payload->GetValues()->data(),
-        payload->GetValues()->size());
+    const auto& geometry = payload->GetGeometry();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetExtent(geometry.extent[0], geometry.extent[1], geometry.extent[2],
+        geometry.extent[3], geometry.extent[4], geometry.extent[5]);
+    image->SetSpacing(geometry.spacing.data());
+    image->SetOrigin(geometry.origin.data());
+    image->SetDirectionMatrix(geometry.direction.data());
+    auto scalars = vtkSmartPointer<vtkDataArray>::Take(
+        vtkDataArray::CreateDataArray(GetVtkValueType(payload->GetValueType())));
+    const auto scalarSize = GetImageValueBytes(payload->GetValueType());
+    const auto count = payload->GetValues()->size() / scalarSize;
+    if (!scalars || count > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max())) return {};
+    scalars->SetNumberOfComponents(static_cast<int>(payload->GetComponentCount()));
+    // 可信只读壳不共享管线对象；写标量的算法必须创建独立输出。
+    // save=1 不让 VTK 释放借用数组，真实存储 owner 负责释放。
+    scalars->SetVoidArray(payload->GetValues()->m_data, static_cast<vtkIdType>(count), 1);
+    const auto& verified = payload->GetValues()->m_verifiedRange;
+    if (verified && verified->valueType == payload->GetValueType()
+        && verified->components.size() == payload->GetComponentCount()) {
+        // VTK 9.4 的普通分量范围缓存；不冒充 finite-only 或向量模长范围。
+        // 每个壳拥有独立 information，Modified() 仍按 VTK 原生规则清除此缓存。
+        auto ranges = vtkSmartPointer<vtkInformationVector>::New();
+        ranges->SetNumberOfInformationObjects(scalars->GetNumberOfComponents());
+        // PER_COMPONENT 存在即表示整组有效，不能只填首组件。
+        for (int component = 0; component < scalars->GetNumberOfComponents(); ++component) {
+            ranges->GetInformationObject(component)->Set(
+                vtkDataArray::COMPONENT_RANGE(), verified->components[component].data(), 2);
+        }
+        scalars->GetInformation()->Set(vtkAbstractArray::PER_COMPONENT(), ranges);
+    }
+    auto owner = new ImageScalarBytes(payload->GetValues());
+    auto keepAlive = vtkSmartPointer<vtkCallbackCommand>::New();
+    keepAlive->SetClientData(owner);
+    keepAlive->SetClientDataDeleteCallback([](void* p) { delete static_cast<ImageScalarBytes*>(p); });
+    keepAlive->SetCallback([](vtkObject*, unsigned long, void*, void*) {});
+    scalars->AddObserver(vtkCommand::DeleteEvent, keepAlive);
+    image->GetPointData()->SetScalars(scalars);
     if (!image) return {};
     vtkSmartPointer<vtkImageData> mask;
     if (payload->GetValidityMask()) {

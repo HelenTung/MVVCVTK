@@ -764,8 +764,8 @@ void TestCompletionCapacity(Checks& checks)
     const auto source = BuildSphere();
     auto params = GetParams(SurfaceDeterminationMethod::GlobalIsoPreview);
     std::size_t acceptedCount = 0;
-    bool wasBounded = false;
-    for (std::uint64_t requestId = 1; requestId <= 80; ++requestId) {
+    constexpr std::uint64_t requestCount = 160;
+    for (std::uint64_t requestId = 1; requestId <= requestCount; ++requestId) {
         const auto admission = service.Start(
             source,
             params,
@@ -775,7 +775,6 @@ void TestCompletionCapacity(Checks& checks)
             ++acceptedCount;
         }
         else {
-            wasBounded = admission == SurfaceAdmissionStatus::Unavailable;
             break;
         }
     }
@@ -804,7 +803,7 @@ void TestCompletionCapacity(Checks& checks)
             ++successCount;
         }
     }
-    checks.Get(wasBounded, "service bounds outstanding completion capacity");
+    checks.Get(acceptedCount == requestCount, "service grows outstanding completion capacity beyond 64");
     checks.Get(
         acceptedCount != 0 && completionCount == acceptedCount,
         "every capacity-admitted request produces one completion");

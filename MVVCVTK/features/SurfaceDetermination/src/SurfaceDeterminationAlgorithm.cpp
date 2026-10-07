@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
 #include "SurfaceProfileSolver.h"
@@ -2049,7 +2050,7 @@ void SetInterfaceWinding(const VolumeView &volume, const ResolvedParams &params,
 
 SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                         const SurfaceDeterminationStartParams &inputParams,
-                                        const std::size_t maxWorkingBytes,
+                                        const WorkLimit maxWorkingBytes,
                                         const SurfaceCancelCheck &getCancelled,
                                         const SurfaceProgressCallback &onProgress,
                                         const SurfaceAlgorithmInputs &inputs)
@@ -2330,7 +2331,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
 
 SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     const VtkImageGridSnapshot &source, const SurfaceDeterminationStartParams &params,
-    const std::size_t maxWorkingBytes, const SurfaceCancelCheck &getCancelled,
+    const WorkLimit maxWorkingBytes, const SurfaceCancelCheck &getCancelled,
     const SurfaceProgressCallback &onProgress, const SurfaceAlgorithmInputs &inputs)
 {
     try {

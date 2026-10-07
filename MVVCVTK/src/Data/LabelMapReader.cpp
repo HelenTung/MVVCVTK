@@ -1,6 +1,7 @@
 #include "Data/LabelMapReader.h"
 #include "Data/DataPayloads.h"
 #include "Data/Internal/DataResourceUse.h"
+#include "Data/Internal/ReadBudget.h"
 
 #include <algorithm>
 #include <cstring>
@@ -337,7 +338,7 @@ LabelMapReadResult LabelMapReader::GetReadResult(
     if (!planned.plan || planned.error != LabelMapError::None) {
         return result;
     }
-    if (planned.plan->requiredBytes > request.maxBytes) {
+    if (planned.plan->requiredBytes > GetReadBudget(request.maxBytes)) {
         result.error = LabelMapError::TooLarge;
         return result;
     }
@@ -387,8 +388,8 @@ LabelMapReadChunkResult LabelMapReader::GetReadChunk(
         result.isDone = true;
         return result;
     }
-    const std::size_t budget = std::min(
-        request.maxBytes, imageChunkLimit);
+    const std::size_t budget = request.maxBytes
+        ? std::min(request.maxBytes, imageChunkLimit) : imageChunkLimit;
     const std::size_t maxVoxels = budget / plan.voxelBytes;
     if (maxVoxels == 0) {
         result.error = LabelMapError::TooLarge;

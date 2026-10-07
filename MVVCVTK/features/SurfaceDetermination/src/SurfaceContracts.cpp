@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "SurfaceContracts.h"
 
 #include <algorithm>
@@ -162,7 +163,7 @@ bool GetInputsCurrent(const TrustedDataReadPort &data, const DataGraphSnapshot &
 }
 
 std::string BuildParameters(const SurfaceDeterminationStartParams& requested,
-    const SurfaceDeterminationStartParams& resolved, const std::string& frame, const std::size_t workingBytes)
+    const SurfaceDeterminationStartParams& resolved, const std::string& frame, const WorkLimit workingBytes)
 {
     std::ostringstream out; out.imbue(std::locale::classic());
     out << "surface-parameters 2 " << std::quoted(frame) << ' ' << workingBytes << '\n';
@@ -176,17 +177,17 @@ std::string BuildParameters(const SurfaceDeterminationStartParams& requested,
 }
 
 bool GetParameters(const std::string& text, SurfaceDeterminationStartParams& requested,
-    SurfaceDeterminationStartParams& resolved, std::string& frame, std::size_t& workingBytes)
+    SurfaceDeterminationStartParams& resolved, std::string& frame, WorkLimit& workingBytes)
 {
     if (text.size() > 2U * 1024U * 1024U)
         return false;
     std::istringstream in(text); in.imbue(std::locale::classic());
     std::string tag, nextFrame;
     unsigned version = 0;
-    std::size_t nextBytes = 0;
+    WorkLimit nextBytes;
     SurfaceDeterminationStartParams nextRequested, nextResolved;
     if (!(in >> tag >> version >> std::quoted(nextFrame) >> nextBytes) || tag != "surface-parameters" ||
-        (version != 1 && version != 2) || nextFrame.empty() || !nextBytes)
+        (version != 1 && version != 2) || nextFrame.empty() || nextBytes == 0)
         return false;
     if (version == 1)
     {

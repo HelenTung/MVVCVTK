@@ -31,7 +31,7 @@ public:
     virtual std::optional<ImageDescriptor> GetImageDescriptor() const = 0;
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;
     virtual ImageReadResult GetImageReadResult(
-        std::size_t maxReadBytes = imageReadLimit) const = 0;
+        std::size_t maxReadBytes = 0) const = 0;
     virtual ImageReadResult GetImageReadResult(
         const ImageReadRequest& request,
         const TaskStopToken& stopToken) const = 0;
@@ -72,6 +72,11 @@ public:
     }
 
     virtual DataLoadStageSnapshot GetLoadStage() const = 0;
+    // 接纳正式修订；此步骤不切换 primary binding 或视图。
+    virtual DataLoadState GetLoadState() const = 0;
+    virtual bool SetLoadActivation(const DataRevisionRef&, DataBindingRevision) = 0;
+    virtual void SetLoadStatus(const DataRevisionRef&, DataLoadStatus) = 0;
+    virtual bool SetLoadAccepted(const DataLoadStageSnapshot& stage) = 0;
     virtual bool SetLoadCommit(
         const DataLoadStageSnapshot& expectedStage,
         VtkImageGridSnapshot& published) = 0;

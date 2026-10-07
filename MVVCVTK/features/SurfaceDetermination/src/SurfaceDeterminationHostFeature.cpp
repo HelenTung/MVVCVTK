@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
 #include "Data/DataPayloads.h"
@@ -119,7 +120,7 @@ bool GetStartValid(const SurfaceDeterminationStartParams& params)
 
 bool GetConfigValid(const SurfaceDeterminationConfig& config)
 {
-    if (config.maxWorkingBytes == 0) return false;
+    if (WorkLimit(config.maxWorkingBytes) == 0) return false;
     auto params = config.defaultStart;
     if (!GetTargetsUsed(params.targetViews)) {
         params.targetViews.viewRoles.push_back(
@@ -572,7 +573,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             requestItem->second.params = params;
             requestItem->second.inputs = inputs;
             m_service->SetRetainedBytes(GetRetainedBytes());
-            admission.status = m_service->Start(source, params, m_config.maxWorkingBytes, requestId, inputs);
+            admission.status = m_service->Start(source, params, WorkLimit(m_config.maxWorkingBytes), requestId, inputs);
         }
         catch (...) {
             if (requestItem != m_requests.end()) {
@@ -1495,7 +1496,7 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
     generation.requestedParams.targetViews = {};
     generation.resolvedParams = result.resolvedParams;
     generation.canonicalParameters = SurfaceContract::BuildParameters(
-        generation.requestedParams, generation.resolvedParams, generation.coordinateFrame, m_config.maxWorkingBytes);
+        generation.requestedParams, generation.resolvedParams, generation.coordinateFrame, WorkLimit(m_config.maxWorkingBytes));
     generation.sourceBinding = request.source->binding;
     if (isFormal) {
         generation.meshRevision = { m_data->CreateDataEntityId(), 1 };
@@ -1552,7 +1553,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         if (count > (SIZE_MAX - publicationBytes) / width)
             return false;
         publicationBytes += count * width;
-        return publicationBytes <= m_config.maxWorkingBytes;
+        return publicationBytes <= WorkLimit(m_config.maxWorkingBytes);
     };
     if (!charge(result.points.capacity(), sizeof(SurfacePointRecord)) ||
         !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
@@ -1573,7 +1574,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
     constexpr std::size_t qualityBytesPerPoint = 11U * sizeof(double) * 2U;
     if (stagedGeneration->points->size()
-        > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
+        > WorkLimit(m_config.maxWorkingBytes) / qualityBytesPerPoint) return {};
     std::vector<MeshAttribute> attributes{
         { "measurement.valid", 1, {} },
         { "measurement.fit-residual", 1, {} },

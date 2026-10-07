@@ -120,6 +120,12 @@ bool HostCommandRouter::Impl::Dispatch(
         return sendSync(false);
     };
 
+    if (const auto* value = dynamic_cast<const HostLoadActivationRequest*>(&request)) {
+        const auto route = GetDataRoute(HostViewTarget{});
+        const auto data = route ? route->data.lock() : nullptr;
+        return data && data->StartDataActivation(value->dataRevision, value->expectedBindingRevision,
+            std::move(onComplete)) == TaskAdmissionResult::Accepted;
+    }
     if (auto* value = dynamic_cast<HostLoadRequest*>(&request)) {
         return LoadFile(
             std::move(*value),

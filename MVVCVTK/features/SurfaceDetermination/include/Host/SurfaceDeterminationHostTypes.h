@@ -64,7 +64,7 @@ struct SurfaceGenerationSnapshot final {
 
 struct SurfaceDeterminationConfig final {
     SurfaceDeterminationStartParams defaultStart;
-    std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
+    std::optional<std::size_t> maxWorkingBytes {};
     bool isOverlayVisible = true;
 };
 

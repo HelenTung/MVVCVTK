@@ -1,5 +1,6 @@
 // 测试用途：验证 VTK 对象与数据图之间的冻结快照、桥接和类型转换。
 #include "Data/DataGraphStore.h"
+#include "Data/DataManager.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
 
@@ -12,6 +13,8 @@
 #include <limits>
 #include <cmath>
 #include <vtkImageData.h>
+#include <vtkInformation.h>
+#include <vtkInformationVector.h>
 #include <vtkPointData.h>
 #include <vtkDataArray.h>
 #include <vtkPoints.h>
@@ -21,6 +24,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -93,11 +97,137 @@ bool GetImageRoundTripValid()
     return Check(
         !rejectedMask && payload && snapshot
             && first && second && first == second
-            && resultValues && resultValues[0] == 1.0f
+            && resultValues && reinterpret_cast<const void*>(resultValues) == payload->GetValues()->data()
+            && resultValues[0] == 1.0f
             && resultValues[3] == 4.0f
             && resultMask && resultMask[0] == 1
             && first->image->GetSpacing()[1] == 0.75,
         "image/mask isolation, geometry, or cache failed");
+}
+
+bool GetRangeCachePresent(vtkDataArray* scalars)
+{
+    auto* ranges = scalars->GetInformation()->Get(vtkAbstractArray::PER_COMPONENT());
+    return ranges && ranges->GetNumberOfInformationObjects() > 0
+        && ranges->GetInformationObject(0)->Has(vtkDataArray::COMPONENT_RANGE());
+}
+
+bool GetScalarRangeReuseValid()
+{
+    VtkDataBridge bridge;
+    DataGraphStore store;
+    for (const auto type : {VTK_FLOAT, VTK_DOUBLE, VTK_INT}) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(4, 1, 1);
+        image->AllocateScalars(type, 1);
+        auto* source = image->GetPointData()->GetScalars();
+        for (int i = 0; i < 4; ++i) source->SetComponent(i, 0, i);
+        double obsolete[2];
+        source->GetRange(obsolete);
+        // 外部写者未发 Modified 也不能把旧范围带入新的正式快照。
+        source->SetComponent(0, 0, -3);
+        source->SetComponent(3, 0, 9);
+        const auto payload = bridge.CreateImagePayload(image);
+        const auto data = SetPayload(store, payload);
+        const auto first = bridge.GetImageGrid(data);
+        VtkDataBridge otherBridge;
+        const auto other = otherBridge.GetImageGrid(data);
+        if (!Check(first && other && payload->GetScalarRange() == std::array<double, 2>{-3, 9},
+            "import trusted stale external scalar range")) return false;
+        auto* a = first->image->GetPointData()->GetScalars();
+        auto* b = other->image->GetPointData()->GetScalars();
+        if (!Check(a != b && a->GetVoidPointer(0) == b->GetVoidPointer(0)
+            && GetRangeCachePresent(a) && GetRangeCachePresent(b),
+            "new independent scalar shells did not inherit verified range before first query")) return false;
+        const auto time = a->GetMTime();
+        double range[2];
+        first->image->GetScalarRange(range);
+        if (!Check(range[0] == -3 && range[1] == 9 && a->GetMTime() == time,
+            "range reuse changed scalar values or MTime")) return false;
+        a->Modified();
+        if (!Check(!GetRangeCachePresent(a) && GetRangeCachePresent(b),
+            "Modified failed to invalidate only its own shell range")) return false;
+        a->GetRange(range);
+        if (!Check(range[0] == -3 && range[1] == 9, "range after invalidation changed")) return false;
+
+        const auto geometryCopy = payload->CreateGeometrySnapshot(payload->GetGeometry());
+        const auto maskCopy = geometryCopy->CreateMaskSnapshot(std::vector<std::uint8_t>(4, 255));
+        const auto copied = bridge.GetImageGrid(SetPayload(store, maskCopy));
+        if (!Check(copied && GetRangeCachePresent(copied->image->GetPointData()->GetScalars()),
+            "geometry or mask snapshot lost verified scalar range")) return false;
+
+        if (type == VTK_FLOAT) {
+            const auto checkUntrusted = [&](std::shared_ptr<const ImageGrid3DPayload> candidate) {
+                const auto view = bridge.GetImageGrid(SetPayload(store, candidate));
+                if (!view) return false;
+                auto* scalars = view->image->GetPointData()->GetScalars();
+                if (GetRangeCachePresent(scalars)) return false;
+                scalars->GetRange(range);
+                return range[0] != 100 && range[1] != 200;
+            };
+            auto bytes = std::make_shared<std::vector<std::uint8_t>>(payload->GetValues()->begin(), payload->GetValues()->end());
+            if (!Check(checkUntrusted(std::make_shared<const ImageGrid3DPayload>(payload->GetGeometry(),
+                ImageValueType::Float32, 1, bytes, DataBytes{}, std::array<double,2>{100,200})),
+                "caller-declared range was installed as verified cache")) return false;
+            if (!Check(checkUntrusted(std::make_shared<const ImageGrid3DPayload>(payload->GetGeometry(),
+                ImageValueType::Int32, 1, payload->GetValues(), DataBytes{}, std::array<double,2>{100,200})),
+                "range survived scalar type reinterpretation")) return false;
+            auto geometry = payload->GetGeometry();
+            geometry.dimensions[0] = 2; geometry.extent[1] = 1;
+            if (!Check(checkUntrusted(std::make_shared<const ImageGrid3DPayload>(geometry,
+                ImageValueType::Float32, 2, payload->GetValues(), DataBytes{}, std::array<double,2>{100,200})),
+                "range survived component layout reinterpretation")) return false;
+        }
+    }
+
+    // RAW 内部独占移交路径在发布前已计算范围，重新建壳不能再次遍历标量。
+    RawVolumeDataManager loader;
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "range-cache-test";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://range-cache-test";
+    const auto layout = VolumeLayout::Create({2,2,2}, {1,1,1}, {}, {1,0,0,0,1,0,0,0,1}, metadata);
+    const auto buffer = layout ? VolumeBuffer::Create({-3,1,2,3,4,5,6,9}, *layout) : std::optional<VolumeBuffer>{};
+    if (!Check(buffer && loader.SetFromBuffer(*buffer), "owned scalar load failed")) return false;
+    const auto stage = loader.GetLoadStage();
+    const auto owned = stage ? bridge.GetImageGrid(SetPayload(store, stage->output.payload)) : VtkImageGridSnapshot{};
+    if (!Check(owned && GetRangeCachePresent(owned->image->GetPointData()->GetScalars()),
+        "owned load lost its computed range at the scalar handoff")) return false;
+    double range[2]; owned->image->GetScalarRange(range);
+    return Check(range[0] == -3 && range[1] == 9, "owned range values changed");
+}
+
+bool GetScalarRangeNonfiniteValid()
+{
+    VtkDataBridge bridge;
+    DataGraphStore store;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(3,1,1); image->AllocateScalars(VTK_DOUBLE, 2);
+    auto* input = image->GetPointData()->GetScalars();
+    const double values[] = {1, -std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN(), 7, 3, std::numeric_limits<double>::infinity()};
+    std::memcpy(input->GetVoidPointer(0), values, sizeof(values));
+    const auto payload = bridge.CreateImagePayload(image);
+    const auto view = bridge.GetImageGrid(SetPayload(store, payload));
+    if (!Check(view && GetRangeCachePresent(view->image->GetPointData()->GetScalars()),
+        "NaN or multi-component import lost valid first-component range")) return false;
+    auto* output = view->image->GetPointData()->GetScalars();
+    if (!Check(!output->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+        "ordinary range was incorrectly reused as finite-only range")) return false;
+    for (int component = 0; component < 2; ++component) {
+        double expected[2], actual[2];
+        input->GetRange(expected, component); output->GetRange(actual, component);
+        if (!Check(expected[0] == actual[0] && expected[1] == actual[1],
+            "ordinary multi-component range differs from VTK")) return false;
+        input->GetFiniteRange(expected, component); output->GetFiniteRange(actual, component);
+        if (!Check(expected[0] == actual[0] && expected[1] == actual[1],
+            "finite-only range differs from VTK")) return false;
+    }
+    image->SetDimensions(1,1,1); image->AllocateScalars(VTK_DOUBLE, 1);
+    *static_cast<double*>(image->GetScalarPointer()) = std::numeric_limits<double>::infinity();
+    if (!Check(!bridge.CreateImagePayload(image), "nonfinite formal range was accepted")) return false;
+    *static_cast<double*>(image->GetScalarPointer()) = std::numeric_limits<double>::quiet_NaN();
+    return Check(!bridge.CreateImagePayload(image), "all-NaN formal range was accepted");
 }
 
 bool GetLabelRoundTripValid()
@@ -423,6 +553,8 @@ int main()
 {
     return GetBorrowedRenderResourceReleased() && GetPreparedResultReleased() && GetArrayLeaseValid()
         && GetImageRoundTripValid()
+        && GetScalarRangeReuseValid()
+        && GetScalarRangeNonfiniteValid()
         && GetLabelRoundTripValid()
         && GetMeshRoundTripValid()
         && GetCacheIdentityValid()

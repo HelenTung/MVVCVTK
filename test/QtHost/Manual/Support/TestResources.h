@@ -5,6 +5,7 @@
 #include <cstdint>
 namespace Manual {
 struct TestResources {
+    bool hasExplicitWorkingLimit = false;
     std::uint64_t workingBytes = 512ULL * 1024 * 1024;
     std::uint64_t publishBytes = 256ULL * 1024 * 1024;
     std::uint64_t physicalBytes = 0, availableBytes = 0, commitAvailableBytes = 0;

@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
 #include "ThicknessMaterialField.h"
@@ -67,7 +68,8 @@ class Kernel final
     double m_epsilon = 0, m_minSpacing = 0;
     double m_sourceMargin = 0;
     struct SourceMeasurement { std::size_t triangle = 0; unsigned rule = 0; std::optional<double> value; };
-    std::size_t m_nodeBudget = 0, m_sourceCapacity = 0, m_workerCount = 1;
+    WorkLimit m_nodeBudget;
+    std::size_t m_sourceCapacity = 0, m_workerCount = 1;
 
     bool GetIsSourceLocal() const
     {
@@ -253,12 +255,15 @@ class Kernel final
         const auto &limits = m_work.archive.limits;
         if (pc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
             tc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
-            pc > limits.maxWorkingBytes / 24U || tc > limits.maxWorkingBytes / 256U)
+            pc > WorkLimit(limits.maxWorkingBytes) / 24U || tc > WorkLimit(limits.maxWorkingBytes) / 256U)
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
-        if (pc * 24U > limits.maxWorkingBytes - tc * 256U)
+        if (pc > std::numeric_limits<std::size_t>::max() / 24U
+            || tc > (std::numeric_limits<std::size_t>::max() - pc * 24U) / 256U)
+            throw Failure{ThicknessStatus::InvalidInput, "Mesh byte count overflows."};
+        if (pc * 24U > WorkLimit(limits.maxWorkingBytes) - tc * 256U)
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
         const auto meshBytes = pc * 24U + tc * 256U;
-        if (meshBytes > limits.maxWorkingBytes)
+        if (meshBytes > WorkLimit(limits.maxWorkingBytes))
             throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
         auto points = vtkSmartPointer<vtkPoints>::New();
         points->SetDataTypeToDouble();
@@ -328,28 +333,37 @@ class Kernel final
                               "Mesh must be closed and consistently manifold."};
         }
         const double divisions = std::ceil(maxEdge / m_params.sampleSpacing);
-        if (!std::isfinite(divisions) || divisions > 64)
+        if (!std::isfinite(divisions) || divisions >= std::numeric_limits<unsigned>::max())
             throw Failure{ThicknessStatus::BudgetExceeded, "Surface subdivision limit exceeded."};
         m_n = static_cast<unsigned>(std::max(divisions, 1.0));
-        if (tc > limits.maxSamples / (m_n * m_n))
+        const auto n = static_cast<std::size_t>(m_n);
+        if (n > std::numeric_limits<std::size_t>::max() / n
+            || tc > std::numeric_limits<std::size_t>::max() / (n * n))
+            throw Failure{ThicknessStatus::InvalidInput, "Sample count overflows."};
+        if (tc > WorkLimit(limits.maxSamples) / (n * n))
             throw Failure{ThicknessStatus::BudgetExceeded, "Sample count limit exceeded."};
-        m_sampleCount = tc * m_n * m_n;
-        if (m_sampleCount > (limits.maxWorkingBytes - meshBytes) / (sizeof(ThicknessSample) + 640U))
+        m_sampleCount = tc * n * n;
+        if (m_sampleCount > std::numeric_limits<std::size_t>::max() / (sizeof(ThicknessSample) + 640U))
+            throw Failure{ThicknessStatus::InvalidInput, "Sample byte count overflows."};
+        if (m_sampleCount > (WorkLimit(limits.maxWorkingBytes) - meshBytes) / (sizeof(ThicknessSample) + 640U))
             throw Failure{ThicknessStatus::BudgetExceeded,
                           "Sampling and topology exceed working budget."};
         // 每个并行槽独占射线单元与有界路径工作区，归并仍按来源顺序执行。
-        auto remaining = limits.maxWorkingBytes - meshBytes -
+        auto remaining = WorkLimit(limits.maxWorkingBytes) - meshBytes -
                          m_sampleCount * (sizeof(ThicknessSample) + 640U);
-        m_sourceCapacity = tc > limits.maxSamples / 9U ? limits.maxSamples : tc * 9U;
+        // 缺省限额按本次原始三角形的实际 Gauss 来源数分配，不预留无穷容量。
+        m_sourceCapacity = WorkLimit(limits.maxSamples).GetBound(tc * 9U);
+        if (m_sourceCapacity > std::numeric_limits<std::size_t>::max() / sizeof(SourceMeasurement))
+            throw Failure{ThicknessStatus::InvalidInput, "Source byte count overflows."};
         if (m_sourceCapacity > remaining / sizeof(SourceMeasurement))
             throw Failure{ThicknessStatus::BudgetExceeded, "Source values exceed working budget."};
-        remaining -= m_sourceCapacity * sizeof(SourceMeasurement);
+        remaining = remaining - m_sourceCapacity * sizeof(SourceMeasurement);
         const std::size_t workerBytes = 8U * 1024U * 1024U + tc;
         if (remaining <= workerBytes)
             throw Failure{ThicknessStatus::BudgetExceeded, "Material path workspace exceeds budget."};
-        m_workerCount = std::min({std::size_t(8),
-            std::size_t(std::max(1U, std::thread::hardware_concurrency())),
-            std::max(std::size_t(1), remaining / workerBytes / 2)});
+        const auto hardwareWorkers = std::min(std::size_t(8),
+            std::size_t(std::max(1U, std::thread::hardware_concurrency())));
+        m_workerCount = std::max(std::size_t(1), (remaining / workerBytes / 2U).GetBound(hardwareWorkers));
         m_nodeBudget = (remaining - m_workerCount * workerBytes) / 192U;
         m_poly = vtkSmartPointer<vtkPolyData>::New();
         m_poly->SetPoints(points);
@@ -789,8 +803,8 @@ bool GetDisplayValid(const ThicknessDisplay &d) noexcept
 }
 bool GetConfigValid(const ThicknessConfig &c) noexcept
 {
-    return c.maxWorkingBytes >= 4096 && c.maxSamples > 0 && c.deadlineMilliseconds > 0 &&
-           c.deadlineMilliseconds <= 3600000 && c.stopTimeoutMilliseconds <= 5000;
+    return WorkLimit(c.maxWorkingBytes) >= 4096 && WorkLimit(c.maxSamples) > 0 && (!WorkLimit(c.deadlineMilliseconds).GetValue() || WorkLimit(c.deadlineMilliseconds) > 0) &&
+           (!WorkLimit(c.deadlineMilliseconds).GetValue() || WorkLimit(c.deadlineMilliseconds) <= 3600000) && c.stopTimeoutMilliseconds <= 5000;
 }
 std::optional<double> GetValue(const Field &field, const ThicknessPoint &modelPoint)
 {

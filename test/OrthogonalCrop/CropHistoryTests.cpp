@@ -1,4 +1,5 @@
 #include "Interaction/CropHistory.h"
+#include "Interaction/CropHistoryQueue.h"
 
 #include <iostream>
 
@@ -118,10 +119,55 @@ bool GetNoPartialStage()
     const auto next=Append(history,root,2);
     return Check(next!=id&&next!=abandoned.head,"deleted/reserved identity reused");
 }
+bool GetLargeHistoryValid()
+{
+    const auto makeArchive=[](CropNodeId count,bool isChain) {
+        CropDocumentArchive archive;archive.sourceRevision=Ref(1);archive.rootNodeId=1;
+        archive.requestedHead=archive.appliedHead=isChain?count:1;
+        archive.nodes.reserve(static_cast<std::size_t>(count));
+        archive.nodes.push_back({1,0,{}});
+        for(CropNodeId id=2;id<=count;++id) {
+            CropOpItem operation;operation.operationIndex=id;
+            archive.nodes.push_back({id,isChain?id-1:1,operation});
+        }
+        return archive;
+    };
+    const auto checkAppend=[](CropHistory& history,CropNodeId parent) {
+        const auto next=Append(history,parent,1);
+        if(!next)return false;
+        CropHistoryQueue queue;CropEditRequest request;
+        request.documentId=history.GetDocumentId();request.requestId=1;
+        request.expectedRevision=history.GetRevision();request.nodeId=next;request.kind=CropEditKind::Append;
+        const auto admitted=queue.StartRequest(history,request);
+        if(!admitted)return false;
+        auto stage=queue.BuildNext(history);
+        if(stage.failureReason!=CropFailure::None)return false;
+        queue.SetComplete(history,std::move(stage));
+        return queue.GetOutcome(1)->status==CropEditStatus::Succeeded;
+    };
+    CropFailure failure;
+    auto deepArchive=makeArchive(5001,true);
+    auto deep=CropHistory::CreateFromArchive(deepArchive,failure);
+    if(!Check(deep&&failure==CropFailure::None
+        &&deep->GetPath(deep->GetAppliedHead()).size()==5000
+        &&checkAppend(*deep,deep->GetAppliedHead())
+        &&deep->GetPath(deep->GetAppliedHead()).size()==5002,"deep history restore/append/queue still has a 4096 limit"))return false;
+    deepArchive.nodes.back().parentNodeId=deepArchive.nodes.back().nodeId;
+    if(!Check(!CropHistory::CreateFromArchive(deepArchive,failure),"deep archive cycle accepted"))return false;
+    deepArchive.nodes.back().parentNodeId=999999;
+    if(!Check(!CropHistory::CreateFromArchive(deepArchive,failure),"deep archive missing parent accepted"))return false;
+    auto wide=CropHistory::CreateFromArchive(makeArchive(100001,false),failure);
+    if(!Check(wide&&failure==CropFailure::None&&checkAppend(*wide,wide->GetRootId())
+        &&wide->GetNodeCount()==100003,"large history restore/append/queue still has a 100000 limit"))return false;
+    const auto all=wide->GetSnapshot(0,0),explicitPage=wide->GetSnapshot(0,100003);
+    return Check(all.nodes.size()==100003&&!all.nextPageAfter
+        &&explicitPage.nodes.size()==100003&&!explicitPage.nextPageAfter
+        &&wide->GetSnapshot(0,17).nodes.size()==17,"history pagination silently truncates at 100000");
+}
 }
 
 int GetCropHistoryQueueFailures();
 int GetCropHistoryFailures()
 {
-    return GetCropHistoryQueueFailures()+(!GetBranchesValid())+(!GetPruneProtected())+(!GetFallbackValid())+(!GetNoPartialStage());
+    return GetCropHistoryQueueFailures()+(!GetBranchesValid())+(!GetPruneProtected())+(!GetFallbackValid())+(!GetNoPartialStage())+(!GetLargeHistoryValid());
 }

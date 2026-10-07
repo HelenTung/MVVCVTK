@@ -178,9 +178,11 @@ struct CropInputSnapshot final {
 };
 
 struct CropBuildOptions final {
-    std::size_t availableRamBytes = 512ULL * 1024 * 1024;
+    // 0 selects available system RAM when the worker starts; nonzero is an explicit work budget.
+    std::size_t availableRamBytes = 0;
     double meshTolerance = 0.05;
-    std::size_t maxCells = 1000000;
+    // 0 不启用单元数量预算；误差容差与数值终止条件仍有效。
+    std::size_t maxCells = 0;
     std::uint32_t maxDepth = 64;
     bool operator==(const CropBuildOptions& other) const noexcept {
         return availableRamBytes==other.availableRamBytes && meshTolerance==other.meshTolerance
@@ -197,7 +199,7 @@ struct CropBuildParams final {
     std::size_t nodeCount = 0;
     std::size_t availableRamBytes = 0;
     double meshTolerance = 0.05;
-    std::size_t maxCells = 1000000;
+    std::size_t maxCells = 0;
     std::uint32_t maxDepth = 64;
 };
 
