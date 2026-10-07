@@ -156,7 +156,7 @@ class Kernel final
                 r[a] += m_geometry.direction[a * 3 + k] * i[k] * m_geometry.spacing[k];
         return r;
     }
-    // -2缺失支持，-1其他材料/未知，0背景，1唯一选定材料。整数不经double。
+    // -2缺失支持，-1其他材料/未知，0背景，1选定材料标签集合。整数不经double。
     int Material(const std::array<std::int64_t, 3> &i) const
     {
         std::size_t offset = 0, stride = 1;
@@ -181,7 +181,10 @@ class Kernel final
                         return -1;
                 }
                 const auto label = static_cast<std::uint64_t>(v);
-                return label == m_work.archive.input.materialLabel ? 1 : label == 0 ? 0 : -1;
+                if (label == 0) return 0;
+                const auto &selected = m_work.archive.input.materialLabels;
+                return selected.empty() || std::find(selected.begin(), selected.end(), label) != selected.end()
+                           ? 1 : -1;
             },
             m_work.labels->GetValues());
     }
@@ -861,7 +864,7 @@ Candidate BuildField(const Work &w) noexcept
     {
         if (!w.source || !w.labels || !w.mesh || !GetParamsValid(w.archive.params) ||
             !GetConfigValid(w.archive.limits) || !GetEvaluationValid(w.archive.evaluation) ||
-            w.archive.input.materialLabel == 0 || static_cast<unsigned>(w.archive.input.unit) < 1 ||
+            std::find(w.archive.input.materialLabels.begin(), w.archive.input.materialLabels.end(), 0) != w.archive.input.materialLabels.end() || static_cast<unsigned>(w.archive.input.unit) < 1 ||
             static_cast<unsigned>(w.archive.input.unit) > 2)
             return {ThicknessStatus::InvalidInput, {}, {}, {}, "Invalid thickness work input."};
         return Kernel(w).Build();

@@ -71,8 +71,6 @@ void TestExplicitPlaneAndScalarTypes(Checks& checks)
         auto params = GetParams();
         params.initialIsoValue = scalarType == VTK_UNSIGNED_CHAR
             ? 127.5 : 500.0;
-        params.minimumContrast = scalarType == VTK_UNSIGNED_CHAR
-            ? 20.0 : 50.0;
         const auto result = Build(BuildPlane(scalarType, boundary), params);
         checks.Get(
             result.status == SurfaceResultStatus::Succeeded,
@@ -91,18 +89,18 @@ void TestExplicitPlaneAndScalarTypes(Checks& checks)
     }
 }
 
-void TestAutomaticIsoAndPeakMode(Checks& checks)
+void TestMaterialRangeEstimation(Checks& checks)
 {
     auto automatic = GetParams();
     automatic.initialIsoValue.reset();
     const auto automaticResult = Build(BuildSphere(), automatic);
     checks.Get(
         automaticResult.status == SurfaceResultStatus::Succeeded,
-        "automatic ISO50 accepts a separated bimodal sphere");
+        "material range estimation accepts a separated bimodal sphere");
     checks.Get(
         automaticResult.initialIsoValue > 350.0
             && automaticResult.initialIsoValue < 650.0,
-        "automatic ISO50 remains between material peaks");
+        "material range estimation remains between material peaks");
 
     const auto flat = BuildSnapshot(
         { 16, 16, 16 },
@@ -117,9 +115,9 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
     checks.Get(
         flatResult.failureReason
             == SurfaceFailureReason::ThresholdUnreliable,
-        "automatic ISO50 rejects a single flat peak");
+        "material range estimation rejects a single flat peak");
 
-    auto threshold = GetParams(SurfaceDeterminationMethod::AutomaticIso50);
+    auto threshold = GetParams(SurfaceDeterminationMethod::MaterialIso);
     threshold.initialIsoValue.reset();
     // 大于旧网格预检预算的体积仍能用固定空间估计阈值；低值伪影不得取代主空气峰。
     const auto artifact = BuildSnapshot(
@@ -127,21 +125,20 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
         {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, VTK_FLOAT,
         [](const Point3& point) { return point[0] < -8.0 ? -900.0
             : point[0] > 90.0 ? 1000.0 : 0.0; }, {}, 1, {-10, -10, -10});
-    const auto estimate = Build(artifact, threshold, 64U * 1024U);
-    const auto repeated = Build(artifact, threshold, 64U * 1024U);
+    const auto estimate = Build(artifact, threshold);
+    const auto repeated = Build(artifact, threshold);
     checks.Get(estimate.status == SurfaceResultStatus::Succeeded
         && estimate.isoEstimate && estimate.isoEstimate->isoValue > 450.0
         && estimate.isoEstimate->isoValue < 550.0
         && estimate.isoEstimate->sampleCount <= 128U * 128U * 128U
-        && estimate.requiredBytes <= 64U * 1024U
-        && estimate.points.empty() && estimate.triangleIndices.empty(),
-        "bounded threshold mode excludes a low artifact and allocates no mesh");
+        && !estimate.points.empty() && !estimate.triangleIndices.empty(),
+        "material estimation excludes low artifacts and publishes the same new surface");
     checks.Get(estimate.isoEstimate && repeated.isoEstimate
         && estimate.isoEstimate->isoValue == repeated.isoEstimate->isoValue
         && estimate.parameterFingerprint == repeated.parameterFingerprint,
         "threshold sampling is deterministic with nonzero negative extents");
     checks.Get(Build(flat, threshold).failureReason == SurfaceFailureReason::ThresholdUnreliable,
-        "threshold-only mode refuses degenerate data instead of fabricating an iso");
+        "material estimation refuses degenerate data instead of fabricating an iso");
     checks.Get(Build(artifact, threshold, 1024U).failureReason == SurfaceFailureReason::BudgetExceeded,
         "threshold workspace budget is enforced independently of mesh budget");
     const auto cancelled = SurfaceDeterminationAlgorithm::BuildSurface(artifact, threshold,
@@ -152,7 +149,7 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
     const auto thinMaterial = BuildSnapshot(
         {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
         [](const Point3& point) { return point[0] == 61 || point[0] == 62 ? 1000.0 : point[0] >= 112 ? 0.0 : -100.0; });
-    const auto thinEstimate = Build(thinMaterial, threshold, 64U * 1024U);
+    const auto thinEstimate = Build(thinMaterial, threshold);
     checks.Get(thinEstimate.status == SurfaceResultStatus::Succeeded && thinEstimate.isoEstimate
         && std::abs(thinEstimate.isoEstimate->isoValue-450.0) < 3.0
         && thinEstimate.isoEstimate->materialValue > 990.0,
@@ -161,34 +158,26 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
         {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
         [](const Point3& point) { return point[0] < 80 ? -100.0 : point[0] < 112
             ? 600.0 + .8*(point[1]+point[2]-127.0) : 2000.0; });
-    const auto dominantEstimate = Build(multipleMaterials, threshold, 64U*1024U);
+    const auto dominantEstimate = Build(multipleMaterials, threshold);
     checks.Get(dominantEstimate.status == SurfaceResultStatus::Succeeded && dominantEstimate.isoEstimate
         && std::abs(dominantEstimate.isoEstimate->isoValue-250.0) < 5.0,
-        "automatic ISO50 selects the largest material population instead of a sharper brighter minority peak");
+        "material range estimation selects the largest material population instead of a sharper brighter minority peak");
     const auto materialDominated = BuildSnapshot(
         {128,128,128}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
         [](const Point3& point) { return point[0] < 32 ? 0.0 : point[0] < 116 ? 800.0 : 1200.0; });
-    const auto materialDominatedEstimate = Build(materialDominated, threshold, 64U*1024U);
+    const auto materialDominatedEstimate = Build(materialDominated, threshold);
     checks.Get(materialDominatedEstimate.status == SurfaceResultStatus::Succeeded && materialDominatedEstimate.isoEstimate
         && std::abs(materialDominatedEstimate.isoEstimate->isoValue-400.0) < 3.0,
         "the tallest material peak is not mistaken for air when material occupies most of the input");
     const auto negativeMaterial = BuildSnapshot(
         {32,32,32}, {1,1,1}, {0,0,0}, {1,0,0,0,1,0,0,0,1}, VTK_FLOAT,
         [](const Point3& point) { return point[0] < 24 ? -1000.0 : -200.0; });
-    const auto negativeEstimate = Build(negativeMaterial, threshold, 64U*1024U);
+    const auto negativeEstimate = Build(negativeMaterial, threshold);
     checks.Get(negativeEstimate.status == SurfaceResultStatus::Succeeded && negativeEstimate.isoEstimate
         && std::abs(negativeEstimate.isoEstimate->isoValue+600.0) < 2.0,
         "ISO50 remains in the input scalar domain and never clamps or takes the absolute value of valid negative thresholds");
 
-    constexpr double boundary = 15.35;
-    auto peakParams = GetParams(SurfaceDeterminationMethod::GradientPeak);
-    const auto peakResult = Build(BuildPlane(VTK_FLOAT, boundary), peakParams);
-    checks.Get(
-        peakResult.status == SurfaceResultStatus::Succeeded,
-        "gradient peak mode succeeds");
-    checks.Get(
-        GetPlaneMeanError(peakResult, boundary) <= 0.15,
-        "gradient peak mode reaches subvoxel plane tolerance");
+
 }
 
 void TestQualityFlags(Checks& checks)
@@ -211,58 +200,14 @@ void TestQualityFlags(Checks& checks)
     checks.Get(invalidResult.execution.skippedCellCount > 0 && invalidResult.acceptedPointCount == 0,
                "invalid cells are counted and cannot become accepted seeds");
 
-    auto clippedParams = GetParams();
-    clippedParams.profileHalfLengthModel = 3.0;
-    const auto clippedResult = Build(
-        BuildPlane(VTK_FLOAT, 0.55), clippedParams);
-    const bool hasClipped = std::any_of(
-        clippedResult.points.begin(), clippedResult.points.end(),
-        [](const SurfacePointRecord& point) {
-            return GetSurfaceFlag(
-                point.flags, SurfacePointFlags::ProfileClipped);
-        });
-    checks.Get(hasClipped, "data-edge profile clipping is flagged");
-
-    const auto thinWall = BuildSnapshot(
-        { 32, 16, 16 },
-        { 1.0, 1.0, 1.0 },
-        { 0.0, 0.0, 0.0 },
-        { 1.0, 0.0, 0.0,
-          0.0, 1.0, 0.0,
-          0.0, 0.0, 1.0 },
-        VTK_FLOAT,
-        [](const Point3& point) {
-            return GetSmoothInside(std::abs(point[0] - 15.5) - 1.25);
-        });
-    auto wallParams = GetParams();
-    wallParams.componentSelection = SurfaceComponentSelection::All;
-    wallParams.profileHalfLengthModel = 4.0;
-    const auto wallResult = Build(thinWall, wallParams);
-    const bool hasMultiple = std::any_of(
-        wallResult.points.begin(), wallResult.points.end(),
-        [](const SurfacePointRecord& point) {
-            return GetSurfaceFlag(
-                point.flags, SurfacePointFlags::MultipleCrossings);
-        });
-    checks.Get(hasMultiple, "thin-wall profiles report multiple crossings");
-
-    auto offsetParams = GetParams();
-    offsetParams.initialIsoValue = 100.0;
-    offsetParams.maximumOffsetModel = 0.10;
-    const auto offsetResult = Build(BuildPlane(), offsetParams);
-    const bool hasExcessive = std::any_of(
-        offsetResult.points.begin(), offsetResult.points.end(),
-        [](const SurfacePointRecord& point) {
-            return GetSurfaceFlag(
-                point.flags, SurfacePointFlags::ExcessiveOffset);
-        });
-    checks.Get(hasExcessive, "excessive seed displacement is flagged");
-    checks.Get(
-        offsetResult.rejectedPointCount > 0,
-        "excessive displacement is excluded from accepted points");
-
+    const auto material = Build(BuildPlane(), GetParams());
+    bool unchanged = !material.points.empty();
+    for (const auto &point : material.points)
+        unchanged = unchanged && point.positionModel == point.seedPositionModel && point.offsetFromSeed == 0;
+    checks.Get(unchanged && material.execution.sampledProfileCount == 0,
+               "material surface never relocates seeds through a retired local fit");
     auto previewParams = GetParams(
-        SurfaceDeterminationMethod::GlobalIsoPreview);
+        SurfaceDeterminationMethod::MaterialIso);
     const auto previewResult = Build(
         BuildPlane(
             VTK_FLOAT,
@@ -350,14 +295,11 @@ void TestNoiseAndParameterValidation(Checks& checks)
             == SurfaceFailureReason::InvalidGeometry,
         "correct-type mask with mismatched geometry is rejected");
 
-    auto excessiveSamples = GetParams();
-    excessiveSamples.profileHalfLengthModel = 100.0;
-    excessiveSamples.profileSampleStepModel = 0.001;
-    excessiveSamples.maximumOffsetModel = 1.0;
-    const auto sampleResult = Build(BuildPlane(), excessiveSamples);
-    checks.Get(
-        sampleResult.failureReason == SurfaceFailureReason::InvalidGeometry,
-        "profile sample limit is enforced");
+    auto invalidRange = GetParams();
+    invalidRange.materialRange = std::array<double, 2>{500, 500};
+    checks.Get(Build(BuildPlane(), invalidRange).failureReason == SurfaceFailureReason::InvalidGeometry,
+               "degenerate material range remains invalid");
+
 }
 
 void TestCancellationAndBudget(Checks& checks)
@@ -416,11 +358,23 @@ void TestMaterialIso(Checks &checks)
                "material range belongs to the request and changes identity");
     if (!result.points.empty())
     {
-        const auto replay = SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+        const auto replay = SurfaceDeterminationAlgorithm::GetPointDiagnostic(
             source, result.resolvedParams, result.points[result.points.size() / 2], {});
         checks.Get(replay.isAvailable && replay.point.localThreshold == 40,
                    "diagnostic replay uses the first frozen material range");
     }
+    auto inferred = params;
+    inferred.materialRange.reset();
+    const auto inferredResult = Build(source, inferred);
+    auto explicitSource = inferred;
+    explicitSource.materialRange = std::array<double, 2>{-100, 200};
+    const auto explicitSourceResult = Build(source, explicitSource);
+    bool same = inferredResult.status == SurfaceResultStatus::Succeeded &&
+        inferredResult.points.size() == explicitSourceResult.points.size();
+    if (same) for (std::size_t i=0;i<inferredResult.points.size();++i)
+        same = same && inferredResult.points[i].positionModel == explicitSourceResult.points[i].positionModel;
+    checks.Get(same && inferredResult.resolvedParams.materialRange == explicitSource.materialRange,
+               "explicit ISO uses source range without an unrelated peak-estimation rejection");
     params.initialIsoValue = 200;
     checks.Get(Build(source, params).status == SurfaceResultStatus::Failed,
                "material threshold must be strictly inside the material range");
@@ -437,7 +391,7 @@ int GetSurfaceAlgorithmFailCount()
 {
     Checks checks;
     TestExplicitPlaneAndScalarTypes(checks);
-    TestAutomaticIsoAndPeakMode(checks);
+    TestMaterialRangeEstimation(checks);
     TestQualityFlags(checks);
     TestNoiseAndParameterValidation(checks);
     TestCancellationAndBudget(checks);

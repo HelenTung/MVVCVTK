@@ -92,7 +92,7 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     w.mesh = std::make_shared<const SurfaceMeshPayload>(std::move(vertices), std::move(triangles),
                                                         std::move(attributes));
     w.archive.input = {
-        GetTestDataRef(1),        GetTestDataRef(2), GetTestDataRef(3), {}, {}, {}, 1,
+        GetTestDataRef(1),        GetTestDataRef(2), GetTestDataRef(3), {}, {}, {}, {1},
         ThicknessUnit::Millimeter};
     auto &p = w.archive.params;
     p.maxDistance = 10 * scale;
@@ -353,6 +353,28 @@ void Algorithm()
     Check(oriented.status == ThicknessStatus::Succeeded && oriented.statistics.minimum &&
               std::abs(*oriented.statistics.minimum - 6) < 1e-7,
           "anisotropic rotated nonzero extent uses physical lengths");
+    auto allParts = BuildSlab();
+    auto partLabels = std::make_shared<std::vector<std::uint64_t>>(512, 0);
+    for (int z=2; z<=3; ++z) for (int y=2; y<=5; ++y) for (int x=2; x<=5; ++x)
+        (*partLabels)[x+8*(y+8*z)] = (x%2) ? 1 : 2;
+    allParts.labels = std::make_shared<const LabelMap3DPayload>(allParts.labels->GetGeometry(),
+        LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(partLabels)});
+    allParts.archive.input.materialLabels.clear();
+    const auto allResult = ThicknessAlgorithm::BuildField(allParts);
+    allParts.archive.input.materialLabels = {1,2};
+    const auto selectedResult = ThicknessAlgorithm::BuildField(allParts);
+    bool sameField = allResult.field.nodes && selectedResult.field.nodes &&
+        allResult.field.nodes->size()==selectedResult.field.nodes->size();
+    if(sameField) for(std::size_t i=0;i<allResult.field.nodes->size();++i) {
+        const auto &a=(*allResult.field.nodes)[i], &b=(*selectedResult.field.nodes)[i];
+        sameField=sameField && a.index==b.index && a.validWeight==b.validWeight && a.thickness==b.thickness;
+    }
+    Check(allResult.status==ThicknessStatus::Succeeded && selectedResult.status==ThicknessStatus::Succeeded &&
+        allResult.statistics.validCount==result.statistics.validCount && sameField,
+        "all nonzero component labels and an explicit material set produce the same normal-offset field");
+    allParts.archive.input.materialLabels={0};
+    Check(ThicknessAlgorithm::BuildField(allParts).status==ThicknessStatus::InvalidInput,
+        "background label cannot be supplied as selected material");
     auto wide = BuildSlab();
     const auto hugeLabel = std::numeric_limits<std::uint64_t>::max() - 2;
     auto integers = std::make_shared<std::vector<std::uint64_t>>(512, 0);
@@ -363,7 +385,7 @@ void Algorithm()
     wide.labels = std::make_shared<const LabelMap3DPayload>(
         wide.labels->GetGeometry(),
         LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(integers)});
-    wide.archive.input.materialLabel = hugeLabel;
+    wide.archive.input.materialLabels = {hugeLabel};
     const auto exactLabel = ThicknessAlgorithm::BuildField(wide);
     Check(exactLabel.status == ThicknessStatus::Succeeded &&
               exactLabel.statistics.validCount == result.statistics.validCount,
@@ -601,7 +623,8 @@ void Lifecycle()
     Check(snapshot && snapshot->isCurrent && snapshot->statistics.minimum,
           "read immutable public result");
     const auto archive = feature->GetArchive(outcome.result);
-    Check(archive && archive->params.maxDistance == request.params->maxDistance,
+    Check(archive && archive->params.maxDistance == request.params->maxDistance &&
+        archive->schemaVersion==3 && archive->input.materialLabels==request.input->materialLabels,
           "complete recipe recoverable");
     const bool hasSampleTarget = snapshot
         && snapshot->statistics.minimumSample.has_value()

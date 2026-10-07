@@ -55,19 +55,7 @@ bool GetRoleSupported(const HostRenderViewRole role)
 
 bool GetMethodValid(const SurfaceDeterminationMethod method)
 {
-    switch (method) {
-    case SurfaceDeterminationMethod::GlobalIsoPreview:
-    case SurfaceDeterminationMethod::LocalAdaptiveIso50:
-    case SurfaceDeterminationMethod::GradientPeak:
-    case SurfaceDeterminationMethod::AutomaticIso50:
-    case SurfaceDeterminationMethod::LocalRelativeIso:
-    case SurfaceDeterminationMethod::EdgeModelFit:
-    case SurfaceDeterminationMethod::PairedEdgeModelFit:
-    case SurfaceDeterminationMethod::MaterialIso:
-        return true;
-    default:
-        return false;
-    }
+    return method == SurfaceDeterminationMethod::MaterialIso;
 }
 
 bool GetSelectionValid(const SurfaceComponentSelection selection)
@@ -82,24 +70,11 @@ bool GetSelectionValid(const SurfaceComponentSelection selection)
     }
 }
 
-bool GetOptionalPositive(const std::optional<double>& value)
-{
-    return !value || (std::isfinite(*value) && *value > 0.0);
-}
-
 bool GetStartValid(const SurfaceDeterminationStartParams& params)
 {
-    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue) ||
-        !SurfaceContract::GetInputValid(params) || !GetMethodValid(params.method) ||
+    if (!SurfaceContract::GetInputValid(params) || !GetMethodValid(params.method) ||
         !GetSelectionValid(params.componentSelection) ||
-        !std::isfinite(params.minimumContrast) || params.minimumContrast < 0.0 ||
-        (params.initialIsoValue && !std::isfinite(*params.initialIsoValue)) ||
-        !GetOptionalPositive(params.profileHalfLengthModel) ||
-        !GetOptionalPositive(params.profileSampleStepModel) ||
-        (params.maximumOffsetModel &&
-         (!std::isfinite(*params.maximumOffsetModel) || *params.maximumOffsetModel < 0.0)) ||
-        (params.profileSmoothingSigmaModel &&
-         (!std::isfinite(*params.profileSmoothingSigmaModel) || *params.profileSmoothingSigmaModel < 0.0)))
+        (params.initialIsoValue && !std::isfinite(*params.initialIsoValue)))
     {
         return false;
     }
@@ -242,7 +217,7 @@ public:
         SurfaceDeterminationRequest request,
         SurfaceDeterminationCallback onComplete);
     SurfaceDeterminationState GetState() const;
-    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef revision, std::uint64_t pointIndex) const;
+    SurfacePointDiagnostic GetPointDiagnostic(DataRevisionRef revision, std::uint64_t pointIndex) const;
     SurfaceRestoreState GetResultValidity(DataRevisionRef revision) const;
     std::vector<FeatureOperationState> GetOperationStates() const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
@@ -533,18 +508,6 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             }
             if (!GetRoiCurrent(inputs.roi, params.sourcePolicy)) return admission;
         }
-        if (params.materialLabels)
-            inputs.materialLabels = m_data->GetData(graph, *params.materialLabels);
-        if (params.initialSurface)
-            inputs.initialSurface = m_data->GetData(graph, *params.initialSurface);
-        for (const auto &ref : {params.materialLabels, params.initialSurface})
-            if (ref && (!m_data->GetData(graph, *ref) ||
-                        (params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
-                         !SurfaceContract::GetSourceCurrent(*m_data, graph, *ref))))
-            {
-                admission.status = SurfaceAdmissionStatus::Unavailable;
-                return admission;
-            }
         if (SurfaceDeterminationAlgorithm::GetInputFailure(source, params, inputs) !=
             SurfaceFailureReason::None)
             return admission;
@@ -568,8 +531,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             requestItem = inserted.first;
             requestItem->second.hasCompleteBoundary = params.componentSelection
                     == SurfaceComponentSelection::All
-                && !params.analysisRoi && params.minimumObjectVoxels <= 1
-                && !params.initialSurface && !params.materialLabels;
+                && !params.analysisRoi && params.minimumObjectVoxels <= 1;
             requestItem->second.params = params;
             requestItem->second.inputs = inputs;
             m_service->SetRetainedBytes(GetRetainedBytes());
@@ -601,10 +563,6 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 if (ref != inputs.roi->GetRevision() && ref != source->data->self)
                     operationInputs.push_back({"analysis-roi.input-" + std::to_string(index++), ref});
         }
-        if (inputs.materialLabels)
-            requestItem->second.operation.inputs.push_back({"material-labels", inputs.materialLabels->self});
-        if (inputs.initialSurface)
-            requestItem->second.operation.inputs.push_back({"initial-surface", inputs.initialSurface->self});
         requestItem->second.operation.status = FeatureRunStatus::Preparing;
         requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
@@ -773,32 +731,22 @@ bool SurfaceDeterminationHostFeature::Impl::GetRequestInputsSame(const RequestEn
     if (!GetSourceSame(request.source, request.params.sourcePolicy)
         || !GetRoiCurrent(request.inputs.roi, request.params.sourcePolicy))
         return false;
-    const auto graph = m_data->GetDataGraph();
-    for (const auto &input : {request.inputs.materialLabels, request.inputs.initialSurface})
-        if (input)
-        {
-            if (!m_data->GetData(graph, input->self))
-                return false;
-            if (request.params.sourcePolicy == DataPublishPolicy::RequireCurrentInputs &&
-                !SurfaceContract::GetSourceCurrent(*m_data, graph, input->self))
-                return false;
-        }
     return true;
 }
 
-SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagnostic(
+SurfacePointDiagnostic SurfaceDeterminationHostFeature::Impl::GetPointDiagnostic(
     const DataRevisionRef revision, const std::uint64_t pointIndex) const
 {
     const auto generation = m_store.GetGeneration(revision);
     if (!m_data || !generation || !generation->points || pointIndex >= generation->points->size())
     {
-        SurfaceProfileDiagnostic result;
+        SurfacePointDiagnostic result;
         result.message = "Surface generation or point is unavailable.";
         return result;
     }
     if (generation->algorithmRevision != surfaceAlgorithmRevision)
     {
-        SurfaceProfileDiagnostic result;
+        SurfacePointDiagnostic result;
         result.message = "Surface algorithm revision is incompatible with diagnostic replay.";
         return result;
     }
@@ -807,11 +755,7 @@ SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::Impl::GetProfileDiagno
     if (generation->resolvedParams.analysisRoi)
         inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
                                   generation->sourceRevision).roi;
-    if (generation->resolvedParams.materialLabels)
-        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
-    if (generation->resolvedParams.initialSurface)
-        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
-    return SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+    return SurfaceDeterminationAlgorithm::GetPointDiagnostic(
         m_data->GetImageGrid(graph, generation->sourceRevision), generation->resolvedParams,
         (*generation->points)[static_cast<std::size_t>(pointIndex)], inputs);
 }
@@ -860,13 +804,7 @@ SurfaceRestoreState SurfaceDeterminationHostFeature::Impl::GetResultValidity(
     if (generation->resolvedParams.analysisRoi)
         inputs.roi = m_data->GetRoi(graph, *generation->resolvedParams.analysisRoi,
                                   generation->sourceRevision).roi;
-    if (generation->resolvedParams.materialLabels)
-        inputs.materialLabels = m_data->GetData(graph, *generation->resolvedParams.materialLabels);
-    if (generation->resolvedParams.initialSurface)
-        inputs.initialSurface = m_data->GetData(graph, *generation->resolvedParams.initialSurface);
-    if ((generation->resolvedParams.analysisRoi && !inputs.roi) ||
-        (generation->resolvedParams.materialLabels && !inputs.materialLabels) ||
-        (generation->resolvedParams.initialSurface && !inputs.initialSurface))
+    if (generation->resolvedParams.analysisRoi && !inputs.roi)
     {
         state.status = SurfaceRestoreStatus::MissingInput;
         state.message = "A recipe input is unavailable.";
@@ -1293,6 +1231,9 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
             SurfaceDeterminationState ready;
             ready.stage = SurfaceDeterminationStage::Ready;
             ready.sourceRevision = generation->sourceRevision;
+            ready.purpose = generation->purpose;
+            ready.resultScope = generation->resultScope;
+            ready.isoEstimate = generation->isoEstimate;
             ready.resultRevision = generation->resultRevision;
             ready.progress01 = 1.0;
             ready.pointCount = generation->points ? generation->points->size() : 0;
@@ -1425,7 +1366,7 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(SurfaceJobComplet
     }
     if (isLatest && m_isAttached && callbackResult.status == SurfaceResultStatus::Succeeded
         && request.params.sourcePolicy != DataPublishPolicy::AllowHistoricalResult
-        && purpose != SurfaceTaskPurpose::Estimate && (m_isDisplayPending
+        && (m_isDisplayPending
             || (published && GetResultBinding(request.params.resultScope).target != published->self))) {
         callbackResult.failureReason = SurfaceFailureReason::DisplayFailed;
         callbackResult.message = "Surface calculation completed; display has not followed the result.";
@@ -1539,7 +1480,6 @@ void SurfaceDeterminationHostFeature::Impl::SetTransientResult(const RequestEntr
         m_isDisplayPending = !SetDisplayProjection();
         if (m_isDisplayPending) SetDisplayFailure();
     }
-    else SetState(std::move(ready));
 }
 
 DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
@@ -1688,6 +1628,8 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
             ready.stage = SurfaceDeterminationStage::Ready; ready.progress01 = 1.0;
             ready.purpose = SurfaceTaskPurpose::Determine; ready.resultScope = request.params.resultScope;
             ready.resultRevision = stagedGeneration->resultRevision;
+            ready.sourceRevision = stagedGeneration->sourceRevision;
+            ready.isoEstimate = stagedGeneration->isoEstimate;
             ready.pointCount = stagedGeneration->points->size(); ready.objectCount = static_cast<std::uint32_t>(stagedGeneration->objects->size());
             ready.acceptedPointCount = result.acceptedPointCount; ready.rejectedPointCount = result.rejectedPointCount;
             SetState(std::move(ready));
@@ -1718,6 +1660,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         ready.purpose = SurfaceTaskPurpose::Determine;
         ready.resultScope = request.params.resultScope;
         ready.sourceRevision = stagedGeneration->sourceRevision;
+        ready.isoEstimate = stagedGeneration->isoEstimate;
         ready.resultRevision = stagedGeneration->resultRevision;
         ready.progress01 = 1.0;
         ready.pointCount = stagedGeneration->points->size();
@@ -1821,10 +1764,10 @@ std::shared_ptr<const SurfaceGenerationSnapshot>
 SurfaceDeterminationHostFeature::GetPreviewSnapshot() const
 { return m_impl ? m_impl->GetPreviewSnapshot() : nullptr; }
 
-SurfaceProfileDiagnostic SurfaceDeterminationHostFeature::GetProfileDiagnostic(
+SurfacePointDiagnostic SurfaceDeterminationHostFeature::GetPointDiagnostic(
     const DataRevisionRef revision, const std::uint64_t pointIndex) const
 {
-    return m_impl ? m_impl->GetProfileDiagnostic(revision, pointIndex) : SurfaceProfileDiagnostic{};
+    return m_impl ? m_impl->GetPointDiagnostic(revision, pointIndex) : SurfacePointDiagnostic{};
 }
 
 SurfaceRestoreState SurfaceDeterminationHostFeature::GetResultValidity(const DataRevisionRef revision) const

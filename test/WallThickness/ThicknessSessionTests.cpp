@@ -419,7 +419,7 @@ void TestSession(Acceptance c)
                                    std::string(primaryVolumeBinding),
                                    {},
                                    {},
-                                   c.label,
+                                   {c.label},
                                    c.unit};
     request.params = c.params;
     request.params->materialThreshold = mesh->resolvedParams.initialIsoValue;

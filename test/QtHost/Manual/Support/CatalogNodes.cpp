@@ -213,10 +213,9 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
         children.append(Node("surface:" + Ref(s["mesh"]), "表面网格 · " + s["points"].toString() + " 点", !s["hasResult"].toBool() ? "已过期" : s["hasMeasurement"].toBool() ? "测量表面" : "预览网格",
             {"SamplePoints", "Visibility", "OpenAlignment", "Clear", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart"}, {}, objects));
     }
-    if (module == "Surface" && s["hasIso"].toBool()) children.append(Node("surface-iso", "阈值估计 · " + QString::number(s["isoEstimate"].toObject()["iso"].toDouble()), "当前结果", {"MaterialIso", "LocalAdaptiveIso50", "GradientPeak", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart"},
+    if (module == "Surface" && s["hasIso"].toBool()) children.append(Node("surface-iso", "材料阈值 · " + QString::number(s["isoEstimate"].toObject()["iso"].toDouble()), "当前结果", {"MaterialIso", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart"},
         {{"MaterialIso", QJsonObject{{"initialIsoValue", s["isoEstimate"].toObject()["iso"]},
-             {"materialRange", QJsonArray{s["isoEstimate"].toObject()["background"], s["isoEstimate"].toObject()["material"]}}}},
-         {"LocalAdaptiveIso50", QJsonObject{{"initialIsoValue", s["isoEstimate"].toObject()["iso"]}}}, {"GradientPeak", QJsonObject{{"initialIsoValue", s["isoEstimate"].toObject()["iso"]}}}}));
+             {"materialRange", QJsonArray{s["isoEstimate"].toObject()["background"], s["isoEstimate"].toObject()["material"]}}}}}));
     if (module == "Alignment") {
         QJsonArray details;
         if (result["result"] == s["lastResult"]) for (const auto value : result["residuals"].toArray()) { const auto residual = value.toObject();

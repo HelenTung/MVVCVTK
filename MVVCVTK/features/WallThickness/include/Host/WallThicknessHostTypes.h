@@ -88,8 +88,9 @@ struct ThicknessInput final
     // 源灰度支持 Float32/Float64 及不超过 32 位的整数；标签编号仍按整数精确比较。
     DataRevisionRef source, labels, mesh;
     std::string sourceBinding, labelsBinding, meshBinding;
-    // 单一高灰度材料；标签用于身份与边界覆盖核验，材料路径由原始灰度定义。
-    std::uint64_t materialLabel = 0;
+    // 同一高灰度材料可包含多个零件标签；空集合选择全部非零标签，0 始终是背景。
+    // 标签只核验身份与支持，连续材料路径仍由原始灰度及阈值定义。
+    std::vector<std::uint64_t> materialLabels;
     // 所有坐标、长度参数与输出使用该单位；不隐式改变源数据尺度。
     ThicknessUnit unit = ThicknessUnit::Unknown;
 };
@@ -201,7 +202,7 @@ struct ThicknessRegion final
 
 struct ThicknessArchive final
 {
-    std::uint32_t schemaVersion = 2;
+    std::uint32_t schemaVersion = 3;
     std::string algorithmVersion = "wall-thickness-normal-offset-field-2";
     ThicknessInput input;
     ThicknessParams params;

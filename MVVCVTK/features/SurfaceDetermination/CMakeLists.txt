@@ -6,8 +6,6 @@ set(MVVCVTK_SURFACE_API_HEADERS
 set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceSeedBuilder.h
     src/SurfaceSeedBuilder.cpp
-    src/SurfaceProfileSolver.h
-    src/SurfaceProfileSolver.cpp
     src/SurfaceRecipeCodec.cpp
     src/SurfaceContracts.h
     src/SurfaceContracts.cpp

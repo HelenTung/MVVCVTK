@@ -13,15 +13,13 @@
 using SurfaceCancelCheck = std::function<bool()>;
 using SurfaceProgressCallback =
     std::function<void(SurfaceDeterminationStage, double)>;
-inline constexpr std::uint32_t surfaceAlgorithmRevision = 6;
+inline constexpr std::uint32_t surfaceAlgorithmRevision = 7;
 
 // 点细化可由 VTK SMP worker 并发查询取消状态；调用方必须提供可并发调用的
 // 只读检查。进度回调只在 BuildSurface 的调用线程执行。
 
 struct SurfaceAlgorithmInputs final
 {
-    DataSnapshot materialLabels;
-    DataSnapshot initialSurface;
     RoiReadSnapshot roi;
 };
 
@@ -63,7 +61,7 @@ public:
                                              const SurfaceCancelCheck &getCancelled,
                                              const SurfaceProgressCallback &onProgress,
                                              const SurfaceAlgorithmInputs &inputs = {});
-  static SurfaceProfileDiagnostic GetProfileDiagnostic(const VtkImageGridSnapshot &source,
+  static SurfacePointDiagnostic GetPointDiagnostic(const VtkImageGridSnapshot &source,
                                                        const SurfaceDeterminationStartParams &resolved,
                                                        const SurfacePointRecord &point,
                                                        const SurfaceAlgorithmInputs &inputs = {});

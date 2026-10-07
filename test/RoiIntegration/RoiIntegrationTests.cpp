@@ -199,7 +199,7 @@ void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
     graph=probe->data->GetDataGraph();
     Check(partResult.status==PartResultStatus::Succeeded && HasInput(probe->data->GetData(graph,partResult.labelMap),"edit-roi",ref),"Part 正式标签追溯同一 ROI");
     SurfaceDeterminationStartParams surfaceParams; surfaceParams.targetViews=targets; surfaceParams.analysisRoi=ref;
-    surfaceParams.method=SurfaceDeterminationMethod::LocalAdaptiveIso50; surfaceParams.componentSelection=SurfaceComponentSelection::All;
+    surfaceParams.method=SurfaceDeterminationMethod::MaterialIso; surfaceParams.componentSelection=SurfaceComponentSelection::All;
     double minimum=INFINITY,maximum=-INFINITY;
     for (std::size_t i=0;i<count;++i) if (Selected(i,n)) { minimum=std::min(minimum,double(originalValues[i])); maximum=std::max(maximum,double(originalValues[i])); }
     surfaceParams.initialIsoValue=(minimum+maximum)*.5;

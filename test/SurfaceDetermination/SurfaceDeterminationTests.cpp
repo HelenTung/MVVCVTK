@@ -31,7 +31,7 @@ int GetSuiteFailCount(const std::string_view suite)
 int main(int argc, char* argv[])
 {
     // 对外部原始体按生产步长提取的 128^3 float32 样本运行同一算法，
-    // 不在测试仓库保存 CT，也不为阈值审计分配整卷图像或构造测量网格。
+    // 不在测试仓库保存 CT；阈值解析和表面提取使用同一个材料流程。
     if (argc == 5 && std::string_view(argv[1]) == "--iso-samples") {
         try {
             std::vector<float> values(128U*128U*128U);
@@ -42,8 +42,8 @@ int main(int argc, char* argv[])
                 {1,0,0,0,1,0,0,0,1}, VTK_FLOAT, [&values](const SurfaceTest::Point3& p) {
                     return values[static_cast<std::size_t>(p[0])+128U*(static_cast<std::size_t>(p[1])+128U*static_cast<std::size_t>(p[2]))];
                 });
-            auto params = SurfaceTest::GetParams(SurfaceDeterminationMethod::AutomaticIso50); params.initialIsoValue.reset();
-            const auto result = SurfaceDeterminationAlgorithm::BuildSurface(source, params, 64U*1024U, [] { return false; }, {});
+            auto params = SurfaceTest::GetParams(SurfaceDeterminationMethod::MaterialIso); params.initialIsoValue.reset();
+            const auto result = SurfaceDeterminationAlgorithm::BuildSurface(source, params, 256U*1024U*1024U, [] { return false; }, {});
             if (result.status != SurfaceResultStatus::Succeeded || !result.isoEstimate) {
                 std::cerr << result.message << '\n'; return 1;
             }

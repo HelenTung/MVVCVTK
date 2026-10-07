@@ -25,7 +25,7 @@ bool SetType(TrustedDataPort &data)
                               const auto &r = p->GetRecord();
                               const bool valid =
                                   r.field.samples && r.field.neighbors && r.field.nodes &&
-                                  GetGridGeometryValid(r.field.geometry) && r.archive.schemaVersion == 2 &&
+                                  GetGridGeometryValid(r.field.geometry) && r.archive.schemaVersion == 3 &&
                                   r.field.samples->size() == r.field.neighbors->size() &&
                                   r.field.subdivisions > 0 &&
                                   ThicknessAlgorithm::GetParamsValid(r.archive.params) &&
@@ -72,7 +72,7 @@ ThicknessAlgorithm::Work BuildWork(const DataGraphSnapshot &graph, const Thickne
         throw std::invalid_argument("No data graph.");
     const auto &input = archive.input;
     if (!GetDataRevisionRefValid(input.source) || !GetDataRevisionRefValid(input.labels) ||
-        !GetDataRevisionRefValid(input.mesh) || input.materialLabel == 0 ||
+        !GetDataRevisionRefValid(input.mesh) || std::find(input.materialLabels.begin(), input.materialLabels.end(), 0) != input.materialLabels.end() ||
         static_cast<unsigned>(input.unit) < 1 || static_cast<unsigned>(input.unit) > 2)
         throw std::invalid_argument(
             "Explicit input revisions, material and length unit are required.");
@@ -185,8 +185,9 @@ std::string GetParameters(const ThicknessArchive &a)
     ref(a.input.labels);
     ref(a.input.mesh);
     out << std::quoted(a.input.sourceBinding) << ';' << std::quoted(a.input.labelsBinding) << ';'
-        << std::quoted(a.input.meshBinding) << ';' << a.input.materialLabel << ';'
-        << unsigned(a.input.unit) << ';';
+        << std::quoted(a.input.meshBinding) << ';' << a.input.materialLabels.size() << ';';
+    for (const auto label : a.input.materialLabels) out << label << ';';
+    out << unsigned(a.input.unit) << ';';
     const auto &p = a.params;
     out << p.maxDistance << ';' << p.sampleSpacing << ';' << bool(p.materialThreshold) << ';';
     if (p.materialThreshold) out << *p.materialThreshold << ';';

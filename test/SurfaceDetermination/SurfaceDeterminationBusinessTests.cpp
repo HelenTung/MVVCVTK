@@ -1,7 +1,6 @@
 #include "SurfaceDeterminationTestCases.h"
 #include "SurfaceDeterminationTestSupport.h"
 #include "SurfaceDeterminationAlgorithm.h"
-#include "SurfaceProfileSolver.h"
 #include "SurfaceContracts.h"
 
 #include <limits>
@@ -18,212 +17,49 @@ SurfaceAlgorithmResult Run(const VtkImageGridSnapshot &source, const SurfaceDete
         source, params, budget, [] { return false; }, {}, inputs);
 }
 
-SurfaceProfileWorkspace Profile(const std::function<double(double)> &field)
-{
-    SurfaceProfileWorkspace p;
-    p.step = 0.05;
-    for (int i = -100; i <= 100; ++i)
-    {
-        p.offsets.push_back(i * p.step);
-        p.raw.push_back(field(i * p.step));
-        p.support.push_back(SurfaceSampleStatus::Valid);
-    }
-    p.validRatio = 1;
-    return p;
-}
-SurfaceLocalParams Local(SurfaceDeterminationMethod method)
-{
-    SurfaceLocalParams p;
-    p.method = method;
-    p.profileHalfLengthModel = 5;
-    p.profileSampleStepModel = .05;
-    p.maximumOffsetModel = 2;
-    p.profileSmoothingSigmaModel = 0;
-    p.minimumEdgeWidthModel = .05;
-    p.maximumEdgeWidthModel = 2;
-    p.minimumEdgeSeparationModel = .2;
-    return p;
-}
-
 void TestPureRecipe(Checks &c)
 {
-    const std::string legacy = "surface-parameters 1 \"RAS\" 67108864\n"
-                               "1 0 2 0 \"\" \"mm\" 1 500 0 0 0 0 0 0 1 50\n"
-                               "1 0 2 0 \"\" \"mm\" 1 500 0 0 0 0 0 0 1 50\n";
-    SurfaceDeterminationStartParams oldRequested, oldResolved;
-    std::string frame;
-    WorkLimit working;
-    c.Get(SurfaceContract::GetParameters(legacy, oldRequested, oldResolved, frame, working) &&
-              oldResolved.localFraction == .5 && oldResolved.materialPairs.empty(),
-          "v1 recipe decoding explicitly supplies the old ISO50 semantics");
-
-    SurfaceRecipe recipe;
-    recipe.method = SurfaceDeterminationMethod::LocalRelativeIso;
-    recipe.localFraction = .43;
-    recipe.seedFraction = .61;
-    recipe.maximumOffsetModel = 0;
-    recipe.profileSmoothingSigmaModel = 0;
-    recipe.grayPair = SurfaceGrayPair{{900, 1100}, {-100, 100}};
-    SurfaceRegionOverride rule;
-    rule.id = "edge/rule";
-    rule.priority = 2;
-    rule.boundsModel = {1, 2, 3, 4, 5, 6};
-    rule.minimumCnr = 4;
-    recipe.regionOverrides.push_back(rule);
+    const std::string legacy = "surface-parameters 1 \"RAS\" 67108864\n";
+    SurfaceDeterminationStartParams requested, resolved;
+    std::string frame; WorkLimit working;
+    c.Get(!SurfaceContract::GetParameters(legacy, requested, resolved, frame, working),
+          "retired parameter schema is not interpreted as a material recipe");
+    SurfaceRecipe recipe; recipe.materialRange = std::array<double, 2>{-100, 900};
+    recipe.initialIsoValue = 250;
     const auto text = SurfaceRecipeCodec::BuildText(recipe);
     const auto parsed = SurfaceRecipeCodec::GetRecipe(text);
     c.Get(parsed.recipe && SurfaceRecipeCodec::BuildText(*parsed.recipe) == text,
-          "pure recipe round trip retains fractions, zero scales, gray direction and rules");
-    c.Get(!SurfaceRecipeCodec::GetRecipe("surface-recipe 99\n").recipe,
-          "unsupported recipe version cannot silently restore");
-    c.Get(!SurfaceRecipeCodec::GetRecipe(text + "bad").recipe, "pure recipe rejects trailing content");
-    auto invalid = recipe;
-    invalid.regionOverrides.push_back(rule);
-    invalid.regionOverrides.back().id = "other";
-    c.Get(!SurfaceRecipeCodec::GetError(invalid).empty(), "equal-priority overlapping regions are ambiguous");
-    invalid.regionOverrides.back().priority = 3;
-    c.Get(SurfaceRecipeCodec::GetError(invalid).empty(), "overlap with explicit priority is deterministic");
-    invalid = recipe;
-    invalid.method = SurfaceDeterminationMethod::LocalAdaptiveIso50;
-    c.Get(!SurfaceRecipeCodec::GetError(invalid).empty(), "ISO50 cannot silently become relative ISO43");
-    invalid = recipe;
-    invalid.componentSelection = SurfaceComponentSelection::All;
-    invalid.materialPairs = {{2, 7}, {7, 2}};
-    c.Get(!SurfaceRecipeCodec::GetError(invalid).empty(),
-          "reverse pair duplicates cannot produce duplicate interfaces");
+          "material calibration round trips without a legacy method mapping");
+    c.Get(!SurfaceRecipeCodec::GetRecipe("surface-recipe 2\n").recipe,
+          "retired recipe schema is rejected");
+    c.Get(!SurfaceRecipeCodec::GetRecipe(text + "bad").recipe, "trailing recipe data is rejected");
+    for (unsigned method=0; method<7; ++method) {
+        recipe.method=static_cast<SurfaceDeterminationMethod>(method);
+        c.Get(!SurfaceRecipeCodec::GetError(recipe).empty(), "retired method cannot select a new algorithm");
+    }
 }
 
-void TestProfileModels(Checks &c)
-{
-    const auto step = [](double x) { return 0.5 * (1 + std::tanh((x - .37) / .42)); };
-    auto profile = Profile([&](double x) { return 10 + 2 * x + 100 * step(x); });
-    auto params = Local(SurfaceDeterminationMethod::EdgeModelFit);
-    const auto fit = SurfaceProfileSolver::BuildFit(profile, params);
-    c.Get(fit.flags == SurfacePointFlags::None && std::abs(fit.offset - .37) < .01 &&
-              std::abs(fit.width - .42) < .02 && fit.normalizedResidual < .005,
-          "single-edge model recovers position and width with a sloping background");
-    auto pairProfile = Profile(
-        [](double x) { return 20 + x + 80 * .5 * (std::tanh((x + .8) / .25) - std::tanh((x - 1.1) / .25)); });
-    params = Local(SurfaceDeterminationMethod::PairedEdgeModelFit);
-    auto paired = SurfaceProfileSolver::BuildFit(pairProfile, params);
-    c.Get(paired.flags == SurfacePointFlags::None && std::abs(paired.offset + .8) < .02 &&
-              std::abs(paired.separation - 1.9) < .03 && std::abs(paired.width - .25) < .03,
-          "paired model jointly recovers two transitions and their separation");
-    params.minimumEdgeSeparationModel = 2.5;
-    paired = SurfaceProfileSolver::BuildFit(pairProfile, params);
-    c.Get(GetSurfaceFlag(paired.flags, SurfacePointFlags::Unresolved),
-          "paired spacing below resolution threshold is rejected");
-    auto relative = Profile([&](double x) { return 100 * step(x); });
-    params = Local(SurfaceDeterminationMethod::LocalRelativeIso);
-    params.localFraction = .43;
-    auto fraction = SurfaceProfileSolver::BuildFit(relative, params);
-    const double expected = .37 + .42 * std::atanh(2 * .43 - 1);
-    c.Get(fraction.flags == SurfacePointFlags::None && std::abs(fraction.offset - expected) < .002,
-          "relative ISO43 changes the actual crossing");
-    relative.offsets.pop_back();
-    c.Get(GetSurfaceFlag(SurfaceProfileSolver::BuildFit(relative, params).flags,
-                         SurfacePointFlags::FitRejected),
-          "malformed profile lengths are rejected before indexing");
-}
 
-DataSnapshot Labels(const VtkImageGridSnapshot &source, const bool junction = false)
-{
-    const auto *image = dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get());
-    const auto geometry = image->GetGeometry();
-    auto values = std::make_shared<std::vector<std::uint16_t>>();
-    for (int z = geometry.extent[4]; z <= geometry.extent[5]; ++z)
-        for (int y = geometry.extent[2]; y <= geometry.extent[3]; ++y)
-            for (int x = geometry.extent[0]; x <= geometry.extent[1]; ++x)
-                values->push_back(junction && y == 12 ? 9 : x <= 15 ? 2 : 7);
-    return std::make_shared<const DataRevision>(
-        DataRevision{GetTestDataRef(91),
-                     DataTypes::labelMap3D,
-                     {{"source-volume", source->data->self}},
-                     std::make_shared<const LabelMap3DPayload>(geometry, LabelMapValues{values}),
-                     {}});
-}
+
+
 void TestMaterialsAndReplay(Checks &c)
 {
     const auto source = BuildPlane();
-    SurfaceAlgorithmInputs inputs;
-    inputs.materialLabels = Labels(source);
-    auto params = GetParams();
-    params.targetViews = {};
-    params.materialLabels = inputs.materialLabels->self;
-    params.materialPairs = {{2, 7}};
-    params.componentSelection = SurfaceComponentSelection::All;
-    params.initialIsoValue.reset();
-    const auto forward = Run(source, params, inputs);
-    c.Get(forward.status == SurfaceResultStatus::Succeeded && forward.acceptedPointCount > 0 &&
-              forward.interfaces.size() == 1 && forward.interfaces[0].canonicalId == "2:7",
-          "generic uint16 labels create a named material interface without global histogram");
-    params.materialPairs = {{7, 2}};
-    const auto reverse = Run(source, params, inputs);
-    bool same = forward.points.size() == reverse.points.size() && !forward.points.empty();
-    if (same)
-        for (std::size_t i = 0; i < forward.points.size(); ++i)
-        {
-            for (unsigned a = 0; a < 3; ++a)
-                same = same && std::abs(forward.points[i].positionModel[a] -
-                                        reverse.points[i].positionModel[a]) < 1e-8;
-            same = same && forward.points[i].normalModel[0] * reverse.points[i].normalModel[0] < -.99;
-        }
-    c.Get(same && reverse.interfaces[0].canonicalId == "2:7",
-          "reverse material direction shares canonical geometry and reverses normals");
-    if (!forward.points.empty())
-    {
-        const auto selected =
-            std::find_if(forward.points.begin(), forward.points.end(),
-                         [](const auto &point) { return point.flags == SurfacePointFlags::None; });
-        if (selected != forward.points.end())
-        {
-            const auto diagnostic = SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
-                source, forward.resolvedParams, *selected, inputs);
-            c.Get(diagnostic.isAvailable && diagnostic.rawValues.size() == diagnostic.offsetsModel.size() &&
-                      diagnostic.rawValues.size() == diagnostic.materialLabels.size() &&
-                      diagnostic.sideA > diagnostic.sideB &&
-                      diagnostic.point.positionModel == selected->positionModel,
-                  "diagnostic replays the actual frozen labeled profile and final point");
-        }
+    auto params = GetParams(); params.targetViews = {};
+    params.materialRange = std::array<double, 2>{0, 1000};
+    const auto result = Run(source, params);
+    c.Get(result.status == SurfaceResultStatus::Succeeded && result.acceptedPointCount > 0,
+          "material surface uses scalar calibration");
+    if (!result.points.empty()) {
+        const auto diagnostic = SurfaceDeterminationAlgorithm::GetPointDiagnostic(
+            source, result.resolvedParams, result.points[result.points.size()/2], {});
+        c.Get(diagnostic.isAvailable &&
+              diagnostic.point.positionModel == result.points[result.points.size()/2].positionModel,
+              "material replay has no local fitting candidate");
     }
-    {
-        auto combinedInputs = inputs;
-        auto combinedParams = forward.resolvedParams;
-        combinedInputs.roi = BuildRoi(source, {10, 20, 4, 18, 4, 18});
-        combinedParams.analysisRoi = combinedInputs.roi->GetRevision();
-        std::vector<double> vertices;
-        for (const auto& point : forward.points)
-            vertices.insert(vertices.end(), point.positionModel.begin(), point.positionModel.end());
-        combinedInputs.initialSurface = std::make_shared<const DataRevision>(DataRevision{
-            GetTestDataRef(93), DataTypes::surfaceMesh, {{"source-volume", source->data->self}},
-            std::make_shared<const SurfaceMeshPayload>(vertices,
-                std::vector<std::uint64_t>(forward.triangleIndices.begin(), forward.triangleIndices.end())), {}});
-        combinedParams.initialSurface = combinedInputs.initialSurface->self;
-        const auto combined = Run(source, combinedParams, combinedInputs);
-        c.Get(combined.status == SurfaceResultStatus::Succeeded && combined.acceptedPointCount > 0
-            && combined.execution.scannedCellCount == 0 && combined.interfaces.size() == 1
-            && combined.interfaces.front().canonicalId == "2:7"
-            && std::all_of(combined.points.begin(), combined.points.end(), [&](const auto& point) {
-                return combinedInputs.roi->GetContains(point.positionModel);
-            }), "frozen ROI, labels and initial mesh jointly constrain the same surface task");
-        combinedInputs.roi.reset();
-        c.Get(Run(source, combinedParams, combinedInputs).failureReason == SurfaceFailureReason::InvalidRoi,
-            "a missing frozen ROI cannot silently replay the labeled initial mesh without clipping");
-    }
-    inputs.materialLabels = Labels(source, true);
-    params.materialPairs = {{2, 7}};
-    const auto junction = Run(source, params, inputs);
-    bool gap = !junction.points.empty();
-    for (const auto &point : junction.points)
-        gap = gap && (point.seedPositionModel[1] <= 11 || point.seedPositionModel[1] >= 13);
-    c.Get(gap && junction.execution.skippedCellCount > 0,
-          "third material cells leave a gap instead of inventing an A-B interface");
-    auto bad = std::make_shared<DataRevision>(*inputs.materialLabels);
-    bad->inputs.clear();
-    inputs.materialLabels = bad;
-    c.Get(Run(source, params, inputs).failureReason == SurfaceFailureReason::InvalidSource,
-          "labels require exact source lineage");
+
 }
+
 
 void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
 {
@@ -271,114 +107,22 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
     c.Get(otherRoiResult.status == SurfaceResultStatus::Succeeded
         && otherRoiResult.parameterFingerprint != first.parameterFingerprint,
         "ROI identity participates in the surface fingerprint even for equal geometry");
-    params = GetParams();
-    params.targetViews = {};
-    params.method = SurfaceDeterminationMethod::LocalRelativeIso;
-    SurfaceRegionOverride rule;
-    rule.id = "upper";
-    rule.priority = 1;
-    rule.boundsModel = {0, 32, 12, 24, 0, 20};
-    rule.localFraction = .43;
-    params.regionOverrides = {rule};
-    const auto plane = BuildPlane();
-    const auto overridden = Run(plane, params);
-    bool lower = false, upper = false, seam = false;
-    for (const auto &point : overridden.points)
-    {
-        if (point.flags == SurfacePointFlags::None)
-        {
-            lower = lower || point.overrideIndex == 0;
-            upper = upper || (point.overrideIndex == 1 && point.localThreshold > 550);
-        }
-        seam = seam || GetSurfaceFlag(point.flags, SurfacePointFlags::OverrideBoundary);
-    }
-    c.Get(lower && upper && seam,
-          "region override changes localization and marks shared boundary quality lower=" +
-              std::to_string(lower) + " upper=" + std::to_string(upper) + " seam=" + std::to_string(seam) +
-              " message=" + overridden.message);
-    auto seedParams = GetParams(SurfaceDeterminationMethod::GlobalIsoPreview);
-    seedParams.targetViews = {};
-    const auto seed = Run(plane, seedParams);
-    std::vector<double> vertices;
-    for (const auto &point : seed.points)
-        vertices.insert(vertices.end(), point.positionModel.begin(), point.positionModel.end());
-    std::vector<std::uint64_t> indices(seed.triangleIndices.begin(), seed.triangleIndices.end());
-    SurfaceAlgorithmInputs inputs;
-    inputs.initialSurface = std::make_shared<const DataRevision>(
-        DataRevision{GetTestDataRef(92),
-                     DataTypes::surfaceMesh,
-                     {{"source-volume", plane->data->self}},
-                     std::make_shared<const SurfaceMeshPayload>(vertices, indices),
-                     {}});
-    params = GetParams();
-    params.targetViews = {};
-    params.initialSurface = inputs.initialSurface->self;
-    params.initialIsoValue.reset();
-    const auto imported = Run(plane, params, inputs);
-    c.Get(imported.status == SurfaceResultStatus::Succeeded && imported.acceptedPointCount > 0 &&
-              imported.execution.scannedCellCount == 0 && imported.points.size() == seed.points.size(),
-          "generic initial mesh supports business refinement without iso extraction");
-    params.maximumOffsetModel = 0;
-    params.profileSmoothingSigmaModel = 0;
-    const auto stationary = Run(plane, params, inputs);
-    bool retained = true;
-    for (const auto &point : stationary.points)
-        retained = retained && point.positionModel == point.seedPositionModel;
-    c.Get(stationary.status == SurfaceResultStatus::Succeeded && retained,
-          "zero offset and zero smoothing are accepted and preserve all seeds");
     const auto refused =
-        SurfaceDeterminationAlgorithm::BuildSurface(plane, GetParams(), 64 * 1024, [] { return false; }, {});
+        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 64 * 1024, [] { return false; }, {});
     c.Get(refused.failureReason == SurfaceFailureReason::BudgetExceeded && refused.points.empty(),
-          "budget covers parallel workspaces before mesh publication");
+          "explicit mesh budget refuses allocation before publication");
 }
 void TestReviewedFailureBoundaries(Checks &c)
 {
-    auto profile = Profile(
-        [](double x) { return 20 + 80 * .5 * (std::tanh((x + 1.1) / .2) - std::tanh((x - .3) / .2)); });
-    for (const auto offset : profile.offsets)
-        profile.labels.push_back(offset < -1.1 || offset > .3 ? 2 : 7);
-    auto params = Local(SurfaceDeterminationMethod::PairedEdgeModelFit);
-    params.materials = SurfaceMaterialPair{2, 7};
-    const auto reversed = SurfaceProfileSolver::BuildFit(profile, params);
-    c.Get(GetSurfaceFlag(reversed.flags, SurfacePointFlags::DirectionMismatch),
-          "paired fit rejects the nearest edge when it is B-to-A");
-    auto noisy = Profile([](double x) {
-        return 20 + 80 * .5 * (std::tanh((x + .8) / .25) - std::tanh((x - 1.1) / .25)) + 2 * std::sin(13 * x);
-    });
-    params = Local(SurfaceDeterminationMethod::PairedEdgeModelFit);
-    params.maximumPlateauNoiseRatio = .001;
-    const auto unstable = SurfaceProfileSolver::BuildFit(noisy, params);
-    c.Get(GetSurfaceFlag(unstable.flags, SurfacePointFlags::PlateauUnstable),
-          "paired fit applies the declared plateau noise limit after estimating amplitude");
     const auto source = BuildSnapshot(
         {32, 32, 32}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_DOUBLE,
         [](const Point3 &p) { return p == Point3{1, 1, 1} ? 1e30 : GetSmoothInside(p[0] - 10.35); });
-    auto automatic = GetParams(SurfaceDeterminationMethod::AutomaticIso50);
+    auto automatic = GetParams(SurfaceDeterminationMethod::MaterialIso);
     automatic.initialIsoValue.reset();
     const auto estimate = Run(source, automatic);
     c.Get(estimate.status == SurfaceResultStatus::Succeeded && estimate.isoEstimate &&
               estimate.isoEstimate->excludedSampleCount > 0 && std::abs(estimate.initialIsoValue - 500) < 50,
           "trimmed automatic range survives an extreme finite hot voxel and reports exclusion");
-    const auto triple = BuildSnapshot({32, 32, 32}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1},
-                                      VTK_FLOAT, [](const Point3 &p) {
-                                          return p[0] < 10 ? 0.0 : p[0] < 21 ? 500.0 : 1000.0;
-                                      });
-    auto seed = GetParams();
-    seed.initialIsoValue.reset();
-    c.Get(Run(triple, seed).failureReason == SurfaceFailureReason::ThresholdUnreliable,
-          "automatic seed refuses three significant material peaks");
-    const auto plane = BuildPlane();
-    auto gray = GetParams();
-    gray.method = SurfaceDeterminationMethod::LocalRelativeIso;
-    gray.localFraction = .43;
-    gray.initialIsoValue.reset();
-    gray.grayPair = SurfaceGrayPair{{-100, 100}, {900, 1100}};
-    const auto backward = Run(plane, gray);
-    bool directed = backward.acceptedPointCount > 0;
-    for (const auto &point : backward.points)
-        if (point.flags == SurfacePointFlags::None)
-            directed = directed && point.normalModel[0] < -.99 && point.localThreshold < 450;
-    c.Get(directed, "explicit low-to-high gray direction determines the ISO43 interpretation");
     const auto box = BuildSnapshot(
         {24, 24, 24}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_FLOAT, [](const Point3 &p) {
             return GetSmoothInside(
@@ -392,8 +136,7 @@ void TestReviewedFailureBoundaries(Checks &c)
         if (GetSurfaceFlag(point.flags, SurfacePointFlags::SharpCorner))
         {
             flagged = true;
-            kept = kept && point.positionModel == point.seedPositionModel &&
-                   GetSurfaceFlag(point.flags, SurfacePointFlags::SeedRetained);
+            kept = kept && point.positionModel == point.seedPositionModel;
         }
     c.Get(flagged && kept, "sharp seed corners remain rejected seeds rather than accepted rounded geometry");
     std::atomic<bool> topology{false};
@@ -409,49 +152,6 @@ void TestReviewedFailureBoundaries(Checks &c)
 
 void TestMultipleInterfacesAndLocality(Checks &c)
 {
-    const auto source = BuildSnapshot(
-        {32, 24, 20}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_FLOAT, [](const Point3 &p) {
-            return GetSmoothInside(p[0] - 10.35, 0, 500) + GetSmoothInside(p[0] - 20.35, 0, 500);
-        });
-    const auto geometry =
-        dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get())->GetGeometry();
-    auto values = std::make_shared<std::vector<std::uint16_t>>();
-    for (int z = 0; z < 20; ++z)
-        for (int y = 0; y < 24; ++y)
-            for (int x = 0; x < 32; ++x)
-                values->push_back(x <= 10 ? 2 : x <= 20 ? 7 : 9);
-    SurfaceAlgorithmInputs inputs;
-    inputs.materialLabels = std::make_shared<const DataRevision>(
-        DataRevision{GetTestDataRef(94),
-                     DataTypes::labelMap3D,
-                     {{"source-volume", source->data->self}},
-                     std::make_shared<const LabelMap3DPayload>(geometry, LabelMapValues{values}),
-                     {}});
-    auto params = GetParams();
-    params.targetViews = {};
-    params.initialIsoValue.reset();
-    params.materialLabels = inputs.materialLabels->self;
-    params.materialPairs = {{2, 7}, {7, 9}};
-    params.componentSelection = SurfaceComponentSelection::All;
-    const auto result = Run(source, params, inputs);
-    bool correct = result.interfaces.size() == 2 && result.objects.size() == 2;
-    if (correct)
-        for (unsigned i = 0; i < 2; ++i)
-        {
-            const auto &face = result.interfaces[i];
-            correct = correct && face.pointCount > 0 && face.triangleCount > 0;
-            for (std::size_t j = face.firstPoint; j < face.firstPoint + face.pointCount; ++j)
-            {
-                const auto &point = result.points[j];
-                correct = correct && point.interfaceIndex == i && point.normalModel[0] > .99;
-                if (point.flags == SurfacePointFlags::None)
-                    correct = correct && std::abs(point.positionModel[0] - (i ? 20.35 : 10.35)) < .05;
-            }
-        }
-    c.Get(correct && result.execution.sampledProfileCount > 0 &&
-              result.execution.sampledValueCount > result.execution.sampledProfileCount,
-          "one request publishes two distinct material interfaces with original-gray refinement and sample "
-          "counts");
     const auto large =
         BuildSnapshot({64, 64, 64}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_FLOAT,
                       [](const Point3 &p) { return GetSmoothInside(p[0] - 31.35); });
@@ -490,7 +190,6 @@ int GetSurfaceBusinessFailCount()
     TestMultipleInterfacesAndLocality(checks);
     TestReviewedFailureBoundaries(checks);
     TestPureRecipe(checks);
-    TestProfileModels(checks);
     TestMaterialsAndReplay(checks);
     TestBlocksRoiOverridesAndInitialMesh(checks);
     return checks.failureCount;

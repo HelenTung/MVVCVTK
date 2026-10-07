@@ -95,7 +95,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         panel->SetAdmission(id, admission.status == ThicknessAdmissionStatus::Accepted,
             {{"requestId", QString::number(admission.requestId)}, {"admissionStatus", static_cast<int>(admission.status)}});
     };
-    panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabel":"1","unit":"Millimeter",
+    panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabels":[],"unit":"Millimeter",
         "maxDistance":5.0,"sampleSpacing":0.3074,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"Complete",
         "maxBoundaryError":0.0768,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
@@ -111,7 +111,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         } else input.mesh = GetRef(p["mesh"]);
         if (!GetDataRevisionRefValid(input.labels) || !GetDataRevisionRefValid(input.mesh))
             throw std::invalid_argument("需要当前零件标签图和正式测量表面；预览网格不能用于壁厚测量");
-        input.materialLabel = GetId(p["materialLabel"]);
+        for (const auto label : p["materialLabels"].toArray()) input.materialLabels.push_back(GetId(label));
         input.unit = GetEnum<ThicknessUnit>(p, "unit", {{"Millimeter", ThicknessUnit::Millimeter}, {"Meter", ThicknessUnit::Meter}});
         ThicknessParams params;
         params.maxDistance = GetNumber(p, "maxDistance"); params.sampleSpacing = GetNumber(p, "sampleSpacing");

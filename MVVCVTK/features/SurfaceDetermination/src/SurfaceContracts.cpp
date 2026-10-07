@@ -34,89 +34,34 @@ bool GetScopeValid(const std::string& scope)
     return true;
 }
 
-template<class T> bool ReadOptional(std::istream& in, std::optional<T>& value)
-{
-    int present = 0;
-    if (!(in >> present) || (present != 0 && present != 1)) return false;
-    value.reset();
-    if (present) { T item{}; if (!(in >> item)) return false; value = item; }
-    return true;
-}
-template<std::size_t N> bool ReadArray(std::istream& in,
-    std::optional<std::array<double, N>>& value)
-{
-    int present = 0;
-    if (!(in >> present) || (present != 0 && present != 1)) return false;
-    value.reset();
-    if (present) {
-        std::array<double, N> items{};
-        for (auto& item : items) if (!(in >> item) || !std::isfinite(item)) return false;
-        value = items;
-    }
-    return true;
-}
-bool ReadParams(std::istream& in, SurfaceDeterminationStartParams& p)
-{
-    unsigned method, selection, purpose, policy;
-    std::optional<std::array<double, 6>> legacyBounds;
-    if (!(in >> method >> selection >> purpose >> policy
-        >> std::quoted(p.resultScope) >> std::quoted(p.modelUnit))
-        || method > 3 || selection > 2 || purpose > 2 || policy > 1) return false;
-    p.method = static_cast<SurfaceDeterminationMethod>(method);
-    p.componentSelection = static_cast<SurfaceComponentSelection>(selection);
-    p.purpose = static_cast<SurfaceTaskPurpose>(purpose);
-    p.sourcePolicy = static_cast<DataPublishPolicy>(policy);
-    if (!ReadOptional(in, p.initialIsoValue) || !ReadArray(in, p.seedModelPoint)
-        || !ReadArray(in, legacyBounds) || legacyBounds.has_value() || !ReadOptional(in, p.profileHalfLengthModel)
-        || !ReadOptional(in, p.profileSampleStepModel) || !ReadOptional(in, p.maximumOffsetModel)
-        || !ReadOptional(in, p.profileSmoothingSigmaModel)
-        || !(in >> p.minimumObjectVoxels >> p.minimumContrast)) return false;
-    const auto positive = [](const std::optional<double>& x) { return !x || (std::isfinite(*x) && *x > 0.0); };
-    if (!GetInputValid(p) || !p.minimumObjectVoxels || !std::isfinite(p.minimumContrast) || p.minimumContrast < 0.0
-        || (p.initialIsoValue && !std::isfinite(*p.initialIsoValue))
-        || !positive(p.profileHalfLengthModel) || !positive(p.profileSampleStepModel)
-        || !positive(p.maximumOffsetModel) || !positive(p.profileSmoothingSigmaModel)
-        || (p.componentSelection == SurfaceComponentSelection::Seeded && !p.seedModelPoint)) return false;
-    return true;
-}
+
 }
 
 SurfaceTaskPurpose GetPurpose(const SurfaceDeterminationStartParams& params)
 {
-    return params.purpose.value_or(params.method == SurfaceDeterminationMethod::AutomaticIso50
-        ? SurfaceTaskPurpose::Estimate : params.method == SurfaceDeterminationMethod::GlobalIsoPreview
-        ? SurfaceTaskPurpose::Preview : SurfaceTaskPurpose::Determine);
+    return params.purpose.value_or(SurfaceTaskPurpose::Determine);
 }
 
 bool GetInputValid(const SurfaceDeterminationStartParams& p)
 {
     if (!SurfaceRecipeCodec::GetError(p).empty() || p.seedBlockDepth == 0 || p.seedBlockDepth > 4096 ||
-        (p.analysisRoi && !GetDataRevisionRefValid(*p.analysisRoi)) ||
-        (p.materialLabels && !GetDataRevisionRefValid(*p.materialLabels)) ||
-        (p.initialSurface && !GetDataRevisionRefValid(*p.initialSurface)) ||
-        (p.materialLabels.has_value() != !p.materialPairs.empty()))
+        (p.analysisRoi && !GetDataRevisionRefValid(*p.analysisRoi)))
         return false;
     const auto purpose = GetPurpose(p);
-    if (purpose != SurfaceTaskPurpose::Estimate && purpose != SurfaceTaskPurpose::Preview
+    if (purpose != SurfaceTaskPurpose::Preview
         && purpose != SurfaceTaskPurpose::Determine) return false;
-    if (static_cast<unsigned>(p.method) > 7 || static_cast<unsigned>(p.componentSelection) > 2 ||
+    if (p.method != SurfaceDeterminationMethod::MaterialIso || static_cast<unsigned>(p.componentSelection) > 2 ||
         static_cast<unsigned>(p.sourcePolicy) > 1 || !GetScopeValid(p.resultScope) ||
         (p.sourceVolume && !GetDataRevisionRefValid(*p.sourceVolume)) ||
         (p.modelUnit != "" && p.modelUnit != "mm" && p.modelUnit != "cm" && p.modelUnit != "m" &&
          p.modelUnit != "um"))
         return false;
-    if (p.method == SurfaceDeterminationMethod::MaterialIso && (p.materialLabels || p.initialSurface))
-        return false;
-    if ((purpose == SurfaceTaskPurpose::Estimate) != (p.method == SurfaceDeterminationMethod::AutomaticIso50)
-        || (purpose == SurfaceTaskPurpose::Determine && p.method == SurfaceDeterminationMethod::GlobalIsoPreview)) return false;
     return true;
 }
 
 bool GetPointValid(const SurfacePointRecord& point, const SurfaceDeterminationMethod method)
 {
-    if (method == SurfaceDeterminationMethod::GlobalIsoPreview
-        || method == SurfaceDeterminationMethod::AutomaticIso50
-        || point.flags != SurfacePointFlags::None) return false;
+    if (method != SurfaceDeterminationMethod::MaterialIso || point.flags != SurfacePointFlags::None) return false;
     double normal2 = 0.0;
     for (const auto x : point.positionModel) if (!std::isfinite(x)) return false;
     for (const auto x : point.normalModel) normal2 += double(x) * x;
@@ -187,14 +132,9 @@ bool GetParameters(const std::string& text, SurfaceDeterminationStartParams& req
     WorkLimit nextBytes;
     SurfaceDeterminationStartParams nextRequested, nextResolved;
     if (!(in >> tag >> version >> std::quoted(nextFrame) >> nextBytes) || tag != "surface-parameters" ||
-        (version != 1 && version != 2) || nextFrame.empty() || nextBytes == 0)
+        version != 2 || nextFrame.empty() || nextBytes == 0)
         return false;
-    if (version == 1)
     {
-        if (!ReadParams(in, nextRequested) || !ReadParams(in, nextResolved))
-            return false;
-    }
-    else
         for (auto *p : {&nextRequested, &nextResolved})
         {
             unsigned purpose = 0, policy = 0;
@@ -209,17 +149,14 @@ bool GetParameters(const std::string& text, SurfaceDeterminationStartParams& req
             static_cast<SurfaceRecipe &>(*p) = *decoded.recipe;
             p->purpose = static_cast<SurfaceTaskPurpose>(purpose);
             p->sourcePolicy = static_cast<DataPublishPolicy>(policy);
-            if ((purpose == unsigned(SurfaceTaskPurpose::Estimate)) !=
-                    (p->method == SurfaceDeterminationMethod::AutomaticIso50) ||
-                (purpose == unsigned(SurfaceTaskPurpose::Determine) &&
-                 p->method == SurfaceDeterminationMethod::GlobalIsoPreview))
-                return false;
+            if (purpose != unsigned(SurfaceTaskPurpose::Preview) && purpose != unsigned(SurfaceTaskPurpose::Determine)) return false;
             // 修订引用只来自图 inputs；配方中不得伪造实体身份。
             if (!GetScopeValid(p->resultScope) || p->seedBlockDepth == 0 || p->seedBlockDepth > 4096 ||
                 (p->modelUnit != "" && p->modelUnit != "mm" && p->modelUnit != "cm" && p->modelUnit != "m" &&
                  p->modelUnit != "um"))
                 return false;
         }
+    }
     in >> std::ws; if (!in.eof()) return false;
     requested = std::move(nextRequested);
     resolved = std::move(nextResolved);

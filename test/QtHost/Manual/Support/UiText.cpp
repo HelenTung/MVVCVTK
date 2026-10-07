@@ -89,10 +89,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Paint", "涂绘标签"}, {"Erase", "擦除标签"}, {"Fill", "填充区域"}, {"Island", "处理孤岛"},
         {"Grow", "区域生长"}, {"Split", "拆分零件"}, {"Merge", "合并零件"}, {"Undo", "撤销"}, {"Redo", "重做"},
         {"Discard", "丢弃候选"}, {"Cancel", "取消计算"},
-        {"AutomaticIso50", "自动 ISO50 阈值估计"}, {"GlobalIsoPreview", "全局等值面预览"},
         {"MaterialIso", "材料等值面测定"},
-        {"LocalAdaptiveIso50", "局部自适应 ISO50"}, {"GradientPeak", "梯度峰值表面定位"},
-        {"LocalRelativeIso", "局部相对等值表面"}, {"EdgeModelFit", "单边模型拟合表面"}, {"PairedEdgeModelFit", "双边模型拟合表面"},
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
@@ -109,7 +106,6 @@ QString GetParameterSectionText(const QString& module, const QString& action)
         {"Data.Load", "输入参数"}, {"View.Set", "显示参数"}, {"View.Visibility", "辅助显示"}, {"View.Reset", "视图定位"}, {"View.Cursor", "切片位置"},
         {"Part.Start", "分割参数"}, {"Part.SetState", "零件属性"}, {"Gap.Start", "孔隙参数"},
         {"Artifact.Ring", "环形校正"}, {"Artifact.Diffusion", "扩散滤波"}, {"Artifact.Combined", "组合校正"},
-        {"Surface.AutomaticIso50", "阈值估计"}, {"Surface.GlobalIsoPreview", "等值面预览"}, {"Surface.LocalAdaptiveIso50", "自适应表面"}, {"Surface.GradientPeak", "梯度峰值"},
         {"Wall.Start", "壁厚参数"}, {"Wall.SetEvaluation", "壁厚公差"}, {"Wall.SetDisplay", "结果显示"}, {"Wall.SelectSample", "采样定位"},
         {"Alignment.Start", "求解参数"}, {"Alignment.ImportReference", "名义参考"}, {"Alignment.SaveRecipe", "对齐方案"},
         {"Crop.Start", "裁剪参数"}, {"Crop.Mode", "保留方式"}, {"Rotation.Rotate", "旋转参数"}};
@@ -121,7 +117,7 @@ QString GetParameterText(const QString& key)
     if (key == "graphRevision") return "发布修订";
     if (key == "viewScope") return "辅助显示作用范围";
     static const QHash<QString, QString> labels{
-        {"labels", "材料标签图修订"}, {"materialLabel", "材料标签编号"}, {"maxDistance", "搜索距离上限"},
+        {"labels", "材料标签图修订"}, {"materialLabels", "材料标签集合"}, {"maxDistance", "搜索距离上限"},
         {"sampleSpacing", "显示采样间距"}, {"materialThreshold", "原始灰度材料阈值"}, {"materialRange", "背景/材料灰度值"},
         {"coneAngleDegrees", "搜索锥半角（度）"}, {"directionCount", "搜索方向数量"}, {"boundaryPolicy", "源边界策略"},
         {"maxBoundaryError", "边界误差上限"}, {"evaluationBounds", "评估空间范围"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
@@ -220,7 +216,7 @@ QString GetParameterHelp(const QString& key)
         {"recipe", "不勾选“指定”时使用已导入参考中的方案；勾选后可分别编辑几何、约束和对应点。"},
         {"source", "current 表示当前输入；显式修订必须使用实际存在的数据引用。"},
         {"labels", "parts 使用当前零件分割标签图；也可输入准确的标签图修订。"},
-        {"materialLabel", "只测量此正整数标签对应的材料；默认标签 1。"},
+        {"materialLabels", "空集合选择全部非零零件标签；填写正整数集合时只测量所选标签，0 为背景。"},
         {"evaluationBounds", "按源数据物理坐标填写评估范围，顺序为 X 最小/最大、Y 最小/最大、Z 最小/最大。"},
         {"mesh", "surface 表示最近生成且属于当前输入的正式测量表面网格。"},
         {"result", "current 表示本页最近保存的结果修订。"},
@@ -314,8 +310,6 @@ QString GetFlowText(const QJsonObject& record)
         parts << completed.value(action, "对齐操作完成");
     } else parts << statuses.value(status, status);
     const auto result = record["result"].toObject();
-    const bool thresholdOnly = module == "Surface" && action == "AutomaticIso50";
-    if (thresholdOnly && status == "Succeeded") parts << "仅估计阈值，未生成网格：ISO=" + QString::number(result["isoEstimate"].toObject()["iso"].toDouble(), 'g', 10);
     for (const auto* key : {"message", "error", "hint"}) {
         if (result[key].isString() && !result[key].toString().isEmpty()) parts << result[key].toString().simplified().left(300);
     }
@@ -324,7 +318,6 @@ QString GetFlowText(const QJsonObject& record)
             {"points", "网格点数"}, {"objectCount", "对象数"}, {"voidVolumeMM3", "孔隙体积（mm³）"}, {"porosityRatio", "孔隙率"},
             {"previewId", "候选编号"}, {"errorCode", "错误码"}, {"failureReason", "失败原因码"}}) {
             const auto value = result[field.first];
-            if (thresholdOnly && (field.first == "pointCount" || field.first == "points" || field.first == "objectCount")) continue;
             if (value.isString() && !value.toString().isEmpty()) parts << field.second + "=" + value.toString();
             else if (value.isDouble() && ((!field.first.contains("Code") && field.first != "failureReason") || value.toDouble() != 0))
                 parts << field.second + "=" + QString::number(value.toDouble(), 'g', 8);

@@ -19,11 +19,9 @@ struct SurfaceDeterminationStartParams final : SurfaceRecipe
     // 省略只在接纳时解析主卷，计算不再查询当前选择。
     std::optional<DataRevisionRef> sourceVolume;
     std::optional<DataRevisionRef> analysisRoi;
-    std::optional<DataRevisionRef> materialLabels;
-    std::optional<DataRevisionRef> initialSurface;
     // 执行分块不降低分辨率，不影响算法结果的参数指纹。
     std::uint32_t seedBlockDepth = 16;
-    // 省略沿用方法的既有用途：Automatic→Estimate、Global→Preview。
+    // 省略表示正式测量；预览也执行同一材料等值面算法。
     std::optional<SurfaceTaskPurpose> purpose;
     std::string resultScope;
     DataPublishPolicy sourcePolicy = DataPublishPolicy::RequireCurrentInputs;

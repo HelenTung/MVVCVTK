@@ -20,8 +20,6 @@ struct SurfaceSeedGrid final
     const void *values = nullptr;
     double (*readScalar)(const void *, std::size_t) = nullptr;
     const unsigned char *validity = nullptr;
-    const LabelMap3DPayload *labels = nullptr;
-    const SurfaceMeshPayload *initialMesh = nullptr;
 };
 
 enum class SurfaceSeedStatus
@@ -37,12 +35,10 @@ class SurfaceSeedBuilder final
 {
   public:
     static SurfaceSeedStatus BuildMesh(const SurfaceSeedGrid &grid, double iso,
-                                       const std::optional<SurfaceMaterialPair> &materials,
                                        const RoiReadSnapshot &roi, double haloModel,
                                        std::uint32_t blockDepth, WorkLimit budgetBytes,
                                        const std::function<bool()> &cancelled,
                                        std::vector<std::array<double, 3>> &points,
                                        std::vector<SurfaceSeedTriangle> &triangles,
                                        SurfaceExecutionStats &statistics);
-    static std::uint64_t GetLabel(const LabelMap3DPayload &labels, std::size_t index);
 };
