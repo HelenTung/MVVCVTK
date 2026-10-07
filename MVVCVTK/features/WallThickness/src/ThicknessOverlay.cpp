@@ -192,8 +192,8 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_lineActor->VisibilityOff();
     m_legend->SetLookupTable(data.lookup);
     const std::string title =
-        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Thickness tol." : "Thickness") +
-        (unit == ThicknessUnit::Millimeter ? "\n[mm]" : "\n[m]");
+        std::string(display.mode == ThicknessDisplayMode::Tolerance ? u8"壁厚公差" : u8"壁厚") +
+        (unit == ThicknessUnit::Millimeter ? " [mm]" : " [m]");
     AnalysisColorStyle::SetLegend(*m_legend, title.c_str());
     m_legend->SetVisibility(display.isVisible && display.hasLegend);
     m_invalidLegend = vtkSmartPointer<vtkLegendBoxActor>::New();
@@ -214,11 +214,12 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     symbol->GetCellData()->SetScalars(symbolColor);
     double textColor[3]{1, 1, 1};
     m_invalidLegend->SetNumberOfEntries(1);
-    m_invalidLegend->SetEntry(0, symbol, "Invalid / unmeasured", textColor);
+    m_invalidLegend->SetEntry(0, symbol, u8"无效/未测", textColor);
     m_invalidLegend->ScalarVisibilityOn();
     m_invalidLegend->SetPosition(0.025, 0.06);
     m_invalidLegend->SetPosition2(0.34, 0.035);
     m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
+    RenderTextStyle::SetFont(*m_invalidLegend->GetEntryTextProperty());
     m_invalidLegend->GetEntryTextProperty()->ItalicOff();
     m_invalidLegend->GetEntryTextProperty()->BoldOff();
     m_invalidLegend->BorderOff();

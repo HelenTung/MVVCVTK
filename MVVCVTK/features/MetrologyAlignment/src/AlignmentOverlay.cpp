@@ -22,10 +22,14 @@ AlignmentOverlay::AlignmentOverlay()
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetPickable(false);
     AttachProp(m_actor);
+    SetCaption(u8"计量对齐：基准与约束", 5);
+    SetCaptionVisible(false);
 }
 void AlignmentOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data) {
-    if (auto *poly = vtkPolyData::SafeDownCast(data))
+    if (auto *poly = vtkPolyData::SafeDownCast(data)) {
         m_mapper->SetInputData(poly);
+        SetCaptionVisible(poly->GetNumberOfPoints() > 0);
+    }
 }
 void AlignmentOverlay::SetOverlayState(const FeatureOverlayState &state) {
     Set3DPropsTransform(state.modelToWorld);

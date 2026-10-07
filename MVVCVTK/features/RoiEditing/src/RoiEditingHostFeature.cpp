@@ -66,6 +66,8 @@ public:
         vtkNew<vtkMatrix4x4> matrix; matrix->DeepCopy(box.data());
         m_transform->SetMatrix(matrix); m_actor->SetVisibility(isVisible);
         m_actor->GetProperty()->SetColor(isDraft ? 1.0 : 0.1, isDraft ? 0.7 : 0.95, isDraft ? 0.15 : 1.0);
+        SetCaption(isDraft ? u8"感兴趣区域：草稿" : u8"感兴趣区域：已提交", isDraft ? 4 : 3);
+        SetCaptionVisible(isVisible);
     }
 private:
     vtkSmartPointer<vtkCubeSource> m_cube=vtkSmartPointer<vtkCubeSource>::New();

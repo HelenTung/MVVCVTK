@@ -1,5 +1,6 @@
 #include "SliceStrategy.h"
 #include "Render/Contracts/SlicePlaneState.h"
+#include "Render/Support/RenderTextStyle.h"
 #include <vtkCamera.h>
 #include <vtkImageData.h>
 #include <vtkImageMask.h>
@@ -19,6 +20,9 @@
 #include <vtkOpenGLPolyDataMapper.h>
 #include <cmath>
 #include <limits>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 
 namespace {
 class EffectSlicePolyMapper final : public vtkOpenGLPolyDataMapper {
@@ -617,6 +621,17 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     AttachProp(m_slice);
     AttachProp(m_vLineActor);
     AttachProp(m_hLineActor);
+    m_coordinateText = vtkSmartPointer<vtkTextActor>::New();
+    m_coordinateText->PickableOff();
+    m_coordinateText->VisibilityOff();
+    m_coordinateText->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
+    m_coordinateText->SetPosition(0.025, 0.975);
+    auto* text = m_coordinateText->GetTextProperty();
+    RenderTextStyle::SetFont(*text);
+    text->SetFontSize(11); text->SetColor(1, 1, 1);
+    text->SetVerticalJustificationToTop();
+    text->BoldOff(); text->ItalicOff(); text->ShadowOn();
+    AttachProp(m_coordinateText);
 }
 
 SliceStrategy::~SliceStrategy() = default;
@@ -651,6 +666,24 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     img->GetCenter(center);
     m_slicePlane->SetOrigin(center);
     m_slice->SetMapper(m_mapper);
+    // 输入中心仍属于模型空间；收到实际场景切片平面前不发布坐标说明。
+    m_coordinateText->VisibilityOff();
+}
+
+void SliceStrategy::SetCoordinateText(const std::array<double, 3>& worldOrigin)
+{
+    const int axis = m_orientation == Orientation::Top_down ? 2
+        : m_orientation == Orientation::Front_back ? 1 : 0;
+    if (!std::isfinite(worldOrigin[axis])) {
+        m_coordinateText->VisibilityOff();
+        return;
+    }
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << u8"场景 坐标系\n" << std::fixed << std::setprecision(6)
+         << worldOrigin[axis] << " mm";
+    m_coordinateText->SetInput(text.str().c_str());
+    m_coordinateText->VisibilityOn();
 }
 
 void SliceStrategy::SetInputMask(
@@ -811,6 +844,7 @@ bool SliceStrategy::SetVisualState(
         }
         slicePlane->SetOrigin(planeState.worldOrigin.data());
         slicePlane->SetNormal(planeState.worldNormal.data());
+        SetCoordinateText(planeState.worldOrigin);
 
         const double safeOffset = std::min({
             m_inputSpacing[0],

@@ -1,4 +1,5 @@
 #pragma once
+#include "Render/Support/RenderTextStyle.h"
 
 #include <vtkLookupTable.h>
 #include <vtkDoubleArray.h>
@@ -102,6 +103,7 @@ inline void SetLegend(vtkScalarBarActor& legend, const char* title, bool isRight
     legend.SetUnconstrainedFontSize(true);
     for (auto* text : {legend.GetTitleTextProperty(), legend.GetLabelTextProperty(),
              legend.GetAnnotationTextProperty()}) {
+        RenderTextStyle::SetFont(*text);
         text->SetFontSize(11);
         text->SetColor(1, 1, 1);
         text->BoldOff(); text->ItalicOff(); text->ShadowOff();

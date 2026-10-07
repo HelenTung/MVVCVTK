@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Render/Contracts/FeatureOverlay.h"
+#include "Render/Support/RenderTextStyle.h"
 
 #include <vtkMatrix4x4.h>
 #include <vtkProp.h>
@@ -14,6 +15,21 @@
 // Feature 侧可复用的 overlay 骨架，只管理 prop、renderer 与模型变换。
 class FeatureOverlayBase : public FeatureOverlay {
 protected:
+    // 文字与几何由同一 overlay 独占，挂接失败或退出时一起清理。
+    void SetCaption(const char* text, int row)
+    {
+        if (!m_caption) {
+            m_caption = vtkSmartPointer<vtkTextActor>::New();
+            AttachProp(m_caption);
+        }
+        RenderTextStyle::SetCaption(*m_caption, text, row);
+    }
+
+    void SetCaptionVisible(bool isVisible)
+    {
+        if (m_caption) m_caption->SetVisibility(isVisible);
+    }
+
     void AttachProp(vtkSmartPointer<vtkProp> prop)
     {
         if (prop) m_managedProps.push_back(std::move(prop));
@@ -68,6 +84,7 @@ public:
     }
 
 private:
+    vtkSmartPointer<vtkTextActor> m_caption;
     std::vector<vtkSmartPointer<vtkProp>> m_managedProps;
     vtkWeakPointer<vtkRenderer> m_renderer;
 };

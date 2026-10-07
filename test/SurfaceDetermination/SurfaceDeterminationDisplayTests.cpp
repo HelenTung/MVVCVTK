@@ -14,6 +14,8 @@
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
 
 #include <array>
 #include <cmath>
@@ -59,9 +61,11 @@ vtkSmartPointer<vtkPolyData> BuildCube()
 vtkActor* GetOnlyActor(vtkRenderer& renderer)
 {
     auto* props = renderer.GetViewProps();
-    if (!props || props->GetNumberOfItems() != 1) return nullptr;
+    if (!props || props->GetNumberOfItems() != 2) return nullptr;
     props->InitTraversal();
-    return vtkActor::SafeDownCast(props->GetNextProp());
+    auto* actor = vtkActor::SafeDownCast(props->GetNextProp());
+    auto* caption = vtkTextActor::SafeDownCast(props->GetNextProp());
+    return caption && !caption->GetPickable() ? actor : nullptr;
 }
 
 void TestSurfaceOverlay(Checks& checks)

@@ -57,10 +57,14 @@ int main()
     Check(extreme->GetNumberOfValues()==2 && AnalysisColorStyle::GetLabelFormat(*extreme)=="%.6g",
         "extreme finite endpoints do not overflow formatting precision conversion");
     vtkNew<vtkScalarBarActor> legend;legend->SetLookupTable(thickness);
-    AnalysisColorStyle::SetLegend(*legend,"Thickness [mm]");
+    AnalysisColorStyle::SetLegend(*legend,u8"壁厚 [mm]");
     Check(legend->GetBarRatio()<=.15 && legend->GetMaximumWidthInPixels()<=80
         && legend->GetUseCustomLabels() && thickness->GetRange()[0]==0 && thickness->GetRange()[1]==5,
         "compact legend changes presentation without changing the colour mapping range");
+    Check(std::strcmp(legend->GetTitle(),u8"壁厚 [mm]")==0
+        && legend->GetTitleTextProperty()->GetFontFamily()==VTK_FONT_FILE
+        && legend->GetTitleTextProperty()->GetFontFile(),
+        "Chinese legend is backed by a CJK font resource");
     vtkNew<vtkImageData> image;image->SetExtent(-3,4,5,12,2,9);image->SetSpacing(.5,1,1.5);
     image->SetOrigin(11,22,33);const double direction[9]{0,-1,0,1,0,0,0,0,1};
     image->SetDirectionMatrix(direction);image->AllocateScalars(VTK_INT,1);

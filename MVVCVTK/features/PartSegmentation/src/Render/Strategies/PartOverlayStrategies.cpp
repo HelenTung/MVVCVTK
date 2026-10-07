@@ -238,6 +238,8 @@ PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy(const bool isSelectionOnl
     m_outlineActor->GetProperty()->SetLineWidth(2.5);
     m_outlineActor->VisibilityOff(); m_outlineActor->PickableOff();
     AttachProp(m_outlineActor);
+    SetCaption(isPreview ? u8"部件编辑：候选" : u8"零件分割", isPreview ? 2 : 1);
+    SetCaptionVisible(false);
 }
 
 void PartSurfaceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
@@ -290,6 +292,8 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
         m_selection->SetLowerThreshold(selected);
         m_selection->SetUpperThreshold(selected);
         m_outlineActor->SetVisibility(selected > 0);
+        SetCaptionVisible(m_actor->GetVisibility() && std::any_of(states.statesByLabel.begin(), states.statesByLabel.end(),
+            [](const auto& part) { return part.color[3] > 0.0; }));
         return true;
     }
     catch (...) {
@@ -357,6 +361,8 @@ PartSliceOverlayStrategy::PartSliceOverlayStrategy(
     m_outlineActor->GetProperty()->SetLineWidth(2);
     m_outlineActor->VisibilityOff(); m_outlineActor->PickableOff();
     AttachProp(m_outlineActor);
+    SetCaption(previous ? u8"部件编辑：候选" : u8"零件分割", previous ? 2 : 1);
+    SetCaptionVisible(false);
 }
 
 void PartSliceOverlayStrategy::SetInputData(
@@ -421,6 +427,8 @@ bool PartSliceOverlayStrategy::SetPartStates(
             }
         if (!m_difference) m_selection->ThresholdBetween(selected, selected);
         m_outlineActor->SetVisibility(m_difference != nullptr || selected > 0);
+        SetCaptionVisible(std::any_of(states.statesByLabel.begin(), states.statesByLabel.end(),
+            [](const auto& part) { return part.color[3] > 0.0; }));
         return true;
     }
     catch (...) {

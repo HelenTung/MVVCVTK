@@ -52,6 +52,8 @@ SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview)
     m_actor->SetMapper(m_mapper);
     SetActorStyle(*m_actor, false, isPreview);
     AttachProp(m_actor);
+    SetCaption(isPreview ? u8"表面测定：预览" : u8"表面测定：正式结果", 0);
+    SetCaptionVisible(false);
 }
 
 void SurfaceOverlayStrategy::SetInputData(
@@ -60,6 +62,7 @@ void SurfaceOverlayStrategy::SetInputData(
     auto* surface = vtkPolyData::SafeDownCast(data);
     if (!surface) return;
     m_mapper->SetInputData(surface);
+    SetCaptionVisible(surface->GetNumberOfPoints() > 0);
 }
 
 void SurfaceOverlayStrategy::SetOverlayState(
@@ -88,6 +91,8 @@ SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
     SetActorStyle(*m_actor, true, isPreview);
     m_actor->GetProperty()->SetLineWidth(2.0F);
     AttachProp(m_actor);
+    SetCaption(isPreview ? u8"表面测定：预览" : u8"表面测定：正式结果", 0);
+    SetCaptionVisible(false);
 }
 
 void SurfaceSliceOverlayStrategy::SetInputData(
@@ -96,6 +101,7 @@ void SurfaceSliceOverlayStrategy::SetInputData(
     auto* surface = vtkPolyData::SafeDownCast(data);
     if (!surface) return;
     m_cutter->SetInputData(surface);
+    SetCaptionVisible(surface->GetNumberOfPoints() > 0);
 }
 
 void SurfaceSliceOverlayStrategy::SetOverlayState(

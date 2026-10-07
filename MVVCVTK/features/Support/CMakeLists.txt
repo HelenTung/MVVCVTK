@@ -10,6 +10,7 @@ target_sources(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/FeatureOverlayBase.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/AnalysisColorStyle.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/SliceContourPlane.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/RenderTextStyle.h"
 )
 target_include_directories(
     mvvcvtk_feature_support

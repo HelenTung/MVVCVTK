@@ -757,7 +757,7 @@ void Display()
     while (auto *prop = renderer->GetViewProps()->GetNextProp())
         if (auto *legend = vtkLegendBoxActor::SafeDownCast(prop))
             hasInvalidLegend = legend->GetNumberOfEntries() == 1 &&
-                               std::string(legend->GetEntryString(0)) == "Invalid / unmeasured";
+                               std::string(legend->GetEntryString(0)) == u8"无效/未测";
     Check(hasInvalidLegend, "invalid color has an explicit legend entry");
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
     window->SetOffScreenRendering(1);

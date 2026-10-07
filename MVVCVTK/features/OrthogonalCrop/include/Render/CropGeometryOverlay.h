@@ -45,6 +45,7 @@ public:
             AttachProp(m_actor);
         }
         m_text->GetTextProperty()->SetFontSize(12);
+        RenderTextStyle::SetFont(*m_text->GetTextProperty());
         m_text->GetTextProperty()->SetColor(1, 1, 1);
         m_text->GetTextProperty()->ShadowOn();
         m_text->SetPosition(12, 12);
@@ -57,9 +58,9 @@ public:
         double n[3];m_plane->GetNormal(n);
         const double dot=n[0]*m_normal[0]+n[1]*m_normal[1]+n[2]*m_normal[2];
         const double length=std::hypot(n[0],n[1],n[2])*std::hypot(m_normal[0],m_normal[1],m_normal[2]);
-        const bool coplanar=m_shape==CropShape::Plane && length>0 && std::abs(dot)/length>1-1e-8
+        const bool isCoplanar=m_shape==CropShape::Plane && length>0 && std::abs(dot)/length>1-1e-8
             && std::abs(m_plane->EvaluateFunction(m_center.data()))<1e-6;
-        if(coplanar)m_mapper->SetInputData(m_mesh);
+        if(isCoplanar)m_mapper->SetInputData(m_mesh);
         else m_mapper->SetInputConnection(m_cutter->GetOutputPort());
         Set3DPropsTransform(state.modelToWorld);
     }
@@ -74,16 +75,16 @@ public:
         if (op.geometryType == CropShape::Box) {
             vtkNew<vtkCubeSource> source; source->SetBounds(-1,1,-1,1,-1,1); source->Update();
             mesh->ShallowCopy(source->GetOutput()); matrix->DeepCopy(op.boxToInputModelMatrix.data());
-            text << "Box ";
+            text << u8"裁剪框\n尺寸：";
             for (int axis=0;axis<3;++axis) {
                 double squared=0;for(int row=0;row<3;++row) squared+=std::pow(matrix->GetElement(row,axis),2);
-                if(axis)text<<" x ";text<<2*std::sqrt(squared);
+                if(axis)text<<u8" × ";text<<2*std::sqrt(squared);
             }
             text << " mm";
         } else if (op.geometryType == CropShape::Sphere) {
             vtkNew<vtkSphereSource> source; source->SetCenter(op.centerInInputModel.data());
             source->SetRadius(op.radius);source->SetThetaResolution(64);source->SetPhiResolution(48);source->Update();
-            mesh->ShallowCopy(source->GetOutput()); text << "Sphere R=" << op.radius << " mm";
+            mesh->ShallowCopy(source->GetOutput()); text << u8"裁剪球\n半径：" << op.radius << " mm";
         } else if (op.geometryType == CropShape::Cylinder) {
             vtkNew<vtkCylinderSource> source;source->SetRadius(op.radius);source->SetHeight(op.height);
             source->SetResolution(64);source->CappingOn();source->Update();mesh->ShallowCopy(source->GetOutput());
@@ -98,7 +99,7 @@ public:
                 matrix->SetElement(row,0,radial[row]);matrix->SetElement(row,1,axis[row]);
                 matrix->SetElement(row,2,third[row]);matrix->SetElement(row,3,op.centerInInputModel[row]);
             }
-            text<<"Cylinder R="<<op.radius<<", L="<<op.height<<" mm";
+            text<<u8"裁剪圆柱\n半径："<<op.radius<<u8" mm  长度："<<op.height<<" mm";
         } else {
             const auto& n=op.planeNormalInInputModel;
             const double radius=std::hypot(bounds[1]-bounds[0],bounds[3]-bounds[2],bounds[5]-bounds[4])*0.5;
@@ -110,7 +111,7 @@ public:
             for(int i=0;i<3;++i){p[i]=op.planeCenterInInputModel[i]-a[i]-c[i];q[i]=p[i]+2*a[i];r[i]=p[i]+2*c[i];}
             vtkNew<vtkPlaneSource> source;source->SetOrigin(p.data());source->SetPoint1(q.data());source->SetPoint2(r.data());
             source->Update();mesh->ShallowCopy(source->GetOutput());
-            text<<"Plane N=("<<n[0]<<", "<<n[1]<<", "<<n[2]<<")";
+            text<<u8"裁剪平面\n法线：("<<n[0]<<", "<<n[1]<<", "<<n[2]<<")";
         }
         vtkNew<vtkTransform> transform;transform->SetMatrix(matrix);
         vtkNew<vtkTransformPolyDataFilter> filter;filter->SetTransform(transform);filter->SetInputData(mesh);
