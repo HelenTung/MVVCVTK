@@ -127,7 +127,7 @@ inline std::string GetLabelFormat(vtkDoubleArray& labels)
     return "%." + std::to_string(decimals) + "f";
 }
 
-inline void SetLegend(vtkScalarBarActor& legend, const char* title, bool isRight = false)
+inline void SetLegend(vtkScalarBarActor& legend, const char* title)
 {
     legend.SetTitle(title);
     if (auto* lookup = legend.GetLookupTable()) {
@@ -141,7 +141,7 @@ inline void SetLegend(vtkScalarBarActor& legend, const char* title, bool isRight
     legend.SetBarRatio(0.13);
     legend.SetTextPad(2);
     legend.SetHeight(0.60);
-    legend.SetPosition(isRight ? 0.78 : 0.025, 0.20);
+    legend.SetPosition(0.025, 0.20);
     legend.SetMaximumWidthInPixels(80);
     legend.SetMaximumHeightInPixels(260);
     legend.SetUnconstrainedFontSize(true);

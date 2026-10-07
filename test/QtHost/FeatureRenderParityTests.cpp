@@ -59,6 +59,7 @@ int main()
     vtkNew<vtkScalarBarActor> legend;legend->SetLookupTable(thickness);
     AnalysisColorStyle::SetLegend(*legend,u8"壁厚 [mm]");
     Check(legend->GetBarRatio()<=.15 && legend->GetMaximumWidthInPixels()<=80
+        && legend->GetPosition()[0]==0.025
         && legend->GetUseCustomLabels() && thickness->GetRange()[0]==0 && thickness->GetRange()[1]==5,
         "compact legend changes presentation without changing the colour mapping range");
     Check(std::strcmp(legend->GetTitle(),u8"壁厚 [mm]")==0
@@ -98,9 +99,14 @@ int main()
             auto sliceColor = std::make_shared<GapSliceOverlayStrategy>(Orientation::Top_down, colored);
             meshColor->SetInputData(colored->mesh); sliceColor->SetInputData(image);
             meshColor->AttachRenderer(colorRenderer); sliceColor->AttachRenderer(colorRenderer);
-            bool hasMeshColor=false, hasSliceColor=false;
+            bool hasMeshColor=false, hasSliceColor=false, hasLeftLegends=true;
+            int legendCount=0;
             colorRenderer->GetViewProps()->InitTraversal();
             while (auto* prop = colorRenderer->GetViewProps()->GetNextProp()) {
+                if (auto* scale = vtkScalarBarActor::SafeDownCast(prop)) {
+                    hasLeftLegends &= scale->GetPosition()[0]==0.025;
+                    ++legendCount;
+                }
                 if (auto* actor = vtkActor::SafeDownCast(prop)) {
                     auto* mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
                     hasMeshColor |= mapper && mapper->GetLookupTable() == colored->labels;
@@ -109,6 +115,7 @@ int main()
                     hasSliceColor |= slice->GetProperty()->GetLookupTable() == colored->labels;
             }
             Check(hasMeshColor && hasSliceColor, "2D and 3D bind the same selected palette");
+            Check(hasLeftLegends && legendCount==2, "2D and 3D analysis legends stay on the left for every palette");
             meshColor->DetachRenderer(colorRenderer); sliceColor->DetachRenderer(colorRenderer);
             Check(colorRenderer->GetViewProps()->GetNumberOfItems()==0, "selected palette releases all owned props");
         }

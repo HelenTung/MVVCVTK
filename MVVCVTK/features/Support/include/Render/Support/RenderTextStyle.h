@@ -1,8 +1,5 @@
 #pragma once
 
-#include <vtkCoordinate.h>
-#include <vtkSmartPointer.h>
-#include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 
 #include <cstdlib>
@@ -42,22 +39,4 @@ inline void SetFont(vtkTextProperty& property)
     }
 }
 
-inline void SetCaption(vtkTextActor& actor, const char* text, int row)
-{
-    actor.SetInput(text);
-    actor.PickableOff();
-    auto anchor = vtkSmartPointer<vtkCoordinate>::New();
-    anchor->SetCoordinateSystemToNormalizedViewport();
-    anchor->SetValue(0.5, 1.0);
-    actor.GetPositionCoordinate()->SetCoordinateSystemToViewport();
-    actor.GetPositionCoordinate()->SetReferenceCoordinate(anchor);
-    actor.SetPosition(0, -12 - row * 16);
-    auto* property = actor.GetTextProperty();
-    SetFont(*property);
-    property->SetFontSize(11);
-    property->SetColor(1, 1, 1);
-    property->SetJustificationToCentered();
-    property->SetVerticalJustificationToTop();
-    property->BoldOff(); property->ItalicOff(); property->ShadowOn();
-}
 }

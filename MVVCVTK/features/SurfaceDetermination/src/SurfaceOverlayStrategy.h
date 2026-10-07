@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Render/Support/FeatureOverlayBase.h"
-#include "SurfaceRecipe.h"
 
 #include <vtkSmartPointer.h>
 
@@ -14,8 +13,7 @@ class vtkPolyDataMapper;
 
 class SurfaceOverlayStrategy final : public FeatureOverlayBase {
 public:
-    explicit SurfaceOverlayStrategy(bool isPreview = false,
-        SurfaceDeterminationMethod method = SurfaceDeterminationMethod::LocalAdaptiveIso50);
+    explicit SurfaceOverlayStrategy(bool isPreview = false);
 
     void SetInputData(
         vtkSmartPointer<vtkDataObject> data) override;
@@ -30,8 +28,7 @@ private:
 class SurfaceSliceOverlayStrategy final : public FeatureOverlayBase {
 public:
     explicit SurfaceSliceOverlayStrategy(
-        std::array<double, 3> normalModel, bool isPreview = false,
-        SurfaceDeterminationMethod method = SurfaceDeterminationMethod::LocalAdaptiveIso50);
+        std::array<double, 3> normalModel, bool isPreview = false);
 
     void SetInputData(
         vtkSmartPointer<vtkDataObject> data) override;

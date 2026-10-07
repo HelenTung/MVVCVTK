@@ -61,11 +61,10 @@ vtkSmartPointer<vtkPolyData> BuildCube()
 vtkActor* GetOnlyActor(vtkRenderer& renderer)
 {
     auto* props = renderer.GetViewProps();
-    if (!props || props->GetNumberOfItems() != 2) return nullptr;
+    if (!props || props->GetNumberOfItems() != 1) return nullptr;
     props->InitTraversal();
     auto* actor = vtkActor::SafeDownCast(props->GetNextProp());
-    auto* caption = vtkTextActor::SafeDownCast(props->GetNextProp());
-    return caption && !caption->GetPickable() ? actor : nullptr;
+    return actor;
 }
 
 void TestSurfaceOverlay(Checks& checks)

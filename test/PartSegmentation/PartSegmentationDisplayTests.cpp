@@ -248,11 +248,11 @@ int GetPartDisplayFailCount()
             && surfaceRssBefore > 0
             && surfaceRssPeak >= surfaceRssBefore
             && surfaceRssAfter > 0
-            && surfaceRenderer->GetViewProps()->GetNumberOfItems() == 3
+            && surfaceRenderer->GetViewProps()->GetNumberOfItems() == 2
             && secondSurfaceRenderer->GetViewProps()
-                ->GetNumberOfItems() == 3
-            && vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(2))
-            && !vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(2))->GetPickable()
+                ->GetNumberOfItems() == 2
+            && !vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(0))
+            && !vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(1))
             && getSurfaceInput(surfaceRenderer)
                 == surfaceProduct.product->surface.GetPointer()
             && getSurfaceInput(secondSurfaceRenderer)
@@ -329,10 +329,10 @@ int GetPartDisplayFailCount()
         slice->AttachRenderer(renderer);
         slice->AttachRenderer(renderer);
         failureCount += GetCaseResult(
-            renderer->GetViewProps()->GetNumberOfItems() == 3
-                && vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(2))
-                && !vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(2))->GetPickable(),
-            "Slice overlay owns label fill, selection contour and non-pickable caption per View") ? 0 : 1;
+            renderer->GetViewProps()->GetNumberOfItems() == 2
+                && !vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(0))
+                && !vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(1)),
+            "Slice overlay owns only label fill and selection contour per View") ? 0 : 1;
         slice->DetachRenderer(renderer);
         failureCount += GetCaseResult(
             renderer->GetViewProps()->GetNumberOfItems() == 0,

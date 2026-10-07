@@ -7,7 +7,7 @@ class vtkPolyData;
 class vtkPolyDataMapper;
 class AlignmentOverlay final : public FeatureOverlayBase {
   public:
-    explicit AlignmentOverlay(AlignmentMethod method = AlignmentMethod::Rps);
+    AlignmentOverlay();
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void SetOverlayState(const FeatureOverlayState &state) override;
     static vtkSmartPointer<vtkPolyData> BuildData(const AlignmentMatrix &sourceToTarget,

@@ -3,6 +3,7 @@
 #include "OrthogonalCropTypes.h"
 #include "Host/Types/HostViewTypes.h"
 #include "Render/Support/FeatureOverlayBase.h"
+#include "Render/Support/RenderTextStyle.h"
 #include "Render/Contracts/SlicePlaneState.h"
 #include "Render/Support/SliceContourPlane.h"
 #include <vtkActor.h>

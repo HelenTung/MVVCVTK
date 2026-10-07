@@ -9,7 +9,7 @@
 #include <vtkProperty.h>
 #include <vtkUnsignedCharArray.h>
 
-AlignmentOverlay::AlignmentOverlay(AlignmentMethod method)
+AlignmentOverlay::AlignmentOverlay()
     : m_actor(vtkSmartPointer<vtkActor>::New()),
       m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()) {
     m_mapper->SetScalarModeToUseCellData();
@@ -22,20 +22,10 @@ AlignmentOverlay::AlignmentOverlay(AlignmentMethod method)
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetPickable(false);
     AttachProp(m_actor);
-    const char* caption = u8"计量对齐：基准与约束";
-    switch (method) {
-    case AlignmentMethod::SequentialPlanes: caption = u8"计量对齐：依次拟合平面"; break;
-    case AlignmentMethod::PlaneTwoHoles: caption = u8"计量对齐：一面两孔"; break;
-    case AlignmentMethod::Rps: caption = u8"计量对齐：参考点系统"; break;
-    case AlignmentMethod::ConstrainedBestFit: caption = u8"计量对齐：约束最佳拟合"; break;
-    }
-    SetCaption(caption, 5);
-    SetCaptionVisible(false);
 }
 void AlignmentOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (auto *poly = vtkPolyData::SafeDownCast(data)) {
         m_mapper->SetInputData(poly);
-        SetCaptionVisible(poly->GetNumberOfPoints() > 0);
     }
 }
 void AlignmentOverlay::SetOverlayState(const FeatureOverlayState &state) {

@@ -42,7 +42,7 @@ public:
             m_mapper->UseLookupTableScalarRangeOn();
             auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]", true);
+            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
             legend->SetVisibility(display->hasRegions);
             AttachProp(legend);
         }
@@ -105,7 +105,7 @@ public:
             m_slice->GetProperty()->SetOpacity(0.35);
             auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]", true);
+            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
             legend->SetVisibility(display->hasRegions);
             AttachProp(legend);
             m_contour = vtkSmartPointer<vtkCutter>::New();
