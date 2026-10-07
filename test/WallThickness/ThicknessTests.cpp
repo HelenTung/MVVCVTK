@@ -9,6 +9,7 @@
 #include "Render/Contracts/OverlayService.h"
 #include <vtkActorCollection.h>
 #include <vtkActor.h>
+#include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkCell.h>
 #include <vtkIdTypeArray.h>
@@ -811,6 +812,11 @@ void Display()
     const auto invalidId = candidate.statistics.minimumSample.value_or(0) == 0 ? 1U : 0U;
     (*mixed)[invalidId].validity = ThicknessValidity::NoValidSource;
     (*mixed)[invalidId].thickness = 0;
+    std::size_t colorCases=0;
+    for(auto& sample:*mixed) if(sample.validity==ThicknessValidity::Valid && colorCases<2) {
+        sample.thickness=colorCases++==0 ? 0.5 : 3.5;
+    }
+    Check(colorCases==2,"display fixture covers distinct lower and upper tolerance colors");
     candidate.field.samples = mixed;
     ThicknessData::Record record{
         w.archive, candidate.field, candidate.statistics, candidate.regions, {}};
@@ -836,6 +842,20 @@ void Display()
         hasSameTolerance = std::equal(first,first+3,second);
     }
     Check(hasSameTolerance, "continuous palette options do not alter tolerance or invalid colors");
+    auto* toleranceIds=vtkIdTypeArray::SafeDownCast(toleranceData.mesh->GetCellData()->GetArray("thickness.sample"));
+    bool hasMappedTolerance=toleranceIds && toleranceIds->GetNumberOfValues()==toleranceColors->GetNumberOfTuples();
+    for(vtkIdType cell=0;hasMappedTolerance && cell<toleranceIds->GetNumberOfValues();++cell) {
+        const auto id=toleranceIds->GetValue(cell);
+        if(id<0 || static_cast<std::size_t>(id)>=mixed->size()) {hasMappedTolerance=false;break;}
+        const auto& sample=(*mixed)[static_cast<std::size_t>(id)];
+        const std::array<double,3> expected=sample.validity!=ThicknessValidity::Valid ? std::array<double,3>{128,128,128}
+            : sample.thickness<record.archive.evaluation.lower ? std::array<double,3>{208,88,89}
+            : sample.thickness>record.archive.evaluation.upper ? std::array<double,3>{83,114,188}
+            : std::array<double,3>{97,179,113};
+        double actual[3];toleranceColors->GetTuple(cell,actual);
+        hasMappedTolerance &= std::equal(actual,actual+3,expected.begin());
+    }
+    Check(hasMappedTolerance,"each sample ID maps to its exact VG tolerance or invalid RGB");
     auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
     bool hasMatchingFootprints=surfaceIds && surfaceIds->GetNumberOfValues()==prepared.mesh->GetNumberOfCells();
     // 用原始三角形和归档重心坐标独立重建面片，检查显示未替换测量几何。
@@ -848,7 +868,7 @@ void Display()
         auto* cell=prepared.mesh->GetCell(index);
         hasMatchingFootprints &= cell->GetNumberOfPoints()==3 && sample.validity!=ThicknessValidity::OutsideEvaluation;
         for(std::size_t corner=0;hasMatchingFootprints && corner<3;++corner) {
-            double actual[3];prepared.mesh->GetPoint(cell->GetPointId(static_cast<vtkIdType>(corner)),actual);
+            double actual[3];prepared.mesh->GetPoint(cell->GetPointId(static_cast<int>(corner)),actual);
             for(std::size_t axis=0;axis<3;++axis) {
                 double expected=0;
                 for(std::size_t vertex=0;vertex<3;++vertex) {
