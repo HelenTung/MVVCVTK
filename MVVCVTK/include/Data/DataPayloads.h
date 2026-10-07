@@ -115,6 +115,37 @@ inline bool GetGridGeometryValid(
             geometry.direction.begin(), geometry.direction.end(), isFinite);
 }
 
+// 已冻结且保持对齐的标量存储；共享外部字节输入仍复制隔离。
+// 标准容器访问语法只暴露只读字节，底层 owner 一直存活到最后一个读者释放。
+class ImageScalarStorage final {
+public:
+    const std::uint8_t* data() const noexcept { return static_cast<const std::uint8_t*>(m_data); }
+    std::size_t size() const noexcept { return m_size; }
+    const std::uint8_t* begin() const noexcept { return data(); }
+    const std::uint8_t* end() const noexcept { return data() + m_size; }
+    const std::uint8_t& operator[](std::size_t i) const noexcept { return data()[i]; }
+    friend bool operator==(const ImageScalarStorage& a, const ImageScalarStorage& b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    }
+    friend bool operator!=(const ImageScalarStorage& a, const ImageScalarStorage& b) { return !(a == b); }
+private:
+    friend class ImageGrid3DPayload;
+    friend class VtkDataBridge;
+    ImageScalarStorage(std::shared_ptr<const void> owner, void* data, std::size_t size)
+        : m_owner(std::move(owner)), m_data(data), m_size(size) {}
+    std::shared_ptr<const void> m_owner;
+    void* m_data = nullptr;
+    std::size_t m_size = 0;
+    // 仅由 bridge 从实际标量计算并在发布前写入；外部声明范围不能成为缓存凭据。
+    // 同一冻结字节可被重新解释，复用时必须同时匹配类型与组件布局。
+    struct ScalarRange final {
+        ImageValueType valueType;
+        std::vector<std::array<double, 2>> components;
+    };
+    std::optional<ScalarRange> m_verifiedRange;
+};
+using ImageScalarBytes = std::shared_ptr<const ImageScalarStorage>;
+
 class ImageGrid3DPayload final : public IDataPayload {
 public:
     ImageGrid3DPayload(
@@ -128,12 +159,19 @@ public:
         : m_geometry(std::move(geometry))
         , m_valueType(valueType)
         , m_componentCount(componentCount)
-        , m_values(GetDataBytesSnapshot(values))
+        , m_values(CreateValuesSnapshot(values))
         , m_validityMask(GetDataBytesSnapshot(validityMask))
         , m_scalarRange(scalarRange)
         , m_metadata(std::move(metadata))
     {
     }
+
+    // 已冻结存储可以安全共享；外部 mask 仍须形成独立快照。
+    ImageGrid3DPayload(GridGeometry3D geometry, ImageValueType type, std::size_t components,
+        ImageScalarBytes values, DataBytes mask = {}, std::array<double, 2> range = {0, 0},
+        ImageMetadata metadata = {})
+        : ImageGrid3DPayload(std::move(geometry), type, components, std::move(values),
+            GetDataBytesSnapshot(mask), range, std::move(metadata), SnapshotUse{}) {}
 
     DataTypeId GetDataType() const override { return DataTypes::imageGrid3D; }
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
@@ -150,7 +188,7 @@ public:
     const GridGeometry3D& GetGeometry() const noexcept { return m_geometry; }
     ImageValueType GetValueType() const noexcept { return m_valueType; }
     std::size_t GetComponentCount() const noexcept { return m_componentCount; }
-    const DataBytes& GetValues() const noexcept { return m_values; }
+    const ImageScalarBytes& GetValues() const noexcept { return m_values; }
     const DataBytes& GetValidityMask() const noexcept { return m_validityMask; }
     std::vector<std::shared_ptr<const void>> GetDataResources() const override
     {
@@ -165,6 +203,20 @@ public:
         return std::shared_ptr<const ImageGrid3DPayload>(new ImageGrid3DPayload(
             m_geometry, m_valueType, m_componentCount, m_values,
             std::move(mask), m_scalarRange, m_metadata, SnapshotUse{}));
+    }
+    // 接收生产者独占的 float 输出；移交后不得保留任何可写别名。
+    std::shared_ptr<const ImageGrid3DPayload> CreateFloatSnapshot(
+        std::unique_ptr<std::vector<float>> values,
+        std::array<double, 2> scalarRange, ImageMetadata metadata) const
+    {
+        if (!values || values->size() > std::numeric_limits<std::size_t>::max() / sizeof(float)) return {};
+        auto owner = std::shared_ptr<std::vector<float>>(std::move(values));
+        auto storage = ImageScalarBytes(new ImageScalarStorage(
+            owner, owner->data(), owner->size() * sizeof(float)));
+        auto result = std::shared_ptr<const ImageGrid3DPayload>(new ImageGrid3DPayload(
+            m_geometry, ImageValueType::Float32, 1, std::move(storage),
+            m_validityMask, scalarRange, std::move(metadata), SnapshotUse{}));
+        return result->GetValid() ? result : nullptr;
     }
     const ImageMetadata& GetMetadata() const noexcept { return m_metadata; }
     const std::array<double, 2>& GetScalarRange() const noexcept
@@ -233,13 +285,19 @@ public:
     }
 
 private:
+    friend class VtkDataBridge;
+    static ImageScalarBytes CreateValuesSnapshot(const DataBytes& values) {
+        if (!values) return {};
+        auto owned = std::make_shared<std::vector<std::uint8_t>>(*values);
+        return ImageScalarBytes(new ImageScalarStorage(owned, owned->data(), owned->size()));
+    }
     struct SnapshotUse final {};
 
     ImageGrid3DPayload(
         GridGeometry3D geometry,
         const ImageValueType valueType,
         const std::size_t componentCount,
-        DataBytes values,
+        ImageScalarBytes values,
         DataBytes validityMask,
         const std::array<double, 2> scalarRange,
         ImageMetadata metadata,
@@ -257,7 +315,7 @@ private:
     GridGeometry3D m_geometry;
     ImageValueType m_valueType = ImageValueType::Unknown;
     std::size_t m_componentCount = 0;
-    DataBytes m_values;
+    ImageScalarBytes m_values;
     DataBytes m_validityMask;
     std::array<double, 2> m_scalarRange = { 0.0, 0.0 };
     ImageMetadata m_metadata;

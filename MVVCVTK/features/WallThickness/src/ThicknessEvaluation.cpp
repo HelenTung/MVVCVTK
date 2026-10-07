@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
 #include <algorithm>
@@ -23,8 +24,8 @@ Candidate BuildEvaluation(const Field &field, const ThicknessEvaluation &evaluat
             return result;
         }
         const auto &samples = *field.samples;
-        if (samples.size() > config.maxSamples ||
-            samples.size() > config.maxWorkingBytes / (sizeof(ThicknessSample) + 128U))
+        if (samples.size() > WorkLimit(config.maxSamples) ||
+            samples.size() > WorkLimit(config.maxWorkingBytes) / (sizeof(ThicknessSample) + 128U))
         {
             result.status = ThicknessStatus::BudgetExceeded;
             return result;

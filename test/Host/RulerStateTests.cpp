@@ -109,8 +109,9 @@ int GetRulerStateFailures() {
     nextWindow->Render();
     check(ports.app.view->GetViewState().rulerState.status==RulerStatus::Visible,"rebound ruler visible");
     check(shared->StartLoad(LoadEventKind::File) && shared->SetFileLoadFailed(),"inject active file failure"); ports.interaction.update->SendPendingUpdates();
+    nextWindow->Render();
     const auto cleared=ports.app.view->GetViewState();
-    check(cleared.rulerState.status==RulerStatus::NoData && cleared.rulerState.label.empty(),"load failure clears cached ruler immediately");
+    check(cleared.rulerState.status==RulerStatus::Visible && !cleared.rulerState.label.empty(),"load failure preserves the active data ruler");
     std::cout<<"Ruler state failures="<<failures<<'\n';
     return failures;
 }

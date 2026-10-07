@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Host/PartSegmentationHostTypes.h"
@@ -29,11 +30,13 @@ struct PartSurfaceBuildRequest final {
     // 已验证目录中所有非背景部件的并集；提取时再扩展一体素背景边界。
     std::optional<std::array<int, 6>> foregroundExtent;
     std::uint32_t partCount = 0;
-    std::size_t maxWorkingBytes = 0;
+    std::vector<PartLabelId> partIds; // 可选的有限显示集合；标签仍完整保留。
+    WorkLimit maxWorkingBytes {};
 };
 
 struct PartSurfaceProduct final {
     vtkSmartPointer<vtkPolyData> surface;
+    std::vector<PartLabelId> partIds;
     std::size_t actualBytes = 0;
 };
 

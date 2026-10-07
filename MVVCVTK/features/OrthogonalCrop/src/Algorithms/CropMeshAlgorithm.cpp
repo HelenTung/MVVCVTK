@@ -58,8 +58,10 @@ public:
         const std::function<bool()>& stop,std::uint64_t& operation,std::shared_ptr<const SurfaceMeshPayload> canonicalSource)
         :m_source(source),m_canonical(std::move(canonicalSource)),m_params(params),m_geometry(geometry),m_stop(stop),m_operation(operation)
     {
-        m_limit=params.availableRamBytes?params.availableRamBytes:512ULL*1024*1024;
-        if(!std::isfinite(params.meshTolerance)||params.meshTolerance<=0||!params.maxCells
+        // The router supplies current RAM for automatic requests. Like the image
+        // algorithm, direct calls without a budget do not invent a fixed cap.
+        m_limit=params.availableRamBytes?params.availableRamBytes:std::numeric_limits<std::size_t>::max();
+        if(!std::isfinite(params.meshTolerance)||params.meshTolerance<=0
             ||!params.maxDepth||params.maxDepth>128||std::fegetround()!=FE_TONEAREST)
             throw Failure{CropFailure::BadInput,"Mesh tolerance, cell/depth limits or floating-point mode is invalid."};
         m_fixed=16ULL*1024*1024;
@@ -147,7 +149,11 @@ public:
                 *std::numeric_limits<double>::epsilon()*magnitude,std::numeric_limits<double>::infinity());
             m_stack.push_back({{Make(0,0),Make(1,0),Make(0,1)},0});
             while(!m_stack.empty()) {
-                CheckStop();if(m_visited++>=m_params.maxCells)throw Failure{CropFailure::ResourceLimit,"Mesh cell budget was exhausted."};
+                CheckStop();
+                if(m_visited==std::numeric_limits<std::size_t>::max()
+                    ||(m_params.maxCells&&m_visited>=m_params.maxCells))
+                    throw Failure{CropFailure::ResourceLimit,"Mesh cell budget or index range was exhausted."};
+                ++m_visited;
                 Triangle triangle=std::move(m_stack.back());m_stack.pop_back();
                 Process(triangle);
             }
@@ -431,7 +437,7 @@ private:
                     Polygon clipped;if(!ClipCurve(polygon,index,clipped,seed,hasSeed))return false;
                     if(clipped.size()>=3)next.push_back(std::move(clipped));
                 }
-                if(next.size()>m_params.maxCells)throw Failure{CropFailure::ResourceLimit,"Mesh boundary component budget was exhausted."};
+                if(m_params.maxCells&&next.size()>m_params.maxCells)throw Failure{CropFailure::ResourceLimit,"Mesh boundary component budget was exhausted."};
                 std::size_t bytes=0;for(const auto& p:next)AddBytes(bytes,p.capacity()*sizeof(Vertex)*4);Memory(bytes);
             }
             result=std::move(next);if(result.empty())return false;
@@ -449,7 +455,7 @@ private:
     void Emit(const std::array<Vertex,3>& triangle,double error) {
         if(!Nonzero(triangle))return;
         if(!(Area(triangle)>0))throw Failure{CropFailure::PrecisionNotMet,"A retained mesh patch cannot be represented without degeneracy."};
-        if(m_emitted>=m_params.maxCells||m_emitted>=static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()/3))
+        if((m_params.maxCells&&m_emitted>=m_params.maxCells)||m_emitted>=static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()/3))
             throw Failure{CropFailure::ResourceLimit,"Mesh output cell budget was exhausted."};
         for(const auto& vertex:triangle) {
             const auto delta=Sub(Coordinates(vertex),Values(vertex.point));

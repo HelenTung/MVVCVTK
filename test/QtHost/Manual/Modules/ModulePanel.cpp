@@ -514,9 +514,8 @@ void ModulePanel::SetParameters(const QString& action, const QJsonObject& values
         if (form->GetHasInputs()) m_parameterAction = action;
         form->SetValue(parameters);
         Observe(false);
-        QJsonObject booleans;
-        for (auto it = values.begin(); it != values.end(); ++it) if (it.value().isBool() && form->GetField(it.key()) && form->GetField(it.key())->GetIsStateBound()) booleans[it.key()] = it.value();
-        if (!booleans.isEmpty()) form->SetPatch(booleans);
+        // 观察先同步外部模式/目标上下文，再保留调用者本次明确提供的草稿。
+        if (!values.isEmpty()) form->SetPatch(values);
     }
     else if (!values.isEmpty()) throw std::invalid_argument("此操作不需要参数");
     Observe(false); RefreshWorkflow();
@@ -530,7 +529,9 @@ void ModulePanel::SetParameterPatch(const QString& action, const QJsonObject& pa
         if (form->GetHasInputs()) m_parameterAction = action;
         auto values = patch; QJsonObject target;
         for (const auto* key : {"viewId", "viewScope", "target"}) if (values.contains(key)) { target[key] = values.take(key); }
-        if (!target.isEmpty()) { form->SetPatch(target); Observe(false); }
+        if (!target.isEmpty()) form->SetPatch(target);
+        // 即使没有显式 target，外部输入/工具栏也可能已改变观察上下文。
+        Observe(false);
         if (!values.isEmpty()) form->SetPatch(values);
     }
     else if (!patch.isEmpty()) throw std::invalid_argument("此操作不需要参数");

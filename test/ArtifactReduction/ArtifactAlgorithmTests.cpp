@@ -70,7 +70,7 @@ void TestTypesAndMasks()
     ArtifactConfig budget;
     budget.memoryBudgetBytes = required;
     Require(BuildCandidate(input, {}, budget).error == ArtifactError::None, "exact budget acceptance");
-    --budget.memoryBudgetBytes;
+    budget.memoryBudgetBytes = *budget.memoryBudgetBytes - 1;
     Require(BuildCandidate(input, {}, budget).error == ArtifactError::TooLarge, "one-byte budget rejection");
     ArtifactReduction::TaskControl control;
     control.deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
@@ -133,6 +133,29 @@ void TestDiffusion()
     for (std::size_t i = 0; i < count; ++i)
         Require(actual[i] == ((protection[i] || !processing[i]) ? values[i] : expected[i]), "mask only restricts final writeback");
     std::cout << "diffusion material std: " << full.quality.materialStdBefore << " -> " << full.quality.materialStdAfter << '\n';
+}
+
+void TestLongAxes()
+{
+    auto grid = CreateGrid(16385, 1, 1);
+    ArtifactReduction::AlgorithmInput input;
+    input.image = CreateImage(grid, ImageValueType::UInt8, std::vector<std::uint8_t>(16385, 7));
+    const auto copied = BuildCandidate(input);
+    Require(copied.error == ArtifactError::None && copied.image
+        && copied.image->GetGeometry().dimensions == grid.dimensions,
+        "long skinny input is not rejected by a fixed axis quota");
+    grid = CreateGrid(16385, 64, 1);
+    ArtifactRingParams ring;
+    ring.centerIndex = {8192, 31.5};
+    ring.ringWidth = 1;
+    ring.threshMin = 0; ring.threshMax = 1; ring.threshold = 1;
+    ArtifactReduction::RingLayout layout;
+    Require(ArtifactReduction::GetRingLayout(grid, ring, layout) == ArtifactError::None,
+        "ring layout accepts a representable plane beyond the old axis quota");
+    MvvcvtkTomoPyLayout native{};
+    Require(mvvcvtk_tomopy_get_layout(std::numeric_limits<int>::max(), 64, 1, 31.5F,
+        30, 1, 0, &native) != MVVCVTK_TOMOPY_OK,
+        "ring layout still rejects overflow of its actual int index space");
 }
 
 void TestRing()
@@ -202,5 +225,6 @@ void TestAlgorithm()
 {
     TestTypesAndMasks();
     TestDiffusion();
+    TestLongAxes();
     TestRing();
 }

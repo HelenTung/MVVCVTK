@@ -22,6 +22,10 @@ struct RenderInputUse final {
     bool GetIsPublished() const { return !lifetime || lifetime->GetIsPublished(); }
 };
 
+struct VolumeLodBuildRequest;
+struct VolumeLodBuildResult;
+struct IsoSurfaceBuildRequest;
+struct IsoSurfaceBuildResult;
 struct VolumeLodKey;
 struct VolumeLodProduct;
 struct IsoSurfaceKey;
@@ -64,8 +68,13 @@ struct RenderTransitionStats final {
     std::uint64_t activeRevision = 0;
     std::uint64_t cpuPrepareUs = 0;
     std::uint64_t gpuReleaseUs = 0;
-    std::uint64_t gpuUploadUs = 0;
+    std::uint64_t gpuUploadUs = 0; // Only populated by an actual GPU timing source.
+    std::uint64_t cpuBindUs = 0;
+    std::uint64_t drawCpuUs = 0;
+    std::optional<std::uint64_t> scalarUploadBytes;
+    std::optional<std::uint64_t> maskUploadBytes;
     std::uint64_t firstRenderUs = 0;
+    std::uint64_t estimatedPeakBytes = 0;
     std::uint64_t candidateBytes = 0;
     std::uint64_t activeBytes = 0;
     std::uint64_t cacheBytes = 0;
@@ -89,6 +98,9 @@ class RenderTaskToken final {
 public:
     RenderTaskToken() = default;
     bool GetIsStopped() const noexcept;
+    bool GetIsBudgetEnforced() const;
+    // 估算默认只作诊断；宿主显式设置限制后才参与准入。
+    bool SetEstimatedBytes(std::uint64_t estimatedBytes) const;
     bool SetActualBytes(std::uint64_t actualBytes) const;
     // 产品读者在取消/退役后仍存活时继续计费；不取得业务数据或渲染对象所有权。
     bool SetProductOwner(const std::shared_ptr<const void>& product,
@@ -118,6 +130,8 @@ struct RenderTaskRequest final {
     std::uint64_t requestRevision = 0;
     std::uint64_t estimatedBytes = 0;
     RenderTaskWork work;
+    std::function<void()> onFinished;
+    std::function<bool()> onNeeded; // 最后一个有效等待者离开后才取消共享构建。
 };
 
 class RenderTaskChannel final {
@@ -159,6 +173,10 @@ struct RenderResourceState final {
     std::uint64_t pendingBytes = 0;
     std::uint64_t cacheBytes = 0;
     std::uint64_t cpuBudgetBytes = 0;
+    bool isCpuBudgetEnforced = false;
+    std::uint64_t productBuildCount = 0;
+    std::uint64_t joinedBuildCount = 0;
+    std::uint64_t scalarResampleBuildCount = 0;
 };
 
 struct RenderGpuResourceState final {
@@ -182,10 +200,16 @@ public:
 
     std::shared_ptr<RenderTaskChannel> CreateTaskChannel(
         RenderProductKind productKind);
+    RenderTaskAdmission StartVolumeProduct(const std::shared_ptr<RenderTaskChannel>& channel,
+        VolumeLodBuildRequest request, std::function<void(VolumeLodBuildResult, std::uint64_t)> onComplete);
+    RenderTaskAdmission StartIsoSurfaceProduct(const std::shared_ptr<RenderTaskChannel>& channel,
+        IsoSurfaceBuildRequest request, std::function<void(IsoSurfaceBuildResult, std::uint64_t)> onComplete);
     bool SendTasks();
     bool StartStop();
     bool Stop(std::chrono::steady_clock::time_point deadline);
     RenderResourceState GetResourceState() const;
+    // 显式限制已登记的渲染工作与产品，不代表进程内存上限。
+    // 未调用本方法时，cpuBudgetBytes 只控制缓存保留。
     bool SetCpuBudgetBytes(std::uint64_t budgetBytes);
 
     std::shared_ptr<const VolumeLodProduct> GetVolumeProduct(
@@ -219,6 +243,8 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
     friend class RenderTaskChannel;
+    friend class VolumeLodProductBuilder;
+    void SetScalarBuildCount();
 };
 
 struct RenderStrategyServices final {

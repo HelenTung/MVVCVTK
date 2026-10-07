@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr std::uint32_t maxOverlayPartCount = 4096;
+constexpr std::uint32_t maxOverlayPartCount = std::numeric_limits<int>::max() - 1U;
 
 std::optional<PartLabelId> GetPickedLabel(vtkProp3D& prop, vtkDataSet* data,
     vtkLookupTable& table, const int x, const int y, vtkRenderer* renderer,

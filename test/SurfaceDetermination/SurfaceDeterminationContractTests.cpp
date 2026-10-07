@@ -28,7 +28,7 @@ void TestRecipeReplay(Checks& checks)
     std::locale::global(oldLocale);
     checks.Get(localized==text,"canonical recipe is locale independent");
     SurfaceDeterminationStartParams requested,resolved;
-    std::string frame;std::size_t bytes=0;
+    std::string frame;WorkLimit bytes;
     checks.Get(SurfaceContract::GetParameters(text,requested,resolved,frame,bytes)
         && !requested.initialIsoValue && resolved.initialIsoValue==result.resolvedParams.initialIsoValue
         && requested.resultScope==params.resultScope && frame=="RAS" && bytes==128U*1024U*1024U,

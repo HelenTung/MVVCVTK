@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Model/PartCatalog.h"
 #include "Model/PartIdentityFactory.h"
@@ -19,7 +20,7 @@ struct PartLineageRequest final {
     std::shared_ptr<const std::vector<PartLabelId>> currentLabels;
     std::vector<PartMetrics> currentMetricsByLabel;
     std::uint64_t nextResultRevision = 0;
-    std::size_t maxWorkingBytes = 0;
+    WorkLimit maxWorkingBytes {};
 };
 
 struct PartLineageResult final {

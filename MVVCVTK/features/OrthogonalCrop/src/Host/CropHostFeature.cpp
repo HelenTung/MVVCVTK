@@ -92,6 +92,11 @@ bool GetTargetsSame(const std::optional<CropHostTarget>& a,const std::optional<C
         &&a->referenceView.isViewRoleUsed==b->referenceView.isViewRoleUsed&&a->referenceView.viewRole==b->referenceView.viewRole
         &&a->targetViews.viewIds==b->targetViews.viewIds&&a->targetViews.viewRoles==b->targetViews.viewRoles;
 }
+bool GetRestoreOptionsDefault(const CropDocumentRequest& request) {
+    // Non-restore commands do not consume a RAM budget. Accept the old header's
+    // default as well as the new automatic value for existing callers.
+    return request.restoreResult && (request.availableRamBytes==0 || request.availableRamBytes==512ULL*1024*1024);
+}
 bool GetDocumentRequestsSame(const CropDocumentRequest& a,const CropDocumentRequest& b) {
     return a.action==b.action&&a.documentId==b.documentId&&a.requestId==b.requestId&&a.expectedRevision==b.expectedRevision
         &&a.sourceRevision==b.sourceRevision&&GetTargetsSame(a.target,b.target)&&a.restoreResult==b.restoreResult
@@ -1593,8 +1598,7 @@ CropDocumentAdmission CropHostFeature::Impl::Document::SendRequest(CropDocumentR
     const bool isClosed=request.documentId==m_lastClosedDocument && request.documentId!=0
         && m_dataState.documentStatus==CropDocumentStatus::Closed && request.action==CropDocumentAction::CloseDocument;
     if (isClosed) admission.stateRevision=m_lastClosedRevision;
-    if (request.target || request.sourceRevision || request.archive || !request.restoreResult
-        || request.availableRamBytes!=512ULL*1024*1024 || !request.requestId || !request.documentId || (request.documentId!=history.documentId && !isClosed)
+    if (request.target || request.sourceRevision || request.archive || !GetRestoreOptionsDefault(request) || !request.requestId || !request.documentId || (request.documentId!=history.documentId && !isClosed)
         || (request.action!=CropDocumentAction::ReturnToSource && request.action!=CropDocumentAction::CloseDocument)) {
         admission.failureReason=CropFailure::InvalidRequest;return admission;
     }
@@ -1955,8 +1959,8 @@ CropBuildAdmission CropHostFeature::Impl::Document::SendRequest(CropBuildRequest
     if(!node)return reject(CropFailure::NodeNotFound);
     if(!node->operation && !request.inputRoi)return reject(CropFailure::NoCropOperations);
     if(request.inputRoi && (!GetDataRevisionRefValid(*request.inputRoi) || node->operation))return reject(CropFailure::InvalidRequest);
-    if(!request.options.availableRamBytes||!std::isfinite(request.options.meshTolerance)||request.options.meshTolerance<=0
-        ||!request.options.maxCells||!request.options.maxDepth||request.options.maxDepth>128)return reject(CropFailure::BadInput);
+    if(!std::isfinite(request.options.meshTolerance)||request.options.meshTolerance<=0
+        ||!request.options.maxDepth||request.options.maxDepth>128)return reject(CropFailure::BadInput);
     const auto source=m_bridge->GetSource();if(!source.binding)return reject(CropFailure::SourceMismatch);
     if(const auto failure=ReserveRequest(request.documentId,request.requestId,RequestKind::Build);failure!=CropFailure::None)return reject(failure);
     RequestReservation reservation{this,request.requestId};
@@ -2009,18 +2013,8 @@ CropFailure CropHostFeature::Impl::Document::ReserveRequest(CropDocumentId docum
     if(const auto failure=GetRequestFailure(documentId,requestId,kind);failure!=CropFailure::None)return failure;
     if(!m_requestOrder)return CropFailure::ResourceLimit;
     CaptureEditOutcomes();
-    std::size_t pending=0;
-    for(const auto& pair:m_requests) {
-        if(pair.second.documentId!=documentId)continue;
-        if(pair.second.kind==RequestKind::Edit) {
-            const auto it=m_editCommands.find(pair.first);if(it!=m_editCommands.end()&&it->second.outcome.status==CropEditStatus::Queued)++pending;
-        } else if(pair.second.kind==RequestKind::Build) {
-            const auto it=m_buildCommands.find(pair.first);if(it!=m_buildCommands.end()&&!it->second->result)++pending;
-        } else {
-            const auto it=m_documentCommands.find(pair.first);if(it!=m_documentCommands.end()&&it->second.outcome.status==CropEditStatus::Queued)++pending;
-        }
-    }
-    if(pending>=256||!TrimRequests(documentId,1023))return CropFailure::ResourceLimit;
+    // 只回收已投递的终态记录。未消费的完成结果必须保留，不能反向限制新请求。
+    (void)TrimRequests(documentId,1023);
     m_requests.emplace(requestId,RequestEntry{documentId,kind,m_requestOrder});
     m_requestOrder=m_requestOrder==std::numeric_limits<std::uint64_t>::max()?0:m_requestOrder+1;
     return CropFailure::None;
@@ -2192,8 +2186,7 @@ CropDocumentAdmission CropHostFeature::Impl::SendRequest(CropDocumentRequest req
         CropDocumentAdmission result;result.requestId=request.requestId;result.documentId=request.documentId;
         const auto history=document->m_bridge->GetHistory(0,1);
         result.rootNodeId=history.rootNodeId;result.stateRevision=history.stateRevision;
-        if(request.target||request.sourceRevision||request.archive||!request.restoreResult
-            ||request.availableRamBytes!=512ULL*1024*1024)result.failureReason=CropFailure::InvalidRequest;
+        if(request.target||request.sourceRevision||request.archive||!GetRestoreOptionsDefault(request))result.failureReason=CropFailure::InvalidRequest;
         else if(request.expectedRevision!=history.stateRevision)result.failureReason=CropFailure::StateVersionMismatch;
         else if(m_open->closeRequest)result.failureReason=CropFailure::Busy;
         else result.failureReason=document->ReserveRequest(request.documentId,request.requestId,Document::RequestKind::Document);
@@ -2294,8 +2287,7 @@ CropDocumentAdmission CropHostFeature::Impl::StartDocument(CropDocumentRequest r
     if(!request.target)return reject(CropFailure::InvalidRequest);
     const bool restoring=request.action==CropDocumentAction::RestoreDocument;
     const bool create=request.action==CropDocumentAction::CreateDocument||restoring;
-    if(bool(request.archive)!=restoring||(!restoring&&(!request.restoreResult||request.availableRamBytes!=512ULL*1024*1024)))return reject(CropFailure::InvalidRequest);
-    if(restoring&&!request.availableRamBytes)return reject(CropFailure::BadInput);
+    if(bool(request.archive)!=restoring||(!restoring&&!GetRestoreOptionsDefault(request)))return reject(CropFailure::InvalidRequest);
     std::vector<CropNodeMapping> mappings;
     auto next=create?std::make_shared<Document>():GetDocument(request.documentId);
     if(!next)return reject(CropFailure::InvalidRequest);

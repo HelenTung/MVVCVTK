@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "Host/TrustedDataPort.h"
 #include "Host/SurfaceDeterminationHostTypes.h"
@@ -58,7 +59,7 @@ public:
                                               const SurfaceAlgorithmInputs &inputs);
   static SurfaceAlgorithmResult BuildSurface(const VtkImageGridSnapshot &source,
                                              const SurfaceDeterminationStartParams &params,
-                                             std::size_t maxWorkingBytes,
+                                             WorkLimit maxWorkingBytes,
                                              const SurfaceCancelCheck &getCancelled,
                                              const SurfaceProgressCallback &onProgress,
                                              const SurfaceAlgorithmInputs &inputs = {});

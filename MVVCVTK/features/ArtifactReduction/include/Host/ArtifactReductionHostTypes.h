@@ -24,9 +24,9 @@ enum class ArtifactInputMode : std::uint8_t {
 
 struct ArtifactConfig final {
     // 本 Feature 保留输入及工作缓冲的保守预算，不代表进程峰值。
-    std::size_t memoryBudgetBytes = 512ULL * 1024 * 1024;
-    // 同一 Feature 对象累计发布量；Detach/Attach 不重置，Host 历史仍持有输出。
-    std::size_t publishBudgetBytes = 512ULL * 1024 * 1024;
+    std::optional<std::size_t> memoryBudgetBytes {};
+    // 单个候选的可选发布上限；历史累计发布量只作统计。
+    std::optional<std::size_t> publishBudgetBytes {};
     std::uint32_t stopTimeoutMs = 2000;
 };
 
@@ -63,7 +63,7 @@ struct ArtifactRequest final {
     // qualityRoi仅用于区域（material）质量统计，整体输出统计仍覆盖有效数据；两种算法都不是掩码感知滤波器。
     std::optional<ArtifactDiffusionParams> diffusion;
     std::optional<ArtifactRingParams> ring;
-    std::uint32_t timeoutMs = 60000;
+    std::optional<std::size_t> timeoutMs{};
 };
 
 enum class ArtifactAction : std::uint8_t { Prepare, Cancel, Commit, Discard };

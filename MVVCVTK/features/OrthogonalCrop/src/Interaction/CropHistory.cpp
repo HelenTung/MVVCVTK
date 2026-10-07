@@ -8,8 +8,6 @@
 #include <utility>
 
 namespace {
-constexpr std::size_t nodeLimit=100000;
-constexpr std::size_t depthLimit=4096;
 std::atomic<std::uint64_t> nextIdentity{1};
 }
 
@@ -49,7 +47,7 @@ CropHistorySnapshot CropHistory::GetSnapshot(CropNodeId after,std::size_t limit)
     result.appliedHead=m_appliedHead;
     result.totalNodeCount=m_nodes.size();
     result.results=m_results;
-    const auto count=limit ? std::min(limit,nodeLimit) : nodeLimit;
+    const auto count=limit ? limit : m_nodes.size();
     auto next=m_nodes.upper_bound(after);
     for (;next!=m_nodes.end() && result.nodes.size()<count;++next) result.nodes.push_back(next->second);
     if (next!=m_nodes.end() && !result.nodes.empty()) result.nextPageAfter=result.nodes.back().nodeId;
@@ -73,7 +71,7 @@ std::vector<CropNodeId> CropHistory::GetPathIds(CropNodeId id) const
     std::vector<CropNodeId> result;
     while (id) {
         const auto found=m_nodes.find(id);
-        if (found==m_nodes.end() || result.size()>depthLimit) return {};
+        if (found==m_nodes.end() || result.size()>=m_nodes.size()) return {};
         result.push_back(id);
         id=found->second.parentNodeId;
     }
@@ -110,7 +108,7 @@ CropHistory::Stage CropHistory::BuildAppend(CropNodeId parent,CropOpItem operati
     if (stage.failureReason!=CropFailure::None) return stage;
     if (!m_nodes.count(parent)) { stage.failureReason=CropFailure::NodeNotFound; return stage; }
     const auto path=GetPathIds(parent);
-    if (m_nodes.size()>=nodeLimit || path.size()>depthLimit) { stage.failureReason=CropFailure::ResourceLimit; return stage; }
+    if (path.empty()) { stage.failureReason=CropFailure::NodeNotFound; return stage; }
     auto geometry=CropGeometry::Build(std::move(operation));
     if (!geometry) { stage.failureReason=CropFailure::BadInput; return stage; }
     const auto node=reservedId ? reservedId : CreateNodeId();
@@ -325,9 +323,8 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
 {
     failure=CropFailure::BadInput;
     if(mappings)mappings->clear();
-    if(archive.nodes.size()>nodeLimit){failure=CropFailure::ResourceLimit;return {};}
     if (archive.schemaVersion!=1 || !GetDataRevisionRefValid(archive.sourceRevision)
-        || archive.nodes.empty() || archive.nodes.size()>nodeLimit) return {};
+        || archive.nodes.empty()) return {};
     std::map<CropNodeId,CropNodeSnapshot> nodes;
     for (const auto& node:archive.nodes) {
         if (!node.nodeId || !nodes.emplace(node.nodeId,node).second) return {};
@@ -348,14 +345,13 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
         auto id=entry.first;
         while (!depths.count(id)) {
             const auto found=nodes.find(id);
-            if (found==nodes.end() || !pending.insert(id).second || path.size()>=depthLimit) return {};
+            if (found==nodes.end() || !pending.insert(id).second) return {};
             path.push_back(id);
             id=found->second.parentNodeId;
         }
         auto depth=depths.at(id);
         for (auto node=path.rbegin();node!=path.rend();++node) {
-            if (++depth>depthLimit) return {};
-            depths.emplace(*node,depth);
+            depths.emplace(*node,++depth);
         }
     }
     if (archive.result) {
@@ -363,8 +359,8 @@ std::optional<CropHistory> CropHistory::CreateFromArchive(const CropDocumentArch
         if (!result.resultId || (result.inputRoi && !GetDataRevisionRefValid(*result.inputRoi)) || (result.nodeId==archive.rootNodeId && !result.inputRoi) || !nodes.count(result.nodeId)
             || result.status!=CropResultStatus::Published || result.sourceRevision!=archive.sourceRevision
             || !GetDataEntityIdValid(result.scopeId) || !GetDataRevisionRefValid(result.recipeRevision)
-            || !GetDataRevisionRefValid(result.outputRevision)||!result.options.availableRamBytes
-            ||!std::isfinite(result.options.meshTolerance)||result.options.meshTolerance<=0||!result.options.maxCells
+            || !GetDataRevisionRefValid(result.outputRevision)
+            ||!std::isfinite(result.options.meshTolerance)||result.options.meshTolerance<=0
             ||!result.options.maxDepth||result.options.maxDepth>128||!std::isfinite(result.meshErrorBound)||result.meshErrorBound<0
             ||!std::isfinite(result.meshAreaErrorBound)||result.meshAreaErrorBound<0) return {};
     }

@@ -216,7 +216,7 @@ std::optional<PartSegmentationResult> StartPart(
             *result = std::move(value);
         });
     if (admission.status != PartAdmissionStatus::Accepted
-        || !PumpUntil(primary, timer, [result] { return result->has_value(); })) {
+        || !PumpUntil(primary, timer, [result, &feature] { return result->has_value() && !feature.GetState().isDisplayPreparing; })) {
         return std::nullopt;
     }
     return *result;
@@ -536,7 +536,9 @@ int GetPartSceneFailCount()
         "Worker Ready advances during RenderPending while the committed old display remains") ? 0 : 1;
     renderProbe->isFailing = false;
     const bool replacementPumped = replacementAdmission.status == PartAdmissionStatus::Accepted
-        && PumpUntil(*primary, *timer, [replacement] { return replacement->has_value(); });
+        && PumpUntil(*primary, *timer, [&] {
+            return replacement->has_value() && !feature->GetState().isDisplayPreparing;
+        });
     const auto replacementResult = replacementPumped ? *replacement : std::nullopt;
     const auto replacementSnapshot = feature->GetPartSetSnapshot();
     const auto* replacementPart = replacementSnapshot

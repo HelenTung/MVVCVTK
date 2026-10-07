@@ -765,6 +765,7 @@ std::optional<HostStateSnapshot> VtkAppHostSession::Impl::GetStateSnapshot() con
         || !core.sharedDataMgr) return std::nullopt;
     try {
         HostStateSnapshot snapshot;
+        snapshot.load = core.sharedDataMgr->GetLoadState();
         snapshot.sessionGeneration = frameCoordinator->GetSessionGeneration();
         const auto operations = featureRuntime.GetOperationStates();
         if (!operations || !isBuilt || stopState.load() != HostStopState::Running

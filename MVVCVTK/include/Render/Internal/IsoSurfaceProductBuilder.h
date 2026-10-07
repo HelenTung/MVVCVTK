@@ -45,6 +45,7 @@ struct IsoSurfaceBuildRequest final {
     vtkSmartPointer<vtkImageData> input;
     vtkSmartPointer<vtkImageData> mask;
     bool isPreview = false;
+    std::weak_ptr<RenderResourceCoordinator> resources;
 };
 
 struct IsoSurfaceBuildResult final {

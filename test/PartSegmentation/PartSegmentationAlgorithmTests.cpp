@@ -50,6 +50,23 @@ int GetPartAlgorithmFailCount()
 {
     int failureCount = 0;
     PartAlgorithmParams params;
+    std::vector<float> many(34 * 34 * 34, 0);
+    for (int z = 0; z < 34; z += 2) for (int y = 0; y < 34; y += 2) for (int x = 0; x < 34; x += 2)
+        many[(z * 34 + y) * 34 + x] = 1;
+    const auto all = ClassicalPartSegmenter::BuildLabels(BuildVolume({34, 34, 34}, many, PartScalarType::Float32), params);
+    failureCount += GetCaseResult(all.error == PartAlgorithmError::None && all.metricsByLabel.size() == 4914
+        && all.labels.size() == many.size(), "Complete business labels exceed the old 4096 display quota") ? 0 : 1;
+    const auto manyVolume = BuildVolume({34, 34, 34}, many, PartScalarType::Float32);
+    const auto scanned = ClassicalPartSegmenter::BuildLabelMetrics(manyVolume, all.labels, 4913);
+    auto remappedLabels = all.labels;
+    std::vector<PartLabelId> mapping(4914);
+    for (std::size_t i = 0; i < mapping.size(); ++i) mapping[i] = static_cast<PartLabelId>(i);
+    const auto remapped = ClassicalPartSegmenter::BuildRemappedMetrics(manyVolume, remappedLabels, mapping, 4913);
+    failureCount += GetCaseResult(scanned && remapped && scanned->size() == 4914
+        && remapped->size() == 4914 && (*scanned)[4913].voxelCount == 1
+        && (*remapped)[4913].voxelCount == 1 && remappedLabels == all.labels,
+        "Independent and remapped metrics preserve more than 4096 business parts") ? 0 : 1;
+
 
     const auto invalid = ClassicalPartSegmenter::BuildLabels(
         PartVolumeView{}, params);

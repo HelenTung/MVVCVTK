@@ -495,9 +495,10 @@ bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
     m_impl->m_isLoadPublished = false;
     m_impl->m_isLoadPublishing = false;
     if (loadEventKind == LoadEventKind::File) {
-        // B. File 会替换数据真源，加载期间 current 不再被标记为可信。
+        // 加载新文件期间，当前 active 修订仍然有效。
         m_impl->m_fileLoadState = LoadState::Loading;
-        m_impl->m_dataTrustedState = LoadState::Loading;
+        if (m_impl->m_dataTrustedState != LoadState::Succeeded)
+            m_impl->m_dataTrustedState = LoadState::Loading;
     }
     else {
         // C. Reload 采用 pending 提交；加载期间仍允许旧 current 保持可信并继续显示。
@@ -730,7 +731,8 @@ bool SharedInteractionState::SetFileLoadFailed()
             || m_impl->m_fileLoadState != LoadState::Loading) return false;
         m_impl->m_isLoadPublishing = true;
         m_impl->m_fileLoadState = LoadState::Failed;
-        m_impl->m_dataTrustedState = LoadState::Failed;
+        if (m_impl->m_dataTrustedState != LoadState::Succeeded)
+            m_impl->m_dataTrustedState = LoadState::Failed;
     }
     try { m_impl->SendFlags(UpdateFlags::LoadFailed | UpdateFlags::FileLoad); }
     catch (...) {}

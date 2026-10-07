@@ -242,7 +242,7 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
 
     const int* sourceDimensions = request.input->GetDimensions();
     auto* sourcePointData = request.input->GetPointData();
-    if (!sourceDimensions || request.input->GetNumberOfPoints() <= 0
+    if (!sourceDimensions || !RenderWorkBudget::GetScalarStorageValid(request.input)
         || !sourcePointData || !sourcePointData->GetScalars()) {
         return GetFailure(
             RenderProductFailure::InvalidInput,
@@ -260,7 +260,8 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         }
     }
     if (request.mask
-        && (request.mask->GetScalarType() != VTK_UNSIGNED_CHAR
+        && (!RenderWorkBudget::GetScalarStorageValid(request.mask)
+            || request.mask->GetScalarType() != VTK_UNSIGNED_CHAR
             || request.mask->GetNumberOfScalarComponents() != 1
             || !GetGeometryMatch(request.input, request.mask))) {
         return GetFailure(
@@ -268,8 +269,18 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             "The volume LOD mask geometry is invalid.");
     }
 
+    const auto resources = request.resources.lock();
+    if (resources) {
+        if (auto cached = resources->GetVolumeProduct(request.key)) {
+            if (!stopToken.SetProductOwner(cached, cached->actualBytes))
+                return GetFailure(stopToken.GetIsStopped() ? RenderProductFailure::Cancelled
+                    : RenderProductFailure::ResourceRejected, "The scalar product lease is unavailable.");
+            VolumeLodBuildResult result; result.product = std::move(cached); return result;
+        }
+    }
     const auto estimate = GetEstimatedBytes(request);
-    if (!estimate || !stopToken.SetActualBytes(*estimate)) {
+    if ((!estimate && stopToken.GetIsBudgetEnforced())
+        || (estimate && !stopToken.SetEstimatedBytes(*estimate))) {
         return GetFailure(RenderProductFailure::ResourceRejected,
             "The volume CPU working set was rejected before allocation.");
     }
@@ -287,6 +298,7 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             volume = request.input;
         }
         else {
+            if (resources) resources->SetScalarBuildCount();
             vtkAlgorithmOutput* inputPort = nullptr;
             if (request.key.isDenoiseOn) {
                 denoise = vtkSmartPointer<
@@ -406,6 +418,7 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             return GetFailure(RenderProductFailure::ResourceRejected,
                 "The product allocation lease was rejected.");
         }
+        if (resources) (void)resources->SetVolumeProduct(request.key, product);
         VolumeLodBuildResult result;
         result.product = std::move(product);
         return result;
