@@ -54,11 +54,11 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             display.rangeMode = GetEnum<GapRangeMode>(p, "rangeMode", {
                 {"Result", GapRangeMode::Result}, {"SelectedInterval", GapRangeMode::SelectedInterval}});
             if (p.contains("range")) display.range = GetArray<double, 2>(p["range"]);
-            if (!p["constantColor"].isNull()) display.constantColor = GetArray<double, 3>(p["constantColor"]);
-            if (!p["lowColor"].isNull()) display.lowColor = GetArray<double, 3>(p["lowColor"]);
-            if (!p["highColor"].isNull()) display.highColor = GetArray<double, 3>(p["highColor"]);
-            if (!p["belowColor"].isNull()) display.belowColor = GetArray<double, 3>(p["belowColor"]);
-            if (!p["aboveColor"].isNull()) display.aboveColor = GetArray<double, 3>(p["aboveColor"]);
+            if (p.contains("constantColor") && !p["constantColor"].isNull()) display.constantColor = GetArray<double, 3>(p["constantColor"]);
+            if (p.contains("lowColor") && !p["lowColor"].isNull()) display.lowColor = GetArray<double, 3>(p["lowColor"]);
+            if (p.contains("highColor") && !p["highColor"].isNull()) display.highColor = GetArray<double, 3>(p["highColor"]);
+            if (p.contains("belowColor") && !p["belowColor"].isNull()) display.belowColor = GetArray<double, 3>(p["belowColor"]);
+            if (p.contains("aboveColor") && !p["aboveColor"].isNull()) display.aboveColor = GetArray<double, 3>(p["aboveColor"]);
             GapHostRequest request; request.action = GapHostAction::SetDisplay; request.display = display;
             const bool isAccepted = feature->SendRequest(std::move(request));
             const auto state = feature->GetState();

@@ -51,11 +51,11 @@ ThicknessDisplay Display(const QJsonObject& p)
     if (p.contains("palette")) value.colorBand.mode = GetEnum<ThicknessColorMode>(p, "palette", {
         {"Constant", ThicknessColorMode::Constant}, {"Gradient", ThicknessColorMode::Gradient},
         {"Rainbow", ThicknessColorMode::Rainbow}, {"InverseRainbow", ThicknessColorMode::InverseRainbow}, {"HueLoop", ThicknessColorMode::HueLoop}});
-    if (!p["constantColor"].isNull()) value.colorBand.constantColor = GetArray<double, 3>(p["constantColor"]);
-    if (!p["lowColor"].isNull()) value.colorBand.lowColor = GetArray<double, 3>(p["lowColor"]);
-    if (!p["highColor"].isNull()) value.colorBand.highColor = GetArray<double, 3>(p["highColor"]);
-    if (!p["belowColor"].isNull()) value.colorBand.belowColor = GetArray<double, 3>(p["belowColor"]);
-    if (!p["aboveColor"].isNull()) value.colorBand.aboveColor = GetArray<double, 3>(p["aboveColor"]);
+    if (p.contains("constantColor") && !p["constantColor"].isNull()) value.colorBand.constantColor = GetArray<double, 3>(p["constantColor"]);
+    if (p.contains("lowColor") && !p["lowColor"].isNull()) value.colorBand.lowColor = GetArray<double, 3>(p["lowColor"]);
+    if (p.contains("highColor") && !p["highColor"].isNull()) value.colorBand.highColor = GetArray<double, 3>(p["highColor"]);
+    if (p.contains("belowColor") && !p["belowColor"].isNull()) value.colorBand.belowColor = GetArray<double, 3>(p["belowColor"]);
+    if (p.contains("aboveColor") && !p["aboveColor"].isNull()) value.colorBand.aboveColor = GetArray<double, 3>(p["aboveColor"]);
     value.isVisible = GetBool(p, "isVisible"); value.hasLegend = GetBool(p, "hasLegend"); return value;
 }
 }
