@@ -216,8 +216,9 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_invalidLegend->SetNumberOfEntries(1);
     m_invalidLegend->SetEntry(0, symbol, u8"无效/未测", textColor);
     m_invalidLegend->ScalarVisibilityOn();
-    m_invalidLegend->SetPosition(0.025, 0.06);
-    m_invalidLegend->SetPosition2(0.34, 0.07);
+    // 与左下方向轴和右下标尺分开，限制自动排版后的文字高度。
+    m_invalidLegend->SetPosition(0.25, 0.06);
+    m_invalidLegend->SetPosition2(0.26, 0.04);
     m_invalidLegend->SetPadding(0);
     m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
     RenderTextStyle::SetFont(*m_invalidLegend->GetEntryTextProperty());
