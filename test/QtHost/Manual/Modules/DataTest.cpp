@@ -48,6 +48,15 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
             request.metadata.attributes.push_back({"manual.evidence", GetText(params, "evidenceKind").toStdString()});
             panel->SendHost(id, std::move(request));
         }, TestPolicy::Input, true);
+    panel->AttachAction("ActivateAccepted", {}, [panel](auto id, const auto&) {
+        const auto snapshot = panel->GetSession()->GetStateSnapshot();
+        if (!snapshot || !GetDataRevisionRefValid(snapshot->load.acceptedRevision))
+            throw std::invalid_argument("没有已接纳的数据可激活");
+        HostLoadActivationRequest request;
+        request.dataRevision = snapshot->load.acceptedRevision;
+        request.expectedBindingRevision = snapshot->load.activeBindingRevision;
+        panel->SendHost(id, std::move(request));
+    }, TestPolicy::Input, true);
     panel->AttachAction("Descriptor", {}, [panel](auto id, const auto&) {
         panel->SetComplete(id, "Observed", GetDescriptor(panel->GetSession()->GetImageDescriptor()));
     }, TestPolicy::Read);
@@ -115,7 +124,13 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         // Comparison exports below read immutable results through the public ports.
         QJsonArray labels;
         for (const auto& label : panel->GetSession()->GetLabelMapDescriptors()) labels.append(QJsonObject{{"id", QString::fromStdString(label.id)}, {"revision", GetRefText(label.dataRevision)}, {"source", GetRefText(label.sourceRevision)}});
-    panel->SetState({{"labels", labels}});
+        QJsonObject state{{"labels", labels}};
+        if (const auto snapshot = panel->GetSession()->GetStateSnapshot()) {
+            state["acceptedRevision"] = GetRefText(snapshot->load.acceptedRevision);
+            state["activeRevision"] = GetRefText(snapshot->load.activeRevision);
+            state["activationPhase"] = static_cast<int>(snapshot->load.status);
+        }
+        panel->SetState(state);
     };
     panel->AttachAction("ReadTransform", {}, [panel, reference](auto id,const auto&) {
         panel->SetComplete(id,"Observed",reference->ReadTransform());

@@ -2,6 +2,10 @@
 #include "Host/PartSegmentationHostFeature.h"
 
 #include <vtkSmartPointer.h>
+#include <vtkRenderer.h>
+#include <vtkVolume.h>
+#include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkImageData.h>
 #include <vtkWin32OpenGLRenderWindow.h>
 #include <windows.h>
 #include <psapi.h>
@@ -92,6 +96,13 @@ void ReportLabels(const std::vector<PartLabelId>& labels, const PartSetSnapshot&
     std::cout << "stage=" << stage << " parts=" << parts.parts.size() << " labelsHash="
         << GetHash(labels.data(), labels.size()*sizeof(PartLabelId)) << '\n';
 }
+}
+
+namespace {
+template<class State> auto GetDisplayPreparing(const State& state, int) -> decltype(state.isGetDisplayPreparing)
+{ return state.isGetDisplayPreparing; }
+template<class State> bool GetDisplayPreparing(const State&, long) { return false; }
+
 }
 
 // 手工审计入口：真实 RAW、源立方边长、三个相同 ROI 起点、ROI 边长、阈值、输出前缀。
@@ -195,7 +206,7 @@ int main(int argc, char** argv)
         request.action=PartSegmentationAction::Start;
         Check(feature->SendRequest(request,[&](auto r){completed=std::move(r);}).status==PartAdmissionStatus::Accepted,
             "Part Start not admitted");
-        pump([&]{return completed.has_value();},start);
+        pump([&]{return completed.has_value() && !GetDisplayPreparing(feature->GetState(),0);},start);
         start.Report("start");
         Check(completed->status==PartResultStatus::Succeeded,completed->message.c_str());
         std::cout << "detail=" << completed->message << '\n';
@@ -234,7 +245,7 @@ int main(int argc, char** argv)
             Phase commit;
             Check(feature->SetEditCommit(preview->previewId,[&](auto r){completed=std::move(r);}).status==PartAdmissionStatus::Accepted,
                 "Split commit not admitted");
-            pump([&]{return completed.has_value();},commit);
+            pump([&]{return completed.has_value() && !GetDisplayPreparing(feature->GetState(),0);},commit);
             commit.Report(("commit"+std::to_string(editIndex)).c_str());
             Check(completed->status==PartResultStatus::Succeeded,completed->message.c_str());
             parts=feature->GetPartSetSnapshot();

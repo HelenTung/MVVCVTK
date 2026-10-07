@@ -128,6 +128,20 @@ int GetPartEditFailCount()
         std::cout << (passed ? "[PASS] " : "[FAIL] ") << name << '\n';
         if (!passed) ++failures;
     };
+    {
+        PartEditRequest large;
+        PartMergeEdit merge;
+        merge.parts.resize(1048577);
+        large.operation = std::move(merge);
+        check(GetPartEditBytes(large).has_value(),
+            "Request accounting has no fixed one-million-item gate");
+        PartBrushEdit brush;
+        brush.sourcePoints.resize(2U * 1024U * 1024U);
+        large.operation = std::move(brush);
+        const auto bytes = GetPartEditBytes(large);
+        check(bytes && *bytes > 32U * 1024U * 1024U,
+            "Request accounting retains exact capacity beyond 32 MiB without a fixed gate");
+    }
     EditCase splitCase({ 1, 1, 1, 1, 1 });
     PartSplitEdit split;
     split.target = splitCase.GetPart(1);
@@ -364,11 +378,11 @@ int GetPartEditFailCount()
     check(isOracleEqual, "Bounded split matches the independent anisotropic 3D distance oracle");
     const auto requestBytes = GetPartEditBytes(padded.input.request);
     const std::size_t expectedBytes = 4U * paddedLabels.size() + 30U * 4U * 4U * 3U
-        + (4096U * 2U + 1U) * 2048U + (requestBytes ? *requestBytes * 3U : 0U);
+        + (padded.input.previous.catalog->partsByLabel.size() * 2U + 1U) * 2048U + (requestBytes ? *requestBytes * 3U : 0U);
     check(bounded.requiredBytes == expectedBytes, "Split capacity follows 4N+30R without a full-grid editable buffer");
     padded.input.maxWorkingBytes = bounded.requiredBytes;
     check(padded.Build().labels != nullptr, "Exact local workspace budget is sufficient");
-    --padded.input.maxWorkingBytes;
+    padded.input.maxWorkingBytes = padded.input.maxWorkingBytes - 1;
     const auto underBudget = padded.Build();
     check(underBudget.failureReason == PartFailureReason::BudgetExceeded && !underBudget.labels
         && *padded.input.previous.labels == paddedLabels, "One byte below local workspace rejects before split allocation");
@@ -503,7 +517,7 @@ int GetPartEditFailCount()
         if (result.labels) {
             swept.input.maxWorkingBytes = result.requiredBytes;
             check(swept.Build().failureReason == PartFailureReason::None, "Exact editor budget succeeds");
-            --swept.input.maxWorkingBytes;
+            swept.input.maxWorkingBytes = swept.input.maxWorkingBytes - 1;
             check(swept.Build().failureReason == PartFailureReason::BudgetExceeded, "One byte below editor budget is rejected");
         }
         swept.input.maxWorkingBytes = 128U * 1024U * 1024U;

@@ -54,7 +54,7 @@ bool HasInput(const DataSnapshot& data,const std::string& role,const DataRevisio
     if (!data) return false;
     return std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input) { return input.role==role && input.source==ref; });
 }
-void Run(const char* sample)
+void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
 {
     const int n=sample ? 64:24; const std::size_t count=std::size_t(n)*n*n;
     HostRenderViewConfig view; view.id="primary"; view.role=HostRenderViewRole::Primary3D;
@@ -74,8 +74,8 @@ void Run(const char* sample)
     const auto complete=[&](HostResult r) { loadResult=std::move(r); loaded=true; };
     if (sample) {
         HostLoadRequest load; load.filePath=sample; load.geometry.dimensions={n,n,n};
-        load.geometry.spacing={.1537F,.1537F,.1537F}; load.geometry.origin={113.1232F,87.3016F,113.1232F};
-        load.metadata.source.kind=ImageSourceKind::RawFile; load.metadata.identity.datasetId="roi-real-1536-region"; load.metadata.source.uri=sample;
+        load.geometry.spacing={spacing,spacing,spacing}; load.geometry.origin=origin;
+        load.metadata.source.kind=ImageSourceKind::RawFile; load.metadata.identity.datasetId="roi-real-region:"+std::string(sample); load.metadata.source.uri=sample;
         Check(session.SendRequestResult(std::move(load),complete),"真实 CT RAW 加载接纳");
     } else {
         HostReloadRequest load; load.geometry.dimensions={n,n,n}; load.geometry.spacing={.7F,1.1F,1.3F};
@@ -257,6 +257,16 @@ void Run(const char* sample)
 }
 int main(int argc,char** argv)
 {
-    try { Run(argc>1 ? argv[1]:nullptr); return 0; }
+    try {
+        Check(argc == 1 || argc == 2 || argc == 6,
+            "Usage: RoiIntegrationTests [raw64 [spacingMm originX originY originZ]]");
+        const float spacing = argc == 6 ? std::stof(argv[2]) : .1537F;
+        const std::array<float, 3> origin = argc == 6
+            ? std::array<float, 3>{std::stof(argv[3]), std::stof(argv[4]), std::stof(argv[5])}
+            : std::array<float, 3>{113.1232F,87.3016F,113.1232F};
+        Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
+            [](float value) { return std::isfinite(value); }), "真实样本物理几何合法");
+        Run(argc>1 ? argv[1]:nullptr, spacing, origin); return 0;
+    }
     catch (const std::exception& e) { std::cerr << "[FAIL] " << e.what() << std::endl; return 1; }
 }

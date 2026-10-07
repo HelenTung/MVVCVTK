@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
 #include <map>
@@ -319,8 +320,17 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
         CheckWork(work);
         const auto &spec = recipe.geometries[i];
         const auto samples = AlignmentGeometryFit::BuildSamples(work, spec.region, initial);
+        if (samples.points.size() > std::numeric_limits<std::size_t>::max() - total)
+            throw std::length_error("Selection size overflows.");
         total += samples.points.size();
-        if (total > work.config.pointLimit)
+        if (recipe.constraints.size() > std::numeric_limits<std::size_t>::max() - recipe.fitPairs.size())
+            throw std::length_error("Constraint count overflows.");
+        const auto constraints = recipe.constraints.size() + recipe.fitPairs.size();
+        if (total > std::numeric_limits<std::size_t>::max() / 1024
+            || WorkLimit(work.config.workingBytes) < 65536 || total > (WorkLimit(work.config.workingBytes) - 65536) / 1024
+            || constraints > (WorkLimit(work.config.workingBytes) - 65536 - total * 1024) / 1024)
+            throw std::length_error("Actual selection exceeds working budget.");
+        if (work.config.pointLimit && total > work.config.pointLimit)
             throw std::length_error("Total selection exceeds point budget.");
         std::optional<AlignmentPoint> constraint;
         bool fixed = false;
@@ -473,13 +483,6 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                 "Invalid mesh or incompatible spatial units.");
         Require(!work.poses.empty() && work.poses.size() <= 8,
                 "Expected one to eight initial poses.");
-        // 包含薄 SVD/Jacobian、点集副本、选择索引、配方及候选；配置上限独立限界。
-        if (work.config.workingBytes < 65536 ||
-            work.config.pointLimit + work.config.constraintLimit >
-                (work.config.workingBytes - 65536) / 1024) {
-            result.diagnostics.status = AlignmentStatus::BudgetExceeded;
-            return result;
-        }
         for (const auto &g : work.recipe.geometries)
             if (g.association == AlignmentAssociation::Contact) {
                 result.diagnostics.status = AlignmentStatus::Unsupported;

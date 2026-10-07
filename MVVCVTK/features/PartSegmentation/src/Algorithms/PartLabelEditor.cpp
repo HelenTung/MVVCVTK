@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Algorithms/PartLabelEditor.h"
 #include "Model/LabelMapBuilder.h"
 
@@ -12,7 +13,7 @@
 
 namespace {
 
-constexpr std::size_t maxParts = 4096;
+constexpr std::size_t maxParts = std::numeric_limits<PartLabelId>::max() - 2U;
 constexpr std::size_t cancelBatch = 4096;
 constexpr auto noIndex = std::numeric_limits<std::size_t>::max();
 
@@ -343,8 +344,10 @@ private:
             }
         }
         // 目录、指标、映射、请求派生的小容器及分配器余量。
-        constexpr std::size_t catalogReserve = (maxParts * 2 + 1) * 2048;
-        m_requiredBytes = catalogReserve;
+        const auto sizeLimit = std::numeric_limits<std::size_t>::max();
+        if (m_old->partsByLabel.size() > (sizeLimit / 2048 - 1) / 2)
+            SetFailure(PartFailureReason::BudgetExceeded, "Edit catalog storage overflows.");
+        m_requiredBytes = (m_old->partsByLabel.size() * 2 + 1) * 2048;
         const auto reserve = [&](std::size_t count, std::size_t bytes) {
             if (count > (std::numeric_limits<std::size_t>::max()-m_requiredBytes)/bytes) {
                 m_requiredBytes = std::numeric_limits<std::size_t>::max();
@@ -362,14 +365,14 @@ private:
         }, m_input.request.operation);
         const auto requestBytes = GetPartEditBytes(m_input.request);
         if (!requestBytes || *requestBytes > (std::numeric_limits<std::size_t>::max() - m_requiredBytes) / 3U) {
-            SetFailure(PartFailureReason::BudgetExceeded, "Edit request storage exceeds the bounded limit.");
+            SetFailure(PartFailureReason::BudgetExceeded, "Edit request storage overflows.");
         }
         m_requiredBytes += *requestBytes * 3U;
         if (m_requiredBytes > m_input.maxWorkingBytes) {
             SetFailure(PartFailureReason::BudgetExceeded, "Edit workspace budget exceeded.");
         }
         m_fixedBytes = m_requiredBytes;
-        m_queueLimit = std::min(m_count, (m_input.maxWorkingBytes-m_fixedBytes)/(3*sizeof(std::size_t)));
+        m_queueLimit = ((m_input.maxWorkingBytes-m_fixedBytes)/(3*sizeof(std::size_t))).GetBound(m_count);
         if (!GetPartCatalogValid(*m_old, *m_input.previous.labels, m_stop, &m_counts)) {
             CheckStop(0);
             SetFailure(PartFailureReason::InvalidEdit, "Edit input labels and catalog disagree.");
@@ -676,7 +679,7 @@ private:
         const auto parent = GetLabel(op.target);
         m_sources = { parent };
         SetWholeParts(m_sources);
-        std::vector<bool> targets(maxParts + 1, false);
+        std::vector<bool> targets(op.seeds.size() + 1, false);
         std::vector<std::uint32_t> owner(m_splitCount, 0);
         std::vector<std::uint8_t> fixed(m_splitCount, 0), barriers(m_splitCount, 0);
         std::vector<double> distance(m_splitCount, std::numeric_limits<double>::infinity());
@@ -685,8 +688,8 @@ private:
             const auto& seed = op.seeds[seedIndex];
             const auto source = GetOffset(seed.imageIndex);
             const auto i = GetSplitOffset(source);
-            if (seed.target == 0 || seed.target > maxParts) {
-                SetFailure(PartFailureReason::InvalidEdit, "Split target is outside 1..4096.");
+            if (seed.target == 0 || seed.target > op.seeds.size()) {
+                SetFailure(PartFailureReason::InvalidEdit, "Split target is outside the supplied seed range.");
             }
             if (i == noIndex || (*m_labels)[source] != parent || !GetEditable(source)
                 || (owner[i] != 0 && owner[i] != seed.target)) {
@@ -704,7 +707,7 @@ private:
             SetFailure(PartFailureReason::InvalidEdit, "Split targets must cover contiguous 1..N, N>=2.");
         }
         if (m_old->partsByLabel.size() - 2 + m_newCount > maxParts) {
-            SetFailure(PartFailureReason::BudgetExceeded, "Split result exceeds the 4096 part limit.");
+            SetFailure(PartFailureReason::BudgetExceeded, "Split result exceeds the label representation.");
         }
         for (std::size_t edgeIndex = 0; edgeIndex < op.barriers.size(); ++edgeIndex) {
             CheckStop(edgeIndex);
@@ -782,7 +785,7 @@ private:
         for (std::size_t label = 1; label < mapping.size(); ++label) {
             if (m_counts[label] != 0) mapping[label] = ++count;
         }
-        if (count > maxParts) SetFailure(PartFailureReason::BudgetExceeded, "Edited part count exceeds 4096.");
+        if (count > maxParts) SetFailure(PartFailureReason::BudgetExceeded, "Edited part count exceeds the label representation.");
         std::vector<PartMetrics> metrics(mapping.size());
         for (std::size_t label = 1; label < mapping.size(); ++label) {
             if (!mapping[label]) continue;
@@ -878,13 +881,12 @@ private:
 
 std::optional<std::size_t> GetPartEditBytes(const PartEditRequest& request)
 {
-    constexpr std::size_t itemLimit = 1024U * 1024U;
-    constexpr std::size_t byteLimit = 32U * 1024U * 1024U;
+    constexpr std::size_t byteLimit = std::numeric_limits<std::size_t>::max();
     std::size_t bytes = sizeof(PartEditRequest);
     bool isValid = true;
     const auto add = [&](const auto& values) {
         using Item = typename std::decay_t<decltype(values)>::value_type;
-        if (values.size() > itemLimit || values.capacity() > (byteLimit - bytes) / sizeof(Item)) {
+        if (values.capacity() > (byteLimit - bytes) / sizeof(Item)) {
             isValid = false;
         }
         else bytes += values.capacity() * sizeof(Item);
@@ -911,7 +913,7 @@ PartEditBuildResult PartLabelEditor::BuildLabels(const PartEditInput& input,
 }
 
 PartEditBuildResult PartLabelEditor::BuildRestore(const PartHistorySnapshot& current,
-    const PartHistorySnapshot& restored, std::size_t maxWorkingBytes,
+    const PartHistorySnapshot& restored, WorkLimit maxWorkingBytes,
     const std::function<bool()>& getStopRequested)
 {
     try {

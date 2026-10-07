@@ -1,4 +1,5 @@
 #pragma once
+#include "FeatureSupport/WorkLimit.h"
 
 #include "SurfaceDeterminationAlgorithm.h"
 
@@ -36,7 +37,7 @@ public:
         const SurfaceDeterminationService&) = delete;
 
     SurfaceAdmissionStatus Start(VtkImageGridSnapshot source, SurfaceDeterminationStartParams params,
-                                 std::size_t maxWorkingBytes, std::uint64_t requestId,
+                                 WorkLimit maxWorkingBytes, std::uint64_t requestId,
                                  SurfaceAlgorithmInputs inputs = {});
     bool StopRequest(std::uint64_t requestId) noexcept;
     std::optional<SurfaceJobComplete> GetComplete(bool retainForPublication = false);
@@ -52,7 +53,7 @@ private:
         SurfaceAlgorithmInputs inputs;
         VtkImageGridSnapshot source;
         SurfaceDeterminationStartParams params;
-        std::size_t maxWorkingBytes = 0;
+        WorkLimit maxWorkingBytes {};
         std::uint64_t requestId = 0;
         std::shared_ptr<std::atomic<bool>> isCancelled;
     };

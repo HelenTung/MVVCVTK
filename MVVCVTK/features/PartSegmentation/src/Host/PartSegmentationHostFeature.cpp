@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Host/PartSegmentationHostFeature.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -32,10 +33,27 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
 constexpr std::string_view featureId = "part-segmentation";
+std::size_t GetHistoryBudget() noexcept
+{
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};status.dwLength=sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) return 0;
+    // Preserve headroom for the current result, the next edit and other Features.
+    return static_cast<std::size_t>(std::min(status.ullAvailPhys,status.ullAvailPageFile)/2);
+#else
+    return std::numeric_limits<std::size_t>::max();
+#endif
+}
 constexpr std::string_view partResultBinding =
     "analysis.parts.active";
 const DataTypeId partTableType{
@@ -418,6 +436,7 @@ private:
     vtkSmartPointer<vtkImageData> m_labelImage;
     std::shared_ptr<const PartCatalog> m_catalogView;
     std::shared_ptr<const PartSurfaceProduct> m_surfaceProduct;
+    const PartSurfaceProduct* m_displaySurfaceIdentity = nullptr;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
@@ -442,6 +461,9 @@ private:
     std::atomic<bool> m_isPublishing{ false };
     std::optional<PartEditRequest> m_editRequest;
     std::optional<PartLabelCandidate> m_editCandidate;
+    std::uint64_t m_surfaceRequestId = 0;
+    std::uint64_t m_surfaceCatalogRevision = 0;
+    std::vector<PartLabelId> m_pendingSurfacePartIds;
     std::shared_ptr<const PartEditPreview> m_editPreview;
     std::vector<DataInputRef> m_editInputs;
     std::vector<DataExpectation> m_editExpected;
@@ -644,12 +666,12 @@ bool PartSegmentationHostFeature::Impl::AttachHost(
     const HostFeatureContext& context)
 {
     if (m_isAttached || !context.views || !context.data || !context.host
-        || m_config.maxWorkingBytes == 0
+        || WorkLimit(m_config.maxWorkingBytes) == 0
         || !std::isfinite(m_config.defaultStart.threshold)
         || m_config.defaultStart.minPartVoxels == 0
-        || m_config.maxHistoryBytes == 0 || m_config.maxUndoSteps == 0
-        || m_config.maxUndoSteps > 1024 || m_config.editTimeoutMs == 0
-        || m_config.editTimeoutMs > 86400000) {
+        || m_config.maxUndoSteps == 0
+        || m_config.maxUndoSteps > 1024 || WorkLimit(m_config.editTimeoutMs) == 0
+        || (WorkLimit(m_config.editTimeoutMs).GetValue() && WorkLimit(m_config.editTimeoutMs) > 86400000)) {
         return false;
     }
     m_data = context.data;
@@ -781,6 +803,31 @@ bool PartSegmentationHostFeature::Impl::OnHostTick()
         m_hasDisplayPending = !SendSceneDelta(GetNextRequestId(), FeatureScenePriority::Overlay,
             m_activeSource, m_activeViews);
     }
+    if (auto surface = m_service->RemoveSurfaceComplete()) {
+        if (surface->requestId == m_surfaceRequestId && m_activeLabels && m_activeLabels->data
+            && surface->labels == m_activeLabels->data->self && !m_isSourceChanged) {
+            m_surfaceRequestId = 0;
+            m_surfaceProduct = std::move(surface->result.product);
+            const bool isDisplayed = m_surfaceProduct && (!GetState().isOverlayVisible || SetDisplay(GetNextRequestId()));
+            auto state = GetState();
+            state.isDisplayPreparing = m_surfaceRequestId != 0;
+            state.isDisplayReady = isDisplayed && !state.isDisplayPreparing && state.isOverlayVisible;
+            state.failureReason = isDisplayed ? PartFailureReason::None : PartFailureReason::DisplayFailed;
+            SetState(std::move(state));
+        }
+    }
+    if (m_surfaceRequestId != 0 && !m_service->GetIsSurfaceBusy()) {
+        m_surfaceRequestId = 0;
+        auto state = GetState(); state.isDisplayPreparing = false; SetState(std::move(state));
+    }
+    if (m_activeRequestId == 0 && m_catalogView && GetState().isOverlayVisible
+        && GetState().status != PartSegmentationStatus::Stale
+        && m_surfaceCatalogRevision != m_catalogView->catalogRevision) {
+        if (!SetDisplay(GetNextRequestId())) {
+            auto state = GetState(); state.failureReason = PartFailureReason::DisplayFailed;
+            SetState(std::move(state));
+        }
+    }
     auto complete = m_service->GetComplete();
     if (!complete || complete->requestId != m_activeRequestId) return true;
     if (m_editRequest) SetEditComplete(std::move(*complete));
@@ -854,7 +901,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         const auto status = m_service->Start(
             source,
             params,
-            m_config.maxWorkingBytes,
+            WorkLimit(m_config.maxWorkingBytes),
             requestId,
             std::move(previous),
             expectedResultRevision,
@@ -1099,63 +1146,30 @@ bool PartSegmentationHostFeature::Impl::GetHistoryBytes(std::size_t& bytes,
     if (!m_data) return false;
     m_previewRetained.erase(std::remove_if(m_previewRetained.begin(), m_previewRetained.end(),
         [](const auto& item) { return item.labels.expired() && item.parts.expired(); }), m_previewRetained.end());
-    if (m_previewRetained.size() >= 4096) return false;
-    // 只扫有界修订 metadata，不扫描任何体素。历史即使已被 Undo 栈弹出仍计费。
-    DataQuery query;
-    query.producerId = std::string(featureId);
-    constexpr std::size_t revisionLimit = 4096;
-    query.limit = revisionLimit + 1;
-    const auto data = m_data->GetDataQuery(m_data->GetDataGraph(), query);
-    if (data.data.size() > revisionLimit) return false;
+    // 只统计仍被引用的分配；已发布过的历史总量不是当前工作集。
     const auto add = [&](std::size_t count, std::size_t width) {
-        if (width != 0 && count > (std::numeric_limits<std::size_t>::max() - bytes) / width) return false;
-        bytes += count * width;
-        return bytes <= m_config.maxHistoryBytes;
+        if (width && count > (std::numeric_limits<std::size_t>::max() - bytes) / width) return false;
+        bytes += count * width; return true;
     };
-    // 撤销/重做修订和外部候选可共享同一不可变标签缓冲，只计费一次。
-    // 去重表由既有修订/候选数量上限约束；不同分配仍独立计费。
-    std::vector<const void*> countedLabels;
-    countedLabels.reserve(data.data.size() + m_previewRetained.size() + (additionalLabels ? 1U : 0U));
-    if (!add(countedLabels.capacity(), sizeof(const void*))) return false;
+    std::vector<const void*> countedLabels, countedCatalogs;
     const auto addLabels = [&](const auto& values) {
-        using Item = typename std::decay_t<decltype(values)>::element_type::value_type;
         if (!values) return false;
-        const auto* identity = static_cast<const void*>(values.get());
-        if (std::find(countedLabels.begin(), countedLabels.end(), identity) != countedLabels.end()) return true;
-        countedLabels.push_back(identity);
-        return add(values->capacity(), sizeof(Item));
+        if (std::find(countedLabels.begin(), countedLabels.end(), values.get()) != countedLabels.end()) return true;
+        countedLabels.push_back(values.get());
+        return add(values->capacity(), sizeof(PartLabelId));
     };
-    for (const auto& revision : data.data) {
-        if (!revision || !revision->payload || !add(1, 2048)
-            || !add(revision->inputs.capacity(), sizeof(DataInputRef) + 128)
-            || (revision->provenance && !add(revision->provenance->canonicalParameters.capacity(), 1))) return false;
-        if (const auto labels = std::dynamic_pointer_cast<const LabelMap3DPayload>(revision->payload)) {
-            const bool fits = std::visit(addLabels, labels->GetValues());
-            if (!fits) return false;
-        }
-        else if (const auto catalog = std::dynamic_pointer_cast<const PartCatalogPayload>(revision->payload)) {
-            std::size_t catalogBytes = 0;
-            if (!catalog->GetCatalog() || !GetPartCatalogStorageBytes(*catalog->GetCatalog(), catalogBytes)
-                || !add(1, catalogBytes)) return false;
-        }
-        else if (const auto table = std::dynamic_pointer_cast<const RecordTablePayload>(revision->payload)) {
-            for (const auto& column : table->GetColumns()) {
-                const bool fits = std::visit([&](const auto& values) {
-                    using Item = typename std::decay_t<decltype(values)>::value_type;
-                    if (!add(values.capacity(), sizeof(Item))) return false;
-                    if constexpr (std::is_same_v<Item, std::string>) {
-                        for (const auto& text : values) if (!add(text.capacity(), 1)) return false;
-                    }
-                    return true;
-                }, column.values);
-                if (!fits) return false;
-            }
-        }
-        else if (const auto collection = std::dynamic_pointer_cast<const DataCollectionPayload>(revision->payload)) {
-            if (!add(collection->GetItems().capacity(), sizeof(DataCollectionEntry) + 128)) return false;
-        }
-        else return false;
-    }
+    const auto addEntry = [&](const HistoryEntry& entry) {
+        const auto labels = entry.labels ? std::dynamic_pointer_cast<const LabelMap3DPayload>(entry.labels->payload) : nullptr;
+        if (!labels || !addLabels(labels->GetLabels()) || !entry.catalog) return false;
+        if (std::find(countedCatalogs.begin(), countedCatalogs.end(), entry.catalog.get()) != countedCatalogs.end()) return true;
+        countedCatalogs.push_back(entry.catalog.get());
+        std::size_t amount = 0;
+        return GetPartCatalogStorageBytes(*entry.catalog, amount) && add(1, amount);
+    };
+    for (const auto* stack : {&m_undo, &m_redo, &m_commitUndo, &m_commitRedo})
+        for (const auto& entry : *stack) if (!addEntry(entry)) return false;
+    const auto current = GetHistoryEntry();
+    if (current && !addEntry(*current)) return false;
     if (!add(m_previewRetained.capacity(), sizeof(PreviewRetention))) return false;
     for (const auto& item : m_previewRetained) {
         const auto labels = item.labels.lock();
@@ -1286,8 +1300,8 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendEditRequest(
         job.source = m_activeSource;
         job.previous = { m_labelValues, m_catalogView };
         job.request = request;
-        job.maxWorkingBytes = m_config.maxWorkingBytes;
-        job.timeoutMs = m_config.editTimeoutMs;
+        job.maxWorkingBytes = WorkLimit(m_config.maxWorkingBytes);
+        job.timeoutMs = WorkLimit(m_config.editTimeoutMs);
         std::vector<DataInputRef> inputs{ { "base-labels", state.labelMap }, { "base-catalog", history->catalogRef } };
         std::vector<DataExpectation> expected;
         const auto addExpected = [&](const DataRevisionRef& ref) {
@@ -1414,7 +1428,7 @@ void PartSegmentationHostFeature::Impl::SetEditComplete(PartLabelCandidate candi
             if (!GetPartCatalogStorageBytes(*candidate.catalog, partBytes)) throw std::runtime_error("Invalid preview storage.");
             partBytes += preview->parts->parts.capacity() * sizeof(PartSnapshot);
             std::size_t retained = 0;
-            if (!GetHistoryBytes(retained, preview->labels) || partBytes > m_config.maxHistoryBytes - retained) {
+            if (!GetHistoryBytes(retained, preview->labels) || partBytes > std::numeric_limits<std::size_t>::max() - retained) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
                 throw std::runtime_error("Retained preview budget exceeded.");
             }
@@ -1485,7 +1499,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SetEditCommit(
             const auto add = [&](std::size_t count, std::size_t width) {
                 if (width != 0 && count > (std::numeric_limits<std::size_t>::max() - retained) / width) return false;
                 retained += count * width;
-                return retained <= m_config.maxHistoryBytes;
+                return retained <= WorkLimit(m_config.maxWorkingBytes);
             };
             if (!add(3, catalogBytes) || !add(candidate.catalog->partsByLabel.size(), 512)
                 || !add(1, 16384)
@@ -1511,6 +1525,23 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SetEditCommit(
             }
             if (m_commitUndo.size() > m_config.maxUndoSteps) m_commitUndo.erase(m_commitUndo.begin());
             if (m_commitRedo.size() > m_config.maxUndoSteps) m_commitRedo.erase(m_commitRedo.begin());
+            // 保留策略淘汰可选旧历史，不拒绝新的完整业务结果。
+            const auto historyBudget = m_config.maxHistoryBytes ? m_config.maxHistoryBytes : GetHistoryBudget();
+            const auto trim = [&](auto& stack) {
+                std::size_t retained = 0;
+                for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
+                    const auto labels = std::dynamic_pointer_cast<const LabelMap3DPayload>(it->labels->payload);
+                    std::size_t catalogBytes = 0;
+                    if (!labels || !GetPartCatalogStorageBytes(*it->catalog, catalogBytes)) break;
+                    const auto labelBytes = labels->GetValueCount() * sizeof(PartLabelId);
+                    if (labelBytes > historyBudget || catalogBytes > historyBudget - labelBytes
+                        || retained > historyBudget - labelBytes - catalogBytes) {
+                        stack.erase(stack.begin(), it.base()); break;
+                    }
+                    retained += labelBytes + catalogBytes;
+                }
+            };
+            trim(m_commitUndo); trim(m_commitRedo);
         }
     }
     catch (...) { failure = PartFailureReason::BudgetExceeded; }
@@ -2175,8 +2206,12 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
             || !GetDataRevisionRefValid(state.resultSet)) return true;
     }
     if (!isVisible) {
+        if (m_service) m_service->StopSurface();
+        m_surfaceRequestId = 0; m_pendingSurfacePartIds.clear();
         const bool isDisplayRemoved = RemoveDisplay();
         state.isOverlayVisible = false;
+        state.isDisplayPreparing = false; state.isDisplayReady = false;
+        state.displayPartCount = 0; state.isDisplayPartial = false;
         if (m_activeRequestId != 0 || m_editCandidate) {
             // 完成、失败或取消会恢复请求前状态，也必须保留新的显示偏好。
             const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -2185,7 +2220,7 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         SetState(std::move(state));
         return isDisplayRemoved;
     }
-    if (!m_labelValues || !m_labelImage || !m_surfaceProduct
+    if (!m_labelValues || !m_labelImage
         || m_activeViews.empty()) {
         if (GetDataRevisionRefValid(state.resultSet)
             && state.status != PartSegmentationStatus::Stale) return false;
@@ -2194,6 +2229,7 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         return true;
     }
     if (!SetDisplay(GetNextRequestId())) return false;
+    state = GetState();
     state.isOverlayVisible = true;
     SetState(std::move(state));
     return true;
@@ -2201,6 +2237,51 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
 
 bool PartSegmentationHostFeature::Impl::SetDisplay(const std::uint64_t requestId)
 {
+    if (!m_service || !m_catalogView || !m_activeLabels || !m_activeLabels->data) return false;
+    std::vector<PartLabelId> desiredIds;
+    for (std::size_t i = 1; i < m_catalogView->partsByLabel.size(); ++i)
+        desiredIds.push_back(static_cast<PartLabelId>(i));
+    const auto visibleCount = static_cast<std::size_t>(std::count_if(m_catalogView->partsByLabel.begin() + 1,
+        m_catalogView->partsByLabel.end(), [](const auto& part) { return part.presentation.isVisible; }));
+    const auto displayCount = static_cast<std::size_t>(std::count_if(desiredIds.begin(), desiredIds.end(),
+        [&](const auto id) { return m_catalogView->partsByLabel[id].presentation.isVisible; }));
+    m_surfaceCatalogRevision = m_catalogView->catalogRevision;
+    if (!m_surfaceProduct || m_surfaceProduct->partIds != desiredIds) {
+        if (m_surfaceRequestId != 0 && m_pendingSurfacePartIds == desiredIds) return true;
+        const auto labels = std::dynamic_pointer_cast<const LabelMap3DPayload>(m_activeLabels->data->payload);
+        if (!labels) return false;
+        const auto& grid = labels->GetGeometry();
+        PartSurfaceBuildRequest request;
+        request.extent = grid.extent; request.dimensions = grid.dimensions;
+        request.spacing = grid.spacing; request.origin = grid.origin; request.direction = grid.direction;
+        request.labels = labels->GetLabels(); request.maxWorkingBytes = WorkLimit(m_config.maxWorkingBytes);
+        // 不按部件数量截断展示；准备成本由实际工作预算和资源失败路径管理。
+        request.partIds = desiredIds;
+        for (const auto id : desiredIds) {
+            const auto& extent = m_catalogView->partsByLabel[id].metrics.voxelExtent;
+            if (!request.foregroundExtent) request.foregroundExtent = extent;
+            else for (std::size_t axis = 0; axis < 3; ++axis) {
+                auto& bounds = *request.foregroundExtent;
+                bounds[axis * 2] = std::min(bounds[axis * 2], extent[axis * 2]);
+                bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], extent[axis * 2 + 1]);
+            }
+        }
+        if (!m_service->StartSurface(std::move(request), m_activeLabels->data->self, requestId)) return false;
+        m_surfaceRequestId = requestId;
+        m_pendingSurfacePartIds = std::move(desiredIds);
+        { std::lock_guard<std::mutex> lock(m_stateMutex);
+          m_state.isDisplayPreparing = true; m_state.isDisplayReady = false; }
+        return true;
+    }
+
+    if (!m_bindings.empty() && m_displayLabels == m_activeLabels->data->self
+        && m_displayResultSet == GetState().resultSet
+        && m_displaySurfaceIdentity == m_surfaceProduct.get()) {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_state.displayPartCount = displayCount; m_state.isDisplayPartial = displayCount < visibleCount;
+        return true;
+    }
+
     const auto renderStates = m_catalogView
         ? BuildPartRenderStateTable(*m_catalogView)
         : std::optional<PartRenderStateTable>{};
@@ -2240,12 +2321,19 @@ bool PartSegmentationHostFeature::Impl::SetDisplay(const std::uint64_t requestId
         return false;
     }
     RemoveBindings(nextBindings);
+    m_displaySurfaceIdentity = m_surfaceProduct.get();
     m_hasDisplayPending = false;
+    { std::lock_guard<std::mutex> lock(m_stateMutex);
+      m_state.isDisplayReady = true; m_state.isDisplayPreparing = false;
+      m_state.displayPartCount = displayCount; m_state.isDisplayPartial = displayCount < visibleCount;
+      m_state.failureReason = PartFailureReason::None; }
     return true;
 }
 
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
+    if (m_service) m_service->StopSurface();
+    m_surfaceRequestId = 0; m_pendingSurfacePartIds.clear();
     const auto current = GetState();
     const auto graph = m_data ? m_data->GetDataGraph() : DataGraphSnapshot{};
     const auto binding = GetResultBinding(graph);
@@ -2327,6 +2415,10 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     state.status = PartSegmentationStatus::Stale;
     state.failureReason = PartFailureReason::SourceChanged;
     state.progress = 0.0;
+    state.isDisplayPreparing = false; state.isDisplayReady = false;
+    state.displayPartCount = 0; state.isDisplayPartial = false;
+    if (m_service) m_service->StopSurface();
+    m_surfaceRequestId = 0; m_pendingSurfacePartIds.clear();
     auto staleSnapshot = GetPartSetSnapshot();
     if (staleSnapshot && !staleSnapshot->isStale) {
         try {
@@ -2391,7 +2483,6 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                     && m_catalogView->catalogRevision == candidate.expectedCatalogRevision
                 : !m_catalogView;
             if (!isExpected || !candidate.catalog || !candidate.labels
-                || !candidate.surface || !candidate.surface->surface
                 || !candidate.labelPayload || !candidate.labelPayload->GetValid()
                 || !candidate.labelImage
                 || candidate.labelPayload->GetLabels() != candidate.labels) {
@@ -2421,17 +2512,16 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                 && addBytes(1U, 9U * sizeof(RecordColumn)
                     + 4U * sizeof(DataRevision) + 16U * sizeof(DataInputRef)
                     + sizeof(DataCollectionPayload) + sizeof(PartSetSnapshot))
-                && requiredBytes <= m_config.maxWorkingBytes;
+                && requiredBytes <= WorkLimit(m_config.maxWorkingBytes);
             if (!hasBudget) {
                 reason = PartFailureReason::BudgetExceeded;
                 throw std::runtime_error("Part graph publication budget exceeded: requiredBytes="
                     + std::to_string(requiredBytes) + ", maxWorkingBytes="
-                    + std::to_string(m_config.maxWorkingBytes) + ".");
+                    + WorkLimit(m_config.maxWorkingBytes).GetText() + ".");
             }
             message += " graphPublicationBytes=" + std::to_string(requiredBytes) + ".";
             const auto publicSnapshot = BuildPartSetSnapshot(
                 *candidate.catalog, m_requestSource->data->self, false);
-            const auto renderStates = BuildPartRenderStateTable(*candidate.catalog);
             const auto labels = candidate.labelPayload;
             // 所有容器与显示壳分配都先于正式提交；成功后仅转移冻结 owner。
             auto nextViews = m_requestViews;
@@ -2442,8 +2532,8 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             DataPreparedResource resource;
             if (GetDataEntityIdValid(m_requestSource->data->lifetimeScope))
                 resource = VtkPreparedDataView::BuildResourceUse(candidate.labelImage,
-                    candidate.surface->surface, candidate.labels);
-            if (!publicSnapshot || !renderStates
+                    candidate.surface ? candidate.surface->surface.GetPointer() : nullptr, candidate.labels);
+            if (!publicSnapshot
                 || !SetCatalogCommit(*candidate.catalog, m_requestSource,
                     m_requestResultBinding, labels, nextState,
                     m_editInputs, m_editExpected,
@@ -2458,6 +2548,8 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             }
             // 正式数据已经发布；之后的显示失败只能报告 presentation failure。
             nextState.status = PartSegmentationStatus::Succeeded;
+            nextState.isDisplayReady = false; nextState.isDisplayPreparing = false;
+            nextState.displayPartCount = 0; nextState.isDisplayPartial = false;
             nextState.failureReason = PartFailureReason::None;
             nextState.requestId = requestId;
             nextState.progress = 1.0;
@@ -2468,6 +2560,9 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             m_operation.stateRevision = execution ? execution->stateRevision + 2 : 2;
             m_resultOperation = m_operation;
             m_surfaceProduct = std::move(candidate.surface);
+            m_surfaceRequestId = 0;
+            m_surfaceCatalogRevision = 0;
+            m_pendingSurfacePartIds.clear();
             m_activeViews.swap(nextViews);
             m_activeSource = m_requestSource;
             const auto labelPayload = labelData
@@ -2497,7 +2592,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             else {
                 resultStatus = PartResultStatus::Succeeded;
                 reason = PartFailureReason::None;
-                if (nextState.isOverlayVisible) {
+                if (nextState.isOverlayVisible && GetState().isDisplayReady) {
                     requiredInput = RenderInputStamp{ m_activeSource->data->self };
                     requiredViews = GetViewIds(m_activeViews);
                 }
@@ -2549,7 +2644,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
     m_commitRedo.clear();
     m_isPublishing.store(guard.previous, std::memory_order_release);
     QueueComplete(std::move(callback), std::move(result),
-        requiredInput, std::move(requiredViews), isEdit && isCommitted);
+        requiredInput, std::move(requiredViews), isCommitted);
 }
 
 void PartSegmentationHostFeature::Impl::SetRequestFailed(

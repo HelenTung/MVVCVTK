@@ -69,6 +69,47 @@ VtkImageGridSnapshot BuildInput(const std::shared_ptr<BaseDataManager>& data)
     return data->GetPrimaryImage();
 }
 
+bool GetAcceptedLoadRetry()
+{
+    auto data = std::make_shared<RawVolumeDataManager>();
+    auto old = BuildInput(data); if (!old) return false;
+    auto image = vtkSmartPointer<vtkImageData>::New(); image->SetDimensions(3, 2, 1); image->AllocateScalars(VTK_FLOAT, 1);
+    image->GetPointData()->GetScalars()->FillComponent(0, 7);
+    ImageMetadata metadata; metadata.identity.datasetId = "accept-retry";
+    metadata.source.kind = ImageSourceKind::Memory; metadata.source.uri = "memory://accept-retry";
+    if (!data->SetImageSnapshot(image, metadata)) return false;
+    const auto pending = data->GetLoadStage();
+    if (!Check(data->SetLoadAccepted(pending) && data->GetData(data->GetDataGraph(), pending->outputRef)
+        && data->GetPrimaryImage()->data->self == old->data->self, "headless acceptance keeps old primary")) return false;
+    LoadCommitCoordinator coordinator(data); auto first = std::make_shared<StageProbe>(), second = std::make_shared<StageProbe>();
+    second->failCommit = true;
+    LoadCommitRequest request; request.loadKind = LoadEventKind::File; request.transactionRevision = 40;
+    request.sourceRevision = pending->outputRef; request.pending = pending->image; request.stages = {first, second};
+    if (coordinator.SetLoadCommit(request).status != LoadCommitStatus::Preparing) return false;
+    const auto cancelled = coordinator.SetLoadCancelled(40, LoadCommitFailure::Cancelled);
+    if (!Check(cancelled.status == LoadCommitStatus::Cancelled
+        && data->GetLoadState().status == DataLoadStatus::Cancelled
+        && data->GetData(data->GetDataGraph(), pending->outputRef)
+        && data->GetPrimaryImage()->data->self == old->data->self,
+        "activation cancellation keeps accepted data and the old primary")) return false;
+    request.transactionRevision = 41;
+    if (coordinator.SetLoadCommit(request).status != LoadCommitStatus::Preparing) return false;
+    const auto failed = coordinator.SetLoadCommit(request);
+    if (!Check(failed.status == LoadCommitStatus::Failed && !first->committed
+        && data->GetData(data->GetDataGraph(), pending->outputRef)
+        && data->GetPrimaryImage()->data->self == old->data->self
+        && data->GetLoadState().status == DataLoadStatus::Failed, "display failure retains accepted data and coherent old group")) return false;
+    second->failCommit = false; request.transactionRevision = 42;
+    const auto beforeRetry = data->GetDataGraph().commitId;
+    if (coordinator.SetLoadCommit(request).status != LoadCommitStatus::Preparing) return false;
+    if (coordinator.SetLoadCommit(request).status != LoadCommitStatus::Succeeded) return false;
+    const auto active = data->GetPrimaryImage();
+    return Check(active && active->data->self == pending->outputRef
+        && active->image->GetScalarPointer() == pending->image->image->GetScalarPointer()
+        && data->GetDataGraph().commitId == beforeRetry + 1
+        && data->GetLoadState().status == DataLoadStatus::Active, "retry only switches binding; no re-read, copy or republish");
+}
+
 bool GetLoadedSnapshotIdentity()
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -336,6 +377,7 @@ bool GetTransitionCase(int failure)
 bool GetDataTransitionTests()
 {
     bool passed=GetLoadedSnapshotIdentity();
+    passed=GetAcceptedLoadRetry()&&passed;
     passed=GetRealMeshTransitions()&&passed;
     passed=GetMaskedPickCoordinates()&&passed;
     passed=GetEffectTransitions()&&passed;

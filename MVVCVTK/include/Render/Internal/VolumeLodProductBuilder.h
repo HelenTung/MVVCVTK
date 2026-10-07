@@ -43,6 +43,7 @@ struct VolumeLodBuildRequest final {
     VolumeQuality requestedQuality = VolumeQuality::Auto;
     vtkSmartPointer<vtkImageData> input;
     vtkSmartPointer<vtkImageData> mask;
+    std::weak_ptr<RenderResourceCoordinator> resources;
 };
 
 struct VolumeLodBuildResult final {

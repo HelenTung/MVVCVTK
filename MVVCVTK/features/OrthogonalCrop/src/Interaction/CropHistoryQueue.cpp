@@ -4,7 +4,7 @@
 #include <limits>
 
 namespace {
-constexpr std::size_t pendingLimit=256,terminalLimit=1024,nodeLimit=100000,depthLimit=4096;
+constexpr std::size_t terminalLimit=1024;
 bool GetSame(const CropEditRequest& a,const CropEditRequest& b)
 {
     const auto& x=a.operation;const auto& y=b.operation;
@@ -66,7 +66,7 @@ CropEditAdmission CropHistoryQueue::StartRequest(CropHistory& history,CropEditRe
     }
     if(request.requestId<=m_expiredThrough)return reject(CropFailure::RequestExpired);
     if(request.expectedRevision!=history.GetRevision())return reject(CropFailure::StateVersionMismatch);
-    if(m_pending.size()>=pendingLimit||!m_nextOrder)return reject(CropFailure::ResourceLimit);
+    if(!m_nextOrder)return reject(CropFailure::ResourceLimit);
     if(!m_pending.empty()&&m_entries.at(m_pending.front()).request.kind==CropEditKind::Prune)return reject(CropFailure::Busy);
     Entry entry;entry.request=request;entry.admissionOrder=m_nextOrder;
     entry.outcome.requestId=request.requestId;entry.outcome.stateRevision=history.GetRevision();
@@ -80,13 +80,13 @@ CropEditAdmission CropHistoryQueue::StartRequest(CropHistory& history,CropEditRe
         const bool isIdentical=request.kind==CropEditKind::Replace
             &&CropGeometry::GetOperationsSame(*base->operation,geometry->GetOperation());
         if(!isIdentical) {
-            std::size_t reservedCount=0;
-            for(const auto id:m_pending)if(m_entries.at(id).reserved)++reservedCount;
-            if(history.GetNodeCount()+reservedCount>=nodeLimit)return reject(CropFailure::ResourceLimit);
             const auto parent=request.kind==CropEditKind::Append?base->nodeId:base->parentNodeId;
             auto ancestor=GetNode(history,parent);std::size_t depth=0;
             while(ancestor&&ancestor->parentNodeId) {
-                if(++depth>=depthLimit)return reject(CropFailure::ResourceLimit);
+                // 父链最多包含实际历史节点和已排队预留节点；防循环而非固定深度配额。
+                if(depth>=history.GetNodeCount()
+                    &&depth-history.GetNodeCount()>=m_pending.size())return reject(CropFailure::NodeNotFound);
+                ++depth;
                 ancestor=GetNode(history,ancestor->parentNodeId);
             }
             if(!ancestor||ancestor->nodeId!=history.GetRootId())return reject(CropFailure::NodeNotFound);

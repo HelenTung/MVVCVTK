@@ -106,14 +106,11 @@ CropRouter::BuildResultTask(
         || payload.predicateTable->operationCount < payload.nodeCount) {
         return std::nullopt;
     }
-    if (params.availableRamBytes == 0) {
-        params.availableRamBytes = GetRamBytes();
-    }
-
     return std::packaged_task<CropMaterializationCandidate()>(
         [input = std::move(input), params = std::move(params),
             payload = std::move(payload),
             getStopRequested = std::move(getStopRequested)]() mutable {
+            if (params.availableRamBytes == 0) params.availableRamBytes = GetRamBytes();
             CropMaterializationCandidate result;
             if (input.image) {
                 const auto* source = dynamic_cast<const ImageGrid3DPayload*>(input.data->payload.get());
@@ -206,7 +203,8 @@ std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
         result.sourceRevision=params.sourceRevision;result.operations=params.operations;result.nodeCount=params.operations.size();
         try {
             if(stop&&stop())throw RestoreCancelled{};
-            if(!original||!input.data||!recipe||(result.operations.empty()&&!record.inputRoi)||!params.availableRamBytes){result.failureReason=CropFailure::BadInput;return result;}
+            if(!original||!input.data||!recipe||(result.operations.empty()&&!record.inputRoi)){result.failureReason=CropFailure::BadInput;return result;}
+            if(params.availableRamBytes==0)params.availableRamBytes=GetRamBytes();
             constexpr std::size_t margin=16*1024*1024;
             if(const auto image=std::dynamic_pointer_cast<const ImageGrid3DPayload>(original->payload)) {
                 const auto source=std::dynamic_pointer_cast<const ImageGrid3DPayload>(input.data->payload);
@@ -260,9 +258,9 @@ std::optional<std::packaged_task<CropMaterializationCandidate()>> CropRouter::Bu
 {
     if (!CropAlgorithm::GetInputValid(input) || !input.data || !roi || roi->GetSource()!=input.data->self) return {};
     if (input.mesh && roi->GetClipPlanes().error!=RoiError::None) return {};
-    const auto budget=params.availableRamBytes ? params.availableRamBytes:GetRamBytes();
     return std::packaged_task<CropMaterializationCandidate()>(
-        [input=std::move(input),params=std::move(params),roi=std::move(roi),budget,getStopRequested=std::move(getStopRequested)] {
+        [input=std::move(input),params=std::move(params),roi=std::move(roi),getStopRequested=std::move(getStopRequested)] {
+            const auto budget=params.availableRamBytes ? params.availableRamBytes:GetRamBytes();
             auto result=CropAlgorithm::GetRoiResult(input,roi,budget,getStopRequested);
             result.documentId=params.documentId;result.nodeId=params.nodeId;result.requestId=params.requestId;
             return result;

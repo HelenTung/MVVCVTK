@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Algorithms/ClassicalPartSegmenter.h"
 
 #include <algorithm>
@@ -77,7 +78,7 @@ bool GetScalarTypeValid(const PartScalarType scalarType)
 
 class WorkingBudget final {
 public:
-    explicit WorkingBudget(const std::size_t limit) noexcept
+    explicit WorkingBudget(const WorkLimit limit) noexcept
         : m_limit(limit)
     {
     }
@@ -117,7 +118,7 @@ public:
     }
 
 private:
-    std::size_t m_limit = 0;
+    WorkLimit m_limit;
     std::size_t m_current = 0;
     std::size_t m_peak = 0;
     std::size_t m_required = 0;
@@ -648,7 +649,7 @@ std::optional<std::vector<PartMetrics>> BuildLabelStats(
             return {};
         }
     }
-    if (labels.size() != count || partCount > 4096) return {};
+    if (labels.size() != count || partCount >= pendingLabel || partCount > count) return {};
     std::vector<PartStats> stats(static_cast<std::size_t>(partCount) + 1U);
     std::vector<std::size_t> counts(stats.size(), 0);
     const auto width = static_cast<std::size_t>(volume.dimensions[0]);
@@ -755,7 +756,8 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
     std::size_t labelBytes = 0;
     std::size_t catalogBytes = 0;
     std::size_t baseBytes = 0;
-    const std::size_t metricsCapacity = partCapacity + 1U;
+    // 只控制初始预留量；目录按真实部件数继续增长，并逐次核算实际容量。
+    const std::size_t metricsCapacity = std::min<std::size_t>(partCapacity + 1U, 4097U);
     if (!GetProduct(voxelCount, sizeof(PartLabelId), labelBytes)
         || !GetProduct(
             metricsCapacity, sizeof(PartMetrics), catalogBytes)
@@ -1018,6 +1020,20 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
                 SetFailure(
                     result, PartAlgorithmError::InvalidInput, budget);
                 return result;
+            }
+            if (result.metricsByLabel.size() == result.metricsByLabel.capacity()) {
+                const auto capacity = result.metricsByLabel.capacity();
+                const auto maximum = result.metricsByLabel.max_size();
+                const auto next = capacity > maximum / 2 ? maximum : capacity * 2;
+                std::size_t newBytes = 0;
+                if (next <= capacity || !GetProduct(next, sizeof(PartMetrics), newBytes)
+                    || !budget.Add(newBytes)) {
+                    SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
+                    return result;
+                }
+                result.metricsByLabel.reserve(next);
+                // reserve 成功之前旧缓冲仍驻留，峰值必须计入完整新缓冲。
+                budget.Remove(capacity * sizeof(PartMetrics));
             }
             result.metricsByLabel.push_back(std::move(metrics));
         }

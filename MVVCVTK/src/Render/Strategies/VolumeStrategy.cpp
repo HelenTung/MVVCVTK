@@ -97,6 +97,10 @@ public:
     vtkTypeMacro(Mapper, vtkOpenGLGPUVolumeRayCastMapper);
 
     void SetOwner(VolumeStrategy* owner) { m_owner = owner; }
+    void ReleaseGraphicsResources(vtkWindow* window) override {
+        if (m_owner) { m_owner->m_gpuInputTime = 0; m_owner->m_isGpuAdmissionPending = true; }
+        this->Superclass::ReleaseGraphicsResources(window);
+    }
 
     bool SetEffectVolume(vtkVolume* volume)
     {
@@ -167,7 +171,10 @@ protected:
         if (m_binding) {
             (void)m_binding->OnRenderStart(renderer);
         }
+        const auto drawStart = std::chrono::steady_clock::now();
         this->Superclass::GPURender(renderer, volume);
+        if (m_owner) m_owner->m_transition.stats.drawCpuUs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawStart).count());
         if (m_binding) {
             (void)m_binding->OnRenderStop();
         }
@@ -943,7 +950,7 @@ bool VolumeStrategy::BuildLodPlan()
         addUsed(resources.runningBytes);
         addUsed(resources.pendingBytes);
         addUsed(resources.cacheBytes);
-        if (resources.cpuBudgetBytes > usedBytes) {
+        if (resources.isCpuBudgetEnforced && resources.cpuBudgetBytes > usedBytes) {
             source.systemMemoryBytes =
                 resources.cpuBudgetBytes - usedBytes;
         }
@@ -1010,6 +1017,7 @@ bool VolumeStrategy::StartProduct(
     VolumeLodBuildRequest request,
     const double dimensionRatio)
 {
+    request.resources = m_resources;
     if (!m_asyncState || !request.input
         || !std::isfinite(dimensionRatio)
         || dimensionRatio <= 0.0 || dimensionRatio > 1.0) {
@@ -1040,25 +1048,16 @@ bool VolumeStrategy::StartProduct(
     if (!m_taskChannel) return false;
 
     const auto estimate = VolumeLodProductBuilder::GetEstimatedBytes(request);
-    if (!estimate) {
+    if (!estimate && m_resources->GetResourceState().isCpuBudgetEnforced) {
         m_transition.status = RenderProductStatus::Failed;
         m_transition.failureReason = RenderProductFailure::ResourceRejected;
         m_transition.message = "The CPU working-set estimate overflowed.";
         return false;
     }
-    const std::uint64_t estimatedBytes = *estimate;
+    const std::uint64_t estimatedBytes = estimate.value_or(0);
     const auto asyncState = m_asyncState;
-    RenderTaskRequest task;
-    task.requestRevision = request.requestRevision;
-    task.estimatedBytes = estimatedBytes;
-    task.work = [asyncState, request, dimensionRatio](
-                    RenderTaskToken stopToken) {
-        const auto prepareStart = std::chrono::steady_clock::now();
-        auto result = VolumeLodProductBuilder().BuildProduct(
-            request, stopToken);
-        const auto prepareUs = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - prepareStart).count());
+    const auto admission = m_resources->StartVolumeProduct(m_taskChannel, request,
+        [asyncState, request, dimensionRatio](VolumeLodBuildResult result, std::uint64_t prepareUs) {
         std::lock_guard<std::mutex> lock(asyncState->mutex);
         const bool isNewer = !asyncState->completion
             || asyncState->completion->requestRevision
@@ -1072,8 +1071,7 @@ bool VolumeStrategy::StartProduct(
                 prepareUs
             };
         }
-    };
-    const auto admission = m_taskChannel->StartTask(std::move(task));
+    });
     if (admission != RenderTaskAdmission::Accepted
         && admission != RenderTaskAdmission::Replaced) {
         m_transition.status = RenderProductStatus::Failed;
@@ -1196,8 +1194,7 @@ bool VolumeStrategy::SetProduct(
             m_transition.failureReason, m_transition.message);
         return false;
     }
-    const std::uint64_t leaseRevision = isChannelReady
-        ? result.product->requestRevision : activeRevision;
+    const std::uint64_t leaseRevision = activeRevision;
     const bool isLeaseCommitted = !m_taskChannel
         || (isChannelReady
             ? m_taskChannel->SetActiveBytes(
@@ -1230,7 +1227,8 @@ bool VolumeStrategy::SetProduct(
         m_transition.failureReason = RenderProductFailure::CommitFailed;
         m_transition.message = "The volume LOD GPU commit failed.";
         m_transition.stats.gpuReleaseUs = gpuReleaseUs;
-        m_transition.stats.gpuUploadUs = gpuUploadUs;
+        m_transition.stats.cpuBindUs = gpuUploadUs;
+    m_transition.stats.gpuUploadUs = 0;
         return false;
     }
     if (m_taskChannel) {
@@ -1251,7 +1249,8 @@ bool VolumeStrategy::SetProduct(
         activeRevision;
     m_transition.stats.cpuPrepareUs = cpuPrepareUs;
     m_transition.stats.gpuReleaseUs = gpuReleaseUs;
-    m_transition.stats.gpuUploadUs = gpuUploadUs;
+    m_transition.stats.cpuBindUs = gpuUploadUs;
+    m_transition.stats.gpuUploadUs = 0;
     m_transition.stats.candidateBytes = 0;
     m_transition.stats.activeBytes = result.product->actualBytes;
     m_transition.stats.resolvedDimensions =
@@ -1370,6 +1369,17 @@ bool VolumeStrategy::SetGpuInput(
     gpuReleaseUs = 0;
     gpuUploadUs = 0;
 
+    auto* rendererNow = m_renderer.GetPointer();
+    auto* contextNow = rendererNow ? vtkOpenGLRenderWindow::SafeDownCast(rendererNow->GetRenderWindow()) : nullptr;
+    if (m_activeLod && !m_isGpuAdmissionPending && contextNow && m_gpuContext == contextNow
+        && m_gpuContextTime == contextNow->GetContextCreationTime()
+        && m_activeLod->volume == nextLod.volume && m_activeLod->mask == nextLod.mask
+        && m_gpuInputTime == nextLod.volume->GetMTime() && m_gpuScalarTime == GetScalarTime(nextLod.volume)
+        && m_gpuMaskTime == (nextLod.mask ? nextLod.mask->GetMTime() : 0)
+        && m_gpuMaskScalarTime == GetScalarTime(nextLod.mask)) {
+        nextLod.partitions = m_activeLod->partitions;
+        return SetMapperQuality(nextLod);
+    }
     auto* oldLod = m_activeLod.get();
     const auto restore = [&]() {
         if (!oldLod || !oldLod->volume) {
@@ -1540,6 +1550,9 @@ bool VolumeStrategy::SetGpuInput(
     m_gpuContextTime = m_gpuContext
         ? m_gpuContext->GetContextCreationTime() : 0;
     m_isGpuAdmissionPending = !hasRenderedWindow;
+    m_gpuInputTime = nextLod.volume->GetMTime(); m_gpuScalarTime = GetScalarTime(nextLod.volume);
+    m_gpuMaskTime = nextLod.mask ? nextLod.mask->GetMTime() : 0;
+    m_gpuMaskScalarTime = GetScalarTime(nextLod.mask);
     setUploadDuration();
     return true;
 }
@@ -1564,7 +1577,7 @@ bool VolumeStrategy::PrepareGpuRender(vtkRenderer* renderer)
     if (!SetGpuInput(*m_activeLod, true, releaseUs, uploadUs)) return false;
     m_transition.stats.partitions = m_activeLod->partitions;
     m_transition.stats.gpuReleaseUs += releaseUs;
-    m_transition.stats.gpuUploadUs += uploadUs;
+    m_transition.stats.cpuBindUs += uploadUs;
     return true;
 }
 
@@ -1816,7 +1829,7 @@ bool VolumeStrategy::SetVisualState(
                 }
                 usedBytes += bytes;
             }
-            if (resources.cpuBudgetBytes > usedBytes) {
+            if (resources.isCpuBudgetEnforced && resources.cpuBudgetBytes > usedBytes) {
                 source.systemMemoryBytes =
                     resources.cpuBudgetBytes - usedBytes;
             }

@@ -82,6 +82,12 @@ struct HostLoadRequest final : HostRequest {
     ImageMetadata metadata;
 };
 
+// 对已接纳修订执行完整显示组事务，可在失败后重试。
+struct HostLoadActivationRequest final : HostRequest {
+    DataRevisionRef dataRevision;
+    DataBindingRevision expectedBindingRevision = 0;
+};
+
 struct HostReloadRequest final : HostRequest {
     std::vector<float> voxels; // X 最快、随后 Y/Z 的连续 float32 标量；请求对象拥有其存储。
     HostVolumeGeometry geometry; // dimensions 的乘积必须与 voxels.size() 一致。

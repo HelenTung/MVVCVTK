@@ -137,6 +137,12 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     auto* tree = panel->GetCatalogTree(); ClickNode(tree, tree->topLevelItem(0));
     panel->SetParameterPatch(action, patch);
     auto* button = panel->findChild<QPushButton*>("action_" + action);
+    if (!button || !button->isVisible() || !button->isEnabled())
+        std::cerr << "Button diagnostic: " << module.toStdString() << '/' << action.toStdString()
+            << " exists=" << (button != nullptr) << " visible=" << (button && button->isVisible())
+            << " enabled=" << (button && button->isEnabled())
+            << " reason=" << (button ? button->toolTip().toStdString() : "")
+            << " state=" << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
     Check(button && button->isVisible() && button->isEnabled(), "actual business button is visible and responds");
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     button->click(); return id;
@@ -813,6 +819,21 @@ void CheckViewCapabilities(TestWindow& window)
         QCoreApplication::processEvents(); window.grab().save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
     }
 }
+void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
+{
+    const auto original = *window.GetSession()->GetImageDescriptor();
+    const auto* endpoint = window.GetSession()->GetPrimaryEndpoint();
+        std::array<double, 3> world = original.origin;
+        for (int row = 0; row < 3; ++row) for (int axis = 0; axis < 3; ++axis)
+            world[row] += original.direction[row*3+axis] * original.spacing[axis]
+                * (original.extent[axis*2] + fraction[axis] * (original.extent[axis*2+1]-original.extent[axis*2]));
+        endpoint->renderer->SetWorldPoint(world[0], world[1], world[2], 1.0); endpoint->renderer->WorldToDisplay();
+        const auto* display = endpoint->renderer->GetDisplayPoint();
+        const int x = static_cast<int>(display[0]), y = static_cast<int>(display[1]);
+        endpoint->interactor->SetEventPosition(x, y); endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
+        endpoint->interactor->SetEventPosition(x+8, y); endpoint->interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
+        endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
+}
 void CheckCropWorkflow(TestWindow& window)
 {
     if (!GetEnabled(window, "Crop")) return;
@@ -832,10 +853,8 @@ void CheckCropWorkflow(TestWindow& window)
     Check(panel->GetObservedState()["documents"].toArray().size()==1,"empty iso display still allows document cleanup");
     GetComplete(window, Send(window, "View", "Set", {{"iso", 50.0}}), "Succeeded");
     GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",secondDocument}}),"Succeeded");
-    Check(Wait([&] {
-        panel->Observe();
-        return panel->GetObservedState()["framesReady"].toBool();
-    }), "reactivated crop display settles before BuildResult input");
+    Check(Wait([&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); }),
+        "reactivated crop document renders before history actions");
     GetComplete(window, Click(window, "Crop", "BuildResult"), "Rejected");
     GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
     GetComplete(window, Click(window, "Crop", "RemoveInside"), "Succeeded");
@@ -853,18 +872,7 @@ void CheckCropWorkflow(TestWindow& window)
     Check(endpoint && endpoint->renderer && endpoint->interactor, "public crop input endpoint exists");
     const std::array<std::array<double, 3>, 10> fractions{{
         {1,.5,.5}, {0,.5,.5}, {.5,1,.5}, {.5,0,.5}, {.5,.5,1}, {.5,.5,0}, {1,1,1}, {0,0,0}, {1,0,1}, {0,1,0}}};
-    const auto drag=[&](const std::array<double,3>& fraction) {
-        std::array<double, 3> world = original.origin;
-        for (int row = 0; row < 3; ++row) for (int axis = 0; axis < 3; ++axis)
-            world[row] += original.direction[row*3+axis] * original.spacing[axis]
-                * (original.extent[axis*2] + fraction[axis] * (original.extent[axis*2+1]-original.extent[axis*2]));
-        endpoint->renderer->SetWorldPoint(world[0], world[1], world[2], 1.0); endpoint->renderer->WorldToDisplay();
-        const auto* display = endpoint->renderer->GetDisplayPoint();
-        const int x = static_cast<int>(display[0]), y = static_cast<int>(display[1]);
-        endpoint->interactor->SetEventPosition(x, y); endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
-        endpoint->interactor->SetEventPosition(x+8, y); endpoint->interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
-        endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
-    };
+    const auto drag=[&](const std::array<double,3>& fraction) { SendCropDrag(window, fraction); };
     for (const auto& fraction : fractions) {
         const auto beforeDrag = panel->GetObservedState()["operationCount"].toString().toULongLong();
         drag(fraction);
@@ -1654,6 +1662,27 @@ void StartSequence(TestWindow& window, const QString& path)
     const auto script = LoadJson(path);
     QJsonObject results;
     QMap<QString, QImage> volumeFrames;
+    QTimer previewWatch;
+    int preparingSamples = 0;
+    bool hasHiddenSource = false, hasPreparationCapture = false;
+    if (script["checkPartPreparation"].toBool()) {
+        QObject::connect(&previewWatch, &QTimer::timeout, &window, [&] {
+            const auto* part = window.GetModule("Part");
+            const auto state = part ? part->GetObservedState() : QJsonObject{};
+            const auto session = window.GetSession();
+            if (!session) return;
+            const auto view = session->GetRenderViewState({"primary-3d"});
+            if (!view || !state["isDisplayPreparing"].toBool()
+                || window.GetWorkflow().getRenderPending("primary-3d")) return;
+            ++preparingSamples;
+            const bool iso = view->viewMode == HostRenderMode::IsoSurface || view->viewMode == HostRenderMode::CompositeIsoSurface;
+            hasHiddenSource = hasHiddenSource || (iso && view->material.opacity <= 0);
+            if (!hasPreparationCapture && script.contains("partPreparationScreenshot")) {
+                hasPreparationCapture = window.grab().save(GetText(script, "partPreparationScreenshot"));
+            }
+        });
+        previewWatch.start(100);
+    }
     if (script["viewsVisible"].isBool()) window.SetViewsVisible(script["viewsVisible"].toBool());
     if (!script["steps"].isArray() || script["steps"].toArray().isEmpty()) throw std::invalid_argument("用例必须包含非空 steps");
     for (const auto value : script["steps"].toArray()) {
@@ -1673,6 +1702,11 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto timeout = step.contains("timeoutMs") ? GetNumber(step, "timeoutMs") : 30000.;
         if (timeout < 1 || timeout > 3600000 || timeout != std::trunc(timeout)) throw std::invalid_argument("用例 timeoutMs 必须为 1..3600000 毫秒整数");
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
+        if (step["waitForCropFrames"].toBool()) {
+            auto* crop = window.GetModule("Crop");
+            Check(crop && Wait([&] { crop->Observe(); return crop->GetObservedState()["framesReady"].toBool(); },
+                static_cast<int>(timeout)), "crop business frames are ready before the next operation");
+        }
         const auto id = Send(window, GetText(step, "module"), GetText(step, "action"), params);
         QTimer switching, cancellation;
         int switchCount = 0;
@@ -1697,6 +1731,80 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         const auto record = GetComplete(window, id, expected, static_cast<int>(timeout));
         switching.stop(); cancellation.stop();
+        if (GetText(step, "module") == "View" && GetText(step, "action") == "Set"
+            && params["mode"].isString() && record["status"] == "Succeeded") {
+            Check(record["parameters"].toObject()["mode"] == params["mode"], "explicit view mode survives editor context refresh");
+            const auto expectedMode = GetEnum<HostRenderMode>(params, "mode", {
+                {"Volume", HostRenderMode::Volume}, {"CompositeVolume", HostRenderMode::CompositeVolume},
+                {"IsoSurface", HostRenderMode::IsoSurface}, {"CompositeIsoSurface", HostRenderMode::CompositeIsoSurface},
+                {"SliceTopDown", HostRenderMode::SliceTopDown}, {"SliceFrontBack", HostRenderMode::SliceFrontBack},
+                {"SliceLeftRight", HostRenderMode::SliceLeftRight}});
+            const auto view = window.GetSession()->GetRenderViewState({(params.contains("viewId") ? GetText(params, "viewId") : QString("primary-3d")).toStdString()});
+            Check(view && view->viewMode == expectedMode, "requested view mode is actually applied");
+        }
+        if (script["checkPartPreparation"].toBool()) Check(!hasHiddenSource, "source stays visible while part surface is preparing");
+        if (step["checkDefaultImageRead"].toBool()) {
+            const auto read = window.GetSession()->GetImageReadResult();
+            Check(read.error == ImageReadError::None && read.state && read.state->values
+                && read.state->dims == std::array<int,3>{1000,1000,1000}
+                && read.requiredBytes == 4000000000ULL && read.state->values->size() == 4000000000ULL,
+                "default image read copies the complete native 1000-cube");
+        }
+        if (step["checkDefaultLabelRead"].toBool()) {
+            const auto descriptors = window.GetSession()->GetLabelMapDescriptors();
+            Check(descriptors.size() == 1 && descriptors.front().dims == std::array<int,3>{1000,1000,1000},
+                "the full-resolution segmentation label map is available");
+            LabelMapReadRequest request; request.id = descriptors.front().id;
+            const auto read = window.GetSession()->GetLabelMapReadResult(request);
+            Check(read.error == LabelMapError::None && read.state && read.state->values
+                && read.requiredBytes == 4000000000ULL && read.state->values->size() == 4000000000ULL,
+                "default label read copies the complete native 1000-cube");
+        }
+        if (step["checkFullMaskArchive"].toBool()) {
+            const auto descriptors=window.GetSession()->GetLabelMapDescriptors();
+            const auto source=window.GetSession()->GetImageDescriptor();
+            Check(descriptors.size()==1 && source && descriptors.front().sourceRevision==source->dataRevision,
+                "full-grid label mask and current source have the same geometry");
+            RoiRequest request;request.definition.source=source->dataRevision;
+            request.metadata.name="full-grid-mask";
+            RoiNode mask;mask.kind=RoiNodeKind::Primitive;
+            mask.primitive.shape=RoiShape::MaskReference;
+            mask.primitive.mask=descriptors.front().dataRevision;
+            request.definition.nodes={mask};
+            const auto created=window.GetSession()->SetRoi(request);
+            Check(created.error==RoiError::None && created.roi,"full-grid mask ROI is created");
+            const auto key=descriptors.front().datasetId;
+            const auto bounded=window.GetSession()->GetRoiArchive(created.roi->revision,key,roiCopyLimit);
+            Check(bounded.error==RoiError::TooLarge && bounded.requiredBytes>roiCopyLimit,
+                "explicit ROI archive copy limit still rejects the full-grid mask");
+            const auto saved=window.GetSession()->GetRoiArchive(created.roi->revision,key);
+            Check(saved.error==RoiError::None && saved.archive && saved.archive->masks.size()==1
+                && saved.archive->masks.front().values.size()==1000000000ULL,
+                "default ROI archive retains the entire native mask");
+            const auto restored=window.GetSession()->LoadRoiArchive(*saved.archive,key,source->dataRevision,
+                created.roi->catalogRevision);
+            Check(restored.error==RoiError::None && restored.roi
+                && restored.roi->revision.entityId!=created.roi->revision.entityId,
+                "full-grid mask ROI archive restores with an independent identity");
+        }
+        if (step["cropDrag"].toBool()) {
+            // 复用已有公共 interactor 鼠标路径，真实产生裁剪历史节点，禁止空发布冒充裁切。
+            Check(GetText(step, "module") == "Crop", "cropDrag belongs to a crop operation");
+            auto* panel = window.GetModule("Crop");
+            Check(Wait([&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); }),
+                "crop input views settle before dragging");
+            const auto before = panel->GetObservedState()["operationCount"].toString().toULongLong();
+            bool hasDragged = false;
+            for (const std::array<double,3> fraction : {std::array<double,3>{1,.5,.5}, {0,.5,.5},
+                    {.5,1,.5}, {.5,0,.5}, {.5,.5,1}, {.5,.5,0}, {1,1,1}, {0,0,0}, {1,0,1}, {0,1,0}}) {
+                SendCropDrag(window, fraction);
+                if (Wait([&] { panel->Observe(); return panel->GetObservedState()["operationCount"].toString().toULongLong() > before
+                        && panel->GetObservedState()["framesReady"].toBool(); }, 1500)) {
+                    hasDragged = true; break;
+                }
+            }
+            Check(hasDragged, "real mouse drag commits a crop node and all views present it");
+        }
         if (step["switchFeaturesWhilePending"].toBool()) {
             Check(switchCount >= 11, "real pending operation survives switching across every feature page");
             std::cout << "FEATURE SWITCH COUNT: " << switchCount << std::endl;
@@ -1777,10 +1885,44 @@ void StartSequence(TestWindow& window, const QString& path)
             Check(Wait([&] { return composing.empty(); }, static_cast<int>(timeout)), "Qt composes every visible view before capture");
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
         }
+        if (step["checkSceneConsistency"].toBool()) {
+            const bool consistent = Wait([&] {
+                const auto descriptor = window.GetSession()->GetImageDescriptor();
+                const auto scenes = window.GetSession()->GetSceneViewStates();
+                if (!descriptor || scenes.size() != 4 || scenes.front().sceneEpoch == 0
+                    || !window.GetWorkflow().getRenderPending
+                    || GetId(window.GetDiagnostics()["pendingUpdateFailures"]) != 0) return false;
+                return std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
+                    return scene.isAvailable && scene.presentation
+                        && scene.presentation->dataRevision == descriptor->dataRevision
+                        && scene.sceneEpoch == scenes.front().sceneEpoch
+                        // HostDriven 无 dirty 的视图保留最后实际绘制的 epoch；完成以 owner/render 队列为空为准。
+                        && scene.renderedEpoch > 0 && scene.renderedEpoch <= scene.sceneEpoch
+                        && !window.GetWorkflow().getRenderPending(scene.id);
+                });
+            }, static_cast<int>(timeout));
+            if (!consistent) {
+                QJsonArray scenes;
+                const auto descriptor = window.GetSession()->GetImageDescriptor();
+                for (const auto& scene : window.GetSession()->GetSceneViewStates())
+                    scenes.append(QJsonObject{{"id", QString::fromStdString(scene.id)}, {"isAvailable", scene.isAvailable},
+                        {"sceneEpoch", QString::number(scene.sceneEpoch)}, {"renderedEpoch", QString::number(scene.renderedEpoch)},
+                        {"dataRevision", scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()}});
+                std::cerr << GetJsonText(QJsonObject{{"scenes", scenes},
+                    {"selectedInput", descriptor ? GetRefText(descriptor->dataRevision) : QString()},
+                    {"hostDiagnostics", window.GetDiagnostics()}}).toStdString();
+            }
+            Check(consistent, "all four committed scenes use the selected input and epoch with no pending updates or renders");
+        }
         if (step.contains("rendererAudit")) {
             const auto orangePixels = SaveRendererAudit(window, GetText(step, "rendererAudit"));
             if (step.contains("minimumOrangePixels")) Check(orangePixels >= GetNumber(step, "minimumOrangePixels"), "real surface overlay contributes visible orange pixels through the Host render path");
         }
+    }
+    previewWatch.stop();
+    if (script["checkPartPreparation"].toBool()) {
+        Check(preparingSamples > 0 && !hasHiddenSource, "observed pending part surface without hiding the source model");
+        if (script.contains("partPreparationScreenshot")) Check(hasPreparationCapture, "pending part surface screenshot captured");
     }
     if (script["checkIdle"].toBool()) CheckIdle(window);
     if (script.contains("maximumUpdateFailures")) {

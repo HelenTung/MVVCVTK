@@ -111,6 +111,8 @@ public:
     TaskAdmissionResult ReloadFromBufferAsync(
         VolumeBuffer buffer,
         std::function<void(bool isSuccess)> onComplete);
+    TaskAdmissionResult StartDataActivation(const DataRevisionRef& ref, DataBindingRevision expected,
+        std::function<void(bool)> onComplete);
     TaskAdmissionResult ExportDataAsync(
         std::string outputDir,
         std::string extension,
@@ -2223,6 +2225,29 @@ TaskAdmissionResult AppRuntime::ReloadFromBufferAsync(
     return TaskAdmissionResult::Accepted;
 }
 
+TaskAdmissionResult AppRuntime::StartDataActivation(const DataRevisionRef& ref,
+    DataBindingRevision expected, std::function<void(bool)> onComplete)
+{
+    if (!GetIsOwnerThread() || !m_dataManager || !m_sharedState || !m_setLoadCommit)
+        return TaskAdmissionResult::Unavailable;
+    if (!m_isAccepting) return TaskAdmissionResult::Stopping;
+    if (!GetDataRevisionRefValid(ref) || m_dataManager->GetPrimaryBindingRevision() != expected
+        || !m_dataManager->GetData(m_dataManager->GetDataGraph(), ref)) return TaskAdmissionResult::InvalidRequest;
+    if (m_nextLoadTransactionRevision == std::numeric_limits<std::uint64_t>::max()) return TaskAdmissionResult::Unavailable;
+    bool isReplaced = false;
+    if (!SetPreparingLoadReplaced(LoadEventKind::Reload, isReplaced)) return TaskAdmissionResult::Busy;
+    if (!isReplaced && !m_sharedState->StartLoad(LoadEventKind::Reload)) return TaskAdmissionResult::Busy;
+    if ((!isReplaced && !SetOwnedLoad(LoadEventKind::Reload))
+        || !m_dataManager->SetLoadActivation(ref, expected)) {
+        m_sharedState->SetReloadLoadFailed(); m_sharedState->ResetLoad(LoadEventKind::Reload);
+        ResetOwnedLoad(LoadEventKind::Reload); return TaskAdmissionResult::InvalidRequest;
+    }
+    const auto stage = m_dataManager->GetLoadStage();
+    m_pendingLoadCommit = PendingLoadCommit{LoadEventKind::Reload, ++m_nextLoadTransactionRevision,
+        stage->image, std::move(onComplete)};
+    return TaskAdmissionResult::Accepted;
+}
+
 TaskAdmissionResult AppRuntime::ExportDataAsync(
     std::string outputDir,
     std::string extension,
@@ -2658,8 +2683,10 @@ void AppRuntime::SetTaskResult(ActiveTask task, bool isSuccess)
 
 void AppRuntime::SetLoadResult(ActiveTask task, bool isSuccess)
 {
-    // worker 成功只建立 strong pending transaction；Host 发布由后续 owner
-    // tick 推进，Preparing 期间不发布共享终态或 callback。
+    // owner 线程先接纳数据；显示激活保留独立终态和完成回调。
+    if (isSuccess && m_dataManager) {
+        isSuccess = m_dataManager->SetLoadAccepted(m_dataManager->GetLoadStage());
+    }
     if (isSuccess && m_dataManager && m_setLoadCommit) {
         const auto loadStage = m_dataManager->GetLoadStage();
         const auto pending = loadStage ? loadStage->image : nullptr;
@@ -2722,9 +2749,11 @@ void AppRuntime::SendLoadCommit()
     PendingLoadCommit terminal = std::move(pending);
     m_pendingLoadCommit.reset();
     const bool isSuccess = result.status == LoadCommitStatus::Succeeded;
-    if (!isSuccess && m_dataManager) {
-        (void)m_dataManager->ClearLoadStage();
-    }
+    if (m_dataManager && terminal.pending && terminal.pending->data)
+        m_dataManager->SetLoadStatus(terminal.pending->data->self,
+            isSuccess ? DataLoadStatus::Active
+                : result.status == LoadCommitStatus::Cancelled ? DataLoadStatus::Cancelled : DataLoadStatus::Failed);
+    // 显示失败保留正式数据修订和可重试候选。
     m_ownedCallback = std::move(terminal.callback);
     if (!m_sharedState || !m_dataManager) return;
     if (isSuccess) {
@@ -3847,9 +3876,8 @@ bool AppRuntime::SetProductState()
 
 void AppRuntime::ClearLoadFail(LoadEventKind loadEventKind)
 {
-    if (loadEventKind == LoadEventKind::Reload
-        && m_sharedState
-        && m_sharedState->GetDataTrustedState() == LoadState::Succeeded) {
+    if ((m_renderSnapshot && (m_renderSnapshot->image || m_renderSnapshot->mesh))
+        || (m_dataManager && m_dataManager->GetPrimaryBindingRevision() != 0)) {
         // Reload 失败不替换 current；保留旧 snapshot/strategy/overlay，使可信数据继续可见。
         SetDirty();
         return;
@@ -3964,6 +3992,12 @@ public:
         return m_service
             ? m_service->ReloadFromBufferAsync(
                 std::move(buffer), std::move(onComplete))
+            : TaskAdmissionResult::Unavailable;
+    }
+
+    TaskAdmissionResult StartDataActivation(const DataRevisionRef& ref, DataBindingRevision expected,
+        std::function<void(bool)> onComplete) override {
+        return m_service ? m_service->StartDataActivation(ref, expected, std::move(onComplete))
             : TaskAdmissionResult::Unavailable;
     }
 

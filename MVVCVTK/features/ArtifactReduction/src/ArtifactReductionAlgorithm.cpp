@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "ArtifactReductionAlgorithm.h"
 #include "ArtifactQualityEvaluator.h"
 #include "TomoPyRingAdapter.h"
@@ -15,7 +16,7 @@
 namespace ArtifactReduction {
 namespace {
 template<class T>
-double ReadScalar(const std::vector<std::uint8_t>& bytes, std::size_t index) noexcept
+double ReadScalar(const ImageScalarStorage& bytes, std::size_t index) noexcept
 {
     T value{};
     std::memcpy(&value, bytes.data() + index * sizeof(T), sizeof(T));
@@ -53,7 +54,7 @@ std::string CreateParameters(const ArtifactRequest& request)
             << ",\"slabDepth\":" << d.slabDepth << ",\"neighbors\":26,\"gradientMagnitude\":false}";
     }
     else stream << "null";
-    stream << ",\"timeoutMs\":" << request.timeoutMs << '}';
+    stream << ",\"timeoutMs\":" << (WorkLimit(request.timeoutMs).GetValue() ? WorkLimit(request.timeoutMs).GetText() : "null") << '}';
     return stream.str();
 }
 } // namespace
@@ -141,7 +142,7 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
     const auto& grid = input.image->GetGeometry();
     // 旋转与反射的正交网格可直接按spacing解释；不支持剪切或退化方向。
     for (int i = 0; i < 3; ++i) {
-        if (grid.dimensions[i] > 16384 || grid.spacing[i] < 1e-12 || grid.spacing[i] > 1e12)
+        if (grid.spacing[i] < 1e-12 || grid.spacing[i] > 1e12)
             return ArtifactError::UnsupportedGeometry;
         for (int j = 0; j < 3; ++j) {
             double dot = 0.0;
@@ -155,8 +156,8 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
         if (static_cast<bool>(regions[i])!=refs[i].has_value()) return ArtifactError::InvalidData;
         if (regions[i] && (regions[i]->GetRevision()!=*refs[i] || regions[i]->GetSource()!=request.source)) return ArtifactError::InvalidData;
     }
-    if (request.timeoutMs == 0 || request.timeoutMs > 3600000 || config.stopTimeoutMs > 60000
-        || config.memoryBudgetBytes == 0 || config.publishBudgetBytes == 0
+    if (WorkLimit(request.timeoutMs) == 0 || (WorkLimit(request.timeoutMs).GetValue() && WorkLimit(request.timeoutMs) > 3600000) || config.stopTimeoutMs > 60000
+        || WorkLimit(config.memoryBudgetBytes) == 0 || WorkLimit(config.publishBudgetBytes) == 0
         || (request.inputMode != ArtifactInputMode::CurrentPrimary && request.inputMode != ArtifactInputMode::ExplicitRevision))
         return ArtifactError::InvalidRequest;
     std::size_t ringBytes = 0;
@@ -190,14 +191,14 @@ ArtifactError GetInputError(const AlgorithmInput& input, const ArtifactRequest& 
         if (!AddBytes(workerBytes, diffusionCount, 24)) return ArtifactError::TooLarge;
         const auto& d = *request.diffusion;
         const auto slabCount = static_cast<std::size_t>(1 + (grid.dimensions[2] - 1) / d.slabDepth);
-        const auto available = config.memoryBudgetBytes > requiredBytes
-            ? config.memoryBudgetBytes - requiredBytes : 0;
+        const auto available = WorkLimit(config.memoryBudgetBytes) > requiredBytes
+            ? WorkLimit(config.memoryBudgetBytes) - requiredBytes : 0;
         const auto workers = std::max<std::size_t>(1,
-            std::min({std::size_t{8}, slabCount, available / workerBytes}));
+            std::min({std::size_t{8}, slabCount, (available / workerBytes).GetBound(8)}));
         if (diffusionWorkerCount) *diffusionWorkerCount = static_cast<int>(workers);
         if (!AddBytes(requiredBytes, workerBytes, workers)) return ArtifactError::TooLarge;
     }
-    return requiredBytes > config.memoryBudgetBytes ? ArtifactError::TooLarge : ArtifactError::None;
+    return requiredBytes > WorkLimit(config.memoryBudgetBytes) ? ArtifactError::TooLarge : ArtifactError::None;
 }
 
 AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
@@ -261,19 +262,14 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
         auto metadata = input.image->GetMetadata();
         metadata.source = { ImageSourceKind::Memory, {}, values.size() * sizeof(float), {} };
         control.progress.store(95, std::memory_order_relaxed);
-        auto bytes = std::make_shared<std::vector<std::uint8_t>>(values.size() * sizeof(float));
-        std::memcpy(bytes->data(), values.data(), bytes->size());
-        // 质量评估已结束；冻结 payload 前释放 float 工作卷，避免三份输出整卷重叠。
-        std::vector<float>{}.swap(values);
-        control.progress.store(97, std::memory_order_relaxed);
-        result.publishBytes = bytes->size();
+        result.publishBytes = values.size() * sizeof(float);
         if (!AddBytes(result.publishBytes, input.image->GetValidityMask() ? input.image->GetValidityMask()->size() : 0, 1)
             || !AddBytes(result.publishBytes, 1, 64 * 1024)) { result.error = ArtifactError::TooLarge; return result; }
         result.error = control.GetError();
         if (result.error != ArtifactError::None) return result;
-        // 3. payload首次冻结复制仅在worker；之后Store共享该不可变缓冲。
-        result.image = std::make_shared<const ImageGrid3DPayload>(source.GetGeometry(), ImageValueType::Float32,
-            1, bytes, input.image->GetValidityMask(), range, std::move(metadata));
+        result.image = input.image->CreateFloatSnapshot(
+            std::make_unique<std::vector<float>>(std::move(values)), range, std::move(metadata));
+        if (!result.image) { result.error = ArtifactError::InvalidData; return result; }
         result.error = control.GetError();
         if (result.error != ArtifactError::None) { result.image.reset(); result.report.reset(); }
         else control.progress.store(100, std::memory_order_relaxed);

@@ -457,12 +457,13 @@ struct PartSegmentationStartParams final {
 
 struct PartSegmentationConfig final {
     PartSegmentationStartParams defaultStart;
-    std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
+    std::optional<std::size_t> maxWorkingBytes {};
     bool isOverlayVisible = true;
     bool isSelectionEnabled = false;
-    std::size_t maxHistoryBytes = 256U * 1024U * 1024U;
+    // 0 budgets undo/redo history from available memory at each edit commit.
+    std::size_t maxHistoryBytes = 0;
     std::size_t maxUndoSteps = 16;
-    std::uint64_t editTimeoutMs = 30000;
+    std::optional<std::size_t> editTimeoutMs{};
 };
 
 struct PartSegmentationRequest final {
@@ -510,4 +511,8 @@ struct PartSegmentationState final {
     DataRevisionRef resultSet;
     double progress = 0.0;
     bool isOverlayVisible = true;
+    bool isDisplayPreparing = false;
+    bool isDisplayReady = false;
+    std::size_t displayPartCount = 0; // 可选三维表面当前覆盖的可见部件数。
+    bool isDisplayPartial = false;
 };

@@ -110,9 +110,9 @@ struct ThicknessDisplay final
 
 struct ThicknessConfig final
 {
-    std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
-    std::size_t maxSamples = 1000000;
-    std::uint32_t deadlineMilliseconds = 60000;
+    std::optional<std::size_t> maxWorkingBytes {};
+    std::optional<std::size_t> maxSamples{};
+    std::optional<std::size_t> deadlineMilliseconds{};
     std::uint32_t stopTimeoutMilliseconds = 250;
 };
 

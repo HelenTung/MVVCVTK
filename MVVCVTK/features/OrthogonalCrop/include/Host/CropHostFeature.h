@@ -94,7 +94,8 @@ struct CropDocumentRequest final {
     std::optional<DataRevisionRef> sourceRevision;
     std::optional<CropDocumentArchive> archive;
     bool restoreResult=true;
-    std::size_t availableRamBytes=512ULL*1024*1024;
+    // Restore only: 0 selects current available system RAM; nonzero limits restore work.
+    std::size_t availableRamBytes=0;
 };
 enum class CropRestoreStatus : std::uint8_t { None, HistoryOnly, ResultRestored };
 struct CropDocumentOutcome final {

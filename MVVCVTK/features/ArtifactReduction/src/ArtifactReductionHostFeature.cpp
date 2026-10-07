@@ -1,3 +1,4 @@
+#include "FeatureSupport/WorkLimit.h"
 #include "Host/ArtifactReductionHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
 #include "ArtifactReductionAlgorithm.h"
@@ -142,7 +143,7 @@ bool ArtifactReductionHostFeature::AttachHost(const HostFeatureContext& context)
 {
     auto& state = *m_impl;
     if (state.m_data || state.m_future.valid() || !context.data
-        || state.m_config.memoryBudgetBytes == 0 || state.m_config.publishBudgetBytes == 0
+        || WorkLimit(state.m_config.memoryBudgetBytes) == 0 || WorkLimit(state.m_config.publishBudgetBytes) == 0
         || state.m_config.stopTimeoutMs > 60000) return false;
     state.m_owner = std::this_thread::get_id();
     state.m_data = context.data;
@@ -206,7 +207,7 @@ ArtifactAdmission ArtifactReductionHostFeature::StartCandidate(ArtifactRequest r
     if (state.m_nextId == std::numeric_limits<std::uint64_t>::max()) return { ArtifactError::TooLarge, 0 };
     try {
         auto control = std::make_shared<ArtifactReduction::TaskControl>();
-        control->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(request.timeoutMs);
+        control->deadline = WorkLimit(request.timeoutMs).GetDeadline();
         ArtifactReduction::AlgorithmInput input;
         std::vector<DataInputRef> inputs;
         std::vector<DataExpectation> expectations;
@@ -316,7 +317,7 @@ ArtifactCommitResult ArtifactReductionHostFeature::SetCandidate(std::uint64_t re
     if (result.error != ArtifactError::None) return result;
     result.error = ArtifactError::InvalidRequest;
     if (state.m_state.status != ArtifactStatus::Ready || state.m_state.requestId != requestId) return result;
-    if (state.m_candidate.publishBytes > state.m_config.publishBudgetBytes - state.m_state.publishedBytes) {
+    if (state.m_candidate.publishBytes > WorkLimit(state.m_config.publishBudgetBytes)) {
         result.error = ArtifactError::TooLarge;
         state.m_state.error = result.error;
         return result;
@@ -348,7 +349,10 @@ ArtifactCommitResult ArtifactReductionHostFeature::SetCandidate(std::uint64_t re
         result.error = ArtifactError::None;
         result.correctedVolume = DataRevisionRef{ volumeId, 1 };
         result.qualityReport = DataRevisionRef{ reportId, 1 };
-        state.m_state.publishedBytes += state.m_candidate.publishBytes;
+        state.m_state.publishedBytes = state.m_candidate.publishBytes
+            > std::numeric_limits<std::size_t>::max() - state.m_state.publishedBytes
+            ? std::numeric_limits<std::size_t>::max()
+            : state.m_state.publishedBytes + state.m_candidate.publishBytes;
         state.m_state.correctedVolume = result.correctedVolume;
         state.m_state.qualityReport = result.qualityReport;
         state.m_candidate = {};

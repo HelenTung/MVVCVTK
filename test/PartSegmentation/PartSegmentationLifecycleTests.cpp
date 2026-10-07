@@ -8,6 +8,10 @@
 #include "Services/PartSegmentationService.h"
 
 #include <vtkImageData.h>
+#include <vtkActor.h>
+#include <vtkCellData.h>
+#include <vtkMapper.h>
+#include <vtkDataArray.h>
 #include <vtkImageResliceMapper.h>
 #include <vtkImageSlice.h>
 #include <vtkNew.h>
@@ -78,6 +82,20 @@ public:
     }
     int GetAttachCount() const noexcept { return m_attachCount; }
     int GetRemoveCount() const noexcept { return m_removeCount; }
+    double GetMaxSurfaceLabel() const
+    {
+        if (m_overlays.empty()) return 0;
+        vtkNew<vtkRenderer> renderer;
+        const auto& overlay = m_overlays.back();
+        overlay->AttachRenderer(renderer);
+        auto* props = renderer->GetViewProps(); props->InitTraversal();
+        auto* actor = vtkActor::SafeDownCast(props->GetNextProp());
+        auto* data = actor && actor->GetMapper() ? actor->GetMapper()->GetInput() : nullptr;
+        auto* scalars = data && data->GetCellData() ? data->GetCellData()->GetScalars() : nullptr;
+        const auto maximum = scalars && scalars->GetNumberOfTuples() ? scalars->GetRange()[1] : 0;
+        overlay->DetachRenderer(renderer);
+        return maximum;
+    }
     const void* GetLabelPointer() const
     {
         if (m_overlays.empty()) return nullptr;
@@ -459,12 +477,12 @@ bool SendTicks(
 {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!isComplete() && std::chrono::steady_clock::now() < deadline) {
+    while ((!isComplete() || feature.GetState().isDisplayPreparing) && std::chrono::steady_clock::now() < deadline) {
         if (!feature.OnHostTick()) return false;
         if (onTick) onTick();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return isComplete();
+    return isComplete() && !feature.GetState().isDisplayPreparing;
 }
 
 struct TestHost final {
@@ -614,76 +632,35 @@ int GetPreviousPartFailCount()
 bool GetSurfaceRetentionValid()
 {
     const auto config = GetConfig();
-    TestDataPort probeData;
-    const auto source = probeData.SetPrimaryImage(BuildImage(8));
-    PartSegmentationService probe;
-    const auto getComplete = [&probe]() {
-        std::optional<PartLabelCandidate> result;
-        const auto deadline = std::chrono::steady_clock::now()
-            + std::chrono::seconds(5);
-        do {
-            result = probe.GetComplete();
-            if (!result) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } while (!result && std::chrono::steady_clock::now() < deadline);
-        return result;
-    };
-    if (probe.Start(source, config.defaultStart, config.maxWorkingBytes, 1)
-        != PartAdmissionStatus::Accepted) return false;
-    const auto first = getComplete();
-    if (!first || first->status != PartResultStatus::Succeeded
-        || !first->catalog || first->surfaceBytes == 0
-        || !first->labelPayload || !first->labelImage
-        || first->labelPayload->GetLabels() != first->labels
-        || first->labelImage->GetScalarPointer() != first->labels->data()) return false;
-    // 测出只保留历史标签/目录时足够的预算，再让真实 Feature 保留旧表面重算。
-    if (probe.Start(source, config.defaultStart, config.maxWorkingBytes, 2,
-            { first->labels, first->catalog },
-            first->catalog->resultRevision, first->catalog->catalogRevision)
-        != PartAdmissionStatus::Accepted) return false;
-    const auto baseline = getComplete();
-    if (!baseline || baseline->status != PartResultStatus::Succeeded
-        || baseline->requiredBytes < first->requiredBytes) return false;
-
-    // Host 仍须为目录、表格和图修订预留空间；首次发布不再复制整幅标签。
-    TestHost publicationProbe;
-    if (!publicationProbe.Attach()) return false;
-    std::optional<PartSegmentationResult> publication;
-    if (publicationProbe.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
-            [&publication](PartSegmentationResult value) { publication = std::move(value); })
-                .status != PartAdmissionStatus::Accepted
-        || !SendTicks(*publicationProbe.feature, [&] { return publication.has_value(); })
-        || publication->status != PartResultStatus::Succeeded) return false;
-    const std::string budgetKey = "graphPublicationBytes=";
-    const auto budgetOffset = publication->message.find(budgetKey);
-    if (budgetOffset == std::string::npos || !publicationProbe.feature->DetachHost()) return false;
-    const auto publicationBudget = static_cast<std::size_t>(std::stoull(
-        publication->message.substr(budgetOffset + budgetKey.size())));
-    TestHost test(8, std::max(baseline->requiredBytes, publicationBudget));
-    if (!test.Attach()) return false;
-    auto result = std::make_shared<std::optional<PartSegmentationResult>>();
-    const auto sendStart = [&]() {
-        result->reset();
-        return test.feature->SendRequest(
-            GetRequest(PartSegmentationAction::Start),
-            [result](PartSegmentationResult value) { *result = std::move(value); });
-    };
-    if (sendStart().status != PartAdmissionStatus::Accepted
-        || !SendTicks(*test.feature, [&] { return result->has_value(); })
-        || (*result)->status != PartResultStatus::Succeeded) return false;
-    const auto active = test.feature->GetPartSetSnapshot();
-    const auto overlayCount = test.views->GetOverlayCount();
-    const auto graphBefore = test.data->GetDataGraph();
-    const bool isAccepted = sendStart().status == PartAdmissionStatus::Accepted;
-    const bool didComplete = SendTicks(
-        *test.feature, [&] { return result->has_value(); });
-    const bool isRetained = isAccepted && didComplete && active
-        && (*result)->status == PartResultStatus::Failed
-        && (*result)->failureReason == PartFailureReason::BudgetExceeded
-        && test.feature->GetPartSetSnapshot() == active
-        && test.feature->GetState().status == PartSegmentationStatus::Succeeded
-        && test.data->GetDataGraph().commitId == graphBefore.commitId
-        && overlayCount == 4 && test.views->GetOverlayCount() == overlayCount;
-    return test.feature->DetachHost() && isRetained;
+    TestDataPort data;
+    const auto source = data.SetPrimaryImage(BuildImage(8));
+    PartSegmentationService service;
+    if (service.Start(source, config.defaultStart, config.maxWorkingBytes, 1) != PartAdmissionStatus::Accepted) return false;
+    std::optional<PartLabelCandidate> candidate;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!candidate && std::chrono::steady_clock::now() < deadline) {
+        candidate = service.GetComplete();
+        if (!candidate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!candidate || candidate->status != PartResultStatus::Succeeded || !candidate->catalog
+        || !candidate->labels || !candidate->labelPayload || candidate->surface || candidate->surfaceBytes != 0) return false;
+    PartSurfaceBuildRequest display;
+    display.extent = candidate->extent; display.dimensions = candidate->dimensions;
+    display.spacing = candidate->spacing; display.origin = candidate->origin; display.direction = candidate->direction;
+    display.labels = candidate->labels; display.partCount = static_cast<std::uint32_t>(candidate->catalog->partsByLabel.size() - 1);
+    display.maxWorkingBytes = 1; // Explicit display failure injection, after business completion.
+    if (!service.StartSurface(std::move(display), source->data->self, 2)) return false;
+    std::optional<PartSurfaceCompletion> completed;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!completed && std::chrono::steady_clock::now() < deadline) {
+        completed = service.RemoveSurfaceComplete();
+        if (!completed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return completed && completed->result.failureReason == PartFailureReason::BudgetExceeded
+        && !completed->result.product && candidate->status == PartResultStatus::Succeeded
+        && candidate->catalog->partsByLabel.size() == 3
+        && candidate->labelPayload->GetLabels() == candidate->labels
+        && service.Stop(std::chrono::steady_clock::now() + std::chrono::seconds(1));
 }
 
 int GetEditLifecycleFailCount()
@@ -838,7 +815,8 @@ int GetEditLifecycleFailCount()
     test.host->SetSceneRejected(true);
     const auto displayed = displayPreview ? commit(test, displayPreview->previewId) : std::nullopt;
     test.host->SetSceneRejected(false);
-    check(displayed && displayed->status == PartResultStatus::SucceededWithDisplayFailure
+    check(displayed && displayed->status == PartResultStatus::Succeeded
+        && test.feature->GetState().failureReason == PartFailureReason::DisplayFailed
         && test.feature->GetPartSetSnapshot()->parts.size() == 2,
         "Display failure preserves the successfully committed edit");
     check(test.feature->DetachHost(), "Edited Feature detaches without retained overlays");
@@ -972,12 +950,24 @@ int GetEditLifecycleFailCount()
             [&](auto value) { rejected = std::move(value); });
         check(admission.status == PartAdmissionStatus::Accepted
             && SendTicks(*sharedBudget.feature, [&] { return rejected.has_value(); })
-            && rejected->failureReason == PartFailureReason::BudgetExceeded
+            && rejected->status == PartResultStatus::PreviewReady
             && sharedBudget.feature->GetState().labelMap == beforeRejected
-            && !sharedBudget.feature->GetEditPreview(),
-            "A genuinely new third label allocation still exceeds retained history budget");
+            && sharedBudget.feature->GetEditPreview(),
+            "Historical retention does not veto a valid third business candidate");
     }
     (void)sharedBudget.feature->DetachHost();
+
+    TestHost automaticHistory(64);
+    auto automaticConfig = GetConfig();automaticConfig.maxHistoryBytes=0;
+    automaticHistory.feature=std::make_shared<PartSegmentationHostFeature>(automaticConfig);
+    check(start(automaticHistory), "Default automatic history budget admits a Part result");
+    const auto automaticPreview=preview(automaticHistory,mergeRequest(automaticHistory));
+    const auto automaticCommit=automaticPreview?commit(automaticHistory,automaticPreview->previewId):std::nullopt;
+    const auto automaticUndo=automaticCommit?preview(automaticHistory,historyRequest(automaticHistory,false)):decltype(automaticPreview){};
+    check(automaticCommit&&automaticCommit->status==PartResultStatus::Succeeded
+        &&automaticUndo,
+        "Automatic history budget preserves a valid undo candidate");
+    (void)automaticHistory.feature->DetachHost();
 
     TestHost budget;
     auto budgetConfig = GetConfig();
@@ -986,14 +976,15 @@ int GetEditLifecycleFailCount()
     budget.feature = std::make_shared<PartSegmentationHostFeature>(budgetConfig);
     check(start(budget), "History budget fixture starts with existing formal data");
     const auto budgetLabels = budget.feature->GetState().labelMap;
-    check(budget.feature->SendEditRequest(mergeRequest(budget)).status == PartAdmissionStatus::BudgetExceeded
-        && budget.feature->GetState().labelMap == budgetLabels,
-        "Retained DataGraph history is charged before edit admission");
+    const auto boundedPreview = preview(budget, mergeRequest(budget));
+    check(boundedPreview && budget.feature->GetState().labelMap == budgetLabels,
+        "Small history retention budget does not veto an edit candidate");
+    if (boundedPreview) (void)budget.feature->ClearEditPreview(boundedPreview->previewId);
     (void)budget.feature->SendRequest(GetRequest(PartSegmentationAction::Clear));
     (void)budget.feature->DetachHost();
     check(start(budget), "History budget fixture reattaches and creates a new active result");
-    check(budget.feature->SendEditRequest(mergeRequest(budget)).status == PartAdmissionStatus::BudgetExceeded,
-        "Clear and reattach do not refund retained DataGraph history");
+    check(preview(budget, mergeRequest(budget)) != nullptr,
+        "Clear and reattach do not accumulate historical publication admission debt");
     (void)budget.feature->DetachHost();
 
     TestHost late;
@@ -1028,9 +1019,9 @@ int GetEditLifecycleFailCount()
         externalLabels.push_back(item->labels);
         (void)retained.feature->ClearEditPreview(item->previewId);
     }
-    check(wasBudgetRejected && !externalLabels.empty()
+    check(!wasBudgetRejected && externalLabels.size() == 64
         && retained.feature->GetPartSetSnapshot()->parts.size() == 2,
-        "Externally retained cancelled previews remain charged and cannot grow without bound");
+        "External preview owners retain valid storage without becoming a history admission quota");
     externalLabels.clear();
     result.reset();
     const auto retry = retained.feature->SendEditRequest(mergeRequest(retained), [&](auto value) { result = std::move(value); });
@@ -1097,7 +1088,8 @@ int GetPartLifecycleFailCount()
         const auto oldLabels = test.feature->GetState().labelMap;
         const auto overlayCount = test.views->GetOverlayCount();
         test.host->SetSceneRejected(true);
-        if (!start() || result->status != PartResultStatus::SucceededWithDisplayFailure) return false;
+        if (!start() || result->status != PartResultStatus::Succeeded
+            || test.feature->GetState().failureReason != PartFailureReason::DisplayFailed) return false;
         const auto operations = test.feature->GetOperationStates();
         const bool isOldDisplayRetained = operations.size() == 2 && !oldOperations.empty()
             && operations.front().status == FeatureRunStatus::Succeeded
@@ -1269,7 +1261,7 @@ int GetPartLifecycleFailCount()
         "Rejected Part display keeps old resources and operation while new outputs remain readable") ? 0 : 1;
     failureCount += GetCaseResult(
         GetSurfaceRetentionValid(),
-        "Retained surface consumes recompute budget while preserving the active Part result")
+        "Optional surface failure preserves complete business labels and catalog")
         ? 0 : 1;
 
     {
@@ -1372,10 +1364,8 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(
             replace.status == PartAdmissionStatus::Accepted
                 && didReplace && replaceResult
-                && replaceResult->status
-                    == PartResultStatus::SucceededWithDisplayFailure
-                && replaceResult->failureReason
-                    == PartFailureReason::DisplayFailed
+                && replaceResult->status == PartResultStatus::Succeeded
+                && restored.failureReason == PartFailureReason::DisplayFailed
                 && restored.status == PartSegmentationStatus::Succeeded
                 && restored.resultRevision == 2
                 && restored.catalogRevision == 2
@@ -1706,10 +1696,8 @@ int GetPartLifecycleFailCount()
             isAttached
                 && admission.status == PartAdmissionStatus::Accepted
                 && didFail && failedResult
-                && failedResult->status
-                    == PartResultStatus::SucceededWithDisplayFailure
-                && failedResult->failureReason
-                    == PartFailureReason::DisplayFailed
+                && failedResult->status == PartResultStatus::Succeeded
+                && test.feature->GetState().failureReason == PartFailureReason::DisplayFailed
                 && GetDataRevisionRefValid(failedResult->resultSet)
                 && test.views->GetOverlayCount() == 0
                 && test.host->GetActiveViews().empty(),
@@ -1787,15 +1775,26 @@ int GetPartLifecycleFailCount()
             isAttached
                 && admission.status == PartAdmissionStatus::Accepted
                 && didComplete && result
-                && result->status == PartResultStatus::Failed
-                && result->failureReason == PartFailureReason::BudgetExceeded
-                && state.status == PartSegmentationStatus::Failed
-                && state.failureReason == PartFailureReason::BudgetExceeded
-                && test.views->GetOverlayCount() == 0,
-            "Part-count limit rejects an unbounded overlay candidate") ? 0 : 1;
+                && result->status == PartResultStatus::Succeeded
+                && state.status == PartSegmentationStatus::Succeeded
+                && state.partCount > 4096 && GetDataRevisionRefValid(state.labelMap),
+            "Complete labels and catalog preserve all business parts") ? 0 : 1;
+        const auto parts = test.feature->GetPartSetSnapshot();
+        const auto surface = test.views->GetOverlay("part-primary");
+        const auto beforeMaximum = surface->GetMaxSurfaceLabel();
+        PartStatePatch selected; selected.isSelected = true;
+        const auto mutation = parts && !parts->parts.empty()
+            ? test.feature->SetPartState(parts->parts.back().binding, selected, parts->catalogRevision)
+            : PartMutationResult{};
+        const bool refreshed = SendTicks(*test.feature, [&] { return surface->GetMaxSurfaceLabel() > 4096; });
+        failureCount += GetCaseResult(beforeMaximum > 4096
+            && mutation.status == PartMutationStatus::Succeeded && refreshed
+            && test.feature->GetState().labelMap == state.labelMap
+            && test.feature->GetState().partCount == state.partCount,
+            "Display already includes parts beyond the former quota before selection") ? 0 : 1;
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
-            "Overlay-limit failure remains detachable") ? 0 : 1;
+            "Complete part surface display remains detachable") ? 0 : 1;
     }
 
     {
@@ -1971,10 +1970,11 @@ int GetPartLifecycleFailCount()
             isAttached
                 && admission.status == PartAdmissionStatus::Accepted
                 && didQueue && callbackCount == 1 && result
-                && result->status == PartResultStatus::Failed
-                && result->failureReason
-                    == PartFailureReason::DisplayFailed,
-            "Rendered completion rejects a detached target View") ? 0 : 1;
+                && result->status == PartResultStatus::Succeeded
+                && result->failureReason == PartFailureReason::None
+                && GetDataRevisionRefValid(test.feature->GetState().labelMap)
+                && test.feature->GetPartSetSnapshot(),
+            "Detached target View cannot invalidate completed labels and catalog") ? 0 : 1;
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
             "View-stale completion remains detachable") ? 0 : 1;
