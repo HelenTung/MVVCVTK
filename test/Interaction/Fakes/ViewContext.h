@@ -141,6 +141,9 @@ public:
     int GetInputClearCount() const { return m_inputClearCount; }
 
     bool SetInteractorReady() override { return true; }
+    bool GetIsInputIdle() const override {
+        return m_inputRouter.GetIsIdle();
+    }
     bool SetInputEnabled(const bool isEnabled) override
     {
         m_isInputEnabled = isEnabled;

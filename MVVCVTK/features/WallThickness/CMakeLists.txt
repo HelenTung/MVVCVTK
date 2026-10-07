@@ -27,7 +27,7 @@ target_sources(wall_thickness PRIVATE
 target_include_directories(wall_thickness
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(wall_thickness PUBLIC MVVCVTK::FeatureSPI
+target_link_libraries(wall_thickness PUBLIC MVVCVTK::FeatureSPI MVVCVTK::HostAPI
     PRIVATE MVVCVTKInternal::FeatureSupport VTK::CommonCore VTK::CommonDataModel
         VTK::FiltersCore VTK::FiltersGeneral VTK::RenderingCore VTK::RenderingAnnotation)
 SetTargetDefaults(wall_thickness)

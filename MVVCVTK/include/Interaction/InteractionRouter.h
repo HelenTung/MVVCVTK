@@ -46,6 +46,11 @@ public:
     // 先收口 active capture，再对其余 Handler 广播 Cancel。
     InteractionResult SendCancel(const InteractionEvent& eve);
 
+    bool GetIsIdle() const noexcept
+    {
+        return !m_capture && m_dispatchDepth == 0;
+    }
+
     // 分发事件
     // - FirstMatch：第一个 isHandled=true 后停止，返回其结果（传播停止状态聚合）
     // - Broadcast ：所有 Handler 均执行，传播停止状态取 OR 聚合

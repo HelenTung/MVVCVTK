@@ -257,8 +257,22 @@ private:
 
 class HostControlStub final : public FeatureHostControl {
 public:
-    bool AttachInput(HostInputBinding) override { return true; }
-    bool DetachInput(std::string_view) override { return true; }
+    bool AttachInput(HostInputBinding value) override
+    {
+        binding = std::move(value);
+        return true;
+    }
+    bool DetachInput(std::string_view) override
+    {
+        binding = {};
+        return true;
+    }
+    bool GetSemanticTargetValid(const HostSemanticTarget&) const override
+    {
+        return isSemanticTargetValid;
+    }
+    HostInputBinding binding;
+    bool isSemanticTargetValid = false;
 
     bool SetActiveViews(
         const std::vector<std::string>& viewIds) override
@@ -432,9 +446,11 @@ vtkSmartPointer<vtkImageData> BuildSoaImage()
 }
 
 PartSegmentationConfig GetConfig(
-    const std::size_t maxWorkingBytes = 512U * 1024U * 1024U)
+    const std::size_t maxWorkingBytes = 512U * 1024U * 1024U,
+    const bool isSelectionEnabled = false)
 {
     PartSegmentationConfig config;
+    config.isSelectionEnabled = isSelectionEnabled;
     config.defaultStart.targetViews.viewRoles = {
         HostRenderViewRole::Primary3D,
         HostRenderViewRole::TopDownSlice,
@@ -472,12 +488,13 @@ bool SendTicks(
 struct TestHost final {
     explicit TestHost(
         const int side = 8,
-        const std::size_t maxWorkingBytes = 512U * 1024U * 1024U)
+        const std::size_t maxWorkingBytes = 512U * 1024U * 1024U,
+        const bool isSelectionEnabled = false)
         : views(std::make_shared<ViewDirectoryStub>())
         , data(std::make_shared<TestDataPort>())
         , host(std::make_shared<HostControlStub>())
         , feature(std::make_shared<PartSegmentationHostFeature>(
-            GetConfig(maxWorkingBytes)))
+            GetConfig(maxWorkingBytes, isSelectionEnabled)))
     {
         (void)data->SetPrimaryImage(BuildImage(side));
         const auto snapshot = data->GetPrimaryImage();
@@ -1088,6 +1105,112 @@ int GetPartLifecycleFailCount()
             && test.feature->DetachHost();
     };
     int failureCount = GetPreviousPartFailCount() + GetEditLifecycleFailCount();
+    {
+        PartSegmentationHostFeature feature;
+        ConfigurableInputBindings settings;
+        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
+            InputBindingOverride::Replace,
+            { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
+              static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
+        const bool isValid = feature.SetInputBindings(settings)
+            == InputBindingStatus::Applied;
+        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
+            InputBindingOverride::Replace,
+            { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 65 });
+        if (!GetCaseResult(isValid && feature.SetInputBindings(settings)
+                == InputBindingStatus::Unsupported,
+                "selection input binding validation")) ++failureCount;
+    }
+    {
+        TestHost test(8, 512U * 1024U * 1024U, true);
+        ConfigurableInputBindings settings;
+        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
+            InputBindingOverride::Replace,
+            { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
+              static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
+        bool isValid = test.feature->SetInputBindings(settings)
+            == InputBindingStatus::Applied && test.Attach();
+        std::optional<PartSegmentationResult> result;
+        if (isValid) {
+            isValid = test.feature->SendRequest(
+                GetRequest(PartSegmentationAction::Start),
+                [&](PartSegmentationResult value) { result = std::move(value); })
+                .status == PartAdmissionStatus::Accepted;
+        }
+        isValid = isValid && SendTicks(*test.feature, [&] {
+            return result.has_value();
+        });
+        const auto before = test.feature->GetPartSetSnapshot();
+        isValid = isValid && result && result->status == PartResultStatus::Succeeded
+            && before && before->parts.size() == 2
+            && bool(test.host->binding.onTargetInput);
+        if (isValid) {
+            const auto object = before->parts.front().binding.object.objectId;
+            constexpr char digits[] = "0123456789abcdef";
+            std::string objectText(32, '0');
+            for (std::size_t index = 0; index < 16; ++index) {
+                objectText[15 - index] =
+                    digits[(object.high >> (index * 4)) & 15U];
+                objectText[31 - index] =
+                    digits[(object.low >> (index * 4)) & 15U];
+            }
+            HostSemanticTarget target;
+            target.display.data = test.feature->GetState().labelMap;
+            target.objectId = std::move(objectText);
+            target.resultRevision = before->resultRevision;
+            test.host->isSemanticTargetValid = true;
+            InteractionEvent click;
+            click.viewId = "part-primary";
+            click.eventKind = InteractionEventKind::SecondaryPress;
+            click.isAltDown = true;
+            const auto pressed = test.host->binding.onTargetInput(click, target);
+            const auto pending = test.feature->GetPartSetSnapshot();
+            const bool isNotCommitted = pending
+                && !pending->parts.front().presentation.isSelected;
+            const bool isBusy = test.feature->SetInputBindings(settings)
+                == InputBindingStatus::Busy;
+            click.eventKind = InteractionEventKind::PrimaryRelease;
+            const auto unrelated = test.host->binding.onTargetInput(click, target);
+            const auto stillPending = test.feature->GetPartSetSnapshot();
+            const bool isStillUncommitted = stillPending
+                && !stillPending->parts.front().presentation.isSelected;
+            const bool isStillBusy = test.feature->SetInputBindings(settings)
+                == InputBindingStatus::Busy;
+            click.eventKind = InteractionEventKind::SecondaryRelease;
+            const auto released = test.host->binding.onTargetInput(click, target);
+            const auto after = test.feature->GetPartSetSnapshot();
+            const auto restored = test.feature->SetInputBindings(settings);
+            const bool selectedAfter = after
+                && after->parts.front().presentation.isSelected;
+            const bool selectedBefore =
+                before->parts.front().presentation.isSelected;
+            isValid = pressed.isHandled && pressed.isSucceeded
+                && isNotCommitted && isBusy
+                && !unrelated.isHandled && unrelated.isSucceeded
+                && isStillUncommitted && isStillBusy
+                && released.isHandled && released.isSucceeded
+                && selectedAfter && !selectedBefore
+                && restored == InputBindingStatus::Applied;
+            if (!isValid) {
+                std::cerr << "Part click: press=" << pressed.isHandled
+                    << '/' << pressed.isSucceeded
+                    << " pending=" << isNotCommitted << " busy=" << isBusy
+                    << " unrelated=" << unrelated.isHandled
+                    << '/' << unrelated.isSucceeded
+                    << " stillPending=" << isStillUncommitted
+                    << " stillBusy=" << isStillBusy
+                    << " release=" << released.isHandled
+                    << '/' << released.isSucceeded
+                    << " selectedBefore=" << selectedBefore
+                    << " selectedAfter=" << selectedAfter
+                    << " restored=" << static_cast<int>(restored) << '\n';
+            }
+        }
+        if (!GetCaseResult(isValid,
+                "Alt+secondary part selection commits only on secondary release"))
+            ++failureCount;
+        (void)test.feature->DetachHost();
+    }
     {
         TestHost test;
         bool isValid = test.Attach();

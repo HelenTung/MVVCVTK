@@ -2,10 +2,16 @@
 
 #include "Host/HostFeature.h"
 #include "Host/WallThicknessHostTypes.h"
+#include "Interaction/InputBindings.h"
 
 // 仓内可选 Feature；不安装到 SDK。生命周期/请求/查询均属于 Session owner thread。
 // 拒绝请求不回调；Accepted 恰好一次 owner 回调。短命令可同步完成。
 // 回调可查询/再次请求/取消；Host frame 内拓扑变更仍按 Host 原契约拒绝。
+namespace ThicknessBindingKeys {
+inline constexpr std::string_view SelectSample =
+    "wallThickness.selectSample.press";
+}
+
 class WallThicknessHostFeature final : public HostFeature,
                                        public std::enable_shared_from_this<WallThicknessHostFeature>
 {
@@ -19,6 +25,7 @@ class WallThicknessHostFeature final : public HostFeature,
     FeatureDataContract GetDataContract() const override;
     std::vector<FeatureOperationState> GetOperationStates() const override;
     bool AttachHost(const HostFeatureContext &context) override;
+    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     bool DetachHost() override;
     bool OnHostTick() override;
     ThicknessAdmission SendRequest(ThicknessRequest request, ThicknessCallback onComplete = {});

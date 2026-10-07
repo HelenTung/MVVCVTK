@@ -2,6 +2,7 @@
 
 #include "Interaction/AbstractViewContext.h"
 #include "Interaction/InteractionPorts.h"
+#include "Interaction/NavigationBindings.h"
 
 #include <memory>
 
@@ -9,4 +10,5 @@
 std::shared_ptr<AbstractViewContext> CreateViewContext(
     InteractionPorts ports,
     bool isHostInjected = false,
-    bool isHostDriven = false);
+    bool isHostDriven = false,
+    const NavigationBindings* bindings = nullptr);

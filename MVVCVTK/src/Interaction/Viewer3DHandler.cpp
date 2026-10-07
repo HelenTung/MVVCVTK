@@ -23,13 +23,15 @@ Viewer3DHandler::Viewer3DHandler(
     ModelInputPort* modelPort,
     RenderUpdatePort* updatePort,
     vtkPropPicker* picker,
-    vtkRenderer* renderer)
+    vtkRenderer* renderer,
+    const NavigationBindings* bindings)
     : m_statePort(statePort)
     , m_slicePort(slicePort)
     , m_modelPort(modelPort)
     , m_updatePort(updatePort)
     , m_picker(picker)
     , m_renderer(renderer)
+    , m_bindings(bindings ? bindings : &m_defaultBindings)
 {
     m_source.ownerId = "Viewer3D";
     m_source.channelId =
@@ -65,7 +67,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
 
     // 模式切换不能吞掉已开始拖拽的 Release/Cancel。
     const bool isCleanup =
-        eve.eventKind == InteractionEventKind::PrimaryRelease
+        eve.eventKind == m_planeReleaseKind
         || eve.eventKind == InteractionEventKind::Cancel;
     if (isCleanup && m_isDragging) {
         if (!m_statePort
@@ -79,6 +81,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         }
         m_isDragging = false;
         m_dragAxis = -1;
+        m_planeReleaseKind = InteractionEventKind::None;
         return getResult(true, InteractionFailureReason::None);
     }
     if (eve.eventKind == InteractionEventKind::Cancel) {
@@ -103,7 +106,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     // 其他鼠标事件继续交给 VTK 默认相机控制，避免把 3D 浏览手感全部吞掉。
 
     // ── 左键按下：拾取切片平面 ────────────────────────────────────────
-    if (eve.eventKind == InteractionEventKind::PrimaryPress)
+    if (m_bindings->GetMatched(NavigationAction::PlaneDrag, eve))
     {
         if (!m_picker || !m_renderer) {
             return {};
@@ -146,32 +149,16 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                     m_statePort->SetInteracting(m_source, true);
                 m_isDragging = isStarted;
                 m_dragAxis = isStarted ? axis : -1;
+                m_planeReleaseKind = isStarted
+                    ? (eve.eventKind == InteractionEventKind::PrimaryPress
+                        ? InteractionEventKind::PrimaryRelease
+                        : InteractionEventKind::SecondaryRelease)
+                    : InteractionEventKind::None;
                 return getResult(
                     isStarted, InteractionFailureReason::StateRejected);
             }
         }
         // 点到主模型或空白处：不消费，让相机交互继续
-        return {};
-    }
-
-    // ── 左键抬起：结束拖拽 ────────────────────────────────────────────
-    if (eve.eventKind == InteractionEventKind::PrimaryRelease)
-    {
-        if (m_isDragging) {
-            const bool isInteractionSet =
-                m_statePort->SetInteracting(m_source, false);
-            if (!isInteractionSet) {
-                return getResult(
-                    false, InteractionFailureReason::CleanupRejected);
-            }
-            const bool isRenderSet = m_updatePort->SetRenderNeeded();
-            if (isRenderSet) {
-                m_isDragging = false;
-                m_dragAxis = -1;
-            }
-            return getResult(
-                isRenderSet, InteractionFailureReason::RenderRejected);
-        }
         return {};
     }
 
@@ -263,6 +250,7 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
         if (!m_statePort->SetInteracting(m_source,false)) return result(false);
         m_isModelDrag = false;
         m_modelToken = 0;
+        m_modelReleaseKind = InteractionEventKind::None;
         return result(true);
     }
     const bool isCancel = event.eventKind == InteractionEventKind::Cancel
@@ -273,13 +261,20 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
             || !m_statePort->SetInteracting(m_source,false)) return result(false);
         m_isModelDrag = false;
         m_modelToken = 0;
+        m_modelReleaseKind = InteractionEventKind::None;
         return result(m_updatePort->SetRenderNeeded());
     }
     const bool isPrimary = event.eventKind == InteractionEventKind::PrimaryPress;
     const bool isSecondary = event.eventKind == InteractionEventKind::SecondaryPress;
     if (!m_isModelDrag && (isPrimary || isSecondary)) {
-        // 旋转已由上游窄输入能力消费；本层只保留 Shift 平移和 Ctrl+Shift 缩放。
-        if (isPrimary && !event.isShiftDown) return result(false);
+        // 旋转已由上游窄输入能力消费；此处只识别已声明的变换操作。
+        const bool pan = m_bindings->GetMatched(
+            NavigationAction::ModelPanDrag, event);
+        const bool scale = m_bindings->GetMatched(
+            NavigationAction::ModelScaleDrag, event);
+        const bool secondaryPan = m_bindings->GetMatched(
+            NavigationAction::ModelSecondaryPanDrag, event);
+        if (!pan && !scale && !secondaryPan) return result(false);
         auto* prop = m_modelPort->GetMainProp();
         if (!prop || !m_renderer->GetRenderWindow()) return result(false);
         std::copy_n(prop->GetCenter(), 3, m_modelCenter.begin());
@@ -300,14 +295,15 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
         m_modelToken = *token;
         m_modelSequence = 0;
         m_modelStart = state->modelToWorld;
-        m_isModelScale = isPrimary && event.isCtrlDown;
-        m_isModelSecondary = isSecondary;
+        m_isModelScale = scale;
+        m_modelReleaseKind = isPrimary
+            ? InteractionEventKind::PrimaryRelease
+            : InteractionEventKind::SecondaryRelease;
         m_modelStartY = event.y;
         m_isModelDrag = true;
         return result(true);
     }
-    const bool isRelease = event.eventKind == (m_isModelSecondary
-        ? InteractionEventKind::SecondaryRelease : InteractionEventKind::PrimaryRelease);
+    const bool isRelease = event.eventKind == m_modelReleaseKind;
     if (m_isModelDrag && (event.eventKind == InteractionEventKind::PointerMove || isRelease)) {
         auto matrix = m_modelStart;
         if (m_isModelScale) {
@@ -336,6 +332,7 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
             if (!m_statePort->SetInteracting(m_source,false)) return result(false);
             m_isModelDrag = false;
             m_modelToken = 0;
+            m_modelReleaseKind = InteractionEventKind::None;
         }
         return result(m_updatePort->SetRenderNeeded());
     }
