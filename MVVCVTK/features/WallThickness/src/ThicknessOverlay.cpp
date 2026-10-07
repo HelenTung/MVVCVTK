@@ -106,8 +106,8 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
 {
     m_actor = vtkSmartPointer<vtkActor>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-    m_lineActor = vtkSmartPointer<vtkActor>::New();
-    m_lineMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    m_selectionActor = vtkSmartPointer<vtkActor>::New();
+    m_selectionMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     m_legend = vtkSmartPointer<vtkScalarBarActor>::New();
     m_isSlice = role == HostRenderViewRole::TopDownSlice ||
                 role == HostRenderViewRole::FrontBackSlice ||
@@ -138,16 +138,16 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_actor->GetProperty()->SetOpacity(display.opacity);
     m_actor->GetProperty()->SetLineWidth(2);
     m_actor->SetVisibility(display.isVisible);
-    m_lineActor->SetMapper(m_lineMapper);
-    m_lineActor->PickableOff();
-    m_lineActor->GetProperty()->SetColor(1, 1, 1);
-    m_lineActor->GetProperty()->SetLineWidth(3);
-    m_lineActor->GetProperty()->LightingOff();
-    m_lineActor->VisibilityOff();
+    m_selectionActor->SetMapper(m_selectionMapper);
+    m_selectionActor->PickableOff();
+    m_selectionActor->GetProperty()->SetColor(1, 1, 1);
+    m_selectionActor->GetProperty()->SetLineWidth(3);
+    m_selectionActor->GetProperty()->LightingOff();
+    m_selectionActor->VisibilityOff();
     m_legend->SetLookupTable(data.lookup);
     m_legend->SetNumberOfLabels(5);
     const std::string title =
-        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Ray tol." : "Ray") +
+        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Thickness tol." : "Thickness") +
         (unit == ThicknessUnit::Millimeter ? "\n[mm]" : "\n[m]");
     m_legend->SetTitle(title.c_str());
     m_legend->SetWidth(0.18);
@@ -189,7 +189,7 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_invalidLegend->BorderOff();
     m_invalidLegend->SetVisibility(display.isVisible && display.hasLegend);
     AttachProp(m_actor);
-    AttachProp(m_lineActor);
+    AttachProp(m_selectionActor);
     AttachProp(m_legend);
     AttachProp(m_invalidLegend);
 }
@@ -216,21 +216,22 @@ void ThicknessOverlay::SetSelection(const ThicknessSample *sample)
 {
     if (!sample || sample->validity != ThicknessValidity::Valid)
     {
-        m_lineActor->VisibilityOff();
+        m_selectionActor->VisibilityOff();
         return;
     }
     auto points = vtkSmartPointer<vtkPoints>::New();
     points->SetDataTypeToDouble();
     points->InsertNextPoint(sample->source.data());
-    points->InsertNextPoint(sample->opposite.data());
-    auto lines = vtkSmartPointer<vtkCellArray>::New();
-    vtkIdType ids[2]{0, 1};
-    lines->InsertNextCell(2, ids);
+    // 插值值没有唯一对应的双端；只标记查询位置。
+    auto vertices = vtkSmartPointer<vtkCellArray>::New();
+    vtkIdType id = 0;
+    vertices->InsertNextCell(1, &id);
     auto data = vtkSmartPointer<vtkPolyData>::New();
     data->SetPoints(points);
-    data->SetLines(lines);
-    m_lineMapper->SetInputData(data);
-    m_lineActor->SetVisibility(m_actor->GetVisibility());
+    data->SetVerts(vertices);
+    m_selectionActor->GetProperty()->SetPointSize(7);
+    m_selectionMapper->SetInputData(data);
+    m_selectionActor->SetVisibility(m_actor->GetVisibility());
 }
 std::optional<std::size_t> ThicknessOverlay::GetPickedSample(int x, int y, vtkRenderer *renderer)
 {

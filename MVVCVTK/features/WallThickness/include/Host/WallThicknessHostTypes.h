@@ -30,6 +30,7 @@ enum class ThicknessValidity : std::uint8_t
     SearchLimitReached,
     InvalidMaterialPath,
     OutsideEvaluation,
+    NoValidSource,
     Count
 };
 enum class ThicknessStatus : std::uint8_t
@@ -62,30 +63,34 @@ enum class ThicknessDisplayMode : std::uint8_t
 
 struct ThicknessInput final
 {
+    // 源灰度支持 Float32/Float64 及不超过 32 位的整数；标签编号仍按整数精确比较。
     DataRevisionRef source, labels, mesh;
     std::string sourceBinding, labelsBinding, meshBinding;
-    // 只有此正整数标签是材料；所有其他标签均不允许穿越。
+    // 单一高灰度材料；标签用于身份与边界覆盖核验，材料路径由原始灰度定义。
     std::uint64_t materialLabel = 0;
     // 所有坐标、长度参数与输出使用该单位；不隐式改变源数据尺度。
     ThicknessUnit unit = ThicknessUnit::Unknown;
 };
 
+enum class ThicknessBoundaryPolicy : std::uint8_t
+{
+    Complete,
+    // 允许网格在源体素盒面上开放；只测量有完整搜索邻域的来源。
+    SourceExtentLocal
+};
+
 struct ThicknessParams final
 {
     double maxDistance = 0.0;
+    // 只控制显示/面积统计采样；节点积分固定为原始三角形上的 3×3 Gauss 规则。
     double sampleSpacing = 0.0;
-    double reverseTolerance = 0.0;
-    double maxFitResidual = 0.0; // measurement.fit-residual 的原灰度量纲，不是长度。
-    double maxLocalizationSigma = 0.0;
-    double minSupportRatio = 0.8;
-    double coneAngleDegrees = 10.0;
+    // 必须显式指定，与 source 的原始存储灰度同量纲；材料为 trilinear(source) > threshold。
+    std::optional<double> materialThreshold;
+    double coneAngleDegrees = 30.0; // 围绕源法向的搜索锥半角。
     std::uint32_t directionCount = 9;
-    double minOppositeCosine = 0.5;
-    double sharpNormalCosine = 0.5;
-    double ambiguityAbsolute = 0.0;
-    double ambiguityRelative = 0.15;
-    // 只允许两端连续的离散边界误差，不能跳过线段内部孔隙。
+    // 只允许两端连续的灰度边界误差，不能跳过线段内部孔隙。
     double maxBoundaryError = 0.0;
+    ThicknessBoundaryPolicy boundaryPolicy = ThicknessBoundaryPolicy::Complete;
     std::optional<std::array<double, 6>> evaluationBounds;
 };
 
@@ -119,15 +124,23 @@ struct ThicknessConfig final
 struct ThicknessSample final
 {
     std::uint64_t sourceTriangle = 0;
-    std::uint64_t oppositeTriangle = 0;
     // 源三角形上的子三角形足迹；不复制源网格坐标。
     std::array<ThicknessPoint, 3> barycentricCorners{};
-    ThicknessPoint source{}, opposite{};
+    // 节点场的查询位置，不代表某条唯一测量射线的起点。
+    ThicknessPoint source{};
     double area = 0.0;
     double thickness = 0.0;
-    std::array<double, 2> endpointTrim{};
-    std::uint32_t directionIndex = 0;
     ThicknessValidity validity = ThicknessValidity::LowSurfaceQuality;
+};
+
+struct ThicknessNode final
+{
+    std::array<int, 3> index{};
+    // 原始源三角形面积 × Gauss 权重 × Q1 帽函数；无效来源不进入分母。
+    double validWeight = 0.0;
+    double totalWeight = 0.0;
+    // 仅 validWeight > 0 时有效；没有有效来源的节点不以零厚度参与插值。
+    double thickness = 0.0;
 };
 
 struct ThicknessStatistics final
@@ -161,8 +174,8 @@ struct ThicknessRegion final
 
 struct ThicknessArchive final
 {
-    std::uint32_t schemaVersion = 1;
-    std::string algorithmVersion = "wall-thickness-ray-1";
+    std::uint32_t schemaVersion = 2;
+    std::string algorithmVersion = "wall-thickness-normal-offset-field-2";
     ThicknessInput input;
     ThicknessParams params;
     ThicknessEvaluation evaluation;
@@ -174,6 +187,8 @@ struct ThicknessSnapshot final
     DataRevisionRef result;
     ThicknessArchive archive;
     std::shared_ptr<const std::vector<ThicknessSample>> samples;
+    // 按 index 字典序排列；索引属于 archive.input.source 的原始网格。
+    std::shared_ptr<const std::vector<ThicknessNode>> nodes;
     ThicknessStatistics statistics;
     std::vector<ThicknessRegion> regions;
     std::uint32_t subdivisionCount = 0;

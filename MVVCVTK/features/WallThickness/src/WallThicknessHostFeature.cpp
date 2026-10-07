@@ -955,6 +955,7 @@ class WallThicknessHostFeature::Impl final
         return ThicknessSnapshot{ref,
                                  r.archive,
                                  r.field.samples,
+                                 r.field.nodes,
                                  r.statistics,
                                  r.regions,
                                  r.field.subdivisions,
@@ -964,6 +965,18 @@ class WallThicknessHostFeature::Impl final
     {
         return m_operation.operation.requestId ? std::vector<FeatureOperationState>{m_operation}
                                                : std::vector<FeatureOperationState>{};
+    }
+    std::optional<double> GetThicknessValue(const DataRevisionRef &ref, const ThicknessPoint &point) const
+    {
+        if (!GetOwner()) return {};
+        const auto payload = ThicknessData::GetResult(m_context.data->GetDataGraph(), ref);
+        if (!payload) return {};
+        const auto &record = payload->GetRecord();
+        if (record.archive.params.evaluationBounds)
+            for (unsigned a = 0; a < 3; ++a)
+                if (point[a] < (*record.archive.params.evaluationBounds)[2 * a] - record.field.coordinateTolerance ||
+                    point[a] > (*record.archive.params.evaluationBounds)[2 * a + 1] + record.field.coordinateTolerance) return {};
+        return ThicknessAlgorithm::GetValue(record.field, point);
     }
 };
 WallThicknessHostFeature::WallThicknessHostFeature(ThicknessConfig config)
@@ -1015,6 +1028,11 @@ ThicknessAdmission WallThicknessHostFeature::SendRequest(ThicknessRequest reques
 ThicknessState WallThicknessHostFeature::GetState() const
 {
     return m_impl->GetState();
+}
+std::optional<double> WallThicknessHostFeature::GetThicknessValue(
+    const DataRevisionRef &ref, const ThicknessPoint &modelPoint) const
+{
+    return m_impl->GetThicknessValue(ref, modelPoint);
 }
 std::optional<ThicknessSnapshot>
 WallThicknessHostFeature::GetResult(const DataRevisionRef &ref) const

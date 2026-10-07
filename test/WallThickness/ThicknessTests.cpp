@@ -1,8 +1,10 @@
 #include "../TestDataPort.h"
 #include "Host/WallThicknessHostFeature.h"
 #include "ThicknessAlgorithm.h"
+#include "ThicknessMath.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
+#include "FeatureSupport/WorkLimit.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkActorCollection.h>
@@ -31,6 +33,8 @@
 #include <iostream>
 #include <thread>
 
+int GetMaterialFieldTestFailures();
+
 namespace
 {
 int failures = 0;
@@ -54,7 +58,8 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
         for (int y = 2; y <= 5; ++y)
             for (int x = 2; x <= 5; ++x)
                 (*labels)[x + 8 * (y + 8 * z)] = 1;
-    auto bytes = std::make_shared<const std::vector<std::uint8_t>>(512, 100);
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(512);
+    for (std::size_t i = 0; i < bytes->size(); ++i) (*bytes)[i] = (*labels)[i] ? 100 : 0;
     std::vector<double> vertices;
     const std::array<ThicknessPoint, 8> points{{{1.5, 1.5, 1.5},
                                                 {5.5, 1.5, 1.5},
@@ -91,10 +96,9 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     auto &p = w.archive.params;
     p.maxDistance = 10 * scale;
     p.sampleSpacing = scale;
-    p.reverseTolerance = 1e-5 * scale;
+    p.materialThreshold = 50;
     p.directionCount = 1;
-    p.maxFitResidual = scale;
-    p.maxLocalizationSigma = scale;
+    p.maxBoundaryError = 0.5 * scale;
     w.archive.evaluation = {1.5 * scale, 2.5 * scale, {0, 4 * scale}, 8, 0};
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
     w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -117,7 +121,7 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
     w.labels = std::make_shared<const LabelMap3DPayload>(
         g, LabelMapValues{std::shared_ptr<const std::vector<std::uint8_t>>(labels)});
     w.source = std::make_shared<const ImageGrid3DPayload>(
-        g, ImageValueType::UInt8, 1, std::make_shared<const std::vector<std::uint8_t>>(1728, 100));
+        g, ImageValueType::UInt8, 1, labels);
     std::vector<double> vertices, normals;
     std::vector<std::uint64_t> triangles;
     for (int shell = 0; shell < (hasInner ? 2 : 1); ++shell)
@@ -158,26 +162,33 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
             {"measurement.localization-sigma", 1, std::vector<double>(count, 0)},
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     w.archive.params.maxBoundaryError = 0.5;
-    w.archive.params.reverseTolerance = 0.1;
+    w.archive.params.materialThreshold = 0.5;
+    // 完整球壳按每原始面九点积分，沿用归档的可选计算时限。
+    // 未配置时保持不限时，CTest 负责测试进程的运行上限。
+    w.deadline = WorkLimit(w.archive.limits.deadlineMilliseconds).GetDeadline();
     return w;
 }
 void TestRayDefinitions()
 {
     auto slab = BuildSlab();
     slab.archive.params.directionCount = 9;
-    slab.archive.params.reverseTolerance = 1;
     slab.archive.params.evaluationBounds = std::array<double, 6>{2.5, 4.5, 2.5, 4.5, 0, 7};
     auto rays = ThicknessAlgorithm::BuildField(slab);
     Check(rays.status == ThicknessStatus::Succeeded && rays.statistics.minimum &&
               std::abs(*rays.statistics.minimum - 2) < 1e-8,
           "cone candidates retain the normal thickness");
-    slab.archive.params.ambiguityRelative = 0;
-    slab.archive.params.ambiguityAbsolute = 0;
-    auto ambiguous = ThicknessAlgorithm::BuildField(slab);
-    Check(ambiguous.status == ThicknessStatus::NoValidSamples &&
-              ambiguous.statistics.reasonCounts[static_cast<std::size_t>(
-                  ThicknessValidity::AmbiguousOpposite)] > 0,
-          "conflicting direction distances are not silently reduced to a minimum");
+    slab.archive.params.sampleSpacing = 0.5;
+    auto finer = ThicknessAlgorithm::BuildField(slab);
+    Check(finer.status == ThicknessStatus::Succeeded && rays.field.nodes && finer.field.nodes &&
+              rays.field.nodes->size() == finer.field.nodes->size(),
+          "display subdivision does not select the measurement sources");
+    if (rays.field.nodes && finer.field.nodes && rays.field.nodes->size() == finer.field.nodes->size())
+        for (std::size_t i = 0; i < rays.field.nodes->size(); ++i)
+        {
+            const auto &a = (*rays.field.nodes)[i], &b = (*finer.field.nodes)[i];
+            Check(a.index == b.index && a.validWeight == b.validWeight && a.thickness == b.thickness,
+                  "Gauss source field is invariant to display sampling");
+        }
     auto samples = std::make_shared<std::vector<ThicknessSample>>(4);
     const std::array<double, 4> values{1, 2, 9, 0}, areas{9, 1, 1, 100};
     for (std::size_t i = 0; i < 4; ++i)
@@ -214,7 +225,7 @@ void TestRayDefinitions()
     tube.labels = std::make_shared<const LabelMap3DPayload>(
         g, LabelMapValues{std::shared_ptr<const std::vector<std::uint8_t>>(labels)});
     tube.source = std::make_shared<const ImageGrid3DPayload>(
-        g, ImageValueType::UInt8, 1, std::make_shared<const std::vector<std::uint8_t>>(1728, 100));
+        g, ImageValueType::UInt8, 1, labels);
     constexpr std::size_t segments = 48;
     std::vector<double> vertices, normals;
     std::vector<std::uint64_t> triangles;
@@ -248,17 +259,49 @@ void TestRayDefinitions()
             {"measurement.localization-sigma", 1, std::vector<double>(count, 0)},
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     tube.archive.params.maxBoundaryError = 0.5;
-    tube.archive.params.reverseTolerance = 0.1;
+    tube.archive.params.materialThreshold = 0.5;
     const auto wall = ThicknessAlgorithm::BuildField(tube);
-    Check(wall.status == ThicknessStatus::Succeeded && wall.statistics.minimum &&
-              std::abs(*wall.statistics.minimum - 2) < 0.05,
-          "closed tube measures radial wall instead of void diameter");
+    std::cout << "tube status=" << unsigned(wall.status) << " min=" << wall.statistics.minimum.value_or(-1)
+              << " message=" << wall.message << '\n';
+    const auto radial = ThicknessAlgorithm::GetValue(wall.field, {7.5, 5.5, 5.5});
+    Check(wall.status == ThicknessStatus::Succeeded && radial && std::abs(*radial - 2) < 0.05,
+          "tube mid-height query measures radial wall; cap normals are outside this analytic reference");
 }
 
 void Algorithm()
 {
+    failures += GetMaterialFieldTestFailures();
+    using namespace ThicknessMath;
+    const ThicknessPoint ns{std::sqrt(3.0) / 2, 0, 0.5}, no{-0.5, 0, -std::sqrt(3.0) / 2};
+    const auto delta = Scale(Sub(ns, no), 1.5);
+    const auto offset = GetNormalOffset(delta, Scale(ns, 3), Scale(no, 7));
+    Check(offset && std::abs(*offset - 3) < 1e-12 && std::abs(*offset - Length(delta)) > 0.01,
+          "common normal displacement recovers two half-offset surfaces, not the chord or unit bisector");
+    Check(!GetNormalOffset(delta, ns, ns) && !GetNormalOffset(delta, {}, no),
+          "undefined endpoint normals cannot manufacture a thickness");
+    ThicknessAlgorithm::Field query;
+    query.geometry.extent = {-2, -1, 7, 8, 3, 4};
+    query.geometry.dimensions = {2, 2, 2};
+    query.geometry.origin = {10, -20, 30};
+    query.geometry.spacing = {0.2, 1, 2};
+    query.geometry.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+    auto nodes = std::make_shared<std::vector<ThicknessNode>>();
+    const std::array<double, 8> values{2, 4, 0, 8, 10, 0, 14, 16};
+    for (unsigned corner = 0; corner < 8; ++corner)
+        nodes->push_back({{-2 + int(corner & 1), 7 + int((corner >> 1) & 1), 3 + int(corner >> 2)},
+                           values[corner] ? 1.0 : 0.0, 1, values[corner]});
+    std::sort(nodes->begin(), nodes->end(), [](const auto &a, const auto &b) { return a.index < b.index; });
+    query.nodes = nodes;
+    const auto interpolated = ThicknessAlgorithm::GetValue(query, {2.75, -20.35, 36.5});
+    Check(interpolated && std::abs(*interpolated - 5.6875) < 1e-11,
+          "rotated anisotropic field preserves XYZ missing-corner interpolation order");
+    Check(!ThicknessAlgorithm::GetValue(query, {2.2, -20.36, 36.4}),
+          "invalid nearest corner rejects query before interpolation");
+    Check(!ThicknessAlgorithm::GetValue(query, {100, 100, 100}), "outside grid has no field value");
     TestRayDefinitions();
     auto shell = ThicknessAlgorithm::BuildField(BuildShell());
+    std::cout << "shell status=" << unsigned(shell.status) << " min=" << shell.statistics.minimum.value_or(-1)
+              << " message=" << shell.message << '\n';
     Check(shell.status == ThicknessStatus::Succeeded && shell.statistics.minimum &&
               std::abs(*shell.statistics.minimum - 2) < 0.05,
           "closed sphere shell measures wall, not diameter");
@@ -277,8 +320,10 @@ void Algorithm()
           "slab minimum=2");
     Check(result.statistics.maximum && std::abs(*result.statistics.maximum - 2) < 1e-8,
           "slab maximum=2");
-    Check(result.statistics.validCount > 0 && result.statistics.coverage < 1,
-          "invalid side normals reduce coverage");
+    Check(result.statistics.validCount > 0 && result.field.nodes &&
+              std::any_of(result.field.nodes->begin(), result.field.nodes->end(),
+                  [](const auto &n) { return n.totalWeight > n.validWeight && n.validWeight > 0; }),
+          "invalid sources reduce node support, while valid-only means remain queryable");
     Check(std::abs(result.statistics.evaluatedArea - 64) < 1e-8,
           "both-side total area includes invalid sides");
     auto rotated = BuildSlab();
@@ -362,10 +407,13 @@ void Algorithm()
         w.labels->GetGeometry(),
         LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(labels)});
     const auto foreign = ThicknessAlgorithm::BuildField(w);
+    const auto validMass = [](const auto &candidate) {
+        double sum = 0; if (candidate.field.nodes) for (const auto &node : *candidate.field.nodes) sum += node.validWeight;
+        return sum;
+    };
     Check(foreign.status == ThicknessStatus::IncompleteBoundary ||
-              (foreign.status == ThicknessStatus::Succeeded &&
-               foreign.statistics.validCount < result.statistics.validCount),
-          "foreign material is rejected as missing interface or invalid path");
+              (foreign.status == ThicknessStatus::Succeeded && validMass(foreign) < validMass(result)),
+          "foreign material nodes cannot support the selected material path");
 }
 void Evaluation()
 {
@@ -758,6 +806,12 @@ void Display()
 {
     auto w = BuildSlab();
     auto candidate = ThicknessAlgorithm::BuildField(w);
+    // 显示负例显式注入缺测值，不依赖某个算法恰好产生无效侧面。
+    auto mixed = std::make_shared<std::vector<ThicknessSample>>(*candidate.field.samples);
+    const auto invalidId = candidate.statistics.minimumSample.value_or(0) == 0 ? 1U : 0U;
+    (*mixed)[invalidId].validity = ThicknessValidity::NoValidSource;
+    (*mixed)[invalidId].thickness = 0;
+    candidate.field.samples = mixed;
     ThicknessData::Record record{
         w.archive, candidate.field, candidate.statistics, candidate.regions, {}};
     ThicknessDisplay display;
@@ -768,7 +822,7 @@ void Display()
                                                       HostRenderViewRole::Primary3D);
     overlay->AttachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 4,
-          "feature owns surface, path, scale and invalid swatch");
+          "feature owns surface, query marker, scale and invalid swatch");
     auto *colors = prepared.mesh->GetCellData()->GetScalars();
     Check(colors && colors->GetNumberOfComponents() == 3,
           "cell RGB prevents invalid interpolation");

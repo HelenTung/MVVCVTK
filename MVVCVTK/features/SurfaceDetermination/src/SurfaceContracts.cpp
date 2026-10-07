@@ -99,11 +99,13 @@ bool GetInputValid(const SurfaceDeterminationStartParams& p)
     const auto purpose = GetPurpose(p);
     if (purpose != SurfaceTaskPurpose::Estimate && purpose != SurfaceTaskPurpose::Preview
         && purpose != SurfaceTaskPurpose::Determine) return false;
-    if (static_cast<unsigned>(p.method) > 6 || static_cast<unsigned>(p.componentSelection) > 2 ||
+    if (static_cast<unsigned>(p.method) > 7 || static_cast<unsigned>(p.componentSelection) > 2 ||
         static_cast<unsigned>(p.sourcePolicy) > 1 || !GetScopeValid(p.resultScope) ||
         (p.sourceVolume && !GetDataRevisionRefValid(*p.sourceVolume)) ||
         (p.modelUnit != "" && p.modelUnit != "mm" && p.modelUnit != "cm" && p.modelUnit != "m" &&
          p.modelUnit != "um"))
+        return false;
+    if (p.method == SurfaceDeterminationMethod::MaterialIso && (p.materialLabels || p.initialSurface))
         return false;
     if ((purpose == SurfaceTaskPurpose::Estimate) != (p.method == SurfaceDeterminationMethod::AutomaticIso50)
         || (purpose == SurfaceTaskPurpose::Determine && p.method == SurfaceDeterminationMethod::GlobalIsoPreview)) return false;

@@ -86,6 +86,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Grow", "区域生长"}, {"Split", "拆分零件"}, {"Merge", "合并零件"}, {"Undo", "撤销"}, {"Redo", "重做"},
         {"Discard", "丢弃候选"}, {"Cancel", "取消计算"},
         {"AutomaticIso50", "自动 ISO50 阈值估计"}, {"GlobalIsoPreview", "全局等值面预览"},
+        {"MaterialIso", "材料等值面测定"},
         {"LocalAdaptiveIso50", "局部自适应 ISO50"}, {"GradientPeak", "梯度峰值表面定位"},
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
@@ -116,9 +117,8 @@ QString GetParameterText(const QString& key)
     if (key == "viewScope") return "辅助显示作用范围";
     static const QHash<QString, QString> labels{
         {"labels", "材料标签图修订"}, {"materialLabel", "材料标签编号"}, {"maxDistance", "搜索距离上限"},
-        {"sampleSpacing", "采样间距"}, {"reverseTolerance", "反向验证容差"}, {"maxFitResidual", "灰度拟合残差上限"},
-        {"coneAngleDegrees", "搜索锥角（度）"}, {"directionCount", "搜索方向数量"}, {"minOppositeCosine", "对面法向余弦下限"},
-        {"sharpNormalCosine", "锐边法向余弦下限"}, {"ambiguityAbsolute", "歧义绝对容差"}, {"ambiguityRelative", "歧义相对容差"},
+        {"sampleSpacing", "显示采样间距"}, {"materialThreshold", "原始灰度材料阈值"}, {"materialRange", "背景/材料灰度值"},
+        {"coneAngleDegrees", "搜索锥半角（度）"}, {"directionCount", "搜索方向数量"}, {"boundaryPolicy", "源边界策略"},
         {"maxBoundaryError", "边界误差上限"}, {"evaluationBounds", "评估空间范围"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
         {"histogramRange", "直方图范围"}, {"histogramBins", "直方图分箱数"}, {"minRegionArea", "最小异常区域面积"},
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},

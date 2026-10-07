@@ -205,7 +205,7 @@ Candidate BuildEvaluation(const Field &field, const ThicknessEvaluation &evaluat
             stats.validCount ? ThicknessStatus::Succeeded : ThicknessStatus::NoValidSamples;
         result.message =
             stats.validCount
-                ? "Sampled ray thickness evaluated; areas count both surface sides."
+                ? "Interpolated node-field thickness evaluated; areas count both surface sides."
                 : "No reliable thickness samples; no compliance decision is available.";
         return result;
     }

@@ -38,4 +38,15 @@ inline bool Finite(const ThicknessPoint &a)
 {
     return std::all_of(a.begin(), a.end(), [](double v) { return std::isfinite(v); });
 }
+inline std::optional<double> GetNormalOffset(const ThicknessPoint &delta, const ThicknessPoint &sourceNormal,
+                                           const ThicknessPoint &oppositeNormal)
+{
+    const auto source = Unit(sourceNormal), opposite = Unit(oppositeNormal);
+    if (!Finite(delta) || Length(source) < 0.5 || Length(opposite) < 0.5) return {};
+    const auto difference = Sub(source, opposite);
+    const double denominator = Dot(difference, difference);
+    if (!(denominator > 0)) return {};
+    const double value = 2 * Dot(delta, difference) / denominator;
+    return std::isfinite(value) && value > 0 ? std::optional<double>(value) : std::nullopt;
+}
 } // namespace ThicknessMath

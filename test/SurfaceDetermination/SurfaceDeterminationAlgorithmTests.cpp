@@ -384,6 +384,53 @@ void TestCancellationAndBudget(Checks& checks)
         "algorithm rejects insufficient budget before extraction");
 }
 
+void TestMaterialIso(Checks &checks)
+{
+    SurfaceDeterminationStartParams params;
+    checks.Get(params.method == SurfaceDeterminationMethod::MaterialIso, "material ISO is the default method");
+    params.componentSelection = SurfaceComponentSelection::All;
+    params.materialRange = std::array<double, 2>{0, 100};
+    params.initialIsoValue = 40;
+    const auto source = BuildSnapshot({20, 20, 20}, {1, 1, 1}, {0, 0, 0},
+        {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_FLOAT,
+        [](const Point3 &point) { return point[0] <= 7 ? -100.0 : 200.0; });
+    const auto result = Build(source, params);
+    checks.Get(result.status == SurfaceResultStatus::Succeeded && !result.points.empty() &&
+        result.acceptedPointCount > 0, "saturated material ISO publishes measurement points");
+    for (const auto &point : result.points)
+        checks.Get(std::abs(point.positionModel[0] - 7.4) < 1e-12 &&
+                       std::abs(point.normalModel[0] + 1) < 1e-7 && point.offsetFromSeed == 0,
+                   "saturation occurs at scalar nodes before crossing and gradient interpolation");
+    checks.Get(source->image->GetScalarComponentAsDouble(7, 8, 8, 0) == -100,
+               "material surface leaves original RAW unchanged");
+    checks.Get(result.resolvedParams.materialRange == params.materialRange && result.isoEstimate &&
+                   result.isoEstimate->isoValue == 40, "resolved recipe retains scalar calibration");
+    const auto text = SurfaceRecipeCodec::BuildText(result.resolvedParams);
+    const auto decoded = SurfaceRecipeCodec::GetRecipe(text);
+    checks.Get(decoded.recipe && decoded.recipe->materialRange == params.materialRange,
+               "material range survives recipe serialization");
+    params.materialRange = std::array<double, 2>{0, 200};
+    const auto other = Build(source, params);
+    checks.Get(!other.points.empty() && std::abs(other.points.front().positionModel[0] - 7.2) < 1e-12 &&
+                   other.parameterFingerprint != result.parameterFingerprint,
+               "material range belongs to the request and changes identity");
+    if (!result.points.empty())
+    {
+        const auto replay = SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
+            source, result.resolvedParams, result.points[result.points.size() / 2], {});
+        checks.Get(replay.isAvailable && replay.point.localThreshold == 40,
+                   "diagnostic replay uses the first frozen material range");
+    }
+    params.initialIsoValue = 200;
+    checks.Get(Build(source, params).status == SurfaceResultStatus::Failed,
+               "material threshold must be strictly inside the material range");
+    params.materialRange = std::array<double, 2>{-std::numeric_limits<double>::max(),
+                                                std::numeric_limits<double>::max()};
+    params.initialIsoValue = 0;
+    checks.Get(Build(source, params).status == SurfaceResultStatus::Failed,
+               "unrepresentable material span is rejected before interpolation");
+}
+
 } // namespace
 
 int GetSurfaceAlgorithmFailCount()
@@ -394,5 +441,6 @@ int GetSurfaceAlgorithmFailCount()
     TestQualityFlags(checks);
     TestNoiseAndParameterValidation(checks);
     TestCancellationAndBudget(checks);
+    TestMaterialIso(checks);
     return checks.failureCount;
 }

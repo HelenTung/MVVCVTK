@@ -74,9 +74,13 @@ struct ScalarView final {
     std::size_t valueCount = 0;
     int vtkType = VTK_VOID;
     double (*read)(const void *, std::size_t) = nullptr;
+    std::optional<std::array<double, 2>> materialRange;
     double GetValue(std::size_t index) const noexcept
     {
-        return read(values, index);
+        const auto value = read(values, index);
+        // 非有限原始节点仍属缺失支持，不得饱和成有效材料。
+        return materialRange && std::isfinite(value)
+                   ? std::clamp(value, (*materialRange)[0], (*materialRange)[1]) : value;
     }
     void SetReader()
     {
@@ -843,7 +847,7 @@ SurfaceFailureReason GetAutomaticIso(
         maximum = highest[trim];
     }
     if (validCount < 64 || !std::isfinite(minimum)
-        || !std::isfinite(maximum)
+        || !std::isfinite(maximum) || !std::isfinite(maximum - minimum)
         || maximum - minimum <= geometryEpsilon
             * std::max({ 1.0, std::abs(minimum), std::abs(maximum) })) {
         message = "Surface automatic ISO50 requires a non-degenerate bimodal histogram.";
@@ -1068,8 +1072,7 @@ SurfaceFailureReason ResolveParams(
 
     params.minimumObjectVoxels = input.minimumObjectVoxels;
     params.minimumContrast = input.minimumContrast;
-    if (params.minimumObjectVoxels == 0
-        || !std::isfinite(params.minimumContrast)
+    if (!std::isfinite(params.minimumContrast)
         || params.minimumContrast < 0.0) {
         message = "Surface parameters contain an invalid count or contrast.";
         return SurfaceFailureReason::InvalidGeometry;
@@ -1150,6 +1153,43 @@ SurfaceFailureReason ResolveParams(
         }
     }
     params.isAutomaticIso = !input.initialIsoValue.has_value();
+    if (input.method == SurfaceDeterminationMethod::MaterialIso)
+    {
+        if (volume.labels || volume.initialMesh)
+        {
+            message = "Material ISO requires the scalar source, without a label or initial mesh seed.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+        if (input.materialRange)
+        {
+            SurfaceIsoEstimate estimate;
+            estimate.backgroundValue = (*input.materialRange)[0];
+            estimate.materialValue = (*input.materialRange)[1];
+            params.isoEstimate = estimate;
+        }
+        else
+        {
+            auto estimateParams = params;
+            estimateParams.method = SurfaceDeterminationMethod::AutomaticIso50;
+            const auto status = GetAutomaticIso(volume, estimateParams, getCancelled, params.initialIsoValue,
+                                                message, params.isoEstimate);
+            if (status != SurfaceFailureReason::None)
+                return status;
+        }
+        if (!params.isoEstimate)
+            return SurfaceFailureReason::ThresholdUnreliable;
+        auto &estimate = *params.isoEstimate;
+        params.initialIsoValue = input.initialIsoValue.value_or(
+            (1 - input.seedFraction) * estimate.backgroundValue + input.seedFraction * estimate.materialValue);
+        if (!(estimate.backgroundValue < params.initialIsoValue &&
+              params.initialIsoValue < estimate.materialValue))
+        {
+            message = "Material ISO threshold must lie strictly between the material values.";
+            return SurfaceFailureReason::ThresholdUnreliable;
+        }
+        estimate.isoValue = params.initialIsoValue;
+        return SurfaceFailureReason::None;
+    }
     if (volume.labels || volume.initialMesh)
     {
         params.initialIsoValue = input.initialIsoValue.value_or(0.0);
@@ -1585,7 +1625,8 @@ bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, con
     record.normalModel = {GetFiniteFloat(record.seedNormalModel[0]),
                           GetFiniteFloat(record.seedNormalModel[1]),
                           GetFiniteFloat(record.seedNormalModel[2])};
-    if (params.method == SurfaceDeterminationMethod::GlobalIsoPreview)
+    if (params.method == SurfaceDeterminationMethod::GlobalIsoPreview ||
+        params.method == SurfaceDeterminationMethod::MaterialIso)
     {
         record.localThreshold = GetFiniteFloat(params.initialIsoValue);
         record.gradientMagnitude = GetFiniteFloat(magnitude);
@@ -1597,7 +1638,7 @@ bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, con
         {
             diagnostic->isAvailable = true;
             diagnostic->point = record;
-            diagnostic->message = "Preview has no local refinement profile.";
+            diagnostic->message = "Global material threshold has no local refinement profile.";
         }
         return true;
     }
@@ -2053,6 +2094,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
     result.resolvedParams = inputParams;
+    if (inputParams.method == SurfaceDeterminationMethod::MaterialIso)
+    {
+        // 估计必须先读原始灰度；此后种子、梯度和诊断统一读同一饱和节点场。
+        volume.scalars.materialRange = std::array<double, 2>{params.isoEstimate->backgroundValue,
+                                                            params.isoEstimate->materialValue};
+        result.resolvedParams.materialRange = volume.scalars.materialRange;
+    }
     result.resolvedParams.targetViews = {};
     auto &resolved = result.resolvedParams;
     resolved.purpose = SurfaceContract::GetPurpose(inputParams);
@@ -2122,8 +2170,10 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     grid.origin = volume.geometry.origin;
     grid.indexToModel = volume.geometry.indexToModel;
     grid.modelToIndex = volume.geometry.modelToIndex;
-    grid.values = volume.scalars.values;
-    grid.readScalar = volume.scalars.read;
+    grid.values = &volume.scalars;
+    grid.readScalar = [](const void *view, std::size_t index) {
+        return static_cast<const ScalarView *>(view)->GetValue(index);
+    };
     grid.validity = volume.validity;
     grid.labels = volume.labels;
     grid.initialMesh = volume.initialMesh;
@@ -2336,6 +2386,9 @@ SurfaceProfileDiagnostic SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
         params.roi = inputs.roi;
         if (ResolveParams(volume, resolved, {}, params, diagnostic.message) != SurfaceFailureReason::None)
             return diagnostic;
+        if (resolved.method == SurfaceDeterminationMethod::MaterialIso)
+            volume.scalars.materialRange = std::array<double, 2>{params.isoEstimate->backgroundValue,
+                                                                params.isoEstimate->materialValue};
         if (!resolved.materialPairs.empty())
         {
             if (point.interfaceIndex >= resolved.materialPairs.size())
