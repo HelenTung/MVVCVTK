@@ -48,7 +48,7 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件分割"}, {"PartEdit", "零件编辑"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","ROI 编辑"}};
+        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -61,7 +61,8 @@ QString GetActionText(const QString& module, const QString& action)
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
-        {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"},
+        {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
+        {"Roi.Cancel", "取消区域草稿"},
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
@@ -135,7 +136,7 @@ QString GetParameterText(const QString& key)
         {"isoMode", "分析阈值方式"}, {"dataRangeRatio", "灰度范围比例"}, {"absoluteIsoValue", "绝对灰度阈值"},
         {"backgroundMean", "背景灰度均值"}, {"materialMean", "材料灰度均值"}, {"filter", "启用孔隙过滤"},
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
-        {"isVisible", "显示结果"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
+        {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
         {"target", "目标零件"}, {"name", "零件名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
         {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"}, {"roiMask", "作用区域掩码"},
         {"protectionMask", "保护掩码"}, {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},

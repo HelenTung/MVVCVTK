@@ -217,7 +217,8 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_invalidLegend->SetEntry(0, symbol, u8"无效/未测", textColor);
     m_invalidLegend->ScalarVisibilityOn();
     m_invalidLegend->SetPosition(0.025, 0.06);
-    m_invalidLegend->SetPosition2(0.34, 0.035);
+    m_invalidLegend->SetPosition2(0.34, 0.07);
+    m_invalidLegend->SetPadding(0);
     m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
     RenderTextStyle::SetFont(*m_invalidLegend->GetEntryTextProperty());
     m_invalidLegend->GetEntryTextProperty()->ItalicOff();

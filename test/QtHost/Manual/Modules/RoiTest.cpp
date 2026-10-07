@@ -5,7 +5,7 @@ namespace Manual {
 ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFeature> feature,QWidget* parent)
 {
     auto* panel=new ModulePanel(context,"Roi",parent);
-    panel->SetNotice("黄色是可拖动草稿，青色是已提交 ROI。取消草稿保留已提交几何；坐标使用源模型空间。");
+    panel->SetNotice("黄色是可拖动草稿，青色是已提交的感兴趣区域。取消草稿保留已提交几何；坐标使用源模型空间。");
     panel->AttachAction("Begin",{{"boxToSource",QJsonValue()}},[panel,feature](auto id,const auto& p) {
         const auto source=panel->GetSession()->GetImageDescriptor();
         if (!source) throw std::invalid_argument("没有当前体数据");
