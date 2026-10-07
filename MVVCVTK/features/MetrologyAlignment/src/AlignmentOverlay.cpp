@@ -16,6 +16,8 @@ AlignmentOverlay::AlignmentOverlay()
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetLighting(false);
     m_actor->GetProperty()->SetLineWidth(2.5F);
+    m_actor->GetProperty()->SetPointSize(5);
+    m_actor->GetProperty()->RenderPointsAsSpheresOn();
     m_mapper->SetColorModeToDirectScalars();
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetPickable(false);
@@ -38,6 +40,9 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     auto points = vtkSmartPointer<vtkPoints>::New();
     points->SetDataTypeToDouble();
     auto lines = vtkSmartPointer<vtkCellArray>::New();
+    auto markers = vtkSmartPointer<vtkCellArray>::New();
+    auto markerColors = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    markerColors->SetNumberOfComponents(3);
     auto colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
     colors->SetNumberOfComponents(3);
     const auto add = [&](const Vec &a, const Vec &b, std::array<unsigned char, 3> color) {
@@ -55,6 +60,14 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     }
     for (const auto &g : geometries) {
         const auto center = Vector(g.sourceCenter), normal = Vector(g.sourceDirection);
+        if (g.kind == AlignmentGeometryKind::Point) {
+            // 拟合/约束位置用点标识，不把每个对应点伪装成一个坐标十字。
+            const vtkIdType marker = points->InsertNextPoint(center.val);
+            markers->InsertNextCell(1, &marker);
+            const unsigned char color[]{200, 180, 70};
+            markerColors->InsertNextTypedTuple(color);
+            continue;
+        }
         const auto a = Tangent(normal) * axisLength * 0.2, b = normal.cross(a);
         // 圆、球和圆柱的显示半径直接来自已拟合结果，不再拟合或制造残差。
         if ((g.kind == AlignmentGeometryKind::Circle || g.kind == AlignmentGeometryKind::Sphere
@@ -89,23 +102,28 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
                    g.kind == AlignmentGeometryKind::Cylinder)
             add(center - normal * axisLength * 0.3, center + normal * axisLength * 0.3,
                 {200, 180, 70});
-        else {
-            add(center - a, center + a, {200, 180, 70});
-            add(center - b, center + b, {200, 180, 70});
-        }
     }
     for (const auto &constraint : recipe.constraints) {
         if (constraint.geometryIndex >= geometries.size())
             continue;
         const auto &g = geometries[constraint.geometryIndex];
         if (g.kind == AlignmentGeometryKind::Point || g.kind == AlignmentGeometryKind::Sphere ||
-            g.kind == AlignmentGeometryKind::Circle)
-            add(Vector(g.sourceCenter), Transform(inverse, Vector(constraint.nominalPoint)),
-                {255, 100, 220});
+            g.kind == AlignmentGeometryKind::Circle) {
+            const auto source = Vector(g.sourceCenter);
+            const auto target = Transform(inverse, Vector(constraint.nominalPoint));
+            if ((source - target).dot(source - target) > 0)
+                add(source, target, {255, 100, 220});
+        }
     }
     auto data = vtkSmartPointer<vtkPolyData>::New();
     data->SetPoints(points);
+    data->SetVerts(markers);
     data->SetLines(lines);
-    data->GetCellData()->SetScalars(colors);
+    // VTK cell 顺序为 verts 在前、lines 在后，保持每类几何颜色对应。
+    for (vtkIdType index = 0; index < colors->GetNumberOfTuples(); ++index) {
+        unsigned char color[3]; colors->GetTypedTuple(index, color);
+        markerColors->InsertNextTypedTuple(color);
+    }
+    data->GetCellData()->SetScalars(markerColors);
     return data;
 }

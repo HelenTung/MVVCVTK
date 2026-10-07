@@ -6,6 +6,7 @@
 #include "AlignmentOverlay.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <iostream>
@@ -280,6 +281,19 @@ void Display() {
     double p[3]{};
     poly->GetPoint(0, p);
     Check(std::abs(p[0] + 10) < 1e-12, "overlay target origin mapped to source by inverse");
+    std::vector<AlignmentGeometry> geometries(3);
+    for(std::size_t index=0;index<geometries.size();++index) {
+        geometries[index].kind=AlignmentGeometryKind::Point;
+        geometries[index].sourceCenter={double(index),double(index+1),double(index+2)};
+    }
+    AlignmentRecipe emptyRecipe;
+    const auto markers=AlignmentOverlay::BuildData(alignmentIdentity,geometries,emptyRecipe,1);
+    Check(markers && markers->GetNumberOfVerts()==3 && markers->GetNumberOfLines()==3,
+        "alignment keeps one coordinate triad and point markers instead of per-datum crosses");
+    for(std::size_t index=0;index<geometries.size();++index) {
+        markers->GetPoint(6+static_cast<vtkIdType>(index),p);
+        Check(std::equal(p,p+3,geometries[index].sourceCenter.begin()),"datum marker retains exact fitted center");
+    }
 }
 void Reentry() {
     Fixture f;

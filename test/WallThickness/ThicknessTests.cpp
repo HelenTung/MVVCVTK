@@ -713,6 +713,27 @@ void Display()
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto* pathIds=vtkIdTypeArray::SafeDownCast(prepared.paths->GetCellData()->GetArray("thickness.sample"));
+    auto* pathColors=prepared.paths->GetCellData()->GetScalars();
+    auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
+    bool hasMatchingPaths=pathIds && pathColors && surfaceIds;
+    for(vtkIdType index=0;hasMatchingPaths && index<prepared.paths->GetNumberOfLines();++index) {
+        const auto sampleIndex=pathIds->GetValue(index);
+        const auto& sample=(*candidate.field.samples)[static_cast<std::size_t>(sampleIndex)];
+        double source[3],opposite[3];
+        prepared.paths->GetPoint(index*2,source);prepared.paths->GetPoint(index*2+1,opposite);
+        hasMatchingPaths &= sample.validity==ThicknessValidity::Valid
+            && std::equal(source,source+3,sample.source.begin())
+            && std::equal(opposite,opposite+3,sample.opposite.begin());
+        bool hasSameColor=false;
+        for(vtkIdType cell=0;cell<surfaceIds->GetNumberOfValues();++cell) if(surfaceIds->GetValue(cell)==sampleIndex) {
+            double first[3],second[3];prepared.mesh->GetCellData()->GetScalars()->GetTuple(cell,first);
+            pathColors->GetTuple(index,second);hasSameColor=std::equal(first,first+3,second);break;
+        }
+        hasMatchingPaths &= hasSameColor;
+    }
+    Check(hasMatchingPaths && prepared.paths->GetNumberOfLines()>0,
+        "slice coverage uses only exact valid measurement paths with the same RGB as the 3D samples");
     auto renderer = vtkSmartPointer<vtkRenderer>::New();
     auto overlay = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                       HostRenderViewRole::Primary3D);
@@ -805,6 +826,16 @@ void Display()
     renderer->ResetCameraClippingRange();
     window->Render();
     capture("WallThickness-Slice.png");
+    bool hasPathIntersections=false;
+    auto* projectedActors=renderer->GetActors();projectedActors->InitTraversal();
+    while(auto* actor=projectedActors->GetNextActor()) {
+        auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if(!mapper)continue;mapper->Update();
+        auto* cut=mapper->GetInput();
+        if(cut && cut->GetNumberOfVerts()>0 && cut->GetCellData()->GetArray("thickness.sample"))
+            hasPathIntersections=true;
+    }
+    Check(hasPathIntersections,"valid through-wall sample values remain visible inside the current 2D slice");
     bool sliceMapped = false;
     auto *sliceActors = renderer->GetActors();
     sliceActors->InitTraversal();

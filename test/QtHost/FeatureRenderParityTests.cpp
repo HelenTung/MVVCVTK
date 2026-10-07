@@ -5,6 +5,7 @@
 #include "SurfaceOverlayStrategy.h"
 #include <vtkCellData.h>
 #include <vtkCubeSource.h>
+#include <vtkDoubleArray.h>
 #include <vtkPNGWriter.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
@@ -12,6 +13,10 @@
 #include <vtkWindowToImageFilter.h>
 #include <cstring>
 #include <iostream>
+#include <cstdio>
+#include <set>
+#include <cmath>
+#include <limits>
 
 namespace {
 int failures=0;
@@ -29,7 +34,33 @@ int main()
 {
     auto thickness=AnalysisColorStyle::BuildRamp({0,5},true);
     double low[3],high[3];thickness->GetColor(0,low);thickness->GetColor(5,high);
-    Check(low[0]>.9 && low[2]<.1 && high[2]>.9 && high[0]<.1,"thickness thin red and thick blue");
+    Check(low[0]>low[2]+.4 && high[2]>high[0]+.4 && low[0]<.9 && high[2]<.9,
+        "thickness keeps red/blue direction with softer saturation and brightness");
+    for(const auto range : {std::array<double,2>{0,5}, {0,24}, {.1197,.3321}, {-1.3,2.1}, {1e-8,3e-8}}) {
+        const auto labels=AnalysisColorStyle::BuildLabels(range);
+        const auto format=AnalysisColorStyle::GetLabelFormat(*labels);
+        bool isRegular=labels->GetNumberOfValues()>1;
+        const double step=labels->GetValue(1)-labels->GetValue(0);
+        std::set<std::string> texts;
+        for(vtkIdType i=0;i<labels->GetNumberOfValues();++i) {
+            const double value=labels->GetValue(i);
+            isRegular &= value>=range[0] && value<=range[1]
+                && (i==0 || std::abs(value-labels->GetValue(i-1)-step)<step*1e-9);
+            char text[64];std::snprintf(text,sizeof(text),format.c_str(),value);texts.insert(text);
+        }
+        Check(isRegular && texts.size()==static_cast<std::size_t>(labels->GetNumberOfValues()),
+            "legend ticks increase uniformly with distinct formatted values inside the unchanged range");
+    }
+    const auto single=AnalysisColorStyle::BuildLabels({2,std::nextafter(2.0,3.0)});
+    Check(single->GetNumberOfValues()==1 && single->GetValue(0)==2,"single-value legend avoids repeated fake precision");
+    const auto extreme=AnalysisColorStyle::BuildLabels({-std::numeric_limits<double>::max(),std::numeric_limits<double>::max()});
+    Check(extreme->GetNumberOfValues()==2 && AnalysisColorStyle::GetLabelFormat(*extreme)=="%.6g",
+        "extreme finite endpoints do not overflow formatting precision conversion");
+    vtkNew<vtkScalarBarActor> legend;legend->SetLookupTable(thickness);
+    AnalysisColorStyle::SetLegend(*legend,"Thickness [mm]");
+    Check(legend->GetBarRatio()<=.15 && legend->GetMaximumWidthInPixels()<=80
+        && legend->GetUseCustomLabels() && thickness->GetRange()[0]==0 && thickness->GetRange()[1]==5,
+        "compact legend changes presentation without changing the colour mapping range");
     vtkNew<vtkImageData> image;image->SetExtent(-3,4,5,12,2,9);image->SetSpacing(.5,1,1.5);
     image->SetOrigin(11,22,33);const double direction[9]{0,-1,0,1,0,0,0,0,1};
     image->SetDirectionMatrix(direction);image->AllocateScalars(VTK_INT,1);

@@ -21,6 +21,12 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+constexpr std::array<unsigned char, 3> belowColor{208, 88, 89};
+constexpr std::array<unsigned char, 3> withinColor{97, 179, 113};
+constexpr std::array<unsigned char, 3> aboveColor{83, 114, 188};
+}
+
 ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &record,
                                                  const SurfaceMeshPayload &mesh,
                                                  const ThicknessDisplay &display)
@@ -32,16 +38,9 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
         const double value = display.range[0] + f * (display.range[1] - display.range[0]);
         if (display.mode == ThicknessDisplayMode::Tolerance)
         {
-            const bool low = value<record.archive.evaluation.lower, high = value> record.archive
-                                 .evaluation.upper;
-            lookup->SetTableValue(i,
-                                  low    ? 0.9
-                                  : high ? 0.1
-                                         : 0.2,
-                                  low    ? 0.1
-                                  : high ? 0.3
-                                         : 0.8,
-                                  high ? 0.9 : 0.1, 1);
+            const auto& color = value < record.archive.evaluation.lower ? belowColor
+                : value > record.archive.evaluation.upper ? aboveColor : withinColor;
+            lookup->SetTableValue(i, color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1);
         }
     }
     auto points = vtkSmartPointer<vtkPoints>::New();
@@ -52,6 +51,13 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
     colors->SetNumberOfComponents(3);
     auto ids = vtkSmartPointer<vtkIdTypeArray>::New();
     ids->SetName("thickness.sample");
+    auto pathPoints = vtkSmartPointer<vtkPoints>::New();
+    pathPoints->SetDataTypeToDouble();
+    auto paths = vtkSmartPointer<vtkCellArray>::New();
+    auto pathColors = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    pathColors->SetNumberOfComponents(3);
+    auto pathIds = vtkSmartPointer<vtkIdTypeArray>::New();
+    pathIds->SetName("thickness.sample");
     const auto &samples = *record.field.samples;
     for (std::size_t i = 0; i < samples.size(); ++i)
     {
@@ -71,13 +77,9 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
         {
             if (display.mode == ThicknessDisplayMode::Tolerance)
             {
-                const bool low =
-                    sample
-                        .thickness<record.archive.evaluation.lower, high = sample.thickness>
-                            record.archive.evaluation.upper;
-                rgb[0] = low ? 230 : high ? 26 : 51;
-                rgb[1] = low ? 26 : high ? 77 : 204;
-                rgb[2] = high ? 230 : 26;
+                const auto& color = sample.thickness < record.archive.evaluation.lower ? belowColor
+                    : sample.thickness > record.archive.evaluation.upper ? aboveColor : withinColor;
+                std::copy(color.begin(), color.end(), rgb);
             }
             else
             {
@@ -88,6 +90,14 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
             }
         }
         colors->InsertNextTypedTuple(rgb);
+        if (sample.validity == ThicknessValidity::Valid) {
+            // 只投影已有有效测量路径；不把表面值填充为未经计算的体积场。
+            const vtkIdType ends[]{pathPoints->InsertNextPoint(sample.source.data()),
+                pathPoints->InsertNextPoint(sample.opposite.data())};
+            paths->InsertNextCell(2, ends);
+            pathColors->InsertNextTypedTuple(rgb);
+            pathIds->InsertNextValue(static_cast<vtkIdType>(i));
+        }
     }
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->SetPoints(points);
@@ -95,7 +105,11 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
     // Cell RGB 不在有效样本与无效零占位之间插值。
     output->GetCellData()->SetScalars(colors);
     output->GetCellData()->AddArray(ids);
-    return {output, lookup};
+    auto pathData = vtkSmartPointer<vtkPolyData>::New();
+    pathData->SetPoints(pathPoints); pathData->SetLines(paths);
+    pathData->GetCellData()->SetScalars(pathColors);
+    pathData->GetCellData()->AddArray(pathIds);
+    return {output, lookup, pathData};
 }
 ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDisplay &display,
                                    ThicknessUnit unit, HostRenderViewRole role)
@@ -146,6 +160,25 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
         m_contourActor->PickableOff();
         m_contourActor->SetVisibility(display.isVisible);
         AttachProp(m_contourActor);
+        m_pathCutter = vtkSmartPointer<vtkCutter>::New();
+        m_pathCutter->SetCutFunction(m_plane);
+        m_pathCutter->SetInputData(data.paths);
+        m_pathCutter->GenerateTrianglesOff();
+        auto pathMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        pathMapper->SetInputConnection(m_pathCutter->GetOutputPort());
+        pathMapper->SetScalarModeToUseCellData();
+        pathMapper->SetColorModeToDirectScalars();
+        pathMapper->SetResolveCoincidentTopologyToPolygonOffset();
+        pathMapper->SetRelativeCoincidentTopologyPointOffsetParameter(-4);
+        m_pathActor = vtkSmartPointer<vtkActor>::New();
+        m_pathActor->SetMapper(pathMapper);
+        m_pathActor->GetProperty()->LightingOff();
+        m_pathActor->GetProperty()->SetPointSize(3);
+        m_pathActor->GetProperty()->RenderPointsAsSpheresOn();
+        m_pathActor->GetProperty()->SetOpacity(display.opacity);
+        m_pathActor->SetVisibility(display.isVisible);
+        m_pathActor->PickableOff();
+        AttachProp(m_pathActor);
     }
     m_lineActor->SetMapper(m_lineMapper);
     m_lineActor->PickableOff();
@@ -162,16 +195,6 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
         std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Thickness tol." : "Thickness") +
         (unit == ThicknessUnit::Millimeter ? "\n[mm]" : "\n[m]");
     AnalysisColorStyle::SetLegend(*m_legend, title.c_str());
-    m_legend->SetWidth(0.18);
-    m_legend->SetHeight(0.65);
-    m_legend->SetPosition(0.025, 0.20);
-    // 在宽三维工作区中使用稳定字号，不让色标文字随整个 viewport 放大。
-    m_legend->SetMaximumWidthInPixels(120);
-    m_legend->SetMaximumHeightInPixels(320);
-    m_legend->SetUnconstrainedFontSize(true);
-    for (auto* text : {m_legend->GetTitleTextProperty(), m_legend->GetLabelTextProperty(), m_legend->GetAnnotationTextProperty()}) {
-        text->SetFontSize(13); text->BoldOff(); text->ItalicOff(); text->ShadowOff();
-    }
     m_legend->SetVisibility(display.isVisible && display.hasLegend);
     m_invalidLegend = vtkSmartPointer<vtkLegendBoxActor>::New();
     auto symbolPoints = vtkSmartPointer<vtkPoints>::New();

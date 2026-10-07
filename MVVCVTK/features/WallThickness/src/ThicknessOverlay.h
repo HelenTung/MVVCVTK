@@ -16,6 +16,7 @@ struct ThicknessDisplayData final
 {
     vtkSmartPointer<vtkPolyData> mesh;
     vtkSmartPointer<vtkLookupTable> lookup;
+    vtkSmartPointer<vtkPolyData> paths;
 };
 class ThicknessOverlay final : public FeatureOverlayBase
 {
@@ -36,6 +37,8 @@ class ThicknessOverlay final : public FeatureOverlayBase
     vtkSmartPointer<vtkScalarBarActor> m_legend;
     vtkSmartPointer<vtkLegendBoxActor> m_invalidLegend;
     vtkSmartPointer<vtkCutter> m_cutter;
+    vtkSmartPointer<vtkCutter> m_pathCutter;
+    vtkSmartPointer<vtkActor> m_pathActor;
     vtkSmartPointer<vtkPlane> m_plane;
     std::array<double, 3> m_normal{};
     bool m_isSlice = false;
