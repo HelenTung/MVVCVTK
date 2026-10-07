@@ -78,13 +78,15 @@ private:
 
 class StdViewContext final : public AbstractViewContext {
 public:
-    StdViewContext(InteractionPorts ports, bool isHostInjected, bool isHostDriven);
+    StdViewContext(InteractionPorts ports, bool isHostInjected,
+        bool isHostDriven, const NavigationBindings* bindings);
     ~StdViewContext() override;
     static void RemoveContext(
         AbstractViewContext* context) noexcept;
 
     bool SetInteractorReady() override;
     bool SetInputEnabled(bool isEnabled) override;
+    bool GetIsInputIdle() const override;
     bool Start() override;
     bool StopInput() override;
     bool SetCameraStyle(VizMode mode) override;
@@ -153,6 +155,8 @@ private:
     vtkSmartPointer<vtkPropPicker> m_picker;
     VizMode m_currentMode = VizMode::Volume;
     ToolMode m_toolMode = ToolMode::Navigation;
+    NavigationBindings m_defaultBindings;
+    const NavigationBindings* m_bindings = nullptr;
     InteractionRouter m_interactionRouter;
     std::vector<unsigned long> m_observerTags;
     unsigned long m_timerObserverTag = 0;
@@ -186,14 +190,16 @@ private:
 
 std::shared_ptr<AbstractViewContext> CreateViewContext(
     InteractionPorts ports,
-    const bool isHostInjected, const bool isHostDriven)
+    const bool isHostInjected, const bool isHostDriven,
+    const NavigationBindings* bindings)
 {
     if (!ports.update || !ports.state
         || !ports.slice || !ports.model) {
         return nullptr;
     }
     std::shared_ptr<AbstractViewContext> context(
-        new StdViewContext(std::move(ports), isHostInjected, isHostDriven),
+        new StdViewContext(std::move(ports), isHostInjected,
+            isHostDriven, bindings),
         &StdViewContext::RemoveContext);
     const auto* value = static_cast<StdViewContext*>(context.get());
     return value->GetIsCreated() ? std::move(context) : nullptr;
@@ -201,8 +207,10 @@ std::shared_ptr<AbstractViewContext> CreateViewContext(
 
 StdViewContext::StdViewContext(
     InteractionPorts ports,
-    const bool isHostInjected, const bool isHostDriven)
+    const bool isHostInjected, const bool isHostDriven,
+    const NavigationBindings* bindings)
     : m_ports(std::move(ports))
+    , m_bindings(bindings ? bindings : &m_defaultBindings)
     , m_isHostInjected(isHostInjected)
     , m_isHostDriven(isHostDriven)
 {
@@ -471,6 +479,13 @@ bool StdViewContext::SetInteractorReady()
     return isReady;
 }
 
+bool StdViewContext::GetIsInputIdle() const
+{
+    return GetIsOwnerThread() && m_interactionRouter.GetIsIdle()
+        && !m_isStyleInteracting && !m_isSendingInput
+        && !m_isCancellingStyle;
+}
+
 bool StdViewContext::SetInputEnabled(const bool isEnabled)
 {
     if (!GetIsOwnerThread()
@@ -522,7 +537,8 @@ bool StdViewContext::RebuildInteractionRouter(
                     m_ports.model.get(),
                     m_ports.update.get(),
                     m_picker.GetPointer(),
-                    m_renderer.GetPointer()))) {
+                    m_renderer.GetPointer(),
+                    m_bindings))) {
             return false;
         }
         m_interactionRouter = std::move(candidate);
@@ -1043,7 +1059,6 @@ void StdViewContext::OnVTKEvent(
         return;
     }
     if (!m_isInputEnabled) return;
-
     // Session 为每个 View 安装唯一 frame handler。存在该 handler 时，
     // Timer 不再进入单 View TimeUpdateHandler，避免同一心跳重复 apply/render。
     if (eventId == vtkCommand::TimerEvent && m_timerHandler) {

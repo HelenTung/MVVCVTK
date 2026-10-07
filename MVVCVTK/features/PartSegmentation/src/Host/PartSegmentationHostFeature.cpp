@@ -248,6 +248,38 @@ PartSegmentationResult BuildResult(
     return result;
 }
 
+constexpr std::uint8_t selectShift = static_cast<std::uint8_t>(InputModifierFlags::Shift);
+constexpr std::uint8_t selectCtrl = static_cast<std::uint8_t>(InputModifierFlags::Ctrl);
+constexpr std::uint8_t selectAlt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
+constexpr std::uint8_t selectModifiers = selectShift | selectCtrl | selectAlt;
+
+bool GetValidSelect(const InputBinding& binding) noexcept
+{
+    return binding.trigger == InputTriggerKind::PointerPress
+        && (binding.button == InputMouseButton::Primary
+            || binding.button == InputMouseButton::Secondary)
+        && binding.key == 0
+        && !((binding.requiredModifiers | binding.forbiddenModifiers)
+            & ~selectModifiers)
+        && !(binding.requiredModifiers & binding.forbiddenModifiers);
+}
+
+bool GetSelectMatched(
+    const InputBinding& binding, const InteractionEvent& event) noexcept
+{
+    if ((binding.button == InputMouseButton::Primary
+            && event.eventKind != InteractionEventKind::PrimaryPress)
+        || (binding.button == InputMouseButton::Secondary
+            && event.eventKind != InteractionEventKind::SecondaryPress)) {
+        return false;
+    }
+    const auto modifiers = (event.isShiftDown ? selectShift : 0)
+        | (event.isCtrlDown ? selectCtrl : 0)
+        | (event.isAltDown ? selectAlt : 0);
+    return (modifiers & binding.requiredModifiers)
+            == binding.requiredModifiers
+        && !(modifiers & binding.forbiddenModifiers);
+}
 } // namespace
 
 class PartSegmentationHostFeature::Impl final {
@@ -260,6 +292,7 @@ public:
 
     bool AttachHost(const HostFeatureContext& context);
     bool AttachInput(std::weak_ptr<PartSegmentationHostFeature> owner);
+    InputBindingStatus SetInputBindings(const IInputBindings& source);
     bool DetachHost();
     bool OnHostTick();
     PartSegmentationAdmission SendRequest(
@@ -421,6 +454,11 @@ private:
     bool m_isActiveViewClearPending = false;
     bool m_isInputAttached = false;
     std::optional<SelectionPreview> m_preview;
+    InputBinding m_selectBinding{ InputTriggerKind::PointerPress,
+        InputMouseButton::Primary, 0, 0, 0 };
+    bool m_isSelectEnabled = true;
+    bool m_isSettingBindings = false;
+    InteractionEventKind m_previewReleaseKind = InteractionEventKind::None;
     std::atomic<bool> m_isPublishing{ false };
     std::optional<PartEditRequest> m_editRequest;
     std::optional<PartLabelCandidate> m_editCandidate;
@@ -447,6 +485,37 @@ std::string PartSegmentationHostFeature::Impl::GetObjectText(const PartObjectId&
         text[31 - index] = digits[(id.low >> (index * 4)) & 15U];
     }
     return text;
+}
+
+InputBindingStatus PartSegmentationHostFeature::Impl::SetInputBindings(
+    const IInputBindings& source)
+{
+    if (m_isAttached && !GetIsOwnerThread()) return InputBindingStatus::Failed;
+    if (m_preview || m_isClosing || m_isSettingBindings
+        || m_isPublishing.load(std::memory_order_acquire)) {
+        return InputBindingStatus::Busy;
+    }
+    m_isSettingBindings = true;
+    InputBinding candidate{ InputTriggerKind::PointerPress,
+        InputMouseButton::Primary, 0, 0, 0 };
+    bool isEnabled = true;
+    InputBinding replacement;
+    InputBindingStatus status = InputBindingStatus::Applied;
+    switch (source.GetOverride(PartSelectionBindingKeys::Select, replacement)) {
+    case InputBindingOverride::UseDefault: break;
+    case InputBindingOverride::Replace:
+        if (!GetValidSelect(replacement)) status = InputBindingStatus::Unsupported;
+        else candidate = replacement;
+        break;
+    case InputBindingOverride::Disable: isEnabled = false; break;
+    default: status = InputBindingStatus::Invalid; break;
+    }
+    m_isSettingBindings = false;
+    if (status != InputBindingStatus::Applied) return status;
+    if (m_preview || m_isClosing) return InputBindingStatus::Busy;
+    m_selectBinding = candidate;
+    m_isSelectEnabled = isEnabled;
+    return InputBindingStatus::Applied;
 }
 
 bool PartSegmentationHostFeature::Impl::AttachInput(
@@ -479,7 +548,8 @@ std::optional<HostSemanticTarget> PartSegmentationHostFeature::Impl::GetInputTar
     if (!m_isAttached || !GetIsOwnerThread() || m_isClosing || !m_host || !m_views
         || !m_activeLabels || !m_activeLabels->data || m_activeRequestId != 0
         || m_editCandidate || m_isPublishing.load(std::memory_order_acquire)
-        || event.eventKind != InteractionEventKind::PrimaryPress) return std::nullopt;
+        || !m_isSelectEnabled
+        || !GetSelectMatched(m_selectBinding, event)) return std::nullopt;
     const auto snapshot = GetPartSetSnapshot();
     auto target = m_host->GetDisplayTarget(event.viewId, "parts");
     if (!snapshot || snapshot->isStale || !target
@@ -519,7 +589,11 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
 bool PartSegmentationHostFeature::Impl::ClearPreview()
 {
     if (!m_preview) return true;
-    if (m_bindings.empty()) { m_preview.reset(); return true; }
+    if (m_bindings.empty()) {
+        m_preview.reset();
+        m_previewReleaseKind = InteractionEventKind::None;
+        return true;
+    }
     if (!GetIsOwnerThread() || !m_catalogView) return false;
     try {
         const auto states = BuildPartRenderStateTable(*m_catalogView);
@@ -531,6 +605,7 @@ bool PartSegmentationHostFeature::Impl::ClearPreview()
         if (!SendSceneDelta(GetNextRequestId(), FeatureScenePriority::Overlay,
                 m_activeSource, m_activeViews)) return false;
         m_preview.reset();
+        m_previewReleaseKind = InteractionEventKind::None;
         return true;
     }
     catch (...) { return false; }
@@ -547,7 +622,7 @@ InteractionResult PartSegmentationHostFeature::Impl::SendTargetInput(
     if (!m_isAttached || !GetIsOwnerThread() || m_isClosing) return result(false);
     if (m_editCandidate || m_isPublishing.load(std::memory_order_acquire)) return result(false);
     if (event.eventKind == InteractionEventKind::PointerMove) return result(true);
-    if (event.eventKind == InteractionEventKind::PrimaryRelease) {
+    if (event.eventKind == m_previewReleaseKind) {
         if (!m_preview) return result(true);
         const auto revision = m_preview->catalogRevision;
         if (!ClearPreview()) return result(false);
@@ -555,7 +630,8 @@ InteractionResult PartSegmentationHostFeature::Impl::SendTargetInput(
         patch.isSelected = true;
         return result(SetPartState(target, patch, revision).status == PartMutationStatus::Succeeded);
     }
-    if (event.eventKind != InteractionEventKind::PrimaryPress) return {};
+    if (!m_isSelectEnabled
+        || !GetSelectMatched(m_selectBinding, event)) return {};
     if (!ClearPreview() || !m_host || !m_host->GetSemanticTargetValid(target)
         || !m_catalogView) return result(false);
     const auto snapshot = GetPartSetSnapshot();
@@ -577,6 +653,9 @@ InteractionResult PartSegmentationHostFeature::Impl::SendTargetInput(
         for (const auto& binding : m_bindings) controls.push_back(binding.control);
         if (!SetPartStates(controls, *next, *previous)) return result(false);
         m_preview = std::move(preview);
+        m_previewReleaseKind = event.eventKind == InteractionEventKind::PrimaryPress
+            ? InteractionEventKind::PrimaryRelease
+            : InteractionEventKind::SecondaryRelease;
         if (!SendSceneDelta(GetNextRequestId(), FeatureScenePriority::Overlay,
                 m_activeSource, m_activeViews)) { (void)ClearPreview(); return result(false); }
         return result(true);
@@ -2626,6 +2705,13 @@ PartSegmentationHostFeature::PartSegmentationHostFeature(
 }
 
 PartSegmentationHostFeature::~PartSegmentationHostFeature() noexcept = default;
+
+InputBindingStatus PartSegmentationHostFeature::SetInputBindings(
+    const IInputBindings& bindings)
+{
+    return m_impl ? m_impl->SetInputBindings(bindings)
+        : InputBindingStatus::Failed;
+}
 
 std::string_view PartSegmentationHostFeature::GetFeatureId() const noexcept
 {

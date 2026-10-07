@@ -51,6 +51,7 @@ public:
     }
     bool SetCameraStyle(VizMode) override { return true; }
     bool SetInteractorReady() override { return true; }
+    bool GetIsInputIdle() const override { return true; }
     bool SetInputEnabled(bool) override { return true; }
     bool Start() override { return true; }
     bool StopInput() override { return true; }

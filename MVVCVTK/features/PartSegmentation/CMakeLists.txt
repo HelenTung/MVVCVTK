@@ -57,7 +57,7 @@ target_include_directories(
 )
 target_link_libraries(
     part_segmentation
-    PUBLIC MVVCVTK::FeatureSPI
+    PUBLIC MVVCVTK::FeatureSPI MVVCVTK::HostAPI
     PRIVATE
         MVVCVTKInternal::FeatureSupport
         VTK::FiltersHybrid

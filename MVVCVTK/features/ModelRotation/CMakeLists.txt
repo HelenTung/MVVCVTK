@@ -17,7 +17,7 @@ target_include_directories(model_rotation
     PUBLIC "$<BUILD_INTERFACE:${rotationStage}>"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(model_rotation
-    PUBLIC MVVCVTK::FeatureSPI
+    PUBLIC MVVCVTK::FeatureSPI MVVCVTK::HostAPI
     PRIVATE ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(model_rotation)
 SetApiDefaults(model_rotation)

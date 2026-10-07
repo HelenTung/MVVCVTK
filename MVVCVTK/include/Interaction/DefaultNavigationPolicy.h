@@ -2,6 +2,7 @@
 
 #include "IInteractionHandler.h"
 #include "Interaction/InteractionPorts.h"
+#include "Interaction/NavigationBindings.h"
 #include "Viewer2DHandler.h"
 #include "Viewer3DHandler.h"
 
@@ -18,12 +19,15 @@ public:
         ModelInputPort* modelPort,
         RenderUpdatePort* updatePort,
         vtkPropPicker* picker,
-        vtkRenderer* renderer);
+        vtkRenderer* renderer,
+        const NavigationBindings* bindings = nullptr);
 
     InteractionResult Send(const InteractionEvent& event) override;
     InteractionDispatch Route(const InteractionEvent& event) override;
 
 private:
+    NavigationBindings m_defaultBindings;
+    const NavigationBindings* m_bindings = nullptr;
     Viewer2DHandler m_viewer2D;
     Viewer3DHandler m_viewer3D;
 };

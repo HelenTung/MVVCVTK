@@ -4,6 +4,7 @@
 #include "Host/HostFeature.h"
 #include "Host/HostFrameCoordinator.h"
 #include "Host/Types/HostSessionTypes.h"
+#include "Interaction/NavigationBindings.h"
 
 #include <array>
 #include <memory>
@@ -82,7 +83,8 @@ public:
     // 根据 host 配置构建一次窗口集合；configs 数量就是窗口数量，id 必须由宿主作为稳定外部事实提供。
     bool Build(
         const HostCoreServices& core,
-        const std::vector<HostRenderViewConfig>& configs);
+        const std::vector<HostRenderViewConfig>& configs,
+        const NavigationBindings* bindings = nullptr);
 
     // 返回目标视图的独立业务状态快照；调用方不获得 runtime/service 所有权。
     std::optional<HostRenderViewState> GetViewState(
@@ -128,6 +130,7 @@ public:
     bool ClearTimerHandler(const HostViewTarget& target) const;
     bool SetFrameHandlers(std::function<void()> handler) const;
     bool SetInputsEnabled(bool isEnabled) const;
+    bool GetInputsIdle() const;
     bool SetFrameGeneration(std::uint64_t sessionGeneration);
     bool SetFrameIntents(
         const std::vector<HostFrameIntent>& intents);
