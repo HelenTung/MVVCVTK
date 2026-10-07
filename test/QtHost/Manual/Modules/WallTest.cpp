@@ -2,6 +2,8 @@
 #include "ModuleFactories.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
+#include <QFile>
+#include <QTextStream>
 namespace Manual {
 namespace {
 QString Status(ThicknessStatus status)
@@ -134,6 +136,20 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if (result) { const auto stats = Statistics(*result); for (auto it = stats.begin(); it != stats.end(); ++it) summary[it.key()] = it.value(); }
         panel->SetState(summary);
     };
+    panel->AttachAction("ExportComparison",{{"outputPath",""}},[panel,feature](auto id,const auto& p){
+        const auto snapshot=feature->GetResult(feature->GetState().result);
+        if(!snapshot||!snapshot->samples)throw std::runtime_error("wall result unavailable");
+        QFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
+        // 聚合节点场没有唯一对端；比较文件只导出查询位置及对应场值。
+        QTextStream out(&file);out.setRealNumberPrecision(17);out<<"sample_id,x_mm,y_mm,z_mm,thickness_mm,area_mm2,validity\n";
+        std::size_t i=0;for(const auto& s:*snapshot->samples){out<<qulonglong(i++);for(auto x:s.source)out<<','<<x;out<<','<<s.thickness<<','<<s.area<<','<<int(s.validity)<<'\n';}
+        out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("wall write failed");
+        QJsonArray histogram,reasons,regions;const auto& s=snapshot->statistics;
+        for(auto x:s.histogramAreas)histogram.append(x);
+        for(std::size_t j=0;j<s.reasonCounts.size();++j)reasons.append(QJsonObject{{"reason",int(j)},{"count",QString::number(s.reasonCounts[j])},{"area",s.reasonAreas[j]}});
+        for(const auto& r:snapshot->regions)regions.append(QJsonObject{{"id",QString::number(r.id)},{"area",r.area},{"minimum",r.minimum},{"maximum",r.maximum},{"bounds",GetValues(r.sampleBounds)},{"samples",QString::number(r.sampleIds.size())}});
+        panel->SetComplete(id,"Exported",{{"statistics",Statistics(*snapshot)},{"histogramAreas",histogram},{"reasons",reasons},{"regions",regions},{"evaluatedArea",s.evaluatedArea},{"validArea",s.validArea}});
+    },TestPolicy::Read);
     panel->onStop = [panel] { panel->SendAction("Cancel", {{"targetRequestId", "0"}}); };
     return panel;
 }
