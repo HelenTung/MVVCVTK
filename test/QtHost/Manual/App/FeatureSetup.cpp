@@ -60,6 +60,13 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     PartSegmentationConfig partConfig; partConfig.defaultStart.targetViews = GetPartViews();
     partConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     partConfig.maxHistoryBytes = context.workflow.resources.publishBytes;
+    // Explicit comparison-run retention budget; never exceed the measured working budget.
+    if (const auto configured = qgetenv("MVVCVTK_TEST_HISTORY_MIB"); !configured.isEmpty()) {
+        const auto mib = configured.toULongLong();
+        if (!mib || mib > context.workflow.resources.workingBytes / (1024ULL*1024ULL))
+            throw std::invalid_argument("history budget exceeds available working budget");
+        partConfig.maxHistoryBytes = mib * 1024ULL * 1024ULL;
+    }
     // 整卷编辑的时限包含表面重建和不可变标签冻结，测试宿主显式给出完整阶段预算。
     partConfig.editTimeoutMs = 120000;
     auto part = std::make_shared<PartSegmentationHostFeature>(partConfig); attach(part);

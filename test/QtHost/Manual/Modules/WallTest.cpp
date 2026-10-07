@@ -2,6 +2,8 @@
 #include "ModuleFactories.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
+#include <QFile>
+#include <QTextStream>
 namespace Manual {
 namespace {
 QString Status(ThicknessStatus status)
@@ -49,7 +51,7 @@ ThicknessDisplay Display(const QJsonObject& p)
 ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Wall", parent);
-    panel->SetNotice("先完成零件分割及局部自适应/梯度峰值测量表面，再计算壁厚。默认长度参数按 0.1537 mm 体素设置，可按零件尺寸调整。");
+    panel->SetNotice("先完成零件分割及局部自适应/梯度峰值测量表面，再计算壁厚。测量表面须选择全部分量、最小对象体素数为 1，且不限制表面分析区域。端点边界误差不得超过最小体素间距的一半；默认长度参数按 0.1537 mm 体素设置。");
     auto visible = std::make_shared<bool>(true);
     const auto resolveResult = [feature](const QJsonObject& p) {
         return GetText(p, "result") == "current" ? feature->GetState().result : GetRef(p["result"]);
@@ -75,7 +77,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         "maxDistance":15.37,"sampleSpacing":0.3074,"reverseTolerance":0.1537,"maxFitResidual":0.1,
         "maxLocalizationSigma":0.1537,"minSupportRatio":0.8,"coneAngleDegrees":10,"directionCount":9,
         "minOppositeCosine":0.5,"sharpNormalCosine":0.5,"ambiguityAbsolute":0.0,"ambiguityRelative":0.15,
-        "maxBoundaryError":0.1537,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
+        "maxBoundaryError":0.0768,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
         const auto current = panel->GetSession()->GetImageDescriptor();
         if (!current) throw std::invalid_argument("请先加载体数据");
         ThicknessInput input;
@@ -133,6 +135,19 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if (result) { const auto stats = Statistics(*result); for (auto it = stats.begin(); it != stats.end(); ++it) summary[it.key()] = it.value(); }
         panel->SetState(summary);
     };
+    panel->AttachAction("ExportComparison",{{"outputPath",""}},[panel,feature](auto id,const auto& p){
+        const auto snapshot=feature->GetResult(feature->GetState().result);
+        if(!snapshot||!snapshot->samples)throw std::runtime_error("wall result unavailable");
+        QFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
+        QTextStream out(&file);out.setRealNumberPrecision(17);out<<"sample_id,x_mm,y_mm,z_mm,opposite_x_mm,opposite_y_mm,opposite_z_mm,thickness_mm,area_mm2,validity\n";
+        std::size_t i=0;for(const auto& s:*snapshot->samples){out<<qulonglong(i++);for(auto x:s.source)out<<','<<x;for(auto x:s.opposite)out<<','<<x;out<<','<<s.thickness<<','<<s.area<<','<<int(s.validity)<<'\n';}
+        out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("wall write failed");
+        QJsonArray histogram,reasons,regions;const auto& s=snapshot->statistics;
+        for(auto x:s.histogramAreas)histogram.append(x);
+        for(std::size_t j=0;j<s.reasonCounts.size();++j)reasons.append(QJsonObject{{"reason",int(j)},{"count",QString::number(s.reasonCounts[j])},{"area",s.reasonAreas[j]}});
+        for(const auto& r:snapshot->regions)regions.append(QJsonObject{{"id",QString::number(r.id)},{"area",r.area},{"minimum",r.minimum},{"maximum",r.maximum},{"bounds",GetValues(r.sampleBounds)},{"samples",QString::number(r.sampleIds.size())}});
+        panel->SetComplete(id,"Exported",{{"statistics",Statistics(*snapshot)},{"histogramAreas",histogram},{"reasons",reasons},{"regions",regions},{"evaluatedArea",s.evaluatedArea},{"validArea",s.validArea}});
+    },TestPolicy::Read);
     panel->onStop = [panel] { panel->SendAction("Cancel", {{"targetRequestId", "0"}}); };
     return panel;
 }

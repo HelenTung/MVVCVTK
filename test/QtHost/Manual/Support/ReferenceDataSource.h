@@ -27,8 +27,11 @@ public:
     ReferenceInput LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh);
     DataRevisionRef CreateMask(DataRevisionRef source, const QJsonObject& params);
     QJsonObject GetPublishedGraph();
+    QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
+    QJsonObject ReadTransform();
 private:
     std::shared_ptr<TrustedDataPort> m_data;
+    std::shared_ptr<FeatureViewDirectory> m_views;
     std::optional<DataCommitId> m_sceneCommit;
     QJsonObject m_sceneGraph;
     std::map<QString, std::uint64_t> m_sceneOrder;

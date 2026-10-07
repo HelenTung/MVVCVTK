@@ -120,6 +120,22 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         const auto accepted=feature->SendRequest(request);if(accepted){flow->preferredMode=*request.removalMode;flow->isConfirmed=false;}
         panel->SetComplete(id,accepted?"Succeeded":"Rejected");
     },TestPolicy::Interaction,true);
+    panel->AttachAction("AppendExact",GetJson(R"({"shape":"Box","removalMode":"KeepInside","matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"center":[0,0,0],"axis":[0,0,1],"radius":1,"height":1})"),[panel,feature](auto id,const auto& p){
+        const auto history=feature->GetHistory();
+        CropEditRequest request;request.documentId=history.documentId;request.nodeId=history.rootNodeId;
+        request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;request.kind=CropEditKind::Append;
+        auto& op=request.operation;
+        op.geometryType=GetEnum<CropShape>(p,"shape",{{"Box",CropShape::Box},{"Plane",CropShape::Plane},{"Sphere",CropShape::Sphere},{"Cylinder",CropShape::Cylinder}});
+        op.removalMode=GetEnum<CropRemovalMode>(p,"removalMode",{{"KeepInside",CropRemovalMode::KeepInside},{"RemoveInside",CropRemovalMode::RemoveInside}});
+        op.boxToInputModelMatrix=GetArray<double,16>(p["matrix"]);
+        op.centerInInputModel=GetArray<double,3>(p["center"]);op.planeCenterInInputModel=op.centerInInputModel;
+        op.axisInInputModel=GetArray<double,3>(p["axis"]);op.planeNormalInInputModel=op.axisInInputModel;
+        op.radius=GetNumber(p,"radius");op.height=GetNumber(p,"height");
+        const auto admission=feature->SendRequest(request,[owner=QPointer<ModulePanel>(panel),id](CropEditOutcome result){
+            if(owner && result.status!=CropEditStatus::Queued)owner->SetComplete(id,result.status==CropEditStatus::Succeeded?"Succeeded":"Failed",{{"nodeId",QString::number(result.nodeId)},{"failureReason",int(result.failureReason)}});
+        });
+        panel->SetAdmission(id,admission.isAccepted);
+    },TestPolicy::Compute);
     for(const auto& mode:std::vector<std::pair<QString,CropRemovalMode>>{{"KeepInside",CropRemovalMode::KeepInside},{"RemoveInside",CropRemovalMode::RemoveInside},{"PositionOnly",CropRemovalMode::None}})
         panel->AttachAction(mode.first,{},[panel,feature,flow,mode](auto id,const auto&){
             CropHostRequest request;request.action=CropHostAction::Mode;request.target=GetCropTarget();request.removalMode=mode.second;
