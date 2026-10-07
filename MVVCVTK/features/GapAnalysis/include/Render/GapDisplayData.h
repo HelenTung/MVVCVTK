@@ -27,30 +27,42 @@ struct GapDisplayData final {
     std::array<double, 2> resultRange{0, 1};
     GapDisplayParams params;
 
+    static AnalysisColorStyle::RampMode GetRampMode(GapColorMode mode)
+    {
+        switch (mode) {
+        case GapColorMode::Constant: return AnalysisColorStyle::RampMode::Constant;
+        case GapColorMode::Gradient: return AnalysisColorStyle::RampMode::Gradient;
+        case GapColorMode::Rainbow: return AnalysisColorStyle::RampMode::Rainbow;
+        case GapColorMode::InverseRainbow: return AnalysisColorStyle::RampMode::InverseRainbow;
+        case GapColorMode::HueLoop: return AnalysisColorStyle::RampMode::HueLoop;
+        default: return static_cast<AnalysisColorStyle::RampMode>(-1);
+        }
+    }
     static AnalysisColorStyle::RampParams GetColorRamp(const GapDisplayParams& params)
     {
-        AnalysisColorStyle::RampParams ramp;
-        switch (params.mode) {
-        case GapColorMode::Constant: ramp.mode = AnalysisColorStyle::RampMode::Constant; break;
-        case GapColorMode::Gradient: ramp.mode = AnalysisColorStyle::RampMode::Gradient; break;
-        case GapColorMode::Rainbow: ramp.mode = AnalysisColorStyle::RampMode::Rainbow; break;
-        case GapColorMode::InverseRainbow: ramp.mode = AnalysisColorStyle::RampMode::InverseRainbow; break;
-        case GapColorMode::HueLoop: ramp.mode = AnalysisColorStyle::RampMode::HueLoop; break;
-        default: ramp.mode = static_cast<AnalysisColorStyle::RampMode>(-1); break;
-        }
+        AnalysisColorStyle::RampParams ramp;ramp.mode=GetRampMode(params.mode);
         ramp.constantColor = params.constantColor; ramp.lowColor = params.lowColor;
         ramp.highColor = params.highColor; ramp.belowColor = params.belowColor;
         ramp.aboveColor = params.aboveColor;
+        ramp.opacityRange=params.opacityRange;
+        ramp.blend=params.style==GapDisplayStyle::Constant ? AnalysisColorStyle::BlendMode::Constant
+            : params.style==GapDisplayStyle::Inclined ? AnalysisColorStyle::BlendMode::Inclined
+            : params.style==GapDisplayStyle::InverseInclined ? AnalysisColorStyle::BlendMode::InverseInclined
+            : static_cast<AnalysisColorStyle::BlendMode>(-1);
+        for(const auto& segment:params.segments)
+            ramp.segments.push_back({segment.lower,segment.upper,GetRampMode(segment.mode),segment.lowColor,segment.highColor});
         return ramp;
     }
 
     static bool GetParamsValid(const GapDisplayParams& params) noexcept
     {
-        return AnalysisColorStyle::GetRampValid(GetColorRamp(params))
+        if(params.segments.size()>1024)return false;
+        try { return AnalysisColorStyle::GetRampValid(GetColorRamp(params))
             && (params.rangeMode == GapRangeMode::Result
                 || (params.rangeMode == GapRangeMode::SelectedInterval
                     && std::isfinite(params.range[0]) && std::isfinite(params.range[1])
                     && params.range[0] >= 0 && params.range[0] < params.range[1]));
+        } catch (...) { return false; }
     }
 
     static std::shared_ptr<const GapDisplayData> CreateColors(
@@ -60,7 +72,8 @@ struct GapDisplayData final {
         auto result = std::make_shared<GapDisplayData>(source);
         result->params = params;
         result->params.range = params.rangeMode == GapRangeMode::Result ? source.resultRange : params.range;
-        result->volumes = AnalysisColorStyle::BuildRamp(result->params.range, GetColorRamp(params));
+        const auto ramp=GetColorRamp(params);
+        result->volumes = AnalysisColorStyle::BuildRamp(result->params.range,ramp);
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
         result->labels->IndexedLookupOn();
@@ -69,9 +82,9 @@ struct GapDisplayData final {
         result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
         for (std::size_t index = 0; index < source.regionVolumes.size(); ++index) {
             const auto& region = source.regionVolumes[index];
-            double rgb[3]; result->volumes->GetColor(region.second, rgb);
+            const auto rgba=AnalysisColorStyle::GetMappedColor(*result->volumes,ramp,region.second);
             result->labels->SetAnnotation(vtkVariant(region.first), std::to_string(region.first));
-            result->labels->SetTableValue(static_cast<vtkIdType>(index + 1), rgb[0], rgb[1], rgb[2], 1);
+            result->labels->SetTableValue(static_cast<vtkIdType>(index + 1),rgba.data());
         }
         result->labels->Build();
         return result;

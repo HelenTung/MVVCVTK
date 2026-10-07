@@ -312,10 +312,22 @@ int GapDisplaySuite::GetFailCount() const
             const auto* storedValues = static_cast<const int*>(storedLabels->GetScalarPointer());
             const std::vector<int> labelValues(storedValues, storedValues + storedLabels->GetNumberOfPoints());
             GapDisplayParams colors;
+            std::vector<GapDisplayParams> displays;
             for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
                      GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
-                colors.mode = mode;
-                expect(paletteService.SetDisplay(colors) && paletteService.GetDisplayParams().mode == mode,
+                GapDisplayParams next;next.mode=mode;displays.push_back(next);
+            }
+            for(const auto style:{GapDisplayStyle::Inclined,GapDisplayStyle::InverseInclined}) {
+                GapDisplayParams next;next.style=style;
+                next.segments={{std::nullopt,1,GapColorMode::Constant,{.6,.2,.7},{.6,.2,.7}},
+                    {1,2,GapColorMode::Gradient,{.2,.4,.7},{.7,.4,.2}},
+                    {2,std::nullopt,GapColorMode::Constant,{.2,.3,.8},{.2,.3,.8}}};
+                displays.push_back(next);
+            }
+            for (const auto& next:displays) {
+                colors=next;
+                expect(paletteService.SetDisplay(colors) && paletteService.GetDisplayParams().mode == next.mode
+                    && paletteService.GetDisplayParams().style==next.style,
                     "Every color mode should replace the display on the owner thread.");
                 const auto statistics = paletteService.GetStatistics();
                 const auto labels = paletteService.BuildLabelImage();
@@ -333,9 +345,16 @@ int GapDisplaySuite::GetFailCount() const
                     && statistics.porosityRatio == storedStats.porosityRatio,
                     "Color switching must preserve exact supplier labels, mesh and statistics.");
             }
+            colors={};colors.mode=GapColorMode::HueLoop;
+            expect(paletteService.SetDisplay(colors),"Restore the fixed-alpha palette before transactional failure checks.");
             const auto previousSlice = paletteSlice->GetOverlay(), previousMesh = paletteMesh->GetOverlay();
             const int sliceProps = paletteSlice->GetPropCount(), meshProps = paletteMesh->GetPropCount();
+            auto invalid=displays.back();invalid.segments[1].lower=1.1;
+            expect(!paletteService.SetDisplay(invalid) && paletteSlice->GetOverlay()==previousSlice
+                && paletteMesh->GetOverlay()==previousMesh,
+                "An invalid segment gap preserves both views and the prior display.");
             colors.mode = GapColorMode::Gradient;
+            colors.style=GapDisplayStyle::Inclined;colors.segments=displays.back().segments;
             paletteSlice->isAttachRejected = true;
             expect(!paletteService.SetDisplay(colors) && paletteSlice->GetOverlay() == previousSlice
                 && paletteMesh->GetOverlay() == previousMesh

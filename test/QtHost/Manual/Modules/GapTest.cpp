@@ -1,5 +1,6 @@
 // 测试用途：通过孔隙页面测试分析请求、统计结果、叠加显示与退出收口。
 #include "ModuleFactories.h"
+#include "Support/ColorSegmentInput.h"
 #include "Host/GapHostFeature.h"
 #include <QPointer>
 namespace Manual {
@@ -45,10 +46,11 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         }, TestPolicy::Compute, true);
     auto pendingExit = std::make_shared<std::uint64_t>(0);
     panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
-        "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null})"),
+        "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
+        "segments":[],"displayStyle":"Constant","opacityRange":[0.15,1]})"),
         [panel, feature](auto id, const auto& p) {
             GapDisplayParams display;
-            display.mode = GetEnum<GapColorMode>(p, "palette", {{"Constant", GapColorMode::Constant},
+            if(p.contains("palette"))display.mode = GetEnum<GapColorMode>(p, "palette", {{"Constant", GapColorMode::Constant},
                 {"Gradient", GapColorMode::Gradient}, {"Rainbow", GapColorMode::Rainbow},
                 {"InverseRainbow", GapColorMode::InverseRainbow}, {"HueLoop", GapColorMode::HueLoop}});
             display.rangeMode = GetEnum<GapRangeMode>(p, "rangeMode", {
@@ -59,12 +61,19 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             if (p.contains("highColor") && !p["highColor"].isNull()) display.highColor = GetArray<double, 3>(p["highColor"]);
             if (p.contains("belowColor") && !p["belowColor"].isNull()) display.belowColor = GetArray<double, 3>(p["belowColor"]);
             if (p.contains("aboveColor") && !p["aboveColor"].isNull()) display.aboveColor = GetArray<double, 3>(p["aboveColor"]);
+            display.segments=GetColorSegments<GapColorSegment,GapColorMode>(p,{
+                {"Constant",GapColorMode::Constant},{"Gradient",GapColorMode::Gradient},{"Rainbow",GapColorMode::Rainbow},
+                {"InverseRainbow",GapColorMode::InverseRainbow},{"HueLoop",GapColorMode::HueLoop}});
+            if(p.contains("displayStyle"))display.style=GetEnum<GapDisplayStyle>(p,"displayStyle",{
+                {"Constant",GapDisplayStyle::Constant},{"Inclined",GapDisplayStyle::Inclined},{"InverseInclined",GapDisplayStyle::InverseInclined}});
+            if(p.contains("opacityRange"))display.opacityRange=GetArray<double,2>(p["opacityRange"]);
             GapHostRequest request; request.action = GapHostAction::SetDisplay; request.display = display;
             const bool isAccepted = feature->SendRequest(std::move(request));
             const auto state = feature->GetState();
             panel->SetComplete(id, isAccepted ? "Succeeded" : "Rejected",
                 {{"isOverlayVisible", state.isOverlayVisible}, {"range", GetValues(state.display.range)},
-                    {"palette", static_cast<int>(state.display.mode)}, {"resultSet", GetRefText(state.resultSet)}});
+                    {"palette", static_cast<int>(state.display.mode)}, {"displayStyle",static_cast<int>(state.display.style)},
+                    {"segmentCount",static_cast<int>(state.display.segments.size())},{"resultSet", GetRefText(state.resultSet)}});
         }, TestPolicy::View);
     for (const bool exit : {false, true}) panel->AttachAction(exit ? "Exit" : "Overlay", {},
         [panel, feature, pendingExit, exit](auto id, const auto&) {

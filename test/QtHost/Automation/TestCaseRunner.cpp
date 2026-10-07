@@ -624,6 +624,22 @@ void CheckParameterLayout(TestWindow& window)
     poses.findChild<QPushButton*>("addRow")->click(); Check(poses.GetCount() == 2, "another initial pose can be added without array text");
     ParameterEditor ids("Alignment", "SaveRecipe", "vertexIds", QJsonArray{"18446744073709551615"}, QJsonArray{});
     Check(ids.GetValue().toArray()[0].toString() == "18446744073709551615", "structured lists preserve full uint64 strings");
+    const QJsonObject firstSegment{{"segmentFrom",QJsonValue()},{"segmentTo",1.0},{"palette","Constant"},
+        {"lowColor",QJsonArray{.6,.2,.7}},{"highColor",QJsonArray{.2,.3,.8}}};
+    const QJsonObject lastSegment{{"segmentFrom",1.0},{"segmentTo",QJsonValue()},{"palette","Constant"},
+        {"lowColor",QJsonArray{.2,.3,.8}},{"highColor",QJsonArray{.2,.3,.8}}};
+    ParameterEditor segments("Gap","SetDisplay","segments",QJsonArray{firstSegment,lastSegment},QJsonArray{});
+    Check(segments.GetElement(0)->GetField("segmentFrom")->GetValue().isNull()
+        && segments.GetElement(1)->GetField("segmentTo")->GetValue().isNull()
+        && segments.GetElement(0)->GetField("highColor")->isHidden(),
+        "segment rows retain infinite endpoints and hide unused constant-color controls");
+    segments.GetElement(1)->parentWidget()->findChild<QPushButton*>("moveUp",Qt::FindDirectChildrenOnly)->click();
+    Check(segments.GetValue().toArray()[0].toObject()["segmentFrom"]==1,
+        "segment reorder is reflected in the submitted value");
+    segments.GetElement(0)->parentWidget()->findChild<QPushButton*>("moveDown",Qt::FindDirectChildrenOnly)->click();
+    segments.GetElement(1)->parentWidget()->findChild<QPushButton*>("removeRow",Qt::FindDirectChildrenOnly)->click();
+    Check(segments.GetCount()==1 && segments.GetValue().toArray()[0].toObject()["segmentTo"]==1,
+        "segment removal preserves the remaining physical interval");
     if (auto* split = window.GetModule("PartEdit")->GetParameterEditor("Split")) {
         window.GetWorkflow().onNavigate("PartEdit", "Split", {});
         auto* card = window.GetModule("PartEdit")->findChild<QWidget*>("card_Split");

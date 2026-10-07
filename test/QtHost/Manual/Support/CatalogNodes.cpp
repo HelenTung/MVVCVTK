@@ -226,7 +226,7 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
         if (s["hasResult"].toBool()) children.append(Node("alignment-result:" + Ref(s["lastResult"]), "对齐结果", !s["isResultCurrent"].toBool() ? "已过期" : s["isApplied"].toBool() ? "已应用" : "待应用",
             {"Result", "Activate", "Deactivate", "ExportArchive", "Visibility"}, {{"Result", QJsonObject{{"result", s["lastResult"]}}}, {"Activate", QJsonObject{{"result", s["lastResult"]}}}, {"ExportArchive", QJsonObject{{"result", s["lastResult"]}}}}, details));
     }
-    if (module == "Gap" && s["hasResult"].toBool()) children.append(Node("gap-result:" + Ref(s["resultSet"]), "孔隙分析结果", s["isCurrent"].toBool() ? "孔隙率 " + QString::number(s["porosityRatio"].toDouble()*100., 'g', 5) + "%" : "已过期", {"Overlay", "Exit", "Start"}, {},
+    if (module == "Gap" && s["hasResult"].toBool()) children.append(Node("gap-result:" + Ref(s["resultSet"]), "孔隙分析结果", s["isCurrent"].toBool() ? "孔隙率 " + QString::number(s["porosityRatio"].toDouble()*100., 'g', 5) + "%" : "已过期", {"Overlay", "SetDisplay", "Exit", "Start"}, {},
         {Node("gap-volume", "孔隙体积（mm³）", QString::number(s["voidVolumeMM3"].toDouble(), 'g', 7)), Node("gap-object-volume", "对象体积（mm³）", QString::number(s["objectVolumeMM3"].toDouble(), 'g', 7)), Node("gap-voxels", "孔隙体素", s["voidVoxels"].toString())}));
     if (module == "Wall" && s["hasResult"].toBool()) {
         const auto ref = s["result"].toString();

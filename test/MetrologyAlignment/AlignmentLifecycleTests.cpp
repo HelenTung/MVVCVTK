@@ -302,6 +302,20 @@ void Display() {
         "best-fit inputs have a position marker and actual correspondence line with one coordinate triad");
     pairs->GetPoint(6,p);
     Check(std::equal(p,p+3,modelVertices.begin()),"best-fit marker uses exact published mesh coordinates");
+    std::vector<AlignmentGeometry> holes(3);
+    holes[0].kind=AlignmentGeometryKind::Plane;holes[0].sourceDirection={0,0,1};
+    for(std::size_t index=1;index<holes.size();++index) {
+        holes[index].kind=AlignmentGeometryKind::Cylinder;
+        holes[index].sourceCenter={double(index*3),2,4};holes[index].sourceDirection={0,0,1};
+        holes[index].radius=double(index)*.75;
+    }
+    const auto cylinders=AlignmentOverlay::BuildData(alignmentIdentity,holes,emptyRecipe,10);
+    Check(cylinders && cylinders->GetNumberOfLines()==397 && cylinders->GetNumberOfVerts()==0,
+        "plane and two fitted cylinders retain three rings, generators and one axis per cylinder with a single triad");
+    cylinders->GetPoint(14,p);
+    Check(std::abs(std::hypot(p[0]-holes[1].sourceCenter[0],p[1]-holes[1].sourceCenter[1])-holes[1].radius)<1e-12
+        && p[2]==holes[1].sourceCenter[2],
+        "cylinder display consumes the fitted center and radius without refitting the measurement");
 }
 void Reentry() {
     Fixture f;

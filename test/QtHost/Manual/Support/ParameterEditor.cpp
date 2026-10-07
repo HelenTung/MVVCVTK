@@ -33,12 +33,13 @@ protected:
 bool IsList(const QString& key)
 {
     static const QSet<QString> keys{"sourcePointsMM", "seeds", "barriers", "parts", "protectedParts", "overwriteParts",
-        "indexBoxes", "initialPoses", "colorNodes", "opacityNodes", "geometries", "constraints", "fitPairs", "vertexIds"};
+        "indexBoxes", "initialPoses", "colorNodes", "opacityNodes", "geometries", "constraints", "fitPairs", "vertexIds", "segments"};
     return keys.contains(key);
 }
 QJsonValue Shape(const QString& key)
 {
     if (key == "worldCenter" || key == "seedModelPoint" || key == "targetNormal") return QJsonArray{0,0,0};
+    if(key=="segmentFrom" || key=="segmentTo")return 0.0;
     if (key == "evaluationBounds" || key == "extent" || key == "roiModelBounds" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
@@ -61,6 +62,8 @@ QJsonValue Shape(const QString& key)
 QJsonValue RowTemplate(const QString& action, const QString& key, const QJsonArray& values)
 {
     if (!values.isEmpty()) return values.first();
+    if(key=="segments")return QJsonObject{{"segmentFrom",QJsonValue()},{"segmentTo",QJsonValue()},
+        {"palette","Constant"},{"lowColor",QJsonArray{.7,.7,.7}},{"highColor",QJsonArray{.7,.7,.7}}};
     if (key == "seeds") return action == "Split" ? QJsonValue(QJsonObject{{"imageIndex", QJsonArray{0,0,0}}, {"target", "1"}}) : QJsonValue(QJsonArray{0,0,0});
     if (key == "sourcePointsMM") return QJsonArray{0,0,0};
     if (key == "barriers") return QJsonObject{{"imageIndex", QJsonArray{0,0,0}}, {"axis", 0}};
@@ -127,15 +130,24 @@ bool ParameterEditor::GetFieldApplicable(const QString& key) const
         const auto selection = m_fields.find("componentSelection");
         return selection != m_fields.end() && selection->second->GetValue() == "Seeded";
     }
-    if (m_key.isEmpty() && (m_module == "Wall" || m_module == "Gap") && m_action == "SetDisplay") {
+    if ((m_key.isEmpty() || m_key=="segments") && (m_module == "Wall" || m_module == "Gap") && m_action == "SetDisplay") {
         const auto field = [&](const QString& name) {
             const auto found = m_fields.find(name);
             return found == m_fields.end() ? QString() : found->second->GetValue().toString();
         };
+        if(m_fields.find("segmentFrom")!=m_fields.end()) {
+            if(key=="lowColor")return field("palette")=="Constant" || field("palette")=="Gradient";
+            if(key=="highColor")return field("palette")=="Gradient";
+            return true;
+        }
         if (m_module == "Wall" && field("mode") == "Tolerance"
             && (key == "palette" || key == "constantColor" || key == "lowColor" || key == "highColor"
-                || key == "belowColor" || key == "aboveColor")) return false;
+                || key == "belowColor" || key == "aboveColor" || key=="segments")) return false;
+        if(key=="opacityRange")return field("displayStyle")=="Inclined" || field("displayStyle")=="InverseInclined";
         if (key == "range") return field("rangeMode") == "Manual" || field("rangeMode") == "SelectedInterval";
+        const auto segments=m_fields.find("segments");
+        if(segments!=m_fields.end() && segments->second->GetCount()>0
+            && (key=="palette" || key=="constantColor" || key=="lowColor" || key=="highColor"))return false;
         if (key == "constantColor") return field("palette") == "Constant";
         if (key == "lowColor" || key == "highColor") return field("palette") == "Gradient";
     }
@@ -148,8 +160,8 @@ void ParameterEditor::SetFieldApplicability(QJsonObject fields)
 }
 void ParameterEditor::SetFieldVisibility()
 {
-    if (!m_key.isEmpty()) return;
-    const auto bound = GetBoundParameters(m_module, m_action);
+    if (!m_key.isEmpty() && m_key!="segments") return;
+    const auto bound = m_key.isEmpty() ? GetBoundParameters(m_module, m_action) : QStringList{};
     for (const auto& field : m_fields) field.second->setVisible(!bound.contains(field.first) && GetFieldApplicable(field.first));
 }
 void ParameterEditor::NotifyEdited() { SetFieldVisibility(); if (onEdited) onEdited(); }
@@ -309,6 +321,24 @@ void ParameterEditor::AddRow(const QJsonValue& value)
     editor->onEdited = [this] { NotifyEdited(); };
     auto* remove = new QPushButton("删除", row); remove->setObjectName("removeRow"); remove->setFixedWidth(55);
     layout->addWidget(editor, 1); layout->addWidget(remove, 0, Qt::AlignTop); m_rowLayout->addWidget(row); m_rows.emplace_back(row, editor);
+    if(m_key=="segments")for(const int direction:{-1,1}) {
+        auto* move=new QPushButton(direction<0 ? "上移" : "下移",row);
+        move->setObjectName(direction<0 ? "moveUp" : "moveDown");layout->addWidget(move,0,Qt::AlignTop);
+        connect(move,&QPushButton::clicked,this,[this,row,direction] {
+            const auto found=std::find_if(m_rows.begin(),m_rows.end(),[row](const auto& item){return item.first==row;});
+            if(found==m_rows.end())return;
+            const int index=static_cast<int>(found-m_rows.begin()),target=index+direction;
+            if(target<0 || target>=static_cast<int>(m_rows.size()))return;
+            std::swap(m_rows[index],m_rows[target]);
+            for(std::size_t i=0;i<m_rows.size();++i) {
+                m_rowLayout->removeWidget(m_rows[i].first);m_rowLayout->insertWidget(static_cast<int>(i),m_rows[i].first);
+                auto* input=m_rows[i].second;input->m_title="第 "+QString::number(i+1)+" 组";
+                input->setAccessibleName(input->m_title);
+                input->findChild<QLabel*>("parameterTitle",Qt::FindDirectChildrenOnly)->setText(input->m_title);
+            }
+            NotifyEdited();
+        });
+    }
     connect(remove, &QPushButton::clicked, this, [this, row] {
         m_rows.erase(std::remove_if(m_rows.begin(), m_rows.end(), [row](const auto& item) { return item.first == row; }), m_rows.end());
         m_rowLayout->removeWidget(row); row->hide(); row->deleteLater();

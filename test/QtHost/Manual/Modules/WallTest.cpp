@@ -1,5 +1,6 @@
 // 测试用途：通过公开 Feature 请求测试壁厚计算、评估、显示、结果激活与采样定位。
 #include "ModuleFactories.h"
+#include "Support/ColorSegmentInput.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
 #include <QCryptographicHash>
@@ -56,6 +57,13 @@ ThicknessDisplay Display(const QJsonObject& p)
     if (p.contains("highColor") && !p["highColor"].isNull()) value.colorBand.highColor = GetArray<double, 3>(p["highColor"]);
     if (p.contains("belowColor") && !p["belowColor"].isNull()) value.colorBand.belowColor = GetArray<double, 3>(p["belowColor"]);
     if (p.contains("aboveColor") && !p["aboveColor"].isNull()) value.colorBand.aboveColor = GetArray<double, 3>(p["aboveColor"]);
+    value.colorBand.segments=GetColorSegments<ThicknessColorSegment,ThicknessColorMode>(p,{
+        {"Constant",ThicknessColorMode::Constant},{"Gradient",ThicknessColorMode::Gradient},{"Rainbow",ThicknessColorMode::Rainbow},
+        {"InverseRainbow",ThicknessColorMode::InverseRainbow},{"HueLoop",ThicknessColorMode::HueLoop}});
+    if(p.contains("displayStyle"))value.style=GetEnum<ThicknessDisplayStyle>(p,"displayStyle",{
+        {"Overlay",ThicknessDisplayStyle::Overlay},{"Constant",ThicknessDisplayStyle::Constant},
+        {"Inclined",ThicknessDisplayStyle::Inclined},{"InverseInclined",ThicknessDisplayStyle::InverseInclined}});
+    if(p.contains("opacityRange"))value.opacityRange=GetArray<double,2>(p["opacityRange"]);
     value.isVisible = GetBool(p, "isVisible"); value.hasLegend = GetBool(p, "hasLegend"); return value;
 }
 }
@@ -129,6 +137,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         [send](auto id, const auto& p) { ThicknessRequest r; r.action = ThicknessAction::SetEvaluation; r.evaluation = Evaluation(p); send(id, r); }, TestPolicy::Compute);
     panel->AttachAction("SetDisplay", GetJson(R"({"mode":"Continuous","rangeMode":"Result","range":[0,15.37],"palette":"InverseRainbow",
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
+        "segments":[],"displayStyle":"Overlay","opacityRange":[0.15,1],
         "opacity":1,"isVisible":true,"hasLegend":true})"),
         [send](auto id, const auto& p) { ThicknessRequest r; r.action = ThicknessAction::SetDisplay; r.display = Display(p); send(id, r); }, TestPolicy::View);
     panel->AttachAction("SetActive", {{"result", "current"}}, [send, resolveResult](auto id, const auto& p) {

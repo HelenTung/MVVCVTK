@@ -67,6 +67,33 @@ int main()
         && legend->GetTitleTextProperty()->GetFontFamily()==VTK_FONT_FILE
         && legend->GetTitleTextProperty()->GetFontFile(),
         "Chinese legend is backed by a CJK font resource");
+    AnalysisColorStyle::RampParams segmented;
+    segmented.segments={{std::nullopt,1,AnalysisColorStyle::RampMode::Constant,{.6,.2,.7},{.6,.2,.7}},
+        {1,2,AnalysisColorStyle::RampMode::Gradient,{0,1,0},{1,1,0}},
+        {2,std::nullopt,AnalysisColorStyle::RampMode::Constant,{.2,.3,.8},{.2,.3,.8}}};
+    Check(AnalysisColorStyle::GetRampValid(segmented),"infinite tails and continuous finite color segments are valid");
+    const auto segments=AnalysisColorStyle::BuildRamp({0,4},segmented);
+    double middle[3];segments->GetColor(1.5,middle);
+    Check(middle[0]>.45 && middle[0]<.55 && middle[1]>.99 && middle[2]<.01
+        && segments->GetBelowRangeColor()[2]>.65 && segments->GetAboveRangeColor()[2]>.75,
+        "segmented colors follow their own endpoints and infinite constant tails");
+    auto narrow=segmented;narrow.segments[1].upper=1.000001;narrow.segments[2].lower=1.000001;
+    const auto narrowTable=AnalysisColorStyle::BuildRamp({0,4},narrow);
+    const auto exact=AnalysisColorStyle::GetMappedColor(*narrowTable,narrow,1.0000005);
+    Check(std::abs(exact[0]-.5)<1e-8 && exact[1]==1 && exact[2]==0,
+        "narrow physical intervals retain exact segment mapping independent of legend texture resolution");
+    for(const bool isOverlap:{false,true}) {
+        auto invalid=segmented;invalid.segments[1].lower=isOverlap ? .9 : 1.1;
+        Check(!AnalysisColorStyle::GetRampValid(invalid),"gaps and overlapping color domains are rejected");
+    }
+    auto infiniteGradient=segmented;infiniteGradient.segments[0].mode=AnalysisColorStyle::RampMode::Gradient;
+    Check(!AnalysisColorStyle::GetRampValid(infiniteGradient),"unbounded gradients are rejected without display mutation");
+    segmented.blend=AnalysisColorStyle::BlendMode::Inclined;
+    const auto rising=AnalysisColorStyle::BuildRamp({0,4},segmented);
+    segmented.blend=AnalysisColorStyle::BlendMode::InverseInclined;
+    const auto falling=AnalysisColorStyle::BuildRamp({0,4},segmented);
+    Check(rising->GetOpacity(0)<rising->GetOpacity(4) && falling->GetOpacity(0)>falling->GetOpacity(4),
+        "inclined styles change only overlay intensity in opposite value directions");
     vtkNew<vtkImageData> image;image->SetExtent(-3,4,5,12,2,9);image->SetSpacing(.5,1,1.5);
     image->SetOrigin(11,22,33);const double direction[9]{0,-1,0,1,0,0,0,0,1};
     image->SetDirectionMatrix(direction);image->AllocateScalars(VTK_INT,1);
@@ -81,6 +108,13 @@ int main()
     const auto display=GapDisplayData::Build(image,{a,c},stopping);
     Check(display && display->labels->GetNumberOfTableValues()==3,"sparse IDs allocate by region count");
     if (display) {
+        GapDisplayParams segmentedGap;segmentedGap.style=GapDisplayStyle::Inclined;
+        segmentedGap.segments={{std::nullopt,1,GapColorMode::Constant,{.6,.2,.7},{.6,.2,.7}},
+            {1,2,GapColorMode::Gradient,{0,1,0},{1,1,0}},
+            {2,std::nullopt,GapColorMode::Constant,{.2,.3,.8},{.2,.3,.8}}};
+        const auto shaded=GapDisplayData::CreateColors(*display,segmentedGap);
+        Check(shaded && shaded->mesh==display->mesh && shaded->labels->MapValue(a.id)[3]<shaded->labels->MapValue(c.id)[3]
+            && shaded->labels->GetNumberOfTableValues()==3,"segmented inclined display keeps exact sparse IDs and display topology");
         for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
                  GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
             GapDisplayParams params; params.mode = mode;

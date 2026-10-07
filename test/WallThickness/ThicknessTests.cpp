@@ -713,6 +713,13 @@ void Display()
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto inclined=display;inclined.style=ThicknessDisplayStyle::Inclined;
+    const auto faded=ThicknessOverlay::BuildData(record,*w.mesh,inclined);
+    auto* fadeColors=faded.mesh->GetCellData()->GetScalars();
+    auto* fadePaths=faded.paths->GetCellData()->GetScalars();
+    Check(fadeColors->GetNumberOfComponents()==4 && fadePaths->GetNumberOfComponents()==4
+        && faded.mesh->GetNumberOfCells()==prepared.mesh->GetNumberOfCells(),
+        "inclined wall display uses RGBA without changing sample footprints or topology");
     auto tolerance = display; tolerance.mode = ThicknessDisplayMode::Tolerance;
     const auto toleranceData = ThicknessOverlay::BuildData(record, *w.mesh, tolerance);
     tolerance.colorBand.mode = ThicknessColorMode::HueLoop;

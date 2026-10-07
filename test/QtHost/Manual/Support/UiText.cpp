@@ -134,6 +134,8 @@ QString GetParameterText(const QString& key)
         {"boxValue", "盒内掩码值"}, {"indexBoxes", "体素索引盒列表"}, {"purpose", "用途"},
         {"mode", "显示模式"}, {"iso", "显示等值阈值"}, {"opacity", "不透明度（0～1）"}, {"quality", "显示质量"},
         {"palette", "色带类型"}, {"rangeMode", "色标范围来源"}, {"constantColor", "恒定颜色"},
+        {"segments","分段色带（按值域从低到高）"},{"segmentFrom","从值（不提供为负无穷）"},
+        {"segmentTo","至值（不提供为正无穷）"},{"displayStyle","叠加显示方式"},{"opacityRange","渐变叠加强度范围"},
         {"lowColor", "区间低端颜色"}, {"highColor", "区间高端颜色"},
         {"belowColor", "低于区间的颜色"}, {"aboveColor", "高于区间的颜色"},
         {"axes", "显示坐标轴"}, {"windowLevel", "窗宽与窗位"}, {"transfer", "颜色与透明度传递函数"},
@@ -184,6 +186,9 @@ QString GetParameterText(const QString& key)
 QString GetParameterHelp(const QString& key)
 {
     static const QHash<QString, QString> help{
+        {"segments","仅作用于本模块的量与单位。按值域从低到高排列连续区间；无穷端段使用恒定色。添加分段后覆盖单一色带，可逐行编辑、上下移动和删除。"},
+        {"opacityRange","相对于原有视图透明度的叠加强度。倾斜按本模块当前量值范围递增，反向倾斜递减；不改变几何、筛选或计算结果。"},
+        {"displayStyle","控制结果叠加的强度。倾斜／反向倾斜按量值渐变；当前采用统一风格实现，不表示改变切片或模型的空间角度。"},
         {"centerIndex", "未提供时使用当前源数据的截面中心；显式提供可逐项输入两个索引。"},
         {"initialIsoValue", "未提供时由算法估计当前输入的初始阈值；显式值使用原始灰度单位。"},
         {"minPartVoxels", "小于此体素数的连通域不生成零件。手动测试默认 1000 以过滤真实 CT 的微小噪声；需保留更小零件时可降低。"},
@@ -226,6 +231,10 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if(key=="displayStyle") {
+        ParameterChoices choices{{"Constant","恒定"},{"Inclined","倾斜（数值渐变叠加）"},{"InverseInclined","反向倾斜"}};
+        if(module=="Wall")choices.prepend({"Overlay","叠加层"});return choices;
+    }
     if ((module == "Wall" || module == "Gap") && key == "palette")
         return {{"Constant", "恒定"}, {"Gradient", "梯度"}, {"Rainbow", "彩虹"},
             {"InverseRainbow", "反向彩虹"}, {"HueLoop", "色调环"}};

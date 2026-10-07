@@ -26,37 +26,52 @@ constexpr std::array<unsigned char, 3> belowColor{208, 88, 89};
 constexpr std::array<unsigned char, 3> withinColor{97, 179, 113};
 constexpr std::array<unsigned char, 3> aboveColor{83, 114, 188};
 
-AnalysisColorStyle::RampParams GetColorRamp(const ThicknessColorBand& band)
+AnalysisColorStyle::RampMode GetRampMode(ThicknessColorMode mode)
 {
-    AnalysisColorStyle::RampParams params;
-    switch (band.mode) {
-    case ThicknessColorMode::Constant: params.mode = AnalysisColorStyle::RampMode::Constant; break;
-    case ThicknessColorMode::Gradient: params.mode = AnalysisColorStyle::RampMode::Gradient; break;
-    case ThicknessColorMode::Rainbow: params.mode = AnalysisColorStyle::RampMode::Rainbow; break;
-    case ThicknessColorMode::InverseRainbow: params.mode = AnalysisColorStyle::RampMode::InverseRainbow; break;
-    case ThicknessColorMode::HueLoop: params.mode = AnalysisColorStyle::RampMode::HueLoop; break;
-    default: params.mode = static_cast<AnalysisColorStyle::RampMode>(-1); break;
+    switch (mode) {
+    case ThicknessColorMode::Constant: return AnalysisColorStyle::RampMode::Constant;
+    case ThicknessColorMode::Gradient: return AnalysisColorStyle::RampMode::Gradient;
+    case ThicknessColorMode::Rainbow: return AnalysisColorStyle::RampMode::Rainbow;
+    case ThicknessColorMode::InverseRainbow: return AnalysisColorStyle::RampMode::InverseRainbow;
+    case ThicknessColorMode::HueLoop: return AnalysisColorStyle::RampMode::HueLoop;
+    default: return static_cast<AnalysisColorStyle::RampMode>(-1);
     }
+}
+AnalysisColorStyle::RampParams GetColorRamp(const ThicknessDisplay& display)
+{
+    const auto& band=display.colorBand;
+    AnalysisColorStyle::RampParams params;params.mode=GetRampMode(band.mode);
     params.constantColor = band.constantColor; params.lowColor = band.lowColor;
     params.highColor = band.highColor; params.belowColor = band.belowColor;
     params.aboveColor = band.aboveColor;
+    params.opacityRange=display.opacityRange;
+    params.blend=display.style==ThicknessDisplayStyle::Overlay || display.style==ThicknessDisplayStyle::Constant
+        ? AnalysisColorStyle::BlendMode::Constant : display.style==ThicknessDisplayStyle::Inclined
+        ? AnalysisColorStyle::BlendMode::Inclined : display.style==ThicknessDisplayStyle::InverseInclined
+        ? AnalysisColorStyle::BlendMode::InverseInclined : static_cast<AnalysisColorStyle::BlendMode>(-1);
+    for(const auto& segment:band.segments)
+        params.segments.push_back({segment.lower,segment.upper,GetRampMode(segment.mode),segment.lowColor,segment.highColor});
     return params;
 }
 }
 
 bool ThicknessOverlay::GetColorValid(const ThicknessDisplay& display) noexcept
 {
-    return AnalysisColorStyle::GetRampValid(GetColorRamp(display.colorBand))
+    if(display.colorBand.segments.size()>1024)return false;
+    try { return AnalysisColorStyle::GetRampValid(GetColorRamp(display))
         && (display.rangeMode == ThicknessRangeMode::Manual
             || display.rangeMode == ThicknessRangeMode::Result
             || display.rangeMode == ThicknessRangeMode::Histogram);
+    } catch (...) { return false; }
 }
 
 ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &record,
                                                  const SurfaceMeshPayload &mesh,
                                                  const ThicknessDisplay &display)
 {
-    auto lookup = AnalysisColorStyle::BuildRamp(display.range, GetColorRamp(display.colorBand));
+    const auto ramp=GetColorRamp(display);
+    auto lookup = AnalysisColorStyle::BuildRamp(display.range,ramp);
+    const bool hasAlpha=display.style==ThicknessDisplayStyle::Inclined || display.style==ThicknessDisplayStyle::InverseInclined;
     for (int i = 0; i < 256; ++i)
     {
         const double f = double(i) / 255;
@@ -65,7 +80,7 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
         {
             const auto& color = value < record.archive.evaluation.lower ? belowColor
                 : value > record.archive.evaluation.upper ? aboveColor : withinColor;
-            lookup->SetTableValue(i, color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1);
+            lookup->SetTableValue(i, color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, lookup->GetOpacity(value));
         }
     }
     auto points = vtkSmartPointer<vtkPoints>::New();
@@ -73,14 +88,14 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
     auto cells = vtkSmartPointer<vtkCellArray>::New();
     auto colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
     colors->SetName("thickness.display");
-    colors->SetNumberOfComponents(3);
+    colors->SetNumberOfComponents(hasAlpha ? 4 : 3);
     auto ids = vtkSmartPointer<vtkIdTypeArray>::New();
     ids->SetName("thickness.sample");
     auto pathPoints = vtkSmartPointer<vtkPoints>::New();
     pathPoints->SetDataTypeToDouble();
     auto paths = vtkSmartPointer<vtkCellArray>::New();
     auto pathColors = vtkSmartPointer<vtkUnsignedCharArray>::New();
-    pathColors->SetNumberOfComponents(3);
+    pathColors->SetNumberOfComponents(hasAlpha ? 4 : 3);
     auto pathIds = vtkSmartPointer<vtkIdTypeArray>::New();
     pathIds->SetName("thickness.sample");
     const auto &samples = *record.field.samples;
@@ -97,9 +112,10 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
         }
         cells->InsertNextCell(3, triangle);
         ids->InsertNextValue(static_cast<vtkIdType>(i));
-        unsigned char rgb[3]{128, 128, 128};
+        unsigned char rgb[4]{128, 128, 128,255};
         if (sample.validity == ThicknessValidity::Valid)
         {
+            const auto mapped=AnalysisColorStyle::GetMappedColor(*lookup,ramp,sample.thickness);
             if (display.mode == ThicknessDisplayMode::Tolerance)
             {
                 const auto& color = sample.thickness < record.archive.evaluation.lower ? belowColor
@@ -108,11 +124,10 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
             }
             else
             {
-                double color[3]{};
-                lookup->GetColor(sample.thickness, color);
                 for (int k = 0; k < 3; ++k)
-                    rgb[k] = static_cast<unsigned char>(std::lround(255 * color[k]));
+                    rgb[k] = static_cast<unsigned char>(std::lround(255 * mapped[k]));
             }
+            if(hasAlpha)rgb[3]=static_cast<unsigned char>(std::lround(255*mapped[3]));
         }
         colors->InsertNextTypedTuple(rgb);
         if (sample.validity == ThicknessValidity::Valid) {
