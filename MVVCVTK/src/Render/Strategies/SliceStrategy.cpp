@@ -1,4 +1,5 @@
 #include "SliceStrategy.h"
+#include <vtkTextActor.h>
 #include "Render/Contracts/SlicePlaneState.h"
 #include "Render/Support/RenderTextStyle.h"
 #include <vtkCamera.h>

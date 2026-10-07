@@ -11,6 +11,7 @@
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkWindowToImageFilter.h>
+#include <vtkTextActor.h>
 #include <cstring>
 #include <iostream>
 #include <cstdio>
@@ -176,6 +177,14 @@ int main()
     crop->SetOperation(operation,{-5,5,-5,5,-5,5});crop->SetOverlayState({{0,0,0}});
     crop->AttachRenderer(renderer);Capture(renderer,"RenderParity-CylinderSlice.png");
     Check(renderer->GetViewProps()->GetNumberOfItems()==2,"crop owns its slice section and dimension label");
+    bool hasDimensionOnly=false;
+    renderer->GetViewProps()->InitTraversal();
+    while(auto* prop=renderer->GetViewProps()->GetNextProp()) if(auto* text=vtkTextActor::SafeDownCast(prop)) {
+        const std::string label=text->GetInput();
+        hasDimensionOnly=label.find(u8"裁剪")==std::string::npos
+            && label.find(u8"半径")!=std::string::npos && label.find("mm")!=std::string::npos;
+    }
+    Check(hasDimensionOnly,"geometry annotations keep dimensions and units without business titles");
     crop->DetachRenderer(renderer);Check(renderer->GetViewProps()->GetNumberOfItems()==0,"crop annotations leave no residue");
     return failures?1:0;
 }
