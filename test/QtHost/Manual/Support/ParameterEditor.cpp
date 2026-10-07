@@ -43,6 +43,8 @@ QJsonValue Shape(const QString& key)
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
     if (key == "colorRGBA") return QJsonArray{1,1,1,1};
+    if (key == "constantColor" || key == "lowColor" || key == "highColor"
+        || key == "belowColor" || key == "aboveColor") return QJsonArray{0.7,0.7,0.7};
     if (key == "boxToSource") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (key == "transfer") return QJsonObject{{"colorNodes", QJsonArray{}}, {"opacityNodes", QJsonArray{}}};
     if (key == "grayPair") return QJsonObject{{"sideA", QJsonArray{-1.0, 0.0}}, {"sideB", QJsonArray{1.0, 2.0}}};
@@ -81,6 +83,8 @@ QString Component(const QString& key, int index, int size)
     if (key == "colorNodes") return QStringList{"灰度", "红", "绿", "蓝"}.value(index);
     if (key == "opacityNodes") return index == 0 ? "灰度" : "透明度";
     if (key == "colorRGBA") return QStringList{"红", "绿", "蓝", "透明度"}.value(index);
+    if (key == "constantColor" || key == "lowColor" || key == "highColor"
+        || key == "belowColor" || key == "aboveColor") return QStringList{"红（0～1）", "绿（0～1）", "蓝（0～1）"}.value(index);
     if (key == "centerIndex") return QString("截面轴 %1").arg(index+1);
     if (size == 6) return QStringList{"X 最小", "X 最大", "Y 最小", "Y 最大", "Z 最小", "Z 最大"}.value(index);
     if (size == 3) return QStringList{"X", "Y", "Z"}.value(index);
@@ -122,6 +126,18 @@ bool ParameterEditor::GetFieldApplicable(const QString& key) const
     if (m_key.isEmpty() && m_module == "Surface" && key == "seedModelPoint") {
         const auto selection = m_fields.find("componentSelection");
         return selection != m_fields.end() && selection->second->GetValue() == "Seeded";
+    }
+    if (m_key.isEmpty() && (m_module == "Wall" || m_module == "Gap") && m_action == "SetDisplay") {
+        const auto field = [&](const QString& name) {
+            const auto found = m_fields.find(name);
+            return found == m_fields.end() ? QString() : found->second->GetValue().toString();
+        };
+        if (m_module == "Wall" && field("mode") == "Tolerance"
+            && (key == "palette" || key == "constantColor" || key == "lowColor" || key == "highColor"
+                || key == "belowColor" || key == "aboveColor")) return false;
+        if (key == "range") return field("rangeMode") == "Manual" || field("rangeMode") == "SelectedInterval";
+        if (key == "constantColor") return field("palette") == "Constant";
+        if (key == "lowColor" || key == "highColor") return field("palette") == "Gradient";
     }
     return true;
 }

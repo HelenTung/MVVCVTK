@@ -680,7 +680,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                 const auto port = m_views->GetOverlayPort(view.id);
                 if (!port)
                     throw std::runtime_error("Overlay port unavailable.");
-                auto overlay = std::make_shared<AlignmentOverlay>();
+                auto overlay = std::make_shared<AlignmentOverlay>(recipe->recipe.method);
                 overlay->SetInputData(poly);
                 next.push_back({port, overlay});
                 if (!port->AttachOverlay(overlay))

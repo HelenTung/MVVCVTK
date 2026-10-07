@@ -79,6 +79,52 @@ int main()
     const auto display=GapDisplayData::Build(image,{a,c},stopping);
     Check(display && display->labels->GetNumberOfTableValues()==3,"sparse IDs allocate by region count");
     if (display) {
+        for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
+                 GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
+            GapDisplayParams params; params.mode = mode;
+            const auto colored = GapDisplayData::CreateColors(*display, params);
+            Check(colored && colored->mesh == display->mesh && colored->labels->GetNumberOfTableValues() == 3
+                && colored->params.range == std::array<double,2>{.5,3},
+                "every palette keeps sparse IDs, display topology and data-derived volume range");
+            if (!colored) continue;
+            for (const auto& region : {a,c}) {
+                const auto* expected = colored->volumes->MapValue(region.volumeMM3);
+                const auto* actual = colored->labels->MapValue(region.id);
+                Check(std::equal(expected, expected + 4, actual),
+                    "legend and exact sparse-label mapping use identical colors");
+            }
+            vtkNew<vtkRenderer> colorRenderer;
+            auto meshColor = std::make_shared<GapMeshOverlayStrategy>(colored);
+            auto sliceColor = std::make_shared<GapSliceOverlayStrategy>(Orientation::Top_down, colored);
+            meshColor->SetInputData(colored->mesh); sliceColor->SetInputData(image);
+            meshColor->AttachRenderer(colorRenderer); sliceColor->AttachRenderer(colorRenderer);
+            bool hasMeshColor=false, hasSliceColor=false;
+            colorRenderer->GetViewProps()->InitTraversal();
+            while (auto* prop = colorRenderer->GetViewProps()->GetNextProp()) {
+                if (auto* actor = vtkActor::SafeDownCast(prop)) {
+                    auto* mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+                    hasMeshColor |= mapper && mapper->GetLookupTable() == colored->labels;
+                }
+                if (auto* slice = vtkImageSlice::SafeDownCast(prop))
+                    hasSliceColor |= slice->GetProperty()->GetLookupTable() == colored->labels;
+            }
+            Check(hasMeshColor && hasSliceColor, "2D and 3D bind the same selected palette");
+            meshColor->DetachRenderer(colorRenderer); sliceColor->DetachRenderer(colorRenderer);
+            Check(colorRenderer->GetViewProps()->GetNumberOfItems()==0, "selected palette releases all owned props");
+        }
+        GapDisplayParams selected; selected.rangeMode = GapRangeMode::SelectedInterval; selected.range = {.75,2.75};
+        const auto interval = GapDisplayData::CreateColors(*display, selected);
+        Check(interval && interval->params.range == selected.range
+            && interval->labels->MapValue(a.id)[2] > interval->labels->MapValue(a.id)[0]
+            && interval->labels->MapValue(c.id)[0] > interval->labels->MapValue(c.id)[2],
+            "selected interval preserves actual values and distinguishes below/above range colors");
+        selected.range = {3,1};
+        Check(!GapDisplayData::CreateColors(*display, selected), "invalid interval has no display candidate");
+        Check(std::equal(before.begin(),before.end(),original), "all palette modes leave labels byte-identical");
+        double wallLow[3],wallHigh[3]; thickness->GetColor(0,wallLow); thickness->GetColor(5,wallHigh);
+        Check(thickness->GetRange()[0]==0 && thickness->GetRange()[1]==5
+            && std::equal(wallLow,wallLow+3,low) && std::equal(wallHigh,wallHigh+3,high),
+            "gap palette and range changes do not change wall colors or its independent range");
         const auto* background=display->labels->MapValue(0);
         const auto* first=display->labels->MapValue(60001);
         const auto* second=display->labels->MapValue(33554433);

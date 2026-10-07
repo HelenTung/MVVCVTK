@@ -110,6 +110,9 @@ public:
 
     bool StartView(GapViewRequest request, std::function<void(bool)> onComplete);
     bool SwitchOverlay();
+    bool SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay);
+    GapDisplayParams GetDisplayParams() const
+    { return GetViewThread() && m_displayData ? m_displayData->params : GapDisplayParams{}; }
     bool ExitView();
     void ClearView();
     bool GetViewOn() const;
@@ -269,7 +272,8 @@ private:
     void SetAnalysisState(GapAnalysisState state);
 
     bool SetOverlayOff() noexcept;
-    bool SetStoredView();
+    bool SetStoredView(std::shared_ptr<const GapDisplayData> display,
+        const std::function<bool()>& acceptDisplay = {});
     bool ExitViewState();
     void ClearDisplayState();
     bool SetViewThread();
@@ -653,6 +657,16 @@ bool GapAnalysisService::StartView(
 bool GapAnalysisService::SwitchOverlay()
 {
     return m_impl->SwitchOverlay();
+}
+
+bool GapAnalysisService::SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay)
+{
+    return m_impl->SetDisplay(params, std::move(acceptDisplay));
+}
+
+GapDisplayParams GapAnalysisService::GetDisplayParams() const
+{
+    return m_impl->GetDisplayParams();
 }
 
 bool GapAnalysisService::ExitView()
@@ -1087,7 +1101,23 @@ bool GapAnalysisService::Impl::SwitchOverlay() {
         return true;
     }
 
-    return SetStoredView();
+    return SetStoredView(m_displayData);
+}
+
+bool GapAnalysisService::Impl::SetDisplay(const GapDisplayParams& params,
+    std::function<bool()> acceptDisplay)
+{
+    if (!GetViewThread() || m_isExitPending || !m_displayData
+        || m_viewPhase.load() != GapViewPhase::Consumed
+        || !GapDisplayData::GetParamsValid(params)) return false;
+    try {
+        auto candidate = GapDisplayData::CreateColors(*m_displayData, params);
+        if (!candidate) return false;
+        if (m_isOverlayOn) return SetStoredView(std::move(candidate), acceptDisplay);
+        if (acceptDisplay && !acceptDisplay()) return false;
+        m_displayData = std::move(candidate);
+        return true;
+    } catch (...) { return false; }
 }
 
 bool GapAnalysisService::Impl::ExitView() {
@@ -1258,7 +1288,7 @@ bool GapAnalysisService::Impl::SetCommittedView(
     bool isDisplayed = m_displayData != nullptr;
     if (m_isOverlayOn && isDisplayed) {
         try {
-            isDisplayed = SetStoredView();
+            isDisplayed = SetStoredView(m_displayData);
         }
         catch (...) {
             SetOverlayOff();
@@ -1443,8 +1473,9 @@ bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
     return hasRemoved;
 }
 
-bool GapAnalysisService::Impl::SetStoredView() {
-    if (!m_displayData) return false;
+bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayData> display,
+    const std::function<bool()>& acceptDisplay) {
+    if (!display) return false;
     std::vector<GapOverlayBinding> candidate;
     const auto rollback = [&] {
         for (auto item = candidate.rbegin(); item != candidate.rend(); ++item)
@@ -1456,7 +1487,7 @@ bool GapAnalysisService::Impl::SetStoredView() {
         for (const auto& service : m_meshTargets) {
             if (!hasMesh) continue;
             if (!service) { rollback(); return false; }
-            auto overlay = std::make_shared<GapMeshOverlayStrategy>(m_displayData);
+            auto overlay = std::make_shared<GapMeshOverlayStrategy>(display);
             overlay->SetInputData(m_displayVoidMesh);
             candidate.push_back({service, overlay});
             if (!service->AttachOverlay(overlay)) { rollback(); return false; }
@@ -1464,15 +1495,17 @@ bool GapAnalysisService::Impl::SetStoredView() {
         for (const auto& target : m_sliceTargets) {
             if (!hasLabels) continue;
             if (!target.second) { rollback(); return false; }
-            auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, m_displayData);
+            auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, display);
             overlay->SetInputData(m_displayLabelImage);
             candidate.push_back({target.second, overlay});
             if (!target.second->AttachOverlay(overlay)) { rollback(); return false; }
         }
+        if (acceptDisplay && !acceptDisplay()) { rollback(); return false; }
     } catch (...) { rollback(); return false; }
     // 新目标全部挂接成功，才清退本 Feature 的旧绑定。
     SetOverlayOff();
     m_displayOverlayBindings.swap(candidate);
+    m_displayData = std::move(display);
     return !m_displayOverlayBindings.empty() || !m_displayData->hasRegions;
 }
 

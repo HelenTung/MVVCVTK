@@ -8,7 +8,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     if (!hasInput && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
-    if (module == "Gap" && action == "Overlay" && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
+    if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
     if (module == "Part" && (action == "SetState" || action == "Highlight" || action == "ClearHighlight" || action == "EditSelected" || action == "Visibility") && !s["hasCurrentParts"].toBool()) return "请先完成当前输入的零件分割。";
     if (module == "PartEdit") {
         if (!s["hasCurrentParts"].toBool()) return "请先在零件分割页生成当前输入的有效目录。";

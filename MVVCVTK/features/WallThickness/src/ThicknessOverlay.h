@@ -21,6 +21,7 @@ struct ThicknessDisplayData final
 class ThicknessOverlay final : public FeatureOverlayBase
 {
   public:
+    static bool GetColorValid(const ThicknessDisplay& display) noexcept;
     static ThicknessDisplayData BuildData(const ThicknessData::Record &record,
                                           const SurfaceMeshPayload &mesh,
                                           const ThicknessDisplay &display);

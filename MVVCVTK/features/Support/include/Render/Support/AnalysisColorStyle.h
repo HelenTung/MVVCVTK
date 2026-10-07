@@ -14,23 +14,67 @@
 
 // 仅复用显示色带和色标排版；数值范围及业务单位由所属 Feature 决定。
 namespace AnalysisColorStyle {
+enum class RampMode { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
+
+struct RampParams final {
+    RampMode mode = RampMode::InverseRainbow;
+    std::array<double, 3> constantColor{0.70, 0.70, 0.70};
+    std::array<double, 3> lowColor{0.84, 0.294, 0.294};
+    std::array<double, 3> highColor{0.294, 0.294, 0.84};
+    std::array<double, 3> belowColor{0.64, 0.29, 0.78};
+    std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
+};
+
+inline bool GetRampValid(const RampParams& params) noexcept
+{
+    switch (params.mode) {
+    case RampMode::Constant: case RampMode::Gradient: case RampMode::Rainbow:
+    case RampMode::InverseRainbow: case RampMode::HueLoop: break;
+    default: return false;
+    }
+    for (const auto& color : {params.constantColor, params.lowColor, params.highColor,
+             params.belowColor, params.aboveColor})
+        for (const double value : color)
+            if (!std::isfinite(value) || value < 0 || value > 1) return false;
+    return true;
+}
+
 inline vtkSmartPointer<vtkLookupTable> BuildRamp(
-    const std::array<double, 2>& range, bool isLowRed)
+    const std::array<double, 2>& range, const RampParams& params)
 {
     auto table = vtkSmartPointer<vtkLookupTable>::New();
     table->SetNumberOfTableValues(256);
     table->SetTableRange(range.data());
-    table->SetHueRange(isLowRed ? 0.0 : 2.0 / 3.0, isLowRed ? 2.0 / 3.0 : 0.0);
+    const bool isLowRed = params.mode != RampMode::Rainbow;
+    table->SetHueRange(isLowRed ? 0.0 : 2.0 / 3.0,
+        params.mode == RampMode::HueLoop ? 1.0 : isLowRed ? 2.0 / 3.0 : 0.0);
     // 保持原有颜色方向，降低饱和度和亮度；同一 LUT 同时用于结果与色标。
     table->SetSaturationRange(0.65, 0.65);
     table->SetValueRange(0.84, 0.84);
     table->SetRampToLinear();
-    table->SetBelowRangeColor(0.64, 0.29, 0.78, 1);
-    table->SetAboveRangeColor(0.64, 0.29, 0.78, 1);
+    table->SetBelowRangeColor(params.belowColor[0], params.belowColor[1], params.belowColor[2], 1);
+    table->SetAboveRangeColor(params.aboveColor[0], params.aboveColor[1], params.aboveColor[2], 1);
     table->UseBelowRangeColorOn();
     table->UseAboveRangeColorOn();
     table->Build();
+    if (params.mode == RampMode::Constant || params.mode == RampMode::Gradient)
+        for (int index = 0; index < 256; ++index) {
+            std::array<double, 3> color = params.constantColor;
+            if (params.mode == RampMode::Gradient)
+                for (int component = 0; component < 3; ++component)
+                    color[component] = params.lowColor[component]
+                        + (params.highColor[component] - params.lowColor[component]) * index / 255.0;
+            table->SetTableValue(index, color[0], color[1], color[2], 1);
+        }
     return table;
+}
+
+inline vtkSmartPointer<vtkLookupTable> BuildRamp(
+    const std::array<double, 2>& range, bool isLowRed)
+{
+    RampParams params;
+    params.mode = isLowRed ? RampMode::InverseRainbow : RampMode::Rainbow;
+    return BuildRamp(range, params);
 }
 
 inline vtkSmartPointer<vtkDoubleArray> BuildLabels(const std::array<double, 2>& range)

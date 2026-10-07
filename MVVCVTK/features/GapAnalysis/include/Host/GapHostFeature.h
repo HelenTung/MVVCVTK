@@ -11,7 +11,8 @@ enum class GapHostAction {
     None,
     Start,
     Overlay,
-    Exit
+    Exit,
+    SetDisplay
 };
 
 struct GapHostStartParams {
@@ -23,6 +24,7 @@ struct GapHostStartParams {
 struct GapHostRequest {
     GapHostAction action = GapHostAction::None;
     std::optional<GapHostStartParams> start;
+    std::optional<GapDisplayParams> display;
 };
 
 struct GapHostKeys {

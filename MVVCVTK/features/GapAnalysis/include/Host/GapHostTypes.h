@@ -3,6 +3,7 @@
 #include "Data/DataGraphTypes.h"
 
 #include <cstddef>
+#include <array>
 #include <string>
 
 // worker 执行轴；Host 只读取已发布状态，不借此控制 overlay 显示。
@@ -53,6 +54,21 @@ struct GapStatistics final {
     double porosityRatio = 0.0;
 };
 
+enum class GapColorMode { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
+enum class GapRangeMode { Result, SelectedInterval };
+
+// 色带只投影已发布的缺陷体积；不改变标签、筛选、网格和统计。
+struct GapDisplayParams final {
+    GapColorMode mode = GapColorMode::Rainbow;
+    std::array<double, 3> constantColor{0.70, 0.70, 0.70};
+    std::array<double, 3> lowColor{0.294, 0.294, 0.84};
+    std::array<double, 3> highColor{0.84, 0.294, 0.294};
+    std::array<double, 3> belowColor{0.64, 0.29, 0.78};
+    std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
+    GapRangeMode rangeMode = GapRangeMode::Result;
+    std::array<double, 2> range{0, 1};
+};
+
 struct GapHostState final {
     GapAnalysisState analysisState = GapAnalysisState::Idle;
     GapStatistics statistics;
@@ -65,6 +81,8 @@ struct GapHostState final {
     DataRevisionRef resultSet;
     bool isViewActive = false;
     bool isExitPending = false;
+    bool isOverlayVisible = false;
+    GapDisplayParams display;
 };
 
 struct GapHostResult final {

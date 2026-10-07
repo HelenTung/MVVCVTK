@@ -132,6 +132,9 @@ QString GetParameterText(const QString& key)
         {"offset", "区域起始偏移（体素）"}, {"size", "区域尺寸（体素）"}, {"defaultValue", "掩码默认值"},
         {"boxValue", "盒内掩码值"}, {"indexBoxes", "体素索引盒列表"}, {"purpose", "用途"},
         {"mode", "显示模式"}, {"iso", "显示等值阈值"}, {"opacity", "不透明度（0～1）"}, {"quality", "显示质量"},
+        {"palette", "色带类型"}, {"rangeMode", "色标范围来源"}, {"constantColor", "恒定颜色"},
+        {"lowColor", "区间低端颜色"}, {"highColor", "区间高端颜色"},
+        {"belowColor", "低于区间的颜色"}, {"aboveColor", "高于区间的颜色"},
         {"axes", "显示坐标轴"}, {"windowLevel", "窗宽与窗位"}, {"transfer", "颜色与透明度传递函数"},
         {"visibility", "辅助元素可见性"}, {"world", "游标世界坐标"}, {"axis", "作用轴"},
         {"removalMode", "裁剪保留模式"}, {"shape", "裁剪工具"}, {"nodeId", "裁剪节点编号"}, {"documentId", "裁剪文档编号"}, {"inputRoi", "输入区域修订（可选）"}, {"plyPath", "裁剪网格路径（PLY）"},
@@ -222,6 +225,13 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if ((module == "Wall" || module == "Gap") && key == "palette")
+        return {{"Constant", "恒定"}, {"Gradient", "梯度"}, {"Rainbow", "彩虹"},
+            {"InverseRainbow", "反向彩虹"}, {"HueLoop", "色调环"}};
+    if (module == "Wall" && key == "rangeMode") return {{"Result", "当前有效厚度范围"},
+        {"Histogram", "当前厚度直方图范围"}, {"Manual", "选定区间／自定义范围"}};
+    if (module == "Gap" && key == "rangeMode") return {{"Result", "当前缺陷体积范围"},
+        {"SelectedInterval", "选定区间／自定义范围"}};
     if (module == "Surface" && key == "purpose") return {{"Determine", "正式测定"}, {"Preview", "预览"}};
     if (module == "View" && key == "viewScope") {
         auto choices = GetParameterChoices(module, "viewId");

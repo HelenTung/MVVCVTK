@@ -22,6 +22,60 @@ struct GapDisplayData final {
     vtkSmartPointer<vtkLookupTable> labels;
     vtkSmartPointer<vtkLookupTable> volumes;
     bool hasRegions = false;
+    // 稀疏 ID 与其正式体积只供重新着色，切换不重新提取网格或修改标签。
+    std::vector<std::pair<std::int32_t, double>> regionVolumes;
+    std::array<double, 2> resultRange{0, 1};
+    GapDisplayParams params;
+
+    static AnalysisColorStyle::RampParams GetColorRamp(const GapDisplayParams& params)
+    {
+        AnalysisColorStyle::RampParams ramp;
+        switch (params.mode) {
+        case GapColorMode::Constant: ramp.mode = AnalysisColorStyle::RampMode::Constant; break;
+        case GapColorMode::Gradient: ramp.mode = AnalysisColorStyle::RampMode::Gradient; break;
+        case GapColorMode::Rainbow: ramp.mode = AnalysisColorStyle::RampMode::Rainbow; break;
+        case GapColorMode::InverseRainbow: ramp.mode = AnalysisColorStyle::RampMode::InverseRainbow; break;
+        case GapColorMode::HueLoop: ramp.mode = AnalysisColorStyle::RampMode::HueLoop; break;
+        default: ramp.mode = static_cast<AnalysisColorStyle::RampMode>(-1); break;
+        }
+        ramp.constantColor = params.constantColor; ramp.lowColor = params.lowColor;
+        ramp.highColor = params.highColor; ramp.belowColor = params.belowColor;
+        ramp.aboveColor = params.aboveColor;
+        return ramp;
+    }
+
+    static bool GetParamsValid(const GapDisplayParams& params) noexcept
+    {
+        return AnalysisColorStyle::GetRampValid(GetColorRamp(params))
+            && (params.rangeMode == GapRangeMode::Result
+                || (params.rangeMode == GapRangeMode::SelectedInterval
+                    && std::isfinite(params.range[0]) && std::isfinite(params.range[1])
+                    && params.range[0] >= 0 && params.range[0] < params.range[1]));
+    }
+
+    static std::shared_ptr<const GapDisplayData> CreateColors(
+        const GapDisplayData& source, const GapDisplayParams& params)
+    {
+        if (!GetParamsValid(params)) return {};
+        auto result = std::make_shared<GapDisplayData>(source);
+        result->params = params;
+        result->params.range = params.rangeMode == GapRangeMode::Result ? source.resultRange : params.range;
+        result->volumes = AnalysisColorStyle::BuildRamp(result->params.range, GetColorRamp(params));
+        result->labels = vtkSmartPointer<vtkLookupTable>::New();
+        result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
+        result->labels->IndexedLookupOn();
+        result->labels->SetAnnotation(vtkVariant(0), "background");
+        result->labels->SetTableValue(0, 0, 0, 0, 0);
+        result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
+        for (std::size_t index = 0; index < source.regionVolumes.size(); ++index) {
+            const auto& region = source.regionVolumes[index];
+            double rgb[3]; result->volumes->GetColor(region.second, rgb);
+            result->labels->SetAnnotation(vtkVariant(region.first), std::to_string(region.first));
+            result->labels->SetTableValue(static_cast<vtkIdType>(index + 1), rgb[0], rgb[1], rgb[2], 1);
+        }
+        result->labels->Build();
+        return result;
+    }
 
     static std::shared_ptr<const GapDisplayData> Build(vtkImageData* image,
         const std::vector<VoidRegion>& regions, const std::atomic<bool>& isStopping)
@@ -45,7 +99,9 @@ struct GapDisplayData final {
         // 单值结果只扩展颜色映射区间，不改变任何缺陷值。
         if (range[0] == range[1]) range[1] = std::nextafter(range[1],
             std::numeric_limits<double>::infinity());
-        result->volumes = AnalysisColorStyle::BuildRamp(range, false);
+        result->resultRange = range;
+        result->params.range = range;
+        result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(regions.size() + 1));
         result->labels->IndexedLookupOn();
@@ -58,6 +114,7 @@ struct GapDisplayData final {
         for (std::size_t index = 0; index < regions.size(); ++index) {
             if (isStopping.load()) return {};
             const auto& region = regions[index];
+            result->regionVolumes.emplace_back(region.id, region.volumeMM3);
             double rgb[3]; result->volumes->GetColor(region.volumeMM3, rgb);
             result->labels->SetAnnotation(vtkVariant(region.id), std::to_string(region.id));
             result->labels->SetTableValue(static_cast<vtkIdType>(index + 1), rgb[0], rgb[1], rgb[2], 1);

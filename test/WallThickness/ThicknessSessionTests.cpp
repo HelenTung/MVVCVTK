@@ -393,6 +393,31 @@ void TestSession(Acceptance c)
             "Tolerance display rejected.");
     Require(wall->GetResult(completed->result)->samples == before,
             "Display changes numerical buffer.");
+    for (const auto mode : {ThicknessColorMode::Constant, ThicknessColorMode::Gradient,
+             ThicknessColorMode::Rainbow, ThicknessColorMode::InverseRainbow, ThicknessColorMode::HueLoop}) {
+        color.display->mode = ThicknessDisplayMode::Continuous;
+        color.display->rangeMode = ThicknessRangeMode::Result;
+        color.display->colorBand.mode = mode;
+        Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
+            "Color mode switch rejected.");
+        const auto range = wall->GetState().displayRange;
+        Require(range && (*range)[0] == *result->statistics.minimum
+            && (*range)[1] >= *result->statistics.maximum,
+            "Automatic legend range does not follow the valid measured thickness.");
+        Require(wall->GetResult(completed->result)->samples == before
+            && probe->context.data->GetDataGraph().commitId == graphCommit,
+            "Color mode changed formal data or measurement identity.");
+    }
+    color.display->rangeMode = ThicknessRangeMode::Histogram;
+    Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted
+        && wall->GetState().displayRange == std::optional<std::array<double,2>>(c.evaluation.histogramRange),
+        "Histogram legend range does not follow the current evaluation.");
+    const auto previousRange = wall->GetState().displayRange;
+    color.display->colorBand.lowColor[0] = std::numeric_limits<double>::quiet_NaN();
+    Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::InvalidRequest
+        && wall->GetState().displayRange == previousRange
+        && wall->GetResult(completed->result)->samples == before,
+        "Invalid palette must retain the existing result and display range.");
     Require(session.DetachFeature(*wallMount) && session.DetachFeature(*surface) &&
                 session.DetachFeature(*part) && session.DetachFeature(*probe),
             "Public feature detach failed.");

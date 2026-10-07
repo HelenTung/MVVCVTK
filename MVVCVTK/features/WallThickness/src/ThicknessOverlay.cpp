@@ -25,13 +25,38 @@ namespace {
 constexpr std::array<unsigned char, 3> belowColor{208, 88, 89};
 constexpr std::array<unsigned char, 3> withinColor{97, 179, 113};
 constexpr std::array<unsigned char, 3> aboveColor{83, 114, 188};
+
+AnalysisColorStyle::RampParams GetColorRamp(const ThicknessColorBand& band)
+{
+    AnalysisColorStyle::RampParams params;
+    switch (band.mode) {
+    case ThicknessColorMode::Constant: params.mode = AnalysisColorStyle::RampMode::Constant; break;
+    case ThicknessColorMode::Gradient: params.mode = AnalysisColorStyle::RampMode::Gradient; break;
+    case ThicknessColorMode::Rainbow: params.mode = AnalysisColorStyle::RampMode::Rainbow; break;
+    case ThicknessColorMode::InverseRainbow: params.mode = AnalysisColorStyle::RampMode::InverseRainbow; break;
+    case ThicknessColorMode::HueLoop: params.mode = AnalysisColorStyle::RampMode::HueLoop; break;
+    default: params.mode = static_cast<AnalysisColorStyle::RampMode>(-1); break;
+    }
+    params.constantColor = band.constantColor; params.lowColor = band.lowColor;
+    params.highColor = band.highColor; params.belowColor = band.belowColor;
+    params.aboveColor = band.aboveColor;
+    return params;
+}
+}
+
+bool ThicknessOverlay::GetColorValid(const ThicknessDisplay& display) noexcept
+{
+    return AnalysisColorStyle::GetRampValid(GetColorRamp(display.colorBand))
+        && (display.rangeMode == ThicknessRangeMode::Manual
+            || display.rangeMode == ThicknessRangeMode::Result
+            || display.rangeMode == ThicknessRangeMode::Histogram);
 }
 
 ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &record,
                                                  const SurfaceMeshPayload &mesh,
                                                  const ThicknessDisplay &display)
 {
-    auto lookup = AnalysisColorStyle::BuildRamp(display.range, true);
+    auto lookup = AnalysisColorStyle::BuildRamp(display.range, GetColorRamp(display.colorBand));
     for (int i = 0; i < 256; ++i)
     {
         const double f = double(i) / 255;

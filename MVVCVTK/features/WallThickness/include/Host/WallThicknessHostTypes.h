@@ -60,6 +60,20 @@ enum class ThicknessDisplayMode : std::uint8_t
     Tolerance
 };
 
+enum class ThicknessColorMode : std::uint8_t { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
+enum class ThicknessRangeMode : std::uint8_t { Manual, Result, Histogram };
+
+// 仅控制显示颜色；公差模式仍使用其独立的判定颜色。
+struct ThicknessColorBand final
+{
+    ThicknessColorMode mode = ThicknessColorMode::InverseRainbow;
+    std::array<double, 3> constantColor{0.70, 0.70, 0.70};
+    std::array<double, 3> lowColor{0.84, 0.294, 0.294};
+    std::array<double, 3> highColor{0.294, 0.294, 0.84};
+    std::array<double, 3> belowColor{0.64, 0.29, 0.78};
+    std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
+};
+
 struct ThicknessInput final
 {
     DataRevisionRef source, labels, mesh;
@@ -106,6 +120,8 @@ struct ThicknessDisplay final
     double opacity = 1.0;
     bool isVisible = true;
     bool hasLegend = true;
+    ThicknessColorBand colorBand;
+    ThicknessRangeMode rangeMode = ThicknessRangeMode::Manual;
 };
 
 struct ThicknessConfig final
@@ -229,4 +245,5 @@ struct ThicknessState final
     DataRevisionRef result;
     ThicknessStatus status = ThicknessStatus::Unavailable;
     std::optional<std::size_t> selectedSample;
+    std::optional<std::array<double, 2>> displayRange;
 };

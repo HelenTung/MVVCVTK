@@ -713,6 +713,19 @@ void Display()
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto tolerance = display; tolerance.mode = ThicknessDisplayMode::Tolerance;
+    const auto toleranceData = ThicknessOverlay::BuildData(record, *w.mesh, tolerance);
+    tolerance.colorBand.mode = ThicknessColorMode::HueLoop;
+    tolerance.colorBand.constantColor = {0,0,0};
+    const auto alternate = ThicknessOverlay::BuildData(record, *w.mesh, tolerance);
+    auto* toleranceColors = toleranceData.mesh->GetCellData()->GetScalars();
+    auto* alternateColors = alternate.mesh->GetCellData()->GetScalars();
+    bool hasSameTolerance = toleranceColors->GetNumberOfTuples() == alternateColors->GetNumberOfTuples();
+    for (vtkIdType index = 0; hasSameTolerance && index < toleranceColors->GetNumberOfTuples(); ++index) {
+        double first[3], second[3]; toleranceColors->GetTuple(index,first); alternateColors->GetTuple(index,second);
+        hasSameTolerance = std::equal(first,first+3,second);
+    }
+    Check(hasSameTolerance, "continuous palette options do not alter tolerance or invalid colors");
     auto* pathIds=vtkIdTypeArray::SafeDownCast(prepared.paths->GetCellData()->GetArray("thickness.sample"));
     auto* pathColors=prepared.paths->GetCellData()->GetScalars();
     auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
