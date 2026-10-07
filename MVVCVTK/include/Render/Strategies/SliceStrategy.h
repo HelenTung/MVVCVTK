@@ -16,6 +16,8 @@
 #include <array>
 #include <cstdint>
 
+class vtkTextActor;
+
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
 class SliceStrategy : public BaseVisualStrategy {
@@ -58,6 +60,7 @@ private:
     void SetWorldBounds(const double bounds[6],
         const std::array<double, 16>& modelMatrix,
         double worldBounds[6]) const; // 把局部数据包围盒映射到当前模型变换后的世界包围盒
+    void SetCoordinateText(const std::array<double, 3>& worldOrigin);
 
     // 非拥有 renderer 弱引用，仅供相机和 clipping range 更新；renderer 销毁后自动为空。
     vtkWeakPointer<vtkRenderer> m_renderer;
@@ -67,6 +70,8 @@ private:
     vtkSmartPointer<Mapper> m_mapper;
     // 持久切片平面；SetVisualState 以 world cursor 更新原点，以 orientation 对应主轴更新法线。
     vtkSmartPointer<vtkPlane> m_slicePlane;
+    // 仅表示当前场景切片平面；不将 world 数值冒称为输入影像 LPS/RAS 坐标。
+    vtkSmartPointer<vtkTextActor> m_coordinateText;
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
     vtkSmartPointer<vtkDataObject> m_lastInput;
     // 构造期切片轴：Top_down=Z、Front_back=Y、Left_right=X，同时决定相机和十字线配色。

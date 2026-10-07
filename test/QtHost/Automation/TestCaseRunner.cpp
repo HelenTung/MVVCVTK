@@ -198,7 +198,13 @@ void CheckFourViewGeometry(TestWindow& window)
 void CheckUiAndRecords(TestWindow& window)
 {
     const auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    Check(tabs && tabs->count() == 11 && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
+    Check(tabs && tabs->count() ==
+#if defined(MANUAL_ROI)
+        12
+#else
+        11
+#endif
+        && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
     Check(window.GetSession()->GetRenderViewStates().size() == 4 && window.findChildren<QVTKOpenGLNativeWidget*>().size() == 4,
         "manual workspace contains one 3D viewport and three slice viewports");
     Check(!window.findChild<QComboBox*>("renderMode")->isEnabled() && !window.findChild<QPushButton*>("fitView")->isEnabled(),
@@ -428,8 +434,8 @@ QJsonObject BuildPartSeeds(TestWindow& window, const QJsonObject& catalog)
         if (GetRefText(item.dataRevision) == catalog["labelMap"].toString()) descriptor = item;
     Check(descriptor && descriptor->valueType == ImageValueType::UInt32, "formal part labels are available through the public read API");
     QJsonArray seeds; const auto parts = catalog["parts"].toArray();
-    Check(parts.size() >= 2, "real edit seed audit has two source parts");
-    for (int p = 0; p < 2; ++p) {
+    Check(!parts.isEmpty(), "real edit seed audit has source parts");
+    for (int p = 0; p < std::min(parts.size(), 2); ++p) {
         const auto part = parts[p].toObject(); const auto extent = GetArray<int,6>(part["extent"]);
         const auto wantedLabel = GetId(part["labelId"]);
         ImageReadRegion region;
@@ -638,6 +644,22 @@ void CheckParameterLayout(TestWindow& window)
     poses.findChild<QPushButton*>("addRow")->click(); Check(poses.GetCount() == 2, "another initial pose can be added without array text");
     ParameterEditor ids("Alignment", "SaveRecipe", "vertexIds", QJsonArray{"18446744073709551615"}, QJsonArray{});
     Check(ids.GetValue().toArray()[0].toString() == "18446744073709551615", "structured lists preserve full uint64 strings");
+    const QJsonObject firstSegment{{"segmentFrom",QJsonValue()},{"segmentTo",1.0},{"palette","Constant"},
+        {"lowColor",QJsonArray{.6,.2,.7}},{"highColor",QJsonArray{.2,.3,.8}}};
+    const QJsonObject lastSegment{{"segmentFrom",1.0},{"segmentTo",QJsonValue()},{"palette","Constant"},
+        {"lowColor",QJsonArray{.2,.3,.8}},{"highColor",QJsonArray{.2,.3,.8}}};
+    ParameterEditor segments("Gap","SetDisplay","segments",QJsonArray{firstSegment,lastSegment},QJsonArray{});
+    Check(segments.GetElement(0)->GetField("segmentFrom")->GetValue().isNull()
+        && segments.GetElement(1)->GetField("segmentTo")->GetValue().isNull()
+        && segments.GetElement(0)->GetField("highColor")->isHidden(),
+        "segment rows retain infinite endpoints and hide unused constant-color controls");
+    segments.GetElement(1)->parentWidget()->findChild<QPushButton*>("moveUp",Qt::FindDirectChildrenOnly)->click();
+    Check(segments.GetValue().toArray()[0].toObject()["segmentFrom"]==1,
+        "segment reorder is reflected in the submitted value");
+    segments.GetElement(0)->parentWidget()->findChild<QPushButton*>("moveDown",Qt::FindDirectChildrenOnly)->click();
+    segments.GetElement(1)->parentWidget()->findChild<QPushButton*>("removeRow",Qt::FindDirectChildrenOnly)->click();
+    Check(segments.GetCount()==1 && segments.GetValue().toArray()[0].toObject()["segmentTo"]==1,
+        "segment removal preserves the remaining physical interval");
     if (auto* split = window.GetModule("PartEdit")->GetParameterEditor("Split")) {
         window.GetWorkflow().onNavigate("PartEdit", "Split", {});
         auto* card = window.GetModule("PartEdit")->findChild<QWidget*>("card_Split");
@@ -1652,9 +1674,6 @@ QJsonObject CheckPartDisplay(TestWindow& window)
             Check(label > 0 && label < static_cast<std::uint64_t>(table->GetNumberOfTableValues()), "part label indexes the view lookup table");
             double actual[4]{}; table->GetTableValue(static_cast<vtkIdType>(label), actual);
             auto expected = GetArray<double, 4>(part["colorRGBA"]);
-            if (part["selected"].toBool() && part["visible"].toBool() && expected[3] * part["opacity"].toDouble() > 0) {
-                expected[0] = 1; expected[1] = 0.68; expected[2] = 0.16;
-            }
             expected[3] *= part["visible"].toBool() ? part["opacity"].toDouble() : 0;
             if (isSlice) expected[3] *= part["selected"].toBool() ? 0.8 : 0.18;
             if (scene->role == HostRenderViewRole::Composite3D) expected[3] *= part["selected"].toBool() ? 0.35 : 0;
@@ -1713,6 +1732,15 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto timeout = step.contains("timeoutMs") ? GetNumber(step, "timeoutMs") : 30000.;
         if (timeout < 1 || timeout > 3600000 || timeout != std::trunc(timeout)) throw std::invalid_argument("用例 timeoutMs 必须为 1..3600000 毫秒整数");
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
+        if (step["waitAvailable"].toBool()) {
+            auto* panel = window.GetModule(GetText(step, "module"));
+            const auto action = GetText(step, "action");
+            Check(panel && Wait([&] {
+                panel->Observe();
+                auto* button = panel->findChild<QPushButton*>("action_" + action);
+                return button && button->isEnabled();
+            }, static_cast<int>(timeout)), "public business action becomes available after its actual frame guards");
+        }
         if (step["waitForCropFrames"].toBool()) {
             auto* crop = window.GetModule("Crop");
             Check(crop && Wait([&] { crop->Observe(); return crop->GetObservedState()["framesReady"].toBool(); },

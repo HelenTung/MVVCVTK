@@ -1,4 +1,5 @@
 #include "SurfaceOverlayStrategy.h"
+#include "Render/Support/SliceContourPlane.h"
 
 #include <vtkActor.h>
 #include <vtkCutter.h>
@@ -28,24 +29,30 @@ bool SetNormalized(std::array<double, 3>& normal)
     return true;
 }
 
-void SetActorStyle(vtkActor& actor)
+void SetActorStyle(vtkActor& actor, bool isSlice, bool isPreview)
 {
-    actor.GetProperty()->SetColor(1.0, 0.55, 0.10);
-    actor.GetProperty()->SetOpacity(0.92);
-    actor.GetProperty()->SetLighting(false);
+    actor.GetProperty()->SetColor(isPreview ? 0.15 : isSlice ? 1.0 : 0.83,
+        isPreview ? 0.85 : isSlice ? 1.0 : 0.84, isPreview ? 1.0 : isSlice ? 1.0 : 0.86);
+    // 直接参考的稳定切片预览为黄色；正式轮廓仍为白色。
+    if (isPreview && isSlice) actor.GetProperty()->SetColor(1.0, 1.0, 0.0);
+    actor.GetProperty()->SetOpacity(isSlice ? 1.0 : isPreview ? 0.35 : 0.92);
+    actor.GetProperty()->SetLighting(!isSlice && !isPreview);
+    actor.GetProperty()->SetAmbient(0.35);
+    actor.GetProperty()->SetDiffuse(0.65);
+    if (isPreview && !isSlice) actor.GetProperty()->SetRepresentationToWireframe();
     actor.SetPickable(false);
 }
 
 } // namespace
 
-SurfaceOverlayStrategy::SurfaceOverlayStrategy()
+SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
 {
     m_mapper->ScalarVisibilityOff();
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetMapper(m_mapper);
-    SetActorStyle(*m_actor);
+    SetActorStyle(*m_actor, false, isPreview);
     AttachProp(m_actor);
 }
 
@@ -64,7 +71,7 @@ void SurfaceOverlayStrategy::SetOverlayState(
 }
 
 SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
-    std::array<double, 3> normalModel)
+    std::array<double, 3> normalModel, bool isPreview)
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_cutter(vtkSmartPointer<vtkCutter>::New())
     , m_plane(vtkSmartPointer<vtkPlane>::New())
@@ -80,7 +87,7 @@ SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
     m_mapper->SetInputConnection(m_cutter->GetOutputPort());
     m_mapper->ScalarVisibilityOff();
     m_actor->SetMapper(m_mapper);
-    SetActorStyle(*m_actor);
+    SetActorStyle(*m_actor, true, isPreview);
     m_actor->GetProperty()->SetLineWidth(2.0F);
     AttachProp(m_actor);
 }
@@ -96,7 +103,6 @@ void SurfaceSliceOverlayStrategy::SetInputData(
 void SurfaceSliceOverlayStrategy::SetOverlayState(
     const FeatureOverlayState& state)
 {
-    m_plane->SetOrigin(state.cursor.data());
-    m_plane->SetNormal(m_normalModel.data());
+    (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normalModel,state.modelToWorld);
     Set3DPropsTransform(state.modelToWorld);
 }

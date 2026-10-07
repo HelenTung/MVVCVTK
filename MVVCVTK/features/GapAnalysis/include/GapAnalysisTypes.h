@@ -61,6 +61,7 @@ struct VoidRegion {
 class LabelMap3DPayload;
 class SurfaceMeshPayload;
 class RecordTablePayload;
+struct GapDisplayData;
 
 struct GapResultPayloads final {
     std::shared_ptr<const LabelMap3DPayload> labels;
@@ -71,6 +72,8 @@ struct GapResultPayloads final {
 
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
 struct GapAnalysisResult {
+    // worker 准备的私有显示候选，不进入正式 payload 或导出。
+    std::shared_ptr<const GapDisplayData> display;
     // worker 完成所有首次转换；Host 仍遵守 DataGraph 的防御性 snapshot/校验。
     std::shared_ptr<const GapResultPayloads> payloads;
     // 私有内核完成筛选后的原始区域集合。

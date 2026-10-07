@@ -7,6 +7,8 @@
 #include "Interaction/CropCurveWidget.h"
 #include "Interaction/CropPlaneWidget.h"
 #include "Render/CropShaderController.h"
+#include "Render/CropGeometryOverlay.h"
+#include "Render/Contracts/OverlayService.h"
 #include "Routing/CropRouter.h"
 
 #include <vtkMath.h>
@@ -139,6 +141,7 @@ public:
         bool isTargetRebind = false;
         vtkRenderer* nextRenderer = nullptr;
         std::vector<bool> renderRequested;
+        std::vector<CropOverlayTarget> geometryTargets;
     };
 
     struct BuildTask final {
@@ -271,6 +274,22 @@ private:
     std::optional<CropOpItem> BuildBoxOp();
     std::optional<CropOpItem> BuildPlaneOp();
     std::optional<CropOpItem> BuildCurveOp();
+    void SetGeometryViews();
+    void ClearGeometryViews();
+    void SetGeometryTargets(const std::vector<CropOverlayTarget>& targets) {
+        const bool same=targets.size()==m_geometryTargets.size()
+            && std::equal(targets.begin(),targets.end(),m_geometryTargets.begin(),[this](const auto& a,const auto& b) {
+                const auto lease=a.lease.lock();
+                const auto first=a.view ? a.view->GetRenderInputStamp() : std::optional<RenderInputStamp>{};
+                const auto second=b.view ? b.view->GetRenderInputStamp() : std::optional<RenderInputStamp>{};
+                return !a.viewId.empty() && a.viewId==b.viewId && a.role==b.role
+                    && lease && lease==b.lease.lock() && lease->GetIsActive()
+                    && lease->GetIsOwnerThread() && first && second
+                    && *first==GetInputStamp(m_input) && *second==*first;
+            });
+        if(same)return;
+        ClearGeometryViews(); m_geometryTargets=targets;
+    }
     bool GetOpSame(
         const CropOpItem& first,
         const CropOpItem& second) const;
@@ -301,6 +320,12 @@ private:
     std::shared_ptr<FeatureViewService> m_referenceService;
     std::weak_ptr<const FeatureViewLease> m_lease;
     std::vector<TargetBinding> m_targets;
+    struct GeometryBinding final {
+        CropOverlayTarget target;
+        std::shared_ptr<CropGeometryOverlay> overlay;
+    };
+    std::vector<CropOverlayTarget> m_geometryTargets;
+    std::vector<GeometryBinding> m_geometryBindings;
     std::shared_ptr<SourceCommitGate> m_sourceGate=std::make_shared<SourceCommitGate>();
     CropHistory m_tree;
     CropHistoryQueue m_commands;
@@ -513,6 +538,7 @@ bool CropBridge::Impl::StartViewInput(
         m_boxWidget.SetInteractor(request.interactor);
         m_planeWidget.SetInteractor(request.interactor);
         m_curveWidget.SetContext(request.interactor,request.renderer);
+        SetGeometryTargets(request.geometryTargets);
         m_isActive = true;
         try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
         return true;
@@ -555,6 +581,7 @@ bool CropBridge::Impl::StartViewInput(
             true,
             request.renderer
         };
+        m_pendingShader->geometryTargets=request.geometryTargets;
         m_isActive = true;
         try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
         return true;
@@ -580,6 +607,7 @@ bool CropBridge::Impl::StartViewInput(
     }
     m_referenceService = request.referenceService;
     m_targets = std::move(targets);
+    SetGeometryTargets(request.geometryTargets);
     m_boxWidget.SetInteractor(request.interactor);
     m_planeWidget.SetInteractor(request.interactor);
     m_curveWidget.SetContext(request.interactor,request.renderer);
@@ -851,6 +879,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     // Widget 仅存在于 reference renderer；切换成功后通过 service 门铃请求
     // 下一帧，避免依赖 vtkBoxWidget2/vtkImplicitPlaneWidget2 的偶然 Render 副作用。
     if (isEnabled && m_referenceService) {
+        SetGeometryViews();
         (void)m_referenceService->SetRenderNeeded();
     }
     return isEnabled;
@@ -877,6 +906,7 @@ bool CropBridge::Impl::SetCropMode(const CropRemovalMode mode)
 
 void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 {
+    SetGeometryViews();
     if (!GetLeaseReady()) {
         return;
     }
@@ -927,6 +957,7 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 
 void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
 {
+    SetGeometryViews();
     if (!GetLeaseReady()) {
         return;
     }
@@ -980,8 +1011,66 @@ std::optional<CropOpItem> CropBridge::Impl::BuildCurveOp()
     auto operation=m_curveWidget.GetGeometry();operation.removalMode=m_removalMode;
     const auto geometry=CropGeometry::Build(operation);return geometry?std::optional<CropOpItem>{geometry->GetOperation()}:std::nullopt;
 }
+void CropBridge::Impl::ClearGeometryViews()
+{
+    for (const auto& binding:m_geometryBindings) {
+        binding.target.overlays->RemoveOverlay(binding.overlay);
+        try { (void)binding.target.view->SetRenderNeeded(); } catch (...) {}
+    }
+    m_geometryBindings.clear();
+}
+void CropBridge::Impl::SetGeometryViews()
+{
+    if (!m_isActive || !GetLeaseReady()) { ClearGeometryViews(); return; }
+    for (const auto& target:m_geometryTargets) {
+        const auto lease=target.lease.lock();
+        const auto stamp=target.view ? target.view->GetRenderInputStamp() : std::optional<RenderInputStamp>{};
+        if (!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread()
+            || !target.overlays || !stamp || *stamp!=GetInputStamp(m_input)) {
+            ClearGeometryViews(); return;
+        }
+    }
+    const auto operation=m_geometryType==CropShape::Box ? BuildBoxOp()
+        : m_geometryType==CropShape::Plane ? BuildPlaneOp()
+        : std::optional<CropOpItem>{m_curveWidget.GetGeometry()};
+    if (!operation) return;
+    std::vector<GeometryBinding> candidate;
+    const auto rollback=[&candidate] {
+        for (const auto& item:candidate) {
+            item.target.overlays->RemoveOverlay(item.overlay);
+            try { (void)item.target.view->SetRenderNeeded(); } catch (...) {}
+        }
+    };
+    try {
+        if (m_geometryBindings.empty()) {
+            for (const auto& target:m_geometryTargets) {
+                const auto stamp=target.view ? target.view->GetRenderInputStamp() : std::optional<RenderInputStamp>{};
+                if (!target.overlays || !stamp || *stamp!=GetInputStamp(m_input)) {
+                    rollback();
+                    return;
+                }
+                auto overlay=std::make_shared<CropGeometryOverlay>(target.role);
+                overlay->SetOperation(*operation,m_input.inputModelBounds);
+                candidate.push_back({target,overlay});
+                if (!target.overlays->AttachOverlay(overlay)) {
+                    rollback();
+                    return;
+                }
+            }
+            m_geometryBindings=std::move(candidate);
+        }
+        for (const auto& binding:m_geometryBindings) {
+            binding.overlay->SetOperation(*operation,m_input.inputModelBounds);
+            (void)binding.target.view->SetRenderNeeded();
+        }
+    } catch (...) {
+        rollback();
+        ClearGeometryViews();
+    }
+}
 void CropBridge::Impl::OnCurveWidget(CropInteractionPhase phase)
 {
+    SetGeometryViews();
     if(!GetLeaseReady())return;
     if(!m_isActive||(m_geometryType!=CropShape::Sphere&&m_geometryType!=CropShape::Cylinder)||m_removalMode==CropRemovalMode::None) {
         (void)SetInteraction(m_curveSource,false);m_hasDrag=false;m_dragStart.reset();return;
@@ -1138,11 +1227,13 @@ bool CropBridge::Impl::SendShaderCommit()
             }
         }
         (void)ClearInteractions();m_targets=std::move(pending.targets);
+        SetGeometryTargets(pending.geometryTargets);
         m_referenceService=std::move(pending.nextReferenceService);
         m_boxWidget.SetInteractor(pending.nextInteractor);m_planeWidget.SetInteractor(pending.nextInteractor);
         m_curveWidget.SetContext(pending.nextInteractor,pending.nextRenderer);
     }
     m_pendingShader.reset();
+    SetGeometryViews();
     for(const auto& target:m_targets)if(target.service)(void)target.service->SetRenderNeeded();
     if(m_commands.GetIsEmpty())(void)SetInteraction(m_commitSource,false);
     else (void)SendNextOp();
@@ -1498,6 +1589,7 @@ bool CropBridge::Impl::GetTargetsReady() const
 
 bool CropBridge::Impl::SetWidgetActive(const bool isActive)
 {
+    if (!isActive) ClearGeometryViews();
     if(!isActive)(void)ClearInteractions();
     const bool box=m_boxWidget.SetEnabled(isActive&&m_geometryType==CropShape::Box);
     const bool plane=m_planeWidget.SetEnabled(isActive&&m_geometryType==CropShape::Plane);
@@ -1554,6 +1646,8 @@ void CropBridge::Impl::ClearShader()
 
 void CropBridge::Impl::ClearTargets()
 {
+    ClearGeometryViews();
+    m_geometryTargets.clear();
     for (const auto& target : m_targets) {
         if (target.service && target.effect) {
             (void)target.service->DetachRenderEffect(
@@ -1577,6 +1671,7 @@ bool CropBridge::Impl::ExitCrop()
     m_planeWidget.SetEnabled(false);
     m_curveWidget.SetEnabled(false);
     // 已接纳命令继续完成；Exit 只关闭控件和模式编辑权。
+    ClearGeometryViews();
     m_editNode=0;
     if(!m_commands.GetIsEmpty())(void)SetInteraction(m_commitSource,true);
     m_removalMode = CropRemovalMode::None;
@@ -1800,6 +1895,13 @@ bool CropBridge::SwitchCropSphere(){return m_impl->GetLeaseReady()&&m_impl->Swit
 
 bool CropBridge::Impl::RefreshWidgetTransform()
 {
+    for(const auto& binding:m_geometryBindings) {
+        const auto lease=binding.target.lease.lock();
+        const auto stamp=binding.target.view->GetRenderInputStamp();
+        if(!lease || !lease->GetIsActive() || !stamp || *stamp!=GetInputStamp(m_input)) {
+            ClearGeometryViews(); break;
+        }
+    }
     if(!GetLeaseReady()||!m_isActive||(m_geometryType!=CropShape::Sphere&&m_geometryType!=CropShape::Cylinder))return false;
     const auto matrix=m_referenceService->GetModelToWorld();
     if(matrix&&m_curveWidget.GetTransformSame(*matrix))return false;

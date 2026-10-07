@@ -1,5 +1,7 @@
 #include "ThicknessOverlay.h"
 #include "Render/Contracts/SlicePlaneState.h"
+#include "Render/Support/AnalysisColorStyle.h"
+#include "Render/Support/SliceContourPlane.h"
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkCellData.h>
@@ -19,41 +21,74 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+constexpr std::array<unsigned char, 3> belowColor{208, 88, 89};
+constexpr std::array<unsigned char, 3> withinColor{97, 179, 113};
+constexpr std::array<unsigned char, 3> aboveColor{83, 114, 188};
+
+AnalysisColorStyle::RampMode GetRampMode(ThicknessColorMode mode)
+{
+    switch (mode) {
+    case ThicknessColorMode::Constant: return AnalysisColorStyle::RampMode::Constant;
+    case ThicknessColorMode::Gradient: return AnalysisColorStyle::RampMode::Gradient;
+    case ThicknessColorMode::Rainbow: return AnalysisColorStyle::RampMode::Rainbow;
+    case ThicknessColorMode::InverseRainbow: return AnalysisColorStyle::RampMode::InverseRainbow;
+    case ThicknessColorMode::HueLoop: return AnalysisColorStyle::RampMode::HueLoop;
+    default: return static_cast<AnalysisColorStyle::RampMode>(-1);
+    }
+}
+AnalysisColorStyle::RampParams GetColorRamp(const ThicknessDisplay& display)
+{
+    const auto& band=display.colorBand;
+    AnalysisColorStyle::RampParams params;params.mode=GetRampMode(band.mode);
+    params.constantColor = band.constantColor; params.lowColor = band.lowColor;
+    params.highColor = band.highColor; params.belowColor = band.belowColor;
+    params.aboveColor = band.aboveColor;
+    params.opacityRange=display.opacityRange;
+    params.blend=display.style==ThicknessDisplayStyle::Overlay || display.style==ThicknessDisplayStyle::Constant
+        ? AnalysisColorStyle::BlendMode::Constant : display.style==ThicknessDisplayStyle::Inclined
+        ? AnalysisColorStyle::BlendMode::Inclined : display.style==ThicknessDisplayStyle::InverseInclined
+        ? AnalysisColorStyle::BlendMode::InverseInclined : static_cast<AnalysisColorStyle::BlendMode>(-1);
+    for(const auto& segment:band.segments)
+        params.segments.push_back({segment.lower,segment.upper,GetRampMode(segment.mode),segment.lowColor,segment.highColor});
+    return params;
+}
+}
+
+bool ThicknessOverlay::GetColorValid(const ThicknessDisplay& display) noexcept
+{
+    if(display.colorBand.segments.size()>1024)return false;
+    try { return AnalysisColorStyle::GetRampValid(GetColorRamp(display))
+        && (display.rangeMode == ThicknessRangeMode::Manual
+            || display.rangeMode == ThicknessRangeMode::Result
+            || display.rangeMode == ThicknessRangeMode::Histogram);
+    } catch (...) { return false; }
+}
+
 ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &record,
                                                  const SurfaceMeshPayload &mesh,
                                                  const ThicknessDisplay &display)
 {
-    auto lookup = vtkSmartPointer<vtkLookupTable>::New();
-    lookup->SetNumberOfTableValues(256);
-    lookup->SetRange(display.range[0], display.range[1]);
-    lookup->Build();
+    const auto ramp=GetColorRamp(display);
+    auto lookup = AnalysisColorStyle::BuildRamp(display.range,ramp);
+    const bool hasAlpha=display.style==ThicknessDisplayStyle::Inclined || display.style==ThicknessDisplayStyle::InverseInclined;
     for (int i = 0; i < 256; ++i)
     {
         const double f = double(i) / 255;
         const double value = display.range[0] + f * (display.range[1] - display.range[0]);
         if (display.mode == ThicknessDisplayMode::Tolerance)
         {
-            const bool low = value<record.archive.evaluation.lower, high = value> record.archive
-                                 .evaluation.upper;
-            lookup->SetTableValue(i,
-                                  low    ? 0.9
-                                  : high ? 0.1
-                                         : 0.2,
-                                  low    ? 0.1
-                                  : high ? 0.3
-                                         : 0.8,
-                                  high ? 0.9 : 0.1, 1);
+            const auto& color = value < record.archive.evaluation.lower ? belowColor
+                : value > record.archive.evaluation.upper ? aboveColor : withinColor;
+            lookup->SetTableValue(i, color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, lookup->GetOpacity(value));
         }
-        else
-            lookup->SetTableValue(i, std::min(1.0, 2 * f), 1 - std::abs(2 * f - 1),
-                                  std::min(1.0, 2 * (1 - f)), 1);
     }
     auto points = vtkSmartPointer<vtkPoints>::New();
     points->SetDataTypeToDouble();
     auto cells = vtkSmartPointer<vtkCellArray>::New();
     auto colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
     colors->SetName("thickness.display");
-    colors->SetNumberOfComponents(3);
+    colors->SetNumberOfComponents(hasAlpha ? 4 : 3);
     auto ids = vtkSmartPointer<vtkIdTypeArray>::New();
     ids->SetName("thickness.sample");
     const auto &samples = *record.field.samples;
@@ -70,26 +105,22 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
         }
         cells->InsertNextCell(3, triangle);
         ids->InsertNextValue(static_cast<vtkIdType>(i));
-        unsigned char rgb[3]{128, 128, 128};
+        unsigned char rgb[4]{128, 128, 128,255};
         if (sample.validity == ThicknessValidity::Valid)
         {
+            const auto mapped=AnalysisColorStyle::GetMappedColor(*lookup,ramp,sample.thickness);
             if (display.mode == ThicknessDisplayMode::Tolerance)
             {
-                const bool low =
-                    sample
-                        .thickness<record.archive.evaluation.lower, high = sample.thickness>
-                            record.archive.evaluation.upper;
-                rgb[0] = low ? 230 : high ? 26 : 51;
-                rgb[1] = low ? 26 : high ? 77 : 204;
-                rgb[2] = high ? 230 : 26;
+                const auto& color = sample.thickness < record.archive.evaluation.lower ? belowColor
+                    : sample.thickness > record.archive.evaluation.upper ? aboveColor : withinColor;
+                std::copy(color.begin(), color.end(), rgb);
             }
             else
             {
-                double color[3]{};
-                lookup->GetColor(sample.thickness, color);
                 for (int k = 0; k < 3; ++k)
-                    rgb[k] = static_cast<unsigned char>(std::lround(255 * color[k]));
+                    rgb[k] = static_cast<unsigned char>(std::lround(255 * mapped[k]));
             }
+            if(hasAlpha)rgb[3]=static_cast<unsigned char>(std::lround(255*mapped[3]));
         }
         colors->InsertNextTypedTuple(rgb);
     }
@@ -138,28 +169,34 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_actor->GetProperty()->SetOpacity(display.opacity);
     m_actor->GetProperty()->SetLineWidth(2);
     m_actor->SetVisibility(display.isVisible);
+    if (m_isSlice) {
+        auto contourMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        contourMapper->SetInputConnection(m_cutter->GetOutputPort());
+        contourMapper->ScalarVisibilityOff();
+        m_contourActor = vtkSmartPointer<vtkActor>::New();
+        m_contourActor->SetMapper(contourMapper);
+        m_contourActor->GetProperty()->SetColor(1, 1, 1);
+        m_contourActor->GetProperty()->LightingOff();
+        m_contourActor->GetProperty()->SetLineWidth(4);
+        m_contourActor->PickableOff();
+        m_contourActor->SetVisibility(display.isVisible);
+        AttachProp(m_contourActor);
+    }
     m_selectionActor->SetMapper(m_selectionMapper);
     m_selectionActor->PickableOff();
     m_selectionActor->GetProperty()->SetColor(1, 1, 1);
     m_selectionActor->GetProperty()->SetLineWidth(3);
+    m_selectionActor->GetProperty()->SetPointSize(8);
+    m_selectionActor->GetProperty()->RenderPointsAsSpheresOn();
+    m_selectionMapper->SetResolveCoincidentTopologyToPolygonOffset();
+    m_selectionMapper->SetRelativeCoincidentTopologyPointOffsetParameter(-4);
     m_selectionActor->GetProperty()->LightingOff();
     m_selectionActor->VisibilityOff();
     m_legend->SetLookupTable(data.lookup);
-    m_legend->SetNumberOfLabels(5);
     const std::string title =
-        std::string(display.mode == ThicknessDisplayMode::Tolerance ? "Thickness tol." : "Thickness") +
-        (unit == ThicknessUnit::Millimeter ? "\n[mm]" : "\n[m]");
-    m_legend->SetTitle(title.c_str());
-    m_legend->SetWidth(0.18);
-    m_legend->SetHeight(0.65);
-    m_legend->SetPosition(0.81, 0.15);
-    // 在宽三维工作区中使用稳定字号，不让色标文字随整个 viewport 放大。
-    m_legend->SetMaximumWidthInPixels(120);
-    m_legend->SetMaximumHeightInPixels(320);
-    m_legend->SetUnconstrainedFontSize(true);
-    for (auto* text : {m_legend->GetTitleTextProperty(), m_legend->GetLabelTextProperty(), m_legend->GetAnnotationTextProperty()}) {
-        text->SetFontSize(13); text->BoldOff(); text->ItalicOff(); text->ShadowOff();
-    }
+        std::string(display.mode == ThicknessDisplayMode::Tolerance ? u8"壁厚公差" : u8"壁厚") +
+        (unit == ThicknessUnit::Millimeter ? " [mm]" : " [m]");
+    AnalysisColorStyle::SetLegend(*m_legend, title.c_str());
     m_legend->SetVisibility(display.isVisible && display.hasLegend);
     m_invalidLegend = vtkSmartPointer<vtkLegendBoxActor>::New();
     auto symbolPoints = vtkSmartPointer<vtkPoints>::New();
@@ -179,11 +216,14 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     symbol->GetCellData()->SetScalars(symbolColor);
     double textColor[3]{1, 1, 1};
     m_invalidLegend->SetNumberOfEntries(1);
-    m_invalidLegend->SetEntry(0, symbol, "Invalid / unmeasured", textColor);
+    m_invalidLegend->SetEntry(0, symbol, u8"无效/未测", textColor);
     m_invalidLegend->ScalarVisibilityOn();
-    m_invalidLegend->SetPosition(0.64, 0.02);
-    m_invalidLegend->SetPosition2(0.34, 0.035);
+    // 与左下方向轴和右下标尺分开，限制自动排版后的文字高度。
+    m_invalidLegend->SetPosition(0.25, 0.06);
+    m_invalidLegend->SetPosition2(0.26, 0.04);
+    m_invalidLegend->SetPadding(0);
     m_invalidLegend->GetEntryTextProperty()->SetFontSize(12);
+    RenderTextStyle::SetFont(*m_invalidLegend->GetEntryTextProperty());
     m_invalidLegend->GetEntryTextProperty()->ItalicOff();
     m_invalidLegend->GetEntryTextProperty()->BoldOff();
     m_invalidLegend->BorderOff();
@@ -198,6 +238,8 @@ void ThicknessOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data)
     auto *mesh = vtkPolyData::SafeDownCast(data);
     if (!mesh)
         return;
+    const auto* previous = m_cutter ? vtkPolyData::SafeDownCast(m_cutter->GetInput()) : m_mapper->GetInput();
+    if (mesh != previous) m_selectionActor->VisibilityOff();
     if (m_cutter)
         m_cutter->SetInputData(mesh);
     else
@@ -207,8 +249,7 @@ void ThicknessOverlay::SetOverlayState(const FeatureOverlayState &state)
 {
     if (m_plane)
     {
-        m_plane->SetOrigin(state.cursor.data());
-        m_plane->SetNormal(m_normal.data());
+        (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normal,state.modelToWorld);
     }
     Set3DPropsTransform(state.modelToWorld);
 }
@@ -229,7 +270,6 @@ void ThicknessOverlay::SetSelection(const ThicknessSample *sample)
     auto data = vtkSmartPointer<vtkPolyData>::New();
     data->SetPoints(points);
     data->SetVerts(vertices);
-    m_selectionActor->GetProperty()->SetPointSize(7);
     m_selectionMapper->SetInputData(data);
     m_selectionActor->SetVisibility(m_actor->GetVisibility());
 }

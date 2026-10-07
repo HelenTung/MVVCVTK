@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <thread>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +16,13 @@
 namespace
 {
 constexpr std::string_view featureId = "wall-thickness";
+bool GetDisplayValid(const ThicknessDisplay& requested) noexcept
+{
+    auto display = requested;
+    // 自动范围的输入占位不参与判定；正式范围在准备显示时由本 Feature 解析。
+    if (display.rangeMode != ThicknessRangeMode::Manual) display.range = {0,1};
+    return ThicknessOverlay::GetColorValid(display) && ThicknessAlgorithm::GetDisplayValid(display);
+}
 void SendComplete(ThicknessCallback callback, const ThicknessResult &result) noexcept
 {
     try
@@ -218,10 +227,20 @@ class WallThicknessHostFeature::Impl final
         RemoveBindings(m_bindings);
         m_state.isDisplayReady = false;
     }
-    bool SetDisplay(const ThicknessDisplay &display)
+    bool SetDisplay(const ThicknessDisplay &requested)
     {
-        if (!m_active || !ThicknessAlgorithm::GetDisplayValid(display) || !m_context.views)
+        if (!m_active || !ThicknessOverlay::GetColorValid(requested) || !m_context.views)
             return false;
+        auto display = requested;
+        const auto& record = m_active->GetRecord();
+        if (display.rangeMode == ThicknessRangeMode::Result) {
+            if (!record.statistics.minimum || !record.statistics.maximum) return false;
+            display.range = {*record.statistics.minimum, *record.statistics.maximum};
+            if (display.range[0] == display.range[1])
+                display.range[1] = std::nextafter(display.range[1], std::numeric_limits<double>::infinity());
+        } else if (display.rangeMode == ThicknessRangeMode::Histogram)
+            display.range = record.archive.evaluation.histogramRange;
+        if (!ThicknessAlgorithm::GetDisplayValid(display)) return false;
         const auto graph = m_context.data->GetDataGraph();
         if (ThicknessData::GetBinding(graph).target != m_state.result ||
             !ThicknessData::GetCurrent(graph, m_active->GetRecord().expectations))
@@ -231,6 +250,7 @@ class WallThicknessHostFeature::Impl final
         {
             RemoveDisplay();
             m_display = display;
+            m_state.displayRange = display.range;
             return true;
         }
         auto views = m_context.views->GetViews(display.targetViews);
@@ -256,9 +276,9 @@ class WallThicknessHostFeature::Impl final
                     throw std::runtime_error("Overlay port unavailable.");
                 auto overlay = std::make_shared<ThicknessOverlay>(
                     prepared, display, m_active->GetRecord().archive.input.unit, view.role);
+                candidate.push_back({view.id, port, overlay});
                 if (!port->AttachOverlay(overlay))
                     throw std::runtime_error("Overlay attach rejected.");
-                candidate.push_back({view.id, port, overlay});
                 if (m_state.selectedSample &&
                     *m_state.selectedSample < m_active->GetRecord().field.samples->size())
                     overlay->SetSelection(
@@ -276,6 +296,7 @@ class WallThicknessHostFeature::Impl final
         RemoveBindings(m_bindings);
         m_bindings = std::move(candidate);
         m_display = display;
+        m_state.displayRange = display.range;
         m_state.isDisplayReady = true;
         return true;
     }
@@ -585,7 +606,7 @@ class WallThicknessHostFeature::Impl final
         if (!GetFieldsValid(request) ||
             (request.params && !ThicknessAlgorithm::GetParamsValid(*request.params)) ||
             (request.evaluation && !ThicknessAlgorithm::GetEvaluationValid(*request.evaluation)) ||
-            (request.display && !ThicknessAlgorithm::GetDisplayValid(*request.display)))
+            (request.display && !GetDisplayValid(*request.display)))
             return {};
         if ((m_task || m_completing) && request.action != ThicknessAction::Cancel &&
             request.action != ThicknessAction::SetDisplay &&

@@ -1,7 +1,9 @@
 // 测试用途：通过公开 Feature 请求测试壁厚计算、评估、显示、结果激活与采样定位。
 #include "ModuleFactories.h"
+#include "Support/ColorSegmentInput.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QTextStream>
 namespace Manual {
@@ -30,6 +32,7 @@ QJsonObject Statistics(const ThicknessSnapshot& result)
     return {{"result", GetRefText(result.result)}, {"isCurrent", result.isCurrent},
         {"sampleCount", QString::number(s.sampleCount)}, {"validCount", QString::number(s.validCount)},
         {"coverage", s.coverage}, {"minimum", s.minimum ? QJsonValue(*s.minimum) : QJsonValue()},
+        {"minimumSampleIndex", s.minimumSample ? QJsonValue(QString::number(*s.minimumSample)) : QJsonValue()},
         {"maximum", s.maximum ? QJsonValue(*s.maximum) : QJsonValue()}, {"mean", s.mean ? QJsonValue(*s.mean) : QJsonValue()},
         {"regionCount", QString::number(result.regions.size())}};
 }
@@ -44,7 +47,25 @@ ThicknessDisplay Display(const QJsonObject& p)
 {
     ThicknessDisplay value; value.targetViews = GetAllViews();
     value.mode = GetEnum<ThicknessDisplayMode>(p, "mode", {{"Continuous", ThicknessDisplayMode::Continuous}, {"Tolerance", ThicknessDisplayMode::Tolerance}});
-    value.range = GetArray<double, 2>(p["range"]); value.opacity = GetNumber(p, "opacity");
+    if (p.contains("range")) value.range = GetArray<double, 2>(p["range"]);
+    value.opacity = GetNumber(p, "opacity");
+    if (p.contains("rangeMode")) value.rangeMode = GetEnum<ThicknessRangeMode>(p, "rangeMode", {
+        {"Manual", ThicknessRangeMode::Manual}, {"Result", ThicknessRangeMode::Result}, {"Histogram", ThicknessRangeMode::Histogram}});
+    if (p.contains("palette")) value.colorBand.mode = GetEnum<ThicknessColorMode>(p, "palette", {
+        {"Constant", ThicknessColorMode::Constant}, {"Gradient", ThicknessColorMode::Gradient},
+        {"Rainbow", ThicknessColorMode::Rainbow}, {"InverseRainbow", ThicknessColorMode::InverseRainbow}, {"HueLoop", ThicknessColorMode::HueLoop}});
+    if (p.contains("constantColor") && !p["constantColor"].isNull()) value.colorBand.constantColor = GetArray<double, 3>(p["constantColor"]);
+    if (p.contains("lowColor") && !p["lowColor"].isNull()) value.colorBand.lowColor = GetArray<double, 3>(p["lowColor"]);
+    if (p.contains("highColor") && !p["highColor"].isNull()) value.colorBand.highColor = GetArray<double, 3>(p["highColor"]);
+    if (p.contains("belowColor") && !p["belowColor"].isNull()) value.colorBand.belowColor = GetArray<double, 3>(p["belowColor"]);
+    if (p.contains("aboveColor") && !p["aboveColor"].isNull()) value.colorBand.aboveColor = GetArray<double, 3>(p["aboveColor"]);
+    value.colorBand.segments=GetColorSegments<ThicknessColorSegment,ThicknessColorMode>(p,{
+        {"Constant",ThicknessColorMode::Constant},{"Gradient",ThicknessColorMode::Gradient},{"Rainbow",ThicknessColorMode::Rainbow},
+        {"InverseRainbow",ThicknessColorMode::InverseRainbow},{"HueLoop",ThicknessColorMode::HueLoop}});
+    if(p.contains("displayStyle"))value.style=GetEnum<ThicknessDisplayStyle>(p,"displayStyle",{
+        {"Overlay",ThicknessDisplayStyle::Overlay},{"Constant",ThicknessDisplayStyle::Constant},
+        {"Inclined",ThicknessDisplayStyle::Inclined},{"InverseInclined",ThicknessDisplayStyle::InverseInclined}});
+    if(p.contains("opacityRange"))value.opacityRange=GetArray<double,2>(p["opacityRange"]);
     value.isVisible = GetBool(p, "isVisible"); value.hasLegend = GetBool(p, "hasLegend"); return value;
 }
 }
@@ -65,6 +86,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             QJsonObject info{{"requestId", QString::number(result.requestId)}, {"result", GetRefText(result.result)},
                 {"statusCode", static_cast<int>(result.status)}, {"message", QString::fromStdString(result.message)},
                 {"isActivated", result.isActivated}, {"isDisplayReady", result.isDisplayReady}};
+            if (const auto range = feature->GetState().displayRange) info["displayRange"] = GetValues(*range);
             if (const auto snapshot = feature->GetResult(result.result)) {
                 const auto stats = Statistics(*snapshot); for (auto it = stats.begin(); it != stats.end(); ++it) info[it.key()] = it.value();
             }
@@ -103,7 +125,8 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         params.maxBoundaryError = GetNumber(p, "maxBoundaryError");
         if (!p["evaluationBounds"].isNull()) params.evaluationBounds = GetArray<double, 6>(p["evaluationBounds"]);
         ThicknessRequest request; request.action = ThicknessAction::Start; request.input = input; request.params = params;
-        ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, params.maxDistance}; request.display = display;
+        ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, params.maxDistance};
+        display.rangeMode = ThicknessRangeMode::Result; request.display = display;
         ThicknessEvaluation evaluation; evaluation.upper = params.maxDistance; evaluation.histogramRange = display.range; request.evaluation = evaluation;
         send(id, std::move(request));
     }, TestPolicy::Compute, true);
@@ -115,7 +138,10 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     });
     panel->AttachAction("SetEvaluation", GetJson(R"({"lower":0.3074,"upper":3.074,"histogramRange":[0,15.37],"histogramBins":32,"minRegionArea":0})"),
         [send](auto id, const auto& p) { ThicknessRequest r; r.action = ThicknessAction::SetEvaluation; r.evaluation = Evaluation(p); send(id, r); }, TestPolicy::Compute);
-    panel->AttachAction("SetDisplay", GetJson(R"({"mode":"Continuous","range":[0,15.37],"opacity":1,"isVisible":true,"hasLegend":true})"),
+    panel->AttachAction("SetDisplay", GetJson(R"({"mode":"Continuous","rangeMode":"Result","range":[0,15.37],"palette":"InverseRainbow",
+        "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
+        "segments":[],"displayStyle":"Overlay","opacityRange":[0.15,1],
+        "opacity":1,"isVisible":true,"hasLegend":true})"),
         [send](auto id, const auto& p) { ThicknessRequest r; r.action = ThicknessAction::SetDisplay; r.display = Display(p); send(id, r); }, TestPolicy::View);
     panel->AttachAction("SetActive", {{"result", "current"}}, [send, resolveResult](auto id, const auto& p) {
         ThicknessRequest r; r.action = ThicknessAction::SetActive; r.resultRevision = resolveResult(p); send(id, r);
@@ -128,11 +154,30 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if (!result) throw std::invalid_argument("所选壁厚结果不可用");
         panel->SetComplete(id, "Observed", Statistics(*result));
     }, TestPolicy::Read);
+    panel->AttachAction("ResultEvidence",{{"result","current"}},[panel,feature,resolveResult](auto id,const auto& p) {
+        const auto snapshot=feature->GetResult(resolveResult(p));
+        if(!snapshot || !snapshot->samples)throw std::invalid_argument("没有壁厚采样结果");
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        const auto add=[&](const auto& value){hash.addData(reinterpret_cast<const char*>(&value),sizeof(value));};
+        for(const auto& sample:*snapshot->samples) {
+            add(sample.sourceTriangle);add(sample.barycentricCorners);
+            add(sample.source);add(sample.area);add(sample.thickness);add(sample.validity);
+        }
+        auto result=Statistics(*snapshot);result["samplesSha256"]=QString::fromLatin1(hash.result().toHex());
+        QCryptographicHash nodeHash(QCryptographicHash::Sha256);
+        const auto addNode=[&](const auto& value){nodeHash.addData(reinterpret_cast<const char*>(&value),sizeof(value));};
+        if(snapshot->nodes)for(const auto& node:*snapshot->nodes) {
+            addNode(node.index);addNode(node.validWeight);addNode(node.totalWeight);addNode(node.thickness);
+        }
+        result["nodesSha256"]=QString::fromLatin1(nodeHash.result().toHex());
+        panel->SetComplete(id,"Observed",result);
+    },TestPolicy::Read);
     panel->onObserve = [panel, feature, visible] {
         const auto state = feature->GetState();
         QJsonObject summary{{"isBusy", state.isBusy}, {"isCurrent", state.isCurrent}, {"requestId", QString::number(state.requestId)},
             {"result", GetRefText(state.result)}, {"isDisplayReady", state.isDisplayReady}, {"isVisible", *visible}};
         const auto result = feature->GetResult(state.result); summary["hasResult"] = result.has_value();
+        if (state.displayRange) summary["displayRange"] = GetValues(*state.displayRange);
         if (result) { const auto stats = Statistics(*result); for (auto it = stats.begin(); it != stats.end(); ++it) summary[it.key()] = it.value(); }
         panel->SetState(summary);
     };

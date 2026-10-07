@@ -7,6 +7,7 @@
 #include "Render/Internal/PartSurfaceProductBuilder.h"
 
 #include <vtkActor.h>
+#include <vtkProperty.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <stdexcept>
@@ -19,11 +20,15 @@
 #include <vtkNew.h>
 #include <vtkPlane.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyDataNormals.h>
+#include <vtkCellData.h>
+#include <vtkIdList.h>
 #include <vtkPointData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkUnsignedIntArray.h>
+#include <vtkTextActor.h>
 
 #include <windows.h>
 #include <psapi.h>
@@ -148,6 +153,29 @@ std::uint64_t GetWorkingSetBytes() noexcept
         : 0;
 }
 
+vtkPolyData* GetFormalSurface(vtkPolyDataMapper* mapper)
+{
+    auto* normals=mapper ? vtkPolyDataNormals::SafeDownCast(mapper->GetInputAlgorithm()) : nullptr;
+    return normals ? vtkPolyData::SafeDownCast(normals->GetInput()) : nullptr;
+}
+
+bool GetGeometryExactlyShared(vtkPolyDataMapper* mapper,vtkPolyData* formal)
+{
+    auto* display=mapper ? mapper->GetInput() : nullptr;
+    if(!display || !formal || GetFormalSurface(mapper)!=formal
+        || display->GetPoints()!=formal->GetPoints()
+        || display->GetNumberOfCells()!=formal->GetNumberOfCells()
+        || display->GetCellData()->GetScalars()!=formal->GetCellData()->GetScalars()
+        || !display->GetPointData()->GetNormals())return false;
+    vtkNew<vtkIdList> first; vtkNew<vtkIdList> second;
+    for(vtkIdType cell=0;cell<formal->GetNumberOfCells();++cell) {
+        formal->GetCellPoints(cell,first);display->GetCellPoints(cell,second);
+        if(first->GetNumberOfIds()!=second->GetNumberOfIds())return false;
+        for(vtkIdType i=0;i<first->GetNumberOfIds();++i)if(first->GetId(i)!=second->GetId(i))return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int GetPartDisplayFailCount()
@@ -209,7 +237,7 @@ int GetPartDisplayFailCount()
         auto* mapper = actor
             ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper())
             : nullptr;
-        return mapper ? mapper->GetInput() : nullptr;
+        return GetFormalSurface(mapper);
     };
     failureCount += GetCaseResult(
         surfaceProduct.failureReason == PartFailureReason::None
@@ -220,9 +248,11 @@ int GetPartDisplayFailCount()
             && surfaceRssBefore > 0
             && surfaceRssPeak >= surfaceRssBefore
             && surfaceRssAfter > 0
-            && surfaceRenderer->GetViewProps()->GetNumberOfItems() == 1
+            && surfaceRenderer->GetViewProps()->GetNumberOfItems() == 2
             && secondSurfaceRenderer->GetViewProps()
-                ->GetNumberOfItems() == 1
+                ->GetNumberOfItems() == 2
+            && !vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(0))
+            && !vtkTextActor::SafeDownCast(surfaceRenderer->GetViewProps()->GetItemAsObject(1))
             && getSurfaceInput(surfaceRenderer)
                 == surfaceProduct.product->surface.GetPointer()
             && getSurfaceInput(secondSurfaceRenderer)
@@ -299,8 +329,10 @@ int GetPartDisplayFailCount()
         slice->AttachRenderer(renderer);
         slice->AttachRenderer(renderer);
         failureCount += GetCaseResult(
-            renderer->GetViewProps()->GetNumberOfItems() == 1,
-            "Slice overlay keeps one prop per View") ? 0 : 1;
+            renderer->GetViewProps()->GetNumberOfItems() == 2
+                && !vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(0))
+                && !vtkTextActor::SafeDownCast(renderer->GetViewProps()->GetItemAsObject(1)),
+            "Slice overlay owns only label fill and selection contour per View") ? 0 : 1;
         slice->DetachRenderer(renderer);
         failureCount += GetCaseResult(
             renderer->GetViewProps()->GetNumberOfItems() == 0,
@@ -349,6 +381,51 @@ int GetPartDisplayFailCount()
             "Rotated/scaled label data uses the same world cursor plane") ? 0 : 1;
     }
     rotatedSlice->DetachRenderer(rotatedRenderer);
+
+    // 两幅不同范围的同坐标标签图只在一个像素有变化；差分必须对齐采样网格。
+    vtkNew<vtkImageData> previous;
+    previous->SetExtent(0,3,0,3,0,3); previous->AllocateScalars(VTK_UNSIGNED_INT,1);
+    std::fill_n(static_cast<unsigned int*>(previous->GetScalarPointer()),64,0U);
+    *static_cast<unsigned int*>(previous->GetScalarPointer(2,2,2))=1;
+    vtkNew<vtkImageData> edited;
+    edited->SetExtent(-2,5,-2,5,-2,5); edited->AllocateScalars(VTK_UNSIGNED_INT,1);
+    std::fill_n(static_cast<unsigned int*>(edited->GetScalarPointer()),512,0U);
+    *static_cast<unsigned int*>(edited->GetScalarPointer(2,2,2))=1;
+    *static_cast<unsigned int*>(edited->GetScalarPointer(3,2,2))=1;
+    const auto previousTime=previous->GetMTime(), editedTime=edited->GetMTime();
+    auto editSlice=std::make_shared<PartSliceOverlayStrategy>(Orientation::Top_down,previous);
+    editSlice->SetInputData(edited);
+    FeatureOverlayState editState; editState.cursor={2,2,2}; editSlice->SetOverlayState(editState);
+    editSlice->SetPartStates(*BuildPartRenderStateTable(BuildRenderCatalog()));
+    vtkNew<vtkRenderer> editRenderer; editSlice->AttachRenderer(editRenderer);
+    editRenderer->GetViewProps()->InitTraversal(); editRenderer->GetViewProps()->GetNextProp();
+    auto* changedActor=vtkActor::SafeDownCast(editRenderer->GetViewProps()->GetNextProp());
+    auto* changedMapper=changedActor ? vtkPolyDataMapper::SafeDownCast(changedActor->GetMapper()) : nullptr;
+    if(changedMapper)changedMapper->Update();
+    double changedBounds[6]{};
+    if(changedMapper)changedActor->GetBounds(changedBounds);
+    std::cout << "EDIT_DIFFERENCE: points=" << (changedMapper ? changedMapper->GetInput()->GetNumberOfPoints() : 0)
+        << " bounds=" << changedBounds[0] << ',' << changedBounds[1] << ',' << changedBounds[2] << ',' << changedBounds[3]
+        << " sourceUnchanged=" << (previous->GetMTime()==previousTime && edited->GetMTime()==editedTime) << '\n';
+    failureCount += GetCaseResult(changedMapper && changedMapper->GetInput()->GetNumberOfPoints()>0
+        && std::abs(changedBounds[0]-2.5)<1e-10 && std::abs(changedBounds[1]-3.5)<1e-10
+        && std::abs(changedBounds[2]-1.5)<1e-10 && std::abs(changedBounds[3]-2.5)<1e-10
+        && previous->GetMTime()==previousTime && edited->GetMTime()==editedTime,
+        "Edit difference is localized on a common grid and leaves both label inputs unchanged") ? 0 : 1;
+    editSlice->DetachRenderer(editRenderer);
+
+    auto editSurface=std::make_shared<PartSurfaceOverlayStrategy>(false,true);
+    editSurface->SetInputData(surfaceProduct.product->surface);
+    editSurface->SetPartStates(*BuildPartRenderStateTable(BuildRenderCatalog()));
+    editSurface->AttachRenderer(editRenderer);
+    editRenderer->GetViewProps()->InitTraversal();
+    auto* previewActor=vtkActor::SafeDownCast(editRenderer->GetViewProps()->GetNextProp());
+    auto* previewOutline=vtkActor::SafeDownCast(editRenderer->GetViewProps()->GetNextProp());
+    failureCount += GetCaseResult(previewActor && previewOutline && previewOutline->GetVisibility()
+        && previewOutline->GetProperty()->GetColor()[0]==1.0
+        && GetGeometryExactlyShared(vtkPolyDataMapper::SafeDownCast(previewActor->GetMapper()),surfaceProduct.product->surface),
+        "Edit preview has its own amber silhouette while retaining the exact candidate surface") ? 0 : 1;
+    editSurface->DetachRenderer(editRenderer);
 
     static_assert(std::is_same_v<std::uint32_t, unsigned int>);
     auto candidateOwner =
@@ -403,7 +480,7 @@ int GetPartDisplayFailCount()
     if (surfaceLut) surfaceLut->GetTableValue(1, hiddenSurfaceColor);
     failureCount += GetCaseResult(
         didSetSurfaceStates && sharedSurface && surfaceMapper && surfaceLut
-            && surfaceMapper->GetInput() == sharedSurface
+            && GetGeometryExactlyShared(surfaceMapper,sharedSurface)
             && sharedSurface->GetMTime() == surfaceMTime
             && hiddenSurfaceColor[3] == 0.0
             && surfaceMapper->GetScalarRange()[0] == 0.0
@@ -444,7 +521,7 @@ int GetPartDisplayFailCount()
     double markerColor[4]{}, otherColor[4]{};
     markerLut->GetTableValue(1, markerColor); markerLut->GetTableValue(2, otherColor);
     failureCount += GetCaseResult(noSelection && hasSelection && markerColor[3] > 0 && markerColor[3] < 0.4
-        && otherColor[3] == 0 && markerMapper->GetInput() == sharedSurface
+        && otherColor[3] == 0 && GetGeometryExactlyShared(markerMapper,sharedSurface)
         && marker->SetPartStates(*hiddenStates) && !markerActor->GetVisibility(),
         "DVR selection marker preserves source volume, shares geometry, and retires when hidden") ? 0 : 1;
     vtkNew<vtkRenderWindow> pickWindow; pickWindow->SetSize(256, 256); pickWindow->AddRenderer(markerRenderer);
@@ -461,10 +538,10 @@ int GetPartDisplayFailCount()
         selectedStates
             && selectedStates->statesByLabel[1].isSelected
             && selectedStates->statesByLabel[1].color
-                != reorderedStates->statesByLabel[2].color
+                == reorderedStates->statesByLabel[2].color
             && selectedStates->statesByLabel[1].color[3]
                 == reorderedStates->statesByLabel[2].color[3],
-        "Selected state adds a temporary LUT highlight without changing alpha")
+        "Selection preserves the exact catalog colour and alpha for a separate contour")
         ? 0 : 1;
 
     auto firstControl = std::make_shared<PartControlStub>();
@@ -566,8 +643,14 @@ int GetPartDisplayFailCount()
     failureCount += GetCaseResult(didSelectSlice
         && idleColor[0] == idleColor[1] && idleColor[1] == idleColor[2]
         && idleColor[3] < 0.2 && selectedColor[3] > 0.5
-        && selectedColor[0] > selectedColor[1] && selectedColor[1] > selectedColor[2],
-        "Slice preview preserves source greyscale and uses one selection accent") ? 0 : 1;
+        && selectedColor[0] == idleColor[0] && selectedColor[1] == idleColor[1] && selectedColor[2] == idleColor[2],
+        "Slice selection preserves the source colour and increases only the fill alpha") ? 0 : 1;
+    lutProps->InitTraversal();lutProps->GetNextProp();
+    auto* outline=vtkActor::SafeDownCast(lutProps->GetNextProp());
+    failureCount += GetCaseResult(outline && outline->GetVisibility()
+        && outline->GetProperty()->GetColor()[1] > .9 && outline->GetProperty()->GetColor()[2] > .9
+        && outline->GetProperty()->GetColor()[0] < .2,
+        "Selected part owns a visible cyan contour independent of its LUT colour") ? 0 : 1;
     auto customCatalog = BuildRenderCatalog();
     customCatalog.partsByLabel[1].presentation.colorUse = PartColorUse::Custom;
     customCatalog.partsByLabel[1].presentation.color = {0.2, 0.4, 0.6, 1.0};
@@ -578,7 +661,8 @@ int GetPartDisplayFailCount()
     const auto customRestored = BuildPartRenderStateTable(customCatalog);
     failureCount += GetCaseResult(customStates && customSelected && customRestored
         && *customStates == *customRestored
-        && customSelected->statesByLabel[1].color != customStates->statesByLabel[1].color
+        && customSelected->statesByLabel[1].color == customStates->statesByLabel[1].color
+        && customSelected->statesByLabel[1].isSelected
         && customStates->statesByLabel[1].color[0] == 0.2,
         "Explicit custom colour survives selection and deselection") ? 0 : 1;
     lutSlice->DetachRenderer(lutRenderer);

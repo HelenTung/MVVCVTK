@@ -110,6 +110,9 @@ public:
 
     bool StartView(GapViewRequest request, std::function<void(bool)> onComplete);
     bool SwitchOverlay();
+    bool SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay);
+    GapDisplayParams GetDisplayParams() const
+    { return GetViewThread() && m_displayData ? m_displayData->params : GapDisplayParams{}; }
     bool ExitView();
     void ClearView();
     bool GetViewOn() const;
@@ -269,7 +272,8 @@ private:
     void SetAnalysisState(GapAnalysisState state);
 
     bool SetOverlayOff() noexcept;
-    bool SetStoredView();
+    bool SetStoredView(std::shared_ptr<const GapDisplayData> display,
+        const std::function<bool()>& acceptDisplay = {});
     bool ExitViewState();
     void ClearDisplayState();
     bool SetViewThread();
@@ -335,6 +339,7 @@ private:
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     // 成功结果中 2D label image 的只读强引用；完整继承输入快照几何，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
+    std::shared_ptr<const GapDisplayData> m_displayData;
     // 显示缓存必须由正式 revision 的 typed view 持有，不再把 worker candidate 当成权威 owner。
     VtkSurfaceMeshSnapshot m_displayMeshOwner;
     VtkLabelMapSnapshot m_displayLabelOwner;
@@ -652,6 +657,16 @@ bool GapAnalysisService::StartView(
 bool GapAnalysisService::SwitchOverlay()
 {
     return m_impl->SwitchOverlay();
+}
+
+bool GapAnalysisService::SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay)
+{
+    return m_impl->SetDisplay(params, std::move(acceptDisplay));
+}
+
+GapDisplayParams GapAnalysisService::GetDisplayParams() const
+{
+    return m_impl->GetDisplayParams();
 }
 
 bool GapAnalysisService::ExitView()
@@ -1086,7 +1101,23 @@ bool GapAnalysisService::Impl::SwitchOverlay() {
         return true;
     }
 
-    return SetStoredView();
+    return SetStoredView(m_displayData);
+}
+
+bool GapAnalysisService::Impl::SetDisplay(const GapDisplayParams& params,
+    std::function<bool()> acceptDisplay)
+{
+    if (!GetViewThread() || m_isExitPending || !m_displayData
+        || m_viewPhase.load() != GapViewPhase::Consumed
+        || !GapDisplayData::GetParamsValid(params)) return false;
+    try {
+        auto candidate = GapDisplayData::CreateColors(*m_displayData, params);
+        if (!candidate) return false;
+        if (m_isOverlayOn) return SetStoredView(std::move(candidate), acceptDisplay);
+        if (acceptDisplay && !acceptDisplay()) return false;
+        m_displayData = std::move(candidate);
+        return true;
+    } catch (...) { return false; }
 }
 
 bool GapAnalysisService::Impl::ExitView() {
@@ -1223,6 +1254,7 @@ bool GapAnalysisService::Impl::GetCompletedResult(
         result.labelImage = m_result.labelImage;
         result.voidMesh = m_result.voidMesh;
         result.payloads = m_result.payloads;
+        result.display = m_result.display;
         result.statistics = m_result.statistics;
         result.isSucceeded = true;
     }
@@ -1246,13 +1278,17 @@ bool GapAnalysisService::Impl::SetCommittedView(
     m_displayLabelOwner = std::move(labels);
     m_displayMeshOwner = std::move(mesh);
     m_displayLabelImage = m_displayLabelOwner->labels;
-    m_displayVoidMesh = m_displayMeshOwner->mesh;
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        m_displayData = m_result.display;
+    }
+    m_displayVoidMesh = m_displayData ? m_displayData->mesh : nullptr;
     SetOverlayOff();
 
-    bool isDisplayed = true;
-    if (m_isOverlayOn) {
+    bool isDisplayed = m_displayData != nullptr;
+    if (m_isOverlayOn && isDisplayed) {
         try {
-            isDisplayed = SetStoredView();
+            isDisplayed = SetStoredView(m_displayData);
         }
         catch (...) {
             SetOverlayOff();
@@ -1379,6 +1415,9 @@ void GapAnalysisService::Impl::StartWorker(
                 if (isPrepared) result.payloads = std::move(payloads);
             }
             if (isPrepared && !m_isStopping.load()) {
+                // 显示失败不把已经有效的正式数据改报为算法失败。
+                try { result.display = GapDisplayData::Build(result.labelImage, result.voids, m_isStopping); }
+                catch (...) { result.display.reset(); }
                 result.isSucceeded = true;
                 isSuccess = true;
             }
@@ -1434,68 +1473,44 @@ bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
     return hasRemoved;
 }
 
-bool GapAnalysisService::Impl::SetStoredView() {
-    // 1. 先对称卸载旧 binding，保证重复显示/切换可见性不会累积 prop。
-    // 2. mesh 与 label 两类 artifact 独立判定、独立挂载；缺少其中一类不阻止另一类显示。
-    // 3. 每次成功 Attach 都记录同一 service/strategy 对，供 SetOverlayOff 精确 Remove。
-    SetOverlayOff();
-
-    const bool hasMeshInput = GetMeshVisible(m_displayVoidMesh);
-    const bool hasSliceInput = GetLabelExtent(m_displayLabelImage);
-    bool hasMeshAdded = false;
-    bool hasSliceAdded = false;
-
-    if (hasMeshInput) {
+bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayData> display,
+    const std::function<bool()>& acceptDisplay) {
+    if (!display) return false;
+    std::vector<GapOverlayBinding> candidate;
+    const auto rollback = [&] {
+        for (auto item = candidate.rbegin(); item != candidate.rend(); ++item)
+            item->service->RemoveOverlay(item->overlay);
+    };
+    try {
+        const bool hasMesh = GetMeshVisible(m_displayVoidMesh);
+        const bool hasLabels = GetLabelExtent(m_displayLabelImage);
         for (const auto& service : m_meshTargets) {
-            if (!service) {
-                continue;
-            }
-            auto overlay = std::make_shared<GapMeshOverlayStrategy>();
+            if (!hasMesh) continue;
+            if (!service) { rollback(); return false; }
+            auto overlay = std::make_shared<GapMeshOverlayStrategy>(display);
             overlay->SetInputData(m_displayVoidMesh);
-            if (service->AttachOverlay(overlay)) {
-                m_displayOverlayBindings.push_back({ service, overlay });
-                hasMeshAdded = true;
-            }
+            candidate.push_back({service, overlay});
+            if (!service->AttachOverlay(overlay)) { rollback(); return false; }
         }
-    }
-
-    if (hasSliceInput) {
         for (const auto& target : m_sliceTargets) {
-            if (!target.second) {
-                continue;
-            }
-            auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first);
+            if (!hasLabels) continue;
+            if (!target.second) { rollback(); return false; }
+            auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, display);
             overlay->SetInputData(m_displayLabelImage);
-            if (target.second->AttachOverlay(overlay)) {
-                m_displayOverlayBindings.push_back({ target.second, overlay });
-                hasSliceAdded = true;
-            }
+            candidate.push_back({target.second, overlay});
+            if (!target.second->AttachOverlay(overlay)) { rollback(); return false; }
         }
-    }
-
-    if (!hasMeshAdded) {
-        std::cerr << "[GapAnalysis] Analysis produced no 3D void mesh overlay target." << std::endl;
-    }
-    if (!hasSliceAdded) {
-        std::cerr << "[GapAnalysis] Analysis produced no 2D label overlay target." << std::endl;
-    }
-
-    if (!m_displayOverlayBindings.empty()) {
-        int labelDims[3] = { 0, 0, 0 };
-        if (m_displayLabelImage) {
-            m_displayLabelImage->GetDimensions(labelDims);
-        }
-        const vtkIdType meshPoints = m_displayVoidMesh ? m_displayVoidMesh->GetNumberOfPoints() : 0;
-        const vtkIdType meshCells = m_displayVoidMesh ? m_displayVoidMesh->GetNumberOfCells() : 0;
-        std::cout << "[GapAnalysis] Overlays shown: mesh points = "
-            << meshPoints << ", mesh cells = " << meshCells
-            << ", label dims = " << labelDims[0] << "x" << labelDims[1] << "x" << labelDims[2]
-            << std::endl;
-    }
-    return !m_displayOverlayBindings.empty();
+        if (acceptDisplay && !acceptDisplay()) { rollback(); return false; }
+    } catch (...) { rollback(); return false; }
+    // 新目标全部挂接成功，才清退本 Feature 的旧绑定。
+    SetOverlayOff();
+    m_displayOverlayBindings.swap(candidate);
+    m_displayData = std::move(display);
+    return !m_displayOverlayBindings.empty() || !m_displayData->hasRegions;
 }
 
 void GapAnalysisService::Impl::ClearDisplayState() {
+    m_displayData.reset();
     m_meshTargets.clear();
     m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;

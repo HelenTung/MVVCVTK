@@ -680,6 +680,7 @@ bool GapHostFeature::Impl::SendRequest(
     }
 
     if (m_isClosing) return false;
+    if (request.display && request.action != GapHostAction::SetDisplay) return false;
     SetBindingStale();
     switch (request.action) {
     case GapHostAction::Start:
@@ -699,6 +700,11 @@ bool GapHostFeature::Impl::SendRequest(
             return false;
         }
         return ExitView();
+    case GapHostAction::SetDisplay:
+        if (onComplete || !request.display || request.start || m_isRequestPending || m_isExitPending
+            || !GetResultCurrent()) return false;
+        return m_service->SetDisplay(*request.display,
+            [this] { return SendSceneDelta(FeatureScenePriority::Overlay); });
     case GapHostAction::None:
         return false;
     }
@@ -719,6 +725,8 @@ GapHostState GapHostFeature::Impl::GetState() const
     }
     state.isViewActive = m_service->GetViewOn();
     state.isExitPending = m_isExitPending;
+    state.isOverlayVisible = m_service->GetDisplayOn();
+    state.display = m_service->GetDisplayParams();
     return state;
 }
 

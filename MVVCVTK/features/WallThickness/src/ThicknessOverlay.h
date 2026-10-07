@@ -20,6 +20,7 @@ struct ThicknessDisplayData final
 class ThicknessOverlay final : public FeatureOverlayBase
 {
   public:
+    static bool GetColorValid(const ThicknessDisplay& display) noexcept;
     static ThicknessDisplayData BuildData(const ThicknessData::Record &record,
                                           const SurfaceMeshPayload &mesh,
                                           const ThicknessDisplay &display);
@@ -31,7 +32,7 @@ class ThicknessOverlay final : public FeatureOverlayBase
     std::optional<std::size_t> GetPickedSample(int x, int y, vtkRenderer *renderer);
 
   private:
-    vtkSmartPointer<vtkActor> m_actor, m_selectionActor;
+    vtkSmartPointer<vtkActor> m_actor, m_selectionActor, m_contourActor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper, m_selectionMapper;
     vtkSmartPointer<vtkScalarBarActor> m_legend;
     vtkSmartPointer<vtkLegendBoxActor> m_invalidLegend;

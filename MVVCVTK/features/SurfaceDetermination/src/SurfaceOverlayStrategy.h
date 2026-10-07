@@ -13,7 +13,7 @@ class vtkPolyDataMapper;
 
 class SurfaceOverlayStrategy final : public FeatureOverlayBase {
 public:
-    SurfaceOverlayStrategy();
+    explicit SurfaceOverlayStrategy(bool isPreview = false);
 
     void SetInputData(
         vtkSmartPointer<vtkDataObject> data) override;
@@ -28,7 +28,7 @@ private:
 class SurfaceSliceOverlayStrategy final : public FeatureOverlayBase {
 public:
     explicit SurfaceSliceOverlayStrategy(
-        std::array<double, 3> normalModel);
+        std::array<double, 3> normalModel, bool isPreview = false);
 
     void SetInputData(
         vtkSmartPointer<vtkDataObject> data) override;

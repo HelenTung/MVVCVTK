@@ -3,6 +3,7 @@
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Support/FeatureOverlayBase.h"
+#include "Render/Support/SliceContourPlane.h"
 
 #include <vtkActor.h>
 #include <vtkBoxRepresentation.h>
@@ -45,7 +46,7 @@ public:
         const int axis=role==HostRenderViewRole::TopDownSlice ? 2
             : role==HostRenderViewRole::FrontBackSlice ? 1 : role==HostRenderViewRole::LeftRightSlice ? 0:-1;
         if (axis>=0) {
-            std::array<double,3> normal{}; normal[axis]=1; m_plane->SetNormal(normal.data());
+            m_normal={}; m_normal[axis]=1; m_plane->SetNormal(m_normal.data());
             m_cutter->SetCutFunction(m_plane); m_cutter->SetInputConnection(m_transformFilter->GetOutputPort());
             m_mapper->SetInputConnection(m_cutter->GetOutputPort());
         } else m_mapper->SetInputConnection(m_transformFilter->GetOutputPort());
@@ -57,18 +58,21 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
     void SetOverlayState(const FeatureOverlayState& state) override
     {
-        m_plane->SetOrigin(state.cursor.data()); Set3DPropsTransform(state.modelToWorld);
+        (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normal,state.modelToWorld);
+        Set3DPropsTransform(state.modelToWorld);
     }
-    void SetBox(const std::array<double,16>& box,bool isVisible)
+    void SetBox(const std::array<double,16>& box,bool isVisible,bool isDraft=true)
     {
         vtkNew<vtkMatrix4x4> matrix; matrix->DeepCopy(box.data());
         m_transform->SetMatrix(matrix); m_actor->SetVisibility(isVisible);
+        m_actor->GetProperty()->SetColor(isDraft ? 1.0 : 0.1, isDraft ? 0.7 : 0.95, isDraft ? 0.15 : 1.0);
     }
 private:
     vtkSmartPointer<vtkCubeSource> m_cube=vtkSmartPointer<vtkCubeSource>::New();
     vtkSmartPointer<vtkTransform> m_transform=vtkSmartPointer<vtkTransform>::New();
     vtkSmartPointer<vtkTransformPolyDataFilter> m_transformFilter=vtkSmartPointer<vtkTransformPolyDataFilter>::New();
     vtkSmartPointer<vtkPlane> m_plane=vtkSmartPointer<vtkPlane>::New();
+    std::array<double,3> m_normal{0,0,1};
     vtkSmartPointer<vtkCutter> m_cutter=vtkSmartPointer<vtkCutter>::New();
     vtkSmartPointer<vtkPolyDataMapper> m_mapper=vtkSmartPointer<vtkPolyDataMapper>::New();
     vtkSmartPointer<vtkActor> m_actor=vtkSmartPointer<vtkActor>::New();
@@ -78,7 +82,7 @@ private:
 class RoiEditingHostFeature::Impl final {
 public:
     explicit Impl(RoiEditingConfig config):m_config(std::move(config)) {}
-    ~Impl() { (void)ClearDraft(); }
+    ~Impl() { if (ClearDraft()) ClearCommitted(); }
     struct Binding final {
         std::shared_ptr<OverlayService> service;
         std::shared_ptr<FeatureViewService> view;
@@ -104,6 +108,32 @@ public:
         }
         m_bindings.clear(); m_state.hasDraft=false; m_state.draft.reset(); m_request={}; m_reference.reset(); m_lease.reset();
         return true;
+    }
+    void ClearCommitted()
+    {
+        for (auto& binding:m_committedBindings) {
+            binding.service->RemoveOverlay(binding.overlay);
+            try { (void)binding.view->SetRenderNeeded(); } catch (...) {}
+        }
+        m_committedBindings.clear();
+    }
+    void SetCommittedVisible()
+    {
+        for (auto& binding:m_committedBindings) {
+            binding.overlay->SetBox(m_committedBox,m_state.isVisible,false);
+            (void)binding.view->SetRenderNeeded();
+        }
+    }
+    void SetCommittedCurrent()
+    {
+        if (!m_committedBindings.empty()) {
+            const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),primaryVolumeBinding);
+            if (!binding || binding->target!=m_committedSource) { ClearCommitted(); return; }
+        }
+        for (const auto& binding:m_committedBindings) {
+            const auto stamp=binding.view->GetRenderInputStamp();
+            if (!stamp || stamp->dataRevision!=m_committedSource) { ClearCommitted(); return; }
+        }
     }
     bool SetProjection()
     {
@@ -198,8 +228,9 @@ public:
         m_reference=std::move(reference); m_lease=input->lease;
         // 所有候选先准备好；部分挂载失败保留清理失败的资源，供 Detach 重试。
         for (auto& binding:prepared) {
-            if (!binding.service->AttachOverlay(binding.overlay)) { (void)ClearDraft(); return RoiError::Unavailable; }
             m_bindings.push_back(std::move(binding));
+            const auto& attached=m_bindings.back();
+            if (!attached.service->AttachOverlay(attached.overlay)) { (void)ClearDraft(); return RoiError::Unavailable; }
         }
         m_representation=vtkSmartPointer<vtkBoxRepresentation>::New();
         m_representation->SetPlaceFactor(1);
@@ -223,6 +254,9 @@ public:
     std::shared_ptr<FeatureViewService> m_reference;
     std::weak_ptr<const FeatureViewLease> m_lease;
     std::vector<Binding> m_bindings;
+    std::vector<Binding> m_committedBindings;
+    std::array<double,16> m_committedBox=roiIdentityMatrix;
+    DataRevisionRef m_committedSource;
     vtkSmartPointer<vtkBoxWidget2> m_widget;
     vtkSmartPointer<vtkBoxRepresentation> m_representation;
     RoiRequest m_request;
@@ -250,12 +284,14 @@ bool RoiEditingHostFeature::DetachHost()
     auto& state=*m_impl;
     if (!state.m_state.isAttached) return true;
     if (state.GetAccessError()!=RoiError::None || !state.ClearDraft()) return false;
+    state.ClearCommitted();
     state.m_data.reset(); state.m_views.reset(); state.m_state.isAttached=false; return true;
 }
 bool RoiEditingHostFeature::OnHostTick()
 {
     auto& state=*m_impl;
     if (state.GetAccessError()!=RoiError::None) return false;
+    state.SetCommittedCurrent();
     if (!state.m_state.hasDraft) return true;
     const auto stamp=state.m_reference->GetRenderInputStamp();
     const auto lease=state.m_lease.lock();
@@ -304,6 +340,11 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
             state.m_isPublishing=false;
             if (result.error==RoiError::None) {
                 state.m_state.committedRoi=result.roi->revision;
+                state.ClearCommitted();
+                state.m_committedBox=state.m_request.definition.nodes[0].primitive.localToSource;
+                state.m_committedSource=state.m_request.definition.source;
+                state.m_committedBindings.swap(state.m_bindings);
+                state.SetCommittedVisible();
                 (void)state.ClearDraft();
             }
             break;
@@ -314,7 +355,7 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
                 state.m_state.isVisible=*request.isVisible;
                 if (state.m_state.hasDraft && !state.SetProjection()) {
                     state.m_state.isVisible=previous; result.error=RoiError::Unavailable;
-                } else result.error=RoiError::None;
+                } else { state.SetCommittedVisible(); result.error=RoiError::None; }
             }
             break;
         default: result.error=RoiError::InvalidRequest; break;

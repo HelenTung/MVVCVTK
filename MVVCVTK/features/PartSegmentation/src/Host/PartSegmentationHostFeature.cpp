@@ -142,26 +142,26 @@ struct PartOverlayCandidate final {
 };
 
 PartOverlayCandidate CreateOverlay(
-    const HostRenderViewRole role)
+    const HostRenderViewRole role, bool isPreview = false, vtkImageData* previous = nullptr)
 {
     if (role == HostRenderViewRole::Primary3D
         || role == HostRenderViewRole::Composite3D) {
-        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>(role == HostRenderViewRole::Composite3D);
+        auto overlay = std::make_shared<PartSurfaceOverlayStrategy>(!isPreview && role == HostRenderViewRole::Composite3D, isPreview);
         return { overlay, overlay };
     }
     if (role == HostRenderViewRole::TopDownSlice) {
         auto overlay = std::make_shared<PartSliceOverlayStrategy>(
-            Orientation::Top_down);
+            Orientation::Top_down, previous);
         return { overlay, overlay };
     }
     if (role == HostRenderViewRole::FrontBackSlice) {
         auto overlay = std::make_shared<PartSliceOverlayStrategy>(
-            Orientation::Front_back);
+            Orientation::Front_back, previous);
         return { overlay, overlay };
     }
     if (role == HostRenderViewRole::LeftRightSlice) {
         auto overlay = std::make_shared<PartSliceOverlayStrategy>(
-            Orientation::Left_right);
+            Orientation::Left_right, previous);
         return { overlay, overlay };
     }
     return {};
@@ -396,7 +396,7 @@ private:
         const PartRenderStateTable& renderStates,
         std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
         const std::vector<HostFeatureView>& views,
-        std::vector<OverlayBinding>& nextBindings);
+        std::vector<OverlayBinding>& nextBindings, bool isPreview = false);
     bool RemoveDisplay();
     bool SetDisplay(std::uint64_t requestId);
     static void RemoveBindings(
@@ -440,6 +440,7 @@ private:
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
+    std::vector<OverlayBinding> m_editBindings;
     PartSegmentationCallback m_startCallback;
     mutable std::mutex m_pendingCompleteMutex;
     mutable std::vector<PendingComplete> m_pendingCompleteResults;
@@ -1090,6 +1091,7 @@ PartSegmentationHostFeature::Impl::GetEditPreview() const
 
 void PartSegmentationHostFeature::Impl::ClearEditState()
 {
+    RemoveBindings(m_editBindings);
     if (m_editCandidate) CancelEditComplete(m_editCandidate->requestId);
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -1434,6 +1436,24 @@ void PartSegmentationHostFeature::Impl::SetEditComplete(PartLabelCandidate candi
             }
             m_previewRetained.push_back({ preview->labels, preview->parts, partBytes });
             m_editCandidate = std::move(candidate);
+            bool isPreviewDisplayed = false;
+            if (GetState().isOverlayVisible) {
+                auto colors = BuildPartRenderStateTable(*m_editCandidate->catalog);
+                if (colors) {
+                    // 候选以独立琥珀色层显示，正式目录和正式标签都不被改写。
+                    for (std::size_t i = 1; i < colors->statesByLabel.size(); ++i) {
+                        auto& item = colors->statesByLabel[i];
+                        item.color = {1.0, 0.68, 0.16, item.color[3] > 0 ? 0.25 : 0.0};
+                        item.isSelected = false;
+                    }
+                    isPreviewDisplayed = AttachDisplay(m_editCandidate->labelImage, *colors,
+                        m_editCandidate->surface, m_requestViews, m_editBindings, true);
+                    if (isPreviewDisplayed) isPreviewDisplayed = SendSceneDelta(
+                        m_editCandidate->requestId, FeatureScenePriority::Overlay,
+                        m_requestSource, m_requestViews);
+                    if (!isPreviewDisplayed) RemoveBindings(m_editBindings);
+                }
+            }
             {
                 const std::lock_guard<std::mutex> lock(m_stateMutex);
                 m_editPreview = preview;
@@ -1448,7 +1468,9 @@ void PartSegmentationHostFeature::Impl::SetEditComplete(PartLabelCandidate candi
             m_activeRequestId = 0;
             auto callback = std::move(m_startCallback);
             QueueComplete(std::move(callback), BuildResult(GetState(), id, PartResultStatus::PreviewReady,
-                PartFailureReason::None, preview->parts->parts.size(), "Edit preview is ready; confirmation is required."));
+                PartFailureReason::None, preview->parts->parts.size(),
+                isPreviewDisplayed ? "Edit preview is displayed in amber; confirmation is required."
+                    : "Edit preview values are ready; preview display is unavailable."));
             return;
         }
         catch (...) {
@@ -1467,6 +1489,8 @@ PartMutationResult PartSegmentationHostFeature::Impl::ClearEditPreview(std::uint
     if (m_isPublishing.load(std::memory_order_acquire) || m_activeRequestId != 0) return { PartMutationStatus::Busy, state.catalogRevision };
     if (!m_editCandidate || m_editCandidate->requestId != previewId) return { PartMutationStatus::StaleReference, state.catalogRevision };
     CancelEditComplete(previewId);
+    RemoveBindings(m_editBindings);
+    (void)SendSceneDelta(previewId, FeatureScenePriority::Overlay, m_activeSource, m_activeViews);
     m_editCandidate.reset();
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -1546,6 +1570,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SetEditCommit(
     }
     catch (...) { failure = PartFailureReason::BudgetExceeded; }
     auto candidate = std::move(*m_editCandidate);
+    RemoveBindings(m_editBindings);
     m_editCandidate.reset();
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -2123,7 +2148,7 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
     const PartRenderStateTable& renderStates,
     std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
     const std::vector<HostFeatureView>& views,
-    std::vector<OverlayBinding>& nextBindings)
+    std::vector<OverlayBinding>& nextBindings, bool isPreview)
 {
     if (!m_views || !m_host || !labelImage || !surfaceProduct
         || !surfaceProduct->surface || views.empty()) return false;
@@ -2133,7 +2158,7 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
         nextBindings.reserve(views.size());
         for (const auto& view : views) {
             auto service = m_views->GetOverlayPort(view.id);
-            auto candidate = CreateOverlay(view.role);
+            auto candidate = CreateOverlay(view.role, isPreview, isPreview ? m_labelImage.GetPointer() : nullptr);
             if (!service || !candidate.overlay || !candidate.control) {
                 RemoveBindings(nextBindings);
                 return false;
@@ -2171,6 +2196,7 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
 
 bool PartSegmentationHostFeature::Impl::RemoveDisplay()
 {
+    RemoveBindings(m_editBindings);
     const bool needsActiveViewClear =
         !m_bindings.empty() || m_isActiveViewClearPending;
     const bool isActiveViewCleared = !needsActiveViewClear

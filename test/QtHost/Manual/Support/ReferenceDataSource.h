@@ -28,6 +28,8 @@ public:
     ReferenceInput LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh);
     DataRevisionRef CreateMask(DataRevisionRef source, const QJsonObject& params);
     QJsonObject GetPublishedGraph();
+    QJsonObject GetViewTransforms();
+    QJsonObject GetResultEvidence();
     QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
     QJsonObject ReadTransform();
 private:

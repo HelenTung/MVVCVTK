@@ -61,6 +61,28 @@ enum class ThicknessDisplayMode : std::uint8_t
     Tolerance
 };
 
+enum class ThicknessColorMode : std::uint8_t { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
+enum class ThicknessRangeMode : std::uint8_t { Manual, Result, Histogram };
+enum class ThicknessDisplayStyle : std::uint8_t { Overlay, Constant, Inclined, InverseInclined };
+struct ThicknessColorSegment final {
+    // 缺省端点分别表示负／正无穷；无穷端段只支持恒定色，邻段必须连续。
+    std::optional<double> lower, upper;
+    ThicknessColorMode mode=ThicknessColorMode::Gradient;
+    std::array<double,3> lowColor{0.84,0.294,0.294},highColor{0.294,0.294,0.84};
+};
+
+// 仅控制显示颜色；公差模式仍使用其独立的判定颜色。
+struct ThicknessColorBand final
+{
+    ThicknessColorMode mode = ThicknessColorMode::InverseRainbow;
+    std::array<double, 3> constantColor{0.70, 0.70, 0.70};
+    std::array<double, 3> lowColor{0.84, 0.294, 0.294};
+    std::array<double, 3> highColor{0.294, 0.294, 0.84};
+    std::array<double, 3> belowColor{0.64, 0.29, 0.78};
+    std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
+    std::vector<ThicknessColorSegment> segments;
+};
+
 struct ThicknessInput final
 {
     // 源灰度支持 Float32/Float64 及不超过 32 位的整数；标签编号仍按整数精确比较。
@@ -111,6 +133,11 @@ struct ThicknessDisplay final
     double opacity = 1.0;
     bool isVisible = true;
     bool hasLegend = true;
+    ThicknessColorBand colorBand;
+    ThicknessRangeMode rangeMode = ThicknessRangeMode::Manual;
+    ThicknessDisplayStyle style=ThicknessDisplayStyle::Overlay;
+    // 渐变的相对叠加强度；最终透明度仍乘以 opacity，不改变公差分类。
+    std::array<double,2> opacityRange{0.15,1.0};
 };
 
 struct ThicknessConfig final
@@ -244,4 +271,5 @@ struct ThicknessState final
     DataRevisionRef result;
     ThicknessStatus status = ThicknessStatus::Unavailable;
     std::optional<std::size_t> selectedSample;
+    std::optional<std::array<double, 2>> displayRange;
 };

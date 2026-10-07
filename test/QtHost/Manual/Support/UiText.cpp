@@ -48,7 +48,7 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件分割"}, {"PartEdit", "零件编辑"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}};
+        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -61,10 +61,14 @@ QString GetActionText(const QString& module, const QString& action)
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
-        {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"},
+        {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
+        {"Roi.Cancel", "取消区域草稿"},
+        {"Roi.SetDraft", "更新区域草稿"},
+        {"Gap.SetDisplay", "应用孔隙色带"},
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
+        {"Begin","开始编辑"},{"ResultEvidence","读取回归证据"},
         {"ActivateAccepted", "重试显示已加载数据"}, {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
         {"ReadLabelRegion", "读取标签区域"}, {"CreateMask", "创建测试掩码"},
@@ -88,6 +92,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"AutomaticIso50", "自动 ISO50 阈值估计"}, {"GlobalIsoPreview", "全局等值面预览"},
         {"MaterialIso", "材料等值面测定"},
         {"LocalAdaptiveIso50", "局部自适应 ISO50"}, {"GradientPeak", "梯度峰值表面定位"},
+        {"LocalRelativeIso", "局部相对等值表面"}, {"EdgeModelFit", "单边模型拟合表面"}, {"PairedEdgeModelFit", "双边模型拟合表面"},
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
@@ -129,15 +134,20 @@ QString GetParameterText(const QString& key)
         {"evidenceKind", "数据证据类型"}, {"revision", "数据修订引用"}, {"expectedBindingRevision", "预期输入绑定版本"},
         {"viewId", "目标视图"}, {"format", "导出格式"}, {"angleDeg", "旋转角度（度）"}, {"id", "标签标识"},
         {"offset", "区域起始偏移（体素）"}, {"size", "区域尺寸（体素）"}, {"defaultValue", "掩码默认值"},
-        {"boxValue", "盒内掩码值"}, {"indexBoxes", "体素索引盒列表"}, {"purpose", "掩码用途"},
+        {"boxValue", "盒内掩码值"}, {"indexBoxes", "体素索引盒列表"}, {"purpose", "用途"},
         {"mode", "显示模式"}, {"iso", "显示等值阈值"}, {"opacity", "不透明度（0～1）"}, {"quality", "显示质量"},
+        {"palette", "色带类型"}, {"rangeMode", "色标范围来源"}, {"constantColor", "恒定颜色"},
+        {"segments","分段色带（按值域从低到高）"},{"segmentFrom","从值（不提供为负无穷）"},
+        {"segmentTo","至值（不提供为正无穷）"},{"displayStyle","叠加显示方式"},{"opacityRange","渐变叠加强度范围"},
+        {"lowColor", "区间低端颜色"}, {"highColor", "区间高端颜色"},
+        {"belowColor", "低于区间的颜色"}, {"aboveColor", "高于区间的颜色"},
         {"axes", "显示坐标轴"}, {"windowLevel", "窗宽与窗位"}, {"transfer", "颜色与透明度传递函数"},
         {"visibility", "辅助元素可见性"}, {"world", "游标世界坐标"}, {"axis", "作用轴"},
         {"removalMode", "裁剪保留模式"}, {"shape", "裁剪工具"}, {"nodeId", "裁剪节点编号"}, {"documentId", "裁剪文档编号"}, {"inputRoi", "输入区域修订（可选）"}, {"plyPath", "裁剪网格路径（PLY）"},
         {"isoMode", "分析阈值方式"}, {"dataRangeRatio", "灰度范围比例"}, {"absoluteIsoValue", "绝对灰度阈值"},
         {"backgroundMean", "背景灰度均值"}, {"materialMean", "材料灰度均值"}, {"filter", "启用孔隙过滤"},
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
-        {"isVisible", "显示结果"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
+        {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
         {"target", "目标零件"}, {"name", "零件名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
         {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"}, {"roiMask", "作用区域掩码"},
         {"protectionMask", "保护掩码"}, {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},
@@ -150,6 +160,9 @@ QString GetParameterText(const QString& key)
         {"profileSampleStepModel", "剖面采样间距（模型单位）"}, {"maximumOffsetModel", "最大定位偏移（模型单位）"},
         {"profileSmoothingSigmaModel", "剖面平滑尺度（模型单位）"}, {"minimumObjectVoxels", "最小对象体素数"},
         {"minimumContrast", "最小灰度对比度"}, {"targetRequestId", "目标计算请求编号"}, {"maxPoints", "最大采样点数"},
+        {"localFraction", "局部等值比例"}, {"grayPair", "界面两侧灰度范围"}, {"sideA", "背景侧范围"}, {"sideB", "材料侧范围"},
+        {"minimumCnr", "最小对比噪声比"}, {"maximumPlateauNoiseRatio", "平台噪声比例上限"}, {"maximumNormalizedResidual", "归一化拟合残差上限"},
+        {"minimumEdgeWidthModel", "最小边缘宽度（模型单位）"}, {"maximumEdgeWidthModel", "最大边缘宽度（模型单位）"}, {"minimumEdgeSeparationModel", "最小边缘间距（模型单位）"},
         {"source", "源数据修订"}, {"processingMask", "处理区域掩码"}, {"materialMask", "材料统计掩码"},
         {"timeoutMs", "计算超时（毫秒）"}, {"ring", "环形校正参数"}, {"diffusion", "扩散滤波参数"}, {"requestId", "计算请求编号"},
         {"isEnabled", "启用旋转"}, {"worldAxis", "世界坐标旋转轴"}, {"worldCenter", "世界坐标旋转中心"},
@@ -176,6 +189,9 @@ QString GetParameterText(const QString& key)
 QString GetParameterHelp(const QString& key)
 {
     static const QHash<QString, QString> help{
+        {"segments","仅作用于本模块的量与单位。按值域从低到高排列连续区间；无穷端段使用恒定色。添加分段后覆盖单一色带，可逐行编辑、上下移动和删除。"},
+        {"opacityRange","相对于原有视图透明度的叠加强度。倾斜按本模块当前量值范围递增，反向倾斜递减；不改变几何、筛选或计算结果。"},
+        {"displayStyle","控制结果叠加的强度。倾斜／反向倾斜按量值渐变；当前采用统一风格实现，不表示改变切片或模型的空间角度。"},
         {"centerIndex", "未提供时使用当前源数据的截面中心；显式提供可逐项输入两个索引。"},
         {"initialIsoValue", "未提供时由算法估计当前输入的初始阈值；显式值使用原始灰度单位。"},
         {"minPartVoxels", "小于此体素数的连通域不生成零件。手动测试默认 1000 以过滤真实 CT 的微小噪声；需保留更小零件时可降低。"},
@@ -218,6 +234,18 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if(key=="displayStyle") {
+        ParameterChoices choices{{"Constant","恒定"},{"Inclined","倾斜（数值渐变叠加）"},{"InverseInclined","反向倾斜"}};
+        if(module=="Wall")choices.prepend({"Overlay","叠加层"});return choices;
+    }
+    if ((module == "Wall" || module == "Gap") && key == "palette")
+        return {{"Constant", "恒定"}, {"Gradient", "梯度"}, {"Rainbow", "彩虹"},
+            {"InverseRainbow", "反向彩虹"}, {"HueLoop", "色调环"}};
+    if (module == "Wall" && key == "rangeMode") return {{"Result", "当前有效厚度范围"},
+        {"Histogram", "当前厚度直方图范围"}, {"Manual", "选定区间／自定义范围"}};
+    if (module == "Gap" && key == "rangeMode") return {{"Result", "当前缺陷体积范围"},
+        {"SelectedInterval", "选定区间／自定义范围"}};
+    if (module == "Surface" && key == "purpose") return {{"Determine", "正式测定"}, {"Preview", "预览"}};
     if (module == "View" && key == "viewScope") {
         auto choices = GetParameterChoices(module, "viewId");
         choices.prepend({"slices", "三个切片"}); choices.prepend({"all", "全部四视图"}); return choices;

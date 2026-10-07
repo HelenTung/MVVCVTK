@@ -3,6 +3,9 @@
 #include "Render/Contracts/SlicePlaneState.h"
 #include "App/ViewTypes.h"
 #include "Render/Support/FeatureOverlayBase.h"
+#include "Render/GapDisplayData.h"
+#include "Render/Support/SliceContourPlane.h"
+#include <vtkCutter.h>
 #include <vtkActor.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
@@ -23,7 +26,7 @@ private:
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
 
 public:
-    GapMeshOverlayStrategy() {
+    explicit GapMeshOverlayStrategy(std::shared_ptr<const GapDisplayData> display = {}) {
         m_actor = vtkSmartPointer<vtkActor>::New();
         m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
         m_actor->SetMapper(m_mapper);
@@ -32,11 +35,21 @@ public:
         m_actor->GetProperty()->SetOpacity(1.0);         // 保持不透明，避免小孔隙在等值面后被背景吞掉
         m_actor->GetProperty()->SetLighting(false);      // 关闭光照，避免红色标签被场景光照改色
         m_actor->SetPickable(false);
+        AttachProp(m_actor);
+        if (display) {
+            m_mapper->SetScalarModeToUseCellData();
+            m_mapper->SetLookupTable(display->labels);
+            m_mapper->UseLookupTableScalarRangeOn();
+            auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
+            legend->SetLookupTable(display->volumes);
+            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
+            legend->SetVisibility(display->hasRegions);
+            AttachProp(legend);
+        }
 
 		// 多边形偏移设置，防止在极少数重合表面发生 Z-Fighting
         m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
 
-        AttachProp(m_actor);
     }
 
     // 只接受 vtkPolyData；类型不匹配时保留 mapper 当前输入，调用方清场应走 overlay detach/clear 生命周期。
@@ -67,11 +80,16 @@ private:
     vtkSmartPointer<vtkLookupTable> m_lut;
     // 当前窗口固定轴向；构造后不变，用于选择 plane normal。
     Orientation m_orientation;
+    vtkSmartPointer<vtkCutter> m_contour;
+    vtkSmartPointer<vtkActor> m_contourActor;
+    vtkSmartPointer<vtkPlane> m_contourPlane=vtkSmartPointer<vtkPlane>::New();
 public:
-    explicit GapSliceOverlayStrategy(Orientation orient) : m_orientation(orient) {
+    explicit GapSliceOverlayStrategy(Orientation orient,
+        std::shared_ptr<const GapDisplayData> display = {}) : m_orientation(orient) {
         m_slice = vtkSmartPointer<vtkImageSlice>::New();
         m_mapper = vtkSmartPointer<vtkImageResliceMapper>::New();
         m_slice->SetMapper(m_mapper);
+        AttachProp(m_slice);
 
         // 设置红色的透明 LUT 映射
         m_lut = vtkSmartPointer<vtkLookupTable>::New();
@@ -82,12 +100,33 @@ public:
             m_lut->SetTableValue(i, 1.0, 0.0, 0.0, 1.0); // 非 0 标签统一显示为红色孔隙
         }
         m_lut->Build(); // 生效
+        if (display) {
+            m_lut = display->labels;
+            m_slice->GetProperty()->SetOpacity(0.35);
+            auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
+            legend->SetLookupTable(display->volumes);
+            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
+            legend->SetVisibility(display->hasRegions);
+            AttachProp(legend);
+            m_contour = vtkSmartPointer<vtkCutter>::New();
+            m_contour->SetInputData(display->mesh);
+            m_contour->GenerateTrianglesOff();
+            auto contourMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            contourMapper->SetInputConnection(m_contour->GetOutputPort());
+            contourMapper->ScalarVisibilityOff();
+            m_contourActor = vtkSmartPointer<vtkActor>::New();
+            m_contourActor->SetMapper(contourMapper);
+            m_contourActor->GetProperty()->SetColor(1, 1, 1);
+            m_contourActor->GetProperty()->LightingOff();
+            m_contourActor->GetProperty()->SetLineWidth(1.5);
+            m_contourActor->PickableOff();
+            AttachProp(m_contourActor);
+        }
 
         m_slice->GetProperty()->SetLookupTable(m_lut);
         m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
         m_slice->GetProperty()->SetLayerNumber(1); // 提高层级防止 Z-fighting
 		m_slice->GetProperty()->SetInterpolationTypeToNearest(); // 最近邻插值，保持标签边界清晰
-        AttachProp(m_slice);
     }
 
     // 输入 label image 后建立固定轴向切片平面；LUT 把 0 当背景、所有正标签统一显示为红色。
@@ -105,6 +144,7 @@ public:
         const auto planeState = SlicePlaneState::Build(m_orientation, {});
         plane->SetNormal(planeState.worldNormal.data());
         m_mapper->SetSlicePlane(plane);
+        if (m_contour) m_contour->SetCutFunction(m_contourPlane);
     }
 
     // Transform 同步 overlay 的 modelToWorld；Cursor 把 plane origin 移到当前十字线并沿法线微偏移。
@@ -119,6 +159,8 @@ public:
             const auto planeState = SlicePlaneState::Build(m_orientation, state.cursor, sliceOffset);
             plane->SetOrigin(planeState.worldOrigin.data());
             plane->SetNormal(planeState.worldNormal.data());
+            if (m_contour) (void)SliceContourPlane::SetPlane(*m_contourPlane,
+                planeState.worldOrigin,planeState.worldNormal,state.modelToWorld);
         }
     }
 };

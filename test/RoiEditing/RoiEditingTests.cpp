@@ -33,10 +33,9 @@ public:
     bool SetRenderNeeded() override {++renders;return true;}
     bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override
     {
-        if (isRejected) return false;
         overlay->AttachRenderer(renderer); overlays.push_back(overlay);
         FeatureOverlayState state; state.modelToWorld=matrix; overlay->SetOverlayState(state);
-        return true;
+        return !isRejected; // 故意模拟已部分挂接后才返回失败的端口。
     }
     void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override
     {
@@ -109,8 +108,24 @@ void TestEditor()
         && data->GetDataGraph().commitId==before,"cancel wrote data or leaked overlays");
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"second draft failed");
     const auto saved=editor.SendRequest({RoiEditingAction::Commit});
-    Require(saved.error==RoiError::None && saved.roi && !editor.GetState().hasDraft && main->overlays.empty(),"formal commit failed");
-    Require(editor.DetachHost() && editor.DetachHost() && data->GetData(data->GetDataGraph(),saved.roi->revision),"detach deleted formal ROI");
+    Require(saved.error==RoiError::None && saved.roi && !editor.GetState().hasDraft
+        && main->overlays.size()==1 && slice->overlays.size()==1,"formal ROI projection was not retained");
+    RoiEditingRequest shown;shown.action=RoiEditingAction::SetVisible;shown.isVisible=true;
+    Require(editor.SendRequest(shown).error==RoiError::None,"committed ROI visibility failed");
+    const auto committedData=data->GetDataGraph().commitId;
+    Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None
+        && main->overlays.size()==2,"draft and committed ROI ownership are not separate");
+    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None
+        && main->overlays.size()==1 && slice->overlays.size()==1
+        && data->GetDataGraph().commitId==committedData,"cancel did not restore the committed projection without a data write");
+    auto otherSource=source; ++otherSource.generation;
+    slice->source=otherSource;
+    Require(editor.OnHostTick() && main->overlays.empty() && slice->overlays.empty()
+        && data->GetData(data->GetDataGraph(),saved.roi->revision),
+        "stale committed projection survived a view source change or deleted formal ROI");
+    slice->source=source;
+    Require(editor.DetachHost() && editor.DetachHost() && main->overlays.empty() && slice->overlays.empty()
+        && data->GetData(data->GetDataGraph(),saved.roi->revision),"detach deleted formal ROI or left a projection");
     Require(editor.AttachHost(context),"reattach failed");
     RoiRequest edit; edit.action=RoiAction::SetGeometry; edit.definition=saved.roi->definition;
     edit.expectedRoi=saved.roi->revision; edit.expectedCatalogRevision=saved.roi->catalogRevision;

@@ -44,6 +44,8 @@
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkTrivialProducer.h>
 #include <vtkVolume.h>
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
 
 namespace {
 
@@ -1414,6 +1416,45 @@ int GetCompositeAtomicFailCount()
     return failureCount;
 }
 
+int GetSliceTextFailCount()
+{
+    int failures = 0;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    const std::array<Orientation, 3> orientations{
+        Orientation::Top_down, Orientation::Front_back, Orientation::Left_right};
+    const std::array<const char*, 3> labels{
+        u8"场景 坐标系\n33.789012 mm", u8"场景 坐标系\n22.456789 mm", u8"场景 坐标系\n11.123456 mm"};
+    for (std::size_t index = 0; index < orientations.size(); ++index) {
+        SliceStrategy slice(orientations[index]);
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        slice.AttachRenderer(renderer);
+        vtkTextActor* text = nullptr;
+        renderer->GetViewProps()->InitTraversal();
+        while (auto* prop = renderer->GetViewProps()->GetNextProp())
+            if (auto* candidate = vtkTextActor::SafeDownCast(prop)) text = candidate;
+        const bool isInitiallyHidden = text && !text->GetVisibility();
+        slice.SetInputData(image);
+        const bool isPendingHidden = text && !text->GetVisibility();
+        RenderParams params;
+        params.cursor = {11.123456, 22.456789, 33.789012};
+        // 模型平移不能被再次加到场景切片坐标上。
+        params.modelMatrix[3] = 100;
+        const bool isApplied = slice.SetVisualState(params, UpdateFlags::Transform | UpdateFlags::Cursor);
+        const bool isWorldPosition = text && text->GetInput()
+            && std::string(text->GetInput()) == labels[index]
+            && text->GetVisibility() && !text->GetPickable();
+        const bool hasChineseFont = text && text->GetTextProperty()->GetFontFamily() == VTK_FONT_FILE
+            && text->GetTextProperty()->GetFontFile();
+        slice.DetachRenderer(renderer);
+        failures += GetCaseResult(isInitiallyHidden && isPendingHidden && isApplied && isWorldPosition
+            && hasChineseFont && renderer->GetViewProps()->GetNumberOfItems() == 0,
+            "Chinese slice text uses the actual world plane and detaches with its view") ? 0 : 1;
+    }
+    return failures;
+}
+
 int GetSliceAndPlaneCacheFailCount()
 {
     int failureCount = 0;
@@ -1517,5 +1558,6 @@ int GetRenderProductFailCount()
         + GetResourceAccountingFailCount()
         + GetSharedCacheAndGpuFailCount()
         + GetCompositeAtomicFailCount()
+        + GetSliceTextFailCount()
         + GetSliceAndPlaneCacheFailCount();
 }

@@ -2,6 +2,9 @@
 #include "FeatureSetup.h"
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
+#if defined(MANUAL_ROI)
+#include "Host/RoiEditingHostFeature.h"
+#endif
 #include <limits>
 #if defined(MANUAL_CROP)
 #include "Host/CropHostFeature.h"
@@ -34,8 +37,19 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     auto reference = std::make_shared<ReferenceDataSource>();
     if (!context.runtime.AttachFeature(reference)) throw std::runtime_error("测试输入适配器挂载失败");
     context.workflow.getPublishedGraph = [reference] { return reference->GetPublishedGraph(); };
-    modules.push_back(CreateDataTest(context, reference, parent));
+    context.workflow.getViewTransforms = [reference] { return reference->GetViewTransforms(); };
+    std::shared_ptr<RoiEditingHostFeature> roi;
+#if defined(MANUAL_ROI)
+    RoiEditingConfig roiConfig; roiConfig.referenceView.viewId="primary-3d"; roiConfig.targetViews=GetAllViews();
+    roi=std::make_shared<RoiEditingHostFeature>(roiConfig);
+    if (!context.runtime.AttachFeature(roi)) throw std::runtime_error("ROI 编辑器挂载失败");
+#endif
+    // 数据比较入口和区域页面共用一个已挂载实例，保持草稿与输入注册的一致性。
+    modules.push_back(CreateDataTest(context, reference, parent, roi));
     modules.push_back(CreateViewTest(context, parent));
+#if defined(MANUAL_ROI)
+    modules.push_back(CreateRoiTest(context,roi,parent));
+#endif
     const auto unavailable = [&](const QString& name) {
         auto* page = new ModulePanel(context, name, parent);
         page->SetNotice("当前构建未启用此功能。"); modules.push_back(page);
@@ -81,7 +95,7 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     unavailable("Part"); unavailable("PartEdit");
 #endif
 #if defined(MANUAL_SURFACE)
-    SurfaceDeterminationConfig surfaceConfig; surfaceConfig.defaultStart.targetViews = GetMainViews();
+    SurfaceDeterminationConfig surfaceConfig; surfaceConfig.defaultStart.targetViews = GetAllViews();
     if (context.workflow.resources.hasExplicitWorkingLimit) surfaceConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig); attach(surface);
     modules.push_back(CreateSurfaceTest(context, surface, parent));

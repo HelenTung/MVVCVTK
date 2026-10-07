@@ -6,6 +6,7 @@
 #include "AlignmentOverlay.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <iostream>
@@ -280,6 +281,41 @@ void Display() {
     double p[3]{};
     poly->GetPoint(0, p);
     Check(std::abs(p[0] + 10) < 1e-12, "overlay target origin mapped to source by inverse");
+    std::vector<AlignmentGeometry> geometries(3);
+    for(std::size_t index=0;index<geometries.size();++index) {
+        geometries[index].kind=AlignmentGeometryKind::Point;
+        geometries[index].sourceCenter={double(index),double(index+1),double(index+2)};
+    }
+    AlignmentRecipe emptyRecipe;
+    const auto markers=AlignmentOverlay::BuildData(alignmentIdentity,geometries,emptyRecipe,1);
+    Check(markers && markers->GetNumberOfVerts()==3 && markers->GetNumberOfLines()==3,
+        "alignment keeps one coordinate triad and point markers instead of per-datum crosses");
+    for(std::size_t index=0;index<geometries.size();++index) {
+        markers->GetPoint(6+static_cast<vtkIdType>(index),p);
+        Check(std::equal(p,p+3,geometries[index].sourceCenter.begin()),"datum marker retains exact fitted center");
+    }
+    AlignmentRecipe bestFit; bestFit.method=AlignmentMethod::ConstrainedBestFit;
+    AlignmentFitPair pair; pair.vertexId=0; pair.nominalPoint={2,3,4}; bestFit.fitPairs={pair};
+    const std::vector<double> modelVertices{1,2,3};
+    const auto pairs=AlignmentOverlay::BuildData(alignmentIdentity,{},bestFit,1,&modelVertices);
+    Check(pairs && pairs->GetNumberOfVerts()==1 && pairs->GetNumberOfLines()==4,
+        "best-fit inputs have a position marker and actual correspondence line with one coordinate triad");
+    pairs->GetPoint(6,p);
+    Check(std::equal(p,p+3,modelVertices.begin()),"best-fit marker uses exact published mesh coordinates");
+    std::vector<AlignmentGeometry> holes(3);
+    holes[0].kind=AlignmentGeometryKind::Plane;holes[0].sourceDirection={0,0,1};
+    for(std::size_t index=1;index<holes.size();++index) {
+        holes[index].kind=AlignmentGeometryKind::Cylinder;
+        holes[index].sourceCenter={double(index*3),2,4};holes[index].sourceDirection={0,0,1};
+        holes[index].radius=double(index)*.75;
+    }
+    const auto cylinders=AlignmentOverlay::BuildData(alignmentIdentity,holes,emptyRecipe,10);
+    Check(cylinders && cylinders->GetNumberOfLines()==397 && cylinders->GetNumberOfVerts()==0,
+        "plane and two fitted cylinders retain three rings, generators and one axis per cylinder with a single triad");
+    cylinders->GetPoint(14,p);
+    Check(std::abs(std::hypot(p[0]-holes[1].sourceCenter[0],p[1]-holes[1].sourceCenter[1])-holes[1].radius)<1e-12
+        && p[2]==holes[1].sourceCenter[2],
+        "cylinder display consumes the fitted center and radius without refitting the measurement");
 }
 void Reentry() {
     Fixture f;

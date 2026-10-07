@@ -7,13 +7,12 @@
 #endif
 #include "../../../Host/FeatureInput.h"
 namespace Manual {
-ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSource> reference, QWidget* parent)
+ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSource> reference, QWidget* parent,
+    std::shared_ptr<RoiEditingHostFeature> editor)
 {
     auto* panel = new ModulePanel(context, "Data", parent);
 #if defined(MANUAL_ROI)
-    RoiEditingConfig roiConfig;roiConfig.referenceView.viewId="primary-3d";roiConfig.targetViews=GetAllViews();
-    auto editor=std::make_shared<RoiEditingHostFeature>(roiConfig);
-    if(!context.runtime.AttachFeature(editor))throw std::runtime_error("ROI editor attach failed");
+    if (!editor) throw std::invalid_argument("数据测试入口缺少组合的 ROI 编辑器");
     panel->AttachAction("EditRoiBox",{{"matrix",GetValues(roiIdentityMatrix)}},[panel,editor](auto id,const auto& p){
         const auto source=panel->GetSession()->GetImageDescriptor();if(!source)throw std::runtime_error("source unavailable");
         RoiRequest draft;draft.definition.source=source->dataRevision;draft.metadata.name="comparison-half-box";
@@ -26,6 +25,8 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         RoiEditingRequest commit;commit.action=RoiEditingAction::Commit;const auto result=editor->SendRequest(commit);
         panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"draftBeforeCommit",hadDraft},{"draftAfterCommit",editor->GetState().hasDraft},{"roi",result.roi?GetRefText(result.roi->revision):QString()},{"error",int(result.error)}});
     },TestPolicy::Compute);
+#else
+    (void)editor;
 #endif
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
     panel->AttachAction("Load", GetJson(R"({"filePath":"F:/data/ct/1536x1536x1536_1440.raw","datasetId":"1","dimensions":[1536,1536,1536],"spacingLPS":[0.1537,0.1537,0.1537],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
@@ -60,6 +61,9 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("Descriptor", {}, [panel](auto id, const auto&) {
         panel->SetComplete(id, "Observed", GetDescriptor(panel->GetSession()->GetImageDescriptor()));
     }, TestPolicy::Read);
+    panel->AttachAction("ResultEvidence",{},[panel,reference](auto id,const auto&) {
+        panel->SetComplete(id,"Observed",reference->GetResultEvidence());
+    },TestPolicy::Read);
     panel->AttachAction("Select", {{"revision", ""}, {"expectedBindingRevision", "current"}},
         [panel](auto id, const auto& params) {
             const auto ref = GetRef(params["revision"]);

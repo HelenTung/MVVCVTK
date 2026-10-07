@@ -9,6 +9,7 @@
 #include "Render/Contracts/OverlayService.h"
 #include <vtkActorCollection.h>
 #include <vtkActor.h>
+#include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkCell.h>
 #include <vtkIdTypeArray.h>
@@ -811,12 +812,75 @@ void Display()
     const auto invalidId = candidate.statistics.minimumSample.value_or(0) == 0 ? 1U : 0U;
     (*mixed)[invalidId].validity = ThicknessValidity::NoValidSource;
     (*mixed)[invalidId].thickness = 0;
+    std::size_t colorCases=0;
+    for(auto& sample:*mixed) if(sample.validity==ThicknessValidity::Valid && colorCases<2) {
+        sample.thickness=colorCases++==0 ? 0.5 : 3.5;
+    }
+    Check(colorCases==2,"display fixture covers distinct lower and upper tolerance colors");
     candidate.field.samples = mixed;
     ThicknessData::Record record{
         w.archive, candidate.field, candidate.statistics, candidate.regions, {}};
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto inclined=display;inclined.style=ThicknessDisplayStyle::Inclined;
+    const auto faded=ThicknessOverlay::BuildData(record,*w.mesh,inclined);
+    auto* fadeColors=faded.mesh->GetCellData()->GetScalars();
+    Check(fadeColors && fadeColors->GetNumberOfComponents()==4
+        && faded.mesh->GetNumberOfCells()==prepared.mesh->GetNumberOfCells(),
+        "inclined wall display uses RGBA without changing sample footprints or topology");
+    auto tolerance = display; tolerance.mode = ThicknessDisplayMode::Tolerance;
+    const auto toleranceData = ThicknessOverlay::BuildData(record, *w.mesh, tolerance);
+    tolerance.colorBand.mode = ThicknessColorMode::HueLoop;
+    tolerance.colorBand.constantColor = {0,0,0};
+    const auto alternate = ThicknessOverlay::BuildData(record, *w.mesh, tolerance);
+    auto* toleranceColors = toleranceData.mesh->GetCellData()->GetScalars();
+    auto* alternateColors = alternate.mesh->GetCellData()->GetScalars();
+    bool hasSameTolerance = toleranceColors->GetNumberOfTuples() == alternateColors->GetNumberOfTuples();
+    for (vtkIdType index = 0; hasSameTolerance && index < toleranceColors->GetNumberOfTuples(); ++index) {
+        double first[3], second[3]; toleranceColors->GetTuple(index,first); alternateColors->GetTuple(index,second);
+        hasSameTolerance = std::equal(first,first+3,second);
+    }
+    Check(hasSameTolerance, "continuous palette options do not alter tolerance or invalid colors");
+    auto* toleranceIds=vtkIdTypeArray::SafeDownCast(toleranceData.mesh->GetCellData()->GetArray("thickness.sample"));
+    bool hasMappedTolerance=toleranceIds && toleranceIds->GetNumberOfValues()==toleranceColors->GetNumberOfTuples();
+    for(vtkIdType cell=0;hasMappedTolerance && cell<toleranceIds->GetNumberOfValues();++cell) {
+        const auto id=toleranceIds->GetValue(cell);
+        if(id<0 || static_cast<std::size_t>(id)>=mixed->size()) {hasMappedTolerance=false;break;}
+        const auto& sample=(*mixed)[static_cast<std::size_t>(id)];
+        const std::array<double,3> expected=sample.validity!=ThicknessValidity::Valid ? std::array<double,3>{128,128,128}
+            : sample.thickness<record.archive.evaluation.lower ? std::array<double,3>{208,88,89}
+            : sample.thickness>record.archive.evaluation.upper ? std::array<double,3>{83,114,188}
+            : std::array<double,3>{97,179,113};
+        double actual[3];toleranceColors->GetTuple(cell,actual);
+        hasMappedTolerance &= std::equal(actual,actual+3,expected.begin());
+    }
+    Check(hasMappedTolerance,"each sample ID maps to its exact VG tolerance or invalid RGB");
+    auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
+    bool hasMatchingFootprints=surfaceIds && surfaceIds->GetNumberOfValues()==prepared.mesh->GetNumberOfCells();
+    // 用原始三角形和归档重心坐标独立重建面片，检查显示未替换测量几何。
+    for(vtkIdType index=0;hasMatchingFootprints && index<prepared.mesh->GetNumberOfCells();++index) {
+        const auto sampleIndex=surfaceIds->GetValue(index);
+        if(sampleIndex<0 || static_cast<std::size_t>(sampleIndex)>=candidate.field.samples->size()) {
+            hasMatchingFootprints=false;break;
+        }
+        const auto& sample=(*candidate.field.samples)[static_cast<std::size_t>(sampleIndex)];
+        auto* cell=prepared.mesh->GetCell(index);
+        hasMatchingFootprints &= cell->GetNumberOfPoints()==3 && sample.validity!=ThicknessValidity::OutsideEvaluation;
+        for(std::size_t corner=0;hasMatchingFootprints && corner<3;++corner) {
+            double actual[3];prepared.mesh->GetPoint(cell->GetPointId(static_cast<int>(corner)),actual);
+            for(std::size_t axis=0;axis<3;++axis) {
+                double expected=0;
+                for(std::size_t vertex=0;vertex<3;++vertex) {
+                    const auto id=w.mesh->GetTriangles()[sample.sourceTriangle*3+vertex];
+                    expected+=sample.barycentricCorners[corner][vertex]*w.mesh->GetVertices()[id*3+axis];
+                }
+                hasMatchingFootprints &= std::abs(actual[axis]-expected)<1e-12;
+            }
+        }
+    }
+    Check(hasMatchingFootprints && prepared.mesh->GetNumberOfCells()>0,
+        "field display preserves original source footprints and exact query sample IDs");
     auto renderer = vtkSmartPointer<vtkRenderer>::New();
     auto overlay = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                       HostRenderViewRole::Primary3D);
@@ -840,7 +904,7 @@ void Display()
     while (auto *prop = renderer->GetViewProps()->GetNextProp())
         if (auto *legend = vtkLegendBoxActor::SafeDownCast(prop))
             hasInvalidLegend = legend->GetNumberOfEntries() == 1 &&
-                               std::string(legend->GetEntryString(0)) == "Invalid / unmeasured";
+                               std::string(legend->GetEntryString(0)) == u8"无效/未测";
     Check(hasInvalidLegend, "invalid color has an explicit legend entry");
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
     window->SetOffScreenRendering(1);
@@ -879,13 +943,32 @@ void Display()
         break;
     }
     if (candidate.statistics.minimumSample)
+    {
         overlay->SetSelection(&(*candidate.field.samples)[*candidate.statistics.minimumSample]);
+        bool hasExactQuery=false;
+        renderer->GetViewProps()->InitTraversal();
+        while(auto* prop=renderer->GetViewProps()->GetNextProp()) {
+            auto* actor=vtkActor::SafeDownCast(prop);
+            auto* mapper=actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
+            auto* data=mapper ? mapper->GetInput() : nullptr;
+            if(!data || data->GetNumberOfLines()!=0 || data->GetNumberOfVerts()!=1 || data->GetNumberOfPoints()!=1)continue;
+            double first[3];data->GetPoint(0,first);
+            const auto& sample=(*candidate.field.samples)[*candidate.statistics.minimumSample];
+            hasExactQuery=std::equal(first,first+3,sample.source.begin())
+                && actor->GetProperty()->GetPointSize()==8
+                && actor->GetProperty()->GetRenderPointsAsSpheres();
+        }
+        Check(hasExactQuery,"field selection marks the exact query position with the VG point style");
+        window->Render();capture("WallThickness-Selection.png");
+    }
     overlay->SetOverlayState({{0, 0, 2.5}, {}});
     overlay->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 0, "detach removes owned props");
     auto slice = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                     HostRenderViewRole::TopDownSlice);
     slice->AttachRenderer(renderer);
+    Check(renderer->GetViewProps()->GetNumberOfItems()==5,
+        "slice owns colored field contour, contrast outline, query marker and both legends");
     FeatureOverlayState state;
     state.cursor = {3, 3, 2.5};
     slice->SetOverlayState(state);
@@ -893,6 +976,31 @@ void Display()
     renderer->ResetCameraClippingRange();
     window->Render();
     capture("WallThickness-Slice.png");
+    bool hasFieldContours=false;
+    bool hasMatchingIntersectionColors=true;
+    auto* projectedActors=renderer->GetActors();projectedActors->InitTraversal();
+    while(auto* actor=projectedActors->GetNextActor()) {
+        auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if(!mapper)continue;mapper->Update();
+        auto* cut=mapper->GetInput();
+        if(cut && cut->GetNumberOfLines()>0 && cut->GetCellData()->GetArray("thickness.sample")) {
+            hasFieldContours=true;
+            auto* cutIds=vtkIdTypeArray::SafeDownCast(cut->GetCellData()->GetArray("thickness.sample"));
+            auto* cutColors=cut->GetCellData()->GetScalars();
+            for(vtkIdType cell=0;cell<cut->GetNumberOfCells();++cell) {
+                bool hasSameColor=false;
+                for(vtkIdType source=0;source<surfaceIds->GetNumberOfValues();++source) if(surfaceIds->GetValue(source)==cutIds->GetValue(cell)) {
+                    double first[3],second[3];prepared.mesh->GetCellData()->GetScalars()->GetTuple(source,first);cutColors->GetTuple(cell,second);
+                    hasSameColor=std::equal(first,first+3,second);break;
+                }
+                hasMatchingIntersectionColors &= hasSameColor;
+                double point[3];cut->GetPoint(cut->GetCell(cell)->GetPointId(0),point);
+                hasMatchingIntersectionColors &= std::abs(point[2]-state.cursor[2])<1e-10;
+            }
+        }
+    }
+    Check(hasFieldContours,"computed field footprints remain visible in the current 2D slice");
+    Check(hasMatchingIntersectionColors,"2D intersections retain exact sample IDs, RGB and the requested plane");
     bool sliceMapped = false;
     auto *sliceActors = renderer->GetActors();
     sliceActors->InitTraversal();
@@ -938,6 +1046,18 @@ void Display()
     Check(sliceMapped, "actual cutter pick preserves exact sample mapping");
     slice->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 0, "slice cleanup");
+    slice->AttachRenderer(renderer);
+    auto replacement=vtkSmartPointer<vtkPolyData>::New();replacement->ShallowCopy(prepared.mesh);
+    slice->SetInputData(replacement);
+    bool hasVisibleStaleQueries=false;
+    auto* replacementActors=renderer->GetActors();replacementActors->InitTraversal();
+    while(auto* actor=replacementActors->GetNextActor()) {
+        auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if(!mapper)continue;mapper->Update();auto* input=mapper->GetInput();
+        hasVisibleStaleQueries |= actor->GetVisibility() && input && input->GetNumberOfVerts()>0;
+    }
+    Check(!hasVisibleStaleQueries,"replacement display mesh retires prior query markers");
+    slice->DetachRenderer(renderer);
 }
 } // namespace
 int main(int argc, char **argv)

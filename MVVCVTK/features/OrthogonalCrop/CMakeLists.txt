@@ -10,6 +10,7 @@ set(MVVCVTK_CROP_SOURCES
     include/Interaction/CropBridge.h
     include/Interaction/CropPlaneWidget.h
     include/Render/CropShaderController.h
+    include/Render/CropGeometryOverlay.h
     include/Routing/CropRouter.h
     src/Algorithms/CropAlgorithm.cpp
     src/Algorithms/CropGeometry.cpp
@@ -118,6 +119,7 @@ target_link_libraries(
         MVVCVTK::FeatureSPI
         ${MVVCVTK_VTK_PUBLIC_TARGETS}
     PRIVATE
+        "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>"
         ${MVVCVTK_VTK_TARGETS}
 )
 install(

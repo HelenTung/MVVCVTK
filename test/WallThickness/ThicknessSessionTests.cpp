@@ -3,10 +3,12 @@
 #include "Host/PartSegmentationHostFeature.h"
 #include "Host/VtkAppHostSession.h"
 #include "App/Services/FeatureViewService.h"
+#include "Render/Contracts/OverlayService.h"
 #include "Host/TrustedDataPort.h"
 #include "Data/DataPayloads.h"
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkPropCollection.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -179,6 +181,62 @@ class Probe final : public HostFeature
     }
     HostFeatureContext context;
 };
+
+struct DisplayFault final {
+    bool isEnabled=false;
+    std::vector<std::shared_ptr<FeatureOverlay>> candidates;
+};
+class FaultOverlayPort final : public OverlayService {
+public:
+    FaultOverlayPort(std::shared_ptr<OverlayService> port,std::shared_ptr<DisplayFault> fault,bool isLast)
+        : m_port(std::move(port)),m_fault(std::move(fault)),m_isLast(isLast) {}
+    bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override {
+        if(m_fault->isEnabled)m_fault->candidates.push_back(overlay);
+        const bool attached=m_port->AttachOverlay(overlay);
+        return attached && !(m_fault->isEnabled && m_isLast);
+    }
+    void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override {
+        m_port->RemoveOverlay(overlay);
+        auto& items=m_fault->candidates;
+        items.erase(std::remove(items.begin(),items.end(),overlay),items.end());
+    }
+    void ClearOverlays() noexcept override { m_port->ClearOverlays(); }
+private:
+    std::shared_ptr<OverlayService> m_port;
+    std::shared_ptr<DisplayFault> m_fault;
+    bool m_isLast;
+};
+class FaultViews final : public FeatureViewDirectory {
+public:
+    FaultViews(std::shared_ptr<FeatureViewDirectory> views,std::shared_ptr<DisplayFault> fault)
+        : m_views(std::move(views)),m_fault(std::move(fault)) {}
+    std::vector<HostFeatureView> GetViews(const HostViewTargets& t) const override {return m_views->GetViews(t);}
+    std::shared_ptr<FeatureViewService> GetFeaturePort(const std::string& id) const override {return m_views->GetFeaturePort(id);}
+    std::optional<HostInputView> GetInputView(const HostViewTarget& t) const override {return m_views->GetInputView(t);}
+    std::shared_ptr<OverlayService> GetOverlayPort(const std::string& id) const override {
+        return std::make_shared<FaultOverlayPort>(m_views->GetOverlayPort(id),m_fault,id=="thickness-3");
+    }
+private:
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    std::shared_ptr<DisplayFault> m_fault;
+};
+class WallMount final : public HostFeature {
+public:
+    WallMount(std::shared_ptr<WallThicknessHostFeature> wall,std::shared_ptr<DisplayFault> fault)
+        : m_wall(std::move(wall)),m_fault(std::move(fault)) {}
+    std::string_view GetFeatureId() const noexcept override {return m_wall->GetFeatureId();}
+    FeatureDataContract GetDataContract() const override {return m_wall->GetDataContract();}
+    std::vector<FeatureOperationState> GetOperationStates() const override {return m_wall->GetOperationStates();}
+    bool AttachHost(const HostFeatureContext& context) override {
+        auto candidate=context;candidate.views=std::make_shared<FaultViews>(context.views,m_fault);
+        return m_wall->AttachHost(candidate);
+    }
+    bool DetachHost() override {return m_wall->DetachHost();}
+    bool OnHostTick() override {return m_wall->OnHostTick();}
+private:
+    std::shared_ptr<WallThicknessHostFeature> m_wall;
+    std::shared_ptr<DisplayFault> m_fault;
+};
 void TestSession(Acceptance c)
 {
     HostSessionConfig config;
@@ -219,8 +277,10 @@ void TestSession(Acceptance c)
     auto part = std::make_shared<PartSegmentationHostFeature>();
     auto surface = std::make_shared<SurfaceDeterminationHostFeature>();
     auto wall = std::make_shared<WallThicknessHostFeature>(c.limits);
+    auto displayFault=std::make_shared<DisplayFault>();
+    auto wallMount=std::make_shared<WallMount>(wall,displayFault);
     Require(session.AttachFeature(probe) && session.AttachFeature(part) &&
-                session.AttachFeature(surface) && session.AttachFeature(wall),
+                session.AttachFeature(surface) && session.AttachFeature(wallMount),
             "Attach public features failed.");
     Require(!session.Start(), "HostDriven must reject the native event-loop entry.");
     const auto wait = [&](const auto &ready)
@@ -451,12 +511,50 @@ void TestSession(Acceptance c)
     color.action = ThicknessAction::SetDisplay;
     color.display = display;
     color.display->mode = ThicknessDisplayMode::Tolerance;
+    std::array<int,4> oldProps{};
+    for(std::size_t i=0;i<oldProps.size();++i)
+        oldProps[i]=probe->context.views->GetInputView({display.targetViews.viewIds[i]})->renderer->GetViewProps()->GetNumberOfItems();
+    const auto graphCommit=probe->context.data->GetDataGraph().commitId;
+    displayFault->isEnabled=true;
+    Require(wall->SendRequest(color).status != ThicknessAdmissionStatus::Accepted
+        && displayFault->candidates.empty(),"Partially attached wall candidate was not fully removed.");
+    for(std::size_t i=0;i<oldProps.size();++i)
+        Require(probe->context.views->GetInputView({display.targetViews.viewIds[i]})->renderer->GetViewProps()->GetNumberOfItems()==oldProps[i],
+            "Failed wall display replaced or leaked renderer props.");
+    Require(probe->context.data->GetDataGraph().commitId==graphCommit
+        && wall->GetResult(completed->result)->samples==before,"Failed display changed published numerical data.");
+    displayFault->isEnabled=false;
     Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
             "Tolerance display rejected.");
     Require(wall->GetResult(completed->result)->samples == before &&
                 wall->GetResult(completed->result)->nodes == nodesBefore,
             "Display changes numerical buffer.");
-    Require(session.DetachFeature(*wall) && session.DetachFeature(*surface) &&
+    for (const auto mode : {ThicknessColorMode::Constant, ThicknessColorMode::Gradient,
+             ThicknessColorMode::Rainbow, ThicknessColorMode::InverseRainbow, ThicknessColorMode::HueLoop}) {
+        color.display->mode = ThicknessDisplayMode::Continuous;
+        color.display->rangeMode = ThicknessRangeMode::Result;
+        color.display->colorBand.mode = mode;
+        Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
+            "Color mode switch rejected.");
+        const auto range = wall->GetState().displayRange;
+        Require(range && (*range)[0] == *result->statistics.minimum
+            && (*range)[1] >= *result->statistics.maximum,
+            "Automatic legend range does not follow the valid measured thickness.");
+        Require(wall->GetResult(completed->result)->samples == before
+            && probe->context.data->GetDataGraph().commitId == graphCommit,
+            "Color mode changed formal data or measurement identity.");
+    }
+    color.display->rangeMode = ThicknessRangeMode::Histogram;
+    Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted
+        && wall->GetState().displayRange == std::optional<std::array<double,2>>(c.evaluation.histogramRange),
+        "Histogram legend range does not follow the current evaluation.");
+    const auto previousRange = wall->GetState().displayRange;
+    color.display->colorBand.lowColor[0] = std::numeric_limits<double>::quiet_NaN();
+    Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::InvalidRequest
+        && wall->GetState().displayRange == previousRange
+        && wall->GetResult(completed->result)->samples == before,
+        "Invalid palette must retain the existing result and display range.");
+    Require(session.DetachFeature(*wallMount) && session.DetachFeature(*surface) &&
                 session.DetachFeature(*part) && session.DetachFeature(*probe),
             "Public feature detach failed.");
     Require(session.Stop(), "Session Stop failed.");

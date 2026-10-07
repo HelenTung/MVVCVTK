@@ -3,6 +3,9 @@
 #include "Data/DataGraphTypes.h"
 
 #include <cstddef>
+#include <array>
+#include <optional>
+#include <vector>
 #include <string>
 
 // worker 执行轴；Host 只读取已发布状态，不借此控制 overlay 显示。
@@ -53,6 +56,32 @@ struct GapStatistics final {
     double porosityRatio = 0.0;
 };
 
+enum class GapColorMode { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
+enum class GapRangeMode { Result, SelectedInterval };
+enum class GapDisplayStyle { Constant, Inclined, InverseInclined };
+struct GapColorSegment final {
+    // 缺省端点分别表示负／正无穷；无穷端段只支持恒定色，邻段必须连续。
+    std::optional<double> lower, upper;
+    GapColorMode mode=GapColorMode::Gradient;
+    std::array<double,3> lowColor{0.294,0.294,0.84},highColor{0.84,0.294,0.294};
+};
+
+// 色带只投影已发布的缺陷体积；不改变标签、筛选、网格和统计。
+struct GapDisplayParams final {
+    GapColorMode mode = GapColorMode::Rainbow;
+    std::array<double, 3> constantColor{0.70, 0.70, 0.70};
+    std::array<double, 3> lowColor{0.294, 0.294, 0.84};
+    std::array<double, 3> highColor{0.84, 0.294, 0.294};
+    std::array<double, 3> belowColor{0.64, 0.29, 0.78};
+    std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
+    GapRangeMode rangeMode = GapRangeMode::Result;
+    std::array<double, 2> range{0, 1};
+    std::vector<GapColorSegment> segments;
+    GapDisplayStyle style=GapDisplayStyle::Constant;
+    // 按本 Feature 当前体积范围渐变的相对叠加强度，仍乘以各视图原有透明度。
+    std::array<double,2> opacityRange{0.15,1.0};
+};
+
 struct GapHostState final {
     GapAnalysisState analysisState = GapAnalysisState::Idle;
     GapStatistics statistics;
@@ -65,6 +94,8 @@ struct GapHostState final {
     DataRevisionRef resultSet;
     bool isViewActive = false;
     bool isExitPending = false;
+    bool isOverlayVisible = false;
+    GapDisplayParams display;
 };
 
 struct GapHostResult final {

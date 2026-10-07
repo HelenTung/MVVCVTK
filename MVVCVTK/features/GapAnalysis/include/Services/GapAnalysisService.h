@@ -77,6 +77,8 @@ public:
         GapViewRequest request,
         std::function<void(bool isSuccess)> onComplete = nullptr);
     bool SwitchOverlay();
+    bool SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay = {});
+    GapDisplayParams GetDisplayParams() const;
     // 清除显示会话与已挂载 overlay；若 worker 正在执行，仅发布停止请求。
     bool ExitView();
     void ClearView();

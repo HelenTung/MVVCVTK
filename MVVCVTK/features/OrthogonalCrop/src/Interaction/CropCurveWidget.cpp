@@ -4,7 +4,9 @@
 #include <vtkAlgorithm.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
-#include <vtkCylinderSource.h>
+#include <vtkCellArray.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
 #include <vtkHandleWidget.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
@@ -50,9 +52,9 @@ public:
         modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();worldToModel=vtkSmartPointer<vtkMatrix4x4>::New();
         mapper=vtkSmartPointer<vtkPolyDataMapper>::New();actor=vtkSmartPointer<vtkActor>::New();actor->SetMapper(mapper);
         actor->SetPickable(false);actor->GetProperty()->SetRepresentationToWireframe();
-        actor->GetProperty()->SetColor(0.74,0.80,0.86);actor->GetProperty()->SetLineWidth(1.5);
+        actor->GetProperty()->SetColor(0.95,0.2,0.2);actor->GetProperty()->SetLineWidth(1.5);
+        actor->GetProperty()->LightingOff();
         sphere=vtkSmartPointer<vtkSphereSource>::New();sphere->SetOutputPointsPrecision(vtkAlgorithm::DOUBLE_PRECISION);sphere->SetThetaResolution(40);sphere->SetPhiResolution(24);
-        cylinder=vtkSmartPointer<vtkCylinderSource>::New();cylinder->SetOutputPointsPrecision(vtkAlgorithm::DOUBLE_PRECISION);cylinder->SetResolution(48);cylinder->CappingOn();
         for(std::size_t i=0;i<handles.size();++i) {
             auto& handle=handles[i];handle.owner=this;handle.index=i;
             handle.widget=vtkSmartPointer<vtkHandleWidget>::New();
@@ -124,8 +126,18 @@ public:
             sphere->SetCenter(center.data());sphere->SetRadius(operation.radius);mapper->SetInputConnection(sphere->GetOutputPort());
             actor->SetUserMatrix(modelToWorld);
         } else {
-            cylinder->SetRadius(operation.radius);cylinder->SetHeight(operation.height);
-            mapper->SetInputConnection(cylinder->GetOutputPort());
+            // 三个圆环和四条母线表示圆柱，避免封盖三角扇成为视觉噪声。
+            auto points=vtkSmartPointer<vtkPoints>::New();points->SetDataTypeToDouble();
+            auto lines=vtkSmartPointer<vtkCellArray>::New();
+            constexpr double tau=6.283185307179586;
+            for(int ring=0;ring<3;++ring) {
+                const double y=(ring-1)*operation.height/2;
+                for(int i=0;i<64;++i)points->InsertNextPoint(operation.radius*std::cos(tau*i/64),y,operation.radius*std::sin(tau*i/64));
+                for(int i=0;i<64;++i){const vtkIdType ids[]{ring*64+i,ring*64+(i+1)%64};lines->InsertNextCell(2,ids);}
+            }
+            for(int i=0;i<64;i+=16){const vtkIdType ids[]{i,128+i};lines->InsertNextCell(2,ids);}
+            auto outline=vtkSmartPointer<vtkPolyData>::New();outline->SetPoints(points);outline->SetLines(lines);
+            mapper->SetInputData(outline);
             const auto z=Cross(radial,axis);vtkNew<vtkMatrix4x4> local;local->Identity();
             for(int row=0;row<3;++row) {local->SetElement(row,0,radial[row]);local->SetElement(row,1,axis[row]);local->SetElement(row,2,z[row]);local->SetElement(row,3,center[row]);}
             vtkNew<vtkMatrix4x4> world;vtkMatrix4x4::Multiply4x4(modelToWorld,local,world);actor->SetUserMatrix(world);
@@ -163,7 +175,7 @@ public:
     vtkRenderWindowInteractor* interactor=nullptr;vtkWeakPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkMatrix4x4> modelToWorld,worldToModel;
     vtkSmartPointer<vtkPolyDataMapper> mapper;vtkSmartPointer<vtkActor> actor;
-    vtkSmartPointer<vtkSphereSource> sphere;vtkSmartPointer<vtkCylinderSource> cylinder;
+    vtkSmartPointer<vtkSphereSource> sphere;
     std::array<Handle,4> handles;
     std::function<void(CropInteractionPhase)> callback;
     std::function<bool()> gate;

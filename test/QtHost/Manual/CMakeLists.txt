@@ -8,7 +8,7 @@ target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::Feat
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
 foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;PartSegmentation;Part"
     "SURFACE;SurfaceDetermination;Surface" "ARTIFACT;ArtifactReduction;Artifact" "ROTATION;ModelRotation;Rotation"
-    "ALIGNMENT;MetrologyAlignment;Alignment" "WALL;WallThickness;Wall")
+    "ALIGNMENT;MetrologyAlignment;Alignment" "WALL;WallThickness;Wall" "ROI;RoiEditing;Roi")
     list(GET spec 0 key)
     list(GET spec 1 feature)
     list(GET spec 2 module)
