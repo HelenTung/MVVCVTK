@@ -19,9 +19,11 @@ public:
     bool GetIsClosing() const { return m_isClosing; }
     std::uint64_t GetBusyOperation() const { return m_busyId; }
     void AttachExit(QString module, std::function<bool()> exit) { m_exits.emplace_back(std::move(module), std::move(exit)); }
-    void SetSurfaceInput(DataRevisionRef source, DataRevisionRef mesh) { m_surfaceSource = source; m_surfaceMesh = mesh; }
+    void SetSurfaceInput(DataRevisionRef source, DataRevisionRef mesh, std::optional<double> threshold = {})
+    { m_surfaceSource = source; m_surfaceMesh = mesh; m_surfaceThreshold = threshold; }
     DataRevisionRef GetSurfaceSource() const { return m_surfaceSource; }
     DataRevisionRef GetSurfaceMesh() const { return m_surfaceMesh; }
+    std::optional<double> GetSurfaceThreshold() const { return m_surfaceThreshold; }
     std::function<void(const QString&, const QString&, const QJsonObject&)> onCopyParameters;
     std::function<void(const QString&, const QString&, const QJsonObject&)> onNavigate;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
@@ -36,5 +38,6 @@ private:
     std::vector<std::pair<QString, std::function<bool()>>> m_exits;
     DataRevisionRef m_surfaceSource;
     DataRevisionRef m_surfaceMesh;
+    std::optional<double> m_surfaceThreshold;
 };
 }

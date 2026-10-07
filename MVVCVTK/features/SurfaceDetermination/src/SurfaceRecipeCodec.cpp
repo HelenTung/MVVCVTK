@@ -78,6 +78,7 @@ void WriteRecipe(std::ostream &out, const SurfaceRecipe &p)
 {
     out << unsigned(p.method) << ' ' << unsigned(p.componentSelection) << ' ';
     WriteValue(out, p.initialIsoValue);
+    WriteArray(out, p.materialRange);
     WriteArray(out, p.seedModelPoint);
     WriteValue(out, p.profileHalfLengthModel);
     WriteValue(out, p.profileSampleStepModel);
@@ -115,15 +116,16 @@ void WriteRecipe(std::ostream &out, const SurfaceRecipe &p)
         out << '\n';
     }
 }
-bool ReadRecipe(std::istream &in, SurfaceRecipe &p)
+bool ReadRecipe(std::istream &in, SurfaceRecipe &p, unsigned version)
 {
     unsigned method = 0, selection = 0;
     int gray = 0;
-    if (!(in >> method >> selection) || method > 6 || selection > 2)
+    if (!(in >> method >> selection) || method > (version == 2 ? 6U : 7U) || selection > 2)
         return false;
     p.method = static_cast<SurfaceDeterminationMethod>(method);
     p.componentSelection = static_cast<SurfaceComponentSelection>(selection);
-    if (!ReadValue(in, p.initialIsoValue) || !ReadArray(in, p.seedModelPoint) ||
+    if (!ReadValue(in, p.initialIsoValue) || (version >= 3 && !ReadArray(in, p.materialRange)) ||
+        !ReadArray(in, p.seedModelPoint) ||
         !ReadValue(in, p.profileHalfLengthModel) ||
         !ReadValue(in, p.profileSampleStepModel) || !ReadValue(in, p.maximumOffsetModel) ||
         !ReadValue(in, p.profileSmoothingSigmaModel) ||
@@ -184,9 +186,20 @@ bool ReadRecipe(std::istream &in, SurfaceRecipe &p)
 
 std::string SurfaceRecipeCodec::GetError(const SurfaceRecipe &p)
 {
-    if (unsigned(p.method) > 6 || unsigned(p.componentSelection) > 2)
+    if (unsigned(p.method) > 7 || unsigned(p.componentSelection) > 2)
         return "Unsupported method or component selection.";
-    if (!p.minimumObjectVoxels || !std::isfinite(p.minimumContrast) || p.minimumContrast < 0 ||
+    if (p.materialRange)
+    {
+        const auto range = *p.materialRange;
+        if (p.method != SurfaceDeterminationMethod::MaterialIso || !std::isfinite(range[0]) ||
+            !std::isfinite(range[1]) || range[0] >= range[1] || !std::isfinite(range[1] - range[0]) ||
+            (p.initialIsoValue && (*p.initialIsoValue <= range[0] || *p.initialIsoValue >= range[1])))
+            return "Material ISO requires finite background < threshold < material values.";
+    }
+    if (p.method == SurfaceDeterminationMethod::MaterialIso &&
+        (p.grayPair || !p.materialPairs.empty() || !p.regionOverrides.empty()))
+        return "Material ISO uses one scalar material range without local overrides or label interfaces.";
+    if (!std::isfinite(p.minimumContrast) || p.minimumContrast < 0 ||
         !std::isfinite(p.minimumCnr) || p.minimumCnr < 0)
         return "Invalid count, contrast or CNR.";
     if (!std::isfinite(p.seedFraction) || p.seedFraction <= 0 || p.seedFraction >= 1 ||
@@ -263,7 +276,8 @@ std::string SurfaceRecipeCodec::GetError(const SurfaceRecipe &p)
         if (rule.minimumCnr)
             local.minimumCnr = *rule.minimumCnr;
         if (local.method == SurfaceDeterminationMethod::AutomaticIso50 ||
-            local.method == SurfaceDeterminationMethod::GlobalIsoPreview)
+            local.method == SurfaceDeterminationMethod::GlobalIsoPreview ||
+            local.method == SurfaceDeterminationMethod::MaterialIso)
             return "Region overrides select localization methods only.";
         if (const auto error = GetError(local); !error.empty())
             return error;
@@ -277,7 +291,7 @@ std::string SurfaceRecipeCodec::BuildText(const SurfaceRecipe &recipe)
         return {};
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << std::setprecision(std::numeric_limits<double>::max_digits10) << "surface-recipe 2\n";
+    out << std::setprecision(std::numeric_limits<double>::max_digits10) << "surface-recipe 3\n";
     WriteRecipe(out, recipe);
     return out.str();
 }
@@ -291,9 +305,9 @@ SurfaceRecipeReadResult SurfaceRecipeCodec::GetRecipe(const std::string_view tex
     std::string tag;
     unsigned version = 0;
     SurfaceRecipe recipe;
-    if (!(in >> tag >> version) || tag != "surface-recipe" || version != 2)
+    if (!(in >> tag >> version) || tag != "surface-recipe" || (version != 2 && version != 3))
         return {{}, "Unsupported recipe schema."};
-    if (!ReadRecipe(in, recipe))
+    if (!ReadRecipe(in, recipe, version))
         return {{}, "Malformed recipe."};
     in >> std::ws;
     if (!in.eof())

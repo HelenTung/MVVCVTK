@@ -1,8 +1,10 @@
 #include "../TestDataPort.h"
 #include "Host/WallThicknessHostFeature.h"
 #include "ThicknessAlgorithm.h"
+#include "ThicknessMath.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
+#include "FeatureSupport/WorkLimit.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkActorCollection.h>
@@ -31,6 +33,8 @@
 #include <iostream>
 #include <thread>
 
+int GetMaterialFieldTestFailures();
+
 namespace
 {
 int failures = 0;
@@ -54,7 +58,8 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
         for (int y = 2; y <= 5; ++y)
             for (int x = 2; x <= 5; ++x)
                 (*labels)[x + 8 * (y + 8 * z)] = 1;
-    auto bytes = std::make_shared<const std::vector<std::uint8_t>>(512, 100);
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(512);
+    for (std::size_t i = 0; i < bytes->size(); ++i) (*bytes)[i] = (*labels)[i] ? 100 : 0;
     std::vector<double> vertices;
     const std::array<ThicknessPoint, 8> points{{{1.5, 1.5, 1.5},
                                                 {5.5, 1.5, 1.5},
@@ -91,10 +96,9 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     auto &p = w.archive.params;
     p.maxDistance = 10 * scale;
     p.sampleSpacing = scale;
-    p.reverseTolerance = 1e-5 * scale;
+    p.materialThreshold = 50;
     p.directionCount = 1;
-    p.maxFitResidual = scale;
-    p.maxLocalizationSigma = scale;
+    p.maxBoundaryError = 0.5 * scale;
     w.archive.evaluation = {1.5 * scale, 2.5 * scale, {0, 4 * scale}, 8, 0};
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
     w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -117,7 +121,7 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
     w.labels = std::make_shared<const LabelMap3DPayload>(
         g, LabelMapValues{std::shared_ptr<const std::vector<std::uint8_t>>(labels)});
     w.source = std::make_shared<const ImageGrid3DPayload>(
-        g, ImageValueType::UInt8, 1, std::make_shared<const std::vector<std::uint8_t>>(1728, 100));
+        g, ImageValueType::UInt8, 1, labels);
     std::vector<double> vertices, normals;
     std::vector<std::uint64_t> triangles;
     for (int shell = 0; shell < (hasInner ? 2 : 1); ++shell)
@@ -158,26 +162,33 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
             {"measurement.localization-sigma", 1, std::vector<double>(count, 0)},
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     w.archive.params.maxBoundaryError = 0.5;
-    w.archive.params.reverseTolerance = 0.1;
+    w.archive.params.materialThreshold = 0.5;
+    // 完整球壳按每原始面九点积分，沿用归档的可选计算时限。
+    // 未配置时保持不限时，CTest 负责测试进程的运行上限。
+    w.deadline = WorkLimit(w.archive.limits.deadlineMilliseconds).GetDeadline();
     return w;
 }
 void TestRayDefinitions()
 {
     auto slab = BuildSlab();
     slab.archive.params.directionCount = 9;
-    slab.archive.params.reverseTolerance = 1;
     slab.archive.params.evaluationBounds = std::array<double, 6>{2.5, 4.5, 2.5, 4.5, 0, 7};
     auto rays = ThicknessAlgorithm::BuildField(slab);
     Check(rays.status == ThicknessStatus::Succeeded && rays.statistics.minimum &&
               std::abs(*rays.statistics.minimum - 2) < 1e-8,
           "cone candidates retain the normal thickness");
-    slab.archive.params.ambiguityRelative = 0;
-    slab.archive.params.ambiguityAbsolute = 0;
-    auto ambiguous = ThicknessAlgorithm::BuildField(slab);
-    Check(ambiguous.status == ThicknessStatus::NoValidSamples &&
-              ambiguous.statistics.reasonCounts[static_cast<std::size_t>(
-                  ThicknessValidity::AmbiguousOpposite)] > 0,
-          "conflicting direction distances are not silently reduced to a minimum");
+    slab.archive.params.sampleSpacing = 0.5;
+    auto finer = ThicknessAlgorithm::BuildField(slab);
+    Check(finer.status == ThicknessStatus::Succeeded && rays.field.nodes && finer.field.nodes &&
+              rays.field.nodes->size() == finer.field.nodes->size(),
+          "display subdivision does not select the measurement sources");
+    if (rays.field.nodes && finer.field.nodes && rays.field.nodes->size() == finer.field.nodes->size())
+        for (std::size_t i = 0; i < rays.field.nodes->size(); ++i)
+        {
+            const auto &a = (*rays.field.nodes)[i], &b = (*finer.field.nodes)[i];
+            Check(a.index == b.index && a.validWeight == b.validWeight && a.thickness == b.thickness,
+                  "Gauss source field is invariant to display sampling");
+        }
     auto samples = std::make_shared<std::vector<ThicknessSample>>(4);
     const std::array<double, 4> values{1, 2, 9, 0}, areas{9, 1, 1, 100};
     for (std::size_t i = 0; i < 4; ++i)
@@ -214,7 +225,7 @@ void TestRayDefinitions()
     tube.labels = std::make_shared<const LabelMap3DPayload>(
         g, LabelMapValues{std::shared_ptr<const std::vector<std::uint8_t>>(labels)});
     tube.source = std::make_shared<const ImageGrid3DPayload>(
-        g, ImageValueType::UInt8, 1, std::make_shared<const std::vector<std::uint8_t>>(1728, 100));
+        g, ImageValueType::UInt8, 1, labels);
     constexpr std::size_t segments = 48;
     std::vector<double> vertices, normals;
     std::vector<std::uint64_t> triangles;
@@ -248,17 +259,49 @@ void TestRayDefinitions()
             {"measurement.localization-sigma", 1, std::vector<double>(count, 0)},
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     tube.archive.params.maxBoundaryError = 0.5;
-    tube.archive.params.reverseTolerance = 0.1;
+    tube.archive.params.materialThreshold = 0.5;
     const auto wall = ThicknessAlgorithm::BuildField(tube);
-    Check(wall.status == ThicknessStatus::Succeeded && wall.statistics.minimum &&
-              std::abs(*wall.statistics.minimum - 2) < 0.05,
-          "closed tube measures radial wall instead of void diameter");
+    std::cout << "tube status=" << unsigned(wall.status) << " min=" << wall.statistics.minimum.value_or(-1)
+              << " message=" << wall.message << '\n';
+    const auto radial = ThicknessAlgorithm::GetValue(wall.field, {7.5, 5.5, 5.5});
+    Check(wall.status == ThicknessStatus::Succeeded && radial && std::abs(*radial - 2) < 0.05,
+          "tube mid-height query measures radial wall; cap normals are outside this analytic reference");
 }
 
 void Algorithm()
 {
+    failures += GetMaterialFieldTestFailures();
+    using namespace ThicknessMath;
+    const ThicknessPoint ns{std::sqrt(3.0) / 2, 0, 0.5}, no{-0.5, 0, -std::sqrt(3.0) / 2};
+    const auto delta = Scale(Sub(ns, no), 1.5);
+    const auto offset = GetNormalOffset(delta, Scale(ns, 3), Scale(no, 7));
+    Check(offset && std::abs(*offset - 3) < 1e-12 && std::abs(*offset - Length(delta)) > 0.01,
+          "common normal displacement recovers two half-offset surfaces, not the chord or unit bisector");
+    Check(!GetNormalOffset(delta, ns, ns) && !GetNormalOffset(delta, {}, no),
+          "undefined endpoint normals cannot manufacture a thickness");
+    ThicknessAlgorithm::Field query;
+    query.geometry.extent = {-2, -1, 7, 8, 3, 4};
+    query.geometry.dimensions = {2, 2, 2};
+    query.geometry.origin = {10, -20, 30};
+    query.geometry.spacing = {0.2, 1, 2};
+    query.geometry.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+    auto nodes = std::make_shared<std::vector<ThicknessNode>>();
+    const std::array<double, 8> values{2, 4, 0, 8, 10, 0, 14, 16};
+    for (unsigned corner = 0; corner < 8; ++corner)
+        nodes->push_back({{-2 + int(corner & 1), 7 + int((corner >> 1) & 1), 3 + int(corner >> 2)},
+                           values[corner] ? 1.0 : 0.0, 1, values[corner]});
+    std::sort(nodes->begin(), nodes->end(), [](const auto &a, const auto &b) { return a.index < b.index; });
+    query.nodes = nodes;
+    const auto interpolated = ThicknessAlgorithm::GetValue(query, {2.75, -20.35, 36.5});
+    Check(interpolated && std::abs(*interpolated - 5.6875) < 1e-11,
+          "rotated anisotropic field preserves XYZ missing-corner interpolation order");
+    Check(!ThicknessAlgorithm::GetValue(query, {2.2, -20.36, 36.4}),
+          "invalid nearest corner rejects query before interpolation");
+    Check(!ThicknessAlgorithm::GetValue(query, {100, 100, 100}), "outside grid has no field value");
     TestRayDefinitions();
     auto shell = ThicknessAlgorithm::BuildField(BuildShell());
+    std::cout << "shell status=" << unsigned(shell.status) << " min=" << shell.statistics.minimum.value_or(-1)
+              << " message=" << shell.message << '\n';
     Check(shell.status == ThicknessStatus::Succeeded && shell.statistics.minimum &&
               std::abs(*shell.statistics.minimum - 2) < 0.05,
           "closed sphere shell measures wall, not diameter");
@@ -277,8 +320,10 @@ void Algorithm()
           "slab minimum=2");
     Check(result.statistics.maximum && std::abs(*result.statistics.maximum - 2) < 1e-8,
           "slab maximum=2");
-    Check(result.statistics.validCount > 0 && result.statistics.coverage < 1,
-          "invalid side normals reduce coverage");
+    Check(result.statistics.validCount > 0 && result.field.nodes &&
+              std::any_of(result.field.nodes->begin(), result.field.nodes->end(),
+                  [](const auto &n) { return n.totalWeight > n.validWeight && n.validWeight > 0; }),
+          "invalid sources reduce node support, while valid-only means remain queryable");
     Check(std::abs(result.statistics.evaluatedArea - 64) < 1e-8,
           "both-side total area includes invalid sides");
     auto rotated = BuildSlab();
@@ -362,10 +407,13 @@ void Algorithm()
         w.labels->GetGeometry(),
         LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(labels)});
     const auto foreign = ThicknessAlgorithm::BuildField(w);
+    const auto validMass = [](const auto &candidate) {
+        double sum = 0; if (candidate.field.nodes) for (const auto &node : *candidate.field.nodes) sum += node.validWeight;
+        return sum;
+    };
     Check(foreign.status == ThicknessStatus::IncompleteBoundary ||
-              (foreign.status == ThicknessStatus::Succeeded &&
-               foreign.statistics.validCount < result.statistics.validCount),
-          "foreign material is rejected as missing interface or invalid path");
+              (foreign.status == ThicknessStatus::Succeeded && validMass(foreign) < validMass(result)),
+          "foreign material nodes cannot support the selected material path");
 }
 void Evaluation()
 {
@@ -758,6 +806,12 @@ void Display()
 {
     auto w = BuildSlab();
     auto candidate = ThicknessAlgorithm::BuildField(w);
+    // 显示负例显式注入缺测值，不依赖某个算法恰好产生无效侧面。
+    auto mixed = std::make_shared<std::vector<ThicknessSample>>(*candidate.field.samples);
+    const auto invalidId = candidate.statistics.minimumSample.value_or(0) == 0 ? 1U : 0U;
+    (*mixed)[invalidId].validity = ThicknessValidity::NoValidSource;
+    (*mixed)[invalidId].thickness = 0;
+    candidate.field.samples = mixed;
     ThicknessData::Record record{
         w.archive, candidate.field, candidate.statistics, candidate.regions, {}};
     ThicknessDisplay display;
@@ -766,8 +820,7 @@ void Display()
     auto inclined=display;inclined.style=ThicknessDisplayStyle::Inclined;
     const auto faded=ThicknessOverlay::BuildData(record,*w.mesh,inclined);
     auto* fadeColors=faded.mesh->GetCellData()->GetScalars();
-    auto* fadePaths=faded.paths->GetCellData()->GetScalars();
-    Check(fadeColors->GetNumberOfComponents()==4 && fadePaths->GetNumberOfComponents()==4
+    Check(fadeColors && fadeColors->GetNumberOfComponents()==4
         && faded.mesh->GetNumberOfCells()==prepared.mesh->GetNumberOfCells(),
         "inclined wall display uses RGBA without changing sample footprints or topology");
     auto tolerance = display; tolerance.mode = ThicknessDisplayMode::Tolerance;
@@ -783,33 +836,37 @@ void Display()
         hasSameTolerance = std::equal(first,first+3,second);
     }
     Check(hasSameTolerance, "continuous palette options do not alter tolerance or invalid colors");
-    auto* pathIds=vtkIdTypeArray::SafeDownCast(prepared.paths->GetCellData()->GetArray("thickness.sample"));
-    auto* pathColors=prepared.paths->GetCellData()->GetScalars();
     auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
-    bool hasMatchingPaths=pathIds && pathColors && surfaceIds;
-    for(vtkIdType index=0;hasMatchingPaths && index<prepared.paths->GetNumberOfLines();++index) {
-        const auto sampleIndex=pathIds->GetValue(index);
-        const auto& sample=(*candidate.field.samples)[static_cast<std::size_t>(sampleIndex)];
-        double source[3],opposite[3];
-        prepared.paths->GetPoint(index*2,source);prepared.paths->GetPoint(index*2+1,opposite);
-        hasMatchingPaths &= sample.validity==ThicknessValidity::Valid
-            && std::equal(source,source+3,sample.source.begin())
-            && std::equal(opposite,opposite+3,sample.opposite.begin());
-        bool hasSameColor=false;
-        for(vtkIdType cell=0;cell<surfaceIds->GetNumberOfValues();++cell) if(surfaceIds->GetValue(cell)==sampleIndex) {
-            double first[3],second[3];prepared.mesh->GetCellData()->GetScalars()->GetTuple(cell,first);
-            pathColors->GetTuple(index,second);hasSameColor=std::equal(first,first+3,second);break;
+    bool hasMatchingFootprints=surfaceIds && surfaceIds->GetNumberOfValues()==prepared.mesh->GetNumberOfCells();
+    // 用原始三角形和归档重心坐标独立重建面片，检查显示未替换测量几何。
+    for(vtkIdType index=0;hasMatchingFootprints && index<prepared.mesh->GetNumberOfCells();++index) {
+        const auto sampleIndex=surfaceIds->GetValue(index);
+        if(sampleIndex<0 || static_cast<std::size_t>(sampleIndex)>=candidate.field.samples->size()) {
+            hasMatchingFootprints=false;break;
         }
-        hasMatchingPaths &= hasSameColor;
+        const auto& sample=(*candidate.field.samples)[static_cast<std::size_t>(sampleIndex)];
+        auto* cell=prepared.mesh->GetCell(index);
+        hasMatchingFootprints &= cell->GetNumberOfPoints()==3 && sample.validity!=ThicknessValidity::OutsideEvaluation;
+        for(std::size_t corner=0;hasMatchingFootprints && corner<3;++corner) {
+            double actual[3];prepared.mesh->GetPoint(cell->GetPointId(static_cast<vtkIdType>(corner)),actual);
+            for(std::size_t axis=0;axis<3;++axis) {
+                double expected=0;
+                for(std::size_t vertex=0;vertex<3;++vertex) {
+                    const auto id=w.mesh->GetTriangles()[sample.sourceTriangle*3+vertex];
+                    expected+=sample.barycentricCorners[corner][vertex]*w.mesh->GetVertices()[id*3+axis];
+                }
+                hasMatchingFootprints &= std::abs(actual[axis]-expected)<1e-12;
+            }
+        }
     }
-    Check(hasMatchingPaths && prepared.paths->GetNumberOfLines()>0,
-        "slice coverage uses only exact valid measurement paths with the same RGB as the 3D samples");
+    Check(hasMatchingFootprints && prepared.mesh->GetNumberOfCells()>0,
+        "field display preserves original source footprints and exact query sample IDs");
     auto renderer = vtkSmartPointer<vtkRenderer>::New();
     auto overlay = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                       HostRenderViewRole::Primary3D);
     overlay->AttachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 4,
-          "feature owns surface, path, scale and invalid swatch");
+          "feature owns surface, query marker, scale and invalid swatch");
     auto *colors = prepared.mesh->GetCellData()->GetScalars();
     Check(colors && colors->GetNumberOfComponents() == 3,
           "cell RGB prevents invalid interpolation");
@@ -868,19 +925,20 @@ void Display()
     if (candidate.statistics.minimumSample)
     {
         overlay->SetSelection(&(*candidate.field.samples)[*candidate.statistics.minimumSample]);
-        bool hasExactEndpoints=false;
+        bool hasExactQuery=false;
         renderer->GetViewProps()->InitTraversal();
         while(auto* prop=renderer->GetViewProps()->GetNextProp()) {
             auto* actor=vtkActor::SafeDownCast(prop);
             auto* mapper=actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
             auto* data=mapper ? mapper->GetInput() : nullptr;
-            if(!data || data->GetNumberOfLines()!=1 || data->GetNumberOfVerts()!=2)continue;
-            double first[3],second[3];data->GetPoint(0,first);data->GetPoint(1,second);
+            if(!data || data->GetNumberOfLines()!=0 || data->GetNumberOfVerts()!=1 || data->GetNumberOfPoints()!=1)continue;
+            double first[3];data->GetPoint(0,first);
             const auto& sample=(*candidate.field.samples)[*candidate.statistics.minimumSample];
-            hasExactEndpoints=std::equal(first,first+3,sample.source.begin())
-                && std::equal(second,second+3,sample.opposite.begin());
+            hasExactQuery=std::equal(first,first+3,sample.source.begin())
+                && actor->GetProperty()->GetPointSize()==8
+                && actor->GetProperty()->GetRenderPointsAsSpheres();
         }
-        Check(hasExactEndpoints,"selection vertices retain the exact source and opposite endpoints");
+        Check(hasExactQuery,"field selection marks the exact query position with the VG point style");
         window->Render();capture("WallThickness-Selection.png");
     }
     overlay->SetOverlayState({{0, 0, 2.5}, {}});
@@ -889,6 +947,8 @@ void Display()
     auto slice = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                     HostRenderViewRole::TopDownSlice);
     slice->AttachRenderer(renderer);
+    Check(renderer->GetViewProps()->GetNumberOfItems()==5,
+        "slice owns colored field contour, contrast outline, query marker and both legends");
     FeatureOverlayState state;
     state.cursor = {3, 3, 2.5};
     slice->SetOverlayState(state);
@@ -896,21 +956,21 @@ void Display()
     renderer->ResetCameraClippingRange();
     window->Render();
     capture("WallThickness-Slice.png");
-    bool hasPathIntersections=false;
+    bool hasFieldContours=false;
     bool hasMatchingIntersectionColors=true;
     auto* projectedActors=renderer->GetActors();projectedActors->InitTraversal();
     while(auto* actor=projectedActors->GetNextActor()) {
         auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
         if(!mapper)continue;mapper->Update();
         auto* cut=mapper->GetInput();
-        if(cut && cut->GetNumberOfVerts()>0 && cut->GetCellData()->GetArray("thickness.sample")) {
-            hasPathIntersections=true;
+        if(cut && cut->GetNumberOfLines()>0 && cut->GetCellData()->GetArray("thickness.sample")) {
+            hasFieldContours=true;
             auto* cutIds=vtkIdTypeArray::SafeDownCast(cut->GetCellData()->GetArray("thickness.sample"));
             auto* cutColors=cut->GetCellData()->GetScalars();
-            for(vtkIdType cell=0;cell<cut->GetNumberOfVerts();++cell) {
+            for(vtkIdType cell=0;cell<cut->GetNumberOfCells();++cell) {
                 bool hasSameColor=false;
-                for(vtkIdType line=0;line<pathIds->GetNumberOfValues();++line) if(pathIds->GetValue(line)==cutIds->GetValue(cell)) {
-                    double first[3],second[3];pathColors->GetTuple(line,first);cutColors->GetTuple(cell,second);
+                for(vtkIdType source=0;source<surfaceIds->GetNumberOfValues();++source) if(surfaceIds->GetValue(source)==cutIds->GetValue(cell)) {
+                    double first[3],second[3];prepared.mesh->GetCellData()->GetScalars()->GetTuple(source,first);cutColors->GetTuple(cell,second);
                     hasSameColor=std::equal(first,first+3,second);break;
                 }
                 hasMatchingIntersectionColors &= hasSameColor;
@@ -919,7 +979,7 @@ void Display()
             }
         }
     }
-    Check(hasPathIntersections,"valid through-wall sample values remain visible inside the current 2D slice");
+    Check(hasFieldContours,"computed field footprints remain visible in the current 2D slice");
     Check(hasMatchingIntersectionColors,"2D intersections retain exact sample IDs, RGB and the requested plane");
     bool sliceMapped = false;
     auto *sliceActors = renderer->GetActors();
@@ -969,14 +1029,14 @@ void Display()
     slice->AttachRenderer(renderer);
     auto replacement=vtkSmartPointer<vtkPolyData>::New();replacement->ShallowCopy(prepared.mesh);
     slice->SetInputData(replacement);
-    bool hasVisibleStalePaths=false;
+    bool hasVisibleStaleQueries=false;
     auto* replacementActors=renderer->GetActors();replacementActors->InitTraversal();
     while(auto* actor=replacementActors->GetNextActor()) {
         auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
         if(!mapper)continue;mapper->Update();auto* input=mapper->GetInput();
-        hasVisibleStalePaths |= actor->GetVisibility() && input && input->GetNumberOfVerts()>0;
+        hasVisibleStaleQueries |= actor->GetVisibility() && input && input->GetNumberOfVerts()>0;
     }
-    Check(!hasVisibleStalePaths,"replacement display mesh retires prior measurement-path projections");
+    Check(!hasVisibleStaleQueries,"replacement display mesh retires prior query markers");
     slice->DetachRenderer(renderer);
 }
 } // namespace

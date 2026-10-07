@@ -50,7 +50,7 @@ struct SurfaceGenerationSnapshot final {
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = 0;
     SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::LocalAdaptiveIso50;
+        SurfaceDeterminationMethod::MaterialIso;
     std::shared_ptr<const std::vector<SurfacePointRecord>> points;
     std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
     std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;

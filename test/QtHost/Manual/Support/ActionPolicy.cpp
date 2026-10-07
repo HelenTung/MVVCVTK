@@ -21,7 +21,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         if (action == "CopyIsoToDisplay" && !s["canApplyIsoToDisplay"].toBool()) return "主三维当前不是等值面模式，请先切换显示模式。";
         if (action == "Visibility" && !s["hasMesh"].toBool()) return "当前没有可显示的表面网格。";
         if (action == "SamplePoints" && !s["hasMesh"].toBool()) return "请先生成当前输入的表面网格。";
-        if (action == "OpenAlignment" && !s["hasMeasurement"].toBool()) return "请先生成局部自适应或梯度峰值测量表面。";
+        if (action == "OpenAlignment" && !s["hasMeasurement"].toBool()) return "请先生成当前输入的有效测量表面。";
     }
     if (module == "Artifact") {
         if (action == "Commit" && !s["isCandidateCurrent"].toBool()) return "当前输入与校正候选不匹配，请恢复源输入或丢弃候选。";
