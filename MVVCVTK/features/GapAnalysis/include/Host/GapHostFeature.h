@@ -12,7 +12,7 @@ enum class GapHostAction {
     Start,
     Overlay,
     Exit,
-    SetDisplay
+    SetDisplay // owner thread 的短显示命令，不接收完成回调；失败保留原显示。
 };
 
 struct GapHostStartParams {

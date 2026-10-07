@@ -43,7 +43,7 @@ void AlignmentOverlay::SetOverlayState(const FeatureOverlayState &state) {
 }
 vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     const AlignmentMatrix &sourceToTarget, const std::vector<AlignmentGeometry> &geometries,
-    const AlignmentRecipe &recipe, double axisLength) {
+    const AlignmentRecipe &recipe, double axisLength, const std::vector<double>* modelVertices) {
     using namespace AlignmentMath;
     if (!Rigid(sourceToTarget) || !std::isfinite(axisLength) || axisLength <= 0)
         return {};
@@ -125,6 +125,17 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
             if ((source - target).dot(source - target) > 0)
                 add(source, target, {255, 100, 220});
         }
+    }
+    if (modelVertices) for (const auto& pair : recipe.fitPairs) {
+        if (pair.vertexId >= modelVertices->size() / 3) continue;
+        const auto offset = static_cast<std::size_t>(pair.vertexId) * 3;
+        const Vec source((*modelVertices)[offset], (*modelVertices)[offset+1], (*modelVertices)[offset+2]);
+        const auto target = Transform(inverse, Vector(pair.nominalPoint));
+        // 标记输入对应的位置，不添加新的拟合值或把每个对应画成坐标十字。
+        const auto marker = points->InsertNextPoint(source.val);
+        markers->InsertNextCell(1, &marker);
+        const unsigned char color[]{200,180,70}; markerColors->InsertNextTypedTuple(color);
+        if ((source-target).dot(source-target) > 0) add(source,target,{255,100,220});
     }
     auto data = vtkSmartPointer<vtkPolyData>::New();
     data->SetPoints(points);

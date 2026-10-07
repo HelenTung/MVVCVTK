@@ -294,6 +294,14 @@ void Display() {
         markers->GetPoint(6+static_cast<vtkIdType>(index),p);
         Check(std::equal(p,p+3,geometries[index].sourceCenter.begin()),"datum marker retains exact fitted center");
     }
+    AlignmentRecipe bestFit; bestFit.method=AlignmentMethod::ConstrainedBestFit;
+    AlignmentFitPair pair; pair.vertexId=0; pair.nominalPoint={2,3,4}; bestFit.fitPairs={pair};
+    const std::vector<double> modelVertices{1,2,3};
+    const auto pairs=AlignmentOverlay::BuildData(alignmentIdentity,{},bestFit,1,&modelVertices);
+    Check(pairs && pairs->GetNumberOfVerts()==1 && pairs->GetNumberOfLines()==4,
+        "best-fit inputs have a position marker and actual correspondence line with one coordinate triad");
+    pairs->GetPoint(6,p);
+    Check(std::equal(p,p+3,modelVertices.begin()),"best-fit marker uses exact published mesh coordinates");
 }
 void Reentry() {
     Fixture f;

@@ -665,9 +665,11 @@ class MetrologyAlignmentHostFeature::Impl final {
                 graph.view->GetData(result->record.transform)->payload);
             if (!geometry || !recipe || !matrix)
                 return;
+            const auto meshData = graph.view->GetData(result->record.input.mesh);
+            const auto mesh = meshData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(meshData->payload) : nullptr;
             const auto poly =
                 AlignmentOverlay::BuildData(matrix->GetSourceToTarget(), geometry->geometries,
-                                            recipe->recipe, m_config.axisLength);
+                                            recipe->recipe, m_config.axisLength, mesh ? &mesh->GetVertices() : nullptr);
             if (!poly)
                 return;
             const auto views = m_views->GetViews(m_config.targetViews);
