@@ -4,6 +4,7 @@
 #include "ThicknessMath.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
+#include "FeatureSupport/WorkLimit.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkActorCollection.h>
