@@ -5,9 +5,11 @@
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentSolver.h"
+#include "AlignmentReference.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
+#include <filesystem>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -167,6 +169,10 @@ class MetrologyAlignmentHostFeature::Impl final {
         return AlignmentArchive{1, "metrology-alignment-1", recipe->recipe, result->record.input,
                                 transform->GetSourceToTarget()};
     }
+    std::optional<AlignmentReferenceSnapshot> GetReference(const DataRevisionRef &ref) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentData::GetReference(m_data->GetDataGraph(), ref);
+    }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
             return {};
@@ -229,9 +235,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::Restore))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::ImportReference))
             return {};
-        if ((request.targetRequestId && request.action != AlignmentAction::Cancel) ||
+        if ((request.reference && request.action != AlignmentAction::ImportReference) ||
+            (request.targetRequestId && request.action != AlignmentAction::Cancel) ||
             (GetDataRevisionRefValid(request.recipeRef) &&
              request.action != AlignmentAction::Start &&
              request.action != AlignmentAction::SaveRecipe) ||
@@ -251,12 +258,27 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentResult result;
         result.requestId = id;
         try {
-            if (request.action == AlignmentAction::Start) {
-                if (!request.input || request.recipe || request.archive || request.isVisible ||
-                    GetDataRevisionRefValid(request.resultRef) ||
-                    !GetDataRevisionRefValid(request.recipeRef))
-                    return {};
-                auto task = BuildTask(request, id, std::move(callback));
+            if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference) {
+                std::shared_ptr<Task> task;
+                if (request.action == AlignmentAction::ImportReference) {
+                    if (!request.reference || request.input || request.recipe || request.archive ||
+                        request.isVisible || !AlignmentReferenceLoader::GetRequestValid(*request.reference))
+                        return {};
+                    task = std::make_shared<Task>();
+                    task->id = id;
+                    task->referenceRequest = std::move(request.reference);
+                    task->referenceRequest->filePath = std::filesystem::absolute(
+                        std::filesystem::u8path(task->referenceRequest->filePath)).lexically_normal().u8string();
+                    task->work.config = m_config;
+                    task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
+                    task->work.deadline = WorkLimit(m_config.deadlineMs).GetDeadline();
+                    task->callback = std::move(callback);
+                } else {
+                    if (!request.input || request.recipe || request.archive || request.isVisible ||
+                        GetDataRevisionRefValid(request.resultRef) || !GetDataRevisionRefValid(request.recipeRef))
+                        return {};
+                    task = BuildTask(request, id, std::move(callback));
+                }
                 if (!task)
                     return {};
                 m_nextRequest = id;
@@ -267,7 +289,11 @@ class MetrologyAlignmentHostFeature::Impl final {
                 try {
                     task->worker = std::thread([task, host = std::weak_ptr<FeatureHostControl>(m_host)] {
                         try {
-                            task->candidate = AlignmentSolver::BuildResult(task->work);
+                            if (task->referenceRequest) {
+                                task->referenceData = AlignmentReferenceLoader::Load(*task->referenceRequest, task->work);
+                                task->candidate.diagnostics.status = task->referenceData.status;
+                                task->candidate.diagnostics.message = task->referenceData.message;
+                            } else task->candidate = AlignmentSolver::BuildResult(task->work);
                         } catch (...) {
                             task->candidate.diagnostics.status = AlignmentStatus::InternalError;
                         }
@@ -423,6 +449,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             result.status = AlignmentStatus::Stale;
         else if (task->work.cancelled->load() || m_state.isStopping)
             result.status = AlignmentStatus::Cancelled;
+        else if (task->referenceRequest) {
+            if (result.status == AlignmentStatus::FullyDetermined)
+                SetReference(task->referenceData, result);
+        }
         else if (result.status == AlignmentStatus::FullyDetermined ||
                  result.status == AlignmentStatus::Underconstrained ||
                  result.status == AlignmentStatus::Conflicting ||
@@ -494,10 +524,38 @@ class MetrologyAlignmentHostFeature::Impl final {
         DataBinding active;
         AlignmentCallback callback;
         AlignmentCandidate candidate;
+        std::optional<AlignmentReferenceRequest> referenceRequest;
+        AlignmentReferenceData referenceData;
         std::atomic<bool> isDone{false};
         bool isStale = false, isActivationRequested = true;
         std::thread worker;
     };
+    void SetReference(const AlignmentReferenceData &reference, AlignmentResult &result) {
+        DataRevisionRef meshRef;
+        try {
+            if (!reference.mesh || !reference.mesh->GetValid()) throw std::invalid_argument("Invalid imported mesh.");
+            meshRef = {m_data->CreateDataEntityId(), 1};
+            const DataRevisionRef sourceRef{m_data->CreateDataEntityId(), 1};
+            auto metadata = reference.metadata;
+            metadata.mesh = meshRef;
+            const DataProvenance provenance{"metrology-alignment", "import-stl", "stl-reference-1", metadata.sha256};
+            DataTransaction tx;
+            tx.outputs.push_back({sourceRef.entityId, 0, AlignmentData::referenceType, {},
+                                  std::make_shared<const AlignmentData::ReferencePayload>(std::move(metadata)), provenance});
+            tx.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
+                                  {{"reference-source", sourceRef}}, reference.mesh, provenance});
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting); commit = m_resultScopes.Commit(*m_data, std::move(tx)); }
+            if (commit.status == DataCommitStatus::Succeeded) result.referenceMesh = meshRef;
+            else result.status = AlignmentStatus::InternalError;
+        } catch (...) {
+            // 发布成功后的观察者异常不能撤销导入事实；回读确认配对元数据与网格。
+            try {
+                if (AlignmentData::GetReference(m_data->GetDataGraph(), meshRef)) result.referenceMesh = meshRef;
+                else result.status = AlignmentStatus::InternalError;
+            } catch (...) { result.status = AlignmentStatus::InternalError; }
+        }
+    }
     struct OverlayBinding final {
         std::shared_ptr<OverlayService> port;
         std::shared_ptr<AlignmentOverlay> overlay;
@@ -537,6 +595,12 @@ class MetrologyAlignmentHostFeature::Impl final {
                 ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload) : nullptr;
             if (!task->work.referenceMesh ||
                 task->work.referenceMesh->GetCoordinateFrame() != request.input->coordinateFrame)
+                return {};
+            const auto reference = AlignmentData::GetReference(graph, recipe->recipe.nominalData);
+            const bool hasSource = std::any_of(nominal->inputs.begin(), nominal->inputs.end(),
+                [](const DataInputRef &value) { return value.role == "reference-source"; });
+            if ((hasSource && !reference) || (reference &&
+                (reference->unit != recipe->recipe.unit || reference->frameId != recipe->recipe.targetFrameId)))
                 return {};
         }
         task->work.poses = request.initialPoses;
@@ -744,7 +808,9 @@ FeatureDataContract MetrologyAlignmentHostFeature::GetDataContract() const {
              {"geometry", AlignmentData::geometryType, {{"org.mvvcvtk.metrology-alignment.geometry"}}},
              {"residuals", DataTypes::recordTable, {DataFacets::tabularRecords}},
              {"result", AlignmentData::resultType, {{"org.mvvcvtk.metrology-alignment.result"}}},
-             {"transform", DataTypes::transform3D, {DataFacets::transform3D}}}};
+             {"transform", DataTypes::transform3D, {DataFacets::transform3D}},
+             {"reference-source", AlignmentData::referenceType, {{"org.mvvcvtk.metrology-alignment.reference"}}},
+             {"reference-mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}}}};
 }
 bool MetrologyAlignmentHostFeature::AttachHost(const HostFeatureContext &context) {
     return m_impl->AttachHost(context);
@@ -775,4 +841,8 @@ std::optional<AlignmentSnapshot> MetrologyAlignmentHostFeature::GetResult(
 std::optional<AlignmentArchive> MetrologyAlignmentHostFeature::GetArchive(
     const DataRevisionRef &ref) const {
     return m_impl->GetArchive(ref);
+}
+std::optional<AlignmentReferenceSnapshot> MetrologyAlignmentHostFeature::GetReference(
+    const DataRevisionRef &ref) const {
+    return m_impl->GetReference(ref);
 }

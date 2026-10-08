@@ -4,6 +4,7 @@ target_sources(metrology_alignment
     PRIVATE src/AlignmentMath.h src/AlignmentGeometry.h src/AlignmentGeometry.cpp
         src/AlignmentSolver.h src/AlignmentSolver.cpp
         src/AlignmentMeshQuery.h src/AlignmentMeshQuery.cpp
+        src/AlignmentReference.h src/AlignmentReference.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp
@@ -14,7 +15,7 @@ target_include_directories(metrology_alignment
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(metrology_alignment PUBLIC MVVCVTK::FeatureSPI
-    PRIVATE opencv_world MVVCVTKInternal::FeatureSupport VTK::CommonCore
+    PRIVATE opencv_world bcrypt MVVCVTKInternal::FeatureSupport VTK::CommonCore
         VTK::CommonDataModel VTK::RenderingCore)
 SetTargetDefaults(metrology_alignment)
 set_target_properties(metrology_alignment PROPERTIES

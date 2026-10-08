@@ -6,6 +6,17 @@ namespace AlignmentData {
 inline const DataTypeId recipeType{"org.mvvcvtk.metrology-alignment.recipe", 1};
 inline const DataTypeId geometryType{"org.mvvcvtk.metrology-alignment.geometry", 1};
 inline const DataTypeId resultType{"org.mvvcvtk.metrology-alignment.result", 1};
+inline const DataTypeId referenceType{"org.mvvcvtk.metrology-alignment.reference", 1};
+
+class ReferencePayload final : public IDataPayload {
+  public:
+    explicit ReferencePayload(AlignmentReferenceSnapshot value) : metadata(std::move(value)) {}
+    DataTypeId GetDataType() const override { return referenceType; }
+    std::shared_ptr<const IDataPayload> CreateSnapshot() const override {
+        return std::make_shared<const ReferencePayload>(metadata);
+    }
+    const AlignmentReferenceSnapshot metadata;
+};
 
 class RecipePayload final : public IDataPayload {
   public:
@@ -48,6 +59,8 @@ class ResultPayload final : public IDataPayload {
     const ResultRecord record;
 };
 bool SetTypes(TrustedDataPort &data);
+std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,
+                                                       const DataRevisionRef &mesh);
 bool GetInputValid(const AlignmentInput &input);
 bool GetExpectationsCurrent(const DataGraphSnapshot &graph,
                             const std::vector<DataExpectation> &expectations);

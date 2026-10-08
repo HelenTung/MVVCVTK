@@ -1,5 +1,6 @@
 #include "AlignmentData.h"
 #include "AlignmentMath.h"
+#include "AlignmentReference.h"
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -25,6 +26,22 @@ bool GetResultValid(const ResultRecord &r) {
 } // namespace
 bool SetTypes(TrustedDataPort &data) {
     const std::vector<DataTypeDescriptor> types{
+        {referenceType,
+         {{"org.mvvcvtk.metrology-alignment.reference"}},
+         [](const IDataPayload &p, std::string &message) {
+             const auto *value = dynamic_cast<const ReferencePayload *>(&p);
+             if (!value) { message = "Invalid reference payload type."; return false; }
+             const auto &r = value->metadata;
+             const bool valid = AlignmentReferenceLoader::GetRequestValid(
+                 {r.filePath, r.frameId, r.coordinateFrame, r.fileUnit, r.unit}) &&
+                 GetDataRevisionRefValid(r.mesh) && r.sourceBytes > 0 && r.pointCount >= 3 &&
+                 r.triangleCount > 0 && r.sha256.size() == 64 &&
+                 std::all_of(r.sha256.begin(), r.sha256.end(), [](char c) {
+                     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                 });
+             if (!valid) message = "Invalid STL reference provenance.";
+             return valid;
+         }},
         {recipeType,
          {{"org.mvvcvtk.metrology-alignment.recipe"}},
          [](const IDataPayload &p, std::string &message) {
@@ -62,6 +79,23 @@ bool SetTypes(TrustedDataPort &data) {
             return false;
     }
     return true;
+}
+std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,
+                                                       const DataRevisionRef &ref) {
+    const auto data = graph.view ? graph.view->GetData(ref) : nullptr;
+    const auto mesh = data ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload) : nullptr;
+    if (!mesh || data->type != DataTypes::surfaceMesh) return {};
+    const auto input = std::find_if(data->inputs.begin(), data->inputs.end(), [](const DataInputRef &i) {
+        return i.role == "reference-source";
+    });
+    if (input == data->inputs.end()) return {};
+    const auto source = graph.view->GetData(input->source);
+    const auto reference = source ? std::dynamic_pointer_cast<const ReferencePayload>(source->payload) : nullptr;
+    if (!reference || source->type != referenceType || reference->metadata.mesh != ref ||
+        reference->metadata.coordinateFrame != mesh->GetCoordinateFrame() ||
+        reference->metadata.pointCount != mesh->GetVertices().size() / 3 ||
+        reference->metadata.triangleCount != mesh->GetTriangles().size() / 3) return {};
+    return reference->metadata;
 }
 bool GetInputValid(const AlignmentInput &i) {
     if (!GetDataRevisionRefValid(i.source) || !GetDataRevisionRefValid(i.mesh) ||

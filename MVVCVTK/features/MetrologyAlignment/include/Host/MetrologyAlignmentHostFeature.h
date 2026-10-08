@@ -29,6 +29,7 @@ class MetrologyAlignmentHostFeature final
     AlignmentState GetScopeState(const std::string &scope) const;
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &result) const;
     std::optional<AlignmentArchive> GetArchive(const DataRevisionRef &result) const;
+    std::optional<AlignmentReferenceSnapshot> GetReference(const DataRevisionRef &mesh) const;
 
   private:
     class Impl;

@@ -58,7 +58,30 @@ enum class AlignmentStatus : std::uint8_t {
     Unsupported,
     BudgetExceeded,
     Unavailable,
-    InternalError
+    InternalError,
+    IoError
+};
+
+struct AlignmentReferenceRequest final {
+    std::string filePath;
+    std::string frameId;
+    std::string coordinateFrame;
+    // STL 不存长度单位。ModelUnit 仅能保持为 ModelUnit，不能推测物理单位。
+    AlignmentUnit fileUnit = AlignmentUnit::ModelUnit;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+};
+
+struct AlignmentReferenceSnapshot final {
+    DataRevisionRef mesh;
+    std::string filePath;
+    std::string sha256;
+    std::string frameId;
+    std::string coordinateFrame;
+    AlignmentUnit fileUnit = AlignmentUnit::ModelUnit;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+    std::uint64_t sourceBytes = 0;
+    std::uint64_t pointCount = 0;
+    std::uint64_t triangleCount = 0;
 };
 
 struct AlignmentInput final {
@@ -209,6 +232,7 @@ struct AlignmentResult final {
     bool isActivated = false;
     bool isDisplayReady = false;
     std::string message;
+    DataRevisionRef referenceMesh;
 };
 
 struct AlignmentArchive final {
@@ -238,7 +262,8 @@ enum class AlignmentAction : std::uint8_t {
     Activate,
     Deactivate,
     SetVisibility,
-    Restore
+    Restore,
+    ImportReference
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -254,6 +279,7 @@ struct AlignmentRequest final {
     std::optional<bool> isVisible;
     std::uint64_t targetRequestId = 0;
     bool isActivationRequested = true;
+    std::optional<AlignmentReferenceRequest> reference;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,

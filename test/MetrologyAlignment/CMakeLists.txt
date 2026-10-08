@@ -15,6 +15,17 @@ set_target_properties(mvvcvtk_alignment_surface_tests PROPERTIES
     PROJECT_LABEL AlignmentSurfaceTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.Surface COMMAND mvvcvtk_alignment_surface_tests)
 SetTestRuntime(MetrologyAlignment.Surface mvvcvtk_alignment_surface_tests)
+add_executable(mvvcvtk_alignment_reference_io_tests AlignmentReferenceTestsIo.cpp)
+target_include_directories(mvvcvtk_alignment_reference_io_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_reference_io_tests PRIVATE mvvcvtk_host_test_internal
+    MVVCVTK::Host MVVCVTK::MetrologyAlignment opencv_world psapi ${MVVCVTK_VTK_TARGETS})
+SetTargetDefaults(mvvcvtk_alignment_reference_io_tests)
+set_target_properties(mvvcvtk_alignment_reference_io_tests PROPERTIES
+    PROJECT_LABEL AlignmentReferenceIoTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.ReferenceIo COMMAND mvvcvtk_alignment_reference_io_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/reference-fixtures-$<CONFIG>")
+SetTestRuntime(MetrologyAlignment.ReferenceIo mvvcvtk_alignment_reference_io_tests)
 add_library(mvvcvtk_alignment_header_probe OBJECT AlignmentHeaderProbe.cpp)
 target_link_libraries(mvvcvtk_alignment_header_probe PRIVATE MVVCVTK::MetrologyAlignment)
 SetTargetDefaults(mvvcvtk_alignment_header_probe)

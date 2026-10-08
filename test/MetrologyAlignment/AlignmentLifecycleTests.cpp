@@ -184,7 +184,7 @@ struct Fixture final {
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
-    Check(contract.inputs.size() == 2 && contract.outputs.size() == 5,
+    Check(contract.inputs.size() == 2 && contract.outputs.size() == 7,
         "feature declares recipe/mesh inputs and all formal output roles");
     const auto result = f.Solve();
     Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated,
