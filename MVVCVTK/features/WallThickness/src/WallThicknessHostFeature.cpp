@@ -850,7 +850,7 @@ class WallThicknessHostFeature::Impl final
                       {"labels", input.labels},
                       {"mesh", input.mesh}},
                      payload,
-                     DataProvenance{std::string(featureId), "ray-thickness",
+                     DataProvenance{std::string(featureId), "global-automatic-surface-wall-thickness",
                                     task->work.archive.algorithmVersion,
                                     ThicknessData::GetParameters(task->work.archive)}});
                 transaction.bindings.push_back({std::string(ThicknessData::bindingName),

@@ -2331,8 +2331,10 @@ int GetCropFailCount()
     {
         SurfaceDeterminationConfig surfaceConfig;
         surfaceConfig.defaultStart.targetViews = target.targetViews;
-        surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::GlobalIsoPreview;
+        surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::GlobalAutomatic;
         surfaceConfig.defaultStart.initialIsoValue = 0.5;
+        surfaceConfig.defaultStart.materialRange = std::array<double, 2>{0, 1};
+        surfaceConfig.defaultStart.purpose = SurfaceTaskPurpose::Preview;
         auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
         const bool attached = session.AttachFeature(surface);
         SurfaceDeterminationRequest request;

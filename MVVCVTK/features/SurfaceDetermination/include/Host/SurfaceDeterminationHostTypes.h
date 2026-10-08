@@ -13,17 +13,19 @@
 #include <string>
 #include <vector>
 
+// 业务模式与计算方法分离；高级模式只预留入口，未实现时明确拒绝。
+enum class SurfaceBusinessMode : std::uint8_t { Production, Advanced };
+
 struct SurfaceDeterminationStartParams final : SurfaceRecipe
 {
+    SurfaceBusinessMode businessMode = SurfaceBusinessMode::Production;
     HostViewTargets targetViews;
     // 省略只在接纳时解析主卷，计算不再查询当前选择。
     std::optional<DataRevisionRef> sourceVolume;
     std::optional<DataRevisionRef> analysisRoi;
-    std::optional<DataRevisionRef> materialLabels;
-    std::optional<DataRevisionRef> initialSurface;
     // 执行分块不降低分辨率，不影响算法结果的参数指纹。
     std::uint32_t seedBlockDepth = 16;
-    // 省略沿用方法的既有用途：Automatic→Estimate、Global→Preview。
+    // 省略表示正式测量；预览也执行同一材料等值面算法。
     std::optional<SurfaceTaskPurpose> purpose;
     std::string resultScope;
     DataPublishPolicy sourcePolicy = DataPublishPolicy::RequireCurrentInputs;
@@ -50,7 +52,7 @@ struct SurfaceGenerationSnapshot final {
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = 0;
     SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::MaterialIso;
+        SurfaceDeterminationMethod::GlobalAutomatic;
     std::shared_ptr<const std::vector<SurfacePointRecord>> points;
     std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
     std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
@@ -91,7 +93,8 @@ enum class SurfaceAdmissionStatus : std::uint8_t {
     InvalidRequest,
     Busy,
     Stopping,
-    Unavailable
+    Unavailable,
+    UnsupportedMode
 };
 
 struct SurfaceDeterminationAdmission final {

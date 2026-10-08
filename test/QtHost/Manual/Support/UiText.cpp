@@ -89,10 +89,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Paint", "涂绘标签"}, {"Erase", "擦除标签"}, {"Fill", "填充区域"}, {"Island", "处理孤岛"},
         {"Grow", "区域生长"}, {"Split", "拆分零件"}, {"Merge", "合并零件"}, {"Undo", "撤销"}, {"Redo", "重做"},
         {"Discard", "丢弃候选"}, {"Cancel", "取消计算"},
-        {"AutomaticIso50", "自动 ISO50 阈值估计"}, {"GlobalIsoPreview", "全局等值面预览"},
-        {"MaterialIso", "材料等值面测定"},
-        {"LocalAdaptiveIso50", "局部自适应 ISO50"}, {"GradientPeak", "梯度峰值表面定位"},
-        {"LocalRelativeIso", "局部相对等值表面"}, {"EdgeModelFit", "单边模型拟合表面"}, {"PairedEdgeModelFit", "双边模型拟合表面"},
+        {"GlobalAutomatic", "全局自动表面测定"},
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
@@ -109,7 +106,6 @@ QString GetParameterSectionText(const QString& module, const QString& action)
         {"Data.Load", "输入参数"}, {"View.Set", "显示参数"}, {"View.Visibility", "辅助显示"}, {"View.Reset", "视图定位"}, {"View.Cursor", "切片位置"},
         {"Part.Start", "分割参数"}, {"Part.SetState", "零件属性"}, {"Gap.Start", "孔隙参数"},
         {"Artifact.Ring", "环形校正"}, {"Artifact.Diffusion", "扩散滤波"}, {"Artifact.Combined", "组合校正"},
-        {"Surface.AutomaticIso50", "阈值估计"}, {"Surface.GlobalIsoPreview", "等值面预览"}, {"Surface.LocalAdaptiveIso50", "自适应表面"}, {"Surface.GradientPeak", "梯度峰值"},
         {"Wall.Start", "壁厚参数"}, {"Wall.SetEvaluation", "壁厚公差"}, {"Wall.SetDisplay", "结果显示"}, {"Wall.SelectSample", "采样定位"},
         {"Alignment.Start", "求解参数"}, {"Alignment.ImportReference", "名义参考"}, {"Alignment.SaveRecipe", "对齐方案"},
         {"Crop.Start", "裁剪参数"}, {"Crop.Mode", "保留方式"}, {"Rotation.Rotate", "旋转参数"}};
@@ -314,8 +310,6 @@ QString GetFlowText(const QJsonObject& record)
         parts << completed.value(action, "对齐操作完成");
     } else parts << statuses.value(status, status);
     const auto result = record["result"].toObject();
-    const bool thresholdOnly = module == "Surface" && action == "AutomaticIso50";
-    if (thresholdOnly && status == "Succeeded") parts << "仅估计阈值，未生成网格：ISO=" + QString::number(result["isoEstimate"].toObject()["iso"].toDouble(), 'g', 10);
     for (const auto* key : {"message", "error", "hint"}) {
         if (result[key].isString() && !result[key].toString().isEmpty()) parts << result[key].toString().simplified().left(300);
     }
@@ -324,7 +318,6 @@ QString GetFlowText(const QJsonObject& record)
             {"points", "网格点数"}, {"objectCount", "对象数"}, {"voidVolumeMM3", "孔隙体积（mm³）"}, {"porosityRatio", "孔隙率"},
             {"previewId", "候选编号"}, {"errorCode", "错误码"}, {"failureReason", "失败原因码"}}) {
             const auto value = result[field.first];
-            if (thresholdOnly && (field.first == "pointCount" || field.first == "points" || field.first == "objectCount")) continue;
             if (value.isString() && !value.toString().isEmpty()) parts << field.second + "=" + value.toString();
             else if (value.isDouble() && ((!field.first.contains("Code") && field.first != "failureReason") || value.toDouble() != 0))
                 parts << field.second + "=" + QString::number(value.toDouble(), 'g', 8);

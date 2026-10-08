@@ -357,7 +357,7 @@ bool TestScheduling()
     surfaceRequest.action = SurfaceDeterminationAction::Start;
     SurfaceDeterminationStartParams surfaceStart;
     surfaceStart.targetViews.viewIds = {"a"};
-    surfaceStart.method = SurfaceDeterminationMethod::GlobalIsoPreview;
+    surfaceStart.method = SurfaceDeterminationMethod::GlobalAutomatic;
     surfaceStart.initialIsoValue = 50.0;
     surfaceRequest.start = surfaceStart;
     int surfaceCompletions = 0;

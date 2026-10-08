@@ -30,7 +30,7 @@ SurfaceAlgorithmResult Build(
         params,
         128U * 1024U * 1024U,
         [] { return false; },
-        {}, {{}, {}, std::move(roi)});
+        {}, {std::move(roi)});
 }
 
 
@@ -402,20 +402,18 @@ void TestDirectionExtentAndDeterminism(Checks& checks)
     checks.Get(coordinatesEqual, "thread-count changes preserve point coordinates");
 
     auto changedParams = params;
-    changedParams.maximumOffsetModel = 1.1;
+    changedParams.seedFraction = .6;
     const auto changed = Build(rotated, changedParams);
     checks.Get(
         changed.status == SurfaceResultStatus::Succeeded
             && changed.parameterFingerprint != first.parameterFingerprint,
         "resolved parameter changes produce a new fingerprint");
     auto changedMethod = params;
-    changedMethod.method = SurfaceDeterminationMethod::GradientPeak;
+    changedMethod.method = static_cast<SurfaceDeterminationMethod>(0);
     const auto changedMethodResult = Build(rotated, changedMethod);
     checks.Get(
-        changedMethodResult.status == SurfaceResultStatus::Succeeded
-            && changedMethodResult.parameterFingerprint
-                != first.parameterFingerprint,
-        "method changes produce a new fingerprint");
+        changedMethodResult.status == SurfaceResultStatus::Failed,
+        "retired method has no algorithm dispatch");
 
     const auto nonzeroExtent = BuildSnapshot(
         { 16, 12, 10 },
