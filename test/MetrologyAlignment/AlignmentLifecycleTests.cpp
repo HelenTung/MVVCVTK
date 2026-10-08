@@ -11,6 +11,7 @@
 #include <chrono>
 #include <atomic>
 #include <iostream>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 
@@ -40,13 +41,17 @@ class FaultDataPort final : public TestDataPort {
 class OverlayPort final : public OverlayService {
   public:
     bool rejectsAttach = false;
+    std::function<void()> onAttach;
+    std::function<void()> onRemove;
     std::vector<std::shared_ptr<FeatureOverlay>> overlays;
     bool AttachOverlay(std::shared_ptr<FeatureOverlay> value) override {
         overlays.push_back(value);
+        if (onAttach) onAttach();
         return !rejectsAttach;
     }
     void RemoveOverlay(std::shared_ptr<FeatureOverlay> value) noexcept override {
         overlays.erase(std::remove(overlays.begin(), overlays.end(), value), overlays.end());
+        if (onRemove) onRemove();
     }
     void ClearOverlays() noexcept override {
         overlays.clear();
@@ -160,7 +165,11 @@ struct Fixture final {
             feature->OnHostTick();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        Check(!feature->GetState().isBusy, "bounded task completion");
+        if (feature->GetState().isBusy) {
+            // 超时后禁止继续使用仍引用本测试栈变量的异步回调。
+            Check(false, "bounded task completion; stopping test before callback captures leave scope");
+            std::abort();
+        }
     }
     AlignmentResult Solve() {
         AlignmentResult result;
@@ -507,7 +516,8 @@ void SurfaceReferenceLifecycle() {
           "restore cannot reuse reference triangle IDs on another revision");
 }
 void AutomaticReferenceLifecycle() {
-    Fixture f;
+    auto views = std::make_shared<Views>();
+    Fixture f(views);
     const auto model = AlignmentTestModels::Model();
     f.mesh = model.mesh; f.recipe = model.recipe;
     f.recipe.surfaceFit->scales = {{.4,.8,40},{0,.8,40}};
@@ -574,9 +584,74 @@ void AutomaticReferenceLifecycle() {
           deviation->verdict == AlignmentInspectionVerdict::Pass && deviation->forward->samples.size() == f.mesh->GetVertices().size()/3,
           "dense evaluation independently records mesh/alignment/parameters and verdict");
     const auto again = f.feature->GetDeviation(deviationRef);
-    Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse,
+    Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse && deviation->parameters == again->parameters,
           "result queries share immutable fields without full-array copy");
     Check(f.feature->GetState().activeResult == result.result, "evaluation leaves alignment activation unchanged");
+    AlignmentRequest display; display.action = AlignmentAction::SetDeviationDisplay;
+    display.deviationDisplay = AlignmentDeviationDisplay{};
+    display.deviationDisplay->result = deviationRef; display.deviationDisplay->range = {0,.1};
+    display.deviationDisplay->selectedVertex = 0;
+    AlignmentResult displayed;
+    const auto displayCommit = f.data->GetDataGraph().commitId;
+    const auto show = [&] {
+        Check(f.feature->SendRequest(display,[&](AlignmentResult r) { displayed = std::move(r); }).status ==
+              AlignmentAdmissionStatus::Accepted,"deviation display request accepted");
+    };
+    show();
+    Check(displayed.isDisplayReady && f.feature->GetState().isDeviationDisplayReady &&
+          views->overlay->overlays.size() == 2 && f.data->GetDataGraph().commitId == displayCommit,
+          "deviation colors coexist with alignment marker without republishing numerical data");
+    const auto selected = f.feature->GetDeviationSample(deviationRef,0);
+    Check(selected && selected->isCurrent && selected->sample.distance < 1e-7 &&
+          std::abs(selected->alignedPoint[0]-model.referenceMesh->GetVertices()[0]) < 1e-7,
+          "selected deviation locates original sample and aligned reference-space point");
+    Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetVertices().size()/3),"selection bounds checked");
+    const auto oldOverlay = views->overlay->overlays.back();
+    show();
+    Check(displayed.isDisplayReady && views->overlay->overlays.back()==oldOverlay,
+          "identical display request reuses geometry, colors and overlay objects");
+    views->overlay->rejectsAttach = true; display.deviationDisplay->range = {0,.2}; show(); views->overlay->rejectsAttach = false;
+    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
+          views->overlay->overlays.back() == oldOverlay && f.feature->GetState().isDeviationDisplayReady &&
+          f.feature->GetState().deviationDisplay->range[1] == .1,
+          "failed display replacement preserves previous complete overlay and settings");
+    views->overlay->onAttach = [] { throw 42; }; show(); views->overlay->onAttach = {};
+    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
+          views->overlay->overlays.back() == oldOverlay,"nonstandard port exception rolls back partial display attachment");
+    display.deviationDisplay->range = {1,0};
+    Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::InvalidRequest &&
+          views->overlay->overlays.back() == oldOverlay,"invalid color range leaves current display untouched");
+    display.deviationDisplay->range = {0,.1}; display.deviationDisplay->isVisible = false; show();
+    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.size() == 1 &&
+          f.data->GetDataGraph().commitId == displayCommit,"hiding deviation releases overlay without changing detection data");
+    display.deviationDisplay->isVisible = true;
+    views->overlay->onAttach = [&] {
+        Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::Busy && !f.feature->DetachHost(),
+              "display attachment blocks reentrant mutation and detach until atomic replacement ends");
+    };
+    show(); views->overlay->onAttach = {};
+    Check(f.feature->GetScopeState(f.input.scope).isDeviationDisplayReady &&
+          !f.feature->GetScopeState("other-part").deviationDisplay,
+          "deviation display state is scoped to its bound alignment part");
+    AlignmentConfig limitedConfig; limitedConfig.workingBytes = 100000;
+    auto limitedDisplay = std::make_shared<MetrologyAlignmentHostFeature>(limitedConfig);
+    HostFeatureContext limitedContext; limitedContext.data=f.data; limitedContext.views=views;
+    Check(limitedDisplay->AttachHost(limitedContext),"bounded display consumer attaches to existing numerical results");
+    AlignmentResult limitedResult;
+    Check(limitedDisplay->SendRequest(display,[&](AlignmentResult r) { limitedResult=std::move(r); }).status ==
+          AlignmentAdmissionStatus::Accepted && limitedResult.isDisplayReady,"budget admits one set of display arrays");
+    auto replacement = display; replacement.deviationDisplay->range[1]=.2;
+    Check(limitedDisplay->SendRequest(replacement,[&](AlignmentResult r) { limitedResult=std::move(r); }).status ==
+          AlignmentAdmissionStatus::Accepted && limitedResult.status == AlignmentStatus::BudgetExceeded &&
+          limitedDisplay->GetState().isDeviationDisplayReady,
+          "replacement charges simultaneously retained old arrays and preserves old display on budget failure");
+    Check(limitedDisplay->DetachHost() && views->overlay->overlays.size()==2,"bounded consumer removes only its own display");
+    std::thread otherThread([&] {
+        Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::Unavailable &&
+              !f.feature->GetDeviationSample(deviationRef,0),"display and selection reject non-owner calls");
+    });
+    otherThread.join();
+
     runEvaluation();
     AlignmentRequest cancel; cancel.action = AlignmentAction::Cancel;
     Check(f.feature->SendRequest(cancel).status == AlignmentAdmissionStatus::Accepted, "surface evaluation cancellation accepted");
@@ -604,9 +679,21 @@ void AutomaticReferenceLifecycle() {
         {{"source", f.input.source}}, f.mesh, {}});
     Check(f.data->SetDataCommit(std::move(changed)).status == DataCommitStatus::Succeeded,
           "measurement revision advances while evaluation is pending");
+    views->overlay->onRemove = [&] {
+        AlignmentRequest hide = display; hide.deviationDisplay->isVisible = false;
+        Check(f.feature->SendRequest(hide).status == AlignmentAdmissionStatus::Busy && !f.feature->DetachHost(),
+              "stale display removal prevents recursive clear or detach through port callback");
+    };
     f.Drain();
+    views->overlay->onRemove = {};
     Check(evaluated.status == AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.deviationResult),
           "input change prevents stale field publication");
+    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.empty(),
+          "source revision invalidates and removes both dependent displays");
+    show();
+    Check(displayed.status == AlignmentStatus::Stale && !displayed.isDisplayReady,"stale deviation cannot be displayed");
+    const auto staleSample = f.feature->GetDeviationSample(deviationRef,0);
+    Check(staleSample && !staleSample->isCurrent,"historical selected value has explicit stale status");
     const auto historical = f.feature->GetDeviation(deviationRef);
     Check(historical && !historical->isCurrent && historical->forward == deviation->forward,
           "historical deviation stays readable with unchanged arrays and explicit stale state");
@@ -616,13 +703,14 @@ void AutomaticReferenceLifecycle() {
 }
 } // namespace
 int main() {
-    AutomaticReferenceLifecycle();
-    SurfaceReferenceLifecycle();
-    WorkNotifications();
-    Lifecycle();
-    Currentness();
-    Display();
-    Reentry();
-    ScopeRestoreAndCommitFault();
+    const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
+    run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
+    run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
+    run("WorkNotifications", WorkNotifications);
+    run("Lifecycle", Lifecycle);
+    run("Currentness", Currentness);
+    run("Display", Display);
+    run("Reentry", Reentry);
+    run("ScopeRestoreAndCommitFault", ScopeRestoreAndCommitFault);
     return failures ? 1 : 0;
 }

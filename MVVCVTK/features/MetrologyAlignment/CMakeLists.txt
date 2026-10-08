@@ -9,6 +9,8 @@ target_sources(metrology_alignment
         src/AlignmentPrealign.h src/AlignmentPrealign.cpp
         src/AlignmentDeviation.h src/AlignmentDeviation.cpp
         src/AlignmentDeviationData.h src/AlignmentDeviationData.cpp
+        src/AlignmentDeviationOverlay.h src/AlignmentDeviationOverlay.cpp
+        src/AlignmentDeviationDisplay.h src/AlignmentDeviationDisplay.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp
@@ -20,7 +22,7 @@ target_include_directories(metrology_alignment
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(metrology_alignment PUBLIC MVVCVTK::FeatureSPI
     PRIVATE opencv_world bcrypt MVVCVTKInternal::FeatureSupport VTK::CommonCore
-        VTK::CommonDataModel VTK::RenderingCore)
+        VTK::CommonDataModel VTK::RenderingCore VTK::RenderingAnnotation)
 SetTargetDefaults(metrology_alignment)
 set_target_properties(metrology_alignment PROPERTIES
     OUTPUT_NAME MetrologyAlignment PROJECT_LABEL MetrologyAlignment FOLDER "MVVCVTK/Features")

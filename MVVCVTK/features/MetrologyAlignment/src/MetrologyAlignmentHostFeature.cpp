@@ -7,6 +7,7 @@
 #include "AlignmentSolver.h"
 #include "AlignmentReference.h"
 #include "AlignmentDeviationData.h"
+#include "AlignmentDeviationDisplay.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -78,6 +79,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         }
         if (GetIsOwner()) {
             ClearDisplay();
+            m_deviationDisplay.Clear();
             if (m_data && m_observer)
                 m_data->DetachDataChange(m_observer);
         }
@@ -125,10 +127,12 @@ class MetrologyAlignmentHostFeature::Impl final {
             if (!m_state.isAttached)
                 return true;
         }
+        CommitGuard guard(m_isCommitting);
         if (m_observer && !m_data->DetachDataChange(m_observer))
             return false;
         m_observer = 0;
         ClearDisplay();
+        m_deviationDisplay.Clear();
         if (!m_resultScopes.Clear(*m_data)) return false;
         m_data.reset();
         m_views.reset();
@@ -143,6 +147,8 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner())
             return {};
         auto state = m_state;
+        state.deviationDisplay = m_deviationDisplay.GetRequest();
+        state.isDeviationDisplayReady = m_data && m_deviationDisplay.GetReady(m_data->GetDataGraph());
         if (m_data && GetDataRevisionRefValid(state.activeResult)) {
             const auto graph = m_data->GetDataGraph();
             const auto result = AlignmentData::GetResult(graph, state.activeResult);
@@ -178,10 +184,14 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(), ref);
     }
+    std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &ref, std::uint64_t vertex) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentDeviationDisplayController::GetSelection(m_data->GetDataGraph(),ref,vertex);
+    }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
             return {};
-        auto state = m_state;
+        auto state = GetState();
         const auto graph = m_data->GetDataGraph();
         const auto binding = AlignmentData::GetBinding(graph, scope);
         state.activeResult = binding.target.value_or(DataRevisionRef{});
@@ -190,6 +200,13 @@ class MetrologyAlignmentHostFeature::Impl final {
             result && AlignmentData::GetExpectationsCurrent(graph, result->record.expectations);
         state.isDisplayReady =
             state.isCurrent && m_state.isDisplayReady && state.activeResult == m_state.activeResult;
+        if (state.deviationDisplay) {
+            const auto deviation = AlignmentDeviationDataStore::GetResult(graph,state.deviationDisplay->result);
+            const auto alignment = deviation ? AlignmentData::GetResult(graph,deviation->alignmentResult) : nullptr;
+            if (!alignment || alignment->record.input.scope != scope) {
+                state.deviationDisplay.reset(); state.isDeviationDisplayReady = false;
+            }
+        }
         return state;
     }
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &ref) const {
@@ -240,9 +257,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::EvaluateSurface))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::SetDeviationDisplay))
             return {};
-        if ((request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
+        if ((request.deviationDisplay && request.action != AlignmentAction::SetDeviationDisplay) ||
+            (request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
             (request.reference && request.action != AlignmentAction::ImportReference) ||
             (request.targetRequestId && request.action != AlignmentAction::Cancel) ||
             (GetDataRevisionRefValid(request.recipeRef) &&
@@ -310,7 +328,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                         try {
                             if (task->deviationContext) {
                                 task->deviationData = AlignmentDeviation::Build(task->work,
-                                    task->deviationContext->snapshot.parameters, task->deviationContext->snapshot.sourceToTarget);
+                                    *task->deviationContext->snapshot.parameters, task->deviationContext->snapshot.sourceToTarget);
                                 task->candidate.diagnostics.status = task->deviationData.status;
                                 task->candidate.diagnostics.message = task->deviationData.message;
                             } else if (task->referenceRequest) {
@@ -332,7 +350,12 @@ class MetrologyAlignmentHostFeature::Impl final {
                 }
                 return {AlignmentAdmissionStatus::Accepted, id};
             }
-            if (request.action == AlignmentAction::Cancel) {
+            if (request.action == AlignmentAction::SetDeviationDisplay) {
+                if (!request.deviationDisplay || request.input || request.recipe || request.archive || request.isVisible) return {};
+                CommitGuard guard(m_isCommitting);
+                result = m_deviationDisplay.Set(*m_data,m_views.get(),m_config,*request.deviationDisplay);
+                result.requestId = id;
+            } else if (request.action == AlignmentAction::Cancel) {
                 if (!m_task || (request.targetRequestId && request.targetRequestId != m_task->id) ||
                     request.input || request.recipe || request.archive || request.isVisible)
                     return {};
@@ -462,7 +485,9 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || !m_state.isAttached || m_isCommitting)
             return false;
         if (m_dirty && m_dirty->exchange(false, std::memory_order_acq_rel)) {
+            CommitGuard guard(m_isCommitting);
             const auto graph = m_data->GetDataGraph();
+            m_deviationDisplay.Refresh(graph);
             if (m_task && !AlignmentData::GetExpectationsCurrent(graph, m_task->expectations)) {
                 m_task->isStale = true;
                 m_task->work.cancelled->store(true);
@@ -861,6 +886,7 @@ class MetrologyAlignmentHostFeature::Impl final {
     bool m_isCommitting = false;
     std::shared_ptr<Task> m_task;
     std::vector<OverlayBinding> m_overlays;
+    AlignmentDeviationDisplayController m_deviationDisplay;
 };
 
 MetrologyAlignmentHostFeature::MetrologyAlignmentHostFeature(AlignmentConfig config)
@@ -918,4 +944,9 @@ std::optional<AlignmentReferenceSnapshot> MetrologyAlignmentHostFeature::GetRefe
 
 std::optional<AlignmentDeviationSnapshot> MetrologyAlignmentHostFeature::GetDeviation(const DataRevisionRef &ref) const {
     return m_impl->GetDeviation(ref);
+}
+
+std::optional<AlignmentDeviationSelection> MetrologyAlignmentHostFeature::GetDeviationSample(
+    const DataRevisionRef &ref, std::uint64_t vertex) const {
+    return m_impl->GetDeviationSample(ref,vertex);
 }

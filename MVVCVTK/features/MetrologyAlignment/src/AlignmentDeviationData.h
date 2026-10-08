@@ -16,8 +16,8 @@ class Payload final : public IDataPayload {
     DataTypeId GetDataType() const override { return resultType; }
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override { return std::make_shared<const Payload>(*this); }
     std::vector<std::shared_ptr<const void>> GetDataResources() const override {
-        if (snapshot.reverse) return {snapshot.forward, snapshot.reverse};
-        return {snapshot.forward};
+        if (snapshot.reverse) return {snapshot.forward, snapshot.reverse, snapshot.parameters};
+        return {snapshot.forward, snapshot.parameters};
     }
     const AlignmentDeviationSnapshot snapshot;
     const std::vector<DataExpectation> expectations;

@@ -36,10 +36,10 @@ bool SetType(TrustedDataPort &data) {
                 const auto &s = value->snapshot;
                 if (GetDataRevisionRefValid(s.result) && GetDataRevisionRefValid(s.alignmentResult) &&
                     GetDataRevisionRefValid(s.sourceMesh) && GetDataRevisionRefValid(s.referenceMesh) &&
-                    GetDataRevisionRefValid(s.transform) && s.parameters.alignmentResult == s.alignmentResult &&
-                    AlignmentDeviation::GetRequestValid(s.parameters) && AlignmentMath::Rigid(s.sourceToTarget) &&
+                    GetDataRevisionRefValid(s.transform) && s.parameters && s.parameters->alignmentResult == s.alignmentResult &&
+                    AlignmentDeviation::GetRequestValid(*s.parameters) && AlignmentMath::Rigid(s.sourceToTarget) &&
                     static_cast<unsigned>(s.unit) <= 2 && static_cast<unsigned>(s.verdict) <= 3 &&
-                    FieldValid(s.forward) && (s.parameters.reverseCoverage ? FieldValid(s.reverse) : !s.reverse)) return true;
+                    FieldValid(s.forward) && (s.parameters->reverseCoverage ? FieldValid(s.reverse) : !s.reverse)) return true;
             }
             message = "Invalid surface deviation result."; return false;
         }};
@@ -75,7 +75,7 @@ std::optional<Context> Prepare(const DataGraphSnapshot &graph, const AlignmentDe
     auto &s = context.snapshot;
     s.alignmentResult = request.alignmentResult; s.sourceMesh = alignment->record.input.mesh;
     s.referenceMesh = recipe->recipe.nominalData; s.transform = alignment->record.transform;
-    s.parameters = request; s.unit = alignment->record.input.unit; s.sourceToTarget = matrix->GetSourceToTarget();
+    s.parameters = std::make_shared<const AlignmentDeviationRequest>(request); s.unit = alignment->record.input.unit; s.sourceToTarget = matrix->GetSourceToTarget();
     context.expectations = alignment->record.expectations;
     for (const auto &input : Inputs(s)) {
         DataExpectation expectation;

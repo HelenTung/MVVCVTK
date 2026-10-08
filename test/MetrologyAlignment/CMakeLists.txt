@@ -70,3 +70,27 @@ set_target_properties(mvvcvtk_alignment_deviation_tests PROPERTIES
     PROJECT_LABEL AlignmentDeviationTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.Deviation COMMAND mvvcvtk_alignment_deviation_tests)
 SetTestRuntime(MetrologyAlignment.Deviation mvvcvtk_alignment_deviation_tests)
+
+add_executable(mvvcvtk_alignment_deviation_display_tests AlignmentDeviationDisplayTests.cpp)
+target_include_directories(mvvcvtk_alignment_deviation_display_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_deviation_display_tests PRIVATE MVVCVTK::MetrologyAlignment
+    MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} VTK::RenderingAnnotation VTK::IOImage)
+SetTargetDefaults(mvvcvtk_alignment_deviation_display_tests)
+set_target_properties(mvvcvtk_alignment_deviation_display_tests PROPERTIES
+    PROJECT_LABEL AlignmentDeviationDisplayTests FOLDER "MVVCVTK/test/Automation")
+vtk_module_autoinit(TARGETS mvvcvtk_alignment_deviation_display_tests MODULES ${MVVCVTK_VTK_TARGETS})
+add_test(NAME MetrologyAlignment.DeviationDisplay COMMAND mvvcvtk_alignment_deviation_display_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/deviation-display-$<CONFIG>.png")
+SetTestRuntime(MetrologyAlignment.DeviationDisplay mvvcvtk_alignment_deviation_display_tests)
+
+add_executable(mvvcvtk_alignment_display_audit AlignmentDisplayAudit.cpp)
+target_include_directories(mvvcvtk_alignment_display_audit PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_display_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
+    MVVCVTK::MetrologyAlignment MVVCVTKInternal::FeatureSupport opencv_world psapi
+    ${MVVCVTK_VTK_TARGETS} VTK::RenderingAnnotation VTK::IOImage)
+SetTargetDefaults(mvvcvtk_alignment_display_audit)
+set_target_properties(mvvcvtk_alignment_display_audit PROPERTIES
+    PROJECT_LABEL AlignmentDisplayAudit FOLDER "MVVCVTK/test/Automation/Reference")
+vtk_module_autoinit(TARGETS mvvcvtk_alignment_display_audit MODULES ${MVVCVTK_VTK_TARGETS})

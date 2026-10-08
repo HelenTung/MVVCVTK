@@ -311,12 +311,29 @@ struct AlignmentDeviationField final {
 };
 struct AlignmentDeviationSnapshot final {
     DataRevisionRef result, alignmentResult, sourceMesh, referenceMesh, transform;
-    AlignmentDeviationRequest parameters;
+    // 选区编号也只读共享，状态轮询不复制大型 ROI。
+    std::shared_ptr<const AlignmentDeviationRequest> parameters;
     AlignmentUnit unit = AlignmentUnit::ModelUnit;
     AlignmentMatrix sourceToTarget = alignmentIdentity;
     // 只读共享数组；查询不会再次复制完整场。reverse 只表示名义到实测的无符号覆盖距离。
     std::shared_ptr<const AlignmentDeviationField> forward, reverse;
     AlignmentInspectionVerdict verdict = AlignmentInspectionVerdict::NotEvaluated;
+    bool isCurrent = false;
+};
+
+struct AlignmentDeviationDisplay final {
+    DataRevisionRef result;
+    // 固定显示范围，截断只影响颜色。若启用公差色，范围必须覆盖正式公差区间。
+    std::array<double,2> range{0,1};
+    bool useToleranceColors = true;
+    bool isVisible = true;
+    std::optional<std::uint64_t> selectedVertex;
+};
+struct AlignmentDeviationSelection final {
+    DataRevisionRef result;
+    std::uint64_t vertex = 0;
+    AlignmentPoint sourcePoint{}, alignedPoint{};
+    AlignmentDeviationSample sample;
     bool isCurrent = false;
 };
 
@@ -364,7 +381,8 @@ enum class AlignmentAction : std::uint8_t {
     Restore,
     ImportReference,
     // FullyDetermined 表示计算/发布成功；合格判定读取 DeviationSnapshot.verdict。
-    EvaluateSurface
+    EvaluateSurface,
+    SetDeviationDisplay
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -383,6 +401,7 @@ struct AlignmentRequest final {
     bool isActivationRequested = true;
     std::optional<AlignmentReferenceRequest> reference;
     std::optional<AlignmentDeviationRequest> deviation;
+    std::optional<AlignmentDeviationDisplay> deviationDisplay;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,
@@ -419,4 +438,6 @@ struct AlignmentState final {
     std::uint64_t requestId = 0;
     DataRevisionRef activeResult;
     AlignmentStatus lastStatus = AlignmentStatus::Unavailable;
+    std::optional<AlignmentDeviationDisplay> deviationDisplay;
+    bool isDeviationDisplayReady = false;
 };
