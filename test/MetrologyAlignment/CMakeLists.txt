@@ -115,6 +115,14 @@ set_target_properties(mvvcvtk_alignment_section_tests PROPERTIES
 add_test(NAME MetrologyAlignment.Section COMMAND mvvcvtk_alignment_section_tests)
 SetTestRuntime(MetrologyAlignment.Section mvvcvtk_alignment_section_tests)
 
+add_executable(mvvcvtk_voxel_volume_tests AlignmentVoxelVolumeTests.cpp)
+target_include_directories(mvvcvtk_voxel_volume_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_voxel_volume_tests PRIVATE MVVCVTK::MetrologyAlignment)
+SetTargetDefaults(mvvcvtk_voxel_volume_tests)
+set_target_properties(mvvcvtk_voxel_volume_tests PROPERTIES PROJECT_LABEL VoxelVolumeTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.VoxelVolume COMMAND mvvcvtk_voxel_volume_tests)
+SetTestRuntime(MetrologyAlignment.VoxelVolume mvvcvtk_voxel_volume_tests)
+
 add_executable(mvvcvtk_metrology_report_write_tests MetrologyReportWriteTests.cpp)
 set(MVVCVTK_METROLOGY_REFERENCE_PYTHON "" CACHE FILEPATH "Optional Python 3.11+ with numpy/scipy for independent real-section verification; test-only")
 target_link_libraries(mvvcvtk_metrology_report_write_tests PRIVATE MVVCVTK::MetrologyAlignment)

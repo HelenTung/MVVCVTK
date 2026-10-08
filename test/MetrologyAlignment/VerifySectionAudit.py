@@ -179,6 +179,32 @@ def verify(path):
     require(result["sections"], "No real sections independently verified")
     result["numericalChecksPassed"] = True
     result["physicalAccuracyValidated"] = False
+    volumes = data["voxelVolumes"]
+    require(len(volumes) == len(scans) and {v["id"] for v in volumes} == set(scans), "Voxel volume scan coverage mismatch")
+    result["voxelVolumes"] = []
+    for volume in volumes:
+        scan = scans[volume["id"]]; roi = scan["nativeInclusiveRoi"]
+        dims = tuple(roi[2*a+1] - roi[2*a] + 1 for a in range(3))
+        raw_path = Path(scan["roiFile"])
+        require(digest(raw_path) == scan["roiSha256"], "Voxel reference ROI hash mismatch")
+        raw = np.memmap(raw_path, dtype="<f4", mode="r", shape=(dims[2], dims[1], dims[0]))
+        selected = nonfinite = 0; touches = False
+        for z in range(dims[2]):
+            slab = raw[z].astype(np.float64)
+            valid = np.isfinite(slab); chosen = valid & (slab >= volume["lower"]) & (slab <= volume["upper"])
+            selected += int(np.count_nonzero(chosen)); nonfinite += int(np.count_nonzero(~valid))
+            touches |= bool(np.any(chosen[0]) or np.any(chosen[-1]) or np.any(chosen[:, 0]) or np.any(chosen[:, -1]) or
+                            (z in (0, dims[2]-1) and np.any(chosen)))
+        del raw
+        total = dims[0]*dims[1]*dims[2]; cell = scan["spacingMm"]**3
+        require(volume["total"] == total and volume["selected"] == selected and volume["unselected"] == total-selected-nonfinite and
+                volume["nonFinite"] == nonfinite and volume["masked"] == volume["noData"] == volume["invalidLabels"] == 0,
+                "Independent RAW voxel classification mismatch")
+        require(volume["touchesRegionBoundary"] == touches and np.isclose(volume["cellVolumeMm3"], cell, rtol=1e-12, atol=0) and
+                np.isclose(volume["observedVolumeMm3"], selected*cell, rtol=1e-12, atol=1e-12), "Independent voxel geometry/volume mismatch")
+        require((volume["volumeMm3"] is None) == bool(nonfinite), "Unknown voxel volume completeness mismatch")
+        result["voxelVolumes"].append({"id": volume["id"], "selected": selected, "total": total, "observedVolumeMm3": selected*cell,
+                                       "touchesRegionBoundary": touches, "scope": "stored-threshold full-cell volume within ROI"})
     result["reportExports"] = verify_report(folder / "inspection-report.json", folder / "inspection-report.csv")
     destination = folder / "section-reference.json"
     require(not destination.exists(), "Reference evidence already exists; use a new audit run")

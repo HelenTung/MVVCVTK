@@ -4,6 +4,7 @@
 #include "AlignmentData.h"
 #include "AlignmentInspectionData.h"
 #include "AlignmentReport.h"
+#include "AlignmentVoxelVolumeData.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentPrealignTestSupport.h"
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <sstream>
+#include <cstring>
 #include <thread>
 
 namespace {
@@ -209,7 +211,7 @@ struct Fixture final {
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
-    Check(contract.inputs.size() == 2 && contract.outputs.size() == 9,
+    Check(contract.inputs.size() == 4 && contract.outputs.size() == 10,
         "feature declares recipe/mesh inputs and all formal output roles");
     const auto result = f.Solve();
     Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated,
@@ -614,6 +616,44 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
 }
+void VoxelVolumeLifecycle() {
+    Fixture f;GridGeometry3D geometry;geometry.dimensions={3,3,3};geometry.extent={0,2,0,2,0,2};geometry.spacing={.5,.5,.5};
+    std::vector<float> values(27,0);values[13]=100;
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(float));std::memcpy(bytes->data(),values.data(),bytes->size());
+    auto image=std::make_shared<const ImageGrid3DPayload>(geometry,ImageValueType::Float32,1,bytes);
+    const DataRevisionRef source{f.data->CreateDataEntityId(),1};DataTransaction add;
+    add.outputs.push_back({source.entityId,0,DataTypes::imageGrid3D,{},image,{}});
+    Check(f.data->SetDataCommit(std::move(add)).status==DataCommitStatus::Succeeded,"voxel source publishes");
+    AlignmentRequest request;request.action=AlignmentAction::EvaluateVoxelVolume;request.voxelVolume=VoxelVolumeRequest{};
+    request.voxelVolume->id="occupied-cell";request.voxelVolume->source=source;request.voxelVolume->storedValueRange=std::array<double,2>{50,200};request.voxelVolume->requireEnclosedSelection=true;
+    AlignmentResult completed;int calls=0;const auto before=f.feature->GetState().activeResult;
+    const auto run=[&] { Check(f.feature->SendRequest(request,[&](AlignmentResult r) { completed=std::move(r);++calls; }).status==AlignmentAdmissionStatus::Accepted,"voxel evaluation admitted"); };
+    run();(*request.voxelVolume->storedValueRange)[0]=150;f.Drain();(*request.voxelVolume->storedValueRange)[0]=50;
+    const auto resultRef=completed.voxelVolumeResult;const auto snapshot=f.feature->GetVoxelVolume(resultRef);
+    Check(calls==1 && completed.status==AlignmentStatus::FullyDetermined && snapshot && snapshot->isCurrent && snapshot->statistics.selected==1 &&
+        snapshot->statistics.volumeMm3 && std::abs(*snapshot->statistics.volumeMm3-.125)<1e-12 && !snapshot->statistics.touchesRegionBoundary,
+        "public voxel endpoint freezes parameters and computes enclosed analytic cell volume without alignment");
+    Check(f.feature->GetState().activeResult==before,"voxel measurement does not change active pose");
+    if(snapshot) {
+        auto forged=*snapshot;forged.result={f.data->CreateDataEntityId(),1};forged.statistics.cellVolumeMm3=2;
+        forged.statistics.observedVolumeMm3=2;forged.statistics.volumeMm3=2;
+        DataTransaction invalid;invalid.outputs.push_back({forged.result.entityId,0,AlignmentVoxelVolumeData::resultType,{{"source",source}},
+            std::make_shared<const AlignmentVoxelVolumeData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,"volume publication rejects cell volume inconsistent with source geometry");
+    }
+    run();AlignmentRequest cancel;cancel.action=AlignmentAction::Cancel;f.feature->SendRequest(cancel);f.Drain();
+    Check(completed.status==AlignmentStatus::Cancelled && !GetDataRevisionRefValid(completed.voxelVolumeResult),"cancelled voxel scan publishes nothing");
+    f.data->rejectsCommit=true;run();f.Drain();f.data->rejectsCommit=false;
+    Check(completed.status==AlignmentStatus::InternalError && !GetDataRevisionRefValid(completed.voxelVolumeResult),"failed volume commit exposes no output identity");
+    f.data->throwsAfterCommit=true;run();f.Drain();f.data->throwsAfterCommit=false;
+    Check(completed.status==AlignmentStatus::FullyDetermined && f.feature->GetVoxelVolume(completed.voxelVolumeResult),"volume observer exception preserves committed result");
+    run();DataTransaction change;change.outputs.push_back({source.entityId,1,DataTypes::imageGrid3D,{},image,{}});
+    Check(f.data->SetDataCommit(std::move(change)).status==DataCommitStatus::Succeeded,"voxel source advances during work");f.Drain();
+    Check(completed.status==AlignmentStatus::Stale && !GetDataRevisionRefValid(completed.voxelVolumeResult),"stale voxel candidate cannot publish");
+    const auto history=f.feature->GetVoxelVolume(resultRef);
+    Check(history && !history->isCurrent && snapshot && history->parameters==snapshot->parameters,"voxel history is readable with explicit staleness");
+    Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"stale source cannot start new formal volume measurement");
+}
 void ReportLifecycle() {
     std::shared_ptr<const MetrologyReport> retained;
     {
@@ -889,6 +929,7 @@ int main() {
     const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
     run("InspectionLifecycle", [] { InspectionLifecycle(); });
     run("ReportLifecycle", ReportLifecycle);
+    run("VoxelVolumeLifecycle", VoxelVolumeLifecycle);
     run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);

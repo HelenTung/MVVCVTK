@@ -10,6 +10,7 @@
 #include "AlignmentDeviationDisplay.h"
 #include "AlignmentInspectionData.h"
 #include "AlignmentReport.h"
+#include "AlignmentVoxelVolumeData.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -94,7 +95,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return false;
         m_owner = std::this_thread::get_id();
         try {
-            if (!AlignmentData::SetTypes(*context.data) || !AlignmentDeviationDataStore::SetType(*context.data) || !AlignmentInspectionData::SetType(*context.data))
+            if (!AlignmentData::SetTypes(*context.data) || !AlignmentDeviationDataStore::SetType(*context.data) || !AlignmentInspectionData::SetType(*context.data) || !AlignmentVoxelVolumeData::SetType(*context.data))
                 return false;
             auto dirty = std::make_shared<std::atomic<bool>>(false);
             const auto observer = context.data->AttachDataChange(
@@ -194,6 +195,9 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentReport::Capture(m_data->GetDataGraph(),request,m_config);
     }
+    std::optional<VoxelVolumeSnapshot> GetVoxelVolume(const DataRevisionRef &ref) const {
+        if(!GetIsOwner() || !m_data)return {};return AlignmentVoxelVolumeData::GetResult(m_data->GetDataGraph(),ref);
+    }
     std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &ref, std::uint64_t vertex) const {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentDeviationDisplayController::GetSelection(m_data->GetDataGraph(),ref,vertex);
@@ -267,9 +271,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::Inspect))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::EvaluateVoxelVolume))
             return {};
-        if ((request.inspection && request.action != AlignmentAction::Inspect) ||
+        if ((request.voxelVolume && request.action != AlignmentAction::EvaluateVoxelVolume) ||
+            (request.inspection && request.action != AlignmentAction::Inspect) ||
             (request.deviationDisplay && request.action != AlignmentAction::SetDeviationDisplay) ||
             (request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
             (request.reference && request.action != AlignmentAction::ImportReference) ||
@@ -294,9 +299,16 @@ class MetrologyAlignmentHostFeature::Impl final {
         result.requestId = id;
         try {
             if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference ||
-                request.action == AlignmentAction::EvaluateSurface || request.action == AlignmentAction::Inspect) {
+                request.action == AlignmentAction::EvaluateSurface || request.action == AlignmentAction::Inspect || request.action==AlignmentAction::EvaluateVoxelVolume) {
                 std::shared_ptr<Task> task;
-                if (request.action == AlignmentAction::Inspect) {
+                if(request.action==AlignmentAction::EvaluateVoxelVolume) {
+                    if(!request.voxelVolume || request.input || request.recipe || request.archive || request.isVisible)return {};
+                    auto context=AlignmentVoxelVolumeData::Prepare(m_data->GetDataGraph(),std::move(*request.voxelVolume),m_config);
+                    if(!context)return {};
+                    task=std::make_shared<Task>();task->id=id;task->work=std::move(context->work);task->expectations=context->expectations;
+                    task->volumeContext=std::move(context);task->work.cancelled=std::make_shared<std::atomic<bool>>(false);
+                    task->work.deadline=WorkLimit(m_config.deadlineMs).GetDeadline();task->callback=std::move(callback);
+                } else if (request.action == AlignmentAction::Inspect) {
                     if (!request.inspection || request.input || request.recipe || request.archive || request.isVisible) return {};
                     auto context=AlignmentInspectionData::Prepare(m_data->GetDataGraph(),std::move(*request.inspection),m_config);
                     if (!context) return {};
@@ -345,7 +357,10 @@ class MetrologyAlignmentHostFeature::Impl final {
                 try {
                     task->worker = std::thread([task, host = std::weak_ptr<FeatureHostControl>(m_host)] {
                         try {
-                            if (task->inspectionContext) {
+                            if(task->volumeContext) {
+                                task->volumeData=AlignmentVoxelVolume::Build(task->work,task->volumeContext->source,*task->volumeContext->snapshot.parameters);
+                                task->candidate.diagnostics.status=task->volumeData.status;task->candidate.diagnostics.message=task->volumeData.message;
+                            } else if (task->inspectionContext) {
                                 task->inspectionData=AlignmentInspection::Build(task->work,*task->inspectionContext->snapshot.plan,
                                     task->inspectionContext->snapshot.sourceToTarget);
                                 task->candidate.diagnostics.status=task->inspectionData.status;
@@ -537,6 +552,9 @@ class MetrologyAlignmentHostFeature::Impl final {
             result.status = AlignmentStatus::Stale;
         else if (task->work.cancelled->load() || m_state.isStopping)
             result.status = AlignmentStatus::Cancelled;
+        else if(task->volumeContext) {
+            if(result.status==AlignmentStatus::FullyDetermined)SetVoxelVolume(*task,result);
+        }
         else if (task->inspectionContext) {
             if (result.status==AlignmentStatus::FullyDetermined) SetInspection(*task,result);
         }
@@ -624,10 +642,25 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentDeviationData deviationData;
         std::optional<AlignmentInspectionData::Context> inspectionContext;
         InspectionData inspectionData;
+        std::optional<AlignmentVoxelVolumeData::Context> volumeContext;
+        VoxelVolumeData volumeData;
         std::atomic<bool> isDone{false};
         bool isStale = false, isActivationRequested = true;
         std::thread worker;
     };
+    void SetVoxelVolume(Task &task,AlignmentResult &result) {
+        try {
+            auto tx=AlignmentVoxelVolumeData::BuildTransaction(*m_data,*task.volumeContext,task.volumeData,result.voxelVolumeResult);
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting);commit=m_resultScopes.Commit(*m_data,std::move(tx)); }
+            if(commit.status!=DataCommitStatus::Succeeded) {
+                result.voxelVolumeResult={};result.status=commit.failureReason==DataCommitFailure::ExpectationFailed ? AlignmentStatus::Stale : AlignmentStatus::InternalError;
+            }
+        } catch(...) {
+            try { if(AlignmentVoxelVolumeData::GetResult(m_data->GetDataGraph(),result.voxelVolumeResult))return; } catch(...) {}
+            result.voxelVolumeResult={};result.status=AlignmentStatus::InternalError;
+        }
+    }
     void SetInspection(Task &task,AlignmentResult &result) {
         try {
             auto tx=AlignmentInspectionData::BuildTransaction(*m_data,*task.inspectionContext,task.inspectionData,result.inspectionResult);
@@ -939,7 +972,9 @@ std::string_view MetrologyAlignmentHostFeature::GetFeatureId() const noexcept {
 }
 FeatureDataContract MetrologyAlignmentHostFeature::GetDataContract() const {
     return {{{"mesh", DataFacets::surfaceMesh, true},
-             {"recipe", {"org.mvvcvtk.metrology-alignment.recipe"}, true}},
+             {"recipe", {"org.mvvcvtk.metrology-alignment.recipe"}, true},
+             {"volume", DataFacets::scalarGrid3D, false},
+             {"labels", DataFacets::labelMap3D, false}},
             {{"recipe", AlignmentData::recipeType, {{"org.mvvcvtk.metrology-alignment.recipe"}}},
              {"geometry", AlignmentData::geometryType, {{"org.mvvcvtk.metrology-alignment.geometry"}}},
              {"residuals", DataTypes::recordTable, {DataFacets::tabularRecords}},
@@ -948,7 +983,8 @@ FeatureDataContract MetrologyAlignmentHostFeature::GetDataContract() const {
              {"reference-source", AlignmentData::referenceType, {{"org.mvvcvtk.metrology-alignment.reference"}}},
              {"reference-mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},
              {"deviation", AlignmentDeviationDataStore::resultType, {{"org.mvvcvtk.metrology-alignment.deviation"}}},
-             {"inspection", AlignmentInspectionData::resultType, {{"org.mvvcvtk.metrology-alignment.inspection"}}}}};
+             {"inspection", AlignmentInspectionData::resultType, {{"org.mvvcvtk.metrology-alignment.inspection"}}},
+             {"voxel-volume", AlignmentVoxelVolumeData::resultType, {{"org.mvvcvtk.metrology-alignment.voxel-volume"}}}}};
 }
 bool MetrologyAlignmentHostFeature::AttachHost(const HostFeatureContext &context) {
     return m_impl->AttachHost(context);
@@ -999,4 +1035,7 @@ std::optional<InspectionSnapshot> MetrologyAlignmentHostFeature::GetInspection(c
 }
 MetrologyReportResult MetrologyAlignmentHostFeature::GetReport(const MetrologyReportRequest &request) const {
     return m_impl->GetReport(request);
+}
+std::optional<VoxelVolumeSnapshot> MetrologyAlignmentHostFeature::GetVoxelVolume(const DataRevisionRef &ref) const {
+    return m_impl->GetVoxelVolume(ref);
 }

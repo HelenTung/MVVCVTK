@@ -2,6 +2,7 @@
 
 #include "Data/DataGraphTypes.h"
 #include "Host/Types/HostViewTypes.h"
+#include "Host/VoxelVolume.h"
 
 #include <array>
 #include <cstddef>
@@ -468,6 +469,7 @@ struct AlignmentResult final {
     DataRevisionRef referenceMesh;
     DataRevisionRef deviationResult;
     DataRevisionRef inspectionResult;
+    DataRevisionRef voxelVolumeResult;
 };
 
 struct AlignmentArchive final {
@@ -502,7 +504,8 @@ enum class AlignmentAction : std::uint8_t {
     // FullyDetermined 表示计算/发布成功；合格判定读取 DeviationSnapshot.verdict。
     EvaluateSurface,
     SetDeviationDisplay,
-    Inspect
+    Inspect,
+    EvaluateVoxelVolume
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -523,6 +526,7 @@ struct AlignmentRequest final {
     std::optional<AlignmentDeviationRequest> deviation;
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
     std::optional<InspectionPlan> inspection;
+    std::optional<VoxelVolumeRequest> voxelVolume;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,

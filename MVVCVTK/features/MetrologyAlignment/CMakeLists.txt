@@ -16,6 +16,8 @@ target_sources(metrology_alignment
         src/AlignmentAllocation.h src/AlignmentSection.h src/AlignmentSection.cpp
         src/AlignmentInspectionData.h src/AlignmentInspectionData.cpp
         src/AlignmentReport.h src/AlignmentReport.cpp
+        src/AlignmentVoxelVolume.h src/AlignmentVoxelVolume.cpp
+        src/AlignmentVoxelVolumeData.h src/AlignmentVoxelVolumeData.cpp
         src/MetrologyReportWriter.cpp
         src/MetrologyReportFile.cpp
         src/AlignmentData.h src/AlignmentData.cpp
@@ -23,7 +25,7 @@ target_sources(metrology_alignment
         src/MetrologyAlignmentHostFeature.cpp
     PUBLIC FILE_SET api_headers TYPE HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        FILES include/Host/MetrologyAlignmentHostFeature.h include/Host/MetrologyAlignmentHostTypes.h include/Host/MetrologyReport.h)
+        FILES include/Host/MetrologyAlignmentHostFeature.h include/Host/MetrologyAlignmentHostTypes.h include/Host/MetrologyReport.h include/Host/VoxelVolume.h)
 target_include_directories(metrology_alignment
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

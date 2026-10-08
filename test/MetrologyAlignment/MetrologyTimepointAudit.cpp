@@ -159,6 +159,7 @@ struct Surface final {
     std::shared_ptr<const SurfaceMeshPayload> payload;
     std::vector<std::uint64_t> validVertices,validTriangles;
     std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
+    std::optional<double> iso;
 };
 Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,const Scan &scan,const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
     std::cout<<"SURFACE_START "<<scan.id<<'\n'<<std::flush;
@@ -172,6 +173,7 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
     Wait(feature,completion,m.deadlineMs);
     const auto &result=completion->value;
     out<<"{\"id\":"<<Json(scan.id)<<",\"parentSha256\":"<<Json(scan.parentSha)<<",\"roiSha256\":"<<Json(scan.roiSha)
+       <<",\"roiFile\":"<<Json(std::filesystem::absolute(scan.roiPath).lexically_normal().u8string())
        <<",\"spacingMm\":"<<scan.spacing<<",\"source\":"<<Json(Id(surface.source))<<",\"status\":"<<unsigned(result.status)
        <<",\"failure\":"<<unsigned(result.failureReason)<<",\"message\":"<<Json(result.message)<<",\"nativeInclusiveRoi\":[";
     for (std::size_t i=0;i<6;++i) { if (i) out<<','; out<<scan.nativeRoi[i]; }
@@ -183,6 +185,7 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         Require(snapshot && snapshot->modelUnit=="mm" && validity.canMeasure,"Published surface is not measurable/current.");
         surface.mesh=result.meshRevision; surface.generation=result.dataRevision;
         surface.objects=snapshot->objects;
+        if(snapshot->isoEstimate)surface.iso=snapshot->isoEstimate->isoValue;
         const auto node=data.GetDataGraph().view->GetData(surface.mesh);
         surface.payload=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
         Require(bool(surface.payload),"Formal surface mesh unavailable.");
@@ -506,6 +509,34 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
     }
     out<<"]}";
 }
+void VoxelVolumes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
+    out<<'[';
+    for(std::size_t i=0;i<surfaces.size();++i) {
+        if(i)out<<',';const auto &surface=surfaces[i];Require(surface.iso.has_value(),"Voxel experiment needs explicit C3 global initial ISO.");
+        const auto source=data.GetDataGraph().view->GetData(surface.source);
+        const auto image=std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload);Require(bool(image),"Voxel source image unavailable.");
+        const auto *storage=image->GetValues().get();const auto owners=image->GetValues().use_count();
+        AlignmentRequest request;request.action=AlignmentAction::EvaluateVoxelVolume;request.voxelVolume=VoxelVolumeRequest{};
+        auto &p=*request.voxelVolume;p.id=m.scans[i].id+"-voxel-range";p.source=surface.source;
+        p.storedValueRange=std::array<double,2>{*surface.iso,std::numeric_limits<double>::max()};
+        const auto started=std::chrono::steady_clock::now();auto completed=std::make_shared<AlignmentCompletion>();
+        Require(feature.SendRequest(request,[completed](AlignmentResult r){completed->value=std::move(r);completed->done=true;}).status==AlignmentAdmissionStatus::Accepted,"Voxel volume request rejected.");
+        Wait(feature,completed,m.deadlineMs+1000);const auto volume=feature.GetVoxelVolume(completed->value.voxelVolumeResult);
+        Require(completed->value.status==AlignmentStatus::FullyDetermined && volume && volume->isCurrent &&
+            image->GetValues().get()==storage && image->GetValues().use_count()==owners,"Voxel volume must preserve source storage and publish current statistics.");
+        const auto &s=volume->statistics;
+        out<<"{\"id\":"<<Json(m.scans[i].id)<<",\"result\":"<<Json(Id(volume->result))<<",\"source\":"<<Json(Id(volume->source))
+           <<",\"scope\":\"selected full cells within native ROI; global stored-value threshold, not C3 continuous surface volume or whole-part volume\",\"method\":\"StoredValueRange\""
+           <<",\"lower\":"<<(*volume->parameters->storedValueRange)[0]<<",\"upper\":"<<(*volume->parameters->storedValueRange)[1]
+           <<",\"total\":"<<s.total<<",\"selected\":"<<s.selected<<",\"unselected\":"<<s.unselected<<",\"masked\":"<<s.masked
+           <<",\"noData\":"<<s.noData<<",\"nonFinite\":"<<s.nonFinite<<",\"invalidLabels\":"<<s.invalidLabels
+           <<",\"cellVolumeMm3\":"<<s.cellVolumeMm3<<",\"observedVolumeMm3\":"<<s.observedVolumeMm3<<",\"volumeMm3\":";
+        if(s.volumeMm3)out<<*s.volumeMm3;else out<<"null";
+        out<<",\"validity\":"<<unsigned(s.validity)<<",\"touchesRegionBoundary\":"<<(s.touchesRegionBoundary ? "true" : "false")
+           <<",\"sourceStorageUnchanged\":true,\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+    }
+    out<<']';
+}
 void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
     if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
         out<<"{\"attempted\":false,\"reason\":\"Two measurable array surfaces are required\"}"; return;
@@ -580,6 +611,7 @@ int wmain(int argc,wchar_t **argv) {
         for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder,reports) && sectionsPassed; }
         out<<']';
         out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,deviations,out,folder);
+        out<<",\"voxelVolumes\":";VoxelVolumes(alignmentFeature,*data,surfaces,manifest,out);
         const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
         out.close();
