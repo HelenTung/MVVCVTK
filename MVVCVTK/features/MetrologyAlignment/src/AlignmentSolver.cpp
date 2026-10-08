@@ -3,6 +3,7 @@
 #include "AlignmentMath.h"
 #include "AlignmentMeshQuery.h"
 #include "AlignmentPrealign.h"
+#include "AlignmentSurfaceSamples.h"
 #include <map>
 #include <numeric>
 #include <set>
@@ -310,89 +311,10 @@ void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
         d.status =
             d.remaining ? AlignmentStatus::Underconstrained : AlignmentStatus::FullyDetermined;
 }
-struct SurfaceSample final {
-    std::uint64_t vertex = 0;
-    double area = 0;
-};
-
-std::vector<SurfaceSample> BuildSurfaceSamples(const AlignmentWork &work,
-                                               const AlignmentMatrix &initial,
-                                               std::size_t indexBytes) {
-    const auto &v = work.mesh->GetVertices();
-    const auto &region = work.recipe.surfaceFit->sourceRegion;
-    Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
-            "Surface selection belongs to another mesh revision.");
-    const auto count = region && !region->vertexIds.empty() ? region->vertexIds.size() : v.size() / 3;
-    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
-    const auto initialCapacity = region && region->targetBounds ? 0 : count;
-    if (indexBytes > limit || initialCapacity > (limit - indexBytes) / sizeof(SurfaceSample))
-        throw std::length_error("Surface selection exceeds the working budget.");
-    std::vector<SurfaceSample> samples;
-    // 只保留编号和面积权重；源坐标继续由固定网格提供。
-    samples.reserve(initialCapacity);
-    for (std::size_t i = 0; i < count; ++i) {
-        if (i % 256 == 0) CheckWork(work);
-        const auto id = region && !region->vertexIds.empty() ? region->vertexIds[i] : i;
-        Require(id < v.size() / 3, "Surface selection is out of bounds.");
-        if (region && region->targetBounds) {
-            const auto p = Transform(initial, {v[3 * id], v[3 * id + 1], v[3 * id + 2]});
-            bool inside = true;
-            for (std::size_t axis = 0; axis < 3; ++axis)
-                inside = inside && p[static_cast<int>(axis)] >= (*region->targetBounds)[2 * axis] &&
-                         p[static_cast<int>(axis)] <= (*region->targetBounds)[2 * axis + 1];
-            if (!inside) continue;
-        }
-        if (samples.size() == samples.capacity()) {
-            const auto capacity = samples.capacity() == 0 ? std::size_t{1}
-                : std::min(count, samples.capacity() * 2);
-            if (capacity > (limit - indexBytes) / sizeof(SurfaceSample))
-                throw std::length_error("Surface region exceeds the working budget.");
-            samples.reserve(capacity);
-        }
-        samples.push_back({static_cast<std::uint64_t>(id), 0});
-    }
-    Require(!samples.empty(), "Surface alignment region is empty.");
-    std::sort(samples.begin(), samples.end(), [](const auto &a, const auto &b) {
-        return a.vertex < b.vertex;
-    });
-    for (std::size_t i = 1; i < samples.size(); ++i)
-        Require(samples[i - 1].vertex != samples[i].vertex, "Duplicate surface selection.");
-    if ((work.config.pointLimit && samples.size() > work.config.pointLimit) ||
-        (work.config.constraintLimit && samples.size() > work.config.constraintLimit) ||
-        samples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / 3)
-        throw std::length_error("Surface alignment exceeds point/constraint limit.");
-    // 覆盖方程和薄 SVD 的同时存活缓冲；不把输入灰度体计为新的工作副本。
-    // 每方程为薄 SVD/伪逆/投影预留十二个六列 double 缓冲及有界残差标识。
-    // 这是算法工作量的保守准入，不代表 OpenCV/分配器或进程 RSS 的精确计量。
-    constexpr std::size_t equationBytes = sizeof(Equation) + 12 * 6 * sizeof(double) + 64;
-    const std::size_t sampleBytes = sizeof(SurfaceSample) +
-        (work.recipe.surfaceFit->isPointToPlane ? 1 : 3) * equationBytes;
-    if (samples.capacity() > (limit - indexBytes) / sampleBytes)
-        throw std::length_error("Surface equations exceed the working budget.");
-    const auto &triangles = work.mesh->GetTriangles();
-    Require(!triangles.empty(), "Surface fitting requires source triangle connectivity.");
-    for (std::size_t i = 0; i < triangles.size(); i += 3) {
-        if (i % 768 == 0) CheckWork(work);
-        const auto vertex = [&](std::uint64_t id) { return Vec(v[3 * id], v[3 * id + 1], v[3 * id + 2]); };
-        const double area = cv::norm((vertex(triangles[i + 1]) - vertex(triangles[i])).cross(
-                                        vertex(triangles[i + 2]) - vertex(triangles[i]))) / 6;
-        Require(std::isfinite(area) && area > 0, "Source contains a degenerate triangle.");
-        for (std::size_t j = 0; j < 3; ++j) {
-            const auto id = triangles[i + j];
-            const auto found = std::lower_bound(samples.begin(), samples.end(), id,
-                [](const auto &sample, auto value) { return sample.vertex < value; });
-            if (found != samples.end() && found->vertex == id) found->area += area;
-        }
-    }
-    for (const auto &sample : samples)
-        Require(std::isfinite(sample.area) && sample.area > 0, "Selected vertex has no surface area.");
-    return samples;
-}
-
 void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &query,
-                         const std::vector<SurfaceSample> &samples,
+                         const std::vector<AlignmentSurfaceSample> &samples,
                          const AlignmentMatrix &pose, std::vector<Equation> &equations,
-                         AlignmentDiagnostics &diagnostics) {
+                         AlignmentDiagnostics &diagnostics, AlignmentSurfaceStage &stage) {
     const auto &v = work.mesh->GetVertices();
     double area = 0, acceptedArea = 0;
     diagnostics.rejectedPairs = 0;
@@ -410,7 +332,7 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
         const auto hit = query.GetClosest(Point(Transform(pose, p)));
         Require(hit.isValid, "Reference correspondence is unavailable.");
         bool used = AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) &&
-                    std::sqrt(hit.distanceSquared) <= work.recipe.maxPairDistance;
+                    std::sqrt(hit.distanceSquared) <= stage.maxPairDistance;
         if (normal) {
             const Vec n(normal->values[3 * id], normal->values[3 * id + 1], normal->values[3 * id + 2]);
             used = used && std::abs(cv::norm(n) - 1) <= 1e-6 &&
@@ -425,10 +347,12 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
             direction[axis] = 1;
             if (components == 1) direction = Vector(hit.normal);
             equations.push_back({p, Vector(hit.point), direction, AlignmentConstraintKind::Soft,
-                63, sample.area, work.recipe.maxPairDistance,
+                63, sample.area, stage.maxPairDistance,
                 "surface-" + std::to_string(id) + "-" + std::to_string(axis), false, used});
         }
     }
+    stage.selectedArea = area; stage.acceptedArea = acceptedArea;
+    stage.rejectedSamples = diagnostics.rejectedPairs;
     Require(std::isfinite(area) && area > 0 && acceptedArea / area >= work.recipe.minPairCoverage,
             "Surface area coverage failed.");
 }
@@ -587,29 +511,73 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
     bool converged = false;
     if (recipe.surfaceFit) {
         Require(surfaceQuery != nullptr, "Reference surface is missing.");
-        const auto samples = BuildSurfaceSamples(work, initial, surfaceQuery->GetWorkingBytes());
+        constexpr std::size_t equationBytes = sizeof(Equation) + 12 * 6 * sizeof(double) + 64;
+        const auto limit = WorkLimit(work.config.workingBytes);
         const auto fixedCount = equations.size();
+        const auto indexBytes = surfaceQuery->GetWorkingBytes();
+        if (indexBytes > limit || limit - indexBytes < 65536 ||
+            total > (limit - indexBytes - 65536) / 1024)
+            throw std::length_error("Surface auxiliary work exceeds working budget.");
+        const auto geometryBytes = indexBytes + 65536 + total * 1024;
+        if (fixedCount > (limit - geometryBytes) / equationBytes)
+            throw std::length_error("Fixed equations exceed working budget.");
+        const auto baseBytes = geometryBytes + fixedCount * equationBytes;
+        const auto &scales = recipe.surfaceFit->scales;
+        const bool needsDirections = std::any_of(scales.begin(), scales.end(),
+            [](const auto &scale) { return scale.voxelSize > 0; });
+        // 选区只在初始姿态确定一次；各级采样引用相同不可变顶点。
+        const auto dense = AlignmentSurfaceSampling::Build(work, initial, baseBytes, needsDirections);
         const auto components = recipe.surfaceFit->isPointToPlane ? std::size_t{1} : std::size_t{3};
-        if (samples.size() > (std::numeric_limits<std::size_t>::max() - fixedCount) / components)
-            throw std::length_error("Surface equation count overflows.");
-        equations.reserve(fixedCount + samples.size() * components);
-        for (std::size_t iteration = 0; iteration < recipe.surfaceFit->iterationLimit; ++iteration) {
+        const auto stageCount = scales.empty() ? std::size_t{1} : scales.size();
+        for (std::size_t stageIndex = 0; stageIndex < stageCount; ++stageIndex) {
             CheckWork(work);
+            // 释放上一级方程容量后再建下一级分组，避免两级大工作集同时存活。
+            equations.resize(fixedCount);
+            std::vector<Equation>(equations).swap(equations);
+            const AlignmentSurfaceScale scale = scales.empty()
+                ? AlignmentSurfaceScale{0, recipe.maxPairDistance, recipe.surfaceFit->iterationLimit}
+                : scales[stageIndex];
+            std::vector<AlignmentSurfaceSample> reduced;
+            if (scale.voxelSize > 0)
+                reduced = AlignmentSurfaceSampling::Reduce(work, dense, scale.voxelSize, baseBytes);
+            const auto &samples = scale.voxelSize > 0 ? reduced : dense.points;
+            const auto usedBytes = baseBytes + dense.GetWorkingBytes();
+            if (reduced.capacity() > (limit - usedBytes) / sizeof(AlignmentSurfaceSample))
+                throw std::length_error("Surface samples exceed working budget.");
+            const auto available = limit - usedBytes - reduced.capacity() * sizeof(AlignmentSurfaceSample);
+            if ((work.config.pointLimit && (total > work.config.pointLimit || samples.size() > work.config.pointLimit - total)) ||
+                (work.config.constraintLimit && (fixedCount > work.config.constraintLimit ||
+                    samples.size() > (work.config.constraintLimit - fixedCount) / components)) ||
+                fixedCount > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                samples.size() > (static_cast<std::size_t>(std::numeric_limits<int>::max()) - fixedCount) / components ||
+                samples.size() > available / equationBytes / components)
+                throw std::length_error("Surface equations exceed working limits.");
+            equations.reserve(fixedCount + samples.size() * components);
+            AlignmentSurfaceStage stage;
+            stage.voxelSize = scale.voxelSize; stage.maxPairDistance = scale.maxPairDistance;
+            stage.selectedVertices = dense.points.size(); stage.samples = samples.size();
+            converged = false;
+            for (std::size_t iteration = 0; iteration < scale.iterationLimit; ++iteration) {
+                CheckWork(work);
+                ++stage.iterations;
+                equations.resize(fixedCount);
+                SetSurfaceEquations(work, *surfaceQuery, samples, output.sourceToTarget,
+                                    equations, output.diagnostics, stage);
+                const auto previous = output.sourceToTarget;
+                const bool optimized = Optimize(work, equations, output.sourceToTarget,
+                                                 output.diagnostics.iterations);
+                const auto relative = Multiply(output.sourceToTarget, Inverse(previous));
+                const double movement = cv::norm(Vec(relative[3], relative[7], relative[11])) +
+                                        recipe.lengthScale * GetRotationAngle(relative);
+                if (optimized && movement <= recipe.solveTolerance) { converged = true; break; }
+            }
+            // 各级诊断采用该级最终姿态和实际求解样本，不冒充完整表面偏差。
             equations.resize(fixedCount);
             SetSurfaceEquations(work, *surfaceQuery, samples, output.sourceToTarget,
-                                equations, output.diagnostics);
-            const auto previous = output.sourceToTarget;
-            const bool optimized = Optimize(work, equations, output.sourceToTarget,
-                                             output.diagnostics.iterations);
-            const auto relative = Multiply(output.sourceToTarget, Inverse(previous));
-            const double movement = cv::norm(Vec(relative[3], relative[7], relative[11])) +
-                                    recipe.lengthScale * GetRotationAngle(relative);
-            if (optimized && movement <= recipe.solveTolerance) { converged = true; break; }
+                                equations, output.diagnostics, stage);
+            stage.isConverged = converged;
+            output.diagnostics.surfaceStages.push_back(stage);
         }
-        // 最终姿态重新查询，诊断对应正式结果，不沿用上一次迭代的配对残差。
-        equations.resize(fixedCount);
-        SetSurfaceEquations(work, *surfaceQuery, samples, output.sourceToTarget,
-                            equations, output.diagnostics);
     } else {
         converged = Optimize(work, equations, output.sourceToTarget, output.diagnostics.iterations);
     }

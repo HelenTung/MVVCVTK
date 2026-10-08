@@ -46,7 +46,7 @@ struct ResultRecord final {
     AlignmentDiagnostics diagnostics;
     std::vector<AlignmentMatrix> initialPoses;
     std::vector<DataExpectation> expectations;
-    std::string algorithmVersion = "metrology-alignment-2";
+    std::string algorithmVersion = "metrology-alignment-3";
 };
 class ResultPayload final : public IDataPayload {
   public:

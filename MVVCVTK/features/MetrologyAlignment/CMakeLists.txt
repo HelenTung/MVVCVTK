@@ -4,6 +4,7 @@ target_sources(metrology_alignment
     PRIVATE src/AlignmentMath.h src/AlignmentGeometry.h src/AlignmentGeometry.cpp
         src/AlignmentSolver.h src/AlignmentSolver.cpp
         src/AlignmentMeshQuery.h src/AlignmentMeshQuery.cpp
+        src/AlignmentSurfaceSamples.h src/AlignmentSurfaceSamples.cpp
         src/AlignmentReference.h src/AlignmentReference.cpp
         src/AlignmentPrealign.h src/AlignmentPrealign.cpp
         src/AlignmentData.h src/AlignmentData.cpp

@@ -1,6 +1,7 @@
 #include "AlignmentMeshQuery.h"
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
+#include "AlignmentSurfaceSamples.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -154,9 +155,129 @@ void SurfaceAlignment() {
     Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::Cancelled,
           "dynamic alignment cancellation status");
 }
+AlignmentWork DensePlanes() {
+    auto work = Planes();
+    std::vector<double> vertices;
+    std::vector<std::uint64_t> triangles;
+    constexpr int n = 60;
+    const double c = std::cos(0.02), s = std::sin(0.02);
+    for (int face = 0; face < 3; ++face) {
+        const auto start = vertices.size() / 3;
+        for (int y = 0; y <= n; ++y) for (int x = 0; x <= n; ++x) {
+            const double u = 2 + 6.0 * x / n, v = 2 + 6.0 * y / n;
+            const AlignmentPoint q = face == 0 ? AlignmentPoint{u,v,0}
+                : face == 1 ? AlignmentPoint{0,u,v} : AlignmentPoint{v,0,u};
+            const double px = q[0] - .1, py = q[1] + .2;
+            vertices.insert(vertices.end(), {c*px+s*py, -s*px+c*py, q[2]-.15});
+        }
+        for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+            const auto a = static_cast<std::uint64_t>(start + y*(n+1) + x);
+            const auto b = a + 1, d = a + n + 1, e = d + 1;
+            triangles.insert(triangles.end(), {a,b,d, b,e,d});
+        }
+    }
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(std::move(vertices), std::move(triangles));
+    return work;
+}
+void MultiscaleAlignment() {
+    auto work = DensePlanes();
+    const auto original = work.mesh->GetVertices();
+    work.config.workingBytes = 2 * 1024 * 1024;
+    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::BudgetExceeded,
+          "dense equations exceed small working budget explicitly");
+    work.recipe.surfaceFit->scales = {{1,2,40},{.5,.1,40}};
+    work.config.pointLimit = 1500;
+    const auto result = AlignmentSolver::BuildResult(work);
+    std::cerr << "multiscale status " << static_cast<int>(result.diagnostics.status) << ' '
+              << result.diagnostics.message << '\n';
+    Check(result.diagnostics.status == AlignmentStatus::FullyDetermined && result.diagnostics.isQualityPassed,
+          "bounded multiscale fit solves dense surface");
+    Check(std::abs(result.sourceToTarget[3]-.1) < numericTolerance &&
+          std::abs(result.sourceToTarget[7]+.2) < numericTolerance &&
+          std::abs(result.sourceToTarget[11]-.15) < numericTolerance,
+          "multiscale fit recovers analytic translation");
+    const auto &stages = result.diagnostics.surfaceStages;
+    Check(stages.size() == 2, "all explicit surface stages recorded");
+    if (stages.size() == 2) {
+        Check(stages[0].samples < stages[1].samples && stages[1].samples < stages[1].selectedVertices &&
+              stages[1].selectedVertices == original.size()/3 && stages[1].isConverged,
+              "diagnostics distinguish full selection from final working sample count");
+        Check(std::abs(stages[0].selectedArea-108) < numericTolerance &&
+              std::abs(stages[1].acceptedArea-108) < numericTolerance,
+              "coarsening preserves analytic selected surface area");
+    }
+    Check(work.mesh->GetVertices() == original, "multiscale keeps full source immutable");
+    work.recipe.surfaceFit->scales.push_back({0,.1,40});
+    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::BudgetExceeded,
+          "full final stage cannot silently skip work to meet point limit");
+    work = Planes(.5);
+    AlignmentGeometrySpec datum; datum.id = "A";
+    datum.association = AlignmentAssociation::SequentialLeastSquares;
+    datum.region.pinnedMesh = work.input.mesh; datum.region.vertexIds = {0,1,2,3,4,5};
+    work.recipe.geometries = {datum}; work.recipe.datumCount = 1;
+    work.recipe.surfaceFit->scales = {{1,2,40},{0,1,40}};
+    const auto constrained = AlignmentSolver::BuildResult(work);
+    Check(constrained.diagnostics.status == AlignmentStatus::FullyDetermined &&
+          std::abs(constrained.sourceToTarget[11]-.15) < numericTolerance,
+          "multiscale preserves primary datum across stages");
+    work.recipe.surfaceFit->scales = {{1,1,40},{2,1,40}};
+    Check(!AlignmentGeometryFit::GetRecipeValid(work.recipe, work.config), "increasing voxel size rejected");
+    work.recipe.surfaceFit->scales = {{1,1,40},{0,3,40}};
+    Check(!AlignmentGeometryFit::GetRecipeValid(work.recipe, work.config), "widening final distance rejected");
+}
+void SurfaceGrouping() {
+    auto work = Work();
+    std::vector<double> vertices, normals, valid, interfaces, overrides;
+    std::vector<std::uint64_t> triangles;
+    for (int group = 0; group < 5; ++group) {
+        const double z = .01 * group;
+        vertices.insert(vertices.end(), {0,0,z, .1,0,z, 0,.1,z});
+        for (int corner = 0; corner < 3; ++corner) {
+            triangles.push_back(static_cast<std::uint64_t>(group*3+corner));
+            normals.insert(normals.end(), {0,0,group == 1 ? -1.0 : 1.0});
+            valid.push_back(group == 2 ? 0 : 1);
+            interfaces.push_back(group == 3 ? 1 : 0);
+            overrides.push_back(group == 4 ? 1 : 0);
+        }
+    }
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(vertices, triangles,
+        std::vector<MeshAttribute>{{"measurement.normal",3,normals},{"measurement.valid",1,valid},
+            {"surface.interface-index",1,interfaces},{"surface.override-index",1,overrides}});
+    const auto dense = AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, true);
+    const auto reduced = AlignmentSurfaceSampling::Reduce(work, dense, 1, 0);
+    Check(reduced.size() == 5, "same voxel separates opposite normals, invalid samples and interface identities");
+    double area = 0;
+    for (const auto &sample : reduced) {
+        area += sample.area;
+        Check(sample.vertex % 3 == 0, "representative is stable original vertex");
+    }
+    Check(std::abs(area-.025) < numericTolerance, "grouping conserves selected area including invalid area");
+    AlignmentRegion region; region.targetBounds = std::array<double,6>{-.1,.2,-.1,.2,-.001,.011};
+    work.recipe.surfaceFit->sourceRegion = region;
+    const auto roi = AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, true);
+    Check(roi.points.size() == 6 && AlignmentSurfaceSampling::Reduce(work, roi, 1, 0).size() == 2,
+          "ROI grouping uses only original selected vertices");
+    work.config.workingBytes = dense.GetWorkingBytes() + 1;
+    bool limited = false;
+    try { (void)AlignmentSurfaceSampling::Reduce(work, dense, 1, 0); }
+    catch (const std::length_error &) { limited = true; }
+    Check(limited, "group allocations reject a budget with no node or bucket space");
+    work.config.workingBytes.reset();
+    work.deadline = std::chrono::steady_clock::now();
+    bool timedOut = false;
+    try { (void)AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, true); }
+    catch (const std::runtime_error &) { timedOut = true; }
+    Check(timedOut, "surface selection observes expired deadline");
+    work.deadline = std::chrono::steady_clock::time_point::max();
+    work.cancelled->store(true);
+    bool cancelled = false;
+    try { (void)AlignmentSurfaceSampling::Reduce(work, dense, 1, 0); }
+    catch (const std::runtime_error &) { cancelled = true; }
+    Check(cancelled, "surface reduction observes cancellation");
+}
 } // namespace
 int main() {
-    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); }
+    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); MultiscaleAlignment(); SurfaceGrouping(); }
     catch (const std::exception &error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures == 0 ? 0 : 1;
 }

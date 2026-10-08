@@ -321,8 +321,11 @@ class MetrologyAlignmentHostFeature::Impl final {
                         !AlignmentData::GetInputValid(*request.input) || request.recipe ||
                         request.archive->schemaVersion != 1 ||
                         (request.archive->algorithmVersion != "metrology-alignment-1" &&
-                         request.archive->algorithmVersion != "metrology-alignment-2") ||
+                         request.archive->algorithmVersion != "metrology-alignment-2" &&
+                         request.archive->algorithmVersion != "metrology-alignment-3") ||
                         (request.archive->algorithmVersion == "metrology-alignment-1" && request.archive->recipe.prealignment) ||
+                        (request.archive->algorithmVersion != "metrology-alignment-3" &&
+                         request.archive->recipe.surfaceFit && !request.archive->recipe.surfaceFit->scales.empty()) ||
                         !AlignmentMath::Rigid(request.archive->sourceToTarget) ||
                         !GetDataRevisionRefValid(request.restoredNominal) ||
                         request.input->unit != request.archive->recipe.unit)

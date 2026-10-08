@@ -15,7 +15,7 @@ bool GetGeometryValid(const AlignmentGeometry &g) {
            std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0;
 }
 bool GetResultValid(const ResultRecord &r) {
-    if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2") return false;
+    if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2" && r.algorithmVersion != "metrology-alignment-3") return false;
     if (r.diagnostics.prealignment) {
         const auto &p = *r.diagnostics.prealignment;
         if (p.sourceFeatures > p.sourceSamples || p.referenceFeatures > p.referenceSamples ||
@@ -23,6 +23,17 @@ bool GetResultValid(const ResultRecord &r) {
             p.bestCoverage < 0 || p.bestCoverage > 1 || !std::isfinite(p.sourceSelectedArea) ||
             !std::isfinite(p.sourceRejectedArea) || p.sourceRejectedArea < 0 ||
             p.sourceSelectedArea < p.sourceRejectedArea) return false;
+    }
+    if (r.algorithmVersion != "metrology-alignment-3" && !r.diagnostics.surfaceStages.empty()) return false;
+    if (r.diagnostics.surfaceStages.size() > 16) return false;
+    for (const auto &stage : r.diagnostics.surfaceStages) {
+        if (!std::isfinite(stage.voxelSize) || stage.voxelSize < 0 ||
+            !std::isfinite(stage.maxPairDistance) || stage.maxPairDistance <= 0 ||
+            stage.samples == 0 || stage.samples > stage.selectedVertices ||
+            stage.rejectedSamples > stage.samples || stage.iterations == 0 || stage.iterations > 1000 ||
+            !std::isfinite(stage.selectedArea) || !std::isfinite(stage.acceptedArea) ||
+            stage.selectedArea <= 0 || stage.acceptedArea < 0 || stage.acceptedArea > stage.selectedArea)
+            return false;
     }
     return GetInputValid(r.input) && GetDataRevisionRefValid(r.recipe) &&
            GetDataRevisionRefValid(r.transform) && GetDataRevisionRefValid(r.geometry) &&
@@ -202,7 +213,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
         residualRef{data.CreateDataEntityId(), 1};
     resultRef = {data.CreateDataEntityId(), 1};
     const auto inputs = BuildInputs(work.input, recipe, work.recipe.nominalData);
-    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-2",
+    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-3",
                                     "parameters: recipe input; initialization: result payload"};
     tx.outputs.push_back({transformRef.entityId, 0, DataTypes::transform3D, inputs,
                           std::make_shared<const Transform3DPayload>(candidate.sourceToTarget,

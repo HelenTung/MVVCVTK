@@ -510,6 +510,7 @@ void AutomaticReferenceLifecycle() {
     Fixture f;
     const auto model = AlignmentTestModels::Model();
     f.mesh = model.mesh; f.recipe = model.recipe;
+    f.recipe.surfaceFit->scales = {{.4,.8,40},{0,.8,40}};
     f.input.mesh = {f.data->CreateDataEntityId(), 1}; f.input.meshBinding.clear();
     f.recipe.nominalData = {f.data->CreateDataEntityId(), 1};
     DataTransaction inputs;
@@ -533,8 +534,9 @@ void AutomaticReferenceLifecycle() {
           stored->record.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity},
           "published result records generated poses instead of default identity");
     const auto archive = f.feature->GetArchive(result.result);
-    Check(archive && archive->algorithmVersion == "metrology-alignment-2" && archive->recipe.prealignment &&
-          archive->recipe.prealignment->randomSeed == f.recipe.prealignment->randomSeed,
+    Check(archive && archive->algorithmVersion == "metrology-alignment-3" && archive->recipe.prealignment &&
+          archive->recipe.prealignment->randomSeed == f.recipe.prealignment->randomSeed &&
+          archive->recipe.surfaceFit->scales.size() == 2 && result.diagnostics.surfaceStages.size() == 2,
           "archive preserves algorithm version and repeatable automatic parameters");
     AlignmentRequest restore; restore.action = AlignmentAction::Restore;
     restore.archive = archive; restore.input = f.input; restore.restoredNominal = f.input.scopeData;
@@ -544,6 +546,12 @@ void AutomaticReferenceLifecycle() {
     if (restore.archive) restore.archive->algorithmVersion = "metrology-alignment-1";
     Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
           "legacy archive version cannot claim automatic prealignment parameters");
+    if (restore.archive) restore.archive->algorithmVersion = "metrology-alignment-2";
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "version two archive cannot claim multiscale parameters");
+    restore.archive = archive;
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::Accepted,
+          "version three restores multiscale recipe");
     f.recipe.id = "unsupported-neighborhood"; f.recipe.prealignment->normalRadius = 1e-5;
     save();
     const auto commit = f.data->GetDataGraph().commitId;

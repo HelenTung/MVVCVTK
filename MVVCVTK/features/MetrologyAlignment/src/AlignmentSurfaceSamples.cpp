@@ -1,0 +1,207 @@
+#include "AlignmentSurfaceSamples.h"
+#include "AlignmentMath.h"
+#include <unordered_map>
+#include <stdexcept>
+
+namespace {
+using namespace AlignmentMath;
+void Require(bool value, const char *message) { if (!value) throw std::invalid_argument(message); }
+void CheckWork(const AlignmentWork &work) {
+    if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
+        throw std::runtime_error("Surface sampling cancelled or deadline reached.");
+}
+std::int8_t Direction(const Vec &n) {
+    if (!Finite(n) || cv::norm(n) <= 0) return 6;
+    int axis = 0;
+    for (int i = 1; i < 3; ++i) if (std::abs(n[i]) > std::abs(n[axis])) axis = i;
+    return static_cast<std::int8_t>(2 * axis + (n[axis] < 0 ? 1 : 0));
+}
+const MeshAttribute *Attribute(const SurfaceMeshPayload &mesh, const char *name, std::size_t components) {
+    for (const auto &attribute : mesh.GetPointAttributes()) if (attribute.name == name) {
+        Require(attribute.componentCount == components && attribute.values.size() == mesh.GetVertices().size() / 3 * components,
+                "Invalid surface grouping attribute.");
+        return &attribute;
+    }
+    return nullptr;
+}
+// 计量容器申请的字节数，包含扩容时同时存活的新旧缓冲；分配器元数据不属于该算法预算。
+struct AllocationBudget final {
+    std::size_t limit = 0, used = 0;
+    void Acquire(std::size_t bytes) {
+        if (bytes > limit - used) throw std::length_error("Surface grouping exceeds working budget.");
+        used += bytes;
+    }
+    void Release(std::size_t bytes) noexcept { used -= bytes; }
+};
+template<class T> struct BudgetAllocator final {
+    using value_type = T;
+    AllocationBudget *budget = nullptr;
+    explicit BudgetAllocator(AllocationBudget *value) noexcept : budget(value) {}
+    template<class U> BudgetAllocator(const BudgetAllocator<U> &other) noexcept : budget(other.budget) {}
+    T *allocate(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
+            throw std::length_error("Surface allocation size overflows.");
+        const auto bytes = count * sizeof(T);
+        budget->Acquire(bytes);
+        try { return std::allocator<T>{}.allocate(count); }
+        catch (...) { budget->Release(bytes); throw; }
+    }
+    void deallocate(T *pointer, std::size_t count) noexcept {
+        std::allocator<T>{}.deallocate(pointer, count); budget->Release(count * sizeof(T));
+    }
+    template<class U> bool operator==(const BudgetAllocator<U> &other) const noexcept { return budget == other.budget; }
+    template<class U> bool operator!=(const BudgetAllocator<U> &other) const noexcept { return !(*this == other); }
+};
+using Cell = std::array<std::int64_t, 7>;
+struct CellHash final {
+    std::size_t operator()(const Cell &cell) const noexcept {
+        std::size_t value = 0;
+        for (const auto part : cell) value ^= std::hash<std::int64_t>{}(part) + std::size_t{0x9e3779b9} + (value << 6) + (value >> 2);
+        return value;
+    }
+};
+} // namespace
+
+AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &work,
+    const AlignmentMatrix &initial, std::size_t indexBytes, bool needsDirections) {
+    CheckWork(work);
+    Require(work.mesh && work.mesh->GetValid() && work.recipe.surfaceFit, "Invalid surface sampling input.");
+    const auto &v = work.mesh->GetVertices();
+    const auto &region = work.recipe.surfaceFit->sourceRegion;
+    Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
+            "Surface selection belongs to another mesh revision.");
+    const auto count = region && !region->vertexIds.empty() ? region->vertexIds.size() : v.size() / 3;
+    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto initialCapacity = region && region->targetBounds ? 0 : count;
+    const auto *normals = needsDirections ? Attribute(*work.mesh, "measurement.normal", 3) : nullptr;
+    const bool needsFallback = needsDirections && !normals;
+    const auto bytes = sizeof(AlignmentSurfaceSample) + (needsFallback ? 1U : 0U);
+    if (indexBytes > limit || initialCapacity > (limit - indexBytes) / bytes)
+        throw std::length_error("Surface selection exceeds working budget.");
+    AlignmentSurfaceSamples output;
+    auto &samples = output.points;
+    samples.reserve(initialCapacity);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i % 256 == 0) CheckWork(work);
+        const auto id = region && !region->vertexIds.empty() ? region->vertexIds[i] : i;
+        Require(id < v.size() / 3, "Surface selection is out of bounds.");
+        if (region && region->targetBounds) {
+            const auto p = Transform(initial, {v[3 * id], v[3 * id + 1], v[3 * id + 2]});
+            bool inside = true;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                inside = inside && p[static_cast<int>(axis)] >= (*region->targetBounds)[2 * axis] &&
+                         p[static_cast<int>(axis)] <= (*region->targetBounds)[2 * axis + 1];
+            if (!inside) continue;
+        }
+        if (samples.size() == samples.capacity()) {
+            const auto capacity = samples.capacity() == 0 ? std::size_t{1} : samples.capacity() + std::min(samples.capacity(), count - samples.capacity());
+            if (capacity > (limit - indexBytes) / bytes - samples.capacity())
+                throw std::length_error("Surface region growth exceeds working budget.");
+            samples.reserve(capacity);
+        }
+        samples.push_back({static_cast<std::uint64_t>(id), 0});
+    }
+    Require(!samples.empty(), "Surface alignment region is empty.");
+    if (region && !region->vertexIds.empty()) {
+        std::size_t comparisons = 0;
+        std::sort(samples.begin(), samples.end(), [&](const auto &a, const auto &b) {
+            if (++comparisons % 256 == 0) CheckWork(work); return a.vertex < b.vertex;
+        });
+        for (std::size_t i = 1; i < samples.size(); ++i)
+            Require(samples[i - 1].vertex != samples[i].vertex, "Duplicate surface selection.");
+    }
+    if (needsFallback) output.directions.assign(samples.size(), -1);
+    const bool direct = samples.size() == v.size() / 3;
+    const auto &triangles = work.mesh->GetTriangles();
+    Require(!triangles.empty(), "Surface fitting requires triangle connectivity.");
+    for (std::size_t i = 0; i < triangles.size(); i += 3) {
+        if (i % 768 == 0) CheckWork(work);
+        const auto point = [&](std::uint64_t id) { return Vec(v[3 * id], v[3 * id + 1], v[3 * id + 2]); };
+        const auto cross = (point(triangles[i + 1]) - point(triangles[i])).cross(point(triangles[i + 2]) - point(triangles[i]));
+        const double area = cv::norm(cross) / 6;
+        Require(std::isfinite(area) && area > 0, "Source contains a degenerate triangle.");
+        for (std::size_t j = 0; j < 3; ++j) {
+            const auto id = triangles[i + j];
+            const auto found = direct ? samples.begin() + static_cast<std::size_t>(id)
+                : std::lower_bound(samples.begin(), samples.end(), id, [](const auto &sample, auto value) { return sample.vertex < value; });
+            if (found != samples.end() && found->vertex == id) {
+                found->area += area;
+                if (needsFallback) {
+                    auto &direction = output.directions[static_cast<std::size_t>(found - samples.begin())];
+                    if (direction < 0) direction = Direction(cross);
+                }
+            }
+        }
+    }
+    for (const auto &sample : samples) Require(std::isfinite(sample.area) && sample.area > 0, "Selected vertex has no surface area.");
+    return output;
+}
+
+std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const AlignmentWork &work,
+    const AlignmentSurfaceSamples &source, double voxelSize, std::size_t indexBytes) {
+    Require(std::isfinite(voxelSize) && voxelSize > 0, "Invalid surface voxel size.");
+    CheckWork(work);
+    const auto &v = work.mesh->GetVertices();
+    const auto *normals = Attribute(*work.mesh, "measurement.normal", 3);
+    const auto *interfaces = Attribute(*work.mesh, "surface.interface-index", 1);
+    const auto *overrides = Attribute(*work.mesh, "surface.override-index", 1);
+    Require(normals || source.directions.size() == source.points.size(), "Surface direction groups are missing.");
+    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    if (indexBytes > limit || source.GetWorkingBytes() > limit - indexBytes)
+        throw std::length_error("Surface preprocessing exceeds working budget.");
+    AllocationBudget budget{limit - indexBytes - source.GetWorkingBytes(), 0};
+    using Entry = std::pair<const Cell, std::size_t>;
+    std::unordered_map<Cell, std::size_t, CellHash, std::equal_to<Cell>, BudgetAllocator<Entry>>
+        groups(0, CellHash{}, std::equal_to<Cell>{}, BudgetAllocator<Entry>{&budget});
+    std::vector<AlignmentSurfaceSample> result;
+    const Vec origin(v[0], v[1], v[2]);
+    const auto regionId = [](const MeshAttribute *attribute, std::uint64_t id) -> std::int64_t {
+        if (!attribute) return 0;
+        const double value = attribute->values[static_cast<std::size_t>(id)];
+        Require(value >= 0 && value <= std::numeric_limits<std::uint32_t>::max() && std::floor(value) == value,
+                "Invalid interface or override identity.");
+        return static_cast<std::int64_t>(value);
+    };
+    for (std::size_t i = 0; i < source.points.size(); ++i) {
+        if (i % 256 == 0) CheckWork(work);
+        const auto &sample = source.points[i];
+        const auto id = sample.vertex;
+        Cell key{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const double cell = std::floor((v[3 * id + axis] - origin[static_cast<int>(axis)]) / voxelSize);
+            // 保持坐标格编号可精确传递，避免 double 到 int64 的边界溢出。
+            Require(std::isfinite(cell) && std::abs(cell) <= 9007199254740991.0, "Surface grid coordinate exceeds exact integer range.");
+            key[axis] = static_cast<std::int64_t>(cell);
+        }
+        key[3] = normals ? Direction({normals->values[3 * id], normals->values[3 * id + 1], normals->values[3 * id + 2]}) : source.directions[i];
+        key[4] = AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) ? 1 : 0;
+        key[5] = regionId(interfaces, id); key[6] = regionId(overrides, id);
+        const auto found = groups.find(key);
+        if (found == groups.end()) {
+            if ((work.config.pointLimit && result.size() >= work.config.pointLimit) ||
+                (work.config.constraintLimit && result.size() >= work.config.constraintLimit))
+                throw std::length_error("Surface voxel groups exceed working limits.");
+            if (result.size() == result.capacity()) {
+                const auto oldCapacity = result.capacity();
+                const auto capacity = oldCapacity == 0 ? std::size_t{1}
+                    : oldCapacity + std::min(oldCapacity, source.points.size() - oldCapacity);
+                if (capacity > std::numeric_limits<std::size_t>::max() / sizeof(AlignmentSurfaceSample))
+                    throw std::length_error("Surface sample capacity overflows.");
+                budget.Acquire(capacity * sizeof(AlignmentSurfaceSample));
+                result.reserve(capacity);
+                budget.Release(oldCapacity * sizeof(AlignmentSurfaceSample));
+            }
+            groups.emplace(key, result.size()); result.push_back(sample);
+        } else {
+            auto &representative = result[found->second];
+            representative.vertex = std::min(representative.vertex, sample.vertex);
+            representative.area += sample.area;
+            Require(std::isfinite(representative.area), "Surface group area overflows.");
+        }
+    }
+    std::size_t comparisons = 0;
+    std::sort(result.begin(), result.end(), [&](const auto &a, const auto &b) {
+        if (++comparisons % 256 == 0) CheckWork(work); return a.vertex < b.vertex;
+    });
+    return result;
+}

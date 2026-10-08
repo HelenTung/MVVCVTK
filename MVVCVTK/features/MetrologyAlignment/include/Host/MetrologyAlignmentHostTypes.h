@@ -139,6 +139,19 @@ struct AlignmentFitPair final {
     double weight = 1.0;
 };
 
+struct AlignmentSurfaceScale final {
+    // 源坐标网格单元边长；0 使用全部选中顶点，不改变原计量网格。
+    double voxelSize = 0;
+    double maxPairDistance = 1;
+    std::size_t iterationLimit = 40;
+};
+struct AlignmentSurfaceStage final {
+    double voxelSize = 0, maxPairDistance = 0;
+    std::size_t selectedVertices = 0, samples = 0, iterations = 0, rejectedSamples = 0;
+    // 聚合后按代表点的配对状态累计组面积；acceptedArea 不是完整表面的逐点覆盖率。
+    double selectedArea = 0, acceptedArea = 0;
+    bool isConverged = false;
+};
 struct AlignmentSurfaceFit final {
     // 空选区使用完整实测网格；ROI 在初始姿态下确定后固定，不随迭代漂移。
     std::optional<AlignmentRegion> sourceRegion;
@@ -146,6 +159,8 @@ struct AlignmentSurfaceFit final {
     std::vector<std::uint64_t> referenceTriangles;
     std::size_t iterationLimit = 40;
     bool isPointToPlane = true;
+    // 空列表保留全顶点单级行为；显式列表使用各级迭代上限，按粗到细且距离门槛不逐级放宽。
+    std::vector<AlignmentSurfaceScale> scales;
 };
 
 struct AlignmentPrealignParams final {
@@ -253,6 +268,7 @@ struct AlignmentDiagnostics final {
     bool isQualityPassed = false;
     std::string message;
     std::optional<AlignmentPrealignStats> prealignment;
+    std::vector<AlignmentSurfaceStage> surfaceStages;
 };
 
 struct AlignmentResult final {
@@ -270,7 +286,7 @@ struct AlignmentResult final {
 
 struct AlignmentArchive final {
     std::uint32_t schemaVersion = 1;
-    std::string algorithmVersion = "metrology-alignment-2";
+    std::string algorithmVersion = "metrology-alignment-3";
     AlignmentRecipe recipe;
     AlignmentInput input;
     // 导出值只用于交换；恢复不直接激活旧矩阵，必须以重映射输入重新求解。
@@ -331,7 +347,7 @@ using AlignmentCallback = std::function<void(AlignmentResult)>;
 
 struct AlignmentConfig final {
     HostViewTargets targetViews;
-    // 0 不启用数量预算；非零值只表示调用方显式选择的工作策略。
+    // 0 不启用数量预算。导入限制唯一顶点，预对齐限制两侧样本总数，求解限制工作样本。
     std::size_t pointLimit = 0;
     std::size_t constraintLimit = 0;
     std::optional<std::size_t> workingBytes {};

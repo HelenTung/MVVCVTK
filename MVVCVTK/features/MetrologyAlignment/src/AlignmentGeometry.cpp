@@ -215,6 +215,17 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         !r.fitPairs.empty() || r.surfaceFit->iterationLimit == 0 ||
         r.surfaceFit->iterationLimit > 1000))
         return false;
+    if (r.surfaceFit && !r.surfaceFit->scales.empty()) {
+        const auto &scales = r.surfaceFit->scales;
+        if (scales.size() > 16 || scales.back().maxPairDistance > r.maxPairDistance) return false;
+        for (std::size_t i = 0; i < scales.size(); ++i) {
+            const auto &scale = scales[i];
+            if (!std::isfinite(scale.voxelSize) || scale.voxelSize < 0 ||
+                !Positive(scale.maxPairDistance) || scale.iterationLimit == 0 || scale.iterationLimit > 1000 ||
+                (i && (scale.voxelSize >= scales[i - 1].voxelSize ||
+                       scale.maxPairDistance > scales[i - 1].maxPairDistance))) return false;
+        }
+    }
     if (r.surfaceFit && r.surfaceFit->sourceRegion) {
         const auto &region = *r.surfaceFit->sourceRegion;
         if (region.vertexIds.empty() == !region.targetBounds.has_value() ||
