@@ -1909,14 +1909,12 @@ void StartSequence(TestWindow& window, const QString& path)
                 if (window.GetWorkflow().getViewRenderPending && window.GetWorkflow().getViewRenderPending(view.id)) return false;
                 return true; }, static_cast<int>(timeout)), "visible real-data views finish requested rendering before capture");
             QCoreApplication::processEvents();
-            // Host Render 结束不等于 Qt 已合成三维 FBO；等待真实交换事件，避免首张截图串帧。
-            QObject captureReceiver; std::set<QVTKOpenGLNativeWidget*> composing;
+            // 直接读取已完成的视图帧；截图不依赖顶层窗口再触发交换信号。
             for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
-                composing.insert(widget);
-                QObject::connect(widget, &QOpenGLWidget::frameSwapped, &captureReceiver, [&, widget] { composing.erase(widget); });
-                widget->update();
+                const auto frame = widget->grabFramebuffer();
+                Check(!frame.isNull() && frame.size() == widget->size() * widget->devicePixelRatioF(),
+                    "visible view framebuffer is readable at its current size");
             }
-            Check(Wait([&] { return composing.empty(); }, static_cast<int>(timeout)), "Qt composes every visible view before capture");
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
         }
         if (step["checkSceneConsistency"].toBool()) {
