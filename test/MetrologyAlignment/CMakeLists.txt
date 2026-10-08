@@ -60,3 +60,13 @@ if(MVVCVTK_ALIGNMENT_REFERENCE_ROOT)
     add_test(NAME MetrologyAlignment.NistPractice COMMAND mvvcvtk_alignment_reference_tests "${MVVCVTK_ALIGNMENT_REFERENCE_ROOT}")
     SetTestRuntime(MetrologyAlignment.NistPractice mvvcvtk_alignment_reference_tests)
 endif()
+
+add_executable(mvvcvtk_alignment_deviation_tests AlignmentDeviationTests.cpp)
+target_include_directories(mvvcvtk_alignment_deviation_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_deviation_tests PRIVATE MVVCVTK::MetrologyAlignment opencv_world)
+SetTargetDefaults(mvvcvtk_alignment_deviation_tests)
+set_target_properties(mvvcvtk_alignment_deviation_tests PROPERTIES
+    PROJECT_LABEL AlignmentDeviationTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.Deviation COMMAND mvvcvtk_alignment_deviation_tests)
+SetTestRuntime(MetrologyAlignment.Deviation mvvcvtk_alignment_deviation_tests)

@@ -185,7 +185,7 @@ struct Fixture final {
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
-    Check(contract.inputs.size() == 2 && contract.outputs.size() == 7,
+    Check(contract.inputs.size() == 2 && contract.outputs.size() == 8,
         "feature declares recipe/mesh inputs and all formal output roles");
     const auto result = f.Solve();
     Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated,
@@ -552,6 +552,43 @@ void AutomaticReferenceLifecycle() {
     restore.archive = archive;
     Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::Accepted,
           "version three restores multiscale recipe");
+    AlignmentRequest evaluate; evaluate.action = AlignmentAction::EvaluateSurface;
+    evaluate.deviation = AlignmentDeviationRequest{};
+    evaluate.deviation->alignmentResult = result.result;
+    evaluate.deviation->maxDistance = .1;
+    evaluate.deviation->tolerance = std::array<double,2>{0,1e-7};
+    AlignmentResult evaluated; int completions = 0;
+    const auto runEvaluation = [&] {
+        Check(f.feature->SendRequest(evaluate, [&](AlignmentResult r) { evaluated = std::move(r); ++completions; }).status ==
+              AlignmentAdmissionStatus::Accepted, "bound surface evaluation accepted");
+    };
+    runEvaluation();
+    Check(f.feature->SendRequest(evaluate).status == AlignmentAdmissionStatus::Busy, "evaluation shares single worker admission");
+    f.Drain();
+    Check(completions == 1 && evaluated.status == AlignmentStatus::FullyDetermined &&
+          GetDataRevisionRefValid(evaluated.deviationResult), "full field committed with one owner completion");
+    const auto deviationRef = evaluated.deviationResult;
+    const auto deviation = f.feature->GetDeviation(deviationRef);
+    Check(deviation && deviation->isCurrent && deviation->alignmentResult == result.result &&
+          deviation->sourceMesh == f.input.mesh && deviation->referenceMesh == f.recipe.nominalData &&
+          deviation->verdict == AlignmentInspectionVerdict::Pass && deviation->forward->samples.size() == f.mesh->GetVertices().size()/3,
+          "dense evaluation independently records mesh/alignment/parameters and verdict");
+    const auto again = f.feature->GetDeviation(deviationRef);
+    Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse,
+          "result queries share immutable fields without full-array copy");
+    Check(f.feature->GetState().activeResult == result.result, "evaluation leaves alignment activation unchanged");
+    runEvaluation();
+    AlignmentRequest cancel; cancel.action = AlignmentAction::Cancel;
+    Check(f.feature->SendRequest(cancel).status == AlignmentAdmissionStatus::Accepted, "surface evaluation cancellation accepted");
+    f.Drain();
+    Check(evaluated.status == AlignmentStatus::Cancelled && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "cancelled evaluation publishes no partial field");
+    f.data->rejectsCommit = true; runEvaluation(); f.Drain(); f.data->rejectsCommit = false;
+    Check(evaluated.status == AlignmentStatus::InternalError && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "rejected evaluation commit exposes no result reference");
+    f.data->throwsAfterCommit = true; runEvaluation(); f.Drain(); f.data->throwsAfterCommit = false;
+    Check(evaluated.status == AlignmentStatus::FullyDetermined && f.feature->GetDeviation(evaluated.deviationResult).has_value(),
+          "post-commit exception retains published evaluation fact");
     f.recipe.id = "unsupported-neighborhood"; f.recipe.prealignment->normalRadius = 1e-5;
     save();
     const auto commit = f.data->GetDataGraph().commitId;
@@ -561,6 +598,21 @@ void AutomaticReferenceLifecycle() {
           "failed coarse registration publishes no placeholder transform or result");
     Check(f.feature->GetState().activeResult == result.result && f.feature->GetState().isCurrent,
           "failed coarse registration preserves previous valid active result");
+    runEvaluation();
+    DataTransaction changed;
+    changed.outputs.push_back({f.input.mesh.entityId, 1, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    Check(f.data->SetDataCommit(std::move(changed)).status == DataCommitStatus::Succeeded,
+          "measurement revision advances while evaluation is pending");
+    f.Drain();
+    Check(evaluated.status == AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "input change prevents stale field publication");
+    const auto historical = f.feature->GetDeviation(deviationRef);
+    Check(historical && !historical->isCurrent && historical->forward == deviation->forward,
+          "historical deviation stays readable with unchanged arrays and explicit stale state");
+    Check(f.feature->SendRequest(evaluate).status == AlignmentAdmissionStatus::InvalidRequest,
+          "new evaluation refuses stale alignment inputs");
+
 }
 } // namespace
 int main() {

@@ -271,6 +271,55 @@ struct AlignmentDiagnostics final {
     std::vector<AlignmentSurfaceStage> surfaceStages;
 };
 
+// 以下评价绑定已发布的刚体对齐结果；检测区域独立于配准选区。
+// NormalProjection 是最近名义三角面法向上的点积，不是全局内外符号距离或沿法向射线求交。
+enum class AlignmentDeviationMetric : std::uint8_t { UnsignedDistance, NominalNormalProjection };
+enum class AlignmentDeviationState : std::uint8_t {
+    NotSelected, Valid, InvalidSource, InvalidTarget, TooFar, NormalMismatch, NormalUnavailable
+};
+enum class AlignmentInspectionVerdict : std::uint8_t { NotEvaluated, Pass, Fail, Indeterminate };
+struct AlignmentDeviationRequest final {
+    DataRevisionRef alignmentResult;
+    AlignmentDeviationMetric metric = AlignmentDeviationMetric::UnsignedDistance;
+    // 编号属于 alignmentResult 固定的实测/名义网格，空集合使用全部三角形。
+    std::vector<std::uint64_t> sourceTriangles, referenceTriangles;
+    double maxDistance = 1;
+    std::optional<double> minNormalCosine;
+    // 与 metric 同定义、同长度单位；空值只报告偏差，不作合格判定。
+    std::optional<std::array<double, 2>> tolerance;
+    bool reverseCoverage = true;
+    bool requiresMeasurementQuality = false;
+    double minSupportRatio = 0, maxLocalizationSigma = 1, maxSurfaceFitResidual = 1;
+};
+struct AlignmentDeviationSample final {
+    // 下标直接对应原网格顶点；NotSelected/InvalidSource 时 value、distance 不可解释为测量值。
+    double value = 0, distance = 0, area = 0;
+    std::uint64_t closestTriangle = 0;
+    AlignmentDeviationState state = AlignmentDeviationState::NotSelected;
+};
+struct AlignmentDeviationStatistics final {
+    std::array<std::size_t, 7> counts{};
+    std::array<double, 7> areas{};
+    // 三角形面积三等分至顶点的离散面积积分；不是连续曲面误差极值保证。
+    double selectedArea = 0, evaluatedArea = 0, outOfToleranceArea = 0;
+    double minimum = 0, maximum = 0, mean = 0, rms = 0, absoluteP95 = 0;
+    bool hasValues = false;
+};
+struct AlignmentDeviationField final {
+    std::vector<AlignmentDeviationSample> samples;
+    AlignmentDeviationStatistics statistics;
+};
+struct AlignmentDeviationSnapshot final {
+    DataRevisionRef result, alignmentResult, sourceMesh, referenceMesh, transform;
+    AlignmentDeviationRequest parameters;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+    AlignmentMatrix sourceToTarget = alignmentIdentity;
+    // 只读共享数组；查询不会再次复制完整场。reverse 只表示名义到实测的无符号覆盖距离。
+    std::shared_ptr<const AlignmentDeviationField> forward, reverse;
+    AlignmentInspectionVerdict verdict = AlignmentInspectionVerdict::NotEvaluated;
+    bool isCurrent = false;
+};
+
 struct AlignmentResult final {
     std::uint64_t requestId = 0;
     AlignmentStatus status = AlignmentStatus::Unavailable;
@@ -282,6 +331,7 @@ struct AlignmentResult final {
     bool isDisplayReady = false;
     std::string message;
     DataRevisionRef referenceMesh;
+    DataRevisionRef deviationResult;
 };
 
 struct AlignmentArchive final {
@@ -312,7 +362,9 @@ enum class AlignmentAction : std::uint8_t {
     Deactivate,
     SetVisibility,
     Restore,
-    ImportReference
+    ImportReference,
+    // FullyDetermined 表示计算/发布成功；合格判定读取 DeviationSnapshot.verdict。
+    EvaluateSurface
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -330,6 +382,7 @@ struct AlignmentRequest final {
     std::uint64_t targetRequestId = 0;
     bool isActivationRequested = true;
     std::optional<AlignmentReferenceRequest> reference;
+    std::optional<AlignmentDeviationRequest> deviation;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,

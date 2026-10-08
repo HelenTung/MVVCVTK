@@ -25,6 +25,7 @@ class MetrologyAlignmentHostFeature final
     bool DetachHost() override;
     bool OnHostTick() override;
     AlignmentAdmission SendRequest(AlignmentRequest request, AlignmentCallback onComplete = {});
+    std::optional<AlignmentDeviationSnapshot> GetDeviation(const DataRevisionRef &result) const;
     AlignmentState GetState() const;
     AlignmentState GetScopeState(const std::string &scope) const;
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &result) const;

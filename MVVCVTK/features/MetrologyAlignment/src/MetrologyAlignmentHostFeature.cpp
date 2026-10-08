@@ -6,6 +6,7 @@
 #include "AlignmentOverlay.h"
 #include "AlignmentSolver.h"
 #include "AlignmentReference.h"
+#include "AlignmentDeviationData.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -89,7 +90,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return false;
         m_owner = std::this_thread::get_id();
         try {
-            if (!AlignmentData::SetTypes(*context.data))
+            if (!AlignmentData::SetTypes(*context.data) || !AlignmentDeviationDataStore::SetType(*context.data))
                 return false;
             auto dirty = std::make_shared<std::atomic<bool>>(false);
             const auto observer = context.data->AttachDataChange(
@@ -173,6 +174,10 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentData::GetReference(m_data->GetDataGraph(), ref);
     }
+    std::optional<AlignmentDeviationSnapshot> GetDeviation(const DataRevisionRef &ref) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(), ref);
+    }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
             return {};
@@ -235,9 +240,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::ImportReference))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::EvaluateSurface))
             return {};
-        if ((request.reference && request.action != AlignmentAction::ImportReference) ||
+        if ((request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
+            (request.reference && request.action != AlignmentAction::ImportReference) ||
             (request.targetRequestId && request.action != AlignmentAction::Cancel) ||
             (GetDataRevisionRefValid(request.recipeRef) &&
              request.action != AlignmentAction::Start &&
@@ -258,9 +264,22 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentResult result;
         result.requestId = id;
         try {
-            if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference) {
+            if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference ||
+                request.action == AlignmentAction::EvaluateSurface) {
                 std::shared_ptr<Task> task;
-                if (request.action == AlignmentAction::ImportReference) {
+                if (request.action == AlignmentAction::EvaluateSurface) {
+                    if (!request.deviation || request.input || request.recipe || request.archive || request.isVisible)
+                        return {};
+                    auto context = AlignmentDeviationDataStore::Prepare(m_data->GetDataGraph(), *request.deviation, m_config);
+                    if (!context) return {};
+                    task = std::make_shared<Task>(); task->id = id;
+                    task->work = std::move(context->work);
+                    task->expectations = context->expectations;
+                    task->deviationContext = std::move(context);
+                    task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
+                    task->work.deadline = WorkLimit(m_config.deadlineMs).GetDeadline();
+                    task->callback = std::move(callback);
+                } else if (request.action == AlignmentAction::ImportReference) {
                     if (!request.reference || request.input || request.recipe || request.archive ||
                         request.isVisible || !AlignmentReferenceLoader::GetRequestValid(*request.reference))
                         return {};
@@ -289,7 +308,12 @@ class MetrologyAlignmentHostFeature::Impl final {
                 try {
                     task->worker = std::thread([task, host = std::weak_ptr<FeatureHostControl>(m_host)] {
                         try {
-                            if (task->referenceRequest) {
+                            if (task->deviationContext) {
+                                task->deviationData = AlignmentDeviation::Build(task->work,
+                                    task->deviationContext->snapshot.parameters, task->deviationContext->snapshot.sourceToTarget);
+                                task->candidate.diagnostics.status = task->deviationData.status;
+                                task->candidate.diagnostics.message = task->deviationData.message;
+                            } else if (task->referenceRequest) {
                                 task->referenceData = AlignmentReferenceLoader::Load(*task->referenceRequest, task->work);
                                 task->candidate.diagnostics.status = task->referenceData.status;
                                 task->candidate.diagnostics.message = task->referenceData.message;
@@ -464,6 +488,9 @@ class MetrologyAlignmentHostFeature::Impl final {
             result.status = AlignmentStatus::Stale;
         else if (task->work.cancelled->load() || m_state.isStopping)
             result.status = AlignmentStatus::Cancelled;
+        else if (task->deviationContext) {
+            if (result.status == AlignmentStatus::FullyDetermined) SetDeviation(*task, result);
+        }
         else if (task->referenceRequest) {
             if (result.status == AlignmentStatus::FullyDetermined)
                 SetReference(task->referenceData, result);
@@ -541,10 +568,30 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentCandidate candidate;
         std::optional<AlignmentReferenceRequest> referenceRequest;
         AlignmentReferenceData referenceData;
+        std::optional<AlignmentDeviationDataStore::Context> deviationContext;
+        AlignmentDeviationData deviationData;
         std::atomic<bool> isDone{false};
         bool isStale = false, isActivationRequested = true;
         std::thread worker;
     };
+    void SetDeviation(Task &task, AlignmentResult &result) {
+        try {
+            auto tx = AlignmentDeviationDataStore::BuildTransaction(*m_data, *task.deviationContext,
+                task.deviationData, result.deviationResult);
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting); commit = m_resultScopes.Commit(*m_data, std::move(tx)); }
+            if (commit.status != DataCommitStatus::Succeeded) {
+                result.deviationResult = {};
+                result.status = commit.failureReason == DataCommitFailure::ExpectationFailed
+                    ? AlignmentStatus::Stale : AlignmentStatus::InternalError;
+            }
+        } catch (...) {
+            try {
+                if (AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(), result.deviationResult)) return;
+            } catch (...) {}
+            result.deviationResult = {}; result.status = AlignmentStatus::InternalError;
+        }
+    }
     void SetReference(const AlignmentReferenceData &reference, AlignmentResult &result) {
         DataRevisionRef meshRef;
         try {
@@ -831,7 +878,8 @@ FeatureDataContract MetrologyAlignmentHostFeature::GetDataContract() const {
              {"result", AlignmentData::resultType, {{"org.mvvcvtk.metrology-alignment.result"}}},
              {"transform", DataTypes::transform3D, {DataFacets::transform3D}},
              {"reference-source", AlignmentData::referenceType, {{"org.mvvcvtk.metrology-alignment.reference"}}},
-             {"reference-mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}}}};
+             {"reference-mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},
+             {"deviation", AlignmentDeviationDataStore::resultType, {{"org.mvvcvtk.metrology-alignment.deviation"}}}}};
 }
 bool MetrologyAlignmentHostFeature::AttachHost(const HostFeatureContext &context) {
     return m_impl->AttachHost(context);
@@ -866,4 +914,8 @@ std::optional<AlignmentArchive> MetrologyAlignmentHostFeature::GetArchive(
 std::optional<AlignmentReferenceSnapshot> MetrologyAlignmentHostFeature::GetReference(
     const DataRevisionRef &ref) const {
     return m_impl->GetReference(ref);
+}
+
+std::optional<AlignmentDeviationSnapshot> MetrologyAlignmentHostFeature::GetDeviation(const DataRevisionRef &ref) const {
+    return m_impl->GetDeviation(ref);
 }

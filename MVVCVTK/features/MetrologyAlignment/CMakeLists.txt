@@ -7,6 +7,8 @@ target_sources(metrology_alignment
         src/AlignmentSurfaceSamples.h src/AlignmentSurfaceSamples.cpp
         src/AlignmentReference.h src/AlignmentReference.cpp
         src/AlignmentPrealign.h src/AlignmentPrealign.cpp
+        src/AlignmentDeviation.h src/AlignmentDeviation.cpp
+        src/AlignmentDeviationData.h src/AlignmentDeviationData.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp
