@@ -456,6 +456,29 @@ struct InspectionSnapshot final {
     bool isCurrent=false;
 };
 
+struct AlignmentScenePart final {
+    std::string id;
+    DataRevisionRef alignmentResult;
+    bool showMeasured=true,showReference=true;
+};
+struct AlignmentSceneDisplay final {
+    // 场景目标坐标经 anchor 的逆变换进入 Host model 坐标；再由 Host modelToWorld 定位。
+    // measured: M * inverse(T_anchor) * T_part，reference: M * inverse(T_anchor)。
+    DataRevisionRef anchorAlignment;
+    std::vector<AlignmentScenePart> parts;
+    std::array<double,3> measuredColor{.15,.75,.9},referenceColor{.75,.75,.75};
+    double referenceOpacity=.5;
+    bool referenceWireframe=true,isVisible=true;
+    std::optional<std::string> selectedPart;
+};
+struct AlignmentSceneVertex final {
+    std::string partId;
+    DataRevisionRef alignmentResult,anchorAlignment,mesh;
+    std::uint64_t vertex=0;
+    bool isReference=false,isCurrent=false;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    AlignmentPoint nativePoint{},targetPoint{},modelPoint{};
+};
 struct AlignmentResult final {
     std::uint64_t requestId = 0;
     AlignmentStatus status = AlignmentStatus::Unavailable;
@@ -509,7 +532,8 @@ enum class AlignmentAction : std::uint8_t {
     EvaluateVoxelVolume,
     // 以 resultRef 的绝对计量矩阵替换当前 Host 模型显示姿态；不是单部件变换。
     // 仅当前显示数据等于结果源体或源网格时接纳，帧提交完成后才回调成功；不重采样。
-    ApplyModelPose
+    ApplyModelPose,
+    SetSceneDisplay
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -531,6 +555,7 @@ struct AlignmentRequest final {
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
     std::optional<InspectionPlan> inspection;
     std::optional<VoxelVolumeRequest> voxelVolume;
+    std::optional<AlignmentSceneDisplay> sceneDisplay;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,
@@ -578,4 +603,8 @@ struct AlignmentState final {
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
     bool isDeviationDisplayReady = false;
     AlignmentModelPoseState modelPose;
+    std::shared_ptr<const AlignmentSceneDisplay> sceneDisplay;
+    bool isSceneDisplayReady=false;
+    // 包含保守的渲染缓存计账；不是实测显存/工作集。旧新场景并存时均计入准入。
+    std::size_t sceneWorkingBytes=0;
 };

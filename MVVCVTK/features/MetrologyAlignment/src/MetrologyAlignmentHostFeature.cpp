@@ -12,6 +12,7 @@
 #include "AlignmentReport.h"
 #include "AlignmentVoxelVolumeData.h"
 #include "AlignmentModelPose.h"
+#include "AlignmentSceneDisplay.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -84,6 +85,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (GetIsOwner()) {
             ClearDisplay();
             m_deviationDisplay.Clear();
+            m_sceneDisplay.Clear();
             if (m_data && m_observer)
                 m_data->DetachDataChange(m_observer);
         }
@@ -143,6 +145,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         m_observer = 0;
         ClearDisplay();
         m_deviationDisplay.Clear();
+        m_sceneDisplay.Clear();
         if (!m_resultScopes.Clear(*m_data)) return false;
         m_data.reset();
         m_views.reset();
@@ -159,6 +162,8 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {};
         auto state = m_state;
         if(m_data)state.modelPose=m_modelPose.GetState(m_data->GetDataGraph());
+        state.sceneDisplay=m_sceneDisplay.GetRequest();state.sceneWorkingBytes=m_sceneDisplay.GetWorkingBytes();
+        state.isSceneDisplayReady=m_data && m_sceneDisplay.GetReady(m_data->GetDataGraph());
         state.deviationDisplay = m_deviationDisplay.GetRequest();
         state.isDeviationDisplayReady = m_data && m_deviationDisplay.GetReady(m_data->GetDataGraph());
         if (m_data && GetDataRevisionRefValid(state.activeResult)) {
@@ -210,6 +215,9 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &ref, std::uint64_t vertex) const {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentDeviationDisplayController::GetSelection(m_data->GetDataGraph(),ref,vertex);
+    }
+    std::optional<AlignmentSceneVertex> GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
+        if(!GetIsOwner() || !m_data)return {};return m_sceneDisplay.GetVertex(m_data->GetDataGraph(),part,reference,vertex);
     }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
@@ -284,9 +292,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::ApplyModelPose))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::SetSceneDisplay))
             return {};
-        if ((request.voxelVolume && request.action != AlignmentAction::EvaluateVoxelVolume) ||
+        if ((request.sceneDisplay && request.action!=AlignmentAction::SetSceneDisplay) ||
+            (request.voxelVolume && request.action != AlignmentAction::EvaluateVoxelVolume) ||
             (request.inspection && request.action != AlignmentAction::Inspect) ||
             (request.deviationDisplay && request.action != AlignmentAction::SetDeviationDisplay) ||
             (request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
@@ -409,7 +418,10 @@ class MetrologyAlignmentHostFeature::Impl final {
                 }
                 return {AlignmentAdmissionStatus::Accepted, id};
             }
-            if (request.action == AlignmentAction::SetDeviationDisplay) {
+            if(request.action==AlignmentAction::SetSceneDisplay) {
+                if(!request.sceneDisplay || request.input || request.recipe || request.archive || request.isVisible)return {};
+                CommitGuard guard(m_isCommitting);result=m_sceneDisplay.Set(*m_data,m_views.get(),m_config,*request.sceneDisplay);result.requestId=id;
+            } else if (request.action == AlignmentAction::SetDeviationDisplay) {
                 if (!request.deviationDisplay || request.input || request.recipe || request.archive || request.isVisible) return {};
                 CommitGuard guard(m_isCommitting);
                 result = m_deviationDisplay.Set(*m_data,m_views.get(),m_config,*request.deviationDisplay);
@@ -551,6 +563,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             CommitGuard guard(m_isCommitting);
             const auto graph = m_data->GetDataGraph();
             m_deviationDisplay.Refresh(graph);
+            m_sceneDisplay.Refresh(graph);
             if (m_task && !AlignmentData::GetExpectationsCurrent(graph, m_task->expectations)) {
                 m_task->isStale = true;
                 m_task->work.cancelled->store(true);
@@ -996,6 +1009,7 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::vector<OverlayBinding> m_overlays;
     AlignmentDeviationDisplayController m_deviationDisplay;
     AlignmentModelPose m_modelPose;
+    AlignmentSceneDisplayController m_sceneDisplay;
 };
 
 MetrologyAlignmentHostFeature::MetrologyAlignmentHostFeature(AlignmentConfig config)
@@ -1072,4 +1086,8 @@ MetrologyReportResult MetrologyAlignmentHostFeature::GetReport(const MetrologyRe
 }
 std::optional<VoxelVolumeSnapshot> MetrologyAlignmentHostFeature::GetVoxelVolume(const DataRevisionRef &ref) const {
     return m_impl->GetVoxelVolume(ref);
+}
+
+std::optional<AlignmentSceneVertex> MetrologyAlignmentHostFeature::GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
+    return m_impl->GetSceneVertex(part,reference,vertex);
 }

@@ -168,3 +168,12 @@ vtk_module_autoinit(TARGETS mvvcvtk_alignment_model_pose_tests MODULES ${MVVCVTK
 set_target_properties(mvvcvtk_alignment_model_pose_tests PROPERTIES PROJECT_LABEL AlignmentModelPoseTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.ModelPoseSession COMMAND mvvcvtk_alignment_model_pose_tests)
 SetTestRuntime(MetrologyAlignment.ModelPoseSession mvvcvtk_alignment_model_pose_tests)
+
+add_executable(mvvcvtk_alignment_scene_display_tests AlignmentSceneDisplayTests.cpp)
+target_include_directories(mvvcvtk_alignment_scene_display_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_scene_display_tests PRIVATE MVVCVTK::MetrologyAlignment MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} VTK::IOImage)
+SetTargetDefaults(mvvcvtk_alignment_scene_display_tests)
+vtk_module_autoinit(TARGETS mvvcvtk_alignment_scene_display_tests MODULES ${MVVCVTK_VTK_TARGETS})
+set_target_properties(mvvcvtk_alignment_scene_display_tests PROPERTIES PROJECT_LABEL AlignmentSceneDisplayTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.SceneDisplay COMMAND mvvcvtk_alignment_scene_display_tests "${CMAKE_CURRENT_BINARY_DIR}/scene-display-$<CONFIG>.png")
+SetTestRuntime(MetrologyAlignment.SceneDisplay mvvcvtk_alignment_scene_display_tests)

@@ -8,9 +8,11 @@
 #include "Host/FeatureModelTransformPort.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
+#include "AlignmentSceneDisplay.h"
 #include "AlignmentPrealignTestSupport.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
+#include <vtkPropCollection.h>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
@@ -644,6 +646,46 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
 }
+void SceneLifecycle() {
+    auto views=std::make_shared<Views>();Fixture f(views,{},true);
+    const DataRevisionRef nominal{f.data->CreateDataEntityId(),1};DataTransaction tx;
+    tx.outputs.push_back({nominal.entityId,0,DataTypes::surfaceMesh,{},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded,"scene nominal surface publishes");f.recipe.nominalData=nominal;
+    const auto save=[&]{AlignmentRequest r;r.action=AlignmentAction::SaveRecipe;r.recipe=f.recipe;
+        Check(f.feature->SendRequest(r,[&](AlignmentResult value){f.recipeRef=value.recipe;}).status==AlignmentAdmissionStatus::Accepted,"scene recipe saves");};
+    save();const auto first=f.Solve();for(auto &c:f.recipe.constraints)c.nominalPoint[0]+=5;f.input.scope="part-2";save();const auto second=f.Solve();
+    AlignmentRequest request;request.action=AlignmentAction::SetSceneDisplay;request.sceneDisplay=AlignmentSceneDisplay{};
+    auto &scene=*request.sceneDisplay;scene.anchorAlignment=first.result;scene.parts={{"first",first.result},{"second",second.result}};
+    AlignmentResult result;const auto show=[&]{return f.feature->SendRequest(request,[&](AlignmentResult value){result=std::move(value);});};
+    const auto commit=f.data->GetDataGraph().commitId;Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"multi-part scene publishes display");
+    const auto frozen=f.feature->GetState().sceneDisplay;const auto before=views->overlay->overlays;
+    auto displayed=std::dynamic_pointer_cast<AlignmentSceneOverlay>(views->overlay->overlays.back());auto renderer=vtkSmartPointer<vtkRenderer>::New();
+    Check(bool(displayed),"scene owns a typed overlay");if(displayed){displayed->AttachRenderer(renderer);Check(renderer->GetViewProps()->GetNumberOfItems()==3,"two measured parts share one drawn nominal surface");displayed->DetachRenderer(renderer);}
+    Check(frozen && f.feature->GetState().isSceneDisplayReady && f.data->GetDataGraph().commitId==commit,"scene is display-only with frozen request");
+    Check(show().status==AlignmentAdmissionStatus::Accepted && f.feature->GetState().sceneDisplay==frozen && views->overlay->overlays==before,"identical scene reuses actors and render product");
+    const auto a=f.feature->GetSceneVertex("first",false,0),b=f.feature->GetSceneVertex("second",false,0),n=f.feature->GetSceneVertex("first",true,0);
+    Check(a && b && n && a->mesh==f.input.mesh && a->anchorAlignment==first.result && std::abs(a->modelPoint[0])<1e-7 &&
+        std::abs(b->modelPoint[0]-5)<1e-7 && std::abs(n->modelPoint[0]+.1)<1e-7,"vertex trace uses each formal pose and one pinned anchor");
+    Check(!f.feature->GetSceneVertex("missing",false,0) && !f.feature->GetSceneVertex("first",false,UINT64_MAX),"scene vertex bounds and identities checked");
+    scene.selectedPart="second";views->overlay->rejectsAttach=true;Check(show().status==AlignmentAdmissionStatus::Accepted && result.status==AlignmentStatus::InternalError &&
+        f.feature->GetState().sceneDisplay==frozen && views->overlay->overlays==before,"failed scene replacement preserves prior valid display");views->overlay->rejectsAttach=false;
+    scene.selectedPart.reset();scene.parts.push_back(scene.parts.front());Check(show().status==AlignmentAdmissionStatus::InvalidRequest,"duplicate scene identity refused");scene.parts.pop_back();
+    f.recipe.targetFrameId="other-target";save();const auto otherFrame=f.Solve();scene.parts.push_back({"wrong-frame",otherFrame.result});
+    Check(show().status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozen,"scene refuses mixed target frames without replacing current display");scene.parts.pop_back();
+    AlignmentSceneDisplayController controller;AlignmentConfig config;config.workingBytes=1024;
+    Check(controller.Set(*f.data,views.get(),config,scene).status==AlignmentStatus::BudgetExceeded,"scene admission checks metadata before mesh adaptation");
+    config.workingBytes.reset();Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene budget fixture starts");config.workingBytes=controller.GetWorkingBytes();
+    Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"identical scene fits existing retained budget");
+    scene.selectedPart="second";Check(controller.Set(*f.data,views.get(),config,scene).status==AlignmentStatus::BudgetExceeded && controller.GetReady(f.data->GetDataGraph()),"replacement charges old and new scene caches");controller.Clear();
+    views->overlay->onAttach=[&]{AlignmentRequest nested=request;Check(f.feature->SendRequest(nested).status==AlignmentAdmissionStatus::Busy,"scene attach callback cannot reenter feature mutation");};
+    Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"scene selection switches");views->overlay->onAttach={};
+    scene.isVisible=false;Check(show().status==AlignmentAdmissionStatus::Accepted && !f.feature->GetState().sceneDisplay,"scene hide removes only its overlay");scene.isVisible=true;
+    Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"scene restores");
+    views->overlay->onAttach=[&]{DataTransaction changed;changed.outputs.push_back({nominal.entityId,1,DataTypes::surfaceMesh,{},f.mesh,{}});
+        Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"scene dependency changes during attach");};
+    scene.selectedPart="first";Check(show().status==AlignmentAdmissionStatus::Accepted && result.status==AlignmentStatus::Stale && !result.isDisplayReady,"scene refuses stale attach result");
+    views->overlay->onAttach={};f.feature->OnHostTick();Check(!f.feature->GetState().isSceneDisplayReady && !f.feature->GetState().sceneDisplay,"stale scene is retired on owner tick");
+}
 void ModelPoseLifecycle() {
     {
         Fixture f;const auto solved=f.Solve();AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
@@ -1030,6 +1072,7 @@ int main() {
     run("ReportLifecycle", ReportLifecycle);
     run("VoxelVolumeLifecycle", VoxelVolumeLifecycle);
     run("ModelPoseLifecycle", ModelPoseLifecycle);
+    run("SceneLifecycle", SceneLifecycle);
     run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
