@@ -300,6 +300,10 @@ class MetrologyAlignmentHostFeature::Impl final {
                         request.input->unit != request.archive->recipe.unit)
                         return {};
                     request.recipe = request.archive->recipe;
+                    if (request.recipe->surfaceFit &&
+                        !request.recipe->surfaceFit->referenceTriangles.empty() &&
+                        request.restoredNominal != request.archive->recipe.nominalData)
+                        return {};
                     request.recipe->nominalData = request.restoredNominal;
                     const auto graph = m_data->GetDataGraph();
                     if (!GetSourceRelated(graph, request.input->mesh, request.input->source))
@@ -319,6 +323,11 @@ class MetrologyAlignmentHostFeature::Impl final {
                     if (!request.recipe->fitPairs.empty() &&
                         request.recipe->exactMesh != request.input->mesh)
                         return {};
+                    if (request.recipe->surfaceFit && request.recipe->surfaceFit->sourceRegion) {
+                        const auto &region = *request.recipe->surfaceFit->sourceRegion;
+                        if (!region.vertexIds.empty() && region.pinnedMesh != request.input->mesh)
+                            return {};
+                    }
                     // 只恢复经显式修订映射校验的配方；旧顶点编号不能映射到新网格。
                     (void)AlignmentData::BuildExpectations(graph, *request.input, {},
                                                            request.restoredNominal);
@@ -522,6 +531,14 @@ class MetrologyAlignmentHostFeature::Impl final {
         task->work.recipe = recipe->recipe;
         task->work.config = m_config;
         task->work.mesh = mesh;
+        if (recipe->recipe.surfaceFit) {
+            const auto nominal = graph.view->GetData(recipe->recipe.nominalData);
+            task->work.referenceMesh = nominal
+                ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload) : nullptr;
+            if (!task->work.referenceMesh ||
+                task->work.referenceMesh->GetCoordinateFrame() != request.input->coordinateFrame)
+                return {};
+        }
         task->work.poses = request.initialPoses;
         task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
         task->work.deadline =
@@ -545,6 +562,9 @@ class MetrologyAlignmentHostFeature::Impl final {
                     {"selection-" + std::to_string(i), recipe.geometries[i].region.pinnedMesh});
         if (!recipe.fitPairs.empty())
             inputs.push_back({"correspondence", recipe.exactMesh});
+        if (recipe.surfaceFit && recipe.surfaceFit->sourceRegion &&
+            !recipe.surfaceFit->sourceRegion->vertexIds.empty())
+            inputs.push_back({"surface-selection", recipe.surfaceFit->sourceRegion->pinnedMesh});
         DataTransaction tx;
         for (const auto &input : inputs) {
             if (!graph.view->GetData(input.source))

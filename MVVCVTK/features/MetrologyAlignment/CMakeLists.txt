@@ -3,6 +3,7 @@ add_library(MVVCVTK::MetrologyAlignment ALIAS metrology_alignment)
 target_sources(metrology_alignment
     PRIVATE src/AlignmentMath.h src/AlignmentGeometry.h src/AlignmentGeometry.cpp
         src/AlignmentSolver.h src/AlignmentSolver.cpp
+        src/AlignmentMeshQuery.h src/AlignmentMeshQuery.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp

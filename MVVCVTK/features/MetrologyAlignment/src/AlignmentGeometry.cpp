@@ -207,7 +207,23 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         return false;
     if (r.method == AlignmentMethod::Rps && r.constraints.empty())
         return false;
-    if (r.method == AlignmentMethod::ConstrainedBestFit &&
+    if (r.surfaceFit && (r.method != AlignmentMethod::ConstrainedBestFit ||
+        !r.fitPairs.empty() || r.surfaceFit->iterationLimit == 0 ||
+        r.surfaceFit->iterationLimit > 1000))
+        return false;
+    if (r.surfaceFit && r.surfaceFit->sourceRegion) {
+        const auto &region = *r.surfaceFit->sourceRegion;
+        if (region.vertexIds.empty() == !region.targetBounds.has_value() ||
+            (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh)))
+            return false;
+        if (region.targetBounds)
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                if (!std::isfinite((*region.targetBounds)[2 * axis]) ||
+                    !std::isfinite((*region.targetBounds)[2 * axis + 1]) ||
+                    (*region.targetBounds)[2 * axis] > (*region.targetBounds)[2 * axis + 1])
+                    return false;
+    }
+    if (r.method == AlignmentMethod::ConstrainedBestFit && !r.surfaceFit &&
         (r.fitPairs.empty() || !GetDataRevisionRefValid(r.exactMesh)))
         return false;
     if (r.method != AlignmentMethod::ConstrainedBestFit && !r.fitPairs.empty())

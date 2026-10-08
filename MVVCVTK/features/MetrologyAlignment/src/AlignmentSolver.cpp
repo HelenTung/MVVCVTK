@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
+#include "AlignmentMeshQuery.h"
 #include <map>
 #include <numeric>
 #include <set>
@@ -277,16 +278,16 @@ void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
             v[static_cast<std::size_t>(i + 3)] -= correction[i];
         d.nullspace.push_back(v);
     }
-    double sum = 0;
-    std::size_t count = 0;
+    double sum = 0, totalWeight = 0;
     bool hardPassed = true, quality = true;
     for (const auto &e : eq) {
         const double value = Residual(e, pose);
         output.residuals.push_back({e.id, e.kind, e.priority, value, e.tolerance, e.isUsed});
         // 被排除的点仍进入最终评价摘要，不能靠剔除伪造低残差。
         if (e.kind != AlignmentConstraintKind::Hard) {
-            sum += value * value;
-            ++count;
+            const double weight = work.recipe.surfaceFit && e.priority == 63 ? e.weight : 1.0;
+            sum += weight * value * value;
+            totalWeight += weight;
         }
         d.maximum = std::max(d.maximum, std::abs(value));
         if (e.kind == AlignmentConstraintKind::Hard && std::abs(value) > e.tolerance)
@@ -294,7 +295,7 @@ void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
         if (std::abs(value) > e.tolerance)
             quality = false;
     }
-    d.rms = count ? std::sqrt(sum / static_cast<double>(count)) : 0;
+    d.rms = totalWeight > 0 ? std::sqrt(sum / totalWeight) : 0;
     d.isQualityPassed = quality && d.rms <= work.recipe.maxAlignmentRms;
     if (!Rigid(pose) || !std::isfinite(d.rms))
         d.status = AlignmentStatus::InvalidInput;
@@ -308,7 +309,131 @@ void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
         d.status =
             d.remaining ? AlignmentStatus::Underconstrained : AlignmentStatus::FullyDetermined;
 }
-AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &initial) {
+struct SurfaceSample final {
+    std::uint64_t vertex = 0;
+    double area = 0;
+};
+
+std::vector<SurfaceSample> BuildSurfaceSamples(const AlignmentWork &work,
+                                               const AlignmentMatrix &initial,
+                                               std::size_t indexBytes) {
+    const auto &v = work.mesh->GetVertices();
+    const auto &region = work.recipe.surfaceFit->sourceRegion;
+    Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
+            "Surface selection belongs to another mesh revision.");
+    const auto count = region && !region->vertexIds.empty() ? region->vertexIds.size() : v.size() / 3;
+    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto initialCapacity = region && region->targetBounds ? 0 : count;
+    if (indexBytes > limit || initialCapacity > (limit - indexBytes) / sizeof(SurfaceSample))
+        throw std::length_error("Surface selection exceeds the working budget.");
+    std::vector<SurfaceSample> samples;
+    // 只保留编号和面积权重；源坐标继续由固定网格提供。
+    samples.reserve(initialCapacity);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i % 256 == 0) CheckWork(work);
+        const auto id = region && !region->vertexIds.empty() ? region->vertexIds[i] : i;
+        Require(id < v.size() / 3, "Surface selection is out of bounds.");
+        if (region && region->targetBounds) {
+            const auto p = Transform(initial, {v[3 * id], v[3 * id + 1], v[3 * id + 2]});
+            bool inside = true;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                inside = inside && p[static_cast<int>(axis)] >= (*region->targetBounds)[2 * axis] &&
+                         p[static_cast<int>(axis)] <= (*region->targetBounds)[2 * axis + 1];
+            if (!inside) continue;
+        }
+        if (samples.size() == samples.capacity()) {
+            const auto capacity = samples.capacity() == 0 ? std::size_t{1}
+                : std::min(count, samples.capacity() * 2);
+            if (capacity > (limit - indexBytes) / sizeof(SurfaceSample))
+                throw std::length_error("Surface region exceeds the working budget.");
+            samples.reserve(capacity);
+        }
+        samples.push_back({static_cast<std::uint64_t>(id), 0});
+    }
+    Require(!samples.empty(), "Surface alignment region is empty.");
+    std::sort(samples.begin(), samples.end(), [](const auto &a, const auto &b) {
+        return a.vertex < b.vertex;
+    });
+    for (std::size_t i = 1; i < samples.size(); ++i)
+        Require(samples[i - 1].vertex != samples[i].vertex, "Duplicate surface selection.");
+    if ((work.config.pointLimit && samples.size() > work.config.pointLimit) ||
+        (work.config.constraintLimit && samples.size() > work.config.constraintLimit) ||
+        samples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / 3)
+        throw std::length_error("Surface alignment exceeds point/constraint limit.");
+    // 覆盖方程和薄 SVD 的同时存活缓冲；不把输入灰度体计为新的工作副本。
+    // 每方程为薄 SVD/伪逆/投影预留十二个六列 double 缓冲及有界残差标识。
+    // 这是算法工作量的保守准入，不代表 OpenCV/分配器或进程 RSS 的精确计量。
+    constexpr std::size_t equationBytes = sizeof(Equation) + 12 * 6 * sizeof(double) + 64;
+    const std::size_t sampleBytes = sizeof(SurfaceSample) +
+        (work.recipe.surfaceFit->isPointToPlane ? 1 : 3) * equationBytes;
+    if (samples.capacity() > (limit - indexBytes) / sampleBytes)
+        throw std::length_error("Surface equations exceed the working budget.");
+    const auto &triangles = work.mesh->GetTriangles();
+    Require(!triangles.empty(), "Surface fitting requires source triangle connectivity.");
+    for (std::size_t i = 0; i < triangles.size(); i += 3) {
+        if (i % 768 == 0) CheckWork(work);
+        const auto vertex = [&](std::uint64_t id) { return Vec(v[3 * id], v[3 * id + 1], v[3 * id + 2]); };
+        const double area = cv::norm((vertex(triangles[i + 1]) - vertex(triangles[i])).cross(
+                                        vertex(triangles[i + 2]) - vertex(triangles[i]))) / 6;
+        Require(std::isfinite(area) && area > 0, "Source contains a degenerate triangle.");
+        for (std::size_t j = 0; j < 3; ++j) {
+            const auto id = triangles[i + j];
+            const auto found = std::lower_bound(samples.begin(), samples.end(), id,
+                [](const auto &sample, auto value) { return sample.vertex < value; });
+            if (found != samples.end() && found->vertex == id) found->area += area;
+        }
+    }
+    for (const auto &sample : samples)
+        Require(std::isfinite(sample.area) && sample.area > 0, "Selected vertex has no surface area.");
+    return samples;
+}
+
+void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &query,
+                         const std::vector<SurfaceSample> &samples,
+                         const AlignmentMatrix &pose, std::vector<Equation> &equations,
+                         AlignmentDiagnostics &diagnostics) {
+    const auto &v = work.mesh->GetVertices();
+    double area = 0, acceptedArea = 0;
+    diagnostics.rejectedPairs = 0;
+    const MeshAttribute *normal = nullptr;
+    if (work.recipe.minPairNormalCosine) {
+        for (const auto &attribute : work.mesh->GetPointAttributes())
+            if (attribute.name == "measurement.normal") normal = &attribute;
+        Require(normal && normal->componentCount == 3 && normal->values.size() == v.size(),
+                "Surface normal gate requires source measurement normals.");
+    }
+    for (const auto &sample : samples) {
+        CheckWork(work);
+        const auto id = sample.vertex;
+        const Vec p(v[3 * id], v[3 * id + 1], v[3 * id + 2]);
+        const auto hit = query.GetClosest(Point(Transform(pose, p)));
+        Require(hit.isValid, "Reference correspondence is unavailable.");
+        bool used = AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) &&
+                    std::sqrt(hit.distanceSquared) <= work.recipe.maxPairDistance;
+        if (normal) {
+            const Vec n(normal->values[3 * id], normal->values[3 * id + 1], normal->values[3 * id + 2]);
+            used = used && std::abs(cv::norm(n) - 1) <= 1e-6 &&
+                   Rotate(pose, n).dot(Vector(hit.normal)) >= *work.recipe.minPairNormalCosine;
+        }
+        area += sample.area;
+        if (used) acceptedArea += sample.area;
+        else ++diagnostics.rejectedPairs;
+        const int components = work.recipe.surfaceFit->isPointToPlane ? 1 : 3;
+        for (int axis = 0; axis < components; ++axis) {
+            Vec direction{};
+            direction[axis] = 1;
+            if (components == 1) direction = Vector(hit.normal);
+            equations.push_back({p, Vector(hit.point), direction, AlignmentConstraintKind::Soft,
+                63, sample.area, work.recipe.maxPairDistance,
+                "surface-" + std::to_string(id) + "-" + std::to_string(axis), false, used});
+        }
+    }
+    Require(std::isfinite(area) && area > 0 && acceptedArea / area >= work.recipe.minPairCoverage,
+            "Surface area coverage failed.");
+}
+
+AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &initial,
+                              const AlignmentMeshQuery *surfaceQuery) {
     AlignmentCandidate output;
     output.sourceToTarget = initial;
     const auto &recipe = work.recipe;
@@ -411,7 +536,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
                              constraint.kind, constraint.priority, constraint.weight,
                              constraint.tolerance, g.id});
     }
-    if (recipe.method == AlignmentMethod::ConstrainedBestFit) {
+    if (recipe.method == AlignmentMethod::ConstrainedBestFit && !recipe.surfaceFit) {
         Require(recipe.exactMesh == work.input.mesh,
                 "Best-fit correspondence belongs to another mesh revision.");
         const auto &v = work.mesh->GetVertices();
@@ -458,8 +583,35 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
                     recipe.minPairCoverage,
                 "Best-fit coverage failed.");
     }
-    const bool converged =
-        Optimize(work, equations, output.sourceToTarget, output.diagnostics.iterations);
+    bool converged = false;
+    if (recipe.surfaceFit) {
+        Require(surfaceQuery != nullptr, "Reference surface is missing.");
+        const auto samples = BuildSurfaceSamples(work, initial, surfaceQuery->GetWorkingBytes());
+        const auto fixedCount = equations.size();
+        const auto components = recipe.surfaceFit->isPointToPlane ? std::size_t{1} : std::size_t{3};
+        if (samples.size() > (std::numeric_limits<std::size_t>::max() - fixedCount) / components)
+            throw std::length_error("Surface equation count overflows.");
+        equations.reserve(fixedCount + samples.size() * components);
+        for (std::size_t iteration = 0; iteration < recipe.surfaceFit->iterationLimit; ++iteration) {
+            CheckWork(work);
+            equations.resize(fixedCount);
+            SetSurfaceEquations(work, *surfaceQuery, samples, output.sourceToTarget,
+                                equations, output.diagnostics);
+            const auto previous = output.sourceToTarget;
+            const bool optimized = Optimize(work, equations, output.sourceToTarget,
+                                             output.diagnostics.iterations);
+            const auto relative = Multiply(output.sourceToTarget, Inverse(previous));
+            const double movement = cv::norm(Vec(relative[3], relative[7], relative[11])) +
+                                    recipe.lengthScale * GetRotationAngle(relative);
+            if (optimized && movement <= recipe.solveTolerance) { converged = true; break; }
+        }
+        // 最终姿态重新查询，诊断对应正式结果，不沿用上一次迭代的配对残差。
+        equations.resize(fixedCount);
+        SetSurfaceEquations(work, *surfaceQuery, samples, output.sourceToTarget,
+                            equations, output.diagnostics);
+    } else {
+        converged = Optimize(work, equations, output.sourceToTarget, output.diagnostics.iterations);
+    }
     Diagnose(work, equations, output, converged);
     // 对应集合在初始化后固定以保证可重复性；最终姿态重新验证距离门槛。
     for (const auto &e : equations) {
@@ -490,13 +642,20 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                 return result;
             }
         bool hasCandidate = false;
+        std::unique_ptr<AlignmentMeshQuery> surfaceQuery;
+        if (work.recipe.surfaceFit) {
+            Require(work.referenceMesh && work.referenceMesh->GetCoordinateFrame() ==
+                    work.input.coordinateFrame, "Reference surface coordinate frame is incompatible.");
+            surfaceQuery = std::make_unique<AlignmentMeshQuery>(work.referenceMesh, work,
+                                                    work.recipe.surfaceFit->referenceTriangles);
+        }
         std::vector<AlignmentMatrix> validPoses;
         for (const auto &pose : work.poses) {
             CheckWork(work);
             Require(Rigid(pose), "Initial pose must be rigid.");
             AlignmentCandidate candidate;
             try {
-                candidate = SolvePose(work, pose);
+                candidate = SolvePose(work, pose, surfaceQuery.get());
             } catch (const std::invalid_argument &error) {
                 candidate.diagnostics.status = AlignmentStatus::Degenerate;
                 candidate.diagnostics.message = error.what();
@@ -506,10 +665,8 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                 bool distinct = true;
                 for (const auto &existing : validPoses) {
                     const auto relative = Multiply(candidate.sourceToTarget, Inverse(existing));
-                    const double cosine =
-                        std::clamp((relative[0] + relative[5] + relative[10] - 1) / 2, -1.0, 1.0);
                     const double distance = cv::norm(Vec(relative[3], relative[7], relative[11])) +
-                                            work.recipe.lengthScale * std::acos(cosine);
+                                            work.recipe.lengthScale * GetRotationAngle(relative);
                     if (distance < work.recipe.solveTolerance * 10)
                         distinct = false;
                 }

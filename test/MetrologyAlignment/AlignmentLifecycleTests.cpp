@@ -448,8 +448,66 @@ void WorkNotifications() {
     Check(f.data->SetDataCommit(std::move(change)).status == DataCommitStatus::Succeeded
         && host->notifications.load() > changesBefore, "data invalidation wakes owner for stale cleanup");
 }
+void SurfaceReferenceLifecycle() {
+    Fixture f;
+    const std::vector<double> referenceVertices{0,0,0, 10,0,0, 0,10,0,
+        0,0,0, 0,10,0, 0,0,10, 0,0,0, 0,0,10, 10,0,0};
+    const std::vector<std::uint64_t> triangles{0,1,2, 3,4,5, 6,7,8};
+    auto reference = std::make_shared<const SurfaceMeshPayload>(referenceVertices, triangles);
+    std::vector<double> measured{1,1,0, 3,1,0, 1,3,0,
+        0,1,1, 0,3,1, 0,1,3, 1,0,1, 1,0,3, 3,0,1};
+    for (std::size_t i = 0; i < measured.size(); i += 3) {
+        measured[i] -= 0.1;
+        measured[i+1] += 0.2;
+        measured[i+2] -= 0.3;
+    }
+    f.mesh = std::make_shared<const SurfaceMeshPayload>(measured, triangles);
+    f.input.mesh = {f.data->CreateDataEntityId(), 1};
+    f.input.meshBinding.clear();
+    f.recipe.nominalData = {f.data->CreateDataEntityId(), 1};
+    DataTransaction inputs;
+    inputs.outputs.push_back({f.input.mesh.entityId, 0, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    inputs.outputs.push_back({f.recipe.nominalData.entityId, 0, DataTypes::surfaceMesh,
+        {}, reference, {}});
+    Check(f.data->SetDataCommit(std::move(inputs)).status == DataCommitStatus::Succeeded,
+          "source and reference surfaces published");
+    f.recipe.geometries.clear();
+    f.recipe.constraints.clear();
+    f.recipe.method = AlignmentMethod::ConstrainedBestFit;
+    f.recipe.surfaceFit = AlignmentSurfaceFit{};
+    f.recipe.surfaceFit->referenceTriangles = {0,1,2};
+    AlignmentRequest save;
+    save.action = AlignmentAction::SaveRecipe;
+    save.recipe = f.recipe;
+    Check(f.feature->SendRequest(save, [&](AlignmentResult r) { f.recipeRef = r.recipe; }).status ==
+          AlignmentAdmissionStatus::Accepted, "surface recipe accepted through public entry");
+    const auto result = f.Solve();
+    const auto archive = f.feature->GetArchive(result.result);
+    Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated && archive &&
+          std::abs(archive->sourceToTarget[3] - 0.1) < 1e-7 &&
+          std::abs(archive->sourceToTarget[7] + 0.2) < 1e-7 &&
+          std::abs(archive->sourceToTarget[11] - 0.3) < 1e-7,
+          "public dynamic surface alignment publishes analytic transform");
+    Check(f.mesh->GetVertices() == measured && reference->GetVertices() == referenceVertices,
+          "public alignment preserves both immutable input meshes");
+    DataTransaction replace;
+    replace.outputs.push_back({f.recipe.nominalData.entityId, 1, DataTypes::surfaceMesh, {}, reference, {}});
+    Check(f.data->SetDataCommit(std::move(replace)).status == DataCommitStatus::Succeeded,
+          "reference revision advanced");
+    Check(!f.feature->GetState().isCurrent, "reference change invalidates active surface alignment");
+    Check(f.feature->GetArchive(result.result).has_value(), "historical surface alignment remains readable");
+    AlignmentRequest restore;
+    restore.action = AlignmentAction::Restore;
+    restore.archive = archive;
+    restore.input = f.input;
+    restore.restoredNominal = {f.recipe.nominalData.entityId, 2};
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "restore cannot reuse reference triangle IDs on another revision");
+}
 } // namespace
 int main() {
+    SurfaceReferenceLifecycle();
     WorkNotifications();
     Lifecycle();
     Currentness();

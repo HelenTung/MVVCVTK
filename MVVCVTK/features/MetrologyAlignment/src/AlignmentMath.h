@@ -43,6 +43,12 @@ inline AlignmentMatrix Multiply(const AlignmentMatrix &a, const AlignmentMatrix 
                 r[4 * i + j] += a[4 * i + k] * b[4 * k + j];
     return r;
 }
+inline double GetRotationAngle(const AlignmentMatrix &m) {
+    const double sine = cv::norm(Vec(m[9] - m[6], m[2] - m[8], m[4] - m[1])) / 2;
+    const double cosine = std::clamp((m[0] + m[5] + m[10] - 1) / 2, -1.0, 1.0);
+    // atan2 同时覆盖微小转角和半周旋转，避免反对称部分在 pi 附近消失。
+    return std::atan2(sine, cosine);
+}
 inline bool Rigid(const AlignmentMatrix &m) {
     for (const auto v : m)
         if (!std::isfinite(v))

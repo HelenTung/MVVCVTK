@@ -116,6 +116,15 @@ struct AlignmentFitPair final {
     double weight = 1.0;
 };
 
+struct AlignmentSurfaceFit final {
+    // 空选区使用完整实测网格；ROI 在初始姿态下确定后固定，不随迭代漂移。
+    std::optional<AlignmentRegion> sourceRegion;
+    // 编号属于 nominalData 指向的参考三角网格；空集合使用全部三角形。
+    std::vector<std::uint64_t> referenceTriangles;
+    std::size_t iterationLimit = 40;
+    bool isPointToPlane = true;
+};
+
 struct AlignmentRecipe final {
     std::string id;
     std::string targetFrameId;
@@ -126,6 +135,8 @@ struct AlignmentRecipe final {
     // 最佳拟合的对应顶点绑定到 exactMesh；不允许在另一网格复用编号。
     DataRevisionRef exactMesh;
     std::vector<AlignmentFitPair> fitPairs;
+    // 与显式 fitPairs 互斥。nominalData 必须为同单位、同坐标轴约定的参考表面。
+    std::optional<AlignmentSurfaceFit> surfaceFit;
     DataRevisionRef nominalData;
     // ConstrainedBestFit 时前 0..3 个几何为 A/B/C 基准，其余点对只优化余下运动。
     std::size_t datumCount = 3;

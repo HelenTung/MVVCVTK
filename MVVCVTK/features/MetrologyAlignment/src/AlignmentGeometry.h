@@ -12,6 +12,7 @@ struct AlignmentWork final {
     AlignmentConfig config;
     // 生产入口只传 DataGraphStore 已验证的不可变 payload；计算不重复扫描整张网格。
     std::shared_ptr<const SurfaceMeshPayload> mesh;
+    std::shared_ptr<const SurfaceMeshPayload> referenceMesh;
     std::vector<AlignmentMatrix> poses;
     std::shared_ptr<std::atomic<bool>> cancelled;
     std::chrono::steady_clock::time_point deadline;
