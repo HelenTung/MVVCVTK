@@ -18,7 +18,8 @@ void TestRecipeReplay(Checks& checks)
     params.resultScope = "part/\"quoted\""; params.modelUnit = "mm";
     const auto result = SurfaceDeterminationAlgorithm::BuildSurface(source,params,128U*1024U*1024U,[]{return false;},{});
     checks.Get(result.status == SurfaceResultStatus::Succeeded && result.resolvedParams.initialIsoValue
-        && result.resolvedParams.materialRange,
+        && result.resolvedParams.profileHalfLengthModel && result.resolvedParams.maximumOffsetModel
+        && result.resolvedParams.profileSampleStepModel && result.resolvedParams.profileSmoothingSigmaModel,
         "auto settings preserve every resolved physical parameter");
     const auto text = SurfaceContract::BuildParameters(params,result.resolvedParams,"RAS",128U*1024U*1024U);
     const auto oldLocale=std::locale();
@@ -37,11 +38,11 @@ void TestRecipeReplay(Checks& checks)
     if(same)for(std::size_t i=0;i<replay.points.size();++i)
         same=same && replay.points[i].positionModel==result.points[i].positionModel && replay.points[i].flags==result.points[i].flags;
     checks.Get(same && replay.triangleIndices==result.triangleIndices,"resolved recipe reproduces positions and quality");
-    auto changed=params; changed.seedFraction=.6;
+    auto changed=params; changed.minimumContrast+=1;
     checks.Get(SurfaceContract::BuildParameters(changed,result.resolvedParams,"RAS",bytes)!=text,
         "user parameter changes remain traceable");
     checks.Get(!SurfaceContract::GetParameters(text+"extra",requested,resolved,frame,bytes),"trailing recipe content is rejected");
-    changed=params;changed.seedFraction=-1;
+    changed=params;changed.minimumContrast=-1;
     checks.Get(!SurfaceContract::GetParameters(SurfaceContract::BuildParameters(changed,result.resolvedParams,"RAS",bytes),
         requested,resolved,frame,bytes),"negative recipe quality is rejected without changing output");
 }
@@ -50,19 +51,19 @@ void TestBaseQuality(Checks& checks)
 {
     SurfacePointRecord point;
     point.normalModel={1,0,0}; point.validSupportRatio=1;
-    checks.Get(SurfaceContract::GetPointValid(point,SurfaceDeterminationMethod::MaterialIso),"finite located point is valid");
+    checks.Get(SurfaceContract::GetPointValid(point,SurfaceDeterminationMethod::LocalAdaptiveIso50),"finite located point is valid");
     for(unsigned bit=0;bit<7;++bit){
         auto rejected=point;rejected.flags=static_cast<SurfacePointFlags>(1U<<bit);
-        checks.Get(!SurfaceContract::GetPointValid(rejected,SurfaceDeterminationMethod::MaterialIso),
+        checks.Get(!SurfaceContract::GetPointValid(rejected,SurfaceDeterminationMethod::LocalAdaptiveIso50),
             "each rejected point flag blocks base measurement validity");
     }
     auto invalid=point;invalid.normalModel={0,0,0};
-    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::MaterialIso),"zero normal rejected");
+    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::GradientPeak),"zero normal rejected");
     invalid=point;invalid.positionModel[0]=std::numeric_limits<double>::infinity();
-    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::MaterialIso),"infinite position rejected");
+    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::GradientPeak),"infinite position rejected");
     invalid=point;invalid.estimatedLocalizationSigma=std::numeric_limits<float>::quiet_NaN();
-    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::MaterialIso),"NaN evidence rejected");
-    checks.Get(!SurfaceContract::GetPointValid(point,static_cast<SurfaceDeterminationMethod>(0)),"retired method is never measurement valid");
+    checks.Get(!SurfaceContract::GetPointValid(invalid,SurfaceDeterminationMethod::GradientPeak),"NaN evidence rejected");
+    checks.Get(!SurfaceContract::GetPointValid(point,SurfaceDeterminationMethod::GlobalIsoPreview),"global preview is never measurement valid");
 }
 
 void TestAreaCoverage(Checks& checks)
@@ -70,9 +71,7 @@ void TestAreaCoverage(Checks& checks)
     const auto source=BuildSnapshot({32,32,32},{1,1,1},{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_FLOAT,
         [](const Point3& p){return GetSmoothInside(std::sqrt((p[0]-15.5)*(p[0]-15.5)+(p[1]-15.5)*(p[1]-15.5)+(p[2]-15.5)*(p[2]-15.5))-8);},
         [](const Point3& p){return p[1]>11;});
-    auto params=GetParams(); SurfaceAlgorithmInputs inputs;
-    inputs.roi=BuildRoi(source,{0,31,12.25,31,0,31}); params.analysisRoi=inputs.roi->GetRevision();
-    const auto result=SurfaceDeterminationAlgorithm::BuildSurface(source,params,128U*1024U*1024U,[]{return false;},{},inputs);
+    const auto result=SurfaceDeterminationAlgorithm::BuildSurface(source,GetParams(),128U*1024U*1024U,[]{return false;},{});
     checks.Get(result.status==SurfaceResultStatus::Succeeded && result.triangleValidity.size()==result.triangleIndices.size()/3,
         "face quality preserves exact triangle indexing");
     if(result.objects.empty())return;

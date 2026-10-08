@@ -131,8 +131,24 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
 }
 } // namespace
 
+std::uint64_t SurfaceSeedBuilder::GetLabel(const LabelMap3DPayload &labels, const std::size_t index)
+{
+    return std::visit(
+        [index](const auto &values) -> std::uint64_t {
+            if (!values || index >= values->size())
+                return UINT64_MAX;
+            const auto value = (*values)[index];
+            if constexpr (std::is_signed_v<std::decay_t<decltype(value)>>)
+                if (value < 0)
+                    return UINT64_MAX;
+            const auto result = static_cast<std::uint64_t>(value);
+            return result <= UINT32_MAX ? result : UINT64_MAX;
+        },
+        labels.GetValues());
+}
+
 SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
-    const SurfaceSeedGrid &grid, const double iso,
+    const SurfaceSeedGrid &grid, const double iso, const std::optional<SurfaceMaterialPair> &materials,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
     const WorkLimit budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
     std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
@@ -142,6 +158,8 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
         return SurfaceSeedStatus::InvalidInput;
     if (!GetBudget(0, 0, budget, stats))
         return SurfaceSeedStatus::BudgetExceeded;
+    if (materials && !grid.labels)
+        return SurfaceSeedStatus::InvalidInput;
     std::vector<RoiPlane> planes;
     if (roi) {
         auto clip = roi->GetClipPlanes();
@@ -177,6 +195,79 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
         }
     }
     stats.processedExtent = range;
+    if (grid.initialMesh)
+    {
+        if (!grid.initialMesh->GetValid())
+            return SurfaceSeedStatus::InvalidInput;
+        const auto &vertices = grid.initialMesh->GetVertices();
+        const auto &inputTriangles = grid.initialMesh->GetTriangles();
+        if (!GetBudget(vertices.size() / 3, inputTriangles.size() / 3, budget, stats))
+            return SurfaceSeedStatus::BudgetExceeded;
+        for (std::size_t i = 0; i < vertices.size(); i += 3)
+            points.push_back({vertices[i], vertices[i + 1], vertices[i + 2]});
+        for (std::size_t i = 0; i < inputTriangles.size(); i += 3)
+        {
+            if ((i & 1023U) == 0 && cancelled && cancelled())
+                return SurfaceSeedStatus::Cancelled;
+            if (materials)
+            {
+                Point center{}, u{}, v{}, normal{};
+                const auto a = points[static_cast<std::size_t>(inputTriangles[i])],
+                           b = points[static_cast<std::size_t>(inputTriangles[i + 1])],
+                           c = points[static_cast<std::size_t>(inputTriangles[i + 2])];
+                for (unsigned d = 0; d < 3; ++d)
+                {
+                    center[d] = (a[d] + b[d] + c[d]) / 3;
+                    u[d] = b[d] - a[d];
+                    v[d] = c[d] - a[d];
+                }
+                normal = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+                const auto norm = std::hypot(normal[0], normal[1], normal[2]);
+                if (norm == 0)
+                    continue;
+                Point directionIndex{};
+                for (unsigned d = 0; d < 3; ++d)
+                    for (unsigned e = 0; e < 3; ++e)
+                        directionIndex[d] += grid.modelToIndex[d * 3 + e] * normal[e] / norm;
+                const double indexNorm = std::hypot(directionIndex[0], directionIndex[1], directionIndex[2]);
+                auto index = ToIndex(grid, center);
+                std::array<std::uint64_t, 2> side{};
+                bool valid = true;
+                for (unsigned sideIndex = 0; sideIndex < 2; ++sideIndex)
+                {
+                    std::array<int, 3> nearest{};
+                    for (unsigned d = 0; d < 3; ++d)
+                    {
+                        const double coordinate =
+                            index[d] + (sideIndex ? 1 : -1) * directionIndex[d] / indexNorm;
+                        if (!std::isfinite(coordinate) || coordinate < grid.extent[d * 2] ||
+                            coordinate > grid.extent[d * 2 + 1])
+                        {
+                            valid = false;
+                            break;
+                        }
+                        nearest[d] = static_cast<int>(std::floor(coordinate + 0.5));
+                    }
+                    if (!valid)
+                        break;
+                    const auto tuple = GetIndex(grid, nearest[0], nearest[1], nearest[2]);
+                    if (grid.validity && !grid.validity[tuple])
+                    {
+                        valid = false;
+                        break;
+                    }
+                    side[sideIndex] = GetLabel(*grid.labels, tuple);
+                }
+                if (!valid || !((side[0] == materials->materialA && side[1] == materials->materialB) ||
+                                (side[0] == materials->materialB && side[1] == materials->materialA)))
+                    continue;
+            }
+            triangles.push_back({{static_cast<std::uint32_t>(inputTriangles[i]),
+                                  static_cast<std::uint32_t>(inputTriangles[i + 1]),
+                                  static_cast<std::uint32_t>(inputTriangles[i + 2])}});
+        }
+    }
+    else
     {
         std::map<Edge, std::uint32_t> edgeIds;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
@@ -194,6 +285,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                         if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
                             return SurfaceSeedStatus::Cancelled;
                         std::array<double, 8> scalar{};
+                        std::array<std::uint64_t, 8> labels{};
                         unsigned code = 0;
                         bool supported = true;
                         for (unsigned c = 0; c < 8; ++c)
@@ -204,7 +296,18 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                             scalar[c] = grid.readScalar(grid.values, index);
                             supported = supported && (!grid.validity || grid.validity[index]) &&
                                         std::isfinite(scalar[c]);
-                            if (scalar[c] >= iso)
+                            if (materials)
+                            {
+                                labels[c] = GetLabel(*grid.labels, index);
+                                if (labels[c] == UINT64_MAX)
+                                    return SurfaceSeedStatus::InvalidInput;
+                                supported = supported && (labels[c] == materials->materialA ||
+                                                          labels[c] == materials->materialB);
+                                // 几何始终从 canonical 较小材料构造；方向在后续单独处理。
+                                if (labels[c] == std::min(materials->materialA, materials->materialB))
+                                    code |= 1U << c;
+                            }
+                            else if (scalar[c] >= iso)
                                 code |= 1U << c;
                         }
                         if (!supported)
@@ -224,7 +327,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                                 Point indexB{double(xx + corners[b][0]), double(yy + corners[b][1]),
                                              double(zz + corners[b][2])};
                                 double fraction =
-                                    (iso - scalar[a]) / (scalar[b] - scalar[a]);
+                                    materials ? 0.5 : (iso - scalar[a]) / (scalar[b] - scalar[a]);
                                 fraction = std::clamp(fraction, 0.0, 1.0);
                                 Edge key{};
                                 unsigned axis = 0;

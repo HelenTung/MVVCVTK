@@ -11,13 +11,22 @@
 
 enum class SurfaceDeterminationMethod : std::uint8_t
 {
-    // 先饱和原始节点再提取等值面；仅支持材料等值面。
-    MaterialIso = 7
+    GlobalIsoPreview,
+    LocalAdaptiveIso50,
+    GradientPeak,
+    // 从空气背景与占比最多的非空气材料群估计 ISO50，不构造测量网格。
+    AutomaticIso50,
+    LocalRelativeIso,
+    EdgeModelFit,
+    PairedEdgeModelFit,
+    // 先将原始节点饱和到背景/材料值，再提取等值面；不进行局部位置重拟合。
+    MaterialIso
 };
 
 enum class SurfaceTaskPurpose : std::uint8_t
 {
-    Preview = 1,
+    Estimate,
+    Preview,
     Determine
 };
 
@@ -135,10 +144,31 @@ struct SurfaceIsoEstimate final
     double separationRatio = 0.0;
 };
 
+struct SurfaceGrayPair final
+{
+    std::array<double, 2> sideA{};
+    std::array<double, 2> sideB{};
+};
+
 struct SurfaceMaterialPair final
 {
     std::uint32_t materialA = 0;
     std::uint32_t materialB = 0;
+};
+
+struct SurfaceRegionOverride final
+{
+    std::string id;
+    std::int32_t priority = 0;
+    std::array<double, 6> boundsModel{};
+    std::optional<SurfaceDeterminationMethod> method;
+    std::optional<double> localFraction;
+    std::optional<double> profileHalfLengthModel;
+    std::optional<double> profileSampleStepModel;
+    std::optional<double> maximumOffsetModel;
+    std::optional<double> profileSmoothingSigmaModel;
+    std::optional<double> minimumContrast;
+    std::optional<double> minimumCnr;
 };
 
 struct SurfaceRecipe
@@ -146,18 +176,67 @@ struct SurfaceRecipe
     SurfaceDeterminationMethod method = SurfaceDeterminationMethod::MaterialIso;
     SurfaceComponentSelection componentSelection = SurfaceComponentSelection::All;
     std::optional<double> initialIsoValue;
-    // 有显式阈值时缺省取正式源灰度范围；阈值也省略时估计背景/材料峰。
+    // MaterialIso 的背景/材料灰度值（递增）；缺省时在原始灰度上估计。
+    // 与用于局部拟合约束的 grayPair 区间语义不同。
     std::optional<std::array<double, 2>> materialRange;
     std::optional<std::array<double, 3>> seedModelPoint;
+    std::optional<double> profileHalfLengthModel;
+    std::optional<double> profileSampleStepModel;
+    std::optional<double> maximumOffsetModel;
+    std::optional<double> profileSmoothingSigmaModel;
+    // 0 保留全部分量；闭合表面按体积/体素体积估计，开放/截断表面不伪造 voxel count。
     std::uint64_t minimumObjectVoxels = 0;
+    double minimumContrast = 0.0;
+
     double seedFraction = 0.5;
+    double localFraction = 0.5;
+    std::optional<SurfaceGrayPair> grayPair;
+    double minimumCnr = 0.0;
+    double maximumPlateauNoiseRatio = 1.0;
+    double maximumNormalizedResidual = 0.25;
+    std::optional<double> minimumEdgeWidthModel;
+    std::optional<double> maximumEdgeWidthModel;
+    std::optional<double> minimumEdgeSeparationModel;
     double sharpCornerAngleDeg = 75.0;
+    double maximumNormalTurnDeg = 75.0;
+    std::vector<SurfaceMaterialPair> materialPairs;
+    std::vector<SurfaceRegionOverride> regionOverrides;
 };
 
-struct SurfacePointDiagnostic final
+enum class SurfaceSampleStatus : std::uint8_t
+{
+    Valid,
+    Clipped,
+    InvalidSupport,
+    OtherMaterial
+};
+
+struct SurfaceEdgeCandidate final
+{
+    double offsetModel = 0.0;
+    double gradient = 0.0;
+    double widthModel = 0.0;
+    bool isSelected = false;
+};
+
+struct SurfaceProfileDiagnostic final
 {
     bool isAvailable = false;
     SurfacePointRecord point;
+    std::array<double, 3> profileCenterModel{};
+    std::array<double, 3> directionModel{};
+    std::vector<double> offsetsModel;
+    std::vector<double> rawValues;
+    std::vector<double> filteredValues;
+    std::vector<SurfaceSampleStatus> support;
+    std::vector<std::uint32_t> materialLabels;
+    std::vector<SurfaceEdgeCandidate> candidates;
+    double sideA = 0.0;
+    double sideB = 0.0;
+    double noiseSigma = 0.0;
+    double normalizedResidual = 0.0;
+    double minimumOffsetModel = 0.0;
+    double maximumOffsetModel = 0.0;
     std::string message;
 };
 

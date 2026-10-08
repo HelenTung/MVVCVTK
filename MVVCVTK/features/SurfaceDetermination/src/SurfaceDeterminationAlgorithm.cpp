@@ -1,7 +1,9 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
+#include "SurfaceProfileSolver.h"
 #include "SurfaceSeedBuilder.h"
+#include <vtkSMPThreadLocal.h>
 #include <chrono>
 #include "Data/DataPayloads.h"
 
@@ -39,6 +41,7 @@ constexpr std::uint32_t algorithmRevision = surfaceAlgorithmRevision;
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
+constexpr std::size_t maxProfileSampleCount = 4097;
 
 using Triangle = SurfaceSeedTriangle;
 struct SurfaceCancelled final
@@ -127,6 +130,8 @@ struct ScalarView final {
 };
 
 struct VolumeView final {
+    const LabelMap3DPayload *labels = nullptr;
+    const SurfaceMeshPayload *initialMesh = nullptr;
     std::array<double, 2> sourceRange{};
     ImageGeometry geometry;
     ScalarView scalars;
@@ -134,18 +139,17 @@ struct VolumeView final {
     std::size_t voxelCount = 0;
 };
 
-struct ResolvedParams final
+struct ResolvedParams final : SurfaceLocalParams
 {
     SurfaceComponentSelection componentSelection = SurfaceComponentSelection::Largest;
-    SurfaceDeterminationMethod method = SurfaceDeterminationMethod::MaterialIso;
-    double initialIsoValue = 0.0;
-    double boundaryToleranceModel = 0.0, haloModel = 0.0;
+    bool isAutomaticIso = false;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::optional<Point3> seedModelPoint;
     RoiReadSnapshot roi;
     std::vector<RoiPlane> clipPlanes;
     std::uint64_t minimumObjectVoxels = 1;
     double sharpCornerAngleDeg = 75.0;
+    std::vector<SurfaceRegionOverride> regionOverrides;
 };
 
 enum class SampleStatus : std::uint8_t {
@@ -670,6 +674,106 @@ bool GetGradient(
     return std::isfinite(magnitude) && magnitude > geometryEpsilon;
 }
 
+std::uint64_t GetLabelAtModel(const VolumeView &volume, const Point3 &point)
+{
+    if (!volume.labels)
+        return UINT64_MAX;
+    const auto index = GetContinuousIndex(volume.geometry, point);
+    std::array<int, 3> nearest{};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        if (!std::isfinite(index[a]) || index[a] < volume.geometry.extent[a * 2] ||
+            index[a] > volume.geometry.extent[a * 2 + 1])
+            return UINT64_MAX;
+        nearest[a] = static_cast<int>(std::floor(index[a] + 0.5));
+    }
+    return SurfaceSeedBuilder::GetLabel(*volume.labels,
+                                        GetTupleIndex(volume.geometry, nearest[0], nearest[1], nearest[2]));
+}
+
+void BuildProfile(const VolumeView &volume, const Point3 &center, const Point3 &normal,
+                  const SurfaceLocalParams &params, SurfaceProfileWorkspace &p)
+{
+    auto intervals =
+        std::max<std::size_t>(8, static_cast<std::size_t>(std::ceil(2 * params.profileHalfLengthModel /
+                                                                    params.profileSampleStepModel)));
+    if (intervals % 2)
+        ++intervals;
+    p.Reserve(intervals + 1);
+    p.offsets.clear();
+    p.raw.clear();
+    p.support.clear();
+    p.labels.clear();
+    p.step = 2 * params.profileHalfLengthModel / intervals;
+    std::size_t valid = 0;
+    for (std::size_t i = 0; i <= intervals; ++i)
+    {
+        const double offset = -params.profileHalfLengthModel + i * p.step;
+        const auto point = Add(center, Scale(normal, offset));
+        const auto sample = GetScalarAtModel(volume, point);
+        auto support = sample.status == SampleStatus::Valid
+                           ? SurfaceSampleStatus::Valid
+                           : (sample.status == SampleStatus::Clipped ? SurfaceSampleStatus::Clipped
+                                                                     : SurfaceSampleStatus::InvalidSupport);
+        if (volume.labels && params.materials)
+        {
+            const auto label = GetLabelAtModel(volume, point);
+            p.labels.push_back(static_cast<std::uint32_t>(label));
+            if (support == SurfaceSampleStatus::Valid && label != params.materials->materialA &&
+                label != params.materials->materialB)
+                support = label == UINT64_MAX ? SurfaceSampleStatus::InvalidSupport
+                                              : SurfaceSampleStatus::OtherMaterial;
+        }
+        p.offsets.push_back(offset);
+        p.raw.push_back(sample.value);
+        p.support.push_back(support);
+        valid += support == SurfaceSampleStatus::Valid;
+    }
+    p.validRatio = double(valid) / (intervals + 1);
+    ++p.sampledProfileCount;
+    p.sampledValueCount += intervals + 1;
+}
+
+SurfaceLocalParams GetLocalParams(const ResolvedParams &params, const Point3 &point, std::uint32_t &ruleIndex)
+{
+    SurfaceLocalParams local = params;
+    ruleIndex = 0;
+    const SurfaceRegionOverride *selected = nullptr;
+    for (std::size_t i = 0; i < params.regionOverrides.size(); ++i)
+    {
+        const auto &rule = params.regionOverrides[i];
+        bool inside = true;
+        for (unsigned a = 0; a < 3; ++a)
+            inside = inside && point[a] >= rule.boundsModel[a * 2] && point[a] < rule.boundsModel[a * 2 + 1];
+        if (inside && (!selected || rule.priority > selected->priority))
+        {
+            selected = &rule;
+            ruleIndex = static_cast<std::uint32_t>(i + 1);
+        }
+    }
+    if (selected)
+    {
+        const auto &r = *selected;
+        if (r.method)
+            local.method = *r.method;
+        if (r.localFraction)
+            local.localFraction = *r.localFraction;
+        if (r.profileHalfLengthModel)
+            local.profileHalfLengthModel = *r.profileHalfLengthModel;
+        if (r.profileSampleStepModel)
+            local.profileSampleStepModel = *r.profileSampleStepModel;
+        if (r.maximumOffsetModel)
+            local.maximumOffsetModel = *r.maximumOffsetModel;
+        if (r.profileSmoothingSigmaModel)
+            local.profileSmoothingSigmaModel = *r.profileSmoothingSigmaModel;
+        if (r.minimumContrast)
+            local.minimumContrast = *r.minimumContrast;
+        if (r.minimumCnr)
+            local.minimumCnr = *r.minimumCnr;
+    }
+    return local;
+}
+
 bool GetVoxelUsed(
     const VolumeView& volume,
     const ResolvedParams& params,
@@ -690,7 +794,7 @@ bool GetVoxelUsed(
     return params.roi->GetContains(point);
 }
 
-SurfaceFailureReason GetMaterialRange(
+SurfaceFailureReason GetAutomaticIso(
     const VolumeView& volume,
     const ResolvedParams& params,
     const SurfaceCancelCheck& getCancelled,
@@ -748,7 +852,7 @@ SurfaceFailureReason GetMaterialRange(
         || !std::isfinite(maximum) || !std::isfinite(maximum - minimum)
         || maximum - minimum <= geometryEpsilon
             * std::max({ 1.0, std::abs(minimum), std::abs(maximum) })) {
-        message = "Surface material range estimation requires a non-degenerate bimodal histogram.";
+        message = "Surface automatic ISO50 requires a non-degenerate bimodal histogram.";
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
@@ -828,10 +932,11 @@ SurfaceFailureReason GetMaterialRange(
     });
 
     std::optional<std::pair<Peak, Peak>> selected;
+    double selectedScore = -1.0;
     const std::size_t minimumSeparation = histogramBinCount / 10;
     const double minimumPeakHeight = std::max(
         2.0, static_cast<double>(validCount) * 1.0e-5);
-    if (!peaks.empty()) {
+    if (params.method == SurfaceDeterminationMethod::AutomaticIso50 && !peaks.empty()) {
         // 按谷分群；近背景起伏和同一材料上的小尖峰合并，
         // 非空气材料按原始直方图积分样本数比较，而不是按峰高或离背景的距离比较。
         std::vector<Peak> groups;
@@ -868,11 +973,54 @@ SurfaceFailureReason GetMaterialRange(
             }
         }
     }
+    else {
+        const std::size_t candidateCount = std::min<std::size_t>(32, peaks.size());
+        for (std::size_t first = 0; first < candidateCount; ++first) {
+            for (std::size_t second = first + 1;
+                second < candidateCount; ++second) {
+                Peak low = peaks[first];
+                Peak high = peaks[second];
+                if (low.index > high.index) std::swap(low, high);
+                if (high.index - low.index < minimumSeparation
+                    || low.height < minimumPeakHeight
+                    || high.height < minimumPeakHeight) {
+                    continue;
+                }
+                const auto valley = std::min_element(
+                    smooth.begin() + static_cast<std::ptrdiff_t>(low.index),
+                    smooth.begin() + static_cast<std::ptrdiff_t>(high.index + 1));
+                const double valleyHeight = *valley;
+                const double smallerPeak = std::min(low.height, high.height);
+                if (valleyHeight > 0.85 * smallerPeak) continue;
+                const double separation = static_cast<double>(
+                    high.index - low.index);
+                const double score = separation * smallerPeak
+                    * (1.0 - valleyHeight / smallerPeak);
+                if (score > selectedScore) {
+                    selected = std::make_pair(low, high);
+                    selectedScore = score;
+                }
+            }
+        }
+    }
     if (!selected) {
-        message = "Surface material range estimation could not identify two reliable peaks.";
+        message = "Surface automatic ISO50 could not identify two reliable peaks.";
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
+    if (params.method != SurfaceDeterminationMethod::AutomaticIso50) for (const auto &peak : peaks)
+    {
+        const auto distanceA = peak.index > selected->first.index ? peak.index - selected->first.index
+                                                                  : selected->first.index - peak.index;
+        const auto distanceB = peak.index > selected->second.index ? peak.index - selected->second.index
+                                                                   : selected->second.index - peak.index;
+        if (distanceA >= minimumSeparation && distanceB >= minimumSeparation &&
+            peak.height >= 0.2 * std::min(selected->first.height, selected->second.height))
+        {
+            message = "Surface automatic seed is ambiguous between more than two significant peaks.";
+            return SurfaceFailureReason::ThresholdUnreliable;
+        }
+    }
     const double binWidth = (maximum - minimum)
         / static_cast<double>(histogramBinCount - 1);
     const double background = minimum
@@ -881,7 +1029,7 @@ SurfaceFailureReason GetMaterialRange(
         + static_cast<double>(selected->second.index) * binWidth;
     isoValue = 0.5 * (background + material);
     if (!std::isfinite(isoValue) || material <= background) {
-        message = "Surface material range estimation produced an invalid threshold.";
+        message = "Surface automatic ISO50 produced an invalid threshold.";
         return SurfaceFailureReason::ThresholdUnreliable;
     }
     estimate = SurfaceIsoEstimate{
@@ -912,12 +1060,25 @@ SurfaceFailureReason ResolveParams(
     message = SurfaceRecipeCodec::GetError(input);
     if (!message.empty() || input.seedBlockDepth == 0 || input.seedBlockDepth > 4096)
         return SurfaceFailureReason::InvalidGeometry;
+    params.localFraction = input.localFraction;
+    params.grayPair = input.grayPair;
+    params.minimumCnr = input.minimumCnr;
+    params.maximumPlateauNoiseRatio = input.maximumPlateauNoiseRatio;
+    params.maximumNormalizedResidual = input.maximumNormalizedResidual;
+    params.maximumNormalTurnDeg = input.maximumNormalTurnDeg;
     params.sharpCornerAngleDeg = input.sharpCornerAngleDeg;
+    params.regionOverrides = input.regionOverrides;
     params.method = input.method;
     params.componentSelection = input.componentSelection;
     params.seedModelPoint = input.seedModelPoint;
 
     params.minimumObjectVoxels = input.minimumObjectVoxels;
+    params.minimumContrast = input.minimumContrast;
+    if (!std::isfinite(params.minimumContrast)
+        || params.minimumContrast < 0.0) {
+        message = "Surface parameters contain an invalid count or contrast.";
+        return SurfaceFailureReason::InvalidGeometry;
+    }
     if (params.componentSelection == SurfaceComponentSelection::Seeded
         && !params.seedModelPoint) {
         message = "Surface seeded selection requires a model-space seed.";
@@ -941,10 +1102,66 @@ SurfaceFailureReason ResolveParams(
         }
     }
 
-    params.boundaryToleranceModel = 0.25 * *std::min_element(volume.geometry.spacing.begin(), volume.geometry.spacing.end());
-    params.haloModel = 4 * *std::max_element(volume.geometry.spacing.begin(), volume.geometry.spacing.end());
+    const double minimumSpacing = *std::min_element(
+        volume.geometry.spacing.begin(), volume.geometry.spacing.end());
+    const double maximumSpacing = *std::max_element(
+        volume.geometry.spacing.begin(), volume.geometry.spacing.end());
+    params.profileHalfLengthModel = input.profileHalfLengthModel.value_or(
+        2.5 * maximumSpacing);
+    params.profileSampleStepModel = input.profileSampleStepModel.value_or(
+        0.25 * minimumSpacing);
+    params.maximumOffsetModel = input.maximumOffsetModel.value_or(
+        1.5 * maximumSpacing);
+    params.profileSmoothingSigmaModel =
+        input.profileSmoothingSigmaModel.value_or(
+            params.profileSampleStepModel);
+    const std::array<double, 4> profileValues{
+        params.profileHalfLengthModel,
+        params.profileSampleStepModel,
+        params.maximumOffsetModel,
+        params.profileSmoothingSigmaModel
+    };
+    for (const double value : profileValues) {
+        if (!std::isfinite(value) || value < 0.0)
+        {
+            message = "Surface profile parameters must be finite and nonnegative.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+    }
+    if (params.profileHalfLengthModel <= 0 || params.profileSampleStepModel <= 0 ||
+        params.maximumOffsetModel > params.profileHalfLengthModel ||
+        2.0 * params.profileHalfLengthModel / params.profileSampleStepModel >
+            static_cast<double>(maxProfileSampleCount - 1))
+    {
+        message = "Surface profile bounds are inconsistent or exceed the sample limit.";
+        return SurfaceFailureReason::InvalidGeometry;
+    }
+
+    params.minimumEdgeWidthModel = input.minimumEdgeWidthModel.value_or(params.profileSampleStepModel * 0.25);
+    params.maximumEdgeWidthModel = input.maximumEdgeWidthModel.value_or(params.profileHalfLengthModel);
+    params.minimumEdgeSeparationModel =
+        input.minimumEdgeSeparationModel.value_or(params.profileSampleStepModel * 2);
+    if (params.minimumEdgeWidthModel > params.maximumEdgeWidthModel)
+        return SurfaceFailureReason::InvalidGeometry;
+    for (const auto &rule : params.regionOverrides)
+    {
+        const auto half = rule.profileHalfLengthModel.value_or(params.profileHalfLengthModel);
+        const auto step = rule.profileSampleStepModel.value_or(params.profileSampleStepModel);
+        const auto offset = rule.maximumOffsetModel.value_or(params.maximumOffsetModel);
+        if (offset > half || 2 * half / step > maxProfileSampleCount - 1)
+        {
+            message = "Surface override exceeds the resolved profile bounds.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+    }
+    params.isAutomaticIso = !input.initialIsoValue.has_value();
     if (input.method == SurfaceDeterminationMethod::MaterialIso)
     {
+        if (volume.labels || volume.initialMesh)
+        {
+            message = "Material ISO requires the scalar source, without a label or initial mesh seed.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
         if (input.materialRange)
         {
             SurfaceIsoEstimate estimate;
@@ -954,7 +1171,7 @@ SurfaceFailureReason ResolveParams(
         }
         else if (input.initialIsoValue)
         {
-            // 显式阈值的缺省饱和范围来自同一正式输入，不能被另一次峰估计否决。
+            // 仅修复 MaterialIso 的显式阈值输入；其他方法的估计/定位规则不变。
             SurfaceIsoEstimate estimate;
             estimate.backgroundValue = volume.sourceRange[0];
             estimate.materialValue = volume.sourceRange[1];
@@ -965,7 +1182,9 @@ SurfaceFailureReason ResolveParams(
         }
         else
         {
-            const auto status = GetMaterialRange(volume, params, getCancelled, params.initialIsoValue,
+            auto estimateParams = params;
+            estimateParams.method = SurfaceDeterminationMethod::AutomaticIso50;
+            const auto status = GetAutomaticIso(volume, estimateParams, getCancelled, params.initialIsoValue,
                                                 message, params.isoEstimate);
             if (status != SurfaceFailureReason::None)
                 return status;
@@ -984,7 +1203,33 @@ SurfaceFailureReason ResolveParams(
         estimate.isoValue = params.initialIsoValue;
         return SurfaceFailureReason::None;
     }
-    return SurfaceFailureReason::InvalidGeometry;
+    if (volume.labels || volume.initialMesh)
+    {
+        params.initialIsoValue = input.initialIsoValue.value_or(0.0);
+        return SurfaceFailureReason::None;
+    }
+    if (input.grayPair && !input.initialIsoValue)
+    {
+        const double a = 0.5 * input.grayPair->sideA[0] + 0.5 * input.grayPair->sideA[1];
+        const double b = 0.5 * input.grayPair->sideB[0] + 0.5 * input.grayPair->sideB[1];
+        params.initialIsoValue = (1 - input.seedFraction) * a + input.seedFraction * b;
+        return SurfaceFailureReason::None;
+    }
+    if (input.initialIsoValue) {
+        if (!std::isfinite(*input.initialIsoValue)) {
+            message = "Surface initial ISO value is not finite.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+        params.initialIsoValue = *input.initialIsoValue;
+        return SurfaceFailureReason::None;
+    }
+    const auto status =
+        GetAutomaticIso(volume, params, getCancelled, params.initialIsoValue, message, params.isoEstimate);
+    if (status == SurfaceFailureReason::None && params.isoEstimate &&
+        input.method != SurfaceDeterminationMethod::AutomaticIso50)
+        params.initialIsoValue = (1 - input.seedFraction) * params.isoEstimate->backgroundValue +
+                                 input.seedFraction * params.isoEstimate->materialValue;
+    return status;
 }
 
 bool AddWorkingBytes(
@@ -1354,42 +1599,140 @@ float GetFiniteFloat(const double value)
     return static_cast<float>(bounded);
 }
 
-bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, const Point3 &initialPoint,
-                      const Point3 &initialNormal, SurfacePointRecord &record,
-                      SurfacePointDiagnostic *diagnostic = nullptr)
+bool SetRefinedPoint(const VolumeView &volume, const ResolvedParams &global, const Point3 &initialPoint,
+                     const Point3 &initialNormal, SurfacePointRecord &record,
+                     SurfaceProfileWorkspace &workspace, SurfaceProfileDiagnostic *diagnostic = nullptr)
 {
-    record.seedPositionModel = record.positionModel = initialPoint;
-    auto normal = initialNormal;
-    Point3 gradient{};
+    record.seedPositionModel = initialPoint;
+    record.positionModel = initialPoint;
+    Point3 normal = initialNormal, current = initialPoint, gradient{};
     double magnitude = 0;
-    if (params.roi) {
+    auto params = GetLocalParams(global, initialPoint, record.overrideIndex);
+    if (global.roi) {
         const auto tolerance = 32 * std::numeric_limits<double>::epsilon()
             * std::max({1.0, std::abs(initialPoint[0]), std::abs(initialPoint[1]), std::abs(initialPoint[2])});
-        const auto distance = params.roi->GetBoundaryDistance(initialPoint);
+        const auto distance = global.roi->GetBoundaryDistance(initialPoint);
         if (std::isfinite(distance) && distance <= tolerance)
             record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
     }
-    if (GetGradient(volume, initialPoint, gradient, magnitude) && Normalize(gradient))
-        normal = Scale(gradient, -1);
-    if (!Normalize(normal)) {
+    if (!params.materials && GetGradient(volume, current, gradient, magnitude) && Normalize(gradient))
+    {
+        double sign = -1;
+        if (params.grayPair)
+            sign = params.grayPair->sideB[0] > params.grayPair->sideA[1] ? 1 : -1;
+        normal = Scale(gradient, sign);
+    }
+    if (!Normalize(normal))
+    {
         record.flags |= SurfacePointFlags::FitRejected | SurfacePointFlags::SeedRetained;
         return false;
     }
     record.seedNormalModel = normal;
-    // 原始分支的饱和节点梯度、位置和支持规则；不再保留局部剖面拟合路径。
-    GetGradient(volume, initialPoint, gradient, magnitude);
-    record.normalModel = {GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]), GetFiniteFloat(normal[2])};
-    record.localThreshold = GetFiniteFloat(params.initialIsoValue);
-    record.gradientMagnitude = GetFiniteFloat(magnitude);
-    const auto sample = GetScalarAtModel(volume, initialPoint);
-    record.validSupportRatio = sample.status == SampleStatus::Valid ? 1.0F : 0.0F;
-    if (sample.status != SampleStatus::Valid) record.flags |= SurfacePointFlags::InvalidSupport;
-    if (diagnostic) {
+    if (GetGradient(volume, current, gradient, magnitude))
+    {
+        const auto projected = Dot(gradient, normal);
+        params.expectedDerivativeSign = projected > geometryEpsilon    ? 1
+                                        : projected < -geometryEpsilon ? -1
+                                                                       : 0;
+    }
+    record.normalModel = {GetFiniteFloat(record.seedNormalModel[0]),
+                          GetFiniteFloat(record.seedNormalModel[1]),
+                          GetFiniteFloat(record.seedNormalModel[2])};
+    if (params.method == SurfaceDeterminationMethod::GlobalIsoPreview ||
+        params.method == SurfaceDeterminationMethod::MaterialIso)
+    {
+        record.localThreshold = GetFiniteFloat(params.initialIsoValue);
+        record.gradientMagnitude = GetFiniteFloat(magnitude);
+        const auto sample = GetScalarAtModel(volume, current);
+        record.validSupportRatio = sample.status == SampleStatus::Valid ? 1.0F : 0.0F;
+        if (sample.status != SampleStatus::Valid)
+            record.flags |= SurfacePointFlags::InvalidSupport;
+        if (diagnostic)
+        {
+            diagnostic->isAvailable = true;
+            diagnostic->point = record;
+            diagnostic->message = "Global material threshold has no local refinement profile.";
+        }
+        return true;
+    }
+    double supportRatio = 1;
+    SurfaceProfileFit fit;
+    for (unsigned iteration = 0; iteration < 2; ++iteration)
+    {
+        BuildProfile(volume, current, normal, params, workspace);
+        fit = SurfaceProfileSolver::BuildFit(workspace, params);
+        supportRatio = std::min(supportRatio, workspace.validRatio);
+        record.flags |= fit.flags;
+        if (diagnostic)
+        {
+            diagnostic->profileCenterModel = current;
+            diagnostic->directionModel = normal;
+            diagnostic->offsetsModel = workspace.offsets;
+            diagnostic->rawValues = workspace.raw;
+            diagnostic->filteredValues = workspace.values;
+            diagnostic->support = workspace.support;
+            diagnostic->materialLabels = workspace.labels;
+            diagnostic->candidates = workspace.candidates;
+            diagnostic->sideA = fit.sideA;
+            diagnostic->sideB = fit.sideB;
+            diagnostic->noiseSigma = fit.noise;
+            diagnostic->normalizedResidual = fit.normalizedResidual;
+            diagnostic->minimumOffsetModel = -params.maximumOffsetModel;
+            diagnostic->maximumOffsetModel = params.maximumOffsetModel;
+        }
+        if (record.flags != SurfacePointFlags::None)
+            break;
+        const auto next = Add(current, Scale(normal, fit.offset));
+        if (global.roi && !global.roi->GetContains(next))
+        {
+            record.flags |= SurfacePointFlags::RoiBoundary;
+            break;
+        }
+        if (GetLength(Subtract(next, initialPoint)) > params.maximumOffsetModel + geometryEpsilon)
+        {
+            record.flags |= SurfacePointFlags::ExcessiveOffset;
+            break;
+        }
+        current = next;
+        if (GetGradient(volume, current, gradient, magnitude) && Normalize(gradient))
+        {
+            if (Dot(gradient, normal) < 0)
+                gradient = Scale(gradient, -1);
+            if (Dot(gradient, normal) < std::cos(params.maximumNormalTurnDeg * 3.141592653589793 / 180))
+            {
+                record.flags |= SurfacePointFlags::SharpCorner;
+                break;
+            }
+            normal = gradient;
+        }
+    }
+    record.localThreshold = GetFiniteFloat(fit.threshold);
+    record.contrast = GetFiniteFloat(fit.contrast);
+    record.gradientMagnitude = GetFiniteFloat(fit.gradient);
+    record.fitResidual = GetFiniteFloat(fit.residual);
+    record.validSupportRatio = GetFiniteFloat(supportRatio);
+    record.crossingCount = fit.crossingCount;
+    record.transitionWidthModel = GetFiniteFloat(fit.width);
+    record.pairedSeparationModel = GetFiniteFloat(fit.separation);
+    record.estimatedLocalizationSigma = GetFiniteFloat(
+        std::hypot(std::hypot(fit.noise, fit.residual) / std::max(fit.gradient, geometryEpsilon),
+                   workspace.step / std::sqrt(12.0)));
+    const bool accepted = record.flags == SurfacePointFlags::None;
+    if (!accepted)
+        record.flags |= SurfacePointFlags::SeedRetained;
+    record.positionModel = accepted ? current : initialPoint;
+    record.offsetFromSeed = GetFiniteFloat(GetLength(Subtract(record.positionModel, initialPoint)));
+    record.normalModel = accepted ? std::array<float, 3>{GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]),
+                                                         GetFiniteFloat(normal[2])}
+                                  : std::array<float, 3>{GetFiniteFloat(record.seedNormalModel[0]),
+                                                         GetFiniteFloat(record.seedNormalModel[1]),
+                                                         GetFiniteFloat(record.seedNormalModel[2])};
+    if (diagnostic)
+    {
         diagnostic->isAvailable = true;
         diagnostic->point = record;
-        diagnostic->message = "Material threshold has no local refinement profile.";
     }
-    return true;
+    return accepted;
 }
 
 bool GetPointAtDataBoundary(
@@ -1514,7 +1857,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     std::uint64_t lowContrastCount = 0;
     bool isTruncated = false;
     const double boundaryTolerance = std::max(
-        params.boundaryToleranceModel, 1.0e-8);
+        params.profileSampleStepModel, 1.0e-8);
     std::array<double, 6> bounds{
         std::numeric_limits<double>::max(),
         std::numeric_limits<double>::lowest(),
@@ -1622,6 +1965,8 @@ SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
                                          const SurfaceAlgorithmInputs &inputs, VolumeView &volume,
                                          std::string &message)
 {
+    const auto *image = dynamic_cast<const ImageGrid3DPayload *>(source->data->payload.get());
+    const auto &geometry = image->GetGeometry();
     if (params.analysisRoi.has_value() != static_cast<bool>(inputs.roi)
         || (inputs.roi && (inputs.roi->GetRevision() != *params.analysisRoi
                            || inputs.roi->GetSource() != source->data->self))) {
@@ -1632,9 +1977,89 @@ SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
         message = "Surface requires a convex ROI with exact clipping planes.";
         return SurfaceFailureReason::UnsupportedRoi;
     }
+    const auto matches = [&](const DataSnapshot &snapshot, const std::optional<DataRevisionRef> &expected) {
+        return snapshot && expected && snapshot->self == *expected &&
+               std::any_of(snapshot->inputs.begin(), snapshot->inputs.end(), [&](const auto &input) {
+                   return input.role == "source-volume" && input.source == source->data->self;
+               });
+    };
+    if (bool(params.materialLabels) != bool(inputs.materialLabels) ||
+        bool(params.initialSurface) != bool(inputs.initialSurface) ||
+        bool(params.materialLabels) != !params.materialPairs.empty())
+    {
+        message = "Surface optional input snapshots do not match the request.";
+        return SurfaceFailureReason::InvalidSource;
+    }
+    if (inputs.materialLabels)
+    {
+        const auto *labels = dynamic_cast<const LabelMap3DPayload *>(inputs.materialLabels->payload.get());
+        if (!matches(inputs.materialLabels, params.materialLabels) || !labels || !labels->GetValid())
+        {
+            message = "Surface material labels require the exact source-volume revision.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        const auto &other = labels->GetGeometry();
+        if (other.extent != geometry.extent || other.dimensions != geometry.dimensions ||
+            other.spacing != geometry.spacing || other.origin != geometry.origin ||
+            other.direction != geometry.direction || other.coordinateFrame != geometry.coordinateFrame)
+        {
+            message = "Surface material labels must have the source geometry and frame.";
+            return SurfaceFailureReason::InvalidGeometry;
+        }
+        if (labels->GetScalarRange()[0] < 0 || labels->GetScalarRange()[1] > UINT32_MAX)
+        {
+            message = "Surface material identities must fit uint32.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        volume.labels = labels;
+    }
+    if (inputs.initialSurface)
+    {
+        const auto *mesh = dynamic_cast<const SurfaceMeshPayload *>(inputs.initialSurface->payload.get());
+        if (!matches(inputs.initialSurface, params.initialSurface) || !mesh || !mesh->GetValid() ||
+            mesh->GetCoordinateFrame() != geometry.coordinateFrame)
+        {
+            message = "Surface initial mesh requires the exact source-volume revision and frame.";
+            return SurfaceFailureReason::InvalidSource;
+        }
+        volume.initialMesh = mesh;
+    }
     return SurfaceFailureReason::None;
 }
 
+void SetInterfaceWinding(const VolumeView &volume, const ResolvedParams &params,
+                         const std::vector<Point3> &points, std::vector<Triangle> &triangles)
+{
+    if (!params.materials)
+    {
+        SetOutwardWinding(volume, points, triangles);
+        if (params.grayPair && params.grayPair->sideB[0] > params.grayPair->sideA[1])
+            for (auto &t : triangles)
+                std::swap(t.vertices[1], t.vertices[2]);
+        return;
+    }
+    double score = 0;
+    const double probe = *std::max_element(volume.geometry.spacing.begin(), volume.geometry.spacing.end());
+    const auto stride = std::max<std::size_t>(1, triangles.size() / 256);
+    for (std::size_t i = 0; i < triangles.size(); i += stride)
+    {
+        const auto &ids = triangles[i].vertices;
+        const auto center = Scale(Add(Add(points[ids[0]], points[ids[1]]), points[ids[2]]), 1.0 / 3);
+        auto normal =
+            Cross(Subtract(points[ids[1]], points[ids[0]]), Subtract(points[ids[2]], points[ids[0]]));
+        if (!Normalize(normal))
+            continue;
+        const auto a = GetLabelAtModel(volume, Add(center, Scale(normal, -probe)));
+        const auto b = GetLabelAtModel(volume, Add(center, Scale(normal, probe)));
+        if (a == params.materials->materialA && b == params.materials->materialB)
+            score += 1;
+        if (a == params.materials->materialB && b == params.materials->materialA)
+            score -= 1;
+    }
+    if (score < 0)
+        for (auto &t : triangles)
+            std::swap(t.vertices[1], t.vertices[2]);
+}
 
 SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                         const SurfaceDeterminationStartParams &inputParams,
@@ -1694,6 +2119,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     resolved.purpose = SurfaceContract::GetPurpose(inputParams);
     resolved.sourceVolume = result.sourceRevision;
     resolved.initialIsoValue = params.initialIsoValue;
+    resolved.profileHalfLengthModel = params.profileHalfLengthModel;
+    resolved.profileSampleStepModel = params.profileSampleStepModel;
+    resolved.maximumOffsetModel = params.maximumOffsetModel;
+    resolved.profileSmoothingSigmaModel = params.profileSmoothingSigmaModel;
+    resolved.minimumEdgeWidthModel = params.minimumEdgeWidthModel;
+    resolved.maximumEdgeWidthModel = params.maximumEdgeWidthModel;
+    resolved.minimumEdgeSeparationModel = params.minimumEdgeSeparationModel;
     result.initialIsoValue = params.initialIsoValue;
     result.isoEstimate = params.isoEstimate;
     result.parameterFingerprint = 1469598103934665603ULL;
@@ -1707,7 +2139,44 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             AddFingerprint(result.parameterFingerprint, byte);
         AddFingerprint(result.parameterFingerprint, params.roi->GetRevision().generation);
     }
-    const double halo = params.haloModel;
+    if (inputParams.method == SurfaceDeterminationMethod::AutomaticIso50)
+    {
+        if (!params.isoEstimate)
+            return fail(SurfaceFailureReason::ThresholdUnreliable,
+                        "Automatic ISO50 requires an estimated bimodal threshold.");
+        result.status = SurfaceResultStatus::Succeeded;
+        result.failureReason = SurfaceFailureReason::None;
+        result.execution.estimatedWorkingBytes = result.requiredBytes;
+        result.message = "Automatic ISO50 succeeded.";
+        SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 1);
+        return result;
+    }
+    double halo = params.profileHalfLengthModel + params.maximumOffsetModel;
+    std::size_t sampleCount = static_cast<std::size_t>(std::ceil(2 * params.profileHalfLengthModel /
+                                                                 params.profileSampleStepModel)) +
+                              2;
+    for (const auto &rule : params.regionOverrides)
+    {
+        const double half = rule.profileHalfLengthModel.value_or(params.profileHalfLengthModel);
+        halo = std::max(halo, half + rule.maximumOffsetModel.value_or(params.maximumOffsetModel));
+        sampleCount =
+            std::max(sampleCount,
+                     static_cast<std::size_t>(std::ceil(
+                         2 * half / rule.profileSampleStepModel.value_or(params.profileSampleStepModel))) +
+                         2);
+    }
+    // VTK SMP 的上界只用于 workspace 预算，不修改宿主的并发配置。
+    std::size_t profileBytes = 0;
+    if (!GetProduct(sampleCount,
+                    2 * (8 * sizeof(double) + sizeof(SurfaceSampleStatus) + sizeof(std::uint32_t) +
+                         sizeof(SurfaceEdgeCandidate)),
+                    profileBytes) ||
+        !GetProduct(profileBytes,
+                    static_cast<std::size_t>(std::max(1, vtkSMPTools::GetEstimatedNumberOfThreads())),
+                    profileBytes) ||
+        profileBytes > maxWorkingBytes - result.requiredBytes)
+        return fail(SurfaceFailureReason::BudgetExceeded,
+                    "Surface parallel profile workspace exceeds the budget.");
     SurfaceSeedGrid grid;
     grid.extent = volume.geometry.extent;
     grid.dimensions = volume.geometry.dimensions;
@@ -1719,10 +2188,23 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         return static_cast<const ScalarView *>(view)->GetValue(index);
     };
     grid.validity = volume.validity;
-    constexpr std::size_t pairIndex = 0, pairCount = 1;
+    grid.labels = volume.labels;
+    grid.initialMesh = volume.initialMesh;
+    const auto pairCount = std::max<std::size_t>(1, inputParams.materialPairs.size());
+    for (std::size_t pairIndex = 0; pairIndex < pairCount; ++pairIndex)
     {
+        params.materials = inputParams.materialPairs.empty() ? std::optional<SurfaceMaterialPair>{}
+                                                             : inputParams.materialPairs[pairIndex];
         SurfaceInterfaceRecord interfaceRecord;
-        interfaceRecord.canonicalId = "gray";
+        if (params.materials)
+        {
+            interfaceRecord.materials = *params.materials;
+            interfaceRecord.canonicalId =
+                std::to_string(std::min(params.materials->materialA, params.materials->materialB)) + ":" +
+                std::to_string(std::max(params.materials->materialA, params.materials->materialB));
+        }
+        else
+            interfaceRecord.canonicalId = "gray";
         interfaceRecord.firstPoint = result.points.size();
         interfaceRecord.firstTriangle = result.triangleIndices.size() / 3;
         std::size_t retained = 0;
@@ -1730,7 +2212,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             !AddWorkingBytes(result.triangleIndices.capacity(), sizeof(std::uint32_t), retained) ||
             !AddWorkingBytes(result.triangleValidity.capacity(), sizeof(std::uint8_t), retained) ||
             !AddWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained) ||
-            retained > maxWorkingBytes)
+            retained > maxWorkingBytes - profileBytes)
             return fail(SurfaceFailureReason::BudgetExceeded,
                         "Surface retained interfaces exceed the budget.");
         std::vector<Point3> meshPoints;
@@ -1739,11 +2221,11 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
                      0.1 + 0.8 * pairIndex / pairCount);
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
-            grid, params.initialIsoValue, params.roi, halo,
-            inputParams.seedBlockDepth, maxWorkingBytes - retained, getCancelled, meshPoints,
+            grid, params.initialIsoValue, params.materials, params.roi, halo,
+            inputParams.seedBlockDepth, maxWorkingBytes - retained - profileBytes, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
-            std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained);
+            std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained + profileBytes);
         result.execution.scannedCellCount += statistics.scannedCellCount;
         result.execution.skippedCellCount += statistics.skippedCellCount;
         result.execution.blockCount += statistics.blockCount;
@@ -1751,6 +2233,11 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         result.execution.seedMs += statistics.seedMs;
         if (seedStatus != SurfaceSeedStatus::Succeeded)
         {
+            if (seedStatus == SurfaceSeedStatus::NoSurface && params.materials)
+            {
+                result.interfaces.push_back(interfaceRecord);
+                continue;
+            }
             return fail(seedStatus == SurfaceSeedStatus::Cancelled ? SurfaceFailureReason::Cancelled
                         : seedStatus == SurfaceSeedStatus::BudgetExceeded
                             ? SurfaceFailureReason::BudgetExceeded
@@ -1774,7 +2261,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             std::vector<Point3> points;
             std::vector<Triangle> triangles;
             GetLocalMesh(components[selectedIndex], meshPoints, points, triangles, getCancelled);
-            SetOutwardWinding(volume, points, triangles);
+            SetInterfaceWinding(volume, params, points, triangles);
             const auto normals = GetVertexNormals(points, triangles, getCancelled);
             std::vector<SurfacePointRecord> records(points.size());
             const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
@@ -1789,9 +2276,12 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     if (Dot(face, normals[id]) < cornerCosine)
                         records[id].flags |= SurfacePointFlags::SharpCorner;
             }
+            vtkSMPThreadLocal<SurfaceProfileWorkspace> workspaces;
             std::atomic<bool> cancelled{false};
             vtkSMPTools::For(
                 0, static_cast<vtkIdType>(points.size()), 128, [&](vtkIdType begin, vtkIdType end) {
+                    auto &workspace = workspaces.Local();
+                    workspace.Reserve(sampleCount);
                     for (auto i = begin; i < end; ++i)
                     {
                         if (cancelled.load(std::memory_order_acquire))
@@ -1802,12 +2292,25 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             return;
                         }
                         const auto id = static_cast<std::size_t>(i);
-                        SetMaterialPoint(volume, params, points[id], normals[id], records[id]);
+                        SetRefinedPoint(volume, params, points[id], normals[id], records[id], workspace);
                         records[id].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
                     }
                 });
             if (cancelled.load())
                 return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+            for (const auto &t : triangles)
+            {
+                const auto &ids = t.vertices;
+                if (records[ids[0]].overrideIndex != records[ids[1]].overrideIndex ||
+                    records[ids[0]].overrideIndex != records[ids[2]].overrideIndex)
+                    for (auto id : ids)
+                        records[id].flags |= SurfacePointFlags::OverrideBoundary;
+            }
+            for (auto &workspace : workspaces)
+            {
+                result.execution.sampledProfileCount += workspace.sampledProfileCount;
+                result.execution.sampledValueCount += workspace.sampledValueCount;
+            }
             SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
                          .1 + .8 * (pairIndex + .85) / pairCount);
             AddObjectResult(volume, params, static_cast<std::uint32_t>(result.objects.size()), points,
@@ -1874,11 +2377,11 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     }
 }
 
-SurfacePointDiagnostic SurfaceDeterminationAlgorithm::GetPointDiagnostic(
+SurfaceProfileDiagnostic SurfaceDeterminationAlgorithm::GetProfileDiagnostic(
     const VtkImageGridSnapshot &source, const SurfaceDeterminationStartParams &resolved,
     const SurfacePointRecord &point, const SurfaceAlgorithmInputs &inputs)
 {
-    SurfacePointDiagnostic diagnostic;
+    SurfaceProfileDiagnostic diagnostic;
     try
     {
         VolumeView volume;
@@ -1899,12 +2402,22 @@ SurfacePointDiagnostic SurfaceDeterminationAlgorithm::GetPointDiagnostic(
         if (resolved.method == SurfaceDeterminationMethod::MaterialIso)
             volume.scalars.materialRange = std::array<double, 2>{params.isoEstimate->backgroundValue,
                                                                 params.isoEstimate->materialValue};
+        if (!resolved.materialPairs.empty())
+        {
+            if (point.interfaceIndex >= resolved.materialPairs.size())
+            {
+                diagnostic.message = "Invalid interface index.";
+                return diagnostic;
+            }
+            params.materials = resolved.materialPairs[point.interfaceIndex];
+        }
         SurfacePointRecord replay;
+        SurfaceProfileWorkspace workspace;
         const Point3 normal{point.seedNormalModel[0], point.seedNormalModel[1], point.seedNormalModel[2]};
-        SetMaterialPoint(volume, params, point.seedPositionModel, normal, replay, &diagnostic);
-        // 拓扑/覆盖区边界是网格级判定；保留发布记录，使调用方能区分节点定位与最终质量。
+        SetRefinedPoint(volume, params, point.seedPositionModel, normal, replay, workspace, &diagnostic);
+        // 拓扑/覆盖区边界是网格级判定；保留发布记录，使调用方能区分局部拟合与最终质量。
         diagnostic.point = point;
-        diagnostic.message = "Point replay uses the frozen source, resolved recipe and original seed; "
+        diagnostic.message = "Profile replay uses the frozen source, resolved recipe and original seed; "
                              "point includes final mesh quality flags.";
     }
     catch (const std::bad_alloc &)

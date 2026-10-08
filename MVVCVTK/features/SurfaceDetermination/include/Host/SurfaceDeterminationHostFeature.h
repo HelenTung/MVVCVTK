@@ -41,7 +41,7 @@ public:
         GetSurfaceSnapshot(DataRevisionRef revision) const;
     std::shared_ptr<const SurfaceGenerationSnapshot>
         GetPreviewSnapshot() const;
-    SurfacePointDiagnostic GetPointDiagnostic(DataRevisionRef generation, std::uint64_t pointIndex) const;
+    SurfaceProfileDiagnostic GetProfileDiagnostic(DataRevisionRef generation, std::uint64_t pointIndex) const;
     SurfaceRestoreState GetResultValidity(DataRevisionRef generation) const;
 
   private:

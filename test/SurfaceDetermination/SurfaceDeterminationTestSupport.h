@@ -207,15 +207,16 @@ inline VtkImageGridSnapshot BuildSphere(
 
 inline SurfaceDeterminationStartParams GetParams(
     const SurfaceDeterminationMethod method =
-        SurfaceDeterminationMethod::MaterialIso)
+        SurfaceDeterminationMethod::LocalAdaptiveIso50)
 {
     SurfaceDeterminationStartParams params;
     params.targetViews.viewRoles.push_back(HostRenderViewRole::Primary3D);
     params.method = method;
-    // 解析几何回归使用明确材料阈值。
+    // 旧定位方法的回归保持原显式配方，不依赖材料等值面的新默认值。
     params.componentSelection = SurfaceComponentSelection::Largest;
     params.minimumObjectVoxels = 1;
     params.initialIsoValue = 500.0;
+    params.minimumContrast = 50.0;
     return params;
 }
 

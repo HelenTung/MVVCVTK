@@ -20,6 +20,8 @@ inline constexpr std::uint32_t surfaceAlgorithmRevision = 7;
 
 struct SurfaceAlgorithmInputs final
 {
+    DataSnapshot materialLabels;
+    DataSnapshot initialSurface;
     RoiReadSnapshot roi;
 };
 
@@ -61,7 +63,7 @@ public:
                                              const SurfaceCancelCheck &getCancelled,
                                              const SurfaceProgressCallback &onProgress,
                                              const SurfaceAlgorithmInputs &inputs = {});
-  static SurfacePointDiagnostic GetPointDiagnostic(const VtkImageGridSnapshot &source,
+  static SurfaceProfileDiagnostic GetProfileDiagnostic(const VtkImageGridSnapshot &source,
                                                        const SurfaceDeterminationStartParams &resolved,
                                                        const SurfacePointRecord &point,
                                                        const SurfaceAlgorithmInputs &inputs = {});

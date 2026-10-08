@@ -242,7 +242,7 @@ void CheckUiAndRecords(TestWindow& window)
     }
     for (const auto* name : {"Part", "Artifact", "Surface", "Wall"}) {
         auto* page = window.GetModule(name); if (page->GetActions().isEmpty()) continue;
-        const QString initial = QString(name) == "Artifact" ? "Ring" : QString(name) == "Surface" ? "MaterialIso" : "Start";
+        const QString initial = QString(name) == "Artifact" ? "Ring" : QString(name) == "Surface" ? "AutomaticIso50" : "Start";
         window.GetWorkflow().onNavigate(name, initial, {});
         auto* groups = page->findChild<QTabBar*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
         for (int i=0; i<groups->count(); ++i) if (groups->isTabEnabled(i)) {
@@ -602,13 +602,14 @@ void CheckBusinessParameters(TestWindow& window)
         auto* diffusion = window.GetModule("Artifact")->GetParameterEditor("Diffusion");
         Check(diffusion->GetField("diffusion") && !diffusion->GetField("ring"), "diffusion card has no ring parameters");
     }
-    if (auto* material = window.GetModule("Surface")->GetParameterEditor("MaterialIso")) {
-        Check(material->GetField("materialRange") && material->GetField("initialIsoValue") &&
-              !material->GetField("profileHalfLengthModel"), "material form has calibration and no retired fitting controls");
-        bool rejected=false;
-        try {window.GetModule("Surface")->SetParameters("MaterialIso", {{"localFraction", 0.5}});}
-        catch(const std::invalid_argument&) {rejected=true;}
-        Check(rejected, "retired fitting parameters are rejected without changing the material form");
+    if (auto* automatic = window.GetModule("Surface")->GetParameterEditor("AutomaticIso50")) {
+        Check(automatic->GetValue().toObject().size() == 1 && automatic->GetField("roiModelBounds") && !automatic->GetField("initialIsoValue"), "automatic ISO only presents its real ROI parameter and never sends forbidden explicit ISO");
+        bool rejected = false;
+        try { window.GetModule("Surface")->SetParameters("AutomaticIso50", {{"initialIsoValue", 0.5}}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        Check(rejected && !automatic->GetField("initialIsoValue"), "parameter import rejects unsupported algorithm fields without changing the form");
+        auto* preview = window.GetModule("Surface")->GetParameterEditor("GlobalIsoPreview");
+        Check(preview->GetField("componentSelection") && preview->GetField("minimumObjectVoxels") && !preview->GetField("profileHalfLengthModel") && !preview->GetField("minimumContrast"), "global preview retains selection and object filtering but no unused refinement controls");
     }
     if (auto* node = window.GetModule("Crop")->GetParameterEditor("Node")) Check(!node->GetHasInputs(), "crop history position is supplied by selected node without a numeric form");
 }
@@ -1144,12 +1145,14 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     GetComplete(window, Click(window, "Wall", "Start"), "InvalidInput");
     GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
     GetComplete(window, Click(window, "Surface", "MaterialIso", {{"componentSelection", "Largest"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
-        {"roiModelBounds", QJsonValue()}}), "Succeeded");
+        {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
+        {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");
     const auto incomplete = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5}}), "Failed");
     Check(incomplete["result"].toObject()["message"] == "Mesh lacks complete-boundary provenance.",
         "wall rejects a component-filtered surface for the complete-boundary reason");
     GetComplete(window, Click(window, "Surface", "MaterialIso", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
-        {"roiModelBounds", QJsonValue()}}), "Succeeded");
+        {"profileHalfLengthModel", QJsonValue()}, {"profileSampleStepModel", QJsonValue()}, {"maximumOffsetModel", QJsonValue()},
+        {"profileSmoothingSigmaModel", QJsonValue()}, {"roiModelBounds", QJsonValue()}}), "Succeeded");
     const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
         {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
     const auto result = record["result"].toObject();
@@ -1397,19 +1400,21 @@ void StartSelfTest(TestWindow& window)
         SaveScene(window, dataTree, "scene-ui-published-branches.png");
     }
     if (GetEnabled(window, "Surface")) {
-        GetComplete(window, Send(window, "Surface", "MaterialIso"), "Succeeded");
+        GetComplete(window, Send(window, "Surface", "AutomaticIso50"), "Succeeded");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeVolume"}}), "Succeeded");
         GetComplete(window, SendUnavailable(window, "Surface", "CopyIsoToDisplay"), "Rejected");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
         window.GetModule("Surface")->Observe();
         Check(window.GetModule("Surface")->findChild<QPushButton*>("action_CopyIsoToDisplay")->isEnabled(),
             "estimated ISO can be applied again after returning to isosurface mode");
-        GetComplete(window, Send(window, "Surface", "MaterialIso", {{"initialIsoValue", 50.0}}), "Succeeded");
+        GetComplete(window, Send(window, "Surface", "GlobalIsoPreview", {{"initialIsoValue", 50.0}}), "Succeeded");
         CheckOverlaySwitch(window, "Surface");
-        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()), "material surface is a formal metrology input");
+        Check(!GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()), "preview mesh is not promoted to metrology input");
 #if defined(MANUAL_ALIGNMENT)
         if (GetEnabled(window, "Alignment")) {
-            GetComplete(window, Send(window, "Surface", "MaterialIso", {{"initialIsoValue", 50.0}}), "Succeeded");
+            GetComplete(window, Send(window, "Alignment", "SaveRecipe"), "Rejected");
+            GetComplete(window, SendUnavailable(window, "Surface", "OpenAlignment"), "Rejected");
+            GetComplete(window, Send(window, "Surface", "LocalAdaptiveIso50", {{"initialIsoValue", 50.0}}), "Succeeded");
             const auto samples = GetComplete(window, Send(window, "Surface", "SamplePoints"), "Observed")["result"].toObject()["samples"].toArray();
             GetComplete(window, Click(window, "Surface", "OpenAlignment"), "ParametersCopied");
             QJsonArray points;

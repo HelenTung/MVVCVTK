@@ -119,7 +119,9 @@ Manifest ReadManifest(const std::filesystem::path &path)
     const auto recipe = SurfaceRecipeCodec::GetRecipe(text);
     Require(bool(recipe.recipe), "Invalid business recipe.");
     m.recipe = *recipe.recipe;
-    Require(m.recipe.method == SurfaceDeterminationMethod::MaterialIso, "Material surface recipe required.");
+    Require(m.recipe.materialPairs.empty() && m.recipe.method != SurfaceDeterminationMethod::AutomaticIso50 &&
+                m.recipe.method != SurfaceDeterminationMethod::GlobalIsoPreview,
+            "This RAW acceptance entry requires a gray-volume localization recipe.");
     in >> std::ws;
     Require(in.eof(), "Trailing manifest fields.");
     return m;

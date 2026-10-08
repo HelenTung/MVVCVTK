@@ -413,7 +413,7 @@ void ModulePanel::RefreshWorkflow()
     QStringList allowed; for (const auto value : m_node["actions"].toArray()) allowed.append(value.toString());
     static const QHash<QString, QStringList> globalActions{{"Data", {"Load"}}, {"View", {"Set", "Reset", "Visibility"}},
         {"Crop", {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly"}}, {"Part", {"Start"}}, {"Gap", {"Start"}},
-        {"Artifact", {"Ring", "Diffusion", "Combined"}}, {"Surface", {"MaterialIso"}},
+        {"Artifact", {"Ring", "Diffusion", "Combined"}}, {"Surface", {"MaterialIso", "AutomaticIso50", "GlobalIsoPreview", "LocalAdaptiveIso50", "GradientPeak", "LocalRelativeIso", "EdgeModelFit", "PairedEdgeModelFit"}},
         {"Wall", {"Start", "Cancel", "Result", "Clear"}}, {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
     allowed.append(globalActions.value(m_name));
     for (const auto& entry : m_entries) if (entry.second.policy == TestPolicy::Stop) allowed.append(entry.first);
