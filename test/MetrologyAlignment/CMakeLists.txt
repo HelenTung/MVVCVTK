@@ -94,3 +94,13 @@ SetTargetDefaults(mvvcvtk_alignment_display_audit)
 set_target_properties(mvvcvtk_alignment_display_audit PROPERTIES
     PROJECT_LABEL AlignmentDisplayAudit FOLDER "MVVCVTK/test/Automation/Reference")
 vtk_module_autoinit(TARGETS mvvcvtk_alignment_display_audit MODULES ${MVVCVTK_VTK_TARGETS})
+
+add_executable(mvvcvtk_alignment_inspection_tests AlignmentInspectionTests.cpp)
+target_include_directories(mvvcvtk_alignment_inspection_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_inspection_tests PRIVATE MVVCVTK::MetrologyAlignment opencv_world)
+SetTargetDefaults(mvvcvtk_alignment_inspection_tests)
+set_target_properties(mvvcvtk_alignment_inspection_tests PROPERTIES
+    PROJECT_LABEL AlignmentInspectionTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.Inspection COMMAND mvvcvtk_alignment_inspection_tests)
+SetTestRuntime(MetrologyAlignment.Inspection mvvcvtk_alignment_inspection_tests)

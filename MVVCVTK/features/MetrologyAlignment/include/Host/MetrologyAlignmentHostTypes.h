@@ -337,6 +337,83 @@ struct AlignmentDeviationSelection final {
     bool isCurrent = false;
 };
 
+enum class InspectionGeometrySource : std::uint8_t { MeasuredSurface, ReferenceSurface, NominalDefinition };
+struct InspectionIdealGeometry final {
+    AlignmentPoint center{}, direction{0,0,1};
+    double radius = 0;
+};
+struct InspectionGeometrySpec final {
+    // NominalDefinition 仅使用 fit.id/kind 与 ideal；其他来源从独立 ROI 按最小二乘拟合。
+    AlignmentGeometrySpec fit;
+    InspectionGeometrySource source = InspectionGeometrySource::MeasuredSurface;
+    std::optional<InspectionIdealGeometry> ideal;
+    std::string definitionSource;
+};
+enum class InspectionMetric : std::uint8_t {
+    Radius, Diameter, CenterX, CenterY, CenterZ, CenterDistance,
+    OrientedDirectionAngleDegrees, SignedParallelPlaneDistance, FitRms, FitMaximum
+};
+struct InspectionOperand final {
+    std::size_t geometry = 0;
+    // Line/Cylinder 的位置必须以轴线与这个 Plane 的交点构造，不能采用任意轴心。
+    std::optional<std::size_t> sectionPlane;
+};
+struct InspectionMeasure final {
+    InspectionMetric metric = InspectionMetric::Diameter;
+    InspectionOperand first;
+    std::optional<InspectionOperand> second;
+    double maxParallelAngleDegrees = .001;
+};
+struct InspectionItem final {
+    std::string id, name;
+    InspectionMeasure measured;
+    // 二选一：明确名义标量，或在同一对齐坐标系中从名义几何计算相同量。
+    std::optional<double> nominal;
+    std::optional<InspectionMeasure> nominalMeasure;
+    std::string nominalSource;
+    // 实测值减名义值的允许区间；角度为度，其余量使用对齐长度单位。
+    std::optional<std::array<double,2>> deviationLimits;
+};
+struct InspectionPlan final {
+    std::string id;
+    DataRevisionRef alignmentResult;
+    std::vector<InspectionGeometrySpec> geometries;
+    std::vector<InspectionItem> items;
+    double lengthScale=1, rankTolerance=1e-10, conditionLimit=1e8, solveTolerance=1e-8;
+    std::size_t iterationLimit=100;
+    bool requiresMeasurementQuality=false;
+    double minSupportRatio=0, maxLocalizationSigma=1, maxSurfaceFitResidual=1;
+};
+struct InspectionGeometry final {
+    InspectionGeometrySource source=InspectionGeometrySource::MeasuredSurface;
+    AlignmentStatus status=AlignmentStatus::InvalidInput;
+    AlignmentGeometry fitted;
+    AlignmentPoint alignedCenter{}, alignedDirection{};
+    std::string message;
+};
+struct InspectionItemResult final {
+    std::string id;
+    std::optional<double> measured, nominal, deviation;
+    AlignmentInspectionVerdict verdict=AlignmentInspectionVerdict::Indeterminate;
+    std::string message;
+};
+struct InspectionReport final {
+    std::vector<InspectionGeometry> geometries;
+    std::vector<InspectionItemResult> items;
+    AlignmentInspectionVerdict verdict=AlignmentInspectionVerdict::NotEvaluated;
+    std::string algorithmVersion="metrology-inspection-1";
+    std::int64_t evaluatedUnixMilliseconds=0;
+    // FitRms/FitMaximum 是拟合残差，不是平面度、圆度、圆柱度或测量不确定度。
+};
+struct InspectionSnapshot final {
+    DataRevisionRef result, alignmentResult, sourceMesh, referenceData, transform;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    AlignmentMatrix sourceToTarget=alignmentIdentity;
+    std::shared_ptr<const InspectionPlan> plan;
+    std::shared_ptr<const InspectionReport> report;
+    bool isCurrent=false;
+};
+
 struct AlignmentResult final {
     std::uint64_t requestId = 0;
     AlignmentStatus status = AlignmentStatus::Unavailable;
@@ -349,6 +426,7 @@ struct AlignmentResult final {
     std::string message;
     DataRevisionRef referenceMesh;
     DataRevisionRef deviationResult;
+    DataRevisionRef inspectionResult;
 };
 
 struct AlignmentArchive final {
@@ -382,7 +460,8 @@ enum class AlignmentAction : std::uint8_t {
     ImportReference,
     // FullyDetermined 表示计算/发布成功；合格判定读取 DeviationSnapshot.verdict。
     EvaluateSurface,
-    SetDeviationDisplay
+    SetDeviationDisplay,
+    Inspect
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -402,6 +481,7 @@ struct AlignmentRequest final {
     std::optional<AlignmentReferenceRequest> reference;
     std::optional<AlignmentDeviationRequest> deviation;
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
+    std::optional<InspectionPlan> inspection;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,

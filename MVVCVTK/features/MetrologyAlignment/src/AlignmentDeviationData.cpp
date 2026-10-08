@@ -1,5 +1,6 @@
 #include "AlignmentDeviationData.h"
 #include "AlignmentData.h"
+#include "AlignmentResultSource.h"
 #include "AlignmentMath.h"
 #include <algorithm>
 
@@ -50,39 +51,16 @@ bool SetType(TrustedDataPort &data) {
 std::optional<Context> Prepare(const DataGraphSnapshot &graph, const AlignmentDeviationRequest &request,
                               const AlignmentConfig &config) {
     if (!AlignmentDeviation::GetRequestValid(request)) return {};
-    const auto alignment = AlignmentData::GetResult(graph, request.alignmentResult);
-    if (!alignment || alignment->record.diagnostics.status != AlignmentStatus::FullyDetermined ||
-        !alignment->record.diagnostics.isQualityPassed ||
-        !AlignmentData::GetExpectationsCurrent(graph, alignment->record.expectations)) return {};
-    const auto recipe = std::dynamic_pointer_cast<const AlignmentData::RecipePayload>(
-        graph.view->GetData(alignment->record.recipe)->payload);
-    const auto matrix = std::dynamic_pointer_cast<const Transform3DPayload>(
-        graph.view->GetData(alignment->record.transform)->payload);
-    const auto measured = graph.view->GetData(alignment->record.input.mesh);
-    const auto nominal = recipe ? graph.view->GetData(recipe->recipe.nominalData) : nullptr;
-    if (!measured || !nominal || !matrix) return {};
-    Context context;
-    context.work.config = config;
-    context.work.mesh = std::dynamic_pointer_cast<const SurfaceMeshPayload>(measured->payload);
-    context.work.referenceMesh = std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload);
-    if (!context.work.mesh || !context.work.referenceMesh ||
-        context.work.mesh->GetCoordinateFrame() != context.work.referenceMesh->GetCoordinateFrame()) return {};
-    const auto imported = AlignmentData::GetReference(graph, recipe->recipe.nominalData);
-    const bool hasSource = std::any_of(nominal->inputs.begin(), nominal->inputs.end(),
-        [](const auto &input) { return input.role == "reference-source"; });
-    if ((hasSource && !imported) || (imported && (imported->unit != recipe->recipe.unit ||
-        imported->frameId != recipe->recipe.targetFrameId))) return {};
-    auto &s = context.snapshot;
-    s.alignmentResult = request.alignmentResult; s.sourceMesh = alignment->record.input.mesh;
-    s.referenceMesh = recipe->recipe.nominalData; s.transform = alignment->record.transform;
-    s.parameters = std::make_shared<const AlignmentDeviationRequest>(request); s.unit = alignment->record.input.unit; s.sourceToTarget = matrix->GetSourceToTarget();
-    context.expectations = alignment->record.expectations;
-    for (const auto &input : Inputs(s)) {
-        DataExpectation expectation;
-        expectation.entityId = input.source.entityId; expectation.expectedGeneration = input.source.generation;
-        context.expectations.push_back(expectation);
-    }
-    if (!AlignmentData::GetExpectationsCurrent(graph, context.expectations)) return {};
+    const auto source=AlignmentResultSource::Read(graph,request.alignmentResult,true);
+    if (!source) return {};
+    Context context; context.work.config=config;
+    context.work.mesh=source->measuredMesh; context.work.referenceMesh=source->referenceMesh;
+    auto &s=context.snapshot;
+    s.alignmentResult=source->alignment; s.sourceMesh=source->input.mesh;
+    s.referenceMesh=source->nominal; s.transform=source->transform;
+    s.parameters=std::make_shared<const AlignmentDeviationRequest>(request);
+    s.unit=source->input.unit; s.sourceToTarget=source->sourceToTarget;
+    context.expectations=source->expectations;
     return context;
 }
 DataTransaction BuildTransaction(TrustedDataPort &data, Context &context, const AlignmentDeviationData &result,

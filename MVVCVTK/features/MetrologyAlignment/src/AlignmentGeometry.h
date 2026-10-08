@@ -32,6 +32,7 @@ struct AlignmentCandidate final {
 
 class AlignmentGeometryFit final {
   public:
+    static bool GetSpecValid(const AlignmentGeometrySpec &spec);
     static bool GetRecipeValid(const AlignmentRecipe &recipe, const AlignmentConfig &config);
     static AlignmentStatus GetWorkStatus(const AlignmentWork &work);
     static bool GetPointUsable(const AlignmentWork &work, std::size_t index);

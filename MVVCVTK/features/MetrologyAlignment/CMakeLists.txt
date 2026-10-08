@@ -11,6 +11,9 @@ target_sources(metrology_alignment
         src/AlignmentDeviationData.h src/AlignmentDeviationData.cpp
         src/AlignmentDeviationOverlay.h src/AlignmentDeviationOverlay.cpp
         src/AlignmentDeviationDisplay.h src/AlignmentDeviationDisplay.cpp
+        src/AlignmentResultSource.h src/AlignmentResultSource.cpp
+        src/AlignmentInspection.h src/AlignmentInspection.cpp
+        src/AlignmentInspectionData.h src/AlignmentInspectionData.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp

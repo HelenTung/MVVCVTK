@@ -27,6 +27,7 @@ class MetrologyAlignmentHostFeature final
     AlignmentAdmission SendRequest(AlignmentRequest request, AlignmentCallback onComplete = {});
     std::optional<AlignmentDeviationSnapshot> GetDeviation(const DataRevisionRef &result) const;
     std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &result, std::uint64_t vertex) const;
+    std::optional<InspectionSnapshot> GetInspection(const DataRevisionRef &result) const;
     AlignmentState GetState() const;
     AlignmentState GetScopeState(const std::string &scope) const;
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &result) const;

@@ -2,6 +2,7 @@
 #include "../TestDataPort.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "AlignmentData.h"
+#include "AlignmentInspectionData.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentPrealignTestSupport.h"
@@ -194,7 +195,7 @@ struct Fixture final {
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
-    Check(contract.inputs.size() == 2 && contract.outputs.size() == 8,
+    Check(contract.inputs.size() == 2 && contract.outputs.size() == 9,
         "feature declares recipe/mesh inputs and all formal output roles");
     const auto result = f.Solve();
     Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated,
@@ -515,6 +516,55 @@ void SurfaceReferenceLifecycle() {
     Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
           "restore cannot reuse reference triangle IDs on another revision");
 }
+void InspectionLifecycle() {
+    Fixture f;
+    const auto alignment=f.Solve();
+    AlignmentRequest request; request.action=AlignmentAction::Inspect; request.inspection=InspectionPlan{};
+    auto &plan=*request.inspection; plan.id="drawing-inspection"; plan.alignmentResult=alignment.result;
+    InspectionGeometrySpec point; point.fit=f.recipe.geometries[0]; plan.geometries.push_back(point);
+    InspectionItem item; item.id="center-x"; item.measured.metric=InspectionMetric::CenterX;
+    item.nominal=.1; item.nominalSource="drawing"; item.deviationLimits=std::array<double,2>{-1e-7,1e-7}; plan.items.push_back(item);
+    AlignmentResult evaluated; int completed=0;
+    const auto run=[&] {
+        Check(f.feature->SendRequest(request,[&](AlignmentResult r) { evaluated=std::move(r); ++completed; }).status==
+              AlignmentAdmissionStatus::Accepted,"independent inspection accepted");
+    };
+    run(); request.inspection->items[0].nominal=99; f.Drain(); request.inspection->items[0].nominal=.1;
+    Check(completed==1 && evaluated.status==AlignmentStatus::FullyDetermined && GetDataRevisionRefValid(evaluated.inspectionResult),
+          "inspection publishes one immutable report");
+    const auto reportRef=evaluated.inspectionResult;
+    const auto report=f.feature->GetInspection(reportRef);
+    Check(report && report->isCurrent && report->report->verdict==AlignmentInspectionVerdict::Pass &&
+          report->plan->items[0].nominal==.1 && report->sourceMesh==f.input.mesh && report->alignmentResult==alignment.result,
+          "inspection freezes plan and reports explicit alignment/mesh identity");
+    const auto again=f.feature->GetInspection(reportRef);
+    Check(report && again && report->report==again->report && report->plan==again->plan,"report polling shares immutable data and ROI plan");
+    Check(f.feature->GetState().activeResult==alignment.result,"inspection does not realign or reactivate measurement");
+    if (report) {
+        auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+        auto body=std::make_shared<InspectionReport>(*report->report); body->verdict=AlignmentInspectionVerdict::Fail; forged.report=body;
+        DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+            std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,
+              "report validator rejects aggregate verdict contradicting item requirements");
+    }
+
+    run(); AlignmentRequest cancel; cancel.action=AlignmentAction::Cancel; f.feature->SendRequest(cancel); f.Drain();
+    Check(evaluated.status==AlignmentStatus::Cancelled && !GetDataRevisionRefValid(evaluated.inspectionResult),"cancelled inspection publishes nothing");
+    f.data->rejectsCommit=true; run(); f.Drain(); f.data->rejectsCommit=false;
+    Check(evaluated.status==AlignmentStatus::InternalError && !GetDataRevisionRefValid(evaluated.inspectionResult),"inspection commit failure clears result ref");
+    f.data->throwsAfterCommit=true; run(); f.Drain(); f.data->throwsAfterCommit=false;
+    Check(evaluated.status==AlignmentStatus::FullyDetermined && f.feature->GetInspection(evaluated.inspectionResult),
+          "inspection preserves committed result after observer exception");
+    run();
+    DataTransaction changed; changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"inspection source changes while worker is pending");
+    f.Drain();
+    Check(evaluated.status==AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.inspectionResult),"stale inspection is not published");
+    const auto historical=f.feature->GetInspection(reportRef);
+    Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
+    Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
+}
 void AutomaticReferenceLifecycle() {
     auto views = std::make_shared<Views>();
     Fixture f(views);
@@ -704,6 +754,7 @@ void AutomaticReferenceLifecycle() {
 } // namespace
 int main() {
     const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
+    run("InspectionLifecycle", InspectionLifecycle);
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
     run("WorkNotifications", WorkNotifications);

@@ -13,13 +13,6 @@ void Require(bool condition, const char *message) {
     if (!condition)
         throw std::invalid_argument(message);
 }
-bool Positive(double x) {
-    return std::isfinite(x) && x > 0;
-}
-bool Direction(const AlignmentPoint &p) {
-    const auto v = Vector(p);
-    return Finite(v) && std::abs(cv::norm(v) - 1) < 1e-8;
-}
 const MeshAttribute *Attribute(const SurfaceMeshPayload &mesh, const char *name,
                                std::size_t components) {
     const MeshAttribute *found = nullptr;
@@ -181,6 +174,21 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
 }
 } // namespace
 
+bool AlignmentGeometryFit::GetSpecValid(const AlignmentGeometrySpec &g) {
+    if (g.id.empty() || static_cast<unsigned>(g.kind)>5 ||
+        static_cast<unsigned>(g.association)>2 || !GetUnitDirectionValid(g.targetDirection) ||
+        !Positive(g.maxFitRms) || !Positive(g.minCoverage) || g.minCoverage>1 ||
+        !Positive(g.minDirectionCosine) || g.minDirectionCosine>1) return false;
+    const auto &region=g.region;
+    if (region.vertexIds.empty()==!region.targetBounds.has_value() ||
+        (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh))) return false;
+    if (region.targetBounds) for (std::size_t axis=0;axis<3;++axis)
+        if (!std::isfinite((*region.targetBounds)[2*axis]) || !std::isfinite((*region.targetBounds)[2*axis+1]) ||
+            (*region.targetBounds)[2*axis]>(*region.targetBounds)[2*axis+1]) return false;
+    return !g.radiusRange || (Positive((*g.radiusRange)[0]) && Positive((*g.radiusRange)[1]) &&
+                              (*g.radiusRange)[0]<=(*g.radiusRange)[1]);
+}
+
 bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const AlignmentConfig &config) {
     if (r.minPairNormalCosine && (!std::isfinite(*r.minPairNormalCosine) ||
                                   *r.minPairNormalCosine < 0 || *r.minPairNormalCosine > 1))
@@ -247,38 +255,21 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
     std::size_t selected = 0;
     for (std::size_t geometryIndex = 0; geometryIndex < r.geometries.size(); ++geometryIndex) {
         const auto &g = r.geometries[geometryIndex];
-        if (g.id.empty() || !names.insert(g.id).second || static_cast<unsigned>(g.kind) > 5 ||
-            static_cast<unsigned>(g.association) > 2 || !Direction(g.targetDirection) ||
-            !Positive(g.maxFitRms) || !Positive(g.minCoverage) || g.minCoverage > 1 ||
-            !Positive(g.minDirectionCosine) || g.minDirectionCosine > 1)
-            return false;
+        if (!GetSpecValid(g) || !names.insert(g.id).second) return false;
         if (g.association == AlignmentAssociation::SequentialLeastSquares &&
             (g.kind != AlignmentGeometryKind::Plane || geometryIndex >= r.datumCount ||
              (r.method != AlignmentMethod::SequentialPlanes &&
               r.method != AlignmentMethod::ConstrainedBestFit)))
             return false;
         const auto &region = g.region;
-        if (region.vertexIds.empty() == !region.targetBounds.has_value())
-            return false;
-        if (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh))
-            return false;
         const auto pointBound = config.pointLimit ? config.pointLimit : std::numeric_limits<std::size_t>::max();
         if (region.vertexIds.size() > pointBound - selected)
             return false;
         selected += region.vertexIds.size();
-        if (region.targetBounds)
-            for (int i = 0; i < 3; ++i)
-                if (!std::isfinite((*region.targetBounds)[2 * i]) ||
-                    !std::isfinite((*region.targetBounds)[2 * i + 1]) ||
-                    (*region.targetBounds)[2 * i] > (*region.targetBounds)[2 * i + 1])
-                    return false;
-        if (g.radiusRange && (!Positive((*g.radiusRange)[0]) || !Positive((*g.radiusRange)[1]) ||
-                              (*g.radiusRange)[0] > (*g.radiusRange)[1]))
-            return false;
     }
     for (const auto &c : r.constraints)
         if (c.geometryIndex >= r.geometries.size() || !Finite(Vector(c.nominalPoint)) ||
-            !Direction(c.targetDirection) || static_cast<unsigned>(c.kind) > 2 || c.priority > 63 ||
+            !GetUnitDirectionValid(c.targetDirection) || static_cast<unsigned>(c.kind) > 2 || c.priority > 63 ||
             !Positive(c.weight) || c.weight > 1e12 || !Positive(c.tolerance) ||
             (r.method == AlignmentMethod::ConstrainedBestFit &&
              c.kind == AlignmentConstraintKind::Soft && c.priority >= 63) ||
@@ -288,7 +279,7 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
             return false;
     for (const auto &p : r.fitPairs)
         if (!Finite(Vector(p.nominalPoint)) || !Positive(p.weight) || p.weight > 1e12 ||
-            (p.targetNormal && !Direction(*p.targetNormal)))
+            (p.targetNormal && !GetUnitDirectionValid(*p.targetNormal)))
             return false;
     return true;
 }

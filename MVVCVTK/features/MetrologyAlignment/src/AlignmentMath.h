@@ -16,6 +16,10 @@ inline AlignmentPoint Point(const Vec &p) {
 inline bool Finite(const Vec &p) {
     return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]);
 }
+inline bool Positive(double value) { return std::isfinite(value) && value>0; }
+inline bool GetUnitDirectionValid(const AlignmentPoint &point) {
+    const auto value=Vector(point); return Finite(value) && std::abs(cv::norm(value)-1)<1e-8;
+}
 inline Vec Unit(const Vec &p) {
     const auto n = cv::norm(p);
     return n > 1e-15 ? p / n : Vec{};
