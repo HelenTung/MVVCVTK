@@ -124,9 +124,16 @@ if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
         PROJECT_LABEL MetrologyTimepointAudit FOLDER "MVVCVTK/test/Automation/Reference")
     vtk_module_autoinit(TARGETS mvvcvtk_metrology_timepoint_audit MODULES ${MVVCVTK_VTK_TARGETS})
     set(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST "" CACHE FILEPATH "Optional frozen RAW ROI timepoint manifest for public pipeline checks")
+    set(MVVCVTK_METROLOGY_REFERENCE_PYTHON "" CACHE FILEPATH "Optional Python 3.11+ with numpy/scipy for independent real-section verification; test-only")
     if(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST)
-        add_test(NAME MetrologyAlignment.RealSurfaceControls COMMAND mvvcvtk_metrology_timepoint_audit
-            "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" "${CMAKE_CURRENT_BINARY_DIR}/timepoint-runs-$<CONFIG>" --controls-only --new-run)
+        if(MVVCVTK_METROLOGY_REFERENCE_PYTHON)
+            add_test(NAME MetrologyAlignment.RealSurfaceControls COMMAND "${MVVCVTK_METROLOGY_REFERENCE_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/VerifySectionAudit.py" --audit "$<TARGET_FILE:mvvcvtk_metrology_timepoint_audit>"
+                --manifest "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" --output "${CMAKE_CURRENT_BINARY_DIR}/timepoint-runs-$<CONFIG>")
+        else()
+            add_test(NAME MetrologyAlignment.RealSurfaceControls COMMAND mvvcvtk_metrology_timepoint_audit
+                "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" "${CMAKE_CURRENT_BINARY_DIR}/timepoint-runs-$<CONFIG>" --controls-only --new-run)
+        endif()
         SetTestRuntime(MetrologyAlignment.RealSurfaceControls mvvcvtk_metrology_timepoint_audit)
     endif()
 endif()

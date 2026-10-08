@@ -148,6 +148,7 @@ struct Surface final {
     DataRevisionRef source,mesh,generation;
     std::shared_ptr<const SurfaceMeshPayload> payload;
     std::vector<std::uint64_t> validVertices,validTriangles;
+    std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
 };
 Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,const Scan &scan,const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
     std::cout<<"SURFACE_START "<<scan.id<<'\n'<<std::flush;
@@ -171,6 +172,7 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         out<<",\"restoreStatus\":"<<unsigned(validity.status)<<",\"canMeasure\":"<<(validity.canMeasure ? "true" : "false")<<",\"validityMessage\":"<<Json(validity.message);
         Require(snapshot && snapshot->modelUnit=="mm" && validity.canMeasure,"Published surface is not measurable/current.");
         surface.mesh=result.meshRevision; surface.generation=result.dataRevision;
+        surface.objects=snapshot->objects;
         const auto node=data.GetDataGraph().view->GetData(surface.mesh);
         surface.payload=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
         Require(bool(surface.payload),"Formal surface mesh unavailable.");
@@ -204,6 +206,15 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         std::size_t closed=0,truncated=0,nonManifold=0;
         if (snapshot->objects) for (const auto &object:*snapshot->objects) { closed+=object.isClosed ? 1 : 0; truncated+=object.isTruncated ? 1 : 0; nonManifold+=object.isManifold ? 0 : 1; }
         out<<",\"closedObjects\":"<<closed<<",\"truncatedObjects\":"<<truncated<<",\"nonManifoldObjects\":"<<nonManifold;
+        out<<",\"objectGeometry\":[";
+        if (surface.objects) for (std::size_t i=0;i<surface.objects->size();++i) {
+            if (i) out<<','; const auto &object=(*surface.objects)[i];
+            out<<"{\"index\":"<<object.objectIndex<<",\"firstTriangle\":"<<object.firstTriangle<<",\"triangleCount\":"<<object.triangleCount
+               <<",\"closed\":"<<(object.isClosed ? "true" : "false")<<",\"manifold\":"<<(object.isManifold ? "true" : "false")
+               <<",\"truncated\":"<<(object.isTruncated ? "true" : "false")<<",\"validAreaRatio\":"<<object.validAreaRatio<<",\"bounds\":[";
+            for (std::size_t j=0;j<6;++j) { if (j) out<<','; out<<object.boundsModel[j]; } out<<"]}";
+        }
+        out<<']';
         if (snapshot->isoEstimate) out<<",\"background\":"<<snapshot->isoEstimate->backgroundValue<<",\"material\":"<<snapshot->isoEstimate->materialValue<<",\"iso\":"<<snapshot->isoEstimate->isoValue;
         const auto view=data.GetSurfaceMesh(data.GetDataGraph(),surface.mesh);
         Require(view && view->mesh,"Formal surface render view unavailable.");
@@ -256,10 +267,8 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     out<<",\"numericalControlPassed\":"<<(passed ? "true" : "false")<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"RIGID_CONTROL status="<<unsigned(result.status)<<" rms="<<result.diagnostics.rms<<'\n'<<std::flush; return passed;
 }
-bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
-    if (!surface.payload || surface.validVertices.size()<3) { out<<"{\"attempted\":false}"; return false; }
-    const auto started=std::chrono::steady_clock::now();
-    bool passed=false;
+AlignmentResult NativeFrame(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m) {
+    Require(surface.payload && surface.validVertices.size()>=3,"Native frame needs three valid surface points.");
     const auto &v=surface.payload->GetVertices();
     const auto point=[&](std::uint64_t id) { return AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]}; };
     const auto distance=[](const AlignmentPoint &a,const AlignmentPoint &b) { double d=0; for (int j=0;j<3;++j) d+=(a[j]-b[j])*(a[j]-b[j]); return d; };
@@ -273,7 +282,7 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
         if (d>greatest) { greatest=d; anchors[2]=i; }
     }
     Require(greatest>1e-8,"Native frame anchors are degenerate.");
-    AlignmentRecipe recipe; recipe.id="ring-native-frame"; recipe.targetFrameId="ring-native"; recipe.unit=AlignmentUnit::Millimeter;
+    AlignmentRecipe recipe; recipe.id="surface-native-frame"; recipe.targetFrameId="surface-native"; recipe.unit=AlignmentUnit::Millimeter;
     recipe.method=AlignmentMethod::Rps; recipe.datumCount=0; recipe.nominalData=surface.source; recipe.requiresMeasurementQuality=true;
     for (std::size_t i=0;i<3;++i) {
         AlignmentGeometrySpec spec; spec.id="native-anchor-"+std::to_string(i); spec.kind=AlignmentGeometryKind::Point;
@@ -283,8 +292,15 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
             recipe.constraints.push_back(c);
         }
     }
-    const auto alignment=Solve(feature,std::move(recipe),
-        AlignmentInput{surface.source,surface.mesh,surface.source,"ring-native","RAS","ring-native",AlignmentUnit::Millimeter},m);
+    return Solve(feature,std::move(recipe),
+        AlignmentInput{surface.source,surface.mesh,surface.source,"surface-native","RAS","surface-native",AlignmentUnit::Millimeter},m);
+}
+bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
+    if (!surface.payload || surface.validVertices.size()<3) { out<<"{\"attempted\":false}"; return false; }
+    const auto started=std::chrono::steady_clock::now(); bool passed=false;
+    const auto &v=surface.payload->GetVertices();
+    const auto point=[&](std::uint64_t id) { return AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]}; };
+    const auto alignment=NativeFrame(feature,surface,m);
     out<<"{\"attempted\":true,\"scope\":\"native RAW coordinate assignment, not alignment to independent nominal geometry\",\"alignmentStatus\":"<<unsigned(alignment.status);
     if (alignment.status==AlignmentStatus::FullyDetermined && alignment.diagnostics.isQualityPassed) {
         InspectionPlan plan; plan.id="ring-local-wall"; plan.alignmentResult=alignment.result; plan.requiresMeasurementQuality=true;
@@ -334,6 +350,80 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
     }
     out<<",\"normalSelectionAbsXMaximum\":0.3,\"maxFitRmsMm\":0.0778,\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"RING_NATIVE alignment="<<unsigned(alignment.status)<<'\n'<<std::flush; return passed;
+}
+bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Scan &scan,
+                const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
+    const SurfaceObjectRecord *object=nullptr;
+    if (surface.objects) for (const auto &candidate:*surface.objects)
+        if (candidate.isClosed && candidate.isManifold && !candidate.isTruncated &&
+            (!object || candidate.triangleCount>object->triangleCount)) object=&candidate;
+    if (!object) { out<<"{\"scanId\":"<<Json(scan.id)<<",\"attempted\":false,\"reason\":\"No closed manifold untruncated object; this input has no positive section acceptance\"}"; return true; }
+    const auto started=std::chrono::steady_clock::now();
+    const auto alignment=NativeFrame(feature,surface,m);
+    Require(alignment.status==AlignmentStatus::FullyDetermined && alignment.diagnostics.isQualityPassed,"Section native frame assignment failed.");
+    const auto archive=feature.GetArchive(alignment.result); Require(bool(archive),"Section frame unavailable.");
+    const auto &vertices=surface.payload->GetVertices(); const auto &triangles=surface.payload->GetTriangles();
+    const auto prefix=scan.id+"-section";
+    std::ofstream points(folder/(prefix+"-points.csv")),faces(folder/(prefix+"-triangles.csv"));
+    points.imbue(std::locale::classic()); faces.imbue(std::locale::classic()); points<<std::setprecision(17);
+    points<<"id,x,y,z\n"; faces<<"id,a,b,c,valid\n";
+    for (auto i=object->firstPoint;i<object->firstPoint+object->pointCount;++i)
+        points<<i<<','<<vertices[3*i]<<','<<vertices[3*i+1]<<','<<vertices[3*i+2]<<'\n';
+    for (auto i=object->firstTriangle;i<object->firstTriangle+object->triangleCount;++i)
+        faces<<i<<','<<triangles[3*i]<<','<<triangles[3*i+1]<<','<<triangles[3*i+2]<<','
+             <<(std::binary_search(surface.validTriangles.begin(),surface.validTriangles.end(),i) ? 1 : 0)<<'\n';
+    points.close(); faces.close();
+    Require(bool(points) && bool(faces),"Section source export failed.");
+    InspectionPlan plan; plan.id=prefix; plan.alignmentResult=alignment.result; plan.requiresMeasurementQuality=true;
+    AlignmentPoint midpoint{}; double diagonalSquared=0;
+    for (std::size_t a=0;a<3;++a) { midpoint[a]=(object->boundsModel[2*a]+object->boundsModel[2*a+1])/2;
+        const double width=object->boundsModel[2*a+1]-object->boundsModel[2*a]; diagonalSquared+=width*width; }
+    for (std::size_t axis=0;axis<3;++axis) {
+        InspectionGeometrySpec g; g.fit.id=prefix+"-axis-"+std::to_string(axis); g.fit.kind=AlignmentGeometryKind::Circle;
+        // 审计记录任何可求解截线的拟合残差；此宽门限不是形状精度/合格判据。
+        g.fit.maxFitRms=std::sqrt(diagonalSquared); g.section=InspectionSection{};
+        auto &s=*g.section; s.pinnedMesh=surface.mesh; s.planePoint=midpoint; s.planeNormal={0,0,0}; s.planeNormal[axis]=1;
+        s.sampleSpacing=scan.spacing/4; s.planeTolerance=scan.spacing*1e-6;
+        s.triangles.reserve(static_cast<std::size_t>(object->triangleCount));
+        for (auto i=object->firstTriangle;i<object->firstTriangle+object->triangleCount;++i) s.triangles.push_back(i);
+        plan.geometries.push_back(std::move(g));
+        InspectionItem item; item.id="diameter-"+std::to_string(axis); item.measured.first.geometry=axis; plan.items.push_back(item);
+    }
+    AlignmentRequest request; request.action=AlignmentAction::Inspect; request.inspection=std::move(plan);
+    auto completion=std::make_shared<AlignmentCompletion>();
+    Require(feature.SendRequest(std::move(request),[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Section inspection rejected.");
+    Wait(feature,completion,m.deadlineMs+1000);
+    const auto report=feature.GetInspection(completion->value.inspectionResult);
+    out<<"{\"scanId\":"<<Json(scan.id)<<",\"attempted\":true,\"selection\":\"largest closed manifold untruncated object by triangle count; all three midpoint planes retained\",\"objectIndex\":"<<object->objectIndex
+       <<",\"status\":"<<unsigned(completion->value.status)<<",\"sourcePoints\":"<<Json(prefix+"-points.csv")<<",\"sourceTriangles\":"<<Json(prefix+"-triangles.csv")
+       <<",\"scope\":\"numerical geometry comparison on real measured surface; no independent physical nominal or tolerance\",\"sourceToTarget\":[";
+    for (std::size_t i=0;i<16;++i) { if (i) out<<','; out<<archive->sourceToTarget[i]; } out<<"],\"sections\":[";
+    std::size_t succeeded=0;
+    if (report) for (std::size_t axis=0;axis<report->report->geometries.size();++axis) {
+        if (axis) out<<','; const auto &g=report->report->geometries[axis]; const auto &s=*report->plan->geometries[axis].section;
+        out<<"{\"axis\":"<<axis<<",\"status\":"<<unsigned(g.status)<<",\"message\":"<<Json(g.message)<<",\"planePoint\":[";
+        for (std::size_t a=0;a<3;++a) { if (a) out<<','; out<<s.planePoint[a]; }
+        out<<"],\"sampleSpacing\":"<<s.sampleSpacing<<",\"planeTolerance\":"<<s.planeTolerance;
+        if (g.status==AlignmentStatus::FullyDetermined && g.section) {
+            ++succeeded; const auto file=prefix+"-"+std::to_string(axis)+"-samples.csv";
+            std::ofstream samples(folder/file); samples.imbue(std::locale::classic()); samples<<std::setprecision(17)<<"triangle,w0,w1,w2,planeCorrection\n";
+            for (const auto &sample:g.section->samples) samples<<sample.triangle<<','<<sample.barycentric[0]<<','<<sample.barycentric[1]<<','<<sample.barycentric[2]<<','<<sample.planeCorrection<<'\n';
+            samples.close();
+            Require(bool(samples),"Section provenance export failed.");
+            out<<",\"samples\":"<<Json(file)<<",\"sampleCount\":"<<g.fitted.sampleCount<<",\"radius\":"<<g.fitted.radius
+               <<",\"fitRms\":"<<g.fitted.fitRms<<",\"perimeter\":"<<g.section->perimeter<<",\"sourceCenter\":[";
+            for (std::size_t a=0;a<3;++a) { if (a) out<<','; out<<g.fitted.sourceCenter[a]; }
+            out<<"],\"sourcePlanePoint\":[";
+            for (std::size_t a=0;a<3;++a) { if (a) out<<','; out<<g.section->sourcePlanePoint[a]; }
+            out<<"],\"sourcePlaneNormal\":[";
+            for (std::size_t a=0;a<3;++a) { if (a) out<<','; out<<g.section->sourcePlaneNormal[a]; } out<<']';
+            Require(report->report->items[axis].verdict==AlignmentInspectionVerdict::NotEvaluated,"Unspecified section nominal must not imply pass.");
+        }
+        out<<'}';
+    }
+    out<<"],\"successfulSections\":"<<succeeded<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+    std::cout<<"SECTIONS "<<scan.id<<" success="<<succeeded<<'\n'<<std::flush;
+    return report && report->isCurrent && succeeded>0;
 }
 void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
     if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
@@ -403,8 +493,12 @@ int wmain(int argc,wchar_t **argv) {
         out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
         out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out);
         out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out); else out<<"null";
-        const bool pipelinePassed=controlPassed && ringPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
+        out<<",\"sectionInspections\":["; bool sectionsPassed=true;
+        for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder) && sectionsPassed; }
+        out<<']';
+        const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
+        out.close();
         Require(bool(out),"Observation report write failed.");
         Require(alignmentFeature.DetachHost() && surfaceFeature.DetachHost(),"Audit feature detach failed.");
         std::cout<<"OBSERVATIONS "<<(folder/"observations.json").u8string()<<'\n'; return pipelinePassed ? 0 : 2;
