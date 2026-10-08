@@ -60,6 +60,8 @@ class ResultPayload final : public IDataPayload {
     const ResultRecord record;
 };
 bool SetTypes(TrustedDataPort &data);
+std::shared_ptr<const AlignmentReferenceSnapshot> GetReferenceShared(const DataGraphSnapshot &graph,
+                                                                    const DataRevisionRef &mesh);
 std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,
                                                        const DataRevisionRef &mesh);
 bool GetInputValid(const AlignmentInput &input);

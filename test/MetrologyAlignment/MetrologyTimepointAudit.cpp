@@ -305,7 +305,8 @@ AlignmentResult NativeFrame(MetrologyAlignmentHostFeature &feature,const Surface
     return Solve(feature,std::move(recipe),
         AlignmentInput{surface.source,surface.mesh,surface.source,"surface-native","RAS","surface-native",AlignmentUnit::Millimeter},m);
 }
-bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
+bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out,
+             std::vector<DataRevisionRef> &reports) {
     if (!surface.payload || surface.validVertices.size()<3) { out<<"{\"attempted\":false}"; return false; }
     const auto started=std::chrono::steady_clock::now(); bool passed=false;
     const auto &v=surface.payload->GetVertices();
@@ -331,6 +332,7 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
         Wait(feature,completion,m.deadlineMs+1000);
         out<<",\"inspectionStatus\":"<<unsigned(completion->value.status);
         if (const auto report=feature.GetInspection(completion->value.inspectionResult)) {
+            reports.push_back(report->result);
             out<<",\"geometryStatus\":"<<unsigned(report->report->geometries[0].status)<<",\"geometryMessage\":"<<Json(report->report->geometries[0].message)
                <<",\"verdict\":"<<unsigned(report->report->verdict)<<",\"values\":[";
             for (std::size_t i=0;i<report->report->items.size();++i) { if (i) out<<','; const auto &row=report->report->items[i]; out<<"{\"id\":"<<Json(row.id)<<",\"value\":"; if (row.measured) out<<*row.measured; else out<<"null"; out<<'}'; }
@@ -366,7 +368,7 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
     std::cout<<"RING_NATIVE alignment="<<unsigned(alignment.status)<<'\n'<<std::flush; return passed;
 }
 bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Scan &scan,
-                const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
+                const Manifest &m,std::ostream &out,const std::filesystem::path &folder,std::vector<DataRevisionRef> &reports) {
     const SurfaceObjectRecord *object=nullptr;
     if (surface.objects) for (const auto &candidate:*surface.objects)
         if (candidate.isClosed && candidate.isManifold && !candidate.isTruncated &&
@@ -408,6 +410,7 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
     Require(feature.SendRequest(std::move(request),[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Section inspection rejected.");
     Wait(feature,completion,m.deadlineMs+1000);
     const auto report=feature.GetInspection(completion->value.inspectionResult);
+    if (report) reports.push_back(report->result);
     out<<"{\"scanId\":"<<Json(scan.id)<<",\"attempted\":true,\"selection\":\"largest closed manifold untruncated object by triangle count; all three midpoint planes retained\",\"objectIndex\":"<<object->objectIndex
        <<",\"status\":"<<unsigned(completion->value.status)<<",\"sourcePoints\":"<<Json(prefix+"-points.csv")<<",\"sourceTriangles\":"<<Json(prefix+"-triangles.csv")
        <<",\"scope\":\"numerical geometry comparison on real measured surface; no independent physical nominal or tolerance\",\"sourceToTarget\":[";
@@ -439,6 +442,42 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
     out<<"],\"successfulSections\":"<<succeeded<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"SECTIONS "<<scan.id<<" success="<<succeeded<<'\n'<<std::flush;
     return report && report->isCurrent && succeeded>0;
+}
+void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,
+                   const Manifest &manifest,const std::vector<DataRevisionRef> &inspections,std::ostream &out) {
+    const auto started=std::chrono::steady_clock::now();
+    const auto scalarOwners=[&](const DataRevisionRef &ref) {
+        const auto node=data.GetDataGraph().view->GetData(ref);
+        const auto *image=dynamic_cast<const ImageGrid3DPayload *>(node->payload.get());
+        Require(image && image->GetValues(),"Report source image unavailable."); return image->GetValues().use_count();
+    };
+    std::vector<long> before; for (const auto &surface:surfaces) before.push_back(scalarOwners(surface.source));
+    const auto commit=data.GetDataGraph().commitId;
+    MetrologyReportRequest request; request.id="real-ct-inspection"; request.title="Frozen real ROI measurement contexts"; request.inspections=inspections;
+    const auto captured=feature.GetReport(request);
+    Require(captured.status==AlignmentStatus::FullyDetermined && captured.report && captured.report->capturedCommit==commit &&
+        captured.report->wereInputsCurrentAtCapture && captured.report->inspections.size()==inspections.size(),"Real report capture failed.");
+    const auto &report=*captured.report;
+    out<<"{\"status\":"<<unsigned(captured.status)<<",\"capturedCommit\":"<<report.capturedCommit
+       <<",\"alignments\":"<<report.alignments.size()<<",\"inspections\":"<<report.inspections.size()
+       <<",\"inputNodes\":"<<report.inputs.size()<<",\"estimatedMetadataBytes\":"<<report.estimatedMetadataBytes<<",\"sourceVolumes\":[";
+    for (std::size_t i=0;i<surfaces.size();++i) {
+        const auto source=std::find_if(report.inputs.begin(),report.inputs.end(),[&](const auto &node) { return node.revision==surfaces[i].source; });
+        Require(source!=report.inputs.end() && source->image && source->provenance &&
+            source->image->geometry.spacing==std::array<double,3>{manifest.scans[i].spacing,manifest.scans[i].spacing,manifest.scans[i].spacing} &&
+            source->provenance->canonicalParameters.find(manifest.scans[i].parentSha)!=std::string::npos &&
+            scalarOwners(surfaces[i].source)==before[i],"Report must preserve source spacing/provenance without retaining scalar storage.");
+        if (i) out<<','; out<<"{\"id\":"<<Json(manifest.scans[i].id)<<",\"revision\":"<<Json(Id(source->revision))
+            <<",\"spacingMm\":"<<source->image->geometry.spacing[0]<<",\"valueBytes\":"<<source->image->valueBytes<<'}';
+    }
+    for (const auto &inspection:report.inspections) {
+        const auto original=feature.GetInspection(inspection.result);
+        const auto owner=std::find_if(report.alignments.begin(),report.alignments.end(),[&](const auto &a) { return a.result==inspection.alignmentResult; });
+        Require(original && original->plan==inspection.plan && original->report==inspection.report && owner!=report.alignments.end() &&
+            owner->sourceToTarget==inspection.sourceToTarget,"Captured evaluation lost sharing or coordinate owner.");
+    }
+    out<<"],\"sourceScalarOwnershipUnchanged\":true,\"sharedInspectionStorageChecked\":true,\"elapsedMs\":"
+       <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
 }
 void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
     if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
@@ -507,10 +546,12 @@ int wmain(int argc,wchar_t **argv) {
         for (std::size_t i=0;i<manifest.scans.size();++i) { if (i) out<<','; surfaces.push_back(Determine(*data,surfaceFeature,manifest.scans[i],manifest,out,folder)); }
         out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
         out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out);
-        out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out); else out<<"null";
+        std::vector<DataRevisionRef> reports;
+        out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out,reports); else out<<"null";
         out<<",\"sectionInspections\":["; bool sectionsPassed=true;
-        for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder) && sectionsPassed; }
+        for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder,reports) && sectionsPassed; }
         out<<']';
+        out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,out);
         const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
         out.close();

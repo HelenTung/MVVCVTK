@@ -3,6 +3,7 @@
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "AlignmentData.h"
 #include "AlignmentInspectionData.h"
+#include "AlignmentReport.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentPrealignTestSupport.h"
@@ -612,6 +613,77 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
 }
+void ReportLifecycle() {
+    std::shared_ptr<const MetrologyReport> retained;
+    {
+        Fixture f;
+        MetrologyReportRequest request; request.id="multi-alignment"; request.title="global and local evaluation";
+        for (const double x:{.1,.6}) {
+            if (x>.1) {
+                for (auto &c:f.recipe.constraints) c.nominalPoint[0]+=.5;
+                AlignmentRequest save; save.action=AlignmentAction::SaveRecipe; save.recipe=f.recipe;
+                Check(f.feature->SendRequest(save,[&](AlignmentResult r) { f.recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted,
+                    "second report coordinate relation saved");
+            }
+            const auto alignment=f.Solve();
+            if (request.alignments.empty()) request.alignments.push_back(alignment.result);
+            AlignmentRequest inspect; inspect.action=AlignmentAction::Inspect; inspect.inspection=InspectionPlan{};
+            auto &plan=*inspect.inspection; plan.id="report-row"; plan.alignmentResult=alignment.result;
+            InspectionGeometrySpec geometry; geometry.fit=f.recipe.geometries[0]; plan.geometries.push_back(geometry);
+            InspectionItem item; item.id="x"; item.measured.metric=InspectionMetric::CenterX; item.nominal=x;
+            item.nominalSource="analytic coordinate relation"; item.deviationLimits=std::array<double,2>{-1e-7,1e-7}; plan.items.push_back(item);
+            AlignmentResult evaluated;
+            Check(f.feature->SendRequest(inspect,[&](AlignmentResult r) { evaluated=std::move(r); }).status==AlignmentAdmissionStatus::Accepted,
+                "report row evaluation accepted"); f.Drain();
+            Check(evaluated.status==AlignmentStatus::FullyDetermined,"report row evaluation completed");
+            request.inspections.push_back(evaluated.inspectionResult);
+        }
+        const auto graph=f.data->GetDataGraph();
+        const auto captured=f.feature->GetReport(request); retained=captured.report;
+        Check(captured.status==AlignmentStatus::FullyDetermined && retained && retained->capturedCommit==graph.commitId &&
+            retained->alignments.size()==2 && retained->inspections.size()==2 && retained->wereInputsCurrentAtCapture,
+            "one graph capture includes both alignment owners without duplicating explicit owner");
+        if (!retained) return;
+        for (std::size_t i=0;i<2;++i) {
+            const auto &inspection=retained->inspections[i];
+            const auto owner=std::find_if(retained->alignments.begin(),retained->alignments.end(),[&](const auto &a) { return a.result==inspection.alignmentResult; });
+            Check(owner!=retained->alignments.end() && std::abs(owner->sourceToTarget[3]-(i ? .6 : .1))<1e-7 &&
+                inspection.report->items[0].verdict==AlignmentInspectionVerdict::Pass,"each report row retains its own coordinate relation");
+            const auto original=f.feature->GetInspection(request.inspections[i]);
+            Check(original && original->plan==inspection.plan && original->report==inspection.report,"capture shares immutable inspection plan and report");
+            if (owner!=retained->alignments.end()) {
+                const auto recipe=std::dynamic_pointer_cast<const AlignmentData::RecipePayload>(graph.view->GetData(owner->recipeRevision)->payload);
+                Check(recipe && owner->recipe.get()==&recipe->recipe,"report aliases recipe without copying ROI arrays");
+            }
+        }
+        auto duplicate=request; duplicate.inspections.push_back(request.inspections.front());
+        Check(f.feature->GetReport(duplicate).status==AlignmentStatus::InvalidInput,"duplicate report entries are rejected");
+        auto missing=request; missing.inspections[0].generation=999;
+        Check(f.feature->GetReport(missing).status==AlignmentStatus::InvalidInput,"missing report revision produces no partial report");
+        AlignmentConfig small; small.workingBytes=1;
+        Check(AlignmentReport::Capture(graph,request,small).status==AlignmentStatus::BudgetExceeded,"report metadata budget is enforced");
+        bool ownerRejected=false; std::thread foreign([&] { ownerRejected=f.feature->GetReport(request).status==AlignmentStatus::Unavailable; }); foreign.join();
+        Check(ownerRejected,"report capture is owner-thread only");
+        f.recipe.constraints.resize(3);
+        AlignmentRequest underSave; underSave.action=AlignmentAction::SaveRecipe; underSave.recipe=f.recipe;
+        Check(f.feature->SendRequest(underSave,[&](AlignmentResult r) { f.recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted,
+            "underdetermined report recipe saved");
+        const auto under=f.Solve();
+        MetrologyReportRequest diagnostic; diagnostic.id="underconstrained"; diagnostic.alignments={under.result};
+        const auto incomplete=f.feature->GetReport(diagnostic);
+        Check(under.status==AlignmentStatus::Underconstrained && incomplete.report &&
+            incomplete.report->alignments[0].diagnostics->status==AlignmentStatus::Underconstrained,
+            "report capture retains underconstrained alignment diagnostics without converting them to measurement success");
+        DataTransaction changed; changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+        Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"report source advances");
+        const auto historical=f.feature->GetReport(request);
+        Check(historical.report && !historical.report->wereInputsCurrentAtCapture && retained->wereInputsCurrentAtCapture &&
+            historical.report->capturedCommit>retained->capturedCommit && historical.report->inspections[0].report==retained->inspections[0].report,
+            "recapture reports stale inputs while prior capture retains its explicit capture-time state");
+    }
+    Check(retained && retained->inspections[0].report->items[0].measured && retained->alignments[0].recipe,
+        "frozen report values remain readable after feature and graph owner destruction");
+}
 void AutomaticReferenceLifecycle() {
     auto views = std::make_shared<Views>();
     Fixture f(views);
@@ -683,6 +755,11 @@ void AutomaticReferenceLifecycle() {
     const auto again = f.feature->GetDeviation(deviationRef);
     Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse && deviation->parameters == again->parameters,
           "result queries share immutable fields without full-array copy");
+    MetrologyReportRequest reportRequest; reportRequest.id="deviation-report"; reportRequest.deviations={deviationRef};
+    const auto reportCapture=f.feature->GetReport(reportRequest);
+    Check(reportCapture.report && reportCapture.report->alignments.size()==1 && reportCapture.report->deviations.size()==1 &&
+        reportCapture.report->deviations[0].forward==deviation->forward && reportCapture.report->deviations[0].reverse==deviation->reverse &&
+        reportCapture.report->deviations[0].parameters==deviation->parameters,"report capture shares dense fields and evaluation selections");
     Check(f.feature->GetState().activeResult == result.result, "evaluation leaves alignment activation unchanged");
     AlignmentRequest display; display.action = AlignmentAction::SetDeviationDisplay;
     display.deviationDisplay = AlignmentDeviationDisplay{};
@@ -802,6 +879,7 @@ void AutomaticReferenceLifecycle() {
 int main() {
     const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
     run("InspectionLifecycle", [] { InspectionLifecycle(); });
+    run("ReportLifecycle", ReportLifecycle);
     run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);

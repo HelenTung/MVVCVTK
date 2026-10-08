@@ -9,6 +9,7 @@
 #include "AlignmentDeviationData.h"
 #include "AlignmentDeviationDisplay.h"
 #include "AlignmentInspectionData.h"
+#include "AlignmentReport.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -188,6 +189,10 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::optional<InspectionSnapshot> GetInspection(const DataRevisionRef &ref) const {
         if (!GetIsOwner() || !m_data) return {};
         return AlignmentInspectionData::GetResult(m_data->GetDataGraph(),ref);
+    }
+    MetrologyReportResult GetReport(const MetrologyReportRequest &request) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentReport::Capture(m_data->GetDataGraph(),request,m_config);
     }
     std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &ref, std::uint64_t vertex) const {
         if (!GetIsOwner() || !m_data) return {};
@@ -991,4 +996,7 @@ std::optional<AlignmentDeviationSelection> MetrologyAlignmentHostFeature::GetDev
 
 std::optional<InspectionSnapshot> MetrologyAlignmentHostFeature::GetInspection(const DataRevisionRef &ref) const {
     return m_impl->GetInspection(ref);
+}
+MetrologyReportResult MetrologyAlignmentHostFeature::GetReport(const MetrologyReportRequest &request) const {
+    return m_impl->GetReport(request);
 }

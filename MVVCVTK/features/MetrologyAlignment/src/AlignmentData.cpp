@@ -100,8 +100,8 @@ bool SetTypes(TrustedDataPort &data) {
     }
     return true;
 }
-std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,
-                                                       const DataRevisionRef &ref) {
+std::shared_ptr<const AlignmentReferenceSnapshot> GetReferenceShared(const DataGraphSnapshot &graph,
+                                                                    const DataRevisionRef &ref) {
     const auto data = graph.view ? graph.view->GetData(ref) : nullptr;
     const auto mesh = data ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload) : nullptr;
     if (!mesh || data->type != DataTypes::surfaceMesh) return {};
@@ -115,7 +115,11 @@ std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &
         reference->metadata.coordinateFrame != mesh->GetCoordinateFrame() ||
         reference->metadata.pointCount != mesh->GetVertices().size() / 3 ||
         reference->metadata.triangleCount != mesh->GetTriangles().size() / 3) return {};
-    return reference->metadata;
+    return std::shared_ptr<const AlignmentReferenceSnapshot>(reference,&reference->metadata);
+}
+std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,const DataRevisionRef &ref) {
+    const auto reference=GetReferenceShared(graph,ref);
+    return reference ? std::optional<AlignmentReferenceSnapshot>{*reference} : std::nullopt;
 }
 bool GetInputValid(const AlignmentInput &i) {
     if (!GetDataRevisionRefValid(i.source) || !GetDataRevisionRefValid(i.mesh) ||
