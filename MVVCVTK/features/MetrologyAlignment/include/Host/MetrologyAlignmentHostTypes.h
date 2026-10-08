@@ -460,8 +460,13 @@ struct AlignmentScenePart final {
     std::string id;
     DataRevisionRef alignmentResult;
     bool showMeasured=true,showReference=true;
+    std::optional<DataRevisionRef> inspection;
+    // 选择项目会高亮其 measured/nominal 两侧及构造截面涉及的几何。
+    std::optional<std::string> selectedItem;
 };
 struct AlignmentSceneDisplay final {
+    // 拟合线框使用 AlignmentConfig.axisLength 作为示意长度，圆柱线框长度不是高度测量。
+    // 黄色为选中元素，青绿为其他拟合，紫红为区域标记；这些颜色不用于公差判定。
     // 场景目标坐标经 anchor 的逆变换进入 Host model 坐标；再由 Host modelToWorld 定位。
     // measured: M * inverse(T_anchor) * T_part，reference: M * inverse(T_anchor)。
     DataRevisionRef anchorAlignment;
@@ -470,6 +475,29 @@ struct AlignmentSceneDisplay final {
     double referenceOpacity=.5;
     bool referenceWireframe=true,isVisible=true;
     std::optional<std::string> selectedPart;
+    // 每个所选区域最多绘制这些采样标记；0 不绘制标记，区域边框仍显示。原始计划/截面样本不变。
+    std::size_t roiMarkerLimit=4096;
+};
+enum class AlignmentSceneRegionKind : std::uint8_t { VertexCandidates, TargetBounds, SectionSamples };
+struct AlignmentSceneRegionDisplay final {
+    std::size_t geometry=0;
+    AlignmentSceneRegionKind kind=AlignmentSceneRegionKind::VertexCandidates;
+    // bounds 不扫描全网格计数，缺失的截面 trace 也为空；不能用 0 冒充没有样本。
+    std::optional<std::uint64_t> sourceCount;
+    std::uint64_t drawnMarkers=0;
+};
+struct AlignmentSceneItem final {
+    std::string partId;
+    DataRevisionRef inspectionResult,alignmentResult,anchorAlignment;
+    std::size_t item=0;
+    std::vector<std::size_t> geometries;
+    // 共享冻结结果，可从 plan.geometries 追溯完整区域；不复制选区/截面数组。
+    std::shared_ptr<const InspectionPlan> plan;
+    std::shared_ptr<const InspectionReport> report;
+    std::vector<AlignmentSceneRegionDisplay> displayedRegions;
+    AlignmentMatrix targetToModel=alignmentIdentity;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    bool isCurrent=false,isSelected=false;
 };
 struct AlignmentSceneVertex final {
     std::string partId;

@@ -33,6 +33,7 @@ class MetrologyAlignmentHostFeature final
     // 在 owner thread 的同一个图快照上捕获；返回后可在后台只读使用，状态为捕获时状态。
     MetrologyReportResult GetReport(const MetrologyReportRequest &request) const;
     std::optional<AlignmentSceneVertex> GetSceneVertex(const std::string &partId,bool isReference,std::uint64_t vertex) const;
+    std::optional<AlignmentSceneItem> GetSceneItem(const std::string &partId,const std::string &itemId) const;
     AlignmentState GetState() const;
     AlignmentState GetScopeState(const std::string &scope) const;
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &result) const;

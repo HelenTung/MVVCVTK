@@ -1,6 +1,8 @@
 #include "AlignmentSceneDisplay.h"
 #include "AlignmentResultSource.h"
 #include "AlignmentMath.h"
+#include "AlignmentSceneGeometry.h"
+#include "AlignmentInspectionData.h"
 #include "FeatureSupport/WorkLimit.h"
 #include <vtkPolyData.h>
 #include <algorithm>
@@ -17,13 +19,15 @@ bool Same(const AlignmentSceneDisplay &a, const AlignmentSceneDisplay &b) {
       a.referenceColor != b.referenceColor ||
       a.referenceOpacity != b.referenceOpacity ||
       a.referenceWireframe != b.referenceWireframe ||
-      a.selectedPart != b.selectedPart)
+      a.selectedPart != b.selectedPart || a.roiMarkerLimit != b.roiMarkerLimit)
     return false;
   for (std::size_t i = 0; i < a.parts.size(); ++i)
     if (a.parts[i].id != b.parts[i].id ||
         a.parts[i].alignmentResult != b.parts[i].alignmentResult ||
         a.parts[i].showMeasured != b.parts[i].showMeasured ||
-        a.parts[i].showReference != b.parts[i].showReference)
+        a.parts[i].showReference != b.parts[i].showReference ||
+        a.parts[i].inspection != b.parts[i].inspection ||
+        a.parts[i].selectedItem != b.parts[i].selectedItem)
       return false;
   return true;
 }
@@ -95,13 +99,18 @@ AlignmentResult AlignmentSceneDisplayController::Set(
     std::set<std::string> ids;
     std::set<DataRevisionRef> alignments;
     for (const auto &part : request.parts) {
-      Require(!part.id.empty() && part.id.size() <= 128 &&
-                  ids.insert(part.id).second &&
-                  GetDataRevisionRefValid(part.alignmentResult) &&
-                  alignments.insert(part.alignmentResult).second &&
-                  (part.showMeasured || part.showReference),
-              "Invalid or duplicate scene part.");
+      Require(
+          !part.id.empty() && part.id.size() <= 128 &&
+              ids.insert(part.id).second &&
+              GetDataRevisionRefValid(part.alignmentResult) &&
+              alignments.insert(part.alignmentResult).second &&
+              (part.showMeasured || part.showReference || part.inspection) &&
+              (!part.selectedItem || part.inspection) &&
+              (!part.inspection || GetDataRevisionRefValid(*part.inspection)),
+          "Invalid or duplicate scene part.");
       budget.Add(part.id.size(), 4);
+      if (part.selectedItem)
+        budget.Add(part.selectedItem->size(), 4);
       checkTime();
     }
     Require(!request.selectedPart || ids.count(*request.selectedPart),
@@ -193,6 +202,37 @@ AlignmentResult AlignmentSceneDisplayController::Set(
                  : request.measuredColor,
              1, false});
       }
+      if (part.inspection) {
+        const auto inspection =
+            AlignmentInspectionData::GetResult(graph, *part.inspection);
+        if (!inspection || !inspection->isCurrent) {
+          result.status = AlignmentStatus::Stale;
+          return result;
+        }
+        Require(inspection->alignmentResult == part.alignmentResult,
+                "Scene inspection belongs to a different alignment.");
+        const auto payload =
+            std::dynamic_pointer_cast<const AlignmentInspectionData::Payload>(
+                graph.view->GetData(*part.inspection)->payload);
+        budget.Add(payload->expectations.size() + 1,
+                   4 * sizeof(DataExpectation));
+        product->expectations.insert(product->expectations.end(),
+                                     payload->expectations.begin(),
+                                     payload->expectations.end());
+        DataExpectation e;
+        e.kind = DataExpectationKind::EntityHead;
+        e.entityId = part.inspection->entityId;
+        e.expectedGeneration = part.inspection->generation;
+        product->expectations.push_back(e);
+        product->parts.back().inspection = inspection;
+        AlignmentSceneGeometry::Build(
+            *product, product->parts.back(), part, *source->measuredMesh,
+            source->referenceMesh.get(), config.axisLength,
+            request.roiMarkerLimit, targets.size(), deadline,
+            [&](std::size_t count, std::size_t width) {
+              budget.Add(count, width);
+            });
+      }
       if (part.showReference &&
           drawnReferences.insert(source->nominal).second) {
         budget.Add(targets.size(), 16384);
@@ -202,6 +242,8 @@ AlignmentResult AlignmentSceneDisplayController::Set(
              request.referenceOpacity, request.referenceWireframe});
       }
     }
+    Require(!product->surfaces.empty() || !product->glyphs.empty(),
+            "Scene has no drawable surfaces or inspection geometry.");
     product->request = std::make_shared<const AlignmentSceneDisplay>(request);
     product->workingBytes = budget.used - retained;
     for (auto &binding : next) {
@@ -287,6 +329,46 @@ std::optional<AlignmentSceneVertex> AlignmentSceneDisplayController::GetVertex(
       value.modelPoint = AlignmentMath::Point(AlignmentMath::Transform(
           m_product->targetToModel, AlignmentMath::Vector(value.targetPoint)));
       return value;
+    }
+  return {};
+}
+
+std::optional<AlignmentSceneItem>
+AlignmentSceneDisplayController::GetItem(const DataGraphSnapshot &graph,
+                                         const std::string &partId,
+                                         const std::string &itemId) const {
+  if (!m_product)
+    return {};
+  const auto &request = *m_product->request;
+  for (std::size_t i = 0; i < request.parts.size(); ++i)
+    if (request.parts[i].id == partId) {
+      const auto &part = m_product->parts[i];
+      if (!part.inspection)
+        return {};
+      const auto &s = *part.inspection;
+      const auto found =
+          std::find_if(s.plan->items.begin(), s.plan->items.end(),
+                       [&](const auto &v) { return v.id == itemId; });
+      if (found == s.plan->items.end())
+        return {};
+      AlignmentSceneItem result;
+      result.partId = partId;
+      result.inspectionResult = s.result;
+      result.alignmentResult = s.alignmentResult;
+      result.anchorAlignment = request.anchorAlignment;
+      result.item = static_cast<std::size_t>(found - s.plan->items.begin());
+      result.geometries =
+          AlignmentSceneGeometry::GetItemGeometries(*s.plan, result.item);
+      result.plan = s.plan;
+      result.report = s.report;
+      result.targetToModel = m_product->targetToModel;
+      result.unit = s.unit;
+      result.isCurrent = GetReady(graph);
+      result.isSelected = request.parts[i].selectedItem &&
+                          *request.parts[i].selectedItem == itemId;
+      if (result.isSelected)
+        result.displayedRegions = part.regions;
+      return result;
     }
   return {};
 }

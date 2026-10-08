@@ -219,6 +219,9 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::optional<AlignmentSceneVertex> GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
         if(!GetIsOwner() || !m_data)return {};return m_sceneDisplay.GetVertex(m_data->GetDataGraph(),part,reference,vertex);
     }
+    std::optional<AlignmentSceneItem> GetSceneItem(const std::string &part,const std::string &item) const {
+        if(!GetIsOwner() || !m_data)return {};return m_sceneDisplay.GetItem(m_data->GetDataGraph(),part,item);
+    }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
             return {};
@@ -1090,4 +1093,8 @@ std::optional<VoxelVolumeSnapshot> MetrologyAlignmentHostFeature::GetVoxelVolume
 
 std::optional<AlignmentSceneVertex> MetrologyAlignmentHostFeature::GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
     return m_impl->GetSceneVertex(part,reference,vertex);
+}
+
+std::optional<AlignmentSceneItem> MetrologyAlignmentHostFeature::GetSceneItem(const std::string &part,const std::string &item) const {
+    return m_impl->GetSceneItem(part,item);
 }

@@ -12,6 +12,14 @@
 #include <vtkMatrix3x3.h>
 #include <vtkPolyData.h>
 #include <vtkXMLPolyDataWriter.h>
+#include "Render/Contracts/OverlayService.h"
+#include <vtkRenderer.h>
+#include <vtkCamera.h>
+#include <vtkRenderWindow.h>
+#include <vtkPointData.h>
+#include <vtkUnsignedCharArray.h>
+#include <vtkWindowToImageFilter.h>
+#include <vtkPNGWriter.h>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -74,6 +82,24 @@ class Views final : public FeatureViewDirectory {
     std::shared_ptr<FeatureViewService> GetFeaturePort(const std::string &) const override { return {}; }
     std::shared_ptr<OverlayService> GetOverlayPort(const std::string &) const override { return {}; }
     std::optional<HostInputView> GetInputView(const HostViewTarget &) const override { return {}; }
+};
+class InspectionOverlayPort final:public OverlayService {
+public:
+    vtkSmartPointer<vtkRenderer> renderer=vtkSmartPointer<vtkRenderer>::New();
+    bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override {overlay->SetOverlayState({});overlay->AttachRenderer(renderer);overlays.push_back(overlay);return true;}
+    void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override {overlay->DetachRenderer(renderer);overlays.erase(std::remove(overlays.begin(),overlays.end(),overlay),overlays.end());}
+    void ClearOverlays() noexcept override {while(!overlays.empty())RemoveOverlay(overlays.back());}
+    std::vector<std::shared_ptr<FeatureOverlay>> overlays;
+};
+class InspectionViews final:public FeatureViewDirectory {
+public:
+    std::shared_ptr<InspectionOverlayPort> port=std::make_shared<InspectionOverlayPort>();
+    vtkSmartPointer<vtkRenderWindow> window=vtkSmartPointer<vtkRenderWindow>::New();
+    InspectionViews(){window->SetOffScreenRendering(1);window->SetSize(640,480);window->SetMultiSamples(0);window->AddRenderer(port->renderer);port->renderer->SetBackground(.025,.025,.025);}
+    std::vector<HostFeatureView> GetViews(const HostViewTargets &) const override{return {{"inspection-audit",HostRenderViewRole::Primary3D}};}
+    std::shared_ptr<FeatureViewService> GetFeaturePort(const std::string &) const override{return {};}
+    std::shared_ptr<OverlayService> GetOverlayPort(const std::string &) const override{return port;}
+    std::optional<HostInputView> GetInputView(const HostViewTarget &) const override{return {};}
 };
 class Control final : public FeatureHostControl {
     bool SetActiveViews(const std::vector<std::string> &) override { return true; }
@@ -538,6 +564,45 @@ void VoxelVolumes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,cons
     }
     out<<']';
 }
+void InspectionScenes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,InspectionViews &views,const std::vector<DataRevisionRef> &reports,
+    std::ostream &out,const std::filesystem::path &folder) {
+    out<<'[';
+    for(std::size_t index=0;index<reports.size();++index) {
+        const auto report=feature.GetInspection(reports[index]);Require(report && report->isCurrent,"Scene inspection is unavailable.");
+        const auto found=std::find_if(report->report->items.begin(),report->report->items.end(),[](const auto &item){return item.measured.has_value();});
+        Require(found!=report->report->items.end(),"Scene audit requires a measured item.");
+        const auto original=data.GetSurfaceMesh(data.GetDataGraph(),report->sourceMesh);Require(original && original->mesh,"Scene native mesh unavailable.");
+        const auto *points=original->mesh->GetPoints();const auto *triangles=original->mesh->GetPolys();const auto modified=original->mesh->GetMTime();
+        const auto commit=data.GetDataGraph().commitId;
+        AlignmentRequest request;request.action=AlignmentAction::SetSceneDisplay;request.sceneDisplay=AlignmentSceneDisplay{};
+        auto &display=*request.sceneDisplay;display.anchorAlignment=report->alignmentResult;display.roiMarkerLimit=256;
+        display.parts={{"measured",report->alignmentResult,true,false,report->result,found->id}};
+        AlignmentResult shown;Require(feature.SendRequest(request,[&](AlignmentResult value){shown=std::move(value);}).status==AlignmentAdmissionStatus::Accepted && shown.isDisplayReady,"Real inspection scene did not attach.");
+        const auto item=feature.GetSceneItem("measured",found->id);
+        Require(item && item->isCurrent && item->isSelected && item->plan==report->plan && item->report==report->report,"Scene selection lost frozen report sharing.");
+        auto *camera=views.port->renderer->GetActiveCamera();camera->ParallelProjectionOn();camera->SetPosition(1,-1,1);camera->SetFocalPoint(0,0,0);views.port->renderer->ResetCamera();
+        const auto begin=std::chrono::steady_clock::now();views.window->Render();views.window->WaitForCompletion();
+        const auto coldMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+        const auto warmBegin=std::chrono::steady_clock::now();for(int frame=0;frame<3;++frame){views.window->Render();views.window->WaitForCompletion();}
+        const auto warmMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmBegin).count()/3;
+        auto capture=vtkSmartPointer<vtkWindowToImageFilter>::New();capture->SetInput(views.window);capture->ReadFrontBufferOff();capture->Update();
+        auto *pixels=vtkUnsignedCharArray::SafeDownCast(capture->GetOutput()->GetPointData()->GetScalars());Require(pixels,"Scene pixels unavailable.");std::size_t selectedPixels=0;
+        for(vtkIdType i=0;i<pixels->GetNumberOfTuples();++i){const auto *p=pixels->GetPointer(i*pixels->GetNumberOfComponents());if(p[0]>220 && p[1]>160 && p[2]<80)++selectedPixels;}
+        Require(selectedPixels>0 && original->mesh->GetPoints()==points && original->mesh->GetPolys()==triangles && original->mesh->GetMTime()==modified && data.GetDataGraph().commitId==commit,
+            "Scene must render selected glyphs without modifying native geometry or data graph.");
+        const auto file="inspection-scene-"+std::to_string(index)+".png";auto writer=vtkSmartPointer<vtkPNGWriter>::New();writer->SetFileName((folder/file).u8string().c_str());writer->SetInputConnection(capture->GetOutputPort());writer->Write();
+        Require(std::filesystem::exists(folder/file) && std::filesystem::file_size(folder/file)>0,"Scene image export failed.");
+        if(index)out<<',';out<<"{\"inspection\":"<<Json(Id(report->result))<<",\"item\":"<<Json(found->id)<<",\"image\":"<<Json(file)
+            <<",\"selectedPixels\":"<<selectedPixels<<",\"coldRenderMs\":"<<coldMs<<",\"warmRenderMs\":"<<warmMs
+            <<",\"workingBytesEstimate\":"<<feature.GetState().sceneWorkingBytes<<",\"nativeStorageUnchanged\":true,\"sharedReport\":true,\"targetToModel\":[";
+        for(std::size_t i=0;i<16;++i){if(i)out<<',';out<<item->targetToModel[i];}out<<"],\"geometries\":[";
+        for(std::size_t i=0;i<item->geometries.size();++i){if(i)out<<',';out<<item->geometries[i];}out<<"],\"regions\":[";
+        for(std::size_t i=0;i<item->displayedRegions.size();++i){if(i)out<<',';const auto &region=item->displayedRegions[i];out<<"{\"geometry\":"<<region.geometry<<",\"kind\":"<<unsigned(region.kind)<<",\"sourceCount\":";
+            if(region.sourceCount)out<<*region.sourceCount;else out<<"null";out<<",\"drawnMarkers\":"<<region.drawnMarkers<<'}';}out<<"]}";
+        display.isVisible=false;Require(feature.SendRequest(request).status==AlignmentAdmissionStatus::Accepted && views.port->overlays.empty(),"Scene overlay resources did not detach.");
+    }
+    out<<']';
+}
 void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
     if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
         out<<"{\"attempted\":false,\"reason\":\"Two measurable array surfaces are required\"}"; return;
@@ -600,7 +665,8 @@ int wmain(int argc,wchar_t **argv) {
         SurfaceDeterminationConfig surfaceConfig; surfaceConfig.maxWorkingBytes=manifest.workingLimit; surfaceConfig.isOverlayVisible=false;
         SurfaceDeterminationHostFeature surfaceFeature(surfaceConfig); Require(surfaceFeature.AttachHost(context),"Surface attach failed.");
         AlignmentConfig alignmentConfig; alignmentConfig.workingBytes=manifest.workingLimit; alignmentConfig.deadlineMs=manifest.deadlineMs; alignmentConfig.isOverlayVisible=false;
-        MetrologyAlignmentHostFeature alignmentFeature(alignmentConfig); Require(alignmentFeature.AttachHost(context),"Metrology attach failed.");
+        auto inspectionViews=std::make_shared<InspectionViews>();auto alignmentContext=context;alignmentContext.views=inspectionViews;
+        MetrologyAlignmentHostFeature alignmentFeature(alignmentConfig); Require(alignmentFeature.AttachHost(alignmentContext),"Metrology attach failed.");
         std::vector<Surface> surfaces;
         for (std::size_t i=0;i<manifest.scans.size();++i) { if (i) out<<','; surfaces.push_back(Determine(*data,surfaceFeature,manifest.scans[i],manifest,out,folder)); }
         out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
@@ -614,6 +680,7 @@ int wmain(int argc,wchar_t **argv) {
         std::vector<DataRevisionRef> volumes;
         out<<",\"voxelVolumes\":";VoxelVolumes(alignmentFeature,*data,surfaces,manifest,out,volumes);
         out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,deviations,volumes,out,folder);
+        out<<",\"inspectionScenes\":";InspectionScenes(alignmentFeature,*data,*inspectionViews,reports,out,folder);
         const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
         out.close();

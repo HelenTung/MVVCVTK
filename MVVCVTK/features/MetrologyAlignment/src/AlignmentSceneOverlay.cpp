@@ -33,11 +33,34 @@ AlignmentSceneOverlay::AlignmentSceneOverlay(
     AttachProp(actor);
     m_actors.push_back(actor);
   }
+  for (const auto &glyph : m_product->glyphs) {
+    auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    mapper->SetInputData(glyph.data);
+    mapper->ScalarVisibilityOff();
+    mapper->StaticOn();
+    auto actor = vtkSmartPointer<vtkActor>::New();
+    actor->SetMapper(mapper);
+    actor->PickableOff();
+    actor->GetProperty()->SetColor(glyph.color[0], glyph.color[1],
+                                   glyph.color[2]);
+    actor->GetProperty()->SetLighting(false);
+    actor->GetProperty()->SetLineWidth(static_cast<float>(glyph.lineWidth));
+    actor->GetProperty()->SetPointSize(static_cast<float>(glyph.pointSize));
+    actor->GetProperty()->RenderPointsAsSpheresOn();
+    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    matrix->DeepCopy(glyph.localToModel.data());
+    actor->SetUserMatrix(matrix);
+    AttachProp(actor);
+    m_actors.push_back(actor);
+  }
 }
 void AlignmentSceneOverlay::SetOverlayState(const FeatureOverlayState &state) {
   for (std::size_t i = 0; i < m_actors.size(); ++i) {
     const auto matrix = AlignmentMath::Multiply(
-        state.modelToWorld, m_product->surfaces[i].localToModel);
+        state.modelToWorld,
+        i < m_product->surfaces.size()
+            ? m_product->surfaces[i].localToModel
+            : m_product->glyphs[i - m_product->surfaces.size()].localToModel);
     // 更新现有矩阵，不创建变换后的网格或改动顶点、拓扑与标量。
     m_actors[i]->GetUserMatrix()->DeepCopy(matrix.data());
   }

@@ -11,15 +11,24 @@ struct AlignmentSceneSurface final {
   double opacity = 1;
   bool wireframe = false;
 };
+struct AlignmentSceneGlyph final {
+  vtkSmartPointer<vtkPolyData> data;
+  AlignmentMatrix localToModel = alignmentIdentity;
+  std::array<double, 3> color{};
+  double pointSize = 5, lineWidth = 2.5;
+};
 struct AlignmentScenePartData final {
   DataRevisionRef alignment, measured, reference;
   AlignmentMatrix sourceToTarget = alignmentIdentity;
+  std::optional<InspectionSnapshot> inspection;
+  std::vector<AlignmentSceneRegionDisplay> regions;
 };
 struct AlignmentSceneProduct final {
   std::shared_ptr<const AlignmentSceneDisplay> request;
   AlignmentMatrix targetToModel = alignmentIdentity;
   AlignmentUnit unit = AlignmentUnit::ModelUnit;
   std::vector<AlignmentSceneSurface> surfaces;
+  std::vector<AlignmentSceneGlyph> glyphs;
   std::vector<AlignmentScenePartData> parts;
   std::vector<DataExpectation> expectations;
   std::size_t workingBytes = 0;
@@ -54,6 +63,10 @@ public:
                                                 const std::string &part,
                                                 bool reference,
                                                 std::uint64_t vertex) const;
+
+  std::optional<AlignmentSceneItem> GetItem(const DataGraphSnapshot &graph,
+                                            const std::string &part,
+                                            const std::string &item) const;
 
 private:
   struct Binding {

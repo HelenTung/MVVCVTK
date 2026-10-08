@@ -142,7 +142,7 @@ endif()
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_executable(mvvcvtk_metrology_timepoint_audit MetrologyTimepointAudit.cpp)
     target_link_libraries(mvvcvtk_metrology_timepoint_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
-        MVVCVTK::SurfaceDetermination MVVCVTK::MetrologyAlignment bcrypt psapi ${MVVCVTK_VTK_TARGETS} VTK::IOXML)
+        MVVCVTK::SurfaceDetermination MVVCVTK::MetrologyAlignment bcrypt psapi ${MVVCVTK_VTK_TARGETS} VTK::IOXML VTK::IOImage)
     SetTargetDefaults(mvvcvtk_metrology_timepoint_audit)
     set_target_properties(mvvcvtk_metrology_timepoint_audit PROPERTIES
         PROJECT_LABEL MetrologyTimepointAudit FOLDER "MVVCVTK/test/Automation/Reference")
@@ -169,11 +169,11 @@ set_target_properties(mvvcvtk_alignment_model_pose_tests PROPERTIES PROJECT_LABE
 add_test(NAME MetrologyAlignment.ModelPoseSession COMMAND mvvcvtk_alignment_model_pose_tests)
 SetTestRuntime(MetrologyAlignment.ModelPoseSession mvvcvtk_alignment_model_pose_tests)
 
-add_executable(mvvcvtk_alignment_scene_display_tests AlignmentSceneDisplayTests.cpp)
+add_executable(mvvcvtk_alignment_scene_display_tests AlignmentSceneDisplayTests.cpp AlignmentSceneGeometryTests.cpp)
 target_include_directories(mvvcvtk_alignment_scene_display_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
 target_link_libraries(mvvcvtk_alignment_scene_display_tests PRIVATE MVVCVTK::MetrologyAlignment MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} VTK::IOImage)
 SetTargetDefaults(mvvcvtk_alignment_scene_display_tests)
 vtk_module_autoinit(TARGETS mvvcvtk_alignment_scene_display_tests MODULES ${MVVCVTK_VTK_TARGETS})
 set_target_properties(mvvcvtk_alignment_scene_display_tests PROPERTIES PROJECT_LABEL AlignmentSceneDisplayTests FOLDER "MVVCVTK/test/Automation")
-add_test(NAME MetrologyAlignment.SceneDisplay COMMAND mvvcvtk_alignment_scene_display_tests "${CMAKE_CURRENT_BINARY_DIR}/scene-display-$<CONFIG>.png")
+add_test(NAME MetrologyAlignment.SceneDisplay COMMAND mvvcvtk_alignment_scene_display_tests "${CMAKE_CURRENT_BINARY_DIR}/scene-display-$<CONFIG>.png" "${CMAKE_CURRENT_BINARY_DIR}/scene-inspection-$<CONFIG>.png")
 SetTestRuntime(MetrologyAlignment.SceneDisplay mvvcvtk_alignment_scene_display_tests)

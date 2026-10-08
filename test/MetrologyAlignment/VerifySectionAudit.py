@@ -213,6 +213,33 @@ def verify(path):
         require(v["source"] == volume["source"] and params["storedValueRange"] == [volume["lower"], volume["upper"]] and
                 all(st[k] == volume[k] for k in ("total", "selected", "unselected", "masked", "noData", "nonFinite", "invalidLabels",
                     "cellVolumeMm3", "observedVolumeMm3", "volumeMm3", "touchesRegionBoundary")), "Formal voxel report differs from independently checked result")
+    scene_rows = data["inspectionScenes"]
+    inspection_by_ref = {v["result"]:v for v in frozen["inspections"]}
+    alignment_by_ref = {v["result"]:v for v in frozen["alignments"]}
+    require(len(scene_rows) == len(inspection_by_ref) and {r["inspection"] for r in scene_rows} == set(inspection_by_ref), "Real scene report coverage mismatch")
+    for scene in scene_rows:
+        inspection = inspection_by_ref[scene["inspection"]]
+        item = next(i for i in inspection["plan"]["items"] if i["id"] == scene["item"])
+        indices = []
+        for measure in (item["measured"], item["nominalMeasure"]):
+            if measure:
+                for operand in (measure["first"], measure["second"]):
+                    if operand:
+                        for index in (operand["geometry"],operand["sectionPlane"]):
+                            if index is not None and index not in indices: indices.append(index)
+        require(indices == scene["geometries"] and scene["selectedPixels"] > 0 and scene["nativeStorageUnchanged"] and scene["sharedReport"], "Real scene selection or storage mismatch")
+        pose = np.array(alignment_by_ref[inspection["alignmentResult"]]["sourceToTarget"]).reshape(4,4)
+        require(np.allclose(np.array(scene["targetToModel"]).reshape(4,4),np.linalg.inv(pose),atol=1e-10,rtol=1e-12), "Real scene anchor transform mismatch")
+        for region in scene["regions"]:
+            index = region["geometry"]; spec = inspection["plan"]["geometries"][index]; geometry = inspection["report"]["geometries"][index]
+            require(index in indices, "Scene region belongs to an unrelated geometry")
+            if spec["section"] is not None:
+                count = len(geometry["section"]["samples"]) if geometry["section"] else None; kind = 2
+            elif spec["fit"]["region"]["targetBounds"] is not None: count = None; kind = 1
+            else: count = len(spec["fit"]["region"]["vertexIds"]); kind = 0
+            require(region["sourceCount"] == count and region["kind"] == kind and region["drawnMarkers"] == (min(count,256) if count is not None else 0), "Scene marker provenance or limit mismatch")
+        png = (folder / scene["image"]).read_bytes(); require(png[:8] == b"\x89PNG\r\n\x1a\n", "Scene screenshot missing or not PNG")
+    result["inspectionScenesVerified"] = len(scene_rows)
     result["reportExports"] = verify_report(folder / "inspection-report.json", folder / "inspection-report.csv")
     destination = folder / "section-reference.json"
     require(not destination.exists(), "Reference evidence already exists; use a new audit run")

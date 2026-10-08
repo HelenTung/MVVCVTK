@@ -50,4 +50,5 @@ void Run(const char *file) {
     overlay->DetachRenderer(renderer);CHECK(renderer->GetViewProps()->GetNumberOfItems()==0);CHECK(otherRenderer->GetViewProps()->GetNumberOfItems()==3);
     other->DetachRenderer(otherRenderer);CHECK(otherRenderer->GetViewProps()->GetNumberOfItems()==0);
 }
-int main(int argc,char **argv){try{Run(argc>1 ? argv[1] : nullptr);return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}
+void TestInspectionSceneGeometry(const char *path);
+int main(int argc,char **argv){try{Run(argc>1 ? argv[1] : nullptr);TestInspectionSceneGeometry(argc>2 ? argv[2] : nullptr);return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}

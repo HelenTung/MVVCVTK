@@ -563,7 +563,7 @@ void SurfaceReferenceLifecycle() {
           "restore cannot reuse reference triangle IDs on another revision");
 }
 void InspectionLifecycle(bool hasSectionMesh=false) {
-    Fixture f({}, {}, hasSectionMesh);
+    auto inspectionViews=std::make_shared<Views>();Fixture f(inspectionViews, {}, hasSectionMesh);
     const auto alignment=f.Solve();
     AlignmentRequest request; request.action=AlignmentAction::Inspect; request.inspection=InspectionPlan{};
     auto &plan=*request.inspection; plan.id="drawing-inspection"; plan.alignmentResult=alignment.result;
@@ -605,6 +605,28 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
         Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,"report rejects invalid support metadata");
     }
     Check(f.feature->GetState().activeResult==alignment.result,"inspection does not realign or reactivate measurement");
+    AlignmentRequest display;display.action=AlignmentAction::SetSceneDisplay;display.sceneDisplay=AlignmentSceneDisplay{};
+    display.sceneDisplay->anchorAlignment=alignment.result;display.sceneDisplay->roiMarkerLimit=3;
+    const std::string selectedItem=hasSectionMesh ? "section-diameter" : "center-x";
+    display.sceneDisplay->parts={{"inspection",alignment.result,hasSectionMesh,false,reportRef,selectedItem}};
+    AlignmentResult shown;Check(f.feature->SendRequest(display,[&](AlignmentResult value){shown=std::move(value);}).status==AlignmentAdmissionStatus::Accepted && shown.isDisplayReady,
+        "inspection scene displays published geometry without fitting again");
+    const auto selection=f.feature->GetSceneItem("inspection",selectedItem);
+    Check(selection && report && selection->plan==report->plan && selection->report==report->report && selection->inspectionResult==reportRef &&
+        selection->isCurrent && selection->isSelected && selection->geometries==std::vector<std::size_t>{hasSectionMesh ? 1u : 0u},
+        "selected report item shares original plan/report and exact geometry mapping");
+    if(selection)Check(selection->displayedRegions.size()==1 && selection->displayedRegions[0].kind==(hasSectionMesh ? AlignmentSceneRegionKind::SectionSamples : AlignmentSceneRegionKind::VertexCandidates) &&
+        selection->displayedRegions[0].drawnMarkers==(hasSectionMesh ? 3u : 1u) && selection->displayedRegions[0].sourceCount.has_value(),
+        "display distinguishes actual section samples from vertex candidates and caps visual markers");
+    const auto frozenDisplay=f.feature->GetState().sceneDisplay;display.sceneDisplay->parts[0].selectedItem="missing-item";
+    Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozenDisplay,
+        "missing report item cannot replace a valid inspection scene");
+    Check(!f.feature->GetSceneItem("inspection","missing-item"),"unknown report item selection is empty");
+    display.sceneDisplay->parts[0].selectedItem=selectedItem;const auto otherAlignment=f.Solve();display.sceneDisplay->parts[0].alignmentResult=otherAlignment.result;
+    Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozenDisplay,
+        "inspection from another alignment cannot be silently attached to a scene part");display.sceneDisplay->parts[0].alignmentResult=alignment.result;
+
+
     if (hasSectionMesh && report && again) {
         const auto trace=report->report->geometries[1].section;
         Check(trace && trace==again->report->geometries[1].section && trace->sourceTriangleCount==64,
@@ -642,6 +664,7 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"inspection source changes while worker is pending");
     f.Drain();
     Check(evaluated.status==AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.inspectionResult),"stale inspection is not published");
+    Check(!f.feature->GetState().isSceneDisplayReady && !f.feature->GetSceneItem("inspection",selectedItem),"source revision change retires inspection display and selection");
     const auto historical=f.feature->GetInspection(reportRef);
     Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
