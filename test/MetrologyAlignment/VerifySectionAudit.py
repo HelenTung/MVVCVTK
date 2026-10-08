@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+sys.dont_write_bytecode = True
+from VerifyReportWrite import verify_report
 
 import numpy as np
 import scipy
@@ -177,6 +179,7 @@ def verify(path):
     require(result["sections"], "No real sections independently verified")
     result["numericalChecksPassed"] = True
     result["physicalAccuracyValidated"] = False
+    result["reportExports"] = verify_report(folder / "inspection-report.json", folder / "inspection-report.csv")
     destination = folder / "section-reference.json"
     require(not destination.exists(), "Reference evidence already exists; use a new audit run")
     destination.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

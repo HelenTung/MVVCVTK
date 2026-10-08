@@ -1,6 +1,7 @@
 #pragma once
 #include "Host/MetrologyAlignmentHostTypes.h"
 #include "Data/DataPayloads.h"
+#include <iosfwd>
 
 struct MetrologyReportRequest final {
     std::string id, title;
@@ -63,3 +64,23 @@ struct MetrologyReportResult final {
     std::shared_ptr<const MetrologyReport> report;
     std::string message;
 };
+enum class MetrologyReportFormat : std::uint8_t { Json, Csv };
+enum class MetrologyReportWriteStatus : std::uint8_t { Succeeded, InvalidInput, BudgetExceeded, Cancelled, IoError, InternalError };
+struct MetrologyReportWriteOptions final {
+    MetrologyReportFormat format=MetrologyReportFormat::Json;
+    std::optional<std::size_t> maxBytes;
+    bool includeDeviationSamples=false;
+    std::function<bool()> isCancelled;
+};
+struct MetrologyReportWriteResult final {
+    MetrologyReportWriteStatus status=MetrologyReportWriteStatus::InvalidInput;
+    // 已由 streambuf 确认接收的字节；流抛异常时不能推断异常调用内部已写多少字节。
+    std::size_t bytesWritten=0;
+    std::string message;
+};
+// 可在后台只读写出 GetReport 返回的冻结对象；不访问 Host/VTK，不构造整份字符串。
+// UTF-8 JSON 保留完整上下文；非有限浮点数用 {"numericState":"NaN|PositiveInfinity|NegativeInfinity"} 表达。
+// CSV 是尺寸/偏差统计视图（偏差行 verdict 属于整个评价）；以空白、公式前缀或单引号起始的文本前加单引号，JSON 保留原文。
+// 逐点偏差默认省略并明确标记；CSV 明细的非 Valid 测量值留空。失败可能留下前缀，调用方负责丢弃/原子提交。
+MetrologyReportWriteResult WriteMetrologyReport(const MetrologyReport &report,std::ostream &output,
+                                               const MetrologyReportWriteOptions &options={});

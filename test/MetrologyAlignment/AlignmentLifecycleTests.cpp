@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <stdexcept>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -683,6 +684,14 @@ void ReportLifecycle() {
     }
     Check(retained && retained->inspections[0].report->items[0].measured && retained->alignments[0].recipe,
         "frozen report values remain readable after feature and graph owner destruction");
+    if(retained) {
+        bool written=false;
+        std::thread background([&] {
+            std::ostringstream stream;const auto result=WriteMetrologyReport(*retained,stream);
+            written=result.status==MetrologyReportWriteStatus::Succeeded && stream.str().find("multi-alignment")!=std::string::npos;
+        });background.join();
+        Check(written,"frozen report exports on a background thread after Host destruction");
+    }
 }
 void AutomaticReferenceLifecycle() {
     auto views = std::make_shared<Views>();

@@ -115,6 +115,21 @@ set_target_properties(mvvcvtk_alignment_section_tests PROPERTIES
 add_test(NAME MetrologyAlignment.Section COMMAND mvvcvtk_alignment_section_tests)
 SetTestRuntime(MetrologyAlignment.Section mvvcvtk_alignment_section_tests)
 
+add_executable(mvvcvtk_metrology_report_write_tests MetrologyReportWriteTests.cpp)
+set(MVVCVTK_METROLOGY_REFERENCE_PYTHON "" CACHE FILEPATH "Optional Python 3.11+ with numpy/scipy for independent real-section verification; test-only")
+target_link_libraries(mvvcvtk_metrology_report_write_tests PRIVATE MVVCVTK::MetrologyAlignment)
+SetTargetDefaults(mvvcvtk_metrology_report_write_tests)
+set_target_properties(mvvcvtk_metrology_report_write_tests PROPERTIES PROJECT_LABEL MetrologyReportWriteTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.ReportWrite COMMAND mvvcvtk_metrology_report_write_tests "${CMAKE_CURRENT_BINARY_DIR}/report-write-$<CONFIG>")
+SetTestRuntime(MetrologyAlignment.ReportWrite mvvcvtk_metrology_report_write_tests)
+if(MVVCVTK_METROLOGY_REFERENCE_PYTHON)
+    set_tests_properties(MetrologyAlignment.ReportWrite PROPERTIES FIXTURES_SETUP metrology_report_write)
+    add_test(NAME MetrologyAlignment.ReportWriteParse COMMAND "${MVVCVTK_METROLOGY_REFERENCE_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/VerifyReportWrite.py" "${CMAKE_CURRENT_BINARY_DIR}/report-write-$<CONFIG>/fixture.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/report-write-$<CONFIG>/fixture.csv" --fixture)
+    set_tests_properties(MetrologyAlignment.ReportWriteParse PROPERTIES FIXTURES_REQUIRED metrology_report_write)
+endif()
+
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_executable(mvvcvtk_metrology_timepoint_audit MetrologyTimepointAudit.cpp)
     target_link_libraries(mvvcvtk_metrology_timepoint_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
@@ -124,7 +139,6 @@ if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
         PROJECT_LABEL MetrologyTimepointAudit FOLDER "MVVCVTK/test/Automation/Reference")
     vtk_module_autoinit(TARGETS mvvcvtk_metrology_timepoint_audit MODULES ${MVVCVTK_VTK_TARGETS})
     set(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST "" CACHE FILEPATH "Optional frozen RAW ROI timepoint manifest for public pipeline checks")
-    set(MVVCVTK_METROLOGY_REFERENCE_PYTHON "" CACHE FILEPATH "Optional Python 3.11+ with numpy/scipy for independent real-section verification; test-only")
     if(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST)
         if(MVVCVTK_METROLOGY_REFERENCE_PYTHON)
             add_test(NAME MetrologyAlignment.RealSurfaceControls COMMAND "${MVVCVTK_METROLOGY_REFERENCE_PYTHON}"

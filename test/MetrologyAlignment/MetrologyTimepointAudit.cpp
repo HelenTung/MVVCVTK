@@ -246,7 +246,8 @@ AlignmentResult Solve(MetrologyAlignmentHostFeature &feature,AlignmentRecipe rec
     Require(feature.SendRequest(run,[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Alignment was not admitted.");
     Wait(feature,completion,m.deadlineMs+1000); return completion->value;
 }
-bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
+bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out,
+                     std::vector<DataRevisionRef> &deviations) {
     if (!surface.payload || surface.validTriangles.empty()) { out<<"{\"attempted\":false}"; return false; }
     const auto started=std::chrono::steady_clock::now();
     AlignmentRecipe recipe; recipe.id="real-surface-rigid-control"; recipe.targetFrameId="control-reference"; recipe.unit=AlignmentUnit::Millimeter;
@@ -273,6 +274,17 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
         const double angle=std::atan2(std::hypot(t[9]-t[6],t[2]-t[8],t[4]-t[1])/2,(t[0]+t[5]+t[10]-1)/2);
         out<<",\"translationErrorMm\":"<<translation<<",\"rotationErrorRadians\":"<<angle;
         passed=result.status==AlignmentStatus::FullyDetermined && result.diagnostics.isQualityPassed && translation<1e-6 && angle<1e-6;
+    }
+    if(passed) {
+        AlignmentRequest evaluate;evaluate.action=AlignmentAction::EvaluateSurface;evaluate.deviation=AlignmentDeviationRequest{};
+        auto &p=*evaluate.deviation;p.alignmentResult=result.result;p.sourceTriangles=surface.validTriangles;p.referenceTriangles=surface.validTriangles;
+        p.requiresMeasurementQuality=true;p.reverseCoverage=false;p.maxDistance=1e-6;p.tolerance=std::array<double,2>{0,1e-6};
+        auto complete=std::make_shared<AlignmentCompletion>();
+        Require(feature.SendRequest(evaluate,[complete](AlignmentResult value) { complete->value=std::move(value);complete->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Identity deviation rejected.");
+        Wait(feature,complete,m.deadlineMs+1000);const auto field=feature.GetDeviation(complete->value.deviationResult);
+        Require(field && field->isCurrent && field->forward->statistics.hasValues && field->forward->statistics.maximum<=1e-6,
+            "Identity deviation exceeds its numerical control tolerance.");
+        deviations.push_back(field->result);out<<",\"deviationSamples\":"<<field->forward->samples.size();
     }
     out<<",\"numericalControlPassed\":"<<(passed ? "true" : "false")<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"RIGID_CONTROL status="<<unsigned(result.status)<<" rms="<<result.diagnostics.rms<<'\n'<<std::flush; return passed;
@@ -444,7 +456,8 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
     return report && report->isCurrent && succeeded>0;
 }
 void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,
-                   const Manifest &manifest,const std::vector<DataRevisionRef> &inspections,std::ostream &out) {
+                   const Manifest &manifest,const std::vector<DataRevisionRef> &inspections,const std::vector<DataRevisionRef> &deviations,
+                   std::ostream &out,const std::filesystem::path &folder) {
     const auto started=std::chrono::steady_clock::now();
     const auto scalarOwners=[&](const DataRevisionRef &ref) {
         const auto node=data.GetDataGraph().view->GetData(ref);
@@ -454,6 +467,7 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
     std::vector<long> before; for (const auto &surface:surfaces) before.push_back(scalarOwners(surface.source));
     const auto commit=data.GetDataGraph().commitId;
     MetrologyReportRequest request; request.id="real-ct-inspection"; request.title="Frozen real ROI measurement contexts"; request.inspections=inspections;
+    request.deviations=deviations;
     const auto captured=feature.GetReport(request);
     Require(captured.status==AlignmentStatus::FullyDetermined && captured.report && captured.report->capturedCommit==commit &&
         captured.report->wereInputsCurrentAtCapture && captured.report->inspections.size()==inspections.size(),"Real report capture failed.");
@@ -477,7 +491,19 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
             owner->sourceToTarget==inspection.sourceToTarget,"Captured evaluation lost sharing or coordinate owner.");
     }
     out<<"],\"sourceScalarOwnershipUnchanged\":true,\"sharedInspectionStorageChecked\":true,\"elapsedMs\":"
-       <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+       <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<",\"streamExports\":[";
+    for(const auto format:{MetrologyReportFormat::Json,MetrologyReportFormat::Csv}) {
+        if(format==MetrologyReportFormat::Csv)out<<',';
+        const auto file=format==MetrologyReportFormat::Json ? "inspection-report.json" : "inspection-report.csv";
+        Require(!std::filesystem::exists(folder/file),"Report export destination already exists.");
+        std::ofstream destination(folder/file,std::ios::binary);MetrologyReportWriteOptions options;options.format=format;
+        options.maxBytes=manifest.workingLimit;options.includeDeviationSamples=format==MetrologyReportFormat::Json;
+        const auto begin=std::chrono::steady_clock::now();const auto written=WriteMetrologyReport(report,destination,options);destination.close();
+        Require(written.status==MetrologyReportWriteStatus::Succeeded && bool(destination) && std::filesystem::file_size(folder/file)==written.bytesWritten,"Report stream export failed.");
+        out<<"{\"file\":"<<Json(file)<<",\"bytes\":"<<written.bytesWritten<<",\"elapsedMs\":"
+           <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count()<<'}';
+    }
+    out<<"]}";
 }
 void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
     if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
@@ -545,13 +571,14 @@ int wmain(int argc,wchar_t **argv) {
         std::vector<Surface> surfaces;
         for (std::size_t i=0;i<manifest.scans.size();++i) { if (i) out<<','; surfaces.push_back(Determine(*data,surfaceFeature,manifest.scans[i],manifest,out,folder)); }
         out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
-        out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out);
+        std::vector<DataRevisionRef> deviations;
+        out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out,deviations);
         std::vector<DataRevisionRef> reports;
         out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out,reports); else out<<"null";
         out<<",\"sectionInspections\":["; bool sectionsPassed=true;
         for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder,reports) && sectionsPassed; }
         out<<']';
-        out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,out);
+        out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,deviations,out,folder);
         const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
         out.close();
