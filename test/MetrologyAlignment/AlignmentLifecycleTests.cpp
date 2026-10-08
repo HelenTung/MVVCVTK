@@ -5,6 +5,7 @@
 #include "AlignmentInspectionData.h"
 #include "AlignmentReport.h"
 #include "AlignmentVoxelVolumeData.h"
+#include "Host/FeatureModelTransformPort.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentPrealignTestSupport.h"
@@ -78,7 +79,7 @@ class Views final : public FeatureViewDirectory {
         return {};
     }
 };
-class WorkControl final : public FeatureHostControl {
+class WorkControl : public FeatureHostControl {
   public:
     bool SetActiveViews(const std::vector<std::string>&) override { return true; }
     bool SetViewStatus(const std::vector<std::string>&, const std::string&) override { return true; }
@@ -88,6 +89,33 @@ class WorkControl final : public FeatureHostControl {
     bool SendOwnerComplete(std::function<void()>) override { return false; }
     bool SendWorkAvailable() override { ++notifications; return true; }
     std::atomic<int> notifications{0};
+};
+class PoseControl final : public WorkControl,public FeatureModelTransformPort {
+public:
+    ModelTransformSnapshot state;AlignmentMatrix queued=alignmentIdentity;bool cancel=false,rejectCommit=false,rejectStopOnce=false,throwAfterQueue=false,throwStart=false;
+    PoseControl() { state.sessionGeneration=1;state.bindingRevision=1; }
+    std::optional<ModelTransformSnapshot> GetTransformState() const override { return state; }
+    std::optional<std::uint64_t> StartTransform(const ModelTransformSnapshot &expected) override {
+        if(throwStart)throw std::runtime_error("start pose fault");
+        if(state.editToken || expected.dataRevision!=state.dataRevision || expected.transformRevision!=state.transformRevision)return {};
+        state.editToken=++next;cancel=false;return state.editToken;
+    }
+    bool SetTransformPreview(std::uint64_t,std::uint64_t,const AlignmentMatrix &) override { return false; }
+    bool SetTransformCommit(std::uint64_t token,std::uint64_t,const AlignmentMatrix &matrix) override {
+        if(rejectCommit || token!=state.editToken)return false;queued=matrix;state.hasPending=true;
+        if(throwAfterQueue)throw std::runtime_error("queued pose fault");return true;
+    }
+    bool StopTransform(std::uint64_t token) override {
+        if(rejectStopOnce){rejectStopOnce=false;return false;}
+        if(!token || token!=state.editToken)return false;cancel=true;state.hasPending=true;return true;
+    }
+    void Frame() {
+        if(!state.hasPending)return;
+        if(!cancel){state.modelToWorld=queued;state.worldToModel=AlignmentMath::Inverse(queued);++state.transformRevision;}
+        state.completedToken=state.editToken;state.editToken=0;state.hasPending=false;
+        state.completion=cancel ? ModelTransformStatus::Cancelled : ModelTransformStatus::Committed;
+    }
+private: std::uint64_t next=0;
 };
 struct Fixture final {
     std::shared_ptr<FaultDataPort> data = std::make_shared<FaultDataPort>();
@@ -616,6 +644,55 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
 }
+void ModelPoseLifecycle() {
+    {
+        Fixture f;const auto solved=f.Solve();AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
+        Check(f.feature->SendRequest(apply).status==AlignmentAdmissionStatus::Unavailable,"data-only attachment does not promise model rendering");
+    }
+    auto host=std::make_shared<PoseControl>();Fixture f({},host);host->state.dataRevision=f.input.mesh;
+    const auto solved=f.Solve();const auto archive=f.feature->GetArchive(solved.result);const auto active=f.feature->GetState().activeResult;
+    const auto graphBefore=f.data->GetDataGraph().commitId;const auto *vertices=f.mesh->GetVertices().data();
+    AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
+    int calls=0;AlignmentResult completed;
+    const auto start=[&] { return f.feature->SendRequest(apply,[&](AlignmentResult r){completed=std::move(r);++calls;}); };
+    auto wrong=host->state.dataRevision;host->state.dataRevision=f.input.scopeData;
+    Check(start().status==AlignmentAdmissionStatus::InvalidRequest,"model pose refuses a different displayed revision");host->state.dataRevision=wrong;
+    host->throwStart=true;int faultCalls=0;
+    const auto fault=f.feature->SendRequest(apply,[&](AlignmentResult r){++faultCalls;Check(r.status==AlignmentStatus::InternalError,"pose start exception is explicit");});
+    Check(fault.status==AlignmentAdmissionStatus::Accepted && faultCalls==1,"pre-token exception preserves exactly-once callback ownership");host->throwStart=false;
+    const auto admitted=start();Check(admitted.status==AlignmentAdmissionStatus::Accepted && calls==0 && f.feature->GetState().isBusy,
+        "model pose remains pending until Host frame acknowledgement");
+    f.feature->OnHostTick();Check(calls==0 && host->state.modelToWorld==alignmentIdentity,"queued pose is not reported as applied");
+    Check(start().status==AlignmentAdmissionStatus::Busy,"pending pose serializes feature work");
+    host->Frame();f.feature->OnHostTick();
+    Check(calls==1 && completed.status==AlignmentStatus::FullyDetermined && completed.isModelPoseApplied && archive &&
+        host->state.modelToWorld==archive->sourceToTarget && f.feature->GetState().modelPose.isCurrent,"acknowledged absolute pose matches formal result");
+    Check(f.feature->GetState().activeResult==active && f.data->GetDataGraph().commitId==graphBefore && f.mesh->GetVertices().data()==vertices,
+        "display pose changes no data graph, active result or mesh storage");
+    Check(!GetDataRevisionRefValid(f.feature->GetScopeState("unrelated").modelPose.alignmentResult),"scope state does not attribute model pose to another part");
+    host->state.modelToWorld[3]+=2;++host->state.transformRevision;
+    Check(!f.feature->GetState().modelPose.isCurrent,"external visual edit invalidates pose-current claim");
+    const auto previous=host->state.modelToWorld;
+    auto requestId=start().requestId;AlignmentRequest cancel;cancel.action=AlignmentAction::Cancel;cancel.targetRequestId=requestId;
+    host->rejectStopOnce=true;Check(f.feature->SendRequest(cancel).status==AlignmentAdmissionStatus::Accepted,"transient stop rejection still accepts queued cancellation");f.feature->OnHostTick();host->Frame();f.feature->OnHostTick();
+    Check(calls==2 && completed.status==AlignmentStatus::Cancelled && host->state.modelToWorld==previous,"transient stop rejection retains ownership until cancellation frame commits");
+    host->rejectCommit=true;Check(start().status==AlignmentAdmissionStatus::Accepted,"commit failure retains accepted completion");host->Frame();f.feature->OnHostTick();host->rejectCommit=false;
+    Check(calls==3 && completed.status==AlignmentStatus::InternalError && !completed.isModelPoseApplied,"failed pose commit completes without fabricated application");
+    host->throwAfterQueue=true;Check(start().status==AlignmentAdmissionStatus::Accepted,"exception after queue keeps token and callback");host->Frame();f.feature->OnHostTick();host->throwAfterQueue=false;
+    Check(calls==4 && completed.status==AlignmentStatus::InternalError && !host->state.editToken,"queued exception cancellation releases pose token");
+    Check(start().status==AlignmentAdmissionStatus::Accepted,"stale pose case starts");DataTransaction changed;
+    changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"pose dependency changes before frame");
+    f.feature->OnHostTick();host->Frame();f.feature->OnHostTick();
+    Check(calls==5 && completed.status==AlignmentStatus::Stale && !completed.isModelPoseApplied,"stale candidate cancels before application");
+    {
+        auto otherHost=std::make_shared<PoseControl>();Fixture other({},otherHost);otherHost->state.dataRevision=other.input.mesh;
+        apply.resultRef=other.Solve().result;int detachedCalls=0;
+        Check(other.feature->SendRequest(apply,[&](AlignmentResult r){++detachedCalls;Check(r.status==AlignmentStatus::Cancelled,"detach cancels pose");}).status==AlignmentAdmissionStatus::Accepted,"detach pose starts");
+        Check(!other.feature->DetachHost(),"detach waits for pose token retirement");otherHost->Frame();other.feature->OnHostTick();
+        Check(detachedCalls==1 && other.feature->DetachHost(),"pose completion occurs exactly once before detach releases port");
+    }
+}
 void VoxelVolumeLifecycle() {
     std::shared_ptr<const MetrologyReport> retained;std::weak_ptr<const std::vector<std::uint8_t>> sourceLifetime;
     {
@@ -952,6 +1029,7 @@ int main() {
     run("InspectionLifecycle", [] { InspectionLifecycle(); });
     run("ReportLifecycle", ReportLifecycle);
     run("VoxelVolumeLifecycle", VoxelVolumeLifecycle);
+    run("ModelPoseLifecycle", ModelPoseLifecycle);
     run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);

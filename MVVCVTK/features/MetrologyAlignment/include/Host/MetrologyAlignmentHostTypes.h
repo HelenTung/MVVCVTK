@@ -470,6 +470,7 @@ struct AlignmentResult final {
     DataRevisionRef deviationResult;
     DataRevisionRef inspectionResult;
     DataRevisionRef voxelVolumeResult;
+    bool isModelPoseApplied=false;
 };
 
 struct AlignmentArchive final {
@@ -505,7 +506,10 @@ enum class AlignmentAction : std::uint8_t {
     EvaluateSurface,
     SetDeviationDisplay,
     Inspect,
-    EvaluateVoxelVolume
+    EvaluateVoxelVolume,
+    // 以 resultRef 的绝对计量矩阵替换当前 Host 模型显示姿态；不是单部件变换。
+    // 仅当前显示数据等于结果源体或源网格时接纳，帧提交完成后才回调成功；不重采样。
+    ApplyModelPose
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -553,6 +557,14 @@ struct AlignmentConfig final {
     bool isOverlayVisible = true;
 };
 
+struct AlignmentModelPoseState final {
+    DataRevisionRef alignmentResult,displayedData;
+    AlignmentMatrix modelToWorld=alignmentIdentity;
+    std::uint64_t transformRevision=0,sessionGeneration=0;
+    DataBindingRevision bindingRevision=0;
+    AlignmentStatus status=AlignmentStatus::Unavailable;
+    bool isPending=false,isCurrent=false;
+};
 struct AlignmentState final {
     bool isAttached = false;
     bool isBusy = false;
@@ -565,4 +577,5 @@ struct AlignmentState final {
     AlignmentStatus lastStatus = AlignmentStatus::Unavailable;
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
     bool isDeviationDisplayReady = false;
+    AlignmentModelPoseState modelPose;
 };

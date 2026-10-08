@@ -11,6 +11,7 @@
 #include "AlignmentInspectionData.h"
 #include "AlignmentReport.h"
 #include "AlignmentVoxelVolumeData.h"
+#include "AlignmentModelPose.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
@@ -110,6 +111,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             m_data = context.data;
             m_views = context.views;
             m_host = context.host;
+            m_modelPose.Attach(std::dynamic_pointer_cast<FeatureModelTransformPort>(context.host));
             m_state.isAttached = true;
             return true;
         } catch (...) {
@@ -122,6 +124,11 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || m_isCommitting)
             return false;
         m_state.isStopping = true;
+        if(m_modelPose.GetPending()) {
+            (void)m_modelPose.Cancel();OnHostTick();
+            if(!m_state.isAttached)return true;
+            if(m_modelPose.GetPending())return false;
+        }
         if (m_task) {
             m_task->work.cancelled->store(true);
             if (!m_task->isDone.load(std::memory_order_acquire))
@@ -140,6 +147,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         m_data.reset();
         m_views.reset();
         m_host.reset();
+        m_modelPose.Clear();
         m_dirty.reset();
         m_state.isAttached = false;
         m_state.isStopping = false;
@@ -150,6 +158,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner())
             return {};
         auto state = m_state;
+        if(m_data)state.modelPose=m_modelPose.GetState(m_data->GetDataGraph());
         state.deviationDisplay = m_deviationDisplay.GetRequest();
         state.isDeviationDisplayReady = m_data && m_deviationDisplay.GetReady(m_data->GetDataGraph());
         if (m_data && GetDataRevisionRefValid(state.activeResult)) {
@@ -209,6 +218,10 @@ class MetrologyAlignmentHostFeature::Impl final {
         const auto graph = m_data->GetDataGraph();
         const auto binding = AlignmentData::GetBinding(graph, scope);
         state.activeResult = binding.target.value_or(DataRevisionRef{});
+        if(GetDataRevisionRefValid(state.modelPose.alignmentResult)) {
+            const auto pose=AlignmentData::GetResult(graph,state.modelPose.alignmentResult);
+            if(!pose || pose->record.input.scope!=scope)state.modelPose={};
+        }
         const auto result = AlignmentData::GetResult(graph, state.activeResult);
         state.isCurrent =
             result && AlignmentData::GetExpectationsCurrent(graph, result->record.expectations);
@@ -271,7 +284,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::EvaluateVoxelVolume))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::ApplyModelPose))
             return {};
         if ((request.voxelVolume && request.action != AlignmentAction::EvaluateVoxelVolume) ||
             (request.inspection && request.action != AlignmentAction::Inspect) ||
@@ -283,14 +296,14 @@ class MetrologyAlignmentHostFeature::Impl final {
              request.action != AlignmentAction::Start &&
              request.action != AlignmentAction::SaveRecipe) ||
             (GetDataRevisionRefValid(request.resultRef) &&
-             request.action != AlignmentAction::Activate) ||
+             request.action != AlignmentAction::Activate && request.action != AlignmentAction::ApplyModelPose) ||
             (GetDataRevisionRefValid(request.restoredNominal) &&
              request.action != AlignmentAction::Restore) ||
             (request.archive && request.action != AlignmentAction::Restore) ||
             (request.action != AlignmentAction::Start &&
              request.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity}))
             return {};
-        if (m_task && request.action != AlignmentAction::Cancel)
+        if ((m_task || m_modelPose.GetPending()) && request.action != AlignmentAction::Cancel)
             return {AlignmentAdmissionStatus::Busy, 0};
         if (m_nextRequest == std::numeric_limits<std::uint64_t>::max())
             return {AlignmentAdmissionStatus::Unavailable, 0};
@@ -298,6 +311,13 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentResult result;
         result.requestId = id;
         try {
+            if(request.action==AlignmentAction::ApplyModelPose) {
+                if(request.input || request.recipe || request.isVisible)return {};
+                CommitGuard guard(m_isCommitting);
+                const auto admission=m_modelPose.Begin(m_data->GetDataGraph(),request.resultRef,id,callback,m_config);
+                if(admission.status==AlignmentAdmissionStatus::Accepted) { m_nextRequest=id;m_state.requestId=id;m_state.isBusy=true;NotifyOwner(m_host); }
+                return admission;
+            }
             if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference ||
                 request.action == AlignmentAction::EvaluateSurface || request.action == AlignmentAction::Inspect || request.action==AlignmentAction::EvaluateVoxelVolume) {
                 std::shared_ptr<Task> task;
@@ -395,10 +415,14 @@ class MetrologyAlignmentHostFeature::Impl final {
                 result = m_deviationDisplay.Set(*m_data,m_views.get(),m_config,*request.deviationDisplay);
                 result.requestId = id;
             } else if (request.action == AlignmentAction::Cancel) {
-                if (!m_task || (request.targetRequestId && request.targetRequestId != m_task->id) ||
-                    request.input || request.recipe || request.archive || request.isVisible)
-                    return {};
-                m_task->work.cancelled->store(true);
+                if(request.input || request.recipe || request.archive || request.isVisible)return {};
+                if(m_modelPose.GetPending()) {
+                    CommitGuard guard(m_isCommitting);
+                    if(!m_modelPose.Cancel(request.targetRequestId))return {};
+                } else {
+                    if(!m_task || (request.targetRequestId && request.targetRequestId!=m_task->id))return {};
+                    m_task->work.cancelled->store(true);
+                }
                 result.status = AlignmentStatus::Cancelled;
             } else if (request.action == AlignmentAction::SaveRecipe ||
                        request.action == AlignmentAction::Restore) {
@@ -534,6 +558,15 @@ class MetrologyAlignmentHostFeature::Impl final {
             if (GetDataRevisionRefValid(m_state.activeResult) && !GetState().isCurrent) {
                 m_state.isCurrent = false;
                 ClearDisplay();
+            }
+        }
+        if(m_modelPose.GetPending()) {
+            std::optional<AlignmentModelPose::Completion> completion;
+            { CommitGuard guard(m_isCommitting);completion=m_modelPose.Tick(m_data->GetDataGraph()); }
+            if(completion) {
+                m_state.isBusy=bool(m_task);m_state.lastStatus=completion->result.status;
+                SendComplete(std::move(completion->callback),std::move(completion->result));
+                return true;
             }
         }
         if (!m_task || !m_task->isDone.load(std::memory_order_acquire))
@@ -962,6 +995,7 @@ class MetrologyAlignmentHostFeature::Impl final {
     std::shared_ptr<Task> m_task;
     std::vector<OverlayBinding> m_overlays;
     AlignmentDeviationDisplayController m_deviationDisplay;
+    AlignmentModelPose m_modelPose;
 };
 
 MetrologyAlignmentHostFeature::MetrologyAlignmentHostFeature(AlignmentConfig config)

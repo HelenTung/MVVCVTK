@@ -16,6 +16,7 @@ target_sources(metrology_alignment
         src/AlignmentAllocation.h src/AlignmentSection.h src/AlignmentSection.cpp
         src/AlignmentInspectionData.h src/AlignmentInspectionData.cpp
         src/AlignmentReport.h src/AlignmentReport.cpp
+        src/AlignmentModelPose.h src/AlignmentModelPose.cpp
         src/AlignmentVoxelVolume.h src/AlignmentVoxelVolume.cpp
         src/AlignmentVoxelVolumeData.h src/AlignmentVoxelVolumeData.cpp
         src/MetrologyReportWriter.cpp
