@@ -58,7 +58,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME SurfaceDetermination
         PROJECT_LABEL SurfaceDetermination
-        FOLDER "MVVCVTK/Host/Features"
+        FOLDER "MVVCVTK/Features"
 )
 source_group(
     TREE "${CMAKE_CURRENT_SOURCE_DIR}"

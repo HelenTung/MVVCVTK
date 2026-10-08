@@ -33,5 +33,5 @@ target_link_libraries(wall_thickness PUBLIC MVVCVTK::FeatureSPI MVVCVTK::HostAPI
 SetTargetDefaults(wall_thickness)
 target_compile_options(wall_thickness PRIVATE /fp:strict)
 set_target_properties(wall_thickness PROPERTIES OUTPUT_NAME WallThickness
-    PROJECT_LABEL WallThickness FOLDER "MVVCVTK/Host/Features")
+    PROJECT_LABEL WallThickness FOLDER "MVVCVTK/Features")
 unset(_wall_headers)

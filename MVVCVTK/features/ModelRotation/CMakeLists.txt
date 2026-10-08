@@ -22,4 +22,4 @@ target_link_libraries(model_rotation
 SetTargetDefaults(model_rotation)
 SetApiDefaults(model_rotation)
 set_target_properties(model_rotation PROPERTIES
-    OUTPUT_NAME ModelRotation PROJECT_LABEL ModelRotation FOLDER "MVVCVTK/Host/Features")
+    OUTPUT_NAME ModelRotation PROJECT_LABEL ModelRotation FOLDER "MVVCVTK/Features")

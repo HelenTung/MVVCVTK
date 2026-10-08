@@ -9,7 +9,7 @@ set_target_properties(tomopy_ring PROPERTIES
     C_STANDARD 11 C_STANDARD_REQUIRED YES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     MSVC_DEBUG_INFORMATION_FORMAT Embedded
-    FOLDER "MVVCVTK/Host/Features/Private")
+    FOLDER "MVVCVTK/Features/Private")
 
 add_library(artifact_reduction STATIC)
 add_library(MVVCVTK::ArtifactReduction ALIAS artifact_reduction)
@@ -43,6 +43,6 @@ SetTargetDefaults(artifact_reduction)
 set_target_properties(artifact_reduction PROPERTIES
     OUTPUT_NAME ArtifactReduction
     PROJECT_LABEL ArtifactReduction
-    FOLDER "MVVCVTK/Host/Features"
+    FOLDER "MVVCVTK/Features"
 )
 # 仓内目标：不 staging 到 SDK，不 install/export，不添加 package component。

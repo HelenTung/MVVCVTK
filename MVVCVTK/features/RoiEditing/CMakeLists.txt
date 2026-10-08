@@ -10,5 +10,5 @@ target_link_libraries(roi_editing PUBLIC MVVCVTK::FeatureSPI
     PRIVATE MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(roi_editing)
 SetApiDefaults(roi_editing)
-set_target_properties(roi_editing PROPERTIES OUTPUT_NAME RoiEditing PROJECT_LABEL RoiEditing FOLDER "MVVCVTK/Host/Features")
+set_target_properties(roi_editing PROPERTIES OUTPUT_NAME RoiEditing PROJECT_LABEL RoiEditing FOLDER "MVVCVTK/Features")
 # 仅仓内构建；不 install/export，不增加 SDK 产品或公开物理头。

@@ -17,4 +17,4 @@ target_link_libraries(metrology_alignment PUBLIC MVVCVTK::FeatureSPI
         VTK::CommonDataModel VTK::RenderingCore)
 SetTargetDefaults(metrology_alignment)
 set_target_properties(metrology_alignment PROPERTIES
-    OUTPUT_NAME MetrologyAlignment PROJECT_LABEL MetrologyAlignment FOLDER "MVVCVTK/Host/Features")
+    OUTPUT_NAME MetrologyAlignment PROJECT_LABEL MetrologyAlignment FOLDER "MVVCVTK/Features")

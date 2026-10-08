@@ -35,7 +35,7 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME GapKernel
         PROJECT_LABEL GapKernel
-        FOLDER "MVVCVTK/Host/Features/Private"
+        FOLDER "MVVCVTK/Features/Private"
 )
 # build tree 与 SDK install tree 都让私有 kernel 和 DefX runtime 成对出现；
 # C++ 加载器据此解析唯一绝对路径，不修改外部供应商根中的原始工件。
@@ -101,7 +101,7 @@ set_target_properties(
         OUTPUT_NAME GapAnalysis
         EXPORT_NAME GapAnalysis
         PROJECT_LABEL GapAnalysis
-        FOLDER "MVVCVTK/Host/Features"
+        FOLDER "MVVCVTK/Features"
 )
 target_sources(
     gap_analysis

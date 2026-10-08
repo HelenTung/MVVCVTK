@@ -23,6 +23,7 @@
 #include <chrono>
 #include <future>
 #include <iostream>
+#include <set>
 #include <thread>
 
 namespace {
@@ -227,7 +228,8 @@ bool GetNestedFrameCompletions()
     if(!Check(fa==RenderFrameLifetime::Create(first),"duplicate renderer frame trackers"))return false;
     struct Probe final {
         std::shared_ptr<RenderFrameLifetime> frames;vtkRenderWindow* nested=nullptr;
-        int queued=0,completed=0;std::uint64_t id=0;bool valid=true;
+        int queued=0,completed=0;bool valid=true;
+        std::set<std::uint64_t> frameIds;
         std::vector<RenderFrameOutcome> outcomes;
         int pendingRenders = 0;
     } pa{fa,b},pb{fb};
@@ -237,8 +239,9 @@ bool GetNestedFrameCompletions()
             auto* probe=static_cast<Probe*>(data);
             probe->valid=probe->frames->QueueCompletion([probe](RenderFrameOutcome outcome) {
                 probe->outcomes.push_back(outcome);
-                ++probe->completed;probe->valid=probe->valid&&outcome.isSucceeded&&outcome.isPresented&&outcome.frameId>probe->id;
-                probe->id=outcome.frameId;
+                // 跨 OpenGL context 的 fence 完成可乱序；验证非零、唯一身份及真实成功呈现。
+                ++probe->completed;probe->valid=probe->valid&&outcome.isSucceeded&&outcome.isPresented
+                    &&outcome.frameId!=0&&probe->frameIds.insert(outcome.frameId).second;
                 RenderFrameLifetime::PollAll();
                 if (probe->nested) {
                     // VTK 会忽略忙窗口的递归 Render；保留请求，返回外层后再执行。
@@ -260,7 +263,9 @@ bool GetNestedFrameCompletions()
         RenderFrameLifetime::PollAll();sendPending();std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     first->RemoveObserver(ta);second->RemoveObserver(tb);
-    const bool passed=pa.valid&&pb.valid&&pa.queued==frameCount&&pa.completed==frameCount&&pb.queued==frameCount&&pb.completed==frameCount;
+    bool distinct=true;
+    for(const auto id:pa.frameIds)distinct=distinct&&pb.frameIds.count(id)==0;
+    const bool passed=pa.valid&&pb.valid&&distinct&&pa.queued==frameCount&&pa.completed==frameCount&&pb.queued==frameCount&&pb.completed==frameCount;
     if (!passed) {
         for (const auto* probe : {&pa, &pb}) {
             std::cerr << "Nested frame probe queued=" << probe->queued << " completed=" << probe->completed

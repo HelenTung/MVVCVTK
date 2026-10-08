@@ -77,7 +77,7 @@ set_target_properties(
         OUTPUT_NAME OrthogonalCrop
         EXPORT_NAME OrthogonalCrop
         PROJECT_LABEL OrthogonalCrop
-        FOLDER "MVVCVTK/Host/Features"
+        FOLDER "MVVCVTK/Features"
 )
 target_sources(
     orthogonal_crop

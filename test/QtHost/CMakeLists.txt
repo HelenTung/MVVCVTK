@@ -271,6 +271,9 @@ if(TARGET MVVCVTK::GapAnalysis AND TARGET MVVCVTK::SurfaceDetermination AND TARG
     target_link_libraries(feature_render_parity_tests PRIVATE MVVCVTK::Host MVVCVTK::SurfaceDetermination
         MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
     SetTargetDefaults(feature_render_parity_tests)
+    set_target_properties(feature_render_parity_tests PROPERTIES
+        PROJECT_LABEL FeatureRenderParityTests
+        FOLDER "MVVCVTK/test/Automation")
     vtk_module_autoinit(TARGETS feature_render_parity_tests MODULES ${MVVCVTK_VTK_TARGETS})
     add_test(NAME Feature.RenderParity COMMAND feature_render_parity_tests)
     SetTestRuntime(Feature.RenderParity feature_render_parity_tests)
