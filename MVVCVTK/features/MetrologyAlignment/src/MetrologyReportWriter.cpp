@@ -1,4 +1,5 @@
 #include "Host/MetrologyReport.h"
+#include "AlignmentVoxelVolumeData.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -142,6 +143,13 @@ const char *Enum(T value, std::initializer_list<const char *> names) {
   const auto index = static_cast<std::size_t>(value);
   Require(index < names.size(), "Unknown report enum value.");
   return names.begin()[index];
+}
+const char *Name(VoxelVolumeMethod v) {
+  return Enum(v, {"StoredValueRange", "Labels"});
+}
+const char *Name(VoxelVolumeValidity v) {
+  return Enum(v, {"Complete", "IncompleteSamples", "TouchesBoundary",
+                  "EmptySelection"});
 }
 const char *Name(AlignmentUnit v) {
   return Enum(v, {"ModelUnit", "Millimeter", "Meter"});
@@ -968,6 +976,56 @@ template <> struct Codec<AlignmentDeviationSnapshot> {
     j.End();
   }
 };
+template <> struct Codec<VoxelVolumeRequest> {
+  static void Write(Json &j, const VoxelVolumeRequest &v) {
+    j.Object();
+    j.Field("id", v.id);
+    j.Field("source", v.source);
+    j.Field("method", v.method);
+    j.Field("extent", v.extent);
+    j.Field("storedValueRange", v.storedValueRange);
+    j.Field("labels", v.labels);
+    j.Field("validityImage", v.validityImage);
+    j.Field("requireEnclosedSelection", v.requireEnclosedSelection);
+    j.End();
+  }
+};
+template <> struct Codec<VoxelVolumeStatistics> {
+  static void Write(Json &j, const VoxelVolumeStatistics &v) {
+    j.Object();
+    j.Field("evaluatedExtent", v.evaluatedExtent);
+    j.Field("total", v.total);
+    j.Field("selected", v.selected);
+    j.Field("unselected", v.unselected);
+    j.Field("masked", v.masked);
+    j.Field("noData", v.noData);
+    j.Field("nonFinite", v.nonFinite);
+    j.Field("invalidLabels", v.invalidLabels);
+    j.Field("cellVolumeMm3", v.cellVolumeMm3);
+    j.Field("observedVolumeMm3", v.observedVolumeMm3);
+    j.Field("volumeMm3", v.volumeMm3);
+    j.Field("touchesRegionBoundary", v.touchesRegionBoundary);
+    j.Field("validity", v.validity);
+    j.End();
+  }
+};
+template <> struct Codec<VoxelVolumeSnapshot> {
+  static void Write(Json &j, const VoxelVolumeSnapshot &v) {
+    j.Object();
+    j.Field("result", v.result);
+    j.Field("source", v.source);
+    j.Field("parameters", v.parameters);
+    j.Field("geometry", v.geometry);
+    j.Field("statistics", v.statistics);
+    j.Field("algorithmVersion", v.algorithmVersion);
+    j.Field("isCurrent", v.isCurrent);
+    j.Field("volumeUnit", std::string("mm^3"));
+    j.Field("scope",
+            std::string("selected full cells within evaluated index extent; "
+                        "not continuous surface or whole-part volume"));
+    j.End();
+  }
+};
 template <> struct Codec<MetrologyReportImage> {
   static void Write(Json &j, const MetrologyReportImage &v) {
     j.Object();
@@ -1006,7 +1064,7 @@ template <> struct Codec<MetrologyReportInput> {
 template <> struct Codec<MetrologyReport> {
   static void Write(Json &j, const MetrologyReport &v) {
     j.Object();
-    j.Field("format", std::string("mvvcvtk.metrology.report.json/1"));
+    j.Field("format", std::string("mvvcvtk.metrology.report.json/2"));
     j.Field("schemaVersion", v.schemaVersion);
     j.Field("id", v.id);
     j.Field("title", v.title);
@@ -1015,6 +1073,7 @@ template <> struct Codec<MetrologyReport> {
     j.Field("alignments", v.alignments);
     j.Field("inspections", v.inspections);
     j.Field("deviations", v.deviations);
+    j.Field("voxelVolumes", v.voxelVolumes);
     j.Field("inputs", v.inputs);
     j.Field("wereInputsCurrentAtCapture", v.wereInputsCurrentAtCapture);
     j.Field("estimatedMetadataBytes", v.estimatedMetadataBytes);
@@ -1032,8 +1091,9 @@ const MetrologyReportAlignment &Owner(const MetrologyReport &r,
   return *found;
 }
 void Validate(const MetrologyReport &r, Sink &sink) {
-  Require(r.schemaVersion == 1 && !r.id.empty() &&
-              r.capturedUnixMilliseconds > 0 && !r.alignments.empty(),
+  Require(r.schemaVersion == 2 && !r.id.empty() &&
+              r.capturedUnixMilliseconds > 0 &&
+              (!r.alignments.empty() || !r.voxelVolumes.empty()),
           "Invalid frozen report header.");
   for (std::size_t i = 0; i < r.alignments.size(); ++i) {
     sink.Check();
@@ -1046,6 +1106,32 @@ void Validate(const MetrologyReport &r, Sink &sink) {
     Require(std::all_of(a.sourceToTarget.begin(), a.sourceToTarget.end(),
                         [](double v) { return std::isfinite(v); }),
             "Non-finite report transform.");
+  }
+  for (const auto &v : r.voxelVolumes) {
+    sink.Check();
+    Require(AlignmentVoxelVolumeData::GetSnapshotValid(v),
+            "Invalid voxel volume report snapshot.");
+    const auto input =
+        std::find_if(r.inputs.begin(), r.inputs.end(),
+                     [&](const auto &i) { return i.revision == v.source; });
+    Require(input != r.inputs.end(), "Voxel volume source lineage is missing.");
+    if (v.parameters->method == VoxelVolumeMethod::StoredValueRange)
+      Require(input->image && AlignmentVoxelVolume::GetGeometrySame(
+                                  input->image->geometry, v.geometry),
+              "Voxel source geometry mismatch.");
+    else
+      Require(input->type == DataTypes::labelMap3D,
+              "Voxel label source type mismatch.");
+    if (v.parameters->validityImage) {
+      const auto validity =
+          std::find_if(r.inputs.begin(), r.inputs.end(), [&](const auto &i) {
+            return i.revision == *v.parameters->validityImage;
+          });
+      Require(validity != r.inputs.end() && validity->image &&
+                  AlignmentVoxelVolume::GetGeometrySame(
+                      validity->image->geometry, v.geometry),
+              "Voxel validity image lineage mismatch.");
+    }
   }
   for (const auto &v : r.inspections) {
     sink.Check();
@@ -1142,19 +1228,37 @@ public:
     }
     sink.Put("]\"");
   }
+  template <class Range> void Array(const Range &value) {
+    Begin();
+    sink.Put("\"[");
+    bool separator = false;
+    for (const auto item : value) {
+      if (separator)
+        sink.Put(",");
+      Number(sink, item);
+      separator = true;
+    }
+    sink.Put("]\"");
+  }
   void End() {
+    while (columns < 46)
+      Empty();
+    Require(columns == 46, "CSV column count mismatch.");
     sink.Put("\r\n");
     first = true;
+    columns = 0;
   }
 
 private:
   void Begin() {
+    ++columns;
     if (!first)
       sink.Put(",");
     first = false;
   }
   Sink &sink;
   bool first = true;
+  unsigned columns = 0;
 };
 void CsvReport(Sink &sink, const MetrologyReport &r) {
   Csv csv(sink);
@@ -1191,7 +1295,19 @@ void CsvReport(Sink &sink, const MetrologyReport &r) {
                            "closest_triangle",
                            "distance",
                            "area",
-                           "sample_state"})
+                           "sample_state",
+                           "source_volume",
+                           "validity_image",
+                           "voxel_method",
+                           "voxel_extent",
+                           "voxel_range",
+                           "voxel_labels",
+                           "voxel_spacing",
+                           "voxel_origin",
+                           "voxel_direction",
+                           "require_enclosed_selection",
+                           "touches_region_boundary",
+                           "algorithm_version"})
     csv.Cell(name);
   csv.End();
   const auto prefix = [&](const char *kind, const DataRevisionRef &result,
@@ -1218,6 +1334,71 @@ void CsvReport(Sink &sink, const MetrologyReport &r) {
       csv.Empty();
     csv.End();
   };
+  for (const auto &v : r.voxelVolumes) {
+    const auto &p = *v.parameters;
+    const auto &s = v.statistics;
+    const auto row = [&](const char *metric, const char *unit,
+                         std::optional<double> value,
+                         std::optional<std::uint64_t> count = {}) {
+      csv.Cell("voxel-volume");
+      csv.Cell(r.id);
+      csv.Integer(r.capturedCommit);
+      csv.Integer(r.capturedUnixMilliseconds);
+      csv.Boolean(r.wereInputsCurrentAtCapture);
+      csv.Cell(Ref(v.result));
+      for (int i = 0; i < 6; ++i)
+        csv.Empty();
+      csv.Cell(v.geometry.coordinateFrame);
+      csv.Cell("mm");
+      csv.Empty();
+      csv.Empty();
+      csv.Cell(p.id);
+      csv.Cell("selected cells in index ROI");
+      csv.Cell(metric);
+      csv.Cell(unit);
+      if (count)
+        csv.Integer(*count);
+      else
+        csv.Numeric(value);
+      for (int i = 0; i < 5; ++i)
+        csv.Empty();
+      csv.Cell(Name(s.validity));
+      csv.Boolean(v.isCurrent);
+      csv.Cell("Full-cell ROI estimate; not continuous surface or whole-part "
+               "volume");
+      for (int i = 0; i < 5; ++i)
+        csv.Empty();
+      csv.Cell(Ref(v.source));
+      if (p.validityImage)
+        csv.Cell(Ref(*p.validityImage));
+      else
+        csv.Empty();
+      csv.Cell(Name(p.method));
+      csv.Array(s.evaluatedExtent);
+      if (p.storedValueRange)
+        csv.Array(*p.storedValueRange);
+      else
+        csv.Empty();
+      csv.Array(p.labels);
+      csv.Array(v.geometry.spacing);
+      csv.Array(v.geometry.origin);
+      csv.Array(v.geometry.direction);
+      csv.Boolean(p.requireEnclosedSelection);
+      csv.Boolean(s.touchesRegionBoundary);
+      csv.Cell(v.algorithmVersion);
+      csv.End();
+    };
+    row("volume", "mm^3", s.volumeMm3);
+    row("observed-volume", "mm^3", s.observedVolumeMm3);
+    row("cell-volume", "mm^3", s.cellVolumeMm3);
+    row("total", "count", {}, s.total);
+    row("selected", "count", {}, s.selected);
+    row("unselected", "count", {}, s.unselected);
+    row("masked", "count", {}, s.masked);
+    row("no-data", "count", {}, s.noData);
+    row("non-finite", "count", {}, s.nonFinite);
+    row("invalid-labels", "count", {}, s.invalidLabels);
+  }
   for (const auto &a : r.alignments) {
     prefix("alignment", a.result, a);
     csv.Empty();

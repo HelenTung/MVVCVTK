@@ -617,6 +617,8 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
 }
 void VoxelVolumeLifecycle() {
+    std::shared_ptr<const MetrologyReport> retained;std::weak_ptr<const std::vector<std::uint8_t>> sourceLifetime;
+    {
     Fixture f;GridGeometry3D geometry;geometry.dimensions={3,3,3};geometry.extent={0,2,0,2,0,2};geometry.spacing={.5,.5,.5};
     std::vector<float> values(27,0);values[13]=100;
     auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(float));std::memcpy(bytes->data(),values.data(),bytes->size());
@@ -634,6 +636,17 @@ void VoxelVolumeLifecycle() {
         snapshot->statistics.volumeMm3 && std::abs(*snapshot->statistics.volumeMm3-.125)<1e-12 && !snapshot->statistics.touchesRegionBoundary,
         "public voxel endpoint freezes parameters and computes enclosed analytic cell volume without alignment");
     Check(f.feature->GetState().activeResult==before,"voxel measurement does not change active pose");
+    sourceLifetime=bytes;
+    const auto storageOwners=bytes.use_count();
+    MetrologyReportRequest volumeReport;volumeReport.id="voxel-only";volumeReport.voxelVolumes={resultRef};
+    const auto frozen=f.feature->GetReport(volumeReport);retained=frozen.report;
+    Check(frozen.report && frozen.report->alignments.empty() && frozen.report->voxelVolumes.size()==1 && snapshot &&
+        frozen.report->voxelVolumes[0].parameters==snapshot->parameters && bytes.use_count()==storageOwners,
+        "voxel-only report shares frozen parameters without retaining scalar storage or fabricating alignment");
+    auto duplicate=volumeReport;duplicate.voxelVolumes.push_back(resultRef);
+    Check(f.feature->GetReport(duplicate).status==AlignmentStatus::InvalidInput,"duplicate voxel report revisions rejected");
+    auto missing=volumeReport;missing.voxelVolumes[0].generation=999;
+    Check(f.feature->GetReport(missing).status==AlignmentStatus::InvalidInput,"missing voxel report source rejected");
     if(snapshot) {
         auto forged=*snapshot;forged.result={f.data->CreateDataEntityId(),1};forged.statistics.cellVolumeMm3=2;
         forged.statistics.observedVolumeMm3=2;forged.statistics.volumeMm3=2;
@@ -653,7 +666,16 @@ void VoxelVolumeLifecycle() {
     const auto history=f.feature->GetVoxelVolume(resultRef);
     Check(history && !history->isCurrent && snapshot && history->parameters==snapshot->parameters,"voxel history is readable with explicit staleness");
     Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"stale source cannot start new formal volume measurement");
+    const auto stale=f.feature->GetReport(volumeReport);
+    Check(stale.report && !stale.report->wereInputsCurrentAtCapture && !stale.report->voxelVolumes[0].isCurrent &&
+        frozen.report && frozen.report->wereInputsCurrentAtCapture,"voxel report freezes capture-time currentness");
+    }
+    Check(sourceLifetime.expired(),"frozen voxel report does not retain source bytes after Host destruction");
+    if(retained) { bool written=false;std::thread writer([&]{std::ostringstream stream;
+        written=WriteMetrologyReport(*retained,stream).status==MetrologyReportWriteStatus::Succeeded;});writer.join();
+        Check(written,"voxel-only frozen report writes after Host and source destruction"); }
 }
+
 void ReportLifecycle() {
     std::shared_ptr<const MetrologyReport> retained;
     {

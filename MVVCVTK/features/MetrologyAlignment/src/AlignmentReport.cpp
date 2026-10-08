@@ -2,6 +2,7 @@
 #include "AlignmentData.h"
 #include "AlignmentInspectionData.h"
 #include "AlignmentDeviationData.h"
+#include "AlignmentVoxelVolumeData.h"
 #include <set>
 #include <limits>
 #include <stdexcept>
@@ -33,11 +34,11 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
     MetrologyReportResult output;
     try {
         Require(graph.view && !request.id.empty() && request.id.size()<=128 && request.title.size()<=1024 &&
-            (!request.alignments.empty() || !request.inspections.empty() || !request.deviations.empty()),"Invalid report request.");
+            (!request.alignments.empty() || !request.inspections.empty() || !request.deviations.empty() || !request.voxelVolumes.empty()),"Invalid report request.");
         Budget budget{config.workingBytes.value_or(std::numeric_limits<std::size_t>::max())};
         budget.Add(4096); budget.Text(request.id); budget.Text(request.title);
         // 每项预留包括增长中同时存活的 vector 缓冲、去重节点和小快照。
-        for (const auto *refs:{&request.alignments,&request.inspections,&request.deviations}) {
+        for (const auto *refs:{&request.alignments,&request.inspections,&request.deviations,&request.voxelVolumes}) {
             budget.Add(refs->size(),4096); std::set<DataRevisionRef> unique;
             for (const auto &ref:*refs) Require(GetDataRevisionRefValid(ref) && unique.insert(ref).second,"Invalid or duplicate report result revision.");
         }
@@ -66,6 +67,15 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
             pendingAlignments.insert(snapshot->alignmentResult); addInput(ref);
             report->wereInputsCurrentAtCapture=report->wereInputsCurrentAtCapture && snapshot->isCurrent;
             report->deviations.push_back(*snapshot);
+        }
+        report->voxelVolumes.reserve(request.voxelVolumes.size());
+        for (const auto &ref:request.voxelVolumes) {
+            const auto snapshot=AlignmentVoxelVolumeData::GetResult(graph,ref);
+            Require(snapshot.has_value(),"Voxel volume report source is missing or inconsistent.");
+            budget.Text(snapshot->geometry.coordinateFrame); budget.Text(snapshot->algorithmVersion);
+            addInput(ref);
+            report->wereInputsCurrentAtCapture=report->wereInputsCurrentAtCapture && snapshot->isCurrent;
+            report->voxelVolumes.push_back(*snapshot);
         }
         for (const auto &ref:pendingAlignments) {
             budget.Add(4096); addInput(ref);

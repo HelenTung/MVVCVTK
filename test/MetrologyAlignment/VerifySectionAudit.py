@@ -205,6 +205,14 @@ def verify(path):
         require((volume["volumeMm3"] is None) == bool(nonfinite), "Unknown voxel volume completeness mismatch")
         result["voxelVolumes"].append({"id": volume["id"], "selected": selected, "total": total, "observedVolumeMm3": selected*cell,
                                        "touchesRegionBoundary": touches, "scope": "stored-threshold full-cell volume within ROI"})
+    frozen = json.loads((folder / "inspection-report.json").read_text(encoding="utf-8"))
+    reported = {v["result"]:v for v in frozen["voxelVolumes"]}
+    require(set(reported) == {v["result"] for v in volumes}, "Formal report voxel result coverage mismatch")
+    for volume in volumes:
+        v = reported[volume["result"]]; st = v["statistics"]; params = v["parameters"]
+        require(v["source"] == volume["source"] and params["storedValueRange"] == [volume["lower"], volume["upper"]] and
+                all(st[k] == volume[k] for k in ("total", "selected", "unselected", "masked", "noData", "nonFinite", "invalidLabels",
+                    "cellVolumeMm3", "observedVolumeMm3", "volumeMm3", "touchesRegionBoundary")), "Formal voxel report differs from independently checked result")
     result["reportExports"] = verify_report(folder / "inspection-report.json", folder / "inspection-report.csv")
     destination = folder / "section-reference.json"
     require(not destination.exists(), "Reference evidence already exists; use a new audit run")

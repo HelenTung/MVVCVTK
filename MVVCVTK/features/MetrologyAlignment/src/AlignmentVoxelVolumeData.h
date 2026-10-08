@@ -19,6 +19,7 @@ public:
     const VoxelVolumeSnapshot snapshot;
     const std::vector<DataExpectation> expectations;
 };
+bool GetSnapshotValid(const VoxelVolumeSnapshot &snapshot);
 bool SetType(TrustedDataPort &data);
 std::optional<Context> Prepare(const DataGraphSnapshot &graph,VoxelVolumeRequest request,const AlignmentConfig &config);
 DataTransaction BuildTransaction(TrustedDataPort &data,Context &context,const VoxelVolumeData &result,DataRevisionRef &ref);

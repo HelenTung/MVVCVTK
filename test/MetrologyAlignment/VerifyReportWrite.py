@@ -20,17 +20,28 @@ def verify_report(json_path, csv_path, fixture=False):
     def constant(value):
         raise ValueError("Nonstandard JSON numeric token: " + value)
     report = json.loads(json_path.read_text(encoding="utf-8"), parse_constant=constant)
-    require(report["format"] == "mvvcvtk.metrology.report.json/1", "Unknown report format")
+    require(report["format"] == "mvvcvtk.metrology.report.json/2", "Unknown report format")
     alignments = {a["result"]: a for a in report["alignments"]}
     inspections = {v["result"]: v for v in report["inspections"]}
     deviations = {v["result"]: v for v in report["deviations"]}
+    volumes = {v["result"]: v for v in report["voxelVolumes"]}
+    require(len(volumes) == len(report["voxelVolumes"]), "Duplicate volume identity")
     with csv_path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
-        require(len(reader.fieldnames) == 34 and len(set(reader.fieldnames)) == 34, "CSV column schema mismatch")
+        require(len(reader.fieldnames) == 46 and len(set(reader.fieldnames)) == 46, "CSV column schema mismatch")
         rows = list(reader)
     for row in rows:
         require(None not in row and all(v is not None for v in row.values()), "CSV record has wrong column count")
         require(text(row["report_id"]) == report["id"] and int(row["captured_commit"]) == report["capturedCommit"], "CSV report identity mismatch")
+        require(row["all_inputs_current_at_capture"] == str(report["wereInputsCurrentAtCapture"]).lower(), "CSV capture currentness mismatch")
+        if row["record_type"] == "voxel-volume":
+            require(all(row[k] == "" for k in ("alignment", "transform", "source_mesh", "reference", "source_frame", "target_frame",
+                    "source_to_target", "alignment_quality_passed", "nominal", "deviation", "lower_limit", "upper_limit", "verdict")),
+                    "Voxel CSV row fabricates alignment, nominal or tolerance")
+            continue
+        require(all(row[k] == "" for k in ("source_volume", "validity_image", "voxel_method", "voxel_extent", "voxel_range", "voxel_labels",
+                    "voxel_spacing", "voxel_origin", "voxel_direction", "require_enclosed_selection", "touches_region_boundary", "algorithm_version")),
+                "Nonvoxel CSV row contains voxel parameters")
         owner = alignments[text(row["alignment"])]
         require(json.loads(row["source_to_target"]) == owner["sourceToTarget"] and text(row["transform"]) == owner["transform"] and
                 text(row["source_mesh"]) == owner["input"]["mesh"] and text(row["reference"]) == owner["recipe"]["nominalData"],
@@ -85,7 +96,7 @@ def verify_report(json_path, csv_path, fixture=False):
     # 按记录身份逐项对账，不允许以行数总量代替覆盖，也不接受未知行。
     def row_key(row):
         kind = row["record_type"]
-        detail = text(row["item_id"]) if kind == "inspection" else row["vertex"] if kind.endswith("-sample") else row["metric"] if kind in ("deviation-forward", "deviation-reverse") else ""
+        detail = text(row["item_id"]) if kind == "inspection" else row["vertex"] if kind.endswith("-sample") else row["metric"] if kind in ("deviation-forward", "deviation-reverse", "voxel-volume") else ""
         return kind, text(row["result"]), detail
     indexed = {row_key(row): row for row in rows}
     require(len(indexed) == len(rows), "Duplicate CSV row identity")
@@ -144,15 +155,39 @@ def verify_report(json_path, csv_path, fixture=False):
                     valid = sample["state"] == "Valid"
                     number(row["distance"], sample["distance"] if valid else None); number(row["area"], sample["area"])
                     require(row["closest_triangle"] == (str(sample["closestTriangle"]) if valid else ""), "CSV nearest triangle mismatch")
+    for v in volumes.values():
+        p = v["parameters"]; st = v["statistics"]; g = v["geometry"]
+        require(p["source"] == v["source"] and v["volumeUnit"] == "mm^3", "JSON voxel source or unit mismatch")
+        require(st["total"] == sum(st[k] for k in ("selected", "unselected", "masked", "noData", "nonFinite", "invalidLabels")), "Voxel count conservation")
+        require((st["volumeMm3"] is not None) == (st["validity"] == "Complete"), "Voxel completeness ambiguity")
+        if st["volumeMm3"] is not None:
+            require(st["volumeMm3"] == st["observedVolumeMm3"], "Complete voxel volume mismatch")
+        metrics = {"volume": st["volumeMm3"], "observed-volume": st["observedVolumeMm3"], "cell-volume": st["cellVolumeMm3"],
+                   "total": st["total"], "selected": st["selected"], "unselected": st["unselected"], "masked": st["masked"],
+                   "no-data": st["noData"], "non-finite": st["nonFinite"], "invalid-labels": st["invalidLabels"]}
+        for metric, value in metrics.items():
+            count = metric not in ("volume", "observed-volume", "cell-volume")
+            row = expect("voxel-volume", v["result"], "", metric, item_id=p["id"], status=st["validity"],
+                         value_unit="count" if count else "mm^3", current_at_capture=str(v["isCurrent"]).lower(),
+                         source_volume=v["source"], validity_image=p["validityImage"] or "", voxel_method=p["method"],
+                         coordinate_frame=g["coordinateFrame"], model_unit="mm", algorithm_version=v["algorithmVersion"],
+                         require_enclosed_selection=str(p["requireEnclosedSelection"]).lower(), touches_region_boundary=str(st["touchesRegionBoundary"]).lower())
+            if count: require(int(row["measured"]) == value, "Voxel count precision lost")
+            else: number(row["measured"], value)
+            for col, value in (("voxel_extent",st["evaluatedExtent"]),("voxel_range",p["storedValueRange"]),("voxel_labels",p["labels"]),
+                               ("voxel_spacing",g["spacing"]),("voxel_origin",g["origin"]),("voxel_direction",g["direction"])):
+                require((json.loads(row[col]) if row[col] else None) == value, "CSV voxel context mismatch: " + col)
     require(set(indexed) == expected, "CSV contains unaccounted rows")
     if fixture:
         require(report["title"] == '报告 "A",\n二'.replace("\\n", "\n"), "Unicode/control JSON round trip failed")
         require(any(a["diagnostics"]["condition"] == {"numericState": "PositiveInfinity"} for a in alignments.values()), "Infinite diagnostic lost")
         require(report["inputs"][0]["image"]["metadata"]["scalar"]["noData"] == {"numericState": "NaN"}, "NaN metadata lost")
         require(next(iter(alignments.values()))["residuals"]["columns"][1]["values"][0] == 2**64 - 1, "UInt64 precision lost")
+        require(len(volumes) == 3 and {v["statistics"]["validity"] for v in volumes.values()} == {"Complete", "TouchesBoundary", "IncompleteSamples"}, "Voxel fixture state coverage")
+        require(any(v["parameters"]["labels"] == [2**53+1,2**64-1] for v in volumes.values()), "Label integer precision lost")
         require(samples_verified == 3 and all(x["report_id"].startswith("'=") for x in rows), "Fixture sample or spreadsheet text protection mismatch")
     result = {"jsonSha256": hashlib.sha256(json_path.read_bytes()).hexdigest(), "csvSha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
-              "csvRows": len(rows), "inspectionRows": len(dimension_rows), "jsonDeviationSamples": samples_verified, "passed": True}
+              "csvRows": len(rows), "voxelVolumes": len(volumes), "inspectionRows": len(dimension_rows), "jsonDeviationSamples": samples_verified, "passed": True}
     print("REPORT_REFERENCE " + json.dumps(result))
     return result
 

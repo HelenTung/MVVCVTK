@@ -9,7 +9,8 @@ std::vector<DataInputRef> Inputs(const VoxelVolumeRequest &r) {
     std::vector<DataInputRef> inputs{{"source",r.source}};
     if(r.validityImage)inputs.push_back({"validity-image",*r.validityImage});return inputs;
 }
-bool Valid(const VoxelVolumeSnapshot &s) {
+}
+bool GetSnapshotValid(const VoxelVolumeSnapshot &s) {
     if(!GetDataRevisionRefValid(s.result) || !s.parameters || s.source!=s.parameters->source ||
        !AlignmentVoxelVolume::GetRequestValid(*s.parameters,{}) || !GetGridGeometryValid(s.geometry) || s.algorithmVersion!="voxel-cell-volume-1")return false;
     const auto &v=s.statistics;std::uint64_t sum=0,total=1;
@@ -29,10 +30,9 @@ bool Valid(const VoxelVolumeSnapshot &s) {
         v.observedVolumeMm3==v.selected*v.cellVolumeMm3 && v.validity==validity &&
         (v.volumeMm3.has_value()==(validity==VoxelVolumeValidity::Complete)) && (!v.volumeMm3 || *v.volumeMm3==v.observedVolumeMm3);
 }
-}
 bool SetType(TrustedDataPort &data) {
     const DataTypeDescriptor type{resultType,{{"org.mvvcvtk.metrology-alignment.voxel-volume"}},[](const IDataPayload &value,std::string &message) {
-        const auto *p=dynamic_cast<const Payload *>(&value);if(p && Valid(p->snapshot))return true;message="Invalid voxel volume result.";return false;
+        const auto *p=dynamic_cast<const Payload *>(&value);if(p && GetSnapshotValid(p->snapshot))return true;message="Invalid voxel volume result.";return false;
     }};
     if(data.SetDataType(type))return true;const auto graph=data.GetDataGraph();return graph.view && graph.view->GetDataFacets(resultType)==type.facets;
 }

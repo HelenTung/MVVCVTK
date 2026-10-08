@@ -55,7 +55,20 @@ MetrologyReport Fixture() {
     MetrologyReportInput input;input.revision=Ref(2);input.type=DataTypes::imageGrid3D;input.image=MetrologyReportImage{};
     input.image->geometry.dimensions={2,2,2};input.image->geometry.extent={0,1,0,1,0,1};input.image->geometry.spacing={.1375,.1375,.1375};
     input.image->metadata.source.uri=u8"F:\\数据\\测试.raw";input.image->metadata.scalar.noData=std::numeric_limits<double>::quiet_NaN();
-    input.image->valueType=ImageValueType::Float32;input.image->valueBytes=32;input.image->components=1;r.inputs.push_back(input);return r;
+    input.image->valueType=ImageValueType::Float32;input.image->valueBytes=32;input.image->components=1;r.inputs.push_back(input);
+    input.revision=Ref(21); input.image->geometry.spacing={1,1,1}; r.inputs.push_back(input);
+    VoxelVolumeSnapshot v; v.result=Ref(20); v.source=Ref(21); v.geometry=input.image->geometry;
+    auto vp=std::make_shared<VoxelVolumeRequest>(); vp->id="volume-range"; vp->source=v.source; vp->storedValueRange=std::array<double,2>{.25,.75};
+    v.parameters=vp; v.statistics.evaluatedExtent=v.geometry.extent; v.statistics.total=8; v.statistics.selected=3;
+    v.statistics.unselected=5; v.statistics.cellVolumeMm3=1; v.statistics.observedVolumeMm3=3; v.statistics.volumeMm3=3;
+    v.statistics.touchesRegionBoundary=true; v.statistics.validity=VoxelVolumeValidity::Complete; r.voxelVolumes.push_back(v);
+    MetrologyReportInput label;label.revision=Ref(22);label.type=DataTypes::labelMap3D;r.inputs.push_back(label);
+    v.result=Ref(23);v.source=label.revision;vp=std::make_shared<VoxelVolumeRequest>();vp->source=v.source;vp->id="volume-labels";
+    vp->method=VoxelVolumeMethod::Labels;vp->labels={9007199254740993ULL,UINT64_MAX};vp->validityImage=Ref(21);v.parameters=vp;
+    v.statistics.unselected=4;v.statistics.masked=1;v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::IncompleteSamples;r.voxelVolumes.push_back(v);
+    v=r.voxelVolumes.front();v.result=Ref(24);vp=std::make_shared<VoxelVolumeRequest>(*v.parameters);vp->requireEnclosedSelection=true;v.parameters=vp;
+    v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::TouchesBoundary;r.voxelVolumes.push_back(v);
+    return r;
 }
 class Counter final : public std::streambuf {
 public:
@@ -170,6 +183,12 @@ int main(int argc,char **argv) {
             "late text failure reports the emitted prefix; caller must discard it");
         invalid=report;invalid.inspections[0].sourceToTarget[3]=99;std::ostringstream mismatched;
         Check(WriteMetrologyReport(invalid,mismatched,options).status==MetrologyReportWriteStatus::InvalidInput,"mismatched row alignment rejected");
+        invalid=report;invalid.voxelVolumes[0].statistics.volumeMm3=999;std::ostringstream badVolume;
+        Check(WriteMetrologyReport(invalid,badVolume,options).status==MetrologyReportWriteStatus::InvalidInput,"inconsistent voxel volume rejected");
+        invalid=report;invalid.voxelVolumes[0].source=Ref(99);std::ostringstream badSource;
+        Check(WriteMetrologyReport(invalid,badSource,options).status==MetrologyReportWriteStatus::InvalidInput,"voxel source mismatch rejected");
+        auto volumeOnly=report;volumeOnly.alignments.clear();volumeOnly.inspections.clear();volumeOnly.deviations.clear();std::ostringstream standalone;
+        Check(WriteMetrologyReport(volumeOnly,standalone,options).status==MetrologyReportWriteStatus::Succeeded,"voxel report has no fictitious alignment dependency");
         options.includeDeviationSamples=true;std::ostringstream full;
         Check(WriteMetrologyReport(report,full,options).status==MetrologyReportWriteStatus::Succeeded,"full sample JSON writes");
         options.format=MetrologyReportFormat::Csv;std::ostringstream csv;

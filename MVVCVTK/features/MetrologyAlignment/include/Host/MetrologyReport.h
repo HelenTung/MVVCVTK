@@ -6,7 +6,7 @@
 struct MetrologyReportRequest final {
     std::string id, title;
     // 每组内不允许重复修订。评价隐含的对齐自动加入，也可显式保留未通过质量门限的对齐。
-    std::vector<DataRevisionRef> alignments, inspections, deviations;
+    std::vector<DataRevisionRef> alignments, inspections, deviations, voxelVolumes;
 };
 struct MetrologyReportAlignment final {
     DataRevisionRef result, recipeRevision, transform;
@@ -45,7 +45,7 @@ struct MetrologyReportInput final {
     bool wasCurrentAtCapture=false;
 };
 struct MetrologyReport final {
-    std::uint32_t schemaVersion=1;
+    std::uint32_t schemaVersion=2;
     std::string id, title;
     DataCommitId capturedCommit=0;
     std::int64_t capturedUnixMilliseconds=0;
@@ -57,6 +57,8 @@ struct MetrologyReport final {
     bool wereInputsCurrentAtCapture=true;
     // 保守的新增元信息预算估计；不含共享结果本体，也不是进程工作集上限。
     std::size_t estimatedMetadataBytes=0;
+    // 原生网格上的单元体积评价，不依赖对齐；共享参数，不持有源体素。
+    std::vector<VoxelVolumeSnapshot> voxelVolumes;
 };
 struct MetrologyReportResult final {
     // FullyDetermined 仅表示捕获成功，不代表报告中所有尺寸合格或输入仍为当前版本。
@@ -80,7 +82,8 @@ struct MetrologyReportWriteResult final {
 };
 // 可在后台只读写出 GetReport 返回的冻结对象；不访问 Host/VTK，不构造整份字符串。
 // UTF-8 JSON 保留完整上下文；非有限浮点数用 {"numericState":"NaN|PositiveInfinity|NegativeInfinity"} 表达。
-// CSV 是尺寸/偏差统计视图（偏差行 verdict 属于整个评价）；以空白、公式前缀或单引号起始的文本前加单引号，JSON 保留原文。
+// JSON/CSV schema 2 增加体素体积和完整参数；体素行无对齐归属，空矩阵不代表单位矩阵。
+// CSV 是尺寸/偏差/体素统计视图（偏差行 verdict 属于整个评价）；以空白、公式前缀或单引号起始的文本前加单引号，JSON 保留原文。
 // 逐点偏差默认省略并明确标记；CSV 明细的非 Valid 测量值留空。失败可能留下前缀，调用方负责丢弃/原子提交。
 MetrologyReportWriteResult WriteMetrologyReport(const MetrologyReport &report,std::ostream &output,
                                                const MetrologyReportWriteOptions &options={});

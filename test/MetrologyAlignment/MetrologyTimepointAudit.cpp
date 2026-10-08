@@ -459,7 +459,7 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
     return report && report->isCurrent && succeeded>0;
 }
 void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,
-                   const Manifest &manifest,const std::vector<DataRevisionRef> &inspections,const std::vector<DataRevisionRef> &deviations,
+                   const Manifest &manifest,const std::vector<DataRevisionRef> &inspections,const std::vector<DataRevisionRef> &deviations,const std::vector<DataRevisionRef> &volumes,
                    std::ostream &out,const std::filesystem::path &folder) {
     const auto started=std::chrono::steady_clock::now();
     const auto scalarOwners=[&](const DataRevisionRef &ref) {
@@ -470,10 +470,10 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
     std::vector<long> before; for (const auto &surface:surfaces) before.push_back(scalarOwners(surface.source));
     const auto commit=data.GetDataGraph().commitId;
     MetrologyReportRequest request; request.id="real-ct-inspection"; request.title="Frozen real ROI measurement contexts"; request.inspections=inspections;
-    request.deviations=deviations;
+    request.deviations=deviations;request.voxelVolumes=volumes;
     const auto captured=feature.GetReport(request);
     Require(captured.status==AlignmentStatus::FullyDetermined && captured.report && captured.report->capturedCommit==commit &&
-        captured.report->wereInputsCurrentAtCapture && captured.report->inspections.size()==inspections.size(),"Real report capture failed.");
+        captured.report->wereInputsCurrentAtCapture && captured.report->inspections.size()==inspections.size() && captured.report->voxelVolumes.size()==volumes.size(),"Real report capture failed.");
     const auto &report=*captured.report;
     out<<"{\"status\":"<<unsigned(captured.status)<<",\"capturedCommit\":"<<report.capturedCommit
        <<",\"alignments\":"<<report.alignments.size()<<",\"inspections\":"<<report.inspections.size()
@@ -509,7 +509,7 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
     }
     out<<"]}";
 }
-void VoxelVolumes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
+void VoxelVolumes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out,std::vector<DataRevisionRef> &volumes) {
     out<<'[';
     for(std::size_t i=0;i<surfaces.size();++i) {
         if(i)out<<',';const auto &surface=surfaces[i];Require(surface.iso.has_value(),"Voxel experiment needs explicit C3 global initial ISO.");
@@ -524,6 +524,7 @@ void VoxelVolumes(MetrologyAlignmentHostFeature &feature,TestDataPort &data,cons
         Wait(feature,completed,m.deadlineMs+1000);const auto volume=feature.GetVoxelVolume(completed->value.voxelVolumeResult);
         Require(completed->value.status==AlignmentStatus::FullyDetermined && volume && volume->isCurrent &&
             image->GetValues().get()==storage && image->GetValues().use_count()==owners,"Voxel volume must preserve source storage and publish current statistics.");
+        volumes.push_back(volume->result);
         const auto &s=volume->statistics;
         out<<"{\"id\":"<<Json(m.scans[i].id)<<",\"result\":"<<Json(Id(volume->result))<<",\"source\":"<<Json(Id(volume->source))
            <<",\"scope\":\"selected full cells within native ROI; global stored-value threshold, not C3 continuous surface volume or whole-part volume\",\"method\":\"StoredValueRange\""
@@ -610,8 +611,9 @@ int wmain(int argc,wchar_t **argv) {
         out<<",\"sectionInspections\":["; bool sectionsPassed=true;
         for (std::size_t i=0;i<surfaces.size();++i) { if (i) out<<','; sectionsPassed=SectionFit(alignmentFeature,surfaces[i],manifest.scans[i],manifest,out,folder,reports) && sectionsPassed; }
         out<<']';
-        out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,deviations,out,folder);
-        out<<",\"voxelVolumes\":";VoxelVolumes(alignmentFeature,*data,surfaces,manifest,out);
+        std::vector<DataRevisionRef> volumes;
+        out<<",\"voxelVolumes\":";VoxelVolumes(alignmentFeature,*data,surfaces,manifest,out,volumes);
+        out<<",\"reportCapture\":"; CaptureReport(alignmentFeature,*data,surfaces,manifest,reports,deviations,volumes,out,folder);
         const bool pipelinePassed=controlPassed && ringPassed && sectionsPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
         const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
         out.close();
