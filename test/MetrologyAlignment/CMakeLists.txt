@@ -104,3 +104,19 @@ set_target_properties(mvvcvtk_alignment_inspection_tests PROPERTIES
     PROJECT_LABEL AlignmentInspectionTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.Inspection COMMAND mvvcvtk_alignment_inspection_tests)
 SetTestRuntime(MetrologyAlignment.Inspection mvvcvtk_alignment_inspection_tests)
+
+if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
+    add_executable(mvvcvtk_metrology_timepoint_audit MetrologyTimepointAudit.cpp)
+    target_link_libraries(mvvcvtk_metrology_timepoint_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
+        MVVCVTK::SurfaceDetermination MVVCVTK::MetrologyAlignment bcrypt psapi ${MVVCVTK_VTK_TARGETS} VTK::IOXML)
+    SetTargetDefaults(mvvcvtk_metrology_timepoint_audit)
+    set_target_properties(mvvcvtk_metrology_timepoint_audit PROPERTIES
+        PROJECT_LABEL MetrologyTimepointAudit FOLDER "MVVCVTK/test/Automation/Reference")
+    vtk_module_autoinit(TARGETS mvvcvtk_metrology_timepoint_audit MODULES ${MVVCVTK_VTK_TARGETS})
+    set(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST "" CACHE FILEPATH "Optional frozen RAW ROI timepoint manifest for public pipeline checks")
+    if(MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST)
+        add_test(NAME MetrologyAlignment.RealSurfaceControls COMMAND mvvcvtk_metrology_timepoint_audit
+            "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" "${CMAKE_CURRENT_BINARY_DIR}/timepoint-runs-$<CONFIG>" --controls-only --new-run)
+        SetTestRuntime(MetrologyAlignment.RealSurfaceControls mvvcvtk_metrology_timepoint_audit)
+    endif()
+endif()

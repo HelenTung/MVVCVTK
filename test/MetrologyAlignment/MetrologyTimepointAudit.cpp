@@ -1,0 +1,405 @@
+// 真实 ROI 的公共 Feature 组合实验；不把跨采集实测件当作独立名义真值。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+#include <psapi.h>
+#include "../TestDataPort.h"
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/MetrologyAlignmentHostFeature.h"
+#include <vtkImageData.h>
+#include <vtkMatrix3x3.h>
+#include <vtkPolyData.h>
+#include <vtkXMLPolyDataWriter.h>
+#include <array>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <cmath>
+#include <thread>
+
+namespace {
+void Require(bool value,const char *message) { if (!value) throw std::runtime_error(message); }
+std::string Json(const std::string &value) {
+    std::string text="\""; const char *hex="0123456789abcdef";
+    for (const unsigned char c:value) {
+        if (c=='"' || c=='\\') { text+='\\'; text+=static_cast<char>(c); }
+        else if (c<32) { text+="\\u00"; text+=hex[c>>4]; text+=hex[c&15]; }
+        else text+=static_cast<char>(c);
+    }
+    return text+'"';
+}
+std::string Id(const DataRevisionRef &r) {
+    std::ostringstream out; out<<std::hex<<std::setfill('0');
+    for (auto b:r.entityId.bytes) out<<std::setw(2)<<unsigned(b);
+    out<<':'<<std::dec<<r.generation; return out.str();
+}
+struct Memory final { std::size_t working=0,privateBytes=0,peak=0,peakCommit=0; };
+Memory ReadMemory() {
+    PROCESS_MEMORY_COUNTERS_EX m{}; m.cb=sizeof(m);
+    Require(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&m),sizeof(m)),"Memory counters unavailable.");
+    return {m.WorkingSetSize,m.PrivateUsage,m.PeakWorkingSetSize,m.PeakPagefileUsage};
+}
+class Hash final {
+  public:
+    Hash() {
+        Require(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,"SHA provider failed.");
+        if (BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)<0) { BCryptCloseAlgorithmProvider(algorithm,0); algorithm=nullptr; throw std::runtime_error("SHA create failed."); }
+    }
+    ~Hash() { if (hash) BCryptDestroyHash(hash); if (algorithm) BCryptCloseAlgorithmProvider(algorithm,0); }
+    void Add(unsigned char *data,ULONG count) { Require(BCryptHashData(hash,data,count,0)>=0,"SHA update failed."); }
+    std::string Finish() {
+        std::array<unsigned char,32> bytes{}; Require(BCryptFinishHash(hash,bytes.data(),32,0)>=0,"SHA finish failed.");
+        std::ostringstream out; out<<std::hex<<std::setfill('0'); for (auto b:bytes) out<<std::setw(2)<<unsigned(b); return out.str();
+    }
+  private:
+    BCRYPT_ALG_HANDLE algorithm=nullptr; BCRYPT_HASH_HANDLE hash=nullptr;
+};
+class Views final : public FeatureViewDirectory {
+    std::vector<HostFeatureView> GetViews(const HostViewTargets &) const override { return {}; }
+    std::shared_ptr<FeatureViewService> GetFeaturePort(const std::string &) const override { return {}; }
+    std::shared_ptr<OverlayService> GetOverlayPort(const std::string &) const override { return {}; }
+    std::optional<HostInputView> GetInputView(const HostViewTarget &) const override { return {}; }
+};
+class Control final : public FeatureHostControl {
+    bool SetActiveViews(const std::vector<std::string> &) override { return true; }
+    bool SetViewStatus(const std::vector<std::string> &,const std::string &) override { return true; }
+    bool SendSceneDelta(FeatureSceneDelta) override { return true; }
+    bool AttachInput(HostInputBinding) override { return true; }
+    bool DetachInput(std::string_view) override { return true; }
+    bool SendOwnerComplete(std::function<void()> complete) override {
+        if (!complete || std::this_thread::get_id()!=owner) return false;
+        complete(); return true;
+    }
+    bool SendWorkAvailable() override { return true; }
+    const std::thread::id owner=std::this_thread::get_id();
+};
+struct Scan final {
+    std::string id,parentSha,roiSha;
+    std::filesystem::path roiPath;
+    double spacing=0;
+    std::array<int,6> nativeRoi{};
+};
+struct Manifest final {
+    std::size_t inputLimit=0,workingLimit=0,deadlineMs=0;
+    std::vector<Scan> scans;
+};
+Manifest ReadManifest(const std::filesystem::path &path) {
+    Require(std::filesystem::file_size(path)<1024*1024,"Manifest too large.");
+    std::ifstream in(path); in.imbue(std::locale::classic()); std::string key; unsigned version=0; Manifest m;
+    Require(bool(in>>key>>version) && key=="ct-timepoints" && version==1,"Invalid timepoint manifest.");
+    Require(bool(in>>key>>m.inputLimit>>m.workingLimit>>m.deadlineMs) && key=="limits" && m.inputLimit && m.workingLimit &&
+        m.deadlineMs>0 && m.deadlineMs<=3600000,"Invalid audit limits.");
+    while (in>>key) {
+        Scan s; std::string file;
+        Require(key=="scan" && bool(in>>std::quoted(s.id)>>std::quoted(file)>>std::quoted(s.parentSha)>>std::quoted(s.roiSha)>>s.spacing),"Invalid scan entry.");
+        Require(s.id.size()>0 && s.id.size()<64 && s.parentSha.size()==64 && s.roiSha.size()==64 && std::isfinite(s.spacing) && s.spacing>0,"Invalid scan identity or spacing.");
+        Require(std::all_of(s.id.begin(),s.id.end(),[](char c) { return (c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || c=='-' || c=='_'; }),"Scan id must be a filename-safe label.");
+        Require(std::none_of(m.scans.begin(),m.scans.end(),[&](const auto &scan) { return scan.id==s.id; }),"Duplicate scan id.");
+        for (const auto &digest:{s.parentSha,s.roiSha}) Require(std::all_of(digest.begin(),digest.end(),[](char c) { return (c>='0' && c<='9') || (c>='a' && c<='f'); }),"Invalid SHA256 text.");
+        for (auto &v:s.nativeRoi) Require(bool(in>>v),"Missing native ROI bounds.");
+        for (std::size_t a=0;a<3;++a) Require(s.nativeRoi[2*a]>=0 && s.nativeRoi[2*a+1]<1536 &&
+            s.nativeRoi[2*a+1]>s.nativeRoi[2*a],"ROI outside parent RAW.");
+        s.roiPath=std::filesystem::u8path(file); if (s.roiPath.is_relative()) s.roiPath=path.parent_path()/s.roiPath;
+        Require(m.scans.size()<8,"Too many scans in one bounded experiment."); m.scans.push_back(std::move(s));
+    }
+    Require(in.eof() && !m.scans.empty(),"Incomplete manifest."); return m;
+}
+DataRevisionRef Load(TestDataPort &data,const Scan &scan,std::size_t inputLimit) {
+    const std::uint16_t endian=1; Require(*reinterpret_cast<const unsigned char *>(&endian)==1,"Little-endian host required.");
+    std::array<int,3> dims{}; std::size_t count=1;
+    for (std::size_t a=0;a<3;++a) { dims[a]=scan.nativeRoi[2*a+1]-scan.nativeRoi[2*a]+1; count*=static_cast<std::size_t>(dims[a]); }
+    Require(count<=inputLimit/4 && std::filesystem::file_size(scan.roiPath)==count*4,"ROI input size or budget mismatch.");
+    auto image=vtkSmartPointer<vtkImageData>::New(); image->SetDimensions(dims.data());
+    image->SetSpacing(scan.spacing,scan.spacing,scan.spacing);
+    image->SetOrigin(-scan.nativeRoi[0]*scan.spacing,-scan.nativeRoi[2]*scan.spacing,scan.nativeRoi[4]*scan.spacing);
+    auto direction=vtkSmartPointer<vtkMatrix3x3>::New(); direction->Identity(); direction->SetElement(0,0,-1); direction->SetElement(1,1,-1);
+    image->SetDirectionMatrix(direction); image->AllocateScalars(VTK_FLOAT,1);
+    auto *buffer=static_cast<unsigned char *>(image->GetScalarPointer()); Require(buffer,"ROI allocation failed.");
+    std::ifstream input(scan.roiPath,std::ios::binary); Hash hash;
+    for (std::size_t offset=0;offset<count*4;) {
+        const auto amount=std::min<std::size_t>(1024*1024,count*4-offset);
+        Require(bool(input.read(reinterpret_cast<char *>(buffer+offset),static_cast<std::streamsize>(amount))),"ROI read failed.");
+        hash.Add(buffer+offset,static_cast<ULONG>(amount)); offset+=amount;
+    }
+    Require(hash.Finish()==scan.roiSha,"ROI SHA256 mismatch.");
+    VtkDataBridge bridge; const auto payload=bridge.CreateImagePayload(image); Require(bool(payload),"ROI image adapter rejected geometry.");
+    const DataRevisionRef ref{data.CreateDataEntityId(),1};
+    std::ostringstream provenance; provenance<<std::setprecision(17)<<"parent-sha256="<<scan.parentSha<<";roi-sha256="<<scan.roiSha<<";spacing-mm="<<scan.spacing<<";native-inclusive-roi=";
+    for (auto v:scan.nativeRoi) provenance<<v<<',';
+    DataTransaction tx; tx.outputs.push_back({ref.entityId,0,DataTypes::imageGrid3D,{},payload,
+        DataProvenance{"timepoint-audit","native-raw-roi","1",provenance.str()}});
+    Require(data.SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded,"ROI publication failed."); return ref;
+}
+template<class Feature,class Completion> void Wait(Feature &feature,const std::shared_ptr<Completion> &completion,std::size_t milliseconds) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(milliseconds);
+    while (!completion->done && std::chrono::steady_clock::now()<deadline) {
+        Require(feature.OnHostTick(),"Owner tick failed."); std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Require(completion->done,"Audit operation deadline exceeded.");
+}
+struct SurfaceCompletion final { bool done=false; SurfaceDeterminationResult value; };
+struct AlignmentCompletion final { bool done=false; AlignmentResult value; };
+struct Surface final {
+    DataRevisionRef source,mesh,generation;
+    std::shared_ptr<const SurfaceMeshPayload> payload;
+    std::vector<std::uint64_t> validVertices,validTriangles;
+};
+Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,const Scan &scan,const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
+    std::cout<<"SURFACE_START "<<scan.id<<'\n'<<std::flush;
+    Surface surface; const auto start=std::chrono::steady_clock::now(); surface.source=Load(data,scan,m.inputLimit);
+    SurfaceDeterminationRequest request; request.action=SurfaceDeterminationAction::Start;
+    request.start=SurfaceDeterminationStartParams{}; request.start->sourceVolume=surface.source; request.start->modelUnit="mm";
+    request.start->resultScope=scan.id; request.start->componentSelection=SurfaceComponentSelection::All;
+    auto completion=std::make_shared<SurfaceCompletion>();
+    const auto admission=feature.SendRequest(request,[completion](SurfaceDeterminationResult r) { completion->value=std::move(r); completion->done=true; });
+    Require(admission.status==SurfaceAdmissionStatus::Accepted,"Surface request was not admitted.");
+    Wait(feature,completion,m.deadlineMs);
+    const auto &result=completion->value;
+    out<<"{\"id\":"<<Json(scan.id)<<",\"parentSha256\":"<<Json(scan.parentSha)<<",\"roiSha256\":"<<Json(scan.roiSha)
+       <<",\"spacingMm\":"<<scan.spacing<<",\"source\":"<<Json(Id(surface.source))<<",\"status\":"<<unsigned(result.status)
+       <<",\"failure\":"<<unsigned(result.failureReason)<<",\"message\":"<<Json(result.message)<<",\"nativeInclusiveRoi\":[";
+    for (std::size_t i=0;i<6;++i) { if (i) out<<','; out<<scan.nativeRoi[i]; }
+    out<<"],\"coordinateFrame\":\"RAS\",\"nativeToRasDirection\":[-1,0,0,0,-1,0,0,0,1]";
+    if (result.status==SurfaceResultStatus::Succeeded && result.isPublished) {
+        const auto snapshot=feature.GetSurfaceSnapshot(result.dataRevision);
+        const auto validity=feature.GetResultValidity(result.dataRevision);
+        out<<",\"restoreStatus\":"<<unsigned(validity.status)<<",\"canMeasure\":"<<(validity.canMeasure ? "true" : "false")<<",\"validityMessage\":"<<Json(validity.message);
+        Require(snapshot && snapshot->modelUnit=="mm" && validity.canMeasure,"Published surface is not measurable/current.");
+        surface.mesh=result.meshRevision; surface.generation=result.dataRevision;
+        const auto node=data.GetDataGraph().view->GetData(surface.mesh);
+        surface.payload=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
+        Require(bool(surface.payload),"Formal surface mesh unavailable.");
+        const std::array<double,6> expectedBounds{-scan.nativeRoi[1]*scan.spacing,-scan.nativeRoi[0]*scan.spacing,
+            -scan.nativeRoi[3]*scan.spacing,-scan.nativeRoi[2]*scan.spacing,scan.nativeRoi[4]*scan.spacing,scan.nativeRoi[5]*scan.spacing};
+        const auto &positions=surface.payload->GetVertices();
+        for (std::size_t i=0;i<positions.size();++i) Require(positions[i]>=expectedBounds[2*(i%3)]-1e-8 &&
+            positions[i]<=expectedBounds[2*(i%3)+1]+1e-8,"Published point violates native-ROI physical bounds.");
+        out<<",\"physicalBoundsChecked\":true,\"inputIsCroppedFromParent\":true,\"voxelCenterBoundsRAS\":[";
+        for (std::size_t i=0;i<6;++i) { if (i) out<<','; out<<expectedBounds[i]; } out<<']';
+        const MeshAttribute *valid=nullptr;
+        for (const auto &a:surface.payload->GetPointAttributes()) if (a.name=="measurement.valid") valid=&a;
+        Require(valid && valid->values.size()==surface.payload->GetVertices().size()/3,"Measurement validity attributes missing.");
+        for (std::size_t i=0;i<valid->values.size();++i) if (valid->values[i]==1) surface.validVertices.push_back(i);
+        const auto &tri=surface.payload->GetTriangles();
+        for (std::size_t i=0;i<tri.size()/3;++i) if (valid->values[tri[3*i]]==1 && valid->values[tri[3*i+1]]==1 && valid->values[tri[3*i+2]]==1 &&
+            snapshot->triangleValidity && (*snapshot->triangleValidity)[i]) surface.validTriangles.push_back(i);
+        out<<",\"mesh\":"<<Json(Id(surface.mesh))<<",\"generation\":"<<Json(Id(surface.generation))
+           <<",\"algorithmRevision\":"<<snapshot->algorithmRevision<<",\"parameterFingerprint\":"<<snapshot->parameterFingerprint
+           <<",\"resolvedRecipe\":"<<Json(snapshot->canonicalParameters)<<",\"points\":"<<valid->values.size()
+           <<",\"validPoints\":"<<surface.validVertices.size()<<",\"triangles\":"<<tri.size()/3<<",\"validTriangles\":"<<surface.validTriangles.size()
+           <<",\"objects\":"<<(snapshot->objects ? snapshot->objects->size() : 0)
+           <<",\"workingEstimateBytes\":"<<snapshot->execution.estimatedWorkingBytes<<",\"retainedBytes\":"<<snapshot->execution.retainedBytes;
+        std::size_t closed=0,truncated=0,nonManifold=0;
+        if (snapshot->objects) for (const auto &object:*snapshot->objects) { closed+=object.isClosed ? 1 : 0; truncated+=object.isTruncated ? 1 : 0; nonManifold+=object.isManifold ? 0 : 1; }
+        out<<",\"closedObjects\":"<<closed<<",\"truncatedObjects\":"<<truncated<<",\"nonManifoldObjects\":"<<nonManifold;
+        if (snapshot->isoEstimate) out<<",\"background\":"<<snapshot->isoEstimate->backgroundValue<<",\"material\":"<<snapshot->isoEstimate->materialValue<<",\"iso\":"<<snapshot->isoEstimate->isoValue;
+        const auto view=data.GetSurfaceMesh(data.GetDataGraph(),surface.mesh);
+        Require(view && view->mesh,"Formal surface render view unavailable.");
+        auto writer=vtkSmartPointer<vtkXMLPolyDataWriter>::New(); writer->SetFileName((folder/(scan.id+".vtp")).u8string().c_str());
+        writer->SetInputData(view->mesh); Require(writer->Write()!=0,"VTP output failed.");
+    }
+    const auto memory=ReadMemory();
+    out<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()
+       <<",\"workingSetBytes\":"<<memory.working<<",\"privateBytes\":"<<memory.privateBytes<<",\"peakWorkingSetBytes\":"<<memory.peak<<'}'; out.flush();
+    std::cout<<"SURFACE "<<scan.id<<" status="<<unsigned(result.status)<<" valid="<<surface.validVertices.size()<<'\n'<<std::flush;
+    return surface;
+}
+AlignmentResult Solve(MetrologyAlignmentHostFeature &feature,AlignmentRecipe recipe,AlignmentInput input,
+    const Manifest &m,std::vector<AlignmentMatrix> poses={alignmentIdentity}) {
+    AlignmentRequest save; save.action=AlignmentAction::SaveRecipe; save.recipe=std::move(recipe); DataRevisionRef recipeRef;
+    Require(feature.SendRequest(std::move(save),[&](AlignmentResult r) { recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted && GetDataRevisionRefValid(recipeRef),"Alignment recipe rejected.");
+    AlignmentRequest run; run.recipeRef=recipeRef; run.input=std::move(input); run.initialPoses=std::move(poses);
+    auto completion=std::make_shared<AlignmentCompletion>();
+    Require(feature.SendRequest(run,[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Alignment was not admitted.");
+    Wait(feature,completion,m.deadlineMs+1000); return completion->value;
+}
+bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
+    if (!surface.payload || surface.validTriangles.empty()) { out<<"{\"attempted\":false}"; return false; }
+    const auto started=std::chrono::steady_clock::now();
+    AlignmentRecipe recipe; recipe.id="real-surface-rigid-control"; recipe.targetFrameId="control-reference"; recipe.unit=AlignmentUnit::Millimeter;
+    recipe.method=AlignmentMethod::ConstrainedBestFit; recipe.datumCount=0; recipe.nominalData=surface.mesh;
+    recipe.requiresMeasurementQuality=true; recipe.surfaceFit=AlignmentSurfaceFit{};
+    recipe.surfaceFit->referenceTriangles=surface.validTriangles;
+    AlignmentRegion region; region.pinnedMesh=surface.mesh;
+    std::vector<bool> selected(surface.payload->GetVertices().size()/3,false);
+    const auto &tri=surface.payload->GetTriangles();
+    for (auto i:surface.validTriangles) for (std::size_t j=0;j<3;++j) selected[tri[3*i+j]]=true;
+    for (std::size_t i=0;i<selected.size();++i) if (selected[i]) region.vertexIds.push_back(i);
+    recipe.surfaceFit->sourceRegion=std::move(region); recipe.surfaceFit->scales={{.55,4,60},{.275,.5,60}};
+    recipe.maxPairDistance=.5; recipe.maxAlignmentRms=1e-5; recipe.minPairCoverage=1;
+    auto pose=alignmentIdentity; const double a=.01; pose[0]=pose[5]=std::cos(a); pose[1]=-std::sin(a); pose[4]=std::sin(a);
+    pose[3]=.15; pose[7]=-.12; pose[11]=.08;
+    const auto result=Solve(feature,std::move(recipe),
+        AlignmentInput{surface.source,surface.mesh,surface.source,"control-source","RAS","rigid-control",AlignmentUnit::Millimeter},m,{pose});
+    out<<"{\"attempted\":true,\"scope\":\"same measured mesh; perturbed initialization; identity is exact numerical truth\",\"status\":"<<unsigned(result.status)
+       <<",\"qualityPassed\":"<<(result.diagnostics.isQualityPassed ? "true" : "false")<<",\"rms\":"<<result.diagnostics.rms;
+    bool passed=false;
+    if (const auto archive=feature.GetArchive(result.result)) {
+        const auto &t=archive->sourceToTarget;
+        const double translation=std::hypot(t[3],t[7],t[11]);
+        const double angle=std::atan2(std::hypot(t[9]-t[6],t[2]-t[8],t[4]-t[1])/2,(t[0]+t[5]+t[10]-1)/2);
+        out<<",\"translationErrorMm\":"<<translation<<",\"rotationErrorRadians\":"<<angle;
+        passed=result.status==AlignmentStatus::FullyDetermined && result.diagnostics.isQualityPassed && translation<1e-6 && angle<1e-6;
+    }
+    out<<",\"numericalControlPassed\":"<<(passed ? "true" : "false")<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+    std::cout<<"RIGID_CONTROL status="<<unsigned(result.status)<<" rms="<<result.diagnostics.rms<<'\n'<<std::flush; return passed;
+}
+bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m,std::ostream &out) {
+    if (!surface.payload || surface.validVertices.size()<3) { out<<"{\"attempted\":false}"; return false; }
+    const auto started=std::chrono::steady_clock::now();
+    bool passed=false;
+    const auto &v=surface.payload->GetVertices();
+    const auto point=[&](std::uint64_t id) { return AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]}; };
+    const auto distance=[](const AlignmentPoint &a,const AlignmentPoint &b) { double d=0; for (int j=0;j<3;++j) d+=(a[j]-b[j])*(a[j]-b[j]); return d; };
+    std::array<std::uint64_t,3> anchors{surface.validVertices.front(),0,0};
+    double greatest=-1;
+    for (auto i:surface.validVertices) if (const auto d=distance(point(i),point(anchors[0]));d>greatest) { greatest=d; anchors[1]=i; }
+    const auto a=point(anchors[0]),b=point(anchors[1]); greatest=-1;
+    for (auto i:surface.validVertices) {
+        const auto c=point(i); double projection=0; for (int j=0;j<3;++j) projection+=(c[j]-a[j])*(b[j]-a[j]);
+        const double d=distance(c,a)-projection*projection/distance(a,b);
+        if (d>greatest) { greatest=d; anchors[2]=i; }
+    }
+    Require(greatest>1e-8,"Native frame anchors are degenerate.");
+    AlignmentRecipe recipe; recipe.id="ring-native-frame"; recipe.targetFrameId="ring-native"; recipe.unit=AlignmentUnit::Millimeter;
+    recipe.method=AlignmentMethod::Rps; recipe.datumCount=0; recipe.nominalData=surface.source; recipe.requiresMeasurementQuality=true;
+    for (std::size_t i=0;i<3;++i) {
+        AlignmentGeometrySpec spec; spec.id="native-anchor-"+std::to_string(i); spec.kind=AlignmentGeometryKind::Point;
+        spec.region={surface.mesh,{anchors[i]}, {}}; recipe.geometries.push_back(spec);
+        for (std::size_t axis=0;axis<3;++axis) {
+            AlignmentConstraint c; c.geometryIndex=i; c.nominalPoint=point(anchors[i]); c.targetDirection={0,0,0}; c.targetDirection[axis]=1;
+            recipe.constraints.push_back(c);
+        }
+    }
+    const auto alignment=Solve(feature,std::move(recipe),
+        AlignmentInput{surface.source,surface.mesh,surface.source,"ring-native","RAS","ring-native",AlignmentUnit::Millimeter},m);
+    out<<"{\"attempted\":true,\"scope\":\"native RAW coordinate assignment, not alignment to independent nominal geometry\",\"alignmentStatus\":"<<unsigned(alignment.status);
+    if (alignment.status==AlignmentStatus::FullyDetermined && alignment.diagnostics.isQualityPassed) {
+        InspectionPlan plan; plan.id="ring-local-wall"; plan.alignmentResult=alignment.result; plan.requiresMeasurementQuality=true;
+        InspectionGeometrySpec cylinder; cylinder.fit.id="outer-wall-patch"; cylinder.fit.kind=AlignmentGeometryKind::Cylinder;
+        cylinder.fit.targetDirection={1,0,0}; cylinder.fit.maxFitRms=.0778; cylinder.fit.region.pinnedMesh=surface.mesh;
+        const MeshAttribute *normals=nullptr;
+        for (const auto &attribute:surface.payload->GetPointAttributes()) if (attribute.name=="measurement.normal") normals=&attribute;
+        Require(normals && normals->componentCount==3,"Ring source normals missing.");
+        for (auto i:surface.validVertices) if (std::abs(normals->values[3*i])<.3) cylinder.fit.region.vertexIds.push_back(i);
+        out<<",\"selectedPoints\":"<<cylinder.fit.region.vertexIds.size(); plan.geometries.push_back(std::move(cylinder));
+        for (const auto metric:{InspectionMetric::Diameter,InspectionMetric::FitRms}) {
+            InspectionItem item; item.id=metric==InspectionMetric::Diameter ? "local-cylinder-diameter" : "local-fit-residual";
+            item.measured.metric=metric; plan.items.push_back(item);
+        }
+        AlignmentRequest inspect; inspect.action=AlignmentAction::Inspect; inspect.inspection=std::move(plan);
+        auto completion=std::make_shared<AlignmentCompletion>();
+        Require(feature.SendRequest(std::move(inspect),[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Ring inspection not admitted.");
+        Wait(feature,completion,m.deadlineMs+1000);
+        out<<",\"inspectionStatus\":"<<unsigned(completion->value.status);
+        if (const auto report=feature.GetInspection(completion->value.inspectionResult)) {
+            out<<",\"geometryStatus\":"<<unsigned(report->report->geometries[0].status)<<",\"geometryMessage\":"<<Json(report->report->geometries[0].message)
+               <<",\"verdict\":"<<unsigned(report->report->verdict)<<",\"values\":[";
+            for (std::size_t i=0;i<report->report->items.size();++i) { if (i) out<<','; const auto &row=report->report->items[i]; out<<"{\"id\":"<<Json(row.id)<<",\"value\":"; if (row.measured) out<<*row.measured; else out<<"null"; out<<'}'; }
+            out<<']';
+            passed=completion->value.status==AlignmentStatus::FullyDetermined && report->isCurrent &&
+                report->report->geometries[0].status==AlignmentStatus::FullyDetermined && report->report->verdict==AlignmentInspectionVerdict::NotEvaluated &&
+                std::all_of(report->report->items.begin(),report->report->items.end(),[](const auto &item) { return item.measured && std::isfinite(*item.measured); });
+            if (passed) {
+                const auto &geometry=report->report->geometries[0].fitted;
+                const auto &axis=geometry.sourceDirection; const auto &center=geometry.sourceCenter;
+                const AlignmentPoint helper=std::abs(axis[0])<.8 ? AlignmentPoint{1,0,0} : AlignmentPoint{0,1,0};
+                AlignmentPoint u{axis[1]*helper[2]-axis[2]*helper[1],axis[2]*helper[0]-axis[0]*helper[2],axis[0]*helper[1]-axis[1]*helper[0]};
+                const double length=std::hypot(u[0],u[1],u[2]); for (auto &component:u) component/=length;
+                const AlignmentPoint w{axis[1]*u[2]-axis[2]*u[1],axis[2]*u[0]-axis[0]*u[2],axis[0]*u[1]-axis[1]*u[0]};
+                std::vector<double> angles; double low=std::numeric_limits<double>::infinity(),high=-low;
+                for (auto id:report->plan->geometries[0].fit.region.vertexIds) {
+                    const auto p=point(id); double axial=0,x=0,y=0;
+                    for (std::size_t j=0;j<3;++j) { const double d=p[j]-center[j]; axial+=d*axis[j]; x+=d*u[j]; y+=d*w[j]; }
+                    low=std::min(low,axial); high=std::max(high,axial); angles.push_back(std::atan2(y,x));
+                }
+                std::sort(angles.begin(),angles.end()); const double pi=std::acos(-1.0);
+                double gap=2*pi-angles.back()+angles.front(); for (std::size_t i=1;i<angles.size();++i) gap=std::max(gap,angles[i]-angles[i-1]);
+                out<<",\"selectedPatchAngularSpanDegrees\":"<<(2*pi-gap)*180/pi<<",\"selectedPatchAxialSpanMm\":"<<high-low
+                   <<",\"coverageNote\":\"local patch support only; axial span is not part height and extrapolated diameter is not a nominal acceptance result\"";
+            }
+        }
+    }
+    out<<",\"normalSelectionAbsXMaximum\":0.3,\"maxFitRmsMm\":0.0778,\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+    std::cout<<"RING_NATIVE alignment="<<unsigned(alignment.status)<<'\n'<<std::flush; return passed;
+}
+void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &surfaces,const Manifest &m,std::ostream &out) {
+    if (surfaces.size()<2 || !surfaces[0].payload || !surfaces[1].payload || surfaces[0].validTriangles.empty() || surfaces[1].validTriangles.empty()) {
+        out<<"{\"attempted\":false,\"reason\":\"Two measurable array surfaces are required\"}"; return;
+    }
+    const auto started=std::chrono::steady_clock::now();
+    const auto &source=surfaces[0]; const auto &reference=surfaces[1];
+    AlignmentRecipe recipe; recipe.id="array-acquisition-comparison"; recipe.targetFrameId="array-b"; recipe.unit=AlignmentUnit::Millimeter;
+    recipe.method=AlignmentMethod::ConstrainedBestFit; recipe.datumCount=0; recipe.nominalData=reference.mesh; recipe.exactMesh=source.mesh;
+    recipe.requiresMeasurementQuality=true; recipe.minSupportRatio=.5; recipe.maxLocalizationSigma=.5; recipe.maxSurfaceFitResidual=1;
+    recipe.surfaceFit=AlignmentSurfaceFit{}; recipe.surfaceFit->sourceRegion=AlignmentRegion{source.mesh,source.validVertices,{}};
+    recipe.surfaceFit->referenceTriangles=reference.validTriangles; recipe.surfaceFit->scales={{.55,4,40},{.275,2,40}};
+    recipe.maxPairDistance=2; recipe.maxAlignmentRms=.5; recipe.minPairCoverage=.3;
+    recipe.prealignment=AlignmentPrealignParams{}; auto &p=*recipe.prealignment;
+    p.sampleSpacing=.5; p.normalRadius=1.2; p.featureRadius=2.4; p.maxPairDistance=2; p.minCoverage=.25;
+    p.iterationLimit=10000; p.randomSeed=20261009; p.sourceTriangles=source.validTriangles; p.referenceTriangles=reference.validTriangles;
+    AlignmentRequest save; save.action=AlignmentAction::SaveRecipe; save.recipe=recipe; DataRevisionRef recipeRef;
+    Require(feature.SendRequest(std::move(save),[&](AlignmentResult r) { recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted && GetDataRevisionRefValid(recipeRef),"Alignment recipe rejected.");
+    AlignmentRequest run; run.recipeRef=recipeRef;
+    run.input=AlignmentInput{source.source,source.mesh,source.source,"array-a","RAS","array-a",AlignmentUnit::Millimeter};
+    auto completion=std::make_shared<AlignmentCompletion>();
+    Require(feature.SendRequest(run,[completion](AlignmentResult r) { completion->value=std::move(r); completion->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Alignment was not admitted.");
+    Wait(feature,completion,m.deadlineMs+1000);
+    const auto &r=completion->value;
+    out<<"{\"attempted\":true,\"status\":"<<unsigned(r.status)<<",\"message\":"<<Json(r.message)<<",\"qualityPassed\":"<<(r.diagnostics.isQualityPassed ? "true" : "false")
+       <<",\"rms\":"<<r.diagnostics.rms<<",\"maximum\":"<<r.diagnostics.maximum<<",\"remainingDof\":"<<r.diagnostics.remaining;
+    if (r.diagnostics.prealignment) out<<",\"coarseCandidates\":"<<r.diagnostics.prealignment->candidates<<",\"coarseCoverage\":"<<r.diagnostics.prealignment->bestCoverage;
+    if (const auto archive=feature.GetArchive(r.result)) {
+        out<<",\"transform\":["; for (std::size_t i=0;i<16;++i) { if (i) out<<','; out<<archive->sourceToTarget[i]; } out<<']';
+    }
+    if (r.status==AlignmentStatus::FullyDetermined && r.diagnostics.isQualityPassed) {
+        AlignmentRequest evaluate; evaluate.action=AlignmentAction::EvaluateSurface; evaluate.deviation=AlignmentDeviationRequest{};
+        evaluate.deviation->alignmentResult=r.result; evaluate.deviation->maxDistance=2; evaluate.deviation->requiresMeasurementQuality=true;
+        auto evaluated=std::make_shared<AlignmentCompletion>();
+        Require(feature.SendRequest(evaluate,[evaluated](AlignmentResult v) { evaluated->value=std::move(v); evaluated->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Deviation was not admitted.");
+        Wait(feature,evaluated,m.deadlineMs+1000);
+        out<<",\"deviationStatus\":"<<unsigned(evaluated->value.status);
+        if (const auto field=feature.GetDeviation(evaluated->value.deviationResult)) out<<",\"deviationRms\":"<<field->forward->statistics.rms<<",\"evaluatedArea\":"<<field->forward->statistics.evaluatedArea
+            <<",\"selectedArea\":"<<field->forward->statistics.selectedArea<<",\"verdict\":"<<unsigned(field->verdict);
+    }
+    out<<",\"sampleSpacingMm\":"<<p.sampleSpacing<<",\"normalRadiusMm\":"<<p.normalRadius<<",\"featureRadiusMm\":"<<p.featureRadius
+       <<",\"ransacSeed\":"<<p.randomSeed<<",\"ransacIterations\":"<<p.iterationLimit<<",\"maxPairDistanceMm\":"<<recipe.maxPairDistance
+       <<",\"maxAlignmentRmsMm\":"<<recipe.maxAlignmentRms<<",\"minimumPairCoverage\":"<<recipe.minPairCoverage
+       <<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
+    std::cout<<"ALIGNMENT status="<<unsigned(r.status)<<" rms="<<r.diagnostics.rms<<'\n';
+}
+} // namespace
+int wmain(int argc,wchar_t **argv) {
+    try {
+        Require(argc>=3 && argc<=5,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run]");
+        bool controlsOnly=false,newRun=false;
+        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else throw std::runtime_error("Unknown audit option."); }
+        const auto manifest=ReadManifest(std::filesystem::path(argv[1])); std::filesystem::path folder(argv[2]);
+        if (newRun) folder/="run-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        std::filesystem::create_directories(folder);
+        Require(!std::filesystem::exists(folder/"observations.json"),"Use a new output directory to retain previous audit evidence.");
+        std::ofstream out(folder/"observations.json",std::ios::binary); out.imbue(std::locale::classic()); out<<std::setprecision(17);
+        out<<"{\"schema\":\"ct-timepoint-audit-1\",\"scope\":\"public C3 to metrology experiment; measured timepoint comparison, no independent nominal truth\",\"inputLimitBytes\":"<<manifest.inputLimit
+           <<",\"workingLimitBytes\":"<<manifest.workingLimit<<",\"deadlineMs\":"<<manifest.deadlineMs<<",\"scans\":[";
+        auto data=std::make_shared<TestDataPort>(); HostFeatureContext context; context.data=data; context.views=std::make_shared<Views>(); context.host=std::make_shared<Control>();
+        SurfaceDeterminationConfig surfaceConfig; surfaceConfig.maxWorkingBytes=manifest.workingLimit; surfaceConfig.isOverlayVisible=false;
+        SurfaceDeterminationHostFeature surfaceFeature(surfaceConfig); Require(surfaceFeature.AttachHost(context),"Surface attach failed.");
+        AlignmentConfig alignmentConfig; alignmentConfig.workingBytes=manifest.workingLimit; alignmentConfig.deadlineMs=manifest.deadlineMs; alignmentConfig.isOverlayVisible=false;
+        MetrologyAlignmentHostFeature alignmentFeature(alignmentConfig); Require(alignmentFeature.AttachHost(context),"Metrology attach failed.");
+        std::vector<Surface> surfaces;
+        for (std::size_t i=0;i<manifest.scans.size();++i) { if (i) out<<','; surfaces.push_back(Determine(*data,surfaceFeature,manifest.scans[i],manifest,out,folder)); }
+        out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
+        out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out);
+        out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out); else out<<"null";
+        const bool pipelinePassed=controlPassed && ringPassed && std::all_of(surfaces.begin(),surfaces.end(),[](const auto &surface) { return surface.payload && !surface.validVertices.empty(); });
+        const auto memory=ReadMemory(); out<<",\"pipelineChecksPassed\":"<<(pipelinePassed ? "true" : "false")<<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
+        Require(bool(out),"Observation report write failed.");
+        Require(alignmentFeature.DetachHost() && surfaceFeature.DetachHost(),"Audit feature detach failed.");
+        std::cout<<"OBSERVATIONS "<<(folder/"observations.json").u8string()<<'\n'; return pipelinePassed ? 0 : 2;
+    } catch (const std::exception &e) { std::cerr<<"AUDIT_ERROR: "<<e.what()<<'\n'; return 1; }
+}
