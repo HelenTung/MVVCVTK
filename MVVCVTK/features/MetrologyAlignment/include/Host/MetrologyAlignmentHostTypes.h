@@ -228,6 +228,18 @@ struct AlignmentRecipe final {
     double maxSurfaceFitResidual = 1.0;
 };
 
+struct AlignmentGeometrySupport final {
+    // 有效拟合样本相对质心的三个主方向 RMS 展宽，降序排列，使用模型长度单位。
+    // 描述离散样本分布，不代表工件尺寸、完整表面积覆盖率或计量不确定度。
+    std::array<double,3> principalRmsSpreads{};
+    // Line/Cylinder：样本投影到拟合轴上的最大值减最小值，不是整件轴向长度。
+    std::optional<double> axialSpan;
+    // Circle/Cylinder：容纳全部样本方位角的最小圆弧（度），等于 360 度减最大空隙。
+    // 有限离散整圈样本通常仍小于 360；不得据此宣称表面闭合或周向连续。
+    std::optional<double> angularSpanDegrees;
+    // Sphere：球心至样本的单位向量均值之长度，[0,1]；接近 1 表示方向集中。
+    std::optional<double> radialDirectionMeanLength;
+};
 struct AlignmentGeometry final {
     std::string id;
     AlignmentGeometryKind kind = AlignmentGeometryKind::Point;
@@ -239,6 +251,8 @@ struct AlignmentGeometry final {
     double fitMax = 0.0;
     std::size_t sampleCount = 0;
     std::size_t rejectedCount = 0;
+    // 旧结果或名义定义可以缺失；新成功拟合保留有效样本的支撑信息。
+    std::optional<AlignmentGeometrySupport> support;
 };
 
 struct AlignmentResidual final {

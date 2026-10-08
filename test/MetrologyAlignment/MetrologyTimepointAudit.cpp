@@ -38,6 +38,16 @@ std::string Id(const DataRevisionRef &r) {
     for (auto b:r.entityId.bytes) out<<std::setw(2)<<unsigned(b);
     out<<':'<<std::dec<<r.generation; return out.str();
 }
+void WriteSupport(std::ostream &out,const AlignmentGeometry &geometry) {
+    Require(geometry.support.has_value(),"New measured geometry has no sample support.");
+    const auto &s=*geometry.support;
+    out<<",\"support\":{\"principalRmsSpreads\":[";
+    for (std::size_t i=0;i<3;++i) { if (i) out<<','; out<<s.principalRmsSpreads[i]; } out<<']';
+    if (s.axialSpan) out<<",\"axialSpan\":"<<*s.axialSpan;
+    if (s.angularSpanDegrees) out<<",\"angularSpanDegrees\":"<<*s.angularSpanDegrees;
+    if (s.radialDirectionMeanLength) out<<",\"radialDirectionMeanLength\":"<<*s.radialDirectionMeanLength;
+    out<<'}';
+}
 struct Memory final { std::size_t working=0,privateBytes=0,peak=0,peakCommit=0; };
 Memory ReadMemory() {
     PROCESS_MEMORY_COUNTERS_EX m{}; m.cb=sizeof(m);
@@ -330,6 +340,7 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
                 std::all_of(report->report->items.begin(),report->report->items.end(),[](const auto &item) { return item.measured && std::isfinite(*item.measured); });
             if (passed) {
                 const auto &geometry=report->report->geometries[0].fitted;
+                WriteSupport(out,geometry);
                 const auto &axis=geometry.sourceDirection; const auto &center=geometry.sourceCenter;
                 const AlignmentPoint helper=std::abs(axis[0])<.8 ? AlignmentPoint{1,0,0} : AlignmentPoint{0,1,0};
                 AlignmentPoint u{axis[1]*helper[2]-axis[2]*helper[1],axis[2]*helper[0]-axis[0]*helper[2],axis[0]*helper[1]-axis[1]*helper[0]};
@@ -343,6 +354,9 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
                 }
                 std::sort(angles.begin(),angles.end()); const double pi=std::acos(-1.0);
                 double gap=2*pi-angles.back()+angles.front(); for (std::size_t i=1;i<angles.size();++i) gap=std::max(gap,angles[i]-angles[i-1]);
+                Require(geometry.support->angularSpanDegrees && geometry.support->axialSpan &&
+                    std::abs(*geometry.support->angularSpanDegrees-(2*pi-gap)*180/pi)<1e-7 &&
+                    std::abs(*geometry.support->axialSpan-(high-low))<1e-7,"Formal cylinder support differs from original-point recomputation.");
                 out<<",\"selectedPatchAngularSpanDegrees\":"<<(2*pi-gap)*180/pi<<",\"selectedPatchAxialSpanMm\":"<<high-low
                    <<",\"coverageNote\":\"local patch support only; axial span is not part height and extrapolated diameter is not a nominal acceptance result\"";
             }
@@ -405,6 +419,7 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
         for (std::size_t a=0;a<3;++a) { if (a) out<<','; out<<s.planePoint[a]; }
         out<<"],\"sampleSpacing\":"<<s.sampleSpacing<<",\"planeTolerance\":"<<s.planeTolerance;
         if (g.status==AlignmentStatus::FullyDetermined && g.section) {
+            WriteSupport(out,g.fitted);
             ++succeeded; const auto file=prefix+"-"+std::to_string(axis)+"-samples.csv";
             std::ofstream samples(folder/file); samples.imbue(std::locale::classic()); samples<<std::setprecision(17)<<"triangle,w0,w1,w2,planeCorrection\n";
             for (const auto &sample:g.section->samples) samples<<sample.triangle<<','<<sample.barycentric[0]<<','<<sample.barycentric[1]<<','<<sample.barycentric[2]<<','<<sample.planeCorrection<<'\n';

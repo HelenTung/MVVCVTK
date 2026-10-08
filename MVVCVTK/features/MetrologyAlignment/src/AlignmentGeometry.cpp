@@ -181,6 +181,22 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
 }
 } // namespace
 
+bool AlignmentGeometryFit::GetSupportValid(const AlignmentGeometry &g) {
+    if (!g.support) return true;
+    const auto &s=*g.support;
+    if (!g.sampleCount || static_cast<unsigned>(g.kind)>5) return false;
+    for (std::size_t i=0;i<3;++i)
+        if (!std::isfinite(s.principalRmsSpreads[i]) || s.principalRmsSpreads[i]<0 ||
+            (i && s.principalRmsSpreads[i]>s.principalRmsSpreads[i-1])) return false;
+    const bool axial=g.kind==AlignmentGeometryKind::Line || g.kind==AlignmentGeometryKind::Cylinder;
+    const bool angular=g.kind==AlignmentGeometryKind::Circle || g.kind==AlignmentGeometryKind::Cylinder;
+    const bool radial=g.kind==AlignmentGeometryKind::Sphere;
+    return s.axialSpan.has_value()==axial && s.angularSpanDegrees.has_value()==angular &&
+        s.radialDirectionMeanLength.has_value()==radial &&
+        (!s.axialSpan || (std::isfinite(*s.axialSpan) && *s.axialSpan>=0)) &&
+        (!s.angularSpanDegrees || (std::isfinite(*s.angularSpanDegrees) && *s.angularSpanDegrees>=0 && *s.angularSpanDegrees<=360)) &&
+        (!s.radialDirectionMeanLength || (std::isfinite(*s.radialDirectionMeanLength) && *s.radialDirectionMeanLength>=0 && *s.radialDirectionMeanLength<=1));
+}
 bool AlignmentGeometryFit::GetSpecValid(const AlignmentGeometrySpec &g, bool requiresRegion) {
     if (g.id.empty() || static_cast<unsigned>(g.kind)>5 ||
         static_cast<unsigned>(g.association)>2 || !GetUnitDirectionValid(g.targetDirection) ||
@@ -485,10 +501,27 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
             : 0;
     output.sampleCount = points.size();
     output.rejectedCount = samples.rejected;
+    output.support=AlignmentGeometrySupport{};
+    auto &support=*output.support;
+    for (int i=0;i<3;++i)
+        support.principalRmsSpreads[i]=std::sqrt(std::max(0.0,svd.w.at<double>(i))/points.size())*work.recipe.lengthScale;
+    const bool hasAngular=spec.kind==AlignmentGeometryKind::Circle || spec.kind==AlignmentGeometryKind::Cylinder;
+    const bool hasAxial=spec.kind==AlignmentGeometryKind::Line || spec.kind==AlignmentGeometryKind::Cylinder;
+    const auto tangent=Tangent(shape.normal),bitangent=shape.normal.cross(tangent);
+    double axialLow=std::numeric_limits<double>::infinity(),axialHigh=-axialLow;
+    Vec radialMean{};
+    std::size_t workSteps=0;
+    const auto check=[&] {
+        if (++workSteps%256==0 && GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)
+            throw std::runtime_error("Cancelled geometry support calculation.");
+    };
     double sum = 0;
-    for (const auto &p : points) {
+    for (auto &p : points) {
+        check();
         const auto q = p - shape.center;
         const auto axial = q.dot(shape.normal);
+        if (hasAxial) { axialLow=std::min(axialLow,axial); axialHigh=std::max(axialHigh,axial); }
+        if (spec.kind==AlignmentGeometryKind::Sphere) radialMean+=Unit(q)/static_cast<double>(points.size());
         double distance = 0;
         switch (spec.kind) {
         case AlignmentGeometryKind::Point:
@@ -513,6 +546,8 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
         distance *= work.recipe.lengthScale;
         sum += distance * distance;
         output.fitMax = std::max(output.fitMax, distance);
+        // 后续不再使用规范化坐标，复用私有点缓冲存放角度，不复制原测量样本。
+        if (hasAngular) p[0]=std::atan2(q.dot(bitangent),q.dot(tangent));
     }
     output.fitRms = std::sqrt(sum / static_cast<double>(points.size()));
     Require(std::isfinite(output.fitRms) && output.fitRms <= spec.maxFitRms,
@@ -520,5 +555,15 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
     if (spec.radiusRange)
         Require(output.radius >= (*spec.radiusRange)[0] && output.radius <= (*spec.radiusRange)[1],
                 "Geometry radius outside recipe range.");
+    if (hasAxial) support.axialSpan=(axialHigh-axialLow)*work.recipe.lengthScale;
+    if (spec.kind==AlignmentGeometryKind::Sphere) support.radialDirectionMeanLength=std::clamp(cv::norm(radialMean),0.0,1.0);
+    if (hasAngular) {
+        std::sort(points.begin(),points.end(),[&](const auto &a,const auto &b) { check(); return a[0]<b[0]; });
+        const double full=2*std::acos(-1.0);
+        double gap=full-points.back()[0]+points.front()[0];
+        for (std::size_t i=1;i<points.size();++i) { check(); gap=std::max(gap,points[i][0]-points[i-1][0]); }
+        support.angularSpanDegrees=std::clamp((full-gap)*360/full,0.0,360.0);
+    }
+    Require(GetSupportValid(output),"Geometry support is invalid or overflows.");
     return output;
 }

@@ -12,7 +12,7 @@ bool GetGeometryValid(const AlignmentGeometry &g) {
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceCenter)) &&
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceDirection)) &&
            std::isfinite(g.radius) && g.radius >= 0 && std::isfinite(g.fitRms) && g.fitRms >= 0 &&
-           std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0;
+           std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0 && AlignmentGeometryFit::GetSupportValid(g);
 }
 bool GetResultValid(const ResultRecord &r) {
     if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2" && r.algorithmVersion != "metrology-alignment-3") return false;

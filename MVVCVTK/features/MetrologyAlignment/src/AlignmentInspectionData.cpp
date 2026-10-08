@@ -16,6 +16,8 @@ bool ReportValid(const InspectionSnapshot &s) {
         const auto &g=s.report->geometries[i]; const auto &spec=s.plan->geometries[i];
         if (g.source!=spec.source || g.fitted.id!=spec.fit.id || g.fitted.kind!=spec.fit.kind ||
             (g.status!=AlignmentStatus::FullyDetermined && g.status!=AlignmentStatus::Degenerate)) return false;
+        if (!AlignmentGeometryFit::GetSupportValid(g.fitted) ||
+            (g.source==InspectionGeometrySource::NominalDefinition && g.fitted.support)) return false;
         if ((spec.section && s.report->algorithmVersion!="metrology-inspection-2") || (g.section && !spec.section) ||
             (spec.section && g.status==AlignmentStatus::FullyDetermined && !g.section)) return false;
         if (g.section) {

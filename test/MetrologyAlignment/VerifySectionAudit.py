@@ -159,11 +159,21 @@ def verify(path):
             rms = float(np.sqrt(np.mean(solve.fun ** 2)))
             require(center_error <= tolerance and radius_error <= tolerance and abs(rms - section["fitRms"]) <= tolerance,
                     "Independent circle center/radius/RMS mismatch")
+            support = section["support"]
+            spreads = np.linalg.svd(independent - mean, compute_uv=False) / np.sqrt(count)
+            require(np.max(np.abs(spreads - support["principalRmsSpreads"])) <= tolerance,
+                    "Independent principal sample spreads mismatch")
+            angles = np.sort(np.arctan2((independent - center) @ basis[:, 1], (independent - center) @ basis[:, 0]))
+            angular_span = float(360 - np.max(np.diff(np.r_[angles, angles[0] + 2 * np.pi])) * 180 / np.pi)
+            angular_tolerance = max(1e-8, 2 * tolerance / solve.x[2] * 180 / np.pi)
+            require(abs(angular_span - support["angularSpanDegrees"]) <= angular_tolerance and
+                    "axialSpan" not in support and "radialDirectionMeanLength" not in support,
+                    "Independent angular sample support mismatch")
             result["inputs"][sample_path.name] = digest(sample_path)
             result["sections"].append({"input": audit["sourcePoints"], "axis": section["axis"], "sampleCount": count,
                 "perimeterMm": perimeter, "radiusMm": float(solve.x[2]), "fitRmsMm": rms,
                 "sampleMaximumErrorMm": sample_error, "centerErrorMm": center_error, "radiusErrorMm": radius_error,
-                "numericalToleranceMm": tolerance})
+                "numericalToleranceMm": tolerance, "principalRmsSpreadsMm": spreads.tolist(), "angularSpanDegrees": angular_span})
     require(result["sections"], "No real sections independently verified")
     result["numericalChecksPassed"] = True
     result["physicalAccuracyValidated"] = False

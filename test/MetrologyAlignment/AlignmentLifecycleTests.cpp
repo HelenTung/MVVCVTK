@@ -560,6 +560,16 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
           "inspection freezes plan and reports explicit alignment/mesh identity");
     const auto again=f.feature->GetInspection(reportRef);
     Check(report && again && report->report==again->report && report->plan==again->plan,"report polling shares immutable data and ROI plan");
+    if (report) {
+        Check(report->report->geometries[0].fitted.support.has_value(),"public inspection publishes sample support");
+        auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+        auto body=std::make_shared<InspectionReport>(*report->report);
+        body->geometries[0].fitted.support=AlignmentGeometrySupport{};
+        body->geometries[0].fitted.support->principalRmsSpreads[0]=-1; forged.report=body;
+        DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+            std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,"report rejects invalid support metadata");
+    }
     Check(f.feature->GetState().activeResult==alignment.result,"inspection does not realign or reactivate measurement");
     if (hasSectionMesh && report && again) {
         const auto trace=report->report->geometries[1].section;

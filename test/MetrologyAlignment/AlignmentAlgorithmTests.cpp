@@ -178,10 +178,11 @@ void LineAndContact() {
 }
 } // namespace
 int TestConstraints();
+int TestGeometrySupport();
 int main() {
     Sequential();
     Rps();
     Shapes();
     LineAndContact();
-    return failures + TestConstraints() ? 1 : 0;
+    return failures + TestConstraints() + TestGeometrySupport() ? 1 : 0;
 }

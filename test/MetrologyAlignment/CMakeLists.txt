@@ -1,4 +1,4 @@
-add_executable(mvvcvtk_alignment_tests AlignmentAlgorithmTests.cpp AlignmentConstraintTests.cpp)
+add_executable(mvvcvtk_alignment_tests AlignmentAlgorithmTests.cpp AlignmentConstraintTests.cpp AlignmentSupportTests.cpp)
 target_include_directories(mvvcvtk_alignment_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
 target_link_libraries(mvvcvtk_alignment_tests PRIVATE MVVCVTK::MetrologyAlignment opencv_world)
