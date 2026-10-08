@@ -186,6 +186,13 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         Require(valid && valid->values.size()==surface.payload->GetVertices().size()/3,"Measurement validity attributes missing.");
         for (std::size_t i=0;i<valid->values.size();++i) if (valid->values[i]==1) surface.validVertices.push_back(i);
         const auto &tri=surface.payload->GetTriangles();
+        const MeshAttribute *faceValidity=nullptr;
+        for (const auto &a:surface.payload->GetCellAttributes()) if (a.name=="measurement.valid") faceValidity=&a;
+        Require(faceValidity && faceValidity->componentCount==1 && faceValidity->values.size()==tri.size()/3 &&
+            snapshot->triangleValidity && faceValidity->values.size()==snapshot->triangleValidity->size() &&
+            std::equal(faceValidity->values.begin(),faceValidity->values.end(),snapshot->triangleValidity->begin()),
+            "Published cell quality does not preserve C3 triangle validity.");
+        out<<",\"cellQualityChecked\":true";
         for (std::size_t i=0;i<tri.size()/3;++i) if (valid->values[tri[3*i]]==1 && valid->values[tri[3*i+1]]==1 && valid->values[tri[3*i+2]]==1 &&
             snapshot->triangleValidity && (*snapshot->triangleValidity)[i]) surface.validTriangles.push_back(i);
         out<<",\"mesh\":"<<Json(Id(surface.mesh))<<",\"generation\":"<<Json(Id(surface.generation))

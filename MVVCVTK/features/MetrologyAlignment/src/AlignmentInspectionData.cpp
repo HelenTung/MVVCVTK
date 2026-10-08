@@ -9,13 +9,34 @@ std::vector<DataInputRef> Inputs(const InspectionSnapshot &s) {
 }
 bool ReportValid(const InspectionSnapshot &s) {
     if (!s.plan || !s.report || !AlignmentInspection::GetPlanValid(*s.plan,{}) || s.plan->alignmentResult!=s.alignmentResult ||
-        s.report->algorithmVersion!="metrology-inspection-1" || s.report->evaluatedUnixMilliseconds<=0 ||
+        (s.report->algorithmVersion!="metrology-inspection-1" && s.report->algorithmVersion!="metrology-inspection-2") || s.report->evaluatedUnixMilliseconds<=0 ||
         s.report->geometries.size()!=s.plan->geometries.size() || s.report->items.size()!=s.plan->items.size() ||
         static_cast<unsigned>(s.report->verdict)>3 || s.report->verdict!=AlignmentInspection::GetVerdict(s.report->items)) return false;
     for (std::size_t i=0;i<s.report->geometries.size();++i) {
         const auto &g=s.report->geometries[i]; const auto &spec=s.plan->geometries[i];
         if (g.source!=spec.source || g.fitted.id!=spec.fit.id || g.fitted.kind!=spec.fit.kind ||
             (g.status!=AlignmentStatus::FullyDetermined && g.status!=AlignmentStatus::Degenerate)) return false;
+        if ((spec.section && s.report->algorithmVersion!="metrology-inspection-2") || (g.section && !spec.section) ||
+            (spec.section && g.status==AlignmentStatus::FullyDetermined && !g.section)) return false;
+        if (g.section) {
+            const auto &trace=*g.section;
+            if (!AlignmentMath::Finite(AlignmentMath::Vector(trace.sourcePlanePoint)) ||
+                !AlignmentMath::GetUnitDirectionValid(trace.sourcePlaneNormal) || trace.components==0 || trace.closedLoops==0 ||
+                trace.closedLoops>trace.components || trace.selectedSegments<3 || trace.sourceTriangleCount==0 ||
+                !AlignmentMath::Positive(trace.perimeter) || !AlignmentMath::Positive(trace.sampleSpacing) ||
+                trace.samples.size()!=g.fitted.sampleCount || trace.samples.size()<8 ||
+                !std::isfinite(trace.maxPlaneCorrection) || trace.maxPlaneCorrection<0 ||
+                trace.maxPlaneCorrection>2*spec.section->planeTolerance) return false;
+            for (const auto &sample:trace.samples) {
+                double sum=0;
+                for (auto weight:sample.barycentric) {
+                    if (!std::isfinite(weight) || weight< -1e-10 || weight>1+1e-10) return false;
+                    sum+=weight;
+                }
+                if (sample.triangle>=trace.sourceTriangleCount || std::abs(sum-1)>1e-10 || !std::isfinite(sample.planeCorrection) ||
+                    std::abs(sample.planeCorrection)>trace.maxPlaneCorrection) return false;
+            }
+        }
         if (g.status==AlignmentStatus::FullyDetermined &&
             (!AlignmentMath::Finite(AlignmentMath::Vector(g.alignedCenter)) || !AlignmentMath::GetUnitDirectionValid(g.alignedDirection) ||
              !std::isfinite(g.fitted.radius) || g.fitted.radius<0 || !std::isfinite(g.fitted.fitRms) || g.fitted.fitRms<0 ||
@@ -56,6 +77,8 @@ std::optional<Context> Prepare(const DataGraphSnapshot &graph,InspectionPlan pla
     if (!source) return {};
     for (const auto &g:plan.geometries) if (g.source!=InspectionGeometrySource::NominalDefinition && !g.fit.region.vertexIds.empty() &&
         g.fit.region.pinnedMesh!=(g.source==InspectionGeometrySource::MeasuredSurface ? source->input.mesh : source->nominal)) return {};
+    for (const auto &g:plan.geometries) if (g.section &&
+        g.section->pinnedMesh!=(g.source==InspectionGeometrySource::MeasuredSurface ? source->input.mesh : source->nominal)) return {};
     Context context; context.work.input=source->input; context.work.config=config;
     context.work.mesh=source->measuredMesh; context.work.referenceMesh=source->referenceMesh; context.work.recipe.nominalData=source->nominal;
     context.expectations=source->expectations;
@@ -68,7 +91,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data,Context &context,const In
     DataTransaction tx; tx.expectations=context.expectations;
     tx.outputs.push_back({ref.entityId,0,resultType,Inputs(context.snapshot),
         std::make_shared<const Payload>(context.snapshot,context.expectations),
-        DataProvenance{"metrology-alignment","inspect","metrology-inspection-1","independent fitting and typed scalar requirements"}});
+        DataProvenance{"metrology-alignment","inspect",result.report->algorithmVersion,"independent fitting and typed scalar requirements"}});
     return tx;
 }
 std::optional<InspectionSnapshot> GetResult(const DataGraphSnapshot &graph,const DataRevisionRef &ref) {
@@ -80,6 +103,13 @@ std::optional<InspectionSnapshot> GetResult(const DataGraphSnapshot &graph,const
     const auto recipe=std::dynamic_pointer_cast<const AlignmentData::RecipePayload>(graph.view->GetData(alignment->record.recipe)->payload);
     const auto matrix=std::dynamic_pointer_cast<const Transform3DPayload>(graph.view->GetData(s.transform)->payload);
     if (!recipe || recipe->recipe.nominalData!=s.referenceData || !matrix || matrix->GetSourceToTarget()!=s.sourceToTarget) return {};
+    // 逐样本范围在发布时验证；读取仅核对不可变来源规模，避免轮询反复遍历整条截线。
+    for (const auto &g:s.report->geometries) if (g.section) {
+        const auto meshRef=g.source==InspectionGeometrySource::MeasuredSurface ? s.sourceMesh : s.referenceData;
+        const auto source=graph.view->GetData(meshRef);
+        const auto *mesh=source ? dynamic_cast<const SurfaceMeshPayload *>(source->payload.get()) : nullptr;
+        if (!mesh || g.section->sourceTriangleCount!=mesh->GetTriangles().size()/3) return {};
+    }
     for (const auto &input:Inputs(s)) {
         if (std::none_of(node->inputs.begin(),node->inputs.end(),[&](const auto &i) { return i.role==input.role && i.source==input.source; }) ||
             std::none_of(payload->expectations.begin(),payload->expectations.end(),[&](const auto &e) {

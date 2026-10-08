@@ -105,6 +105,16 @@ set_target_properties(mvvcvtk_alignment_inspection_tests PROPERTIES
 add_test(NAME MetrologyAlignment.Inspection COMMAND mvvcvtk_alignment_inspection_tests)
 SetTestRuntime(MetrologyAlignment.Inspection mvvcvtk_alignment_inspection_tests)
 
+add_executable(mvvcvtk_alignment_section_tests AlignmentSectionTests.cpp)
+target_include_directories(mvvcvtk_alignment_section_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_section_tests PRIVATE MVVCVTK::MetrologyAlignment opencv_world)
+SetTargetDefaults(mvvcvtk_alignment_section_tests)
+set_target_properties(mvvcvtk_alignment_section_tests PROPERTIES
+    PROJECT_LABEL AlignmentSectionTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.Section COMMAND mvvcvtk_alignment_section_tests)
+SetTestRuntime(MetrologyAlignment.Section mvvcvtk_alignment_section_tests)
+
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_executable(mvvcvtk_metrology_timepoint_audit MetrologyTimepointAudit.cpp)
     target_link_libraries(mvvcvtk_metrology_timepoint_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host

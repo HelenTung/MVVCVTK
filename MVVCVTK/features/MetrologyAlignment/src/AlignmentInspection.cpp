@@ -1,4 +1,5 @@
 #include "AlignmentInspection.h"
+#include "AlignmentSection.h"
 #include "AlignmentMath.h"
 #include <set>
 #include <stdexcept>
@@ -115,10 +116,11 @@ bool AlignmentInspection::GetPlanValid(const InspectionPlan &p,const AlignmentCo
         if (g.fit.id.empty() || g.fit.id.size()>128 || !ids.insert(g.fit.id).second || static_cast<unsigned>(g.source)>2 ||
             static_cast<unsigned>(g.fit.kind)>5 || g.definitionSource.size()>1024 || g.fit.association!=AlignmentAssociation::LeastSquares) return false;
         if (g.source==InspectionGeometrySource::NominalDefinition) {
-            if (!g.ideal || g.definitionSource.empty() || !Finite(Vector(g.ideal->center)) || !GetUnitDirectionValid(g.ideal->direction) ||
+            if (g.section || !g.ideal || g.definitionSource.empty() || !Finite(Vector(g.ideal->center)) || !GetUnitDirectionValid(g.ideal->direction) ||
                 !g.fit.region.vertexIds.empty() || g.fit.region.targetBounds ||
                 (Round(g.fit.kind) ? !Positive(g.ideal->radius) : g.ideal->radius!=0)) return false;
-        } else if (g.ideal || !AlignmentGeometryFit::GetSpecValid(g.fit)) return false;
+        } else if (g.ideal || !AlignmentGeometryFit::GetSpecValid(g.fit,!g.section) ||
+            (g.section && (g.fit.kind!=AlignmentGeometryKind::Circle || !AlignmentSection::GetValid(*g.section)))) return false;
     }
     ids.clear();
     for (const auto &item:p.items) {
@@ -165,6 +167,7 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
             if (!nominal) {
                 Require(work.mesh!=nullptr,"Reference surface for nominal fitting is unavailable.");
                 Require(spec.fit.region.vertexIds.empty() || spec.fit.region.pinnedMesh==work.input.mesh,"Inspection ROI belongs to another mesh revision.");
+                Require(!spec.section || spec.section->pinnedMesh==work.input.mesh,"Inspection section belongs to another mesh revision.");
             }
             try {
                 if (nominal) {
@@ -173,18 +176,32 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
                 } else {
                     if (input.config.pointLimit && total>=input.config.pointLimit) throw std::length_error("Inspection sample budget exhausted.");
                     work.config.pointLimit=input.config.pointLimit ? input.config.pointLimit-total : 0;
-                    const auto samples=AlignmentGeometryFit::BuildSamples(work,spec.fit.region,transform);
+                    AlignmentSamples samples;
+                    std::optional<AlignmentGeometrySpec> sectionFit;
+                    const auto *fit=&spec.fit;
+                    if (spec.section) {
+                        auto section=AlignmentSection::Build(work,*spec.section,transform);
+                        samples=std::move(section.samples); geometry.section=std::move(section.trace);
+                        sectionFit=spec.fit; sectionFit->targetDirection=spec.section->planeNormal;
+                        fit=&*sectionFit;
+                        // 截面取样预检已覆盖当前拟合；持久化来源链占用须从后续几何的预算扣除。
+                        const auto retained=geometry.section->samples.capacity()*sizeof(InspectionSectionSample);
+                        if (retained>*work.config.workingBytes) throw std::length_error("Section provenance exceeds working budget.");
+                        work.config.workingBytes=*work.config.workingBytes-retained;
+                    } else samples=AlignmentGeometryFit::BuildSamples(work,fit->region,transform);
                     if (input.config.pointLimit && (total>input.config.pointLimit || samples.points.size()>input.config.pointLimit-total))
                         throw std::length_error("Inspection sample total exceeds point limit.");
                     if (samples.points.size()>std::numeric_limits<std::size_t>::max()-total) throw std::length_error("Inspection sample count overflows.");
                     total+=samples.points.size();
                     geometry.fitted.sampleCount=samples.points.size(); geometry.fitted.rejectedCount=samples.rejected;
-                    geometry.fitted=AlignmentGeometryFit::BuildGeometry(work,spec.fit,samples,transform);
+                    geometry.fitted=AlignmentGeometryFit::BuildGeometry(work,*fit,samples,transform,
+                        geometry.section ? std::optional<AlignmentPoint>{geometry.section->sourcePlaneNormal} : std::nullopt,
+                        bool(geometry.section));
                 }
                 geometry.alignedCenter=Point(Transform(transform,Vector(geometry.fitted.sourceCenter)));
                 geometry.alignedDirection=Point(Unit(Rotate(transform,Vector(geometry.fitted.sourceDirection))));
                 if (!nominal && HasDirection(spec.fit.kind)) {
-                    const double cosine=Vector(geometry.alignedDirection).dot(Vector(spec.fit.targetDirection));
+                    const double cosine=Vector(geometry.alignedDirection).dot(Vector(spec.section ? spec.section->planeNormal : spec.fit.targetDirection));
                     Require(std::abs(cosine)>=spec.fit.minDirectionCosine,"Inspection direction sign is ambiguous against its declared hint.");
                     if (cosine<0) {
                         geometry.alignedDirection=Point(-Vector(geometry.alignedDirection));

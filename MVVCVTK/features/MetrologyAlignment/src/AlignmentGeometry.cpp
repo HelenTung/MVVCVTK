@@ -30,7 +30,7 @@ struct Shape final {
     double radius = 1;
 };
 std::vector<double> Residuals(const Shape &shape, AlignmentGeometryKind kind,
-                              const std::vector<Vec> &points) {
+                              const std::vector<Vec> &points, bool fixedPlane = false) {
     std::vector<double> r;
     r.reserve(points.size() * 2);
     for (const auto &p : points) {
@@ -39,19 +39,22 @@ std::vector<double> Residuals(const Shape &shape, AlignmentGeometryKind kind,
         r.push_back((kind == AlignmentGeometryKind::Sphere ? cv::norm(q)
                                                            : cv::norm(q - axial * shape.normal)) -
                     shape.radius);
-        if (kind == AlignmentGeometryKind::Circle)
+        if (kind == AlignmentGeometryKind::Circle && !fixedPlane)
             r.push_back(axial);
     }
     return r;
 }
-Shape Shift(Shape s, AlignmentGeometryKind kind, const cv::Mat &dx) {
+Shape Shift(Shape s, AlignmentGeometryKind kind, const cv::Mat &dx, bool fixedPlane = false) {
     if (kind == AlignmentGeometryKind::Sphere) {
         s.center += Vec(dx.at<double>(0), dx.at<double>(1), dx.at<double>(2));
         s.radius += dx.at<double>(3);
         return s;
     }
     const Vec a = Tangent(s.normal), b = s.normal.cross(a);
-    if (kind == AlignmentGeometryKind::Cylinder) {
+    if (fixedPlane && kind == AlignmentGeometryKind::Circle) {
+        s.center += a * dx.at<double>(0) + b * dx.at<double>(1);
+        s.radius += dx.at<double>(2);
+    } else if (kind == AlignmentGeometryKind::Cylinder) {
         s.center += a * dx.at<double>(0) + b * dx.at<double>(1);
         s.normal = Unit(s.normal + a * dx.at<double>(2) + b * dx.at<double>(3));
         s.radius += dx.at<double>(4);
@@ -66,7 +69,7 @@ double Cost(const std::vector<double> &r) {
     return std::inner_product(r.begin(), r.end(), r.begin(), 0.0);
 }
 Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
-               const std::vector<Vec> &points, Shape shape) {
+               const std::vector<Vec> &points, Shape shape, bool fixedPlane = false) {
     const bool sphere = kind == AlignmentGeometryKind::Sphere;
     const int columns = sphere ? 4 : 3;
     const auto a = Tangent(shape.normal), b = shape.normal.cross(a);
@@ -95,12 +98,12 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
     shape.radius =
         std::sqrt(std::max(0.0, answer.at<double>(columns - 1) + shape.center.dot(shape.center)));
     Require(Positive(shape.radius), "Degenerate radius.");
-    const int count = sphere ? 4 : (kind == AlignmentGeometryKind::Cylinder ? 5 : 6);
+    const int count = fixedPlane ? 3 : sphere ? 4 : (kind == AlignmentGeometryKind::Cylinder ? 5 : 6);
     bool converged = false;
     for (std::size_t iteration = 0; iteration < work.recipe.iterationLimit; ++iteration) {
         if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
             throw std::runtime_error("Cancelled geometry fit.");
-        const auto r = Residuals(shape, kind, points);
+        const auto r = Residuals(shape, kind, points, fixedPlane);
         cv::Mat jac(static_cast<int>(r.size()), count, CV_64F);
         // 解析 Jacobian 避免短圆弧在最优点附近的差分消减误差；参数均为规范化长度。
         const auto tangent = Tangent(shape.normal), bitangent = shape.normal.cross(tangent);
@@ -115,8 +118,12 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
             const double distance = sphere ? cv::norm(q) : cv::norm(radial);
             Require(distance > 1e-15, "Point lies on singular shape center/axis.");
             const auto direction = (sphere ? q : radial) / distance;
-            const int row = static_cast<int>(i) * (kind == AlignmentGeometryKind::Circle ? 2 : 1);
-            if (kind == AlignmentGeometryKind::Cylinder) {
+            const int row = static_cast<int>(i) * (kind == AlignmentGeometryKind::Circle && !fixedPlane ? 2 : 1);
+            if (fixedPlane) {
+                jac.at<double>(row, 0) = -direction.dot(tangent);
+                jac.at<double>(row, 1) = -direction.dot(bitangent);
+                jac.at<double>(row, 2) = -1;
+            } else if (kind == AlignmentGeometryKind::Cylinder) {
                 jac.at<double>(row, 0) = -direction.dot(tangent);
                 jac.at<double>(row, 1) = -direction.dot(bitangent);
                 jac.at<double>(row, 2) = -axial * direction.dot(tangent);
@@ -151,8 +158,8 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
         }
         bool improved = false;
         for (double fraction = 1; fraction >= 1.0 / 1024; fraction *= 0.5) {
-            const auto candidate = Shift(shape, kind, dx * fraction);
-            if (candidate.radius > 0 && Cost(Residuals(candidate, kind, points)) < Cost(r)) {
+            const auto candidate = Shift(shape, kind, dx * fraction, fixedPlane);
+            if (candidate.radius > 0 && Cost(Residuals(candidate, kind, points, fixedPlane)) < Cost(r)) {
                 shape = candidate;
                 improved = true;
                 break;
@@ -174,14 +181,15 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
 }
 } // namespace
 
-bool AlignmentGeometryFit::GetSpecValid(const AlignmentGeometrySpec &g) {
+bool AlignmentGeometryFit::GetSpecValid(const AlignmentGeometrySpec &g, bool requiresRegion) {
     if (g.id.empty() || static_cast<unsigned>(g.kind)>5 ||
         static_cast<unsigned>(g.association)>2 || !GetUnitDirectionValid(g.targetDirection) ||
         !Positive(g.maxFitRms) || !Positive(g.minCoverage) || g.minCoverage>1 ||
         !Positive(g.minDirectionCosine) || g.minDirectionCosine>1) return false;
     const auto &region=g.region;
-    if (region.vertexIds.empty()==!region.targetBounds.has_value() ||
-        (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh))) return false;
+    if (requiresRegion && (region.vertexIds.empty()==!region.targetBounds.has_value() ||
+        (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh)))) return false;
+    if (!requiresRegion && (!region.vertexIds.empty() || region.targetBounds || GetDataRevisionRefValid(region.pinnedMesh))) return false;
     if (region.targetBounds) for (std::size_t axis=0;axis<3;++axis)
         if (!std::isfinite((*region.targetBounds)[2*axis]) || !std::isfinite((*region.targetBounds)[2*axis+1]) ||
             (*region.targetBounds)[2*axis]>(*region.targetBounds)[2*axis+1]) return false;
@@ -461,7 +469,8 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
     }
     if (spec.kind == AlignmentGeometryKind::Sphere || spec.kind == AlignmentGeometryKind::Circle ||
         spec.kind == AlignmentGeometryKind::Cylinder)
-        shape = FitRound(work, spec.kind, points, shape);
+        shape = FitRound(work, spec.kind, points, shape,
+            spec.kind == AlignmentGeometryKind::Circle && normalConstraint && isFixedNormal);
     if (spec.kind == AlignmentGeometryKind::Cylinder)
         shape.center -= shape.center.dot(shape.normal) * shape.normal;
     AlignmentGeometry output;

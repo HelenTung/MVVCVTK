@@ -93,7 +93,7 @@ struct Fixture final {
     AlignmentRecipe recipe;
     DataRevisionRef recipeRef;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
-    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}) {
+    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false) {
         input.source = {data->CreateDataEntityId(), 1};
         input.mesh = {data->CreateDataEntityId(), 1};
         input.scopeData = {data->CreateDataEntityId(), 1};
@@ -107,7 +107,19 @@ struct Fixture final {
             DataTypes::recordTable, "test",
             std::vector<RecordColumn>{{"value", std::vector<double>{1}}});
         std::vector<double> vertices{0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4};
-        mesh = std::make_shared<const SurfaceMeshPayload>(vertices, std::vector<std::uint64_t>{});
+        std::vector<std::uint64_t> triangles;
+        if (hasSectionMesh) {
+            constexpr std::size_t sides=32;
+            for (int z=-1;z<=1;z+=2) for (std::size_t i=0;i<sides;++i) {
+                const auto a=2*std::acos(-1.0)*i/sides;
+                vertices.insert(vertices.end(),{5*std::cos(a),5*std::sin(a),static_cast<double>(z)});
+            }
+            for (std::size_t i=0;i<sides;++i) {
+                const auto a=4+i,b=4+(i+1)%sides,c=a+sides,d=b+sides;
+                triangles.insert(triangles.end(),{a,b,c,b,d,c});
+            }
+        }
+        mesh = std::make_shared<const SurfaceMeshPayload>(vertices, std::move(triangles));
         DataTransaction tx;
         for (const auto ref : {input.source, input.scopeData, nominal})
             tx.outputs.push_back({ref.entityId, 0, DataTypes::recordTable, {}, table, {}});
@@ -516,14 +528,23 @@ void SurfaceReferenceLifecycle() {
     Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
           "restore cannot reuse reference triangle IDs on another revision");
 }
-void InspectionLifecycle() {
-    Fixture f;
+void InspectionLifecycle(bool hasSectionMesh=false) {
+    Fixture f({}, {}, hasSectionMesh);
     const auto alignment=f.Solve();
     AlignmentRequest request; request.action=AlignmentAction::Inspect; request.inspection=InspectionPlan{};
     auto &plan=*request.inspection; plan.id="drawing-inspection"; plan.alignmentResult=alignment.result;
     InspectionGeometrySpec point; point.fit=f.recipe.geometries[0]; plan.geometries.push_back(point);
     InspectionItem item; item.id="center-x"; item.measured.metric=InspectionMetric::CenterX;
     item.nominal=.1; item.nominalSource="drawing"; item.deviationLimits=std::array<double,2>{-1e-7,1e-7}; plan.items.push_back(item);
+    if (hasSectionMesh) {
+        InspectionGeometrySpec circle; circle.fit.id="section"; circle.fit.kind=AlignmentGeometryKind::Circle;
+        circle.fit.maxFitRms=.1; circle.section=InspectionSection{}; circle.section->pinnedMesh=f.input.mesh;
+        circle.section->planePoint={.1,-.2,.3}; plan.geometries.push_back(circle);
+        InspectionItem diameter; diameter.id="section-diameter"; diameter.measured.first.geometry=1;
+        diameter.nominal=10; diameter.nominalSource="analytic regular polygon cylinder";
+        const double chordBound=10*(1-std::cos(std::acos(-1.0)/32));
+        diameter.deviationLimits=std::array<double,2>{-chordBound,chordBound}; plan.items.push_back(diameter);
+    }
     AlignmentResult evaluated; int completed=0;
     const auto run=[&] {
         Check(f.feature->SendRequest(request,[&](AlignmentResult r) { evaluated=std::move(r); ++completed; }).status==
@@ -540,6 +561,22 @@ void InspectionLifecycle() {
     const auto again=f.feature->GetInspection(reportRef);
     Check(report && again && report->report==again->report && report->plan==again->plan,"report polling shares immutable data and ROI plan");
     Check(f.feature->GetState().activeResult==alignment.result,"inspection does not realign or reactivate measurement");
+    if (hasSectionMesh && report && again) {
+        const auto trace=report->report->geometries[1].section;
+        Check(trace && trace==again->report->geometries[1].section && trace->sourceTriangleCount==64,
+            "public section inspection preserves shared sample provenance and source triangle count");
+        if (trace) {
+            auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+            auto body=std::make_shared<InspectionReport>(*report->report);
+            auto invalidTrace=std::make_shared<InspectionSectionTrace>(*trace);
+            invalidTrace->samples[0].triangle=trace->sourceTriangleCount;
+            body->geometries[1].section=invalidTrace; forged.report=body;
+            DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+                std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+            Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,
+                "report validator rejects out-of-range section provenance");
+        }
+    }
     if (report) {
         auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
         auto body=std::make_shared<InspectionReport>(*report->report); body->verdict=AlignmentInspectionVerdict::Fail; forged.report=body;
@@ -754,7 +791,8 @@ void AutomaticReferenceLifecycle() {
 } // namespace
 int main() {
     const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
-    run("InspectionLifecycle", InspectionLifecycle);
+    run("InspectionLifecycle", [] { InspectionLifecycle(); });
+    run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
     run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
     run("WorkNotifications", WorkNotifications);

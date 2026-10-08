@@ -342,12 +342,38 @@ struct InspectionIdealGeometry final {
     AlignmentPoint center{}, direction{0,0,1};
     double radius = 0;
 };
+struct InspectionSection final {
+    // 截面位于对齐目标坐标系；索引属于该精确计量网格，空集合遍历全网格。
+    DataRevisionRef pinnedMesh;
+    AlignmentPoint planePoint{}, planeNormal{0,0,1};
+    std::vector<std::uint64_t> triangles;
+    // 闭环等弧长取样的最大间距，至少 8 点。容差只用于平面分类和数值检查，不做空间焊接。
+    double sampleSpacing=.1, planeTolerance=1e-8;
+    // 多个截线分量时按距此点最近的分量选取；并列、开口或分支均不能静默成为圆。
+    std::optional<AlignmentPoint> selectionPoint;
+    double maxSelectionDistance=1;
+};
+struct InspectionSectionSample final {
+    std::uint64_t triangle=0;
+    std::array<double,3> barycentric{};
+    // 由原三角形重心坐标重建的点沿源截面法向投影至平面的带符号距离。
+    double planeCorrection=0;
+};
+struct InspectionSectionTrace final {
+    AlignmentPoint sourcePlanePoint{}, sourcePlaneNormal{0,0,1};
+    std::size_t components=0, closedLoops=0, selectedSegments=0;
+    std::size_t sourceTriangleCount=0;
+    double perimeter=0, sampleSpacing=0, maxPlaneCorrection=0;
+    std::vector<InspectionSectionSample> samples;
+};
 struct InspectionGeometrySpec final {
     // NominalDefinition 仅使用 fit.id/kind 与 ideal；其他来源从独立 ROI 按最小二乘拟合。
     AlignmentGeometrySpec fit;
     InspectionGeometrySource source = InspectionGeometrySource::MeasuredSurface;
     std::optional<InspectionIdealGeometry> ideal;
     std::string definitionSource;
+    // 仅 Circle 支持截面模式；与 fit.region 互斥，平面方向采用 section.planeNormal。
+    std::optional<InspectionSection> section;
 };
 enum class InspectionMetric : std::uint8_t {
     Radius, Diameter, CenterX, CenterY, CenterZ, CenterDistance,
@@ -389,6 +415,7 @@ struct InspectionGeometry final {
     AlignmentStatus status=AlignmentStatus::InvalidInput;
     AlignmentGeometry fitted;
     AlignmentPoint alignedCenter{}, alignedDirection{};
+    std::shared_ptr<const InspectionSectionTrace> section;
     std::string message;
 };
 struct InspectionItemResult final {
@@ -401,7 +428,7 @@ struct InspectionReport final {
     std::vector<InspectionGeometry> geometries;
     std::vector<InspectionItemResult> items;
     AlignmentInspectionVerdict verdict=AlignmentInspectionVerdict::NotEvaluated;
-    std::string algorithmVersion="metrology-inspection-1";
+    std::string algorithmVersion="metrology-inspection-2";
     std::int64_t evaluatedUnixMilliseconds=0;
     // FitRms/FitMaximum 是拟合残差，不是平面度、圆度、圆柱度或测量不确定度。
 };
