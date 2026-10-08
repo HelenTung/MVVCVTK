@@ -9,6 +9,7 @@
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -100,7 +101,7 @@ bool IsPath(const QString& key)
 }
 }
 ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJsonValue value, QJsonValue schema,
-    QWidget* parent, bool listItem, QString title)
+    QWidget* parent, bool listItem, QString title, bool showTitle)
     : QWidget(parent), m_module(std::move(module)), m_action(std::move(action)), m_key(std::move(key)),
       m_title(title.isEmpty() ? GetParameterText(m_key) : std::move(title)), m_schema(std::move(schema)),
       m_listItem(listItem), m_optional(m_schema.isNull() && !m_key.isEmpty())
@@ -108,7 +109,7 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
     m_boolean = m_schema.isBool() || (m_schema.isNull() && Shape(m_key).isBool());
     setObjectName(m_key); setAccessibleName(m_title);
     m_layout = new QVBoxLayout(this); m_layout->setContentsMargins(0,0,0,0); m_layout->setSpacing(4);
-    if (!m_key.isEmpty()) {
+    if (!m_key.isEmpty() && showTitle) {
         auto* heading = new QHBoxLayout;
         auto* label = new QLabel(m_title, this); label->setObjectName("parameterTitle"); label->setWordWrap(true); label->setToolTip(GetParameterHelp(m_key)); heading->addWidget(label, 1);
         if (m_optional && !m_boolean) {
@@ -263,11 +264,29 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             connect(add, &QPushButton::clicked, this, [this] { AddRow(m_itemTemplate); NotifyEdited(); });
         } else {
             auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setSpacing(8);
+            const bool matrix = array.size() == 9 || array.size() == 16;
             const int columns = array.size() == 16 || array.size() == 4 ? 4 : array.size() == 2 || array.size() == 6 ? 2 : 3;
+            const int offset = matrix ? 1 : 0;
+            if (matrix) {
+                grid->setObjectName("matrixGrid"); m_body->setObjectName("matrix");
+                m_body->setProperty("matrixDimension", columns);
+                if (auto* title = findChild<QLabel*>("parameterTitle", Qt::FindDirectChildrenOnly))
+                    title->setText(m_title + QString("（%1 × %1）").arg(columns));
+                for (const bool left : {true, false}) {
+                    auto* bracket = new QFrame(m_body); bracket->setFixedWidth(6);
+                    bracket->setStyleSheet(QString("border-top: 2px solid #718294; border-bottom: 2px solid #718294; border-%1: 2px solid #718294;").arg(left ? "left" : "right"));
+                    grid->addWidget(bracket, 0, left ? 0 : columns+1, columns, 1);
+                }
+            }
             for (int i = 0; i < array.size(); ++i) {
-                auto* field = new ParameterEditor(m_module, m_action, QString::number(i), array[i], array[i], m_body, true, Component(m_key, i, array.size()));
-                field->onEdited = [this] { NotifyEdited(); }; grid->addWidget(field, i/columns, i%columns);
-                m_rows.emplace_back(field, field); grid->setColumnStretch(i%columns, 1);
+                const auto component = Component(m_key, i, array.size());
+                auto* field = new ParameterEditor(m_module, m_action, QString::number(i), array[i], array[i], m_body, true, component, !matrix);
+                if (matrix) {
+                    field->setToolTip(component);
+                    if (auto* input = field->findChild<QLineEdit*>("value")) input->setAlignment(Qt::AlignCenter);
+                }
+                field->onEdited = [this] { NotifyEdited(); }; grid->addWidget(field, i/columns, i%columns+offset);
+                m_rows.emplace_back(field, field); grid->setColumnStretch(i%columns+offset, 1);
             }
         }
         return;

@@ -18,6 +18,8 @@
 #include <QEventLoop>
 #include <QAbstractEventDispatcher>
 #include <QFile>
+#include <QFileDialog>
+#include <QGridLayout>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -200,11 +202,20 @@ void CheckUiAndRecords(TestWindow& window)
     const auto* tabs = window.findChild<QTabBar*>("featureTabs");
     Check(tabs && tabs->count() ==
 #if defined(MANUAL_ROI)
-        12
-#else
         11
+#else
+        10
 #endif
         && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
+    int partTabs = 0;
+    for (int i = 0; i < tabs->count(); ++i) {
+        if (tabs->tabText(i) == "零件") ++partTabs;
+        Check(tabs->tabText(i) != "零件分割" && tabs->tabText(i) != "零件编辑", "segmentation and editing never appear as separate businesses");
+    }
+    Check(partTabs == 1 && window.GetModule("PartEdit") == window.GetModule("Part"), "one part workspace also resolves legacy case identifiers");
+    auto* open = window.findChild<QPushButton*>("openVolume");
+    Check(open && open->isVisible() && open->isEnabled() && open->shortcut() == QKeySequence(QKeySequence::Open),
+        "input can be opened from the top toolbar or Ctrl+O");
     Check(window.GetSession()->GetRenderViewStates().size() == 4 && window.findChildren<QVTKOpenGLNativeWidget*>().size() == 4,
         "manual workspace contains one 3D viewport and three slice viewports");
     Check(!window.findChild<QComboBox*>("renderMode")->isEnabled() && !window.findChild<QPushButton*>("fitView")->isEnabled(),
@@ -222,7 +233,7 @@ void CheckUiAndRecords(TestWindow& window)
     }
     const QRegularExpression chinese("[\\x{4e00}-\\x{9fff}]");
     for (const QString name : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
-            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
+            QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
         auto* panel = window.GetModule(name);
         Check(panel && chinese.match(panel->GetDisplayName()).hasMatch(), "module display name is Chinese and stable ID resolves");
         Check(panel->GetCatalogTree() && panel->GetSceneTree() && panel->GetSceneTree() != panel->GetCatalogTree(), "scene objects and result catalog have distinct widgets");
@@ -312,7 +323,7 @@ void CheckSceneRefresh(TestWindow& window)
     Check(ordinary.rows.isEmpty(), "ordinary UI hierarchy is never mistaken for a business branch");
     // 合成的两千零件目录只验证 UI 更新成本与节点身份，不冒充算法/真实 CT 验收。
     TestRecordWriter records; TestWorkflow workflow;
-    ModulePanel panel({window.GetModule("View")->GetContext().runtime, workflow, records}, "PartEdit");
+    ModulePanel panel({window.GetModule("View")->GetContext().runtime, workflow, records}, "Part");
     panel.AttachAction("Merge", {}, [](auto, const auto&) {});
     QJsonArray parts;
     for (int i = 0; i < 2000; ++i) parts.append(QJsonObject{{"binding", QJsonObject{{"partId", QString::number(i)}}},
@@ -479,7 +490,7 @@ QJsonObject CheckPartDirectories(TestWindow& window)
     ClickPartNode(window, 0);
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()+1);
     panel->findChild<QPushButton*>("action_EditSelected")->click(); GetComplete(window, id, "ParametersCopied");
-    auto* edit = window.GetModule("PartEdit");
+    auto* edit = window.GetModule("Part");
     for (const auto* action : {"Paint","Erase","Fill","Island","Grow","Split"})
         Check(edit->GetParameterEditor(action)->GetField("target")->GetValue() == a, "entering edit binds every tool to the exact chosen scene object");
     ClickPartNode(window, 1);
@@ -496,7 +507,7 @@ QJsonObject CheckPartDirectories(TestWindow& window)
     panel->findChild<QPushButton*>("focus_part-highlights")->click();
     Check(search->text().isEmpty() && tree->currentItem()->data(0, Qt::UserRole).toJsonObject()["binding"] == b
         && tree->viewport()->rect().intersects(tree->visualItemRect(tree->currentItem())), "highlight locator reveals the actual selected part in the viewport");
-    window.GetWorkflow().onNavigate("PartEdit","Paint",{{"target",a}}); edit->Observe();
+    window.GetWorkflow().onNavigate("Part","Paint",{{"target",a}}); edit->Observe();
     auto* editTree = edit->GetCatalogTree();
     ClickNode(editTree,FindNode(editTree,nodeId("editing-part:",a)));
     ClickNode(editTree,FindNode(editTree,nodeId("part:",a)),Qt::ControlModifier);
@@ -507,7 +518,7 @@ QJsonObject CheckPartDirectories(TestWindow& window)
 }
 QJsonObject CheckPartEditPreview(TestWindow& window, const QJsonObject& spec)
 {
-    auto* panel = window.GetModule("PartEdit"); panel->Observe(); const auto state = panel->GetObservedState();
+    auto* panel = window.GetModule("Part"); panel->Observe(); const auto state = panel->GetObservedState();
     Check(state["hasPreview"].toBool(), "real edit has an unpublished candidate");
     const auto base = spec["base"].toObject(); const auto parts = base["parts"].toArray();
     QMap<QString,QJsonObject> before;
@@ -541,7 +552,7 @@ QJsonObject CheckPartEditPreview(TestWindow& window, const QJsonObject& spec)
 }
 void CheckNodeParameters(TestWindow& window)
 {
-    for (const auto& name : {"Data", "View", "Crop", "Gap", "Part", "PartEdit", "Surface", "Artifact", "Rotation", "Alignment"}) {
+    for (const auto& name : {"Data", "View", "Crop", "Gap", "Part", "Surface", "Artifact", "Rotation", "Alignment"}) {
         auto* panel = window.GetModule(name); if (!panel) continue;
         auto* tree = panel->GetCatalogTree();
         for (QTreeWidgetItemIterator it(tree); *it; ++it) {
@@ -593,9 +604,9 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
 }
 void CheckBusinessParameters(TestWindow& window)
 {
-    if (auto* undo = window.GetModule("PartEdit")->GetParameterEditor("Undo")) {
+    if (auto* undo = window.GetModule("Part")->GetParameterEditor("Undo")) {
         Check(!undo->GetHasInputs() && !undo->GetField("target") && !undo->GetField("extent") && !undo->GetField("protectedParts"), "history undo has no unused editing target or scope controls");
-        Check(!window.GetModule("PartEdit")->GetParameterEditor("Merge")->GetField("target"), "merge does not expose an unused single target");
+        Check(!window.GetModule("Part")->GetParameterEditor("Merge")->GetField("target"), "merge does not expose an unused single target");
     }
     if (auto* ring = window.GetModule("Artifact")->GetParameterEditor("Ring")) {
         Check(ring->GetField("ring") && !ring->GetField("diffusion") && ring->GetField("source")->isHidden(), "ring card contains only its algorithm and automatically bound source");
@@ -638,6 +649,23 @@ void CheckParameterLayout(TestWindow& window)
 
     const auto identity = QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     ParameterEditor poses("Alignment", "Start", "initialPoses", QJsonArray{QJsonValue(identity)}, QJsonArray{QJsonValue(identity)});
+    auto* matrix = poses.GetElement(0);
+    auto* grid = matrix->findChild<QGridLayout*>("matrixGrid");
+    Check(grid && matrix->findChildren<QLineEdit*>("value").size() == 16, "pose is displayed as a complete 4 by 4 matrix");
+    for (int i = 0; i < 16; ++i) {
+        Check(!matrix->GetElement(i)->findChild<QLabel*>("parameterTitle"), "matrix cells have no repetitive row and column headings");
+        Check(grid->itemAtPosition(i/4, i%4+1)->widget() == matrix->GetElement(i), "matrix cells retain their row and column positions");
+    }
+    ParameterEditor direction("Data", "Load", "directionLPS", QJsonArray{1,0,0,0,1,0,0,0,1}, QJsonArray{1,0,0,0,1,0,0,0,1});
+    Check(direction.findChild<QGridLayout*>("matrixGrid") && direction.GetCount() == 9, "direction uses the same compact 3 by 3 matrix");
+    ParameterEditor optional("Roi", "Begin", "boxToSource", QJsonValue(), QJsonValue());
+    Check(optional.GetValue().isNull(), "unspecified transform matrix keeps the business default");
+    optional.findChild<QCheckBox*>("specified")->setChecked(true);
+    Check(optional.GetValue() == QJsonValue(identity), "enabling the optional transform supplies the identity matrix");
+#if defined(MANUAL_ROI)
+    window.GetWorkflow().onNavigate("Roi", "Begin", {}); QCoreApplication::processEvents();
+    window.GetModule("Roi")->findChild<QWidget*>("card_Begin")->grab().save("parameter-ui-roi-matrix.png");
+#endif
     poses.GetElement(0)->GetElement(3)->findChild<QLineEdit*>("value")->setText("12.5");
     Check(poses.GetValue().toArray()[0].toArray()[3].toDouble() == 12.5, "individual matrix cell retains row-major position");
     poses.findChild<QPushButton*>("addRow")->click(); Check(poses.GetCount() == 2, "another initial pose can be added without array text");
@@ -659,10 +687,10 @@ void CheckParameterLayout(TestWindow& window)
     segments.GetElement(1)->parentWidget()->findChild<QPushButton*>("removeRow",Qt::FindDirectChildrenOnly)->click();
     Check(segments.GetCount()==1 && segments.GetValue().toArray()[0].toObject()["segmentTo"]==1,
         "segment removal preserves the remaining physical interval");
-    if (auto* split = window.GetModule("PartEdit")->GetParameterEditor("Split")) {
-        window.GetWorkflow().onNavigate("PartEdit", "Split", {});
-        auto* card = window.GetModule("PartEdit")->findChild<QWidget*>("card_Split");
-        auto* splitScroll = window.GetModule("PartEdit")->findChild<QScrollArea*>("operationScroll");
+    if (auto* split = window.GetModule("Part")->GetParameterEditor("Split")) {
+        window.GetWorkflow().onNavigate("Part", "Split", {});
+        auto* card = window.GetModule("Part")->findChild<QWidget*>("card_Split");
+        auto* splitScroll = window.GetModule("Part")->findChild<QScrollArea*>("operationScroll");
         Check(Wait([&] { return qAbs(card->mapTo(splitScroll->viewport(), QPoint()).y()) < 30; }, 3000),
             "navigation reveals requested card after hidden page layout settles");
         auto* seeds = split->GetField("seeds");
@@ -674,7 +702,7 @@ void CheckParameterLayout(TestWindow& window)
         seeds->GetElement(0)->parentWidget()->findChild<QPushButton*>("removeRow", Qt::FindDirectChildrenOnly)->click();
         Check(seeds->GetCount() == rows && seeds->GetValue().toArray().last().toObject()["target"] == "3", "deleting a row retains remaining values");
         QCoreApplication::processEvents();
-        window.GetWorkflow().onNavigate("PartEdit", "Split", {});
+        window.GetWorkflow().onNavigate("Part", "Split", {});
         Check(Wait([&] { return qAbs(card->mapTo(splitScroll->viewport(), QPoint()).y()) < 30; }, 3000), "edited card can be focused again without resetting rows");
         window.grab().save("parameter-ui-split.png");
         seeds->SetValue(original);
@@ -685,7 +713,7 @@ void CheckBooleanControls(TestWindow& window)
 {
     int checked = 0;
     for (const QString module : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
-            QString("PartEdit"), QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
+            QString("Surface"), QString("Artifact"), QString("Rotation"), QString("Alignment"), QString("Wall")}) {
         const auto boxes = window.GetModule(module)->findChildren<QCheckBox*>("value");
         for (auto* box : boxes) {
             if (!box->isEnabled()) continue;
@@ -1240,6 +1268,35 @@ void StartSelfTest(TestWindow& window)
     const QJsonObject load{{"filePath", path}, {"datasetId", "synthetic-manual-contract-test"}, {"dimensions", QJsonArray{24, 24, 24}}, {"spacingLPS", QJsonArray{1,1,1}},
         {"evidenceKind", "synthetic-regression"}, {"sourceDigest", QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
     auto* dataPanel = window.GetModule("Data"); dataPanel->SetParameterPatch("Load", load);
+    const auto loadDraft = dataPanel->GetParameterEditor("Load")->GetValue();
+    const auto recordCount = window.GetRecords().GetRecords()["records"].toArray().size();
+    window.GetWorkflow().onNavigate("View", "Set", {});
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    QTimer dialogDeadline; dialogDeadline.setSingleShot(true);
+    QObject::connect(&dialogDeadline, &QTimer::timeout, &window, [] {
+        if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
+    });
+    bool opened = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
+        if (!dialog) return;
+        opened = true; dialog->reject();
+    });
+    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+    Check(opened && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft,
+        "cancelling the top-level file picker preserves the loading parameters");
+    opened = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
+        if (!dialog) return;
+        opened = true; dialog->selectFile(path); QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
+    });
+    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, false);
+    Check(opened && dataPanel->isVisible() && dataPanel->GetCurrentAction() == "Load"
+        && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft
+        && window.GetRecords().GetRecords()["records"].toArray().size() == recordCount,
+        "opening a file reveals the loading card and preserves geometry without submitting a request");
     dataPanel->GetParameterEditor("Load")->GetField("filePath")->findChild<QLineEdit*>("value")->clear(); DropFile(dataPanel->GetParameterEditor("Load")->GetField("filePath")->findChild<QLineEdit*>("value"), path);
     Check(dataPanel->GetParameters()["filePath"].toString() == path, "drop preserves Unicode and spaces in file path");
     DropFile(&window, path);
@@ -1304,8 +1361,8 @@ void StartSelfTest(TestWindow& window)
         const auto target = parts[0].toObject();
         CheckPartBooleanRequests(window, target);
         CheckOverlaySwitch(window, "Part", originalOpacities);
-        auto* editPanel = window.GetModule("PartEdit");
-        window.GetWorkflow().onNavigate("PartEdit", "Merge", {});
+        auto* editPanel = window.GetModule("Part");
+        window.GetWorkflow().onNavigate("Part", "Merge", {});
         auto* editTree = editPanel->GetCatalogTree();
         const auto partNode = [&](const QJsonObject& binding) -> QTreeWidgetItem* {
             for (QTreeWidgetItemIterator it(editTree); *it; ++it) if ((*it)->data(0, Qt::UserRole).toJsonObject()["binding"].toObject() == binding) return *it;
@@ -1320,27 +1377,29 @@ void StartSelfTest(TestWindow& window)
         Check(Wait([&] { const auto* item = partNode(target["binding"].toObject()); return item && item->text(0).contains("节点刷新测试零件") && editTree->selectedItems().size() == 2; }),
             "scene rebuild preserves multi-selection by stable part identity");
         QCoreApplication::processEvents(); window.grab().save("scene-ui-parts.png");
-        GetComplete(window, SendUnavailable(window, "PartEdit", "Commit"), "Rejected");
+        GetComplete(window, SendUnavailable(window, "Part", "Commit"), "Rejected");
         GetComplete(window, Click(window, "Part", "EditSelected", {{"target", target["binding"]}}), "ParametersCopied");
+        Check(editPanel == window.GetModule("Part") && editPanel->GetCurrentAction() == "Paint"
+            && editPanel->GetParameterEditor("Paint")->isVisible(), "editing a selected part reveals the paint tool in the same workspace");
         GetComplete(window, Send(window, "Part", "SetState", {{"target", target["binding"]}}), "Succeeded");
         const auto formal = window.GetSession()->GetLabelMapDescriptors(); Check(!formal.empty(), "formal label descriptor exists");
         const auto formalRef = formal.front().dataRevision;
         const auto edit = QJsonObject{{"target", target["binding"]}, {"sourcePointsMM", QJsonArray{target["centroidSourceMM"]}}, {"radiusMM", 1.5}};
-        GetComplete(window, Click(window, "PartEdit", "Erase", edit), "PreviewReady");
+        GetComplete(window, Click(window, "Part", "Erase", edit), "PreviewReady");
         Check(window.GetSession()->GetLabelMapDescriptors().front().dataRevision == formalRef, "preview does not publish formal labels");
-        GetComplete(window, Send(window, "PartEdit", "Discard"), "Discarded");
-        GetComplete(window, Click(window, "PartEdit", "Erase", edit), "PreviewReady");
-        GetComplete(window, Click(window, "PartEdit", "Commit"), "Succeeded");
+        GetComplete(window, Send(window, "Part", "Discard"), "Discarded");
+        GetComplete(window, Click(window, "Part", "Erase", edit), "PreviewReady");
+        GetComplete(window, Click(window, "Part", "Commit"), "Succeeded");
         Check(window.GetSession()->GetLabelMapDescriptors().front().dataRevision != formalRef, "commit changes formal labels");
         GetComplete(window, Send(window, "Part", "SetState", {{"target", target["binding"]}, {"expectedCatalogRevision", catalog["catalogRevision"]}}), "Failed");
-        GetComplete(window, Send(window, "PartEdit", "Undo"), "PreviewReady");
-        GetComplete(window, Click(window, "PartEdit", "Commit"), "Succeeded");
-        GetComplete(window, Send(window, "PartEdit", "Redo"), "PreviewReady");
-        GetComplete(window, Send(window, "PartEdit", "Discard"), "Discarded");
+        GetComplete(window, Send(window, "Part", "Undo"), "PreviewReady");
+        GetComplete(window, Click(window, "Part", "Commit"), "Succeeded");
+        GetComplete(window, Send(window, "Part", "Redo"), "PreviewReady");
+        GetComplete(window, Send(window, "Part", "Discard"), "Discarded");
         const auto restored = GetComplete(window, Send(window, "Part", "Catalog"), "Observed")["result"].toObject()["parts"].toArray();
         QJsonArray mergeParts; for (const auto part : restored) mergeParts.append(part.toObject()["binding"]);
-        GetComplete(window, Click(window, "PartEdit", "Merge", {{"parts", mergeParts}}), "PreviewReady");
-        GetComplete(window, Click(window, "PartEdit", "Commit"), "Succeeded");
+        GetComplete(window, Click(window, "Part", "Merge", {{"parts", mergeParts}}), "PreviewReady");
+        GetComplete(window, Click(window, "Part", "Commit"), "Succeeded");
         const auto merged = GetComplete(window, Send(window, "Part", "Catalog"), "Observed")["result"].toObject();
         Check(merged["parts"].toArray().size() == 1 && merged["relations"].toArray().size() >= 2, "real merge exposes both previous part bindings");
         editPanel->Observe();
@@ -1352,8 +1411,8 @@ void StartSelfTest(TestWindow& window)
         Check(joined, "merged scene part has both real parents, not just a UI category parent");
         SaveScene(window, editTree, "scene-ui-merge.png");
         const QJsonArray splitSeeds{QJsonObject{{"imageIndex", QJsonArray{6, 11, 11}}, {"target", "1"}}, QJsonObject{{"imageIndex", QJsonArray{16, 11, 11}}, {"target", "2"}}};
-        GetComplete(window, Click(window, "PartEdit", "Split", {{"target", merged["parts"].toArray().first().toObject()["binding"]}, {"seeds", splitSeeds}}), "PreviewReady");
-        GetComplete(window, Click(window, "PartEdit", "Commit"), "Succeeded");
+        GetComplete(window, Click(window, "Part", "Split", {{"target", merged["parts"].toArray().first().toObject()["binding"]}, {"seeds", splitSeeds}}), "PreviewReady");
+        GetComplete(window, Click(window, "Part", "Commit"), "Succeeded");
         const auto split = GetComplete(window, Send(window, "Part", "Catalog"), "Observed")["result"].toObject();
         Check(split["parts"].toArray().size() == 2, "actual split restores two independently actionable scene parts");
         for (const auto& part : split["parts"].toArray()) Check(part.toObject()["opacity"].toDouble() == 1
@@ -1854,7 +1913,7 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         if (step.contains("expectPartCount")) Check(record["result"].toObject()["partCount"].toInt() == step["expectPartCount"].toInt(), "formal catalog has the expected part count");
         if (step.contains("expectEditingCount")) {
-            auto* panel = window.GetModule("PartEdit"); panel->Observe();
+            auto* panel = window.GetModule("Part"); panel->Observe();
             Check(panel->GetObservedState()["editingParts"].toArray().size() == step["expectEditingCount"].toInt(), "editing directory follows committed split/merge/history outputs");
         }
         if (step.contains("expectLabelDimensions")) {

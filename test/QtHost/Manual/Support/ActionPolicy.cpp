@@ -1,5 +1,6 @@
 // 测试用途：执行前校验当前输入、候选和结果的业务前置条件。
 #include "ActionPolicy.h"
+#include "UiText.h"
 namespace Manual {
 QString GetActionRequirement(const QString& module, const QString& action, const QJsonObject& s, bool hasInput)
 {
@@ -11,8 +12,8 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
     if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
     if (module == "Part" && (action == "SetState" || action == "Highlight" || action == "ClearHighlight" || action == "EditSelected" || action == "Visibility") && !s["hasCurrentParts"].toBool()) return "请先完成当前输入的零件分割。";
-    if (module == "PartEdit") {
-        if (!s["hasCurrentParts"].toBool()) return "请先在零件分割页生成当前输入的有效目录。";
+    if (module == "Part" && IsPartEditAction(action)) {
+        if (!s["hasCurrentParts"].toBool()) return "请先分割生成当前输入的有效零件目录。";
         if ((action == "Commit" || action == "Discard") && !s["hasPreview"].toBool()) return "当前没有编辑候选，请先执行编辑或撤销/重做。";
         if (action != "Commit" && action != "Discard" && s["hasPreview"].toBool()) return "先确认或丢弃已有候选，再开始下一次编辑。";
     }

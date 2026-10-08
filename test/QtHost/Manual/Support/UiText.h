@@ -7,6 +7,7 @@
 #include <utility>
 
 namespace Manual {
+bool IsPartEditAction(const QString& action);
 QString GetActionDescription(const QString& module, const QString& action);
 QString GetModuleText(const QString& module);
 QString GetActionText(const QString& module, const QString& action);

@@ -1,14 +1,12 @@
-// 测试用途：通过编辑页面测试标签候选、确认、丢弃、撤销重做及编辑约束。
+// 测试用途：为同一零件业务页添加标签编辑、候选确认、丢弃及历史操作。
 #include "ModuleFactories.h"
 #include "PartInput.h"
 #include "Support/ReferenceDataSource.h"
 #include <QPointer>
 #include <type_traits>
 namespace Manual {
-ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegmentationHostFeature> feature, QWidget* parent)
+void AttachPartEditActions(ModulePanel* panel, std::shared_ptr<PartSegmentationHostFeature> feature)
 {
-    auto* panel = new ModulePanel(context, "PartEdit", parent);
-    panel->SetNotice("种子使用源网格体素索引，笔刷点和半径以毫米计。高亮零件、编辑对象和候选在顶部单列，可按名称或标签检索。单次编辑的 120 秒预算包含表面重建及标签冻结；候选需确认后才替换正式结果。");
     const auto complete = [owner = QPointer<ModulePanel>(panel), feature](std::uint64_t id, PartSegmentationResult result) {
         if (!owner) return;
         auto summary = GetPartResult(result);
@@ -141,30 +139,5 @@ ModulePanel* CreatePartEditTest(TestContext context, std::shared_ptr<PartSegment
                 panel->Observe(); panel->SelectNodeGroup("part-edit-targets");
             }
         });
-    panel->onObserve = [panel, feature] {
-        const auto preview = feature->GetEditPreview();
-        const auto catalog = feature->GetPartSetSnapshot();
-        const auto input = panel->GetSession()->GetImageDescriptor();
-        const auto current = feature->GetState();
-        QJsonObject summary{{"hasPreview", preview && input && preview->sourceRevision == input->dataRevision}, {"formalLabelMap", GetRefText(feature->GetState().labelMap)}};
-        const auto detail = GetCatalog(*feature);
-        summary["parts"] = detail["parts"]; summary["relations"] = detail["relations"];
-        summary["source"] = detail["source"]; summary["isOverlayVisible"] = current.isOverlayVisible;
-        summary["editingParts"] = catalog ? GetEditingParts(panel->GetContext().workflow.partEditContext, *catalog) : QJsonArray{};
-        summary["editingStatus"] = panel->GetContext().workflow.partEditContext["status"];
-        summary["hasCurrentParts"] = catalog && !catalog->isStale && !catalog->parts.empty() && input && catalog->sourceRevision == input->dataRevision;
-        summary["isBusy"] = current.status == PartSegmentationStatus::Running || current.status == PartSegmentationStatus::Stopping || current.status == PartSegmentationStatus::Committing;
-        summary["requestId"] = QString::number(current.requestId); summary["progress"] = current.progress;
-        if (summary["hasPreview"].toBool()) {
-            summary["previewId"] = QString::number(preview->previewId);
-            summary["source"] = GetRefText(preview->sourceRevision);
-            summary["baseLabels"] = GetRefText(preview->baseLabels);
-            summary["candidatePartCount"] = QString::number(preview->parts ? preview->parts->parts.size() : 0);
-            if (preview->parts && catalog) summary["previewChanges"] = GetPreviewChanges(*catalog, *preview->parts);
-        }
-        panel->SetState(summary);
-    };
-    panel->onStop = [feature] { PartSegmentationRequest request; request.action = PartSegmentationAction::Stop; feature->SendRequest(std::move(request)); };
-    return panel;
 }
 }

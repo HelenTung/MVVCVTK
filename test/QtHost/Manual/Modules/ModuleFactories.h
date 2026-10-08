@@ -18,7 +18,7 @@ ModulePanel* CreateViewTest(TestContext, QWidget*);
 ModulePanel* CreateCropTest(TestContext, std::shared_ptr<CropHostFeature>, QWidget*);
 ModulePanel* CreateGapTest(TestContext, std::shared_ptr<GapHostFeature>, QWidget*);
 ModulePanel* CreatePartTest(TestContext, std::shared_ptr<PartSegmentationHostFeature>, QWidget*);
-ModulePanel* CreatePartEditTest(TestContext, std::shared_ptr<PartSegmentationHostFeature>, QWidget*);
+void AttachPartEditActions(ModulePanel*, std::shared_ptr<PartSegmentationHostFeature>);
 ModulePanel* CreateSurfaceTest(TestContext, std::shared_ptr<SurfaceDeterminationHostFeature>, QWidget*);
 ModulePanel* CreateArtifactTest(TestContext, std::shared_ptr<ArtifactReductionHostFeature>, QWidget*);
 ModulePanel* CreateWallTest(TestContext, std::shared_ptr<WallThicknessHostFeature>, QWidget*);

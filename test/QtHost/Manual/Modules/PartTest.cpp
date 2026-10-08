@@ -74,7 +74,7 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     auto* panel = new ModulePanel(context, "Part", parent);
     panel->observeInBackground = true;
     auto preview = std::make_shared<PartPreviewDisplay>();
-    panel->SetNotice("等值面模式显示零件表面，体渲染模式恢复原始灰度背景。可关闭零件预览查看体数据；选中节点后点击“高亮此零件”即可定位。隐藏零件只影响预览，不裁去原始体数据。");
+    panel->SetNotice("先分割生成零件，再选择零件进行属性设置、涂绘、拆分或合并；编辑候选需确认后才替换正式结果。等值面显示零件表面，体渲染保留灰度背景。种子使用体素索引，笔刷点和半径以毫米计。");
     panel->AttachAction("Start", GetJson(R"({"threshold":0.5,"minPartVoxels":"1000"})"), [panel, feature, preview](auto id, const auto& params) {
         PartSegmentationRequest request; request.action = PartSegmentationAction::Start;
         request.start = PartSegmentationStartParams{GetPartViews(), GetNumber(params, "threshold"), GetId(params["minPartVoxels"])};
@@ -161,14 +161,24 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
         if (result.status != PartMutationStatus::Succeeded) throw std::runtime_error("选择目标时目录已变化，请重新选择零件");
         panel->GetContext().workflow.partEditContext = {{"source", GetRefText(catalog->sourceRevision)},
             {"targets", QJsonArray{GetPartRef(target)}}, {"status", "待编辑"}};
-        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("PartEdit", "Paint", {{"target", GetPartRef(target)}});
+        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("Part", "Paint", {{"target", GetPartRef(target)}});
         panel->SetComplete(id, "ParametersCopied", {{"message", "已选择唯一编辑目标并进入零件编辑"}, {"binding", GetPartRef(target)}});
     });
+    AttachPartEditActions(panel, feature);
     panel->onObserve = [panel, feature, preview] {
         auto summary = GetCatalog(*feature);
         const auto input = panel->GetSession()->GetImageDescriptor();
         summary["hasCurrentParts"] = summary["hasCurrentParts"].toBool() && input && GetRefText(input->dataRevision) == summary["source"].toString();
         const auto catalog = feature->GetPartSetSnapshot();
+        const auto candidate = feature->GetEditPreview();
+        summary["hasPreview"] = candidate && input && candidate->sourceRevision == input->dataRevision;
+        summary["formalLabelMap"] = summary["labelMap"];
+        if (summary["hasPreview"].toBool()) {
+            summary["previewId"] = QString::number(candidate->previewId);
+            summary["baseLabels"] = GetRefText(candidate->baseLabels);
+            summary["candidatePartCount"] = QString::number(candidate->parts ? candidate->parts->parts.size() : 0);
+            if (candidate->parts && catalog) summary["previewChanges"] = GetPreviewChanges(*catalog, *candidate->parts);
+        }
         summary["editingParts"] = catalog ? GetEditingParts(panel->GetContext().workflow.partEditContext, *catalog) : QJsonArray{};
         summary["editingStatus"] = panel->GetContext().workflow.partEditContext["status"];
         auto* form = panel->GetParameterEditor("SetState");

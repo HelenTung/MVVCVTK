@@ -9,6 +9,9 @@
 #include <QMetaObject>
 #include <QCloseEvent>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QKeySequence>
+#include "Support/ParameterEditor.h"
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QPushButton>
@@ -41,12 +44,22 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     resize(1560, 920);
     auto* root = new QWidget(this); auto* layout = new QVBoxLayout(root); setCentralWidget(root);
     auto* toolbar = new QHBoxLayout;
+    m_openVolume = new QPushButton("打开体数据…", root); m_openVolume->setObjectName("openVolume");
+    m_openVolume->setShortcut(QKeySequence::Open); m_openVolume->setEnabled(false);
+    m_openVolume->setToolTip("选择输入文件，核对尺寸、间距等参数后点击“加载体数据”。（Ctrl+O）");
     auto* stop = new QPushButton("停止当前计算", root);
     auto* exportRecords = new QPushButton("导出测试记录", root);
     auto* performance = new QPushButton("开始性能采样", root); performance->setCheckable(true);
     performance->setObjectName("performanceCapture");
     m_status = new QLabel("正在创建测试会话", root);
-    toolbar->addWidget(m_status, 1); toolbar->addWidget(stop); toolbar->addWidget(performance); toolbar->addWidget(exportRecords); layout->addLayout(toolbar);
+    toolbar->addWidget(m_openVolume); toolbar->addWidget(m_status, 1); toolbar->addWidget(stop); toolbar->addWidget(performance); toolbar->addWidget(exportRecords); layout->addLayout(toolbar);
+    connect(m_openVolume, &QPushButton::clicked, this, [this] {
+        auto* page = GetModule("Data"); if (!m_isReady || m_isClosing || !page) return;
+        const auto currentPath = page->GetParameterEditor("Load")->GetField("filePath")->GetValue().toString();
+        QFileDialog dialog(this, "打开体数据", currentPath, "体数据 (*.raw *.RAW);;所有文件 (*)");
+        dialog.setObjectName("inputFileDialog"); dialog.setFileMode(QFileDialog::ExistingFile);
+        if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) SetInputFile(dialog.selectedFiles().first());
+    });
     m_featureTabs = new QTabBar(root); m_featureTabs->setObjectName("featureTabs"); m_featureTabs->setMinimumHeight(40);
     m_featureTabs->setExpanding(true); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
     layout->addWidget(m_featureTabs);
@@ -142,7 +155,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
             applied->viewMode == HostRenderMode::Volume || applied->viewMode == HostRenderMode::CompositeVolume ? 1 : 0); }
         const auto descriptor = session->GetImageDescriptor();
         m_renderMode->setEnabled(descriptor.has_value()); fit->setEnabled(descriptor.has_value());
-        const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "拖入文件开始，或在数据页选择路径";
+        const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "点击“打开体数据…”或拖入文件开始";
         if (m_status->text() != text) m_status->setText(text);
         QueueObserve();
     };
@@ -249,18 +262,20 @@ void TestWindow::BuildSession()
             if (!page || !page->GetActions().contains(action)) { AppendLog("当前构建未启用目标步骤：" + GetModuleText(module)); return; }
             try {
                 page->SetParameterPatch(action, patch); m_pages->setCurrentWidget(page);
-                if ((module == "Part" || module == "PartEdit") && patch["target"].isObject())
+                if (page->GetName() == "Part" && patch["target"].isObject()) {
                     page->SelectPartTarget(patch["target"].toObject());
+                    page->SelectAction(action);
+                }
             }
             catch (const std::exception& error) { AppendLog("切换步骤失败：" + QString::fromUtf8(error.what())); }
         };
         m_workflow.getActionAvailable = [this](const QString& module, const QString& action) {
             const auto* page = GetModule(module); return page && page->GetActions().contains(action);
         };
-        m_isReady = true;
+        m_isReady = true; m_openVolume->setEnabled(true);
         QStringList enabled;
         for (auto* page : m_modules) if (!page->GetActions().isEmpty()) enabled.append(page->GetDisplayName());
-        AppendLog("测试会话已就绪：" + enabled.join("、") + "。请选择“数据输入 → 加载体数据”开始测试。");
+        AppendLog("测试会话已就绪：" + enabled.join("、") + "。点击“打开体数据…”选择文件，核对参数后加载。");
         m_pump.SendUpdates();
     } catch (const std::exception& error) {
         m_failure = QString::fromUtf8(error.what()); m_status->setText(m_failure); AppendLog("初始化失败：" + m_failure);
@@ -268,14 +283,16 @@ void TestWindow::BuildSession()
 }
 ModulePanel* TestWindow::GetModule(const QString& name) const
 {
-    for (auto* module : m_modules) if (module->GetName() == name) return module;
+    // 保留已有自动化用例的模块标识；界面与新记录统一使用零件业务页。
+    const auto resolved = name == "PartEdit" ? QString("Part") : name;
+    for (auto* module : m_modules) if (module->GetName() == resolved) return module;
     return nullptr;
 }
 void TestWindow::SetViewsVisible(bool visible) { m_viewArea->setVisible(visible); m_pump.SetVisible(); }
 bool TestWindow::StopSession()
 {
     if (!m_isClosing) AppendLog("正在关闭测试会话，停止计算并释放视图资源。");
-    m_isClosing = true; m_workflow.Stop(); m_pump.Stop();
+    m_isClosing = true; m_openVolume->setEnabled(false); m_workflow.Stop(); m_pump.Stop();
     const auto session = m_runtime.GetSession();
     const auto current = GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{});
     if (!m_runtime.Stop()) { m_status->setText("正在停止：保留资源，等待重试"); return false; }
@@ -317,7 +334,17 @@ void TestWindow::dragEnterEvent(QDragEnterEvent* event)
 void TestWindow::dropEvent(QDropEvent* event)
 {
     const auto urls = event->mimeData()->urls(); if (urls.size() != 1 || !urls.first().isLocalFile()) return;
-    auto* panel = GetModule("Data"); if (!panel) return;
-    panel->SelectAction("Load"); panel->SetDroppedPath(urls.first().toLocalFile()); m_pages->setCurrentWidget(panel); event->acceptProposedAction();
+    SetInputFile(urls.first().toLocalFile()); event->acceptProposedAction();
+}
+void TestWindow::SetInputFile(const QString& path)
+{
+    auto* panel = GetModule("Data"); if (!m_isReady || m_isClosing || !panel) return;
+    const QFileInfo file(path);
+    if (!file.isFile()) { AppendLog("请选择存在的体数据文件。"); return; }
+    try {
+        m_pages->setCurrentWidget(panel);
+        panel->SetParameterPatch("Load", {{"filePath", file.absoluteFilePath()}});
+        AppendLog("已选择体数据：" + file.absoluteFilePath() + "。请核对尺寸、间距等参数后点击“加载体数据”。");
+    } catch (const std::exception& error) { AppendLog("选择文件失败：" + QString::fromUtf8(error.what())); }
 }
 }

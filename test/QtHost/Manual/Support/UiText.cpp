@@ -5,6 +5,11 @@
 #include <QStringList>
 
 namespace Manual {
+bool IsPartEditAction(const QString& action)
+{
+    static const QStringList actions{"Paint", "Erase", "Fill", "Island", "Grow", "Split", "Merge", "Undo", "Redo", "Commit", "Discard"};
+    return actions.contains(action);
+}
 QString GetActionDescription(const QString& module, const QString& action)
 {
     if (action == "UseData") return "将所选已发布体数据设为当前输入，然后执行所需业务；新的发布结果按真实来源形成分支，已有结果保留。";
@@ -25,11 +30,11 @@ QString GetActionDescription(const QString& module, const QString& action)
         {"Crop.RestoreSource", "恢复该文档的固定源数据，并等待派生结果与真实资源释放。"},
         {"Crop.ResetPreview", "选择原始节点，保留历史分支，并释放文档的派生结果。"},
         {"Crop.BuildResult", "从已确认历史生成独立裁剪数据；发布后可选择使用结果。"},
-        {"Part.EditSelected", "将场景树选中的零件设为唯一编辑目标，并打开零件编辑页。"},
+        {"Part.EditSelected", "将场景树选中的零件设为唯一编辑目标，并在本页切换到编辑参数。"},
         {"Part.Highlight", "显示并高亮场景树选中的零件，同时取消上一个零件的高亮；无需勾选参数。零件透明度保持原值，体渲染中显示半透明定位标记。"},
         {"Part.ClearHighlight", "取消场景树选中零件的高亮，恢复目录颜色；不改变其他零件的选择。"},
         {"Part.SetState", "修改当前零件属性。勾选项显示该零件的实际状态；直接切换高亮请使用“高亮此零件”。"},
-        {"PartEdit.Commit", "确认所选编辑候选，替换正式标签与零件目录。"},
+        {"Part.Commit", "确认所选编辑候选，替换正式标签与零件目录。"},
         {"Artifact.Commit", "发布已计算的校正候选；后续算法输入由“使用校正数据”显式切换。"},
         {"Surface.OpenAlignment", "使用当前有效测量表面进入对齐页，仍需导入名义参考文件。"},
         {"Alignment.Restore", "从归档恢复对齐方案，随后需重新求解，不会自动应用旧位姿。"},
@@ -47,7 +52,7 @@ QString GetActionDescription(const QString& module, const QString& action)
 QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
-        {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件分割"}, {"PartEdit", "零件编辑"},
+        {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件"},
         {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
     return labels.value(module, module);
 }
@@ -61,7 +66,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
-        {"PartEdit.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
+        {"Part.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
         {"Roi.Cancel", "取消区域草稿"},
         {"Roi.SetDraft", "更新区域草稿"},
         {"Gap.SetDisplay", "应用孔隙色带"},
@@ -143,7 +148,7 @@ QString GetParameterText(const QString& key)
         {"isoMode", "分析阈值方式"}, {"dataRangeRatio", "灰度范围比例"}, {"absoluteIsoValue", "绝对灰度阈值"},
         {"backgroundMean", "背景灰度均值"}, {"materialMean", "材料灰度均值"}, {"filter", "启用孔隙过滤"},
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
-        {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
+        {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换矩阵"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
         {"target", "目标零件"}, {"name", "零件名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
         {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"}, {"roiMask", "作用区域掩码"},
         {"protectionMask", "保护掩码"}, {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},
@@ -269,7 +274,7 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 {
     if (action == "UseData" || action == "GraphInfo") return {"graphRevision"};
     if (module == "Crop") return {"nodeId", "documentId"};
-    if (module == "PartEdit") {
+    if (module == "Part" && IsPartEditAction(action)) {
         QStringList fields{"target", "expectedLabelMap", "expectedCatalogRevision", "previewId"};
         if (action == "Merge") fields.append("parts");
         return fields;

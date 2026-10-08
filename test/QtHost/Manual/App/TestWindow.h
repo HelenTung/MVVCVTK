@@ -24,6 +24,7 @@ public:
     bool GetIsReady() const { return m_isReady; }
     QString GetFailure() const { return m_failure; }
     void SetViewsVisible(bool visible);
+    void SetInputFile(const QString& path);
     bool StopSession();
     std::uint64_t GetUpdateCount() const { return m_pump.GetUpdateCount(); }
     std::uint64_t GetRenderCount() const { return m_pump.GetRenderCount(); }
@@ -47,6 +48,7 @@ private:
     QStackedWidget* m_pages = nullptr;
     QStackedWidget* m_browsers = nullptr;
     QComboBox* m_renderMode = nullptr;
+    QPushButton* m_openVolume = nullptr;
     QTabBar* m_featureTabs = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;

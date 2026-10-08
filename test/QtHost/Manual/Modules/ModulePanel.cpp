@@ -65,7 +65,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_scene->setUniformRowHeights(true); m_scene->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_scene->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_browser->addTab(m_scene, "场景"); m_browser->addTab(catalogPage, "结果目录");
-    if (m_name == "Part" || m_name == "PartEdit") {
+    if (m_name == "Part") {
         auto* tools = new QHBoxLayout;
         m_nodeSearch = new QLineEdit(this); m_nodeSearch->setObjectName("nodeSearch");
         m_nodeSearch->setPlaceholderText("搜索零件名称或标签"); m_nodeSearch->setClearButtonEnabled(true);
@@ -83,7 +83,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_nodes = new SceneGraphTree(this); m_nodes->setObjectName("resultCatalog");
     m_nodes->setAlternatingRowColors(true);
     m_nodes->setMinimumHeight(100); m_nodes->setRootIsDecorated(true); m_nodes->setUniformRowHeights(true);
-    if (m_name == "PartEdit") m_nodes->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    if (m_name == "Part") m_nodes->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_nodes->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_nodes->header()->setStretchLastSection(false);
     m_nodes->header()->setSectionResizeMode(1, QHeaderView::Interactive); m_nodes->header()->resizeSection(1, 88);
@@ -148,7 +148,7 @@ bool ModulePanel::SelectNodeGroup(const QString& id)
 }
 bool ModulePanel::SelectPartTarget(const QJsonObject& binding)
 {
-    if (m_name != "Part" && m_name != "PartEdit") return false;
+    if (m_name != "Part") return false;
     Observe(); QTreeWidgetItem* target = nullptr;
     for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
         const auto node = (*it)->data(0, Qt::UserRole).toJsonObject();
@@ -274,7 +274,7 @@ void ModulePanel::SetNode(QTreeWidgetItem* item)
     try {
     if (!item) return; auto node = item->data(0, Qt::UserRole).toJsonObject();
     const auto selectedText = item->text(0) + " ｜ " + item->text(1);
-    if (m_name == "PartEdit") {
+    if (m_name == "Part") {
         QJsonArray parts;
         for (auto* selected : m_nodes->selectedItems()) {
             const auto binding = selected->data(0, Qt::UserRole).toJsonObject()["binding"].toObject();
@@ -401,7 +401,7 @@ void ModulePanel::RefreshWorkflow()
         m_nodes->verticalScrollBar()->setValue(scroll);
         static_cast<SceneGraphTree*>(m_nodes)->SetGraph(nodes);
         FilterNodes();
-        if (m_name == "PartEdit") {
+        if (m_name == "Part") {
             QJsonArray parts;
             for (auto* item : m_nodes->selectedItems()) {
                 const auto binding = item->data(0, Qt::UserRole).toJsonObject()["binding"].toObject();

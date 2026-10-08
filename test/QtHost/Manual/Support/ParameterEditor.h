@@ -16,7 +16,7 @@ namespace Manual {
 class ParameterEditor final : public QWidget {
 public:
     ParameterEditor(QString module, QString action, QString key, QJsonValue value, QJsonValue schema,
-        QWidget* parent = nullptr, bool listItem = false, QString title = {});
+        QWidget* parent = nullptr, bool listItem = false, QString title = {}, bool showTitle = true);
     QJsonValue GetValue() const;
     void SetValue(const QJsonValue& value);
     void SetPatch(const QJsonObject& patch);

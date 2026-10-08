@@ -90,9 +90,9 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
         const auto catalog = part->GetPartSetSnapshot();
         return catalog && !catalog->isStale ? part->GetState().labelMap : DataRevisionRef{};
     };
-    modules.push_back(CreatePartTest(context, part, parent)); modules.push_back(CreatePartEditTest(context, part, parent));
+    modules.push_back(CreatePartTest(context, part, parent));
 #else
-    unavailable("Part"); unavailable("PartEdit");
+    unavailable("Part");
 #endif
 #if defined(MANUAL_SURFACE)
     SurfaceDeterminationConfig surfaceConfig; surfaceConfig.defaultStart.targetViews = GetAllViews();

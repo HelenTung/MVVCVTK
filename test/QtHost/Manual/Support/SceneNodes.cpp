@@ -15,7 +15,7 @@ QJsonArray GetSceneNodes(const QString& module, const QJsonObject& s, const QJso
     if (input["available"].toBool()) objects.append(Object("input:" + input["dataRevision"].toString(),
         input["datasetId"].toString(), "体数据"));
     if (module == "Crop" && s["isActive"].toBool()) objects.append(Object("crop-tools", "裁剪工具", "编辑中"));
-    if ((module == "Part" || module == "PartEdit") && s["hasCurrentParts"].toBool()) {
+    if (module == "Part" && s["hasCurrentParts"].toBool()) {
         for (const auto value : s["parts"].toArray()) {
             const auto part = value.toObject();
             const auto id = QString::fromUtf8(QJsonDocument(part["binding"].toObject()).toJson(QJsonDocument::Compact));
