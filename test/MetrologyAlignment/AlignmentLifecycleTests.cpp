@@ -4,6 +4,7 @@
 #include "AlignmentData.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
+#include "AlignmentPrealignTestSupport.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <algorithm>
@@ -505,8 +506,57 @@ void SurfaceReferenceLifecycle() {
     Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
           "restore cannot reuse reference triangle IDs on another revision");
 }
+void AutomaticReferenceLifecycle() {
+    Fixture f;
+    const auto model = AlignmentTestModels::Model();
+    f.mesh = model.mesh; f.recipe = model.recipe;
+    f.input.mesh = {f.data->CreateDataEntityId(), 1}; f.input.meshBinding.clear();
+    f.recipe.nominalData = {f.data->CreateDataEntityId(), 1};
+    DataTransaction inputs;
+    inputs.outputs.push_back({f.input.mesh.entityId, 0, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    inputs.outputs.push_back({f.recipe.nominalData.entityId, 0, DataTypes::surfaceMesh,
+        {}, model.referenceMesh, {}});
+    Check(f.data->SetDataCommit(std::move(inputs)).status == DataCommitStatus::Succeeded,
+          "automatic reference fixture committed");
+    const auto save = [&] {
+        AlignmentRequest request; request.action = AlignmentAction::SaveRecipe; request.recipe = f.recipe;
+        Check(f.feature->SendRequest(request, [&](AlignmentResult result) { f.recipeRef = result.recipe; }).status ==
+              AlignmentAdmissionStatus::Accepted, "automatic recipe accepted");
+    };
+    save();
+    const auto result = f.Solve();
+    Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated && result.diagnostics.prealignment,
+          "public automatic alignment activates only after formal solve");
+    const auto stored = AlignmentData::GetResult(f.data->GetDataGraph(), result.result);
+    Check(stored && !stored->record.initialPoses.empty() &&
+          stored->record.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity},
+          "published result records generated poses instead of default identity");
+    const auto archive = f.feature->GetArchive(result.result);
+    Check(archive && archive->algorithmVersion == "metrology-alignment-2" && archive->recipe.prealignment &&
+          archive->recipe.prealignment->randomSeed == f.recipe.prealignment->randomSeed,
+          "archive preserves algorithm version and repeatable automatic parameters");
+    AlignmentRequest restore; restore.action = AlignmentAction::Restore;
+    restore.archive = archive; restore.input = f.input; restore.restoredNominal = f.input.scopeData;
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "automatic restore validates mapped reference surface before saving recipe");
+    restore.restoredNominal = f.recipe.nominalData;
+    if (restore.archive) restore.archive->algorithmVersion = "metrology-alignment-1";
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "legacy archive version cannot claim automatic prealignment parameters");
+    f.recipe.id = "unsupported-neighborhood"; f.recipe.prealignment->normalRadius = 1e-5;
+    save();
+    const auto commit = f.data->GetDataGraph().commitId;
+    const auto failed = f.Solve();
+    Check(failed.status == AlignmentStatus::NotConverged && !GetDataRevisionRefValid(failed.result) &&
+          !GetDataRevisionRefValid(failed.transform) && f.data->GetDataGraph().commitId == commit,
+          "failed coarse registration publishes no placeholder transform or result");
+    Check(f.feature->GetState().activeResult == result.result && f.feature->GetState().isCurrent,
+          "failed coarse registration preserves previous valid active result");
+}
 } // namespace
 int main() {
+    AutomaticReferenceLifecycle();
     SurfaceReferenceLifecycle();
     WorkNotifications();
     Lifecycle();

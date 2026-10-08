@@ -148,6 +148,37 @@ struct AlignmentSurfaceFit final {
     bool isPointToPlane = true;
 };
 
+struct AlignmentPrealignParams final {
+    // 长度使用配方单位；sampleSpacing^2 是每个工作样本的目标面积，不是最小点间距。
+    double sampleSpacing = 0;
+    double normalRadius = 0;
+    double featureRadius = 0;
+    double maxPairDistance = 0;
+    double minCoverage = 0.25;
+    double edgeLengthRatio = 0.9;
+    // 粗候选的分群距离；0 使用 maxPairDistance，正式解仍用求解容差判别。
+    double candidateSeparation = 0;
+    std::size_t neighborLimit = 64;
+    std::size_t matchCount = 4;
+    std::size_t iterationLimit = 10000;
+    std::size_t candidateLimit = 8;
+    std::uint64_t randomSeed = 0;
+    // 空集合覆盖整个表面；源编号绑定 exactMesh，参考编号绑定 nominalData。
+    std::vector<std::uint64_t> sourceTriangles;
+    std::vector<std::uint64_t> referenceTriangles;
+};
+
+struct AlignmentPrealignStats final {
+    std::size_t sourceSamples = 0, referenceSamples = 0;
+    std::size_t sourceFeatures = 0, referenceFeatures = 0;
+    std::size_t trials = 0, candidates = 0;
+    double bestCoverage = 0;
+    // 源选区面积使用配方单位的平方；质量过滤的面与面积单独报告。
+    std::size_t sourceRejectedTriangles = 0;
+    double sourceSelectedArea = 0, sourceRejectedArea = 0;
+    bool isCandidateLimitReached = false;
+};
+
 struct AlignmentRecipe final {
     std::string id;
     std::string targetFrameId;
@@ -160,6 +191,7 @@ struct AlignmentRecipe final {
     std::vector<AlignmentFitPair> fitPairs;
     // 与显式 fitPairs 互斥。nominalData 必须为同单位、同坐标轴约定的参考表面。
     std::optional<AlignmentSurfaceFit> surfaceFit;
+    std::optional<AlignmentPrealignParams> prealignment;
     DataRevisionRef nominalData;
     // ConstrainedBestFit 时前 0..3 个几何为 A/B/C 基准，其余点对只优化余下运动。
     std::size_t datumCount = 3;
@@ -220,6 +252,7 @@ struct AlignmentDiagnostics final {
     std::size_t rejectedPairs = 0;
     bool isQualityPassed = false;
     std::string message;
+    std::optional<AlignmentPrealignStats> prealignment;
 };
 
 struct AlignmentResult final {
@@ -237,7 +270,7 @@ struct AlignmentResult final {
 
 struct AlignmentArchive final {
     std::uint32_t schemaVersion = 1;
-    std::string algorithmVersion = "metrology-alignment-1";
+    std::string algorithmVersion = "metrology-alignment-2";
     AlignmentRecipe recipe;
     AlignmentInput input;
     // 导出值只用于交换；恢复不直接激活旧矩阵，必须以重映射输入重新求解。
@@ -272,6 +305,7 @@ struct AlignmentRequest final {
     DataRevisionRef recipeRef;
     DataRevisionRef resultRef;
     // row-major，列向量：pTarget = sourceToTarget * pSource；不得包含尺度。
+    // 启用自动预对齐时保持默认；实际生成的候选保存在正式结果的输入记录中。
     std::vector<AlignmentMatrix> initialPoses{alignmentIdentity};
     std::optional<AlignmentArchive> archive;
     // Restore 时显式映射名义数据；source/mesh/scope 由 input 映射。

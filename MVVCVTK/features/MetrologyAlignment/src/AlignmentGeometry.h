@@ -26,6 +26,8 @@ struct AlignmentCandidate final {
     std::vector<AlignmentGeometry> geometries;
     std::vector<AlignmentResidual> residuals;
     AlignmentDiagnostics diagnostics;
+    std::vector<AlignmentMatrix> initialPoses;
+    bool hasSolution = false;
 };
 
 class AlignmentGeometryFit final {

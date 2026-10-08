@@ -166,7 +166,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             graph.view->GetData(result->record.transform)->payload);
         if (!recipe || !transform)
             return {};
-        return AlignmentArchive{1, "metrology-alignment-1", recipe->recipe, result->record.input,
+        return AlignmentArchive{1, result->record.algorithmVersion, recipe->recipe, result->record.input,
                                 transform->GetSourceToTarget()};
     }
     std::optional<AlignmentReferenceSnapshot> GetReference(const DataRevisionRef &ref) const {
@@ -320,7 +320,9 @@ class MetrologyAlignmentHostFeature::Impl final {
                     if (!request.archive || !request.input ||
                         !AlignmentData::GetInputValid(*request.input) || request.recipe ||
                         request.archive->schemaVersion != 1 ||
-                        request.archive->algorithmVersion != "metrology-alignment-1" ||
+                        (request.archive->algorithmVersion != "metrology-alignment-1" &&
+                         request.archive->algorithmVersion != "metrology-alignment-2") ||
+                        (request.archive->algorithmVersion == "metrology-alignment-1" && request.archive->recipe.prealignment) ||
                         !AlignmentMath::Rigid(request.archive->sourceToTarget) ||
                         !GetDataRevisionRefValid(request.restoredNominal) ||
                         request.input->unit != request.archive->recipe.unit)
@@ -328,6 +330,10 @@ class MetrologyAlignmentHostFeature::Impl final {
                     request.recipe = request.archive->recipe;
                     if (request.recipe->surfaceFit &&
                         !request.recipe->surfaceFit->referenceTriangles.empty() &&
+                        request.restoredNominal != request.archive->recipe.nominalData)
+                        return {};
+                    if (request.recipe->prealignment &&
+                        !request.recipe->prealignment->referenceTriangles.empty() &&
                         request.restoredNominal != request.archive->recipe.nominalData)
                         return {};
                     request.recipe->nominalData = request.restoredNominal;
@@ -341,12 +347,18 @@ class MetrologyAlignmentHostFeature::Impl final {
                             : nullptr;
                     if (!mesh || mesh->GetCoordinateFrame() != request.input->coordinateFrame)
                         return {};
+                    if ((request.recipe->surfaceFit || request.recipe->prealignment) &&
+                        !GetReferenceMesh(graph, *request.recipe, request.input->coordinateFrame))
+                        return {};
                     for (const auto &spec : request.recipe->geometries) {
                         if (!spec.region.vertexIds.empty() &&
                             spec.region.pinnedMesh != request.input->mesh)
                             return {};
                     }
                     if (!request.recipe->fitPairs.empty() &&
+                        request.recipe->exactMesh != request.input->mesh)
+                        return {};
+                    if (request.recipe->prealignment && !request.recipe->prealignment->sourceTriangles.empty() &&
                         request.recipe->exactMesh != request.input->mesh)
                         return {};
                     if (request.recipe->surfaceFit && request.recipe->surfaceFit->sourceRegion) {
@@ -453,10 +465,10 @@ class MetrologyAlignmentHostFeature::Impl final {
             if (result.status == AlignmentStatus::FullyDetermined)
                 SetReference(task->referenceData, result);
         }
-        else if (result.status == AlignmentStatus::FullyDetermined ||
+        else if (task->candidate.hasSolution && (result.status == AlignmentStatus::FullyDetermined ||
                  result.status == AlignmentStatus::Underconstrained ||
                  result.status == AlignmentStatus::Conflicting ||
-                 result.status == AlignmentStatus::NotConverged) {
+                 result.status == AlignmentStatus::NotConverged)) {
             try {
                 auto tx = AlignmentData::BuildTransaction(
                     *m_data, task->work, task->recipeRef, task->candidate, task->expectations,
@@ -560,6 +572,18 @@ class MetrologyAlignmentHostFeature::Impl final {
         std::shared_ptr<OverlayService> port;
         std::shared_ptr<AlignmentOverlay> overlay;
     };
+    static std::shared_ptr<const SurfaceMeshPayload> GetReferenceMesh(const DataGraphSnapshot &graph,
+            const AlignmentRecipe &recipe, const std::string &coordinateFrame) {
+        const auto nominal = graph.view ? graph.view->GetData(recipe.nominalData) : nullptr;
+        const auto mesh = nominal ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload) : nullptr;
+        if (!mesh || mesh->GetCoordinateFrame() != coordinateFrame) return {};
+        const auto reference = AlignmentData::GetReference(graph, recipe.nominalData);
+        const bool hasSource = std::any_of(nominal->inputs.begin(), nominal->inputs.end(),
+            [](const DataInputRef &value) { return value.role == "reference-source"; });
+        if ((hasSource && !reference) || (reference &&
+            (reference->unit != recipe.unit || reference->frameId != recipe.targetFrameId))) return {};
+        return mesh;
+    }
     std::shared_ptr<Task> BuildTask(const AlignmentRequest &request, std::uint64_t id,
                                     AlignmentCallback callback) {
         if (!AlignmentData::GetInputValid(*request.input) || request.initialPoses.empty() ||
@@ -589,19 +613,11 @@ class MetrologyAlignmentHostFeature::Impl final {
         task->work.recipe = recipe->recipe;
         task->work.config = m_config;
         task->work.mesh = mesh;
-        if (recipe->recipe.surfaceFit) {
-            const auto nominal = graph.view->GetData(recipe->recipe.nominalData);
-            task->work.referenceMesh = nominal
-                ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload) : nullptr;
-            if (!task->work.referenceMesh ||
-                task->work.referenceMesh->GetCoordinateFrame() != request.input->coordinateFrame)
-                return {};
-            const auto reference = AlignmentData::GetReference(graph, recipe->recipe.nominalData);
-            const bool hasSource = std::any_of(nominal->inputs.begin(), nominal->inputs.end(),
-                [](const DataInputRef &value) { return value.role == "reference-source"; });
-            if ((hasSource && !reference) || (reference &&
-                (reference->unit != recipe->recipe.unit || reference->frameId != recipe->recipe.targetFrameId)))
-                return {};
+        if (recipe->recipe.prealignment && request.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity})
+            return {};
+        if (recipe->recipe.surfaceFit || recipe->recipe.prealignment) {
+            task->work.referenceMesh = GetReferenceMesh(graph, recipe->recipe, request.input->coordinateFrame);
+            if (!task->work.referenceMesh) return {};
         }
         task->work.poses = request.initialPoses;
         task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
@@ -626,6 +642,8 @@ class MetrologyAlignmentHostFeature::Impl final {
                     {"selection-" + std::to_string(i), recipe.geometries[i].region.pinnedMesh});
         if (!recipe.fitPairs.empty())
             inputs.push_back({"correspondence", recipe.exactMesh});
+        if (recipe.prealignment && !recipe.prealignment->sourceTriangles.empty())
+            inputs.push_back({"prealignment-selection", recipe.exactMesh});
         if (recipe.surfaceFit && recipe.surfaceFit->sourceRegion &&
             !recipe.surfaceFit->sourceRegion->vertexIds.empty())
             inputs.push_back({"surface-selection", recipe.surfaceFit->sourceRegion->pinnedMesh});

@@ -15,6 +15,15 @@ bool GetGeometryValid(const AlignmentGeometry &g) {
            std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0;
 }
 bool GetResultValid(const ResultRecord &r) {
+    if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2") return false;
+    if (r.diagnostics.prealignment) {
+        const auto &p = *r.diagnostics.prealignment;
+        if (p.sourceFeatures > p.sourceSamples || p.referenceFeatures > p.referenceSamples ||
+            p.candidates == 0 || p.candidates > 8 || !std::isfinite(p.bestCoverage) ||
+            p.bestCoverage < 0 || p.bestCoverage > 1 || !std::isfinite(p.sourceSelectedArea) ||
+            !std::isfinite(p.sourceRejectedArea) || p.sourceRejectedArea < 0 ||
+            p.sourceSelectedArea < p.sourceRejectedArea) return false;
+    }
     return GetInputValid(r.input) && GetDataRevisionRefValid(r.recipe) &&
            GetDataRevisionRefValid(r.transform) && GetDataRevisionRefValid(r.geometry) &&
            GetDataRevisionRefValid(r.residuals) && r.diagnostics.hardRemaining <= 6 &&
@@ -193,7 +202,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
         residualRef{data.CreateDataEntityId(), 1};
     resultRef = {data.CreateDataEntityId(), 1};
     const auto inputs = BuildInputs(work.input, recipe, work.recipe.nominalData);
-    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-1",
+    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-2",
                                     "parameters: recipe input; initialization: result payload"};
     tx.outputs.push_back({transformRef.entityId, 0, DataTypes::transform3D, inputs,
                           std::make_shared<const Transform3DPayload>(candidate.sourceToTarget,
@@ -224,7 +233,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
                           provenance});
     ResultRecord record{work.input,  recipe,      transformRef,
                         geometryRef, residualRef, candidate.diagnostics,
-                        work.poses,  expectations};
+                        candidate.initialPoses.empty() ? work.poses : candidate.initialPoses, expectations};
     auto resultInputs = inputs;
     resultInputs.push_back({"transform", transformRef});
     resultInputs.push_back({"geometry", geometryRef});

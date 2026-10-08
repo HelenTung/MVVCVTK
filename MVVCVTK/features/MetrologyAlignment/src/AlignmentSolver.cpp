@@ -2,6 +2,7 @@
 #include "AlignmentSolver.h"
 #include "AlignmentMath.h"
 #include "AlignmentMeshQuery.h"
+#include "AlignmentPrealign.h"
 #include <map>
 #include <numeric>
 #include <set>
@@ -613,6 +614,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
         converged = Optimize(work, equations, output.sourceToTarget, output.diagnostics.iterations);
     }
     Diagnose(work, equations, output, converged);
+    output.hasSolution = true;
     // 对应集合在初始化后固定以保证可重复性；最终姿态重新验证距离门槛。
     for (const auto &e : equations) {
         if (e.kind == AlignmentConstraintKind::Soft && e.priority == 63 && e.isUsed &&
@@ -642,6 +644,22 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                 return result;
             }
         bool hasCandidate = false;
+        auto poses = work.poses;
+        std::optional<AlignmentPrealignStats> prealignment;
+        if (work.recipe.prealignment) {
+            Require(work.poses == std::vector<AlignmentMatrix>{alignmentIdentity},
+                    "Automatic prealignment cannot silently replace supplied initial poses.");
+            Require(work.referenceMesh && work.referenceMesh->GetCoordinateFrame() == work.input.coordinateFrame,
+                    "Prealignment reference coordinate frame is incompatible.");
+            auto generated = AlignmentPrealign::BuildCandidates(work);
+            poses = std::move(generated.poses); prealignment = generated.statistics;
+            if (poses.empty()) {
+                result.diagnostics.status = AlignmentStatus::NotConverged;
+                result.diagnostics.prealignment = prealignment;
+                result.diagnostics.message = "FPFH/RANSAC did not produce a supported initial pose.";
+                return result;
+            }
+        }
         std::unique_ptr<AlignmentMeshQuery> surfaceQuery;
         if (work.recipe.surfaceFit) {
             Require(work.referenceMesh && work.referenceMesh->GetCoordinateFrame() ==
@@ -650,7 +668,7 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                                                     work.recipe.surfaceFit->referenceTriangles);
         }
         std::vector<AlignmentMatrix> validPoses;
-        for (const auto &pose : work.poses) {
+        for (const auto &pose : poses) {
             CheckWork(work);
             Require(Rigid(pose), "Initial pose must be rigid.");
             AlignmentCandidate candidate;
@@ -690,6 +708,8 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
             result.diagnostics.isQualityPassed = false;
             result.diagnostics.message = "Multiple distinct candidate poses satisfy the recipe.";
         }
+        result.initialPoses = std::move(poses);
+        result.diagnostics.prealignment = prealignment;
     } catch (const std::length_error& error) {
         result.diagnostics.status = AlignmentStatus::BudgetExceeded;
         result.diagnostics.message = error.what();

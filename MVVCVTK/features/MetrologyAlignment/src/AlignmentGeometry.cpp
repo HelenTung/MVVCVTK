@@ -1,5 +1,6 @@
 #include "AlignmentGeometry.h"
 #include "AlignmentMath.h"
+#include "AlignmentPrealign.h"
 #include "FeatureSupport/WorkLimit.h"
 #include <limits>
 #include <numeric>
@@ -199,6 +200,9 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         !Finite(Vector(r.datumOffsets)))
         return false;
     if (!GetDataRevisionRefValid(r.nominalData))
+        return false;
+    if (r.prealignment && (!AlignmentPrealign::GetParamsValid(*r.prealignment) ||
+        (!r.prealignment->sourceTriangles.empty() && !GetDataRevisionRefValid(r.exactMesh))))
         return false;
     if (r.method == AlignmentMethod::SequentialPlanes &&
         (r.datumCount == 0 || r.geometries.size() != r.datumCount))

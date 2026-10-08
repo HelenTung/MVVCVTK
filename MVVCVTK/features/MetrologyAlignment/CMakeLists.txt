@@ -5,6 +5,7 @@ target_sources(metrology_alignment
         src/AlignmentSolver.h src/AlignmentSolver.cpp
         src/AlignmentMeshQuery.h src/AlignmentMeshQuery.cpp
         src/AlignmentReference.h src/AlignmentReference.cpp
+        src/AlignmentPrealign.h src/AlignmentPrealign.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp
