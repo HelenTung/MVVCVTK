@@ -4,6 +4,9 @@
 #include <iostream>
 #include <locale>
 #include <sstream>
+#include <chrono>
+#include <atomic>
+#include <thread>
 
 namespace {
 int failures=0;
@@ -63,6 +66,78 @@ public:
     }
 };
 class CommaLocale final : public std::numpunct<char> { char do_decimal_point() const override { return ','; } };
+std::string Read(const std::filesystem::path &path) { std::ifstream in(path,std::ios::binary);return {std::istreambuf_iterator<char>(in),{}}; }
+void FileCases(const MetrologyReport &report,const std::filesystem::path &base) {
+    using Status=MetrologyReportWriteStatus;
+    const auto folder=base/("files-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(folder);
+    const auto clean=[&] {
+        for(const auto &entry:std::filesystem::directory_iterator(folder))
+            if(entry.path().filename().u8string().find(".mvvcvtk-report-")==0)return false;
+        return true;
+    };
+    const auto target=folder/std::filesystem::u8path(u8"报告_尺寸_😀.json");
+    std::ostringstream expected;Check(WriteMetrologyReport(report,expected).status==Status::Succeeded,"file reference serialization");
+    std::size_t baselineChecks=0;MetrologyReportWriteOptions observed;observed.isCancelled=[&] { ++baselineChecks;return false; };
+    auto result=WriteMetrologyReportFile(report,target.u8string(),observed);
+    if(!result.isCommitted)std::cerr<<result.write.message<<'\n';
+    Check(result.isCommitted && result.write.status==Status::Succeeded && Read(target)==expected.str() &&
+        result.write.bytesWritten==expected.str().size() && clean(),"Unicode file commits exact bytes without temporary residue");
+    const auto original=Read(target);result=WriteMetrologyReportFile(report,target.u8string());
+    Check(result.write.status==Status::AlreadyExists && !result.isCommitted && Read(target)==original && clean(),"existing report is never replaced");
+    std::size_t lateChecks=0;MetrologyReportWriteOptions late;late.isCancelled=[&] { return ++lateChecks==baselineChecks; };
+    const auto beforeCommit=folder/"before-commit.json";result=WriteMetrologyReportFile(report,beforeCommit.u8string(),late);
+    Check(result.write.status==Status::Cancelled && result.write.bytesWritten==expected.str().size() && !result.isCommitted &&
+        !std::filesystem::exists(beforeCommit) && clean(),"last cancellation checkpoint discards a fully written temporary before commit");
+    MetrologyReportWriteOptions options;options.maxBytes=1;
+    const auto limited=folder/"limited.json";result=WriteMetrologyReportFile(report,limited.u8string(),options);
+    Check(result.write.status==Status::BudgetExceeded && !result.isCommitted && !std::filesystem::exists(limited) && clean(),"budget failure removes own temporary and publishes nothing");
+    auto bad=report;bad.title=std::string(40000,'x')+std::string("\xC0\xAF",2);
+    const auto malformed=folder/"malformed.json";result=WriteMetrologyReportFile(bad,malformed.u8string());
+    Check(result.write.status==Status::InvalidInput && result.write.bytesWritten>0 && !std::filesystem::exists(malformed) && clean(),"late encoding failure discards written prefix");
+    auto large=report;auto field=std::make_shared<AlignmentDeviationField>();field->samples.resize(100000);field->statistics.counts[0]=field->samples.size();large.deviations[0].forward=field;
+    std::size_t calls=0;options={};options.includeDeviationSamples=true;options.isCancelled=[&] { return ++calls>=500000; };
+    const auto cancelled=folder/"cancelled.json";result=WriteMetrologyReportFile(large,cancelled.u8string(),options);
+    Check(result.write.status==Status::Cancelled && result.write.bytesWritten>0 && !result.isCommitted &&
+        !std::filesystem::exists(cancelled) && clean(),"mid-file cancellation leaves no final file or temporary prefix");
+    calls=0;options={};const auto raced=folder/"raced.json";
+    options.isCancelled=[&] { if(++calls==2) { std::ofstream sentinel(raced,std::ios::binary);sentinel<<"concurrent owner"; }return false; };
+    result=WriteMetrologyReportFile(report,raced.u8string(),options);
+    Check(result.write.status==Status::AlreadyExists && !result.isCommitted && Read(raced)=="concurrent owner" && clean(),"target created during serialization wins without replacement");
+    const auto concurrent=folder/"concurrent.json";std::atomic<int> ready{0};std::array<MetrologyReportFileResult,2> writers;
+    const auto run=[&](std::size_t i) { ready.fetch_add(1);while(ready.load()<2)std::this_thread::yield();writers[i]=WriteMetrologyReportFile(report,concurrent.u8string()); };
+    std::thread first(run,0),second(run,1);first.join();second.join();
+    Check(writers[0].isCommitted!=writers[1].isCommitted &&
+        (writers[0].isCommitted ? writers[1].write.status : writers[0].write.status)==Status::AlreadyExists &&
+        Read(concurrent)==expected.str() && clean(),"two concurrent exporters commit exactly one complete report");
+    Check(WriteMetrologyReportFile(report,(folder/"missing"/"a.json").u8string()).write.status==Status::IoError && clean(),"missing output parent is reported without creating directories");
+    for(const auto &name:{"NUL.json","report.json:alternate","trailing.json ","dot.json."})
+        Check(WriteMetrologyReportFile(report,(folder/name).u8string()).write.status==Status::InvalidInput,"ambiguous device/ADS/trailing path rejected");
+    Check(WriteMetrologyReportFile(report,std::string("bad\0path",8)).write.status==Status::InvalidInput && clean(),"embedded path NUL rejected");
+    options={};calls=0;options.isCancelled=[&] { if(++calls==2)throw std::runtime_error("callback fault");return false; };
+    const auto fault=folder/"callback-fault.json";result=WriteMetrologyReportFile(report,fault.u8string(),options);
+    Check(result.write.status==Status::InternalError && !std::filesystem::exists(fault) && clean(),"callback exception cleans its exclusive temporary file");
+    std::filesystem::path ownedTemporary;options={};calls=0;
+    options.isCancelled=[&] {
+        if(++calls!=2)return false;
+        for(const auto &entry:std::filesystem::directory_iterator(folder))if(entry.path().filename().u8string().find(".mvvcvtk-report-")==0)ownedTemporary=entry.path();
+        if(ownedTemporary.empty())throw std::runtime_error("test temporary not found");
+        std::filesystem::permissions(ownedTemporary,std::filesystem::perms::owner_read,std::filesystem::perm_options::replace);
+        return true;
+    };
+    const auto cleanupFailure=folder/"cleanup-failure.json";result=WriteMetrologyReportFile(report,cleanupFailure.u8string(),options);
+    Check(result.write.status==Status::Cancelled && !result.isCommitted && !std::filesystem::exists(cleanupFailure) &&
+        !ownedTemporary.empty() && !result.remainingTemporaryPath.empty() && std::filesystem::exists(ownedTemporary) &&
+        std::filesystem::equivalent(ownedTemporary,std::filesystem::u8path(result.remainingTemporaryPath)),
+        "cleanup failure exposes the exact owned temporary path instead of claiming cleanup succeeded");
+    std::cout<<"CleanupFailureStatus="<<static_cast<unsigned>(result.write.status)<<" CleanupPathPresent="<<!result.remainingTemporaryPath.empty()
+             <<" PathSpellingIdentical="<<(result.remainingTemporaryPath==ownedTemporary.u8string())<<'\n';
+    if(!ownedTemporary.empty()) {
+        // 仅恢复并删除本用例独立目录内、刚刚由回调标记只读的已知临时文件。
+        std::filesystem::permissions(ownedTemporary,std::filesystem::perms::owner_all,std::filesystem::perm_options::replace);
+        Check(std::filesystem::remove(ownedTemporary) && clean(),"known injected read-only temporary is recovered");
+    }
+}
 }
 int main(int argc,char **argv) {
     try {
@@ -105,6 +180,7 @@ int main(int argc,char **argv) {
             const std::filesystem::path folder(argv[1]);std::filesystem::create_directories(folder);
             std::ofstream a(folder/"fixture.json",std::ios::binary),b(folder/"fixture.csv",std::ios::binary);
             a<<full.str();b<<csv.str();a.close();b.close();Check(bool(a)&&bool(b),"parser fixtures written");
+            FileCases(report,folder);
         }
         auto large=std::make_shared<AlignmentDeviationField>();large->samples.resize(100000);large->statistics.counts[0]=large->samples.size();
         report.deviations[0].forward=large;options={};std::ostringstream noValues;

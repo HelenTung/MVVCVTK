@@ -496,11 +496,12 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
         if(format==MetrologyReportFormat::Csv)out<<',';
         const auto file=format==MetrologyReportFormat::Json ? "inspection-report.json" : "inspection-report.csv";
         Require(!std::filesystem::exists(folder/file),"Report export destination already exists.");
-        std::ofstream destination(folder/file,std::ios::binary);MetrologyReportWriteOptions options;options.format=format;
+        MetrologyReportWriteOptions options;options.format=format;
         options.maxBytes=manifest.workingLimit;options.includeDeviationSamples=format==MetrologyReportFormat::Json;
-        const auto begin=std::chrono::steady_clock::now();const auto written=WriteMetrologyReport(report,destination,options);destination.close();
-        Require(written.status==MetrologyReportWriteStatus::Succeeded && bool(destination) && std::filesystem::file_size(folder/file)==written.bytesWritten,"Report stream export failed.");
-        out<<"{\"file\":"<<Json(file)<<",\"bytes\":"<<written.bytesWritten<<",\"elapsedMs\":"
+        const auto begin=std::chrono::steady_clock::now();const auto written=WriteMetrologyReportFile(report,(folder/file).u8string(),options);
+        Require(written.write.status==MetrologyReportWriteStatus::Succeeded && written.isCommitted && written.remainingTemporaryPath.empty() &&
+            std::filesystem::file_size(folder/file)==written.write.bytesWritten,"Report file commit failed.");
+        out<<"{\"file\":"<<Json(file)<<",\"bytes\":"<<written.write.bytesWritten<<",\"isCommitted\":true,\"elapsedMs\":"
            <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count()<<'}';
     }
     out<<"]}";

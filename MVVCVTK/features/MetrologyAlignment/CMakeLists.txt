@@ -17,6 +17,7 @@ target_sources(metrology_alignment
         src/AlignmentInspectionData.h src/AlignmentInspectionData.cpp
         src/AlignmentReport.h src/AlignmentReport.cpp
         src/MetrologyReportWriter.cpp
+        src/MetrologyReportFile.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
         src/MetrologyAlignmentHostFeature.cpp

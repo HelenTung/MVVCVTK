@@ -65,7 +65,7 @@ struct MetrologyReportResult final {
     std::string message;
 };
 enum class MetrologyReportFormat : std::uint8_t { Json, Csv };
-enum class MetrologyReportWriteStatus : std::uint8_t { Succeeded, InvalidInput, BudgetExceeded, Cancelled, IoError, InternalError };
+enum class MetrologyReportWriteStatus : std::uint8_t { Succeeded, InvalidInput, BudgetExceeded, Cancelled, IoError, InternalError, AlreadyExists };
 struct MetrologyReportWriteOptions final {
     MetrologyReportFormat format=MetrologyReportFormat::Json;
     std::optional<std::size_t> maxBytes;
@@ -84,3 +84,15 @@ struct MetrologyReportWriteResult final {
 // 逐点偏差默认省略并明确标记；CSV 明细的非 Valid 测量值留空。失败可能留下前缀，调用方负责丢弃/原子提交。
 MetrologyReportWriteResult WriteMetrologyReport(const MetrologyReport &report,std::ostream &output,
                                                const MetrologyReportWriteOptions &options={});
+struct MetrologyReportFileResult final {
+    MetrologyReportWriteResult write;
+    bool isCommitted=false;
+    // 仅清理失败时非空；标识本次创建的临时文件，不授权调用方盲目删除该路径的后来文件。
+    std::string remainingTemporaryPath;
+};
+// Windows x64：UTF-8 常规文件路径，父目录必须存在；不支持设备名/ADS，不覆盖已有目标。
+// 在目标目录独占创建临时文件，写出并 FlushFileBuffers 后通过句柄重命名提交；可在后台调用。
+// 失败按句柄清理；write.bytesWritten 可能是未提交的临时字节。只有 isCommitted=true 表示目标已提交。
+// 提交成功后不因稍后到达的取消而回滚；不承诺掉电时目录项的持久性。
+MetrologyReportFileResult WriteMetrologyReportFile(const MetrologyReport &report,const std::string &utf8Path,
+                                                  const MetrologyReportWriteOptions &options={});
