@@ -108,6 +108,12 @@ struct HostDataSelectRequest final : HostRequest {
     DataBindingRevision expectedBindingRevision = 0;
 };
 
+// 卸载该实体及其显式退役派生结果；Reader、临时 Feature 输入及非 primary binding 仍阻塞。
+// 成功表示已退役；在途 GPU 引用结束后才完成物理释放，不删除源文件。
+struct HostDataUnloadRequest final : HostRequest {
+    DataRevisionRef dataRevision; // 调用方观察到的当前实体 head，防止卸载后来生成的修订。
+};
+
 struct HostDataExportRequest final : HostRequest {
     std::string outputPath; // UTF-8 输出目录；文件名由 Data 层基于冻结数据生成。
     // 缺省时由 sourceView 模式收敛：体渲染导出 RAW，等值面导出 PLY。

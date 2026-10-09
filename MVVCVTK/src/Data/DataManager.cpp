@@ -9,6 +9,7 @@
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
 #include "Platform/Path.h"
+#include "Data/Internal/AtomicFileOutput.h"
 #include <vtkDataArray.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
@@ -44,11 +45,37 @@
 #include <vtkImageChangeInformation.h>
 #include <vtkPNGWriter.h>
 #include <vtkImageImport.h>
-#include <vtkImageAppend.h>
 #include <vtkMatrix3x3.h>
 #include <vtkMatrix4x4.h>
 #include <cstring>
 #include "MemMappedFile.h"
+
+namespace {
+template<std::size_t PixelBytes>
+void CopyFlippedRow(unsigned char* target, const unsigned char* source, int width)
+{
+    for (int x=0;x<width;++x)
+        std::memcpy(target + static_cast<std::size_t>(width-1-x)*PixelBytes,
+            source + static_cast<std::size_t>(x)*PixelBytes, PixelBytes);
+}
+void CopyFlippedRow(unsigned char* target, const unsigned char* source, int width, std::size_t pixelBytes)
+{
+    // 常见像素宽度使用编译期 memcpy 长度，避免每个体素调用动态长度 memcpy。
+    switch (pixelBytes) {
+    case 1: return CopyFlippedRow<1>(target,source,width);
+    case 2: return CopyFlippedRow<2>(target,source,width);
+    case 3: return CopyFlippedRow<3>(target,source,width);
+    case 4: return CopyFlippedRow<4>(target,source,width);
+    case 8: return CopyFlippedRow<8>(target,source,width);
+    case 12: return CopyFlippedRow<12>(target,source,width);
+    case 16: return CopyFlippedRow<16>(target,source,width);
+    default:
+        for (int x=0;x<width;++x)
+            std::memcpy(target + static_cast<std::size_t>(width-1-x)*pixelBytes,
+                source + static_cast<std::size_t>(x)*pixelBytes,pixelBytes);
+    }
+}
+}
 
 class BaseDataManager::Impl final {
 public:
@@ -1003,6 +1030,8 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         std::move(nextPayload),
         DataProvenance{
             "org.mvvcvtk.host", "set-spacing", "1", "{}" } });
+    transaction.outputs.back().lifetimeScope = CreateDataEntityId();
+    transaction.outputs.back().lifetimePolicy = current->data->lifetimePolicy;
     transaction.bindings.push_back(DataBindingUpdate{
         std::string(primaryVolumeBinding),
         current->binding->revision,
@@ -1339,6 +1368,17 @@ bool BaseDataManager::ClearLoadStage()
     return true;
 }
 
+void BaseDataManager::ClearRetiredLoad(const DataEntityId& entity)
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+    if (m_impl->m_loadStage && m_impl->m_loadStage->outputRef.entityId == entity) m_impl->m_loadStage.reset();
+    if (m_impl->m_loadState.acceptedRevision.entityId == entity) m_impl->m_loadState.acceptedRevision = {};
+    if (m_impl->m_loadState.requestedRevision.entityId == entity) {
+        m_impl->m_loadState.requestedRevision = {};
+        m_impl->m_loadState.status = DataLoadStatus::None;
+    }
+}
+
 bool BaseDataManager::SetOwnedLoadImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata)
 {
     auto payload = m_impl->m_vtk->BuildImagePayload(std::move(image), std::move(metadata));
@@ -1379,6 +1419,8 @@ bool BaseDataManager::SetLoadPayload(
         {},
         std::move(payload),
         std::move(provenance) };
+    output.lifetimeScope = CreateDataEntityId();
+    output.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
     auto candidate = std::make_shared<const DataRevision>(DataRevision{
         outputRef,
         output.type,
@@ -1929,8 +1971,8 @@ bool BaseDataManager::Impl::ExportRaw(
         outputDir, newDims, ".raw");
 
     // 按 x-fast、逐行无 padding 的 float32 裸数据写出，不附带维度、spacing、origin 等元数据。
-    std::ofstream rawFile(finalPath, std::ios::binary);
-    if (!rawFile.is_open()) {
+    AtomicFileOutput rawFile(finalPath);
+    if (!rawFile.GetIsOpen()) {
         std::cerr
             << "[Error] Failed to open RAW file for writing: "
             << PlatformPath::GetUtf8Path(finalPath)
@@ -2002,15 +2044,13 @@ bool BaseDataManager::Impl::ExportRaw(
                 }
             }
             // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
-            rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
-            if (!rawFile) {
+            if (!rawFile.Write(rowPtr, rowBytes)) {
                 return false;
             }
         }
     }
 
-    rawFile.close();
-    if (!rawFile || stopToken.GetIsStopped()) {
+    if (!rawFile.Commit(stopToken)) {
         return false;
     }
     std::cout << "[Export] Successfully saved transformed RAW to: "
@@ -2469,7 +2509,7 @@ bool TiffVolumeDataManager::SetDataLoaded(
         layout, ImageSourceKind::TiffSeries, sourceByteSize);
     if (!metadata) return false;
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(image), {}, {}, *metadata);
+    return SetOwnedLoadImage(std::move(image), *metadata);
 }
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
@@ -2591,70 +2631,65 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 
         // 每张 TIFF 独立解码后沿 Z 轴组装，避开批量 SetFileNames 在部分 Windows
         // libtiff 构建中的跨文件状态损坏；fileList 的自然排序仍是切片顺序真源。
-        auto append = vtkSmartPointer<vtkImageAppend>::New();
-        append->SetAppendAxis(2);
-        std::vector<vtkSmartPointer<vtkImageData>> slices;
-        slices.reserve(fileList.size());
-        int expectedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+        const auto& dims = layout.GetDimensions();
+        if (fileList.size() != static_cast<std::size_t>(dims[2])) return nullptr;
+        // 最终 RAS 缓冲只分配一次；每轮仅保留当前解码切片。
+        auto volume = vtkSmartPointer<vtkImageData>::New();
+        const auto geometry = BaseDataManager::Impl::GetRasGeometry(layout);
+        volume->SetDimensions(dims.data());
+        volume->SetSpacing(geometry.spacing.data());
+        volume->SetOrigin(geometry.origin.data());
+        BaseDataManager::Impl::SetDirection(*volume, geometry.direction);
         int expectedScalarType = VTK_VOID;
         int expectedComponents = 0;
+        std::size_t pixelBytes = 0;
         try {
-            for (const auto& file : fileList) {
+            for (std::size_t z = 0; z < fileList.size(); ++z) {
                 if (stopToken.GetIsStopped()) return nullptr;
-                auto sliceReader = vtkSmartPointer<vtkTIFFReader>::New();
-                sliceReader->SetFileName(file.c_str());
-                if (!sliceReader->CanReadFile(file.c_str())) {
-                    return nullptr;
-                }
-                sliceReader->Update();
-                if (stopToken.GetIsStopped()
-                    || sliceReader->GetErrorCode() != 0
-                    || !sliceReader->GetOutput()
-                    || sliceReader->GetOutput()->GetNumberOfPoints() == 0) {
-                    return nullptr;
-                }
-                auto slice = vtkSmartPointer<vtkImageData>::New();
-                slice->DeepCopy(sliceReader->GetOutput());
-                if (stopToken.GetIsStopped()) return nullptr;
-                int sliceExtent[6] = { 0, -1, 0, -1, 0, -1 };
-                slice->GetExtent(sliceExtent);
-                if (slice->GetDimensions()[0] <= 0
-                    || slice->GetDimensions()[1] <= 0
-                    || slice->GetDimensions()[2] != 1) {
-                    return nullptr;
-                }
-                if (slices.empty()) {
-                    std::copy(std::begin(sliceExtent), std::end(sliceExtent), expectedExtent);
+                const auto& file = fileList[z];
+                auto reader = vtkSmartPointer<vtkTIFFReader>::New();
+                reader->SetFileName(file.c_str());
+                if (!reader->CanReadFile(file.c_str())) return nullptr;
+                reader->Update();
+                auto* slice = reader->GetOutput();
+                if (stopToken.GetIsStopped() || reader->GetErrorCode() != 0 || !slice
+                    || slice->GetDimensions()[0] != dims[0]
+                    || slice->GetDimensions()[1] != dims[1]
+                    || slice->GetDimensions()[2] != 1) return nullptr;
+                if (z == 0) {
                     expectedScalarType = slice->GetScalarType();
                     expectedComponents = slice->GetNumberOfScalarComponents();
+                    if (expectedComponents <= 0 || slice->GetScalarSize() <= 0
+                        || !BaseDataManager::Impl::GetCheckedProduct(
+                            static_cast<std::size_t>(expectedComponents),
+                            static_cast<std::size_t>(slice->GetScalarSize()), pixelBytes)) return nullptr;
+                    std::size_t totalBytes = 0;
+                    if (!BaseDataManager::Impl::GetCheckedProduct(
+                            layout.GetVoxelCount(), pixelBytes, totalBytes)
+                        || totalBytes > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max())) return nullptr;
+                    volume->AllocateScalars(expectedScalarType, expectedComponents);
                 }
-                else if (sliceExtent[0] != expectedExtent[0]
-                    || sliceExtent[1] != expectedExtent[1]
-                    || sliceExtent[2] != expectedExtent[2]
-                    || sliceExtent[3] != expectedExtent[3]
-                    || slice->GetScalarType() != expectedScalarType
-                    || slice->GetNumberOfScalarComponents() != expectedComponents) {
-                    return nullptr;
+                else if (slice->GetScalarType() != expectedScalarType
+                    || slice->GetNumberOfScalarComponents() != expectedComponents) return nullptr;
+                const auto* extent = slice->GetExtent();
+                for (int y = 0; y < dims[1]; ++y) {
+                    if (stopToken.GetIsStopped()) return nullptr;
+                    const auto* source = static_cast<const unsigned char*>(
+                        slice->GetScalarPointer(extent[0], extent[2] + y, extent[4]));
+                    auto* target = static_cast<unsigned char*>(
+                        volume->GetScalarPointer(0, dims[1] - 1 - y, static_cast<int>(z)));
+                    if (!source || !target) return nullptr;
+                    CopyFlippedRow(target,source,dims[0],pixelBytes);
                 }
-                slices.push_back(slice);
-                append->AddInputData(slice);
             }
-            if (stopToken.GetIsStopped()) return nullptr;
-            append->Update();
         }
         catch (...) {
             std::cerr << "[Error] Exception during TIFF series reading." << std::endl;
             return nullptr;
         }
-        if (stopToken.GetIsStopped()
-            || append->GetErrorCode() != 0
-            || !append->GetOutput()
-            || append->GetOutput()->GetNumberOfPoints() == 0) {
-            return nullptr;
-        }
-        decodedImage = vtkSmartPointer<vtkImageData>::New();
-        decodedImage->DeepCopy(append->GetOutput());
-        if (stopToken.GetIsStopped()) return nullptr;
+        volume->Modified();
+        return stopToken.GetIsStopped() ? nullptr : volume;
+
     }
     else {
         // 单文件
@@ -2689,7 +2724,7 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
             return nullptr;
         }
         decodedImage = vtkSmartPointer<vtkImageData>::New();
-        decodedImage->DeepCopy(reader->GetOutput());
+        decodedImage->ShallowCopy(reader->GetOutput());
         if (stopToken.GetIsStopped()) return nullptr;
     }
 
@@ -2787,12 +2822,8 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
         for (size_t y = 0; y < ny; ++y) {
             const char* srcRow = srcBase + srcSliceOffset + y * rowBytes;
             char* dstRow = dstBase + dstSliceOffset + (ny - 1 - y) * rowBytes;
-            for (size_t x = 0; x < nx; ++x) {
-                std::memcpy(
-                    dstRow + (nx - 1 - x) * pixelBytes,
-                    srcRow + x * pixelBytes,
-                    pixelBytes);
-            }
+            CopyFlippedRow(reinterpret_cast<unsigned char*>(dstRow),
+                reinterpret_cast<const unsigned char*>(srcRow),dims[0],pixelBytes);
         }
     }
 

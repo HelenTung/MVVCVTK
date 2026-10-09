@@ -54,7 +54,7 @@ bool HasInput(const DataSnapshot& data,const std::string& role,const DataRevisio
     if (!data) return false;
     return std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input) { return input.role==role && input.source==ref; });
 }
-void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
+void Run(const char* sample, double spacing, const std::array<double, 3>& origin)
 {
     const int n=sample ? 64:24; const std::size_t count=std::size_t(n)*n*n;
     HostRenderViewConfig view; view.id="primary"; view.role=HostRenderViewRole::Primary3D;
@@ -260,12 +260,12 @@ int main(int argc,char** argv)
     try {
         Check(argc == 1 || argc == 2 || argc == 6,
             "Usage: RoiIntegrationTests [raw64 [spacingMm originX originY originZ]]");
-        const float spacing = argc == 6 ? std::stof(argv[2]) : .1537F;
-        const std::array<float, 3> origin = argc == 6
-            ? std::array<float, 3>{std::stof(argv[3]), std::stof(argv[4]), std::stof(argv[5])}
-            : std::array<float, 3>{113.1232F,87.3016F,113.1232F};
+        const double spacing = argc == 6 ? std::stod(argv[2]) : .1537;
+        const std::array<double, 3> origin = argc == 6
+            ? std::array<double, 3>{std::stod(argv[3]), std::stod(argv[4]), std::stod(argv[5])}
+            : std::array<double, 3>{113.1232,87.3016,113.1232};
         Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
-            [](float value) { return std::isfinite(value); }), "真实样本物理几何合法");
+            [](double value) { return std::isfinite(value); }), "真实样本物理几何合法");
         Run(argc>1 ? argv[1]:nullptr, spacing, origin); return 0;
     }
     catch (const std::exception& e) { std::cerr << "[FAIL] " << e.what() << std::endl; return 1; }

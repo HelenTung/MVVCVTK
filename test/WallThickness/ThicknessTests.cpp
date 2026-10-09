@@ -2,6 +2,7 @@
 #include "Host/WallThicknessHostFeature.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
+#include "ThicknessSampling.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
 #include "FeatureSupport/WorkLimit.h"
@@ -269,8 +270,63 @@ void TestRayDefinitions()
           "tube mid-height query measures radial wall; cap normals are outside this analytic reference");
 }
 
+void TestLocalSampling()
+{
+    auto work = BuildSlab();
+    std::vector<double> points{0,0,0, 10,0,0, 0,10,0, 0,-.1,0};
+    std::vector<std::uint64_t> faces{0,1,2, 0,3,1};
+    for (unsigned i=0;i<100;++i) {
+        const auto id=points.size()/3;
+        points.insert(points.end(),{double(i),20,0,double(i)+.1,20,0,double(i),20.1,0});
+        faces.insert(faces.end(),{id,id+1,id+2});
+    }
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(points,faces);
+    work.archive.params.sampleSpacing=1;
+    const auto verify=[&](const auto& triangles,double expectedArea,double sharedEnd) {
+        double area=0;
+        std::map<std::size_t,ThicknessPoint> identities;
+        std::map<std::pair<std::size_t,std::size_t>,unsigned> sharedEdges;
+        for(const auto& triangle:triangles) {
+            std::array<ThicknessPoint,3> p{};
+            for(unsigned k=0;k<3;++k) for(unsigned v=0;v<3;++v) for(unsigned a=0;a<3;++a)
+                p[k][a]+=triangle.corners[k].barycentric[v]*points[3*faces[3*triangle.source+v]+a];
+            for(unsigned k=0;k<3;++k) {
+                const auto found=identities.emplace(triangle.corners[k].vertex,p[k]);
+                Check(ThicknessMath::Length(ThicknessMath::Sub(found.first->second,p[k]))<1e-12,
+                    "shared vertex identity reconstructs the same point in both source barycentric frames");
+            }
+            area+=.5*ThicknessMath::Length(ThicknessMath::Cross(ThicknessMath::Sub(p[1],p[0]),ThicknessMath::Sub(p[2],p[0])));
+            for(unsigned k=0;k<3;++k) {
+                Check(ThicknessMath::Length(ThicknessMath::Sub(p[k],p[(k+1)%3]))<=1+1e-12,"local sampling bounds every edge");
+                if(p[k][1]==0 && p[(k+1)%3][1]==0 && p[k][0]!=p[(k+1)%3][0]
+                    && p[k][0]>=0 && p[k][0]<=sharedEnd && p[(k+1)%3][0]>=0 && p[(k+1)%3][0]<=sharedEnd) {
+                    const auto a=triangle.corners[k].vertex,b=triangle.corners[(k+1)%3].vertex;
+                    ++sharedEdges[{std::min(a,b),std::max(a,b)}];
+                }
+            }
+        }
+        Check(std::abs(area-expectedArea)<1e-10,"local and clipped sampling conserve analytic area");
+        Check(!sharedEdges.empty() && std::all_of(sharedEdges.begin(),sharedEdges.end(),[](const auto& edge){return edge.second==2;}),
+            "shared source edges have identical subdivisions without T junctions");
+    };
+    const auto start=std::chrono::steady_clock::now();
+    const auto local=ThicknessAlgorithm::BuildSampling(work,2000);
+    const auto small=std::count_if(local.begin(),local.end(),[](const auto& triangle){return triangle.source>=2;});
+    Check(small==100 && local.size()<2000,"large triangles do not subdivide unrelated small triangles");
+    verify(local,51,10);
+    std::cout<<"sampling measured local="<<local.size()<<" old-uniform-formula="<<102*15*15
+        <<" build-us="<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count()<<'\n';
+    work.archive.params.evaluationBounds=std::array<double,6>{-1,1,-1,1,-1,1};
+    const auto clipped=ThicknessAlgorithm::BuildSampling(work,100);
+    verify(clipped,1.095,1);
+    Check(clipped.size()<local.size(),"evaluation clipping removes outside sample allocations");
+    bool limited=false;
+    try{(void)ThicknessAlgorithm::BuildSampling(work,1);}catch(ThicknessStatus status){limited=status==ThicknessStatus::BudgetExceeded;}
+    Check(limited,"local sampling budget fails explicitly without downgrade");
+}
 void Algorithm()
 {
+    TestLocalSampling();
     failures += GetMaterialFieldTestFailures();
     using namespace ThicknessMath;
     const ThicknessPoint ns{std::sqrt(3.0) / 2, 0, 0.5}, no{-0.5, 0, -std::sqrt(3.0) / 2};

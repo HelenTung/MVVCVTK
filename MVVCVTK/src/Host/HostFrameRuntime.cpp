@@ -336,7 +336,7 @@ bool HostFrameRuntime::CollectFrameUpdates()
 {
     if (!m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
+        || m_frameStage) {
         return false;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -353,7 +353,7 @@ bool HostFrameRuntime::ApplyFrameUpdates()
 {
     if (!m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
+        || m_frameStage) {
         return false;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -369,7 +369,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
     if (nextEpoch == 0 || nextEpoch != m_committedEpoch + 1
         || !m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
+        || m_frameStage) {
         return HostFrameStageStatus::Failed;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -462,7 +462,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
         stage.dirtyIndices = dirtyIndices;
         stage.renderOrder = dirtyIndices;
         // 新提交继承尚未绘制的 View，回滚仍只恢复本轮领取的 dirty。
-        if (m_isHostDriven) {
+        {
             for (std::size_t index = 0; index < m_views.size(); ++index) {
                 if (m_views[index].pendingRenderEpoch != 0 && !stage.renderNeeded[index]) {
                     stage.renderNeeded[index] = true;

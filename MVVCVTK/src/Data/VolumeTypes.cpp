@@ -118,8 +118,8 @@ bool GetImageMetadataValid(const ImageMetadata& value) noexcept
 
 std::optional<VolumeLayout> VolumeLayout::Create(
     std::array<int, 3> dimensions,
-    std::array<float, 3> spacing,
-    std::array<float, 3> origin,
+    std::array<double, 3> spacing,
+    std::array<double, 3> origin,
     std::array<double, 9> direction,
     ImageMetadata metadata)
 {
@@ -156,8 +156,8 @@ std::optional<VolumeLayout> VolumeLayout::Create(
 
 VolumeLayout::VolumeLayout(
     std::array<int, 3> dimensions,
-    std::array<float, 3> spacing,
-    std::array<float, 3> origin,
+    std::array<double, 3> spacing,
+    std::array<double, 3> origin,
     std::array<double, 9> direction,
     ImageMetadata metadata,
     std::size_t voxelCount,
@@ -173,8 +173,8 @@ VolumeLayout::VolumeLayout(
 }
 
 const std::array<int, 3>& VolumeLayout::GetDimensions() const noexcept { return m_dimensions; }
-const std::array<float, 3>& VolumeLayout::GetSpacing() const noexcept { return m_spacing; }
-const std::array<float, 3>& VolumeLayout::GetOrigin() const noexcept { return m_origin; }
+const std::array<double, 3>& VolumeLayout::GetSpacing() const noexcept { return m_spacing; }
+const std::array<double, 3>& VolumeLayout::GetOrigin() const noexcept { return m_origin; }
 const std::array<double, 9>& VolumeLayout::GetDirection() const noexcept { return m_direction; }
 const ImageMetadata& VolumeLayout::GetMetadata() const noexcept { return m_metadata; }
 std::size_t VolumeLayout::GetVoxelCount() const noexcept { return m_voxelCount; }

@@ -226,7 +226,7 @@ void CheckUiAndRecords(TestWindow& window)
         && defaults["spacingLPS"] == QJsonArray{0.1537,0.1537,0.1537}
         && defaults["filePath"] == "F:/data/ct/1536x1536x1536_1440.raw", "manual defaults match the confirmed real CT sample");
     if (GetEnabled(window, "Wall")) {
-        const auto spacing = GetArray<float, 3>(defaults["spacingLPS"]);
+        const auto spacing = GetArray<double, 3>(defaults["spacingLPS"]);
         const auto wallDefaults = window.GetModule("Wall")->GetParameterEditor("Start")->GetValue().toObject();
         Check(GetNumber(wallDefaults, "maxBoundaryError") <= 0.5 * *std::min_element(spacing.begin(), spacing.end()),
             "wall defaults respect the half-voxel endpoint-error limit for the default real CT spacing");

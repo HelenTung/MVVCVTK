@@ -61,8 +61,8 @@ Acceptance ReadCase(const char *path, const char *fieldOutput = nullptr)
         input >> v;
     for (unsigned a = 0; a < 3; ++a)
     {
-        c.volume.geometry.spacing[a] = static_cast<float>(c.exactSpacing[a]);
-        c.volume.geometry.origin[a] = static_cast<float>(c.exactOriginLps[a]);
+        c.volume.geometry.spacing[a] = c.exactSpacing[a];
+        c.volume.geometry.origin[a] = c.exactOriginLps[a];
     }
     for (auto &v : c.volume.geometry.direction)
         input >> v;

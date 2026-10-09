@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
+#include "ThicknessSampling.h"
 #include "ThicknessMaterialField.h"
 #include <vtkCellArray.h>
 #include <vtkGenericCell.h>
@@ -63,7 +64,7 @@ class Kernel final
     vtkSmartPointer<vtkStaticCellLocator> m_locator;
     vtkSmartPointer<vtkGenericCell> m_cell = vtkSmartPointer<vtkGenericCell>::New();
     std::vector<double> m_areas;
-    unsigned m_n = 1;
+    std::vector<SamplingTriangle> m_sampling;
     std::size_t m_sampleCount = 0;
     double m_epsilon = 0, m_minSpacing = 0;
     double m_sourceMargin = 0;
@@ -300,7 +301,6 @@ class Kernel final
         auto cells = vtkSmartPointer<vtkCellArray>::New();
         m_areas.reserve(tc);
         std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<unsigned, int>> edges;
-        double maxEdge = 0;
         for (std::size_t i = 0; i < tc; ++i)
         {
             if ((i & 255U) == 0)
@@ -323,7 +323,6 @@ class Kernel final
                 auto &e = edges[{std::min(a, b), std::max(a, b)}];
                 ++e.first;
                 e.second += a < b ? 1 : -1;
-                maxEdge = std::max(maxEdge, Length(Sub(p[k], p[(k + 1) % 3])));
             }
             cells->InsertNextCell(3, ids.data());
         }
@@ -335,22 +334,12 @@ class Kernel final
                 throw Failure{ThicknessStatus::IncompleteBoundary,
                               "Mesh must be closed and consistently manifold."};
         }
-        const double divisions = std::ceil(maxEdge / m_params.sampleSpacing);
-        if (!std::isfinite(divisions) || divisions >= std::numeric_limits<unsigned>::max())
-            throw Failure{ThicknessStatus::BudgetExceeded, "Surface subdivision limit exceeded."};
-        m_n = static_cast<unsigned>(std::max(divisions, 1.0));
-        const auto n = static_cast<std::size_t>(m_n);
-        if (n > std::numeric_limits<std::size_t>::max() / n
-            || tc > std::numeric_limits<std::size_t>::max() / (n * n))
-            throw Failure{ThicknessStatus::InvalidInput, "Sample count overflows."};
-        if (tc > WorkLimit(limits.maxSamples) / (n * n))
-            throw Failure{ThicknessStatus::BudgetExceeded, "Sample count limit exceeded."};
-        m_sampleCount = tc * n * n;
-        if (m_sampleCount > std::numeric_limits<std::size_t>::max() / (sizeof(ThicknessSample) + 640U))
-            throw Failure{ThicknessStatus::InvalidInput, "Sample byte count overflows."};
-        if (m_sampleCount > (WorkLimit(limits.maxWorkingBytes) - meshBytes) / (sizeof(ThicknessSample) + 640U))
-            throw Failure{ThicknessStatus::BudgetExceeded,
-                          "Sampling and topology exceed working budget."};
+        const auto memoryLimit = ((WorkLimit(limits.maxWorkingBytes) - meshBytes)
+            / (sizeof(ThicknessSample) + 640U)).GetBound(std::numeric_limits<std::size_t>::max() / (sizeof(ThicknessSample) + 640U));
+        const auto sampleLimit = WorkLimit(limits.maxSamples).GetBound(memoryLimit);
+        try { m_sampling = BuildSampling(m_work, sampleLimit); }
+        catch (ThicknessStatus status) { throw Failure{status, "Display sampling exceeded its budget, precision or task lifetime."}; }
+        m_sampleCount = m_sampling.size();
         // 每个并行槽独占射线单元与有界路径工作区，归并仍按来源顺序执行。
         auto remaining = WorkLimit(limits.maxWorkingBytes) - meshBytes -
                          m_sampleCount * (sizeof(ThicknessSample) + 640U);
@@ -695,39 +684,28 @@ class Kernel final
         auto neighbors = std::make_shared<Neighbors>();
         samples->reserve(m_sampleCount);
         neighbors->reserve(m_sampleCount);
-        using VertexKey = std::array<std::pair<std::uint64_t, unsigned>, 3>;
-        std::map<VertexKey, std::size_t> vertices;
         std::map<std::pair<std::size_t, std::size_t>, std::pair<std::size_t, std::size_t>> edges;
         auto add =
-            [&](std::uint64_t triangle, const std::array<std::array<unsigned, 3>, 3> &corners)
+            [&](const SamplingTriangle& sampled)
         {
             CheckWork(m_work);
+            const auto triangle = sampled.source;
             ThicknessSample sample;
             sample.sourceTriangle = triangle;
             ThicknessPoint bary{};
             std::array<std::size_t, 3> ids{};
             for (std::size_t k = 0; k < 3; ++k)
             {
-                VertexKey key{};
-                std::size_t count = 0;
-                for (std::size_t a = 0; a < 3; ++a)
-                {
-                    sample.barycentricCorners[k][a] = double(corners[k][a]) / m_n;
-                    if (corners[k][a])
-                        key[count++] = {m_mesh.GetTriangles()[triangle * 3 + a], corners[k][a]};
-                }
-                std::sort(key.begin(), key.begin() + count);
-                ids[k] = vertices.emplace(key, vertices.size()).first->second;
+                sample.barycentricCorners[k] = sampled.corners[k].barycentric;
+                ids[k] = sampled.corners[k].vertex;
                 bary = Add(bary, Scale(sample.barycentricCorners[k], 1.0 / 3));
             }
             const auto p = Interpolate(triangle, bary);
             sample.source = Add(p, m_geometry.origin);
-            sample.area = m_areas[triangle] / (double(m_n) * m_n);
-            if (m_params.evaluationBounds)
-                for (std::size_t a = 0; a < 3; ++a)
-                    if (sample.source[a] < (*m_params.evaluationBounds)[a * 2] ||
-                        sample.source[a] > (*m_params.evaluationBounds)[a * 2 + 1])
-                        sample.validity = ThicknessValidity::OutsideEvaluation;
+            const auto a = Interpolate(triangle,sample.barycentricCorners[0]);
+            const auto b = Interpolate(triangle,sample.barycentricCorners[1]);
+            const auto c = Interpolate(triangle,sample.barycentricCorners[2]);
+            sample.area = 0.5 * Length(Cross(Sub(b,a),Sub(c,a)));
             if (sample.validity != ThicknessValidity::OutsideEvaluation)
             {
                 const auto value = GetValue(field, sample.source);
@@ -753,21 +731,11 @@ class Kernel final
             }
             samples->push_back(std::move(sample));
         };
-        // 同一n的整数重心细分，面积恰好为原面/n²；ROI只筛选评价点。
-        for (std::size_t triangle = 0; triangle < m_areas.size(); ++triangle)
-            for (unsigned row = 0; row < m_n; ++row)
-                for (unsigned column = 0; column < m_n - row; ++column)
-                {
-                    const auto b = [&](unsigned i, unsigned j)
-                    { return std::array<unsigned, 3>{m_n - i - j, i, j}; };
-                    add(triangle, {b(row, column), b(row + 1, column), b(row, column + 1)});
-                    if (row + column + 1 < m_n)
-                        add(triangle,
-                            {b(row + 1, column), b(row + 1, column + 1), b(row, column + 1)});
-                }
+        for (const auto& triangle : m_sampling) add(triangle);
+        m_sampling.clear();
         field.samples = std::move(samples);
         field.neighbors = std::move(neighbors);
-        field.subdivisions = m_n;
+        field.subdivisions = 0; // 局部细分不再使用全局统一阶数。
         auto result = BuildEvaluation(field, m_work.archive.evaluation, m_params,
                                       m_work.archive.limits, m_work.cancelled, m_work.deadline);
         result.field = std::move(field);

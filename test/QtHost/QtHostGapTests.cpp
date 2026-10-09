@@ -838,8 +838,10 @@ int GetGapFailCount()
         && (abaFeature->SendRequest(GetStartRequest(start), [&](GapHostResult result) {
             abaResult = std::move(result); ++abaCount;
         }).status == GapAdmissionStatus::Accepted);
-    const bool hasRequestAba = isAbaStarted && gapBinding
-        && setGapBinding(gapBinding->target) && setGapBinding({});
+    // 可退役输入的旧 Feature 结果在 detach 后已退役；用仍存活的修订制造真实 binding ABA。
+    const auto liveSource = contextProbe->m_data->GetPrimaryImage();
+    const bool hasRequestAba = isAbaStarted && liveSource && liveSource->data
+        && setGapBinding(liveSource->data->self) && setGapBinding({});
     const auto abaCommit = contextProbe->m_data->GetDataGraph().commitId;
     for (int poll = 0; abaCount == 0 && poll < 500; ++poll) {
         SendTicks(*endpoint, 1);

@@ -18,6 +18,7 @@ unset(_wall_boost_version)
 target_include_directories(wall_thickness SYSTEM PRIVATE "${MVVCVTK_WALL_BOOST_ROOT}")
 target_sources(wall_thickness PRIVATE
     src/ThicknessAlgorithm.h src/ThicknessAlgorithm.cpp
+    src/ThicknessSampling.h src/ThicknessSampling.cpp
     src/ThicknessMath.h src/ThicknessMaterialField.h src/ThicknessEvaluation.cpp
     src/ThicknessData.h src/ThicknessData.cpp
     src/ThicknessOverlay.h src/ThicknessOverlay.cpp

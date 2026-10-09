@@ -257,6 +257,9 @@ public:
     }
 };
 
+// OwnerRetirement 由临时输入/Feature 关闭退役；ExplicitRetirement 保留到用户卸载。
+enum class DataLifetimePolicy : std::uint8_t { OwnerRetirement, ExplicitRetirement };
+
 struct DataRevision final {
     DataRevisionRef self;
     DataTypeId type;
@@ -265,6 +268,7 @@ struct DataRevision final {
     std::optional<DataProvenance> provenance;
     DataEntityId lifetimeScope;
     std::weak_ptr<DataLifetimeAccess> lifetime;
+    DataLifetimePolicy lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
 };
 
 using DataSnapshot = std::shared_ptr<const DataRevision>;
@@ -320,6 +324,7 @@ struct DataRevisionDraft final {
     // 同一事务内以新身份创建；已发布或退役的作用域均不能追加输出。
     std::optional<DataEntityId> lifetimeScope;
     std::vector<DataPreparedResource> preparedResources;
+    DataLifetimePolicy lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
 };
 
 struct DataLifetimeRetirement final {

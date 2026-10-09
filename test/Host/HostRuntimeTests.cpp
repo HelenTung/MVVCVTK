@@ -169,24 +169,19 @@ bool GetFailedFrameWakeValid()
 bool GetRenderRetryValid()
 {
     FrameFixture f;
-    if (!f.frames.CollectFrameUpdates()
-        || f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
+    if (!f.frames.CollectFrameUpdates() || f.frames.BuildFrameStage(1) != HostFrameStageStatus::Ready) return false;
     f.frames.SetFrameCommit(1);
     f.contexts[1]->isRenderAccepted = false;
-    bool wasBusy = false;
-    f.contexts[0]->onRender = [&]() {
-        wasBusy = f.frames.GetIsBusy();
-        (void)f.updates[0]->SetRenderNeeded();
-    };
-    if (f.frames.SendFrameRender(1) || !f.frames.GetFrameRenderPending()
-        || !wasBusy || !f.updates[0]->isDirty) return false;
-    if (f.frames.BuildFrameStage(2) != HostFrameStageStatus::Failed) return false;
+    if (f.frames.SendFrameRender(1) || !f.frames.GetFrameRenderPending()) return false;
+    f.updates[0]->SetRenderNeeded();
+    if (!f.frames.CollectFrameUpdates() || !f.frames.ApplyFrameUpdates()
+        || f.frames.BuildFrameStage(2) != HostFrameStageStatus::Ready) return false;
+    f.frames.SetFrameCommit(2);
+    if (f.frames.SendFrameRender(2) || f.contexts[0]->renderCount != 2
+        || f.views[0].pendingRenderEpoch != 0 || f.views[1].pendingRenderEpoch != 2) return false;
     f.contexts[1]->isRenderAccepted = true;
-    if (!f.frames.SendFrameRender(1) || f.contexts[0]->renderCount != 1
-        || f.contexts[1]->renderCount != 2 || !f.updates[0]->isDirty) return false;
-    f.frames.SendFrameCompletions();
-    return f.updates[0]->completeCount == 1 && f.updates[1]->completeCount == 1
-        && f.frames.BuildFrameStage(2) == HostFrameStageStatus::Ready;
+    return f.frames.SendFrameRender(2) && f.contexts[0]->renderCount == 2
+        && f.views[0].renderedEpoch == 2 && f.views[1].renderedEpoch == 2;
 }
 bool GetStoppedStageValid()
 {

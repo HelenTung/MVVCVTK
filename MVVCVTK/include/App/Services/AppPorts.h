@@ -169,6 +169,9 @@ public:
 class AppDataStagePort {
 public:
     virtual ~AppDataStagePort() = default;
+    // 空输入准备只验证 owner/事务状态，不改变可见对象；提交后释放该实体的显示。
+    virtual bool GetCanClearRenderInput() const { return false; }
+    virtual bool ClearRenderInput(const DataEntityId&) noexcept { return false; }
     // Existing image participants remain source-compatible and reject mesh
     // explicitly until they implement the generic candidate protocol.
     virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {

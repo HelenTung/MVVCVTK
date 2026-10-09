@@ -62,8 +62,8 @@ int GetConsumerContractFailCount()
             raw->filePath = real["filePath"].toString().toStdString();
             for (int axis = 0; axis < 3; ++axis) {
                 raw->geometry.dimensions[axis] = real["dimensions"].toArray()[axis].toInt();
-                raw->geometry.spacing[axis] = static_cast<float>(real["spacingLPS"].toArray()[axis].toDouble());
-                raw->geometry.origin[axis] = static_cast<float>(real["originLPS"].toArray()[axis].toDouble());
+                raw->geometry.spacing[axis] = real["spacingLPS"].toArray()[axis].toDouble();
+                raw->geometry.origin[axis] = real["originLPS"].toArray()[axis].toDouble();
             }
             for (int index = 0; index < 9; ++index)
                 raw->geometry.direction[index] = real["directionLPS"].toArray()[index].toDouble();

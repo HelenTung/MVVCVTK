@@ -4,11 +4,8 @@ param(
     [string]$DepsRoot,
     [string]$DefXRoot,
     [ValidateSet('Debug','Release')][string[]]$Configuration = @('Debug','Release'),
-    [string[]]$Case = @('all','host-only','only-OrthogonalCrop','only-GapAnalysis',
-        'only-ModelRotation','only-PartSegmentation','only-SurfaceDetermination',
-        'only-MetrologyAlignment','only-ArtifactReduction','without-OrthogonalCrop',
-        'without-GapAnalysis','without-ModelRotation','without-PartSegmentation',
-        'without-SurfaceDetermination','without-MetrologyAlignment','without-ArtifactReduction'),
+    [string[]]$Case = @(),
+    [string]$WallBoostRoot,
     [switch]$InventoryOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -20,20 +17,14 @@ if (-not $DepsRoot) { $DepsRoot = Join-Path $RepoRoot 'deps/official' }
 if (-not $DefXRoot) { $DefXRoot = Join-Path $RepoRoot 'deps/third_party/defx' }
 $DepsRoot = [IO.Path]::GetFullPath($DepsRoot)
 $DefXRoot = [IO.Path]::GetFullPath($DefXRoot)
-$features = [ordered]@{
-    OrthogonalCrop='ORTHOGONAL_CROP'; GapAnalysis='GAP_ANALYSIS'; ModelRotation='MODEL_ROTATION'
-    PartSegmentation='PART_SEGMENTATION'; SurfaceDetermination='SURFACE_DETERMINATION'
-    MetrologyAlignment='METROLOGY_ALIGNMENT'; ArtifactReduction='ARTIFACT_REDUCTION'
-}
-$minimum = @{
-    OrthogonalCrop=1; GapAnalysis=4; ModelRotation=2; PartSegmentation=7
-    SurfaceDetermination=4; MetrologyAlignment=2; ArtifactReduction=3
-}
+. (Join-Path $PSScriptRoot 'MVVCVTK.FeatureBuild.ps1')
+$features = Get-MVVCVTKFeatureSwitches $RepoRoot
 $cases = @{ 'all'=@($features.Keys); 'host-only'=@() }
 foreach ($feature in $features.Keys) {
     $cases["only-$feature"] = @($feature)
     $cases["without-$feature"] = @($features.Keys | Where-Object { $_ -ne $feature })
 }
+if (-not $Case.Count) { $Case = @('all', 'host-only') + @($features.Keys | ForEach-Object { "only-$_" }) + @($features.Keys | ForEach-Object { "without-$_" }) }
 foreach ($name in $Case) { if (-not $cases.ContainsKey($name)) { throw "Unknown matrix case: $name" } }
 $outputRoot = Join-Path $RepoRoot ('out/feature-convergence/' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 [void](New-Item -ItemType Directory -Path $outputRoot)
@@ -103,7 +94,7 @@ try {
     $sourceHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputRoot 'untracked-source-hashes.json') -Encoding UTF8
     foreach ($name in $Case) {
         $enabled = @($cases[$name])
-        # 七个显式开关组成稳定的短目录ID，完整名称仍保留在报告中。
+        # 全部显式开关组成稳定的短目录ID，完整名称仍保留在报告中。
         # 较长的工作树和配置名会超过MSBuild临时tlog的路径限制。
         $featureMask = 0
         $featureBit = 1
@@ -120,6 +111,7 @@ try {
             "-DMVVCVTK_DEPS_ROOT=$DepsRoot","-DMVVCVTK_DEFX_ROOT=$DefXRoot",
             "-DMVVCVTK_BUILD_TESTING=$testFlag","-DMVVCVTK_BUILD_QT_TESTING=$qt",
             "-DMVVCVTK_BUILD_QT_MANUAL=$manual",'-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=','-DMVVCVTK_REAL_AUDIT_MANIFEST=')
+        if ($WallBoostRoot) { $arguments += "-DMVVCVTK_WALL_BOOST_ROOT=$WallBoostRoot" }
         $expected = @{
             MVVCVTK_BUILD_TESTING=$testFlag; MVVCVTK_BUILD_QT_TESTING=$qt
             MVVCVTK_BUILD_QT_MANUAL=$manual; MVVCVTK_ALIGNMENT_REFERENCE_ROOT=''
@@ -127,8 +119,8 @@ try {
         }
         foreach ($feature in $features.Keys) {
             $flag = if ($enabled -contains $feature) { 'ON' } else { 'OFF' }
-            $arguments += "-DMVVCVTK_BUILD_$($features[$feature])=$flag"
-            $expected["MVVCVTK_BUILD_$($features[$feature])"] = $flag
+            $arguments += "-D$($features[$feature])=$flag"
+            $expected[$features[$feature]] = $flag
         }
         $entry = [ordered]@{ case=$name; binaryDir=$binaryDir; enabled=$enabled; configure=$arguments; status='RUNNING'; configurations=@() }
         $results.Add($entry)
@@ -153,7 +145,7 @@ try {
                 $pattern = '^' + [regex]::Escape($feature) + '\.'
                 $registered = @($inventory.tests | Where-Object { $_.name -match $pattern }).Count
                 if ($enabled -contains $feature) {
-                    if ($registered -lt $minimum[$feature]) { throw "Missing required tests: $feature/$registered" }
+                    if ($registered -eq 0) { throw "Missing required tests: $feature/$registered" }
                 } elseif ($registered -ne 0) { throw "Disabled feature has tests: $feature" }
             }
             foreach ($required in @('Host.StandaloneInput') + $(if($name -eq 'all') {

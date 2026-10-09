@@ -220,7 +220,7 @@ struct ThicknessSnapshot final
     std::shared_ptr<const std::vector<ThicknessNode>> nodes;
     ThicknessStatistics statistics;
     std::vector<ThicknessRegion> regions;
-    std::uint32_t subdivisionCount = 0;
+    std::uint32_t subdivisionCount = 0; // 0 表示局部自适应采样，没有统一细分阶数。
     bool isCurrent = false;
 };
 

@@ -103,6 +103,7 @@ public:
         const DataLoadStageSnapshot& expectedStage,
         VtkImageGridSnapshot& published) override;
     bool ClearLoadStage() override;
+    void ClearRetiredLoad(const DataEntityId&) override;
 
     bool ExportData(
         const VtkImageGridSnapshot& imageSnapshot,

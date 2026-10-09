@@ -180,7 +180,7 @@ int GetCropRealFailCount()
         const auto budgetText=Env("MVVCVTK_CROP_REAL_RAM_MIB");const auto mib=budgetText.empty()?0ULL:std::stoull(budgetText);
         Require(mib<=std::numeric_limits<std::size_t>::max()/(1024*1024),"real RAM MiB overflow");const auto budget=static_cast<std::size_t>(mib*1024*1024);
         report<<"  \"requested_ram_bytes\": "<<budget<<",\n";
-        const auto spacingText=Env("MVVCVTK_CROP_REAL_SPACING");const float spacing=spacingText.empty()?0.1537f:std::stof(spacingText);
+        const auto spacingText=Env("MVVCVTK_CROP_REAL_SPACING");const double spacing=spacingText.empty()?0.1537:std::stod(spacingText);
         Require(std::isfinite(spacing)&&spacing>0,"real spacing must be finite and positive");
         Fixture fixture;const auto start=Clock::now();const auto loaded=std::make_shared<Completion<HostResult>>();
         // 分段日志在断言或外部隔离超时前即刻落盘，区分计算、显示等待与独立核验。

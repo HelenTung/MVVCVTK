@@ -1205,11 +1205,12 @@ bool BuildCompletionRetryTest()
     const auto pending = session.GetSceneViewState({ view.id });
     if (!pending || pending->renderedEpoch >= pending->sceneEpoch || !send(2)) return false;
     window->SetRenderRejected(false);
-    if (!SendTimer(interactor) || completes.size() != 1) return false;
+    if (!SendTimer(interactor) || completes != std::vector<int>{-1,2}) return false;
     const auto retried = session.GetSceneViewState({ view.id });
-    if (!retried || retried->sceneEpoch != pending->sceneEpoch
-        || retried->renderedEpoch != pending->sceneEpoch) return false;
-    if (!SendTimer(interactor) || completes.size() != 2 || completes.back() != 2) return false;
+    if (!retried || retried->sceneEpoch <= pending->sceneEpoch
+        || retried->renderedEpoch != retried->sceneEpoch) return false;
+    // 新状态已在重试 tick 提交和绘制，旧状态完成以被替换失败收口。
+    if (!SendTimer(interactor) || completes != std::vector<int>{-1,2}) return false;
     if (!send(3) || !session.Stop() || completes.size() != 3 || completes.back() != -3) return false;
     return true;
 }

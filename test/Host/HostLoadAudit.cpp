@@ -39,8 +39,8 @@ public:
         Check(argc >= 3, "Usage: HostLoadAudit raw sourceSide [Low|High|Ultra] [--range-audit] [--quality-audit] [--geometry spacingMm originX originY originZ]");
         bool hasRangeAudit = false;
         bool hasQualityAudit = false;
-        float spacing = 0.1537F;
-        std::array<float, 3> origin{};
+        double spacing = 0.1537;
+        std::array<double, 3> origin{};
         const bool hasQuality = argc >= 4 && std::string(argv[3]).rfind("--", 0) != 0;
         const std::string qualityName = hasQuality ? argv[3] : "Ultra";
         const int firstOption = hasQuality ? 4 : 3;
@@ -50,12 +50,12 @@ public:
             else if (option == "--quality-audit") hasQualityAudit = true;
             else if (option == "--geometry") {
                 Check(i + 4 < argc, "Geometry requires spacing and three LPS origin components");
-                spacing = std::stof(argv[++i]);
-                for (auto& value : origin) value = std::stof(argv[++i]);
+                spacing = std::stod(argv[++i]);
+                for (auto& value : origin) value = std::stod(argv[++i]);
             } else Check(false, "Unknown audit option");
         }
         Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
-            [](float value) { return std::isfinite(value); }), "Invalid physical geometry");
+            [](double value) { return std::isfinite(value); }), "Invalid physical geometry");
         const std::string filePath = argv[1];
         const int side = std::stoi(argv[2]);
         Check(side > 1 && side <= 8192, "Invalid source dimensions");

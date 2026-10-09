@@ -642,15 +642,26 @@ int GetIsoStrategyTaskFailCount()
         ? 0 : 1;
 
     const std::size_t startsBeforeDrag = lane->GetStartCount();
+    const auto buildsBeforeDrag = resources->GetResourceState().productBuildCount;
+    bool allAccepted = true;
     for (std::uint64_t index = 0; index < 100; ++index) {
         params.isoValue = static_cast<double>(index) * 0.01;
-        (void)strategy.SetVisualState(params, UpdateFlags::IsoValue);
+        allAccepted = strategy.SetVisualState(params, UpdateFlags::IsoValue) && allAccepted;
     }
-    failureCount += GetCaseResult(
-        lane->GetPendingCount() == 1
-            && lane->GetStartCount() == startsBeforeDrag + 1,
-        "One hundred IsoValue updates keep one running and one latest request")
-        ? 0 : 1;
+    const bool oneQueued = lane->GetPendingCount() == 1 && lane->GetStartCount() == startsBeforeDrag + 1;
+    (void)lane->SendOne(); // 被替换的首项不会执行昂贵构建。
+    (void)resources->SendTasks();
+    (void)lane->SendOne();
+    const bool latestCommitted = strategy.SetProductCommit();
+    const auto finalState = strategy.GetTransitionState();
+    auto latest = GetIsoRequest(image, finalState.stats.requestRevision, VolumeQuality::High, params.isoValue);
+    latest.key.outputDimensions = strategy.GetLodDimensions(VolumeQuality::High);
+    const auto finalProduct = resources->GetIsoSurfaceProduct(latest.key);
+    failureCount += GetCaseResult(allAccepted && oneQueued && latestCommitted
+        && finalState.status == RenderProductStatus::Active && finalProduct && finalProduct->isoValue == .99
+        && finalProduct->surface == mapper->GetInput()
+        && resources->GetResourceState().productBuildCount == buildsBeforeDrag + 1,
+        "One hundred ISO updates admit and commit the final threshold with one actual build") ? 0 : 1;
     (void)resources->StartStop();
     (void)lane->SendOne();
     (void)resources->Stop(

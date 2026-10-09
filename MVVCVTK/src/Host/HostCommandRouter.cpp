@@ -136,6 +136,10 @@ bool HostCommandRouter::Impl::Dispatch(
             std::move(*value),
             std::move(onComplete));
     }
+    if (const auto* value = dynamic_cast<const HostDataUnloadRequest*>(&request)) {
+        const auto directory = m_directory.lock();
+        return sendSync(directory && directory->UnloadData(value->dataRevision));
+    }
     if (auto* value = dynamic_cast<HostDataExportRequest*>(&request)) {
         return ExportData(
             std::move(*value),

@@ -49,7 +49,6 @@ struct DrawResources final {
     std::unordered_set<vtkAlgorithm*> walked;
     bool Add(vtkObject* value) {
         if(!value||seen.find(value)!=seen.end())return false;
-        if(seen.size()>=65536)throw std::bad_alloc{};
         seen.insert(value);values.emplace_back(value);return true;
     }
     void Fields(vtkFieldData* fields) {
@@ -160,14 +159,14 @@ public:
         rendererObserver->SetCallback([](vtkObject*,unsigned long event,void* data,void*) {
             if(!data)return;auto& self=*static_cast<Impl*>(data);
             if(event==vtkCommand::StartEvent)self.Begin();
-            else {self.Capture();if(self.open&&!self.endTag)self.End();}
+            else {self.Capture();self.capturedAtRendererEnd=true;if(self.open&&!self.endTag)self.End();}
         });
         startTag=value->AddObserver(vtkCommand::StartEvent,rendererObserver);
         stopTag=value->AddObserver(vtkCommand::EndEvent,rendererObserver);
     }
     ~Impl() {
         if(renderer){renderer->RemoveObserver(startTag);renderer->RemoveObserver(stopTag);}
-        if(window){window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);}
+        if(window){window->RemoveObserver(windowStartTag);window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);}
         // Incomplete/aborted preparation still retains issued GPU reads.
         if(open){failed=true;End();}
     }
@@ -176,32 +175,39 @@ public:
             (void)RenderFrameLifetime::PollAll();
             auto* context=renderer?vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow()):nullptr;
             if(!context)return;
-            if(open&&window.GetPointer()!=context){failed=true;End();}
+            // window EndEvent 可重入下一次 Render；同一窗口的 stereo pass 则仍属于当前轮次。
+            if(open&&(window.GetPointer()!=context||beginTurn!=windowTurn)) {
+                if(window.GetPointer()!=context)failed=true;
+                End();
+            }
             context->MakeCurrent();
-            if(open){Capture();return;}
+            if(open){capturedAtRendererEnd=false;Capture();return;}
             if(window.GetPointer()!=context||!endTag) {
-                if(window){window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);}
-                endTag=errorTag=deleteTag=0;
+                if(window){window->RemoveObserver(windowStartTag);window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);}
+                windowStartTag=endTag=errorTag=deleteTag=0;windowTurn=0;
                 window=context;windowObserver=vtkSmartPointer<vtkCallbackCommand>::New();windowObserver->SetClientData(this);
                 windowObserver->SetCallback([](vtkObject*,unsigned long event,void* data,void*) {
                     if(!data)return;auto& self=*static_cast<Impl*>(data);
-                    if(event==vtkCommand::ErrorEvent)self.failed=true;
+                    if(event==vtkCommand::StartEvent)++self.windowTurn;
+                    else if(event==vtkCommand::ErrorEvent)self.failed=true;
                     else if(event==vtkCommand::DeleteEvent){self.failed=true;self.open=false;self.resources.reset();self.Complete(false);}
                     else self.End();
                 });
+                windowStartTag=context->AddObserver(vtkCommand::StartEvent,windowObserver);
                 endTag=context->AddObserver(vtkCommand::EndEvent,windowObserver);
                 errorTag=context->AddObserver(vtkCommand::ErrorEvent,windowObserver);
                 deleteTag=context->AddObserver(vtkCommand::DeleteEvent,windowObserver);
             }
-            open=true;failed=false;forceFinish=false;frameId=CreateFrameId();
+            open=true;failed=false;forceFinish=false;capturedAtRendererEnd=false;frameId=CreateFrameId();
+            beginTurn=windowTurn;
             frameCreation=context->GetContextCreationTime();
             resources=std::make_shared<DrawResources>();Capture();
         } catch(...) {
             // If installing window observers failed, the renderer EndEvent is
             // the synchronous fallback. Leave missing observation retryable.
             if(!open&&window) {
-                window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);
-                endTag=errorTag=deleteTag=0;
+                window->RemoveObserver(windowStartTag);window->RemoveObserver(endTag);window->RemoveObserver(errorTag);window->RemoveObserver(deleteTag);
+                windowStartTag=endTag=errorTag=deleteTag=0;
             }
             open=window.GetPointer()!=nullptr;failed=true;forceFinish=true;
             if(window)frameCreation=window->GetContextCreationTime();
@@ -217,7 +223,7 @@ public:
         for(auto& callback:completions)try {callback(value);}catch(...){}
     }
     void End() noexcept {
-        if(!open)return;Capture();open=false;
+        if(!open)return;if(!capturedAtRendererEnd)Capture();open=false;
         auto owned=std::move(resources);auto completions=std::move(callbacks);
         const bool wasFailed=failed,mustFinish=forceFinish;
         vtkSmartPointer<vtkOpenGLRenderWindow> context=window.GetPointer();
@@ -258,8 +264,9 @@ public:
     }
     vtkWeakPointer<vtkRenderer> renderer;vtkWeakPointer<vtkOpenGLRenderWindow> window;
     vtkSmartPointer<vtkCallbackCommand> rendererObserver,windowObserver;
-    unsigned long startTag=0,stopTag=0,endTag=0,errorTag=0,deleteTag=0;
-    bool open=false,failed=false,forceFinish=false;std::uint64_t frameId=0;
+    unsigned long startTag=0,stopTag=0,windowStartTag=0,endTag=0,errorTag=0,deleteTag=0;
+    std::uint64_t windowTurn=0,beginTurn=0;
+    bool open=false,failed=false,forceFinish=false,capturedAtRendererEnd=false;std::uint64_t frameId=0;
     vtkMTimeType frameCreation=0;
     std::shared_ptr<DrawResources> resources;
     std::vector<std::function<void(RenderFrameOutcome)>> callbacks;

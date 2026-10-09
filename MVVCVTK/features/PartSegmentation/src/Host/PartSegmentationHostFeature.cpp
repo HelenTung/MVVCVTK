@@ -1886,16 +1886,18 @@ bool PartSegmentationHostFeature::Impl::SetCatalogCommit(
         expected.revision, true, expected.target, resultRef });
     auto scopes = m_resultScopes;
     if (GetDataEntityIdValid(source->data->lifetimeScope)) {
-        if (scopes.size() >= 1024) return false;
+        const auto policy = source->data->lifetimePolicy;
+        if (policy == DataLifetimePolicy::OwnerRetirement && scopes.size() >= 1024) return false;
         const auto scope = m_data->CreateDataEntityId();
         DataLifetimeRetirement retirement{scope, DataLifetimeStatus::Published, {}, true};
         retirement.expectedRevisions.reserve(transaction.outputs.size());
         for (auto& draft : transaction.outputs) {
             draft.lifetimeScope = scope;
+            draft.lifetimePolicy = policy;
             retirement.expectedRevisions.push_back({draft.entityId, draft.expectedGeneration + 1});
         }
         if (resource.lease) transaction.outputs.front().preparedResources.push_back(std::move(resource));
-        scopes.push_back(std::move(retirement));
+        if (policy == DataLifetimePolicy::OwnerRetirement) scopes.push_back(std::move(retirement));
     }
     // DataGraph observer 可同步重入；查询保留整组旧投影，修改和 Detach 均拒绝。
     struct PublishingGuard final {

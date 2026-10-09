@@ -2221,7 +2221,7 @@ bool GetTiffDescriptorValid()
         auto* values = static_cast<unsigned short*>(
             image->GetScalarPointer());
         if (!values) return false;
-        std::fill(values, values + 4, value);
+        for(unsigned short i=0;i<4;++i) values[i]=value+i;
         auto writer = vtkSmartPointer<vtkTIFFWriter>::New();
         const std::string pathText = path.u8string();
         writer->SetFileName(pathText.c_str());
@@ -2275,9 +2275,9 @@ bool GetTiffDescriptorValid()
     const auto descriptor = seriesManager.GetImageDescriptor();
     const auto read = seriesManager.GetImageReadState();
     const std::array<unsigned short, 12> expectedValues = {
-        1, 1, 1, 1,
-        2, 2, 2, 2,
-        10, 10, 10, 10
+        2, 1, 4, 3,
+        3, 2, 5, 4,
+        11, 10, 13, 12
     };
     if (!descriptor || !read || !read->values
         || descriptor->metadata.identity.datasetId
@@ -2293,6 +2293,12 @@ bool GetTiffDescriptorValid()
             read->values->data(),
             expectedValues.data(),
             sizeof(expectedValues)) != 0) {
+        if (read && read->values) {
+            const auto* actual = reinterpret_cast<const unsigned short*>(read->values->data());
+            std::cerr << "TIFF actual values:";
+            for (std::size_t i=0;i<read->values->size()/2;++i) std::cerr << ' ' << actual[i];
+            std::cerr << '\n';
+        }
         return false;
     }
 

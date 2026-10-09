@@ -14,8 +14,8 @@ struct FeatureTestOptions final {
     std::string inputPath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
     std::array<int, 3> dimensions{1536, 1536, 1536};
     bool hasDimensions = false;
-    std::optional<std::array<float, 3>> spacing;
-    std::optional<std::array<float, 3>> origin;
+    std::optional<std::array<double, 3>> spacing;
+    std::optional<std::array<double, 3>> origin;
     std::optional<std::array<double, 9>> direction;
     std::string inputFrame;
     std::string inputUnit;

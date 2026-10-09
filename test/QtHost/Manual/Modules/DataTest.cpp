@@ -37,8 +37,8 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
             options.inputPath = path.toUtf8().toStdString();
             options.hasDimensions = true;
             options.dimensions = GetArray<int, 3>(params["dimensions"]);
-            options.spacing = GetArray<float, 3>(params["spacingLPS"]);
-            options.origin = GetArray<float, 3>(params["originLPS"]);
+            options.spacing = GetArray<double, 3>(params["spacingLPS"]);
+            options.origin = GetArray<double, 3>(params["originLPS"]);
             options.direction = GetArray<double, 9>(params["directionLPS"]);
             options.datasetId = GetText(params, "datasetId").toStdString();
             options.inputDigest = GetText(params, "sourceDigest").toStdString();

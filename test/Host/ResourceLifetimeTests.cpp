@@ -20,6 +20,8 @@
 #include <vtkDataArray.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
+#include <vtkFloatArray.h>
+#include <vtkFieldData.h>
 #include <chrono>
 #include <future>
 #include <iostream>
@@ -183,6 +185,40 @@ bool GetConsumerStopKeepsRenderReady()
     return Check(renderReady&&stopped,"data consumer stop disabled Root candidate rendering or prevented final stop");
 }
 
+bool GetLoadedGenerationsReleased()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();
+    ImageMetadata metadata;metadata.identity.datasetId="scoped-load";
+    metadata.source.kind=ImageSourceKind::Memory;metadata.source.uri="memory://scoped-load";
+    const auto layout=VolumeLayout::Create({2,2,2},{1,1,1},{},{1,0,0,0,1,0,0,0,1},metadata);
+    if(!layout)return false;
+    {
+        const auto buffer=VolumeBuffer::Create(std::vector<float>(8,1),*layout);
+        if(!buffer||!data->SetFromBuffer(*buffer))return false;
+    }
+    auto stage=data->GetLoadStage(); VtkImageGridSnapshot active;
+    if(!data->SetLoadCommit(stage,active))return false;
+    const auto first=active->data->self;const auto firstScope=active->data->lifetimeScope;
+    const auto* payload=dynamic_cast<const ImageGrid3DPayload*>(active->data->payload.get());
+    std::weak_ptr<const void> allocation=payload->GetValues();
+    auto reader=active->data->lifetime.lock()->StartResourceUse(first,"test-loaded-reader");
+    stage.reset();active.reset();data->ClearLoadStage();
+    if(!data->SetSpacing({2,2,2}))return false;
+    auto next=data->GetPrimaryImage();const auto second=next->data->self;const auto secondScope=next->data->lifetimeScope;
+    if(!Check(GetDataEntityIdValid(firstScope)&&GetDataEntityIdValid(secondScope)&&firstScope!=secondScope,"loaded generations need independent closed scopes"))return false;
+    const auto binding=*next->binding;next.reset();
+    DataTransaction retire;
+    retire.bindings.push_back({std::string(primaryVolumeBinding),binding.revision,true,binding.target,{}});
+    retire.retireScopes.push_back({firstScope,DataLifetimeStatus::Published,{first},true});
+    retire.retireScopes.push_back({secondScope,DataLifetimeStatus::Published,{second},true});
+    if(!Check(data->SetDataCommit(retire).failureReason==DataCommitFailure::ResultInUse
+        && data->GetPrimaryImage()!=nullptr,"reader blocks unload without changing selected data"))return false;
+    reader.reset();
+    if(!Check(data->SetDataCommit(retire).status==DataCommitStatus::Succeeded,"retire all loaded generations"))return false;
+    return Check(allocation.expired() && data->SetDataRelease(firstScope).status==DataLifetimeStatus::Released
+        && data->SetDataRelease(secondScope).status==DataLifetimeStatus::Released,"loaded scalar allocation releases while graph remains alive");
+}
+
 bool GetGpuFrameResourcesProtected()
 {
     auto data=std::make_shared<RawVolumeDataManager>();const auto source=Publish(data,true);
@@ -216,6 +252,32 @@ bool GetGpuFrameResourcesProtected()
     if(!released)for(const auto& blocker:data->GetDataLifetime(source.scope).blockers)std::cerr<<"Frame release blocker: "<<blocker.owner<<'\n';
     frames.reset();window->Finalize();RenderFrameLifetime::PollAll();
     return Check(released,"GPU fence completion did not release the retired draw allocations");
+}
+
+bool GetLargeFrameCollectionValid()
+{
+    auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(2,2,1);image->AllocateScalars(VTK_FLOAT,1);
+    for(int i=0;i<4;++i)static_cast<float*>(image->GetScalarPointer())[i]=float(i);
+    for(int i=0;i<65537;++i) {
+        auto array=vtkSmartPointer<vtkFloatArray>::New();
+        image->GetFieldData()->AddArray(array);
+    }
+    if(!Check(image->GetFieldData()->GetNumberOfArrays()==65537,"large frame fixture retains unique unnamed arrays"))return false;
+    auto renderer=vtkSmartPointer<vtkRenderer>::New();auto window=vtkSmartPointer<vtkRenderWindow>::New();
+    window->SetOffScreenRendering(1);window->SetSize(32,32);window->AddRenderer(renderer);
+    auto actor=vtkSmartPointer<vtkImageActor>::New();actor->SetInputData(image);renderer->AddActor(actor);renderer->ResetCamera();
+    auto tracker=RenderFrameLifetime::Create(renderer);
+    struct Probe final {std::shared_ptr<RenderFrameLifetime> tracker;bool queued=false,done=false,success=false;} probe{tracker};
+    auto observer=vtkSmartPointer<vtkCallbackCommand>::New();observer->SetClientData(&probe);
+    observer->SetCallback([](vtkObject*,unsigned long,void* data,void*) {
+        auto& value=*static_cast<Probe*>(data);
+        value.queued=value.tracker->QueueCompletion([&value](RenderFrameOutcome result){value.done=true;value.success=result.isSucceeded;});
+    });
+    const auto tag=renderer->AddObserver(vtkCommand::StartEvent,observer,-1.0);
+    window->Render();renderer->RemoveObserver(tag);
+    for(int i=0;!probe.done&&i<1000;++i){RenderFrameLifetime::PollAll();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    window->Finalize();RenderFrameLifetime::PollAll();
+    return Check(probe.queued&&probe.done&&probe.success,"normal frame above 65536 objects completes through its GPU fence");
 }
 
 bool GetNestedFrameCompletions()
@@ -364,12 +426,14 @@ bool GetScopedConsumerChainReleased()
 
 bool GetResourceLifetimeTests()
 {
-    bool passed=GetScopedConsumerChainReleased();
+    bool passed=GetLoadedGenerationsReleased();
+    passed=GetScopedConsumerChainReleased()&&passed;
     passed=GetQueuedExportsProtected()&&passed;
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;
     passed=GetConsumerStopKeepsRenderReady()&&passed;
     passed=GetDerivedProductsProtected()&&passed;
     passed=GetGpuFrameResourcesProtected()&&passed;
+    passed=GetLargeFrameCollectionValid()&&passed;
     return GetNestedFrameCompletions()&&passed;
 }
