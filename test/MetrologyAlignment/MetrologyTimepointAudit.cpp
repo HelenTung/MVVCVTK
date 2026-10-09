@@ -32,6 +32,7 @@
 
 namespace {
 AlignmentComputeBackend auditBackend=AlignmentComputeBackend::Cpu;
+bool algorithmOnly=false;
 void Require(bool value,const char *message) { if (!value) throw std::runtime_error(message); }
 std::string Json(const std::string &value) {
     std::string text="\""; const char *hex="0123456789abcdef";
@@ -191,13 +192,16 @@ struct Surface final {
 Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,const Scan &scan,const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
     std::cout<<"SURFACE_START "<<scan.id<<'\n'<<std::flush;
     Surface surface; const auto start=std::chrono::steady_clock::now(); surface.source=Load(data,scan,m.inputLimit);
+    const auto loaded=std::chrono::steady_clock::now();
     SurfaceDeterminationRequest request; request.action=SurfaceDeterminationAction::Start;
     request.start=SurfaceDeterminationStartParams{}; request.start->sourceVolume=surface.source; request.start->modelUnit="mm";
     request.start->resultScope=scan.id; request.start->componentSelection=SurfaceComponentSelection::All;
     auto completion=std::make_shared<SurfaceCompletion>();
+    const auto requested=std::chrono::steady_clock::now();
     const auto admission=feature.SendRequest(request,[completion](SurfaceDeterminationResult r) { completion->value=std::move(r); completion->done=true; });
     Require(admission.status==SurfaceAdmissionStatus::Accepted,"Surface request was not admitted.");
     Wait(feature,completion,m.deadlineMs);
+    const auto completed=std::chrono::steady_clock::now();
     const auto &result=completion->value;
     out<<"{\"id\":"<<Json(scan.id)<<",\"parentSha256\":"<<Json(scan.parentSha)<<",\"roiSha256\":"<<Json(scan.roiSha)
        <<",\"roiFile\":"<<Json(std::filesystem::absolute(scan.roiPath).lexically_normal().u8string())
@@ -221,7 +225,8 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         const auto &positions=surface.payload->GetVertices();
         for (std::size_t i=0;i<positions.size();++i) Require(positions[i]>=expectedBounds[2*(i%3)]-1e-8 &&
             positions[i]<=expectedBounds[2*(i%3)+1]+1e-8,"Published point violates native-ROI physical bounds.");
-        out<<",\"physicalBoundsChecked\":true,\"inputIsCroppedFromParent\":true,\"voxelCenterBoundsRAS\":[";
+        const bool fullVolume=scan.nativeRoi==std::array<int,6>{0,1535,0,1535,0,1535};
+        out<<",\"physicalBoundsChecked\":true,\"inputIsCroppedFromParent\":"<<(fullVolume ? "false" : "true")<<",\"voxelCenterBoundsRAS\":[";
         for (std::size_t i=0;i<6;++i) { if (i) out<<','; out<<expectedBounds[i]; } out<<']';
         const MeshAttribute *valid=nullptr;
         for (const auto &a:surface.payload->GetPointAttributes()) if (a.name=="measurement.valid") valid=&a;
@@ -242,7 +247,12 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
            <<",\"resolvedRecipe\":"<<Json(snapshot->canonicalParameters)<<",\"points\":"<<valid->values.size()
            <<",\"validPoints\":"<<surface.validVertices.size()<<",\"triangles\":"<<tri.size()/3<<",\"validTriangles\":"<<surface.validTriangles.size()
            <<",\"objects\":"<<(snapshot->objects ? snapshot->objects->size() : 0)
-           <<",\"workingEstimateBytes\":"<<snapshot->execution.estimatedWorkingBytes<<",\"retainedBytes\":"<<snapshot->execution.retainedBytes;
+           <<",\"workingEstimateBytes\":"<<snapshot->execution.estimatedWorkingBytes<<",\"retainedBytes\":"<<snapshot->execution.retainedBytes
+           <<",\"seedMs\":"<<snapshot->execution.seedMs<<",\"refinementMs\":"<<snapshot->execution.refinementMs
+           <<",\"publicationPreparationMs\":"<<snapshot->execution.publicationPreparationMs
+           <<",\"scannedCellCount\":"<<snapshot->execution.scannedCellCount<<",\"skippedCellCount\":"<<snapshot->execution.skippedCellCount
+           <<",\"processedExtent\":[";
+        for(std::size_t i=0;i<6;++i) { if(i)out<<',';out<<snapshot->execution.processedExtent[i]; } out<<']';
         std::size_t closed=0,truncated=0,nonManifold=0;
         if (snapshot->objects) for (const auto &object:*snapshot->objects) { closed+=object.isClosed ? 1 : 0; truncated+=object.isTruncated ? 1 : 0; nonManifold+=object.isManifold ? 0 : 1; }
         out<<",\"closedObjects\":"<<closed<<",\"truncatedObjects\":"<<truncated<<",\"nonManifoldObjects\":"<<nonManifold;
@@ -256,13 +266,18 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         }
         out<<']';
         if (snapshot->isoEstimate) out<<",\"background\":"<<snapshot->isoEstimate->backgroundValue<<",\"material\":"<<snapshot->isoEstimate->materialValue<<",\"iso\":"<<snapshot->isoEstimate->isoValue;
+        if(!algorithmOnly) {
         const auto view=data.GetSurfaceMesh(data.GetDataGraph(),surface.mesh);
         Require(view && view->mesh,"Formal surface render view unavailable.");
         auto writer=vtkSmartPointer<vtkXMLPolyDataWriter>::New(); writer->SetFileName((folder/(scan.id+".vtp")).u8string().c_str());
         writer->SetInputData(view->mesh); Require(writer->Write()!=0,"VTP output failed.");
+        }
     }
     const auto memory=ReadMemory();
-    out<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()
+    out<<",\"loadAndHashMs\":"<<std::chrono::duration<double,std::milli>(loaded-start).count()
+       <<",\"surfaceRequestWallMs\":"<<std::chrono::duration<double,std::milli>(completed-requested).count()
+       <<",\"verificationAndExportMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-completed).count()
+       <<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()
        <<",\"workingSetBytes\":"<<memory.working<<",\"privateBytes\":"<<memory.privateBytes<<",\"peakWorkingSetBytes\":"<<memory.peak<<'}'; out.flush();
     std::cout<<"SURFACE "<<scan.id<<" status="<<unsigned(result.status)<<" valid="<<surface.validVertices.size()<<'\n'<<std::flush;
     return surface;
@@ -293,10 +308,13 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     recipe.maxPairDistance=.5; recipe.maxAlignmentRms=1e-5; recipe.minPairCoverage=1;
     auto pose=alignmentIdentity; const double a=.01; pose[0]=pose[5]=std::cos(a); pose[1]=-std::sin(a); pose[4]=std::sin(a);
     pose[3]=.15; pose[7]=-.12; pose[11]=.08;
+    const auto solveStarted=std::chrono::steady_clock::now();
     const auto result=Solve(feature,std::move(recipe),
         AlignmentInput{surface.source,surface.mesh,surface.source,"control-source","RAS","rigid-control",AlignmentUnit::Millimeter},m,{pose});
+    const auto solveWallMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-solveStarted).count();
     out<<"{\"attempted\":true,\"scope\":\"same measured mesh; perturbed initialization; identity is exact numerical truth\",\"status\":"<<unsigned(result.status)
-       <<",\"qualityPassed\":"<<(result.diagnostics.isQualityPassed ? "true" : "false")<<",\"rms\":"<<result.diagnostics.rms;
+       <<",\"qualityPassed\":"<<(result.diagnostics.isQualityPassed ? "true" : "false")<<",\"rms\":"<<result.diagnostics.rms
+       <<",\"alignmentRequestWallMs\":"<<solveWallMs;
     bool passed=false;
     if (const auto archive=feature.GetArchive(result.result)) {
         const auto &t=archive->sourceToTarget;
@@ -306,8 +324,13 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
         passed=result.status==AlignmentStatus::FullyDetermined && result.diagnostics.isQualityPassed && translation<1e-6 && angle<1e-6;
     }
     if(passed) {
+        if(algorithmOnly)out<<",\"deviationRuns\":[";
+        std::shared_ptr<const AlignmentDeviationField> cpuField;
+        const auto runCount=algorithmOnly ? 2 : 1;
+        for(int run=0;run<runCount;++run) {
+        const auto backend=algorithmOnly ? (run==0 ? AlignmentComputeBackend::Cpu : AlignmentComputeBackend::Cuda) : auditBackend;
         AlignmentRequest evaluate;evaluate.action=AlignmentAction::EvaluateSurface;evaluate.deviation=AlignmentDeviationRequest{};
-        evaluate.deviation->computeBackend=auditBackend;
+        evaluate.deviation->computeBackend=backend;
         auto &p=*evaluate.deviation;p.alignmentResult=result.result;p.sourceTriangles=surface.validTriangles;p.referenceTriangles=surface.validTriangles;
         p.requiresMeasurementQuality=true;p.reverseCoverage=false;p.maxDistance=1e-6;p.tolerance=std::array<double,2>{0,1e-6};
         auto complete=std::make_shared<AlignmentCompletion>();
@@ -316,9 +339,26 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
         Wait(feature,complete,m.deadlineMs+1000);const auto field=feature.GetDeviation(complete->value.deviationResult);
         Require(field && field->isCurrent && field->forward->statistics.hasValues && field->forward->statistics.maximum<=1e-6,
             "Identity deviation exceeds its numerical control tolerance.");
-        deviations.push_back(field->result);out<<",\"deviationSamples\":"<<field->forward->samples.size()
-            <<",\"deviationWallMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-deviationStarted).count()
-            <<",\"computeBackend\":"<<Json(auditBackend==AlignmentComputeBackend::Cuda ? "Cuda" : "Cpu");
+        const auto deviationWallMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-deviationStarted).count();
+        if(algorithmOnly) { if(run)out<<',';out<<'{'; } else out<<',';
+        deviations.push_back(field->result);out<<"\"deviationSamples\":"<<field->forward->samples.size()
+            <<",\"deviationWallMs\":"<<deviationWallMs
+            <<",\"computeBackend\":"<<Json(backend==AlignmentComputeBackend::Cuda ? "Cuda" : "Cpu");
+        if(algorithmOnly)out<<'}';
+        if(backend==AlignmentComputeBackend::Cpu)cpuField=field->forward;
+        else if(algorithmOnly && cpuField) {
+            Require(cpuField->samples.size()==field->forward->samples.size(),"CPU/CUDA full-field sample count differs.");
+            const auto &actual=field->forward->samples;
+            for(std::size_t i=0;i<actual.size();++i) {
+                const auto &a=cpuField->samples[i],&b=actual[i];
+                Require(a.closestTriangle==b.closestTriangle && a.state==b.state && a.distance==b.distance &&
+                    a.value==b.value && a.area==b.area,"CPU/CUDA full-field sample differs.");
+            }
+        }
+        out.flush();
+        std::cout<<"DEVIATION backend="<<(backend==AlignmentComputeBackend::Cuda ? "Cuda" : "Cpu")<<" wall_ms="<<deviationWallMs<<'\n'<<std::flush;
+        }
+        if(algorithmOnly)out<<"],\"cpuCudaSamplesExactlyEqual\":true";
     }
     out<<",\"numericalControlPassed\":"<<(passed ? "true" : "false")<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"RIGID_CONTROL status="<<unsigned(result.status)<<" rms="<<result.diagnostics.rms<<'\n'<<std::flush; return passed;
@@ -665,16 +705,17 @@ void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &su
 } // namespace
 int wmain(int argc,wchar_t **argv) {
     try {
-        Require(argc>=3 && argc<=6,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run] [--cuda-deviation]");
+        Require(argc>=3 && argc<=7,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run] [--cuda-deviation] [--algorithm-only]");
         bool controlsOnly=false,newRun=false;
-        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else if(option==L"--cuda-deviation")auditBackend=AlignmentComputeBackend::Cuda; else throw std::runtime_error("Unknown audit option."); }
+        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else if(option==L"--cuda-deviation")auditBackend=AlignmentComputeBackend::Cuda; else if(option==L"--algorithm-only")algorithmOnly=true; else throw std::runtime_error("Unknown audit option."); }
         const auto manifest=ReadManifest(std::filesystem::path(argv[1])); std::filesystem::path folder(argv[2]);
+        Require(!algorithmOnly || manifest.scans.size()==1,"Algorithm audit uses one source per process for independent process peaks.");
         if (newRun) folder/="run-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         std::filesystem::create_directories(folder);
         Require(!std::filesystem::exists(folder/"observations.json"),"Use a new output directory to retain previous audit evidence.");
         std::ofstream out(folder/"observations.json",std::ios::binary); out.imbue(std::locale::classic()); out<<std::setprecision(17);
         out<<"{\"schema\":\"ct-timepoint-audit-1\",\"scope\":\"public C3 to metrology experiment; measured timepoint comparison, no independent nominal truth\",\"inputLimitBytes\":"<<manifest.inputLimit
-           <<",\"workingLimitBytes\":"<<manifest.workingLimit<<",\"deadlineMs\":"<<manifest.deadlineMs<<",\"scans\":[";
+           <<",\"workingLimitBytes\":"<<manifest.workingLimit<<",\"deadlineMs\":"<<manifest.deadlineMs<<",\"algorithmOnly\":"<<(algorithmOnly ? "true" : "false")<<",\"scans\":[";
         auto data=std::make_shared<TestDataPort>(); HostFeatureContext context; context.data=data; context.views=std::make_shared<Views>(); context.host=std::make_shared<Control>();
         SurfaceDeterminationConfig surfaceConfig; surfaceConfig.maxWorkingBytes=manifest.workingLimit; surfaceConfig.isOverlayVisible=false;
         SurfaceDeterminationHostFeature surfaceFeature(surfaceConfig); Require(surfaceFeature.AttachHost(context),"Surface attach failed.");
@@ -683,9 +724,18 @@ int wmain(int argc,wchar_t **argv) {
         MetrologyAlignmentHostFeature alignmentFeature(alignmentConfig); Require(alignmentFeature.AttachHost(alignmentContext),"Metrology attach failed.");
         std::vector<Surface> surfaces;
         for (std::size_t i=0;i<manifest.scans.size();++i) { if (i) out<<','; surfaces.push_back(Determine(*data,surfaceFeature,manifest.scans[i],manifest,out,folder)); }
-        out<<"],\"arrayAlignment\":"; if (!controlsOnly) Align(alignmentFeature,surfaces,manifest,out); else out<<"{\"attempted\":false,\"reason\":\"controls-only run\"}";
+        out<<"],\"arrayAlignment\":";
+        if (!controlsOnly && !algorithmOnly) Align(alignmentFeature,surfaces,manifest,out);
+        else out<<"{\"attempted\":false,\"reason\":"<<Json(algorithmOnly ? "algorithm-only run" : "controls-only run")<<'}';
         std::vector<DataRevisionRef> deviations;
         out<<",\"rigidControl\":"; const bool controlPassed=IdentityControl(alignmentFeature,surfaces.front(),manifest,out,deviations);
+        if(algorithmOnly) {
+            const auto memory=ReadMemory();out<<",\"pipelineChecksPassed\":"<<(controlPassed ? "true" : "false")
+                <<",\"processPeakWorkingSetBytes\":"<<memory.peak<<",\"processPeakCommitBytes\":"<<memory.peakCommit<<"}\n";
+            out.close();Require(bool(out),"Observation report write failed.");
+            Require(alignmentFeature.DetachHost() && surfaceFeature.DetachHost(),"Audit feature detach failed.");
+            std::cout<<"OBSERVATIONS "<<(folder/"observations.json").u8string()<<'\n';return controlPassed ? 0 : 2;
+        }
         std::vector<DataRevisionRef> reports;
         out<<",\"ringInspection\":"; bool ringPassed=true; if (surfaces.size()>2) ringPassed=RingFit(alignmentFeature,surfaces[2],manifest,out,reports); else out<<"null";
         out<<",\"sectionInspections\":["; bool sectionsPassed=true;
