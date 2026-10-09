@@ -232,6 +232,8 @@ private:
         bool isRendererAttached = false;
         bool isPrepared = false;
         bool hasDefaultTransfer = false;
+        bool hasDefaultIso = false;
+        double previousIso = 0.0;
         bool isCommitted = false;
         std::uint64_t transactionRevision = 0;
         std::uint64_t transitionRevision = 0;
@@ -430,6 +432,8 @@ private:
     mutable std::mutex m_transitionMutex;
     std::uint64_t m_transitionRevision = 0;
     bool m_hasVisualConfig = false;
+    bool m_hasExplicitIso = false; // m_transitionMutex 保护阈值来源和默认值版本。
+    DataRevisionRef m_isoSource;
     std::atomic<bool> m_hasTransitionFailure{false};
     std::optional<PendingLoadCommit> m_pendingLoadCommit;
     std::uint64_t m_nextLoadTransactionRevision = 0;
@@ -1813,6 +1817,7 @@ bool AppRuntime::GetTransferAuto() const
 void AppRuntime::SetIsoThreshold(double val)
 {
     std::lock_guard<std::mutex> transitionLock(m_transitionMutex);
+    m_hasExplicitIso = true;
     m_viewState->SetIsoValue(val);
 }
 
@@ -1909,6 +1914,7 @@ void AppRuntime::SetVisualConfig(const PreInitConfig& cfg)
         ++m_transitionRevision;
     }
     m_viewState->SetPreInitConfig(cfg);
+    if (cfg.hasIso) m_hasExplicitIso = true;
     // 首次配置保留原有 bootstrap 语义，由数据事件/加载事务驱动首个候选。
     if (m_hasVisualConfig && (hasModeChanged || m_hasTransitionFailure.load())) {
         m_hasTransitionFailure = false;
@@ -3060,7 +3066,9 @@ bool AppRuntime::GetStageCurrent(const DataStage& stage) const
     // 只比较候选实际依赖的生产参数；颜色、游标等增量不会取消 CPU 产品。
     return stage.nextParams.volumeQuality == GetTargetQuality()
         && stage.nextParams.isDenoiseOn == GetDenoiseOn()
-        && stage.nextParams.isoValue == GetIsoThreshold();
+        && (stage.hasDefaultIso
+            ? !m_hasExplicitIso && stage.previousIso == GetIsoThreshold()
+            : stage.nextParams.isoValue == GetIsoThreshold());
 }
 
 VtkRenderInputSnapshot AppRuntime::GetPrimaryRenderInput() const {
@@ -3158,6 +3166,21 @@ DataStageStatus AppRuntime::StartDataStage(
     if(snapshot->image) {
     stage.nextParams.scalarRange[0] = stage.readyState.scalarRange[0];
     stage.nextParams.scalarRange[1] = stage.readyState.scalarRange[1];
+    {
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_hasExplicitIso && m_isoSource != snapshot->data->self
+            && (stage.mode == VizMode::IsoSurface
+                || stage.mode == VizMode::CompositeIsoSurface)) {
+            const auto low = stage.readyState.scalarRange[0];
+            const auto high = stage.readyState.scalarRange[1];
+            if (!std::isfinite(low) || !std::isfinite(high) || low > high)
+                return DataStageStatus::Failed;
+            // 首次 producer 直接使用原始灰度中值；候选准备不改正式展示状态。
+            stage.previousIso = stage.nextParams.isoValue;
+            stage.nextParams.isoValue = low * 0.5 + high * 0.5;
+            stage.hasDefaultIso = true;
+        }
+    }
     stage.nextParams.cursor = stage.readyState.cursorWorld;
     stage.nextParams.cursorRaw = stage.readyState.cursorWorld;
     stage.nextParams.cursorAxis = -1;
@@ -3550,6 +3573,13 @@ void AppRuntime::SetDataStageComplete(
     }
     if (m_setLoadCommit) {
         m_readyState = m_dataStage->readyState;
+    }
+    if (m_dataStage->hasDefaultIso) {
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_hasExplicitIso && GetIsoThreshold() == m_dataStage->previousIso) {
+            m_isoSource = m_dataStage->nextSnapshot->data->self;
+            m_viewState->SetIsoValue(m_dataStage->nextParams.isoValue);
+        }
     }
     if (m_dataStage->nextSnapshot->image && m_viewState
         && m_viewState->GetWindowLevelMode()
@@ -4438,6 +4468,10 @@ private:
         if (!GetUpdateValid(update) || !SetUpdate(update)) {
             return false;
         }
+        {
+            std::lock_guard<std::mutex> lock(m_service->m_transitionMutex);
+            m_service->m_hasExplicitIso = state.hasExplicitIso;
+        }
         return !state.isTransferAuto
             || m_service->ResetTransfer(
                 state.volumeTransferFunction);
@@ -4453,6 +4487,10 @@ private:
             m_service->GetVolumeTransferFunction();
         state.isTransferAuto = m_service->GetTransferAuto();
         state.isoThreshold = m_service->GetIsoThreshold();
+        {
+            std::lock_guard<std::mutex> lock(m_service->m_transitionMutex);
+            state.hasExplicitIso = m_service->m_hasExplicitIso;
+        }
         state.background = m_service->GetBackground();
         state.spacing = m_service->GetSpacing();
         state.windowLevel = m_service->GetWindowLevel();

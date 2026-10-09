@@ -1,6 +1,7 @@
 // 测试用途：通过数据页面测试体数据加载、精确输入选择、导出、标签读取和掩码准备。
 #include "ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/ParameterEditor.h"
 #include <QFileInfo>
 #if defined(MANUAL_ROI)
 #include "Host/RoiEditingHostFeature.h"
@@ -16,7 +17,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("EditRoiBox",{{"matrix",GetValues(roiIdentityMatrix)}},[panel,editor](auto id,const auto& p){
         const auto source=panel->GetSession()->GetImageDescriptor();if(!source)throw std::runtime_error("source unavailable");
         RoiRequest draft;draft.definition.source=source->dataRevision;draft.metadata.name="comparison-half-box";
-        RoiNode box;box.primitive.localToSource=GetArray<double,16>(p["matrix"]);draft.definition.nodes.push_back(box);
+        RoiNode box;box.primitive.localToSource=GetAffineMatrix(p["matrix"]);draft.definition.nodes.push_back(box);
         const auto catalog=panel->GetSession()->GetRoiDescriptors(true);draft.expectedCatalogRevision=catalog.empty()?0:catalog.front().catalogRevision;
         RoiEditingRequest begin;begin.action=RoiEditingAction::Begin;begin.draft=draft;
         const auto first=editor->SendRequest(begin);
@@ -29,18 +30,19 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     (void)editor;
 #endif
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
-    panel->AttachAction("Load", GetJson(R"({"filePath":"F:/data/ct/1536x1536x1536_1440.raw","datasetId":"1","dimensions":[1536,1536,1536],"spacingLPS":[0.1537,0.1537,0.1537],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"real-data"})"),
+    panel->AttachAction("Load", GetJson(R"({"filePath":"","datasetId":"","dimensions":null,"spacingLPS":[1,1,1],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"unconfigured"})"),
         [panel](auto id, const auto& params) {
             FeatureTestOptions options;
             const auto path = GetText(params, "filePath");
             if (!QFileInfo::exists(path)) throw std::invalid_argument("输入文件不存在");
             options.inputPath = path.toUtf8().toStdString();
             options.hasDimensions = true;
-            options.dimensions = GetArray<int, 3>(params["dimensions"]);
+            options.dimensions = GetInputDimensions(path,params["dimensions"]);
             options.spacing = GetArray<float, 3>(params["spacingLPS"]);
             options.origin = GetArray<float, 3>(params["originLPS"]);
-            options.direction = GetArray<double, 9>(params["directionLPS"]);
+            options.direction = GetDirectionMatrix(params["directionLPS"]);
             options.datasetId = GetText(params, "datasetId").toStdString();
+            if (options.datasetId.empty()) options.datasetId = QFileInfo(path).completeBaseName().toStdString();
             options.inputDigest = GetText(params, "sourceDigest").toStdString();
             options.inputFrame = "LPS";
             options.inputUnit = "mm";
@@ -125,6 +127,9 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
                 {"source", GetRefText(descriptor->dataRevision)}, {"validationRoute", "trusted-input"}});
         }, TestPolicy::Compute, true);
     panel->onObserve = [panel] {
+        auto* load = panel->GetParameterEditor("Load");
+        try { load->GetField("dimensions")->SetDefaultValue(GetValues(GetInputDimensions(load->GetField("filePath")->GetValue().toString(),QJsonValue()))); }
+        catch (const std::exception&) { load->GetField("dimensions")->SetDefaultValue(QJsonArray{0,0,0}); }
         // Comparison exports below read immutable results through the public ports.
         QJsonArray labels;
         for (const auto& label : panel->GetSession()->GetLabelMapDescriptors()) labels.append(QJsonObject{{"id", QString::fromStdString(label.id)}, {"revision", GetRefText(label.dataRevision)}, {"source", GetRefText(label.sourceRevision)}});

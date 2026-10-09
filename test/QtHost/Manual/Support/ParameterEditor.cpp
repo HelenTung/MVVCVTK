@@ -18,6 +18,7 @@
 #include <QVBoxLayout>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QTabWidget>
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -44,15 +45,23 @@ QJsonValue Shape(const QString& key)
     if (key == "evaluationBounds" || key == "extent" || key == "roiModelBounds" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
+    if (key == "dimensions") return QJsonArray{0,0,0};
     if (key == "colorRGBA") return QJsonArray{1,1,1,1};
     if (key == "constantColor" || key == "lowColor" || key == "highColor"
         || key == "belowColor" || key == "aboveColor") return QJsonArray{0.7,0.7,0.7};
     if (key == "boxToSource") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (key == "matrix") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (key == "directionLPS") return QJsonArray{1,0,0,0,1,0,0,0,1};
+    if (key == "materialRange") return QJsonArray{0,1};
+    if (key == "histogramRange") return QJsonArray{0,1};
     if (key == "transfer") return QJsonObject{{"colorNodes", QJsonArray{}}, {"opacityNodes", QJsonArray{}}};
     if (key == "grayPair") return QJsonObject{{"sideA", QJsonArray{-1.0, 0.0}}, {"sideB", QJsonArray{1.0, 2.0}}};
     if (key == "slice") return QJsonObject{{"origin", QJsonArray{0,0,0}}, {"normal", QJsonArray{0,0,1}}, {"thicknessMM", 1.0}};
     if (key == "axes" || (key.startsWith("is") && key.size() > 2 && key[2].isUpper()) || key == "planes" || key == "crosshair" || key == "ruler") return false;
-    if (key == "iso" || key == "opacity" || key == "angleDeg" || key == "minimumContrast" || key == "initialIsoValue"
+    if (key == "iso" || key == "threshold" || key == "absoluteIsoValue" || key == "backgroundMean" || key == "materialMean" || key == "materialThreshold"
+        || key == "sampleSpacing" || key == "maxBoundaryError" || key == "maxDistance"
+        || key == "lower" || key == "upper"
+        || key == "opacity" || key == "angleDeg" || key == "minimumContrast" || key == "initialIsoValue"
         || key.startsWith("profile") || key == "maximumOffsetModel" || key == "minPairNormalCosine"
         || key == "minimumEdgeWidthModel" || key == "maximumEdgeWidthModel" || key == "minimumEdgeSeparationModel") return 0.0;
 #if defined(MANUAL_ALIGNMENT)
@@ -164,6 +173,20 @@ void ParameterEditor::SetFieldVisibility()
     if (!m_key.isEmpty() && m_key!="segments") return;
     const auto bound = m_key.isEmpty() ? GetBoundParameters(m_module, m_action) : QStringList{};
     for (const auto& field : m_fields) field.second->setVisible(!bound.contains(field.first) && GetFieldApplicable(field.first));
+    if (m_groups) {
+        auto* selected = m_groups->currentWidget(); int visibleIndex = 0;
+        for (const auto& name : m_groupOrder) {
+            auto* page = m_groupPages.at(name);
+            const bool populated = std::any_of(m_fields.begin(), m_fields.end(), [&](const auto& field) {
+                return field.second->parentWidget() == page && !field.second->isHidden();
+            });
+            const int index = m_groups->indexOf(page);
+            if (!populated && index >= 0) m_groups->removeTab(index);
+            else if (populated && index < 0) m_groups->insertTab(visibleIndex,page,name);
+            if (populated) ++visibleIndex;
+        }
+        if (selected && m_groups->indexOf(selected) >= 0) m_groups->setCurrentWidget(selected);
+    }
 }
 void ParameterEditor::NotifyEdited() { SetFieldVisibility(); if (onEdited) onEdited(); }
 void ParameterEditor::UpdateBooleanState()
@@ -207,6 +230,40 @@ void ParameterEditor::SetAppliedBoolean(QJsonValue value, const QString& context
     if (m_booleanEdited && value.isBool() && qobject_cast<QCheckBox*>(m_input)->isChecked() == value.toBool()) m_booleanEdited = false;
     CreateBooleanStateControls(); UpdateBooleanState();
 }
+void ParameterEditor::SetDefaultValue(const QJsonValue& value)
+{
+    if (!m_specified || m_specified->isChecked()) return;
+    if (m_type == QJsonValue::Double && value.isDouble()) {
+        auto* input = qobject_cast<QLineEdit*>(m_input);
+        const auto text = QString::number(value.toDouble(), 'g', 17);
+        if (input && input->text() != text) input->setText(text);
+    } else if (m_type == QJsonValue::Array && value.isArray() && value.toArray().size() == GetCount()) {
+        const auto values = value.toArray();
+        for (int index = 0; index < values.size(); ++index) {
+            auto* input = m_rows[index].second->findChild<QLineEdit*>("value");
+            if (input && values[index].isDouble()) input->setText(QString::number(values[index].toDouble(), 'g', 17));
+        }
+    }
+}
+void ParameterEditor::SetReferenceChoices(const ParameterChoices& choices)
+{
+    auto* input = qobject_cast<QComboBox*>(m_input);
+    if (!input || m_type != QJsonValue::String) return;
+    auto next = GetParameterChoices(m_module, m_key);
+    for (const auto& choice : choices)
+        if (std::none_of(next.cbegin(), next.cend(), [&](const auto& entry) { return entry.first == choice.first; })) next.append(choice);
+    const auto current = input->currentData().toString();
+    if (std::none_of(next.cbegin(), next.cend(), [&](const auto& entry) { return entry.first == current; }))
+        next.append({current, "不可用或自定义引用：" + current});
+    bool same = input->count() == next.size();
+    for (int index = 0; same && index < next.size(); ++index)
+        same = input->itemData(index).toString() == next[index].first && input->itemText(index) == next[index].second;
+    if (same) return;
+    const QSignalBlocker blocker(input);
+    input->clear();
+    for (const auto& choice : next) input->addItem(choice.second, choice.first);
+    input->setCurrentIndex(input->findData(current));
+}
 void ParameterEditor::SetValue(const QJsonValue& value)
 {
     if (m_boolean && !value.isNull() && !value.isBool()) throw std::invalid_argument((m_title + "：请输入布尔值").toStdString());
@@ -214,6 +271,7 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     if (effective.isNull()) effective = m_schema.isNull() ? Shape(m_key) : m_schema;
     if (m_body) { m_layout->removeWidget(m_body); delete m_body; }
     m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr;
+    m_groups = nullptr; m_groupPages.clear(); m_groupOrder.clear();
     m_booleanState = nullptr; m_unsetBoolean = nullptr; m_booleanSpecified = !value.isNull();
     if (m_stateBound) m_booleanEdited = value.isBool();
     m_body = new QWidget(this); m_layout->addWidget(m_body);
@@ -229,15 +287,36 @@ void ParameterEditor::SetValue(const QJsonValue& value)
 void ParameterEditor::BuildValue(const QJsonValue& value)
 {
     if (value.isObject()) {
-        auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
         const auto object = value.toObject(); auto keys = object.keys();
         const QStringList first{"filePath", "viewScope", "viewId", "target", "seed", "seeds", "sourcePointsMM", "ring", "diffusion", "componentSelection", "initialIsoValue", "seedModelPoint", "roiModelBounds", "world", "worldAxis", "worldCenter", "dimensions", "spacingLPS", "originLPS", "directionLPS"};
         for (auto i = first.crbegin(); i != first.crend(); ++i) if (keys.removeOne(*i)) keys.prepend(*i);
-        int row = 0, column = 0;
         const bool seedRow = m_listItem && object.contains("imageIndex") && object.size() == 2;
+        QSet<QString> groups;
+        if (m_key.isEmpty()) for (const auto& key : keys)
+            if (!GetBoundParameters(m_module, m_action).contains(key)) groups.insert(GetParameterGroup(m_module, key));
+        const bool grouped = groups.size() > 1;
+        std::map<QString, QGridLayout*> grids;
+        std::map<QString, std::pair<int, int>> positions;
+        if (grouped) {
+            auto* layout = new QVBoxLayout(m_body); layout->setContentsMargins(0,0,0,0);
+            m_groups = new QTabWidget(m_body); m_groups->setObjectName("parameterGroups"); layout->addWidget(m_groups);
+        } else {
+            auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
+            grids[QString()] = grid;
+        }
         for (const auto& key : keys) {
+            const auto group = grouped ? GetParameterGroup(m_module, key) : QString();
+            QWidget* page = m_body;
+            if (grouped) {
+                if (!m_groupPages.count(group)) {
+                    page = new QWidget(m_groups); m_groupPages[group] = page; m_groupOrder.append(group); m_groups->addTab(page, group);
+                    auto* grid = new QGridLayout(page); grid->setContentsMargins(6,8,6,8); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
+                    grids[group] = grid;
+                } else page = m_groupPages.at(group);
+            }
+            auto* grid = grids.at(group); auto& position = positions[group]; auto& row = position.first; auto& column = position.second;
             const auto v = object[key]; const auto prototype = m_schema.isObject() && m_schema.toObject().contains(key) ? m_schema.toObject()[key] : v;
-            auto* field = new ParameterEditor(m_module, m_action, key, v, prototype, m_body, false,
+            auto* field = new ParameterEditor(m_module, m_action, key, v, prototype, page, false,
                 seedRow && key == "target" ? "新标签编号" : QString());
             field->onEdited = [this] { NotifyEdited(); }; m_fields[key] = field;
             if (m_key.isEmpty() && GetBoundParameters(m_module, m_action).contains(key)) { field->hide(); continue; }
@@ -247,8 +326,12 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             grid->addWidget(field, row, column, 1, wide ? 2 : 1);
             if (wide || column == 1) { ++row; column = 0; } else column = 1;
         }
-        if (seedRow) { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); grid->setColumnStretch(2, 1); grid->setColumnStretch(3, 1); }
-        else { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); }
+        for (const auto& entry : grids) {
+            auto* grid = entry.second;
+            if (seedRow) { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); grid->setColumnStretch(2, 1); grid->setColumnStretch(3, 1); }
+            else { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); }
+            grid->setRowStretch(grid->rowCount(), 1);
+        }
         return;
     }
     if (value.isArray()) {

@@ -515,6 +515,104 @@ IsoSurfaceBuildRequest GetIsoRequest(
     return request;
 }
 
+int GetInitialIsoStageFailCount()
+{
+    int failures = 0;
+    for (const bool hasExplicitIso : {false, true}) {
+        auto data = std::make_shared<TransitionData>();
+        const bool seeded = data->SetOwnedImage(BuildIsoImage());
+        const auto snapshot = data->GetPrimaryImage();
+        auto lane = std::make_shared<ManualRenderLane>();
+        auto resources = std::make_shared<RenderResourceCoordinator>(
+            [lane](RenderLaneWork work) { return lane->Start(std::move(work)); });
+        auto services = std::make_shared<RenderStrategyServices>();
+        services->resources = resources;
+        services->isHostDriven = true;
+        auto events = std::make_shared<SharedStateBroadcaster>();
+        AppServiceArgs args;
+        args.dataManager = data;
+        args.interactionState = std::make_shared<SharedInteractionState>(events);
+        args.eventSource = events;
+        args.renderServices = services;
+        auto ports = CreateAppPorts(std::move(args));
+        auto window = vtkSmartPointer<vtkRenderWindow>::New();
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        bool valid = seeded && snapshot && ports.renderBind->SetRenderTarget(window, renderer);
+        PreInitConfig config;
+        config.vizMode = VizMode::IsoSurface;
+        config.hasIso = hasExplicitIso;
+        config.isoThreshold = 0.25;
+        AppViewUpdate quality;
+        quality.volumeQuality = VolumeQuality::Ultra;
+        valid = ports.app.view->SetViewConfig(config)
+            && ports.app.view->SendViewUpdate(quality) && valid;
+        double range[2] = {};
+        snapshot->image->GetScalarRange(range);
+        const auto expected = hasExplicitIso ? config.isoThreshold : range[0] * 0.5 + range[1] * 0.5;
+        constexpr std::uint64_t transaction = 81;
+        valid = ports.dataStage->StartDataStage(snapshot, transaction) == DataStageStatus::Preparing
+            && lane->GetStartCount() == 1 && lane->SendOne() && valid;
+        valid = ports.dataStage->SetDataStageReady(snapshot, transaction) == DataStageStatus::Ready && valid;
+        auto key = GetIsoRequest(snapshot->image, 1, VolumeQuality::Ultra, expected).key;
+        key.inputStamp = {snapshot->data->self};
+        const auto product = resources->GetIsoSurfaceProduct(key);
+        auto zeroKey = key;
+        zeroKey.isoValue = 0.0;
+        valid = product && product->isoValue == expected
+            && !resources->GetIsoSurfaceProduct(zeroKey)
+            && resources->GetResourceState().productBuildCount == 1 && valid;
+        // 模拟跨视图事务补偿：默认值不能在正式数据发布前写回。
+        valid = ports.dataStage->SetViewStage(snapshot, transaction)
+            && ports.dataStage->ResetViewStage(transaction)
+            && ports.dataStage->ClearDataStage(transaction)
+            && ports.app.view->GetViewState().isoThreshold == (hasExplicitIso ? config.isoThreshold : 0.0)
+            && ports.app.view->GetViewState().hasExplicitIso == hasExplicitIso && valid;
+        const bool committed = ports.dataStage->StartDataStage(snapshot, transaction + 1) == DataStageStatus::Preparing
+            && ports.dataStage->SetDataStageReady(snapshot, transaction + 1) == DataStageStatus::Ready
+            && ports.dataStage->SetViewStage(snapshot, transaction + 1);
+        valid = committed && valid;
+        if (committed) {
+            ports.dataStage->SetDataStageComplete(transaction + 1);
+            (void)ports.interaction.update->SendUpdates();
+        }
+        valid = ports.app.view->GetViewState().isoThreshold == expected
+            && ports.app.view->GetViewState().hasExplicitIso == hasExplicitIso
+            && lane->GetStartCount() == 1
+            && resources->GetResourceState().productBuildCount == 1 && valid;
+        if (!hasExplicitIso) {
+            const auto old = ports.app.view->GetViewState();
+            AppViewUpdate explicitIso;
+            explicitIso.isoThreshold = 0.0;
+            valid = ports.app.view->SendViewUpdate(explicitIso)
+                && ports.app.view->SetViewState(old, ports.app.view->GetViewState().revision)
+                && !ports.app.view->GetViewState().hasExplicitIso && valid;
+        }
+        auto replacement = BuildIsoImage();
+        auto* scalars = replacement->GetPointData()->GetScalars();
+        for (vtkIdType index = 0; index < scalars->GetNumberOfTuples(); ++index)
+            scalars->SetComponent(index, 0, scalars->GetComponent(index, 0) + 100.0);
+        scalars->Modified(); replacement->Modified();
+        valid = data->SetOwnedImage(replacement) && valid;
+        const auto replacementSnapshot = data->GetPrimaryImage();
+        const auto nextExpected = hasExplicitIso ? expected : expected + 100.0;
+        valid = ports.dataStage->StartDataStage(replacementSnapshot, transaction + 2) == DataStageStatus::Preparing
+            && lane->SendOne()
+            && ports.dataStage->SetDataStageReady(replacementSnapshot, transaction + 2) == DataStageStatus::Ready
+            && ports.dataStage->ClearDataStage(transaction + 2)
+            && ports.app.view->GetViewState().isoThreshold == expected && valid;
+        const bool replaced = ports.dataStage->StartDataStage(replacementSnapshot, transaction + 3) == DataStageStatus::Preparing
+            && ports.dataStage->SetDataStageReady(replacementSnapshot, transaction + 3) == DataStageStatus::Ready
+            && ports.dataStage->SetViewStage(replacementSnapshot, transaction + 3);
+        if (replaced) ports.dataStage->SetDataStageComplete(transaction + 3);
+        valid = replaced && ports.app.view->GetViewState().isoThreshold == nextExpected
+            && ports.app.view->GetViewState().hasExplicitIso == hasExplicitIso && valid;
+        failures += GetCaseResult(valid, hasExplicitIso
+            ? "Explicit initial ISO builds once and survives data-stage rollback"
+            : "First ISO product uses native midpoint without a zero-ISO cache; rollback preserves automatic intent") ? 0 : 1;
+    }
+    return failures;
+}
+
 int GetIsoBuilderFailCount()
 {
     int failureCount = 0;
@@ -1551,6 +1649,7 @@ int GetRenderProductFailCount()
         + GetRenderLaneFailCount()
         + GetRenderStopFailCount()
         + GetExecutorLaneFailCount()
+        + GetInitialIsoStageFailCount()
         + GetIsoBuilderFailCount()
         + GetIsoStrategyTaskFailCount()
         + GetVolumeBuilderFailCount()

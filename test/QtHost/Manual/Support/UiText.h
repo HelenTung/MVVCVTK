@@ -14,6 +14,7 @@ QString GetActionText(const QString& module, const QString& action);
 QString GetParameterSectionText(const QString& module, const QString& action);
 QString GetParameterText(const QString& key);
 QString GetParameterHelp(const QString& key);
+QString GetParameterGroup(const QString& module, const QString& key);
 using ParameterChoices = QVector<std::pair<QString, QString>>;
 ParameterChoices GetParameterChoices(const QString& module, const QString& key);
 QStringList GetBoundParameters(const QString& module, const QString& action);

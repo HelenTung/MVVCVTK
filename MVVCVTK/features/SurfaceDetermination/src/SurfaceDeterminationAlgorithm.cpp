@@ -1133,7 +1133,8 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
         MeshComponent component;
         component.triangles = std::move(item.second);
         std::vector<std::uint32_t> pointIds;
-        pointIds.reserve(component.triangles.size());
+        if (component.triangles.size() <= std::numeric_limits<std::size_t>::max() / 3U)
+            pointIds.reserve(component.triangles.size() * 3U);
         for (const Triangle& triangle : component.triangles) {
             CheckCancellation(cancellationBatch, cancelled);
             pointIds.insert(
@@ -1169,6 +1170,8 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             }
         }
         const TopologyMetrics topology = GetTopologyMetrics(localPoints, localTriangles, cancelled);
+        // 已按有序 sourcePointIds 完成局部编号，后续对象处理直接复用同一编号。
+        component.triangles = std::move(localTriangles);
         component.isClosed = topology.boundaryEdgeCount == 0
             && topology.nonManifoldEdgeCount == 0;
         if (component.isClosed && voxelVolume > geometryEpsilon) {
@@ -1262,24 +1265,14 @@ void GetLocalMesh(const MeshComponent &component, const std::vector<Point3> &sou
                   const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
-    std::unordered_map<std::uint32_t, std::uint32_t> remap;
-    remap.reserve(component.sourcePointIds.size());
     points.reserve(component.sourcePointIds.size());
     for (std::size_t index = 0;
         index < component.sourcePointIds.size(); ++index) {
         CheckCancellation(cancellationBatch, cancelled);
         const std::uint32_t sourceId = component.sourcePointIds[index];
-        remap.emplace(sourceId, static_cast<std::uint32_t>(index));
         points.push_back(sourcePoints[sourceId]);
     }
     triangles = component.triangles;
-    for (Triangle& triangle : triangles) {
-        CheckCancellation(cancellationBatch, cancelled);
-        for (std::uint32_t& pointId : triangle.vertices) {
-            CheckCancellation(cancellationBatch, cancelled);
-            pointId = remap.at(pointId);
-        }
-    }
 }
 
 std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
@@ -1377,7 +1370,7 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
     }
     record.seedNormalModel = normal;
     // 原始分支的饱和节点梯度、位置和支持规则；不再保留局部剖面拟合路径。
-    GetGradient(volume, initialPoint, gradient, magnitude);
+    // volume 在本次计算中不可变；首次梯度采样已得到相同的原始 magnitude。
     record.normalModel = {GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]), GetFiniteFloat(normal[2])};
     record.localThreshold = GetFiniteFloat(params.initialIsoValue);
     record.gradientMagnitude = GetFiniteFloat(magnitude);

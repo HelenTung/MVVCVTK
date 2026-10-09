@@ -62,7 +62,7 @@ QString GetActionText(const QString& module, const QString& action)
     if (action == "GraphInfo") return "查看发布记录";
     if (module == "View" && action == "Visibility") return "应用辅助显示";
     static const QHash<QString, QString> specific{
-        {"Wall.Start", "计算壁厚"}, {"Wall.Result", "查看壁厚结果"}, {"Wall.SetEvaluation", "更新壁厚公差"},
+        {"Wall.Start", "计算局部壁厚"}, {"Wall.Result", "查看壁厚结果"}, {"Wall.SetEvaluation", "更新壁厚公差"},
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
         {"Alignment.Start", "开始对齐"}, {"Crop.Exit", "退出裁剪编辑"}, {"Gap.Exit", "退出孔隙分析"},
@@ -124,7 +124,7 @@ QString GetParameterText(const QString& key)
     static const QHash<QString, QString> labels{
         {"labels", "材料标签图修订"}, {"materialLabels", "材料标签集合"}, {"maxDistance", "搜索距离上限"},
         {"sampleSpacing", "显示采样间距"}, {"materialThreshold", "原始灰度材料阈值"}, {"materialRange", "背景/材料灰度值"},
-        {"coneAngleDegrees", "搜索锥半角（度）"}, {"directionCount", "搜索方向数量"}, {"boundaryPolicy", "源边界策略"},
+        {"coneAngleDegrees", "搜索锥半角（度）"}, {"directionCount", "搜索方向数量"}, {"boundaryPolicy", "局部支持策略"},
         {"maxBoundaryError", "边界误差上限"}, {"evaluationBounds", "评估空间范围"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
         {"histogramRange", "直方图范围"}, {"histogramBins", "直方图分箱数"}, {"minRegionArea", "最小异常区域面积"},
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
@@ -194,9 +194,20 @@ QString GetParameterHelp(const QString& key)
         {"opacityRange","相对于原有视图透明度的叠加强度。倾斜按本模块当前量值范围递增，反向倾斜递减；不改变几何、筛选或计算结果。"},
         {"displayStyle","控制结果叠加的强度。倾斜／反向倾斜按量值渐变；当前采用统一风格实现，不表示改变切片或模型的空间角度。"},
         {"centerIndex", "未提供时使用当前源数据的截面中心；显式提供可逐项输入两个索引。"},
-        {"initialIsoValue", "未提供时由算法估计当前输入的初始阈值；显式值使用原始灰度单位。"},
-        {"minPartVoxels", "小于此体素数的连通域不生成零件。手动测试默认 1000 以过滤真实 CT 的微小噪声；需保留更小零件时可降低。"},
-        {"dimensions", "分别填写 X、Y、Z 轴体素数量，必须与原始文件匹配。"},
+        {"initialIsoValue", "未提供时使用当前灰度范围（或已指定背景/材料范围）的中值作为初始阈值；表面业务继续定位和检查质量。显式值使用原始灰度单位。"},
+        {"iso", "未提供时，在当前体数据首次进入等值面时按灰度最小值与最大值的中值初始化一次；提供参数后保留手动阈值。"},
+        {"minPartVoxels", "小于此体素数的连通域不生成零件。默认 1 保留全部非空连通域；需要噪声过滤时显式提高阈值。"},
+        {"threshold", "未提供时使用当前体数据的灰度范围中值；提供后使用原始灰度单位，不随换页或观察覆盖。"},
+        {"absoluteIsoValue", "未提供时使用当前灰度范围中值；灰度范围比例模式按当前输入解析比例。"},
+        {"backgroundMean", "未提供时采用当前灰度范围下端；可按材料标定覆盖。"},
+        {"materialMean", "未提供时采用当前灰度范围上端；可按材料标定覆盖。"},
+        {"materialThreshold", "优先使用当前测量表面阈值，或使用当前灰度范围中值；可按所选已有网格显式指定。"},
+        {"materialRange", "分别提供背景与材料灰度值；未提供时使用当前输入的原始灰度范围。"},
+        {"sampleSpacing", "未提供时使用当前最小体素间距的两倍；可显式覆盖采样间距。"},
+        {"maxBoundaryError", "未提供时使用当前最小体素间距的一半；显式值须满足业务误差约束。"},
+        {"maxDistance", "未提供时使用当前体数据物理对角线作为搜索上限；可显式缩小搜索范围。"},
+        {"datasetId", "留空时使用输入文件名；不影响数据修订的唯一身份。"},
+        {"dimensions", "未提供时按 float32 RAW 长度推测立方尺寸并显示；非立方体或手工覆盖时需填写准确 X、Y、Z。"},
         {"spacingLPS", "依次填写 X、Y、Z 轴间距；单位必须与数据来源及后续测量一致。"},
         {"originLPS", "分别填写 LPS 原点的 X、Y、Z 坐标，不需要手工翻转为 RAS。"},
         {"directionLPS", "按行、列逐格填写 3×3 方向矩阵。"},
@@ -220,10 +231,11 @@ QString GetParameterHelp(const QString& key)
         {"reference", "模板必须填写实际测量选区、名义点/约束、单位和来源；导出后再导入名义参考。"},
         {"recipe", "不勾选“指定”时使用已导入参考中的方案；勾选后可分别编辑几何、约束和对应点。"},
         {"source", "current 表示当前输入；显式修订必须使用实际存在的数据引用。"},
-        {"labels", "parts 使用当前零件分割标签图；也可输入准确的标签图修订。"},
-        {"materialLabels", "空集合选择全部非零零件标签；填写正整数集合时只测量所选标签，0 为背景。"},
+        {"labels", "可选择已有材料标签图；parts 是当前零件标签的便捷引用，精确修订可跨操作复用。"},
+        {"materialLabels", "空集合选择全部非零材料标签；填写正整数集合时只测量所选标签，0 为背景。"},
         {"evaluationBounds", "按源数据物理坐标填写评估范围，顺序为 X 最小/最大、Y 最小/最大、Z 最小/最大。"},
-        {"mesh", "surface 表示最近生成且属于当前输入的正式测量表面网格。"},
+        {"mesh", "选择同一源的采样网格。网格提供查询位置和面积；壁厚两端由原始灰度确定，不要求全局闭合或一致流形。"},
+        {"boundaryPolicy","局部策略只接受有充分体数据支撑的测量；缺失方向可能改变最小值时保留未测。严格策略要求所有实际搜索方向都有完整支撑。"},
         {"result", "current 表示本页最近保存的结果修订。"},
         {"targetRequestId", "十进制字符串；0 表示由功能接口选择当前请求。"},
         {"requestId", "current 表示当前计算请求；显式编号使用十进制字符串。"},
@@ -235,6 +247,12 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if (module=="Wall" && key=="boundaryPolicy") return {{"SourceExtentLocal","局部可证明支撑"},{"Complete","所有方向完整支撑"}};
+    if ((module == "Wall" || module == "Alignment" || module == "Artifact" || module == "Surface") && key == "source")
+        return {{"current", "当前体数据"}};
+    if (module == "Wall" && key == "labels") return {{"parts", "当前零件标签"}};
+    if ((module == "Wall" || module == "Alignment") && key == "mesh") return {{"surface", "当前有效测量表面"}};
+    if ((module == "Wall" || module == "Alignment") && key == "result") return {{"current", "当前业务结果"}};
     if(key=="displayStyle") {
         ParameterChoices choices{{"Constant","恒定"},{"Inclined","倾斜（数值渐变叠加）"},{"InverseInclined","反向倾斜"}};
         if(module=="Wall")choices.prepend({"Overlay","叠加层"});return choices;
@@ -253,7 +271,8 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     }
     if (module == "Artifact" && key == "mode") return {{"Wrap", "环绕"}, {"Reflect", "反射"}};
     if (module == "Wall" && key == "mode") return {{"Continuous", "连续色标"}, {"Tolerance", "公差分布"}};
-    if (module == "Wall" && key == "unit") return {{"Millimeter", "毫米"}, {"Meter", "米"}};
+    if (module == "Wall" && key == "unit") return {{"Millimeter", "毫米（与源几何一致）"}};
+    if (key == "evidenceKind") return {{"unconfigured", "未声明"}, {"real-data", "真实数据"}, {"synthetic-regression", "合成回归"}};
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
@@ -280,12 +299,29 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
         return fields;
     }
     if (module == "Part") return {"target"};
-    if (module == "Artifact") return {"source", "requestId"};
+    if (module == "Artifact") return {"requestId"};
     if (module == "Surface") return {"targetRequestId"};
-    if (module == "Wall") return {"source", "labels", "mesh", "result", "targetRequestId"};
-    if (module == "Alignment") return {"source", "mesh", "result", "targetRequestId"};
+    if (module == "Wall" || module == "Alignment") return {"targetRequestId"};
     if (module == "Data") return {"expectedBindingRevision"};
     return {};
+}
+QString GetParameterGroup(const QString& module, const QString& key)
+{
+    if (QStringList{"source", "labels", "mesh", "result", "target", "parts", "revision", "filePath", "datasetId", "sourceDigest", "evidenceKind", "archivePath", "reference"}.contains(key))
+        return "输入与结果";
+    if (QStringList{"matrix", "boxToSource", "directionLPS", "dimensions", "spacingLPS", "originLPS", "initialPoses", "worldAxis", "worldCenter", "angleDeg", "slice"}.contains(key))
+        return "空间与矩阵";
+    if (QStringList{"roiModelBounds", "evaluationBounds", "extent", "seedModelPoint", "componentSelection", "indexBoxes"}.contains(key))
+        return "作用范围";
+    if (key == "ring") return "环状校正";
+    if (key == "diffusion") return "扩散校正";
+    if (key == "filter" || key == "minVolumeMM3") return "孔隙筛选";
+    if (key == "outputPath" || key == "outputDir" || key == "plyPath" || key == "count" || key.endsWith("RequestId")) return "导出与诊断";
+    if (QStringList{"palette", "range", "rangeMode", "displayStyle", "opacity", "opacityRange", "segments", "constantColor", "lowColor", "highColor", "belowColor", "aboveColor", "visibility", "isVisible", "axes", "viewId", "viewScope", "planes", "crosshair", "ruler", "windowLevel", "transfer", "hasLegend", "quality"}.contains(key)
+        || (key == "mode" && (module == "Wall" || module == "View" || module == "Gap")))
+        return "显示设置";
+    if (module == "Part" && QStringList{"name", "colorRGBA", "isSelected", "isReviewed"}.contains(key)) return "零件属性";
+    return "算法参数";
 }
 QString GetFlowText(const QJsonObject& record)
 {

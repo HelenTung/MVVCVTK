@@ -37,6 +37,7 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     auto reference = std::make_shared<ReferenceDataSource>();
     if (!context.runtime.AttachFeature(reference)) throw std::runtime_error("测试输入适配器挂载失败");
     context.workflow.getPublishedGraph = [reference] { return reference->GetPublishedGraph(); };
+    context.workflow.getImageInput = [reference](DataRevisionRef source) { return reference->GetImageInput(source); };
     context.workflow.getViewTransforms = [reference] { return reference->GetViewTransforms(); };
     std::shared_ptr<RoiEditingHostFeature> roi;
 #if defined(MANUAL_ROI)

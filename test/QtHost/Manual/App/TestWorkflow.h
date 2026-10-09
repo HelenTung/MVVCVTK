@@ -30,6 +30,7 @@ public:
     std::function<bool(const std::string&)> getRenderPending;
     std::function<bool(const std::string&)> getViewRenderPending;
     std::function<QJsonObject()> getPublishedGraph;
+    std::function<std::optional<ImageDescriptor>(DataRevisionRef)> getImageInput;
     std::function<QJsonObject()> getViewTransforms;
     std::function<DataRevisionRef()> getPartLabels;
 private:

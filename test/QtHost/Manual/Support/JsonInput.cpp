@@ -1,6 +1,8 @@
 // 测试用途：校验功能测试的 JSON 参数、数值和精确数据修订引用，并支持参数文件读写。
 #include "JsonInput.h"
 #include <QFile>
+#include <QFileInfo>
+#include <algorithm>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QRegularExpression>
@@ -49,6 +51,98 @@ double GetNumber(const QJsonObject& object, const char* key)
     if (!object[key].isDouble() || !std::isfinite(value))
         throw std::invalid_argument(std::string("需要有限数字: ") + key);
     return value;
+}
+
+double GetScalarMidpoint(const ImageDescriptor& image)
+{
+    const auto low = image.scalarRange[0], high = image.scalarRange[1];
+    if (!std::isfinite(low) || !std::isfinite(high) || low > high)
+        throw std::invalid_argument("当前输入没有有效的原始灰度范围");
+    return low * 0.5 + high * 0.5;
+}
+
+double GetInputNumber(const QJsonObject& object, const char* key, double defaultValue)
+{
+    return object[key].isNull() || object[key].isUndefined() ? defaultValue : GetNumber(object, key);
+}
+
+namespace {
+void CheckLinearMatrix(const std::array<double, 9>& matrix, bool rigid)
+{
+    auto normalized = matrix;
+    for (int column = 0; column < 3; ++column) {
+        const auto scale = std::hypot(matrix[column], matrix[3 + column], matrix[6 + column]);
+        if (!std::isfinite(scale) || scale == 0.0)
+            throw std::invalid_argument("矩阵的三个轴必须具有有限且非零的长度");
+        if (rigid && std::abs(scale - 1.0) > 1e-6)
+            throw std::invalid_argument("方向或刚体矩阵的各轴长度必须为 1");
+        for (int row = 0; row < 3; ++row) normalized[row * 3 + column] /= scale;
+    }
+    const auto& a = normalized;
+    const auto determinant = a[0] * (a[4] * a[8] - a[5] * a[7])
+        - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+    if (!std::isfinite(determinant) || std::abs(determinant) <= 1e-12)
+        throw std::invalid_argument("矩阵不可逆，或三个轴接近共面");
+    if (rigid) for (int left = 0; left < 3; ++left) for (int right = left + 1; right < 3; ++right) {
+        double dot = 0.0;
+        for (int row = 0; row < 3; ++row) dot += a[row * 3 + left] * a[row * 3 + right];
+        if (std::abs(dot) > 1e-6) throw std::invalid_argument("方向或刚体矩阵的三个轴必须相互正交");
+    }
+}
+}
+
+std::array<double, 9> GetDirectionMatrix(const QJsonValue& value)
+{
+    const auto matrix = GetArray<double, 9>(value);
+    CheckLinearMatrix(matrix, true);
+    return matrix;
+}
+
+std::array<double, 16> GetAffineMatrix(const QJsonValue& value, bool rigid)
+{
+    const auto matrix = GetArray<double, 16>(value);
+    if (matrix[12] != 0.0 || matrix[13] != 0.0 || matrix[14] != 0.0 || matrix[15] != 1.0)
+        throw std::invalid_argument("4×4 仿射矩阵的最后一行必须为 0、0、0、1");
+    const std::array<double, 9> linear{matrix[0],matrix[1],matrix[2],matrix[4],matrix[5],matrix[6],matrix[8],matrix[9],matrix[10]};
+    CheckLinearMatrix(linear, rigid);
+    if (rigid) {
+        const auto determinant = linear[0] * (linear[4] * linear[8] - linear[5] * linear[7])
+            - linear[1] * (linear[3] * linear[8] - linear[5] * linear[6]) + linear[2] * (linear[3] * linear[7] - linear[4] * linear[6]);
+        if (determinant <= 0.0) throw std::invalid_argument("刚体位姿必须保持右手坐标方向");
+    }
+    return matrix;
+}
+
+std::array<int, 3> GetInputDimensions(const QString& path, const QJsonValue& value)
+{
+    const auto size = QFileInfo(path).size();
+    if (size <= 0 || size % sizeof(float) != 0) throw std::invalid_argument("文件长度不符合 float32 RAW 输入契约");
+    std::array<int,3> dimensions{};
+    if (value.isNull() || value.isUndefined()) {
+        const auto count = static_cast<std::uint64_t>(size) / sizeof(float);
+        const auto side = static_cast<std::uint64_t>(std::llround(std::cbrt(static_cast<double>(count))));
+        if (side == 0 || side > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) || side * side * side != count)
+            throw std::invalid_argument("RAW 没有尺寸头，当前文件不能按立方体推测；请提供 X、Y、Z 尺寸");
+        dimensions.fill(static_cast<int>(side));
+    } else dimensions = GetArray<int,3>(value);
+    std::uint64_t bytes = sizeof(float);
+    for (const auto side : dimensions) {
+        if (side <= 0 || bytes > (std::numeric_limits<std::uint64_t>::max)() / static_cast<std::uint64_t>(side))
+            throw std::invalid_argument("体素尺寸必须为正整数且不能溢出");
+        bytes *= static_cast<std::uint64_t>(side);
+    }
+    if (bytes != static_cast<std::uint64_t>(size)) throw std::invalid_argument("尺寸与文件长度不一致，请核对 X、Y、Z 及 float32 数据类型");
+    return dimensions;
+}
+double GetVoxelSpacing(const ImageDescriptor& image)
+{
+    const auto spacing = *std::min_element(image.spacing.begin(),image.spacing.end());
+    if (!std::isfinite(spacing) || spacing <= 0) throw std::invalid_argument("当前输入没有有效的体素间距");
+    return spacing;
+}
+double GetInputDiagonal(const ImageDescriptor& image)
+{
+    return std::hypot(image.spacing[0] * image.dims[0],image.spacing[1] * image.dims[1],image.spacing[2] * image.dims[2]);
 }
 
 bool GetBool(const QJsonObject& object, const char* key)

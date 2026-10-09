@@ -12,6 +12,7 @@
 #include <vtkGenericOpenGLRenderWindow.h>
 class QVTKOpenGLNativeWidget;
 namespace Manual {
+class ResultReport;
 class TestWindow final : public QMainWindow {
 public:
     explicit TestWindow(std::uint64_t budgetMiB = 0);
@@ -53,6 +54,7 @@ private:
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;
     QPlainTextEdit* m_log = nullptr;
+    ResultReport* m_report = nullptr;
     bool m_observeQueued = false;
     bool m_visibilityQueued = false;
     bool m_closeRetryQueued = false;

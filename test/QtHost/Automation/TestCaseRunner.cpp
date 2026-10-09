@@ -7,13 +7,20 @@
 #include "Support/SceneGraph.h"
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
+#include "Support/ResultReport.h"
 #include <QTabWidget>
+#include <QDialog>
+#include <QToolButton>
+#include <QMenu>
+#include <QTableWidget>
 #include <QSplitter>
 #include <QScrollArea>
+#include <QScrollBar>
 #if defined(MANUAL_ALIGNMENT)
 #include "Modules/AlignmentInput.h"
 #endif
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QEventLoop>
 #include <QAbstractEventDispatcher>
@@ -42,6 +49,7 @@
 #include <functional>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <vtkCommand.h>
 #include <vtkRenderer.h>
@@ -192,7 +200,7 @@ void CheckFourViewGeometry(TestWindow& window)
         // 奇数像素的等分最多有一个像素的取整差。
         return maxWidth-minWidth <= 1 && maxHeight-minHeight <= 1 && minWidth >= 160 && minHeight >= 160;
     };
-    for (const auto size : {QSize(1600,960), QSize(1471,897), original}) {
+    for (const auto size : {QSize(1600,960), QSize(1471,897), QSize(1280,800), original}) {
         window.resize(size); QCoreApplication::processEvents();
         Check(Wait(sameSize, 3000), "all four image regions stay equal in width and height when resizing");
     }
@@ -222,14 +230,13 @@ void CheckUiAndRecords(TestWindow& window)
         "3D toolbar waits for input before offering display operations");
     auto* dataDefaults = window.GetModule("Data")->GetParameterEditor("Load");
     const auto defaults = dataDefaults->GetValue().toObject();
-    Check(defaults["datasetId"] == "1" && defaults["dimensions"] == QJsonArray{1536,1536,1536}
-        && defaults["spacingLPS"] == QJsonArray{0.1537,0.1537,0.1537}
-        && defaults["filePath"] == "F:/data/ct/1536x1536x1536_1440.raw", "manual defaults match the confirmed real CT sample");
+    Check(defaults["datasetId"] == "" && defaults["dimensions"].isNull()
+        && defaults["spacingLPS"] == QJsonArray{1,1,1}
+        && defaults["filePath"] == "", "manual input defaults are independent of a particular CT file and geometry");
     if (GetEnabled(window, "Wall")) {
-        const auto spacing = GetArray<float, 3>(defaults["spacingLPS"]);
         const auto wallDefaults = window.GetModule("Wall")->GetParameterEditor("Start")->GetValue().toObject();
-        Check(GetNumber(wallDefaults, "maxBoundaryError") <= 0.5 * *std::min_element(spacing.begin(), spacing.end()),
-            "wall defaults respect the half-voxel endpoint-error limit for the default real CT spacing");
+        Check(wallDefaults["maxBoundaryError"].isNull() && wallDefaults["sampleSpacing"].isNull() && wallDefaults["maxDistance"].isNull(),
+            "wall default lengths are resolved from the selected input instead of fixed test geometry");
     }
     const QRegularExpression chinese("[\\x{4e00}-\\x{9fff}]");
     for (const QString name : {QString("Data"), QString("View"), QString("Crop"), QString("Gap"), QString("Part"),
@@ -609,7 +616,8 @@ void CheckBusinessParameters(TestWindow& window)
         Check(!window.GetModule("Part")->GetParameterEditor("Merge")->GetField("target"), "merge does not expose an unused single target");
     }
     if (auto* ring = window.GetModule("Artifact")->GetParameterEditor("Ring")) {
-        Check(ring->GetField("ring") && !ring->GetField("diffusion") && ring->GetField("source")->isHidden(), "ring card contains only its algorithm and automatically bound source");
+        Check(ring->GetField("ring") && !ring->GetField("diffusion") && !ring->GetField("source")->isHidden()
+            && ring->GetField("source")->findChild<QComboBox*>("value"), "ring algorithm and selectable published source remain separate inputs");
         auto* diffusion = window.GetModule("Artifact")->GetParameterEditor("Diffusion");
         Check(diffusion->GetField("diffusion") && !diffusion->GetField("ring"), "diffusion card has no ring parameters");
     }
@@ -630,11 +638,40 @@ void CheckParameterLayout(TestWindow& window)
     auto* scroll = view->findChild<QScrollArea*>("operationScroll");
     Check(scroll && scroll->height() > 240 && view->GetBrowser()->parentWidget() != view,
         "parameters occupy a separate full-height column beside the scene browser");
+    auto* commandArea = view->findChild<QStackedWidget*>("operationCommands");
+    auto* execute = view->findChild<QPushButton*>("action_Set");
+    Check(commandArea && commandArea->isAncestorOf(execute) && !scroll->isAncestorOf(execute),
+        "selected operation command remains outside the parameter scroll area");
+    auto* operationTabs = view->findChild<QTabBar*>("parameterTabs");
+    auto* more = view->findChild<QToolButton*>("moreOperations");
+    Check(operationTabs && !operationTabs->usesScrollButtons() && operationTabs->count() <= 5 && more && more->menu(),
+        "common operations fit a compact row and all additional operations have a discoverable menu");
+    const auto originalSize = window.size(); window.resize(1280,800); QCoreApplication::processEvents();
+    const auto commandBounds = QRect(execute->mapTo(view,QPoint()),execute->size());
+    Check(window.size() == QSize(1280,800) && execute->isVisible() && view->rect().contains(commandBounds),
+        "the full execution button fits inside the parameter column at 1280 by 800");
+    window.grab().save("manual-layout-1280.png");
+    window.resize(originalSize); QCoreApplication::processEvents();
+    const auto canvasSize = window.findChild<QWidget*>("primary3D")->size();
+    window.findChild<QPushButton*>("showResultReport")->click(); QCoreApplication::processEvents();
+    auto* reportWindow = window.findChild<QDialog*>("operationReports");
+    Check(reportWindow && reportWindow->isVisible() && window.findChild<QWidget*>("primary3D")->size() == canvasSize,
+        "result report opens independently without reducing the four-view canvas");
+    reportWindow->hide();
     Check(form->isVisible() && !view->GetParameterEditor("Cursor")->isVisible(), "only the selected operation form is expanded");
     auto* windowLevel = form->GetField("windowLevel"); windowLevel->findChild<QCheckBox*>("specified")->setChecked(true);
     windowLevel->GetElement(0)->findChild<QLineEdit*>("value")->setText("1200");
     windowLevel->GetElement(1)->findChild<QLineEdit*>("value")->setText("600");
     Check(windowLevel->GetValue() == QJsonValue(QJsonArray{1200,600}), "separate window width and level fields assemble exact request values");
+    const auto beforeNavigation = window.GetRecords().GetRecords()["records"].toArray().size();
+    auto* resetNavigation = more->menu()->findChild<QAction*>("navigate_Reset");
+    Check(resetNavigation && resetNavigation->isEnabled(), "additional parameter operations remain accessible through the more menu");
+    resetNavigation->trigger(); QCoreApplication::processEvents();
+    Check(view->GetParameterEditor("Reset")->isVisible()
+        && window.GetRecords().GetRecords()["records"].toArray().size() == beforeNavigation,
+        "more menu parameter navigation opens its form without submitting a command");
+    view->SelectAction("Set"); QCoreApplication::processEvents();
+    Check(windowLevel->GetValue() == QJsonValue(QJsonArray{1200,600}), "more menu navigation preserves the edited parameter draft");
     auto* visibility = view->GetParameterEditor("Visibility");
     auto* planes = visibility->GetField("planes");
     SetBoolean(planes, true); SetBoolean(planes, false);
@@ -662,6 +699,66 @@ void CheckParameterLayout(TestWindow& window)
     Check(optional.GetValue().isNull(), "unspecified transform matrix keeps the business default");
     optional.findChild<QCheckBox*>("specified")->setChecked(true);
     Check(optional.GetValue() == QJsonValue(identity), "enabling the optional transform supplies the identity matrix");
+    const auto invalidMatrix = [&](QJsonArray values) {
+        try { (void)GetAffineMatrix(values); return false; } catch (const std::invalid_argument&) { return true; }
+    };
+    auto singular = identity; singular[10] = 0;
+    auto projective = identity; projective[12] = 1;
+    Check(invalidMatrix(singular) && invalidMatrix(projective), "manual matrix validation rejects singular and non-affine input before request dispatch");
+    auto shear = identity; shear[1] = .25;
+    Check(GetAffineMatrix(shear)[1] == .25, "valid affine shear is preserved without forcing a rigid transform");
+    bool rigidRejected = false;
+    try { (void)GetAffineMatrix(shear,true); } catch (const std::invalid_argument&) { rigidRejected = true; }
+    Check(rigidRejected, "alignment pose validation rejects non-rigid input in the manual layer");
+    ParameterEditor adaptive("Part","Start","threshold",QJsonValue(),QJsonValue());
+    adaptive.SetDefaultValue(.0005);
+    Check(adaptive.GetValue().isNull() && adaptive.findChild<QLineEdit*>("value")->text().toDouble() == .0005,
+        "automatic threshold is visible while its omission remains distinct from explicit input");
+    adaptive.SetValue(.05); adaptive.findChild<QLineEdit*>("value")->setText("-"); adaptive.SetDefaultValue(500.);
+    Check(adaptive.findChild<QLineEdit*>("value")->text() == "-", "input changes never overwrite an unfinished explicitly supplied threshold");
+    ImageDescriptor largeRange, signedRange;
+    largeRange.scalarRange = {0.,1000.}; signedRange.scalarRange = {-.12,.04};
+    signedRange.spacing = {.02125,.0425,.085}; signedRange.dims = {10,20,30};
+    Check(GetInputNumber({{"threshold",QJsonValue()}},"threshold",GetScalarMidpoint(largeRange)) == 500.
+        && std::abs(GetInputNumber({{"threshold",QJsonValue()}},"threshold",GetScalarMidpoint(signedRange)) + .04) < 1e-12
+        && GetInputNumber({{"threshold",0.}},"threshold",GetScalarMidpoint(signedRange)) == 0.,
+        "default thresholds adapt to unsigned and signed gray ranges while explicit zero stays explicit");
+    Check(GetVoxelSpacing(signedRange) == .02125 && GetInputDiagonal(signedRange) > 2.55,
+        "default measurement lengths use the input geometry rather than one CT fixture");
+    auto* grouped = window.GetModule("Data")->GetParameterEditor("Load")->findChild<QTabWidget*>("parameterGroups");
+    Check(grouped && grouped->count() >= 2, "data input and geometry are organized in parameter group tabs");
+    const auto groupValues = window.GetModule("Data")->GetParameterEditor("Load")->GetValue();
+    const auto groupRecordCount = window.GetRecords().GetRecords()["records"].toArray().size();
+    for (int index = 0; index < grouped->count(); ++index) grouped->setCurrentIndex(index);
+    Check(window.GetModule("Data")->GetParameterEditor("Load")->GetValue() == groupValues
+        && window.GetRecords().GetRecords()["records"].toArray().size() == groupRecordCount,
+        "parameter group navigation preserves all values and never dispatches a request");
+    const QJsonObject report{{"operationId","7"},{"module","Roi"},{"action","Begin"},{"status","Succeeded"},
+        {"parameters",QJsonObject{{"matrix",identity},{"name","含逗号,引号\"与\n换行"}}},{"result",QJsonObject{{"value",.05}}},{"source",QJsonObject{} },
+        {"current",QJsonObject{{"dims",QJsonArray{32,32,32}}}}};
+    const auto csv = GetReportCsv(report);
+    Check(csv.contains("matrix[4,4]") && csv.contains("current.dims[0]") && csv.contains("\"含逗号,引号\"\"与\n换行\""),
+        "CSV report includes post-operation input, matrix row/column indices, and escaped commas, quotes and newlines");
+    QTemporaryDir reportDirectory; Check(reportDirectory.isValid(), "report export directory exists");
+    const auto reportPath = reportDirectory.filePath("结果报告.csv"); ExportReportCsv(reportPath,report);
+    QFile reportFile(reportPath); Check(reportFile.open(QIODevice::ReadOnly), "CSV report can be read back");
+    const auto reportBytes = reportFile.readAll();
+    Check(reportBytes.startsWith(QByteArray("\xef\xbb\xbf")) && reportBytes.mid(3) == csv.toUtf8(), "CSV export preserves Chinese content and all report rows");
+    ResultReport reportView;
+    auto firstRecord = report; firstRecord["isTerminal"] = true;
+    auto secondRecord = firstRecord; secondRecord["operationId"] = "8";
+    QJsonArray largeReport; for (int index = 0; index < 1010; ++index) largeReport.append(index);
+    secondRecord["result"] = QJsonObject{{"rows",largeReport}};
+    reportView.SetRecord(firstRecord); reportView.SetRecord(secondRecord);
+    Check(reportView.findChild<QComboBox*>("reportOperation")->count() == 2
+        && reportView.GetSelectedRecord()["operationId"] == "8", "report stores terminal operations and selects the latest completion");
+    reportView.show(); QCoreApplication::processEvents();
+    bool reportLimited = false;
+    for (auto* table : reportView.findChildren<QTableWidget*>("reportTable")) reportLimited = reportLimited || table->rowCount() == 1000;
+    Check(reportLimited && GetReportCsv(reportView.GetSelectedRecord()).contains("rows[1009]"), "report preview is bounded while CSV includes the final row");
+    reportView.findChild<QComboBox*>("reportOperation")->setCurrentIndex(0);
+    Check(reportView.GetSelectedRecord()["operationId"] == "7", "report can select an earlier completed operation without changing business state");
+    reportView.hide();
 #if defined(MANUAL_ROI)
     window.GetWorkflow().onNavigate("Roi", "Begin", {}); QCoreApplication::processEvents();
     window.GetModule("Roi")->findChild<QWidget*>("card_Begin")->grab().save("parameter-ui-roi-matrix.png");
@@ -705,6 +802,18 @@ void CheckParameterLayout(TestWindow& window)
         window.GetWorkflow().onNavigate("Part", "Split", {});
         Check(Wait([&] { return qAbs(card->mapTo(splitScroll->viewport(), QPoint()).y()) < 30; }, 3000), "edited card can be focused again without resetting rows");
         window.grab().save("parameter-ui-split.png");
+        QJsonArray longSeeds; for (int index = 0; index < 12; ++index) longSeeds.append(seeds->GetValue().toArray().first());
+        seeds->SetValue(longSeeds);
+        window.resize(1280,800); QCoreApplication::processEvents();
+        Check(Wait([&] { return splitScroll->verticalScrollBar()->maximum() > 0; },3000), "long seed lists scroll in a small window");
+        auto* splitCommand = window.GetModule("Part")->findChild<QPushButton*>("action_Split");
+        const auto commandPosition = splitCommand->mapTo(window.GetModule("Part"),QPoint());
+        splitScroll->verticalScrollBar()->setValue(splitScroll->verticalScrollBar()->maximum()); QCoreApplication::processEvents();
+        Check(splitCommand->isVisible() && splitCommand->mapTo(window.GetModule("Part"),QPoint()) == commandPosition
+            && window.GetModule("Part")->rect().contains(QRect(commandPosition,splitCommand->size())),
+            "scrolling a long form leaves the complete execution button in its fixed position");
+        window.grab().save("manual-layout-long-form-1280.png");
+        window.resize(originalSize); QCoreApplication::processEvents();
         seeds->SetValue(original);
     }
     window.GetWorkflow().onNavigate("Data", "Load", {}); QCoreApplication::processEvents(); window.grab().save("parameter-ui-data.png");
@@ -1170,16 +1279,29 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "wall-manual-slab"},
         {"dimensions", QJsonArray{32,32,32}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{-31,-31,0}}, {"sourceDigest", ""}}), "Succeeded");
     GetComplete(window, Click(window, "Wall", "Start"), "InvalidInput");
-    GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
+    const auto parts = GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
     GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "Largest"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
         {"roiModelBounds", QJsonValue()}}), "Succeeded");
-    const auto incomplete = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5}}), "Failed");
-    Check(incomplete["result"].toObject()["message"] == "Mesh lacks complete-boundary provenance.",
-        "wall rejects a component-filtered surface for the complete-boundary reason");
-    GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
+    const auto local = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5},
+        {"directionCount",1},{"evaluationBounds",QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
+    Check(local["result"].toObject()["validCount"].toString().toULongLong()>0
+        && local["result"].toObject()["algorithmVersion"]=="wall-thickness-cuda-gray-ray-field-4",
+        "local gray wall measurement accepts component-filtered sampling seeds");
+    const auto surface = GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
         {"roiModelBounds", QJsonValue()}}), "Succeeded");
+    const auto savedLabels = window.GetWorkflow().getPartLabels;
+    const auto savedSource = window.GetWorkflow().GetSurfaceSource(), savedMesh = window.GetWorkflow().GetSurfaceMesh();
+    const auto savedThreshold = window.GetWorkflow().GetSurfaceThreshold();
+    window.GetWorkflow().getPartLabels = [] { return DataRevisionRef{}; };
+    window.GetWorkflow().SetSurfaceInput({},{});
     const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
-        {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
+        {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}},
+        {"labels",parts["result"].toObject()["labelMap"]},{"mesh",surface["result"].toObject()["mesh"]},{"materialThreshold",500.}}), "Succeeded");
+    window.GetWorkflow().getPartLabels = savedLabels;
+    window.GetWorkflow().SetSurfaceInput(savedSource,savedMesh,savedThreshold);
+    Check(record["parameters"].toObject()["labels"] == parts["result"].toObject()["labelMap"]
+        && record["parameters"].toObject()["mesh"] == surface["result"].toObject()["mesh"],
+        "wall reuses explicitly selected published inputs without latest-operation workflow aliases");
     const auto result = record["result"].toObject();
     Check(result["isDisplayReady"].toBool() && result["coverage"].toDouble() >= 0.5
         && !result["minimum"].isNull() && std::abs(result["minimum"].toDouble()-8.) <= 0.2,
@@ -1264,6 +1386,7 @@ void StartSelfTest(TestWindow& window)
     QFile file(path); Check(file.open(QIODevice::WriteOnly), "fixture opens");
     const QByteArray bytes(reinterpret_cast<const char*>(voxels.data()), static_cast<int>(voxels.size() * sizeof(float)));
     Check(file.write(bytes) == bytes.size(), "fixture writes"); file.close();
+    Check(GetInputDimensions(path,QJsonValue()) == std::array<int,3>{24,24,24}, "unprovided RAW dimensions are resolved only when file length identifies a cube");
     window.SetViewsVisible(false);
     const QJsonObject load{{"filePath", path}, {"datasetId", "synthetic-manual-contract-test"}, {"dimensions", QJsonArray{24, 24, 24}}, {"spacingLPS", QJsonArray{1,1,1}},
         {"evidenceKind", "synthetic-regression"}, {"sourceDigest", QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
@@ -1308,6 +1431,12 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, firstLoad, "Succeeded");
     Check(window.GetSession()->GetImageDescriptor().has_value(), "hidden windows do not prevent input commit");
     const auto original = *window.GetSession()->GetImageDescriptor();
+    const auto initialIso = original.scalarRange[0] * 0.5 + original.scalarRange[1] * 0.5;
+    Check(Wait([&] {
+        const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});
+        if (!state || state->isoThreshold != initialIso) return false;
+        return true;
+    }), "initial isosurface commits the native scalar-range midpoint with the data load");
     const auto maskA = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 A"}}), "MaskPublished")["result"].toObject()["mask"];
     const auto maskB = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 B"}}), "MaskPublished")["result"].toObject()["mask"];
     const auto graph = window.GetWorkflow().getPublishedGraph();
@@ -1322,6 +1451,8 @@ void StartSelfTest(TestWindow& window)
     auto* sourceNode = FindNode(dataTree, "published:" + GetRefText(original.dataRevision));
     Check(sourceNode != nullptr, "published input is available as a scene node");
     GetComplete(window, ClickNodeAction(window, dataTree, sourceNode, "UseData"), "Succeeded");
+    Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == initialIso,
+        "reselecting the same data preserves the initial ISO");
     window.grab().save("scene-ui-data-graph.png");
     GetComplete(window, Click(window, "View", "Reset", {{"viewId", "missing"}}), "Failed");
     GetComplete(window, Send(window, "Data", "Select", {{"revision", GetRefText(original.dataRevision)}, {"expectedBindingRevision", "0"}}), "Failed");
@@ -1335,6 +1466,10 @@ void StartSelfTest(TestWindow& window)
     for (const auto id : burst) GetComplete(window, id, id == burst.back() ? "Succeeded" : "Failed");
     Check(window.GetUpdateCount() - burstStart < burst.size(), "burst notifications merge and every command retains its exact completion");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == 50.0, "burst keeps final requested view state");
+    GetComplete(window, Send(window, "View", "Set", {{"mode", "CompositeVolume"}}), "Succeeded");
+    GetComplete(window, Send(window, "View", "Set", {{"mode", "CompositeIsoSurface"}}), "Succeeded");
+    Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == 50.0,
+        "returning to isosurface preserves the explicitly supplied ISO");
     CheckCropWorkflow(window);
     CheckCropMouseInteraction(window);
     window.SetViewsVisible(false);
@@ -1767,8 +1902,17 @@ void StartSequence(TestWindow& window, const QString& path)
         });
         previewWatch.start(100);
     }
-    if (script["viewsVisible"].isBool()) window.SetViewsVisible(script["viewsVisible"].toBool());
     if (!script["steps"].isArray() || script["steps"].toArray().isEmpty()) throw std::invalid_argument("用例必须包含非空 steps");
+    // 执行加载/计算前校验全部等待参数；范围来自 Qt 的 int 毫秒计时接口，不设业务时限。
+    const auto getWaitMilliseconds=[](const QJsonObject& step){
+        const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):30000.;
+        if(timeout<1 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
+            throw std::invalid_argument("用例 timeoutMs 必须为 1..2147483647 毫秒整数");
+        return static_cast<int>(timeout);
+    };
+    for(const auto value:script["steps"].toArray())
+        if(!value.toObject()["generateKnownTransformReference"].toBool())(void)getWaitMilliseconds(value.toObject());
+    if (script["viewsVisible"].isBool()) window.SetViewsVisible(script["viewsVisible"].toBool());
     for (const auto value : script["steps"].toArray()) {
         const auto step = value.toObject();
         const auto params = GetResolved(step["parameters"], results).toObject();
@@ -1783,8 +1927,7 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         const auto expected = GetText(step, "expectStatus");
         if (expected.isEmpty()) throw std::invalid_argument("expectStatus 不能为空");
-        const auto timeout = step.contains("timeoutMs") ? GetNumber(step, "timeoutMs") : 30000.;
-        if (timeout < 1 || timeout > 3600000 || timeout != std::trunc(timeout)) throw std::invalid_argument("用例 timeoutMs 必须为 1..3600000 毫秒整数");
+        const auto timeout=getWaitMilliseconds(step);
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
         if (step["waitAvailable"].toBool()) {
             auto* panel = window.GetModule(GetText(step, "module"));
@@ -1800,6 +1943,12 @@ void StartSequence(TestWindow& window, const QString& path)
             Check(crop && Wait([&] { crop->Observe(); return crop->GetObservedState()["framesReady"].toBool(); },
                 static_cast<int>(timeout)), "crop business frames are ready before the next operation");
         }
+        const auto checkpointPath = step["performanceCheckpoint"].toString();
+        const auto timingsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetTimings();
+        const auto requestedUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        QElapsedTimer checkpointClock; checkpointClock.start();
+        if (!checkpointPath.isEmpty()) std::cout << "phase=" << GetText(step,"module").toStdString() << "."
+            << GetText(step,"action").toStdString() << " event=start utc=" << requestedUtc.toStdString() << std::endl;
         const auto id = Send(window, GetText(step, "module"), GetText(step, "action"), params);
         QTimer switching, cancellation;
         int switchCount = 0;
@@ -1911,7 +2060,11 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto spec = GetResolved(step["partEditAudit"],results).toObject();
             ExportJson(GetText(spec,"path"),CheckPartEditPreview(window,spec));
         }
-        if (step.contains("expectPartCount")) Check(record["result"].toObject()["partCount"].toInt() == step["expectPartCount"].toInt(), "formal catalog has the expected part count");
+        if (step.contains("expectPartCount")) {
+            const auto count = record["result"].toObject()["partCount"];
+            Check((count.isString() ? GetId(count) : static_cast<std::uint64_t>(count.toInt())) == static_cast<std::uint64_t>(step["expectPartCount"].toInt()),
+                "formal catalog has the expected part count");
+        }
         if (step.contains("expectEditingCount")) {
             auto* panel = window.GetModule("Part"); panel->Observe();
             Check(panel->GetObservedState()["editingParts"].toArray().size() == step["expectEditingCount"].toInt(), "editing directory follows committed split/merge/history outputs");
@@ -1962,6 +2115,14 @@ void StartSequence(TestWindow& window, const QString& path)
             if (spec.contains("equals")) Check(volumeFrames.contains(GetText(spec, "equals"))
                 && pixels == volumeFrames[GetText(spec, "equals")], "unselected segmentation leaves the native DVR framebuffer unchanged");
         }
+        if (step.contains("expectIso")) {
+            const auto expectedIso = GetNumber(step, "expectIso");
+            Check(Wait([&] {
+                const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});
+                if (!state || state->isoThreshold != expectedIso) return false;
+                return true;
+            }, static_cast<int>(timeout)), "primary 3D uses the expected ISO");
+        }
         if (step.contains("screenshot")) {
             window.GetWorkflow().onNavigate(GetText(step, "module"), GetText(step, "action"), {});
             Check(Wait([&] { for (const auto& view : window.GetSession()->GetSceneViewStates())
@@ -2004,6 +2165,23 @@ void StartSequence(TestWindow& window, const QString& path)
                     {"hostDiagnostics", window.GetDiagnostics()}}).toStdString();
             }
             Check(consistent, "all four committed scenes use the selected input and epoch with no pending updates or renders");
+        }
+        if (!checkpointPath.isEmpty()) {
+            QJsonArray viewports;
+            for (const auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) viewports.append(QJsonObject{
+                {"id",widget->objectName()},{"width",widget->width()},{"height",widget->height()},
+                {"devicePixelRatio",widget->devicePixelRatioF()},{"isVisible",widget->isVisible()}});
+            const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});
+            // 仅在测试宿主保存阶段累计统计；绘制计时仍来自 Host 的实际 Render 返回。
+            ExportJson(checkpointPath,{{"operationId",QString::number(id)},
+                {"module",GetText(step,"module")},{"action",GetText(step,"action")},{"status",record["status"]},
+                {"requestedUtc",requestedUtc},{"checkpointUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+                {"elapsedToCheckpointMs",QString::number(checkpointClock.elapsed())},{"businessElapsedMs",record["elapsedMs"]},
+                {"timingsBefore",timingsBefore},{"timingsAfter",window.GetRecords().GetTimings()},
+                {"viewports",viewports},{"isoThreshold",state ? QJsonValue(state->isoThreshold) : QJsonValue()},
+                {"frameGuardChecked",step["checkSceneConsistency"].toBool()}});
+            std::cout << "phase=" << GetText(step,"module").toStdString() << "." << GetText(step,"action").toStdString()
+                << " event=complete businessMs=" << record["elapsedMs"].toString().toStdString() << std::endl;
         }
         if (step.contains("rendererAudit")) {
             const auto orangePixels = SaveRendererAudit(window, GetText(step, "rendererAudit"));

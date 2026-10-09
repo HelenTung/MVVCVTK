@@ -76,7 +76,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             AlignmentRequest request; request.action = AlignmentAction::Start; request.recipeRef = state->recipe;
             request.input = GetAlignmentInput(*state->reference); request.isActivationRequested = false;
             request.initialPoses.clear();
-            for (const auto pose : p["initialPoses"].toArray()) request.initialPoses.push_back(GetArray<double, 16>(pose));
+            for (const auto pose : p["initialPoses"].toArray()) request.initialPoses.push_back(GetAffineMatrix(pose, true));
             const auto admission = feature->SendRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
             panel->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
@@ -92,8 +92,10 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             if (request.action == AlignmentAction::Cancel) request.targetRequestId = GetId(p["targetRequestId"]);
             if (request.action == AlignmentAction::Activate) request.resultRef = GetText(p, "result") == "current" ? state->result : GetRef(p["result"]);
             if (request.action == AlignmentAction::Deactivate) {
-                if (!state->reference) throw std::invalid_argument("没有当前作用域的参考输入");
-                request.input = GetAlignmentInput(*state->reference);
+                const auto active = feature->GetArchive(feature->GetState().activeResult);
+                if (active) request.input = active->input;
+                else if (state->reference) request.input = GetAlignmentInput(*state->reference);
+                else throw std::invalid_argument("没有可停用的对齐结果输入");
             }
             if (request.action == AlignmentAction::SetVisibility) request.isVisible = GetBool(p, "isVisible");
             const auto admission = feature->SendRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
@@ -118,7 +120,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         if (GetNumber(json, "schemaVersion") != 1 || GetText(json, "algorithmVersion") != "metrology-alignment-1")
             throw std::invalid_argument("归档版本不支持");
         archive.recipe = GetRecipe(json["recipe"].toObject(), {}, state->reference->nominal);
-        archive.sourceToTarget = GetArray<double, 16>(json["sourceToTarget"]);
+        archive.sourceToTarget = GetAffineMatrix(json["sourceToTarget"], true);
         AlignmentRequest request; request.action = AlignmentAction::Restore; request.archive = archive;
         request.input = GetAlignmentInput(*state->reference); request.restoredNominal = state->reference->nominal;
         const auto admission = feature->SendRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
@@ -144,8 +146,28 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         const auto current = feature->GetState();
         const auto input = panel->GetSession()->GetImageDescriptor();
         const bool referenceCurrent = input && state->reference && GetAlignmentInput(*state->reference).source == input->dataRevision;
-        const auto result = feature->GetResult(state->result);
-        const bool active = referenceCurrent && current.isCurrent && current.activeResult == state->result;
+        ParameterChoices results;
+        const auto graph = panel->GetContext().workflow.getPublishedGraph ? panel->GetContext().workflow.getPublishedGraph() : QJsonObject();
+        for (const auto value : graph["nodes"].toArray()) {
+            const auto node = value.toObject();
+            if (node["producer"] != "metrology-alignment") continue;
+            const auto ref = GetRef(node["ref"]);
+            if (feature->GetResult(ref)) results.append({GetRefText(ref),"对齐结果 · #" + node["order"].toString()});
+        }
+        QJsonObject selectedResults;
+        for (const auto* action : {"Result","Activate","ExportArchive"})
+            if (auto* form = panel->GetParameterEditor(action))
+                if (auto* field = form->GetField("result")) {
+                    field->SetReferenceChoices(results);
+                    const auto chosen = field->GetValue();
+                    try { selectedResults[action] = feature->GetResult(chosen == "current" ? state->result : GetRef(chosen)).has_value(); }
+                    catch (const std::invalid_argument&) { selectedResults[action] = false; }
+                }
+        const auto choice = panel->GetParameterEditor("Activate")->GetField("result")->GetValue();
+        DataRevisionRef selectedRef;
+        try { selectedRef = choice == "current" ? state->result : GetRef(choice); } catch (const std::invalid_argument&) {}
+        const auto result = feature->GetResult(selectedRef);
+        const bool active = current.isCurrent && GetDataRevisionRefValid(current.activeResult);
         const bool displayAvailable = active && (!current.isOverlayVisible || current.isDisplayReady);
         panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(displayAvailable ? QJsonValue(current.isOverlayVisible) : QJsonValue(), GetRefText(current.activeResult),
             displayAvailable ? QString() : active ? "叠加未就绪，请重新应用结果" : "请先应用当前对齐结果");
@@ -154,8 +176,10 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             {"hasReference", state->reference.has_value()}, {"isReferenceCurrent", referenceCurrent},
             {"nominal", state->reference ? GetRefText(state->reference->nominal) : QString()},
             {"hasRecipe", GetDataRevisionRefValid(state->recipe)}, {"hasResult", GetDataRevisionRefValid(state->result)},
-            {"isResultCurrent", referenceCurrent && result && result->isCurrent}, {"isReviewed", state->isReviewed},
-            {"isApplied", current.isCurrent && current.activeResult == state->result},
+            {"hasReadableResult", !results.isEmpty()},
+            {"selectedResults", selectedResults},
+            {"isResultCurrent", result && result->isCurrent}, {"isReviewed", state->isReviewed},
+            {"isApplied", active},
             {"lastStatus", static_cast<int>(current.lastStatus)}, {"activeResult", GetRefText(current.activeResult)},
             {"savedRecipe", GetRefText(state->recipe)}, {"lastResult", GetRefText(state->result)}});
     };

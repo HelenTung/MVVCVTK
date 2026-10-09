@@ -38,22 +38,30 @@
 #include <QScrollBar>
 #include <QTabWidget>
 #include <QTabBar>
+#include <QStackedWidget>
 #include <algorithm>
 namespace Manual {
 ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     : QWidget(parent), m_context(context), m_name(std::move(name))
 {
     setAcceptDrops(true);
-    auto* layout = new QVBoxLayout(this); layout->setContentsMargins(12,12,12,12); layout->setSpacing(10);
-    auto* title = new QLabel(GetDisplayName(), this); title->setStyleSheet("font-size: 16px; font-weight: 600;"); layout->addWidget(title);
-    m_noticeLabel = new QLabel(this); m_noticeLabel->setWordWrap(true); m_noticeLabel->setStyleSheet("color: #536579;"); layout->addWidget(m_noticeLabel);
+    auto* layout = new QVBoxLayout(this); layout->setContentsMargins(10,10,10,10); layout->setSpacing(8);
+    auto* heading = new QHBoxLayout;
+    auto* title = new QLabel(GetDisplayName(), this); title->setStyleSheet("font-size: 16px; font-weight: 600;"); heading->addWidget(title,1);
+    m_help = new QToolButton(this); m_help->setText("说明"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
+    m_noticeLabel = new QLabel(this); m_noticeLabel->setWordWrap(true); m_noticeLabel->setStyleSheet("color: #536579;"); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
+    connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible(visible && !m_notice.isEmpty());});
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
     m_quickActions = new QWidget(this); m_quickActions->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
     layout->addWidget(m_quickActions);
+    auto* navigation = new QHBoxLayout;
     m_parameterTabs = new QTabBar(this); m_parameterTabs->setObjectName("parameterTabs");
-    m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setDrawBase(false);
-    layout->addWidget(m_parameterTabs);
+    m_parameterTabs->setExpanding(true); m_parameterTabs->setUsesScrollButtons(false); m_parameterTabs->setElideMode(Qt::ElideRight); m_parameterTabs->setDrawBase(false);
+    navigation->addWidget(m_parameterTabs,1);
+    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("更多");
+    m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_moreOperations->setMenu(m_operationMenu);
+    navigation->addWidget(m_moreOperations); layout->addLayout(navigation);
     connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
     });
@@ -66,10 +74,10 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_scene->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_browser->addTab(m_scene, "场景"); m_browser->addTab(catalogPage, "结果目录");
     if (m_name == "Part") {
-        auto* tools = new QHBoxLayout;
         m_nodeSearch = new QLineEdit(this); m_nodeSearch->setObjectName("nodeSearch");
         m_nodeSearch->setPlaceholderText("搜索零件名称或标签"); m_nodeSearch->setClearButtonEnabled(true);
-        tools->addWidget(m_nodeSearch, 1);
+        catalogLayout->addWidget(m_nodeSearch);
+        auto* tools = new QHBoxLayout;
         for (const auto& entry : {std::pair<QString,QString>{"高亮零件", "part-highlights"}, {"编辑对象", "part-edit-targets"}}) {
             auto* button = new QPushButton(entry.first, this); button->setObjectName("focus_" + entry.second);
             tools->addWidget(button);
@@ -86,7 +94,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     if (m_name == "Part") m_nodes->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_nodes->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_nodes->header()->setStretchLastSection(false);
-    m_nodes->header()->setSectionResizeMode(1, QHeaderView::Interactive); m_nodes->header()->resizeSection(1, 88);
+    m_nodes->header()->setSectionResizeMode(1, QHeaderView::Interactive); m_nodes->header()->resizeSection(1, 76);
     catalogLayout->addWidget(m_nodes);
     connect(m_nodes, &QTreeWidget::itemClicked, this, [this](auto* item, int) { SetNode(item); });
     m_nodes->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -113,7 +121,9 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
-    m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll);
+    m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
+    m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");
+    m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); layout->addWidget(m_commandArea);
     connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
         const auto id = item->data(0, Qt::UserRole).toJsonObject()["id"];
         for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
@@ -197,7 +207,9 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
             Observe();
         };
         layout->addWidget(form);
-        auto* footer = new QHBoxLayout; auto* files = new QToolButton(card); files->setText("参数文件"); files->setPopupMode(QToolButton::InstantPopup);
+        auto* commands = new QWidget(m_commandArea); commands->setObjectName("commands_" + name);
+        auto* footer = new QHBoxLayout(commands); footer->setContentsMargins(4,8,4,4);
+        auto* files = new QToolButton(commands); files->setText("参数文件"); files->setPopupMode(QToolButton::InstantPopup);
         auto* menu = new QMenu(files); files->setMenu(menu);
         menu->addAction("导入参数", this, [this, name] {
             const auto path = QFileDialog::getOpenFileName(this, "导入参数", {}, "JSON (*.json)"); if (path.isEmpty()) return;
@@ -208,7 +220,9 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
             try { ExportJson(path, m_forms.at(name)->GetValue().toObject()); } catch (const std::exception& e) { SetState({{"inputError", QString::fromUtf8(e.what())}}); }
         });
         menu->addAction("恢复默认", this, [this, name] { SetParameters(name, m_entries.at(name).defaults); });
-        footer->addWidget(files); footer->addStretch(); footer->addWidget(button); layout->addLayout(footer);
+        button->setProperty("primaryCommand",true);
+        footer->addWidget(files); footer->addStretch(); footer->addWidget(button);
+        m_commandArea->addWidget(commands); m_commandRows[name] = commands;
         m_actionLayout->addWidget(card); m_cards[name] = card;
         const QSignalBlocker blocker(m_parameterTabs);
         const auto index = m_parameterTabs->addTab(GetParameterSectionText(m_name, name)); m_parameterTabs->setTabData(index, name);
@@ -328,6 +342,19 @@ void ModulePanel::RefreshWorkflow()
     const auto input = GetDescriptor(descriptor);
     const auto actions = GetActions();
     const auto graph = m_context.workflow.getPublishedGraph ? m_context.workflow.getPublishedGraph() : QJsonObject();
+    ParameterChoices sources, labels, meshes;
+    for (const auto value : graph["nodes"].toArray()) {
+        const auto node = value.toObject(); const auto ref = node["ref"].toString();
+        const auto label = QString("%1 · #%2 · %3").arg(node["producer"].toString("数据"), node["order"].toString(), ref.right(10));
+        if (node["isVolume"].toBool()) sources.append({ref,label});
+        if (node["type"].toString().contains("label",Qt::CaseInsensitive)) labels.append({ref,label});
+        if (node["type"] == "org.mvvcvtk.surface-mesh") meshes.append({ref,label});
+    }
+    for (const auto& form : m_forms) {
+        if (auto* field = form.second->GetField("source")) field->SetReferenceChoices(sources);
+        if (auto* field = form.second->GetField("labels")) field->SetReferenceChoices(labels);
+        if (auto* field = form.second->GetField("mesh")) field->SetReferenceChoices(meshes);
+    }
     const auto busy = m_context.workflow.GetBusyOperation(); const bool closing = m_context.workflow.GetIsClosing();
     if (m_hasRefreshed && m_refreshState.state == state && m_refreshState.input == input
         && m_refreshState.node == m_node && m_refreshState.result == m_lastResult && m_refreshState.graph == graph && m_refreshState.action == m_currentAction
@@ -417,8 +444,28 @@ void ModulePanel::RefreshWorkflow()
         {"Wall", {"Start", "Cancel", "Result", "Clear"}}, {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
     allowed.append(globalActions.value(m_name));
     for (const auto& entry : m_entries) if (entry.second.policy == TestPolicy::Stop) allowed.append(entry.first);
+    static const QHash<QString, QStringList> primaryPages{
+        {"Data",{"Load","Select","ExportData"}}, {"View",{"Set","Visibility","Cursor"}},
+        {"Part",{"Start","SetState","Paint","Split"}}, {"Surface",{"GlobalAutomatic","Visibility","SamplePoints"}},
+        {"Wall",{"Start","SetDisplay","SetEvaluation","Result"}}, {"Artifact",{"Ring","Diffusion","Combined"}},
+        {"Alignment",{"ImportReference","SaveRecipe","Start","Result"}}, {"Crop",{"Start","Mode","AppendExact"}},
+        {"Roi",{"Begin","SetDraft"}}, {"Rotation",{"Rotate","SetEnabled"}}, {"Gap",{"Start","SetDisplay"}}};
+    QStringList pages;
+    for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
+    if (m_commandRows.count(m_parameterAction) && !pages.contains(m_parameterAction)) pages.append(m_parameterAction);
+    if (pages.isEmpty()) for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) { pages.append(name); break; }
     {
         const QSignalBlocker blocker(m_parameterTabs);
+        QStringList previous;
+        for (int i = 0; i < m_parameterTabs->count(); ++i) previous.append(m_parameterTabs->tabData(i).toString());
+        if (previous.size() != pages.size() || !std::equal(previous.cbegin(), previous.cend(), pages.cbegin())) {
+            while (m_parameterTabs->count()) m_parameterTabs->removeTab(0);
+            for (const auto& name : pages) {
+                auto title = GetParameterSectionText(m_name,name); if (title.endsWith("参数")) title.chop(2);
+                const auto index = m_parameterTabs->addTab(title); m_parameterTabs->setTabData(index,name);
+                m_parameterTabs->setTabToolTip(index,GetActionText(m_name,name));
+            }
+        }
         int active = -1, first = -1;
         for (int i = 0; i < m_parameterTabs->count(); ++i) {
             const auto name = m_parameterTabs->tabData(i).toString(); const bool enabled = allowed.contains(name);
@@ -431,7 +478,15 @@ void ModulePanel::RefreshWorkflow()
         m_parameterTabs->setCurrentIndex(active); m_parameterTabs->setVisible(m_parameterTabs->count() > 1);
     }
     QStringList visible;
-    for (const auto& name : m_actionOrder) if (allowed.contains(name) && m_cards.at(name) == m_buttons.at(name)) visible.append(name);
+    const auto addQuick = [&](const QString& name) {
+        if (m_entries.count(name) && allowed.contains(name) && m_cards.at(name) == m_buttons.at(name)
+            && !visible.contains(name) && visible.size() < 3) visible.append(name);
+    };
+    addQuick(m_currentAction);
+    for (const auto& name : m_actionOrder) if (m_entries.at(name).policy == TestPolicy::Stop) addQuick(name);
+    if (m_name == "Part" && state["hasPreview"].toBool()) { addQuick("Commit"); addQuick("Discard"); }
+    if (m_name == "Part") { addQuick("Catalog"); addQuick("EditSelected"); }
+    for (const auto& name : m_actionOrder) if (name != "Clear" && name != "GraphInfo" && name != "UseData") addQuick(name);
     if (visible.size() != m_visibleActions.size() || !std::equal(visible.cbegin(), visible.cend(), m_visibleActions.cbegin())) {
         const TestTiming layoutTiming(m_context.records, "Layout.Rebuild." + m_name);
         while (auto* item = m_quickLayout->takeAt(0)) delete item;
@@ -441,7 +496,8 @@ void ModulePanel::RefreshWorkflow()
     const TestTiming actionTiming(m_context.records, "Actions." + m_name);
     for (const auto& name : m_actionOrder) {
         auto* button = m_buttons.at(name); const auto& entry = m_entries.at(name);
-        const bool shown = allowed.contains(name) && (m_cards.at(name) == button || name == m_parameterAction); m_cards.at(name)->setVisible(shown);
+        const bool shown = allowed.contains(name) && (m_cards.at(name) == button ? visible.contains(name) : name == m_parameterAction);
+        m_cards.at(name)->setVisible(shown);
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
@@ -453,6 +509,26 @@ void ModulePanel::RefreshWorkflow()
             button->setCheckable(true);
             button->setChecked(state["isActive"].toBool() && state["editMode"].toInt() == (name == "KeepInside" ? 1 : name == "RemoveInside" ? 2 : 0));
         }
+    }
+    if (m_commandRows.count(m_parameterAction) && allowed.contains(m_parameterAction)) {
+        m_commandArea->setCurrentWidget(m_commandRows.at(m_parameterAction)); m_commandArea->show();
+    } else m_commandArea->hide();
+    m_operationMenu->clear();
+    m_operationMenu->addSection("选择参数操作");
+    for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) {
+        auto* entry = m_operationMenu->addAction(GetActionText(m_name,name),this,[this,name]{
+            QMetaObject::invokeMethod(this,[this,name]{SelectAction(name);},Qt::QueuedConnection);
+        });
+        entry->setObjectName("navigate_" + name); entry->setCheckable(true); entry->setChecked(name == m_parameterAction);
+        entry->setEnabled(allowed.contains(name)); entry->setToolTip(m_buttons.at(name)->toolTip());
+    }
+    m_operationMenu->addSeparator(); m_operationMenu->addSection("其他命令");
+    for (const auto& name : m_actionOrder) if (m_cards.at(name) == m_buttons.at(name) && !visible.contains(name)) {
+        auto* entry = m_operationMenu->addAction(GetActionText(m_name,name),this,[this,name]{
+            QMetaObject::invokeMethod(this,[this,name]{m_buttons.at(name)->click();},Qt::QueuedConnection);
+        });
+        entry->setObjectName("command_" + name); entry->setEnabled(allowed.contains(name) && m_buttons.at(name)->isEnabled());
+        entry->setToolTip(m_buttons.at(name)->toolTip());
     }
     m_refreshState = {state, input, m_node, m_lastResult, graph, actions, m_currentAction, busy, closing};
     m_hasRefreshed = true;
@@ -617,7 +693,7 @@ void ModulePanel::SetState(const QJsonObject& value)
     RefreshWorkflow();
 }
 QString ModulePanel::GetDisplayName() const { return GetModuleText(m_name); }
-void ModulePanel::SetNotice(const QString& text) { m_notice = text; m_noticeLabel->setText(text); }
+void ModulePanel::SetNotice(const QString& text) { m_notice = text; m_noticeLabel->setText(text); m_help->setToolTip(text); m_noticeLabel->setVisible(m_help->isChecked() && !text.isEmpty()); }
 QStringList ModulePanel::GetActions() const
 {
     QStringList result;

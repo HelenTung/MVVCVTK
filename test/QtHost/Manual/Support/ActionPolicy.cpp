@@ -7,7 +7,10 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     if (module == "Data" && action == "ActivateAccepted") return s["acceptedRevision"].toString().isEmpty() ? "没有已接纳的数据可激活。" : QString();
     if (action == "GraphInfo") return {};
     if (action == "UseData") return hasInput ? QString() : "请先加载输入数据。";
-    if (!hasInput && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
+    const bool readableResult = (module == "Wall" || module == "Alignment")
+        && (action == "Result" || action == "ResultEvidence" || action == "ExportArchive")
+        && s["selectedResults"].toObject()[action].toBool();
+    if (!hasInput && !readableResult && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
     if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
@@ -31,14 +34,18 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         if (action == "SelectOutput" && !s["canSelectOutput"].toBool()) return "当前没有匹配输入的已发布校正结果。";
         if (action == "RestoreSource" && !s["isOutputCurrent"].toBool()) return "仅在使用本次校正结果时可以恢复其源数据。";
     }
-    if (module == "Wall" && action != "Start" && action != "Cancel" && action != "Clear" && !s["hasResult"].toBool())
-        return "请先完成壁厚计算。";
+    if (module == "Wall" && action != "Start" && action != "Cancel" && action != "Clear"
+        && !s["hasResult"].toBool() && !s["hasReadableResult"].toBool())
+        return "请选择已有壁厚结果，或提交所需输入开始计算。";
+    if ((module == "Wall" || module == "Alignment") && s["selectedResults"].toObject().contains(action)
+        && !s["selectedResults"].toObject()[action].toBool()) return "请在输入与结果中选择可用的业务结果。";
     if (module == "Rotation" && action == "Undo" && s["undoCount"].toString().toULongLong() == 0) return "当前没有可撤销的旋转。";
     if (module == "Alignment") {
         if ((action == "ImportReference" || action == "SaveRecipe" || action == "Start" || action == "Restore") && s["isApplied"].toBool()) return "请先停用当前对齐结果，再准备或求解新方案。";
         if ((action == "SaveRecipe" || action == "Start" || action == "Restore") && !s["isReferenceCurrent"].toBool()) return "请先导入当前输入的名义参考。";
         if (action == "Start" && !s["hasRecipe"].toBool()) return "请先保存对齐方案。";
-        if ((action == "Activate" || action == "Result" || action == "ExportArchive") && !s["hasResult"].toBool()) return "请先求解得到对齐结果。";
+        if ((action == "Activate" || action == "Result" || action == "ExportArchive")
+            && !s["hasResult"].toBool() && !s["hasReadableResult"].toBool()) return "请选择已有对齐结果，或提供参考与配方进行求解。";
         if (action == "Activate" && !s["isResultCurrent"].toBool()) return "旧输入的对齐结果不能应用到当前数据。";
         if (action == "Deactivate" && !s["isApplied"].toBool()) return "当前没有已应用的对齐结果。";
     }

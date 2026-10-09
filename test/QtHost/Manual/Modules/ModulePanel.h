@@ -25,6 +25,9 @@ class QSplitter;
 class QLineEdit;
 class QTabWidget;
 class QTabBar;
+class QStackedWidget;
+class QToolButton;
+class QMenu;
 
 namespace Manual {
 class ParameterEditor;
@@ -87,6 +90,11 @@ private:
     QTabBar* m_parameterTabs = nullptr;
     QString m_parameterAction;
     QLabel* m_noticeLabel = nullptr;
+    QToolButton* m_help = nullptr;
+    QToolButton* m_moreOperations = nullptr;
+    QMenu* m_operationMenu = nullptr;
+    QStackedWidget* m_commandArea = nullptr;
+    std::map<QString, QWidget*> m_commandRows;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
     bool m_isSearching = false;

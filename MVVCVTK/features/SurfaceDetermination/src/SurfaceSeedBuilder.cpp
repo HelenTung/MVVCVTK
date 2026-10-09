@@ -10,11 +10,25 @@
 #include <map>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 
 namespace
 {
 using Point = std::array<double, 3>;
 using Edge = std::array<std::int64_t, 4>;
+struct EdgeHash final {
+    std::size_t operator()(const Edge& edge) const noexcept
+    {
+        std::uint64_t hash = 0;
+        for (const auto value : edge) {
+            auto part = static_cast<std::uint64_t>(value) + 0x9e3779b97f4a7c15ULL;
+            part = (part ^ (part >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+            part = (part ^ (part >> 27U)) * 0x94d049bb133111ebULL;
+            hash ^= (part ^ (part >> 31U)) + (hash << 6U) + (hash >> 2U);
+        }
+        return static_cast<std::size_t>(hash);
+    }
+};
 constexpr int corners[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                                {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
 // 与锁定 VTK 9.4.2 MC case 表一致的边编号，10/11 的顺序不可套其他库。
@@ -178,7 +192,8 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     }
     stats.processedExtent = range;
     {
-        std::map<Edge, std::uint32_t> edgeIds;
+        // 只查找/插入，不遍历缓存；顶点及三角形仍按原 z/y/x 扫描顺序生成。
+        std::unordered_map<Edge, std::uint32_t, EdgeHash> edgeIds;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
         for (std::int64_t block = range[4]; block < range[5]; block += blockDepth)
         {

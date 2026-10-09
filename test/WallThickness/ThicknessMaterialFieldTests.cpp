@@ -22,6 +22,15 @@ int GetMaterialFieldTestFailures()
     const auto full = field.GetMaterialPath({0, .3, .4}, {1, 0, 0}, 1, 1e-10, 0);
     check(full.status == Status::Valid && full.trim[0] == 0 && full.trim[1] == 0,
           "constant material has one full interval");
+    check(field.GetMaterialPath({.25,.5,.5},{.5,0,0},1,.3,0).status==Status::Unresolved,
+          "positive certificate cannot bypass the four-epsilon short-path gate");
+    check(field.GetMaterialPath({.25,.5,.5},{.5,0,0},1,1e-8,-1).status==Status::Unresolved
+          && field.GetMaterialPath({.25,.5,.5},{.5,0,0},1,1e-8,0,0).status==Status::Unresolved,
+          "positive certificate preserves invalid trim and tolerance gates");
+    field.extent={0,10002,0,1,0,1};
+    check(field.GetMaterialPath({0,.3,.4},{10002,0,0},10002,1,0).status==Status::Unresolved,
+          "positive certificate cannot bypass the original long-path cut budget");
+    field.extent={0,1,0,1,0,1};
     field.node = [](const Index &i, double &v) {
         v = double(i[0]) - .25;
         return true;
@@ -29,6 +38,18 @@ int GetMaterialFieldTestFailures()
     check(field.GetMaterialAt({.25, .3, .4}) == -1 && field.GetMaterialAt({.3, .3, .4}) == 1 &&
               field.GetMaterialAt({.2, .3, .4}) == 0,
           "exact boundary is not assigned a material side");
+    Result positive;
+    check(field.GetPositivePath({.3,.3,.4},{.5,0,0},.5,1e-8,positive)
+          && positive.status==Status::Valid && positive.trim==std::array<double,2>{0,0},
+          "mixed corners use a strict positive Bernstein certificate without exact conversions");
+    field.extent={0,4,0,1,0,1};
+    field.node=[](const Index& i,double& v) {v=std::abs(double(i[0])-2.);return true;};
+    Result touching;
+    check(!field.GetPositivePath({.5,.3,.4},{3,0,0},3,1e-8,touching)
+          && field.GetMaterialPath({.5,.3,.4},{3,0,0},3,1e-8,0).status!=Status::Valid,
+          "zero contact at a cell face cannot receive a positive certificate");
+    field.extent={0,1,0,1,0,1};
+    field.node=[](const Index& i,double& v) {v=double(i[0])-.25;return true;};
     const auto trimmed = field.GetMaterialPath({0, .3, .4}, {1, 0, 0}, 1, 1e-10, .25000001);
     check(trimmed.status == Status::Valid && std::abs(trimmed.trim[0] - .25) < 2e-9,
           "endpoint trim is bounded by the continuous crossing");

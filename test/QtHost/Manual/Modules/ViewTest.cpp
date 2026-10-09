@@ -3,6 +3,8 @@
 #include "Support/UiText.h"
 #include "Support/ParameterEditor.h"
 #include <QPointer>
+#include <QCheckBox>
+#include <QLineEdit>
 #include <algorithm>
 namespace Manual {
 namespace {
@@ -187,6 +189,9 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         for (const auto* key : {"mode", "iso", "opacity", "quality", "windowLevel", "transfer", "axes"})
             applicability[key] = applied && IsDisplayFieldApplicable(effectiveMode, key, viewId == "primary-3d");
         display->SetFieldApplicability(applicability);
+        auto* isoField = display->GetField("iso");
+        if (applied && !isoField->findChild<QCheckBox*>("specified")->isChecked())
+            isoField->findChild<QLineEdit*>("value")->setText(QString::number(applied->isoThreshold, 'g', 17));
         display->GetField("axes")->SetAppliedBoolean(applied ? QJsonValue(applied->isAxesVisible) : QJsonValue(), viewId, applied ? QString() : "当前没有可用视图");
         auto* visibility = panel->GetParameterEditor("Visibility");
         const auto scope = visibility->GetField("viewScope")->GetValue().toString();

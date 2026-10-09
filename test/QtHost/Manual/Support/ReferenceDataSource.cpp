@@ -202,6 +202,20 @@ QJsonObject ReferenceDataSource::GetPublishedGraph()
     m_sceneGraph = {{"commitId", QString::number(graph.commitId)}, {"nodes", nodes}};
     return m_sceneGraph;
 }
+std::optional<ImageDescriptor> ReferenceDataSource::GetImageInput(DataRevisionRef source) const
+{
+    if (!m_data) return {};
+    const auto data = m_data->GetData(m_data->GetDataGraph(),source);
+    const auto* payload = data ? dynamic_cast<const ImageGrid3DPayload*>(data->payload.get()) : nullptr;
+    if (!payload || !payload->GetValid()) return {};
+    const auto& geometry = payload->GetGeometry();
+    ImageDescriptor image;
+    image.dataRevision = source; image.metadata = payload->GetMetadata();
+    image.dims = geometry.dimensions; image.extent = geometry.extent;
+    image.spacing = geometry.spacing; image.origin = geometry.origin; image.direction = geometry.direction;
+    image.scalarRange = payload->GetScalarRange(); image.valueType = payload->GetValueType();
+    return image;
+}
 ReferenceInput ReferenceDataSource::LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh)
 {
     if (!m_data) throw std::runtime_error("可信输入适配器尚未挂载");

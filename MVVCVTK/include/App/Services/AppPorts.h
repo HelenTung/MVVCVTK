@@ -98,6 +98,8 @@ struct AppViewState final {
     VolumeTransferFunction volumeTransferFunction;
     bool isTransferAuto = true;
     double isoThreshold = 0.0;
+    // 私有补偿快照保留阈值来源，避免回滚把默认值变成显式输入。
+    bool hasExplicitIso = false;
     BackgroundColor background;
     std::array<double, 3> spacing{};
     WindowLevelParams windowLevel;

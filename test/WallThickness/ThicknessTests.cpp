@@ -2,6 +2,7 @@
 #include "Host/WallThicknessHostFeature.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
+#include "ThicknessDisplaySampling.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
 #include "FeatureSupport/WorkLimit.h"
@@ -31,10 +32,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <iostream>
+#include <set>
 #include <thread>
 
 int GetMaterialFieldTestFailures();
+int GetGrayRayTestFailures();
 
 namespace
 {
@@ -56,8 +60,8 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     g.spacing = {scale, scale, scale};
     auto labels = std::make_shared<std::vector<std::uint64_t>>(512, 0);
     for (int z = 2; z <= 3; ++z)
-        for (int y = 2; y <= 5; ++y)
-            for (int x = 2; x <= 5; ++x)
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
                 (*labels)[x + 8 * (y + 8 * z)] = 1;
     auto bytes = std::make_shared<std::vector<std::uint8_t>>(512);
     for (std::size_t i = 0; i < bytes->size(); ++i) (*bytes)[i] = (*labels)[i] ? 100 : 0;
@@ -104,6 +108,28 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
     w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     return w;
+}
+void SetAnalyticRadialSource(ThicknessAlgorithm::Work& w, bool sphere)
+{
+    // 独立连续灰度控制：解析边界 r=2/4。0.2 mm 网格的两端插值位置界小于 0.01 mm，
+    // 保持 0.05 mm 厚度验收，不将粗二值等值面冒充 CAD 球面。
+    GridGeometry3D g;g.extent={0,55,0,55,0,55};g.dimensions={56,56,56};g.spacing={.2,.2,.2};
+    auto values=std::make_shared<std::vector<float>>(56U*56U*56U);
+    auto labels=std::make_shared<std::vector<std::uint8_t>>(values->size());
+    for (int z=0;z<56;++z) for (int y=0;y<56;++y) for (int x=0;x<56;++x) {
+        const double px=x*.2-5.5,py=y*.2-5.5,pz=z*.2;
+        const double radius=sphere?std::hypot(px,py,pz-5.5):std::hypot(px,py);
+        double distance=std::min(radius-2.,4.-radius);
+        if (!sphere) distance=std::min({distance,pz-3.5,7.5-pz});
+        const auto index=std::size_t(x)+56U*(std::size_t(y)+56U*std::size_t(z));
+        (*values)[index]=static_cast<float>(std::clamp(.5+distance,0.,1.));
+        (*labels)[index]=distance>0?1:0;
+    }
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values->size()*sizeof(float));
+    std::memcpy(bytes->data(),values->data(),bytes->size());
+    w.source=std::make_shared<const ImageGrid3DPayload>(g,ImageValueType::Float32,1,bytes);
+    w.labels=std::make_shared<const LabelMap3DPayload>(g,LabelMapValues{std::shared_ptr<const std::vector<std::uint8_t>>(labels)});
+    w.archive.params.materialThreshold=.5;w.archive.params.maxBoundaryError=.1;
 }
 ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
 {
@@ -164,6 +190,7 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     w.archive.params.maxBoundaryError = 0.5;
     w.archive.params.materialThreshold = 0.5;
+    SetAnalyticRadialSource(w,true);
     // 完整球壳按每原始面九点积分，沿用归档的可选计算时限。
     // 未配置时保持不限时，CTest 负责测试进程的运行上限。
     w.deadline = WorkLimit(w.archive.limits.deadlineMilliseconds).GetDeadline();
@@ -171,6 +198,27 @@ ThicknessAlgorithm::Work BuildShell(bool hasInner = true)
 }
 void TestRayDefinitions()
 {
+    const auto countDisplay=[](const ThicknessDisplaySampling::Corners& p,double spacing,double& fraction) {
+        std::size_t count=0;fraction=0;
+        ThicknessDisplaySampling::Visit(p,spacing,[]{},[&](const auto& triangle){++count;fraction+=triangle.fraction;});
+        return count;
+    };
+    double largeArea=0,smallArea=0;
+    const auto largeCount=countDisplay({ThicknessPoint{0,0,0},ThicknessPoint{12,0,0},ThicknessPoint{0,12,0}},1,largeArea);
+    const auto smallCount=countDisplay({ThicknessPoint{0,0,0},ThicknessPoint{.25,0,0},ThicknessPoint{0,.25,0}},1,smallArea);
+    Check(largeCount>1 && smallCount==1 && largeArea==1 && smallArea==1,
+        "local display density and exact area fractions do not propagate the largest edge to small triangles");
+    const ThicknessDisplaySampling::Corners displayNeighbors[2]{
+        {ThicknessPoint{0,0,0},ThicknessPoint{3.7,0,0},ThicknessPoint{0,12,0}},
+        {ThicknessPoint{3.7,0,0},ThicknessPoint{0,0,0},ThicknessPoint{1.5,-.2,0}}};
+    std::set<double> shared[2];double fractions[2]{};
+    for(unsigned side=0;side<2;++side)
+        ThicknessDisplaySampling::Visit(displayNeighbors[side],1,[]{},[&](const auto& triangle){
+            fractions[side]+=triangle.fraction;
+            for(const auto& bary:triangle.bary)if(bary[2]==0)shared[side].insert(bary[side==0?1:0]);
+        });
+    Check(shared[0]==shared[1] && shared[0].size()>2 && fractions[0]==1 && fractions[1]==1,
+        "neighbor triangles with different local density share the same dyadic edge and conserve area");
     auto slab = BuildSlab();
     slab.archive.params.directionCount = 9;
     slab.archive.params.evaluationBounds = std::array<double, 6>{2.5, 4.5, 2.5, 4.5, 0, 7};
@@ -261,6 +309,7 @@ void TestRayDefinitions()
             {"measurement.boundary-complete", 1, std::vector<double>(count, 1)}});
     tube.archive.params.maxBoundaryError = 0.5;
     tube.archive.params.materialThreshold = 0.5;
+    SetAnalyticRadialSource(tube,false);
     const auto wall = ThicknessAlgorithm::BuildField(tube);
     std::cout << "tube status=" << unsigned(wall.status) << " min=" << wall.statistics.minimum.value_or(-1)
               << " message=" << wall.message << '\n';
@@ -272,6 +321,7 @@ void TestRayDefinitions()
 void Algorithm()
 {
     failures += GetMaterialFieldTestFailures();
+    failures += GetGrayRayTestFailures();
     using namespace ThicknessMath;
     const ThicknessPoint ns{std::sqrt(3.0) / 2, 0, 0.5}, no{-0.5, 0, -std::sqrt(3.0) / 2};
     const auto delta = Scale(Sub(ns, no), 1.5);
@@ -280,6 +330,12 @@ void Algorithm()
           "common normal displacement recovers two half-offset surfaces, not the chord or unit bisector");
     Check(!GetNormalOffset(delta, ns, ns) && !GetNormalOffset(delta, {}, no),
           "undefined endpoint normals cannot manufacture a thickness");
+    for (double angle : {.1,.4,1.2}) {
+        const ThicknessPoint source{0,0,1},direction{0,0,1},opposite{std::cos(angle),0,-std::sin(angle)};
+        const auto lower = GetNormalOffset(Scale(direction,7),source,opposite);
+        Check(lower && *lower>=7*Dot(direction,source)/2,
+            "common-normal displacement respects the missing-direction lower bound");
+    }
     ThicknessAlgorithm::Field query;
     query.geometry.extent = {-2, -1, 7, 8, 3, 4};
     query.geometry.dimensions = {2, 2, 2};
@@ -306,9 +362,9 @@ void Algorithm()
     Check(shell.status == ThicknessStatus::Succeeded && shell.statistics.minimum &&
               std::abs(*shell.statistics.minimum - 2) < 0.05,
           "closed sphere shell measures wall, not diameter");
-    Check(ThicknessAlgorithm::BuildField(BuildShell(false)).status ==
-              ThicknessStatus::IncompleteBoundary,
-          "missing cavity rejected even with a complete-boundary declaration");
+    const auto seededShell = ThicknessAlgorithm::BuildField(BuildShell(false));
+    Check(seededShell.status == ThicknessStatus::Succeeded && seededShell.statistics.validCount > 0,
+          "source gray field supplies the cavity boundary missing from the seed mesh");
     auto w = BuildSlab();
     auto result = ThicknessAlgorithm::BuildField(w);
     Check(result.status == ThicknessStatus::Succeeded, "slab analysis succeeds");
@@ -327,6 +383,49 @@ void Algorithm()
           "invalid sources reduce node support, while valid-only means remain queryable");
     Check(std::abs(result.statistics.evaluatedArea - 64) < 1e-8,
           "both-side total area includes invalid sides");
+    {
+        // 16 mm 平板跨过真实生产缓存的纯块与末端部分块；显式预算关闭缓存作独立对照。
+        auto thick=BuildSlab();auto geometry=thick.labels->GetGeometry();
+        geometry.extent={0,7,0,7,0,23};geometry.dimensions={8,8,24};
+        auto values=std::make_shared<std::vector<std::uint8_t>>(8U*8U*24U);
+        auto labels=std::make_shared<std::vector<std::uint64_t>>(values->size());
+        for (int z=4;z<=19;++z) for (int y=0;y<8;++y) for (int x=0;x<8;++x) {
+            const auto index=std::size_t(x+8*(y+8*z));(*values)[index]=100;(*labels)[index]=1;
+        }
+        auto vertices=thick.mesh->GetVertices();
+        for (std::size_t i=2;i<vertices.size();i+=3) vertices[i]=(vertices[i]-1.5)*8+3.5;
+        thick.mesh=std::make_shared<const SurfaceMeshPayload>(vertices,thick.mesh->GetTriangles(),thick.mesh->GetPointAttributes());
+        thick.labels=std::make_shared<const LabelMap3DPayload>(geometry,LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(labels)});
+        thick.source=std::make_shared<const ImageGrid3DPayload>(geometry,ImageValueType::UInt8,1,values);
+        thick.archive.params.maxDistance=30;thick.archive.evaluation.upper=30;thick.archive.evaluation.histogramRange={0,30};
+        const auto cached=ThicknessAlgorithm::BuildField(thick);
+        thick.archive.limits.maxWorkingBytes=1024U*1024U*1024U;
+        const auto uncached=ThicknessAlgorithm::BuildField(thick);
+        const auto sameNodes=[](const auto& a,const auto& b) {
+            if (!a.field.nodes || !b.field.nodes || a.field.nodes->size()!=b.field.nodes->size()) return false;
+            for (std::size_t i=0;i<a.field.nodes->size();++i) {
+                const auto& x=(*a.field.nodes)[i];const auto& y=(*b.field.nodes)[i];
+                if (x.index!=y.index || x.validWeight!=y.validWeight || x.totalWeight!=y.totalWeight || x.thickness!=y.thickness) return false;
+            }
+            return true;
+        };
+        Check(cached.status==ThicknessStatus::Succeeded && uncached.status==ThicknessStatus::Succeeded
+            && sameNodes(cached,uncached) && cached.statistics.minimum && std::abs(*cached.statistics.minimum-16)<1e-8,
+            "production uniform-grid cache preserves the complete Gauss9/Q1 field of a 16mm slab");
+        auto mask=std::make_shared<std::vector<std::uint8_t>>(values->size(),1);
+        (*mask)[3+8*(3+8*12)]=0;
+        thick.source=std::make_shared<const ImageGrid3DPayload>(geometry,ImageValueType::UInt8,1,values,mask);
+        thick.archive.limits.maxWorkingBytes.reset();
+        const auto maskedCached=ThicknessAlgorithm::BuildField(thick);
+        thick.archive.limits.maxWorkingBytes=1024U*1024U*1024U;
+        const auto maskedUncached=ThicknessAlgorithm::BuildField(thick);
+        const auto validMass=[](const auto& candidate) {
+            double mass=0;if(candidate.field.nodes) for(const auto& node:*candidate.field.nodes) mass+=node.validWeight;return mass;
+        };
+        Check(maskedCached.status==ThicknessStatus::Succeeded && maskedUncached.status==ThicknessStatus::Succeeded
+            && sameNodes(maskedCached,maskedUncached) && validMass(maskedCached)<validMass(cached),
+            "invalid interior nodes prevent uniform-block certification and reduce measured support");
+    }
     auto rotated = BuildSlab();
     auto g = rotated.labels->GetGeometry();
     g.extent = {-4, 3, 8, 15, 2, 9};
@@ -398,15 +497,15 @@ void Algorithm()
     attrs.back().values.assign(8, 0);
     w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetVertices(),
                                                         w.mesh->GetTriangles(), attrs);
-    Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::IncompleteBoundary,
-          "Largest provenance rejected");
+    Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::Succeeded,
+          "local gray measurement accepts component-filtered seed provenance");
     w = BuildSlab();
     auto triangles = w.mesh->GetTriangles();
     triangles.resize(triangles.size() - 3);
     w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetVertices(), triangles,
                                                         w.mesh->GetPointAttributes());
-    Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::IncompleteBoundary,
-          "open mesh rejected");
+    Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::Succeeded,
+          "an open seed mesh retains supported local measurements");
     w = BuildSlab();
     w.cancelled->store(true);
     Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::Cancelled,
