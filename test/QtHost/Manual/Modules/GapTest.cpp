@@ -28,7 +28,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             start.voidParams.minVolumeMM3 = GetNumber(params, "minVolumeMM3");
             GapHostRequest request; request.action = GapHostAction::Start; request.start = start;
             const QPointer<ModulePanel> owner(panel);
-            const auto accepted = feature->SendRequest(std::move(request), [owner, id](GapHostResult result) {
+            const auto accepted = (feature->SendRequest(std::move(request), [owner, id](GapHostResult result) {
                 if (!owner) return;
                 auto summary = GetStatistics(result.statistics);
                 summary["status"] = static_cast<int>(result.status);
@@ -41,10 +41,9 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                     : result.status == GapResultStatus::SucceededWithDisplayFailure ? "SucceededWithDisplayFailure"
                     : result.status == GapResultStatus::SourceChanged ? "SourceChanged" : "Failed";
                 owner->SetComplete(id, status, summary);
-            });
+            }).status == GapAdmissionStatus::Accepted);
             panel->SetAdmission(id, accepted);
         }, TestPolicy::Compute, true);
-    auto pendingExit = std::make_shared<std::uint64_t>(0);
     panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
         "segments":[],"displayStyle":"Constant","opacityRange":[0.15,1]})"),
@@ -68,7 +67,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 {"Constant",GapDisplayStyle::Constant},{"Inclined",GapDisplayStyle::Inclined},{"InverseInclined",GapDisplayStyle::InverseInclined}});
             if(p.contains("opacityRange"))display.opacityRange=GetArray<double,2>(p["opacityRange"]);
             GapHostRequest request; request.action = GapHostAction::SetDisplay; request.display = display;
-            const bool isAccepted = feature->SendRequest(std::move(request));
+            const bool isAccepted = (feature->SendRequest(std::move(request)).status == GapAdmissionStatus::Accepted);
             const auto state = feature->GetState();
             panel->SetComplete(id, isAccepted ? "Succeeded" : "Rejected",
                 {{"isOverlayVisible", state.isOverlayVisible}, {"range", GetValues(state.display.range)},
@@ -76,20 +75,20 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                     {"segmentCount",static_cast<int>(state.display.segments.size())},{"resultSet", GetRefText(state.resultSet)}});
         }, TestPolicy::View);
     for (const bool exit : {false, true}) panel->AttachAction(exit ? "Exit" : "Overlay", {},
-        [panel, feature, pendingExit, exit](auto id, const auto&) {
+        [panel, feature, exit](auto id, const auto&) {
             GapHostRequest request; request.action = exit ? GapHostAction::Exit : GapHostAction::Overlay;
-            const bool accepted = feature->SendRequest(std::move(request));
-            if (accepted && exit && feature->GetState().isExitPending) {
-                *pendingExit = id; panel->SetAdmission(id, true);
-            } else panel->SetComplete(id, accepted ? "Succeeded" : "Rejected",
-                {{"isOverlayVisible", feature->GetState().isOverlayVisible}});
+            const QPointer<ModulePanel> owner(panel);
+            const auto admission = feature->SendRequest(std::move(request), [owner, id, exit](GapHostResult result) {
+                if (owner) owner->SetComplete(id, result.status == GapResultStatus::Succeeded
+                    ? (exit ? "Exited" : "Succeeded") : "Failed",
+                    {{"requestId", QString::number(result.requestId)}, {"message", QString::fromStdString(result.message)}});
+            });
+            panel->SetAdmission(id, admission.status == GapAdmissionStatus::Accepted,
+                {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
         }, exit ? TestPolicy::Stop : TestPolicy::View);
     panel->onStop = [panel] { panel->SendAction("Exit", {}); };
-    panel->onObserve = [panel, feature, pendingExit] {
+    panel->onObserve = [panel, feature] {
         const auto state = feature->GetState();
-        if (*pendingExit && !state.isExitPending) {
-            panel->SetComplete(*pendingExit, "Exited"); *pendingExit = 0;
-        }
         auto summary = GetStatistics(state.statistics);
         summary["analysisState"] = static_cast<int>(state.analysisState);
         summary["isExitPending"] = state.isExitPending;

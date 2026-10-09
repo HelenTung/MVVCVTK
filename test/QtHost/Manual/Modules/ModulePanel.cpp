@@ -629,11 +629,12 @@ void ModulePanel::SendHost(std::uint64_t id, HostRequest&& request)
     const auto session = GetSession();
     if (!session) { SetComplete(id, "Rejected", {{"message", "会话已停止"}}); return; }
     const QPointer<ModulePanel> owner(this);
-    const bool accepted = session->SendRequestResult(std::move(request), [owner, id](HostResult result) {
+    const auto admission = session->SendRequest(std::move(request), [owner, id](HostResult result) {
         if (owner) owner->SetComplete(id, result.isSucceeded ? "Succeeded" : "Failed",
             {{"errorCode", static_cast<int>(result.errorCode)}, {"message", QString::fromStdString(result.message)}});
     });
-    SetAdmission(id, accepted);
+    SetAdmission(id, admission.status == HostAdmissionStatus::Accepted,
+        {{"errorCode", static_cast<int>(admission.errorCode)}, {"message", QString::fromStdString(admission.message)}});
 }
 void ModulePanel::SetInput(std::uint64_t id, const DataRevisionRef& revision)
 {

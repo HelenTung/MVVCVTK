@@ -118,8 +118,8 @@ void TestRealInputBindings(const std::string& rawPath)
     load.metadata.source.uri = rawPath;
 
     std::optional<HostResult> loaded;
-    Expect(session.SendRequestResult(std::move(load),
-        [&](HostResult result) { loaded = std::move(result); }),
+    Expect((session.SendRequest(std::move(load),
+        [&](HostResult result) { loaded = std::move(result); }).status == HostAdmissionStatus::Accepted),
         "Real binding RAW load admission failed");
     wait([&] { return loaded.has_value(); });
     if (!loaded->isSucceeded)
@@ -278,7 +278,7 @@ void TestRealInputBindings(const std::string& rawPath)
 
     ModelRotationRequest enableRotation;
     enableRotation.action = ModelRotationAction::SetEnabled;
-    Expect(rotation->SendRequest(enableRotation),
+    Expect((rotation->SendRequest(enableRotation).status == ModelRotationAdmissionStatus::Accepted),
         "Real binding rotation enable rejected");
     ConfigurableInputBindings rotationBindings;
     Expect(rotationBindings.SetOverride(

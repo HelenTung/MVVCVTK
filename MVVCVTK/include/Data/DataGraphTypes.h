@@ -161,6 +161,11 @@ inline bool GetDataTypeIdValid(const DataTypeId& value) noexcept
     return !value.name.empty() && value.schemaVersion != 0;
 }
 
+// 普通 Host 目录/图像查询使用的稳定值标识，不要求包含可信 payload 契约。
+namespace DataTypes {
+inline const DataTypeId imageGrid3D{"org.mvvcvtk.image-grid-3d", 1};
+}
+
 struct DataFacetId final {
     std::string name;
 };

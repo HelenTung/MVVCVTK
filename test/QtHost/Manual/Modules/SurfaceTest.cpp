@@ -69,18 +69,13 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                     params["roiModelBounds"], QJsonValue(), "Surface analysis region", true);
             }
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
-            SurfaceDeterminationRequest request; request.action = SurfaceDeterminationAction::Start; request.start = start;
+            SurfaceStartRequest request{start};
             const QPointer<ModulePanel> owner(panel);
             const auto admission = feature->SendRequest(std::move(request), [owner, feature, id](SurfaceDeterminationResult result) {
                 if (!owner) return;
                 auto summary = GetSurface(feature);
                 summary["status"] = static_cast<int>(result.status);
                 summary["message"] = QString::fromStdString(result.message);
-                const auto snapshot = feature->GetSurfaceSnapshot();
-                if (result.status == SurfaceResultStatus::Succeeded && snapshot && GetDataRevisionRefValid(snapshot->meshRevision)
-                    && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure)
-                    owner->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
-                else owner->GetContext().workflow.SetSurfaceInput({}, {});
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
                     : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed", summary);
             });
@@ -88,21 +83,24 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
         }, TestPolicy::Compute, true);
     }
-    for (const auto& action : std::vector<std::pair<QString, SurfaceDeterminationAction>>{
-        {"Stop", SurfaceDeterminationAction::Stop}, {"Visibility", SurfaceDeterminationAction::SetVisibility}, {"Clear", SurfaceDeterminationAction::Clear}, {"ClearPreview", SurfaceDeterminationAction::ClearPreview}}) {
+    for (const QString action : {QString("Stop"), QString("Visibility"), QString("Clear"), QString("ClearPreview")}) {
         QJsonObject defaults;
-        if (action.second == SurfaceDeterminationAction::SetVisibility) defaults = {{"isVisible", true}};
-        if (action.second == SurfaceDeterminationAction::Stop) defaults = {{"targetRequestId", "0"}};
-        panel->AttachAction(action.first, defaults, [panel, feature, action](auto id, const auto& params) {
-            SurfaceDeterminationRequest request; request.action = action.second;
-            if (request.action == SurfaceDeterminationAction::SetVisibility) request.isVisible = GetBool(params, "isVisible");
-            if (request.action == SurfaceDeterminationAction::Stop) request.targetRequestId = GetId(params["targetRequestId"]);
-            const auto admission = feature->SendRequest(std::move(request));
-            if (action.second == SurfaceDeterminationAction::Clear && admission.status == SurfaceAdmissionStatus::Accepted)
-                panel->GetContext().workflow.SetSurfaceInput({}, {});
-            panel->SetComplete(id, admission.status == SurfaceAdmissionStatus::Accepted ? "Accepted" : "Rejected",
-                {{"admission", static_cast<int>(admission.status)}});
-        }, action.second == SurfaceDeterminationAction::Stop ? TestPolicy::Stop : TestPolicy::Change);
+        if (action == "Visibility") defaults = {{"isVisible", true}};
+        if (action == "Stop") defaults = {{"targetRequestId", "0"}};
+        panel->AttachAction(action, defaults, [panel, feature, action](auto id, const auto& params) {
+            SurfaceDeterminationRequest request = SurfaceClearRequest{};
+            if (action == "Visibility") request = SurfaceVisibilityRequest{GetBool(params, "isVisible")};
+            else if (action == "Stop") request = SurfaceStopRequest{GetId(params["targetRequestId"])};
+            else if (action == "ClearPreview") request = SurfaceClearPreviewRequest{};
+            const QPointer<ModulePanel> owner(panel);
+            const auto admission = feature->SendRequest(std::move(request), [owner, id](SurfaceDeterminationResult result) {
+                if (owner) owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
+                    : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed",
+                    {{"requestId", QString::number(result.requestId)}, {"message", QString::fromStdString(result.message)}});
+            });
+            panel->SetAdmission(id, admission.status == SurfaceAdmissionStatus::Accepted,
+                {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
+        }, action == "Stop" ? TestPolicy::Stop : TestPolicy::Change);
     }
     for (const QString destination : {QString("Display"), QString("Gap"), QString("Part")})
         panel->AttachAction("CopyIsoTo" + destination, {}, [panel, feature, destination](auto id, const auto&) {
@@ -186,8 +184,6 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement
             || state.stage == SurfaceDeterminationStage::TopologyValidation || state.stage == SurfaceDeterminationStage::Committing || state.stage == SurfaceDeterminationStage::Stopping;
-        if (measured) panel->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
-        else panel->GetContext().workflow.SetSurfaceInput({}, {});
         panel->SetState(summary);
     };
     panel->onStop = [panel] { panel->SendAction("Stop", {{"targetRequestId", "0"}}); };

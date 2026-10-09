@@ -439,13 +439,12 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     }
     SetBindingProjection();
 
-    if (request.action == SurfaceDeterminationAction::Start) {
-        auto params = request.start.value_or(m_config.defaultStart);
+    if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
+        auto params = start->start.value_or(m_config.defaultStart);
         if (params.businessMode != SurfaceBusinessMode::Production) {
             admission.status = SurfaceAdmissionStatus::UnsupportedMode;
             return admission;
         }
-        if (request.isVisible || request.targetRequestId != 0) return admission;
         if (!SurfaceContract::GetInputValid(params)) return admission;
         auto targetViews = GetTargetViews(params.targetViews);
         if (GetTargetsUsed(params.targetViews) && targetViews.empty()) return admission;
@@ -537,10 +536,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
 
-    if (request.action == SurfaceDeterminationAction::Stop) {
-        if (request.start || request.isVisible) return admission;
-        const std::uint64_t targetRequestId = request.targetRequestId == 0
-            ? m_latestRequestId : request.targetRequestId;
+    if (const auto* stop = std::get_if<SurfaceStopRequest>(&request)) {
+        const std::uint64_t targetRequestId = stop->targetRequestId == 0
+            ? m_latestRequestId : stop->targetRequestId;
         if (targetRequestId == 0
             || m_requests.find(targetRequestId) == m_requests.end()) {
             return admission;
@@ -572,19 +570,14 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
     const std::uint64_t requestId = GetNextRequestId();
-    if (request.action == SurfaceDeterminationAction::SetVisibility
-        && request.isVisible
-        && SetVisibility(*request.isVisible)) {
+    const auto* visibility = std::get_if<SurfaceVisibilityRequest>(&request);
+    if (visibility && SetVisibility(visibility->isVisible)) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
-    else if (request.action == SurfaceDeterminationAction::ClearPreview
-        && !request.start && !request.isVisible && request.targetRequestId == 0 && ClearPreview()) {
+    else if (std::holds_alternative<SurfaceClearPreviewRequest>(request) && ClearPreview()) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
-    else if (request.action == SurfaceDeterminationAction::Clear
-        && !request.start && !request.isVisible
-        && request.targetRequestId == 0
-        && ClearResult()) {
+    else if (std::holds_alternative<SurfaceClearRequest>(request) && ClearResult()) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
     if (admission.status == SurfaceAdmissionStatus::Accepted) {

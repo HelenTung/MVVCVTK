@@ -14,6 +14,7 @@
 #include "App/AppState.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Data/LabelMapReader.h"
 #include "Render/Support/RenderFrameLifetime.h"
 #include "Data/RoiService.h"
@@ -78,10 +79,10 @@ public:
     bool BuildSession();
     HostUpdateResult SendUpdates();
     HostRenderResult SendRender(const HostRenderRequest& request);
-    bool SendRequest(
+    bool DispatchRequest(
         HostRequest&& request,
         HostCompleteCallback onComplete);
-    bool SendRequestResult(
+    HostAdmission SendRequest(
         HostRequest&& request,
         HostResultCallback onComplete);
     HostInputResult SendInput(const HostInputEvent& event);
@@ -461,7 +462,7 @@ bool VtkAppHostSession::Impl::BuildSession()
     }
 }
 
-bool VtkAppHostSession::Impl::SendRequest(
+bool VtkAppHostSession::Impl::DispatchRequest(
     HostRequest&& request,
     HostCompleteCallback onComplete)
 {
@@ -507,62 +508,75 @@ bool VtkAppHostSession::Impl::SendRequest(
     return isSent;
 }
 
-bool VtkAppHostSession::Impl::SendRequestResult(
+HostAdmission VtkAppHostSession::Impl::SendRequest(
     HostRequest&& request,
     HostResultCallback onComplete)
 {
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!onComplete) return false;
-    auto callback =
-        std::make_shared<HostResultCallback>(std::move(onComplete));
-    auto isComplete = std::make_shared<std::atomic<bool>>(false);
-    const auto sendResult = [callback, isComplete](
-        HostResult result) noexcept {
-        if (isComplete->exchange(true, std::memory_order_acq_rel)) {
-            return;
-        }
-        try {
-            (*callback)(std::move(result));
-        }
-        catch (...) {
-        }
-    };
-
+    std::unique_lock<std::recursive_mutex> lock(m_sessionMutex);
     if (ownerThread != std::thread::id{}
         && ownerThread != std::this_thread::get_id()) {
-        sendResult({ false, HostErrorCode::WrongThread,
-            "Request must run on the session owner thread." });
-        return false;
+        return { HostAdmissionStatus::Rejected, HostErrorCode::WrongThread,
+            "Request must run on the session owner thread." };
     }
     if (!BuildSession() || !commandRouter) {
-        sendResult({ false, HostErrorCode::SessionNotReady,
-            "Host session is not ready." });
-        return false;
+        return { HostAdmissionStatus::Rejected, HostErrorCode::SessionNotReady,
+            "Host session is not ready." };
     }
-
-    const HostCompleteCallback legacyComplete =
-        [sendResult](const bool isSucceeded) {
-            sendResult({
-                isSucceeded,
-                isSucceeded ? HostErrorCode::None
-                    : HostErrorCode::OperationFailed,
-                isSucceeded ? std::string{}
-                    : "The accepted host operation failed." });
+    // Dispatch 返回前可能产生同步完成。先保存结果，接纳确定后才兑现，
+    // 避免拒绝路径误取得回调，也避免持有 Session 锁调用上位机代码。
+    struct Completion final {
+        enum class Phase { Pending, Accepted, Rejected, Completed };
+        std::mutex mutex;
+        HostResultCallback callback;
+        Phase phase = Phase::Pending;
+        std::optional<bool> pending;
     };
-    try {
-        if (SendRequest(
-                std::move(request), legacyComplete)) {
-            return true;
+    auto completion = std::make_shared<Completion>();
+    completion->callback = std::move(onComplete);
+    const HostCompleteCallback sendComplete = [completion](bool succeeded) {
+        HostResultCallback callback;
+        {
+            const std::lock_guard<std::mutex> guard(completion->mutex);
+            if (completion->phase == Completion::Phase::Rejected
+                || completion->phase == Completion::Phase::Completed) return;
+            if (completion->phase == Completion::Phase::Pending) {
+                if (!completion->pending) completion->pending = succeeded;
+                return;
+            }
+            completion->phase = Completion::Phase::Completed;
+            callback = std::move(completion->callback);
         }
+        if (callback) {
+            try { callback({ succeeded, succeeded ? HostErrorCode::None
+                : HostErrorCode::OperationFailed, succeeded ? std::string{}
+                : "The accepted host operation failed." }); }
+            catch (...) {}
+        }
+    };
+    bool accepted = false;
+    try {
+        accepted = DispatchRequest(std::move(request),
+            completion->callback ? sendComplete : HostCompleteCallback{});
     }
     catch (...) {
-        sendResult({ false, HostErrorCode::OperationFailed,
-            "The host request raised an exception." });
-        return false;
+        const std::lock_guard<std::mutex> guard(completion->mutex);
+        completion->phase = Completion::Phase::Rejected;
+        completion->callback = {};
+        return { HostAdmissionStatus::Rejected, HostErrorCode::OperationFailed,
+            "The host request raised an exception." };
     }
-    sendResult({ false, HostErrorCode::RequestRejected,
-        "The host request was rejected before execution." });
-    return false;
+    std::optional<bool> pending;
+    {
+        const std::lock_guard<std::mutex> guard(completion->mutex);
+        completion->phase = accepted ? Completion::Phase::Accepted : Completion::Phase::Rejected;
+        pending = completion->pending;
+        if (!accepted) completion->callback = {};
+    }
+    lock.unlock();
+    if (!accepted) return { HostAdmissionStatus::Rejected, HostErrorCode::RequestRejected,
+        "The host request was rejected before execution." };
+    if (pending) sendComplete(*pending);
+    return { HostAdmissionStatus::Accepted, HostErrorCode::None, {} };
 }
 
 HostInputResult VtkAppHostSession::Impl::SendInput(
@@ -1352,33 +1366,13 @@ bool VtkAppHostSession::Start()
     return true;
 }
 
-bool VtkAppHostSession::SendRequest(
-    HostRequest&& request,
-    HostCompleteCallback onComplete)
-{
-    return m_impl
-        && m_impl->SendRequest(
-            std::move(request),
-             std::move(onComplete));
-}
-
-bool VtkAppHostSession::SendRequestResult(
+HostAdmission VtkAppHostSession::SendRequest(
     HostRequest&& request,
     HostResultCallback onComplete)
 {
-    if (!m_impl) {
-        if (onComplete) {
-            try {
-                onComplete({ false, HostErrorCode::SessionNotReady,
-                    "Host session is not available." });
-            }
-            catch (...) {
-            }
-        }
-        return false;
-    }
-    return m_impl->SendRequestResult(
-        std::move(request), std::move(onComplete));
+    return m_impl ? m_impl->SendRequest(std::move(request), std::move(onComplete))
+        : HostAdmission{HostAdmissionStatus::Rejected, HostErrorCode::SessionNotReady,
+            "Host session is not available."};
 }
 
 const std::vector<HostRenderViewEndpoint>&
@@ -1552,6 +1546,51 @@ ImageReadAdmission VtkAppHostSession::StartImageRead(
 std::optional<ImageDescriptor> VtkAppHostSession::GetImageDescriptor()
 {
     return m_impl ? m_impl->GetImageDescriptor() : std::optional<ImageDescriptor>{};
+}
+
+std::optional<HostDataCatalog> VtkAppHostSession::GetDataCatalog(const DataQuery& query) const
+{
+    if (!m_impl) return {};
+    const std::lock_guard<std::recursive_mutex> lock(m_impl->m_sessionMutex);
+    if (!m_impl->GetIsReady() || m_impl->ownerThread != std::this_thread::get_id()
+        || !m_impl->core.sharedDataMgr) return {};
+    const auto graph = m_impl->core.sharedDataMgr->GetDataGraph();
+    if (!graph.view) return {};
+    const auto values = graph.view->GetDataQuery(query);
+    HostDataCatalog catalog;
+    catalog.commitId = values.commitId;
+    catalog.data.reserve(values.data.size());
+    for (const auto& data : values.data) if (data)
+        catalog.data.push_back({data->self, data->type, data->inputs, data->provenance});
+    return catalog;
+}
+
+std::optional<ImageDescriptor> VtkAppHostSession::GetImageDescriptor(const DataRevisionRef& revision)
+{
+    if (!m_impl || !GetDataRevisionRefValid(revision)) return {};
+    const std::lock_guard<std::recursive_mutex> lock(m_impl->m_sessionMutex);
+    if (!m_impl->GetIsReady() || m_impl->ownerThread != std::this_thread::get_id()
+        || !m_impl->core.sharedDataMgr) return {};
+    const auto graph = m_impl->core.sharedDataMgr->GetDataGraph();
+    const auto data = graph.view ? graph.view->GetData(revision) : DataSnapshot{};
+    const auto* image = data ? dynamic_cast<const ImageGrid3DPayload*>(data->payload.get()) : nullptr;
+    if (!image || !image->GetValid()) return {};
+    const auto& geometry = image->GetGeometry();
+    ImageDescriptor descriptor;
+    descriptor.dataRevision = revision;
+    descriptor.metadata = image->GetMetadata();
+    descriptor.dims = geometry.dimensions;
+    descriptor.extent = geometry.extent;
+    descriptor.spacing = geometry.spacing;
+    descriptor.origin = geometry.origin;
+    descriptor.direction = geometry.direction;
+    descriptor.scalarRange = image->GetScalarRange();
+    descriptor.valueType = image->GetValueType();
+    descriptor.componentBytes = GetImageValueBytes(descriptor.valueType);
+    descriptor.componentCount = image->GetComponentCount();
+    const auto binding = graph.view->GetDataBinding(primaryVolumeBinding);
+    if (binding && binding->target == revision) descriptor.bindingRevision = binding->revision;
+    return descriptor;
 }
 
 RoiResult VtkAppHostSession::SetRoi(const RoiRequest& request)

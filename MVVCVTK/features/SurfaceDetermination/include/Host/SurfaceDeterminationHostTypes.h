@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <variant>
 
 // 业务模式与计算方法分离；高级模式只预留入口，未实现时明确拒绝。
 enum class SurfaceBusinessMode : std::uint8_t { Production, Advanced };
@@ -70,22 +71,19 @@ struct SurfaceDeterminationConfig final {
     bool isOverlayVisible = true;
 };
 
-enum class SurfaceDeterminationAction : std::uint8_t {
-    None,
-    Start,
-    Stop,
-    SetVisibility,
-    Clear,
-    ClearPreview
-};
-
-struct SurfaceDeterminationRequest final {
-    SurfaceDeterminationAction action = SurfaceDeterminationAction::None;
+struct SurfaceStartRequest final {
+    // 缺省时沿用 Feature 构造配置；具体 Start 参数由这个动作独占。
     std::optional<SurfaceDeterminationStartParams> start;
-    std::optional<bool> isVisible;
+};
+struct SurfaceStopRequest final {
     // Stop 时为 0 表示当前最新请求，否则必须与仍在执行的请求匹配。
     std::uint64_t targetRequestId = 0;
 };
+struct SurfaceVisibilityRequest final { bool isVisible = true; };
+struct SurfaceClearRequest final {};
+struct SurfaceClearPreviewRequest final {};
+using SurfaceDeterminationRequest = std::variant<SurfaceStartRequest, SurfaceStopRequest,
+    SurfaceVisibilityRequest, SurfaceClearRequest, SurfaceClearPreviewRequest>;
 
 enum class SurfaceAdmissionStatus : std::uint8_t {
     Accepted,

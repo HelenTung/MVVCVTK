@@ -1465,7 +1465,7 @@ void StartSelfTest(TestWindow& window)
             "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
         CheckOverlaySwitch(window, "Surface");
-        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()), "material surface is a formal metrology input");
+        Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)), "material surface is a formal metrology input");
 #if defined(MANUAL_ALIGNMENT)
         if (GetEnabled(window, "Alignment")) {
             GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
@@ -1526,7 +1526,7 @@ void StartSelfTest(TestWindow& window)
         // 材料表面单独验证，不依赖可选对齐模块替它生成正式结果。
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0},
             {"materialRange", QJsonArray{0.,100.}}}), "Succeeded");
-        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()),
+        Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)),
             "material ISO publishes an independent formal measurement surface");
     }
     if (GetEnabled(window, "Rotation")) {

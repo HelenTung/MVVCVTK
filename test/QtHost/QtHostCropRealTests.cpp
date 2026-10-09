@@ -191,7 +191,7 @@ int GetCropRealFailCount()
         if(!originText.empty()){std::istringstream coordinates(originText);char a=0,b=0;Require(bool(coordinates>>load.geometry.origin[0]>>a>>load.geometry.origin[1]>>b>>load.geometry.origin[2])&&a==','&&b==','&&coordinates.eof(),"real origin must be X,Y,Z");}
         load.metadata.identity.datasetId="crop-real-"+size;load.metadata.source.kind=ImageSourceKind::RawFile;load.metadata.source.uri=input;
         const auto inputOrigin=load.geometry.origin;
-        Require(fixture.session.SendRequestResult(std::move(load),[loaded](HostResult result){loaded->Set(std::move(result));}),"real load admission");
+        Require((fixture.session.SendRequest(std::move(load),[loaded](HostResult result){loaded->Set(std::move(result));}).status == HostAdmissionStatus::Accepted),"real load admission");
         Require(fixture.Wait([&]{return loaded->Ready();})&&loaded->Once()&&loaded->value.isSucceeded,"real load completion");report<<"  \"load_ms\": "<<Millis(start)<<",\n";
         sendPhase("load-complete");
         const auto rootView=fixture.probe->data->GetPrimaryImage();Require(rootView&&rootView->data,"real Root read");
@@ -279,7 +279,7 @@ int GetCropRealFailCount()
         Require(fixture.Wait([&]{return fixture.crop->GetPreviewPrecision(document,"real-volume",samples).renderedHead==alternateNode;}),"presented alternate preview");
         const auto precision=fixture.crop->GetPreviewPrecision(document,"real-volume",samples);Require(precision.failureReason==CropFailure::None&&precision.samples==std::vector<CropPointClassification>{CropPointClassification::Kept,CropPointClassification::Removed},"preview did not recover the alternate Root region");
         report<<"  \"coordinate_error\": ["<<precision.coordinates.inputError[0]<<','<<precision.coordinates.inputError[1]<<','<<precision.coordinates.inputError[2]<<"],\n";
-        const auto selectAt=Clock::now();HostDataSelectRequest select;select.dataRevision=built.outputRevision;select.expectedBindingRevision=fixture.session.GetImageDescriptor()->bindingRevision;Require(fixture.session.SendRequest(std::move(select)),"materialized result selection");
+        const auto selectAt=Clock::now();HostDataSelectRequest select;select.dataRevision=built.outputRevision;select.expectedBindingRevision=fixture.session.GetImageDescriptor()->bindingRevision;Require((fixture.session.SendRequest(std::move(select)).status == HostAdmissionStatus::Accepted),"materialized result selection");
         Require(fixture.Wait([&]{for(const auto& id:{"real-volume","real-slice"}){HostViewTarget target;target.viewId=id;const auto scene=fixture.session.GetSceneViewState(target);if(!scene||!scene->presentation||scene->presentation->dataRevision!=built.outputRevision)return false;}return true;}),"materialized result views");fixture.Save(output/"materialized.png");
         report<<"  \"select_result_ms\": "<<Millis(selectAt)<<",\n";
         const auto returnAt=Clock::now();CropDocumentRequest returning;returning.documentId=document;returning.requestId=CropHostFeature::CreateRequestId();returning.expectedRevision=fixture.crop->GetHistory(document,0,1).stateRevision;const auto returned=std::make_shared<Completion<CropDocumentOutcome>>();

@@ -26,7 +26,7 @@ struct MethodCase {
 };
 
 constexpr std::size_t methodCaseCount =
-    6
+    7
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     + 3
 #endif
@@ -40,6 +40,7 @@ constexpr std::size_t methodCaseCount =
 
 constexpr std::array<MethodCase, methodCaseCount> methodCases{{
     { "load", &GetLoadFailCount },
+    { "consumer-contract", &GetConsumerContractFailCount },
     { "render", &GetRenderProductFailCount },
     { "label-map", &GetLabelMapFailCount },
     { "view", &GetViewFailCount },
@@ -59,7 +60,7 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
 }};
 
 constexpr std::string_view methodCaseNames =
-    "load|render|label-map|view"
+    "load|consumer-contract|render|label-map|view"
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     "|crop|crop-lifecycle|crop-archive|crop-real"
 #endif

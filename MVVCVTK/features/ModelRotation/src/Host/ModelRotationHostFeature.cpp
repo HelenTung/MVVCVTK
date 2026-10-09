@@ -90,9 +90,14 @@ public:
         Math::Matrix after;
         std::uint64_t afterRevision = 0;
     };
+    struct Completion final {
+        std::uint64_t requestId = 0;
+        ModelRotationCallback callback;
+    };
     struct QueuedRequest final {
         ModelRotationRequest request;
         ModelTransformSnapshot source;
+        Completion completion;
     };
     struct Gesture final {
         std::string viewId;
@@ -178,6 +183,19 @@ public:
         return true;
     }
 
+    void SendComplete(Completion completion, ModelRotationStatus status)
+    {
+        if (!completion.callback) return;
+        try { completion.callback({completion.requestId, status}); }
+        catch (...) {}
+    }
+    void CancelQueued(ModelRotationStatus status)
+    {
+        auto requests = std::move(m_requests);
+        m_requests.clear();
+        for (auto& request : requests) SendComplete(std::move(request.completion), status);
+    }
+
     bool SetCompletion()
     {
         if (!GetOwnerReady()) return false;
@@ -208,6 +226,11 @@ public:
             m_releaseKind = InteractionEventKind::None;
             m_isUndo = false;
         }
+        std::optional<Completion> completed;
+        if (!m_token && m_activeCompletion.requestId) {
+            completed = std::move(m_activeCompletion);
+            m_activeCompletion = {};
+        }
         if (!m_token && !m_history.empty()) {
             const auto& last = m_history.back();
             if (last.before.sessionGeneration != state.sessionGeneration
@@ -216,7 +239,8 @@ public:
                 || last.afterRevision != state.transformRevision
                 || last.after != state.modelToWorld) m_history.clear();
         }
-        return true;
+        if (completed) SendComplete(std::move(*completed), m_status);
+        return GetOwnerReady();
     }
 
     bool StopGesture()
@@ -261,8 +285,8 @@ public:
         if (!state || state->sessionGeneration != queued.source.sessionGeneration
             || state->dataRevision != queued.source.dataRevision
             || state->bindingRevision != queued.source.bindingRevision) {
-            m_requests.clear();
             m_status = ModelRotationStatus::Invalidated;
+            CancelQueued(m_status);
             return true;
         }
         std::optional<Math::Matrix> matrix;
@@ -279,8 +303,8 @@ public:
                 matrix = Math::GetRotatedMatrix(state->modelToWorld, *center, *rotation);
         }
         if (!matrix) {
-            m_requests.clear();
             m_status = ModelRotationStatus::Invalidated;
+            CancelQueued(m_status);
             return true;
         }
         // 其他交互或帧提交暂时占用姿态时保留请求，由后续 owner tick 重试。
@@ -288,15 +312,20 @@ public:
         if (!StartEdit()) return true;
         if (!m_port->SetTransformCommit(m_token, 1, *matrix)) {
             (void)StopGesture();
+            auto completion = std::move(m_requests.front().completion);
+            m_requests.pop_front();
+            m_status = ModelRotationStatus::Invalidated;
+            SendComplete(std::move(completion), m_status);
             return false;
         }
+        m_activeCompletion = std::move(m_requests.front().completion);
         m_requests.pop_front();
         m_isUndo = isUndo;
         m_status = ModelRotationStatus::Pending;
         return true;
     }
 
-    bool SendQueued(const ModelRotationRequest& request)
+    bool SendQueued(const ModelRotationRequest& request, Completion completion)
     {
         const auto state = m_port->GetTransformState();
         if (!state || !GetDataRevisionRefValid(state->dataRevision)) return false;
@@ -308,14 +337,16 @@ public:
         }
         else if (m_history.empty() && !m_token && m_requests.empty()) return false;
         // 不以固定请求数量设门槛；真实分配失败发生在接纳前。
-        try { m_requests.push_back({ request, *state }); }
+        try { m_requests.push_back({ request, *state, std::move(completion) }); }
         catch (const std::bad_alloc&) { return false; }
         if (!m_context.host->SendWorkAvailable()) {
             m_requests.pop_back();
             return false;
         }
         m_status = ModelRotationStatus::Pending;
-        return StartNext();
+        // 入队已经完成接纳；后续提交失败由终态通知收口。
+        (void)StartNext();
+        return true;
     }
 
     std::optional<Gesture> BuildGesture(const InteractionEvent& event) const
@@ -498,6 +529,8 @@ public:
     InteractionEventKind m_releaseKind = InteractionEventKind::None;
     std::vector<History> m_history;
     std::deque<QueuedRequest> m_requests;
+    Completion m_activeCompletion;
+    std::uint64_t m_nextRequestId = 1;
     ModelRotationStatus m_status = ModelRotationStatus::Detached;
     bool m_isEnabled = false, m_isUndo = false;
 };
@@ -540,9 +573,13 @@ bool ModelRotationHostFeature::AttachHost(const HostFeatureContext& context)
 
 bool ModelRotationHostFeature::DetachHost()
 {
+    const auto keepAlive = weak_from_this().lock();
     if (!m_impl->m_port) return true;
     if (!m_impl->GetOwnerReady() || !m_impl->StopGesture()) return false;
     if (!m_impl->m_context.host->DetachInput(GetFeatureId())) return false;
+    auto requests = std::move(m_impl->m_requests);
+    auto active = std::move(m_impl->m_activeCompletion);
+    m_impl->m_activeCompletion = {};
     m_impl->m_context = {};
     m_impl->m_port.reset();
     m_impl->m_history.clear();
@@ -550,38 +587,50 @@ bool ModelRotationHostFeature::DetachHost()
     m_impl->m_token = 0;
     m_impl->m_isEnabled = false;
     m_impl->m_status = ModelRotationStatus::Detached;
+    m_impl->SendComplete(std::move(active), ModelRotationStatus::Cancelled);
+    for (auto& request : requests)
+        m_impl->SendComplete(std::move(request.completion), ModelRotationStatus::Cancelled);
     return true;
 }
 
 bool ModelRotationHostFeature::OnHostTick()
 {
+    const auto keepAlive = weak_from_this().lock();
     if (!m_impl->SetCompletion()) return false;
     if (!m_impl->m_gesture && !m_impl->ClearSource()) return false;
     if (m_impl->m_gesture && !m_impl->GetGestureValid() && !m_impl->StopGesture()) return false;
     return m_impl->StartNext();
 }
 
-bool ModelRotationHostFeature::SendRequest(const ModelRotationRequest& request)
+ModelRotationAdmission ModelRotationHostFeature::SendRequest(const ModelRotationRequest& request,
+    ModelRotationCallback onComplete)
 {
-    if (!m_impl->SetCompletion()) return false;
+    const auto keepAlive = weak_from_this().lock();
+    if (!m_impl->SetCompletion()) return {ModelRotationAdmissionStatus::Unavailable, 0};
     if (request.action != ModelRotationAction::Rotate
         && (request.angleDeg != 0 || request.worldCenter
-            || request.worldAxis != std::array<double,3>{0,0,1})) return false;
+            || request.worldAxis != std::array<double,3>{0,0,1})) return {};
+    if (!m_impl->m_nextRequestId) return {ModelRotationAdmissionStatus::Unavailable, 0};
+    const auto requestId = m_impl->m_nextRequestId++;
+    ModelRotationHostFeature::Impl::Completion completion{requestId, std::move(onComplete)};
     switch (request.action) {
     case ModelRotationAction::SetEnabled:
-        if (!request.isEnabled && !m_impl->StopGesture()) return false;
+        if (!request.isEnabled && !m_impl->StopGesture()) return {};
         m_impl->m_isEnabled = request.isEnabled;
-        return true;
+        m_impl->SendComplete(std::move(completion), ModelRotationStatus::Succeeded);
+        return {ModelRotationAdmissionStatus::Accepted, requestId};
     case ModelRotationAction::Cancel:
-        if (!m_impl->StopGesture()) return false;
-        m_impl->m_requests.clear();
+        if (!m_impl->StopGesture()) return {};
         if (!m_impl->m_token) m_impl->m_status = ModelRotationStatus::Cancelled;
-        return true;
+        m_impl->CancelQueued(ModelRotationStatus::Cancelled);
+        m_impl->SendComplete(std::move(completion), ModelRotationStatus::Succeeded);
+        return {ModelRotationAdmissionStatus::Accepted, requestId};
     case ModelRotationAction::Undo:
     case ModelRotationAction::Rotate:
-        return m_impl->SendQueued(request);
+        if (!m_impl->SendQueued(request, std::move(completion))) return {};
+        return {ModelRotationAdmissionStatus::Accepted, requestId};
     }
-    return false;
+    return {};
 }
 
 ModelRotationState ModelRotationHostFeature::GetState() const

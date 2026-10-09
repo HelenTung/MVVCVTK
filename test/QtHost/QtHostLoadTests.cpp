@@ -2337,15 +2337,14 @@ bool GetHostResultValid()
     VtkAppHostSession emptySession(HostSessionConfig{});
     int emptyCount = 0;
     HostResult emptyResult;
-    const bool isEmptySent = emptySession.SendRequestResult(
+    const auto emptyAdmission = emptySession.SendRequest(
         GetReload(),
         [&emptyCount, &emptyResult](HostResult result) {
             ++emptyCount;
             emptyResult = std::move(result);
         });
-    if (isEmptySent || emptyCount != 1
-        || emptyResult.isSucceeded
-        || emptyResult.errorCode != HostErrorCode::SessionNotReady
+    if (emptyAdmission.status != HostAdmissionStatus::Rejected || emptyCount != 0
+        || emptyAdmission.errorCode != HostErrorCode::SessionNotReady
         || emptySession.GetImageDescriptor()
         || emptySession.GetImageReadState()) {
         return false;
@@ -2377,12 +2376,12 @@ bool GetHostResultValid()
     HostViewSetRequest viewRequest;
     viewRequest.targetView.viewId = "load-primary";
     viewRequest.opacity = 0.75;
-    const bool isSyncSuccessSent = session.SendRequestResult(
+    const bool isSyncSuccessSent = (session.SendRequest(
         std::move(viewRequest),
         [&syncSuccessCount, &syncSuccess](HostResult value) {
             ++syncSuccessCount;
             syncSuccess = std::move(value);
-        });
+        }).status == HostAdmissionStatus::Accepted);
     if (!isSyncSuccessSent || !sendTimer()
         || syncSuccessCount != 1
         || !syncSuccess.isSucceeded
@@ -2395,12 +2394,12 @@ bool GetHostResultValid()
     HostViewSetRequest missingView;
     missingView.targetView.viewId = "missing-view";
     missingView.opacity = 0.5;
-    const bool isSyncFailSent = session.SendRequestResult(
+    const bool isSyncFailSent = (session.SendRequest(
         std::move(missingView),
         [&syncFailCount, &syncFail](HostResult value) {
             ++syncFailCount;
             syncFail = std::move(value);
-        });
+        }).status == HostAdmissionStatus::Accepted);
     if (!isSyncFailSent || !sendTimer()
         || syncFailCount != 1
         || syncFail.isSucceeded
@@ -2414,26 +2413,25 @@ bool GetHostResultValid()
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     int resultCount = 0;
     HostResult result;
-    const bool isSent = session.SendRequestResult(
+    const auto rejected = session.SendRequest(
         std::move(invalidReload),
         [&resultCount, &result](HostResult value) {
             ++resultCount;
             result = std::move(value);
         });
-    const bool isValid = !isSent
-        && resultCount == 1
-        && !result.isSucceeded
-        && result.errorCode == HostErrorCode::RequestRejected;
+    const bool isValid = rejected.status == HostAdmissionStatus::Rejected
+        && resultCount == 0
+        && rejected.errorCode == HostErrorCode::RequestRejected;
     if (!isValid) return false;
 
     int asyncSuccessCount = 0;
     HostResult asyncSuccess;
-    const bool isAsyncSuccessSent = session.SendRequestResult(
+    const bool isAsyncSuccessSent = (session.SendRequest(
         GetReload(),
         [&asyncSuccessCount, &asyncSuccess](HostResult value) {
             ++asyncSuccessCount;
             asyncSuccess = std::move(value);
-        });
+        }).status == HostAdmissionStatus::Accepted);
     constexpr int pollCount = 1000;
     for (int poll = 0; isAsyncSuccessSent
         && asyncSuccessCount == 0 && poll < pollCount; ++poll) {
@@ -2510,12 +2508,12 @@ bool GetHostResultValid()
     missingLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     missingLoad.metadata = GetLoadMetadata(ImageSourceKind::RawFile);
-    const bool isAsyncFailSent = session.SendRequestResult(
+    const bool isAsyncFailSent = (session.SendRequest(
         std::move(missingLoad),
         [&asyncFailCount, &asyncFail](HostResult value) {
             ++asyncFailCount;
             asyncFail = std::move(value);
-        });
+        }).status == HostAdmissionStatus::Accepted);
     for (int poll = 0; isAsyncFailSent
         && asyncFailCount == 0 && poll < pollCount; ++poll) {
         if (!sendTimer()) return false;
@@ -2560,7 +2558,7 @@ int GetLoadFailCount()
     missingLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(missingLoad)),
+        !(session.SendRequest(std::move(missingLoad)).status == HostAdmissionStatus::Accepted),
         "Load missing path rejection") ? 0 : 1;
     HostLoadRequest unicodeLoad;
     unicodeLoad.geometry = {
@@ -2568,8 +2566,8 @@ int GetLoadFailCount()
     unicodeLoad.filePath = u8"不存在/体数据 é.raw";
     unicodeLoad.metadata = GetLoadMetadata(ImageSourceKind::RawFile);
     failureCount += GetCaseResult(
-        !session.SendRequest(
-            HostLoadRequest(unicodeLoad)),
+        !(session.SendRequest(
+            HostLoadRequest(unicodeLoad)).status == HostAdmissionStatus::Accepted),
         "Load UTF-8 missing path rejection") ? 0 : 1;
 
     HostRenderViewConfig view;
@@ -2580,8 +2578,8 @@ int GetLoadFailCount()
     VtkAppHostSession unicodeSession(std::move(config));
     failureCount += GetCaseResult(
         unicodeSession.BuildSession()
-            && unicodeSession.SendRequest(
-                std::move(unicodeLoad)),
+            && (unicodeSession.SendRequest(
+                std::move(unicodeLoad)).status == HostAdmissionStatus::Accepted),
         "Load UTF-8 request facade acceptance") ? 0 : 1;
 
     HostReloadRequest reload;
@@ -2589,7 +2587,7 @@ int GetLoadFailCount()
     reload.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(reload)),
+        !(session.SendRequest(std::move(reload)).status == HostAdmissionStatus::Accepted),
         "Reload voxel-count rejection") ? 0 : 1;
     failureCount += GetCaseResult(
         GetMultiViewLoadValid(false),

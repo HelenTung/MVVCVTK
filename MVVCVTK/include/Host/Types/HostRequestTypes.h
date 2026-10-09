@@ -25,6 +25,14 @@ struct HostResult final {
     std::string message;
 };
 
+// 拒绝原因只从接纳结果读取；拒绝请求不取得完成回调。
+enum class HostAdmissionStatus { Accepted, Rejected };
+struct HostAdmission final {
+    HostAdmissionStatus status = HostAdmissionStatus::Rejected;
+    HostErrorCode errorCode = HostErrorCode::RequestRejected;
+    std::string message;
+};
+
 enum class HostInputKind : std::uint8_t {
     None,
     WheelForward,
@@ -67,8 +75,6 @@ public:
     virtual HostInputResult SendInput(const HostInputEvent& event) = 0;
 };
 
-using HostCompleteCallback =
-    std::function<void(bool isSuccess)>;
 using HostResultCallback =
     std::function<void(HostResult result)>;
 

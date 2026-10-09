@@ -23,6 +23,11 @@ enum class GapResultStatus {
     Failed,
     SourceChanged
 };
+enum class GapAdmissionStatus { Accepted, InvalidRequest, Busy, Stopping, Unavailable };
+struct GapAdmission final {
+    GapAdmissionStatus status = GapAdmissionStatus::InvalidRequest;
+    std::uint64_t requestId = 0;
+};
 
 // Gap Feature 的等值面阈值来源，不携带 Host 窗口或实现对象。
 enum class GapIsoMode {
@@ -109,4 +114,5 @@ struct GapHostResult final {
     DataRevisionRef resultSet;
     GapStatistics statistics;
     std::string message;
+    std::uint64_t requestId = 0;
 };

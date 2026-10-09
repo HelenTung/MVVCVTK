@@ -1196,9 +1196,9 @@ bool BuildCompletionRetryTest()
         HostViewSetRequest request;
         request.targetView.viewId = view.id;
         request.background = HostBackgroundColor{ 0.1 * id, 0.2, 0.3 };
-        return session.SendRequest(std::move(request), [&, id](bool isSucceeded) {
+        return (session.SendRequest(std::move(request), [&, id](HostResult hostResultIsSucceeded) { const bool isSucceeded = hostResultIsSucceeded.isSucceeded;
             completes.push_back(isSucceeded ? id : -id);
-        });
+        }).status == HostAdmissionStatus::Accepted);
     };
     window->SetRenderRejected(true);
     if (!send(1) || !SendTimer(interactor) || !completes.empty()) return false;
@@ -1294,9 +1294,9 @@ bool BuildCoordinatedFrameProtocolTest()
     HostSessionSetRequest request;
     request.cursor = HostCursorParams{
         { 0.25, 0.5, 0.75 }, -1 };
-    const bool isRequestAccepted = session.SendRequest(
+    const bool isRequestAccepted = (session.SendRequest(
         std::move(request),
-        [&](const bool isSucceeded) {
+        [&](HostResult hostResultIsSucceeded) { const bool isSucceeded = hostResultIsSucceeded.isSucceeded;
             ++callbackCount;
             const auto states = session.GetSceneViewStates();
             wasCallbackAfterRender = isSucceeded
@@ -1306,7 +1306,7 @@ bool BuildCoordinatedFrameProtocolTest()
                 && states[1].renderedEpoch == states[1].sceneEpoch
                 && primaryWindow->GetRenderCount() == 2
                 && peerWindow->GetRenderCount() == 2;
-        });
+        }).status == HostAdmissionStatus::Accepted);
 
     std::vector<vtkRenderWindowInteractor*> timers;
     for (int index = 0; index < 32; ++index) {
@@ -2324,7 +2324,7 @@ bool BuildDefaultRenderTest()
     firstRequest.targetView.viewId = "render-probe";
     firstRequest.mode = HostRenderMode::Volume;
     firstRequest.volumeTransferFunction = function;
-    if (!session.SendRequest(std::move(firstRequest))) {
+    if (!(session.SendRequest(std::move(firstRequest)).status == HostAdmissionStatus::Accepted)) {
         return false;
     }
     (void)SendTimer(interactor);
@@ -2335,7 +2335,7 @@ bool BuildDefaultRenderTest()
     HostViewSetRequest sameRequest;
     sameRequest.targetView.viewId = "render-probe";
     sameRequest.volumeTransferFunction = function;
-    if (!session.SendRequest(std::move(sameRequest))) {
+    if (!(session.SendRequest(std::move(sameRequest)).status == HostAdmissionStatus::Accepted)) {
         return false;
     }
     const std::size_t changedRenderCount =
@@ -2768,13 +2768,13 @@ public:
         reload.metadata = GetSessionSmokeMetadata();
         bool isReloadComplete = false;
         bool isReloadSucceeded = false;
-        if (!m_session->SendRequest(
+        if (!(m_session->SendRequest(
                 std::move(reload),
                 [&isReloadComplete,
-                    &isReloadSucceeded](bool isSucceeded) {
+                    &isReloadSucceeded](HostResult hostResultIsSucceeded) { const bool isSucceeded = hostResultIsSucceeded.isSucceeded;
                     isReloadSucceeded = isSucceeded;
                     isReloadComplete = true;
-                })) {
+                }).status == HostAdmissionStatus::Accepted)) {
             return false;
         }
         constexpr int reloadPollCount = 1000;
@@ -3321,7 +3321,7 @@ public:
             HostViewSetRequest request;
             request.targetView.viewId = "primary-3d";
             request.mode = HostRenderMode::Volume;
-            if (!m_session->SendRequest(std::move(request))) {
+            if (!(m_session->SendRequest(std::move(request)).status == HostAdmissionStatus::Accepted)) {
                 return false;
             }
             const auto deadline = std::chrono::steady_clock::now()
@@ -3611,7 +3611,7 @@ public:
             HostViewSetRequest qualityRequest;
             qualityRequest.targetView.viewId = "primary-3d";
             qualityRequest.volumeQuality = HostVolumeQuality::Low;
-            if (!m_session->SendRequest(std::move(qualityRequest))) {
+            if (!(m_session->SendRequest(std::move(qualityRequest)).status == HostAdmissionStatus::Accepted)) {
                 return false;
             }
             vtkVolume* styleVolume = nullptr;
@@ -3908,8 +3908,8 @@ public:
             { 24.0, 25.0, 26.0 }, -1
         };
         const bool isSliceSent =
-            m_session->SendRequest(std::move(cursorRequest))
-            && m_session->SendRequest(std::move(sliceRequest));
+            (m_session->SendRequest(std::move(cursorRequest)).status == HostAdmissionStatus::Accepted)
+            && (m_session->SendRequest(std::move(sliceRequest)).status == HostAdmissionStatus::Accepted);
             (void)SendTimer(endpoint->interactor);
         bool hasSliceProp = false;
         auto* sliceProps = renderer->GetViewProps();
@@ -3935,8 +3935,8 @@ public:
         isoRequest.iso = 64.0;
         isoRequest.volumeQuality = HostVolumeQuality::High;
         const bool isIsoSent =
-            m_session->SendRequest(
-                std::move(isoRequest));
+            (m_session->SendRequest(
+                std::move(isoRequest)).status == HostAdmissionStatus::Accepted);
         std::optional<HostRenderViewState> isoState;
         bool hasIsoActor = false;
         const auto isoDeadline = std::chrono::steady_clock::now()
@@ -3978,8 +3978,8 @@ public:
         exportRequest.outputPath = "volume-preview-cross";
         exportRequest.format = HostDataExportFormat::Raw;
         const bool isExportStable =
-            m_session->SendRequest(
-                std::move(exportRequest))
+            (m_session->SendRequest(
+                std::move(exportRequest)).status == HostAdmissionStatus::Accepted)
             && std::abs(
                 endpoint->renderWindow
                     ->GetDesiredUpdateRate()
@@ -3999,8 +3999,8 @@ public:
             HostRenderMode::CompositeIsoSurface;
         restoreRequest.volumeQuality = HostVolumeQuality::Ultra;
         const bool isRestoreSent =
-            m_session->SendRequest(
-                std::move(restoreRequest));
+            (m_session->SendRequest(
+                std::move(restoreRequest)).status == HostAdmissionStatus::Accepted);
         std::optional<HostRenderViewState> restoreState;
         const auto restoreDeadline = std::chrono::steady_clock::now()
             + std::chrono::seconds(10);

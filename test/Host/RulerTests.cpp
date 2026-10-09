@@ -214,7 +214,7 @@ void TestRender() {
 
 bool SendRequest(VtkAppHostSession& session,HostRequest&& request,bool expected=true) {
     struct Completion { bool done=false; bool success=false; }; auto completion=std::make_shared<Completion>();
-    session.SendRequestResult(std::move(request),[completion](HostResult result){completion->done=true;completion->success=result.isSucceeded;});
+    (session.SendRequest(std::move(request),[completion](HostResult result){completion->done=true;completion->success=result.isSucceeded;}).status == HostAdmissionStatus::Accepted);
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
     while (!completion->done && std::chrono::steady_clock::now()<deadline) {
         session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1));

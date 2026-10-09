@@ -183,12 +183,12 @@ bool Reload(
         bool isSucceeded = false;
     };
     const auto completion = std::make_shared<Completion>();
-    const bool isAccepted = session.SendRequest(
+    const bool isAccepted = (session.SendRequest(
         std::move(reload),
-        [completion](const bool value) {
+        [completion](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
             completion->isSucceeded = value;
             completion->isComplete = true;
-        });
+        }).status == HostAdmissionStatus::Accepted);
     const bool isPumped = isAccepted
         && PumpUntil(primary, timer, [completion] { return completion->isComplete; });
     if (!isAccepted || !isPumped || !completion->isSucceeded) {
@@ -509,7 +509,7 @@ int GetPartSceneFailCount()
     HostViewSetRequest appearance;
     appearance.targetView = { primaryViewId, false, HostRenderViewRole::Primary3D };
     appearance.background = HostBackgroundColor{ 0.13, 0.17, 0.21 };
-    (void)session.SendRequest(std::move(appearance));
+    (void)(session.SendRequest(std::move(appearance)).status == HostAdmissionStatus::Accepted);
     (void)SendTimer(timer->interactor);
     auto replacement = std::make_shared<std::optional<PartSegmentationResult>>();
     PartSegmentationRequest replacementRequest;

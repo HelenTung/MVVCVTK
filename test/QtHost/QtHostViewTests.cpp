@@ -3188,21 +3188,21 @@ int GetViewFailCount()
     HostViewSetRequest value;
     value.targetView.viewId = "missing-view";
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(value)),
+        !(session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted),
         "View missing target rejection") ? 0 : 1;
 
     HostSessionSetRequest sessionValue;
     sessionValue.spacing =
         std::array<double, 3>{ 1.0, 0.0, 1.0 };
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(sessionValue)),
+        !(session.SendRequest(std::move(sessionValue)).status == HostAdmissionStatus::Accepted),
         "Session invalid spacing atomic rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
     value.volumeTransferFunction = HostVolumeTransferFunction{};
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(value)),
+        !(session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted),
         "View explicit empty transfer rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
@@ -3210,7 +3210,7 @@ int GetViewFailCount()
     value.background = HostBackgroundColor{
         std::numeric_limits<double>::infinity(), 0.0, 0.0 };
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(value)),
+        !(session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted),
         "View non-finite background rejection") ? 0 : 1;
 
     const auto firstScene = session.GetSceneViewState(stateTarget);
@@ -3239,7 +3239,7 @@ int GetViewFailCount()
     };
     value.isAxesVisible = true;
     value.volumeQuality = HostVolumeQuality::XHigh;
-    const bool isViewSet = session.SendRequest(std::move(value));
+    const bool isViewSet = (session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         isViewSet,
         "Qt Host can set one View presentation state") ? 0 : 1;
@@ -3265,14 +3265,14 @@ int GetViewFailCount()
         { 1.0, 2.0, 3.0 }, -1
     };
     const bool isNoDataSpacingRejected =
-        !session.SendRequest(std::move(sessionValue));
+        !(session.SendRequest(std::move(sessionValue)).status == HostAdmissionStatus::Accepted);
     sessionValue = HostSessionSetRequest{};
     sessionValue.cursor = HostCursorParams{
         { 1.0, 2.0, 3.0 }, -1
     };
     failureCount += GetCaseResult(
         isNoDataSpacingRejected
-            && session.SendRequest(std::move(sessionValue)),
+            && (session.SendRequest(std::move(sessionValue)).status == HostAdmissionStatus::Accepted),
         "Session rejects spacing without primary data while cursor remains independently writable") ? 0 : 1;
 
     const auto state = session.GetRenderViewState(stateTarget);
@@ -3343,7 +3343,7 @@ int GetViewFailCount()
     value.targetView = stateTarget;
     value.volumeTransferFunction = independentFunction;
     const bool isIndependentSet =
-        session.SendRequest(std::move(value));
+        (session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted);
     const auto independentState =
         session.GetRenderViewState(stateTarget);
     failureCount += GetCaseResult(
@@ -3362,7 +3362,7 @@ int GetViewFailCount()
     value.mode = HostRenderMode::CompositeIsoSurface;
     value.volumeQuality = HostVolumeQuality::Ultra;
     const bool isCompositeIsoQualitySet =
-        session.SendRequest(std::move(value));
+        (session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted);
     const auto compositeIsoState =
         session.GetRenderViewState(stateTarget);
     value = HostViewSetRequest{};
@@ -3370,7 +3370,7 @@ int GetViewFailCount()
     value.mode = HostRenderMode::SliceTopDown;
     value.volumeQuality = HostVolumeQuality::Low;
     const bool isSliceQualityRejected =
-        !session.SendRequest(std::move(value));
+        !(session.SendRequest(std::move(value)).status == HostAdmissionStatus::Accepted);
     const auto preservedIsoState =
         session.GetRenderViewState(stateTarget);
     failureCount += GetCaseResult(
@@ -3391,7 +3391,7 @@ int GetViewFailCount()
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";
     failureCount += GetCaseResult(
-        session.SendRequest(std::move(reset)),
+        (session.SendRequest(std::move(reset)).status == HostAdmissionStatus::Accepted),
         "Qt Host can reset the target camera") ? 0 : 1;
 
     failureCount += GetHistogramFailCount();

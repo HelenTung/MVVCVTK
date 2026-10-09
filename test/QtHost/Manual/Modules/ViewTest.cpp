@@ -124,12 +124,12 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
             const QPointer<ModulePanel> owner(panel); bool accepted = false;
             for (auto& request : requests) {
                 const auto viewId = request.targetView.viewId;
-                accepted = panel->GetSession()->SendRequestResult(std::move(request), [owner, batch, id, viewId](HostResult result) {
+                accepted = (panel->GetSession()->SendRequest(std::move(request), [owner, batch, id, viewId](HostResult result) {
                     if (!owner) return;
                     if (!result.isSucceeded) batch->errors.append(QString::fromStdString(viewId + ": " + result.message));
                     if (--batch->remaining == 0) owner->SetComplete(id, batch->errors.isEmpty() ? "Succeeded" : "Failed",
                         {{"views", batch->targets}, {"message", batch->errors.isEmpty() ? QString("已更新 %1 个视图的辅助显示").arg(batch->targets.size()) : batch->errors.join("；")}});
-                }) || accepted;
+                }).status == HostAdmissionStatus::Accepted) || accepted;
             }
             panel->SetAdmission(id, accepted);
         }, TestPolicy::View);

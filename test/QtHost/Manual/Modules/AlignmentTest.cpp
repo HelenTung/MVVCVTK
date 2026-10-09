@@ -28,8 +28,9 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             const auto source = GetText(p, "source") == "current" ? descriptor->dataRevision : GetRef(p["source"]);
             // 本测试流程激活到当前主输入；历史体先经 Data.Select 显式切换。
             if (source != descriptor->dataRevision) throw std::invalid_argument("请先在“数据输入 → 选择当前输入”中选择参考源体");
-            const auto mesh = GetText(p, "mesh") == "surface" ? panel->GetContext().workflow.GetSurfaceMesh() : GetRef(p["mesh"]);
-            if (GetText(p, "mesh") == "surface" && panel->GetContext().workflow.GetSurfaceSource() != source)
+            const auto surface = panel->GetContext().workflow.GetMeasurementSurface();
+            const auto mesh = GetText(p, "mesh") == "surface" ? (surface ? surface->mesh : DataRevisionRef{}) : GetRef(p["mesh"]);
+            if (GetText(p, "mesh") == "surface" && (!surface || surface->source != source))
                 throw std::invalid_argument("已生成表面不属于选定源修订");
             state->reference = dataSource->LoadReference(GetText(p, "filePath"), source, mesh);
             state->recipe = {}; state->result = {}; state->isReviewed = false;

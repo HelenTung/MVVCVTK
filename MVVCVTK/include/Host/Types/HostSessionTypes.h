@@ -158,6 +158,17 @@ struct HostStateSnapshot final {
     std::vector<FeatureOperationState> operations;
 };
 
+struct HostDataDescriptor final {
+    DataRevisionRef revision;
+    DataTypeId type;
+    std::vector<DataInputRef> inputs;
+    std::optional<DataProvenance> provenance;
+};
+struct HostDataCatalog final {
+    DataCommitId commitId = 0;
+    std::vector<HostDataDescriptor> data;
+};
+
 struct HostRenderViewEndpoint {
     // endpoint 是对 session 内 VTK 对象的非拥有观察视图，不得跨 session 重建或析构缓存。
     std::string id;

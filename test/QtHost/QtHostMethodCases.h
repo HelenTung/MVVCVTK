@@ -9,6 +9,7 @@ const std::string& GetMethodExecutable();
 void SetMethodExecutable(std::string executable);
 
 int GetLoadFailCount();
+int GetConsumerContractFailCount();
 int GetRenderProductFailCount();
 int GetViewFailCount();
 int GetCropFailCount();

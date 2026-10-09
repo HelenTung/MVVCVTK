@@ -179,12 +179,11 @@ struct TestHost final {
     HostFeatureContext context;
 };
 
-SurfaceDeterminationRequest GetStartRequest(
+SurfaceStartRequest GetStartRequest(
     const SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::GlobalAutomatic)
 {
-    SurfaceDeterminationRequest request;
-    request.action = SurfaceDeterminationAction::Start;
+    SurfaceStartRequest request;
     request.start = GetParams(method);
     return request;
 }
@@ -315,8 +314,8 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         "successful request attaches owned display");
 
     SurfaceDeterminationRequest hide;
-    hide.action = SurfaceDeterminationAction::SetVisibility;
-    hide.isVisible = false;
+    hide = SurfaceVisibilityRequest{};
+    std::get<SurfaceVisibilityRequest>(hide).isVisible = false;
     checks.Get(
         feature->SendRequest(hide).status
             == SurfaceAdmissionStatus::Accepted,
@@ -326,7 +325,7 @@ void TestSuccessVisibilityAndClear(Checks& checks)
             && feature->GetSurfaceSnapshot().get() == snapshot.get(),
         "hide removes display without replacing measurement generation");
     SurfaceDeterminationRequest show = hide;
-    show.isVisible = true;
+    std::get<SurfaceVisibilityRequest>(show).isVisible = true;
     checks.Get(
         feature->SendRequest(show).status
             == SurfaceAdmissionStatus::Accepted,
@@ -339,7 +338,7 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         "display changes preserve revision and parameter fingerprint");
 
     SurfaceDeterminationRequest clear;
-    clear.action = SurfaceDeterminationAction::Clear;
+    clear = SurfaceClearRequest{};
     checks.Get(
         feature->SendRequest(clear).status
             == SurfaceAdmissionStatus::Accepted,
@@ -370,8 +369,8 @@ void TestCancelAndSupersede(Checks& checks)
             ++startCallbacks;
         });
     SurfaceDeterminationRequest stop;
-    stop.action = SurfaceDeterminationAction::Stop;
-    stop.targetRequestId = start.requestId;
+    stop = SurfaceStopRequest{};
+    std::get<SurfaceStopRequest>(stop).targetRequestId = start.requestId;
     std::atomic<int> stopCallbacks{ 0 };
     const auto stopAdmission = cancelFeature->SendRequest(
         stop,
@@ -809,7 +808,7 @@ void TestPurposeIsolation(Checks& checks)
         && feature.GetSurfaceSnapshot() == formal && host.data->GetDataGraph().commitId == commit
         && host.host->lastDelta.hasDisplayUpdate && host.host->lastDelta.displays.empty(),
         "preview has transient identity and removes formal picking description");
-    SurfaceDeterminationRequest clear; clear.action = SurfaceDeterminationAction::ClearPreview;
+    SurfaceDeterminationRequest clear; clear = SurfaceClearPreviewRequest{};
     checks.Get(feature.SendRequest(clear).status == SurfaceAdmissionStatus::Accepted
         && !feature.GetPreviewSnapshot() && feature.GetSurfaceSnapshot() == formal
         && host.host->lastDelta.displays.size() == 1 && host.data->GetDataGraph().commitId == commit,
@@ -992,7 +991,7 @@ void TestClearedResultFailure(Checks& checks)
     int count = 0;
     checks.Get(feature.SendRequest(GetStartRequest(), [&](auto) { ++count; }).status == SurfaceAdmissionStatus::Accepted
         && WaitUntil(feature, [&] { return count == 1; }), "clear failure baseline completes");
-    SurfaceDeterminationRequest clear; clear.action = SurfaceDeterminationAction::Clear;
+    SurfaceDeterminationRequest clear; clear = SurfaceClearRequest{};
     checks.Get(feature.SendRequest(clear).status == SurfaceAdmissionStatus::Accepted, "formal result is cleared");
     auto empty = GetStartRequest(); empty.start->initialIsoValue = 1e9;
     checks.Get(feature.SendRequest(empty, [&](auto) { ++count; }).status == SurfaceAdmissionStatus::Accepted

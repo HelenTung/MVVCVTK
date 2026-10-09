@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <variant>
 
 using ThicknessPoint = std::array<double, 3>;
 
@@ -223,28 +224,29 @@ struct ThicknessSnapshot final
     bool isCurrent = false;
 };
 
-enum class ThicknessAction : std::uint8_t
-{
-    None,
-    Start,
-    Cancel,
-    Clear,
-    SetEvaluation,
-    SetDisplay,
-    SetActive,
-    SelectSample
-};
-struct ThicknessRequest final
-{
-    ThicknessAction action = ThicknessAction::None;
-    std::optional<ThicknessInput> input;
-    std::optional<ThicknessParams> params;
+struct ThicknessStartRequest final {
+    ThicknessInput input;
+    ThicknessParams params;
     std::optional<ThicknessEvaluation> evaluation;
     std::optional<ThicknessDisplay> display;
-    std::optional<DataRevisionRef> resultRevision;
-    std::optional<std::size_t> sampleIndex;
+};
+struct ThicknessCancelRequest final {
     std::uint64_t targetRequestId = 0;
 };
+struct ThicknessClearRequest final {};
+struct ThicknessEvaluationRequest final { ThicknessEvaluation evaluation; };
+struct ThicknessDisplayRequest final { ThicknessDisplay display; };
+struct ThicknessActivationRequest final {
+    DataRevisionRef resultRevision;
+    std::optional<ThicknessDisplay> display;
+};
+struct ThicknessSampleRequest final {
+    DataRevisionRef resultRevision;
+    std::size_t sampleIndex = 0;
+};
+using ThicknessRequest = std::variant<ThicknessStartRequest, ThicknessCancelRequest,
+    ThicknessClearRequest, ThicknessEvaluationRequest, ThicknessDisplayRequest,
+    ThicknessActivationRequest, ThicknessSampleRequest>;
 struct ThicknessAdmission final
 {
     ThicknessAdmissionStatus status = ThicknessAdmissionStatus::InvalidRequest;
