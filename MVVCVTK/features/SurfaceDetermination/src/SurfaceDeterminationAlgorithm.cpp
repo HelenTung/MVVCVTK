@@ -161,14 +161,6 @@ struct ScalarSample final {
     double value = 0.0;
 };
 
-struct MeshComponent final {
-    std::vector<std::uint32_t> sourcePointIds;
-    std::vector<Triangle> triangles;
-    std::uint32_t minimumPointId = 0;
-    std::uint64_t estimatedVoxelCount = 0;
-    bool isClosed = false;
-};
-
 struct TopologyMetrics final {
     double area = 0.0;
     double signedVolume = 0.0;
@@ -176,6 +168,15 @@ struct TopologyMetrics final {
     std::uint64_t nonManifoldEdgeCount = 0;
     std::uint64_t degenerateTriangleCount = 0;
     bool isOrientationValid = true;
+};
+
+struct MeshComponent final {
+    std::vector<std::uint32_t> sourcePointIds;
+    std::vector<Triangle> triangles;
+    std::uint32_t minimumPointId = 0;
+    std::uint64_t estimatedVoxelCount = 0;
+    bool isClosed = false;
+    TopologyMetrics topology;
 };
 
 bool GetCancelled(const SurfaceCancelCheck& getCancelled)
@@ -1033,6 +1034,9 @@ public:
         if (m_rank[leftRoot] == m_rank[rightRoot]) ++m_rank[leftRoot];
     }
 
+    std::vector<std::uint32_t> ReleaseParents() { return std::move(m_parent); }
+    std::vector<std::uint8_t> ReleaseRanks() { return std::move(m_rank); }
+
 private:
     std::vector<std::uint32_t> m_parent;
     std::vector<std::uint8_t> m_rank;
@@ -1128,6 +1132,10 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             .push_back(triangle);
     }
 
+    // 分组已完成，不再查询集合根；复用原缓冲作局部编号和去重标记。
+    auto localIds=sets.ReleaseParents();
+    auto seen=sets.ReleaseRanks();
+    for(auto& marker:seen) { CheckCancellation(cancellationBatch,cancelled); marker=0; }
     std::vector<MeshComponent> components;
     components.reserve(groupedTriangles.size());
     for (auto& item : groupedTriangles) {
@@ -1138,28 +1146,20 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
         pointIds.reserve(component.triangles.size());
         for (const Triangle& triangle : component.triangles) {
             CheckCancellation(cancellationBatch, cancelled);
-            pointIds.insert(
-                pointIds.end(),
-                triangle.vertices.begin(),
-                triangle.vertices.end());
+            for(auto id:triangle.vertices) {
+                if(!seen[id]) {seen[id]=1;pointIds.push_back(id);}
+            }
         }
         std::sort(pointIds.begin(), pointIds.end());
-        pointIds.erase(
-            std::unique(pointIds.begin(), pointIds.end()),
-            pointIds.end());
         component.sourcePointIds = std::move(pointIds);
         component.minimumPointId = component.sourcePointIds.front();
 
-        std::unordered_map<std::uint32_t, std::uint32_t> remap;
-        remap.reserve(component.sourcePointIds.size());
         std::vector<Point3> localPoints;
         localPoints.reserve(component.sourcePointIds.size());
         for (std::size_t index = 0;
             index < component.sourcePointIds.size(); ++index) {
             CheckCancellation(cancellationBatch, cancelled);
-            remap.emplace(
-                component.sourcePointIds[index],
-                static_cast<std::uint32_t>(index));
+            localIds[component.sourcePointIds[index]]=static_cast<std::uint32_t>(index);
             localPoints.push_back(points[component.sourcePointIds[index]]);
         }
         std::vector<Triangle> localTriangles = component.triangles;
@@ -1167,10 +1167,11 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             CheckCancellation(cancellationBatch, cancelled);
             for (std::uint32_t& pointId : triangle.vertices) {
                 CheckCancellation(cancellationBatch, cancelled);
-                pointId = remap.at(pointId);
+                pointId = localIds[pointId];
             }
         }
         const TopologyMetrics topology = GetTopologyMetrics(localPoints, localTriangles, cancelled);
+        component.topology=topology;
         // 保留已经生成的局部编号，避免输出阶段再次建立同一 remap。
         component.triangles=std::move(localTriangles);
         component.isClosed = topology.boundaryEdgeCount == 0
@@ -1431,11 +1432,11 @@ void SetTriangleFlipFlags(const std::vector<Point3> &originalPoints, const std::
         const Point3 originalNormal = Cross(
             Subtract(originalPoints[ids[1]], originalPoints[ids[0]]),
             Subtract(originalPoints[ids[2]], originalPoints[ids[0]]));
-        const Point3 refinedNormal = Cross(
+        const Point3 refinedNormal = &originalPoints==&refinedPoints ? originalNormal : Cross(
             Subtract(refinedPoints[ids[1]], refinedPoints[ids[0]]),
             Subtract(refinedPoints[ids[2]], refinedPoints[ids[0]]));
         const double originalLength = GetLength(originalNormal);
-        const double refinedLength = GetLength(refinedNormal);
+        const double refinedLength = &originalPoints==&refinedPoints ? originalLength : GetLength(refinedNormal);
         if (originalLength <= geometryEpsilon
             || refinedLength <= geometryEpsilon
             || Dot(originalNormal, refinedNormal) <= 0.0) {
@@ -1493,14 +1494,17 @@ SurfaceMetricValidity GetAreaValidity(
 
 void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, const std::uint32_t objectIndex,
                      const std::vector<Point3> &originalPoints, const std::vector<Triangle> &triangles,
-                     std::vector<SurfacePointRecord> records, SurfaceAlgorithmResult &result,
+                     std::vector<SurfacePointRecord> records, std::vector<Point3>& classifications,
+                     const TopologyMetrics& cachedTopology, SurfaceAlgorithmResult &result,
                      const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
     // 当前材料流程保留 seed 位置；直接复用同一几何，省去整组件副本。
     const auto& refinedPoints=originalPoints;
     SetTriangleFlipFlags(originalPoints, refinedPoints, triangles, records, cancelled);
-    const TopologyMetrics topology = GetTopologyMetrics(refinedPoints, triangles, cancelled);
+    // 整体翻转不改变边关联、退化和方向一致性；体积仍按最终顺序重新累加。
+    auto topology=cachedTopology;
+    topology.signedVolume=0;
 
     std::uint64_t acceptedCount = 0;
     std::uint64_t lowContrastCount = 0;
@@ -1515,18 +1519,22 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
         std::numeric_limits<double>::max(),
         std::numeric_limits<double>::lowest()
     };
+    std::size_t pointIndex=0;
     for (SurfacePointRecord& record : records) {
         CheckCancellation(cancellationBatch, cancelled);
         record.objectIndex = objectIndex;
-        if (SurfaceContract::GetPointValid(record, params.method)) ++acceptedCount;
+        auto& classified=classifications[pointIndex++];
+        classified={SurfaceContract::GetPointValid(record,params.method)?1.:0.,
+            GetPointAtDataBoundary(volume.geometry,record.positionModel,boundaryTolerance)?1.:0.,
+            GetPointAtRoiBoundary(params.roi,record.positionModel,boundaryTolerance)?1.:0.};
+        if (classified[0]!=0) ++acceptedCount;
         if (GetSurfaceFlag(
                 record.flags, SurfacePointFlags::LowContrast)) {
             ++lowContrastCount;
         }
         if (GetSurfaceFlag(record.flags, SurfacePointFlags::ProfileClipped) ||
             GetSurfaceFlag(record.flags, SurfacePointFlags::RoiBoundary) ||
-            GetPointAtDataBoundary(volume.geometry, record.positionModel, boundaryTolerance) ||
-            GetPointAtRoiBoundary(params.roi, record.positionModel, boundaryTolerance))
+            classified[1]!=0 || classified[2]!=0)
         {
             isTruncated = true;
             ++result.truncatedPointCount;
@@ -1547,13 +1555,14 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
         const auto& ids = triangle.vertices;
         const auto edgeA = Subtract(records[ids[1]].positionModel, records[ids[0]].positionModel);
         const auto edgeB = Subtract(records[ids[2]].positionModel, records[ids[0]].positionModel);
-        const double area = 0.5 * GetLength(Cross(edgeA, edgeB));
+        const double doubleArea=GetLength(Cross(edgeA,edgeB));
+        const double area = 0.5 * doubleArea;
+        if(std::isfinite(doubleArea)&&doubleArea>geometryEpsilon)
+            topology.signedVolume+=Dot(refinedPoints[ids[0]],Cross(refinedPoints[ids[1]],refinedPoints[ids[2]]))/6.0;
         bool isValid = std::isfinite(area) && area > geometryEpsilon;
         for (const auto id : ids) {
             CheckCancellation(cancellationBatch, cancelled);
-            isValid = isValid && SurfaceContract::GetPointValid(records[id], params.method)
-                && !GetPointAtDataBoundary(volume.geometry, records[id].positionModel, boundaryTolerance)
-                && !GetPointAtRoiBoundary(params.roi, records[id].positionModel, boundaryTolerance);
+            isValid = isValid && classifications[id][0]!=0 && classifications[id][1]==0 && classifications[id][2]==0;
         }
         if (std::isfinite(area)) { totalArea += area; if (isValid) validArea += area; }
         hasCompleteSupport = hasCompleteSupport && isValid;
@@ -1758,6 +1767,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                      .1 + .8 * (pairIndex + .25) / pairCount);
         auto components =
             BuildComponents(meshPoints, meshTriangles, volume.geometry.voxelVolume, getCancelled);
+        result.componentsMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         [[maybe_unused]] const auto releasedTriangleBytes=meshTriangles.capacity()*sizeof(Triangle);
         std::vector<Triangle>().swap(meshTriangles);
         const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled);
@@ -1791,11 +1801,12 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         {
             if (GetCancelled(getCancelled))
                 return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+            const auto preparationStart=std::chrono::steady_clock::now();
             std::vector<Point3> points;
             std::vector<Triangle> triangles;
             GetLocalMesh(components[selectedIndex], meshPoints, points, triangles, getCancelled);
             SetOutwardWinding(volume, points, triangles);
-            const auto normals = GetVertexNormals(points, triangles, getCancelled);
+            auto normals = GetVertexNormals(points, triangles, getCancelled);
             std::vector<SurfacePointRecord> records(points.size());
             const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
             for (const auto &triangle : triangles)
@@ -1810,6 +1821,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         records[id].flags |= SurfacePointFlags::SharpCorner;
             }
             std::atomic<bool> cancelled{false};
+            const auto samplingStart=std::chrono::steady_clock::now();
+            result.meshPreparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();
             {
                 SurfaceCudaCompute cuda;
                 std::unique_ptr<SurfaceCudaBatch> deviceSamples;
@@ -1882,10 +1895,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             } // 设备/回传工作区在拓扑分配前释放。
             if (cancelled.load())
                 return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+            const auto outputStart=std::chrono::steady_clock::now();
+            result.pointSamplingMs+=std::chrono::duration<double,std::milli>(outputStart-samplingStart).count();
             SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
                          .1 + .8 * (pairIndex + .85) / pairCount);
             AddObjectResult(volume, params, static_cast<std::uint32_t>(result.objects.size()), points,
-                            triangles, std::move(records), result, getCancelled);
+                            triangles, std::move(records), normals, components[selectedIndex].topology, result, getCancelled);
+            result.outputMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-outputStart).count();
             result.objects.back().interfaceIndex = static_cast<std::uint32_t>(pairIndex);
         }
         result.execution.refinementMs +=

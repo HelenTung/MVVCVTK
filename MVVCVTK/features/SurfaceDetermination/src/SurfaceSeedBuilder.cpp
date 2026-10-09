@@ -194,25 +194,35 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                 {
                     if (cancelled && cancelled())
                         return SurfaceSeedStatus::Cancelled;
+                    std::array<double,8> scalar{};
+                    unsigned invalidCorners=0;
                     for (std::int64_t xx = range[0]; xx < range[1]; ++xx)
                     {
                         if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
                             return SurfaceSeedStatus::Cancelled;
-                        std::array<double, 8> scalar{};
+                        const bool shifted=xx!=range[0];
+                        if(shifted) {
+                            scalar[0]=scalar[1];scalar[3]=scalar[2];scalar[4]=scalar[5];scalar[7]=scalar[6];
+                            invalidCorners=((invalidCorners>>1)&1U)|((invalidCorners&4U)<<1)
+                                |((invalidCorners&32U)>>1)|((invalidCorners&64U)<<1);
+                        }
                         unsigned code = 0;
-                        bool supported = true;
                         for (unsigned c = 0; c < 8; ++c)
                         {
+                            if(shifted&&(c==0||c==3||c==4||c==7)) {
+                                if(scalar[c]>=iso) code|=1U<<c;
+                                continue;
+                            }
                             const auto index = GetIndex(grid, static_cast<int>(xx) + corners[c][0],
                                                         static_cast<int>(yy) + corners[c][1],
                                                         static_cast<int>(zz) + corners[c][2]);
                             scalar[c] = grid.readScalar(grid.values, index);
-                            supported = supported && (!grid.validity || grid.validity[index]) &&
-                                        std::isfinite(scalar[c]);
+                            if((grid.validity&&!grid.validity[index])||!std::isfinite(scalar[c]))
+                                invalidCorners|=1U<<c;
                             if (scalar[c] >= iso)
                                 code |= 1U << c;
                         }
-                        if (!supported)
+                        if (invalidCorners)
                         {
                             ++stats.skippedCellCount;
                             continue;

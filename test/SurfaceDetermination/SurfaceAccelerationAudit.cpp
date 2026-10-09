@@ -106,6 +106,10 @@ int main(int argc, char **argv) {
              << ",\"triangles\":" << result.triangleIndices.size() / 3 << ",\"totalMs\":" << elapsed
              << ",\"seedMs\":" << result.execution.seedMs
              << ",\"refinementMs\":" << result.execution.refinementMs
+             << ",\"componentsMs\":" << result.componentsMs
+             << ",\"meshPreparationMs\":" << result.meshPreparationMs
+             << ",\"pointSamplingMs\":" << result.pointSamplingMs
+             << ",\"outputMs\":" << result.outputMs
              << ",\"cudaPointCount\":" << result.cudaPointCount
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
              << ",\"beforePrivateBytes\":" << before.PrivateUsage

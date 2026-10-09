@@ -55,7 +55,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display)
+foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display seed-window)
     add_test(
         NAME "SurfaceDetermination.${_mvvcvtk_surface_suite}"
         COMMAND mvvcvtk_surface_determination_tests ${_mvvcvtk_surface_suite}

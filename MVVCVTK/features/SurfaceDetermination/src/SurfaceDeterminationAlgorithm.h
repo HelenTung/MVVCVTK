@@ -51,6 +51,10 @@ struct SurfaceAlgorithmResult final {
     // 仓内审计使用，不进入 generation/API/SPI。
     std::size_t cudaPointCount = 0;
     std::size_t cudaDeviceBytes = 0;
+    double componentsMs = 0;
+    double meshPreparationMs = 0;
+    double pointSamplingMs = 0;
+    double outputMs = 0;
 };
 
 class SurfaceDeterminationAlgorithm final {
