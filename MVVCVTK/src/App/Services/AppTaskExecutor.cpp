@@ -322,4 +322,3 @@ bool SendRenderTask(
         && executor->SendRenderTask(std::move(work))
             == TaskAdmissionResult::Accepted;
 }
-
