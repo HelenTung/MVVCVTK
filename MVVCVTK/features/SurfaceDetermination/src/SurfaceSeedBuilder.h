@@ -20,6 +20,10 @@ struct SurfaceSeedGrid final
     const void *values = nullptr;
     double (*readScalar)(const void *, std::size_t) = nullptr;
     const unsigned char *validity = nullptr;
+    // 借用请求内不可变的源节点；缺省仍可使用回调 reader。
+    const void *scalarValues = nullptr;
+    int scalarType = 0;
+    const std::array<double, 2> *materialRange = nullptr;
 };
 
 enum class SurfaceSeedStatus

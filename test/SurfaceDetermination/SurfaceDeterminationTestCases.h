@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 int GetSurfaceSeedWindowFailCount();
+int GetSurfaceOptimizationFailCount();
 
 int GetSurfaceRealInputFailCount(const char* path,int nx,int ny,int nz,double iso,
                                 std::size_t expectedPoints,std::size_t expectedTriangles);

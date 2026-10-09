@@ -112,6 +112,10 @@ int main(int argc, char **argv) {
              << ",\"outputMs\":" << result.outputMs
              << ",\"cudaPointCount\":" << result.cudaPointCount
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
+             << ",\"cpuThreadCount\":" << result.cpuThreadCount
+             << ",\"availablePhysicalCores\":" << result.availablePhysicalCores
+             << ",\"availableLogicalThreads\":" << result.availableLogicalThreads
+             << ",\"plannedCpuThreads\":" << result.plannedCpuThreads
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage

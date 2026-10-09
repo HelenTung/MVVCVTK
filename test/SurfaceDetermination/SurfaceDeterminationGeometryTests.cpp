@@ -5,7 +5,6 @@
 #include "SurfaceDeterminationTestSupport.h"
 
 #include <vtkType.h>
-#include <vtkSMPTools.h>
 
 #include <algorithm>
 #include <array>
@@ -378,9 +377,7 @@ void TestDirectionExtentAndDeterminism(Checks& checks)
         { 0.7, 1.3, 2.0 },
         direction);
     auto params = GetParams();
-    vtkSMPTools::Initialize(1);
     const auto first = Build(rotated, params);
-    vtkSMPTools::Initialize(4);
     const auto second = Build(rotated, params);
     checks.Get(
         first.status == SurfaceResultStatus::Succeeded,
@@ -392,14 +389,14 @@ void TestDirectionExtentAndDeterminism(Checks& checks)
         first.parameterFingerprint == second.parameterFingerprint
             && first.points.size() == second.points.size()
             && first.triangleIndices == second.triangleIndices,
-        "thread-count changes preserve identity and topology order");
+        "repeated builds preserve identity and topology order");
     bool coordinatesEqual = first.points.size() == second.points.size();
     for (std::size_t index = 0;
         coordinatesEqual && index < first.points.size(); ++index) {
         coordinatesEqual = first.points[index].positionModel
             == second.points[index].positionModel;
     }
-    checks.Get(coordinatesEqual, "thread-count changes preserve point coordinates");
+    checks.Get(coordinatesEqual, "repeated builds preserve point coordinates");
 
     auto changedParams = params;
     changedParams.seedFraction = .6;

@@ -27,9 +27,15 @@ int main() {
             for (int x = -3; x <= 12; ++x)
                 values[(std::size_t(z + 4) * 15 + (y - 2)) * 16 + (x + 3)] = x + 2. * y + 4. * z;
     v.values = values.data();
+    constexpr auto hostCredit = std::max<std::size_t>(MVVCVTK_SURFACE_TEST_HOST_BYTES,
+                                                     MVVCVTK_SURFACE_TEST_DEVICE_BYTES);
+    constexpr auto testCredit = std::max<std::size_t>(1024U * 1024U * 1024U, hostCredit);
+    SurfaceCudaCompute limited;
+    if (limited.Start(v, MVVCVTK_SURFACE_TEST_HOST_BYTES - 1U, 1024U * 1024U))
+        return 1;
     const std::array<double, 6> points{1.5, 5, 2, 2.5, 7, 4};
     SurfaceCudaCompute compute;
-    if (!compute.Start(v, 1024U * 1024U * 1024U, 1024U * 1024U)) {
+    if (!compute.Start(v, testCredit, 1024U * 1024U)) {
         std::cerr << "CUDA device/backend unavailable\n";
         return 77;
     }
@@ -46,7 +52,7 @@ int main() {
     v.materialRange[0] = -100;
     v.materialRange[1] = -50;
     SurfaceCudaCompute saturation;
-    if (!saturation.Start(v, 1024U * 1024U * 1024U, 1024U * 1024U) ||
+    if (!saturation.Start(v, testCredit, 1024U * 1024U) ||
         !saturation.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -56,7 +62,7 @@ int main() {
     std::vector<unsigned char> mask(values.size(), 0);
     v.validity = mask.data();
     SurfaceCudaCompute missing;
-    if (!missing.Start(v, 1024U * 1024U * 1024U, 1024U * 1024U) ||
+    if (!missing.Start(v, testCredit, 1024U * 1024U) ||
         !missing.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -71,7 +77,7 @@ int main() {
     v.scalarBytes = 4;
     v.hasMaterialRange = 0;
     SurfaceCudaCompute single;
-    if (!single.Start(v, 1024U * 1024U * 1024U, 1024U * 1024U) ||
+    if (!single.Start(v, testCredit, 1024U * 1024U) ||
         !single.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -83,7 +89,7 @@ int main() {
     single.Reset();
     floats[(6U * 15U + 3U) * 16U + 4U] = std::numeric_limits<float>::quiet_NaN();
     SurfaceCudaCompute nonFinite;
-    if (!nonFinite.Start(v, 1024U * 1024U * 1024U, 1024U * 1024U) ||
+    if (!nonFinite.Start(v, testCredit, 1024U * 1024U) ||
         !nonFinite.Read(points.data(), samples.size(), samples.data()) || samples[0].gradientValid)
         return 1;
     std::cout << "CUDA analytic gradients, node saturation and missing support PASS; buffers="

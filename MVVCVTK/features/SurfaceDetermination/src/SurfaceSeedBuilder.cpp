@@ -2,6 +2,7 @@
 #include "SurfaceSeedBuilder.h"
 
 #include <vtkMarchingCubesTriangleCases.h>
+#include <vtkType.h>
 #include <algorithm>
 #include <chrono>
 #include <cfloat>
@@ -14,7 +15,6 @@
 namespace
 {
 using Point = std::array<double, 3>;
-using Edge = std::array<std::int64_t, 4>;
 constexpr int corners[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                                {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
 // 与锁定 VTK 9.4.2 MC case 表一致的边编号，10/11 的顺序不可套其他库。
@@ -129,16 +129,17 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
     triangles = std::move(clipped);
     return triangles.empty() ? SurfaceSeedStatus::NoSurface : SurfaceSeedStatus::Succeeded;
 }
-} // namespace
-
-SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
+template <class ScalarReader>
+SurfaceSeedStatus BuildSeedMesh(
     const SurfaceSeedGrid &grid, const double iso,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
     const WorkLimit budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
-    std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+    std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats,
+    const ScalarReader &readScalar)
 {
     const auto started = std::chrono::steady_clock::now();
-    if (!grid.values || !grid.readScalar || !blockDepth || !points.empty() || !triangles.empty())
+    if ((!grid.scalarValues && (!grid.values || !grid.readScalar)) ||
+        !blockDepth || !points.empty() || !triangles.empty())
         return SurfaceSeedStatus::InvalidInput;
     if (!GetBudget(0, 0, budget, stats))
         return SurfaceSeedStatus::BudgetExceeded;
@@ -179,7 +180,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     stats.processedExtent = range;
     {
         // 两层只做查找/插入，输出仍按原单元/MC 边顺序创建。
-        std::array<std::map<Edge,std::uint32_t>,2> edgeLayers;
+        std::array<std::map<std::uint64_t, std::uint32_t>, 2> edgeLayers;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
         for (std::int64_t block = range[4]; block < range[5]; block += blockDepth)
         {
@@ -216,7 +217,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                             const auto index = GetIndex(grid, static_cast<int>(xx) + corners[c][0],
                                                         static_cast<int>(yy) + corners[c][1],
                                                         static_cast<int>(zz) + corners[c][2]);
-                            scalar[c] = grid.readScalar(grid.values, index);
+                            scalar[c] = readScalar(index);
                             if((grid.validity&&!grid.validity[index])||!std::isfinite(scalar[c]))
                                 invalidCorners|=1U<<c;
                             if (scalar[c] >= iso)
@@ -241,23 +242,27 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                                 double fraction =
                                     (iso - scalar[a]) / (scalar[b] - scalar[a]);
                                 fraction = std::clamp(fraction, 0.0, 1.0);
-                                Edge key{};
+                                std::array<std::int64_t, 3> edgeOrigin{};
                                 unsigned axis = 0;
                                 for (unsigned d = 0; d < 3; ++d)
                                 {
-                                    key[d] = static_cast<std::int64_t>(std::min(indexA[d], indexB[d]));
+                                    edgeOrigin[d] = static_cast<std::int64_t>(std::min(indexA[d], indexB[d]));
                                     if (indexA[d] != indexB[d])
                                         axis = d;
                                 }
-                                key[3] = axis;
                                 if (fraction == 0 || fraction == 1)
                                 {
                                     const auto &corner = fraction == 0 ? indexA : indexB;
                                     for (unsigned d = 0; d < 3; ++d)
-                                        key[d] = static_cast<std::int64_t>(corner[d]);
-                                    key[3] = 3;
+                                        edgeOrigin[d] = static_cast<std::int64_t>(corner[d]);
+                                    axis = 3;
                                 }
-                                auto& edgeIds=edgeLayers[key[2]==zz?lowerLayer:upperLayer];
+                                // z 由缓存槽承担；XY 与轴/角点标签在已检查的范围内一一对应。
+                                const auto xy = std::uint64_t(edgeOrigin[1] - grid.extent[2]) *
+                                                    std::uint64_t(grid.dimensions[0]) +
+                                                std::uint64_t(edgeOrigin[0] - grid.extent[0]);
+                                const auto key = xy * 4U + axis;
+                                auto& edgeIds=edgeLayers[edgeOrigin[2]==zz?lowerLayer:upperLayer];
                                 auto found = edgeIds.find(key);
                                 if (found == edgeIds.end())
                                 {
@@ -316,4 +321,53 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     stats.seedMs +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     return triangles.empty() ? SurfaceSeedStatus::NoSurface : SurfaceSeedStatus::Succeeded;
+}
+} // namespace
+
+SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
+    const SurfaceSeedGrid &grid, const double iso, const RoiReadSnapshot &roi,
+    const double haloModel, const std::uint32_t blockDepth, const WorkLimit budget,
+    const std::function<bool()> &cancelled, std::vector<Point> &points,
+    std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+{
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        if (grid.dimensions[axis] < 2 ||
+            std::int64_t(grid.extent[2 * axis + 1]) - grid.extent[2 * axis] + 1 != grid.dimensions[axis])
+            return SurfaceSeedStatus::InvalidInput;
+    }
+    const auto nx = std::uint64_t(grid.dimensions[0]), ny = std::uint64_t(grid.dimensions[1]);
+    if (nx > UINT64_MAX / 4U / ny || nx * ny > SIZE_MAX / std::size_t(grid.dimensions[2]))
+        return SurfaceSeedStatus::InvalidInput;
+
+    const auto build = [&](const auto *values) {
+        const auto read = [&](const std::size_t index) {
+            const double value = static_cast<double>(values[index]);
+            // 与原 reader 一样，NaN/Inf 保留为缺失支持，饱和只发生在源节点。
+            return grid.materialRange && std::isfinite(value)
+                       ? std::clamp(value, (*grid.materialRange)[0], (*grid.materialRange)[1]) : value;
+        };
+        return BuildSeedMesh(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
+                             points, triangles, stats, read);
+    };
+    if (grid.scalarValues) {
+        switch (grid.scalarType) {
+        case VTK_CHAR: return build(static_cast<const char *>(grid.scalarValues));
+        case VTK_SIGNED_CHAR: return build(static_cast<const signed char *>(grid.scalarValues));
+        case VTK_UNSIGNED_CHAR: return build(static_cast<const unsigned char *>(grid.scalarValues));
+        case VTK_SHORT: return build(static_cast<const short *>(grid.scalarValues));
+        case VTK_UNSIGNED_SHORT: return build(static_cast<const unsigned short *>(grid.scalarValues));
+        case VTK_INT: return build(static_cast<const int *>(grid.scalarValues));
+        case VTK_UNSIGNED_INT: return build(static_cast<const unsigned int *>(grid.scalarValues));
+        case VTK_LONG: return build(static_cast<const long *>(grid.scalarValues));
+        case VTK_UNSIGNED_LONG: return build(static_cast<const unsigned long *>(grid.scalarValues));
+        case VTK_LONG_LONG: return build(static_cast<const long long *>(grid.scalarValues));
+        case VTK_UNSIGNED_LONG_LONG: return build(static_cast<const unsigned long long *>(grid.scalarValues));
+        case VTK_FLOAT: return build(static_cast<const float *>(grid.scalarValues));
+        case VTK_DOUBLE: return build(static_cast<const double *>(grid.scalarValues));
+        default: return SurfaceSeedStatus::InvalidInput;
+        }
+    }
+    const auto read = [&](std::size_t index) { return grid.readScalar(grid.values, index); };
+    return BuildSeedMesh(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
+                         points, triangles, stats, read);
 }

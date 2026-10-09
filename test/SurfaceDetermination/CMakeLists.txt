@@ -1,6 +1,7 @@
 add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
+    SurfaceDeterminationOptimizationTests.cpp
     SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
     SurfaceDeterminationDisplayTests.cpp
@@ -55,7 +56,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display seed-window)
+foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display seed-window optimization)
     add_test(
         NAME "SurfaceDetermination.${_mvvcvtk_surface_suite}"
         COMMAND mvvcvtk_surface_determination_tests ${_mvvcvtk_surface_suite}
@@ -80,6 +81,11 @@ set_target_properties(mvvcvtk_surface_acceleration_audit PROPERTIES
 vtk_module_autoinit(TARGETS mvvcvtk_surface_acceleration_audit MODULES ${MVVCVTK_VTK_TARGETS})
 if(TARGET surface_cuda_backend)
     add_executable(mvvcvtk_surface_cuda_precision_tests SurfaceCudaPrecisionTests.cpp)
+    math(EXPR _surface_test_host_bytes "${MVVCVTK_SURFACE_CUDA_HOST_MIB} * 1048576")
+    math(EXPR _surface_test_device_bytes "${MVVCVTK_SURFACE_CUDA_DEVICE_MIB} * 1048576")
+    target_compile_definitions(mvvcvtk_surface_cuda_precision_tests PRIVATE
+        MVVCVTK_SURFACE_TEST_HOST_BYTES=${_surface_test_host_bytes}
+        MVVCVTK_SURFACE_TEST_DEVICE_BYTES=${_surface_test_device_bytes})
     target_include_directories(mvvcvtk_surface_cuda_precision_tests PRIVATE
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
     target_link_libraries(mvvcvtk_surface_cuda_precision_tests PRIVATE MVVCVTK::SurfaceDetermination)

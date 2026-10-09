@@ -30,8 +30,10 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
     GetEnvironmentVariableA("MVVCVTK_SURFACE_COMPUTE_BACKEND", backend, sizeof(backend));
     if (std::string_view(backend) == "cpu")
         return false;
-    // 固定 GPU 工作区也是保守的 Host 准入预留；小任务不初始化设备。
-    if (releasedBytes < MVVCVTK_SURFACE_CUDA_DEVICE_BYTES)
+    // 实测初始化可能消耗数百 MiB 主机内存；低额度请求在加载 DLL 前直接走 CPU。
+    // 主机门限是准入预留，不代表驱动的峰值或常驻内存上界。
+    if (releasedBytes < MVVCVTK_SURFACE_CUDA_DEVICE_BYTES ||
+        releasedBytes < MVVCVTK_SURFACE_CUDA_HOST_BYTES)
         return false;
     HMODULE owner = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |

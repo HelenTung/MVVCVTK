@@ -15,7 +15,7 @@ using SurfaceProgressCallback =
     std::function<void(SurfaceDeterminationStage, double)>;
 inline constexpr std::uint32_t surfaceAlgorithmRevision = 8;
 
-// 点细化可由 VTK SMP worker 并发查询取消状态；调用方必须提供可并发调用的
+// 点细化可由请求内 CPU worker 并发查询取消状态；调用方必须提供可并发调用的
 // 只读检查。进度回调只在 BuildSurface 的调用线程执行。
 
 struct SurfaceAlgorithmInputs final
@@ -51,6 +51,10 @@ struct SurfaceAlgorithmResult final {
     // 仓内审计使用，不进入 generation/API/SPI。
     std::size_t cudaPointCount = 0;
     std::size_t cudaDeviceBytes = 0;
+    unsigned cpuThreadCount = 0;
+    unsigned availablePhysicalCores = 0;
+    unsigned availableLogicalThreads = 0;
+    unsigned plannedCpuThreads = 1;
     double componentsMs = 0;
     double meshPreparationMs = 0;
     double pointSamplingMs = 0;
