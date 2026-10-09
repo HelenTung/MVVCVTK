@@ -14,7 +14,7 @@ void Require(bool value,const char *message) { if (!value) throw std::invalid_ar
 struct Budget final {
     std::size_t limit,used=0;
     void Add(std::size_t count,std::size_t width=1) {
-        if (count>(limit-used)/width) throw std::length_error("Report metadata exceeds working budget.");
+        if (count>(limit-used)/width) throw std::length_error("Report metadata size accounting overflows.");
         used+=count*width;
     }
     void Text(const std::string &text) { Add(text.size(),4); }
@@ -40,7 +40,7 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
         const auto *scene=request.captureCurrentDisplay ? current.scene.get() : request.sceneDisplay ? &*request.sceneDisplay : nullptr;
         Require(!scene || scene->isVisible,"Omit hidden scene configuration from report.");
         const auto visitDisplays=[&](const auto &visit){if(request.captureCurrentDisplay){if(current.deviation)visit(*current.deviation);}else for(const auto &display:request.deviationDisplays)visit(display);};
-        Budget budget{config.workingBytes.value_or(std::numeric_limits<std::size_t>::max())};
+        Budget budget{std::numeric_limits<std::size_t>::max()};
         budget.Add(4096); budget.Text(request.id); budget.Text(request.title);
         // 每项预留包括增长中同时存活的 vector 缓冲、去重节点和小快照。
         for (const auto *refs:{&request.alignments,&request.inspections,&request.deviations,&request.voxelVolumes}) {
@@ -155,8 +155,8 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
             presentation.scene=std::move(value);}
         Require(AlignmentReportDisplay::GetValid(*report),"Report display configuration is inconsistent with captured results.");
         report->estimatedMetadataBytes=budget.used; output.report=std::move(report); output.status=AlignmentStatus::FullyDetermined;
-    } catch (const std::length_error &e) { output.status=AlignmentStatus::BudgetExceeded; output.message=e.what(); }
-      catch (const std::bad_alloc &) { output.status=AlignmentStatus::BudgetExceeded; }
+    } catch (const std::length_error &e) { output.status=AlignmentStatus::ResourceExhausted; output.message=e.what(); }
+      catch (const std::bad_alloc &) { output.status=AlignmentStatus::ResourceExhausted; }
       catch (const std::invalid_argument &e) { output.status=AlignmentStatus::InvalidInput; output.message=e.what(); }
       catch (const std::exception &e) { output.status=AlignmentStatus::InternalError; output.message=e.what(); }
     return output;

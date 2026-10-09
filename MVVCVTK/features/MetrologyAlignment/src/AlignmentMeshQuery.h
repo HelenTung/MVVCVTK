@@ -10,6 +10,7 @@ struct AlignmentMeshHit final {
     double distanceSquared = std::numeric_limits<double>::infinity();
     bool isValid = false;
 };
+class AlignmentCudaQuery;
 
 // 只读三角面索引；共享输入几何，查询期间不分配、不改变输入，也不依赖显示 LOD。
 class AlignmentMeshQuery final {
@@ -18,7 +19,9 @@ class AlignmentMeshQuery final {
                        const AlignmentWork &work,
                        const std::vector<std::uint64_t> &triangles = {});
     AlignmentMeshHit GetClosest(const AlignmentPoint &point) const;
+    AlignmentMeshHit GetHit(const AlignmentPoint &point, std::uint64_t triangle) const;
     std::size_t GetWorkingBytes() const noexcept;
+    std::unique_ptr<AlignmentCudaQuery> BuildCudaQuery(std::size_t batchCapacity) const;
 
   private:
     struct Node final {
@@ -31,7 +34,6 @@ class AlignmentMeshQuery final {
     void CheckWork() const;
     std::shared_ptr<const SurfaceMeshPayload> m_mesh;
     std::shared_ptr<std::atomic<bool>> m_cancelled;
-    std::chrono::steady_clock::time_point m_deadline;
     std::vector<std::uint64_t> m_triangles;
     std::vector<Node> m_nodes;
 };

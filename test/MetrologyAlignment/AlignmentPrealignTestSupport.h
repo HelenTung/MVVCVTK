@@ -19,7 +19,7 @@ inline AlignmentWork Work() {
     p.iterationLimit = 4000;
     w.recipe.maxPairDistance = 0.8; w.recipe.maxAlignmentRms = 1e-6;
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
-    w.deadline = std::chrono::steady_clock::time_point::max();
+
     w.poses = {alignmentIdentity};
     return w;
 }

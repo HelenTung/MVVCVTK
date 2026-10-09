@@ -13,7 +13,7 @@ struct Fixture final {
     std::vector<double> vertices,reference;
     AlignmentMatrix pose{0,-1,0,10,1,0,0,-4,0,0,1,2,0,0,0,1};
     Fixture() {
-        work.deadline=std::chrono::steady_clock::time_point::max(); work.cancelled=std::make_shared<std::atomic<bool>>(false);
+         work.cancelled=std::make_shared<std::atomic<bool>>(false);
         work.input.mesh=Ref(1); work.recipe.nominalData=Ref(2); plan.id="inspection-fixture"; plan.alignmentResult=Ref(3);
     }
     std::size_t Add(const char *id,AlignmentGeometryKind kind,const std::vector<AlignmentPoint> &points,bool nominal=false) {
@@ -70,9 +70,7 @@ void SizeVersusFit() {
           "center is evaluated in pinned alignment coordinates while overall preserves dimension failure");
     Check(r.geometries[1].source==InspectionGeometrySource::ReferenceSurface && r.evaluatedUnixMilliseconds>0,
           "report records reference-fit origin and evaluation timestamp");
-    f.work.config.pointLimit=200;
-    Check(f.Run().status==AlignmentStatus::BudgetExceeded,"point budget is shared across measured and reference fitting");
-    f.work.config.pointLimit=0;
+
     f.plan.items.resize(1); f.plan.items[0].deviationLimits.reset();
     const auto unjudged=f.Run();
     Check(unjudged.report && unjudged.report->verdict==AlignmentInspectionVerdict::NotEvaluated,
@@ -120,9 +118,7 @@ void FailureAndBudgets() {
     Check(result.report && result.report->items[0].nominal==0 && !result.report->items[0].measured &&
           result.report->verdict==AlignmentInspectionVerdict::Indeterminate &&
           result.report->geometries[0].fitted.sampleCount==3,"degenerate fit retains sample provenance and known nominal, without pass or zero measurement");
-    f.work.config.workingBytes=1;
-    Check(f.Run().status==AlignmentStatus::BudgetExceeded,"inspection metadata obeys working budget");
-    f.work.config.workingBytes.reset(); f.work.cancelled->store(true);
+    f.work.cancelled->store(true);
     Check(f.Run().status==AlignmentStatus::Cancelled,"cancelled inspection produces no report");
     f.work.cancelled->store(false); f.plan.items[0].nominalSource.clear();
     Check(!AlignmentInspection::GetPlanValid(f.plan,{}),"scalar nominal requires an explicit origin");

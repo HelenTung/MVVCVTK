@@ -15,7 +15,6 @@ struct AlignmentWork final {
     std::shared_ptr<const SurfaceMeshPayload> referenceMesh;
     std::vector<AlignmentMatrix> poses;
     std::shared_ptr<std::atomic<bool>> cancelled;
-    std::chrono::steady_clock::time_point deadline;
 };
 struct AlignmentSamples final {
     std::vector<AlignmentPoint> points;

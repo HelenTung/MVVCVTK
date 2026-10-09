@@ -52,7 +52,7 @@ struct MetrologyReportInput final {
 enum class MetrologyReportDisplaySource : std::uint8_t { None, ExplicitConfiguration, CurrentFeatureState };
 struct MetrologyReportDeviationDisplay final {
     AlignmentDeviationDisplay parameters;
-    std::string colorMapVersion="deviation-colors-1";
+    std::string colorMapVersion="deviation-hue-loop-2";
     // 257 个均匀取值的实际色标 RGB；逐点颜色按同版本分段规则计算，显示截断不修改统计。
     std::array<std::array<std::uint8_t,3>,257> legendRgb{};
     std::array<std::uint8_t,3> invalidRgb{128,128,128},selectedRgb{255,255,0};
@@ -94,10 +94,9 @@ struct MetrologyReportResult final {
     std::string message;
 };
 enum class MetrologyReportFormat : std::uint8_t { Json, Csv };
-enum class MetrologyReportWriteStatus : std::uint8_t { Succeeded, InvalidInput, BudgetExceeded, Cancelled, IoError, InternalError, AlreadyExists };
+enum class MetrologyReportWriteStatus : std::uint8_t { Succeeded, InvalidInput, BudgetExceeded, Cancelled, IoError, InternalError, AlreadyExists, ResourceExhausted };
 struct MetrologyReportWriteOptions final {
     MetrologyReportFormat format=MetrologyReportFormat::Json;
-    std::optional<std::size_t> maxBytes;
     bool includeDeviationSamples=false;
     std::function<bool()> isCancelled;
 };

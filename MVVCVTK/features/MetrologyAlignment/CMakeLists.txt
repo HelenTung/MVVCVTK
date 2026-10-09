@@ -1,5 +1,45 @@
 add_library(metrology_alignment STATIC)
 add_library(MVVCVTK::MetrologyAlignment ALIAS metrology_alignment)
+option(MVVCVTK_METROLOGY_ENABLE_CUDA "Build the optional repository-only CUDA deviation backend" OFF)
+if(MVVCVTK_METROLOGY_ENABLE_CUDA)
+    # 不指定 Toolkit 版本；使用发现的 nvcc，避免依赖某版 Visual Studio CUDA 扩展。
+    find_package(CUDAToolkit REQUIRED)
+    set(MVVCVTK_METROLOGY_CUDA_ARCH "" CACHE STRING "Optional nvcc GPU architecture; empty uses the compiler default")
+    set(cudaArchitecture)
+    if(MVVCVTK_METROLOGY_CUDA_ARCH)
+        list(APPEND cudaArchitecture "--gpu-architecture=${MVVCVTK_METROLOGY_CUDA_ARCH}")
+    endif()
+    set(cudaObject "${CMAKE_CURRENT_BINARY_DIR}/cuda/$<CONFIG>/AlignmentCudaQuery.obj")
+    add_custom_command(OUTPUT "${cudaObject}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/cuda/$<CONFIG>"
+        COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" --compiler-bindir "${CMAKE_CXX_COMPILER}"
+            --std=c++17 --fmad=false ${cudaArchitecture}
+            "-Xcompiler=$<IF:$<CONFIG:Debug>,/MDd,/MD>,/EHsc,/utf-8"
+            "$<IF:$<CONFIG:Debug>,-O0,-O3>" -c "${CMAKE_CURRENT_SOURCE_DIR}/src/AlignmentCudaQuery.cu"
+            -o "${cudaObject}"
+        DEPENDS src/AlignmentCudaQuery.cu src/AlignmentCudaQuery.h
+            "${CUDAToolkit_NVCC_EXECUTABLE}" "${CMAKE_CXX_COMPILER}" VERBATIM)
+    set_source_files_properties("${cudaObject}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    add_library(metrology_alignment_cuda STATIC "${cudaObject}" src/AlignmentCudaQuery.h)
+    set_target_properties(metrology_alignment_cuda PROPERTIES LINKER_LANGUAGE CXX FOLDER "MVVCVTK/Features/Private")
+    target_link_libraries(metrology_alignment_cuda PRIVATE CUDA::cudart)
+    # C API 动态运行时隔离供应商 CRT；只复制到本工作树运行目录，不进入 SDK。
+    file(GLOB cudaRuntimeDll "${CUDAToolkit_BIN_DIR}/cudart64*.dll" "${CUDAToolkit_BIN_DIR}/x64/cudart64*.dll")
+    list(LENGTH cudaRuntimeDll cudaRuntimeCount)
+    if(NOT cudaRuntimeCount EQUAL 1)
+        message(FATAL_ERROR "Expected one cudart DLL in the discovered CUDA Toolkit")
+    endif()
+    add_custom_target(metrology_alignment_cuda_runtime
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${cudaRuntimeDll} "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+        VERBATIM)
+    set_target_properties(metrology_alignment_cuda_runtime PROPERTIES FOLDER "MVVCVTK/Features/Private")
+    add_dependencies(metrology_alignment_cuda metrology_alignment_cuda_runtime)
+    target_link_libraries(metrology_alignment PRIVATE metrology_alignment_cuda)
+    target_compile_definitions(metrology_alignment PRIVATE MVVCVTK_METROLOGY_HAS_CUDA=1)
+else()
+    target_compile_definitions(metrology_alignment PRIVATE MVVCVTK_METROLOGY_HAS_CUDA=0)
+endif()
 target_sources(metrology_alignment
     PRIVATE src/AlignmentMath.h src/AlignmentGeometry.h src/AlignmentGeometry.cpp
         src/AlignmentSolver.h src/AlignmentSolver.cpp

@@ -26,7 +26,7 @@ AlignmentWork Work() {
     w.recipe.targetFrameId = "workpiece";
     w.recipe.nominalData = Ref(4);
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
-    w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
     w.poses = {alignmentIdentity};
     return w;
 }

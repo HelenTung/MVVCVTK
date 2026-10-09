@@ -14,7 +14,7 @@ template<class T> std::shared_ptr<const ImageGrid3DPayload> Image(const GridGeom
 }
 struct Fixture {
     AlignmentWork work;VoxelVolumeWork source;VoxelVolumeRequest request;
-    Fixture() { work.deadline=std::chrono::steady_clock::time_point::max();work.cancelled=std::make_shared<std::atomic<bool>>(false);request.id="volume";request.source=Ref();request.storedValueRange=std::array<double,2>{0,100}; }
+    Fixture() { work.cancelled=std::make_shared<std::atomic<bool>>(false);request.id="volume";request.source=Ref();request.storedValueRange=std::array<double,2>{0,100}; }
     VoxelVolumeData Run() { return AlignmentVoxelVolume::Build(work,source,request); }
 };
 void GeometryAndRoi() {
@@ -60,8 +60,6 @@ void LabelsAndLimits() {
     f.source.validityImage=Image(Grid(5),ImageValueType::UInt8,std::vector<std::uint8_t>(5,1),mask);
     const auto r=f.Run();Check(r.statistics.selected==1 && r.statistics.invalidLabels==1 && r.statistics.masked==1 && !r.statistics.volumeMm3,"label quality source and negative labels are explicit");
     f.work.cancelled->store(true);Check(f.Run().status==AlignmentStatus::Cancelled,"voxel scan cancels");f.work.cancelled->store(false);
-    f.work.deadline=std::chrono::steady_clock::time_point::min();Check(f.Run().status==AlignmentStatus::DeadlineExceeded,"voxel scan deadline");
-    f.work.deadline=std::chrono::steady_clock::time_point::max();f.work.config.workingBytes=8191;Check(f.Run().status==AlignmentStatus::BudgetExceeded,"voxel metadata budget");
 }
 }
 int main() { try { GeometryAndRoi();QualityAndIntegers();LabelsAndLimits(); }catch(const std::exception &e){++failures;std::cerr<<e.what()<<'\n';}return failures ? 1 : 0; }

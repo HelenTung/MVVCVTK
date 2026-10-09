@@ -56,7 +56,7 @@ std::string Binary() {
 }
 AlignmentWork Work() {
     AlignmentWork work;
-    work.deadline = std::chrono::steady_clock::time_point::max();
+
     work.cancelled = std::make_shared<std::atomic<bool>>(false);
     return work;
 }
@@ -91,21 +91,10 @@ void Loader(const std::filesystem::path &folder) {
     request.fileUnit = AlignmentUnit::ModelUnit;
     Check(!AlignmentReferenceLoader::GetRequestValid(request), "unknown units cannot be guessed as meters");
     request = Request(path);
-    work.config.pointLimit = 3;
-    Check(AlignmentReferenceLoader::Load(request, work).status == AlignmentStatus::BudgetExceeded,
-          "unique point limit enforced while importing");
-    work.config.pointLimit = 0;
-    work.config.workingBytes = 65535;
-    Check(AlignmentReferenceLoader::Load(request, work).status == AlignmentStatus::BudgetExceeded,
-          "input buffer respects explicit working budget");
-    work.config.workingBytes.reset();
     work.cancelled->store(true);
     Check(AlignmentReferenceLoader::Load(request, work).status == AlignmentStatus::Cancelled,
           "cancelled import returns no geometry");
     work.cancelled->store(false);
-    work.deadline = std::chrono::steady_clock::time_point::min();
-    Check(AlignmentReferenceLoader::Load(request, work).status == AlignmentStatus::DeadlineExceeded,
-          "expired deadline distinguished from cancellation");
     work = Work();
     const auto binaryPath = folder / "binary.stl";
     Write(binaryPath, Binary());
@@ -241,8 +230,8 @@ int Audit(const std::filesystem::path &path, std::size_t budgetMiB,
     if (budgetMiB == 0 || budgetMiB > std::numeric_limits<std::size_t>::max() / (1024 * 1024) ||
         timeoutMs == 0 || timeoutMs > 3600000) throw std::invalid_argument("Invalid audit limits.");
     AlignmentConfig config;
-    config.workingBytes = budgetMiB * 1024 * 1024;
-    config.deadlineMs = timeoutMs;
+
+
     auto data = std::make_shared<TestDataPort>();
     auto feature = std::make_shared<MetrologyAlignmentHostFeature>(config);
     HostFeatureContext context; context.data = data;

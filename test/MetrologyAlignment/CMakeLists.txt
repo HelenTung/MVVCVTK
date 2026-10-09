@@ -70,6 +70,18 @@ set_target_properties(mvvcvtk_alignment_deviation_tests PROPERTIES
     PROJECT_LABEL AlignmentDeviationTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.Deviation COMMAND mvvcvtk_alignment_deviation_tests)
 SetTestRuntime(MetrologyAlignment.Deviation mvvcvtk_alignment_deviation_tests)
+if(MVVCVTK_METROLOGY_ENABLE_CUDA)
+    add_executable(mvvcvtk_alignment_query_audit AlignmentQueryAudit.cpp)
+    target_include_directories(mvvcvtk_alignment_query_audit PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+    target_link_libraries(mvvcvtk_alignment_query_audit PRIVATE MVVCVTK::MetrologyAlignment opencv_world psapi)
+    SetTargetDefaults(mvvcvtk_alignment_query_audit)
+    set_target_properties(mvvcvtk_alignment_query_audit PROPERTIES FOLDER "MVVCVTK/test/Automation/Reference")
+    add_test(NAME MetrologyAlignment.DeviationCuda COMMAND mvvcvtk_alignment_deviation_tests --cuda)
+    SetTestRuntime(MetrologyAlignment.DeviationCuda mvvcvtk_alignment_deviation_tests)
+else()
+    add_test(NAME MetrologyAlignment.DeviationCudaUnavailable COMMAND mvvcvtk_alignment_deviation_tests --cuda-unavailable)
+    SetTestRuntime(MetrologyAlignment.DeviationCudaUnavailable mvvcvtk_alignment_deviation_tests)
+endif()
 
 add_executable(mvvcvtk_alignment_deviation_display_tests AlignmentDeviationDisplayTests.cpp)
 target_include_directories(mvvcvtk_alignment_deviation_display_tests PRIVATE
@@ -83,6 +95,8 @@ vtk_module_autoinit(TARGETS mvvcvtk_alignment_deviation_display_tests MODULES ${
 add_test(NAME MetrologyAlignment.DeviationDisplay COMMAND mvvcvtk_alignment_deviation_display_tests
     "${CMAKE_CURRENT_BINARY_DIR}/deviation-display-$<CONFIG>.png")
 SetTestRuntime(MetrologyAlignment.DeviationDisplay mvvcvtk_alignment_deviation_display_tests)
+add_test(NAME MetrologyAlignment.DeviationColors COMMAND mvvcvtk_alignment_deviation_display_tests --colors-only)
+SetTestRuntime(MetrologyAlignment.DeviationColors mvvcvtk_alignment_deviation_display_tests)
 
 add_executable(mvvcvtk_alignment_display_audit AlignmentDisplayAudit.cpp)
 target_include_directories(mvvcvtk_alignment_display_audit PRIVATE
@@ -126,7 +140,9 @@ SetTestRuntime(MetrologyAlignment.VoxelVolume mvvcvtk_voxel_volume_tests)
 target_sources(mvvcvtk_alignment_header_probe PRIVATE MetrologyReportHeaderProbe.cpp)
 add_executable(mvvcvtk_metrology_report_write_tests MetrologyReportWriteTests.cpp)
 set(MVVCVTK_METROLOGY_REFERENCE_PYTHON "" CACHE FILEPATH "Optional Python 3.11+ with numpy/scipy for independent real-section verification; test-only")
-target_link_libraries(mvvcvtk_metrology_report_write_tests PRIVATE MVVCVTK::MetrologyAlignment)
+target_include_directories(mvvcvtk_metrology_report_write_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_metrology_report_write_tests PRIVATE MVVCVTK::MetrologyAlignment MVVCVTKInternal::FeatureSupport)
 SetTargetDefaults(mvvcvtk_metrology_report_write_tests)
 set_target_properties(mvvcvtk_metrology_report_write_tests PROPERTIES PROJECT_LABEL MetrologyReportWriteTests FOLDER "MVVCVTK/test/Automation")
 add_test(NAME MetrologyAlignment.ReportWrite COMMAND mvvcvtk_metrology_report_write_tests "${CMAKE_CURRENT_BINARY_DIR}/report-write-$<CONFIG>")
@@ -158,6 +174,13 @@ if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
                 "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" "${CMAKE_CURRENT_BINARY_DIR}/timepoint-runs-$<CONFIG>" --controls-only --new-run)
         endif()
         SetTestRuntime(MetrologyAlignment.RealSurfaceControls mvvcvtk_metrology_timepoint_audit)
+        if(MVVCVTK_METROLOGY_ENABLE_CUDA AND MVVCVTK_METROLOGY_REFERENCE_PYTHON)
+            add_test(NAME MetrologyAlignment.RealSurfaceControlsCuda COMMAND "${MVVCVTK_METROLOGY_REFERENCE_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/VerifySectionAudit.py" --audit "$<TARGET_FILE:mvvcvtk_metrology_timepoint_audit>"
+                --manifest "${MVVCVTK_METROLOGY_TIMEPOINT_MANIFEST}" --output "${CMAKE_CURRENT_BINARY_DIR}/timepoint-cuda-runs-$<CONFIG>"
+                --cuda-deviation)
+            SetTestRuntime(MetrologyAlignment.RealSurfaceControlsCuda mvvcvtk_metrology_timepoint_audit)
+        endif()
     endif()
 endif()
 

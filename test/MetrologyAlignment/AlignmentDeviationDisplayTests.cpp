@@ -16,6 +16,7 @@
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPropCollection.h>
+#include <vtkScalarBarActor.h>
 #include <vtkRenderWindow.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkWindowToImageFilter.h>
@@ -25,6 +26,28 @@ namespace {
 int failures=0;
 void Check(bool condition,const char *message) { if (!condition) { ++failures; std::cerr<<"FAILED: "<<message<<'\n'; } }
 DataRevisionRef Ref(unsigned char id) { DataRevisionRef r; r.entityId.bytes[0]=id; r.generation=1; return r; }
+void Colors() {
+    AlignmentDeviationDisplay display; display.range={0,1}; display.useToleranceColors=false;
+    const AlignmentDeviationColors::Ramp ramp(display,{});
+    Check(ramp.ColorAt(0)==AlignmentDeviationColors::Color{214,75,75} &&
+          ramp.ColorAt(1.0/3)==AlignmentDeviationColors::Color{75,214,75} &&
+          ramp.ColorAt(2.0/3)==AlignmentDeviationColors::Color{75,75,214} &&
+          ramp.ColorAt(1)==ramp.ColorAt(0),"HueLoop red, green, blue anchors close the ring");
+    const auto legend=AlignmentDeviationColors::GetLegend(display,{});
+    for(std::size_t i=0;i<legend.size();++i) {
+        const auto *rgb=ramp.GetLookup()->MapValue(i/256.0);
+        Check(std::equal(legend[i].begin(),legend[i].end(),rgb),"frozen legend and live lookup use identical quantization");
+    }
+    display.useToleranceColors=true;
+    const AlignmentDeviationColors::Ramp narrow(display,std::array<double,2>{.50001,.50002});
+    const auto nanColor=narrow.ColorAt(std::numeric_limits<double>::quiet_NaN());
+    if(nanColor!=AlignmentDeviationColors::invalidColor)
+        std::cerr<<"NaN color: "<<int(nanColor[0])<<','<<int(nanColor[1])<<','<<int(nanColor[2])<<'\n';
+    Check(nanColor==AlignmentDeviationColors::invalidColor,"invalid values keep the legend NaN color");
+    Check(narrow.ColorAt(.50001)==AlignmentDeviationColors::Color{60,180,95} &&
+          narrow.ColorAt(.50002)==AlignmentDeviationColors::Color{60,180,95} &&
+          narrow.ColorAt(.5)!=AlignmentDeviationColors::Color{60,180,95},"narrow tolerance keeps exact inclusive bounds");
+}
 void Display(const char *imagePath) {
     auto points=vtkSmartPointer<vtkPoints>::New(); points->SetDataTypeToDouble();
     auto triangles=vtkSmartPointer<vtkCellArray>::New();
@@ -48,17 +71,16 @@ void Display(const char *imagePath) {
     auto parameters=std::make_shared<AlignmentDeviationRequest>(); parameters->metric=AlignmentDeviationMetric::NominalNormalProjection;
     parameters->tolerance=std::array<double,2>{-.1,.1}; result.parameters=parameters;
     AlignmentDeviationDisplay display; display.result=result.result; display.range={-1,1}; display.selectedVertex=4;
-    const auto deadline=std::chrono::steady_clock::time_point::max();
-    auto product=AlignmentDeviationOverlay::Build(source,result,display,1024*1024,deadline);
+    auto product=AlignmentDeviationOverlay::Build(source,result,display);
     Check(product->colored!=poly && product->colored->GetPoints()==points && product->colored->GetPolys()==triangles,
           "display shell shares exact original positions and topology");
     Check(poly->GetPointData()->GetScalars()==originalScalars && originalScalars->GetValue(0)==42,
           "display never modifies source point data");
     auto *colors=vtkUnsignedCharArray::SafeDownCast(product->colored->GetPointData()->GetScalars());
-    const std::array<std::array<unsigned char,3>,4> expected{{{45,90,215},{60,180,95},{210,45,35},{128,128,128}}};
+    const std::array<std::array<unsigned char,3>,4> expected{{{163,74,199},{60,180,95},{214,74,166},{128,128,128}}};
     for (std::size_t i=0;i<4;++i) {
         unsigned char color[3]{}; colors->GetTypedTuple(static_cast<vtkIdType>(3*i),color);
-        Check(std::equal(expected[i].begin(),expected[i].end(),color),"fixed colors classify cold, in-tolerance, hot and invalid");
+        Check(std::equal(expected[i].begin(),expected[i].end(),color),"shared ramp classifies below-range, tolerance, above-range and invalid");
     }
     Check(field->samples[6].value==2 && field->samples[9].value==4,"display clipping leaves numerical deviations unchanged");
     Check(product->lookup->GetRange()[0]==-1 && product->lookup->GetRange()[1]==1,"legend uses requested fixed range");
@@ -67,6 +89,9 @@ void Display(const char *imagePath) {
     auto renderer=vtkSmartPointer<vtkRenderer>::New();
     auto overlay=std::make_shared<AlignmentDeviationOverlay>(product);
     overlay->AttachRenderer(renderer); overlay->AttachRenderer(renderer);
+    auto *props=renderer->GetViewProps(); props->InitTraversal();
+    while(auto *prop=props->GetNextProp()) if(auto *legend=vtkScalarBarActor::SafeDownCast(prop))
+        Check(legend->GetLookupTable()==product->lookup && legend->GetUseCustomLabels(),"scalar bar reuses surface mapping and shared label mechanism");
     Check(renderer->GetViewProps()->GetNumberOfItems()==3,"repeat attachment does not duplicate surface, legend or marker");
     vtkActor *surface=nullptr;
     auto *actors=renderer->GetActors(); actors->InitTraversal();
@@ -96,28 +121,26 @@ void Display(const char *imagePath) {
     std::array<std::size_t,4> seen{};
     if (pixels) for (vtkIdType i=0;i<pixels->GetNumberOfTuples();++i) {
         const auto *p=pixels->GetPointer(i*pixels->GetNumberOfComponents());
-        if (p[2]>180 && p[0]<80 && p[1]<130) ++seen[0];
-        if (p[1]>150 && p[0]<100 && p[2]<130) ++seen[1];
-        if (p[0]>180 && p[1]<90 && p[2]<90) ++seen[2];
-        if (p[0]>110 && p[0]<145 && p[0]==p[1] && p[1]==p[2]) ++seen[3];
+        for(std::size_t j=0;j<expected.size();++j)
+            if(std::equal(expected[j].begin(),expected[j].end(),p)) ++seen[j];
     }
     for (const auto count:seen) Check(count>30,"offscreen pixels contain each intended surface classification");
     if (imagePath) { auto writer=vtkSmartPointer<vtkPNGWriter>::New(); writer->SetFileName(imagePath); writer->SetInputConnection(capture->GetOutputPort()); writer->Write(); }
     overlay->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems()==0,"detach releases visible surface, legend and marker");
-    bool limited=false;
-    try { (void)AlignmentDeviationOverlay::Build(source,result,display,1,deadline); } catch (const std::length_error &) { limited=true; }
-    Check(limited,"color buffer admission enforces explicit memory budget");
     AlignmentDeviationDisplay huge=display;huge.range={0,1e308};huge.useToleranceColors=false;
     Check(AlignmentDeviationOverlay::GetDisplayValid(huge,result),"finite wide colorbar is valid");
     const auto hugeLegend=AlignmentDeviationColors::GetLegend(huge,{});
-    Check(hugeLegend[128]==AlignmentDeviationColors::Color{223,140,135},"legend interpolation avoids intermediate range-times-index overflow");
+    Check(hugeLegend[128]==AlignmentDeviationColors::Color{75,213,214},"wide range retains finite HueLoop midpoint");
     display.range={0,0}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"zero-width color range rejected");
     display.range={-.01,.01}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"color scale must contain tolerance interval");
 }
 } // namespace
 int main(int argc,char **argv) {
-    try { Display(argc>1 ? argv[1] : nullptr); }
+    try {
+        if(argc>1 && std::string(argv[1])=="--colors-only") Colors();
+        else Display(argc>1 ? argv[1] : nullptr);
+    }
     catch (const std::exception &e) { ++failures; std::cerr<<e.what()<<'\n'; }
     return failures ? 1 : 0;
 }

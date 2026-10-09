@@ -17,7 +17,7 @@ constexpr auto emptySlot = std::numeric_limits<std::uint64_t>::max();
 
 void CheckWork(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Reference import cancelled or deadline reached.");
+        throw std::runtime_error("Reference import cancelled.");
 }
 void Require(bool valid, const char *message) {
     if (!valid) throw std::invalid_argument(message);
@@ -180,15 +180,15 @@ class MeshBuilder final {
     }
   private:
     void CheckBytes(std::size_t extra) const {
-        const auto limit = m_work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+        const auto limit = std::numeric_limits<std::size_t>::max();
         std::size_t used = readBytes;
-        if (used > limit) throw std::length_error("STL input buffer exceeds working budget.");
+        if (used > limit) throw std::length_error("STL input buffer size accounting overflows.");
         for (const auto count : {m_vertices.capacity(), m_triangles.capacity(), m_slots.capacity()}) {
             if (count > (limit - used) / sizeof(std::uint64_t))
-                throw std::length_error("STL mesh exceeds working budget.");
+                throw std::length_error("STL mesh size accounting overflows.");
             used += count * sizeof(std::uint64_t);
         }
-        if (extra > limit - used) throw std::length_error("STL growth exceeds working budget.");
+        if (extra > limit - used) throw std::length_error("STL growth size accounting overflows.");
     }
     template<class T> void Grow(std::vector<T> &values, std::size_t count) {
         if (count <= values.capacity()) return;
@@ -223,8 +223,6 @@ class MeshBuilder final {
             if (m_slots[slot] != emptySlot) return m_slots[slot];
         }
         const auto count = m_vertices.size() / 3;
-        if (m_work.config.pointLimit && count >= m_work.config.pointLimit)
-            throw std::length_error("Reference exceeds point limit.");
         if (m_slots.empty() || count >= m_slots.size() / 2) {
             if (m_slots.size() > std::numeric_limits<std::size_t>::max() / (2 * sizeof(std::uint64_t)))
                 throw std::length_error("STL weld index overflows.");
@@ -273,9 +271,9 @@ AlignmentReferenceData AlignmentReferenceLoader::Load(const AlignmentReferenceRe
             std::array<unsigned char, 84> header{};
             reader.Read(header.data(), header.size());
             const auto count = UInt32(header.data() + 80);
-            const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+            const auto limit = std::numeric_limits<std::size_t>::max();
             if (count > (limit - readBytes) / (3 * sizeof(std::uint64_t)))
-                throw std::length_error("Reference triangle indices exceed working budget.");
+                throw std::length_error("Reference triangle indices size accounting overflows.");
             for (std::uint32_t i = 0; i < count; ++i) {
                 CheckWork(work);
                 std::array<unsigned char, 50> facet{};
@@ -322,8 +320,8 @@ AlignmentReferenceData AlignmentReferenceLoader::Load(const AlignmentReferenceRe
         result.metadata.triangleCount = result.mesh->GetTriangles().size() / 3;
         CheckWork(work);
         result.status = AlignmentStatus::FullyDetermined;
-    } catch (const std::length_error &error) { result.status = AlignmentStatus::BudgetExceeded; result.message = error.what(); }
-      catch (const std::bad_alloc &) { result.status = AlignmentStatus::BudgetExceeded; }
+    } catch (const std::length_error &error) { result.status = AlignmentStatus::ResourceExhausted; result.message = error.what(); }
+      catch (const std::bad_alloc &) { result.status = AlignmentStatus::ResourceExhausted; }
       catch (const std::invalid_argument &error) { result.status = AlignmentStatus::InvalidInput; result.message = error.what(); }
       catch (const std::system_error &error) { result.status = AlignmentStatus::IoError; result.message = error.what(); }
       catch (const std::exception &error) {

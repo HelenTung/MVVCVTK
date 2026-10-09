@@ -245,7 +245,7 @@ WriteMetrologyReportFile(const MetrologyReport &report,
     result.write.status = Status::IoError;
     result.write.message = "Report path resolution failed.";
   } catch (const std::bad_alloc &) {
-    result.write.status = Status::BudgetExceeded;
+    result.write.status = Status::ResourceExhausted;
   } catch (const std::exception &e) {
     result.write.status = Status::InternalError;
     result.write.message = e.what();

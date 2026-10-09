@@ -42,8 +42,8 @@ int wmain(int argc,wchar_t **argv) {
     try {
         const auto initial=ReadMemory();
         AlignmentWork work; work.cancelled=std::make_shared<std::atomic<bool>>(false);
-        work.deadline=std::chrono::steady_clock::now()+std::chrono::seconds(120);
-        work.config.workingBytes=512ULL*1024*1024;
+
+
         AlignmentReferenceRequest input;
         input.filePath=std::filesystem::path(argv[1]).u8string(); input.frameId="render-audit"; input.coordinateFrame="RAS";
         const auto importStart=std::chrono::steady_clock::now();
@@ -75,7 +75,7 @@ int wmain(int argc,wchar_t **argv) {
         parameters->tolerance=std::array<double,2>{-.1,.1}; snapshot.parameters=parameters;
         AlignmentDeviationDisplay display; display.result=snapshot.result; display.range={-1,1};
         const auto colorStart=std::chrono::steady_clock::now();
-        auto product=AlignmentDeviationOverlay::Build(view,snapshot,display,512ULL*1024*1024,work.deadline);
+        auto product=AlignmentDeviationOverlay::Build(view,snapshot,display);
         const double colorMs=Milliseconds(colorStart); const auto afterColor=ReadMemory();
         if (product->colored->GetPoints()!=view->mesh->GetPoints() || product->colored->GetPolys()!=view->mesh->GetPolys())
             throw std::runtime_error("Display geometry was duplicated.");

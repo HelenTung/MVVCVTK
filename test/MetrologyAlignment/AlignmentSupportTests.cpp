@@ -13,7 +13,7 @@ void Check(bool value,const char *message) { if (!value) { ++failures; std::cerr
 AlignmentGeometry Fit(AlignmentGeometryKind kind,const std::vector<AlignmentPoint> &points,double scale=1,
                       AlignmentPoint direction={0,0,1}) {
     AlignmentWork work; work.cancelled=std::make_shared<std::atomic<bool>>(false);
-    work.deadline=std::chrono::steady_clock::time_point::max(); work.recipe.lengthScale=scale;
+     work.recipe.lengthScale=scale;
     work.recipe.solveTolerance=scale*1e-9;
     AlignmentGeometrySpec spec; spec.id="support"; spec.kind=kind; spec.targetDirection=direction; spec.maxFitRms=scale*1e-6;
     return AlignmentGeometryFit::BuildGeometry(work,spec,AlignmentSamples{points,0},alignmentIdentity);

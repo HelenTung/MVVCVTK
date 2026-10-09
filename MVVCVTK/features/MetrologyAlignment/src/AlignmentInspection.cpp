@@ -9,7 +9,7 @@ using namespace AlignmentMath;
 void Require(bool value,const char *message) { if (!value) throw std::invalid_argument(message); }
 void Check(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Inspection cancelled or deadline reached.");
+        throw std::runtime_error("Inspection cancelled.");
 }
 bool Round(AlignmentGeometryKind kind) {
     return kind==AlignmentGeometryKind::Circle || kind==AlignmentGeometryKind::Sphere || kind==AlignmentGeometryKind::Cylinder;
@@ -22,7 +22,7 @@ bool HasDirection(AlignmentGeometryKind kind) {
     return Axis(kind) || kind==AlignmentGeometryKind::Plane || kind==AlignmentGeometryKind::Circle;
 }
 bool MetadataFits(const InspectionPlan &plan,const AlignmentConfig &config) {
-    const auto count=config.workingBytes.value_or(std::numeric_limits<std::size_t>::max())/4096;
+    const auto count=std::numeric_limits<std::size_t>::max()/4096;
     return plan.geometries.size()<=count && plan.items.size()<=count-plan.geometries.size();
 }
 bool MeasureValid(const InspectionMeasure &m,const InspectionPlan &plan,bool nominal) {
@@ -105,8 +105,7 @@ AlignmentInspectionVerdict Overall(const std::vector<InspectionItemResult> &item
 
 bool AlignmentInspection::GetPlanValid(const InspectionPlan &p,const AlignmentConfig &config) {
     if (p.id.empty() || p.id.size()>128 || !GetDataRevisionRefValid(p.alignmentResult) || p.geometries.empty() || p.items.empty() ||
-        p.geometries.size()>4096 || p.items.size()>65536 || !MetadataFits(p,config) ||
-        (config.constraintLimit && p.items.size()>config.constraintLimit) ||
+        !MetadataFits(p,config) ||
         !Positive(p.lengthScale) || !Positive(p.rankTolerance) || p.rankTolerance>=.01 ||
         !Positive(p.conditionLimit) || p.conditionLimit<=1 || !Positive(p.solveTolerance) || p.iterationLimit==0 || p.iterationLimit>1000 ||
         !std::isfinite(p.minSupportRatio) || p.minSupportRatio<0 || p.minSupportRatio>1 ||
@@ -141,14 +140,13 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
     InspectionData output;
     try {
         Check(input);
-        if (!MetadataFits(plan,input.config)) throw std::length_error("Inspection metadata exceeds working budget.");
+        if (!MetadataFits(plan,input.config)) throw std::length_error("Inspection metadata size accounting overflows.");
         Require(GetPlanValid(plan,input.config) && Rigid(pose) && input.mesh,"Invalid inspection input.");
-        const auto limit=input.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+        const auto limit=std::numeric_limits<std::size_t>::max();
         constexpr std::size_t metadataBytes=4096;
         if (plan.geometries.size()>std::numeric_limits<std::size_t>::max()-plan.items.size() ||
-            plan.geometries.size()+plan.items.size()>limit/metadataBytes) throw std::length_error("Inspection metadata exceeds working budget.");
-        AlignmentWork work; work.config=input.config; work.cancelled=input.cancelled; work.deadline=input.deadline;
-        work.config.workingBytes=limit-(plan.geometries.size()+plan.items.size())*metadataBytes;
+            plan.geometries.size()+plan.items.size()>limit/metadataBytes) throw std::length_error("Inspection metadata size accounting overflows.");
+        AlignmentWork work; work.config=input.config; work.cancelled=input.cancelled;
         work.recipe.lengthScale=plan.lengthScale; work.recipe.rankTolerance=plan.rankTolerance; work.recipe.conditionLimit=plan.conditionLimit;
         work.recipe.solveTolerance=plan.solveTolerance; work.recipe.iterationLimit=plan.iterationLimit;
         work.recipe.minSupportRatio=plan.minSupportRatio; work.recipe.maxLocalizationSigma=plan.maxLocalizationSigma;
@@ -174,8 +172,6 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
                     geometry.fitted.sourceCenter=spec.ideal->center; geometry.fitted.sourceDirection=spec.ideal->direction;
                     geometry.fitted.radius=spec.ideal->radius;
                 } else {
-                    if (input.config.pointLimit && total>=input.config.pointLimit) throw std::length_error("Inspection sample budget exhausted.");
-                    work.config.pointLimit=input.config.pointLimit ? input.config.pointLimit-total : 0;
                     AlignmentSamples samples;
                     std::optional<AlignmentGeometrySpec> sectionFit;
                     const auto *fit=&spec.fit;
@@ -184,13 +180,7 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
                         samples=std::move(section.samples); geometry.section=std::move(section.trace);
                         sectionFit=spec.fit; sectionFit->targetDirection=spec.section->planeNormal;
                         fit=&*sectionFit;
-                        // 截面取样预检已覆盖当前拟合；持久化来源链占用须从后续几何的预算扣除。
-                        const auto retained=geometry.section->samples.capacity()*sizeof(InspectionSectionSample);
-                        if (retained>*work.config.workingBytes) throw std::length_error("Section provenance exceeds working budget.");
-                        work.config.workingBytes=*work.config.workingBytes-retained;
                     } else samples=AlignmentGeometryFit::BuildSamples(work,fit->region,transform);
-                    if (input.config.pointLimit && (total>input.config.pointLimit || samples.points.size()>input.config.pointLimit-total))
-                        throw std::length_error("Inspection sample total exceeds point limit.");
                     if (samples.points.size()>std::numeric_limits<std::size_t>::max()-total) throw std::length_error("Inspection sample count overflows.");
                     total+=samples.points.size();
                     geometry.fitted.sampleCount=samples.points.size(); geometry.fitted.rejectedCount=samples.rejected;
@@ -235,8 +225,8 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
         report->verdict=GetVerdict(report->items);
         report->evaluatedUnixMilliseconds=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         output.report=std::move(report); output.status=AlignmentStatus::FullyDetermined;
-    } catch (const std::length_error &e) { output.status=AlignmentStatus::BudgetExceeded; output.message=e.what(); }
-      catch (const std::bad_alloc &) { output.status=AlignmentStatus::BudgetExceeded; }
+    } catch (const std::length_error &e) { output.status=AlignmentStatus::ResourceExhausted; output.message=e.what(); }
+      catch (const std::bad_alloc &) { output.status=AlignmentStatus::ResourceExhausted; }
       catch (const std::invalid_argument &e) { output.status=AlignmentStatus::InvalidInput; output.message=e.what(); }
       catch (const std::exception &e) {
         const auto status=AlignmentGeometryFit::GetWorkStatus(input); output.status=status==AlignmentStatus::FullyDetermined ? AlignmentStatus::InternalError : status;

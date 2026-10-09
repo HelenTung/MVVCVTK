@@ -34,7 +34,6 @@ private:
     AlignmentCallback callback;
     DataRevisionRef transform;
     std::optional<AlignmentStatus> cancellation;
-    std::chrono::steady_clock::time_point deadline;
   };
   bool GetCurrent(const DataGraphSnapshot &graph) const;
   std::shared_ptr<FeatureModelTransformPort> m_port;

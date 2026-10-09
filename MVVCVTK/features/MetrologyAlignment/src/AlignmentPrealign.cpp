@@ -12,7 +12,7 @@ const double pi = std::acos(-1.0);
 void Require(bool value, const char *message) { if (!value) throw std::invalid_argument(message); }
 void CheckWork(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Automatic prealignment cancelled or deadline reached.");
+        throw std::runtime_error("Automatic prealignment cancelled.");
 }
 
 // 三维邻域与 33 维描述子共用精确索引；只保存行号/包围盒，不复制输入数组。
@@ -115,12 +115,10 @@ template<std::size_t Dimension> class PointIndex final {
 
 void CheckBudget(const AlignmentWork &work, std::size_t source, std::size_t reference, bool withMatches = true) {
     const auto &p = *work.recipe.prealignment;
-    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto limit = std::numeric_limits<std::size_t>::max();
     if (source > std::numeric_limits<std::size_t>::max() - reference)
         throw std::length_error("Prealignment sample count overflows.");
     const auto count = source + reference;
-    if (work.config.pointLimit && count > work.config.pointLimit)
-        throw std::length_error("Prealignment exceeds point limit; increase sample spacing.");
     // 两组点/法向、SPFH/FPFH、有效性、两种索引上界，以及有界匹配表。
     constexpr std::size_t pointBytes = 2 * sizeof(AlignmentPoint) + 2 * sizeof(AlignmentDescriptor) +
         2 + 5 * sizeof(std::size_t) + (2 * 33 * sizeof(double) + 4 * sizeof(std::size_t)) / 4 +
@@ -128,7 +126,7 @@ void CheckBudget(const AlignmentWork &work, std::size_t source, std::size_t refe
     std::size_t bytes = 16384; // 固定小矩阵、随机数状态与遍历栈；非进程 RSS 承诺。
     const auto charge = [&](std::size_t elements, std::size_t width) {
         if (bytes > limit || elements > (limit - bytes) / width)
-            throw std::length_error("Prealignment exceeds working budget; increase sample spacing.");
+            throw std::length_error("Prealignment size accounting overflows; increase sample spacing.");
         bytes += elements * width;
     };
     charge(count, pointBytes);

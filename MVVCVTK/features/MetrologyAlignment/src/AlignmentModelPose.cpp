@@ -61,7 +61,7 @@ AlignmentAdmission AlignmentModelPose::Begin(const DataGraphSnapshot &graph,
   pending.id = id;
   pending.before = *before;
   pending.transform = result->record.transform;
-  pending.deadline = WorkLimit(config.deadlineMs).GetDeadline();
+
   const auto token = m_port->StartTransform(*before);
   if (!token)
     return {AlignmentAdmissionStatus::Busy, 0};
@@ -100,8 +100,6 @@ AlignmentModelPose::Tick(const DataGraphSnapshot &graph) {
   if (host && host->editToken == m_pending->token) {
     if (!current)
       Cancel(0, AlignmentStatus::Stale);
-    else if (std::chrono::steady_clock::now() >= m_pending->deadline)
-      Cancel(0, AlignmentStatus::DeadlineExceeded);
     else if (m_pending->cancellation)
       Cancel(0, *m_pending->cancellation);
     return {};

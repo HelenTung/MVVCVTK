@@ -1,12 +1,11 @@
 #include "AlignmentDeviationDisplay.h"
 #include "AlignmentDeviationData.h"
 #include "AlignmentMath.h"
-#include "FeatureSupport/WorkLimit.h"
 #include <stdexcept>
 
 void AlignmentDeviationDisplayController::Clear() noexcept {
     for (auto i=m_bindings.rbegin();i!=m_bindings.rend();++i) i->port->RemoveOverlay(i->overlay);
-    m_bindings.clear(); m_product.reset(); m_request.reset(); m_viewBytes=0;
+    m_bindings.clear(); m_product.reset(); m_request.reset();
 }
 bool AlignmentDeviationDisplayController::GetReady(const DataGraphSnapshot &graph) const {
     if (!m_product || !m_request || m_bindings.empty()) return false;
@@ -27,7 +26,6 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
     if (!deviation->isCurrent) { result.status=AlignmentStatus::Stale; return result; }
     if (!views) { result.status=AlignmentStatus::Unavailable; return result; }
     std::vector<Binding> next;
-    const auto deadline=WorkLimit(config.deadlineMs).GetDeadline();
     try {
         const auto targets=views->GetViews(config.targetViews);
         if (targets.empty()) { result.status=AlignmentStatus::Unavailable; return result; }
@@ -46,18 +44,9 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result; result.isDisplayReady=true;
             return result;
         }
-        const auto limit=config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
-        const auto retained=m_product ? m_product->workingBytes+m_viewBytes : 0;
-        if (retained>limit) throw std::length_error("Existing deviation display exceeds replacement budget.");
-        // 每个视图保守预留 actor/mapper/legend 元数据；共享几何及 VTK/GPU 缓存独立保活。
-        constexpr std::size_t perViewBytes=16384;
-        if (targets.size()>(limit-retained)/perViewBytes) throw std::length_error("Deviation view count exceeds display budget.");
-        const auto viewBytes=targets.size()*perViewBytes;
-        if (AlignmentDeviationOverlay::GetRequiredBytes(deviation->forward->samples.size())>limit-retained-viewBytes)
-            throw std::length_error("Replacement deviation colors exceed display working budget.");
         const auto mesh=data.GetSurfaceMesh(graph,deviation->sourceMesh);
         if (!mesh) throw std::runtime_error("Measured surface render view unavailable.");
-        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,request,limit-retained-viewBytes,deadline);
+        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,request);
         for (auto &binding:next) {
             binding.overlay=std::make_shared<AlignmentDeviationOverlay>(product);
             if (!binding.port->AttachOverlay(binding.overlay)) throw std::runtime_error("Deviation overlay attach failed.");
@@ -69,16 +58,16 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             for (auto i=next.rbegin();i!=next.rend();++i) if (i->overlay) i->port->RemoveOverlay(i->overlay);
             return result;
         }
-        Clear(); m_bindings=std::move(next); m_product=product; m_request=request; m_viewBytes=viewBytes;
+        Clear(); m_bindings=std::move(next); m_product=product; m_request=request;
         result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result; result.isDisplayReady=true;
         return result;
-    } catch (const std::length_error &e) { result.status=AlignmentStatus::BudgetExceeded; result.message=e.what(); }
-      catch (const std::bad_alloc &) { result.status=AlignmentStatus::BudgetExceeded; }
+    } catch (const std::length_error &e) { result.status=AlignmentStatus::ResourceExhausted; result.message=e.what(); }
+      catch (const std::bad_alloc &) { result.status=AlignmentStatus::ResourceExhausted; }
       catch (const std::invalid_argument &) {
         for (auto i=next.rbegin();i!=next.rend();++i) if (i->overlay) i->port->RemoveOverlay(i->overlay);
         throw;
     } catch (const std::exception &e) {
-        result.status=std::chrono::steady_clock::now() >= deadline ? AlignmentStatus::DeadlineExceeded : AlignmentStatus::InternalError; result.message=e.what();
+        result.status=AlignmentStatus::InternalError; result.message=e.what();
     } catch (...) { result.status=AlignmentStatus::InternalError; }
     for (auto i=next.rbegin();i!=next.rend();++i) if (i->overlay) i->port->RemoveOverlay(i->overlay);
     return result;

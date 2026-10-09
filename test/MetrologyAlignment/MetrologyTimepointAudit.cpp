@@ -31,6 +31,7 @@
 #include <thread>
 
 namespace {
+AlignmentComputeBackend auditBackend=AlignmentComputeBackend::Cpu;
 void Require(bool value,const char *message) { if (!value) throw std::runtime_error(message); }
 std::string Json(const std::string &value) {
     std::string text="\""; const char *hex="0123456789abcdef";
@@ -306,14 +307,18 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     }
     if(passed) {
         AlignmentRequest evaluate;evaluate.action=AlignmentAction::EvaluateSurface;evaluate.deviation=AlignmentDeviationRequest{};
+        evaluate.deviation->computeBackend=auditBackend;
         auto &p=*evaluate.deviation;p.alignmentResult=result.result;p.sourceTriangles=surface.validTriangles;p.referenceTriangles=surface.validTriangles;
         p.requiresMeasurementQuality=true;p.reverseCoverage=false;p.maxDistance=1e-6;p.tolerance=std::array<double,2>{0,1e-6};
         auto complete=std::make_shared<AlignmentCompletion>();
+        const auto deviationStarted=std::chrono::steady_clock::now();
         Require(feature.SendRequest(evaluate,[complete](AlignmentResult value) { complete->value=std::move(value);complete->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Identity deviation rejected.");
         Wait(feature,complete,m.deadlineMs+1000);const auto field=feature.GetDeviation(complete->value.deviationResult);
         Require(field && field->isCurrent && field->forward->statistics.hasValues && field->forward->statistics.maximum<=1e-6,
             "Identity deviation exceeds its numerical control tolerance.");
-        deviations.push_back(field->result);out<<",\"deviationSamples\":"<<field->forward->samples.size();
+        deviations.push_back(field->result);out<<",\"deviationSamples\":"<<field->forward->samples.size()
+            <<",\"deviationWallMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-deviationStarted).count()
+            <<",\"computeBackend\":"<<Json(auditBackend==AlignmentComputeBackend::Cuda ? "Cuda" : "Cpu");
     }
     out<<",\"numericalControlPassed\":"<<(passed ? "true" : "false")<<",\"elapsedMs\":"<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<<'}';
     std::cout<<"RIGID_CONTROL status="<<unsigned(result.status)<<" rms="<<result.diagnostics.rms<<'\n'<<std::flush; return passed;
@@ -534,7 +539,7 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
         const auto file=format==MetrologyReportFormat::Json ? "inspection-report.json" : "inspection-report.csv";
         Require(!std::filesystem::exists(folder/file),"Report export destination already exists.");
         MetrologyReportWriteOptions options;options.format=format;
-        options.maxBytes=manifest.workingLimit;options.includeDeviationSamples=format==MetrologyReportFormat::Json;
+        options.includeDeviationSamples=format==MetrologyReportFormat::Json;
         const auto begin=std::chrono::steady_clock::now();const auto written=WriteMetrologyReportFile(report,(folder/file).u8string(),options);
         Require(written.write.status==MetrologyReportWriteStatus::Succeeded && written.isCommitted && written.remainingTemporaryPath.empty() &&
             std::filesystem::file_size(folder/file)==written.write.bytesWritten,"Report file commit failed.");
@@ -642,6 +647,7 @@ void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &su
     }
     if (r.status==AlignmentStatus::FullyDetermined && r.diagnostics.isQualityPassed) {
         AlignmentRequest evaluate; evaluate.action=AlignmentAction::EvaluateSurface; evaluate.deviation=AlignmentDeviationRequest{};
+        evaluate.deviation->computeBackend=auditBackend;
         evaluate.deviation->alignmentResult=r.result; evaluate.deviation->maxDistance=2; evaluate.deviation->requiresMeasurementQuality=true;
         auto evaluated=std::make_shared<AlignmentCompletion>();
         Require(feature.SendRequest(evaluate,[evaluated](AlignmentResult v) { evaluated->value=std::move(v); evaluated->done=true; }).status==AlignmentAdmissionStatus::Accepted,"Deviation was not admitted.");
@@ -659,9 +665,9 @@ void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &su
 } // namespace
 int wmain(int argc,wchar_t **argv) {
     try {
-        Require(argc>=3 && argc<=5,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run]");
+        Require(argc>=3 && argc<=6,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run] [--cuda-deviation]");
         bool controlsOnly=false,newRun=false;
-        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else throw std::runtime_error("Unknown audit option."); }
+        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else if(option==L"--cuda-deviation")auditBackend=AlignmentComputeBackend::Cuda; else throw std::runtime_error("Unknown audit option."); }
         const auto manifest=ReadManifest(std::filesystem::path(argv[1])); std::filesystem::path folder(argv[2]);
         if (newRun) folder/="run-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         std::filesystem::create_directories(folder);
@@ -672,7 +678,7 @@ int wmain(int argc,wchar_t **argv) {
         auto data=std::make_shared<TestDataPort>(); HostFeatureContext context; context.data=data; context.views=std::make_shared<Views>(); context.host=std::make_shared<Control>();
         SurfaceDeterminationConfig surfaceConfig; surfaceConfig.maxWorkingBytes=manifest.workingLimit; surfaceConfig.isOverlayVisible=false;
         SurfaceDeterminationHostFeature surfaceFeature(surfaceConfig); Require(surfaceFeature.AttachHost(context),"Surface attach failed.");
-        AlignmentConfig alignmentConfig; alignmentConfig.workingBytes=manifest.workingLimit; alignmentConfig.deadlineMs=manifest.deadlineMs; alignmentConfig.isOverlayVisible=false;
+        AlignmentConfig alignmentConfig;   alignmentConfig.isOverlayVisible=false;
         auto inspectionViews=std::make_shared<InspectionViews>();auto alignmentContext=context;alignmentContext.views=inspectionViews;
         MetrologyAlignmentHostFeature alignmentFeature(alignmentConfig); Require(alignmentFeature.AttachHost(alignmentContext),"Metrology attach failed.");
         std::vector<Surface> surfaces;

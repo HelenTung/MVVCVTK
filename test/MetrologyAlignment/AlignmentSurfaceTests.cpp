@@ -21,7 +21,7 @@ DataRevisionRef Ref(unsigned char id) {
 }
 AlignmentWork Work() {
     AlignmentWork work;
-    work.deadline = std::chrono::steady_clock::time_point::max();
+
     work.cancelled = std::make_shared<std::atomic<bool>>(false);
     work.input = {Ref(1), Ref(2), Ref(3), "scan", "RAS", "part", AlignmentUnit::ModelUnit};
     work.recipe.id = "surface-fixture";
@@ -83,11 +83,6 @@ void QueryIndex() {
     }
     AlignmentMeshQuery selected(mesh, work, {0});
     Check(selected.GetClosest({1, 1, 20}).triangle == 0, "reference region restricts correspondence");
-    work.config.workingBytes = 1;
-    bool limited = false;
-    try { AlignmentMeshQuery rejected(mesh, work); } catch (const std::length_error &) { limited = true; }
-    Check(limited, "index rejects insufficient explicit working budget");
-    work.config.workingBytes.reset();
     bool duplicate = false;
     try { AlignmentMeshQuery rejected(mesh, work, {0, 0}); } catch (const std::invalid_argument &) { duplicate = true; }
     Check(duplicate, "duplicate reference selection rejected");
@@ -182,11 +177,8 @@ AlignmentWork DensePlanes() {
 void MultiscaleAlignment() {
     auto work = DensePlanes();
     const auto original = work.mesh->GetVertices();
-    work.config.workingBytes = 2 * 1024 * 1024;
-    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::BudgetExceeded,
-          "dense equations exceed small working budget explicitly");
+    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::FullyDetermined,"dense equations run without a resource quota");
     work.recipe.surfaceFit->scales = {{1,2,40},{.5,.1,40}};
-    work.config.pointLimit = 1500;
     const auto result = AlignmentSolver::BuildResult(work);
     std::cerr << "multiscale status " << static_cast<int>(result.diagnostics.status) << ' '
               << result.diagnostics.message << '\n';
@@ -208,8 +200,8 @@ void MultiscaleAlignment() {
     }
     Check(work.mesh->GetVertices() == original, "multiscale keeps full source immutable");
     work.recipe.surfaceFit->scales.push_back({0,.1,40});
-    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::BudgetExceeded,
-          "full final stage cannot silently skip work to meet point limit");
+    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::FullyDetermined,
+          "full final stage runs without a point quota");
     work = Planes(.5);
     AlignmentGeometrySpec datum; datum.id = "A";
     datum.association = AlignmentAssociation::SequentialLeastSquares;
@@ -257,18 +249,6 @@ void SurfaceGrouping() {
     const auto roi = AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, true);
     Check(roi.points.size() == 6 && AlignmentSurfaceSampling::Reduce(work, roi, 1, 0).size() == 2,
           "ROI grouping uses only original selected vertices");
-    work.config.workingBytes = dense.GetWorkingBytes() + 1;
-    bool limited = false;
-    try { (void)AlignmentSurfaceSampling::Reduce(work, dense, 1, 0); }
-    catch (const std::length_error &) { limited = true; }
-    Check(limited, "group allocations reject a budget with no node or bucket space");
-    work.config.workingBytes.reset();
-    work.deadline = std::chrono::steady_clock::now();
-    bool timedOut = false;
-    try { (void)AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, true); }
-    catch (const std::runtime_error &) { timedOut = true; }
-    Check(timedOut, "surface selection observes expired deadline");
-    work.deadline = std::chrono::steady_clock::time_point::max();
     work.cancelled->store(true);
     bool cancelled = false;
     try { (void)AlignmentSurfaceSampling::Reduce(work, dense, 1, 0); }

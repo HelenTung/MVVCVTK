@@ -24,8 +24,7 @@ class AlignmentDeviationOverlay final : public FeatureOverlayBase {
     static std::size_t GetRequiredBytes(std::size_t pointCount);
     static std::shared_ptr<const AlignmentDeviationRenderData> Build(
         VtkSurfaceMeshSnapshot mesh, const AlignmentDeviationSnapshot &result,
-        const AlignmentDeviationDisplay &display, std::size_t availableBytes,
-        std::chrono::steady_clock::time_point deadline);
+        const AlignmentDeviationDisplay &display);
   private:
     // 保活原桥接 view 及正式场；浅共享顶点/单元，不在源 polydata 上挂接颜色。
     std::shared_ptr<const AlignmentDeviationRenderData> m_data;

@@ -65,11 +65,6 @@ AlignmentResult AlignmentSceneDisplayController::Set(
     return result;
   }
   std::vector<Binding> next;
-  const auto deadline = WorkLimit(config.deadlineMs).GetDeadline();
-  const auto checkTime = [&] {
-    if (std::chrono::steady_clock::now() >= deadline)
-      throw std::runtime_error("Scene deadline exceeded.");
-  };
   try {
     Require(GetDataRevisionRefValid(request.anchorAlignment) &&
                 !request.parts.empty(),
@@ -90,7 +85,7 @@ AlignmentResult AlignmentSceneDisplayController::Set(
       return result;
     }
     Budget budget{
-        config.workingBytes.value_or(std::numeric_limits<std::size_t>::max())};
+        std::numeric_limits<std::size_t>::max()};
     const auto retained = GetWorkingBytes();
     budget.Add(8192);
     budget.Add(request.parts.size(), 4096);
@@ -111,7 +106,6 @@ AlignmentResult AlignmentSceneDisplayController::Set(
       budget.Add(part.id.size(), 4);
       if (part.selectedItem)
         budget.Add(part.selectedItem->size(), 4);
-      checkTime();
     }
     Require(!request.selectedPart || ids.count(*request.selectedPart),
             "Selected scene part is missing.");
@@ -161,7 +155,6 @@ AlignmentResult AlignmentSceneDisplayController::Set(
         budget.Add(mesh.GetVertices().size() / 3, 128);
         budget.Add((mesh.GetTriangles().size() / 3), 64);
       }
-      checkTime();
       const auto view = data.GetSurfaceMesh(graph, ref);
       if (!view || !view->mesh)
         throw std::runtime_error("Scene mesh view unavailable.");
@@ -169,7 +162,6 @@ AlignmentResult AlignmentSceneDisplayController::Set(
       return view;
     };
     for (const auto &part : request.parts) {
-      checkTime();
       const auto source = AlignmentResultSource::Read(
           graph, part.alignmentResult, part.showReference);
       if (!source) {
@@ -228,7 +220,7 @@ AlignmentResult AlignmentSceneDisplayController::Set(
         AlignmentSceneGeometry::Build(
             *product, product->parts.back(), part, *source->measuredMesh,
             source->referenceMesh.get(), config.axisLength,
-            request.roiMarkerLimit, targets.size(), deadline,
+            request.roiMarkerLimit, targets.size(),
             [&](std::size_t count, std::size_t width) {
               budget.Add(count, width);
             });
@@ -247,12 +239,10 @@ AlignmentResult AlignmentSceneDisplayController::Set(
     product->request = std::make_shared<const AlignmentSceneDisplay>(request);
     product->workingBytes = budget.used - retained;
     for (auto &binding : next) {
-      checkTime();
       binding.overlay = std::make_shared<AlignmentSceneOverlay>(product);
       if (!binding.port->AttachOverlay(binding.overlay))
         throw std::runtime_error("Scene attach failed.");
     }
-    checkTime();
     if (!AlignmentData::GetExpectationsCurrent(data.GetDataGraph(),
                                                product->expectations))
       result.status = AlignmentStatus::Stale;
@@ -270,19 +260,17 @@ AlignmentResult AlignmentSceneDisplayController::Set(
       result.status = AlignmentStatus::Stale;
     }
   } catch (const std::length_error &e) {
-    result.status = AlignmentStatus::BudgetExceeded;
+    result.status = AlignmentStatus::ResourceExhausted;
     result.message = e.what();
   } catch (const std::bad_alloc &) {
-    result.status = AlignmentStatus::BudgetExceeded;
+    result.status = AlignmentStatus::ResourceExhausted;
   } catch (const std::invalid_argument &) {
     for (auto it = next.rbegin(); it != next.rend(); ++it)
       if (it->overlay)
         it->port->RemoveOverlay(it->overlay);
     throw;
   } catch (const std::exception &e) {
-    result.status = std::chrono::steady_clock::now() >= deadline
-                        ? AlignmentStatus::DeadlineExceeded
-                        : AlignmentStatus::InternalError;
+    result.status = AlignmentStatus::InternalError;
     result.message = e.what();
   } catch (...) {
     result.status = AlignmentStatus::InternalError;

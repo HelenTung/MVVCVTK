@@ -220,8 +220,7 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
     if (r.id.empty() || r.id.size() > 128 || r.targetFrameId.empty() ||
         r.targetFrameId.size() > 128 || static_cast<unsigned>(r.unit) > 2 ||
         static_cast<unsigned>(r.method) > 3 ||
-        (config.constraintLimit && (r.constraints.size() > config.constraintLimit ||
-         r.fitPairs.size() > config.constraintLimit)) || r.datumCount > 3 ||
+        r.datumCount > 3 ||
         r.datumCount > r.geometries.size() || r.iterationLimit == 0 || r.iterationLimit > 1000 ||
         !Positive(r.lengthScale) || !Positive(r.rankTolerance) || r.rankTolerance >= 0.01 ||
         !Positive(r.conditionLimit) || r.conditionLimit <= 1 || !Positive(r.solveTolerance) ||
@@ -286,7 +285,7 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
               r.method != AlignmentMethod::ConstrainedBestFit)))
             return false;
         const auto &region = g.region;
-        const auto pointBound = config.pointLimit ? config.pointLimit : std::numeric_limits<std::size_t>::max();
+        const auto pointBound = std::numeric_limits<std::size_t>::max();
         if (region.vertexIds.size() > pointBound - selected)
             return false;
         selected += region.vertexIds.size();
@@ -311,8 +310,6 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
 AlignmentStatus AlignmentGeometryFit::GetWorkStatus(const AlignmentWork &work) {
     if (work.cancelled && work.cancelled->load(std::memory_order_relaxed))
         return AlignmentStatus::Cancelled;
-    if (std::chrono::steady_clock::now() >= work.deadline)
-        return AlignmentStatus::DeadlineExceeded;
     return AlignmentStatus::FullyDetermined;
 }
 
@@ -363,9 +360,9 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
     std::set<std::uint64_t> seen;
     const auto checkStorage = [&](std::size_t count) {
         if (count > std::numeric_limits<std::size_t>::max() / 1024
-            || WorkLimit(work.config.workingBytes) < 65536
-            || count > (WorkLimit(work.config.workingBytes) - 65536) / 1024)
-            throw std::length_error("Selection storage exceeds working budget.");
+            || std::numeric_limits<std::size_t>::max() < 65536
+            || count > (std::numeric_limits<std::size_t>::max() - 65536) / 1024)
+            throw std::length_error("Selection storage size accounting overflows.");
     };
     const auto add = [&](std::size_t index) {
         Require(index < n, "Selection index is out of bounds.");
@@ -382,8 +379,6 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
             ++result.rejected;
             return;
         }
-        if (work.config.pointLimit && result.points.size() >= work.config.pointLimit)
-            throw std::length_error("Selection exceeds point budget.");
         if (result.points.size() == std::numeric_limits<std::size_t>::max())
             throw std::length_error("Selection count overflows.");
         checkStorage(result.points.size() + 1);

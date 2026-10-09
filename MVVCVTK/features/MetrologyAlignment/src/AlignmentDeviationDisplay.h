@@ -22,5 +22,4 @@ class AlignmentDeviationDisplayController final {
     std::vector<Binding> m_bindings;
     std::shared_ptr<const AlignmentDeviationRenderData> m_product;
     std::optional<AlignmentDeviationDisplay> m_request;
-    std::size_t m_viewBytes = 0;
 };

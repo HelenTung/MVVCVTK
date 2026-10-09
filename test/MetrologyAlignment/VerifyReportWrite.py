@@ -1,6 +1,7 @@
 """使用标准库解析器核对 JSON 全报告与 CSV 统计视图的一致性。"""
 import argparse
 import csv
+import colorsys
 import hashlib
 import json
 import math
@@ -67,6 +68,7 @@ def verify_report(json_path, csv_path, fixture=False):
         require(text(row["message"]) == value["message"], "CSV item message mismatch")
     samples_verified = 0
     for value in deviations.values():
+        require(value["parameters"]["computeBackend"] in ("Cpu","Cuda"), "Unknown or missing deviation compute backend")
         for direction in ("forward", "reverse"):
             field = value[direction]
             if field is None:
@@ -186,19 +188,19 @@ def verify_report(json_path, csv_path, fixture=False):
         require(json.loads(row["configuration_json"]) == display, "CSV deviation display configuration mismatch")
         require(all(row[k] == "" for k in ("measured","nominal","deviation","lower_limit","upper_limit","verdict")), "Display row fabricates a measurement")
         low, high = parameters["range"]; tolerance = deviation["parameters"]["tolerance"]
-        def mix(a,b,t):
-            t = min(1,max(0,t)); return [math.floor(x+(y-x)*t+.5) for x,y in zip(a,b)]
+        def hue(fraction):
+            return [math.floor(v*255+.5) for v in colorsys.hsv_to_rgb(min(1,max(0,fraction)),.65,.84)]
         def color(value):
+            if value < low: return [163,74,199]
+            if value > high: return [214,74,166]
             if parameters["useToleranceColors"] and tolerance:
                 a,b = tolerance
                 if a <= value <= b: return [60,180,95]
-                if value < a: return mix([45,90,215],[150,205,255],(value-low)/(a-low) if a>low else 0)
-                return mix([255,200,130],[210,45,35],(value-b)/(high-b) if high>b else 1)
-            center = min(high,max(low,0))
-            if value < center: return mix([45,90,215],[235,235,235],(value-low)/(center-low) if center>low else 0)
-            return mix([235,235,235],[210,45,35],(value-center)/(high-center) if high>center else 1)
+                return hue((value-low)/(a-low) if value<a else (value-b)/(high-b))
+            index = min(255,math.floor((value-low)/(high-low)*256))
+            return hue(index/255)
         require(display["legendRgb"] == [color(low+(high-low)*(i/256)) for i in range(257)], "Independent colorbar calculation mismatch")
-        require(display["colorMapVersion"] == "deviation-colors-1" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
+        require(display["colorMapVersion"] == "deviation-hue-loop-2" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
         selection = display["selection"]
         require((selection is not None) == (parameters["selectedVertex"] is not None), "Selection capture mismatch")
         if selection:

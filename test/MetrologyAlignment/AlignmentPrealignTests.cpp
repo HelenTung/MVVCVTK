@@ -57,7 +57,7 @@ void Features() {
         regular.points.push_back({x*.1, y*.1, 0}); regular.normals.push_back({0,0,1});
     }
     // 纯描述子阶段不创建匹配表；增大后续 matchCount 不能使该阶段多收费。
-    w.config.workingBytes = 100 * 1024;
+
     w.recipe.prealignment->matchCount = 1;
     AlignmentPrealign::BuildFeatures(regular, w, false);
     const auto values = regular.descriptors;
@@ -121,13 +121,7 @@ void AutomaticAlignment() {
 }
 void FailureAndAmbiguity() {
     auto w = Model();
-    w.config.workingBytes = 1;
-    Check(AlignmentSolver::BuildResult(w).diagnostics.status == AlignmentStatus::BudgetExceeded,
-          "prealignment allocations respect explicit work budget");
-    w.config.workingBytes.reset(); w.config.pointLimit = 2;
-    Check(AlignmentSolver::BuildResult(w).diagnostics.status == AlignmentStatus::BudgetExceeded,
-          "automatic sample count respects explicit point limit");
-    w.config.pointLimit = 0; w.cancelled->store(true);
+    w.cancelled->store(true);
     Check(AlignmentSolver::BuildResult(w).diagnostics.status == AlignmentStatus::Cancelled, "prealignment cancellation");
     w.cancelled->store(false);
     w.recipe.prealignment->normalRadius = 1e-5;

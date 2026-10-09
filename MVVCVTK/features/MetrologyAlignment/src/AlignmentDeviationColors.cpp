@@ -2,35 +2,32 @@
 #include <algorithm>
 #include <cmath>
 namespace AlignmentDeviationColors {
-Color Mix(Color a, Color b, double fraction) {
-  Color result{};
-  fraction = std::clamp(fraction, 0.0, 1.0);
-  for (std::size_t i = 0; i < 3; ++i)
-    result[i] = static_cast<unsigned char>(
-        std::lround(a[i] + (b[i] - a[i]) * fraction));
-  return result;
-}
-Color ColorAt(double value, const AlignmentDeviationDisplay &display,
-              const std::optional<std::array<double, 2>> &tolerance) {
-  const double low = display.range[0], high = display.range[1];
+Ramp::Ramp(const AlignmentDeviationDisplay &display,
+           const std::optional<std::array<double, 2>> &tolerance) {
+  m_parameters.mode = AnalysisColorStyle::RampMode::HueLoop;
   if (display.useToleranceColors && tolerance) {
-    if (value >= (*tolerance)[0] && value <= (*tolerance)[1])
-      return {60, 180, 95};
-    if (value < (*tolerance)[0])
-      return Mix({45, 90, 215}, {150, 205, 255},
-                 (*tolerance)[0] > low ? (value - low) / ((*tolerance)[0] - low)
-                                       : 0);
-    return Mix({255, 200, 130}, {210, 45, 35},
-               high > (*tolerance)[1]
-                   ? (value - (*tolerance)[1]) / (high - (*tolerance)[1])
-                   : 1);
+    m_tolerance = tolerance;
+    // 公差内保留绿色；两侧与色标共用既有分段色环，窄公差不靠 LUT 分辨率判定。
+    const std::array<double, 3> green{60 / 255.0, 180 / 255.0, 95 / 255.0};
+    const auto low = (*tolerance)[0], high = (*tolerance)[1];
+    if (display.range[0] < low)
+      m_parameters.segments.push_back({display.range[0], low, AnalysisColorStyle::RampMode::HueLoop});
+    m_parameters.segments.push_back({low, high, AnalysisColorStyle::RampMode::Constant, green, green});
+    if (high < display.range[1])
+      m_parameters.segments.push_back({high, display.range[1], AnalysisColorStyle::RampMode::HueLoop});
   }
-  const double center = std::clamp(0.0, low, high);
-  if (value < center)
-    return Mix({45, 90, 215}, {235, 235, 235},
-               center > low ? (value - low) / (center - low) : 0);
-  return Mix({235, 235, 235}, {210, 45, 35},
-             high > center ? (value - center) / (high - center) : 1);
+  m_lookup = AnalysisColorStyle::BuildRamp(display.range, m_parameters);
+  m_lookup->SetNanColor(128 / 255.0, 128 / 255.0, 128 / 255.0, 1);
+}
+Color Ramp::ColorAt(double value) const {
+  if (std::isnan(value)) return invalidColor;
+  if (m_tolerance && value >= (*m_tolerance)[0] && value <= (*m_tolerance)[1])
+    return {60, 180, 95};
+  const auto mapped = AnalysisColorStyle::GetMappedColor(*m_lookup, m_parameters, value);
+  Color color{};
+  for (std::size_t i = 0; i < color.size(); ++i)
+    color[i] = static_cast<std::uint8_t>(std::lround(255 * mapped[i]));
+  return color;
 }
 bool GetDisplayValid(const AlignmentDeviationDisplay &d,
                      const AlignmentDeviationSnapshot &r) {
@@ -49,11 +46,11 @@ bool GetDisplayValid(const AlignmentDeviationDisplay &d,
 std::array<Color, 257>
 GetLegend(const AlignmentDeviationDisplay &display,
           const std::optional<std::array<double, 2>> &tolerance) {
+  const Ramp ramp(display, tolerance);
   std::array<Color, 257> result{};
   for (std::size_t i = 0; i < result.size(); ++i)
-    result[i] = ColorAt(display.range[0] +
-                            (display.range[1] - display.range[0]) * (i / 256.0),
-                        display, tolerance);
+    result[i] = ramp.ColorAt(display.range[0] +
+                            (display.range[1] - display.range[0]) * (i / 256.0));
   return result;
 }
 } // namespace AlignmentDeviationColors

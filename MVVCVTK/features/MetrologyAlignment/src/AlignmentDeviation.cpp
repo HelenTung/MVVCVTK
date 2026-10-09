@@ -1,6 +1,7 @@
 #include "AlignmentDeviation.h"
 #include "AlignmentMath.h"
 #include "AlignmentMeshQuery.h"
+#include "AlignmentCudaQuery.h"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -10,10 +11,10 @@ using namespace AlignmentMath;
 void Require(bool value, const char *message) { if (!value) throw std::invalid_argument(message); }
 void Check(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Surface evaluation cancelled or deadline reached.");
+        throw std::runtime_error("Surface evaluation cancelled.");
 }
 std::size_t Charge(std::size_t available, std::size_t count, std::size_t bytes) {
-    if (count > available / bytes) throw std::length_error("Surface evaluation exceeds working budget.");
+    if (count > available / bytes) throw std::length_error("Surface evaluation size accounting overflows.");
     return available - count * bytes;
 }
 Vec Vertex(const SurfaceMeshPayload &mesh, std::uint64_t id) {
@@ -100,7 +101,7 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
     if (reverse) std::swap(work.mesh, work.referenceMesh);
     const auto &selection = reverse ? request.referenceTriangles : request.sourceTriangles;
     const auto &targetSelection = reverse ? request.sourceTriangles : request.referenceTriangles;
-    auto available = Charge(work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max()), retainedBytes, 1);
+    auto available = Charge(std::numeric_limits<std::size_t>::max(), retainedBytes, 1);
     const auto count = work.mesh->GetVertices().size()/3;
     available = Charge(available, count, sizeof(AlignmentDeviationSample));
     const bool needsNormals = request.minNormalCosine.has_value();
@@ -109,27 +110,22 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
     std::vector<AlignmentPoint> normals;
     if (needsNormals) normals.resize(count);
     Prepare(work, selection, *field, normals, available);
-    std::size_t selected = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (i % 256 == 0) Check(work);
-        if (field->samples[i].area > 0) ++selected;
-    }
-    if (work.config.pointLimit && selected > work.config.pointLimit)
-        throw std::length_error("Evaluation selection exceeds point limit.");
-    work.config.workingBytes = available;
     {
         AlignmentMeshQuery query(work.referenceMesh, work, targetSelection);
         const auto transform = reverse ? Inverse(pose) : pose;
-        for (std::size_t i = 0; i < count; ++i) {
-            if (i % 256 == 0) Check(work);
+        const auto position = [&](std::size_t i) -> std::optional<AlignmentPoint> {
             auto &sample = field->samples[i];
-            if (sample.area <= 0) continue;
+            if (sample.area <= 0) return {};
             Require(std::isfinite(sample.area), "Sample area overflows.");
             if (!reverse && !AlignmentGeometryFit::GetPointUsable(measuredWork, i)) {
-                sample.state = AlignmentDeviationState::InvalidSource; continue;
+                sample.state = AlignmentDeviationState::InvalidSource; return {};
             }
             const auto point = Transform(transform, Vertex(*work.mesh,i));
-            const auto hit = query.GetClosest(Point(point));
+            Require(Finite(point), "Non-finite query position.");
+            return Point(point);
+        };
+        const auto setSample = [&](std::size_t i, const AlignmentPoint &position, const AlignmentMeshHit &hit) {
+            auto &sample=field->samples[i];const auto point=Vector(position);
             Require(hit.isValid, "Surface correspondence is unavailable.");
             sample.closestTriangle = hit.triangle; sample.distance = std::sqrt(hit.distanceSquared);
             sample.value = !reverse && request.metric == AlignmentDeviationMetric::NominalNormalProjection
@@ -141,14 +137,67 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
                     if (!AlignmentGeometryFit::GetPointUsable(measuredWork, static_cast<std::size_t>(ids[3*hit.triangle+j])))
                         sample.state = AlignmentDeviationState::InvalidTarget;
             }
-            if (sample.state != AlignmentDeviationState::Valid) continue;
-            if (sample.distance > request.maxDistance) { sample.state = AlignmentDeviationState::TooFar; continue; }
+            if (sample.state != AlignmentDeviationState::Valid) return;
+            if (sample.distance > request.maxDistance) { sample.state = AlignmentDeviationState::TooFar; return; }
             if (needsNormals) {
                 const auto normal = Vector(normals[i]); const double length = cv::norm(normal);
                 if (!Finite(normal) || !std::isfinite(length) || length <= 0)
                     sample.state = AlignmentDeviationState::NormalUnavailable;
                 else if (Rotate(transform, normal/length).dot(Vector(hit.normal)) < *request.minNormalCosine)
                     sample.state = AlignmentDeviationState::NormalMismatch;
+            }
+        };
+        if (request.computeBackend == AlignmentComputeBackend::Cuda) {
+#if MVVCVTK_METROLOGY_HAS_CUDA
+            static_assert(sizeof(AlignmentPoint)==3*sizeof(double));
+            constexpr std::size_t batchCapacity=8192;
+            auto gpu=query.BuildCudaQuery(batchCapacity);
+            std::vector<AlignmentPoint> positions;positions.reserve(batchCapacity);
+            std::vector<std::size_t> indices;indices.reserve(batchCapacity);
+            std::vector<AlignmentCudaHit> hits(batchCapacity);
+            const auto flush=[&] {
+                if(positions.empty())return;
+                Check(work);
+                gpu->Query(positions.front().data(),positions.size(),hits.data());
+                Check(work);
+                cv::parallel_for_(cv::Range(0,static_cast<int>(positions.size())),[&](const cv::Range &range) {
+                  for(int offset=range.start;offset<range.end;++offset) {
+                    if((offset-range.start)%256==0)Check(work);
+                    const auto j=static_cast<std::size_t>(offset);
+                    const auto &hit=hits[j];
+                    if(hit.error==2)throw std::invalid_argument("CUDA triangle distance overflows or is numerically singular.");
+                    if(hit.error==3)throw std::runtime_error("CUDA triangle query traversal stack overflows.");
+                    Require(hit.error==0,"CUDA surface correspondence is unavailable.");
+                    // GPU 只筛候选；CPU 保留原测量公式。近等距（含共享边/顶点）完整验证面归属。
+                    const auto canonical=hit.requiresVerification ? query.GetClosest(positions[j])
+                        : query.GetHit(positions[j],hit.triangle);
+                    setSample(indices[j],positions[j],canonical);
+                  }
+                });
+                positions.clear();indices.clear();
+            };
+            for(std::size_t i=0;i<count;++i) {
+                if(i%256==0)Check(work);
+                if(const auto point=position(i)) { positions.push_back(*point);indices.push_back(i); }
+                if(positions.size()==batchCapacity)flush();
+            }
+            flush();
+#else
+            throw AlignmentCudaUnavailable("This repository build has no CUDA deviation backend.");
+#endif
+        } else {
+            // 索引与几何只读，每个任务只写自己的样本；串行统计保持归约顺序及数值判据。
+            // int 仅是 OpenCV 调度索引，超出时分段继续，不成为输入数量上限。
+            for(std::size_t base=0;base<count;) {
+                const auto size=std::min(count-base,static_cast<std::size_t>(std::numeric_limits<int>::max()));
+                cv::parallel_for_(cv::Range(0,static_cast<int>(size)),[&](const cv::Range &range) {
+                    for(int offset=range.start;offset<range.end;++offset) {
+                        const auto i=base+static_cast<std::size_t>(offset);
+                        if((offset-range.start)%256==0)Check(work);
+                        if(const auto point=position(i))setSample(i,*point,query.GetClosest(*point));
+                    }
+                });
+                base+=size;
             }
         }
     }
@@ -165,6 +214,7 @@ bool Complete(const AlignmentDeviationField &field) {
 
 bool AlignmentDeviation::GetRequestValid(const AlignmentDeviationRequest &r) {
     return GetDataRevisionRefValid(r.alignmentResult) && static_cast<unsigned>(r.metric) <= 1 &&
+        static_cast<unsigned>(r.computeBackend) <= 1 &&
         std::isfinite(r.maxDistance) && r.maxDistance > 0 &&
         (!r.minNormalCosine || (std::isfinite(*r.minNormalCosine) && *r.minNormalCosine >= 0 && *r.minNormalCosine <= 1)) &&
         (!r.tolerance || (std::isfinite((*r.tolerance)[0]) && std::isfinite((*r.tolerance)[1]) &&
@@ -184,9 +234,8 @@ AlignmentDeviationData AlignmentDeviation::Build(const AlignmentWork &input,
             input.mesh->GetCoordinateFrame() == input.referenceMesh->GetCoordinateFrame(), "Invalid evaluation surfaces.");
         AlignmentWork work;
         work.mesh = input.mesh; work.referenceMesh = input.referenceMesh; work.config = input.config;
-        work.cancelled = input.cancelled; work.deadline = input.deadline;
+        work.cancelled = input.cancelled;
         // 固定元数据、共享指针控制块及局部对象预留；不将输入网格或进程 RSS 计作新增数组。
-        work.config.workingBytes = Charge(input.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max()), 4096, 1);
         work.recipe.requiresMeasurementQuality = request.requiresMeasurementQuality;
         work.recipe.minSupportRatio = request.minSupportRatio;
         work.recipe.maxLocalizationSigma = request.maxLocalizationSigma;
@@ -200,8 +249,9 @@ AlignmentDeviationData AlignmentDeviation::Build(const AlignmentWork &input,
                     ? AlignmentInspectionVerdict::Pass : AlignmentInspectionVerdict::Indeterminate;
         }
         output.status = AlignmentStatus::FullyDetermined;
-    } catch (const std::length_error &e) { output.status = AlignmentStatus::BudgetExceeded; output.message = e.what(); }
-      catch (const std::bad_alloc &) { output.status = AlignmentStatus::BudgetExceeded; }
+    } catch (const AlignmentCudaUnavailable &e) { output.status = AlignmentStatus::Unavailable; output.message = e.what(); }
+      catch (const std::length_error &e) { output.status = AlignmentStatus::ResourceExhausted; output.message = e.what(); }
+      catch (const std::bad_alloc &) { output.status = AlignmentStatus::ResourceExhausted; }
       catch (const std::invalid_argument &e) { output.status = AlignmentStatus::InvalidInput; output.message = e.what(); }
       catch (const std::exception &e) {
         const auto status = AlignmentGeometryFit::GetWorkStatus(input);

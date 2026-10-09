@@ -20,7 +20,7 @@ struct Fixture final {
     AlignmentWork work;
     InspectionSection section;
     Fixture() {
-        work.input.mesh=Ref(); work.deadline=std::chrono::steady_clock::time_point::max();
+        work.input.mesh=Ref();
         work.cancelled=std::make_shared<std::atomic<bool>>(false);
         section.pinnedMesh=work.input.mesh; section.planePoint={0,0,.25};
         section.sampleSpacing=2*sides*5*std::sin(std::acos(-1.0)/sides)/256*(1+1e-12);
@@ -122,15 +122,9 @@ void TopologyAndSelection() {
     Reject<std::invalid_argument>([&]{coplanar.Cut();},"coplanar face has no unique contour");
 }
 void Limits() {
-    Fixture f; f.Publish(); f.work.config.workingBytes=4096;
-    Reject<std::length_error>([&]{f.Cut();},"graph allocations obey working budget");
-    f.work.config.workingBytes.reset(); f.work.config.pointLimit=8;
-    Reject<std::length_error>([&]{f.Cut();},"arclength sample count obeys limit");
-    f.work.config.pointLimit=0; f.work.cancelled->store(true);
+    Fixture f; f.Publish(); f.work.cancelled->store(true);
     Reject<std::runtime_error>([&]{f.Cut();},"section extraction checks cancellation");
-    f.work.cancelled->store(false); f.work.deadline=std::chrono::steady_clock::time_point::min();
-    Reject<std::runtime_error>([&]{f.Cut();},"section extraction checks deadline");
-    f.work.deadline=std::chrono::steady_clock::time_point::max(); f.work.recipe.requiresMeasurementQuality=true;
+    f.work.cancelled->store(false); f.work.recipe.requiresMeasurementQuality=true;
     Reject<std::invalid_argument>([&]{f.Cut();},"measurement-quality section requires face quality schema");
 }
 }

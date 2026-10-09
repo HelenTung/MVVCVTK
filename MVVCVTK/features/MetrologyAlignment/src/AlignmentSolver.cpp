@@ -76,7 +76,7 @@ Vec Pivot(const std::vector<Equation> &equations, const AlignmentMatrix &pose) {
 }
 void CheckWork(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Cancelled or deadline reached.");
+        throw std::runtime_error("Cancelled.");
 }
 bool Project(const AlignmentWork &work, const std::vector<Equation> &equations,
              const std::vector<std::size_t> &hard, const std::vector<double> &frozen,
@@ -377,11 +377,9 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
             throw std::length_error("Constraint count overflows.");
         const auto constraints = recipe.constraints.size() + recipe.fitPairs.size();
         if (total > std::numeric_limits<std::size_t>::max() / 1024
-            || WorkLimit(work.config.workingBytes) < 65536 || total > (WorkLimit(work.config.workingBytes) - 65536) / 1024
-            || constraints > (WorkLimit(work.config.workingBytes) - 65536 - total * 1024) / 1024)
-            throw std::length_error("Actual selection exceeds working budget.");
-        if (work.config.pointLimit && total > work.config.pointLimit)
-            throw std::length_error("Total selection exceeds point budget.");
+            || std::numeric_limits<std::size_t>::max() < 65536 || total > (std::numeric_limits<std::size_t>::max() - 65536) / 1024
+            || constraints > (std::numeric_limits<std::size_t>::max() - 65536 - total * 1024) / 1024)
+            throw std::length_error("Actual selection size accounting overflows.");
         std::optional<AlignmentPoint> constraint;
         bool fixed = false;
         if (sequential && i < recipe.datumCount) {
@@ -512,15 +510,15 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
     if (recipe.surfaceFit) {
         Require(surfaceQuery != nullptr, "Reference surface is missing.");
         constexpr std::size_t equationBytes = sizeof(Equation) + 12 * 6 * sizeof(double) + 64;
-        const auto limit = WorkLimit(work.config.workingBytes);
+        const auto limit = std::numeric_limits<std::size_t>::max();
         const auto fixedCount = equations.size();
         const auto indexBytes = surfaceQuery->GetWorkingBytes();
         if (indexBytes > limit || limit - indexBytes < 65536 ||
             total > (limit - indexBytes - 65536) / 1024)
-            throw std::length_error("Surface auxiliary work exceeds working budget.");
+            throw std::length_error("Surface auxiliary work size accounting overflows.");
         const auto geometryBytes = indexBytes + 65536 + total * 1024;
         if (fixedCount > (limit - geometryBytes) / equationBytes)
-            throw std::length_error("Fixed equations exceed working budget.");
+            throw std::length_error("Fixed equations size accounting overflows.");
         const auto baseBytes = geometryBytes + fixedCount * equationBytes;
         const auto &scales = recipe.surfaceFit->scales;
         const bool needsDirections = std::any_of(scales.begin(), scales.end(),
@@ -543,12 +541,9 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
             const auto &samples = scale.voxelSize > 0 ? reduced : dense.points;
             const auto usedBytes = baseBytes + dense.GetWorkingBytes();
             if (reduced.capacity() > (limit - usedBytes) / sizeof(AlignmentSurfaceSample))
-                throw std::length_error("Surface samples exceed working budget.");
+                throw std::length_error("Surface samples size accounting overflows.");
             const auto available = limit - usedBytes - reduced.capacity() * sizeof(AlignmentSurfaceSample);
-            if ((work.config.pointLimit && (total > work.config.pointLimit || samples.size() > work.config.pointLimit - total)) ||
-                (work.config.constraintLimit && (fixedCount > work.config.constraintLimit ||
-                    samples.size() > (work.config.constraintLimit - fixedCount) / components)) ||
-                fixedCount > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            if (fixedCount > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
                 samples.size() > (static_cast<std::size_t>(std::numeric_limits<int>::max()) - fixedCount) / components ||
                 samples.size() > available / equationBytes / components)
                 throw std::length_error("Surface equations exceed working limits.");
@@ -679,10 +674,10 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
         result.initialPoses = std::move(poses);
         result.diagnostics.prealignment = prealignment;
     } catch (const std::length_error& error) {
-        result.diagnostics.status = AlignmentStatus::BudgetExceeded;
+        result.diagnostics.status = AlignmentStatus::ResourceExhausted;
         result.diagnostics.message = error.what();
     } catch (const std::bad_alloc &) {
-        result.diagnostics.status = AlignmentStatus::BudgetExceeded;
+        result.diagnostics.status = AlignmentStatus::ResourceExhausted;
     } catch (const std::invalid_argument &error) {
         result.diagnostics.status = AlignmentStatus::InvalidInput;
         result.diagnostics.message = error.what();

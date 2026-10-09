@@ -9,6 +9,5 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
            const SurfaceMeshPayload &measured,
            const SurfaceMeshPayload *reference, double glyphLength,
            std::size_t markerLimit, std::size_t viewCount,
-           std::chrono::steady_clock::time_point deadline,
            const std::function<void(std::size_t, std::size_t)> &charge);
 } // namespace AlignmentSceneGeometry

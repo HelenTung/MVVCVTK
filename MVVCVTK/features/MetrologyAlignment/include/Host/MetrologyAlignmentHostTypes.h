@@ -60,7 +60,8 @@ enum class AlignmentStatus : std::uint8_t {
     BudgetExceeded,
     Unavailable,
     InternalError,
-    IoError
+    IoError,
+    ResourceExhausted
 };
 
 struct AlignmentReferenceRequest final {
@@ -293,7 +294,10 @@ enum class AlignmentDeviationState : std::uint8_t {
     NotSelected, Valid, InvalidSource, InvalidTarget, TooFar, NormalMismatch, NormalUnavailable
 };
 enum class AlignmentInspectionVerdict : std::uint8_t { NotEvaluated, Pass, Fail, Indeterminate };
+enum class AlignmentComputeBackend : std::uint8_t { Cpu, Cuda };
 struct AlignmentDeviationRequest final {
+    // CUDA 为显式选择；未构建/不可用时返回 Unavailable，不静默替换后端。
+    AlignmentComputeBackend computeBackend = AlignmentComputeBackend::Cpu;
     DataRevisionRef alignmentResult;
     AlignmentDeviationMetric metric = AlignmentDeviationMetric::UnsignedDistance;
     // 编号属于 alignmentResult 固定的实测/名义网格，空集合使用全部三角形。
@@ -601,11 +605,6 @@ using AlignmentCallback = std::function<void(AlignmentResult)>;
 
 struct AlignmentConfig final {
     HostViewTargets targetViews;
-    // 0 不启用数量预算。导入限制唯一顶点，预对齐限制两侧样本总数，求解限制工作样本。
-    std::size_t pointLimit = 0;
-    std::size_t constraintLimit = 0;
-    std::optional<std::size_t> workingBytes {};
-    std::optional<std::size_t> deadlineMs{};
     double axisLength = 10.0;
     bool isOverlayVisible = true;
 };
@@ -633,6 +632,6 @@ struct AlignmentState final {
     AlignmentModelPoseState modelPose;
     std::shared_ptr<const AlignmentSceneDisplay> sceneDisplay;
     bool isSceneDisplayReady=false;
-    // 包含保守的渲染缓存计账；不是实测显存/工作集。旧新场景并存时均计入准入。
+    // 包含保守的渲染缓存计账，仅用于诊断；不是实测显存/工作集。
     std::size_t sceneWorkingBytes=0;
 };

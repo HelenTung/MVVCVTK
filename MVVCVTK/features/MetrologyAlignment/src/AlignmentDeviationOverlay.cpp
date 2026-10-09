@@ -15,11 +15,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace {
-void CheckDeadline(std::chrono::steady_clock::time_point deadline) {
-    if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Deviation display deadline reached.");
-}
-} // namespace
+
 
 bool AlignmentDeviationOverlay::GetDisplayValid(const AlignmentDeviationDisplay &d,
                                                 const AlignmentDeviationSnapshot &r) {
@@ -33,41 +29,30 @@ std::size_t AlignmentDeviationOverlay::GetRequiredBytes(std::size_t count) {
 }
 std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::Build(
     VtkSurfaceMeshSnapshot mesh, const AlignmentDeviationSnapshot &result,
-    const AlignmentDeviationDisplay &display, std::size_t availableBytes,
-    std::chrono::steady_clock::time_point deadline) {
-    CheckDeadline(deadline);
+    const AlignmentDeviationDisplay &display) {
     if (!mesh || !mesh->data || mesh->data->self != result.sourceMesh || !mesh->mesh ||
         !GetDisplayValid(display,result) ||
         mesh->mesh->GetNumberOfPoints() != static_cast<vtkIdType>(result.forward->samples.size()))
         throw std::invalid_argument("Invalid deviation display input.");
     const auto count=result.forward->samples.size();
     const auto requiredBytes=GetRequiredBytes(count);
-    if (requiredBytes>availableBytes)
-        throw std::length_error("Deviation color arrays exceed display working budget.");
     auto output=std::make_shared<AlignmentDeviationRenderData>();
     output->source=std::move(mesh); output->field=result.forward; output->workingBytes=requiredBytes;
     auto colors=vtkSmartPointer<vtkUnsignedCharArray>::New();
     colors->SetName("metrology.deviation.color"); colors->SetNumberOfComponents(3);
     colors->SetNumberOfTuples(static_cast<vtkIdType>(count));
     auto *buffer=colors->GetPointer(0);
+    const AlignmentDeviationColors::Ramp ramp(display,result.parameters->tolerance);
     for (std::size_t i=0;i<count;++i) {
-        if (i%256==0) CheckDeadline(deadline);
         const auto &sample=output->field->samples[i];
         const auto color=sample.state == AlignmentDeviationState::Valid
-            ? AlignmentDeviationColors::ColorAt(sample.value,display,result.parameters->tolerance) : AlignmentDeviationColors::invalidColor;
+            ? ramp.ColorAt(sample.value) : AlignmentDeviationColors::invalidColor;
         std::copy(color.begin(),color.end(),buffer+3*i);
     }
     output->colored=vtkSmartPointer<vtkPolyData>::New();
     output->colored->ShallowCopy(output->source->mesh);
     output->colored->GetPointData()->SetScalars(colors);
-    output->lookup=vtkSmartPointer<vtkLookupTable>::New();
-    output->lookup->SetRange(display.range.data()); output->lookup->SetNumberOfTableValues(257);
-    output->lookup->SetNanColor(.5,.5,.5,1); output->lookup->Build();
-    const auto legendRgb=AlignmentDeviationColors::GetLegend(display,result.parameters->tolerance);
-    for (int i=0;i<=256;++i) {
-        const auto color=legendRgb[static_cast<std::size_t>(i)];
-        output->lookup->SetTableValue(i,color[0]/255.0,color[1]/255.0,color[2]/255.0,1);
-    }
+    output->lookup=ramp.GetLookup();
     const char *unit=result.unit == AlignmentUnit::Millimeter ? "mm" : result.unit == AlignmentUnit::Meter ? "m" : "model unit";
     output->title=std::string(result.parameters->metric == AlignmentDeviationMetric::UnsignedDistance ? "Distance" : "Normal projection")+" ("+unit+")";
     if (display.selectedVertex) {
@@ -88,9 +73,11 @@ AlignmentDeviationOverlay::AlignmentDeviationOverlay(std::shared_ptr<const Align
     auto actor=vtkSmartPointer<vtkActor>::New(); actor->SetMapper(mapper); actor->SetPickable(false);
     actor->GetProperty()->SetLighting(false); AttachProp(actor);
     auto legend=vtkSmartPointer<vtkScalarBarActor>::New(); legend->SetLookupTable(m_data->lookup);
-    legend->SetTitle(m_data->title.c_str()); legend->SetNumberOfLabels(5); legend->SetMaximumNumberOfColors(257);
+    AnalysisColorStyle::SetLegend(*legend,m_data->title.c_str());
+    // 长计量/单位标题按色条中心排版，左侧保留文字余量。
+    legend->SetPosition(.15,.2);
     legend->SetNanAnnotation("invalid / unmatched"); legend->DrawNanAnnotationOn();
-    legend->SetPosition(.82,.1); legend->SetWidth(.16); legend->SetHeight(.8); AttachProp(legend);
+    AttachProp(legend);
     if (m_data->marker) {
         auto markerMapper=vtkSmartPointer<vtkPolyDataMapper>::New(); markerMapper->SetInputData(m_data->marker);
         auto marker=vtkSmartPointer<vtkActor>::New(); marker->SetMapper(markerMapper); marker->SetPickable(false);

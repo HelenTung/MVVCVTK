@@ -68,7 +68,7 @@ template<class Visit> void Scan(const AlignmentWork &work,const GridGeometry3D &
     for(std::int64_t z=extent[4];z<=extent[5];++z)for(std::int64_t y=extent[2];y<=extent[3];++y) {
         auto index=(static_cast<std::size_t>(z-g.extent[4])*g.dimensions[1]+static_cast<std::size_t>(y-g.extent[2]))*g.dimensions[0]+static_cast<std::size_t>(extent[0]-static_cast<std::int64_t>(g.extent[0]));
         for(std::int64_t x=extent[0];x<=extent[1];++x,++index) {
-            if(count++%4096==0 && AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)throw std::runtime_error("Voxel volume cancelled or deadline reached.");
+            if(count++%4096==0 && AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)throw std::runtime_error("Voxel volume cancelled.");
             ++s.total;const auto outcome=visit(index);
             switch(outcome.first) {
             case Quality::Masked:++s.masked;continue;case Quality::NoData:++s.noData;continue;case Quality::NonFinite:++s.nonFinite;continue;default:break;
@@ -88,7 +88,6 @@ bool AlignmentVoxelVolume::GetRequestValid(const VoxelVolumeRequest &r,const Ali
     if(r.id.empty() || r.id.size()>128 || !GetDataRevisionRefValid(r.source) || static_cast<unsigned>(r.method)>1 ||
         (r.validityImage && !GetDataRevisionRefValid(*r.validityImage)))return false;
     if(r.extent)for(int a=0;a<3;++a)if((*r.extent)[2*a]>(*r.extent)[2*a+1])return false;
-    if(config.workingBytes && (*config.workingBytes<8192 || r.labels.size()>(*config.workingBytes-8192)/16))return false;
     if(r.method==VoxelVolumeMethod::StoredValueRange)return r.storedValueRange && r.labels.empty() && !r.validityImage &&
         std::isfinite((*r.storedValueRange)[0]) && std::isfinite((*r.storedValueRange)[1]) && (*r.storedValueRange)[0]<=(*r.storedValueRange)[1];
     return !r.storedValueRange && !r.labels.empty() && std::is_sorted(r.labels.begin(),r.labels.end()) &&
@@ -97,12 +96,10 @@ bool AlignmentVoxelVolume::GetRequestValid(const VoxelVolumeRequest &r,const Ali
 VoxelVolumeData AlignmentVoxelVolume::Build(const AlignmentWork &work,const VoxelVolumeWork &source,const VoxelVolumeRequest &r) {
     VoxelVolumeData result;
     try {
-        if(work.config.workingBytes && (*work.config.workingBytes<8192 || r.labels.size()>(*work.config.workingBytes-8192)/16))throw std::length_error("Voxel volume metadata budget exceeded.");
         Require(GetRequestValid(r,work.config),"Invalid voxel volume request.");
         const bool scalar=r.method==VoxelVolumeMethod::StoredValueRange;
         Require(scalar ? source.image && source.image->GetValid() && source.image->GetComponentCount()==1 : source.labels && source.labels->GetValid(),"Voxel volume source type or geometry is invalid.");
         const auto &g=scalar ? source.image->GetGeometry() : source.labels->GetGeometry();
-        if(work.config.workingBytes && g.coordinateFrame.size()>(*work.config.workingBytes-8192-r.labels.size()*16)/4)throw std::length_error("Voxel geometry metadata budget exceeded.");
         Require(!source.validityImage || (source.validityImage->GetValid() && source.validityImage->GetComponentCount()==1 && GetGeometrySame(g,source.validityImage->GetGeometry())),"Validity image must use the exact source geometry.");
         Require(bool(source.validityImage)==r.validityImage.has_value(),"Validity source is unavailable.");
         auto &s=result.statistics;s.evaluatedExtent=r.extent.value_or(g.extent);
@@ -135,8 +132,8 @@ VoxelVolumeData AlignmentVoxelVolume::Build(const AlignmentWork &work,const Voxe
             : r.requireEnclosedSelection && s.touchesRegionBoundary ? VoxelVolumeValidity::TouchesBoundary : VoxelVolumeValidity::Complete;
         if(s.validity==VoxelVolumeValidity::Complete)s.volumeMm3=s.observedVolumeMm3;
         result.status=AlignmentGeometryFit::GetWorkStatus(work);
-    } catch(const std::length_error &e) { result.status=AlignmentStatus::BudgetExceeded;result.message=e.what(); }
-      catch(const std::bad_alloc &) { result.status=AlignmentStatus::BudgetExceeded; }
+    } catch(const std::length_error &e) { result.status=AlignmentStatus::ResourceExhausted;result.message=e.what(); }
+      catch(const std::bad_alloc &) { result.status=AlignmentStatus::ResourceExhausted; }
       catch(const std::invalid_argument &e) { result.status=AlignmentStatus::InvalidInput;result.message=e.what(); }
       catch(const std::exception &e) { const auto state=AlignmentGeometryFit::GetWorkStatus(work);result.status=state==AlignmentStatus::FullyDetermined ? AlignmentStatus::InternalError : state;result.message=e.what(); }
     return result;

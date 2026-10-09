@@ -56,7 +56,6 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
            const SurfaceMeshPayload &measured,
            const SurfaceMeshPayload *reference, double glyphLength,
            std::size_t markerLimit, std::size_t viewCount,
-           std::chrono::steady_clock::time_point deadline,
            const std::function<void(std::size_t, std::size_t)> &charge) {
   using namespace AlignmentMath;
   if (!part.inspection)
@@ -75,17 +74,12 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
     selected = GetItemGeometries(
         plan, static_cast<std::size_t>(it - plan.items.begin()));
   }
-  const auto check = [&] {
-    if (std::chrono::steady_clock::now() >= deadline)
-      throw std::runtime_error("Inspection display deadline exceeded.");
-  };
   // 线框仅示意已拟合理想元素；glyphLength 不代表实体端面或圆柱高度。
   charge(report.geometries.size(), 65536);
   for (std::size_t i = 0; i < viewCount; ++i)
     charge(report.geometries.size(), 65536);
   std::array<std::vector<AlignmentGeometry>, 2> fitted;
   for (std::size_t i = 0; i < report.geometries.size(); ++i) {
-    check();
     const auto &g = report.geometries[i];
     if (g.status != AlignmentStatus::FullyDetermined)
       continue;
@@ -99,10 +93,9 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
   }
   for (std::size_t group = 0; group < 2; ++group)
     if (!fitted[group].empty()) {
-      check();
-      auto poly =
+        auto poly =
           AlignmentOverlay::BuildData(alignmentIdentity, fitted[group], {},
-                                      glyphLength, nullptr, false, check);
+                                      glyphLength, nullptr, false);
       if (!poly)
         throw std::runtime_error("Inspection glyph construction failed.");
       product.glyphs.push_back({poly, product.targetToModel,
@@ -125,7 +118,6 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
     vertices->InsertNextCell(1, &id);
   };
   for (auto index : selected) {
-    check();
     const auto &spec = plan.geometries[index];
     const auto &g = report.geometries[index];
     if (spec.source == InspectionGeometrySource::NominalDefinition)
@@ -157,8 +149,7 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
         const auto &tri = mesh->GetTriangles();
         const auto n = Vector(g.section->sourcePlaneNormal);
         Slots(g.section->samples.size(), count, [&](std::size_t slot) {
-          check();
-          const auto &sample = g.section->samples[slot];
+                const auto &sample = g.section->samples[slot];
           if (sample.triangle >= tri.size() / 3)
             throw std::invalid_argument(
                 "Inspection section triangle is unavailable.");
@@ -193,8 +184,7 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
       for (std::size_t v = 0; v < viewCount; ++v)
         charge(count, 128);
       Slots(ids.size(), count, [&](std::size_t slot) {
-        check();
-        marker(Transform(pose, point(ids[slot])));
+            marker(Transform(pose, point(ids[slot])));
       });
       info.drawnMarkers = count;
     }

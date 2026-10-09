@@ -2,6 +2,10 @@
 #include "AlignmentMath.h"
 #include <algorithm>
 #include <stdexcept>
+#if MVVCVTK_METROLOGY_HAS_CUDA
+#include "AlignmentCudaQuery.h"
+#include <type_traits>
+#endif
 
 namespace {
 using namespace AlignmentMath;
@@ -44,17 +48,17 @@ double BoundsDistance(const AlignmentPoint &p, const std::array<double, 6> &boun
 AlignmentMeshQuery::AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload> mesh,
                                        const AlignmentWork &work,
                                        const std::vector<std::uint64_t> &triangles)
-    : m_mesh(std::move(mesh)), m_cancelled(work.cancelled), m_deadline(work.deadline) {
+    : m_mesh(std::move(mesh)), m_cancelled(work.cancelled) {
     CheckWork();
     if (!m_mesh || !m_mesh->GetValid() || m_mesh->GetTriangles().empty())
         throw std::invalid_argument("Reference requires a valid triangle surface.");
     const auto count = triangles.empty() ? m_mesh->GetTriangles().size() / 3 : triangles.size();
-    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto limit = std::numeric_limits<std::size_t>::max();
     // 中位数划分、叶最多八个三角形，非根叶至少四个；节点上界为 N/2+1。
     const auto nodeCount = count / 2 + 1;
     if (nodeCount > limit / sizeof(Node) ||
         count > (limit - nodeCount * sizeof(Node)) / sizeof(std::uint64_t))
-        throw std::length_error("Triangle index exceeds the working budget.");
+        throw std::length_error("Triangle index byte count overflows.");
     m_triangles.reserve(count);
     if (!triangles.empty()) {
         m_triangles = triangles;
@@ -83,9 +87,8 @@ AlignmentMeshQuery::AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload>
 }
 
 void AlignmentMeshQuery::CheckWork() const {
-    if ((m_cancelled && m_cancelled->load(std::memory_order_relaxed)) ||
-        std::chrono::steady_clock::now() >= m_deadline)
-        throw std::runtime_error("Triangle query cancelled or deadline reached.");
+    if ((m_cancelled && m_cancelled->load(std::memory_order_relaxed)))
+        throw std::runtime_error("Triangle query cancelled.");
 }
 
 std::array<AlignmentPoint, 3> AlignmentMeshQuery::GetTriangle(std::uint64_t triangle) const {
@@ -127,12 +130,18 @@ std::size_t AlignmentMeshQuery::BuildNode(std::size_t first, std::size_t count) 
             node.bounds[2 * axis + 1] - node.bounds[2 * axis]) axis = j;
     const auto middle = first + count / 2;
     std::size_t comparisons = 0;
+    const auto &vertices=m_mesh->GetVertices();
+    const auto &triangles=m_mesh->GetTriangles();
+    // 索引在构造阶段已校验；排序只读当前轴三坐标，不反复物化完整三角形。
+    const auto center=[&](std::uint64_t triangle) {
+        const auto base=3*triangle;
+        return vertices[3*triangles[base]+axis]/3 + vertices[3*triangles[base+1]+axis]/3
+            + vertices[3*triangles[base+2]+axis]/3;
+    };
     std::nth_element(m_triangles.begin() + first, m_triangles.begin() + middle,
                      m_triangles.begin() + first + count, [&](auto a, auto b) {
         if (++comparisons % 256 == 0) CheckWork();
-        const auto ta = GetTriangle(a), tb = GetTriangle(b);
-        const double ca = ta[0][axis] / 3 + ta[1][axis] / 3 + ta[2][axis] / 3;
-        const double cb = tb[0][axis] / 3 + tb[1][axis] / 3 + tb[2][axis] / 3;
+        const double ca=center(a),cb=center(b);
         return ca == cb ? a < b : ca < cb;
     });
     const auto left = BuildNode(first, middle - first);
@@ -157,16 +166,9 @@ AlignmentMeshHit AlignmentMeshQuery::GetClosest(const AlignmentPoint &point) con
         if (node.count) {
             for (std::size_t i = node.first; i < node.first + node.count; ++i) {
                 const auto id = m_triangles[i];
-                const auto t = GetTriangle(id);
-                const auto a = Vector(t[0]), b = Vector(t[1]), c = Vector(t[2]);
-                const auto closest = ClosestTriangle(Vector(point), a, b, c);
-                const auto delta = Vector(point) - closest;
-                const double squared = delta.dot(delta);
-                if (!std::isfinite(squared)) throw std::invalid_argument("Distance overflows.");
-                if (!hit.isValid || squared < hit.distanceSquared ||
-                    (squared == hit.distanceSquared && id < hit.triangle)) {
-                    hit = {Point(closest), Point(Unit((b - a).cross(c - a))), id, squared, true};
-                }
+                const auto candidate=GetHit(point,id);
+                if (!hit.isValid || candidate.distanceSquared < hit.distanceSquared ||
+                    (candidate.distanceSquared == hit.distanceSquared && id < hit.triangle)) hit=candidate;
             }
         } else {
             auto near = node.left, far = node.right;
@@ -179,6 +181,30 @@ AlignmentMeshHit AlignmentMeshQuery::GetClosest(const AlignmentPoint &point) con
     return hit;
 }
 
+AlignmentMeshHit AlignmentMeshQuery::GetHit(const AlignmentPoint &point, std::uint64_t triangle) const {
+    if(!Finite(Vector(point)))throw std::invalid_argument("Non-finite query position.");
+    const auto t=GetTriangle(triangle);
+    const auto a=Vector(t[0]),b=Vector(t[1]),c=Vector(t[2]);
+    const auto closest=ClosestTriangle(Vector(point),a,b,c);
+    const auto delta=Vector(point)-closest;const double squared=delta.dot(delta);
+    if(!std::isfinite(squared))throw std::invalid_argument("Distance overflows.");
+    return {Point(closest),Point(Unit((b-a).cross(c-a))),triangle,squared,true};
+}
 std::size_t AlignmentMeshQuery::GetWorkingBytes() const noexcept {
     return m_nodes.capacity() * sizeof(Node) + m_triangles.capacity() * sizeof(std::uint64_t);
 }
+#if MVVCVTK_METROLOGY_HAS_CUDA
+std::unique_ptr<AlignmentCudaQuery> AlignmentMeshQuery::BuildCudaQuery(std::size_t batchCapacity) const {
+    CheckWork();
+    static_assert(std::is_standard_layout_v<Node> && sizeof(Node) == sizeof(AlignmentCudaNode));
+    static_assert(offsetof(Node, first) == offsetof(AlignmentCudaNode, first) &&
+                  offsetof(Node, count) == offsetof(AlignmentCudaNode, count) &&
+                  offsetof(Node, left) == offsetof(AlignmentCudaNode, left) &&
+                  offsetof(Node, right) == offsetof(AlignmentCudaNode, right));
+    // 只复制原始对象表示，不通过异型 CPU 指针解引用，避免第二份主机 BVH。
+    return std::make_unique<AlignmentCudaQuery>(m_nodes.data(), m_nodes.size(),
+        m_triangles.data(), m_triangles.size(), m_mesh->GetVertices().data(),
+        m_mesh->GetVertices().size(), m_mesh->GetTriangles().data(),
+        m_mesh->GetTriangles().size(), batchCapacity);
+}
+#endif

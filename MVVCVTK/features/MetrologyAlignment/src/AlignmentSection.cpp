@@ -9,8 +9,8 @@ namespace {
 using namespace AlignmentMath;
 using namespace AlignmentMemory;
 using Key=std::array<std::uint64_t,2>;
-template<class T> using VectorList=std::vector<T,BudgetAllocator<T>>;
-template<class K,class V> using Map=std::map<K,V,std::less<K>,BudgetAllocator<std::pair<const K,V>>>;
+template<class T> using VectorList=std::vector<T,AccountingAllocator<T>>;
+template<class K,class V> using Map=std::map<K,V,std::less<K>,AccountingAllocator<std::pair<const K,V>>>;
 struct Node final {
     Key edge{}; Vec point{}; double fraction=0;
     std::size_t parent=0,degree=0; std::array<std::size_t,2> segments{};
@@ -30,7 +30,7 @@ struct Component final {
 void Require(bool value,const char *message) { if (!value) throw std::invalid_argument(message); }
 void Check(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Section extraction cancelled or deadline reached.");
+        throw std::runtime_error("Section extraction cancelled.");
 }
 Vec Vertex(const SurfaceMeshPayload &mesh,std::uint64_t id) {
     const auto &v=mesh.GetVertices(); return {v[3*id],v[3*id+1],v[3*id+2]};
@@ -62,11 +62,11 @@ std::array<double,3> Barycentric(const Node &node,const std::array<std::uint64_t
 }
 // 使用平面局部坐标，先按包围盒筛选，再拒绝非相邻段相交/接触及相邻段回折。
 void CheckSimple(const AlignmentWork &work,const VectorList<Node> &nodes,const VectorList<std::size_t> &order,
-                 const Vec &normal,double tolerance,AllocationBudget &budget) {
+                 const Vec &normal,double tolerance,AllocationAccounting &budget) {
     struct Edge final { std::size_t index; double x0,x1,y0,y1; };
     const auto u=Tangent(normal),v=normal.cross(u),origin=nodes[order[0]].point;
-    VectorList<std::array<double,2>> p(0,BudgetAllocator<std::array<double,2>>{&budget}); p.reserve(order.size());
-    VectorList<Edge> edges(0,BudgetAllocator<Edge>{&budget}); edges.reserve(order.size());
+    VectorList<std::array<double,2>> p(0,AccountingAllocator<std::array<double,2>>{&budget}); p.reserve(order.size());
+    VectorList<Edge> edges(0,AccountingAllocator<Edge>{&budget}); edges.reserve(order.size());
     for (auto id:order) { const auto d=nodes[id].point-origin; p.push_back({d.dot(u),d.dot(v)}); }
     double twiceArea=0;
     for (std::size_t i=0;i<p.size();++i) {
@@ -107,15 +107,15 @@ AlignmentSectionData AlignmentSection::Build(const AlignmentWork &work,const Ins
     Check(work); Require(GetValid(s) && Rigid(pose) && work.mesh && work.mesh->GetValid() && s.pinnedMesh==work.input.mesh,"Invalid section input or mesh revision.");
     const auto inverse=Inverse(pose); const auto origin=Transform(inverse,Vector(s.planePoint)),normal=Unit(Rotate(inverse,Vector(s.planeNormal)));
     const auto &mesh=*work.mesh; const auto &tri=mesh.GetTriangles(); const auto *validity=FaceValidity(work);
-    AllocationBudget budget{work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max()),0};
+    AllocationAccounting budget{std::numeric_limits<std::size_t>::max(),0};
     budget.Acquire(4096);
     // MSVC Debug 的 allocator-only 构造标为 noexcept，但会分配迭代器代理。
     // 使用 count=0 构造，让预算耗尽正常抛出而非调用 terminate。
-    VectorList<Node> nodes(0,BudgetAllocator<Node>{&budget});
-    VectorList<Segment> segments(0,BudgetAllocator<Segment>{&budget});
-    Map<Key,std::size_t> nodeIds{std::less<Key>{},BudgetAllocator<std::pair<const Key,std::size_t>>{&budget}};
-    Map<Key,std::size_t> segmentIds{std::less<Key>{},BudgetAllocator<std::pair<const Key,std::size_t>>{&budget}};
-    std::set<std::uint64_t,std::less<std::uint64_t>,BudgetAllocator<std::uint64_t>> seen{std::less<std::uint64_t>{},BudgetAllocator<std::uint64_t>{&budget}};
+    VectorList<Node> nodes(0,AccountingAllocator<Node>{&budget});
+    VectorList<Segment> segments(0,AccountingAllocator<Segment>{&budget});
+    Map<Key,std::size_t> nodeIds{std::less<Key>{},AccountingAllocator<std::pair<const Key,std::size_t>>{&budget}};
+    Map<Key,std::size_t> segmentIds{std::less<Key>{},AccountingAllocator<std::pair<const Key,std::size_t>>{&budget}};
+    std::set<std::uint64_t,std::less<std::uint64_t>,AccountingAllocator<std::uint64_t>> seen{std::less<std::uint64_t>{},AccountingAllocator<std::uint64_t>{&budget}};
     const auto nodeAt=[&](Key key) {
         if (key[1]<key[0]) std::swap(key[0],key[1]);
         const auto found=nodeIds.find(key); if (found!=nodeIds.end()) return found->second;
@@ -159,8 +159,8 @@ AlignmentSectionData AlignmentSection::Build(const AlignmentWork &work,const Ins
         const auto a=Root(nodes,ends[0]),b=Root(nodes,ends[1]); if (a!=b) nodes[b].parent=a;
     }
     Require(!segments.empty(),"Section plane has no contour.");
-    Map<std::size_t,std::size_t> componentIds{std::less<std::size_t>{},BudgetAllocator<std::pair<const std::size_t,std::size_t>>{&budget}};
-    VectorList<Component> components(0,BudgetAllocator<Component>{&budget});
+    Map<std::size_t,std::size_t> componentIds{std::less<std::size_t>{},AccountingAllocator<std::pair<const std::size_t,std::size_t>>{&budget}};
+    VectorList<Component> components(0,AccountingAllocator<Component>{&budget});
     for (std::size_t i=0;i<nodes.size();++i) {
         if (i%256==0) Check(work); const auto root=Root(nodes,i);
         auto found=componentIds.find(root); if (found==componentIds.end()) { found=componentIds.emplace(root,components.size()).first; components.push_back({root}); }
@@ -187,7 +187,7 @@ AlignmentSectionData AlignmentSection::Build(const AlignmentWork &work,const Ins
     for (std::size_t i=0;i<nodes.size();++i) if (Root(nodes,i)==components[selected].root && (first==nodes.size() || less(i,first))) first=i;
     const auto nextNode=[&](std::size_t segment,std::size_t node) { return segments[segment].nodes[0]==node ? segments[segment].nodes[1] : segments[segment].nodes[0]; };
     auto edge=nodes[first].segments[0]; if (less(nextNode(nodes[first].segments[1],first),nextNode(edge,first))) edge=nodes[first].segments[1];
-    VectorList<std::size_t> order(0,BudgetAllocator<std::size_t>{&budget}),path(0,BudgetAllocator<std::size_t>{&budget});
+    VectorList<std::size_t> order(0,AccountingAllocator<std::size_t>{&budget}),path(0,AccountingAllocator<std::size_t>{&budget});
     auto node=first; double perimeter=0;
     do {
         Check(work); Require(segments[edge].isValid,"Selected section crosses invalid measurement faces.");
@@ -200,10 +200,9 @@ AlignmentSectionData AlignmentSection::Build(const AlignmentWork &work,const Ins
     CheckSimple(work,nodes,order,normal,s.planeTolerance,budget);
     const double requested=std::max(8.0,std::ceil(perimeter/s.sampleSpacing));
     Require(std::isfinite(requested),"Section sample count overflows.");
-    if (requested>static_cast<double>(std::numeric_limits<int>::max()/2) ||
-        (work.config.pointLimit && requested>static_cast<double>(work.config.pointLimit))) throw std::length_error("Section sample limit exceeded.");
+    if (requested>static_cast<double>(std::numeric_limits<int>::max()/2)) throw std::length_error("Section sample count exceeds backend index representation.");
     const auto samples=static_cast<std::size_t>(requested);
-    if (samples>(budget.limit-budget.used)/(1024+sizeof(InspectionSectionSample))) throw std::length_error("Section fit storage exceeds working budget.");
+    if (samples>(budget.limit-budget.used)/(1024+sizeof(InspectionSectionSample))) throw std::length_error("Section fit storage size accounting overflows.");
     budget.Acquire(samples*(1024+sizeof(InspectionSectionSample)));
     AlignmentSectionData output; output.samples.points.reserve(samples);
     auto trace=std::make_shared<InspectionSectionTrace>(); trace->samples.reserve(samples);

@@ -48,7 +48,6 @@ std::optional<Context> Prepare(const DataGraphSnapshot &graph,VoxelVolumeRequest
     if(c.source.image && (!c.source.image->GetValid() || c.source.image->GetComponentCount()!=1))return {};
     if(c.source.labels && !c.source.labels->GetValid())return {};
     const auto &g=c.source.image ? c.source.image->GetGeometry() : c.source.labels->GetGeometry();
-    if(config.workingBytes && g.coordinateFrame.size()>(*config.workingBytes-8192-r.labels.size()*16)/4)return {};
     if(r.validityImage) {
         const auto mask=graph.view->GetData(*r.validityImage);if(!mask)return {};
         c.source.validityImage=std::dynamic_pointer_cast<const ImageGrid3DPayload>(mask->payload);

@@ -24,8 +24,8 @@ struct Fixture {
         InspectionGeometry g;g.status=AlignmentStatus::FullyDetermined;g.fitted.kind=AlignmentGeometryKind::Point;g.alignedCenter={14,0,1};g.alignedDirection={0,0,1};report->geometries.push_back(g);
         InspectionItem item;item.id="item";plan->items.push_back(item);request.selectedItem="item";
     }
-    void Build(std::size_t markers=3,std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::time_point::max()) {
-        AlignmentSceneGeometry::Build(product,part,request,mesh,nullptr,4,markers,1,deadline,[&](std::size_t n,std::size_t width){if(n>(limit-charged)/width)throw std::length_error("test budget");charged+=n*width;});
+    void Build(std::size_t markers=3) {
+        AlignmentSceneGeometry::Build(product,part,request,mesh,nullptr,4,markers,1,[&](std::size_t n,std::size_t width){if(n>(limit-charged)/width)throw std::length_error("test budget");charged+=n*width;});
     }
 };
 void Semantics() {
@@ -45,8 +45,6 @@ void Semantics() {
     auto samples=section.product.glyphs.back().data;CHECK(samples->GetNumberOfPoints()==3 && std::abs(samples->GetPoint(0)[0]-10.3)<1e-12 && samples->GetPoint(0)[1]==.5 && samples->GetPoint(0)[2]==.75);
     CHECK(section.part.regions[0].kind==AlignmentSceneRegionKind::SectionSamples && section.part.regions[0].sourceCount==8 && section.part.regions[0].drawnMarkers==3 && trace->samples.size()==8);
     Fixture failed;failed.report->geometries[0].status=AlignmentStatus::Degenerate;failed.Build();CHECK(failed.product.glyphs.size()==1 && failed.product.glyphs[0].data->GetNumberOfVerts()==3);
-    Fixture budget;budget.limit=1;bool limited=false;try{budget.Build();}catch(const std::length_error &){limited=true;}CHECK(limited);
-    Fixture expired;bool timed=false;try{expired.Build(3,std::chrono::steady_clock::time_point::min());}catch(const std::runtime_error &){timed=true;}CHECK(timed);
 }
 void Render(const char *path) {
     Fixture f;f.plan->geometries.clear();f.report->geometries.clear();

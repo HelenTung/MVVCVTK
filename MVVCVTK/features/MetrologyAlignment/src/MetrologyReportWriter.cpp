@@ -33,10 +33,10 @@ public:
   void Put(std::string_view text) {
     Check();
     const auto limit =
-        options.maxBytes.value_or(std::numeric_limits<std::size_t>::max());
+        std::numeric_limits<std::size_t>::max();
     if (text.size() > limit - confirmed - pending)
-      throw Failure{Status::BudgetExceeded,
-                    "Report output exceeds byte budget."};
+      throw Failure{Status::ResourceExhausted,
+                    "Report output byte count overflows."};
     while (!text.empty()) {
       Check();
       const auto count = std::min(text.size(), buffer.size() - pending);
@@ -191,11 +191,12 @@ const char *Name(AlignmentStatus v) {
   return Enum(v, {"FullyDetermined", "Underconstrained", "Degenerate",
                   "Conflicting", "Ambiguous", "NotConverged", "Cancelled",
                   "DeadlineExceeded", "Stale", "InvalidInput", "Unsupported",
-                  "BudgetExceeded", "Unavailable", "InternalError", "IoError"});
+                  "BudgetExceeded", "Unavailable", "InternalError", "IoError", "ResourceExhausted"});
 }
 const char *Name(AlignmentDeviationMetric v) {
   return Enum(v, {"UnsignedDistance", "NominalNormalProjection"});
 }
+const char *Name(AlignmentComputeBackend v) { return Enum(v, {"Cpu", "Cuda"}); }
 const char *Name(AlignmentDeviationState v) {
   return Enum(v, {"NotSelected", "Valid", "InvalidSource", "InvalidTarget",
                   "TooFar", "NormalMismatch", "NormalUnavailable"});
@@ -915,6 +916,7 @@ template <> struct Codec<InspectionSnapshot> {
 template <> struct Codec<AlignmentDeviationRequest> {
   static void Write(Json &j, const AlignmentDeviationRequest &v) {
     j.Object();
+    j.Field("computeBackend", v.computeBackend);
     j.Field("alignmentResult", v.alignmentResult);
     j.Field("metric", v.metric);
     j.Field("sourceTriangles", v.sourceTriangles);
@@ -1753,7 +1755,7 @@ WriteMetrologyReport(const MetrologyReport &report, std::ostream &output,
     result.status = Status::IoError;
     result.message = e.what();
   } catch (const std::bad_alloc &) {
-    result.status = Status::BudgetExceeded;
+    result.status = Status::ResourceExhausted;
   } catch (const std::exception &e) {
     result.status = Status::InternalError;
     result.message = e.what();

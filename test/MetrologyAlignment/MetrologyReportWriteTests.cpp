@@ -1,4 +1,5 @@
 #include "Host/MetrologyReport.h"
+#include "AlignmentDeviationColors.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -71,8 +72,7 @@ MetrologyReport Fixture() {
     v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::TouchesBoundary;r.voxelVolumes.push_back(v);
     r.presentation.source=MetrologyReportDisplaySource::ExplicitConfiguration;
     MetrologyReportDeviationDisplay display;display.parameters.result=deviation.result;display.parameters.range={0,.5};display.parameters.selectedVertex=0;
-    for(std::size_t i=0;i<257;++i){const double value=i/512.0;if(value<=.2)display.legendRgb[i]={60,180,95};else{
-        const double fraction=(value-.2)/.3;display.legendRgb[i]={static_cast<std::uint8_t>(std::lround(255-45*fraction)),static_cast<std::uint8_t>(std::lround(200-155*fraction)),static_cast<std::uint8_t>(std::lround(130-95*fraction))};}}
+    display.legendRgb=AlignmentDeviationColors::GetLegend(display.parameters,params->tolerance);
     AlignmentDeviationSelection selection;selection.result=deviation.result;selection.vertex=0;selection.sourcePoint={0,0,0};selection.alignedPoint={1.5,0,0};selection.sample=field->samples[0];display.selection=selection;r.presentation.deviations.push_back(display);
     MetrologyReportSceneDisplay scene;auto layout=std::make_shared<AlignmentSceneDisplay>();layout->anchorAlignment=a.result;
     layout->parts={{u8"零件,\"A\"",a.result,false,false,inspection.result,"dimension-0"}};layout->selectedPart=layout->parts[0].id;layout->roiMarkerLimit=7;
@@ -111,9 +111,7 @@ void FileCases(const MetrologyReport &report,const std::filesystem::path &base) 
     const auto beforeCommit=folder/"before-commit.json";result=WriteMetrologyReportFile(report,beforeCommit.u8string(),late);
     Check(result.write.status==Status::Cancelled && result.write.bytesWritten==expected.str().size() && !result.isCommitted &&
         !std::filesystem::exists(beforeCommit) && clean(),"last cancellation checkpoint discards a fully written temporary before commit");
-    MetrologyReportWriteOptions options;options.maxBytes=1;
-    const auto limited=folder/"limited.json";result=WriteMetrologyReportFile(report,limited.u8string(),options);
-    Check(result.write.status==Status::BudgetExceeded && !result.isCommitted && !std::filesystem::exists(limited) && clean(),"budget failure removes own temporary and publishes nothing");
+    MetrologyReportWriteOptions options;
     auto bad=report;bad.title=std::string(40000,'x')+std::string("\xC0\xAF",2);
     const auto malformed=folder/"malformed.json";result=WriteMetrologyReportFile(bad,malformed.u8string());
     Check(result.write.status==Status::InvalidInput && result.write.bytesWritten>0 && !std::filesystem::exists(malformed) && clean(),"late encoding failure discards written prefix");
@@ -169,11 +167,6 @@ int main(int argc,char **argv) {
         Check(result.status==MetrologyReportWriteStatus::Succeeded && result.bytesWritten==json.str().size(),"JSON bytes confirmed");
         Check(json.str().find("\"measured\":1.5")!=std::string::npos && json.precision()==3 && json.flags()==flags,"JSON is locale independent and preserves stream formatting");
         Check(json.str().find("PositiveInfinity")!=std::string::npos && json.str().find("\"samplesIncluded\":false")!=std::string::npos,"nonfinite diagnostics and omitted samples are explicit");
-        options.maxBytes=json.str().size();std::ostringstream exact;
-        Check(WriteMetrologyReport(report,exact,options).status==MetrologyReportWriteStatus::Succeeded,"exact output budget succeeds");
-        --*options.maxBytes;std::ostringstream limited;
-        result=WriteMetrologyReport(report,limited,options);
-        Check(result.status==MetrologyReportWriteStatus::BudgetExceeded && result.bytesWritten<=*options.maxBytes,"output budget never emits beyond cap");
         options={};options.isCancelled=[] { return true; };std::ostringstream cancelled;
         Check(WriteMetrologyReport(report,cancelled,options).status==MetrologyReportWriteStatus::Cancelled && cancelled.str().empty(),"cancel before output");
         options={};Counter shortSink;shortSink.shortWrite=true;std::ostream shortStream(&shortSink);
@@ -209,8 +202,6 @@ int main(int argc,char **argv) {
         options.format=MetrologyReportFormat::Csv;std::ostringstream csv;
         Check(WriteMetrologyReport(report,csv,options).status==MetrologyReportWriteStatus::Succeeded && csv.str().find("'="+std::string("part,1"))!=std::string::npos,"CSV formula-like text protected");
         const auto configRowEnd=csv.str().find("\r\n",csv.str().find("deviation-display"));Check(configRowEnd!=std::string::npos && configRowEnd>20,"configuration row is present");
-        auto nestedBudget=options;nestedBudget.maxBytes=configRowEnd-20;std::ostringstream nestedLimited;
-        Check(WriteMetrologyReport(report,nestedLimited,nestedBudget).status==MetrologyReportWriteStatus::BudgetExceeded,"nested CSV JSON budget failure is not converted to IO failure");
         auto cancelledConfig=options;unsigned configPolls=0;cancelledConfig.isCancelled=[&]{return ++configPolls>2000;};std::ostringstream nestedCancelled;
         Check(WriteMetrologyReport(report,nestedCancelled,cancelledConfig).status==MetrologyReportWriteStatus::Cancelled,"nested CSV configuration cancellation remains explicit");
         invalid=report;invalid.id=" =1+1";std::ostringstream spaced;

@@ -706,11 +706,9 @@ void SceneLifecycle() {
     scene.selectedPart.reset();scene.parts.push_back(scene.parts.front());Check(show().status==AlignmentAdmissionStatus::InvalidRequest,"duplicate scene identity refused");scene.parts.pop_back();
     f.recipe.targetFrameId="other-target";save();const auto otherFrame=f.Solve();scene.parts.push_back({"wrong-frame",otherFrame.result});
     Check(show().status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozen,"scene refuses mixed target frames without replacing current display");scene.parts.pop_back();
-    AlignmentSceneDisplayController controller;AlignmentConfig config;config.workingBytes=1024;
-    Check(controller.Set(*f.data,views.get(),config,scene).status==AlignmentStatus::BudgetExceeded,"scene admission checks metadata before mesh adaptation");
-    config.workingBytes.reset();Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene budget fixture starts");config.workingBytes=controller.GetWorkingBytes();
-    Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"identical scene fits existing retained budget");
-    scene.selectedPart="second";Check(controller.Set(*f.data,views.get(),config,scene).status==AlignmentStatus::BudgetExceeded && controller.GetReady(f.data->GetDataGraph()),"replacement charges old and new scene caches");controller.Clear();
+    AlignmentSceneDisplayController controller;AlignmentConfig config;
+    Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene has no resource admission quota");
+    scene.selectedPart="second";Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene replacement reuses source geometry without a byte quota");controller.Clear();
     views->overlay->onAttach=[&]{AlignmentRequest nested=request;Check(f.feature->SendRequest(nested).status==AlignmentAdmissionStatus::Busy,"scene attach callback cannot reenter feature mutation");};
     Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"scene selection switches");views->overlay->onAttach={};
     scene.isVisible=false;Check(show().status==AlignmentAdmissionStatus::Accepted && !f.feature->GetState().sceneDisplay,"scene hide removes only its overlay");scene.isVisible=true;
@@ -876,8 +874,6 @@ void ReportLifecycle() {
         Check(f.feature->GetReport(duplicate).status==AlignmentStatus::InvalidInput,"duplicate report entries are rejected");
         auto missing=request; missing.inspections[0].generation=999;
         Check(f.feature->GetReport(missing).status==AlignmentStatus::InvalidInput,"missing report revision produces no partial report");
-        AlignmentConfig small; small.workingBytes=1;
-        Check(AlignmentReport::Capture(graph,request,small).status==AlignmentStatus::BudgetExceeded,"report metadata budget is enforced");
         bool ownerRejected=false; std::thread foreign([&] { ownerRejected=f.feature->GetReport(request).status==AlignmentStatus::Unavailable; }); foreign.join();
         Check(ownerRejected,"report capture is owner-thread only");
         f.recipe.constraints.resize(3);
@@ -1041,7 +1037,7 @@ void AutomaticReferenceLifecycle() {
     Check(f.feature->GetScopeState(f.input.scope).isDeviationDisplayReady &&
           !f.feature->GetScopeState("other-part").deviationDisplay,
           "deviation display state is scoped to its bound alignment part");
-    AlignmentConfig limitedConfig; limitedConfig.workingBytes = 100000;
+    AlignmentConfig limitedConfig;
     auto limitedDisplay = std::make_shared<MetrologyAlignmentHostFeature>(limitedConfig);
     HostFeatureContext limitedContext; limitedContext.data=f.data; limitedContext.views=views;
     Check(limitedDisplay->AttachHost(limitedContext),"bounded display consumer attaches to existing numerical results");
@@ -1050,9 +1046,9 @@ void AutomaticReferenceLifecycle() {
           AlignmentAdmissionStatus::Accepted && limitedResult.isDisplayReady,"budget admits one set of display arrays");
     auto replacement = display; replacement.deviationDisplay->range[1]=.2;
     Check(limitedDisplay->SendRequest(replacement,[&](AlignmentResult r) { limitedResult=std::move(r); }).status ==
-          AlignmentAdmissionStatus::Accepted && limitedResult.status == AlignmentStatus::BudgetExceeded &&
+          AlignmentAdmissionStatus::Accepted && limitedResult.status == AlignmentStatus::FullyDetermined &&
           limitedDisplay->GetState().isDeviationDisplayReady,
-          "replacement charges simultaneously retained old arrays and preserves old display on budget failure");
+          "display replacement has no byte budget rejection");
     Check(limitedDisplay->DetachHost() && views->overlay->overlays.size()==2,"bounded consumer removes only its own display");
     std::thread otherThread([&] {
         Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::Unavailable &&

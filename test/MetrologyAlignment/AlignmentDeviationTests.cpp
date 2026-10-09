@@ -1,15 +1,17 @@
 #include "AlignmentDeviation.h"
+#include <opencv2/core.hpp>
 #include <cmath>
 #include <iostream>
 #include <limits>
 
 namespace {
 int failures = 0;
+AlignmentComputeBackend backend=AlignmentComputeBackend::Cpu;
 constexpr double epsilon = 1e-9; // 解析双精度计算容差，不代表 CT 精度。
 void Check(bool value, const char *message) { if (!value) { ++failures; std::cerr << "FAILED: " << message << '\n'; } }
 AlignmentWork Work() {
     AlignmentWork work;
-    work.deadline = std::chrono::steady_clock::time_point::max();
+
     work.cancelled = std::make_shared<std::atomic<bool>>(false);
     work.mesh = std::make_shared<const SurfaceMeshPayload>(
         std::vector<double>{1,1,2,2,1,2,1,2,2},std::vector<std::uint64_t>{0,1,2});
@@ -19,6 +21,7 @@ AlignmentWork Work() {
 }
 AlignmentDeviationRequest Request() {
     AlignmentDeviationRequest request;
+    request.computeBackend=backend;
     request.alignmentResult.entityId.bytes[0] = 1; request.alignmentResult.generation = 1;
     request.reverseCoverage = false; request.maxDistance = 5;
     return request;
@@ -85,14 +88,7 @@ void CoverageAndQuality() {
 }
 void ValidationAndPeakBudget() {
     auto work = Work(); auto request = Request();
-    work.config.workingBytes = 4096 + 256;
-    Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::FullyDetermined,
-          "small budget covers one field plus query peak");
-    request.reverseCoverage = true;
-    const auto limited = AlignmentDeviation::Build(work,request,alignmentIdentity);
-    Check(limited.status == AlignmentStatus::BudgetExceeded && !limited.forward && !limited.reverse,
-          "reverse field charges retained forward allocation and drops incomplete result");
-    work.config.workingBytes.reset(); request = Request();
+    request = Request();
     request.metric = static_cast<AlignmentDeviationMetric>(9);
     Check(!AlignmentDeviation::GetRequestValid(request), "unknown deviation metric rejected");
     request = Request(); request.maxDistance = std::numeric_limits<double>::infinity();
@@ -103,6 +99,11 @@ void ValidationAndPeakBudget() {
     Check(!AlignmentDeviation::GetRequestValid(request), "negative unsigned tolerance rejected");
     request = Request(); request.minNormalCosine = std::numeric_limits<double>::quiet_NaN();
     Check(!AlignmentDeviation::GetRequestValid(request), "nonfinite normal gate rejected");
+    request=Request();request.computeBackend=static_cast<AlignmentComputeBackend>(9);
+    Check(!AlignmentDeviation::GetRequestValid(request),"unknown compute backend rejected");
+    request=Request();auto overflowPose=alignmentIdentity;overflowPose[3]=1e200;
+    const auto overflow=AlignmentDeviation::Build(work,request,overflowPose);
+    Check(overflow.status==AlignmentStatus::InvalidInput && !overflow.forward && !overflow.reverse,"distance overflow never publishes a partial CPU or CUDA field");
     request = Request(); request.maxDistance = 2;
     Check(AlignmentDeviation::Build(work,request,alignmentIdentity).forward->statistics.counts[1] == 3,
           "distance exactly at gate remains evaluable");
@@ -122,13 +123,7 @@ void AreaWeightAndBudget() {
           result.forward->statistics.absoluteP95 == 3,
           "area weights prevent equal vertex counts from hiding larger high-deviation patch");
     Check(work.mesh->GetVertices() == original, "evaluation does not transform underlying measurement mesh");
-    work.config.workingBytes = 1;
-    Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::BudgetExceeded,
-          "field allocation obeys working budget");
-    work.config.workingBytes.reset(); work.config.pointLimit = 2;
-    Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::BudgetExceeded,
-          "dense evaluation never substitutes fewer samples to meet limit");
-    work.config.pointLimit = 0; request.sourceTriangles = {0,0};
+    request.sourceTriangles = {0,0};
     Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::InvalidInput,
           "duplicate selected triangles cannot double-count area");
     request.sourceTriangles = {2};
@@ -138,13 +133,51 @@ void AreaWeightAndBudget() {
     result = AlignmentDeviation::Build(work,request,alignmentIdentity);
     Check(result.status == AlignmentStatus::Cancelled && !result.forward && !result.reverse,
           "cancelled evaluation returns no partial field");
-    work.cancelled->store(false); work.deadline = std::chrono::steady_clock::now();
-    Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::DeadlineExceeded,
-          "expired evaluation deadline is explicit");
+    work.cancelled->store(false);
+}
+void BackendEquivalence() {
+    auto work=Work();auto request=Request();request.computeBackend=AlignmentComputeBackend::Cpu;
+    std::vector<double> vertices;std::vector<std::uint64_t> triangles;
+    constexpr std::size_t side=101;
+    for(std::size_t y=0;y<side;++y)for(std::size_t x=0;x<side;++x)
+        vertices.insert(vertices.end(),{double(x)*.1,double(y)*.1,.01*std::sin(double(x)*.1)*std::cos(double(y)*.1)});
+    for(std::size_t y=0;y+1<side;++y)for(std::size_t x=0;x+1<side;++x) {
+        const auto i=y*side+x;triangles.insert(triangles.end(),{i,i+1,i+side,i+1,i+side+1,i+side});
+    }
+    work.referenceMesh=std::make_shared<const SurfaceMeshPayload>(vertices,triangles);
+    for(std::size_t i=2;i<vertices.size();i+=3)vertices[i]+=.2;
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),triangles);
+    const int previousThreads=cv::getNumThreads();cv::setNumThreads(1);
+    const auto serial=AlignmentDeviation::Build(work,request,alignmentIdentity);
+    cv::setNumThreads(4);const auto parallel=AlignmentDeviation::Build(work,request,alignmentIdentity);
+    cv::setNumThreads(previousThreads);
+    Check(serial.forward && parallel.forward,"serial and parallel fields exist");
+    if(!serial.forward || !parallel.forward)return;
+    auto candidate=parallel;
+    if(backend==AlignmentComputeBackend::Cuda) {
+        request.computeBackend=backend;candidate=AlignmentDeviation::Build(work,request,alignmentIdentity);
+        Check(candidate.status==AlignmentStatus::FullyDetermined && candidate.forward,"CUDA multi-batch field completes");
+        if(!candidate.forward)return;
+    }
+    for(std::size_t i=0;i<serial.forward->samples.size();++i) {
+        const auto &a=serial.forward->samples[i],&b=parallel.forward->samples[i],&g=candidate.forward->samples[i];
+        Check(a.value==b.value && a.closestTriangle==b.closestTriangle && a.state==b.state,"CPU scheduling preserves exact samples");
+        Check(std::abs(a.distance-g.distance)<epsilon && std::abs(a.value-g.value)<epsilon &&
+              a.closestTriangle==g.closestTriangle && a.state==g.state && a.area==g.area,"CUDA preserves distance, tie choice, state and source area");
+    }
+    Check(serial.forward->statistics.mean==parallel.forward->statistics.mean &&
+          std::abs(serial.forward->statistics.mean-candidate.forward->statistics.mean)<epsilon,"ordered reduction preserves field statistics");
 }
 } // namespace
-int main() {
-    try { Distances(); CoverageAndQuality(); AreaWeightAndBudget(); ValidationAndPeakBudget(); }
+int main(int argc,char **argv) {
+    if(argc>1 && std::string(argv[1])=="--cuda-unavailable") {
+        auto request=Request();request.computeBackend=AlignmentComputeBackend::Cuda;
+        const auto result=AlignmentDeviation::Build(Work(),request,alignmentIdentity);
+        Check(result.status==AlignmentStatus::Unavailable && !result.forward && !result.reverse,"CPU-only build rejects explicit CUDA without falling back");
+        return failures ? 1 : 0;
+    }
+    if(argc>1 && std::string(argv[1])=="--cuda")backend=AlignmentComputeBackend::Cuda;
+    try { Distances(); CoverageAndQuality(); AreaWeightAndBudget(); ValidationAndPeakBudget(); BackendEquivalence(); }
     catch (const std::exception &e) { ++failures; std::cerr << e.what() << '\n'; }
     return failures ? 1 : 0;
 }

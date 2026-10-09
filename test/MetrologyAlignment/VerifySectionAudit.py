@@ -55,7 +55,7 @@ def contour(points, triangles, origin, normal):
     return np.array([locations[k] for k in order])
 
 
-def verify(path):
+def verify(path,compute_backend="Cpu"):
     data = json.loads(path.read_text(encoding="utf-8"))
     require(data["schema"] == "ct-timepoint-audit-1" and data["pipelineChecksPassed"], "Public pipeline failed or schema is unknown")
     scans = {scan["id"]: scan for scan in data["scans"]}
@@ -206,6 +206,7 @@ def verify(path):
         result["voxelVolumes"].append({"id": volume["id"], "selected": selected, "total": total, "observedVolumeMm3": selected*cell,
                                        "touchesRegionBoundary": touches, "scope": "stored-threshold full-cell volume within ROI"})
     frozen = json.loads((folder / "inspection-report.json").read_text(encoding="utf-8"))
+    require(all(v["parameters"]["computeBackend"] == compute_backend for v in frozen["deviations"]), "Audit did not execute the requested deviation backend")
     reported = {v["result"]:v for v in frozen["voxelVolumes"]}
     require(set(reported) == {v["result"] for v in volumes}, "Formal report voxel result coverage mismatch")
     for volume in volumes:
@@ -253,16 +254,18 @@ if __name__ == "__main__":
     parser.add_argument("--audit")
     parser.add_argument("--manifest")
     parser.add_argument("--output")
+    parser.add_argument("--cuda-deviation",action="store_true")
     args = parser.parse_args()
     if args.audit:
         require(args.manifest and args.output and not args.observations, "Audit needs manifest and output")
         command = [args.audit, args.manifest, args.output, "--controls-only", "--new-run"]
+        if args.cuda_deviation: command.append("--cuda-deviation")
         run = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", check=False)
         print(run.stdout, end="")
         require(run.returncode == 0, f"Audit exited {run.returncode}")
         reports = [line[len("OBSERVATIONS "):] for line in run.stdout.splitlines() if line.startswith("OBSERVATIONS ")]
         require(len(reports) == 1, "Audit did not identify one observation report")
-        verify(Path(reports[0]))
+        verify(Path(reports[0]),"Cuda" if args.cuda_deviation else "Cpu")
     else:
         require(args.observations is not None, "Observation file required")
         verify(Path(args.observations))

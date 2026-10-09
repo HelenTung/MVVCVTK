@@ -70,8 +70,7 @@ bool GetSourceRelated(const DataGraphSnapshot &graph, const DataRevisionRef &mes
 class MetrologyAlignmentHostFeature::Impl final {
   public:
     explicit Impl(AlignmentConfig config) : m_config(std::move(config)) {
-        if (WorkLimit(m_config.workingBytes) < 1024 || WorkLimit(m_config.deadlineMs) == 0 ||
-            (WorkLimit(m_config.deadlineMs).GetValue() && WorkLimit(m_config.deadlineMs) > 3600000) || !std::isfinite(m_config.axisLength) ||
+        if (!std::isfinite(m_config.axisLength) ||
             m_config.axisLength <= 0)
             throw std::invalid_argument("Invalid alignment resource configuration.");
         m_state.isOverlayVisible = m_config.isOverlayVisible;
@@ -345,7 +344,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                     if(!context)return {};
                     task=std::make_shared<Task>();task->id=id;task->work=std::move(context->work);task->expectations=context->expectations;
                     task->volumeContext=std::move(context);task->work.cancelled=std::make_shared<std::atomic<bool>>(false);
-                    task->work.deadline=WorkLimit(m_config.deadlineMs).GetDeadline();task->callback=std::move(callback);
+                    task->callback=std::move(callback);
                 } else if (request.action == AlignmentAction::Inspect) {
                     if (!request.inspection || request.input || request.recipe || request.archive || request.isVisible) return {};
                     auto context=AlignmentInspectionData::Prepare(m_data->GetDataGraph(),std::move(*request.inspection),m_config);
@@ -353,7 +352,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                     task=std::make_shared<Task>(); task->id=id; task->work=std::move(context->work);
                     task->expectations=context->expectations; task->inspectionContext=std::move(context);
                     task->work.cancelled=std::make_shared<std::atomic<bool>>(false);
-                    task->work.deadline=WorkLimit(m_config.deadlineMs).GetDeadline(); task->callback=std::move(callback);
+                     task->callback=std::move(callback);
                 } else if (request.action == AlignmentAction::EvaluateSurface) {
                     if (!request.deviation || request.input || request.recipe || request.archive || request.isVisible)
                         return {};
@@ -364,7 +363,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                     task->expectations = context->expectations;
                     task->deviationContext = std::move(context);
                     task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
-                    task->work.deadline = WorkLimit(m_config.deadlineMs).GetDeadline();
+
                     task->callback = std::move(callback);
                 } else if (request.action == AlignmentAction::ImportReference) {
                     if (!request.reference || request.input || request.recipe || request.archive ||
@@ -377,7 +376,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                         std::filesystem::u8path(task->referenceRequest->filePath)).lexically_normal().u8string();
                     task->work.config = m_config;
                     task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
-                    task->work.deadline = WorkLimit(m_config.deadlineMs).GetDeadline();
+
                     task->callback = std::move(callback);
                 } else {
                     if (!request.input || request.recipe || request.archive || request.isVisible ||
@@ -826,8 +825,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         }
         task->work.poses = request.initialPoses;
         task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
-        task->work.deadline =
-            WorkLimit(m_config.deadlineMs).GetDeadline();
+
         task->expectations = AlignmentData::BuildExpectations(
             graph, *request.input, request.recipeRef, recipe->recipe.nominalData);
         task->active = AlignmentData::GetBinding(graph, request.input->scope);

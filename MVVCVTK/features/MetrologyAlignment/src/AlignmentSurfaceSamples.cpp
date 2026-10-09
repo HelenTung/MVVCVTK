@@ -10,7 +10,7 @@ using namespace AlignmentMemory;
 void Require(bool value, const char *message) { if (!value) throw std::invalid_argument(message); }
 void CheckWork(const AlignmentWork &work) {
     if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
-        throw std::runtime_error("Surface sampling cancelled or deadline reached.");
+        throw std::runtime_error("Surface sampling cancelled.");
 }
 std::int8_t Direction(const Vec &n) {
     if (!Finite(n) || cv::norm(n) <= 0) return 6;
@@ -45,13 +45,13 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
             "Surface selection belongs to another mesh revision.");
     const auto count = region && !region->vertexIds.empty() ? region->vertexIds.size() : v.size() / 3;
-    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto limit = std::numeric_limits<std::size_t>::max();
     const auto initialCapacity = region && region->targetBounds ? 0 : count;
     const auto *normals = needsDirections ? Attribute(*work.mesh, "measurement.normal", 3) : nullptr;
     const bool needsFallback = needsDirections && !normals;
     const auto bytes = sizeof(AlignmentSurfaceSample) + (needsFallback ? 1U : 0U);
     if (indexBytes > limit || initialCapacity > (limit - indexBytes) / bytes)
-        throw std::length_error("Surface selection exceeds working budget.");
+        throw std::length_error("Surface selection size accounting overflows.");
     AlignmentSurfaceSamples output;
     auto &samples = output.points;
     samples.reserve(initialCapacity);
@@ -70,7 +70,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         if (samples.size() == samples.capacity()) {
             const auto capacity = samples.capacity() == 0 ? std::size_t{1} : samples.capacity() + std::min(samples.capacity(), count - samples.capacity());
             if (capacity > (limit - indexBytes) / bytes - samples.capacity())
-                throw std::length_error("Surface region growth exceeds working budget.");
+                throw std::length_error("Surface region growth size accounting overflows.");
             samples.reserve(capacity);
         }
         samples.push_back({static_cast<std::uint64_t>(id), 0});
@@ -120,13 +120,13 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
     const auto *interfaces = Attribute(*work.mesh, "surface.interface-index", 1);
     const auto *overrides = Attribute(*work.mesh, "surface.override-index", 1);
     Require(normals || source.directions.size() == source.points.size(), "Surface direction groups are missing.");
-    const auto limit = work.config.workingBytes.value_or(std::numeric_limits<std::size_t>::max());
+    const auto limit = std::numeric_limits<std::size_t>::max();
     if (indexBytes > limit || source.GetWorkingBytes() > limit - indexBytes)
-        throw std::length_error("Surface preprocessing exceeds working budget.");
-    AllocationBudget budget{limit - indexBytes - source.GetWorkingBytes(), 0};
+        throw std::length_error("Surface preprocessing size accounting overflows.");
+    AllocationAccounting budget{limit - indexBytes - source.GetWorkingBytes(), 0};
     using Entry = std::pair<const Cell, std::size_t>;
-    std::unordered_map<Cell, std::size_t, CellHash, std::equal_to<Cell>, BudgetAllocator<Entry>>
-        groups(0, CellHash{}, std::equal_to<Cell>{}, BudgetAllocator<Entry>{&budget});
+    std::unordered_map<Cell, std::size_t, CellHash, std::equal_to<Cell>, AccountingAllocator<Entry>>
+        groups(0, CellHash{}, std::equal_to<Cell>{}, AccountingAllocator<Entry>{&budget});
     std::vector<AlignmentSurfaceSample> result;
     const Vec origin(v[0], v[1], v[2]);
     const auto regionId = [](const MeshAttribute *attribute, std::uint64_t id) -> std::int64_t {
@@ -152,9 +152,6 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
         key[5] = regionId(interfaces, id); key[6] = regionId(overrides, id);
         const auto found = groups.find(key);
         if (found == groups.end()) {
-            if ((work.config.pointLimit && result.size() >= work.config.pointLimit) ||
-                (work.config.constraintLimit && result.size() >= work.config.constraintLimit))
-                throw std::length_error("Surface voxel groups exceed working limits.");
             if (result.size() == result.capacity()) {
                 const auto oldCapacity = result.capacity();
                 const auto capacity = oldCapacity == 0 ? std::size_t{1}
