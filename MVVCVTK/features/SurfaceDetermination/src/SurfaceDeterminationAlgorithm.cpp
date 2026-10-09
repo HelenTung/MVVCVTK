@@ -2,6 +2,7 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
 #include "SurfaceSeedBuilder.h"
+#include "SurfaceCudaCompute.h"
 #include <chrono>
 #include "Data/DataPayloads.h"
 
@@ -22,6 +23,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <new>
 #include <optional>
@@ -1169,6 +1171,8 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             }
         }
         const TopologyMetrics topology = GetTopologyMetrics(localPoints, localTriangles, cancelled);
+        // 保留已经生成的局部编号，避免输出阶段再次建立同一 remap。
+        component.triangles=std::move(localTriangles);
         component.isClosed = topology.boundaryEdgeCount == 0
             && topology.nonManifoldEdgeCount == 0;
         if (component.isClosed && voxelVolume > geometryEpsilon) {
@@ -1257,29 +1261,19 @@ std::vector<std::size_t> GetSelectedComponents(const std::vector<MeshComponent> 
     return eligible;
 }
 
-void GetLocalMesh(const MeshComponent &component, const std::vector<Point3> &sourcePoints,
+void GetLocalMesh(MeshComponent &component, const std::vector<Point3> &sourcePoints,
                   std::vector<Point3> &points, std::vector<Triangle> &triangles,
                   const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
-    std::unordered_map<std::uint32_t, std::uint32_t> remap;
-    remap.reserve(component.sourcePointIds.size());
     points.reserve(component.sourcePointIds.size());
     for (std::size_t index = 0;
         index < component.sourcePointIds.size(); ++index) {
         CheckCancellation(cancellationBatch, cancelled);
         const std::uint32_t sourceId = component.sourcePointIds[index];
-        remap.emplace(sourceId, static_cast<std::uint32_t>(index));
         points.push_back(sourcePoints[sourceId]);
     }
-    triangles = component.triangles;
-    for (Triangle& triangle : triangles) {
-        CheckCancellation(cancellationBatch, cancelled);
-        for (std::uint32_t& pointId : triangle.vertices) {
-            CheckCancellation(cancellationBatch, cancelled);
-            pointId = remap.at(pointId);
-        }
-    }
+    triangles = std::move(component.triangles);
 }
 
 std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
@@ -1356,7 +1350,8 @@ float GetFiniteFloat(const double value)
 
 bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, const Point3 &initialPoint,
                       const Point3 &initialNormal, SurfacePointRecord &record,
-                      SurfacePointDiagnostic *diagnostic = nullptr)
+                      SurfacePointDiagnostic *diagnostic = nullptr,
+                      const SurfaceCudaSample* deviceSample = nullptr)
 {
     record.seedPositionModel = record.positionModel = initialPoint;
     auto normal = initialNormal;
@@ -1369,7 +1364,12 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
         if (std::isfinite(distance) && distance <= tolerance)
             record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
     }
-    if (GetGradient(volume, initialPoint, gradient, magnitude) && Normalize(gradient))
+    bool hasGradient=false;
+    if(deviceSample) {
+        std::copy_n(deviceSample->gradient,3,gradient.begin());
+        magnitude=deviceSample->magnitude; hasGradient=deviceSample->gradientValid!=0;
+    } else hasGradient=GetGradient(volume,initialPoint,gradient,magnitude);
+    if (hasGradient && Normalize(gradient))
         normal = Scale(gradient, -1);
     if (!Normalize(normal)) {
         record.flags |= SurfacePointFlags::FitRejected | SurfacePointFlags::SeedRetained;
@@ -1377,11 +1377,13 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
     }
     record.seedNormalModel = normal;
     // 原始分支的饱和节点梯度、位置和支持规则；不再保留局部剖面拟合路径。
-    GetGradient(volume, initialPoint, gradient, magnitude);
+    // 不可变输入下首次采样已给出相同 magnitude，无需重复 6 次插值。
     record.normalModel = {GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]), GetFiniteFloat(normal[2])};
     record.localThreshold = GetFiniteFloat(params.initialIsoValue);
     record.gradientMagnitude = GetFiniteFloat(magnitude);
-    const auto sample = GetScalarAtModel(volume, initialPoint);
+    const auto sample = deviceSample
+        ? ScalarSample{deviceSample->support==1?SampleStatus::Valid:SampleStatus::InvalidSupport,0}
+        : GetScalarAtModel(volume, initialPoint);
     record.validSupportRatio = sample.status == SampleStatus::Valid ? 1.0F : 0.0F;
     if (sample.status != SampleStatus::Valid) record.flags |= SurfacePointFlags::InvalidSupport;
     if (diagnostic) {
@@ -1495,19 +1497,9 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
                      const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
-    std::vector<Point3> refinedPoints;
-    refinedPoints.reserve(records.size());
-    for (const SurfacePointRecord& record : records) {
-        CheckCancellation(cancellationBatch, cancelled);
-        refinedPoints.push_back(record.positionModel);
-    }
+    // 当前材料流程保留 seed 位置；直接复用同一几何，省去整组件副本。
+    const auto& refinedPoints=originalPoints;
     SetTriangleFlipFlags(originalPoints, refinedPoints, triangles, records, cancelled);
-    refinedPoints.clear();
-    refinedPoints.reserve(records.size());
-    for (const SurfacePointRecord& record : records) {
-        CheckCancellation(cancellationBatch, cancelled);
-        refinedPoints.push_back(record.positionModel);
-    }
     const TopologyMetrics topology = GetTopologyMetrics(refinedPoints, triangles, cancelled);
 
     std::uint64_t acceptedCount = 0;
@@ -1766,7 +1758,35 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                      .1 + .8 * (pairIndex + .25) / pairCount);
         auto components =
             BuildComponents(meshPoints, meshTriangles, volume.geometry.voxelVolume, getCancelled);
+        [[maybe_unused]] const auto releasedTriangleBytes=meshTriangles.capacity()*sizeof(Triangle);
+        std::vector<Triangle>().swap(meshTriangles);
         const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled);
+        // 数量已确定后一次预留最终产物，避免追加时同时存活的新旧大数组。
+        std::size_t outputPoints=result.points.size(),outputTriangles=result.triangleIndices.size()/3;
+        std::size_t outputObjects=0,reservedBytes=0,reservationCancellation=0;
+        for(const auto index:selected) {
+            CheckCancellation(reservationCancellation,getCancelled);
+            if(!GetSum(outputPoints,components[index].sourcePointIds.size(),outputPoints)
+                ||!GetSum(outputTriangles,components[index].triangles.size(),outputTriangles))
+                return fail(SurfaceFailureReason::BudgetExceeded,"Surface output counts overflow.");
+        }
+        if(outputTriangles>std::numeric_limits<std::size_t>::max()/3)
+            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output indices overflow.");
+        if(!GetSum(result.objects.size(),selected.size(),outputObjects)
+            ||!AddWorkingBytes(outputPoints,sizeof(SurfacePointRecord),reservedBytes)
+            ||!AddWorkingBytes(outputTriangles*3,sizeof(std::uint32_t),reservedBytes)
+            ||!AddWorkingBytes(outputTriangles,sizeof(std::uint8_t),reservedBytes)
+            ||!AddWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes)
+            ||reservedBytes>maxWorkingBytes)
+            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation exceeds budget.");
+        if(GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"Surface reservation was cancelled.");
+        result.points.reserve(outputPoints);
+        result.triangleIndices.reserve(outputTriangles*3);
+        result.triangleValidity.reserve(outputTriangles);
+        result.objects.reserve(outputObjects);
+        [[maybe_unused]] const auto largest=std::max_element(selected.begin(),selected.end(),[&](auto a,auto b) {
+            return components[a].sourcePointIds.size()<components[b].sourcePointIds.size();
+        });
         for (const auto selectedIndex : selected)
         {
             if (GetCancelled(getCancelled))
@@ -1790,22 +1810,76 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         records[id].flags |= SurfacePointFlags::SharpCorner;
             }
             std::atomic<bool> cancelled{false};
-            vtkSMPTools::For(
-                0, static_cast<vtkIdType>(points.size()), 128, [&](vtkIdType begin, vtkIdType end) {
-                    for (auto i = begin; i < end; ++i)
-                    {
-                        if (cancelled.load(std::memory_order_acquire))
-                            return;
-                        if (((i - begin) & 31) == 0 && GetCancelled(getCancelled))
-                        {
-                            cancelled.store(true, std::memory_order_release);
-                            return;
-                        }
-                        const auto id = static_cast<std::size_t>(i);
-                        SetMaterialPoint(volume, params, points[id], normals[id], records[id]);
-                        records[id].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+            {
+                SurfaceCudaCompute cuda;
+                std::unique_ptr<SurfaceCudaBatch> deviceSamples;
+#ifdef MVVCVTK_SURFACE_CUDA_ENABLED
+                if (largest != selected.end() && selectedIndex == *largest &&
+                    (volume.scalars.vtkType == VTK_FLOAT || volume.scalars.vtkType == VTK_DOUBLE)) {
+                    SurfaceCudaVolume input;
+                    input.values = volume.scalars.values;
+                    input.validity = volume.validity;
+                    std::copy(volume.geometry.extent.begin(), volume.geometry.extent.end(), input.extent);
+                    std::copy(volume.geometry.dimensions.begin(), volume.geometry.dimensions.end(), input.dimensions);
+                    std::copy(volume.geometry.origin.begin(), volume.geometry.origin.end(), input.origin);
+                    std::copy(volume.geometry.modelToIndex.begin(), volume.geometry.modelToIndex.end(),
+                              input.modelToIndex);
+                    input.scalarBytes = volume.scalars.vtkType == VTK_FLOAT ? sizeof(float) : sizeof(double);
+                    if (volume.scalars.materialRange) {
+                        input.hasMaterialRange = 1;
+                        std::copy(volume.scalars.materialRange->begin(), volume.scalars.materialRange->end(),
+                                  input.materialRange);
                     }
-                });
+                    if (points.size() >= surfaceCudaBatchCapacity && releasedTriangleBytes > sizeof(*deviceSamples) &&
+                        !GetCancelled(getCancelled) &&
+                        cuda.Start(input, releasedTriangleBytes - sizeof(*deviceSamples),
+                                   maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES))) {
+                        deviceSamples = std::make_unique<SurfaceCudaBatch>();
+                        result.cudaDeviceBytes = cuda.GetDeviceBytes();
+                    }
+                }
+#endif
+                if (deviceSamples) {
+                    // 每批在同一工作线程同步完成；取消/异常不发布部分结果。
+                    for (std::size_t begin = 0; begin < points.size(); begin += surfaceCudaBatchCapacity) {
+                        if (GetCancelled(getCancelled)) {
+                            cancelled.store(true);
+                            break;
+                        }
+                        const auto count = std::min(surfaceCudaBatchCapacity, points.size() - begin);
+                        for (std::size_t i = 0; i < count; ++i)
+                            deviceSamples->indices[i] = GetContinuousIndex(volume.geometry, points[begin + i]);
+                        const bool computed =
+                            cuda.Read(deviceSamples->indices[0].data(), count, deviceSamples->samples.data());
+                        if (!computed)
+                            cuda.Reset();
+                        for (std::size_t i = 0; i < count; ++i) {
+                            const auto &sample = deviceSamples->samples[i];
+                            const auto *accepted =
+                                computed && sample.support == 1 && sample.gradientValid ? &sample : nullptr;
+                            SetMaterialPoint(volume, params, points[begin + i], normals[begin + i], records[begin + i],
+                                             nullptr, accepted);
+                            records[begin + i].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+                            if (accepted)
+                                ++result.cudaPointCount;
+                        }
+                    }
+                } else {
+                    vtkSMPTools::For(0, static_cast<vtkIdType>(points.size()), 128, [&](vtkIdType begin, vtkIdType end) {
+                        for (auto i = begin; i < end; ++i) {
+                            if (cancelled.load(std::memory_order_acquire))
+                                return;
+                            if (((i - begin) & 31) == 0 && GetCancelled(getCancelled)) {
+                                cancelled.store(true, std::memory_order_release);
+                                return;
+                            }
+                            const auto id = static_cast<std::size_t>(i);
+                            SetMaterialPoint(volume, params, points[id], normals[id], records[id]);
+                            records[id].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+                        }
+                    });
+                }
+            } // 设备/回传工作区在拓扑分配前释放。
             if (cancelled.load())
                 return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
             SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,

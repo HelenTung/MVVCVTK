@@ -67,6 +67,28 @@ foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display)
 endforeach()
 unset(_mvvcvtk_surface_suite)
 
+# 同一审计入口分别链接原始基线与候选，实现数值、资源及端到端对照。
+add_executable(mvvcvtk_surface_acceleration_audit SurfaceAccelerationAudit.cpp)
+target_include_directories(mvvcvtk_surface_acceleration_audit PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+target_link_libraries(mvvcvtk_surface_acceleration_audit PRIVATE
+    mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTK::SurfaceDetermination
+    MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} Psapi)
+SetTargetDefaults(mvvcvtk_surface_acceleration_audit)
+set_target_properties(mvvcvtk_surface_acceleration_audit PROPERTIES
+    OUTPUT_NAME SurfaceAccelerationAudit FOLDER "MVVCVTK/test/Automation")
+vtk_module_autoinit(TARGETS mvvcvtk_surface_acceleration_audit MODULES ${MVVCVTK_VTK_TARGETS})
+if(TARGET surface_cuda_backend)
+    add_executable(mvvcvtk_surface_cuda_precision_tests SurfaceCudaPrecisionTests.cpp)
+    target_include_directories(mvvcvtk_surface_cuda_precision_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+    target_link_libraries(mvvcvtk_surface_cuda_precision_tests PRIVATE MVVCVTK::SurfaceDetermination)
+    SetTargetDefaults(mvvcvtk_surface_cuda_precision_tests)
+    add_test(NAME SurfaceDetermination.cuda-precision COMMAND mvvcvtk_surface_cuda_precision_tests)
+    set_tests_properties(SurfaceDetermination.cuda-precision PROPERTIES SKIP_RETURN_CODE 77)
+    SetTestRuntime(SurfaceDetermination.cuda-precision mvvcvtk_surface_cuda_precision_tests)
+endif()
+
 # Pure business header probe deliberately has no Host/VTK/Qt include or link dependency.
 add_library(mvvcvtk_surface_recipe_header_probe OBJECT SurfaceRecipeHeaderProbe.cpp)
 target_include_directories(mvvcvtk_surface_recipe_header_probe PRIVATE

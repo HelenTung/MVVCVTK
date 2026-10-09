@@ -30,6 +30,12 @@ int GetSuiteFailCount(const std::string_view suite)
 
 int main(int argc, char* argv[])
 {
+    if(argc==9&&std::string_view(argv[1])=="--real-entry") {
+        try {
+            return GetSurfaceRealInputFailCount(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),
+                std::stoi(argv[5]),std::stod(argv[6]),std::stoull(argv[7]),std::stoull(argv[8]))?1:0;
+        } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 2;}
+    }
     // 对外部原始体按生产步长提取的 128^3 float32 样本运行同一算法，
     // 不在测试仓库保存 CT；阈值解析和表面提取使用同一个材料流程。
     if (argc == 5 && std::string_view(argv[1]) == "--iso-samples") {

@@ -178,13 +178,18 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     }
     stats.processedExtent = range;
     {
-        std::map<Edge, std::uint32_t> edgeIds;
+        // 两层只做查找/插入，输出仍按原单元/MC 边顺序创建。
+        std::array<std::map<Edge,std::uint32_t>,2> edgeLayers;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
         for (std::int64_t block = range[4]; block < range[5]; block += blockDepth)
         {
             ++stats.blockCount;
             const auto end = std::min<std::int64_t>(range[5], block + blockDepth);
             for (std::int64_t zz = block; zz < end; ++zz)
+            {
+                const auto lowerLayer=std::size_t(zz-range[4])&1U;
+                const auto upperLayer=lowerLayer^1U;
+                edgeLayers[upperLayer].clear();
                 for (std::int64_t yy = range[2]; yy < range[3]; ++yy)
                 {
                     if (cancelled && cancelled())
@@ -242,6 +247,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                                         key[d] = static_cast<std::int64_t>(corner[d]);
                                     key[3] = 3;
                                 }
+                                auto& edgeIds=edgeLayers[key[2]==zz?lowerLayer:upperLayer];
                                 auto found = edgeIds.find(key);
                                 if (found == edgeIds.end())
                                 {
@@ -271,6 +277,8 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
                         }
                     }
                 }
+                // 上表面边/等阈值端点留到下一层，其余缓存在复用时清除。
+            }
         }
     }
     if (roi)
