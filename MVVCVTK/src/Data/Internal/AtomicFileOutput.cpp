@@ -7,6 +7,33 @@
 #include <atomic>
 #include <limits>
 #include <string>
+#include <map>
+#include <memory>
+#include <mutex>
+
+namespace {
+struct PathLess final {
+    bool operator()(const std::wstring& left, const std::wstring& right) const noexcept {
+        return CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
+            right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_LESS_THAN;
+    }
+};
+std::shared_ptr<std::mutex> GetCommitMutex(const std::filesystem::path& target)
+{
+    const auto key = (std::filesystem::weakly_canonical(target.parent_path()) / target.filename()).native();
+    static std::mutex registryMutex;
+    static std::map<std::wstring, std::weak_ptr<std::mutex>, PathLess> paths;
+    const std::lock_guard<std::mutex> lock(registryMutex);
+    for (auto it = paths.begin(); it != paths.end();) {
+        if (it->second.expired()) it = paths.erase(it);
+        else ++it;
+    }
+    auto& entry = paths[key];
+    auto mutex = entry.lock();
+    if (!mutex) { mutex = std::make_shared<std::mutex>(); entry = mutex; }
+    return mutex;
+}
+}
 
 AtomicFileOutput::AtomicFileOutput(std::filesystem::path target)
     : m_target(std::move(target))
@@ -59,9 +86,14 @@ bool AtomicFileOutput::Commit(const TaskStopToken& stopToken) noexcept
     if (!closed) return false;
     m_handle = nullptr;
     if (stopToken.GetIsStopped()) return false;
-    // 同卷 rename 由文件系统串行提交：同名并发导出只会留下某次完整结果。
-    if (!MoveFileExW(m_temporary.c_str(), m_target.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return false;
+    // 只协调同一路径的提交，不串行化解码、写入或其他目标文件。
+    try {
+        const auto mutex = GetCommitMutex(m_target);
+        const std::lock_guard<std::mutex> lock(*mutex);
+        if (stopToken.GetIsStopped() || !MoveFileExW(m_temporary.c_str(), m_target.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return false;
+    }
+    catch (...) { return false; }
     m_temporary.clear();
     return true;
 }
