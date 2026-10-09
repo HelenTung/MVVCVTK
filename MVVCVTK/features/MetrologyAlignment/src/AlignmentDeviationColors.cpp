@@ -23,7 +23,14 @@ Color Ramp::ColorAt(double value) const {
   if (std::isnan(value)) return invalidColor;
   if (m_tolerance && value >= (*m_tolerance)[0] && value <= (*m_tolerance)[1])
     return {60, 180, 95};
-  const auto mapped = AnalysisColorStyle::GetMappedColor(*m_lookup, m_parameters, value);
+  const auto *range=m_lookup->GetRange();
+  if(m_parameters.segments.empty() || value<range[0] || value>range[1]) {
+    const auto *mapped=m_lookup->MapValue(value);
+    return {mapped[0],mapped[1],mapped[2]};
+  }
+  // 分段已覆盖范围，直接复用其色环公式，避免先取 LUT/透明度后又覆盖 RGB。
+  const auto &segment=value<(*m_tolerance)[0] ? m_parameters.segments.front() : m_parameters.segments.back();
+  const auto mapped=AnalysisColorStyle::GetSegmentColor(segment,value);
   Color color{};
   for (std::size_t i = 0; i < color.size(); ++i)
     color[i] = static_cast<std::uint8_t>(std::lround(255 * mapped[i]));

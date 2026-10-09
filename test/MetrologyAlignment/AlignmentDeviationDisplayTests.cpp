@@ -39,6 +39,18 @@ void Colors() {
         Check(std::equal(legend[i].begin(),legend[i].end(),rgb),"frozen legend and live lookup use identical quantization");
     }
     display.useToleranceColors=true;
+    const AlignmentDeviationColors::Ramp segmented(display,std::array<double,2>{.4,.6});
+    AnalysisColorStyle::RampParams reference;reference.mode=AnalysisColorStyle::RampMode::HueLoop;
+    reference.segments={{0,.4,AnalysisColorStyle::RampMode::HueLoop},
+        {.4,.6,AnalysisColorStyle::RampMode::Constant,{60/255.0,180/255.0,95/255.0}},
+        {.6,1,AnalysisColorStyle::RampMode::HueLoop}};
+    for(int i=-1;i<=258;++i) {
+        const double value=i/256.0;
+        const auto mapped=AnalysisColorStyle::GetMappedColor(*segmented.GetLookup(),reference,value);
+        AlignmentDeviationColors::Color expected{};
+        for(std::size_t j=0;j<3;++j)expected[j]=static_cast<std::uint8_t>(std::lround(mapped[j]*255));
+        Check(segmented.ColorAt(value)==expected,"direct color mapping preserves the shared segmented ramp bytes");
+    }
     const AlignmentDeviationColors::Ramp narrow(display,std::array<double,2>{.50001,.50002});
     const auto nanColor=narrow.ColorAt(std::numeric_limits<double>::quiet_NaN());
     if(nanColor!=AlignmentDeviationColors::invalidColor)
