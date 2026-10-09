@@ -2,6 +2,7 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
 #include "SurfaceSeedBuilder.h"
+#include "SurfaceEdgeTopology.h"
 #include "SurfaceCudaCompute.h"
 #include <chrono>
 #include "Data/DataPayloads.h"
@@ -1218,10 +1219,18 @@ TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std:
         std::uint32_t count = 0;
         int directionSum = 0;
     };
-    std::unordered_map<std::uint64_t, EdgeRecord> edges;
+    const bool useCompact = points.size() <= (std::uint64_t(1) << 31U);
+    std::vector<std::uint64_t> edgeKeys;
+    std::optional<std::unordered_map<std::uint64_t, EdgeRecord>> edges;
+    if (useCompact) {
+        if (triangles.size() > edgeKeys.max_size() / 3U) throw std::bad_alloc{};
+        edgeKeys.reserve(triangles.size() * 3U);
+    } else {
+        edges.emplace();
     if (triangles.size()
         <= std::numeric_limits<std::size_t>::max() / 2U) {
-        edges.reserve(triangles.size() * 2U);
+        edges->reserve(triangles.size() * 2U);
+    }
     }
     TopologyMetrics metrics;
     for (const Triangle& triangle : triangles) {
@@ -1251,12 +1260,23 @@ TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std:
             CheckCancellation(cancellationBatch, cancelled);
             const std::uint32_t from = ids[edge];
             const std::uint32_t to = ids[(edge + 1) % 3];
-            auto& record = edges[GetEdgeKey(from, to)];
-            ++record.count;
-            record.directionSum += from < to ? 1 : -1;
+            if (useCompact) edgeKeys.push_back(GetSurfaceDirectedEdgeKey(from, to));
+            else {
+                auto& record = (*edges)[GetEdgeKey(from, to)];
+                ++record.count;
+                record.directionSum += from < to ? 1 : -1;
+            }
         }
     }
-    for (const auto& item : edges) {
+    if (useCompact) {
+        const auto topology = GetSortedSurfaceEdgeTopology(edgeKeys, [&] {
+            CheckCancellation(cancellationBatch, cancelled);
+            if (cancelled && cancelled()) throw SurfaceCancelled{};
+        });
+        metrics.boundaryEdgeCount = topology.boundaryEdgeCount;
+        metrics.nonManifoldEdgeCount = topology.nonManifoldEdgeCount;
+        metrics.isOrientationValid = metrics.isOrientationValid && topology.isOrientationValid;
+    } else for (const auto& item : *edges) {
         CheckCancellation(cancellationBatch, cancelled);
         const EdgeRecord& edge = item.second;
         if (edge.count == 1) ++metrics.boundaryEdgeCount;
@@ -1446,6 +1466,7 @@ void GetLocalMesh(MeshComponent &component, std::vector<Point3> &sourcePoints,
 
 std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
                                      const std::vector<Triangle> &triangles,
+                                     const CpuSamplingPlan &cpuPlan, unsigned &normalizationThreads,
                                      const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
@@ -1464,10 +1485,14 @@ std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
             normals[pointId] = Add(normals[pointId], normal);
         }
     }
-    for (Point3& normal : normals) {
-        CheckCancellation(cancellationBatch, cancelled);
-        if (!Normalize(normal)) normal = { 0.0, 0.0, 1.0 };
-    }
+    normalizationThreads = RunPointSampling(normals.size(), cpuPlan.threadLimit, cancelled,
+        [&](std::size_t begin, std::size_t end) {
+            std::size_t batch = 0;
+            for (auto i = begin; i < end; ++i) {
+                CheckCancellation(batch, cancelled);
+                if (!Normalize(normals[i])) normals[i] = {0.0, 0.0, 1.0};
+            }
+        });
     return normals;
 }
 
@@ -1981,7 +2006,9 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             GetLocalMesh(components[selectedIndex], meshPoints, points, triangles,
                          components.size() == 1, getCancelled);
             SetOutwardWinding(volume, points, triangles);
-            auto normals = GetVertexNormals(points, triangles, getCancelled);
+            unsigned normalizationThreads = 1;
+            auto normals = GetVertexNormals(points, triangles, cpuPlan, normalizationThreads, getCancelled);
+            result.cpuThreadCount = std::max(result.cpuThreadCount, normalizationThreads);
             std::vector<SurfacePointRecord> records(points.size());
             const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
             for (const auto &triangle : triangles)
@@ -2000,7 +2027,16 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             result.meshPreparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();
             {
                 SurfaceCudaCompute cuda;
-                std::unique_ptr<SurfaceCudaBatch> deviceSamples;
+                const auto sampleCpu = [&](std::size_t begin, std::size_t end) {
+                    for (auto i = begin; i < end; ++i) {
+                        if (cancelled.load(std::memory_order_acquire)) return;
+                        if (((i-begin)&31U)==0 && GetCancelled(getCancelled)) {
+                            cancelled.store(true); return;
+                        }
+                        SetMaterialPoint(volume,params,points[i],normals[i],records[i]);
+                        records[i].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
+                    }
+                };
 #ifdef MVVCVTK_SURFACE_CUDA_ENABLED
                 if (largest != selected.end() && selectedIndex == *largest &&
                     (volume.scalars.vtkType == VTK_FLOAT || volume.scalars.vtkType == VTK_DOUBLE)) {
@@ -2018,56 +2054,64 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         std::copy(volume.scalars.materialRange->begin(), volume.scalars.materialRange->end(),
                                   input.materialRange);
                     }
-                    if (points.size() >= surfaceCudaBatchCapacity && releasedTriangleBytes > sizeof(*deviceSamples) &&
+                    if (points.size() >= surfaceCudaBatchCapacity && releasedTriangleBytes > surfaceCudaHostBufferBytes &&
                         !GetCancelled(getCancelled) &&
-                        cuda.Start(input, releasedTriangleBytes - sizeof(*deviceSamples),
+                        cuda.Start(input, releasedTriangleBytes,
                                    maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES))) {
-                        deviceSamples = std::make_unique<SurfaceCudaBatch>();
                         result.cudaDeviceBytes = cuda.GetDeviceBytes();
+                        result.cudaHostBufferBytes = surfaceCudaHostBufferBytes;
                     }
                 }
 #endif
-                if (deviceSamples) {
-                    // 每批在同一工作线程同步完成；取消/异常不发布部分结果。
-                    for (std::size_t begin = 0; begin < points.size(); begin += surfaceCudaBatchCapacity) {
-                        if (GetCancelled(getCancelled)) {
-                            cancelled.store(true);
-                            break;
+                if (cuda.GetActive()) {
+                    struct PendingBatch final { std::size_t begin=0; SurfaceCudaTicket ticket; };
+                    std::array<PendingBatch,surfaceCudaSlotCount> pending;
+                    unsigned head=0, queued=0;
+                    std::size_t cursor=0;
+                    bool healthy=true;
+                    while (cursor<points.size() || queued) {
+                        if (GetCancelled(getCancelled)) {cancelled.store(true);break;}
+                        // 两批可同时入队；CPU 回填前一批时 GPU 继续处理后一批。
+                        while (healthy && cursor<points.size() && queued<surfaceCudaSlotCount) {
+                            const auto slot=(head+queued)%surfaceCudaSlotCount;
+                            auto *indices=cuda.Prepare(slot);
+                            if (!indices) {healthy=false;break;}
+                            const auto count=std::min(surfaceCudaBatchCapacity,points.size()-cursor);
+                            for (std::size_t i=0;i<count;++i) {
+                                const auto index=GetContinuousIndex(volume.geometry,points[cursor+i]);
+                                std::copy(index.begin(),index.end(),indices+i*3);
+                            }
+                            auto &batch=pending[slot];batch.begin=cursor;
+                            if (!cuda.Submit(slot,count,batch.ticket)) {healthy=false;break;}
+                            cursor+=batch.ticket.count; ++queued; ++result.cudaBatchCount;
                         }
-                        const auto count = std::min(surfaceCudaBatchCapacity, points.size() - begin);
-                        for (std::size_t i = 0; i < count; ++i)
-                            deviceSamples->indices[i] = GetContinuousIndex(volume.geometry, points[begin + i]);
-                        const bool computed =
-                            cuda.Read(deviceSamples->indices[0].data(), count, deviceSamples->samples.data());
-                        if (!computed)
+                        if (queued) {
+                            const auto &batch=pending[head];
+                            const auto *samples=cuda.Collect(batch.ticket);
+                            if (!samples) healthy=false;
+                            for (std::size_t i=0;i<batch.ticket.count;++i) {
+                                if ((i&31U)==0 && GetCancelled(getCancelled)) {cancelled.store(true);break;}
+                                const auto *accepted=samples && samples[i].support==1 && samples[i].gradientValid
+                                    ? samples+i : nullptr;
+                                const auto id=batch.begin+i;
+                                SetMaterialPoint(volume,params,points[id],normals[id],records[id],nullptr,accepted);
+                                records[id].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
+                                if (accepted) ++result.cudaPointCount;
+                            }
+                            head=(head+1)%surfaceCudaSlotCount; --queued;
+                            if (cancelled.load()) break;
+                        } else if (!healthy) {
+                            // 已提交批次收集完再关闭；未提交的连续余段保持原 CPU 计算。
                             cuda.Reset();
-                        for (std::size_t i = 0; i < count; ++i) {
-                            const auto &sample = deviceSamples->samples[i];
-                            const auto *accepted =
-                                computed && sample.support == 1 && sample.gradientValid ? &sample : nullptr;
-                            SetMaterialPoint(volume, params, points[begin + i], normals[begin + i], records[begin + i],
-                                             nullptr, accepted);
-                            records[begin + i].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
-                            if (accepted)
-                                ++result.cudaPointCount;
+                            const auto threads=RunPointSampling(points.size()-cursor,cpuPlan.threadLimit,getCancelled,
+                                [&](std::size_t begin,std::size_t end){sampleCpu(cursor+begin,cursor+end);});
+                            result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
+                            cursor=points.size();
                         }
                     }
                 } else {
-                    const auto threads = RunPointSampling(points.size(), cpuPlan.threadLimit, getCancelled,
-                                                         [&](std::size_t begin, std::size_t end) {
-                        for (auto i = begin; i < end; ++i) {
-                            if (cancelled.load(std::memory_order_acquire))
-                                return;
-                            if (((i - begin) & 31) == 0 && GetCancelled(getCancelled)) {
-                                cancelled.store(true, std::memory_order_release);
-                                return;
-                            }
-                            const auto id = i;
-                            SetMaterialPoint(volume, params, points[id], normals[id], records[id]);
-                            records[id].interfaceIndex = static_cast<std::uint32_t>(pairIndex);
-                        }
-                    });
-                    result.cpuThreadCount = std::max(result.cpuThreadCount, threads);
+                    const auto threads=RunPointSampling(points.size(),cpuPlan.threadLimit,getCancelled,sampleCpu);
+                    result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
                 }
             } // 设备/回传工作区在拓扑分配前释放。
             if (cancelled.load())

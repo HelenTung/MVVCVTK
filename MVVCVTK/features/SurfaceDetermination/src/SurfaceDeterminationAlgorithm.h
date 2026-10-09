@@ -51,6 +51,8 @@ struct SurfaceAlgorithmResult final {
     // 仓内审计使用，不进入 generation/API/SPI。
     std::size_t cudaPointCount = 0;
     std::size_t cudaDeviceBytes = 0;
+    std::size_t cudaHostBufferBytes = 0;
+    std::size_t cudaBatchCount = 0;
     unsigned cpuThreadCount = 0;
     unsigned availablePhysicalCores = 0;
     unsigned availableLogicalThreads = 0;

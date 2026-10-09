@@ -129,7 +129,7 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
     triangles = std::move(clipped);
     return triangles.empty() ? SurfaceSeedStatus::NoSurface : SurfaceSeedStatus::Succeeded;
 }
-template <class ScalarReader>
+template <bool HasMask, class ScalarReader>
 SurfaceSeedStatus BuildSeedMesh(
     const SurfaceSeedGrid &grid, const double iso,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
@@ -196,7 +196,7 @@ SurfaceSeedStatus BuildSeedMesh(
                     if (cancelled && cancelled())
                         return SurfaceSeedStatus::Cancelled;
                     std::array<double,8> scalar{};
-                    unsigned invalidCorners=0;
+                    unsigned invalidCorners=0, code=0;
                     for (std::int64_t xx = range[0]; xx < range[1]; ++xx)
                     {
                         if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
@@ -204,21 +204,18 @@ SurfaceSeedStatus BuildSeedMesh(
                         const bool shifted=xx!=range[0];
                         if(shifted) {
                             scalar[0]=scalar[1];scalar[3]=scalar[2];scalar[4]=scalar[5];scalar[7]=scalar[6];
-                            invalidCorners=((invalidCorners>>1)&1U)|((invalidCorners&4U)<<1)
-                                |((invalidCorners&32U)>>1)|((invalidCorners&64U)<<1);
+                            invalidCorners=((invalidCorners&0x22U)>>1)|((invalidCorners&0x44U)<<1);
+                            code=((code&0x22U)>>1)|((code&0x44U)<<1);
                         }
-                        unsigned code = 0;
                         for (unsigned c = 0; c < 8; ++c)
                         {
-                            if(shifted&&(c==0||c==3||c==4||c==7)) {
-                                if(scalar[c]>=iso) code|=1U<<c;
-                                continue;
-                            }
+                            if(shifted&&(c==0||c==3||c==4||c==7)) continue;
                             const auto index = GetIndex(grid, static_cast<int>(xx) + corners[c][0],
                                                         static_cast<int>(yy) + corners[c][1],
                                                         static_cast<int>(zz) + corners[c][2]);
                             scalar[c] = readScalar(index);
-                            if((grid.validity&&!grid.validity[index])||!std::isfinite(scalar[c]))
+                            const bool invalidMask = HasMask && !grid.validity[index];
+                            if(invalidMask||!std::isfinite(scalar[c]))
                                 invalidCorners|=1U<<c;
                             if (scalar[c] >= iso)
                                 code |= 1U << c;
@@ -340,14 +337,24 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
         return SurfaceSeedStatus::InvalidInput;
 
     const auto build = [&](const auto *values) {
+        const auto selected = [&](auto hasRange, auto hasMask) {
         const auto read = [&](const std::size_t index) {
             const double value = static_cast<double>(values[index]);
             // 与原 reader 一样，NaN/Inf 保留为缺失支持，饱和只发生在源节点。
-            return grid.materialRange && std::isfinite(value)
+            if constexpr (decltype(hasRange)::value)
+                return std::isfinite(value)
                        ? std::clamp(value, (*grid.materialRange)[0], (*grid.materialRange)[1]) : value;
+            else return value;
         };
-        return BuildSeedMesh(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
+        return BuildSeedMesh<decltype(hasMask)::value>(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
                              points, triangles, stats, read);
+        };
+        if (grid.materialRange) {
+            if (grid.validity) return selected(std::true_type{}, std::true_type{});
+            return selected(std::true_type{}, std::false_type{});
+        }
+        if (grid.validity) return selected(std::false_type{}, std::true_type{});
+        return selected(std::false_type{}, std::false_type{});
     };
     if (grid.scalarValues) {
         switch (grid.scalarType) {
@@ -368,6 +375,9 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
         }
     }
     const auto read = [&](std::size_t index) { return grid.readScalar(grid.values, index); };
-    return BuildSeedMesh(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
-                         points, triangles, stats, read);
+    if (grid.validity)
+        return BuildSeedMesh<true>(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
+                                  points, triangles, stats, read);
+    return BuildSeedMesh<false>(grid, iso, roi, haloModel, blockDepth, budget, cancelled,
+                               points, triangles, stats, read);
 }

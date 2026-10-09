@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <vector>
+#include <future>
 
 int main() {
     SurfaceCudaVolume v;
@@ -31,11 +32,11 @@ int main() {
                                                      MVVCVTK_SURFACE_TEST_DEVICE_BYTES);
     constexpr auto testCredit = std::max<std::size_t>(1024U * 1024U * 1024U, hostCredit);
     SurfaceCudaCompute limited;
-    if (limited.Start(v, MVVCVTK_SURFACE_TEST_HOST_BYTES - 1U, 1024U * 1024U))
+    if (limited.Start(v, MVVCVTK_SURFACE_TEST_HOST_BYTES - 1U, 4U * 1024U * 1024U))
         return 1;
     const std::array<double, 6> points{1.5, 5, 2, 2.5, 7, 4};
     SurfaceCudaCompute compute;
-    if (!compute.Start(v, testCredit, 1024U * 1024U)) {
+    if (!compute.Start(v, testCredit, 4U * 1024U * 1024U)) {
         std::cerr << "CUDA device/backend unavailable\n";
         return 77;
     }
@@ -47,12 +48,62 @@ int main() {
             sample.gradient[1] != .5 || sample.gradient[2] != 8 || sample.magnitude != std::sqrt(68.25))
             return 1;
     }
+    // 非线性解析场使两批结果不同，能识别异步缓冲串批、覆写与重载错误。
+    {
+        auto input=v;
+        std::vector<double> quadratic(values.size());
+        for(int z=-4;z<=7;++z)for(int y=2;y<=16;++y)for(int x=-3;x<=12;++x)
+            quadratic[(std::size_t(z+4)*15+(y-2))*16+(x+3)]=x*x+2.*y*y+4.*z*z;
+        input.values=quadratic.data();
+        SurfaceCudaCompute pipeline;
+        const auto deviceLimit=surfaceCudaHostBufferBytes+4U*16U*15U*sizeof(double);
+        if(!pipeline.Start(input,testCredit,deviceLimit)||pipeline.GetDeviceBytes()>deviceLimit) return 1;
+        const auto fill=[&](unsigned slot,bool upper,std::size_t count) {
+            auto *p=pipeline.Prepare(slot);if(!p)return false;
+            for(std::size_t i=0;i<count;++i){p[3*i]=upper?2.5:1.5;p[3*i+1]=upper?7:5;p[3*i+2]=upper?6.5:-3.5;}
+            return true;
+        };
+        const auto verify=[&](const SurfaceCudaTicket &ticket,bool upper) {
+            const auto *p=pipeline.Collect(ticket);if(!p)return false;
+            const double gx=upper?-28:-20,gy=upper?2.5:1.5,gz=upper?104:-56;
+            for(std::size_t i=0;i<ticket.count;++i)
+                if(p[i].support!=1||!p[i].gradientValid||p[i].gradient[0]!=gx||p[i].gradient[1]!=gy||
+                   p[i].gradient[2]!=gz||p[i].magnitude!=std::sqrt(gx*gx+gy*gy+gz*gz))return false;
+            return true;
+        };
+        SurfaceCudaTicket a,b;
+        if(!fill(0,false,surfaceCudaBatchCapacity)||!pipeline.Submit(0,surfaceCudaBatchCapacity,a)||
+           !fill(1,true,surfaceCudaBatchCapacity)||!pipeline.Submit(1,surfaceCudaBatchCapacity,b))return 1;
+        auto wrong=b;--wrong.count;
+        if(pipeline.Collect(wrong)||pipeline.Prepare(0)||!verify(b,true)||!verify(a,false)||pipeline.Collect(a))return 1;
+        // 小 slab 只提交可容纳的连续前缀，后半段随后重载，不漏点。
+        auto *p=pipeline.Prepare(0);if(!p)return 1;
+        const double split[]{1.5,5,-3.5,2.5,7,6.5};std::copy_n(split,6,p);
+        SurfaceCudaTicket prefix;
+        if(!pipeline.Submit(0,2,prefix)||prefix.count!=1||!verify(prefix,false)||
+           !fill(0,true,1)||!pipeline.Submit(0,1,b)||pipeline.Collect(prefix)||!verify(b,true))return 1;
+        if(std::async(std::launch::async,[&]{return pipeline.Prepare(0);}).get())return 1;
+        // Reset 必须等待 pending 工作；旧 token 在重启后也不能收集新批次。
+        if(!fill(0,false,1)||!pipeline.Submit(0,1,a))return 1;
+        pipeline.Reset();
+        if(pipeline.Collect(a)||!pipeline.Start(input,testCredit,deviceLimit)||!fill(0,true,1)||
+           !pipeline.Submit(0,1,b)||pipeline.Collect(a)||!verify(b,true))return 1;
+        for(unsigned fault=1;fault<=3;++fault) {
+            if(!fill(0,false,1)||!pipeline.SetTestFault(fault))return 1;
+            const bool submitted=pipeline.Submit(0,1,a);
+            if(fault==1 ? submitted : !submitted)return 1;
+            if(fault==2 && pipeline.Collect(a))return 1;
+            pipeline.Reset();
+            if(!pipeline.Start(input,testCredit,deviceLimit)||!fill(0,true,1)||
+               !pipeline.Submit(0,1,b)||!verify(b,true))return 1;
+        }
+    }
     // 饱和发生在源节点；全饱和线性场应得到零梯度。
     v.hasMaterialRange = 1;
     v.materialRange[0] = -100;
     v.materialRange[1] = -50;
     SurfaceCudaCompute saturation;
-    if (!saturation.Start(v, testCredit, 1024U * 1024U) ||
+    if (!saturation.Start(v, testCredit, 4U * 1024U * 1024U) ||
         !saturation.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -62,7 +113,7 @@ int main() {
     std::vector<unsigned char> mask(values.size(), 0);
     v.validity = mask.data();
     SurfaceCudaCompute missing;
-    if (!missing.Start(v, testCredit, 1024U * 1024U) ||
+    if (!missing.Start(v, testCredit, 4U * 1024U * 1024U) ||
         !missing.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -77,7 +128,7 @@ int main() {
     v.scalarBytes = 4;
     v.hasMaterialRange = 0;
     SurfaceCudaCompute single;
-    if (!single.Start(v, testCredit, 1024U * 1024U) ||
+    if (!single.Start(v, testCredit, 4U * 1024U * 1024U) ||
         !single.Read(points.data(), samples.size(), samples.data()))
         return 1;
     for (const auto &sample : samples)
@@ -89,7 +140,7 @@ int main() {
     single.Reset();
     floats[(6U * 15U + 3U) * 16U + 4U] = std::numeric_limits<float>::quiet_NaN();
     SurfaceCudaCompute nonFinite;
-    if (!nonFinite.Start(v, testCredit, 1024U * 1024U) ||
+    if (!nonFinite.Start(v, testCredit, 4U * 1024U * 1024U) ||
         !nonFinite.Read(points.data(), samples.size(), samples.data()) || samples[0].gradientValid)
         return 1;
     std::cout << "CUDA analytic gradients, node saturation and missing support PASS; buffers="

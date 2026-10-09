@@ -23,11 +23,21 @@ struct SurfaceCudaSample final {
     int gradientValid = 0;
     int support = 0; // 0=clipped, 1=valid, 2=invalid mask, 3=tile miss。
 };
-inline constexpr std::size_t surfaceCudaBatchCapacity = 1024;
-struct SurfaceCudaBatch final {
-    std::array<std::array<double, 3>, surfaceCudaBatchCapacity> indices{};
-    std::array<SurfaceCudaSample, surfaceCudaBatchCapacity> samples{};
+inline constexpr std::size_t surfaceCudaBatchCapacity = 8192;
+inline constexpr unsigned surfaceCudaSlotCount = 2;
+inline constexpr std::size_t surfaceCudaHostBufferBytes =
+    surfaceCudaSlotCount * surfaceCudaBatchCapacity * (3 * sizeof(double) + sizeof(SurfaceCudaSample));
+struct SurfaceCudaTicket final {
+    unsigned slot = 0;
+    std::uint64_t generation = 0;
+    std::size_t count = 0;
+    const void *owner = nullptr;
+    std::uint64_t epoch = 0;
 };
 using SurfaceCudaOpen = int (*)(const SurfaceCudaVolume *, std::size_t, std::size_t, void **, std::size_t *);
 using SurfaceCudaRead = int (*)(void *, const double *, std::size_t, SurfaceCudaSample *);
+using SurfaceCudaPrepareCallback = int (*)(void *, unsigned, double **);
+using SurfaceCudaSubmitCallback = int (*)(void *, unsigned, std::size_t, SurfaceCudaTicket *);
+using SurfaceCudaCollectCallback = int (*)(void *, const SurfaceCudaTicket *, const SurfaceCudaSample **);
+using SurfaceCudaTestFaultCallback = int (*)(void *, unsigned);
 using SurfaceCudaClose = void (*)(void *) noexcept;

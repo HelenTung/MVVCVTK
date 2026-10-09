@@ -2,6 +2,7 @@
 #include "SurfaceDeterminationTestCases.h"
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceSeedBuilder.h"
+#include "SurfaceEdgeTopology.h"
 #include "SurfaceDeterminationTestSupport.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -10,6 +11,7 @@
 #include <future>
 #include <cfenv>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -79,6 +81,12 @@ void TestTypedSeed(Checks &checks, int type)
     grid.scalarType = type;
     grid.materialRange = &range;
     verify(1); verify(2); verify(99);
+    for (bool hasRange : {false,true}) for (bool hasMask : {false,true}) {
+        grid.materialRange=hasRange?&range:nullptr;
+        grid.validity=hasMask?mask.data():nullptr;
+        verify(1);
+    }
+    grid.materialRange=&range;grid.validity=mask.data();
     mask[0] = 0;
     if constexpr (std::is_floating_point_v<T>) values[0] = std::numeric_limits<T>::quiet_NaN();
     verify(1);
@@ -210,6 +218,35 @@ void TestParallelSampling(Checks &checks)
               << " logical=" << parallel.availableLogicalThreads << " planned=" << parallel.plannedCpuThreads
               << " actual=" << parallel.cpuThreadCount << '\n';
 }
+
+void TestSortedTopology(Checks &checks)
+{
+    const auto verify=[&](std::initializer_list<std::array<std::uint32_t,3>> triangles,
+                         std::uint64_t boundary,std::uint64_t nonManifold,bool oriented) {
+        std::vector<std::uint64_t> keys;
+        for(const auto &tri:triangles) for(unsigned e=0;e<3;++e)
+            keys.push_back(GetSurfaceDirectedEdgeKey(tri[e],tri[(e+1)%3]));
+        const auto result=GetSortedSurfaceEdgeTopology(keys,{});
+        checks.Get(result.boundaryEdgeCount==boundary&&result.nonManifoldEdgeCount==nonManifold&&
+                   result.isOrientationValid==oriented,"integer edge topology matches independent mesh incidence");
+    };
+    verify({{0,2,1},{0,1,3},{0,3,2},{1,2,3}},0,0,true);
+    verify({{0,2,1},{0,3,1},{0,3,2},{1,2,3}},0,0,false);
+    verify({{0,1,2}},3,0,true);
+    verify({{0,1,2},{1,0,3},{0,1,4}},6,1,false);
+    verify({{0,0,1}},1,0,true);
+    verify({{0,0,1},{0,0,1}},0,1,false);
+    const auto forward=GetSurfaceDirectedEdgeKey(0,0x7fffffffU);
+    const auto reverse=GetSurfaceDirectedEdgeKey(0x7fffffffU,0);
+    checks.Get((forward&~std::uint64_t(1))==(reverse&~std::uint64_t(1))&&forward!=reverse&&
+               forward!=GetSurfaceDirectedEdgeKey(0,0x7ffffffeU),"31-bit boundary keys retain identity and direction");
+    std::vector<std::uint64_t> keys(10000);
+    std::iota(keys.rbegin(),keys.rend(),0U);
+    bool interrupted=false;
+    try { GetSortedSurfaceEdgeTopology(keys,[]{throw std::runtime_error("sort cancellation probe");}); }
+    catch(const std::runtime_error&){interrupted=true;}
+    checks.Get(interrupted,"edge sort propagates cancellation before returning partial statistics");
+}
 } // namespace
 
 int GetSurfaceOptimizationFailCount()
@@ -222,6 +259,6 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<unsigned long>(checks,VTK_UNSIGNED_LONG); TestTypedSeed<long long>(checks,VTK_LONG_LONG);
     TestTypedSeed<unsigned long long>(checks,VTK_UNSIGNED_LONG_LONG);
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
-    TestEdgeAxes(checks); TestParallelSampling(checks);
+    TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
     return checks.failureCount;
 }

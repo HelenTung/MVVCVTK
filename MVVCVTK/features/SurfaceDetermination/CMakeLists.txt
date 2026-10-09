@@ -6,6 +6,7 @@ set(MVVCVTK_SURFACE_API_HEADERS
 set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceSeedBuilder.h
     src/SurfaceSeedBuilder.cpp
+    src/SurfaceEdgeTopology.h
     src/SurfaceCudaTypes.h
     src/SurfaceCudaCompute.h
     src/SurfaceCudaCompute.cpp
@@ -90,6 +91,10 @@ if(MVVCVTK_SURFACE_CUDA)
             DEPENDS src/SurfaceCudaKernels.cu src/SurfaceCudaTypes.h EmbedCudaPtx.cmake
             VERBATIM)
         add_library(surface_cuda_backend SHARED src/SurfaceCudaBackend.cpp "${_surface_ptx_header}")
+        if(MVVCVTK_BUILD_TESTING)
+            target_compile_definitions(surface_cuda_backend PRIVATE MVVCVTK_SURFACE_CUDA_TESTING=1)
+            target_compile_definitions(surface_determination PRIVATE MVVCVTK_SURFACE_CUDA_TESTING=1)
+        endif()
         target_include_directories(surface_cuda_backend PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
         target_sources(surface_cuda_backend PRIVATE src/SurfaceCudaKernels.cu src/SurfaceCudaTypes.h)
         set_source_files_properties(src/SurfaceCudaKernels.cu PROPERTIES HEADER_FILE_ONLY TRUE)

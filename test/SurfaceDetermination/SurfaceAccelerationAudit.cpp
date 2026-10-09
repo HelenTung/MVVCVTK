@@ -112,6 +112,8 @@ int main(int argc, char **argv) {
              << ",\"outputMs\":" << result.outputMs
              << ",\"cudaPointCount\":" << result.cudaPointCount
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
+             << ",\"cudaHostBufferBytes\":" << result.cudaHostBufferBytes
+             << ",\"cudaBatchCount\":" << result.cudaBatchCount
              << ",\"cpuThreadCount\":" << result.cpuThreadCount
              << ",\"availablePhysicalCores\":" << result.availablePhysicalCores
              << ",\"availableLogicalThreads\":" << result.availableLogicalThreads

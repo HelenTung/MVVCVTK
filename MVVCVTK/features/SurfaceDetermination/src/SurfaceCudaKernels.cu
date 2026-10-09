@@ -24,7 +24,7 @@ __device__ int Sample(const SurfaceCudaVolume &v, const double *position, double
     for (int corner = 0; corner < 8; ++corner) {
         const int x = lower[0] + (corner & 1), y = lower[1] + ((corner >> 1) & 1),
                   z = lower[2] + ((corner >> 2) & 1);
-        if (z < v.firstSlice || z >= v.firstSlice + v.sliceCount)
+        if (z < v.firstSlice || std::int64_t(z) - v.firstSlice >= v.sliceCount)
             return 3;
         const auto index =
             (std::size_t(z - v.firstSlice) * v.dimensions[1] + (y - v.extent[2])) * v.dimensions[0] +
