@@ -33,6 +33,7 @@
 namespace {
 AlignmentComputeBackend auditBackend=AlignmentComputeBackend::Cpu;
 bool algorithmOnly=false;
+bool exportSurfaces=false;
 void Require(bool value,const char *message) { if (!value) throw std::runtime_error(message); }
 std::string Json(const std::string &value) {
     std::string text="\""; const char *hex="0123456789abcdef";
@@ -266,7 +267,7 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         }
         out<<']';
         if (snapshot->isoEstimate) out<<",\"background\":"<<snapshot->isoEstimate->backgroundValue<<",\"material\":"<<snapshot->isoEstimate->materialValue<<",\"iso\":"<<snapshot->isoEstimate->isoValue;
-        if(!algorithmOnly) {
+        if(!algorithmOnly || exportSurfaces) {
         const auto view=data.GetSurfaceMesh(data.GetDataGraph(),surface.mesh);
         Require(view && view->mesh,"Formal surface render view unavailable.");
         auto writer=vtkSmartPointer<vtkXMLPolyDataWriter>::New(); writer->SetFileName((folder/(scan.id+".vtp")).u8string().c_str());
@@ -318,6 +319,8 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     bool passed=false;
     if (const auto archive=feature.GetArchive(result.result)) {
         const auto &t=archive->sourceToTarget;
+        out<<",\"sourceToTarget\":[";
+        for(std::size_t i=0;i<t.size();++i) {if(i)out<<',';out<<t[i];} out<<']';
         const double translation=std::hypot(t[3],t[7],t[11]);
         const double angle=std::atan2(std::hypot(t[9]-t[6],t[2]-t[8],t[4]-t[1])/2,(t[0]+t[5]+t[10]-1)/2);
         out<<",\"translationErrorMm\":"<<translation<<",\"rotationErrorRadians\":"<<angle;
@@ -705,9 +708,9 @@ void Align(MetrologyAlignmentHostFeature &feature,const std::vector<Surface> &su
 } // namespace
 int wmain(int argc,wchar_t **argv) {
     try {
-        Require(argc>=3 && argc<=7,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run] [--cuda-deviation] [--algorithm-only]");
+        Require(argc>=3 && argc<=8,"Usage: MetrologyTimepointAudit manifest output-directory [--controls-only] [--new-run] [--cuda-deviation] [--algorithm-only] [--export-surfaces]");
         bool controlsOnly=false,newRun=false;
-        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else if(option==L"--cuda-deviation")auditBackend=AlignmentComputeBackend::Cuda; else if(option==L"--algorithm-only")algorithmOnly=true; else throw std::runtime_error("Unknown audit option."); }
+        for (int i=3;i<argc;++i) { const std::wstring option(argv[i]); if (option==L"--controls-only") controlsOnly=true; else if (option==L"--new-run") newRun=true; else if(option==L"--cuda-deviation")auditBackend=AlignmentComputeBackend::Cuda; else if(option==L"--algorithm-only")algorithmOnly=true; else if(option==L"--export-surfaces")exportSurfaces=true; else throw std::runtime_error("Unknown audit option."); }
         const auto manifest=ReadManifest(std::filesystem::path(argv[1])); std::filesystem::path folder(argv[2]);
         Require(!algorithmOnly || manifest.scans.size()==1,"Algorithm audit uses one source per process for independent process peaks.");
         if (newRun) folder/="run-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());

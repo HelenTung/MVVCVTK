@@ -109,6 +109,17 @@ set_target_properties(mvvcvtk_alignment_display_audit PROPERTIES
     PROJECT_LABEL AlignmentDisplayAudit FOLDER "MVVCVTK/test/Automation/Reference")
 vtk_module_autoinit(TARGETS mvvcvtk_alignment_display_audit MODULES ${MVVCVTK_VTK_TARGETS})
 
+add_executable(mvvcvtk_alignment_deviation_render_audit AlignmentDeviationRenderAudit.cpp)
+target_include_directories(mvvcvtk_alignment_deviation_render_audit PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_deviation_render_audit PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
+    MVVCVTK::MetrologyAlignment MVVCVTKInternal::FeatureSupport opencv_world
+    ${MVVCVTK_VTK_TARGETS} VTK::RenderingAnnotation VTK::IOImage VTK::IOXML VTK::FiltersCore)
+SetTargetDefaults(mvvcvtk_alignment_deviation_render_audit)
+set_target_properties(mvvcvtk_alignment_deviation_render_audit PROPERTIES
+    PROJECT_LABEL DeviationRenderAudit FOLDER "MVVCVTK/test/Automation/Reference")
+vtk_module_autoinit(TARGETS mvvcvtk_alignment_deviation_render_audit MODULES ${MVVCVTK_VTK_TARGETS})
+
 add_executable(mvvcvtk_alignment_inspection_tests AlignmentInspectionTests.cpp)
 target_include_directories(mvvcvtk_alignment_inspection_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
