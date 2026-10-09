@@ -3,6 +3,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 from pathlib import Path
 
 
@@ -20,7 +21,7 @@ def verify_report(json_path, csv_path, fixture=False):
     def constant(value):
         raise ValueError("Nonstandard JSON numeric token: " + value)
     report = json.loads(json_path.read_text(encoding="utf-8"), parse_constant=constant)
-    require(report["format"] == "mvvcvtk.metrology.report.json/2", "Unknown report format")
+    require(report["format"] == "mvvcvtk.metrology.report.json/3", "Unknown report format")
     alignments = {a["result"]: a for a in report["alignments"]}
     inspections = {v["result"]: v for v in report["inspections"]}
     deviations = {v["result"]: v for v in report["deviations"]}
@@ -28,9 +29,10 @@ def verify_report(json_path, csv_path, fixture=False):
     require(len(volumes) == len(report["voxelVolumes"]), "Duplicate volume identity")
     with csv_path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
-        require(len(reader.fieldnames) == 46 and len(set(reader.fieldnames)) == 46, "CSV column schema mismatch")
+        require(len(reader.fieldnames) == 47 and len(set(reader.fieldnames)) == 47, "CSV column schema mismatch")
         rows = list(reader)
     for row in rows:
+        require(row["configuration_json"] != "" if row["record_type"] in ("deviation-display","scene-display") else row["configuration_json"] == "", "Unexpected/missing configuration JSON cell")
         require(None not in row and all(v is not None for v in row.values()), "CSV record has wrong column count")
         require(text(row["report_id"]) == report["id"] and int(row["captured_commit"]) == report["capturedCommit"], "CSV report identity mismatch")
         require(row["all_inputs_current_at_capture"] == str(report["wereInputsCurrentAtCapture"]).lower(), "CSV capture currentness mismatch")
@@ -177,6 +179,49 @@ def verify_report(json_path, csv_path, fixture=False):
             for col, value in (("voxel_extent",st["evaluatedExtent"]),("voxel_range",p["storedValueRange"]),("voxel_labels",p["labels"]),
                                ("voxel_spacing",g["spacing"]),("voxel_origin",g["origin"]),("voxel_direction",g["direction"])):
                 require((json.loads(row[col]) if row[col] else None) == value, "CSV voxel context mismatch: " + col)
+    presentation = report["presentation"]
+    for display in presentation["deviations"]:
+        parameters = display["parameters"]; deviation = deviations[parameters["result"]]
+        row = expect("deviation-display",deviation["result"],deviation["alignmentResult"],metric="display-configuration",status=presentation["source"],current_at_capture=str(deviation["isCurrent"]).lower())
+        require(json.loads(row["configuration_json"]) == display, "CSV deviation display configuration mismatch")
+        require(all(row[k] == "" for k in ("measured","nominal","deviation","lower_limit","upper_limit","verdict")), "Display row fabricates a measurement")
+        low, high = parameters["range"]; tolerance = deviation["parameters"]["tolerance"]
+        def mix(a,b,t):
+            t = min(1,max(0,t)); return [math.floor(x+(y-x)*t+.5) for x,y in zip(a,b)]
+        def color(value):
+            if parameters["useToleranceColors"] and tolerance:
+                a,b = tolerance
+                if a <= value <= b: return [60,180,95]
+                if value < a: return mix([45,90,215],[150,205,255],(value-low)/(a-low) if a>low else 0)
+                return mix([255,200,130],[210,45,35],(value-b)/(high-b) if high>b else 1)
+            center = min(high,max(low,0))
+            if value < center: return mix([45,90,215],[235,235,235],(value-low)/(center-low) if center>low else 0)
+            return mix([235,235,235],[210,45,35],(value-center)/(high-center) if high>center else 1)
+        require(display["legendRgb"] == [color(low+(high-low)*(i/256)) for i in range(257)], "Independent colorbar calculation mismatch")
+        require(display["colorMapVersion"] == "deviation-colors-1" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
+        selection = display["selection"]
+        require((selection is not None) == (parameters["selectedVertex"] is not None), "Selection capture mismatch")
+        if selection:
+            require(selection["result"] == deviation["result"] and selection["vertex"] == parameters["selectedVertex"] and selection["isCurrent"] == deviation["isCurrent"], "Selected deviation identity mismatch")
+            matrix = deviation["sourceToTarget"]; p = selection["sourcePoint"]
+            for axis in range(3): require(math.isclose(selection["alignedPoint"][axis],sum(matrix[4*axis+j]*p[j] for j in range(3))+matrix[4*axis+3],rel_tol=1e-12,abs_tol=1e-10), "Selected point transform mismatch")
+            if deviation["forward"]["samplesIncluded"]: require(selection["sample"] == deviation["forward"]["samples"][selection["vertex"]], "Selected sample is not original unclipped field data")
+    scene = presentation["scene"]
+    if scene:
+        parameters = scene["parameters"]; anchor = alignments[parameters["anchorAlignment"]]
+        row = expect("scene-display",anchor["result"],anchor["result"],metric="display-configuration",status=presentation["source"],current_at_capture=str(scene["wasCurrentAtCapture"]).lower())
+        require(json.loads(row["configuration_json"]) == scene, "CSV scene configuration mismatch")
+        require(all(row[k] == "" for k in ("measured","nominal","deviation","lower_limit","upper_limit","verdict")), "Scene configuration fabricates a measurement")
+        inverse = scene["targetToModel"]; forward = anchor["sourceToTarget"]
+        for i in range(4):
+            for j in range(4): require(math.isclose(sum(inverse[4*i+k]*forward[4*k+j] for k in range(4)),int(i==j),abs_tol=1e-10), "Report scene anchor inverse mismatch")
+        current = anchor["wasCurrentAtCapture"]
+        for part in parameters["parts"]:
+            current = current and alignments[part["alignmentResult"]]["wasCurrentAtCapture"]
+            if part["inspection"]:
+                inspection = inspections[part["inspection"]]; current = current and inspection["isCurrent"]
+                require(inspection["alignmentResult"] == part["alignmentResult"] and (part["selectedItem"] is None or any(v["id"] == part["selectedItem"] for v in inspection["plan"]["items"])), "Scene inspection selection mismatch")
+        require(current == scene["wasCurrentAtCapture"] and scene["glyphVersion"] == "inspection-glyphs-1" and not scene["glyphLengthIsMeasuredHeight"], "Scene provenance/currentness mismatch")
     require(set(indexed) == expected, "CSV contains unaccounted rows")
     if fixture:
         require(report["title"] == '报告 "A",\n二'.replace("\\n", "\n"), "Unicode/control JSON round trip failed")
@@ -187,7 +232,7 @@ def verify_report(json_path, csv_path, fixture=False):
         require(any(v["parameters"]["labels"] == [2**53+1,2**64-1] for v in volumes.values()), "Label integer precision lost")
         require(samples_verified == 3 and all(x["report_id"].startswith("'=") for x in rows), "Fixture sample or spreadsheet text protection mismatch")
     result = {"jsonSha256": hashlib.sha256(json_path.read_bytes()).hexdigest(), "csvSha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
-              "csvRows": len(rows), "voxelVolumes": len(volumes), "inspectionRows": len(dimension_rows), "jsonDeviationSamples": samples_verified, "passed": True}
+              "csvRows": len(rows), "voxelVolumes": len(volumes), "displayConfigurations": len(presentation["deviations"])+int(scene is not None), "inspectionRows": len(dimension_rows), "jsonDeviationSamples": samples_verified, "passed": True}
     print("REPORT_REFERENCE " + json.dumps(result))
     return result
 

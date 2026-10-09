@@ -618,7 +618,18 @@ void InspectionLifecycle(bool hasSectionMesh=false) {
     if(selection)Check(selection->displayedRegions.size()==1 && selection->displayedRegions[0].kind==(hasSectionMesh ? AlignmentSceneRegionKind::SectionSamples : AlignmentSceneRegionKind::VertexCandidates) &&
         selection->displayedRegions[0].drawnMarkers==(hasSectionMesh ? 3u : 1u) && selection->displayedRegions[0].sourceCount.has_value(),
         "display distinguishes actual section samples from vertex candidates and caps visual markers");
-    const auto frozenDisplay=f.feature->GetState().sceneDisplay;display.sceneDisplay->parts[0].selectedItem="missing-item";
+    const auto frozenDisplay=f.feature->GetState().sceneDisplay;
+    MetrologyReportRequest sceneCapture;sceneCapture.id="current-scene";sceneCapture.captureCurrentDisplay=true;
+    const auto currentSceneReport=f.feature->GetReport(sceneCapture);
+    Check(currentSceneReport.report && currentSceneReport.report->presentation.source==MetrologyReportDisplaySource::CurrentFeatureState &&
+        currentSceneReport.report->presentation.scene && currentSceneReport.report->presentation.scene->parameters==frozenDisplay &&
+        currentSceneReport.report->inspections.size()==1 && currentSceneReport.report->alignments.size()==1,
+        "current display capture shares configuration and automatically includes inspection and alignment");
+    sceneCapture.sceneDisplay=*frozenDisplay;Check(f.feature->GetReport(sceneCapture).status==AlignmentStatus::InvalidInput,"current and explicit display capture cannot be mixed");
+    sceneCapture.captureCurrentDisplay=false;const auto explicitSceneReport=f.feature->GetReport(sceneCapture);sceneCapture.sceneDisplay->parts[0].selectedItem="changed-after-capture";
+    Check(explicitSceneReport.report && explicitSceneReport.report->presentation.source==MetrologyReportDisplaySource::ExplicitConfiguration &&
+        explicitSceneReport.report->presentation.scene->parameters->parts[0].selectedItem==selectedItem,"explicit scene configuration freezes without aliasing mutable caller parameters");
+    display.sceneDisplay->parts[0].selectedItem="missing-item";
     Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozenDisplay,
         "missing report item cannot replace a valid inspection scene");
     Check(!f.feature->GetSceneItem("inspection","missing-item"),"unknown report item selection is empty");
@@ -993,6 +1004,16 @@ void AutomaticReferenceLifecycle() {
           std::abs(selected->alignedPoint[0]-model.referenceMesh->GetVertices()[0]) < 1e-7,
           "selected deviation locates original sample and aligned reference-space point");
     Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetVertices().size()/3),"selection bounds checked");
+    MetrologyReportRequest paletteRequest;paletteRequest.id="current-colorbar";paletteRequest.captureCurrentDisplay=true;
+    const auto paletteCapture=f.feature->GetReport(paletteRequest);
+    Check(paletteCapture.report && paletteCapture.report->deviations.size()==1 && paletteCapture.report->presentation.deviations.size()==1 &&
+        paletteCapture.report->presentation.deviations[0].parameters.range==std::array<double,2>{0,.1} &&
+        paletteCapture.report->presentation.deviations[0].selection && selected && paletteCapture.report->presentation.deviations[0].selection->sourcePoint==selected->sourcePoint &&
+        paletteCapture.report->presentation.deviations[0].selection->alignedPoint==selected->alignedPoint,"colorbar capture freezes original point/sample and auto-includes its result");
+    paletteRequest.captureCurrentDisplay=false;paletteRequest.deviationDisplays={*display.deviationDisplay};paletteRequest.deviationDisplays.push_back(*display.deviationDisplay);
+    Check(f.feature->GetReport(paletteRequest).status==AlignmentStatus::InvalidInput,"duplicate colorbar ownership rejected");paletteRequest.deviationDisplays.pop_back();
+    paletteRequest.deviationDisplays[0].range={0,0};Check(f.feature->GetReport(paletteRequest).status==AlignmentStatus::InvalidInput,"invalid report colorbar range rejected");
+
     const auto oldOverlay = views->overlay->overlays.back();
     show();
     Check(displayed.isDisplayReady && views->overlay->overlays.back()==oldOverlay,

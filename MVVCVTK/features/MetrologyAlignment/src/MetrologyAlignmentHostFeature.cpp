@@ -207,7 +207,13 @@ class MetrologyAlignmentHostFeature::Impl final {
     }
     MetrologyReportResult GetReport(const MetrologyReportRequest &request) const {
         if (!GetIsOwner() || !m_data) return {};
-        return AlignmentReport::Capture(m_data->GetDataGraph(),request,m_config);
+        const auto graph=m_data->GetDataGraph();AlignmentReport::CurrentDisplay current;
+        if(request.captureCurrentDisplay) {
+            current.supplied=true;current.deviation=m_deviationDisplay.GetRequest();current.scene=m_sceneDisplay.GetRequest();
+            if((current.deviation && !m_deviationDisplay.GetReady(graph)) || (current.scene && !m_sceneDisplay.GetReady(graph)))
+                return {AlignmentStatus::Stale,{},"Current display dependencies are stale."};
+        }
+        return AlignmentReport::Capture(graph,request,m_config,current);
     }
     std::optional<VoxelVolumeSnapshot> GetVoxelVolume(const DataRevisionRef &ref) const {
         if(!GetIsOwner() || !m_data)return {};return AlignmentVoxelVolumeData::GetResult(m_data->GetDataGraph(),ref);

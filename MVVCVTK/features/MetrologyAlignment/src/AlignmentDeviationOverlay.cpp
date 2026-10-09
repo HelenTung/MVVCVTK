@@ -1,4 +1,5 @@
 #include "AlignmentDeviationOverlay.h"
+#include "AlignmentDeviationColors.h"
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkLookupTable.h>
@@ -15,25 +16,6 @@
 #include <stdexcept>
 
 namespace {
-using Color = std::array<unsigned char,3>;
-Color Mix(Color a, Color b, double fraction) {
-    Color result{}; fraction = std::clamp(fraction,0.0,1.0);
-    for (std::size_t i=0;i<3;++i) result[i]=static_cast<unsigned char>(std::lround(a[i]+(b[i]-a[i])*fraction));
-    return result;
-}
-Color ColorAt(double value, const AlignmentDeviationDisplay &display,
-              const std::optional<std::array<double,2>> &tolerance) {
-    const double low=display.range[0], high=display.range[1];
-    if (display.useToleranceColors && tolerance) {
-        if (value >= (*tolerance)[0] && value <= (*tolerance)[1]) return {60,180,95};
-        if (value < (*tolerance)[0]) return Mix({45,90,215},{150,205,255},
-            (*tolerance)[0] > low ? (value-low)/((*tolerance)[0]-low) : 0);
-        return Mix({255,200,130},{210,45,35},high > (*tolerance)[1] ? (value-(*tolerance)[1])/(high-(*tolerance)[1]) : 1);
-    }
-    const double center=std::clamp(0.0,low,high);
-    if (value < center) return Mix({45,90,215},{235,235,235},center > low ? (value-low)/(center-low) : 0);
-    return Mix({235,235,235},{210,45,35},high > center ? (value-center)/(high-center) : 1);
-}
 void CheckDeadline(std::chrono::steady_clock::time_point deadline) {
     if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Deviation display deadline reached.");
 }
@@ -41,13 +23,7 @@ void CheckDeadline(std::chrono::steady_clock::time_point deadline) {
 
 bool AlignmentDeviationOverlay::GetDisplayValid(const AlignmentDeviationDisplay &d,
                                                 const AlignmentDeviationSnapshot &r) {
-    if (!r.forward || !r.parameters || !GetDataRevisionRefValid(d.result) || d.result != r.result ||
-        !std::isfinite(d.range[0]) || !std::isfinite(d.range[1]) || d.range[0] >= d.range[1] ||
-        !std::isfinite(d.range[1]-d.range[0]) ||
-        (r.parameters->metric == AlignmentDeviationMetric::UnsignedDistance && d.range[0] < 0) ||
-        (d.selectedVertex && *d.selectedVertex >= r.forward->samples.size())) return false;
-    return !d.useToleranceColors || !r.parameters->tolerance ||
-        (d.range[0] <= (*r.parameters->tolerance)[0] && d.range[1] >= (*r.parameters->tolerance)[1]);
+    return AlignmentDeviationColors::GetDisplayValid(d,r);
 }
 std::size_t AlignmentDeviationOverlay::GetRequiredBytes(std::size_t count) {
     constexpr std::size_t fixedBytes=65536;
@@ -78,7 +54,7 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
         if (i%256==0) CheckDeadline(deadline);
         const auto &sample=output->field->samples[i];
         const auto color=sample.state == AlignmentDeviationState::Valid
-            ? ColorAt(sample.value,display,result.parameters->tolerance) : Color{128,128,128};
+            ? AlignmentDeviationColors::ColorAt(sample.value,display,result.parameters->tolerance) : AlignmentDeviationColors::invalidColor;
         std::copy(color.begin(),color.end(),buffer+3*i);
     }
     output->colored=vtkSmartPointer<vtkPolyData>::New();
@@ -87,8 +63,9 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
     output->lookup=vtkSmartPointer<vtkLookupTable>::New();
     output->lookup->SetRange(display.range.data()); output->lookup->SetNumberOfTableValues(257);
     output->lookup->SetNanColor(.5,.5,.5,1); output->lookup->Build();
+    const auto legendRgb=AlignmentDeviationColors::GetLegend(display,result.parameters->tolerance);
     for (int i=0;i<=256;++i) {
-        const auto color=ColorAt(display.range[0]+(display.range[1]-display.range[0])*i/256.0,display,result.parameters->tolerance);
+        const auto color=legendRgb[static_cast<std::size_t>(i)];
         output->lookup->SetTableValue(i,color[0]/255.0,color[1]/255.0,color[2]/255.0,1);
     }
     const char *unit=result.unit == AlignmentUnit::Millimeter ? "mm" : result.unit == AlignmentUnit::Meter ? "m" : "model unit";

@@ -7,6 +7,11 @@ struct MetrologyReportRequest final {
     std::string id, title;
     // 每组内不允许重复修订。评价隐含的对齐自动加入，也可显式保留未通过质量门限的对齐。
     std::vector<DataRevisionRef> alignments, inspections, deviations, voxelVolumes;
+    // 显式展示配置引用的结果自动加入报告；同一偏差只允许一套色标。
+    std::vector<AlignmentDeviationDisplay> deviationDisplays;
+    std::optional<AlignmentSceneDisplay> sceneDisplay;
+    // 与显式配置互斥。只冻结当前 Feature 配置，不捕获屏幕像素、相机或 VTK 对象。
+    bool captureCurrentDisplay=false;
 };
 struct MetrologyReportAlignment final {
     DataRevisionRef result, recipeRevision, transform;
@@ -44,8 +49,29 @@ struct MetrologyReportInput final {
     std::optional<MetrologyReportMesh> mesh;
     bool wasCurrentAtCapture=false;
 };
+enum class MetrologyReportDisplaySource : std::uint8_t { None, ExplicitConfiguration, CurrentFeatureState };
+struct MetrologyReportDeviationDisplay final {
+    AlignmentDeviationDisplay parameters;
+    std::string colorMapVersion="deviation-colors-1";
+    // 257 个均匀取值的实际色标 RGB；逐点颜色按同版本分段规则计算，显示截断不修改统计。
+    std::array<std::array<std::uint8_t,3>,257> legendRgb{};
+    std::array<std::uint8_t,3> invalidRgb{128,128,128},selectedRgb{255,255,0};
+    std::optional<AlignmentDeviationSelection> selection;
+};
+struct MetrologyReportSceneDisplay final {
+    std::shared_ptr<const AlignmentSceneDisplay> parameters;
+    AlignmentMatrix targetToModel=alignmentIdentity;
+    double glyphLength=10;
+    std::string glyphVersion="inspection-glyphs-1";
+    bool wasCurrentAtCapture=true;
+};
+struct MetrologyReportPresentation final {
+    MetrologyReportDisplaySource source=MetrologyReportDisplaySource::None;
+    std::vector<MetrologyReportDeviationDisplay> deviations;
+    std::optional<MetrologyReportSceneDisplay> scene;
+};
 struct MetrologyReport final {
-    std::uint32_t schemaVersion=2;
+    std::uint32_t schemaVersion=3;
     std::string id, title;
     DataCommitId capturedCommit=0;
     std::int64_t capturedUnixMilliseconds=0;
@@ -59,6 +85,7 @@ struct MetrologyReport final {
     std::size_t estimatedMetadataBytes=0;
     // 原生网格上的单元体积评价，不依赖对齐；共享参数，不持有源体素。
     std::vector<VoxelVolumeSnapshot> voxelVolumes;
+    MetrologyReportPresentation presentation;
 };
 struct MetrologyReportResult final {
     // FullyDetermined 仅表示捕获成功，不代表报告中所有尺寸合格或输入仍为当前版本。
@@ -82,7 +109,8 @@ struct MetrologyReportWriteResult final {
 };
 // 可在后台只读写出 GetReport 返回的冻结对象；不访问 Host/VTK，不构造整份字符串。
 // UTF-8 JSON 保留完整上下文；非有限浮点数用 {"numericState":"NaN|PositiveInfinity|NegativeInfinity"} 表达。
-// JSON/CSV schema 2 增加体素体积和完整参数；体素行无对齐归属，空矩阵不代表单位矩阵。
+// JSON/CSV schema 3 加入冻结显示配置与色标；CSV configuration_json 列流式保留完整配置。
+// 体素行无对齐归属，空矩阵不代表单位矩阵；显示配置行不产生测量值或公差判定。
 // CSV 是尺寸/偏差/体素统计视图（偏差行 verdict 属于整个评价）；以空白、公式前缀或单引号起始的文本前加单引号，JSON 保留原文。
 // 逐点偏差默认省略并明确标记；CSV 明细的非 Valid 测量值留空。失败可能留下前缀，调用方负责丢弃/原子提交。
 MetrologyReportWriteResult WriteMetrologyReport(const MetrologyReport &report,std::ostream &output,

@@ -3,6 +3,8 @@
 #include "AlignmentInspectionData.h"
 #include "AlignmentDeviationData.h"
 #include "AlignmentVoxelVolumeData.h"
+#include "AlignmentReportDisplay.h"
+#include "AlignmentMath.h"
 #include <set>
 #include <limits>
 #include <stdexcept>
@@ -30,11 +32,14 @@ bool Current(const DataGraphSnapshot &graph,const DataRevisionRef &ref) {
 }
 
 MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,const MetrologyReportRequest &request,
-                                              const AlignmentConfig &config) {
+                                              const AlignmentConfig &config,const CurrentDisplay &current) {
     MetrologyReportResult output;
     try {
-        Require(graph.view && !request.id.empty() && request.id.size()<=128 && request.title.size()<=1024 &&
-            (!request.alignments.empty() || !request.inspections.empty() || !request.deviations.empty() || !request.voxelVolumes.empty()),"Invalid report request.");
+        Require(graph.view && !request.id.empty() && request.id.size()<=128 && request.title.size()<=1024,"Invalid report request.");
+        Require(!request.captureCurrentDisplay || (current.supplied && request.deviationDisplays.empty() && !request.sceneDisplay),"Current and explicit report display configuration cannot be mixed.");
+        const auto *scene=request.captureCurrentDisplay ? current.scene.get() : request.sceneDisplay ? &*request.sceneDisplay : nullptr;
+        Require(!scene || scene->isVisible,"Omit hidden scene configuration from report.");
+        const auto visitDisplays=[&](const auto &visit){if(request.captureCurrentDisplay){if(current.deviation)visit(*current.deviation);}else for(const auto &display:request.deviationDisplays)visit(display);};
         Budget budget{config.workingBytes.value_or(std::numeric_limits<std::size_t>::max())};
         budget.Add(4096); budget.Text(request.id); budget.Text(request.title);
         // 每项预留包括增长中同时存活的 vector 缓冲、去重节点和小快照。
@@ -42,10 +47,19 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
             budget.Add(refs->size(),4096); std::set<DataRevisionRef> unique;
             for (const auto &ref:*refs) Require(GetDataRevisionRefValid(ref) && unique.insert(ref).second,"Invalid or duplicate report result revision.");
         }
+        budget.Add(request.captureCurrentDisplay ? (current.deviation ? 1u : 0u) : request.deviationDisplays.size(),4096);
+        std::vector<DataRevisionRef> inspections=request.inspections,deviations=request.deviations;
+        const auto append=[&](auto &refs,const DataRevisionRef &ref){if(std::find(refs.begin(),refs.end(),ref)==refs.end()){budget.Add(4096);refs.push_back(ref);}};
+        std::set<DataRevisionRef> displayRefs;
+        visitDisplays([&](const auto &d){Require(GetDataRevisionRefValid(d.result) && displayRefs.insert(d.result).second,"Duplicate or invalid report colorbar.");append(deviations,d.result);});
+        if(scene){budget.Add(scene->parts.size(),4096);for(const auto &part:scene->parts){budget.Text(part.id);if(part.selectedItem)budget.Text(*part.selectedItem);if(part.inspection)append(inspections,*part.inspection);}
+            if(scene->selectedPart)budget.Text(*scene->selectedPart);}
+        Require(!request.alignments.empty() || !inspections.empty() || !deviations.empty() || !request.voxelVolumes.empty() || scene,"Report has no results.");
         auto report=std::make_shared<MetrologyReport>(); report->id=request.id; report->title=request.title;
         report->capturedCommit=graph.commitId;
         report->capturedUnixMilliseconds=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         std::set<DataRevisionRef> pendingAlignments(request.alignments.begin(),request.alignments.end());
+        if(scene){pendingAlignments.insert(scene->anchorAlignment);for(const auto &part:scene->parts)pendingAlignments.insert(part.alignmentResult);}
         std::set<DataRevisionRef> visited;
         std::vector<DataRevisionRef> pendingInputs;
         const auto addInput=[&](const DataRevisionRef &ref) {
@@ -53,15 +67,15 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
             Require(GetDataRevisionRefValid(ref),"Report lineage contains an invalid revision.");
             budget.Add(4096); visited.insert(ref); pendingInputs.push_back(ref);
         };
-        report->inspections.reserve(request.inspections.size()); report->deviations.reserve(request.deviations.size());
-        for (const auto &ref:request.inspections) {
+        report->inspections.reserve(inspections.size()); report->deviations.reserve(deviations.size());
+        for (const auto &ref:inspections) {
             const auto snapshot=AlignmentInspectionData::GetResult(graph,ref);
             Require(snapshot.has_value(),"Inspection report source is missing or inconsistent.");
             pendingAlignments.insert(snapshot->alignmentResult); addInput(ref);
             report->wereInputsCurrentAtCapture=report->wereInputsCurrentAtCapture && snapshot->isCurrent;
             report->inspections.push_back(*snapshot);
         }
-        for (const auto &ref:request.deviations) {
+        for (const auto &ref:deviations) {
             const auto snapshot=AlignmentDeviationDataStore::GetResult(graph,ref);
             Require(snapshot.has_value(),"Deviation report source is missing or inconsistent.");
             pendingAlignments.insert(snapshot->alignmentResult); addInput(ref);
@@ -122,6 +136,24 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
             report->wereInputsCurrentAtCapture=report->wereInputsCurrentAtCapture && entry.wasCurrentAtCapture;
             report->inputs.push_back(std::move(entry));
         }
+        auto &presentation=report->presentation;
+        presentation.source=request.captureCurrentDisplay ? MetrologyReportDisplaySource::CurrentFeatureState :
+            scene || !request.deviationDisplays.empty() ? MetrologyReportDisplaySource::ExplicitConfiguration : MetrologyReportDisplaySource::None;
+        visitDisplays([&](const auto &d){const auto found=std::find_if(report->deviations.begin(),report->deviations.end(),[&](const auto &value){return value.result==d.result;});
+            Require(found!=report->deviations.end(),"Report colorbar deviation is unavailable.");std::optional<AlignmentPoint> point;
+            if(d.selectedVertex){const auto node=graph.view->GetData(found->sourceMesh);const auto mesh=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
+                Require(mesh && *d.selectedVertex<mesh->GetVertices().size()/3,"Selected report vertex is unavailable.");const auto offset=3*(*d.selectedVertex);const auto &v=mesh->GetVertices();point=AlignmentPoint{v[offset],v[offset+1],v[offset+2]};}
+            presentation.deviations.push_back(AlignmentReportDisplay::BuildDeviation(d,*found,point));});
+        if(scene){const auto anchor=std::find_if(report->alignments.begin(),report->alignments.end(),[&](const auto &a){return a.result==scene->anchorAlignment;});
+            Require(anchor!=report->alignments.end(),"Report scene anchor is unavailable.");MetrologyReportSceneDisplay value;
+            value.parameters=request.captureCurrentDisplay ? current.scene : std::make_shared<const AlignmentSceneDisplay>(*scene);
+            value.targetToModel=AlignmentMath::Inverse(anchor->sourceToTarget);value.glyphLength=config.axisLength;value.wasCurrentAtCapture=anchor->wasCurrentAtCapture;
+            for(const auto &part:scene->parts){const auto a=std::find_if(report->alignments.begin(),report->alignments.end(),[&](const auto &v){return v.result==part.alignmentResult;});
+                Require(a!=report->alignments.end(),"Report scene part is unavailable.");value.wasCurrentAtCapture=value.wasCurrentAtCapture && a->wasCurrentAtCapture;
+                if(part.inspection){const auto i=std::find_if(report->inspections.begin(),report->inspections.end(),[&](const auto &v){return v.result==*part.inspection;});
+                    Require(i!=report->inspections.end(),"Report scene inspection is unavailable.");value.wasCurrentAtCapture=value.wasCurrentAtCapture && i->isCurrent;}}
+            presentation.scene=std::move(value);}
+        Require(AlignmentReportDisplay::GetValid(*report),"Report display configuration is inconsistent with captured results.");
         report->estimatedMetadataBytes=budget.used; output.report=std::move(report); output.status=AlignmentStatus::FullyDetermined;
     } catch (const std::length_error &e) { output.status=AlignmentStatus::BudgetExceeded; output.message=e.what(); }
       catch (const std::bad_alloc &) { output.status=AlignmentStatus::BudgetExceeded; }

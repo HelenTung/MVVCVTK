@@ -1,5 +1,6 @@
 #include "Host/MetrologyReport.h"
 #include "AlignmentVoxelVolumeData.h"
+#include "AlignmentReportDisplay.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -23,6 +24,8 @@ class Sink final {
 public:
   Sink(std::ostream &stream, const MetrologyReportWriteOptions &options)
       : options(options), stream(stream) {}
+  explicit Sink(Sink &parent)
+      : options(parent.options), stream(parent.stream), csvParent(&parent) {}
   void Check() const {
     if (options.isCancelled && options.isCancelled())
       throw Failure{Status::Cancelled, "Report write cancelled."};
@@ -46,6 +49,19 @@ public:
   }
   void Flush() {
     Check();
+    if (csvParent) {
+      std::size_t start = 0;
+      for (std::size_t i = 0; i < pending; ++i)
+        if (buffer[i] == '"') {
+          csvParent->Put({buffer.data() + start, i - start});
+          csvParent->Put("\"\"");
+          start = i + 1;
+        }
+      csvParent->Put({buffer.data() + start, pending - start});
+      confirmed += pending;
+      pending = 0;
+      return;
+    }
     if (!stream.good() || !stream.rdbuf())
       throw Failure{Status::IoError, "Report output stream is unavailable."};
     if (!pending)
@@ -79,6 +95,7 @@ private:
   std::ostream &stream;
   std::array<char, 16384> buffer{};
   std::size_t pending = 0;
+  Sink *csvParent = nullptr;
 };
 std::size_t Utf8(std::string_view s, std::size_t i) {
   const auto first = static_cast<unsigned char>(s[i]);
@@ -150,6 +167,9 @@ const char *Name(VoxelVolumeMethod v) {
 const char *Name(VoxelVolumeValidity v) {
   return Enum(v, {"Complete", "IncompleteSamples", "TouchesBoundary",
                   "EmptySelection"});
+}
+const char *Name(MetrologyReportDisplaySource v) {
+  return Enum(v, {"None", "ExplicitConfiguration", "CurrentFeatureState"});
 }
 const char *Name(AlignmentUnit v) {
   return Enum(v, {"ModelUnit", "Millimeter", "Meter"});
@@ -1026,6 +1046,96 @@ template <> struct Codec<VoxelVolumeSnapshot> {
     j.End();
   }
 };
+template <> struct Codec<AlignmentDeviationDisplay> {
+  static void Write(Json &j, const AlignmentDeviationDisplay &v) {
+    j.Object();
+    j.Field("result", v.result);
+    j.Field("range", v.range);
+    j.Field("useToleranceColors", v.useToleranceColors);
+    j.Field("isVisible", v.isVisible);
+    j.Field("selectedVertex", v.selectedVertex);
+    j.End();
+  }
+};
+template <> struct Codec<AlignmentDeviationSelection> {
+  static void Write(Json &j, const AlignmentDeviationSelection &v) {
+    j.Object();
+    j.Field("result", v.result);
+    j.Field("vertex", v.vertex);
+    j.Field("sourcePoint", v.sourcePoint);
+    j.Field("alignedPoint", v.alignedPoint);
+    j.Field("sample", v.sample);
+    j.Field("isCurrent", v.isCurrent);
+    j.End();
+  }
+};
+template <> struct Codec<MetrologyReportDeviationDisplay> {
+  static void Write(Json &j, const MetrologyReportDeviationDisplay &v) {
+    j.Object();
+    j.Field("parameters", v.parameters);
+    j.Field("colorMapVersion", v.colorMapVersion);
+    j.Field("legendRgb", v.legendRgb);
+    j.Field("invalidRgb", v.invalidRgb);
+    j.Field("selectedRgb", v.selectedRgb);
+    j.Field("selection", v.selection);
+    j.Field("clippingAffectsStatistics", false);
+    j.End();
+  }
+};
+template <> struct Codec<AlignmentScenePart> {
+  static void Write(Json &j, const AlignmentScenePart &v) {
+    j.Object();
+    j.Field("id", v.id);
+    j.Field("alignmentResult", v.alignmentResult);
+    j.Field("showMeasured", v.showMeasured);
+    j.Field("showReference", v.showReference);
+    j.Field("inspection", v.inspection);
+    j.Field("selectedItem", v.selectedItem);
+    j.End();
+  }
+};
+template <> struct Codec<AlignmentSceneDisplay> {
+  static void Write(Json &j, const AlignmentSceneDisplay &v) {
+    j.Object();
+    j.Field("anchorAlignment", v.anchorAlignment);
+    j.Field("parts", v.parts);
+    j.Field("measuredColor", v.measuredColor);
+    j.Field("referenceColor", v.referenceColor);
+    j.Field("referenceOpacity", v.referenceOpacity);
+    j.Field("referenceWireframe", v.referenceWireframe);
+    j.Field("isVisible", v.isVisible);
+    j.Field("selectedPart", v.selectedPart);
+    j.Field("roiMarkerLimit", v.roiMarkerLimit);
+    j.End();
+  }
+};
+template <> struct Codec<MetrologyReportSceneDisplay> {
+  static void Write(Json &j, const MetrologyReportSceneDisplay &v) {
+    j.Object();
+    j.Field("parameters", v.parameters);
+    j.Field("targetToModel", v.targetToModel);
+    j.Field("glyphLength", v.glyphLength);
+    j.Field("glyphVersion", v.glyphVersion);
+    j.Field("wasCurrentAtCapture", v.wasCurrentAtCapture);
+    j.Field("regionSampling",
+            std::string("uniform-index-floor; markers only; complete ROI and "
+                        "section trace remain in inspection plan/report"));
+    j.Field("glyphLengthIsMeasuredHeight", false);
+    j.End();
+  }
+};
+template <> struct Codec<MetrologyReportPresentation> {
+  static void Write(Json &j, const MetrologyReportPresentation &v) {
+    j.Object();
+    j.Field("source", v.source);
+    j.Field("deviations", v.deviations);
+    j.Field("scene", v.scene);
+    j.Field("scope",
+            std::string(
+                "display configuration, not captured pixels or camera state"));
+    j.End();
+  }
+};
 template <> struct Codec<MetrologyReportImage> {
   static void Write(Json &j, const MetrologyReportImage &v) {
     j.Object();
@@ -1064,7 +1174,7 @@ template <> struct Codec<MetrologyReportInput> {
 template <> struct Codec<MetrologyReport> {
   static void Write(Json &j, const MetrologyReport &v) {
     j.Object();
-    j.Field("format", std::string("mvvcvtk.metrology.report.json/2"));
+    j.Field("format", std::string("mvvcvtk.metrology.report.json/3"));
     j.Field("schemaVersion", v.schemaVersion);
     j.Field("id", v.id);
     j.Field("title", v.title);
@@ -1074,6 +1184,7 @@ template <> struct Codec<MetrologyReport> {
     j.Field("inspections", v.inspections);
     j.Field("deviations", v.deviations);
     j.Field("voxelVolumes", v.voxelVolumes);
+    j.Field("presentation", v.presentation);
     j.Field("inputs", v.inputs);
     j.Field("wereInputsCurrentAtCapture", v.wereInputsCurrentAtCapture);
     j.Field("estimatedMetadataBytes", v.estimatedMetadataBytes);
@@ -1091,10 +1202,12 @@ const MetrologyReportAlignment &Owner(const MetrologyReport &r,
   return *found;
 }
 void Validate(const MetrologyReport &r, Sink &sink) {
-  Require(r.schemaVersion == 2 && !r.id.empty() &&
+  Require(r.schemaVersion == 3 && !r.id.empty() &&
               r.capturedUnixMilliseconds > 0 &&
               (!r.alignments.empty() || !r.voxelVolumes.empty()),
           "Invalid frozen report header.");
+  Require(AlignmentReportDisplay::GetValid(r),
+          "Invalid report presentation context.");
   for (std::size_t i = 0; i < r.alignments.size(); ++i) {
     sink.Check();
     const auto &a = r.alignments[i];
@@ -1240,10 +1353,19 @@ public:
     }
     sink.Put("]\"");
   }
+  template <class T> void Configuration(const T &value) {
+    Begin();
+    sink.Put("\"");
+    Sink escaped(sink);
+    Json json(escaped);
+    json.Value(value);
+    escaped.Flush();
+    sink.Put("\"");
+  }
   void End() {
-    while (columns < 46)
+    while (columns < 47)
       Empty();
-    Require(columns == 46, "CSV column count mismatch.");
+    Require(columns == 47, "CSV column count mismatch.");
     sink.Put("\r\n");
     first = true;
     columns = 0;
@@ -1307,7 +1429,8 @@ void CsvReport(Sink &sink, const MetrologyReport &r) {
                            "voxel_direction",
                            "require_enclosed_selection",
                            "touches_region_boundary",
-                           "algorithm_version"})
+                           "algorithm_version",
+                           "configuration_json"})
     csv.Cell(name);
   csv.End();
   const auto prefix = [&](const char *kind, const DataRevisionRef &result,
@@ -1334,6 +1457,38 @@ void CsvReport(Sink &sink, const MetrologyReport &r) {
       csv.Empty();
     csv.End();
   };
+  const auto configuration = [&](const char *kind, const DataRevisionRef &ref,
+                                 const MetrologyReportAlignment &owner,
+                                 bool current, const auto &value) {
+    prefix(kind, ref, owner);
+    csv.Empty();
+    csv.Cell(kind);
+    csv.Cell("display-configuration");
+    csv.Empty();
+    for (int i = 0; i < 6; ++i)
+      csv.Empty();
+    csv.Cell(Name(r.presentation.source));
+    csv.Boolean(current);
+    csv.Empty();
+    for (int i = 29; i < 46; ++i)
+      csv.Empty();
+    csv.Configuration(value);
+    csv.End();
+  };
+  for (const auto &display : r.presentation.deviations) {
+    const auto deviation = std::find_if(
+        r.deviations.begin(), r.deviations.end(),
+        [&](const auto &v) { return v.result == display.parameters.result; });
+    configuration("deviation-display", deviation->result,
+                  Owner(r, deviation->alignmentResult), deviation->isCurrent,
+                  display);
+  }
+  if (r.presentation.scene) {
+    const auto &scene = *r.presentation.scene;
+    configuration("scene-display", scene.parameters->anchorAlignment,
+                  Owner(r, scene.parameters->anchorAlignment),
+                  scene.wasCurrentAtCapture, scene);
+  }
   for (const auto &v : r.voxelVolumes) {
     const auto &p = *v.parameters;
     const auto &s = v.statistics;

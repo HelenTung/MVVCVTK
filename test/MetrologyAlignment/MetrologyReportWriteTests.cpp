@@ -5,6 +5,7 @@
 #include <locale>
 #include <sstream>
 #include <chrono>
+#include <cmath>
 #include <atomic>
 #include <thread>
 
@@ -68,6 +69,14 @@ MetrologyReport Fixture() {
     v.statistics.unselected=4;v.statistics.masked=1;v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::IncompleteSamples;r.voxelVolumes.push_back(v);
     v=r.voxelVolumes.front();v.result=Ref(24);vp=std::make_shared<VoxelVolumeRequest>(*v.parameters);vp->requireEnclosedSelection=true;v.parameters=vp;
     v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::TouchesBoundary;r.voxelVolumes.push_back(v);
+    r.presentation.source=MetrologyReportDisplaySource::ExplicitConfiguration;
+    MetrologyReportDeviationDisplay display;display.parameters.result=deviation.result;display.parameters.range={0,.5};display.parameters.selectedVertex=0;
+    for(std::size_t i=0;i<257;++i){const double value=i/512.0;if(value<=.2)display.legendRgb[i]={60,180,95};else{
+        const double fraction=(value-.2)/.3;display.legendRgb[i]={static_cast<std::uint8_t>(std::lround(255-45*fraction)),static_cast<std::uint8_t>(std::lround(200-155*fraction)),static_cast<std::uint8_t>(std::lround(130-95*fraction))};}}
+    AlignmentDeviationSelection selection;selection.result=deviation.result;selection.vertex=0;selection.sourcePoint={0,0,0};selection.alignedPoint={1.5,0,0};selection.sample=field->samples[0];display.selection=selection;r.presentation.deviations.push_back(display);
+    MetrologyReportSceneDisplay scene;auto layout=std::make_shared<AlignmentSceneDisplay>();layout->anchorAlignment=a.result;
+    layout->parts={{u8"零件,\"A\"",a.result,false,false,inspection.result,"dimension-0"}};layout->selectedPart=layout->parts[0].id;layout->roiMarkerLimit=7;
+    scene.parameters=layout;scene.targetToModel[3]=-1.5;scene.glyphLength=12;scene.wasCurrentAtCapture=false;r.presentation.scene=scene;
     return r;
 }
 class Counter final : public std::streambuf {
@@ -108,7 +117,7 @@ void FileCases(const MetrologyReport &report,const std::filesystem::path &base) 
     auto bad=report;bad.title=std::string(40000,'x')+std::string("\xC0\xAF",2);
     const auto malformed=folder/"malformed.json";result=WriteMetrologyReportFile(bad,malformed.u8string());
     Check(result.write.status==Status::InvalidInput && result.write.bytesWritten>0 && !std::filesystem::exists(malformed) && clean(),"late encoding failure discards written prefix");
-    auto large=report;auto field=std::make_shared<AlignmentDeviationField>();field->samples.resize(100000);field->statistics.counts[0]=field->samples.size();large.deviations[0].forward=field;
+    auto large=report;large.presentation={};auto field=std::make_shared<AlignmentDeviationField>();field->samples.resize(100000);field->statistics.counts[0]=field->samples.size();large.deviations[0].forward=field;
     std::size_t calls=0;options={};options.includeDeviationSamples=true;options.isCancelled=[&] { return ++calls>=500000; };
     const auto cancelled=folder/"cancelled.json";result=WriteMetrologyReportFile(large,cancelled.u8string(),options);
     Check(result.write.status==Status::Cancelled && result.write.bytesWritten>0 && !result.isCommitted &&
@@ -187,12 +196,23 @@ int main(int argc,char **argv) {
         Check(WriteMetrologyReport(invalid,badVolume,options).status==MetrologyReportWriteStatus::InvalidInput,"inconsistent voxel volume rejected");
         invalid=report;invalid.voxelVolumes[0].source=Ref(99);std::ostringstream badSource;
         Check(WriteMetrologyReport(invalid,badSource,options).status==MetrologyReportWriteStatus::InvalidInput,"voxel source mismatch rejected");
-        auto volumeOnly=report;volumeOnly.alignments.clear();volumeOnly.inspections.clear();volumeOnly.deviations.clear();std::ostringstream standalone;
+        auto volumeOnly=report;volumeOnly.presentation={};volumeOnly.alignments.clear();volumeOnly.inspections.clear();volumeOnly.deviations.clear();std::ostringstream standalone;
         Check(WriteMetrologyReport(volumeOnly,standalone,options).status==MetrologyReportWriteStatus::Succeeded,"voxel report has no fictitious alignment dependency");
+        invalid=report;invalid.presentation.deviations[0].legendRgb[128][0]^=1;std::ostringstream wrongPalette;
+        Check(WriteMetrologyReport(invalid,wrongPalette,options).status==MetrologyReportWriteStatus::InvalidInput,"tampered colorbar table rejected");
+        invalid=report;invalid.presentation.deviations[0].selection->alignedPoint[0]=99;std::ostringstream wrongSelection;
+        Check(WriteMetrologyReport(invalid,wrongSelection,options).status==MetrologyReportWriteStatus::InvalidInput,"inconsistent selected point coordinate rejected");
+        invalid=report;auto wrongScene=std::make_shared<AlignmentSceneDisplay>(*invalid.presentation.scene->parameters);wrongScene->parts[0].selectedItem="missing";invalid.presentation.scene->parameters=wrongScene;std::ostringstream wrongItem;
+        Check(WriteMetrologyReport(invalid,wrongItem,options).status==MetrologyReportWriteStatus::InvalidInput,"report scene item must belong to captured inspection");
         options.includeDeviationSamples=true;std::ostringstream full;
         Check(WriteMetrologyReport(report,full,options).status==MetrologyReportWriteStatus::Succeeded,"full sample JSON writes");
         options.format=MetrologyReportFormat::Csv;std::ostringstream csv;
         Check(WriteMetrologyReport(report,csv,options).status==MetrologyReportWriteStatus::Succeeded && csv.str().find("'="+std::string("part,1"))!=std::string::npos,"CSV formula-like text protected");
+        const auto configRowEnd=csv.str().find("\r\n",csv.str().find("deviation-display"));Check(configRowEnd!=std::string::npos && configRowEnd>20,"configuration row is present");
+        auto nestedBudget=options;nestedBudget.maxBytes=configRowEnd-20;std::ostringstream nestedLimited;
+        Check(WriteMetrologyReport(report,nestedLimited,nestedBudget).status==MetrologyReportWriteStatus::BudgetExceeded,"nested CSV JSON budget failure is not converted to IO failure");
+        auto cancelledConfig=options;unsigned configPolls=0;cancelledConfig.isCancelled=[&]{return ++configPolls>2000;};std::ostringstream nestedCancelled;
+        Check(WriteMetrologyReport(report,nestedCancelled,cancelledConfig).status==MetrologyReportWriteStatus::Cancelled,"nested CSV configuration cancellation remains explicit");
         invalid=report;invalid.id=" =1+1";std::ostringstream spaced;
         Check(WriteMetrologyReport(invalid,spaced,options).status==MetrologyReportWriteStatus::Succeeded && spaced.str().find("' =1+1")!=std::string::npos,"leading-space formula-like text protected");
         if(argc==2) {
@@ -202,7 +222,7 @@ int main(int argc,char **argv) {
             FileCases(report,folder);
         }
         auto large=std::make_shared<AlignmentDeviationField>();large->samples.resize(100000);large->statistics.counts[0]=large->samples.size();
-        report.deviations[0].forward=large;options={};std::ostringstream noValues;
+        report.presentation={};report.deviations[0].forward=large;options={};std::ostringstream noValues;
         Check(WriteMetrologyReport(report,noValues,options).status==MetrologyReportWriteStatus::Succeeded &&
             noValues.str().find("\"minimum\":null")!=std::string::npos,"unavailable statistics are null, never fabricated zero");
         Counter counter;std::ostream largeStream(&counter);options.includeDeviationSamples=true;

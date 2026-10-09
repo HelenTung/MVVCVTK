@@ -1,4 +1,5 @@
 #include "AlignmentDeviationOverlay.h"
+#include "AlignmentDeviationColors.h"
 #include "Data/DataPayloads.h"
 #include <algorithm>
 #include <cmath>
@@ -107,6 +108,10 @@ void Display(const char *imagePath) {
     bool limited=false;
     try { (void)AlignmentDeviationOverlay::Build(source,result,display,1,deadline); } catch (const std::length_error &) { limited=true; }
     Check(limited,"color buffer admission enforces explicit memory budget");
+    AlignmentDeviationDisplay huge=display;huge.range={0,1e308};huge.useToleranceColors=false;
+    Check(AlignmentDeviationOverlay::GetDisplayValid(huge,result),"finite wide colorbar is valid");
+    const auto hugeLegend=AlignmentDeviationColors::GetLegend(huge,{});
+    Check(hugeLegend[128]==AlignmentDeviationColors::Color{223,140,135},"legend interpolation avoids intermediate range-times-index overflow");
     display.range={0,0}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"zero-width color range rejected");
     display.range={-.01,.01}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"color scale must contain tolerance interval");
 }
