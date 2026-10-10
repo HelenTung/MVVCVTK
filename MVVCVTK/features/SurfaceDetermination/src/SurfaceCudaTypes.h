@@ -34,10 +34,19 @@ struct SurfaceCudaTicket final {
     const void *owner = nullptr;
     std::uint64_t epoch = 0;
 };
+// 可选仓内剖析快照；不改变既有 ticket、kernel 参数或计算函数的私有 ABI。
+struct SurfaceCudaProfile final {
+    int requested = 0, eventsAvailable = 0, complete = 0, failed = 0;
+    std::uint64_t submittedBatchCount = 0, measuredBatchCount = 0, measuredPointCount = 0;
+    std::uint64_t slabUploadCount = 0, slabUploadBytes = 0;
+    double eventSetupMs = 0, slabWaitMs = 0, slabUploadHostMs = 0;
+    double pointUploadMs = 0, kernelMs = 0, sampleDownloadMs = 0;
+};
 using SurfaceCudaOpen = int (*)(const SurfaceCudaVolume *, std::size_t, std::size_t, void **, std::size_t *);
 using SurfaceCudaRead = int (*)(void *, const double *, std::size_t, SurfaceCudaSample *);
 using SurfaceCudaPrepareCallback = int (*)(void *, unsigned, double **);
 using SurfaceCudaSubmitCallback = int (*)(void *, unsigned, std::size_t, SurfaceCudaTicket *);
 using SurfaceCudaCollectCallback = int (*)(void *, const SurfaceCudaTicket *, const SurfaceCudaSample **);
 using SurfaceCudaTestFaultCallback = int (*)(void *, unsigned);
+using SurfaceCudaProfileCallback = int (*)(void *, SurfaceCudaProfile *);
 using SurfaceCudaClose = void (*)(void *) noexcept;

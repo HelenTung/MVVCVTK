@@ -1895,6 +1895,18 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                         const SurfaceAlgorithmInputs &inputs)
 {
     SurfaceAlgorithmResult result;
+    char profilingSetting[8]{};
+    result.cudaProfilingRequested =
+        GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",profilingSetting,sizeof(profilingSetting))==1 &&
+        profilingSetting[0]=='1';
+    const auto profileStart = [&] {
+        return result.cudaProfilingRequested ? std::chrono::steady_clock::now() :
+                                              std::chrono::steady_clock::time_point{};
+    };
+    const auto profileRecord = [&](double &milliseconds, const std::chrono::steady_clock::time_point start) {
+        if (result.cudaProfilingRequested)
+            milliseconds += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+    };
     result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
     result.method = inputParams.method;
     result.algorithmRevision = algorithmRevision;
@@ -2082,6 +2094,34 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             result.meshPreparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();
             {
                 SurfaceCudaCompute cuda;
+                const auto collectProfile = [&] {
+                    if (!result.cudaProfilingRequested || !cuda.GetActive()) return;
+                    const auto profile=cuda.GetProfile();
+                    if (!profile.requested) return;
+                    auto &total=result.cudaProfile;
+                    const bool first=!total.requested;
+                    total.eventsAvailable=first?profile.eventsAvailable:total.eventsAvailable&&profile.eventsAvailable;
+                    total.complete=first?profile.complete:total.complete&&profile.complete;
+                    total.requested=1; total.failed=total.failed||profile.failed;
+                    total.submittedBatchCount+=profile.submittedBatchCount;
+                    total.measuredBatchCount+=profile.measuredBatchCount;
+                    total.measuredPointCount+=profile.measuredPointCount;
+                    total.slabUploadCount+=profile.slabUploadCount;
+                    total.slabUploadBytes+=profile.slabUploadBytes;
+                    total.eventSetupMs+=profile.eventSetupMs;
+                    total.slabWaitMs+=profile.slabWaitMs;
+                    total.slabUploadHostMs+=profile.slabUploadHostMs;
+                    total.pointUploadMs+=profile.pointUploadMs;
+                    total.kernelMs+=profile.kernelMs;
+                    total.sampleDownloadMs+=profile.sampleDownloadMs;
+                };
+                const auto closeCuda = [&] {
+                    if (!cuda.GetActive()) return;
+                    collectProfile();
+                    const auto started=profileStart();
+                    cuda.Reset();
+                    profileRecord(result.cudaCloseMs,started);
+                };
                 const auto sampleCpu = [&](std::size_t begin, std::size_t end) {
                     for (auto i = begin; i < end; ++i) {
                         if (cancelled.load(std::memory_order_acquire)) return;
@@ -2110,11 +2150,15 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                   input.materialRange);
                     }
                     if (points.size() >= surfaceCudaBatchCapacity && releasedTriangleBytes > surfaceCudaHostBufferBytes &&
-                        !GetCancelled(getCancelled) &&
-                        cuda.Start(input, releasedTriangleBytes,
-                                   maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES))) {
-                        result.cudaDeviceBytes = cuda.GetDeviceBytes();
-                        result.cudaHostBufferBytes = surfaceCudaHostBufferBytes;
+                        !GetCancelled(getCancelled)) {
+                        const auto started=profileStart();
+                        const bool active=cuda.Start(input,releasedTriangleBytes,
+                            maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES));
+                        profileRecord(result.cudaStartMs,started);
+                        if (active) {
+                            result.cudaDeviceBytes = cuda.GetDeviceBytes();
+                            result.cudaHostBufferBytes = surfaceCudaHostBufferBytes;
+                        }
                     }
                 }
 #endif
@@ -2129,21 +2173,29 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         // 两批可同时入队；CPU 回填前一批时 GPU 继续处理后一批。
                         while (healthy && cursor<points.size() && queued<surfaceCudaSlotCount) {
                             const auto slot=(head+queued)%surfaceCudaSlotCount;
+                            const auto indexStart=profileStart();
                             auto *indices=cuda.Prepare(slot);
-                            if (!indices) {healthy=false;break;}
+                            if (!indices) {profileRecord(result.cudaIndexMs,indexStart);healthy=false;break;}
                             const auto count=std::min(surfaceCudaBatchCapacity,points.size()-cursor);
                             for (std::size_t i=0;i<count;++i) {
                                 const auto index=GetContinuousIndex(volume.geometry,points[cursor+i]);
                                 std::copy(index.begin(),index.end(),indices+i*3);
                             }
+                            profileRecord(result.cudaIndexMs,indexStart);
                             auto &batch=pending[slot];batch.begin=cursor;
-                            if (!cuda.Submit(slot,count,batch.ticket)) {healthy=false;break;}
+                            const auto submitStart=profileStart();
+                            const bool submitted=cuda.Submit(slot,count,batch.ticket);
+                            profileRecord(result.cudaSubmitMs,submitStart);
+                            if (!submitted) {healthy=false;break;}
                             cursor+=batch.ticket.count; ++queued; ++result.cudaBatchCount;
                         }
                         if (queued) {
                             const auto &batch=pending[head];
+                            const auto collectStart=profileStart();
                             const auto *samples=cuda.Collect(batch.ticket);
+                            profileRecord(result.cudaCollectMs,collectStart);
                             if (!samples) healthy=false;
+                            const auto finalizeStart=profileStart();
                             for (std::size_t i=0;i<batch.ticket.count;++i) {
                                 if ((i&31U)==0 && GetCancelled(getCancelled)) {cancelled.store(true);break;}
                                 const auto *accepted=samples && samples[i].support==1 && samples[i].gradientValid
@@ -2153,21 +2205,27 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                 records[id].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
                                 if (accepted) ++result.cudaPointCount;
                             }
+                            profileRecord(result.cudaFinalizeMs,finalizeStart);
                             head=(head+1)%surfaceCudaSlotCount; --queued;
                             if (cancelled.load()) break;
                         } else if (!healthy) {
                             // 已提交批次收集完再关闭；未提交的连续余段保持原 CPU 计算。
-                            cuda.Reset();
+                            closeCuda();
+                            const auto cpuStarted=profileStart();
                             const auto threads=RunPointSampling(points.size()-cursor,cpuPlan.threadLimit,getCancelled,
                                 [&](std::size_t begin,std::size_t end){sampleCpu(cursor+begin,cursor+end);});
+                            profileRecord(result.cpuSamplingMs,cpuStarted);
                             result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
                             cursor=points.size();
                         }
                     }
                 } else {
+                    const auto cpuStarted=profileStart();
                     const auto threads=RunPointSampling(points.size(),cpuPlan.threadLimit,getCancelled,sampleCpu);
+                    profileRecord(result.cpuSamplingMs,cpuStarted);
                     result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
                 }
+                closeCuda();
             } // 设备/回传工作区在拓扑分配前释放。
             if (cancelled.load())
                 return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");

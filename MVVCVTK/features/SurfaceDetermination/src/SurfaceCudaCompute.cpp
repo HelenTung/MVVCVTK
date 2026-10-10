@@ -22,6 +22,7 @@ void SurfaceCudaCompute::Reset() noexcept {
     m_submit = nullptr;
     m_collect = nullptr;
     m_testFault = nullptr;
+    m_profile = nullptr;
     m_close = nullptr;
     m_deviceBytes = 0;
     ++m_epoch;
@@ -67,6 +68,8 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
     m_submit = reinterpret_cast<SurfaceCudaSubmitCallback>(GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaSubmit"));
     m_collect = reinterpret_cast<SurfaceCudaCollectCallback>(GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaCollect"));
     m_testFault = reinterpret_cast<SurfaceCudaTestFaultCallback>(GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaTestSetFault"));
+    // 诊断入口缺失不影响旧私有 DLL 的计算能力。
+    m_profile = reinterpret_cast<SurfaceCudaProfileCallback>(GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaGetProfile"));
     m_close = reinterpret_cast<SurfaceCudaClose>(
         GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaDestroy"));
     if (!open || !m_read || !m_prepare || !m_submit || !m_collect || !m_close ||
@@ -87,7 +90,7 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
     char fault[4]{};
     if (GetEnvironmentVariableA("MVVCVTK_SURFACE_CUDA_TEST_FAULT",fault,sizeof(fault))==1 &&
-        fault[0]>='1' && fault[0]<='3') SetTestFault(unsigned(fault[0]-'0'));
+        fault[0]>='1' && fault[0]<='6') SetTestFault(unsigned(fault[0]-'0'));
 #endif
     return true;
 #else
@@ -118,4 +121,9 @@ const SurfaceCudaSample *SurfaceCudaCompute::Collect(const SurfaceCudaTicket &ti
 }
 bool SurfaceCudaCompute::SetTestFault(unsigned fault) {
     return m_session && m_testFault && m_testFault(m_session,fault);
+}
+SurfaceCudaProfile SurfaceCudaCompute::GetProfile() const {
+    SurfaceCudaProfile profile;
+    if (m_session && m_profile) m_profile(m_session,&profile);
+    return profile;
 }

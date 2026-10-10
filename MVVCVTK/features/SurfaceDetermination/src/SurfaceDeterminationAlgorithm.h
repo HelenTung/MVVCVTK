@@ -1,5 +1,6 @@
 #pragma once
 #include "FeatureSupport/WorkLimit.h"
+#include "SurfaceCudaTypes.h"
 
 #include "Host/TrustedDataPort.h"
 #include "Host/SurfaceDeterminationHostTypes.h"
@@ -57,6 +58,10 @@ struct SurfaceAlgorithmResult final {
     std::size_t cudaDeviceBytes = 0;
     std::size_t cudaHostBufferBytes = 0;
     std::size_t cudaBatchCount = 0;
+    bool cudaProfilingRequested = false;
+    double cudaStartMs = 0, cudaIndexMs = 0, cudaSubmitMs = 0, cudaCollectMs = 0;
+    double cudaFinalizeMs = 0, cudaCloseMs = 0, cpuSamplingMs = 0;
+    SurfaceCudaProfile cudaProfile;
     unsigned cpuThreadCount = 0;
     unsigned availablePhysicalCores = 0;
     unsigned availableLogicalThreads = 0;

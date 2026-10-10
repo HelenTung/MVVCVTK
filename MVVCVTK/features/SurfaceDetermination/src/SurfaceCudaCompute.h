@@ -13,8 +13,9 @@ class SurfaceCudaCompute final {
     double *Prepare(unsigned slot);
     bool Submit(unsigned slot, std::size_t count, SurfaceCudaTicket &ticket);
     const SurfaceCudaSample *Collect(const SurfaceCudaTicket &ticket);
-    // 仅仓内测试后端提供该探针：1=提交中断，2=收集失败，3=收尾同步失败。
+    // 仅仓内测试后端提供该探针：1..3 为计算故障，4..6 为可选计时创建/记录/读取故障。
     bool SetTestFault(unsigned fault);
+    SurfaceCudaProfile GetProfile() const;
     bool GetActive() const noexcept { return m_session != nullptr; }
     void Reset() noexcept;
     std::size_t GetDeviceBytes() const noexcept { return m_deviceBytes; }
@@ -27,6 +28,7 @@ class SurfaceCudaCompute final {
     SurfaceCudaSubmitCallback m_submit = nullptr;
     SurfaceCudaCollectCallback m_collect = nullptr;
     SurfaceCudaTestFaultCallback m_testFault = nullptr;
+    SurfaceCudaProfileCallback m_profile = nullptr;
     SurfaceCudaClose m_close = nullptr;
     std::size_t m_deviceBytes = 0;
     std::uint64_t m_epoch = 0;

@@ -20,24 +20,25 @@
 namespace {
 using namespace SurfaceTest;
 
-class ParallelSetting final {
+class EnvironmentSwitch final {
 public:
-    ParallelSetting()
+    explicit EnvironmentSwitch(const char *name) : m_name(name)
     {
-        const auto size = GetEnvironmentVariableA("MVVCVTK_SURFACE_CPU_PARALLEL", nullptr, 0);
+        const auto size = GetEnvironmentVariableA(m_name, nullptr, 0);
         if (size) {
             m_previous.resize(size);
-            GetEnvironmentVariableA("MVVCVTK_SURFACE_CPU_PARALLEL", m_previous.data(), size);
+            GetEnvironmentVariableA(m_name, m_previous.data(), size);
             m_previous.resize(size - 1);
             m_present = true;
         }
     }
-    ~ParallelSetting()
+    ~EnvironmentSwitch()
     {
-        SetEnvironmentVariableA("MVVCVTK_SURFACE_CPU_PARALLEL", m_present ? m_previous.c_str() : nullptr);
+        SetEnvironmentVariableA(m_name, m_present ? m_previous.c_str() : nullptr);
     }
-    void Set(bool enabled) { SetEnvironmentVariableA("MVVCVTK_SURFACE_CPU_PARALLEL", enabled ? "1" : "0"); }
+    void Set(bool enabled) { SetEnvironmentVariableA(m_name, enabled ? "1" : "0"); }
 private:
+    const char *m_name;
     std::string m_previous;
     bool m_present = false;
 };
@@ -179,12 +180,17 @@ void TestParallelSampling(Checks &checks)
     auto params = GetParams(); params.initialIsoValue = 3.5; params.minimumObjectVoxels = 0;
     const auto build = [&] { return SurfaceDeterminationAlgorithm::BuildSurface(source, params,
                                            256U*1024U*1024U, [] { return false; }, {}); };
-    ParallelSetting setting;
+    EnvironmentSwitch setting("MVVCVTK_SURFACE_CPU_PARALLEL");
+    EnvironmentSwitch profiling("MVVCVTK_SURFACE_GPU_PROFILE");profiling.Set(false);
     setting.Set(false); const auto serial = build();
     setting.Set(true); const auto parallel = build();
     checks.Get(serial.status == SurfaceResultStatus::Succeeded && serial.points.size()==65536 &&
                serial.triangleIndices.size()/3==130050, "large single-component plane matches analytic mesh counts");
     checks.Get(GetEqualMeasurements(serial,parallel), "all point/object measurement fields are thread independent");
+    profiling.Set(true);const auto profiled=build();profiling.Set(false);
+    checks.Get(GetEqualMeasurements(parallel,profiled) && profiled.cudaProfilingRequested &&
+               profiled.cpuSamplingMs>0 && profiled.cudaPointCount==0 && !profiled.cudaProfile.complete,
+               "optional phase clocks preserve all CPU measurement fields without requiring a CUDA device");
     checks.Get(std::all_of(parallel.points.begin(),parallel.points.end(),[](const auto &p) { return p.positionModel[0]==3.5; }),
                "parallel plane has zero analytic position error");
     checks.Get(parallel.cpuThreadCount <= parallel.plannedCpuThreads &&

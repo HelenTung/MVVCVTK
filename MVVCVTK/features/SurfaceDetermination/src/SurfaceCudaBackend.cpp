@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <chrono>
 
 namespace {
 std::size_t PrivateBytes() {
@@ -20,6 +21,8 @@ struct Slot final {
     void *host = nullptr;
     CUstream stream = nullptr;
     CUevent done = nullptr;
+    std::array<CUevent,4> profileEvents{};
+    bool profileRecorded = false;
     bool prepared = false, pending = false;
     std::uint64_t generation = 0;
     std::size_t count = 0;
@@ -38,6 +41,8 @@ struct Session final {
     std::size_t planeCount = 0, planeBytes = 0, sliceCapacity = 0;
     int cachedFirst = 0, cachedCount = 0;
     bool createdCurrent = false, failed = false;
+    SurfaceCudaProfile profile;
+    bool profileInitialized = false;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
     unsigned testFault = 0;
 #endif
@@ -63,6 +68,7 @@ struct Session final {
                 return;
             }
             for (auto &slot : slots) {
+                for (const auto event : slot.profileEvents) if (event) cuEventDestroy(event);
                 if (slot.done) cuEventDestroy(slot.done);
                 if (slot.stream) cuStreamDestroy(slot.stream);
                 if (slot.samples) cuMemFree(slot.samples);
@@ -86,6 +92,66 @@ struct CurrentContext final {
 };
 bool GetOwned(const Session &s) { return s.ownerThread == GetCurrentThreadId(); }
 
+using ProfileClock = std::chrono::steady_clock;
+double ProfileElapsed(const ProfileClock::time_point start) {
+    return std::chrono::duration<double,std::milli>(ProfileClock::now()-start).count();
+}
+void InitializeProfile(Session &s) {
+    if (!s.profile.requested || s.profileInitialized) return;
+    s.profileInitialized = true;
+    const auto started = ProfileClock::now();
+    bool available = true;
+    // Start 的计算资源准入已完成；首次 Submit 才尝试固定的八个可选事件。
+    for (auto &slot : s.slots) for (auto &event : slot.profileEvents) {
+        if (available && cuEventCreate(&event,CU_EVENT_DEFAULT) != CUDA_SUCCESS) available = false;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+        if (s.testFault == 4) { s.testFault=0; available=false; }
+#endif
+    }
+    if (!available) {
+        for (auto &slot : s.slots) for (auto &event : slot.profileEvents) {
+            if (event) cuEventDestroy(event);
+            event = nullptr;
+        }
+        s.profile.failed = 1;
+    }
+    s.profile.eventsAvailable = available ? 1 : 0;
+    s.profile.eventSetupMs += ProfileElapsed(started);
+}
+void RecordProfile(Session &s, Slot &slot, const unsigned stage) {
+    if (!slot.profileRecorded) return;
+    bool recorded = true;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+    if (s.testFault == 5 && stage == 1) { s.testFault=0; recorded=false; }
+#endif
+    if (!recorded || cuEventRecord(slot.profileEvents[stage],slot.stream) != CUDA_SUCCESS) {
+        slot.profileRecorded = false;
+        s.profile.failed = 1;
+    }
+}
+void CollectProfile(Session &s, const Slot &slot) {
+    if (!slot.profileRecorded || s.profile.failed) return;
+    // 必需的 done 已同步，四个更早记录的同 stream 事件也已完成；失败只影响诊断。
+    float upload=0, kernel=0, download=0;
+    bool readable = true;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+    if (s.testFault == 6) { s.testFault=0; readable=false; }
+#endif
+    if (!readable || cuEventElapsedTime(&upload,slot.profileEvents[0],slot.profileEvents[1]) != CUDA_SUCCESS ||
+        cuEventElapsedTime(&kernel,slot.profileEvents[1],slot.profileEvents[2]) != CUDA_SUCCESS ||
+        cuEventElapsedTime(&download,slot.profileEvents[2],slot.profileEvents[3]) != CUDA_SUCCESS ||
+        !std::isfinite(upload) || !std::isfinite(kernel) || !std::isfinite(download) ||
+        upload<0 || kernel<0 || download<0) {
+        s.profile.failed = 1;
+        return;
+    }
+    ++s.profile.measuredBatchCount;
+    s.profile.measuredPointCount += slot.count;
+    s.profile.pointUploadMs += upload;
+    s.profile.kernelMs += kernel;
+    s.profile.sampleDownloadMs += download;
+}
+
 bool GetPrefix(const Session &s, const double *points, std::size_t requested,
                std::size_t &accepted, int &first, int &last) {
     accepted = 0;
@@ -105,15 +171,24 @@ bool GetPrefix(const Session &s, const double *points, std::size_t requested,
 bool SetSlab(Session &s, int first, int last) {
     if (s.cachedCount && first >= s.cachedFirst && std::int64_t(last)-s.cachedFirst < s.cachedCount) return true;
     // 两个 stream 共用体素 slab；所有旧读者完成后才能覆写。
+    const auto waitStarted = s.profile.requested ? ProfileClock::now() : ProfileClock::time_point{};
     for (const auto &slot : s.slots)
         if (slot.pending && cuEventSynchronize(slot.done) != CUDA_SUCCESS) return false;
+    if (s.profile.requested) s.profile.slabWaitMs += ProfileElapsed(waitStarted);
     s.cachedCount = 0;
     const auto count = int(std::min(s.sliceCapacity, std::size_t(s.source.extent[5] - first + 1)));
     const auto offset = std::size_t(first - s.source.extent[4]);
+    const auto uploadStarted = s.profile.requested ? ProfileClock::now() : ProfileClock::time_point{};
     if (cuMemcpyHtoD(s.values, static_cast<const unsigned char *>(s.source.values) + offset * s.planeBytes,
                      std::size_t(count) * s.planeBytes) != CUDA_SUCCESS ||
         (s.mask && cuMemcpyHtoD(s.mask, s.source.validity + offset * s.planeCount,
                                std::size_t(count) * s.planeCount) != CUDA_SUCCESS)) return false;
+    if (s.profile.requested) {
+        s.profile.slabUploadHostMs += ProfileElapsed(uploadStarted);
+        ++s.profile.slabUploadCount;
+        s.profile.slabUploadBytes += std::uint64_t(count) *
+            (s.planeBytes + (s.mask ? s.planeCount : 0));
+    }
     s.cachedFirst = first; s.cachedCount = count;
     return true;
 }
@@ -133,6 +208,9 @@ extern "C" __declspec(dllexport) int SurfaceCudaCreate(const SurfaceCudaVolume *
         CUdevice device;
         if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return 0;
         auto s = std::make_unique<Session>(); s->source = *source;
+        char profiling[8]{};
+        s->profile.requested = GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",profiling,sizeof(profiling))==1 &&
+                               profiling[0]=='1' ? 1 : 0;
 #if CUDA_VERSION >= 13000
         if (cuCtxCreate(&s->context, nullptr, 0, device) != CUDA_SUCCESS) return 0;
 #else
@@ -179,6 +257,7 @@ extern "C" __declspec(dllexport) int SurfaceCudaSubmit(void *handle, unsigned in
     auto &s = *static_cast<Session *>(handle); auto &slot = s.slots[index];
     if (!GetOwned(s) || s.failed || slot.pending || !slot.prepared) return 0;
     CurrentContext current(s); if (!current.active) return 0;
+    InitializeProfile(s);
     std::size_t accepted = 0; int first = 0, last = 0;
     if (!GetPrefix(s,slot.Indices(),count,accepted,first,last)) return 0;
     if (!SetSlab(s,first,last)) { s.failed = true; return 0; }
@@ -189,16 +268,25 @@ extern "C" __declspec(dllexport) int SurfaceCudaSubmit(void *handle, unsigned in
     void *arguments[]{&v,&pointAddress,&accepted,&sampleAddress};
     // 先标 pending，使任何部分入队失败仍由 Reset 的 context drain 覆盖。
     slot.pending = true; slot.prepared = false; slot.count = accepted; ++slot.generation;
+    slot.profileRecorded = s.profile.eventsAvailable && !s.profile.failed;
+    RecordProfile(s,slot,0);
     if (cuMemcpyHtoDAsync(slot.points,slot.Indices(),accepted*3*sizeof(double),slot.stream) != CUDA_SUCCESS) {
         s.failed = true; return 0;
     }
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
     if (s.testFault == 1) {s.testFault=0;s.failed=true;return 0;}
 #endif
-    if (
-        cuLaunchKernel(s.function,unsigned((accepted+127)/128),1,1,128,1,1,0,slot.stream,arguments,nullptr) != CUDA_SUCCESS ||
-        cuMemcpyDtoHAsync(slot.Samples(),slot.samples,accepted*sizeof(SurfaceCudaSample),slot.stream) != CUDA_SUCCESS ||
-        cuEventRecord(slot.done,slot.stream) != CUDA_SUCCESS) { s.failed = true; return 0; }
+    RecordProfile(s,slot,1);
+    if (cuLaunchKernel(s.function,unsigned((accepted+127)/128),1,1,128,1,1,0,slot.stream,arguments,nullptr) != CUDA_SUCCESS) {
+        s.failed = true; return 0;
+    }
+    RecordProfile(s,slot,2);
+    if (cuMemcpyDtoHAsync(slot.Samples(),slot.samples,accepted*sizeof(SurfaceCudaSample),slot.stream) != CUDA_SUCCESS) {
+        s.failed = true; return 0;
+    }
+    RecordProfile(s,slot,3);
+    if (cuEventRecord(slot.done,slot.stream) != CUDA_SUCCESS) { s.failed = true; return 0; }
+    if (s.profile.requested) ++s.profile.submittedBatchCount;
     *ticket = {}; ticket->slot=index; ticket->generation=slot.generation; ticket->count=accepted;
     return 1;
 }
@@ -212,7 +300,18 @@ extern "C" __declspec(dllexport) int SurfaceCudaCollect(void *handle, const Surf
     if (s.testFault == 2) {s.testFault=0;s.failed=true;return 0;}
 #endif
     if (cuEventSynchronize(slot.done) != CUDA_SUCCESS) { s.failed = true; return 0; }
+    CollectProfile(s,slot);
     slot.pending=false; *samples=slot.Samples(); return 1;
+}
+extern "C" __declspec(dllexport) int SurfaceCudaGetProfile(void *handle, SurfaceCudaProfile *profile) {
+    if (!handle || !profile) return 0;
+    const auto &s = *static_cast<const Session *>(handle);
+    if (!GetOwned(s)) return 0;
+    *profile = s.profile;
+    const bool pending = std::any_of(std::begin(s.slots),std::end(s.slots),[](const auto &slot){return slot.pending;});
+    profile->complete = profile->eventsAvailable && !profile->failed && !s.failed && !pending &&
+        profile->submittedBatchCount && profile->submittedBatchCount==profile->measuredBatchCount ? 1 : 0;
+    return 1;
 }
 extern "C" __declspec(dllexport) int SurfaceCudaReadPoints(void *handle, const double *points,
                                                            std::size_t count, SurfaceCudaSample *output) {
@@ -231,7 +330,7 @@ extern "C" __declspec(dllexport) void SurfaceCudaDestroy(void *handle) noexcept 
 }
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
 extern "C" __declspec(dllexport) int SurfaceCudaTestSetFault(void *handle,unsigned fault) {
-    if (!handle || fault>3) return 0;
+    if (!handle || fault>6) return 0;
     auto &s=*static_cast<Session *>(handle);
     if (!GetOwned(s)) return 0;
     s.testFault=fault;return 1;

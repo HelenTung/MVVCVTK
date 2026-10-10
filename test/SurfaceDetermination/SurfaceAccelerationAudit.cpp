@@ -127,6 +127,28 @@ int main(int argc, char **argv) {
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
              << ",\"cudaHostBufferBytes\":" << result.cudaHostBufferBytes
              << ",\"cudaBatchCount\":" << result.cudaBatchCount
+             << ",\"cudaProfilingRequested\":" << result.cudaProfilingRequested
+             << ",\"cudaStartMs\":" << result.cudaStartMs
+             << ",\"cudaIndexMs\":" << result.cudaIndexMs
+             << ",\"cudaSubmitMs\":" << result.cudaSubmitMs
+             << ",\"cudaCollectMs\":" << result.cudaCollectMs
+             << ",\"cudaFinalizeMs\":" << result.cudaFinalizeMs
+             << ",\"cudaCloseMs\":" << result.cudaCloseMs
+             << ",\"cpuSamplingMs\":" << result.cpuSamplingMs
+             << ",\"cudaProfileEventsAvailable\":" << result.cudaProfile.eventsAvailable
+             << ",\"cudaProfileComplete\":" << result.cudaProfile.complete
+             << ",\"cudaProfileFailed\":" << result.cudaProfile.failed
+             << ",\"cudaProfileSubmittedBatches\":" << result.cudaProfile.submittedBatchCount
+             << ",\"cudaProfileMeasuredBatches\":" << result.cudaProfile.measuredBatchCount
+             << ",\"cudaProfileMeasuredPoints\":" << result.cudaProfile.measuredPointCount
+             << ",\"cudaSlabUploadCount\":" << result.cudaProfile.slabUploadCount
+             << ",\"cudaSlabUploadBytes\":" << result.cudaProfile.slabUploadBytes
+             << ",\"cudaEventSetupMs\":" << result.cudaProfile.eventSetupMs
+             << ",\"cudaSlabWaitMs\":" << result.cudaProfile.slabWaitMs
+             << ",\"cudaSlabUploadHostMs\":" << result.cudaProfile.slabUploadHostMs
+             << ",\"cudaPointUploadMs\":" << result.cudaProfile.pointUploadMs
+             << ",\"cudaKernelMs\":" << result.cudaProfile.kernelMs
+             << ",\"cudaSampleDownloadMs\":" << result.cudaProfile.sampleDownloadMs
              << ",\"cpuThreadCount\":" << result.cpuThreadCount
              << ",\"availablePhysicalCores\":" << result.availablePhysicalCores
              << ",\"availableLogicalThreads\":" << result.availableLogicalThreads
