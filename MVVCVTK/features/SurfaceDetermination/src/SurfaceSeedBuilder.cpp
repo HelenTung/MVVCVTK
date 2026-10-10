@@ -111,7 +111,8 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
                 {
                     if (!GetBudget(points.size() + 1, triangles.size() + clipped.size(), budget, stats))
                         return SurfaceSeedStatus::BudgetExceeded;
-                    const double dLow = distance(low), dHigh = distance(high);
+                    // canonical low/high 的端点和浮点表达式不变，复用当前边已算出的距离。
+                    const double dLow = low==a?da:db, dHigh = high==b?db:da;
                     const double fraction = dLow / (dLow - dHigh);
                     Point point{};
                     for (unsigned c = 0; c < 3; ++c)

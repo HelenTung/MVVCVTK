@@ -75,6 +75,9 @@ struct SurfaceAlgorithmResult final {
     std::size_t componentWorkspaceBound = 0, componentBudgetFallbackCount = 0;
     double componentParallelMs = 0;
     double componentsMs = 0;
+    double componentSelectionMs = 0, largestPointSamplingMs = 0;
+    std::uint64_t componentCandidateCount = 0, componentSelectionPointVisits = 0;
+    std::size_t largestPointCount = 0, largestTriangleCount = 0;
     double meshPreparationMs = 0;
     double pointSamplingMs = 0;
     double outputMs = 0;

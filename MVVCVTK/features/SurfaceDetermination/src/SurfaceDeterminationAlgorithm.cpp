@@ -1509,7 +1509,8 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
 }
 
 double GetComponentDistanceSquared(const MeshComponent &component, const std::vector<Point3> &points,
-                                   const Point3 &seed, const SurfaceCancelCheck &cancelled = {})
+                                   const Point3 &seed, const SurfaceCancelCheck &cancelled = {},
+                                   std::uint64_t *visited = nullptr)
 {
     std::size_t cancellationBatch = 0;
     double distance = std::numeric_limits<double>::max();
@@ -1518,63 +1519,62 @@ double GetComponentDistanceSquared(const MeshComponent &component, const std::ve
         const Point3 delta = Subtract(points[pointId], seed);
         distance = std::min(distance, Dot(delta, delta));
     }
+    if(visited)*visited+=component.sourcePointIds.size();
     return distance;
 }
 
 std::vector<std::size_t> GetSelectedComponents(const std::vector<MeshComponent> &components,
                                                const std::vector<Point3> &points,
                                                const ResolvedParams &params,
-                                               const SurfaceCancelCheck &cancelled = {})
+                                               const SurfaceCancelCheck &cancelled,
+                                               std::uint64_t &candidateCount,std::uint64_t &pointVisits)
 {
     std::size_t cancellationBatch = 0;
     std::vector<std::size_t> eligible;
-    for (std::size_t index = 0; index < components.size(); ++index) {
-        CheckCancellation(cancellationBatch, cancelled);
-        const MeshComponent& component = components[index];
-        // 开放表面没有可信体积，不伪造 voxel count；保留它并由 truncated
-        // 与 metric validity 向调用方表达限制。
-        if (!component.isClosed
-            || component.estimatedVoxelCount >= params.minimumObjectVoxels) {
-            eligible.push_back(index);
-        }
-    }
     const auto score = [&components](const std::size_t index) {
         const MeshComponent& component = components[index];
-        return std::make_pair(
-            component.estimatedVoxelCount,
-            static_cast<std::uint64_t>(component.triangles.size()));
+        return std::make_pair(component.estimatedVoxelCount,
+                              static_cast<std::uint64_t>(component.triangles.size()));
     };
-    const auto stableOrder = [&components, &score](
-        const std::size_t left,
-        const std::size_t right) {
+    const auto stableOrder = [&components, &score](const std::size_t left,const std::size_t right) {
         if (score(left) != score(right)) return score(left) > score(right);
-        return components[left].minimumPointId
-            < components[right].minimumPointId;
+        return components[left].minimumPointId < components[right].minimumPointId;
     };
-    std::sort(eligible.begin(), eligible.end(), stableOrder);
-    if (eligible.empty()) return {};
-    if (params.componentSelection == SurfaceComponentSelection::Largest) {
-        eligible.resize(1);
-        return eligible;
+    std::optional<std::size_t> best;
+    double bestDistance = 0;
+    bool distanceKnown = false;
+    for (std::size_t index = 0; index < components.size(); ++index) {
+        CheckCancellation(cancellationBatch, cancelled);
+        const auto &component = components[index];
+        // 开放表面没有可信体积，保留原准入规则。
+        if (component.isClosed && component.estimatedVoxelCount < params.minimumObjectVoxels) continue;
+        ++candidateCount;
+        if (params.componentSelection == SurfaceComponentSelection::All) {
+            eligible.push_back(index);
+            continue;
+        }
+        if (!best) { best = index; continue; }
+        if (params.componentSelection == SurfaceComponentSelection::Largest) {
+            // 与原 sort 的首项比较器相同；只输出一项时不存储、排序其余候选。
+            if (stableOrder(index,*best)) best=index;
+            continue;
+        }
+        // 仅一个候选时无需计算距离；存在竞争时，每件组件至多扫描一次。
+        const auto &seed=*params.seedModelPoint;
+        if (!distanceKnown) {
+            bestDistance=GetComponentDistanceSquared(components[*best],points,seed,cancelled,&pointVisits);
+            distanceKnown=true;
+        }
+        const auto distance=GetComponentDistanceSquared(component,points,seed,cancelled,&pointVisits);
+        if (distance<bestDistance || (distance==bestDistance &&
+                component.minimumPointId<components[*best].minimumPointId)) {
+            best=index;bestDistance=distance;
+        }
     }
-    if (params.componentSelection == SurfaceComponentSelection::Seeded) {
-        const Point3& seed = *params.seedModelPoint;
-        const auto selected = std::min_element(
-            eligible.begin(), eligible.end(),
-            [&components, &points, &seed, &cancelled](const std::size_t left, const std::size_t right) {
-                const double leftDistance =
-                    GetComponentDistanceSquared(components[left], points, seed, cancelled);
-                const double rightDistance =
-                    GetComponentDistanceSquared(components[right], points, seed, cancelled);
-                if (leftDistance != rightDistance)
-                {
-                    return leftDistance < rightDistance;
-                }
-                return components[left].minimumPointId
-                    < components[right].minimumPointId;
-            });
-        return { *selected };
-    }
+    if (params.componentSelection != SurfaceComponentSelection::All)
+        return best?std::vector<std::size_t>{*best}:std::vector<std::size_t>{};
+    // All 仍按原规则排序，保留全部对象和点、面的发布顺序。
+    std::sort(eligible.begin(),eligible.end(),stableOrder);
     return eligible;
 }
 
@@ -2144,7 +2144,11 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         result.componentsMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         [[maybe_unused]] const auto releasedTriangleBytes=meshTriangles.capacity()*sizeof(Triangle);
         std::vector<Triangle>().swap(meshTriangles);
-        const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled);
+        const auto selectionStarted=std::chrono::steady_clock::now();
+        const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled,
+            result.componentCandidateCount,result.componentSelectionPointVisits);
+        result.componentSelectionMs+=std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-selectionStarted).count();
         // 数量已确定后一次预留最终产物，避免追加时同时存活的新旧大数组。
         std::size_t outputPoints=result.points.size(),outputTriangles=result.triangleIndices.size()/3;
         std::size_t outputObjects=0,reservedBytes=0,reservationCancellation=0;
@@ -2426,6 +2430,10 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                 throw SurfaceCancelled{};
             const auto outputStart=std::chrono::steady_clock::now();
             totals.samplingMs+=std::chrono::duration<double,std::milli>(outputStart-samplingStart).count();
+            if(!ownsCpuQuota && largest!=selected.end() && selectedIndex==*largest){
+                result.largestPointSamplingMs+=std::chrono::duration<double,std::milli>(outputStart-samplingStart).count();
+                result.largestPointCount+=points.size();result.largestTriangleCount+=triangles.size();
+            }
             if (!ownsCpuQuota) SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
                                            .1 + .8 * (pairIndex + .85) / pairCount);
             WriteObjectResult(volume,params,objectIndex,points,triangles,records,normals,

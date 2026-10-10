@@ -56,18 +56,31 @@ void WriteResult(std::ostream &stream, const SurfaceAlgorithmResult &result) {
 int main(int argc, char **argv) {
     if (argc < 7) {
         std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout] "
-                     "[--roi-box xmin xmax ymin ymax zmin zmax] [--work-limit bytes] [--retry-finalizer-fault]\n";
+                     "[--roi-box xmin xmax ymin ymax zmin zmax] [--work-limit bytes] [--retry-finalizer-fault] "
+                     "[--largest|--seed-model x y z]\n";
         return 2;
     }
     try {
         bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false;
         std::optional<std::array<double,6>> roiBounds;
         WorkLimit workingLimit;
+        bool hasSelection=false;
+        auto selection=SurfaceComponentSelection::All;
+        std::optional<std::array<double,3>> seedModel;
         for(int i=7;i<argc;++i) {
             const std::string_view option(argv[i]);
             if(option=="--binary-stdout" || option=="--metrics-only") {
                 if(streamBinary || metricsOnly)return 2;
                 streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
+            } else if(option=="--largest" || option=="--seed-model") {
+                if(hasSelection)return 2;
+                hasSelection=true;
+                selection=option=="--largest"?SurfaceComponentSelection::Largest:SurfaceComponentSelection::Seeded;
+                if(selection==SurfaceComponentSelection::Seeded){
+                    if(argc-i<4)return 2;
+                    seedModel.emplace();
+                    for(auto &value:*seedModel){value=std::stod(argv[++i]);if(!std::isfinite(value))return 2;}
+                }
             } else if(option=="--work-limit") {
                 if(workingLimit.GetValue() || ++i>=argc || argv[i][0]=='-')return 2;
                 std::size_t parsed=0;
@@ -109,7 +122,8 @@ int main(int argc, char **argv) {
         const auto source = std::make_shared<const VtkImageGridView>(
             VtkImageGridView{{}, DataBinding{std::string(primaryVolumeBinding), ref, 1}, data, image, {}});
         auto params = SurfaceTest::GetParams(SurfaceDeterminationMethod::GlobalAutomatic);
-        params.componentSelection = SurfaceComponentSelection::All;
+        params.componentSelection = selection;
+        params.seedModelPoint=seedModel;
         params.minimumObjectVoxels = 0;
         params.initialIsoValue = std::stod(argv[5]);
         SurfaceAlgorithmInputs inputs;
@@ -160,6 +174,12 @@ int main(int argc, char **argv) {
              << ",\"seedMs\":" << result.execution.seedMs
              << ",\"refinementMs\":" << result.execution.refinementMs
              << ",\"componentsMs\":" << result.componentsMs
+             << ",\"componentSelectionMs\":" << result.componentSelectionMs
+             << ",\"componentCandidateCount\":" << result.componentCandidateCount
+             << ",\"componentSelectionPointVisits\":" << result.componentSelectionPointVisits
+             << ",\"largestPointSamplingMs\":" << result.largestPointSamplingMs
+             << ",\"largestPointCount\":" << result.largestPointCount
+             << ",\"largestTriangleCount\":" << result.largestTriangleCount
              << ",\"meshPreparationMs\":" << result.meshPreparationMs
              << ",\"pointSamplingMs\":" << result.pointSamplingMs
              << ",\"outputMs\":" << result.outputMs

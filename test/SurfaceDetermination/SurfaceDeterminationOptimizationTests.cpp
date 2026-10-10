@@ -345,6 +345,36 @@ void TestManyComponents(Checks &checks)
                    record.pointCount == 6 && record.triangleCount == 8 && record.isClosed && record.isManifold,
                    "component bounds and ordering follow isolated-node geometry and first scan encounter");
     }
+    params.componentSelection=SurfaceComponentSelection::Largest;
+    const auto largest=build();
+    checks.Get(largest.status==SurfaceResultStatus::Succeeded && largest.objects.size()==1 && !first.objects.empty() &&
+        largest.objects[0].boundsModel==first.objects[0].boundsModel &&
+        largest.componentCandidateCount==125 && largest.componentSelectionPointVisits==0,
+        "equal-volume/equal-triangle Largest keeps the original minimum point-ID tie break without distance scans");
+    params.componentSelection=SurfaceComponentSelection::Seeded;params.seedModelPoint=Point3{8,5,5};
+    const auto tied=build();
+    checks.Get(tied.status==SurfaceResultStatus::Succeeded && tied.objects.size()==1 && !first.objects.empty() &&
+        tied.objects[0].boundsModel==first.objects[0].boundsModel &&
+        tied.componentCandidateCount==125 && tied.componentSelectionPointVisits==first.points.size(),
+        "Seeded equidistance keeps the original point-ID tie break and scans each candidate point once");
+    params.seedModelPoint=Point3{std::numeric_limits<double>::max(),0,0};
+    const auto overflowed=build();
+    checks.Get(overflowed.status==SurfaceResultStatus::Succeeded && overflowed.objects.size()==1 && !first.objects.empty() &&
+        overflowed.objects[0].boundsModel==first.objects[0].boundsModel,
+        "overflowed squared distances keep the finite max-distance sentinel and original tie break");
+    params.minimumObjectVoxels=std::numeric_limits<std::uint64_t>::max();
+    const auto excluded=build();
+    checks.Get(excluded.failureReason==SurfaceFailureReason::NoSurface && excluded.points.empty() &&
+        excluded.componentCandidateCount==0 && excluded.componentSelectionPointVisits==0,
+        "fully excluded closed components preserve the empty selection failure without distance scans");
+    const auto singleSource=BuildSnapshot({9,9,9},{1,1,1},{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_FLOAT,
+        [](const Point3&p){return p==Point3{4,4,4}?1.:0.;});
+    params.minimumObjectVoxels=0;params.seedModelPoint=Point3{4,4,4};
+    const auto single=SurfaceDeterminationAlgorithm::BuildSurface(singleSource,params,WorkLimit{},[]{return false;},{});
+    checks.Get(single.status==SurfaceResultStatus::Succeeded && single.objects.size()==1 && single.points.size()==6 &&
+        single.componentCandidateCount==1 && single.componentSelectionPointVisits==0,
+        "single-candidate Seeded preserves the analytic octahedron and avoids an unnecessary distance scan");
+    params.componentSelection=SurfaceComponentSelection::All;params.seedModelPoint.reset();
     bool grouping = false;
     unsigned checksInGrouping = 0;
     const auto cancelled = SurfaceDeterminationAlgorithm::BuildSurface(source, params, 256U*1024U*1024U,
@@ -488,6 +518,40 @@ void TestSingleRoiDistance(Checks &checks)
                         std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),[](auto valid){return valid==0;}),
                         "zero distance adds the original explicit nonmeasurement boundary reason");
     }
+}
+
+void TestDiagonalRoiSeedClip(Checks &checks)
+{
+    const auto source=BuildSnapshot({7,7,7},{1,1,1},{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_FLOAT,
+        [](const Point3&p){return p[2];});
+    DataGraphStore store;
+    RoiNode node;node.primitive.localToSource={1,1,0,3, 1,-1,0,3, 0,0,2,3, 0,0,0,1};
+    RoiDefinition definition{source->data->self,{node}};
+    const DataRevisionRef ref{store.CreateDataEntityId(),1};
+    DataTransaction transaction;
+    transaction.outputs={{source->data->self.entityId,0,DataTypes::imageGrid3D,{},source->data->payload},
+        {ref.entityId,0,DataTypes::roiGeometry,RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition)}};
+    const auto committed=store.SetDataCommit(transaction);
+    const auto roi=RoiEvaluator::GetRoi(committed.graph,ref,source->data->self).roi;
+    checks.Get(bool(roi),"diagonal ROI fixture evaluates a nonsingular transformed box");
+    if(!roi)return;
+    SurfaceSeedGrid grid;grid.extent={0,6,0,6,0,6};grid.dimensions={7,7,7};
+    grid.indexToModel=grid.modelToIndex={1,0,0,0,1,0,0,0,1};
+    grid.values=grid.scalarValues=source->image->GetScalarPointer();grid.scalarType=VTK_FLOAT;
+    grid.readScalar=[](const void*p,std::size_t i){return double(static_cast<const float*>(p)[i]);};
+    std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+    const auto status=SurfaceSeedBuilder::BuildMesh(grid,3.5,roi,0,2,WorkLimit{}, {},points,triangles,stats);
+    checks.Get(status==SurfaceSeedStatus::Succeeded && !triangles.empty() &&
+        std::all_of(points.begin(),points.end(),[](const auto&p){return p[2]==3.5 &&
+            p[0]+p[1]>=4-1e-12 && p[0]+p[1]<=8+1e-12 && std::abs(p[0]-p[1])<=2+1e-12;}),
+        "diagonal clip keeps the analytic plane inside the four diamond half spaces");
+    double area=0;
+    for(const auto &triangle:triangles){
+        const auto &a=points[triangle.vertices[0]],&b=points[triangle.vertices[1]],&c=points[triangle.vertices[2]];
+        area+=.5*std::abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]));
+    }
+    // 四顶点 (1,3),(3,1),(5,3),(3,5) 的解析面积为8；裕量仅覆盖 float64 投影舍入。
+    checks.Get(std::abs(area-8)<1e-12,"shared intersections in reverse edge directions retain the analytic diamond area");
 }
 
 void TestSparseTopology(Checks &checks)
@@ -782,7 +846,7 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
     TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks); TestComponentPool(checks);
-    TestSingleRoiDistance(checks); TestSparseTopology(checks);
+    TestSingleRoiDistance(checks); TestDiagonalRoiSeedClip(checks); TestSparseTopology(checks);
     TestGpuFinalizerOwnership(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
