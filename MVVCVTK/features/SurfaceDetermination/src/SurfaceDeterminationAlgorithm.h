@@ -58,9 +58,13 @@ struct SurfaceAlgorithmResult final {
     std::size_t cudaDeviceBytes = 0;
     std::size_t cudaHostBufferBytes = 0;
     std::size_t cudaBatchCount = 0;
+    unsigned cudaFinalizeThreads = 1;
+    std::size_t cudaFinalizeWorkspaceBound = 0;
     bool cudaProfilingRequested = false;
     double cudaStartMs = 0, cudaIndexMs = 0, cudaSubmitMs = 0, cudaCollectMs = 0;
     double cudaFinalizeMs = 0, cudaCloseMs = 0, cpuSamplingMs = 0;
+    // GPU 分支的 wall 时间，包含后处理排空；故障时也包含该分支的 CPU 余段回退。
+    double cudaPipelineMs = 0;
     SurfaceCudaProfile cudaProfile;
     unsigned cpuThreadCount = 0;
     unsigned availablePhysicalCores = 0;

@@ -3,6 +3,7 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceSeedBuilder.h"
 #include "SurfaceEdgeTopology.h"
+#include "SurfaceGpuFinalizer.h"
 #include "SurfaceDeterminationTestSupport.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -522,6 +523,49 @@ void TestSparseTopology(Checks &checks)
         "early local topology estimates still select the independently largest component");
 }
 
+void TestGpuFinalizerOwnership(Checks &checks)
+{
+    std::vector<SurfaceCudaSample> samples(surfaceCudaBatchCapacity);
+    for (auto &sample:samples) { sample.support=1;sample.gradientValid=1;sample.magnitude=17; }
+    std::promise<void> entered,release;
+    auto released=release.get_future().share();
+    std::atomic<bool> copied{false};
+    const auto callback=[&](std::size_t begin,std::size_t count,const SurfaceCudaSample *values) {
+        if(begin==99)throw std::runtime_error("finalizer exception probe");
+        if(begin==0){entered.set_value();released.wait();}
+        SurfaceGpuFinalizedBatch result;
+        if(!values){result.accepted=count;return result;}
+        copied.store(std::all_of(values,values+count,[](const auto &sample){
+            return sample.support==1 && sample.gradientValid==1 && sample.magnitude==17;
+        }));
+        result.accepted=count;
+        return result;
+    };
+    SurfaceGpuFinalizer<decltype(callback)> pool(1,callback);
+    checks.Get(pool.GetThreadCount()==1,"finalizer ownership fixture starts a bounded persistent worker");
+    if(!pool.GetThreadCount())return;
+    pool.Submit(0,0,samples.size(),samples.data());
+    entered.get_future().wait();
+    // 模拟 owner 重用 pinned 样本；worker 必须继续读取自己的普通 CPU 副本。
+    for(auto &sample:samples)sample.magnitude=-23;
+    release.set_value();
+    const auto first=pool.Finish(0);
+    checks.Get(copied.load() && first.accepted==samples.size(),"finalizer does not borrow mutable CUDA samples");
+    pool.Submit(0,1,31,nullptr);
+    checks.Get(pool.Finish(0).accepted==31 && pool.Finish(0).accepted==0,
+        "completed slot is reusable and merged once; missing GPU data reaches CPU callback");
+    pool.Submit(1,99,1,nullptr);
+    bool threw=false;
+    try{pool.Finish(1);}catch(const std::runtime_error&){threw=true;}
+    pool.Stop();
+    checks.Get(threw,"finalizer joins workers and propagates exceptions through owner");
+    SurfaceGpuFinalizer<decltype(callback)> recovery(1,callback);
+    if(recovery.GetThreadCount()){
+        recovery.Submit(0,2,7,nullptr);
+        checks.Get(recovery.Finish(0).accepted==7,"failed finalizer leaves no persistent task state");
+    }
+}
+
 struct SeedReadCounter final {
     const std::vector<float> *values;
     std::size_t reads = 0;
@@ -739,6 +783,7 @@ int GetSurfaceOptimizationFailCount()
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
     TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks); TestComponentPool(checks);
     TestSingleRoiDistance(checks); TestSparseTopology(checks);
+    TestGpuFinalizerOwnership(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);

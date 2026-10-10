@@ -4,6 +4,7 @@
 #include "SurfaceSeedBuilder.h"
 #include "SurfaceEdgeTopology.h"
 #include "SurfaceCudaCompute.h"
+#include "SurfaceGpuFinalizer.h"
 #include <chrono>
 #include "Data/DataPayloads.h"
 
@@ -25,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -35,6 +37,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -2274,11 +2277,94 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                 }
 #endif
                 if (cuda.GetActive()) {
+                    const auto pipelineStart=profileStart();
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                    char faultSetting[4]{};
+                    const unsigned finalizerFault=GetEnvironmentVariableA("MVVCVTK_SURFACE_FINALIZER_TEST_FAULT",
+                        faultSetting,sizeof(faultSetting))==1 && faultSetting[0]>='1' && faultSetting[0]<='3'
+                        ?unsigned(faultSetting[0]-'0'):0;
+                    const auto cudaOwner=std::this_thread::get_id();
+#endif
                     struct PendingBatch final { std::size_t begin=0; SurfaceCudaTicket ticket; };
                     std::array<PendingBatch,surfaceCudaSlotCount> pending;
                     unsigned head=0, queued=0;
                     std::size_t cursor=0;
                     bool healthy=true;
+                    const auto finalize=[&](std::size_t begin,std::size_t count,const SurfaceCudaSample *samples) {
+                        SurfaceGpuFinalizedBatch finalized;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                        if(begin==0 && std::this_thread::get_id()!=cudaOwner && finalizerFault>=2) {
+                            std::fprintf(stderr,"Surface finalizer worker fault %u entered.\n",finalizerFault);
+                            if(finalizerFault==2){cancelled.store(true);return finalized;}
+                            throw std::runtime_error("Surface finalizer worker failure probe.");
+                        }
+#endif
+                        const auto started=profileStart();
+                        for (std::size_t i=0;i<count;++i) {
+                            if (cancelled.load(std::memory_order_acquire)) break;
+                            if ((i&31U)==0 && GetCancelled(getCancelled)) {cancelled.store(true);break;}
+                            const auto *accepted=samples && samples[i].support==1 && samples[i].gradientValid
+                                ?samples+i:nullptr;
+                            const auto id=begin+i;
+                            SetMaterialPoint<true>(volume,params,points[id],normals[id],records[id],nullptr,accepted);
+                            records[id].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
+                            if (accepted) ++finalized.accepted;
+                        }
+                        profileRecord(finalized.cpuMs,started);
+                        return finalized;
+                    };
+                    using Finalizer=SurfaceGpuFinalizer<decltype(finalize)>;
+                    std::optional<CpuSamplingLease> finalizerLease;
+                    std::unique_ptr<Finalizer> finalizer;
+                    char setting[8]{};
+                    const bool allowFinalizers=MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL && cpuPlan.threadLimit>1 &&
+                        !(GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL",setting,sizeof(setting))==1 && setting[0]=='0');
+                    const auto stack=allowFinalizers?GetComponentWorkerStackReserve():std::optional<std::size_t>{};
+                    auto requested=stack?std::min(cpuPlan.threadLimit-1,surfaceCudaSlotCount):0U;
+                    std::size_t perWorker=0,workspace=0;
+                    if (requested && GetSum(*stack,64*1024,perWorker)) {
+                        const auto remaining=maxWorkingBytes-result.requiredBytes;
+                        const auto available=remaining.GetBound(SIZE_MAX-result.requiredBytes);
+                        if (available>=Finalizer::sampleBytes) requested=unsigned(std::min<std::size_t>(requested,
+                            (available-Finalizer::sampleBytes)/perWorker));
+                        else requested=0;
+                    } else requested=0;
+                    // 未创建 worker 时 owner 仍执行索引转换和材料回填，也必须占用一个共享槽。
+                    finalizerLease.emplace(requested+1,cpuPlan.threadLimit,getCancelled);
+                    if (requested) {
+                        try {
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                            if(finalizerFault==1){
+                                std::fprintf(stderr,"Surface finalizer allocation fault entered.\n");
+                                throw std::bad_alloc{};
+                            }
+#endif
+                            // 配额包括 CUDA owner；两个可重用样本槽决定最多同时存在两个后处理任务。
+                            if (finalizerLease->GetThreadCount()>1) {
+                                finalizer=std::make_unique<Finalizer>(finalizerLease->GetThreadCount()-1,finalize);
+                                const auto workers=finalizer->GetThreadCount();
+                                if (workers) {
+                                    workspace=Finalizer::sampleBytes+workers*perWorker;
+                                    result.cudaFinalizeThreads=workers+1;
+                                    result.cudaFinalizeWorkspaceBound=std::max(result.cudaFinalizeWorkspaceBound,workspace);
+                                    result.requiredBytes+=workspace;
+                                    totals.cpuThreads=std::max(totals.cpuThreads,workers+1);
+                                } else finalizer.reset();
+                            }
+                        } catch (const std::bad_alloc &) { finalizer.reset(); }
+                    }
+                    const auto mergeFinalized=[&](const SurfaceGpuFinalizedBatch &batch) {
+                        result.cudaPointCount+=batch.accepted;
+                        // 并行时为 worker 累计 CPU 时间，不能当作独占 wall 时间相加。
+                        result.cudaFinalizeMs+=batch.cpuMs;
+                    };
+                    const auto finishFinalizers=[&] {
+                        if (finalizer) {
+                            for (unsigned slot=0;slot<surfaceCudaSlotCount;++slot) mergeFinalized(finalizer->Finish(slot));
+                            finalizer.reset();
+                        }
+                        finalizerLease.reset();
+                    };
                     while (cursor<points.size() || queued) {
                         if (GetCancelled(getCancelled)) {cancelled.store(true);break;}
                         // 两批可同时入队；CPU 回填前一批时 GPU 继续处理后一批。
@@ -2306,21 +2392,15 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             const auto *samples=cuda.Collect(batch.ticket);
                             profileRecord(result.cudaCollectMs,collectStart);
                             if (!samples) healthy=false;
-                            const auto finalizeStart=profileStart();
-                            for (std::size_t i=0;i<batch.ticket.count;++i) {
-                                if ((i&31U)==0 && GetCancelled(getCancelled)) {cancelled.store(true);break;}
-                                const auto *accepted=samples && samples[i].support==1 && samples[i].gradientValid
-                                    ? samples+i : nullptr;
-                                const auto id=batch.begin+i;
-                                SetMaterialPoint<true>(volume,params,points[id],normals[id],records[id],nullptr,accepted);
-                                records[id].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
-                                if (accepted) ++result.cudaPointCount;
-                            }
-                            profileRecord(result.cudaFinalizeMs,finalizeStart);
+                            if (finalizer) {
+                                mergeFinalized(finalizer->Finish(head));
+                                finalizer->Submit(head,batch.begin,batch.ticket.count,samples);
+                            } else mergeFinalized(finalize(batch.begin,batch.ticket.count,samples));
                             head=(head+1)%surfaceCudaSlotCount; --queued;
                             if (cancelled.load()) break;
                         } else if (!healthy) {
                             // 已提交批次收集完再关闭；未提交的连续余段保持原 CPU 计算。
+                            finishFinalizers(); // 先释放共享配额，再申请 CPU 余段的点级配额。
                             closeCuda();
                             const auto cpuStarted=profileStart();
                             const auto threads=RunPointSampling(points.size()-cursor,cpuPlan.threadLimit,getCancelled,
@@ -2330,6 +2410,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             cursor=points.size();
                         }
                     }
+                    finishFinalizers();
+                    profileRecord(result.cudaPipelineMs,pipelineStart);
                 } else {
                     const auto cpuStarted=profileStart();
                     unsigned threads=1;

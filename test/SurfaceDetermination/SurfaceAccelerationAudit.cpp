@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <Psapi.h>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -55,17 +56,27 @@ void WriteResult(std::ostream &stream, const SurfaceAlgorithmResult &result) {
 int main(int argc, char **argv) {
     if (argc < 7) {
         std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout] "
-                     "[--roi-box xmin xmax ymin ymax zmin zmax]\n";
+                     "[--roi-box xmin xmax ymin ymax zmin zmax] [--work-limit bytes] [--retry-finalizer-fault]\n";
         return 2;
     }
     try {
-        bool streamBinary=false,metricsOnly=false;
+        bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false;
         std::optional<std::array<double,6>> roiBounds;
+        WorkLimit workingLimit;
         for(int i=7;i<argc;++i) {
             const std::string_view option(argv[i]);
             if(option=="--binary-stdout" || option=="--metrics-only") {
                 if(streamBinary || metricsOnly)return 2;
                 streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
+            } else if(option=="--work-limit") {
+                if(workingLimit.GetValue() || ++i>=argc || argv[i][0]=='-')return 2;
+                std::size_t parsed=0;
+                const auto bytes=std::stoull(argv[i],&parsed);
+                if(parsed!=std::strlen(argv[i]) || bytes>SIZE_MAX)return 2;
+                workingLimit=static_cast<std::size_t>(bytes);
+            } else if(option=="--retry-finalizer-fault") {
+                if(retryFinalizerFault)return 2;
+                retryFinalizerFault=true;
             } else if(option=="--roi-box") {
                 if(roiBounds || argc-i<7)return 2;
                 roiBounds.emplace();
@@ -113,7 +124,18 @@ int main(int argc, char **argv) {
                              sizeof(before));
         const auto start = std::chrono::steady_clock::now();
         auto result = SurfaceDeterminationAlgorithm::BuildSurface(
-            source, params, std::numeric_limits<std::size_t>::max(), [] { return false; }, {},inputs);
+            source, params, workingLimit, [] { return false; }, {},inputs);
+        std::optional<SurfaceResultStatus> precedingStatus;
+        SurfaceFailureReason precedingReason=SurfaceFailureReason::None;
+        if(retryFinalizerFault){
+            if((result.status!=SurfaceResultStatus::Cancelled && result.failureReason!=SurfaceFailureReason::InternalError) ||
+                !result.points.empty() || !result.objects.empty() || !result.triangleIndices.empty() ||
+                !result.triangleValidity.empty() || !result.interfaces.empty())return 2;
+            precedingStatus=result.status;precedingReason=result.failureReason;
+            if(!SetEnvironmentVariableA("MVVCVTK_SURFACE_FINALIZER_TEST_FAULT","0"))return 2;
+            result=SurfaceDeterminationAlgorithm::BuildSurface(
+                source,params,workingLimit,[]{return false;},{},inputs);
+        }
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         PROCESS_MEMORY_COUNTERS_EX after{};
@@ -149,12 +171,16 @@ int main(int argc, char **argv) {
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
              << ",\"cudaHostBufferBytes\":" << result.cudaHostBufferBytes
              << ",\"cudaBatchCount\":" << result.cudaBatchCount
+             << ",\"cudaFinalizeThreads\":" << result.cudaFinalizeThreads
+             << ",\"cudaFinalizeWorkspaceBound\":" << result.cudaFinalizeWorkspaceBound
+             << ",\"estimatedWorkingBytes\":" << result.requiredBytes
              << ",\"cudaProfilingRequested\":" << result.cudaProfilingRequested
              << ",\"cudaStartMs\":" << result.cudaStartMs
              << ",\"cudaIndexMs\":" << result.cudaIndexMs
              << ",\"cudaSubmitMs\":" << result.cudaSubmitMs
              << ",\"cudaCollectMs\":" << result.cudaCollectMs
              << ",\"cudaFinalizeMs\":" << result.cudaFinalizeMs
+             << ",\"cudaPipelineMs\":" << result.cudaPipelineMs
              << ",\"cudaCloseMs\":" << result.cudaCloseMs
              << ",\"cpuSamplingMs\":" << result.cpuSamplingMs
              << ",\"cudaProfileEventsAvailable\":" << result.cudaProfile.eventsAvailable
@@ -183,7 +209,9 @@ int main(int argc, char **argv) {
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage
-             << ",\"peakWorkingBytes\":" << after.PeakWorkingSetSize << "}\n";
+             << ",\"peakWorkingBytes\":" << after.PeakWorkingSetSize
+             << ",\"precedingFaultStatus\":" << (precedingStatus?int(*precedingStatus):-1)
+             << ",\"precedingFaultReason\":" << int(precedingReason) << "}\n";
         if (!streamBinary) std::cout << "points=" << result.points.size() << " triangles=" << result.triangleIndices.size() / 3
                   << " totalMs=" << elapsed << " peakPrivate=" << after.PeakPagefileUsage << '\n';
         if (result.status != SurfaceResultStatus::Succeeded)
