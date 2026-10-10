@@ -226,12 +226,20 @@ SurfaceSeedStatus BuildSeedMesh(
                             continue;
                         }
                         const auto *entries = cases[code].edges;
+                        if (entries[0] < 0) continue;
+                        std::array<std::uint32_t, 12> cellIds;
+                        cellIds.fill(UINT32_MAX);
                         for (unsigned t = 0; t < 15 && entries[t] >= 0; t += 3)
                         {
                             SurfaceSeedTriangle triangle;
                             for (unsigned v = 0; v < 3; ++v)
                             {
-                                const int a = edges[entries[t + v]][0], b = edges[entries[t + v]][1];
+                                const auto edgeId = entries[t + v];
+                                if (cellIds[edgeId] != UINT32_MAX) {
+                                    triangle.vertices[v] = cellIds[edgeId];
+                                    continue;
+                                }
+                                const int a = edges[edgeId][0], b = edges[edgeId][1];
                                 Point indexA{double(xx + corners[a][0]), double(yy + corners[a][1]),
                                              double(zz + corners[a][2])};
                                 Point indexB{double(xx + corners[b][0]), double(yy + corners[b][1]),
@@ -276,7 +284,7 @@ SurfaceSeedStatus BuildSeedMesh(
                                     points.push_back(point);
                                     found = edgeIds.emplace(key, id).first;
                                 }
-                                triangle.vertices[v] = found->second;
+                                cellIds[edgeId] = triangle.vertices[v] = found->second;
                             }
                             if (triangle.vertices[0] != triangle.vertices[1] &&
                                 triangle.vertices[1] != triangle.vertices[2] &&

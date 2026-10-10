@@ -321,7 +321,6 @@ struct ScalarSample final {
 };
 
 struct TopologyMetrics final {
-    double area = 0.0;
     double signedVolume = 0.0;
     std::uint64_t boundaryEdgeCount = 0;
     std::uint64_t nonManifoldEdgeCount = 0;
@@ -731,6 +730,7 @@ std::size_t GetTupleIndex(
         + localX;
 }
 
+template <bool Interpolate = true>
 ScalarSample GetScalarAtIndex(
     const VolumeView& volume,
     const Point3& continuousIndex)
@@ -760,10 +760,13 @@ ScalarSample GetScalarAtIndex(
             base = volume.geometry.extent[axis * 2];
         }
         lower[axis] = base;
-        fraction[axis] = std::clamp(
-            bounded - static_cast<double>(base), 0.0, 1.0);
+        if constexpr (Interpolate)
+            fraction[axis] = std::clamp(bounded - static_cast<double>(base), 0.0, 1.0);
     }
 
+    // 原采样状态只取决于坐标和完整角点 mask，NaN 标量不会改变该状态。
+    if constexpr (!Interpolate)
+        if (!volume.validity) return {SampleStatus::Valid, 0.0};
     double value = 0.0;
     for (int corner = 0; corner < 8; ++corner) {
         const int x = lower[0] + (corner & 1);
@@ -774,35 +777,23 @@ ScalarSample GetScalarAtIndex(
         if (volume.validity && volume.validity[tupleIndex] == 0) {
             return { SampleStatus::InvalidSupport, 0.0 };
         }
-        const double xWeight = (corner & 1)
-            ? fraction[0] : 1.0 - fraction[0];
-        const double yWeight = (corner & 2)
-            ? fraction[1] : 1.0 - fraction[1];
-        const double zWeight = (corner & 4)
-            ? fraction[2] : 1.0 - fraction[2];
-        value += xWeight * yWeight * zWeight
-            * volume.scalars.GetValue(tupleIndex);
+        if constexpr (Interpolate) {
+            const double xWeight = (corner & 1) ? fraction[0] : 1.0 - fraction[0];
+            const double yWeight = (corner & 2) ? fraction[1] : 1.0 - fraction[1];
+            const double zWeight = (corner & 4) ? fraction[2] : 1.0 - fraction[2];
+            value += xWeight * yWeight * zWeight * volume.scalars.GetValue(tupleIndex);
+        }
     }
     return { SampleStatus::Valid, value };
 }
 
-ScalarSample GetScalarAtModel(
-    const VolumeView& volume,
-    const Point3& modelPoint)
-{
-    return GetScalarAtIndex(
-        volume,
-        GetContinuousIndex(volume.geometry, modelPoint));
-}
 
-bool GetGradient(
+bool GetGradientAtIndex(
     const VolumeView& volume,
-    const Point3& modelPoint,
+    const Point3& center,
     Point3& gradientModel,
     double& magnitude)
 {
-    const Point3 center = GetContinuousIndex(
-        volume.geometry, modelPoint);
     Point3 gradientIndex{};
     for (std::size_t axis = 0; axis < 3; ++axis) {
         Point3 negative = center;
@@ -830,6 +821,11 @@ bool GetGradient(
     };
     magnitude = GetLength(gradientModel);
     return std::isfinite(magnitude) && magnitude > geometryEpsilon;
+}
+
+bool GetGradient(const VolumeView &volume, const Point3 &modelPoint, Point3 &gradientModel, double &magnitude)
+{
+    return GetGradientAtIndex(volume, GetContinuousIndex(volume.geometry, modelPoint), gradientModel, magnitude);
 }
 
 bool GetVoxelUsed(
@@ -1251,7 +1247,6 @@ TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std:
             ++metrics.degenerateTriangleCount;
         }
         else {
-            metrics.area += 0.5 * doubleArea;
             metrics.signedVolume += Dot(
                 points[ids[0]],
                 Cross(points[ids[1]], points[ids[2]])) / 6.0;
@@ -1298,25 +1293,71 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
 {
     std::size_t cancellationBatch = 0;
     DisjointSet sets(points.size());
-    for (const Triangle& triangle : triangles) {
+    for (const auto &triangle : triangles) {
         CheckCancellation(cancellationBatch, cancelled);
         sets.SetJoined(triangle.vertices[0], triangle.vertices[1]);
         sets.SetJoined(triangle.vertices[1], triangle.vertices[2]);
     }
-    std::map<std::uint32_t, std::vector<Triangle>> groupedTriangles;
-    for (const Triangle& triangle : triangles) {
-        CheckCancellation(cancellationBatch, cancelled);
-        groupedTriangles[sets.GetRoot(triangle.vertices[0])]
-            .push_back(triangle);
+    using Group = std::pair<std::uint32_t, std::vector<Triangle>>;
+    using GroupMap = std::map<std::uint32_t, std::vector<Triangle>>;
+    std::vector<Group> groups;
+    std::optional<GroupMap> legacyGroups;
+    std::vector<std::uint32_t> localIds;
+    // Union 已结束，GetRoot 不读取 rank；把 rank 缓冲改作根和点的标记。
+    auto seen = sets.ReleaseRanks();
+    for (auto &marker : seen) { CheckCancellation(cancellationBatch, cancelled); marker = 0; }
+    constexpr auto groupTag = std::uint32_t(1) << 31U;
+    if (points.size() <= std::uint64_t(groupTag)) {
+        std::size_t groupCount = 0;
+        for (const auto &triangle : triangles) {
+            CheckCancellation(cancellationBatch, cancelled);
+            const auto root = sets.GetRoot(triangle.vertices[0]);
+            if (!seen[root]) { seen[root] = 1; ++groupCount; }
+        }
+        groups.reserve(groupCount);
+        localIds = sets.ReleaseParents();
+        const auto getGroup = [&](std::uint32_t point) {
+            auto root = point;
+            while (localIds[root] != root && !(localIds[root] & groupTag)) root = localIds[root];
+            auto encoded = localIds[root];
+            if (!(encoded & groupTag)) {
+                encoded = groupTag | static_cast<std::uint32_t>(groups.size());
+                groups.emplace_back(root, std::vector<Triangle>{});
+                localIds[root] = encoded;
+            }
+            while (!(localIds[point] & groupTag)) {
+                const auto next = localIds[point];
+                localIds[point] = encoded;
+                point = next;
+            }
+            return encoded & ~groupTag;
+        };
+        for (const auto &triangle : triangles) {
+            CheckCancellation(cancellationBatch, cancelled);
+            const auto group = getGroup(triangle.vertices[0]);
+            groups[group].second.push_back(triangle);
+        }
+        // 恢复原 map 的根编号顺序，保留组件顺序及每组件的浮点累加顺序。
+        std::sort(groups.begin(), groups.end(), [&](const auto &left, const auto &right) {
+            CheckCancellation(cancellationBatch, cancelled);
+            return left.first < right.first;
+        });
+        for (const auto &group : groups) {
+            CheckCancellation(cancellationBatch, cancelled);
+            seen[group.first] = 0;
+        }
+    } else {
+        // 32 位完整编号保留原分组容器，避免标签占用合法点编号。
+        legacyGroups.emplace();
+        for (const auto &triangle : triangles) {
+            CheckCancellation(cancellationBatch, cancelled);
+            (*legacyGroups)[sets.GetRoot(triangle.vertices[0])].push_back(triangle);
+        }
+        localIds = sets.ReleaseParents();
     }
-
-    // 分组已完成，不再查询集合根；复用原缓冲作局部编号和去重标记。
-    auto localIds=sets.ReleaseParents();
-    auto seen=sets.ReleaseRanks();
-    for(auto& marker:seen) { CheckCancellation(cancellationBatch,cancelled); marker=0; }
     std::vector<MeshComponent> components;
-    components.reserve(groupedTriangles.size());
-    for (auto& item : groupedTriangles) {
+    components.reserve(legacyGroups ? legacyGroups->size() : groups.size());
+    const auto appendComponent = [&](auto &item) {
         CheckCancellation(cancellationBatch, cancelled);
         MeshComponent component;
         component.triangles = std::move(item.second);
@@ -1370,6 +1411,11 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             }
         }
         components.push_back(std::move(component));
+    };
+    if (legacyGroups) {
+        for (auto &group : *legacyGroups) appendComponent(group);
+    } else {
+        for (auto &group : groups) appendComponent(group);
     }
     return components;
 }
@@ -1557,13 +1603,19 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
         if (std::isfinite(distance) && distance <= tolerance)
             record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
     }
-    bool hasGradient=false;
-    if(deviceSample) {
-        std::copy_n(deviceSample->gradient,3,gradient.begin());
-        magnitude=deviceSample->magnitude; hasGradient=deviceSample->gradientValid!=0;
-    } else hasGradient=GetGradient(volume,initialPoint,gradient,magnitude);
-    if (hasGradient && Normalize(gradient))
-        normal = Scale(gradient, -1);
+    Point3 center{};
+    bool hasGradient = false;
+    if (deviceSample) {
+        std::copy_n(deviceSample->gradient, 3, gradient.begin());
+        magnitude = deviceSample->magnitude;
+        hasGradient = deviceSample->gradientValid != 0;
+        if (hasGradient && Normalize(gradient)) normal = Scale(gradient, -1);
+    } else {
+        center = GetContinuousIndex(volume.geometry, initialPoint);
+        hasGradient = GetGradientAtIndex(volume, center, gradient, magnitude);
+        // CPU magnitude 已由同一梯度的 GetLength 得到；保留随后 normal 的归一化。
+        if (hasGradient) normal = Scale(Scale(gradient, 1.0 / magnitude), -1);
+    }
     if (!Normalize(normal)) {
         record.flags |= SurfacePointFlags::FitRejected | SurfacePointFlags::SeedRetained;
         return false;
@@ -1574,11 +1626,11 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
     record.normalModel = {GetFiniteFloat(normal[0]), GetFiniteFloat(normal[1]), GetFiniteFloat(normal[2])};
     record.localThreshold = GetFiniteFloat(params.initialIsoValue);
     record.gradientMagnitude = GetFiniteFloat(magnitude);
-    const auto sample = deviceSample
-        ? ScalarSample{deviceSample->support==1?SampleStatus::Valid:SampleStatus::InvalidSupport,0}
-        : GetScalarAtModel(volume, initialPoint);
-    record.validSupportRatio = sample.status == SampleStatus::Valid ? 1.0F : 0.0F;
-    if (sample.status != SampleStatus::Valid) record.flags |= SurfacePointFlags::InvalidSupport;
+    const auto support = deviceSample
+        ? (deviceSample->support == 1 ? SampleStatus::Valid : SampleStatus::InvalidSupport)
+        : GetScalarAtIndex<false>(volume, center).status;
+    record.validSupportRatio = support == SampleStatus::Valid ? 1.0F : 0.0F;
+    if (support != SampleStatus::Valid) record.flags |= SurfacePointFlags::InvalidSupport;
     if (diagnostic) {
         diagnostic->isAvailable = true;
         diagnostic->point = record;
@@ -1742,6 +1794,9 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     double validArea = 0.0;
     double totalArea = 0.0;
     bool hasCompleteSupport = !triangles.empty();
+    // 无体积输出的对象不再累加体积；面积、质量判定和有效体积的顺序保持原样。
+    const bool calculateVolume = topology.nonManifoldEdgeCount == 0 && !isTruncated &&
+        topology.boundaryEdgeCount == 0 && topology.isOrientationValid && topology.degenerateTriangleCount == 0;
     for (const auto& triangle : triangles) {
         CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
@@ -1749,7 +1804,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
         const auto edgeB = Subtract(records[ids[2]].positionModel, records[ids[0]].positionModel);
         const double doubleArea=GetLength(Cross(edgeA,edgeB));
         const double area = 0.5 * doubleArea;
-        if(std::isfinite(doubleArea)&&doubleArea>geometryEpsilon)
+        if(calculateVolume && hasCompleteSupport && std::isfinite(doubleArea)&&doubleArea>geometryEpsilon)
             topology.signedVolume+=Dot(refinedPoints[ids[0]],Cross(refinedPoints[ids[1]],refinedPoints[ids[2]]))/6.0;
         bool isValid = std::isfinite(area) && area > geometryEpsilon;
         for (const auto id : ids) {

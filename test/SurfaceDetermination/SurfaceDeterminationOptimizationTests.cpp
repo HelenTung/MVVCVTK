@@ -219,6 +219,98 @@ void TestParallelSampling(Checks &checks)
               << " actual=" << parallel.cpuThreadCount << '\n';
 }
 
+
+class RoundingSetting final {
+public:
+    RoundingSetting() : m_previous(std::fegetround()) {}
+    ~RoundingSetting() { std::fesetround(m_previous); }
+    void Set(int mode) { std::fesetround(mode); }
+private:
+    int m_previous;
+};
+
+void TestPointSupportRules(Checks &checks)
+{
+    const Point3 target{5,5,5}, missingNode{4,6,6};
+    RoundingSetting rounding;
+    for (int mode : {FE_TONEAREST, FE_UPWARD}) {
+        rounding.Set(mode);
+        for (unsigned missing = 0; missing < 3; ++missing) {
+            const auto source = BuildSnapshot({8,8,8}, {2,1,1}, {4,-2,7},
+                {1,0,0,0,1,0,0,0,1}, VTK_DOUBLE,
+                [=](const Point3 &position) {
+                    return missing == 2 && position == missingNode
+                        ? std::numeric_limits<double>::quiet_NaN() : position[0];
+                },
+                missing == 1 ? ValidityField([=](const Point3 &position) { return position != missingNode; })
+                             : ValidityField{}, 1, {-2,5,-4});
+            auto params = GetParams();
+            params.initialIsoValue = 5;
+            params.minimumObjectVoxels = 0;
+            params.componentSelection = SurfaceComponentSelection::All;
+            const auto result = SurfaceDeterminationAlgorithm::BuildSurface(source, params,
+                256U*1024U*1024U, [] { return false; }, {});
+            const auto point = std::find_if(result.points.begin(), result.points.end(),
+                [&](const auto &record) { return record.positionModel == target; });
+            checks.Get(result.status == SurfaceResultStatus::Succeeded && point != result.points.end(),
+                       "offset anisotropic plane retains the independently located crossing");
+            if (point == result.points.end()) continue;
+            checks.Get(point->seedPositionModel == target && point->normalModel[0] == -1 &&
+                       point->normalModel[1] == 0 && point->normalModel[2] == 0 && point->localThreshold == 5,
+                       "point position and normal match the analytic x=5 plane");
+            checks.Get(point->gradientMagnitude == (missing == 0 ? 1.0F : 0.0F),
+                       "linear gradient is one; missing neighbor keeps the existing zero-magnitude fallback");
+            checks.Get(point->validSupportRatio == (missing == 1 ? 0.0F : 1.0F) &&
+                       GetSurfaceFlag(point->flags, SurfacePointFlags::InvalidSupport) == (missing == 1),
+                       "zero-weight mask corner invalidates support; scalar NaN alone preserves its status");
+            if (mode == FE_UPWARD)
+                checks.Get(result.cpuThreadCount == 1 && result.plannedCpuThreads == 1,
+                           "non-default rounding preserves analytic results through the serial path");
+        }
+    }
+}
+
+void TestManyComponents(Checks &checks)
+{
+    const auto source = BuildSnapshot({34,34,34}, {1,1,1}, {0,0,0},
+        {1,0,0,0,1,0,0,0,1}, VTK_FLOAT, [](const Point3 &point) {
+            for (auto value : point) {
+                const auto index = int(value);
+                if (index < 5 || index > 29 || (index - 5) % 6 != 0) return 0.0;
+            }
+            return 1.0;
+        });
+    auto params = GetParams();
+    params.initialIsoValue = .5;
+    params.minimumObjectVoxels = 0;
+    params.componentSelection = SurfaceComponentSelection::All;
+    const auto build = [&] { return SurfaceDeterminationAlgorithm::BuildSurface(source, params,
+        256U*1024U*1024U, [] { return false; }, {}); };
+    const auto first = build(), second = build();
+    checks.Get(first.status == SurfaceResultStatus::Succeeded && first.objects.size() == 125 &&
+               first.points.size() == 750 && first.triangleIndices.size() == 3000,
+               "125 independent high nodes produce 125 six-vertex eight-face components");
+    checks.Get(GetEqualMeasurements(first, second), "dense component grouping preserves deterministic fields and order");
+    std::size_t object = 0;
+    for (int z=5;z<=29;z+=6) for (int y=5;y<=29;y+=6) for (int x=5;x<=29;x+=6) {
+        if (object >= first.objects.size()) continue;
+        const auto &record = first.objects[object++];
+        checks.Get(record.boundsModel == std::array<double,6>{x-.5,x+.5,y-.5,y+.5,z-.5,z+.5} &&
+                   record.pointCount == 6 && record.triangleCount == 8 && record.isClosed && record.isManifold,
+                   "component bounds and ordering follow isolated-node geometry and first scan encounter");
+    }
+    bool grouping = false;
+    unsigned checksInGrouping = 0;
+    const auto cancelled = SurfaceDeterminationAlgorithm::BuildSurface(source, params, 256U*1024U*1024U,
+        [&] { return grouping && ++checksInGrouping >= 3; },
+        [&](SurfaceDeterminationStage stage, double) {
+            if (stage == SurfaceDeterminationStage::SubvoxelRefinement) grouping = true;
+        });
+    checks.Get(cancelled.status == SurfaceResultStatus::Cancelled && cancelled.points.empty() &&
+               cancelled.objects.empty() && checksInGrouping >= 3,
+               "component construction cancellation publishes no partial grouped result");
+}
+
 void TestSortedTopology(Checks &checks)
 {
     const auto verify=[&](std::initializer_list<std::array<std::uint32_t,3>> triangles,
@@ -260,5 +352,6 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<unsigned long long>(checks,VTK_UNSIGNED_LONG_LONG);
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
+    TestPointSupportRules(checks); TestManyComponents(checks);
     return checks.failureCount;
 }

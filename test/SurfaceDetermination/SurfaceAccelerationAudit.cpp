@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <fcntl.h>
+#include <io.h>
 
 namespace {
 template <class T> void Write(std::ostream &stream, const T &value) {
@@ -51,8 +53,9 @@ void WriteResult(std::ostream &stream, const SurfaceAlgorithmResult &result) {
 }
 } // namespace
 int main(int argc, char **argv) {
-    if (argc != 7 && !(argc == 8 && std::string_view(argv[7]) == "--metrics-only")) {
-        std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only]\n";
+    const bool streamBinary = argc == 8 && std::string_view(argv[7]) == "--binary-stdout";
+    if (argc != 7 && !(argc == 8 && (std::string_view(argv[7]) == "--metrics-only" || streamBinary))) {
+        std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout]\n";
         return 2;
     }
     try {
@@ -95,7 +98,13 @@ int main(int argc, char **argv) {
         after.cb = sizeof(after);
         GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&after),
                              sizeof(after));
-        if(argc==7) {
+        if (streamBinary) {
+            // 管道流式校验完整结果，避免大体量回归重复写入数 GiB 文件。
+            if (_setmode(_fileno(stdout), _O_BINARY) == -1) return 2;
+            WriteResult(std::cout, result);
+            std::cout.flush();
+            if (!std::cout) return 2;
+        } else if(argc==7) {
             std::ofstream binary(std::string(argv[6]) + ".bin", std::ios::binary);
             WriteResult(binary, result);
             if(!binary) return 2;
@@ -122,7 +131,7 @@ int main(int argc, char **argv) {
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage
              << ",\"peakWorkingBytes\":" << after.PeakWorkingSetSize << "}\n";
-        std::cout << "points=" << result.points.size() << " triangles=" << result.triangleIndices.size() / 3
+        if (!streamBinary) std::cout << "points=" << result.points.size() << " triangles=" << result.triangleIndices.size() / 3
                   << " totalMs=" << elapsed << " peakPrivate=" << after.PeakPagefileUsage << '\n';
         if (result.status != SurfaceResultStatus::Succeeded)
             std::cerr << result.message << '\n';
