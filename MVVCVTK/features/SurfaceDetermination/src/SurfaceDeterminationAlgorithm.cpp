@@ -13,6 +13,7 @@
 #include <vtkPointData.h>
 #include <vtkType.h>
 #include <Windows.h>
+#include <Psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -211,6 +212,61 @@ unsigned RunPointSampling(const std::size_t pointCount, const unsigned threadLim
     return started;
 }
 
+
+// 新 worker 的默认栈来自当前宿主 PE，不把固定线程栈大小当作所有调用方的事实。
+std::optional<std::size_t> GetComponentWorkerStackReserve() {
+    MODULEINFO module{};
+    const auto handle=GetModuleHandleW(nullptr);
+    if (!handle || !GetModuleInformation(GetCurrentProcess(),handle,&module,sizeof(module)) ||
+        module.SizeOfImage<std::max(sizeof(IMAGE_DOS_HEADER),sizeof(IMAGE_NT_HEADERS64))) return {};
+    const auto *base=static_cast<const unsigned char*>(module.lpBaseOfDll);
+    const auto *dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic!=IMAGE_DOS_SIGNATURE || dos->e_lfanew<0 ||
+        std::size_t(dos->e_lfanew)>module.SizeOfImage-sizeof(IMAGE_NT_HEADERS64)) return {};
+    const auto *header=reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
+    if (header->Signature!=IMAGE_NT_SIGNATURE || header->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        !header->OptionalHeader.SizeOfStackReserve) return {};
+    return std::size_t(header->OptionalHeader.SizeOfStackReserve);
+}
+
+template<class ComponentCallback>
+unsigned RunComponentJobs(std::size_t begin, std::size_t end, unsigned count,
+                          const SurfaceCancelCheck &cancelled, const ComponentCallback &process) {
+    constexpr auto capacity=sizeof(KAFFINITY)*CHAR_BIT/2;
+    std::array<std::thread,capacity-1> workers;
+    std::array<std::exception_ptr,capacity> failures{};
+    std::atomic<std::size_t> next{begin};
+    std::atomic<bool> stopped{false};
+    const auto run=[&](unsigned worker) noexcept {
+        try {
+            while (!stopped.load(std::memory_order_acquire)) {
+                if (cancelled && cancelled()) throw SurfaceCancelled{};
+                // 动态领取小批次，避免海量组件产生一项任务一次原子操作。
+                const auto first=next.fetch_add(16,std::memory_order_relaxed);
+                if (first>=end) break;
+                const auto last=std::min(end,first+16);
+                for (auto position=first;position<last;++position) {
+                    if (stopped.load(std::memory_order_acquire)) return;
+                    process(position,worker);
+                }
+            }
+        } catch (...) {
+            failures[worker]=std::current_exception();
+            stopped.store(true,std::memory_order_release);
+        }
+    };
+    unsigned started=1;
+    for (;started<count;++started) {
+        try { workers[started-1]=std::thread(run,started); }
+        catch (const std::system_error &) { break; }
+        catch (const std::bad_alloc &) { break; }
+    }
+    run(0);
+    for (unsigned worker=1;worker<started;++worker) workers[worker-1].join();
+    for (const auto &failure : failures) if (failure) std::rethrow_exception(failure);
+    return started;
+}
+
 struct ImageGeometry final {
     std::array<int, 6> extent{};
     std::array<int, 3> dimensions{};
@@ -327,6 +383,35 @@ struct TopologyMetrics final {
     std::uint64_t degenerateTriangleCount = 0;
     bool isOrientationValid = true;
 };
+
+
+// C++17 私有可写区间；最终 vector 已定长，worker 不改变容器结构。
+struct SurfaceRecordRange final {
+    SurfacePointRecord *data = nullptr;
+    std::size_t count = 0;
+    SurfacePointRecord &operator[](std::size_t index) const { return data[index]; }
+    SurfacePointRecord *begin() const { return data; }
+    SurfacePointRecord *end() const { return data+count; }
+    std::size_t size() const { return count; }
+};
+struct ComponentTotals final {
+    std::uint64_t accepted=0, rejected=0, lowContrast=0, truncated=0;
+    std::uint32_t nonManifold=0;
+    unsigned cpuThreads=1;
+    double preparationMs=0, samplingMs=0, outputMs=0, cpuSamplingMs=0;
+};
+void MergeComponentTotals(SurfaceAlgorithmResult &result, const ComponentTotals &totals) {
+    result.acceptedPointCount+=totals.accepted;
+    result.rejectedPointCount+=totals.rejected;
+    result.lowContrastPointCount+=totals.lowContrast;
+    result.truncatedPointCount+=totals.truncated;
+    result.nonManifoldObjectCount+=totals.nonManifold;
+    result.cpuThreadCount=std::max(result.cpuThreadCount,totals.cpuThreads);
+    result.meshPreparationMs+=totals.preparationMs;
+    result.pointSamplingMs+=totals.samplingMs;
+    result.outputMs+=totals.outputMs;
+    result.cpuSamplingMs+=totals.cpuSamplingMs;
+}
 
 struct MeshComponent final {
     std::vector<std::uint32_t> sourcePointIds;
@@ -1513,7 +1598,7 @@ void GetLocalMesh(MeshComponent &component, std::vector<Point3> &sourcePoints,
 std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
                                      const std::vector<Triangle> &triangles,
                                      const CpuSamplingPlan &cpuPlan, unsigned &normalizationThreads,
-                                     const SurfaceCancelCheck &cancelled = {})
+                                     const SurfaceCancelCheck &cancelled = {}, const bool ownsCpuQuota = false)
 {
     std::size_t cancellationBatch = 0;
     std::vector<Point3> normals(points.size(), Point3{});
@@ -1531,14 +1616,18 @@ std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
             normals[pointId] = Add(normals[pointId], normal);
         }
     }
-    normalizationThreads = RunPointSampling(normals.size(), cpuPlan.threadLimit, cancelled,
-        [&](std::size_t begin, std::size_t end) {
+    const auto normalize = [&](std::size_t begin, std::size_t end) {
             std::size_t batch = 0;
             for (auto i = begin; i < end; ++i) {
                 CheckCancellation(batch, cancelled);
                 if (!Normalize(normals[i])) normals[i] = {0.0, 0.0, 1.0};
             }
-        });
+        };
+    if (ownsCpuQuota) {
+        // 外层组件池已租用配额；内部串行执行，不能再次申请 limit=1 的嵌套 lease。
+        normalize(0,normals.size());
+        normalizationThreads=1;
+    } else normalizationThreads=RunPointSampling(normals.size(),cpuPlan.threadLimit,cancelled,normalize);
     return normals;
 }
 
@@ -1667,7 +1756,7 @@ bool GetPointAtRoiBoundary(const RoiReadSnapshot& roi, const Point3& point, doub
 
 void SetMaterialTriangleFlags(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
                               const std::vector<Point3> &normals, const double cornerCosine,
-                              std::vector<SurfacePointRecord> &records,
+                              SurfaceRecordRange records,
                               const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
@@ -1732,13 +1821,15 @@ SurfaceMetricValidity GetAreaValidity(
     return SurfaceMetricValidity::Valid;
 }
 
-void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, const std::uint32_t objectIndex,
+void WriteObjectResult(const VolumeView &volume, const ResolvedParams &params, const std::uint32_t objectIndex,
                      const std::vector<Point3> &originalPoints, const std::vector<Triangle> &triangles,
-                     std::vector<SurfacePointRecord> records, std::vector<Point3>& classifications,
-                     const TopologyMetrics& cachedTopology, SurfaceAlgorithmResult &result,
+                     SurfaceRecordRange records, std::vector<Point3>& classifications,
+                     const TopologyMetrics& cachedTopology, SurfaceAlgorithmResult &result, ComponentTotals &totals,
                      const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
+    const auto firstPoint=result.objects[objectIndex].firstPoint;
+    const auto firstTriangle=result.objects[objectIndex].firstTriangle;
     // 当前材料流程保留 seed 位置；直接复用同一几何，省去整组件副本。
     const auto& refinedPoints=originalPoints;
     // 整体翻转不改变边关联、退化和方向一致性；体积仍按最终顺序重新累加。
@@ -1784,7 +1875,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
             classified[1]!=0 || classified[2]!=0)
         {
             isTruncated = true;
-            ++result.truncatedPointCount;
+            ++totals.truncated;
         }
         for (std::size_t axis = 0; axis < 3; ++axis) {
             CheckCancellation(cancellationBatch, cancelled);
@@ -1800,6 +1891,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     // 无体积输出的对象不再累加体积；面积、质量判定和有效体积的顺序保持原样。
     const bool calculateVolume = topology.nonManifoldEdgeCount == 0 && !isTruncated &&
         topology.boundaryEdgeCount == 0 && topology.isOrientationValid && topology.degenerateTriangleCount == 0;
+    std::size_t triangleIndex=0;
     for (const auto& triangle : triangles) {
         CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
@@ -1816,7 +1908,7 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
         }
         if (std::isfinite(area)) { totalArea += area; if (isValid) validArea += area; }
         hasCompleteSupport = hasCompleteSupport && isValid;
-        result.triangleValidity.push_back(isValid ? 1 : 0);
+        result.triangleValidity[std::size_t(firstTriangle)+triangleIndex++]=isValid ? 1 : 0;
     }
     const bool hasFiniteArea = std::isfinite(totalArea) && std::isfinite(validArea);
     const double validAreaRatio = hasFiniteArea && totalArea > 0.0 ? validArea / totalArea : 0.0;
@@ -1825,9 +1917,9 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
 
     SurfaceObjectRecord object;
     object.objectIndex = objectIndex;
-    object.firstPoint = result.points.size();
+    object.firstPoint = firstPoint;
     object.pointCount = records.size();
-    object.firstTriangle = result.triangleIndices.size() / 3U;
+    object.firstTriangle = firstTriangle;
     object.triangleCount = triangles.size();
     object.boundsModel = bounds;
     object.validAreaRatio = validAreaRatio;
@@ -1847,25 +1939,21 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     if (object.volumeValidity == SurfaceMetricValidity::Valid) {
         object.volumeModelUnit3 = std::abs(topology.signedVolume);
     }
-    if (!object.isManifold) ++result.nonManifoldObjectCount;
 
-    result.acceptedPointCount += acceptedCount;
-    result.lowContrastPointCount += lowContrastCount;
-    result.rejectedPointCount += records.size() - acceptedCount;
-    const std::uint32_t pointOffset = static_cast<std::uint32_t>(
-        result.points.size());
-    result.points.insert(
-        result.points.end(),
-        std::make_move_iterator(records.begin()),
-        std::make_move_iterator(records.end()));
-    for (const Triangle& triangle : triangles) {
-        CheckCancellation(cancellationBatch, cancelled);
-        for (const std::uint32_t pointId : triangle.vertices) {
-            CheckCancellation(cancellationBatch, cancelled);
-            result.triangleIndices.push_back(pointOffset + pointId);
+    if (!object.isManifold) ++totals.nonManifold;
+    totals.accepted+=acceptedCount;
+    totals.lowContrast+=lowContrastCount;
+    totals.rejected+=records.size()-acceptedCount;
+    const auto pointOffset=static_cast<std::uint32_t>(firstPoint);
+    auto indexOffset=std::size_t(firstTriangle)*3;
+    for (const auto &triangle : triangles) {
+        CheckCancellation(cancellationBatch,cancelled);
+        for (const auto pointId : triangle.vertices) {
+            CheckCancellation(cancellationBatch,cancelled);
+            result.triangleIndices[indexOffset++]=pointOffset+pointId;
         }
     }
-    result.objects.push_back(std::move(object));
+    result.objects[objectIndex]=std::move(object);
 }
 
 SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
@@ -2070,28 +2158,44 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         result.triangleIndices.reserve(outputTriangles*3);
         result.triangleValidity.reserve(outputTriangles);
         result.objects.reserve(outputObjects);
+
+        const auto objectBase=result.objects.size();
+        auto pointOffset=result.points.size(),triangleOffset=result.triangleIndices.size()/3;
+        result.points.resize(outputPoints);
+        result.triangleIndices.resize(outputTriangles*3);
+        result.triangleValidity.resize(outputTriangles);
+        result.objects.resize(outputObjects);
+        for (std::size_t position=0;position<selected.size();++position) {
+            CheckCancellation(reservationCancellation,getCancelled);
+            const auto &component=components[selected[position]];
+            auto &object=result.objects[objectBase+position];
+            object.firstPoint=pointOffset;object.pointCount=component.sourcePointIds.size();
+            object.firstTriangle=triangleOffset;object.triangleCount=component.triangles.size();
+            pointOffset+=std::size_t(object.pointCount);triangleOffset+=std::size_t(object.triangleCount);
+        }
         [[maybe_unused]] const auto largest=std::max_element(selected.begin(),selected.end(),[&](auto a,auto b) {
             return components[a].sourcePointIds.size()<components[b].sourcePointIds.size();
         });
-        for (const auto selectedIndex : selected)
-        {
+        const auto processComponent=[&](std::size_t position,bool ownsCpuQuota,ComponentTotals &totals) {
+            const auto selectedIndex=selected[position];
+            const auto objectIndex=static_cast<std::uint32_t>(objectBase+position);
             if (GetCancelled(getCancelled))
-                return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+                throw SurfaceCancelled{};
             const auto preparationStart=std::chrono::steady_clock::now();
             std::vector<Point3> points;
             std::vector<Triangle> triangles;
             GetLocalMesh(components[selectedIndex], meshPoints, points, triangles,
-                         components.size() == 1, getCancelled);
+                         !ownsCpuQuota && components.size() == 1, getCancelled);
             SetOutwardWinding(volume, points, triangles);
             unsigned normalizationThreads = 1;
-            auto normals = GetVertexNormals(points, triangles, cpuPlan, normalizationThreads, getCancelled);
-            result.cpuThreadCount = std::max(result.cpuThreadCount, normalizationThreads);
-            std::vector<SurfacePointRecord> records(points.size());
+            auto normals = GetVertexNormals(points, triangles, cpuPlan, normalizationThreads, getCancelled,ownsCpuQuota);
+            totals.cpuThreads = std::max(totals.cpuThreads, normalizationThreads);
+            SurfaceRecordRange records{result.points.data()+std::size_t(result.objects[objectIndex].firstPoint),points.size()};
             const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
             SetMaterialTriangleFlags(points,triangles,normals,cornerCosine,records,getCancelled);
             std::atomic<bool> cancelled{false};
             const auto samplingStart=std::chrono::steady_clock::now();
-            result.meshPreparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();
+            totals.preparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();
             {
                 SurfaceCudaCompute cuda;
                 const auto collectProfile = [&] {
@@ -2133,7 +2237,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     }
                 };
 #ifdef MVVCVTK_SURFACE_CUDA_ENABLED
-                if (largest != selected.end() && selectedIndex == *largest &&
+                if (!ownsCpuQuota && largest != selected.end() && selectedIndex == *largest &&
                     (volume.scalars.vtkType == VTK_FLOAT || volume.scalars.vtkType == VTK_DOUBLE)) {
                     SurfaceCudaVolume input;
                     input.values = volume.scalars.values;
@@ -2214,29 +2318,93 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             const auto cpuStarted=profileStart();
                             const auto threads=RunPointSampling(points.size()-cursor,cpuPlan.threadLimit,getCancelled,
                                 [&](std::size_t begin,std::size_t end){sampleCpu(cursor+begin,cursor+end);});
-                            profileRecord(result.cpuSamplingMs,cpuStarted);
-                            result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
+                            profileRecord(totals.cpuSamplingMs,cpuStarted);
+                            totals.cpuThreads=std::max(totals.cpuThreads,threads);
                             cursor=points.size();
                         }
                     }
                 } else {
                     const auto cpuStarted=profileStart();
-                    const auto threads=RunPointSampling(points.size(),cpuPlan.threadLimit,getCancelled,sampleCpu);
-                    profileRecord(result.cpuSamplingMs,cpuStarted);
-                    result.cpuThreadCount=std::max(result.cpuThreadCount,threads);
+                    unsigned threads=1;
+                    if (ownsCpuQuota) sampleCpu(0,points.size());
+                    else threads=RunPointSampling(points.size(),cpuPlan.threadLimit,getCancelled,sampleCpu);
+                    profileRecord(totals.cpuSamplingMs,cpuStarted);
+                    totals.cpuThreads=std::max(totals.cpuThreads,threads);
                 }
                 closeCuda();
             } // 设备/回传工作区在拓扑分配前释放。
             if (cancelled.load())
-                return fail(SurfaceFailureReason::Cancelled, "Surface refinement was cancelled.");
+                throw SurfaceCancelled{};
             const auto outputStart=std::chrono::steady_clock::now();
-            result.pointSamplingMs+=std::chrono::duration<double,std::milli>(outputStart-samplingStart).count();
-            SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
-                         .1 + .8 * (pairIndex + .85) / pairCount);
-            AddObjectResult(volume, params, static_cast<std::uint32_t>(result.objects.size()), points,
-                            triangles, std::move(records), normals, components[selectedIndex].topology, result, getCancelled);
-            result.outputMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-outputStart).count();
-            result.objects.back().interfaceIndex = static_cast<std::uint32_t>(pairIndex);
+            totals.samplingMs+=std::chrono::duration<double,std::milli>(outputStart-samplingStart).count();
+            if (!ownsCpuQuota) SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation,
+                                           .1 + .8 * (pairIndex + .85) / pairCount);
+            WriteObjectResult(volume,params,objectIndex,points,triangles,records,normals,
+                              components[selectedIndex].topology,result,totals,getCancelled);
+            totals.outputMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-outputStart).count();
+            result.objects[objectIndex].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
+        };
+
+        const auto serialWorkingBound=result.requiredBytes;
+        char componentSetting[8]{};
+        const bool enableComponents=MVVCVTK_SURFACE_COMPONENT_PARALLEL && cpuPlan.threadLimit>1 &&
+            !(GetEnvironmentVariableA("MVVCVTK_SURFACE_COMPONENT_PARALLEL",componentSetting,sizeof(componentSetting))==1 &&
+              componentSetting[0]=='0');
+        const auto stackReserve=enableComponents?GetComponentWorkerStackReserve():std::optional<std::size_t>{};
+        const auto eligible=[&](std::size_t position) {
+            return components[selected[position]].sourcePointIds.size()<=8192 &&
+                (largest==selected.end() || selected[position]!=*largest);
+        };
+        for (std::size_t position=0;position<selected.size();) {
+            auto end=position;
+            std::size_t pointWork=0,maxPoints=0;
+            if (enableComponents && stackReserve) while (end<selected.size() && eligible(end)) {
+                CheckCancellation(reservationCancellation,getCancelled);
+                const auto count=components[selected[end]].sourcePointIds.size();
+                pointWork+=count;maxPoints=std::max(maxPoints,count);++end;
+            }
+            auto requested=unsigned(std::min<std::size_t>(cpuPlan.threadLimit,pointWork/8192));
+            std::size_t perWorker=0;
+            if (requested>=2) {
+                // 工作区为一件组件的 points+normals、宿主默认栈及有界线程/分配 bookkeeping。
+                const bool valid=GetSum(*stackReserve,64*1024,perWorker) &&
+                    AddWorkingBytes(maxPoints,2*sizeof(Point3),perWorker);
+                if (valid && perWorker<=SIZE_MAX/requested) requested=unsigned(
+                    (maxWorkingBytes-serialWorkingBound).GetBound(std::min(
+                        std::size_t(requested)*perWorker,SIZE_MAX-serialWorkingBound))/perWorker);
+                else requested=0;
+                if (requested<2) ++result.componentBudgetFallbackCount;
+            }
+            if (requested>=2) {
+                CpuSamplingLease lease(requested,cpuPlan.threadLimit,getCancelled);
+                const auto count=lease.GetThreadCount();
+                if (count>=2) {
+                    constexpr auto capacity=sizeof(KAFFINITY)*CHAR_BIT/2;
+                    std::array<ComponentTotals,capacity> workerTotals{};
+                    SendProgress(onProgress,SurfaceDeterminationStage::TopologyValidation,
+                                 .1+.8*(pairIndex+.85)/pairCount);
+                    const auto poolStarted=std::chrono::steady_clock::now();
+                    const auto actual=RunComponentJobs(position,end,count,getCancelled,
+                        [&](std::size_t item,unsigned worker){processComponent(item,true,workerTotals[worker]);});
+                    result.componentParallelMs+=std::chrono::duration<double,std::milli>(
+                        std::chrono::steady_clock::now()-poolStarted).count();
+                    result.componentCpuThreads=std::max(result.componentCpuThreads,actual);
+                    result.cpuThreadCount=std::max(result.cpuThreadCount,actual);
+                    result.componentCpuPointCount+=pointWork;
+                    const auto workspace=std::size_t(count)*perWorker;
+                    result.componentWorkspaceBound=std::max(result.componentWorkspaceBound,workspace);
+                    result.requiredBytes=std::max(result.requiredBytes,serialWorkingBound+workspace);
+                    for (unsigned worker=0;worker<actual;++worker) MergeComponentTotals(result,workerTotals[worker]);
+                    position=end;
+                    continue;
+                }
+                // lease 只有一个可用槽时先结束租约，再走保留的点级调度。
+            }
+            // 不够分摊调度或预算不足时一次处理已扫描整段，避免重扫后缀形成平方复杂度。
+            const auto serialEnd=end>position?end:position+1;
+            ComponentTotals totals;
+            while (position<serialEnd) processComponent(position++,false,totals);
+            MergeComponentTotals(result,totals);
         }
         result.execution.refinementMs +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();

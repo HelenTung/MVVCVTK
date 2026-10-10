@@ -153,6 +153,11 @@ int main(int argc, char **argv) {
              << ",\"availablePhysicalCores\":" << result.availablePhysicalCores
              << ",\"availableLogicalThreads\":" << result.availableLogicalThreads
              << ",\"plannedCpuThreads\":" << result.plannedCpuThreads
+             << ",\"componentCpuThreads\":" << result.componentCpuThreads
+             << ",\"componentCpuPointCount\":" << result.componentCpuPointCount
+             << ",\"componentWorkspaceBound\":" << result.componentWorkspaceBound
+             << ",\"componentBudgetFallbackCount\":" << result.componentBudgetFallbackCount
+             << ",\"componentParallelMs\":" << result.componentParallelMs
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage

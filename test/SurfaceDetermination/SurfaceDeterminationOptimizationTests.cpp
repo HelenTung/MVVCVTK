@@ -356,6 +356,72 @@ void TestManyComponents(Checks &checks)
 }
 
 
+void TestComponentPool(Checks &checks)
+{
+    const auto source=BuildSnapshot({100,100,100},{1,1,1},{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_FLOAT,
+        [](const Point3&p){for(auto value:p){const auto i=int(value);if(i<5||i>95||(i-5)%6)return 0.;}return 1.;});
+    auto params=GetParams();params.initialIsoValue=.5;params.minimumObjectVoxels=0;
+    params.componentSelection=SurfaceComponentSelection::All;
+    // 八面体面法线与顶点法线夹角约54.7°，关闭尖角拒绝后可独立判定完整面积和体积。
+    params.sharpCornerAngleDeg=180;
+    EnvironmentSwitch setting("MVVCVTK_SURFACE_COMPONENT_PARALLEL");
+    const auto build=[&](WorkLimit budget=WorkLimit{}){
+        return SurfaceDeterminationAlgorithm::BuildSurface(source,params,budget,[]{return false;},{});};
+    setting.Set(false);const auto serial=build();
+    setting.Set(true);const auto parallel=build();
+    checks.Get(serial.status==SurfaceResultStatus::Succeeded && serial.objects.size()==4096 &&
+        serial.points.size()==24576 && serial.triangleIndices.size()==4096*24,
+        "4096 isolated nodes form 4096 six-point eight-face octahedra");
+    checks.Get(GetEqualMeasurements(serial,parallel),"component pool preserves all measurement fields and output order");
+    checks.Get(parallel.acceptedPointCount==24576 && parallel.rejectedPointCount==0 &&
+        std::all_of(parallel.points.begin(),parallel.points.end(),[](const auto&p){return p.flags==SurfacePointFlags::None;}),
+        "analytic octahedra retain complete support and no point rejection flags");
+    checks.Get(parallel.componentCpuThreads<=parallel.plannedCpuThreads &&
+        parallel.cpuThreadCount<=parallel.plannedCpuThreads,
+        "component workers share the dynamically planned CPU allowance");
+    std::size_t object=0;
+    for(int z=5;z<=95;z+=6)for(int y=5;y<=95;y+=6)for(int x=5;x<=95;x+=6){
+        if(object>=parallel.objects.size())continue;
+        const auto &o=parallel.objects[object];
+        checks.Get(o.objectIndex==object && o.firstPoint==object*6 && o.firstTriangle==object*8 &&
+            o.boundsModel==std::array<double,6>{x-.5,x+.5,y-.5,y+.5,z-.5,z+.5} &&
+            o.areaValidity==SurfaceMetricValidity::Valid && o.volumeValidity==SurfaceMetricValidity::Valid &&
+            o.areaModelUnit2 && std::abs(*o.areaModelUnit2-std::sqrt(3.))<1e-12 &&
+            o.volumeModelUnit3 && std::abs(*o.volumeModelUnit3-1./6)<1e-12,
+            "each ordered octahedron has analytic bounds, area sqrt(3), and volume 1/6");
+        ++object;
+    }
+    const auto tight=build(serial.requiredBytes);
+    checks.Get(GetEqualMeasurements(serial,tight) && tight.componentCpuThreads==1,
+               "original exact budget retains serial output without optional worker workspace");
+    if(parallel.componentCpuThreads>1){
+        checks.Get(parallel.componentCpuPointCount==24570 && parallel.componentWorkspaceBound>0,
+                   "the largest component stays serial and the remaining point slices use real workers");
+        checks.Get(tight.componentBudgetFallbackCount>0,"tight working budget disables the optional component pool");
+        const auto owner=std::this_thread::get_id();bool callbackOnOwner=true;
+        const auto cancelled=SurfaceDeterminationAlgorithm::BuildSurface(source,params,WorkLimit{},
+            [owner]{return std::this_thread::get_id()!=owner;},
+            [&](SurfaceDeterminationStage,double){callbackOnOwner=callbackOnOwner&&std::this_thread::get_id()==owner;});
+        checks.Get(cancelled.status==SurfaceResultStatus::Cancelled && cancelled.points.empty() &&
+            cancelled.objects.empty() && callbackOnOwner,"component cancellation joins workers; progress remains owner-only");
+        const auto failed=SurfaceDeterminationAlgorithm::BuildSurface(source,params,WorkLimit{},
+            [owner]{if(std::this_thread::get_id()!=owner)throw std::runtime_error("component worker failure");return false;},{});
+        checks.Get(failed.failureReason==SurfaceFailureReason::InternalError && failed.points.empty(),
+                   "component worker exceptions join and use the existing failure boundary");
+        checks.Get(GetEqualMeasurements(serial,build()),"component failure releases the outer shared quota");
+        auto first=std::async(std::launch::async,build,WorkLimit{});
+        auto second=std::async(std::launch::async,build,WorkLimit{});
+        checks.Get(GetEqualMeasurements(serial,first.get()) && GetEqualMeasurements(serial,second.get()),
+                   "concurrent component pools preserve independent deterministic results");
+    }
+    const auto oldRounding=std::fegetround();std::fesetround(FE_UPWARD);
+    const auto rounded=build();std::fesetround(oldRounding);
+    checks.Get(rounded.status==SurfaceResultStatus::Succeeded && rounded.componentCpuThreads==1 &&
+        rounded.plannedCpuThreads==1,"non-default floating control keeps component processing serial");
+    std::cout<<"Surface component workers="<<parallel.componentCpuThreads<<" points="
+             <<parallel.componentCpuPointCount<<" workspace-bound="<<parallel.componentWorkspaceBound<<'\n';
+}
+
 struct SeedReadCounter final {
     const std::vector<float> *values;
     std::size_t reads = 0;
@@ -571,7 +637,7 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<unsigned long long>(checks,VTK_UNSIGNED_LONG_LONG);
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
-    TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks);
+    TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks); TestComponentPool(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);

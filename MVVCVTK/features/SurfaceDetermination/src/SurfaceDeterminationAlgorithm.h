@@ -66,6 +66,10 @@ struct SurfaceAlgorithmResult final {
     unsigned availablePhysicalCores = 0;
     unsigned availableLogicalThreads = 0;
     unsigned plannedCpuThreads = 1;
+    unsigned componentCpuThreads = 1;
+    std::uint64_t componentCpuPointCount = 0;
+    std::size_t componentWorkspaceBound = 0, componentBudgetFallbackCount = 0;
+    double componentParallelMs = 0;
     double componentsMs = 0;
     double meshPreparationMs = 0;
     double pointSamplingMs = 0;

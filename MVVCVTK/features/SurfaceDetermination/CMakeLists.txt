@@ -59,8 +59,10 @@ target_link_libraries(
 SetTargetDefaults(surface_determination)
 target_link_libraries(surface_determination PRIVATE Psapi)
 option(MVVCVTK_SURFACE_CPU_PARALLEL "Plan request-local CPU sampling from available cores, with headroom" ON)
+option(MVVCVTK_SURFACE_COMPONENT_PARALLEL "Dynamically schedule bounded Surface components within the shared CPU quota" ON)
 target_compile_definitions(surface_determination PRIVATE
-    NOMINMAX WIN32_LEAN_AND_MEAN MVVCVTK_SURFACE_CPU_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_CPU_PARALLEL}>)
+    NOMINMAX WIN32_LEAN_AND_MEAN MVVCVTK_SURFACE_CPU_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_CPU_PARALLEL}>
+    MVVCVTK_SURFACE_COMPONENT_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_COMPONENT_PARALLEL}>)
 
 set(MVVCVTK_SURFACE_SEED_CACHE_MIB 16 CACHE STRING "Bound for optional seed classification workspace in MiB; 0 disables")
 if(NOT MVVCVTK_SURFACE_SEED_CACHE_MIB MATCHES "^(0|[1-9][0-9]*)$")
