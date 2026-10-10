@@ -53,12 +53,28 @@ void WriteResult(std::ostream &stream, const SurfaceAlgorithmResult &result) {
 }
 } // namespace
 int main(int argc, char **argv) {
-    const bool streamBinary = argc == 8 && std::string_view(argv[7]) == "--binary-stdout";
-    if (argc != 7 && !(argc == 8 && (std::string_view(argv[7]) == "--metrics-only" || streamBinary))) {
-        std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout]\n";
+    if (argc < 7) {
+        std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout] "
+                     "[--roi-box xmin xmax ymin ymax zmin zmax]\n";
         return 2;
     }
     try {
+        bool streamBinary=false,metricsOnly=false;
+        std::optional<std::array<double,6>> roiBounds;
+        for(int i=7;i<argc;++i) {
+            const std::string_view option(argv[i]);
+            if(option=="--binary-stdout" || option=="--metrics-only") {
+                if(streamBinary || metricsOnly)return 2;
+                streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
+            } else if(option=="--roi-box") {
+                if(roiBounds || argc-i<7)return 2;
+                roiBounds.emplace();
+                for(auto &value:*roiBounds)value=std::stod(argv[++i]);
+                for(unsigned axis=0;axis<3;++axis)
+                    if(!std::isfinite((*roiBounds)[2*axis]) || !std::isfinite((*roiBounds)[2*axis+1]) ||
+                        (*roiBounds)[2*axis]>=(*roiBounds)[2*axis+1])return 2;
+            } else return 2;
+        }
         const std::array<int, 3> dimensions{std::stoi(argv[2]), std::stoi(argv[3]), std::stoi(argv[4])};
         for (auto n : dimensions)
             if (n < 2)
@@ -85,13 +101,19 @@ int main(int argc, char **argv) {
         params.componentSelection = SurfaceComponentSelection::All;
         params.minimumObjectVoxels = 0;
         params.initialIsoValue = std::stod(argv[5]);
+        SurfaceAlgorithmInputs inputs;
+        if(roiBounds){
+            inputs.roi=SurfaceTest::BuildRoi(source,*roiBounds);
+            if(!inputs.roi)return 2;
+            params.analysisRoi=inputs.roi->GetRevision();
+        }
         PROCESS_MEMORY_COUNTERS_EX before{};
         before.cb = sizeof(before);
         GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&before),
                              sizeof(before));
         const auto start = std::chrono::steady_clock::now();
         auto result = SurfaceDeterminationAlgorithm::BuildSurface(
-            source, params, std::numeric_limits<std::size_t>::max(), [] { return false; }, {});
+            source, params, std::numeric_limits<std::size_t>::max(), [] { return false; }, {},inputs);
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         PROCESS_MEMORY_COUNTERS_EX after{};
@@ -104,7 +126,7 @@ int main(int argc, char **argv) {
             WriteResult(std::cout, result);
             std::cout.flush();
             if (!std::cout) return 2;
-        } else if(argc==7) {
+        } else if(!metricsOnly) {
             std::ofstream binary(std::string(argv[6]) + ".bin", std::ios::binary);
             WriteResult(binary, result);
             if(!binary) return 2;

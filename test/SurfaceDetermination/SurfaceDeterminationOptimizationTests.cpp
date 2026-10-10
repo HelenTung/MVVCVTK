@@ -16,6 +16,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <atomic>
 
 namespace {
 using namespace SurfaceTest;
@@ -422,6 +423,105 @@ void TestComponentPool(Checks &checks)
              <<parallel.componentCpuPointCount<<" workspace-bound="<<parallel.componentWorkspaceBound<<'\n';
 }
 
+class CountingRoi final : public RoiReadView {
+public:
+    explicit CountingRoi(RoiReadSnapshot inner,std::optional<double> fixed={}) : m_inner(std::move(inner)),m_fixed(fixed) {}
+    DataRevisionRef GetRevision() const noexcept override{return m_inner->GetRevision();}
+    DataRevisionRef GetSource() const noexcept override{return m_inner->GetSource();}
+    const RoiDefinition &GetDefinition() const noexcept override{return m_inner->GetDefinition();}
+    const std::vector<DataRevisionRef> &GetDependencies() const noexcept override{return m_inner->GetDependencies();}
+    std::array<double,6> GetBounds() const noexcept override{return m_inner->GetBounds();}
+    bool GetContains(const std::array<double,3>&p) const noexcept override{return m_inner->GetContains(p);}
+    RoiPointsResult GetPoints(const std::vector<std::array<double,3>>&p,std::size_t b) const override{return m_inner->GetPoints(p,b);}
+    RoiPlanesResult GetClipPlanes() const override{return m_inner->GetClipPlanes();}
+    RoiPolygonResult GetClippedTriangle(const std::array<std::array<double,3>,3>&p,std::size_t b) const override{return m_inner->GetClippedTriangle(p,b);}
+    double GetBoundaryDistance(const std::array<double,3>&p) const noexcept override{
+        queries.fetch_add(1,std::memory_order_relaxed);return m_fixed?*m_fixed:m_inner->GetBoundaryDistance(p);
+    }
+    RoiMaskResult GetMaskChunk(const RoiMaskRequest&r) const override{return m_inner->GetMaskChunk(r);}
+    mutable std::atomic<std::size_t> queries{0};
+private:
+    RoiReadSnapshot m_inner;
+    std::optional<double> m_fixed;
+};
+
+void TestSingleRoiDistance(Checks &checks)
+{
+    const auto source=BuildSnapshot({16,16,16},{1,1,1},{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_DOUBLE,
+        [](const Point3&p){return p[0];});
+    const auto roi=BuildRoi(source,{2,13,3.1,11.7,4.2,12.6});
+    auto params=GetParams();params.initialIsoValue=7.5;params.minimumObjectVoxels=0;
+    params.analysisRoi=roi->GetRevision();
+    const auto build=[&](const RoiReadSnapshot&view){return SurfaceDeterminationAlgorithm::BuildSurface(
+        source,params,WorkLimit{},[]{return false;},{},SurfaceAlgorithmInputs{view});};
+    const auto reference=build(roi);
+    auto counted=std::make_shared<CountingRoi>(roi);const auto actual=build(counted);
+    checks.Get(reference.status==SurfaceResultStatus::Succeeded && !reference.points.empty() &&
+        GetEqualMeasurements(reference,actual),"counted immutable ROI preserves every published measurement field");
+    checks.Get(counted->queries.load()==actual.points.size(),"generation queries ROI distance exactly once per final point");
+    const auto diagnostic=SurfaceDeterminationAlgorithm::GetPointDiagnostic(source,actual.resolvedParams,
+        actual.points.front(),SurfaceAlgorithmInputs{counted});
+    checks.Get(diagnostic.isAvailable && GetPointFields(diagnostic.point)==GetPointFields(actual.points.front()) &&
+        counted->queries.load()==actual.points.size()+1,"diagnostic retains its own single boundary query and final record");
+    for(double distance:{0.,1e-9,1.,std::numeric_limits<double>::quiet_NaN(),
+                        -std::numeric_limits<double>::infinity(),std::numeric_limits<double>::infinity()}){
+        auto fixed=std::make_shared<CountingRoi>(roi,distance);const auto result=build(fixed);
+        checks.Get(result.status==SurfaceResultStatus::Succeeded && result.points.size()==actual.points.size() &&
+            fixed->queries.load()==result.points.size(),"fixed ROI distance uses one query without changing geometry");
+        const bool materialBoundary=distance==0;
+        checks.Get(std::all_of(result.points.begin(),result.points.end(),[materialBoundary](const auto&p){
+            return GetSurfaceFlag(p.flags,SurfacePointFlags::RoiBoundary)==materialBoundary &&
+                (!materialBoundary||GetSurfaceFlag(p.flags,SurfacePointFlags::SeedRetained));
+        }),"finite machine-tolerance predicate keeps NaN and both infinities distinct from zero");
+        if(distance==1e-9 || distance==-std::numeric_limits<double>::infinity())
+            checks.Get(std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),
+                [](auto valid){return valid==0;}) && result.truncatedPointCount==result.points.size() &&
+                result.acceptedPointCount==result.points.size(),
+                "classification retains <= boundary tolerance including negative infinity without setting ROI flags");
+        else if(distance!=0)
+            checks.Get(std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),
+                [](auto valid){return valid==1;}) && result.truncatedPointCount==0 &&
+                result.acceptedPointCount==result.points.size(),
+                "far/NaN/positive infinity keep the supported plane fully accepted and untruncated");
+        else checks.Get(result.acceptedPointCount==0 && result.truncatedPointCount==result.points.size() &&
+                        std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),[](auto valid){return valid==0;}),
+                        "zero distance adds the original explicit nonmeasurement boundary reason");
+    }
+}
+
+void TestSparseTopology(Checks &checks)
+{
+    const std::array<double,3> spacing{2,3,4},origin{-17,29,5};
+    const auto source=BuildSnapshot({32,25,27},spacing,origin,{1,0,0,0,1,0,0,0,1},VTK_FLOAT,
+        [=](const Point3&p){
+            const int x=int((p[0]-origin[0])/spacing[0]),y=int((p[1]-origin[1])/spacing[1]),z=int((p[2]-origin[2])/spacing[2]);
+            return (x==-1&&y==6&&z==-1)||((x==4||x==5)&&y==11&&z==3)||(x==17&&y==20&&z==13)?1.:0.;
+        },{},1,{-3,2,-5});
+    auto params=GetParams();params.initialIsoValue=.5;params.minimumObjectVoxels=0;
+    params.sharpCornerAngleDeg=180;params.componentSelection=SurfaceComponentSelection::All;
+    const auto result=SurfaceDeterminationAlgorithm::BuildSurface(source,params,WorkLimit{},[]{return false;},{});
+    checks.Get(result.status==SurfaceResultStatus::Succeeded && result.objects.size()==3 &&
+        result.points.size()==22 && result.triangleIndices.size()==96,"sparse anisotropic islands retain two octahedra and one adjacent-node component");
+    if(result.objects.size()!=3)return;
+    for(std::size_t i=0;i<3;++i){
+        const auto &o=result.objects[i];const bool pair=i==0;
+        const double area=std::sqrt(244.)+(pair?20:0),volume=pair?16:4;
+        // 本例坐标均为可精确表示的半整数；最多16面只在sqrt、/6和顺序累加时舍入。
+        // 以下为保守float64舍入裕量：绝对面积1e-12 model-unit²、体积1e-10 model-unit³。
+        checks.Get(o.pointCount==(pair?10:6) && o.triangleCount==(pair?16:8) && o.isClosed && o.isManifold &&
+            o.volumeValidity==SurfaceMetricValidity::Valid && o.areaValidity==SurfaceMetricValidity::Valid &&
+            o.areaModelUnit2 && std::abs(*o.areaModelUnit2-area)<1e-12 &&
+            o.volumeModelUnit3 && std::abs(*o.volumeModelUnit3-volume)<1e-10,
+            "local sparse point IDs preserve independent anisotropic area and volume");
+    }
+    params.componentSelection=SurfaceComponentSelection::Largest;
+    const auto largest=SurfaceDeterminationAlgorithm::BuildSurface(source,params,WorkLimit{},[]{return false;},{});
+    checks.Get(largest.status==SurfaceResultStatus::Succeeded && largest.objects.size()==1 &&
+        largest.objects[0].pointCount==10 && largest.objects[0].volumeModelUnit3 &&
+        std::abs(*largest.objects[0].volumeModelUnit3-16)<1e-10,
+        "early local topology estimates still select the independently largest component");
+}
+
 struct SeedReadCounter final {
     const std::vector<float> *values;
     std::size_t reads = 0;
@@ -638,6 +738,7 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
     TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks); TestComponentPool(checks);
+    TestSingleRoiDistance(checks); TestSparseTopology(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);

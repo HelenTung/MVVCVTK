@@ -1676,6 +1676,16 @@ float GetFiniteFloat(const double value)
     return static_cast<float>(bounded);
 }
 
+void SetRoiBoundaryFlags(SurfacePointRecord &record,const double distance)
+{
+    const auto &point=record.seedPositionModel;
+    const auto tolerance=32*std::numeric_limits<double>::epsilon()*
+        std::max({1.0,std::abs(point[0]),std::abs(point[1]),std::abs(point[2])});
+    if(std::isfinite(distance) && distance<=tolerance)
+        record.flags|=SurfacePointFlags::RoiBoundary|SurfacePointFlags::SeedRetained;
+}
+
+template<bool DeferRoiBoundary=false>
 bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, const Point3 &initialPoint,
                       const Point3 &initialNormal, SurfacePointRecord &record,
                       SurfacePointDiagnostic *diagnostic = nullptr,
@@ -1685,13 +1695,8 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
     auto normal = initialNormal;
     Point3 gradient{};
     double magnitude = 0;
-    if (params.roi) {
-        const auto tolerance = 32 * std::numeric_limits<double>::epsilon()
-            * std::max({1.0, std::abs(initialPoint[0]), std::abs(initialPoint[1]), std::abs(initialPoint[2])});
-        const auto distance = params.roi->GetBoundaryDistance(initialPoint);
-        if (std::isfinite(distance) && distance <= tolerance)
-            record.flags |= SurfacePointFlags::RoiBoundary | SurfacePointFlags::SeedRetained;
-    }
+    if constexpr(!DeferRoiBoundary)
+        if(params.roi)SetRoiBoundaryFlags(record,params.roi->GetBoundaryDistance(initialPoint));
     Point3 center{};
     bool hasGradient = false;
     if (deviceSample) {
@@ -1747,11 +1752,6 @@ bool GetPointAtDataBoundary(
         }
     }
     return false;
-}
-
-bool GetPointAtRoiBoundary(const RoiReadSnapshot& roi, const Point3& point, double tolerance)
-{
-    return roi && roi->GetBoundaryDistance(point)<=tolerance;
 }
 
 void SetMaterialTriangleFlags(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
@@ -1861,10 +1861,17 @@ void WriteObjectResult(const VolumeView &volume, const ResolvedParams &params, c
                                 GetFiniteFloat(record.seedNormalModel[2])};
         }
         record.objectIndex = objectIndex;
+        bool roiBoundary=false;
+        if(params.roi){
+            // 当前材料流程位置始终等于 seed；同一次纯查询保留两种独立阈值及非有限值规则。
+            const auto distance=params.roi->GetBoundaryDistance(record.seedPositionModel);
+            SetRoiBoundaryFlags(record,distance);
+            roiBoundary=distance<=boundaryTolerance;
+        }
         auto& classified=classifications[pointIndex++];
         classified={SurfaceContract::GetPointValid(record,params.method)?1.:0.,
             GetPointAtDataBoundary(volume.geometry,record.positionModel,boundaryTolerance)?1.:0.,
-            GetPointAtRoiBoundary(params.roi,record.positionModel,boundaryTolerance)?1.:0.};
+            roiBoundary?1.:0.};
         if (classified[0]!=0) ++acceptedCount;
         if (GetSurfaceFlag(
                 record.flags, SurfacePointFlags::LowContrast)) {
@@ -2232,7 +2239,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         if (((i-begin)&31U)==0 && GetCancelled(getCancelled)) {
                             cancelled.store(true); return;
                         }
-                        SetMaterialPoint(volume,params,points[i],normals[i],records[i]);
+                        SetMaterialPoint<true>(volume,params,points[i],normals[i],records[i]);
                         records[i].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
                     }
                 };
@@ -2305,7 +2312,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                 const auto *accepted=samples && samples[i].support==1 && samples[i].gradientValid
                                     ? samples+i : nullptr;
                                 const auto id=batch.begin+i;
-                                SetMaterialPoint(volume,params,points[id],normals[id],records[id],nullptr,accepted);
+                                SetMaterialPoint<true>(volume,params,points[id],normals[id],records[id],nullptr,accepted);
                                 records[id].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
                                 if (accepted) ++result.cudaPointCount;
                             }
