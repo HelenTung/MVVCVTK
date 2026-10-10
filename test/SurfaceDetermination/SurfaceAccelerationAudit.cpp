@@ -1,5 +1,6 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceDeterminationTestSupport.h"
+#include "SurfaceMeasurementSerialization.h"
 #include <Windows.h>
 #include <Psapi.h>
 #include <chrono>
@@ -11,47 +12,8 @@
 #include <io.h>
 
 namespace {
-template <class T> void Write(std::ostream &stream, const T &value) {
-    stream.write(reinterpret_cast<const char *>(&value), sizeof(value));
-}
-void WriteResult(std::ostream &stream, const SurfaceAlgorithmResult &result) {
-    Write(stream, result.status);
-    Write(stream, result.failureReason);
-    Write(stream, result.parameterFingerprint);
-    Write(stream, result.points.size());
-    for (const auto &p : result.points) {
-        for (auto x : p.seedPositionModel)
-            Write(stream, x);
-        for (auto x : p.seedNormalModel)
-            Write(stream, x);
-        for (auto x : p.positionModel)
-            Write(stream, x);
-        for (auto x : p.normalModel)
-            Write(stream, x);
-        Write(stream, p.localThreshold);
-        Write(stream, p.gradientMagnitude);
-        Write(stream, p.validSupportRatio);
-        Write(stream, p.flags);
-        Write(stream, p.objectIndex);
-        Write(stream, p.interfaceIndex);
-    }
-    Write(stream, result.triangleIndices.size());
-    for (auto x : result.triangleIndices)
-        Write(stream, x);
-    for (auto x : result.triangleValidity)
-        Write(stream, x);
-    Write(stream, result.objects.size());
-    for (const auto &o : result.objects) {
-        Write(stream, o.pointCount);
-        Write(stream, o.triangleCount);
-        Write(stream, o.areaValidity);
-        Write(stream, o.volumeValidity);
-        Write(stream, o.areaModelUnit2.has_value());
-        Write(stream, o.areaModelUnit2.value_or(0));
-        Write(stream, o.volumeModelUnit3.has_value());
-        Write(stream, o.volumeModelUnit3.value_or(0));
-    }
-}
+using SurfaceAudit::Write;
+using SurfaceAudit::WriteResult;
 class CountBuffer final : public std::streambuf {
 public:
     std::uint64_t bytes=0;
@@ -64,11 +26,11 @@ int main(int argc, char **argv) {
     if (argc < 7) {
         std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout] "
                      "[--roi-box xmin xmax ymin ymax zmin zmax] [--work-limit bytes] [--retry-finalizer-fault] "
-                     "[--largest|--seed-model x y z] [--repeat 2..8] [--alternate-cpu-plan]\n";
+                     "[--largest|--seed-model x y z] [--repeat 2..8] [--alternate-cpu-plan] [--full-measurements]\n";
         return 2;
     }
     try {
-        bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false;
+        bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false,fullMeasurements=false;
         std::optional<std::array<double,6>> roiBounds;
         WorkLimit workingLimit;
         unsigned repeats=1;
@@ -81,6 +43,9 @@ int main(int argc, char **argv) {
             if(option=="--binary-stdout" || option=="--metrics-only") {
                 if(streamBinary || metricsOnly)return 2;
                 streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
+            } else if(option=="--full-measurements") {
+                if(fullMeasurements)return 2;
+                fullMeasurements=true;
             } else if(option=="--alternate-cpu-plan") {
                 if(alternateCpuPlan)return 2;
                 alternateCpuPlan=true;
@@ -180,13 +145,13 @@ int main(int argc, char **argv) {
         if (streamBinary) {
             // 管道流式校验完整结果，避免大体量回归重复写入数 GiB 文件。
             if (_setmode(_fileno(stdout), _O_BINARY) == -1) return 2;
-            if(repeats>1){CountBuffer buffer;std::ostream count(&buffer);WriteResult(count,result);Write(std::cout,buffer.bytes);}
-            WriteResult(std::cout, result);
+            if(repeats>1){CountBuffer buffer;std::ostream count(&buffer);WriteResult(count,result,fullMeasurements);Write(std::cout,buffer.bytes);}
+            WriteResult(std::cout, result,fullMeasurements);
             std::cout.flush();
             if (!std::cout) return 2;
         } else if(!metricsOnly) {
             std::ofstream binary(outputPrefix + ".bin", std::ios::binary);
-            WriteResult(binary, result);
+            WriteResult(binary, result,fullMeasurements);
             if(!binary) return 2;
         }
         std::ofstream json(outputPrefix + ".json");
@@ -195,6 +160,8 @@ int main(int argc, char **argv) {
              << ",\"triangles\":" << result.triangleIndices.size() / 3 << ",\"totalMs\":" << elapsed
              << ",\"seedMs\":" << result.execution.seedMs
              << ",\"refinementMs\":" << result.execution.refinementMs
+
+#ifndef MVVCVTK_SURFACE_REFERENCE_AUDIT
              << ",\"componentsMs\":" << result.componentsMs
              << ",\"componentSelectionMs\":" << result.componentSelectionMs
              << ",\"componentCandidateCount\":" << result.componentCandidateCount
@@ -261,12 +228,15 @@ int main(int argc, char **argv) {
              << ",\"componentWorkspaceBound\":" << result.componentWorkspaceBound
              << ",\"componentBudgetFallbackCount\":" << result.componentBudgetFallbackCount
              << ",\"componentParallelMs\":" << result.componentParallelMs
+
+#endif
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage
              << ",\"peakWorkingBytes\":" << after.PeakWorkingSetSize
              << ",\"precedingFaultStatus\":" << (precedingStatus?int(*precedingStatus):-1)
              << ",\"precedingFaultReason\":" << int(precedingReason)
+             << ",\"measurementSchema\":" << (fullMeasurements?2:1)
              << ",\"round\":" << round+1 << ",\"peakScope\":\"process-so-far\"}\n";
         if (!streamBinary) std::cout << "points=" << result.points.size() << " triangles=" << result.triangleIndices.size() / 3
                   << " totalMs=" << elapsed << " peakPrivate=" << after.PeakPagefileUsage << '\n';

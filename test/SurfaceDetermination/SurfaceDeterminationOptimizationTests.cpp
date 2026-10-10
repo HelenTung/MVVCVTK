@@ -5,6 +5,8 @@
 #include "SurfaceEdgeTopology.h"
 #include "SurfaceGpuFinalizer.h"
 #include "SurfaceBackendCost.h"
+#include "SurfaceMeasurementSerialization.h"
+#include <sstream>
 #include "SurfaceDeterminationTestSupport.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -641,6 +643,39 @@ void TestBackendCalibrationCache(Checks &checks)
     std::cout<<"Surface calibration cache bytes="<<sizeof(Cache)<<'\n';
 }
 
+void TestCompleteMeasurementSerialization(Checks &checks)
+{
+    SurfaceAlgorithmResult original;original.status=SurfaceResultStatus::Succeeded;
+    original.points.resize(1);original.objects.resize(1);original.interfaces.resize(1);
+    original.isoEstimate=SurfaceIsoEstimate{};
+    const auto serialize=[](const auto &result,bool full){std::ostringstream out(std::ios::binary);
+        SurfaceAudit::WriteResult(out,result,full);return out.str();};
+    const auto legacy=serialize(original,false),full=serialize(original,true);
+    checks.Get(full.size()>legacy.size() && full.substr(0,legacy.size())==legacy,
+        "complete measurement schema preserves the unchanged legacy hash prefix");
+    const auto changed=[&](auto mutate,const char *name){auto result=original;mutate(result);
+        checks.Get(serialize(result,true)!=full,name);};
+    for(auto field:{&SurfacePointRecord::contrast,&SurfacePointRecord::fitResidual,&SurfacePointRecord::offsetFromSeed,
+                   &SurfacePointRecord::estimatedLocalizationSigma,&SurfacePointRecord::transitionWidthModel,
+                   &SurfacePointRecord::pairedSeparationModel})
+        changed([field](auto &r){r.points[0].*field=1;},"complete schema detects every additional point quality quantity");
+    changed([](auto&r){r.points[0].crossingCount=1;},"complete schema detects crossing count");
+    changed([](auto&r){r.points[0].overrideIndex=1;},"complete schema detects override identity");
+    for(auto field:{&SurfaceObjectRecord::isClosed,&SurfaceObjectRecord::isManifold,&SurfaceObjectRecord::isTruncated,
+                   &SurfaceObjectRecord::isOrientationValid})
+        changed([field](auto&r){r.objects[0].*field=true;},"complete schema detects every object topology/coverage state");
+    changed([](auto&r){r.objects[0].boundsModel[2]=1;},"complete schema detects object model bounds");
+    changed([](auto&r){r.objects[0].validAreaRatio=.5;},"complete schema detects valid area ratio");
+    changed([](auto&r){r.objects[0].firstPoint=1;},"complete schema detects point slice");
+    changed([](auto&r){r.objects[0].firstTriangle=1;},"complete schema detects triangle slice");
+    changed([](auto&r){r.sourceRevision.generation=1;},"complete schema detects source revision");
+    changed([](auto&r){r.acceptedPointCount=1;},"complete schema detects global acceptance counters");
+    changed([](auto&r){r.isoEstimate->separationRatio=.5;},"complete schema detects iso-estimation quality");
+    changed([](auto&r){r.interfaces[0].materials.materialA=1;},"complete schema detects interface material pair");
+    changed([](auto&r){r.interfaces[0].canonicalId="gray";},"complete schema detects interface canonical identity");
+    changed([](auto&r){r.execution.processedExtent[0]=1;},"complete schema detects processed input extent");
+}
+
 void TestGpuFinalizerOwnership(Checks &checks)
 {
     std::vector<SurfaceCudaSample> samples(surfaceCudaBatchCapacity);
@@ -904,6 +939,7 @@ int GetSurfaceOptimizationFailCount()
     TestGpuFinalizerOwnership(checks);
     TestBackendCostChoice(checks);
     TestBackendCalibrationCache(checks);
+    TestCompleteMeasurementSerialization(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);
