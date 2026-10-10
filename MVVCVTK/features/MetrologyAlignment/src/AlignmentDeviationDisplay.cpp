@@ -1,5 +1,6 @@
 #include "AlignmentDeviationDisplay.h"
 #include "AlignmentDeviationData.h"
+#include "AlignmentDeviationColors.h"
 #include "AlignmentMath.h"
 #include <stdexcept>
 
@@ -21,7 +22,8 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
     if (!request.isVisible) { Clear(); result.status=AlignmentStatus::FullyDetermined; return result; }
     const auto graph=data.GetDataGraph();
     const auto deviation=AlignmentDeviationDataStore::GetResult(graph,request.result);
-    if (!deviation || !AlignmentDeviationOverlay::GetDisplayValid(request,*deviation))
+    const auto resolved=deviation ? AlignmentDeviationColors::GetResolvedDisplay(request,*deviation) : std::nullopt;
+    if (!resolved)
         throw std::invalid_argument("Invalid deviation display parameters.");
     if (!deviation->isCurrent) { result.status=AlignmentStatus::Stale; return result; }
     if (!views) { result.status=AlignmentStatus::Unavailable; return result; }
@@ -36,7 +38,7 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             if (!port) throw std::runtime_error("Deviation overlay port unavailable.");
             next.push_back({port,{}});
         }
-        if (m_request && m_product && m_request->result==request.result && m_request->range==request.range &&
+        if (m_request && m_product && m_request->result==request.result && m_request->range==resolved->range &&
             m_request->useToleranceColors==request.useToleranceColors && m_request->selectedVertex==request.selectedVertex &&
             next.size()==m_bindings.size() && std::equal(next.begin(),next.end(),m_bindings.begin(),
                 [](const auto &a,const auto &b) { return a.port==b.port; })) {
@@ -46,7 +48,7 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
         }
         const auto mesh=data.GetSurfaceMesh(graph,deviation->sourceMesh);
         if (!mesh) throw std::runtime_error("Measured surface render view unavailable.");
-        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,request);
+        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,*resolved);
         for (auto &binding:next) {
             binding.overlay=std::make_shared<AlignmentDeviationOverlay>(product);
             if (!binding.port->AttachOverlay(binding.overlay)) throw std::runtime_error("Deviation overlay attach failed.");
@@ -58,7 +60,7 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             for (auto i=next.rbegin();i!=next.rend();++i) if (i->overlay) i->port->RemoveOverlay(i->overlay);
             return result;
         }
-        Clear(); m_bindings=std::move(next); m_product=product; m_request=request;
+        Clear(); m_bindings=std::move(next); m_product=product; m_request=*resolved;
         result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result; result.isDisplayReady=true;
         return result;
     } catch (const std::length_error &e) { result.status=AlignmentStatus::ResourceExhausted; result.message=e.what(); }

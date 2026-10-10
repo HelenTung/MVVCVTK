@@ -1,5 +1,6 @@
 #include "AlignmentDeviationOverlay.h"
 #include "AlignmentDeviationColors.h"
+#include "AlignmentReportDisplay.h"
 #include "Data/DataPayloads.h"
 #include <algorithm>
 #include <cmath>
@@ -60,6 +61,46 @@ void Colors() {
           narrow.ColorAt(.50002)==AlignmentDeviationColors::Color{60,180,95} &&
           narrow.ColorAt(.5)!=AlignmentDeviationColors::Color{60,180,95},"narrow tolerance keeps exact inclusive bounds");
 }
+void EffectiveRange() {
+    auto field=std::make_shared<AlignmentDeviationField>();
+    field->samples.resize(4);field->samples[0].state=field->samples[1].state=AlignmentDeviationState::Valid;
+    field->samples[0].value=-.002;field->samples[1].value=.006;
+    field->samples[2].state=AlignmentDeviationState::TooFar;field->samples[2].value=-100;
+    field->samples[3].state=AlignmentDeviationState::NotSelected;field->samples[3].value=std::numeric_limits<double>::quiet_NaN();
+    AlignmentDeviationSnapshot snapshot;snapshot.result=Ref(9);snapshot.forward=field;
+    auto params=std::make_shared<AlignmentDeviationRequest>();params->metric=AlignmentDeviationMetric::NominalNormalProjection;
+    params->tolerance=std::array<double,2>{-.05,.05};snapshot.parameters=params;
+    AlignmentDeviationDisplay automatic;automatic.result=snapshot.result;
+    const auto resolved=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
+    Check(resolved && resolved->range==std::array<double,2>{-.002,.006} && !resolved->useToleranceColors,
+          "default range uses only valid samples and retains continuous HueLoop within tolerance");
+    const auto frozen=AlignmentReportDisplay::BuildDeviation(automatic,snapshot,{});
+    Check(resolved && frozen.parameters.range==resolved->range && frozen.legendRgb==
+          AlignmentDeviationColors::GetLegend(*resolved,params->tolerance),"frozen report stores resolved finite range and matching legend");
+    if(resolved) {
+        const AlignmentDeviationColors::Ramp ramp(*resolved,params->tolerance);
+        Check(ramp.ColorAt(-.002)!=ramp.ColorAt(.002) && ramp.ColorAt(.002)!=AlignmentDeviationColors::Color{60,180,95},
+              "effective range maps variation even when the whole field lies in the inspection tolerance");
+    }
+    auto fixed=automatic;fixed.range={-1,1};
+    Check(AlignmentDeviationColors::GetResolvedDisplay(fixed,snapshot)->range==fixed.range,"explicit clipping range is preserved");
+    automatic.useToleranceColors=true;
+    const auto tolerance=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
+    Check(tolerance && tolerance->range==std::array<double,2>{-.05,.05},"explicit tolerance colors include the full tolerance range");
+    automatic.useToleranceColors=false;field->samples[1].value=field->samples[0].value;
+    const auto constant=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
+    Check(constant && constant->range[0]<-.002 && constant->range[1]>-.002,"constant field gets finite numerical LUT padding");
+    field->samples[0].value=field->samples[1].value=0;params->metric=AlignmentDeviationMetric::UnsignedDistance;
+    const auto zero=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
+    Check(zero && zero->range[0]==0 && zero->range[1]>0,"constant unsigned zero keeps a nonnegative range");
+    field->samples[1].value=std::numeric_limits<double>::infinity();
+    Check(!AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot),"non-finite valid sample rejects automatic range");
+    field->samples[0].state=field->samples[1].state=AlignmentDeviationState::InvalidSource;
+    Check(!AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot),"all-invalid field has no automatic measured range");
+    fixed.range={0,1};Check(bool(AlignmentDeviationColors::GetResolvedDisplay(fixed,snapshot)),"explicit range can display an all-gray field");
+    fixed.range[1]=std::numeric_limits<double>::quiet_NaN();
+    Check(!AlignmentDeviationColors::GetResolvedDisplay(fixed,snapshot),"partial automatic range sentinel is rejected");
+}
 void Display(const char *imagePath) {
     auto points=vtkSmartPointer<vtkPoints>::New(); points->SetDataTypeToDouble();
     auto triangles=vtkSmartPointer<vtkCellArray>::New();
@@ -82,7 +123,11 @@ void Display(const char *imagePath) {
     AlignmentDeviationSnapshot result; result.result=Ref(2); result.sourceMesh=Ref(1); result.forward=field;
     auto parameters=std::make_shared<AlignmentDeviationRequest>(); parameters->metric=AlignmentDeviationMetric::NominalNormalProjection;
     parameters->tolerance=std::array<double,2>{-.1,.1}; result.parameters=parameters;
-    AlignmentDeviationDisplay display; display.result=result.result; display.range={-1,1}; display.selectedVertex=4;
+    AlignmentDeviationDisplay automatic;automatic.result=result.result;
+    const auto automaticProduct=AlignmentDeviationOverlay::Build(source,result,automatic);
+    Check(automaticProduct->lookup->GetRange()[0]==-2 && automaticProduct->lookup->GetRange()[1]==2,
+          "default live overlay resolves actual valid range and excludes the TooFar patch");
+    AlignmentDeviationDisplay display; display.result=result.result; display.range={-1,1}; display.selectedVertex=4;display.useToleranceColors=true;
     auto product=AlignmentDeviationOverlay::Build(source,result,display);
     Check(product->colored!=poly && product->colored->GetPoints()==points && product->colored->GetPolys()==triangles,
           "display shell shares exact original positions and topology");
@@ -150,7 +195,7 @@ void Display(const char *imagePath) {
 } // namespace
 int main(int argc,char **argv) {
     try {
-        if(argc>1 && std::string(argv[1])=="--colors-only") Colors();
+        if(argc>1 && std::string(argv[1])=="--colors-only") { Colors();EffectiveRange(); }
         else Display(argc>1 ? argv[1] : nullptr);
     }
     catch (const std::exception &e) { ++failures; std::cerr<<e.what()<<'\n'; }

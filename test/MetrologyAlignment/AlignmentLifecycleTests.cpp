@@ -1037,6 +1037,19 @@ void AutomaticReferenceLifecycle() {
     Check(f.feature->GetScopeState(f.input.scope).isDeviationDisplayReady &&
           !f.feature->GetScopeState("other-part").deviationDisplay,
           "deviation display state is scoped to its bound alignment part");
+    display.deviationDisplay->range=AlignmentDeviationDisplay{}.range;show();
+    const auto automaticDisplay=f.feature->GetState().deviationDisplay;
+    Check(automaticDisplay && displayed.isDisplayReady && !automaticDisplay->useToleranceColors &&
+          std::isfinite(automaticDisplay->range[0]) && std::isfinite(automaticDisplay->range[1]) &&
+          automaticDisplay->range[0]<=deviation->forward->statistics.minimum &&
+          automaticDisplay->range[1]>=deviation->forward->statistics.maximum,
+          "public default display resolves the current field range before storing visible state");
+    paletteRequest.deviations.clear();paletteRequest.deviationDisplays.clear();paletteRequest.captureCurrentDisplay=true;
+    const auto automaticCapture=f.feature->GetReport(paletteRequest);
+    Check(automaticDisplay && automaticCapture.report && !automaticCapture.report->presentation.deviations.empty() &&
+          automaticCapture.report->presentation.deviations[0].parameters.range==automaticDisplay->range,
+          "capturing automatic display freezes the same resolved range as the live overlay");
+    display.deviationDisplay->range={0,.1};
     AlignmentConfig limitedConfig;
     auto limitedDisplay = std::make_shared<MetrologyAlignmentHostFeature>(limitedConfig);
     HostFeatureContext limitedContext; limitedContext.data=f.data; limitedContext.views=views;

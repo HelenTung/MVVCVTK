@@ -36,19 +36,51 @@ Color Ramp::ColorAt(double value) const {
     color[i] = static_cast<std::uint8_t>(std::lround(255 * mapped[i]));
   return color;
 }
-bool GetDisplayValid(const AlignmentDeviationDisplay &d,
-                     const AlignmentDeviationSnapshot &r) {
+std::optional<std::array<double,2>> GetEffectiveRange(const AlignmentDeviationField &field) {
+  std::optional<std::array<double,2>> range;
+  for(const auto &sample:field.samples) {
+    if(sample.state!=AlignmentDeviationState::Valid)continue;
+    if(!std::isfinite(sample.value))return {};
+    if(!range)range=std::array<double,2>{sample.value,sample.value};
+    else {(*range)[0]=std::min((*range)[0],sample.value);(*range)[1]=std::max((*range)[1],sample.value);}
+  }
+  return range;
+}
+std::optional<AlignmentDeviationDisplay> GetResolvedDisplay(
+    const AlignmentDeviationDisplay &input,const AlignmentDeviationSnapshot &r) {
+  auto d=input;
   if (!r.forward || !r.parameters || !GetDataRevisionRefValid(d.result) ||
-      d.result != r.result || !std::isfinite(d.range[0]) ||
+      d.result != r.result ||
+      (d.selectedVertex && *d.selectedVertex >= r.forward->samples.size()))return {};
+  if(std::isnan(d.range[0]) && std::isnan(d.range[1])) {
+    const auto range=GetEffectiveRange(*r.forward);if(!range)return {};
+    d.range=*range;
+    if(d.useToleranceColors && r.parameters->tolerance) {
+      d.range[0]=std::min(d.range[0],(*r.parameters->tolerance)[0]);
+      d.range[1]=std::max(d.range[1],(*r.parameters->tolerance)[1]);
+    }
+    // 常量场与极小跨度只扩充 LUT 表示所需的数值余量，不改测量值。
+    if(d.range[0]==d.range[1] || (d.range[1]-d.range[0]>0 &&
+        d.range[1]-d.range[0]<257/std::numeric_limits<double>::max())) {
+      const double padding=std::max(1.0,std::max(std::abs(d.range[0]),std::abs(d.range[1]))) *
+          (16*std::numeric_limits<double>::epsilon());
+      const double low=d.range[0]-padding,high=d.range[1]+padding;
+      if(std::isfinite(low))d.range[0]=low;
+      if(std::isfinite(high))d.range[1]=high;
+      if(r.parameters->metric==AlignmentDeviationMetric::UnsignedDistance)d.range[0]=std::max(0.0,d.range[0]);
+    }
+  }
+  if (!std::isfinite(d.range[0]) ||
       !std::isfinite(d.range[1]) || d.range[0] >= d.range[1] ||
       !std::isfinite(d.range[1] - d.range[0]) ||
       (r.parameters->metric == AlignmentDeviationMetric::UnsignedDistance &&
-       d.range[0] < 0) ||
-      (d.selectedVertex && *d.selectedVertex >= r.forward->samples.size()))
-    return false;
-  return !d.useToleranceColors || !r.parameters->tolerance ||
-         (d.range[0] <= (*r.parameters->tolerance)[0] &&
-          d.range[1] >= (*r.parameters->tolerance)[1]);
+       d.range[0] < 0))return {};
+  if(d.useToleranceColors && r.parameters->tolerance &&
+      !(d.range[0] <= (*r.parameters->tolerance)[0] && d.range[1] >= (*r.parameters->tolerance)[1]))return {};
+  return d;
+}
+bool GetDisplayValid(const AlignmentDeviationDisplay &d,const AlignmentDeviationSnapshot &r) {
+  return GetResolvedDisplay(d,r).has_value();
 }
 std::array<Color, 257>
 GetLegend(const AlignmentDeviationDisplay &display,

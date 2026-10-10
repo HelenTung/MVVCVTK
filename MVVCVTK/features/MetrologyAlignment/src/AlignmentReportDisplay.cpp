@@ -9,12 +9,13 @@ MetrologyReportDeviationDisplay
 BuildDeviation(const AlignmentDeviationDisplay &display,
                const AlignmentDeviationSnapshot &result,
                const std::optional<AlignmentPoint> &sourcePoint) {
-  if (!AlignmentDeviationColors::GetDisplayValid(display, result))
+  const auto resolved=AlignmentDeviationColors::GetResolvedDisplay(display,result);
+  if (!resolved)
     throw std::invalid_argument("Invalid report colorbar configuration.");
   MetrologyReportDeviationDisplay output;
-  output.parameters = display;
+  output.parameters = *resolved;
   output.legendRgb = AlignmentDeviationColors::GetLegend(
-      display, result.parameters->tolerance);
+      *resolved, result.parameters->tolerance);
   if (display.selectedVertex) {
     if (!sourcePoint ||
         !AlignmentMath::Finite(AlignmentMath::Vector(*sourcePoint)))
@@ -47,7 +48,8 @@ bool GetValid(const MetrologyReport &r) {
     const auto result = std::find_if(
         r.deviations.begin(), r.deviations.end(),
         [&](const auto &v) { return v.result == d.parameters.result; });
-    if (!displays.insert(d.parameters.result).second ||
+    if (!std::isfinite(d.parameters.range[0]) || !std::isfinite(d.parameters.range[1]) ||
+        !displays.insert(d.parameters.result).second ||
         result == r.deviations.end() ||
         !AlignmentDeviationColors::GetDisplayValid(d.parameters, *result) ||
         d.colorMapVersion != AlignmentDeviationColors::version ||

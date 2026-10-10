@@ -88,7 +88,10 @@ void Save(vtkRenderer *renderer,const std::filesystem::path &file,const double *
 void Render(TestDataPort &data,const DataRevisionRef &meshRef,const AlignmentDeviationSnapshot &snapshot,
             const std::filesystem::path &folder,const std::string &phase,std::ostream &out) {
     const auto source=data.GetSurfaceMesh(data.GetDataGraph(),meshRef);Require(source && source->mesh,"Source view missing.");
-    AlignmentDeviationDisplay display;display.result=snapshot.result;display.range={-2,2};
+    AlignmentDeviationDisplay automatic;automatic.result=snapshot.result;
+    const auto resolved=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
+    Require(resolved.has_value(),"No finite effective deviation range.");
+    const auto &display=*resolved;
     const AlignmentDeviationColors::Ramp ramp(display,snapshot.parameters->tolerance);
     const auto product=AlignmentDeviationOverlay::Build(source,snapshot,display);
     auto *quality=source->mesh->GetCellData()->GetArray("measurement.valid");Require(quality,"Cell quality missing.");
@@ -110,7 +113,9 @@ void Render(TestDataPort &data,const DataRevisionRef &meshRef,const AlignmentDev
     auto rejected=vtkSmartPointer<vtkPolyData>::New();rejected->SetPoints(source->mesh->GetPoints());rejected->SetPolys(invalid);
     double bounds[6]{};source->mesh->GetBounds(bounds);double center[3]{};
     for(int a=0;a<3;++a)center[a]=(bounds[2*a]+bounds[2*a+1])/2;
-    out<<"{\"phase\":\""<<phase<<"\",\"validFaces\":"<<valid->GetNumberOfCells()<<",\"grayFaces\":"<<invalid->GetNumberOfCells()
+    const auto effective=AlignmentDeviationColors::GetEffectiveRange(*snapshot.forward);
+    out<<"{\"phase\":\""<<phase<<"\",\"rangeSource\":\"finite Valid samples\",\"effectiveRangeMm\":["<<(*effective)[0]<<','<<(*effective)[1]
+       <<"],\"rangeMm\":["<<display.range[0]<<','<<display.range[1]<<"],\"useToleranceColors\":false,\"validFaces\":"<<valid->GetNumberOfCells()<<",\"grayFaces\":"<<invalid->GetNumberOfCells()
        <<",\"qualityRejectedFacesWithValidVertices\":"<<rejectedFacesWithValidVertices<<",\"mixedVertexFaces\":"<<mixedVertexFaces
        <<",\"sectionOriginRAS\":["<<center[0]<<','<<center[1]<<','<<center[2]<<"],\"views\":[";
     for(int view=-2;view<3;++view) {
@@ -159,7 +164,7 @@ int wmain(int argc,wchar_t **argv) {
             pointQuality->values[triangles[3*i+1]]==1 && pointQuality->values[triangles[3*i+2]]==1)request->sourceTriangles.push_back(i);
         request->referenceTriangles=request->sourceTriangles;
         std::ofstream out(folder/"render.json");out<<std::setprecision(17)
-            <<"{\"schema\":\"deviation-render-audit-1\",\"scope\":\"real C3 mesh; known rigid perturbation versus supplied public solve pose or exact identity; not cross-acquisition or CAD nominal acceptance\",\"afterPoseFromPublicSolve\":"<<(argc==19 ? "true" : "false")<<",\"rangeMm\":[-2,2],\"illustrativeToleranceMm\":[-0.05,0.05],\"viewport\":[1024,768],\"points\":"
+            <<"{\"schema\":\"deviation-render-audit-2\",\"scope\":\"real C3 mesh; known rigid perturbation versus supplied public solve pose or exact identity; not cross-acquisition or CAD nominal acceptance\",\"afterPoseFromPublicSolve\":"<<(argc==19 ? "true" : "false")<<",\"rangeMode\":\"effective finite Valid sample range per field, shared by 2D and 3D\",\"useToleranceColors\":false,\"viewport\":[1024,768],\"points\":"
             <<payload->GetVertices().size()/3<<",\"triangles\":"<<triangles.size()/3<<",\"cases\":[";
         for(int phase=0;phase<2;++phase) {
             if(phase)out<<',';const std::string name=phase ? "aligned" : "perturbed";

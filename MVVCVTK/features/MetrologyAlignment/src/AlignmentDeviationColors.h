@@ -18,6 +18,9 @@ private:
 };
 bool GetDisplayValid(const AlignmentDeviationDisplay &display,
                      const AlignmentDeviationSnapshot &result);
+std::optional<std::array<double,2>> GetEffectiveRange(const AlignmentDeviationField &field);
+std::optional<AlignmentDeviationDisplay> GetResolvedDisplay(
+    const AlignmentDeviationDisplay &display,const AlignmentDeviationSnapshot &result);
 std::array<Color, 257>
 GetLegend(const AlignmentDeviationDisplay &display,
           const std::optional<std::array<double, 2>> &tolerance);

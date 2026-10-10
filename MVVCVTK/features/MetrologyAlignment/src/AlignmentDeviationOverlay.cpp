@@ -30,8 +30,9 @@ std::size_t AlignmentDeviationOverlay::GetRequiredBytes(std::size_t count) {
 std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::Build(
     VtkSurfaceMeshSnapshot mesh, const AlignmentDeviationSnapshot &result,
     const AlignmentDeviationDisplay &display) {
+    const auto resolved=AlignmentDeviationColors::GetResolvedDisplay(display,result);
     if (!mesh || !mesh->data || mesh->data->self != result.sourceMesh || !mesh->mesh ||
-        !GetDisplayValid(display,result) ||
+        !resolved ||
         mesh->mesh->GetNumberOfPoints() != static_cast<vtkIdType>(result.forward->samples.size()))
         throw std::invalid_argument("Invalid deviation display input.");
     const auto count=result.forward->samples.size();
@@ -42,7 +43,7 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
     colors->SetName("metrology.deviation.color"); colors->SetNumberOfComponents(3);
     colors->SetNumberOfTuples(static_cast<vtkIdType>(count));
     auto *buffer=colors->GetPointer(0);
-    const AlignmentDeviationColors::Ramp ramp(display,result.parameters->tolerance);
+    const AlignmentDeviationColors::Ramp ramp(*resolved,result.parameters->tolerance);
     for (std::size_t i=0;i<count;++i) {
         const auto &sample=output->field->samples[i];
         const auto color=sample.state == AlignmentDeviationState::Valid

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -342,9 +343,10 @@ struct AlignmentDeviationSnapshot final {
 
 struct AlignmentDeviationDisplay final {
     DataRevisionRef result;
-    // 固定显示范围，截断只影响颜色。若启用公差色，范围必须覆盖正式公差区间。
-    std::array<double,2> range{0,1};
-    bool useToleranceColors = true;
+    // 两端均为 NaN 时按有效样本自动定范围；有限端点表示固定范围，截断只影响颜色。
+    // 公差色显式启用；自动范围此时一并覆盖公差区间。
+    std::array<double,2> range{std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN()};
+    bool useToleranceColors = false;
     bool isVisible = true;
     std::optional<std::uint64_t> selectedVertex;
 };
