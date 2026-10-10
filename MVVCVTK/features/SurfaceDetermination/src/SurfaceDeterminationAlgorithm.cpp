@@ -1665,35 +1665,31 @@ bool GetPointAtRoiBoundary(const RoiReadSnapshot& roi, const Point3& point, doub
     return roi && roi->GetBoundaryDistance(point)<=tolerance;
 }
 
-void SetTriangleFlipFlags(const std::vector<Point3> &originalPoints, const std::vector<Point3> &refinedPoints,
-                          const std::vector<Triangle> &triangles, std::vector<SurfacePointRecord> &records,
-                          const SurfaceCancelCheck &cancelled = {})
+void SetMaterialTriangleFlags(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
+                              const std::vector<Point3> &normals, const double cornerCosine,
+                              std::vector<SurfacePointRecord> &records,
+                              const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
     for (const Triangle& triangle : triangles) {
         CheckCancellation(cancellationBatch, cancelled);
         const auto& ids = triangle.vertices;
-        const Point3 originalNormal = Cross(
-            Subtract(originalPoints[ids[1]], originalPoints[ids[0]]),
-            Subtract(originalPoints[ids[2]], originalPoints[ids[0]]));
-        const Point3 refinedNormal = &originalPoints==&refinedPoints ? originalNormal : Cross(
-            Subtract(refinedPoints[ids[1]], refinedPoints[ids[0]]),
-            Subtract(refinedPoints[ids[2]], refinedPoints[ids[0]]));
-        const double originalLength = GetLength(originalNormal);
-        const double refinedLength = &originalPoints==&refinedPoints ? originalLength : GetLength(refinedNormal);
-        if (originalLength <= geometryEpsilon
-            || refinedLength <= geometryEpsilon
-            || Dot(originalNormal, refinedNormal) <= 0.0) {
+        auto face = Cross(Subtract(points[ids[1]],points[ids[0]]),
+                          Subtract(points[ids[2]],points[ids[0]]));
+        const double length = GetLength(face);
+        // 材料流程的前后位置相同；复用尖角检测的原面及长度，保留原比较而非用 Normalize 失败代替。
+        if (length <= geometryEpsilon || Dot(face,face) <= 0.0) {
             for (const std::uint32_t pointId : ids) {
                 CheckCancellation(cancellationBatch, cancelled);
                 records[pointId].flags |=
                     SurfacePointFlags::TriangleFlipRisk | SurfacePointFlags::SeedRetained;
-                records[pointId].positionModel = originalPoints[pointId];
-                records[pointId].offsetFromSeed = 0;
-                records[pointId].normalModel = {GetFiniteFloat(records[pointId].seedNormalModel[0]),
-                                                GetFiniteFloat(records[pointId].seedNormalModel[1]),
-                                                GetFiniteFloat(records[pointId].seedNormalModel[2])};
             }
+        }
+        if (!std::isfinite(length) || length <= geometryEpsilon) continue;
+        face = Scale(face,1.0/length);
+        for (const auto pointId : ids) {
+            if (Dot(face,normals[pointId]) < cornerCosine)
+                records[pointId].flags |= SurfacePointFlags::SharpCorner;
         }
     }
 }
@@ -1745,7 +1741,6 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     std::size_t cancellationBatch = 0;
     // 当前材料流程保留 seed 位置；直接复用同一几何，省去整组件副本。
     const auto& refinedPoints=originalPoints;
-    SetTriangleFlipFlags(originalPoints, refinedPoints, triangles, records, cancelled);
     // 整体翻转不改变边关联、退化和方向一致性；体积仍按最终顺序重新累加。
     auto topology=cachedTopology;
     topology.signedVolume=0;
@@ -1766,6 +1761,14 @@ void AddObjectResult(const VolumeView &volume, const ResolvedParams &params, con
     std::size_t pointIndex=0;
     for (SurfacePointRecord& record : records) {
         CheckCancellation(cancellationBatch, cancelled);
+        // 风险已在三角面准备时判定；恢复仍在采样后执行，使用采样完成的 seedNormalModel。
+        if (GetSurfaceFlag(record.flags,SurfacePointFlags::TriangleFlipRisk)) {
+            record.positionModel=originalPoints[pointIndex];
+            record.offsetFromSeed=0;
+            record.normalModel={GetFiniteFloat(record.seedNormalModel[0]),
+                                GetFiniteFloat(record.seedNormalModel[1]),
+                                GetFiniteFloat(record.seedNormalModel[2])};
+        }
         record.objectIndex = objectIndex;
         auto& classified=classifications[pointIndex++];
         classified={SurfaceContract::GetPointValid(record,params.method)?1.:0.,
@@ -2073,17 +2076,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             result.cpuThreadCount = std::max(result.cpuThreadCount, normalizationThreads);
             std::vector<SurfacePointRecord> records(points.size());
             const double cornerCosine = std::cos(params.sharpCornerAngleDeg * 0.5 * 3.141592653589793 / 180);
-            for (const auto &triangle : triangles)
-            {
-                const auto &ids = triangle.vertices;
-                auto face =
-                    Cross(Subtract(points[ids[1]], points[ids[0]]), Subtract(points[ids[2]], points[ids[0]]));
-                if (!Normalize(face))
-                    continue;
-                for (auto id : ids)
-                    if (Dot(face, normals[id]) < cornerCosine)
-                        records[id].flags |= SurfacePointFlags::SharpCorner;
-            }
+            SetMaterialTriangleFlags(points,triangles,normals,cornerCosine,records,getCancelled);
             std::atomic<bool> cancelled{false};
             const auto samplingStart=std::chrono::steady_clock::now();
             result.meshPreparationMs+=std::chrono::duration<double,std::milli>(samplingStart-preparationStart).count();

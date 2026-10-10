@@ -270,6 +270,44 @@ void TestPointSupportRules(Checks &checks)
     }
 }
 
+void TestMaterialTriangleQuality(Checks &checks)
+{
+    // 同一 x 平面改变物理面面积：低于 epsilon、正常、以及有限面向量的长度溢出。
+    const std::array<std::array<double,3>,3> spacings{{
+        {10,1.0e-6,0.5e-6}, {10,1.0e-6,2.0e-6}, {1.0e-300,1.0e154,1.0e154}}};
+    for (std::size_t fixture=0;fixture<spacings.size();++fixture) {
+        const auto spacing=spacings[fixture];
+        const auto source=BuildSnapshot({8,8,8},spacing,{0,0,0},{1,0,0,0,1,0,0,0,1},VTK_DOUBLE,
+            [spacing](const Point3&p){return p[0]/spacing[0];});
+        auto params=GetParams();params.initialIsoValue=3.5;params.minimumObjectVoxels=0;
+        const auto result=SurfaceDeterminationAlgorithm::BuildSurface(source,params,256U*1024U*1024U,
+            []{return false;},{});
+        checks.Get(result.status==SurfaceResultStatus::Succeeded && result.points.size()==64 &&
+            result.triangleIndices.size()==294,"anisotropic analytic plane retains all quality-test points/faces");
+        if(result.status!=SurfaceResultStatus::Succeeded)continue;
+        const bool flipRisk=fixture==0;
+        checks.Get(std::all_of(result.points.begin(),result.points.end(),[flipRisk](const auto&p){
+            return GetSurfaceFlag(p.flags,SurfacePointFlags::TriangleFlipRisk)==flipRisk &&
+                !GetSurfaceFlag(p.flags,SurfacePointFlags::SharpCorner) &&
+                (!flipRisk || GetSurfaceFlag(p.flags,SurfacePointFlags::SeedRetained)) &&
+                p.positionModel==p.seedPositionModel && p.offsetFromSeed==0;
+        }),"degenerate risk and nonfinite normalization preserve their separate geometric predicates");
+        const auto point=std::find_if(result.points.begin(),result.points.end(),[spacing](const auto&p){
+            return p.positionModel[1]>2*spacing[1] && p.positionModel[1]<5*spacing[1] &&
+                p.positionModel[2]>2*spacing[2] && p.positionModel[2]<5*spacing[2];
+        });
+        checks.Get(point!=result.points.end(),"quality plane has an independent interior sample");
+        if(point==result.points.end())continue;
+        const std::array<float,3> normal=fixture==2?std::array<float,3>{0,0,1}:std::array<float,3>{-1,0,0};
+        checks.Get(point->normalModel==normal &&
+            point->seedNormalModel==Point3{normal[0],normal[1],normal[2]},
+            "post-sampling recovery uses the final gradient normal; overflow retains the seed-normal fallback");
+        const auto diagnostic=SurfaceDeterminationAlgorithm::GetPointDiagnostic(source,result.resolvedParams,*point);
+        checks.Get(diagnostic.isAvailable && GetPointFields(diagnostic.point)==GetPointFields(*point),
+                   "diagnostic retains all published geometric quality fields");
+    }
+}
+
 void TestManyComponents(Checks &checks)
 {
     const auto source = BuildSnapshot({34,34,34}, {1,1,1}, {0,0,0},
@@ -527,7 +565,7 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<unsigned long long>(checks,VTK_UNSIGNED_LONG_LONG);
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
-    TestPointSupportRules(checks); TestManyComponents(checks);
+    TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);
