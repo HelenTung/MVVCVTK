@@ -11,6 +11,28 @@ void SurfaceModuleAnchor() {}
 } // namespace
 
 SurfaceCudaCompute::~SurfaceCudaCompute() noexcept { Reset(); }
+std::uint64_t SurfaceCudaCompute::GetBackendStamp() noexcept {
+#ifdef MVVCVTK_SURFACE_CUDA_ENABLED
+    try {
+        HMODULE owner=nullptr;wchar_t path[MAX_PATH]{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&SurfaceModuleAnchor),&owner))return 0;
+        const auto length=GetModuleFileNameW(owner,path,MAX_PATH);
+        if(!length || length>=MAX_PATH)return 0;
+        const auto dll=std::filesystem::path(path).parent_path()/L"SurfaceCudaBackend.dll";
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if(!GetFileAttributesExW(dll.c_str(),GetFileExInfoStandard,&data) || (data.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))return 0;
+        std::uint64_t stamp=1469598103934665603ULL;
+        for(const auto c:dll.native()){stamp^=std::uint64_t(c);stamp*=1099511628211ULL;}
+        for(const auto value:{data.nFileSizeHigh,data.nFileSizeLow,data.ftLastWriteTime.dwHighDateTime,data.ftLastWriteTime.dwLowDateTime}){
+            stamp^=value;stamp*=1099511628211ULL;
+        }
+        return stamp?stamp:1;
+    } catch (...) {return 0;}
+#else
+    return 0;
+#endif
+}
 void SurfaceCudaCompute::Reset() noexcept {
     if (m_session && m_close)
         m_close(m_session);

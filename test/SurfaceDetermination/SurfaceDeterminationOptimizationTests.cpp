@@ -611,6 +611,36 @@ void TestBackendCostChoice(Checks &checks)
     checks.Get(!GetSurfaceBackendChoice(probe).hasEstimate,"inconsistent elapsed/upload timings never produce a negative compute estimate");
 }
 
+void TestBackendCalibrationCache(Checks &checks)
+{
+    using Cache=SurfaceBackendCalibrationCache;
+    Cache cache;
+    const Cache::Clock::time_point now{};
+    const SurfaceBackendCalibration calibration{.05,.05,40};
+    Cache::Key key{};key[0]=17;
+    const auto fast=GetSurfaceBackendAdmission(calibration,100,2,1000,1000);
+    const auto slow=GetSurfaceBackendAdmission(calibration,100,100,1000,1000);
+    checks.Get(fast.hasEstimate && !fast.keepGpu && slow.hasEstimate && slow.keepGpu,
+        "prior cost can only skip startup for a clearly faster measured CPU; slow CPU still probes actual GPU");
+    cache.Store(key,calibration,now);
+    auto different=key;++different[8];
+    checks.Get(!cache.Take(different,now),"changed actual CPU plan cannot reuse another calibration class");
+    checks.Get(bool(cache.Take(key,now)) && !cache.Take(key,now),"prior cost is consumed once to force periodic actual GPU reevaluation");
+    cache.Store(key,calibration,now);
+    checks.Get(!cache.Take(key,now+std::chrono::minutes(2)),"expired prior cost cannot skip GPU initialization indefinitely");
+    cache.Store(key,calibration,now);
+    checks.Get(!cache.Take(key,now-std::chrono::seconds(1)),"clock reversal invalidates a cost record");
+    for(std::uint64_t value=0;value<5;++value){key[0]=value;cache.Store(key,calibration,now);}
+    key[0]=0;checks.Get(!cache.Take(key,now),"fifth calibration evicts a bounded slot instead of growing storage");
+    key[0]=99;cache.Store(key,calibration,now);
+    std::atomic<unsigned> hits{0};
+    auto first=std::async(std::launch::async,[&]{if(cache.Take(key,now))++hits;});
+    auto second=std::async(std::launch::async,[&]{if(cache.Take(key,now))++hits;});
+    first.get();second.get();
+    checks.Get(hits.load()==1,"concurrent requests consume the same cost record at most once");
+    std::cout<<"Surface calibration cache bytes="<<sizeof(Cache)<<'\n';
+}
+
 void TestGpuFinalizerOwnership(Checks &checks)
 {
     std::vector<SurfaceCudaSample> samples(surfaceCudaBatchCapacity);
@@ -873,6 +903,7 @@ int GetSurfaceOptimizationFailCount()
     TestSingleRoiDistance(checks); TestDiagonalRoiSeedClip(checks); TestSparseTopology(checks);
     TestGpuFinalizerOwnership(checks);
     TestBackendCostChoice(checks);
+    TestBackendCalibrationCache(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);

@@ -69,6 +69,10 @@ struct SurfaceAlgorithmResult final {
     bool adaptiveKeptGpu = false, adaptiveEstimateAvailable = false;
     double adaptiveCpuPrefixMs = 0, adaptiveGpuPilotMs = 0, adaptiveStartupMs = 0;
     double adaptiveCpuEstimateMs = 0, adaptiveGpuEstimateMs = 0;
+    unsigned adaptiveCpuPrefixThreads = 0;
+    // hit 表示查得成本记录；是否实际避免初始化由 skippedStartup 独立说明。
+    bool adaptiveCalibrationHit = false, adaptiveSkippedStartup = false;
+    std::size_t adaptiveCalibrationBytes = 0;
     SurfaceCudaProfile cudaProfile;
     unsigned cpuThreadCount = 0;
     unsigned availablePhysicalCores = 0;

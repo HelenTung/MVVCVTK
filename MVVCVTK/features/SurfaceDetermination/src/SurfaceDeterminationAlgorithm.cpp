@@ -1994,6 +1994,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                         const SurfaceAlgorithmInputs &inputs)
 {
     SurfaceAlgorithmResult result;
+    std::optional<std::pair<SurfaceBackendCalibrationCache::Key,SurfaceBackendCalibration>> completedCalibration;
     char profilingSetting[8]{};
     result.cudaProfilingRequested =
         GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",profilingSetting,sizeof(profilingSetting))==1 &&
@@ -2253,6 +2254,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                 };
                 bool adaptive=false;
                 std::size_t cpuPrefix=0,adaptiveVolumeBytes=0;
+                std::optional<SurfaceBackendCalibrationCache::Key> calibrationKey;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
                 unsigned adaptiveFault=0;
                 char adaptiveFaultSetting[4]{};
@@ -2296,7 +2298,54 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             result.adaptiveCpuPrefixMs+=elapsed;result.adaptiveCpuPrefixPoints+=cpuPrefix;
                             if(result.cudaProfilingRequested)totals.cpuSamplingMs+=elapsed;
                             totals.cpuThreads=std::max(totals.cpuThreads,threads);
+                            result.adaptiveCpuPrefixThreads=threads;
                             if(cancelled.load())throw SurfaceCancelled{};
+                            char cacheSetting[8]{};
+                            bool cacheAllowed=!(GetEnvironmentVariableA("MVVCVTK_SURFACE_COST_CACHE",cacheSetting,sizeof(cacheSetting))==1 && cacheSetting[0]=='0');
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                            for(const auto name:{"MVVCVTK_SURFACE_CUDA_TEST_FAULT","MVVCVTK_SURFACE_FINALIZER_TEST_FAULT","MVVCVTK_SURFACE_COST_TEST_FAULT"}){
+                                char fault[8]{};
+                                if(GetEnvironmentVariableA(name,fault,sizeof(fault))==1 && fault[0]!='0')cacheAllowed=false;
+                            }
+#endif
+                            const auto deployment=cacheAllowed?SurfaceCudaCompute::GetBackendStamp():0;
+                            if(deployment){
+                                SurfaceBackendCalibrationCache::Key key{};
+                                std::memcpy(&key[0],result.sourceRevision.entityId.bytes.data(),8);
+                                std::memcpy(&key[1],result.sourceRevision.entityId.bytes.data()+8,8);
+                                key[2]=result.sourceRevision.generation;key[3]=result.parameterFingerprint;
+                                key[4]=1469598103934665603ULL;
+                                AddFingerprint(key[4],std::uint64_t(volume.scalars.vtkType));
+                                AddFingerprint(key[4],volume.validity?1:0);AddFingerprint(key[4],volume.voxelCount);
+                                for(const auto value:volume.geometry.extent)AddFingerprint(key[4],std::uint64_t(value));
+                                for(const auto value:volume.geometry.origin){std::uint64_t bits=0;std::memcpy(&bits,&value,8);AddFingerprint(key[4],bits);}
+                                for(const auto value:volume.geometry.spacing){std::uint64_t bits=0;std::memcpy(&bits,&value,8);AddFingerprint(key[4],bits);}
+                                for(const auto value:volume.geometry.direction){std::uint64_t bits=0;std::memcpy(&bits,&value,8);AddFingerprint(key[4],bits);}
+                                for(const auto value:volume.geometry.modelToIndex){std::uint64_t bits=0;std::memcpy(&bits,&value,8);AddFingerprint(key[4],bits);}
+                                GROUP_AFFINITY affinity{};DWORD_PTR processMask=0,systemMask=0;
+                                if(GetThreadGroupAffinity(GetCurrentThread(),&affinity)){
+                                    AddFingerprint(key[4],affinity.Mask);AddFingerprint(key[4],affinity.Group);
+                                }
+                                if(GetProcessAffinityMask(GetCurrentProcess(),&processMask,&systemMask))AddFingerprint(key[4],processMask);
+                                key[5]=deployment;key[6]=points.size();key[7]=maxWorkingBytes.GetBound(SIZE_MAX);
+                                key[8]=std::uint64_t(cpuPlan.threadLimit)|(std::uint64_t(threads)<<16)|
+                                    (std::uint64_t(cpuPlan.physicalCores)<<32)|(std::uint64_t(cpuPlan.logicalThreads)<<48);
+                                char finalize[8]{},reuse[8]{};
+                                const bool finalizeOn=MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL &&
+                                    !(GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL",finalize,sizeof(finalize))==1 && finalize[0]=='0');
+                                const bool reuseOn=!(GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_SLAB_REUSE",reuse,sizeof(reuse))==1 && reuse[0]=='0');
+                                key[9]=std::uint64_t(finalizeOn)|(std::uint64_t(reuseOn)<<1)|(std::uint64_t(result.cudaProfilingRequested)<<2);
+                                calibrationKey=key;result.adaptiveCalibrationBytes=sizeof(SurfaceBackendCalibrationCache);
+                                const auto prior=SurfaceBackendCalibrationCache::Get().Take(key,std::chrono::steady_clock::now());
+                                if(prior){
+                                    const auto admission=GetSurfaceBackendAdmission(*prior,cpuPrefix,elapsed,points.size()-cpuPrefix,adaptiveVolumeBytes);
+                                    result.adaptiveCalibrationHit=true;
+                                    if(admission.hasEstimate && !admission.keepGpu){
+                                        result.adaptiveSkippedStartup=true;result.adaptiveEstimateAvailable=true;
+                                        result.adaptiveCpuEstimateMs=admission.cpuTotalMs;result.adaptiveGpuEstimateMs=admission.gpuTotalMs;
+                                    }
+                                }
+                            }
                         }
                         const auto adaptiveStart=std::chrono::steady_clock::now();
                         const auto started=profileStart();
@@ -2306,7 +2355,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             std::fprintf(stderr,"Surface cost startup refusal fault entered.\n");startAllowed=false;
                         }
 #endif
-                        const bool active=cpuPrefix<points.size() && startAllowed && cuda.Start(input,releasedTriangleBytes,
+                        const bool active=cpuPrefix<points.size() && !result.adaptiveSkippedStartup && startAllowed && cuda.Start(input,releasedTriangleBytes,
                             maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES));
                         profileRecord(result.cudaStartMs,started);
                         if(adaptive)result.adaptiveStartupMs+=std::chrono::duration<double,std::milli>(
@@ -2458,9 +2507,14 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                     traffic={};
                                 }
 #endif
-                                const auto choice=GetSurfaceBackendChoice({cpuPrefix,cursor-cpuPrefix,points.size()-cursor,
+                                const SurfaceBackendProbe probe{cpuPrefix,cursor-cpuPrefix,points.size()-cursor,
                                     adaptiveVolumeBytes,traffic.slabUploadBytes,result.adaptiveCpuPrefixMs,
-                                    elapsed,traffic.slabUploadHostMs,result.adaptiveStartupMs});
+                                    elapsed,traffic.slabUploadHostMs,result.adaptiveStartupMs};
+                                const auto choice=GetSurfaceBackendChoice(probe);
+                                if(calibrationKey){
+                                    const auto calibration=GetSurfaceBackendCalibration(probe);
+                                    if(calibration)completedCalibration=std::make_pair(*calibrationKey,*calibration);
+                                }
                                 result.adaptiveGpuPilotPoints+=cursor-cpuPrefix;result.adaptiveGpuPilotMs+=elapsed;
                                 result.adaptiveEstimateAvailable=choice.hasEstimate;
                                 result.adaptiveCpuEstimateMs=choice.cpuTotalMs;result.adaptiveGpuEstimateMs=choice.gpuTotalMs;
@@ -2597,6 +2651,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     result.message = "Surface determination succeeded: points=" + std::to_string(result.points.size()) +
                      ", accepted=" + std::to_string(result.acceptedPointCount) + ".";
     SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation, 1);
+    if(completedCalibration)SurfaceBackendCalibrationCache::Get().Store(completedCalibration->first,
+        completedCalibration->second,std::chrono::steady_clock::now());
     return result;
 }
 

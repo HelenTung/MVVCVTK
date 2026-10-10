@@ -8,6 +8,8 @@ class SurfaceCudaCompute final {
     SurfaceCudaCompute(const SurfaceCudaCompute &) = delete;
     SurfaceCudaCompute &operator=(const SurfaceCudaCompute &) = delete;
     bool Start(const SurfaceCudaVolume &volume, std::size_t releasedBytes, std::size_t deviceLimit);
+    // 只读部署代际提示，不加载 DLL；不代表设备/驱动可用性或内容摘要。
+    static std::uint64_t GetBackendStamp() noexcept;
     bool Read(const double *points, std::size_t count, SurfaceCudaSample *output);
     // 缓冲由 session 所有，只在创建线程访问；提交后索引不可再写，收集后样本可读到下次 Prepare。
     double *Prepare(unsigned slot);
