@@ -208,7 +208,8 @@ bool SetSlab(Session &s, int first, int last) {
     const auto overlapOffset=overlapCount?std::size_t(overlapFirst-first):0;
     s.cachedCount = 0;
     if (overlapCount && !MoveSlabOverlap(s,std::size_t(overlapFirst-oldFirst),overlapOffset,overlapCount)) return false;
-    const auto uploadStarted = s.profile.requested ? ProfileClock::now() : ProfileClock::time_point{};
+    // 轻量 host 传输计数也供成本选择读取，不申请 CUDA timing events。
+    const auto uploadStarted = ProfileClock::now();
     const auto upload=[&](std::size_t begin,std::size_t planes) {
         if (!planes) return true;
         const auto offset=std::size_t(std::int64_t(first)-s.source.extent[4])+begin;
@@ -219,12 +220,10 @@ bool SetSlab(Session &s, int first, int last) {
     };
     const auto suffix=overlapOffset+overlapCount;
     if (!upload(0,overlapOffset) || !upload(suffix,std::size_t(count)-suffix)) return false;
-    if (s.profile.requested) {
-        s.profile.slabUploadHostMs += ProfileElapsed(uploadStarted);
-        ++s.profile.slabUploadCount;
-        s.profile.slabUploadBytes += (std::uint64_t(count)-overlapCount) *
-            (s.planeBytes + (s.mask ? s.planeCount : 0));
-    }
+    s.profile.slabUploadHostMs += ProfileElapsed(uploadStarted);
+    ++s.profile.slabUploadCount;
+    s.profile.slabUploadBytes += (std::uint64_t(count)-overlapCount) *
+        (s.planeBytes + (s.mask ? s.planeCount : 0));
     s.cachedFirst = first; s.cachedCount = count;
     return true;
 }

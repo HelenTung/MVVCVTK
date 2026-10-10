@@ -11,6 +11,7 @@ set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceCudaCompute.h
     src/SurfaceCudaCompute.cpp
     src/SurfaceGpuFinalizer.h
+    src/SurfaceBackendCost.h
     src/SurfaceRecipeCodec.cpp
     src/SurfaceContracts.h
     src/SurfaceContracts.cpp
@@ -62,10 +63,12 @@ target_link_libraries(surface_determination PRIVATE Psapi)
 option(MVVCVTK_SURFACE_CPU_PARALLEL "Plan request-local CPU sampling from available cores, with headroom" ON)
 option(MVVCVTK_SURFACE_COMPONENT_PARALLEL "Dynamically schedule bounded Surface components within the shared CPU quota" ON)
 option(MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL "Overlap bounded CPU sample finalization with the Surface CUDA owner" OFF)
+option(MVVCVTK_SURFACE_ADAPTIVE_BACKEND "Experiment with bounded CPU/GPU cost probes and reuse computed records" OFF)
 target_compile_definitions(surface_determination PRIVATE
     NOMINMAX WIN32_LEAN_AND_MEAN MVVCVTK_SURFACE_CPU_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_CPU_PARALLEL}>
     MVVCVTK_SURFACE_COMPONENT_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_COMPONENT_PARALLEL}>
-    MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL}>)
+    MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_GPU_FINALIZE_PARALLEL}>
+    MVVCVTK_SURFACE_ADAPTIVE_BACKEND=$<BOOL:${MVVCVTK_SURFACE_ADAPTIVE_BACKEND}>)
 
 set(MVVCVTK_SURFACE_SEED_CACHE_MIB 16 CACHE STRING "Bound for optional seed classification workspace in MiB; 0 disables")
 if(NOT MVVCVTK_SURFACE_SEED_CACHE_MIB MATCHES "^(0|[1-9][0-9]*)$")

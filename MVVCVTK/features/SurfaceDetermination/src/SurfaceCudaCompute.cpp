@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string_view>
 #include <cfenv>
+#include <xmmintrin.h>
 
 namespace {
 void SurfaceModuleAnchor() {}
@@ -31,7 +32,7 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
                                std::size_t deviceLimit) {
     Reset();
 #ifdef MVVCVTK_SURFACE_CUDA_ENABLED
-    if (std::fegetround() != FE_TONEAREST)
+    if (std::fegetround() != FE_TONEAREST || (_mm_getcsr() & 0xffc0U) != 0x1f80U)
         return false;
     char backend[16]{};
     GetEnvironmentVariableA("MVVCVTK_SURFACE_COMPUTE_BACKEND", backend, sizeof(backend));

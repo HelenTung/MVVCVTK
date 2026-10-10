@@ -201,6 +201,15 @@ int main(int argc, char **argv) {
              << ",\"cudaCollectMs\":" << result.cudaCollectMs
              << ",\"cudaFinalizeMs\":" << result.cudaFinalizeMs
              << ",\"cudaPipelineMs\":" << result.cudaPipelineMs
+             << ",\"adaptiveCpuPrefixPoints\":" << result.adaptiveCpuPrefixPoints
+             << ",\"adaptiveGpuPilotPoints\":" << result.adaptiveGpuPilotPoints
+             << ",\"adaptiveKeptGpu\":" << result.adaptiveKeptGpu
+             << ",\"adaptiveEstimateAvailable\":" << result.adaptiveEstimateAvailable
+             << ",\"adaptiveCpuPrefixMs\":" << result.adaptiveCpuPrefixMs
+             << ",\"adaptiveGpuPilotMs\":" << result.adaptiveGpuPilotMs
+             << ",\"adaptiveStartupMs\":" << result.adaptiveStartupMs
+             << ",\"adaptiveCpuEstimateMs\":" << result.adaptiveCpuEstimateMs
+             << ",\"adaptiveGpuEstimateMs\":" << result.adaptiveGpuEstimateMs
              << ",\"cudaCloseMs\":" << result.cudaCloseMs
              << ",\"cpuSamplingMs\":" << result.cpuSamplingMs
              << ",\"cudaProfileEventsAvailable\":" << result.cudaProfile.eventsAvailable

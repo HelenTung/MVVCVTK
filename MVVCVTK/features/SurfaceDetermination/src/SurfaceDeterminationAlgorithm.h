@@ -65,6 +65,10 @@ struct SurfaceAlgorithmResult final {
     double cudaFinalizeMs = 0, cudaCloseMs = 0, cpuSamplingMs = 0;
     // GPU 分支的 wall 时间，包含后处理排空；故障时也包含该分支的 CPU 余段回退。
     double cudaPipelineMs = 0;
+    std::size_t adaptiveCpuPrefixPoints = 0, adaptiveGpuPilotPoints = 0;
+    bool adaptiveKeptGpu = false, adaptiveEstimateAvailable = false;
+    double adaptiveCpuPrefixMs = 0, adaptiveGpuPilotMs = 0, adaptiveStartupMs = 0;
+    double adaptiveCpuEstimateMs = 0, adaptiveGpuEstimateMs = 0;
     SurfaceCudaProfile cudaProfile;
     unsigned cpuThreadCount = 0;
     unsigned availablePhysicalCores = 0;

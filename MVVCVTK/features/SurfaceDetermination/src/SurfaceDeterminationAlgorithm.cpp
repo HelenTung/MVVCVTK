@@ -5,6 +5,7 @@
 #include "SurfaceEdgeTopology.h"
 #include "SurfaceCudaCompute.h"
 #include "SurfaceGpuFinalizer.h"
+#include "SurfaceBackendCost.h"
 #include <chrono>
 #include "Data/DataPayloads.h"
 
@@ -2250,6 +2251,14 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                         records[i].interfaceIndex=static_cast<std::uint32_t>(pairIndex);
                     }
                 };
+                bool adaptive=false;
+                std::size_t cpuPrefix=0,adaptiveVolumeBytes=0;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                unsigned adaptiveFault=0;
+                char adaptiveFaultSetting[4]{};
+                if(GetEnvironmentVariableA("MVVCVTK_SURFACE_COST_TEST_FAULT",adaptiveFaultSetting,sizeof(adaptiveFaultSetting))==1 &&
+                    adaptiveFaultSetting[0]>='1' && adaptiveFaultSetting[0]<='4')adaptiveFault=unsigned(adaptiveFaultSetting[0]-'0');
+#endif
 #ifdef MVVCVTK_SURFACE_CUDA_ENABLED
                 if (!ownsCpuQuota && largest != selected.end() && selectedIndex == *largest &&
                     (volume.scalars.vtkType == VTK_FLOAT || volume.scalars.vtkType == VTK_DOUBLE)) {
@@ -2269,10 +2278,39 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     }
                     if (points.size() >= surfaceCudaBatchCapacity && releasedTriangleBytes > surfaceCudaHostBufferBytes &&
                         !GetCancelled(getCancelled)) {
+                        char adaptiveSetting[8]{},backendSetting[16]{};
+                        GetEnvironmentVariableA("MVVCVTK_SURFACE_COMPUTE_BACKEND",backendSetting,sizeof(backendSetting));
+                        adaptive=MVVCVTK_SURFACE_ADAPTIVE_BACKEND && std::string(backendSetting)!="cpu" &&
+                            std::fegetround()==FE_TONEAREST && (_mm_getcsr()&0xffc0U)==0x1f80U &&
+                            releasedTriangleBytes>=MVVCVTK_SURFACE_CUDA_DEVICE_BYTES &&
+                            releasedTriangleBytes>=MVVCVTK_SURFACE_CUDA_HOST_BYTES &&
+                            GetProduct(volume.voxelCount,std::size_t(input.scalarBytes)+(volume.validity?1:0),adaptiveVolumeBytes) &&
+                            !(GetEnvironmentVariableA("MVVCVTK_SURFACE_ADAPTIVE_BACKEND",adaptiveSetting,sizeof(adaptiveSetting))==1 && adaptiveSetting[0]=='0');
+                        if(adaptive){
+                            // 使用最终 records 作为输出；前缀规模由实际核心计划和既有批次容量确定。
+                            cpuPrefix=std::min(points.size(),std::max(surfaceCudaBatchCapacity,
+                                std::min(points.size()/16,std::size_t(cpuPlan.threadLimit)*surfaceCudaBatchCapacity)));
+                            const auto probeStart=std::chrono::steady_clock::now();
+                            const auto threads=RunPointSampling(cpuPrefix,cpuPlan.threadLimit,getCancelled,sampleCpu);
+                            const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-probeStart).count();
+                            result.adaptiveCpuPrefixMs+=elapsed;result.adaptiveCpuPrefixPoints+=cpuPrefix;
+                            if(result.cudaProfilingRequested)totals.cpuSamplingMs+=elapsed;
+                            totals.cpuThreads=std::max(totals.cpuThreads,threads);
+                            if(cancelled.load())throw SurfaceCancelled{};
+                        }
+                        const auto adaptiveStart=std::chrono::steady_clock::now();
                         const auto started=profileStart();
-                        const bool active=cuda.Start(input,releasedTriangleBytes,
+                        bool startAllowed=true;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                        if(adaptive && adaptiveFault==3){
+                            std::fprintf(stderr,"Surface cost startup refusal fault entered.\n");startAllowed=false;
+                        }
+#endif
+                        const bool active=cpuPrefix<points.size() && startAllowed && cuda.Start(input,releasedTriangleBytes,
                             maxWorkingBytes.GetBound(MVVCVTK_SURFACE_CUDA_DEVICE_BYTES));
                         profileRecord(result.cudaStartMs,started);
+                        if(adaptive)result.adaptiveStartupMs+=std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now()-adaptiveStart).count();
                         if (active) {
                             result.cudaDeviceBytes = cuda.GetDeviceBytes();
                             result.cudaHostBufferBytes = surfaceCudaHostBufferBytes;
@@ -2282,6 +2320,9 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
 #endif
                 if (cuda.GetActive()) {
                     const auto pipelineStart=profileStart();
+                    const auto adaptiveGpuStarted=std::chrono::steady_clock::now();
+                    bool deciding=adaptive;
+                    unsigned pilotSubmitted=0;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
                     char faultSetting[4]{};
                     const unsigned finalizerFault=GetEnvironmentVariableA("MVVCVTK_SURFACE_FINALIZER_TEST_FAULT",
@@ -2292,12 +2333,12 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     struct PendingBatch final { std::size_t begin=0; SurfaceCudaTicket ticket; };
                     std::array<PendingBatch,surfaceCudaSlotCount> pending;
                     unsigned head=0, queued=0;
-                    std::size_t cursor=0;
+                    std::size_t cursor=cpuPrefix;
                     bool healthy=true;
                     const auto finalize=[&](std::size_t begin,std::size_t count,const SurfaceCudaSample *samples) {
                         SurfaceGpuFinalizedBatch finalized;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
-                        if(begin==0 && std::this_thread::get_id()!=cudaOwner && finalizerFault>=2) {
+                        if(begin==cpuPrefix && std::this_thread::get_id()!=cudaOwner && finalizerFault>=2) {
                             std::fprintf(stderr,"Surface finalizer worker fault %u entered.\n",finalizerFault);
                             if(finalizerFault==2){cancelled.store(true);return finalized;}
                             throw std::runtime_error("Surface finalizer worker failure probe.");
@@ -2372,7 +2413,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     while (cursor<points.size() || queued) {
                         if (GetCancelled(getCancelled)) {cancelled.store(true);break;}
                         // 两批可同时入队；CPU 回填前一批时 GPU 继续处理后一批。
-                        while (healthy && cursor<points.size() && queued<surfaceCudaSlotCount) {
+                        while (healthy && cursor<points.size() && queued<surfaceCudaSlotCount &&
+                               (!deciding || pilotSubmitted<surfaceCudaSlotCount)) {
                             const auto slot=(head+queued)%surfaceCudaSlotCount;
                             const auto indexStart=profileStart();
                             auto *indices=cuda.Prepare(slot);
@@ -2389,6 +2431,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             profileRecord(result.cudaSubmitMs,submitStart);
                             if (!submitted) {healthy=false;break;}
                             cursor+=batch.ticket.count; ++queued; ++result.cudaBatchCount;
+                            if(deciding)++pilotSubmitted;
                         }
                         if (queued) {
                             const auto &batch=pending[head];
@@ -2402,6 +2445,36 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                             } else mergeFinalized(finalize(batch.begin,batch.ticket.count,samples));
                             head=(head+1)%surfaceCudaSlotCount; --queued;
                             if (cancelled.load()) break;
+                            if(deciding && !queued && healthy){
+                                // 探测仅提交现有两个槽；先收完并排空回填，计时包含全部回传与CPU处理。
+                                if(finalizer)for(unsigned slot=0;slot<surfaceCudaSlotCount;++slot)
+                                    mergeFinalized(finalizer->Finish(slot));
+                                const auto elapsed=std::chrono::duration<double,std::milli>(
+                                    std::chrono::steady_clock::now()-adaptiveGpuStarted).count();
+                                auto traffic=cuda.GetProfile();
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                                if(adaptiveFault==4){
+                                    std::fprintf(stderr,"Surface cost missing traffic fault entered.\n");
+                                    traffic={};
+                                }
+#endif
+                                const auto choice=GetSurfaceBackendChoice({cpuPrefix,cursor-cpuPrefix,points.size()-cursor,
+                                    adaptiveVolumeBytes,traffic.slabUploadBytes,result.adaptiveCpuPrefixMs,
+                                    elapsed,traffic.slabUploadHostMs,result.adaptiveStartupMs});
+                                result.adaptiveGpuPilotPoints+=cursor-cpuPrefix;result.adaptiveGpuPilotMs+=elapsed;
+                                result.adaptiveEstimateAvailable=choice.hasEstimate;
+                                result.adaptiveCpuEstimateMs=choice.cpuTotalMs;result.adaptiveGpuEstimateMs=choice.gpuTotalMs;
+                                bool keep=choice.keepGpu;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+                                if(adaptiveFault==1 || adaptiveFault==2){
+                                    std::fprintf(stderr,"Surface cost decision fault %u entered.\n",adaptiveFault);
+                                    keep=adaptiveFault==2 && choice.hasEstimate;
+                                }
+#endif
+                                result.adaptiveKeptGpu=keep;
+                                deciding=false;
+                                if(!keep)healthy=false;
+                            }
                         } else if (!healthy) {
                             // 已提交批次收集完再关闭；未提交的连续余段保持原 CPU 计算。
                             finishFinalizers(); // 先释放共享配额，再申请 CPU 余段的点级配额。
@@ -2420,7 +2493,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                     const auto cpuStarted=profileStart();
                     unsigned threads=1;
                     if (ownsCpuQuota) sampleCpu(0,points.size());
-                    else threads=RunPointSampling(points.size(),cpuPlan.threadLimit,getCancelled,sampleCpu);
+                    else if(cpuPrefix<points.size())threads=RunPointSampling(points.size()-cpuPrefix,cpuPlan.threadLimit,getCancelled,
+                        [&](std::size_t begin,std::size_t end){sampleCpu(cpuPrefix+begin,cpuPrefix+end);});
                     profileRecord(totals.cpuSamplingMs,cpuStarted);
                     totals.cpuThreads=std::max(totals.cpuThreads,threads);
                 }

@@ -4,6 +4,7 @@
 #include "SurfaceSeedBuilder.h"
 #include "SurfaceEdgeTopology.h"
 #include "SurfaceGpuFinalizer.h"
+#include "SurfaceBackendCost.h"
 #include "SurfaceDeterminationTestSupport.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -587,6 +588,29 @@ void TestSparseTopology(Checks &checks)
         "early local topology estimates still select the independently largest component");
 }
 
+void TestBackendCostChoice(Checks &checks)
+{
+    SurfaceBackendProbe probe{100,100,1000,1000,100,100,10,5,40};
+    auto choice=GetSurfaceBackendChoice(probe);
+    checks.Get(choice.hasEstimate && choice.keepGpu && choice.cpuTotalMs==1150 && choice.gpuTotalMs==245,
+        "backend cost includes completed prefix/startup/pilot and separates first-window upload from point compute");
+    probe.cpuMs=1;choice=GetSurfaceBackendChoice(probe);
+    checks.Get(choice.hasEstimate && !choice.keepGpu && choice.cpuTotalMs==61 && choice.gpuTotalMs==146,
+        "fast CPU chooses a CPU tail even when GPU computation is correct");
+    probe.cpuMs=11.875;choice=GetSurfaceBackendChoice(probe);
+    checks.Get(choice.hasEstimate && !choice.keepGpu,"exact twenty-percent margin remains conservative");
+    probe.cpuMs=11.876;choice=GetSurfaceBackendChoice(probe);
+    checks.Get(choice.keepGpu,"measured benefit beyond the margin can retain GPU without a fixed thread-count rule");
+    for(const double invalid:{0.,-1.,std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity()}){
+        probe.cpuMs=invalid;
+        checks.Get(!GetSurfaceBackendChoice(probe).hasEstimate,"invalid CPU timing disables cost-based GPU continuation");
+    }
+    probe.cpuMs=100;probe.uploadedBytes=0;
+    checks.Get(!GetSurfaceBackendChoice(probe).hasEstimate,"missing optional traffic snapshot falls back without requiring GPU timing events");
+    probe.uploadedBytes=100;probe.gpuMs=4;
+    checks.Get(!GetSurfaceBackendChoice(probe).hasEstimate,"inconsistent elapsed/upload timings never produce a negative compute estimate");
+}
+
 void TestGpuFinalizerOwnership(Checks &checks)
 {
     std::vector<SurfaceCudaSample> samples(surfaceCudaBatchCapacity);
@@ -848,6 +872,7 @@ int GetSurfaceOptimizationFailCount()
     TestPointSupportRules(checks); TestManyComponents(checks); TestMaterialTriangleQuality(checks); TestComponentPool(checks);
     TestSingleRoiDistance(checks); TestDiagonalRoiSeedClip(checks); TestSparseTopology(checks);
     TestGpuFinalizerOwnership(checks);
+    TestBackendCostChoice(checks);
     TestSeedClassificationCache(checks);
     TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
     TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);

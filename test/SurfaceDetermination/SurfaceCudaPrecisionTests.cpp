@@ -8,6 +8,7 @@
 #include <future>
 #include <tuple>
 #include <string>
+#include <xmmintrin.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -60,6 +61,16 @@ int main() {
     constexpr auto hostCredit = std::max<std::size_t>(MVVCVTK_SURFACE_TEST_HOST_BYTES,
                                                      MVVCVTK_SURFACE_TEST_DEVICE_BYTES);
     constexpr auto testCredit = std::max<std::size_t>(1024U * 1024U * 1024U, hostCredit);
+    // 与 CPU worker 一致：FTZ/DAZ 或非默认 SSE 舍入不能进入默认设备浮点流程。
+    const auto originalControl=_mm_getcsr();
+    for(const auto control:{originalControl|0x8000U,originalControl|0x40U,
+                            (originalControl&~0x6000U)|0x4000U}){
+        _mm_setcsr(control);
+        SurfaceCudaCompute guarded;
+        const bool started=guarded.Start(v,testCredit,4U*1024U*1024U);
+        _mm_setcsr(originalControl);
+        if(started)return 1;
+    }
     SurfaceCudaCompute limited;
     if (limited.Start(v, MVVCVTK_SURFACE_TEST_HOST_BYTES - 1U, 4U * 1024U * 1024U))
         return 1;
@@ -72,6 +83,9 @@ int main() {
     std::array<SurfaceCudaSample, 2> samples;
     if (!compute.Read(points.data(), samples.size(), samples.data()))
         return 1;
+    const auto trafficWithoutEvents=compute.GetProfile();
+    if(trafficWithoutEvents.requested || trafficWithoutEvents.eventsAvailable ||
+       !trafficWithoutEvents.slabUploadBytes || trafficWithoutEvents.slabUploadHostMs<=0)return 1;
     for (const auto &sample : samples) {
         if (sample.support != 1 || sample.gradientValid != 1 || sample.gradient[0] != -2 ||
             sample.gradient[1] != .5 || sample.gradient[2] != 8 || sample.magnitude != std::sqrt(68.25))
