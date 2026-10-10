@@ -1993,12 +1993,19 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         SurfaceExecutionStats statistics;
         SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
                      0.1 + 0.8 * pairIndex / pairCount);
+        SurfaceSeedAudit seedAudit;
+        grid.audit = &seedAudit;
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
             grid, params.initialIsoValue, params.roi, halo,
             inputParams.seedBlockDepth, maxWorkingBytes - retained, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
             std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained);
+        result.seedClassificationCacheBytes = std::max(result.seedClassificationCacheBytes,
+                                                       seedAudit.classificationCacheBytes);
+        result.seedClassifiedNodeCount += seedAudit.classifiedNodeCount;
+        result.seedUniformCellCount += seedAudit.uniformCellCount;
+        result.seedCacheBudgetFallbackCount += seedAudit.budgetFallbackCount;
         result.execution.scannedCellCount += statistics.scannedCellCount;
         result.execution.skippedCellCount += statistics.skippedCellCount;
         result.execution.blockCount += statistics.blockCount;

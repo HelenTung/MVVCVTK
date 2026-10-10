@@ -49,6 +49,10 @@ struct SurfaceAlgorithmResult final {
     std::uint64_t truncatedPointCount = 0;
     std::uint32_t nonManifoldObjectCount = 0;
     // 仓内审计使用，不进入 generation/API/SPI。
+    std::size_t seedClassificationCacheBytes = 0;
+    std::uint64_t seedClassifiedNodeCount = 0;
+    std::uint64_t seedUniformCellCount = 0;
+    std::size_t seedCacheBudgetFallbackCount = 0;
     std::size_t cudaPointCount = 0;
     std::size_t cudaDeviceBytes = 0;
     std::size_t cudaHostBufferBytes = 0;

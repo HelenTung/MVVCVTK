@@ -11,6 +11,12 @@
 #include <map>
 #include <tuple>
 #include <type_traits>
+#include <cstring>
+#include <Windows.h>
+
+#ifndef MVVCVTK_SURFACE_SEED_CACHE_BYTES
+#define MVVCVTK_SURFACE_SEED_CACHE_BYTES 0
+#endif
 
 namespace
 {
@@ -43,20 +49,29 @@ std::size_t GetIndex(const SurfaceSeedGrid &grid, const int x, const int y, cons
                grid.dimensions[0] +
            (x - grid.extent[0]);
 }
-bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const WorkLimit budget,
-               SurfaceExecutionStats &stats)
+std::optional<std::size_t> GetWorkingEstimate(const std::size_t pointCount,
+                                            const std::size_t triangleCount,
+                                            const std::size_t extraBytes = 0)
 {
     // 同时覆盖 edge/clip 映射、组件、原/新网格、records 和发布载荷的保守估算。
     constexpr std::size_t perPoint = 8 * sizeof(Point) + 4 * sizeof(SurfacePointRecord) + 256;
     constexpr std::size_t perTriangle = 8 * sizeof(SurfaceSeedTriangle) + 256;
     constexpr std::size_t fixed = 64 * 1024;
-    if (pointCount > UINT32_MAX || pointCount > (SIZE_MAX - fixed) / perPoint ||
-        triangleCount > (SIZE_MAX - fixed - pointCount * perPoint) / perTriangle)
-        return false;
-    const auto estimate = fixed + pointCount * perPoint + triangleCount * perTriangle;
-    stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, estimate);
-    return estimate <= budget;
+    if (extraBytes > SIZE_MAX - fixed) return {};
+    const auto base = fixed + extraBytes;
+    if (pointCount > UINT32_MAX || pointCount > (SIZE_MAX - base) / perPoint ||
+        triangleCount > (SIZE_MAX - base - pointCount * perPoint) / perTriangle) return {};
+    return base + pointCount * perPoint + triangleCount * perTriangle;
 }
+bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const WorkLimit budget,
+               SurfaceExecutionStats &stats)
+{
+    const auto estimate = GetWorkingEstimate(pointCount, triangleCount);
+    if (!estimate) return false;
+    stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
+    return *estimate <= budget;
+}
+
 SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit budget,
                            const std::function<bool()> &cancelled, std::vector<Point> &points,
                            std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
@@ -178,6 +193,85 @@ SurfaceSeedStatus BuildSeedMesh(
         }
     }
     stats.processedExtent = range;
+    const auto nodeWidth = std::size_t(std::int64_t(range[1]) - range[0] + 1);
+    const auto nodeHeight = std::size_t(std::int64_t(range[3]) - range[2] + 1);
+    std::array<std::vector<unsigned char>, 2> nodeTags;
+    std::size_t cacheBytes = 0;
+    char setting[8]{};
+    const bool disabled = GetEnvironmentVariableA("MVVCVTK_SURFACE_SEED_CACHE", setting, sizeof(setting)) == 1 &&
+                          setting[0] == '0';
+    const auto cacheLimit = std::min<std::size_t>(MVVCVTK_SURFACE_SEED_CACHE_BYTES,
+                                                 grid.classificationCacheLimit);
+    if (grid.scalarValues && !disabled && nodeWidth <= SIZE_MAX / nodeHeight &&
+        nodeWidth * nodeHeight <= cacheLimit / 2) {
+        const auto bytes = nodeWidth * nodeHeight * 2;
+        const auto estimate = GetWorkingEstimate(0, 0, bytes);
+        if (estimate && *estimate <= budget) {
+            try {
+                if (grid.cacheAllocationCheckpoint) grid.cacheAllocationCheckpoint(bytes / 2);
+                nodeTags[0].resize(bytes / 2);
+                stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes,
+                                                      *GetWorkingEstimate(0, 0, bytes / 2));
+                if (grid.cacheAllocationCheckpoint) grid.cacheAllocationCheckpoint(bytes / 2);
+                nodeTags[1].resize(bytes / 2);
+                cacheBytes = bytes;
+                stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
+                if (grid.audit) grid.audit->classificationCacheBytes = bytes;
+            } catch (const std::bad_alloc &) {
+                std::vector<unsigned char>().swap(nodeTags[0]);
+                std::vector<unsigned char>().swap(nodeTags[1]);
+            }
+        }
+    }
+    const auto releaseCache = [&] {
+        std::vector<unsigned char>().swap(nodeTags[0]);
+        std::vector<unsigned char>().swap(nodeTags[1]);
+        cacheBytes = 0;
+    };
+    const auto meshBudget = [&](std::size_t pointCount, std::size_t triangleCount) {
+        if (cacheBytes) {
+            const auto estimate = GetWorkingEstimate(pointCount, triangleCount, cacheBytes);
+            if (estimate && *estimate <= budget) {
+                stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
+                return true;
+            }
+            // 可选缓存不能使原本可完成的网格因预算被拒绝；下一格恢复原读取窗口。
+            releaseCache();
+            if (grid.audit) ++grid.audit->budgetFallbackCount;
+        }
+        return GetBudget(pointCount, triangleCount, budget, stats);
+    };
+    const auto fillTags = [&](std::size_t layer, int z) {
+        std::size_t checked = 0, offset = 0;
+        for (std::int64_t y = range[2]; y <= range[3]; ++y) {
+            if (cancelled && cancelled()) return false;
+            for (std::int64_t x = range[0]; x <= range[1]; ++x, ++offset) {
+                if ((checked++ & 1023U) == 0 && cancelled && cancelled()) return false;
+                const auto index = GetIndex(grid, static_cast<int>(x), static_cast<int>(y), z);
+                const auto value = readScalar(index);
+                const bool invalid = (HasMask && !grid.validity[index]) || !std::isfinite(value);
+                nodeTags[layer][offset] = static_cast<unsigned char>((value >= iso ? 1U : 0U) |
+                                                                     (invalid ? 2U : 0U));
+                if (grid.audit) ++grid.audit->classifiedNodeCount;
+            }
+        }
+        return true;
+    };
+    const auto countUniformCells = [&](std::size_t count) {
+        while (count) {
+            const auto offset = stats.scannedCellCount & 1023U;
+            if (!offset) {
+                ++stats.scannedCellCount;
+                --count;
+                if (cancelled && cancelled()) return false;
+            } else {
+                const auto step = std::min<std::size_t>(count, 1024U - offset);
+                stats.scannedCellCount += step;
+                count -= step;
+            }
+        }
+        return true;
+    };
     {
         // 两层只做查找/插入，输出仍按原单元/MC 边顺序创建。
         std::array<std::map<std::uint64_t, std::uint32_t>, 2> edgeLayers;
@@ -191,34 +285,101 @@ SurfaceSeedStatus BuildSeedMesh(
                 const auto lowerLayer=std::size_t(zz-range[4])&1U;
                 const auto upperLayer=lowerLayer^1U;
                 edgeLayers[upperLayer].clear();
+                if (cacheBytes) {
+                    if (zz == range[4] && !fillTags(lowerLayer, static_cast<int>(zz)))
+                        return SurfaceSeedStatus::Cancelled;
+                    if (!fillTags(upperLayer, static_cast<int>(zz + 1)))
+                        return SurfaceSeedStatus::Cancelled;
+                }
                 for (std::int64_t yy = range[2]; yy < range[3]; ++yy)
                 {
                     if (cancelled && cancelled())
                         return SurfaceSeedStatus::Cancelled;
                     std::array<double,8> scalar{};
-                    unsigned invalidCorners=0, code=0;
+                    unsigned invalidCorners = 0, code = 0;
+                    bool scalarReady = false;
                     for (std::int64_t xx = range[0]; xx < range[1]; ++xx)
                     {
-                        if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
-                            return SurfaceSeedStatus::Cancelled;
-                        const bool shifted=xx!=range[0];
-                        if(shifted) {
-                            scalar[0]=scalar[1];scalar[3]=scalar[2];scalar[4]=scalar[5];scalar[7]=scalar[6];
-                            invalidCorners=((invalidCorners&0x22U)>>1)|((invalidCorners&0x44U)<<1);
-                            code=((code&0x22U)>>1)|((code&0x44U)<<1);
-                        }
-                        for (unsigned c = 0; c < 8; ++c)
-                        {
-                            if(shifted&&(c==0||c==3||c==4||c==7)) continue;
-                            const auto index = GetIndex(grid, static_cast<int>(xx) + corners[c][0],
-                                                        static_cast<int>(yy) + corners[c][1],
-                                                        static_cast<int>(zz) + corners[c][2]);
-                            scalar[c] = readScalar(index);
-                            const bool invalidMask = HasMask && !grid.validity[index];
-                            if(invalidMask||!std::isfinite(scalar[c]))
-                                invalidCorners|=1U<<c;
-                            if (scalar[c] >= iso)
-                                code |= 1U << c;
+                        const bool shifted = xx != range[0];
+                        if (cacheBytes) {
+                            const auto x = std::size_t(xx - range[0]);
+                            const auto y = std::size_t(yy - range[2]);
+                            const auto base = y * nodeWidth + x;
+                            // 每个 64 位 word 覆盖八节点；第九节点保证八个 cell 的右边界也同侧。
+                            constexpr auto runCells = sizeof(std::uint64_t);
+                            if (std::uint64_t(range[1] - xx) >= runCells) {
+                                const auto *a = nodeTags[lowerLayer].data() + base;
+                                const auto *b = a + nodeWidth;
+                                const auto *c = nodeTags[upperLayer].data() + base;
+                                const auto *d = c + nodeWidth;
+                                const auto tag = a[0];
+                                bool uniform = tag <= 1;
+                                const auto pattern = tag ? UINT64_C(0x0101010101010101) : UINT64_C(0);
+                                for (const auto *row : {a,b,c,d}) {
+                                    std::uint64_t word = 0;
+                                    std::memcpy(&word, row, sizeof(word));
+                                    uniform = uniform && word == pattern && row[runCells] == tag;
+                                }
+                                if (uniform) {
+                                    const auto before = stats.scannedCellCount;
+                                    if (!countUniformCells(runCells)) return SurfaceSeedStatus::Cancelled;
+                                    if (grid.audit) grid.audit->uniformCellCount += stats.scannedCellCount - before;
+                                    code = tag ? 255U : 0U;
+                                    invalidCorners = 0;
+                                    scalarReady = false;
+                                    xx += runCells - 1;
+                                    continue;
+                                }
+                            }
+                            if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
+                                return SurfaceSeedStatus::Cancelled;
+                            if (shifted) {
+                                invalidCorners = ((invalidCorners & 0x22U) >> 1) |
+                                                 ((invalidCorners & 0x44U) << 1);
+                                code = ((code & 0x22U) >> 1) | ((code & 0x44U) << 1);
+                            } else { invalidCorners = 0; code = 0; }
+                            for (unsigned corner = 0; corner < 8; ++corner) {
+                                if (shifted && (corner == 0 || corner == 3 || corner == 4 || corner == 7)) continue;
+                                const auto layer = corners[corner][2] ? upperLayer : lowerLayer;
+                                const auto tag = nodeTags[layer][base + corners[corner][1] * nodeWidth +
+                                                                corners[corner][0]];
+                                if (tag & 2U) invalidCorners |= 1U << corner;
+                                if (tag & 1U) code |= 1U << corner;
+                            }
+                            if (invalidCorners || cases[code].edges[0] < 0) {
+                                scalarReady = false;
+                                if (invalidCorners) ++stats.skippedCellCount;
+                                continue;
+                            }
+                            const bool reuse = scalarReady && shifted;
+                            if (reuse) {
+                                scalar[0]=scalar[1];scalar[3]=scalar[2];scalar[4]=scalar[5];scalar[7]=scalar[6];
+                            }
+                            for (unsigned corner = 0; corner < 8; ++corner) {
+                                if (reuse && (corner == 0 || corner == 3 || corner == 4 || corner == 7)) continue;
+                                scalar[corner] = readScalar(GetIndex(grid, static_cast<int>(xx) + corners[corner][0],
+                                    static_cast<int>(yy) + corners[corner][1], static_cast<int>(zz) + corners[corner][2]));
+                            }
+                            scalarReady = true;
+                        } else {
+                            if ((stats.scannedCellCount++ & 1023U) == 0 && cancelled && cancelled())
+                                return SurfaceSeedStatus::Cancelled;
+                            const bool reuse = scalarReady && shifted;
+                            if (reuse) {
+                                scalar[0]=scalar[1];scalar[3]=scalar[2];scalar[4]=scalar[5];scalar[7]=scalar[6];
+                                invalidCorners=((invalidCorners&0x22U)>>1)|((invalidCorners&0x44U)<<1);
+                                code=((code&0x22U)>>1)|((code&0x44U)<<1);
+                            } else { invalidCorners = 0; code = 0; }
+                            for (unsigned corner = 0; corner < 8; ++corner) {
+                                if (reuse && (corner == 0 || corner == 3 || corner == 4 || corner == 7)) continue;
+                                const auto index = GetIndex(grid, static_cast<int>(xx) + corners[corner][0],
+                                    static_cast<int>(yy) + corners[corner][1], static_cast<int>(zz) + corners[corner][2]);
+                                scalar[corner] = readScalar(index);
+                                if ((HasMask && !grid.validity[index]) || !std::isfinite(scalar[corner]))
+                                    invalidCorners |= 1U << corner;
+                                if (scalar[corner] >= iso) code |= 1U << corner;
+                            }
+                            scalarReady = true;
                         }
                         if (invalidCorners)
                         {
@@ -271,7 +432,7 @@ SurfaceSeedStatus BuildSeedMesh(
                                 auto found = edgeIds.find(key);
                                 if (found == edgeIds.end())
                                 {
-                                    if (!GetBudget(points.size() + 1, triangles.size() + 1, budget, stats))
+                                    if (!meshBudget(points.size() + 1, triangles.size() + 1))
                                         return SurfaceSeedStatus::BudgetExceeded;
                                     Point index{};
                                     for (unsigned d = 0; d < 3; ++d)
@@ -290,7 +451,7 @@ SurfaceSeedStatus BuildSeedMesh(
                                 triangle.vertices[1] != triangle.vertices[2] &&
                                 triangle.vertices[0] != triangle.vertices[2])
                             {
-                                if (!GetBudget(points.size(), triangles.size() + 1, budget, stats))
+                                if (!meshBudget(points.size(), triangles.size() + 1))
                                     return SurfaceSeedStatus::BudgetExceeded;
                                 triangles.push_back(triangle);
                             }
@@ -301,6 +462,7 @@ SurfaceSeedStatus BuildSeedMesh(
             }
         }
     }
+    releaseCache();
     if (roi)
     {
         const auto status = ClipMesh(planes, budget, cancelled, points, triangles, stats);
@@ -335,6 +497,7 @@ SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     const std::function<bool()> &cancelled, std::vector<Point> &points,
     std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
+    if (grid.audit) *grid.audit = {};
     for (unsigned axis = 0; axis < 3; ++axis) {
         if (grid.dimensions[axis] < 2 ||
             std::int64_t(grid.extent[2 * axis + 1]) - grid.extent[2 * axis] + 1 != grid.dimensions[axis])

@@ -311,6 +311,181 @@ void TestManyComponents(Checks &checks)
                "component construction cancellation publishes no partial grouped result");
 }
 
+
+struct SeedReadCounter final {
+    const std::vector<float> *values;
+    std::size_t reads = 0;
+    const std::array<double,2> *range = nullptr;
+};
+std::size_t cacheAllocationCount = 0, failCacheAllocation = 0;
+void CheckCacheAllocation(std::size_t)
+{
+    if (++cacheAllocationCount == failCacheAllocation) throw std::bad_alloc{};
+}
+
+template<class T>
+void TestSeedCacheTails(Checks &checks, int type)
+{
+    // 覆盖不足八格及八格快速段后的每种尾长，并跨精确阈值端点生成共享顶点。
+    for (int width = 9; width <= 25; ++width) {
+        std::vector<T> values(std::size_t(width) * 3 * 4);
+        for (int z = 0; z < 4; ++z) for (int y = 0; y < 3; ++y) for (int x = 0; x < width; ++x)
+            values[(z * 3 + y) * width + x] = static_cast<T>(x < 8 ? 0 : 4);
+        SurfaceSeedGrid grid;
+        grid.extent = {-5,width-6,-9,-7,11,14}; grid.dimensions = {width,3,4};
+        grid.indexToModel = grid.modelToIndex = {1,0,0,0,1,0,0,0,1};
+        grid.values = values.data(); grid.scalarType = type;
+        grid.readScalar = [](const void *data, std::size_t index) {
+            return double(static_cast<const T *>(data)[index]);
+        };
+        for (double iso : {1.5,4.0}) {
+            std::vector<Point3> baselinePoints, cachedPoints;
+            std::vector<SurfaceSeedTriangle> baselineTriangles, cachedTriangles;
+            SurfaceExecutionStats baselineStats, cachedStats;
+            grid.scalarValues = nullptr;
+            const auto baseline = SurfaceSeedBuilder::BuildMesh(grid,iso,{},0,2,WorkLimit{},
+                {},baselinePoints,baselineTriangles,baselineStats);
+            grid.scalarValues = values.data();
+            const auto cached = SurfaceSeedBuilder::BuildMesh(grid,iso,{},0,2,WorkLimit{},
+                {},cachedPoints,cachedTriangles,cachedStats);
+            checks.Get(baseline==cached && cached==SurfaceSeedStatus::Succeeded &&
+                cachedPoints==baselinePoints && cachedTriangles.size()==baselineTriangles.size() &&
+                std::equal(cachedTriangles.begin(),cachedTriangles.end(),baselineTriangles.begin(),
+                    [](const auto&a,const auto&b){return a.vertices==b.vertices;}) &&
+                cachedStats.scannedCellCount==baselineStats.scannedCellCount &&
+                cachedStats.skippedCellCount==baselineStats.skippedCellCount &&
+                cachedStats.blockCount==baselineStats.blockCount &&
+                cachedStats.processedExtent==baselineStats.processedExtent,
+                "typed cache run/tail and exact-threshold order: "+std::to_string(type));
+            const double expectedX = iso==4 ? 3.0 : 2.375;
+            checks.Get(cachedPoints.size()==12 && cachedTriangles.size()==12 &&
+                std::all_of(cachedPoints.begin(),cachedPoints.end(),
+                    [expectedX](const auto&p){return p[0]==expectedX;}),
+                "run/tail retains the independent analytic plane");
+        }
+    }
+}
+
+void TestSeedClassificationCache(Checks &checks)
+{
+    constexpr std::size_t width=74,height=7,depth=5;
+    std::vector<float> values(width*height*depth);
+    std::vector<unsigned char> mask(values.size(),1);
+    for(std::size_t z=0;z<depth;++z)for(std::size_t y=0;y<height;++y)for(std::size_t x=0;x<width;++x)
+        values[(z*height+y)*width+x]=x<36?0.F:4.F;
+    SurfaceSeedGrid grid;
+    grid.extent={-13,60,4,10,-7,-3};grid.dimensions={74,7,5};
+    grid.indexToModel=grid.modelToIndex={1,0,0,0,1,0,0,0,1};
+    grid.scalarType=VTK_FLOAT;
+    SeedReadCounter reader{&values};
+    grid.values=&reader;
+    grid.readScalar=[](const void *context,std::size_t index){
+        auto &reader=*const_cast<SeedReadCounter*>(static_cast<const SeedReadCounter*>(context));
+        ++reader.reads;const auto value=double((*reader.values)[index]);
+        return reader.range&&std::isfinite(value)?std::clamp(value,(*reader.range)[0],(*reader.range)[1]):value;
+    };
+    struct Mesh final {
+        SurfaceSeedStatus status;
+        std::vector<Point3> points;
+        std::vector<SurfaceSeedTriangle> triangles;
+        SurfaceExecutionStats stats;
+        SurfaceSeedAudit audit;
+        std::size_t callbackReads;
+    };
+    const auto build=[&](bool typed,std::size_t cacheLimit,WorkLimit budget,std::uint32_t block,
+                         std::uint64_t cancelCell=UINT64_MAX){
+        Mesh mesh;reader.reads=0;cacheAllocationCount=0;
+        grid.scalarValues=typed?values.data():nullptr;grid.classificationCacheLimit=cacheLimit;grid.audit=&mesh.audit;
+        mesh.status=SurfaceSeedBuilder::BuildMesh(grid,1.5,{},0,block,budget,
+            [&]{return mesh.stats.scannedCellCount>=cancelCell;},mesh.points,mesh.triangles,mesh.stats);
+        mesh.callbackReads=reader.reads;return mesh;
+    };
+    const auto equal=[&](const Mesh&a,const Mesh&b){
+        return a.status==b.status&&a.points==b.points&&a.triangles.size()==b.triangles.size()&&
+            std::equal(a.triangles.begin(),a.triangles.end(),b.triangles.begin(),
+                       [](const auto&a,const auto&b){return a.vertices==b.vertices;})&&
+            a.stats.scannedCellCount==b.stats.scannedCellCount&&a.stats.skippedCellCount==b.stats.skippedCellCount&&
+            a.stats.blockCount==b.stats.blockCount&&a.stats.processedExtent==b.stats.processedExtent;
+    };
+    const auto reference=build(false,SIZE_MAX,WorkLimit{},2);
+    const auto cached=build(true,SIZE_MAX,WorkLimit{},2);
+    checks.Get(equal(reference,cached)&&cached.callbackReads==0&&reference.callbackReads==7104,
+               "rolling tags preserve geometry/statistics and callback scan read count");
+    checks.Get(reference.points.size()==35&&reference.triangles.size()==48&&
+               std::all_of(cached.points.begin(),cached.points.end(),[](const auto&p){return p[0]==22.375;}),
+               "uniform-run transitions retain the independent interpolated plane");
+    const bool cacheEnabled=cached.audit.classificationCacheBytes!=0;
+    if(cacheEnabled)checks.Get(cached.audit.classificationCacheBytes==2*width*height&&
+        cached.audit.classifiedNodeCount==values.size()&&cached.audit.uniformCellCount>0,
+        "two bounded planes classify each node once and skip valid same-side cells");
+    checks.Get(equal(reference,build(true,0,WorkLimit{},2))&&
+               equal(reference,build(true,1,WorkLimit{},2)),
+               "disabled and insufficient cache limits preserve baseline output");
+    const auto fallback=build(true,SIZE_MAX,reference.stats.estimatedWorkingBytes,2);
+    checks.Get(equal(reference,fallback),"cache release keeps a mesh admitted at its original exact estimate");
+    if(cacheEnabled)checks.Get(fallback.audit.budgetFallbackCount==1,
+                              "exact mesh budget triggers one optional cache release");
+    if(cacheEnabled){
+        grid.cacheAllocationCheckpoint=CheckCacheAllocation;
+        for(std::size_t allocation=1;allocation<=2;++allocation){
+            failCacheAllocation=allocation;
+            const auto recovered=build(true,SIZE_MAX,WorkLimit{},2);
+            checks.Get(equal(reference,recovered)&&cacheAllocationCount==allocation&&
+                recovered.audit.classificationCacheBytes==0,"optional first/second cache allocation failure falls back");
+        }
+        failCacheAllocation=0;grid.cacheAllocationCheckpoint=nullptr;
+
+        // estimatedWorkingBytes 是历史峰值；第二次失败前实际存在过第一层，不能抹掉该开销。
+        std::vector<float> uniform(64*64*3,0.F);
+        SurfaceSeedGrid uniformGrid;
+        uniformGrid.extent={0,63,0,63,0,2};uniformGrid.dimensions={64,64,3};
+        uniformGrid.indexToModel=uniformGrid.modelToIndex={1,0,0,0,1,0,0,0,1};
+        uniformGrid.scalarValues=uniform.data();uniformGrid.scalarType=VTK_FLOAT;
+        uniformGrid.cacheAllocationCheckpoint=CheckCacheAllocation;
+        for(std::size_t allocation=1;allocation<=2;++allocation){
+            failCacheAllocation=allocation;cacheAllocationCount=0;
+            std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;
+            SurfaceExecutionStats stats;SurfaceSeedAudit audit;uniformGrid.audit=&audit;
+            const auto budget=std::size_t(64*1024+2*64*64);
+            const auto status=SurfaceSeedBuilder::BuildMesh(uniformGrid,1.5,{},0,2,budget,
+                {},points,triangles,stats);
+            checks.Get(status==SurfaceSeedStatus::NoSurface && audit.classificationCacheBytes==0 &&
+                stats.estimatedWorkingBytes==64*1024+(allocation==2?64*64:0) &&
+                stats.estimatedWorkingBytes<=budget,
+                "failed optional allocation retains only the actual historical workspace peak");
+        }
+        failCacheAllocation=0;
+    }
+    for(unsigned missing=0;missing<3;++missing){
+        const auto index=(1*height+3)*width+8;mask[index]=missing==0?0:1;grid.validity=mask.data();
+        const auto old=values[index];
+        if(missing==1)values[index]=std::numeric_limits<float>::quiet_NaN();
+        if(missing==2)values[index]=std::numeric_limits<float>::infinity();
+        checks.Get(equal(build(false,SIZE_MAX,WorkLimit{},3),build(true,SIZE_MAX,WorkLimit{},3)),
+                   "invalid/nonfinite tags cannot skip invalid cells or contaminate windows across block boundaries");
+        values[index]=old;mask[index]=1;
+    }
+    grid.validity=nullptr;
+    const std::array<double,2> range{1,3};grid.materialRange=&range;reader.range=&range;
+    const auto clamped=build(true,SIZE_MAX,WorkLimit{},1);
+    checks.Get(equal(build(false,SIZE_MAX,WorkLimit{},1),clamped)&&
+               std::all_of(clamped.points.begin(),clamped.points.end(),[](const auto&p){return p[0]==22.25;}),
+               "cache applies finite node clamp before classification and preserves interpolation");
+    grid.materialRange=nullptr;reader.range=nullptr;
+    const auto cancelled=build(true,SIZE_MAX,WorkLimit{},2,1025);
+    const auto oldCancelled=build(false,SIZE_MAX,WorkLimit{},2,1025);
+    checks.Get(equal(oldCancelled,cancelled)&&cancelled.status==SurfaceSeedStatus::Cancelled&&
+               cancelled.stats.scannedCellCount==1025,"uniform skipping preserves the exact virtual-cell checkpoint");
+    if(cacheEnabled){
+        Mesh stopped;grid.scalarValues=values.data();grid.classificationCacheLimit=SIZE_MAX;grid.audit=&stopped.audit;
+        unsigned calls=0;
+        stopped.status=SurfaceSeedBuilder::BuildMesh(grid,1.5,{},0,2,WorkLimit{},
+            [&]{return ++calls==2;},stopped.points,stopped.triangles,stopped.stats);
+        checks.Get(stopped.status==SurfaceSeedStatus::Cancelled&&stopped.stats.scannedCellCount==0&&
+                   stopped.points.empty(),"classification cancellation returns before any cell or geometry");
+    }
+}
+
 void TestSortedTopology(Checks &checks)
 {
     const auto verify=[&](std::initializer_list<std::array<std::uint32_t,3>> triangles,
@@ -353,5 +528,8 @@ int GetSurfaceOptimizationFailCount()
     TestTypedSeed<float>(checks,VTK_FLOAT); TestTypedSeed<double>(checks,VTK_DOUBLE);
     TestEdgeAxes(checks); TestSortedTopology(checks); TestParallelSampling(checks);
     TestPointSupportRules(checks); TestManyComponents(checks);
+    TestSeedClassificationCache(checks);
+    TestSeedCacheTails<float>(checks,VTK_FLOAT); TestSeedCacheTails<double>(checks,VTK_DOUBLE);
+    TestSeedCacheTails<unsigned short>(checks,VTK_UNSIGNED_SHORT);
     return checks.failureCount;
 }

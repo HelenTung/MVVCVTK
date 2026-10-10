@@ -119,6 +119,10 @@ int main(int argc, char **argv) {
              << ",\"meshPreparationMs\":" << result.meshPreparationMs
              << ",\"pointSamplingMs\":" << result.pointSamplingMs
              << ",\"outputMs\":" << result.outputMs
+             << ",\"seedClassificationCacheBytes\":" << result.seedClassificationCacheBytes
+             << ",\"seedClassifiedNodeCount\":" << result.seedClassifiedNodeCount
+             << ",\"seedUniformCellCount\":" << result.seedUniformCellCount
+             << ",\"seedCacheBudgetFallbackCount\":" << result.seedCacheBudgetFallbackCount
              << ",\"cudaPointCount\":" << result.cudaPointCount
              << ",\"cudaDeviceBytes\":" << result.cudaDeviceBytes
              << ",\"cudaHostBufferBytes\":" << result.cudaHostBufferBytes

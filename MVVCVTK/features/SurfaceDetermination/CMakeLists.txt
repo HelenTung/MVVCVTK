@@ -62,6 +62,19 @@ option(MVVCVTK_SURFACE_CPU_PARALLEL "Plan request-local CPU sampling from availa
 target_compile_definitions(surface_determination PRIVATE
     NOMINMAX WIN32_LEAN_AND_MEAN MVVCVTK_SURFACE_CPU_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_CPU_PARALLEL}>)
 
+set(MVVCVTK_SURFACE_SEED_CACHE_MIB 16 CACHE STRING "Bound for optional seed classification workspace in MiB; 0 disables")
+if(NOT MVVCVTK_SURFACE_SEED_CACHE_MIB MATCHES "^(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "MVVCVTK_SURFACE_SEED_CACHE_MIB must be a non-negative integer")
+endif()
+string(LENGTH "${MVVCVTK_SURFACE_SEED_CACHE_MIB}" _surface_seed_cache_digits)
+if(_surface_seed_cache_digits GREATER 13 OR
+   (_surface_seed_cache_digits EQUAL 13 AND MVVCVTK_SURFACE_SEED_CACHE_MIB STRGREATER "8796093022207"))
+    message(FATAL_ERROR "MVVCVTK_SURFACE_SEED_CACHE_MIB exceeds the 64-bit byte limit")
+endif()
+math(EXPR _surface_seed_cache_bytes "${MVVCVTK_SURFACE_SEED_CACHE_MIB} * 1048576")
+target_compile_definitions(surface_determination PRIVATE
+    MVVCVTK_SURFACE_SEED_CACHE_BYTES=${_surface_seed_cache_bytes})
+
 option(MVVCVTK_SURFACE_CUDA "Automatically discover an optional private CUDA compute backend" ON)
 set(MVVCVTK_SURFACE_CUDA_DEVICE_MIB 128 CACHE STRING "Bound for Surface CUDA device work buffers in MiB")
 set(MVVCVTK_SURFACE_CUDA_HOST_MIB 512 CACHE STRING "Released host-memory credit required before optional CUDA initialization in MiB")
