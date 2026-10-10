@@ -9,6 +9,10 @@
 #include <memory>
 #include <chrono>
 
+#ifndef MVVCVTK_SURFACE_CUDA_SLAB_REUSE
+#define MVVCVTK_SURFACE_CUDA_SLAB_REUSE 0
+#endif
+
 namespace {
 std::size_t PrivateBytes() {
     PROCESS_MEMORY_COUNTERS_EX memory{};
@@ -41,6 +45,7 @@ struct Session final {
     std::size_t planeCount = 0, planeBytes = 0, sliceCapacity = 0;
     int cachedFirst = 0, cachedCount = 0;
     bool createdCurrent = false, failed = false;
+    bool reuseSlab = false;
     SurfaceCudaProfile profile;
     bool profileInitialized = false;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
@@ -168,6 +173,26 @@ bool GetPrefix(const Session &s, const double *points, std::size_t requested,
     }
     return accepted != 0;
 }
+bool MoveSlabOverlap(Session &s, const std::size_t from, const std::size_t to, const std::size_t count) {
+    if (from==to || !count) return true;
+    const bool forward=to<from;
+    const auto gap=forward?from-to:to-from;
+    // 各 DMA 区间不重叠；同一 stream 按方向串行搬移，实现原分配内的 memmove。
+    for (auto remaining=count;remaining;) {
+        const auto chunk=std::min(remaining,gap);
+        const auto begin=forward?count-remaining:remaining-chunk;
+        if (cuMemcpyDtoDAsync(s.values+(to+begin)*s.planeBytes,s.values+(from+begin)*s.planeBytes,
+                             chunk*s.planeBytes,s.slots[0].stream)!=CUDA_SUCCESS ||
+            (s.mask && cuMemcpyDtoDAsync(s.mask+(to+begin)*s.planeCount,s.mask+(from+begin)*s.planeCount,
+                                        chunk*s.planeCount,s.slots[0].stream)!=CUDA_SUCCESS)) return false;
+#ifdef MVVCVTK_SURFACE_CUDA_TESTING
+        if (s.testFault==7) {s.testFault=0;return false;}
+#endif
+        remaining-=chunk;
+    }
+    // non-blocking stream 与同步 HtoD 之间不依赖隐式 default-stream 屏障。
+    return cuStreamSynchronize(s.slots[0].stream)==CUDA_SUCCESS;
+}
 bool SetSlab(Session &s, int first, int last) {
     if (s.cachedCount && first >= s.cachedFirst && std::int64_t(last)-s.cachedFirst < s.cachedCount) return true;
     // 两个 stream 共用体素 slab；所有旧读者完成后才能覆写。
@@ -175,18 +200,29 @@ bool SetSlab(Session &s, int first, int last) {
     for (const auto &slot : s.slots)
         if (slot.pending && cuEventSynchronize(slot.done) != CUDA_SUCCESS) return false;
     if (s.profile.requested) s.profile.slabWaitMs += ProfileElapsed(waitStarted);
+    const auto oldFirst=std::int64_t(s.cachedFirst),oldEnd=oldFirst+s.cachedCount;
+    const auto count=int(std::min(s.sliceCapacity,std::size_t(std::int64_t(s.source.extent[5])-first+1)));
+    const auto overlapFirst=s.reuseSlab?std::max(oldFirst,std::int64_t(first)):std::int64_t(first);
+    const auto overlapEnd=s.reuseSlab?std::min(oldEnd,std::int64_t(first)+count):overlapFirst;
+    const auto overlapCount=std::size_t(std::max<std::int64_t>(0,overlapEnd-overlapFirst));
+    const auto overlapOffset=overlapCount?std::size_t(overlapFirst-first):0;
     s.cachedCount = 0;
-    const auto count = int(std::min(s.sliceCapacity, std::size_t(s.source.extent[5] - first + 1)));
-    const auto offset = std::size_t(first - s.source.extent[4]);
+    if (overlapCount && !MoveSlabOverlap(s,std::size_t(overlapFirst-oldFirst),overlapOffset,overlapCount)) return false;
     const auto uploadStarted = s.profile.requested ? ProfileClock::now() : ProfileClock::time_point{};
-    if (cuMemcpyHtoD(s.values, static_cast<const unsigned char *>(s.source.values) + offset * s.planeBytes,
-                     std::size_t(count) * s.planeBytes) != CUDA_SUCCESS ||
-        (s.mask && cuMemcpyHtoD(s.mask, s.source.validity + offset * s.planeCount,
-                               std::size_t(count) * s.planeCount) != CUDA_SUCCESS)) return false;
+    const auto upload=[&](std::size_t begin,std::size_t planes) {
+        if (!planes) return true;
+        const auto offset=std::size_t(std::int64_t(first)-s.source.extent[4])+begin;
+        return cuMemcpyHtoD(s.values+begin*s.planeBytes,
+            static_cast<const unsigned char *>(s.source.values)+offset*s.planeBytes,planes*s.planeBytes)==CUDA_SUCCESS &&
+            (!s.mask || cuMemcpyHtoD(s.mask+begin*s.planeCount,s.source.validity+offset*s.planeCount,
+                                    planes*s.planeCount)==CUDA_SUCCESS);
+    };
+    const auto suffix=overlapOffset+overlapCount;
+    if (!upload(0,overlapOffset) || !upload(suffix,std::size_t(count)-suffix)) return false;
     if (s.profile.requested) {
         s.profile.slabUploadHostMs += ProfileElapsed(uploadStarted);
         ++s.profile.slabUploadCount;
-        s.profile.slabUploadBytes += std::uint64_t(count) *
+        s.profile.slabUploadBytes += (std::uint64_t(count)-overlapCount) *
             (s.planeBytes + (s.mask ? s.planeCount : 0));
     }
     s.cachedFirst = first; s.cachedCount = count;
@@ -211,6 +247,9 @@ extern "C" __declspec(dllexport) int SurfaceCudaCreate(const SurfaceCudaVolume *
         char profiling[8]{};
         s->profile.requested = GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",profiling,sizeof(profiling))==1 &&
                                profiling[0]=='1' ? 1 : 0;
+        char reuse[8]{};
+        s->reuseSlab = MVVCVTK_SURFACE_CUDA_SLAB_REUSE &&
+            !(GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_SLAB_REUSE",reuse,sizeof(reuse))==1 && reuse[0]=='0');
 #if CUDA_VERSION >= 13000
         if (cuCtxCreate(&s->context, nullptr, 0, device) != CUDA_SUCCESS) return 0;
 #else
@@ -330,7 +369,7 @@ extern "C" __declspec(dllexport) void SurfaceCudaDestroy(void *handle) noexcept 
 }
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
 extern "C" __declspec(dllexport) int SurfaceCudaTestSetFault(void *handle,unsigned fault) {
-    if (!handle || fault>6) return 0;
+    if (!handle || fault>7) return 0;
     auto &s=*static_cast<Session *>(handle);
     if (!GetOwned(s)) return 0;
     s.testFault=fault;return 1;

@@ -90,7 +90,7 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
     char fault[4]{};
     if (GetEnvironmentVariableA("MVVCVTK_SURFACE_CUDA_TEST_FAULT",fault,sizeof(fault))==1 &&
-        fault[0]>='1' && fault[0]<='6') SetTestFault(unsigned(fault[0]-'0'));
+        fault[0]>='1' && fault[0]<='7') SetTestFault(unsigned(fault[0]-'0'));
 #endif
     return true;
 #else

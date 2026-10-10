@@ -85,7 +85,8 @@ if(TARGET surface_cuda_backend)
     math(EXPR _surface_test_device_bytes "${MVVCVTK_SURFACE_CUDA_DEVICE_MIB} * 1048576")
     target_compile_definitions(mvvcvtk_surface_cuda_precision_tests PRIVATE
         MVVCVTK_SURFACE_TEST_HOST_BYTES=${_surface_test_host_bytes}
-        MVVCVTK_SURFACE_TEST_DEVICE_BYTES=${_surface_test_device_bytes})
+        MVVCVTK_SURFACE_TEST_DEVICE_BYTES=${_surface_test_device_bytes}
+        MVVCVTK_SURFACE_TEST_SLAB_REUSE=$<BOOL:${MVVCVTK_SURFACE_CUDA_SLAB_REUSE}>)
     target_include_directories(mvvcvtk_surface_cuda_precision_tests PRIVATE
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
     target_link_libraries(mvvcvtk_surface_cuda_precision_tests PRIVATE MVVCVTK::SurfaceDetermination)

@@ -76,6 +76,7 @@ target_compile_definitions(surface_determination PRIVATE
     MVVCVTK_SURFACE_SEED_CACHE_BYTES=${_surface_seed_cache_bytes})
 
 option(MVVCVTK_SURFACE_CUDA "Automatically discover an optional private CUDA compute backend" ON)
+option(MVVCVTK_SURFACE_CUDA_SLAB_REUSE "Reuse overlapping Surface CUDA voxel slices without extra device buffers" ON)
 set(MVVCVTK_SURFACE_CUDA_DEVICE_MIB 128 CACHE STRING "Bound for Surface CUDA device work buffers in MiB")
 set(MVVCVTK_SURFACE_CUDA_HOST_MIB 512 CACHE STRING "Released host-memory credit required before optional CUDA initialization in MiB")
 if(MVVCVTK_SURFACE_CUDA)
@@ -113,7 +114,8 @@ if(MVVCVTK_SURFACE_CUDA)
         set_source_files_properties(src/SurfaceCudaKernels.cu PROPERTIES HEADER_FILE_ONLY TRUE)
         target_link_libraries(surface_cuda_backend PRIVATE CUDA::cuda_driver Psapi)
         SetTargetDefaults(surface_cuda_backend)
-        target_compile_definitions(surface_cuda_backend PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_compile_definitions(surface_cuda_backend PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+            MVVCVTK_SURFACE_CUDA_SLAB_REUSE=$<BOOL:${MVVCVTK_SURFACE_CUDA_SLAB_REUSE}>)
         target_compile_options(surface_cuda_backend PRIVATE /fp:strict)
         # NVIDIA 的 driver import lib 带 LIBCMT 默认项；本项目固定使用 /MD[d]。
         target_link_options(surface_cuda_backend PRIVATE /NODEFAULTLIB:LIBCMT)

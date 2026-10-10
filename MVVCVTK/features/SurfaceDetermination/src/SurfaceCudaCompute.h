@@ -13,7 +13,7 @@ class SurfaceCudaCompute final {
     double *Prepare(unsigned slot);
     bool Submit(unsigned slot, std::size_t count, SurfaceCudaTicket &ticket);
     const SurfaceCudaSample *Collect(const SurfaceCudaTicket &ticket);
-    // 仅仓内测试后端提供该探针：1..3 为计算故障，4..6 为可选计时创建/记录/读取故障。
+    // 仅仓内测试后端提供探针：1..3 为计算故障，4..6 为计时故障，7 为 slab 部分搬移中断。
     bool SetTestFault(unsigned fault);
     SurfaceCudaProfile GetProfile() const;
     bool GetActive() const noexcept { return m_session != nullptr; }

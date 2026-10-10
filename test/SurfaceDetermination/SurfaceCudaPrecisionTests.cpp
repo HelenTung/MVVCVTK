@@ -14,16 +14,17 @@
 #include <Windows.h>
 
 namespace {
-class GpuProfileSetting final {
+class EnvironmentSwitch final {
 public:
-    GpuProfileSetting() {
-        const auto size=GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",nullptr,0);
-        if(size){m_previous.resize(size);GetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",m_previous.data(),size);
+    explicit EnvironmentSwitch(const char *name) : m_name(name) {
+        const auto size=GetEnvironmentVariableA(m_name,nullptr,0);
+        if(size){m_previous.resize(size);GetEnvironmentVariableA(m_name,m_previous.data(),size);
             m_previous.resize(size-1);m_present=true;}
     }
-    ~GpuProfileSetting(){SetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",m_present?m_previous.c_str():nullptr);}
-    void Set(bool enabled){SetEnvironmentVariableA("MVVCVTK_SURFACE_GPU_PROFILE",enabled?"1":"0");}
+    ~EnvironmentSwitch(){SetEnvironmentVariableA(m_name,m_present?m_previous.c_str():nullptr);}
+    void Set(bool enabled){SetEnvironmentVariableA(m_name,enabled?"1":"0");}
 private:
+    const char *m_name;
     std::string m_previous;
     bool m_present=false;
 };
@@ -34,7 +35,8 @@ bool EqualSample(const SurfaceCudaSample&a,const SurfaceCudaSample&b) {
 }
 
 int main() {
-    GpuProfileSetting profiling;profiling.Set(false);
+    EnvironmentSwitch profiling("MVVCVTK_SURFACE_GPU_PROFILE");profiling.Set(false);
+    EnvironmentSwitch reuseSetting("MVVCVTK_SURFACE_GPU_SLAB_REUSE");reuseSetting.Set(true);
     SurfaceCudaVolume v;
     const int extent[6]{-3, 12, 2, 16, -4, 7};
     std::copy_n(extent, 6, v.extent);
@@ -103,6 +105,58 @@ int main() {
             if(diagnosticFailure.GetProfile().requested)return 1;
         }
     }
+    // 非零 extent、双 slot 的旧 pending reader、前后两个方向的多块搬移及尾部短窗口。
+    profiling.Set(true);
+    for(bool reuse:{false,true}) for(bool hasMask:{false,true}) {
+        reuseSetting.Set(reuse);
+        auto input=v;
+        std::vector<double> quadratic(values.size());
+        for(int z=-4;z<=7;++z)for(int y=2;y<=16;++y)for(int x=-3;x<=12;++x)
+            quadratic[(std::size_t(z+4)*15+(y-2))*16+(x+3)]=x*x+2.*y*y+4.*z*z;
+        input.values=quadratic.data();
+        std::vector<unsigned char> validity(values.size(),1);
+        // z=1 既在向前/向后保留的交集中，也在 1.5 和 0.5 查询的支持角点内。
+        validity[(5U*15U+3U)*16U+4U]=0;
+        input.validity=hasMask?validity.data():nullptr;
+        const auto perPlane=16U*15U*(sizeof(double)+(hasMask?1:0));
+        const auto deviceLimit=surfaceCudaHostBufferBytes+8*perPlane;
+        SurfaceCudaCompute rolling;
+        if(!rolling.Start(input,testCredit,deviceLimit) || rolling.GetDeviceBytes()!=deviceLimit)return 1;
+        const auto submit=[&](unsigned slot,double z,SurfaceCudaTicket &ticket) {
+            auto *p=rolling.Prepare(slot);if(!p)return false;
+            for(std::size_t i=0;i<surfaceCudaBatchCapacity;++i){p[3*i]=1.5;p[3*i+1]=5;p[3*i+2]=z;}
+            return rolling.Submit(slot,surfaceCudaBatchCapacity,ticket) && ticket.count==surfaceCudaBatchCapacity;
+        };
+        const auto verify=[&](const SurfaceCudaTicket &ticket,double z) {
+            const auto *p=rolling.Collect(ticket);if(!p)return false;
+            const bool invalid=hasMask && (z==1.5 || z==.5);
+            for(std::size_t i=0;i<ticket.count;++i){
+                if(invalid){if(p[i].support!=2 || p[i].gradientValid)return false;}
+                else if(p[i].support!=1 || !p[i].gradientValid || p[i].gradient[0]!=-20 ||
+                    p[i].gradient[1]!=1.5 || p[i].gradient[2]!=16*z ||
+                    p[i].magnitude!=std::sqrt(400+2.25+(16*z)*(16*z)))return false;
+            }
+            return true;
+        };
+        SurfaceCudaTicket a,b;
+        if(!submit(0,-3.5,a) || rolling.Prepare(0) || !submit(1,1.5,b) ||
+            !verify(a,-3.5) || !verify(b,1.5))return 1;
+        if(!submit(0,-3.5,a) || !submit(1,.5,b) || !verify(a,-3.5) || !verify(b,.5) ||
+            !submit(0,6.5,a) || !verify(a,6.5))return 1;
+        const auto trace=rolling.GetProfile();
+        const bool enabled=reuse && MVVCVTK_SURFACE_TEST_SLAB_REUSE;
+        if(!trace.complete || trace.slabUploadCount!=4 || trace.measuredBatchCount!=5 ||
+            trace.slabUploadBytes!=(enabled?18U:28U)*perPlane)return 1;
+        if(enabled){
+            rolling.Reset();
+            if(!rolling.Start(input,testCredit,deviceLimit) || !submit(0,-3.5,a) ||
+                !rolling.SetTestFault(7) || submit(1,1.5,b) || !verify(a,-3.5))return 1;
+            if(rolling.GetProfile().complete)return 1;
+            rolling.Reset();
+            if(!rolling.Start(input,testCredit,deviceLimit) || !submit(0,1.5,b) || !verify(b,1.5))return 1;
+        }
+    }
+    reuseSetting.Set(true);
     // 非线性解析场使两批结果不同，能识别异步缓冲串批、覆写与重载错误。
     for(bool enabled:{false,true}) {
         profiling.Set(enabled);
