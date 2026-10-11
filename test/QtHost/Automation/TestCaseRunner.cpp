@@ -1473,6 +1473,23 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, firstLoad, "Succeeded");
     Check(window.GetSession()->GetImageDescriptor().has_value(), "hidden windows do not prevent input commit");
     const auto original = *window.GetSession()->GetImageDescriptor();
+#if defined(MANUAL_ALIGNMENT)
+    if (GetEnabled(window, "Alignment")) {
+        const auto volume = GetComplete(window, Send(window, "Alignment", "EvaluateVoxelVolume", {
+            {"source", GetRefText(original.dataRevision)}, {"extent", QJsonArray{0,1,0,1,0,1}},
+            {"storedValueRange", QJsonArray{0,1000}}, {"requireEnclosedSelection", false}}), "FullyDetermined")["result"].toObject()["voxelVolume"];
+        const auto stats = GetComplete(window, Send(window, "Alignment", "VoxelVolumeResult", {{"voxelVolume", volume}}), "Observed")["result"].toObject();
+        Check(stats["total"]=="8" && stats["selected"]=="8" && stats["volumeMm3"].toDouble()==8.,
+            "independent voxel result preserves the known eight unit cells before any alignment");
+        const auto path = directory.filePath("独立体积报告.json");
+        GetComplete(window, Click(window, "Alignment", "ExportReport", {{"outputPath",path},{"format","Json"},
+            {"result","current"},{"inspection",QJsonValue()},{"deviation",QJsonValue()},
+            {"voxelVolume",volume},{"captureCurrentDisplay",false}}), "ReportExported");
+        const auto report = LoadJson(path);
+        Check(report["alignments"].toArray().isEmpty() && report["voxelVolumes"].toArray().size()==1,
+            "volume-only report is not blocked by an unavailable alignment and invents no alignment result");
+    }
+#endif
     const auto initialIso = original.scalarRange[0] * 0.5 + original.scalarRange[1] * 0.5;
     Check(Wait([&] {
         const auto state = window.GetSession()->GetRenderViewState({"primary-3d"});

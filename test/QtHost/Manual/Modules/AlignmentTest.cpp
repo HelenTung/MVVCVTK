@@ -182,6 +182,8 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             if (auto* form = panel->GetParameterEditor(action))
                 if (auto* field = form->GetField("result")) {
                     field->SetReferenceChoices(results);
+                    // 报告也可以仅包含独立体素体积等结果；完整请求由报告入口校验。
+                    if (QString(action) == "ExportReport") continue;
                     const auto chosen = field->GetValue();
                     try { selectedResults[action] = feature->GetResult(chosen == "current" ? state->result : GetRef(chosen)).has_value(); }
                     catch (const std::invalid_argument&) { selectedResults[action] = false; }
