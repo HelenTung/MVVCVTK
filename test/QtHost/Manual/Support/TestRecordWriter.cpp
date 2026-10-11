@@ -87,7 +87,7 @@ void TestRecordWriter::SetRendered(const QString& viewId, const QString& dataRev
         if (value["module"] != "Data" || value["action"] != "Load") continue;
         if (dataRevision.isEmpty()) return;
         if (value["isTerminal"].toBool() && (value["status"] != "Succeeded"
-            || value["current"].toObject()["dataRevision"] != dataRevision)) return;
+            || value["current"].toObject()["dataRevision"] != dataRevision)) continue;
         // 每个视窗仅保存当前修订的首次事件。先绘制、后收到加载终态也保留真实顺序。
         const auto previous = it->rendered[viewId].toObject();
         if (previous["dataRevision"] != dataRevision)
@@ -118,7 +118,8 @@ QJsonObject TestRecordWriter::GetMeasurements() const
 {
     QJsonObject result{{"memory", GetProcessMeasurements()}, {"renderBoundary", "Host/VTK Render call return; GPU completion and screen presentation are not measured"}};
     for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
-        if (it->value["module"] == "Data" && it->value["action"] == "Load") {
+        if (it->value["module"] == "Data" && it->value["action"] == "Load"
+            && (!it->value["isTerminal"].toBool() || it->value["status"] == "Succeeded")) {
             result["load"] = QJsonObject{{"operationId", it->value["operationId"]}, {"status", it->value["status"]},
                 {"requestToCompleteMs", it->value["elapsedMs"]}, {"firstRenderedViews", it->value["firstRenderedViews"]}};
             break;

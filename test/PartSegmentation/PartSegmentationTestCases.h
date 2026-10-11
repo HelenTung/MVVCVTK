@@ -6,6 +6,7 @@ int GetPartCatalogFailCount();
 int GetPartLifecycleFailCount();
 int GetPartLineageFailCount();
 int GetPartDisplayFailCount();
+int GetPartSurfaceProductFailCount();
 int GetPartScaleFailCount();
 int GetPartEditFailCount();
 int GetPartEditProfileFailCount();

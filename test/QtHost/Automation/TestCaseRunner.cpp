@@ -323,11 +323,16 @@ void CheckUiAndRecords(TestWindow& window)
     records.SetComplete(loaded, "Succeeded", {}, {{"dataRevision", "loaded:1"}});
     records.SetRendered("slice-top-down", "loaded:1", 30);
     records.SetRendered("primary-3d", "other:1", 40);
+    const auto duplicate = records.StartRecord("Data", "Load", {}, {});
+    records.SetComplete(duplicate, "Rejected", {}, {{"dataRevision", "loaded:1"}});
+    records.SetRendered("slice-left-right", "loaded:1", 50);
     const auto measured = records.GetRecord(loaded)["firstRenderedViews"].toObject();
-    Check(measured.size() == 2 && measured["primary-3d"].toObject()["dataRevision"] == "loaded:1"
+    Check(measured.size() == 3 && measured["primary-3d"].toObject()["dataRevision"] == "loaded:1"
         && measured["primary-3d"].toObject()["renderCallMs"] == .02
         && measured["slice-top-down"].toObject()["renderCallMs"] == .03,
         "first rendering survives completion order and ignores later unrelated revisions");
+    Check(records.GetMeasurements()["load"].toObject()["operationId"] == QString::number(loaded),
+        "rejected duplicate load does not hide measurements for the loaded input");
 }
 void CheckSceneRefresh(TestWindow& window)
 {
@@ -1703,6 +1708,13 @@ void StartSelfTest(TestWindow& window)
     CheckRenderModeSwitch(window);
     CheckWallWorkflow(window, directory.path());
     CheckFeatureSwitchDuringSegmentation(window, directory.path());
+    Check(Wait([&] {
+        const auto* part = window.GetModule("Part");
+        if (part && part->GetObservedState()["isDisplayPreparing"].toBool()) return false;
+        for (const auto& view : window.GetSession()->GetSceneViewStates())
+            if (window.GetWorkflow().getRenderPending(view.id)) return false;
+        return true;
+    }), "optional part display work and its real frames finish before the idle observation window");
     CheckIdle(window);
     // 关闭时保留页面和接收对象，Session 完成/取消尚未交付的业务回调。
     const auto pendingLoad = Send(window, "Data", "Load", load);
@@ -2235,8 +2247,12 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
         if (selfTest) StartSelfTest(window); else StartSequence(window, path);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
-    if (!Wait([&] { return window.StopSession(); })) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }
-    try { if (!recordPath.isEmpty()) { auto records = window.GetRecords().GetRecords(); records["resources"] = window.GetWorkflow().resources.GetJson(); records["hostDiagnostics"] = window.GetDiagnostics(); ExportJson(recordPath, records); } }
+    QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
+    const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); });
+    if (!stopped) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }
+    try { if (!recordPath.isEmpty()) { auto records = window.GetRecords().GetRecords(); records["resources"] = window.GetWorkflow().resources.GetJson(); records["hostDiagnostics"] = window.GetDiagnostics();
+        records["shutdown"] = QJsonObject{{"isStopped", stopped}, {"elapsedMs", QString::number(stopClock.elapsed())}, {"attempts", stopAttempts}};
+        ExportJson(recordPath, records); } }
     catch (const std::exception& error) { std::cerr << error.what() << std::endl; result = 1; }
     return result;
 }

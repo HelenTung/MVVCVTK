@@ -13,6 +13,7 @@ int GetSuiteFailCount(const std::string_view suite)
     if (suite == "lifecycle") return GetPartLifecycleFailCount();
     if (suite == "lineage") return GetPartLineageFailCount();
     if (suite == "display") return GetPartDisplayFailCount();
+    if (suite == "surface-product") return GetPartSurfaceProductFailCount();
     if (suite == "scale") return GetPartScaleFailCount();
     if (suite == "edit-profile") return GetPartEditProfileFailCount();
     if (suite == "edit") return GetPartEditFailCount();
@@ -22,6 +23,7 @@ int GetSuiteFailCount(const std::string_view suite)
             + GetPartLifecycleFailCount()
             + GetPartLineageFailCount()
             + GetPartDisplayFailCount()
+            + GetPartSurfaceProductFailCount()
             + GetPartScaleFailCount()
             + GetPartEditFailCount();
     }

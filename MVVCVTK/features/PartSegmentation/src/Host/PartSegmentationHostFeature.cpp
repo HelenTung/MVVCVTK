@@ -722,9 +722,9 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
         m_state.status = PartSegmentationStatus::Stopping;
     }
     if (m_service) {
-        // An idle worker only needs its wakeup/join handshake; running computations retry.
+        // 显示工作不属于业务忙状态；采用 Host 任务清理同样的两秒窗口，覆盖取消、局部网格释放和退出握手。
         const auto deadline = std::chrono::steady_clock::now()
-            + (m_service->GetIsBusy() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(10));
+            + (m_service->GetIsBusy() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(2000));
         if (!m_service->Stop(deadline)) return false;
     }
     if (m_startCallback) {
