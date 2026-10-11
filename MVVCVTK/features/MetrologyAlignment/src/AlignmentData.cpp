@@ -1,5 +1,6 @@
 #include "AlignmentData.h"
 #include "AlignmentMath.h"
+#include "AlignmentReference.h"
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -11,9 +12,29 @@ bool GetGeometryValid(const AlignmentGeometry &g) {
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceCenter)) &&
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceDirection)) &&
            std::isfinite(g.radius) && g.radius >= 0 && std::isfinite(g.fitRms) && g.fitRms >= 0 &&
-           std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0;
+           std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0 && AlignmentGeometryFit::GetSupportValid(g);
 }
 bool GetResultValid(const ResultRecord &r) {
+    if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2" && r.algorithmVersion != "metrology-alignment-3") return false;
+    if (r.diagnostics.prealignment) {
+        const auto &p = *r.diagnostics.prealignment;
+        if (p.sourceFeatures > p.sourceSamples || p.referenceFeatures > p.referenceSamples ||
+            p.candidates == 0 || p.candidates > 8 || !std::isfinite(p.bestCoverage) ||
+            p.bestCoverage < 0 || p.bestCoverage > 1 || !std::isfinite(p.sourceSelectedArea) ||
+            !std::isfinite(p.sourceRejectedArea) || p.sourceRejectedArea < 0 ||
+            p.sourceSelectedArea < p.sourceRejectedArea) return false;
+    }
+    if (r.algorithmVersion != "metrology-alignment-3" && !r.diagnostics.surfaceStages.empty()) return false;
+    if (r.diagnostics.surfaceStages.size() > 16) return false;
+    for (const auto &stage : r.diagnostics.surfaceStages) {
+        if (!std::isfinite(stage.voxelSize) || stage.voxelSize < 0 ||
+            !std::isfinite(stage.maxPairDistance) || stage.maxPairDistance <= 0 ||
+            stage.samples == 0 || stage.samples > stage.selectedVertices ||
+            stage.rejectedSamples > stage.samples || stage.iterations == 0 || stage.iterations > 1000 ||
+            !std::isfinite(stage.selectedArea) || !std::isfinite(stage.acceptedArea) ||
+            stage.selectedArea <= 0 || stage.acceptedArea < 0 || stage.acceptedArea > stage.selectedArea)
+            return false;
+    }
     return GetInputValid(r.input) && GetDataRevisionRefValid(r.recipe) &&
            GetDataRevisionRefValid(r.transform) && GetDataRevisionRefValid(r.geometry) &&
            GetDataRevisionRefValid(r.residuals) && r.diagnostics.hardRemaining <= 6 &&
@@ -25,6 +46,22 @@ bool GetResultValid(const ResultRecord &r) {
 } // namespace
 bool SetTypes(TrustedDataPort &data) {
     const std::vector<DataTypeDescriptor> types{
+        {referenceType,
+         {{"org.mvvcvtk.metrology-alignment.reference"}},
+         [](const IDataPayload &p, std::string &message) {
+             const auto *value = dynamic_cast<const ReferencePayload *>(&p);
+             if (!value) { message = "Invalid reference payload type."; return false; }
+             const auto &r = value->metadata;
+             const bool valid = AlignmentReferenceLoader::GetRequestValid(
+                 {r.filePath, r.frameId, r.coordinateFrame, r.fileUnit, r.unit}) &&
+                 GetDataRevisionRefValid(r.mesh) && r.sourceBytes > 0 && r.pointCount >= 3 &&
+                 r.triangleCount > 0 && r.sha256.size() == 64 &&
+                 std::all_of(r.sha256.begin(), r.sha256.end(), [](char c) {
+                     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                 });
+             if (!valid) message = "Invalid STL reference provenance.";
+             return valid;
+         }},
         {recipeType,
          {{"org.mvvcvtk.metrology-alignment.recipe"}},
          [](const IDataPayload &p, std::string &message) {
@@ -62,6 +99,27 @@ bool SetTypes(TrustedDataPort &data) {
             return false;
     }
     return true;
+}
+std::shared_ptr<const AlignmentReferenceSnapshot> GetReferenceShared(const DataGraphSnapshot &graph,
+                                                                    const DataRevisionRef &ref) {
+    const auto data = graph.view ? graph.view->GetData(ref) : nullptr;
+    const auto mesh = data ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload) : nullptr;
+    if (!mesh || data->type != DataTypes::surfaceMesh) return {};
+    const auto input = std::find_if(data->inputs.begin(), data->inputs.end(), [](const DataInputRef &i) {
+        return i.role == "reference-source";
+    });
+    if (input == data->inputs.end()) return {};
+    const auto source = graph.view->GetData(input->source);
+    const auto reference = source ? std::dynamic_pointer_cast<const ReferencePayload>(source->payload) : nullptr;
+    if (!reference || source->type != referenceType || reference->metadata.mesh != ref ||
+        reference->metadata.coordinateFrame != mesh->GetCoordinateFrame() ||
+        reference->metadata.pointCount != mesh->GetVertices().size() / 3 ||
+        reference->metadata.triangleCount != mesh->GetTriangles().size() / 3) return {};
+    return std::shared_ptr<const AlignmentReferenceSnapshot>(reference,&reference->metadata);
+}
+std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,const DataRevisionRef &ref) {
+    const auto reference=GetReferenceShared(graph,ref);
+    return reference ? std::optional<AlignmentReferenceSnapshot>{*reference} : std::nullopt;
 }
 bool GetInputValid(const AlignmentInput &i) {
     if (!GetDataRevisionRefValid(i.source) || !GetDataRevisionRefValid(i.mesh) ||
@@ -159,7 +217,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
         residualRef{data.CreateDataEntityId(), 1};
     resultRef = {data.CreateDataEntityId(), 1};
     const auto inputs = BuildInputs(work.input, recipe, work.recipe.nominalData);
-    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-1",
+    const DataProvenance provenance{"metrology-alignment", "align", "metrology-alignment-3",
                                     "parameters: recipe input; initialization: result payload"};
     tx.outputs.push_back({transformRef.entityId, 0, DataTypes::transform3D, inputs,
                           std::make_shared<const Transform3DPayload>(candidate.sourceToTarget,
@@ -190,7 +248,7 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
                           provenance});
     ResultRecord record{work.input,  recipe,      transformRef,
                         geometryRef, residualRef, candidate.diagnostics,
-                        work.poses,  expectations};
+                        candidate.initialPoses.empty() ? work.poses : candidate.initialPoses, expectations};
     auto resultInputs = inputs;
     resultInputs.push_back({"transform", transformRef});
     resultInputs.push_back({"geometry", geometryRef});

@@ -9,12 +9,18 @@
 #include <vtkRenderer.h>
 #include <vtkVolume.h>
 #include <vtkVolumeCollection.h>
+#include <vtkCamera.h>
+#include <vtkPNGWriter.h>
+#include <vtkWindowToImageFilter.h>
 #include <vtkWin32OpenGLRenderWindow.h>
 #include <windows.h>
 #include <psapi.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -22,6 +28,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,10 +40,58 @@
 // 仓内测试器从 Windows 进程创建时间计时；原始文件只经实际 Host 请求读取。
 // 不预读、不清空系统缓存。首帧计时在额外值核验前截止，CPU 返回不冒充 GPU 呈现。
 class LoadAudit final {
+    struct Memory final {
+        std::uint64_t working=0,privateBytes=0,peakWorking=0,peakCommit=0,gpuLocalPeak=0,gpuNonLocalPeak=0;
+        bool hasGpu=false;
+    };
+    class Sampler final {
+    public:
+        Sampler() {
+            Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+            if(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) {
+                SIZE_T largest=0;
+                for(UINT i=0;;++i) {
+                    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+                    if(factory->EnumAdapters1(i,adapter.GetAddressOf())==DXGI_ERROR_NOT_FOUND)break;
+                    if(!adapter)break;
+                    DXGI_ADAPTER_DESC1 desc{};
+                    if(SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) && desc.DedicatedVideoMemory>largest) {
+                        Microsoft::WRL::ComPtr<IDXGIAdapter3> candidate;
+                        if(SUCCEEDED(adapter.As(&candidate))) { m_adapter=candidate;largest=desc.DedicatedVideoMemory; }
+                    }
+                }
+            }
+            Sample();
+            m_thread=std::thread([this] { while(!m_stopped.load()) { Sample();std::this_thread::sleep_for(std::chrono::milliseconds(50)); } });
+        }
+        ~Sampler() { m_stopped.store(true);if(m_thread.joinable())m_thread.join(); }
+        Memory Read() {
+            Sample();std::lock_guard<std::mutex> lock(m_mutex);return m_memory;
+        }
+    private:
+        void Sample() {
+            PROCESS_MEMORY_COUNTERS_EX p{};p.cb=sizeof(p);
+            if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&p),sizeof(p)))return;
+            DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonLocal{};
+            const bool hasGpu=m_adapter && SUCCEEDED(m_adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local))
+                && SUCCEEDED(m_adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonLocal));
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_memory.working=p.WorkingSetSize;m_memory.privateBytes=p.PrivateUsage;
+            m_memory.peakWorking=std::max(m_memory.peakWorking,static_cast<std::uint64_t>(p.PeakWorkingSetSize));
+            m_memory.peakCommit=std::max(m_memory.peakCommit,static_cast<std::uint64_t>(p.PeakPagefileUsage));
+            m_memory.hasGpu=m_memory.hasGpu || hasGpu;
+            if(hasGpu) { m_memory.gpuLocalPeak=std::max(m_memory.gpuLocalPeak,local.CurrentUsage);m_memory.gpuNonLocalPeak=std::max(m_memory.gpuNonLocalPeak,nonLocal.CurrentUsage); }
+        }
+        Microsoft::WRL::ComPtr<IDXGIAdapter3> m_adapter;
+        Memory m_memory;
+        std::mutex m_mutex;
+        std::atomic<bool> m_stopped{false};
+        std::thread m_thread;
+    };
 public:
     int Start(int argc, char** argv)
     {
-        Check(argc >= 3, "Usage: HostLoadAudit raw sourceSide [Low|High|Ultra] [--range-audit] [--quality-audit] [--geometry spacingMm originX originY originZ]");
+        Check(argc >= 3, "Usage: HostLoadAudit raw sourceSide [Low|High|Ultra] [--range-audit] [--quality-audit] [--geometry spacingMm originX originY originZ] [--output directory] [--view-size pixels] [--frames count] [--timeout-seconds count]");
         bool hasRangeAudit = false;
         bool hasQualityAudit = false;
         double spacing = 0.1537;
@@ -52,8 +107,13 @@ public:
                 Check(i + 4 < argc, "Geometry requires spacing and three LPS origin components");
                 spacing = std::stod(argv[++i]);
                 for (auto& value : origin) value = std::stod(argv[++i]);
+            } else if(option=="--output") { Check(i+1<argc,"Missing output directory");m_output=std::filesystem::u8path(argv[++i]); }
+            else if(option=="--view-size") { Check(i+1<argc,"Missing view size");m_viewSize=std::stoi(argv[++i]); }
+            else if(option=="--frames") { Check(i+1<argc,"Missing frame count");m_frameCount=std::stoi(argv[++i]); }
+            else if(option=="--timeout-seconds") { Check(i+1<argc,"Missing audit timeout");m_timeout=std::chrono::seconds(std::stoi(argv[++i]));
             } else Check(false, "Unknown audit option");
         }
+        Check(m_viewSize>0 && m_frameCount>=0 && m_timeout.count()>0,"Invalid audit settings");
         Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
             [](double value) { return std::isfinite(value); }), "Invalid physical geometry");
         const std::string filePath = argv[1];
@@ -63,11 +123,13 @@ public:
         const auto quality = qualityName == "Low" ? HostVolumeQuality::Low
             : qualityName == "High" ? HostVolumeQuality::High : HostVolumeQuality::Ultra;
         const auto sourceBytes = static_cast<std::uint64_t>(side) * side * side * sizeof(float);
+        m_source=filePath;m_side=side;m_spacing=spacing;m_quality=qualityName;m_sourceBytes=sourceBytes;
+        if(!m_output.empty())std::filesystem::create_directories(m_output);
         Check(std::filesystem::file_size(filePath) == sourceBytes, "RAW size disagrees with dimensions");
         std::cout << "source=" << filePath << " sourceBytes=" << sourceBytes << " sourceSide=" << side
             << " quality=" << qualityName << " spacingMm=" << spacing
             << " originLPS=" << origin[0] << ',' << origin[1] << ',' << origin[2]
-            << " views=4 pixels=256x256 fileCache=not-pre-read\n";
+            << " views=4 pixels="<<m_viewSize<<'x'<<m_viewSize<<" fileCache=not-pre-read\n";
 
         HostSessionConfig config;
         config.driveMode = HostDriveMode::HostDriven;
@@ -84,6 +146,7 @@ public:
         const std::array<HostRenderViewRole, 4> roles{HostRenderViewRole::Primary3D, HostRenderViewRole::TopDownSlice,
             HostRenderViewRole::FrontBackSlice, HostRenderViewRole::LeftRightSlice};
         HostRenderRequest draw;
+        std::vector<vtkSmartPointer<vtkWin32OpenGLRenderWindow>> windows;
         for (std::size_t i = 0; i < modes.size(); ++i) {
             HostRenderViewConfig view;
             view.id = "load-audit-" + std::to_string(i);
@@ -92,7 +155,8 @@ public:
             view.window.viewInit.viewMode = modes[i];
             auto window = vtkSmartPointer<vtkWin32OpenGLRenderWindow>::New();
             window->SetOffScreenRendering(1);
-            window->SetSize(256, 256);
+            window->SetSize(m_viewSize, m_viewSize);
+            window->SetMultiSamples(0);windows.push_back(window);
             view.renderWindow = window;
             draw.viewIds.push_back(view.id);
             config.renderViews.push_back(std::move(view));
@@ -125,7 +189,7 @@ public:
         Check((session.SendRequest(std::move(request), [&](HostResult result) { completed = std::move(result); }).status == HostAdmissionStatus::Accepted),
             "Load admission failed");
         bool hasAccepted = false;
-        while (!completed && Clock::now() - requestStart < std::chrono::minutes(5)) {
+        while (!completed && Clock::now() - requestStart < m_timeout) {
             sendOwnerWork();
             if (!hasAccepted) {
                 const auto state = session.GetStateSnapshot();
@@ -138,6 +202,7 @@ public:
             if (!completed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         Check(completed && completed->isSucceeded, "Load and display activation failed");
+        m_loadMs=GetElapsedMs(requestStart);
         SendPhase("display-active", GetElapsedMs(requestStart));
 
         // 时间边界先截止，再做读回/RAW 探针等额外核验。
@@ -145,10 +210,37 @@ public:
         (void)session.SendUpdates();
         const auto rendered = session.SendRender(draw);
         const double renderMs = GetElapsedMs(renderStart);
+        m_firstReturnMs=renderMs;
+        for(const auto &window:windows)window->WaitForCompletion();
+        m_firstGpuMs=GetElapsedMs(renderStart);m_requestToGpuMs=GetElapsedMs(requestStart);
         const double requestToRenderMs = GetElapsedMs(requestStart);
         Check(rendered.status == HostRenderStatus::Rendered && rendered.views.size() == 4, "First four-view render failed");
         SendPhase("first-render-return", requestToRenderMs);
         std::cout << "renderWallMs=" << renderMs << " scalarUploadBytes=unavailable gpuUploadUs=unavailable\n";
+        std::cout<<"gpuCompletedFirstFrameMs="<<*m_firstGpuMs<<" requestToGpuCompletedMs="<<*m_requestToGpuMs<<std::endl;
+
+        if(m_frameCount>0) {
+            const auto *endpoint=session.GetRenderViewEndpoint(draw.viewIds.front());
+            Check(endpoint && endpoint->renderer,"Render endpoint unavailable");
+            for(int i=0;i<3+m_frameCount;++i) {
+                const auto start=Clock::now();endpoint->renderer->GetActiveCamera()->Azimuth(1);
+                endpoint->renderer->ResetCameraClippingRange();
+                // 稳态审计主动绘制四个已激活窗口，避免 Host 的 unchanged 路径被当作渲染。
+                for(const auto &window:windows) { window->SetDesiredUpdateRate(draw.desiredUpdateRate);window->Render(); }
+                for(const auto &window:windows)window->WaitForCompletion();
+                const auto elapsed=GetElapsedMs(start);if(i>=3)m_frames.push_back(elapsed);
+            }
+        }
+        m_measured=m_sampler.Read();
+        SendPhase("measured-render-complete");
+        if(!m_output.empty()) {
+            for(std::size_t i=0;i<windows.size();++i) {
+                auto capture=vtkSmartPointer<vtkWindowToImageFilter>::New();capture->SetInput(windows[i]);
+                capture->ReadFrontBufferOff();capture->Update();
+                auto writer=vtkSmartPointer<vtkPNGWriter>::New();const auto path=(m_output/("view-"+std::to_string(i)+".png")).u8string();
+                writer->SetFileName(path.c_str());writer->SetInputConnection(capture->GetOutputPort());writer->Write();
+            }
+        }
 
         const auto sourceDescriptor = session.GetImageDescriptor();
         Check(bool(sourceDescriptor), "Formal descriptor unavailable");
@@ -186,6 +278,7 @@ public:
             const int displaySide = targetQuality == "Low" ? (side + 3) / 4 : targetQuality == "High" ? (side + 1) / 2 : side;
             Check(display && display->GetDimensions()[0] == displaySide && display->GetDimensions()[1] == displaySide
                 && display->GetDimensions()[2] == displaySide, "Actual display dimensions changed");
+            m_displaySide=displaySide;m_scalarRange=descriptor->scalarRange;
             std::cout << "checkedQuality=" << targetQuality << " displayDimensions="
                 << displaySide << 'x' << displaySide << 'x' << displaySide << '\n';
             for (int index : {0, side / 2, side - 2}) {
@@ -273,6 +366,7 @@ public:
             (void)getDisplayCheck("Ultra");
         }
         Check(session.Stop(), "Host Stop failed");
+        m_afterStop=m_sampler.Read();
         Check(std::all_of(qualityStates.begin(), qualityStates.end(), [](const auto& state) {
             return state->callbackCount == 1;
         }), "Quality callback repeated during cleanup");
@@ -280,13 +374,49 @@ public:
             std::cout << "[PASS] quality audit: six switches, invalid target rejection, full RAW probes and Stop\n";
         }
         std::cout << "[PASS] fresh-process full RAW load, scalar probes, dimensions and four-view consistency\n";
+        SaveReport(true,"");
         return 0;
+    }
+
+    void SaveReport(bool succeeded,const std::string &message) {
+        if(m_output.empty())return;
+        if(!succeeded)m_measured=m_sampler.Read();
+        std::ofstream out(m_output/"report.json",std::ios::binary);out<<std::setprecision(12);
+        const auto number=[&](const std::optional<double> &value) { if(value)out<<*value;else out<<"null"; };
+        out<<"{\n\"status\":"<<std::quoted(succeeded ? "PASS" : "FAIL")<<",\"message\":"<<std::quoted(message)
+            <<",\"source\":"<<std::quoted(m_source)<<",\"sourceBytes\":"<<m_sourceBytes<<",\"sourceSide\":"<<m_side
+            <<",\"spacingMm\":"<<m_spacing<<",\"quality\":"<<std::quoted(m_quality)<<",\"displaySide\":"<<m_displaySide
+            <<",\"partitions\":null"
+            <<",\"scalarRange\":["<<m_scalarRange[0]<<','<<m_scalarRange[1]<<"],\"views\":4,\"viewSize\":"<<m_viewSize
+            <<",\"loadAndDisplayActiveMs\":";number(m_loadMs);
+        out<<",\"firstRenderReturnMs\":";number(m_firstReturnMs);
+        out<<",\"firstGpuCompletedFrameMs\":";number(m_firstGpuMs);
+        out<<",\"requestToFirstGpuCompletedMs\":";number(m_requestToGpuMs);
+        out<<",\"frameTimesMs\":[";for(std::size_t i=0;i<m_frames.size();++i){if(i)out<<',';out<<m_frames[i];}
+        out<<"],\"processPeakWorkingSetBytes\":"<<m_measured.peakWorking<<",\"processPeakCommitBytes\":"<<m_measured.peakCommit
+            <<",\"processGpuLocalPeakBytes\":";
+        if(m_measured.hasGpu && m_measured.gpuLocalPeak)out<<m_measured.gpuLocalPeak;else out<<"null";
+        out<<",\"processGpuNonLocalPeakBytes\":";if(m_measured.hasGpu && m_measured.gpuLocalPeak)out<<m_measured.gpuNonLocalPeak;else out<<"null";
+        out<<",\"afterStopWorkingSetBytes\":"<<m_afterStop.working<<",\"afterStopPrivateBytes\":"<<m_afterStop.privateBytes
+            <<",\"samplingIntervalMs\":50,\"frameTiming\":\"first frame: Host SendRender plus GPU fence; steady frames: four native window Render plus GPU fence; 3 warmup frames, rotating volume camera\""
+            <<",\"peakScope\":\"process startup through measured rendering; readback probes and PNG encoding excluded; WDDM per-process GPU usage sampled every 50ms\"\n}\n";
     }
 
 private:
     using Clock = std::chrono::steady_clock;
     SIZE_T m_peakWorking = 0;
     SIZE_T m_peakPrivate = 0;
+    Sampler m_sampler;
+    Memory m_measured,m_afterStop;
+    std::filesystem::path m_output;
+    std::string m_source,m_quality;
+    int m_side=0,m_displaySide=0,m_viewSize=256,m_frameCount=0;
+    float m_spacing=0;
+    std::uint64_t m_sourceBytes=0;
+    std::array<double,2> m_scalarRange{};
+    std::chrono::seconds m_timeout{300};
+    std::optional<double> m_loadMs,m_firstReturnMs,m_firstGpuMs,m_requestToGpuMs;
+    std::vector<double> m_frames;
 
     static void Check(bool isValid, const char* message)
     { if (!isValid) throw std::runtime_error(message); }
@@ -359,6 +489,7 @@ private:
 
 int main(int argc, char** argv)
 {
-    try { return LoadAudit{}.Start(argc, argv); }
-    catch (const std::exception& error) { std::cerr << "[FAIL] " << error.what() << '\n'; return 1; }
+    LoadAudit audit;
+    try { return audit.Start(argc, argv); }
+    catch (const std::exception& error) { audit.SaveReport(false,error.what());std::cerr << "[FAIL] " << error.what() << '\n'; return 1; }
 }

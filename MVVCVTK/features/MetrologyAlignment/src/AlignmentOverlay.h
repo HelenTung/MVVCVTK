@@ -13,7 +13,7 @@ class AlignmentOverlay final : public FeatureOverlayBase {
     static vtkSmartPointer<vtkPolyData> BuildData(const AlignmentMatrix &sourceToTarget,
                                                   const std::vector<AlignmentGeometry> &geometries,
                                                   const AlignmentRecipe &recipe, double axisLength,
-                                                  const std::vector<double>* modelVertices = nullptr);
+                                                  const std::vector<double>* modelVertices = nullptr,bool showFrame = true,std::function<void()> check = {});
 
   private:
     vtkSmartPointer<vtkActor> m_actor;

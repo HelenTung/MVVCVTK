@@ -281,6 +281,21 @@ void TestSuccessVisibilityAndClear(Checks& checks)
             : nullptr;
         checks.Get(mesh && mesh->GetPointAttributes().size() == 9,
                    "generic mesh publishes measurement quality attributes");
+        checks.Get(mesh && mesh->GetCellAttributes().size() == 1,
+                   "generic mesh publishes per-triangle measurement validity");
+        if (mesh && mesh->GetCellAttributes().size() == 1) {
+            const auto& validity = mesh->GetCellAttributes().front();
+            checks.Get(validity.name == "measurement.valid" && validity.componentCount == 1
+                && validity.values.size() == mesh->GetTriangles().size() / 3
+                && snapshot->triangleValidity
+                && validity.values.size() == snapshot->triangleValidity->size()
+                && std::equal(validity.values.begin(), validity.values.end(),
+                    snapshot->triangleValidity->begin()),
+                "published face validity preserves exact C3 triangle order and values");
+            const auto copy = std::dynamic_pointer_cast<const SurfaceMeshPayload>(mesh->CreateSnapshot());
+            checks.Get(copy && &copy->GetCellAttributes() == &mesh->GetCellAttributes(),
+                "immutable mesh snapshots share face quality storage");
+        }
         if (mesh && mesh->GetPointAttributes().size() == 9)
         {
             const auto& attributes = mesh->GetPointAttributes();

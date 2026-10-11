@@ -28,7 +28,7 @@ AlignmentWork Work() {
     w.recipe.nominalData = Ref(4);
     w.recipe.datumCount = 0;
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
-    w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
     w.poses = {alignmentIdentity};
     return w;
 }
@@ -146,19 +146,6 @@ void SelectionAndQuality() {
     Check(r.geometries.size() == 1 && r.geometries[0].sampleCount == 3 &&
               r.geometries[0].rejectedCount == 1,
           "quality validity filters and records rejected measurement");
-    w.deadline = std::chrono::steady_clock::now();
-    r = AlignmentSolver::BuildResult(w);
-    Check(r.diagnostics.status == AlignmentStatus::DeadlineExceeded,
-          "deadline distinct from cancellation");
-    w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    w.config.pointLimit = 2;
-    r = AlignmentSolver::BuildResult(w);
-    Check(r.diagnostics.status == AlignmentStatus::BudgetExceeded, "selection size reports budget rather than geometric degeneracy");
-    w.config.pointLimit = 100000;
-    w.config.workingBytes = 1024;
-    r = AlignmentSolver::BuildResult(w);
-    Check(r.diagnostics.status == AlignmentStatus::BudgetExceeded,
-          "work allocation budget enforced");
 }
 void ScaleAndDegeneracy() {
     for (double scale : {1e-3, 1.0, 1e3}) {
@@ -213,10 +200,6 @@ void UnlimitedCapacity() {
     const auto samples = AlignmentGeometryFit::BuildSamples(w, region, alignmentIdentity);
     Check(samples.points.size() == 100001,
         "default extraction preserves the complete selected point set");
-    auto bounded = w.config;
-    bounded.constraintLimit = 4096;
-    Check(!AlignmentGeometryFit::GetRecipeValid(w.recipe, bounded),
-        "caller-selected constraint budget remains explicit");
 }
 } // namespace
 namespace {

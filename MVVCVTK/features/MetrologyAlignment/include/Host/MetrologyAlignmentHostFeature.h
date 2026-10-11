@@ -2,6 +2,7 @@
 
 #include "Host/HostFeature.h"
 #include "Host/MetrologyAlignmentHostTypes.h"
+#include "Host/MetrologyReport.h"
 #include <memory>
 #include <optional>
 
@@ -25,10 +26,19 @@ class MetrologyAlignmentHostFeature final
     bool DetachHost() override;
     bool OnHostTick() override;
     AlignmentAdmission SendRequest(AlignmentRequest request, AlignmentCallback onComplete = {});
+    std::optional<AlignmentDeviationSnapshot> GetDeviation(const DataRevisionRef &result) const;
+    std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &result, std::uint64_t vertex) const;
+    std::optional<InspectionSnapshot> GetInspection(const DataRevisionRef &result) const;
+    std::optional<VoxelVolumeSnapshot> GetVoxelVolume(const DataRevisionRef &result) const;
+    // 在 owner thread 的同一个图快照上捕获；返回后可在后台只读使用，状态为捕获时状态。
+    MetrologyReportResult GetReport(const MetrologyReportRequest &request) const;
+    std::optional<AlignmentSceneVertex> GetSceneVertex(const std::string &partId,bool isReference,std::uint64_t vertex) const;
+    std::optional<AlignmentSceneItem> GetSceneItem(const std::string &partId,const std::string &itemId) const;
     AlignmentState GetState() const;
     AlignmentState GetScopeState(const std::string &scope) const;
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &result) const;
     std::optional<AlignmentArchive> GetArchive(const DataRevisionRef &result) const;
+    std::optional<AlignmentReferenceSnapshot> GetReference(const DataRevisionRef &mesh) const;
 
   private:
     class Impl;

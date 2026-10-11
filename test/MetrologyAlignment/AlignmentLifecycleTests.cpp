@@ -2,15 +2,25 @@
 #include "../TestDataPort.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "AlignmentData.h"
+#include "AlignmentInspectionData.h"
+#include "AlignmentReport.h"
+#include "AlignmentVoxelVolumeData.h"
+#include "Host/FeatureModelTransformPort.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
+#include "AlignmentSceneDisplay.h"
+#include "AlignmentPrealignTestSupport.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
+#include <vtkPropCollection.h>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <iostream>
+#include <cstdlib>
 #include <stdexcept>
+#include <sstream>
+#include <cstring>
 #include <thread>
 
 namespace {
@@ -39,13 +49,17 @@ class FaultDataPort final : public TestDataPort {
 class OverlayPort final : public OverlayService {
   public:
     bool rejectsAttach = false;
+    std::function<void()> onAttach;
+    std::function<void()> onRemove;
     std::vector<std::shared_ptr<FeatureOverlay>> overlays;
     bool AttachOverlay(std::shared_ptr<FeatureOverlay> value) override {
         overlays.push_back(value);
+        if (onAttach) onAttach();
         return !rejectsAttach;
     }
     void RemoveOverlay(std::shared_ptr<FeatureOverlay> value) noexcept override {
         overlays.erase(std::remove(overlays.begin(), overlays.end(), value), overlays.end());
+        if (onRemove) onRemove();
     }
     void ClearOverlays() noexcept override {
         overlays.clear();
@@ -67,7 +81,7 @@ class Views final : public FeatureViewDirectory {
         return {};
     }
 };
-class WorkControl final : public FeatureHostControl {
+class WorkControl : public FeatureHostControl {
   public:
     bool SetActiveViews(const std::vector<std::string>&) override { return true; }
     bool SetViewStatus(const std::vector<std::string>&, const std::string&) override { return true; }
@@ -78,6 +92,33 @@ class WorkControl final : public FeatureHostControl {
     bool SendWorkAvailable() override { ++notifications; return true; }
     std::atomic<int> notifications{0};
 };
+class PoseControl final : public WorkControl,public FeatureModelTransformPort {
+public:
+    ModelTransformSnapshot state;AlignmentMatrix queued=alignmentIdentity;bool cancel=false,rejectCommit=false,rejectStopOnce=false,throwAfterQueue=false,throwStart=false;
+    PoseControl() { state.sessionGeneration=1;state.bindingRevision=1; }
+    std::optional<ModelTransformSnapshot> GetTransformState() const override { return state; }
+    std::optional<std::uint64_t> StartTransform(const ModelTransformSnapshot &expected) override {
+        if(throwStart)throw std::runtime_error("start pose fault");
+        if(state.editToken || expected.dataRevision!=state.dataRevision || expected.transformRevision!=state.transformRevision)return {};
+        state.editToken=++next;cancel=false;return state.editToken;
+    }
+    bool SetTransformPreview(std::uint64_t,std::uint64_t,const AlignmentMatrix &) override { return false; }
+    bool SetTransformCommit(std::uint64_t token,std::uint64_t,const AlignmentMatrix &matrix) override {
+        if(rejectCommit || token!=state.editToken)return false;queued=matrix;state.hasPending=true;
+        if(throwAfterQueue)throw std::runtime_error("queued pose fault");return true;
+    }
+    bool StopTransform(std::uint64_t token) override {
+        if(rejectStopOnce){rejectStopOnce=false;return false;}
+        if(!token || token!=state.editToken)return false;cancel=true;state.hasPending=true;return true;
+    }
+    void Frame() {
+        if(!state.hasPending)return;
+        if(!cancel){state.modelToWorld=queued;state.worldToModel=AlignmentMath::Inverse(queued);++state.transformRevision;}
+        state.completedToken=state.editToken;state.editToken=0;state.hasPending=false;
+        state.completion=cancel ? ModelTransformStatus::Cancelled : ModelTransformStatus::Committed;
+    }
+private: std::uint64_t next=0;
+};
 struct Fixture final {
     std::shared_ptr<FaultDataPort> data = std::make_shared<FaultDataPort>();
     std::shared_ptr<MetrologyAlignmentHostFeature> feature =
@@ -86,7 +127,7 @@ struct Fixture final {
     AlignmentRecipe recipe;
     DataRevisionRef recipeRef;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
-    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}) {
+    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false) {
         input.source = {data->CreateDataEntityId(), 1};
         input.mesh = {data->CreateDataEntityId(), 1};
         input.scopeData = {data->CreateDataEntityId(), 1};
@@ -100,7 +141,19 @@ struct Fixture final {
             DataTypes::recordTable, "test",
             std::vector<RecordColumn>{{"value", std::vector<double>{1}}});
         std::vector<double> vertices{0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4};
-        mesh = std::make_shared<const SurfaceMeshPayload>(vertices, std::vector<std::uint64_t>{});
+        std::vector<std::uint64_t> triangles;
+        if (hasSectionMesh) {
+            constexpr std::size_t sides=32;
+            for (int z=-1;z<=1;z+=2) for (std::size_t i=0;i<sides;++i) {
+                const auto a=2*std::acos(-1.0)*i/sides;
+                vertices.insert(vertices.end(),{5*std::cos(a),5*std::sin(a),static_cast<double>(z)});
+            }
+            for (std::size_t i=0;i<sides;++i) {
+                const auto a=4+i,b=4+(i+1)%sides,c=a+sides,d=b+sides;
+                triangles.insert(triangles.end(),{a,b,c,b,d,c});
+            }
+        }
+        mesh = std::make_shared<const SurfaceMeshPayload>(vertices, std::move(triangles));
         DataTransaction tx;
         for (const auto ref : {input.source, input.scopeData, nominal})
             tx.outputs.push_back({ref.entityId, 0, DataTypes::recordTable, {}, table, {}});
@@ -159,7 +212,11 @@ struct Fixture final {
             feature->OnHostTick();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        Check(!feature->GetState().isBusy, "bounded task completion");
+        if (feature->GetState().isBusy) {
+            // 超时后禁止继续使用仍引用本测试栈变量的异步回调。
+            Check(false, "bounded task completion; stopping test before callback captures leave scope");
+            std::abort();
+        }
     }
     AlignmentResult Solve() {
         AlignmentResult result;
@@ -184,7 +241,7 @@ struct Fixture final {
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
-    Check(contract.inputs.size() == 2 && contract.outputs.size() == 5,
+    Check(contract.inputs.size() == 4 && contract.outputs.size() == 10,
         "feature declares recipe/mesh inputs and all formal output roles");
     const auto result = f.Solve();
     Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated,
@@ -376,6 +433,12 @@ void ScopeRestoreAndCommitFault() {
     restore.archive = archive;
     restore.input = secondInput;
     restore.restoredNominal = f.recipe.nominalData;
+    for (const auto* version : {"metrology-alignment-1", "metrology-alignment-2"}) {
+        auto obsolete = restore;
+        if (obsolete.archive) obsolete.archive->algorithmVersion = version;
+        Check(f.feature->SendRequest(obsolete).status == AlignmentAdmissionStatus::InvalidRequest,
+              "restore rejects obsolete versions even without new optional parameters");
+    }
     AlignmentResult restored;
     Check(f.feature->SendRequest(restore, [&](AlignmentResult result) { restored = result; })
                       .status == AlignmentAdmissionStatus::Accepted &&
@@ -448,13 +511,635 @@ void WorkNotifications() {
     Check(f.data->SetDataCommit(std::move(change)).status == DataCommitStatus::Succeeded
         && host->notifications.load() > changesBefore, "data invalidation wakes owner for stale cleanup");
 }
+void SurfaceReferenceLifecycle() {
+    Fixture f;
+    const std::vector<double> referenceVertices{0,0,0, 10,0,0, 0,10,0,
+        0,0,0, 0,10,0, 0,0,10, 0,0,0, 0,0,10, 10,0,0};
+    const std::vector<std::uint64_t> triangles{0,1,2, 3,4,5, 6,7,8};
+    auto reference = std::make_shared<const SurfaceMeshPayload>(referenceVertices, triangles);
+    std::vector<double> measured{1,1,0, 3,1,0, 1,3,0,
+        0,1,1, 0,3,1, 0,1,3, 1,0,1, 1,0,3, 3,0,1};
+    for (std::size_t i = 0; i < measured.size(); i += 3) {
+        measured[i] -= 0.1;
+        measured[i+1] += 0.2;
+        measured[i+2] -= 0.3;
+    }
+    f.mesh = std::make_shared<const SurfaceMeshPayload>(measured, triangles);
+    f.input.mesh = {f.data->CreateDataEntityId(), 1};
+    f.input.meshBinding.clear();
+    f.recipe.nominalData = {f.data->CreateDataEntityId(), 1};
+    DataTransaction inputs;
+    inputs.outputs.push_back({f.input.mesh.entityId, 0, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    inputs.outputs.push_back({f.recipe.nominalData.entityId, 0, DataTypes::surfaceMesh,
+        {}, reference, {}});
+    Check(f.data->SetDataCommit(std::move(inputs)).status == DataCommitStatus::Succeeded,
+          "source and reference surfaces published");
+    f.recipe.geometries.clear();
+    f.recipe.constraints.clear();
+    f.recipe.method = AlignmentMethod::ConstrainedBestFit;
+    f.recipe.surfaceFit = AlignmentSurfaceFit{};
+    f.recipe.surfaceFit->referenceTriangles = {0,1,2};
+    AlignmentRequest save;
+    save.action = AlignmentAction::SaveRecipe;
+    save.recipe = f.recipe;
+    Check(f.feature->SendRequest(save, [&](AlignmentResult r) { f.recipeRef = r.recipe; }).status ==
+          AlignmentAdmissionStatus::Accepted, "surface recipe accepted through public entry");
+    const auto result = f.Solve();
+    const auto archive = f.feature->GetArchive(result.result);
+    Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated && archive &&
+          std::abs(archive->sourceToTarget[3] - 0.1) < 1e-7 &&
+          std::abs(archive->sourceToTarget[7] + 0.2) < 1e-7 &&
+          std::abs(archive->sourceToTarget[11] - 0.3) < 1e-7,
+          "public dynamic surface alignment publishes analytic transform");
+    Check(f.mesh->GetVertices() == measured && reference->GetVertices() == referenceVertices,
+          "public alignment preserves both immutable input meshes");
+    DataTransaction replace;
+    replace.outputs.push_back({f.recipe.nominalData.entityId, 1, DataTypes::surfaceMesh, {}, reference, {}});
+    Check(f.data->SetDataCommit(std::move(replace)).status == DataCommitStatus::Succeeded,
+          "reference revision advanced");
+    Check(!f.feature->GetState().isCurrent, "reference change invalidates active surface alignment");
+    Check(f.feature->GetArchive(result.result).has_value(), "historical surface alignment remains readable");
+    AlignmentRequest restore;
+    restore.action = AlignmentAction::Restore;
+    restore.archive = archive;
+    restore.input = f.input;
+    restore.restoredNominal = {f.recipe.nominalData.entityId, 2};
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "restore cannot reuse reference triangle IDs on another revision");
+}
+void InspectionLifecycle(bool hasSectionMesh=false) {
+    auto inspectionViews=std::make_shared<Views>();Fixture f(inspectionViews, {}, hasSectionMesh);
+    const auto alignment=f.Solve();
+    AlignmentRequest request; request.action=AlignmentAction::Inspect; request.inspection=InspectionPlan{};
+    auto &plan=*request.inspection; plan.id="drawing-inspection"; plan.alignmentResult=alignment.result;
+    InspectionGeometrySpec point; point.fit=f.recipe.geometries[0]; plan.geometries.push_back(point);
+    InspectionItem item; item.id="center-x"; item.measured.metric=InspectionMetric::CenterX;
+    item.nominal=.1; item.nominalSource="drawing"; item.deviationLimits=std::array<double,2>{-1e-7,1e-7}; plan.items.push_back(item);
+    if (hasSectionMesh) {
+        InspectionGeometrySpec circle; circle.fit.id="section"; circle.fit.kind=AlignmentGeometryKind::Circle;
+        circle.fit.maxFitRms=.1; circle.section=InspectionSection{}; circle.section->pinnedMesh=f.input.mesh;
+        circle.section->planePoint={.1,-.2,.3}; plan.geometries.push_back(circle);
+        InspectionItem diameter; diameter.id="section-diameter"; diameter.measured.first.geometry=1;
+        diameter.nominal=10; diameter.nominalSource="analytic regular polygon cylinder";
+        const double chordBound=10*(1-std::cos(std::acos(-1.0)/32));
+        diameter.deviationLimits=std::array<double,2>{-chordBound,chordBound}; plan.items.push_back(diameter);
+    }
+    AlignmentResult evaluated; int completed=0;
+    const auto run=[&] {
+        Check(f.feature->SendRequest(request,[&](AlignmentResult r) { evaluated=std::move(r); ++completed; }).status==
+              AlignmentAdmissionStatus::Accepted,"independent inspection accepted");
+    };
+    run(); request.inspection->items[0].nominal=99; f.Drain(); request.inspection->items[0].nominal=.1;
+    Check(completed==1 && evaluated.status==AlignmentStatus::FullyDetermined && GetDataRevisionRefValid(evaluated.inspectionResult),
+          "inspection publishes one immutable report");
+    const auto reportRef=evaluated.inspectionResult;
+    const auto report=f.feature->GetInspection(reportRef);
+    Check(report && report->isCurrent && report->report->verdict==AlignmentInspectionVerdict::Pass &&
+          report->plan->items[0].nominal==.1 && report->sourceMesh==f.input.mesh && report->alignmentResult==alignment.result,
+          "inspection freezes plan and reports explicit alignment/mesh identity");
+    const auto again=f.feature->GetInspection(reportRef);
+    Check(report && again && report->report==again->report && report->plan==again->plan,"report polling shares immutable data and ROI plan");
+    if (report) {
+        Check(report->report->geometries[0].fitted.support.has_value(),"public inspection publishes sample support");
+        auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+        auto body=std::make_shared<InspectionReport>(*report->report);
+        body->geometries[0].fitted.support=AlignmentGeometrySupport{};
+        body->geometries[0].fitted.support->principalRmsSpreads[0]=-1; forged.report=body;
+        DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+            std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,"report rejects invalid support metadata");
+    }
+    Check(f.feature->GetState().activeResult==alignment.result,"inspection does not realign or reactivate measurement");
+    AlignmentRequest display;display.action=AlignmentAction::SetSceneDisplay;display.sceneDisplay=AlignmentSceneDisplay{};
+    display.sceneDisplay->anchorAlignment=alignment.result;display.sceneDisplay->roiMarkerLimit=3;
+    const std::string selectedItem=hasSectionMesh ? "section-diameter" : "center-x";
+    display.sceneDisplay->parts={{"inspection",alignment.result,hasSectionMesh,false,reportRef,selectedItem}};
+    AlignmentResult shown;Check(f.feature->SendRequest(display,[&](AlignmentResult value){shown=std::move(value);}).status==AlignmentAdmissionStatus::Accepted && shown.isDisplayReady,
+        "inspection scene displays published geometry without fitting again");
+    const auto selection=f.feature->GetSceneItem("inspection",selectedItem);
+    Check(selection && report && selection->plan==report->plan && selection->report==report->report && selection->inspectionResult==reportRef &&
+        selection->isCurrent && selection->isSelected && selection->geometries==std::vector<std::size_t>{hasSectionMesh ? 1u : 0u},
+        "selected report item shares original plan/report and exact geometry mapping");
+    if(selection)Check(selection->displayedRegions.size()==1 && selection->displayedRegions[0].kind==(hasSectionMesh ? AlignmentSceneRegionKind::SectionSamples : AlignmentSceneRegionKind::VertexCandidates) &&
+        selection->displayedRegions[0].drawnMarkers==(hasSectionMesh ? 3u : 1u) && selection->displayedRegions[0].sourceCount.has_value(),
+        "display distinguishes actual section samples from vertex candidates and caps visual markers");
+    const auto frozenDisplay=f.feature->GetState().sceneDisplay;
+    MetrologyReportRequest sceneCapture;sceneCapture.id="current-scene";sceneCapture.captureCurrentDisplay=true;
+    const auto currentSceneReport=f.feature->GetReport(sceneCapture);
+    Check(currentSceneReport.report && currentSceneReport.report->presentation.source==MetrologyReportDisplaySource::CurrentFeatureState &&
+        currentSceneReport.report->presentation.scene && currentSceneReport.report->presentation.scene->parameters==frozenDisplay &&
+        currentSceneReport.report->inspections.size()==1 && currentSceneReport.report->alignments.size()==1,
+        "current display capture shares configuration and automatically includes inspection and alignment");
+    sceneCapture.sceneDisplay=*frozenDisplay;Check(f.feature->GetReport(sceneCapture).status==AlignmentStatus::InvalidInput,"current and explicit display capture cannot be mixed");
+    sceneCapture.captureCurrentDisplay=false;const auto explicitSceneReport=f.feature->GetReport(sceneCapture);sceneCapture.sceneDisplay->parts[0].selectedItem="changed-after-capture";
+    Check(explicitSceneReport.report && explicitSceneReport.report->presentation.source==MetrologyReportDisplaySource::ExplicitConfiguration &&
+        explicitSceneReport.report->presentation.scene->parameters->parts[0].selectedItem==selectedItem,"explicit scene configuration freezes without aliasing mutable caller parameters");
+    display.sceneDisplay->parts[0].selectedItem="missing-item";
+    Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozenDisplay,
+        "missing report item cannot replace a valid inspection scene");
+    Check(!f.feature->GetSceneItem("inspection","missing-item"),"unknown report item selection is empty");
+    display.sceneDisplay->parts[0].selectedItem=selectedItem;const auto otherAlignment=f.Solve();display.sceneDisplay->parts[0].alignmentResult=otherAlignment.result;
+    Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozenDisplay,
+        "inspection from another alignment cannot be silently attached to a scene part");display.sceneDisplay->parts[0].alignmentResult=alignment.result;
+
+
+    if (hasSectionMesh && report && again) {
+        const auto trace=report->report->geometries[1].section;
+        Check(trace && trace==again->report->geometries[1].section && trace->sourceTriangleCount==64,
+            "public section inspection preserves shared sample provenance and source triangle count");
+        if (trace) {
+            auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+            auto body=std::make_shared<InspectionReport>(*report->report);
+            auto invalidTrace=std::make_shared<InspectionSectionTrace>(*trace);
+            invalidTrace->samples[0].triangle=trace->sourceTriangleCount;
+            body->geometries[1].section=invalidTrace; forged.report=body;
+            DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+                std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+            Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,
+                "report validator rejects out-of-range section provenance");
+        }
+    }
+    if (report) {
+        auto forged=*report; forged.result={f.data->CreateDataEntityId(),1};
+        auto body=std::make_shared<InspectionReport>(*report->report); body->verdict=AlignmentInspectionVerdict::Fail; forged.report=body;
+        DataTransaction invalid; invalid.outputs.push_back({forged.result.entityId,0,AlignmentInspectionData::resultType,{},
+            std::make_shared<const AlignmentInspectionData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,
+              "report validator rejects aggregate verdict contradicting item requirements");
+    }
+
+    run(); AlignmentRequest cancel; cancel.action=AlignmentAction::Cancel; f.feature->SendRequest(cancel); f.Drain();
+    Check(evaluated.status==AlignmentStatus::Cancelled && !GetDataRevisionRefValid(evaluated.inspectionResult),"cancelled inspection publishes nothing");
+    f.data->rejectsCommit=true; run(); f.Drain(); f.data->rejectsCommit=false;
+    Check(evaluated.status==AlignmentStatus::InternalError && !GetDataRevisionRefValid(evaluated.inspectionResult),"inspection commit failure clears result ref");
+    f.data->throwsAfterCommit=true; run(); f.Drain(); f.data->throwsAfterCommit=false;
+    Check(evaluated.status==AlignmentStatus::FullyDetermined && f.feature->GetInspection(evaluated.inspectionResult),
+          "inspection preserves committed result after observer exception");
+    run();
+    DataTransaction changed; changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"inspection source changes while worker is pending");
+    f.Drain();
+    Check(evaluated.status==AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.inspectionResult),"stale inspection is not published");
+    Check(!f.feature->GetState().isSceneDisplayReady && !f.feature->GetSceneItem("inspection",selectedItem),"source revision change retires inspection display and selection");
+    const auto historical=f.feature->GetInspection(reportRef);
+    Check(historical && !historical->isCurrent && report && historical->report==report->report,"historical report retains values with explicit stale state");
+    Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"inspection refuses stale alignment source");
+}
+void SceneLifecycle() {
+    auto views=std::make_shared<Views>();Fixture f(views,{},true);
+    const DataRevisionRef nominal{f.data->CreateDataEntityId(),1};DataTransaction tx;
+    tx.outputs.push_back({nominal.entityId,0,DataTypes::surfaceMesh,{},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded,"scene nominal surface publishes");f.recipe.nominalData=nominal;
+    const auto save=[&]{AlignmentRequest r;r.action=AlignmentAction::SaveRecipe;r.recipe=f.recipe;
+        Check(f.feature->SendRequest(r,[&](AlignmentResult value){f.recipeRef=value.recipe;}).status==AlignmentAdmissionStatus::Accepted,"scene recipe saves");};
+    save();const auto first=f.Solve();for(auto &c:f.recipe.constraints)c.nominalPoint[0]+=5;f.input.scope="part-2";save();const auto second=f.Solve();
+    AlignmentRequest request;request.action=AlignmentAction::SetSceneDisplay;request.sceneDisplay=AlignmentSceneDisplay{};
+    auto &scene=*request.sceneDisplay;scene.anchorAlignment=first.result;scene.parts={{"first",first.result},{"second",second.result}};
+    AlignmentResult result;const auto show=[&]{return f.feature->SendRequest(request,[&](AlignmentResult value){result=std::move(value);});};
+    const auto commit=f.data->GetDataGraph().commitId;Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"multi-part scene publishes display");
+    const auto frozen=f.feature->GetState().sceneDisplay;const auto before=views->overlay->overlays;
+    auto displayed=std::dynamic_pointer_cast<AlignmentSceneOverlay>(views->overlay->overlays.back());auto renderer=vtkSmartPointer<vtkRenderer>::New();
+    Check(bool(displayed),"scene owns a typed overlay");if(displayed){displayed->AttachRenderer(renderer);Check(renderer->GetViewProps()->GetNumberOfItems()==3,"two measured parts share one drawn nominal surface");displayed->DetachRenderer(renderer);}
+    Check(frozen && f.feature->GetState().isSceneDisplayReady && f.data->GetDataGraph().commitId==commit,"scene is display-only with frozen request");
+    Check(show().status==AlignmentAdmissionStatus::Accepted && f.feature->GetState().sceneDisplay==frozen && views->overlay->overlays==before,"identical scene reuses actors and render product");
+    const auto a=f.feature->GetSceneVertex("first",false,0),b=f.feature->GetSceneVertex("second",false,0),n=f.feature->GetSceneVertex("first",true,0);
+    Check(a && b && n && a->mesh==f.input.mesh && a->anchorAlignment==first.result && std::abs(a->modelPoint[0])<1e-7 &&
+        std::abs(b->modelPoint[0]-5)<1e-7 && std::abs(n->modelPoint[0]+.1)<1e-7,"vertex trace uses each formal pose and one pinned anchor");
+    Check(!f.feature->GetSceneVertex("missing",false,0) && !f.feature->GetSceneVertex("first",false,UINT64_MAX),"scene vertex bounds and identities checked");
+    scene.selectedPart="second";views->overlay->rejectsAttach=true;Check(show().status==AlignmentAdmissionStatus::Accepted && result.status==AlignmentStatus::InternalError &&
+        f.feature->GetState().sceneDisplay==frozen && views->overlay->overlays==before,"failed scene replacement preserves prior valid display");views->overlay->rejectsAttach=false;
+    scene.selectedPart.reset();scene.parts.push_back(scene.parts.front());Check(show().status==AlignmentAdmissionStatus::InvalidRequest,"duplicate scene identity refused");scene.parts.pop_back();
+    f.recipe.targetFrameId="other-target";save();const auto otherFrame=f.Solve();scene.parts.push_back({"wrong-frame",otherFrame.result});
+    Check(show().status==AlignmentAdmissionStatus::InvalidRequest && f.feature->GetState().sceneDisplay==frozen,"scene refuses mixed target frames without replacing current display");scene.parts.pop_back();
+    AlignmentSceneDisplayController controller;AlignmentConfig config;
+    Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene has no resource admission quota");
+    scene.selectedPart="second";Check(controller.Set(*f.data,views.get(),config,scene).isDisplayReady,"scene replacement reuses source geometry without a byte quota");controller.Clear();
+    views->overlay->onAttach=[&]{AlignmentRequest nested=request;Check(f.feature->SendRequest(nested).status==AlignmentAdmissionStatus::Busy,"scene attach callback cannot reenter feature mutation");};
+    Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"scene selection switches");views->overlay->onAttach={};
+    scene.isVisible=false;Check(show().status==AlignmentAdmissionStatus::Accepted && !f.feature->GetState().sceneDisplay,"scene hide removes only its overlay");scene.isVisible=true;
+    Check(show().status==AlignmentAdmissionStatus::Accepted && result.isDisplayReady,"scene restores");
+    views->overlay->onAttach=[&]{DataTransaction changed;changed.outputs.push_back({nominal.entityId,1,DataTypes::surfaceMesh,{},f.mesh,{}});
+        Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"scene dependency changes during attach");};
+    scene.selectedPart="first";Check(show().status==AlignmentAdmissionStatus::Accepted && result.status==AlignmentStatus::Stale && !result.isDisplayReady,"scene refuses stale attach result");
+    views->overlay->onAttach={};f.feature->OnHostTick();Check(!f.feature->GetState().isSceneDisplayReady && !f.feature->GetState().sceneDisplay,"stale scene is retired on owner tick");
+}
+void ModelPoseLifecycle() {
+    {
+        Fixture f;const auto solved=f.Solve();AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
+        Check(f.feature->SendRequest(apply).status==AlignmentAdmissionStatus::Unavailable,"data-only attachment does not promise model rendering");
+    }
+    auto host=std::make_shared<PoseControl>();Fixture f({},host);host->state.dataRevision=f.input.mesh;
+    const auto solved=f.Solve();const auto archive=f.feature->GetArchive(solved.result);const auto active=f.feature->GetState().activeResult;
+    const auto graphBefore=f.data->GetDataGraph().commitId;const auto *vertices=f.mesh->GetVertices().data();
+    AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
+    int calls=0;AlignmentResult completed;
+    const auto start=[&] { return f.feature->SendRequest(apply,[&](AlignmentResult r){completed=std::move(r);++calls;}); };
+    auto wrong=host->state.dataRevision;host->state.dataRevision=f.input.scopeData;
+    Check(start().status==AlignmentAdmissionStatus::InvalidRequest,"model pose refuses a different displayed revision");host->state.dataRevision=wrong;
+    host->throwStart=true;int faultCalls=0;
+    const auto fault=f.feature->SendRequest(apply,[&](AlignmentResult r){++faultCalls;Check(r.status==AlignmentStatus::InternalError,"pose start exception is explicit");});
+    Check(fault.status==AlignmentAdmissionStatus::Accepted && faultCalls==1,"pre-token exception preserves exactly-once callback ownership");host->throwStart=false;
+    const auto admitted=start();Check(admitted.status==AlignmentAdmissionStatus::Accepted && calls==0 && f.feature->GetState().isBusy,
+        "model pose remains pending until Host frame acknowledgement");
+    f.feature->OnHostTick();Check(calls==0 && host->state.modelToWorld==alignmentIdentity,"queued pose is not reported as applied");
+    Check(start().status==AlignmentAdmissionStatus::Busy,"pending pose serializes feature work");
+    host->Frame();f.feature->OnHostTick();
+    Check(calls==1 && completed.status==AlignmentStatus::FullyDetermined && completed.isModelPoseApplied && archive &&
+        host->state.modelToWorld==archive->sourceToTarget && f.feature->GetState().modelPose.isCurrent,"acknowledged absolute pose matches formal result");
+    Check(f.feature->GetState().activeResult==active && f.data->GetDataGraph().commitId==graphBefore && f.mesh->GetVertices().data()==vertices,
+        "display pose changes no data graph, active result or mesh storage");
+    Check(!GetDataRevisionRefValid(f.feature->GetScopeState("unrelated").modelPose.alignmentResult),"scope state does not attribute model pose to another part");
+    host->state.modelToWorld[3]+=2;++host->state.transformRevision;
+    Check(!f.feature->GetState().modelPose.isCurrent,"external visual edit invalidates pose-current claim");
+    const auto previous=host->state.modelToWorld;
+    auto requestId=start().requestId;AlignmentRequest cancel;cancel.action=AlignmentAction::Cancel;cancel.targetRequestId=requestId;
+    host->rejectStopOnce=true;Check(f.feature->SendRequest(cancel).status==AlignmentAdmissionStatus::Accepted,"transient stop rejection still accepts queued cancellation");f.feature->OnHostTick();host->Frame();f.feature->OnHostTick();
+    Check(calls==2 && completed.status==AlignmentStatus::Cancelled && host->state.modelToWorld==previous,"transient stop rejection retains ownership until cancellation frame commits");
+    host->rejectCommit=true;Check(start().status==AlignmentAdmissionStatus::Accepted,"commit failure retains accepted completion");host->Frame();f.feature->OnHostTick();host->rejectCommit=false;
+    Check(calls==3 && completed.status==AlignmentStatus::InternalError && !completed.isModelPoseApplied,"failed pose commit completes without fabricated application");
+    host->throwAfterQueue=true;Check(start().status==AlignmentAdmissionStatus::Accepted,"exception after queue keeps token and callback");host->Frame();f.feature->OnHostTick();host->throwAfterQueue=false;
+    Check(calls==4 && completed.status==AlignmentStatus::InternalError && !host->state.editToken,"queued exception cancellation releases pose token");
+    Check(start().status==AlignmentAdmissionStatus::Accepted,"stale pose case starts");DataTransaction changed;
+    changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+    Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"pose dependency changes before frame");
+    f.feature->OnHostTick();host->Frame();f.feature->OnHostTick();
+    Check(calls==5 && completed.status==AlignmentStatus::Stale && !completed.isModelPoseApplied,"stale candidate cancels before application");
+    {
+        auto otherHost=std::make_shared<PoseControl>();Fixture other({},otherHost);otherHost->state.dataRevision=other.input.mesh;
+        apply.resultRef=other.Solve().result;int detachedCalls=0;
+        Check(other.feature->SendRequest(apply,[&](AlignmentResult r){++detachedCalls;Check(r.status==AlignmentStatus::Cancelled,"detach cancels pose");}).status==AlignmentAdmissionStatus::Accepted,"detach pose starts");
+        Check(!other.feature->DetachHost(),"detach waits for pose token retirement");otherHost->Frame();other.feature->OnHostTick();
+        Check(detachedCalls==1 && other.feature->DetachHost(),"pose completion occurs exactly once before detach releases port");
+    }
+}
+void VoxelVolumeLifecycle() {
+    std::shared_ptr<const MetrologyReport> retained;std::weak_ptr<const std::vector<std::uint8_t>> sourceLifetime;
+    {
+    Fixture f;GridGeometry3D geometry;geometry.dimensions={3,3,3};geometry.extent={0,2,0,2,0,2};geometry.spacing={.5,.5,.5};
+    std::vector<float> values(27,0);values[13]=100;
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(float));std::memcpy(bytes->data(),values.data(),bytes->size());
+    auto image=std::make_shared<const ImageGrid3DPayload>(geometry,ImageValueType::Float32,1,bytes);
+    const DataRevisionRef source{f.data->CreateDataEntityId(),1};DataTransaction add;
+    add.outputs.push_back({source.entityId,0,DataTypes::imageGrid3D,{},image,{}});
+    Check(f.data->SetDataCommit(std::move(add)).status==DataCommitStatus::Succeeded,"voxel source publishes");
+    AlignmentRequest request;request.action=AlignmentAction::EvaluateVoxelVolume;request.voxelVolume=VoxelVolumeRequest{};
+    request.voxelVolume->id="occupied-cell";request.voxelVolume->source=source;request.voxelVolume->storedValueRange=std::array<double,2>{50,200};request.voxelVolume->requireEnclosedSelection=true;
+    AlignmentResult completed;int calls=0;const auto before=f.feature->GetState().activeResult;
+    const auto run=[&] { Check(f.feature->SendRequest(request,[&](AlignmentResult r) { completed=std::move(r);++calls; }).status==AlignmentAdmissionStatus::Accepted,"voxel evaluation admitted"); };
+    run();(*request.voxelVolume->storedValueRange)[0]=150;f.Drain();(*request.voxelVolume->storedValueRange)[0]=50;
+    const auto resultRef=completed.voxelVolumeResult;const auto snapshot=f.feature->GetVoxelVolume(resultRef);
+    Check(calls==1 && completed.status==AlignmentStatus::FullyDetermined && snapshot && snapshot->isCurrent && snapshot->statistics.selected==1 &&
+        snapshot->statistics.volumeMm3 && std::abs(*snapshot->statistics.volumeMm3-.125)<1e-12 && !snapshot->statistics.touchesRegionBoundary,
+        "public voxel endpoint freezes parameters and computes enclosed analytic cell volume without alignment");
+    Check(f.feature->GetState().activeResult==before,"voxel measurement does not change active pose");
+    sourceLifetime=bytes;
+    const auto storageOwners=bytes.use_count();
+    MetrologyReportRequest volumeReport;volumeReport.id="voxel-only";volumeReport.voxelVolumes={resultRef};
+    const auto frozen=f.feature->GetReport(volumeReport);retained=frozen.report;
+    Check(frozen.report && frozen.report->alignments.empty() && frozen.report->voxelVolumes.size()==1 && snapshot &&
+        frozen.report->voxelVolumes[0].parameters==snapshot->parameters && bytes.use_count()==storageOwners,
+        "voxel-only report shares frozen parameters without retaining scalar storage or fabricating alignment");
+    auto duplicate=volumeReport;duplicate.voxelVolumes.push_back(resultRef);
+    Check(f.feature->GetReport(duplicate).status==AlignmentStatus::InvalidInput,"duplicate voxel report revisions rejected");
+    auto missing=volumeReport;missing.voxelVolumes[0].generation=999;
+    Check(f.feature->GetReport(missing).status==AlignmentStatus::InvalidInput,"missing voxel report source rejected");
+    if(snapshot) {
+        auto forged=*snapshot;forged.result={f.data->CreateDataEntityId(),1};forged.statistics.cellVolumeMm3=2;
+        forged.statistics.observedVolumeMm3=2;forged.statistics.volumeMm3=2;
+        DataTransaction invalid;invalid.outputs.push_back({forged.result.entityId,0,AlignmentVoxelVolumeData::resultType,{{"source",source}},
+            std::make_shared<const AlignmentVoxelVolumeData::Payload>(forged,std::vector<DataExpectation>{}),{}});
+        Check(f.data->SetDataCommit(std::move(invalid)).status!=DataCommitStatus::Succeeded,"volume publication rejects cell volume inconsistent with source geometry");
+    }
+    run();AlignmentRequest cancel;cancel.action=AlignmentAction::Cancel;f.feature->SendRequest(cancel);f.Drain();
+    Check(completed.status==AlignmentStatus::Cancelled && !GetDataRevisionRefValid(completed.voxelVolumeResult),"cancelled voxel scan publishes nothing");
+    f.data->rejectsCommit=true;run();f.Drain();f.data->rejectsCommit=false;
+    Check(completed.status==AlignmentStatus::InternalError && !GetDataRevisionRefValid(completed.voxelVolumeResult),"failed volume commit exposes no output identity");
+    f.data->throwsAfterCommit=true;run();f.Drain();f.data->throwsAfterCommit=false;
+    Check(completed.status==AlignmentStatus::FullyDetermined && f.feature->GetVoxelVolume(completed.voxelVolumeResult),"volume observer exception preserves committed result");
+    run();DataTransaction change;change.outputs.push_back({source.entityId,1,DataTypes::imageGrid3D,{},image,{}});
+    Check(f.data->SetDataCommit(std::move(change)).status==DataCommitStatus::Succeeded,"voxel source advances during work");f.Drain();
+    Check(completed.status==AlignmentStatus::Stale && !GetDataRevisionRefValid(completed.voxelVolumeResult),"stale voxel candidate cannot publish");
+    const auto history=f.feature->GetVoxelVolume(resultRef);
+    Check(history && !history->isCurrent && snapshot && history->parameters==snapshot->parameters,"voxel history is readable with explicit staleness");
+    Check(f.feature->SendRequest(request).status==AlignmentAdmissionStatus::InvalidRequest,"stale source cannot start new formal volume measurement");
+    const auto stale=f.feature->GetReport(volumeReport);
+    Check(stale.report && !stale.report->wereInputsCurrentAtCapture && !stale.report->voxelVolumes[0].isCurrent &&
+        frozen.report && frozen.report->wereInputsCurrentAtCapture,"voxel report freezes capture-time currentness");
+    }
+    Check(sourceLifetime.expired(),"frozen voxel report does not retain source bytes after Host destruction");
+    if(retained) { bool written=false;std::thread writer([&]{std::ostringstream stream;
+        written=WriteMetrologyReport(*retained,stream).status==MetrologyReportWriteStatus::Succeeded;});writer.join();
+        Check(written,"voxel-only frozen report writes after Host and source destruction"); }
+}
+
+void ReportLifecycle() {
+    std::shared_ptr<const MetrologyReport> retained;
+    {
+        Fixture f;
+        MetrologyReportRequest request; request.id="multi-alignment"; request.title="global and local evaluation";
+        for (const double x:{.1,.6}) {
+            if (x>.1) {
+                for (auto &c:f.recipe.constraints) c.nominalPoint[0]+=.5;
+                AlignmentRequest save; save.action=AlignmentAction::SaveRecipe; save.recipe=f.recipe;
+                Check(f.feature->SendRequest(save,[&](AlignmentResult r) { f.recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted,
+                    "second report coordinate relation saved");
+            }
+            const auto alignment=f.Solve();
+            if (request.alignments.empty()) request.alignments.push_back(alignment.result);
+            AlignmentRequest inspect; inspect.action=AlignmentAction::Inspect; inspect.inspection=InspectionPlan{};
+            auto &plan=*inspect.inspection; plan.id="report-row"; plan.alignmentResult=alignment.result;
+            InspectionGeometrySpec geometry; geometry.fit=f.recipe.geometries[0]; plan.geometries.push_back(geometry);
+            InspectionItem item; item.id="x"; item.measured.metric=InspectionMetric::CenterX; item.nominal=x;
+            item.nominalSource="analytic coordinate relation"; item.deviationLimits=std::array<double,2>{-1e-7,1e-7}; plan.items.push_back(item);
+            AlignmentResult evaluated;
+            Check(f.feature->SendRequest(inspect,[&](AlignmentResult r) { evaluated=std::move(r); }).status==AlignmentAdmissionStatus::Accepted,
+                "report row evaluation accepted"); f.Drain();
+            Check(evaluated.status==AlignmentStatus::FullyDetermined,"report row evaluation completed");
+            request.inspections.push_back(evaluated.inspectionResult);
+        }
+        const auto graph=f.data->GetDataGraph();
+        const auto captured=f.feature->GetReport(request); retained=captured.report;
+        Check(captured.status==AlignmentStatus::FullyDetermined && retained && retained->capturedCommit==graph.commitId &&
+            retained->alignments.size()==2 && retained->inspections.size()==2 && retained->wereInputsCurrentAtCapture,
+            "one graph capture includes both alignment owners without duplicating explicit owner");
+        if (!retained) return;
+        for (std::size_t i=0;i<2;++i) {
+            const auto &inspection=retained->inspections[i];
+            const auto owner=std::find_if(retained->alignments.begin(),retained->alignments.end(),[&](const auto &a) { return a.result==inspection.alignmentResult; });
+            Check(owner!=retained->alignments.end() && std::abs(owner->sourceToTarget[3]-(i ? .6 : .1))<1e-7 &&
+                inspection.report->items[0].verdict==AlignmentInspectionVerdict::Pass,"each report row retains its own coordinate relation");
+            const auto original=f.feature->GetInspection(request.inspections[i]);
+            Check(original && original->plan==inspection.plan && original->report==inspection.report,"capture shares immutable inspection plan and report");
+            if (owner!=retained->alignments.end()) {
+                const auto recipe=std::dynamic_pointer_cast<const AlignmentData::RecipePayload>(graph.view->GetData(owner->recipeRevision)->payload);
+                Check(recipe && owner->recipe.get()==&recipe->recipe,"report aliases recipe without copying ROI arrays");
+            }
+        }
+        auto duplicate=request; duplicate.inspections.push_back(request.inspections.front());
+        Check(f.feature->GetReport(duplicate).status==AlignmentStatus::InvalidInput,"duplicate report entries are rejected");
+        auto missing=request; missing.inspections[0].generation=999;
+        Check(f.feature->GetReport(missing).status==AlignmentStatus::InvalidInput,"missing report revision produces no partial report");
+        bool ownerRejected=false; std::thread foreign([&] { ownerRejected=f.feature->GetReport(request).status==AlignmentStatus::Unavailable; }); foreign.join();
+        Check(ownerRejected,"report capture is owner-thread only");
+        f.recipe.constraints.resize(3);
+        AlignmentRequest underSave; underSave.action=AlignmentAction::SaveRecipe; underSave.recipe=f.recipe;
+        Check(f.feature->SendRequest(underSave,[&](AlignmentResult r) { f.recipeRef=r.recipe; }).status==AlignmentAdmissionStatus::Accepted,
+            "underdetermined report recipe saved");
+        const auto under=f.Solve();
+        MetrologyReportRequest diagnostic; diagnostic.id="underconstrained"; diagnostic.alignments={under.result};
+        const auto incomplete=f.feature->GetReport(diagnostic);
+        Check(under.status==AlignmentStatus::Underconstrained && incomplete.report &&
+            incomplete.report->alignments[0].diagnostics->status==AlignmentStatus::Underconstrained,
+            "report capture retains underconstrained alignment diagnostics without converting them to measurement success");
+        DataTransaction changed; changed.outputs.push_back({f.input.mesh.entityId,1,DataTypes::surfaceMesh,{{"source",f.input.source}},f.mesh,{}});
+        Check(f.data->SetDataCommit(std::move(changed)).status==DataCommitStatus::Succeeded,"report source advances");
+        const auto historical=f.feature->GetReport(request);
+        Check(historical.report && !historical.report->wereInputsCurrentAtCapture && retained->wereInputsCurrentAtCapture &&
+            historical.report->capturedCommit>retained->capturedCommit && historical.report->inspections[0].report==retained->inspections[0].report,
+            "recapture reports stale inputs while prior capture retains its explicit capture-time state");
+    }
+    Check(retained && retained->inspections[0].report->items[0].measured && retained->alignments[0].recipe,
+        "frozen report values remain readable after feature and graph owner destruction");
+    if(retained) {
+        bool written=false;
+        std::thread background([&] {
+            std::ostringstream stream;const auto result=WriteMetrologyReport(*retained,stream);
+            written=result.status==MetrologyReportWriteStatus::Succeeded && stream.str().find("multi-alignment")!=std::string::npos;
+        });background.join();
+        Check(written,"frozen report exports on a background thread after Host destruction");
+    }
+}
+void AutomaticReferenceLifecycle() {
+    auto views = std::make_shared<Views>();
+    Fixture f(views);
+    const auto model = AlignmentTestModels::Model();
+    f.mesh = model.mesh; f.recipe = model.recipe;
+    f.recipe.surfaceFit->scales = {{.4,.8,40},{0,.8,40}};
+    f.input.mesh = {f.data->CreateDataEntityId(), 1}; f.input.meshBinding.clear();
+    f.recipe.nominalData = {f.data->CreateDataEntityId(), 1};
+    DataTransaction inputs;
+    inputs.outputs.push_back({f.input.mesh.entityId, 0, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    inputs.outputs.push_back({f.recipe.nominalData.entityId, 0, DataTypes::surfaceMesh,
+        {}, model.referenceMesh, {}});
+    Check(f.data->SetDataCommit(std::move(inputs)).status == DataCommitStatus::Succeeded,
+          "automatic reference fixture committed");
+    const auto save = [&] {
+        AlignmentRequest request; request.action = AlignmentAction::SaveRecipe; request.recipe = f.recipe;
+        Check(f.feature->SendRequest(request, [&](AlignmentResult result) { f.recipeRef = result.recipe; }).status ==
+              AlignmentAdmissionStatus::Accepted, "automatic recipe accepted");
+    };
+    save();
+    const auto result = f.Solve();
+    Check(result.status == AlignmentStatus::FullyDetermined && result.isActivated && result.diagnostics.prealignment,
+          "public automatic alignment activates only after formal solve");
+    const auto stored = AlignmentData::GetResult(f.data->GetDataGraph(), result.result);
+    Check(stored && !stored->record.initialPoses.empty() &&
+          stored->record.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity},
+          "published result records generated poses instead of default identity");
+    const auto archive = f.feature->GetArchive(result.result);
+    Check(archive && archive->algorithmVersion == "metrology-alignment-3" && archive->recipe.prealignment &&
+          archive->recipe.prealignment->randomSeed == f.recipe.prealignment->randomSeed &&
+          archive->recipe.surfaceFit->scales.size() == 2 && result.diagnostics.surfaceStages.size() == 2,
+          "archive preserves algorithm version and repeatable automatic parameters");
+    AlignmentRequest restore; restore.action = AlignmentAction::Restore;
+    restore.archive = archive; restore.input = f.input; restore.restoredNominal = f.input.scopeData;
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "automatic restore validates mapped reference surface before saving recipe");
+    restore.restoredNominal = f.recipe.nominalData;
+    if (restore.archive) restore.archive->algorithmVersion = "metrology-alignment-1";
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "legacy archive version cannot claim automatic prealignment parameters");
+    if (restore.archive) restore.archive->algorithmVersion = "metrology-alignment-2";
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::InvalidRequest,
+          "version two archive cannot claim multiscale parameters");
+    restore.archive = archive;
+    Check(f.feature->SendRequest(restore).status == AlignmentAdmissionStatus::Accepted,
+          "version three restores multiscale recipe");
+    AlignmentRequest evaluate; evaluate.action = AlignmentAction::EvaluateSurface;
+    evaluate.deviation = AlignmentDeviationRequest{};
+    evaluate.deviation->alignmentResult = result.result;
+    evaluate.deviation->maxDistance = .1;
+    evaluate.deviation->tolerance = std::array<double,2>{0,1e-7};
+    AlignmentResult evaluated; int completions = 0;
+    const auto runEvaluation = [&] {
+        Check(f.feature->SendRequest(evaluate, [&](AlignmentResult r) { evaluated = std::move(r); ++completions; }).status ==
+              AlignmentAdmissionStatus::Accepted, "bound surface evaluation accepted");
+    };
+    runEvaluation();
+    Check(f.feature->SendRequest(evaluate).status == AlignmentAdmissionStatus::Busy, "evaluation shares single worker admission");
+    f.Drain();
+    Check(completions == 1 && evaluated.status == AlignmentStatus::FullyDetermined &&
+          GetDataRevisionRefValid(evaluated.deviationResult), "full field committed with one owner completion");
+    const auto deviationRef = evaluated.deviationResult;
+    const auto deviation = f.feature->GetDeviation(deviationRef);
+    Check(deviation && deviation->isCurrent && deviation->alignmentResult == result.result &&
+          deviation->sourceMesh == f.input.mesh && deviation->referenceMesh == f.recipe.nominalData &&
+          deviation->verdict == AlignmentInspectionVerdict::Pass && deviation->forward->samples.size() == f.mesh->GetVertices().size()/3,
+          "dense evaluation independently records mesh/alignment/parameters and verdict");
+    const auto again = f.feature->GetDeviation(deviationRef);
+    Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse && deviation->parameters == again->parameters,
+          "result queries share immutable fields without full-array copy");
+    MetrologyReportRequest reportRequest; reportRequest.id="deviation-report"; reportRequest.deviations={deviationRef};
+    const auto reportCapture=f.feature->GetReport(reportRequest);
+    Check(reportCapture.report && reportCapture.report->alignments.size()==1 && reportCapture.report->deviations.size()==1 &&
+        reportCapture.report->deviations[0].forward==deviation->forward && reportCapture.report->deviations[0].reverse==deviation->reverse &&
+        reportCapture.report->deviations[0].parameters==deviation->parameters,"report capture shares dense fields and evaluation selections");
+    Check(f.feature->GetState().activeResult == result.result, "evaluation leaves alignment activation unchanged");
+    AlignmentRequest display; display.action = AlignmentAction::SetDeviationDisplay;
+    display.deviationDisplay = AlignmentDeviationDisplay{};
+    display.deviationDisplay->result = deviationRef; display.deviationDisplay->range = {0,.1};
+    display.deviationDisplay->selectedVertex = 0;
+    AlignmentResult displayed;
+    const auto displayCommit = f.data->GetDataGraph().commitId;
+    const auto show = [&] {
+        Check(f.feature->SendRequest(display,[&](AlignmentResult r) { displayed = std::move(r); }).status ==
+              AlignmentAdmissionStatus::Accepted,"deviation display request accepted");
+    };
+    show();
+    Check(displayed.isDisplayReady && f.feature->GetState().isDeviationDisplayReady &&
+          views->overlay->overlays.size() == 2 && f.data->GetDataGraph().commitId == displayCommit,
+          "deviation colors coexist with alignment marker without republishing numerical data");
+    const auto selected = f.feature->GetDeviationSample(deviationRef,0);
+    Check(selected && selected->isCurrent && selected->sample.distance < 1e-7 &&
+          std::abs(selected->alignedPoint[0]-model.referenceMesh->GetVertices()[0]) < 1e-7,
+          "selected deviation locates original sample and aligned reference-space point");
+    Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetVertices().size()/3),"selection bounds checked");
+    MetrologyReportRequest paletteRequest;paletteRequest.id="current-colorbar";paletteRequest.captureCurrentDisplay=true;
+    const auto paletteCapture=f.feature->GetReport(paletteRequest);
+    Check(paletteCapture.report && paletteCapture.report->deviations.size()==1 && paletteCapture.report->presentation.deviations.size()==1 &&
+        paletteCapture.report->presentation.deviations[0].parameters.range==std::array<double,2>{0,.1} &&
+        paletteCapture.report->presentation.deviations[0].selection && selected && paletteCapture.report->presentation.deviations[0].selection->sourcePoint==selected->sourcePoint &&
+        paletteCapture.report->presentation.deviations[0].selection->alignedPoint==selected->alignedPoint,"colorbar capture freezes original point/sample and auto-includes its result");
+    paletteRequest.captureCurrentDisplay=false;paletteRequest.deviationDisplays={*display.deviationDisplay};paletteRequest.deviationDisplays.push_back(*display.deviationDisplay);
+    Check(f.feature->GetReport(paletteRequest).status==AlignmentStatus::InvalidInput,"duplicate colorbar ownership rejected");paletteRequest.deviationDisplays.pop_back();
+    paletteRequest.deviationDisplays[0].range={0,0};Check(f.feature->GetReport(paletteRequest).status==AlignmentStatus::InvalidInput,"invalid report colorbar range rejected");
+
+    const auto oldOverlay = views->overlay->overlays.back();
+    show();
+    Check(displayed.isDisplayReady && views->overlay->overlays.back()==oldOverlay,
+          "identical display request reuses geometry, colors and overlay objects");
+    views->overlay->rejectsAttach = true; display.deviationDisplay->range = {0,.2}; show(); views->overlay->rejectsAttach = false;
+    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
+          views->overlay->overlays.back() == oldOverlay && f.feature->GetState().isDeviationDisplayReady &&
+          f.feature->GetState().deviationDisplay->range[1] == .1,
+          "failed display replacement preserves previous complete overlay and settings");
+    views->overlay->onAttach = [] { throw 42; }; show(); views->overlay->onAttach = {};
+    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
+          views->overlay->overlays.back() == oldOverlay,"nonstandard port exception rolls back partial display attachment");
+    display.deviationDisplay->range = {1,0};
+    Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::InvalidRequest &&
+          views->overlay->overlays.back() == oldOverlay,"invalid color range leaves current display untouched");
+    display.deviationDisplay->range = {0,.1}; display.deviationDisplay->isVisible = false; show();
+    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.size() == 1 &&
+          f.data->GetDataGraph().commitId == displayCommit,"hiding deviation releases overlay without changing detection data");
+    display.deviationDisplay->isVisible = true;
+    views->overlay->onAttach = [&] {
+        Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::Busy && !f.feature->DetachHost(),
+              "display attachment blocks reentrant mutation and detach until atomic replacement ends");
+    };
+    show(); views->overlay->onAttach = {};
+    Check(f.feature->GetScopeState(f.input.scope).isDeviationDisplayReady &&
+          !f.feature->GetScopeState("other-part").deviationDisplay,
+          "deviation display state is scoped to its bound alignment part");
+    display.deviationDisplay->range=AlignmentDeviationDisplay{}.range;show();
+    const auto automaticDisplay=f.feature->GetState().deviationDisplay;
+    Check(automaticDisplay && displayed.isDisplayReady && !automaticDisplay->useToleranceColors &&
+          std::isfinite(automaticDisplay->range[0]) && std::isfinite(automaticDisplay->range[1]) &&
+          automaticDisplay->range[0]<=deviation->forward->statistics.minimum &&
+          automaticDisplay->range[1]>=deviation->forward->statistics.maximum,
+          "public default display resolves the current field range before storing visible state");
+    paletteRequest.deviations.clear();paletteRequest.deviationDisplays.clear();paletteRequest.captureCurrentDisplay=true;
+    const auto automaticCapture=f.feature->GetReport(paletteRequest);
+    Check(automaticDisplay && automaticCapture.report && !automaticCapture.report->presentation.deviations.empty() &&
+          automaticCapture.report->presentation.deviations[0].parameters.range==automaticDisplay->range,
+          "capturing automatic display freezes the same resolved range as the live overlay");
+    display.deviationDisplay->range={0,.1};
+    AlignmentConfig limitedConfig;
+    auto limitedDisplay = std::make_shared<MetrologyAlignmentHostFeature>(limitedConfig);
+    HostFeatureContext limitedContext; limitedContext.data=f.data; limitedContext.views=views;
+    Check(limitedDisplay->AttachHost(limitedContext),"bounded display consumer attaches to existing numerical results");
+    AlignmentResult limitedResult;
+    Check(limitedDisplay->SendRequest(display,[&](AlignmentResult r) { limitedResult=std::move(r); }).status ==
+          AlignmentAdmissionStatus::Accepted && limitedResult.isDisplayReady,"budget admits one set of display arrays");
+    auto replacement = display; replacement.deviationDisplay->range[1]=.2;
+    Check(limitedDisplay->SendRequest(replacement,[&](AlignmentResult r) { limitedResult=std::move(r); }).status ==
+          AlignmentAdmissionStatus::Accepted && limitedResult.status == AlignmentStatus::FullyDetermined &&
+          limitedDisplay->GetState().isDeviationDisplayReady,
+          "display replacement has no byte budget rejection");
+    Check(limitedDisplay->DetachHost() && views->overlay->overlays.size()==2,"bounded consumer removes only its own display");
+    std::thread otherThread([&] {
+        Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::Unavailable &&
+              !f.feature->GetDeviationSample(deviationRef,0),"display and selection reject non-owner calls");
+    });
+    otherThread.join();
+
+    runEvaluation();
+    AlignmentRequest cancel; cancel.action = AlignmentAction::Cancel;
+    Check(f.feature->SendRequest(cancel).status == AlignmentAdmissionStatus::Accepted, "surface evaluation cancellation accepted");
+    f.Drain();
+    Check(evaluated.status == AlignmentStatus::Cancelled && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "cancelled evaluation publishes no partial field");
+    f.data->rejectsCommit = true; runEvaluation(); f.Drain(); f.data->rejectsCommit = false;
+    Check(evaluated.status == AlignmentStatus::InternalError && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "rejected evaluation commit exposes no result reference");
+    f.data->throwsAfterCommit = true; runEvaluation(); f.Drain(); f.data->throwsAfterCommit = false;
+    Check(evaluated.status == AlignmentStatus::FullyDetermined && f.feature->GetDeviation(evaluated.deviationResult).has_value(),
+          "post-commit exception retains published evaluation fact");
+    f.recipe.id = "unsupported-neighborhood"; f.recipe.prealignment->normalRadius = 1e-5;
+    save();
+    const auto commit = f.data->GetDataGraph().commitId;
+    const auto failed = f.Solve();
+    Check(failed.status == AlignmentStatus::NotConverged && !GetDataRevisionRefValid(failed.result) &&
+          !GetDataRevisionRefValid(failed.transform) && f.data->GetDataGraph().commitId == commit,
+          "failed coarse registration publishes no placeholder transform or result");
+    Check(f.feature->GetState().activeResult == result.result && f.feature->GetState().isCurrent,
+          "failed coarse registration preserves previous valid active result");
+    runEvaluation();
+    DataTransaction changed;
+    changed.outputs.push_back({f.input.mesh.entityId, 1, DataTypes::surfaceMesh,
+        {{"source", f.input.source}}, f.mesh, {}});
+    Check(f.data->SetDataCommit(std::move(changed)).status == DataCommitStatus::Succeeded,
+          "measurement revision advances while evaluation is pending");
+    views->overlay->onRemove = [&] {
+        AlignmentRequest hide = display; hide.deviationDisplay->isVisible = false;
+        Check(f.feature->SendRequest(hide).status == AlignmentAdmissionStatus::Busy && !f.feature->DetachHost(),
+              "stale display removal prevents recursive clear or detach through port callback");
+    };
+    f.Drain();
+    views->overlay->onRemove = {};
+    Check(evaluated.status == AlignmentStatus::Stale && !GetDataRevisionRefValid(evaluated.deviationResult),
+          "input change prevents stale field publication");
+    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.empty(),
+          "source revision invalidates and removes both dependent displays");
+    show();
+    Check(displayed.status == AlignmentStatus::Stale && !displayed.isDisplayReady,"stale deviation cannot be displayed");
+    const auto staleSample = f.feature->GetDeviationSample(deviationRef,0);
+    Check(staleSample && !staleSample->isCurrent,"historical selected value has explicit stale status");
+    const auto historical = f.feature->GetDeviation(deviationRef);
+    Check(historical && !historical->isCurrent && historical->forward == deviation->forward,
+          "historical deviation stays readable with unchanged arrays and explicit stale state");
+    Check(f.feature->SendRequest(evaluate).status == AlignmentAdmissionStatus::InvalidRequest,
+          "new evaluation refuses stale alignment inputs");
+
+}
 } // namespace
 int main() {
-    WorkNotifications();
-    Lifecycle();
-    Currentness();
-    Display();
-    Reentry();
-    ScopeRestoreAndCommitFault();
+    const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
+    run("InspectionLifecycle", [] { InspectionLifecycle(); });
+    run("ReportLifecycle", ReportLifecycle);
+    run("VoxelVolumeLifecycle", VoxelVolumeLifecycle);
+    run("ModelPoseLifecycle", ModelPoseLifecycle);
+    run("SceneLifecycle", SceneLifecycle);
+    run("SectionInspectionLifecycle", [] { InspectionLifecycle(true); });
+    run("AutomaticReferenceLifecycle", AutomaticReferenceLifecycle);
+    run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
+    run("WorkNotifications", WorkNotifications);
+    run("Lifecycle", Lifecycle);
+    run("Currentness", Currentness);
+    run("Display", Display);
+    run("Reentry", Reentry);
+    run("ScopeRestoreAndCommitFault", ScopeRestoreAndCommitFault);
     return failures ? 1 : 0;
 }

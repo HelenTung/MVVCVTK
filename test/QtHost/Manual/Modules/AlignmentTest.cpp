@@ -118,7 +118,8 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         if (!state->reference) throw std::invalid_argument("恢复归档前必须导入本次映射参考");
         const auto json = LoadJson(GetText(p, "archivePath"));
         AlignmentArchive archive;
-        if (GetNumber(json, "schemaVersion") != 1 || GetText(json, "algorithmVersion") != "metrology-alignment-1")
+        if (GetNumber(json, "schemaVersion") != archive.schemaVersion ||
+            GetText(json, "algorithmVersion").toStdString() != archive.algorithmVersion)
             throw std::invalid_argument("归档版本不支持");
         archive.recipe = GetRecipe(json["recipe"].toObject(), {}, state->reference->nominal);
         archive.sourceToTarget = GetAffineMatrix(json["sourceToTarget"], true);

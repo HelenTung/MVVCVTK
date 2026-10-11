@@ -1,5 +1,6 @@
 #include "AlignmentGeometry.h"
 #include "AlignmentMath.h"
+#include "AlignmentPrealign.h"
 #include "FeatureSupport/WorkLimit.h"
 #include <limits>
 #include <numeric>
@@ -11,13 +12,6 @@ using namespace AlignmentMath;
 void Require(bool condition, const char *message) {
     if (!condition)
         throw std::invalid_argument(message);
-}
-bool Positive(double x) {
-    return std::isfinite(x) && x > 0;
-}
-bool Direction(const AlignmentPoint &p) {
-    const auto v = Vector(p);
-    return Finite(v) && std::abs(cv::norm(v) - 1) < 1e-8;
 }
 const MeshAttribute *Attribute(const SurfaceMeshPayload &mesh, const char *name,
                                std::size_t components) {
@@ -36,7 +30,7 @@ struct Shape final {
     double radius = 1;
 };
 std::vector<double> Residuals(const Shape &shape, AlignmentGeometryKind kind,
-                              const std::vector<Vec> &points) {
+                              const std::vector<Vec> &points, bool fixedPlane = false) {
     std::vector<double> r;
     r.reserve(points.size() * 2);
     for (const auto &p : points) {
@@ -45,19 +39,22 @@ std::vector<double> Residuals(const Shape &shape, AlignmentGeometryKind kind,
         r.push_back((kind == AlignmentGeometryKind::Sphere ? cv::norm(q)
                                                            : cv::norm(q - axial * shape.normal)) -
                     shape.radius);
-        if (kind == AlignmentGeometryKind::Circle)
+        if (kind == AlignmentGeometryKind::Circle && !fixedPlane)
             r.push_back(axial);
     }
     return r;
 }
-Shape Shift(Shape s, AlignmentGeometryKind kind, const cv::Mat &dx) {
+Shape Shift(Shape s, AlignmentGeometryKind kind, const cv::Mat &dx, bool fixedPlane = false) {
     if (kind == AlignmentGeometryKind::Sphere) {
         s.center += Vec(dx.at<double>(0), dx.at<double>(1), dx.at<double>(2));
         s.radius += dx.at<double>(3);
         return s;
     }
     const Vec a = Tangent(s.normal), b = s.normal.cross(a);
-    if (kind == AlignmentGeometryKind::Cylinder) {
+    if (fixedPlane && kind == AlignmentGeometryKind::Circle) {
+        s.center += a * dx.at<double>(0) + b * dx.at<double>(1);
+        s.radius += dx.at<double>(2);
+    } else if (kind == AlignmentGeometryKind::Cylinder) {
         s.center += a * dx.at<double>(0) + b * dx.at<double>(1);
         s.normal = Unit(s.normal + a * dx.at<double>(2) + b * dx.at<double>(3));
         s.radius += dx.at<double>(4);
@@ -72,7 +69,7 @@ double Cost(const std::vector<double> &r) {
     return std::inner_product(r.begin(), r.end(), r.begin(), 0.0);
 }
 Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
-               const std::vector<Vec> &points, Shape shape) {
+               const std::vector<Vec> &points, Shape shape, bool fixedPlane = false) {
     const bool sphere = kind == AlignmentGeometryKind::Sphere;
     const int columns = sphere ? 4 : 3;
     const auto a = Tangent(shape.normal), b = shape.normal.cross(a);
@@ -101,12 +98,12 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
     shape.radius =
         std::sqrt(std::max(0.0, answer.at<double>(columns - 1) + shape.center.dot(shape.center)));
     Require(Positive(shape.radius), "Degenerate radius.");
-    const int count = sphere ? 4 : (kind == AlignmentGeometryKind::Cylinder ? 5 : 6);
+    const int count = fixedPlane ? 3 : sphere ? 4 : (kind == AlignmentGeometryKind::Cylinder ? 5 : 6);
     bool converged = false;
     for (std::size_t iteration = 0; iteration < work.recipe.iterationLimit; ++iteration) {
         if (AlignmentGeometryFit::GetWorkStatus(work) != AlignmentStatus::FullyDetermined)
             throw std::runtime_error("Cancelled geometry fit.");
-        const auto r = Residuals(shape, kind, points);
+        const auto r = Residuals(shape, kind, points, fixedPlane);
         cv::Mat jac(static_cast<int>(r.size()), count, CV_64F);
         // 解析 Jacobian 避免短圆弧在最优点附近的差分消减误差；参数均为规范化长度。
         const auto tangent = Tangent(shape.normal), bitangent = shape.normal.cross(tangent);
@@ -121,8 +118,12 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
             const double distance = sphere ? cv::norm(q) : cv::norm(radial);
             Require(distance > 1e-15, "Point lies on singular shape center/axis.");
             const auto direction = (sphere ? q : radial) / distance;
-            const int row = static_cast<int>(i) * (kind == AlignmentGeometryKind::Circle ? 2 : 1);
-            if (kind == AlignmentGeometryKind::Cylinder) {
+            const int row = static_cast<int>(i) * (kind == AlignmentGeometryKind::Circle && !fixedPlane ? 2 : 1);
+            if (fixedPlane) {
+                jac.at<double>(row, 0) = -direction.dot(tangent);
+                jac.at<double>(row, 1) = -direction.dot(bitangent);
+                jac.at<double>(row, 2) = -1;
+            } else if (kind == AlignmentGeometryKind::Cylinder) {
                 jac.at<double>(row, 0) = -direction.dot(tangent);
                 jac.at<double>(row, 1) = -direction.dot(bitangent);
                 jac.at<double>(row, 2) = -axial * direction.dot(tangent);
@@ -157,8 +158,8 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
         }
         bool improved = false;
         for (double fraction = 1; fraction >= 1.0 / 1024; fraction *= 0.5) {
-            const auto candidate = Shift(shape, kind, dx * fraction);
-            if (candidate.radius > 0 && Cost(Residuals(candidate, kind, points)) < Cost(r)) {
+            const auto candidate = Shift(shape, kind, dx * fraction, fixedPlane);
+            if (candidate.radius > 0 && Cost(Residuals(candidate, kind, points, fixedPlane)) < Cost(r)) {
                 shape = candidate;
                 improved = true;
                 break;
@@ -180,6 +181,38 @@ Shape FitRound(const AlignmentWork &work, AlignmentGeometryKind kind,
 }
 } // namespace
 
+bool AlignmentGeometryFit::GetSupportValid(const AlignmentGeometry &g) {
+    if (!g.support) return true;
+    const auto &s=*g.support;
+    if (!g.sampleCount || static_cast<unsigned>(g.kind)>5) return false;
+    for (std::size_t i=0;i<3;++i)
+        if (!std::isfinite(s.principalRmsSpreads[i]) || s.principalRmsSpreads[i]<0 ||
+            (i && s.principalRmsSpreads[i]>s.principalRmsSpreads[i-1])) return false;
+    const bool axial=g.kind==AlignmentGeometryKind::Line || g.kind==AlignmentGeometryKind::Cylinder;
+    const bool angular=g.kind==AlignmentGeometryKind::Circle || g.kind==AlignmentGeometryKind::Cylinder;
+    const bool radial=g.kind==AlignmentGeometryKind::Sphere;
+    return s.axialSpan.has_value()==axial && s.angularSpanDegrees.has_value()==angular &&
+        s.radialDirectionMeanLength.has_value()==radial &&
+        (!s.axialSpan || (std::isfinite(*s.axialSpan) && *s.axialSpan>=0)) &&
+        (!s.angularSpanDegrees || (std::isfinite(*s.angularSpanDegrees) && *s.angularSpanDegrees>=0 && *s.angularSpanDegrees<=360)) &&
+        (!s.radialDirectionMeanLength || (std::isfinite(*s.radialDirectionMeanLength) && *s.radialDirectionMeanLength>=0 && *s.radialDirectionMeanLength<=1));
+}
+bool AlignmentGeometryFit::GetSpecValid(const AlignmentGeometrySpec &g, bool requiresRegion) {
+    if (g.id.empty() || static_cast<unsigned>(g.kind)>5 ||
+        static_cast<unsigned>(g.association)>2 || !GetUnitDirectionValid(g.targetDirection) ||
+        !Positive(g.maxFitRms) || !Positive(g.minCoverage) || g.minCoverage>1 ||
+        !Positive(g.minDirectionCosine) || g.minDirectionCosine>1) return false;
+    const auto &region=g.region;
+    if (requiresRegion && (region.vertexIds.empty()==!region.targetBounds.has_value() ||
+        (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh)))) return false;
+    if (!requiresRegion && (!region.vertexIds.empty() || region.targetBounds || GetDataRevisionRefValid(region.pinnedMesh))) return false;
+    if (region.targetBounds) for (std::size_t axis=0;axis<3;++axis)
+        if (!std::isfinite((*region.targetBounds)[2*axis]) || !std::isfinite((*region.targetBounds)[2*axis+1]) ||
+            (*region.targetBounds)[2*axis]>(*region.targetBounds)[2*axis+1]) return false;
+    return !g.radiusRange || (Positive((*g.radiusRange)[0]) && Positive((*g.radiusRange)[1]) &&
+                              (*g.radiusRange)[0]<=(*g.radiusRange)[1]);
+}
+
 bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const AlignmentConfig &config) {
     if (r.minPairNormalCosine && (!std::isfinite(*r.minPairNormalCosine) ||
                                   *r.minPairNormalCosine < 0 || *r.minPairNormalCosine > 1))
@@ -187,8 +220,7 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
     if (r.id.empty() || r.id.size() > 128 || r.targetFrameId.empty() ||
         r.targetFrameId.size() > 128 || static_cast<unsigned>(r.unit) > 2 ||
         static_cast<unsigned>(r.method) > 3 ||
-        (config.constraintLimit && (r.constraints.size() > config.constraintLimit ||
-         r.fitPairs.size() > config.constraintLimit)) || r.datumCount > 3 ||
+        r.datumCount > 3 ||
         r.datumCount > r.geometries.size() || r.iterationLimit == 0 || r.iterationLimit > 1000 ||
         !Positive(r.lengthScale) || !Positive(r.rankTolerance) || r.rankTolerance >= 0.01 ||
         !Positive(r.conditionLimit) || r.conditionLimit <= 1 || !Positive(r.solveTolerance) ||
@@ -200,6 +232,9 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         return false;
     if (!GetDataRevisionRefValid(r.nominalData))
         return false;
+    if (r.prealignment && (!AlignmentPrealign::GetParamsValid(*r.prealignment) ||
+        (!r.prealignment->sourceTriangles.empty() && !GetDataRevisionRefValid(r.exactMesh))))
+        return false;
     if (r.method == AlignmentMethod::SequentialPlanes &&
         (r.datumCount == 0 || r.geometries.size() != r.datumCount))
         return false;
@@ -207,7 +242,34 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
         return false;
     if (r.method == AlignmentMethod::Rps && r.constraints.empty())
         return false;
-    if (r.method == AlignmentMethod::ConstrainedBestFit &&
+    if (r.surfaceFit && (r.method != AlignmentMethod::ConstrainedBestFit ||
+        !r.fitPairs.empty() || r.surfaceFit->iterationLimit == 0 ||
+        r.surfaceFit->iterationLimit > 1000))
+        return false;
+    if (r.surfaceFit && !r.surfaceFit->scales.empty()) {
+        const auto &scales = r.surfaceFit->scales;
+        if (scales.size() > 16 || scales.back().maxPairDistance > r.maxPairDistance) return false;
+        for (std::size_t i = 0; i < scales.size(); ++i) {
+            const auto &scale = scales[i];
+            if (!std::isfinite(scale.voxelSize) || scale.voxelSize < 0 ||
+                !Positive(scale.maxPairDistance) || scale.iterationLimit == 0 || scale.iterationLimit > 1000 ||
+                (i && (scale.voxelSize >= scales[i - 1].voxelSize ||
+                       scale.maxPairDistance > scales[i - 1].maxPairDistance))) return false;
+        }
+    }
+    if (r.surfaceFit && r.surfaceFit->sourceRegion) {
+        const auto &region = *r.surfaceFit->sourceRegion;
+        if (region.vertexIds.empty() == !region.targetBounds.has_value() ||
+            (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh)))
+            return false;
+        if (region.targetBounds)
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                if (!std::isfinite((*region.targetBounds)[2 * axis]) ||
+                    !std::isfinite((*region.targetBounds)[2 * axis + 1]) ||
+                    (*region.targetBounds)[2 * axis] > (*region.targetBounds)[2 * axis + 1])
+                    return false;
+    }
+    if (r.method == AlignmentMethod::ConstrainedBestFit && !r.surfaceFit &&
         (r.fitPairs.empty() || !GetDataRevisionRefValid(r.exactMesh)))
         return false;
     if (r.method != AlignmentMethod::ConstrainedBestFit && !r.fitPairs.empty())
@@ -216,38 +278,21 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
     std::size_t selected = 0;
     for (std::size_t geometryIndex = 0; geometryIndex < r.geometries.size(); ++geometryIndex) {
         const auto &g = r.geometries[geometryIndex];
-        if (g.id.empty() || !names.insert(g.id).second || static_cast<unsigned>(g.kind) > 5 ||
-            static_cast<unsigned>(g.association) > 2 || !Direction(g.targetDirection) ||
-            !Positive(g.maxFitRms) || !Positive(g.minCoverage) || g.minCoverage > 1 ||
-            !Positive(g.minDirectionCosine) || g.minDirectionCosine > 1)
-            return false;
+        if (!GetSpecValid(g) || !names.insert(g.id).second) return false;
         if (g.association == AlignmentAssociation::SequentialLeastSquares &&
             (g.kind != AlignmentGeometryKind::Plane || geometryIndex >= r.datumCount ||
              (r.method != AlignmentMethod::SequentialPlanes &&
               r.method != AlignmentMethod::ConstrainedBestFit)))
             return false;
         const auto &region = g.region;
-        if (region.vertexIds.empty() == !region.targetBounds.has_value())
-            return false;
-        if (!region.vertexIds.empty() && !GetDataRevisionRefValid(region.pinnedMesh))
-            return false;
-        const auto pointBound = config.pointLimit ? config.pointLimit : std::numeric_limits<std::size_t>::max();
+        const auto pointBound = std::numeric_limits<std::size_t>::max();
         if (region.vertexIds.size() > pointBound - selected)
             return false;
         selected += region.vertexIds.size();
-        if (region.targetBounds)
-            for (int i = 0; i < 3; ++i)
-                if (!std::isfinite((*region.targetBounds)[2 * i]) ||
-                    !std::isfinite((*region.targetBounds)[2 * i + 1]) ||
-                    (*region.targetBounds)[2 * i] > (*region.targetBounds)[2 * i + 1])
-                    return false;
-        if (g.radiusRange && (!Positive((*g.radiusRange)[0]) || !Positive((*g.radiusRange)[1]) ||
-                              (*g.radiusRange)[0] > (*g.radiusRange)[1]))
-            return false;
     }
     for (const auto &c : r.constraints)
         if (c.geometryIndex >= r.geometries.size() || !Finite(Vector(c.nominalPoint)) ||
-            !Direction(c.targetDirection) || static_cast<unsigned>(c.kind) > 2 || c.priority > 63 ||
+            !GetUnitDirectionValid(c.targetDirection) || static_cast<unsigned>(c.kind) > 2 || c.priority > 63 ||
             !Positive(c.weight) || c.weight > 1e12 || !Positive(c.tolerance) ||
             (r.method == AlignmentMethod::ConstrainedBestFit &&
              c.kind == AlignmentConstraintKind::Soft && c.priority >= 63) ||
@@ -257,7 +302,7 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
             return false;
     for (const auto &p : r.fitPairs)
         if (!Finite(Vector(p.nominalPoint)) || !Positive(p.weight) || p.weight > 1e12 ||
-            (p.targetNormal && !Direction(*p.targetNormal)))
+            (p.targetNormal && !GetUnitDirectionValid(*p.targetNormal)))
             return false;
     return true;
 }
@@ -265,8 +310,6 @@ bool AlignmentGeometryFit::GetRecipeValid(const AlignmentRecipe &r, const Alignm
 AlignmentStatus AlignmentGeometryFit::GetWorkStatus(const AlignmentWork &work) {
     if (work.cancelled && work.cancelled->load(std::memory_order_relaxed))
         return AlignmentStatus::Cancelled;
-    if (std::chrono::steady_clock::now() >= work.deadline)
-        return AlignmentStatus::DeadlineExceeded;
     return AlignmentStatus::FullyDetermined;
 }
 
@@ -317,9 +360,9 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
     std::set<std::uint64_t> seen;
     const auto checkStorage = [&](std::size_t count) {
         if (count > std::numeric_limits<std::size_t>::max() / 1024
-            || WorkLimit(work.config.workingBytes) < 65536
-            || count > (WorkLimit(work.config.workingBytes) - 65536) / 1024)
-            throw std::length_error("Selection storage exceeds working budget.");
+            || std::numeric_limits<std::size_t>::max() < 65536
+            || count > (std::numeric_limits<std::size_t>::max() - 65536) / 1024)
+            throw std::length_error("Selection storage size accounting overflows.");
     };
     const auto add = [&](std::size_t index) {
         Require(index < n, "Selection index is out of bounds.");
@@ -336,8 +379,6 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
             ++result.rejected;
             return;
         }
-        if (work.config.pointLimit && result.points.size() >= work.config.pointLimit)
-            throw std::length_error("Selection exceeds point budget.");
         if (result.points.size() == std::numeric_limits<std::size_t>::max())
             throw std::length_error("Selection count overflows.");
         checkStorage(result.points.size() + 1);
@@ -439,7 +480,8 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
     }
     if (spec.kind == AlignmentGeometryKind::Sphere || spec.kind == AlignmentGeometryKind::Circle ||
         spec.kind == AlignmentGeometryKind::Cylinder)
-        shape = FitRound(work, spec.kind, points, shape);
+        shape = FitRound(work, spec.kind, points, shape,
+            spec.kind == AlignmentGeometryKind::Circle && normalConstraint && isFixedNormal);
     if (spec.kind == AlignmentGeometryKind::Cylinder)
         shape.center -= shape.center.dot(shape.normal) * shape.normal;
     AlignmentGeometry output;
@@ -454,10 +496,27 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
             : 0;
     output.sampleCount = points.size();
     output.rejectedCount = samples.rejected;
+    output.support=AlignmentGeometrySupport{};
+    auto &support=*output.support;
+    for (int i=0;i<3;++i)
+        support.principalRmsSpreads[i]=std::sqrt(std::max(0.0,svd.w.at<double>(i))/points.size())*work.recipe.lengthScale;
+    const bool hasAngular=spec.kind==AlignmentGeometryKind::Circle || spec.kind==AlignmentGeometryKind::Cylinder;
+    const bool hasAxial=spec.kind==AlignmentGeometryKind::Line || spec.kind==AlignmentGeometryKind::Cylinder;
+    const auto tangent=Tangent(shape.normal),bitangent=shape.normal.cross(tangent);
+    double axialLow=std::numeric_limits<double>::infinity(),axialHigh=-axialLow;
+    Vec radialMean{};
+    std::size_t workSteps=0;
+    const auto check=[&] {
+        if (++workSteps%256==0 && GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)
+            throw std::runtime_error("Cancelled geometry support calculation.");
+    };
     double sum = 0;
-    for (const auto &p : points) {
+    for (auto &p : points) {
+        check();
         const auto q = p - shape.center;
         const auto axial = q.dot(shape.normal);
+        if (hasAxial) { axialLow=std::min(axialLow,axial); axialHigh=std::max(axialHigh,axial); }
+        if (spec.kind==AlignmentGeometryKind::Sphere) radialMean+=Unit(q)/static_cast<double>(points.size());
         double distance = 0;
         switch (spec.kind) {
         case AlignmentGeometryKind::Point:
@@ -482,6 +541,8 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
         distance *= work.recipe.lengthScale;
         sum += distance * distance;
         output.fitMax = std::max(output.fitMax, distance);
+        // 后续不再使用规范化坐标，复用私有点缓冲存放角度，不复制原测量样本。
+        if (hasAngular) p[0]=std::atan2(q.dot(bitangent),q.dot(tangent));
     }
     output.fitRms = std::sqrt(sum / static_cast<double>(points.size()));
     Require(std::isfinite(output.fitRms) && output.fitRms <= spec.maxFitRms,
@@ -489,5 +550,15 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
     if (spec.radiusRange)
         Require(output.radius >= (*spec.radiusRange)[0] && output.radius <= (*spec.radiusRange)[1],
                 "Geometry radius outside recipe range.");
+    if (hasAxial) support.axialSpan=(axialHigh-axialLow)*work.recipe.lengthScale;
+    if (spec.kind==AlignmentGeometryKind::Sphere) support.radialDirectionMeanLength=std::clamp(cv::norm(radialMean),0.0,1.0);
+    if (hasAngular) {
+        std::sort(points.begin(),points.end(),[&](const auto &a,const auto &b) { check(); return a[0]<b[0]; });
+        const double full=2*std::acos(-1.0);
+        double gap=full-points.back()[0]+points.front()[0];
+        for (std::size_t i=1;i<points.size();++i) { check(); gap=std::max(gap,points[i][0]-points[i-1][0]); }
+        support.angularSpanDegrees=std::clamp((full-gap)*360/full,0.0,360.0);
+    }
+    Require(GetSupportValid(output),"Geometry support is invalid or overflows.");
     return output;
 }

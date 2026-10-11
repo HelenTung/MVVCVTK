@@ -2,11 +2,13 @@
 
 #include "Data/DataGraphTypes.h"
 #include "Host/Types/HostViewTypes.h"
+#include "Host/VoxelVolume.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,7 +60,31 @@ enum class AlignmentStatus : std::uint8_t {
     Unsupported,
     BudgetExceeded,
     Unavailable,
-    InternalError
+    InternalError,
+    IoError,
+    ResourceExhausted
+};
+
+struct AlignmentReferenceRequest final {
+    std::string filePath;
+    std::string frameId;
+    std::string coordinateFrame;
+    // STL 不存长度单位。ModelUnit 仅能保持为 ModelUnit，不能推测物理单位。
+    AlignmentUnit fileUnit = AlignmentUnit::ModelUnit;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+};
+
+struct AlignmentReferenceSnapshot final {
+    DataRevisionRef mesh;
+    std::string filePath;
+    std::string sha256;
+    std::string frameId;
+    std::string coordinateFrame;
+    AlignmentUnit fileUnit = AlignmentUnit::ModelUnit;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+    std::uint64_t sourceBytes = 0;
+    std::uint64_t pointCount = 0;
+    std::uint64_t triangleCount = 0;
 };
 
 struct AlignmentInput final {
@@ -116,6 +142,61 @@ struct AlignmentFitPair final {
     double weight = 1.0;
 };
 
+struct AlignmentSurfaceScale final {
+    // 源坐标网格单元边长；0 使用全部选中顶点，不改变原计量网格。
+    double voxelSize = 0;
+    double maxPairDistance = 1;
+    std::size_t iterationLimit = 40;
+};
+struct AlignmentSurfaceStage final {
+    double voxelSize = 0, maxPairDistance = 0;
+    std::size_t selectedVertices = 0, samples = 0, iterations = 0, rejectedSamples = 0;
+    // 聚合后按代表点的配对状态累计组面积；acceptedArea 不是完整表面的逐点覆盖率。
+    double selectedArea = 0, acceptedArea = 0;
+    bool isConverged = false;
+};
+struct AlignmentSurfaceFit final {
+    // 空选区使用完整实测网格；ROI 在初始姿态下确定后固定，不随迭代漂移。
+    std::optional<AlignmentRegion> sourceRegion;
+    // 编号属于 nominalData 指向的参考三角网格；空集合使用全部三角形。
+    std::vector<std::uint64_t> referenceTriangles;
+    std::size_t iterationLimit = 40;
+    bool isPointToPlane = true;
+    // 空列表保留全顶点单级行为；显式列表使用各级迭代上限，按粗到细且距离门槛不逐级放宽。
+    std::vector<AlignmentSurfaceScale> scales;
+};
+
+struct AlignmentPrealignParams final {
+    // 长度使用配方单位；sampleSpacing^2 是每个工作样本的目标面积，不是最小点间距。
+    double sampleSpacing = 0;
+    double normalRadius = 0;
+    double featureRadius = 0;
+    double maxPairDistance = 0;
+    double minCoverage = 0.25;
+    double edgeLengthRatio = 0.9;
+    // 粗候选的分群距离；0 使用 maxPairDistance，正式解仍用求解容差判别。
+    double candidateSeparation = 0;
+    std::size_t neighborLimit = 64;
+    std::size_t matchCount = 4;
+    std::size_t iterationLimit = 10000;
+    std::size_t candidateLimit = 8;
+    std::uint64_t randomSeed = 0;
+    // 空集合覆盖整个表面；源编号绑定 exactMesh，参考编号绑定 nominalData。
+    std::vector<std::uint64_t> sourceTriangles;
+    std::vector<std::uint64_t> referenceTriangles;
+};
+
+struct AlignmentPrealignStats final {
+    std::size_t sourceSamples = 0, referenceSamples = 0;
+    std::size_t sourceFeatures = 0, referenceFeatures = 0;
+    std::size_t trials = 0, candidates = 0;
+    double bestCoverage = 0;
+    // 源选区面积使用配方单位的平方；质量过滤的面与面积单独报告。
+    std::size_t sourceRejectedTriangles = 0;
+    double sourceSelectedArea = 0, sourceRejectedArea = 0;
+    bool isCandidateLimitReached = false;
+};
+
 struct AlignmentRecipe final {
     std::string id;
     std::string targetFrameId;
@@ -126,6 +207,9 @@ struct AlignmentRecipe final {
     // 最佳拟合的对应顶点绑定到 exactMesh；不允许在另一网格复用编号。
     DataRevisionRef exactMesh;
     std::vector<AlignmentFitPair> fitPairs;
+    // 与显式 fitPairs 互斥。nominalData 必须为同单位、同坐标轴约定的参考表面。
+    std::optional<AlignmentSurfaceFit> surfaceFit;
+    std::optional<AlignmentPrealignParams> prealignment;
     DataRevisionRef nominalData;
     // ConstrainedBestFit 时前 0..3 个几何为 A/B/C 基准，其余点对只优化余下运动。
     std::size_t datumCount = 3;
@@ -147,6 +231,18 @@ struct AlignmentRecipe final {
     double maxSurfaceFitResidual = 1.0;
 };
 
+struct AlignmentGeometrySupport final {
+    // 有效拟合样本相对质心的三个主方向 RMS 展宽，降序排列，使用模型长度单位。
+    // 描述离散样本分布，不代表工件尺寸、完整表面积覆盖率或计量不确定度。
+    std::array<double,3> principalRmsSpreads{};
+    // Line/Cylinder：样本投影到拟合轴上的最大值减最小值，不是整件轴向长度。
+    std::optional<double> axialSpan;
+    // Circle/Cylinder：容纳全部样本方位角的最小圆弧（度），等于 360 度减最大空隙。
+    // 有限离散整圈样本通常仍小于 360；不得据此宣称表面闭合或周向连续。
+    std::optional<double> angularSpanDegrees;
+    // Sphere：球心至样本的单位向量均值之长度，[0,1]；接近 1 表示方向集中。
+    std::optional<double> radialDirectionMeanLength;
+};
 struct AlignmentGeometry final {
     std::string id;
     AlignmentGeometryKind kind = AlignmentGeometryKind::Point;
@@ -158,6 +254,8 @@ struct AlignmentGeometry final {
     double fitMax = 0.0;
     std::size_t sampleCount = 0;
     std::size_t rejectedCount = 0;
+    // 旧结果或名义定义可以缺失；新成功拟合保留有效样本的支撑信息。
+    std::optional<AlignmentGeometrySupport> support;
 };
 
 struct AlignmentResidual final {
@@ -186,8 +284,235 @@ struct AlignmentDiagnostics final {
     std::size_t rejectedPairs = 0;
     bool isQualityPassed = false;
     std::string message;
+    std::optional<AlignmentPrealignStats> prealignment;
+    std::vector<AlignmentSurfaceStage> surfaceStages;
 };
 
+// 以下评价绑定已发布的刚体对齐结果；检测区域独立于配准选区。
+// NormalProjection 是最近名义三角面法向上的点积，不是全局内外符号距离或沿法向射线求交。
+enum class AlignmentDeviationMetric : std::uint8_t { UnsignedDistance, NominalNormalProjection };
+enum class AlignmentDeviationState : std::uint8_t {
+    NotSelected, Valid, InvalidSource, InvalidTarget, TooFar, NormalMismatch, NormalUnavailable
+};
+enum class AlignmentInspectionVerdict : std::uint8_t { NotEvaluated, Pass, Fail, Indeterminate };
+enum class AlignmentComputeBackend : std::uint8_t { Cpu, Cuda };
+struct AlignmentDeviationRequest final {
+    // CUDA 为显式选择；未构建/不可用时返回 Unavailable，不静默替换后端。
+    AlignmentComputeBackend computeBackend = AlignmentComputeBackend::Cpu;
+    DataRevisionRef alignmentResult;
+    AlignmentDeviationMetric metric = AlignmentDeviationMetric::UnsignedDistance;
+    // 编号属于 alignmentResult 固定的实测/名义网格，空集合使用全部三角形。
+    std::vector<std::uint64_t> sourceTriangles, referenceTriangles;
+    double maxDistance = 1;
+    std::optional<double> minNormalCosine;
+    // 与 metric 同定义、同长度单位；空值只报告偏差，不作合格判定。
+    std::optional<std::array<double, 2>> tolerance;
+    bool reverseCoverage = true;
+    bool requiresMeasurementQuality = false;
+    double minSupportRatio = 0, maxLocalizationSigma = 1, maxSurfaceFitResidual = 1;
+};
+struct AlignmentDeviationSample final {
+    // 下标直接对应原网格顶点；NotSelected/InvalidSource 时 value、distance 不可解释为测量值。
+    double value = 0, distance = 0, area = 0;
+    std::uint64_t closestTriangle = 0;
+    AlignmentDeviationState state = AlignmentDeviationState::NotSelected;
+};
+struct AlignmentDeviationStatistics final {
+    std::array<std::size_t, 7> counts{};
+    std::array<double, 7> areas{};
+    // 三角形面积三等分至顶点的离散面积积分；不是连续曲面误差极值保证。
+    double selectedArea = 0, evaluatedArea = 0, outOfToleranceArea = 0;
+    double minimum = 0, maximum = 0, mean = 0, rms = 0, absoluteP95 = 0;
+    bool hasValues = false;
+};
+struct AlignmentDeviationField final {
+    std::vector<AlignmentDeviationSample> samples;
+    AlignmentDeviationStatistics statistics;
+};
+struct AlignmentDeviationSnapshot final {
+    DataRevisionRef result, alignmentResult, sourceMesh, referenceMesh, transform;
+    // 选区编号也只读共享，状态轮询不复制大型 ROI。
+    std::shared_ptr<const AlignmentDeviationRequest> parameters;
+    AlignmentUnit unit = AlignmentUnit::ModelUnit;
+    AlignmentMatrix sourceToTarget = alignmentIdentity;
+    // 只读共享数组；查询不会再次复制完整场。reverse 只表示名义到实测的无符号覆盖距离。
+    std::shared_ptr<const AlignmentDeviationField> forward, reverse;
+    AlignmentInspectionVerdict verdict = AlignmentInspectionVerdict::NotEvaluated;
+    bool isCurrent = false;
+};
+
+struct AlignmentDeviationDisplay final {
+    DataRevisionRef result;
+    // 两端均为 NaN 时按有效样本自动定范围；有限端点表示固定范围，截断只影响颜色。
+    // 公差色显式启用；自动范围此时一并覆盖公差区间。
+    std::array<double,2> range{std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN()};
+    bool useToleranceColors = false;
+    bool isVisible = true;
+    std::optional<std::uint64_t> selectedVertex;
+};
+struct AlignmentDeviationSelection final {
+    DataRevisionRef result;
+    std::uint64_t vertex = 0;
+    AlignmentPoint sourcePoint{}, alignedPoint{};
+    AlignmentDeviationSample sample;
+    bool isCurrent = false;
+};
+
+enum class InspectionGeometrySource : std::uint8_t { MeasuredSurface, ReferenceSurface, NominalDefinition };
+struct InspectionIdealGeometry final {
+    AlignmentPoint center{}, direction{0,0,1};
+    double radius = 0;
+};
+struct InspectionSection final {
+    // 截面位于对齐目标坐标系；索引属于该精确计量网格，空集合遍历全网格。
+    DataRevisionRef pinnedMesh;
+    AlignmentPoint planePoint{}, planeNormal{0,0,1};
+    std::vector<std::uint64_t> triangles;
+    // 闭环等弧长取样的最大间距，至少 8 点。容差只用于平面分类和数值检查，不做空间焊接。
+    double sampleSpacing=.1, planeTolerance=1e-8;
+    // 多个截线分量时按距此点最近的分量选取；并列、开口或分支均不能静默成为圆。
+    std::optional<AlignmentPoint> selectionPoint;
+    double maxSelectionDistance=1;
+};
+struct InspectionSectionSample final {
+    std::uint64_t triangle=0;
+    std::array<double,3> barycentric{};
+    // 由原三角形重心坐标重建的点沿源截面法向投影至平面的带符号距离。
+    double planeCorrection=0;
+};
+struct InspectionSectionTrace final {
+    AlignmentPoint sourcePlanePoint{}, sourcePlaneNormal{0,0,1};
+    std::size_t components=0, closedLoops=0, selectedSegments=0;
+    std::size_t sourceTriangleCount=0;
+    double perimeter=0, sampleSpacing=0, maxPlaneCorrection=0;
+    std::vector<InspectionSectionSample> samples;
+};
+struct InspectionGeometrySpec final {
+    // NominalDefinition 仅使用 fit.id/kind 与 ideal；其他来源从独立 ROI 按最小二乘拟合。
+    AlignmentGeometrySpec fit;
+    InspectionGeometrySource source = InspectionGeometrySource::MeasuredSurface;
+    std::optional<InspectionIdealGeometry> ideal;
+    std::string definitionSource;
+    // 仅 Circle 支持截面模式；与 fit.region 互斥，平面方向采用 section.planeNormal。
+    std::optional<InspectionSection> section;
+};
+enum class InspectionMetric : std::uint8_t {
+    Radius, Diameter, CenterX, CenterY, CenterZ, CenterDistance,
+    OrientedDirectionAngleDegrees, SignedParallelPlaneDistance, FitRms, FitMaximum
+};
+struct InspectionOperand final {
+    std::size_t geometry = 0;
+    // Line/Cylinder 的位置必须以轴线与这个 Plane 的交点构造，不能采用任意轴心。
+    std::optional<std::size_t> sectionPlane;
+};
+struct InspectionMeasure final {
+    InspectionMetric metric = InspectionMetric::Diameter;
+    InspectionOperand first;
+    std::optional<InspectionOperand> second;
+    double maxParallelAngleDegrees = .001;
+};
+struct InspectionItem final {
+    std::string id, name;
+    InspectionMeasure measured;
+    // 二选一：明确名义标量，或在同一对齐坐标系中从名义几何计算相同量。
+    std::optional<double> nominal;
+    std::optional<InspectionMeasure> nominalMeasure;
+    std::string nominalSource;
+    // 实测值减名义值的允许区间；角度为度，其余量使用对齐长度单位。
+    std::optional<std::array<double,2>> deviationLimits;
+};
+struct InspectionPlan final {
+    std::string id;
+    DataRevisionRef alignmentResult;
+    std::vector<InspectionGeometrySpec> geometries;
+    std::vector<InspectionItem> items;
+    double lengthScale=1, rankTolerance=1e-10, conditionLimit=1e8, solveTolerance=1e-8;
+    std::size_t iterationLimit=100;
+    bool requiresMeasurementQuality=false;
+    double minSupportRatio=0, maxLocalizationSigma=1, maxSurfaceFitResidual=1;
+};
+struct InspectionGeometry final {
+    InspectionGeometrySource source=InspectionGeometrySource::MeasuredSurface;
+    AlignmentStatus status=AlignmentStatus::InvalidInput;
+    AlignmentGeometry fitted;
+    AlignmentPoint alignedCenter{}, alignedDirection{};
+    std::shared_ptr<const InspectionSectionTrace> section;
+    std::string message;
+};
+struct InspectionItemResult final {
+    std::string id;
+    std::optional<double> measured, nominal, deviation;
+    AlignmentInspectionVerdict verdict=AlignmentInspectionVerdict::Indeterminate;
+    std::string message;
+};
+struct InspectionReport final {
+    std::vector<InspectionGeometry> geometries;
+    std::vector<InspectionItemResult> items;
+    AlignmentInspectionVerdict verdict=AlignmentInspectionVerdict::NotEvaluated;
+    std::string algorithmVersion="metrology-inspection-2";
+    std::int64_t evaluatedUnixMilliseconds=0;
+    // FitRms/FitMaximum 是拟合残差，不是平面度、圆度、圆柱度或测量不确定度。
+};
+struct InspectionSnapshot final {
+    DataRevisionRef result, alignmentResult, sourceMesh, referenceData, transform;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    AlignmentMatrix sourceToTarget=alignmentIdentity;
+    std::shared_ptr<const InspectionPlan> plan;
+    std::shared_ptr<const InspectionReport> report;
+    bool isCurrent=false;
+};
+
+struct AlignmentScenePart final {
+    std::string id;
+    DataRevisionRef alignmentResult;
+    bool showMeasured=true,showReference=true;
+    std::optional<DataRevisionRef> inspection;
+    // 选择项目会高亮其 measured/nominal 两侧及构造截面涉及的几何。
+    std::optional<std::string> selectedItem;
+};
+struct AlignmentSceneDisplay final {
+    // 拟合线框使用 AlignmentConfig.axisLength 作为示意长度，圆柱线框长度不是高度测量。
+    // 黄色为选中元素，青绿为其他拟合，紫红为区域标记；这些颜色不用于公差判定。
+    // 场景目标坐标经 anchor 的逆变换进入 Host model 坐标；再由 Host modelToWorld 定位。
+    // measured: M * inverse(T_anchor) * T_part，reference: M * inverse(T_anchor)。
+    DataRevisionRef anchorAlignment;
+    std::vector<AlignmentScenePart> parts;
+    std::array<double,3> measuredColor{.15,.75,.9},referenceColor{.75,.75,.75};
+    double referenceOpacity=.5;
+    bool referenceWireframe=true,isVisible=true;
+    std::optional<std::string> selectedPart;
+    // 每个所选区域最多绘制这些采样标记；0 不绘制标记，区域边框仍显示。原始计划/截面样本不变。
+    std::size_t roiMarkerLimit=4096;
+};
+enum class AlignmentSceneRegionKind : std::uint8_t { VertexCandidates, TargetBounds, SectionSamples };
+struct AlignmentSceneRegionDisplay final {
+    std::size_t geometry=0;
+    AlignmentSceneRegionKind kind=AlignmentSceneRegionKind::VertexCandidates;
+    // bounds 不扫描全网格计数，缺失的截面 trace 也为空；不能用 0 冒充没有样本。
+    std::optional<std::uint64_t> sourceCount;
+    std::uint64_t drawnMarkers=0;
+};
+struct AlignmentSceneItem final {
+    std::string partId;
+    DataRevisionRef inspectionResult,alignmentResult,anchorAlignment;
+    std::size_t item=0;
+    std::vector<std::size_t> geometries;
+    // 共享冻结结果，可从 plan.geometries 追溯完整区域；不复制选区/截面数组。
+    std::shared_ptr<const InspectionPlan> plan;
+    std::shared_ptr<const InspectionReport> report;
+    std::vector<AlignmentSceneRegionDisplay> displayedRegions;
+    AlignmentMatrix targetToModel=alignmentIdentity;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    bool isCurrent=false,isSelected=false;
+};
+struct AlignmentSceneVertex final {
+    std::string partId;
+    DataRevisionRef alignmentResult,anchorAlignment,mesh;
+    std::uint64_t vertex=0;
+    bool isReference=false,isCurrent=false;
+    AlignmentUnit unit=AlignmentUnit::ModelUnit;
+    AlignmentPoint nativePoint{},targetPoint{},modelPoint{};
+};
 struct AlignmentResult final {
     std::uint64_t requestId = 0;
     AlignmentStatus status = AlignmentStatus::Unavailable;
@@ -198,11 +523,16 @@ struct AlignmentResult final {
     bool isActivated = false;
     bool isDisplayReady = false;
     std::string message;
+    DataRevisionRef referenceMesh;
+    DataRevisionRef deviationResult;
+    DataRevisionRef inspectionResult;
+    DataRevisionRef voxelVolumeResult;
+    bool isModelPoseApplied=false;
 };
 
 struct AlignmentArchive final {
     std::uint32_t schemaVersion = 1;
-    std::string algorithmVersion = "metrology-alignment-1";
+    std::string algorithmVersion = "metrology-alignment-3";
     AlignmentRecipe recipe;
     AlignmentInput input;
     // 导出值只用于交换；恢复不直接激活旧矩阵，必须以重映射输入重新求解。
@@ -227,7 +557,17 @@ enum class AlignmentAction : std::uint8_t {
     Activate,
     Deactivate,
     SetVisibility,
-    Restore
+    Restore,
+    ImportReference,
+    // FullyDetermined 表示计算/发布成功；合格判定读取 DeviationSnapshot.verdict。
+    EvaluateSurface,
+    SetDeviationDisplay,
+    Inspect,
+    EvaluateVoxelVolume,
+    // 以 resultRef 的绝对计量矩阵替换当前 Host 模型显示姿态；不是单部件变换。
+    // 仅当前显示数据等于结果源体或源网格时接纳，帧提交完成后才回调成功；不重采样。
+    ApplyModelPose,
+    SetSceneDisplay
 };
 struct AlignmentRequest final {
     AlignmentAction action = AlignmentAction::Start;
@@ -236,6 +576,7 @@ struct AlignmentRequest final {
     DataRevisionRef recipeRef;
     DataRevisionRef resultRef;
     // row-major，列向量：pTarget = sourceToTarget * pSource；不得包含尺度。
+    // 启用自动预对齐时保持默认；实际生成的候选保存在正式结果的输入记录中。
     std::vector<AlignmentMatrix> initialPoses{alignmentIdentity};
     std::optional<AlignmentArchive> archive;
     // Restore 时显式映射名义数据；source/mesh/scope 由 input 映射。
@@ -243,6 +584,12 @@ struct AlignmentRequest final {
     std::optional<bool> isVisible;
     std::uint64_t targetRequestId = 0;
     bool isActivationRequested = true;
+    std::optional<AlignmentReferenceRequest> reference;
+    std::optional<AlignmentDeviationRequest> deviation;
+    std::optional<AlignmentDeviationDisplay> deviationDisplay;
+    std::optional<InspectionPlan> inspection;
+    std::optional<VoxelVolumeRequest> voxelVolume;
+    std::optional<AlignmentSceneDisplay> sceneDisplay;
 };
 enum class AlignmentAdmissionStatus : std::uint8_t {
     Accepted,
@@ -260,15 +607,18 @@ using AlignmentCallback = std::function<void(AlignmentResult)>;
 
 struct AlignmentConfig final {
     HostViewTargets targetViews;
-    // 0 不启用数量预算；非零值只表示调用方显式选择的工作策略。
-    std::size_t pointLimit = 0;
-    std::size_t constraintLimit = 0;
-    std::optional<std::size_t> workingBytes {};
-    std::optional<std::size_t> deadlineMs{};
     double axisLength = 10.0;
     bool isOverlayVisible = true;
 };
 
+struct AlignmentModelPoseState final {
+    DataRevisionRef alignmentResult,displayedData;
+    AlignmentMatrix modelToWorld=alignmentIdentity;
+    std::uint64_t transformRevision=0,sessionGeneration=0;
+    DataBindingRevision bindingRevision=0;
+    AlignmentStatus status=AlignmentStatus::Unavailable;
+    bool isPending=false,isCurrent=false;
+};
 struct AlignmentState final {
     bool isAttached = false;
     bool isBusy = false;
@@ -279,4 +629,11 @@ struct AlignmentState final {
     std::uint64_t requestId = 0;
     DataRevisionRef activeResult;
     AlignmentStatus lastStatus = AlignmentStatus::Unavailable;
+    std::optional<AlignmentDeviationDisplay> deviationDisplay;
+    bool isDeviationDisplayReady = false;
+    AlignmentModelPoseState modelPose;
+    std::shared_ptr<const AlignmentSceneDisplay> sceneDisplay;
+    bool isSceneDisplayReady=false;
+    // 包含保守的渲染缓存计账，仅用于诊断；不是实测显存/工作集。
+    std::size_t sceneWorkingBytes=0;
 };
