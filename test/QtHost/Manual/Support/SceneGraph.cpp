@@ -76,6 +76,7 @@ SceneGraphTree::SceneGraphTree(QWidget* parent) : QTreeWidget(parent)
 {
     setColumnCount(3); setHeaderLabels({"目录条目", "状态", "来源"});
     setItemDelegateForColumn(2, new GraphDelegate(this));
+    header()->setMinimumSectionSize(28);
     header()->moveSection(2, 0); header()->setSectionResizeMode(2, QHeaderView::Interactive); header()->resizeSection(2, 36);
     setIndentation(14); setStyleSheet("QTreeView::item { min-height: 26px; } QHeaderView::section { padding: 5px; }");
 }

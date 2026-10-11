@@ -75,14 +75,18 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     panel->observeInBackground = true;
     auto preview = std::make_shared<PartPreviewDisplay>();
     panel->SetNotice("先分割生成零件，再选择零件进行属性设置、涂绘、拆分或合并；编辑候选需确认后才替换正式结果。等值面显示零件表面，体渲染保留灰度背景。种子使用体素索引，笔刷点和半径以毫米计。");
-    panel->AttachAction("Start", GetJson(R"({"threshold":0.5,"minPartVoxels":"1000"})"), [panel, feature, preview](auto id, const auto& params) {
+    panel->AttachAction("Start", GetJson(R"({"threshold":null,"minPartVoxels":"1"})"), [panel, feature, preview](auto id, const auto& params) {
+        const auto source = panel->GetSession()->GetImageDescriptor();
+        if (!source) throw std::invalid_argument("请先选择体数据输入");
+        const auto threshold = GetInputNumber(params, "threshold", GetScalarMidpoint(*source));
         PartSegmentationRequest request; request.action = PartSegmentationAction::Start;
-        request.start = PartSegmentationStartParams{GetPartViews(), GetNumber(params, "threshold"), GetId(params["minPartVoxels"])};
+        request.start = PartSegmentationStartParams{GetPartViews(), threshold, GetId(params["minPartVoxels"])};
         const QPointer<ModulePanel> owner(panel);
-        const auto admission = feature->SendRequest(std::move(request), [owner, id, preview](PartSegmentationResult result) {
+        const auto admission = feature->SendRequest(std::move(request), [owner, id, preview, threshold](PartSegmentationResult result) {
             if (owner) {
                 if (result.status == PartResultStatus::Succeeded) preview->RetryFailed();
                 auto detail = GetPartResult(result);
+                detail["threshold"] = threshold;
                 owner->SetComplete(id, result.status == PartResultStatus::Succeeded ? "Succeeded"
                     : result.status == PartResultStatus::SucceededWithDisplayFailure ? "SucceededWithDisplayFailure"
                     : result.status == PartResultStatus::Cancelled ? "Cancelled" : "Failed", detail);
@@ -168,6 +172,7 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     panel->onObserve = [panel, feature, preview] {
         auto summary = GetCatalog(*feature);
         const auto input = panel->GetSession()->GetImageDescriptor();
+        if (input) panel->GetParameterEditor("Start")->GetField("threshold")->SetDefaultValue(GetScalarMidpoint(*input));
         summary["hasCurrentParts"] = summary["hasCurrentParts"].toBool() && input && GetRefText(input->dataRevision) == summary["source"].toString();
         const auto catalog = feature->GetPartSetSnapshot();
         const auto candidate = feature->GetEditPreview();

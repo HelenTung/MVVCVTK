@@ -41,6 +41,10 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
         const auto host = session.lock();
         return host ? workflow.GetPublishedGraph(*host) : QJsonObject{};
     };
+    context.workflow.getImageInput = [session](DataRevisionRef source) {
+        const auto host = session.lock();
+        return host ? host->GetImageDescriptor(source) : std::optional<ImageDescriptor>{};
+    };
     context.workflow.getViewTransforms = [reference] { return reference->GetViewTransforms(); };
     std::shared_ptr<RoiEditingHostFeature> roi;
 #if defined(MANUAL_ROI)

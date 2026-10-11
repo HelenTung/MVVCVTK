@@ -3,6 +3,8 @@
 #include "Support/UiText.h"
 #include "Support/ParameterEditor.h"
 #include <QPointer>
+#include <QCheckBox>
+#include <QLineEdit>
 #include <algorithm>
 namespace Manual {
 namespace {
@@ -124,12 +126,15 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
             const QPointer<ModulePanel> owner(panel); bool accepted = false;
             for (auto& request : requests) {
                 const auto viewId = request.targetView.viewId;
-                accepted = (panel->GetSession()->SendRequest(std::move(request), [owner, batch, id, viewId](HostResult result) {
+                const auto complete = [owner, batch, id, viewId](HostResult result) {
                     if (!owner) return;
                     if (!result.isSucceeded) batch->errors.append(QString::fromStdString(viewId + ": " + result.message));
                     if (--batch->remaining == 0) owner->SetComplete(id, batch->errors.isEmpty() ? "Succeeded" : "Failed",
                         {{"views", batch->targets}, {"message", batch->errors.isEmpty() ? QString("已更新 %1 个视图的辅助显示").arg(batch->targets.size()) : batch->errors.join("；")}});
-                }).status == HostAdmissionStatus::Accepted) || accepted;
+                };
+                const auto admission = panel->GetSession()->SendRequest(std::move(request), complete);
+                if (admission.status == HostAdmissionStatus::Accepted) accepted = true;
+                else complete({false, admission.errorCode, admission.message});
             }
             panel->SetAdmission(id, accepted);
         }, TestPolicy::View);
@@ -187,6 +192,9 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         for (const auto* key : {"mode", "iso", "opacity", "quality", "windowLevel", "transfer", "axes"})
             applicability[key] = applied && IsDisplayFieldApplicable(effectiveMode, key, viewId == "primary-3d");
         display->SetFieldApplicability(applicability);
+        auto* isoField = display->GetField("iso");
+        if (applied && !isoField->findChild<QCheckBox*>("specified")->isChecked())
+            isoField->findChild<QLineEdit*>("value")->setText(QString::number(applied->isoThreshold, 'g', 17));
         display->GetField("axes")->SetAppliedBoolean(applied ? QJsonValue(applied->isAxesVisible) : QJsonValue(), viewId, applied ? QString() : "当前没有可用视图");
         auto* visibility = panel->GetParameterEditor("Visibility");
         const auto scope = visibility->GetField("viewScope")->GetValue().toString();

@@ -1,4 +1,6 @@
 #pragma once
+#include "ThicknessProfile.h"
+#include "ThicknessPositiveReference.h"
 // 原始存储灰度的连续三线性材料场；精确符号运算避免漏过单元内部孔隙。
 #include <algorithm>
 #include <array>
@@ -10,6 +12,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -62,85 +65,10 @@ inline int GetSign(const Q &value)
 {
     return value > 0 ? 1 : value < 0 ? -1 : 0;
 }
-// 每个初等运算向外扩一 ULP；只有符号得到区间证明时才跳过有理数路径。
-struct Interval
-{
-    double low = 0, high = 0;
-    Interval() = default;
-    Interval(double value) : low(value), high(value)
-    {
-    }
-    Interval(double lo, double hi) : low(lo), high(hi)
-    {
-    }
-};
-inline Interval GetInterval(double lo, double hi)
-{
-    return {std::nextafter(lo, -std::numeric_limits<double>::infinity()),
-            std::nextafter(hi, std::numeric_limits<double>::infinity())};
-}
 inline Interval GetInterval(const Q &value)
 {
     const double v = GetDoubleValue(value);
     return GetInterval(v, v);
-}
-inline Interval operator+(Interval a, Interval b)
-{
-    return GetInterval(a.low + b.low, a.high + b.high);
-}
-inline Interval operator-(Interval a, Interval b)
-{
-    return GetInterval(a.low - b.high, a.high - b.low);
-}
-inline Interval operator-(Interval a)
-{
-    return {-a.high, -a.low};
-}
-inline Interval operator*(Interval a, Interval b)
-{
-    const std::array<double, 4> p{a.low * b.low, a.low * b.high, a.high * b.low, a.high * b.high};
-    if (!std::all_of(p.begin(), p.end(), [](double v) { return std::isfinite(v); }))
-        return {-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
-    return GetInterval(*std::min_element(p.begin(), p.end()), *std::max_element(p.begin(), p.end()));
-}
-inline Interval operator/(Interval a, double positive)
-{
-    return GetInterval(a.low / positive, a.high / positive);
-}
-inline Interval &operator+=(Interval &a, Interval b)
-{
-    a = a + b;
-    return a;
-}
-inline int GetSign(Interval value)
-{
-    return value.low > 0 ? 1 : value.high < 0 ? -1 : 0;
-}
-template <class Number>
-inline std::array<Number, 4> GetLinePolynomial(const std::array<Number, 8> &nodes,
-                                               const std::array<Number, 3> &start,
-                                               const std::array<Number, 3> &delta, const Number &threshold)
-{
-    std::array<Number, 4> result{-threshold, Number(0), Number(0), Number(0)};
-    for (unsigned corner = 0; corner < 8; ++corner)
-    {
-        std::array<Number, 4> weight{Number(1), Number(0), Number(0), Number(0)};
-        for (unsigned axis = 0; axis < 3; ++axis)
-        {
-            const Number a = corner & (1U << axis) ? start[axis] : Number(1) - start[axis];
-            const Number b = corner & (1U << axis) ? delta[axis] : -delta[axis];
-            std::array<Number, 4> next{};
-            for (unsigned k = 0; k <= axis; ++k)
-            {
-                next[k] += weight[k] * a;
-                next[k + 1] += weight[k] * b;
-            }
-            weight = std::move(next);
-        }
-        for (unsigned k = 0; k < 4; ++k)
-            result[k] += nodes[corner] * weight[k];
-    }
-    return result;
 }
 
 struct Span
@@ -299,10 +227,39 @@ struct Result
 };
 struct Field
 {
+    struct UniformRegion
+    {
+        // 包含整块所有单元角点的节点范围；零符号表示无证书。
+        std::array<int, 6> extent{};
+        int sign = 0;
+    };
     std::array<int, 6> extent{};
     double threshold = 0;
     std::function<bool(const Index &, double &)> node;
     std::function<void()> check = [] {};
+    std::function<UniformRegion(const Index &)> uniformRegion;
+
+    // 相同连续材料证书的区间表示。只有整段严格正且旧预算必然可完成时接受；
+    // 面交点次序或符号无法证明时，交回下面的精确参数/根隔离，不猜测、不改容差。
+    bool GetPositivePath(const Point& from,const Point& delta,double length,double epsilon,Result& result) const
+    {
+        std::size_t pieces=0;
+        if (!GetPositiveCertificate(*this,from,delta,length,epsilon,pieces)) return false;
+        result.status=Status::Valid;result.trim={0,0};result.cells=pieces;
+        result.reason="single continuous material interval";return true;
+    }
+
+    UniformRegion GetUniformRegion(const Index &cell) const
+    {
+        if (!uniformRegion) return {};
+        const auto region = uniformRegion(cell);
+        if (region.sign != 1 && region.sign != -1 && region.sign != 0) return {};
+        for (unsigned a = 0; a < 3; ++a)
+            if (region.extent[2*a] >= region.extent[2*a+1]
+                || region.extent[2*a] < extent[2*a] || region.extent[2*a+1] > extent[2*a+1]
+                || cell[a] < region.extent[2*a] || cell[a] >= region.extent[2*a+1]) return {};
+        return region;
+    }
 
     bool GetCornerValues(const Index &cell, std::array<Q, 8> &values) const
     {
@@ -369,6 +326,8 @@ struct Field
     Result GetMaterialPath(const Point &from, const Point &delta, double length, double epsilon,
                            double maximumTrim, double tolerance = 1e-9) const
     {
+        ThicknessProfile::Increment(ThicknessProfile::PathCalls);
+        ThicknessProfile::Scope profile(ThicknessProfile::PathTime);
         Result result;
         try
         {
@@ -376,9 +335,11 @@ struct Field
                 !std::isfinite(tolerance) || epsilon <= 0 || length <= 4 * epsilon || maximumTrim < 0 ||
                 tolerance <= 0)
                 throw Unsupported("invalid path input");
+            if (GetPositivePath(from,delta,length,epsilon,result)) return result;
             QPoint start{}, difference{}, end{};
             const Q L = GetExactValue(length), E = GetExactValue(epsilon), begin = E / L, finish = 1 - begin;
             std::vector<Q> cuts{begin, finish};
+            std::vector<int> uniformSigns;
             for (unsigned a = 0; a < 3; ++a)
             {
                 if (extent[2 * a] >= extent[2 * a + 1])
@@ -394,7 +355,7 @@ struct Field
                     result.reason = "outside full support";
                     return result;
                 }
-                if (difference[a] != 0)
+                if (!uniformRegion && difference[a] != 0)
                 {
                     const auto lo = GetFloor(std::min(start[a], end[a])) + 1,
                                hi = GetFloor(std::max(start[a], end[a]));
@@ -408,35 +369,127 @@ struct Field
                     }
                 }
             }
-            std::sort(cuts.begin(), cuts.end());
-            cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+            if (uniformRegion)
+            {
+                // 以精确参数和块面交点切分；不借用射线的 double 步进结果作支撑证明。
+                cuts.clear(); cuts.push_back(begin);
+                Q current = begin;
+                while (current < finish)
+                {
+                    check();
+                    Index cell{};
+                    for (unsigned a = 0; a < 3; ++a)
+                    {
+                        const Q coordinate = start[a] + current * difference[a];
+                        cell[a] = GetFloor(coordinate);
+                        if (difference[a] < 0 && coordinate == Q(cell[a])) --cell[a];
+                        cell[a] = std::clamp<std::int64_t>(cell[a], extent[2*a], extent[2*a+1]-1);
+                    }
+                    const auto region = GetUniformRegion(cell);
+                    const bool hasRegion = region.extent[0] < region.extent[1];
+                    Q next = finish;
+                    for (unsigned a = 0; a < 3; ++a)
+                    {
+                        if (difference[a] == 0) continue;
+                        const auto face = hasRegion ? region.extent[2*a+(difference[a]>0?1:0)]
+                            : cell[a] + (difference[a]>0?1:0);
+                        const Q crossing = (Q(face)-start[a])/difference[a];
+                        if (crossing <= current) throw Unsupported("nonforward support step");
+                        next = std::min(next,crossing);
+                    }
+                    if (next <= current) throw Unsupported("nonforward support step");
+                    if (hasRegion && !region.sign)
+                    {
+                        // 混合块沿用整数单元面的原切分，不逐单元重复构造精确 DDA。
+                        std::vector<Q> mixedCuts{current,next};
+                        for (unsigned a = 0; a < 3; ++a)
+                        {
+                            if (difference[a] == 0) continue;
+                            const Q p = start[a]+current*difference[a], q = start[a]+next*difference[a];
+                            const auto lo = GetFloor(std::min(p,q))+1, hi = GetFloor(std::max(p,q));
+                            if (hi-lo > 10000) throw Unsupported("cell budget");
+                            for (auto face = lo; face <= hi; ++face)
+                            {
+                                const Q crossing = (Q(face)-start[a])/difference[a];
+                                if (crossing>current && crossing<next) mixedCuts.push_back(crossing);
+                            }
+                        }
+                        std::sort(mixedCuts.begin(),mixedCuts.end());
+                        mixedCuts.erase(std::unique(mixedCuts.begin(),mixedCuts.end()),mixedCuts.end());
+                        if (mixedCuts.size()-1 > 10000-cuts.size()) throw Unsupported("cell budget");
+                        for (std::size_t k=1;k<mixedCuts.size();++k)
+                        {
+                            cuts.push_back(mixedCuts[k]);uniformSigns.push_back(0);
+                        }
+                    }
+                    else
+                    {
+                        if (cuts.size() >= 10000) throw Unsupported("cell budget");
+                        cuts.push_back(next);uniformSigns.push_back(region.sign);
+                    }
+                    current = next;
+                }
+            }
+            else
+            {
+                std::sort(cuts.begin(), cuts.end());
+                cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+            }
             if (cuts.size() > 10000)
                 throw Unsupported("cell budget");
             Detail detail;
+            std::optional<Q> rootTolerance;
             for (std::size_t k = 1; k < cuts.size(); ++k)
             {
+                ThicknessProfile::Increment(ThicknessProfile::PathCells);
                 check();
                 const Q a = cuts[k - 1], b = cuts[k], mid = (a + b) / 2;
+                if (!uniformSigns.empty() && uniformSigns[k-1])
+                {
+                    ThicknessProfile::Increment(ThicknessProfile::PathBlocks);
+                    detail.spans.push_back({a,b,uniformSigns[k-1]});
+                    ++result.cells;
+                    continue;
+                }
                 Index cell{};
-                QPoint local{}, step{};
                 for (unsigned axis = 0; axis < 3; ++axis)
                 {
                     cell[axis] = std::min<std::int64_t>(GetFloor(start[axis] + mid * difference[axis]),
                                                         extent[2 * axis + 1] - 1);
-                    local[axis] = start[axis] + a * difference[axis] - cell[axis];
-                    step[axis] = (b - a) * difference[axis];
                 }
-                std::array<Q, 8> nodes;
-                if (!GetCornerValues(cell, nodes))
-                {
-                    result.status = Status::Missing;
-                    result.reason = "missing node";
-                    return result;
+                std::array<double, 8> rawNodes{};
+                // 单元八角严格同号时，三线性凸组合的整段符号已确定。
+                // 保持精确 cuts/材料区间合同，避免为纯材料单元构造大整数。
+                int uniformSign = 0;
+                bool uniform = true;
+                for (unsigned corner = 0; corner < 8; ++corner) {
+                    auto index = cell;
+                    for (unsigned axis = 0; axis < 3; ++axis) index[axis] += (corner >> axis) & 1U;
+                    double value = 0;
+                    if (!node(index, value) || !std::isfinite(value)) {
+                        result.status=Status::Missing;result.reason="missing node";return result;
+                    }
+                    rawNodes[corner]=value;
+                    const int sign = value > threshold ? 1 : value < threshold ? -1 : 0;
+                    if (!sign || (uniformSign && sign != uniformSign)) uniform = false;
+                    uniformSign = sign;
                 }
+                if (uniform && uniformSign) {
+                    detail.spans.push_back({a,b,uniformSign});
+                    ++result.cells;
+                    continue;
+                }
+                QPoint local{}, step{};
+                for (unsigned axis=0;axis<3;++axis) {
+                    local[axis]=start[axis]+a*difference[axis]-cell[axis];
+                    step[axis]=(b-a)*difference[axis];
+                }
+                ThicknessProfile::Increment(ThicknessProfile::PathMixedCells);
                 std::array<Interval, 8> boundedNodes{};
                 std::array<Interval, 3> boundedLocal{}, boundedStep{};
                 for (unsigned c = 0; c < 8; ++c)
-                    boundedNodes[c] = GetInterval(nodes[c]);
+                    // 原始 binary64 经 Q 往返仍是同一个数；保留相同的一 ULP 包围，省去大整数转换。
+                    boundedNodes[c] = GetInterval(rawNodes[c],rawNodes[c]);
                 for (unsigned axis = 0; axis < 3; ++axis)
                 {
                     boundedLocal[axis] = GetInterval(local[axis]);
@@ -449,16 +502,21 @@ struct Field
                                                      fp[0] + fp[1] + fp[2] + fp[3]};
                 const auto spanCount = detail.spans.size(), eventCount = detail.events.size(),
                            visited = detail.visited;
-                if (!GetCertifiedRootIntervals(bounds, a, b, GetExactValue(tolerance) / L, detail, check))
+                if (!rootTolerance) rootTolerance=GetExactValue(tolerance)/L;
+                if (!GetCertifiedRootIntervals(bounds, a, b, *rootTolerance, detail, check))
                 {
+                    ThicknessProfile::Increment(ThicknessProfile::ExactFallbacks);
                     detail.spans.resize(spanCount);
                     detail.events.resize(eventCount);
                     detail.visited = visited;
+                    std::array<Q,8> nodes;
+                    for (unsigned c=0;c<8;++c) nodes[c]=GetExactValue(rawNodes[c]);
                     const auto p = GetLinePolynomial(nodes, local, step, GetExactValue(threshold));
                     const Polynomial bernstein{p[0], p[0] + p[1] / 3, p[0] + 2 * p[1] / 3 + p[2] / 3,
                                                p[0] + p[1] + p[2] + p[3]};
-                    IsolateRoots(bernstein, a, b, GetExactValue(tolerance) / L, detail, check);
+                    IsolateRoots(bernstein, a, b, *rootTolerance, detail, check);
                 }
+                else ThicknessProfile::Increment(ThicknessProfile::IntervalCertificates);
                 ++result.cells;
             }
             auto &events = detail.events;

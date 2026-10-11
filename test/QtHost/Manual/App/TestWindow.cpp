@@ -3,6 +3,8 @@
 #include "FeatureSetup.h"
 #include "Support/JsonInput.h"
 #include "Support/UiText.h"
+#include "Support/ResultReport.h"
+#include <QTabWidget>
 #include <QApplication>
 #include <QDateTime>
 #include <QLocale>
@@ -25,6 +27,7 @@
 #include <QUrl>
 #include <QToolButton>
 #include <QSignalBlocker>
+#include <QDialog>
 namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
@@ -39,6 +42,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         "QGroupBox { font-weight: 600; border: 1px solid #d6dde5; border-radius: 4px; margin-top: 9px; padding-top: 8px; }"
         "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; } QLineEdit, QComboBox { min-height: 24px; }"
         "QPushButton:checked { background: #cce1f8; border: 1px solid #3677b5; color: #17416a; }"
+        "QPushButton[primaryCommand=\"true\"] { background: #2469a8; color: white; border-color: #2469a8; font-weight: 600; padding: 7px 14px; }"
+        "QPushButton[primaryCommand=\"true\"]:disabled { background: #e6ebf0; color: #7c8996; border-color: #d6dde5; }"
         "QTabBar::tab { padding: 9px 12px; background: #e8edf3; border-bottom: 3px solid transparent; }"
         "QTabBar::tab:selected { background: #f8fbff; border-bottom: 3px solid #357fbc; color: #14558b; font-weight: 600; }");
     resize(1560, 920);
@@ -49,10 +54,12 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_openVolume->setToolTip("选择输入文件，核对尺寸、间距等参数后点击“加载体数据”。（Ctrl+O）");
     auto* stop = new QPushButton("停止当前计算", root);
     auto* exportRecords = new QPushButton("导出测试记录", root);
+    auto* showReport = new QPushButton("结果报告 / CSV", root); showReport->setObjectName("showResultReport");
     auto* performance = new QPushButton("开始性能采样", root); performance->setCheckable(true);
     performance->setObjectName("performanceCapture");
     m_status = new QLabel("正在创建测试会话", root);
-    toolbar->addWidget(m_openVolume); toolbar->addWidget(m_status, 1); toolbar->addWidget(stop); toolbar->addWidget(performance); toolbar->addWidget(exportRecords); layout->addLayout(toolbar);
+    m_status->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred); m_status->setMinimumWidth(0);
+    toolbar->addWidget(m_openVolume); toolbar->addWidget(m_status, 1); toolbar->addWidget(stop); toolbar->addWidget(performance); toolbar->addWidget(showReport); toolbar->addWidget(exportRecords); layout->addLayout(toolbar);
     connect(m_openVolume, &QPushButton::clicked, this, [this] {
         auto* page = GetModule("Data"); if (!m_isReady || m_isClosing || !page) return;
         const auto currentPath = page->GetParameterEditor("Load")->GetField("filePath")->GetValue().toString();
@@ -65,7 +72,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     layout->addWidget(m_featureTabs);
     auto* split = new QSplitter(root); split->setChildrenCollapsible(false); layout->addWidget(split, 1);
     m_browsers = new QStackedWidget(split); m_browsers->setObjectName("browserStack"); m_browsers->setMinimumWidth(260);
-    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(380);
+    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(400);
     m_pages->setObjectName("parameterPages");
     connect(m_featureTabs, &QTabBar::currentChanged, m_browsers, &QStackedWidget::setCurrentIndex);
     connect(m_featureTabs, &QTabBar::currentChanged, m_pages, &QStackedWidget::setCurrentIndex);
@@ -77,7 +84,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         if (panel && m_isReady) panel->Observe();
         if (panel && !panel->GetNotice().isEmpty()) AppendLog(panel->GetNotice());
     });
-    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(520); auto* viewLayout = new QVBoxLayout(m_viewArea);
+    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(480); auto* viewLayout = new QVBoxLayout(m_viewArea);
     viewLayout->setContentsMargins(0, 0, 0, 0);
     // 四个图像区域共用同一网格和同高标题栏；窗口缩放不改变等分关系。
     auto* viewGrid = new QGridLayout; viewGrid->setObjectName("fourViewGrid");
@@ -114,7 +121,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         m_views.push_back({sliceIds[index], slice, sliceWindow});
     }
     split->addWidget(m_pages); split->setStretchFactor(0, 0); split->setStretchFactor(1, 1); split->setStretchFactor(2, 0);
-    split->setSizes({300, 770, 450});
+    split->setSizes({300, 760, 460});
     connect(m_renderMode, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         if (auto* page = GetModule("View")) {
             auto parameters = GetJson(R"({"viewId":"primary-3d","mode":null,"iso":null,"opacity":null,"quality":null,"axes":null,"windowLevel":null,"transfer":null})");
@@ -130,16 +137,21 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* logToggle = new QToolButton(root); logToggle->setText("操作日志"); logToggle->setCheckable(true);
     logToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); logToggle->setArrowType(Qt::RightArrow);
     layout->addWidget(logToggle);
-    m_log = new QPlainTextEdit(root); m_log->setReadOnly(true); m_log->setMaximumHeight(120); m_log->setMaximumBlockCount(1000);
+    m_log = new QPlainTextEdit(root); m_log->setReadOnly(true); m_log->setMaximumBlockCount(1000); m_log->setMaximumHeight(120);
     layout->addWidget(m_log); m_log->hide();
+    auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("运行结果报告"); reports->resize(940,620);
+    auto* reportLayout = new QVBoxLayout(reports); reportLayout->setContentsMargins(8,8,8,8);
+    m_report = new ResultReport(reports); reportLayout->addWidget(m_report);
     connect(logToggle, &QToolButton::toggled, this, [this, logToggle](bool visible) {
         m_log->setVisible(visible); logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
+    connect(showReport,&QPushButton::clicked,this,[reports]{reports->show();reports->raise();reports->activateWindow();});
     m_log->setObjectName("businessLog");
     m_log->setAccessibleName("操作说明与结果信息");
     m_log->setPlaceholderText("操作提交、执行进度和结果将在这里显示。");
     m_records.onChanged = [this](const QJsonObject& record) {
         AppendLog(GetFlowText(record));
+        m_report->SetRecord(record);
         QueueObserve();
     };
     AppendLog("正在初始化一个三维与三个切片视窗。");
@@ -157,6 +169,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         m_renderMode->setEnabled(descriptor.has_value()); fit->setEnabled(descriptor.has_value());
         const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "点击“打开体数据…”或拖入文件开始";
         if (m_status->text() != text) m_status->setText(text);
+        m_status->setToolTip(text);
         QueueObserve();
     };
     m_pump.onRendered = [this] { QueueObserve(); };
@@ -236,7 +249,6 @@ void TestWindow::BuildSession()
             const auto& target = m_views[index];
             HostRenderViewConfig view; view.id = target.id.toStdString(); view.role = roles[index];
             view.renderWindow = target.window; view.window.viewInit.viewMode = modes[index];
-            view.window.viewInit.hasIso = true; view.window.viewInit.isoThreshold = 0.5;
             view.window.isAxesVisible = index == 0;
             config.renderViews.push_back(std::move(view));
         }
@@ -273,6 +285,7 @@ void TestWindow::BuildSession()
             const auto* page = GetModule(module); return page && page->GetActions().contains(action);
         };
         m_isReady = true; m_openVolume->setEnabled(true);
+        if (auto* data = GetModule("Data")) data->SelectAction("Load");
         QStringList enabled;
         for (auto* page : m_modules) if (!page->GetActions().isEmpty()) enabled.append(page->GetDisplayName());
         AppendLog("测试会话已就绪：" + enabled.join("、") + "。点击“打开体数据…”选择文件，核对参数后加载。");

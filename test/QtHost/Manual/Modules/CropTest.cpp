@@ -127,7 +127,7 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         auto& op=request.operation;
         op.geometryType=GetEnum<CropShape>(p,"shape",{{"Box",CropShape::Box},{"Plane",CropShape::Plane},{"Sphere",CropShape::Sphere},{"Cylinder",CropShape::Cylinder}});
         op.removalMode=GetEnum<CropRemovalMode>(p,"removalMode",{{"KeepInside",CropRemovalMode::KeepInside},{"RemoveInside",CropRemovalMode::RemoveInside}});
-        op.boxToInputModelMatrix=GetArray<double,16>(p["matrix"]);
+        op.boxToInputModelMatrix=GetAffineMatrix(p["matrix"]);
         op.centerInInputModel=GetArray<double,3>(p["center"]);op.planeCenterInInputModel=op.centerInInputModel;
         op.axisInInputModel=GetArray<double,3>(p["axis"]);op.planeNormalInInputModel=op.axisInInputModel;
         op.radius=GetNumber(p,"radius");op.height=GetNumber(p,"height");

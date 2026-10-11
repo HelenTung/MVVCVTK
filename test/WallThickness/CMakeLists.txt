@@ -1,7 +1,35 @@
-add_executable(wall_thickness_tests ThicknessTests.cpp ThicknessMaterialFieldTests.cpp)
+# Boost 仅供冻结的 CPU 测试参照使用，生产 CUDA 引擎不依赖它。
+set(MVVCVTK_WALL_BOOST_ROOT "${MVVCVTK_DEPS_ROOT}/../third_party/boost" CACHE PATH
+    "Private Boost 1.88.0 header root for WallThickness test reference")
+if(NOT EXISTS "${MVVCVTK_WALL_BOOST_ROOT}/boost/version.hpp")
+    message(FATAL_ERROR "WallThickness tests require private Boost 1.88.0 headers: MVVCVTK_WALL_BOOST_ROOT")
+endif()
+file(STRINGS "${MVVCVTK_WALL_BOOST_ROOT}/boost/version.hpp" _wall_boost_version REGEX "^#define BOOST_VERSION ")
+if(NOT _wall_boost_version STREQUAL "#define BOOST_VERSION 108800")
+    message(FATAL_ERROR "WallThickness test reference requires exactly Boost 1.88.0 headers")
+endif()
+unset(_wall_boost_version)
+enable_language(CUDA)
+find_package(CUDAToolkit 13.2 REQUIRED)
+add_executable(wall_thickness_cuda_path_tests ThicknessCudaPathTests.cu ThicknessCudaPathReferenceTests.cpp ThicknessCudaProbe.h)
+target_include_directories(wall_thickness_cuda_path_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Reference"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/WallThickness/src")
+target_include_directories(wall_thickness_cuda_path_tests SYSTEM PRIVATE "${MVVCVTK_WALL_BOOST_ROOT}")
+set_target_properties(wall_thickness_cuda_path_tests PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES 89 CUDA_RUNTIME_LIBRARY Shared MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>" FOLDER "MVVCVTK/test/Automation")
+target_compile_options(wall_thickness_cuda_path_tests PRIVATE
+    "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--expt-relaxed-constexpr;--resource-usage;-Xcompiler=/fp:strict;-Xcompiler=/utf-8>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/fp:strict;/utf-8>")
+target_link_libraries(wall_thickness_cuda_path_tests PRIVATE CUDA::cudart)
+add_dependencies(wall_thickness_cuda_path_tests wall_thickness_cuda_runtime)
+add_test(NAME WallThickness.CudaPath COMMAND wall_thickness_cuda_path_tests)
+set_tests_properties(WallThickness.CudaPath PROPERTIES TIMEOUT 90)
+add_executable(wall_thickness_tests ThicknessTests.cpp ThicknessMaterialFieldTests.cpp ThicknessGrayRayTests.cpp Reference/ThicknessGrayRay.cpp)
 target_include_directories(wall_thickness_tests SYSTEM PRIVATE "${MVVCVTK_WALL_BOOST_ROOT}")
 target_compile_options(wall_thickness_tests PRIVATE /fp:strict)
 target_include_directories(wall_thickness_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/Reference"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/WallThickness/src")
 target_link_libraries(wall_thickness_tests PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
     MVVCVTK::WallThickness MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})

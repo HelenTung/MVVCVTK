@@ -13,7 +13,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         const auto catalog=panel->GetSession()->GetRoiDescriptors(true);
         draft.expectedCatalogRevision=catalog.empty()?0:catalog.front().catalogRevision;
         RoiNode node;
-        if (!p["boxToSource"].isNull()) node.primitive.localToSource=GetArray<double,16>(p["boxToSource"]);
+        if (!p["boxToSource"].isNull()) node.primitive.localToSource=GetAffineMatrix(p["boxToSource"]);
         else {
             auto& matrix=node.primitive.localToSource;
             for (int row=0;row<3;++row) {
@@ -34,7 +34,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
     panel->AttachAction("SetDraft",{{"boxToSource",QJsonValue()}},[panel,feature](auto id,const auto& p) {
         if (p["boxToSource"].isNull()) throw std::invalid_argument("请提供草稿区域框的变换矩阵");
         RoiEditingRequest request; request.action=RoiEditingAction::SetDraft;
-        request.boxToSource=GetArray<double,16>(p["boxToSource"]);
+        request.boxToSource=GetAffineMatrix(p["boxToSource"]);
         const auto result=feature->SendRequest(request);
         panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",static_cast<int>(result.error)}});
     },TestPolicy::Interaction,true);
