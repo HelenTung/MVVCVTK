@@ -26,6 +26,7 @@ public:
     std::function<bool(const std::string&)> getVisible;
     std::function<void()> onUpdated;
     std::function<void()> onRendered;
+    std::function<void(const HostViewRenderResult&)> onViewRendered;
     std::function<void(const QString&)> onError;
     std::function<void(const QString&, qint64)> onTiming;
     std::uint64_t GetUpdateCount() const { return m_updateCount; }

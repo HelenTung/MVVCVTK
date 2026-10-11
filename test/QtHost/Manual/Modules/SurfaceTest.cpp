@@ -49,7 +49,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
 ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeterminationHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
-    panel->SetNotice("选择体数据后，未提供初始阈值时采用当前灰度范围中值；背景/材料灰度也可显式指定。业务继续执行真实的表面定位和质量检查，定位稳定性不等于计量不确定度。");
+    panel->SetNotice("选择体数据后，阈值留空时由当前表面算法估计背景/材料峰；显式阈值或材料范围直接按所填值处理。继续执行真实表面定位和质量检查，定位稳定性不等于计量不确定度。");
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"minimumObjectVoxels":"0"})");
     {
         panel->AttachAction("GlobalAutomatic", parameters, [panel, feature](auto id, const auto& params) {
@@ -62,8 +62,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (params.contains("componentSelection")) start.componentSelection = GetEnum<SurfaceComponentSelection>(params, "componentSelection", {
                 {"Largest", SurfaceComponentSelection::Largest}, {"Seeded", SurfaceComponentSelection::Seeded}, {"All", SurfaceComponentSelection::All}});
             if (params.contains("materialRange") && !params["materialRange"].isNull()) start.materialRange = GetArray<double, 2>(params["materialRange"]);
-            const auto range = start.materialRange.value_or(source->scalarRange);
-            start.initialIsoValue = GetInputNumber(params, "initialIsoValue", range[0] * 0.5 + range[1] * 0.5);
+            if (!params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
             if (!params["roiModelBounds"].isNull()) {
                 const auto source = panel->GetSession()->GetImageDescriptor();

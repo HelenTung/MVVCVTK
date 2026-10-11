@@ -102,6 +102,7 @@ void QtHostPump::SendRender()
     m_nextFrame = now + std::chrono::milliseconds(33);
     bool wasRendered = false;
     for (const auto& view : result.views) {
+        if (view.status == HostRenderStatus::Rendered && onViewRendered) onViewRendered(view);
         if (onTiming && view.status == HostRenderStatus::Rendered)
             onTiming("Render." + QString::fromStdString(view.viewId), static_cast<qint64>(view.durationUs) * 1000);
         wasRendered = wasRendered || view.status == HostRenderStatus::Rendered;

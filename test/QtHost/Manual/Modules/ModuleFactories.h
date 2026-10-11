@@ -26,4 +26,6 @@ ModulePanel* CreateRotationTest(TestContext, std::shared_ptr<ModelRotationHostFe
 ModulePanel* CreateRoiTest(TestContext, std::shared_ptr<RoiEditingHostFeature>, QWidget*);
 ModulePanel* CreateAlignmentTest(TestContext, std::shared_ptr<MetrologyAlignmentHostFeature>,
     std::shared_ptr<ReferenceDataSource>, QWidget*);
+void AttachInspectionActions(ModulePanel*, std::shared_ptr<MetrologyAlignmentHostFeature>,
+    std::function<DataRevisionRef()> currentAlignment);
 }

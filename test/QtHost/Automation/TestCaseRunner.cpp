@@ -317,6 +317,17 @@ void CheckUiAndRecords(TestWindow& window)
     records.SetComplete(pending, "Ready", {}, {});
     records.SetProgress(pending, 100);
     Check(events.last().contains("发布校正结果"), "terminal log explains next business action and rejects late progress");
+    const auto loaded = records.StartRecord("Data", "Load", {}, {});
+    records.SetRendered("primary-3d", "old:1", 10);
+    records.SetRendered("primary-3d", "loaded:1", 20);
+    records.SetComplete(loaded, "Succeeded", {}, {{"dataRevision", "loaded:1"}});
+    records.SetRendered("slice-top-down", "loaded:1", 30);
+    records.SetRendered("primary-3d", "other:1", 40);
+    const auto measured = records.GetRecord(loaded)["firstRenderedViews"].toObject();
+    Check(measured.size() == 2 && measured["primary-3d"].toObject()["dataRevision"] == "loaded:1"
+        && measured["primary-3d"].toObject()["renderCallMs"] == .02
+        && measured["slice-top-down"].toObject()["renderCallMs"] == .03,
+        "first rendering survives completion order and ignores later unrelated revisions");
 }
 void CheckSceneRefresh(TestWindow& window)
 {
@@ -1944,6 +1955,7 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         const auto checkpointPath = step["performanceCheckpoint"].toString();
         const auto timingsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetTimings();
+        const auto measurementsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetMeasurements();
         const auto requestedUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
         QElapsedTimer checkpointClock; checkpointClock.start();
         if (!checkpointPath.isEmpty()) std::cout << "phase=" << GetText(step,"module").toStdString() << "."
@@ -2164,6 +2176,18 @@ void StartSequence(TestWindow& window, const QString& path)
                     {"hostDiagnostics", window.GetDiagnostics()}}).toStdString();
             }
             Check(consistent, "all four committed scenes use the selected input and epoch with no pending updates or renders");
+            if (GetText(step, "module") == "Data" && GetText(step, "action") == "Load") {
+                const auto loaded = window.GetRecords().GetRecord(id);
+                const auto rendered = loaded["firstRenderedViews"].toObject();
+                const auto current = loaded["current"].toObject();
+                const auto revision = current["dataRevision"];
+                Check(rendered.size() == 4, "successful real load records first actual renders for all four views");
+                for (const auto* viewId : {"primary-3d", "slice-top-down", "slice-front-back", "slice-left-right"}) {
+                    const auto measured = rendered[viewId].toObject();
+                    Check(measured["dataRevision"] == revision && measured["requestToRenderReturnMs"].toString().toLongLong() >= 0
+                        && measured["renderCallMs"].isDouble(), "first render measurements use the exact view and loaded revision");
+                }
+            }
         }
         if (!checkpointPath.isEmpty()) {
             QJsonArray viewports;
@@ -2177,6 +2201,7 @@ void StartSequence(TestWindow& window, const QString& path)
                 {"requestedUtc",requestedUtc},{"checkpointUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
                 {"elapsedToCheckpointMs",QString::number(checkpointClock.elapsed())},{"businessElapsedMs",record["elapsedMs"]},
                 {"timingsBefore",timingsBefore},{"timingsAfter",window.GetRecords().GetTimings()},
+                {"measurementsBefore",measurementsBefore},{"measurementsAfter",window.GetRecords().GetMeasurements()},
                 {"viewports",viewports},{"isoThreshold",state ? QJsonValue(state->isoThreshold) : QJsonValue()},
                 {"frameGuardChecked",step["checkSceneConsistency"].toBool()}});
             std::cout << "phase=" << GetText(step,"module").toStdString() << "." << GetText(step,"action").toStdString()
@@ -2206,6 +2231,8 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
     try {
         Check(Wait([&] { return window.GetIsReady() || !window.GetFailure().isEmpty(); }), "window initializes");
         Check(window.GetIsReady(), window.GetFailure().toStdString().c_str());
+        Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
+        Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
         if (selfTest) StartSelfTest(window); else StartSequence(window, path);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
     if (!Wait([&] { return window.StopSession(); })) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }

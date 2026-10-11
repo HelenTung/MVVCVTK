@@ -38,6 +38,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
 private:
     void AppendLog(const QString& message);
+    void UpdateMeasurements();
     void QueueObserve();
     struct View { QString id; QVTKOpenGLNativeWidget* widget; vtkSmartPointer<vtkGenericOpenGLRenderWindow> window; };
     TestSession m_runtime;
@@ -53,6 +54,7 @@ private:
     QTabBar* m_featureTabs = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;
+    QLabel* m_measurements = nullptr;
     QPlainTextEdit* m_log = nullptr;
     ResultReport* m_report = nullptr;
     bool m_observeQueued = false;

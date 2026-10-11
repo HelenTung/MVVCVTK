@@ -68,11 +68,16 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) SetInputFile(dialog.selectedFiles().first());
     });
     m_featureTabs = new QTabBar(root); m_featureTabs->setObjectName("featureTabs"); m_featureTabs->setMinimumHeight(40);
-    m_featureTabs->setExpanding(true); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
+    m_featureTabs->setExpanding(false); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
     layout->addWidget(m_featureTabs);
+    m_measurements = new QLabel(root); m_measurements->setObjectName("businessMeasurements");
+    m_measurements->setWordWrap(true); m_measurements->setMinimumWidth(0);
+    m_measurements->setStyleSheet("QLabel { background: #edf4fb; padding: 7px; border-radius: 4px; }");
+    m_measurements->setToolTip("内存为当前测试进程的 OS 实测值，峰值从进程启动累计。加载为请求到终态；首次绘制和逐帧耗时到 Host/VTK Render 返回，不包含 GPU 完成或屏幕呈现。分项不可相加。");
+    layout->addWidget(m_measurements);
     auto* split = new QSplitter(root); split->setChildrenCollapsible(false); layout->addWidget(split, 1);
-    m_browsers = new QStackedWidget(split); m_browsers->setObjectName("browserStack"); m_browsers->setMinimumWidth(260);
-    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(400);
+    m_browsers = new QStackedWidget(split); m_browsers->setObjectName("browserStack"); m_browsers->setMinimumWidth(220);
+    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(320);
     m_pages->setObjectName("parameterPages");
     connect(m_featureTabs, &QTabBar::currentChanged, m_browsers, &QStackedWidget::setCurrentIndex);
     connect(m_featureTabs, &QTabBar::currentChanged, m_pages, &QStackedWidget::setCurrentIndex);
@@ -121,7 +126,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         m_views.push_back({sliceIds[index], slice, sliceWindow});
     }
     split->addWidget(m_pages); split->setStretchFactor(0, 0); split->setStretchFactor(1, 1); split->setStretchFactor(2, 0);
-    split->setSizes({300, 760, 460});
+    split->setSizes({230, 890, 420});
     connect(m_renderMode, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         if (auto* page = GetModule("View")) {
             auto parameters = GetJson(R"({"viewId":"primary-3d","mode":null,"iso":null,"opacity":null,"quality":null,"axes":null,"windowLevel":null,"transfer":null})");
@@ -152,6 +157,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_records.onChanged = [this](const QJsonObject& record) {
         AppendLog(GetFlowText(record));
         m_report->SetRecord(record);
+        UpdateMeasurements();
         QueueObserve();
     };
     AppendLog("正在初始化一个三维与三个切片视窗。");
@@ -170,9 +176,15 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         const auto text = descriptor ? QString::fromStdString(descriptor->metadata.identity.datasetId) + QString("  ·  %1 × %2 × %3").arg(descriptor->dims[0]).arg(descriptor->dims[1]).arg(descriptor->dims[2]) : "点击“打开体数据…”或拖入文件开始";
         if (m_status->text() != text) m_status->setText(text);
         m_status->setToolTip(text);
+        UpdateMeasurements();
         QueueObserve();
     };
-    m_pump.onRendered = [this] { QueueObserve(); };
+    m_pump.onViewRendered = [this](const HostViewRenderResult& rendered) {
+        const auto session = m_runtime.GetSession();
+        const auto state = session ? session->GetRenderViewState({rendered.viewId}) : std::optional<HostRenderViewState>{};
+        if (state) m_records.SetRendered(QString::fromStdString(rendered.viewId), GetRefText(state->dataRevision), rendered.durationUs);
+    };
+    m_pump.onRendered = [this] { UpdateMeasurements(); QueueObserve(); };
     m_pump.onTiming = [this](const QString& name, qint64 ns) { m_records.AddTiming(name, ns); };
     m_workflow.getRenderPending = [this](const std::string& id) { return m_pump.GetIsRenderPending(id); };
     m_workflow.getViewRenderPending = [this](const std::string& id) { return m_pump.GetIsViewPending(id); };
@@ -210,6 +222,23 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         catch (const std::exception& e) { AppendLog("导出失败：" + QString::fromUtf8(e.what())); }
     });
     QMetaObject::invokeMethod(this, [this] { BuildSession(); }, Qt::QueuedConnection);
+    UpdateMeasurements();
+}
+void TestWindow::UpdateMeasurements()
+{
+    const auto measured = m_records.GetMeasurements();
+    const auto memory = measured["memory"].toObject();
+    const auto load = measured["load"].toObject();
+    const auto first = load["firstRenderedViews"].toObject()["primary-3d"].toObject();
+    const auto render = m_records.GetTimings()["Render.primary-3d"].toObject();
+    const auto mib = [&](const char* key) { return memory["available"].toBool()
+        ? QString::number(memory[key].toString().toULongLong() / 1048576.0, 'f', 1) : QString("不可用"); };
+    const auto elapsed = load["status"] == "Succeeded" ? load["requestToCompleteMs"].toString() + " ms" : QString("等待成功加载");
+    const auto text = QString("加载到终态：%1  ·  首次三维绘制返回：%2  ·  三维绘制：%3 次，平均 %4 ms / 最长 %5 ms\n私有提交：%6 MiB  ·  工作集：%7 MiB  ·  进程提交峰值：%8 MiB  ·  工作集峰值：%9 MiB")
+        .arg(elapsed).arg(first.isEmpty() ? "等待绘制" : first["requestToRenderReturnMs"].toString() + " ms（从加载请求起）")
+        .arg(render["count"].toDouble(), 0, 'f', 0).arg(render["meanMs"].toDouble(), 0, 'f', 2).arg(render["maxMs"].toDouble(), 0, 'f', 2)
+        .arg(mib("privateBytes")).arg(mib("workingSetBytes")).arg(mib("peakCommitBytes")).arg(mib("peakWorkingSetBytes"));
+    if (m_measurements->text() != text) m_measurements->setText(text);
 }
 void TestWindow::QueueObserve()
 {

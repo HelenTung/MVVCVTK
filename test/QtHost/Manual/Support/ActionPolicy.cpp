@@ -10,7 +10,8 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     const bool readableResult = (module == "Wall" || module == "Alignment")
         && (action == "Result" || action == "ResultEvidence" || action == "ExportArchive")
         && s["selectedResults"].toObject()[action].toBool();
-    if (!hasInput && !readableResult && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
+    const bool inspectionRead = module == "Alignment" && (action == "InspectionResult" || action == "DeviationResult" || action == "VoxelVolumeResult");
+    if (!hasInput && !readableResult && !inspectionRead && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
     if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
@@ -41,7 +42,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         && !s["selectedResults"].toObject()[action].toBool()) return "请在输入与结果中选择可用的业务结果。";
     if (module == "Rotation" && action == "Undo" && s["undoCount"].toString().toULongLong() == 0) return "当前没有可撤销的旋转。";
     if (module == "Alignment") {
-        if ((action == "ImportReference" || action == "SaveRecipe" || action == "Start" || action == "Restore") && s["isApplied"].toBool()) return "请先停用当前对齐结果，再准备或求解新方案。";
+        if ((action == "ImportReference" || action == "ImportNominalMesh" || action == "SaveRecipe" || action == "Start" || action == "Restore") && s["isApplied"].toBool()) return "请先停用当前对齐结果，再准备或求解新方案。";
         if ((action == "SaveRecipe" || action == "Start" || action == "Restore") && !s["isReferenceCurrent"].toBool()) return "请先导入当前输入的名义参考。";
         if (action == "Start" && !s["hasRecipe"].toBool()) return "请先保存对齐方案。";
         if ((action == "Activate" || action == "Result" || action == "ExportArchive")

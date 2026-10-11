@@ -35,11 +35,14 @@ protected:
 bool IsList(const QString& key)
 {
     static const QSet<QString> keys{"sourcePointsMM", "seeds", "barriers", "parts", "protectedParts", "overwriteParts",
-        "indexBoxes", "initialPoses", "colorNodes", "opacityNodes", "geometries", "constraints", "fitPairs", "vertexIds", "segments"};
+        "indexBoxes", "initialPoses", "colorNodes", "opacityNodes", "geometries", "constraints", "fitPairs", "vertexIds", "segments", "triangles", "sourceTriangles", "referenceTriangles", "scales"};
     return keys.contains(key);
 }
 QJsonValue Shape(const QString& key)
 {
+    if (key == "range" || key == "tolerance" || key == "deviationLimits" || key == "storedValueRange") return QJsonArray{0.,1.};
+    if (key == "selectionPoint") return QJsonArray{0.,0.,0.};
+    if (key == "nominal" || key == "minNormalCosine") return 0.;
     if (key == "worldCenter" || key == "seedModelPoint" || key == "targetNormal") return QJsonArray{0,0,0};
     if(key=="segmentFrom" || key=="segmentTo")return 0.0;
     if (key == "evaluationBounds" || key == "extent" || key == "roiModelBounds" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
@@ -65,12 +68,18 @@ QJsonValue Shape(const QString& key)
         || key.startsWith("profile") || key == "maximumOffsetModel" || key == "minPairNormalCosine"
         || key == "minimumEdgeWidthModel" || key == "maximumEdgeWidthModel" || key == "minimumEdgeSeparationModel") return 0.0;
 #if defined(MANUAL_ALIGNMENT)
+    if (key == "sourceRegion") return QJsonObject{{"pinnedMesh", "$mesh"}, {"vertexIds", QJsonArray{}}, {"targetBounds", QJsonValue()}};
+    if (key == "surfaceFit") return QJsonObject{{"sourceRegion", QJsonValue()}, {"referenceTriangles", QJsonArray{}}, {"iterationLimit", "40"}, {"isPointToPlane", true}, {"scales", QJsonArray{}}};
+    if (key == "prealignment") return QJsonObject{{"sampleSpacing", 0.}, {"normalRadius", 0.}, {"featureRadius", 0.}, {"maxPairDistance", 0.},
+        {"minCoverage", .25}, {"edgeLengthRatio", .9}, {"candidateSeparation", 0.}, {"neighborLimit", "64"}, {"matchCount", "4"},
+        {"iterationLimit", "10000"}, {"candidateLimit", "8"}, {"randomSeed", "0"}, {"sourceTriangles", QJsonArray{}}, {"referenceTriangles", QJsonArray{}}};
     if (key == "recipe") return GetReferenceTemplate(AlignmentMethod::Rps)["recipe"];
 #endif
     return QString();
 }
 QJsonValue RowTemplate(const QString& action, const QString& key, const QJsonArray& values)
 {
+    if (key == "scales") return QJsonObject{{"voxelSize", 0.}, {"maxPairDistance", 1.}, {"iterationLimit", "40"}};
     if (!values.isEmpty()) return values.first();
     if(key=="segments")return QJsonObject{{"segmentFrom",QJsonValue()},{"segmentTo",QJsonValue()},
         {"palette","Constant"},{"lowColor",QJsonArray{.7,.7,.7}},{"highColor",QJsonArray{.7,.7,.7}}};
@@ -82,7 +91,7 @@ QJsonValue RowTemplate(const QString& action, const QString& key, const QJsonArr
     if (key == "opacityNodes") return QJsonArray{0,1};
     if (key == "initialPoses") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (key == "parts" || key == "protectedParts" || key == "overwriteParts") return QString("selected");
-    if (key == "vertexIds") return QString("0");
+    if (key == "vertexIds" || key == "triangles" || key == "sourceTriangles" || key == "referenceTriangles") return QString("0");
 #if defined(MANUAL_ALIGNMENT)
     if (key == "geometries" || key == "constraints") return GetReferenceTemplate(AlignmentMethod::Rps)["recipe"].toObject()[key].toArray().first();
     if (key == "fitPairs") return GetReferenceTemplate(AlignmentMethod::ConstrainedBestFit)["recipe"].toObject()[key].toArray().first();
@@ -377,7 +386,8 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
     auto* layout = new QHBoxLayout(m_body); layout->setContentsMargins(0,0,0,0);
     auto choices = GetParameterChoices(m_module, m_key);
     if (m_module == "Alignment" && m_key == "kind") {
-        if (value == "Hard" || value == "Soft" || value == "Check") choices = {{"Hard", "硬约束"}, {"Soft", "软约束"}, {"Check", "校验约束"}};
+        if (m_action == "InspectGeometry") choices = {{"Circle", "圆"}, {"Sphere", "球"}, {"Cylinder", "圆柱"}};
+        else if (value == "Hard" || value == "Soft" || value == "Check") choices = {{"Hard", "硬约束"}, {"Soft", "软约束"}, {"Check", "校验约束"}};
         else choices = {{"Point", "点"}, {"Line", "直线"}, {"Plane", "平面"}, {"Circle", "圆"}, {"Sphere", "球"}, {"Cylinder", "圆柱"}};
     }
     if (!choices.isEmpty() && value.isString()) {

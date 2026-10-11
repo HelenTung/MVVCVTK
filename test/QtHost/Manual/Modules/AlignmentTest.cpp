@@ -9,7 +9,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
     std::shared_ptr<ReferenceDataSource> dataSource, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Alignment", parent);
-    panel->SetNotice("先选择当前源体，再导入名义参考 → 保存对齐方案 → 开始对齐 → 检查结果 → 应用对齐结果。模板须填写实测选区；接触关联尚未支持，最佳拟合需要明确的顶点对应。");
+    panel->SetNotice("有效测量表面 → 导入参考 → 保存方案 → 对齐 → 检测 / 偏差 / 报告。检测选区独立于配准选区；截面使用目标坐标系。未提供名义值时只报告实测，不判合格。模型姿态只改变显示，不重采样。");
     struct State { std::optional<ReferenceInput> reference; DataRevisionRef recipe; DataRevisionRef result; bool isReviewed = false; };
     auto state = std::make_shared<State>();
     for (const auto& method : std::vector<std::pair<QString, AlignmentMethod>>{
@@ -35,6 +35,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             state->reference = dataSource->LoadReference(GetText(p, "filePath"), source, mesh);
             state->recipe = {}; state->result = {}; state->isReviewed = false;
             panel->SetComplete(id, "ReferencePublished", {{"input", GetInputJson(GetAlignmentInput(*state->reference))},
+                {"recipe", state->reference->document["recipe"]},
                 {"nominal", GetRefText(state->reference->nominal)}, {"evidenceKind", state->reference->document["evidenceKind"]},
                 {"provenance", state->reference->document["provenance"]}, {"validationRoute", "trusted-input + public-feature"}});
         });
@@ -60,6 +61,25 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             : result.status == AlignmentStatus::Stale ? "Stale" : "Failed";
         owner->SetComplete(id, status, summary);
     };
+    panel->AttachAction("ImportNominalMesh", GetJson(R"({"filePath":"","frameId":"nominal-frame","coordinateFrame":"RAS","fileUnit":"Millimeter","unit":"Millimeter"})"),
+        [panel, state, feature, complete](auto id, const auto& p) {
+            if (!state->reference) throw std::invalid_argument("先导入参考方案，再导入其名义网格");
+            AlignmentReferenceRequest reference; reference.filePath = GetText(p, "filePath").toUtf8().toStdString();
+            reference.frameId = GetText(p, "frameId").toStdString(); reference.coordinateFrame = GetText(p, "coordinateFrame").toStdString();
+            const auto unit = [&](const char* key) { return GetEnum<AlignmentUnit>(p, key, {{"ModelUnit", AlignmentUnit::ModelUnit}, {"Millimeter", AlignmentUnit::Millimeter}, {"Meter", AlignmentUnit::Meter}}); };
+            reference.fileUnit = unit("fileUnit"); reference.unit = unit("unit");
+            if (reference.unit != GetAlignmentInput(*state->reference).unit || reference.coordinateFrame != state->reference->coordinateFrame.toStdString())
+                throw std::invalid_argument("名义网格与参考方案的单位/坐标约定不一致");
+            AlignmentRequest request; request.action = AlignmentAction::ImportReference; request.reference = reference;
+            const auto admission = feature->SendRequest(std::move(request), [state, complete, id](auto result) {
+                if (result.status == AlignmentStatus::FullyDetermined && GetDataRevisionRefValid(result.referenceMesh)) {
+                    state->reference->nominal = result.referenceMesh; state->recipe = {}; state->result = {}; state->isReviewed = false;
+                }
+                complete(id, result);
+            });
+            panel->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
+                {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
+        }, TestPolicy::Change, true);
     panel->AttachAction("SaveRecipe", {{"recipe", QJsonValue()}}, [panel, state, feature, complete](auto id, const auto& p) {
         if (!state->reference) throw std::invalid_argument("请先导入参考文件");
         const auto json = p["recipe"].isNull() ? state->reference->document["recipe"].toObject() : p["recipe"].toObject();
@@ -157,7 +177,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             if (feature->GetResult(ref)) results.append({GetRefText(ref),"对齐结果 · #" + node["order"].toString()});
         }
         QJsonObject selectedResults;
-        for (const auto* action : {"Result","Activate","ExportArchive"})
+        for (const auto* action : {"Result","Activate","ExportArchive","InspectSection","InspectGeometry","EvaluateSurface","ApplyModelPose","SetSceneDisplay","ExportReport"})
             if (auto* form = panel->GetParameterEditor(action))
                 if (auto* field = form->GetField("result")) {
                     field->SetReferenceChoices(results);
@@ -185,6 +205,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             {"lastStatus", static_cast<int>(current.lastStatus)}, {"activeResult", GetRefText(current.activeResult)},
             {"savedRecipe", GetRefText(state->recipe)}, {"lastResult", GetRefText(state->result)}});
     };
+    AttachInspectionActions(panel, feature, [state] { return state->result; });
     panel->onStop = [panel] { panel->SendAction("Cancel", {{"targetRequestId", "0"}}); };
     return panel;
 }

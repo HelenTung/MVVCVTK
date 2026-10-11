@@ -19,6 +19,8 @@ public:
         const QJsonObject& result, const QJsonObject& current);
     QJsonObject GetRecord(std::uint64_t id) const;
     QJsonObject GetRecords() const;
+    QJsonObject GetMeasurements() const;
+    void SetRendered(const QString& viewId, const QString& dataRevision, qint64 durationUs);
     void AddTiming(const QString& name, qint64 nanoseconds);
     QJsonObject GetTimings() const;
     void StartTiming() { m_timings.clear(); m_isTiming = true; }
@@ -26,7 +28,8 @@ public:
     void StopPending(const QJsonObject& current);
     std::function<void(const QJsonObject&)> onChanged;
 private:
-    struct Entry { QJsonObject value; QElapsedTimer clock; };
+    struct Entry { QJsonObject value, rendered; QElapsedTimer clock; };
+    static void BindLoadRenders(Entry& entry);
     std::vector<Entry> m_entries;
     struct Timing { std::uint64_t count = 0, total = 0, maximum = 0, over16ms = 0; };
     std::map<QString, Timing> m_timings;

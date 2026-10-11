@@ -36,6 +36,19 @@ DataRevisionRef GetMeshRef(const QJsonValue& value, DataRevisionRef mesh)
 {
     return value.toString() == "$mesh" ? mesh : GetRef(value);
 }
+AlignmentRegion ReadRegion(const QJsonObject& p, DataRevisionRef mesh)
+{
+    AlignmentRegion region; region.pinnedMesh = GetMeshRef(p["pinnedMesh"], mesh);
+    for (const auto id : p["vertexIds"].toArray()) region.vertexIds.push_back(GetId(id));
+    if (!p["targetBounds"].isNull()) region.targetBounds = GetArray<double, 6>(p["targetBounds"]);
+    return region;
+}
+QJsonObject WriteRegion(const AlignmentRegion& region)
+{
+    QJsonArray ids; for (const auto id : region.vertexIds) ids.append(QString::number(id));
+    return {{"pinnedMesh", GetRefText(region.pinnedMesh)}, {"vertexIds", ids},
+        {"targetBounds", region.targetBounds ? QJsonValue(GetValues(*region.targetBounds)) : QJsonValue()}};
+}
 }
 AlignmentRecipe GetRecipe(const QJsonObject& p, const DataRevisionRef& mesh, const DataRevisionRef& nominal)
 {
@@ -99,6 +112,29 @@ AlignmentRecipe GetRecipe(const QJsonObject& p, const DataRevisionRef& mesh, con
     MANUAL_RECIPE_NUMBER(minPairCoverage); MANUAL_RECIPE_NUMBER(huberDistance); MANUAL_RECIPE_NUMBER(minSupportRatio);
     MANUAL_RECIPE_NUMBER(maxLocalizationSigma); MANUAL_RECIPE_NUMBER(maxSurfaceFitResidual);
 #undef MANUAL_RECIPE_NUMBER
+    if (!p["surfaceFit"].isNull() && p.contains("surfaceFit")) {
+        const auto value = p["surfaceFit"].toObject(); AlignmentSurfaceFit fit;
+        if (!value["sourceRegion"].isNull()) fit.sourceRegion = ReadRegion(value["sourceRegion"].toObject(), mesh);
+        for (const auto id : value["referenceTriangles"].toArray()) fit.referenceTriangles.push_back(GetId(id));
+        fit.iterationLimit = GetId(value["iterationLimit"]); fit.isPointToPlane = GetBool(value, "isPointToPlane");
+        for (const auto item : value["scales"].toArray()) {
+            const auto scale = item.toObject(); fit.scales.push_back({GetNumber(scale, "voxelSize"), GetNumber(scale, "maxPairDistance"), GetId(scale["iterationLimit"])});
+        }
+        recipe.surfaceFit = std::move(fit);
+    }
+    if (!p["prealignment"].isNull() && p.contains("prealignment")) {
+        const auto value = p["prealignment"].toObject(); AlignmentPrealignParams params;
+#define MANUAL_PREALIGN_NUMBER(field) params.field = GetNumber(value, #field)
+        MANUAL_PREALIGN_NUMBER(sampleSpacing); MANUAL_PREALIGN_NUMBER(normalRadius); MANUAL_PREALIGN_NUMBER(featureRadius);
+        MANUAL_PREALIGN_NUMBER(maxPairDistance); MANUAL_PREALIGN_NUMBER(minCoverage); MANUAL_PREALIGN_NUMBER(edgeLengthRatio); MANUAL_PREALIGN_NUMBER(candidateSeparation);
+#undef MANUAL_PREALIGN_NUMBER
+#define MANUAL_PREALIGN_ID(field) params.field = GetId(value[#field])
+        MANUAL_PREALIGN_ID(neighborLimit); MANUAL_PREALIGN_ID(matchCount); MANUAL_PREALIGN_ID(iterationLimit); MANUAL_PREALIGN_ID(candidateLimit); MANUAL_PREALIGN_ID(randomSeed);
+#undef MANUAL_PREALIGN_ID
+        for (const auto id : value["sourceTriangles"].toArray()) params.sourceTriangles.push_back(GetId(id));
+        for (const auto id : value["referenceTriangles"].toArray()) params.referenceTriangles.push_back(GetId(id));
+        recipe.prealignment = std::move(params);
+    }
     return recipe;
 }
 QJsonObject GetRecipeJson(const AlignmentRecipe& recipe)
@@ -135,6 +171,28 @@ QJsonObject GetRecipeJson(const AlignmentRecipe& recipe)
     for (const auto& f : recipe.fitPairs) pairs.append(QJsonObject{{"vertexId", QString::number(f.vertexId)},
         {"nominalPoint", GetValues(f.nominalPoint)}, {"targetNormal", f.targetNormal ? QJsonValue(GetValues(*f.targetNormal)) : QJsonValue()}, {"weight", f.weight}});
     value["geometries"] = geometries; value["constraints"] = constraints; value["fitPairs"] = pairs;
+    value["surfaceFit"] = QJsonValue(); value["prealignment"] = QJsonValue();
+    if (recipe.surfaceFit) {
+        const auto& fit = *recipe.surfaceFit; QJsonArray ids, scales;
+        for (const auto id : fit.referenceTriangles) ids.append(QString::number(id));
+        for (const auto& scale : fit.scales) scales.append(QJsonObject{{"voxelSize", scale.voxelSize}, {"maxPairDistance", scale.maxPairDistance}, {"iterationLimit", QString::number(scale.iterationLimit)}});
+        value["surfaceFit"] = QJsonObject{{"sourceRegion", fit.sourceRegion ? QJsonValue(WriteRegion(*fit.sourceRegion)) : QJsonValue()},
+            {"referenceTriangles", ids}, {"iterationLimit", QString::number(fit.iterationLimit)}, {"isPointToPlane", fit.isPointToPlane}, {"scales", scales}};
+    }
+    if (recipe.prealignment) {
+        const auto& params = *recipe.prealignment; QJsonObject json;
+#define MANUAL_PREALIGN_NUMBER(field) json[#field] = params.field
+        MANUAL_PREALIGN_NUMBER(sampleSpacing); MANUAL_PREALIGN_NUMBER(normalRadius); MANUAL_PREALIGN_NUMBER(featureRadius);
+        MANUAL_PREALIGN_NUMBER(maxPairDistance); MANUAL_PREALIGN_NUMBER(minCoverage); MANUAL_PREALIGN_NUMBER(edgeLengthRatio); MANUAL_PREALIGN_NUMBER(candidateSeparation);
+#undef MANUAL_PREALIGN_NUMBER
+#define MANUAL_PREALIGN_ID(field) json[#field] = QString::number(params.field)
+        MANUAL_PREALIGN_ID(neighborLimit); MANUAL_PREALIGN_ID(matchCount); MANUAL_PREALIGN_ID(iterationLimit); MANUAL_PREALIGN_ID(candidateLimit); MANUAL_PREALIGN_ID(randomSeed);
+#undef MANUAL_PREALIGN_ID
+        QJsonArray source, reference;
+        for (const auto id : params.sourceTriangles) source.append(QString::number(id));
+        for (const auto id : params.referenceTriangles) reference.append(QString::number(id));
+        json["sourceTriangles"] = source; json["referenceTriangles"] = reference; value["prealignment"] = json;
+    }
     return value;
 }
 AlignmentInput GetAlignmentInput(const ReferenceInput& reference)
@@ -186,16 +244,21 @@ QJsonObject GetReferenceTemplate(AlignmentMethod method)
 QJsonObject GetAlignmentResult(const AlignmentResult& result)
 {
     const auto& d = result.diagnostics;
-    QJsonArray singular, stages, nullspace;
+    QJsonArray singular, stages, nullspace, surfaceStages;
     for (auto value : d.singularValues) singular.append(value);
     for (auto value : d.stageRemaining) stages.append(QString::number(value));
     for (const auto& value : d.nullspace) nullspace.append(GetValues(value));
+    for (const auto& s : d.surfaceStages) surfaceStages.append(QJsonObject{{"voxelSize", s.voxelSize}, {"maxPairDistance", s.maxPairDistance},
+        {"selectedVertices", QString::number(s.selectedVertices)}, {"samples", QString::number(s.samples)}, {"iterations", QString::number(s.iterations)},
+        {"rejectedSamples", QString::number(s.rejectedSamples)}, {"selectedArea", s.selectedArea}, {"acceptedArea", s.acceptedArea}, {"isConverged", s.isConverged}});
     return {{"status", static_cast<int>(result.status)}, {"requestId", QString::number(result.requestId)},
         {"recipe", GetRefText(result.recipe)}, {"result", GetRefText(result.result)}, {"transform", GetRefText(result.transform)},
+        {"referenceMesh", GetRefText(result.referenceMesh)},
         {"isActivated", result.isActivated}, {"isDisplayReady", result.isDisplayReady}, {"message", QString::fromStdString(result.message)},
         {"diagnostics", QJsonObject{{"status", static_cast<int>(d.status)}, {"hardRemaining", QString::number(d.hardRemaining)},
             {"remaining", QString::number(d.remaining)}, {"rms", d.rms}, {"maximum", d.maximum}, {"condition", d.condition},
             {"isQualityPassed", d.isQualityPassed}, {"singularValues", singular}, {"nullspace", nullspace}, {"stageRemaining", stages},
-            {"iterations", QString::number(d.iterations)}, {"rejectedPairs", QString::number(d.rejectedPairs)}, {"message", QString::fromStdString(d.message)}}}};
+            {"iterations", QString::number(d.iterations)}, {"rejectedPairs", QString::number(d.rejectedPairs)}, {"surfaceStages", surfaceStages},
+            {"message", QString::fromStdString(d.message)}}}};
 }
 }

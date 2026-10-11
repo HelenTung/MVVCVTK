@@ -1,5 +1,6 @@
 // 测试用途：记录功能操作的提交、接纳、真实进度与终态，保留精确修订和单次完成诊断。
 #include "TestRecordWriter.h"
+#include "ProcessMeasurements.h"
 #include <QDateTime>
 #include <QJsonArray>
 
@@ -14,7 +15,7 @@ std::uint64_t TestRecordWriter::StartRecord(const QString& module, const QString
         {"module", module}, {"action", action}, {"parameters", params}, {"source", source},
         {"startedUtc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
         {"hostUpdatesAtStart", static_cast<double>(m_timings["Host.Update"].count)},
-        {"status", "Sending"}, {"completeCount", 0}, {"isTerminal", false}};
+        {"status", "Sending"}, {"completeCount", 0}, {"isTerminal", false}, {"memoryAtStart", GetProcessMeasurements()}};
     m_entries.push_back(std::move(entry));
     if (onChanged) onChanged(m_entries.back().value);
     return id;
@@ -60,8 +61,10 @@ void TestRecordWriter::SetComplete(std::uint64_t id, const QString& status,
         entry.value["elapsedMs"] = QString::number(entry.clock.elapsed());
         entry.value["hostUpdatesAtComplete"] = static_cast<double>(m_timings["Host.Update"].count);
         entry.value["current"] = current;
+        entry.value["memoryAtComplete"] = GetProcessMeasurements();
         const auto source = entry.value["source"].toObject();
         entry.value["isSourceChanged"] = source["dataRevision"] != current["dataRevision"];
+        BindLoadRenders(entry);
     } else entry.value["duplicateCompletion"] = true;
     if (onChanged) onChanged(entry.value);
 }
@@ -74,7 +77,53 @@ QJsonObject TestRecordWriter::GetRecords() const
     QJsonArray values;
     for (const auto& entry : m_entries) values.append(entry.value);
     return {{"schema", "qt-feature-test-1"}, {"codeHead", MANUAL_CODE_HEAD},
-        {"buildConfig", MANUAL_BUILD_CONFIG}, {"sourceFingerprint", MANUAL_SOURCE_FINGERPRINT}, {"records", values}, {"performance", GetTimings()}};
+        {"buildConfig", MANUAL_BUILD_CONFIG}, {"sourceFingerprint", MANUAL_SOURCE_FINGERPRINT}, {"records", values}, {"performance", GetTimings()},
+        {"measurements", GetMeasurements()}};
+}
+void TestRecordWriter::SetRendered(const QString& viewId, const QString& dataRevision, qint64 durationUs)
+{
+    for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it) {
+        auto& value = it->value;
+        if (value["module"] != "Data" || value["action"] != "Load") continue;
+        if (dataRevision.isEmpty()) return;
+        if (value["isTerminal"].toBool() && (value["status"] != "Succeeded"
+            || value["current"].toObject()["dataRevision"] != dataRevision)) return;
+        // 每个视窗仅保存当前修订的首次事件。先绘制、后收到加载终态也保留真实顺序。
+        const auto previous = it->rendered[viewId].toObject();
+        if (previous["dataRevision"] != dataRevision)
+            it->rendered[viewId] = QJsonObject{{"dataRevision", dataRevision},
+                {"requestToRenderReturnMs", QString::number(it->clock.elapsed())}, {"renderCallMs", durationUs / 1000.0}};
+        BindLoadRenders(*it);
+        return;
+    }
+}
+void TestRecordWriter::BindLoadRenders(Entry& entry)
+{
+    const auto& value = entry.value;
+    if (value["module"] != "Data" || value["action"] != "Load" || value["status"] != "Succeeded") return;
+    QJsonObject views;
+    const auto current = value["current"].toObject();
+    const auto revision = current["dataRevision"];
+    for (auto it = entry.rendered.begin(); it != entry.rendered.end(); ++it) {
+        auto measured = it.value().toObject();
+        if (measured["dataRevision"] != revision) continue;
+        const auto difference = measured["requestToRenderReturnMs"].toString().toLongLong() - value["elapsedMs"].toString().toLongLong();
+        measured["completeToRenderReturnMs"] = QString::number(difference);
+        measured["renderBeforeCompleteNotification"] = difference < 0;
+        views[it.key()] = measured;
+    }
+    entry.value["firstRenderedViews"] = views;
+}
+QJsonObject TestRecordWriter::GetMeasurements() const
+{
+    QJsonObject result{{"memory", GetProcessMeasurements()}, {"renderBoundary", "Host/VTK Render call return; GPU completion and screen presentation are not measured"}};
+    for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
+        if (it->value["module"] == "Data" && it->value["action"] == "Load") {
+            result["load"] = QJsonObject{{"operationId", it->value["operationId"]}, {"status", it->value["status"]},
+                {"requestToCompleteMs", it->value["elapsedMs"]}, {"firstRenderedViews", it->value["firstRenderedViews"]}};
+            break;
+        }
+    return result;
 }
 void TestRecordWriter::AddTiming(const QString& name, qint64 nanoseconds)
 {

@@ -39,7 +39,13 @@ QString GetActionDescription(const QString& module, const QString& action)
         {"Surface.OpenAlignment", "使用当前有效测量表面进入对齐页，仍需导入名义参考文件。"},
         {"Alignment.Restore", "从归档恢复对齐方案，随后需重新求解，不会自动应用旧位姿。"},
         {"Alignment.Activate", "将所选有效对齐结果应用到当前作用域。"},
-        {"Alignment.SaveRecipe", "保存参考约束方案，原求解结果将失效；保存不等于完成求解。"}};
+        {"Alignment.SaveRecipe", "保存参考约束方案，原求解结果将失效；保存不等于完成求解。"},
+        {"Alignment.EvaluateSurface", "在固定对齐结果的实测/名义网格上评价偏差。法向投影是最近名义三角面法向的点积；未指定公差时不判合格。CUDA 不可用会明确返回，不自动换后端。"},
+        {"Alignment.InspectSection", "在对齐目标坐标系截取闭环、等弧长采样并拟合圆，报告直径与拟合 RMS。选区独立于配准；开口/分支不能当作圆。"},
+        {"Alignment.InspectGeometry", "从固定计量网格的顶点或目标坐标范围拟合圆、球或圆柱，报告直径与拟合 RMS；拟合残差不等于形位误差或测量不确定度。"},
+        {"Alignment.ApplyModelPose", "以计量刚体矩阵替换当前 Host 模型显示姿态；等待真实帧提交，不重采样体素。"},
+        {"Alignment.ExportReport", "冻结所选结果和当前 Feature 显示配置，写出 JSON/CSV；不覆盖已有文件。报告记录测量单位和名义来源，捕获成功不等于全部尺寸合格。"},
+        {"Alignment.EvaluateVoxelVolume", "在原生体素网格按存储值闭区间统计单元体积，不应用灰度标量校准；不依赖对齐。"}};
     const auto specific = descriptions.value(module + "." + action);
     if (!specific.isEmpty()) return specific;
     if (action == "SelectOutput") return "将所选已发布结果设为当前输入，后续业务使用该数据。";
@@ -53,7 +59,7 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
+        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -62,6 +68,11 @@ QString GetActionText(const QString& module, const QString& action)
     if (action == "GraphInfo") return "查看发布记录";
     if (module == "View" && action == "Visibility") return "应用辅助显示";
     static const QHash<QString, QString> specific{
+        {"Alignment.ImportNominalMesh", "导入名义 STL 网格"}, {"Alignment.EvaluateSurface", "计算表面偏差"}, {"Alignment.SetDeviationDisplay", "应用偏差色带"},
+        {"Alignment.InspectSection", "检测圆截面"}, {"Alignment.InspectGeometry", "检测独立选区"},
+        {"Alignment.InspectionResult", "查看尺寸检测结果"}, {"Alignment.DeviationResult", "查看偏差统计"},
+        {"Alignment.ApplyModelPose", "应用模型显示姿态"}, {"Alignment.SetSceneDisplay", "显示检测场景"},
+        {"Alignment.EvaluateVoxelVolume", "统计体素体积"}, {"Alignment.VoxelVolumeResult", "查看体素体积"}, {"Alignment.ExportReport", "导出计量报告"},
         {"Wall.Start", "计算局部壁厚"}, {"Wall.Result", "查看壁厚结果"}, {"Wall.SetEvaluation", "更新壁厚公差"},
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},
@@ -119,6 +130,23 @@ QString GetParameterSectionText(const QString& module, const QString& action)
 }
 QString GetParameterText(const QString& key)
 {
+    static const QHash<QString, QString> inspectionLabels{
+        {"inspection", "尺寸检测修订"}, {"deviation", "偏差结果修订"}, {"voxelVolume", "体素体积修订"},
+        {"computeBackend", "计算后端"}, {"metric", "偏差定义"}, {"sourceTriangles", "实测三角形编号"}, {"referenceTriangles", "名义三角形编号"},
+        {"minNormalCosine", "法向余弦下限"}, {"tolerance", "偏差公差（对齐长度单位）"}, {"reverseCoverage", "评价反向覆盖"},
+        {"planePoint", "截面点（目标坐标）"}, {"planeNormal", "截面法向（目标坐标）"}, {"triangles", "截面三角形编号"},
+        {"planeTolerance", "截面数值容差"}, {"selectionPoint", "截线选择点（目标坐标）"}, {"maxSelectionDistance", "截线选择最大距离"},
+        {"nominal", "名义直径（对齐长度单位）"}, {"nominalSource", "名义值来源"}, {"deviationLimits", "尺寸偏差允许区间"},
+        {"useToleranceColors", "启用公差色"}, {"selectedVertex", "选中偏差顶点"}, {"range", "显示数值范围"},
+        {"storedValueRange", "存储灰度闭区间"}, {"requireEnclosedSelection", "要求完整封闭选择"}, {"showMeasured", "显示实测网格"},
+        {"showReference", "显示名义网格"}, {"selectedItem", "高亮检测项目"}, {"roiMarkerLimit", "区域显示标记上限"},
+        {"captureCurrentDisplay", "捕获当前检测显示配置"}, {"includeDeviationSamples", "包含逐点偏差"}, {"format", "输出格式"},
+        {"surfaceFit", "曲面对齐（与显式对应点互斥）"}, {"prealignment", "自动粗对齐"}, {"sourceRegion", "固定实测选区"},
+        {"scales", "粗到细求解级别"}, {"voxelSize", "级别取样单元边长"}, {"isPointToPlane", "点到平面残差"},
+        {"fileUnit", "STL 文件声明单位"}, {"frameId", "名义坐标系标识"}, {"normalRadius", "法向搜索半径"}, {"featureRadius", "特征搜索半径"},
+        {"edgeLengthRatio", "边长比下限"}, {"candidateSeparation", "粗候选分群距离"}, {"neighborLimit", "邻域数量上限"},
+        {"matchCount", "候选匹配数"}, {"candidateLimit", "候选数量上限"}, {"randomSeed", "随机种子"}};
+    if (inspectionLabels.contains(key)) return inspectionLabels.value(key);
     if (key == "graphRevision") return "发布修订";
     if (key == "viewScope") return "辅助显示作用范围";
     static const QHash<QString, QString> labels{
@@ -247,6 +275,13 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if (module == "Alignment") {
+        if (key == "computeBackend") return {{"Cpu", "CPU"}, {"Cuda", "CUDA（显式）"}};
+        if (key == "metric") return {{"UnsignedDistance", "无符号最近距离"}, {"NominalNormalProjection", "名义面法向投影"}};
+        if (key == "format") return {{"Json", "JSON 完整上下文"}, {"Csv", "CSV 测量表"}};
+        if (key == "fileUnit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
+        if (key == "inspection" || key == "deviation" || key == "voxelVolume") return {{"current", "最近发布的对应结果"}};
+    }
     if (module=="Wall" && key=="boundaryPolicy") return {{"SourceExtentLocal","局部可证明支撑"},{"Complete","所有方向完整支撑"}};
     if ((module == "Wall" || module == "Alignment" || module == "Artifact" || module == "Surface") && key == "source")
         return {{"current", "当前体数据"}};
@@ -301,13 +336,14 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
     if (module == "Part") return {"target"};
     if (module == "Artifact") return {"requestId"};
     if (module == "Surface") return {"targetRequestId"};
-    if (module == "Wall" || module == "Alignment") return {"targetRequestId"};
+    if (module == "Alignment") return {"targetRequestId"};
+    if (module == "Wall") return {"targetRequestId"};
     if (module == "Data") return {"expectedBindingRevision"};
     return {};
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
-    if (QStringList{"source", "labels", "mesh", "result", "target", "parts", "revision", "filePath", "datasetId", "sourceDigest", "evidenceKind", "archivePath", "reference"}.contains(key))
+    if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "sourceDigest", "evidenceKind", "archivePath", "reference"}.contains(key))
         return "输入与结果";
     if (QStringList{"matrix", "boxToSource", "directionLPS", "dimensions", "spacingLPS", "originLPS", "initialPoses", "worldAxis", "worldCenter", "angleDeg", "slice"}.contains(key))
         return "空间与矩阵";
