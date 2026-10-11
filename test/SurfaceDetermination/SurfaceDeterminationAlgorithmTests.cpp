@@ -2,6 +2,7 @@
 #include "SurfaceDeterminationTestCases.h"
 
 #include "SurfaceDeterminationAlgorithm.h"
+#include "SurfaceSeedBuilder.h"
 #include "SurfaceDeterminationTestSupport.h"
 
 #include <vtkType.h>
@@ -396,5 +397,45 @@ int GetSurfaceAlgorithmFailCount()
     TestNoiseAndParameterValidation(checks);
     TestCancellationAndBudget(checks);
     TestGlobalAutomatic(checks);
+    return checks.failureCount;
+}
+
+int GetSurfaceSeedWindowFailCount()
+{
+    Checks checks;
+    std::vector<double> values(20);
+    std::vector<unsigned char> mask(20,1);
+    for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<5;++x)
+        values[(z*2+y)*5+x]=x-2.;
+    SurfaceSeedGrid grid;
+    grid.extent={-2,2,5,6,-4,-3};grid.dimensions={5,2,2};
+    grid.indexToModel=grid.modelToIndex={1,0,0,0,1,0,0,0,1};
+    grid.values=&values;grid.validity=mask.data();
+    grid.readScalar=[](const void* p,std::size_t i){return (*static_cast<const std::vector<double>*>(p))[i];};
+    const auto verify=[&](bool hasSurface,const char* message) {
+        std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+        const auto status=SurfaceSeedBuilder::BuildMesh(grid,0,{},0,1,1024U*1024U,[]{return false;},points,triangles,stats);
+        checks.Get(hasSurface ? status==SurfaceSeedStatus::Succeeded&&points.size()==4&&triangles.size()==2
+            &&std::all_of(points.begin(),points.end(),[](const auto& p){return p[0]==0;})
+            : status==SurfaceSeedStatus::NoSurface&&points.empty()&&triangles.empty(),message);
+    };
+    verify(true,"exact-threshold plane has four shared vertices and two triangles");
+    for(int z=0;z<2;++z)for(int y=0;y<2;++y)mask[(z*2+y)*5]=0;
+    verify(true,"left-cell invalid support does not leak into the next X cell");
+    std::fill(mask.begin(),mask.end(),1);
+    values[0]=std::numeric_limits<double>::quiet_NaN();
+    verify(true,"nonfinite corner expires when its X cell leaves the window");
+    values[0]=-2;mask[2]=0;
+    verify(false,"missing corner on the crossing cell cannot create a surface");
+    // 行末无效角不能污染下一行/下一层的独立 crossing cells。
+    values.resize(45);mask.assign(45,1);
+    for(int z=0;z<3;++z)for(int y=0;y<3;++y)for(int x=0;x<5;++x)
+        values[(z*3+y)*5+x]=x-2.;
+    grid.extent={-2,2,5,7,-4,-2};grid.dimensions={5,3,3};grid.validity=mask.data();
+    mask[4]=0;
+    std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+    const auto status=SurfaceSeedBuilder::BuildMesh(grid,0,{},0,1,1024U*1024U,[]{return false;},points,triangles,stats);
+    checks.Get(status==SurfaceSeedStatus::Succeeded&&points.size()==9&&triangles.size()==8,
+        "row-end invalid support resets before independent Y/Z crossing cells");
     return checks.failureCount;
 }

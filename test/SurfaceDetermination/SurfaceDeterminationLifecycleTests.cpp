@@ -14,6 +14,8 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1060,6 +1062,41 @@ void TestBusinessInputLifecycle(Checks &checks)
 
 
 } // namespace
+
+int GetSurfaceRealInputFailCount(const char* path,int nx,int ny,int nz,double iso,
+                                std::size_t expectedPoints,std::size_t expectedTriangles)
+{
+    Checks checks;
+    if(nx<2||ny<2||nz<2||std::size_t(nx)>SIZE_MAX/std::size_t(ny)
+        ||std::size_t(nx)*ny>SIZE_MAX/std::size_t(nz)/sizeof(float)) return 1;
+    auto image=vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(nx,ny,nz);image->SetSpacing(.1537,.1537,.1537);
+    image->AllocateScalars(VTK_FLOAT,1);
+    std::ifstream raw(path,std::ios::binary);
+    if(!raw.read(static_cast<char*>(image->GetScalarPointer()),std::size_t(nx)*ny*nz*sizeof(float))
+        ||raw.peek()!=std::char_traits<char>::eof()) return 1;
+    image->GetPointData()->GetScalars()->Modified();
+    TestHost testHost({});
+    if(!testHost.data->SetPrimaryImage(image)) return 1;
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(testHost.context),"real input attaches through Feature public entry");
+    auto request=GetStartRequest();
+    request.start->initialIsoValue=iso;request.start->componentSelection=SurfaceComponentSelection::All;
+    request.start->minimumObjectVoxels=0;request.start->modelUnit="mm";
+    int completed=0;SurfaceDeterminationResult terminal;
+    const auto admission=feature.SendRequest(request,[&](auto result){terminal=std::move(result);++completed;});
+    checks.Get(admission.status==SurfaceAdmissionStatus::Accepted,"real Surface request accepted");
+    checks.Get(WaitUntil(feature,[&]{return completed==1;}),"real Surface request completes once");
+    const auto snapshot=feature.GetSurfaceSnapshot();
+    checks.Get(terminal.status==SurfaceResultStatus::Succeeded&&snapshot&&snapshot->points&&snapshot->triangleIndices
+        &&snapshot->points->size()==expectedPoints&&snapshot->triangleIndices->size()/3==expectedTriangles,
+        "published real mesh matches independent original CPU baseline counts");
+    checks.Get(snapshot&&snapshot->sourceRevision==testHost.data->GetPrimaryImage()->data->self,
+        "real published generation retains exact source lineage");
+    feature.OnHostTick();checks.Get(completed==1,"terminal callback is not repeated");
+    checks.Get(feature.DetachHost(),"real input detaches cleanly");
+    return checks.failureCount;
+}
 
 int GetSurfaceLifecycleFailCount()
 {

@@ -1,6 +1,7 @@
 add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
+    SurfaceDeterminationOptimizationTests.cpp
     SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
     SurfaceDeterminationDisplayTests.cpp
@@ -8,6 +9,7 @@ add_executable(
     SurfaceDeterminationLifecycleTests.cpp
     SurfaceDeterminationTestCases.h
     SurfaceDeterminationTestSupport.h
+    SurfaceMeasurementSerialization.h
     SurfaceDeterminationTests.cpp
 )
 
@@ -55,7 +57,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display)
+foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display seed-window optimization)
     add_test(
         NAME "SurfaceDetermination.${_mvvcvtk_surface_suite}"
         COMMAND mvvcvtk_surface_determination_tests ${_mvvcvtk_surface_suite}
@@ -66,6 +68,69 @@ foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display)
     )
 endforeach()
 unset(_mvvcvtk_surface_suite)
+
+# 同一审计入口分别链接原始基线与候选，实现数值、资源及端到端对照。
+add_executable(mvvcvtk_surface_acceleration_audit SurfaceAccelerationAudit.cpp)
+target_include_directories(mvvcvtk_surface_acceleration_audit PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+target_link_libraries(mvvcvtk_surface_acceleration_audit PRIVATE
+    mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTK::SurfaceDetermination
+    MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} Psapi)
+SetTargetDefaults(mvvcvtk_surface_acceleration_audit)
+set_target_properties(mvvcvtk_surface_acceleration_audit PROPERTIES
+    OUTPUT_NAME SurfaceAccelerationAudit FOLDER "MVVCVTK/test/Automation")
+vtk_module_autoinit(TARGETS mvvcvtk_surface_acceleration_audit MODULES ${MVVCVTK_VTK_TARGETS})
+
+# 可选只读参考源必须由已核实提交提取；独立 target/object，不覆盖当前 Feature 实现。
+set(MVVCVTK_SURFACE_REFERENCE_DIR "" CACHE PATH "Read-only exact original Surface algorithm sources for measurement audit")
+if(MVVCVTK_SURFACE_REFERENCE_DIR)
+    foreach(_source SurfaceDeterminationAlgorithm.cpp SurfaceDeterminationAlgorithm.h SurfaceSeedBuilder.cpp SurfaceSeedBuilder.h)
+        if(NOT EXISTS "${MVVCVTK_SURFACE_REFERENCE_DIR}/${_source}")
+            message(FATAL_ERROR "Surface reference source missing: ${_source}")
+        endif()
+    endforeach()
+    add_library(mvvcvtk_surface_reference_algorithm STATIC
+        "${MVVCVTK_SURFACE_REFERENCE_DIR}/SurfaceDeterminationAlgorithm.cpp"
+        "${MVVCVTK_SURFACE_REFERENCE_DIR}/SurfaceSeedBuilder.cpp"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src/SurfaceContracts.cpp"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src/SurfaceRecipeCodec.cpp")
+    target_include_directories(mvvcvtk_surface_reference_algorithm PRIVATE
+        "${MVVCVTK_SURFACE_REFERENCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+    target_link_libraries(mvvcvtk_surface_reference_algorithm PRIVATE
+        MVVCVTK::FeatureSPI MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+    target_compile_definitions(mvvcvtk_surface_reference_algorithm PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    SetTargetDefaults(mvvcvtk_surface_reference_algorithm)
+    add_executable(mvvcvtk_surface_reference_audit SurfaceAccelerationAudit.cpp)
+    target_include_directories(mvvcvtk_surface_reference_audit BEFORE PRIVATE
+        "${MVVCVTK_SURFACE_REFERENCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include")
+    target_link_libraries(mvvcvtk_surface_reference_audit PRIVATE
+        mvvcvtk_surface_reference_algorithm mvvcvtk_host_test_internal MVVCVTK::Host
+        MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS} Psapi)
+    target_compile_definitions(mvvcvtk_surface_reference_audit PRIVATE MVVCVTK_SURFACE_REFERENCE_AUDIT=1)
+    SetTargetDefaults(mvvcvtk_surface_reference_audit)
+    set_target_properties(mvvcvtk_surface_reference_audit PROPERTIES
+        OUTPUT_NAME SurfaceOriginalMeasurementAudit FOLDER "MVVCVTK/test/Automation")
+    vtk_module_autoinit(TARGETS mvvcvtk_surface_reference_audit MODULES ${MVVCVTK_VTK_TARGETS})
+endif()
+if(TARGET surface_cuda_backend)
+    add_executable(mvvcvtk_surface_cuda_precision_tests SurfaceCudaPrecisionTests.cpp)
+    math(EXPR _surface_test_host_bytes "${MVVCVTK_SURFACE_CUDA_HOST_MIB} * 1048576")
+    math(EXPR _surface_test_device_bytes "${MVVCVTK_SURFACE_CUDA_DEVICE_MIB} * 1048576")
+    target_compile_definitions(mvvcvtk_surface_cuda_precision_tests PRIVATE
+        MVVCVTK_SURFACE_TEST_HOST_BYTES=${_surface_test_host_bytes}
+        MVVCVTK_SURFACE_TEST_DEVICE_BYTES=${_surface_test_device_bytes}
+        MVVCVTK_SURFACE_TEST_SLAB_REUSE=$<BOOL:${MVVCVTK_SURFACE_CUDA_SLAB_REUSE}>)
+    target_include_directories(mvvcvtk_surface_cuda_precision_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
+    target_link_libraries(mvvcvtk_surface_cuda_precision_tests PRIVATE MVVCVTK::SurfaceDetermination)
+    SetTargetDefaults(mvvcvtk_surface_cuda_precision_tests)
+    add_test(NAME SurfaceDetermination.cuda-precision COMMAND mvvcvtk_surface_cuda_precision_tests)
+    set_tests_properties(SurfaceDetermination.cuda-precision PROPERTIES SKIP_RETURN_CODE 77)
+    SetTestRuntime(SurfaceDetermination.cuda-precision mvvcvtk_surface_cuda_precision_tests)
+endif()
 
 # Pure business header probe deliberately has no Host/VTK/Qt include or link dependency.
 add_library(mvvcvtk_surface_recipe_header_probe OBJECT SurfaceRecipeHeaderProbe.cpp)
