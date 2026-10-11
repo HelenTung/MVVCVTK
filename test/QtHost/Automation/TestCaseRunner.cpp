@@ -2056,19 +2056,32 @@ void StartSequence(TestWindow& window, const QString& path)
             // 复用已有公共 interactor 鼠标路径，真实产生裁剪历史节点，禁止空发布冒充裁切。
             Check(GetText(step, "module") == "Crop", "cropDrag belongs to a crop operation");
             auto* panel = window.GetModule("Crop");
-            Check(Wait([&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); }),
+            Check(Wait([&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); }, timeout),
                 "crop input views settle before dragging");
             const auto before = panel->GetObservedState()["operationCount"].toString().toULongLong();
             bool hasDragged = false;
+            QJsonArray probes;
             for (const std::array<double,3> fraction : {std::array<double,3>{1,.5,.5}, {0,.5,.5},
                     {.5,1,.5}, {.5,0,.5}, {.5,.5,1}, {.5,.5,0}, {1,1,1}, {0,0,0}, {1,0,1}, {0,1,0}}) {
+                QElapsedTimer probeClock; probeClock.start();
                 SendCropDrag(window, fraction);
-                if (Wait([&] { panel->Observe(); return panel->GetObservedState()["operationCount"].toString().toULongLong() > before
-                        && panel->GetObservedState()["framesReady"].toBool(); }, 1500)) {
-                    hasDragged = true; break;
-                }
+                if (Wait([&] { panel->Observe(); return panel->GetObservedState()["operationCount"].toString().toULongLong() > before;
+                    }, 1500)) hasDragged = true;
+                probes.append(QJsonObject{{"fraction", GetValues(fraction)}, {"elapsedMs", QString::number(probeClock.elapsed())},
+                    {"state", panel->GetObservedState()}});
+                if (hasDragged) break;
             }
-            Check(hasDragged, "real mouse drag commits a crop node and all views present it");
+            // 无变化的拾取探测保持短等待；已经提交的节点按本步骤时限等待大数据真实帧。
+            const bool framesReady = hasDragged && Wait([&] {
+                panel->Observe(); const auto state = panel->GetObservedState();
+                return state["framesReady"].toBool() && state["appliedHead"] == state["renderedHead"];
+            }, timeout);
+            const QJsonObject audit{{"operationCountBefore", QString::number(before)}, {"probes", probes},
+                {"hasCommittedDrag", hasDragged}, {"framesReady", framesReady}, {"finalState", panel->GetObservedState()}};
+            if (step.contains("cropDragAudit")) ExportJson(GetText(step, "cropDragAudit"), audit);
+            if (!hasDragged || !framesReady) std::cerr << "Crop drag diagnostic: " << GetJsonText(audit).toStdString() << std::endl;
+            Check(hasDragged, "real mouse drag commits a new crop history node");
+            Check(framesReady, "all crop views present the exact committed history node within the step timeout");
         }
         if (step["switchFeaturesWhilePending"].toBool()) {
             Check(switchCount >= 11, "real pending operation survives switching across every feature page");
