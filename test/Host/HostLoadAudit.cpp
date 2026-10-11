@@ -39,8 +39,8 @@ public:
         Check(argc >= 3, "Usage: HostLoadAudit raw sourceSide [Low|High|Ultra] [--range-audit] [--quality-audit] [--geometry spacingMm originX originY originZ]");
         bool hasRangeAudit = false;
         bool hasQualityAudit = false;
-        float spacing = 0.1537F;
-        std::array<float, 3> origin{};
+        double spacing = 0.1537;
+        std::array<double, 3> origin{};
         const bool hasQuality = argc >= 4 && std::string(argv[3]).rfind("--", 0) != 0;
         const std::string qualityName = hasQuality ? argv[3] : "Ultra";
         const int firstOption = hasQuality ? 4 : 3;
@@ -50,12 +50,12 @@ public:
             else if (option == "--quality-audit") hasQualityAudit = true;
             else if (option == "--geometry") {
                 Check(i + 4 < argc, "Geometry requires spacing and three LPS origin components");
-                spacing = std::stof(argv[++i]);
-                for (auto& value : origin) value = std::stof(argv[++i]);
+                spacing = std::stod(argv[++i]);
+                for (auto& value : origin) value = std::stod(argv[++i]);
             } else Check(false, "Unknown audit option");
         }
         Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
-            [](float value) { return std::isfinite(value); }), "Invalid physical geometry");
+            [](double value) { return std::isfinite(value); }), "Invalid physical geometry");
         const std::string filePath = argv[1];
         const int side = std::stoi(argv[2]);
         Check(side > 1 && side <= 8192, "Invalid source dimensions");
@@ -102,7 +102,7 @@ public:
         HostViewSetRequest qualityRequest;
         qualityRequest.targetView.viewId = draw.viewIds.front();
         qualityRequest.volumeQuality = quality;
-        Check(session.SendRequest(std::move(qualityRequest)), "Quality request rejected");
+        Check((session.SendRequest(std::move(qualityRequest)).status == HostAdmissionStatus::Accepted), "Quality request rejected");
         SendPhase("session-ready");
 
         HostLoadRequest request;
@@ -122,7 +122,7 @@ public:
             SetMemorySample();
         };
         const auto requestStart = Clock::now();
-        Check(session.SendRequestResult(std::move(request), [&](HostResult result) { completed = std::move(result); }),
+        Check((session.SendRequest(std::move(request), [&](HostResult result) { completed = std::move(result); }).status == HostAdmissionStatus::Accepted),
             "Load admission failed");
         bool hasAccepted = false;
         while (!completed && Clock::now() - requestStart < std::chrono::minutes(5)) {
@@ -226,10 +226,10 @@ public:
                 qualityStates.push_back(completion);
                 const auto started = Clock::now();
                 std::cout << "audit=quality-switch target=" << targetName << std::endl;
-                Check(session.SendRequestResult(std::move(update), [completion](HostResult result) {
+                Check((session.SendRequest(std::move(update), [completion](HostResult result) {
                     ++completion->callbackCount;
                     completion->result = std::move(result);
-                }), "Quality switch admission failed");
+                }).status == HostAdmissionStatus::Accepted), "Quality switch admission failed");
                 while (!completion->result && Clock::now() - started < std::chrono::minutes(5)) {
                     sendOwnerWork();
                     if (!completion->result) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -254,10 +254,10 @@ public:
             auto rejection = std::make_shared<QualityState>();
             qualityStates.push_back(rejection);
             const auto rejectedStart = Clock::now();
-            Check(session.SendRequestResult(std::move(invalid), [rejection](HostResult result) {
+            Check((session.SendRequest(std::move(invalid), [rejection](HostResult result) {
                 ++rejection->callbackCount;
                 rejection->result = std::move(result);
-            }), "Invalid quality request was not handled");
+            }).status == HostAdmissionStatus::Accepted), "Invalid quality request was not handled");
             // 已识别请求的失败也沿 Session 的 owner 完成队列投递。
             while (!rejection->result && Clock::now() - rejectedStart < std::chrono::seconds(5)) {
                 sendOwnerWork();

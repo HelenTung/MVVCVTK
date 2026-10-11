@@ -7,6 +7,7 @@ set(MVVCVTK_HOST_METHOD_SOURCES
     QtHostMethodTests.cpp
     QtHostRenderProductTests.cpp
     QtHostViewTests.cpp
+    HostConsumerContractTests.cpp
     RenderProductTestSupport.h
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
@@ -103,7 +104,7 @@ if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     target_link_libraries(mvvcvtk_host_method_tests PRIVATE MVVCVTK::SurfaceDetermination)
 endif()
 
-SetTargetDefaults(mvvcvtk_host_method_tests)
+SetQtTargetDefaults(mvvcvtk_host_method_tests)
 vtk_module_autoinit(
     TARGETS mvvcvtk_host_method_tests
     MODULES ${MVVCVTK_VTK_TARGETS}
@@ -114,6 +115,19 @@ add_test(
     COMMAND mvvcvtk_host_method_tests
 )
 SetTestRuntime(QtHost.Methods mvvcvtk_host_method_tests)
+add_test(NAME Host.ConsumerContract COMMAND mvvcvtk_host_method_tests --case consumer-contract)
+SetTestRuntime(Host.ConsumerContract mvvcvtk_host_method_tests)
+set(MVVCVTK_HOST_CONSUMER_REAL_MANIFEST "" CACHE FILEPATH "Real CT ROI manifest for Host consumer contract regression")
+if(MVVCVTK_HOST_CONSUMER_REAL_MANIFEST)
+    if(NOT EXISTS "${MVVCVTK_HOST_CONSUMER_REAL_MANIFEST}")
+        message(FATAL_ERROR "Host consumer real-data manifest is missing")
+    endif()
+    add_test(NAME Host.ConsumerRealContract COMMAND mvvcvtk_host_method_tests --case consumer-contract)
+    SetTestRuntime(Host.ConsumerRealContract mvvcvtk_host_method_tests)
+    set_property(TEST Host.ConsumerRealContract APPEND PROPERTY ENVIRONMENT
+        "MVVCVTK_HOST_CONSUMER_REAL_MANIFEST=${MVVCVTK_HOST_CONSUMER_REAL_MANIFEST}")
+endif()
+target_link_libraries(mvvcvtk_host_method_tests PRIVATE Qt5::Core)
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_test(NAME OrthogonalCrop.Lifecycle COMMAND mvvcvtk_host_method_tests --case crop-lifecycle)
     SetTestRuntime(OrthogonalCrop.Lifecycle mvvcvtk_host_method_tests)

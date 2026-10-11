@@ -28,6 +28,7 @@
 #include <exception>
 #include <iostream>
 #include <map>
+#include <set>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -63,6 +64,7 @@ public:
         const HostViewTarget& target) const;
     std::weak_ptr<AppSessionPort> GetSessionPort() const;
     bool StopView(std::string_view viewId);
+    bool UnloadData(const DataRevisionRef&);
     FeatureDataTransitionState StartDataTransition(std::uint64_t ownerId, FeatureDataTransitionRequest request);
     FeatureDataTransitionState SetDataTransition(std::uint64_t ownerId, std::uint64_t requestId);
     FeatureDataTransitionState StopDataTransition(std::uint64_t ownerId, std::uint64_t requestId);
@@ -153,6 +155,15 @@ private:
             const HostViewTargets& targets) const override;
         bool SetOwnerThread(std::thread::id ownerThread);
         bool StopView(std::string_view viewId) override;
+        bool UnloadData(const DataRevisionRef& ref) override {
+            Impl* owner = nullptr;
+            {
+                const std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_owner || !m_hasOwnerThread || m_ownerThread != std::this_thread::get_id()) return false;
+                owner = m_owner;
+            }
+            return owner->UnloadData(ref);
+        }
         LoadCommitResult SetLoadCommit(
             LoadEventKind loadKind,
             std::uint64_t transactionRevision,
@@ -1076,6 +1087,107 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
         return isStopped;
     };
     return m_loadCommit->SetLoadCommit(request);
+}
+
+bool HostViewRuntimeRegistry::Impl::UnloadData(const DataRevisionRef& ref)
+{
+    const auto data = m_transitionData.lock();
+    const auto state = m_transitionState.lock();
+    if (!GetDataRevisionRefValid(ref) || !m_lease || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread() || !data || !state || state->GetIsLoadActive()
+        || m_featureTransition || (m_loadCommit && m_loadCommit->GetIsPending())) return false;
+    const auto graph = data->GetDataGraph();
+    if (!graph.view) return false;
+    DataQuery query; query.entityId = ref.entityId;
+    const auto revisions = data->GetDataQuery(graph, query).data;
+    if (revisions.empty()) return false;
+    DataGeneration head = 0;
+    std::set<DataRevisionRef> affected;
+    std::vector<DataRevisionRef> pending;
+    for (const auto& revision : revisions) {
+        if (!revision || revision->type != DataTypes::imageGrid3D
+            || !revision->provenance || revision->provenance->producerId != "org.mvvcvtk.host"
+            || !GetDataEntityIdValid(revision->lifetimeScope)
+            || revision->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement) return false;
+        head = std::max(head, revision->self.generation);
+        pending.push_back(revision->self);
+    }
+    if (head != ref.generation) return false;
+    std::map<DataEntityId, DataLifetimeRetirement> scopes;
+    std::set<DataEntityId> entities;
+    while (!pending.empty()) {
+        const auto revision = pending.back(); pending.pop_back();
+        if (!affected.insert(revision).second) continue;
+        const auto value = data->GetData(graph, revision);
+        // 临时 Feature 输入由其 owner 先关闭；不夺取其退役职责。
+        if (!value || !GetDataEntityIdValid(value->lifetimeScope)
+            || value->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement) return false;
+        entities.insert(revision.entityId);
+        const auto lifetime = data->GetDataLifetime(value->lifetimeScope);
+        if (lifetime.status != DataLifetimeStatus::Published) return false;
+        scopes[value->lifetimeScope] = {value->lifetimeScope, lifetime.status, lifetime.ownedRevisions, true};
+        for (const auto& derived : graph.view->GetDerivedData(revision))
+            if (data->GetData(graph,derived)) pending.push_back(derived);
+    }
+    // 多输出 scope 必须全部属于这份数据的闭包，不能夹带其他独立结果。
+    for (const auto& scope : scopes) for (const auto& owned : scope.second.expectedRevisions)
+        if (!affected.count(owned)) return false;
+    for (const auto& view : m_views) {
+        if (view.isAvailable && (!view.dataStage || !view.dataStage->GetCanClearRenderInput())) return false;
+    }
+    DataTransaction transaction;
+    for (const auto& scope : scopes) transaction.retireScopes.push_back(scope.second);
+    const auto primary = data->GetDataBinding(graph, primaryVolumeBinding);
+    const bool clearsPrimary = primary && primary->target && affected.count(*primary->target);
+    if (clearsPrimary) transaction.bindings.push_back({std::string(primaryVolumeBinding), primary->revision, true, primary->target, {}});
+    // ROI 目录属于 Host：移除这份数据的条目，保留其他数据集及其目录绑定。
+    const auto roiBinding = data->GetDataBinding(graph, roiCatalogBinding);
+    if (roiBinding && roiBinding->target && affected.count(*roiBinding->target)) {
+        const auto catalogData = data->GetData(graph,*roiBinding->target);
+        const auto* catalog = catalogData ? dynamic_cast<const RoiCatalogPayload*>(catalogData->payload.get()) : nullptr;
+        if (!catalog || catalogData->self.generation == std::numeric_limits<DataGeneration>::max()) return false;
+        std::vector<RoiCatalogEntry> entries;
+        std::vector<DataInputRef> inputs;
+        for (const auto& entry : catalog->GetEntries()) if (!affected.count(entry.geometry)) {
+            inputs.push_back({"roi-"+std::to_string(entries.size()),entry.geometry});
+            entries.push_back(entry);
+        }
+        if (entries.empty()) {
+            // 最后一个 ROI 删除后直接解除目录绑定，避免制造不可达的空目录 scope。
+            transaction.bindings.push_back({std::string(roiCatalogBinding),roiBinding->revision,true,roiBinding->target,{}});
+        }
+        else {
+            DataRevisionDraft output{catalogData->self.entityId,catalogData->self.generation,DataTypes::roiCatalog,
+                std::move(inputs),std::make_shared<const RoiCatalogPayload>(std::move(entries)),
+                DataProvenance{"org.mvvcvtk.host","unload-roi-catalog","1","{}"}};
+            output.lifetimeScope = data->CreateDataEntityId();
+            output.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
+            transaction.outputs.push_back(std::move(output));
+            transaction.bindings.push_back({std::string(roiCatalogBinding),roiBinding->revision,true,roiBinding->target,
+                DataRevisionRef{catalogData->self.entityId,catalogData->self.generation+1}});
+        }
+    }
+    // 仅退役未绑定实体也需要当前性保护，不制造无意义 binding revision。
+    DataExpectation expectation; expectation.kind = DataExpectationKind::EntityHead;
+    expectation.entityId = ref.entityId; expectation.expectedGeneration = ref.generation;
+    transaction.expectations.push_back(expectation);
+    auto notifications = data->StartDataChanges();
+    if (!notifications) return false;
+    const auto result = data->SetDataCommit(std::move(transaction));
+    if (result.status != DataCommitStatus::Succeeded) return false;
+    data->ClearRetiredLoad(ref.entityId);
+    for (auto& view : m_views) {
+        if (!view.isAvailable) continue;
+        for (const auto& entity : entities) if (!view.dataStage->ClearRenderInput(entity)) {
+            (void)StopView(view.config.id); break;
+        }
+    }
+    if (clearsPrimary) {
+        DataReadyState ready; ready.hasImageGeometry = false;
+        ready.bindingRevision = primary->revision + 1;
+        state->SetRenderDataReady(ready);
+    }
+    return true;
 }
 
 FeatureDataTransitionState HostViewRuntimeRegistry::Impl::StartDataTransition(

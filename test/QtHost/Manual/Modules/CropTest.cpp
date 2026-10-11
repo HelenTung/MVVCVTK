@@ -43,9 +43,9 @@ void ResetInitialCamera(ModulePanel* panel, bool first)
 {
     if (!first) return;
     HostViewResetRequest request; request.targetView.viewId = "primary-3d";
-    panel->GetSession()->SendRequestResult(std::move(request), [owner = QPointer<ModulePanel>(panel)](HostResult result) {
+    (panel->GetSession()->SendRequest(std::move(request), [owner = QPointer<ModulePanel>(panel)](HostResult result) {
         if (owner && !result.isSucceeded && owner->onMessage) owner->onMessage("裁剪工具已启用，但主三维定位失败，请重置视图后拖动。");
-    });
+    }).status == HostAdmissionStatus::Accepted);
 }
 struct CropFlow {
     DataRevisionRef input;

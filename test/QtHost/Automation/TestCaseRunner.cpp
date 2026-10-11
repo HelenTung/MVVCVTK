@@ -1290,15 +1290,14 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     const auto surface = GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
         {"roiModelBounds", QJsonValue()}}), "Succeeded");
     const auto savedLabels = window.GetWorkflow().getPartLabels;
-    const auto savedSource = window.GetWorkflow().GetSurfaceSource(), savedMesh = window.GetWorkflow().GetSurfaceMesh();
-    const auto savedThreshold = window.GetWorkflow().GetSurfaceThreshold();
+    const auto savedSurface = window.GetWorkflow().getMeasurementSurface;
     window.GetWorkflow().getPartLabels = [] { return DataRevisionRef{}; };
-    window.GetWorkflow().SetSurfaceInput({},{});
+    window.GetWorkflow().getMeasurementSurface = [] { return std::optional<MeasurementSurface>{}; };
     const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
         {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}},
         {"labels",parts["result"].toObject()["labelMap"]},{"mesh",surface["result"].toObject()["mesh"]},{"materialThreshold",500.}}), "Succeeded");
     window.GetWorkflow().getPartLabels = savedLabels;
-    window.GetWorkflow().SetSurfaceInput(savedSource,savedMesh,savedThreshold);
+    window.GetWorkflow().getMeasurementSurface = savedSurface;
     Check(record["parameters"].toObject()["labels"] == parts["result"].toObject()["labelMap"]
         && record["parameters"].toObject()["mesh"] == surface["result"].toObject()["mesh"],
         "wall reuses explicitly selected published inputs without latest-operation workflow aliases");
@@ -1600,7 +1599,7 @@ void StartSelfTest(TestWindow& window)
             "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
         CheckOverlaySwitch(window, "Surface");
-        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()), "material surface is a formal metrology input");
+        Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)), "material surface is a formal metrology input");
 #if defined(MANUAL_ALIGNMENT)
         if (GetEnabled(window, "Alignment")) {
             GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
@@ -1661,7 +1660,7 @@ void StartSelfTest(TestWindow& window)
         // 材料表面单独验证，不依赖可选对齐模块替它生成正式结果。
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0},
             {"materialRange", QJsonArray{0.,100.}}}), "Succeeded");
-        Check(GetDataRevisionRefValid(window.GetWorkflow().GetSurfaceMesh()),
+        Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)),
             "material ISO publishes an independent formal measurement surface");
     }
     if (GetEnabled(window, "Rotation")) {

@@ -36,8 +36,15 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     std::vector<ModulePanel*> modules;
     auto reference = std::make_shared<ReferenceDataSource>();
     if (!context.runtime.AttachFeature(reference)) throw std::runtime_error("测试输入适配器挂载失败");
-    context.workflow.getPublishedGraph = [reference] { return reference->GetPublishedGraph(); };
-    context.workflow.getImageInput = [reference](DataRevisionRef source) { return reference->GetImageInput(source); };
+    const std::weak_ptr<VtkAppHostSession> session = context.runtime.GetSession();
+    context.workflow.getPublishedGraph = [session, &workflow = context.workflow] {
+        const auto host = session.lock();
+        return host ? workflow.GetPublishedGraph(*host) : QJsonObject{};
+    };
+    context.workflow.getImageInput = [session](DataRevisionRef source) {
+        const auto host = session.lock();
+        return host ? host->GetImageDescriptor(source) : std::optional<ImageDescriptor>{};
+    };
     context.workflow.getViewTransforms = [reference] { return reference->GetViewTransforms(); };
     std::shared_ptr<RoiEditingHostFeature> roi;
 #if defined(MANUAL_ROI)
@@ -99,6 +106,14 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     SurfaceDeterminationConfig surfaceConfig; surfaceConfig.defaultStart.targetViews = GetAllViews();
     if (context.workflow.resources.hasExplicitWorkingLimit) surfaceConfig.maxWorkingBytes = context.workflow.resources.workingBytes;
     auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig); attach(surface);
+    context.workflow.getMeasurementSurface = [surface]() -> std::optional<MeasurementSurface> {
+        const auto snapshot = surface->GetSurfaceSnapshot();
+        if (!snapshot || snapshot->purpose != SurfaceTaskPurpose::Determine
+            || !GetDataRevisionRefValid(snapshot->meshRevision)
+            || !surface->GetResultValidity(snapshot->dataRevision).canMeasure) return {};
+        return MeasurementSurface{snapshot->sourceRevision, snapshot->meshRevision,
+            snapshot->resolvedParams.initialIsoValue};
+    };
     modules.push_back(CreateSurfaceTest(context, surface, parent));
 #else
     unavailable("Surface");

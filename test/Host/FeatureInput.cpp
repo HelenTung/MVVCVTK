@@ -50,11 +50,11 @@ FeatureTestOptions GetFeatureTestOptions(const int argc, char* argv[]) {
             throw std::invalid_argument("重复的输入选项：" + key);
         if (key == "--spacing" || key == "--origin") {
             const auto values = GetNumbers<3>(text);
-            std::array<float, 3> converted{};
+            std::array<double, 3> converted{};
             for (std::size_t axis = 0; axis < 3; ++axis) {
-                if (std::abs(values[axis]) > std::numeric_limits<float>::max())
+                if (std::abs(values[axis]) > std::numeric_limits<double>::max())
                     throw std::invalid_argument("输入几何超出Host浮点范围");
-                converted[axis] = static_cast<float>(values[axis]);
+                converted[axis] = values[axis];
                 if (key == "--spacing" && converted[axis] <= 0)
                     throw std::invalid_argument("体素间距必须为可表示的正数");
             }

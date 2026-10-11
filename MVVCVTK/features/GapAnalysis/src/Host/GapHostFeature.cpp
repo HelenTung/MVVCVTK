@@ -61,6 +61,7 @@ public:
     struct CompleteItem final {
         std::mutex mutex;
         GapHostCallback onComplete;
+        std::uint64_t requestId = 0;
         std::optional<GapHostResult> result;
         bool isActive = true;
         bool isQueued = false;
@@ -86,7 +87,7 @@ public:
         const HostFeatureContext& context);
     bool DetachHost();
     bool OnHostTick();
-    bool SendRequest(
+    GapAdmission SendRequest(
         GapHostRequest request,
         GapHostCallback onComplete);
     GapHostState GetState() const;
@@ -147,6 +148,7 @@ private:
     std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<CompleteItem> m_completeItem;
+    std::shared_ptr<CompleteItem> m_exitComplete;
     std::optional<RenderInputStamp> m_activeInput;
     std::vector<std::string> m_activeViewIds;
     VtkImageGridSnapshot m_requestSource;
@@ -319,6 +321,7 @@ bool GapHostFeature::Impl::SendComplete(
         callback = std::move(item->onComplete);
     }
     if (callback) {
+        result.requestId = item->requestId;
         try {
             callback(std::move(result));
         }
@@ -595,6 +598,8 @@ bool GapHostFeature::Impl::DetachHost()
 
     m_isAttached = false;
     ClearBorrowed();
+    if (auto exit = std::move(m_exitComplete))
+        SendComplete(exit, BuildHostResult(m_state, GapResultStatus::Failed, "Gap exit cancelled by detach."));
     return true;
 }
 
@@ -612,6 +617,8 @@ bool GapHostFeature::Impl::OnHostTick()
             m_service->ClearView();m_requestSource.reset();
             if (SetActiveViews({}) && ClearResultScopes()) {
                 m_state={};m_requestResultBinding={};m_isRequestPending=false;
+                if (auto exit = std::move(m_exitComplete))
+                    SendComplete(exit, BuildHostResult(m_state, GapResultStatus::Failed, "Gap exit cancelled while stopping."));
             }
         }
         // Only the registry's Detach retry revokes Host ports and ends the attachment.
@@ -664,51 +671,66 @@ bool GapHostFeature::Impl::OnHostTick()
         if (SetActiveViews({})) {
             m_isExitPending = false;
             ClearComplete();
+            if (auto exit = std::move(m_exitComplete))
+                SendComplete(exit, BuildHostResult(m_state, GapResultStatus::Succeeded, {}));
         }
     }
     return true;
 }
 
-bool GapHostFeature::Impl::SendRequest(
+GapAdmission GapHostFeature::Impl::SendRequest(
     GapHostRequest request,
     GapHostCallback onComplete)
 {
     if (!m_isAttached
         || !m_service
         || !GetOwnerThread()) {
-        return false;
+        return {GapAdmissionStatus::Unavailable, 0};
     }
 
-    if (m_isClosing) return false;
-    if (request.display && request.action != GapHostAction::SetDisplay) return false;
+    if (m_isClosing) return {GapAdmissionStatus::Stopping, 0};
+    if (request.display && request.action != GapHostAction::SetDisplay) return {};
     SetBindingStale();
+    std::shared_ptr<CompleteItem> control;
+    if (request.action != GapHostAction::Start && onComplete) {
+        try { control = std::make_shared<CompleteItem>(); }
+        catch (...) { return {GapAdmissionStatus::Unavailable, 0}; }
+        control->onComplete = std::move(onComplete);
+    }
+    bool succeeded = false;
     switch (request.action) {
     case GapHostAction::Start:
-        if (!request.start) {
-            return false;
-        }
-        return StartView(
-            *request.start,
-            std::move(onComplete));
+        if (!request.start) return {};
+        if (m_isRequestPending || m_isExitPending) return {GapAdmissionStatus::Busy, 0};
+        if (!StartView(*request.start, std::move(onComplete))) return {};
+        return {GapAdmissionStatus::Accepted, m_activeRequestId};
     case GapHostAction::Overlay:
-        if (onComplete) {
-            return false;
-        }
-        return SwitchOverlay();
+        if (request.start) return {};
+        succeeded = SwitchOverlay();
+        break;
     case GapHostAction::Exit:
-        if (onComplete) {
-            return false;
-        }
-        return ExitView();
+        if (request.start) return {};
+        succeeded = ExitView();
+        break;
     case GapHostAction::SetDisplay:
-        if (onComplete || !request.display || request.start || m_isRequestPending || m_isExitPending
-            || !GetResultCurrent()) return false;
-        return m_service->SetDisplay(*request.display,
+        if (m_isRequestPending || m_isExitPending) return {GapAdmissionStatus::Busy, 0};
+        if (!request.display || request.start || !GetResultCurrent()) return {};
+        succeeded = m_service->SetDisplay(*request.display,
             [this] { return SendSceneDelta(FeatureScenePriority::Overlay); });
+        break;
     case GapHostAction::None:
-        return false;
+        return {};
     }
-    return false;
+    if (!succeeded) return {};
+    const GapAdmission admission{GapAdmissionStatus::Accepted, GetNextSceneRequestId()};
+    if (control) {
+        control->requestId = admission.requestId;
+        if (!m_isAttached || m_isClosing || !GetOwnerThread())
+            SendComplete(control, BuildHostResult(m_state, GapResultStatus::Failed, "Gap control cancelled during dispatch."));
+        else if (request.action == GapHostAction::Exit) m_exitComplete = std::move(control);
+        else SendComplete(control, BuildHostResult(m_state, GapResultStatus::Succeeded, {}));
+    }
+    return admission;
 }
 
 GapHostState GapHostFeature::Impl::GetState() const
@@ -776,6 +798,7 @@ bool GapHostFeature::Impl::StartView(
     m_activeInput = RenderInputStamp{ candidate->source->data->self };
     m_activeViewIds = std::move(candidate->activeViewIds);
     m_activeRequestId = GetNextSceneRequestId();
+    m_completeItem->requestId = m_activeRequestId;
     m_requestSource = std::move(candidate->source);
     m_requestResultBinding = std::move(candidate->resultBinding);
     m_requestParameters = std::move(candidate->canonicalParameters);
@@ -985,12 +1008,14 @@ bool GapHostFeature::Impl::SetCompletedResult(
 
     auto scopes=m_resultScopes;
     if (GetDataEntityIdValid(m_requestSource->data->lifetimeScope)) {
-        if (scopes.size()>=1024) {
+        const auto policy = m_requestSource->data->lifetimePolicy;
+        if (policy == DataLifetimePolicy::OwnerRetirement && scopes.size()>=1024) {
             SetFailedResult(GapResultStatus::Failed,"Controlled Gap result history limit reached.");return false;
         }
         const auto scope=m_data->CreateDataEntityId();
-        for (auto& draft:transaction.outputs) draft.lifetimeScope=scope;
-        scopes.push_back({scope,DataLifetimeStatus::Published,{labelRef,voidRef,meshRef,statisticsRef,resultRef},true});
+        for (auto& draft:transaction.outputs) { draft.lifetimeScope=scope; draft.lifetimePolicy=policy; }
+        if (policy == DataLifetimePolicy::OwnerRetirement)
+            scopes.push_back({scope,DataLifetimeStatus::Published,{labelRef,voidRef,meshRef,statisticsRef,resultRef},true});
     }
     auto batch=m_data->StartDataChanges();
     if (!batch) {SetFailedResult(GapResultStatus::Failed,"Gap publication batch is unavailable.");return false;}
@@ -1330,15 +1355,13 @@ bool GapHostFeature::OnHostTick()
     return m_impl && m_impl->OnHostTick();
 }
 
-bool GapHostFeature::SendRequest(
+GapAdmission GapHostFeature::SendRequest(
     GapHostRequest request,
     GapHostCallback onComplete)
 {
     const auto keepAlive=weak_from_this().lock();
-    return m_impl
-        && m_impl->SendRequest(
-            std::move(request),
-            std::move(onComplete));
+    return m_impl ? m_impl->SendRequest(std::move(request), std::move(onComplete))
+        : GapAdmission{GapAdmissionStatus::Unavailable, 0};
 }
 
 GapHostState GapHostFeature::GetState() const

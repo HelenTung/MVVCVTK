@@ -19,8 +19,6 @@
 #include <vector>
 
 namespace DataTypes {
-inline const DataTypeId imageGrid3D{
-    "org.mvvcvtk.image-grid-3d", 1 };
 inline const DataTypeId labelMap3D{
     "org.mvvcvtk.label-map-3d", 1 };
 inline const DataTypeId surfaceMesh{

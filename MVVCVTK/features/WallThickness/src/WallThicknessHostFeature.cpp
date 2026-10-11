@@ -34,30 +34,6 @@ void SendComplete(ThicknessCallback callback, const ThicknessResult &result) noe
     {
     }
 }
-bool GetFieldsValid(const ThicknessRequest &r)
-{
-    const bool i = bool(r.input), p = bool(r.params), e = bool(r.evaluation), d = bool(r.display),
-               v = bool(r.resultRevision), s = bool(r.sampleIndex), t = r.targetRequestId != 0;
-    switch (r.action)
-    {
-    case ThicknessAction::Start:
-        return i && p && !v && !s && !t;
-    case ThicknessAction::Cancel:
-        return !i && !p && !e && !d && !v && !s;
-    case ThicknessAction::Clear:
-        return !i && !p && !e && !d && !v && !s && !t;
-    case ThicknessAction::SetEvaluation:
-        return e && !i && !p && !d && !v && !s && !t;
-    case ThicknessAction::SetDisplay:
-        return d && !i && !p && !e && !v && !s && !t;
-    case ThicknessAction::SetActive:
-        return v && !i && !p && !e && !s && !t;
-    case ThicknessAction::SelectSample:
-        return v && s && !i && !p && !e && !d && !t;
-    default:
-        return false;
-    }
-}
 constexpr std::uint8_t selectShift = static_cast<std::uint8_t>(InputModifierFlags::Shift);
 constexpr std::uint8_t selectCtrl = static_cast<std::uint8_t>(InputModifierFlags::Ctrl);
 constexpr std::uint8_t selectAlt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
@@ -603,30 +579,38 @@ class WallThicknessHostFeature::Impl final
             return {ThicknessAdmissionStatus::Unavailable, 0};
         if (m_state.isStopping)
             return {ThicknessAdmissionStatus::Stopping, 0};
-        if (!GetFieldsValid(request) ||
-            (request.params && !ThicknessAlgorithm::GetParamsValid(*request.params)) ||
-            (request.evaluation && !ThicknessAlgorithm::GetEvaluationValid(*request.evaluation)) ||
-            (request.display && !GetDisplayValid(*request.display)))
+        const auto* start = std::get_if<ThicknessStartRequest>(&request);
+        const auto* cancel = std::get_if<ThicknessCancelRequest>(&request);
+        const auto* evaluation = std::get_if<ThicknessEvaluationRequest>(&request);
+        const auto* displayRequest = std::get_if<ThicknessDisplayRequest>(&request);
+        const auto* activation = std::get_if<ThicknessActivationRequest>(&request);
+        const auto* sample = std::get_if<ThicknessSampleRequest>(&request);
+        const auto* display = start && start->display ? &*start->display
+            : displayRequest ? &displayRequest->display
+            : activation && activation->display ? &*activation->display : nullptr;
+        const auto* evaluationParams = evaluation ? &evaluation->evaluation
+            : start && start->evaluation ? &*start->evaluation : nullptr;
+        if (request.valueless_by_exception() ||
+            (start && !ThicknessAlgorithm::GetParamsValid(start->params)) ||
+            (evaluationParams && !ThicknessAlgorithm::GetEvaluationValid(*evaluationParams)) ||
+            (display && !GetDisplayValid(*display)))
             return {};
-        if ((m_task || m_completing) && request.action != ThicknessAction::Cancel &&
-            request.action != ThicknessAction::SetDisplay &&
-            request.action != ThicknessAction::SelectSample)
+        if ((m_task || m_completing) && !cancel && !displayRequest && !sample)
             return {ThicknessAdmissionStatus::Busy, 0};
         try
         {
             SetStale();
-            if (request.action == ThicknessAction::Start ||
-                request.action == ThicknessAction::SetEvaluation)
+            if (start || evaluation)
             {
                 auto task = std::make_unique<Task>();
                 ThicknessArchive archive;
                 std::shared_ptr<const ThicknessData::ResultPayload> previous;
-                if (request.action == ThicknessAction::Start)
+                if (start)
                 {
-                    archive.input = *request.input;
-                    archive.params = *request.params;
+                    archive.input = start->input;
+                    archive.params = start->params;
                     archive.limits = m_config;
-                    archive.evaluation = request.evaluation.value_or(ThicknessEvaluation{});
+                    archive.evaluation = start->evaluation.value_or(ThicknessEvaluation{});
                 }
                 else
                 {
@@ -634,7 +618,7 @@ class WallThicknessHostFeature::Impl final
                         return {};
                     previous = m_active;
                     archive = previous->GetRecord().archive;
-                    archive.evaluation = *request.evaluation;
+                    archive.evaluation = evaluation->evaluation;
                     archive.limits = m_config;
                 }
                 const auto graph = m_context.data->GetDataGraph();
@@ -644,7 +628,7 @@ class WallThicknessHostFeature::Impl final
                 task->completion = std::make_shared<Completion>();
                 task->completion->requestId = task->requestId;
                 task->completion->callback = std::move(callback);
-                task->display = request.display;
+                task->display = display ? std::optional<ThicknessDisplay>(*display) : std::nullopt;
                 const auto id = task->requestId;
                 auto operation = BuildOperation(id, archive);
                 Task *raw = task.get();
@@ -683,19 +667,19 @@ class WallThicknessHostFeature::Impl final
             bool succeeded = false;
             ThicknessStatus controlStatus = ThicknessStatus::Succeeded;
             std::optional<DataRevisionRef> controlRef;
-            if (request.action == ThicknessAction::Cancel)
+            if (cancel)
             {
                 if (!m_task ||
-                    (request.targetRequestId && request.targetRequestId != m_task->requestId))
+                    (cancel->targetRequestId && cancel->targetRequestId != m_task->requestId))
                     return {};
                 m_task->work.cancelled->store(true);
                 succeeded = true;
             }
-            else if (request.action == ThicknessAction::SetDisplay)
-                succeeded = SetDisplay(*request.display);
-            else if (request.action == ThicknessAction::SelectSample)
-                succeeded = SelectSample(*request.resultRevision, *request.sampleIndex);
-            else if (request.action == ThicknessAction::Clear)
+            else if (displayRequest)
+                succeeded = SetDisplay(displayRequest->display);
+            else if (sample)
+                succeeded = SelectSample(sample->resultRevision, sample->sampleIndex);
+            else if (std::holds_alternative<ThicknessClearRequest>(request))
             {
                 const auto graph = m_context.data->GetDataGraph();
                 const auto binding = ThicknessData::GetBinding(graph);
@@ -728,10 +712,10 @@ class WallThicknessHostFeature::Impl final
                     }
                 }
             }
-            else if (request.action == ThicknessAction::SetActive)
+            else if (activation)
             {
                 const auto graph = m_context.data->GetDataGraph();
-                const auto result = ThicknessData::GetResult(graph, *request.resultRevision);
+                const auto result = ThicknessData::GetResult(graph, activation->resultRevision);
                 if (!result || !ThicknessData::GetCurrent(graph, result->GetRecord().expectations))
                     return {};
                 const auto binding = ThicknessData::GetBinding(graph);
@@ -739,27 +723,27 @@ class WallThicknessHostFeature::Impl final
                 transaction.expectations = result->GetRecord().expectations;
                 transaction.bindings.push_back({std::string(ThicknessData::bindingName),
                                                 binding.revision, true, binding.target,
-                                                *request.resultRevision});
+                                                activation->resultRevision});
                 succeeded = m_resultScopes.Commit(*data,std::move(transaction)).status ==
                             DataCommitStatus::Succeeded;
-                controlRef = *request.resultRevision;
+                controlRef = activation->resultRevision;
                 if (succeeded && (!GetOwner() || generation != m_generation))
                     controlStatus = ThicknessStatus::Cancelled;
                 if (succeeded && GetOwner() && generation == m_generation)
                 {
                     const auto current = data->GetDataGraph();
-                    if (ThicknessData::GetBinding(current).target == request.resultRevision &&
+                    if (ThicknessData::GetBinding(current).target == activation->resultRevision &&
                         ThicknessData::GetCurrent(current, result->GetRecord().expectations))
                     {
                         m_active = result;
-                        m_state.result = *request.resultRevision;
+                        m_state.result = activation->resultRevision;
                         m_state.isCurrent = true;
                         m_state.selectedSample.reset();
                         m_displayOperation = BuildOperation(id, result->GetRecord().archive);
                         m_displayOperation.status = FeatureRunStatus::Succeeded;
-                        m_displayOperation.outputs = {*request.resultRevision};
+                        m_displayOperation.outputs = {activation->resultRevision};
                         m_displayOperation.progress = 1;
-                        if (!SetDisplay(request.display.value_or(m_display)))
+                        if (!SetDisplay(activation->display.value_or(m_display)))
                             RemoveDisplay();
                     }
                     else

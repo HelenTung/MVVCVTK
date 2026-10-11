@@ -95,7 +95,7 @@ void TestRotationSession()
     VERIFY(session.BuildSession());
     const auto probe = std::make_shared<RotationProbe>();
     const auto feature = std::make_shared<ModelRotationHostFeature>();
-    VERIFY(!feature->SendRequest({}));
+    VERIFY(!(feature->SendRequest({}).status == ModelRotationAdmissionStatus::Accepted));
     ModelRotationConfig invalidConfig;
     invalidConfig.targetViews = { {"missing-view"}, {} };
     VERIFY(!session.AttachFeature(std::make_shared<ModelRotationHostFeature>(invalidConfig)));
@@ -132,7 +132,7 @@ void TestRotationSession()
         reload.voxels[x+16*(y+16*z)] = 100;
     const auto reloadAgain = reload;
     bool loaded = false;
-    VERIFY(session.SendRequest(std::move(reload),[&](bool success){loaded=success;}));
+    VERIFY((session.SendRequest(std::move(reload),[&](HostResult hostResultSuccess){ const bool success = hostResultSuccess.isSucceeded;loaded=success;}).status == HostAdmissionStatus::Accepted));
     wait([&]{return loaded;});
     for (int index=0; index<5; ++index) tick();
     const auto dataBefore = probe->context.data->GetPrimaryImage();
@@ -159,9 +159,18 @@ void TestRotationSession()
     const auto initial = *port->GetTransformState();
     ModelRotationRequest numeric;
     numeric.angleDeg = 90;
-    VERIFY(feature->SendRequest(numeric));
+    std::vector<ModelRotationResult> numericResults;
+    const auto callbackOwner = std::this_thread::get_id();
+    const auto numericAdmission = feature->SendRequest(numeric, [&](ModelRotationResult result) {
+        VERIFY(std::this_thread::get_id() == callbackOwner);
+        numericResults.push_back(result);
+    });
+    VERIFY(numericAdmission.status == ModelRotationAdmissionStatus::Accepted && numericAdmission.requestId != 0);
     VERIFY(feature->GetState().status == ModelRotationStatus::Pending);
     wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
+    tick();
+    VERIFY(numericResults.size() == 1 && numericResults.front().requestId == numericAdmission.requestId
+        && numericResults.front().status == ModelRotationStatus::Succeeded);
     const auto rotated = *port->GetTransformState();
     VERIFY(rotated.modelToWorld != initial.modelToWorld);
     VERIFY(rotated.dataRevision == initial.dataRevision && rotated.bindingRevision == initial.bindingRevision);
@@ -202,7 +211,7 @@ void TestRotationSession()
     failureOverlay->failures = 2;
     const auto epochBeforeFailure = session.GetSceneViewState({"rotation-0"})->renderedEpoch;
     numeric.angleDeg = 15;
-    VERIFY(feature->SendRequest(numeric));
+    VERIFY((feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     tick();
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
     VERIFY(session.GetSceneViewState({"rotation-0"})->renderedEpoch == epochBeforeFailure);
@@ -212,30 +221,30 @@ void TestRotationSession()
     VERIFY(failureOverlay->matrices[2] == rotated.modelToWorld);
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     ModelRotationRequest failureUndo; failureUndo.action=ModelRotationAction::Undo;
-    VERIFY(feature->SendRequest(failureUndo));
+    VERIFY((feature->SendRequest(failureUndo).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld==rotated.modelToWorld);
     overlayPort->RemoveOverlay(failureOverlay);
     HostViewSetRequest volumeMode;
     volumeMode.targetView.viewId = "rotation-0";
     volumeMode.mode = HostRenderMode::Volume;
-    VERIFY(session.SendRequest(std::move(volumeMode)));
+    VERIFY((session.SendRequest(std::move(volumeMode)).status == HostAdmissionStatus::Accepted));
     wait([&]{return session.GetRenderViewState({"rotation-0"})->viewMode==HostRenderMode::Volume
         && getProduct()!=nullptr;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
     const auto* volumeProduct = getProduct();
     numeric.angleDeg = 15;
-    VERIFY(feature->SendRequest(numeric));
+    VERIFY((feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(getProduct() == volumeProduct);
     ModelRotationRequest volumeUndo; volumeUndo.action=ModelRotationAction::Undo;
-    VERIFY(feature->SendRequest(volumeUndo));
+    VERIFY((feature->SendRequest(volumeUndo).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
     VERIFY(getProduct() == volumeProduct);
     ModelRotationRequest enable;
     enable.action = ModelRotationAction::SetEnabled;
-    VERIFY(feature->SendRequest(enable));
+    VERIFY((feature->SendRequest(enable).status == ModelRotationAdmissionStatus::Accepted));
     auto* input = session.GetInputEndpoint();
     const auto send = [&](HostInputKind kind,int x,int y,
         bool isShift=false,bool isCtrl=false,bool isAlt=false) {
@@ -261,14 +270,14 @@ void TestRotationSession()
     VERIFY(preview != rotated.modelToWorld);
     HostDataExportRequest exportRequest;
     exportRequest.outputPath = "rotation-must-not-export";
-    VERIFY(!session.SendRequest(std::move(exportRequest)));
+    VERIFY(!(session.SendRequest(std::move(exportRequest)).status == HostAdmissionStatus::Accepted));
     send(HostInputKind::PrimaryRelease,128,190);
     wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld != preview);
     VERIFY(!session.GetRenderViewState({"rotation-0"})->isInteracting);
     VERIFY(feature->GetState().undoCount == 2);
     ModelRotationRequest undo; undo.action=ModelRotationAction::Undo;
-    VERIFY(feature->SendRequest(undo));
+    VERIFY((feature->SendRequest(undo).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
 
@@ -289,7 +298,7 @@ void TestRotationSession()
     send(HostInputKind::SecondaryRelease,128,180,false,false,true);
     wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
     ModelRotationRequest reboundUndo; reboundUndo.action=ModelRotationAction::Undo;
-    VERIFY(feature->SendRequest(reboundUndo));
+    VERIFY((feature->SendRequest(reboundUndo).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
     VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
@@ -341,7 +350,7 @@ void TestRotationSession()
     tick();
     loaded=false;
     auto secondReload=reloadAgain;
-    VERIFY(session.SendRequest(std::move(secondReload),[&](bool success){loaded=success;}));
+    VERIFY((session.SendRequest(std::move(secondReload),[&](HostResult hostResultSuccess){ const bool success = hostResultSuccess.isSucceeded;loaded=success;}).status == HostAdmissionStatus::Accepted));
     wait([&]{return loaded;});
     VERIFY(feature->GetState().status==ModelRotationStatus::Invalidated);
     VERIFY(feature->GetState().undoCount==0);
@@ -357,7 +366,7 @@ void TestRotationSession()
     HostToolSetRequest modelTool;
     modelTool.targetView.viewId="rotation-0";
     modelTool.toolMode=HostToolMode::ModelTransform;
-    VERIFY(session.SendRequest(std::move(modelTool)));
+    VERIFY((session.SendRequest(std::move(modelTool)).status == HostAdmissionStatus::Accepted));
     send(HostInputKind::PrimaryPress,170,128,true);
     VERIFY(port->GetTransformState()->editToken!=0);
     send(HostInputKind::PointerMove,200,150,true);
@@ -382,7 +391,7 @@ void TestRotationSession()
     tick();
     loaded=false;
     auto panReload=reloadAgain;
-    VERIFY(session.SendRequest(std::move(panReload),[&](bool success){loaded=success;}));
+    VERIFY((session.SendRequest(std::move(panReload),[&](HostResult hostResultSuccess){ const bool success = hostResultSuccess.isSucceeded;loaded=success;}).status == HostAdmissionStatus::Accepted));
     wait([&]{return loaded;});
     send(HostInputKind::PrimaryRelease,240,170,true);
     VERIFY(port->GetTransformState()->modelToWorld==rotated.modelToWorld);
@@ -395,9 +404,9 @@ void TestRotationSession()
     VERIFY(port->GetTransformState()->modelToWorld==rotated.modelToWorld);
     VERIFY(!session.GetRenderViewState({"rotation-0"})->isInteracting);
     VERIFY(feature->DetachHost());
-    VERIFY(!feature->SendRequest(numeric));
+    VERIFY(!(feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     VERIFY(session.AttachFeature(feature));
-    VERIFY(feature->SendRequest(enable));
+    VERIFY((feature->SendRequest(enable).status == ModelRotationAdmissionStatus::Accepted));
     send(HostInputKind::PrimaryPress,170,128);
     VERIFY(session.DetachFeature(*probe));
     VERIFY(!port->GetTransformState());
@@ -414,9 +423,9 @@ void TestRotationSession()
     VERIFY(!rebuiltPort->StartTransform(initial));
     loaded=false;
     auto rebuiltReload=reloadAgain;
-    VERIFY(session.SendRequest(std::move(rebuiltReload),[&](bool success){loaded=success;}));
+    VERIFY((session.SendRequest(std::move(rebuiltReload),[&](HostResult hostResultSuccess){ const bool success = hostResultSuccess.isSucceeded;loaded=success;}).status == HostAdmissionStatus::Accepted));
     wait([&]{return loaded;});
-    VERIFY(feature->SendRequest(numeric));
+    VERIFY((feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status==ModelRotationStatus::Succeeded;});
     VERIFY(session.Stop());
     std::cout << "ModelRotation real OpenGL/session/native input passed\n";
@@ -475,7 +484,7 @@ void TestRotationHostDriven()
         reload.voxels[x+8*(y+8*z)] = 100;
     const auto reloadAgain = reload;
     bool loaded = false;
-    VERIFY(session.SendRequest(std::move(reload), [&](bool value) { loaded = value; }));
+    VERIFY((session.SendRequest(std::move(reload), [&](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded; loaded = value; }).status == HostAdmissionStatus::Accepted));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (!loaded && std::chrono::steady_clock::now() < deadline) {
         update();
@@ -516,10 +525,10 @@ void TestRotationHostDriven()
     ModelRotationRequest numeric;
     numeric.angleDeg = 10;
     numeric.worldCenter = std::array<double, 3>{0, 0, 0};
-    for (int index = 0; index < 3; ++index) VERIFY(feature->SendRequest(numeric));
+    for (int index = 0; index < 3; ++index) VERIFY((feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     ModelRotationRequest undo;
     undo.action = ModelRotationAction::Undo;
-    for (int index = 0; index < 3; ++index) VERIFY(feature->SendRequest(undo));
+    for (int index = 0; index < 3; ++index) VERIFY((feature->SendRequest(undo).status == ModelRotationAdmissionStatus::Accepted));
     update();
     VERIFY(feature->GetState().status == ModelRotationStatus::Pending);
     VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
@@ -530,12 +539,12 @@ void TestRotationHostDriven()
     VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
 
     // 连续用户操作不受旧的 100 次历史保留上限影响。
-    for (int index = 0; index < 101; ++index) VERIFY(feature->SendRequest(numeric));
+    for (int index = 0; index < 101; ++index) VERIFY((feature->SendRequest(numeric).status == ModelRotationAdmissionStatus::Accepted));
     for (int attempt = 0; attempt < 300
         && feature->GetState().status == ModelRotationStatus::Pending; ++attempt) update();
     VERIFY(feature->GetState().status == ModelRotationStatus::Succeeded);
     VERIFY(feature->GetState().undoCount == 101);
-    for (int index = 0; index < 101; ++index) VERIFY(feature->SendRequest(undo));
+    for (int index = 0; index < 101; ++index) VERIFY((feature->SendRequest(undo).status == ModelRotationAdmissionStatus::Accepted));
     for (int attempt = 0; attempt < 300
         && feature->GetState().status == ModelRotationStatus::Pending; ++attempt) update();
     VERIFY(feature->GetState().status == ModelRotationStatus::Succeeded);
@@ -543,13 +552,17 @@ void TestRotationHostDriven()
     VERIFY(port->GetTransformState()->modelToWorld == queuedBefore);
     // Cancel 清除尚未开始的请求；非法参数仍拒绝，不占据队列。
     VERIFY(sourcePort->SetInteracting(source, true));
-    VERIFY(feature->SendRequest(numeric));
+    std::vector<ModelRotationResult> cancelledResults;
+    const auto cancelledAdmission = feature->SendRequest(numeric, [&](auto value) { cancelledResults.push_back(value); });
+    VERIFY(cancelledAdmission.status == ModelRotationAdmissionStatus::Accepted);
     auto invalid = numeric;
     invalid.worldAxis = {0, 0, 0};
-    VERIFY(!feature->SendRequest(invalid));
+    VERIFY(!(feature->SendRequest(invalid).status == ModelRotationAdmissionStatus::Accepted));
     ModelRotationRequest stop;
     stop.action = ModelRotationAction::Cancel;
-    VERIFY(feature->SendRequest(stop));
+    VERIFY((feature->SendRequest(stop).status == ModelRotationAdmissionStatus::Accepted));
+    VERIFY(cancelledResults.size() == 1 && cancelledResults.front().requestId == cancelledAdmission.requestId
+        && cancelledResults.front().status == ModelRotationStatus::Cancelled);
     VERIFY(feature->GetState().status == ModelRotationStatus::Cancelled);
     VERIFY(sourcePort->SetInteracting(source, false));
     drain();
@@ -557,10 +570,12 @@ void TestRotationHostDriven()
 
     // 等待期间换源使请求失效，不把旧数据的旋转应用到新数据。
     VERIFY(sourcePort->SetInteracting(source, true));
-    VERIFY(feature->SendRequest(numeric));
+    std::vector<ModelRotationResult> staleResults;
+    const auto staleAdmission = feature->SendRequest(numeric, [&](auto value) { staleResults.push_back(value); });
+    VERIFY(staleAdmission.status == ModelRotationAdmissionStatus::Accepted);
     loaded = false;
     auto secondReload = reloadAgain;
-    VERIFY(session.SendRequest(std::move(secondReload), [&](bool value) { loaded = value; }));
+    VERIFY((session.SendRequest(std::move(secondReload), [&](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded; loaded = value; }).status == HostAdmissionStatus::Accepted));
     for (int attempt = 0; attempt < 1000 && !loaded; ++attempt) {
         update();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -569,6 +584,16 @@ void TestRotationHostDriven()
     VERIFY(sourcePort->SetInteracting(source, false));
     drain();
     VERIFY(feature->GetState().status == ModelRotationStatus::Invalidated);
+    VERIFY(staleResults.size() == 1 && staleResults.front().requestId == staleAdmission.requestId
+        && staleResults.front().status == ModelRotationStatus::Invalidated);
+    VERIFY(sourcePort->SetInteracting(source, true));
+    std::vector<ModelRotationResult> detachedResults;
+    const auto detachedAdmission = feature->SendRequest(numeric, [&](auto value) { detachedResults.push_back(value); });
+    VERIFY(detachedAdmission.status == ModelRotationAdmissionStatus::Accepted);
+    VERIFY(session.DetachFeature(*feature));
+    VERIFY(detachedResults.size() == 1 && detachedResults.front().requestId == detachedAdmission.requestId
+        && detachedResults.front().status == ModelRotationStatus::Cancelled);
+    VERIFY(sourcePort->SetInteracting(source, false));
     VERIFY(session.DetachFeature(*probe));
     VERIFY(!port->GetTransformState());
     VERIFY(session.Stop());

@@ -84,7 +84,10 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         return GetText(p, "result") == "current" ? feature->GetState().result : GetRef(p["result"]);
     };
     const auto send = [panel, feature, visible](std::uint64_t id, ThicknessRequest request) {
-        const auto display = request.display;
+        std::optional<ThicknessDisplay> display;
+        if (const auto* value = std::get_if<ThicknessStartRequest>(&request)) display = value->display;
+        else if (const auto* value = std::get_if<ThicknessDisplayRequest>(&request)) display = value->display;
+        else if (const auto* value = std::get_if<ThicknessActivationRequest>(&request)) display = value->display;
         const QPointer<ModulePanel> owner(panel);
         const auto admission = feature->SendRequest(std::move(request), [owner, feature, visible, display, id](const ThicknessResult& result) {
             if (!owner) return;
@@ -105,47 +108,43 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         "maxDistance":null,"sampleSpacing":null,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"SourceExtentLocal",
         "maxBoundaryError":null,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
-        const auto current = panel->GetSession()->GetImageDescriptor();
-        if (!current) throw std::invalid_argument("请先加载体数据");
-        ThicknessInput input;
-        input.source = GetText(p, "source") == "current" ? current->dataRevision : GetRef(p["source"]);
+        ThicknessInputSelection selection;
+        if (GetText(p, "source") != "current") selection.source = GetRef(p["source"]);
+        if (GetText(p, "labels") != "parts") selection.labels = GetRef(p["labels"]);
+        if (GetText(p, "mesh") != "surface") selection.mesh = GetRef(p["mesh"]);
         auto& workflow = panel->GetContext().workflow;
-        const auto source = workflow.getImageInput ? workflow.getImageInput(input.source) : current;
-        if (!source) throw std::invalid_argument("所选体数据输入不可用");
-        input.labels = GetText(p, "labels") == "parts" ? (workflow.getPartLabels ? workflow.getPartLabels() : DataRevisionRef{}) : GetRef(p["labels"]);
-        if (GetText(p, "mesh") == "surface") {
-            if (workflow.GetSurfaceSource() != input.source) throw std::invalid_argument("请先生成同一输入的有效测量表面");
-            input.mesh = workflow.GetSurfaceMesh();
-        } else input.mesh = GetRef(p["mesh"]);
-        if (!GetDataRevisionRefValid(input.labels) || !GetDataRevisionRefValid(input.mesh))
-            throw std::invalid_argument("请选择可用材料标签图和同一源的采样网格；输入需使用已发布的数据修订");
-        for (const auto label : p["materialLabels"].toArray()) input.materialLabels.push_back(GetId(label));
-        input.unit = GetEnum<ThicknessUnit>(p, "unit", {{"Millimeter", ThicknessUnit::Millimeter}, {"Meter", ThicknessUnit::Meter}});
-        if (input.unit != ThicknessUnit::Millimeter) throw std::invalid_argument("Host 图像和网格使用毫米几何；此参数声明源单位，不执行显示单位换算");
+        const auto source = selection.source ? panel->GetSession()->GetImageDescriptor(*selection.source)
+            : panel->GetSession()->GetImageDescriptor();
+        if (!source) throw std::invalid_argument("所选壁厚体输入不可读");
+        for (const auto label : p["materialLabels"].toArray()) selection.materialLabels.push_back(GetId(label));
+        selection.unit = GetEnum<ThicknessUnit>(p, "unit", {{"Millimeter", ThicknessUnit::Millimeter}, {"Meter", ThicknessUnit::Meter}});
+        if (selection.unit != ThicknessUnit::Millimeter)
+            throw std::invalid_argument("Host 图像输入使用毫米几何；此测试入口不执行单位转换");
         ThicknessParams params;
         params.maxDistance = GetInputNumber(p,"maxDistance",GetInputDiagonal(*source));
         params.sampleSpacing = GetInputNumber(p,"sampleSpacing",2.0 * GetVoxelSpacing(*source));
+        const auto surface = workflow.GetMeasurementSurface();
         params.materialThreshold = p["materialThreshold"].isNull()
-            ? (input.source == workflow.GetSurfaceSource() && input.mesh == workflow.GetSurfaceMesh() && workflow.GetSurfaceThreshold()
-                ? workflow.GetSurfaceThreshold() : std::optional<double>{GetScalarMidpoint(*source)})
+            ? (surface && surface->source == source->dataRevision
+                && (!selection.mesh || *selection.mesh == surface->mesh) && surface->threshold
+                ? surface->threshold : std::optional<double>{GetScalarMidpoint(*source)})
             : std::optional<double>{GetNumber(p, "materialThreshold")};
-        if (!params.materialThreshold) throw std::invalid_argument("请显式提供原始灰度材料阈值，或选择当前测量表面");
         params.coneAngleDegrees = GetNumber(p, "coneAngleDegrees"); params.directionCount = static_cast<std::uint32_t>(Count(p, "directionCount", 4096));
         params.boundaryPolicy = GetEnum<ThicknessBoundaryPolicy>(p, "boundaryPolicy", {
             {"Complete", ThicknessBoundaryPolicy::Complete}, {"SourceExtentLocal", ThicknessBoundaryPolicy::SourceExtentLocal}});
         params.maxBoundaryError = GetInputNumber(p,"maxBoundaryError",0.5 * GetVoxelSpacing(*source));
         if (!p["evaluationBounds"].isNull()) params.evaluationBounds = GetArray<double, 6>(p["evaluationBounds"]);
-        ThicknessRequest request; request.action = ThicknessAction::Start; request.input = input; request.params = params;
-        ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, params.maxDistance};
+        auto request = workflow.BuildThicknessRequest(*panel->GetSession(), selection, std::move(params));
+        ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, request.params.maxDistance};
         display.rangeMode = ThicknessRangeMode::Result; request.display = display;
-        ThicknessEvaluation evaluation; evaluation.upper = params.maxDistance; evaluation.histogramRange = display.range; request.evaluation = evaluation;
+        ThicknessEvaluation evaluation; evaluation.upper = request.params.maxDistance; evaluation.histogramRange = display.range; request.evaluation = evaluation;
         send(id, std::move(request));
     }, TestPolicy::Compute, true);
     panel->AttachAction("Cancel", {{"targetRequestId", "0"}}, [send](auto id, const auto& p) {
-        ThicknessRequest r; r.action = ThicknessAction::Cancel; r.targetRequestId = GetId(p["targetRequestId"]); send(id, r);
+        ThicknessRequest r; r = ThicknessCancelRequest{}; std::get<ThicknessCancelRequest>(r).targetRequestId = GetId(p["targetRequestId"]); send(id, r);
     }, TestPolicy::Stop);
     panel->AttachAction("Clear", {}, [send](auto id, const auto&) {
-        ThicknessRequest r; r.action = ThicknessAction::Clear; send(id, r);
+        ThicknessRequest r; r = ThicknessClearRequest{}; send(id, r);
     });
     panel->AttachAction("SetEvaluation", GetJson(R"({"lower":0,"upper":null,"histogramRange":null,"histogramBins":32,"minRegionArea":0})"),
         [feature, send](auto id, const auto& p) {
@@ -154,18 +153,18 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             auto parameters = p;
             parameters["upper"] = GetInputNumber(p,"upper",std::max(*result->statistics.maximum,std::numeric_limits<double>::epsilon()));
             if (p["histogramRange"].isNull()) parameters["histogramRange"] = QJsonArray{0.,parameters["upper"]};
-            ThicknessRequest r; r.action = ThicknessAction::SetEvaluation; r.evaluation = Evaluation(parameters); send(id,r);
+            send(id, ThicknessEvaluationRequest{Evaluation(parameters)});
         }, TestPolicy::Compute);
     panel->AttachAction("SetDisplay", GetJson(R"({"mode":"Continuous","rangeMode":"Result","range":[0,1],"palette":"InverseRainbow",
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
         "segments":[],"displayStyle":"Overlay","opacityRange":[0.15,1],
         "opacity":1,"isVisible":true,"hasLegend":true})"),
-        [send](auto id, const auto& p) { ThicknessRequest r; r.action = ThicknessAction::SetDisplay; r.display = Display(p); send(id, r); }, TestPolicy::View);
+        [send](auto id, const auto& p) { ThicknessRequest r; r = ThicknessDisplayRequest{}; std::get<ThicknessDisplayRequest>(r).display = Display(p); send(id, r); }, TestPolicy::View);
     panel->AttachAction("SetActive", {{"result", "current"}}, [send, resolveResult](auto id, const auto& p) {
-        ThicknessRequest r; r.action = ThicknessAction::SetActive; r.resultRevision = resolveResult(p); send(id, r);
+        ThicknessRequest r; r = ThicknessActivationRequest{}; std::get<ThicknessActivationRequest>(r).resultRevision = resolveResult(p); send(id, r);
     });
     panel->AttachAction("SelectSample", {{"result", "current"}, {"sampleIndex", "0"}}, [send, resolveResult](auto id, const auto& p) {
-        ThicknessRequest r; r.action = ThicknessAction::SelectSample; r.resultRevision = resolveResult(p); r.sampleIndex = GetId(p["sampleIndex"]); send(id, r);
+        ThicknessRequest r; r = ThicknessSampleRequest{}; std::get<ThicknessSampleRequest>(r).resultRevision = resolveResult(p); std::get<ThicknessSampleRequest>(r).sampleIndex = GetId(p["sampleIndex"]); send(id, r);
     }, TestPolicy::View);
     panel->AttachAction("Result", {{"result", "current"}}, [panel, feature, resolveResult](auto id, const auto& p) {
         const auto result = feature->GetResult(resolveResult(p));
@@ -223,12 +222,13 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if (image) {
             auto* form = panel->GetParameterEditor("Start");
             auto& workflow = panel->GetContext().workflow;
+            const auto surface = workflow.GetMeasurementSurface();
             const auto meshChoice = form->GetField("mesh")->GetValue();
             bool matchedSurface = meshChoice == "surface";
-            if (!matchedSurface) try { matchedSurface = GetRef(meshChoice) == workflow.GetSurfaceMesh(); }
+            if (!matchedSurface) try { matchedSurface = surface && GetRef(meshChoice) == surface->mesh; }
                 catch (const std::invalid_argument&) {}
-            const auto threshold = matchedSurface && image->dataRevision == workflow.GetSurfaceSource() && workflow.GetSurfaceThreshold()
-                ? *workflow.GetSurfaceThreshold() : GetScalarMidpoint(*image);
+            const auto threshold = matchedSurface && surface && image->dataRevision == surface->source && surface->threshold
+                ? *surface->threshold : GetScalarMidpoint(*image);
             form->GetField("materialThreshold")->SetDefaultValue(threshold);
             form->GetField("sampleSpacing")->SetDefaultValue(2.0 * GetVoxelSpacing(*image));
             form->GetField("maxBoundaryError")->SetDefaultValue(0.5 * GetVoxelSpacing(*image));

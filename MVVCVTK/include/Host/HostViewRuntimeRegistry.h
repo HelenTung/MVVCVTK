@@ -61,6 +61,7 @@ public:
     virtual std::vector<HostInputRoute> GetInputRoutes(
         const HostViewTargets& targets) const = 0;
     virtual bool StopView(std::string_view viewId) = 0;
+    virtual bool UnloadData(const DataRevisionRef&) { return false; }
 };
 
 // Session 内的多 View runtime owner/coordinator：维护 topology、context 生命周期、

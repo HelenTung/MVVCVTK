@@ -56,17 +56,11 @@ public:
     static bool SendPendingStops() noexcept;
     static std::size_t GetPendingStopCount() noexcept;
 
-    // 兼容旧调用方；SDK consumer 应迁移到结果语义稳定的 SendRequestResult。
-#if defined(MVVCVTK_SDK_CONSUMER)
-    [[deprecated("Use SendRequestResult to separate acceptance from outcome.")]]
-#endif
-    bool SendRequest(
+    // 仅 owner thread；拒绝不回调，Accepted 恰好一次 owner 回调。
+    // 短命令可在返回前完成；回调可再次请求，更新/绘制中的拓扑变更仍拒绝。
+    HostAdmission SendRequest(
         HostRequest&& request,
-        HostCompleteCallback onComplete = nullptr);
-    // 推荐接口：投递失败也同步返回一次结构化结果，callback 对每个请求只执行一次。
-    bool SendRequestResult(
-        HostRequest&& request,
-        HostResultCallback onComplete);
+        HostResultCallback onComplete = {});
 
     // 返回会话内部 endpoint 集合的只读引用；引用和元素地址只在本会话拓扑不变且存活期间有效。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
@@ -90,6 +84,10 @@ public:
     // 深拷贝当前体素为不含 VTK identity 的只读值；无有效体数据时返回空。
     // metadata-only 查询不复制体素；几何为加载边界转换后的规范 RAS。
     std::optional<ImageDescriptor> GetImageDescriptor();
+    // Running/owner thread 的纯值历史查询；未知或非图像修订返回空。
+    std::optional<ImageDescriptor> GetImageDescriptor(const DataRevisionRef& revision);
+    // 仅复制修订元信息，不持有 payload、VTK identity 或资源租约。
+    std::optional<HostDataCatalog> GetDataCatalog(const DataQuery& query = {}) const;
     std::optional<ImageReadState> GetImageReadState();
     // 扩展接口：在分配前检查同步复制预算，并返回稳定失败原因与所需字节数。
     ImageReadResult GetImageReadResult(

@@ -695,10 +695,10 @@ void Lifecycle()
         "drag trigger must not replace sample click");
     auto work = BuildSlab();
     ThicknessRequest request;
-    request.action = ThicknessAction::Start;
-    request.input = Publish(data, work);
-    request.params = work.archive.params;
-    request.evaluation = work.archive.evaluation;
+    request = ThicknessStartRequest{};
+    std::get<ThicknessStartRequest>(request).input = Publish(data, work);
+    std::get<ThicknessStartRequest>(request).params = work.archive.params;
+    std::get<ThicknessStartRequest>(request).evaluation = work.archive.evaluation;
     Check(feature->SendRequest(request).status == ThicknessAdmissionStatus::Unavailable,
           "unattached rejected");
     Check(feature->AttachHost({{}, {}, data, control}), "attach headless feature");
@@ -722,8 +722,8 @@ void Lifecycle()
     Check(snapshot && snapshot->isCurrent && snapshot->statistics.minimum,
           "read immutable public result");
     const auto archive = feature->GetArchive(outcome.result);
-    Check(archive && archive->params.maxDistance == request.params->maxDistance &&
-        archive->schemaVersion==3 && archive->input.materialLabels==request.input->materialLabels,
+    Check(archive && archive->params.maxDistance == std::get<ThicknessStartRequest>(request).params.maxDistance &&
+        archive->schemaVersion==3 && archive->input.materialLabels==std::get<ThicknessStartRequest>(request).input.materialLabels,
           "complete recipe recoverable");
     const bool hasSampleTarget = snapshot
         && snapshot->statistics.minimumSample.has_value()
@@ -758,10 +758,10 @@ void Lifecycle()
               "secondary release clears click state and retains selection");
     }
     ThicknessRequest eval;
-    eval.action = ThicknessAction::SetEvaluation;
-    eval.evaluation = work.archive.evaluation;
-    eval.evaluation->lower = 2.1;
-    eval.evaluation->upper = 3;
+    eval = ThicknessEvaluationRequest{};
+    std::get<ThicknessEvaluationRequest>(eval).evaluation = work.archive.evaluation;
+    std::get<ThicknessEvaluationRequest>(eval).evaluation.lower = 2.1;
+    std::get<ThicknessEvaluationRequest>(eval).evaluation.upper = 3;
     completions = 0;
     feature->SendRequest(eval,
                          [&](const auto &r)
@@ -777,14 +777,14 @@ void Lifecycle()
     feature->OnHostTick();
     Check(!feature->GetState().isCurrent, "new source identity invalidates historical result");
     ThicknessRequest stalePick;
-    stalePick.action = ThicknessAction::SelectSample;
-    stalePick.resultRevision = outcome.result;
-    stalePick.sampleIndex = 0;
+    stalePick = ThicknessSampleRequest{};
+    std::get<ThicknessSampleRequest>(stalePick).resultRevision = outcome.result;
+    std::get<ThicknessSampleRequest>(stalePick).sampleIndex = 0;
     Check(feature->SendRequest(stalePick).status != ThicknessAdmissionStatus::Accepted,
           "stale sample selection rejected");
     Check(feature->GetResult(outcome.result) && !feature->GetResult(outcome.result)->isCurrent,
           "history still readable");
-    request.input = Publish(data, work);
+    std::get<ThicknessStartRequest>(request).input = Publish(data, work);
     completions = 0;
     feature->SendRequest(request,
                          [&](const auto &r)
@@ -793,7 +793,7 @@ void Lifecycle()
                              outcome = r;
                          });
     ThicknessRequest cancel;
-    cancel.action = ThicknessAction::Cancel;
+    cancel = ThicknessCancelRequest{};
     Check(feature->SendRequest(cancel).status == ThicknessAdmissionStatus::Accepted,
           "cancel admitted");
     Wait(feature, completions);
@@ -807,7 +807,7 @@ void Lifecycle()
               failing->binding.featureId.empty(),
           "throwing input attach reverses observer and partial input registration");
     Check(feature->AttachHost({{}, {}, data, control}), "reattach for observer reentry");
-    request.input = Publish(data, work);
+    std::get<ThicknessStartRequest>(request).input = Publish(data, work);
     completions = 0;
     bool observerDetached = false;
     const auto observer = data->AttachDataChange(
@@ -837,7 +837,7 @@ void Lifecycle()
           "observer detach retains committed identity and cancels exactly once");
     Check(data->DetachDataChange(observer), "test observer cleanup");
     Check(feature->AttachHost({{}, {}, data, control}), "reattach for callback reentry");
-    request.input = Publish(data, work);
+    std::get<ThicknessStartRequest>(request).input = Publish(data, work);
     completions = 0;
     bool queriedIdle = false;
     feature->SendRequest(request,
@@ -846,7 +846,7 @@ void Lifecycle()
                              ++completions;
                              queriedIdle = !feature->GetState().isBusy;
                              ThicknessRequest clear;
-                             clear.action = ThicknessAction::Clear;
+                             clear = ThicknessClearRequest{};
                              Check(feature->SendRequest(clear).status ==
                                        ThicknessAdmissionStatus::Accepted,
                                    "callback can clear published result");
@@ -856,7 +856,7 @@ void Lifecycle()
           "callback sees completed state");
     Check(feature->DetachHost(), "callback reentry cleanup");
     Check(feature->AttachHost({{}, {}, data, control}), "attach for post-commit conflict");
-    request.input = Publish(data, work);
+    std::get<ThicknessStartRequest>(request).input = Publish(data, work);
     completions = 0;
     feature->SendRequest(request,
                          [&](const auto &r)
@@ -885,7 +885,7 @@ void Lifecycle()
                 }
         });
     ThicknessRequest clear;
-    clear.action = ThicknessAction::Clear;
+    clear = ThicknessClearRequest{};
     ThicknessResult controlled;
     Check(feature->SendRequest(clear, [&](const auto &r) { controlled = r; }).status ==
               ThicknessAdmissionStatus::Accepted,
@@ -914,8 +914,8 @@ void Lifecycle()
                 }
         });
     ThicknessRequest activate;
-    activate.action = ThicknessAction::SetActive;
-    activate.resultRevision = savedResult;
+    activate = ThicknessActivationRequest{};
+    std::get<ThicknessActivationRequest>(activate).resultRevision = savedResult;
     Check(feature->SendRequest(activate, [&](const auto &r) { controlled = r; }).status ==
               ThicknessAdmissionStatus::Accepted,
           "activation accepted before observer conflict");

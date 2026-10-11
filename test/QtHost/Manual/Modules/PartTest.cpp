@@ -44,7 +44,7 @@ struct PartPreviewDisplay : std::enable_shared_from_this<PartPreviewDisplay> {
                     if (owner->onMessage) owner->onMessage("切换零件预览显示失败：" + state->error);
                 }
             };
-            if (!panel->GetSession()->SendRequestResult(std::move(request), complete)) {
+            if (!(panel->GetSession()->SendRequest(std::move(request), complete).status == HostAdmissionStatus::Accepted)) {
                 view.pending = false; view.error = "视图请求未接受";
                 if (panel->onMessage) panel->onMessage("切换零件预览显示失败：" + view.error);
             }

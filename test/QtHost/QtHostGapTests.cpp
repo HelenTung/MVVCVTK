@@ -250,12 +250,12 @@ bool SendReload(
     reload.metadata.source.kind = ImageSourceKind::Memory;
     reload.metadata.source.uri = "memory://qt-host-gap-tests";
 
-    return session.SendRequest(
+    return (session.SendRequest(
         std::move(reload),
-        [&isComplete, &isSucceeded](const bool value) {
+        [&isComplete, &isSucceeded](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
             isSucceeded = value;
             isComplete = true;
-        });
+        }).status == HostAdmissionStatus::Accepted);
 }
 
 void SendTicks(
@@ -445,11 +445,11 @@ int GetGapFailCount()
     const auto start = GetGapConfig().defaultStart;
     int unattachedCallbackCount = 0;
     const bool isUnattachedRejected =
-        !feature->SendRequest(
+        !(feature->SendRequest(
             GetStartRequest(start),
             [&unattachedCallbackCount](GapHostResult) {
                 ++unattachedCallbackCount;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     const auto beforeUseCount = feature.use_count();
     const bool isBuilt = session.BuildSession();
     auto contextProbe = std::make_shared<ContextProbeFeature>();
@@ -510,30 +510,30 @@ int GetGapFailCount()
     missingTarget.targetViews = {};
     int invalidStartCallbackCount = 0;
     const bool isStrict =
-        !feature->SendRequest(GetGapRequest(
-            GapHostAction::None))
-        && !feature->SendRequest(GetGapRequest(
-            GapHostAction::Start))
-        && !feature->SendRequest(
+        !(feature->SendRequest(GetGapRequest(
+            GapHostAction::None)).status == GapAdmissionStatus::Accepted)
+        && !(feature->SendRequest(GetGapRequest(
+            GapHostAction::Start)).status == GapAdmissionStatus::Accepted)
+        && !(feature->SendRequest(
             GetStartRequest(missingTarget),
             [&invalidStartCallbackCount](GapHostResult) {
                 ++invalidStartCallbackCount;
-            })
-        && !feature->SendRequest(GetGapRequest(
-            GapHostAction::Overlay))
-        && !feature->SendRequest(GetGapRequest(
-            GapHostAction::Exit))
-        && !feature->SendRequest(
+            }).status == GapAdmissionStatus::Accepted)
+        && !(feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay)).status == GapAdmissionStatus::Accepted)
+        && !(feature->SendRequest(GetGapRequest(
+            GapHostAction::Exit)).status == GapAdmissionStatus::Accepted)
+        && !(feature->SendRequest(
             GetGapRequest(GapHostAction::Overlay),
-            [](GapHostResult) {});
+            [](GapHostResult) {}).status == GapAdmissionStatus::Accepted);
     bool isWrongThreadAccepted = true;
     int wrongThreadCallbackCount = 0;
     std::thread wrongThread([&] {
-        isWrongThreadAccepted = feature->SendRequest(
+        isWrongThreadAccepted = (feature->SendRequest(
             GetStartRequest(start),
             [&wrongThreadCallbackCount](GapHostResult) {
                 ++wrongThreadCallbackCount;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     });
     wrongThread.join();
     failureCount += GetCaseResult(
@@ -654,7 +654,7 @@ int GetGapFailCount()
     const auto ownerThread = std::this_thread::get_id();
     std::thread::id callbackThread;
     const bool isFirstAccepted =
-        feature->SendRequest(
+        (feature->SendRequest(
             GetStartRequest(start),
             [&firstCompleteCount, &isFirstSucceeded,
                 &callbackThread](
@@ -665,16 +665,16 @@ int GetGapFailCount()
                     || result.status
                         == GapResultStatus::SucceededWithDisplayFailure;
                 callbackThread = std::this_thread::get_id();
-            });
+            }).status == GapAdmissionStatus::Accepted);
     const auto acceptedState = feature->GetState();
     const auto acceptedOperations = feature->GetOperationStates();
     bool hasRejectedCallback = false;
     const bool isSecondRejected =
-        !feature->SendRequest(
+        !(feature->SendRequest(
             GetStartRequest(start),
             [&hasRejectedCallback](GapHostResult) {
                 hasRejectedCallback = true;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     for (int poll = 0;
         isFirstAccepted
             && firstCompleteCount == 0
@@ -729,8 +729,8 @@ int GetGapFailCount()
         endpoint->interactor->InvokeEvent(
             vtkCommand::KeyReleaseEvent) != 0;
     const bool isOverlaySwitched =
-        feature->SendRequest(GetGapRequest(
-            GapHostAction::Overlay));
+        (feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay)).status == GapAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         isOverlayKeyHandled
             && isOverlayReleaseHandled
@@ -764,8 +764,8 @@ int GetGapFailCount()
     SendTicks(*endpoint, 2);
     const auto staleState = feature->GetState();
     const bool isStaleOverlayRejected =
-        !feature->SendRequest(GetGapRequest(
-            GapHostAction::Overlay));
+        !(feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay)).status == GapAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         isNextReloadReady
             && isStaleOverlayRejected
@@ -788,13 +788,13 @@ int GetGapFailCount()
     int detachedCallbackCount = 0;
     bool isDetachedCallbackSucceeded = true;
     const bool isPendingAccepted =
-        pendingFeature->SendRequest(
+        (pendingFeature->SendRequest(
             GetStartRequest(start),
             [&detachedCallbackCount,
                 &isDetachedCallbackSucceeded](const GapHostResult& result) {
                 ++detachedCallbackCount;
                 isDetachedCallbackSucceeded = result.status == GapResultStatus::Succeeded;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     bool isDetached = false;
     for (int retry=0; !isDetached && retry<2000; ++retry) {
         isDetached=session.DetachFeature(*pendingFeature);
@@ -804,11 +804,11 @@ int GetGapFailCount()
     SendTicks(*endpoint, 2);
     int detachedSendCount = 0;
     const bool isDetachedRequestRejected =
-        !pendingFeature->SendRequest(
+        !(pendingFeature->SendRequest(
             GetStartRequest(start),
             [&detachedSendCount](GapHostResult) {
                 ++detachedSendCount;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         isFirstDetached
             && isPendingAttached
@@ -835,11 +835,13 @@ int GetGapFailCount()
     int abaCount = 0;
     std::optional<GapHostResult> abaResult;
     const bool isAbaStarted = session.AttachFeature(abaFeature)
-        && abaFeature->SendRequest(GetStartRequest(start), [&](GapHostResult result) {
+        && (abaFeature->SendRequest(GetStartRequest(start), [&](GapHostResult result) {
             abaResult = std::move(result); ++abaCount;
-        });
-    const bool hasRequestAba = isAbaStarted && gapBinding
-        && setGapBinding(gapBinding->target) && setGapBinding({});
+        }).status == GapAdmissionStatus::Accepted);
+    // 可退役输入的旧 Feature 结果在 detach 后已退役；用仍存活的修订制造真实 binding ABA。
+    const auto liveSource = contextProbe->m_data->GetPrimaryImage();
+    const bool hasRequestAba = isAbaStarted && liveSource && liveSource->data
+        && setGapBinding(liveSource->data->self) && setGapBinding({});
     const auto abaCommit = contextProbe->m_data->GetDataGraph().commitId;
     for (int poll = 0; abaCount == 0 && poll < 500; ++poll) {
         SendTicks(*endpoint, 1);

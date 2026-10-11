@@ -25,8 +25,10 @@ public:
     InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     bool DetachHost() override;
     bool OnHostTick() override;
-    // true 表示已接纳；GetState().status 区分等待帧提交与已完成。
-    bool SendRequest(const ModelRotationRequest& request);
+    // 拒绝不回调；Accepted 恰好一次 owner 回调。旋转/撤销成功在帧提交后兑现，失败或短命令可同步完成。
+    // 回调可查询、再次请求或取消；Detach/Stop 仍遵循 Session 的拓扑与停止契约。
+    ModelRotationAdmission SendRequest(const ModelRotationRequest& request,
+        ModelRotationCallback onComplete = {});
     ModelRotationState GetState() const;
 private:
     class Impl;

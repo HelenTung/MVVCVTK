@@ -25,6 +25,14 @@ struct HostResult final {
     std::string message;
 };
 
+// 拒绝原因只从接纳结果读取；拒绝请求不取得完成回调。
+enum class HostAdmissionStatus { Accepted, Rejected };
+struct HostAdmission final {
+    HostAdmissionStatus status = HostAdmissionStatus::Rejected;
+    HostErrorCode errorCode = HostErrorCode::RequestRejected;
+    std::string message;
+};
+
 enum class HostInputKind : std::uint8_t {
     None,
     WheelForward,
@@ -67,8 +75,6 @@ public:
     virtual HostInputResult SendInput(const HostInputEvent& event) = 0;
 };
 
-using HostCompleteCallback =
-    std::function<void(bool isSuccess)>;
 using HostResultCallback =
     std::function<void(HostResult result)>;
 
@@ -100,6 +106,12 @@ struct HostReloadRequest final : HostRequest {
 struct HostDataSelectRequest final : HostRequest {
     DataRevisionRef dataRevision;
     DataBindingRevision expectedBindingRevision = 0;
+};
+
+// 卸载该实体及其显式退役派生结果；Reader、临时 Feature 输入及非 primary binding 仍阻塞。
+// 成功表示已退役；在途 GPU 引用结束后才完成物理释放，不删除源文件。
+struct HostDataUnloadRequest final : HostRequest {
+    DataRevisionRef dataRevision; // 调用方观察到的当前实体 head，防止卸载后来生成的修订。
 };
 
 struct HostDataExportRequest final : HostRequest {
