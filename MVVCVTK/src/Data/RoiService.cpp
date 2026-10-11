@@ -194,6 +194,22 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
         transaction.outputs.push_back({catalogRef.entityId,catalogRef.generation-1,DataTypes::roiCatalog,
             std::move(inputs),std::make_shared<const RoiCatalogPayload>(std::move(catalog.entries)),
             DataProvenance{"Host.Roi","set-catalog","1",{}}});
+        // 几何、mask 与共享目录分别使用独立 scope，目录不能把其他数据集的 ROI 夹带进退役。
+        for (auto& output : transaction.outputs) {
+            bool explicitRetirement = false;
+            for (const auto& input : output.inputs) {
+                const auto source = graph.view->GetData(input.source);
+                if (source && GetDataEntityIdValid(source->lifetimeScope)
+                    && source->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement) explicitRetirement = true;
+                for (const auto& staged : transaction.outputs)
+                    if (staged.entityId == input.source.entityId && staged.expectedGeneration + 1 == input.source.generation
+                        && staged.lifetimeScope && staged.lifetimePolicy == DataLifetimePolicy::ExplicitRetirement) explicitRetirement = true;
+            }
+            if (explicitRetirement && !output.lifetimeScope) {
+                output.lifetimeScope = m_store.CreateDataEntityId();
+                output.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
+            }
+        }
         transaction.bindings.push_back({std::string(roiCatalogBinding),catalog.binding.revision,true,catalog.binding.target,catalogRef});
         const auto committed=m_store.SetDataCommit(std::move(transaction));
         if (committed.status!=DataCommitStatus::Succeeded)

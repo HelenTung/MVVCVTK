@@ -318,7 +318,7 @@ int main(int argc, char* argv[])
             reload.voxels[index] = static_cast<float>(index);
         }
 
-        const bool isAccepted = session->SendRequestResult(
+        const bool isAccepted = (session->SendRequest(
             std::move(reload),
             [&](HostResult result) {
                 const bool isLoaded = result.isSucceeded
@@ -337,7 +337,7 @@ int main(int argc, char* argv[])
                     viewRequest.isAxesVisible = true;
                     auto viewResultCount = std::make_shared<int>(0);
                     const bool isViewAccepted =
-                        session->SendRequestResult(
+                        (session->SendRequest(
                             std::move(viewRequest),
                             [&, viewResultCount](HostResult viewResult) {
                                 ++(*viewResultCount);
@@ -376,12 +376,12 @@ int main(int argc, char* argv[])
                                         }
                                         sendExit(true, "ok");
                                     });
-                            });
+                            }).status == HostAdmissionStatus::Accepted);
                     if (!isViewAccepted) {
                         sendExit(false, "view command admission");
                     }
                 });
-            });
+            }).status == HostAdmissionStatus::Accepted);
         if (!isAccepted) sendExit(false, "reload admission");
     });
 

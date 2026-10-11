@@ -439,13 +439,12 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     }
     SetBindingProjection();
 
-    if (request.action == SurfaceDeterminationAction::Start) {
-        auto params = request.start.value_or(m_config.defaultStart);
+    if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
+        auto params = start->start.value_or(m_config.defaultStart);
         if (params.businessMode != SurfaceBusinessMode::Production) {
             admission.status = SurfaceAdmissionStatus::UnsupportedMode;
             return admission;
         }
-        if (request.isVisible || request.targetRequestId != 0) return admission;
         if (!SurfaceContract::GetInputValid(params)) return admission;
         auto targetViews = GetTargetViews(params.targetViews);
         if (GetTargetsUsed(params.targetViews) && targetViews.empty()) return admission;
@@ -537,10 +536,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
 
-    if (request.action == SurfaceDeterminationAction::Stop) {
-        if (request.start || request.isVisible) return admission;
-        const std::uint64_t targetRequestId = request.targetRequestId == 0
-            ? m_latestRequestId : request.targetRequestId;
+    if (const auto* stop = std::get_if<SurfaceStopRequest>(&request)) {
+        const std::uint64_t targetRequestId = stop->targetRequestId == 0
+            ? m_latestRequestId : stop->targetRequestId;
         if (targetRequestId == 0
             || m_requests.find(targetRequestId) == m_requests.end()) {
             return admission;
@@ -572,19 +570,14 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
     const std::uint64_t requestId = GetNextRequestId();
-    if (request.action == SurfaceDeterminationAction::SetVisibility
-        && request.isVisible
-        && SetVisibility(*request.isVisible)) {
+    const auto* visibility = std::get_if<SurfaceVisibilityRequest>(&request);
+    if (visibility && SetVisibility(visibility->isVisible)) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
-    else if (request.action == SurfaceDeterminationAction::ClearPreview
-        && !request.start && !request.isVisible && request.targetRequestId == 0 && ClearPreview()) {
+    else if (std::holds_alternative<SurfaceClearPreviewRequest>(request) && ClearPreview()) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
-    else if (request.action == SurfaceDeterminationAction::Clear
-        && !request.start && !request.isVisible
-        && request.targetRequestId == 0
-        && ClearResult()) {
+    else if (std::holds_alternative<SurfaceClearRequest>(request) && ClearResult()) {
         admission = { SurfaceAdmissionStatus::Accepted, requestId };
     }
     if (admission.status == SurfaceAdmissionStatus::Accepted) {
@@ -683,9 +676,11 @@ std::size_t SurfaceDeterminationHostFeature::Impl::GetRetainedBytes() const
                 add(generation->objects->capacity(), sizeof(SurfaceObjectRecord));
             // 活跃通用网格及显示缓存保守覆盖；DataGraph 独立持有的历史与借用的源卷不在本工作集内。
             if (generation->points)
-                add(generation->points->size(), 16 * sizeof(double));
+                add(generation->points->size(), 2 * 14 * sizeof(double));
             if (generation->triangleIndices)
                 add(generation->triangleIndices->size(), 2 * sizeof(std::uint64_t));
+            if (generation->triangleValidity)
+                add(generation->triangleValidity->size(), 2 * sizeof(double));
         }
     return bytes;
 }
@@ -1464,6 +1459,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
         !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
         !charge(result.points.size(), 2 * 14 * sizeof(double)) ||
+        !charge(result.triangleValidity.size(), 2 * sizeof(double)) ||
         !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
         throw std::bad_alloc{};
     result.execution.estimatedWorkingBytes =
@@ -1524,8 +1520,17 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     }
     std::vector<std::uint64_t> triangles(stagedGeneration->triangleIndices->begin(),
         stagedGeneration->triangleIndices->end());
+    // 点有效不代表连接它们的面有效；保留 C3 原始面顺序供截面等消费者核验。
+    std::vector<MeshAttribute> cellAttributes{{ "measurement.valid", 1, {} }};
+    auto& faceValidity = cellAttributes.front().values;
+    faceValidity.reserve(stagedGeneration->triangleValidity->size());
+    for (const auto value : *stagedGeneration->triangleValidity) {
+        if (value > 1) return {};
+        faceValidity.push_back(static_cast<double>(value));
+    }
     const auto mesh = std::make_shared<const SurfaceMeshPayload>(
-        std::move(vertices), std::move(triangles), std::move(attributes), stagedGeneration->coordinateFrame);
+        std::move(vertices), std::move(triangles), std::move(attributes),
+        stagedGeneration->coordinateFrame, std::move(cellAttributes));
     if (!mesh->GetValid()) return {};
     const auto& expected = request.resultBinding;
     DataTransaction transaction;

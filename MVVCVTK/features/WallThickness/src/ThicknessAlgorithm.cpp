@@ -1,21 +1,24 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
-#include "ThicknessMaterialField.h"
-#include <vtkCellArray.h>
-#include <vtkGenericCell.h>
-#include <vtkPoints.h>
-#include <vtkPolyData.h>
-#include <vtkStaticCellLocator.h>
+#include "ThicknessGrayField.h"
+#include "ThicknessProfile.h"
+#include "ThicknessDisplaySampling.h"
+#ifdef MVVCVTK_HAS_WALL_CUDA
+#include "ThicknessCudaPath.h"
+#endif
 #include <exception>
 #include <thread>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <map>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_map>
 
 namespace ThicknessAlgorithm
 {
@@ -43,6 +46,13 @@ bool Nonnegative(double v)
 {
     return std::isfinite(v) && v >= 0;
 }
+bool GetProfileEnabled()
+{
+    char* value=nullptr; std::size_t length=0;
+    const auto status=_dupenv_s(&value,&length,"MVVCVTK_WALL_PROFILE");
+    const bool enabled=status==0 && value && std::strcmp(value,"1")==0;
+    std::free(value); return enabled;
+}
 
 template <class T> double ReadScalar(const std::uint8_t *bytes, std::size_t index)
 {
@@ -57,19 +67,74 @@ class Kernel final
     const ThicknessParams &m_params;
     const GridGeometry3D &m_geometry;
     const SurfaceMeshPayload &m_mesh;
-    const MeshAttribute *m_normal = nullptr;
     double (*m_readScalar)(const std::uint8_t *, std::size_t) = nullptr;
-    vtkSmartPointer<vtkPolyData> m_poly;
-    vtkSmartPointer<vtkStaticCellLocator> m_locator;
-    vtkSmartPointer<vtkGenericCell> m_cell = vtkSmartPointer<vtkGenericCell>::New();
+    ThicknessGrayField::Field m_materialField;
+    std::array<std::size_t,3> m_uniformDimensions{};
+    std::vector<std::int8_t> m_uniformSigns;
+    // 只细化混合 8³ 块：4³、2³、1³ 共 584 个证书，缓存上限 256 MiB。
+    std::vector<std::uint32_t> m_uniformChildOffsets;
+    std::vector<std::array<std::int8_t,584>> m_uniformChildren;
+    bool m_hasRestrictedLabels = false;
     std::vector<double> m_areas;
     unsigned m_n = 1;
     std::size_t m_sampleCount = 0;
     double m_epsilon = 0, m_minSpacing = 0;
-    double m_sourceMargin = 0;
     struct SourceMeasurement { std::size_t triangle = 0; unsigned rule = 0; std::optional<double> value; };
+#ifdef MVVCVTK_HAS_WALL_CUDA
+    std::unique_ptr<ThicknessCudaPath::Client> m_cuda;
+    std::vector<std::uint8_t> m_cudaSupport;
+    void BuildCuda() {
+
+        ThicknessCudaPath::Input input;
+        input.extent=m_geometry.extent;input.blocks=m_uniformDimensions;input.threshold=*m_params.materialThreshold;
+        switch (m_work.source->GetValueType()) {
+        case ImageValueType::Int8:input.scalarType=ThicknessCudaPath::ScalarType::Int8;break;
+        case ImageValueType::UInt8:input.scalarType=ThicknessCudaPath::ScalarType::UInt8;break;
+        case ImageValueType::Int16:input.scalarType=ThicknessCudaPath::ScalarType::Int16;break;
+        case ImageValueType::UInt16:input.scalarType=ThicknessCudaPath::ScalarType::UInt16;break;
+        case ImageValueType::Int32:input.scalarType=ThicknessCudaPath::ScalarType::Int32;break;
+        case ImageValueType::UInt32:input.scalarType=ThicknessCudaPath::ScalarType::UInt32;break;
+        case ImageValueType::Float32:input.scalarType=ThicknessCudaPath::ScalarType::Float32;break;
+        case ImageValueType::Float64:input.scalarType=ThicknessCudaPath::ScalarType::Float64;break;
+        default:return;
+        }
+        input.values=m_work.source->GetValues()->data();input.valueBytes=m_work.source->GetValues()->size();
+        if (const auto& mask=m_work.source->GetValidityMask()) {input.mask=mask->data();input.maskBytes=mask->size();}
+        if (m_hasRestrictedLabels) {
+            const auto count=std::visit([](const auto& values){return values->size();},m_work.labels->GetValues());
+            m_cudaSupport.resize(count);
+            std::visit([&](const auto& values){
+                using Value=typename std::decay_t<decltype(*values)>::value_type;
+                const auto& selected=m_work.archive.input.materialLabels;
+                for(std::size_t i=0;i<count;++i){
+                    if((i&65535U)==0)CheckWork(m_work);
+                    const auto v=(*values)[i];bool valid=!input.mask||input.mask[i]!=0;
+                    if constexpr(std::is_signed_v<Value>) if(v<0)valid=false;
+                    const auto label=static_cast<std::uint64_t>(v);
+                    if(label && !selected.empty() && std::find(selected.begin(),selected.end(),label)==selected.end())valid=false;
+                    m_cudaSupport[i]=valid?1:0;
+                }
+            },m_work.labels->GetValues());
+            input.mask=m_cudaSupport.data();input.maskBytes=m_cudaSupport.size();
+        }
+        if (m_materialField.uniformRegion) {
+            input.signs=m_uniformSigns.data();input.signCount=m_uniformSigns.size();
+            input.offsets=m_uniformChildOffsets.data();input.offsetCount=m_uniformChildOffsets.size();
+            input.children=m_uniformChildren.data();input.childBytes=m_uniformChildren.size()*sizeof(m_uniformChildren[0]);
+        }
+        m_cuda=ThicknessCudaPath::Create(input);Profile(m_cuda?"cuda-ready":"cuda-unavailable");
+    }
+#endif
     WorkLimit m_nodeBudget;
     std::size_t m_sourceCapacity = 0, m_workerCount = 1;
+    bool m_profile = GetProfileEnabled();
+    ThicknessProfile::Data m_profileData;
+    std::chrono::steady_clock::time_point m_profileBegin, m_profileLast;
+    void Profile(const char* phase, std::size_t completed=0, std::size_t total=0) {
+        if (!m_profile) return;
+        m_profileLast=std::chrono::steady_clock::now();
+        ThicknessProfile::Print(phase,std::chrono::duration<double>(m_profileLast-m_profileBegin).count(),completed,total,m_profileData);
+    }
 
     bool GetIsSourceLocal() const
     {
@@ -92,27 +157,15 @@ class Kernel final
                 return false;
         return true;
     }
-    bool GetIsSourceFace(std::uint64_t first, std::uint64_t second) const
+    ThicknessGrayField::Field GetMaterialField() const
     {
-        const auto a = Index(Vertex(first)), b = Index(Vertex(second));
-        for (unsigned axis = 0; axis < 3; ++axis)
-            for (unsigned side = 0; side < 2; ++side)
-            {
-                const double face = m_geometry.extent[2 * axis + side];
-                if (std::abs(a[axis] - face) <= m_epsilon / m_geometry.spacing[axis] &&
-                    std::abs(b[axis] - face) <= m_epsilon / m_geometry.spacing[axis]) return true;
-            }
-        return false;
-    }
-    ThicknessMaterialField::Field GetMaterialField() const
-    {
-        ThicknessMaterialField::Field field;
+        ThicknessGrayField::Field field;
         field.extent = m_geometry.extent;
         field.threshold = *m_params.materialThreshold;
         field.check = [this] { CheckWork(m_work); };
         field.node = [this](const std::array<std::int64_t, 3> &index, double &value)
         {
-            if (!GetInsideExtent(index) || Material(index) == -1) return false;
+            if (!GetInsideExtent(index) || (m_hasRestrictedLabels && Material(index) == -1)) return false;
             std::size_t offset = 0, stride = 1;
             for (unsigned a = 0; a < 3; ++a)
             {
@@ -126,6 +179,155 @@ class Kernel final
             return std::isfinite(value);
         };
         return field;
+    }
+
+    void BuildUniformGrid()
+    {
+        if (m_uniformSigns.empty()) return;
+        std::atomic<bool> failed{false};std::exception_ptr failure;
+        const auto run=[&](std::size_t worker) {
+            try {
+                for (std::size_t block=worker;block<m_uniformSigns.size();block+=m_workerCount) {
+                    if (failed.load(std::memory_order_relaxed)) return;
+                    CheckWork(m_work);
+                    ThicknessGrayField::Index low{},high{};
+                    auto index=block;
+                    for (unsigned axis=0;axis<3;++axis) {
+                        low[axis]=m_geometry.extent[2*axis]+8*static_cast<std::int64_t>(index%m_uniformDimensions[axis]);
+                        high[axis]=std::min(low[axis]+8,std::int64_t(m_geometry.extent[2*axis+1]));
+                        index/=m_uniformDimensions[axis];
+                    }
+                    int sign=0;bool uniform=true;
+                    double minimum=std::numeric_limits<double>::infinity(),maximum=-minimum;
+                    // 8³ 单元需要全部 9³ 角点；缺失、等阈值或异号都回退细遍历。
+                    for (auto z=low[2];z<=high[2] && uniform;++z)
+                        for (auto y=low[1];y<=high[1] && uniform;++y)
+                            for (auto x=low[0];x<=high[0];++x) {
+                                double value=0;
+                                if (!m_materialField.node({x,y,z},value)) {uniform=false;break;}
+                                const int current=value>*m_params.materialThreshold?1:value<*m_params.materialThreshold?-1:0;
+                                if (!current || (sign && sign!=current)) {uniform=false;break;}
+                                sign=current;minimum=std::min(minimum,value);maximum=std::max(maximum,value);
+                            }
+                    if (uniform) {
+                        const double scale=std::max({std::abs(minimum),std::abs(maximum),std::abs(*m_params.materialThreshold)});
+                        const double margin=4096*std::numeric_limits<double>::epsilon();
+                        // 射线多项式靠近阈值时不使用块跳跃，保留原数值消歧路径。
+                        if (scale>0 && (sign>0 ? minimum/scale-*m_params.materialThreshold/scale>margin
+                            : *m_params.materialThreshold/scale-maximum/scale>margin))
+                            m_uniformSigns[block]=static_cast<std::int8_t>(sign);
+                    }
+                }
+            } catch (...) {if (!failed.exchange(true)) failure=std::current_exception();}
+        };
+        std::vector<std::thread> workers;workers.reserve(m_workerCount-1);
+        try {for (std::size_t i=1;i<m_workerCount;++i) workers.emplace_back(run,i);}
+        catch (...) {failed.store(true);for (auto& worker:workers) worker.join();throw;}
+        run(0);for (auto& worker:workers) worker.join();if (failure) std::rethrow_exception(failure);
+        const auto mixed=std::count(m_uniformSigns.begin(),m_uniformSigns.end(),std::int8_t(0));
+        if (mixed && m_uniformSigns.size()<(256U*1024U*1024U)/sizeof(std::uint32_t)
+            && std::size_t(mixed)<(256U*1024U*1024U-m_uniformSigns.size()*sizeof(std::uint32_t))/584U) {
+            try {
+                m_uniformChildOffsets.resize(m_uniformSigns.size(),std::numeric_limits<std::uint32_t>::max());
+                m_uniformChildren.resize(static_cast<std::size_t>(mixed));
+            } catch (const std::bad_alloc&) {m_uniformChildOffsets.clear();m_uniformChildren.clear();}
+        }
+        if (!m_uniformChildren.empty()) {
+            std::uint32_t offset=0;
+            for (std::size_t block=0;block<m_uniformSigns.size();++block)
+                if (!m_uniformSigns[block]) m_uniformChildOffsets[block]=offset++;
+            const auto refine=[&](std::size_t worker) {
+                try {
+                    struct Proof {double minimum=std::numeric_limits<double>::infinity(),maximum=-std::numeric_limits<double>::infinity();bool valid=true,used=false;};
+                    const auto merge=[](Proof& parent,const Proof& child) {
+                        if (!child.used) return;parent.used=true;parent.valid=parent.valid && child.valid;
+                        parent.minimum=std::min(parent.minimum,child.minimum);parent.maximum=std::max(parent.maximum,child.maximum);
+                    };
+                    const auto sign=[&](const Proof& proof) -> std::int8_t {
+                        if (!proof.valid || !proof.used) return 0;
+                        const auto threshold=*m_params.materialThreshold;
+                        const double scale=std::max({std::abs(proof.minimum),std::abs(proof.maximum),std::abs(threshold)});
+                        const double margin=4096*std::numeric_limits<double>::epsilon();
+                        if (scale>0 && proof.minimum>threshold && proof.minimum/scale-threshold/scale>margin) return 1;
+                        if (scale>0 && proof.maximum<threshold && threshold/scale-proof.maximum/scale>margin) return -1;
+                        return 0;
+                    };
+                    for (std::size_t block=worker;block<m_uniformSigns.size();block+=m_workerCount) {
+                        if (failed.load(std::memory_order_relaxed)) return;
+                        if (m_uniformSigns[block]) continue;
+                        CheckWork(m_work);
+                        ThicknessGrayField::Index low{},high{};auto index=block;
+                        for (unsigned axis=0;axis<3;++axis) {
+                            low[axis]=m_geometry.extent[2*axis]+8*static_cast<std::int64_t>(index%m_uniformDimensions[axis]);
+                            high[axis]=std::min(low[axis]+8,std::int64_t(m_geometry.extent[2*axis+1]));index/=m_uniformDimensions[axis];
+                        }
+                        std::array<double,729> values{};std::array<bool,729> valid{};
+                        for (auto z=low[2];z<=high[2];++z) for (auto y=low[1];y<=high[1];++y) for (auto x=low[0];x<=high[0];++x) {
+                            const auto node=std::size_t(x-low[0]+9*(y-low[1]+9*(z-low[2])));
+                            valid[node]=m_materialField.node({x,y,z},values[node]);
+                        }
+                        auto& children=m_uniformChildren[m_uniformChildOffsets[block]];
+                        for (unsigned octant=0;octant<8;++octant) {
+                            Proof four;
+                            for (unsigned sub=0;sub<8;++sub) {
+                                Proof two;
+                                for (unsigned leaf=0;leaf<8;++leaf) {
+                                    std::array<unsigned,3> p{};
+                                    for (unsigned axis=0;axis<3;++axis) p[axis]=4*((octant>>axis)&1U)+2*((sub>>axis)&1U)+((leaf>>axis)&1U);
+                                    Proof one;
+                                    for (unsigned axis=0;axis<3;++axis) if (low[axis]+p[axis]>=high[axis]) one.valid=false;
+                                    if (one.valid) {
+                                        one.used=true;
+                                        for (unsigned corner=0;corner<8;++corner) {
+                                            const auto n=p[0]+(corner&1U)+9*(p[1]+((corner>>1)&1U)+9*(p[2]+((corner>>2)&1U)));
+                                            one.valid=one.valid && valid[n];one.minimum=std::min(one.minimum,values[n]);one.maximum=std::max(one.maximum,values[n]);
+                                        }
+                                    }
+                                    children[72+octant*64+sub*8+leaf]=sign(one);merge(two,one);
+                                }
+                                children[8+octant*8+sub]=sign(two);merge(four,two);
+                            }
+                            children[octant]=sign(four);
+                        }
+                    }
+                } catch (...) {if (!failed.exchange(true)) failure=std::current_exception();}
+            };
+            workers.clear();
+            try {for (std::size_t i=1;i<m_workerCount;++i) workers.emplace_back(refine,i);}
+            catch (...) {failed.store(true);for (auto& worker:workers) worker.join();throw;}
+            refine(0);for (auto& worker:workers) worker.join();if (failure) std::rethrow_exception(failure);
+        }
+        if (m_uniformChildren.empty() && std::none_of(m_uniformSigns.begin(),m_uniformSigns.end(),[](auto sign){return sign!=0;})) return;
+        m_materialField.uniformRegion=[this](const ThicknessGrayField::Index& cell) {
+            ThicknessGrayField::Field::UniformRegion region;
+            std::size_t offset=0,stride=1;
+            for (unsigned axis=0;axis<3;++axis) {
+                if (cell[axis]<m_geometry.extent[2*axis] || cell[axis]>=m_geometry.extent[2*axis+1]) return region;
+                const auto block=std::size_t(cell[axis]-m_geometry.extent[2*axis])/8;
+                offset+=block*stride;stride*=m_uniformDimensions[axis];
+                const auto low=std::int64_t(m_geometry.extent[2*axis])+8*static_cast<std::int64_t>(block);
+                region.extent[2*axis]=static_cast<int>(low);
+                region.extent[2*axis+1]=static_cast<int>(std::min(low+8,std::int64_t(m_geometry.extent[2*axis+1])));
+            }
+            region.sign=m_uniformSigns[offset];
+            if (region.sign || m_uniformChildren.empty()) return region;
+            const auto child=m_uniformChildOffsets[offset];
+            if (child==std::numeric_limits<std::uint32_t>::max()) return region;
+            const auto& signs=m_uniformChildren[child];
+            std::array<unsigned,3> keys{};
+            for (unsigned level=0,size=4;level<3;++level,size/=2) {
+                unsigned key=0;
+                for (unsigned axis=0;axis<3;++axis) {
+                    const auto half=unsigned(cell[axis]-region.extent[2*axis])/size;
+                    key|=half<<axis;region.extent[2*axis]+=int(half*size);
+                    region.extent[2*axis+1]=std::min(region.extent[2*axis]+int(size),region.extent[2*axis+1]);
+                }
+                keys[level]=key;
+                const auto node=level==0 ? keys[0] : level==1 ? 8+keys[0]*8+keys[1] : 72+keys[0]*64+keys[1]*8+keys[2];
+                region.sign=signs[node];if (region.sign) break;
+            }
+            return region;
+        };
     }
 
     ThicknessPoint Vertex(std::uint64_t id) const
@@ -188,10 +390,6 @@ class Kernel final
             },
             m_work.labels->GetValues());
     }
-    int MaterialAt(const ThicknessPoint &p) const
-    {
-        return GetMaterialField().GetMaterialAt(Index(p));
-    }
     void ValidateInput()
     {
         if (!m_work.source->GetValid() || !m_work.labels->GetValid() || !m_mesh.GetValid() ||
@@ -232,303 +430,73 @@ class Kernel final
         if (m_params.maxBoundaryError > 0.5 * m_minSpacing)
             throw Failure{ThicknessStatus::InvalidInput,
                           "Endpoint error exceeds half minimum spacing."};
-        std::set<std::string> names;
-        const MeshAttribute *complete = nullptr;
-        for (const auto &a : m_mesh.GetPointAttributes())
-        {
-            if (!names.insert(a.name).second)
-                throw Failure{ThicknessStatus::InvalidInput, "Duplicate mesh attribute."};
-            if (a.name == "measurement.normal")
-                m_normal = &a;
-            if (a.name == "measurement.boundary-complete")
-                complete = &a;
-        }
-        if (!GetIsSourceLocal() && (!complete || complete->componentCount != 1 ||
-            !std::all_of(complete->values.begin(), complete->values.end(),
-                         [](double v) { return v == 1; })))
-            throw Failure{ThicknessStatus::IncompleteBoundary,
-                          "Mesh lacks complete-boundary provenance."};
-        if (!m_normal || m_normal->componentCount != 3)
-            throw Failure{ThicknessStatus::InvalidInput,
-                          "Published measurement normals are required."};
+        m_hasRestrictedLabels = !m_work.archive.input.materialLabels.empty() || std::visit(
+            [](const auto& values) { using Value=typename std::decay_t<decltype(*values)>::value_type;
+                return std::is_signed_v<Value>; }, m_work.labels->GetValues());
     }
-    void BuildMesh()
+    void BuildSampling()
     {
-        const auto pc = m_mesh.GetVertices().size() / 3, tc = m_mesh.GetTriangles().size() / 3;
-        const auto &limits = m_work.archive.limits;
-        if (pc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
-            tc > static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()) ||
-            pc > WorkLimit(limits.maxWorkingBytes) / 24U || tc > WorkLimit(limits.maxWorkingBytes) / 256U)
-            throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
-        if (pc > std::numeric_limits<std::size_t>::max() / 24U
-            || tc > (std::numeric_limits<std::size_t>::max() - pc * 24U) / 256U)
-            throw Failure{ThicknessStatus::InvalidInput, "Mesh byte count overflows."};
-        if (pc * 24U > WorkLimit(limits.maxWorkingBytes) - tc * 256U)
-            throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
-        const auto meshBytes = pc * 24U + tc * 256U;
-        if (meshBytes > WorkLimit(limits.maxWorkingBytes))
-            throw Failure{ThicknessStatus::BudgetExceeded, "Mesh exceeds working budget."};
-        auto points = vtkSmartPointer<vtkPoints>::New();
-        points->SetDataTypeToDouble();
-        points->SetNumberOfPoints(static_cast<vtkIdType>(pc));
-        auto minimum = Vertex(0), maximum = minimum;
-        for (std::size_t i = 0; i < pc; ++i)
-        {
-            if ((i & 255U) == 0)
-                CheckWork(m_work);
-            const auto p = Vertex(i);
-            if (!Finite(p))
-                throw Failure{ThicknessStatus::InvalidInput, "Coordinate overflow."};
-            points->SetPoint(static_cast<vtkIdType>(i), p.data());
-            for (std::size_t k = 0; k < 3; ++k)
-            {
-                minimum[k] = std::min(minimum[k], p[k]);
-                maximum[k] = std::max(maximum[k], p[k]);
-            }
+        const auto pc=m_mesh.GetVertices().size()/3, tc=m_mesh.GetTriangles().size()/3;
+        const auto& limits=m_work.archive.limits;
+        auto minimum=Vertex(0), maximum=minimum;
+        for (std::size_t i=0;i<pc;++i) {
+            if ((i&255U)==0) CheckWork(m_work);
+            const auto p=Vertex(i);
+            if (!Finite(p)) throw Failure{ThicknessStatus::InvalidInput,"Coordinate overflow."};
+            for (unsigned a=0;a<3;++a) {minimum[a]=std::min(minimum[a],p[a]);maximum[a]=std::max(maximum[a],p[a]);}
         }
-        m_epsilon = std::max(64 * std::numeric_limits<double>::epsilon() *
-                                 std::max(Length(Sub(maximum, minimum)), 1.0),
-                             m_minSpacing * 1e-8);
-        // 减原点不能恢复输入double在世界坐标处已产生的舍入；计入其ULP下界。
-        for (double origin : m_geometry.origin)
-            m_epsilon =
-                std::max(m_epsilon, 8 * std::numeric_limits<double>::epsilon() * std::abs(origin));
-        if (!std::isfinite(m_epsilon) || m_epsilon >= 0.01 * m_minSpacing)
-            throw Failure{ThicknessStatus::InvalidInput,
-                          "Coordinate precision cannot resolve the input spacing."};
-        m_sourceMargin = 0.5 * Length(m_geometry.spacing) + 2 * m_params.maxBoundaryError + 16 * m_epsilon;
-        auto cells = vtkSmartPointer<vtkCellArray>::New();
+        m_epsilon=std::max(64*std::numeric_limits<double>::epsilon()*std::max(Length(Sub(maximum,minimum)),1.),m_minSpacing*1e-8);
+        for (double origin:m_geometry.origin) m_epsilon=std::max(m_epsilon,8*std::numeric_limits<double>::epsilon()*std::abs(origin));
+        if (!std::isfinite(m_epsilon) || m_epsilon>=.01*m_minSpacing)
+            throw Failure{ThicknessStatus::InvalidInput,"Coordinate precision cannot resolve the input spacing."};
+        if (tc>WorkLimit(limits.maxWorkingBytes)/sizeof(double))
+            throw Failure{ThicknessStatus::BudgetExceeded,"Sampling geometry exceeds working budget."};
         m_areas.reserve(tc);
-        std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<unsigned, int>> edges;
-        double maxEdge = 0;
-        for (std::size_t i = 0; i < tc; ++i)
-        {
-            if ((i & 255U) == 0)
-                CheckWork(m_work);
-            std::array<vtkIdType, 3> ids{};
-            std::array<ThicknessPoint, 3> p{};
-            for (std::size_t k = 0; k < 3; ++k)
-            {
-                ids[k] = static_cast<vtkIdType>(m_mesh.GetTriangles()[i * 3 + k]);
-                p[k] = Vertex(ids[k]);
-            }
-            const double area = 0.5 * Length(Cross(Sub(p[1], p[0]), Sub(p[2], p[0])));
-            if (!std::isfinite(area) || area <= m_epsilon * m_epsilon)
-                throw Failure{ThicknessStatus::IncompleteBoundary, "Degenerate mesh triangle."};
-            m_areas.push_back(area);
-            for (std::size_t k = 0; k < 3; ++k)
-            {
-                const auto a = static_cast<std::uint64_t>(ids[k]),
-                           b = static_cast<std::uint64_t>(ids[(k + 1) % 3]);
-                auto &e = edges[{std::min(a, b), std::max(a, b)}];
-                ++e.first;
-                e.second += a < b ? 1 : -1;
-                maxEdge = std::max(maxEdge, Length(Sub(p[k], p[(k + 1) % 3])));
-            }
-            cells->InsertNextCell(3, ids.data());
+        double maxEdge=0;
+        const auto perSample=sizeof(ThicknessSample)+640U;
+        const auto areaBytes=tc*sizeof(double);
+        const auto sampleBudget=WorkLimit(limits.maxSamples).GetBound(
+            ((WorkLimit(limits.maxWorkingBytes)-areaBytes)/perSample).GetBound(std::numeric_limits<std::size_t>::max()));
+        for (std::size_t i=0;i<tc;++i) {
+            if ((i&255U)==0) CheckWork(m_work);
+            std::array<ThicknessPoint,3> p{};
+            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangles()[i*3+k]);
+            const double area=.5*Length(Cross(Sub(p[1],p[0]),Sub(p[2],p[0])));
+            if (!std::isfinite(area)) throw Failure{ThicknessStatus::InvalidInput,"Triangle area overflow."};
+            // 退化的种子面没有正面积来源；不使其他局部来源整体失败。
+            m_areas.push_back(area>m_epsilon*m_epsilon?area:0.);
+            if (area>m_epsilon*m_epsilon) for (unsigned k=0;k<3;++k) maxEdge=std::max(maxEdge,Length(Sub(p[k],p[(k+1)%3])));
+            if (m_areas.back()>0) ThicknessDisplaySampling::Visit(p,m_params.sampleSpacing,[&]{CheckWork(m_work);},
+                [&](const auto&) {
+                    if (m_sampleCount==sampleBudget) throw Failure{ThicknessStatus::BudgetExceeded,"Local display sampling exceeds working budget."};
+                    ++m_sampleCount;
+                });
         }
-        for (const auto &e : edges)
-        {
-            if (e.second.first == 1 && GetIsSourceLocal() && GetIsSourceFace(e.first.first, e.first.second))
-                continue;
-            if (e.second.first != 2 || e.second.second != 0)
-                throw Failure{ThicknessStatus::IncompleteBoundary,
-                              "Mesh must be closed and consistently manifold."};
+        const double divisions=std::ceil(maxEdge/m_params.sampleSpacing);
+        if (!std::isfinite(divisions) || divisions>=std::numeric_limits<unsigned>::max())
+            throw Failure{ThicknessStatus::BudgetExceeded,"Surface subdivision limit exceeded."};
+        m_n=static_cast<unsigned>(std::max(divisions,1.));
+        if (tc>std::numeric_limits<std::size_t>::max()/9U)
+            throw Failure{ThicknessStatus::InvalidInput,"Sample count overflows."};
+        if (m_sampleCount>WorkLimit(limits.maxSamples) || m_sampleCount>(WorkLimit(limits.maxWorkingBytes)-areaBytes)/perSample)
+            throw Failure{ThicknessStatus::BudgetExceeded,"Sampling exceeds working budget."};
+        const auto remaining=WorkLimit(limits.maxWorkingBytes)-areaBytes-m_sampleCount*perSample;
+        m_sourceCapacity=WorkLimit(limits.maxSamples).GetBound(tc*9U);
+        m_workerCount=std::min(std::size_t(32),std::size_t(std::max(1U,std::thread::hardware_concurrency())));
+        const auto batchBytes=std::min(m_sourceCapacity,std::size_t(4096U*9U))*sizeof(SourceMeasurement);
+        if (remaining<batchBytes) throw Failure{ThicknessStatus::BudgetExceeded,"Source batch exceeds working budget."};
+        std::size_t blocks=1;
+        for (unsigned axis=0;axis<3;++axis) {
+            m_uniformDimensions[axis]=(std::size_t(m_geometry.dimensions[axis])-2)/8+1;
+            if (m_uniformDimensions[axis]>std::numeric_limits<std::size_t>::max()/blocks) {blocks=0;break;}
+            blocks*=m_uniformDimensions[axis];
         }
-        const double divisions = std::ceil(maxEdge / m_params.sampleSpacing);
-        if (!std::isfinite(divisions) || divisions >= std::numeric_limits<unsigned>::max())
-            throw Failure{ThicknessStatus::BudgetExceeded, "Surface subdivision limit exceeded."};
-        m_n = static_cast<unsigned>(std::max(divisions, 1.0));
-        const auto n = static_cast<std::size_t>(m_n);
-        if (n > std::numeric_limits<std::size_t>::max() / n
-            || tc > std::numeric_limits<std::size_t>::max() / (n * n))
-            throw Failure{ThicknessStatus::InvalidInput, "Sample count overflows."};
-        if (tc > WorkLimit(limits.maxSamples) / (n * n))
-            throw Failure{ThicknessStatus::BudgetExceeded, "Sample count limit exceeded."};
-        m_sampleCount = tc * n * n;
-        if (m_sampleCount > std::numeric_limits<std::size_t>::max() / (sizeof(ThicknessSample) + 640U))
-            throw Failure{ThicknessStatus::InvalidInput, "Sample byte count overflows."};
-        if (m_sampleCount > (WorkLimit(limits.maxWorkingBytes) - meshBytes) / (sizeof(ThicknessSample) + 640U))
-            throw Failure{ThicknessStatus::BudgetExceeded,
-                          "Sampling and topology exceed working budget."};
-        // 每个并行槽独占射线单元与有界路径工作区，归并仍按来源顺序执行。
-        auto remaining = WorkLimit(limits.maxWorkingBytes) - meshBytes -
-                         m_sampleCount * (sizeof(ThicknessSample) + 640U);
-        // 缺省限额按本次原始三角形的实际 Gauss 来源数分配，不预留无穷容量。
-        m_sourceCapacity = WorkLimit(limits.maxSamples).GetBound(tc * 9U);
-        if (m_sourceCapacity > std::numeric_limits<std::size_t>::max() / sizeof(SourceMeasurement))
-            throw Failure{ThicknessStatus::InvalidInput, "Source byte count overflows."};
-        if (m_sourceCapacity > remaining / sizeof(SourceMeasurement))
-            throw Failure{ThicknessStatus::BudgetExceeded, "Source values exceed working budget."};
-        remaining = remaining - m_sourceCapacity * sizeof(SourceMeasurement);
-        const std::size_t workerBytes = 8U * 1024U * 1024U + tc;
-        if (remaining <= workerBytes)
-            throw Failure{ThicknessStatus::BudgetExceeded, "Material path workspace exceeds budget."};
-        const auto hardwareWorkers = std::min(std::size_t(8),
-            std::size_t(std::max(1U, std::thread::hardware_concurrency())));
-        m_workerCount = std::max(std::size_t(1), (remaining / workerBytes / 2U).GetBound(hardwareWorkers));
-        m_nodeBudget = (remaining - m_workerCount * workerBytes) / 192U;
-        m_poly = vtkSmartPointer<vtkPolyData>::New();
-        m_poly->SetPoints(points);
-        m_poly->SetPolys(cells);
-        m_poly->BuildCells();
-        m_locator = vtkSmartPointer<vtkStaticCellLocator>::New();
-        m_locator->SetDataSet(m_poly);
-        m_locator->BuildLocator();
-        CheckWork(m_work);
-    }
-    void CheckBoundary()
-    {
-        const double tolerance = 0.5 * Length(m_geometry.spacing) + m_params.maxBoundaryError;
-        bool hasMaterial = false;
-        std::size_t checks = 0;
-        for (std::int64_t z = m_geometry.extent[4]; z <= m_geometry.extent[5]; ++z)
-            for (std::int64_t y = m_geometry.extent[2]; y <= m_geometry.extent[3]; ++y)
-                for (std::int64_t x = m_geometry.extent[0]; x <= m_geometry.extent[1]; ++x)
-                {
-                    if ((checks++ & 255U) == 0)
-                        CheckWork(m_work);
-                    const std::array<std::int64_t, 3> i{x, y, z};
-                    const auto material = Material(i);
-                    if (GetIsSourceLocal() && material == -2)
-                        throw Failure{ThicknessStatus::IncompleteBoundary, "Source contains missing validity support."};
-                    if (material != 1)
-                        continue;
-                    hasMaterial = true;
-                    for (std::size_t a = 0; a < 3; ++a)
-                        for (int sign : {-1, 1})
-                        {
-                            auto neighbor = i;
-                            neighbor[a] += sign;
-                            if (GetIsSourceLocal() && !GetInsideExtent(neighbor)) continue;
-                            const int label = Material(neighbor);
-                            if (label == 1)
-                                continue;
-                            if (label == -2)
-                                throw Failure{
-                                    ThicknessStatus::IncompleteBoundary,
-                                    "Selected material reaches truncated or invalid support."};
-                            ThicknessPoint center{double(x), double(y), double(z)};
-                            center[a] += 0.5 * sign;
-                            const auto p = Model(center);
-                            if (!Finite(p))
-                                throw Failure{ThicknessStatus::InvalidInput,
-                                              "Grid coordinate overflow."};
-                            double closest[3]{}, d2 = 0;
-                            vtkIdType cellId = -1;
-                            int subId = 0;
-                            m_locator->FindClosestPoint(p.data(), closest, m_cell, cellId, subId,
-                                                        d2);
-                            if (cellId < 0 || !std::isfinite(d2) || d2 > tolerance * tolerance)
-                                throw Failure{ThicknessStatus::IncompleteBoundary,
-                                              "Selected material boundary missing from mesh."};
-                        }
-                }
-        if (!hasMaterial)
-            throw Failure{ThicknessStatus::InvalidInput, "Selected material label absent."};
-    }
-    bool GetNormal(std::uint64_t triangle, const ThicknessPoint &bary, ThicknessPoint &normal) const
-    {
-        normal = {};
-        for (std::size_t k = 0; k < 3; ++k)
-        {
-            const auto id = m_mesh.GetTriangles()[triangle * 3 + k];
-            const auto *n = m_normal->values.data() + id * 3;
-            const auto unit = Unit({n[0], n[1], n[2]});
-            if (!Finite(unit) || Length(unit) < 0.5) return false;
-            normal = Add(normal, Scale(unit, bary[k]));
+        // 缓存为可选优化；显式字节上限下保留原预算准入与细遍历。
+        if (blocks && !WorkLimit(limits.maxWorkingBytes).GetValue()) {
+            try {m_uniformSigns.resize(blocks);}
+            catch (const std::bad_alloc&) {m_uniformSigns.clear();}
         }
-        normal = Unit(normal);
-        return Finite(normal) && Length(normal) > 0.5;
-    }
-    bool Inward(const ThicknessPoint &p, ThicknessPoint &normal, bool &outside) const
-    {
-        const double probe = m_params.maxBoundaryError + 8 * m_epsilon;
-        const int plus = MaterialAt(Add(p, Scale(normal, probe))),
-                  minus = MaterialAt(Sub(p, Scale(normal, probe)));
-        if (plus < 0 || minus < 0) { outside = false; return false; }
-        outside = plus != 1 && minus != 1;
-        if ((plus == 1) == (minus == 1))
-            return false;
-        if (plus != 1)
-            normal = Scale(normal, -1);
-        return true;
-    }
-    struct Hit final
-    {
-        ThicknessPoint point{}, bary{};
-        std::uint64_t triangle = 0;
-        double distance = 0;
-    };
-    bool Intersect(const ThicknessPoint &p, const ThicknessPoint &direction, Hit &hit, vtkGenericCell *cell) const
-    {
-        const auto start = Add(p, Scale(direction, 2 * m_epsilon)),
-                   end = Add(p, Scale(direction, m_params.maxDistance));
-        if (!Finite(start) || !Finite(end))
-            throw Failure{ThicknessStatus::InvalidInput, "Ray coordinate overflow."};
-        double t = 0, point[3]{}, pc[3]{};
-        int subId = 0;
-        vtkIdType cellId = -1;
-        if (!m_locator->IntersectWithLine(start.data(), end.data(), m_epsilon, t, point, pc, subId,
-                                          cellId, cell) ||
-            cellId < 0)
-            return false;
-        hit.point = {point[0], point[1], point[2]};
-        hit.bary = {1 - pc[0] - pc[1], pc[0], pc[1]};
-        hit.triangle = static_cast<std::uint64_t>(cellId);
-        hit.distance = Length(Sub(hit.point, p));
-        return std::isfinite(hit.distance) && hit.distance > 4 * m_epsilon &&
-               hit.distance <= m_params.maxDistance + m_epsilon;
-    }
-    bool GetMaterialPath(const ThicknessPoint &p, const ThicknessPoint &q) const
-    {
-        const double length = Length(Sub(q, p));
-        const auto from = Index(p), delta = Sub(Index(q), from);
-        if (!Finite(from) || !Finite(delta)) return false;
-        const double tolerance = m_work.archive.input.unit == ThicknessUnit::Millimeter ? 1e-9 : 1e-12;
-        return GetMaterialField().GetMaterialPath(from, delta, length, m_epsilon, m_params.maxBoundaryError,
-                                       tolerance).status == ThicknessMaterialField::Status::Valid;
-    }
-    std::optional<double> GetMeasurement(std::uint64_t triangle, const ThicknessPoint &bary,
-                                         const ThicknessPoint &p, vtkGenericCell *cell) const
-    {
-        if (GetIsSourceLocal() && !GetInsideSource(p, m_sourceMargin)) return {};
-        ThicknessPoint normal{};
-        bool outside = false;
-        if (!GetNormal(triangle, bary, normal) || !Inward(p, normal, outside)) return {};
-        std::size_t axis = 0;
-        for (std::size_t k = 1; k < 3; ++k)
-            if (std::abs(normal[k]) < std::abs(normal[axis])) axis = k;
-        ThicknessPoint ref{};
-        ref[axis] = 1;
-        const auto u = Unit(Cross(normal, ref)), v = Cross(normal, u);
-        std::optional<double> minimum;
-        for (std::uint32_t di = 0; di < m_params.directionCount; ++di)
-        {
-            CheckWork(m_work);
-            auto direction = normal;
-            if (di)
-            {
-                const double theta = m_params.coneAngleDegrees * pi / 180,
-                             phi = 2 * pi * (di - 1) / (m_params.directionCount - 1);
-                direction = Add(Scale(normal, std::cos(theta)),
-                    Scale(Add(Scale(u, std::cos(phi)), Scale(v, std::sin(phi))), std::sin(theta)));
-            }
-            // 局部源盒必须覆盖整个搜索锥，不能因缺边界而选到偏小的一条射线。
-            if (GetIsSourceLocal() && !GetInsideSource(Add(p, Scale(direction, m_params.maxDistance)),
-                                                m_sourceMargin)) return {};
-            Hit forward;
-            if (!Intersect(p, direction, forward, cell)) continue;
-            ThicknessPoint oppositeNormal{};
-            if (!GetNormal(forward.triangle, forward.bary, oppositeNormal) ||
-                !Inward(forward.point, oppositeNormal, outside) || Dot(direction, oppositeNormal) > 0 ||
-                !GetMaterialPath(p, forward.point)) continue;
-            // 正向锥 <= 30° 且对端迎向射线，已排除相同单位法向的退化情形。
-            const auto value = GetNormalOffset(Sub(forward.point, p), normal, oppositeNormal);
-            if (value && (!minimum || *value < *minimum)) minimum = value;
-        }
-        // maxDistance 限制搜索弦长；共同法向位移不按该上限截断。
-        return minimum;
+        m_nodeBudget=(remaining-batchBytes-m_uniformSigns.size())/192U;
     }
     struct NodeWeight { std::array<int, 3> index{}; double weight = 0; };
     std::array<NodeWeight, 8> GetNodeWeights(const ThicknessPoint &point) const
@@ -580,89 +548,76 @@ class Kernel final
                 const double u = (abscissas[i] + 1) * 0.5, v = (abscissas[j] + 1) * 0.5;
                 rules[3 * i + j] = {{1 - u, u * (1 - v), u * v}, 0.5 * u * weights[i] * weights[j]};
             }
-        std::vector<SourceMeasurement> sources;
-        sources.reserve(m_sourceCapacity);
-        for (std::size_t triangle = 0; triangle < m_areas.size(); ++triangle)
-            for (unsigned rule = 0; rule < rules.size(); ++rule)
-            {
-                CheckWork(m_work);
-                const auto support = GetNodeWeights(Interpolate(triangle, rules[rule].bary));
-                if (std::none_of(support.begin(), support.end(), [](const auto &w) { return w.weight > 0; })) continue;
-                if (sources.size() == m_sourceCapacity)
-                    throw Failure{ThicknessStatus::BudgetExceeded, "Source quadrature count limit exceeded."};
-                sources.push_back({triangle, rule, {}});
+        struct Accumulator { double valid=0,total=0,moment=0,validError=0,totalError=0,momentError=0; };
+        struct IndexHash {
+            std::size_t operator()(const std::array<int,3>& index) const noexcept {
+                std::size_t hash=0;
+                for (auto value:index) hash^=std::hash<int>{}(value)+std::size_t(0x9e3779b9U)+(hash<<6)+(hash>>2);
+                return hash;
             }
-        std::atomic<bool> failed{false};
-        std::exception_ptr failure;
-        const auto run = [&](std::size_t worker)
-            {
-                try
-                {
-                    auto cell = vtkSmartPointer<vtkGenericCell>::New();
-                    for (std::size_t i = worker; i < sources.size(); i += m_workerCount)
-                        {
-                            if (failed.load(std::memory_order_relaxed)) return;
-                            CheckWork(m_work);
-                            auto &source = sources[i];
-                            const auto &bary = rules[source.rule].bary;
-                            source.value = GetMeasurement(source.triangle, bary, Interpolate(source.triangle, bary), cell);
-                        }
-                }
-                catch (...)
-                {
-                    if (!failed.exchange(true)) failure = std::current_exception();
-                }
-            };
-        // 仅本次任务的有界工作线程，不改 VTK/Host 的全局并行配置。
-        std::vector<std::thread> workers;
-        workers.reserve(m_workerCount - 1);
-        try
-        {
-            for (std::size_t i = 1; i < m_workerCount; ++i) workers.emplace_back(run, i);
-        }
-        catch (...)
-        {
-            failed.store(true);
-            for (auto &worker : workers) worker.join();
-            throw;
-        }
-        run(0);
-        for (auto &worker : workers) worker.join();
-        if (failure) std::rethrow_exception(failure);
-        struct Accumulator { double valid = 0, total = 0, moment = 0, validError = 0, totalError = 0, momentError = 0; };
-        const auto add = [](double &sum, double &error, double value)
-        {
-            const double adjusted = value - error, next = sum + adjusted;
-            error = (next - sum) - adjusted;
-            sum = next;
         };
-        std::map<std::array<int, 3>, Accumulator> accumulators;
-        for (const auto &source : sources)
-        {
-            CheckWork(m_work);
-            const auto &rule = rules[source.rule];
-            const auto support = GetNodeWeights(Interpolate(source.triangle, rule.bary));
-            for (const auto &node : support)
-            {
-                if (node.weight <= 0) continue;
-                auto found = accumulators.find(node.index);
-                if (found == accumulators.end())
-                {
-                    if (accumulators.size() >= m_nodeBudget)
-                        throw Failure{ThicknessStatus::BudgetExceeded, "Sparse node field exceeds budget."};
-                    found = accumulators.emplace(node.index, Accumulator{}).first;
+        const auto add=[](double& sum,double& error,double value) {
+            const double adjusted=value-error,next=sum+adjusted;error=(next-sum)-adjusted;sum=next;
+        };
+        std::unordered_map<std::array<int,3>,Accumulator,IndexHash> accumulators;
+        std::vector<SourceMeasurement> sources;
+        sources.reserve(std::min(m_sourceCapacity,std::size_t(4096U*9U)));
+        std::size_t totalSources=0;
+        // 保持原三角形/九点顺序归并，只保留当前有界批次的射线结果。
+        for (std::size_t begin=0;begin<m_areas.size();begin+=4096U) {
+            sources.clear();
+            const auto end=std::min(m_areas.size(),begin+4096U);
+            for (std::size_t triangle=begin;triangle<end;++triangle) {
+                if (m_areas[triangle]<=0) continue;
+                for (unsigned rule=0;rule<rules.size();++rule) {
+                    CheckWork(m_work);
+                    const auto support=GetNodeWeights(Interpolate(triangle,rules[rule].bary));
+                    if (std::none_of(support.begin(),support.end(),[](const auto& w){return w.weight>0;})) continue;
+                    if (totalSources==m_sourceCapacity)
+                        throw Failure{ThicknessStatus::BudgetExceeded,"Source quadrature count limit exceeded."};
+                    ++totalSources;sources.push_back({triangle,rule,{}});
                 }
-                auto &sum = found->second;
-                const double weight = m_areas[source.triangle] * rule.weight * node.weight;
-                add(sum.total, sum.totalError, weight);
-                if (source.value)
-                {
-                    add(sum.valid, sum.validError, weight);
-                    add(sum.moment, sum.momentError, weight * *source.value);
-                }
-                if (!std::isfinite(sum.total) || !std::isfinite(sum.moment))
-                    throw Failure{ThicknessStatus::InvalidInput, "Node accumulation overflow."};
             }
+#ifdef MVVCVTK_HAS_WALL_CUDA
+            if (!m_cuda) throw Failure{ThicknessStatus::InternalError,"CUDA wall engine is unavailable; no CPU measurement fallback is configured."};
+            std::vector<ThicknessCudaPath::Measurement> measurements;measurements.reserve(sources.size());
+            for (const auto& source:sources) measurements.push_back({Interpolate(source.triangle,rules[source.rule].bary)});
+            ThicknessCudaPath::Params params;
+            params.spacing=m_geometry.spacing;params.direction=m_geometry.direction;params.epsilon=m_epsilon;
+            params.maxDistance=m_params.maxDistance;params.maxBoundaryError=m_params.maxBoundaryError;
+            params.directionCount=m_params.directionCount;params.sourceLocal=GetIsSourceLocal();
+            params.tolerance=m_work.archive.input.unit==ThicknessUnit::Millimeter?1e-9:1e-12;
+            const double theta=m_params.coneAngleDegrees*pi/180;
+            params.coneCos=std::cos(theta);params.coneSin=std::sin(theta);
+            for (unsigned di=1;di<m_params.directionCount;++di) {
+                const double phi=2*pi*(di-1)/(m_params.directionCount-1);params.phiCos[di]=std::cos(phi);params.phiSin[di]=std::sin(phi);
+            }
+            const auto values=m_cuda->Measure(measurements,params,[this]{CheckWork(m_work);});
+            if (values.size()!=sources.size()) throw Failure{ThicknessStatus::InternalError,"Invalid CUDA measurement output size."};
+            for(std::size_t i=0;i<sources.size();++i) if(values[i].valid) sources[i].value=values[i].thickness;
+            if(m_profile) m_profileData.counts[ThicknessProfile::Sources]+=sources.size();
+#else
+            throw Failure{ThicknessStatus::InternalError,"WallThickness requires the CUDA build preset; CPU measurement is not supported."};
+#endif
+            for (const auto& source:sources) {
+                CheckWork(m_work);const auto& rule=rules[source.rule];
+                const auto support=GetNodeWeights(Interpolate(source.triangle,rule.bary));
+                for (const auto& node:support) {
+                    if (node.weight<=0) continue;
+                    auto found=accumulators.find(node.index);
+                    if (found==accumulators.end()) {
+                        if (accumulators.size()>=m_nodeBudget) throw Failure{ThicknessStatus::BudgetExceeded,"Sparse node field exceeds budget."};
+                        found=accumulators.emplace(node.index,Accumulator{}).first;
+                    }
+                    auto& sum=found->second;const double weight=m_areas[source.triangle]*rule.weight*node.weight;
+                    add(sum.total,sum.totalError,weight);
+                    if (source.value) {add(sum.valid,sum.validError,weight);add(sum.moment,sum.momentError,weight**source.value);}
+                    if (!std::isfinite(sum.total) || !std::isfinite(sum.moment))
+                        throw Failure{ThicknessStatus::InvalidInput,"Node accumulation overflow."};
+                }
+            }
+            if (m_profile && std::chrono::steady_clock::now()-m_profileLast>std::chrono::seconds(10))
+                Profile("nodes",end,m_areas.size());
         }
         auto nodes = std::make_shared<std::vector<ThicknessNode>>();
         nodes->reserve(accumulators.size());
@@ -672,6 +627,12 @@ class Kernel final
             const auto &sum = entry.second;
             nodes->push_back({entry.first, sum.valid, sum.total, sum.valid > 0 ? sum.moment / sum.valid : 0});
         }
+        // 只改变查找容器；每个节点仍按原来源顺序补偿累加，发布前恢复索引排序。
+        std::size_t comparisons=0;
+        std::sort(nodes->begin(),nodes->end(),[&](const auto& left,const auto& right) {
+            if ((comparisons++&4095U)==0) CheckWork(m_work);
+            return left.index<right.index;
+        });
         return nodes;
     }
 
@@ -683,23 +644,36 @@ class Kernel final
     }
     Candidate Build()
     {
+        m_profileBegin=m_profileLast=std::chrono::steady_clock::now();
         CheckWork(m_work);
         ValidateInput();
-        BuildMesh();
-        CheckBoundary();
+        m_materialField=GetMaterialField();
+        BuildSampling();
+        Profile("sampling",0,m_areas.size());
+        BuildUniformGrid();
+#ifdef MVVCVTK_HAS_WALL_CUDA
+        BuildCuda();
+#endif
+        Profile("uniform",std::count_if(m_uniformSigns.begin(),m_uniformSigns.end(),[](auto sign){return sign!=0;}),m_uniformSigns.size());
         Field field;
         field.geometry = m_geometry;
         field.coordinateTolerance = m_epsilon;
         field.nodes = BuildNodes();
+        Profile("nodes-complete",m_areas.size(),m_areas.size());
         auto samples = std::make_shared<std::vector<ThicknessSample>>();
         auto neighbors = std::make_shared<Neighbors>();
         samples->reserve(m_sampleCount);
         neighbors->reserve(m_sampleCount);
-        using VertexKey = std::array<std::pair<std::uint64_t, unsigned>, 3>;
+        using VertexKey = std::array<std::pair<std::uint64_t, double>, 3>;
         std::map<VertexKey, std::size_t> vertices;
-        std::map<std::pair<std::size_t, std::size_t>, std::pair<std::size_t, std::size_t>> edges;
+        struct EdgeHash {
+            std::size_t operator()(const std::pair<std::size_t,std::size_t>& edge) const noexcept {
+                return edge.first^(edge.second+std::size_t(0x9e3779b9U)+(edge.first<<6)+(edge.first>>2));
+            }
+        };
+        std::unordered_map<std::pair<std::size_t, std::size_t>, std::pair<std::size_t, std::size_t>,EdgeHash> edges;
         auto add =
-            [&](std::uint64_t triangle, const std::array<std::array<unsigned, 3>, 3> &corners)
+            [&](std::uint64_t triangle, const ThicknessDisplaySampling::Triangle& patch)
         {
             CheckWork(m_work);
             ThicknessSample sample;
@@ -712,28 +686,23 @@ class Kernel final
                 std::size_t count = 0;
                 for (std::size_t a = 0; a < 3; ++a)
                 {
-                    sample.barycentricCorners[k][a] = double(corners[k][a]) / m_n;
-                    if (corners[k][a])
-                        key[count++] = {m_mesh.GetTriangles()[triangle * 3 + a], corners[k][a]};
+                    sample.barycentricCorners[k][a] = patch.bary[k][a];
+                    if (patch.bary[k][a])
+                        key[count++] = {m_mesh.GetTriangles()[triangle * 3 + a], patch.bary[k][a]};
                 }
                 std::sort(key.begin(), key.begin() + count);
-                ids[k] = vertices.emplace(key, vertices.size()).first->second;
+                ids[k] = count==1 ? static_cast<std::size_t>(key[0].first)
+                    : vertices.emplace(key,m_mesh.GetVertices().size()/3+vertices.size()).first->second;
                 bary = Add(bary, Scale(sample.barycentricCorners[k], 1.0 / 3));
             }
             const auto p = Interpolate(triangle, bary);
             sample.source = Add(p, m_geometry.origin);
-            sample.area = m_areas[triangle] / (double(m_n) * m_n);
+            sample.area = m_areas[triangle]*patch.fraction;
             if (m_params.evaluationBounds)
                 for (std::size_t a = 0; a < 3; ++a)
                     if (sample.source[a] < (*m_params.evaluationBounds)[a * 2] ||
                         sample.source[a] > (*m_params.evaluationBounds)[a * 2 + 1])
                         sample.validity = ThicknessValidity::OutsideEvaluation;
-            if (sample.validity != ThicknessValidity::OutsideEvaluation)
-            {
-                const auto value = GetValue(field, sample.source);
-                sample.validity = value ? ThicknessValidity::Valid : ThicknessValidity::NoValidSource;
-                sample.thickness = value.value_or(0);
-            }
             const auto id = samples->size();
             neighbors->push_back({noNeighbor, noNeighbor, noNeighbor});
             for (std::size_t k = 0; k < 3; ++k)
@@ -753,24 +722,42 @@ class Kernel final
             }
             samples->push_back(std::move(sample));
         };
-        // 同一n的整数重心细分，面积恰好为原面/n²；ROI只筛选评价点。
-        for (std::size_t triangle = 0; triangle < m_areas.size(); ++triangle)
-            for (unsigned row = 0; row < m_n; ++row)
-                for (unsigned column = 0; column < m_n - row; ++column)
-                {
-                    const auto b = [&](unsigned i, unsigned j)
-                    { return std::array<unsigned, 3>{m_n - i - j, i, j}; };
-                    add(triangle, {b(row, column), b(row + 1, column), b(row, column + 1)});
-                    if (row + column + 1 < m_n)
-                        add(triangle,
-                            {b(row + 1, column), b(row + 1, column + 1), b(row, column + 1)});
+        for (std::size_t triangle=0;triangle<m_areas.size();++triangle) {
+            if (m_areas[triangle]<=0) continue;
+            ThicknessDisplaySampling::Corners p{};
+            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangles()[triangle*3+k]);
+            ThicknessDisplaySampling::Visit(p,m_params.sampleSpacing,[&]{CheckWork(m_work);},[&](const auto& patch){add(triangle,patch);});
+        }
+        Profile("sample-geometry",samples->size(),m_sampleCount);
+        // 点查询彼此独立；三角形、邻接和结果数组顺序仍由上面的串行构造确定。
+        std::atomic<std::size_t> nextSample{0};std::atomic<bool> failed{false};std::exception_ptr failure;
+        const auto query=[&] {
+            try {
+                for (;;) {
+                    const auto begin=nextSample.fetch_add(256,std::memory_order_relaxed);
+                    if (begin>=samples->size() || failed.load(std::memory_order_relaxed)) break;
+                    for (auto i=begin;i<std::min(begin+256,samples->size());++i) {
+                        CheckWork(m_work);auto& sample=(*samples)[i];
+                        if (sample.validity==ThicknessValidity::OutsideEvaluation) continue;
+                        const auto value=GetValue(field,sample.source);
+                        sample.validity=value ? ThicknessValidity::Valid : ThicknessValidity::NoValidSource;
+                        sample.thickness=value.value_or(0);
+                    }
                 }
+            } catch (...) {if (!failed.exchange(true)) failure=std::current_exception();}
+        };
+        std::vector<std::thread> workers;workers.reserve(m_workerCount-1);
+        try {for (std::size_t i=1;i<m_workerCount;++i) workers.emplace_back(query);}
+        catch (...) {failed.store(true);for (auto& worker:workers) worker.join();throw;}
+        query();for (auto& worker:workers) worker.join();if (failure) std::rethrow_exception(failure);
         field.samples = std::move(samples);
         field.neighbors = std::move(neighbors);
         field.subdivisions = m_n;
+        Profile("samples",field.samples->size(),m_sampleCount);
         auto result = BuildEvaluation(field, m_work.archive.evaluation, m_params,
                                       m_work.archive.limits, m_work.cancelled, m_work.deadline);
         result.field = std::move(field);
+        Profile("evaluation");
         return result;
     }
 };

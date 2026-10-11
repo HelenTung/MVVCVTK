@@ -345,7 +345,7 @@ bool SetSelectedData(VtkAppHostSession& session, const DataRevisionRef& ref)
     HostDataSelectRequest request;
     request.dataRevision = ref;
     request.expectedBindingRevision = descriptor->bindingRevision;
-    return session.SendRequest(std::move(request));
+    return (session.SendRequest(std::move(request)).status == HostAdmissionStatus::Accepted);
 }
 
 CropHostRequest GetCropRequest(const CropHostAction action)
@@ -427,12 +427,12 @@ bool SendReload(
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
     reload.metadata = GetCropTestMetadata();
-    return session.SendRequest(
+    return (session.SendRequest(
         std::move(reload),
-        [&isComplete, &isSucceeded](const bool value) {
+        [&isComplete, &isSucceeded](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
             isSucceeded = value;
             isComplete = true;
-        });
+        }).status == HostAdmissionStatus::Accepted);
 }
 
 bool SendTimer(vtkRenderWindowInteractor* interactor)
@@ -671,8 +671,8 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
     if(consumerKind==1) {
         consumer=std::make_shared<GapHostFeature>(GetGapConfig());
         GapHostResult completed;int consumerCount=0;
-        if(!session.AttachFeature(consumer)||!consumer->SendRequest({GapHostAction::Start,GetGapConfig().defaultStart},
-            [&](auto value){completed=std::move(value);++consumerCount;})||!wait([&]{return consumerCount!=0;}))return false;
+        if(!session.AttachFeature(consumer)||!(consumer->SendRequest({GapHostAction::Start,GetGapConfig().defaultStart},
+            [&](auto value){completed=std::move(value);++consumerCount;}).status == GapAdmissionStatus::Accepted)||!wait([&]{return consumerCount!=0;}))return false;
         consumerGraph=probe->m_data->GetDataGraph();consumerRef=completed.resultSet;
         const auto data=probe->m_data->GetData(consumerGraph,consumerRef);
         if(consumerCount!=1||!data||!GetDataEntityIdValid(data->lifetimeScope)
@@ -2068,14 +2068,14 @@ int GetCropFailCount()
     int staleGapCount = 0;
     GapHostResult staleGapResult;
     const bool isStaleGapAccepted =
-        gapFeature->SendRequest(
+        (gapFeature->SendRequest(
             { GapHostAction::Start,
                 GetGapConfig().defaultStart },
             [&staleGapCount, &staleGapResult](
                 GapHostResult result) {
                 ++staleGapCount;
                 staleGapResult = std::move(result);
-            });
+            }).status == GapAdmissionStatus::Accepted);
     const auto publishExpected =
         contextProbe->m_data->GetPrimaryImage();
     int publishCompleteCount = 0;
@@ -2151,8 +2151,8 @@ int GetCropFailCount()
             && staleGapState.statistics.objectVoxelCount == 0
             && staleGapState.statistics.voidVoxelCount == 0);
     const bool isStaleGapOverlayRejected =
-        !gapFeature->SendRequest({
-            GapHostAction::Overlay });
+        !(gapFeature->SendRequest({
+            GapHostAction::Overlay }).status == GapAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         isGapAttached
             && isStaleGapAccepted
@@ -2238,12 +2238,12 @@ int GetCropFailCount()
         && publishResult.isSucceeded
         && activeCropSnapshot
         && activeCropSnapshot->validityMask
-        && gapFeature->SendRequest(
+        && (gapFeature->SendRequest(
             { GapHostAction::Start,
                 GetGapConfig().defaultStart },
             [&postCropGapCompleteCount](GapHostResult) {
                 ++postCropGapCompleteCount;
-            });
+            }).status == GapAdmissionStatus::Accepted);
     const auto postCropGapAcceptedState =
         gapFeature->GetState();
     for (int poll = 0;
@@ -2259,7 +2259,7 @@ int GetCropFailCount()
     const auto postCropGapState =
         gapFeature->GetState();
     const bool isPostCropGapExited =
-        gapFeature->SendRequest({ GapHostAction::Exit });
+        (gapFeature->SendRequest({ GapHostAction::Exit }).status == GapAdmissionStatus::Accepted);
     failureCount += GetCaseResult(
         hasCroppedVoxel
             && isPostCropGapAccepted
@@ -2338,8 +2338,8 @@ int GetCropFailCount()
         auto surface = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
         const bool attached = session.AttachFeature(surface);
         SurfaceDeterminationRequest request;
-        request.action = SurfaceDeterminationAction::Start;
-        request.start = surfaceConfig.defaultStart;
+        request = SurfaceStartRequest{};
+        std::get<SurfaceStartRequest>(request).start = surfaceConfig.defaultStart;
         std::optional<SurfaceDeterminationResult> result;
         int completions = 0;
         const auto admission = surface->SendRequest(request, [&](SurfaceDeterminationResult value) {
@@ -2395,13 +2395,12 @@ int GetCropFailCount()
     exportRequest.format = HostDataExportFormat::Raw;
     int exportCompleteCount = 0;
     bool isExportSucceeded = false;
-    const bool isExportSent = session.SendRequest(
+    const bool isExportSent = (session.SendRequest(
         std::move(exportRequest),
-        [&exportCompleteCount, &isExportSucceeded](
-            const bool isSuccess) {
+        [&exportCompleteCount, &isExportSucceeded](HostResult hostResultIsSuccess) { const bool isSuccess = hostResultIsSuccess.isSucceeded;
             ++exportCompleteCount;
             isExportSucceeded = isSuccess;
-        });
+        }).status == HostAdmissionStatus::Accepted);
     for (int poll = 0;
         isExportSent
             && exportCompleteCount == 0

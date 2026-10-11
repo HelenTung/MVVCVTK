@@ -1,6 +1,7 @@
 // 测试用途：为功能测试受控发布名义参考和二值掩码，保持真实数据图修订链。
 #pragma once
 #include "Host/HostFeature.h"
+#include "Data/ImageReadTypes.h"
 #include "../../../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include <QJsonObject>
 #include <QString>
@@ -27,7 +28,6 @@ public:
     bool OnHostTick() override { return true; }
     ReferenceInput LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh);
     DataRevisionRef CreateMask(DataRevisionRef source, const QJsonObject& params);
-    QJsonObject GetPublishedGraph();
     QJsonObject GetViewTransforms();
     QJsonObject GetResultEvidence();
     QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
@@ -36,8 +36,5 @@ private:
     std::shared_ptr<TrustedDataPort> m_data;
     FeatureInternal::ResultScopes m_resultScopes;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::optional<DataCommitId> m_sceneCommit;
-    QJsonObject m_sceneGraph;
-    std::map<QString, std::uint64_t> m_sceneOrder;
 };
 }

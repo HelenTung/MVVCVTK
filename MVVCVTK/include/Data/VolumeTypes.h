@@ -15,14 +15,14 @@ class VolumeLayout final {
 public:
     static std::optional<VolumeLayout> Create(
         std::array<int, 3> dimensions,
-        std::array<float, 3> spacing,
-        std::array<float, 3> origin,
+        std::array<double, 3> spacing,
+        std::array<double, 3> origin,
         std::array<double, 9> direction,
         ImageMetadata metadata);
 
     const std::array<int, 3>& GetDimensions() const noexcept;
-    const std::array<float, 3>& GetSpacing() const noexcept;
-    const std::array<float, 3>& GetOrigin() const noexcept;
+    const std::array<double, 3>& GetSpacing() const noexcept;
+    const std::array<double, 3>& GetOrigin() const noexcept;
     const std::array<double, 9>& GetDirection() const noexcept;
     const ImageMetadata& GetMetadata() const noexcept;
     std::size_t GetVoxelCount() const noexcept;
@@ -31,16 +31,16 @@ public:
 private:
     VolumeLayout(
         std::array<int, 3> dimensions,
-        std::array<float, 3> spacing,
-        std::array<float, 3> origin,
+        std::array<double, 3> spacing,
+        std::array<double, 3> origin,
         std::array<double, 9> direction,
         ImageMetadata metadata,
         std::size_t voxelCount,
         std::size_t byteCount) noexcept;
 
     std::array<int, 3> m_dimensions{}; // X/Y/Z 体素数，均为正数。
-    std::array<float, 3> m_spacing{};  // X/Y/Z 物理间距，有限且大于零。
-    std::array<float, 3> m_origin{};   // 物理原点，必须为有限值。
+    std::array<double, 3> m_spacing{};  // X/Y/Z 物理间距，有限且大于零。
+    std::array<double, 3> m_origin{};   // 物理原点，必须为有限值。
     std::array<double, 9> m_direction{}; // 行主序正交方向余弦矩阵。
     ImageMetadata m_metadata;
     std::size_t m_voxelCount = 0;      // dimensions 安全乘积。

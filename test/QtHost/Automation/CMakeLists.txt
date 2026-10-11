@@ -12,4 +12,5 @@ vtk_module_autoinit(TARGETS qt_feature_tests MODULES ${MVVCVTK_QT_VTK_TARGETS})
 add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
     --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
-set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT 120)
+# Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
+set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")

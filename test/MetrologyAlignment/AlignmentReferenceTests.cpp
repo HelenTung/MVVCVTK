@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
                 spread += (Vector(p) - centroid).dot(Vector(p) - centroid);
             work.recipe.lengthScale = std::max(1.0, std::sqrt(spread / static_cast<double>(n)));
             work.cancelled = std::make_shared<std::atomic<bool>>(false);
-            work.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
             AlignmentGeometrySpec spec;
             spec.id = entry.path().stem().string();
             spec.kind = folder.second;

@@ -262,27 +262,10 @@ HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
     FlushGuard guard(m_isFlushing, m_callbacks.sendReadyCompletions);
     std::vector<HostFrameIntent> intents;
     bool restoreIntents = false;
+    bool committedThisFrame = false;
 
     try {
-        // 原生驱动仍以 Render 作为帧终态；宿主驱动的更新不等待该门。
-        if (isRenderEnabled
-            && (m_hasPendingCompletion || m_callbacks.getRenderPending())) {
-            const auto epoch = m_sceneEpoch.load(std::memory_order_acquire);
-            const bool isRendered = m_callbacks.sendRender(epoch);
-            if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
-            if (!isRendered) {
-                SendDisplayCompletions(false);
-                return FlushStatus::RenderPending;
-            }
-            if (m_hasPendingCompletion) {
-                SendCompletions();
-                m_hasPendingCompletion = false;
-            }
-            return FlushStatus::Completed;
-        }
-
-        // 冻结发生在首次 apply 之前。旧帧重试不会到达这里；本轮任一回调
-        // 中接纳的新请求只进入 pending，不能借用当前 Render 的完成证据。
+        // 业务更新持续消费；旧展示回调仍等待全部相关 View 的绘制完成。
         m_frameCompletes.splice(m_frameCompletes.end(), m_pendingCompletes);
         if (!m_callbacks.collectUpdates()) {
             ClearStage();
@@ -340,6 +323,13 @@ HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
         }
         if (stageStatus == HostFrameStageStatus::Unchanged) {
             restoreIntents = false;
+            if (isRenderEnabled && (m_hasPendingCompletion || m_callbacks.getRenderPending())) {
+                if (!m_callbacks.sendRender(currentEpoch)) {
+                    SendDisplayCompletions(false);
+                    return FlushStatus::RenderPending;
+                }
+            }
+            m_hasPendingCompletion = false;
             SendCompletions();
             return m_isStopped.load(std::memory_order_acquire)
                 ? FlushStatus::Stopped : FlushStatus::Completed;
@@ -347,6 +337,7 @@ HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
 
         // setCommit 的目标实现必须 noexcept；全量 stage 已完成，之后不再回滚。
         m_callbacks.setCommit(nextEpoch);
+        committedThisFrame = true;
         restoreIntents = false;
         m_sceneEpoch.store(nextEpoch, std::memory_order_release);
         AdvancePendingBaseEpoch(currentEpoch, nextEpoch);
@@ -370,7 +361,7 @@ HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
         if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
         SendDisplayCompletions(false);
         // 若 epoch 已发布，异常属于 Render/notification 之后的失败，不能回滚。
-        if (m_hasPendingCompletion) return FlushStatus::RenderPending;
+        if (committedThisFrame) return FlushStatus::RenderPending;
         if (restoreIntents) RestoreIntents(std::move(intents));
         ClearStage();
         return FlushStatus::Failed;

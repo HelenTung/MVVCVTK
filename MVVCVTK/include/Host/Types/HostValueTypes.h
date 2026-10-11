@@ -32,8 +32,8 @@ struct HostVolumeTransferFunction final {
 
 struct HostVolumeGeometry {
     std::array<int, 3> dimensions{ 0, 0, 0 }; // 体素数，顺序固定为 X/Y/Z。
-    std::array<float, 3> spacing{};            // 相邻体素的物理间距，单位 mm。
-    std::array<float, 3> origin{};             // 输入 ITK/LPS 体数据的物理原点，单位 mm；origin 对应索引 0。
+    std::array<double, 3> spacing{};            // 相邻体素的物理间距，单位 mm。
+    std::array<double, 3> origin{};             // 输入 ITK/LPS 体数据的物理原点，单位 mm；origin 对应索引 0。
     // 输入 ITK/LPS direction，行主序 3x3；Host 在加载边界一次转换为内部 RAS。
     std::array<double, 9> direction = {
         1.0, 0.0, 0.0,

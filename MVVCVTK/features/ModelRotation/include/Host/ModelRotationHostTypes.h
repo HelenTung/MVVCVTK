@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <functional>
+#include <cstdint>
 
 struct ModelRotationConfig final {
     HostViewTargets targetViews{ {}, { HostRenderViewRole::Primary3D,
@@ -20,6 +22,16 @@ struct ModelRotationRequest final {
 };
 
 enum class ModelRotationStatus { Detached, Idle, Dragging, Pending, Succeeded, Cancelled, Invalidated };
+enum class ModelRotationAdmissionStatus { Accepted, InvalidRequest, Unavailable };
+struct ModelRotationAdmission final {
+    ModelRotationAdmissionStatus status = ModelRotationAdmissionStatus::InvalidRequest;
+    std::uint64_t requestId = 0;
+};
+struct ModelRotationResult final {
+    std::uint64_t requestId = 0;
+    ModelRotationStatus status = ModelRotationStatus::Invalidated;
+};
+using ModelRotationCallback = std::function<void(ModelRotationResult)>;
 struct ModelRotationState final {
     ModelRotationStatus status = ModelRotationStatus::Detached;
     bool isEnabled = false;

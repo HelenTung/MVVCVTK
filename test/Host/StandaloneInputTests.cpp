@@ -31,11 +31,18 @@ int main()
     };
     const auto parsed = Parse(valid);
     const auto request = GetFeatureLoadRequest(parsed, true);
-    check(request.geometry.spacing == std::array<float, 3>{2, 3, 4}
-        && request.geometry.origin == std::array<float, 3>{10, 20, 30}
+    check(request.geometry.spacing == std::array<double, 3>{2, 3, 4}
+        && request.geometry.origin == std::array<double, 3>{10, 20, 30}
         && request.metadata.identity.datasetId == "scan-1"
         && request.metadata.source.digest == "sha256:" + std::string(64, 'a'),
         "Explicit input metadata is preserved in the Host request");
+    auto precise = valid;
+    precise[3] = "--spacing=0.153712345678,0.153712345678,0.153712345678";
+    precise[4] = "--origin=100000.003,100000.007,100000.009";
+    const auto preciseRequest = GetFeatureLoadRequest(Parse(precise), true);
+    check(preciseRequest.geometry.origin[0] == 100000.003
+        && preciseRequest.geometry.spacing[0] == 0.153712345678,
+        "Physical geometry retains double precision at the Host boundary");
     const auto rejects = [&](std::vector<std::string> arguments) {
         try { (void)GetFeatureLoadRequest(Parse(std::move(arguments)), true); }
         catch (const std::exception&) { return true; }
@@ -48,7 +55,7 @@ int main()
         check(rejects(std::move(missing)), "Every required real-audit input field is mandatory");
     }
     for (const std::string bad : {"--spacing=1,0,1", "--spacing=1,nan,1",
-        "--spacing=1,1,1,2", "--origin=1e100,0,0", "--direction=1,0",
+        "--spacing=1,1,1,2", "--origin=inf,0,0", "--direction=1,0",
         "--input-format=uint16", "--input-frame=RAS", "--input-unit=inch",
         "--input-digest=1234", "--dimensions=3,2,2.5"}) {
         auto invalid = valid;

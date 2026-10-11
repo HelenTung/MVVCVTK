@@ -465,6 +465,7 @@ set(MVVCVTK_HOST_SOURCES
     src/App/AppState.cpp
     include/App/VolumePresentationTypes.h
     src/App/Services/AppServiceFactory.cpp
+    src/App/Services/AppTaskExecutor.cpp
     src/App/Tasks/AppDataExportTaskService.cpp
     src/App/Tasks/AppDataLoadTaskService.cpp
     src/Data/DataConverters.cpp
@@ -475,6 +476,7 @@ set(MVVCVTK_HOST_SOURCES
     include/Geometry/RoiEvaluator.h
     src/Geometry/RoiEvaluator.cpp
     src/Data/DataManager.cpp
+    src/Data/Internal/AtomicFileOutput.cpp
     src/Data/ImageProcessor.cpp
     src/Data/LabelMapReader.cpp
     src/Data/VolumeTypes.cpp

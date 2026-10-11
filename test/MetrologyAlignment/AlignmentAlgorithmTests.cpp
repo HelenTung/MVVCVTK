@@ -26,7 +26,7 @@ AlignmentWork Work() {
     w.recipe.targetFrameId = "workpiece";
     w.recipe.nominalData = Ref(4);
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
-    w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
     w.poses = {alignmentIdentity};
     return w;
 }
@@ -178,10 +178,11 @@ void LineAndContact() {
 }
 } // namespace
 int TestConstraints();
+int TestGeometrySupport();
 int main() {
     Sequential();
     Rps();
     Shapes();
     LineAndContact();
-    return failures + TestConstraints() ? 1 : 0;
+    return failures + TestConstraints() + TestGeometrySupport() ? 1 : 0;
 }

@@ -23,10 +23,20 @@ class ResultScopes final {
 public:
     DataCommitResult Commit(TrustedDataPort& data,DataTransaction transaction) {
         if(m_busy)return {};
-        bool scoped=false;const auto graph=data.GetDataGraph();
+        bool scoped=false, explicitRetirement=false;const auto graph=data.GetDataGraph();
         for(const auto& draft:transaction.outputs)for(const auto& input:draft.inputs) {
             const auto source=data.GetData(graph,input.source);
-            scoped=scoped||(source&&GetDataEntityIdValid(source->lifetimeScope));
+            if (source && GetDataEntityIdValid(source->lifetimeScope)) {
+                scoped = scoped || source->lifetimePolicy == DataLifetimePolicy::OwnerRetirement;
+                explicitRetirement = explicitRetirement || source->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement;
+            }
+        }
+        if (!scoped && explicitRetirement && !transaction.outputs.empty()) {
+            const auto scope = data.CreateDataEntityId();
+            for (auto& draft : transaction.outputs) {
+                draft.lifetimeScope = scope;
+                draft.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
+            }
         }
         if(!scoped&&m_scopes.empty())return data.SetDataCommit(std::move(transaction));
         Guard guard(m_busy);
@@ -36,6 +46,7 @@ public:
             Scope scope;scope.retirement={data.CreateDataEntityId(),DataLifetimeStatus::Published,{},true};
             for(auto& draft:transaction.outputs) {
                 draft.lifetimeScope=scope.retirement.scopeId;
+                draft.lifetimePolicy=DataLifetimePolicy::OwnerRetirement;
                 scope.retirement.expectedRevisions.push_back({draft.entityId,draft.expectedGeneration+1});
             }
             next.push_back(std::move(scope));

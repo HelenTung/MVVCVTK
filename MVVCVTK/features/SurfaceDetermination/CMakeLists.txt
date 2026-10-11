@@ -128,7 +128,9 @@ if(MVVCVTK_SURFACE_CUDA)
         # NVIDIA 的 driver import lib 带 LIBCMT 默认项；本项目固定使用 /MD[d]。
         target_link_options(surface_cuda_backend PRIVATE /NODEFAULTLIB:LIBCMT)
         set_target_properties(surface_cuda_backend PROPERTIES OUTPUT_NAME SurfaceCudaBackend
-            FOLDER "MVVCVTK/Features/SurfaceDetermination")
+            FOLDER "MVVCVTK/Features/SurfaceDetermination"
+            # 核函数由独立 nvcc 命令生成 PTX，DLL 本身仅编译 C++；不继承随后启用的壁厚 CUDA 架构。
+            CUDA_ARCHITECTURES OFF)
         add_dependencies(surface_determination surface_cuda_backend)
         target_compile_definitions(surface_determination PRIVATE
             MVVCVTK_SURFACE_CUDA_ENABLED=1 MVVCVTK_SURFACE_CUDA_DEVICE_BYTES=${_surface_device_bytes}

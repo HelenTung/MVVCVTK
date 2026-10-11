@@ -12,9 +12,9 @@ struct AlignmentWork final {
     AlignmentConfig config;
     // 生产入口只传 DataGraphStore 已验证的不可变 payload；计算不重复扫描整张网格。
     std::shared_ptr<const SurfaceMeshPayload> mesh;
+    std::shared_ptr<const SurfaceMeshPayload> referenceMesh;
     std::vector<AlignmentMatrix> poses;
     std::shared_ptr<std::atomic<bool>> cancelled;
-    std::chrono::steady_clock::time_point deadline;
 };
 struct AlignmentSamples final {
     std::vector<AlignmentPoint> points;
@@ -25,10 +25,14 @@ struct AlignmentCandidate final {
     std::vector<AlignmentGeometry> geometries;
     std::vector<AlignmentResidual> residuals;
     AlignmentDiagnostics diagnostics;
+    std::vector<AlignmentMatrix> initialPoses;
+    bool hasSolution = false;
 };
 
 class AlignmentGeometryFit final {
   public:
+    static bool GetSpecValid(const AlignmentGeometrySpec &spec, bool requiresRegion = true);
+    static bool GetSupportValid(const AlignmentGeometry &geometry);
     static bool GetRecipeValid(const AlignmentRecipe &recipe, const AlignmentConfig &config);
     static AlignmentStatus GetWorkStatus(const AlignmentWork &work);
     static bool GetPointUsable(const AlignmentWork &work, std::size_t index);

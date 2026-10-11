@@ -5,9 +5,18 @@
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
 #include "AlignmentSolver.h"
+#include "AlignmentReference.h"
+#include "AlignmentDeviationData.h"
+#include "AlignmentDeviationDisplay.h"
+#include "AlignmentInspectionData.h"
+#include "AlignmentReport.h"
+#include "AlignmentVoxelVolumeData.h"
+#include "AlignmentModelPose.h"
+#include "AlignmentSceneDisplay.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkPolyData.h>
 #include <limits>
+#include <filesystem>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -61,8 +70,7 @@ bool GetSourceRelated(const DataGraphSnapshot &graph, const DataRevisionRef &mes
 class MetrologyAlignmentHostFeature::Impl final {
   public:
     explicit Impl(AlignmentConfig config) : m_config(std::move(config)) {
-        if (WorkLimit(m_config.workingBytes) < 1024 || WorkLimit(m_config.deadlineMs) == 0 ||
-            (WorkLimit(m_config.deadlineMs).GetValue() && WorkLimit(m_config.deadlineMs) > 3600000) || !std::isfinite(m_config.axisLength) ||
+        if (!std::isfinite(m_config.axisLength) ||
             m_config.axisLength <= 0)
             throw std::invalid_argument("Invalid alignment resource configuration.");
         m_state.isOverlayVisible = m_config.isOverlayVisible;
@@ -75,6 +83,8 @@ class MetrologyAlignmentHostFeature::Impl final {
         }
         if (GetIsOwner()) {
             ClearDisplay();
+            m_deviationDisplay.Clear();
+            m_sceneDisplay.Clear();
             if (m_data && m_observer)
                 m_data->DetachDataChange(m_observer);
         }
@@ -87,7 +97,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return false;
         m_owner = std::this_thread::get_id();
         try {
-            if (!AlignmentData::SetTypes(*context.data))
+            if (!AlignmentData::SetTypes(*context.data) || !AlignmentDeviationDataStore::SetType(*context.data) || !AlignmentInspectionData::SetType(*context.data) || !AlignmentVoxelVolumeData::SetType(*context.data))
                 return false;
             auto dirty = std::make_shared<std::atomic<bool>>(false);
             const auto observer = context.data->AttachDataChange(
@@ -102,6 +112,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             m_data = context.data;
             m_views = context.views;
             m_host = context.host;
+            m_modelPose.Attach(std::dynamic_pointer_cast<FeatureModelTransformPort>(context.host));
             m_state.isAttached = true;
             return true;
         } catch (...) {
@@ -114,6 +125,11 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || m_isCommitting)
             return false;
         m_state.isStopping = true;
+        if(m_modelPose.GetPending()) {
+            (void)m_modelPose.Cancel();OnHostTick();
+            if(!m_state.isAttached)return true;
+            if(m_modelPose.GetPending())return false;
+        }
         if (m_task) {
             m_task->work.cancelled->store(true);
             if (!m_task->isDone.load(std::memory_order_acquire))
@@ -122,14 +138,18 @@ class MetrologyAlignmentHostFeature::Impl final {
             if (!m_state.isAttached)
                 return true;
         }
+        CommitGuard guard(m_isCommitting);
         if (m_observer && !m_data->DetachDataChange(m_observer))
             return false;
         m_observer = 0;
         ClearDisplay();
+        m_deviationDisplay.Clear();
+        m_sceneDisplay.Clear();
         if (!m_resultScopes.Clear(*m_data)) return false;
         m_data.reset();
         m_views.reset();
         m_host.reset();
+        m_modelPose.Clear();
         m_dirty.reset();
         m_state.isAttached = false;
         m_state.isStopping = false;
@@ -140,6 +160,11 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner())
             return {};
         auto state = m_state;
+        if(m_data)state.modelPose=m_modelPose.GetState(m_data->GetDataGraph());
+        state.sceneDisplay=m_sceneDisplay.GetRequest();state.sceneWorkingBytes=m_sceneDisplay.GetWorkingBytes();
+        state.isSceneDisplayReady=m_data && m_sceneDisplay.GetReady(m_data->GetDataGraph());
+        state.deviationDisplay = m_deviationDisplay.GetRequest();
+        state.isDeviationDisplayReady = m_data && m_deviationDisplay.GetReady(m_data->GetDataGraph());
         if (m_data && GetDataRevisionRefValid(state.activeResult)) {
             const auto graph = m_data->GetDataGraph();
             const auto result = AlignmentData::GetResult(graph, state.activeResult);
@@ -164,21 +189,67 @@ class MetrologyAlignmentHostFeature::Impl final {
             graph.view->GetData(result->record.transform)->payload);
         if (!recipe || !transform)
             return {};
-        return AlignmentArchive{1, "metrology-alignment-1", recipe->recipe, result->record.input,
+        return AlignmentArchive{1, result->record.algorithmVersion, recipe->recipe, result->record.input,
                                 transform->GetSourceToTarget()};
+    }
+    std::optional<AlignmentReferenceSnapshot> GetReference(const DataRevisionRef &ref) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentData::GetReference(m_data->GetDataGraph(), ref);
+    }
+    std::optional<AlignmentDeviationSnapshot> GetDeviation(const DataRevisionRef &ref) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(), ref);
+    }
+    std::optional<InspectionSnapshot> GetInspection(const DataRevisionRef &ref) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentInspectionData::GetResult(m_data->GetDataGraph(),ref);
+    }
+    MetrologyReportResult GetReport(const MetrologyReportRequest &request) const {
+        if (!GetIsOwner() || !m_data) return {};
+        const auto graph=m_data->GetDataGraph();AlignmentReport::CurrentDisplay current;
+        if(request.captureCurrentDisplay) {
+            current.supplied=true;current.deviation=m_deviationDisplay.GetRequest();current.scene=m_sceneDisplay.GetRequest();
+            if((current.deviation && !m_deviationDisplay.GetReady(graph)) || (current.scene && !m_sceneDisplay.GetReady(graph)))
+                return {AlignmentStatus::Stale,{},"Current display dependencies are stale."};
+        }
+        return AlignmentReport::Capture(graph,request,m_config,current);
+    }
+    std::optional<VoxelVolumeSnapshot> GetVoxelVolume(const DataRevisionRef &ref) const {
+        if(!GetIsOwner() || !m_data)return {};return AlignmentVoxelVolumeData::GetResult(m_data->GetDataGraph(),ref);
+    }
+    std::optional<AlignmentDeviationSelection> GetDeviationSample(const DataRevisionRef &ref, std::uint64_t vertex) const {
+        if (!GetIsOwner() || !m_data) return {};
+        return AlignmentDeviationDisplayController::GetSelection(m_data->GetDataGraph(),ref,vertex);
+    }
+    std::optional<AlignmentSceneVertex> GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
+        if(!GetIsOwner() || !m_data)return {};return m_sceneDisplay.GetVertex(m_data->GetDataGraph(),part,reference,vertex);
+    }
+    std::optional<AlignmentSceneItem> GetSceneItem(const std::string &part,const std::string &item) const {
+        if(!GetIsOwner() || !m_data)return {};return m_sceneDisplay.GetItem(m_data->GetDataGraph(),part,item);
     }
     AlignmentState GetScopeState(const std::string &scope) const {
         if (!GetIsOwner() || !m_data)
             return {};
-        auto state = m_state;
+        auto state = GetState();
         const auto graph = m_data->GetDataGraph();
         const auto binding = AlignmentData::GetBinding(graph, scope);
         state.activeResult = binding.target.value_or(DataRevisionRef{});
+        if(GetDataRevisionRefValid(state.modelPose.alignmentResult)) {
+            const auto pose=AlignmentData::GetResult(graph,state.modelPose.alignmentResult);
+            if(!pose || pose->record.input.scope!=scope)state.modelPose={};
+        }
         const auto result = AlignmentData::GetResult(graph, state.activeResult);
         state.isCurrent =
             result && AlignmentData::GetExpectationsCurrent(graph, result->record.expectations);
         state.isDisplayReady =
             state.isCurrent && m_state.isDisplayReady && state.activeResult == m_state.activeResult;
+        if (state.deviationDisplay) {
+            const auto deviation = AlignmentDeviationDataStore::GetResult(graph,state.deviationDisplay->result);
+            const auto alignment = deviation ? AlignmentData::GetResult(graph,deviation->alignmentResult) : nullptr;
+            if (!alignment || alignment->record.input.scope != scope) {
+                state.deviationDisplay.reset(); state.isDeviationDisplayReady = false;
+            }
+        }
         return state;
     }
     std::optional<AlignmentSnapshot> GetResult(const DataRevisionRef &ref) const {
@@ -229,21 +300,27 @@ class MetrologyAlignmentHostFeature::Impl final {
             return {AlignmentAdmissionStatus::Unavailable, 0};
         if (m_isCommitting)
             return {AlignmentAdmissionStatus::Busy, 0};
-        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::Restore))
+        if (static_cast<unsigned>(request.action) > static_cast<unsigned>(AlignmentAction::SetSceneDisplay))
             return {};
-        if ((request.targetRequestId && request.action != AlignmentAction::Cancel) ||
+        if ((request.sceneDisplay && request.action!=AlignmentAction::SetSceneDisplay) ||
+            (request.voxelVolume && request.action != AlignmentAction::EvaluateVoxelVolume) ||
+            (request.inspection && request.action != AlignmentAction::Inspect) ||
+            (request.deviationDisplay && request.action != AlignmentAction::SetDeviationDisplay) ||
+            (request.deviation && request.action != AlignmentAction::EvaluateSurface) ||
+            (request.reference && request.action != AlignmentAction::ImportReference) ||
+            (request.targetRequestId && request.action != AlignmentAction::Cancel) ||
             (GetDataRevisionRefValid(request.recipeRef) &&
              request.action != AlignmentAction::Start &&
              request.action != AlignmentAction::SaveRecipe) ||
             (GetDataRevisionRefValid(request.resultRef) &&
-             request.action != AlignmentAction::Activate) ||
+             request.action != AlignmentAction::Activate && request.action != AlignmentAction::ApplyModelPose) ||
             (GetDataRevisionRefValid(request.restoredNominal) &&
              request.action != AlignmentAction::Restore) ||
             (request.archive && request.action != AlignmentAction::Restore) ||
             (request.action != AlignmentAction::Start &&
              request.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity}))
             return {};
-        if (m_task && request.action != AlignmentAction::Cancel)
+        if ((m_task || m_modelPose.GetPending()) && request.action != AlignmentAction::Cancel)
             return {AlignmentAdmissionStatus::Busy, 0};
         if (m_nextRequest == std::numeric_limits<std::uint64_t>::max())
             return {AlignmentAdmissionStatus::Unavailable, 0};
@@ -251,12 +328,62 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentResult result;
         result.requestId = id;
         try {
-            if (request.action == AlignmentAction::Start) {
-                if (!request.input || request.recipe || request.archive || request.isVisible ||
-                    GetDataRevisionRefValid(request.resultRef) ||
-                    !GetDataRevisionRefValid(request.recipeRef))
-                    return {};
-                auto task = BuildTask(request, id, std::move(callback));
+            if(request.action==AlignmentAction::ApplyModelPose) {
+                if(request.input || request.recipe || request.isVisible)return {};
+                CommitGuard guard(m_isCommitting);
+                const auto admission=m_modelPose.Begin(m_data->GetDataGraph(),request.resultRef,id,callback,m_config);
+                if(admission.status==AlignmentAdmissionStatus::Accepted) { m_nextRequest=id;m_state.requestId=id;m_state.isBusy=true;NotifyOwner(m_host); }
+                return admission;
+            }
+            if (request.action == AlignmentAction::Start || request.action == AlignmentAction::ImportReference ||
+                request.action == AlignmentAction::EvaluateSurface || request.action == AlignmentAction::Inspect || request.action==AlignmentAction::EvaluateVoxelVolume) {
+                std::shared_ptr<Task> task;
+                if(request.action==AlignmentAction::EvaluateVoxelVolume) {
+                    if(!request.voxelVolume || request.input || request.recipe || request.archive || request.isVisible)return {};
+                    auto context=AlignmentVoxelVolumeData::Prepare(m_data->GetDataGraph(),std::move(*request.voxelVolume),m_config);
+                    if(!context)return {};
+                    task=std::make_shared<Task>();task->id=id;task->work=std::move(context->work);task->expectations=context->expectations;
+                    task->volumeContext=std::move(context);task->work.cancelled=std::make_shared<std::atomic<bool>>(false);
+                    task->callback=std::move(callback);
+                } else if (request.action == AlignmentAction::Inspect) {
+                    if (!request.inspection || request.input || request.recipe || request.archive || request.isVisible) return {};
+                    auto context=AlignmentInspectionData::Prepare(m_data->GetDataGraph(),std::move(*request.inspection),m_config);
+                    if (!context) return {};
+                    task=std::make_shared<Task>(); task->id=id; task->work=std::move(context->work);
+                    task->expectations=context->expectations; task->inspectionContext=std::move(context);
+                    task->work.cancelled=std::make_shared<std::atomic<bool>>(false);
+                     task->callback=std::move(callback);
+                } else if (request.action == AlignmentAction::EvaluateSurface) {
+                    if (!request.deviation || request.input || request.recipe || request.archive || request.isVisible)
+                        return {};
+                    auto context = AlignmentDeviationDataStore::Prepare(m_data->GetDataGraph(), *request.deviation, m_config);
+                    if (!context) return {};
+                    task = std::make_shared<Task>(); task->id = id;
+                    task->work = std::move(context->work);
+                    task->expectations = context->expectations;
+                    task->deviationContext = std::move(context);
+                    task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
+
+                    task->callback = std::move(callback);
+                } else if (request.action == AlignmentAction::ImportReference) {
+                    if (!request.reference || request.input || request.recipe || request.archive ||
+                        request.isVisible || !AlignmentReferenceLoader::GetRequestValid(*request.reference))
+                        return {};
+                    task = std::make_shared<Task>();
+                    task->id = id;
+                    task->referenceRequest = std::move(request.reference);
+                    task->referenceRequest->filePath = std::filesystem::absolute(
+                        std::filesystem::u8path(task->referenceRequest->filePath)).lexically_normal().u8string();
+                    task->work.config = m_config;
+                    task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
+
+                    task->callback = std::move(callback);
+                } else {
+                    if (!request.input || request.recipe || request.archive || request.isVisible ||
+                        GetDataRevisionRefValid(request.resultRef) || !GetDataRevisionRefValid(request.recipeRef))
+                        return {};
+                    task = BuildTask(request, id, std::move(callback));
+                }
                 if (!task)
                     return {};
                 m_nextRequest = id;
@@ -267,7 +394,24 @@ class MetrologyAlignmentHostFeature::Impl final {
                 try {
                     task->worker = std::thread([task, host = std::weak_ptr<FeatureHostControl>(m_host)] {
                         try {
-                            task->candidate = AlignmentSolver::BuildResult(task->work);
+                            if(task->volumeContext) {
+                                task->volumeData=AlignmentVoxelVolume::Build(task->work,task->volumeContext->source,*task->volumeContext->snapshot.parameters);
+                                task->candidate.diagnostics.status=task->volumeData.status;task->candidate.diagnostics.message=task->volumeData.message;
+                            } else if (task->inspectionContext) {
+                                task->inspectionData=AlignmentInspection::Build(task->work,*task->inspectionContext->snapshot.plan,
+                                    task->inspectionContext->snapshot.sourceToTarget);
+                                task->candidate.diagnostics.status=task->inspectionData.status;
+                                task->candidate.diagnostics.message=task->inspectionData.message;
+                            } else if (task->deviationContext) {
+                                task->deviationData = AlignmentDeviation::Build(task->work,
+                                    *task->deviationContext->snapshot.parameters, task->deviationContext->snapshot.sourceToTarget);
+                                task->candidate.diagnostics.status = task->deviationData.status;
+                                task->candidate.diagnostics.message = task->deviationData.message;
+                            } else if (task->referenceRequest) {
+                                task->referenceData = AlignmentReferenceLoader::Load(*task->referenceRequest, task->work);
+                                task->candidate.diagnostics.status = task->referenceData.status;
+                                task->candidate.diagnostics.message = task->referenceData.message;
+                            } else task->candidate = AlignmentSolver::BuildResult(task->work);
                         } catch (...) {
                             task->candidate.diagnostics.status = AlignmentStatus::InternalError;
                         }
@@ -282,24 +426,44 @@ class MetrologyAlignmentHostFeature::Impl final {
                 }
                 return {AlignmentAdmissionStatus::Accepted, id};
             }
-            if (request.action == AlignmentAction::Cancel) {
-                if (!m_task || (request.targetRequestId && request.targetRequestId != m_task->id) ||
-                    request.input || request.recipe || request.archive || request.isVisible)
-                    return {};
-                m_task->work.cancelled->store(true);
+            if(request.action==AlignmentAction::SetSceneDisplay) {
+                if(!request.sceneDisplay || request.input || request.recipe || request.archive || request.isVisible)return {};
+                CommitGuard guard(m_isCommitting);result=m_sceneDisplay.Set(*m_data,m_views.get(),m_config,*request.sceneDisplay);result.requestId=id;
+            } else if (request.action == AlignmentAction::SetDeviationDisplay) {
+                if (!request.deviationDisplay || request.input || request.recipe || request.archive || request.isVisible) return {};
+                CommitGuard guard(m_isCommitting);
+                result = m_deviationDisplay.Set(*m_data,m_views.get(),m_config,*request.deviationDisplay);
+                result.requestId = id;
+            } else if (request.action == AlignmentAction::Cancel) {
+                if(request.input || request.recipe || request.archive || request.isVisible)return {};
+                if(m_modelPose.GetPending()) {
+                    CommitGuard guard(m_isCommitting);
+                    if(!m_modelPose.Cancel(request.targetRequestId))return {};
+                } else {
+                    if(!m_task || (request.targetRequestId && request.targetRequestId!=m_task->id))return {};
+                    m_task->work.cancelled->store(true);
+                }
                 result.status = AlignmentStatus::Cancelled;
             } else if (request.action == AlignmentAction::SaveRecipe ||
                        request.action == AlignmentAction::Restore) {
                 if (request.action == AlignmentAction::Restore) {
                     if (!request.archive || !request.input ||
                         !AlignmentData::GetInputValid(*request.input) || request.recipe ||
-                        request.archive->schemaVersion != 1 ||
-                        request.archive->algorithmVersion != "metrology-alignment-1" ||
+                        request.archive->schemaVersion != AlignmentArchive{}.schemaVersion ||
+                        request.archive->algorithmVersion != AlignmentArchive{}.algorithmVersion ||
                         !AlignmentMath::Rigid(request.archive->sourceToTarget) ||
                         !GetDataRevisionRefValid(request.restoredNominal) ||
                         request.input->unit != request.archive->recipe.unit)
                         return {};
                     request.recipe = request.archive->recipe;
+                    if (request.recipe->surfaceFit &&
+                        !request.recipe->surfaceFit->referenceTriangles.empty() &&
+                        request.restoredNominal != request.archive->recipe.nominalData)
+                        return {};
+                    if (request.recipe->prealignment &&
+                        !request.recipe->prealignment->referenceTriangles.empty() &&
+                        request.restoredNominal != request.archive->recipe.nominalData)
+                        return {};
                     request.recipe->nominalData = request.restoredNominal;
                     const auto graph = m_data->GetDataGraph();
                     if (!GetSourceRelated(graph, request.input->mesh, request.input->source))
@@ -311,6 +475,9 @@ class MetrologyAlignmentHostFeature::Impl final {
                             : nullptr;
                     if (!mesh || mesh->GetCoordinateFrame() != request.input->coordinateFrame)
                         return {};
+                    if ((request.recipe->surfaceFit || request.recipe->prealignment) &&
+                        !GetReferenceMesh(graph, *request.recipe, request.input->coordinateFrame))
+                        return {};
                     for (const auto &spec : request.recipe->geometries) {
                         if (!spec.region.vertexIds.empty() &&
                             spec.region.pinnedMesh != request.input->mesh)
@@ -319,6 +486,14 @@ class MetrologyAlignmentHostFeature::Impl final {
                     if (!request.recipe->fitPairs.empty() &&
                         request.recipe->exactMesh != request.input->mesh)
                         return {};
+                    if (request.recipe->prealignment && !request.recipe->prealignment->sourceTriangles.empty() &&
+                        request.recipe->exactMesh != request.input->mesh)
+                        return {};
+                    if (request.recipe->surfaceFit && request.recipe->surfaceFit->sourceRegion) {
+                        const auto &region = *request.recipe->surfaceFit->sourceRegion;
+                        if (!region.vertexIds.empty() && region.pinnedMesh != request.input->mesh)
+                            return {};
+                    }
                     // 只恢复经显式修订映射校验的配方；旧顶点编号不能映射到新网格。
                     (void)AlignmentData::BuildExpectations(graph, *request.input, {},
                                                            request.restoredNominal);
@@ -388,7 +563,10 @@ class MetrologyAlignmentHostFeature::Impl final {
         if (!GetIsOwner() || !m_state.isAttached || m_isCommitting)
             return false;
         if (m_dirty && m_dirty->exchange(false, std::memory_order_acq_rel)) {
+            CommitGuard guard(m_isCommitting);
             const auto graph = m_data->GetDataGraph();
+            m_deviationDisplay.Refresh(graph);
+            m_sceneDisplay.Refresh(graph);
             if (m_task && !AlignmentData::GetExpectationsCurrent(graph, m_task->expectations)) {
                 m_task->isStale = true;
                 m_task->work.cancelled->store(true);
@@ -396,6 +574,15 @@ class MetrologyAlignmentHostFeature::Impl final {
             if (GetDataRevisionRefValid(m_state.activeResult) && !GetState().isCurrent) {
                 m_state.isCurrent = false;
                 ClearDisplay();
+            }
+        }
+        if(m_modelPose.GetPending()) {
+            std::optional<AlignmentModelPose::Completion> completion;
+            { CommitGuard guard(m_isCommitting);completion=m_modelPose.Tick(m_data->GetDataGraph()); }
+            if(completion) {
+                m_state.isBusy=bool(m_task);m_state.lastStatus=completion->result.status;
+                SendComplete(std::move(completion->callback),std::move(completion->result));
+                return true;
             }
         }
         if (!m_task || !m_task->isDone.load(std::memory_order_acquire))
@@ -414,10 +601,23 @@ class MetrologyAlignmentHostFeature::Impl final {
             result.status = AlignmentStatus::Stale;
         else if (task->work.cancelled->load() || m_state.isStopping)
             result.status = AlignmentStatus::Cancelled;
-        else if (result.status == AlignmentStatus::FullyDetermined ||
+        else if(task->volumeContext) {
+            if(result.status==AlignmentStatus::FullyDetermined)SetVoxelVolume(*task,result);
+        }
+        else if (task->inspectionContext) {
+            if (result.status==AlignmentStatus::FullyDetermined) SetInspection(*task,result);
+        }
+        else if (task->deviationContext) {
+            if (result.status == AlignmentStatus::FullyDetermined) SetDeviation(*task, result);
+        }
+        else if (task->referenceRequest) {
+            if (result.status == AlignmentStatus::FullyDetermined)
+                SetReference(task->referenceData, result);
+        }
+        else if (task->candidate.hasSolution && (result.status == AlignmentStatus::FullyDetermined ||
                  result.status == AlignmentStatus::Underconstrained ||
                  result.status == AlignmentStatus::Conflicting ||
-                 result.status == AlignmentStatus::NotConverged) {
+                 result.status == AlignmentStatus::NotConverged)) {
             try {
                 auto tx = AlignmentData::BuildTransaction(
                     *m_data, task->work, task->recipeRef, task->candidate, task->expectations,
@@ -485,14 +685,104 @@ class MetrologyAlignmentHostFeature::Impl final {
         DataBinding active;
         AlignmentCallback callback;
         AlignmentCandidate candidate;
+        std::optional<AlignmentReferenceRequest> referenceRequest;
+        AlignmentReferenceData referenceData;
+        std::optional<AlignmentDeviationDataStore::Context> deviationContext;
+        AlignmentDeviationData deviationData;
+        std::optional<AlignmentInspectionData::Context> inspectionContext;
+        InspectionData inspectionData;
+        std::optional<AlignmentVoxelVolumeData::Context> volumeContext;
+        VoxelVolumeData volumeData;
         std::atomic<bool> isDone{false};
         bool isStale = false, isActivationRequested = true;
         std::thread worker;
     };
+    void SetVoxelVolume(Task &task,AlignmentResult &result) {
+        try {
+            auto tx=AlignmentVoxelVolumeData::BuildTransaction(*m_data,*task.volumeContext,task.volumeData,result.voxelVolumeResult);
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting);commit=m_resultScopes.Commit(*m_data,std::move(tx)); }
+            if(commit.status!=DataCommitStatus::Succeeded) {
+                result.voxelVolumeResult={};result.status=commit.failureReason==DataCommitFailure::ExpectationFailed ? AlignmentStatus::Stale : AlignmentStatus::InternalError;
+            }
+        } catch(...) {
+            try { if(AlignmentVoxelVolumeData::GetResult(m_data->GetDataGraph(),result.voxelVolumeResult))return; } catch(...) {}
+            result.voxelVolumeResult={};result.status=AlignmentStatus::InternalError;
+        }
+    }
+    void SetInspection(Task &task,AlignmentResult &result) {
+        try {
+            auto tx=AlignmentInspectionData::BuildTransaction(*m_data,*task.inspectionContext,task.inspectionData,result.inspectionResult);
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting); commit=m_resultScopes.Commit(*m_data,std::move(tx)); }
+            if (commit.status!=DataCommitStatus::Succeeded) {
+                result.inspectionResult={}; result.status=commit.failureReason==DataCommitFailure::ExpectationFailed ? AlignmentStatus::Stale : AlignmentStatus::InternalError;
+            }
+        } catch (...) {
+            try { if (AlignmentInspectionData::GetResult(m_data->GetDataGraph(),result.inspectionResult)) return; } catch (...) {}
+            result.inspectionResult={}; result.status=AlignmentStatus::InternalError;
+        }
+    }
+    void SetDeviation(Task &task, AlignmentResult &result) {
+        try {
+            auto tx = AlignmentDeviationDataStore::BuildTransaction(*m_data, *task.deviationContext,
+                task.deviationData, result.deviationResult);
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting); commit = m_resultScopes.Commit(*m_data, std::move(tx)); }
+            if (commit.status != DataCommitStatus::Succeeded) {
+                result.deviationResult = {};
+                result.status = commit.failureReason == DataCommitFailure::ExpectationFailed
+                    ? AlignmentStatus::Stale : AlignmentStatus::InternalError;
+            }
+        } catch (...) {
+            try {
+                if (AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(), result.deviationResult)) return;
+            } catch (...) {}
+            result.deviationResult = {}; result.status = AlignmentStatus::InternalError;
+        }
+    }
+    void SetReference(const AlignmentReferenceData &reference, AlignmentResult &result) {
+        DataRevisionRef meshRef;
+        try {
+            if (!reference.mesh || !reference.mesh->GetValid()) throw std::invalid_argument("Invalid imported mesh.");
+            meshRef = {m_data->CreateDataEntityId(), 1};
+            const DataRevisionRef sourceRef{m_data->CreateDataEntityId(), 1};
+            auto metadata = reference.metadata;
+            metadata.mesh = meshRef;
+            const DataProvenance provenance{"metrology-alignment", "import-stl", "stl-reference-1", metadata.sha256};
+            DataTransaction tx;
+            tx.outputs.push_back({sourceRef.entityId, 0, AlignmentData::referenceType, {},
+                                  std::make_shared<const AlignmentData::ReferencePayload>(std::move(metadata)), provenance});
+            tx.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
+                                  {{"reference-source", sourceRef}}, reference.mesh, provenance});
+            DataCommitResult commit;
+            { CommitGuard guard(m_isCommitting); commit = m_resultScopes.Commit(*m_data, std::move(tx)); }
+            if (commit.status == DataCommitStatus::Succeeded) result.referenceMesh = meshRef;
+            else result.status = AlignmentStatus::InternalError;
+        } catch (...) {
+            // 发布成功后的观察者异常不能撤销导入事实；回读确认配对元数据与网格。
+            try {
+                if (AlignmentData::GetReference(m_data->GetDataGraph(), meshRef)) result.referenceMesh = meshRef;
+                else result.status = AlignmentStatus::InternalError;
+            } catch (...) { result.status = AlignmentStatus::InternalError; }
+        }
+    }
     struct OverlayBinding final {
         std::shared_ptr<OverlayService> port;
         std::shared_ptr<AlignmentOverlay> overlay;
     };
+    static std::shared_ptr<const SurfaceMeshPayload> GetReferenceMesh(const DataGraphSnapshot &graph,
+            const AlignmentRecipe &recipe, const std::string &coordinateFrame) {
+        const auto nominal = graph.view ? graph.view->GetData(recipe.nominalData) : nullptr;
+        const auto mesh = nominal ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(nominal->payload) : nullptr;
+        if (!mesh || mesh->GetCoordinateFrame() != coordinateFrame) return {};
+        const auto reference = AlignmentData::GetReference(graph, recipe.nominalData);
+        const bool hasSource = std::any_of(nominal->inputs.begin(), nominal->inputs.end(),
+            [](const DataInputRef &value) { return value.role == "reference-source"; });
+        if ((hasSource && !reference) || (reference &&
+            (reference->unit != recipe.unit || reference->frameId != recipe.targetFrameId))) return {};
+        return mesh;
+    }
     std::shared_ptr<Task> BuildTask(const AlignmentRequest &request, std::uint64_t id,
                                     AlignmentCallback callback) {
         if (!AlignmentData::GetInputValid(*request.input) || request.initialPoses.empty() ||
@@ -522,10 +812,15 @@ class MetrologyAlignmentHostFeature::Impl final {
         task->work.recipe = recipe->recipe;
         task->work.config = m_config;
         task->work.mesh = mesh;
+        if (recipe->recipe.prealignment && request.initialPoses != std::vector<AlignmentMatrix>{alignmentIdentity})
+            return {};
+        if (recipe->recipe.surfaceFit || recipe->recipe.prealignment) {
+            task->work.referenceMesh = GetReferenceMesh(graph, recipe->recipe, request.input->coordinateFrame);
+            if (!task->work.referenceMesh) return {};
+        }
         task->work.poses = request.initialPoses;
         task->work.cancelled = std::make_shared<std::atomic<bool>>(false);
-        task->work.deadline =
-            WorkLimit(m_config.deadlineMs).GetDeadline();
+
         task->expectations = AlignmentData::BuildExpectations(
             graph, *request.input, request.recipeRef, recipe->recipe.nominalData);
         task->active = AlignmentData::GetBinding(graph, request.input->scope);
@@ -545,6 +840,11 @@ class MetrologyAlignmentHostFeature::Impl final {
                     {"selection-" + std::to_string(i), recipe.geometries[i].region.pinnedMesh});
         if (!recipe.fitPairs.empty())
             inputs.push_back({"correspondence", recipe.exactMesh});
+        if (recipe.prealignment && !recipe.prealignment->sourceTriangles.empty())
+            inputs.push_back({"prealignment-selection", recipe.exactMesh});
+        if (recipe.surfaceFit && recipe.surfaceFit->sourceRegion &&
+            !recipe.surfaceFit->sourceRegion->vertexIds.empty())
+            inputs.push_back({"surface-selection", recipe.surfaceFit->sourceRegion->pinnedMesh});
         DataTransaction tx;
         for (const auto &input : inputs) {
             if (!graph.view->GetData(input.source))
@@ -709,6 +1009,9 @@ class MetrologyAlignmentHostFeature::Impl final {
     bool m_isCommitting = false;
     std::shared_ptr<Task> m_task;
     std::vector<OverlayBinding> m_overlays;
+    AlignmentDeviationDisplayController m_deviationDisplay;
+    AlignmentModelPose m_modelPose;
+    AlignmentSceneDisplayController m_sceneDisplay;
 };
 
 MetrologyAlignmentHostFeature::MetrologyAlignmentHostFeature(AlignmentConfig config)
@@ -719,12 +1022,19 @@ std::string_view MetrologyAlignmentHostFeature::GetFeatureId() const noexcept {
 }
 FeatureDataContract MetrologyAlignmentHostFeature::GetDataContract() const {
     return {{{"mesh", DataFacets::surfaceMesh, true},
-             {"recipe", {"org.mvvcvtk.metrology-alignment.recipe"}, true}},
+             {"recipe", {"org.mvvcvtk.metrology-alignment.recipe"}, true},
+             {"volume", DataFacets::scalarGrid3D, false},
+             {"labels", DataFacets::labelMap3D, false}},
             {{"recipe", AlignmentData::recipeType, {{"org.mvvcvtk.metrology-alignment.recipe"}}},
              {"geometry", AlignmentData::geometryType, {{"org.mvvcvtk.metrology-alignment.geometry"}}},
              {"residuals", DataTypes::recordTable, {DataFacets::tabularRecords}},
              {"result", AlignmentData::resultType, {{"org.mvvcvtk.metrology-alignment.result"}}},
-             {"transform", DataTypes::transform3D, {DataFacets::transform3D}}}};
+             {"transform", DataTypes::transform3D, {DataFacets::transform3D}},
+             {"reference-source", AlignmentData::referenceType, {{"org.mvvcvtk.metrology-alignment.reference"}}},
+             {"reference-mesh", DataTypes::surfaceMesh, {DataFacets::surfaceMesh}},
+             {"deviation", AlignmentDeviationDataStore::resultType, {{"org.mvvcvtk.metrology-alignment.deviation"}}},
+             {"inspection", AlignmentInspectionData::resultType, {{"org.mvvcvtk.metrology-alignment.inspection"}}},
+             {"voxel-volume", AlignmentVoxelVolumeData::resultType, {{"org.mvvcvtk.metrology-alignment.voxel-volume"}}}}};
 }
 bool MetrologyAlignmentHostFeature::AttachHost(const HostFeatureContext &context) {
     return m_impl->AttachHost(context);
@@ -755,4 +1065,35 @@ std::optional<AlignmentSnapshot> MetrologyAlignmentHostFeature::GetResult(
 std::optional<AlignmentArchive> MetrologyAlignmentHostFeature::GetArchive(
     const DataRevisionRef &ref) const {
     return m_impl->GetArchive(ref);
+}
+std::optional<AlignmentReferenceSnapshot> MetrologyAlignmentHostFeature::GetReference(
+    const DataRevisionRef &ref) const {
+    return m_impl->GetReference(ref);
+}
+
+std::optional<AlignmentDeviationSnapshot> MetrologyAlignmentHostFeature::GetDeviation(const DataRevisionRef &ref) const {
+    return m_impl->GetDeviation(ref);
+}
+
+std::optional<AlignmentDeviationSelection> MetrologyAlignmentHostFeature::GetDeviationSample(
+    const DataRevisionRef &ref, std::uint64_t vertex) const {
+    return m_impl->GetDeviationSample(ref,vertex);
+}
+
+std::optional<InspectionSnapshot> MetrologyAlignmentHostFeature::GetInspection(const DataRevisionRef &ref) const {
+    return m_impl->GetInspection(ref);
+}
+MetrologyReportResult MetrologyAlignmentHostFeature::GetReport(const MetrologyReportRequest &request) const {
+    return m_impl->GetReport(request);
+}
+std::optional<VoxelVolumeSnapshot> MetrologyAlignmentHostFeature::GetVoxelVolume(const DataRevisionRef &ref) const {
+    return m_impl->GetVoxelVolume(ref);
+}
+
+std::optional<AlignmentSceneVertex> MetrologyAlignmentHostFeature::GetSceneVertex(const std::string &part,bool reference,std::uint64_t vertex) const {
+    return m_impl->GetSceneVertex(part,reference,vertex);
+}
+
+std::optional<AlignmentSceneItem> MetrologyAlignmentHostFeature::GetSceneItem(const std::string &part,const std::string &item) const {
+    return m_impl->GetSceneItem(part,item);
 }

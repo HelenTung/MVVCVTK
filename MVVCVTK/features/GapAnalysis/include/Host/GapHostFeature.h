@@ -12,7 +12,7 @@ enum class GapHostAction {
     Start,
     Overlay,
     Exit,
-    SetDisplay // owner thread 的短显示命令，不接收完成回调；失败保留原显示。
+    SetDisplay // owner thread 的短显示命令；失败保留原显示。
 };
 
 struct GapHostStartParams {
@@ -60,7 +60,9 @@ public:
     bool DetachHost() override;
     bool OnHostTick() override;
 
-    bool SendRequest(
+    // 拒绝不回调；Accepted 恰好一次 owner 回调，短命令可同步完成。
+    // Exit 在视图解绑完成后兑现；Stop/Detach 使未完成退出以失败终态收口。
+    GapAdmission SendRequest(
         GapHostRequest request,
         GapHostCallback onComplete = nullptr);
     GapHostState GetState() const;

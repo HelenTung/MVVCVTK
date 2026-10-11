@@ -75,7 +75,7 @@ bool ReferenceDataSource::DetachHost()
 {
     // 临时输入派生的测试参考/掩码须由本生产者退休；仍有消费者时保留状态以便重试。
     if (m_data && !m_resultScopes.Clear(*m_data)) return false;
-    m_data.reset(); m_views.reset(); m_sceneCommit.reset(); m_sceneGraph = {}; m_sceneOrder.clear();
+    m_data.reset(); m_views.reset();
     return true;
 }
 QJsonObject ReferenceDataSource::GetViewTransforms()
@@ -179,28 +179,6 @@ QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef so
         {"voxelCount",QString::number(selected)},{"gridCount",QString::number(total)},
         {"volumeMM3",selected*grid.spacing[0]*grid.spacing[1]*grid.spacing[2]},
         {"binaryMaskSha256",QString::fromLatin1(hash.result().toHex())}};
-}
-QJsonObject ReferenceDataSource::GetPublishedGraph()
-{
-    if (!m_data) return {};
-    const auto graph = m_data->GetDataGraph();
-    if (!graph.view) return {};
-    if (m_sceneCommit == graph.commitId) return m_sceneGraph;
-    QJsonArray nodes;
-    // 只读取不可变修订的元信息；不复制体素或网格，不按绘制帧重新查询。
-    for (const auto& data : graph.view->GetDataQuery({}).data) {
-        const auto ref = GetRefText(data->self);
-        if (!m_sceneOrder.count(ref)) m_sceneOrder[ref] = m_sceneOrder.size()+1;
-        QJsonArray parents;
-        for (const auto& input : data->inputs) if (!parents.contains(GetRefText(input.source))) parents.append(GetRefText(input.source));
-        nodes.append(QJsonObject{{"ref", ref}, {"type", QString::fromStdString(data->type.name)}, {"parents", parents},
-            {"producer", data->provenance ? QString::fromStdString(data->provenance->producerId) : QString()},
-            {"operation", data->provenance ? QString::fromStdString(data->provenance->operationId) : QString()},
-            {"isVolume", data->type == DataTypes::imageGrid3D}, {"order", QString::number(m_sceneOrder.at(ref))}});
-    }
-    m_sceneCommit = graph.commitId;
-    m_sceneGraph = {{"commitId", QString::number(graph.commitId)}, {"nodes", nodes}};
-    return m_sceneGraph;
 }
 ReferenceInput ReferenceDataSource::LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh)
 {

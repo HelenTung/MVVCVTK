@@ -451,13 +451,13 @@ bool GetRenderRetryValid()
     probe.isRenderSent = true;
     if (coordinator.FlushOnOwnerTick(true)
             != HostFrameCoordinator::FlushStatus::Completed
-        || coordinator.GetCommittedEpoch() != 1
+        || coordinator.GetCommittedEpoch() != 2
         || probe.committedDataVersion != 2
         || probe.renderAttemptCount != 2
         || probe.completionCount != 1
         || static_cast<std::size_t>(std::count(
             probe.events.begin(), probe.events.end(), "stage-view-a"))
-            != stageCount) {
+            != stageCount + 1) {
         return false;
     }
 
@@ -488,7 +488,7 @@ bool GetRenderRetryValid()
         && thrownProbe.completionCount == 1
         && static_cast<std::size_t>(std::count(
             thrownProbe.events.begin(), thrownProbe.events.end(),
-            "stage-view-a")) == thrownStageCount;
+            "stage-view-a")) == thrownStageCount + 1;
 }
 
 bool GetStopPreemptionValid()
@@ -602,7 +602,7 @@ bool GetDisplayBatchValid()
     if (!coordinator.SendDisplayComplete(ready, [&](bool value) { completed.push_back(value ? 2 : -2); })) return false;
     probe.isRenderSent = true;
     if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
-        || completed != std::vector<int>{1}) return false;
+        || coordinator.GetCommittedEpoch() != 2 || completed != std::vector<int>{1, 2}) return false;
     return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
         && completed == std::vector<int>{1, 2};
 }
@@ -803,32 +803,30 @@ bool GetCorrelationIntentValid()
 
 int main()
 {
-    const bool isValid = GetSequenceValid()
-        && GetLatestWinsValid()
-        && GetFrozenBatchValid()
-        && GetFeatureTickVisibleInSameFrameValid()
-        && GetFailureBeforeCommitValid()
-        && GetThrownPhaseRetryValid()
-        && GetUnchangedCompletionValid()
-        && GetRenderRetryValid()
-        && GetStopPreemptionValid()
-        && GetUpdateOnlyValid()
-        && GetWorkSignalValid()
-        && GetCallbackStopValid()
-        && GetInputValidationValid()
-        && GetDisplayBatchValid()
-        && GetDisplayReentryValid()
-        && GetDisplayPendingValid()
-        && GetDisplayDecisionValid()
-        && GetDisplayFailureValid()
-        && GetRenderStopValid()
-        && GetDisplayCapacityValid()
-        && GetDisplayApplyFailureValid()
-        && GetDisplayUnchangedValid()
-        && GetDisplayReentryBounded()
-        && GetCorrelationIntentValid();
-    std::cout << (isValid
-        ? "PASS: Host frame coordinator protocol\n"
-        : "FAIL: Host frame coordinator protocol\n");
-    return isValid ? 0 : 1;
+    bool passed=true;
+    if (!GetSequenceValid()) { std::cerr << "FAILED: GetSequenceValid\n"; passed=false; }
+    if (!GetLatestWinsValid()) { std::cerr << "FAILED: GetLatestWinsValid\n"; passed=false; }
+    if (!GetFrozenBatchValid()) { std::cerr << "FAILED: GetFrozenBatchValid\n"; passed=false; }
+    if (!GetFeatureTickVisibleInSameFrameValid()) { std::cerr << "FAILED: GetFeatureTickVisibleInSameFrameValid\n"; passed=false; }
+    if (!GetFailureBeforeCommitValid()) { std::cerr << "FAILED: GetFailureBeforeCommitValid\n"; passed=false; }
+    if (!GetThrownPhaseRetryValid()) { std::cerr << "FAILED: GetThrownPhaseRetryValid\n"; passed=false; }
+    if (!GetUnchangedCompletionValid()) { std::cerr << "FAILED: GetUnchangedCompletionValid\n"; passed=false; }
+    if (!GetRenderRetryValid()) { std::cerr << "FAILED: GetRenderRetryValid\n"; passed=false; }
+    if (!GetStopPreemptionValid()) { std::cerr << "FAILED: GetStopPreemptionValid\n"; passed=false; }
+    if (!GetUpdateOnlyValid()) { std::cerr << "FAILED: GetUpdateOnlyValid\n"; passed=false; }
+    if (!GetWorkSignalValid()) { std::cerr << "FAILED: GetWorkSignalValid\n"; passed=false; }
+    if (!GetCallbackStopValid()) { std::cerr << "FAILED: GetCallbackStopValid\n"; passed=false; }
+    if (!GetInputValidationValid()) { std::cerr << "FAILED: GetInputValidationValid\n"; passed=false; }
+    if (!GetDisplayBatchValid()) { std::cerr << "FAILED: GetDisplayBatchValid\n"; passed=false; }
+    if (!GetDisplayReentryValid()) { std::cerr << "FAILED: GetDisplayReentryValid\n"; passed=false; }
+    if (!GetDisplayPendingValid()) { std::cerr << "FAILED: GetDisplayPendingValid\n"; passed=false; }
+    if (!GetDisplayDecisionValid()) { std::cerr << "FAILED: GetDisplayDecisionValid\n"; passed=false; }
+    if (!GetDisplayFailureValid()) { std::cerr << "FAILED: GetDisplayFailureValid\n"; passed=false; }
+    if (!GetRenderStopValid()) { std::cerr << "FAILED: GetRenderStopValid\n"; passed=false; }
+    if (!GetDisplayCapacityValid()) { std::cerr << "FAILED: GetDisplayCapacityValid\n"; passed=false; }
+    if (!GetDisplayApplyFailureValid()) { std::cerr << "FAILED: GetDisplayApplyFailureValid\n"; passed=false; }
+    if (!GetDisplayUnchangedValid()) { std::cerr << "FAILED: GetDisplayUnchangedValid\n"; passed=false; }
+    if (!GetDisplayReentryBounded()) { std::cerr << "FAILED: GetDisplayReentryBounded\n"; passed=false; }
+    if (!GetCorrelationIntentValid()) { std::cerr << "FAILED: GetCorrelationIntentValid\n"; passed=false; }
+    return passed ? 0 : 1;
 }

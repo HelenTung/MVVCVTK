@@ -33,7 +33,7 @@ void AlignmentOverlay::SetOverlayState(const FeatureOverlayState &state) {
 }
 vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     const AlignmentMatrix &sourceToTarget, const std::vector<AlignmentGeometry> &geometries,
-    const AlignmentRecipe &recipe, double axisLength, const std::vector<double>* modelVertices) {
+    const AlignmentRecipe &recipe, double axisLength, const std::vector<double>* modelVertices,bool showFrame,std::function<void()> check) {
     using namespace AlignmentMath;
     if (!Rigid(sourceToTarget) || !std::isfinite(axisLength) || axisLength <= 0)
         return {};
@@ -52,7 +52,7 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
         colors->InsertNextTypedTuple(color.data());
     };
     const Vec origin = Transform(inverse, {});
-    for (int axis = 0; axis < 3; ++axis) {
+    if(showFrame) for (int axis = 0; axis < 3; ++axis) {
         Vec p{};
         p[axis] = axisLength;
         std::array<unsigned char, 3> color{90, 90, 90};
@@ -60,6 +60,7 @@ vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
         add(origin, Transform(inverse, p), color);
     }
     for (const auto &g : geometries) {
+        if(check)check();
         const auto center = Vector(g.sourceCenter), normal = Vector(g.sourceDirection);
         if (g.kind == AlignmentGeometryKind::Point) {
             // 拟合/约束位置用点标识，不把每个对应点伪装成一个坐标十字。

@@ -49,18 +49,21 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
 ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeterminationHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
-    panel->SetNotice("全局自动表面测定先按背景/材料灰度饱和节点再定位；显式阈值缺省范围取当前输入灰度范围；阈值也留空时估计背景/材料峰。当前只开放生产模式，高级业务模式接口预留。定位稳定性不等于计量不确定度。");
+    panel->SetNotice("选择体数据后，未提供初始阈值时采用当前灰度范围中值；背景/材料灰度也可显式指定。业务继续执行真实的表面定位和质量检查，定位稳定性不等于计量不确定度。");
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"minimumObjectVoxels":"0"})");
     {
         panel->AttachAction("GlobalAutomatic", parameters, [panel, feature](auto id, const auto& params) {
             SurfaceDeterminationStartParams start;
             start.targetViews = GetAllViews();
             start.modelUnit = "mm";
-            if (const auto source = panel->GetSession()->GetImageDescriptor()) start.sourceVolume = source->dataRevision;
+            const auto source = panel->GetSession()->GetImageDescriptor();
+            if (!source) throw std::invalid_argument("请先选择体数据输入");
+            start.sourceVolume = source->dataRevision;
             if (params.contains("componentSelection")) start.componentSelection = GetEnum<SurfaceComponentSelection>(params, "componentSelection", {
                 {"Largest", SurfaceComponentSelection::Largest}, {"Seeded", SurfaceComponentSelection::Seeded}, {"All", SurfaceComponentSelection::All}});
-            if (params.contains("initialIsoValue") && !params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
             if (params.contains("materialRange") && !params["materialRange"].isNull()) start.materialRange = GetArray<double, 2>(params["materialRange"]);
+            const auto range = start.materialRange.value_or(source->scalarRange);
+            start.initialIsoValue = GetInputNumber(params, "initialIsoValue", range[0] * 0.5 + range[1] * 0.5);
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
             if (!params["roiModelBounds"].isNull()) {
                 const auto source = panel->GetSession()->GetImageDescriptor();
@@ -69,18 +72,13 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                     params["roiModelBounds"], QJsonValue(), "Surface analysis region", true);
             }
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
-            SurfaceDeterminationRequest request; request.action = SurfaceDeterminationAction::Start; request.start = start;
+            SurfaceStartRequest request{start};
             const QPointer<ModulePanel> owner(panel);
             const auto admission = feature->SendRequest(std::move(request), [owner, feature, id](SurfaceDeterminationResult result) {
                 if (!owner) return;
                 auto summary = GetSurface(feature);
                 summary["status"] = static_cast<int>(result.status);
                 summary["message"] = QString::fromStdString(result.message);
-                const auto snapshot = feature->GetSurfaceSnapshot();
-                if (result.status == SurfaceResultStatus::Succeeded && snapshot && GetDataRevisionRefValid(snapshot->meshRevision)
-                    && snapshot->purpose == SurfaceTaskPurpose::Determine && feature->GetResultValidity(snapshot->dataRevision).canMeasure)
-                    owner->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
-                else owner->GetContext().workflow.SetSurfaceInput({}, {});
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
                     : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed", summary);
             });
@@ -88,21 +86,24 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
         }, TestPolicy::Compute, true);
     }
-    for (const auto& action : std::vector<std::pair<QString, SurfaceDeterminationAction>>{
-        {"Stop", SurfaceDeterminationAction::Stop}, {"Visibility", SurfaceDeterminationAction::SetVisibility}, {"Clear", SurfaceDeterminationAction::Clear}, {"ClearPreview", SurfaceDeterminationAction::ClearPreview}}) {
+    for (const QString action : {QString("Stop"), QString("Visibility"), QString("Clear"), QString("ClearPreview")}) {
         QJsonObject defaults;
-        if (action.second == SurfaceDeterminationAction::SetVisibility) defaults = {{"isVisible", true}};
-        if (action.second == SurfaceDeterminationAction::Stop) defaults = {{"targetRequestId", "0"}};
-        panel->AttachAction(action.first, defaults, [panel, feature, action](auto id, const auto& params) {
-            SurfaceDeterminationRequest request; request.action = action.second;
-            if (request.action == SurfaceDeterminationAction::SetVisibility) request.isVisible = GetBool(params, "isVisible");
-            if (request.action == SurfaceDeterminationAction::Stop) request.targetRequestId = GetId(params["targetRequestId"]);
-            const auto admission = feature->SendRequest(std::move(request));
-            if (action.second == SurfaceDeterminationAction::Clear && admission.status == SurfaceAdmissionStatus::Accepted)
-                panel->GetContext().workflow.SetSurfaceInput({}, {});
-            panel->SetComplete(id, admission.status == SurfaceAdmissionStatus::Accepted ? "Accepted" : "Rejected",
-                {{"admission", static_cast<int>(admission.status)}});
-        }, action.second == SurfaceDeterminationAction::Stop ? TestPolicy::Stop : TestPolicy::Change);
+        if (action == "Visibility") defaults = {{"isVisible", true}};
+        if (action == "Stop") defaults = {{"targetRequestId", "0"}};
+        panel->AttachAction(action, defaults, [panel, feature, action](auto id, const auto& params) {
+            SurfaceDeterminationRequest request = SurfaceClearRequest{};
+            if (action == "Visibility") request = SurfaceVisibilityRequest{GetBool(params, "isVisible")};
+            else if (action == "Stop") request = SurfaceStopRequest{GetId(params["targetRequestId"])};
+            else if (action == "ClearPreview") request = SurfaceClearPreviewRequest{};
+            const QPointer<ModulePanel> owner(panel);
+            const auto admission = feature->SendRequest(std::move(request), [owner, id](SurfaceDeterminationResult result) {
+                if (owner) owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
+                    : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed",
+                    {{"requestId", QString::number(result.requestId)}, {"message", QString::fromStdString(result.message)}});
+            });
+            panel->SetAdmission(id, admission.status == SurfaceAdmissionStatus::Accepted,
+                {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
+        }, action == "Stop" ? TestPolicy::Stop : TestPolicy::Change);
     }
     for (const QString destination : {QString("Display"), QString("Gap"), QString("Part")})
         panel->AttachAction("CopyIsoTo" + destination, {}, [panel, feature, destination](auto id, const auto&) {
@@ -164,6 +165,17 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
 #endif
     panel->observeInBackground = true;
     panel->onObserve = [panel, feature] {
+        const auto image = panel->GetSession()->GetImageDescriptor();
+        if (image) {
+            auto* form = panel->GetParameterEditor("GlobalAutomatic");
+            auto range = image->scalarRange;
+            try {
+                const auto requested = form->GetField("materialRange")->GetValue();
+                if (!requested.isNull()) range = GetArray<double,2>(requested);
+            } catch (const std::exception&) { /* 未完成的手工输入留给提交校验。 */ }
+            form->GetField("initialIsoValue")->SetDefaultValue(range[0] * 0.5 + range[1] * 0.5);
+            form->GetField("materialRange")->SetDefaultValue(GetValues(image->scalarRange));
+        }
         auto summary = GetSurface(feature);
         const auto state = feature->GetState();
         const auto snapshot = feature->GetSurfaceSnapshot();
@@ -186,8 +198,6 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement
             || state.stage == SurfaceDeterminationStage::TopologyValidation || state.stage == SurfaceDeterminationStage::Committing || state.stage == SurfaceDeterminationStage::Stopping;
-        if (measured) panel->GetContext().workflow.SetSurfaceInput(snapshot->sourceRevision, snapshot->meshRevision, snapshot->resolvedParams.initialIsoValue);
-        else panel->GetContext().workflow.SetSurfaceInput({}, {});
         panel->SetState(summary);
     };
     panel->onStop = [panel] { panel->SendAction("Stop", {{"targetRequestId", "0"}}); };
