@@ -108,6 +108,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"GlobalAutomatic", "全局自动表面测定"},
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
+        {"MeasurementSelection", "读取有效计量选区"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
         {"SetEnabled", "设置旋转启用状态"}, {"Rotate", "旋转模型"},
         {"ExportSequentialPlanesTemplate", "导出顺序平面对齐模板"}, {"ExportPlaneTwoHolesTemplate", "导出一面两孔对齐模板"},
@@ -376,7 +377,7 @@ QString GetFlowText(const QJsonObject& record)
         {"TemplateExported", "参考模板已导出，请填写测量选区与名义约束"},
         {"ReferencePublished", "名义参考已导入，下一步保存对齐方案"}, {"ArchiveExported", "对齐归档已导出"},
         {"FullyDetermined", "对齐操作完成，约束充分"}, {"Underconstrained", "约束不足"}, {"Degenerate", "几何退化"},
-        {"Conflicting", "约束或版本冲突"}, {"Stale", "结果已过期"}};
+        {"Conflicting", "约束或版本冲突"}, {"NotConverged", "对齐未收敛，质量验收未通过"}, {"Stale", "结果已过期"}};
     QStringList parts{"#" + record["operationId"].toString(), GetModuleText(module) + " · " + GetActionText(module, action)};
     if (record["duplicateCompletion"].toBool()) parts << "异常：收到重复完成通知";
     else if (!record["isTerminal"].toBool() && record.contains("progress"))

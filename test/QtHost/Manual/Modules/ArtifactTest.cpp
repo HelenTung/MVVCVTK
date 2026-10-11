@@ -67,9 +67,9 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
                 if (!descriptor) throw std::invalid_argument("未加载输入");
                 prepare.source = descriptor->dataRevision;
             } else { prepare.source = GetRef(p["source"]); prepare.inputMode = ArtifactInputMode::ExplicitRevision; }
-            prepare.processingRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["processingMask"], "Artifact processingRoi");
-            prepare.protectionRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["protectionMask"], "Artifact protectionRoi");
-            prepare.qualityRoi = CreateInputRoi(*panel->GetSession(), prepare.source, QJsonValue(), p["materialMask"], "Artifact qualityRoi");
+            prepare.processingRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["processingMask"], "Artifact processingRoi", false);
+            prepare.protectionRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["protectionMask"], "Artifact protectionRoi", false);
+            prepare.qualityRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["materialMask"], "Artifact qualityRoi", false);
             if (!p["timeoutMs"].isNull()) prepare.timeoutMs = GetInt(p, "timeoutMs");
             if (combination != "Diffusion") {
                 const auto r = p["ring"].toObject();

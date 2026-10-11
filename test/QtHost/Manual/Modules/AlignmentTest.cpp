@@ -58,6 +58,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             : result.status == AlignmentStatus::Underconstrained ? "Underconstrained"
             : result.status == AlignmentStatus::Degenerate ? "Degenerate"
             : result.status == AlignmentStatus::Conflicting ? "Conflicting"
+            : result.status == AlignmentStatus::NotConverged ? "NotConverged"
             : result.status == AlignmentStatus::Stale ? "Stale" : "Failed";
         owner->SetComplete(id, status, summary);
     };

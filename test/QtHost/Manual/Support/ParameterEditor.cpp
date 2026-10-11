@@ -15,6 +15,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QVBoxLayout>
 #include <QSet>
 #include <QSignalBlocker>
@@ -345,6 +348,17 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
     }
     if (value.isArray()) {
         const auto array = value.toArray();
+        const bool indexList = m_key == "vertexIds" || m_key == "sourceTriangles" || m_key == "referenceTriangles" || m_key == "triangleIds";
+        if (indexList && array.size()>128) {
+            auto* layout = new QVBoxLayout(m_body); layout->setContentsMargins(0,0,0,0);
+            auto* count = new QLabel(QString("批量索引：%1 项；完整数组保留，可整体编辑。").arg(array.size()),m_body);
+            auto* input = new QPlainTextEdit(m_body); input->setObjectName("bulkIndices");
+            input->setLineWrapMode(QPlainTextEdit::NoWrap); input->setMaximumHeight(120);
+            input->setPlainText(QString::fromUtf8(QJsonDocument(array).toJson(QJsonDocument::Compact)));
+            layout->addWidget(count); layout->addWidget(input); m_input=input;
+            connect(input,&QPlainTextEdit::textChanged,this,[this]{NotifyEdited();});
+            return;
+        }
         m_isList = !m_listItem && (IsList(m_key) || array.isEmpty() || (!array.first().isDouble() && !array.first().isString()));
         if (m_isList) {
             auto* layout = new QVBoxLayout(m_body); layout->setContentsMargins(0,0,0,0); layout->setSpacing(6);
@@ -476,7 +490,14 @@ QJsonValue ParameterEditor::GetValue() const
         }
         return value;
     }
-    if (m_type == QJsonValue::Array) { QJsonArray value; for (const auto& row : m_rows) value.append(row.second->GetValue()); return value; }
+    if (m_type == QJsonValue::Array) {
+        if (auto* input=qobject_cast<QPlainTextEdit*>(m_input)) {
+            QJsonParseError error; const auto document=QJsonDocument::fromJson(input->toPlainText().toUtf8(),&error);
+            if (error.error!=QJsonParseError::NoError || !document.isArray()) throw std::invalid_argument("批量索引必须为完整 JSON 数组");
+            return document.array();
+        }
+        QJsonArray value; for (const auto& row : m_rows) value.append(row.second->GetValue()); return value;
+    }
     if (auto* input = qobject_cast<QComboBox*>(m_input)) return input->currentData().toString();
     if (auto* input = qobject_cast<QCheckBox*>(m_input)) return input->isChecked();
     const auto text = static_cast<QLineEdit*>(m_input)->text();
@@ -496,7 +517,7 @@ void ParameterEditor::SetPatch(const QJsonObject& patch)
 }
 ParameterEditor* ParameterEditor::GetField(const QString& key) const { const auto it = m_fields.find(key); return it == m_fields.end() ? nullptr : it->second; }
 ParameterEditor* ParameterEditor::GetElement(int index) const { return index >= 0 && index < static_cast<int>(m_rows.size()) ? m_rows[index].second : nullptr; }
-int ParameterEditor::GetCount() const { return static_cast<int>(m_rows.size()); }
+int ParameterEditor::GetCount() const { return qobject_cast<QPlainTextEdit*>(m_input) ? GetValue().toArray().size() : static_cast<int>(m_rows.size()); }
 bool ParameterEditor::GetHasInputs() const
 {
     const auto bound = GetBoundParameters(m_module, m_action);

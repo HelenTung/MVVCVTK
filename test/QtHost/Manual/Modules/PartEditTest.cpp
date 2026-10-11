@@ -64,10 +64,10 @@ void AttachPartEditActions(ModulePanel* panel, std::shared_ptr<PartSegmentationH
             request.expectedLabelMap = GetText(p, "expectedLabelMap") == "current" ? feature->GetState().labelMap : GetRef(p["expectedLabelMap"]);
             request.expectedCatalogRevision = GetText(p, "expectedCatalogRevision") == "current" ? catalog->catalogRevision : GetId(p["expectedCatalogRevision"]);
             if (operation != "Undo" && operation != "Redo") {
-                request.scope.editRoi = CreateInputRoi(*panel->GetSession(), feature->GetState().sourceRevision,
-                    p["extent"], p["roiMask"], "Part edit region");
-                request.scope.protectionRoi = CreateInputRoi(*panel->GetSession(), feature->GetState().sourceRevision,
-                    QJsonValue(), p["protectionMask"], "Part protection region");
+                request.scope.editRoi = panel->GetContext().workflow.createInputRoi(feature->GetState().sourceRevision,
+                    p["extent"], p["roiMask"], "Part edit region", false);
+                request.scope.protectionRoi = panel->GetContext().workflow.createInputRoi(feature->GetState().sourceRevision,
+                    QJsonValue(), p["protectionMask"], "Part protection region", false);
                 request.scope.protectedParts = GetParts(p["protectedParts"], *catalog);
             }
             if (operation == "Paint" || operation == "Erase") {

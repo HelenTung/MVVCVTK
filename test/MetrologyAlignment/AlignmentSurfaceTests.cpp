@@ -255,9 +255,36 @@ void SurfaceGrouping() {
     catch (const std::runtime_error &) { cancelled = true; }
     Check(cancelled, "surface reduction observes cancellation");
 }
+void SelectedCellQuality() {
+    auto work=Work();
+    const std::vector<double> vertices{0,0,0, 1,0,0, 0,1,0, 10,0,0, 10,0,0, 10,0,0};
+    const std::vector<std::uint64_t> triangles{0,1,2, 3,4,5};
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(vertices,triangles);
+    work.recipe.surfaceFit->sourceRegion=AlignmentRegion{work.input.mesh,{0,1,2},{}};
+    const auto selected=AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);
+    double area=0;for(const auto& p:selected.points)area+=p.area;
+    Check(selected.points.size()==3 && std::abs(area-.5)<numericTolerance,
+          "outside-selection degenerate triangles cannot invalidate selected surface area");
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,0, 1,0,0, 0,1,0},
+        std::vector<std::uint64_t>{0,1,2, 0,0,1},std::vector<MeshAttribute>{},"RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",1,{1,0}}});
+    work.recipe.requiresMeasurementQuality=true;
+    const auto quality=AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);
+    area=0;for(const auto& p:quality.points)area+=p.area;
+    Check(std::abs(area-.5)<numericTolerance,"explicitly invalid measured cells do not add area or block valid selected cells");
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,0, 1,0,0, 0,1,0},
+        std::vector<std::uint64_t>{0,1,2, 0,0,1});
+    bool rejected=false;try{(void)AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);}catch(const std::invalid_argument&){rejected=true;}
+    Check(rejected,"selected degenerate triangle without explicit invalid quality is still rejected");
+    work.mesh=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,0, 1,0,0, 0,1,0},
+        std::vector<std::uint64_t>{0,1,2},std::vector<MeshAttribute>{},"RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",2,{1,1}}});
+    rejected=false;try{(void)AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);}catch(const std::invalid_argument&){rejected=true;}
+    Check(rejected,"invalid measured cell quality schema is rejected");
+}
 } // namespace
 int main() {
-    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); MultiscaleAlignment(); SurfaceGrouping(); }
+    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); MultiscaleAlignment(); SurfaceGrouping(); SelectedCellQuality(); }
     catch (const std::exception &error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures == 0 ? 0 : 1;
 }

@@ -6,6 +6,7 @@
 #include <QPointer>
 #include <QFile>
 #include <QTextStream>
+#include <cmath>
 namespace Manual {
 namespace {
 QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature)
@@ -67,7 +68,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (!params["roiModelBounds"].isNull()) {
                 const auto source = panel->GetSession()->GetImageDescriptor();
                 if (!source) throw std::invalid_argument("表面范围需要源图像");
-                start.analysisRoi = CreateInputRoi(*panel->GetSession(), source->dataRevision,
+                start.analysisRoi = panel->GetContext().workflow.createInputRoi(source->dataRevision,
                     params["roiModelBounds"], QJsonValue(), "Surface analysis region", true);
             }
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
@@ -144,6 +145,46 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->SetComplete(id, "Observed", {{"mesh", GetRefText(snapshot->meshRevision)}, {"source", GetRefText(snapshot->sourceRevision)},
             {"samples", samples}, {"totalPoints", QString::number(points.size())}});
     }, TestPolicy::Read);
+    panel->AttachAction("MeasurementSelection", {{"minSupportRatio", .5}, {"maxLocalizationSigma", .5}, {"maxSurfaceFitResidual", 1.}},
+        [panel, feature](auto id, const auto& p) {
+            const auto snapshot = feature->GetSurfaceSnapshot();
+            const auto input = panel->GetSession()->GetImageDescriptor();
+            if (!snapshot || !input || snapshot->sourceRevision != input->dataRevision
+                || !snapshot->points || !snapshot->triangleIndices || !snapshot->triangleValidity)
+                throw std::invalid_argument("当前输入没有完整的测量网格与三角形质量信息");
+            const auto& points = *snapshot->points;
+            const auto& triangles = *snapshot->triangleIndices;
+            if (triangles.size()%3 || snapshot->triangleValidity->size()!=triangles.size()/3)
+                throw std::invalid_argument("三角形质量信息与拓扑不一致");
+            const auto support = GetNumber(p, "minSupportRatio"), sigma = GetNumber(p, "maxLocalizationSigma"), residual = GetNumber(p, "maxSurfaceFitResidual");
+            if (support<0 || support>1 || sigma<0 || residual<0) throw std::invalid_argument("测量质量范围无效");
+            QJsonArray vertices, selectedTriangles;
+            std::vector<bool> valid(points.size(), false), used(points.size(), false);
+            for (std::size_t i=0; i<points.size(); ++i) {
+                const auto& point=points[i];
+                valid[i]=static_cast<int>(point.flags)==0 && point.validSupportRatio>=support
+                    && point.estimatedLocalizationSigma<=sigma && point.fitResidual<=residual;
+            }
+            std::size_t degenerate=0, rejectedQuality=0;
+            for (std::size_t i=0; i<triangles.size()/3; ++i) {
+                const auto a=triangles[3*i], b=triangles[3*i+1], c=triangles[3*i+2];
+                if (a>=points.size() || b>=points.size() || c>=points.size()) throw std::invalid_argument("测量网格索引越界");
+                const auto& x=points[a].positionModel; const auto& y=points[b].positionModel; const auto& z=points[c].positionModel;
+                const std::array<double,3> u{y[0]-x[0],y[1]-x[1],y[2]-x[2]}, v{z[0]-x[0],z[1]-x[1],z[2]-x[2]};
+                const std::array<double,3> cross{u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};
+                const auto areaSquared=cross[0]*cross[0]+cross[1]*cross[1]+cross[2]*cross[2];
+                if (!std::isfinite(areaSquared) || areaSquared<=0) { ++degenerate; continue; }
+                if (!valid[a] || !valid[b] || !valid[c] || !(*snapshot->triangleValidity)[i]) { ++rejectedQuality; continue; }
+                selectedTriangles.append(QString::number(i));
+                used[a]=used[b]=used[c]=true;
+            }
+            for (std::size_t i=0; i<used.size(); ++i) if (used[i]) vertices.append(QString::number(i));
+            panel->SetComplete(id, "Observed", {{"source", GetRefText(snapshot->sourceRevision)}, {"mesh", GetRefText(snapshot->meshRevision)},
+                {"vertexIds", vertices}, {"triangleIds", selectedTriangles}, {"totalVertices", QString::number(points.size())},
+                {"selectedVertices", QString::number(vertices.size())}, {"totalTriangles", QString::number(triangles.size()/3)},
+                {"selectedTriangles", QString::number(selectedTriangles.size())}, {"degenerateTriangles", QString::number(degenerate)},
+                {"rejectedQualityTriangles", QString::number(rejectedQuality)}, {"criteria", p}});
+        }, TestPolicy::Read);
     panel->AttachAction("ExportComparison", {{"outputPath",""}}, [panel,feature](auto id,const auto& p){
         auto snapshot=feature->GetSurfaceSnapshot();
         if(!snapshot)snapshot=feature->GetPreviewSnapshot();

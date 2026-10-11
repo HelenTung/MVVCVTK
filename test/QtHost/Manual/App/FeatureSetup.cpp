@@ -2,6 +2,7 @@
 #include "FeatureSetup.h"
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/InputRoiSource.h"
 #if defined(MANUAL_ROI)
 #include "Host/RoiEditingHostFeature.h"
 #endif
@@ -70,6 +71,11 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
 #else
     unavailable("Crop");
 #endif
+    auto inputRoi = std::make_shared<InputRoiSource>(); attach(inputRoi);
+    context.workflow.createInputRoi = [inputRoi](DataRevisionRef source, const QJsonValue& extent,
+        const QJsonValue& mask, const char* name, bool physical) {
+        return inputRoi->Create(source, extent, mask, name, physical);
+    };
 #if defined(MANUAL_GAP)
     GapHostConfig gapConfig; gapConfig.defaultStart.targetViews = GetAllViews();
     gapConfig.inputViews = GetAllViews();

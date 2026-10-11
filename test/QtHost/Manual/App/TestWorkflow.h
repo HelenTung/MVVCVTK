@@ -52,6 +52,8 @@ public:
     std::function<QJsonObject()> getViewTransforms;
     std::function<DataRevisionRef()> getPartLabels;
     std::function<std::optional<MeasurementSurface>()> getMeasurementSurface;
+    std::function<std::optional<DataRevisionRef>(DataRevisionRef, const QJsonValue&, const QJsonValue&,
+        const char*, bool)> createInputRoi;
 private:
     bool m_isClosing = false;
     std::uint64_t m_busyId = 0;

@@ -116,6 +116,21 @@ QJsonObject GetComplete(TestWindow& window, std::uint64_t id, const QString& sta
     if (!status.isEmpty()) Check(result["status"].toString() == status, ("expected status " + status).toStdString().c_str());
     return result;
 }
+QStringList GetExpectedStatuses(const QJsonObject& step)
+{
+    QStringList statuses;
+    if (step.contains("expectStatuses")) {
+        if (step.contains("expectStatus") || !step["expectStatuses"].isArray())
+            throw std::invalid_argument("expectStatuses 必须为数组且不能与 expectStatus 同时指定");
+        for (const auto value : step["expectStatuses"].toArray()) {
+            if (!value.isString() || value.toString().isEmpty() || statuses.contains(value.toString()))
+                throw std::invalid_argument("预期终态必须是非空且不重复的字符串");
+            statuses.append(value.toString());
+        }
+    } else statuses.append(GetText(step, "expectStatus"));
+    if (statuses.isEmpty() || statuses.contains(QString{})) throw std::invalid_argument("必须指定非空预期终态");
+    return statuses;
+}
 bool GetEnabled(TestWindow& window, const QString& module)
 {
     const auto* panel = window.GetModule(module);
@@ -294,6 +309,18 @@ void CheckUiAndRecords(TestWindow& window)
     Check(form->GetValue().toObject()["quality"].isNull(), "optional field returns null when unspecified");
     view->SetParameterPatch("Set", {{"viewId", "primary-3d"}, {"quality", QJsonValue()}, {"axes", QJsonValue()}, {"iso", QJsonValue()}});
     view->SelectAction("Reset");
+
+    QJsonArray bulkIds;
+    for (int i=0; i<1024; ++i) bulkIds.append(QString::number(9007199254740992ULL+static_cast<unsigned>(i)));
+    ParameterEditor bulk("Alignment","SaveRecipe","vertexIds",bulkIds,bulkIds);
+    Check(bulk.findChildren<QPlainTextEdit*>().size()==1 && bulk.GetCount()==1024
+        && bulk.GetValue()==QJsonValue(bulkIds), "bulk measurement IDs preserve every exact integer string in one editor");
+    auto* bulkInput=bulk.findChild<QPlainTextEdit*>("bulkIndices"); bulkInput->setPlainText("[");
+    bool malformedRejected=false;
+    try { (void)bulk.GetValue(); } catch(const std::invalid_argument&) { malformedRejected=true; }
+    Check(malformedRejected,"malformed bulk indices are rejected instead of being truncated");
+    const auto statuses=GetExpectedStatuses({{"expectStatuses",QJsonArray{"FullyDetermined","NotConverged"}}});
+    Check(statuses.contains("NotConverged") && !statuses.contains("Rejected"),"real quality outcomes do not accept unrelated failures");
 
     TestRecordWriter records;
     QStringList events;
@@ -1933,7 +1960,10 @@ void StartSequence(TestWindow& window, const QString& path)
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
-        if(!value.toObject()["generateKnownTransformReference"].toBool())(void)getWaitMilliseconds(value.toObject());
+        if(!value.toObject()["generateKnownTransformReference"].toBool()) {
+            (void)getWaitMilliseconds(value.toObject());
+            (void)GetExpectedStatuses(value.toObject());
+        }
     if (script["viewsVisible"].isBool()) window.SetViewsVisible(script["viewsVisible"].toBool());
     for (const auto value : script["steps"].toArray()) {
         const auto step = value.toObject();
@@ -1947,8 +1977,7 @@ void StartSequence(TestWindow& window, const QString& path)
             throw std::invalid_argument("当前构建未启用计量对齐");
 #endif
         }
-        const auto expected = GetText(step, "expectStatus");
-        if (expected.isEmpty()) throw std::invalid_argument("expectStatus 不能为空");
+        const auto expected = GetExpectedStatuses(step);
         const auto timeout=getWaitMilliseconds(step);
         if (step["viewsVisible"].isBool()) window.SetViewsVisible(step["viewsVisible"].toBool());
         if (step["waitAvailable"].toBool()) {
@@ -1994,7 +2023,9 @@ void StartSequence(TestWindow& window, const QString& path)
             });
             cancellation.start(static_cast<int>(delay));
         }
-        const auto record = GetComplete(window, id, expected, static_cast<int>(timeout));
+        const auto record = GetComplete(window, id, {}, static_cast<int>(timeout));
+        // 合法终态集合只描述可观测结局；实际质量状态仍完整保留在 record 中。
+        Check(expected.contains(record["status"].toString()), ("expected terminal status " + expected.join(" / ")).toStdString().c_str());
         switching.stop(); cancellation.stop();
         if (GetText(step, "module") == "View" && GetText(step, "action") == "Set"
             && params["mode"].isString() && record["status"] == "Succeeded") {
