@@ -29,6 +29,21 @@ if(TARGET MVVCVTK::RoiEditing)
 endif()
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE manual_head OUTPUT_STRIP_TRAILING_WHITESPACE)
+# 工作树的 HEAD 通常只保存符号引用；提交更新分支 ref 时也必须重新生成版本标识。
+execute_process(COMMAND git symbolic-ref -q HEAD WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    OUTPUT_VARIABLE manual_head_ref OUTPUT_STRIP_TRAILING_WHITESPACE)
+foreach(manual_git_ref IN ITEMS HEAD "${manual_head_ref}" packed-refs)
+    if(manual_git_ref STREQUAL "")
+        continue()
+    endif()
+    execute_process(COMMAND git rev-parse --git-path "${manual_git_ref}"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" OUTPUT_VARIABLE manual_git_path
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    cmake_path(ABSOLUTE_PATH manual_git_path BASE_DIRECTORY "${PROJECT_SOURCE_DIR}" NORMALIZE)
+    if(EXISTS "${manual_git_path}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${manual_git_path}")
+    endif()
+endforeach()
 file(GLOB_RECURSE manual_inputs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../Automation/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/../Automation/*.cpp")
 list(APPEND manual_inputs
