@@ -1,6 +1,7 @@
 // 测试用途：通过孔隙页面测试分析请求、统计结果、叠加显示与退出收口。
 #include "ModuleFactories.h"
 #include "Support/ColorSegmentInput.h"
+#include "Support/ParameterEditor.h"
 #include "Host/GapHostFeature.h"
 #include <QPointer>
 namespace Manual {
@@ -15,22 +16,28 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
 {
     auto* panel = new ModulePanel(context, "Gap", parent);
     panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。结果区显示孔隙体积、孔隙率等统计与数据修订。");
-    panel->AttachAction("Start", GetJson(R"({"isoMode":"AbsoluteValue","dataRangeRatio":0.5,"absoluteIsoValue":0.5,"backgroundMean":0,"materialMean":1,"filter":false,"minVolumeMM3":0})"),
+    panel->AttachAction("Start", GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0})"),
         [panel, feature](auto id, const auto& params) {
+            const auto input = panel->GetSession()->GetImageDescriptor();
+            if (!input) throw std::invalid_argument("请先选择体数据输入");
             GapHostStartParams start;
             start.targetViews = GetAllViews();
             start.surface.isoMode = GetEnum<GapIsoMode>(params, "isoMode", {{"AbsoluteValue", GapIsoMode::AbsoluteValue}, {"DataRangeRatio", GapIsoMode::DataRangeRatio}});
-            start.surface.absoluteIsoValue = GetNumber(params, "absoluteIsoValue");
+            start.surface.absoluteIsoValue = GetInputNumber(params, "absoluteIsoValue", GetScalarMidpoint(*input));
             start.surface.dataRangeRatio = GetNumber(params, "dataRangeRatio");
-            start.surface.backgroundMean = static_cast<float>(GetNumber(params, "backgroundMean"));
-            start.surface.materialMean = static_cast<float>(GetNumber(params, "materialMean"));
+            start.surface.backgroundMean = static_cast<float>(GetInputNumber(params, "backgroundMean", input->scalarRange[0]));
+            start.surface.materialMean = static_cast<float>(GetInputNumber(params, "materialMean", input->scalarRange[1]));
+            const auto requestedSurface = start.surface;
             start.voidParams.isFilterEnabled = GetBool(params, "filter");
             start.voidParams.minVolumeMM3 = GetNumber(params, "minVolumeMM3");
             GapHostRequest request; request.action = GapHostAction::Start; request.start = start;
             const QPointer<ModulePanel> owner(panel);
-            const auto accepted = feature->SendRequest(std::move(request), [owner, id](GapHostResult result) {
+            const auto accepted = (feature->SendRequest(std::move(request), [owner, id, requestedSurface](GapHostResult result) {
                 if (!owner) return;
                 auto summary = GetStatistics(result.statistics);
+                summary["isoMode"] = requestedSurface.isoMode == GapIsoMode::AbsoluteValue ? "AbsoluteValue" : "DataRangeRatio";
+                if (requestedSurface.isoMode == GapIsoMode::AbsoluteValue) summary["absoluteIsoValue"] = requestedSurface.absoluteIsoValue;
+                else summary["dataRangeRatio"] = requestedSurface.dataRangeRatio;
                 summary["status"] = static_cast<int>(result.status);
                 summary["message"] = QString::fromStdString(result.message);
                 summary["source"] = GetRefText(result.sourceRevision);
@@ -41,10 +48,9 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                     : result.status == GapResultStatus::SucceededWithDisplayFailure ? "SucceededWithDisplayFailure"
                     : result.status == GapResultStatus::SourceChanged ? "SourceChanged" : "Failed";
                 owner->SetComplete(id, status, summary);
-            });
+            }).status == GapAdmissionStatus::Accepted);
             panel->SetAdmission(id, accepted);
         }, TestPolicy::Compute, true);
-    auto pendingExit = std::make_shared<std::uint64_t>(0);
     panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
         "segments":[],"displayStyle":"Constant","opacityRange":[0.15,1]})"),
@@ -68,7 +74,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 {"Constant",GapDisplayStyle::Constant},{"Inclined",GapDisplayStyle::Inclined},{"InverseInclined",GapDisplayStyle::InverseInclined}});
             if(p.contains("opacityRange"))display.opacityRange=GetArray<double,2>(p["opacityRange"]);
             GapHostRequest request; request.action = GapHostAction::SetDisplay; request.display = display;
-            const bool isAccepted = feature->SendRequest(std::move(request));
+            const bool isAccepted = (feature->SendRequest(std::move(request)).status == GapAdmissionStatus::Accepted);
             const auto state = feature->GetState();
             panel->SetComplete(id, isAccepted ? "Succeeded" : "Rejected",
                 {{"isOverlayVisible", state.isOverlayVisible}, {"range", GetValues(state.display.range)},
@@ -76,20 +82,20 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                     {"segmentCount",static_cast<int>(state.display.segments.size())},{"resultSet", GetRefText(state.resultSet)}});
         }, TestPolicy::View);
     for (const bool exit : {false, true}) panel->AttachAction(exit ? "Exit" : "Overlay", {},
-        [panel, feature, pendingExit, exit](auto id, const auto&) {
+        [panel, feature, exit](auto id, const auto&) {
             GapHostRequest request; request.action = exit ? GapHostAction::Exit : GapHostAction::Overlay;
-            const bool accepted = feature->SendRequest(std::move(request));
-            if (accepted && exit && feature->GetState().isExitPending) {
-                *pendingExit = id; panel->SetAdmission(id, true);
-            } else panel->SetComplete(id, accepted ? "Succeeded" : "Rejected",
-                {{"isOverlayVisible", feature->GetState().isOverlayVisible}});
+            const QPointer<ModulePanel> owner(panel);
+            const auto admission = feature->SendRequest(std::move(request), [owner, id, exit](GapHostResult result) {
+                if (owner) owner->SetComplete(id, result.status == GapResultStatus::Succeeded
+                    ? (exit ? "Exited" : "Succeeded") : "Failed",
+                    {{"requestId", QString::number(result.requestId)}, {"message", QString::fromStdString(result.message)}});
+            });
+            panel->SetAdmission(id, admission.status == GapAdmissionStatus::Accepted,
+                {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
         }, exit ? TestPolicy::Stop : TestPolicy::View);
     panel->onStop = [panel] { panel->SendAction("Exit", {}); };
-    panel->onObserve = [panel, feature, pendingExit] {
+    panel->onObserve = [panel, feature] {
         const auto state = feature->GetState();
-        if (*pendingExit && !state.isExitPending) {
-            panel->SetComplete(*pendingExit, "Exited"); *pendingExit = 0;
-        }
         auto summary = GetStatistics(state.statistics);
         summary["analysisState"] = static_cast<int>(state.analysisState);
         summary["isExitPending"] = state.isExitPending;
@@ -100,6 +106,12 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         summary["source"] = GetRefText(state.sourceRevision);
         summary["resultSet"] = GetRefText(state.resultSet);
         const auto input = panel->GetSession()->GetImageDescriptor();
+        if (input) {
+            auto* form = panel->GetParameterEditor("Start");
+            form->GetField("absoluteIsoValue")->SetDefaultValue(GetScalarMidpoint(*input));
+            form->GetField("backgroundMean")->SetDefaultValue(input->scalarRange[0]);
+            form->GetField("materialMean")->SetDefaultValue(input->scalarRange[1]);
+        }
         summary["isBusy"] = state.analysisState == GapAnalysisState::Running || state.isExitPending;
         summary["hasResult"] = GetDataRevisionRefValid(state.resultSet);
         summary["isCurrent"] = input && input->dataRevision == state.sourceRevision && state.analysisState == GapAnalysisState::Succeeded;

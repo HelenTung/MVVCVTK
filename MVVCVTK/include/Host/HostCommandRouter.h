@@ -3,6 +3,8 @@
 #include "Host/Types/HostRequestTypes.h"
 
 #include <functional>
+// 私有命令路由的完成类型；普通调用方只使用 HostResultCallback。
+using HostCompleteCallback = std::function<void(bool isSuccess)>;
 #include <memory>
 #include <optional>
 

@@ -1088,6 +1088,8 @@ bool RenderTaskChannel::Stop()
         auto& channel = *m_impl->channel;
         if (channel.isStopped) return true;
         channel.isStopped = true;
+        state.readyChannels.erase(std::remove_if(state.readyChannels.begin(), state.readyChannels.end(),
+            [&](const auto& weak) { return weak.expired() || weak.lock() == m_impl->channel; }), state.readyChannels.end());
         discardedRequest = std::move(channel.pending);
         channel.pending.reset();
         channel.isQueued = false;
@@ -1220,10 +1222,27 @@ RenderTaskAdmission RenderResourceCoordinator::Impl::StartProduct(const std::sha
         || !request.inputUse.GetIsPublished()) return RenderTaskAdmission::Unavailable;
     std::shared_ptr<SharedProductBuild> build;
     bool isJoined = false;
+    std::vector<std::shared_ptr<RenderTaskChannel>> obsoleteExecutions;
+    struct StopObsolete final {
+        std::vector<std::shared_ptr<RenderTaskChannel>>& channels;
+        ~StopObsolete() { for (const auto& channel : channels) if (channel) channel->Stop(); }
+    } stopObsolete{obsoleteExecutions};
     std::optional<RenderTaskRequest> discarded;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->isStopping || channel->isStopped) return RenderTaskAdmission::Stopping;
+        // 替换消费请求时，立即移除没有其他 View 等待的构建。
+        for (auto it = state->builds.begin(); it != state->builds.end();) {
+            auto& waiters = (*it)->waiters;
+            waiters.erase(std::remove_if(waiters.begin(), waiters.end(), [&](const auto& waiter) {
+                return !waiter.GetIsCurrent() || waiter.channel.lock() == channel;
+            }), waiters.end());
+            if (waiters.empty()) {
+                obsoleteExecutions.push_back((*it)->execution);
+                it = state->builds.erase(it);
+            }
+            else ++it;
+        }
         for (const auto& existing : state->builds) {
             const auto key = std::get_if<decltype(request.key)>(&existing->key);
             if (key && onEqual(*key, request.key)
@@ -1255,6 +1274,7 @@ RenderTaskAdmission RenderResourceCoordinator::Impl::StartProduct(const std::sha
                 onComplete(std::move(result), elapsed);
             }});
     }
+    for (const auto& obsolete : obsoleteExecutions) if (obsolete) obsolete->Stop();
     if (isJoined) return RenderTaskAdmission::Replaced;
     RenderTaskRequest task;
     task.requestRevision = request.requestRevision;

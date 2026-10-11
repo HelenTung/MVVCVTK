@@ -274,6 +274,7 @@ bool GetGraphAcyclic(
     const GraphState& state,
     const std::vector<DataSnapshot>& outputs)
 {
+    if (outputs.empty()) return true;
     std::map<DataRevisionRef, const DataRevision*> graph;
     for (const auto& entry : state.revisions) {
         if (entry.second.metadata) graph.emplace(entry.first, entry.second.metadata.get());
@@ -590,6 +591,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
         std::optional<DataEntityId> lifetimeScope;
         std::vector<std::shared_ptr<const void>> resources;
         std::vector<DataPreparedResource> preparedResources;
+        DataLifetimePolicy lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
     };
 
     std::shared_ptr<const GraphState> validationState;
@@ -601,7 +603,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
     std::vector<FrozenDraft> drafts;
     try {
         drafts.reserve(transaction.outputs.size());
+        std::map<DataEntityId, DataLifetimePolicy> scopePolicies;
         for (auto& output : transaction.outputs) {
+            if (output.lifetimePolicy != DataLifetimePolicy::OwnerRetirement
+                && output.lifetimePolicy != DataLifetimePolicy::ExplicitRetirement)
+                return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid lifetime policy.");
             if (!GetDataEntityIdValid(output.entityId)
                 || !GetDataTypeIdValid(output.type)
                 || !output.payload) {
@@ -627,6 +633,11 @@ DataCommitResult DataGraphStore::SetDataCommit(
                     DataCommitFailure::PayloadInvalid,
                     message.empty() ? "Payload validation failed." : message);
             }
+            if (output.lifetimeScope) {
+                const auto policy = scopePolicies.emplace(*output.lifetimeScope, output.lifetimePolicy);
+                if (!policy.second && policy.first->second != output.lifetimePolicy)
+                    return GetRejected(DataCommitFailure::InvalidTransaction, "Conflicting scope lifetime policies.");
+            }
             auto resources = payload->GetDataResources();
             if (output.lifetimeScope && !GetDataEntityIdValid(*output.lifetimeScope)) {
                 return GetRejected(DataCommitFailure::InvalidTransaction, "Invalid lifetime scope.");
@@ -644,7 +655,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 std::move(payload),
                 std::move(output.provenance),
                 output.lifetimeScope,
-                std::move(resources), std::move(output.preparedResources) });
+                std::move(resources), std::move(output.preparedResources), output.lifetimePolicy });
         }
     }
     catch (...) {
@@ -843,7 +854,15 @@ DataCommitResult DataGraphStore::SetDataCommit(
                 }
                 if (update.binding == roiCatalogBinding) {
                     const auto catalog = update.target ? getData(*update.target) : DataSnapshot{};
-                    if (!catalog || catalog->type != DataTypes::roiCatalog)
+                    // 只有同事务退役旧目录时才能解除绑定；普通编辑仍要求有效目录。
+                    const auto previous = current->GetDataBinding(roiCatalogBinding);
+                    const bool clearsRetiredCatalog = !update.target && previous && previous->target
+                        && std::any_of(transaction.retireScopes.begin(), transaction.retireScopes.end(),
+                            [&](const auto& scope) {
+                                return std::find(scope.expectedRevisions.begin(), scope.expectedRevisions.end(),
+                                    *previous->target) != scope.expectedRevisions.end();
+                            });
+                    if (!clearsRetiredCatalog && (!catalog || catalog->type != DataTypes::roiCatalog))
                         return GetRejected(DataCommitFailure::PayloadInvalid,"ROI catalog binding requires a catalog revision.");
                 }
                 if (update.target
@@ -902,19 +921,21 @@ DataCommitResult DataGraphStore::SetDataCommit(
             }
         }
         // 2. 依赖、绑定与本事务输入共同检查；集合内相互依赖不阻塞自己的退役。
-        for (const auto& entry : current->revisions) {
-            if (retiredRefs.count(entry.first)) continue;
-            if (entry.second.scope && !entry.second.scope->GetIsPublished()) continue;
-            for (const auto& input : entry.second.metadata->inputs) {
-                if (retiredRefs.count(input.source)) result.blockers.push_back({entry.first, "DerivedRevision"});
+        if (!retiredRefs.empty()) {
+            for (const auto& entry : current->revisions) {
+                if (retiredRefs.count(entry.first)) continue;
+                if (entry.second.scope && !entry.second.scope->GetIsPublished()) continue;
+                for (const auto& input : entry.second.metadata->inputs) {
+                    if (retiredRefs.count(input.source)) result.blockers.push_back({entry.first, "DerivedRevision"});
+                }
             }
-        }
-        for (const auto& binding : current->bindings) {
-            auto target = binding.second.target;
-            const auto update = std::find_if(transaction.bindings.begin(), transaction.bindings.end(),
-                [&binding](const DataBindingUpdate& item) { return item.binding == binding.first; });
-            if (update != transaction.bindings.end()) target = update->target;
-            if (target && retiredRefs.count(*target)) result.blockers.push_back({ *target, binding.first });
+            for (const auto& binding : current->bindings) {
+                auto target = binding.second.target;
+                const auto update = std::find_if(transaction.bindings.begin(), transaction.bindings.end(),
+                    [&binding](const DataBindingUpdate& item) { return item.binding == binding.first; });
+                if (update != transaction.bindings.end()) target = update->target;
+                if (target && retiredRefs.count(*target)) result.blockers.push_back({ *target, binding.first });
+            }
         }
         for (const auto& draft : drafts) {
             if (draft.lifetimeScope && current->lifetimes.count(*draft.lifetimeScope)) {
@@ -951,7 +972,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
             }
             auto snapshot = std::make_shared<const DataRevision>(DataRevision{
                 ref, draft.type, draft.inputs, draft.payload, draft.provenance,
-                scope ? scope->id : DataEntityId{}, scope });
+                scope ? scope->id : DataEntityId{}, scope, draft.lifetimePolicy });
             RevisionEntry entry{ snapshot, {}, scope, {} };
             for (const auto& resource : draft.resources) entry.resources.push_back(resource);
             if (scope) {

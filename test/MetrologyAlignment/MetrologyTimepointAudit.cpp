@@ -194,7 +194,7 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
     std::cout<<"SURFACE_START "<<scan.id<<'\n'<<std::flush;
     Surface surface; const auto start=std::chrono::steady_clock::now(); surface.source=Load(data,scan,m.inputLimit);
     const auto loaded=std::chrono::steady_clock::now();
-    SurfaceDeterminationRequest request; request.action=SurfaceDeterminationAction::Start;
+    SurfaceStartRequest request;
     request.start=SurfaceDeterminationStartParams{}; request.start->sourceVolume=surface.source; request.start->modelUnit="mm";
     request.start->resultScope=scan.id; request.start->componentSelection=SurfaceComponentSelection::All;
     auto completion=std::make_shared<SurfaceCompletion>();

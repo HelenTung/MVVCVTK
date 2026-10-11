@@ -449,13 +449,8 @@ class MetrologyAlignmentHostFeature::Impl final {
                 if (request.action == AlignmentAction::Restore) {
                     if (!request.archive || !request.input ||
                         !AlignmentData::GetInputValid(*request.input) || request.recipe ||
-                        request.archive->schemaVersion != 1 ||
-                        (request.archive->algorithmVersion != "metrology-alignment-1" &&
-                         request.archive->algorithmVersion != "metrology-alignment-2" &&
-                         request.archive->algorithmVersion != "metrology-alignment-3") ||
-                        (request.archive->algorithmVersion == "metrology-alignment-1" && request.archive->recipe.prealignment) ||
-                        (request.archive->algorithmVersion != "metrology-alignment-3" &&
-                         request.archive->recipe.surfaceFit && !request.archive->recipe.surfaceFit->scales.empty()) ||
+                        request.archive->schemaVersion != AlignmentArchive{}.schemaVersion ||
+                        request.archive->algorithmVersion != AlignmentArchive{}.algorithmVersion ||
                         !AlignmentMath::Rigid(request.archive->sourceToTarget) ||
                         !GetDataRevisionRefValid(request.restoredNominal) ||
                         request.input->unit != request.archive->recipe.unit)

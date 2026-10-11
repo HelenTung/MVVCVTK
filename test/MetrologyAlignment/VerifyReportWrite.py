@@ -5,6 +5,7 @@ import colorsys
 import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 
 
@@ -197,7 +198,11 @@ def verify_report(json_path, csv_path, fixture=False):
                 a,b = tolerance
                 if a <= value <= b: return [60,180,95]
                 return hue((value-low)/(a-low) if value<a else (value-b)/(high-b))
-            index = min(255,math.floor((value-low)/(high-low)*256))
+            # 锁定 VTK 9.4.2 的 LUT 先计算 scale 再乘值；交换除乘顺序会使边界索引差一格。
+            # 依据 vtkLookupTable.cxx 的 vtkLookupShiftAndScale/vtkLinearIndexLookupMain，保留逐 RGB 精确断言。
+            span = high-low
+            scale = 0.0 if span < sys.float_info.min*256 else 256/span
+            index = min(255,math.floor((value-low)*scale))
             return hue(index/255)
         require(display["legendRgb"] == [color(low+(high-low)*(i/256)) for i in range(257)], "Independent colorbar calculation mismatch")
         require(display["colorMapVersion"] == "deviation-hue-loop-2" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")

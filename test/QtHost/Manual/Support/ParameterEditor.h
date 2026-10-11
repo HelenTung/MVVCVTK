@@ -7,11 +7,13 @@
 #include <functional>
 #include <map>
 #include <vector>
+#include "UiText.h"
 class QVBoxLayout;
 class QGridLayout;
 class QCheckBox;
 class QLabel;
 class QPushButton;
+class QTabWidget;
 namespace Manual {
 class ParameterEditor final : public QWidget {
 public:
@@ -26,6 +28,8 @@ public:
     bool GetHasInputs() const;
     void SetFieldApplicability(QJsonObject fields);
     void SetAppliedBoolean(QJsonValue value, const QString& context, const QString& unavailableReason = {});
+    void SetDefaultValue(const QJsonValue& value);
+    void SetReferenceChoices(const ParameterChoices& choices);
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
     std::function<void()> onEdited;
@@ -52,6 +56,9 @@ private:
     QWidget* m_body = nullptr;
     QWidget* m_input = nullptr;
     QVBoxLayout* m_rowLayout = nullptr;
+    QTabWidget* m_groups = nullptr;
+    std::map<QString, QWidget*> m_groupPages;
+    QStringList m_groupOrder;
     std::map<QString, ParameterEditor*> m_fields;
     std::vector<std::pair<QWidget*, ParameterEditor*>> m_rows;
 };

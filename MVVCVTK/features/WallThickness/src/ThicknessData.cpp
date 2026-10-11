@@ -27,7 +27,6 @@ bool SetType(TrustedDataPort &data)
                                   r.field.samples && r.field.neighbors && r.field.nodes &&
                                   GetGridGeometryValid(r.field.geometry) && r.archive.schemaVersion == 3 &&
                                   r.field.samples->size() == r.field.neighbors->size() &&
-                                  r.field.subdivisions > 0 &&
                                   ThicknessAlgorithm::GetParamsValid(r.archive.params) &&
                                   ThicknessAlgorithm::GetEvaluationValid(r.archive.evaluation) &&
                                   ThicknessAlgorithm::GetConfigValid(r.archive.limits);

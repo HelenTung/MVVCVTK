@@ -433,6 +433,12 @@ void ScopeRestoreAndCommitFault() {
     restore.archive = archive;
     restore.input = secondInput;
     restore.restoredNominal = f.recipe.nominalData;
+    for (const auto* version : {"metrology-alignment-1", "metrology-alignment-2"}) {
+        auto obsolete = restore;
+        if (obsolete.archive) obsolete.archive->algorithmVersion = version;
+        Check(f.feature->SendRequest(obsolete).status == AlignmentAdmissionStatus::InvalidRequest,
+              "restore rejects obsolete versions even without new optional parameters");
+    }
     AlignmentResult restored;
     Check(f.feature->SendRequest(restore, [&](AlignmentResult result) { restored = result; })
                       .status == AlignmentAdmissionStatus::Accepted &&

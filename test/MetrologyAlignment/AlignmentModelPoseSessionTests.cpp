@@ -56,7 +56,7 @@ void Run() {
     reload.geometry.direction={0,-1,0,1,0,0,0,0,1};reload.metadata.identity.datasetId="pose-session";
     reload.metadata.source.kind=ImageSourceKind::Memory;reload.metadata.source.uri="memory://pose-session";reload.voxels.resize(4096,0);
     for(int z=4;z<12;++z)for(int y=4;y<12;++y)for(int x=4;x<12;++x)reload.voxels[x+16*(y+16*z)]=100;
-    bool loaded=false;CHECK(session.SendRequest(std::move(reload),[&](bool v){loaded=v;}));wait([&]{return loaded;});for(int i=0;i<3;++i)tick();
+    bool loaded=false;CHECK(session.SendRequest(std::move(reload),[&](HostResult result){loaded=result.isSucceeded;}).status==HostAdmissionStatus::Accepted);wait([&]{return loaded;});for(int i=0;i<3;++i)tick();
     const auto primary=probe->context.data->GetPrimaryImage();CHECK(primary && primary->data);
     const auto source=std::dynamic_pointer_cast<const ImageGrid3DPayload>(primary->data->payload);CHECK(source);
     const auto *bytes=source->GetValues().get();const auto imageTime=primary->image->GetMTime();const auto descriptor=session.GetImageDescriptor();

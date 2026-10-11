@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Preset = 'vs2026-x64',
     [string]$PackageRevision,
@@ -697,7 +697,9 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (-not [regex]::IsMatch($Preset, '^[A-Za-z0-9][A-Za-z0-9._-]*$')) {
     throw "Unsafe CMake preset name: $Preset"
 }
-$buildRoot = Join-Path $repoRoot "out\build\$Preset"
+$buildMode = if ($SkipTests) { "products" } else { "tested" }
+$buildRoot = Join-Path $repoRoot "out\sdk-build\$Preset-$buildMode"
+. (Join-Path $repoRoot 'tools/MVVCVTK.FeatureBuild.ps1')
 $stageBase = Join-Path $repoRoot 'out\stage'
 $verifyBase = if ([string]::IsNullOrWhiteSpace($VerifyRoot)) {
     Join-Path (Split-Path -Parent $repoRoot) 'MVVCVTK-sdk-verify'
@@ -767,12 +769,18 @@ if ((Get-IsPathWithin $stage $originalLocation) -or
 try {
     Set-Location -LiteralPath $repoRoot
     Clear-BuildEnv
-    Start-Command $script:cmakePath @(
-        '--preset', $Preset,
-        '-B', $buildRoot,
-        "-DMVVCVTK_DEPS_ROOT=$depsRootPath",
-        "-DMVVCVTK_DEFX_ROOT=$defxRootPath"
-    )
+    $testFlag = if ($SkipTests) { 'OFF' } else { 'ON' }
+    $configure = @('--preset', $Preset, '-B', $buildRoot,
+        "-DMVVCVTK_DEPS_ROOT=$depsRootPath", "-DMVVCVTK_DEFX_ROOT=$defxRootPath",
+        "-DMVVCVTK_BUILD_TESTING=$testFlag", '-DMVVCVTK_BUILD_QT_TESTING=OFF',
+        '-DMVVCVTK_BUILD_QT_MANUAL=OFF', '-DMVVCVTK_REAL_AUDIT_MANIFEST=',
+        '-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=')
+    $features = Get-MVVCVTKFeatureSwitches $repoRoot
+    foreach ($feature in $features.Keys) {
+        $enabled = if ($feature -in @('OrthogonalCrop', 'GapAnalysis')) { 'ON' } else { 'OFF' }
+        $configure += "-D$($features[$feature])=$enabled"
+    }
+    Start-Command $script:cmakePath $configure
     $null = Get-BuildInfo $buildRoot
     foreach ($configuration in @('Debug', 'Release')) {
         if ($SkipTests) {

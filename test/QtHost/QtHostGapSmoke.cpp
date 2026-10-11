@@ -132,6 +132,9 @@ int main(int argc, char* argv[])
     const GapHostStartParams gapStart = BuildGapStart();
     std::unique_ptr<VtkAppHostSession> session;
     std::shared_ptr<GapHostFeature> gap;
+    int exitCallbackCount = 0;
+    std::uint64_t exitRequestId = 0;
+    GapHostResult exitResult;
     QTimer exitPoll(&widget);
     exitPoll.setInterval(5);
     QTimer callbackGrace(&widget);
@@ -223,8 +226,9 @@ int main(int argc, char* argv[])
         &widget,
         [&]() {
             sendExit(
-                callbackCount == 1,
-                callbackCount == 1 ? "ok" : "Gap callback count");
+                callbackCount == 1 && exitCallbackCount == 1
+                    && exitResult.requestId == exitRequestId && exitResult.status == GapResultStatus::Succeeded,
+                callbackCount == 1 && exitCallbackCount == 1 ? "ok" : "Gap callback count");
         });
 
     QObject::connect(
@@ -241,7 +245,7 @@ int main(int argc, char* argv[])
                 && state.commitId == completedCommit
                 && state.resultSet == completedResultSet
                 && !state.isViewActive
-                && !state.isExitPending) {
+                && !state.isExitPending && exitCallbackCount == 1) {
                 exitPoll.stop();
                 callbackGrace.start();
             }
@@ -307,7 +311,7 @@ int main(int argc, char* argv[])
         reload.voxels.assign(voxelCount, 100.0f);
         reload.voxels[2 + sideLength * (2 + sideLength * 2)] = 0.0f;
 
-        const bool isReloadAccepted = session->SendRequestResult(
+        const bool isReloadAccepted = (session->SendRequest(
             std::move(reload),
             [&](HostResult result) {
                 const bool isLoaded = result.isSucceeded
@@ -321,7 +325,7 @@ int main(int argc, char* argv[])
                     GapHostRequest request;
                     request.action = GapHostAction::Start;
                     request.start = gapStart;
-                    const bool isGapAccepted = gap->SendRequest(
+                    const bool isGapAccepted = (gap->SendRequest(
                         std::move(request),
                         [&](GapHostResult result) {
                             ++callbackCount;
@@ -361,19 +365,29 @@ int main(int argc, char* argv[])
                             show.action = GapHostAction::Overlay;
                             GapHostRequest exit;
                             exit.action = GapHostAction::Exit;
-                            if (!gap->SendRequest(std::move(hide))
-                                || !gap->SendRequest(std::move(show))
-                                || !gap->SendRequest(std::move(exit))) {
+                            if (!(gap->SendRequest(std::move(hide)).status == GapAdmissionStatus::Accepted)
+                                || !(gap->SendRequest(std::move(show)).status == GapAdmissionStatus::Accepted)) {
                                 sendExit(false, "Gap Overlay/Exit");
                                 return;
                             }
+                            const auto exitAdmission = gap->SendRequest(std::move(exit), [&](GapHostResult completed) {
+                                if (std::this_thread::get_id() != ownerThread || gap->GetState().isExitPending)
+                                    completed.status = GapResultStatus::Failed;
+                                exitResult = std::move(completed);
+                                ++exitCallbackCount;
+                            });
+                            exitRequestId = exitAdmission.requestId;
+                            if (exitAdmission.status != GapAdmissionStatus::Accepted || exitCallbackCount != 0) {
+                                sendExit(false, "Gap Exit completed before cleanup");
+                                return;
+                            }
                             exitPoll.start();
-                        });
+                        }).status == GapAdmissionStatus::Accepted);
                     if (!isGapAccepted) {
                         sendExit(false, "Gap Start admission");
                     }
                 });
-            });
+            }).status == HostAdmissionStatus::Accepted);
         if (!isReloadAccepted) {
             sendExit(false, "Reload admission");
         }

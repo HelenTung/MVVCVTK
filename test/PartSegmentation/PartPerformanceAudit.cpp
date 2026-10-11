@@ -194,7 +194,7 @@ int main(int argc, char** argv)
             Check(ready(), "Public operation timed out");
         };
         Phase load;
-        Check(session.SendRequestResult(std::move(reload), [&](HostResult r) { loaded=std::move(r); }),
+        Check((session.SendRequest(std::move(reload), [&](HostResult r) { loaded=std::move(r); }).status == HostAdmissionStatus::Accepted),
             "Reload not admitted");
         pump([&]{return loaded.has_value();},load);
         Check(loaded->isSucceeded, loaded->message.c_str());

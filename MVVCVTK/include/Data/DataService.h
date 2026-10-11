@@ -81,6 +81,7 @@ public:
         const DataLoadStageSnapshot& expectedStage,
         VtkImageGridSnapshot& published) = 0;
     virtual bool ClearLoadStage() = 0;
+    virtual void ClearRetiredLoad(const DataEntityId&) {}
 
     virtual bool ExportData(
         const VtkImageGridSnapshot& imageSnapshot,

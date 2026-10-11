@@ -398,11 +398,11 @@ int GetLifecycleFailCount()
     rejectedLoad.filePath = "missing.raw";
     int rejectedCallbackCount = 0;
     failureCount += GetCaseResult(
-        !emptySession.SendRequest(
+        !(emptySession.SendRequest(
             std::move(rejectedLoad),
-            [&rejectedCallbackCount](bool) {
+            [&rejectedCallbackCount](HostResult) {
                 ++rejectedCallbackCount;
-            })
+            }).status == HostAdmissionStatus::Accepted)
             && rejectedCallbackCount == 0,
         "Session Build failure rejects request without callback") ? 0 : 1;
 
@@ -661,11 +661,11 @@ int GetLifecycleFailCount()
     movedLoad.filePath = "missing.raw";
     int movedCallbackCount = 0;
     failureCount += GetCaseResult(
-        !moveSource.SendRequest(
+        !(moveSource.SendRequest(
             std::move(movedLoad),
-            [&movedCallbackCount](bool) {
+            [&movedCallbackCount](HostResult) {
                 ++movedCallbackCount;
-            })
+            }).status == HostAdmissionStatus::Accepted)
             && movedCallbackCount == 0
             && moveSource.GetRenderViewEndpoints().empty()
             && !moveSource.GetRenderViewEndpoint("lifecycle")
@@ -799,7 +799,7 @@ int GetLifecycleFailCount()
         HostViewResetRequest reset;
         reset.targetView.viewId = "lifecycle";
         isCrossRequestAccepted =
-            session->SendRequest(std::move(reset));
+            (session->SendRequest(std::move(reset)).status == HostAdmissionStatus::Accepted);
         isCrossAttachAccepted =
             session->AttachFeature(crossThreadFeature);
         isCrossDetachAccepted =

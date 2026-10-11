@@ -98,6 +98,8 @@ struct AppViewState final {
     VolumeTransferFunction volumeTransferFunction;
     bool isTransferAuto = true;
     double isoThreshold = 0.0;
+    // 私有补偿快照保留阈值来源，避免回滚把默认值变成显式输入。
+    bool hasExplicitIso = false;
     BackgroundColor background;
     std::array<double, 3> spacing{};
     WindowLevelParams windowLevel;
@@ -169,6 +171,9 @@ public:
 class AppDataStagePort {
 public:
     virtual ~AppDataStagePort() = default;
+    // 空输入准备只验证 owner/事务状态，不改变可见对象；提交后释放该实体的显示。
+    virtual bool GetCanClearRenderInput() const { return false; }
+    virtual bool ClearRenderInput(const DataEntityId&) noexcept { return false; }
     // Existing image participants remain source-compatible and reject mesh
     // explicitly until they implement the generic candidate protocol.
     virtual DataStageStatus StartRenderInputStage(const VtkRenderInputSnapshot& input,std::uint64_t revision) {

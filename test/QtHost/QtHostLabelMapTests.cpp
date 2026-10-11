@@ -65,12 +65,12 @@ bool Reload(
     }
     bool isComplete = false;
     bool isSucceeded = false;
-    if (!session.SendRequest(
+    if (!(session.SendRequest(
             std::move(request),
-            [&isComplete, &isSucceeded](const bool value) {
+            [&isComplete, &isSucceeded](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
                 isSucceeded = value;
                 isComplete = true;
-            })) {
+            }).status == HostAdmissionStatus::Accepted)) {
         return false;
     }
     constexpr int pollCount = 1000;

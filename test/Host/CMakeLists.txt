@@ -66,3 +66,16 @@ foreach(ruler_case IN ITEMS metrics render host state)
     add_test(NAME Ruler.${ruler_case} COMMAND mvvcvtk_ruler_tests ${ruler_case})
     SetTestRuntime(Ruler.${ruler_case} mvvcvtk_ruler_tests)
 endforeach()
+
+add_executable(atomic_file_output_tests AtomicFileOutputTests.cpp "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Internal/AtomicFileOutput.cpp")
+target_link_libraries(atomic_file_output_tests PRIVATE mvvcvtk_host_test_internal)
+SetTargetDefaults(atomic_file_output_tests)
+add_test(NAME Host.AtomicFileOutput COMMAND atomic_file_output_tests)
+SetTestRuntime(Host.AtomicFileOutput atomic_file_output_tests)
+
+# 不补 vtk_module_autoinit，验证 Host 静态库的最小消费路径。
+add_executable(host_unload_tests HostUnloadTests.cpp)
+target_link_libraries(host_unload_tests PRIVATE MVVCVTK::Host MVVCVTK::FeatureSPI)
+SetTargetDefaults(host_unload_tests)
+add_test(NAME Host.Unload COMMAND host_unload_tests)
+SetTestRuntime(Host.Unload host_unload_tests)

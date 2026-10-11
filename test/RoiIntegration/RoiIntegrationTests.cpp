@@ -54,7 +54,7 @@ bool HasInput(const DataSnapshot& data,const std::string& role,const DataRevisio
     if (!data) return false;
     return std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input) { return input.role==role && input.source==ref; });
 }
-void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
+void Run(const char* sample, double spacing, const std::array<double, 3>& origin)
 {
     const int n=sample ? 64:24; const std::size_t count=std::size_t(n)*n*n;
     HostRenderViewConfig view; view.id="primary"; view.role=HostRenderViewRole::Primary3D;
@@ -76,7 +76,7 @@ void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
         HostLoadRequest load; load.filePath=sample; load.geometry.dimensions={n,n,n};
         load.geometry.spacing={spacing,spacing,spacing}; load.geometry.origin=origin;
         load.metadata.source.kind=ImageSourceKind::RawFile; load.metadata.identity.datasetId="roi-real-region:"+std::string(sample); load.metadata.source.uri=sample;
-        Check(session.SendRequestResult(std::move(load),complete),"真实 CT RAW 加载接纳");
+        Check((session.SendRequest(std::move(load),complete).status == HostAdmissionStatus::Accepted),"真实 CT RAW 加载接纳");
     } else {
         HostReloadRequest load; load.geometry.dimensions={n,n,n}; load.geometry.spacing={.7F,1.1F,1.3F};
         load.geometry.origin={12.F,-17.F,23.F}; load.geometry.direction={0,-1,0,1,0,0,0,0,1};
@@ -86,7 +86,7 @@ void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
             const double x=double(i%n)-n*.5,y=double(i/n%n)-n*.5,z=double(i/(n*n))-n*.5;
             load.voxels[i]=float(std::sqrt(x*x+y*y+z*z)+.12*std::sin(double(i)*.73));
         }
-        Check(session.SendRequestResult(std::move(load),complete),"旋转各向异性体数据加载接纳");
+        Check((session.SendRequest(std::move(load),complete).status == HostAdmissionStatus::Accepted),"旋转各向异性体数据加载接纳");
     }
     Pump(session,[&] { return loaded; }); Check(loadResult.isSucceeded,"来源加载完成");
     const auto descriptor=session.GetImageDescriptor(); Check(bool(descriptor),"读取规范 RAS 来源描述");
@@ -203,7 +203,7 @@ void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
     double minimum=INFINITY,maximum=-INFINITY;
     for (std::size_t i=0;i<count;++i) if (Selected(i,n)) { minimum=std::min(minimum,double(originalValues[i])); maximum=std::max(maximum,double(originalValues[i])); }
     surfaceParams.initialIsoValue=(minimum+maximum)*.5;
-    SurfaceDeterminationRequest extract; extract.action=SurfaceDeterminationAction::Start; extract.start=surfaceParams;
+    SurfaceDeterminationRequest extract; extract = SurfaceStartRequest{}; std::get<SurfaceStartRequest>(extract).start=surfaceParams;
     bool surfaced=false; SurfaceDeterminationResult surfaceResult;
     Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult r) { surfaceResult=std::move(r); surfaced=true; }).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳同一凸 ROI");
     Pump(session,[&] { return surfaced; });
@@ -235,10 +235,10 @@ void Run(const char* sample, float spacing, const std::array<float, 3>& origin)
     bool selectedCrop=false;HostResult selectCropResult;
     HostDataSelectRequest selectCrop;selectCrop.dataRevision=cropResult.outputRevision;
     selectCrop.expectedBindingRevision=session.GetImageDescriptor()->bindingRevision;
-    Check(session.SendRequestResult(std::move(selectCrop),[&](HostResult value){selectCropResult=std::move(value);selectedCrop=true;}),"选择裁切结果作为 Surface 来源");
+    Check((session.SendRequest(std::move(selectCrop),[&](HostResult value){selectCropResult=std::move(value);selectedCrop=true;}).status == HostAdmissionStatus::Accepted),"选择裁切结果作为 Surface 来源");
     Pump(session,[&]{return selectedCrop;});Check(selectCropResult.isSucceeded,"裁切结果选择完成");
     surfaceParams.analysisRoi.reset();surfaceParams.sourceVolume=cropResult.outputRevision;
-    extract.start=surfaceParams;surfaced=false;surfaceResult={};
+    std::get<SurfaceStartRequest>(extract).start=surfaceParams;surfaced=false;surfaceResult={};
     Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult value){surfaceResult=std::move(value);surfaced=true;}).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳临时裁切来源");
     Pump(session,[&]{return surfaced;});auto scopedSurface=surface->GetSurfaceSnapshot();
     Check(surfaceResult.isPublished&&scopedSurface&&scopedSurface->points&&!scopedSurface->points->empty(),"临时裁切来源生成非空正式表面："+surfaceResult.message);
@@ -260,12 +260,12 @@ int main(int argc,char** argv)
     try {
         Check(argc == 1 || argc == 2 || argc == 6,
             "Usage: RoiIntegrationTests [raw64 [spacingMm originX originY originZ]]");
-        const float spacing = argc == 6 ? std::stof(argv[2]) : .1537F;
-        const std::array<float, 3> origin = argc == 6
-            ? std::array<float, 3>{std::stof(argv[3]), std::stof(argv[4]), std::stof(argv[5])}
-            : std::array<float, 3>{113.1232F,87.3016F,113.1232F};
+        const double spacing = argc == 6 ? std::stod(argv[2]) : .1537;
+        const std::array<double, 3> origin = argc == 6
+            ? std::array<double, 3>{std::stod(argv[3]), std::stod(argv[4]), std::stod(argv[5])}
+            : std::array<double, 3>{113.1232,87.3016,113.1232};
         Check(std::isfinite(spacing) && spacing > 0 && std::all_of(origin.begin(), origin.end(),
-            [](float value) { return std::isfinite(value); }), "真实样本物理几何合法");
+            [](double value) { return std::isfinite(value); }), "真实样本物理几何合法");
         Run(argc>1 ? argv[1]:nullptr, spacing, origin); return 0;
     }
     catch (const std::exception& e) { std::cerr << "[FAIL] " << e.what() << std::endl; return 1; }

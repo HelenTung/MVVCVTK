@@ -2,7 +2,7 @@ add_library(qt_feature_test_support STATIC
     App/TestWindow.cpp App/TestSession.cpp App/QtHostPump.cpp App/FeatureSetup.cpp App/TestWorkflow.cpp
     "${PROJECT_SOURCE_DIR}/test/Host/FeatureInput.cpp"
     Modules/ModulePanel.cpp Modules/DataTest.cpp Modules/ViewTest.cpp
-    Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/TestRecordWriter.cpp Support/TestResources.cpp Support/UiText.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp)
+    Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/TestRecordWriter.cpp Support/TestResources.cpp Support/UiText.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})

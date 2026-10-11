@@ -44,12 +44,12 @@ int GetExportFailCount()
     timer.targetView.viewId = "utf8-export";
     const bool isBuilt = unicodeSession.BuildSession();
     const bool isReloadSent = isBuilt
-        && unicodeSession.SendRequest(
+        && (unicodeSession.SendRequest(
             std::move(reload),
-            [&isReloadComplete, &isReloadSucceeded](const bool value) {
+            [&isReloadComplete, &isReloadSucceeded](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
                 isReloadSucceeded = value;
                 isReloadComplete = true;
-            });
+            }).status == HostAdmissionStatus::Accepted);
     const bool isTimerSet = isReloadSent
         && unicodeSession.AttachTimer(timer);
     const bool isStarted = isTimerSet && unicodeSession.Start();
@@ -70,12 +70,12 @@ int GetExportFailCount()
     }
     const bool isExportSent = isReloadSucceeded
         && !createError
-        && unicodeSession.SendRequest(
+        && (unicodeSession.SendRequest(
             std::move(exportRequest),
-            [&isExportComplete, &isExportSucceeded](const bool value) {
+            [&isExportComplete, &isExportSucceeded](HostResult hostResultValue) { const bool value = hostResultValue.isSucceeded;
                 isExportSucceeded = value;
                 isExportComplete = true;
-            });
+            }).status == HostAdmissionStatus::Accepted);
     for (int poll = 0; isExportSent && !isExportComplete
         && poll < pollCount; ++poll) {
         if (!sendTimer()) break;

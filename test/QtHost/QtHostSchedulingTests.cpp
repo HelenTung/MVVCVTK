@@ -226,9 +226,9 @@ bool TestScheduling()
             for (int y = 1; y <= 3; ++y)
                 for (int x = 1; x <= 3; ++x)
                     request.voxels[x + 5 * (y + 5 * z)] = 0.0f;
-        return session->SendRequestResult(std::move(request), [&](HostResult result) {
+        return (session->SendRequest(std::move(request), [&](HostResult result) {
             if (result.isSucceeded) ++reloads;
-        });
+        }).status == HostAdmissionStatus::Accepted);
     };
     valid &= Check(sendReload() && Wait([&] { return reloads == 1; }),
         "load completes without render");
@@ -291,9 +291,9 @@ bool TestScheduling()
     exportRequest.format = HostDataExportFormat::Raw;
     int exports = 0;
     valid &= Check(exportDirectory.isValid()
-        && session->SendRequestResult(std::move(exportRequest), [&](HostResult result) {
+        && (session->SendRequest(std::move(exportRequest), [&](HostResult result) {
             if (result.isSucceeded) ++exports;
-        }) && Wait([&] { return exports == 1; })
+        }).status == HostAdmissionStatus::Accepted) && Wait([&] { return exports == 1; })
         && !QDir(exportDirectory.path()).entryList(QDir::Files).isEmpty()
         && state->frames == hiddenFrames,
         "export wakes and writes data with all windows hidden and no drawing");
@@ -325,12 +325,12 @@ bool TestScheduling()
     gapRequest.action = GapHostAction::Start;
     gapRequest.start = gapConfig.defaultStart;
     valid &= Check(session->AttachFeature(gap)
-        && gap->SendRequest(std::move(gapRequest), [&](GapHostResult result) {
+        && (gap->SendRequest(std::move(gapRequest), [&](GapHostResult result) {
             if (result.status == GapResultStatus::Succeeded
                 || result.status == GapResultStatus::SucceededWithDisplayFailure)
                 ++gapCompletions;
             else std::cerr << "Gap result: " << result.message << '\n';
-        }) && Wait([&] { return gapCompletions == 1; }),
+        }).status == GapAdmissionStatus::Accepted) && Wait([&] { return gapCompletions == 1; }),
         "Gap worker completes without rendering");
     valid &= Check(session->DetachFeature(*gap), "Gap detach");
 #endif
@@ -354,12 +354,12 @@ bool TestScheduling()
 #if defined(MVVCVTK_TEST_SURFACE)
     auto surface = std::make_shared<SurfaceDeterminationHostFeature>();
     SurfaceDeterminationRequest surfaceRequest;
-    surfaceRequest.action = SurfaceDeterminationAction::Start;
+    surfaceRequest = SurfaceStartRequest{};
     SurfaceDeterminationStartParams surfaceStart;
     surfaceStart.targetViews.viewIds = {"a"};
     surfaceStart.method = SurfaceDeterminationMethod::GlobalAutomatic;
     surfaceStart.initialIsoValue = 50.0;
-    surfaceRequest.start = surfaceStart;
+    std::get<SurfaceStartRequest>(surfaceRequest).start = surfaceStart;
     int surfaceCompletions = 0;
     valid &= Check(session->AttachFeature(surface)
         && surface->SendRequest(std::move(surfaceRequest), [&](SurfaceDeterminationResult result) {

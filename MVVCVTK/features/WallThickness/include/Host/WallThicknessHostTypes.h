@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <variant>
 
 using ThicknessPoint = std::array<double, 3>;
 
@@ -97,15 +98,16 @@ struct ThicknessInput final
 
 enum class ThicknessBoundaryPolicy : std::uint8_t
 {
+    // 全部实际搜索方向都要求完整的局部体数据支持；不要求整网格闭合。
     Complete,
-    // 允许网格在源体素盒面上开放；只测量有完整搜索邻域的来源。
+    // 使用可用的局部支持；缺失方向可能改变最小值时仍保留未测。
     SourceExtentLocal
 };
 
 struct ThicknessParams final
 {
     double maxDistance = 0.0;
-    // 只控制显示/面积统计采样；节点积分固定为原始三角形上的 3×3 Gauss 规则。
+    // 按局部边长控制显示/面积统计采样；节点积分固定为原始三角形上的 3×3 Gauss 规则。
     double sampleSpacing = 0.0;
     // 必须显式指定，与 source 的原始存储灰度同量纲；材料为 trilinear(source) > threshold。
     std::optional<double> materialThreshold;
@@ -203,7 +205,7 @@ struct ThicknessRegion final
 struct ThicknessArchive final
 {
     std::uint32_t schemaVersion = 3;
-    std::string algorithmVersion = "wall-thickness-normal-offset-field-2";
+    std::string algorithmVersion = "wall-thickness-cuda-gray-ray-field-4";
     ThicknessInput input;
     ThicknessParams params;
     ThicknessEvaluation evaluation;
@@ -219,32 +221,34 @@ struct ThicknessSnapshot final
     std::shared_ptr<const std::vector<ThicknessNode>> nodes;
     ThicknessStatistics statistics;
     std::vector<ThicknessRegion> regions;
+    // 原始网格最大边长/显示间距的诊断上界；实际显示密度由各三角形最长边局部控制。
     std::uint32_t subdivisionCount = 0;
     bool isCurrent = false;
 };
 
-enum class ThicknessAction : std::uint8_t
-{
-    None,
-    Start,
-    Cancel,
-    Clear,
-    SetEvaluation,
-    SetDisplay,
-    SetActive,
-    SelectSample
-};
-struct ThicknessRequest final
-{
-    ThicknessAction action = ThicknessAction::None;
-    std::optional<ThicknessInput> input;
-    std::optional<ThicknessParams> params;
+struct ThicknessStartRequest final {
+    ThicknessInput input;
+    ThicknessParams params;
     std::optional<ThicknessEvaluation> evaluation;
     std::optional<ThicknessDisplay> display;
-    std::optional<DataRevisionRef> resultRevision;
-    std::optional<std::size_t> sampleIndex;
+};
+struct ThicknessCancelRequest final {
     std::uint64_t targetRequestId = 0;
 };
+struct ThicknessClearRequest final {};
+struct ThicknessEvaluationRequest final { ThicknessEvaluation evaluation; };
+struct ThicknessDisplayRequest final { ThicknessDisplay display; };
+struct ThicknessActivationRequest final {
+    DataRevisionRef resultRevision;
+    std::optional<ThicknessDisplay> display;
+};
+struct ThicknessSampleRequest final {
+    DataRevisionRef resultRevision;
+    std::size_t sampleIndex = 0;
+};
+using ThicknessRequest = std::variant<ThicknessStartRequest, ThicknessCancelRequest,
+    ThicknessClearRequest, ThicknessEvaluationRequest, ThicknessDisplayRequest,
+    ThicknessActivationRequest, ThicknessSampleRequest>;
 struct ThicknessAdmission final
 {
     ThicknessAdmissionStatus status = ThicknessAdmissionStatus::InvalidRequest;

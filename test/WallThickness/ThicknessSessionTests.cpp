@@ -61,8 +61,8 @@ Acceptance ReadCase(const char *path, const char *fieldOutput = nullptr)
         input >> v;
     for (unsigned a = 0; a < 3; ++a)
     {
-        c.volume.geometry.spacing[a] = static_cast<float>(c.exactSpacing[a]);
-        c.volume.geometry.origin[a] = static_cast<float>(c.exactOriginLps[a]);
+        c.volume.geometry.spacing[a] = c.exactSpacing[a];
+        c.volume.geometry.origin[a] = c.exactOriginLps[a];
     }
     for (auto &v : c.volume.geometry.direction)
         input >> v;
@@ -296,7 +296,7 @@ void TestSession(Acceptance c)
         Require(ready(), "Public entry completion deadline exceeded.");
     };
     bool loaded = false;
-    Require(session.SendRequest(std::move(c.volume), [&](bool ok) { loaded = ok; }),
+    Require((session.SendRequest(std::move(c.volume), [&](HostResult hostResultOk) { const bool ok = hostResultOk.isSucceeded; loaded = ok; }).status == HostAdmissionStatus::Accepted),
             "Volume reload rejected.");
     wait([&] { return loaded; });
     auto sourceRevision = session.GetImageDescriptor()->dataRevision;
@@ -351,7 +351,7 @@ void TestSession(Acceptance c)
         select.dataRevision = precise;
         select.expectedBindingRevision = session.GetImageDescriptor()->bindingRevision;
         bool selected = false, selectionOk = false;
-        Require(session.SendRequest(std::move(select), [&](bool ok) { selectionOk = ok; selected = true; }),
+        Require((session.SendRequest(std::move(select), [&](HostResult hostResultOk) { const bool ok = hostResultOk.isSucceeded; selectionOk = ok; selected = true; }).status == HostAdmissionStatus::Accepted),
                 "Exact field image selection rejected.");
         wait([&] { return selected; });
         Require(selectionOk && session.GetImageDescriptor()->dataRevision == precise &&
@@ -380,13 +380,13 @@ void TestSession(Acceptance c)
         Require(committed.status == DataCommitStatus::Succeeded, "Field material publication failed.");
     }
     SurfaceDeterminationRequest sr;
-    sr.action = SurfaceDeterminationAction::Start;
-    sr.start = SurfaceDeterminationStartParams{};
-    sr.start->targetViews.viewIds = {"thickness-0"};
-    sr.start->componentSelection = SurfaceComponentSelection::All;
-    sr.start->initialIsoValue = c.threshold;
-    sr.start->materialRange = c.materialRange;
-    sr.start->minimumObjectVoxels = c.queries.empty() ? 1 : 0;
+    sr = SurfaceStartRequest{};
+    std::get<SurfaceStartRequest>(sr).start = SurfaceDeterminationStartParams{};
+    std::get<SurfaceStartRequest>(sr).start->targetViews.viewIds = {"thickness-0"};
+    std::get<SurfaceStartRequest>(sr).start->componentSelection = SurfaceComponentSelection::All;
+    std::get<SurfaceStartRequest>(sr).start->initialIsoValue = c.threshold;
+    std::get<SurfaceStartRequest>(sr).start->materialRange = c.materialRange;
+    std::get<SurfaceStartRequest>(sr).start->minimumObjectVoxels = c.queries.empty() ? 1 : 0;
     std::optional<SurfaceDeterminationResult> determined;
     Require(surface->SendRequest(sr, [&](auto r) { determined = std::move(r); }).status ==
                 SurfaceAdmissionStatus::Accepted,
@@ -412,8 +412,8 @@ void TestSession(Acceptance c)
     std::cout << "surface points=" << mesh->points->size() << " accepted=" << accepted
               << " fitResidualMax=" << maxResidual << " localizationSigmaMax=" << maxSigma << '\n';
     ThicknessRequest request;
-    request.action = ThicknessAction::Start;
-    request.input = ThicknessInput{mesh->sourceRevision,
+    request = ThicknessStartRequest{};
+    std::get<ThicknessStartRequest>(request).input = ThicknessInput{mesh->sourceRevision,
                                    labelRevision,
                                    mesh->meshRevision,
                                    std::string(primaryVolumeBinding),
@@ -421,14 +421,14 @@ void TestSession(Acceptance c)
                                    {},
                                    {c.label},
                                    c.unit};
-    request.params = c.params;
-    request.params->materialThreshold = mesh->resolvedParams.initialIsoValue;
-    request.evaluation = c.evaluation;
+    std::get<ThicknessStartRequest>(request).params = c.params;
+    std::get<ThicknessStartRequest>(request).params.materialThreshold = mesh->resolvedParams.initialIsoValue;
+    std::get<ThicknessStartRequest>(request).evaluation = c.evaluation;
     ThicknessDisplay display;
     display.range = {0, c.params.maxDistance};
     for (int i = 0; i < 4; ++i)
         display.targetViews.viewIds.push_back("thickness-" + std::to_string(i));
-    request.display = display;
+    std::get<ThicknessStartRequest>(request).display = display;
     std::optional<ThicknessResult> completed;
     Require(wall->SendRequest(request, [&](auto r) { completed = std::move(r); }).status ==
                 ThicknessAdmissionStatus::Accepted,
@@ -482,12 +482,13 @@ void TestSession(Acceptance c)
     Require(completed->isDisplayReady, "Wall four-view display failed.");
     session.SendUpdates();
     ThicknessRequest selected;
-    selected.action = ThicknessAction::SelectSample;
-    selected.resultRevision = completed->result;
-    selected.sampleIndex = result->statistics.minimumSample;
+    selected = ThicknessSampleRequest{};
+    std::get<ThicknessSampleRequest>(selected).resultRevision = completed->result;
+    Require(result->statistics.minimumSample.has_value(), "Minimum sample is unavailable.");
+    std::get<ThicknessSampleRequest>(selected).sampleIndex = *result->statistics.minimumSample;
     Require(wall->SendRequest(selected).status == ThicknessAdmissionStatus::Accepted,
             "Sample selection failed.");
-    const auto &sample = (*result->samples)[*selected.sampleIndex];
+    const auto &sample = (*result->samples)[std::get<ThicknessSampleRequest>(selected).sampleIndex];
     const auto view = probe->context.views->GetFeaturePort("thickness-0");
     const auto world = view->GetWorldPosition(sample.source);
     Require(bool(world), "Sample world position missing.");
@@ -495,7 +496,7 @@ void TestSession(Acceptance c)
     HostSessionSetRequest cursor;
     cursor.cursor = HostCursorParams{*world, -1};
     bool positioned = false;
-    Require(session.SendRequest(std::move(cursor), [&](bool ok) { positioned = ok; }),
+    Require((session.SendRequest(std::move(cursor), [&](HostResult hostResultOk) { const bool ok = hostResultOk.isSucceeded; positioned = ok; }).status == HostAdmissionStatus::Accepted),
             "Cursor request rejected.");
     wait([&] { return positioned; });
     session.SendUpdates();
@@ -508,9 +509,9 @@ void TestSession(Acceptance c)
     Require(valueBefore && std::abs(*valueBefore - sample.thickness) < 1e-12,
             "Public query and displayed sample must use the same node field.");
     ThicknessRequest color;
-    color.action = ThicknessAction::SetDisplay;
-    color.display = display;
-    color.display->mode = ThicknessDisplayMode::Tolerance;
+    color = ThicknessDisplayRequest{};
+    std::get<ThicknessDisplayRequest>(color).display = display;
+    std::get<ThicknessDisplayRequest>(color).display.mode = ThicknessDisplayMode::Tolerance;
     std::array<int,4> oldProps{};
     for(std::size_t i=0;i<oldProps.size();++i)
         oldProps[i]=probe->context.views->GetInputView({display.targetViews.viewIds[i]})->renderer->GetViewProps()->GetNumberOfItems();
@@ -531,9 +532,9 @@ void TestSession(Acceptance c)
             "Display changes numerical buffer.");
     for (const auto mode : {ThicknessColorMode::Constant, ThicknessColorMode::Gradient,
              ThicknessColorMode::Rainbow, ThicknessColorMode::InverseRainbow, ThicknessColorMode::HueLoop}) {
-        color.display->mode = ThicknessDisplayMode::Continuous;
-        color.display->rangeMode = ThicknessRangeMode::Result;
-        color.display->colorBand.mode = mode;
+        std::get<ThicknessDisplayRequest>(color).display.mode = ThicknessDisplayMode::Continuous;
+        std::get<ThicknessDisplayRequest>(color).display.rangeMode = ThicknessRangeMode::Result;
+        std::get<ThicknessDisplayRequest>(color).display.colorBand.mode = mode;
         Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
             "Color mode switch rejected.");
         const auto range = wall->GetState().displayRange;
@@ -544,12 +545,12 @@ void TestSession(Acceptance c)
             && probe->context.data->GetDataGraph().commitId == graphCommit,
             "Color mode changed formal data or measurement identity.");
     }
-    color.display->rangeMode = ThicknessRangeMode::Histogram;
+    std::get<ThicknessDisplayRequest>(color).display.rangeMode = ThicknessRangeMode::Histogram;
     Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted
         && wall->GetState().displayRange == std::optional<std::array<double,2>>(c.evaluation.histogramRange),
         "Histogram legend range does not follow the current evaluation.");
     const auto previousRange = wall->GetState().displayRange;
-    color.display->colorBand.lowColor[0] = std::numeric_limits<double>::quiet_NaN();
+    std::get<ThicknessDisplayRequest>(color).display.colorBand.lowColor[0] = std::numeric_limits<double>::quiet_NaN();
     Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::InvalidRequest
         && wall->GetState().displayRange == previousRange
         && wall->GetResult(completed->result)->samples == before,
