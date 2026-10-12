@@ -2,6 +2,7 @@
 #pragma once
 #include "Host/VtkAppHostSession.h"
 #include "Support/TestResources.h"
+#include "Support/BusinessStatistics.h"
 #include <functional>
 #include <QString>
 #include <QJsonObject>
@@ -44,6 +45,7 @@ public:
 #endif
     std::function<void(const QString&, const QString&, const QJsonObject&)> onCopyParameters;
     std::function<void(const QString&, const QString&, const QJsonObject&)> onNavigate;
+    std::function<void(const QString&)> onShowStatistics;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
     std::function<bool(const std::string&)> getRenderPending;
     std::function<bool(const std::string&)> getViewRenderPending;
@@ -54,6 +56,10 @@ public:
     std::function<std::optional<ImageDescriptor>(DataRevisionRef)> getImageInput;
     std::function<QJsonObject()> getViewTransforms;
     std::function<DataRevisionRef()> getPartLabels;
+    std::function<StatisticsSamples(DataRevisionRef,DataRevisionRef,std::size_t,GrayPointFilter)> readGraySamples;
+    std::function<StatisticsSamples(DataRevisionRef,const std::string&,std::size_t)> readRecordSamples;
+    std::function<QJsonObject(DataRevisionRef,std::size_t,std::size_t,std::optional<std::array<double,2>>)> readRecordPage;
+    std::function<std::array<double,3>(DataRevisionRef,std::size_t,DataRevisionRef)> getRecordLocation;
     std::function<std::optional<MeasurementSurface>()> getMeasurementSurface;
     std::function<std::optional<DataRevisionRef>(DataRevisionRef, const QJsonValue&, const QJsonValue&,
         const char*, bool)> createInputRoi;

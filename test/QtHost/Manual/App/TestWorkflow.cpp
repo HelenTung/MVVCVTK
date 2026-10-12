@@ -1,7 +1,9 @@
 // 测试用途：协调功能测试中的计算占用、输入选择和交互结束，避免互斥操作并发。
 #include "TestWorkflow.h"
 #include "Support/JsonInput.h"
+#include "Data/DataPayloads.h"
 #include <stdexcept>
+#include <algorithm>
 namespace Manual {
 bool TestWorkflow::StartOperation(std::uint64_t id, TestPolicy policy, bool exitTools, const QString& module)
 {
@@ -55,6 +57,11 @@ ThicknessStartRequest TestWorkflow::BuildThicknessRequest(VtkAppHostSession& ses
     }
     if (!GetDataRevisionRefValid(input.labels) || !GetDataRevisionRefValid(input.mesh))
         throw std::invalid_argument("需要有效标签图和正式测量表面修订");
+    const auto labels=session.GetDataCatalog();
+    bool matched=false;
+    if(labels)for(const auto& value:labels->data)if(value.revision==input.labels && value.type==DataTypes::labelMap3D)
+        matched=std::any_of(value.inputs.begin(),value.inputs.end(),[&](const auto& dependency){return dependency.role=="source-volume" && dependency.source==input.source;});
+    if(!matched)throw std::invalid_argument("所选材料标签与测量体数据的精确源修订不匹配");
     if (!params.materialThreshold && surface && surface->source == input.source
         && surface->mesh == input.mesh) params.materialThreshold = surface->threshold;
     if (!params.materialThreshold) throw std::invalid_argument("请显式提供原始灰度材料阈值");

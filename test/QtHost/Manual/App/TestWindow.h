@@ -43,8 +43,9 @@ private:
     void QueueObserve();
     void SetWorkspace(int index);
     void SyncNavigation();
-    void SetViewLayout(bool isThreeDOnly);
+    void SetViewLayout(const QString& mode);
     void UpdateStopCommand();
+    void UpdateInputIdentity();
     struct View { QString id; QVTKOpenGLNativeWidget* widget; vtkSmartPointer<vtkGenericOpenGLRenderWindow> window; QWidget* frame; };
     TestSession m_runtime;
     TestWorkflow m_workflow;
@@ -54,6 +55,8 @@ private:
     std::vector<ModulePanel*> m_modules;
     QStackedWidget* m_pages = nullptr;
     QStackedWidget* m_browsers = nullptr;
+    QStackedWidget* m_statisticsPages = nullptr;
+    QToolButton* m_showStatistics = nullptr;
     QComboBox* m_renderMode = nullptr;
     QPushButton* m_openVolume = nullptr;
     QPushButton* m_stop = nullptr;
@@ -63,6 +66,8 @@ private:
     QGridLayout* m_viewGrid = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;
+    QLabel* m_inputIdentity = nullptr;
+    QLabel* m_inputGeometry = nullptr;
     QLabel* m_measurements = nullptr;
     QLabel* m_latestMessage = nullptr;
     QPlainTextEdit* m_log = nullptr;

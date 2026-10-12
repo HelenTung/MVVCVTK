@@ -15,7 +15,10 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     if (!hasInput && !readableResult && !inspectionRead && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
+    if(module=="Roi" && action=="Commit" && s["isDragging"].toBool())return "请先结束区域拖动，再保存正式 ROI。";
     if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
+    if (module == "Gap" && action == "NextDefectPage" && !s["hasNextDefectPage"].toBool())return "当前已经是缺陷列表末页。";
+    if (module == "Gap" && action == "ResetDefectFilter" && !s["isListFiltered"].toBool())return "当前列表没有区间筛选。";
     if (module == "Part" && (action == "SetState" || action == "Highlight" || action == "ClearHighlight" || action == "EditSelected" || action == "Visibility") && !s["hasCurrentParts"].toBool()) return "请先完成当前输入的零件分割。";
     if (module == "Part" && IsPartEditAction(action)) {
         if (!s["hasCurrentParts"].toBool()) return "请先分割生成当前输入的有效零件目录。";
@@ -27,7 +30,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         if (action == "CopyIsoToDisplay" && !s["canApplyIsoToDisplay"].toBool()) return "主三维当前不是等值面模式，请先切换显示模式。";
         if (action == "Visibility" && !s["hasMesh"].toBool()) return "当前没有可显示的表面网格。";
         if ((action == "SamplePoints" || action == "MeasurementSelection") && !s["hasMesh"].toBool()) return "请先生成当前输入的表面网格。";
-        if (action == "OpenAlignment" && !s["hasMeasurement"].toBool()) return "请先生成当前输入的有效测量表面。";
+        if ((action == "OpenAlignment" || action == "OpenWall") && !s["hasMeasurement"].toBool()) return "请先生成当前输入的有效测量表面。";
     }
     if (module == "Artifact") {
         if (action == "Commit" && !s["isCandidateCurrent"].toBool()) return "当前输入与校正候选不匹配，请恢复源输入或丢弃候选。";
@@ -41,6 +44,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
         return "请选择已有壁厚结果，或提交所需输入开始计算。";
     if ((module == "Wall" || module == "Alignment") && s["selectedResults"].toObject().contains(action)
         && !s["selectedResults"].toObject()[action].toBool()) return "请在输入与结果中选择可用的业务结果。";
+    if(module=="Wall" && action=="Start")return s["preparationProblem"].toString();
     if (module == "Rotation" && action == "Undo" && s["undoCount"].toString().toULongLong() == 0) return "当前没有可撤销的旋转。";
     if (module == "Alignment") {
         if ((action == "ImportReference" || action == "ImportNominalMesh" || action == "SaveRecipe" || action == "Start" || action == "Restore") && s["isApplied"].toBool()) return "请先停用当前对齐结果，再准备或求解新方案。";

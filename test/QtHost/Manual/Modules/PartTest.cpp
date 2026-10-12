@@ -169,6 +169,17 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
         panel->SetComplete(id, "ParametersCopied", {{"message", "已选择唯一编辑目标并进入零件编辑"}, {"binding", GetPartRef(target)}});
     });
     AttachPartEditActions(panel, feature);
+    panel->onStatistics=[panel,feature] {
+        const auto catalog=feature->GetPartSetSnapshot();if(!catalog)return false;
+        const auto input=panel->GetSession()->GetImageDescriptor();if(!input || catalog->sourceRevision!=input->dataRevision || catalog->isStale)return false;
+        auto* widget=panel->GetStatisticsWidget();const auto key=GetRefText(catalog->sourceRevision)+":"+QString::number(catalog->catalogRevision);
+        if(widget->property("partStatisticsKey").toString()==key && widget->GetHistogram()["title"]=="零件体积分布")return true;
+        widget->setProperty("partStatisticsKey",key);
+        std::vector<double> volumes;for(const auto& part:catalog->parts)volumes.push_back(part.metrics.physicalVolumeMM3);
+        panel->GetStatisticsWidget()->SetHistogram(BuildHistogram(volumes,{},"零件体积分布",
+            "来源 "+GetRefText(catalog->sourceRevision)+" · 标签目录修订 "+QString::number(catalog->catalogRevision)+" · 全量正式零件；不替换灰度输入","体积 / mm³","零件数量"));
+        return true;
+    };
     panel->onObserve = [panel, feature, preview] {
         auto summary = GetCatalog(*feature);
         const auto input = panel->GetSession()->GetImageDescriptor();

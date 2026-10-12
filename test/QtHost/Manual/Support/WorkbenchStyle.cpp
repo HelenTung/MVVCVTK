@@ -6,6 +6,13 @@ QString GetWorkbenchStyle()
 QMainWindow, QWidget#workbench { background: #eaf0f6; color: #23364b; }
 QWidget#workbenchToolbar, QWidget#workbenchNavigation, QWidget#diagnosticBar,
 QWidget#objectColumn, QWidget#parameterPages { background: #ffffff; }
+QWidget#currentInputBar { background: #ffffff; border: 1px solid #dae3ed; border-radius: 4px; }
+QLabel#currentInputIdentity { color: #214c7a; font-weight: 600; }
+QLabel#currentInputGeometry, QLabel#businessInput { color: #62758b; }
+QLabel#businessStage { color: #36516f; background: #edf3fa; padding: 7px; border-radius: 4px; font-weight: 600; }
+QLabel#businessNext { color: #36516f; }
+QLabel#businessDisplay { color: #62758b; font-size: 11px; }
+QLabel#businessRecovery { color: #946021; background: #fff8ed; padding: 6px; }
 QLabel#columnTitle, QLabel#moduleTitle { color: #214c7a; font-weight: 600; }
 QLabel#moduleTitle { font-size: 16px; }
 QLabel#operationTitle { font-weight: 600; color: #214c7a; }

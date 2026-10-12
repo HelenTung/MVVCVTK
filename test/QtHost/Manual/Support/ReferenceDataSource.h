@@ -2,6 +2,7 @@
 #pragma once
 #include "Host/HostFeature.h"
 #include "Data/ImageReadTypes.h"
+#include "BusinessStatistics.h"
 #include "../../../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include <QJsonObject>
 #include <QString>
@@ -29,6 +30,12 @@ public:
     QJsonObject GetResultEvidence();
     QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
     QJsonObject ReadTransform();
+    static std::size_t GetGraySampleStride(std::size_t total, const std::array<int,3>& dimensions);
+    StatisticsSamples ReadGraySamples(DataRevisionRef source, DataRevisionRef roi, std::size_t offset, GrayPointFilter filter = {});
+    StatisticsSamples ReadRecordSamples(DataRevisionRef table, const std::string& column, std::size_t offset);
+    QJsonObject ReadRecordPage(DataRevisionRef table, std::size_t offset, std::size_t count,
+        std::optional<std::array<double,2>> volumeRange = {});
+    std::array<double,3> GetRecordLocation(DataRevisionRef table, std::size_t row, DataRevisionRef source);
 private:
     std::shared_ptr<TrustedDataPort> m_data;
     FeatureInternal::ResultScopes m_resultScopes;

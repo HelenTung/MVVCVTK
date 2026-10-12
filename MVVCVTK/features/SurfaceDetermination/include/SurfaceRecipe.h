@@ -133,6 +133,10 @@ struct SurfaceIsoEstimate final
     std::uint64_t sampleCount = 0;
     std::uint64_t excludedSampleCount = 0;
     double separationRatio = 0.0;
+    // 原估计样本的最近中心分桶；首尾桶为半宽，不使用最终网格点重建分布。
+    std::array<std::uint64_t,512> histogramCounts{};
+    std::array<double,513> histogramEdges{};
+    std::array<int,3> histogramSampleSteps{1,1,1};
 };
 
 struct SurfaceMaterialPair final

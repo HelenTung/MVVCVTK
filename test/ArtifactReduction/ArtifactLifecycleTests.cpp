@@ -154,6 +154,10 @@ void TestLifecycle()
     const auto admission = Prepare(feature, request);
     Require(admission.error == ArtifactError::None && Prepare(feature, request).error == ArtifactError::Busy, "single task admission");
     Require(WaitResult(feature).status == ArtifactStatus::Ready, "candidate ready");
+    const auto comparison=feature.GetCandidateSamples(admission.requestId,0,1,16);
+    Require(comparison && !comparison->empty() && comparison->size()<=16,"ready candidate exposes bounded source/candidate value pairs");
+    Require(!feature.GetCandidateSamples(admission.requestId+1,0,1,16) && !feature.GetCandidateSamples(admission.requestId,0,0,16)
+        && !feature.GetCandidateSamples(admission.requestId,0,1,4097),"candidate samples reject stale identity and invalid read bounds");
     Require(feature.SendRequest({ ArtifactAction::Commit, {}, admission.requestId + 1 }).error == ArtifactError::InvalidRequest, "candidate id gate");
     port->shouldThrow = true;
     Require(feature.SendRequest({ ArtifactAction::Commit, {}, admission.requestId }).error == ArtifactError::CommitFailed
@@ -183,6 +187,7 @@ void TestLifecycle()
     const auto output = port->GetData(port->GetDataGraph(), *published.correctedVolume);
     Require(output && output->inputs.size() == 3 && output->inputs[1].role == "processing-roi" && output->inputs[1].source == roi && output->provenance->canonicalParameters.find("3377fed") != std::string::npos, "complete provenance");
     Require(feature.SendRequest({ ArtifactAction::Commit, {}, admission.requestId }).error == ArtifactError::InvalidRequest, "no duplicate publication");
+    Require(!feature.GetCandidateSamples(admission.requestId,0,1,16) && !comparison->empty(),"publication retires the candidate reader while copied comparison values remain valid");
     const auto maskCandidate = Prepare(feature, request);
     Require(WaitResult(feature).status == ArtifactStatus::Ready, "mask CAS candidate");
     const auto nextMask = Publish(*port, CreateMask(grid, std::vector<std::uint8_t>(336, 1)), false, mask);

@@ -166,6 +166,11 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("SelectSample", {{"result", "current"}, {"sampleIndex", "0"}}, [send, resolveResult](auto id, const auto& p) {
         ThicknessRequest r; r = ThicknessSampleRequest{}; std::get<ThicknessSampleRequest>(r).resultRevision = resolveResult(p); std::get<ThicknessSampleRequest>(r).sampleIndex = GetId(p["sampleIndex"]); send(id, r);
     }, TestPolicy::View);
+    panel->AttachAction("LocateMinimum",{},[feature,send](auto id,const auto&) {
+        const auto result=feature->GetResult(feature->GetState().result);
+        if(!result || !result->statistics.minimumSample)throw std::invalid_argument("该结果没有有效最薄样本，未测区域不会当作零厚度。");
+        send(id,ThicknessSampleRequest{result->result,*result->statistics.minimumSample});
+    },TestPolicy::View);
     panel->AttachAction("Result", {{"result", "current"}}, [panel, feature, resolveResult](auto id, const auto& p) {
         const auto result = feature->GetResult(resolveResult(p));
         if (!result) throw std::invalid_argument("所选壁厚结果不可用");
@@ -220,6 +225,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             catch (const std::invalid_argument&) { image.reset(); }
         }
         if (image) {
+            summary["source"]=GetRefText(image->dataRevision);
             auto* form = panel->GetParameterEditor("Start");
             auto& workflow = panel->GetContext().workflow;
             const auto surface = workflow.GetMeasurementSurface();
@@ -233,6 +239,20 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             form->GetField("sampleSpacing")->SetDefaultValue(2.0 * GetVoxelSpacing(*image));
             form->GetField("maxBoundaryError")->SetDefaultValue(0.5 * GetVoxelSpacing(*image));
             form->GetField("maxDistance")->SetDefaultValue(GetInputDiagonal(*image));
+            QString preparation;
+            const auto labelChoice=form->GetField("labels")->GetValue();
+            DataRevisionRef labels;
+            try {labels=labelChoice=="parts" ? workflow.getPartLabels ? workflow.getPartLabels() : DataRevisionRef{} : GetRef(labelChoice);}catch(const std::exception&){}
+            if(!GetDataRevisionRefValid(labels))preparation="缺少标签：请先分割所选源体数据，生成同源材料标签。";
+            else {
+                bool matched=false;for(const auto& descriptor:panel->GetSession()->GetLabelMapDescriptors())
+                    if(descriptor.dataRevision==labels)matched=descriptor.sourceRevision==image->dataRevision;
+                if(!matched)for(const auto value:graph["nodes"].toArray())if(value.toObject()["ref"]==GetRefText(labels))
+                    matched=value.toObject()["parents"].toArray().contains(GetRefText(image->dataRevision));
+                if(!matched)preparation="标签来源与所选体数据不一致，请采用正确源数据并生成同源标签。";
+            }
+            if(meshChoice=="surface" && (!surface || surface->source!=image->dataRevision))preparation+=(preparation.isEmpty()?"":"\n")+QString("缺少同源正式测量表面：请进入表面测定。");
+            summary["preparationProblem"]=preparation;
         }
         if (state.displayRange) summary["displayRange"] = GetValues(*state.displayRange);
         if (result) { const auto stats = Statistics(*result); for (auto it = stats.begin(); it != stats.end(); ++it) summary[it.key()] = it.value(); }
@@ -253,6 +273,27 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         panel->SetComplete(id,"Exported",{{"statistics",Statistics(*snapshot)},{"histogramAreas",histogram},{"reasons",reasons},{"regions",regions},{"evaluatedArea",s.evaluatedArea},{"validArea",s.validArea}});
     },TestPolicy::Read);
     panel->onStop = [panel] { panel->SendAction("Cancel", {{"targetRequestId", "0"}}); };
+    panel->onStatistics=[panel,feature] {
+        const auto selected=panel->GetActionParameters("Result");
+        const auto ref=selected["result"]=="current" ? feature->GetState().result : GetRef(selected["result"]);
+        const auto result=feature->GetResult(ref);if(!result)return false;
+        const auto& s=result->statistics;const auto& e=result->archive.evaluation;
+        QJsonArray counts,edges;for(auto value:s.histogramAreas)counts.append(value);
+        for(std::size_t i=0;i<=s.histogramAreas.size();++i)edges.append(e.histogramRange[0]+(e.histogramRange[1]-e.histogramRange[0])*i/std::max<std::size_t>(1,s.histogramAreas.size()));
+        panel->GetStatisticsWidget()->SetHistogram({{"title","壁厚有效面积分布"},{"description","结果 "+GetRefText(ref)+QString(" · 来源 %1 · 已计算面积桶 · 有效面积 %2 mm² · 覆盖 %3% · 范围外面积 %4 / %5 mm²；未测不进入零桶")
+            .arg(GetRefText(result->archive.input.source)).arg(s.validArea).arg(s.coverage*100).arg(s.histogramBelowArea).arg(s.histogramAboveArea)},
+            {"counts",counts},{"edges",edges},{"xUnit","壁厚 / mm"},{"yUnit","有效面积 / mm²"},{"markers",QJsonArray{QJsonObject{{"label","评价下限"},{"value",e.lower}},QJsonObject{{"label","评价上限"},{"value",e.upper}}}}});
+        QJsonArray reasons;for(std::size_t i=0;i<s.reasonCounts.size();++i)if(s.reasonCounts[i])reasons.append(QJsonArray{QString::number(i),QString::number(s.reasonCounts[i]),s.reasonAreas[i]});
+        panel->GetStatisticsWidget()->SetTable({"有效性原因编号","样本数","面积 mm²"},reasons);
+        panel->GetStatisticsWidget()->onInterval=[panel,feature,ref](double low,double high) {
+            const auto snapshot=feature->GetResult(ref);if(!snapshot || !snapshot->samples)return;
+            for(std::size_t i=0;i<snapshot->samples->size();++i){const auto& sample=(*snapshot->samples)[i];
+                if(sample.validity==ThicknessValidity::Valid && sample.thickness>=low && sample.thickness<=high) {
+                    panel->SendAction("SelectSample",{{"result",GetRefText(ref)},{"sampleIndex",QString::number(i)}});return;}}
+            if(panel->onMessage)panel->onMessage("所选区间没有可定位的有效壁厚样本。");
+        };
+        return true;
+    };
     return panel;
 }
 }

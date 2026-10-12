@@ -67,6 +67,14 @@ QString GetModuleText(const QString& module)
 }
 QString GetActionText(const QString& module, const QString& action)
 {
+    if(action=="Preview")return "生成表面预览";
+    if(action=="Determine")return "生成正式测量表面";
+    if(action=="OpenWall")return "进入壁厚分析";
+    if(action=="LocateMinimum")return "定位最薄有效区域";
+    if(action=="Defects")return "查看缺陷目录";
+    if(action=="NextDefectPage")return "下一页缺陷";
+    if(action=="LocateDefect")return "定位孔隙缺陷";
+    if(action=="ResetDefectFilter")return "清除列表筛选";
     if (action == "UseData") return "从此数据继续";
     if (action == "GraphInfo") return "查看发布记录";
     if (action == "KeepResult") return "长期保留";
@@ -137,6 +145,9 @@ QString GetParameterSectionText(const QString& module, const QString& action)
 }
 QString GetParameterText(const QString& key)
 {
+    if(key=="pageOffset")return "缺陷列表起始行";
+    if(key=="rowIndex")return "缺陷表原始行号";
+    if(key=="table")return "缺陷表修订";
     static const QHash<QString, QString> inspectionLabels{
         {"inspection", "尺寸检测修订"}, {"deviation", "偏差结果修订"}, {"voxelVolume", "体素体积修订"},
         {"computeBackend", "计算后端"}, {"metric", "偏差定义"}, {"sourceTriangles", "实测三角形编号"}, {"referenceTriangles", "名义三角形编号"},

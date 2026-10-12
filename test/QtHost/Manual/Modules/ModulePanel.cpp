@@ -7,6 +7,7 @@
 #include "Support/SceneGraph.h"
 #include "Support/PathInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/BusinessStep.h"
 #include <QCheckBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -45,12 +46,26 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     : QWidget(parent), m_context(context), m_name(std::move(name))
 {
     setAcceptDrops(true);
+    m_statistics=new BusinessStatistics(this);m_statistics->hide();
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(10,10,10,10); layout->setSpacing(8);
     auto* heading = new QHBoxLayout;
     auto* title = new QLabel(GetDisplayName(), this); title->setObjectName("moduleTitle"); title->setWordWrap(true); heading->addWidget(title,1);
     m_help = new QToolButton(this); m_help->setText("模块说明"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
     m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
     connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());});
+    m_businessStage = new QLabel(this); m_businessStage->setObjectName("businessStage"); m_businessStage->setWordWrap(true); layout->addWidget(m_businessStage);
+    m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true); layout->addWidget(m_businessSource);
+    m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();layout->addWidget(m_businessDisplay);
+    m_businessNext = new QLabel(this); m_businessNext->setObjectName("businessNext"); m_businessNext->setWordWrap(true); layout->addWidget(m_businessNext);
+    m_primary = new QPushButton(this); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); layout->addWidget(m_primary);
+    m_executionMessage = new QLabel(this); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); layout->addWidget(m_executionMessage);
+    m_nextActions = new QWidget(this); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); layout->addWidget(m_nextActions);
+    connect(m_primary,&QPushButton::clicked,this,[this] {
+        try {
+        Observe(); const auto step=GetBusinessStep(m_name,m_observed,GetDescriptor(GetSession()->GetImageDescriptor()),m_parameterAction);
+        if (!step.action.isEmpty()) SendBusinessAction(step.action,step.usesOutput);
+        } catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}
+    });
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
     m_quickActions = new QWidget(this); m_quickActions->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
@@ -64,8 +79,8 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
     });
-    m_operationTitle = new QLabel(this); m_operationTitle->setObjectName("operationTitle"); m_operationTitle->setWordWrap(true); layout->addWidget(m_operationTitle);
-    m_operationDescription = new QLabel(this); m_operationDescription->setObjectName("operationDescription"); m_operationDescription->setWordWrap(true); layout->addWidget(m_operationDescription);
+    m_operationTitle = new QLabel(this); m_operationTitle->setObjectName("operationTitle"); m_operationTitle->setWordWrap(true);
+    m_operationDescription = new QLabel(this); m_operationDescription->setObjectName("operationDescription"); m_operationDescription->setWordWrap(true);
     m_browser = new QTabWidget(this); m_browser->setObjectName("objectBrowser");
     auto* catalogPage = new QWidget(m_browser); auto* catalogLayout = new QVBoxLayout(catalogPage);
     catalogLayout->setContentsMargins(4, 6, 4, 4);
@@ -73,7 +88,12 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_scene->setColumnCount(2); m_scene->setHeaderLabels({"场景对象", "显示状态"});
     m_scene->setUniformRowHeights(true); m_scene->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_scene->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_browser->addTab(m_scene, "场景"); m_browser->addTab(catalogPage, "结果目录");
+    m_browser->addTab(m_scene, "对象"); m_browser->addTab(catalogPage, "历史与目录");
+    m_sources = new QTreeWidget(m_browser); m_sources->setObjectName("businessSources"); m_sources->setHeaderLabels({"实际来源关系", "精确修订"});
+    m_sources->header()->setSectionResizeMode(0,QHeaderView::Stretch); m_browser->addTab(m_sources,"来源");
+    connect(m_browser,&QTabWidget::currentChanged,this,[this](int index) {
+        if(index==2) RefreshSources(m_context.workflow.getPublishedGraph ? m_context.workflow.getPublishedGraph() : QJsonObject(),GetDescriptor(GetSession()->GetImageDescriptor()));
+    });
     if (m_name == "Part") {
         m_nodeSearch = new QLineEdit(this); m_nodeSearch->setObjectName("nodeSearch");
         m_nodeSearch->setPlaceholderText("搜索零件名称或标签"); m_nodeSearch->setClearButtonEnabled(true);
@@ -122,9 +142,10 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
+    m_actionLayout->addWidget(m_operationTitle);m_actionLayout->addWidget(m_operationDescription);
     m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
     m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");
-    m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); layout->addWidget(m_commandArea);
+    m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); m_actionLayout->addWidget(m_commandArea);
     layout->addWidget(m_quickActions);
     connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
         const auto id = item->data(0, Qt::UserRole).toJsonObject()["id"];
@@ -135,6 +156,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
 }
 QWidget* ModulePanel::GetBrowser() const { return m_browser; }
+ModulePanel::~ModulePanel(){m_statistics->Cancel();delete m_statistics;}
 
 void ModulePanel::SelectSceneItem(QTreeWidgetItem* item)
 {
@@ -226,10 +248,10 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
             try { ExportJson(path, m_forms.at(name)->GetValue().toObject()); } catch (const std::exception& e) { SetState({{"inputError", QString::fromUtf8(e.what())}}); }
         });
         menu->addAction("恢复默认", this, [this, name] { SetParameters(name, m_entries.at(name).defaults); });
-        button->setProperty("primaryCommand",true);
+        button->setProperty("primaryCommand",false);
         footer->addWidget(files); footer->addStretch(); footer->addWidget(button);
         m_commandArea->addWidget(commands); m_commandRows[name] = commands;
-        m_actionLayout->addWidget(card); m_cards[name] = card;
+        m_actionLayout->insertWidget(m_actionLayout->count()-1,card); m_cards[name] = card;
         const QSignalBlocker blocker(m_parameterTabs);
         const auto index = m_parameterTabs->addTab(GetParameterSectionText(m_name, name)); m_parameterTabs->setTabData(index, name);
         if (m_parameterAction.isEmpty()) m_parameterAction = name;
@@ -379,6 +401,8 @@ void ModulePanel::RefreshWorkflow()
         if (auto* field = form.second->GetField("mesh")) field->SetReferenceChoices(meshes);
     }
     const auto busy = m_context.workflow.GetBusyOperation(); const bool closing = m_context.workflow.GetIsClosing();
+    RefreshBusinessStep(state,input);
+    if (m_browser->currentIndex()==2) RefreshSources(graph,input);
     if (m_hasRefreshed && m_refreshState.state == state && m_refreshState.input == input
         && m_refreshState.node == m_node && m_refreshState.result == m_lastResult && m_refreshState.graph == graph && m_refreshState.action == m_currentAction
         && m_refreshState.busy == busy && m_refreshState.closing == closing
@@ -596,6 +620,7 @@ void ModulePanel::Observe(bool refresh)
     try { onObserve(); } catch (...) { m_isObserving = false; throw; }
     m_isObserving = false;
     if (refresh) RefreshWorkflow();
+    if (refresh) RefreshStatistics();
 }
 void ModulePanel::dragEnterEvent(QDragEnterEvent* event)
 {
@@ -686,12 +711,13 @@ void ModulePanel::QueueParameterFocus()
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);
 }
-std::uint64_t ModulePanel::SendAction(const QString& name, const QJsonObject& params)
+std::uint64_t ModulePanel::SendAction(const QString& name, const QJsonObject& params, Completion onComplete)
 {
     Observe();
     const auto session = GetSession();
     const auto id = m_context.records.StartRecord(m_name, name, params,
         GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{}));
+    if (onComplete) m_completions.emplace(id,std::move(onComplete));
     if (!session || !m_entries.count(name)) {
         SetComplete(id, "Rejected", {{"message", "会话或操作不可用"}});
         return id;
@@ -718,7 +744,15 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
     m_context.records.SetComplete(id, status, result,
         GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{}));
     m_context.workflow.SetComplete(id);
+    if(QStringList{"Failed","Rejected","InvalidInput","SourceChanged"}.contains(status)) {
+        m_executionMessage->setText("上次操作 · "+result["message"].toString("操作未完成，请检查输入与前置条件。")); m_executionMessage->show();
+    } else if(status!="Observed" && status!="ParametersCopied") { m_executionMessage->clear(); m_executionMessage->hide(); }
     SetState(m_context.records.GetRecord(id));
+    const auto found=m_completions.find(id);
+    if(found!=m_completions.end()) {
+        auto complete=std::move(found->second); m_completions.erase(found);
+        QMetaObject::invokeMethod(this,[complete=std::move(complete),status,result]{complete(status,result);},Qt::QueuedConnection);
+    }
 }
 void ModulePanel::SetAdmission(std::uint64_t id, bool accepted, QJsonObject raw)
 {

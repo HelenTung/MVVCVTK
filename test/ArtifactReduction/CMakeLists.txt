@@ -5,7 +5,7 @@ set_target_properties(mvvcvtk_tomopy_reference PROPERTIES PROJECT_LABEL TomoPyRe
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     FOLDER "MVVCVTK/test/Automation/Reference")
 
-add_library(mvvcvtk_artifact_header_probe OBJECT ArtifactReductionHeaderProbe.cpp)
+add_library(mvvcvtk_artifact_header_probe OBJECT ArtifactReductionHeaderProbe.cpp ArtifactCandidateReadProbe.cpp)
 target_link_libraries(mvvcvtk_artifact_header_probe PRIVATE MVVCVTK::ArtifactReduction)
 SetTargetDefaults(mvvcvtk_artifact_header_probe)
 set_target_properties(mvvcvtk_artifact_header_probe PROPERTIES PROJECT_LABEL ArtifactReductionHeaderProbe FOLDER "MVVCVTK/test/Automation/HeaderProbes")

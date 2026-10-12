@@ -1,7 +1,9 @@
 add_library(qt_feature_test_support STATIC
     App/TestWindow.cpp App/TestSession.cpp App/QtHostPump.cpp App/FeatureSetup.cpp App/TestWorkflow.cpp
     "${PROJECT_SOURCE_DIR}/test/Host/FeatureInput.cpp"
-    Modules/ModulePanel.cpp Modules/DataTest.cpp Modules/ViewTest.cpp
+    Modules/ModulePanel.cpp Modules/ModuleBusiness.cpp Modules/DataTest.cpp Modules/ViewTest.cpp
+    Support/BusinessStep.cpp
+    Support/BusinessStatistics.cpp Support/StatisticsRead.cpp
     Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/InputRoiSource.cpp Support/ResultRetention.cpp Support/TestRecordWriter.cpp Support/ProcessMeasurements.cpp Support/TestResources.cpp Support/UiText.cpp Support/WorkbenchStyle.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
@@ -56,7 +58,11 @@ list(APPEND manual_inputs
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Host/CropHostFeature.h"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/OrthogonalCropTypes.h"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ArtifactReduction/src/ArtifactReductionHostFeature.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ArtifactReduction/include/Host/ArtifactReductionHostFeature.h"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src/MetrologyAlignmentHostFeature.cpp")
+list(APPEND manual_inputs
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include/SurfaceRecipe.h"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src/SurfaceDeterminationAlgorithm.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${manual_inputs})
 set(manual_fingerprints "")
 foreach(input IN LISTS manual_inputs)

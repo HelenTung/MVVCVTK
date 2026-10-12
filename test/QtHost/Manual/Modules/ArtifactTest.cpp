@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
 #include "Host/ArtifactReductionHostFeature.h"
+#include <algorithm>
 namespace Manual {
 namespace {
 QString GetArtifactErrorText(ArtifactError error)
@@ -15,7 +16,7 @@ QString GetArtifactErrorText(ArtifactError error)
     case ArtifactError::InvalidData: return "输入数据或掩码网格不匹配";
     case ArtifactError::UnsupportedType: return "当前数据类型不支持伪影校正";
     case ArtifactError::SourceChanged: return "计算期间源数据已变化";
-    case ArtifactError::TooLarge: return "工作集或累计发布量超过本次测试预算；请检查本次资源上限，累计发布过多时需重新启动测试会话释放历史数据";
+    case ArtifactError::TooLarge: return "工作集或单次发布超过本次显式测试预算，请检查所设上限";
     case ArtifactError::Cancelled: return "伪影任务已取消";
     case ArtifactError::TimedOut: return "伪影计算超过所设超时";
     case ArtifactError::InsufficientEvidence: return "校正质量检查未通过，不能发布候选";
@@ -151,6 +152,24 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
         panel->SetState(summary);
     };
     panel->onStop = [panel] { panel->SendAction("Cancel", {}); };
+    panel->onStatistics=[panel,feature,pending] {
+        const auto state=feature->GetState();if(state.status!=ArtifactStatus::Ready)return false;
+        const auto source=panel->GetSession()->GetImageDescriptor(pending->source);if(!source)return false;
+        std::size_t voxels=1;for(auto side:source->dims)voxels*=static_cast<std::size_t>(side);
+        const auto stride=ReferenceDataSource::GetGraySampleStride(voxels,source->dims);const auto total=(voxels+stride-1)/stride;
+        panel->GetStatisticsWidget()->StartHistogram("candidate:"+QString::number(state.requestId),"校正候选与源数据的灰度对照","原始灰度","抽样频数（蓝：源，橙：候选）",
+            [feature,request=state.requestId,source=pending->source,stride,total](std::size_t offset) {
+                const auto count=std::min<std::size_t>(4096,total-offset);const auto pairs=feature->GetCandidateSamples(request,offset*stride,stride,count);
+                if(!pairs)throw std::runtime_error("候选已发布、丢弃或来源不可读，旧候选统计已停止");
+                StatisticsSamples result;result.total=total;result.next=offset+count;result.excluded=count-pairs->size();
+                result.description="固定源 "+GetRefText(source)+QString(" · 候选请求 %1 · 规则抽样步长 %2 · 源有效域；质量统计不能单独证明保真").arg(request).arg(stride);
+                for(const auto& pair:*pairs){result.values.push_back(pair[0]);result.groups.push_back(0);result.values.push_back(pair[1]);result.groups.push_back(1);}return result;
+            });
+        const auto& q=state.quality;panel->GetStatisticsWidget()->SetTable({"质量量值","源数据","候选"},QJsonArray{
+            QJsonArray{"整体均值",q.meanBefore,q.meanAfter},QJsonArray{"材料均值",q.hasMaterial ? QJsonValue(q.materialMeanBefore):QJsonValue(),q.hasMaterial ? QJsonValue(q.materialMeanAfter):QJsonValue()},
+            QJsonArray{"材料标准差",q.hasMaterial ? QJsonValue(q.materialStdBefore):QJsonValue(),q.hasMaterial ? QJsonValue(q.materialStdAfter):QJsonValue()}});
+        return true;
+    };
     return panel;
 }
 }

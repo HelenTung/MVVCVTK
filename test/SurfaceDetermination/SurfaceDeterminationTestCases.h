@@ -8,6 +8,7 @@ int GetSurfaceRealInputFailCount(const char* path,int nx,int ny,int nz,double is
                                 std::size_t expectedPoints,std::size_t expectedTriangles);
 
 int GetSurfaceAlgorithmFailCount();
+int GetSurfaceHistogramFailCount();
 int GetSurfaceGeometryFailCount();
 int GetSurfaceLifecycleFailCount();
 int GetSurfaceDisplayFailCount();

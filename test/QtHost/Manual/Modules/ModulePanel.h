@@ -36,12 +36,14 @@ class ModulePanel : public QWidget {
 public:
     using Action = std::function<void(std::uint64_t, const QJsonObject&)>;
     ModulePanel(TestContext context, QString name, QWidget* parent = nullptr);
+    ~ModulePanel() override;
     QWidget* GetBrowser() const;
     QTreeWidget* GetCatalogTree() const { return m_nodes; }
     QTreeWidget* GetSceneTree() const { return m_scene; }
     void AttachAction(const QString& name, const QJsonObject& defaults, Action action,
         TestPolicy policy = TestPolicy::Change, bool exitTools = false);
-    std::uint64_t SendAction(const QString& name, const QJsonObject& params);
+    using Completion = std::function<void(const QString&, const QJsonObject&)>;
+    std::uint64_t SendAction(const QString& name, const QJsonObject& params, Completion onComplete = {});
     void SetComplete(std::uint64_t id, const QString& status, QJsonObject result = {});
     void SetAdmission(std::uint64_t id, bool accepted, QJsonObject raw = {});
     void SetState(const QJsonObject& value);
@@ -54,6 +56,10 @@ public:
     QJsonObject GetParameters() const;
     ParameterEditor* GetParameterEditor(const QString& action) const;
     QJsonObject GetObservedState() const { return m_observed; }
+    QJsonObject GetActionParameters(const QString& action) const;
+    void SendBusinessAction(const QString& action, bool usesOutput = false);
+    BusinessStatistics* GetStatisticsWidget() const { return m_statistics; }
+    void RefreshStatistics();
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
     void SelectAction(const QString& action);
@@ -69,6 +75,8 @@ public:
     std::shared_ptr<VtkAppHostSession> GetSession() const { return m_context.runtime.GetSession(); }
     TestContext GetContext() const { return m_context; }
     std::function<void()> onObserve;
+    std::function<bool()> onStatistics;
+    std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;
     std::function<void(const QString&)> onMessage;
     std::function<QString(const QString&, const QJsonObject&)> validateAction;
@@ -83,9 +91,21 @@ private:
     std::map<QString, Entry> m_entries;
     QString m_currentAction;
     std::set<std::uint64_t> m_pending;
+    std::map<std::uint64_t, Completion> m_completions;
     QJsonObject m_observed;
     QTreeWidget* m_nodes = nullptr;
     QTreeWidget* m_scene = nullptr;
+    QTreeWidget* m_sources = nullptr;
+    QLabel* m_businessStage = nullptr;
+    QLabel* m_businessNext = nullptr;
+    QLabel* m_businessSource = nullptr;
+    QLabel* m_businessDisplay = nullptr;
+    QLabel* m_executionMessage = nullptr;
+    QPushButton* m_primary = nullptr;
+    BusinessStatistics* m_statistics = nullptr;
+    QWidget* m_nextActions = nullptr;
+    QGridLayout* m_nextLayout = nullptr;
+    QStringList m_nextActionIds;
     QTabWidget* m_browser = nullptr;
     QTabBar* m_parameterTabs = nullptr;
     QString m_parameterAction;
@@ -132,6 +152,8 @@ private:
     void FilterNodes();
     void SendButton(const QString& action, const QJsonObject& context = {});
     QString GetActionGroup(const QString& action) const;
+    void RefreshBusinessStep(const QJsonObject& state, const QJsonObject& input);
+    void RefreshSources(const QJsonObject& graph, const QJsonObject& input);
 };
 HostViewTargets GetAllViews();
 HostViewTargets GetMainViews();

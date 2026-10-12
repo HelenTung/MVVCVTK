@@ -19,9 +19,13 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
         {"lowContrastPoints", QString::number(state.lowContrastPointCount)}, {"rejectedPoints", QString::number(state.rejectedPointCount)},
         {"truncatedPoints", QString::number(state.truncatedPointCount)}, {"error", QString::fromStdString(state.errorMessage)}};
     summary["purpose"] = static_cast<int>(state.purpose);
-    if (state.isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", state.isoEstimate->isoValue},
-        {"background", state.isoEstimate->backgroundValue}, {"material", state.isoEstimate->materialValue},
-        {"samples", QString::number(state.isoEstimate->sampleCount)}};
+    const auto describeEstimate=[](const SurfaceIsoEstimate& value) {
+        QJsonObject result{{"iso",value.isoValue},{"samples",QString::number(value.sampleCount)},{"isAutomatic",value.sampleCount>0}};
+        if(value.sampleCount){result["background"]=value.backgroundValue;result["material"]=value.materialValue;}
+        else result["providedRange"]=QJsonArray{value.backgroundValue,value.materialValue};
+        return result;
+    };
+    if (state.isoEstimate) summary["isoEstimate"] = describeEstimate(*state.isoEstimate);
     const auto preview = feature->GetPreviewSnapshot();
     summary["previewRequestId"] = preview ? QString::number(preview->requestId) : QString();
     // 只在当前调用范围持有正式网格；预览和估计不替换正式结果身份。
@@ -29,9 +33,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     if (!snapshot) return summary;
     summary["mesh"] = GetRefText(snapshot->meshRevision);
     summary["method"] = static_cast<int>(snapshot->method);
-    if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = QJsonObject{{"iso", snapshot->isoEstimate->isoValue},
-        {"background", snapshot->isoEstimate->backgroundValue}, {"material", snapshot->isoEstimate->materialValue},
-        {"samples", QString::number(snapshot->isoEstimate->sampleCount)}};
+    if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = describeEstimate(*snapshot->isoEstimate);
     QJsonArray objects;
     if (snapshot->objects) for (const auto& object : *snapshot->objects) {
         objects.append(QJsonObject{{"objectIndex", static_cast<int>(object.objectIndex)}, {"closed", object.isClosed},
@@ -52,9 +54,11 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     auto* panel = new ModulePanel(context, "Surface", parent);
     panel->SetNotice("选择体数据后，阈值留空时由当前表面算法估计背景/材料峰；显式阈值或材料范围直接按所填值处理。继续执行真实表面定位和质量检查，定位稳定性不等于计量不确定度。");
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"minimumObjectVoxels":"0"})");
+    auto requestedParameters=std::make_shared<QJsonObject>();
     {
-        panel->AttachAction("GlobalAutomatic", parameters, [panel, feature](auto id, const auto& params) {
+        const auto send=[panel, feature,requestedParameters](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
             SurfaceDeterminationStartParams start;
+            start.purpose=purpose;
             start.targetViews = GetAllViews();
             start.modelUnit = "mm";
             const auto source = panel->GetSession()->GetImageDescriptor();
@@ -84,7 +88,13 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             });
             panel->SetAdmission(id, admission.status == SurfaceAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
-        }, TestPolicy::Compute, true);
+            if(admission.status==SurfaceAdmissionStatus::Accepted)*requestedParameters=params;
+        };
+        panel->AttachAction("GlobalAutomatic",parameters,[send](auto id,const auto& p){send(id,p,SurfaceTaskPurpose::Determine);},TestPolicy::Compute,true);
+        for(const auto& action:std::vector<std::pair<QString,SurfaceTaskPurpose>>{{"Preview",SurfaceTaskPurpose::Preview},{"Determine",SurfaceTaskPurpose::Determine}})
+            panel->AttachAction(action.first,{},[panel,send,action](auto id,const auto& p){
+                send(id,p.isEmpty() ? panel->GetActionParameters("GlobalAutomatic") : p,action.second);
+            },TestPolicy::Compute,true);
     }
     for (const QString action : {QString("Stop"), QString("Visibility"), QString("Clear"), QString("ClearPreview")}) {
         QJsonObject defaults;
@@ -203,8 +213,20 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->SetComplete(id, "ParametersCopied", {{"message", "已进入计量对齐，请导入与当前测量表面对应的名义参考"}});
     }, TestPolicy::Read);
 #endif
+#if defined(MANUAL_WALL)
+    panel->AttachAction("OpenWall",{},[panel,feature](auto id,const auto&) {
+        const auto surface=feature->GetSurfaceSnapshot();
+        if(!surface) throw std::invalid_argument("正式测量表面不可用");
+        const auto labels=panel->GetContext().workflow.getPartLabels ? panel->GetContext().workflow.getPartLabels() : DataRevisionRef{};
+        QJsonObject patch{{"source",GetRefText(surface->sourceRevision)},{"mesh",GetRefText(surface->meshRevision)}};
+        if(GetDataRevisionRefValid(labels)) patch["labels"]=GetRefText(labels);
+        if(surface->resolvedParams.initialIsoValue) patch["materialThreshold"]=*surface->resolvedParams.initialIsoValue;
+        if(panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("Wall","Start",patch);
+        panel->SetComplete(id,"ParametersCopied",{{"message",GetDataRevisionRefValid(labels) ? "已带入同源测量表面，请核对材料标签。" : "已带入测量表面，仍需生成同源零件标签。"}});
+    },TestPolicy::Read);
+#endif
     panel->observeInBackground = true;
-    panel->onObserve = [panel, feature] {
+    panel->onObserve = [panel, feature,requestedParameters] {
         const auto image = panel->GetSession()->GetImageDescriptor();
         if (image) {
             auto* form = panel->GetParameterEditor("GlobalAutomatic");
@@ -235,12 +257,28 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         const auto displayKey = hasPreview ? QString::number(preview->requestId) : summary["mesh"].toString();
         panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasMesh"].toBool() ? QJsonValue(state.isOverlayVisible) : QJsonValue(), displayKey, summary["hasMesh"].toBool() ? QString() : "当前没有可用表面");
         summary["hasMeasurement"] = measured;
+        try {summary["parametersChanged"]=!requestedParameters->isEmpty() && panel->GetActionParameters("GlobalAutomatic")!=*requestedParameters;}
+        catch(const std::exception&){summary["parametersChanged"]=true;}
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement
             || state.stage == SurfaceDeterminationStage::TopologyValidation || state.stage == SurfaceDeterminationStage::Committing || state.stage == SurfaceDeterminationStage::Stopping;
         panel->SetState(summary);
     };
     panel->onStop = [panel] { panel->SendAction("Stop", {{"targetRequestId", "0"}}); };
+    panel->onStatistics=[panel,feature] {
+        const auto state=feature->GetState();
+        auto estimate=state.isoEstimate;auto source=state.sourceRevision;
+        if(!estimate)if(const auto snapshot=feature->GetSurfaceSnapshot()){estimate=snapshot->isoEstimate;source=snapshot->sourceRevision;}
+        if(!estimate || estimate->sampleCount==0)return false;
+        QJsonArray counts,edges;for(auto value:estimate->histogramCounts)counts.append(static_cast<double>(value));for(auto value:estimate->histogramEdges)edges.append(value);
+        const auto description="来源 "+GetRefText(source)+QString(" · 原算法估计范围 · 512 桶最近中心分桶 · 采样步长 %1/%2/%3 · 有效 %4 · 排除 %5")
+            .arg(estimate->histogramSampleSteps[0]).arg(estimate->histogramSampleSteps[1]).arg(estimate->histogramSampleSteps[2]).arg(estimate->sampleCount).arg(estimate->excludedSampleCount);
+        panel->GetStatisticsWidget()->SetHistogram({{"title","表面初始灰度估计分布"},{"description",description},{"counts",counts},{"edges",edges},
+            {"xUnit","原始灰度"},{"yUnit","算法估计样本次数"},{"markers",QJsonArray{
+                QJsonObject{{"label","BG"},{"value",estimate->backgroundValue}},QJsonObject{{"label","M"},{"value",estimate->materialValue}},QJsonObject{{"label","ISO"},{"value",estimate->isoValue}}}}});
+        panel->GetStatisticsWidget()->onInterval=[panel](double low,double high){panel->SetParameterPatch("GlobalAutomatic",{{"initialIsoValue",(low+high)*0.5}});if(panel->onMessage)panel->onMessage("已形成手工 ISO 草稿；需明确重新生成表面。图中 BG/M 仍来自原估计。");};
+        return true;
+    };
     return panel;
 }
 }

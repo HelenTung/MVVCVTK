@@ -1,6 +1,7 @@
 add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
+    SurfaceDeterminationHistogramTests.cpp
     SurfaceDeterminationOptimizationTests.cpp
     SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
@@ -57,7 +58,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_surface_suite IN ITEMS algorithm geometry lifecycle display seed-window optimization)
+foreach(_mvvcvtk_surface_suite IN ITEMS algorithm histogram geometry lifecycle display seed-window optimization)
     add_test(
         NAME "SurfaceDetermination.${_mvvcvtk_surface_suite}"
         COMMAND mvvcvtk_surface_determination_tests ${_mvvcvtk_surface_suite}

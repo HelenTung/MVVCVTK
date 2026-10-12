@@ -50,6 +50,10 @@ void ResetInitialCamera(ModulePanel* panel, bool first)
 struct CropFlow {
     DataRevisionRef input;
     bool isConfirmed=false;
+    CropDocumentId confirmedDocument=0;
+    CropNodeId confirmedNode=0;
+    std::uint64_t confirmedRevision=0;
+    QString confirmedInputRoi;
     std::uint64_t pending=0;
     CropNodeId historyAfter=0;
     std::optional<CropNodeId> expectedNode;
@@ -194,7 +198,12 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
     }
     for(const QString action:{QString("FinishEditing"),QString("Exit")})panel->AttachAction(action,{},[panel,feature,flow,action](auto id,const auto&){
         CropHostRequest request;request.action=CropHostAction::Exit;const bool accepted=feature->SendRequest(request);
-        if(accepted)flow->isConfirmed=action=="FinishEditing"&&feature->GetState().history.nodeCount>0;
+        if(accepted) {
+            const auto history=feature->GetHistory();
+            flow->isConfirmed=action=="FinishEditing"&&feature->GetState().history.operationCount>0;
+            flow->confirmedDocument=history.documentId;flow->confirmedNode=history.appliedHead;flow->confirmedRevision=history.stateRevision;
+            flow->confirmedInputRoi=panel->GetActionParameters("BuildResult")["inputRoi"].toString();
+        }
         panel->SetComplete(id,accepted?(flow->isConfirmed?"PreviewConfirmed":"Exited"):"Rejected");
     },TestPolicy::Change);
     panel->AttachAction("BuildResult",{{"nodeId","0"},{"inputRoi",""}},[panel,feature,flow](auto id,const auto& p){
@@ -205,7 +214,7 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         flow->pending=id;
         const auto admission=feature->SendRequest(request,[owner=QPointer<ModulePanel>(panel),flow,id](CropBuildResult result){
             if(!owner)return;if(flow->pending==id)flow->pending=0;
-            owner->SetComplete(id,result.isSucceeded?"Published":"Failed",{{"failureReason",int(result.failureReason)},{"message",QString::fromStdString(result.message)},
+            owner->SetComplete(id,result.isSucceeded?"Published":result.failureReason==CropFailure::Cancelled ? "Cancelled":"Failed",{{"failureReason",int(result.failureReason)},{"message",QString::fromStdString(result.message)},
                 {"source",GetRefText(result.sourceRevision)},{"output",GetRefText(result.outputRevision)},{"recipe",GetRefText(result.recipeRevision)},{"commitId",QString::number(result.commitId)}});
         });
         if(!admission)flow->pending=0;panel->SetAdmission(id,admission.isAccepted);
@@ -235,9 +244,15 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         flow->historyAfter=next?feature->GetHistory(0,flow->historyAfter).nextPageAfter:0;
         panel->SetComplete(id,"Observed");
     },TestPolicy::Read);
-    panel->validateAction=[panel,flow](const QString& action,const QJsonObject&)->QString{
+    panel->validateAction=[panel,flow,feature](const QString& action,const QJsonObject& p)->QString{
         if(flow->pending && action!="RestoreSource" && action!="CloseDocument")return "请等待当前裁剪请求完成。";
         if(action=="Start"||action=="Box"||action=="Plane"||action=="Sphere"||action=="Cylinder"||action=="KeepInside"||action=="RemoveInside")return GetDisplayProblem(panel);
+        if(action=="BuildResult") {
+            const auto history=feature->GetHistory(); const auto node=GetId(p["nodeId"]);
+            if(!flow->isConfirmed || history.documentId!=flow->confirmedDocument || history.appliedHead!=flow->confirmedNode
+                || history.stateRevision!=flow->confirmedRevision || (node && node!=flow->confirmedNode) || p["inputRoi"].toString()!=flow->confirmedInputRoi)
+                return "请重新确认本次文档、源数据和预览节点，再生成裁剪结果。";
+        }
         return {};
     };
     panel->observeInBackground=true;
@@ -245,6 +260,8 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         const auto input=panel->GetSession()->GetImageDescriptor();const auto current=input?input->dataRevision:DataRevisionRef{};
         if(current!=flow->input){flow->input=current;flow->isConfirmed=false;}
         const auto state=feature->GetState();const auto history=feature->GetHistory(0,flow->historyAfter);const bool framesReady=GetFramesReady(panel);
+        if(flow->isConfirmed && (history.documentId!=flow->confirmedDocument || history.appliedHead!=flow->confirmedNode
+            || history.stateRevision!=flow->confirmedRevision || panel->GetActionParameters("BuildResult")["inputRoi"].toString()!=flow->confirmedInputRoi)) flow->isConfirmed=false;
         if(flow->pending&&flow->expectedNode&&framesReady&&state.history.appliedHead==*flow->expectedNode&&state.history.renderedHead==*flow->expectedNode){
             const auto id=flow->pending;flow->pending=0;flow->expectedNode.reset();deadline->stop();
             panel->SetComplete(id,"Succeeded",{{"nodeId",QString::number(state.history.appliedHead)},{"message","历史与已呈现画面均已更新。"}});
@@ -254,15 +271,31 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         if(busy||!framesReady)for(const auto* action:{"Start","Previous","Next","Node","ResetPreview","FinishEditing","PruneSubtree","PruneDescendants","PruneOutsidePaths","BuildResult","SaveRoi"})disabled[action]="请等待当前操作与视图完成。";
         if(!history.documentId)for(const auto* action:{"Box","Plane","Sphere","Cylinder","Previous","Next","Node","BuildResult","SaveRoi","CloseDocument","RestoreSource"})disabled[action]="请先创建裁剪文档。";
         if(!GetDataRevisionRefValid(state.outputRevision))disabled["SelectOutput"]="当前文档没有已发布结果。";
+        if(!flow->isConfirmed)disabled["BuildResult"]="请先确认当前裁剪预览；切换节点或来源后须重新确认。";
+        if(!state.history.operationCount)disabled["FinishEditing"]="请先拖动裁剪控件，形成有效裁剪预览。";
         QJsonArray nodes;for(const auto& node:history.nodes)nodes.append(QJsonObject{{"nodeId",QString::number(node.nodeId)},{"parentNodeId",QString::number(node.parentNodeId)}});
         QJsonArray documents;for(const auto document:feature->GetDocuments())documents.append(QString::number(document));
         panel->SetState({{"nextPageAfter",QString::number(history.nextPageAfter)},{"documents",documents},{"documentId",QString::number(history.documentId)},{"nodes",nodes},
             {"appliedHead",QString::number(state.history.appliedHead)},{"renderedHead",QString::number(state.history.renderedHead)},
             {"isActive",state.isActive},{"isBusy",busy},{"nodeCount",QString::number(state.history.nodeCount)},{"operationCount",QString::number(state.history.operationCount)},
-            {"framesReady",framesReady},{"editMode",int(state.history.editMode)},{"isConfirmed",flow->isConfirmed},{"source",GetRefText(state.sourceRevision)},{"output",GetRefText(state.outputRevision)},
+            {"framesReady",framesReady},{"editMode",int(state.history.editMode)},{"isConfirmed",flow->isConfirmed},{"source",GetDataRevisionRefValid(state.sourceRevision)?GetRefText(state.sourceRevision):QString()},{"output",GetDataRevisionRefValid(state.outputRevision)?GetRefText(state.outputRevision):QString()},
             {"documentStatus",int(state.documentStatus)},{"blockerCount",int(state.blockers.size())},{"disabled",disabled}});
     };
-    panel->onStop=[panel]{if(panel->onMessage)panel->onMessage("返回源数据可取消当前裁剪构建；关闭文档会等待结果资源释放。");};
+    panel->onStop=[panel]{panel->SendAction("RestoreSource",{});};
+    panel->getGrayScope=[panel,feature] {
+        GrayStatisticsScope scope;const auto state=feature->GetState();const auto history=feature->GetHistory();
+        if(!history.documentId || !state.history.operationCount || GetDataRevisionRefValid(state.outputRevision))return scope;
+        scope.source=history.sourceRevision;scope.title="当前裁剪预览保留区的灰度分布";
+        scope.key=QString("preview:%1:%2:%3").arg(history.documentId).arg(history.renderedHead).arg(history.stateRevision);
+        scope.description=QString("预览文档 %1 · 节点 %2 · 确定保留区 ∩ 源有效域；边界带与无法保证精度的样本单列排除").arg(history.documentId).arg(history.renderedHead);
+        const auto roi=panel->GetActionParameters("BuildResult")["inputRoi"].toString();if(!roi.isEmpty())scope.roi=GetRef(roi);
+        scope.filter=[feature,document=history.documentId,node=history.renderedHead,revision=history.stateRevision](const auto& points) {
+            const auto precision=feature->GetPreviewPrecision(document,"primary-3d",points);
+            if(precision.failureReason!=CropFailure::None || precision.renderedHead!=node || precision.stateRevision!=revision)throw std::runtime_error("预览节点或已呈现范围已变化，等待重新统计");
+            std::vector<bool> kept;kept.reserve(precision.samples.size());for(auto value:precision.samples)kept.push_back(value==CropPointClassification::Kept);return kept;
+        };
+        return scope;
+    };
     return panel;
 }
 }

@@ -18,6 +18,7 @@ int main(int argc, char* argv[])
     parser.addHelpOption();
     parser.addOption({"case", "执行指定的 JSON 用例文件", "path"});
     parser.addOption({"record", "导出自动化操作记录", "path"});
+    parser.addOption({"background", "显示实际 Qt/VTK 窗口，但不激活或接管桌面焦点"});
     parser.addOption({"memory-budget-mib", "算法工作集上限（MiB），0 为不启用估算工作集硬限额", "MiB", "0"});
     parser.process(app);
     bool valid = false; const auto budget = parser.value("memory-budget-mib").toULongLong(&valid);
@@ -25,6 +26,7 @@ int main(int argc, char* argv[])
     try {
     Manual::TestWindow window(budget);
     window.setWindowTitle("功能自动化测试");
+    if(parser.isSet("background")){window.setAttribute(Qt::WA_ShowWithoutActivating,true);window.setWindowFlag(Qt::WindowDoesNotAcceptFocus,true);window.setWindowFlag(Qt::WindowTransparentForInput,true);}
     window.show();
     QMetaObject::invokeMethod(&window, [&] {
         const auto result = Manual::StartTestCase(window, parser.value("case"), parser.value("record"), !parser.isSet("case"));

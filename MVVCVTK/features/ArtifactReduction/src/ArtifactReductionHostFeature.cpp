@@ -11,6 +11,9 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <cstring>
+#include <algorithm>
+#include <cmath>
 
 class ArtifactReductionHostFeature::Impl final {
 public:
@@ -288,6 +291,31 @@ ArtifactState ArtifactReductionHostFeature::GetState() const
     }
     auto result = state.m_state;
     if (state.m_control) result.progressPercent = state.m_control->progress.load(std::memory_order_relaxed);
+    return result;
+}
+std::optional<std::vector<std::array<double,2>>> ArtifactReductionHostFeature::GetCandidateSamples(
+    std::uint64_t requestId,std::size_t firstVoxel,std::size_t stride,std::size_t maxCount) const
+{
+    const auto& state=*m_impl;
+    if(state.GetAccessError()!=ArtifactError::None || state.m_state.status!=ArtifactStatus::Ready || state.m_state.requestId!=requestId
+        || !stride || !maxCount || maxCount>4096 || !state.m_candidate.image)return std::nullopt;
+    DataRevisionRef source;for(const auto& input:state.m_inputs)if(input.role=="source-volume")source=input.source;
+    const auto data=state.m_data->GetData(state.m_data->GetDataGraph(),source);
+    const auto before=data ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload) : nullptr;
+    const auto after=state.m_candidate.image;
+    if(!before || !before->GetValid() || !after->GetValid() || after->GetValueType()!=ImageValueType::Float32
+        || before->GetComponentCount()!=1 || after->GetComponentCount()!=1)return std::nullopt;
+    const auto& a=before->GetGeometry();const auto& b=after->GetGeometry();
+    if(a.extent!=b.extent || a.dimensions!=b.dimensions || a.spacing!=b.spacing || a.origin!=b.origin || a.direction!=b.direction || a.coordinateFrame!=b.coordinateFrame)return std::nullopt;
+    const auto count=GetGridVoxelCount(a).value();if(firstVoxel>count)return std::nullopt;
+    ArtifactReduction::AlgorithmInput beforeInput,afterInput;beforeInput.image=before;afterInput.image=after;
+    ArtifactReduction::VolumeView sourceValues(beforeInput),candidateValues(afterInput);
+    std::vector<std::array<double,2>> result;result.reserve(maxCount);
+    auto voxel=firstVoxel;
+    for(std::size_t i=0;i<maxCount && voxel<count;++i) {
+        if(sourceValues.GetValid(voxel) && candidateValues.GetValid(voxel))result.push_back({sourceValues.GetValue(voxel),candidateValues.GetValue(voxel)});
+        if(count-voxel<=stride)break;voxel+=stride;
+    }
     return result;
 }
 

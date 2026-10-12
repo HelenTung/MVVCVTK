@@ -53,6 +53,10 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
         return host ? host->GetImageDescriptor(source) : std::optional<ImageDescriptor>{};
     };
     context.workflow.getViewTransforms = [reference] { return reference->GetViewTransforms(); };
+    context.workflow.readGraySamples=[reference](auto source,auto roi,auto offset,auto filter){return reference->ReadGraySamples(source,roi,offset,std::move(filter));};
+    context.workflow.readRecordSamples=[reference](auto ref,const std::string& column,auto offset){return reference->ReadRecordSamples(ref,column,offset);};
+    context.workflow.readRecordPage=[reference](auto ref,auto offset,auto count,auto range){return reference->ReadRecordPage(ref,offset,count,range);};
+    context.workflow.getRecordLocation=[reference](auto table,auto row,auto source){return reference->GetRecordLocation(table,row,source);};
     std::shared_ptr<RoiEditingHostFeature> roi;
 #if defined(MANUAL_ROI)
     RoiEditingConfig roiConfig; roiConfig.referenceView.viewId="primary-3d"; roiConfig.targetViews=GetAllViews();

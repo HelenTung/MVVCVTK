@@ -1,4 +1,6 @@
-add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp)
+add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp BusinessWorkflowTests.cpp
+    Scenarios/business-primary.json Scenarios/business-crop.json
+    Scenarios/business-artifact.json Scenarios/business-measurement.json)
 target_link_libraries(qt_feature_tests PRIVATE qt_feature_test_support)
 SetQtTargetDefaults(qt_feature_tests)
 set_target_properties(qt_feature_tests PROPERTIES OUTPUT_NAME QtFeatureTests
@@ -10,7 +12,7 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd" CONTE
     "@echo off\nsetlocal\nset \"PATH=${automation_runtime_path};%PATH%\"\nset \"QT_PLUGIN_PATH=${MVVCVTK_QT_PLUGIN_DIR}\"\n\"$<TARGET_FILE:qt_feature_tests>\" %*\n")
 vtk_module_autoinit(TARGETS qt_feature_tests MODULES ${MVVCVTK_QT_VTK_TARGETS})
 add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
-    --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
+    --background --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
 # Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")

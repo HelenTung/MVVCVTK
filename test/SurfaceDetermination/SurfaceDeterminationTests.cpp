@@ -16,6 +16,7 @@ int GetSuiteFailCount(const std::string_view suite)
     if (suite == "algorithm")
         return GetSurfaceBusinessFailCount() + GetSurfaceAlgorithmFailCount() + GetSurfaceContractFailCount();
     if (suite == "geometry") return GetSurfaceGeometryFailCount();
+    if (suite == "histogram") return GetSurfaceHistogramFailCount();
     if (suite == "seed-window") return GetSurfaceSeedWindowFailCount();
     if (suite == "optimization") return GetSurfaceOptimizationFailCount();
     if (suite == "lifecycle") return GetSurfaceLifecycleFailCount();
@@ -24,7 +25,7 @@ int GetSuiteFailCount(const std::string_view suite)
         return GetSurfaceBusinessFailCount() + GetSurfaceContractFailCount() +
                GetSurfaceAlgorithmFailCount() + GetSurfaceGeometryFailCount() +
                GetSurfaceLifecycleFailCount() + GetSurfaceDisplayFailCount() + GetSurfaceSeedWindowFailCount() +
-               GetSurfaceOptimizationFailCount();
+               GetSurfaceOptimizationFailCount()+GetSurfaceHistogramFailCount();
     }
     return 1;
 }

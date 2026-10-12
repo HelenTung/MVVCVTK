@@ -1,0 +1,11 @@
+{
+  "schema":"qt-control-scenario-1","checkWindowLocked":true,"viewsVisible":true,"viewLayout":"Inspection",
+  "steps":[
+    {"control":"businessPrimary","module":"Data","action":"Load","parameters":{},"expectPrimaryAction":"Load","expectStatus":"Succeeded","saveAs":"loaded","performanceCheckpoint":"@Output/load-performance.json"},
+    {"control":"businessPrimary","module":"View","action":"Set","parameters":{"viewId":"primary-3d","mode":"CompositeVolume"},"expectStatus":"Succeeded"},
+    {"control":"businessPrimary","module":"Crop","action":"Start","parameters":{"shape":"Box","removalMode":"KeepInside"},"waitForCropFrames":true,"expectPrimaryAction":"Start","expectStatus":"Succeeded","cropDrag":true,"cropDragAudit":"@Output/crop-drag.json"},
+    {"control":"businessPrimary","module":"Crop","action":"FinishEditing","waitForCropFrames":true,"expectPrimaryAction":"FinishEditing","expectStatus":"PreviewConfirmed"},
+    {"control":"businessPrimary","module":"Crop","action":"BuildResult","waitForCropFrames":true,"expectPrimaryAction":"BuildResult","expectStatus":"Published","expectFollowupStatus":"Succeeded","expectAdoptPublished":true,"screenshot":"@Output/crop-used.png","showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/crop-statistics.json","performanceCheckpoint":"@Output/crop-performance.json"},
+    {"control":"actionButton","module":"Crop","action":"RestoreSource","expectStatus":"Succeeded","screenshot":"@Output/original-restored.png"}
+  ]
+}

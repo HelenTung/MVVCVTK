@@ -211,6 +211,58 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                 {"message", QString::fromStdString(write.write.message)}, {"capturedCommit", QString::number(report.report->capturedCommit)}});
         }, TestPolicy::Read);
     const auto observeAlignment = panel->onObserve;
+    panel->onStatistics=[panel,feature,selected] {
+        if(QStringList{"EvaluateVoxelVolume","VoxelVolumeResult"}.contains(panel->GetCurrentAction())) {
+            const auto choice=panel->GetActionParameters("VoxelVolumeResult")["voxelVolume"];
+            const auto ref=choice=="current" ? selected->voxelVolume : GetRef(choice);
+            if(const auto volume=feature->GetVoxelVolume(ref)) {
+                const auto& s=volume->statistics;
+                panel->GetStatisticsWidget()->SetMessage("独立体素体积结果","结果 "+GetRefText(ref)+" · 来源 "+GetRefText(volume->source)+" · 原生体素网格，独立于对齐；存储值区间未自动标定");
+                panel->GetStatisticsWidget()->SetTable({"量值","结果","单位"},QJsonArray{
+                    QJsonArray{"可评价体积",Value(s.volumeMm3),"mm³"},QJsonArray{"观察选中体积",s.observedVolumeMm3,"mm³"},
+                    QJsonArray{"单元体积",s.cellVolumeMm3,"mm³"},QJsonArray{"选中 / 总体素",QString::number(s.selected)+" / "+QString::number(s.total),"体素"}});
+                return true;
+            }
+        }
+        const auto choice=panel->GetActionParameters("DeviationResult")["deviation"];
+        const auto ref=choice=="current" ? selected->deviation : GetRef(choice);
+        const auto snapshot=feature->GetDeviation(ref);
+        const bool geometryPage=QStringList{"InspectGeometry","InspectSection","InspectionResult"}.contains(panel->GetCurrentAction());
+        if(!geometryPage && snapshot && snapshot->forward) {
+            const auto field=snapshot->forward;
+            const auto metric=snapshot->parameters->metric;
+            const QString unit=snapshot->unit==AlignmentUnit::Millimeter ? "mm" : snapshot->unit==AlignmentUnit::Meter ? "m" : "模型单位";
+            panel->GetStatisticsWidget()->StartHistogram(GetRefText(ref),metric==AlignmentDeviationMetric::UnsignedDistance ? "实测到名义的无符号距离分布" : "名义法向投影分布",
+                (metric==AlignmentDeviationMetric::UnsignedDistance ? "无符号距离 / " : "法向投影 / ")+unit,"有效面积 / "+unit+"²",
+                [field,ref,verdict=snapshot->verdict](std::size_t offset) {
+                    StatisticsSamples result;result.total=field->samples.size();result.next=std::min(result.total,offset+4096);
+                    result.description="偏差修订 "+GetRefText(ref)+" · 实测 → 名义 · 全量面积加权 · 判定 "+Verdict(verdict)
+                        +QString(" · 有效覆盖 %1 / %2 · 另列未评估面积；反向覆盖为独立无符号距离").arg(field->statistics.evaluatedArea).arg(field->statistics.selectedArea);
+                    for(std::size_t i=offset;i<result.next;++i){const auto& sample=field->samples[i];
+                        if(sample.state==AlignmentDeviationState::Valid && std::isfinite(sample.value) && std::isfinite(sample.area) && sample.area>0){result.values.push_back(sample.value);result.weights.push_back(sample.area);}else ++result.excluded;}
+                    return result;
+                });
+            panel->GetStatisticsWidget()->onInterval=[panel,field,ref](double low,double high) {
+                for(std::size_t i=0;i<field->samples.size();++i)if(field->samples[i].state==AlignmentDeviationState::Valid && field->samples[i].value>=low && field->samples[i].value<=high) {
+                    auto p=panel->GetActionParameters("SetDeviationDisplay");p["deviation"]=GetRefText(ref);p["selectedVertex"]=QString::number(i);panel->SendAction("SetDeviationDisplay",p);return;
+                }
+            };
+            return true;
+        }
+        const auto inspection=feature->GetInspection(selected->inspection);
+        if(inspection && inspection->report) {
+            QJsonArray rows;std::vector<double> rms;
+            for(const auto& geometry:inspection->report->geometries){
+                const bool valid=geometry.status==AlignmentStatus::FullyDetermined && geometry.fitted.sampleCount>0;
+                if(valid)rms.push_back(geometry.fitted.fitRms);
+                rows.append(QJsonArray{QString::fromStdString(geometry.fitted.id),valid ? QJsonValue(geometry.fitted.fitRms) : QJsonValue(),valid ? QJsonValue(geometry.fitted.fitMax) : QJsonValue(),QString::number(geometry.fitted.sampleCount)});
+            }
+            panel->GetStatisticsWidget()->SetHistogram(BuildHistogram(rms,{},"逐特征几何拟合残差 RMS",
+                "检测修订 "+GetRefText(selected->inspection)+" · 逐特征汇总；拟合残差与配准 RMS、偏差场 RMS 分别命名","拟合 RMS（结果长度单位）","特征数量"));
+            panel->GetStatisticsWidget()->SetTable({"特征","拟合 RMS","拟合 Max","样本数"},rows);return true;
+        }
+        return false;
+    };
     panel->onObserve = [panel, feature, observeAlignment] {
         if (observeAlignment) observeAlignment();
         ParameterChoices inspections, deviations, volumes;

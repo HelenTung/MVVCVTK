@@ -1135,6 +1135,11 @@ SurfaceFailureReason GetMaterialRange(
         isoValue,      background,
         material,      validCount,
         excludedCount, double(selected->second.index - selected->first.index) / (histogramBinCount - 1)};
+    estimate->histogramCounts=histogram;
+    estimate->histogramEdges.front()=minimum;
+    estimate->histogramEdges.back()=maximum;
+    for(std::size_t i=1;i<histogramBinCount;++i) estimate->histogramEdges[i]=minimum+(static_cast<double>(i)-0.5)*binWidth;
+    for(std::size_t axis=0;axis<3;++axis) estimate->histogramSampleSteps[axis]=static_cast<int>(sampleSteps[axis]);
     return SurfaceFailureReason::None;
 }
 

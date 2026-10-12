@@ -4,6 +4,7 @@
 #include "Support/ParameterEditor.h"
 #include "Host/GapHostFeature.h"
 #include <QPointer>
+#include <limits>
 namespace Manual {
 namespace {
 QJsonObject GetStatistics(const GapStatistics& value)
@@ -15,9 +16,11 @@ QJsonObject GetStatistics(const GapStatistics& value)
 ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> feature, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "Gap", parent);
+    auto runParameters=std::make_shared<QJsonObject>();
+    auto listRange=std::make_shared<std::optional<std::array<double,2>>>();
     panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。结果区显示孔隙体积、孔隙率等统计与数据修订。");
     panel->AttachAction("Start", GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0})"),
-        [panel, feature](auto id, const auto& params) {
+        [panel, feature,runParameters](auto id, const auto& params) {
             const auto input = panel->GetSession()->GetImageDescriptor();
             if (!input) throw std::invalid_argument("请先选择体数据输入");
             GapHostStartParams start;
@@ -50,6 +53,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 owner->SetComplete(id, status, summary);
             }).status == GapAdmissionStatus::Accepted);
             panel->SetAdmission(id, accepted);
+            if(accepted)*runParameters=params;
         }, TestPolicy::Compute, true);
     panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
@@ -94,7 +98,47 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
         }, exit ? TestPolicy::Stop : TestPolicy::View);
     panel->onStop = [panel] { panel->SendAction("Exit", {}); };
-    panel->onObserve = [panel, feature] {
+    panel->AttachAction("Defects",{{"pageOffset","0"}},[panel,feature,listRange](auto id,const auto& p) {
+        const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))throw std::invalid_argument("尚无已发布缺陷表");
+        const auto page=panel->GetContext().workflow.readRecordPage(state.voidTable,GetId(p["pageOffset"]),128,*listRange);
+        QJsonArray rows,indices;for(const auto value:page["rows"].toArray()) {
+            const auto row=value.toObject();rows.append(QJsonArray{row["void-id"],row["volume-mm3"],row["equivalent-diameter-mm"]});indices.append(row["rowIndex"]);
+        }
+        auto* widget=panel->GetStatisticsWidget();widget->SetTable({"缺陷编号","体积 mm³","等效直径 mm"},rows);
+        widget->setProperty("defectRows",indices);widget->setProperty("defectNext",page["next"]);widget->setProperty("defectTotal",page["total"]);widget->setProperty("defectTable",GetRefText(state.voidTable));widget->setProperty("defectSource",GetRefText(state.sourceRevision));
+        widget->onRow=[panel,widget](int row) {
+            const auto indices=widget->property("defectRows").toJsonArray();if(row<0 || row>=indices.size())return;
+            panel->SendAction("LocateDefect",{{"rowIndex",indices[row]},{"table",widget->property("defectTable").toString()},{"source",widget->property("defectSource").toString()}});
+        };
+        panel->SetComplete(id,"Observed",{{"table",GetRefText(state.voidTable)},{"page",page}});
+        if(panel->onMessage)panel->onMessage(*listRange ? QString("列表体积筛选 [%1, %2] mm³；算法结果与全量直方图未变。").arg((**listRange)[0]).arg((**listRange)[1]) : "缺陷目录已更新；在“统计与结果”中选行可定位，翻页不重新运行算法。");
+    },TestPolicy::Read);
+    panel->AttachAction("ResetDefectFilter",{},[panel,listRange](auto id,const auto&){listRange->reset();panel->SendAction("Defects",{{"pageOffset","0"}});panel->SetComplete(id,"Observed");},TestPolicy::Read);
+    panel->AttachAction("NextDefectPage",{},[panel](auto id,const auto&) {
+        const auto offset=panel->GetStatisticsWidget()->property("defectNext").toJsonValue();
+        panel->SetParameterPatch("Defects",{{"pageOffset",offset.isString()?offset:QJsonValue("0")}});
+        panel->SendAction("Defects",panel->GetActionParameters("Defects"));panel->SetComplete(id,"Observed");
+    },TestPolicy::Read);
+    panel->AttachAction("LocateDefect",{{"rowIndex","0"},{"table","current"},{"source","current"}},[panel,feature](auto id,const auto& p) {
+        const auto state=feature->GetState();const auto table=p["table"]=="current" ? state.voidTable : GetRef(p["table"]);
+        const auto source=p["source"]=="current" ? state.sourceRevision : GetRef(p["source"]);
+        const auto world=panel->GetContext().workflow.getRecordLocation(table,GetId(p["rowIndex"]),source);
+        HostSessionSetRequest request;request.cursor=HostCursorParams{world,-1};panel->SendHost(id,std::move(request));
+    },TestPolicy::View);
+    panel->onStatistics=[panel,feature,listRange] {
+        const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))return false;
+        const auto ref=state.voidTable;const auto read=panel->GetContext().workflow.readRecordSamples;
+        panel->GetStatisticsWidget()->StartHistogram(GetRefText(ref),"缺陷体积分布","缺陷体积 / mm³","缺陷数量",
+            [owner=QPointer<ModulePanel>(panel),read,ref](auto offset){if(!owner || owner->GetContext().workflow.GetIsClosing())throw std::runtime_error("统计已停止");return read(ref,"volume-mm3",offset);});
+        panel->GetStatisticsWidget()->onInterval=[panel,feature,listRange,ref](double low,double high){
+            if(feature->GetState().voidTable!=ref){if(panel->onMessage)panel->onMessage("所显示分布的结果已变化，请刷新后再筛选。");return;}
+            const auto edges=panel->GetStatisticsWidget()->GetHistogram()["edges"].toArray();
+            const auto upper=!edges.isEmpty() && high<edges.last().toDouble() ? std::nextafter(high,-std::numeric_limits<double>::infinity()) : high;
+            *listRange=std::array<double,2>{low,upper};panel->SendAction("Defects",{{"pageOffset","0"}});
+        };
+        return true;
+    };
+    panel->onObserve = [panel, feature,runParameters,listRange] {
         const auto state = feature->GetState();
         auto summary = GetStatistics(state.statistics);
         summary["analysisState"] = static_cast<int>(state.analysisState);
@@ -105,6 +149,11 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         summary["palette"] = static_cast<int>(state.display.mode);
         summary["source"] = GetRefText(state.sourceRevision);
         summary["resultSet"] = GetRefText(state.resultSet);
+        summary["voidTable"] = GetRefText(state.voidTable);
+        summary["isListFiltered"]=listRange->has_value();
+        summary["hasNextDefectPage"]=panel->GetStatisticsWidget()->property("defectNext").toJsonValue().toString().toULongLong()<panel->GetStatisticsWidget()->property("defectTotal").toJsonValue().toString().toULongLong();
+        try {summary["parametersChanged"]=!runParameters->isEmpty() && panel->GetActionParameters("Start")!=*runParameters;}
+        catch(const std::exception&){summary["parametersChanged"]=true;}
         const auto input = panel->GetSession()->GetImageDescriptor();
         if (input) {
             auto* form = panel->GetParameterEditor("Start");
