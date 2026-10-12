@@ -21,7 +21,7 @@
 #include <QVBoxLayout>
 #include <QSet>
 #include <QSignalBlocker>
-#include <QTabWidget>
+#include <QToolButton>
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -129,10 +129,11 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
 {
     m_boolean = m_schema.isBool() || (m_schema.isNull() && Shape(m_key).isBool());
     setObjectName(m_key); setAccessibleName(m_title);
+    setMinimumWidth(0); setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_layout = new QVBoxLayout(this); m_layout->setContentsMargins(0,0,0,0); m_layout->setSpacing(4);
     if (!m_key.isEmpty() && showTitle) {
         auto* heading = new QHBoxLayout;
-        auto* label = new QLabel(m_title, this); label->setObjectName("parameterTitle"); label->setWordWrap(true); label->setToolTip(GetParameterHelp(m_key)); heading->addWidget(label, 1);
+        auto* label = new QLabel(m_title, this); label->setObjectName("parameterTitle"); label->setWordWrap(true); label->setMinimumWidth(0); label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); label->setToolTip(GetParameterHelp(m_key)); heading->addWidget(label, 1);
         if (m_optional && !m_boolean) {
             m_specified = new QCheckBox("提供参数", this); m_specified->setObjectName("specified");
             m_specified->setToolTip("取消仅表示不提供此参数，由业务使用默认值或保留原值；不会清零或设置 false。"); heading->addWidget(m_specified);
@@ -185,19 +186,12 @@ void ParameterEditor::SetFieldVisibility()
     if (!m_key.isEmpty() && m_key!="segments") return;
     const auto bound = m_key.isEmpty() ? GetBoundParameters(m_module, m_action) : QStringList{};
     for (const auto& field : m_fields) field.second->setVisible(!bound.contains(field.first) && GetFieldApplicable(field.first));
-    if (m_groups) {
-        auto* selected = m_groups->currentWidget(); int visibleIndex = 0;
-        for (const auto& name : m_groupOrder) {
-            auto* page = m_groupPages.at(name);
-            const bool populated = std::any_of(m_fields.begin(), m_fields.end(), [&](const auto& field) {
-                return field.second->parentWidget() == page && !field.second->isHidden();
-            });
-            const int index = m_groups->indexOf(page);
-            if (!populated && index >= 0) m_groups->removeTab(index);
-            else if (populated && index < 0) m_groups->insertTab(visibleIndex,page,name);
-            if (populated) ++visibleIndex;
-        }
-        if (selected && m_groups->indexOf(selected) >= 0) m_groups->setCurrentWidget(selected);
+    for (const auto& section : m_groupSections) {
+        auto* page = m_groupPages.at(section.first);
+        const bool populated = std::any_of(m_fields.begin(), m_fields.end(), [&](const auto& field) {
+            return field.second->parentWidget() == page && !field.second->isHidden();
+        });
+        section.second->setVisible(populated);
     }
 }
 void ParameterEditor::NotifyEdited() { SetFieldVisibility(); if (onEdited) onEdited(); }
@@ -283,7 +277,7 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     if (effective.isNull()) effective = m_schema.isNull() ? Shape(m_key) : m_schema;
     if (m_body) { m_layout->removeWidget(m_body); delete m_body; }
     m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr;
-    m_groups = nullptr; m_groupPages.clear(); m_groupOrder.clear();
+    m_groupPages.clear(); m_groupSections.clear();
     m_booleanState = nullptr; m_unsetBoolean = nullptr; m_booleanSpecified = !value.isNull();
     if (m_stateBound) m_booleanEdited = value.isBool();
     m_body = new QWidget(this); m_layout->addWidget(m_body);
@@ -308,10 +302,11 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             if (!GetBoundParameters(m_module, m_action).contains(key)) groups.insert(GetParameterGroup(m_module, key));
         const bool grouped = groups.size() > 1;
         std::map<QString, QGridLayout*> grids;
-        std::map<QString, std::pair<int, int>> positions;
+        std::map<QString, int> rows;
+        QVBoxLayout* sections = nullptr;
         if (grouped) {
-            auto* layout = new QVBoxLayout(m_body); layout->setContentsMargins(0,0,0,0);
-            m_groups = new QTabWidget(m_body); m_groups->setObjectName("parameterGroups"); layout->addWidget(m_groups);
+            m_body->setObjectName("parameterGroups");
+            sections = new QVBoxLayout(m_body); sections->setContentsMargins(0,0,0,0); sections->setSpacing(10);
         } else {
             auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
             grids[QString()] = grid;
@@ -321,28 +316,42 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             QWidget* page = m_body;
             if (grouped) {
                 if (!m_groupPages.count(group)) {
-                    page = new QWidget(m_groups); m_groupPages[group] = page; m_groupOrder.append(group); m_groups->addTab(page, group);
-                    auto* grid = new QGridLayout(page); grid->setContentsMargins(6,8,6,8); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
+                    auto* section = new QWidget(m_body); section->setObjectName("parameterSection");
+                    section->setProperty("sectionName", group);
+                    auto* sectionLayout = new QVBoxLayout(section); sectionLayout->setContentsMargins(0,0,0,0); sectionLayout->setSpacing(8);
+                    auto* toggle = new QToolButton(section); toggle->setObjectName("sectionToggle"); toggle->setText(group);
+                    toggle->setProperty("parameterSection", true); toggle->setCheckable(true);
+                    toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                    const bool expanded = group != "高级与诊断";
+                    toggle->setChecked(expanded); toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+                    page = new QWidget(section); page->setObjectName("sectionFields"); page->setVisible(expanded);
+                    sectionLayout->addWidget(toggle); sectionLayout->addWidget(page); sections->addWidget(section);
+                    // 折叠仅改变可见性，不读取输入、不重建字段，也不通知业务编辑。
+                    connect(toggle, &QToolButton::toggled, page, [page, toggle](bool isExpanded) {
+                        page->setVisible(isExpanded); toggle->setArrowType(isExpanded ? Qt::DownArrow : Qt::RightArrow);
+                    });
+                    m_groupPages[group] = page; m_groupSections[group] = section;
+                    auto* grid = new QGridLayout(page); grid->setContentsMargins(2,0,2,2); grid->setVerticalSpacing(10);
                     grids[group] = grid;
                 } else page = m_groupPages.at(group);
             }
-            auto* grid = grids.at(group); auto& position = positions[group]; auto& row = position.first; auto& column = position.second;
+            auto* grid = grids.at(group); auto& row = rows[group];
             const auto v = object[key]; const auto prototype = m_schema.isObject() && m_schema.toObject().contains(key) ? m_schema.toObject()[key] : v;
             auto* field = new ParameterEditor(m_module, m_action, key, v, prototype, page, false,
                 seedRow && key == "target" ? "新标签编号" : QString());
             field->onEdited = [this] { NotifyEdited(); }; m_fields[key] = field;
             if (m_key.isEmpty() && GetBoundParameters(m_module, m_action).contains(key)) { field->hide(); continue; }
-            if (seedRow) { grid->addWidget(field, 0, key == "imageIndex" ? 0 : 3, 1, key == "imageIndex" ? 3 : 1); continue; }
-            const bool wide = v.isArray() || v.isObject() || (v.isNull() && (Shape(key).isArray() || Shape(key).isObject())) || IsPath(key);
-            if (wide && column) { ++row; column = 0; }
-            grid->addWidget(field, row, column, 1, wide ? 2 : 1);
-            if (wide || column == 1) { ++row; column = 0; } else column = 1;
+            grid->addWidget(field, row++, 0);
         }
         for (const auto& entry : grids) {
             auto* grid = entry.second;
-            if (seedRow) { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); grid->setColumnStretch(2, 1); grid->setColumnStretch(3, 1); }
-            else { grid->setColumnStretch(0, 1); grid->setColumnStretch(1, 1); }
-            grid->setRowStretch(grid->rowCount(), 1);
+            grid->setColumnStretch(0, 1);
+        }
+        if (sections) {
+            for (const auto& name : {"输入与结果", "空间与矩阵", "作用范围", "零件属性", "环状校正", "扩散校正", "孔隙筛选", "算法参数", "显示设置", "导出与诊断", "高级与诊断"}) {
+                const auto section = m_groupSections.find(name);
+                if (section != m_groupSections.end()) { sections->removeWidget(section->second); sections->addWidget(section->second); }
+            }
         }
         return;
     }
@@ -406,6 +415,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
     }
     if (!choices.isEmpty() && value.isString()) {
         auto* input = new QComboBox(m_body); input->setObjectName("value");
+        input->setMinimumWidth(0); input->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         for (const auto& choice : choices) input->addItem(choice.second, choice.first);
         int index = input->findData(value.toString());
         if (index < 0) { input->addItem(value.toString().isEmpty() ? "请选择" : "自定义：" + value.toString(), value.toString()); index = input->count()-1; }
@@ -446,10 +456,12 @@ void ParameterEditor::AddRow(const QJsonValue& value)
     auto* editor = new ParameterEditor(m_module, m_action, m_key, value, m_itemTemplate, row, true, "第 " + QString::number(m_rows.size()+1) + " 组");
     editor->onEdited = [this] { NotifyEdited(); };
     auto* remove = new QPushButton("删除", row); remove->setObjectName("removeRow"); remove->setFixedWidth(55);
-    layout->addWidget(editor, 1); layout->addWidget(remove, 0, Qt::AlignTop); m_rowLayout->addWidget(row); m_rows.emplace_back(row, editor);
+    auto* commands = new QVBoxLayout; commands->setSpacing(4); commands->addWidget(remove);
+    layout->addWidget(editor, 1); layout->addLayout(commands); commands->setAlignment(Qt::AlignTop);
+    m_rowLayout->addWidget(row); m_rows.emplace_back(row, editor);
     if(m_key=="segments")for(const int direction:{-1,1}) {
         auto* move=new QPushButton(direction<0 ? "上移" : "下移",row);
-        move->setObjectName(direction<0 ? "moveUp" : "moveDown");layout->addWidget(move,0,Qt::AlignTop);
+        move->setObjectName(direction<0 ? "moveUp" : "moveDown"); move->setFixedWidth(55); commands->addWidget(move);
         connect(move,&QPushButton::clicked,this,[this,row,direction] {
             const auto found=std::find_if(m_rows.begin(),m_rows.end(),[row](const auto& item){return item.first==row;});
             if(found==m_rows.end())return;
