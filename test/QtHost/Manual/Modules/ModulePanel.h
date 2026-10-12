@@ -90,11 +90,14 @@ private:
     QTabBar* m_parameterTabs = nullptr;
     QString m_parameterAction;
     QLabel* m_noticeLabel = nullptr;
+    QLabel* m_operationTitle = nullptr;
+    QLabel* m_operationDescription = nullptr;
     QToolButton* m_help = nullptr;
     QToolButton* m_moreOperations = nullptr;
     QMenu* m_operationMenu = nullptr;
     QStackedWidget* m_commandArea = nullptr;
     std::map<QString, QWidget*> m_commandRows;
+    std::map<QString, QLabel*> m_requirements;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
     bool m_isSearching = false;
@@ -128,6 +131,7 @@ private:
     void SelectSceneItem(QTreeWidgetItem* item);
     void FilterNodes();
     void SendButton(const QString& action, const QJsonObject& context = {});
+    QString GetActionGroup(const QString& action) const;
 };
 HostViewTargets GetAllViews();
 HostViewTargets GetMainViews();

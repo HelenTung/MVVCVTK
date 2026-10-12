@@ -8,6 +8,7 @@
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
 #include "Support/ResultReport.h"
+#include "Support/WorkbenchStyle.h"
 #include <QTabWidget>
 #include <QDialog>
 #include <QToolButton>
@@ -164,20 +165,23 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
     const bool ready = Wait([&] {
         const auto* current = panel->findChild<QPushButton*>("action_" + action);
-        return current && current->isVisible() && current->isEnabled();
+        const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
+        const auto* command = menu->findChild<QAction*>("command_" + action);
+        return current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled()));
     }, 2000);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
-    Check(ready, "actual business button is visible and responds");
+    Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
-    if (!button || !button->isVisible() || !button->isEnabled())
-        std::cerr << "Button diagnostic: " << module.toStdString() << '/' << action.toStdString()
-            << " exists=" << (button != nullptr) << " visible=" << (button && button->isVisible())
-            << " enabled=" << (button && button->isEnabled())
-            << " reason=" << (button ? button->toolTip().toStdString() : "")
-            << " state=" << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
-    Check(button && button->isVisible() && button->isEnabled(), "actual business button is visible and responds");
+    Check(button && button->isEnabled(), "actual business command is enabled");
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    button->click(); return id;
+    if (button->isVisible()) button->click();
+    else {
+        auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
+        Check(command && command->isEnabled(), "direct command remains available in the classified menu");
+        command->trigger();
+        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000), "menu dispatch reaches the original business path");
+    }
+    return id;
 }
 std::uint64_t SendUnavailable(TestWindow& window, const QString& module, const QString& action)
 {
@@ -219,23 +223,56 @@ void CheckFourViewGeometry(TestWindow& window)
         window.resize(size); QCoreApplication::processEvents();
         Check(Wait(sameSize, 3000), "all four image regions stay equal in width and height when resizing");
     }
+    auto* layoutChoice = window.findChild<QComboBox*>("viewLayout");
+    const auto windows = window.GetSession()->GetRenderViewStates();
+    auto* primary = window.findChild<QVTKOpenGLNativeWidget*>("primary3D");
+    const auto primarySize = primary->size();
+    auto* renderWindow = primary->renderWindow();
+    layoutChoice->setCurrentIndex(1); QCoreApplication::processEvents();
+    Check(Wait([&] { return primary->width() > primarySize.width() && primary->height() > primarySize.height(); },3000),
+        "3D-only layout expands the existing primary viewport");
+    for (const auto* view : views) if (view != primary) Check(!view->isVisible(), "slice viewports are hidden in 3D-only layout");
+    Check(primary->renderWindow() == renderWindow && window.GetSession()->GetRenderViewStates().size() == windows.size(),
+        "layout switching preserves the original render windows and host view identities");
+    layoutChoice->setCurrentIndex(0); QCoreApplication::processEvents();
+    Check(Wait(sameSize,3000), "returning to four views restores equal image regions");
 }
 void CheckUiAndRecords(TestWindow& window)
 {
-    const auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    Check(tabs && tabs->count() ==
-#if defined(MANUAL_ROI)
-        11
-#else
-        10
-#endif
-        && tabs->shape() == QTabBar::RoundedNorth, "all feature names are in a horizontal top bar");
-    int partTabs = 0;
-    for (int i = 0; i < tabs->count(); ++i) {
-        if (tabs->tabText(i) == "零件") ++partTabs;
-        Check(tabs->tabText(i) != "零件分割" && tabs->tabText(i) != "零件编辑", "segmentation and editing never appear as separate businesses");
+    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+    auto* tabs = window.findChild<QTabBar*>("featureTabs");
+    auto* pages = window.findChild<QStackedWidget*>("parameterPages");
+    auto* browsers = window.findChild<QStackedWidget*>("browserStack");
+    Check(workspaces && workspaces->count() == 3 && tabs && tabs->shape() == QTabBar::RoundedNorth,
+        "task workspaces organize horizontal module navigation");
+    QSet<QString> moduleIds;
+    QStringList remembered;
+    for (int group = 0; group < workspaces->count(); ++group) {
+        workspaces->setCurrentIndex(group);
+        for (int i = 0; i < tabs->count(); ++i) {
+            tabs->setCurrentIndex(i);
+            const auto id = tabs->tabData(i).toString(); moduleIds.insert(id);
+            auto* module = window.GetModule(id);
+            Check(module && pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
+                "module identity keeps its parameter page and object browser synchronized");
+        }
+        remembered.append(tabs->tabData(tabs->currentIndex()).toString());
     }
-    Check(partTabs == 1 && window.GetModule("PartEdit") == window.GetModule("Part"), "one part workspace also resolves legacy case identifiers");
+    Check(moduleIds.size() == (window.GetModule("Roi") ? 11 : 10) && moduleIds.contains("Part")
+        && window.GetModule("PartEdit") == window.GetModule("Part"), "all modules remain reachable with one segmentation and editing page");
+    for (int group = 0; group < workspaces->count(); ++group) {
+        workspaces->setCurrentIndex(group);
+        Check(tabs->tabData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
+    }
+    window.GetWorkflow().onNavigate("Data", "Load", {});
+    Check(workspaces->currentIndex() == 0 && tabs->tabData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
+    auto* diagnostics = window.findChild<QToolButton*>("toggleDiagnostics");
+    auto* details = window.findChild<QWidget*>("diagnosticDetails");
+    Check(diagnostics && details && details->isHidden() && window.findChild<QLabel*>("latestMessage")->isVisible(),
+        "latest feedback stays visible while detailed diagnostics are collapsed");
+    diagnostics->click(); Check(details->isVisible(), "diagnostics reveal logs and measurements on demand"); diagnostics->click();
+    Check(window.findChild<QToolButton*>("testTools")->menu()->findChild<QAction*>("performanceCapture")
+        && !window.findChild<QPushButton*>("stopCalculation")->isEnabled(), "diagnostic tools are grouped and idle stop is disabled");
     auto* open = window.findChild<QPushButton*>("openVolume");
     Check(open && open->isVisible() && open->isEnabled() && open->shortcut() == QKeySequence(QKeySequence::Open),
         "input can be opened from the top toolbar or Ctrl+O");
@@ -687,7 +724,7 @@ void CheckParameterLayout(TestWindow& window)
         "selected operation command remains outside the parameter scroll area");
     auto* operationTabs = view->findChild<QTabBar*>("parameterTabs");
     auto* more = view->findChild<QToolButton*>("moreOperations");
-    Check(operationTabs && !operationTabs->usesScrollButtons() && operationTabs->count() <= 5 && more && more->menu(),
+    Check(operationTabs && operationTabs->usesScrollButtons() && operationTabs->count() <= 5 && more && more->menu(),
         "common operations fit a compact row and all additional operations have a discoverable menu");
     const auto originalSize = window.size(); window.resize(1280,800); QCoreApplication::processEvents();
     const auto commandBounds = QRect(execute->mapTo(view,QPoint()),execute->size());
@@ -768,14 +805,31 @@ void CheckParameterLayout(TestWindow& window)
         "default thresholds adapt to unsigned and signed gray ranges while explicit zero stays explicit");
     Check(GetVoxelSpacing(signedRange) == .02125 && GetInputDiagonal(signedRange) > 2.55,
         "default measurement lengths use the input geometry rather than one CT fixture");
-    auto* grouped = window.GetModule("Data")->GetParameterEditor("Load")->findChild<QTabWidget*>("parameterGroups");
-    Check(grouped && grouped->count() >= 2, "data input and geometry are organized in parameter group tabs");
+    auto* dataForm = window.GetModule("Data")->GetParameterEditor("Load");
+    auto* grouped = dataForm->findChild<QWidget*>("parameterGroups");
+    Check(grouped && grouped->findChildren<QToolButton*>("sectionToggle").size() >= 2, "data input and geometry use named collapsible sections");
     const auto groupValues = window.GetModule("Data")->GetParameterEditor("Load")->GetValue();
     const auto groupRecordCount = window.GetRecords().GetRecords()["records"].toArray().size();
-    for (int index = 0; index < grouped->count(); ++index) grouped->setCurrentIndex(index);
+    int edits = 0; const auto previousCallback = dataForm->onEdited;
+    dataForm->onEdited = [&] { ++edits; };
+    for (auto* section : grouped->findChildren<QToolButton*>("sectionToggle")) { section->click(); section->click(); }
+    dataForm->onEdited = previousCallback;
+    Check(edits == 0, "section folding never emits parameter edits");
     Check(window.GetModule("Data")->GetParameterEditor("Load")->GetValue() == groupValues
         && window.GetRecords().GetRecords()["records"].toArray().size() == groupRecordCount,
         "parameter group navigation preserves all values and never dispatches a request");
+    // 使用真实字段构造检查窄栏；不依赖整窗分割器把参数列撑宽。
+    for (const auto& sample : {std::pair<QString,QString>{"Data", "Load"}, {"View", "Set"}, {"Gap", "SetDisplay"}}) {
+        auto* source = window.GetModule(sample.first)->GetParameterEditor(sample.second); if (!source) continue;
+        QScrollArea narrow; narrow.setStyleSheet(GetWorkbenchStyle()); narrow.setWidgetResizable(true); narrow.resize(340,600);
+        auto* editor = new ParameterEditor(sample.first,sample.second,{},source->GetValue(),source->GetValue()); narrow.setWidget(editor);
+        if (auto* segments = editor->GetField("segments")) {
+            if (auto* add = segments->findChild<QPushButton*>("addRow")) add->click();
+        }
+        narrow.show(); QCoreApplication::processEvents();
+        Check(Wait([&] { return narrow.horizontalScrollBar()->maximum() == 0; },2000), "narrow parameter samples fit without horizontal scrolling");
+        narrow.hide();
+    }
     const QJsonObject report{{"operationId","7"},{"module","Roi"},{"action","Begin"},{"status","Succeeded"},
         {"parameters",QJsonObject{{"matrix",identity},{"name","含逗号,引号\"与\n换行"}}},{"result",QJsonObject{{"value",.05}}},{"source",QJsonObject{} },
         {"current",QJsonObject{{"dims",QJsonArray{32,32,32}}}}};
@@ -1375,14 +1429,19 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
     GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "feature-switch-regression"},
         {"dimensions", QJsonArray{n,n,n}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{0,0,0}}, {"sourceDigest", ""}}), "Succeeded");
     auto* tabs = window.findChild<QTabBar*>("featureTabs");
+    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
     auto* part = window.GetModule("Part"); auto* form = part->GetParameterEditor("Start");
     const auto threshold = form->GetField("threshold");
     for (int round = 0; round < 3; ++round) {
         const auto id = Click(window, "Part", "Start", {{"threshold", 50.}, {"minPartVoxels", "1"}});
         Check(!window.GetRecords().GetRecord(id)["isTerminal"].toBool(), "feature switching begins while segmentation is pending");
         int switches = 0;
-        const auto change = [&] { tabs->setCurrentIndex((tabs->currentIndex()+1) % tabs->count()); ++switches; };
-        for (int i = 0; i < tabs->count(); ++i) change();
+        const auto change = [&] {
+            if (tabs->currentIndex()+1 < tabs->count()) tabs->setCurrentIndex(tabs->currentIndex()+1);
+            else { workspaces->setCurrentIndex((workspaces->currentIndex()+1) % workspaces->count()); tabs->setCurrentIndex(0); }
+            ++switches;
+        };
+        for (int i = 0; i < (window.GetModule("Roi") ? 11 : 10); ++i) change();
         QTimer switching; switching.setInterval(1); QObject::connect(&switching, &QTimer::timeout, &window, [&] {
             if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) switching.stop(); else change();
         }); switching.start();
@@ -2034,7 +2093,10 @@ void StartSequence(TestWindow& window, const QString& path)
             auto* tabs = window.findChild<QTabBar*>("featureTabs");
             QObject::connect(&switching, &QTimer::timeout, &window, [&, tabs] {
                 if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) { switching.stop(); return; }
-                tabs->setCurrentIndex((tabs->currentIndex()+1) % tabs->count()); ++switchCount;
+                auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+                if (tabs->currentIndex()+1 < tabs->count()) tabs->setCurrentIndex(tabs->currentIndex()+1);
+                else { workspaces->setCurrentIndex((workspaces->currentIndex()+1) % workspaces->count()); tabs->setCurrentIndex(0); }
+                ++switchCount;
             });
             switching.start(20);
         }
@@ -2230,6 +2292,7 @@ void StartSequence(TestWindow& window, const QString& path)
             }
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
         }
+        if (step["checkViewLayout"].toBool()) CheckFourViewGeometry(window);
         if (step["checkSceneConsistency"].toBool()) {
             const bool consistent = Wait([&] {
                 const auto descriptor = window.GetSession()->GetImageDescriptor();

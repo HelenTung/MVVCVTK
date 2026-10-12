@@ -47,24 +47,25 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     setAcceptDrops(true);
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(10,10,10,10); layout->setSpacing(8);
     auto* heading = new QHBoxLayout;
-    auto* title = new QLabel(GetDisplayName(), this); title->setStyleSheet("font-size: 16px; font-weight: 600;"); heading->addWidget(title,1);
-    m_help = new QToolButton(this); m_help->setText("说明"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
-    m_noticeLabel = new QLabel(this); m_noticeLabel->setWordWrap(true); m_noticeLabel->setStyleSheet("color: #536579;"); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
-    connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible(visible && !m_notice.isEmpty());});
+    auto* title = new QLabel(GetDisplayName(), this); title->setObjectName("moduleTitle"); title->setWordWrap(true); heading->addWidget(title,1);
+    m_help = new QToolButton(this); m_help->setText("模块说明"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
+    m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
+    connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());});
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
     m_quickActions = new QWidget(this); m_quickActions->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
-    layout->addWidget(m_quickActions);
     auto* navigation = new QHBoxLayout;
     m_parameterTabs = new QTabBar(this); m_parameterTabs->setObjectName("parameterTabs");
-    m_parameterTabs->setExpanding(true); m_parameterTabs->setUsesScrollButtons(false); m_parameterTabs->setElideMode(Qt::ElideRight); m_parameterTabs->setDrawBase(false);
-    navigation->addWidget(m_parameterTabs,1);
-    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("更多");
+    navigation->addWidget(new QLabel("常用操作", this),1);
+    m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setElideMode(Qt::ElideNone); m_parameterTabs->setDrawBase(false);
+    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("全部操作");
     m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_moreOperations->setMenu(m_operationMenu);
-    navigation->addWidget(m_moreOperations); layout->addLayout(navigation);
+    navigation->addWidget(m_moreOperations); layout->addLayout(navigation); layout->addWidget(m_parameterTabs);
     connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
     });
+    m_operationTitle = new QLabel(this); m_operationTitle->setObjectName("operationTitle"); m_operationTitle->setWordWrap(true); layout->addWidget(m_operationTitle);
+    m_operationDescription = new QLabel(this); m_operationDescription->setObjectName("operationDescription"); m_operationDescription->setWordWrap(true); layout->addWidget(m_operationDescription);
     m_browser = new QTabWidget(this); m_browser->setObjectName("objectBrowser");
     auto* catalogPage = new QWidget(m_browser); auto* catalogLayout = new QVBoxLayout(catalogPage);
     catalogLayout->setContentsMargins(4, 6, 4, 4);
@@ -117,13 +118,14 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
     m_parameterScroll = new QScrollArea(this); m_parameterScroll->setObjectName("operationScroll");
     m_parameterScroll->setWidgetResizable(true); m_parameterScroll->setFrameShape(QFrame::NoFrame);
-    m_parameterScroll->setMinimumHeight(180);
+    m_parameterScroll->setMinimumHeight(96);
     auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
     m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
     m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");
     m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); layout->addWidget(m_commandArea);
+    layout->addWidget(m_quickActions);
     connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
         const auto id = item->data(0, Qt::UserRole).toJsonObject()["id"];
         for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
@@ -208,7 +210,11 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         };
         layout->addWidget(form);
         auto* commands = new QWidget(m_commandArea); commands->setObjectName("commands_" + name);
-        auto* footer = new QHBoxLayout(commands); footer->setContentsMargins(4,8,4,4);
+        auto* commandLayout = new QVBoxLayout(commands); commandLayout->setContentsMargins(0,8,0,0); commandLayout->setSpacing(6);
+        auto* requirement = new QLabel(commands); requirement->setObjectName("commandRequirement"); requirement->setWordWrap(true);
+        requirement->setMinimumWidth(0); requirement->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+        commandLayout->addWidget(requirement); m_requirements[name] = requirement;
+        auto* footer = new QHBoxLayout; footer->setContentsMargins(0,0,0,0); commandLayout->addLayout(footer);
         auto* files = new QToolButton(commands); files->setText("参数文件"); files->setPopupMode(QToolButton::InstantPopup);
         auto* menu = new QMenu(files); files->setMenu(menu);
         menu->addAction("导入参数", this, [this, name] {
@@ -465,7 +471,7 @@ void ModulePanel::RefreshWorkflow()
         {"Data",{"Load","Select","ExportData"}}, {"View",{"Set","Visibility","Cursor"}},
         {"Part",{"Start","SetState","Paint","Split"}}, {"Surface",{"GlobalAutomatic","Visibility","SamplePoints"}},
         {"Wall",{"Start","SetDisplay","SetEvaluation","Result"}}, {"Artifact",{"Ring","Diffusion","Combined"}},
-        {"Alignment",{"ImportReference","SaveRecipe","Start","Result"}}, {"Crop",{"Start","Mode","AppendExact"}},
+        {"Alignment",{"ImportReference","SaveRecipe","Start","Result"}}, {"Crop",{"Start","Mode","BuildResult","AppendExact"}},
         {"Roi",{"Begin","SetDraft"}}, {"Rotation",{"Rotate","SetEnabled"}}, {"Gap",{"Start","SetDisplay"}}};
     QStringList pages;
     for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
@@ -483,41 +489,42 @@ void ModulePanel::RefreshWorkflow()
                 m_parameterTabs->setTabToolTip(index,GetActionText(m_name,name));
             }
         }
-        int active = -1, first = -1;
+        int active = -1;
         for (int i = 0; i < m_parameterTabs->count(); ++i) {
-            const auto name = m_parameterTabs->tabData(i).toString(); const bool enabled = allowed.contains(name);
-            m_parameterTabs->setTabEnabled(i, enabled);
-            if (enabled && first < 0) first = i;
-            if (enabled && name == m_parameterAction) active = i;
+            const auto name = m_parameterTabs->tabData(i).toString();
+            m_parameterTabs->setTabEnabled(i, !closing);
+            if (name == m_parameterAction) active = i;
         }
-        if (active < 0) active = first;
-        if (active >= 0) m_parameterAction = m_parameterTabs->tabData(active).toString();
-        m_parameterTabs->setCurrentIndex(active); m_parameterTabs->setVisible(m_parameterTabs->count() > 1);
+        m_parameterTabs->setCurrentIndex(active); m_parameterTabs->setVisible(!pages.isEmpty());
     }
+    static const QHash<QString, QStringList> quickCommands{
+        {"Data", {"Descriptor"}}, {"View", {"State"}}, {"Roi", {"Commit", "Cancel"}},
+        {"Crop", {"FinishEditing", "Exit"}}, {"Part", {"Commit", "Discard", "Stop", "EditSelected"}},
+        {"Surface", {"OpenAlignment", "Stop"}}, {"Artifact", {"Commit", "Discard", "Cancel"}},
+        {"Alignment", {"Result", "Cancel"}}, {"Wall", {"Result", "Cancel"}},
+        {"Rotation", {"Cancel"}}, {"Gap", {"Overlay", "Exit"}}};
     QStringList visible;
-    const auto addQuick = [&](const QString& name) {
-        if (m_entries.count(name) && allowed.contains(name) && m_cards.at(name) == m_buttons.at(name)
-            && !visible.contains(name) && visible.size() < 3) visible.append(name);
-    };
-    addQuick(m_currentAction);
-    for (const auto& name : m_actionOrder) if (m_entries.at(name).policy == TestPolicy::Stop) addQuick(name);
-    if (m_name == "Part" && state["hasPreview"].toBool()) { addQuick("Commit"); addQuick("Discard"); }
-    if (m_name == "Part") { addQuick("Catalog"); addQuick("EditSelected"); }
-    for (const auto& name : m_actionOrder) if (name != "Clear" && name != "GraphInfo" && name != "UseData") addQuick(name);
+    for (const auto& name : quickCommands.value(m_name))
+        if (m_entries.count(name) && m_cards.at(name) == m_buttons.at(name)) visible.append(name);
     if (visible.size() != m_visibleActions.size() || !std::equal(visible.cbegin(), visible.cend(), m_visibleActions.cbegin())) {
         const TestTiming layoutTiming(m_context.records, "Layout.Rebuild." + m_name);
         while (auto* item = m_quickLayout->takeAt(0)) delete item;
-        for (int i = 0; i < visible.size(); ++i) m_quickLayout->addWidget(m_buttons.at(visible[i]), i/3, i%3);
+        for (int i = 0; i < visible.size(); ++i) m_quickLayout->addWidget(m_buttons.at(visible[i]), i/2, i%2);
         m_visibleActions = visible;
     }
     const TestTiming actionTiming(m_context.records, "Actions." + m_name);
     for (const auto& name : m_actionOrder) {
         auto* button = m_buttons.at(name); const auto& entry = m_entries.at(name);
-        const bool shown = allowed.contains(name) && (m_cards.at(name) == button ? visible.contains(name) : name == m_parameterAction);
+        const bool shown = m_cards.at(name) == button ? visible.contains(name) : name == m_parameterAction;
         m_cards.at(name)->setVisible(shown);
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
+        if (!allowed.contains(name) && reason.isEmpty()) reason = "请在左侧选择适用对象，或先完成所需步骤。";
+        if (closing) reason = "测试会话正在关闭。";
+        if (m_requirements.count(name)) {
+            m_requirements.at(name)->setText(reason); m_requirements.at(name)->setVisible(!reason.isEmpty());
+        }
         // 按业务能力禁用命令并说明原因；参数页仍可浏览，后台完成后自动恢复。
         button->setEnabled(!m_context.workflow.GetIsClosing() && reason.isEmpty());
         button->setToolTip(GetActionDescription(m_name, name) + (reason.isEmpty() ? "" : "\n" + reason));
@@ -527,28 +534,60 @@ void ModulePanel::RefreshWorkflow()
             button->setChecked(state["isActive"].toBool() && state["editMode"].toInt() == (name == "KeepInside" ? 1 : name == "RemoveInside" ? 2 : 0));
         }
     }
-    if (m_commandRows.count(m_parameterAction) && allowed.contains(m_parameterAction)) {
+    if (m_commandRows.count(m_parameterAction)) {
         m_commandArea->setCurrentWidget(m_commandRows.at(m_parameterAction)); m_commandArea->show();
     } else m_commandArea->hide();
-    m_operationMenu->clear();
-    m_operationMenu->addSection("选择参数操作");
-    for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) {
-        auto* entry = m_operationMenu->addAction(GetActionText(m_name,name),this,[this,name]{
-            QMetaObject::invokeMethod(this,[this,name]{SelectAction(name);},Qt::QueuedConnection);
+    m_quickActions->setVisible(!visible.isEmpty());
+    m_moreOperations->setVisible(!m_entries.empty());
+    m_noticeLabel->setVisible((m_help->isChecked() || m_entries.empty()) && !m_notice.isEmpty());
+    m_parameterScroll->setVisible(!m_commandRows.empty());
+    m_operationTitle->setText(GetActionText(m_name, m_parameterAction));
+    m_operationDescription->setText(GetActionDescription(m_name, m_parameterAction));
+    m_operationTitle->setVisible(!m_parameterAction.isEmpty()); m_operationDescription->setVisible(!m_parameterAction.isEmpty());
+    // QMenu::clear 不负责销毁子菜单；刷新前显式回收原分类容器。
+    const auto oldMenus = m_operationMenu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+    m_operationMenu->clear(); qDeleteAll(oldMenus);
+    QMap<QString, QMenu*> menus;
+    for (const auto& name : m_actionOrder) {
+        const auto group = GetActionGroup(name);
+        if (!menus.contains(group)) menus[group] = m_operationMenu->addMenu(group);
+        const bool parameter = m_commandRows.count(name) != 0;
+        auto* entry = menus[group]->addAction(GetActionText(m_name,name),this,[this,name,parameter]{
+            QMetaObject::invokeMethod(this,[this,name,parameter]{
+                if (m_context.workflow.GetIsClosing()) return;
+                if (parameter) SelectAction(name); else m_buttons.at(name)->click();
+            },Qt::QueuedConnection);
         });
-        entry->setObjectName("navigate_" + name); entry->setCheckable(true); entry->setChecked(name == m_parameterAction);
-        entry->setEnabled(allowed.contains(name)); entry->setToolTip(m_buttons.at(name)->toolTip());
-    }
-    m_operationMenu->addSeparator(); m_operationMenu->addSection("其他命令");
-    for (const auto& name : m_actionOrder) if (m_cards.at(name) == m_buttons.at(name) && !visible.contains(name)) {
-        auto* entry = m_operationMenu->addAction(GetActionText(m_name,name),this,[this,name]{
-            QMetaObject::invokeMethod(this,[this,name]{m_buttons.at(name)->click();},Qt::QueuedConnection);
-        });
-        entry->setObjectName("command_" + name); entry->setEnabled(allowed.contains(name) && m_buttons.at(name)->isEnabled());
-        entry->setToolTip(m_buttons.at(name)->toolTip());
+        entry->setObjectName((parameter ? "navigate_" : "command_") + name);
+        entry->setCheckable(parameter); entry->setChecked(parameter && name == m_parameterAction);
+        entry->setEnabled(parameter ? !closing : m_buttons.at(name)->isEnabled()); entry->setToolTip(m_buttons.at(name)->toolTip());
     }
     m_refreshState = {state, input, m_node, m_lastResult, graph, actions, m_currentAction, busy, closing};
     m_hasRefreshed = true;
+}
+QString ModulePanel::GetActionGroup(const QString& action) const
+{
+    if (m_name == "Alignment") {
+        if (action.startsWith("Export") && action.endsWith("Template")) return "参考模板";
+        if (QStringList{"ImportReference", "SaveRecipe", "Activate", "Deactivate"}.contains(action)) return "参考准备";
+        if (QStringList{"Start", "ApplyModelPose", "Cancel"}.contains(action)) return "对齐与应用";
+        if (QStringList{"InspectSection", "InspectGeometry", "InspectionResult"}.contains(action)) return "尺寸检测";
+        if (QStringList{"ImportNominalMesh", "EvaluateSurface", "DeviationResult", "SetDeviationDisplay"}.contains(action)) return "表面偏差";
+        if (QStringList{"Visibility", "Result", "SetSceneDisplay"}.contains(action)) return "显示与结果";
+        if (QStringList{"EvaluateVoxelVolume", "VoxelVolumeResult"}.contains(action)) return "体素统计";
+        if (QStringList{"ExportArchive", "ExportReport", "Restore"}.contains(action)) return "报告与归档";
+    }
+    if (m_name == "Crop") {
+        if (QStringList{"Start", "FinishEditing", "BuildResult", "SelectOutput", "Exit", "ResetPreview"}.contains(action)) return "预览与发布";
+        if (QStringList{"Mode", "AppendExact", "Box", "Plane", "Sphere", "Cylinder", "KeepInside", "RemoveInside", "PositionOnly", "SetPolyData", "ClearPolyData"}.contains(action)) return "裁剪工具";
+        if (action == "SaveRoi") return "数据与导出";
+        if (action != "GraphInfo" && action != "UseData" && action != "KeepResult" && action != "ReleaseResult" && action != "UnloadResult") return "文档与历史";
+    }
+    if (QStringList{"GraphInfo", "UseData", "KeepResult", "ReleaseResult", "UnloadResult", "Select", "SelectOutput", "Descriptor", "ResultEvidence", "LabelDescriptors", "ReadTransform", "ReadRoi"}.contains(action) || action.startsWith("Export")) return "数据与导出";
+    if (QStringList{"Commit", "Discard", "Cancel", "Stop", "Exit"}.contains(action)) return "确认与退出";
+    if (QStringList{"SetDisplay", "Visibility", "State", "Overlay", "Result", "SetActive", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart", "OpenAlignment"}.contains(action)) return "显示与结果";
+    if (QStringList{"Paint", "Erase", "Fill", "Island", "Grow", "Undo", "Redo", "Split", "Merge", "EditSelected", "Catalog"}.contains(action)) return "对象与编辑";
+    return m_commandRows.count(action) ? "参数操作" : "其他命令";
 }
 void ModulePanel::Observe(bool refresh)
 {
@@ -710,7 +749,15 @@ void ModulePanel::SetState(const QJsonObject& value)
     RefreshWorkflow();
 }
 QString ModulePanel::GetDisplayName() const { return GetModuleText(m_name); }
-void ModulePanel::SetNotice(const QString& text) { m_notice = text; m_noticeLabel->setText(text); m_help->setToolTip(text); m_noticeLabel->setVisible(m_help->isChecked() && !text.isEmpty()); }
+void ModulePanel::SetNotice(const QString& text)
+{
+    m_notice = text; m_noticeLabel->setText(text); m_help->setToolTip(text);
+    m_noticeLabel->setVisible((m_help->isChecked() || m_entries.empty()) && !text.isEmpty());
+    if (m_entries.empty()) {
+        m_parameterScroll->hide(); m_parameterTabs->hide(); m_commandArea->hide();
+        m_quickActions->hide(); m_moreOperations->hide(); m_operationTitle->hide(); m_operationDescription->hide();
+    }
+}
 QStringList ModulePanel::GetActions() const
 {
     QStringList result;

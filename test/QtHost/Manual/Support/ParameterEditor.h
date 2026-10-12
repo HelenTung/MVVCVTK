@@ -13,7 +13,6 @@ class QGridLayout;
 class QCheckBox;
 class QLabel;
 class QPushButton;
-class QTabWidget;
 namespace Manual {
 class ParameterEditor final : public QWidget {
 public:
@@ -56,9 +55,8 @@ private:
     QWidget* m_body = nullptr;
     QWidget* m_input = nullptr;
     QVBoxLayout* m_rowLayout = nullptr;
-    QTabWidget* m_groups = nullptr;
     std::map<QString, QWidget*> m_groupPages;
-    QStringList m_groupOrder;
+    std::map<QString, QWidget*> m_groupSections;
     std::map<QString, ParameterEditor*> m_fields;
     std::vector<std::pair<QWidget*, ParameterEditor*>> m_rows;
 };

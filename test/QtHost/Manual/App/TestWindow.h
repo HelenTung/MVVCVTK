@@ -11,6 +11,7 @@
 #include <QTabBar>
 #include <vtkGenericOpenGLRenderWindow.h>
 class QVTKOpenGLNativeWidget;
+class QGridLayout;
 namespace Manual {
 class ResultReport;
 class TestWindow final : public QMainWindow {
@@ -40,7 +41,11 @@ private:
     void AppendLog(const QString& message);
     void UpdateMeasurements();
     void QueueObserve();
-    struct View { QString id; QVTKOpenGLNativeWidget* widget; vtkSmartPointer<vtkGenericOpenGLRenderWindow> window; };
+    void SetWorkspace(int index);
+    void SyncNavigation();
+    void SetViewLayout(bool isThreeDOnly);
+    void UpdateStopCommand();
+    struct View { QString id; QVTKOpenGLNativeWidget* widget; vtkSmartPointer<vtkGenericOpenGLRenderWindow> window; QWidget* frame; };
     TestSession m_runtime;
     TestWorkflow m_workflow;
     TestRecordWriter m_records;
@@ -51,10 +56,15 @@ private:
     QStackedWidget* m_browsers = nullptr;
     QComboBox* m_renderMode = nullptr;
     QPushButton* m_openVolume = nullptr;
+    QPushButton* m_stop = nullptr;
+    QTabBar* m_workspaceTabs = nullptr;
     QTabBar* m_featureTabs = nullptr;
+    QStringList m_workspaceSelections{"Data", "Artifact", "Alignment"};
+    QGridLayout* m_viewGrid = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_status = nullptr;
     QLabel* m_measurements = nullptr;
+    QLabel* m_latestMessage = nullptr;
     QPlainTextEdit* m_log = nullptr;
     ResultReport* m_report = nullptr;
     bool m_observeQueued = false;

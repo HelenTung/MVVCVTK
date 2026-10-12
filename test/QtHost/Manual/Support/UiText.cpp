@@ -61,8 +61,8 @@ QString GetActionDescription(const QString& module, const QString& action)
 QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
-        {"Crop", "正交裁剪"}, {"Gap", "孔隙分析"}, {"Part", "零件"},
-        {"Surface", "表面确定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","感兴趣区域编辑"}};
+        {"Crop", "裁剪"}, {"Gap", "孔隙分析"}, {"Part", "分割与编辑"},
+        {"Surface", "表面测定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","ROI 区域"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
@@ -351,7 +351,8 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
-    if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "sourceDigest", "evidenceKind", "archivePath", "reference"}.contains(key))
+    if (key == "sourceDigest" || key == "evidenceKind") return "高级与诊断";
+    if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "archivePath", "reference"}.contains(key))
         return "输入与结果";
     if (QStringList{"matrix", "boxToSource", "directionLPS", "dimensions", "spacingLPS", "originLPS", "initialPoses", "worldAxis", "worldCenter", "angleDeg", "slice"}.contains(key))
         return "空间与矩阵";
