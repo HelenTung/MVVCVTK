@@ -114,6 +114,32 @@ void TestLifecycle()
     }
     Require(feature.AttachHost(context) && !feature.AttachHost(context), "attach exactly once");
     Require(feature.GetDataContract().outputs.size() == 2, "data contract");
+    {
+        // 模拟另一个生产者替换输入；尚未发布的候选也必须保护其精确输入身份。
+        const auto upstream=[&] {
+            const DataRevisionRef ref{port->CreateDataEntityId(),1}; const auto scope=port->CreateDataEntityId();
+            DataTransaction tx;
+            DataRevisionDraft draft{ref.entityId,0,DataTypes::imageGrid3D,{{"source",source}},image,
+                DataProvenance{"upstream-test","compute","1","{}"}};
+            draft.lifetimeScope=scope; draft.lifetimePolicy=DataLifetimePolicy::ExplicitRetirement;
+            tx.outputs.push_back(std::move(draft));
+            Require(port->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded,"publish upstream input");
+            return std::make_pair(ref,scope);
+        };
+        const auto oldInput=upstream();
+        ArtifactRequest pending; pending.source=oldInput.first; pending.inputMode=ArtifactInputMode::ExplicitRevision;
+        pending.diffusion=ArtifactDiffusionParams{};
+        Require(Prepare(feature,pending).error==ArtifactError::None && WaitResult(feature).status==ArtifactStatus::Ready,
+            "candidate retains an explicit upstream input");
+        upstream();
+        Require(port->GetData(port->GetDataGraph(),oldInput.first)!=nullptr,"upstream replacement preserves candidate input");
+        DataTransaction retire; retire.retireScopes.push_back({oldInput.second,DataLifetimeStatus::Published,{oldInput.first},true});
+        Require(port->SetDataCommit(std::move(retire)).failureReason==DataCommitFailure::ResultInUse,
+            "candidate Reader blocks input unload");
+        Require(feature.SendRequest({ArtifactAction::Discard,{},0}).error==ArtifactError::None,"discard releases candidate Reader");
+        upstream();
+        Require(!port->GetData(port->GetDataGraph(),oldInput.first),"discarded candidate no longer pins obsolete input");
+    }
     Require(feature.SendRequest({ ArtifactAction::Prepare, {}, 0 }).error == ArtifactError::InvalidRequest, "missing prepare payload");
     Require(feature.SendRequest({ ArtifactAction::Prepare, request, 1 }).error == ArtifactError::InvalidRequest, "prepare rejects id");
     for (const auto action : { ArtifactAction::Cancel, ArtifactAction::Commit, ArtifactAction::Discard }) {

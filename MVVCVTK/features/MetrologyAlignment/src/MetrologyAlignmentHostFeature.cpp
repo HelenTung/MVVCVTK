@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
+#include "../../common/FeatureInputReads.h"
 #include "AlignmentData.h"
 #include "AlignmentMath.h"
 #include "AlignmentOverlay.h"
@@ -386,6 +387,9 @@ class MetrologyAlignmentHostFeature::Impl final {
                 }
                 if (!task)
                     return {};
+                auto readers=FeatureInternal::StartInputReads(m_data->GetDataGraph(),task->expectations,"metrology-alignment-reader");
+                if (!readers) return {};
+                task->readers=std::move(*readers);
                 m_nextRequest = id;
                 // 槽位先有唯一 owner；worker 只发布结果并通知 owner，不执行业务回调或显示。
                 m_task = task;
@@ -682,6 +686,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         AlignmentWork work;
         DataRevisionRef recipeRef;
         std::vector<DataExpectation> expectations;
+        FeatureInternal::InputReads readers;
         DataBinding active;
         AlignmentCallback callback;
         AlignmentCandidate candidate;

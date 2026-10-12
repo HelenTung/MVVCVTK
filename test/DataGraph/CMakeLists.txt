@@ -2,6 +2,7 @@
 add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
     DataLifetimeTests.cpp
+    ResultRetentionTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
@@ -16,6 +17,7 @@ set_target_properties(
 )
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
 add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
+add_test(NAME DataGraph.ResultRetention COMMAND mvvcvtk_data_graph_tests retention)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp

@@ -2,7 +2,7 @@ add_library(qt_feature_test_support STATIC
     App/TestWindow.cpp App/TestSession.cpp App/QtHostPump.cpp App/FeatureSetup.cpp App/TestWorkflow.cpp
     "${PROJECT_SOURCE_DIR}/test/Host/FeatureInput.cpp"
     Modules/ModulePanel.cpp Modules/DataTest.cpp Modules/ViewTest.cpp
-    Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/InputRoiSource.cpp Support/TestRecordWriter.cpp Support/ProcessMeasurements.cpp Support/TestResources.cpp Support/UiText.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
+    Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/InputRoiSource.cpp Support/ResultRetention.cpp Support/TestRecordWriter.cpp Support/ProcessMeasurements.cpp Support/TestResources.cpp Support/UiText.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
@@ -47,6 +47,7 @@ endforeach()
 file(GLOB_RECURSE manual_inputs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../Automation/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/../Automation/*.cpp")
 list(APPEND manual_inputs
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/test/Host/FeatureInput.h"
     "${PROJECT_SOURCE_DIR}/test/Host/FeatureInput.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/src/Interaction/CropBridge.cpp"

@@ -603,12 +603,15 @@ bool GetConcurrentCasValid()
 } // namespace
 
 bool GetDataLifetimeTests();
+bool GetResultRetentionTests();
 
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "lifetime") return GetDataLifetimeTests() ? 0 : 1;
+    if (argc == 2 && std::string(argv[1]) == "retention") return GetResultRetentionTests() ? 0 : 1;
     const bool isSucceeded =
         GetDataLifetimeTests()
+        && GetResultRetentionTests()
         && GetBasicCommitValid()
         && GetGenerationValid()
         && GetTypeValidationValid()

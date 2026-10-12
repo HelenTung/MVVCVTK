@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
+#include "../../common/FeatureInputReads.h"
 #include "Data/DataPayloads.h"
 
 #include "Render/Contracts/OverlayService.h"
@@ -208,6 +209,7 @@ private:
         SurfaceDeterminationStartParams params;
         bool isSuperseded = false;
         SurfaceAlgorithmInputs inputs;
+        std::shared_ptr<const FeatureInternal::InputReads> readers;
     };
 
     bool GetIsOwnerThread() const noexcept;
@@ -480,6 +482,18 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         const bool isFirstRequest = m_requests.empty();
         auto requestItem = m_requests.end();
         try {
+            std::vector<DataRevisionRef> readRefs{source->data->self};
+            if (inputs.roi) {
+                readRefs.push_back(inputs.roi->GetRevision());
+                const auto dependencies=inputs.roi->GetDependencies();
+                readRefs.insert(readRefs.end(),dependencies.begin(),dependencies.end());
+            }
+            auto readers=FeatureInternal::StartInputReads(graph,readRefs,"surface-determination-reader");
+            if (!readers) return admission;
+            const auto inputReads=std::make_shared<const FeatureInternal::InputReads>(std::move(*readers));
+            struct ReadSource { VtkImageGridSnapshot source; std::shared_ptr<const FeatureInternal::InputReads> readers; };
+            const auto readSource=std::make_shared<const ReadSource>(ReadSource{source,inputReads});
+            const VtkImageGridSnapshot workerSource(readSource,source.get());
             const auto inserted = m_requests.emplace(
                 requestId,
                 RequestEntry{
@@ -497,8 +511,9 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 && !params.analysisRoi && params.minimumObjectVoxels <= 1;
             requestItem->second.params = params;
             requestItem->second.inputs = inputs;
+            requestItem->second.readers = inputReads;
             m_service->SetRetainedBytes(GetRetainedBytes());
-            admission.status = m_service->Start(source, params, WorkLimit(m_config.maxWorkingBytes), requestId, inputs);
+            admission.status = m_service->Start(workerSource, params, WorkLimit(m_config.maxWorkingBytes), requestId, inputs);
         }
         catch (...) {
             if (requestItem != m_requests.end()) {

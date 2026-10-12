@@ -1497,6 +1497,7 @@ void StartSelfTest(TestWindow& window)
         return true;
     }), "initial isosurface commits the native scalar-range midpoint with the data load");
     const auto maskA = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 A"}}), "MaskPublished")["result"].toObject()["mask"];
+    GetComplete(window,Send(window,"Data","KeepResult",{{"graphRevision",maskA}}),"Succeeded");
     const auto maskB = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 B"}}), "MaskPublished")["result"].toObject()["mask"];
     const auto graph = window.GetWorkflow().getPublishedGraph();
     for (const auto ref : {maskA, maskB}) {
@@ -1637,6 +1638,8 @@ void StartSelfTest(TestWindow& window)
         selectPublished(firstOutput);
         GetComplete(window, Send(window, "Artifact", "Diffusion"), "Ready");
         const auto child = GetComplete(window, Send(window, "Artifact", "Commit"), "Published")["result"].toObject()["correctedVolume"];
+        // 历史分支比较显式保留；默认重复发布不再无限持有未使用的整卷结果。
+        GetComplete(window, Send(window,"Data","KeepResult",{{"graphRevision",child}}),"Succeeded");
         selectPublished(GetRefText(original.dataRevision));
         GetComplete(window, Send(window, "Artifact", "Diffusion"), "Ready");
         const auto sibling = GetComplete(window, Send(window, "Artifact", "Commit"), "Published")["result"].toObject()["correctedVolume"];
@@ -1647,6 +1650,12 @@ void StartSelfTest(TestWindow& window)
             Check(found, "continuing from historical input publishes a real branch with the exact selected parent");
         }
         selectPublished(GetRefText(original.dataRevision));
+        GetComplete(window,Send(window,"Data","UnloadResult",{{"graphRevision",child}}),"Failed");
+        GetComplete(window,Send(window,"Data","ReleaseResult",{{"graphRevision",child}}),"Succeeded");
+        const auto afterRelease=window.GetWorkflow().getPublishedGraph()["nodes"].toArray();
+        for (const auto value : afterRelease)
+            Check(value.toObject()["ref"]!=child && value.toObject()["ref"]!=firstOutput,
+                "unpinning an obsolete branch releases it and its unused upstream result");
         SaveScene(window, dataTree, "scene-ui-published-branches.png");
     }
     if (GetEnabled(window, "Surface")) {

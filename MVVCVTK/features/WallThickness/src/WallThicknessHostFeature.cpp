@@ -1,5 +1,6 @@
 #include "Host/WallThicknessHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
+#include "../../common/FeatureInputReads.h"
 #include "ThicknessData.h"
 #include "ThicknessOverlay.h"
 #include "App/Services/FeatureViewService.h"
@@ -94,6 +95,7 @@ class WallThicknessHostFeature::Impl final
         std::uint64_t requestId = 0;
         ThicknessAlgorithm::Work work;
         std::vector<DataExpectation> expectations;
+        FeatureInternal::InputReads readers;
         DataBinding binding;
         std::shared_ptr<Completion> completion;
         std::optional<ThicknessDisplay> display;
@@ -623,6 +625,9 @@ class WallThicknessHostFeature::Impl final
                 }
                 const auto graph = m_context.data->GetDataGraph();
                 task->work = ThicknessData::BuildWork(graph, archive, task->expectations);
+                auto readers=FeatureInternal::StartInputReads(graph,task->expectations,"wall-thickness-reader");
+                if (!readers) return {};
+                task->readers=std::move(*readers);
                 task->binding = ThicknessData::GetBinding(graph);
                 task->requestId = NextId();
                 task->completion = std::make_shared<Completion>();

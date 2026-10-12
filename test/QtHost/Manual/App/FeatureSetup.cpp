@@ -3,6 +3,7 @@
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
 #include "Support/InputRoiSource.h"
+#include "Support/ResultRetention.h"
 #if defined(MANUAL_ROI)
 #include "Host/RoiEditingHostFeature.h"
 #endif
@@ -38,6 +39,11 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     auto reference = std::make_shared<ReferenceDataSource>();
     if (!context.runtime.AttachFeature(reference)) throw std::runtime_error("测试输入适配器挂载失败");
     const std::weak_ptr<VtkAppHostSession> session = context.runtime.GetSession();
+    auto retention = std::make_shared<ResultRetention>();
+    if (!context.runtime.AttachFeature(retention)) throw std::runtime_error("结果保留入口挂载失败");
+    context.workflow.getResultRetained = [retention](DataRevisionRef ref) { return retention->GetRetained(ref); };
+    context.workflow.setResultRetained = [retention](DataRevisionRef ref, bool retained) { return retention->SetRetained(ref,retained); };
+    context.workflow.unloadResult = [retention](DataRevisionRef ref) { return retention->UnloadResult(ref); };
     context.workflow.getPublishedGraph = [session, &workflow = context.workflow] {
         const auto host = session.lock();
         return host ? workflow.GetPublishedGraph(*host) : QJsonObject{};

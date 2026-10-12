@@ -13,9 +13,12 @@
 #include <random>
 #include <set>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 namespace {
+
+using ResultKey = std::set<std::tuple<std::string, std::string, DataTypeId>>;
 
 class DataLifetimeScope final : public DataLifetimeAccess {
 public:
@@ -76,6 +79,7 @@ public:
     std::vector<DataSnapshot> owned;
     std::vector<Probe> probes;
     std::vector<Probe> uses;
+    ResultKey resultKey;
 };
 
 struct RevisionEntry final {
@@ -207,6 +211,87 @@ public:
     std::map<DataRevisionRef, std::vector<DataRevisionRef>> derived;
     std::map<std::string, DataBinding> bindings;
     std::map<DataTypeId, DataTypeDescriptor> types;
+    std::map<ResultKey, std::set<DataEntityId>> currentResults;
+
+    // 当前结果、绑定（包括显式保留）和 Reader 是根；沿输入依赖保留整个作用域。
+    // 只回收持久业务输出，不接管原始数据和临时 Feature 输入的退役职责。
+    void SetResultRetirements(const std::vector<DataSnapshot>& published, bool isActivated,
+        std::map<DataEntityId, std::shared_ptr<DataLifetimeScope>>& retiring,
+        std::vector<std::unique_lock<std::mutex>>& locks)
+    {
+        std::set<DataEntityId> created;
+        std::map<ResultKey, std::set<DataEntityId>> replacements;
+        for (const auto& value : published)
+            if (GetDataEntityIdValid(value->lifetimeScope)) created.insert(value->lifetimeScope);
+        for (const auto& id : created) {
+            const auto scope = lifetimes.at(id);
+            ResultKey key;
+            for (const auto& value : scope->owned) {
+                if (value->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement
+                    || value->inputs.empty() || !value->provenance
+                    || value->provenance->producerId.empty()
+                    || value->provenance->operationId.empty()
+                    || value->provenance->producerId == "org.mvvcvtk.host") {
+                    key.clear(); break;
+                }
+                key.emplace(value->provenance->producerId, value->provenance->operationId, value->type);
+            }
+            scope->resultKey = std::move(key);
+            if (isActivated && !scope->resultKey.empty()) replacements[scope->resultKey].insert(id);
+        }
+        for (auto& entry : replacements) currentResults[entry.first] = std::move(entry.second);
+        if (std::none_of(lifetimes.begin(),lifetimes.end(),[](const auto& entry) {
+            return !entry.second->resultKey.empty();
+        })) return;
+
+        // state lock 已持有；与显式退役一样锁住租约准入，避免检查后出现新 Reader。
+        locks.reserve(locks.size() + lifetimes.size());
+        for (const auto& entry : lifetimes)
+            if (!retiring.count(entry.first)) locks.emplace_back(entry.second->mutex);
+        std::vector<DataRevisionRef> pending;
+        for (const auto& entry : lifetimes) {
+            const auto& scope = entry.second;
+            if (scope->status != DataLifetimeStatus::Published || retiring.count(entry.first)) continue;
+            const bool hasReader = std::any_of(scope->uses.begin(), scope->uses.end(), [](const auto& use) {
+                return use.kind == DataResourceKind::Reader && !use.resource.expired();
+            });
+            if (scope->resultKey.empty() || created.count(entry.first) || hasReader)
+                pending.insert(pending.end(), scope->revisions.begin(), scope->revisions.end());
+        }
+        for (const auto& entry : currentResults) {
+            for (const auto& id : entry.second) {
+                const auto scope = lifetimes.at(id);
+                if (!retiring.count(id) && scope->status == DataLifetimeStatus::Published)
+                    pending.insert(pending.end(), scope->revisions.begin(), scope->revisions.end());
+            }
+        }
+        for (const auto& entry : bindings) if (entry.second.target) pending.push_back(*entry.second.target);
+        for (const auto& entry : revisions) if (!entry.second.scope) pending.push_back(entry.first);
+        std::set<DataRevisionRef> visited;
+        std::set<DataEntityId> kept;
+        while (!pending.empty()) {
+            const auto ref = pending.back(); pending.pop_back();
+            if (!visited.insert(ref).second) continue;
+            const auto found = revisions.find(ref);
+            if (found == revisions.end()) continue;
+            const auto& value = found->second;
+            if (value.scope) {
+                if (value.scope->status != DataLifetimeStatus::Published || retiring.count(value.scope->id)) continue;
+                if (kept.insert(value.scope->id).second)
+                    pending.insert(pending.end(), value.scope->revisions.begin(), value.scope->revisions.end());
+            }
+            for (const auto& input : value.metadata->inputs) pending.push_back(input.source);
+        }
+        for (const auto& entry : lifetimes)
+            if (entry.second->status == DataLifetimeStatus::Published
+                && !entry.second->resultKey.empty() && !kept.count(entry.first))
+                retiring.emplace(entry.first, entry.second);
+        for (auto entry = currentResults.begin(); entry != currentResults.end();) {
+            for (auto id = entry->second.begin(); id != entry->second.end();)
+                if (retiring.count(*id)) id = entry->second.erase(id); else ++id;
+            if (entry->second.empty()) entry = currentResults.erase(entry); else ++entry;
+        }
+    }
 };
 
 DataCommitResult GetRejected(
@@ -1043,6 +1128,7 @@ DataCommitResult DataGraphStore::SetDataCommit(
                     update.binding, previousTarget, binding });
             }
         }
+        next->SetResultRetirements(result.published, isActivated, retiring, scopeLocks);
         for (const auto& retirement : retiring) change.retiredScopes.push_back(retirement.first);
         std::vector<std::vector<DataSnapshot>> retiredOwners(retiring.size());
         next->commitId = change.commitId;

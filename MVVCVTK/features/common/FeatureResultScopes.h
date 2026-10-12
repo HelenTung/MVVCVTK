@@ -7,7 +7,7 @@
 #include <vector>
 
 namespace FeatureInternal {
-// 私有生产者账本：普通结果保持持久化；依赖临时输入的结果由创建者负责退休。
+// 私有生产者账本：普通结果的替换/保留由数据图管理；临时输入的结果由创建者负责退休。
 class ResultScopes final {
     struct Scope final {
         DataLifetimeRetirement retirement;

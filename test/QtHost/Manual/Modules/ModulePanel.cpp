@@ -242,6 +242,23 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
             const auto node = data(params); if (!node["isVolume"].toBool()) throw std::invalid_argument("此节点不是可用作输入的体数据");
             SetInput(id, GetRef(node["ref"]));
         }, TestPolicy::Input, true);
+        const auto complete = [this](auto id, const DataCommitResult& result) {
+            QJsonArray blockers;
+            for (const auto& blocker : result.blockers) blockers.append(QString::fromStdString(blocker.owner));
+            SetComplete(id,result.status==DataCommitStatus::Succeeded?"Succeeded":"Failed",
+                {{"message",QString::fromStdString(result.message)},{"blockers",blockers}});
+        };
+        for (const auto& action : {QString("KeepResult"),QString("ReleaseResult")})
+            AttachAction(action,{{"graphRevision",""}},[this,data,complete,action](auto id,const auto& params) {
+                const auto ref=GetRef(data(params)["ref"]);
+                complete(id,m_context.workflow.setResultRetained(ref,action=="KeepResult"));
+            },TestPolicy::Change);
+        AttachAction("UnloadResult",{{"graphRevision",""}},[this,data,complete](auto id,const auto& params) {
+            const auto node=data(params); const auto ref=GetRef(node["ref"]);
+            if (node["producer"]=="org.mvvcvtk.host") {
+                HostDataUnloadRequest request; request.dataRevision=ref; SendHost(id,std::move(request));
+            } else complete(id,m_context.workflow.unloadResult(ref));
+        },TestPolicy::Input,true);
     }
 }
 void ModulePanel::SelectAction(const QString& action)

@@ -12,7 +12,10 @@ bool IsPartEditAction(const QString& action)
 }
 QString GetActionDescription(const QString& module, const QString& action)
 {
-    if (action == "UseData") return "将所选已发布体数据设为当前输入，然后执行所需业务；新的发布结果按真实来源形成分支，已有结果保留。";
+    if (action == "UseData") return "将所选已发布体数据设为当前输入，再执行所需业务；需要长期保留的旧结果请先选择保留。";
+    if (action == "KeepResult") return "长期保留所选结果及其输入依赖，重复计算不会自动回收它。";
+    if (action == "ReleaseResult") return "取消长期保留；当前结果和仍被业务依赖的结果继续保留，其余旧结果可以回收。";
+    if (action == "UnloadResult") return "卸载所选数据或结果。若当前显示、下游业务、读取任务或长期保留仍依赖它，将拒绝卸载。";
     if (action == "GraphInfo") return "读取所选发布修订的真实类型、来源和业务记录；该记录不修改数据。";
     if (module == "View" && action == "Visibility") return "按辅助显示作用范围更新十字线、三维切片平面和标尺；所有视图会逐个接收请求，完成后回读实际状态。";
     static const QHash<QString, QString> descriptions{
@@ -66,6 +69,9 @@ QString GetActionText(const QString& module, const QString& action)
 {
     if (action == "UseData") return "从此数据继续";
     if (action == "GraphInfo") return "查看发布记录";
+    if (action == "KeepResult") return "长期保留";
+    if (action == "ReleaseResult") return "取消长期保留";
+    if (action == "UnloadResult") return "卸载数据或结果";
     if (module == "View" && action == "Visibility") return "应用辅助显示";
     static const QHash<QString, QString> specific{
         {"Alignment.ImportNominalMesh", "导入名义 STL 网格"}, {"Alignment.EvaluateSurface", "计算表面偏差"}, {"Alignment.SetDeviationDisplay", "应用偏差色带"},
@@ -327,7 +333,8 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 }
 QStringList GetBoundParameters(const QString& module, const QString& action)
 {
-    if (action == "UseData" || action == "GraphInfo") return {"graphRevision"};
+    if (action == "UseData" || action == "GraphInfo" || action == "KeepResult"
+        || action == "ReleaseResult" || action == "UnloadResult") return {"graphRevision"};
     if (module == "Crop") return {"nodeId", "documentId"};
     if (module == "Part" && IsPartEditAction(action)) {
         QStringList fields{"target", "expectedLabelMap", "expectedCatalogRevision", "previewId"};

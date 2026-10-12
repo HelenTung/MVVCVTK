@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Host/ArtifactReductionHostFeature.h"
 #include "../../common/FeatureResultScopes.h"
+#include "../../common/FeatureInputReads.h"
 #include "ArtifactReductionAlgorithm.h"
 
 #include <chrono>
@@ -114,6 +115,7 @@ public:
     ArtifactReduction::AlgorithmResult m_candidate;
     std::vector<DataInputRef> m_inputs;
     std::vector<DataExpectation> m_expectations;
+    std::shared_ptr<const FeatureInternal::InputReads> m_inputReads;
     std::uint64_t m_nextId = 1;
 };
 
@@ -170,6 +172,7 @@ bool ArtifactReductionHostFeature::DetachHost()
     state.m_control.reset();
     state.m_inputs.clear();
     state.m_expectations.clear();
+    state.m_inputReads.reset();
     if (!state.m_resultScopes.Clear(*state.m_data)) return false;
     state.m_data.reset();
     state.m_host.reset();
@@ -217,8 +220,11 @@ ArtifactAdmission ArtifactReductionHostFeature::StartCandidate(ArtifactRequest r
         error = ArtifactReduction::GetInputError(input, request, state.m_config, requiredBytes);
         if (error != ArtifactError::None) return { error, 0 };
         // Publish the future before notifying HostDriven work; notification must never precede readiness.
+        auto acquired=FeatureInternal::StartInputReads(state.m_data->GetDataGraph(),expectations,"artifact-reduction-reader");
+        if (!acquired) return {ArtifactError::SourceChanged,0};
+        const auto readers=std::make_shared<const FeatureInternal::InputReads>(std::move(*acquired));
         std::packaged_task<ArtifactReduction::AlgorithmResult()> task(
-            [input = std::move(input), request, config = state.m_config, control]() {
+            [input = std::move(input), request, config = state.m_config, control, readers]() {
                 return ArtifactReduction::BuildArtifactCandidate(input, request, config, *control);
             });
         auto future = task.get_future();
@@ -233,6 +239,7 @@ ArtifactAdmission ArtifactReductionHostFeature::StartCandidate(ArtifactRequest r
         state.m_candidate = {};
         state.m_inputs = std::move(inputs);
         state.m_expectations = std::move(expectations);
+        state.m_inputReads = readers;
         state.m_inputMode = request.inputMode;
         const auto publishedBytes = state.m_state.publishedBytes;
         state.m_state = {};
@@ -267,6 +274,7 @@ bool ArtifactReductionHostFeature::OnHostTick()
         state.m_state.error = ArtifactError::InvalidData;
     }
     if (state.m_worker.joinable()) state.m_worker.join();
+    if (state.m_state.status!=ArtifactStatus::Ready) state.m_inputReads.reset();
     return true;
 }
 
@@ -302,6 +310,7 @@ ArtifactError ArtifactReductionHostFeature::ClearCandidate()
     state.m_control.reset();
     state.m_inputs.clear();
     state.m_expectations.clear();
+    state.m_inputReads.reset();
     const auto publishedBytes = state.m_state.publishedBytes;
     state.m_state = {};
     state.m_state.status = ArtifactStatus::Idle;
@@ -358,6 +367,7 @@ ArtifactCommitResult ArtifactReductionHostFeature::SetCandidate(std::uint64_t re
         state.m_candidate = {};
         state.m_inputs.clear();
         state.m_expectations.clear();
+        state.m_inputReads.reset();
         state.m_state.status = ArtifactStatus::Idle;
         state.m_state.error = ArtifactError::None;
     }

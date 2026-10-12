@@ -74,13 +74,16 @@ QJsonObject PublishedNodes(const QString& module, const QJsonObject& graph, cons
             if (--children[parentRef] == 0) ready.emplace(all[parentRef]["order"].toString().toULongLong(), parentRef);
         }
         QStringList actions{"GraphInfo"}; if (data["isVolume"].toBool()) actions.prepend("UseData");
+        actions.append(data["isRetained"].toBool()?"ReleaseResult":"KeepResult");
+        actions.append("UnloadResult");
         const QJsonObject target{{"graphRevision", ref}};
         auto row = Node("published:" + ref, QString("%1 · %2 #%3").arg(feature, kind, data["order"].toString()),
-            (ref == current ? "当前输入" : data["isVolume"].toBool() ? "可继续处理" : "已发布") + (omitted ? QString(" · %1 个来源未展开").arg(omitted) : QString()),
-            actions, {{"UseData", target}, {"GraphInfo", target}});
+            (ref == current ? "当前输入" : data["isVolume"].toBool() ? "可继续处理" : "已发布")
+                + (data["isRetained"].toBool()?QString(" · 长期保留"):QString()) + (omitted ? QString(" · %1 个来源未展开").arg(omitted) : QString()),
+            actions, {{"UseData", target}, {"GraphInfo", target}, {"KeepResult",target}, {"ReleaseResult",target}, {"UnloadResult",target}});
         row["parents"] = parents; row["current"] = ref == current;
         row["description"] = QString("修订 %1；来源 %2；业务 %3 / %4。%5").arg(ref, QString::fromUtf8(QJsonDocument(data["parents"].toArray()).toJson(QJsonDocument::Compact)), data["producer"].toString(), data["operation"].toString(),
-            data["isVolume"].toBool() ? "从此数据继续会切换当前输入；再次计算后保留已有发布结果。" : "只读发布记录；连线表示数据来源关系。");
+            data["isVolume"].toBool() ? "从此数据继续会切换当前输入；长期需要的结果请先保留。" : "连线表示输入依赖；长期需要的结果请先保留。");
         rows.append(row);
     }
     auto group = Node("published-graph", "已发布数据关系", QString("%1 个节点").arg(rows.size()) + (included.size() == 256 ? " · 部分历史未展开" : ""), {}, {}, rows);

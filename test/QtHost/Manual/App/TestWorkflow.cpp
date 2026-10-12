@@ -31,6 +31,7 @@ QJsonObject TestWorkflow::GetPublishedGraph(VtkAppHostSession& session)
         nodes.append(QJsonObject{{"ref", ref}, {"type", QString::fromStdString(data.type.name)}, {"parents", parents},
             {"producer", data.provenance ? QString::fromStdString(data.provenance->producerId) : QString()},
             {"operation", data.provenance ? QString::fromStdString(data.provenance->operationId) : QString()},
+            {"isRetained", getResultRetained && getResultRetained(data.revision)},
             {"isVolume", data.type == DataTypes::imageGrid3D}, {"order", QString::number(m_catalogOrder.at(ref))}});
     }
     return {{"commitId", QString::number(catalog->commitId)}, {"nodes", nodes}};
