@@ -4,6 +4,7 @@
 #include <opencv2/core.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace AlignmentMath {
 using Vec = cv::Vec3d;
@@ -52,6 +53,16 @@ inline double GetRotationAngle(const AlignmentMatrix &m) {
     const double cosine = std::clamp((m[0] + m[5] + m[10] - 1) / 2, -1.0, 1.0);
     // atan2 同时覆盖微小转角和半周旋转，避免反对称部分在 pi 附近消失。
     return std::atan2(sine, cosine);
+}
+inline double GetPoseDistance(const AlignmentMatrix &a, const AlignmentMatrix &b,
+                              const Vec &center, double radius) {
+    return cv::norm(Transform(a, center) - Transform(b, center)) +
+        radius * GetRotationAngle(Multiply(a, Inverse(b)));
+}
+inline bool GetFitStatisticsValid(double rms, double maximum) {
+    // 仅容纳内部不变量的末位舍入；不放宽用户的拟合或尺寸公差。
+    return std::isfinite(rms) && rms >= 0 && std::isfinite(maximum) && maximum >= 0 &&
+        rms - maximum <= 8 * std::numeric_limits<double>::epsilon() * std::max(rms, maximum);
 }
 inline bool Rigid(const AlignmentMatrix &m) {
     for (const auto v : m)

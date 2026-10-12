@@ -36,6 +36,7 @@ class AlignmentGeometryFit final {
     static bool GetRecipeValid(const AlignmentRecipe &recipe, const AlignmentConfig &config);
     static AlignmentStatus GetWorkStatus(const AlignmentWork &work);
     static bool GetPointUsable(const AlignmentWork &work, std::size_t index);
+    static bool GetFaceValid(const SurfaceMeshPayload &mesh, std::size_t index);
     static AlignmentSamples BuildSamples(const AlignmentWork &work, const AlignmentRegion &region,
                                          const AlignmentMatrix &pose);
     static AlignmentGeometry BuildGeometry(const AlignmentWork &work,

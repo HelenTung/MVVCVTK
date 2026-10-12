@@ -278,6 +278,8 @@ struct AlignmentDiagnostics final {
     double lengthScale = 1.0;
     double rankTolerance = 1e-10;
     double condition = 1.0;
+    // 非硬约束标量残差的加权 RMS；点到点的三个坐标分量分别计入，
+    // 纯点到点时为欧氏距离 RMS / sqrt(3)，不能与偏差场距离 RMS 混用。
     double rms = 0.0;
     double maximum = 0.0;
     std::size_t iterations = 0;

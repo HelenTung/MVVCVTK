@@ -136,7 +136,7 @@ void CheckBudget(const AlignmentWork &work, std::size_t source, std::size_t refe
     charge(p.referenceTriangles.size(), sizeof(std::uint64_t));
 }
 struct Face final { std::array<Vec, 3> points{}; std::array<std::size_t, 3> ids{}; Vec normal{}; double area = 0; };
-Face GetFace(const SurfaceMeshPayload &mesh, std::uint64_t id) {
+Face GetFace(const SurfaceMeshPayload &mesh, std::uint64_t id, bool usable = true) {
     Require(id < mesh.GetTriangles().size() / 3, "Prealignment triangle selection is out of bounds.");
     Face face;
     const auto &vertices = mesh.GetVertices();
@@ -147,13 +147,15 @@ Face GetFace(const SurfaceMeshPayload &mesh, std::uint64_t id) {
     }
     const auto cross = (face.points[1] - face.points[0]).cross(face.points[2] - face.points[0]);
     const auto length = cv::norm(cross);
-    Require(std::isfinite(length) && length > 0, "Prealignment contains a degenerate triangle.");
-    face.area = length / 2; face.normal = cross / length;
+    Require(std::isfinite(length) && (length > 0 || !usable), "Prealignment contains a degenerate triangle.");
+    face.area = length / 2; face.normal = length > 0 ? cross / length : Vec{};
     return face;
 }
-bool GetFaceUsable(const AlignmentWork &work, const Face &face, bool source) {
-    return !source || (AlignmentGeometryFit::GetPointUsable(work, face.ids[0]) &&
-        AlignmentGeometryFit::GetPointUsable(work, face.ids[1]) && AlignmentGeometryFit::GetPointUsable(work, face.ids[2]));
+bool GetFaceUsable(const AlignmentWork &work, const SurfaceMeshPayload &mesh, std::uint64_t id, bool source) {
+    if (!AlignmentGeometryFit::GetFaceValid(mesh, id)) return false;
+    const auto &ids = mesh.GetTriangles();
+    return !source || (AlignmentGeometryFit::GetPointUsable(work, ids[3*id]) &&
+        AlignmentGeometryFit::GetPointUsable(work, ids[3*id+1]) && AlignmentGeometryFit::GetPointUsable(work, ids[3*id+2]));
 }
 struct SamplePlan final {
     std::vector<std::uint64_t> selected;
@@ -175,8 +177,10 @@ SamplePlan PlanSamples(const SurfaceMeshPayload &mesh, const std::vector<std::ui
     double correction = 0;
     for (std::size_t i = 0; i < count; ++i) {
         if (i % 256 == 0) CheckWork(work);
-        const auto face = GetFace(mesh, plan.selected.empty() ? i : plan.selected[i]);
-        if (!GetFaceUsable(work, face, source)) {
+        const auto id = plan.selected.empty() ? i : plan.selected[i];
+        const bool usable = GetFaceUsable(work, mesh, id, source);
+        const auto face = GetFace(mesh, id, usable);
+        if (!usable) {
             ++plan.rejected; plan.rejectedArea += face.area; continue;
         }
         const double adjusted = face.area - correction, next = plan.area + adjusted;
@@ -204,8 +208,9 @@ AlignmentFeatureCloud SampleMesh(const SurfaceMeshPayload &mesh, const SamplePla
     std::size_t sample = 0;
     for (std::size_t i = 0; i < count && sample < plan.count; ++i) {
         if (i % 256 == 0) CheckWork(work);
-        const auto face = GetFace(mesh, plan.selected.empty() ? i : plan.selected[i]);
-        if (!GetFaceUsable(work, face, source)) continue;
+        const auto id = plan.selected.empty() ? i : plan.selected[i];
+        if (!GetFaceUsable(work, mesh, id, source)) continue;
+        const auto face = GetFace(mesh, id);
         const double adjusted = face.area - correction, next = cumulative + adjusted;
         correction = (next - cumulative) - adjusted; cumulative = next;
         while (sample < plan.count && (static_cast<double>(sample) + 0.5) * (plan.area / plan.count) < cumulative) {
@@ -446,8 +451,7 @@ AlignmentPrealignResult AlignmentPrealign::BuildCandidates(const AlignmentWork &
         stats.bestCoverage = std::max(stats.bestCoverage, coverage);
         if (coverage < p.minCoverage) continue;
         const auto existing = std::find_if(candidates.begin(), candidates.end(), [&](const Candidate &other) {
-            return cv::norm(Transform(other.pose, center) - Transform(candidate.pose, center)) +
-                   radius * GetRotationAngle(Multiply(candidate.pose, Inverse(other.pose))) <= separation;
+            return GetPoseDistance(other.pose, candidate.pose, center, radius) <= separation;
         });
         if (existing != candidates.end()) { if (better(candidate, *existing)) *existing = candidate; }
         else if (candidates.size() < p.candidateLimit) candidates.push_back(candidate);

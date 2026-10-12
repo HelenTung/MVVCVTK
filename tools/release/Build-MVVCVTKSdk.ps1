@@ -5,6 +5,8 @@ param(
     [string]$DepsRoot,
     [string]$DefXRoot,
     [string]$VerifyRoot,
+    [string]$MetrologyMesh,
+    [string]$MetrologyMeshSha256,
     [switch]$SkipTests,
     [switch]$SkipCleanRoom
 )
@@ -203,6 +205,7 @@ project(MVVCVTKCleanRoomProbe LANGUAGES CXX)
 
 option(MVVCVTK_PROBE_CROP "Link the OrthogonalCrop SDK module." ON)
 option(MVVCVTK_PROBE_GAP "Link the GapAnalysis SDK module." ON)
+option(MVVCVTK_PROBE_METROLOGY "Link the MetrologyAlignment SDK module." ON)
 set(
     MVVCVTK_VERIFY_SURFACE_FILE
     ""
@@ -219,7 +222,7 @@ endif()
 set(_mvvcvtk_components Host)
 set(_mvvcvtk_links MVVCVTK::Host)
 set(_mvvcvtk_surface_categories HostAPI HostSupport)
-if(MVVCVTK_PROBE_CROP OR MVVCVTK_PROBE_GAP)
+if(MVVCVTK_PROBE_CROP OR MVVCVTK_PROBE_GAP OR MVVCVTK_PROBE_METROLOGY)
     list(APPEND
         _mvvcvtk_surface_categories
         FeatureSPI
@@ -235,6 +238,11 @@ if(MVVCVTK_PROBE_GAP)
     list(APPEND _mvvcvtk_components GapAnalysis)
     list(APPEND _mvvcvtk_links MVVCVTK::GapAnalysis)
     list(APPEND _mvvcvtk_surface_categories GapAnalysis)
+endif()
+if(MVVCVTK_PROBE_METROLOGY)
+    list(APPEND _mvvcvtk_components MetrologyAlignment)
+    list(APPEND _mvvcvtk_links MVVCVTK::MetrologyAlignment)
+    list(APPEND _mvvcvtk_surface_categories MetrologyAlignment)
 endif()
 
 find_package(
@@ -280,6 +288,15 @@ else()
     )
 endif()
 
+target_compile_definitions(mvvcvtk_clean_room_probe PRIVATE MVVCVTK_PROBE_METROLOGY=$<BOOL:${MVVCVTK_PROBE_METROLOGY}>)
+set(MVVCVTK_VERIFY_METROLOGY_MESH "" CACHE FILEPATH "Frozen real C3 mesh used only by verification")
+if(MVVCVTK_PROBE_METROLOGY AND MVVCVTK_VERIFY_METROLOGY_MESH)
+    add_executable(mvvcvtk_metrology_sdk_pipeline MetrologySdkPipeline.cpp)
+    target_compile_features(mvvcvtk_metrology_sdk_pipeline PRIVATE cxx_std_17)
+    target_link_libraries(mvvcvtk_metrology_sdk_pipeline PRIVATE ${_mvvcvtk_links}
+        VTK::IOXML VTK::RenderingOpenGL2 VTK::InteractionStyle bcrypt)
+    vtk_module_autoinit(TARGETS mvvcvtk_metrology_sdk_pipeline MODULES VTK::RenderingOpenGL2 VTK::InteractionStyle)
+endif()
 file(STRINGS
     "${MVVCVTK_VERIFY_SURFACE_FILE}"
     _mvvcvtk_surface_entries
@@ -396,12 +413,21 @@ endif()
 if(MVVCVTK_PROBE_GAP)
     SetForbiddenHeader(Services/GapAnalysisService.h)
 endif()
+if(MVVCVTK_PROBE_METROLOGY)
+    SetForbiddenHeader(AlignmentSolver.h)
+    SetForbiddenHeader(AlignmentMeshQuery.h)
+    SetForbiddenHeader(MVVCVTK/API/Features/MetrologyAlignment/AlignmentSolver.h)
+    SetForbiddenHeader(MVVCVTK/API/Features/MetrologyAlignment/AlignmentMeshQuery.h)
+endif()
 '@
 
     $mainContent = @'
 #include "MVVCVTK/API/Host/VtkAppHostSession.h"
 #include "MVVCVTK/API/Host/Types/HostRequestTypes.h"
 #include <opencv2/core/utility.hpp>
+#if MVVCVTK_PROBE_METROLOGY
+#include "MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h"
+#endif
 
 #if MVVCVTK_PROBE_CROP
 #include "MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h"
@@ -479,6 +505,11 @@ int main()
     }
 #endif
 
+#if MVVCVTK_PROBE_METROLOGY
+    auto metrology = std::make_shared<MetrologyAlignmentHostFeature>(AlignmentConfig{});
+    if (metrology->GetFeatureId() != std::string_view{"metrology-alignment"}) return 7;
+#endif
+
 #if MVVCVTK_PROBE_GAP
     const std::shared_ptr<HostFeature> gap =
         std::make_shared<GapHostFeature>(GapHostConfig{});
@@ -494,6 +525,8 @@ int main()
 
     Set-Utf8File (Join-Path $sourceRoot 'CMakeLists.txt') $cmakeContent
     Set-Utf8File (Join-Path $sourceRoot 'main.cpp') $mainContent
+    Set-Utf8File (Join-Path $sourceRoot 'MetrologySdkPipeline.cpp') ([IO.File]::ReadAllText(
+        (Join-Path $repoRoot 'test/SdkBoundary/MetrologySdkPipeline.cpp'), [Text.Encoding]::UTF8))
     $null = @(Get-SafeTreeItems $sourceRoot)
 }
 
@@ -592,7 +625,8 @@ function Start-RuntimeExecutable(
     [string]$executable,
     [string]$depsRoot,
     [string]$configuration,
-    [bool]$isGapEnabled)
+    [bool]$isGapEnabled,
+    [string[]]$executableArguments = @())
 {
     $oldPath = $env:PATH
     $hasPluginPath = Test-Path -LiteralPath Env:QT_PLUGIN_PATH
@@ -624,7 +658,7 @@ function Start-RuntimeExecutable(
             Remove-Item -LiteralPath Env:QT_PLUGIN_PATH
         }
         Set-Location -LiteralPath (Split-Path -Parent $executable)
-        Start-Command $executable @()
+        Start-Command $executable $executableArguments
     }
     finally {
         try {
@@ -660,10 +694,14 @@ function Start-CleanRoomProbe(
     $sourceRoot = Join-Path $probeRoot 'src'
     Build-CleanRoomSource $sourceRoot
     $probeCases = @(
-        [ordered]@{ name = 'host'; crop = 'OFF'; gap = 'OFF' }
-        [ordered]@{ name = 'host-crop'; crop = 'ON'; gap = 'OFF' }
-        [ordered]@{ name = 'host-gap'; crop = 'OFF'; gap = 'ON' }
-        [ordered]@{ name = 'host-crop-gap'; crop = 'ON'; gap = 'ON' }
+        [ordered]@{ name = 'host'; crop = 'OFF'; gap = 'OFF'; metrology = 'OFF' }
+        [ordered]@{ name = 'host-crop'; crop = 'ON'; gap = 'OFF'; metrology = 'OFF' }
+        [ordered]@{ name = 'host-gap'; crop = 'OFF'; gap = 'ON'; metrology = 'OFF' }
+        [ordered]@{ name = 'host-crop-gap'; crop = 'ON'; gap = 'ON'; metrology = 'OFF' }
+        [ordered]@{ name = 'host-metrology'; crop = 'OFF'; gap = 'OFF'; metrology = 'ON' }
+        [ordered]@{ name = 'host-crop-metrology'; crop = 'ON'; gap = 'OFF'; metrology = 'ON' }
+        [ordered]@{ name = 'host-gap-metrology'; crop = 'OFF'; gap = 'ON'; metrology = 'ON' }
+        [ordered]@{ name = 'host-crop-gap-metrology'; crop = 'ON'; gap = 'ON'; metrology = 'ON' }
     )
     foreach ($probeCase in $probeCases) {
         $caseBuildRoot = Join-Path $probeRoot "build-$($probeCase.name)"
@@ -676,7 +714,9 @@ function Start-CleanRoomProbe(
             "-DCMAKE_PREFIX_PATH=$stage",
             "-DMVVCVTK_VERIFY_SURFACE_FILE=$(Join-Path $productBuildRoot 'MVVCVTKHeaderSurface.txt')",
             "-DMVVCVTK_PROBE_CROP=$($probeCase.crop)",
-            "-DMVVCVTK_PROBE_GAP=$($probeCase.gap)"
+            "-DMVVCVTK_PROBE_GAP=$($probeCase.gap)",
+            "-DMVVCVTK_PROBE_METROLOGY=$($probeCase.metrology)"
+            "-DMVVCVTK_VERIFY_METROLOGY_MESH=$MetrologyMesh"
         )
         foreach ($configuration in @('Debug', 'Release')) {
             Start-Command $script:cmakePath @(
@@ -689,11 +729,32 @@ function Start-CleanRoomProbe(
                     "$configuration\mvvcvtk_clean_room_probe.exe") (
                 Join-Path $stage 'deps') $configuration (
                 $probeCase.gap -eq 'ON')
+            if ($probeCase.metrology -eq 'ON' -and -not [string]::IsNullOrWhiteSpace($MetrologyMesh)) {
+                Start-RuntimeExecutable (Join-Path $caseBuildRoot "$configuration\mvvcvtk_metrology_sdk_pipeline.exe") (
+                    Join-Path $stage 'deps') $configuration ($probeCase.gap -eq 'ON') @($MetrologyMesh, $MetrologyMeshSha256)
+            }
         }
     }
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+if ([string]::IsNullOrWhiteSpace($MetrologyMesh)) {
+    if (-not $SkipCleanRoom) {
+        throw 'SDK validation requires -MetrologyMesh pointing to a frozen real C3 VTP input. -SkipCleanRoom produces diagnostics only.'
+    }
+}
+else {
+    $MetrologyMesh = [IO.Path]::GetFullPath($MetrologyMesh)
+    if (-not [IO.File]::Exists($MetrologyMesh)) { throw "Metrology mesh input is missing: $MetrologyMesh" }
+    Get-SafeAncestors $MetrologyMesh
+    $actualMeshSha256 = (Get-FileHash -LiteralPath $MetrologyMesh -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($MetrologyMeshSha256)) { $MetrologyMeshSha256 = $actualMeshSha256 }
+    if ($MetrologyMeshSha256 -notmatch '^[0-9a-fA-F]{64}$' -or $actualMeshSha256 -ne $MetrologyMeshSha256) {
+        throw 'Frozen Metrology mesh SHA256 does not match the input.'
+    }
+    $MetrologyMeshSha256 = $MetrologyMeshSha256.ToLowerInvariant()
+    Write-Output "Frozen Metrology mesh: $MetrologyMesh SHA256=$MetrologyMeshSha256"
+}
 if (-not [regex]::IsMatch($Preset, '^[A-Za-z0-9][A-Za-z0-9._-]*$')) {
     throw "Unsafe CMake preset name: $Preset"
 }
@@ -774,10 +835,11 @@ try {
         "-DMVVCVTK_DEPS_ROOT=$depsRootPath", "-DMVVCVTK_DEFX_ROOT=$defxRootPath",
         "-DMVVCVTK_BUILD_TESTING=$testFlag", '-DMVVCVTK_BUILD_QT_TESTING=OFF',
         '-DMVVCVTK_BUILD_QT_MANUAL=OFF', '-DMVVCVTK_REAL_AUDIT_MANIFEST=',
-        '-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=')
+        '-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=', '-DMVVCVTK_METROLOGY_ENABLE_CUDA=OFF',
+        "-DMVVCVTK_METROLOGY_SDK_MESH=$MetrologyMesh", "-DMVVCVTK_METROLOGY_SDK_MESH_SHA256=$MetrologyMeshSha256")
     $features = Get-MVVCVTKFeatureSwitches $repoRoot
     foreach ($feature in $features.Keys) {
-        $enabled = if ($feature -in @('OrthogonalCrop', 'GapAnalysis')) { 'ON' } else { 'OFF' }
+        $enabled = if ($feature -in @('OrthogonalCrop', 'GapAnalysis', 'MetrologyAlignment')) { 'ON' } else { 'OFF' }
         $configure += "-D$($features[$feature])=$enabled"
     }
     Start-Command $script:cmakePath $configure
@@ -791,6 +853,7 @@ try {
                 'mvvcvtk_host',
                 'orthogonal_crop',
                 'gap_analysis',
+                'metrology_alignment',
                 '--parallel'
             )
         }

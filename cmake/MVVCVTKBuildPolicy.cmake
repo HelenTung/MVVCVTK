@@ -22,7 +22,7 @@ option(
     "Build repository-only SurfaceDetermination feature"
     OFF
 )
-option(MVVCVTK_BUILD_METROLOGY_ALIGNMENT "Build repository-only MetrologyAlignment feature" OFF)
+option(MVVCVTK_BUILD_METROLOGY_ALIGNMENT "Build MetrologyAlignment feature and SDK component" OFF)
 option(MVVCVTK_BUILD_ARTIFACT_REDUCTION "Build repository-only ArtifactReduction feature" OFF)
 option(MVVCVTK_ENABLE_AVX2 "Enable AVX2 for Release builds" ON)
 

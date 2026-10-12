@@ -41,8 +41,8 @@ bool ReportValid(const InspectionSnapshot &s) {
         }
         if (g.status==AlignmentStatus::FullyDetermined &&
             (!AlignmentMath::Finite(AlignmentMath::Vector(g.alignedCenter)) || !AlignmentMath::GetUnitDirectionValid(g.alignedDirection) ||
-             !std::isfinite(g.fitted.radius) || g.fitted.radius<0 || !std::isfinite(g.fitted.fitRms) || g.fitted.fitRms<0 ||
-             !std::isfinite(g.fitted.fitMax) || g.fitted.fitMax<g.fitted.fitRms ||
+             !std::isfinite(g.fitted.radius) || g.fitted.radius<0 ||
+             !AlignmentMath::GetFitStatisticsValid(g.fitted.fitRms, g.fitted.fitMax) ||
              (g.source!=InspectionGeometrySource::NominalDefinition && g.fitted.sampleCount==0))) return false;
     }
     for (std::size_t i=0;i<s.report->items.size();++i) {

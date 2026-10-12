@@ -304,6 +304,12 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     std::vector<bool> selected(surface.payload->GetVertices().size()/3,false);
     const auto &tri=surface.payload->GetTriangles();
     for (auto i:surface.validTriangles) for (std::size_t j=0;j<3;++j) selected[tri[3*i+j]]=true;
+    // 100% 覆盖控制只选取整个邻面支撑均有效的顶点；不能把有效面的边界顶点
+    // 隐含连接的无效面删除后，仍将该顶点选区称为完整有效。
+    std::vector<bool> validFaces(tri.size()/3,false);
+    for (auto i:surface.validTriangles) validFaces[i]=true;
+    for (std::size_t i=0;i<validFaces.size();++i) if (!validFaces[i])
+        for (std::size_t j=0;j<3;++j) selected[tri[3*i+j]]=false;
     for (std::size_t i=0;i<selected.size();++i) if (selected[i]) region.vertexIds.push_back(i);
     recipe.surfaceFit->sourceRegion=std::move(region); recipe.surfaceFit->scales={{.55,4,60},{.275,.5,60}};
     recipe.maxPairDistance=.5; recipe.maxAlignmentRms=1e-5; recipe.minPairCoverage=1;

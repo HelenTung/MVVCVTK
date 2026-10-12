@@ -32,11 +32,12 @@ if(DEFINED MVVCVTK_FOUND AND NOT MVVCVTK_FOUND)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKTargets.cmake")
 
-# 普通调用方只请求三个产品模块；HostAPI 与 FeatureSPI 作为传递 target 一并导出。
+# 产品按需显式请求；HostAPI 与 FeatureSPI 作为传递 target 一并导出。
 foreach(_mvvcvtk_component IN ITEMS
     Host
     OrthogonalCrop
     GapAnalysis
+    MetrologyAlignment
 )
     if(TARGET MVVCVTK::${_mvvcvtk_component})
         set(MVVCVTK_${_mvvcvtk_component}_FOUND TRUE)

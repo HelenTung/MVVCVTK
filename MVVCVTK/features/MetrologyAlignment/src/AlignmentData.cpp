@@ -11,8 +11,8 @@ bool GetGeometryValid(const AlignmentGeometry &g) {
     return !g.id.empty() && static_cast<unsigned>(g.kind) <= 5 &&
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceCenter)) &&
            AlignmentMath::Finite(AlignmentMath::Vector(g.sourceDirection)) &&
-           std::isfinite(g.radius) && g.radius >= 0 && std::isfinite(g.fitRms) && g.fitRms >= 0 &&
-           std::isfinite(g.fitMax) && g.fitMax >= g.fitRms && g.sampleCount > 0 && AlignmentGeometryFit::GetSupportValid(g);
+           std::isfinite(g.radius) && g.radius >= 0 && AlignmentMath::GetFitStatisticsValid(g.fitRms, g.fitMax) &&
+           g.sampleCount > 0 && AlignmentGeometryFit::GetSupportValid(g);
 }
 bool GetResultValid(const ResultRecord &r) {
     if (r.algorithmVersion != "metrology-alignment-1" && r.algorithmVersion != "metrology-alignment-2" && r.algorithmVersion != "metrology-alignment-3") return false;
@@ -231,6 +231,9 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
     std::vector<double> values, tolerances;
     std::vector<std::uint64_t> kinds, priorities;
     std::vector<std::uint8_t> used;
+    const auto count = candidate.residuals.size();
+    ids.reserve(count); values.reserve(count); tolerances.reserve(count);
+    kinds.reserve(count); priorities.reserve(count); used.reserve(count);
     for (const auto &r : candidate.residuals) {
         ids.push_back(r.id);
         values.push_back(r.value);
@@ -239,12 +242,17 @@ DataTransaction BuildTransaction(TrustedDataPort &data, const AlignmentWork &wor
         priorities.push_back(r.priority);
         used.push_back(r.isUsed ? 1 : 0);
     }
-    const std::vector<RecordColumn> columns{{"constraint", ids},       {"residual", values},
-                                            {"tolerance", tolerances}, {"kind", kinds},
-                                            {"priority", priorities},  {"used", used}};
+    std::vector<RecordColumn> columns;
+    columns.reserve(6);
+    columns.push_back({"constraint", std::move(ids)});
+    columns.push_back({"residual", std::move(values)});
+    columns.push_back({"tolerance", std::move(tolerances)});
+    columns.push_back({"kind", std::move(kinds)});
+    columns.push_back({"priority", std::move(priorities)});
+    columns.push_back({"used", std::move(used)});
     tx.outputs.push_back({residualRef.entityId, 0, DataTypes::recordTable, inputs,
                           std::make_shared<const RecordTablePayload>(
-                              DataTypes::recordTable, "metrology-alignment-residuals-1", columns),
+                              DataTypes::recordTable, "metrology-alignment-residuals-1", std::move(columns)),
                           provenance});
     ResultRecord record{work.input,  recipe,      transformRef,
                         geometryRef, residualRef, candidate.diagnostics,

@@ -11,23 +11,26 @@ namespace {
 using namespace AlignmentMath;
 
 // 三角形 Voronoi 区域求最近点，包含面内部、三条边及三个顶点。
-Vec ClosestTriangle(const Vec &p, const Vec &a, const Vec &b, const Vec &c) {
+Vec ClosestTriangle(const Vec &p, const Vec &a, const Vec &b, const Vec &c,
+                    Vec &edge, bool &isVertex) {
     const auto ab = b - a, ac = c - a, ap = p - a;
     const double d1 = ab.dot(ap), d2 = ac.dot(ap);
-    if (d1 <= 0 && d2 <= 0) return a;
+    if (d1 <= 0 && d2 <= 0) { isVertex = true; return a; }
     const auto bp = p - b;
     const double d3 = ab.dot(bp), d4 = ac.dot(bp);
-    if (d3 >= 0 && d4 <= d3) return b;
+    if (d3 >= 0 && d4 <= d3) { isVertex = true; return b; }
     const double vc = d1 * d4 - d3 * d2;
-    if (vc <= 0 && d1 >= 0 && d3 <= 0) return a + (d1 / (d1 - d3)) * ab;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) { edge = ab; return a + (d1 / (d1 - d3)) * ab; }
     const auto cp = p - c;
     const double d5 = ab.dot(cp), d6 = ac.dot(cp);
-    if (d6 >= 0 && d5 <= d6) return c;
+    if (d6 >= 0 && d5 <= d6) { isVertex = true; return c; }
     const double vb = d5 * d2 - d1 * d6;
-    if (vb <= 0 && d2 >= 0 && d6 <= 0) return a + (d2 / (d2 - d6)) * ac;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) { edge = ac; return a + (d2 / (d2 - d6)) * ac; }
     const double va = d3 * d6 - d5 * d4;
-    if (va <= 0 && d4 >= d3 && d5 >= d6)
+    if (va <= 0 && d4 >= d3 && d5 >= d6) {
+        edge = c - b;
         return b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b);
+    }
     const double denominator = va + vb + vc;
     if (!std::isfinite(denominator) || denominator <= 0)
         throw std::invalid_argument("Triangle distance is numerically singular.");
@@ -75,15 +78,20 @@ AlignmentMeshQuery::AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload>
             m_triangles.push_back(static_cast<std::uint64_t>(i));
         }
     }
+    std::size_t kept = 0;
     for (std::size_t i = 0; i < m_triangles.size(); ++i) {
         if (i % 256 == 0) CheckWork();
+        if (!AlignmentGeometryFit::GetFaceValid(*m_mesh, m_triangles[i])) continue;
         const auto t = GetTriangle(m_triangles[i]);
         const auto cross = (Vector(t[1]) - Vector(t[0])).cross(Vector(t[2]) - Vector(t[0]));
         if (!Finite(cross) || cross.dot(cross) <= 0 || !std::isfinite(cross.dot(cross)))
             throw std::invalid_argument("Reference contains a degenerate triangle.");
+        m_triangles[kept++] = m_triangles[i];
     }
-    m_nodes.reserve(nodeCount);
-    (void)BuildNode(0, count);
+    m_triangles.resize(kept);
+    if (m_triangles.empty()) return;
+    m_nodes.reserve(m_triangles.size() / 2 + 1);
+    (void)BuildNode(0, m_triangles.size());
 }
 
 void AlignmentMeshQuery::CheckWork() const {
@@ -152,10 +160,11 @@ std::size_t AlignmentMeshQuery::BuildNode(std::size_t first, std::size_t count) 
     return index;
 }
 
-AlignmentMeshHit AlignmentMeshQuery::GetClosest(const AlignmentPoint &point) const {
+AlignmentMeshHit AlignmentMeshQuery::GetClosest(const AlignmentPoint &point, bool isObservabilityNeeded) const {
     CheckWork();
     if (!Finite(Vector(point))) throw std::invalid_argument("Non-finite query position.");
     AlignmentMeshHit hit;
+    if (m_nodes.empty()) return hit;
     // 中位数树深度至多为 size_t 位数；固定栈避免逐测点堆分配。
     std::array<std::size_t, std::numeric_limits<std::size_t>::digits + 1> stack{};
     std::size_t pending = 1, visited = 0;
@@ -178,17 +187,40 @@ AlignmentMeshHit AlignmentMeshQuery::GetClosest(const AlignmentPoint &point) con
             stack[pending++] = near;
         }
     }
-    return hit;
+    return isObservabilityNeeded && hit.isValid ? GetHit(point, hit.triangle, true) : hit;
 }
 
-AlignmentMeshHit AlignmentMeshQuery::GetHit(const AlignmentPoint &point, std::uint64_t triangle) const {
+AlignmentMeshHit AlignmentMeshQuery::GetHit(const AlignmentPoint &point, std::uint64_t triangle, bool isObservabilityNeeded) const {
     if(!Finite(Vector(point)))throw std::invalid_argument("Non-finite query position.");
     const auto t=GetTriangle(triangle);
+    if (!AlignmentGeometryFit::GetFaceValid(*m_mesh, triangle)) return {};
     const auto a=Vector(t[0]),b=Vector(t[1]),c=Vector(t[2]);
-    const auto closest=ClosestTriangle(Vector(point),a,b,c);
+    Vec edge{};
+    bool isVertex = false;
+    const auto closest=ClosestTriangle(Vector(point),a,b,c,edge,isVertex);
     const auto delta=Vector(point)-closest;const double squared=delta.dot(delta);
     if(!std::isfinite(squared))throw std::invalid_argument("Distance overflows.");
-    return {Point(closest),Point(Unit((b-a).cross(c-a))),triangle,squared,true};
+    const auto normal = Unit((b-a).cross(c-a));
+    AlignmentMeshHit hit{Point(closest), Point(normal), triangle, squared, true};
+    if (!isObservabilityNeeded) return hit;
+    hit.observableDirections[0] = Point(normal);
+    hit.observableCount = 1;
+    // 最近曲面点可沿面滑动。仅严格处于边/顶点的外侧 Voronoi 区域时，
+    // 才增加边界约束；零距离接触边界不被当成双侧固定点约束。
+    const auto tangential = delta - delta.dot(normal) * normal;
+    const double roundoff = 64 * std::numeric_limits<double>::epsilon() *
+        std::max({cv::norm(a), cv::norm(b), cv::norm(c), cv::norm(Vector(point)),
+                  cv::norm(b-a), cv::norm(c-a), cv::norm(delta)});
+    if (cv::norm(tangential) > roundoff) {
+        if (isVertex) {
+            hit.observableDirections = {{{1,0,0}, {0,1,0}, {0,0,1}}};
+            hit.observableCount = 3;
+        } else if (cv::norm(edge) > 0) {
+            hit.observableDirections[1] = Point(Unit(edge.cross(normal)));
+            hit.observableCount = 2;
+        }
+    }
+    return hit;
 }
 std::size_t AlignmentMeshQuery::GetWorkingBytes() const noexcept {
     return m_nodes.capacity() * sizeof(Node) + m_triangles.capacity() * sizeof(std::uint64_t);

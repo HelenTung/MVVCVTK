@@ -9,6 +9,8 @@ struct AlignmentMeshHit final {
     std::uint64_t triangle = 0;
     double distanceSquared = std::numeric_limits<double>::infinity();
     bool isValid = false;
+    std::array<AlignmentPoint, 3> observableDirections{};
+    std::size_t observableCount = 0;
 };
 class AlignmentCudaQuery;
 
@@ -18,9 +20,10 @@ class AlignmentMeshQuery final {
     AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload> mesh,
                        const AlignmentWork &work,
                        const std::vector<std::uint64_t> &triangles = {});
-    AlignmentMeshHit GetClosest(const AlignmentPoint &point) const;
-    AlignmentMeshHit GetHit(const AlignmentPoint &point, std::uint64_t triangle) const;
+    AlignmentMeshHit GetClosest(const AlignmentPoint &point, bool isObservabilityNeeded = false) const;
+    AlignmentMeshHit GetHit(const AlignmentPoint &point, std::uint64_t triangle, bool isObservabilityNeeded = false) const;
     std::size_t GetWorkingBytes() const noexcept;
+    bool GetIsEmpty() const noexcept { return m_triangles.empty(); }
     std::unique_ptr<AlignmentCudaQuery> BuildCudaQuery(std::size_t batchCapacity) const;
 
   private:
