@@ -35,7 +35,7 @@ if(MVVCVTK_METROLOGY_ENABLE_CUDA)
         VERBATIM)
     set_target_properties(metrology_alignment_cuda_runtime PROPERTIES FOLDER "MVVCVTK/Features/Private")
     add_dependencies(metrology_alignment_cuda metrology_alignment_cuda_runtime)
-    target_link_libraries(metrology_alignment PRIVATE metrology_alignment_cuda)
+    target_link_libraries(metrology_alignment PRIVATE "$<BUILD_INTERFACE:metrology_alignment_cuda>")
     target_compile_definitions(metrology_alignment PRIVATE MVVCVTK_METROLOGY_HAS_CUDA=1)
 else()
     target_compile_definitions(metrology_alignment PRIVATE MVVCVTK_METROLOGY_HAS_CUDA=0)
@@ -67,16 +67,32 @@ target_sources(metrology_alignment
         src/MetrologyReportFile.cpp
         src/AlignmentData.h src/AlignmentData.cpp
         src/AlignmentOverlay.h src/AlignmentOverlay.cpp
-        src/MetrologyAlignmentHostFeature.cpp
-    PUBLIC FILE_SET api_headers TYPE HEADERS
-        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        FILES include/Host/MetrologyAlignmentHostFeature.h include/Host/MetrologyAlignmentHostTypes.h include/Host/MetrologyReport.h include/Host/VoxelVolume.h)
+        src/MetrologyAlignmentHostFeature.cpp)
+SetHeaderSurface(MVVCVTK_METROLOGY_API_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}"
+    include/Host/MetrologyAlignmentHostFeature.h include/Host/MetrologyAlignmentHostTypes.h
+    include/Host/MetrologyReport.h include/Host/VoxelVolume.h)
+ResetSdkStage("${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}")
+ResetSdkStage("${MVVCVTK_METROLOGY_SOURCE_API_INCLUDE_DIR}")
+BuildSdkHeaders(MVVCVTK_METROLOGY_STAGED_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}" ${MVVCVTK_METROLOGY_API_HEADERS})
+BuildSourceHeaders(MVVCVTK_METROLOGY_SOURCE_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_METROLOGY_SOURCE_API_INCLUDE_DIR}" ${MVVCVTK_METROLOGY_API_HEADERS})
+target_sources(metrology_alignment PUBLIC FILE_SET api_headers TYPE HEADERS
+    BASE_DIRS "${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}" FILES ${MVVCVTK_METROLOGY_STAGED_HEADERS})
 target_include_directories(metrology_alignment
-    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    PUBLIC "$<BUILD_INTERFACE:${MVVCVTK_METROLOGY_SOURCE_API_INCLUDE_DIR}>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(metrology_alignment PUBLIC MVVCVTK::FeatureSPI
-    PRIVATE opencv_world bcrypt MVVCVTKInternal::FeatureSupport VTK::CommonCore
+    PRIVATE opencv_world bcrypt "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>" VTK::CommonCore
         VTK::CommonDataModel VTK::RenderingCore VTK::RenderingAnnotation)
 SetTargetDefaults(metrology_alignment)
 set_target_properties(metrology_alignment PROPERTIES
-    OUTPUT_NAME MetrologyAlignment PROJECT_LABEL MetrologyAlignment FOLDER "MVVCVTK/Features")
+    OUTPUT_NAME MetrologyAlignment EXPORT_NAME MetrologyAlignment PROJECT_LABEL MetrologyAlignment FOLDER "MVVCVTK/Features")
+if(MVVCVTK_METROLOGY_ENABLE_CUDA)
+    # CUDA 后端仍属于仓内验证；未批准新增 CUDA 库或 runtime 到安装闭包。
+    install(CODE "message(FATAL_ERROR \"MetrologyAlignment SDK installation requires MVVCVTK_METROLOGY_ENABLE_CUDA=OFF.\")")
+endif()
+install(TARGETS metrology_alignment EXPORT MVVCVTKTargets
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/$<CONFIG>" COMPONENT Host
+    FILE_SET api_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" COMPONENT Host)

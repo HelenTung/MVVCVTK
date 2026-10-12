@@ -282,9 +282,70 @@ void SelectedCellQuality() {
     rejected=false;try{(void)AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);}catch(const std::invalid_argument&){rejected=true;}
     Check(rejected,"invalid measured cell quality schema is rejected");
 }
+void DynamicObservability() {
+    auto work = Work();
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{2,2,0, 3,2,0, 2,3,0}, std::vector<std::uint64_t>{0,1,2});
+    work.referenceMesh = Triangle();
+    // 小面完全处于大平面内部。面内平移和绕法向旋转都不改变曲面距离。
+    work.referenceMesh = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{0,0,0, 20,0,0, 0,20,0}, std::vector<std::uint64_t>{0,1,2});
+    work.recipe.surfaceFit->isPointToPlane = false;
+    for (const auto pose : {alignmentIdentity, AlignmentMatrix{std::cos(.1),-std::sin(.1),0,1,
+         std::sin(.1),std::cos(.1),0,0, 0,0,1,0, 0,0,0,1}}) {
+        work.poses = {pose};
+        const auto result = AlignmentSolver::BuildResult(work);
+        Check(result.diagnostics.status == AlignmentStatus::Underconstrained && result.diagnostics.remaining == 3,
+              "dynamic point-to-point planar ICP cannot turn closest points into fixed correspondences");
+    }
+    work.recipe.surfaceFit.reset(); work.recipe.exactMesh = work.input.mesh; work.poses = {alignmentIdentity};
+    work.recipe.fitPairs = {{0,{2,2,0},{},1}, {1,{3,2,0},{},1}, {2,{2,3,0},{},1}};
+    Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::FullyDetermined,
+          "explicit fixed point pairs still determine a planar rigid pose");
+    AlignmentMeshQuery query(Triangle(), work);
+    Check(query.GetClosest({1,1,2},true).observableCount == 1 && query.GetClosest({3,3,1},true).observableCount == 2 &&
+          query.GetClosest({-1,-2,1},true).observableCount == 3 && query.GetClosest({0,0,0},true).observableCount == 1,
+          "interior, strict edge and vertex exterior, and zero-distance boundary have distinct observability");
+}
+void FaceCoverageAndPoseDistance() {
+    auto work = Work();
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{0,0,0, 1,0,0, 0,1,0, 3,0,0, 4,0,0, 3,1,0},
+        std::vector<std::uint64_t>{0,1,2,3,4,5}, std::vector<MeshAttribute>{}, "RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",1,{1,0}}});
+    const auto samples = AlignmentSurfaceSampling::Build(work, alignmentIdentity, 0, false);
+    double area = 0, validArea = 0;
+    for (const auto &sample : samples.points) { area += sample.area; validArea += sample.validArea; }
+    Check(std::abs(area-1) < numericTolerance && std::abs(validArea-.5) < numericTolerance,
+          "ICP keeps invalid selected area in coverage but excludes it from fit weight without requiring point quality");
+    AlignmentMeshQuery query(work.mesh, work);
+    Check(query.GetClosest({3.1,.1,0}).triangle == 0, "invalid cell is excluded from nearest-face query");
+    for (const auto center : {AlignmentMath::Vec{}, AlignmentMath::Vec(100,200,300)}) {
+        const double angle = 1e-9;
+        AlignmentMatrix pose{std::cos(angle),-std::sin(angle),0,0, std::sin(angle),std::cos(angle),0,0,
+                             0,0,1,0, 0,0,0,1};
+        const auto translation = center - AlignmentMath::Rotate(pose, center);
+        pose[3]=translation[0]; pose[7]=translation[1]; pose[11]=translation[2];
+        Check(AlignmentMath::GetPoseDistance(pose, alignmentIdentity, center, std::sqrt(2.0)) < numericTolerance,
+              "pose equivalence uses actual part displacement at any coordinate origin");
+        auto pairs = Work(); pairs.recipe.surfaceFit.reset(); pairs.recipe.exactMesh = pairs.input.mesh;
+        std::vector<double> vertices;
+        for (const auto offset : {AlignmentMath::Vec{}, AlignmentMath::Vec(1,0,0),
+                                 AlignmentMath::Vec(0,1,0), AlignmentMath::Vec(0,0,1)}) {
+            const auto point = AlignmentMath::Point(center + offset);
+            pairs.recipe.fitPairs.push_back({vertices.size()/3,point,{},1});
+            vertices.insert(vertices.end(), point.begin(), point.end());
+        }
+        pairs.mesh = std::make_shared<const SurfaceMeshPayload>(std::move(vertices), std::vector<std::uint64_t>{});
+        pairs.poses = {alignmentIdentity, pose};
+        Check(AlignmentSolver::BuildResult(pairs).diagnostics.status == AlignmentStatus::FullyDetermined,
+              "near-identical converged candidates are not Ambiguous when the part is shifted from the origin");
+    }
+}
 } // namespace
 int main() {
-    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); MultiscaleAlignment(); SurfaceGrouping(); SelectedCellQuality(); }
+    try { QueryGeometry(); QueryIndex(); SurfaceAlignment(); MultiscaleAlignment(); SurfaceGrouping(); SelectedCellQuality();
+          DynamicObservability(); FaceCoverageAndPoseDistance(); }
     catch (const std::exception &error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures == 0 ? 0 : 1;
 }

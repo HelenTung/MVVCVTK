@@ -42,9 +42,13 @@ void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &select
         const auto a = triangles[3*triangle], b = triangles[3*triangle+1], c = triangles[3*triangle+2];
         const auto cross = (Vertex(mesh,b)-Vertex(mesh,a)).cross(Vertex(mesh,c)-Vertex(mesh,a));
         const double area = cv::norm(cross)/6;
-        Require(std::isfinite(area) && area > 0, "Evaluation contains a degenerate triangle.");
+        const bool valid = AlignmentGeometryFit::GetFaceValid(mesh, triangle);
+        Require(std::isfinite(area) && (area > 0 || !valid), "Evaluation contains a degenerate triangle.");
         for (auto id : {a,b,c}) {
             field.samples[id].area += area;
+            // 公开场按原顶点存储，不能拆成不同面上的两个样本；关联无效选中面
+            // 的顶点保守标为无效，保留其全部选中面积，避免缩小分母后误报完整合格。
+            if (!valid) field.samples[id].state = AlignmentDeviationState::InvalidSource;
             if (!normals.empty()) normals[id] = Point(Vector(normals[id]) + cross);
         }
     }
@@ -117,16 +121,18 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
             auto &sample = field->samples[i];
             if (sample.area <= 0) return {};
             Require(std::isfinite(sample.area), "Sample area overflows.");
+            if (sample.state == AlignmentDeviationState::InvalidSource) return {};
             if (!reverse && !AlignmentGeometryFit::GetPointUsable(measuredWork, i)) {
                 sample.state = AlignmentDeviationState::InvalidSource; return {};
             }
+            if (query.GetIsEmpty()) { sample.state = AlignmentDeviationState::InvalidTarget; return {}; }
             const auto point = Transform(transform, Vertex(*work.mesh,i));
             Require(Finite(point), "Non-finite query position.");
             return Point(point);
         };
         const auto setSample = [&](std::size_t i, const AlignmentPoint &position, const AlignmentMeshHit &hit) {
             auto &sample=field->samples[i];const auto point=Vector(position);
-            Require(hit.isValid, "Surface correspondence is unavailable.");
+            if (!hit.isValid) { sample.state = AlignmentDeviationState::InvalidTarget; return; }
             sample.closestTriangle = hit.triangle; sample.distance = std::sqrt(hit.distanceSquared);
             sample.value = !reverse && request.metric == AlignmentDeviationMetric::NominalNormalProjection
                 ? (point-Vector(hit.point)).dot(Vector(hit.normal)) : sample.distance;
@@ -147,7 +153,11 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
                     sample.state = AlignmentDeviationState::NormalMismatch;
             }
         };
-        if (request.computeBackend == AlignmentComputeBackend::Cuda) {
+#if !MVVCVTK_METROLOGY_HAS_CUDA
+        if (request.computeBackend == AlignmentComputeBackend::Cuda)
+            throw AlignmentCudaUnavailable("This repository build has no CUDA deviation backend.");
+#endif
+        if (request.computeBackend == AlignmentComputeBackend::Cuda && !query.GetIsEmpty()) {
 #if MVVCVTK_METROLOGY_HAS_CUDA
             static_assert(sizeof(AlignmentPoint)==3*sizeof(double));
             constexpr std::size_t batchCapacity=8192;

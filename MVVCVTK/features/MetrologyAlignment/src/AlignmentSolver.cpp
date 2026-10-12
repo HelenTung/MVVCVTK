@@ -42,15 +42,35 @@ double Residual(const Equation &e, const AlignmentMatrix &pose) {
                            e.target);
 }
 cv::Mat Jacobian(const std::vector<Equation> &equations, const AlignmentMatrix &pose,
-                 const std::vector<std::size_t> &indices, double length, const Vec &pivot) {
+                 const std::vector<std::size_t> &indices, double length, const Vec &pivot,
+                 const AlignmentMeshQuery *surfaceQuery = nullptr) {
     cv::Mat result(static_cast<int>(indices.size()), 6, CV_64F);
+    const auto firstSurface = surfaceQuery ? static_cast<std::size_t>(std::find_if(equations.begin(), equations.end(),
+        [](const auto &e) { return e.kind == AlignmentConstraintKind::Soft && e.priority == 63; }) - equations.begin()) : equations.size();
+    std::size_t previousSample = equations.size();
+    AlignmentMeshHit observation;
     for (int i = 0; i < result.rows; ++i) {
-        const auto &e = equations[indices[static_cast<std::size_t>(i)]];
+        const auto index = indices[static_cast<std::size_t>(i)];
+        const auto &e = equations[index];
         const auto p = e.isVector ? Rotate(pose, e.source) : Transform(pose, e.source) - pivot;
-        const auto angular = p.cross(e.direction) / length;
+        auto direction = e.direction;
+        if (surfaceQuery && index >= firstSurface) {
+            const auto axis = (index - firstSurface) % 3;
+            const auto sample = index - axis;
+            // 最终诊断才重新读曲面切空间；每个测点只查询一次，不给每轮的
+            // 三坐标优化方程增加方向存储，也不在偏差查询中计算可观测性。
+            if (sample != previousSample) {
+                observation = surfaceQuery->GetClosest(Point(Transform(pose, e.source)), true);
+                Require(observation.isValid, "Final surface observability is unavailable.");
+                previousSample = sample;
+            }
+            if (axis >= observation.observableCount) { result.row(i).setTo(0); continue; }
+            direction = Vector(observation.observableDirections[axis]);
+        }
+        const auto angular = p.cross(direction) / length;
         for (int j = 0; j < 3; ++j) {
             result.at<double>(i, j) = angular[j];
-            result.at<double>(i, j + 3) = e.isVector ? 0 : e.direction[j];
+            result.at<double>(i, j + 3) = e.isVector ? 0 : direction[j];
         }
     }
     return result;
@@ -239,7 +259,7 @@ AlignmentMatrix DatumPose(const std::vector<AlignmentGeometry> &g, std::size_t c
     return pose;
 }
 void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
-              AlignmentCandidate &output, bool converged) {
+              AlignmentCandidate &output, bool converged, const AlignmentMeshQuery *surfaceQuery) {
     auto &d = output.diagnostics;
     const auto &pose = output.sourceToTarget;
     d.lengthScale = work.recipe.lengthScale;
@@ -262,7 +282,7 @@ void Diagnose(const AlignmentWork &work, const std::vector<Equation> &eq,
     cv::Mat nullspace = c.nullspace;
     if (!soft.empty() && nullspace.cols) {
         const auto rank =
-            Decompose(Jacobian(eq, pose, soft, work.recipe.lengthScale, pivot) * nullspace,
+            Decompose(Jacobian(eq, pose, soft, work.recipe.lengthScale, pivot, surfaceQuery) * nullspace,
                       work.recipe.rankTolerance);
         d.remaining -= static_cast<std::size_t>(rank.rank);
         d.singularValues.insert(d.singularValues.end(), rank.values.begin(), rank.values.end());
@@ -331,7 +351,7 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
         const Vec p(v[3 * id], v[3 * id + 1], v[3 * id + 2]);
         const auto hit = query.GetClosest(Point(Transform(pose, p)));
         Require(hit.isValid, "Reference correspondence is unavailable.");
-        bool used = AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) &&
+        bool used = sample.validArea > 0 && AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) &&
                     std::sqrt(hit.distanceSquared) <= stage.maxPairDistance;
         if (normal) {
             const Vec n(normal->values[3 * id], normal->values[3 * id + 1], normal->values[3 * id + 2]);
@@ -339,7 +359,7 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
                    Rotate(pose, n).dot(Vector(hit.normal)) >= *work.recipe.minPairNormalCosine;
         }
         area += sample.area;
-        if (used) acceptedArea += sample.area;
+        if (used) acceptedArea += sample.validArea;
         else ++diagnostics.rejectedPairs;
         const int components = work.recipe.surfaceFit->isPointToPlane ? 1 : 3;
         for (int axis = 0; axis < components; ++axis) {
@@ -347,7 +367,7 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
             direction[axis] = 1;
             if (components == 1) direction = Vector(hit.normal);
             equations.push_back({p, Vector(hit.point), direction, AlignmentConstraintKind::Soft,
-                63, sample.area, stage.maxPairDistance,
+                63, sample.validArea, stage.maxPairDistance,
                 "surface-" + std::to_string(id) + "-" + std::to_string(axis), false, used});
         }
     }
@@ -525,6 +545,13 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
             [](const auto &scale) { return scale.voxelSize > 0; });
         // 选区只在初始姿态确定一次；各级采样引用相同不可变顶点。
         const auto dense = AlignmentSurfaceSampling::Build(work, initial, baseBytes, needsDirections);
+        Vec sourcePivot{};
+        const auto &vertices = work.mesh->GetVertices();
+        for (const auto &sample : dense.points) {
+            CheckWork(work);
+            const auto id = sample.vertex;
+            sourcePivot += Vec(vertices[3*id], vertices[3*id+1], vertices[3*id+2]) / static_cast<double>(dense.points.size());
+        }
         const auto components = recipe.surfaceFit->isPointToPlane ? std::size_t{1} : std::size_t{3};
         const auto stageCount = scales.empty() ? std::size_t{1} : scales.size();
         for (std::size_t stageIndex = 0; stageIndex < stageCount; ++stageIndex) {
@@ -561,9 +588,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
                 const auto previous = output.sourceToTarget;
                 const bool optimized = Optimize(work, equations, output.sourceToTarget,
                                                  output.diagnostics.iterations);
-                const auto relative = Multiply(output.sourceToTarget, Inverse(previous));
-                const double movement = cv::norm(Vec(relative[3], relative[7], relative[11])) +
-                                        recipe.lengthScale * GetRotationAngle(relative);
+                const double movement = GetPoseDistance(output.sourceToTarget, previous, sourcePivot, recipe.lengthScale);
                 if (optimized && movement <= recipe.solveTolerance) { converged = true; break; }
             }
             // 各级诊断采用该级最终姿态和实际求解样本，不冒充完整表面偏差。
@@ -576,7 +601,8 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
     } else {
         converged = Optimize(work, equations, output.sourceToTarget, output.diagnostics.iterations);
     }
-    Diagnose(work, equations, output, converged);
+    Diagnose(work, equations, output, converged,
+        recipe.surfaceFit && !recipe.surfaceFit->isPointToPlane ? surfaceQuery : nullptr);
     output.hasSolution = true;
     // 对应集合在初始化后固定以保证可重复性；最终姿态重新验证距离门槛。
     for (const auto &e : equations) {
@@ -631,6 +657,21 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                                                     work.recipe.surfaceFit->referenceTriangles);
         }
         std::vector<AlignmentMatrix> validPoses;
+        const auto &vertices = work.mesh->GetVertices();
+        Vec center{};
+        const auto pointCount = vertices.size() / 3;
+        Require(pointCount > 0, "Empty source geometry.");
+        const Vec origin(vertices[0], vertices[1], vertices[2]);
+        for (std::size_t i = 0; i < pointCount; ++i) {
+            if (i % 256 == 0) CheckWork(work);
+            center += (Vec(vertices[3*i], vertices[3*i+1], vertices[3*i+2]) - origin) / static_cast<double>(pointCount);
+        }
+        center += origin;
+        double radius = 0;
+        for (std::size_t i = 0; i < pointCount; ++i) {
+            if (i % 256 == 0) CheckWork(work);
+            radius = std::max(radius, cv::norm(Vec(vertices[3*i], vertices[3*i+1], vertices[3*i+2]) - center));
+        }
         for (const auto &pose : poses) {
             CheckWork(work);
             Require(Rigid(pose), "Initial pose must be rigid.");
@@ -645,9 +686,7 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                 candidate.diagnostics.isQualityPassed) {
                 bool distinct = true;
                 for (const auto &existing : validPoses) {
-                    const auto relative = Multiply(candidate.sourceToTarget, Inverse(existing));
-                    const double distance = cv::norm(Vec(relative[3], relative[7], relative[11])) +
-                                            work.recipe.lengthScale * GetRotationAngle(relative);
+                    const double distance = GetPoseDistance(candidate.sourceToTarget, existing, center, radius);
                     if (distance < work.recipe.solveTolerance * 10)
                         distinct = false;
                 }

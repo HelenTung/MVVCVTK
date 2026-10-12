@@ -313,6 +313,19 @@ AlignmentStatus AlignmentGeometryFit::GetWorkStatus(const AlignmentWork &work) {
     return AlignmentStatus::FullyDetermined;
 }
 
+bool AlignmentGeometryFit::GetFaceValid(const SurfaceMeshPayload &mesh, std::size_t index) {
+    Require(index < mesh.GetTriangles().size() / 3, "Invalid measurement face index.");
+    for (const auto &attribute : mesh.GetCellAttributes()) if (attribute.name == "measurement.valid") {
+        Require(attribute.componentCount == 1 && attribute.values.size() == mesh.GetTriangles().size() / 3,
+                "Invalid surface cell quality attribute.");
+        const double value = attribute.values[index];
+        Require(value == 0 || value == 1, "Invalid surface cell quality value.");
+        return value != 0;
+    }
+    // 名义网格可以没有测量属性；已有的显式无效标记始终生效。
+    return true;
+}
+
 bool AlignmentGeometryFit::GetPointUsable(const AlignmentWork &work, std::size_t index) {
     Require(work.mesh && index < work.mesh->GetVertices().size() / 3,
             "Invalid measurement point index.");
@@ -510,7 +523,7 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
         if (++workSteps%256==0 && GetWorkStatus(work)!=AlignmentStatus::FullyDetermined)
             throw std::runtime_error("Cancelled geometry support calculation.");
     };
-    double sum = 0;
+    double sum = 0, correction = 0, scale = 0;
     for (auto &p : points) {
         check();
         const auto q = p - shape.center;
@@ -539,12 +552,22 @@ AlignmentGeometry AlignmentGeometryFit::BuildGeometry(
             break;
         }
         distance *= work.recipe.lengthScale;
-        sum += distance * distance;
+        if (distance > scale) {
+            const double ratio = scale / distance;
+            sum *= ratio * ratio;
+            correction *= ratio * ratio;
+            scale = distance;
+        }
+        const double normalized = scale > 0 ? distance / scale : 0;
+        const double adjusted = normalized * normalized - correction;
+        const double next = sum + adjusted;
+        correction = (next - sum) - adjusted;
+        sum = next;
         output.fitMax = std::max(output.fitMax, distance);
         // 后续不再使用规范化坐标，复用私有点缓冲存放角度，不复制原测量样本。
         if (hasAngular) p[0]=std::atan2(q.dot(bitangent),q.dot(tangent));
     }
-    output.fitRms = std::sqrt(sum / static_cast<double>(points.size()));
+    output.fitRms = std::min(output.fitMax, scale * std::sqrt(sum / static_cast<double>(points.size())));
     Require(std::isfinite(output.fitRms) && output.fitRms <= spec.maxFitRms,
             "Geometry quality failed.");
     if (spec.radiusRange)

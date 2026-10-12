@@ -3,10 +3,12 @@ foreach(requiredVariable IN ITEMS
     SPI_STAGING_ROOT
     CROP_STAGING_ROOT
     GAP_STAGING_ROOT
+    METROLOGY_STAGING_ROOT
     EXPECTED_HOST_HEADERS
     EXPECTED_SPI_HEADERS
     EXPECTED_CROP_HEADERS
     EXPECTED_GAP_HEADERS
+    EXPECTED_METROLOGY_HEADERS
 )
     if(NOT DEFINED ${requiredVariable})
         message(FATAL_ERROR "Missing ${requiredVariable}.")
@@ -14,6 +16,9 @@ foreach(requiredVariable IN ITEMS
 endforeach()
 
 function(GetStageHeaders outputName stagingRoot)
+    if("${stagingRoot}" STREQUAL "" OR NOT IS_DIRECTORY "${stagingRoot}")
+        message(FATAL_ERROR "Missing or invalid SDK staging root: ${stagingRoot}")
+    endif()
     file(
         GLOB_RECURSE stageHeaders
         LIST_DIRECTORIES false
@@ -70,6 +75,7 @@ GetStageHeaders(actualHostHeaders "${HOST_STAGING_ROOT}")
 GetStageHeaders(actualSpiHeaders "${SPI_STAGING_ROOT}")
 GetStageHeaders(actualCropHeaders "${CROP_STAGING_ROOT}")
 GetStageHeaders(actualGapHeaders "${GAP_STAGING_ROOT}")
+GetStageHeaders(actualMetrologyHeaders "${METROLOGY_STAGING_ROOT}")
 if(NOT actualHostHeaders OR NOT actualSpiHeaders)
     message(FATAL_ERROR "Required Host/API or Feature/SPI staging is empty.")
 endif()
@@ -83,10 +89,12 @@ SetStageLayout(Host "API" ${actualHostHeaders})
 SetStageLayout(FeatureSPI "API;SPI" ${actualSpiHeaders})
 SetStageLayout(OrthogonalCrop "API" ${actualCropHeaders})
 SetStageLayout(GapAnalysis "API" ${actualGapHeaders})
+SetStageLayout(MetrologyAlignment "API" ${actualMetrologyHeaders})
 SetStageExpected(expectedHostHeaders "${EXPECTED_HOST_HEADERS}")
 SetStageExpected(expectedSpiHeaders "${EXPECTED_SPI_HEADERS}")
 SetStageExpected(expectedCropHeaders "${EXPECTED_CROP_HEADERS}")
 SetStageExpected(expectedGapHeaders "${EXPECTED_GAP_HEADERS}")
+SetStageExpected(expectedMetrologyHeaders "${EXPECTED_METROLOGY_HEADERS}")
 
 if(NOT actualHostHeaders STREQUAL expectedHostHeaders)
     message(FATAL_ERROR
@@ -111,4 +119,7 @@ if(NOT actualGapHeaders STREQUAL expectedGapHeaders)
         "Gap staging inventory mismatch. Actual=[${actualGapHeaders}] "
         "Expected=[${expectedGapHeaders}]"
     )
+endif()
+if(NOT actualMetrologyHeaders STREQUAL expectedMetrologyHeaders)
+    message(FATAL_ERROR "Metrology staging inventory mismatch. Actual=[${actualMetrologyHeaders}] Expected=[${expectedMetrologyHeaders}]")
 endif()

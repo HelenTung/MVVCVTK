@@ -14,6 +14,7 @@ set(
     MVVCVTK_GAP_DEPENDENCY_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/gap-source-dependencies"
 )
+set(MVVCVTK_METROLOGY_DEPENDENCY_DIR "${CMAKE_CURRENT_BINARY_DIR}/metrology-source-dependencies")
 set(
     MVVCVTK_PROBE_SOURCE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/generated-probes"
@@ -23,6 +24,7 @@ file(MAKE_DIRECTORY
     "${MVVCVTK_SPI_DEPENDENCY_DIR}"
     "${MVVCVTK_CROP_DEPENDENCY_DIR}"
     "${MVVCVTK_GAP_DEPENDENCY_DIR}"
+    "${MVVCVTK_METROLOGY_DEPENDENCY_DIR}"
     "${MVVCVTK_PROBE_SOURCE_DIR}"
 )
 
@@ -43,6 +45,7 @@ GetSurfaceHeaders(
 )
 GetSurfaceHeaders(MVVCVTK_CROP_ENTRY_HEADERS MVVCVTK_CROP_API_HEADERS)
 GetSurfaceHeaders(MVVCVTK_GAP_ENTRY_HEADERS MVVCVTK_GAP_API_HEADERS)
+GetSurfaceHeaders(MVVCVTK_METROLOGY_ENTRY_HEADERS MVVCVTK_METROLOGY_API_HEADERS)
 set(
     MVVCVTK_HOST_PROBE_HEADERS
     ${MVVCVTK_HOST_ENTRY_HEADERS}
@@ -136,12 +139,15 @@ BuildHeaderProbes(
     "${MVVCVTK_GAP_DEPENDENCY_DIR}"
     ${MVVCVTK_GAP_ENTRY_HEADERS}
 )
+BuildHeaderProbes(MVVCVTK_METROLOGY_PROBES MVVCVTK_METROLOGY_DEPENDENCY_FILES
+    MetrologyApi "${MVVCVTK_METROLOGY_DEPENDENCY_DIR}" ${MVVCVTK_METROLOGY_ENTRY_HEADERS})
 set(
     MVVCVTK_AGGREGATE_HEADERS
     ${MVVCVTK_HOST_ENTRY_HEADERS}
     ${MVVCVTK_SPI_ENTRY_HEADERS}
     ${MVVCVTK_CROP_ENTRY_HEADERS}
     ${MVVCVTK_GAP_ENTRY_HEADERS}
+    ${MVVCVTK_METROLOGY_ENTRY_HEADERS}
 )
 list(REMOVE_DUPLICATES MVVCVTK_AGGREGATE_HEADERS)
 BuildAggregateProbe(
@@ -275,6 +281,32 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     )
 endif()
 
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    add_library(mvvcvtk_metrology_header_probes OBJECT ${MVVCVTK_METROLOGY_PROBES})
+    SetTargetDefaults(mvvcvtk_metrology_header_probes)
+    target_link_libraries(mvvcvtk_metrology_header_probes PRIVATE MVVCVTK::MetrologyAlignment)
+    target_compile_options(mvvcvtk_metrology_header_probes PRIVATE /sourceDependencies "${MVVCVTK_METROLOGY_DEPENDENCY_DIR}")
+    set_target_properties(mvvcvtk_metrology_header_probes PROPERTIES
+        PROJECT_LABEL MetrologyHeaderProbes FOLDER "MVVCVTK/test/Automation/HeaderProbes")
+endif()
+set(MVVCVTK_METROLOGY_SDK_MESH "" CACHE FILEPATH "Optional frozen real C3 VTP input for public SDK pipeline verification")
+set(MVVCVTK_METROLOGY_SDK_MESH_SHA256 "" CACHE STRING "Frozen SHA256 of the real C3 SDK verification input")
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT AND MVVCVTK_METROLOGY_SDK_MESH)
+    string(LENGTH "${MVVCVTK_METROLOGY_SDK_MESH_SHA256}" meshShaLength)
+    if(NOT meshShaLength EQUAL 64 OR NOT MVVCVTK_METROLOGY_SDK_MESH_SHA256 MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "Metrology SDK real mesh requires a frozen lowercase SHA256.")
+    endif()
+    add_executable(mvvcvtk_metrology_sdk_pipeline MetrologySdkPipeline.cpp)
+    SetTargetDefaults(mvvcvtk_metrology_sdk_pipeline)
+    target_link_libraries(mvvcvtk_metrology_sdk_pipeline PRIVATE MVVCVTK::Host MVVCVTK::MetrologyAlignment
+        VTK::IOXML VTK::RenderingOpenGL2 VTK::InteractionStyle bcrypt)
+    vtk_module_autoinit(TARGETS mvvcvtk_metrology_sdk_pipeline MODULES VTK::RenderingOpenGL2 VTK::InteractionStyle)
+    set_target_properties(mvvcvtk_metrology_sdk_pipeline PROPERTIES
+        PROJECT_LABEL MetrologySdkPipeline FOLDER "MVVCVTK/test/Automation/Reference")
+    add_test(NAME SdkBoundary.MetrologyRealPipeline COMMAND mvvcvtk_metrology_sdk_pipeline
+        "${MVVCVTK_METROLOGY_SDK_MESH}" "${MVVCVTK_METROLOGY_SDK_MESH_SHA256}")
+    SetTestRuntime(SdkBoundary.MetrologyRealPipeline mvvcvtk_metrology_sdk_pipeline)
+endif()
 add_library(mvvcvtk_sdk_header_aggregate OBJECT
     "${MVVCVTK_AGGREGATE_PROBE}"
 )
@@ -296,6 +328,9 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
         mvvcvtk_sdk_header_aggregate
         PRIVATE MVVCVTK::GapAnalysis
     )
+endif()
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    target_link_libraries(mvvcvtk_sdk_header_aggregate PRIVATE MVVCVTK::MetrologyAlignment)
 endif()
 set_target_properties(
     mvvcvtk_sdk_header_aggregate
@@ -330,6 +365,7 @@ set(
 )
 set(MVVCVTK_EXPECTED_CROP_STAGE ${MVVCVTK_CROP_ENTRY_HEADERS})
 set(MVVCVTK_EXPECTED_GAP_STAGE ${MVVCVTK_GAP_ENTRY_HEADERS})
+set(MVVCVTK_EXPECTED_METROLOGY_STAGE ${MVVCVTK_METROLOGY_ENTRY_HEADERS})
 
 SetClosureTest(
     SdkBoundary.HostApiClosure
@@ -360,6 +396,11 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     )
 endif()
 
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    SetClosureTest(SdkBoundary.MetrologyApiClosure "${MVVCVTK_METROLOGY_DEPENDENCY_FILES}"
+        "${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}" ${MVVCVTK_EXPECTED_METROLOGY_STAGE})
+endif()
+list(JOIN MVVCVTK_EXPECTED_METROLOGY_STAGE "," MVVCVTK_EXPECTED_METROLOGY_STAGE_CSV)
 list(JOIN MVVCVTK_EXPECTED_HOST_STAGE "," MVVCVTK_EXPECTED_HOST_STAGE_CSV)
 list(JOIN MVVCVTK_EXPECTED_SPI_STAGE "," MVVCVTK_EXPECTED_SPI_STAGE_CSV)
 list(JOIN MVVCVTK_EXPECTED_CROP_STAGE "," MVVCVTK_EXPECTED_CROP_STAGE_CSV)
@@ -371,10 +412,12 @@ add_test(
         "-DSPI_STAGING_ROOT=${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
         "-DCROP_STAGING_ROOT=${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
         "-DGAP_STAGING_ROOT=${MVVCVTK_GAP_SDK_INCLUDE_DIR}"
+        "-DMETROLOGY_STAGING_ROOT=${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}"
         "-DEXPECTED_HOST_HEADERS=${MVVCVTK_EXPECTED_HOST_STAGE_CSV}"
         "-DEXPECTED_SPI_HEADERS=${MVVCVTK_EXPECTED_SPI_STAGE_CSV}"
         "-DEXPECTED_CROP_HEADERS=${MVVCVTK_EXPECTED_CROP_STAGE_CSV}"
         "-DEXPECTED_GAP_HEADERS=${MVVCVTK_EXPECTED_GAP_STAGE_CSV}"
+        "-DEXPECTED_METROLOGY_HEADERS=${MVVCVTK_EXPECTED_METROLOGY_STAGE_CSV}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/VerifySdkStage.cmake"
 )
 
@@ -477,6 +520,12 @@ SetSourceRootGuard(
 )
 SetHostBinaryGuard(mvvcvtk_host_api)
 SetHostBinaryGuard(mvvcvtk_feature_spi)
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    SetSourceRootGuard(metrology_alignment INTERFACE_INCLUDE_DIRECTORIES
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/include")
+    SetSourceRootGuard(metrology_alignment INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
+    SetHostBinaryGuard(metrology_alignment)
+endif()
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     SetSourceRootGuard(
         orthogonal_crop

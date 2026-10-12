@@ -7,6 +7,9 @@ foreach(requiredVariable IN ITEMS
         message(FATAL_ERROR "Missing ${requiredVariable}.")
     endif()
 endforeach()
+if("${STAGING_ROOT}" STREQUAL "" OR NOT IS_DIRECTORY "${STAGING_ROOT}")
+    message(FATAL_ERROR "Missing or invalid SDK staging root: ${STAGING_ROOT}")
+endif()
 
 cmake_path(
     ABSOLUTE_PATH STAGING_ROOT

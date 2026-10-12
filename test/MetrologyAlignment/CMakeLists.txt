@@ -130,6 +130,17 @@ set_target_properties(mvvcvtk_alignment_inspection_tests PROPERTIES
 add_test(NAME MetrologyAlignment.Inspection COMMAND mvvcvtk_alignment_inspection_tests)
 SetTestRuntime(MetrologyAlignment.Inspection mvvcvtk_alignment_inspection_tests)
 
+add_executable(mvvcvtk_alignment_publication_tests AlignmentPublicationTests.cpp)
+target_include_directories(mvvcvtk_alignment_publication_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")
+target_link_libraries(mvvcvtk_alignment_publication_tests PRIVATE mvvcvtk_host_test_internal
+    MVVCVTK::Host MVVCVTK::MetrologyAlignment opencv_world psapi ${MVVCVTK_VTK_TARGETS})
+SetTargetDefaults(mvvcvtk_alignment_publication_tests)
+set_target_properties(mvvcvtk_alignment_publication_tests PROPERTIES
+    PROJECT_LABEL AlignmentPublicationTests FOLDER "MVVCVTK/test/Automation")
+add_test(NAME MetrologyAlignment.Publication COMMAND mvvcvtk_alignment_publication_tests)
+SetTestRuntime(MetrologyAlignment.Publication mvvcvtk_alignment_publication_tests)
+
 add_executable(mvvcvtk_alignment_section_tests AlignmentSectionTests.cpp)
 target_include_directories(mvvcvtk_alignment_section_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")

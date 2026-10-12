@@ -119,7 +119,7 @@ function Get-HeaderSurface(
     $allowedCategories = @(
         'HostAPI', 'HostSupport',
         'FeatureSPI', 'FeatureSupport',
-        'OrthogonalCrop', 'GapAnalysis'
+        'OrthogonalCrop', 'GapAnalysis', 'MetrologyAlignment'
     )
     $seenEntries = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::OrdinalIgnoreCase)
@@ -213,9 +213,11 @@ if ($actualHeaders.Count -ne $expectedHeaders.Count -or
 $expectedLibraries = @(
     'Debug/GapAnalysis.lib'
     'Debug/MVVCVTKHost.lib'
+    'Debug/MetrologyAlignment.lib'
     'Debug/OrthogonalCrop.lib'
     'Release/GapAnalysis.lib'
     'Release/MVVCVTKHost.lib'
+    'Release/MetrologyAlignment.lib'
     'Release/OrthogonalCrop.lib'
 )
 $libraryRoot = Join-Path $stageRoot 'lib'

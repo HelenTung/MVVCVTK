@@ -35,6 +35,10 @@ set(
     MVVCVTK_PART_SOURCE_API_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/features/PartSegmentation/mvvcvtk-source-api-include"
 )
+set(MVVCVTK_METROLOGY_SDK_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/features/MetrologyAlignment/mvvcvtk-sdk-include")
+set(MVVCVTK_METROLOGY_SOURCE_API_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/features/MetrologyAlignment/mvvcvtk-source-api-include")
 set(
     MVVCVTK_SDK_CLOSURE_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-sdk-closure-include"
@@ -121,6 +125,10 @@ SetSdkHeaderMap(
     "include/OrthogonalCropTypes.h|MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h"
     "include/Host/GapHostFeature.h|MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h"
     "include/Host/GapHostTypes.h|MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h"
+    "include/Host/MetrologyAlignmentHostFeature.h|MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h"
+    "include/Host/MetrologyAlignmentHostTypes.h|MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h"
+    "include/Host/MetrologyReport.h|MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyReport.h"
+    "include/Host/VoxelVolume.h|MVVCVTK/API/Features/MetrologyAlignment/Host/VoxelVolume.h"
 )
 
 # 源码目录保持原样；所有公开面先经过同一份声明与路径校验，再生成 staging、
@@ -787,6 +795,7 @@ get_property(
     MVVCVTK_GAP_API_HEADERS
     GLOBAL PROPERTY MVVCVTK_GAP_API_HEADERS
 )
+get_property(MVVCVTK_METROLOGY_API_HEADERS GLOBAL PROPERTY MVVCVTK_METROLOGY_API_HEADERS)
 
 # 不同源码模块不得覆盖同一个安装路径；核心 API/SPI 中指向同一源头的闭包重复可合并。
 set(
@@ -802,6 +811,7 @@ foreach(header IN LISTS
     _mvvcvtk_core_install_headers
     MVVCVTK_CROP_API_HEADERS
     MVVCVTK_GAP_API_HEADERS
+    MVVCVTK_METROLOGY_API_HEADERS
 )
     GetSdkHeaderPath(sdkHeader "${header}")
     string(TOLOWER "${sdkHeader}" installKey)
@@ -848,6 +858,7 @@ SetSurfaceLines(
     GapAnalysis
     ${MVVCVTK_GAP_API_HEADERS}
 )
+SetSurfaceLines(_mvvcvtk_metrology_lines MetrologyAlignment ${MVVCVTK_METROLOGY_API_HEADERS})
 set(
     _mvvcvtk_surface_lines
     ${_mvvcvtk_host_api_lines}
@@ -856,6 +867,7 @@ set(
     ${_mvvcvtk_spi_support_lines}
     ${_mvvcvtk_crop_lines}
     ${_mvvcvtk_gap_lines}
+    ${_mvvcvtk_metrology_lines}
 )
 list(SORT _mvvcvtk_surface_lines)
 list(JOIN _mvvcvtk_surface_lines "\n" _mvvcvtk_surface_content)
@@ -870,6 +882,7 @@ file(GENERATE
 )
 unset(_mvvcvtk_crop_lines)
 unset(_mvvcvtk_gap_lines)
+unset(_mvvcvtk_metrology_lines)
 unset(_mvvcvtk_host_api_lines)
 unset(_mvvcvtk_host_support_lines)
 unset(_mvvcvtk_spi_lines)
@@ -878,6 +891,7 @@ unset(_mvvcvtk_surface_content)
 unset(_mvvcvtk_surface_lines)
 
 # 测试目录由根 CMakeLists 后续加入，需要生成视图的绝对路径。
+set(MVVCVTK_METROLOGY_SDK_INCLUDE_DIR "${MVVCVTK_METROLOGY_SDK_INCLUDE_DIR}" PARENT_SCOPE)
 set(
     MVVCVTK_HOST_SDK_INCLUDE_DIR
     "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"

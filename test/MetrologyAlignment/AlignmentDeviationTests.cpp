@@ -86,6 +86,41 @@ void CoverageAndQuality() {
     Check(result.forward->statistics.counts[5] == 3 && result.reverse->statistics.counts[5] == 3,
           "opposite oriented surfaces are rejected by explicit normal gate in both directions");
 }
+void CellQualityCoverage() {
+    auto work = Work(); auto request = Request();
+    const std::vector<double> vertices{0,0,0,1,0,0,0,1,0};
+    const std::vector<std::uint64_t> triangles{0,1,2};
+    const std::vector<MeshAttribute> quality{{"measurement.valid",1,{1,1,1}},
+        {"measurement.support-ratio",1,{1,1,1}}, {"measurement.localization-sigma",1,{0,0,0}},
+        {"measurement.fit-residual",1,{0,0,0}}, {"measurement.normal",3,{0,0,1,0,0,1,0,0,1}}};
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(vertices,triangles,quality,"RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",1,{0}}});
+    work.referenceMesh = std::make_shared<const SurfaceMeshPayload>(vertices,triangles);
+    request.requiresMeasurementQuality = true; request.reverseCoverage = true;
+    request.minNormalCosine = .9; request.tolerance = std::array<double,2>{0,.01};
+    const auto result = AlignmentDeviation::Build(work,request,alignmentIdentity);
+    Check(result.status == AlignmentStatus::FullyDetermined && result.forward && result.reverse,
+          "invalid cell still yields an explicit unevaluated coverage field");
+    if (!result.forward || !result.reverse) return;
+    Check(result.forward->statistics.counts[2] == 3 && result.forward->statistics.selectedArea == .5 &&
+          result.forward->statistics.evaluatedArea == 0 && result.reverse->statistics.counts[3] == 3 &&
+          result.reverse->statistics.selectedArea == .5 && result.verdict == AlignmentInspectionVerdict::Indeterminate,
+          "valid vertices on invalid cell cannot produce a zero-deviation Pass in either coverage direction");
+    work.mesh = std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,0,1,0,0,0,1,0,1,1,0},
+        std::vector<std::uint64_t>{0,1,2,1,3,2},std::vector<MeshAttribute>{},"RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",1,{1,0}}});
+    request.requiresMeasurementQuality = false; request.minNormalCosine.reset(); request.reverseCoverage = false;
+    const auto mixed = AlignmentDeviation::Build(work,request,alignmentIdentity);
+    Check(mixed.forward && std::abs(mixed.forward->statistics.selectedArea-1) < epsilon &&
+          std::abs(mixed.forward->statistics.evaluatedArea-1.0/6) < epsilon &&
+          mixed.verdict == AlignmentInspectionVerdict::Indeterminate,
+          "shared invalid-face vertices are conservative without deleting selected area");
+    request.sourceTriangles = {0};
+    const auto selected = AlignmentDeviation::Build(work,request,alignmentIdentity);
+    Check(selected.forward && std::abs(selected.forward->statistics.evaluatedArea-.5) < epsilon &&
+          selected.verdict == AlignmentInspectionVerdict::Pass,
+          "unselected invalid incident faces do not contaminate a valid local evaluation");
+}
 void ValidationAndPeakBudget() {
     auto work = Work(); auto request = Request();
     request = Request();
@@ -174,10 +209,13 @@ int main(int argc,char **argv) {
         auto request=Request();request.computeBackend=AlignmentComputeBackend::Cuda;
         const auto result=AlignmentDeviation::Build(Work(),request,alignmentIdentity);
         Check(result.status==AlignmentStatus::Unavailable && !result.forward && !result.reverse,"CPU-only build rejects explicit CUDA without falling back");
+        request.sourceTriangles={2};
+        Check(AlignmentDeviation::Build(Work(),request,alignmentIdentity).status==AlignmentStatus::InvalidInput,
+              "invalid selection is rejected before unsupported backend, preserving validation precedence");
         return failures ? 1 : 0;
     }
     if(argc>1 && std::string(argv[1])=="--cuda")backend=AlignmentComputeBackend::Cuda;
-    try { Distances(); CoverageAndQuality(); AreaWeightAndBudget(); ValidationAndPeakBudget(); BackendEquivalence(); }
+    try { Distances(); CoverageAndQuality(); CellQualityCoverage(); AreaWeightAndBudget(); ValidationAndPeakBudget(); BackendEquivalence(); }
     catch (const std::exception &e) { ++failures; std::cerr << e.what() << '\n'; }
     return failures ? 1 : 0;
 }

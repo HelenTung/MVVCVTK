@@ -88,15 +88,6 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     const bool direct = samples.size() == v.size() / 3;
     const auto &triangles = work.mesh->GetTriangles();
     Require(!triangles.empty(), "Surface fitting requires triangle connectivity.");
-    const MeshAttribute* cellValidity = nullptr;
-    if (work.recipe.requiresMeasurementQuality)
-        for (const auto& attribute : work.mesh->GetCellAttributes()) if (attribute.name == "measurement.valid") {
-            Require(attribute.componentCount == 1 && attribute.values.size() == triangles.size()/3,
-                    "Invalid surface cell quality attribute.");
-            Require(std::all_of(attribute.values.begin(), attribute.values.end(), [](double value) { return value==0 || value==1; }),
-                    "Invalid surface cell quality value.");
-            cellValidity = &attribute;
-        }
     for (std::size_t i = 0; i < triangles.size(); i += 3) {
         if (i % 768 == 0) CheckWork(work);
         std::array<std::vector<AlignmentSurfaceSample>::iterator,3> selected;
@@ -107,19 +98,19 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
                 : std::lower_bound(samples.begin(), samples.end(), id, [](const auto& sample, auto value) { return sample.vertex < value; });
             contributes = contributes || (selected[j] != samples.end() && selected[j]->vertex == id);
         }
-        // 选区外的面不贡献面积；生产端明确标为无效的面也不参与质量受控拟合。
-        // 未标记的选中退化面仍然拒绝，不能将未知几何错误当作可用测量。
-        if (!contributes || (cellValidity && cellValidity->values[i/3] == 0)) continue;
+        if (!contributes) continue;
+        const bool valid = AlignmentGeometryFit::GetFaceValid(*work.mesh, i / 3);
         const auto point = [&](std::uint64_t id) { return Vec(v[3 * id], v[3 * id + 1], v[3 * id + 2]); };
         const auto cross = (point(triangles[i + 1]) - point(triangles[i])).cross(point(triangles[i + 2]) - point(triangles[i]));
         const double area = cv::norm(cross) / 6;
-        Require(std::isfinite(area) && area > 0, "Source contains a degenerate triangle.");
+        Require(std::isfinite(area) && (area > 0 || !valid), "Source contains a degenerate triangle.");
         for (std::size_t j = 0; j < 3; ++j) {
             const auto id = triangles[i + j];
             const auto found = selected[j];
             if (found != samples.end() && found->vertex == id) {
                 found->area += area;
-                if (needsFallback) {
+                if (valid) found->validArea += area;
+                if (needsFallback && valid) {
                     auto &direction = output.directions[static_cast<std::size_t>(found - samples.begin())];
                     if (direction < 0) direction = Direction(cross);
                 }
@@ -167,7 +158,7 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
             key[axis] = static_cast<std::int64_t>(cell);
         }
         key[3] = normals ? Direction({normals->values[3 * id], normals->values[3 * id + 1], normals->values[3 * id + 2]}) : source.directions[i];
-        key[4] = AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) ? 1 : 0;
+        key[4] = sample.validArea > 0 && AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) ? 1 : 0;
         key[5] = regionId(interfaces, id); key[6] = regionId(overrides, id);
         const auto found = groups.find(key);
         if (found == groups.end()) {
@@ -186,6 +177,7 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
             auto &representative = result[found->second];
             representative.vertex = std::min(representative.vertex, sample.vertex);
             representative.area += sample.area;
+            representative.validArea += sample.validArea;
             Require(std::isfinite(representative.area), "Surface group area overflows.");
         }
     }

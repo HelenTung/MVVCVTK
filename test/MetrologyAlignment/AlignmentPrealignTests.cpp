@@ -182,6 +182,23 @@ void SelectionAndRepresentation() {
           std::abs(filtered.statistics.sourceSelectedArea - 1) < numericTolerance &&
           std::abs(filtered.statistics.sourceRejectedArea - .5) < numericTolerance,
           "quality-filtered source area is reported rather than hidden by work sampling");
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(square, faces, std::vector<MeshAttribute>{}, "RAS",
+        std::vector<MeshAttribute>{{"measurement.valid",1,{0,1}}});
+    const auto cellFiltered = AlignmentPrealign::BuildCandidates(w);
+    Check(cellFiltered.statistics.sourceRejectedTriangles == 1 &&
+          std::abs(cellFiltered.statistics.sourceSelectedArea-1) < numericTolerance &&
+          std::abs(cellFiltered.statistics.sourceRejectedArea-.5) < numericTolerance,
+          "FPFH rejects invalid cells even when their vertices are usable");
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(square, std::vector<std::uint64_t>{0,1,2,1,1,1},
+        std::vector<MeshAttribute>{}, "RAS", std::vector<MeshAttribute>{{"measurement.valid",1,{1,0}}});
+    const auto invalidDegenerate = AlignmentPrealign::BuildCandidates(w);
+    Check(invalidDegenerate.statistics.sourceRejectedTriangles == 1,
+          "explicitly invalid degenerate cell cannot block valid prealignment support");
+    w.recipe.prealignment->sourceTriangles = {0};
+    w.recipe.exactMesh = w.input.mesh;
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(square, std::vector<std::uint64_t>{0,1,2,1,1,1});
+    Check(AlignmentPrealign::BuildCandidates(w).statistics.sourceRejectedTriangles == 0,
+          "unselected degenerate cells do not block local prealignment");
 }
 } // namespace
 int main() {
