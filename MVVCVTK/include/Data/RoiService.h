@@ -6,8 +6,13 @@
 // Host 私有薄服务：唯一正式状态位于传入的 DataGraphStore。
 class RoiService final {
 public:
+    static RoiArchiveBundleResult GetArchiveBundle(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&,std::size_t maxBytes);
+    RoiArchiveRestoreResult LoadArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&,std::size_t maxBytes);
     explicit RoiService(DataGraphStore& store) noexcept : m_store(store) {}
     RoiResult SetRoi(const RoiRequest& request);
+    static RoiOperationResult GetOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request);
+    RoiOperationResult SetOperation(const RoiOperationRequest& request);
+    RoiOperationResult SetOperationCommit(const RoiOperationRequest& request,RoiOperationResult candidate);
     static std::vector<RoiDescriptor> GetDescriptors(
         const DataGraphSnapshot& graph, bool includeArchived = false);
     static std::optional<RoiDescriptor> GetDescriptor(

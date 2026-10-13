@@ -230,6 +230,7 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         form->onEdited = [this, name] {
             if(name=="GraphInfo")m_sourceRoot.clear();
             m_parameterAction=name;
+            if (onParametersEdited) try {onParametersEdited(name,GetActionParameters(name));} catch (const std::exception&) {}
             if (m_currentAction != name) { m_currentAction = name; if (onMessage) onMessage(GetDisplayName() + " · " + GetActionDescription(m_name, name)); }
             Observe();
         };

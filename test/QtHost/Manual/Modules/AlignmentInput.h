@@ -5,7 +5,7 @@
 #include "Host/MetrologyAlignmentHostTypes.h"
 namespace Manual {
 AlignmentRecipe GetRecipe(const QJsonObject& value, const DataRevisionRef& mesh, const DataRevisionRef& nominal);
-void SetRegionRoi(AlignmentRegion& region, const std::vector<std::uint64_t>& vertices, DataRevisionRef mesh);
+void SetRegionRoi(AlignmentRegion& region, DataRevisionRef roi, DataRevisionRef mesh);
 QJsonObject GetRecipeJson(const AlignmentRecipe& value);
 AlignmentInput GetAlignmentInput(const ReferenceInput& reference);
 QJsonObject GetInputJson(const AlignmentInput& input);

@@ -349,7 +349,7 @@ bool GetFormalGapResultValid(
         return false;
     }
 
-    constexpr std::array<std::string_view, 27> voidColumns = {
+    constexpr std::array<std::string_view, 33> voidColumns = {
         "void-id", "voxel-count", "volume-mm3",
         "equivalent-diameter-mm", "radius-mm", "diameter-mm",
         "center-mm", "centroid-mm", "voxel-bbox", "seed-voxel",
@@ -359,7 +359,8 @@ bool GetFormalGapResultValid(
         "pca-deviation", "pca-maximum-deviation-ratio",
         "pca-minimum-deviation-ratio", "projected-area-x-mm2",
         "projected-area-y-mm2", "projected-area-z-mm2",
-        "projected-size-voxel", "defect-probability"
+        "projected-size-voxel", "defect-probability", "parent-voxel-count", "intersection-voxel-count",
+        "parent-volume-mm3", "intersection-volume-mm3", "roi-partial", "whole-object-geometry"
     };
     const auto& columns = voidTable->GetColumns();
     const bool hasEveryVoidColumn = columns.size() == voidColumns.size()
@@ -382,8 +383,8 @@ bool GetFormalGapResultValid(
             });
     };
     return hasEveryVoidColumn
-        && statisticsTable->GetColumns().size() == 5
-        && resultSet->GetItems().size() == 4
+        && statisticsTable->GetColumns().size() == 8
+        && resultSet->GetItems().size() == 7
         && hasResultItem("labels", state.labelMap)
         && hasResultItem("void-regions", state.voidTable)
         && hasResultItem("void-surface", state.voidMesh)
@@ -569,6 +570,7 @@ int GetGapFailCount()
     const int hotkeySliceImageCount =
         GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
     const auto hotkeyMaps = session.GetLabelMapDescriptors();
+    const auto hotkeyMap=std::find_if(hotkeyMaps.begin(),hotkeyMaps.end(),[](const auto& map){return map.id=="GapAnalysis.labels";});
     LabelMapReadRequest hotkeyReadRequest;
     hotkeyReadRequest.id = "GapAnalysis.labels";
     const auto hotkeyRead = session.GetLabelMapReadResult(
@@ -608,12 +610,12 @@ int GetGapFailCount()
             && hotkeySliceImageCount
                 == sliceBaseImageCount + 1
             && GetPropCount<vtkScalarBarActor>(endpoint->renderer)==0
-            && hotkeyMaps.size() == 1
-            && hotkeyMaps.front().id == "GapAnalysis.labels"
-            && hotkeyMaps.front().producerFeatureId == "GapAnalysis"
-            && hotkeyMaps.front().datasetId == "qt-host-gap-tests"
-            && hotkeyMaps.front().valueType == ImageValueType::Int32
-            && hotkeyMaps.front().voxelCount == 125
+            && hotkeyMaps.size() == 2 && hotkeyMap!=hotkeyMaps.end()
+            && hotkeyMap->id == "GapAnalysis.labels"
+            && hotkeyMap->producerFeatureId == "GapAnalysis"
+            && hotkeyMap->datasetId == "qt-host-gap-tests"
+            && hotkeyMap->valueType == ImageValueType::Int32
+            && hotkeyMap->voxelCount == 125
             && hotkeyRead.error == LabelMapError::None
             && hotkeyRead.state
             && hotkeyRead.state->values
@@ -705,7 +707,7 @@ int GetGapFailCount()
         && gapOperations.front().operation == acceptedOperations.front().operation
         && gapOperations.front().status == FeatureRunStatus::Succeeded
         && gapOperations.front().stateRevision > acceptedOperations.front().stateRevision
-        && gapOperations.front().inputs.size() == 1 && gapOperations.front().outputs.size() == 5
+        && gapOperations.front().inputs.size() == 1 && gapOperations.front().outputs.size() == 8
         && gapSnapshot && std::any_of(gapSnapshot->scenes.begin(), gapSnapshot->scenes.end(),
             [&](const auto& scene) { return std::any_of(scene.displays.begin(), scene.displays.end(),
                 [&](const auto& display) { return display.operation == gapOperations.front().operation
@@ -717,7 +719,7 @@ int GetGapFailCount()
                 + feature->GetState().statistics.voidVoxelCount == 125
             && feature->GetState().analysisState
                 == GapAnalysisState::Succeeded
-            && session.GetLabelMapDescriptors().size() == 1,
+            && session.GetLabelMapDescriptors().size() == 2,
         "Rejected Gap Start preserves the accepted analysis result") ? 0 : 1;
 
     endpoint->interactor->SetKeyEventInformation(
@@ -735,7 +737,7 @@ int GetGapFailCount()
         isOverlayKeyHandled
             && isOverlayReleaseHandled
             && isOverlaySwitched
-            && session.GetLabelMapDescriptors().size() == 1,
+            && session.GetLabelMapDescriptors().size() == 2,
         "Gap 热键与显式请求必须进入同一 Feature 动作链") ? 0 : 1;
 
     const auto gapBinding = contextProbe->m_data->GetDataBinding(

@@ -789,19 +789,6 @@ std::array<double, 6> GetDataBounds(const ImageGeometry& geometry)
     return bounds;
 }
 
-bool GetBoundsIntersect(
-    const std::array<double, 6>& left,
-    const std::array<double, 6>& right)
-{
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        if (left[axis * 2 + 1] < right[axis * 2]
-            || right[axis * 2 + 1] < left[axis * 2]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::size_t GetTupleIndex(
     const ImageGeometry& geometry,
     const int x,
@@ -926,15 +913,9 @@ bool GetVoxelUsed(
     const std::size_t tupleIndex)
 {
     if (volume.validity && volume.validity[tupleIndex] == 0) return false;
-    if (!params.roi) return true;
-    const Point3 point = GetModelPoint(
-        volume.geometry,
-        Point3{
-            static_cast<double>(x),
-            static_cast<double>(y),
-            static_cast<double>(z)
-        });
-    return params.roi->GetContains(point);
+    (void)params;(void)x;(void)y;(void)z;
+    // ROI 是评价选区；材料估计与剖面支撑保持原有效域。
+    return true;
 }
 
 SurfaceFailureReason GetMaterialRange(
@@ -1185,12 +1166,7 @@ SurfaceFailureReason ResolveParams(
     }
     if (params.roi) {
         const auto planes=params.roi->GetClipPlanes();
-        if (planes.error!=RoiError::None) return SurfaceFailureReason::UnsupportedRoi;
-        params.clipPlanes=planes.planes;
-        if (!GetBoundsIntersect(params.roi->GetBounds(),GetDataBounds(volume.geometry))) {
-            message="Surface ROI does not intersect the source data.";
-            return SurfaceFailureReason::InvalidRoi;
-        }
+        if (planes.error==RoiError::None) params.clipPlanes=planes.planes;
     }
 
     params.boundaryToleranceModel = 0.25 * *std::min_element(volume.geometry.spacing.begin(), volume.geometry.spacing.end());
@@ -1685,15 +1661,6 @@ float GetFiniteFloat(const double value)
     return static_cast<float>(bounded);
 }
 
-void SetRoiBoundaryFlags(SurfacePointRecord &record,const double distance)
-{
-    const auto &point=record.seedPositionModel;
-    const auto tolerance=32*std::numeric_limits<double>::epsilon()*
-        std::max({1.0,std::abs(point[0]),std::abs(point[1]),std::abs(point[2])});
-    if(std::isfinite(distance) && distance<=tolerance)
-        record.flags|=SurfacePointFlags::RoiBoundary|SurfacePointFlags::SeedRetained;
-}
-
 template<bool DeferRoiBoundary=false>
 bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, const Point3 &initialPoint,
                       const Point3 &initialNormal, SurfacePointRecord &record,
@@ -1704,8 +1671,7 @@ bool SetMaterialPoint(const VolumeView &volume, const ResolvedParams &params, co
     auto normal = initialNormal;
     Point3 gradient{};
     double magnitude = 0;
-    if constexpr(!DeferRoiBoundary)
-        if(params.roi)SetRoiBoundaryFlags(record,params.roi->GetBoundaryDistance(initialPoint));
+    // ROI 边缘不改变材料点细化或测量资格。
     Point3 center{};
     bool hasGradient = false;
     if (deviceSample) {
@@ -1871,12 +1837,6 @@ void WriteObjectResult(const VolumeView &volume, const ResolvedParams &params, c
         }
         record.objectIndex = objectIndex;
         bool roiBoundary=false;
-        if(params.roi){
-            // 当前材料流程位置始终等于 seed；同一次纯查询保留两种独立阈值及非有限值规则。
-            const auto distance=params.roi->GetBoundaryDistance(record.seedPositionModel);
-            SetRoiBoundaryFlags(record,distance);
-            roiBoundary=distance<=boundaryTolerance;
-        }
         auto& classified=classifications[pointIndex++];
         classified={SurfaceContract::GetPointValid(record,params.method)?1.:0.,
             GetPointAtDataBoundary(volume.geometry,record.positionModel,boundaryTolerance)?1.:0.,
@@ -1982,10 +1942,6 @@ SurfaceFailureReason SetAdditionalInputs(const VtkImageGridSnapshot &source,
                            || inputs.roi->GetSource() != source->data->self))) {
         message = "Surface ROI snapshot does not match the request/source.";
         return SurfaceFailureReason::InvalidRoi;
-    }
-    if (inputs.roi && inputs.roi->GetClipPlanes().error != RoiError::None) {
-        message = "Surface requires a convex ROI with exact clipping planes.";
-        return SurfaceFailureReason::UnsupportedRoi;
     }
     return SurfaceFailureReason::None;
 }
@@ -2116,7 +2072,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         SurfaceSeedAudit seedAudit;
         grid.audit = &seedAudit;
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
-            grid, params.initialIsoValue, params.roi, halo,
+            grid, params.initialIsoValue, {}, halo,
             inputParams.seedBlockDepth, maxWorkingBytes - retained, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
@@ -2646,6 +2602,29 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         return fail(SurfaceFailureReason::Cancelled, "Surface validation was cancelled.");
     if (result.points.empty() || result.triangleIndices.empty())
         return fail(SurfaceFailureReason::NoSurface, "Surface output is empty.");
+    if (inputs.roi) {
+        // 在完整正式表面上选片，保留父三角形及重心来源，不生成封口或移动新点。
+        for (std::size_t i=0;i<result.triangleIndices.size();i+=3) {
+            if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
+            const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
+                result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
+            const auto selected=inputs.roi->GetTriangleSelection(triangle,maxWorkingBytes.GetBound(SIZE_MAX),0,getCancelled);
+            if (selected.error!=RoiError::None) return fail(SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection could not be read.");
+            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
+            const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
+            const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
+            if (!(denominator>0)) continue;
+            for (const auto& piece:selected.triangles) {
+                SurfaceSelectionPiece record;record.parentTriangle=i/3;record.points=piece;
+                for (int p=0;p<3;++p) {const auto q=Subtract(piece[p],triangle[0]);const double aq=Dot(a,q),bq=Dot(b,q);
+                    const double v=(bb*aq-ab*bq)/denominator,w=(aa*bq-ab*aq)/denominator;record.barycentric[p]={1-v-w,v,w};}
+                const auto u=Subtract(piece[1],piece[0]),v=Subtract(piece[2],piece[0]);
+                result.selectedAreaMM2+=0.5*std::hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]);
+                if(result.selection.size()>=maxWorkingBytes/sizeof(SurfaceSelectionPiece))return fail(SurfaceFailureReason::BudgetExceeded,"ROI surface selection exceeds the budget.");
+                result.selection.push_back(std::move(record));
+            }
+        }
+    }
     result.execution.estimatedWorkingBytes = result.requiredBytes;
     result.execution.retainedBytes = result.points.capacity() * sizeof(SurfacePointRecord) +
                                      result.triangleIndices.capacity() * sizeof(std::uint32_t) +
@@ -2661,6 +2640,57 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     return result;
 }
 
+SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,const SurfaceDeterminationStartParams& params,WorkLimit maxWorkingBytes,const SurfaceCancelCheck& getCancelled,const SurfaceAlgorithmInputs& inputs)
+{
+    SurfaceAlgorithmResult result;
+    const auto fail=[&](SurfaceFailureReason reason,const std::string& message){result.failureReason=reason;result.status=reason==SurfaceFailureReason::Cancelled?SurfaceResultStatus::Cancelled:SurfaceResultStatus::Failed;result.message=message;return result;};
+    const auto& parent=*inputs.parent;
+    if(!source || !source->data || parent.sourceRevision!=source->data->self || !parent.points || !parent.triangleIndices || !parent.objects || !parent.triangleValidity
+        || !params.parentGeneration || parent.dataRevision!=*params.parentGeneration || parent.algorithmRevision!=surfaceAlgorithmRevision)
+        return fail(SurfaceFailureReason::InvalidGeometry,"Parent surface does not match the source/revision.");
+    if(GetCancelled(getCancelled))return fail(SurfaceFailureReason::Cancelled,"Surface selection cancelled.");
+    const auto inputError=SurfaceDeterminationAlgorithm::GetInputFailure(source,params,inputs);
+    if(inputError!=SurfaceFailureReason::None)return fail(inputError,"Surface selection inputs are invalid.");
+    std::size_t bytes=0;
+    if(!AddWorkingBytes(parent.points->size(),sizeof(SurfacePointRecord),bytes) || !AddWorkingBytes(parent.triangleIndices->size(),sizeof(std::uint32_t),bytes)
+        || !AddWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes) || bytes>maxWorkingBytes)
+        return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface selection exceeds working budget.");
+    result.sourceRevision=parent.sourceRevision;result.algorithmRevision=parent.algorithmRevision;result.method=parent.method;result.isoEstimate=parent.isoEstimate;
+    result.resolvedParams=parent.resolvedParams;result.resolvedParams.analysisRoi=params.analysisRoi;result.resolvedParams.parentGeneration=params.parentGeneration;
+    result.points=*parent.points;result.triangleIndices=*parent.triangleIndices;result.objects=*parent.objects;result.triangleValidity=*parent.triangleValidity;
+    if(parent.interfaces)result.interfaces=*parent.interfaces;
+    result.parameterFingerprint=parent.parameterFingerprint;
+    for(auto byte:parent.dataRevision.entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}
+    if(inputs.roi){for(auto byte:inputs.roi->GetRevision().entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}result.parameterFingerprint^=inputs.roi->GetRevision().generation;}
+    for(const auto& point:result.points){if(SurfaceContract::GetPointValid(point,parent.method))++result.acceptedPointCount;else ++result.rejectedPointCount;if(GetSurfaceFlag(point.flags,SurfacePointFlags::LowContrast))++result.lowContrastPointCount;}
+    if (inputs.roi) {
+        // 在完整正式表面上选片，保留父三角形及重心来源，不生成封口或移动新点。
+        for (std::size_t i=0;i<result.triangleIndices.size();i+=3) {
+            if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
+            const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
+                result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
+            const auto selected=inputs.roi->GetTriangleSelection(triangle,maxWorkingBytes.GetBound(SIZE_MAX),0,getCancelled);
+            if (selected.error!=RoiError::None) return fail(SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection could not be read.");
+            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
+            const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
+            const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
+            if (!(denominator>0)) continue;
+            for (const auto& piece:selected.triangles) {
+                SurfaceSelectionPiece record;record.parentTriangle=i/3;record.points=piece;
+                for (int p=0;p<3;++p) {const auto q=Subtract(piece[p],triangle[0]);const double aq=Dot(a,q),bq=Dot(b,q);
+                    const double v=(bb*aq-ab*bq)/denominator,w=(aa*bq-ab*aq)/denominator;record.barycentric[p]={1-v-w,v,w};}
+                const auto u=Subtract(piece[1],piece[0]),v=Subtract(piece[2],piece[0]);
+                result.selectedAreaMM2+=0.5*std::hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]);
+                if(result.selection.size()>=maxWorkingBytes/sizeof(SurfaceSelectionPiece))return fail(SurfaceFailureReason::BudgetExceeded,"ROI surface selection exceeds the budget.");
+                result.selection.push_back(std::move(record));
+            }
+        }
+    }
+    if(!AddWorkingBytes(result.selection.size(),sizeof(SurfaceSelectionPiece),bytes) || bytes>maxWorkingBytes)return fail(SurfaceFailureReason::BudgetExceeded,"Surface selected fragments exceed working budget.");
+    result.requiredBytes=bytes;result.execution.estimatedWorkingBytes=bytes;result.execution.retainedBytes=bytes;
+    result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Selected the immutable parent surface without measurement.";return result;
+}
+
 } // namespace
 
 SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
@@ -2669,6 +2699,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     const SurfaceProgressCallback &onProgress, const SurfaceAlgorithmInputs &inputs)
 {
     try {
+        if(inputs.parent)return SelectParentSurface(source,params,maxWorkingBytes,getCancelled,inputs);
         return BuildSurfaceImpl(source, params, maxWorkingBytes, getCancelled, onProgress, inputs);
     }
     catch (const SurfaceCancelled &)

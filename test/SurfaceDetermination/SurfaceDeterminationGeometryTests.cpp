@@ -314,37 +314,23 @@ void TestRoiAndInvalidGeometry(Checks& checks)
         truncated.status == SurfaceResultStatus::Succeeded
             && !truncated.objects.empty(),
         "ROI produces a partial surface");
-    if (!truncated.objects.empty()) {
-        const auto& object = truncated.objects.front();
-        checks.Get(object.isTruncated, "ROI object is marked truncated");
-        checks.Get(
-            object.areaValidity == SurfaceMetricValidity::Truncated
-                && object.areaModelUnit2.has_value(),
-            "ROI object reports only a qualified local open area");
-        checks.Get(
-            object.volumeValidity == SurfaceMetricValidity::Truncated
-                && !object.volumeModelUnit3,
-            "ROI object does not report closed volume");
-    }
-    const bool allPointsInRoi = std::all_of(
-        truncated.points.begin(), truncated.points.end(),
-        [](const SurfacePointRecord& point) {
-            return point.positionModel[0] >= -1.0e-8
-                && point.positionModel[0] <= 15.5 + 1.0e-8
-                && point.positionModel[1] >= -1.0e-8
-                && point.positionModel[1] <= 31.0 + 1.0e-8
-                && point.positionModel[2] >= -1.0e-8
-                && point.positionModel[2] <= 31.0 + 1.0e-8;
-        });
-    checks.Get(allPointsInRoi, "all ROI output points remain inside model bounds");
-
-    auto outsideParams = GetParams();
+    const auto full=Build(source,GetParams());
+    checks.Get(truncated.points.size()==full.points.size() && truncated.triangleIndices==full.triangleIndices,
+        "ROI retains the complete measured parent surface");
+    checks.Get(truncated.selectedAreaMM2>0 && !truncated.selection.empty(),"ROI produces actual selected surface pieces");
+    bool selectedInside=true;
+    for(const auto& piece:truncated.selection)for(const auto& p:piece.points)
+        selectedInside=selectedInside && p[0]>=-1e-8 && p[0]<=15.5+1e-8;
+    checks.Get(selectedInside,"selected surface pieces stay in the ROI without caps");
+    if(!truncated.objects.empty() && !full.objects.empty())
+        checks.Get(truncated.objects.front().volumeModelUnit3==full.objects.front().volumeModelUnit3,
+            "ROI selection does not change complete-parent volume");
+    auto outsideParams=GetParams();
     const auto outsideRoi=BuildRoi(source,{100,110,100,110,100,110});
     outsideParams.analysisRoi=outsideRoi->GetRevision();
-    const auto outside = Build(source, outsideParams, outsideRoi);
-    checks.Get(
-        outside.failureReason == SurfaceFailureReason::InvalidRoi,
-        "non-intersecting ROI is rejected");
+    const auto outside=Build(source,outsideParams,outsideRoi);
+    checks.Get(outside.status==SurfaceResultStatus::Succeeded && outside.selection.empty()
+        && outside.triangleIndices==full.triangleIndices,"empty ROI selection remains empty with complete parent support");
 
     const auto singular = BuildSnapshot(
         { 8, 8, 8 },

@@ -1,3 +1,5 @@
+#include "../GapParentRecord.h"
+#include "../../../common/FeatureInputReads.h"
 #include "Host/GapHostFeature.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -74,6 +76,7 @@ public:
         VtkImageGridSnapshot source;
         DataBinding resultBinding;
         std::string canonicalParameters;
+        std::vector<DataInputRef> inputs;
     };
 
     explicit Impl(GapHostConfig config)
@@ -458,13 +461,36 @@ GapHostFeature::Impl::GetViewCandidate(
     }
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
+    candidate.request.roiPolicy=start.roiPolicy;candidate.request.isEvaluationOnly=start.isEvaluationOnly;
+    candidate.inputs={{"source-volume",snapshot->data->self}};
+    for (const auto& role:std::array<std::pair<const char*,std::optional<DataRevisionRef>>,2>{{{"evaluation-roi",start.evaluationRoi},{"detection-roi",start.detectionRoi}}}) {
+        if (!role.second) continue;const auto resolved=m_data->GetRoi(snapshot->graph,*role.second,snapshot->data->self);
+        if (resolved.error!=RoiError::None || !resolved.roi) return std::nullopt;
+        if (std::string_view(role.first)=="evaluation-roi") candidate.request.evaluationRoi=resolved.roi;else candidate.request.detectionRoi=resolved.roi;
+        candidate.inputs.push_back({role.first,*role.second});
+        for (const auto& dependency:resolved.roi->GetDependencies()) if (dependency!=*role.second && dependency!=snapshot->data->self)
+            candidate.inputs.push_back({std::string(role.first)+"-dependency-"+std::to_string(candidate.inputs.size()),dependency});
+    }
+    if(start.parentResult){
+        if(!start.isEvaluationOnly)return std::nullopt;
+        const auto node=m_data->GetData(snapshot->graph,*start.parentResult);const auto* collection=node?dynamic_cast<const DataCollectionPayload*>(node->payload.get()):nullptr;if(!collection || collection->GetDataType()!=gapResultSetType)return std::nullopt;
+        const auto get=[&](std::string_view role)->DataSnapshot{for(const auto& entry:collection->GetItems())if(entry.role==role)return m_data->GetData(snapshot->graph,entry.data);return {};};
+        const auto recordNode=get("parent-detection"),labelNode=get("parent-labels");const auto record=recordNode?std::dynamic_pointer_cast<const GapParentRecord>(recordNode->payload):nullptr;
+        if(!record || !record->GetValid() || record->source!=snapshot->data->self || !labelNode || !std::dynamic_pointer_cast<const LabelMap3DPayload>(labelNode->payload) || std::dynamic_pointer_cast<const LabelMap3DPayload>(labelNode->payload)->GetValues()!=record->labels->GetValues())return std::nullopt;
+        const auto labels=m_data->GetLabelMap(snapshot->graph,labelNode->self);if(!labels || !labels->labels || labels->labels->GetScalarType()!=VTK_INT)return std::nullopt;
+        auto parent=std::make_shared<GapAnalysisResult>();parent->sourceRevision=record->source;parent->detectionParameters=record->parameters;parent->statistics=record->statistics;parent->voids=*record->voids;parent->labelImage=labels->labels;parent->isSucceeded=true;candidate.request.savedParent=std::move(parent);
+        candidate.inputs.push_back({"parent-result",*start.parentResult});candidate.inputs.push_back({"measurement-parent-detection",recordNode->self});candidate.inputs.push_back({"measurement-parent-labels",labelNode->self});
+    }
+    std::vector<DataRevisionRef> refs;for(const auto& input:candidate.inputs)refs.push_back(input.source);auto readers=FeatureInternal::StartInputReads(snapshot->graph,refs,"gap-roi-parent-reader");if(!readers)return std::nullopt;
+    auto retained=std::make_shared<std::pair<VtkImageGridSnapshot,FeatureInternal::InputReads>>(snapshot,std::move(*readers));auto scoped=std::make_shared<VtkImageGridView>(*snapshot);scoped->data=DataSnapshot(retained,retained->first->data.get());candidate.source=scoped;candidate.request.graphInput=scoped;
     std::ostringstream parameters;
     parameters.imbue(std::locale::classic());
     parameters << std::setprecision(std::numeric_limits<double>::max_digits10)
         << "isoMode=" << static_cast<int>(start.surface.isoMode)
         << ";ratio=" << start.surface.dataRangeRatio << ";absoluteIso=" << start.surface.absoluteIsoValue
         << ";background=" << start.surface.backgroundMean << ";material=" << start.surface.materialMean
-        << ";filter=" << start.voidParams.isFilterEnabled << ";minVolumeMM3=" << start.voidParams.minVolumeMM3;
+        << ";filter=" << start.voidParams.isFilterEnabled << ";minVolumeMM3=" << start.voidParams.minVolumeMM3
+        << ";roiPolicy=" << int(start.roiPolicy) << ";evaluationOnly=" << start.isEvaluationOnly;
     candidate.canonicalParameters = parameters.str();
 
     for (const auto& view : views) {
@@ -692,7 +718,7 @@ GapAdmission GapHostFeature::Impl::SendRequest(
     if (request.display && request.action != GapHostAction::SetDisplay) return {};
     SetBindingStale();
     std::shared_ptr<CompleteItem> control;
-    if (request.action != GapHostAction::Start && onComplete) {
+    if (request.action != GapHostAction::Start && request.action!=GapHostAction::Evaluate && onComplete) {
         try { control = std::make_shared<CompleteItem>(); }
         catch (...) { return {GapAdmissionStatus::Unavailable, 0}; }
         control->onComplete = std::move(onComplete);
@@ -700,7 +726,9 @@ GapAdmission GapHostFeature::Impl::SendRequest(
     bool succeeded = false;
     switch (request.action) {
     case GapHostAction::Start:
+    case GapHostAction::Evaluate:
         if (!request.start) return {};
+        if (request.action==GapHostAction::Evaluate) request.start->isEvaluationOnly=true;
         if (m_isRequestPending || m_isExitPending) return {GapAdmissionStatus::Busy, 0};
         if (!StartView(*request.start, std::move(onComplete))) return {};
         return {GapAdmissionStatus::Accepted, m_activeRequestId};
@@ -807,7 +835,7 @@ bool GapHostFeature::Impl::StartView(
     m_state.sourceRevision = m_requestSource->data->self;
     m_operation = {};
     m_operation.operation = { std::string(featureId), m_host->GetAttachmentId(), m_activeRequestId };
-    m_operation.inputs = { { "source-volume", m_state.sourceRevision } };
+    m_operation.inputs = std::move(candidate->inputs);
     m_operation.status = FeatureRunStatus::Preparing;
     m_operation.stateRevision = m_service->GetExecutionState().stateRevision + 1;
     m_isRequestPending = true;
@@ -862,7 +890,8 @@ bool GapHostFeature::Impl::SetDataTypes()
                 && !graph.view->GetDataFacets(type).empty())
             || m_data->SetDataType(std::move(descriptor));
     };
-    return setType(
+    return setType(gapParentRecordType,DataTypeDescriptor{gapParentRecordType,{gapParentRecordFacet},[](const IDataPayload& payload,std::string& message){const auto* parent=dynamic_cast<const GapParentRecord*>(&payload);if(parent && parent->GetValid())return true;message="Invalid full parent detection record.";return false;}})
+        && setType(
             gapVoidTableType,
             GetRecordTableDescriptor(
                 gapVoidTableType,
@@ -934,13 +963,14 @@ bool GapHostFeature::Impl::SetCompletedResult(
     const DataRevisionRef meshRef{ meshEntity, 1 };
     const DataRevisionRef statisticsRef{ statisticsEntity, 1 };
     const DataRevisionRef resultRef{ resultEntity, 1 };
+    const DataRevisionRef parentLabels{m_data->CreateDataEntityId(),1},parentVoids{m_data->CreateDataEntityId(),1},parentRecord{m_data->CreateDataEntityId(),1};
     auto resultSet = std::make_shared<const DataCollectionPayload>(
         gapResultSetType,
         std::vector<DataCollectionEntry>{
             { "labels", labelRef },
             { "void-regions", voidRef },
             { "void-surface", meshRef },
-            { "statistics", statisticsRef } });
+            { "statistics", statisticsRef },{"parent-labels",parentLabels},{"parent-void-regions",parentVoids},{"parent-detection",parentRecord} });
     if (!resultSet->GetValid()) {
         SetFailedResult(
             GapResultStatus::Failed,
@@ -999,6 +1029,14 @@ bool GapHostFeature::Impl::SetCompletedResult(
             DataProvenance{
                 std::string(featureId), "collect-results", "1", m_requestParameters } }
     };
+    for (auto& output:transaction.outputs)
+        for (const auto& input:m_operation.inputs) if (input.role!="source-volume") output.inputs.push_back(input);
+    if (!prepared || !prepared->parentLabels || !prepared->parentVoids || !prepared->parentRecord) return false;
+    transaction.outputs.insert(transaction.outputs.begin(),{parentLabels.entityId,0,DataTypes::labelMap3D,{{"source-volume",sourceRef}},prepared->parentLabels,DataProvenance{std::string(featureId),"retain-parent-labels","1",m_requestParameters}});
+    transaction.outputs.insert(transaction.outputs.begin()+1,{parentVoids.entityId,0,gapVoidTableType,{{"source-volume",sourceRef},{"labels",parentLabels}},prepared->parentVoids,DataProvenance{std::string(featureId),"retain-parent-defects","1",m_requestParameters}});
+    transaction.outputs.insert(transaction.outputs.begin()+2,{parentRecord.entityId,0,gapParentRecordType,{{"source-volume",sourceRef},{"parent-labels",parentLabels},{"parent-void-regions",parentVoids}},prepared->parentRecord,DataProvenance{std::string(featureId),"retain-parent-detection","1",m_requestParameters}});
+    transaction.outputs.back().inputs.push_back({"parent-detection",parentRecord});
+    transaction.outputs.back().inputs.push_back({"parent-labels",parentLabels});transaction.outputs.back().inputs.push_back({"parent-void-regions",parentVoids});
     transaction.bindings.push_back(DataBindingUpdate{
         std::string(gapResultBinding),
         m_requestResultBinding.revision,
@@ -1015,7 +1053,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
         const auto scope=m_data->CreateDataEntityId();
         for (auto& draft:transaction.outputs) { draft.lifetimeScope=scope; draft.lifetimePolicy=policy; }
         if (policy == DataLifetimePolicy::OwnerRetirement)
-            scopes.push_back({scope,DataLifetimeStatus::Published,{labelRef,voidRef,meshRef,statisticsRef,resultRef},true});
+            scopes.push_back({scope,DataLifetimeStatus::Published,{labelRef,voidRef,meshRef,statisticsRef,resultRef,parentLabels,parentVoids,parentRecord},true});
     }
     auto batch=m_data->StartDataChanges();
     if (!batch) {SetFailedResult(GapResultStatus::Failed,"Gap publication batch is unavailable.");return false;}
@@ -1026,7 +1064,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
                 ? GapResultStatus::Failed
                 : GapResultStatus::SourceChanged,
             GetSourceSame()
-                ? "Gap data transaction was rejected."
+                ? "Gap data transaction was rejected: "+commit.message
                 : "Gap source changed before publication.");
         return false;
     }
@@ -1047,7 +1085,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
     m_operation.status = FeatureRunStatus::Succeeded;
     m_operation.progress = 1.0;
     m_operation.stateRevision = m_service->GetExecutionState().stateRevision + 2;
-    m_operation.outputs = { labelRef, voidRef, meshRef, statisticsRef, resultRef };
+    m_operation.outputs = { labelRef, voidRef, meshRef, statisticsRef, resultRef,parentLabels,parentVoids,parentRecord };
 
     const auto graph = m_data->GetDataGraph();
     auto labelView = m_data->GetLabelMap(graph, labelRef);
@@ -1330,6 +1368,7 @@ FeatureDataContract GapHostFeature::GetDataContract() const
             DataOutputSpec{
                 "statistics", gapStatisticsType,
                 { DataFacets::tabularRecords, gapStatisticsFacet } },
+            DataOutputSpec{"parent-detection",gapParentRecordType,{gapParentRecordFacet}},
             DataOutputSpec{
                 "result-set", gapResultSetType,
                 { DataFacets::dataCollection } }

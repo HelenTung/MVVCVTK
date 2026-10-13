@@ -45,7 +45,7 @@ SurfaceTaskPurpose GetPurpose(const SurfaceDeterminationStartParams& params)
 bool GetInputValid(const SurfaceDeterminationStartParams& p)
 {
     if (!SurfaceRecipeCodec::GetError(p).empty() || p.seedBlockDepth == 0 || p.seedBlockDepth > 4096 ||
-        (p.analysisRoi && !GetDataRevisionRefValid(*p.analysisRoi)))
+        (p.analysisRoi && !GetDataRevisionRefValid(*p.analysisRoi)) || (p.parentGeneration && !GetDataRevisionRefValid(*p.parentGeneration)))
         return false;
     const auto purpose = GetPurpose(p);
     if (purpose != SurfaceTaskPurpose::Preview

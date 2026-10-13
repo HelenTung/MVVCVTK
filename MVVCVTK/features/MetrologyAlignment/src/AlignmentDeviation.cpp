@@ -21,7 +21,8 @@ Vec Vertex(const SurfaceMeshPayload &mesh, std::uint64_t id) {
     const auto &v = mesh.GetVertices(); return {v[3*id],v[3*id+1],v[3*id+2]};
 }
 void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &selection,
-             AlignmentDeviationField &field, std::vector<AlignmentPoint> &normals, std::size_t available) {
+             AlignmentDeviationField &field, std::vector<AlignmentPoint> &normals, std::size_t available,
+             const RoiReadSnapshot& roi,const AlignmentMatrix& meshToRoi) {
     const auto &mesh = *work.mesh;
     const auto &triangles = mesh.GetTriangles();
     const auto count = selection.empty() ? triangles.size()/3 : selection.size();
@@ -44,6 +45,23 @@ void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &select
         const double area = cv::norm(cross)/6;
         const bool valid = AlignmentGeometryFit::GetFaceValid(mesh, triangle);
         Require(std::isfinite(area) && (area > 0 || !valid), "Evaluation contains a degenerate triangle.");
+        if (roi) {
+            const std::array<AlignmentPoint,3> roiTriangle{Point(Transform(meshToRoi,Vertex(mesh,a))),Point(Transform(meshToRoi,Vertex(mesh,b))),Point(Transform(meshToRoi,Vertex(mesh,c)))};
+            const auto selected=roi->GetTriangleSelection(roiTriangle,0,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});
+            Require(selected.error==RoiError::None,"Deviation ROI triangle selection failed.");field.roiBoundaryTolerance=std::max(field.roiBoundaryTolerance,selected.boundaryTolerance);
+            const auto inverse=Inverse(meshToRoi);
+            for (const auto& piece:selected.triangles) {
+                const AlignmentPoint center{(piece[0][0]+piece[1][0]+piece[2][0])/3,(piece[0][1]+piece[1][1]+piece[2][1])/3,(piece[0][2]+piece[1][2]+piece[2][2])/3};
+                if(!roi->GetContains(center))continue;AlignmentDeviationSample sample;sample.parentTriangle=triangle;sample.sourcePosition=Point(Transform(inverse,Vector(center)));
+                std::array<AlignmentPoint,3> positions{};for(int j=0;j<3;++j)positions[j]=Point(Transform(inverse,Vector(piece[j])));sample.sourceTriangle=positions;
+                const auto u=Vector(positions[1])-Vector(positions[0]),v=Vector(positions[2])-Vector(positions[0]);sample.area=cv::norm(u.cross(v))*.5;
+                if(!(sample.area>0))continue;if(!valid)sample.state=AlignmentDeviationState::InvalidSource;
+                const auto ab=Vertex(mesh,b)-Vertex(mesh,a),ac=Vertex(mesh,c)-Vertex(mesh,a),q=Vector(*sample.sourcePosition)-Vertex(mesh,a);
+                const double aa=ab.dot(ab),bb=ac.dot(ac),d=ab.dot(ac),det=aa*bb-d*d;
+                if(det>0){const double vv=(bb*ab.dot(q)-d*ac.dot(q))/det,ww=(aa*ac.dot(q)-d*ab.dot(q))/det;sample.barycentric={1-vv-ww,vv,ww};}
+                field.samples.push_back(std::move(sample));if(!normals.empty())normals.push_back(Point(cross));
+            }continue;
+        }
         for (auto id : {a,b,c}) {
             field.samples[id].area += area;
             // 公开场按原顶点存储，不能拆成不同面上的两个样本；关联无效选中面
@@ -69,7 +87,7 @@ void Statistics(const AlignmentWork &work, AlignmentDeviationField &field,
         if (tolerance && (sample.value < (*tolerance)[0] || sample.value > (*tolerance)[1]))
             s.outOfToleranceArea += sample.area;
     }
-    Require(std::isfinite(s.selectedArea) && s.selectedArea > 0, "Invalid selected surface area.");
+    Require(std::isfinite(s.selectedArea) && s.selectedArea >= 0, "Invalid selected surface area.");
     if (!validCount) return;
     (void)Charge(available, validCount, sizeof(std::size_t));
     std::vector<std::size_t> order; order.reserve(validCount);
@@ -106,14 +124,16 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
     const auto &selection = reverse ? request.referenceTriangles : request.sourceTriangles;
     const auto &targetSelection = reverse ? request.sourceTriangles : request.referenceTriangles;
     auto available = Charge(std::numeric_limits<std::size_t>::max(), retainedBytes, 1);
-    const auto count = work.mesh->GetVertices().size()/3;
-    available = Charge(available, count, sizeof(AlignmentDeviationSample));
+    const auto baseCount = work.mesh->GetVertices().size()/3;
+    available = Charge(available, baseCount, sizeof(AlignmentDeviationSample));
     const bool needsNormals = request.minNormalCosine.has_value();
-    if (needsNormals) available = Charge(available, count, sizeof(AlignmentPoint));
-    auto field = std::make_shared<AlignmentDeviationField>(); field->samples.resize(count);
+    if (needsNormals) available = Charge(available, baseCount, sizeof(AlignmentPoint));
+    auto field = std::make_shared<AlignmentDeviationField>(); field->samples.resize(baseCount);field->originalVertexCount=baseCount;
     std::vector<AlignmentPoint> normals;
-    if (needsNormals) normals.resize(count);
-    Prepare(work, selection, *field, normals, available);
+    if (needsNormals) normals.resize(baseCount);
+    RoiReadSnapshot roi;if(request.evaluationRoi){const auto found=work.rois.find(*request.evaluationRoi);Require(found!=work.rois.end(),"Deviation ROI read view is missing.");roi=found->second;}
+    Prepare(work, selection, *field, normals, available,roi,reverse ? Inverse(pose):alignmentIdentity);
+    const auto count=field->samples.size();
     {
         AlignmentMeshQuery query(work.referenceMesh, work, targetSelection);
         const auto transform = reverse ? Inverse(pose) : pose;
@@ -122,11 +142,11 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
             if (sample.area <= 0) return {};
             Require(std::isfinite(sample.area), "Sample area overflows.");
             if (sample.state == AlignmentDeviationState::InvalidSource) return {};
-            if (!reverse && !AlignmentGeometryFit::GetPointUsable(measuredWork, i)) {
+            if (!reverse && ((sample.parentTriangle && !AlignmentGeometryFit::GetFaceValid(*measuredWork.mesh,*sample.parentTriangle)) || (!sample.parentTriangle && !AlignmentGeometryFit::GetPointUsable(measuredWork, i)))) {
                 sample.state = AlignmentDeviationState::InvalidSource; return {};
             }
             if (query.GetIsEmpty()) { sample.state = AlignmentDeviationState::InvalidTarget; return {}; }
-            const auto point = Transform(transform, Vertex(*work.mesh,i));
+            const auto point = Transform(transform,sample.sourcePosition ? Vector(*sample.sourcePosition):Vertex(*work.mesh,i));
             Require(Finite(point), "Non-finite query position.");
             return Point(point);
         };
@@ -216,6 +236,7 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
     return field;
 }
 bool Complete(const AlignmentDeviationField &field) {
+    if(!field.statistics.hasValues)return false;
     for (std::size_t i = 2; i < field.statistics.counts.size(); ++i)
         if (field.statistics.counts[i]) return false;
     return field.statistics.hasValues;
@@ -245,6 +266,7 @@ AlignmentDeviationData AlignmentDeviation::Build(const AlignmentWork &input,
         AlignmentWork work;
         work.mesh = input.mesh; work.referenceMesh = input.referenceMesh; work.config = input.config;
         work.cancelled = input.cancelled;
+        work.rois=input.rois;work.input=input.input;
         // 固定元数据、共享指针控制块及局部对象预留；不将输入网格或进程 RSS 计作新增数组。
         work.recipe.requiresMeasurementQuality = request.requiresMeasurementQuality;
         work.recipe.minSupportRatio = request.minSupportRatio;

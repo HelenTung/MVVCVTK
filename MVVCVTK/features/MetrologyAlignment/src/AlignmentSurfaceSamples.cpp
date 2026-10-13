@@ -54,6 +54,29 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         throw std::length_error("Surface selection size accounting overflows.");
     AlignmentSurfaceSamples output;
     auto &samples = output.points;
+    if (region && region->roi) {
+        Require(region->pinnedMesh==work.input.mesh,"ROI surface sampling belongs to another mesh revision.");
+        const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");
+        const auto roi=found->second;const auto inverse=Inverse(region->meshToRoi);const auto& triangles=work.mesh->GetTriangles();
+        for (std::size_t i=0;i<triangles.size();i+=3) {
+            if(i%768==0)CheckWork(work);std::array<AlignmentPoint,3> triangle{};
+            for(int j=0;j<3;++j){const auto id=triangles[i+j];triangle[j]=Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}));}
+            const auto selected=roi->GetTriangleSelection(triangle,0,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});Require(selected.error==RoiError::None,"Alignment ROI triangle selection failed.");
+            const bool valid=AlignmentGeometryFit::GetFaceValid(*work.mesh,i/3);
+            for(const auto& piece:selected.triangles){
+                const AlignmentPoint center{(piece[0][0]+piece[1][0]+piece[2][0])/3,(piece[0][1]+piece[1][1]+piece[2][1])/3,(piece[0][2]+piece[1][2]+piece[2][2])/3};
+                if(!roi->GetContains(center))continue;const auto sourcePoint=Point(Transform(inverse,Vector(center)));
+                if(region->targetBounds){const auto p=Transform(initial,Vector(sourcePoint));bool inside=true;for(int a=0;a<3;++a)if(p[a]<(*region->targetBounds)[a*2] || p[a]>(*region->targetBounds)[a*2+1])inside=false;if(!inside)continue;}
+                const auto a=Transform(inverse,Vector(piece[0])),b=Transform(inverse,Vector(piece[1])),c=Transform(inverse,Vector(piece[2]));
+                const auto cross=(b-a).cross(c-a);const double area=cv::norm(cross)*.5;if(!(area>0))continue;
+                const bool usable=valid && AlignmentGeometryFit::GetPointUsable(work,triangles[i]) && AlignmentGeometryFit::GetPointUsable(work,triangles[i+1]) && AlignmentGeometryFit::GetPointUsable(work,triangles[i+2]);
+                AlignmentSurfaceSample sample{triangles[i],area,usable?area:0,sourcePoint};
+                if(normals){Vec normal{};for(int j=0;j<3;++j){const auto id=triangles[i+j];normal+=Vec(normals->values[3*id],normals->values[3*id+1],normals->values[3*id+2]);}const double length=cv::norm(normal);if(length>0)sample.sourceNormal=Point(normal/length);}
+                samples.push_back(std::move(sample));if(needsFallback)output.directions.push_back(Direction(cross));
+            }
+        }
+        Require(!samples.empty(),"Surface alignment ROI is empty.");return output;
+    }
     samples.reserve(initialCapacity);
     for (std::size_t i = 0; i < count; ++i) {
         if (i % 256 == 0) CheckWork(work);
@@ -150,14 +173,15 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
         if (i % 256 == 0) CheckWork(work);
         const auto &sample = source.points[i];
         const auto id = sample.vertex;
+        const auto position=sample.sourcePosition.value_or(AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]});
         Cell key{};
         for (std::size_t axis = 0; axis < 3; ++axis) {
-            const double cell = std::floor((v[3 * id + axis] - origin[static_cast<int>(axis)]) / voxelSize);
+            const double cell = std::floor((position[axis] - origin[static_cast<int>(axis)]) / voxelSize);
             // 保持坐标格编号可精确传递，避免 double 到 int64 的边界溢出。
             Require(std::isfinite(cell) && std::abs(cell) <= 9007199254740991.0, "Surface grid coordinate exceeds exact integer range.");
             key[axis] = static_cast<std::int64_t>(cell);
         }
-        key[3] = normals ? Direction({normals->values[3 * id], normals->values[3 * id + 1], normals->values[3 * id + 2]}) : source.directions[i];
+        key[3] = sample.sourceNormal ? Direction(Vector(*sample.sourceNormal)):normals ? Direction({normals->values[3 * id], normals->values[3 * id + 1], normals->values[3 * id + 2]}) : source.directions[i];
         key[4] = sample.validArea > 0 && AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) ? 1 : 0;
         key[5] = regionId(interfaces, id); key[6] = regionId(overrides, id);
         const auto found = groups.find(key);
@@ -175,7 +199,7 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
             groups.emplace(key, result.size()); result.push_back(sample);
         } else {
             auto &representative = result[found->second];
-            representative.vertex = std::min(representative.vertex, sample.vertex);
+            if (!representative.sourcePosition && !sample.sourcePosition) representative.vertex = std::min(representative.vertex, sample.vertex);
             representative.area += sample.area;
             representative.validArea += sample.validArea;
             Require(std::isfinite(representative.area), "Surface group area overflows.");

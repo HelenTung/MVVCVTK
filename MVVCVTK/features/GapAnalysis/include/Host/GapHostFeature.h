@@ -12,13 +12,18 @@ enum class GapHostAction {
     Start,
     Overlay,
     Exit,
-    SetDisplay // owner thread 的短显示命令；失败保留原显示。
+    SetDisplay, // owner thread 的短显示命令；失败保留原显示。
+    Evaluate
 };
 
 struct GapHostStartParams {
     HostViewTargets targetViews;
     GapSurfaceConfig surface;
     GapVoidParams voidParams;
+    std::optional<DataRevisionRef> evaluationRoi, detectionRoi;
+    GapRoiPolicy roiPolicy = GapRoiPolicy::WholeIfIntersects;
+    bool isEvaluationOnly = false;
+    std::optional<DataRevisionRef> parentResult;
 };
 
 struct GapHostRequest {

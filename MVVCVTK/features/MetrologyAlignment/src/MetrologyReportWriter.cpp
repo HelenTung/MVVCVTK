@@ -502,6 +502,7 @@ template <> struct Codec<AlignmentRegion> {
     j.Field("pinnedMesh", v.pinnedMesh);
     j.Field("vertexIds", v.vertexIds);
     j.Field("targetBounds", v.targetBounds);
+    j.Field("roi",v.roi);j.Field("meshToRoi",v.meshToRoi);
     j.End();
   }
 };
@@ -796,6 +797,8 @@ template <> struct Codec<InspectionSectionTrace> {
     j.Field("perimeter", v.perimeter);
     j.Field("sampleSpacing", v.sampleSpacing);
     j.Field("maxPlaneCorrection", v.maxPlaneCorrection);
+    j.Field("isPartialSelection",v.isPartialSelection);
+    j.Field("parentSampleCount",v.parentSampleCount);
     j.Field("samples", v.samples);
     j.End();
   }
@@ -918,6 +921,7 @@ template <> struct Codec<AlignmentDeviationRequest> {
     j.Object();
     j.Field("computeBackend", v.computeBackend);
     j.Field("alignmentResult", v.alignmentResult);
+    j.Field("evaluationRoi",v.evaluationRoi);
     j.Field("metric", v.metric);
     j.Field("sourceTriangles", v.sourceTriangles);
     j.Field("referenceTriangles", v.referenceTriangles);
@@ -957,6 +961,7 @@ template <> struct Codec<AlignmentDeviationSample> {
     j.Object();
     j.Field("state", v.state);
     j.Field("area", v.area);
+    j.Field("sourcePosition",v.sourcePosition);j.Field("parentTriangle",v.parentTriangle);j.Field("barycentric",v.barycentric);j.Field("sourceTriangle",v.sourceTriangle);
     const bool hasQuery = v.state != AlignmentDeviationState::NotSelected &&
                           v.state != AlignmentDeviationState::InvalidSource;
     j.Field("value", hasQuery ? std::optional<double>{v.value} : std::nullopt);
@@ -974,7 +979,8 @@ template <> struct Codec<AlignmentDeviationField> {
     j.Field("statistics", v.statistics);
     j.Field("sampleCount", v.samples.size());
     j.Field("samplesIncluded", j.sink.options.includeDeviationSamples);
-    j.Field("sampleIndexSpace", std::string("original-mesh-vertex"));
+    j.Field("sampleIndexSpace", std::string("parent-vertices-and-roi-face-samples"));
+    j.Field("originalVertexCount",v.originalVertexCount);j.Field("roiBoundaryTolerance",v.roiBoundaryTolerance);
     if (j.sink.options.includeDeviationSamples)
       j.Field("samples", v.samples);
     j.End();

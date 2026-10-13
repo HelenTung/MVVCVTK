@@ -27,7 +27,7 @@ void ModulePanel::SendBusinessAction(const QString& action, bool usesOutput)
     }
     if(!m_entries.count(action)) return;
     auto params=GetActionParameters(action);
-    if(m_name=="Crop" && action=="BuildResult")params["nodeId"]=m_observed["appliedHead"];
+    if(m_name=="Crop" && action=="BuildResult" && params["inputRoi"].toString().isEmpty())params["nodeId"]=m_observed["appliedHead"];
     m_currentAction=action;
     if(m_forms.count(action) && m_forms.at(action)->GetHasInputs())m_parameterAction=action;
     if(m_name=="Surface" && (action=="Preview" || action=="Determine")) params=GetActionParameters("GlobalAutomatic");

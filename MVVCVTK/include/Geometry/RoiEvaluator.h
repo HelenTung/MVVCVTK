@@ -10,8 +10,9 @@ class RoiEvaluator final {
 public:
     using DataLookup = std::function<DataSnapshot(const DataRevisionRef&)>;
     static RoiError GetDefinitionError(const RoiDefinition& definition) noexcept;
-    static RoiError GetRelationsError(const DataRevision& roi, const DataLookup& getData);
+    static RoiError GetRelationsError(const DataRevision& roi, const DataLookup& getData,bool checkProvenance=true);
     static RoiReadResult GetRoi(const DataGraphSnapshot& graph,
         const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef);
+    static RoiReadResult GetPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition);
     static std::vector<DataInputRef> GetInputs(const RoiDefinition& definition);
 };

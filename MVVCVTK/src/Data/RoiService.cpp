@@ -9,20 +9,21 @@ namespace {
 struct CatalogView final {
     DataBinding binding{std::string(roiCatalogBinding)};
     DataSnapshot data;
+    bool isReadable=true;
     std::vector<RoiCatalogEntry> entries;
 };
 
 CatalogView GetCatalog(const DataGraphSnapshot& graph)
 {
     CatalogView result;
-    if (!graph.view) return result;
+    if (!graph.view) {result.isReadable=false;return result;}
     if (auto binding=graph.view->GetDataBinding(roiCatalogBinding)) result.binding=*binding;
     if (!result.binding.target) return result;
     result.data=graph.view->GetData(*result.binding.target);
     if (result.data) {
         const auto* catalog=dynamic_cast<const RoiCatalogPayload*>(result.data->payload.get());
-        if (catalog) result.entries=catalog->GetEntries();
-    }
+        if (catalog) result.entries=catalog->GetEntries();else result.isReadable=false;
+    }else result.isReadable=false;
     return result;
 }
 
@@ -87,24 +88,25 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
         // 1. 在一个不可变 graph 中解析目录和请求；正式写入仍由 Store CAS 决定。
         const auto graph=m_store.GetDataGraph();
         auto catalog=GetCatalog(graph);
-        if (catalog.binding.revision!=request.expectedCatalogRevision)
+        if(!catalog.isReadable)return GetFailure(RoiError::MissingInput,"ROI catalog cannot be read.");
+        if (request.expectedCatalogRevision && catalog.binding.revision!=*request.expectedCatalogRevision)
             return GetFailure(RoiError::RevisionConflict,"ROI catalog changed.");
         const bool creates=request.action==RoiAction::Create || request.action==RoiAction::Copy;
-        const bool writesGeometry=request.action!=RoiAction::SetMetadata;
+        const bool removes=request.action==RoiAction::Remove;
+        const bool writesGeometry=request.action!=RoiAction::SetMetadata && !removes;
         if (request.action!=RoiAction::Create && request.action!=RoiAction::Copy
-            && request.action!=RoiAction::SetGeometry && request.action!=RoiAction::SetMetadata)
+            && request.action!=RoiAction::SetGeometry && request.action!=RoiAction::SetMetadata && !removes)
             return GetFailure(RoiError::InvalidRequest,"Unknown ROI action.");
         if ((creates && request.expectedRoi) || (!creates && !request.expectedRoi)
             || (request.action==RoiAction::Copy)!=request.copyFrom.has_value())
             return GetFailure(RoiError::InvalidRequest,"ROI action fields conflict.");
-        if ((request.action==RoiAction::Copy || request.action==RoiAction::SetMetadata)
+        if ((request.action==RoiAction::Copy || request.action==RoiAction::SetMetadata || removes)
             && (!request.definition.nodes.empty() || GetDataRevisionRefValid(request.definition.source)))
             return GetFailure(RoiError::InvalidRequest,"This ROI action cannot contain geometry.");
-        if ((request.action==RoiAction::SetGeometry && !GetMetadataEmpty(request.metadata))
-            || (request.action!=RoiAction::SetGeometry && !GetMetadataValid(request.metadata)))
+        if ((request.action==RoiAction::SetGeometry && !GetMetadataEmpty(request.metadata) && !GetMetadataValid(request.metadata))
+            || (removes && !GetMetadataEmpty(request.metadata))
+            || (request.action!=RoiAction::SetGeometry && !removes && !GetMetadataValid(request.metadata)))
             return GetFailure(RoiError::InvalidRequest,"ROI metadata is invalid for the action.");
-        if (creates && catalog.entries.size()>=roiCatalogLimit)
-            return GetFailure(RoiError::TooLarge,"ROI catalog is full.");
         auto selected=catalog.entries.end();
         if (!creates) {
             selected=std::find_if(catalog.entries.begin(),catalog.entries.end(),[&](const RoiCatalogEntry& item) {
@@ -162,23 +164,18 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
                 return graph.view->GetData(ref);
             });
             if (error!=RoiError::None) return GetFailure(error,"ROI input relations are invalid.");
-            for (const auto& input:RoiEvaluator::GetInputs(definition)) {
-                if (!graph.view->GetData(input.source)) continue; // 本次恢复中新建的 mask，由 output CAS 校验。
-                DataExpectation expectation;
-                expectation.entityId=input.source.entityId;
-                expectation.expectedGeneration=input.source.generation;
-                transaction.expectations.push_back(expectation);
-            }
+            // 输入引用固定的不可变修订；Store 校验其存在，不要求对应实体的最新 head 仍相同。
             transaction.outputs.push_back(std::move(draft));
         } else {
             DataExpectation expectation;
             expectation.entityId=target.entityId; expectation.expectedGeneration=target.generation;
             transaction.expectations.push_back(expectation);
         }
-        if (creates) catalog.entries.push_back({target,request.metadata});
+        if (removes) catalog.entries.erase(selected);
+        else if (creates) catalog.entries.push_back({target,request.metadata});
         else {
             selected->geometry=target;
-            if (request.action==RoiAction::SetMetadata) selected->metadata=request.metadata;
+            if (request.action==RoiAction::SetMetadata || (request.action==RoiAction::SetGeometry && !GetMetadataEmpty(request.metadata))) selected->metadata=request.metadata;
         }
         std::sort(catalog.entries.begin(),catalog.entries.end(),[](const RoiCatalogEntry& a,const RoiCatalogEntry& b){return a.geometry.entityId<b.geometry.entityId;});
         const DataRevisionRef catalogRef=catalog.data ? DataRevisionRef{catalog.data->self.entityId,catalog.data->self.generation+1}
@@ -190,7 +187,7 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
         RoiDefinition outcomeDefinition=writesGeometry ? definition
             : dynamic_cast<const RoiGeometryPayload&>(*graph.view->GetData(target)->payload).GetDefinition();
         RoiResult result;
-        result.roi=RoiDescriptor{target,target,std::move(outcomeDefinition),outcomeEntry->metadata,catalog.binding.revision+1};
+        if (!removes) result.roi=RoiDescriptor{target,target,std::move(outcomeDefinition),outcomeEntry->metadata,catalog.binding.revision+1};
         transaction.outputs.push_back({catalogRef.entityId,catalogRef.generation-1,DataTypes::roiCatalog,
             std::move(inputs),std::make_shared<const RoiCatalogPayload>(std::move(catalog.entries)),
             DataProvenance{"Host.Roi","set-catalog","1",{}}});

@@ -31,6 +31,11 @@ public:
     RoiReadResult GetRoi(const DataGraphSnapshot& graph,
         const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const override;
     RoiResult SetRoi(const RoiRequest& request) override;
+    RoiOperationResult GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const override;
+    RoiReadResult GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition) const override;
+    RoiOperationResult SetRoiOperation(const RoiOperationRequest& request) override;
+    RoiOperationResult SetRoiOperationCommit(const RoiOperationRequest& request,RoiOperationResult candidate) override;
+    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&,std::size_t maxBytes) override;
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
         const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes) override;
     DataGraphSnapshot GetDataGraph() const override;

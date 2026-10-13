@@ -387,7 +387,23 @@ class MetrologyAlignmentHostFeature::Impl final {
                 }
                 if (!task)
                     return {};
-                auto readers=FeatureInternal::StartInputReads(m_data->GetDataGraph(),task->expectations,"metrology-alignment-reader");
+                const auto roiGraph=m_data->GetDataGraph();
+                const auto resolveRoi=[&](const std::optional<DataRevisionRef>& ref,const DataRevisionRef& source) {
+                    if (!ref) return true;
+                    const auto resolved=m_data->GetRoi(roiGraph,*ref,source);
+                    if (resolved.error!=RoiError::None || !resolved.roi) return false;
+                    task->work.rois[*ref]=resolved.roi;return true;
+                };
+                for (const auto& geometry:task->work.recipe.geometries)
+                    if (!resolveRoi(geometry.region.roi,task->work.input.source)) return {};
+                if (task->work.recipe.surfaceFit && task->work.recipe.surfaceFit->sourceRegion
+                    && !resolveRoi(task->work.recipe.surfaceFit->sourceRegion->roi,task->work.input.source)) return {};
+                if (task->deviationContext && !resolveRoi(task->deviationContext->snapshot.parameters->evaluationRoi,task->work.input.source)) return {};
+                if (task->inspectionContext) for (const auto& geometry:task->inspectionContext->snapshot.plan->geometries)
+                    if (!resolveRoi(geometry.fit.region.roi,geometry.source==InspectionGeometrySource::ReferenceSurface ? task->inspectionContext->snapshot.referenceData:task->work.input.source)) return {};
+                auto readExpectations=task->expectations;
+                for(const auto& entry:task->work.rois)for(const auto& ref:entry.second->GetDependencies()){DataExpectation e;e.entityId=ref.entityId;e.expectedGeneration=ref.generation;readExpectations.push_back(e);}
+                auto readers=FeatureInternal::StartInputReads(m_data->GetDataGraph(),readExpectations,"metrology-alignment-reader");
                 if (!readers) return {};
                 task->readers=std::move(*readers);
                 m_nextRequest = id;
@@ -483,7 +499,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                         !GetReferenceMesh(graph, *request.recipe, request.input->coordinateFrame))
                         return {};
                     for (const auto &spec : request.recipe->geometries) {
-                        if (!spec.region.vertexIds.empty() &&
+                        if ((!spec.region.vertexIds.empty() || spec.region.roi) &&
                             spec.region.pinnedMesh != request.input->mesh)
                             return {};
                     }
@@ -495,7 +511,7 @@ class MetrologyAlignmentHostFeature::Impl final {
                         return {};
                     if (request.recipe->surfaceFit && request.recipe->surfaceFit->sourceRegion) {
                         const auto &region = *request.recipe->surfaceFit->sourceRegion;
-                        if (!region.vertexIds.empty() && region.pinnedMesh != request.input->mesh)
+                        if ((!region.vertexIds.empty() || region.roi) && region.pinnedMesh != request.input->mesh)
                             return {};
                     }
                     // 只恢复经显式修订映射校验的配方；旧顶点编号不能映射到新网格。
@@ -840,16 +856,20 @@ class MetrologyAlignmentHostFeature::Impl final {
         result.requestId = id;
         std::vector<DataInputRef> inputs{{"nominal", recipe.nominalData}};
         for (std::size_t i = 0; i < recipe.geometries.size(); ++i)
-            if (!recipe.geometries[i].region.vertexIds.empty())
+            if (!recipe.geometries[i].region.vertexIds.empty() || recipe.geometries[i].region.roi)
                 inputs.push_back(
                     {"selection-" + std::to_string(i), recipe.geometries[i].region.pinnedMesh});
+        for (std::size_t i=0;i<recipe.geometries.size();++i) if(recipe.geometries[i].region.roi)
+            inputs.push_back({"fit-roi-"+std::to_string(i),*recipe.geometries[i].region.roi});
         if (!recipe.fitPairs.empty())
             inputs.push_back({"correspondence", recipe.exactMesh});
         if (recipe.prealignment && !recipe.prealignment->sourceTriangles.empty())
             inputs.push_back({"prealignment-selection", recipe.exactMesh});
         if (recipe.surfaceFit && recipe.surfaceFit->sourceRegion &&
-            !recipe.surfaceFit->sourceRegion->vertexIds.empty())
+            (!recipe.surfaceFit->sourceRegion->vertexIds.empty() || recipe.surfaceFit->sourceRegion->roi))
             inputs.push_back({"surface-selection", recipe.surfaceFit->sourceRegion->pinnedMesh});
+        if (recipe.surfaceFit && recipe.surfaceFit->sourceRegion && recipe.surfaceFit->sourceRegion->roi)
+            inputs.push_back({"alignment-roi",*recipe.surfaceFit->sourceRegion->roi});
         DataTransaction tx;
         for (const auto &input : inputs) {
             if (!graph.view->GetData(input.source))

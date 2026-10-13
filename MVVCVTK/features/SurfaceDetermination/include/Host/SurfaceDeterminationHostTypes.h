@@ -24,6 +24,8 @@ struct SurfaceDeterminationStartParams final : SurfaceRecipe
     // 省略只在接纳时解析主卷，计算不再查询当前选择。
     std::optional<DataRevisionRef> sourceVolume;
     std::optional<DataRevisionRef> analysisRoi;
+    // 显式复用已验证的完整父表面；只重新选择面片，不重新测量。
+    std::optional<DataRevisionRef> parentGeneration;
     // 执行分块不降低分辨率，不影响算法结果的参数指纹。
     std::uint32_t seedBlockDepth = 16;
     // 省略表示正式测量；预览也执行同一材料等值面算法。
@@ -34,6 +36,11 @@ struct SurfaceDeterminationStartParams final : SurfaceRecipe
     std::string modelUnit;
 };
 
+struct SurfaceSelectionPiece final {
+    std::uint64_t parentTriangle = 0;
+    std::array<std::array<double,3>,3> points{};
+    std::array<std::array<double,3>,3> barycentric{};
+};
 struct SurfaceGenerationSnapshot final {
     // Preview 的两个图引用为空；requestId 标识临时候选。
     std::uint64_t requestId = 0;
@@ -48,6 +55,10 @@ struct SurfaceGenerationSnapshot final {
     std::optional<DataBinding> sourceBinding;
     DataRevisionRef dataRevision;
     DataRevisionRef meshRevision;
+    DataRevisionRef selectionMeshRevision;
+    std::shared_ptr<const std::vector<SurfaceSelectionPiece>> selection;
+    double selectedAreaMM2 = 0;
+    double selectionToleranceMM = 0;
     DataRevisionRef sourceRevision;
     std::uint64_t resultRevision = 0;
     std::uint64_t parameterFingerprint = 0;

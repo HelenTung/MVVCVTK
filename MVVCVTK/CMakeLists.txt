@@ -480,6 +480,7 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/DataGraphStore.cpp
     include/Data/RoiService.h
     src/Data/RoiService.cpp
+    src/Data/RoiOperations.cpp
     src/Data/RoiArchive.cpp
     include/Geometry/RoiEvaluator.h
     src/Geometry/RoiEvaluator.cpp

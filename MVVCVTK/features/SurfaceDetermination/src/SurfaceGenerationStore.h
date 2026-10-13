@@ -39,7 +39,7 @@ public:
     {
         if (!m_generation) return {};
         return {m_generation,m_generation->points,m_generation->triangleIndices,m_generation->objects,
-            m_generation->triangleValidity,m_generation->interfaces};
+            m_generation->triangleValidity,m_generation->interfaces,m_generation->selection};
     }
     const Statistics& GetStatistics() const noexcept { return m_statistics; }
 private:

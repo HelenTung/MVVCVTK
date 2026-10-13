@@ -210,9 +210,16 @@ void Run(const char* sample, double spacing, const std::array<double, 3>& origin
     const auto mesh=surface->GetSurfaceSnapshot();
     Check(surfaceResult.status==SurfaceResultStatus::Succeeded && surfaceResult.isPublished
         && mesh && mesh->purpose==SurfaceTaskPurpose::Determine && mesh->points && !mesh->points->empty(),"Surface 生成局部表面："+surfaceResult.message);
-    exact=true; for (const auto& p:*mesh->points) if (!frozen.roi->GetContains(p.positionModel)) exact=false;
+    Check(mesh->selection && !mesh->selection->empty() && mesh->selectedAreaMM2>0,"Surface 选择完整父表面的实际 ROI 面片");
+    exact=true;for(const auto& piece:*mesh->selection)for(const auto& p:piece.points)if(!frozen.roi->GetContains(p))exact=false;
     graph=probe->data->GetDataGraph();
-    Check(exact && HasInput(probe->data->GetData(graph,mesh->meshRevision),"analysis-roi",ref),"Surface 所有点位于同一精确 ROI 并记录修订");
+    Check(exact && HasInput(probe->data->GetData(graph,mesh->selectionMeshRevision),"analysis-roi",ref),"Surface 选片位于同一精确 ROI 并记录修订");
+    surfaceParams.parentGeneration=mesh->dataRevision;std::get<SurfaceStartRequest>(extract).start=surfaceParams;surfaced=false;
+    Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult r){surfaceResult=std::move(r);surfaced=true;}).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳显式完整父表面复用");
+    Pump(session,[&]{return surfaced;});const auto reused=surface->GetSurfaceSnapshot();
+    Check(surfaceResult.isPublished && reused && reused->meshRevision==mesh->meshRevision && reused->points==mesh->points && reused->triangleIndices==mesh->triangleIndices
+        && reused->execution.scannedCellCount==0 && reused->selection && reused->selection->size()==mesh->selection->size(),"ROI 重新选片复用原测量点、网格与完整支撑，不重新扫描体素");
+    surfaceParams.parentGeneration.reset();
     const auto archive=session.GetRoiArchive(ref,d.metadata.identity.datasetId);
     Check(archive.error==RoiError::None && archive.archive,"带来源 URI 的纯值归档成功");
     const auto restored=session.LoadRoiArchive(*archive.archive,d.metadata.identity.datasetId,source,renamed.roi->catalogRevision);

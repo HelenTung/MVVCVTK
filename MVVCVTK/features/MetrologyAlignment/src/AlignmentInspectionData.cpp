@@ -5,7 +5,9 @@
 namespace AlignmentInspectionData {
 namespace {
 std::vector<DataInputRef> Inputs(const InspectionSnapshot &s) {
-    return {{"alignment",s.alignmentResult},{"mesh",s.sourceMesh},{"nominal",s.referenceData},{"transform",s.transform}};
+    std::vector<DataInputRef> result{{"alignment",s.alignmentResult},{"mesh",s.sourceMesh},{"nominal",s.referenceData},{"transform",s.transform}};
+    if(s.plan)for(std::size_t i=0;i<s.plan->geometries.size();++i)if(s.plan->geometries[i].fit.region.roi)result.push_back({"evaluation-roi-"+std::to_string(i),*s.plan->geometries[i].fit.region.roi});
+    return result;
 }
 bool ReportValid(const InspectionSnapshot &s) {
     if (!s.plan || !s.report || !AlignmentInspection::GetPlanValid(*s.plan,{}) || s.plan->alignmentResult!=s.alignmentResult ||
@@ -26,7 +28,7 @@ bool ReportValid(const InspectionSnapshot &s) {
                 !AlignmentMath::GetUnitDirectionValid(trace.sourcePlaneNormal) || trace.components==0 || trace.closedLoops==0 ||
                 trace.closedLoops>trace.components || trace.selectedSegments<3 || trace.sourceTriangleCount==0 ||
                 !AlignmentMath::Positive(trace.perimeter) || !AlignmentMath::Positive(trace.sampleSpacing) ||
-                trace.samples.size()!=g.fitted.sampleCount || trace.samples.size()<8 ||
+                trace.samples.size()!=g.fitted.sampleCount || trace.samples.size()<8 || (trace.isPartialSelection && trace.parentSampleCount<=trace.samples.size()) ||
                 !std::isfinite(trace.maxPlaneCorrection) || trace.maxPlaneCorrection<0 ||
                 trace.maxPlaneCorrection>2*spec.section->planeTolerance) return false;
             for (const auto &sample:trace.samples) {
@@ -77,7 +79,7 @@ std::optional<Context> Prepare(const DataGraphSnapshot &graph,InspectionPlan pla
     const bool needsSurface=std::any_of(plan.geometries.begin(),plan.geometries.end(),[](const auto &g) { return g.source==InspectionGeometrySource::ReferenceSurface; });
     const auto source=AlignmentResultSource::Read(graph,plan.alignmentResult,needsSurface);
     if (!source) return {};
-    for (const auto &g:plan.geometries) if (g.source!=InspectionGeometrySource::NominalDefinition && !g.fit.region.vertexIds.empty() &&
+    for (const auto &g:plan.geometries) if (g.source!=InspectionGeometrySource::NominalDefinition && (!g.fit.region.vertexIds.empty() || g.fit.region.roi) &&
         g.fit.region.pinnedMesh!=(g.source==InspectionGeometrySource::MeasuredSurface ? source->input.mesh : source->nominal)) return {};
     for (const auto &g:plan.geometries) if (g.section &&
         g.section->pinnedMesh!=(g.source==InspectionGeometrySource::MeasuredSurface ? source->input.mesh : source->nominal)) return {};
@@ -113,6 +115,7 @@ std::optional<InspectionSnapshot> GetResult(const DataGraphSnapshot &graph,const
         if (!mesh || g.section->sourceTriangleCount!=mesh->GetTriangles().size()/3) return {};
     }
     for (const auto &input:Inputs(s)) {
+        if(input.role.rfind("evaluation-roi-",0)==0){if(!graph.view->GetData(input.source) || std::none_of(node->inputs.begin(),node->inputs.end(),[&](const auto& i){return i.role==input.role && i.source==input.source;}))return {};continue;}
         if (std::none_of(node->inputs.begin(),node->inputs.end(),[&](const auto &i) { return i.role==input.role && i.source==input.source; }) ||
             std::none_of(payload->expectations.begin(),payload->expectations.end(),[&](const auto &e) {
                 return e.kind==DataExpectationKind::EntityHead && e.use==DataExpectationUse::Required && e.entityId==input.source.entityId &&

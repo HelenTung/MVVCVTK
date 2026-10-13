@@ -25,6 +25,10 @@ struct GapViewRequest final {
     vtkSmartPointer<vtkImageData> validityMask;
     GapSurfaceConfig surface; // DefX 材料均值与等值面阈值配置快照。
     GapVoidParams voidParams; // DefX 过滤开关与最小体积参数快照。
+    RoiReadSnapshot evaluationRoi, detectionRoi;
+    GapRoiPolicy roiPolicy = GapRoiPolicy::WholeIfIntersects;
+    bool isEvaluationOnly = false;
+    std::shared_ptr<const GapAnalysisResult> savedParent;
     std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets; // 轴向与 2D label overlay 目标配对。
 };

@@ -82,12 +82,13 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
         if (owner) owner->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
             {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
     };
-    panel->AttachAction("EvaluateSurface", GetJson(R"({"result":"current","computeBackend":"Cpu","metric":"UnsignedDistance","sourceTriangles":[],"referenceTriangles":[],"maxDistance":1,"minNormalCosine":null,"tolerance":null,"reverseCoverage":true})"),
+    panel->AttachAction("EvaluateSurface", GetJson(R"({"result":"current","computeBackend":"Cpu","metric":"UnsignedDistance","sourceTriangles":[],"referenceTriangles":[],"evaluationRoi":"","maxDistance":1,"minNormalCosine":null,"tolerance":null,"reverseCoverage":true})"),
         [alignment, send](auto id, const auto& p) {
             AlignmentDeviationRequest evaluation; evaluation.alignmentResult = alignment(p);
             evaluation.computeBackend = GetEnum<AlignmentComputeBackend>(p, "computeBackend", {{"Cpu", AlignmentComputeBackend::Cpu}, {"Cuda", AlignmentComputeBackend::Cuda}});
             evaluation.metric = GetEnum<AlignmentDeviationMetric>(p, "metric", {{"UnsignedDistance", AlignmentDeviationMetric::UnsignedDistance}, {"NominalNormalProjection", AlignmentDeviationMetric::NominalNormalProjection}});
             evaluation.sourceTriangles = Ids(p["sourceTriangles"]); evaluation.referenceTriangles = Ids(p["referenceTriangles"]);
+            if(!p["evaluationRoi"].toString().isEmpty())evaluation.evaluationRoi=GetRef(p["evaluationRoi"]);
             evaluation.maxDistance = GetNumber(p, "maxDistance"); evaluation.reverseCoverage = GetBool(p, "reverseCoverage");
             if (!p["minNormalCosine"].isNull()) evaluation.minNormalCosine = GetNumber(p, "minNormalCosine");
             if (!p["tolerance"].isNull()) evaluation.tolerance = GetArray<double, 2>(p["tolerance"]);
@@ -124,8 +125,7 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                     geometry.fit.region.pinnedMesh = snapshot->input.mesh; geometry.fit.region.vertexIds = Ids(p["vertexIds"]);
                     if (!p["targetBounds"].isNull()) geometry.fit.region.targetBounds = GetArray<double, 6>(p["targetBounds"]);
                     if(const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],snapshot->input.source)) {
-                        const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,snapshot->input.source,snapshot->input.mesh);
-                        SetRegionRoi(geometry.fit.region,vertices,snapshot->input.mesh);
+                        SetRegionRoi(geometry.fit.region,*roi,snapshot->input.mesh);
                     }
                     geometry.fit.targetDirection = GetArray<double, 3>(p["targetDirection"]);
                 }

@@ -119,6 +119,10 @@ bool VolumeView::GetMaterial(std::size_t index) const noexcept
 {
     return m_input.material && m_input.material->GetContains(GetPoint(index));
 }
+bool VolumeView::GetQuality(std::size_t index) const noexcept
+{
+    return !m_input.material || m_input.material->GetContains(GetPoint(index));
+}
 
 void VolumeView::SetValues(const std::vector<float>& values) noexcept { m_values = &values; }
 

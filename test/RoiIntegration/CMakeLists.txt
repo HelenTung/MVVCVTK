@@ -14,3 +14,21 @@ if(MVVCVTK_ROI_REAL_SAMPLE)
     SetTestRuntime(RoiIntegration.RealCt mvvcvtk_roi_integration_tests)
     set_tests_properties(RoiIntegration.RealCt PROPERTIES TIMEOUT 120 LABELS "RealData")
 endif()
+
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT AND MVVCVTK_BUILD_GAP_ANALYSIS)
+    add_executable(mvvcvtk_roi_consumer_tests RoiConsumerTests.cpp)
+    target_include_directories(mvvcvtk_roi_consumer_tests PRIVATE "${PROJECT_SOURCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include")
+    target_link_libraries(mvvcvtk_roi_consumer_tests PRIVATE mvvcvtk_host_test_internal MVVCVTK::Host
+        MVVCVTK::MetrologyAlignment MVVCVTK::GapAnalysis MVVCVTK::OrthogonalCrop MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+    if(MVVCVTK_BUILD_WALL_THICKNESS)
+        target_link_libraries(mvvcvtk_roi_consumer_tests PRIVATE MVVCVTK::WallThickness)
+        target_compile_definitions(mvvcvtk_roi_consumer_tests PRIVATE ROI_TEST_WALL=1)
+    endif()
+    SetTargetDefaults(mvvcvtk_roi_consumer_tests)
+    vtk_module_autoinit(TARGETS mvvcvtk_roi_consumer_tests MODULES ${MVVCVTK_VTK_TARGETS})
+    add_test(NAME RoiIntegration.SurfaceConsumers COMMAND mvvcvtk_roi_consumer_tests)
+    SetTestRuntime(RoiIntegration.SurfaceConsumers mvvcvtk_roi_consumer_tests)
+    set_tests_properties(RoiIntegration.SurfaceConsumers PROPERTIES TIMEOUT 90)
+endif()

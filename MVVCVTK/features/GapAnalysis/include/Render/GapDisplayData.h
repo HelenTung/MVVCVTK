@@ -1,9 +1,12 @@
 #pragma once
 
 #include "GapAnalysisTypes.h"
+#include "Host/RoiReadTypes.h"
 #include "Render/Support/AnalysisColorStyle.h"
 #include <vtkAppendPolyData.h>
 #include <vtkCellData.h>
+#include <vtkCellArray.h>
+#include <vtkPoints.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkIntArray.h>
 #include <vtkPointData.h>
@@ -91,7 +94,8 @@ struct GapDisplayData final {
     }
 
     static std::shared_ptr<const GapDisplayData> Build(vtkImageData* image,
-        const std::vector<VoidRegion>& regions, const std::atomic<bool>& isStopping)
+        const std::vector<VoidRegion>& regions, const std::atomic<bool>& isStopping,
+        const RoiReadSnapshot& evaluationRoi={},const std::vector<VoidRegion>* parentRegions=nullptr)
     {
         if (!image || image->GetScalarType() != VTK_INT
             || image->GetNumberOfScalarComponents() != 1) return {};
@@ -132,16 +136,18 @@ struct GapDisplayData final {
             result->labels->SetAnnotation(vtkVariant(region.id), std::to_string(region.id));
             result->labels->SetTableValue(static_cast<vtkIdType>(index + 1), rgb[0], rgb[1], rgb[2], 1);
             if (region.voxelCount == 0) continue;
-            // bbox 是供应商的含端点网格索引；外围背景只用于封闭显示表面。
+            // 从完整父标签提面；评价区域只选择原表面的面片，不产生截断盖面。
+            const VoidRegion* parent=&region;
+            if(parentRegions){const auto found=std::find_if(parentRegions->begin(),parentRegions->end(),[&](const auto& p){return p.id==region.id;});if(found==parentRegions->end())return {};parent=&*found;}
             int extent[6]; std::size_t count = 1;
             for (int axis = 0; axis < 3; ++axis) {
-                if (region.bbox[2 * axis] < sourceExtent[2 * axis]
-                    || region.bbox[2 * axis + 1] > sourceExtent[2 * axis + 1]
-                    || region.bbox[2 * axis] > region.bbox[2 * axis + 1]
-                    || region.bbox[2 * axis] == std::numeric_limits<int>::min()
-                    || region.bbox[2 * axis + 1] == std::numeric_limits<int>::max()) return {};
-                extent[2 * axis] = region.bbox[2 * axis] - 1;
-                extent[2 * axis + 1] = region.bbox[2 * axis + 1] + 1;
+                if (parent->bbox[2 * axis] < sourceExtent[2 * axis]
+                    || parent->bbox[2 * axis + 1] > sourceExtent[2 * axis + 1]
+                    || parent->bbox[2 * axis] > parent->bbox[2 * axis + 1]
+                    || parent->bbox[2 * axis] == std::numeric_limits<int>::min()
+                    || parent->bbox[2 * axis + 1] == std::numeric_limits<int>::max()) return {};
+                extent[2 * axis] = parent->bbox[2 * axis] - 1;
+                extent[2 * axis + 1] = parent->bbox[2 * axis + 1] + 1;
                 const auto size = std::size_t(std::int64_t(extent[2 * axis + 1])
                     - extent[2 * axis] + 1);
                 if (size > roiByteLimit / count) return {};
@@ -152,12 +158,12 @@ struct GapDisplayData final {
             mask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
             auto* values = static_cast<unsigned char*>(mask->GetScalarPointer());
             std::fill_n(values, count, static_cast<unsigned char>(0));
-            for (int z = region.bbox[4]; z <= region.bbox[5]; ++z) {
+            for (int z = parent->bbox[4]; z <= parent->bbox[5]; ++z) {
                 if (isStopping.load()) return {};
-                for (int y = region.bbox[2]; y <= region.bbox[3]; ++y) {
-                    auto* source = static_cast<const int*>(image->GetScalarPointer(region.bbox[0], y, z));
-                    auto* target = static_cast<unsigned char*>(mask->GetScalarPointer(region.bbox[0], y, z));
-                    for (int x = region.bbox[0]; x <= region.bbox[1]; ++x)
+                for (int y = parent->bbox[2]; y <= parent->bbox[3]; ++y) {
+                    auto* source = static_cast<const int*>(image->GetScalarPointer(parent->bbox[0], y, z));
+                    auto* target = static_cast<unsigned char*>(mask->GetScalarPointer(parent->bbox[0], y, z));
+                    for (int x = parent->bbox[0]; x <= parent->bbox[1]; ++x)
                         *target++ = *source++ == region.id ? 1 : 0;
                 }
             }
@@ -174,6 +180,22 @@ struct GapDisplayData final {
             if (isStopping.load()) return {};
             auto poly = vtkSmartPointer<vtkPolyData>::New();
             poly->ShallowCopy(filter->GetOutput());
+            if(evaluationRoi){
+                auto points=vtkSmartPointer<vtkPoints>::New();points->SetDataTypeToDouble();
+                auto cells=vtkSmartPointer<vtkCellArray>::New();
+                vtkIdType count=0;const vtkIdType* ids=nullptr;auto* triangles=poly->GetPolys();triangles->InitTraversal();
+                while(triangles->GetNextCell(count,ids)){
+                    if(count!=3)return {};
+                    std::array<std::array<double,3>,3> triangle{};for(int k=0;k<3;++k)poly->GetPoint(ids[k],triangle[k].data());
+                    const auto selected=evaluationRoi->GetTriangleSelection(triangle,meshByteLimit-totalMeshBytes,0,[&]{return isStopping.load();});
+                    if(selected.error!=RoiError::None)return {};
+                    for(const auto& piece:selected.triangles){
+                        if(std::size_t(points->GetNumberOfPoints())> (meshByteLimit-totalMeshBytes)/(sizeof(double)*3+sizeof(vtkIdType)))return {};
+                        vtkIdType corners[3];for(int k=0;k<3;++k)corners[k]=points->InsertNextPoint(piece[k].data());cells->InsertNextCell(3,corners);
+                    }
+                }
+                poly=vtkSmartPointer<vtkPolyData>::New();poly->SetPoints(points);poly->SetPolys(cells);
+            }
             auto labels = vtkSmartPointer<vtkIntArray>::New();
             labels->SetName("gap.display.id");
             labels->SetNumberOfTuples(poly->GetNumberOfCells());

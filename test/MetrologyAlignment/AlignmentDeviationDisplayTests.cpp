@@ -115,6 +115,7 @@ void Display(const char *imagePath) {
             field->samples.push_back(sample);
         }
     }
+    field->originalVertexCount=12;
     auto poly=vtkSmartPointer<vtkPolyData>::New(); poly->SetPoints(points); poly->SetPolys(triangles);
     auto originalScalars=vtkSmartPointer<vtkDoubleArray>::New(); originalScalars->SetNumberOfTuples(12); originalScalars->FillValue(42);
     poly->GetPointData()->SetScalars(originalScalars);

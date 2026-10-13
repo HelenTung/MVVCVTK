@@ -7,11 +7,12 @@
 namespace AlignmentDeviationDataStore {
 namespace {
 std::vector<DataInputRef> Inputs(const AlignmentDeviationSnapshot &s) {
-    return {{"alignment",s.alignmentResult},{"mesh",s.sourceMesh},{"nominal",s.referenceMesh},{"transform",s.transform}};
+    std::vector<DataInputRef> result{{"alignment",s.alignmentResult},{"mesh",s.sourceMesh},{"nominal",s.referenceMesh},{"transform",s.transform}};
+    if(s.parameters && s.parameters->evaluationRoi)result.push_back({"evaluation-roi",*s.parameters->evaluationRoi});return result;
 }
 bool FieldValid(const std::shared_ptr<const AlignmentDeviationField> &field) {
     if (!field || field->samples.empty() || !std::isfinite(field->statistics.selectedArea) ||
-        field->statistics.selectedArea <= 0) return false;
+        field->statistics.selectedArea < 0) return false;
     const auto &stats = field->statistics;
     if (!std::isfinite(stats.evaluatedArea) || stats.evaluatedArea < 0 || stats.evaluatedArea > stats.selectedArea ||
         !std::isfinite(stats.outOfToleranceArea) || stats.outOfToleranceArea < 0 || stats.outOfToleranceArea > stats.evaluatedArea ||
@@ -54,6 +55,7 @@ std::optional<Context> Prepare(const DataGraphSnapshot &graph, const AlignmentDe
     const auto source=AlignmentResultSource::Read(graph,request.alignmentResult,true);
     if (!source) return {};
     Context context; context.work.config=config;
+    context.work.input=source->input;
     context.work.mesh=source->measuredMesh; context.work.referenceMesh=source->referenceMesh;
     auto &s=context.snapshot;
     s.alignmentResult=source->alignment; s.sourceMesh=source->input.mesh;
@@ -88,9 +90,10 @@ std::optional<AlignmentDeviationSnapshot> GetResult(const DataGraphSnapshot &gra
     const auto sourceData = graph.view->GetData(s.sourceMesh), referenceData = graph.view->GetData(s.referenceMesh);
     const auto source = sourceData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(sourceData->payload) : nullptr;
     const auto reference = referenceData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(referenceData->payload) : nullptr;
-    if (!source || !reference || !s.forward || s.forward->samples.size() != source->GetVertices().size()/3 ||
-        (s.reverse && s.reverse->samples.size() != reference->GetVertices().size()/3)) return {};
+    if (!source || !reference || !s.forward || s.forward->originalVertexCount != source->GetVertices().size()/3 || s.forward->samples.size()<s.forward->originalVertexCount ||
+        (s.reverse && (s.reverse->originalVertexCount != reference->GetVertices().size()/3 || s.reverse->samples.size()<s.reverse->originalVertexCount))) return {};
     for (const auto &input : Inputs(s)) {
+        if(input.role=="evaluation-roi"){if(!graph.view->GetData(input.source) || std::none_of(data->inputs.begin(),data->inputs.end(),[&](const auto& i){return i.role==input.role && i.source==input.source;}))return {};continue;}
         if (std::none_of(data->inputs.begin(), data->inputs.end(), [&](const auto &i) { return i.role == input.role && i.source == input.source; }) ||
             std::none_of(payload->expectations.begin(), payload->expectations.end(), [&](const auto &e) {
                 return e.kind == DataExpectationKind::EntityHead && e.use == DataExpectationUse::Required &&

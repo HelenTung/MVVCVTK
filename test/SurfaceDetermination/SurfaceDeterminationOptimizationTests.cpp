@@ -468,6 +468,7 @@ public:
     bool GetContains(const std::array<double,3>&p) const noexcept override{return m_inner->GetContains(p);}
     RoiPointsResult GetPoints(const std::vector<std::array<double,3>>&p,std::size_t b) const override{return m_inner->GetPoints(p,b);}
     RoiPlanesResult GetClipPlanes() const override{return m_inner->GetClipPlanes();}
+    RoiTriangleSelection GetTriangleSelection(const std::array<std::array<double,3>,3>& p,std::size_t bytes,double tolerance,std::function<bool()> cancel)const override{return m_inner->GetTriangleSelection(p,bytes,tolerance,std::move(cancel));}
     RoiPolygonResult GetClippedTriangle(const std::array<std::array<double,3>,3>&p,std::size_t b) const override{return m_inner->GetClippedTriangle(p,b);}
     double GetBoundaryDistance(const std::array<double,3>&p) const noexcept override{
         queries.fetch_add(1,std::memory_order_relaxed);return m_fixed?*m_fixed:m_inner->GetBoundaryDistance(p);
@@ -492,34 +493,18 @@ void TestSingleRoiDistance(Checks &checks)
     auto counted=std::make_shared<CountingRoi>(roi);const auto actual=build(counted);
     checks.Get(reference.status==SurfaceResultStatus::Succeeded && !reference.points.empty() &&
         GetEqualMeasurements(reference,actual),"counted immutable ROI preserves every published measurement field");
-    checks.Get(counted->queries.load()==actual.points.size(),"generation queries ROI distance exactly once per final point");
+    // ROI 只选父表面片段；边界距离不参与材料细化、支持判定或正式父点资格。
+    checks.Get(counted->queries.load()==0 && !actual.selection.empty(),"ROI selection preserves complete measurement support");
     const auto diagnostic=SurfaceDeterminationAlgorithm::GetPointDiagnostic(source,actual.resolvedParams,
         actual.points.front(),SurfaceAlgorithmInputs{counted});
     checks.Get(diagnostic.isAvailable && GetPointFields(diagnostic.point)==GetPointFields(actual.points.front()) &&
-        counted->queries.load()==actual.points.size()+1,"diagnostic retains its own single boundary query and final record");
+        counted->queries.load()==0,"diagnostic retains the complete parent measurement independently of ROI boundary");
     for(double distance:{0.,1e-9,1.,std::numeric_limits<double>::quiet_NaN(),
                         -std::numeric_limits<double>::infinity(),std::numeric_limits<double>::infinity()}){
         auto fixed=std::make_shared<CountingRoi>(roi,distance);const auto result=build(fixed);
-        checks.Get(result.status==SurfaceResultStatus::Succeeded && result.points.size()==actual.points.size() &&
-            fixed->queries.load()==result.points.size(),"fixed ROI distance uses one query without changing geometry");
-        const bool materialBoundary=distance==0;
-        checks.Get(std::all_of(result.points.begin(),result.points.end(),[materialBoundary](const auto&p){
-            return GetSurfaceFlag(p.flags,SurfacePointFlags::RoiBoundary)==materialBoundary &&
-                (!materialBoundary||GetSurfaceFlag(p.flags,SurfacePointFlags::SeedRetained));
-        }),"finite machine-tolerance predicate keeps NaN and both infinities distinct from zero");
-        if(distance==1e-9 || distance==-std::numeric_limits<double>::infinity())
-            checks.Get(std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),
-                [](auto valid){return valid==0;}) && result.truncatedPointCount==result.points.size() &&
-                result.acceptedPointCount==result.points.size(),
-                "classification retains <= boundary tolerance including negative infinity without setting ROI flags");
-        else if(distance!=0)
-            checks.Get(std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),
-                [](auto valid){return valid==1;}) && result.truncatedPointCount==0 &&
-                result.acceptedPointCount==result.points.size(),
-                "far/NaN/positive infinity keep the supported plane fully accepted and untruncated");
-        else checks.Get(result.acceptedPointCount==0 && result.truncatedPointCount==result.points.size() &&
-                        std::all_of(result.triangleValidity.begin(),result.triangleValidity.end(),[](auto valid){return valid==0;}),
-                        "zero distance adds the original explicit nonmeasurement boundary reason");
+        checks.Get(result.status==SurfaceResultStatus::Succeeded && GetEqualMeasurements(reference,result) &&
+            fixed->queries.load()==0 && result.selection.size()==reference.selection.size(),
+            "ROI boundary distance does not create material boundaries or change parent measurements");
     }
 }
 

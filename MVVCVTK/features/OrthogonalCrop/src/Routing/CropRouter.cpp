@@ -257,7 +257,6 @@ std::optional<std::packaged_task<CropMaterializationCandidate()>> CropRouter::Bu
     CropInputSnapshot input, CropBuildParams params, RoiReadSnapshot roi, std::function<bool()> getStopRequested) const
 {
     if (!CropAlgorithm::GetInputValid(input) || !input.data || !roi || roi->GetSource()!=input.data->self) return {};
-    if (input.mesh && roi->GetClipPlanes().error!=RoiError::None) return {};
     return std::packaged_task<CropMaterializationCandidate()>(
         [input=std::move(input),params=std::move(params),roi=std::move(roi),getStopRequested=std::move(getStopRequested)] {
             const auto budget=params.availableRamBytes ? params.availableRamBytes:GetRamBytes();

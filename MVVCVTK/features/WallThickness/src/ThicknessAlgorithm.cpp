@@ -434,6 +434,44 @@ class Kernel final
             [](const auto& values) { using Value=typename std::decay_t<decltype(*values)>::value_type;
                 return std::is_signed_v<Value>; }, m_work.labels->GetValues());
     }
+    template<class Emit> void VisitEvaluation(std::size_t triangle,const Emit& emit)
+    {
+        ThicknessDisplaySampling::Corners original{};
+        for (unsigned k=0;k<3;++k) original[k]=Vertex(m_mesh.GetTriangles()[triangle*3+k]);
+        if (!m_work.evaluationRoi) {
+            ThicknessDisplaySampling::Visit(original,m_params.sampleSpacing,[&]{CheckWork(m_work);},emit);
+            return;
+        }
+        auto source=original;for(auto& point:source)point=Add(point,m_geometry.origin);
+        const auto selected=m_work.evaluationRoi->GetTriangleSelection(source,
+            WorkLimit(m_work.archive.limits.maxWorkingBytes).GetBound(std::numeric_limits<std::size_t>::max()),0,
+            [&]{CheckWork(m_work);return false;});
+        if(selected.error!=RoiError::None) {
+            CheckWork(m_work);
+            throw Failure{selected.error==RoiError::TooLarge?ThicknessStatus::BudgetExceeded:ThicknessStatus::InvalidInput,
+                "ROI surface selection failed."};
+        }
+        const auto u=Sub(original[1],original[0]),v=Sub(original[2],original[0]);
+        const double uu=Dot(u,u),uv=Dot(u,v),vv=Dot(v,v),denom=uu*vv-uv*uv;
+        if(denom<=0)return;
+        for(const auto& piece:selected.triangles) {
+            ThicknessDisplaySampling::Corners corners{},bary{};
+            for(unsigned k=0;k<3;++k) {
+                corners[k]=Sub(piece[k],m_geometry.origin);
+                const auto w=Sub(corners[k],original[0]);
+                const double b=(Dot(w,u)*vv-Dot(w,v)*uv)/denom,c=(Dot(w,v)*uu-Dot(w,u)*uv)/denom;
+                bary[k]={1-b-c,b,c};
+            }
+            const double area=.5*Length(Cross(Sub(corners[1],corners[0]),Sub(corners[2],corners[0])));
+            if(area<=m_epsilon*m_epsilon)continue;
+            const double fraction=area/m_areas[triangle];
+            ThicknessDisplaySampling::Visit(corners,m_params.sampleSpacing,[&]{CheckWork(m_work);},[&](const auto& patch){
+                ThicknessDisplaySampling::Triangle mapped;mapped.fraction=fraction*patch.fraction;
+                for(unsigned k=0;k<3;++k){mapped.bary[k]={};for(unsigned a=0;a<3;++a)mapped.bary[k]=Add(mapped.bary[k],Scale(bary[a],patch.bary[k][a]));}
+                emit(mapped);
+            });
+        }
+    }
     void BuildSampling()
     {
         const auto pc=m_mesh.GetVertices().size()/3, tc=m_mesh.GetTriangles().size()/3;
@@ -466,7 +504,7 @@ class Kernel final
             // 退化的种子面没有正面积来源；不使其他局部来源整体失败。
             m_areas.push_back(area>m_epsilon*m_epsilon?area:0.);
             if (area>m_epsilon*m_epsilon) for (unsigned k=0;k<3;++k) maxEdge=std::max(maxEdge,Length(Sub(p[k],p[(k+1)%3])));
-            if (m_areas.back()>0) ThicknessDisplaySampling::Visit(p,m_params.sampleSpacing,[&]{CheckWork(m_work);},
+            if (m_areas.back()>0) VisitEvaluation(i,
                 [&](const auto&) {
                     if (m_sampleCount==sampleBudget) throw Failure{ThicknessStatus::BudgetExceeded,"Local display sampling exceeds working budget."};
                     ++m_sampleCount;
@@ -698,8 +736,6 @@ class Kernel final
             const auto p = Interpolate(triangle, bary);
             sample.source = Add(p, m_geometry.origin);
             sample.area = m_areas[triangle]*patch.fraction;
-            if (m_work.evaluationRoi && !m_work.evaluationRoi->GetContains(sample.source))
-                sample.validity=ThicknessValidity::OutsideEvaluation;
             if (m_params.evaluationBounds)
                 for (std::size_t a = 0; a < 3; ++a)
                     if (sample.source[a] < (*m_params.evaluationBounds)[a * 2] ||
@@ -726,9 +762,7 @@ class Kernel final
         };
         for (std::size_t triangle=0;triangle<m_areas.size();++triangle) {
             if (m_areas[triangle]<=0) continue;
-            ThicknessDisplaySampling::Corners p{};
-            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangles()[triangle*3+k]);
-            ThicknessDisplaySampling::Visit(p,m_params.sampleSpacing,[&]{CheckWork(m_work);},[&](const auto& patch){add(triangle,patch);});
+            VisitEvaluation(triangle,[&](const auto& patch){add(triangle,patch);});
         }
         Profile("sample-geometry",samples->size(),m_sampleCount);
         // 点查询彼此独立；三角形、邻接和结果数组顺序仍由上面的串行构造确定。

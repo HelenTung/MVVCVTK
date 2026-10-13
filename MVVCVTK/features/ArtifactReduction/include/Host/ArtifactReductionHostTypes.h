@@ -60,7 +60,7 @@ struct ArtifactRequest final {
     std::optional<DataRevisionRef> processingRoi;
     std::optional<DataRevisionRef> protectionRoi;
     std::optional<DataRevisionRef> qualityRoi;
-    // qualityRoi仅用于区域（material）质量统计，整体输出统计仍覆盖有效数据；两种算法都不是掩码感知滤波器。
+    // qualityRoi 独立限定质量评价；算法支撑和正式输出范围由处理/保护区决定。
     std::optional<ArtifactDiffusionParams> diffusion;
     std::optional<ArtifactRingParams> ring;
     std::optional<std::size_t> timeoutMs{};

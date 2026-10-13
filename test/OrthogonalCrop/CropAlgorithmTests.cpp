@@ -625,7 +625,7 @@ bool StartCurvedRecipeCase()
     std::vector<CropOpItem> deep(4096);
     for(std::size_t i=0;i<deep.size();++i){deep[i].operationIndex=i+1;deep[i].removalMode=CropRemovalMode::RemoveInside;}
     const auto recipe=CropRouter::CreateRecipePayload(deep,view->data->self);
-    if(!SetExpect(recipe&&recipe->GetDefinition().nodes.size()==roiNodeLimit,"Maximum history path must fit the bounded unified ROI expression."))return false;
+    if(!SetExpect(recipe&&recipe->GetDefinition().nodes.size()==3*4096+1,"Maximum crop history path must preserve every operation in the unified ROI expression."))return false;
     DataTransaction transaction;transaction.outputs.push_back({data.CreateDataEntityId(),0,DataTypes::roiGeometry,
         {{"source-data",view->data->self}},recipe});
     if(!SetExpect(data.SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded,"Deep balanced recipe must satisfy unified ROI validation."))return false;

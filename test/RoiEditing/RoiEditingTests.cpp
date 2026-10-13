@@ -2,6 +2,7 @@
 #include "TestDataPort.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
+#include <vtkCamera.h>
 #include <vtkImageData.h>
 #include <vtkNew.h>
 #include <vtkRenderer.h>
@@ -9,6 +10,8 @@
 #include <vtkRenderWindowInteractor.h>
 
 #include <algorithm>
+#include <cmath>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -127,10 +130,10 @@ void TestEditor()
         && data->GetDataGraph().commitId==committedData,"cancel did not restore the committed projection without a data write");
     auto otherSource=source; ++otherSource.generation;
     slice->source=otherSource;
-    Require(editor.OnHostTick() && main->overlays.empty() && slice->overlays.empty()
+    Require(editor.OnHostTick() && main->overlays.size()==1 && slice->overlays.empty()
         && data->GetData(data->GetDataGraph(),saved.roi->revision),
-        "stale committed projection survived a view source change or deleted formal ROI");
-    slice->source=source;
+        "ROI projection was attached to a wrong source view or deleted formal ROI");
+    slice->source=source;Require(editor.OnHostTick() && main->overlays.size()==1 && slice->overlays.size()==1,"ROI projection did not return when its source view returned");
     Require(editor.DetachHost() && editor.DetachHost() && main->overlays.empty() && slice->overlays.empty()
         && data->GetData(data->GetDataGraph(),saved.roi->revision),"detach deleted formal ROI or left a projection");
     Require(editor.AttachHost(context),"reattach failed");
@@ -177,8 +180,53 @@ void TestCurves()
     }
     Require(editor.DetachHost() && main->overlays.empty(),"curve projection leaked on detach");
 }
+class Controller final:public FeatureHostControl {
+public:
+    HostInputBinding binding;std::atomic<unsigned> signals{0};
+    bool AttachInput(HostInputBinding value)override{binding=std::move(value);return true;}
+    bool DetachInput(std::string_view)override{binding={};return true;}
+    bool SetActiveViews(const std::vector<std::string>&)override{return true;}
+    bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
+    bool SendSceneDelta(FeatureSceneDelta)override{return true;}
+    bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
+    bool SendWorkAvailable()override{++signals;return true;}
+};
+void TestDrawingAndLatestOperation()
+{
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D),slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);
+    main->source=slice->source=source;views->views={{"main",main},{"slice",slice}};auto host=std::make_shared<Controller>();
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context) && bool(host->binding.onInput),"drawing input was not registered");
+    RoiRequest draft;draft.metadata.name="old";draft.definition.source=source;RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"drawing draft failed");
+    FeatureOverlayState overlay;overlay.cursor={0,0,2};for(auto& item:slice->overlays)item->SetOverlayState(overlay);
+    slice->renderer->GetActiveCamera()->SetPosition(2,2,10);slice->renderer->GetActiveCamera()->SetFocalPoint(2,2,2);slice->renderer->GetActiveCamera()->ParallelProjectionOn();slice->renderer->GetActiveCamera()->SetParallelScale(3);
+    const auto display=[&](double x,double y){slice->renderer->SetWorldPoint(x,y,2,1);slice->renderer->WorldToDisplay();const auto* p=slice->renderer->GetDisplayPoint();return std::array<int,2>{int(std::lround(p[0])),int(std::lround(p[1]))};};
+    RoiEditingRequest drawing;drawing.action=RoiEditingAction::BeginDrawing;drawing.drawing=RoiDrawingMode::SliceRectangle;Require(editor->SendRequest(drawing).error==RoiError::None,"rectangle tool failed");
+    const auto first=display(1.2,1.2),last=display(2.8,2.8);InteractionEvent event;event.viewId="slice";event.x=first[0];event.y=first[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onInput(event).isHandled,"rectangle press not captured");
+    event.x=last[0];event.y=last[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onInput(event).isSucceeded,"rectangle update failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onInput(event).isSucceeded,"rectangle release failed");
+    Require(editor->GetState().preview->GetContains({2,2,2}) && !editor->GetState().preview->GetContains({3,3,2}) && editor->GetState().undoCount==1,"slice rectangle ignored its plane or applied baseline");
+    Require(editor->SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor->GetState().preview->GetContains({2.9,2.9,2}),"gesture undo did not restore the prior region");
+    Require(editor->SendRequest({RoiEditingAction::Redo}).error==RoiError::None && !editor->GetState().preview->GetContains({2.9,2.9,2}),"gesture redo failed");
+    RoiOperationRequest operation;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"operation was not deferred");
+    operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,0,RoiRadiusUnit::Voxels};start.action=RoiEditingAction::SetOperation;start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"latest operation was not queued");
+    RoiEditingRequest metadata;metadata.action=RoiEditingAction::SetMetadata;metadata.draft=draft;metadata.draft->metadata.name="计算期间修改的名称";Require(editor->SendRequest(metadata).error==RoiError::None,"metadata update during calculation failed");
+    const auto before=data->GetDataGraph().commitId;Require(editor->SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"direct save did not wait for the latest candidate");
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor->GetState().hasDraft && std::chrono::steady_clock::now()<until){editor->OnHostTick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    const auto descriptors=RoiService::GetDescriptors(data->GetDataGraph());Require(!editor->GetState().hasDraft && descriptors.size()==1 && descriptors.front().metadata.name=="计算期间修改的名称" && data->GetDataGraph().commitId==before+1,"save used a stale candidate/name or published more than once");
+    const auto read=data->GetRoi(data->GetDataGraph(),descriptors.front().revision,source);Require(read.roi->GetContains({2,2,2}) && !read.roi->GetContains({1,2,2}),"late dilation overwrote the latest zero-radius candidate");
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"failed-operation draft did not start");operation.maxWorkingBytes=1;start.action=RoiEditingAction::BeginOperation;start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"resource-limited operation not admitted");Require(editor->SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"failed-operation save wait did not start");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor->GetState().isComputing && std::chrono::steady_clock::now()<deadline){editor->OnHostTick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    Require(!editor->GetState().isSaving && editor->GetState().hasDraft && editor->GetState().error==RoiError::TooLarge && data->GetDataGraph().commitId==before+1,"resource failure left save waiting or changed formal data");
+    Require(editor->SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"failed draft cancellation failed");
+    RoiRequest contour;contour.metadata.name="curve";contour.definition.source=source;RoiNode curve;curve.primitive.shape=RoiShape::Contour;curve.primitive.localToSource[3]=2;curve.primitive.localToSource[7]=2;curve.primitive.localToSource[11]=2;curve.primitive.contours={{{-.5,-.5},{.5,-.5},{0,.5}}};contour.definition.nodes={curve};
+    Require(editor->SendRequest({RoiEditingAction::Begin,contour}).error==RoiError::None,"control point draft failed");drawing.drawing=RoiDrawingMode::EditControlPoint;Require(editor->SendRequest(drawing).error==RoiError::None,"control point editing was not enabled");
+    const auto control=display(2.5,1.5),moved=display(2.8,1.5);event.x=control[0];event.y=control[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onInput(event).isHandled,"control point was not hit");event.x=moved[0];event.y=moved[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onInput(event).isSucceeded,"control point move failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onInput(event).isSucceeded,"control point release failed");
+    Require(editor->GetState().draft->nodes[0].primitive.contours[0][1][0]>.7,"control point movement changed another selection");Require(editor->SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor->GetState().tool->contours[0][1][0]==.5,"control point undo left stale handles");
+    Require(editor->DetachHost() && !host->binding.onInput && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
+}
+
 }
 int main()
 {
-    try {TestEditor();TestCurves(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {TestEditor();TestCurves();TestDrawingAndLatestOperation(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -56,6 +56,11 @@ struct VoidRegion {
     // 供应商定义为三个方向的 voxel 索引差，不擅自换算为物理长度。
     std::array<float, 3> projectedSize = { 0.0f, 0.0f, 0.0f };
     float defectProbability = 0.0f;
+    std::int64_t parentVoxelCount = 0, intersectionVoxelCount = 0;
+    double parentVolumeMM3 = 0, intersectionVolumeMM3 = 0;
+    bool isRoiPartial = false;
+    // 其余形状量属于完整父缺陷，不将截断片段冒充新的封闭孔隙。
+    bool hasWholeObjectGeometry = true;
 };
 
 class LabelMap3DPayload;
@@ -63,15 +68,22 @@ class SurfaceMeshPayload;
 class RecordTablePayload;
 struct GapDisplayData;
 
+class GapParentRecord;
 struct GapResultPayloads final {
     std::shared_ptr<const LabelMap3DPayload> labels;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
     std::shared_ptr<const RecordTablePayload> voids;
     std::shared_ptr<const RecordTablePayload> statistics;
+    std::shared_ptr<const LabelMap3DPayload> parentLabels;
+    std::shared_ptr<const RecordTablePayload> parentVoids;
+    std::shared_ptr<const GapParentRecord> parentRecord;
 };
 
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
 struct GapAnalysisResult {
+    DataRevisionRef sourceRevision;
+    GapSurfaceParams detectionParameters;
+    std::shared_ptr<const GapAnalysisResult> parent;
     // worker 准备的私有显示候选，不进入正式 payload 或导出。
     std::shared_ptr<const GapDisplayData> display;
     // worker 完成所有首次转换；Host 仍遵守 DataGraph 的防御性 snapshot/校验。

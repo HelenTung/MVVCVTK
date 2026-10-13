@@ -5,21 +5,45 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <chrono>
+#include <limits>
 #include <optional>
+#include <memory>
+#include <map>
+#include <variant>
 #include <string>
 #include <vector>
 
-// 4096 项裁切路径的最坏补集表达式为 3*N+1；逐块读取仍受 8 MiB 单块限制。
-inline constexpr std::size_t roiNodeLimit = 3 * 4096 + 1;
-inline constexpr std::size_t roiDepthLimit = 64;
-inline constexpr std::size_t roiCatalogLimit = 4096;
-inline constexpr std::uint32_t roiSchemaVersion = 2;
+// 节点索引的表示上限；不按历史长度或 ROI 数量另设业务门槛。
+inline constexpr std::size_t roiNodeLimit = std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::uint32_t roiSchemaVersion = 3;
 inline constexpr std::size_t roiCopyLimit = 8ULL * 1024 * 1024;
 inline constexpr std::array<double, 16> roiIdentityMatrix = {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 inline constexpr std::string_view roiCatalogBinding = "session.roi.catalog";
 
-enum class RoiShape : std::uint8_t { Box, HalfSpace, MaskReference, Sphere, Cylinder };
+enum class RoiShape : std::uint8_t {
+    Box, HalfSpace, MaskReference, Sphere, Cylinder, Ellipsoid,
+    Contour, ProjectedContour, Brush, VoxelSet, EllipticCylinder
+};
+
+struct RoiVoxel final {
+    std::array<int,3> index{};
+    std::uint32_t label = 1;
+};
+
+// 正式稀疏载荷，按绝对源索引排序；拆分结果共享一次标记的数据。
+class RoiVoxelSet final {
+public:
+    explicit RoiVoxelSet(std::vector<RoiVoxel> voxels);
+    const std::vector<RoiVoxel>& GetVoxels() const noexcept { return m_voxels; }
+    std::uint32_t GetLabel(const std::array<int,3>& index) const noexcept;
+    std::array<double,6> GetIndexBounds(const std::vector<std::uint64_t>& labels) const noexcept;
+private:
+    std::vector<RoiVoxel> m_voxels;
+    std::map<std::uint32_t,std::array<double,6>> m_labelBounds;
+};
 // Closed 保持已有 ROI 语义；CropV1 保留裁切 Box 容差和 Plane 严格正侧。
 enum class RoiBoundaryPolicy : std::uint8_t { Closed, CropV1 };
 enum class RoiNodeKind : std::uint8_t {
@@ -39,6 +63,17 @@ struct RoiPrimitive final {
     // 曲面使用 origin 为中心、normal 为柱轴；球体 height 必须为 0。
     double radius = 0;
     double height = 0;
+    // 轮廓局部 XY 平面，多环奇偶填充；深度沿局部 Z，包含端面。
+    std::vector<std::vector<std::array<double,2>>> contours;
+    std::array<double,2> depth = {-0.5,0.5};
+    // 创建时冻结的 source->view 和 view->clip；投影轮廓为 NDC。
+    std::array<double,16> sourceToView = roiIdentityMatrix;
+    std::array<double,16> viewToClip = roiIdentityMatrix;
+    // 画笔源空间路径，radius 为 mm；轮廓及椭球由 localToSource 定位。
+    std::vector<std::array<double,3>> path;
+    std::shared_ptr<const RoiVoxelSet> voxels;
+    // 空集合表示全部非零标签，非空时只选择这些固定标签。
+    std::vector<std::uint64_t> labels;
 };
 
 struct RoiNode final {
@@ -73,17 +108,17 @@ struct RoiDescriptor final {
 enum class RoiError : std::uint8_t {
     None, Unavailable, WrongThread, InvalidRequest, InvalidGeometry,
     UnsupportedRoi, MissingInput, SourceMismatch, SourceUnresolved,
-    RevisionConflict, TooLarge, Cancelled, CommitFailed
+    RevisionConflict, TooLarge, Cancelled, CommitFailed, Pending, DeadlineExceeded
 };
 
-enum class RoiAction : std::uint8_t { Create, SetGeometry, SetMetadata, Copy };
+enum class RoiAction : std::uint8_t { Create, SetGeometry, SetMetadata, Copy, Remove };
 
 struct RoiRequest final {
     RoiAction action = RoiAction::Create;
     RoiDefinition definition;
     RoiMetadata metadata;
     std::optional<DataRevisionRef> expectedRoi;
-    DataBindingRevision expectedCatalogRevision = 0;
+    std::optional<DataBindingRevision> expectedCatalogRevision;
     std::optional<DataRevisionRef> copyFrom;
     // 当前绑定驱动的操作可冻结来源绑定；显式历史来源操作可省略。
     std::optional<DataBinding> expectedSourceBinding;
@@ -97,6 +132,79 @@ struct RoiResult final {
     DataCommitId commitId = 0;
 };
 
+enum class RoiSelectionMode : std::uint8_t { NewRoi, Replace, Add, Subtract, Intersect };
+enum class RoiOutputMode : std::uint8_t { UpdateTarget, CreateNew };
+enum class RoiBooleanOperation : std::uint8_t { Union, Intersection, Difference };
+enum class RoiMorphologyOperation : std::uint8_t { Dilate, Erode, Open, Close };
+enum class RoiRadiusUnit : std::uint8_t { Millimetres, Voxels };
+enum class RoiConnectivity : std::uint8_t { Faces, Full };
+enum class RoiComponentOperation : std::uint8_t { RemoveSmall, KeepLargest, KeepSelected, Split, FillHoles };
+struct RoiBooleanParams final {
+    RoiBooleanOperation operation = RoiBooleanOperation::Union;
+    std::vector<DataRevisionRef> operands;
+};
+struct RoiMorphologyParams final {
+    RoiMorphologyOperation operation = RoiMorphologyOperation::Dilate;
+    double radius = 0;
+    RoiRadiusUnit unit = RoiRadiusUnit::Millimetres;
+};
+struct RoiComponentParams final {
+    RoiComponentOperation operation = RoiComponentOperation::RemoveSmall;
+    RoiConnectivity connectivity = RoiConnectivity::Faces;
+    double minimumVolume = 0; // mm^3
+    double maximumHoleVolume = 0; // 0 表示不限大小
+    std::vector<std::uint32_t> labels;
+    bool keepInput = true;
+};
+enum class RoiThresholdMode : std::uint8_t { Threshold, SeedGrow };
+struct RoiThresholdParams final {
+    RoiThresholdMode mode=RoiThresholdMode::Threshold;
+    std::array<double,2> range{};
+    std::vector<std::array<double,3>> seeds; // 连通生长的源物理坐标种子；阈值模式必须为空
+    RoiConnectivity connectivity = RoiConnectivity::Faces;
+};
+struct RoiInvertParams final { std::optional<DataRevisionRef> domain; };
+struct RoiClearParams final {};
+struct RoiTransformParams final {
+    std::array<double,16> sourceToTarget = roiIdentityMatrix;
+    std::optional<DataRevisionRef> targetSource;
+    // 掩码或不能精确保留的几何必须由调用方显式选择按目标体素中心重采样。
+    bool rasterize = false;
+};
+enum class RoiMeshMode : std::uint8_t { Interior, Layer };
+struct RoiMeshParams final {
+    DataRevisionRef mesh;
+    std::array<double,16> meshToSource = roiIdentityMatrix;
+    RoiMeshMode mode = RoiMeshMode::Interior;
+    double inward = 0; // mm
+    double outward = 0; // mm
+    bool hasOrientation = false;
+};
+using RoiOperationParams = std::variant<RoiBooleanParams,RoiMorphologyParams,
+    RoiComponentParams,RoiThresholdParams,RoiInvertParams,RoiClearParams,
+    RoiTransformParams,RoiMeshParams>;
+struct RoiOperationRequest final {
+    DataRevisionRef source;
+    std::optional<DataRevisionRef> target;
+    std::optional<RoiDefinition> input;
+    RoiOperationParams params;
+    RoiOutputMode output = RoiOutputMode::UpdateTarget;
+    RoiMetadata metadata;
+    std::optional<DataBinding> expectedSourceBinding;
+    std::function<bool()> getCancelled;
+    std::size_t maxWorkingBytes=0;
+    std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::time_point::max();
+};
+struct RoiOperationResult final {
+    RoiError error = RoiError::Unavailable;
+    std::vector<RoiDescriptor> rois;
+    std::vector<std::size_t> componentVoxelCounts;
+    DataCommitId commitId = 0;
+    std::string message;
+    // 临时候选绑定输入、参数和输出几何；不进入正式 ROI 或归档。
+    std::string preparedSignature;
+};
+
 // 来源的外部稳定身份由调用应用解析；image 内的运行期 revision 必须清除。
 struct RoiSourceDescriptor final {
     DataTypeId type;
@@ -105,12 +213,20 @@ struct RoiSourceDescriptor final {
     std::array<double, 6> sourceBounds{};
     std::size_t pointCount = 0;
     std::size_t triangleCount = 0;
+    std::string meshGeometryDigest; // 规范化点与拓扑的 SHA-256；同包围盒不能代替来源身份。
 };
 
 struct RoiArchiveMask final {
     ImageDescriptor grid;
     std::vector<std::uint32_t> nodeIndices;
-    std::vector<std::uint8_t> values;
+    std::vector<std::uint64_t> values;
+    std::optional<std::uint32_t> sharedPayload;
+};
+
+struct RoiArchiveVoxels final {
+    std::vector<std::uint32_t> nodeIndices;
+    std::vector<RoiVoxel> values;
+    std::optional<std::uint32_t> sharedPayload;
 };
 
 struct RoiArchive final {
@@ -118,9 +234,12 @@ struct RoiArchive final {
     std::string sourceKey;
     RoiSourceDescriptor source;
     RoiMetadata metadata;
+    DataRevisionRef originalRevision;
+    DataProvenance provenance;
     // mask 引用清空，由 masks.nodeIndices 关联归档内数据，不持久化运行期 ID。
     std::vector<RoiNode> nodes;
     std::vector<RoiArchiveMask> masks;
+    std::vector<RoiArchiveVoxels> voxels;
 };
 
 struct RoiArchiveResult final {
@@ -128,4 +247,25 @@ struct RoiArchiveResult final {
     std::size_t requiredBytes = 0;
     std::optional<RoiArchive> archive;
     std::string message;
+};
+
+struct RoiArchiveSelection final {DataRevisionRef roi;std::string sourceKey;};
+struct RoiSourceMapping final {std::string sourceKey;DataRevisionRef source;};
+// 多对象文件只保存一次共享标签/稀疏载荷，节点通过包内索引引用。
+struct RoiArchiveBundle final {
+    std::uint32_t schemaVersion=roiSchemaVersion;
+    std::vector<RoiArchive> rois;
+    std::vector<RoiArchiveMask> masks;
+    std::vector<RoiArchiveVoxels> voxels;
+};
+struct RoiArchiveBundleResult final {
+    RoiError error=RoiError::Unavailable;
+    std::optional<RoiArchiveBundle> archive;
+    std::size_t requiredBytes=0;
+};
+struct RoiArchiveRestoreResult final {
+    RoiError error=RoiError::Unavailable;
+    DataCommitId commitId=0;
+    std::vector<RoiDescriptor> rois;
+    std::vector<std::pair<DataRevisionRef,DataRevisionRef>> revisionMapping;
 };

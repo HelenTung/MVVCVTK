@@ -467,12 +467,11 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             const auto resolved = m_data->GetRoi(graph, *params.analysisRoi, source->data->self);
             if (resolved.error != RoiError::None || !resolved.roi) return admission;
             inputs.roi = resolved.roi;
-            if (inputs.roi->GetClipPlanes().error != RoiError::None) {
-                admission.status = SurfaceAdmissionStatus::UnsupportedRoi;
-                return admission;
-            }
             if (!GetRoiCurrent(inputs.roi, params.sourcePolicy)) return admission;
         }
+        if(params.parentGeneration){inputs.parent=m_store.GetGeneration(*params.parentGeneration);
+            if(!inputs.parent || inputs.parent->sourceRevision!=source->data->self || inputs.parent->algorithmRevision!=surfaceAlgorithmRevision
+                || SurfaceRecipeCodec::BuildText(params)!=SurfaceRecipeCodec::BuildText(inputs.parent->requestedParams))return admission;}
         if (SurfaceDeterminationAlgorithm::GetInputFailure(source, params, inputs) !=
             SurfaceFailureReason::None)
             return admission;
@@ -483,6 +482,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         auto requestItem = m_requests.end();
         try {
             std::vector<DataRevisionRef> readRefs{source->data->self};
+            if(inputs.parent){readRefs.push_back(inputs.parent->dataRevision);readRefs.push_back(inputs.parent->meshRevision);}
             if (inputs.roi) {
                 readRefs.push_back(inputs.roi->GetRevision());
                 const auto dependencies=inputs.roi->GetDependencies();
@@ -541,6 +541,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 if (ref != inputs.roi->GetRevision() && ref != source->data->self)
                     operationInputs.push_back({"analysis-roi.input-" + std::to_string(index++), ref});
         }
+        if(inputs.parent){requestItem->second.operation.inputs.push_back({"measurement-parent",inputs.parent->dataRevision});requestItem->second.operation.inputs.push_back({"measurement-parent.mesh",inputs.parent->meshRevision});}
         requestItem->second.operation.status = FeatureRunStatus::Preparing;
         requestItem->second.operation.stateRevision = 1;
         m_latestRequestId = requestId;
@@ -647,11 +648,7 @@ bool SurfaceDeterminationHostFeature::Impl::GetRoiCurrent(const RoiReadSnapshot&
     dependencies.push_back(roi->GetRevision());
     for (const auto& ref:dependencies) {
         if (!m_data->GetData(graph, ref)) return false;
-        if (policy == DataPublishPolicy::AllowHistoricalResult) continue;
-        DataQuery query; query.entityId=ref.entityId;
-        DataGeneration head=0;
-        for (const auto& item:m_data->GetDataQuery(graph,query).data) if (item) head=std::max(head,item->self.generation);
-        if (head!=ref.generation) return false;
+
     }
     return true;
 }
@@ -705,6 +702,7 @@ bool SurfaceDeterminationHostFeature::Impl::GetRequestInputsSame(const RequestEn
     if (!GetSourceSame(request.source, request.params.sourcePolicy)
         || !GetRoiCurrent(request.inputs.roi, request.params.sourcePolicy))
         return false;
+    if(request.inputs.parent){const auto graph=m_data->GetDataGraph();if(!m_data->GetData(graph,request.inputs.parent->dataRevision) || !m_data->GetData(graph,request.inputs.parent->meshRevision))return false;}
     return true;
 }
 
@@ -1399,6 +1397,8 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
     if (!image || image->GetGeometry().coordinateFrame.empty()) return {};
     SurfaceGenerationSnapshot generation;
     generation.inputs = request.operation.inputs;
+    if (request.inputs.roi) generation.selection=std::make_shared<const std::vector<SurfaceSelectionPiece>>(std::move(result.selection));
+    generation.selectedAreaMM2=result.selectedAreaMM2;generation.selectionToleranceMM=result.selectionToleranceMM;
     generation.execution = result.execution;
     generation.interfaces =
         std::make_shared<const std::vector<SurfaceInterfaceRecord>>(std::move(result.interfaces));
@@ -1414,7 +1414,7 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
         generation.requestedParams, generation.resolvedParams, generation.coordinateFrame, WorkLimit(m_config.maxWorkingBytes));
     generation.sourceBinding = request.source->binding;
     if (isFormal) {
-        generation.meshRevision = { m_data->CreateDataEntityId(), 1 };
+        generation.meshRevision = request.inputs.parent?request.inputs.parent->meshRevision:DataRevisionRef{ m_data->CreateDataEntityId(), 1 };
         generation.dataRevision = { m_data->CreateDataEntityId(), 1 };
         generation.resultRevision = m_resultRevision + 1;
     }
@@ -1427,6 +1427,7 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
     generation.triangleIndices = std::make_shared<const std::vector<std::uint32_t>>(std::move(result.triangleIndices));
     generation.triangleValidity = std::make_shared<const std::vector<std::uint8_t>>(std::move(result.triangleValidity));
     generation.objects = std::make_shared<const std::vector<SurfaceObjectRecord>>(std::move(result.objects));
+    if(request.inputs.parent){generation.points=request.inputs.parent->points;generation.triangleIndices=request.inputs.parent->triangleIndices;generation.triangleValidity=request.inputs.parent->triangleValidity;generation.objects=request.inputs.parent->objects;generation.interfaces=request.inputs.parent->interfaces;}
     return std::make_shared<SurfaceGenerationSnapshot>(std::move(generation));
 }
 
@@ -1473,6 +1474,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
         !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
         !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
+        !charge(result.selection.capacity(),sizeof(SurfaceSelectionPiece)+3*(7*sizeof(double)+sizeof(std::uint64_t))) ||
         !charge(result.points.size(), 2 * 14 * sizeof(double)) ||
         !charge(result.triangleValidity.size(), 2 * sizeof(double)) ||
         !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
@@ -1483,6 +1485,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     if (!stagedGeneration) return {};
     const auto meshRef = stagedGeneration->meshRevision;
     const auto generationRef = stagedGeneration->dataRevision;
+    std::shared_ptr<const SurfaceMeshPayload> mesh;
+    if(request.inputs.parent){const auto existing=m_data->GetData(m_data->GetDataGraph(),request.inputs.parent->meshRevision);mesh=existing?std::dynamic_pointer_cast<const SurfaceMeshPayload>(existing->payload):nullptr;if(!mesh)return {};}
+    else {
     std::vector<double> vertices;
     vertices.reserve(stagedGeneration->points->size() * 3U);
     // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
@@ -1543,10 +1548,11 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         if (value > 1) return {};
         faceValidity.push_back(static_cast<double>(value));
     }
-    const auto mesh = std::make_shared<const SurfaceMeshPayload>(
+    mesh = std::make_shared<const SurfaceMeshPayload>(
         std::move(vertices), std::move(triangles), std::move(attributes),
         stagedGeneration->coordinateFrame, std::move(cellAttributes));
     if (!mesh->GetValid()) return {};
+    }
     const auto& expected = request.resultBinding;
     DataTransaction transaction;
     transaction.policy = request.params.sourcePolicy;
@@ -1580,9 +1586,22 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         stagedGeneration->canonicalParameters };
     std::vector<DataInputRef> generationInputs = request.operation.inputs;
     {
-        transaction.outputs.push_back(
+        if(!request.inputs.parent)transaction.outputs.push_back(
             {meshRef.entityId, 0, DataTypes::surfaceMesh, request.operation.inputs, mesh, provenance});
         generationInputs.push_back({"mesh", meshRef});
+    }
+    if (stagedGeneration->selection) {
+        std::vector<double> selectedVertices,barycentric;std::vector<std::uint64_t> selectedTriangles;std::vector<double> parents;
+        for (const auto& piece:*stagedGeneration->selection) {
+            for (int p=0;p<3;++p) {selectedTriangles.push_back(selectedVertices.size()/3);selectedVertices.insert(selectedVertices.end(),piece.points[p].begin(),piece.points[p].end());barycentric.insert(barycentric.end(),piece.barycentric[p].begin(),piece.barycentric[p].end());}
+            parents.push_back(static_cast<double>(piece.parentTriangle));
+        }
+        const DataRevisionRef selectionRef{m_data->CreateDataEntityId(),1};stagedGeneration->selectionMeshRevision=selectionRef;
+        auto selection=std::make_shared<const SurfaceMeshPayload>(std::move(selectedVertices),std::move(selectedTriangles),
+            std::vector<MeshAttribute>{{"selection.barycentric",3,std::move(barycentric)}},stagedGeneration->coordinateFrame,
+            std::vector<MeshAttribute>{{"selection.parent-triangle",1,std::move(parents)}});
+        transaction.outputs.push_back({selectionRef.entityId,0,DataTypes::surfaceMesh,{{"measurement-parent",meshRef},{"analysis-roi",*request.params.analysisRoi}},selection,provenance});
+        generationInputs.push_back({"selection-mesh",selectionRef});
     }
     stagedGeneration->execution.publicationPreparationMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - publicationStarted)
