@@ -116,10 +116,10 @@ bool AlignmentInspection::GetPlanValid(const InspectionPlan &p,const AlignmentCo
             static_cast<unsigned>(g.fit.kind)>5 || g.definitionSource.size()>1024 || g.fit.association!=AlignmentAssociation::LeastSquares) return false;
         if (g.source==InspectionGeometrySource::NominalDefinition) {
             if (g.section || !g.ideal || g.definitionSource.empty() || !Finite(Vector(g.ideal->center)) || !GetUnitDirectionValid(g.ideal->direction) ||
-                !g.fit.region.vertexIds.empty() || g.fit.region.targetBounds ||
+                !g.fit.region.vertexIds.empty() || g.fit.region.targetBounds || g.fit.region.roi ||
                 (Round(g.fit.kind) ? !Positive(g.ideal->radius) : g.ideal->radius!=0)) return false;
-        } else if (g.ideal || !AlignmentGeometryFit::GetSpecValid(g.fit,!g.section) ||
-            (g.section && (g.fit.kind!=AlignmentGeometryKind::Circle || !AlignmentSection::GetValid(*g.section)))) return false;
+        } else if (g.ideal || !AlignmentGeometryFit::GetSpecValid(g.fit,!g.section || g.fit.region.roi.has_value() || g.fit.region.targetBounds.has_value()) ||
+            (g.section && (!g.fit.region.vertexIds.empty() || g.fit.kind!=AlignmentGeometryKind::Circle || !AlignmentSection::GetValid(*g.section)))) return false;
     }
     ids.clear();
     for (const auto &item:p.items) {
@@ -164,7 +164,7 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
             const auto transform=reference || nominal ? alignmentIdentity : pose;
             if (!nominal) {
                 Require(work.mesh!=nullptr,"Reference surface for nominal fitting is unavailable.");
-                Require(spec.fit.region.vertexIds.empty() || spec.fit.region.pinnedMesh==work.input.mesh,"Inspection ROI belongs to another mesh revision.");
+                Require((spec.fit.region.vertexIds.empty() && !spec.fit.region.roi) || spec.fit.region.pinnedMesh==work.input.mesh,"Inspection ROI belongs to another mesh revision.");
                 Require(!spec.section || spec.section->pinnedMesh==work.input.mesh,"Inspection section belongs to another mesh revision.");
             }
             try {
@@ -178,6 +178,15 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
                     if (spec.section) {
                         auto section=AlignmentSection::Build(work,*spec.section,transform);
                         samples=std::move(section.samples); geometry.section=std::move(section.trace);
+                        if(spec.fit.region.roi || spec.fit.region.targetBounds){
+                            auto trace=std::make_shared<InspectionSectionTrace>(*geometry.section);AlignmentSamples selected;trace->parentSampleCount=trace->samples.size();trace->samples.clear();
+                            RoiReadSnapshot roi;if(spec.fit.region.roi){const auto found=work.rois.find(*spec.fit.region.roi);Require(found!=work.rois.end(),"Inspection section ROI is unavailable.");roi=found->second;}
+                            for(std::size_t i=0;i<samples.points.size();++i){const auto& p=samples.points[i];bool inside=!roi || roi->GetContains(Point(Transform(spec.fit.region.meshToRoi,Vector(p))));
+                                if(spec.fit.region.targetBounds){const auto q=Transform(transform,Vector(p));for(int a=0;a<3;++a)if(q[a]<(*spec.fit.region.targetBounds)[a*2] || q[a]>(*spec.fit.region.targetBounds)[a*2+1])inside=false;}
+                                if(inside){selected.points.push_back(p);trace->samples.push_back(geometry.section->samples[i]);}else ++selected.rejected;
+                            }
+                            trace->isPartialSelection=trace->samples.size()!=trace->parentSampleCount;samples=std::move(selected);geometry.section=std::move(trace);
+                        }
                         sectionFit=spec.fit; sectionFit->targetDirection=spec.section->planeNormal;
                         fit=&*sectionFit;
                     } else samples=AlignmentGeometryFit::BuildSamples(work,fit->region,transform);

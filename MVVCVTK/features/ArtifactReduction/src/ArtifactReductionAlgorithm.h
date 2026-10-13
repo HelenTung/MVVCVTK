@@ -45,6 +45,7 @@ public:
     bool GetValid(std::size_t index) const noexcept;
     bool GetWritable(std::size_t index) const noexcept;
     bool GetMaterial(std::size_t index) const noexcept;
+    bool GetQuality(std::size_t index) const noexcept;
     bool GetProtected(std::size_t index) const noexcept;
     void SetValues(const std::vector<float>& values) noexcept;
     std::size_t GetIndex(int x, int y, int z) const noexcept;

@@ -35,6 +35,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     const auto snapshot = feature->GetSurfaceSnapshot();
     if (!snapshot) return summary;
     summary["mesh"] = GetRefText(snapshot->meshRevision);
+    summary["generation"]=GetRefText(snapshot->dataRevision);summary["selectedAreaMM2"]=snapshot->selectedAreaMM2;summary["selectionToleranceMM"]=snapshot->selectionToleranceMM;summary["selectionMesh"]=GetRefText(snapshot->selectionMeshRevision);
     summary["formalSource"]=GetRefText(snapshot->sourceRevision);
     summary["points"]=snapshot->points?QString::number(snapshot->points->size()):QString();
     if(state.purpose==SurfaceTaskPurpose::Determine && state.requestId==snapshot->requestId)
@@ -61,7 +62,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
     panel->SetNotice("选择体数据后，阈值留空时由当前表面算法估计背景/材料峰；显式阈值或材料范围直接按所填值处理。继续执行真实表面定位和质量检查，定位稳定性不等于计量不确定度。");
-    const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"analysisRoi":"","minimumObjectVoxels":"0"})");
+    const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"analysisRoi":"","parentGeneration":"","minimumObjectVoxels":"0"})");
     auto requestedParameters=std::make_shared<QJsonObject>();
     auto formalStatistics=std::make_shared<QJsonObject>();
     {
@@ -78,6 +79,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (params.contains("materialRange") && !params["materialRange"].isNull()) start.materialRange = GetArray<double, 2>(params["materialRange"]);
             if (!params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
+            if(!params["parentGeneration"].toString().isEmpty())start.parentGeneration=GetRef(params["parentGeneration"]);
             start.analysisRoi = GetSelectedRoi(*panel->GetSession(), params["analysisRoi"], source->dataRevision);
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
             SurfaceStartRequest request{start};

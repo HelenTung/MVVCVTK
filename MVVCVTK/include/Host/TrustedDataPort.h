@@ -103,6 +103,8 @@ public:
 
     virtual RoiReadResult GetRoi(const DataGraphSnapshot& graph,
         const DataRevisionRef& roiRef, const DataRevisionRef& sourceRef) const = 0;
+    virtual RoiOperationResult GetRoiOperation(const DataGraphSnapshot&,const RoiOperationRequest&) const = 0;
+    virtual RoiReadResult GetRoiPreview(const DataGraphSnapshot&,const RoiDefinition&) const = 0;
     virtual DataGraphSnapshot GetDataGraph() const = 0;
     virtual DataSnapshot GetData(
         const DataGraphSnapshot& graph,
@@ -140,6 +142,8 @@ public:
         const DataRevisionRef&, std::shared_ptr<const VtkPreparedDataView>) { return {}; }
     // 仅 Host owner thread 可写；轻量同步事务，不持有完成回调。
     virtual RoiResult SetRoi(const RoiRequest& request) = 0;
+    virtual RoiOperationResult SetRoiOperation(const RoiOperationRequest&) = 0;
+    virtual RoiOperationResult SetRoiOperationCommit(const RoiOperationRequest&,RoiOperationResult) = 0;
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
     virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;

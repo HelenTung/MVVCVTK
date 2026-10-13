@@ -70,6 +70,10 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
                 if (!after.GetValid(index)) return ArtifactError::InvalidData;
                 const double oldValue = before.GetValue(index);
                 const double newValue = after.GetValue(index);
+                // 输出标量范围仍覆盖完整有效数据，质量选区不能重标输出数据。
+                scalarRange[0] = std::min(scalarRange[0], newValue);
+                scalarRange[1] = std::max(scalarRange[1], newValue);
+                if (!before.GetQuality(index)) continue;
                 const double delta = newValue - oldValue;
                 if (!std::isfinite(delta)) return ArtifactError::InvalidData;
                 ++quality.validCount;
@@ -78,8 +82,6 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
                     || !sumDelta.Add(delta) || !squaredDelta.Add(delta * delta))
                     return ArtifactError::InvalidData;
                 quality.maxDelta = std::max(quality.maxDelta, std::abs(delta));
-                scalarRange[0] = std::min(scalarRange[0], newValue);
-                scalarRange[1] = std::max(scalarRange[1], newValue);
                 if (before.GetMaterial(index)) {
                     if (!materialBefore.Add(oldValue) || !materialAfter.Add(newValue)) return ArtifactError::InvalidData;
                 }
@@ -87,7 +89,7 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
                 for (int axis = 0; axis < 3; ++axis) {
                     if (position[axis] + 1 >= dims[axis]) continue;
                     const auto next = index + strides[axis];
-                    if (!before.GetValid(next)) continue;
+                    if (!before.GetValid(next) || !before.GetQuality(next)) continue;
                     const double nextDelta = after.GetValue(next) - before.GetValue(next);
                     const double gradientDelta = (nextDelta - delta) / grid.spacing[axis];
                     if (!std::isfinite(gradientDelta)) return ArtifactError::InvalidData;
@@ -99,7 +101,7 @@ ArtifactError BuildQuality(const AlgorithmInput& input,
         }
         control.progress.store(80 + static_cast<unsigned int>(15.0 * (z + 1) / dims[2]), std::memory_order_relaxed);
     }
-    if (quality.validCount == 0) return ArtifactError::InvalidData;
+    if (quality.validCount == 0) return std::isfinite(scalarRange[0]) && scalarRange[0]<=scalarRange[1] ? ArtifactError::None:ArtifactError::InvalidData;
     const double count = static_cast<double>(quality.validCount);
     quality.meanBefore = sumBefore.value / count;
     quality.meanAfter = sumAfter.value / count;

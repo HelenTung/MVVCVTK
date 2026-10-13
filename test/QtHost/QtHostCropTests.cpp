@@ -676,7 +676,7 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
         consumerGraph=probe->m_data->GetDataGraph();consumerRef=completed.resultSet;
         const auto data=probe->m_data->GetData(consumerGraph,consumerRef);
         if(consumerCount!=1||!data||!GetDataEntityIdValid(data->lifetimeScope)
-            ||probe->m_data->GetDataLifetime(data->lifetimeScope).ownedRevisions.size()!=5)return false;
+            ||probe->m_data->GetDataLifetime(data->lifetimeScope).ownedRevisions.size()!=8)return false;
     }
 #else
     if(consumerKind==1)return false;
@@ -1293,7 +1293,7 @@ int GetCropLifecycleFailCount()
     failures+=GetCaseResult(GetCropCloseRetryValid(false),"Detach cancels Building exactly once and retries the same close before releasing ports")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true),"Session Stop keeps Crop owned while a bare result array prevents release")?0:1;
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
-    failures+=GetCaseResult(GetCropCloseRetryValid(true,1),"Gap retires its five controlled outputs before the dependent Crop can finish Session Stop")?0:1;
+    failures+=GetCaseResult(GetCropCloseRetryValid(true,1),"Gap retires its eight controlled outputs before the dependent Crop can finish Session Stop")?0:1;
 #endif
 #ifdef MVVCVTK_HAS_PART_SEGMENTATION
     failures+=GetCaseResult(GetCropCloseRetryValid(true,2),"Part retires all controlled outputs and waits for a bare label array before Crop closes")?0:1;

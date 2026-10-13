@@ -33,9 +33,17 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
     const auto resolved=AlignmentDeviationColors::GetResolvedDisplay(display,result);
     if (!mesh || !mesh->data || mesh->data->self != result.sourceMesh || !mesh->mesh ||
         !resolved ||
-        mesh->mesh->GetNumberOfPoints() != static_cast<vtkIdType>(result.forward->samples.size()))
+        mesh->mesh->GetNumberOfPoints() != static_cast<vtkIdType>(result.forward->originalVertexCount))
         throw std::invalid_argument("Invalid deviation display input.");
-    const auto count=result.forward->samples.size();
+    std::vector<std::size_t> sampleIndices;
+    vtkSmartPointer<vtkPolyData> selected;
+    if(result.parameters->evaluationRoi){
+        vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> triangles;
+        for(std::size_t i=result.forward->originalVertexCount;i<result.forward->samples.size();++i){const auto& sample=result.forward->samples[i];if(!sample.sourceTriangle)continue;
+            vtkIdType ids[3];for(int j=0;j<3;++j){ids[j]=points->InsertNextPoint((*sample.sourceTriangle)[j].data());sampleIndices.push_back(i);}triangles->InsertNextCell(3,ids);}
+        selected=vtkSmartPointer<vtkPolyData>::New();selected->SetPoints(points);selected->SetPolys(triangles);
+    }else for(std::size_t i=0;i<result.forward->samples.size();++i)sampleIndices.push_back(i);
+    const auto count=sampleIndices.size();
     const auto requiredBytes=GetRequiredBytes(count);
     auto output=std::make_shared<AlignmentDeviationRenderData>();
     output->source=std::move(mesh); output->field=result.forward; output->workingBytes=requiredBytes;
@@ -45,20 +53,21 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
     auto *buffer=colors->GetPointer(0);
     const AlignmentDeviationColors::Ramp ramp(*resolved,result.parameters->tolerance);
     for (std::size_t i=0;i<count;++i) {
-        const auto &sample=output->field->samples[i];
+        const auto &sample=output->field->samples[sampleIndices[i]];
         const auto color=sample.state == AlignmentDeviationState::Valid
             ? ramp.ColorAt(sample.value) : AlignmentDeviationColors::invalidColor;
         std::copy(color.begin(),color.end(),buffer+3*i);
     }
     output->colored=vtkSmartPointer<vtkPolyData>::New();
-    output->colored->ShallowCopy(output->source->mesh);
+    output->colored->ShallowCopy(selected ? selected:output->source->mesh);
     output->colored->GetPointData()->SetScalars(colors);
     output->lookup=ramp.GetLookup();
     const char *unit=result.unit == AlignmentUnit::Millimeter ? "mm" : result.unit == AlignmentUnit::Meter ? "m" : "model unit";
     output->title=std::string(result.parameters->metric == AlignmentDeviationMetric::UnsignedDistance ? "Distance" : "Normal projection")+" ("+unit+")";
     if (display.selectedVertex) {
         auto points=vtkSmartPointer<vtkPoints>::New(); points->SetDataTypeToDouble();
-        double point[3]; output->source->mesh->GetPoint(static_cast<vtkIdType>(*display.selectedVertex),point);
+        double point[3];const auto& sample=result.forward->samples[*display.selectedVertex];
+        if(sample.sourcePosition)std::copy(sample.sourcePosition->begin(),sample.sourcePosition->end(),point);else output->source->mesh->GetPoint(static_cast<vtkIdType>(*display.selectedVertex),point);
         points->InsertNextPoint(point);
         auto vertices=vtkSmartPointer<vtkCellArray>::New(); const vtkIdType id=0; vertices->InsertNextCell(1,&id);
         output->marker=vtkSmartPointer<vtkPolyData>::New(); output->marker->SetPoints(points); output->marker->SetVerts(vertices);

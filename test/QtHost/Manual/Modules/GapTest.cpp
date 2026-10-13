@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Support/ColorSegmentInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Host/GapHostFeature.h"
 #include <QPointer>
 #include <limits>
@@ -10,7 +11,8 @@ namespace {
 QJsonObject GetStatistics(const GapStatistics& value)
 {
     return {{"objectVoxels", QString::number(value.objectVoxelCount)}, {"voidVoxels", QString::number(value.voidVoxelCount)},
-        {"objectVolumeMM3", value.objectVolumeMM3}, {"voidVolumeMM3", value.voidVolumeMM3}, {"porosityRatio", value.porosityRatio}};
+        {"objectVolumeMM3", value.objectVolumeMM3}, {"voidVolumeMM3", value.voidVolumeMM3}, {"porosityRatio", value.isPorosityAvailable?QJsonValue(value.porosityRatio):QJsonValue()},
+        {"porosityAvailable",value.isPorosityAvailable},{"evaluationVoxels",QString::number(value.evaluationVoxelCount)},{"actualSupportVoxels",QString::number(value.actualSupportVoxelCount)}};
 }
 }
 ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> feature, QWidget* parent)
@@ -19,8 +21,8 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
     auto runParameters=std::make_shared<QJsonObject>();
     auto listRange=std::make_shared<std::optional<std::array<double,2>>>();
     panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。结果区显示孔隙体积、孔隙率等统计与数据修订。");
-    panel->AttachAction("Start", GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0})"),
-        [panel, feature,runParameters](auto id, const auto& params) {
+    for(const auto& action:QStringList{"Start","Evaluate"})panel->AttachAction(action, GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0,"parentResult":"","evaluationRoi":"","detectionRoi":"","roiPolicy":"WholeIfIntersects"})"),
+        [panel, feature,runParameters,action](auto id, const auto& params) {
             const auto input = panel->GetSession()->GetImageDescriptor();
             if (!input) throw std::invalid_argument("请先选择体数据输入");
             GapHostStartParams start;
@@ -33,7 +35,11 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             const auto requestedSurface = start.surface;
             start.voidParams.isFilterEnabled = GetBool(params, "filter");
             start.voidParams.minVolumeMM3 = GetNumber(params, "minVolumeMM3");
-            GapHostRequest request; request.action = GapHostAction::Start; request.start = start;
+            start.evaluationRoi=GetSelectedRoi(*panel->GetSession(),params["evaluationRoi"],input->dataRevision);
+            start.detectionRoi=GetSelectedRoi(*panel->GetSession(),params["detectionRoi"],input->dataRevision);
+            if(!params["parentResult"].toString().isEmpty())start.parentResult=GetRef(params["parentResult"]);
+            start.roiPolicy=GetEnum<GapRoiPolicy>(params,"roiPolicy",{{"InsideOnly",GapRoiPolicy::InsideOnly},{"WholeIfIntersects",GapRoiPolicy::WholeIfIntersects}});
+            GapHostRequest request; request.action = action=="Evaluate"?GapHostAction::Evaluate:GapHostAction::Start; request.start = start;
             const QPointer<ModulePanel> owner(panel);
             const auto accepted = (feature->SendRequest(std::move(request), [owner, id, requestedSurface,runParameters,params](GapHostResult result) {
                 if (!owner) return;

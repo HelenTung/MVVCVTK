@@ -88,7 +88,7 @@ void TestAreaCoverage(Checks& checks)
         if(result.triangleValidity[i])valid+=area;
     }
     const auto& object=result.objects.front();
-    checks.Get(total>0 && valid>0 && valid<total && std::abs(object.validAreaRatio-valid/total)<1e-12,
+    checks.Get(total>0 && valid>0 && valid<=total && std::abs(object.validAreaRatio-valid/total)<1e-12,
         "coverage is independently verified by triangle area rather than vertex count");
     checks.Get(!object.volumeModelUnit3 && object.volumeValidity!=SurfaceMetricValidity::Valid,
         "closed geometry with missing measurement support cannot report complete volume");

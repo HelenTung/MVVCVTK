@@ -107,6 +107,8 @@ struct AlignmentRegion final {
     DataRevisionRef pinnedMesh;
     std::vector<std::uint64_t> vertexIds;
     std::optional<std::array<double, 6>> targetBounds;
+    std::optional<DataRevisionRef> roi;
+    AlignmentMatrix meshToRoi = alignmentIdentity;
 };
 
 struct AlignmentGeometrySpec final {
@@ -305,6 +307,7 @@ struct AlignmentDeviationRequest final {
     AlignmentDeviationMetric metric = AlignmentDeviationMetric::UnsignedDistance;
     // 编号属于 alignmentResult 固定的实测/名义网格，空集合使用全部三角形。
     std::vector<std::uint64_t> sourceTriangles, referenceTriangles;
+    std::optional<DataRevisionRef> evaluationRoi;
     double maxDistance = 1;
     std::optional<double> minNormalCosine;
     // 与 metric 同定义、同长度单位；空值只报告偏差，不作合格判定。
@@ -314,10 +317,14 @@ struct AlignmentDeviationRequest final {
     double minSupportRatio = 0, maxLocalizationSigma = 1, maxSurfaceFitResidual = 1;
 };
 struct AlignmentDeviationSample final {
-    // 下标直接对应原网格顶点；NotSelected/InvalidSource 时 value、distance 不可解释为测量值。
+    // 前 originalVertexCount 项对应父网格顶点；后续项为有明确面片来源的 ROI 样本。
     double value = 0, distance = 0, area = 0;
     std::uint64_t closestTriangle = 0;
     AlignmentDeviationState state = AlignmentDeviationState::NotSelected;
+    std::optional<AlignmentPoint> sourcePosition;
+    std::optional<std::uint64_t> parentTriangle;
+    AlignmentPoint barycentric{};
+    std::optional<std::array<AlignmentPoint,3>> sourceTriangle;
 };
 struct AlignmentDeviationStatistics final {
     std::array<std::size_t, 7> counts{};
@@ -330,6 +337,8 @@ struct AlignmentDeviationStatistics final {
 struct AlignmentDeviationField final {
     std::vector<AlignmentDeviationSample> samples;
     AlignmentDeviationStatistics statistics;
+    std::size_t originalVertexCount = 0;
+    double roiBoundaryTolerance = 0;
 };
 struct AlignmentDeviationSnapshot final {
     DataRevisionRef result, alignmentResult, sourceMesh, referenceMesh, transform;
@@ -387,6 +396,8 @@ struct InspectionSectionTrace final {
     std::size_t components=0, closedLoops=0, selectedSegments=0;
     std::size_t sourceTriangleCount=0;
     double perimeter=0, sampleSpacing=0, maxPlaneCorrection=0;
+    bool isPartialSelection=false;
+    std::size_t parentSampleCount=0;
     std::vector<InspectionSectionSample> samples;
 };
 struct InspectionGeometrySpec final {
@@ -395,7 +406,7 @@ struct InspectionGeometrySpec final {
     InspectionGeometrySource source = InspectionGeometrySource::MeasuredSurface;
     std::optional<InspectionIdealGeometry> ideal;
     std::string definitionSource;
-    // 仅 Circle 支持截面模式；与 fit.region 互斥，平面方向采用 section.planeNormal。
+    // 仅 Circle 支持截面模式；ROI/bounds 选择完整父截线中的样本，平面方向采用 section.planeNormal。
     std::optional<InspectionSection> section;
 };
 enum class InspectionMetric : std::uint8_t {

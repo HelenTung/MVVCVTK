@@ -95,6 +95,9 @@ public:
     std::optional<HostStateSnapshot> GetStateSnapshot() const;
     std::optional<ImageDescriptor> GetImageDescriptor();
     RoiResult SetRoi(const RoiRequest& request);
+    RoiOperationResult SetRoiOperation(const RoiOperationRequest& request);
+    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>&,std::size_t maxBytes);
+    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&,std::size_t maxBytes);
     RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey,std::size_t maxBytes);
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
         const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes);
@@ -636,6 +639,15 @@ RoiResult VtkAppHostSession::Impl::SetRoi(const RoiRequest& request)
     if (!GetIsReady() || !core.sharedDataMgr) return {};
     const auto data = core.sharedDataMgr;
     return data->SetRoi(request);
+}
+
+RoiOperationResult VtkAppHostSession::Impl::SetRoiOperation(const RoiOperationRequest& request)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    const auto data=core.sharedDataMgr;
+    return data->SetRoiOperation(request);
 }
 
 std::vector<RoiDescriptor> VtkAppHostSession::Impl::GetRoiDescriptors(bool includeArchived)
@@ -1598,6 +1610,11 @@ RoiResult VtkAppHostSession::SetRoi(const RoiRequest& request)
     return m_impl ? m_impl->SetRoi(request) : RoiResult{};
 }
 
+RoiOperationResult VtkAppHostSession::SetRoiOperation(const RoiOperationRequest& request)
+{
+    return m_impl ? m_impl->SetRoiOperation(request):RoiOperationResult{};
+}
+
 std::vector<RoiDescriptor> VtkAppHostSession::GetRoiDescriptors(bool includeArchived)
 {
     return m_impl ? m_impl->GetRoiDescriptors(includeArchived) : std::vector<RoiDescriptor>{};
@@ -1732,3 +1749,22 @@ RoiResult VtkAppHostSession::LoadRoiArchive(const RoiArchive& archive,const std:
 {
     return m_impl ? m_impl->LoadRoiArchive(archive,sourceKey,sourceRef,expectedCatalogRevision,maxBytes):RoiResult{};
 }
+
+RoiArchiveBundleResult VtkAppHostSession::Impl::GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection,std::size_t maxBytes)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if(ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id())return {RoiError::WrongThread};
+    if(!GetIsReady() || !core.sharedDataMgr)return {};
+    return RoiService::GetArchiveBundle(core.sharedDataMgr->GetDataGraph(),selection,maxBytes);
+}
+RoiArchiveRestoreResult VtkAppHostSession::Impl::LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if(ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id())return {RoiError::WrongThread};
+    if(!GetIsReady() || !core.sharedDataMgr)return {};
+    const auto data=core.sharedDataMgr;return data->LoadRoiArchiveBundle(bundle,mappings,maxBytes);
+}
+RoiArchiveBundleResult VtkAppHostSession::GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection,std::size_t maxBytes)
+{return m_impl?m_impl->GetRoiArchiveBundle(selection,maxBytes):RoiArchiveBundleResult{};}
+RoiArchiveRestoreResult VtkAppHostSession::LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes)
+{return m_impl?m_impl->LoadRoiArchiveBundle(bundle,mappings,maxBytes):RoiArchiveRestoreResult{};}

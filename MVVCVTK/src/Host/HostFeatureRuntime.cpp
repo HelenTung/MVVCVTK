@@ -331,6 +331,25 @@ public:
             return data ? data->SetRoi(request) : RoiResult{};
         }
 
+        RoiOperationResult GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const override
+        {
+            const auto data=GetReadData();return data ? data->GetRoiOperation(graph,request):RoiOperationResult{};
+        }
+        RoiReadResult GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition) const override
+        {
+            const auto data=GetReadData();return data ? data->GetRoiPreview(graph,definition):RoiReadResult{};
+        }
+        RoiOperationResult SetRoiOperation(const RoiOperationRequest& request) override
+        {
+            if (m_ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
+            const auto data=GetWriteData();return data ? data->SetRoiOperation(request):RoiOperationResult{};
+        }
+        RoiOperationResult SetRoiOperationCommit(const RoiOperationRequest& request,RoiOperationResult candidate) override
+        {
+            if (m_ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
+            const auto data=GetWriteData();return data ? data->SetRoiOperationCommit(request,std::move(candidate)):RoiOperationResult{};
+        }
+
         DataGraphSnapshot GetDataGraph() const override
         {
             const auto data = GetReadData();

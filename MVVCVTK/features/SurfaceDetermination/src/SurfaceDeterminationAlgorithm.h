@@ -22,6 +22,7 @@ inline constexpr std::uint32_t surfaceAlgorithmRevision = 8;
 struct SurfaceAlgorithmInputs final
 {
     RoiReadSnapshot roi;
+    std::shared_ptr<const SurfaceGenerationSnapshot> parent;
 };
 
 struct SurfaceAlgorithmResult final {
@@ -43,6 +44,8 @@ struct SurfaceAlgorithmResult final {
     std::size_t requiredBytes = 0;
     std::vector<SurfacePointRecord> points;
     std::vector<std::uint32_t> triangleIndices;
+    std::vector<SurfaceSelectionPiece> selection;
+    double selectedAreaMM2 = 0, selectionToleranceMM = 0;
     std::vector<SurfaceObjectRecord> objects;
     std::uint64_t acceptedPointCount = 0;
     std::uint64_t lowContrastPointCount = 0;

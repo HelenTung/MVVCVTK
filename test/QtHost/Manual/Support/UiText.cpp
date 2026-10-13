@@ -69,6 +69,10 @@ QString GetActionText(const QString& module, const QString& action)
 {
     if(action=="PrepareRoi")return "选用已有区域";
     if(action=="OpenCrop")return "进入裁剪";
+    if(module=="Roi"){
+        static const QHash<QString,QString> names{{"Union","并集"},{"Intersection","交集"},{"Difference","差集"},{"Merge","合并为新区域"},{"Dilate","膨胀"},{"Erode","腐蚀"},{"Open","开运算"},{"Close","闭运算"},{"RemoveSmall","删除小分量"},{"KeepLargest","保留最大分量"},{"KeepSelected","保留指定分量"},{"Split","拆分区域"},{"FillHoles","填孔"},{"Threshold","灰度选区"},{"Grow","连通生长"},{"Invert","反选"},{"Transform","变换或跨源复制"},{"SurfaceInterior","闭合表面内部"},{"SurfaceLayer","表面薄层"},{"ApplySelection","应用当前选区"},{"ApplyOperation","应用当前运算"},{"CancelOperation","取消当前运算"},{"Undo","撤销"},{"Redo","重做"},{"DrawRectangle2D","切片矩形"},{"DrawCircle2D","切片圆形"},{"DrawEllipse2D","切片椭圆"},{"DrawContour2D","切片绘制轮廓"},{"DrawBrush2D","切片画笔"},{"DrawContour3D","三维体积圈选"},{"DrawBrush3D","三维可见表面画笔"},{"PickSeed","点击添加种子"},{"EditControlPoint","拖动区域控制点"},{"EndDrawing","结束绘制"},{"Remove","删除区域"}};
+        const auto found=names.find(action);if(found!=names.end())return found.value();
+    }
     if(action=="OpenGap")return "进入孔隙分析";
     if(module=="Roi" && action=="Edit")return "编辑已有区域";
     if(module=="Roi" && action=="SetMetadata")return "更新区域信息";
@@ -101,7 +105,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Part.Commit", "确认编辑"}, {"Artifact.Commit", "发布校正结果"}, {"Roi.Commit", "提交区域"},
         {"Roi.Cancel", "取消区域草稿"},
         {"Roi.SetDraft", "更新区域草稿"},
-        {"Gap.SetDisplay", "应用孔隙色带"},
+        {"Gap.SetDisplay", "应用孔隙色带"},{"Gap.Evaluate","按区域重评价父结果"},
         {"Crop.SelectOutput", "使用裁剪结果"}, {"Artifact.SelectOutput", "使用校正数据"},
         {"Crop.Previous", "撤销上一步裁剪"}, {"Crop.Next", "恢复下一步裁剪"}, {"Crop.Node", "跳转到此节点"}};
     static const QHash<QString, QString> labels{
@@ -155,8 +159,10 @@ QString GetParameterText(const QString& key)
     if(key=="description")return "说明";
     static const QHash<QString,QString> regionLabels{{"analysisRoi","分析范围"},{"processingRoi","处理范围"},
         {"protectionRoi","保护范围"},{"qualityRoi","质量统计范围"},{"editRoi","编辑范围"},
-        {"evaluationRoi","评价范围"},{"inputRoi","已有区域"},{"roi","区域对象"},{"group","区域分组"}};
+        {"evaluationRoi","评价范围"},{"detectionRoi","检测候选范围"},{"parentResult","完整检测父结果"},{"parentGeneration","完整测量父结果"},{"roiPolicy","缺陷选取方式"},{"meshToRoi","网格到区域坐标变换"},{"inputRoi","已有区域"},{"roi","区域对象"},{"group","区域分组"}};
     if(regionLabels.contains(key))return regionLabels.value(key);
+    static const QHash<QString,QString> operationLabels{{"selectionMode","区域作用方式"},{"planeToSource","轮廓平面到源坐标变换"},{"sourceToView","冻结源到视图变换"},{"viewToClip","冻结投影变换"},{"depthMM","有限深度（毫米）"},{"contours","轮廓环与孔"},{"pathMM","画笔路径（源坐标毫米）"},{"isSliceBrush","限制到切片厚度"},{"outputMode","输出区域方式"},{"operands","操作数区域"},{"radiusUnit","半径单位"},{"connectivity","邻接方式"},{"minimumVolumeMM3","最小分量体积（立方毫米）"},{"maximumHoleVolumeMM3","最大填孔体积（零表示全部）"},{"componentLabels","保留的分量标签"},{"keepInput","保留原区域"},{"grayRange","闭区间灰度范围"},{"seedsMM","生长种子（源坐标毫米）"},{"domainRoi","反选允许域"},{"rasterize","显式按目标网格重采样"},{"sourceToTarget","源到目标坐标变换"},{"targetSource","目标源修订"},{"meshToSource","网格到源坐标变换"},{"inwardMM","向内厚度（毫米）"},{"outwardMM","向外厚度（毫米）"},{"hasOrientation","按内外侧分别取薄层"}};
+    if(operationLabels.contains(key))return operationLabels.value(key);
     if(key=="pageOffset")return "缺陷列表起始行";
     if(key=="rowIndex")return "缺陷表原始行号";
     if(key=="table")return "缺陷表修订";
@@ -344,7 +350,12 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
-    if (module == "Roi" && key == "shape") return {{"Box","区域盒"},{"Sphere","球形区域"},{"Cylinder","圆柱区域"}};
+    if (module=="Gap" && key=="roiPolicy")return {{"InsideOnly","只评价区域内部分"},{"WholeIfIntersects","相交后保留整个缺陷"}};
+    if (module == "Roi" && key == "shape") return {{"Box","区域盒"},{"Sphere","球形区域"},{"Cylinder","有限圆柱"},{"Ellipsoid","椭球"},{"EllipticCylinder","有限厚度椭圆区域"},{"HalfSpace","半空间"},{"Contour","平面轮廓与有限厚度"},{"ProjectedContour","冻结视图体积圈选"},{"Brush","画笔路径"},{"MaskReference","已有标签或掩膜"}};
+    if (module=="Roi" && key=="selectionMode") return {{"Replace","替换目标全部范围"},{"Add","添加本次选区"},{"Subtract","扣除本次选区"},{"Intersect","与本次选区求交"},{"NewRoi","另建独立区域"}};
+    if (module=="Roi" && key=="outputMode") return {{"UpdateTarget","更新原区域"},{"CreateNew","建立新区域"}};
+    if (module=="Roi" && key=="radiusUnit") return {{"Millimetres","毫米"},{"Voxels","索引体素"}};
+    if (module=="Roi" && key=="connectivity") return {{"Faces","6 邻接"},{"Full","26 邻接"}};
     if (module == "Crop" && key == "shape") return {{"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"}};
     if (key == "viewId") return {{"primary-3d", "三维视窗"}, {"slice-top-down", "上下切片"},
         {"slice-front-back", "前后切片"}, {"slice-left-right", "左右切片"}};

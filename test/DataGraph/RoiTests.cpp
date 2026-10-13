@@ -95,10 +95,8 @@ bool GetDefinitionRejected()
     invalid=f.GetBox(); invalid.nodes.push_back({RoiNodeKind::SourceDomain});
     if (!Check(RoiEvaluator::GetDefinitionError(invalid)==RoiError::InvalidGeometry,"unreachable node accepted")) return false;
     invalid=f.GetBox();
-    for (std::uint32_t i=1;i<=roiDepthLimit;++i) invalid.nodes.push_back({RoiNodeKind::Intersection,{},i-1,i-1});
-    if (!Check(RoiEvaluator::GetDefinitionError(invalid)==RoiError::TooLarge,"DAG depth limit ignored")) return false;
-    invalid.nodes.resize(roiNodeLimit+1);
-    if (!Check(RoiEvaluator::GetDefinitionError(invalid)==RoiError::TooLarge,"node limit ignored")) return false;
+    for (std::uint32_t i=1;i<=5000;++i) invalid.nodes.push_back({RoiNodeKind::Intersection,{},i-1,i-1});
+    if (!Check(RoiEvaluator::GetDefinitionError(invalid)==RoiError::None,"valid long ROI history was rejected")) return false;
     DataTransaction tx; tx.outputs={f.GetImage(),f.GetRoi(f.GetBox())}; tx.outputs[1].inputs.clear();
     const auto before=f.store.GetDataGraph().commitId;
     if (!Check(f.store.SetDataCommit(tx).status==DataCommitStatus::Rejected && f.store.GetDataGraph().commitId==before,"missing source relation committed partial data")) return false;

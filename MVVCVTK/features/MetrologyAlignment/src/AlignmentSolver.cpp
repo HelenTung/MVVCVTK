@@ -348,13 +348,13 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
     for (const auto &sample : samples) {
         CheckWork(work);
         const auto id = sample.vertex;
-        const Vec p(v[3 * id], v[3 * id + 1], v[3 * id + 2]);
+        const Vec p=sample.sourcePosition ? Vector(*sample.sourcePosition):Vec(v[3 * id], v[3 * id + 1], v[3 * id + 2]);
         const auto hit = query.GetClosest(Point(Transform(pose, p)));
         Require(hit.isValid, "Reference correspondence is unavailable.");
         bool used = sample.validArea > 0 && AlignmentGeometryFit::GetPointUsable(work, static_cast<std::size_t>(id)) &&
                     std::sqrt(hit.distanceSquared) <= stage.maxPairDistance;
         if (normal) {
-            const Vec n(normal->values[3 * id], normal->values[3 * id + 1], normal->values[3 * id + 2]);
+            const Vec n=sample.sourceNormal ? Vector(*sample.sourceNormal):Vec(normal->values[3 * id], normal->values[3 * id + 1], normal->values[3 * id + 2]);
             used = used && std::abs(cv::norm(n) - 1) <= 1e-6 &&
                    Rotate(pose, n).dot(Vector(hit.normal)) >= *work.recipe.minPairNormalCosine;
         }
@@ -550,7 +550,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
         for (const auto &sample : dense.points) {
             CheckWork(work);
             const auto id = sample.vertex;
-            sourcePivot += Vec(vertices[3*id], vertices[3*id+1], vertices[3*id+2]) / static_cast<double>(dense.points.size());
+            sourcePivot += (sample.sourcePosition ? Vector(*sample.sourcePosition):Vec(vertices[3*id], vertices[3*id+1], vertices[3*id+2])) / static_cast<double>(dense.points.size());
         }
         const auto components = recipe.surfaceFit->isPointToPlane ? std::size_t{1} : std::size_t{3};
         const auto stageCount = scales.empty() ? std::size_t{1} : scales.size();

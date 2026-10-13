@@ -680,7 +680,6 @@ public:
     const std::vector<RoiCatalogEntry>& GetEntries() const noexcept { return m_entries; }
     bool GetValid() const noexcept
     {
-        if (m_entries.size() > roiCatalogLimit) return false;
         for (std::size_t i = 0; i < m_entries.size(); ++i) {
             const auto& entry = m_entries[i];
             if (!GetDataRevisionRefValid(entry.geometry)

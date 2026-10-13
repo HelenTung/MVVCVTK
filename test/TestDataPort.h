@@ -35,6 +35,14 @@ public:
     {
         return RoiService(m_store).SetRoi(request);
     }
+    RoiReadResult GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition) const override
+    { return RoiEvaluator::GetPreview(graph,definition); }
+    RoiOperationResult GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const override
+    { return RoiService::GetOperation(graph,request); }
+    RoiOperationResult SetRoiOperation(const RoiOperationRequest& request) override
+    { return RoiService(m_store).SetOperation(request); }
+    RoiOperationResult SetRoiOperationCommit(const RoiOperationRequest& request,RoiOperationResult candidate) override
+    { return RoiService(m_store).SetOperationCommit(request,std::move(candidate)); }
     DataGraphSnapshot GetDataGraph() const override
     {
         return m_store.GetDataGraph();

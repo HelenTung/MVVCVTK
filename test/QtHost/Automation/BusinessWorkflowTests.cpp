@@ -31,11 +31,12 @@ void CheckBusinessWorkflow(TestWindow& window)
 #if defined(MANUAL_ALIGNMENT)
     AlignmentRegion selection;selection.vertexIds={1,3,8};
     DataRevisionRef mesh;mesh.entityId.bytes[0]=1;mesh.generation=1;
-    SetRegionRoi(selection,{1,2,3},mesh);
-    Require(selection.pinnedMesh==mesh && selection.vertexIds==std::vector<std::uint64_t>{1,3},
-        "shared spatial ROI intersects the existing revision-pinned vertex selection");
+    DataRevisionRef roi;roi.entityId.bytes[0]=2;roi.generation=1;
+    SetRegionRoi(selection,roi,mesh);
+    Require(selection.pinnedMesh==mesh && selection.roi==roi && selection.vertexIds==std::vector<std::uint64_t>{1,3,8},
+        "shared spatial ROI stays an exact reference alongside the explicit vertex selection");
     bool rejected=false;try{SetRegionRoi(selection,{},mesh);}catch(const std::invalid_argument&){rejected=true;}
-    Require(rejected && selection.vertexIds==std::vector<std::uint64_t>{1,3},
+    Require(rejected && selection.roi==roi && selection.vertexIds==std::vector<std::uint64_t>{1,3,8},
         "empty ROI selection cannot become the complete mesh or overwrite the prior selection");
 #endif
     // 与完整真实 CT 相同的网格周期；无需分配十余 GB 就能复现抽样列偏置。

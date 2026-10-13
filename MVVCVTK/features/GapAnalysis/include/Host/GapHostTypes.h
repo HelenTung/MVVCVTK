@@ -59,7 +59,11 @@ struct GapStatistics final {
     double objectVolumeMM3 = 0.0;
     double voidVolumeMM3 = 0.0;
     double porosityRatio = 0.0;
+    bool isPorosityAvailable = true;
+    std::size_t evaluationVoxelCount = 0, actualSupportVoxelCount = 0;
+    std::optional<DataRevisionRef> evaluationRoi, detectionRoi;
 };
+enum class GapRoiPolicy : std::uint8_t { InsideOnly, WholeIfIntersects };
 
 enum class GapColorMode { Constant, Gradient, Rainbow, InverseRainbow, HueLoop };
 enum class GapRangeMode { Result, SelectedInterval };

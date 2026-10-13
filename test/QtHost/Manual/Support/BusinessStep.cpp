@@ -35,7 +35,8 @@ BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
         return {"待生成校正候选", "选择校正方法和作用范围，先生成候选并核对质量。", action, "生成校正候选", {"OpenRoi"}};
     }
     if (module == "Roi") {
-        if(s["draftParametersChanged"].toBool())return {"范围数值有未应用修改","先把区域几何和元信息更新到可见草稿；图表当前仍属于原可见范围。","SetDraft","更新范围预览",{"Cancel"}};
+        if(s["draftParametersChanged"].toBool())return {"范围参数尚未完整","完成有效参数后可直接保存；未完成输入不会替换已有区域。","Commit","保存当前参数对应的区域",{"Cancel"}};
+        if(s["isComputing"].toBool())return {"区域正在计算","保存会等待当前参数对应的计算；再次改参数会取消原保存意图。","Commit","保存当前计算结果",{"CancelOperation","Cancel"}};
         if (s["hasDraft"].toBool()) return {"区域草稿", "调整区域后保存正式 ROI；隐藏区域不会删除它。", "Commit", "保存感兴趣区域", {"SetDraft", "Cancel", "Visibility"}};
         const auto action=QStringList{"Edit","SetMetadata","Copy"}.contains(parameterAction)?parameterAction:QString("Begin");
         QStringList next{"Begin","Edit","SetMetadata","Copy","Visibility"};

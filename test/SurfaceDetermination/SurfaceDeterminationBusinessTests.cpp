@@ -83,20 +83,13 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
               first.triangleValidity == second.triangleValidity &&
               first.execution.blockCount > second.execution.blockCount,
           "ROI geometry and global indices are identical across block boundaries");
-    bool inside = true;
-    bool keptBoundary = false;
-    for (const auto &point : first.points)
-        for (unsigned a = 0; a < 3; ++a)
-            inside = inside && point.positionModel[a] >= roiBounds[a * 2] - 1e-10 &&
-                     point.positionModel[a] <= roiBounds[a * 2 + 1] + 1e-10;
-    c.Get(inside && !first.objects.empty() && !first.objects[0].isClosed,
-          "final refined geometry stays inside ROI and adds no caps");
-    for (const auto &point : first.points)
-        if (GetSurfaceFlag(point.flags, SurfacePointFlags::RoiBoundary))
-            keptBoundary = keptBoundary || (point.positionModel == point.seedPositionModel &&
-                                            GetSurfaceFlag(point.flags, SurfacePointFlags::SeedRetained));
-    c.Get(keptBoundary,
-          "artificial ROI boundary retains its seed and explicit nonmeasurement quality reason");
+    auto parentParams=params;parentParams.analysisRoi.reset();const auto parent=Run(source,parentParams);
+    bool sameParent=parent.status==SurfaceResultStatus::Succeeded && parent.points.size()==first.points.size() && parent.triangleIndices==first.triangleIndices;
+    if(sameParent)for(std::size_t i=0;i<first.points.size();++i)sameParent=sameParent && parent.points[i].positionModel==first.points[i].positionModel && parent.points[i].flags==first.points[i].flags;
+    bool inside=!first.selection.empty();for(const auto& piece:first.selection)for(const auto& point:piece.points)for(unsigned a=0;a<3;++a)inside=inside && point[a]>=roiBounds[a*2]-1e-10 && point[a]<=roiBounds[a*2+1]+1e-10;
+    c.Get(sameParent && inside && first.selectedAreaMM2>0,"ROI selects fragments while preserving the complete parent surface");
+    c.Get(std::none_of(first.points.begin(),first.points.end(),[](const auto& point){return GetSurfaceFlag(point.flags,SurfacePointFlags::RoiBoundary);}),
+          "selection boundaries do not become nonmeasurement material boundaries");
     auto otherRoiInputs = roiInputs;
     otherRoiInputs.roi = BuildRoi(source, roiBounds);
     c.Get(Run(source, params, otherRoiInputs).failureReason == SurfaceFailureReason::InvalidRoi,
@@ -161,10 +154,11 @@ void TestMultipleInterfacesAndLocality(Checks &c)
     roiInputs.roi = BuildRoi(large, {30, 32, 30, 32, 30, 32});
     roi.analysisRoi = roiInputs.roi->GetRevision();
     const auto local = Run(large, roi, roiInputs);
-    c.Get(local.status == SurfaceResultStatus::Succeeded &&
-              local.execution.scannedCellCount < 63U * 63U * 63U / 4 &&
-              local.execution.processedExtent[0] > 0 && local.execution.processedExtent[1] < 63,
-          "small model ROI scans only its inverse-transformed halo region");
+    auto fullParams=roi;fullParams.analysisRoi.reset();const auto full=Run(large,fullParams);
+    c.Get(local.status==SurfaceResultStatus::Succeeded && full.status==SurfaceResultStatus::Succeeded &&
+          local.execution.scannedCellCount==full.execution.scannedCellCount && local.triangleIndices==full.triangleIndices &&
+          std::abs(local.selectedAreaMM2-4)<1e-10,
+          "small ROI keeps complete measurement support and selects only its four square millimetres");
     const auto cylinder = BuildSnapshot(
         {32, 32, 32}, {1, 1, 1}, {0, 0, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, VTK_FLOAT,
         [](const Point3 &p) { return GetSmoothInside(std::hypot(p[0] - 15.5, p[1] - 15.5) - 8); });

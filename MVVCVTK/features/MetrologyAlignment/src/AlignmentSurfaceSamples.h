@@ -5,6 +5,8 @@ struct AlignmentSurfaceSample final {
     std::uint64_t vertex = 0;
     double area = 0;
     double validArea = 0;
+    std::optional<AlignmentPoint> sourcePosition;
+    std::optional<AlignmentPoint> sourceNormal;
 };
 struct AlignmentSurfaceSamples final {
     std::vector<AlignmentSurfaceSample> points;

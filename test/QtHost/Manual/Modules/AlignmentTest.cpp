@@ -91,13 +91,13 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         const QJsonObject normalized{{"recipe",GetRecipeJson(*request.recipe)},{"inputRoi",p["inputRoi"]}};
         const auto input=GetAlignmentInput(*state->reference);
         if (const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],input.source)) {
-            const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,input.source,input.mesh);
-            for(auto& geometry:request.recipe->geometries)SetRegionRoi(geometry.region,vertices,input.mesh);
+            for(auto& geometry:request.recipe->geometries)SetRegionRoi(geometry.region,*roi,input.mesh);
             if(request.recipe->surfaceFit) {
                 if(!request.recipe->surfaceFit->sourceRegion)request.recipe->surfaceFit->sourceRegion=AlignmentRegion{};
-                SetRegionRoi(*request.recipe->surfaceFit->sourceRegion,vertices,input.mesh);
+                SetRegionRoi(*request.recipe->surfaceFit->sourceRegion,*roi,input.mesh);
             }
             if(!request.recipe->fitPairs.empty()) {
+                const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,input.source,input.mesh);
                 auto& pairs=request.recipe->fitPairs;
                 pairs.erase(std::remove_if(pairs.begin(),pairs.end(),[&](const auto& pair){
                     return !std::binary_search(vertices.begin(),vertices.end(),pair.vertexId);

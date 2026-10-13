@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include "Host/RoiReadTypes.h"
+#include <map>
 
 struct AlignmentWork final {
     AlignmentInput input;
@@ -13,6 +15,7 @@ struct AlignmentWork final {
     // 生产入口只传 DataGraphStore 已验证的不可变 payload；计算不重复扫描整张网格。
     std::shared_ptr<const SurfaceMeshPayload> mesh;
     std::shared_ptr<const SurfaceMeshPayload> referenceMesh;
+    std::map<DataRevisionRef,RoiReadSnapshot> rois;
     std::vector<AlignmentMatrix> poses;
     std::shared_ptr<std::atomic<bool>> cancelled;
 };

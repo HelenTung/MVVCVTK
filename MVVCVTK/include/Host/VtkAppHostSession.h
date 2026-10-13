@@ -105,10 +105,13 @@ public:
         ImageReadCallback onComplete);
     // Running/owner thread 的有界同步 ROI 事务；成功返回正式修订。
     RoiResult SetRoi(const RoiRequest& request);
+    RoiOperationResult SetRoiOperation(const RoiOperationRequest& request);
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
     // 归档同步复制按显式预算或当前可用内存检查；0 表示自动预算。
+    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection,std::size_t maxBytes=0);
+    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes=0);
     RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey,
         std::size_t maxBytes = 0);
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,

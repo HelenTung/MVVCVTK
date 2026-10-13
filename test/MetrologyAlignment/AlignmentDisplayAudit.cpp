@@ -59,7 +59,7 @@ int wmain(int argc,wchar_t **argv) {
         const auto view=data.GetSurfaceMesh(data.GetDataGraph(),meshRef);
         if (!view) throw std::runtime_error("Audit render view unavailable.");
         const double viewMs=Milliseconds(viewStart); const auto afterView=ReadMemory();
-        auto field=std::make_shared<AlignmentDeviationField>(); field->samples.resize(points);
+        auto field=std::make_shared<AlignmentDeviationField>();field->originalVertexCount=points; field->samples.resize(points);
         const auto &coordinates=imported.mesh->GetVertices();
         double low=coordinates[0], high=coordinates[0];
         for (std::size_t i=0;i<points;++i) { low=std::min(low,coordinates[3*i]); high=std::max(high,coordinates[3*i]); }

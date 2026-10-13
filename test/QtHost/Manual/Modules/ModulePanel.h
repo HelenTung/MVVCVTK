@@ -77,6 +77,7 @@ public:
     std::shared_ptr<VtkAppHostSession> GetSession() const { return m_context.runtime.GetSession(); }
     TestContext GetContext() const { return m_context; }
     std::function<void()> onObserve;
+    std::function<void(const QString&,const QJsonObject&)> onParametersEdited;
     std::function<bool()> onStatistics;
     std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;

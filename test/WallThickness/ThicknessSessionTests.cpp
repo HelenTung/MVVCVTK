@@ -467,9 +467,9 @@ void TestSession(Acceptance c, bool useRoi = false)
             } else {++outside;Require(sample.validity==ThicknessValidity::OutsideEvaluation,"ROI exterior was evaluated.");}
         }
         const auto data=probe->context.data->GetData(probe->context.data->GetDataGraph(),completed->result);
-        Require(inside && outside && std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input){
+        Require(inside && outside==0 && std::abs(result->statistics.evaluatedArea-121)<1e-8 && std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input){
             return input.role=="evaluation-roi" && input.source==*ref;
-        }),"Published result lacks its evaluation selection dependency.");
+        }),"Published ROI fragments lost selection area, parent support or dependency.");
         Require(!wall->GetThicknessValue(completed->result,{15.5,15.5,11.5}),"Outside ROI query returned a thickness.");
         // 上侧约 20，下侧约 12；ROI 只包含上侧，已有 8 mm 解析参照仍须通过。
     }

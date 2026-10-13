@@ -801,6 +801,23 @@ RoiResult BaseDataManager::SetRoi(const RoiRequest& request)
     return RoiService(*m_impl->m_graph).SetRoi(request);
 }
 
+RoiOperationResult BaseDataManager::GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const
+{
+    return RoiService::GetOperation(graph,request);
+}
+RoiReadResult BaseDataManager::GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition) const
+{
+    return RoiEvaluator::GetPreview(graph,definition);
+}
+RoiOperationResult BaseDataManager::SetRoiOperation(const RoiOperationRequest& request)
+{
+    return RoiService(*m_impl->m_graph).SetOperation(request);
+}
+RoiOperationResult BaseDataManager::SetRoiOperationCommit(const RoiOperationRequest& request,RoiOperationResult candidate)
+{
+    return RoiService(*m_impl->m_graph).SetOperationCommit(request,std::move(candidate));
+}
+
 RoiResult BaseDataManager::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
     const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision,std::size_t maxBytes)
 {
@@ -2830,3 +2847,6 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     target->Modified();
     return !stopToken.GetIsStopped();
 }
+
+RoiArchiveRestoreResult BaseDataManager::LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes)
+{ return RoiService(*m_impl->m_graph).LoadArchiveBundle(bundle,mappings,maxBytes); }

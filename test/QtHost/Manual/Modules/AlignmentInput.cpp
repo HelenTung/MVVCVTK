@@ -42,30 +42,24 @@ AlignmentRegion ReadRegion(const QJsonObject& p, DataRevisionRef mesh)
     AlignmentRegion region; region.pinnedMesh = GetMeshRef(p["pinnedMesh"], mesh);
     for (const auto id : p["vertexIds"].toArray()) region.vertexIds.push_back(GetId(id));
     if (!p["targetBounds"].isNull()) region.targetBounds = GetArray<double, 6>(p["targetBounds"]);
+    if(!p["roi"].toString().isEmpty())region.roi=GetRef(p["roi"]);
+    if(p.contains("meshToRoi"))region.meshToRoi=GetArray<double,16>(p["meshToRoi"]);
     return region;
 }
 QJsonObject WriteRegion(const AlignmentRegion& region)
 {
     QJsonArray ids; for (const auto id : region.vertexIds) ids.append(QString::number(id));
     return {{"pinnedMesh", GetRefText(region.pinnedMesh)}, {"vertexIds", ids},
-        {"targetBounds", region.targetBounds ? QJsonValue(GetValues(*region.targetBounds)) : QJsonValue()}};
+        {"targetBounds", region.targetBounds ? QJsonValue(GetValues(*region.targetBounds)) : QJsonValue()},
+        {"roi",region.roi?GetRefText(*region.roi):QString()},{"meshToRoi",GetValues(region.meshToRoi)}};
 }
 }
-void SetRegionRoi(AlignmentRegion& region, const std::vector<std::uint64_t>& vertices, DataRevisionRef mesh)
+void SetRegionRoi(AlignmentRegion& region, DataRevisionRef roi, DataRevisionRef mesh)
 {
-    if(vertices.empty())throw std::invalid_argument("空间区域没有顶点，不能解释为全网格");
-    if(region.targetBounds)throw std::invalid_argument("空间区域与目标坐标包围范围不能同时选择");
+    if(!GetDataRevisionRefValid(roi) || !GetDataRevisionRefValid(mesh))throw std::invalid_argument("区域或网格修订无效");
     if(GetDataRevisionRefValid(region.pinnedMesh) && region.pinnedMesh!=mesh)
         throw std::invalid_argument("顶点选区与区域筛选的网格修订不一致");
-    if(region.vertexIds.empty())region.vertexIds=vertices;
-    else {
-        // 公共区域读取器按原网格编号递增返回顶点；保留既有顶点选区的顺序。
-        std::vector<std::uint64_t> kept;
-        for(auto vertex:region.vertexIds)if(std::binary_search(vertices.begin(),vertices.end(),vertex))kept.push_back(vertex);
-        if(kept.empty())throw std::invalid_argument("原顶点选区与区域没有交集");
-        region.vertexIds=std::move(kept);
-    }
-    region.pinnedMesh=mesh;
+    region.pinnedMesh=mesh;region.roi=roi;
 }
 AlignmentRecipe GetRecipe(const QJsonObject& p, const DataRevisionRef& mesh, const DataRevisionRef& nominal)
 {
@@ -86,10 +80,7 @@ AlignmentRecipe GetRecipe(const QJsonObject& p, const DataRevisionRef& mesh, con
         spec.kind = GetEnum<AlignmentGeometryKind>(g, "kind", {{"Point", AlignmentGeometryKind::Point}, {"Line", AlignmentGeometryKind::Line},
             {"Plane", AlignmentGeometryKind::Plane}, {"Circle", AlignmentGeometryKind::Circle}, {"Sphere", AlignmentGeometryKind::Sphere}, {"Cylinder", AlignmentGeometryKind::Cylinder}});
         spec.association = GetEnum<AlignmentAssociation>(g, "association", {{"LeastSquares", AlignmentAssociation::LeastSquares}, {"SequentialLeastSquares", AlignmentAssociation::SequentialLeastSquares}});
-        const auto region = g["region"].toObject();
-        spec.region.pinnedMesh = GetMeshRef(region["pinnedMesh"], mesh);
-        for (const auto vertex : region["vertexIds"].toArray()) spec.region.vertexIds.push_back(GetId(vertex));
-        if (!region["targetBounds"].isNull()) spec.region.targetBounds = GetArray<double, 6>(region["targetBounds"]);
+        spec.region=ReadRegion(g["region"].toObject(),mesh);
         spec.targetDirection = GetArray<double, 3>(g["targetDirection"]);
         if (g.contains("radiusRange") && !g["radiusRange"].isNull()) spec.radiusRange = GetArray<double, 2>(g["radiusRange"]);
         if (g.contains("maxFitRms")) spec.maxFitRms = GetNumber(g, "maxFitRms");

@@ -1204,7 +1204,6 @@ bool CropHostFeature::Impl::Document::BuildCropResult(
         const auto result=m_data->GetRoi(m_data->GetDataGraph(),*inputRoi,source->data->self);
         if (result.error!=RoiError::None || !result.roi) return false;
         roi=result.roi;
-        if (source->mesh && roi->GetClipPlanes().error!=RoiError::None) return false;
     }
     DataBinding resultBinding;
     resultBinding.name = std::string(cropResultBinding);
