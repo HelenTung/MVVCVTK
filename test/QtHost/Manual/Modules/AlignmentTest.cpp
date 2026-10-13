@@ -12,7 +12,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
 {
     auto* panel = new ModulePanel(context, "Alignment", parent);
     panel->SetNotice("有效测量表面 → 导入参考 → 保存方案 → 对齐 → 检测 / 偏差 / 报告。检测选区独立于配准选区；截面使用目标坐标系。未提供名义值时只报告实测，不判合格。模型姿态只改变显示，不重采样。");
-    struct State { std::optional<ReferenceInput> reference; DataRevisionRef recipe; DataRevisionRef result; bool isReviewed = false; };
+    struct State { std::optional<ReferenceInput> reference; DataRevisionRef recipe; DataRevisionRef result; QJsonObject savedParameters,startParameters; bool isReviewed = false; };
     auto state = std::make_shared<State>();
     for (const auto& method : std::vector<std::pair<QString, AlignmentMethod>>{
         {"SequentialPlanes", AlignmentMethod::SequentialPlanes}, {"PlaneTwoHoles", AlignmentMethod::PlaneTwoHoles},
@@ -35,7 +35,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             if (GetText(p, "mesh") == "surface" && (!surface || surface->source != source))
                 throw std::invalid_argument("已生成表面不属于选定源修订");
             state->reference = dataSource->LoadReference(GetText(p, "filePath"), source, mesh);
-            state->recipe = {}; state->result = {}; state->isReviewed = false;
+            state->recipe = {}; state->result = {}; state->savedParameters={};state->startParameters={};state->isReviewed = false;
             panel->SetComplete(id, "ReferencePublished", {{"input", GetInputJson(GetAlignmentInput(*state->reference))},
                 {"recipe", state->reference->document["recipe"]},
                 {"nominal", GetRefText(state->reference->nominal)}, {"evidenceKind", state->reference->document["evidenceKind"]},
@@ -76,7 +76,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             AlignmentRequest request; request.action = AlignmentAction::ImportReference; request.reference = reference;
             const auto admission = feature->SendRequest(std::move(request), [state, complete, id](auto result) {
                 if (result.status == AlignmentStatus::FullyDetermined && GetDataRevisionRefValid(result.referenceMesh)) {
-                    state->reference->nominal = result.referenceMesh; state->recipe = {}; state->result = {}; state->isReviewed = false;
+                    state->reference->nominal = result.referenceMesh; state->recipe = {}; state->result = {};state->savedParameters={};state->startParameters={}; state->isReviewed = false;
                 }
                 complete(id, result);
             });
@@ -88,6 +88,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         const auto json = p["recipe"].isNull() ? state->reference->document["recipe"].toObject() : p["recipe"].toObject();
         AlignmentRequest request; request.action = AlignmentAction::SaveRecipe;
         request.recipe = GetRecipe(json, state->reference->mesh, state->reference->nominal);
+        const QJsonObject normalized{{"recipe",GetRecipeJson(*request.recipe)},{"inputRoi",p["inputRoi"]}};
         const auto input=GetAlignmentInput(*state->reference);
         if (const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],input.source)) {
             const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,input.source,input.mesh);
@@ -107,7 +108,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         }
         if (request.recipe->unit != GetAlignmentInput(*state->reference).unit) throw std::invalid_argument("配方与参考单位不一致");
         panel->GetContext().records.SetAdmission(id, {{"resolvedRecipe", GetRecipeJson(*request.recipe)}});
-        const auto admission = feature->SendRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
+        const auto admission = feature->SendRequest(std::move(request), [complete, id,state,normalized](auto result) {if(result.status==AlignmentStatus::FullyDetermined)state->savedParameters=normalized; complete(id, result); });
         panel->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
             {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
     });
@@ -118,7 +119,8 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             request.input = GetAlignmentInput(*state->reference); request.isActivationRequested = false;
             request.initialPoses.clear();
             for (const auto pose : p["initialPoses"].toArray()) request.initialPoses.push_back(GetAffineMatrix(pose, true));
-            const auto admission = feature->SendRequest(std::move(request), [complete, id](auto result) { complete(id, result); });
+            QJsonArray poses;for(const auto& pose:request.initialPoses)poses.append(GetValues(pose));const QJsonObject normalized{{"initialPoses",poses}};
+            const auto admission = feature->SendRequest(std::move(request), [complete, id,state,normalized](auto result) {if(result.status==AlignmentStatus::FullyDetermined)state->startParameters=normalized; complete(id, result); });
             panel->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
         }, TestPolicy::Compute, true);
@@ -187,7 +189,14 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
     panel->onObserve = [panel, feature, state] {
         const auto current = feature->GetState();
         const auto input = panel->GetSession()->GetImageDescriptor();
-        const bool referenceCurrent = input && state->reference && GetAlignmentInput(*state->reference).source == input->dataRevision;
+        DataRevisionRef desiredSource,desiredMesh;
+        try {const auto target=panel->GetActionParameters("ImportReference");desiredSource=target["source"]=="current" && input?input->dataRevision:GetRef(target["source"]);
+            const auto surface=panel->GetContext().workflow.GetMeasurementSurface();desiredMesh=target["mesh"]=="surface" ? surface?surface->mesh:DataRevisionRef{} : GetRef(target["mesh"]);
+        }catch(const std::exception&){}
+        const bool referenceCurrent = input && state->reference && state->reference->source==desiredSource && state->reference->mesh==desiredMesh && desiredSource==input->dataRevision;
+        bool recipeChanged=false,poseChanged=false;
+        if(referenceCurrent)try {const QJsonValue recipe=panel->GetActionParameters("SaveRecipe")["recipe"];const auto json=recipe.isNull()?state->reference->document["recipe"].toObject():recipe.toObject();recipeChanged=!state->savedParameters.isEmpty() && QJsonObject{{"recipe",GetRecipeJson(GetRecipe(json,state->reference->mesh,state->reference->nominal))},{"inputRoi",panel->GetActionParameters("SaveRecipe")["inputRoi"]}}!=state->savedParameters;QJsonArray poses;for(const auto pose:panel->GetActionParameters("Start")["initialPoses"].toArray())poses.append(GetValues(GetAffineMatrix(pose,true)));poseChanged=!state->startParameters.isEmpty() && QJsonObject{{"initialPoses",poses}}!=state->startParameters;}
+        catch(const std::exception&){recipeChanged=true;}
         ParameterChoices results;
         const auto graph = panel->GetContext().workflow.getPublishedGraph ? panel->GetContext().workflow.getPublishedGraph() : QJsonObject();
         for (const auto value : graph["nodes"].toArray()) {
@@ -219,7 +228,8 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             {"isOverlayVisible", current.isOverlayVisible},
             {"hasReference", state->reference.has_value()}, {"isReferenceCurrent", referenceCurrent},
             {"nominal", state->reference ? GetRefText(state->reference->nominal) : QString()},
-            {"hasRecipe", GetDataRevisionRefValid(state->recipe)}, {"hasResult", GetDataRevisionRefValid(state->result)},
+            {"hasRecipe", GetDataRevisionRefValid(state->recipe) && referenceCurrent}, {"hasResult", GetDataRevisionRefValid(state->result) && referenceCurrent},
+            {"recipeParametersChanged",recipeChanged},{"poseParametersChanged",poseChanged},{"targetSource",GetDataRevisionRefValid(desiredSource)?GetRefText(desiredSource):QString()},{"targetMesh",GetDataRevisionRefValid(desiredMesh)?GetRefText(desiredMesh):QString()},
             {"hasReadableResult", !results.isEmpty()},
             {"selectedResults", selectedResults},
             {"isResultCurrent", result && result->isCurrent}, {"isReviewed", state->isReviewed},

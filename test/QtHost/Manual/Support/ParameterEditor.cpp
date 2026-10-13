@@ -48,7 +48,7 @@ QJsonValue Shape(const QString& key)
     if (key == "nominal" || key == "minNormalCosine") return 0.;
     if (key == "worldCenter" || key == "seedModelPoint" || key == "targetNormal") return QJsonArray{0,0,0};
     if(key=="segmentFrom" || key=="segmentTo")return 0.0;
-    if (key == "extent" || key == "targetBounds") return QJsonArray{0,0,0,0,0,0};
+    if (key == "extent" || key == "targetBounds" || key=="sectionPlaneBounds") return QJsonArray{0,0,0,0,0,0};
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
     if (key == "dimensions") return QJsonArray{0,0,0};
@@ -56,6 +56,9 @@ QJsonValue Shape(const QString& key)
     if (key == "constantColor" || key == "lowColor" || key == "highColor"
         || key == "belowColor" || key == "aboveColor") return QJsonArray{0.7,0.7,0.7};
     if (key == "boxToSource") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (key == "centerMM") return QJsonArray{0,0,0};
+    if (key == "sizeMM") return QJsonArray{1,1,1};
+    if (key == "direction3D") return QJsonArray{1,0,0,0,1,0,0,0,1};
     if (key == "matrix") return QJsonArray{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (key == "directionLPS") return QJsonArray{1,0,0,0,1,0,0,0,1};
     if (key == "materialRange") return QJsonArray{0,1};
@@ -131,7 +134,7 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
         if(m_key=="name")m_title="区域名称";
         else if(m_key=="shape")m_title="区域形状";
         else if(m_key=="axis")m_title="柱轴（源模型坐标）";
-        else if(m_key=="center")m_title="区域中心（源模型坐标）";
+        else if(m_key=="centerMM")m_title="区域中心（源模型坐标）";
     }
     m_boolean = m_schema.isBool() || (m_schema.isNull() && Shape(m_key).isBool());
     setObjectName(m_key); setAccessibleName(m_title);
@@ -158,8 +161,8 @@ bool ParameterEditor::GetFieldApplicable(const QString& key) const
     if(m_key.isEmpty() && m_module=="Roi" && m_action=="Begin") {
         const auto shape=m_fields.find("shape");
         const auto selected=shape==m_fields.end()?QString("Box"):shape->second->GetValue().toString();
-        if(key=="boxToSource")return selected=="Box";
-        if(key=="center" || key=="radius")return selected!="Box";
+        if(key=="boxToSource" || key=="sizeMM" || key=="direction3D")return selected=="Box";
+        if(key=="radius")return selected!="Box";
         if(key=="axis" || key=="height")return selected=="Cylinder";
     }
     if (m_key.isEmpty() && m_module == "Surface" && key == "seedModelPoint") {
@@ -294,6 +297,14 @@ void ParameterEditor::SetRegionCreator(std::function<void()> onCreate)
             if (m_onCreateRegion) m_onCreateRegion();
         });
     }
+}
+void ParameterEditor::SetAllowedChoices(const ParameterChoices& choices)
+{
+    auto* input=qobject_cast<QComboBox*>(m_input);if(!input || m_type!=QJsonValue::String)return;
+    const auto current=input->currentData().toString();auto next=choices;
+    if(std::none_of(next.begin(),next.end(),[&](const auto& entry){return entry.first==current;}))next.append({current,"当前组合不支持："+current});
+    bool same=input->count()==next.size();for(int i=0;same && i<next.size();++i)same=input->itemData(i)==next[i].first && input->itemText(i)==next[i].second;
+    if(same)return;const QSignalBlocker blocker(input);input->clear();for(const auto& entry:next)input->addItem(entry.second,entry.first);input->setCurrentIndex(input->findData(current));
 }
 void ParameterEditor::SetValue(const QJsonValue& value)
 {
@@ -435,7 +446,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
     auto* layout = new QHBoxLayout(m_body); layout->setContentsMargins(0,0,0,0);
     auto choices = GetParameterChoices(m_module, m_key);
     if (m_module == "Alignment" && m_key == "kind") {
-        if (m_action == "InspectGeometry") choices = {{"Circle", "圆"}, {"Sphere", "球"}, {"Cylinder", "圆柱"}};
+        if (m_action == "InspectGeometry" || m_action=="InspectPair") choices = {{"Point","点"},{"Line","直线"},{"Plane","平面"},{"Circle", "圆"}, {"Sphere", "球"}, {"Cylinder", "圆柱"}};
         else if (value == "Hard" || value == "Soft" || value == "Check") choices = {{"Hard", "硬约束"}, {"Soft", "软约束"}, {"Check", "校验约束"}};
         else choices = {{"Point", "点"}, {"Line", "直线"}, {"Plane", "平面"}, {"Circle", "圆"}, {"Sphere", "球"}, {"Cylinder", "圆柱"}};
     }

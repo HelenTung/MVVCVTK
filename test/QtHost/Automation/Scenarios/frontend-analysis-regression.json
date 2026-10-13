@@ -1,0 +1,31 @@
+{
+  "schema":"qt-control-scenario-1",
+  "checkWindowStable":true,
+  "viewsVisible":true,
+  "viewLayout":"Inspection",
+  "steps":[
+    {"control":"businessPrimary","module":"Data","action":"Load","expectPrimaryAction":"Load","expectStatus":"Succeeded","parameters":{}},
+    {"control":"nextButton","module":"Surface","action":"Preview","parameterAction":"GlobalAutomatic","parameters":{"componentSelection":"All","initialIsoValue":null,"materialRange":null,"analysisRoi":""},"expectStatus":"Succeeded"},
+    {"control":"currentPrimary","module":"Surface","action":"Determine","expectPrimaryAction":"Determine","expectStatus":"Succeeded","saveAs":"formalA","expectState":{"parametersChanged":false},"showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/formal-A-statistics.json"},
+    {"control":"editParameters","module":"Surface","action":"GlobalAutomatic","parameters":{"componentSelection":"Largest"},"expectPrimaryAction":"Determine","expectState":{"parametersChanged":true}},
+    {"control":"nextButton","module":"Surface","action":"Preview","parameterAction":"GlobalAutomatic","expectStatus":"Succeeded","expectState":{"formalMesh":"$formalA.result.mesh","points":"$formalA.result.points","objectCount":"$formalA.result.objectCount","parametersChanged":true,"hasPreview":true},"stateAudit":"@Output/formal-A-preview-B.json","screenshot":"@Output/formal-A-preview-B.png"},
+    {"control":"actionButton","module":"Surface","action":"Stop","expectStatus":"Rejected","expectState":{"formalMesh":"$formalA.result.mesh","parametersChanged":true}},
+    {"control":"currentPrimary","module":"Surface","action":"Determine","expectPrimaryAction":"Determine","cancelAfterMs":200,"expectStatus":"Cancelled","expectState":{"formalMesh":"$formalA.result.mesh","parametersChanged":true},"stateAudit":"@Output/formal-A-after-cancelled-B.json"},
+    {"control":"currentPrimary","module":"Surface","action":"Determine","expectPrimaryAction":"Determine","expectStatus":"Succeeded","saveAs":"formalB","expectState":{"parametersChanged":false},"stateAudit":"@Output/formal-B.json"},
+    {"control":"currentPrimary","module":"Surface","action":"OpenAlignment","expectPrimaryAction":"OpenAlignment","expectStatus":"ParametersCopied"},
+    {"control":"checkPage","module":"Alignment","expectPrimaryAction":"ImportReference","expectState":{"targetMesh":"$formalB.result.mesh","hasRecipe":false,"hasResult":false},"stateAudit":"@Output/alignment-new-mesh-target.json"},
+    {"control":"businessPrimary","module":"Part","action":"Start","parameters":{"threshold":"$formalB.result.isoEstimate.iso","minPartVoxels":"1"},"expectPrimaryAction":"Start","expectStatus":"Succeeded","showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/part-volume-A.json"},
+    {"control":"editParameters","module":"Part","action":"Start","parameters":{"minPartVoxels":"100"},"expectPrimaryAction":"Start","expectState":{"parametersChanged":true}},
+    {"control":"currentPrimary","module":"Part","action":"Start","expectPrimaryAction":"Start","expectStatus":"Succeeded","expectState":{"parametersChanged":false},"showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/part-volume-B.json","screenshot":"@Output/parts-B.png"},
+    {"control":"businessPrimary","module":"Wall","action":"Start","parameters":{"directionCount":1},"expectPrimaryAction":"Start","expectStatus":"Succeeded","saveAs":"wall","showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/wall-area.json"},
+    {"control":"actionButton","module":"Wall","action":"KeepResult","parameters":{"graphRevision":"$wall.result.result"},"expectStatus":"Succeeded"},
+    {"control":"actionButton","module":"Wall","action":"SetEvaluation","parameters":{"lower":0,"upper":10,"histogramRange":[0,20]},"expectStatus":"Succeeded","showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/wall-evaluated.json"},
+    {"control":"actionButton","module":"Wall","action":"Result","parameters":{"result":"$wall.result.result"},"expectStatus":"Observed","expectState":{"viewedIsActive":false},"showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/wall-history-W1.json"},
+    {"control":"currentPrimary","module":"Wall","action":"ActivateViewed","expectPrimaryAction":"ActivateViewed","expectStatus":"Succeeded","expectState":{"viewedIsActive":true}},
+    {"control":"currentPrimary","module":"Wall","action":"LocateMinimum","expectPrimaryAction":"LocateMinimum","expectStatus":"Succeeded","screenshot":"@Output/wall-history-located.png"},
+    {"control":"businessPrimary","module":"Gap","action":"Start","parameters":{"isoMode":"AbsoluteValue","absoluteIsoValue":"$formalB.result.isoEstimate.iso","filter":false},"expectPrimaryAction":"Start","expectStatus":"Succeeded","showStatistics":true,"waitStatistics":true,"statisticsAudit":"@Output/gap-unfiltered.json"},
+    {"control":"editParameters","module":"Gap","action":"Start","parameters":{"filter":true,"minVolumeMM3":1000},"expectPrimaryAction":"Start","expectState":{"parametersChanged":true}},
+    {"control":"currentPrimary","module":"Gap","action":"Start","expectPrimaryAction":"Start","expectStatus":"Succeeded","expectState":{"parametersChanged":false,"isCurrent":true},"showStatistics":true,"waitStatistics":true,"statisticsAudit":"@Output/gap-filtered-empty.json","screenshot":"@Output/gap-filtered-empty.png"},
+    {"control":"currentPrimary","module":"Gap","action":"Defects","expectPrimaryAction":"Defects","expectStatus":"Observed","expectResult":{"page":{"offset":"0","next":"0","total":"0","rows":[]}}}
+  ]
+}

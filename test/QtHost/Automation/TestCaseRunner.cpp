@@ -185,6 +185,14 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     }
     return id;
 }
+std::uint64_t ClickCurrentPrimary(TestWindow& window,const QString& module,const QString& expected)
+{
+    auto* panel=window.GetModule(module);Check(panel && panel->isVisible(),"current primary uses the visible page without navigation");panel->Observe();
+    auto* button=panel->findChild<QPushButton*>("businessPrimary");
+    if(!button || !button->isEnabled() || button->property("businessAction")!=expected)std::cerr<<"CURRENT PRIMARY: expected="<<expected.toStdString()<<" actual="<<(button?button->property("businessAction").toString().toStdString():"missing")<<" parameterAction="<<panel->GetParameterAction().toStdString()<<" state="<<QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString()<<std::endl;
+    Check(button && button->isVisible() && button->isEnabled() && button->property("businessAction")==expected,"current primary presents the expected natural phase");
+    const auto id=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;button->click();return id;
+}
 std::uint64_t SendUnavailable(TestWindow& window, const QString& module, const QString& action)
 {
     auto* panel = window.GetModule(module); panel->Observe();
@@ -223,8 +231,8 @@ void CheckFourViewGeometry(TestWindow& window)
         // 奇数像素的等分最多有一个像素的取整差。
         return maxWidth-minWidth <= 1 && maxHeight-minHeight <= 1 && minWidth >= 160 && minHeight >= 160;
     };
-    Check(window.minimumSize()==original && window.maximumSize()==original,"manual window size is locked for all business pages");
-    Check(Wait(sameSize,3000),"four-view layout has equal image regions inside the fixed window");
+    Check(window.minimumSize()!=window.maximumSize(),"manual window has a resizable default size");
+    Check(Wait(sameSize,3000),"four-view layout has equal image regions inside the current window");
     const auto windows = window.GetSession()->GetRenderViewStates();
     auto* primary = window.findChild<QVTKOpenGLNativeWidget*>("primary3D");
     const auto primarySize = primary->size();
@@ -241,7 +249,7 @@ void CheckFourViewGeometry(TestWindow& window)
     if(window.height()>=900) {
         layoutChoice->setCurrentIndex(layoutChoice->findData("Inspection"));QCoreApplication::processEvents();
         Check(Wait([&]{return primary->width()>views[1]->width() && primary->height()>views[1]->height();},3000),"inspection layout gives the existing 3D viewport the main canvas");
-        Check(primary->renderWindow()==renderWindow && window.size()==original,"inspection layout preserves render identity and locked outer size");
+        Check(primary->renderWindow()==renderWindow && window.size()==original,"inspection layout preserves render identity and current outer size");
         layoutChoice->setCurrentIndex(layoutChoice->findData("FourViews"));QCoreApplication::processEvents();
     }
 }
@@ -276,7 +284,20 @@ void CheckUiAndRecords(TestWindow& window)
     auto* details = window.findChild<QWidget*>("diagnosticDetails");
     Check(diagnostics && details && details->isHidden() && window.findChild<QLabel*>("latestMessage")->isVisible(),
         "latest feedback stays visible while detailed diagnostics are collapsed");
-    diagnostics->click(); Check(details->isVisible(), "diagnostics reveal logs and measurements on demand"); diagnostics->click();
+    const auto compactSize=window.size();auto* workspace=window.findChild<QSplitter*>();const auto workspaceHeight=workspace->height();
+    diagnostics->click();const bool grewOutside=Wait([&]{return details->isVisible() && window.height()>compactSize.height() && std::abs(workspace->height()-workspaceHeight)<=1;},3000);
+    if(!grewOutside)window.grab().save("diagnostic-layout-failure.png");
+    else window.grab().save("diagnostics-expanded.png");
+    Check(grewOutside,QString("diagnostics grow outside: window %1 -> %2, workspace %3 -> %4, details %5").arg(compactSize.height()).arg(window.height()).arg(workspaceHeight).arg(workspace->height()).arg(details->height()).toStdString().c_str());diagnostics->click();Check(Wait([&]{return window.size()==compactSize;},3000),"closing diagnostics restores the prior outer height");
+    auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QWidget*>("objectColumn");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
+    const auto resized=compactSize+QSize(40,20);window.resize(resized);
+    Check(Wait([&]{return window.size()==resized;},3000),"user can resize the main window beyond its default size");
+    window.resize(compactSize);QCoreApplication::processEvents();window.grab().save("workbench-default.png");
+    window.showMaximized();Check(Wait([&]{return window.isMaximized();},3000),"main window can be maximized");QCoreApplication::processEvents();
+    const auto maximizedWorkspaceHeight=workspace->height();diagnostics->click();
+    Check(Wait([&]{return !window.isMaximized() && details->isVisible() && std::abs(workspace->height()-maximizedWorkspaceHeight)<=1;},3000),"diagnostics also grow outward from a maximized window");
+    diagnostics->click();Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
+    window.showNormal();window.resize(compactSize);QCoreApplication::processEvents();
     Check(window.findChild<QToolButton*>("testTools")->menu()->findChild<QAction*>("performanceCapture")
         && !window.findChild<QPushButton*>("stopCalculation")->isEnabled(), "diagnostic tools are grouped and idle stop is disabled");
     auto* open = window.findChild<QPushButton*>("openVolume");
@@ -410,7 +431,8 @@ void CheckSceneRefresh(TestWindow& window)
     const auto linear = GetGraphLayout({node("c", {"b"}), node("b", {"a"}), node("a", {})});
     Check(linear.lanes == 1 && linear.rows.size() == 3, "linear history uses exactly one graph lane");
     const auto branched = GetGraphLayout({node("merge", {"left", "right"}), node("left", {"base"}), node("right", {"base"}), node("base", {})});
-    Check(branched.lanes == 2 && branched.rows["merge"].strokes.size() == 2 && branched.rows["base"].strokes.size() == 1,
+    Check(branched.lanes > 1 && branched.edges.size()==4 && branched.edges.contains(QJsonObject{{"child","merge"},{"parent","left"}}) && branched.edges.contains(QJsonObject{{"child","merge"},{"parent","right"}})
+        && branched.edges.contains(QJsonObject{{"child","left"},{"parent","base"}}) && branched.edges.contains(QJsonObject{{"child","right"},{"parent","base"}}),
         "real split and merge retain both routes and converge on their shared parent");
     const auto ordinary = GetGraphLayout({QJsonObject{{"id", "views"}, {"children", QJsonArray{QJsonObject{{"id", "one"}}, QJsonObject{{"id", "two"}}}}}});
     Check(ordinary.rows.isEmpty(), "ordinary UI hierarchy is never mistaken for a business branch");
@@ -1126,6 +1148,9 @@ void CheckCropWorkflow(TestWindow& window)
         "reactivated crop document renders before history actions");
     GetComplete(window, SendUnavailable(window, "Crop", "BuildResult"), "Rejected");
     GetComplete(window, Click(window, "Crop", "Box"), "Succeeded");
+    auto* cropLayoutChoice=window.findChild<QComboBox*>("viewLayout");cropLayoutChoice->setCurrentIndex(cropLayoutChoice->findData("ThreeDOnly"));QCoreApplication::processEvents();
+    const auto cropViews=window.findChildren<QVTKOpenGLNativeWidget*>();
+    Check(cropLayoutChoice->currentData()=="FourViews" && std::all_of(cropViews.begin(),cropViews.end(),[](const auto* view){return view->isVisible();}),"crop editing restores visible frame guards when 3D-only layout is requested");
     GetComplete(window, Click(window, "Crop", "RemoveInside"), "Succeeded");
     GetComplete(window, Click(window, "Crop", "KeepInside"), "Succeeded");
     Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"crop mode changes settle before finishing editing");
@@ -1202,8 +1227,29 @@ void CheckCropWorkflow(TestWindow& window)
     GetComplete(window,Send(window,"Crop","PruneSubtree",{{"nodeId",pruneNode}}),"Rejected");
     GetComplete(window, Click(window, "Crop", "FinishEditing"), "PreviewConfirmed");
     Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"widget removal finishes rendering before publication");
-    const auto published = GetComplete(window, Send(window, "Crop", "BuildResult", {{"nodeId",currentNode}}), "Published")["result"].toObject();
+    auto published = GetComplete(window, Send(window, "Crop", "BuildResult", {{"nodeId",currentNode}}), "Published")["result"].toObject();
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "crop publish keeps source selected");
+    const auto firstOutput=published["output"].toString();
+    // 同源视图命中缓存；第二次发布仍须通过工作通知推进旧结果退休和提交。
+    GetComplete(window,Click(window,"Crop","Box"),"Succeeded");
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"new crop tool settles while the first output is retained");
+    QJsonArray secondBox;
+    for(int row=0;row<4;++row)for(int column=0;column<4;++column) {
+        double value=row==3 && column==3 ? 1.0 : 0.0;
+        if(row<3 && column<3)value=original.direction[row*3+column]*original.spacing[column]*(original.extent[column*2+1]-original.extent[column*2])*0.25;
+        if(row<3 && column==3){value=original.origin[row];for(int axis=0;axis<3;++axis)value+=original.direction[row*3+axis]*original.spacing[axis]*(original.extent[axis*2]+original.extent[axis*2+1])*0.5;}
+        secondBox.append(value);
+    }
+    GetComplete(window,Send(window,"Crop","AppendExact",{{"matrix",secondBox}}),"Succeeded");
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"new preview presents before its confirmation");
+    GetComplete(window,Click(window,"Crop","FinishEditing"),"PreviewConfirmed");
+    Check(Wait([&]{panel->Observe();return panel->GetObservedState()["framesReady"].toBool();}),"reconfirmed cached source views are ready before the second publication");
+    const auto combined=ClickCurrentPrimary(window,"Crop","BuildResult");
+    published=GetComplete(window,combined,"Published")["result"].toObject();
+    Check(Wait([&]{return !window.GetRecords().GetRecord(combined+1).isEmpty();},2000),"a publication's own source restore still dispatches automatic adoption");
+    GetComplete(window,combined+1,"Succeeded");
+    Check(published["output"].toString()!=firstOutput && GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision)==published["output"].toString(),
+        "repeated publication on cached source views adopts its exact new output through the natural primary");
     GetComplete(window, Click(window, "Crop", "SelectOutput"), "Succeeded");
     Check(GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision) == published["output"].toString(), "select uses exact published crop output");
     GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
@@ -1394,6 +1440,7 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     Check(evaluatedRoi.error==RoiError::None && evaluatedRoi.roi,"wall workflow saves an independent evaluation ROI");
     const auto local = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5},
         {"directionCount",1},{"evaluationRoi",GetRefText(evaluatedRoi.roi->revision)}}), "Succeeded");
+    GetComplete(window,Click(window,"Wall","KeepResult",{{"graphRevision",local["result"].toObject()["result"]}}),"Succeeded");
     Check(local["result"].toObject()["validCount"].toString().toULongLong()>0
         && local["result"].toObject()["algorithmVersion"]=="wall-thickness-cuda-gray-ray-field-4",
         "local gray wall measurement accepts component-filtered sampling seeds");
@@ -1417,7 +1464,13 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         "manual wall entry measures the known 8 mm slab and creates its 3D display");
     const auto queried = GetComplete(window, Click(window, "Wall", "Result"), "Observed")["result"].toObject();
     Check(queried["result"] == result["result"] && queried["sampleCount"] == result["sampleCount"], "wall query retains exact published result identity");
+    const auto inputBeforeHistory=window.GetSession()->GetImageDescriptor()->dataRevision;
+    const auto historical=local["result"].toObject()["result"].toString();GetComplete(window,Click(window,"Wall","Result",{{"result",historical}}),"Observed");
+    auto* historicalPage=window.GetModule("Wall");historicalPage->Observe();Check(historicalPage->GetObservedState()["viewedResult"]==historical,"history detail binds the selected result");
+    GetComplete(window,ClickCurrentPrimary(window,"Wall","ActivateViewed"),"Succeeded");
+    Check(window.GetSession()->GetImageDescriptor()->dataRevision==inputBeforeHistory,"activating a wall history result preserves the global image input");
     GetComplete(window, Click(window, "Wall", "SetEvaluation", {{"lower", 7.}, {"upper", 9.}, {"histogramRange", QJsonArray{0,24}}}), "Succeeded");
+    historicalPage->Observe();Check(historicalPage->GetObservedState()["viewedResult"]!=historical && historicalPage->GetObservedState()["viewedIsActive"].toBool(),"successful history evaluation selects its new result revision");
     for (const bool visible : {false, true}) GetComplete(window, Click(window, "Wall", "SetDisplay", {{"mode", "Tolerance"}, {"range", QJsonArray{0,24}}, {"isVisible", visible}}), "Succeeded");
     GetComplete(window, Click(window, "Wall", "SelectSample", {{"sampleIndex", "0"}}), "Succeeded");
     auto* wall = window.GetModule("Wall"); wall->Observe();
@@ -1427,7 +1480,7 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         "wall scene objects exclude the independent published-result catalog");
     window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); window.grab().save("wall-manual-ui.png");
     GetComplete(window, Click(window, "Wall", "Clear"), "Succeeded");
-    wall->Observe(); Check(!wall->GetObservedState()["hasResult"].toBool(), "wall clear removes the active result");
+    wall->Observe(); Check(wall->GetObservedState()["activeResult"].toString().isEmpty() && !wall->GetObservedState()["viewedIsActive"].toBool(), "wall clear removes activation while retained historical results remain readable");
 }
 void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& directory)
 {
@@ -1509,10 +1562,31 @@ void CheckSharedRoi(TestWindow& window)
     window.GetModule("Roi")->onStop();
     Check(window.GetWorkflow().roiConsumer.isEmpty(),"stopping the shared editor clears the old return destination");
 #if defined(MANUAL_CROP)
-    GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"PreviewConfirmed");
+    window.SetViewsVisible(true);window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});
+    auto* crop=window.GetModule("Crop");
+    const auto framesReady=[&]{crop->Observe();const auto state=crop->GetObservedState();return state["framesReady"].toBool() && !state["isBusy"].toBool() && state["appliedHead"]==state["renderedHead"];};
+    GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"ParametersCopied");
+    Check(Wait(framesReady),"formal ROI confirmation waits for actual crop frames");
+    GetComplete(window,Send(window,"Crop","FinishEditing"),"PreviewConfirmed");
     Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"preparing a saved ROI for crop preserves the source input");
-    window.GetModule("Crop")->SetParameterPatch("BuildResult",{{"inputRoi",""}});
+    crop->SetParameterPatch("BuildResult",{{"inputRoi",""}});
+    const auto document=crop->GetObservedState().value("documentId");
+    const auto root=crop->GetObservedState().value("appliedHead");
+    GetComplete(window,Send(window,"Crop","AppendExact",{{"matrix",GetValues(window.GetSession()->GetRoiDescriptor(ref)->definition.nodes.front().primitive.localToSource)}}),"Succeeded");
+    Check(Wait(framesReady),"interactive history is presented before switching to a formal ROI");
+    const auto historyOperations=crop->GetObservedState().value("operationCount");
+    const auto historyNodes=crop->GetObservedState().value("nodes");
+    Check(crop->GetObservedState()["appliedHead"]!=root,"history fixture selects a non-root crop node");
+    GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"ParametersCopied");
+    Check(Wait(framesReady),"formal ROI root selection reaches the displayed preview");
+    Check(crop->GetObservedState()["documentId"]==document && crop->GetObservedState()["operationCount"]==historyOperations && crop->GetObservedState()["nodes"]==historyNodes
+        && crop->GetObservedState()["appliedHead"]==root,"formal ROI selection preserves the document and history while selecting the build root");
+    GetComplete(window,Send(window,"Crop","FinishEditing"),"PreviewConfirmed");
+    const auto scope=crop->getGrayScope();
+    Check(scope.roi==ref && !scope.filter,"formal ROI statistics use the region without intersecting old crop history");
+    crop->SetParameterPatch("BuildResult",{{"inputRoi",""}});
     GetComplete(window,Send(window,"Crop","CloseDocument"),"Succeeded");
+    window.SetViewsVisible(false);
 #endif
     GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",true}}),"Succeeded");
     Check(GetRoiChoices(*window.GetSession(),source).size()==1
@@ -1529,12 +1603,16 @@ void CheckSharedRoi(TestWindow& window)
     for(int row=0;row<3;++row)for(int axis=0;axis<3;++axis)
         center[row]+=image->direction[row*3+axis]*image->spacing[axis]*(image->extent[axis*2]+image->extent[axis*2+1])*.5;
     for(const auto* shape:{"Sphere","Cylinder"}) {
-        GetComplete(window,Send(window,"Roi","Begin",{{"shape",shape},{"center",GetValues(center)},
+        GetComplete(window,Send(window,"Roi","Begin",{{"shape",shape},{"centerMM",GetValues(center)},
             {"radius",2.0},{"height",4.0}}),"Succeeded");
+        auto* roiPanel=window.GetModule("Roi");roiPanel->SetParameterPatch("SetDraft",{{"radius",3.0},{"group","曲面测试"}});roiPanel->Observe();
+        Check(roiPanel->GetObservedState()["draftParametersChanged"].toBool(),"curve geometry and metadata edits require applying the draft before save");
+        GetComplete(window,Send(window,"Roi","SetDraft"),"Succeeded");roiPanel->Observe();
+        Check(!roiPanel->GetObservedState()["draftParametersChanged"].toBool(),"applying curve geometry and metadata clears the dirty draft state");
         const auto curve=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
         const auto descriptor=window.GetSession()->GetRoiDescriptor(GetRef(curve));
         Check(descriptor && descriptor->definition.nodes.front().primitive.origin==center
-            && descriptor->definition.nodes.front().primitive.radius==2.0,"curve editor fields save the intended source-space geometry");
+            && descriptor->definition.nodes.front().primitive.radius==3.0 && descriptor->metadata.group=="曲面测试","curve editor fields save the intended source-space geometry");
     }
 #endif
 }
@@ -1615,7 +1693,7 @@ void StartSelfTest(TestWindow& window)
     const auto original = *window.GetSession()->GetImageDescriptor();
 #if defined(MANUAL_ALIGNMENT)
     if (GetEnabled(window, "Alignment")) {
-        const auto volume = GetComplete(window, Send(window, "Alignment", "EvaluateVoxelVolume", {
+        const QJsonValue volume = GetComplete(window, Send(window, "Alignment", "EvaluateVoxelVolume", {
             {"source", GetRefText(original.dataRevision)}, {"extent", QJsonArray{0,1,0,1,0,1}},
             {"storedValueRange", QJsonArray{0,1000}}, {"requireEnclosedSelection", false}}), "FullyDetermined").value("result").toObject().value("voxelVolume");
         const auto stats = GetComplete(window, Send(window, "Alignment", "VoxelVolumeResult", {{"voxelVolume", volume}}), "Observed")["result"].toObject();
@@ -1667,7 +1745,15 @@ void StartSelfTest(TestWindow& window)
     for (const auto id : burst) GetComplete(window, id, id == burst.back() ? "Succeeded" : "Failed");
     Check(window.GetUpdateCount() - burstStart < burst.size(), "burst notifications merge and every command retains its exact completion");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == 50.0, "burst keeps final requested view state");
-    GetComplete(window, Send(window, "View", "Set", {{"mode", "CompositeVolume"}}), "Succeeded");
+    GetComplete(window, Click(window, "View", "Set", {{"mode", "CompositeVolume"},{"opacity",0.8}}), "Succeeded");
+    Check(Wait([&]{view->Observe();return !view->GetObservedState()["parametersChanged"].toBool()
+        && view->GetObservedState()["appliedDisplay"].toObject()["mode"]=="CompositeVolume";}),
+        "applied volume settings stay clean when inapplicable ISO and window fields are omitted");
+    view->SetParameterPatch("Set",{{"opacity",0.6}});view->Observe();
+    Check(view->GetObservedState()["parametersChanged"].toBool(),"editing volume opacity marks the visible draft as unapplied");
+    GetComplete(window,ClickCurrentPrimary(window,"View","Set"),"Succeeded");
+    Check(Wait([&]{view->Observe();return !view->GetObservedState()["parametersChanged"].toBool();}),
+        "the natural primary clears the volume draft only after applying it");
     GetComplete(window, Send(window, "View", "Set", {{"mode", "CompositeIsoSurface"}}), "Succeeded");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == 50.0,
         "returning to isosurface preserves the explicitly supplied ISO");
@@ -1808,6 +1894,8 @@ void StartSelfTest(TestWindow& window)
     }
     if (GetEnabled(window, "Surface")) {
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic"), "Succeeded");
+        window.GetModule("Surface")->Observe();
+        Check(!window.GetModule("Surface")->GetObservedState()["parametersChanged"].toBool(),"a formal surface does not treat an inapplicable seed field as a changed parameter");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeVolume"}}), "Succeeded");
         GetComplete(window, SendUnavailable(window, "Surface", "CopyIsoToDisplay"), "Rejected");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
@@ -1853,6 +1941,24 @@ void StartSelfTest(TestWindow& window)
             GetComplete(window, Click(window, "Alignment", "ImportReference"), "ReferencePublished");
             GetComplete(window, Send(window, "Alignment", "SaveRecipe"), "FullyDetermined");
             GetComplete(window, Send(window, "Alignment", "Start"), "FullyDetermined");
+            const auto firstPoint=points[0].toObject();const auto secondPoint=points[second].toObject();
+            GetComplete(window,Click(window,"Alignment","InspectGeometry",{{"kind","Point"},{"vertexIds",QJsonArray{firstPoint["vertexId"]}},{"measurementMetric","CenterX"},{"nominal",origin[0]},{"nominalSource","合成夹具解析坐标"},{"deviationLimits",QJsonArray{-.0001,.0001}}}),"FullyDetermined");
+            const auto singleInspection=GetComplete(window,ClickCurrentPrimary(window,"Alignment","InspectionResult"),"Observed");Check(!singleInspection["result"].toObject()["items"].toArray().isEmpty(),"single geometry natural next action reads its own result");
+            const auto firstInspection=singleInspection["result"].toObject()["inspection"].toString();
+            GetComplete(window,Click(window,"Alignment","KeepResult",{{"graphRevision",firstInspection}}),"Succeeded");
+            const QJsonObject firstGeometry{{"kind","Point"},{"vertexIds",QJsonArray{firstPoint["vertexId"]}},{"targetBounds",QJsonValue()},{"targetDirection",QJsonArray{0,0,1}}};
+            auto secondGeometry=firstGeometry;secondGeometry["vertexIds"]=QJsonArray{secondPoint["vertexId"]};
+            GetComplete(window,Click(window,"Alignment","InspectPair",{{"first",firstGeometry},{"second",secondGeometry},{"measurementMetric","CenterDistance"},{"nominal",std::sqrt(squared(delta(second)))},{"nominalSource","合成夹具两点解析距离"},{"deviationLimits",QJsonArray{-.0001,.0001}}}),"FullyDetermined");
+            const auto pairInspection=GetComplete(window,ClickCurrentPrimary(window,"Alignment","InspectionResult"),"Observed");
+            const auto measuredItems=pairInspection["result"].toObject()["items"].toArray();Check(measuredItems.size()==1 && measuredItems[0].toObject()["verdict"]=="Pass","pair measurement reports the analytical nominal and tolerance in alignment length units");
+            const auto historyInspection=GetComplete(window,Click(window,"Alignment","InspectionResult",{{"inspection",firstInspection}}),"Observed");
+            Check(historyInspection["result"].toObject()["inspection"]==firstInspection && historyInspection["result"].toObject()["items"].toArray().size()==2,"historical inspection detail preserves I1 after I2 succeeds");
+            auto* inspectionPage=window.GetModule("Alignment");window.SetViewsVisible(true);QCoreApplication::processEvents();window.GetWorkflow().onShowStatistics("Alignment");inspectionPage->RefreshStatistics();
+            Check(inspectionPage->GetStatisticsWidget()->GetHistogram()["description"].toString().contains(firstInspection),"historical chart uses the same I1 as its detail");
+            const auto historyReportPath=directory.filePath("history-inspection-report.json");
+            GetComplete(window,Click(window,"Alignment","ExportReport",{{"outputPath",historyReportPath},{"inspection",firstInspection},{"deviation",QJsonValue()},{"voxelVolume",QJsonValue()},{"captureCurrentDisplay",false}}),"ReportExported");
+            const auto historyReports=LoadJson(historyReportPath)["inspections"].toArray();Check(historyReports.size()==1 && historyReports[0].toObject()["result"]==firstInspection,"report form exports the explicitly selected historical I1");
+            window.SetViewsVisible(false);
             GetComplete(window, Click(window, "Alignment", "Result"), "Observed");
             auto* resultTree = window.GetModule("Alignment")->GetCatalogTree();
             bool hasResidual = false;
@@ -1877,6 +1983,12 @@ void StartSelfTest(TestWindow& window)
         // 材料表面单独验证，不依赖可选对齐模块替它生成正式结果。
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0},
             {"materialRange", QJsonArray{0.,100.}}}), "Succeeded");
+#if defined(MANUAL_ALIGNMENT)
+        if(GetEnabled(window,"Alignment") && window.GetModule("Alignment")->GetObservedState()["hasReference"].toBool()) {
+            GetComplete(window,Click(window,"Surface","OpenAlignment"),"ParametersCopied");auto* alignmentPage=window.GetModule("Alignment");alignmentPage->Observe();
+            Check(!alignmentPage->GetObservedState()["isReferenceCurrent"].toBool() && !alignmentPage->GetObservedState()["hasRecipe"].toBool() && !alignmentPage->GetObservedState()["hasResult"].toBool(),"new formal mesh from the same image cannot inherit the old alignment recipe and result");
+        }
+#endif
         Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)),
             "material ISO publishes an independent formal measurement surface");
     }
@@ -2102,7 +2214,7 @@ QJsonObject CheckPartDisplay(TestWindow& window)
 void StartSequence(TestWindow& window, const QString& path)
 {
     const auto script = LoadJson(path);
-    const auto lockedSize=window.size();
+    const auto initialWindowSize=window.size();
     if(script["viewLayout"].isString()) {
         auto* choice=window.findChild<QComboBox*>("viewLayout");const auto index=choice->findData(script["viewLayout"].toString());
         if(index<0)throw std::invalid_argument("未知内部视图布局");choice->setCurrentIndex(index);QCoreApplication::processEvents();
@@ -2139,11 +2251,24 @@ void StartSequence(TestWindow& window, const QString& path)
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
-        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage") {
+        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage" && value.toObject()["control"]!="editParameters") {
             (void)getWaitMilliseconds(value.toObject());
             (void)GetExpectedStatuses(value.toObject());
         }
     if (script["viewsVisible"].isBool()) window.SetViewsVisible(script["viewsVisible"].toBool());
+    const auto checkObserved=[&](const QJsonObject& step) {
+        auto* panel=window.GetModule(GetText(step,"module"));
+        const auto expected=GetResolved(step["expectState"],results).toObject();QJsonObject actual;
+        // 请求终态可以早于 Host 提交场景；等待页面观察到实际提交值，保持原断言。
+        const bool settled=Wait([&] {
+            panel->Observe();actual=panel->GetObservedState();
+            for(auto it=expected.begin();it!=expected.end();++it)if(actual[it.key()]!=it.value())return false;
+            return true;
+        },std::min(getWaitMilliseconds(step),30000));
+        if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
+        for(auto it=expected.begin();it!=expected.end();++it)Check(actual[it.key()]==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
+        if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
+    };
     for (const auto value : script["steps"].toArray()) {
         const auto step = value.toObject();
         const auto params = GetResolved(step["parameters"], results).toObject();
@@ -2156,8 +2281,18 @@ void StartSequence(TestWindow& window, const QString& path)
             QApplication::sendEvent(tabs,&press);QMouseEvent release(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(tabs,&release);
             auto* page=window.GetModule(module);QCoreApplication::processEvents();page->Observe();
             Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt tab mouse event reveals the planned stage and primary");
-            Check(window.size()==lockedSize,"tab clicks preserve fixed outer window size");
+            Check(window.size()==initialWindowSize,"tab clicks preserve the current outer window size");
+            checkObserved(step);if(step.contains("expectPrimaryAction"))Check(page->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"current page presents the expected phase without selecting a form");
             if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"business page screenshot saved");
+            continue;
+        }
+        if(step["control"]=="editParameters") {
+            auto* panel=window.GetModule(GetText(step,"module"));Check(panel && panel->isVisible(),"editing targets the already visible business page");
+            const auto action=panel->GetParameterAction();if(step.contains("action"))Check(action==GetText(step,"action"),"editing preserves the currently selected form");
+            panel->SetParameterPatch(action,params);QCoreApplication::processEvents();panel->Observe();
+            if(step.contains("expectPrimaryAction"))Check(panel->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"edited current form changes its natural next action");
+            if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"edited business page screenshot saved");
+            checkObserved(step);
             continue;
         }
         if (step["generateKnownTransformReference"].toBool()) {
@@ -2195,23 +2330,33 @@ void StartSequence(TestWindow& window, const QString& path)
             << GetText(step,"action").toStdString() << " event=start utc=" << requestedUtc.toStdString() << std::endl;
         const auto control=step["control"].toString();
         std::uint64_t id=0;
-        if(control=="businessPrimary" || control=="nextButton") {
+        if(control=="businessPrimary" || control=="nextButton" || control=="currentPrimary") {
             const auto module=GetText(step,"module"),action=GetText(step,"action");auto* panel=window.GetModule(module);
             if(!panel)throw std::invalid_argument("脚本模块不存在");
             const auto parameterAction=step["parameterAction"].isString()?GetText(step,"parameterAction"):action;
-            window.GetWorkflow().onNavigate(module,parameterAction,params);QCoreApplication::processEvents();panel->Observe();
+            if(control=="currentPrimary") {Check(panel->isVisible(),"primary click targets the already visible page");Check(params.isEmpty(),"currentPrimary never injects parameters or navigation");}
+            else window.GetWorkflow().onNavigate(module,parameterAction,params);
+            QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
-            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="businessPrimary" ? "businessPrimary" : "next_"+action);return button && button->isVisible() && button->isEnabled();},std::min(timeout,30000));
+            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},std::min(timeout,30000));
             if(!available)std::cout << "CONTROL BLOCKED: " << module.toStdString() << "." << action.toStdString()
                 << " tooltip=" << (button ? button->toolTip().toStdString() : "missing control") << " state="
                 << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
             Check(available,"actual stage primary is visible and enabled");
             if(step["expectPrimaryAction"].isString())Check(button->property("businessAction").toString()==step["expectPrimaryAction"].toString(),"stage primary matches the planned business phase");
             id=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+            std::cout<<"PRIMARY CLICK: "<<module.toStdString()<<"."<<action.toStdString()<<" record="<<id<<std::endl;
             button->click();
+            std::cout<<"PRIMARY RETURN: "<<module.toStdString()<<"."<<action.toStdString()<<std::endl;
+            const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},2000);
+            if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
+                <<" primary="<<button->property("businessAction").toString().toStdString()<<" enabled="<<button->isEnabled()
+                <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+                <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+            Check(dispatched,"primary click creates the actual operation record");
         } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
-        else throw std::invalid_argument("control 仅支持 businessPrimary、nextButton、actionButton、checkPage");
+        else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、checkPage");
         QTimer switching, cancellation;
         int switchCount = 0;
         if (step["switchFeaturesWhilePending"].toBool()) {
@@ -2239,7 +2384,15 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto record = GetComplete(window, id, {}, static_cast<int>(timeout));
         // 合法终态集合只描述可观测结局；实际质量状态仍完整保留在 record 中。
         Check(expected.contains(record["status"].toString()), ("expected terminal status " + expected.join(" / ")).toStdString().c_str());
+        const auto expectedResult=GetResolved(step["expectResult"],results).toObject();
+        for(auto field=expectedResult.begin();field!=expectedResult.end();++field)
+            Check(record["result"].toObject()[field.key()]==field.value(),("business result matches "+field.key()).toStdString().c_str());
+        checkObserved(step);
         if(step.contains("expectFollowupStatus")) {
+            const bool followed=Wait([&]{return !window.GetRecords().GetRecord(id+1).isEmpty();},2000);
+            if(!followed)std::cerr<<"FOLLOWUP MISSING: "<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+                <<" state="<<GetJsonText(window.GetModule(GetText(step,"module"))->GetObservedState()).toStdString()<<std::endl;
+            Check(followed,"combined primary dispatches its real follow-up transaction");
             const auto followup=GetComplete(window,id+1,GetText(step,"expectFollowupStatus"),timeout);
             Check(followup["action"]=="UseData","combined primary uses the real input adoption request");
             if(step["expectAdoptPublished"].toBool()) {
@@ -2247,13 +2400,13 @@ void StartSequence(TestWindow& window, const QString& path)
                 Check(!output.isEmpty() && GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision)==output,"script adopts the precise result published by this primary");
             }
         }
-        if(script["checkWindowLocked"].toBool())Check(window.size()==lockedSize && window.minimumSize()==lockedSize && window.maximumSize()==lockedSize,"script operation preserves the locked main window size");
+        if(script["checkWindowStable"].toBool() || script["checkWindowLocked"].toBool())Check(window.size()==initialWindowSize,"business operations preserve the user-selected outer window size");
         if(step["showStatistics"].toBool()) {
             auto* panel=window.GetModule(GetText(step,"module"));window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();
             if(step["waitHistogram"].toBool())Check(Wait([&]{return !panel->GetStatisticsWidget()->GetHistogram()["counts"].toArray().isEmpty();},timeout),"real statistics histogram completes its bounded data read");
             if(step["waitStatistics"].toBool())Check(Wait([&]{const auto data=panel->GetStatisticsWidget()->GetHistogram();return data["cacheKey"].isString() && !data["description"].toString().contains("正在读取");},timeout),"real statistics completes including a valid empty result");
             if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),panel->GetStatisticsWidget()->GetHistogram());
-            if(step.contains("statisticsScreenshot"))Check(window.findChild<QDialog*>("businessStatisticsDialog")->grab().save(GetText(step,"statisticsScreenshot")),"actual statistics controls are captured");
+            if(step.contains("statisticsScreenshot"))Check(panel->GetStatisticsWidget()->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
             // 关闭统计窗口后继续操作视图，避免弹窗覆盖正在等待呈现的裁剪视图。
             window.findChild<QDialog*>("businessStatisticsDialog")->close();QCoreApplication::processEvents();
         }
@@ -2359,7 +2512,7 @@ void StartSequence(TestWindow& window, const QString& path)
             ExportJson(GetText(spec,"path"),CheckPartEditPreview(window,spec));
         }
         if (step.contains("expectPartCount")) {
-            const auto count = record["result"].toObject()["partCount"];
+            const QJsonValue count = record["result"].toObject()["partCount"];
             Check((count.isString() ? GetId(count) : static_cast<std::uint64_t>(count.toInt())) == static_cast<std::uint64_t>(step["expectPartCount"].toInt()),
                 "formal catalog has the expected part count");
         }
@@ -2423,16 +2576,21 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         if (step.contains("screenshot")) {
             window.GetWorkflow().onNavigate(GetText(step, "module"), GetText(step, "action"), {});
-            Check(Wait([&] { for (const auto& view : window.GetSession()->GetSceneViewStates())
-                if (window.GetWorkflow().getViewRenderPending && window.GetWorkflow().getViewRenderPending(view.id)) return false;
+            std::cout<<"CAPTURE: waiting for visible views"<<std::endl;
+            Check(Wait([&] { for (const auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if(widget->isVisible()) {
+                const auto id=widget->objectName()=="primary3D"?QString("primary-3d"):widget->objectName();
+                if (window.GetWorkflow().getViewRenderPending && window.GetWorkflow().getViewRenderPending(id.toStdString())) return false;
+                }
                 return true; }, static_cast<int>(timeout)), "visible real-data views finish requested rendering before capture");
             QCoreApplication::processEvents();
             // 直接读取已完成的视图帧；截图不依赖顶层窗口再触发交换信号。
             for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
+                std::cout<<"CAPTURE: reading "<<widget->objectName().toStdString()<<std::endl;
                 const auto frame = widget->grabFramebuffer();
                 Check(!frame.isNull() && frame.size() == widget->size() * widget->devicePixelRatioF(),
                     "visible view framebuffer is readable at its current size");
             }
+            std::cout<<"CAPTURE: saving window"<<std::endl;
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
         }
         if (step["checkViewLayout"].toBool()) CheckFourViewGeometry(window);

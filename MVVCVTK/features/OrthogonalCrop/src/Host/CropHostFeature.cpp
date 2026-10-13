@@ -880,6 +880,8 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
             value->blockers = started.blockers;
             return value;
         }
+        // 缓存命中的源视图没有 worker 完成事件，安排下一次 owner 更新推进发布。
+        (void)m_host->SendWorkAvailable();
         return std::nullopt;
     }
     const PublishGuard publishGuard(m_isPublishing);

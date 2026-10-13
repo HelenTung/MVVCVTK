@@ -28,6 +28,10 @@ bool IsDisplayFieldApplicable(HostRenderMode mode, const QString& key, bool prim
     if (key == "windowLevel") return !volume && !iso;
     return true;
 }
+QString ModeName(HostRenderMode mode)
+{
+    switch(mode){case HostRenderMode::Volume:return "Volume";case HostRenderMode::CompositeVolume:return "CompositeVolume";case HostRenderMode::IsoSurface:return "IsoSurface";case HostRenderMode::CompositeIsoSurface:return "CompositeIsoSurface";case HostRenderMode::SliceTopDown:return "SliceTopDown";case HostRenderMode::SliceFrontBack:return "SliceFrontBack";case HostRenderMode::SliceLeftRight:return "SliceLeftRight";}return {};
+}
 bool IsApplicable(HostRenderMode mode, std::uint32_t bit)
 {
     const bool slice = mode == HostRenderMode::SliceTopDown || mode == HostRenderMode::SliceFrontBack || mode == HostRenderMode::SliceLeftRight;
@@ -205,7 +209,24 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
             const bool available = std::any_of(targets.begin(), targets.end(), [&](const auto& target) { return IsApplicable(target.viewMode, entry.second); });
             visibility->GetField(entry.first)->SetAppliedBoolean(GetVisibility(targets, entry.second), context, available ? QString() : "当前视图模式不支持此项");
         }
-        panel->SetState({{"views", views}, {"displayMode", int(effectiveMode)}, {"displayView", viewId}});
+        bool dirty=false;QJsonArray markers;QJsonObject appliedValues;
+        if(applied)try {
+            const auto p=display->GetValue().toObject();
+            const auto specified=[&](const char* key){return p.contains(key) && !p[key].isNull();};
+            dirty=(specified("mode") && GetMode(p)!=applied->viewMode)
+                || (specified("iso") && GetNumber(p,"iso")!=applied->isoThreshold)
+                || (specified("opacity") && GetNumber(p,"opacity")!=applied->material.opacity)
+                || (specified("axes") && GetBool(p,"axes")!=applied->isAxesVisible);
+            if(specified("quality"))dirty=dirty || GetEnum<HostVolumeQuality>(p,"quality",{{"Auto",HostVolumeQuality::Auto},{"Low",HostVolumeQuality::Low},{"High",HostVolumeQuality::High},{"XHigh",HostVolumeQuality::XHigh},{"Ultra",HostVolumeQuality::Ultra}})!=applied->volumeQuality;
+            if(specified("windowLevel")){const auto window=GetArray<double,2>(p["windowLevel"]);dirty=dirty || window[0]!=applied->windowLevel.windowWidth || window[1]!=applied->windowLevel.windowCenter;}
+            QJsonArray colors,opacities;for(const auto& node:applied->volumeTransferFunction.colorNodes)colors.append(QJsonArray{node.scalar,node.r,node.g,node.b});for(const auto& node:applied->volumeTransferFunction.opacityNodes)opacities.append(QJsonArray{node.scalar,node.opacity});
+            const QJsonObject transfer{{"colorNodes",colors},{"opacityNodes",opacities}};if(specified("transfer"))dirty=dirty || p["transfer"].toObject()!=transfer;
+            appliedValues={{"mode",ModeName(applied->viewMode)},{"iso",applied->isoThreshold},{"windowLevel",QJsonArray{applied->windowLevel.windowWidth,applied->windowLevel.windowCenter}},{"transfer",transfer}};
+            if(ModeName(effectiveMode).contains("IsoSurface")){markers.append(QJsonObject{{"label","已应用 ISO"},{"value",applied->isoThreshold}});if(specified("iso"))markers.append(QJsonObject{{"label","草稿 ISO"},{"value",p["iso"]}});}
+            else if(ModeName(effectiveMode).startsWith("Slice")){const auto width=applied->windowLevel.windowWidth,center=applied->windowLevel.windowCenter;markers.append(QJsonObject{{"label","窗口下界"},{"value",center-width*0.5}});markers.append(QJsonObject{{"label","窗口上界"},{"value",center+width*0.5}});}
+            else for(const auto& node:applied->volumeTransferFunction.opacityNodes)markers.append(QJsonObject{{"label","传递节点"},{"value",node.scalar}});
+        }catch(const std::exception&){dirty=true;}
+        panel->SetState({{"views", views}, {"displayMode", int(effectiveMode)}, {"displayModeName",ModeName(effectiveMode)}, {"displayView", viewId},{"parametersChanged",dirty},{"appliedDisplay",appliedValues},{"displayMarkers",markers}});
     };
     return panel;
 }

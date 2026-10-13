@@ -30,6 +30,7 @@ public:
     void SetDefaultValue(const QJsonValue& value);
     void SetReferenceChoices(const ParameterChoices& choices);
     void SetRegionCreator(std::function<void()> onCreate);
+    void SetAllowedChoices(const ParameterChoices& choices);
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
     std::function<void()> onEdited;

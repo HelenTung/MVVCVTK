@@ -46,6 +46,7 @@ ModulePanel* CreateRotationTest(TestContext context, std::shared_ptr<ModelRotati
         QJsonObject summary{{"status", static_cast<int>(state.status)}, {"isEnabled", state.isEnabled}, {"undoCount", QString::number(state.undoCount)}};
         summary["isBusy"] = state.status == ModelRotationStatus::Pending || state.status == ModelRotationStatus::Dragging;
         summary["isInvalidated"] = state.status == ModelRotationStatus::Invalidated;
+        summary["requestedEnabled"]=panel->GetActionParameters("SetEnabled")["isEnabled"];
         if (panel->GetContext().workflow.getViewTransforms)
             summary["projection"]=panel->GetContext().workflow.getViewTransforms();
         panel->SetState(summary);

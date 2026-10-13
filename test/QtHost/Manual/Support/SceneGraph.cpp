@@ -11,27 +11,34 @@
 namespace Manual {
 GraphLayout GetGraphLayout(const QJsonArray& nodes)
 {
-    // 每组由 CatalogNodes 保证子修订在前、父修订在后；不同组不建立连线。
+    // 按真实父关系连接每组已显示的节点，列表可为父先子后或子先父后。
     GraphLayout result;
     const std::function<void(const QJsonArray&)> visit = [&](const QJsonArray& values) {
-        QSet<QString> remaining;
-        for (const auto value : values) if (value.toObject().contains("parents")) remaining.insert(value.toObject()["id"].toString());
-        QStringList lanes;
-        auto freeLane = [&] { int lane = lanes.indexOf(QString()); if (lane < 0) { lane = lanes.size(); lanes.append(QString()); } return lane; };
+        QHash<QString,int> positions;QVector<QString> ids;
+        for(const auto value:values)if(value.toObject().contains("parents")){const auto id=value.toObject()["id"].toString();positions[id]=ids.size();ids.append(id);}
         for (const auto value : values) {
             const auto node = value.toObject(); const auto id = node["id"].toString();
             if (node.contains("parents")) {
                 GraphRow row; row.current = node["current"].toBool(); row.pending = node["pending"].toBool();
-                row.lane = lanes.indexOf(id); if (row.lane < 0) row.lane = freeLane();
-                for (int lane = 0; lane < lanes.size(); ++lane) if (!lanes[lane].isEmpty()) row.strokes.push_back({lane, lane, true});
-                lanes[row.lane].clear(); remaining.remove(id);
-                for (int lane = 0; lane < lanes.size(); ++lane) if (!lanes[lane].isEmpty()) row.strokes.push_back({lane, lane, false});
+                result.rows.insert(id,std::move(row));
+            }
+        }
+        QVector<int> laneEnds;
+        for(const auto value:values) {
+            const auto node=value.toObject();const auto id=node["id"].toString();
+            if(node.contains("parents")) {
                 for (const auto parent : node["parents"].toArray()) {
-                    const auto ref = parent.toString(); if (!remaining.contains(ref)) continue;
-                    int lane = lanes.indexOf(ref); if (lane < 0) { lane = freeLane(); lanes[lane] = ref; }
-                    row.strokes.push_back({row.lane, lane, false});
+                    const auto ref=parent.toString();if(!positions.contains(ref) || ref==id)continue;
+                    const auto first=std::min(positions[id],positions[ref]),last=std::max(positions[id],positions[ref]);
+                    result.edges.append(QJsonObject{{"child",id},{"parent",ref}});
+                    if(last==first+1){result.rows[ids[first]].strokes.push_back({0,0,false});result.rows[ids[last]].strokes.push_back({0,0,true});continue;}
+                    int index=0;while(index<laneEnds.size() && laneEnds[index]>=first)++index;
+                    if(index==laneEnds.size())laneEnds.append(last);else laneEnds[index]=last;
+                    const int lane=index+1;result.lanes=std::max(result.lanes,lane+1);
+                    result.rows[ids[first]].strokes.push_back({0,lane,false});
+                    for(int row=first+1;row<last;++row){result.rows[ids[row]].strokes.push_back({lane,lane,true});result.rows[ids[row]].strokes.push_back({lane,lane,false});}
+                    result.rows[ids[last]].strokes.push_back({lane,0,true});
                 }
-                result.lanes = std::max(result.lanes, lanes.size()); result.rows.insert(id, std::move(row));
             }
             visit(node["children"].toArray());
         }

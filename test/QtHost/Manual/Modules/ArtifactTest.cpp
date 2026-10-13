@@ -55,14 +55,10 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
 {
     auto* panel = new ModulePanel(context, "Artifact", parent);
     panel->SetNotice("处理轴使用网格轴，环形中心使用截面索引。计算候选 → 发布校正结果 → 使用校正数据。灰度统计变化不能单独证明校正保真。");
-    struct Pending { std::uint64_t operation = 0; DataRevisionRef source; DataRevisionRef output; };
+    struct Pending { std::uint64_t operation = 0,binding=0; DataRevisionRef source; DataRevisionRef output; ArtifactInputMode mode=ArtifactInputMode::CurrentPrimary; QString action; QJsonObject parameters; };
     auto pending = std::make_shared<Pending>();
     const auto defaults = GetJson(R"({"source":"current","processingRoi":"","protectionRoi":"","qualityRoi":"","timeoutMs":null,"ring":{"axis":2,"centerIndex":null,"threshMin":0,"threshMax":1,"threshold":1,"angularMin":30,"ringWidth":3,"mode":"Wrap","strength":1,"maxCorrection":1},"diffusion":{"iterations":4,"threshold":1,"factor":0.25,"slabDepth":8}})");
-    for (const QString combination : {QString("Ring"), QString("Diffusion"), QString("Combined")}) {
-        auto parameters = defaults;
-        if (combination == "Ring") parameters.remove("diffusion");
-        if (combination == "Diffusion") parameters.remove("ring");
-        panel->AttachAction(combination, parameters, [panel, feature, pending, combination](auto id, const auto& p) {
+    const auto prepare=[panel,feature,pending](std::uint64_t id,const QJsonObject& p,const QString& combination) {
             ArtifactRequest prepare;
             if (GetText(p, "source") == "current") {
                 const auto descriptor = panel->GetSession()->GetImageDescriptor();
@@ -99,12 +95,22 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
             QJsonObject detail{{"workingBudgetBytes", QString::number(panel->GetContext().workflow.resources.workingBytes)}, {"publishBudgetBytes", QString::number(panel->GetContext().workflow.resources.publishBytes)}};
             if (prepare.ring) detail["ringCenterIndex"] = GetValues(prepare.ring->centerIndex);
             const auto admission = feature->SendRequest(std::move(request));
-            if (admission.error == ArtifactError::None) { pending->operation = id; pending->source = prepare.source; pending->output = {}; }
+            if (admission.error == ArtifactError::None) { pending->operation = id; pending->source = prepare.source; pending->output = {};pending->mode=prepare.inputMode;pending->action=combination;pending->parameters=p;
+                const auto input=panel->GetSession()->GetImageDescriptor();pending->binding=input?input->bindingRevision:0; }
             detail["errorCode"] = static_cast<int>(admission.error); detail["message"] = GetArtifactErrorText(admission.error);
             detail["requestId"] = QString::number(admission.requestId);
             panel->SetAdmission(id, admission.error == ArtifactError::None, detail);
-        }, TestPolicy::Compute, true);
+    };
+    for (const QString combination : {QString("Ring"), QString("Diffusion"), QString("Combined")}) {
+        auto parameters=defaults;if(combination=="Ring")parameters.remove("diffusion");if(combination=="Diffusion")parameters.remove("ring");
+        panel->AttachAction(combination,parameters,[prepare,combination](auto id,const auto& p){prepare(id,p,combination);},TestPolicy::Compute,true);
     }
+    panel->AttachAction("Recompute",{},[panel,feature,pending,prepare](auto id,const auto&) {
+        if(pending->action.isEmpty())throw std::invalid_argument("没有可重新计算的候选方法");
+        const auto params=pending->parameters;ArtifactHostRequest discard;discard.action=ArtifactAction::Discard;
+        const auto admission=feature->SendRequest(discard);if(admission.error!=ArtifactError::None){panel->SetComplete(id,"Rejected",GetArtifact(feature->GetState()));return;}
+        prepare(id,params,pending->action);
+    },TestPolicy::Compute,true);
     for (const auto& action : std::vector<std::pair<QString, ArtifactAction>>{
         {"Cancel", ArtifactAction::Cancel}, {"Discard", ArtifactAction::Discard}, {"Commit", ArtifactAction::Commit}}) {
         panel->AttachAction(action.first, action.second == ArtifactAction::Commit ? QJsonObject{{"requestId", "current"}} : QJsonObject{},
@@ -134,9 +140,11 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
         const auto input = panel->GetSession()->GetImageDescriptor();
         summary["isBusy"] = state.status == ArtifactStatus::Running || state.status == ArtifactStatus::Cancelling;
         summary["hasCandidate"] = state.status == ArtifactStatus::Ready;
-        summary["isCandidateCurrent"] = input && input->dataRevision == pending->source;
-        summary["source"] = GetRefText(pending->source); summary["output"] = GetRefText(pending->output);
-        summary["canSelectOutput"] = input && GetDataRevisionRefValid(pending->output) && input->dataRevision == pending->source;
+        summary["isCandidateCurrent"] = pending->mode==ArtifactInputMode::ExplicitRevision ? panel->GetSession()->GetImageDescriptor(pending->source).has_value()
+            : input && input->dataRevision == pending->source && input->bindingRevision==pending->binding;
+        summary["source"] = GetDataRevisionRefValid(pending->source)?GetRefText(pending->source):QString(); summary["output"] = GetDataRevisionRefValid(pending->output)?GetRefText(pending->output):QString();
+        summary["candidateMode"]=pending->mode==ArtifactInputMode::CurrentPrimary?"CurrentPrimary":"ExplicitRevision";summary["candidateBindingRevision"]=QString::number(pending->binding);
+        summary["canSelectOutput"] = input && GetDataRevisionRefValid(pending->output) && input->dataRevision != pending->output;
         summary["isOutputCurrent"] = input && GetDataRevisionRefValid(pending->output) && input->dataRevision == pending->output;
         summary["displayedVolume"] = input ? GetRefText(input->dataRevision) : QString();
         QJsonArray views;

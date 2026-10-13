@@ -48,6 +48,7 @@ public:
     // 仅记录编辑工具的返回位置；区域仍由 Host 目录拥有。
     QJsonObject roiConsumer;
     std::function<void(const QString&)> onShowStatistics;
+    std::function<void()> ensureCropViews;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
     std::function<bool(const std::string&)> getRenderPending;
     std::function<bool(const std::string&)> getViewRenderPending;

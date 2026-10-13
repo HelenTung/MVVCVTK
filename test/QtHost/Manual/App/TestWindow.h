@@ -39,6 +39,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
 private:
     void AppendLog(const QString& message);
+    void ShowMessage(const QString& message);
     void UpdateMeasurements();
     void QueueObserve();
     void SetWorkspace(int index);
@@ -65,9 +66,11 @@ private:
     QStringList m_workspaceSelections{"Data", "Artifact", "Alignment"};
     QGridLayout* m_viewGrid = nullptr;
     QWidget* m_viewArea = nullptr;
-    QLabel* m_status = nullptr;
     QLabel* m_inputIdentity = nullptr;
     QLabel* m_inputGeometry = nullptr;
+    QLabel* m_messageData = nullptr;
+    QPushButton* m_sourceButton = nullptr;
+    QString m_inputSummary;
     QLabel* m_measurements = nullptr;
     QLabel* m_latestMessage = nullptr;
     QPlainTextEdit* m_log = nullptr;
@@ -77,6 +80,7 @@ private:
     bool m_closeRetryQueued = false;
     bool m_isReady = false;
     bool m_isClosing = false;
+    QMap<QString,bool> m_statisticsPreferences;
     QString m_failure;
 };
 }
