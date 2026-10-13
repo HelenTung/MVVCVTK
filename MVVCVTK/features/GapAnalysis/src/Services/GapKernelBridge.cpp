@@ -32,11 +32,8 @@ bool GetRequestValid(const GapKernelRequest* request)
         || !std::isfinite(request->backgroundMean)
         || !std::isfinite(request->materialMean)
         || !std::isfinite(request->isoThreshold)
-        || !std::isfinite(request->minVolumeMM3)
         || request->backgroundMean > request->materialMean
-        || request->minVolumeMM3 < 0.0f
-        || request->numberRuns <= 0
-        || request->isFilterEnabled > 1U) {
+        || request->numberRuns <= 0) {
         return false;
     }
 
@@ -299,8 +296,8 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
         analysisRequest.params.seedStrategy = DefXSeed_LocalMinima;
         analysisRequest.params.numberRuns = request->numberRuns;
         analysisRequest.filter = FilterCriteria{};
-        analysisRequest.filter.enabled = request->isFilterEnabled != 0U;
-        analysisRequest.filter.minVolume = request->minVolumeMM3;
+        // DefX 只输出原始检测批次；Gap 在自己的结果阶段统一执行尺寸筛选。
+        analysisRequest.filter.enabled = false;
 
         auto labelData = std::make_shared<GapLabelData>();
         auto& analysis = labelData->analysis;
@@ -312,7 +309,6 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             << " | background=" << request->backgroundMean
             << " | material=" << request->materialMean
             << " | iso=" << request->isoThreshold
-            << " | filter=" << request->isFilterEnabled
             << '\n' << std::flush;
         const auto analysisStart = std::chrono::steady_clock::now();
         const bool isAnalyzed = analysis.SetInputImage(inputImage)

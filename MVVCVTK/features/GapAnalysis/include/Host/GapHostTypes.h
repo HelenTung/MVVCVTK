@@ -47,9 +47,9 @@ struct GapSurfaceConfig {
 };
 
 struct GapVoidParams {
-    // 显式控制 DefX 过滤；关闭时 minVolumeMM3 不参与筛选。
+    // 显式控制 Gap 结果的最小体积筛选；关闭时 minVolumeMM3 不参与筛选。
     bool isFilterEnabled = false;
-    // DefX 最小缺陷体积，单位 mm^3。
+    // 最小缺陷体积，单位 mm^3；保留体积大于或等于此值的检测区域。
     double minVolumeMM3 = 0.00;
 };
 

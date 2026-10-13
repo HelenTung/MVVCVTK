@@ -241,8 +241,9 @@ private:
         const GapKernelResultView* result,
         void* context) noexcept;
     bool BuildResultPayload(
-        const KernelBatch& batch,
+        KernelBatch& batch,
         vtkImageData* inputImage,
+        const GapVoidParams& voidParams,
         GapAnalysisResult& result) const;
     bool GetRequestValid(
         const GapSurfaceConfig& surface,
@@ -1366,7 +1367,7 @@ void GapAnalysisService::Impl::StartWorker(
                 && !m_isStopping.load();
 
             // 2. bridge 在自己的 DLL 内完成唯一一次 DefX 调用；同步 callback
-            // 直接形成最终 label image，并复制小得多的 header/region。
+            // 形成原始 label image，并复制小得多的 header/region。
             // DefX 没有取消入口，因此这里只能在调用前后观察停止标志。
             const bool hasKernelResult = hasKernelInput
                 && BuildKernelResult(
@@ -1376,11 +1377,12 @@ void GapAnalysisService::Impl::StartWorker(
                     batch)
                 && !m_isStopping.load();
 
-            // 3. Feature 只验证并投影供应商 DTO；不得再执行阈值、腐蚀、连通域、过滤或重编号。
+            // 3. 验证原始 DTO 后，Gap 按自身尺寸条件选择结果；保留供应商检测值和区域编号。
             hasPayload = hasKernelResult
                 && BuildResultPayload(
                     batch,
                     kernelImage,
+                    params.voidParams,
                     result)
                 && !m_isStopping.load();
         }
@@ -1972,10 +1974,7 @@ bool GapAnalysisService::Impl::BuildKernelResult(
     request.backgroundMean = params.surfParams.background;
     request.materialMean = params.surfParams.material;
     request.isoThreshold = params.surfParams.isoValue;
-    request.minVolumeMM3 = static_cast<float>(
-        params.voidParams.minVolumeMM3);
     request.numberRuns = 1;
-    request.isFilterEnabled = params.voidParams.isFilterEnabled ? 1U : 0U;
 
     const auto kernelPath = GetKernelPath();
     if (!kernelPath) {
@@ -2047,8 +2046,9 @@ bool GapAnalysisService::Impl::BuildKernelResult(
     return isBuilt;
 }
 bool GapAnalysisService::Impl::BuildResultPayload(
-    const KernelBatch& batch,
+    KernelBatch& batch,
     vtkImageData* inputImage,
+    const GapVoidParams& voidParams,
     GapAnalysisResult& result) const
 {
     result = {};
@@ -2283,18 +2283,49 @@ bool GapAnalysisService::Impl::BuildResultPayload(
         return false;
     }
 
+    const auto sourceObjectVoxelCount = totalVoxelCount - voidVoxelCount;
     candidate.labelImage = batch.labelImage;
-    candidate.statistics.objectVoxelCount =
-        static_cast<std::size_t>(
-            totalVoxelCount - voidVoxelCount);
-    candidate.statistics.voidVoxelCount =
-        static_cast<std::size_t>(voidVoxelCount);
-    candidate.statistics.objectVolumeMM3 =
-        static_cast<double>(batch.header.materialVolumeMM3);
-    candidate.statistics.voidVolumeMM3 =
-        static_cast<double>(batch.header.defectVolumeMM3);
-    candidate.statistics.porosityRatio =
-        static_cast<double>(batch.header.defectVolumeRatio);
+    if (voidParams.isFilterEnabled) {
+        const auto removed = std::remove_if(candidate.voids.begin(), candidate.voids.end(),
+            [&](const auto& region) { return region.volumeMM3 < voidParams.minVolumeMM3; });
+        if (removed != candidate.voids.end()) {
+            candidate.voids.erase(removed, candidate.voids.end());
+            std::unordered_set<std::int32_t> keptIds;
+            voidVoxelCount = 0;
+            for (const auto& region : candidate.voids) {
+                keptIds.insert(region.id);
+                voidVoxelCount += static_cast<std::uint64_t>(region.voxelCount);
+            }
+            auto selectedLabels = vtkSmartPointer<vtkImageData>::New();
+            selectedLabels->CopyStructure(batch.labelImage);
+            candidate.labelImage = nullptr;
+            // 全部排除时先释放原始标签 owner，再分配零标签，避免叠加两份整卷标签。
+            if (keptIds.empty()) batch.labelImage = nullptr;
+            selectedLabels->AllocateScalars(VTK_INT, 1);
+            auto* selected = static_cast<int*>(selectedLabels->GetScalarPointer());
+            if (!selected) return false;
+            for (std::size_t index = 0; index < static_cast<std::size_t>(voxelCount); ++index) {
+                if ((index & 4095U) == 0U && m_isStopping.load()) return false;
+                selected[index] = keptIds.empty() ? 0 : keptIds.count(labels[index]) ? labels[index] : 0;
+            }
+            selectedLabels->Modified();
+            candidate.labelImage = std::move(selectedLabels);
+        }
+    }
+    candidate.statistics.objectVoxelCount = static_cast<std::size_t>(sourceObjectVoxelCount);
+    candidate.statistics.voidVoxelCount = static_cast<std::size_t>(voidVoxelCount);
+    candidate.statistics.objectVolumeMM3 = static_cast<double>(batch.header.materialVolumeMM3);
+    // 未筛选时保留原始统计；开启时统计与选中区域、标签和后续网格使用同一集合。
+    if (voidParams.isFilterEnabled) {
+        double selectedVolume = 0;
+        for (const auto& region : candidate.voids) selectedVolume += region.volumeMM3;
+        candidate.statistics.voidVolumeMM3 = selectedVolume;
+        candidate.statistics.porosityRatio = candidate.statistics.objectVolumeMM3 > 0
+            ? selectedVolume / candidate.statistics.objectVolumeMM3 : 0;
+    } else {
+        candidate.statistics.voidVolumeMM3 = static_cast<double>(batch.header.defectVolumeMM3);
+        candidate.statistics.porosityRatio = static_cast<double>(batch.header.defectVolumeRatio);
+    }
     result = std::move(candidate);
     return true;
 }
