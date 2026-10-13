@@ -8,6 +8,7 @@
 #include <vtkRenderWindow.h>
 #include <thread>
 #include "MVVCVTK/features/MetrologyAlignment/src/AlignmentDeviation.h"
+#include "MVVCVTK/features/MetrologyAlignment/src/AlignmentSurfaceSamples.h"
 #include "MVVCVTK/features/GapAnalysis/include/Render/GapDisplayData.h"
 #ifdef ROI_TEST_WALL
 #include "MVVCVTK/features/WallThickness/src/ThicknessAlgorithm.h"
@@ -30,6 +31,7 @@ void Metrology(){Fixture f;const auto roi=f.Box();AlignmentWork work;work.input.
     work.referenceMesh=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,1.5,7,0,1.5,0,7,1.5},std::vector<std::uint64_t>{0,1,2});work.rois.emplace(roi->GetRevision(),roi);
     AlignmentRegion region;region.pinnedMesh=work.input.mesh;region.roi=roi->GetRevision();const auto samples=AlignmentGeometryFit::BuildSamples(work,region,alignmentIdentity);
     Require(samples.points.size()>=3,"geometry fit missed ROI inside a large triangle");for(const auto& p:samples.points)Require(roi->GetContains(p),"geometry fit sample is outside ROI");
+    auto explicitRegion=region;explicitRegion.vertexIds={0,1,2};work.recipe.surfaceFit=AlignmentSurfaceFit{};work.recipe.surfaceFit->sourceRegion=explicitRegion;bool empty=false;try{(void)AlignmentSurfaceSampling::Build(work,alignmentIdentity,0,false);}catch(const std::invalid_argument&){empty=true;}Require(empty,"surface fitting ignored the explicit vertex selection while applying ROI");work.recipe.surfaceFit.reset();
     AlignmentDeviationRequest request;request.alignmentResult=Ref(92);request.reverseCoverage=false;request.maxDistance=3;request.evaluationRoi=roi->GetRevision();
     const auto result=AlignmentDeviation::Build(work,request,alignmentIdentity);Require(result.status==AlignmentStatus::FullyDetermined && result.forward,"deviation ROI computation failed");
     Require(result.forward->originalVertexCount==3 && result.forward->samples.size()>3 && std::abs(result.forward->statistics.selectedArea-.16)<1e-10 && std::abs(result.forward->statistics.mean-.5)<1e-10,"ROI deviation lost fragment area or complete reference support");

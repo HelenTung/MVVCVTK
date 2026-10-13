@@ -56,6 +56,7 @@ QJsonObject WriteRegion(const AlignmentRegion& region)
 }
 void SetRegionRoi(AlignmentRegion& region, DataRevisionRef roi, DataRevisionRef mesh)
 {
+    if(!GetDataRevisionRefValid(roi) || !GetDataRevisionRefValid(mesh))throw std::invalid_argument("区域或网格修订无效");
     if(GetDataRevisionRefValid(region.pinnedMesh) && region.pinnedMesh!=mesh)
         throw std::invalid_argument("顶点选区与区域筛选的网格修订不一致");
     region.pinnedMesh=mesh;region.roi=roi;

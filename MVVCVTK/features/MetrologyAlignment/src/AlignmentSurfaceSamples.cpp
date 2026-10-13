@@ -54,7 +54,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         throw std::length_error("Surface selection size accounting overflows.");
     AlignmentSurfaceSamples output;
     auto &samples = output.points;
-    if (region && region->roi) {
+    if (region && region->roi && region->vertexIds.empty()) {
         Require(region->pinnedMesh==work.input.mesh,"ROI surface sampling belongs to another mesh revision.");
         const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");
         const auto roi=found->second;const auto inverse=Inverse(region->meshToRoi);const auto& triangles=work.mesh->GetTriangles();
@@ -82,6 +82,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         if (i % 256 == 0) CheckWork(work);
         const auto id = region && !region->vertexIds.empty() ? region->vertexIds[i] : i;
         Require(id < v.size() / 3, "Surface selection is out of bounds.");
+        if(region && region->roi){const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");if(!found->second->GetContains(Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}))))continue;}
         if (region && region->targetBounds) {
             const auto p = Transform(initial, {v[3 * id], v[3 * id + 1], v[3 * id + 2]});
             bool inside = true;
