@@ -62,8 +62,8 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_nextActions = new QWidget(this); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); layout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
-        Observe(); const auto step=GetBusinessStep(m_name,m_observed,GetDescriptor(GetSession()->GetImageDescriptor()),m_parameterAction);
-        if (!step.action.isEmpty()) SendBusinessAction(step.action,step.usesOutput);
+        Observe();const auto action=m_primary->property("businessAction").toString();
+        if (!action.isEmpty() && m_primary->isEnabled()) SendBusinessAction(action,m_primary->property("usesOutput").toBool());
         } catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}
     });
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
@@ -227,6 +227,8 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         auto* card = new QGroupBox(GetParameterSectionText(m_name, name), m_parameterScroll); card->setObjectName("card_" + name); card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         auto* layout = new QVBoxLayout(card); layout->setSpacing(10); layout->setContentsMargins(12,18,12,12);
         form->onEdited = [this, name] {
+            if(name=="GraphInfo")m_sourceRoot.clear();
+            m_parameterAction=name;
             if (m_currentAction != name) { m_currentAction = name; if (onMessage) onMessage(GetDisplayName() + " · " + GetActionDescription(m_name, name)); }
             Observe();
         };
@@ -355,6 +357,7 @@ void ModulePanel::SetNode(QTreeWidgetItem* item)
         }
     }
     m_node = node;
+    m_sourceRoot.clear();
     for (auto it = patches.begin(); it != patches.end(); ++it) if (m_entries.count(it.key())) SetParameterPatch(it.key(), it.value().toObject());
     if (onMessage) onMessage("选中：" + selectedText + (m_node["description"].toString().isEmpty() ? QString() : " ｜ " + m_node["description"].toString()));
     const auto actions = m_node["actions"].toArray();
@@ -595,7 +598,7 @@ QString ModulePanel::GetActionGroup(const QString& action) const
         if (action.startsWith("Export") && action.endsWith("Template")) return "参考模板";
         if (QStringList{"ImportReference", "SaveRecipe", "Activate", "Deactivate"}.contains(action)) return "参考准备";
         if (QStringList{"Start", "ApplyModelPose", "Cancel"}.contains(action)) return "对齐与应用";
-        if (QStringList{"InspectSection", "InspectGeometry", "InspectionResult"}.contains(action)) return "尺寸检测";
+        if (QStringList{"InspectSection", "InspectGeometry", "InspectPair", "InspectionResult"}.contains(action)) return "尺寸检测";
         if (QStringList{"ImportNominalMesh", "EvaluateSurface", "DeviationResult", "SetDeviationDisplay"}.contains(action)) return "表面偏差";
         if (QStringList{"Visibility", "Result", "SetSceneDisplay"}.contains(action)) return "显示与结果";
         if (QStringList{"EvaluateVoxelVolume", "VoxelVolumeResult"}.contains(action)) return "体素统计";
@@ -681,6 +684,7 @@ void ModulePanel::SetParameters(const QString& action, const QJsonObject& values
 void ModulePanel::SetParameterPatch(const QString& action, const QJsonObject& patch)
 {
     if (!m_entries.count(action)) throw std::invalid_argument("参数目标不存在");
+    if(action=="GraphInfo" && patch.contains("graphRevision"))m_sourceRoot.clear();
     m_currentAction = action;
     if (auto* form = GetParameterEditor(action)) {
         if (form->GetHasInputs()) m_parameterAction = action;

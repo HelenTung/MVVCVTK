@@ -74,16 +74,19 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     auto* panel = new ModulePanel(context, "Part", parent);
     panel->observeInBackground = true;
     auto preview = std::make_shared<PartPreviewDisplay>();
+    auto segmentationParameters=std::make_shared<QJsonObject>();
     panel->SetNotice("先分割生成零件，再选择零件进行属性设置、涂绘、拆分或合并；编辑候选需确认后才替换正式结果。等值面显示零件表面，体渲染保留灰度背景。种子使用体素索引，笔刷点和半径以毫米计。");
-    panel->AttachAction("Start", GetJson(R"({"threshold":null,"minPartVoxels":"1"})"), [panel, feature, preview](auto id, const auto& params) {
+    panel->AttachAction("Start", GetJson(R"({"threshold":null,"minPartVoxels":"1"})"), [panel, feature, preview,segmentationParameters](auto id, const auto& params) {
         const auto source = panel->GetSession()->GetImageDescriptor();
         if (!source) throw std::invalid_argument("请先选择体数据输入");
         const auto threshold = GetInputNumber(params, "threshold", GetScalarMidpoint(*source));
         PartSegmentationRequest request; request.action = PartSegmentationAction::Start;
         request.start = PartSegmentationStartParams{GetPartViews(), threshold, GetId(params["minPartVoxels"])};
         const QPointer<ModulePanel> owner(panel);
-        const auto admission = feature->SendRequest(std::move(request), [owner, id, preview, threshold](PartSegmentationResult result) {
+        const auto normalized=QJsonObject{{"source",GetRefText(source->dataRevision)},{"threshold",threshold},{"minPartVoxels",QString::number(GetId(params["minPartVoxels"]))}};
+        const auto admission = feature->SendRequest(std::move(request), [owner, id, preview, threshold,segmentationParameters,normalized](PartSegmentationResult result) {
             if (owner) {
+                if(result.status==PartResultStatus::Succeeded || result.status==PartResultStatus::SucceededWithDisplayFailure)*segmentationParameters=normalized;
                 if (result.status == PartResultStatus::Succeeded) preview->RetryFailed();
                 auto detail = GetPartResult(result);
                 detail["threshold"] = threshold;
@@ -170,6 +173,7 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
     });
     AttachPartEditActions(panel, feature);
     panel->onStatistics=[panel,feature] {
+        if(panel->GetObservedState()["parametersChanged"].toBool())return false;
         const auto catalog=feature->GetPartSetSnapshot();if(!catalog)return false;
         const auto input=panel->GetSession()->GetImageDescriptor();if(!input || catalog->sourceRevision!=input->dataRevision || catalog->isStale)return false;
         auto* widget=panel->GetStatisticsWidget();const auto key=GetRefText(catalog->sourceRevision)+":"+QString::number(catalog->catalogRevision);
@@ -180,9 +184,11 @@ ModulePanel* CreatePartTest(TestContext context, std::shared_ptr<PartSegmentatio
             "来源 "+GetRefText(catalog->sourceRevision)+" · 标签目录修订 "+QString::number(catalog->catalogRevision)+" · 全量正式零件；不替换灰度输入","体积 / mm³","零件数量"));
         return true;
     };
-    panel->onObserve = [panel, feature, preview] {
+    panel->onObserve = [panel, feature, preview,segmentationParameters] {
         auto summary = GetCatalog(*feature);
         const auto input = panel->GetSession()->GetImageDescriptor();
+        try {const auto p=panel->GetActionParameters("Start");summary["parametersChanged"]=input && !segmentationParameters->isEmpty() && QJsonObject{{"source",GetRefText(input->dataRevision)},{"threshold",GetInputNumber(p,"threshold",GetScalarMidpoint(*input))},{"minPartVoxels",QString::number(GetId(p["minPartVoxels"]))}}!=*segmentationParameters;}
+        catch(const std::exception&){summary["parametersChanged"]=true;}
         if (input) panel->GetParameterEditor("Start")->GetField("threshold")->SetDefaultValue(GetScalarMidpoint(*input));
         summary["hasCurrentParts"] = summary["hasCurrentParts"].toBool() && input && GetRefText(input->dataRevision) == summary["source"].toString();
         const auto catalog = feature->GetPartSetSnapshot();

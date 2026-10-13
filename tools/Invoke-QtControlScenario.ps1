@@ -2,7 +2,7 @@
 .SYNOPSIS
 在 Qt 进程内模拟真实控件点击，运行阶段主动作脚本并保存记录。
 .DESCRIPTION
-InputParameters 为 Data.Load 参数 JSON。窗口不抢占桌面焦点，尺寸固定。
+InputParameters 为 Data.Load 参数 JSON。窗口在独立后台桌面运行，业务切换保持当前尺寸。
 真实数据只证明所覆盖操作链；名义参考及物理精度验收由独立输入和参考确定。
 #>
 [CmdletBinding()]

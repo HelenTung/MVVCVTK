@@ -12,6 +12,8 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     std::shared_ptr<RoiEditingHostFeature> editor)
 {
     auto* panel = new ModulePanel(context, "Data", parent);
+    struct Activation { std::uint64_t event=0,binding=0; DataRevisionRef target,acceptedBeforeLoad; };
+    auto activation=std::make_shared<Activation>();
 #if defined(MANUAL_ROI)
     if (!editor) throw std::invalid_argument("数据测试入口缺少组合的 ROI 编辑器");
     panel->AttachAction("EditRoiBox",{{"matrix",GetValues(roiIdentityMatrix)}},[panel,editor](auto id,const auto& p){
@@ -31,7 +33,10 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
 #endif
     panel->SetNotice("RAW 使用原生字节序的 32 位浮点数据，X 轴变化最快。几何输入采用 LPS，数据描述采用 RAS；修订编号使用字符串。");
     panel->AttachAction("Load", GetJson(R"({"filePath":"","datasetId":"","dimensions":null,"spacingLPS":[1,1,1],"originLPS":[0,0,0],"directionLPS":[1,0,0,0,1,0,0,0,1],"sourceDigest":"","evidenceKind":"unconfigured"})"),
-        [panel](auto id, const auto& params) {
+        [panel,activation](auto id, const auto& params) {
+            activation->event=id;activation->target={};
+            const auto before=panel->GetSession()->GetStateSnapshot();activation->acceptedBeforeLoad=before?before->load.acceptedRevision:DataRevisionRef{};
+            const auto input=panel->GetSession()->GetImageDescriptor();activation->binding=input?input->bindingRevision:0;
             FeatureTestOptions options;
             const auto path = GetText(params, "filePath");
             if (!QFileInfo::exists(path)) throw std::invalid_argument("输入文件不存在");
@@ -51,13 +56,15 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
             request.metadata.attributes.push_back({"manual.evidence", GetText(params, "evidenceKind").toStdString()});
             panel->SendHost(id, std::move(request));
         }, TestPolicy::Input, true);
-    panel->AttachAction("ActivateAccepted", {}, [panel](auto id, const auto&) {
+    panel->AttachAction("ActivateAccepted", {}, [panel,activation](auto id, const auto&) {
         const auto snapshot = panel->GetSession()->GetStateSnapshot();
         if (!snapshot || !GetDataRevisionRefValid(snapshot->load.acceptedRevision))
             throw std::invalid_argument("没有已接纳的数据可激活");
         HostLoadActivationRequest request;
-        request.dataRevision = snapshot->load.acceptedRevision;
+        request.dataRevision = GetDataRevisionRefValid(activation->target)?activation->target:snapshot->load.acceptedRevision;
         request.expectedBindingRevision = snapshot->load.activeBindingRevision;
+        activation->event=id;activation->target=request.dataRevision;
+        const auto input=panel->GetSession()->GetImageDescriptor();activation->binding=input?input->bindingRevision:0;
         panel->SendHost(id, std::move(request));
     }, TestPolicy::Input, true);
     panel->AttachAction("Descriptor", {}, [panel](auto id, const auto&) {
@@ -126,7 +133,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
             panel->SetComplete(id, "MaskPublished", {{"mask", GetRefText(mask)},
                 {"source", GetRefText(descriptor->dataRevision)}, {"validationRoute", "trusted-input"}});
         }, TestPolicy::Compute, true);
-    panel->onObserve = [panel] {
+    panel->onObserve = [panel,activation] {
         auto* load = panel->GetParameterEditor("Load");
         try { load->GetField("dimensions")->SetDefaultValue(GetValues(GetInputDimensions(load->GetField("filePath")->GetValue().toString(),QJsonValue()))); }
         catch (const std::exception&) { load->GetField("dimensions")->SetDefaultValue(QJsonArray{0,0,0}); }
@@ -138,6 +145,16 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
             state["acceptedRevision"] = GetRefText(snapshot->load.acceptedRevision);
             state["activeRevision"] = GetRefText(snapshot->load.activeRevision);
             state["activationPhase"] = static_cast<int>(snapshot->load.status);
+            const auto event=panel->GetContext().records.GetRecord(activation->event);
+            const bool failed=event["isTerminal"].toBool() && event["status"]=="Failed";
+            // 加载失败只有当本次事件确实接纳了新修订，才能重试其激活。
+            if(failed && event["action"]=="Load" && snapshot->load.status==DataLoadStatus::Failed
+                && GetDataRevisionRefValid(snapshot->load.requestedRevision) && snapshot->load.requestedRevision==snapshot->load.acceptedRevision
+                && activation->acceptedBeforeLoad!=snapshot->load.acceptedRevision)activation->target=snapshot->load.requestedRevision;
+            const auto input=panel->GetSession()->GetImageDescriptor();
+            state["activationFailed"] = failed && (input?input->bindingRevision:0)==activation->binding && GetDataRevisionRefValid(activation->target)
+                && panel->GetSession()->GetImageDescriptor(activation->target).has_value();
+            state["activationTarget"] = GetDataRevisionRefValid(activation->target)?GetRefText(activation->target):QString();
         }
         panel->SetState(state);
     };

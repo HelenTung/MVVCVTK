@@ -9,7 +9,7 @@
 #include <cmath>
 namespace Manual {
 namespace {
-QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature)
+QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature,QJsonObject& formalStatistics)
 {
     const auto state = feature->GetState();
     QJsonObject summary{{"stage", static_cast<int>(state.stage)}, {"failureReason", static_cast<int>(state.failureReason)},
@@ -19,6 +19,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
         {"lowContrastPoints", QString::number(state.lowContrastPointCount)}, {"rejectedPoints", QString::number(state.rejectedPointCount)},
         {"truncatedPoints", QString::number(state.truncatedPointCount)}, {"error", QString::fromStdString(state.errorMessage)}};
     summary["purpose"] = static_cast<int>(state.purpose);
+    summary["taskDiagnostics"]=QJsonObject{{"points",summary["points"]},{"acceptedPoints",summary["acceptedPoints"]},{"rejectedPoints",summary["rejectedPoints"]},{"purpose",summary["purpose"]}};
     const auto describeEstimate=[](const SurfaceIsoEstimate& value) {
         QJsonObject result{{"iso",value.isoValue},{"samples",QString::number(value.sampleCount)},{"isAutomatic",value.sampleCount>0}};
         if(value.sampleCount){result["background"]=value.backgroundValue;result["material"]=value.materialValue;}
@@ -28,10 +29,16 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     if (state.isoEstimate) summary["isoEstimate"] = describeEstimate(*state.isoEstimate);
     const auto preview = feature->GetPreviewSnapshot();
     summary["previewRequestId"] = preview ? QString::number(preview->requestId) : QString();
+    summary["previewPoints"]=preview && preview->points?QString::number(preview->points->size()):QString();
     // 只在当前调用范围持有正式网格；预览和估计不替换正式结果身份。
     const auto snapshot = feature->GetSurfaceSnapshot();
     if (!snapshot) return summary;
     summary["mesh"] = GetRefText(snapshot->meshRevision);
+    summary["formalSource"]=GetRefText(snapshot->sourceRevision);
+    summary["points"]=snapshot->points?QString::number(snapshot->points->size()):QString();
+    if(state.purpose==SurfaceTaskPurpose::Determine && state.requestId==snapshot->requestId)
+        formalStatistics={{"mesh",summary["mesh"]},{"acceptedPoints",QString::number(state.acceptedPointCount)},{"lowContrastPoints",QString::number(state.lowContrastPointCount)},{"rejectedPoints",QString::number(state.rejectedPointCount)},{"truncatedPoints",QString::number(state.truncatedPointCount)}};
+    for(const auto* key:{"acceptedPoints","lowContrastPoints","rejectedPoints","truncatedPoints"})summary[key]=formalStatistics["mesh"]==summary["mesh"]?formalStatistics[key]:QJsonValue();
     summary["method"] = static_cast<int>(snapshot->method);
     if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = describeEstimate(*snapshot->isoEstimate);
     QJsonArray objects;
@@ -44,7 +51,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
         if (objects.size() >= 256) break;
     }
     summary["objects"] = objects;
-    summary["objectCount"] = static_cast<int>(state.objectCount);
+    summary["objectCount"] = snapshot->objects?static_cast<int>(snapshot->objects->size()):0;
     summary["objectSummaryLimit"] = 256;
     return summary;
 }
@@ -55,8 +62,9 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     panel->SetNotice("选择体数据后，阈值留空时由当前表面算法估计背景/材料峰；显式阈值或材料范围直接按所填值处理。继续执行真实表面定位和质量检查，定位稳定性不等于计量不确定度。");
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"minimumObjectVoxels":"0"})");
     auto requestedParameters=std::make_shared<QJsonObject>();
+    auto formalStatistics=std::make_shared<QJsonObject>();
     {
-        const auto send=[panel, feature,requestedParameters](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
+        const auto send=[panel, feature,requestedParameters,formalStatistics](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
             SurfaceDeterminationStartParams start;
             start.purpose=purpose;
             start.targetViews = GetAllViews();
@@ -78,9 +86,10 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
             SurfaceStartRequest request{start};
             const QPointer<ModulePanel> owner(panel);
-            const auto admission = feature->SendRequest(std::move(request), [owner, feature, id](SurfaceDeterminationResult result) {
+            const auto admission = feature->SendRequest(std::move(request), [owner, feature, id,requestedParameters,params,purpose,formalStatistics](SurfaceDeterminationResult result) {
                 if (!owner) return;
-                auto summary = GetSurface(feature);
+                if(result.status==SurfaceResultStatus::Succeeded && purpose==SurfaceTaskPurpose::Determine)*requestedParameters=params;
+                auto summary = GetSurface(feature,*formalStatistics);
                 summary["status"] = static_cast<int>(result.status);
                 summary["message"] = QString::fromStdString(result.message);
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
@@ -88,7 +97,6 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             });
             panel->SetAdmission(id, admission.status == SurfaceAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
-            if(admission.status==SurfaceAdmissionStatus::Accepted)*requestedParameters=params;
         };
         panel->AttachAction("GlobalAutomatic",parameters,[send](auto id,const auto& p){send(id,p,SurfaceTaskPurpose::Determine);},TestPolicy::Compute,true);
         for(const auto& action:std::vector<std::pair<QString,SurfaceTaskPurpose>>{{"Preview",SurfaceTaskPurpose::Preview},{"Determine",SurfaceTaskPurpose::Determine}})
@@ -208,9 +216,10 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->SetComplete(id,"Exported",{{"points",QString::number(i)},{"triangles",QString::number(snapshot->triangleIndices?snapshot->triangleIndices->size()/3:0)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"objects",objects},{"coordinateFrame",QString::fromStdString(snapshot->coordinateFrame)}});
     },TestPolicy::Read);
 #if defined(MANUAL_ALIGNMENT)
-    panel->AttachAction("OpenAlignment", {}, [panel](auto id, const auto&) {
-        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("Alignment", "ImportReference", {});
-        panel->SetComplete(id, "ParametersCopied", {{"message", "已进入计量对齐，请导入与当前测量表面对应的名义参考"}});
+    panel->AttachAction("OpenAlignment", {}, [panel,feature](auto id, const auto&) {
+        const auto surface=feature->GetSurfaceSnapshot();if(!surface)throw std::invalid_argument("正式测量表面不可用");
+        if (panel->GetContext().workflow.onNavigate) panel->GetContext().workflow.onNavigate("Alignment", "ImportReference", {{"source",GetRefText(surface->sourceRevision)},{"mesh",GetRefText(surface->meshRevision)}});
+        panel->SetComplete(id, "ParametersCopied", {{"source",GetRefText(surface->sourceRevision)},{"mesh",GetRefText(surface->meshRevision)},{"message", "已带入正式网格；请准备该目标的名义参考"}});
     }, TestPolicy::Read);
 #endif
 #if defined(MANUAL_WALL)
@@ -226,7 +235,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     },TestPolicy::Read);
 #endif
     panel->observeInBackground = true;
-    panel->onObserve = [panel, feature,requestedParameters] {
+    panel->onObserve = [panel, feature,requestedParameters,formalStatistics] {
         const auto image = panel->GetSession()->GetImageDescriptor();
         if (image) {
             auto* form = panel->GetParameterEditor("GlobalAutomatic");
@@ -238,7 +247,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             form->GetField("initialIsoValue")->SetDefaultValue(range[0] * 0.5 + range[1] * 0.5);
             form->GetField("materialRange")->SetDefaultValue(GetValues(image->scalarRange));
         }
-        auto summary = GetSurface(feature);
+        auto summary = GetSurface(feature,*formalStatistics);
         const auto state = feature->GetState();
         const auto snapshot = feature->GetSurfaceSnapshot();
         const auto input = panel->GetSession()->GetImageDescriptor();
@@ -257,7 +266,24 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         const auto displayKey = hasPreview ? QString::number(preview->requestId) : summary["mesh"].toString();
         panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasMesh"].toBool() ? QJsonValue(state.isOverlayVisible) : QJsonValue(), displayKey, summary["hasMesh"].toBool() ? QString() : "当前没有可用表面");
         summary["hasMeasurement"] = measured;
-        try {summary["parametersChanged"]=!requestedParameters->isEmpty() && panel->GetActionParameters("GlobalAutomatic")!=*requestedParameters;}
+        summary["isFormalCurrent"]=current;
+        try {
+            const auto draft=panel->GetActionParameters("GlobalAutomatic");
+            QJsonObject formal=*requestedParameters;
+            if(snapshot) {
+                const auto& p=snapshot->requestedParams;
+                formal["componentSelection"]=p.componentSelection==SurfaceComponentSelection::Largest?"Largest":p.componentSelection==SurfaceComponentSelection::Seeded?"Seeded":"All";
+                formal["initialIsoValue"]=p.initialIsoValue?QJsonValue(*p.initialIsoValue):QJsonValue();
+                formal["materialRange"]=p.materialRange?QJsonValue(GetValues(*p.materialRange)):QJsonValue();
+                if(p.componentSelection==SurfaceComponentSelection::Seeded)formal["seedModelPoint"]=p.seedModelPoint?QJsonValue(GetValues(*p.seedModelPoint)):QJsonValue();
+                else formal.remove("seedModelPoint");
+                formal["minimumObjectVoxels"]=QString::number(p.minimumObjectVoxels);
+                if(!p.analysisRoi)formal["roiModelBounds"]=QJsonValue();
+                summary["formalMesh"]=GetRefText(snapshot->meshRevision);summary["formalParameters"]=formal;
+                summary["formalParameterFingerprint"]=QString::number(snapshot->parameterFingerprint);
+            }
+            summary["parametersChanged"]=current && draft!=formal;
+        }
         catch(const std::exception&){summary["parametersChanged"]=true;}
         summary["isBusy"] = state.stage == SurfaceDeterminationStage::Preparing || state.stage == SurfaceDeterminationStage::ThresholdEstimation
             || state.stage == SurfaceDeterminationStage::SeedExtraction || state.stage == SurfaceDeterminationStage::SubvoxelRefinement

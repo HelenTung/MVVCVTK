@@ -60,6 +60,7 @@ public:
     void SendBusinessAction(const QString& action, bool usesOutput = false);
     BusinessStatistics* GetStatisticsWidget() const { return m_statistics; }
     void RefreshStatistics();
+    void ShowSources(DataRevisionRef root);
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
     void SelectAction(const QString& action);
@@ -71,6 +72,7 @@ public:
     bool observeInBackground = false;
     void SetDroppedPath(const QString& path);
     QString GetCurrentAction() const { return m_currentAction; }
+    QString GetParameterAction() const { return m_parameterAction; }
     QStringList GetActions() const;
     std::shared_ptr<VtkAppHostSession> GetSession() const { return m_context.runtime.GetSession(); }
     TestContext GetContext() const { return m_context; }
@@ -78,6 +80,7 @@ public:
     std::function<bool()> onStatistics;
     std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;
+    QString stopDescription;
     std::function<void(const QString&)> onMessage;
     std::function<QString(const QString&, const QJsonObject&)> validateAction;
 protected:
@@ -131,6 +134,7 @@ private:
     QStringList m_actionOrder;
     QJsonObject m_node;
     QJsonObject m_lastResult;
+    QString m_sourceRoot;
     QJsonArray m_sceneNodes;
     QJsonArray m_displayNodes;
     // 分别保留 Qt 隐式共享值，避免每次把大型目录嵌入一个新 JSON 对象后再比较。

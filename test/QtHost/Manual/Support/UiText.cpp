@@ -82,6 +82,7 @@ QString GetActionText(const QString& module, const QString& action)
     if (action == "UnloadResult") return "卸载数据或结果";
     if (module == "View" && action == "Visibility") return "应用辅助显示";
     static const QHash<QString, QString> specific{
+        {"Crop.PrepareRoi","按正式 ROI 准备裁剪"},{"Crop.ViewOutput","查看输出记录与统计"},{"Artifact.Recompute","丢弃候选并重新计算"},{"Wall.ActivateViewed","激活所看壁厚结果"},{"Alignment.InspectPair","检测双几何量值"},
         {"Alignment.ImportNominalMesh", "导入名义 STL 网格"}, {"Alignment.EvaluateSurface", "计算表面偏差"}, {"Alignment.SetDeviationDisplay", "应用偏差色带"},
         {"Alignment.InspectSection", "检测圆截面"}, {"Alignment.InspectGeometry", "检测独立选区"},
         {"Alignment.InspectionResult", "查看尺寸检测结果"}, {"Alignment.DeviationResult", "查看偏差统计"},
@@ -154,7 +155,8 @@ QString GetParameterText(const QString& key)
         {"minNormalCosine", "法向余弦下限"}, {"tolerance", "偏差公差（对齐长度单位）"}, {"reverseCoverage", "评价反向覆盖"},
         {"planePoint", "截面点（目标坐标）"}, {"planeNormal", "截面法向（目标坐标）"}, {"triangles", "截面三角形编号"},
         {"planeTolerance", "截面数值容差"}, {"selectionPoint", "截线选择点（目标坐标）"}, {"maxSelectionDistance", "截线选择最大距离"},
-        {"nominal", "名义直径（对齐长度单位）"}, {"nominalSource", "名义值来源"}, {"deviationLimits", "尺寸偏差允许区间"},
+        {"nominal", "所选量值的名义值（角度为度，长度用对齐单位）"}, {"nominalSource", "名义值来源"}, {"deviationLimits", "所选量值偏差允许区间"},
+        {"measurementMetric","检测量值"},{"first","第一几何对象"},{"second","第二几何对象"},{"useSectionPlane","轴位置使用截面平面"},{"sectionPlaneVertexIds","截面基准平面顶点"},{"sectionPlaneBounds","截面基准平面范围"},{"sectionPlaneNormal","截面基准平面方向"},{"maxParallelAngleDegrees","允许的两平面平行角偏差（度）"},
         {"useToleranceColors", "启用公差色"}, {"selectedVertex", "选中偏差顶点"}, {"range", "显示数值范围"},
         {"storedValueRange", "存储灰度闭区间"}, {"requireEnclosedSelection", "要求完整封闭选择"}, {"showMeasured", "显示实测网格"},
         {"showReference", "显示名义网格"}, {"selectedItem", "高亮检测项目"}, {"roiMarkerLimit", "区域显示标记上限"},
@@ -176,6 +178,7 @@ QString GetParameterText(const QString& key)
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
         {"filePath", "输入文件路径"}, {"outputPath", "输出文件路径"}, {"outputDir", "输出目录"}, {"archivePath", "归档文件路径"},
         {"matrix", "局部到源坐标矩阵"}, {"center", "源模型坐标中心"}, {"radius", "半径"}, {"height", "高度"}, {"roi", "区域修订"},
+        {"centerMM","区域中心（源模型坐标）"},{"sizeMM","区域完整尺寸（模型长度单位）"},{"direction3D","区域方向（正交轴）"},
         {"datasetId", "数据集标识"}, {"dimensions", "各轴体素数量"}, {"spacingLPS", "体素间距（LPS）"},
         {"originLPS", "原点坐标（LPS）"}, {"directionLPS", "方向矩阵（LPS）"}, {"sourceDigest", "源文件摘要"},
         {"evidenceKind", "数据证据类型"}, {"revision", "数据修订引用"}, {"expectedBindingRevision", "预期输入绑定版本"},
@@ -195,7 +198,7 @@ QString GetParameterText(const QString& key)
         {"backgroundMean", "背景灰度均值"}, {"materialMean", "材料灰度均值"}, {"filter", "启用孔隙过滤"},
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
         {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换矩阵"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
-        {"target", "目标零件"}, {"name", "零件名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
+        {"target", "目标零件"}, {"name", "名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
         {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"}, {"roiMask", "作用区域掩码"},
         {"protectionMask", "保护掩码"}, {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},
         {"radiusMM", "笔刷半径（mm）"}, {"slice", "笔刷切片平面"}, {"overwriteParts", "允许覆盖的零件"},
@@ -214,7 +217,7 @@ QString GetParameterText(const QString& key)
         {"timeoutMs", "计算超时（毫秒）"}, {"ring", "环形校正参数"}, {"diffusion", "扩散滤波参数"}, {"requestId", "计算请求编号"},
         {"isEnabled", "启用旋转"}, {"worldAxis", "世界坐标旋转轴"}, {"worldCenter", "世界坐标旋转中心"},
         {"reference", "名义参考与约束模板"}, {"mesh", "测量网格修订"}, {"recipe", "对齐方案"},
-        {"initialPoses", "初始位姿矩阵列表"}, {"result", "对齐结果修订"},
+        {"initialPoses", "初始位姿矩阵列表"}, {"result", "业务结果修订"},
         {"imageIndex", "种子体素索引"}, {"origin", "原点"}, {"normal", "法向"}, {"thicknessMM", "厚度（mm）"},
         {"colorNodes", "颜色节点"}, {"opacityNodes", "透明度节点"}, {"planes", "三维切片平面"}, {"crosshair", "十字线"}, {"ruler", "标尺"},
         {"setHigh", "零件集标识高位"}, {"setLow", "零件集标识低位"}, {"objectHigh", "零件标识高位"}, {"objectLow", "零件标识低位"}, {"resultRevision", "结果修订"},
@@ -296,6 +299,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (module == "Alignment") {
         if (key == "computeBackend") return {{"Cpu", "CPU"}, {"Cuda", "CUDA（显式）"}};
         if (key == "metric") return {{"UnsignedDistance", "无符号最近距离"}, {"NominalNormalProjection", "名义面法向投影"}};
+        if (key == "measurementMetric") return {{"Radius","半径"},{"Diameter","直径"},{"CenterX","中心 X"},{"CenterY","中心 Y"},{"CenterZ","中心 Z"},{"CenterDistance","两几何中心距"},{"OrientedDirectionAngleDegrees","有向方向夹角（度）"},{"SignedParallelPlaneDistance","有符号平行面距离"},{"FitRms","拟合 RMS"},{"FitMaximum","拟合最大残差"}};
         if (key == "format") return {{"Json", "JSON 完整上下文"}, {"Csv", "CSV 测量表"}};
         if (key == "fileUnit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
         if (key == "inspection" || key == "deviation" || key == "voxelVolume") return {{"current", "最近发布的对应结果"}};
@@ -362,6 +366,8 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
+    if(module=="Roi" && key=="boxToSource")return "高级与诊断";
+    if(module=="Roi" && QStringList{"name","centerMM","sizeMM","direction3D"}.contains(key))return "作用范围";
     if (key == "sourceDigest" || key == "evidenceKind") return "高级与诊断";
     if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "archivePath", "reference"}.contains(key))
         return "输入与结果";
@@ -379,7 +385,7 @@ QString GetParameterGroup(const QString& module, const QString& key)
     if (module == "Part" && QStringList{"name", "colorRGBA", "isSelected", "isReviewed"}.contains(key)) return "零件属性";
     return "算法参数";
 }
-QString GetFlowText(const QJsonObject& record)
+QString GetFlowText(const QJsonObject& record,bool detailed)
 {
     const auto module = record["module"].toString();
     const auto action = record["action"].toString();
@@ -397,12 +403,13 @@ QString GetFlowText(const QJsonObject& record)
         {"ReferencePublished", "名义参考已导入，下一步保存对齐方案"}, {"ArchiveExported", "对齐归档已导出"},
         {"FullyDetermined", "对齐操作完成，约束充分"}, {"Underconstrained", "约束不足"}, {"Degenerate", "几何退化"},
         {"Conflicting", "约束或版本冲突"}, {"NotConverged", "对齐未收敛，质量验收未通过"}, {"Stale", "结果已过期"}};
-    QStringList parts{"#" + record["operationId"].toString(), GetModuleText(module) + " · " + GetActionText(module, action)};
+    QStringList parts;if(detailed)parts<<"#" + record["operationId"].toString();parts<<GetModuleText(module) + " · " + GetActionText(module, action);
     if (record["duplicateCompletion"].toBool()) parts << "异常：收到重复完成通知";
     else if (!record["isTerminal"].toBool() && record.contains("progress"))
         parts << QString("执行进度 %1%").arg(record["progress"].toObject()["percent"].toInt());
     else if (module == "Alignment" && status == "FullyDetermined" && action != "Start") {
         static const QHash<QString, QString> completed{{"SaveRecipe", "对齐方案已保存"}, {"Activate", "对齐结果已应用"},
+            {"InspectGeometry","尺寸检测完成"},{"InspectSection","截面检测完成"},{"InspectPair","双几何检测完成"},{"EvaluateSurface","表面偏差检测完成"},{"EvaluateVoxelVolume","体素体积统计完成"},
             {"Deactivate", "对齐结果已停用"}, {"Restore", "归档方案已恢复，下一步重新求解"}, {"Visibility", "结果可见性已设置"}};
         parts << completed.value(action, "对齐操作完成");
     } else parts << statuses.value(status, status);
@@ -415,6 +422,7 @@ QString GetFlowText(const QJsonObject& record)
             {"points", "网格点数"}, {"objectCount", "对象数"}, {"voidVolumeMM3", "孔隙体积（mm³）"}, {"porosityRatio", "孔隙率"},
             {"previewId", "候选编号"}, {"errorCode", "错误码"}, {"failureReason", "失败原因码"}}) {
             const auto value = result[field.first];
+            if(!detailed && (field.first=="errorCode" || field.first=="failureReason" || field.first=="previewId"))continue;
             if (value.isString() && !value.toString().isEmpty()) parts << field.second + "=" + value.toString();
             else if (value.isDouble() && ((!field.first.contains("Code") && field.first != "failureReason") || value.toDouble() != 0))
                 parts << field.second + "=" + QString::number(value.toDouble(), 'g', 8);
@@ -423,8 +431,8 @@ QString GetFlowText(const QJsonObject& record)
         if (module == "Crop" && status == "Published") parts << "可选择“使用裁剪结果”切换当前输入";
         const auto current = record["current"].toObject();
         if (record["isSourceChanged"].toBool()) parts << "当前输入已更新：" + current["datasetId"].toString();
-        parts << "耗时 " + record["elapsedMs"].toString() + " 毫秒";
-    } else if (status == "Sending") {
+        if(detailed)parts << "耗时 " + record["elapsedMs"].toString() + " 毫秒";
+    } else if (detailed && status == "Sending") {
         const auto params = record["parameters"].toObject();
         if (params["filePath"].isString()) parts << "文件：" + params["filePath"].toString().simplified();
         else if (record["source"].toObject()["available"].toBool())

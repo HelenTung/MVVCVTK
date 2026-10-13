@@ -132,7 +132,7 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
         }
         if(!history.isEmpty())children.append(Node("crop-history","裁剪历史",s["nextPageAfter"].toString()!="0"?"部分历史，后续可翻页":"当前页",
             {"Previous","Next","ResetPreview","FinishEditing","BuildResult","SaveRoi","FirstHistoryPage","NextHistoryPage"},{},history));
-        if (!Ref(s["output"]).isEmpty()) children.append(Node("crop-output:"+Ref(s["output"]),"裁剪结果","已发布",{"SelectOutput","RestoreSource"}));
+        for(const auto value:s["results"].toArray()) {const auto result=value.toObject();const auto ref=result["output"].toString();children.append(Node("crop-output:"+ref,"裁剪结果 · 节点 "+result["node"].toString(),s["viewedOutput"]==ref?"正在读取此记录与统计":"历史已发布",{"ViewOutput","SelectOutput","RestoreSource"},{{"ViewOutput",QJsonObject{{"revision",ref}}},{"SelectOutput",QJsonObject{{"revision",ref}}}}));}
     }
     if (module == "Part") {
         const bool current = s["hasCurrentParts"].toBool();
@@ -202,7 +202,7 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
         if (!Ref(s["output"]).isEmpty()) children.append(Node("artifact-output:" + Ref(s["output"]), "校正体数据", s["isOutputCurrent"].toBool() ? "当前输入" : s["canSelectOutput"].toBool() ? "已发布" : "源输入已变化", {"SelectOutput", "RestoreSource"}));
     }
     if (module == "Surface" && s["hasPreview"].toBool()) children.append(Node("surface-preview:" + s["previewRequestId"].toString(),
-        "等值面预览", s["isOverlayVisible"].toBool() ? "显示" : "隐藏", {"Visibility", "ClearPreview"}));
+        "等值面预览 · "+s["previewPoints"].toString()+" 点", s["isOverlayVisible"].toBool() ? "显示" : "隐藏", {"Visibility", "ClearPreview"}));
     if (module == "Surface" && !Ref(s["mesh"]).isEmpty()) {
         QJsonArray objects{Node("surface-accepted", "有效测量点", s["acceptedPoints"].toString()), Node("surface-rejected", "无效点", s["rejectedPoints"].toString())};
         for (const auto value : s["objects"].toArray()) { const auto object = value.toObject(); objects.append(Node("surface-object:" + Ref(s["mesh"]) + ":" + QString::number(object["objectIndex"].toInt()),
@@ -213,7 +213,7 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
                 "采样点 " + point["vertexId"].toString(), Values(point["sourcePoint"]).replace(" × ", ", "))); }
             objects.append(Node("samples:" + Ref(s["mesh"]), QString("采样点 · 显示 %1 / %2").arg(samples.size()).arg(values.size()), "源坐标", {"SamplePoints"}, {}, samples));
         }
-        children.append(Node("surface:" + Ref(s["mesh"]), "表面网格 · " + s["points"].toString() + " 点", !s["hasResult"].toBool() ? "已过期" : s["hasMeasurement"].toBool() ? "测量表面" : "预览网格",
+        children.append(Node("surface:" + Ref(s["mesh"]), (s["hasPreview"].toBool()?"保留的正式表面 · ":"正式表面网格 · ") + s["points"].toString() + " 点", !s["isFormalCurrent"].toBool() ? "旧来源的正式网格" : s["hasMeasurement"].toBool() ? "测量表面" : "测量资格不足",
             {"SamplePoints", "Visibility", "OpenAlignment", "Clear", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart"}, {}, objects));
     }
     if (module == "Surface" && s["hasIso"].toBool()) children.append(Node("surface-iso", "材料阈值 · " + QString::number(s["isoEstimate"].toObject()["iso"].toDouble()), "当前结果", {"GlobalAutomatic", "CopyIsoToDisplay", "CopyIsoToGap", "CopyIsoToPart"},

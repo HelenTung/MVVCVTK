@@ -313,7 +313,8 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
 {
     auto& state=*m_impl; RoiResult result; result.error=state.GetAccessError();
     if (result.error!=RoiError::None) return result;
-    if ((request.action==RoiEditingAction::Begin)!=request.draft.has_value()
+    if ((request.action==RoiEditingAction::Begin && !request.draft)
+        || (request.draft && request.action!=RoiEditingAction::Begin && request.action!=RoiEditingAction::SetDraft)
         || (request.action==RoiEditingAction::SetDraft)!=request.boxToSource.has_value()
         || (request.action==RoiEditingAction::SetVisible)!=request.isVisible.has_value()) {result.error=RoiError::InvalidRequest; return result;}
     try {
@@ -322,10 +323,14 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
         case RoiEditingAction::SetDraft:
             if (!state.m_state.hasDraft || state.m_state.isDragging || !GetMatrixValid(*request.boxToSource)) {result.error=RoiError::InvalidGeometry; break;}
             {
+                // SetDraft 可携带同源草稿元信息；不销毁已有几何和交互资源。
+                if(request.draft && (request.draft->definition.source!=state.m_request.definition.source
+                    || request.draft->metadata.name.empty() || request.draft->metadata.name.size()>256
+                    || request.draft->metadata.group.size()>256 || request.draft->metadata.description.size()>4096)) {result.error=RoiError::InvalidRequest;break;}
                 const auto previous=state.m_request.definition.nodes[0].primitive.localToSource;
                 state.m_request.definition.nodes[0].primitive.localToSource=*request.boxToSource;
                 if (!state.SetProjection()) {state.m_request.definition.nodes[0].primitive.localToSource=previous; result.error=RoiError::Unavailable;}
-                else {state.m_state.draft=state.m_request.definition; result.error=RoiError::None;}
+                else {if(request.draft)state.m_request.metadata=request.draft->metadata;state.m_state.draft=state.m_request.definition; result.error=RoiError::None;}
             }
             break;
         case RoiEditingAction::Commit:

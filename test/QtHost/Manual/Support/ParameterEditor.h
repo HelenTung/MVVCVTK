@@ -29,6 +29,7 @@ public:
     void SetAppliedBoolean(QJsonValue value, const QString& context, const QString& unavailableReason = {});
     void SetDefaultValue(const QJsonValue& value);
     void SetReferenceChoices(const ParameterChoices& choices);
+    void SetAllowedChoices(const ParameterChoices& choices);
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
     std::function<void()> onEdited;

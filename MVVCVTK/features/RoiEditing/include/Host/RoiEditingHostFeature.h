@@ -8,6 +8,7 @@ struct RoiEditingConfig final {
 enum class RoiEditingAction : std::uint8_t { Begin, SetDraft, Commit, Cancel, SetVisible };
 struct RoiEditingRequest final {
     RoiEditingAction action = RoiEditingAction::Begin;
+    // Begin 的完整草稿；SetDraft 可选携带同源元信息，成功投影后与几何一起更新。
     std::optional<RoiRequest> draft;
     std::optional<std::array<double,16>> boxToSource;
     std::optional<bool> isVisible;

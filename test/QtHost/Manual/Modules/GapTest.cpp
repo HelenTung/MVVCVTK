@@ -35,8 +35,9 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             start.voidParams.minVolumeMM3 = GetNumber(params, "minVolumeMM3");
             GapHostRequest request; request.action = GapHostAction::Start; request.start = start;
             const QPointer<ModulePanel> owner(panel);
-            const auto accepted = (feature->SendRequest(std::move(request), [owner, id, requestedSurface](GapHostResult result) {
+            const auto accepted = (feature->SendRequest(std::move(request), [owner, id, requestedSurface,runParameters,params](GapHostResult result) {
                 if (!owner) return;
+                if(result.status==GapResultStatus::Succeeded || result.status==GapResultStatus::SucceededWithDisplayFailure)*runParameters=params;
                 auto summary = GetStatistics(result.statistics);
                 summary["isoMode"] = requestedSurface.isoMode == GapIsoMode::AbsoluteValue ? "AbsoluteValue" : "DataRangeRatio";
                 if (requestedSurface.isoMode == GapIsoMode::AbsoluteValue) summary["absoluteIsoValue"] = requestedSurface.absoluteIsoValue;
@@ -53,7 +54,6 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 owner->SetComplete(id, status, summary);
             }).status == GapAdmissionStatus::Accepted);
             panel->SetAdmission(id, accepted);
-            if(accepted)*runParameters=params;
         }, TestPolicy::Compute, true);
     panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
@@ -126,6 +126,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         HostSessionSetRequest request;request.cursor=HostCursorParams{world,-1};panel->SendHost(id,std::move(request));
     },TestPolicy::View);
     panel->onStatistics=[panel,feature,listRange] {
+        if(panel->GetObservedState()["parametersChanged"].toBool())return false;
         const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))return false;
         const auto ref=state.voidTable;const auto read=panel->GetContext().workflow.readRecordSamples;
         panel->GetStatisticsWidget()->StartHistogram(GetRefText(ref),"缺陷体积分布","缺陷体积 / mm³","缺陷数量",

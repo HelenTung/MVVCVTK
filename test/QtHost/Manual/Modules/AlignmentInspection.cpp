@@ -17,6 +17,21 @@ QString Verdict(AlignmentInspectionVerdict value)
     throw std::invalid_argument("检测判定无效");
 }
 QJsonValue Value(const std::optional<double>& value) { return value ? QJsonValue(*value) : QJsonValue(); }
+InspectionMetric GetInspectionMetric(const QJsonObject& p)
+{
+    return GetEnum<InspectionMetric>(p,"measurementMetric",{{"Radius",InspectionMetric::Radius},{"Diameter",InspectionMetric::Diameter},{"CenterX",InspectionMetric::CenterX},{"CenterY",InspectionMetric::CenterY},{"CenterZ",InspectionMetric::CenterZ},{"CenterDistance",InspectionMetric::CenterDistance},{"OrientedDirectionAngleDegrees",InspectionMetric::OrientedDirectionAngleDegrees},{"SignedParallelPlaneDistance",InspectionMetric::SignedParallelPlaneDistance},{"FitRms",InspectionMetric::FitRms},{"FitMaximum",InspectionMetric::FitMaximum}});
+}
+AlignmentGeometryKind GetInspectionKind(const QJsonObject& p)
+{
+    return GetEnum<AlignmentGeometryKind>(p,"kind",{{"Point",AlignmentGeometryKind::Point},{"Line",AlignmentGeometryKind::Line},{"Plane",AlignmentGeometryKind::Plane},{"Circle",AlignmentGeometryKind::Circle},{"Sphere",AlignmentGeometryKind::Sphere},{"Cylinder",AlignmentGeometryKind::Cylinder}});
+}
+QStringList MeasurementChoices(const QString& first,const QString& second={},bool section=false)
+{
+    const auto center=[section](const QString& kind){return QStringList{"Point","Circle","Sphere"}.contains(kind) || (section && QStringList{"Line","Cylinder"}.contains(kind));};
+    const auto direction=[](const QString& kind){return QStringList{"Line","Cylinder","Plane","Circle"}.contains(kind);};
+    if(!second.isEmpty()) {QStringList result;if(center(first) && center(second))result<<"CenterDistance";if(direction(first) && direction(second))result<<"OrientedDirectionAngleDegrees";if(first=="Plane" && second=="Plane")result<<"SignedParallelPlaneDistance";return result;}
+    QStringList result{"FitRms","FitMaximum"};if(QStringList{"Circle","Sphere","Cylinder"}.contains(first))result<<"Radius"<<"Diameter";if(center(first))result<<"CenterX"<<"CenterY"<<"CenterZ";return result;
+}
 std::vector<std::uint64_t> Ids(const QJsonValue& value)
 {
     if (!value.isArray()) throw std::invalid_argument("编号必须为数组");
@@ -41,7 +56,7 @@ QJsonObject Statistics(const AlignmentDeviationField& field)
 void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignmentHostFeature> feature,
     std::function<DataRevisionRef()> currentAlignment)
 {
-    struct Selection { DataRevisionRef inspection, deviation, voxelVolume; };
+    struct Selection { DataRevisionRef inspection, deviation, voxelVolume; QMap<QString,QJsonObject> successfulParameters; };
     auto selected = std::make_shared<Selection>();
     const auto alignment = [feature, currentAlignment](const QJsonObject& p) {
         const auto ref = p["result"] == "current" ? currentAlignment() : GetRef(p["result"]);
@@ -54,6 +69,7 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
             if (GetDataRevisionRefValid(result.inspectionResult)) selected->inspection = result.inspectionResult;
             if (GetDataRevisionRefValid(result.deviationResult)) selected->deviation = result.deviationResult;
             if (GetDataRevisionRefValid(result.voxelVolumeResult)) selected->voxelVolume = result.voxelVolumeResult;
+            if(result.status==AlignmentStatus::FullyDetermined) {const auto record=owner->GetContext().records.GetRecord(id);selected->successfulParameters[record["action"].toString()]=record["parameters"].toObject();}
             auto json = GetAlignmentResult(result);
             json["inspection"] = GetRefText(result.inspectionResult);
             json["deviation"] = GetRefText(result.deviationResult);
@@ -85,7 +101,9 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
         } else {
             defaults["kind"] = "Cylinder"; defaults["vertexIds"] = QJsonArray{}; defaults["targetBounds"] = QJsonValue();
             defaults["targetDirection"] = QJsonArray{0,0,1};
+            defaults["useSectionPlane"]=false;defaults["sectionPlaneVertexIds"]=QJsonArray{};defaults["sectionPlaneBounds"]=QJsonValue();defaults["sectionPlaneNormal"]=QJsonArray{0,0,1};
         }
+        defaults["measurementMetric"]="Diameter";
         panel->AttachAction(section ? "InspectSection" : "InspectGeometry", defaults,
             [feature, alignment, send, section](auto id, const auto& p) {
                 InspectionPlan plan; plan.id = GetText(p, "id").toStdString(); plan.alignmentResult = alignment(p);
@@ -99,14 +117,17 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                     if (!p["selectionPoint"].isNull()) cut.selectionPoint = GetArray<double, 3>(p["selectionPoint"]);
                     cut.maxSelectionDistance = GetNumber(p, "maxSelectionDistance"); geometry.section = std::move(cut);
                 } else {
-                    geometry.fit.kind = GetEnum<AlignmentGeometryKind>(p, "kind", {{"Circle", AlignmentGeometryKind::Circle}, {"Sphere", AlignmentGeometryKind::Sphere}, {"Cylinder", AlignmentGeometryKind::Cylinder}});
+                    geometry.fit.kind = GetInspectionKind(p);
                     geometry.fit.region.pinnedMesh = snapshot->input.mesh; geometry.fit.region.vertexIds = Ids(p["vertexIds"]);
                     if (!p["targetBounds"].isNull()) geometry.fit.region.targetBounds = GetArray<double, 6>(p["targetBounds"]);
                     geometry.fit.targetDirection = GetArray<double, 3>(p["targetDirection"]);
                 }
                 plan.geometries.push_back(std::move(geometry));
-                InspectionItem diameter; diameter.id = "diameter"; diameter.name = "直径";
-                diameter.measured.metric = InspectionMetric::Diameter;
+                InspectionItem diameter; diameter.id = "measurement"; diameter.name = GetText(p,"measurementMetric").toStdString();
+                diameter.measured.metric = GetInspectionMetric(p);
+                if(!section && p["useSectionPlane"].toBool() && QStringList{"Line","Cylinder"}.contains(p["kind"].toString()) && QStringList{"CenterX","CenterY","CenterZ"}.contains(p["measurementMetric"].toString())) {
+                    InspectionGeometrySpec plane;plane.fit.id="axis-section-plane";plane.fit.kind=AlignmentGeometryKind::Plane;plane.fit.region.pinnedMesh=snapshot->input.mesh;plane.fit.region.vertexIds=Ids(p["sectionPlaneVertexIds"]);if(!p["sectionPlaneBounds"].isNull())plane.fit.region.targetBounds=GetArray<double,6>(p["sectionPlaneBounds"]);plane.fit.targetDirection=GetArray<double,3>(p["sectionPlaneNormal"]);plan.geometries.push_back(std::move(plane));diameter.measured.first.sectionPlane=1;
+                }
                 if (!p["nominal"].isNull()) diameter.nominal = GetNumber(p, "nominal");
                 diameter.nominalSource = GetText(p, "nominalSource").toStdString();
                 if (!p["deviationLimits"].isNull()) diameter.deviationLimits = GetArray<double, 2>(p["deviationLimits"]);
@@ -115,6 +136,25 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                 AlignmentRequest request; request.action = AlignmentAction::Inspect; request.inspection = std::move(plan); send(id, std::move(request));
             }, TestPolicy::Compute, true);
     }
+    const auto pairGeometry=GetJson(R"({"kind":"Plane","vertexIds":[],"targetBounds":null,"targetDirection":[0,0,1]})");
+    QJsonObject pair{{"result","current"},{"id","geometry-pair"},{"first",pairGeometry},{"second",pairGeometry},{"measurementMetric","SignedParallelPlaneDistance"},{"maxParallelAngleDegrees",.001},{"useSectionPlane",false},{"sectionPlaneVertexIds",QJsonArray{}},{"sectionPlaneBounds",QJsonValue()},{"sectionPlaneNormal",QJsonArray{0,0,1}},{"nominal",QJsonValue()},{"nominalSource",""},{"deviationLimits",QJsonValue()}};
+    panel->AttachAction("InspectPair",pair,[feature,alignment,send](auto id,const auto& p) {
+        InspectionPlan plan;plan.id=GetText(p,"id").toStdString();plan.alignmentResult=alignment(p);const auto snapshot=feature->GetResult(plan.alignmentResult);
+        for(const auto* key:{"first","second"}) {
+            const auto values=p[key].toObject();InspectionGeometrySpec geometry;geometry.fit.id=key;geometry.fit.kind=GetInspectionKind(values);
+            geometry.fit.region.pinnedMesh=snapshot->input.mesh;geometry.fit.region.vertexIds=Ids(values["vertexIds"]);if(!values["targetBounds"].isNull())geometry.fit.region.targetBounds=GetArray<double,6>(values["targetBounds"]);
+            geometry.fit.targetDirection=GetArray<double,3>(values["targetDirection"]);plan.geometries.push_back(std::move(geometry));
+        }
+        InspectionItem item;item.id="pair-measurement";item.name=GetText(p,"measurementMetric").toStdString();item.measured.metric=GetInspectionMetric(p);item.measured.first.geometry=0;item.measured.second=InspectionOperand{1,{}};item.measured.maxParallelAngleDegrees=GetNumber(p,"maxParallelAngleDegrees");
+        if(p["useSectionPlane"].toBool() && p["measurementMetric"]=="CenterDistance") {
+            InspectionGeometrySpec plane;plane.fit.id="axis-section-plane";plane.fit.kind=AlignmentGeometryKind::Plane;plane.fit.region.pinnedMesh=snapshot->input.mesh;plane.fit.region.vertexIds=Ids(p["sectionPlaneVertexIds"]);
+            if(!p["sectionPlaneBounds"].isNull())plane.fit.region.targetBounds=GetArray<double,6>(p["sectionPlaneBounds"]);plane.fit.targetDirection=GetArray<double,3>(p["sectionPlaneNormal"]);plan.geometries.push_back(std::move(plane));
+            if(plan.geometries[0].fit.kind==AlignmentGeometryKind::Line || plan.geometries[0].fit.kind==AlignmentGeometryKind::Cylinder)item.measured.first.sectionPlane=2;
+            if(plan.geometries[1].fit.kind==AlignmentGeometryKind::Line || plan.geometries[1].fit.kind==AlignmentGeometryKind::Cylinder)item.measured.second->sectionPlane=2;
+        }
+        if(!p["nominal"].isNull())item.nominal=GetNumber(p,"nominal");item.nominalSource=GetText(p,"nominalSource").toStdString();if(!p["deviationLimits"].isNull())item.deviationLimits=GetArray<double,2>(p["deviationLimits"]);plan.items.push_back(std::move(item));
+        AlignmentRequest request;request.action=AlignmentAction::Inspect;request.inspection=std::move(plan);send(id,std::move(request));
+    },TestPolicy::Compute,true);
     panel->AttachAction("InspectionResult", {{"inspection", "current"}}, [panel, feature, selected](auto id, const auto& p) {
         const auto ref = p["inspection"] == "current" ? selected->inspection : GetRef(p["inspection"]);
         const auto snapshot = feature->GetInspection(ref);
@@ -197,8 +237,9 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                 const auto ref = p[key] == "current" ? current : GetRef(p[key]);
                 if (GetDataRevisionRefValid(ref)) refs.push_back(ref);
             };
-            append("result", currentAlignment(), request.alignments); append("inspection", selected->inspection, request.inspections);
-            append("deviation", selected->deviation, request.deviations); append("voxelVolume", selected->voxelVolume, request.voxelVolumes);
+            const auto chosen=[panel](const char* action,const char* key,DataRevisionRef fallback){const QJsonValue value=panel->GetActionParameters(action)[key];return value=="current"?fallback:GetRef(value);};
+            append("result", chosen("Result","result",currentAlignment()), request.alignments); append("inspection", chosen("InspectionResult","inspection",selected->inspection), request.inspections);
+            append("deviation", chosen("DeviationResult","deviation",selected->deviation), request.deviations); append("voxelVolume", chosen("VoxelVolumeResult","voxelVolume",selected->voxelVolume), request.voxelVolumes);
             request.captureCurrentDisplay = GetBool(p, "captureCurrentDisplay");
             const auto report = feature->GetReport(request);
             if (!report.report) throw std::invalid_argument(report.message);
@@ -213,7 +254,7 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
     const auto observeAlignment = panel->onObserve;
     panel->onStatistics=[panel,feature,selected] {
         if(QStringList{"EvaluateVoxelVolume","VoxelVolumeResult"}.contains(panel->GetCurrentAction())) {
-            const auto choice=panel->GetActionParameters("VoxelVolumeResult")["voxelVolume"];
+            const QJsonValue choice=panel->GetActionParameters("VoxelVolumeResult")["voxelVolume"];
             const auto ref=choice=="current" ? selected->voxelVolume : GetRef(choice);
             if(const auto volume=feature->GetVoxelVolume(ref)) {
                 const auto& s=volume->statistics;
@@ -224,10 +265,10 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                 return true;
             }
         }
-        const auto choice=panel->GetActionParameters("DeviationResult")["deviation"];
+        const QJsonValue choice=panel->GetActionParameters("DeviationResult")["deviation"];
         const auto ref=choice=="current" ? selected->deviation : GetRef(choice);
         const auto snapshot=feature->GetDeviation(ref);
-        const bool geometryPage=QStringList{"InspectGeometry","InspectSection","InspectionResult"}.contains(panel->GetCurrentAction());
+        const bool geometryPage=QStringList{"InspectGeometry","InspectSection","InspectPair","InspectionResult"}.contains(panel->GetCurrentAction());
         if(!geometryPage && snapshot && snapshot->forward) {
             const auto field=snapshot->forward;
             const auto metric=snapshot->parameters->metric;
@@ -242,14 +283,17 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                         if(sample.state==AlignmentDeviationState::Valid && std::isfinite(sample.value) && std::isfinite(sample.area) && sample.area>0){result.values.push_back(sample.value);result.weights.push_back(sample.area);}else ++result.excluded;}
                     return result;
                 });
-            panel->GetStatisticsWidget()->onInterval=[panel,field,ref](double low,double high) {
-                for(std::size_t i=0;i<field->samples.size();++i)if(field->samples[i].state==AlignmentDeviationState::Valid && field->samples[i].value>=low && field->samples[i].value<=high) {
+            panel->GetStatisticsWidget()->onInterval=[panel,feature,ref](double low,double high) {
+                const auto result=feature->GetDeviation(ref);if(!result || !result->forward)return;const auto& samples=result->forward->samples;
+                for(std::size_t i=0;i<samples.size();++i)if(samples[i].state==AlignmentDeviationState::Valid && panel->GetStatisticsWidget()->ContainsInterval(samples[i].value,low,high)) {
                     auto p=panel->GetActionParameters("SetDeviationDisplay");p["deviation"]=GetRefText(ref);p["selectedVertex"]=QString::number(i);panel->SendAction("SetDeviationDisplay",p);return;
                 }
             };
+            QJsonArray markers{QJsonObject{{"label","零偏差"},{"value",0.}}};if(snapshot->parameters->tolerance){markers.append(QJsonObject{{"label","公差下限"},{"value",(*snapshot->parameters->tolerance)[0]}});markers.append(QJsonObject{{"label","公差上限"},{"value",(*snapshot->parameters->tolerance)[1]}});}panel->GetStatisticsWidget()->SetMarkers(markers);
             return true;
         }
-        const auto inspection=feature->GetInspection(selected->inspection);
+        const QJsonValue inspectedChoice=panel->GetActionParameters("InspectionResult")["inspection"];const auto inspectedRef=inspectedChoice=="current"?selected->inspection:GetRef(inspectedChoice);
+        const auto inspection=feature->GetInspection(inspectedRef);
         if(inspection && inspection->report) {
             QJsonArray rows;std::vector<double> rms;
             for(const auto& geometry:inspection->report->geometries){
@@ -258,12 +302,12 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                 rows.append(QJsonArray{QString::fromStdString(geometry.fitted.id),valid ? QJsonValue(geometry.fitted.fitRms) : QJsonValue(),valid ? QJsonValue(geometry.fitted.fitMax) : QJsonValue(),QString::number(geometry.fitted.sampleCount)});
             }
             panel->GetStatisticsWidget()->SetHistogram(BuildHistogram(rms,{},"逐特征几何拟合残差 RMS",
-                "检测修订 "+GetRefText(selected->inspection)+" · 逐特征汇总；拟合残差与配准 RMS、偏差场 RMS 分别命名","拟合 RMS（结果长度单位）","特征数量"));
+                "检测修订 "+GetRefText(inspectedRef)+" · 逐特征汇总；拟合残差与配准 RMS、偏差场 RMS 分别命名","拟合 RMS（结果长度单位）","特征数量"));
             panel->GetStatisticsWidget()->SetTable({"特征","拟合 RMS","拟合 Max","样本数"},rows);return true;
         }
         return false;
     };
-    panel->onObserve = [panel, feature, observeAlignment] {
+    panel->onObserve = [panel, feature, observeAlignment,selected,currentAlignment] {
         if (observeAlignment) observeAlignment();
         ParameterChoices inspections, deviations, volumes;
         const auto graph = panel->GetContext().workflow.getPublishedGraph ? panel->GetContext().workflow.getPublishedGraph() : QJsonObject{};
@@ -281,6 +325,22 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
         choices("inspection", inspections, {"InspectionResult", "SetSceneDisplay", "ExportReport"});
         choices("deviation", deviations, {"DeviationResult", "SetDeviationDisplay", "ExportReport"});
         choices("voxelVolume", volumes, {"VoxelVolumeResult", "ExportReport"});
+        auto summary=panel->GetObservedState();
+        const auto matches=[panel,selected](const QString& action){try{return selected->successfulParameters.contains(action) && selected->successfulParameters[action]==panel->GetActionParameters(action);}catch(const std::exception&){return false;}};
+        const auto action=panel->GetParameterAction();
+        const auto bindingMatches=[panel,currentAlignment](const char* action,DataRevisionRef binding){try{const QJsonValue value=panel->GetActionParameters(action)["result"];if(value=="current" && !panel->GetObservedState()["isReferenceCurrent"].toBool())return false;return binding==(value=="current"?currentAlignment():GetRef(value));}catch(const std::exception&){return false;}};
+        const auto inspection=feature->GetInspection(selected->inspection);const auto deviation=feature->GetDeviation(selected->deviation);
+        summary["inspectionContext"]=QJsonObject{{"action",action},{"isReadable",inspection.has_value()},{"isCurrent",inspection && inspection->isCurrent},{"parametersMatch",matches(action)},{"bindingMatch",inspection && bindingMatches(action.toUtf8().constData(),inspection->alignmentResult)}};
+        summary["inspectionMatchesDraft"]=(action=="InspectGeometry" || action=="InspectSection" || action=="InspectPair") && inspection && inspection->isCurrent && matches(action) && bindingMatches(action.toUtf8().constData(),inspection->alignmentResult);
+        summary["deviationMatchesDraft"]=deviation && deviation->isCurrent && matches("EvaluateSurface") && bindingMatches("EvaluateSurface",deviation->alignmentResult);
+        const auto volume=feature->GetVoxelVolume(selected->voxelVolume);const auto image=panel->GetSession()->GetImageDescriptor();DataRevisionRef volumeSource;try{const QJsonValue value=panel->GetActionParameters("EvaluateVoxelVolume")["source"];volumeSource=value=="current" && image?image->dataRevision:GetRef(value);}catch(const std::exception&){}
+        summary["voxelMatchesDraft"]=volume && volume->source==volumeSource && matches("EvaluateVoxelVolume");
+        if(QStringList{"InspectGeometry","InspectSection","InspectPair"}.contains(action))try {
+            const auto p=panel->GetActionParameters(action);const auto allowed=MeasurementChoices(action=="InspectSection"?"Circle":action=="InspectPair"?p["first"].toObject()["kind"].toString():p["kind"].toString(),action=="InspectPair"?p["second"].toObject()["kind"].toString():QString(),action!="InspectSection" && GetBool(p,"useSectionPlane"));
+            ParameterChoices choices;for(const auto& entry:GetParameterChoices("Alignment","measurementMetric"))if(allowed.contains(entry.first))choices.append(entry);
+            panel->GetParameterEditor(action)->GetField("measurementMetric")->SetAllowedChoices(choices);summary["inspectionProblem"]=allowed.contains(p["measurementMetric"].toString())?QString():QString("当前几何组合不支持此量值；请选择列表中的适用量值。轴心位置须提供截面平面。");
+        }catch(const std::exception& error){summary["inspectionProblem"]=QString::fromUtf8(error.what());}
+        summary["latestInspection"]=GetDataRevisionRefValid(selected->inspection)?GetRefText(selected->inspection):QString();summary["latestDeviation"]=GetDataRevisionRefValid(selected->deviation)?GetRefText(selected->deviation):QString();summary["latestVoxelVolume"]=GetDataRevisionRefValid(selected->voxelVolume)?GetRefText(selected->voxelVolume):QString();panel->SetState(summary);
     };
 }
 }

@@ -7,7 +7,7 @@
 namespace Manual {
 struct GraphStroke { int from = 0, to = 0; bool incoming = false; };
 struct GraphRow { int lane = 0; std::vector<GraphStroke> strokes; bool current = false, pending = false; };
-struct GraphLayout { QHash<QString, GraphRow> rows; int lanes = 1; };
+struct GraphLayout { QHash<QString, GraphRow> rows; QJsonArray edges; int lanes = 1; };
 GraphLayout GetGraphLayout(const QJsonArray& nodes);
 class SceneGraphTree final : public QTreeWidget {
 public:

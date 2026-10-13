@@ -107,7 +107,14 @@ void TestEditor()
     Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && main->overlays.empty()
         && data->GetDataGraph().commitId==before,"cancel wrote data or leaked overlays");
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"second draft failed");
+    RoiEditingRequest update;update.action=RoiEditingAction::SetDraft;update.boxToSource=geometry;update.draft=draft;update.draft->metadata.name="";
+    Require(editor.SendRequest(update).error==RoiError::InvalidRequest && editor.GetState().hasDraft
+        && editor.GetState().draft->nodes[0].primitive.localToSource==geometry,"invalid metadata destroyed the existing draft");
+    update.draft->metadata.name="renamed draft";(*update.boxToSource)[3]+=1;
+    Require(editor.SendRequest(update).error==RoiError::None && editor.GetState().hasDraft
+        && editor.GetState().draft->nodes[0].primitive.localToSource==*update.boxToSource,"geometry and metadata update did not retain the draft");
     const auto saved=editor.SendRequest({RoiEditingAction::Commit});
+    Require(saved.roi && saved.roi->metadata.name=="renamed draft" && saved.roi->definition.nodes[0].primitive.localToSource==*update.boxToSource,"commit lost the applied draft name or geometry");
     Require(saved.error==RoiError::None && saved.roi && !editor.GetState().hasDraft
         && main->overlays.size()==1 && slice->overlays.size()==1,"formal ROI projection was not retained");
     RoiEditingRequest shown;shown.action=RoiEditingAction::SetVisible;shown.isVisible=true;

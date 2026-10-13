@@ -32,6 +32,9 @@ public:
     void StartHistogram(const QString& key,const QString& title,const QString& xUnit,
         const QString& yUnit,std::function<StatisticsSamples(std::size_t)> read);
     void Cancel();
+    void SetCompact(bool compact);
+    bool ContainsInterval(double value,double low,double high) const;
+    void SetMarkers(const QJsonArray& markers);
     QJsonObject GetHistogram() const { return m_data; }
     std::function<void(double,double)> onInterval;
     std::function<void(int)> onRow;
@@ -50,6 +53,13 @@ private:
     std::size_t m_offset=0,m_used=0,m_excluded=0;
     double m_minimum=0,m_maximum=0;
     bool m_isCounting=false,m_hasValue=false;
+    enum class State { None,Loading,Ready,Empty,Failed,Cancelled };
+    State m_state=State::None;
+    std::uint64_t m_generation=0;
+    bool m_compact=false;
+    void StopRead();
+    void ResetPresentation();
+    void Present(const QJsonObject& data);
     void ReadBlock();
 };
 QJsonObject BuildHistogram(const std::vector<double>& values,const std::vector<double>& weights,

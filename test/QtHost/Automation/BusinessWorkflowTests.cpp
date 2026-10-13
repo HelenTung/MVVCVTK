@@ -4,12 +4,15 @@
 #include "Support/BusinessStep.h"
 #include "Support/BusinessStatistics.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/SceneGraph.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QScrollArea>
 #include <QPushButton>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QTreeWidget>
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
@@ -35,11 +38,18 @@ void CheckBusinessWorkflow(TestWindow& window)
     Require(samples<=262144 && central>10000 && std::all_of(low.begin(),low.end(),[](bool value){return value;}) && std::all_of(high.begin(),high.end(),[](bool value){return value;}),"full CT statistics sampling spans every axis and its central ROI rather than repeated X columns");
     const QJsonObject input{{"available",true},{"dataRevision","source-A"}};
     Require(GetBusinessStep("Crop",{{"output","00000000000000000000000000000000:0"}},input,"Start").action=="Start","an empty crop revision cannot masquerade as a published result before the first crop");
-    Require(GetBusinessStep("Data",{{"acceptedRevision","B"},{"activeRevision","A"}},input,"Load").action=="ActivateAccepted","accepted data must offer activation retry without reloading");
+    Require(GetBusinessStep("Data",{{"acceptedRevision","B"},{"activeRevision","A"}},input,"Load").action=="Load","adopting derived data is not an activation failure");
+    Require(GetBusinessStep("Data",{{"acceptedRevision","B"},{"activationFailed",true}},input,"Load").action=="ActivateAccepted","a real failed adoption offers activation retry");
     const auto confirmed=GetBusinessStep("Crop",{{"isConfirmed",true}},input,"Start");
     Require(confirmed.action=="BuildResult" && confirmed.usesOutput,"confirmed crop offers generation followed by exact adoption");
-    Require(GetBusinessStep("Crop",{{"isConfirmed",false},{"operationCount","3"}},input,"BuildResult").action=="FinishEditing","changed history returns to confirmation instead of publishing");
-    Require(GetBusinessStep("Crop",{{"output","crop-B"}},input,"Start").action=="SelectOutput","published crop offers adoption retry");
+    Require(GetBusinessStep("Crop",{{"isConfirmed",false},{"nodeCount","3"}},input,"BuildResult").action=="FinishEditing","changed active path returns to confirmation instead of publishing");
+    Require(GetBusinessStep("Crop",{{"output","crop-B"},{"outputMatchesPreview",true}},input,"Start").action=="SelectOutput","matching published crop offers adoption retry");
+    Require(GetBusinessStep("Crop",{{"output","old-O1"},{"hasCurrentPreview",true}},input,"Start").action=="FinishEditing","old output cannot hijack a new preview");
+    const auto adjusting=GetBusinessStep("Crop",{{"isActive",true},{"hasCurrentPreview",false}},input,"Start");
+    Require(adjusting.action.isEmpty() && adjusting.next.contains("拖动"),"a started crop with no edit node asks for widget adjustment before confirmation");
+    const auto retained=GetBusinessStep("Crop",{{"output","old-O1"},{"viewingOutput",true},{"blockerCount",1}},input,"RestoreSource");
+    Require(retained.action=="Start" && retained.stage.contains("下游"),"downstream consumers retain crop output and offer a new crop instead of implying successful release");
+    Require(GetBusinessStep("Crop",{{"operationCount","3"},{"nodeCount","0"}},input,"BuildResult").action=="Start","branches outside the root path are not an active crop");
     Require(GetBusinessStep("Crop",{{"output","source-A"}},input,"Start").title.contains("继续裁剪"),"adopted crop continues from current input");
     Require(GetBusinessStep("Artifact",{{"hasCandidate",true},{"isCandidateCurrent",true}},input,"Ring").usesOutput,"artifact candidate offers publish and adoption");
     Require(GetBusinessStep("Artifact",{{"canSelectOutput",true}},input,"Ring").action=="SelectOutput","published artifact does not recompute for adoption retry");
@@ -55,7 +65,7 @@ void CheckBusinessWorkflow(TestWindow& window)
         auto* primary=page->findChild<QPushButton*>("businessPrimary");auto* stage=page->findChild<QLabel*>("businessStage");auto* scroll=page->findChild<QScrollArea*>("operationScroll");
         Require(primary && stage && scroll && !scroll->isAncestorOf(primary),"every business has a fixed stage primary outside parameter scrolling");
     }
-    Require(window.findChild<QLabel*>("currentInputIdentity") && window.findChild<QLabel*>("currentInputGeometry"),"input identity and geometry have dedicated persistent widgets");
+    Require(window.findChild<QLabel*>("messageDataSummary") && window.findChild<QWidget*>("diagnosticDetails")->isAncestorOf(window.findChild<QLabel*>("currentInputIdentity")) && !window.findChild<QWidget*>("currentInputBar"),"input data information lives in messages and diagnostics instead of a second toolbar row");
     const auto weighted=BuildHistogram({-1,0,1},{2,3,5},"area","fixed result","mm","mm2");
     Require(Sum(weighted)==10,"area histogram sums area rather than sample count");
     Require(BuildHistogram({std::numeric_limits<double>::quiet_NaN()},{},"invalid","invalid","gray","count")["counts"].toArray().isEmpty(),"invalid samples are not inserted in zero bin");
@@ -64,6 +74,14 @@ void CheckBusinessWorkflow(TestWindow& window)
     statistics.StartHistogram("R1","gray","gray","count",reader);
     Require(Await([&]{return !statistics.GetHistogram()["counts"].toArray().isEmpty();}) && Sum(statistics.GetHistogram())==4,"bounded histogram conserves the known samples");
     statistics.SetHistogram(weighted);
+    statistics.onInterval=[](double,double){};statistics.onRow=[](int){};statistics.SetTable({"old"},QJsonArray{QJsonArray{"old row"}});
+    statistics.SetHistogram(weighted);
+    Require(!statistics.onInterval && !statistics.onRow && statistics.findChild<QTreeWidget*>("businessResultTable")->topLevelItemCount()==0,"equal chart data still replaces callbacks and table context");
+    const auto edges=weighted["edges"].toArray();const auto boundary=edges[1].toDouble();
+    Require(!statistics.ContainsInterval(boundary,edges[0].toDouble(),boundary) && statistics.ContainsInterval(boundary,boundary,edges[2].toDouble()) && statistics.ContainsInterval(edges.last().toDouble(),edges[edges.size()-2].toDouble(),edges.last().toDouble()),"bins are half-open with a closed final endpoint");
+    statistics.resize(500,300);statistics.show();QCoreApplication::processEvents();int selected=0;statistics.onInterval=[&](double,double){++selected;};auto* plot=statistics.findChild<QWidget*>("businessHistogramPlot");
+    const auto press=[&](const QPoint& pos,Qt::MouseButton button){QMouseEvent event(QEvent::MouseButtonPress,pos,button,button,Qt::NoModifier);QCoreApplication::sendEvent(plot,&event);};
+    press({80,3},Qt::LeftButton);press({80,30},Qt::RightButton);Require(selected==0,"chart margins and right click never select an interval");press({80,30},Qt::LeftButton);Require(selected==1,"left click within the plot selects an interval");statistics.hide();
     statistics.StartHistogram("R1","gray","gray","count",reader);
     Require(Await([&]{return statistics.GetHistogram()["title"]=="gray" && !statistics.GetHistogram()["counts"].toArray().isEmpty();}) && Sum(statistics.GetHistogram())==4,"static chart cannot impersonate a cached histogram from the same revision");
     statistics.StartHistogram("zero","defects","mm3","count",[](std::size_t){StatisticsSamples samples;samples.description="published empty defect table";return samples;});
@@ -72,5 +90,13 @@ void CheckBusinessWorkflow(TestWindow& window)
     statistics.StartHistogram("old","old","gray","count",[&](std::size_t){oldRead=true;return StatisticsSamples{};});
     statistics.StartHistogram("new","new","gray","count",reader);
     Require(Await([&]{return !statistics.GetHistogram()["counts"].toArray().isEmpty();}) && !oldRead && statistics.GetHistogram()["cacheKey"]=="new","replaced histogram job cannot publish a late old-source curve");
+    statistics.StartHistogram("retry","retry","gray","count",[](std::size_t)->StatisticsSamples{throw std::runtime_error("first read fails");});
+    Require(Await([&]{return statistics.GetHistogram()["status"]=="Failed";}),"failed histogram exposes a failed state");
+    statistics.StartHistogram("retry","retry","gray","count",reader);Require(Await([&]{return statistics.GetHistogram()["status"]=="Ready";}),"same-key histogram retries after failure");
+    statistics.StartHistogram("reentrant","reentrant","gray","count",[&](std::size_t){statistics.StartHistogram("replacement","replacement","gray","count",reader);StatisticsSamples old;old.values={999};old.total=1;old.next=1;return old;});
+    Require(Await([&]{return statistics.GetHistogram()["cacheKey"]=="replacement" && statistics.GetHistogram()["status"]=="Ready";}) && Sum(statistics.GetHistogram())==4,"reentrant reader cannot publish over its replacement");
+    const QJsonObject root{{"id","root"},{"parents",QJsonArray{}}},a{{"id","a"},{"parents",QJsonArray{"root"}}},b{{"id","b"},{"parents",QJsonArray{"root"}}},merge{{"id","merge"},{"parents",QJsonArray{"a","b"}}};
+    const auto checkEdges=[&](const QJsonArray& nodes){const auto layout=GetGraphLayout(nodes);Require(layout.edges.size()==4,"all true parent edges survive list ordering");for(const auto& pair:QJsonArray{QJsonObject{{"child","a"},{"parent","root"}},QJsonObject{{"child","b"},{"parent","root"}},QJsonObject{{"child","merge"},{"parent","a"}},QJsonObject{{"child","merge"},{"parent","b"}}})Require(layout.edges.contains(pair),"branch and merge endpoints are exact");};
+    checkEdges({root,a,b,merge});checkEdges({merge,b,a,root});
 }
 }

@@ -18,5 +18,5 @@ QString GetParameterGroup(const QString& module, const QString& key);
 using ParameterChoices = QVector<std::pair<QString, QString>>;
 ParameterChoices GetParameterChoices(const QString& module, const QString& key);
 QStringList GetBoundParameters(const QString& module, const QString& action);
-QString GetFlowText(const QJsonObject& record);
+QString GetFlowText(const QJsonObject& record,bool detailed=true);
 }

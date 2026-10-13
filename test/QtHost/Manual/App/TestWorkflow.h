@@ -46,6 +46,7 @@ public:
     std::function<void(const QString&, const QString&, const QJsonObject&)> onCopyParameters;
     std::function<void(const QString&, const QString&, const QJsonObject&)> onNavigate;
     std::function<void(const QString&)> onShowStatistics;
+    std::function<void()> ensureCropViews;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
     std::function<bool(const std::string&)> getRenderPending;
     std::function<bool(const std::string&)> getViewRenderPending;
