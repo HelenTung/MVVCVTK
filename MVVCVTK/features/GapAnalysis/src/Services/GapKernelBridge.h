@@ -12,7 +12,7 @@
 
 #define MVVCVTK_GAP_KERNEL_CALL __cdecl
 
-inline constexpr std::uint32_t GapKernelAbiVersion = 4;
+inline constexpr std::uint32_t GapKernelAbiVersion = 5;
 
 // GapAnalysis 与私有算法 DLL 之间只交换固定宽度 POD 和调用方持有的原始缓冲区；
 // 供应商 C++/STL/VTK 类型不得越过此边界，bridge 也不得重算供应商输出。
@@ -29,9 +29,7 @@ struct GapKernelRequest final {
     float backgroundMean;
     float materialMean;
     float isoThreshold;
-    float minVolumeMM3;
     std::int32_t numberRuns;
-    std::uint32_t isFilterEnabled;
     std::uint32_t reserved[8];
 };
 
@@ -127,8 +125,8 @@ MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
 
 static_assert(std::is_standard_layout_v<GapKernelRequest>);
 static_assert(std::is_trivially_copyable_v<GapKernelRequest>);
-static_assert(sizeof(GapKernelRequest) == 240);
-static_assert(offsetof(GapKernelRequest, isFilterEnabled) == 204);
+static_assert(sizeof(GapKernelRequest) == 232);
+static_assert(offsetof(GapKernelRequest, numberRuns) == 196);
 static_assert(std::is_standard_layout_v<GapKernelHeader>);
 static_assert(std::is_trivially_copyable_v<GapKernelHeader>);
 static_assert(sizeof(GapKernelHeader) == 72);

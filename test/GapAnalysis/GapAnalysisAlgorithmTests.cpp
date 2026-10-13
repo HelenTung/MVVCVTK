@@ -303,7 +303,7 @@ public:
                 : regions.empty() && voidVoxelCount == 0,
             hasDefectExpected
                 ? "Synthetic input should retain the DefX defect batch."
-                : "DefX minimum-volume filter should return an empty batch.",
+                : "Gap minimum-volume filter should return an empty batch.",
             failureCount);
 
         auto voidMesh = service.BuildVoidMesh();
@@ -427,13 +427,85 @@ public:
             service.StartAsync(nullptr)
                 && GetServiceState(service)
                     == GapAnalysisState::Succeeded,
-            "Disabled DefX filter should accept a retained minimum-volume value.",
+            "Disabled Gap filter should accept a retained minimum-volume value.",
             failureCount);
         // filter 关闭时 Feature 不得按保留的 minVolumeMM3 在返回后二次过滤。
-        SetResultExpect(
-            service,
-            !service.GetVoidRegions().empty(),
-            failureCount);
+        SetResultExpect(service, true, failureCount);
+        const auto unfiltered = service.GetStatistics();
+        const auto originalLabels = GetLabels(service.BuildLabelImage(), failureCount);
+        params.isFilterEnabled = true;
+        params.minVolumeMM3 = 0.0;
+        service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr) && GetServiceState(service) == GapAnalysisState::Succeeded,
+            "Enabled zero-volume filter should retain the complete batch.", failureCount);
+        SetResultExpect(service, true, failureCount);
+        SetExpect(service.GetLabelStorageTransferred(), "No excluded IDs should preserve borrowed label storage.", failureCount);
+        SetExpect(GetLabels(service.BuildLabelImage(), failureCount) == originalLabels,
+            "Zero-volume selection should retain every native label at its original voxel.", failureCount);
+        params.minVolumeMM3 = 1000000.0;
+        service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr) && GetServiceState(service) == GapAnalysisState::Succeeded,
+            "Enabled minimum-volume filter should complete through the private detection kernel.", failureCount);
+        SetResultExpect(service, false, failureCount);
+        SetExpectNear(service.GetStatistics().voidVolumeMM3, 0.0, "Filtered void volume should be zero.", failureCount);
+        SetExpectNear(service.GetStatistics().porosityRatio, 0.0, "Filtered porosity should be zero.", failureCount);
+        SetExpect(service.GetStatistics().objectVoxelCount == unfiltered.objectVoxelCount,
+            "Size filtering should preserve the source object voxel count.", failureCount);
+        SetExpectNear(service.GetStatistics().objectVolumeMM3, unfiltered.objectVolumeMM3,
+            "Size filtering should preserve the source material volume.", failureCount);
+        params.isFilterEnabled = false;
+        service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr) && GetServiceState(service) == GapAnalysisState::Succeeded,
+            "Disabling the filter should recover the original detection batch.", failureCount);
+        SetResultExpect(service, true, failureCount);
+        SetExpect(GetLabels(service.BuildLabelImage(), failureCount) == originalLabels,
+            "Disabling selection should restore the complete original label map.", failureCount);
+        SetExpectNear(service.GetStatistics().voidVolumeMM3, unfiltered.voidVolumeMM3,
+            "Disabling selection should restore the original void volume.", failureCount);
+    }
+
+    void StartPartialFilterCase(int& failureCount) const
+    {
+        auto image = BuildTestImage();
+        SetSolidImage(image);
+        auto* voxels = static_cast<float*>(image->GetScalarPointer());
+        for (int z = 2; z <= 3; ++z) for (int y = 2; y <= 3; ++y) for (int x = 2; x <= 3; ++x)
+            voxels[GetLinearIndex(x, y, z, TestDims)] = 0.0f;
+        voxels[GetLinearIndex(5, 5, 4, TestDims)] = 0.0f;
+        voxels[GetLinearIndex(5, 5, 5, TestDims)] = 0.0f;
+        image->Modified();
+        const std::vector<float> originalInput(voxels, voxels + image->GetNumberOfPoints());
+        GapAnalysisService service;
+        SetExpect(service.SetGapInput(image), "Partial filter should freeze the two-pore input.", failureCount);
+        GapSurfaceParams surface; surface.isoValue = 0.5f; surface.background = 0.0f; surface.material = 1.0f;
+        service.SetSurface(surface);
+        auto params = BuildVoidParams(); service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr) && GetServiceState(service) == GapAnalysisState::Succeeded,
+            "Two-pore input should complete through DefX.", failureCount);
+        const auto raw = service.GetVoidRegions();
+        SetExpect(raw.size() == 2, "Partial filter fixture should detect two separate regions.", failureCount);
+        if (raw.size() != 2) return;
+        const auto rawLabels = GetLabels(service.BuildLabelImage(), failureCount);
+        const auto kept = *std::max_element(raw.begin(), raw.end(), [](const auto& a, const auto& b) { return a.volumeMM3 < b.volumeMM3; });
+        const auto excluded = *std::min_element(raw.begin(), raw.end(), [](const auto& a, const auto& b) { return a.volumeMM3 < b.volumeMM3; });
+        params.isFilterEnabled = true; params.minVolumeMM3 = (kept.volumeMM3 + excluded.volumeMM3) * 0.5;
+        service.SetVoid(params);
+        SetExpect(service.StartAsync(nullptr) && GetServiceState(service) == GapAnalysisState::Succeeded,
+            "Partial size selection should complete successfully.", failureCount);
+        SetResultExpect(service, true, failureCount);
+        const auto selected = service.GetVoidRegions();
+        SetExpect(selected.size() == 1 && selected.front().id == kept.id && selected.front().voxelCount == kept.voxelCount,
+            "Partial filtering should preserve the selected native ID and voxel count.", failureCount);
+        SetExpectNear(service.GetStatistics().voidVolumeMM3, kept.volumeMM3,
+            "Filtered statistics should contain only the selected region volume.", failureCount);
+        const auto selectedLabels = GetLabels(service.BuildLabelImage(), failureCount);
+        bool hasExpectedLabels = selectedLabels.size() == rawLabels.size();
+        for (std::size_t i = 0; hasExpectedLabels && i < rawLabels.size(); ++i)
+            hasExpectedLabels = selectedLabels[i] == (rawLabels[i] == kept.id ? kept.id : 0);
+        SetExpect(hasExpectedLabels, "Selected IDs should preserve their exact voxel positions and excluded IDs should become background.", failureCount);
+        SetExpect(!service.GetLabelStorageTransferred(), "Excluded IDs should use independent selected labels.", failureCount);
+        SetExpect(std::equal(originalInput.begin(), originalInput.end(), voxels),
+            "Result selection must preserve the original input voxel values.", failureCount);
     }
 
     int GetFailCount() const
@@ -442,6 +514,7 @@ public:
         StartSnapCase(failureCount);
         StartConvertCase(failureCount);
         StartFilterCase(failureCount);
+        StartPartialFilterCase(failureCount);
         return failureCount;
     }
 };
