@@ -1,9 +1,11 @@
 // 测试用途：通过对齐页面测试参考导入、方案保存、求解、结果应用与归档恢复。
 #include "ModuleFactories.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "AlignmentInput.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include <QPointer>
+#include <algorithm>
 namespace Manual {
 ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyAlignmentHostFeature> feature,
     std::shared_ptr<ReferenceDataSource> dataSource, QWidget* parent)
@@ -81,12 +83,29 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
             panel->SetAdmission(id, admission.status == AlignmentAdmissionStatus::Accepted,
                 {{"status", static_cast<int>(admission.status)}, {"requestId", QString::number(admission.requestId)}});
         }, TestPolicy::Change, true);
-    panel->AttachAction("SaveRecipe", {{"recipe", QJsonValue()}}, [panel, state, feature, complete](auto id, const auto& p) {
+    panel->AttachAction("SaveRecipe", {{"recipe", QJsonValue()},{"inputRoi",""}}, [panel, state, feature, complete](auto id, const auto& p) {
         if (!state->reference) throw std::invalid_argument("请先导入参考文件");
         const auto json = p["recipe"].isNull() ? state->reference->document["recipe"].toObject() : p["recipe"].toObject();
         AlignmentRequest request; request.action = AlignmentAction::SaveRecipe;
         request.recipe = GetRecipe(json, state->reference->mesh, state->reference->nominal);
-        const auto normalized=GetRecipeJson(*request.recipe);
+        const QJsonObject normalized{{"recipe",GetRecipeJson(*request.recipe)},{"inputRoi",p["inputRoi"]}};
+        const auto input=GetAlignmentInput(*state->reference);
+        if (const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],input.source)) {
+            const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,input.source,input.mesh);
+            for(auto& geometry:request.recipe->geometries)SetRegionRoi(geometry.region,vertices,input.mesh);
+            if(request.recipe->surfaceFit) {
+                if(!request.recipe->surfaceFit->sourceRegion)request.recipe->surfaceFit->sourceRegion=AlignmentRegion{};
+                SetRegionRoi(*request.recipe->surfaceFit->sourceRegion,vertices,input.mesh);
+            }
+            if(!request.recipe->fitPairs.empty()) {
+                auto& pairs=request.recipe->fitPairs;
+                pairs.erase(std::remove_if(pairs.begin(),pairs.end(),[&](const auto& pair){
+                    return !std::binary_search(vertices.begin(),vertices.end(),pair.vertexId);
+                }),pairs.end());
+                if(pairs.empty() && !request.recipe->surfaceFit)throw std::invalid_argument("区域内没有配准对应点");
+            }
+            panel->GetContext().records.SetAdmission(id,{{"inputRoi",GetRefText(*roi)}});
+        }
         if (request.recipe->unit != GetAlignmentInput(*state->reference).unit) throw std::invalid_argument("配方与参考单位不一致");
         panel->GetContext().records.SetAdmission(id, {{"resolvedRecipe", GetRecipeJson(*request.recipe)}});
         const auto admission = feature->SendRequest(std::move(request), [complete, id,state,normalized](auto result) {if(result.status==AlignmentStatus::FullyDetermined)state->savedParameters=normalized; complete(id, result); });
@@ -176,7 +195,7 @@ ModulePanel* CreateAlignmentTest(TestContext context, std::shared_ptr<MetrologyA
         }catch(const std::exception&){}
         const bool referenceCurrent = input && state->reference && state->reference->source==desiredSource && state->reference->mesh==desiredMesh && desiredSource==input->dataRevision;
         bool recipeChanged=false,poseChanged=false;
-        if(referenceCurrent)try {const QJsonValue recipe=panel->GetActionParameters("SaveRecipe")["recipe"];const auto json=recipe.isNull()?state->reference->document["recipe"].toObject():recipe.toObject();recipeChanged=!state->savedParameters.isEmpty() && GetRecipeJson(GetRecipe(json,state->reference->mesh,state->reference->nominal))!=state->savedParameters;QJsonArray poses;for(const auto pose:panel->GetActionParameters("Start")["initialPoses"].toArray())poses.append(GetValues(GetAffineMatrix(pose,true)));poseChanged=!state->startParameters.isEmpty() && QJsonObject{{"initialPoses",poses}}!=state->startParameters;}
+        if(referenceCurrent)try {const QJsonValue recipe=panel->GetActionParameters("SaveRecipe")["recipe"];const auto json=recipe.isNull()?state->reference->document["recipe"].toObject():recipe.toObject();recipeChanged=!state->savedParameters.isEmpty() && QJsonObject{{"recipe",GetRecipeJson(GetRecipe(json,state->reference->mesh,state->reference->nominal))},{"inputRoi",panel->GetActionParameters("SaveRecipe")["inputRoi"]}}!=state->savedParameters;QJsonArray poses;for(const auto pose:panel->GetActionParameters("Start")["initialPoses"].toArray())poses.append(GetValues(GetAffineMatrix(pose,true)));poseChanged=!state->startParameters.isEmpty() && QJsonObject{{"initialPoses",poses}}!=state->startParameters;}
         catch(const std::exception&){recipeChanged=true;}
         ParameterChoices results;
         const auto graph = panel->GetContext().workflow.getPublishedGraph ? panel->GetContext().workflow.getPublishedGraph() : QJsonObject();

@@ -107,14 +107,14 @@ void TestEditor()
     Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && main->overlays.empty()
         && data->GetDataGraph().commitId==before,"cancel wrote data or leaked overlays");
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"second draft failed");
-    RoiEditingRequest update;update.action=RoiEditingAction::SetDraft;update.boxToSource=geometry;update.draft=draft;update.draft->metadata.name="";
+    RoiEditingRequest update;update.action=RoiEditingAction::SetDraft;update.primitive=RoiPrimitive{};update.primitive->localToSource=geometry;update.draft=draft;update.draft->metadata.name="";
     Require(editor.SendRequest(update).error==RoiError::InvalidRequest && editor.GetState().hasDraft
         && editor.GetState().draft->nodes[0].primitive.localToSource==geometry,"invalid metadata destroyed the existing draft");
-    update.draft->metadata.name="renamed draft";(*update.boxToSource)[3]+=1;
+    update.draft->metadata.name="renamed draft";update.primitive->localToSource[3]+=1;
     Require(editor.SendRequest(update).error==RoiError::None && editor.GetState().hasDraft
-        && editor.GetState().draft->nodes[0].primitive.localToSource==*update.boxToSource,"geometry and metadata update did not retain the draft");
+        && editor.GetState().draft->nodes[0].primitive.localToSource==update.primitive->localToSource,"geometry and metadata update did not retain the draft");
     const auto saved=editor.SendRequest({RoiEditingAction::Commit});
-    Require(saved.roi && saved.roi->metadata.name=="renamed draft" && saved.roi->definition.nodes[0].primitive.localToSource==*update.boxToSource,"commit lost the applied draft name or geometry");
+    Require(saved.roi && saved.roi->metadata.name=="renamed draft" && saved.roi->definition.nodes[0].primitive.localToSource==update.primitive->localToSource,"commit lost the applied draft name or geometry");
     Require(saved.error==RoiError::None && saved.roi && !editor.GetState().hasDraft
         && main->overlays.size()==1 && slice->overlays.size()==1,"formal ROI projection was not retained");
     RoiEditingRequest shown;shown.action=RoiEditingAction::SetVisible;shown.isVisible=true;
@@ -142,8 +142,43 @@ void TestEditor()
     Require(editor.OnHostTick() && !editor.GetState().hasDraft,"stale draft not retired on owner tick");
     Require(editor.DetachHost(),"final detach failed");
 }
+void TestCurves()
+{
+    auto data=std::make_shared<TestDataPort>();
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    RoiEditingHostFeature editor({{"main"},{{"main"},{}}});HostFeatureContext context;context.data=data;context.views=views;
+    Require(editor.AttachHost(context),"curve editor attach failed");
+    DataBindingRevision catalogRevision=0;
+    for(auto shape:{RoiShape::Sphere,RoiShape::Cylinder}) {
+        RoiRequest draft;draft.definition.source=source;draft.metadata.name="曲面区域";
+        draft.expectedCatalogRevision=catalogRevision;
+        RoiNode node;node.primitive.shape=shape;node.primitive.origin={2,2,2};node.primitive.radius=1;
+        node.primitive.height=shape==RoiShape::Cylinder?2:0;draft.definition.nodes={node};
+        Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"curve draft rejected");
+        const auto commit=data->GetDataGraph().commitId;
+        RoiEditingRequest change;change.action=RoiEditingAction::SetDraft;change.primitive=node.primitive;
+        change.primitive->radius=-1;
+        Require(editor.SendRequest(change).error==RoiError::InvalidGeometry
+            && editor.GetState().draft->nodes.front().primitive.radius==1,"invalid curve changed draft");
+        change.primitive->radius=.75;
+        Require(editor.SendRequest(change).error==RoiError::None && data->GetDataGraph().commitId==commit,
+            "curve adjustment published data");
+        const auto saved=editor.SendRequest({RoiEditingAction::Commit});
+        Require(saved.error==RoiError::None && saved.roi,"curve commit failed");
+        catalogRevision=saved.roi->catalogRevision;
+        const auto read=data->GetRoi(data->GetDataGraph(),saved.roi->revision,source);
+        Require(read.error==RoiError::None && read.roi->GetContains({2,2,2})
+            && !read.roi->GetContains({3,2,2}) && read.roi->GetDefinition().nodes.front().primitive.radius==.75,
+            "saved curve selection differs from its analytic radius");
+    }
+    Require(editor.DetachHost() && main->overlays.empty(),"curve projection leaked on detach");
+}
 }
 int main()
 {
-    try {TestEditor(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {TestEditor();TestCurves(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -11,6 +11,9 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkCubeSource.h>
+#include <vtkSphereSource.h>
+#include <vtkCylinderSource.h>
+#include <vtkMath.h>
 #include <vtkCutter.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
@@ -36,9 +39,24 @@ bool GetMatrixValid(const std::array<double,16>& m)
     return std::isfinite(determinant) && determinant!=0;
 }
 
-class RoiBoxOverlay final : public FeatureOverlayBase {
+bool GetPrimitiveValid(const RoiPrimitive& p)
+{
+    const auto finite=[](double x){return std::isfinite(x);};
+    if ((p.boundaryPolicy!=RoiBoundaryPolicy::Closed && p.boundaryPolicy!=RoiBoundaryPolicy::CropV1)
+        || p.mask || !std::all_of(p.origin.begin(),p.origin.end(),finite)
+        || !std::all_of(p.normal.begin(),p.normal.end(),finite)
+        || !finite(p.radius) || !finite(p.height)) return false;
+    if (p.shape==RoiShape::Box) return GetMatrixValid(p.localToSource)
+        && p.origin==std::array<double,3>{0,0,0} && p.normal==std::array<double,3>{0,0,1}
+        && p.radius==0 && p.height==0;
+    if (p.localToSource!=roiIdentityMatrix || p.radius<=0) return false;
+    if (p.shape==RoiShape::Sphere) return p.height==0 && p.normal==std::array<double,3>{0,0,1};
+    const auto length=std::hypot(p.normal[0],p.normal[1],p.normal[2]);
+    return p.shape==RoiShape::Cylinder && p.height>0 && finite(length) && length>0;
+}
+class RoiOverlay final : public FeatureOverlayBase {
 public:
-    explicit RoiBoxOverlay(HostRenderViewRole role)
+    explicit RoiOverlay(HostRenderViewRole role)
     {
         m_cube->SetBounds(-1,1,-1,1,-1,1);
         m_transformFilter->SetInputConnection(m_cube->GetOutputPort());
@@ -61,14 +79,35 @@ public:
         (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normal,state.modelToWorld);
         Set3DPropsTransform(state.modelToWorld);
     }
-    void SetBox(const std::array<double,16>& box,bool isVisible,bool isDraft=true)
+    void SetPrimitive(const RoiPrimitive& primitive,bool isVisible,bool isDraft=true)
     {
-        vtkNew<vtkMatrix4x4> matrix; matrix->DeepCopy(box.data());
+        vtkNew<vtkMatrix4x4> matrix;
+        if (primitive.shape==RoiShape::Box) {
+            matrix->DeepCopy(primitive.localToSource.data());
+            m_transformFilter->SetInputConnection(m_cube->GetOutputPort());
+        } else if (primitive.shape==RoiShape::Sphere) {
+            m_sphere->SetCenter(primitive.origin.data());m_sphere->SetRadius(primitive.radius);
+            m_sphere->SetThetaResolution(48);m_sphere->SetPhiResolution(32);
+            m_transformFilter->SetInputConnection(m_sphere->GetOutputPort());
+        } else {
+            auto axis=primitive.normal;vtkMath::Normalize(axis.data());
+            std::array<double,3> u{},v{};vtkMath::Perpendiculars(axis.data(),u.data(),v.data(),0);
+            // VTK 圆柱沿局部 Y 轴；这里只近似显示，公共 ROI 查询仍使用精确圆柱。
+            for(int row=0;row<3;++row) {
+                matrix->SetElement(row,0,u[row]);matrix->SetElement(row,1,axis[row]);
+                matrix->SetElement(row,2,v[row]);matrix->SetElement(row,3,primitive.origin[row]);
+            }
+            m_cylinder->SetRadius(primitive.radius);m_cylinder->SetHeight(primitive.height);
+            m_cylinder->SetResolution(64);m_cylinder->CappingOn();
+            m_transformFilter->SetInputConnection(m_cylinder->GetOutputPort());
+        }
         m_transform->SetMatrix(matrix); m_actor->SetVisibility(isVisible);
         m_actor->GetProperty()->SetColor(isDraft ? 1.0 : 0.1, isDraft ? 0.7 : 0.95, isDraft ? 0.15 : 1.0);
     }
 private:
     vtkSmartPointer<vtkCubeSource> m_cube=vtkSmartPointer<vtkCubeSource>::New();
+    vtkSmartPointer<vtkSphereSource> m_sphere=vtkSmartPointer<vtkSphereSource>::New();
+    vtkSmartPointer<vtkCylinderSource> m_cylinder=vtkSmartPointer<vtkCylinderSource>::New();
     vtkSmartPointer<vtkTransform> m_transform=vtkSmartPointer<vtkTransform>::New();
     vtkSmartPointer<vtkTransformPolyDataFilter> m_transformFilter=vtkSmartPointer<vtkTransformPolyDataFilter>::New();
     vtkSmartPointer<vtkPlane> m_plane=vtkSmartPointer<vtkPlane>::New();
@@ -86,7 +125,7 @@ public:
     struct Binding final {
         std::shared_ptr<OverlayService> service;
         std::shared_ptr<FeatureViewService> view;
-        std::shared_ptr<RoiBoxOverlay> overlay;
+        std::shared_ptr<RoiOverlay> overlay;
     };
     RoiError GetAccessError() const noexcept
     {
@@ -120,7 +159,7 @@ public:
     void SetCommittedVisible()
     {
         for (auto& binding:m_committedBindings) {
-            binding.overlay->SetBox(m_committedBox,m_state.isVisible,false);
+            binding.overlay->SetPrimitive(m_committedPrimitive,m_state.isVisible,false);
             (void)binding.view->SetRenderNeeded();
         }
     }
@@ -137,7 +176,7 @@ public:
     }
     bool SetProjection()
     {
-        if (!m_state.hasDraft || !m_reference || !m_widget) return false;
+        if (!m_state.hasDraft || !m_reference) return false;
         const auto lease=m_lease.lock();
         if (!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread()) return false;
         const auto matrix=m_reference->GetModelToWorld();
@@ -153,10 +192,12 @@ public:
         vtkNew<vtkMatrix4x4> box; box->DeepCopy(m_request.definition.nodes[0].primitive.localToSource.data());
         vtkNew<vtkMatrix4x4> world; vtkMatrix4x4::Multiply4x4(display,box,world);
         vtkNew<vtkTransform> transform; transform->SetMatrix(world);
-        if (!m_state.isDragging) m_representation->SetTransform(transform);
-        m_widget->SetEnabled(m_state.isVisible ? 1:0);
+        if (m_widget) {
+            if (!m_state.isDragging) m_representation->SetTransform(transform);
+            m_widget->SetEnabled(m_state.isVisible ? 1:0);
+        }
         for (auto& binding:m_bindings) {
-            binding.overlay->SetBox(m_request.definition.nodes[0].primitive.localToSource,m_state.isVisible);
+            binding.overlay->SetPrimitive(m_request.definition.nodes[0].primitive,m_state.isVisible);
             (void)binding.view->SetRenderNeeded();
         }
         return true;
@@ -191,8 +232,7 @@ public:
         if (m_state.hasDraft || !m_bindings.empty()) return RoiError::InvalidRequest;
         if ((request.action!=RoiAction::Create && request.action!=RoiAction::SetGeometry)
             || request.definition.nodes.size()!=1 || request.definition.nodes[0].kind!=RoiNodeKind::Primitive
-            || request.definition.nodes[0].primitive.shape!=RoiShape::Box
-            || !GetMatrixValid(request.definition.nodes[0].primitive.localToSource)) return RoiError::UnsupportedRoi;
+            || !GetPrimitiveValid(request.definition.nodes[0].primitive)) return RoiError::UnsupportedRoi;
         const auto graph=m_data->GetDataGraph();
         const auto source=m_data->GetData(graph,request.definition.source);
         if (!source) return RoiError::MissingInput;
@@ -216,7 +256,7 @@ public:
             if (!ids.insert(view.id).second) continue;
             auto port=m_views->GetFeaturePort(view.id); auto overlays=m_views->GetOverlayPort(view.id);
             if (!port || !overlays) return RoiError::Unavailable;
-            prepared.push_back({overlays,port,std::make_shared<RoiBoxOverlay>(view.role)});
+            prepared.push_back({overlays,port,std::make_shared<RoiOverlay>(view.role)});
         }
         if (!ids.count(input->view.id)) return RoiError::InvalidRequest;
         m_bindings.reserve(prepared.size());
@@ -232,6 +272,7 @@ public:
             const auto& attached=m_bindings.back();
             if (!attached.service->AttachOverlay(attached.overlay)) { (void)ClearDraft(); return RoiError::Unavailable; }
         }
+        if (request.definition.nodes[0].primitive.shape==RoiShape::Box) {
         m_representation=vtkSmartPointer<vtkBoxRepresentation>::New();
         m_representation->SetPlaceFactor(1);
         double bounds[6]{-1,1,-1,1,-1,1}; m_representation->PlaceWidget(bounds);
@@ -243,6 +284,7 @@ public:
         });
         for (auto event:{vtkCommand::StartInteractionEvent,vtkCommand::InteractionEvent,vtkCommand::EndInteractionEvent})
             m_widget->AddObserver(event,callback);
+        }
         m_state.hasDraft=true; m_state.draft=request.definition;
         if (!SetProjection()) { (void)ClearDraft(); return RoiError::Unavailable; }
         return RoiError::None;
@@ -255,7 +297,7 @@ public:
     std::weak_ptr<const FeatureViewLease> m_lease;
     std::vector<Binding> m_bindings;
     std::vector<Binding> m_committedBindings;
-    std::array<double,16> m_committedBox=roiIdentityMatrix;
+    RoiPrimitive m_committedPrimitive;
     DataRevisionRef m_committedSource;
     vtkSmartPointer<vtkBoxWidget2> m_widget;
     vtkSmartPointer<vtkBoxRepresentation> m_representation;
@@ -315,21 +357,22 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
     if (result.error!=RoiError::None) return result;
     if ((request.action==RoiEditingAction::Begin && !request.draft)
         || (request.draft && request.action!=RoiEditingAction::Begin && request.action!=RoiEditingAction::SetDraft)
-        || (request.action==RoiEditingAction::SetDraft)!=request.boxToSource.has_value()
+        || (request.action==RoiEditingAction::SetDraft)!=request.primitive.has_value()
         || (request.action==RoiEditingAction::SetVisible)!=request.isVisible.has_value()) {result.error=RoiError::InvalidRequest; return result;}
     try {
         switch (request.action) {
         case RoiEditingAction::Begin: result.error=state.Begin(*request.draft); break;
         case RoiEditingAction::SetDraft:
-            if (!state.m_state.hasDraft || state.m_state.isDragging || !GetMatrixValid(*request.boxToSource)) {result.error=RoiError::InvalidGeometry; break;}
+            if (!state.m_state.hasDraft || state.m_state.isDragging || !GetPrimitiveValid(*request.primitive)
+                || request.primitive->shape!=state.m_request.definition.nodes[0].primitive.shape) {result.error=RoiError::InvalidGeometry; break;}
             {
-                // SetDraft 可携带同源草稿元信息；不销毁已有几何和交互资源。
+                // 几何和同源元信息在成功投影后一起成为当前草稿。
                 if(request.draft && (request.draft->definition.source!=state.m_request.definition.source
                     || request.draft->metadata.name.empty() || request.draft->metadata.name.size()>256
                     || request.draft->metadata.group.size()>256 || request.draft->metadata.description.size()>4096)) {result.error=RoiError::InvalidRequest;break;}
-                const auto previous=state.m_request.definition.nodes[0].primitive.localToSource;
-                state.m_request.definition.nodes[0].primitive.localToSource=*request.boxToSource;
-                if (!state.SetProjection()) {state.m_request.definition.nodes[0].primitive.localToSource=previous; result.error=RoiError::Unavailable;}
+                const auto previous=state.m_request.definition.nodes[0].primitive;
+                state.m_request.definition.nodes[0].primitive=*request.primitive;
+                if (!state.SetProjection()) {state.m_request.definition.nodes[0].primitive=previous; result.error=RoiError::Unavailable;}
                 else {if(request.draft)state.m_request.metadata=request.draft->metadata;state.m_state.draft=state.m_request.definition; result.error=RoiError::None;}
             }
             break;
@@ -346,7 +389,7 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
             if (result.error==RoiError::None) {
                 state.m_state.committedRoi=result.roi->revision;
                 state.ClearCommitted();
-                state.m_committedBox=state.m_request.definition.nodes[0].primitive.localToSource;
+                state.m_committedPrimitive=state.m_request.definition.nodes[0].primitive;
                 state.m_committedSource=state.m_request.definition.source;
                 state.m_committedBindings.swap(state.m_bindings);
                 state.SetCommittedVisible();

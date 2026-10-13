@@ -624,7 +624,7 @@ class WallThicknessHostFeature::Impl final
                     archive.limits = m_config;
                 }
                 const auto graph = m_context.data->GetDataGraph();
-                task->work = ThicknessData::BuildWork(graph, archive, task->expectations);
+                task->work = ThicknessData::BuildWork(*m_context.data, graph, archive, task->expectations);
                 auto readers=FeatureInternal::StartInputReads(graph,task->expectations,"wall-thickness-reader");
                 if (!readers) return {};
                 task->readers=std::move(*readers);
@@ -842,6 +842,8 @@ class WallThicknessHostFeature::Impl final
                      DataProvenance{std::string(featureId), "global-automatic-surface-wall-thickness",
                                     task->work.archive.algorithmVersion,
                                     ThicknessData::GetParameters(task->work.archive)}});
+                if(task->work.archive.params.evaluationRoi)
+                    transaction.outputs.back().inputs.push_back({"evaluation-roi",*task->work.archive.params.evaluationRoi});
                 transaction.bindings.push_back({std::string(ThicknessData::bindingName),
                                                 task->binding.revision, true, task->binding.target,
                                                 ref});
@@ -982,6 +984,11 @@ class WallThicknessHostFeature::Impl final
         const auto payload = ThicknessData::GetResult(m_context.data->GetDataGraph(), ref);
         if (!payload) return {};
         const auto &record = payload->GetRecord();
+        if(record.archive.params.evaluationRoi) {
+            const auto roi=m_context.data->GetRoi(m_context.data->GetDataGraph(),
+                *record.archive.params.evaluationRoi,record.archive.input.source);
+            if(roi.error!=RoiError::None || !roi.roi || !roi.roi->GetContains(point))return {};
+        }
         if (record.archive.params.evaluationBounds)
             for (unsigned a = 0; a < 3; ++a)
                 if (point[a] < (*record.archive.params.evaluationBounds)[2 * a] - record.field.coordinateTolerance ||
@@ -1008,7 +1015,8 @@ FeatureDataContract WallThicknessHostFeature::GetDataContract() const
 {
     return {{{"source-volume", DataFacets::scalarGrid3D, true},
              {"labels", DataFacets::labelMap3D, true},
-             {"mesh", DataFacets::surfaceMesh, true}},
+             {"mesh", DataFacets::surfaceMesh, true},
+             {"evaluation-roi", DataFacets::roiGeometry, false}},
             {{"result", ThicknessData::resultType, {ThicknessData::resultFacet}}}};
 }
 std::vector<FeatureOperationState> WallThicknessHostFeature::GetOperationStates() const

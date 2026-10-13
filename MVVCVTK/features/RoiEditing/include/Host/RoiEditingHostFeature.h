@@ -1,5 +1,6 @@
 #pragma once
 #include "Host/HostFeature.h"
+#include "Data/RoiTypes.h"
 
 struct RoiEditingConfig final {
     HostViewTarget referenceView;
@@ -10,7 +11,7 @@ struct RoiEditingRequest final {
     RoiEditingAction action = RoiEditingAction::Begin;
     // Begin 的完整草稿；SetDraft 可选携带同源元信息，成功投影后与几何一起更新。
     std::optional<RoiRequest> draft;
-    std::optional<std::array<double,16>> boxToSource;
+    std::optional<RoiPrimitive> primitive;
     std::optional<bool> isVisible;
 };
 struct RoiEditingState final {

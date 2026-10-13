@@ -44,7 +44,7 @@ class ResultPayload final : public IDataPayload
 };
 bool SetType(TrustedDataPort &data);
 bool GetCurrent(const DataGraphSnapshot &graph, const std::vector<DataExpectation> &expectations);
-ThicknessAlgorithm::Work BuildWork(const DataGraphSnapshot &graph, const ThicknessArchive &archive,
+ThicknessAlgorithm::Work BuildWork(TrustedDataPort& data, const DataGraphSnapshot &graph, const ThicknessArchive &archive,
                                    std::vector<DataExpectation> &expectations);
 DataBinding GetBinding(const DataGraphSnapshot &graph);
 std::shared_ptr<const ResultPayload> GetResult(const DataGraphSnapshot &graph,

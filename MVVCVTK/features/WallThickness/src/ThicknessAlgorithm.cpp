@@ -698,6 +698,8 @@ class Kernel final
             const auto p = Interpolate(triangle, bary);
             sample.source = Add(p, m_geometry.origin);
             sample.area = m_areas[triangle]*patch.fraction;
+            if (m_work.evaluationRoi && !m_work.evaluationRoi->GetContains(sample.source))
+                sample.validity=ThicknessValidity::OutsideEvaluation;
             if (m_params.evaluationBounds)
                 for (std::size_t a = 0; a < 3; ++a)
                     if (sample.source[a] < (*m_params.evaluationBounds)[a * 2] ||
@@ -764,6 +766,7 @@ class Kernel final
 } // namespace
 bool GetParamsValid(const ThicknessParams &p) noexcept
 {
+    if(p.evaluationRoi && !GetDataRevisionRefValid(*p.evaluationRoi))return false;
     if (!Positive(p.maxDistance) || !Positive(p.sampleSpacing) || !p.materialThreshold ||
         !std::isfinite(*p.materialThreshold) || !Nonnegative(p.maxBoundaryError) ||
         static_cast<unsigned>(p.boundaryPolicy) > 1 ||

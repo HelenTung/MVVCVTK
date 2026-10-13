@@ -5,7 +5,7 @@
   "viewLayout":"Inspection",
   "steps":[
     {"control":"businessPrimary","module":"Data","action":"Load","expectPrimaryAction":"Load","expectStatus":"Succeeded","parameters":{}},
-    {"control":"nextButton","module":"Surface","action":"Preview","parameterAction":"GlobalAutomatic","parameters":{"componentSelection":"All","initialIsoValue":null,"materialRange":null,"roiModelBounds":null},"expectStatus":"Succeeded"},
+    {"control":"nextButton","module":"Surface","action":"Preview","parameterAction":"GlobalAutomatic","parameters":{"componentSelection":"All","initialIsoValue":null,"materialRange":null,"analysisRoi":""},"expectStatus":"Succeeded"},
     {"control":"currentPrimary","module":"Surface","action":"Determine","expectPrimaryAction":"Determine","expectStatus":"Succeeded","saveAs":"formalA","expectState":{"parametersChanged":false},"showStatistics":true,"waitHistogram":true,"statisticsAudit":"@Output/formal-A-statistics.json"},
     {"control":"editParameters","module":"Surface","action":"GlobalAutomatic","parameters":{"componentSelection":"Largest"},"expectPrimaryAction":"Determine","expectState":{"parametersChanged":true}},
     {"control":"nextButton","module":"Surface","action":"Preview","parameterAction":"GlobalAutomatic","expectStatus":"Succeeded","expectState":{"formalMesh":"$formalA.result.mesh","points":"$formalA.result.points","objectCount":"$formalA.result.objectCount","parametersChanged":true,"hasPreview":true},"stateAudit":"@Output/formal-A-preview-B.json","screenshot":"@Output/formal-A-preview-B.png"},

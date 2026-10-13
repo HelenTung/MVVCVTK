@@ -1,6 +1,7 @@
 // 测试用途：通过伪影页面测试环形校正、扩散、候选发布与校正数据选择。
 #include "ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/RoiSelection.h"
 #include "Host/ArtifactReductionHostFeature.h"
 #include <algorithm>
 namespace Manual {
@@ -56,7 +57,7 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
     panel->SetNotice("处理轴使用网格轴，环形中心使用截面索引。计算候选 → 发布校正结果 → 使用校正数据。灰度统计变化不能单独证明校正保真。");
     struct Pending { std::uint64_t operation = 0,binding=0; DataRevisionRef source; DataRevisionRef output; ArtifactInputMode mode=ArtifactInputMode::CurrentPrimary; QString action; QJsonObject parameters; };
     auto pending = std::make_shared<Pending>();
-    const auto defaults = GetJson(R"({"source":"current","processingMask":null,"protectionMask":null,"materialMask":null,"timeoutMs":null,"ring":{"axis":2,"centerIndex":null,"threshMin":0,"threshMax":1,"threshold":1,"angularMin":30,"ringWidth":3,"mode":"Wrap","strength":1,"maxCorrection":1},"diffusion":{"iterations":4,"threshold":1,"factor":0.25,"slabDepth":8}})");
+    const auto defaults = GetJson(R"({"source":"current","processingRoi":"","protectionRoi":"","qualityRoi":"","timeoutMs":null,"ring":{"axis":2,"centerIndex":null,"threshMin":0,"threshMax":1,"threshold":1,"angularMin":30,"ringWidth":3,"mode":"Wrap","strength":1,"maxCorrection":1},"diffusion":{"iterations":4,"threshold":1,"factor":0.25,"slabDepth":8}})");
     const auto prepare=[panel,feature,pending](std::uint64_t id,const QJsonObject& p,const QString& combination) {
             ArtifactRequest prepare;
             if (GetText(p, "source") == "current") {
@@ -64,9 +65,9 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
                 if (!descriptor) throw std::invalid_argument("未加载输入");
                 prepare.source = descriptor->dataRevision;
             } else { prepare.source = GetRef(p["source"]); prepare.inputMode = ArtifactInputMode::ExplicitRevision; }
-            prepare.processingRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["processingMask"], "Artifact processingRoi", false);
-            prepare.protectionRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["protectionMask"], "Artifact protectionRoi", false);
-            prepare.qualityRoi = panel->GetContext().workflow.createInputRoi(prepare.source, QJsonValue(), p["materialMask"], "Artifact qualityRoi", false);
+            prepare.processingRoi = GetSelectedRoi(*panel->GetSession(), p["processingRoi"], prepare.source);
+            prepare.protectionRoi = GetSelectedRoi(*panel->GetSession(), p["protectionRoi"], prepare.source);
+            prepare.qualityRoi = GetSelectedRoi(*panel->GetSession(), p["qualityRoi"], prepare.source);
             if (!p["timeoutMs"].isNull()) prepare.timeoutMs = GetInt(p, "timeoutMs");
             if (combination != "Diffusion") {
                 const auto r = p["ring"].toObject();

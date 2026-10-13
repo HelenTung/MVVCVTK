@@ -7,6 +7,7 @@
 #include "Support/SceneGraph.h"
 #include "Support/PathInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Support/BusinessStep.h"
 #include <QCheckBox>
 #include <QFileDialog>
@@ -398,10 +399,42 @@ void ModulePanel::RefreshWorkflow()
         if (node["type"].toString().contains("label",Qt::CaseInsensitive)) labels.append({ref,label});
         if (node["type"] == "org.mvvcvtk.surface-mesh") meshes.append({ref,label});
     }
+    std::map<DataRevisionRef,ParameterChoices> regionsBySource;
     for (const auto& form : m_forms) {
         if (auto* field = form.second->GetField("source")) field->SetReferenceChoices(sources);
         if (auto* field = form.second->GetField("labels")) field->SetReferenceChoices(labels);
         if (auto* field = form.second->GetField("mesh")) field->SetReferenceChoices(meshes);
+        if (session) {
+            std::vector<std::pair<QString,ParameterEditor*>> roiFields;
+            for (const auto* key : {"analysisRoi", "processingRoi", "protectionRoi", "qualityRoi",
+                "editRoi", "evaluationRoi", "inputRoi", "roi"})
+                if(auto* field=form.second->GetField(key))roiFields.emplace_back(key,field);
+            if(roiFields.empty())continue;
+            auto source = descriptor ? descriptor->dataRevision : DataRevisionRef{};
+            if (auto* field = form.second->GetField("source")) {
+                const auto value = field->GetValue();
+                if (value.isString() && value != "current") {
+                    try { source = GetRef(value); } catch (const std::invalid_argument&) { source = {}; }
+                }
+            }
+            const auto inserted=regionsBySource.emplace(source,ParameterChoices{});
+            if(inserted.second)inserted.first->second=GetRoiChoices(*session, source, m_name=="Roi");
+            const auto& regions=inserted.first->second;
+            for (const auto& roiField : roiFields) {
+                    auto* field=roiField.second;
+                    field->SetReferenceChoices(regions);
+#if defined(MANUAL_ROI)
+                    if (m_name != "Roi") field->SetRegionCreator([this, action = form.first, key = roiField.first, source] {
+                        const auto current=GetSession()->GetImageDescriptor();
+                        if(!current || current->dataRevision!=source) {
+                            SetNotice("编辑新区域前，请先将本次业务所选的源修订设为当前输入。");return;
+                        }
+                        m_context.workflow.roiConsumer = {{"module", m_name}, {"action", action}, {"key", key}};
+                        if (m_context.workflow.onNavigate) m_context.workflow.onNavigate("Roi", "Begin", {});
+                    });
+#endif
+                }
+        }
     }
     const auto busy = m_context.workflow.GetBusyOperation(); const bool closing = m_context.workflow.GetIsClosing();
     RefreshBusinessStep(state,input);

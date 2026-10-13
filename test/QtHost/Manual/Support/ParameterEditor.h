@@ -29,6 +29,7 @@ public:
     void SetAppliedBoolean(QJsonValue value, const QString& context, const QString& unavailableReason = {});
     void SetDefaultValue(const QJsonValue& value);
     void SetReferenceChoices(const ParameterChoices& choices);
+    void SetRegionCreator(std::function<void()> onCreate);
     void SetAllowedChoices(const ParameterChoices& choices);
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
@@ -55,6 +56,8 @@ private:
     QPushButton* m_unsetBoolean = nullptr;
     QWidget* m_body = nullptr;
     QWidget* m_input = nullptr;
+    QPushButton* m_createRegion = nullptr;
+    std::function<void()> m_onCreateRegion;
     QVBoxLayout* m_rowLayout = nullptr;
     std::map<QString, QWidget*> m_groupPages;
     std::map<QString, QWidget*> m_groupSections;

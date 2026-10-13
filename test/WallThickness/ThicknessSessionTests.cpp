@@ -237,7 +237,7 @@ private:
     std::shared_ptr<WallThicknessHostFeature> m_wall;
     std::shared_ptr<DisplayFault> m_fault;
 };
-void TestSession(Acceptance c)
+void TestSession(Acceptance c, bool useRoi = false)
 {
     HostSessionConfig config;
     config.driveMode = HostDriveMode::HostDriven;
@@ -423,6 +423,14 @@ void TestSession(Acceptance c)
                                    c.unit};
     std::get<ThicknessStartRequest>(request).params = c.params;
     std::get<ThicknessStartRequest>(request).params.materialThreshold = mesh->resolvedParams.initialIsoValue;
+    if(useRoi) {
+        RoiRequest region;region.definition.source=sourceRevision;region.metadata.name="上侧评价点";
+        RoiNode box;box.primitive.localToSource={5.5,0,0,15.5,0,5.5,0,15.5,0,0,2,20,0,0,0,1};
+        region.definition.nodes={box};const auto created=session.SetRoi(region);
+        Require(created.error==RoiError::None && created.roi,"Evaluation ROI creation failed.");
+        auto& params=std::get<ThicknessStartRequest>(request).params;
+        params.evaluationBounds.reset();params.evaluationRoi=created.roi->revision;
+    }
     std::get<ThicknessStartRequest>(request).evaluation = c.evaluation;
     ThicknessDisplay display;
     display.range = {0, c.params.maxDistance};
@@ -447,6 +455,24 @@ void TestSession(Acceptance c)
     }
     Require(result && completed->status == ThicknessStatus::Succeeded && completed->isActivated,
             "Wall public analysis failed.");
+    if(useRoi) {
+        const auto ref=std::get<ThicknessStartRequest>(request).params.evaluationRoi;
+        Require(result->archive.params.evaluationRoi==ref,"Result lost its exact ROI revision.");
+        const auto roi=probe->context.data->GetRoi(probe->context.data->GetDataGraph(),*ref,sourceRevision);
+        Require(roi.error==RoiError::None,"Published evaluation ROI is unreadable.");
+        std::size_t inside=0,outside=0;
+        for(const auto& sample:*result->samples) {
+            if(roi.roi->GetContains(sample.source)) {
+                ++inside;Require(sample.validity!=ThicknessValidity::OutsideEvaluation,"ROI interior was excluded.");
+            } else {++outside;Require(sample.validity==ThicknessValidity::OutsideEvaluation,"ROI exterior was evaluated.");}
+        }
+        const auto data=probe->context.data->GetData(probe->context.data->GetDataGraph(),completed->result);
+        Require(inside && outside && std::any_of(data->inputs.begin(),data->inputs.end(),[&](const auto& input){
+            return input.role=="evaluation-roi" && input.source==*ref;
+        }),"Published result lacks its evaluation selection dependency.");
+        Require(!wall->GetThicknessValue(completed->result,{15.5,15.5,11.5}),"Outside ROI query returned a thickness.");
+        // 上侧约 20，下侧约 12；ROI 只包含上侧，已有 8 mm 解析参照仍须通过。
+    }
     std::cout << std::setprecision(17) << "minimum=" << result->statistics.minimum.value_or(-1)
               << " coverage=" << result->statistics.coverage
               << " samples=" << result->statistics.sampleCount << '\n';
@@ -569,6 +595,8 @@ int main(int argc, char **argv)
     {
         if (argc == 2 && std::string(argv[1]) == "--synthetic")
             TestSession(Synthetic());
+        else if (argc == 2 && std::string(argv[1]) == "--shared-roi")
+            TestSession(Synthetic(),true);
         else if (argc == 3 && std::string(argv[1]) == "--real")
             TestSession(ReadCase(argv[2]));
         else if (argc == 4 && std::string(argv[1]) == "--field")

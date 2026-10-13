@@ -48,7 +48,7 @@ QJsonValue Shape(const QString& key)
     if (key == "nominal" || key == "minNormalCosine") return 0.;
     if (key == "worldCenter" || key == "seedModelPoint" || key == "targetNormal") return QJsonArray{0,0,0};
     if(key=="segmentFrom" || key=="segmentTo")return 0.0;
-    if (key == "evaluationBounds" || key == "extent" || key == "roiModelBounds" || key == "targetBounds" || key=="sectionPlaneBounds") return QJsonArray{0,0,0,0,0,0};
+    if (key == "extent" || key == "targetBounds" || key=="sectionPlaneBounds") return QJsonArray{0,0,0,0,0,0};
     if (key == "windowLevel" || key == "radiusRange") return QJsonArray{0,1};
     if (key == "centerIndex") return QJsonArray{0,0};
     if (key == "dimensions") return QJsonArray{0,0,0};
@@ -130,6 +130,12 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
       m_title(title.isEmpty() ? GetParameterText(m_key) : std::move(title)), m_schema(std::move(schema)),
       m_listItem(listItem), m_optional(m_schema.isNull() && !m_key.isEmpty())
 {
+    if(m_module=="Roi") {
+        if(m_key=="name")m_title="区域名称";
+        else if(m_key=="shape")m_title="区域形状";
+        else if(m_key=="axis")m_title="柱轴（源模型坐标）";
+        else if(m_key=="centerMM")m_title="区域中心（源模型坐标）";
+    }
     m_boolean = m_schema.isBool() || (m_schema.isNull() && Shape(m_key).isBool());
     setObjectName(m_key); setAccessibleName(m_title);
     setMinimumWidth(0); setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -152,6 +158,13 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
 bool ParameterEditor::GetFieldApplicable(const QString& key) const
 {
     if (m_applicableFields.contains(key) && !m_applicableFields[key].toBool()) return false;
+    if(m_key.isEmpty() && m_module=="Roi" && m_action=="Begin") {
+        const auto shape=m_fields.find("shape");
+        const auto selected=shape==m_fields.end()?QString("Box"):shape->second->GetValue().toString();
+        if(key=="boxToSource" || key=="sizeMM" || key=="direction3D")return selected=="Box";
+        if(key=="radius")return selected!="Box";
+        if(key=="axis" || key=="height")return selected=="Cylinder";
+    }
     if (m_key.isEmpty() && m_module == "Surface" && key == "seedModelPoint") {
         const auto selection = m_fields.find("componentSelection");
         return selection != m_fields.end() && selection->second->GetValue() == "Seeded";
@@ -273,6 +286,18 @@ void ParameterEditor::SetReferenceChoices(const ParameterChoices& choices)
     for (const auto& choice : next) input->addItem(choice.second, choice.first);
     input->setCurrentIndex(input->findData(current));
 }
+void ParameterEditor::SetRegionCreator(std::function<void()> onCreate)
+{
+    m_onCreateRegion = std::move(onCreate);
+    if (!m_createRegion && qobject_cast<QComboBox*>(m_input)) {
+        m_createRegion = new QPushButton("新建区域", m_body);
+        m_createRegion->setObjectName("createRegion");
+        static_cast<QHBoxLayout*>(m_body->layout())->addWidget(m_createRegion);
+        connect(m_createRegion, &QPushButton::clicked, this, [this] {
+            if (m_onCreateRegion) m_onCreateRegion();
+        });
+    }
+}
 void ParameterEditor::SetAllowedChoices(const ParameterChoices& choices)
 {
     auto* input=qobject_cast<QComboBox*>(m_input);if(!input || m_type!=QJsonValue::String)return;
@@ -287,7 +312,7 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     auto effective = value;
     if (effective.isNull()) effective = m_schema.isNull() ? Shape(m_key) : m_schema;
     if (m_body) { m_layout->removeWidget(m_body); delete m_body; }
-    m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr;
+    m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr; m_createRegion = nullptr;
     m_groupPages.clear(); m_groupSections.clear();
     m_booleanState = nullptr; m_unsetBoolean = nullptr; m_booleanSpecified = !value.isNull();
     if (m_stateBound) m_booleanEdited = value.isBool();
@@ -305,8 +330,9 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
 {
     if (value.isObject()) {
         const auto object = value.toObject(); auto keys = object.keys();
-        const QStringList first{"filePath", "viewScope", "viewId", "target", "seed", "seeds", "sourcePointsMM", "ring", "diffusion", "componentSelection", "initialIsoValue", "seedModelPoint", "roiModelBounds", "world", "worldAxis", "worldCenter", "dimensions", "spacingLPS", "originLPS", "directionLPS"};
+        const QStringList first{"filePath", "viewScope", "viewId", "target", "seed", "seeds", "sourcePointsMM", "ring", "diffusion", "componentSelection", "initialIsoValue", "seedModelPoint", "analysisRoi", "world", "worldAxis", "worldCenter", "dimensions", "spacingLPS", "originLPS", "directionLPS"};
         for (auto i = first.crbegin(); i != first.crend(); ++i) if (keys.removeOne(*i)) keys.prepend(*i);
+        if(m_module=="Roi" && keys.removeOne("shape"))keys.prepend("shape");
         const bool seedRow = m_listItem && object.contains("imageIndex") && object.size() == 2;
         QSet<QString> groups;
         if (m_key.isEmpty()) for (const auto& key : keys)

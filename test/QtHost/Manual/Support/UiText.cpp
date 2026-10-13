@@ -62,11 +62,17 @@ QString GetModuleText(const QString& module)
 {
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "裁剪"}, {"Gap", "孔隙分析"}, {"Part", "分割与编辑"},
-        {"Surface", "表面测定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","ROI 区域"}};
+        {"Surface", "表面测定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","区域管理"}};
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
 {
+    if(action=="PrepareRoi")return "选用已有区域";
+    if(action=="OpenCrop")return "进入裁剪";
+    if(action=="OpenGap")return "进入孔隙分析";
+    if(module=="Roi" && action=="Edit")return "编辑已有区域";
+    if(module=="Roi" && action=="SetMetadata")return "更新区域信息";
+    if(module=="Roi" && action=="Copy")return "复制区域";
     if(action=="Preview")return "生成表面预览";
     if(action=="Determine")return "生成正式测量表面";
     if(action=="OpenWall")return "进入壁厚分析";
@@ -146,6 +152,11 @@ QString GetParameterSectionText(const QString& module, const QString& action)
 }
 QString GetParameterText(const QString& key)
 {
+    if(key=="description")return "说明";
+    static const QHash<QString,QString> regionLabels{{"analysisRoi","分析范围"},{"processingRoi","处理范围"},
+        {"protectionRoi","保护范围"},{"qualityRoi","质量统计范围"},{"editRoi","编辑范围"},
+        {"evaluationRoi","评价范围"},{"inputRoi","已有区域"},{"roi","区域对象"},{"group","区域分组"}};
+    if(regionLabels.contains(key))return regionLabels.value(key);
     if(key=="pageOffset")return "缺陷列表起始行";
     if(key=="rowIndex")return "缺陷表原始行号";
     if(key=="table")return "缺陷表修订";
@@ -173,7 +184,7 @@ QString GetParameterText(const QString& key)
         {"labels", "材料标签图修订"}, {"materialLabels", "材料标签集合"}, {"maxDistance", "搜索距离上限"},
         {"sampleSpacing", "显示采样间距"}, {"materialThreshold", "原始灰度材料阈值"}, {"materialRange", "背景/材料灰度值"},
         {"coneAngleDegrees", "搜索锥半角（度）"}, {"directionCount", "搜索方向数量"}, {"boundaryPolicy", "局部支持策略"},
-        {"maxBoundaryError", "边界误差上限"}, {"evaluationBounds", "评估空间范围"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
+        {"maxBoundaryError", "边界误差上限"}, {"lower", "壁厚下限"}, {"upper", "壁厚上限"},
         {"histogramRange", "直方图范围"}, {"histogramBins", "直方图分箱数"}, {"minRegionArea", "最小异常区域面积"},
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
         {"filePath", "输入文件路径"}, {"outputPath", "输出文件路径"}, {"outputDir", "输出目录"}, {"archivePath", "归档文件路径"},
@@ -199,21 +210,21 @@ QString GetParameterText(const QString& key)
         {"minVolumeMM3", "最小孔隙体积（mm³）"}, {"threshold", "分割阈值"}, {"minPartVoxels", "最小零件体素数"},
         {"isVisible", "显示结果"}, {"boxToSource", "区域框到源空间的变换矩阵"}, {"isSelected", "选中零件"}, {"isReviewed", "已复核"}, {"colorRGBA", "颜色（RGBA）"},
         {"target", "目标零件"}, {"name", "名称"}, {"expectedCatalogRevision", "预期零件目录版本"},
-        {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"}, {"roiMask", "作用区域掩码"},
-        {"protectionMask", "保护掩码"}, {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},
+        {"expectedLabelMap", "预期标签图修订"}, {"extent", "编辑索引范围"},
+        {"protectedParts", "受保护零件列表"}, {"sourcePointsMM", "源坐标笔刷点（mm）"},
         {"radiusMM", "笔刷半径（mm）"}, {"slice", "笔刷切片平面"}, {"overwriteParts", "允许覆盖的零件"},
         {"isBackgroundAllowed", "允许修改背景"}, {"seed", "种子位置（体素）"}, {"seeds", "种子列表"},
         {"minIslandVoxels", "孤岛体素数阈值"}, {"minimum", "生长灰度下限"}, {"maximum", "生长灰度上限"},
         {"barriers", "拆分屏障"}, {"parts", "待合并零件列表"}, {"previewId", "编辑候选编号"},
         {"componentSelection", "连通分量选择"}, {"initialIsoValue", "初始等值阈值"}, {"seedModelPoint", "种子点（模型坐标）"},
-        {"roiModelBounds", "作用范围（模型坐标）"}, {"profileHalfLengthModel", "剖面半长（模型单位）"},
+        {"profileHalfLengthModel", "剖面半长（模型单位）"},
         {"profileSampleStepModel", "剖面采样间距（模型单位）"}, {"maximumOffsetModel", "最大定位偏移（模型单位）"},
         {"profileSmoothingSigmaModel", "剖面平滑尺度（模型单位）"}, {"minimumObjectVoxels", "最小对象体素数"},
         {"minimumContrast", "最小灰度对比度"}, {"targetRequestId", "目标计算请求编号"}, {"maxPoints", "最大采样点数"},
         {"localFraction", "局部等值比例"}, {"grayPair", "界面两侧灰度范围"}, {"sideA", "背景侧范围"}, {"sideB", "材料侧范围"},
         {"minimumCnr", "最小对比噪声比"}, {"maximumPlateauNoiseRatio", "平台噪声比例上限"}, {"maximumNormalizedResidual", "归一化拟合残差上限"},
         {"minimumEdgeWidthModel", "最小边缘宽度（模型单位）"}, {"maximumEdgeWidthModel", "最大边缘宽度（模型单位）"}, {"minimumEdgeSeparationModel", "最小边缘间距（模型单位）"},
-        {"source", "源数据修订"}, {"processingMask", "处理区域掩码"}, {"materialMask", "材料统计掩码"},
+        {"source", "源数据修订"},
         {"timeoutMs", "计算超时（毫秒）"}, {"ring", "环形校正参数"}, {"diffusion", "扩散滤波参数"}, {"requestId", "计算请求编号"},
         {"isEnabled", "启用旋转"}, {"worldAxis", "世界坐标旋转轴"}, {"worldCenter", "世界坐标旋转中心"},
         {"reference", "名义参考与约束模板"}, {"mesh", "测量网格修订"}, {"recipe", "对齐方案"},
@@ -268,7 +279,6 @@ QString GetParameterHelp(const QString& key)
         {"visibility", "分别指定是否修改三维切片平面、十字线和标尺，再设置启用状态。"},
         {"indexBoxes", "每行定义一个索引盒，分别填写三个轴的最小与最大索引。"},
         {"extent", "分别填写各轴最小与最大索引；不勾选“指定”时不额外限制。"},
-        {"roiModelBounds", "分别填写各轴最小与最大模型坐标。"},
         {"target", "selected 表示当前选中零件；也可填零件目录返回的完整绑定对象。"},
         {"parts", "填写零件目录中的完整绑定对象列表，包含标签图修订、标签编号与稳定实例编号。"},
         {"slice", "分别填写源坐标原点、法向和厚度（mm）；不指定时使用三维笔刷。"},
@@ -282,7 +292,6 @@ QString GetParameterHelp(const QString& key)
         {"source", "current 表示当前输入；显式修订必须使用实际存在的数据引用。"},
         {"labels", "可选择已有材料标签图；parts 是当前零件标签的便捷引用，精确修订可跨操作复用。"},
         {"materialLabels", "空集合选择全部非零材料标签；填写正整数集合时只测量所选标签，0 为背景。"},
-        {"evaluationBounds", "按源数据物理坐标填写评估范围，顺序为 X 最小/最大、Y 最小/最大、Z 最小/最大。"},
         {"mesh", "选择同一源的采样网格。网格提供查询位置和面积；壁厚两端由原始灰度确定，不要求全局闭合或一致流形。"},
         {"boundaryPolicy","局部策略只接受有充分体数据支撑的测量；缺失方向可能改变最小值时保留未测。严格策略要求所有实际搜索方向都有完整支撑。"},
         {"result", "current 表示本页最近保存的结果修订。"},
@@ -296,6 +305,8 @@ QString GetParameterHelp(const QString& key)
 }
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
+    if (key.endsWith("Roi")) return {{"", key == "protectionRoi" ? "不附加保护区域" : "全部有效数据"}};
+    if (module == "Roi" && key == "roi") return {{"", "请选择已有区域"}};
     if (module == "Alignment") {
         if (key == "computeBackend") return {{"Cpu", "CPU"}, {"Cuda", "CUDA（显式）"}};
         if (key == "metric") return {{"UnsignedDistance", "无符号最近距离"}, {"NominalNormalProjection", "名义面法向投影"}};
@@ -333,6 +344,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
+    if (module == "Roi" && key == "shape") return {{"Box","区域盒"},{"Sphere","球形区域"},{"Cylinder","圆柱区域"}};
     if (module == "Crop" && key == "shape") return {{"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"}};
     if (key == "viewId") return {{"primary-3d", "三维视窗"}, {"slice-top-down", "上下切片"},
         {"slice-front-back", "前后切片"}, {"slice-left-right", "左右切片"}};
@@ -350,6 +362,7 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 {
     if (action == "UseData" || action == "GraphInfo" || action == "KeepResult"
         || action == "ReleaseResult" || action == "UnloadResult") return {"graphRevision"};
+    if (module=="Roi" && action=="OpenCrop")return {"roi"};
     if (module == "Crop") return {"nodeId", "documentId"};
     if (module == "Part" && IsPartEditAction(action)) {
         QStringList fields{"target", "expectedLabelMap", "expectedCatalogRevision", "previewId"};
@@ -367,13 +380,14 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 QString GetParameterGroup(const QString& module, const QString& key)
 {
     if(module=="Roi" && key=="boxToSource")return "高级与诊断";
-    if(module=="Roi" && QStringList{"name","centerMM","sizeMM","direction3D"}.contains(key))return "作用范围";
+    if(module=="Roi")return QStringList{"name","group","description","shape","roi","isArchived"}.contains(key)?"区域信息":"区域几何";
+    if (key.endsWith("Roi") || key == "roi") return "作用范围";
     if (key == "sourceDigest" || key == "evidenceKind") return "高级与诊断";
     if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "archivePath", "reference"}.contains(key))
         return "输入与结果";
     if (QStringList{"matrix", "boxToSource", "directionLPS", "dimensions", "spacingLPS", "originLPS", "initialPoses", "worldAxis", "worldCenter", "angleDeg", "slice"}.contains(key))
         return "空间与矩阵";
-    if (QStringList{"roiModelBounds", "evaluationBounds", "extent", "seedModelPoint", "componentSelection", "indexBoxes"}.contains(key))
+    if (QStringList{"extent", "seedModelPoint", "componentSelection", "indexBoxes"}.contains(key))
         return "作用范围";
     if (key == "ring") return "环状校正";
     if (key == "diffusion") return "扩散校正";

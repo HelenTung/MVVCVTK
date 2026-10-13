@@ -1,4 +1,5 @@
 #include "BusinessStep.h"
+#include "UiText.h"
 #include <QJsonArray>
 namespace Manual {
 BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
@@ -34,9 +35,13 @@ BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
         return {"待生成校正候选", "选择校正方法和作用范围，先生成候选并核对质量。", action, "生成校正候选", {"OpenRoi"}};
     }
     if (module == "Roi") {
-        if(s["draftParametersChanged"].toBool())return {"范围数值有未应用修改","先把中心、尺寸和方向更新到可见草稿；图表当前仍属于原可见范围。","SetDraft","更新范围预览",{"Cancel"}};
+        if(s["draftParametersChanged"].toBool())return {"范围数值有未应用修改","先把区域几何和元信息更新到可见草稿；图表当前仍属于原可见范围。","SetDraft","更新范围预览",{"Cancel"}};
         if (s["hasDraft"].toBool()) return {"区域草稿", "调整区域后保存正式 ROI；隐藏区域不会删除它。", "Commit", "保存感兴趣区域", {"SetDraft", "Cancel", "Visibility"}};
-        return {s["isRoiCurrent"].toBool() ? "正式区域已保存" : "待定义当前输入区域", "区域固定绑定源修订，可继续裁剪或分析；输入变化后重新定义。", "Begin", "定义新区域", {"Visibility", "OpenCrop", "OpenGap"}};
+        const auto action=QStringList{"Edit","SetMetadata","Copy"}.contains(parameterAction)?parameterAction:QString("Begin");
+        QStringList next{"Begin","Edit","SetMetadata","Copy","Visibility"};
+        if(s["isRoiCurrent"].toBool())next.append({"OpenCrop","OpenGap"});
+        return {"区域管理", "保存区域后，在各业务的范围中直接选用；区域不需要生成或采用数据结果。", action,
+            action=="Begin"?"新建区域":GetActionText(module,action), next};
     }
     if (module == "Crop") {
         if(s["blockerCount"].toInt()>0)return {"裁剪输出仍被下游引用","为保留后续业务结果，暂不能释放裁剪输出；可继续使用源体数据，或开始新的裁剪。结束会话会统一清理资源。","Start","开始新的裁剪",{"RestoreSource","OpenPart","OpenSurface"}};

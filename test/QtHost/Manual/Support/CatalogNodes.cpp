@@ -97,6 +97,16 @@ QJsonArray GetCatalogNodes(const QString& module, const QJsonObject& s, const QJ
     actions.removeAll("UseData"); actions.removeAll("GraphInfo");
     if (module == "Crop") { actions.removeAll("Node"); actions.removeAll("PruneSubtree"); actions.removeAll("PruneDescendants"); actions.removeAll("PruneOutsidePaths"); }
     QJsonArray children;
+    if(module=="Roi") for(const auto value:s["regions"].toArray()) {
+        const auto roi=value.toObject();const auto ref=roi["roi"].toString();
+        QJsonObject metadata=roi;metadata.remove("source");
+        QStringList regionActions{"Edit","SetMetadata","Copy"};
+        QJsonObject patches{{"Edit",QJsonObject{{"roi",ref}}},{"Copy",QJsonObject{{"roi",ref}}},{"SetMetadata",metadata}};
+        if(!roi["isArchived"].toBool() && roi["source"]==input["dataRevision"] && availableActions.contains("OpenCrop")) {
+            regionActions.append("OpenCrop");patches["OpenCrop"]=QJsonObject{{"roi",ref}};
+        }
+        children.append(Node("roi:"+ref,roi["name"].toString(),roi["isArchived"].toBool()?"已归档":"已保存，可用于分析",regionActions,patches));
+    }
     if (input["available"].toBool()) children.append(Node("input:" + input["dataRevision"].toString(), input["datasetId"].toString("当前体数据"), "当前输入",
         module == "Data" ? QStringList{"Descriptor", "ExportData", "ExportSlices", "CreateMask", "Select"} : actions,
         module == "Data" ? QJsonObject{{"Select", QJsonObject{{"revision", input["dataRevision"]}, {"expectedBindingRevision", "current"}}}} : QJsonObject{},

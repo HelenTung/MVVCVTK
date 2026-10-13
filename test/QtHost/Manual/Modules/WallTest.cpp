@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Support/ColorSegmentInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
 #include <QCryptographicHash>
@@ -59,7 +60,8 @@ QJsonObject MeasurementJson(const ThicknessInput& input,const ThicknessParams& p
     return {{"source",GetRefText(input.source)},{"labels",GetRefText(input.labels)},{"mesh",GetRefText(input.mesh)},{"materialLabels",labels},{"unit",int(input.unit)},
         {"maxDistance",p.maxDistance},{"sampleSpacing",p.sampleSpacing},{"materialThreshold",p.materialThreshold?QJsonValue(*p.materialThreshold):QJsonValue()},
         {"coneAngleDegrees",p.coneAngleDegrees},{"directionCount",int(p.directionCount)},{"boundaryPolicy",int(p.boundaryPolicy)},{"maxBoundaryError",p.maxBoundaryError},
-        {"evaluationBounds",p.evaluationBounds?QJsonValue(GetValues(*p.evaluationBounds)):QJsonValue()}};
+        {"evaluationBounds",p.evaluationBounds?QJsonValue(GetValues(*p.evaluationBounds)):QJsonValue()},
+        {"evaluationRoi",p.evaluationRoi?QJsonValue(GetRefText(*p.evaluationRoi)):QJsonValue()}};
 }
 ThicknessDisplay Display(const QJsonObject& p)
 {
@@ -147,7 +149,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         params.boundaryPolicy = GetEnum<ThicknessBoundaryPolicy>(p, "boundaryPolicy", {
             {"Complete", ThicknessBoundaryPolicy::Complete}, {"SourceExtentLocal", ThicknessBoundaryPolicy::SourceExtentLocal}});
         params.maxBoundaryError = GetInputNumber(p,"maxBoundaryError",0.5 * GetVoxelSpacing(*source));
-        if (!p["evaluationBounds"].isNull()) params.evaluationBounds = GetArray<double, 6>(p["evaluationBounds"]);
+        params.evaluationRoi=GetSelectedRoi(*panel->GetSession(),p["evaluationRoi"],source->dataRevision);
         auto request = workflow.BuildThicknessRequest(*panel->GetSession(), selection, std::move(params));
         ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, request.params.maxDistance};
         display.rangeMode = ThicknessRangeMode::Result; request.display = display;
@@ -157,7 +159,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabels":[],"unit":"Millimeter",
         "maxDistance":null,"sampleSpacing":null,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"SourceExtentLocal",
-        "maxBoundaryError":null,"evaluationBounds":null})"), [build,send](auto id,const auto& p){send(id,build(p));}, TestPolicy::Compute, true);
+        "maxBoundaryError":null,"evaluationRoi":""})"), [build,send](auto id,const auto& p){send(id,build(p));}, TestPolicy::Compute, true);
     panel->AttachAction("Cancel", {{"targetRequestId", "0"}}, [send](auto id, const auto& p) {
         ThicknessRequest r; r = ThicknessCancelRequest{}; std::get<ThicknessCancelRequest>(r).targetRequestId = GetId(p["targetRequestId"]); send(id, r);
     }, TestPolicy::Stop);

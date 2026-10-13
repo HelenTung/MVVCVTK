@@ -2,6 +2,7 @@
 
 #include "Host/WallThicknessHostTypes.h"
 #include "Data/DataPayloads.h"
+#include "Host/RoiReadTypes.h"
 
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,7 @@ struct Work final
     std::shared_ptr<const ImageGrid3DPayload> source;
     std::shared_ptr<const LabelMap3DPayload> labels;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
+    RoiReadSnapshot evaluationRoi;
     std::shared_ptr<std::atomic<bool>> cancelled;
     std::chrono::steady_clock::time_point deadline;
 };

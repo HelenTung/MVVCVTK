@@ -3,6 +3,7 @@
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "Support/ParameterEditor.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/RoiSelection.h"
 #include <QPointer>
 #include <QFile>
 #include <QTextStream>
@@ -60,7 +61,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
 {
     auto* panel = new ModulePanel(context, "Surface", parent);
     panel->SetNotice("选择体数据后，阈值留空时由当前表面算法估计背景/材料峰；显式阈值或材料范围直接按所填值处理。继续执行真实表面定位和质量检查，定位稳定性不等于计量不确定度。");
-    const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"roiModelBounds":null,"minimumObjectVoxels":"0"})");
+    const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"analysisRoi":"","minimumObjectVoxels":"0"})");
     auto requestedParameters=std::make_shared<QJsonObject>();
     auto formalStatistics=std::make_shared<QJsonObject>();
     {
@@ -77,12 +78,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             if (params.contains("materialRange") && !params["materialRange"].isNull()) start.materialRange = GetArray<double, 2>(params["materialRange"]);
             if (!params["initialIsoValue"].isNull()) start.initialIsoValue = GetNumber(params, "initialIsoValue");
             if (start.componentSelection == SurfaceComponentSelection::Seeded && !params["seedModelPoint"].isNull()) start.seedModelPoint = GetArray<double, 3>(params["seedModelPoint"]);
-            if (!params["roiModelBounds"].isNull()) {
-                const auto source = panel->GetSession()->GetImageDescriptor();
-                if (!source) throw std::invalid_argument("表面范围需要源图像");
-                start.analysisRoi = panel->GetContext().workflow.createInputRoi(source->dataRevision,
-                    params["roiModelBounds"], QJsonValue(), "Surface analysis region", true);
-            }
+            start.analysisRoi = GetSelectedRoi(*panel->GetSession(), params["analysisRoi"], source->dataRevision);
             start.minimumObjectVoxels = GetId(params["minimumObjectVoxels"]);
             SurfaceStartRequest request{start};
             const QPointer<ModulePanel> owner(panel);
@@ -278,7 +274,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 if(p.componentSelection==SurfaceComponentSelection::Seeded)formal["seedModelPoint"]=p.seedModelPoint?QJsonValue(GetValues(*p.seedModelPoint)):QJsonValue();
                 else formal.remove("seedModelPoint");
                 formal["minimumObjectVoxels"]=QString::number(p.minimumObjectVoxels);
-                if(!p.analysisRoi)formal["roiModelBounds"]=QJsonValue();
+                formal["analysisRoi"]=p.analysisRoi?GetRefText(*p.analysisRoi):QString();
                 summary["formalMesh"]=GetRefText(snapshot->meshRevision);summary["formalParameters"]=formal;
                 summary["formalParameterFingerprint"]=QString::number(snapshot->parameterFingerprint);
             }

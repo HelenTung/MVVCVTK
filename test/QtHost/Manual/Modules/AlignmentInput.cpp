@@ -1,5 +1,6 @@
 // 测试用途：解析计量对齐参考与方案，校验几何约束并导出参数模板和结果摘要。
 #include "AlignmentInput.h"
+#include <algorithm>
 namespace Manual {
 namespace {
 const char* GetMethodName(AlignmentMethod method)
@@ -49,6 +50,22 @@ QJsonObject WriteRegion(const AlignmentRegion& region)
     return {{"pinnedMesh", GetRefText(region.pinnedMesh)}, {"vertexIds", ids},
         {"targetBounds", region.targetBounds ? QJsonValue(GetValues(*region.targetBounds)) : QJsonValue()}};
 }
+}
+void SetRegionRoi(AlignmentRegion& region, const std::vector<std::uint64_t>& vertices, DataRevisionRef mesh)
+{
+    if(vertices.empty())throw std::invalid_argument("空间区域没有顶点，不能解释为全网格");
+    if(region.targetBounds)throw std::invalid_argument("空间区域与目标坐标包围范围不能同时选择");
+    if(GetDataRevisionRefValid(region.pinnedMesh) && region.pinnedMesh!=mesh)
+        throw std::invalid_argument("顶点选区与区域筛选的网格修订不一致");
+    if(region.vertexIds.empty())region.vertexIds=vertices;
+    else {
+        // 公共区域读取器按原网格编号递增返回顶点；保留既有顶点选区的顺序。
+        std::vector<std::uint64_t> kept;
+        for(auto vertex:region.vertexIds)if(std::binary_search(vertices.begin(),vertices.end(),vertex))kept.push_back(vertex);
+        if(kept.empty())throw std::invalid_argument("原顶点选区与区域没有交集");
+        region.vertexIds=std::move(kept);
+    }
+    region.pinnedMesh=mesh;
 }
 AlignmentRecipe GetRecipe(const QJsonObject& p, const DataRevisionRef& mesh, const DataRevisionRef& nominal)
 {
