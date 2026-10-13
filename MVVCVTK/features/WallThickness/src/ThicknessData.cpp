@@ -64,7 +64,7 @@ bool GetCurrent(const DataGraphSnapshot &graph, const std::vector<DataExpectatio
     }
     return true;
 }
-ThicknessAlgorithm::Work BuildWork(const DataGraphSnapshot &graph, const ThicknessArchive &archive,
+ThicknessAlgorithm::Work BuildWork(TrustedDataPort& port, const DataGraphSnapshot &graph, const ThicknessArchive &archive,
                                    std::vector<DataExpectation> &expectations)
 {
     if (!graph.view)
@@ -111,6 +111,14 @@ ThicknessAlgorithm::Work BuildWork(const DataGraphSnapshot &graph, const Thickne
     if (!collect(input.labels) || !collect(input.mesh))
         throw std::invalid_argument("Labels and surface must derive from the exact source volume.");
     collect(input.source);
+    if(archive.params.evaluationRoi) {
+        const auto roi=port.GetRoi(graph,*archive.params.evaluationRoi,input.source);
+        if(roi.error!=RoiError::None || !roi.roi)
+            throw std::invalid_argument("壁厚评价区域不可读或源修订不一致："+roi.message);
+        work.evaluationRoi=roi.roi;
+        collect(*archive.params.evaluationRoi);
+        for(const auto& ref:roi.roi->GetDependencies())collect(ref);
+    }
     expectations.clear();
     for (const auto &ref : all)
     {
@@ -195,6 +203,8 @@ std::string GetParameters(const ThicknessArchive &a)
     if (p.evaluationBounds)
         for (double v : *p.evaluationBounds)
             out << v << ';';
+    out << bool(p.evaluationRoi) << ';';
+    if(p.evaluationRoi)ref(*p.evaluationRoi);
     const auto &e = a.evaluation;
     out << e.lower << ';' << e.upper << ';' << e.histogramRange[0] << ';' << e.histogramRange[1]
         << ';' << e.histogramBins << ';' << e.minRegionArea << ';' << WorkLimit(a.limits.maxWorkingBytes)

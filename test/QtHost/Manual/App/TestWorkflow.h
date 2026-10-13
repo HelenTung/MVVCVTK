@@ -45,6 +45,8 @@ public:
 #endif
     std::function<void(const QString&, const QString&, const QJsonObject&)> onCopyParameters;
     std::function<void(const QString&, const QString&, const QJsonObject&)> onNavigate;
+    // 仅记录编辑工具的返回位置；区域仍由 Host 目录拥有。
+    QJsonObject roiConsumer;
     std::function<void(const QString&)> onShowStatistics;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
     std::function<bool(const std::string&)> getRenderPending;
@@ -61,8 +63,7 @@ public:
     std::function<QJsonObject(DataRevisionRef,std::size_t,std::size_t,std::optional<std::array<double,2>>)> readRecordPage;
     std::function<std::array<double,3>(DataRevisionRef,std::size_t,DataRevisionRef)> getRecordLocation;
     std::function<std::optional<MeasurementSurface>()> getMeasurementSurface;
-    std::function<std::optional<DataRevisionRef>(DataRevisionRef, const QJsonValue&, const QJsonValue&,
-        const char*, bool)> createInputRoi;
+    std::function<std::vector<std::uint64_t>(DataRevisionRef,DataRevisionRef,DataRevisionRef)> getRoiVertices;
 private:
     bool m_isClosing = false;
     std::uint64_t m_busyId = 0;

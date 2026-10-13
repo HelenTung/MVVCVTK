@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "PartInput.h"
 #include "Support/ReferenceDataSource.h"
+#include "Support/RoiSelection.h"
 #include <QPointer>
 #include <type_traits>
 namespace Manual {
@@ -42,7 +43,7 @@ void AttachPartEditActions(ModulePanel* panel, std::shared_ptr<PartSegmentationH
     };
     for (const QString operation : {QString("Paint"), QString("Erase"), QString("Fill"), QString("Island"),
         QString("Grow"), QString("Split"), QString("Merge"), QString("Undo"), QString("Redo")}) {
-        auto defaults = GetJson(R"({"target":"selected","expectedLabelMap":"current","expectedCatalogRevision":"current","extent":null,"roiMask":null,"protectionMask":null,"protectedParts":[]})");
+        auto defaults = GetJson(R"({"target":"selected","expectedLabelMap":"current","expectedCatalogRevision":"current","editRoi":"","protectionRoi":"","protectedParts":[]})");
         if (operation == "Undo" || operation == "Redo") defaults = {{"expectedLabelMap", "current"}, {"expectedCatalogRevision", "current"}};
         if (operation == "Merge") defaults.remove("target");
         if (operation == "Paint" || operation == "Erase") {
@@ -64,10 +65,8 @@ void AttachPartEditActions(ModulePanel* panel, std::shared_ptr<PartSegmentationH
             request.expectedLabelMap = GetText(p, "expectedLabelMap") == "current" ? feature->GetState().labelMap : GetRef(p["expectedLabelMap"]);
             request.expectedCatalogRevision = GetText(p, "expectedCatalogRevision") == "current" ? catalog->catalogRevision : GetId(p["expectedCatalogRevision"]);
             if (operation != "Undo" && operation != "Redo") {
-                request.scope.editRoi = panel->GetContext().workflow.createInputRoi(feature->GetState().sourceRevision,
-                    p["extent"], p["roiMask"], "Part edit region", false);
-                request.scope.protectionRoi = panel->GetContext().workflow.createInputRoi(feature->GetState().sourceRevision,
-                    QJsonValue(), p["protectionMask"], "Part protection region", false);
+                request.scope.editRoi = GetSelectedRoi(*panel->GetSession(), p["editRoi"], feature->GetState().sourceRevision);
+                request.scope.protectionRoi = GetSelectedRoi(*panel->GetSession(), p["protectionRoi"], feature->GetState().sourceRevision);
                 request.scope.protectedParts = GetParts(p["protectedParts"], *catalog);
             }
             if (operation == "Paint" || operation == "Erase") {

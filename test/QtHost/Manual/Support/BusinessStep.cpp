@@ -1,4 +1,5 @@
 #include "BusinessStep.h"
+#include "UiText.h"
 #include <QJsonArray>
 namespace Manual {
 BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
@@ -33,7 +34,9 @@ BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
     }
     if (module == "Roi") {
         if (s["hasDraft"].toBool()) return {"区域草稿", "调整区域后保存正式 ROI；隐藏区域不会删除它。", "Commit", "保存感兴趣区域", {"SetDraft", "Cancel", "Visibility"}};
-        return {s["isRoiCurrent"].toBool() ? "正式区域已保存" : "待定义当前输入区域", "区域固定绑定源修订，可继续裁剪或分析；输入变化后重新定义。", "Begin", "定义新区域", {"Visibility", "OpenCrop", "OpenGap"}};
+        const auto action=QStringList{"Edit","SetMetadata","Copy"}.contains(parameterAction)?parameterAction:QString("Begin");
+        return {"区域管理", "保存区域后，在各业务的范围中直接选用；区域不需要生成或采用数据结果。", action,
+            action=="Begin"?"新建区域":GetActionText(module,action), {"Begin","Edit","SetMetadata","Copy","Visibility"}};
     }
     if (module == "Crop") {
         const auto output=s["output"].toString();

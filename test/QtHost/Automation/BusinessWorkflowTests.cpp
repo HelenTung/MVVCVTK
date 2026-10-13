@@ -4,6 +4,9 @@
 #include "Support/BusinessStep.h"
 #include "Support/BusinessStatistics.h"
 #include "Support/ReferenceDataSource.h"
+#if defined(MANUAL_ALIGNMENT)
+#include "Modules/AlignmentInput.h"
+#endif
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -22,6 +25,16 @@ double Sum(const QJsonObject& data){double sum=0;for(const auto value:data["coun
 }
 void CheckBusinessWorkflow(TestWindow& window)
 {
+#if defined(MANUAL_ALIGNMENT)
+    AlignmentRegion selection;selection.vertexIds={1,3,8};
+    DataRevisionRef mesh;mesh.entityId.bytes[0]=1;mesh.generation=1;
+    SetRegionRoi(selection,{1,2,3},mesh);
+    Require(selection.pinnedMesh==mesh && selection.vertexIds==std::vector<std::uint64_t>{1,3},
+        "shared spatial ROI intersects the existing revision-pinned vertex selection");
+    bool rejected=false;try{SetRegionRoi(selection,{},mesh);}catch(const std::invalid_argument&){rejected=true;}
+    Require(rejected && selection.vertexIds==std::vector<std::uint64_t>{1,3},
+        "empty ROI selection cannot become the complete mesh or overwrite the prior selection");
+#endif
     // 与完整真实 CT 相同的网格周期；无需分配十余 GB 就能复现抽样列偏置。
     const std::array<int,3> dimensions{1536,1536,1536};
     const std::size_t total=std::size_t(1536)*1536*1536;

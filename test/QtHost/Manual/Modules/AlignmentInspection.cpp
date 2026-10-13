@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "AlignmentInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include <QPointer>
 namespace Manual {
@@ -84,12 +85,14 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
             defaults["selectionPoint"] = QJsonValue(); defaults["maxSelectionDistance"] = 1.;
         } else {
             defaults["kind"] = "Cylinder"; defaults["vertexIds"] = QJsonArray{}; defaults["targetBounds"] = QJsonValue();
+            defaults["inputRoi"]="";
             defaults["targetDirection"] = QJsonArray{0,0,1};
         }
         panel->AttachAction(section ? "InspectSection" : "InspectGeometry", defaults,
-            [feature, alignment, send, section](auto id, const auto& p) {
+            [panel, feature, alignment, send, section](auto id, const auto& p) {
                 InspectionPlan plan; plan.id = GetText(p, "id").toStdString(); plan.alignmentResult = alignment(p);
                 const auto snapshot = feature->GetResult(plan.alignmentResult);
+                if(!snapshot)throw std::invalid_argument("所选对齐结果不可读");
                 InspectionGeometrySpec geometry; geometry.fit.id = "measured";
                 if (section) {
                     geometry.fit.kind = AlignmentGeometryKind::Circle;
@@ -102,6 +105,10 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
                     geometry.fit.kind = GetEnum<AlignmentGeometryKind>(p, "kind", {{"Circle", AlignmentGeometryKind::Circle}, {"Sphere", AlignmentGeometryKind::Sphere}, {"Cylinder", AlignmentGeometryKind::Cylinder}});
                     geometry.fit.region.pinnedMesh = snapshot->input.mesh; geometry.fit.region.vertexIds = Ids(p["vertexIds"]);
                     if (!p["targetBounds"].isNull()) geometry.fit.region.targetBounds = GetArray<double, 6>(p["targetBounds"]);
+                    if(const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],snapshot->input.source)) {
+                        const auto vertices=panel->GetContext().workflow.getRoiVertices(*roi,snapshot->input.source,snapshot->input.mesh);
+                        SetRegionRoi(geometry.fit.region,vertices,snapshot->input.mesh);
+                    }
                     geometry.fit.targetDirection = GetArray<double, 3>(p["targetDirection"]);
                 }
                 plan.geometries.push_back(std::move(geometry));

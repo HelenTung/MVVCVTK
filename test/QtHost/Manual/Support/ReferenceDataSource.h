@@ -29,6 +29,7 @@ public:
     QJsonObject GetViewTransforms();
     QJsonObject GetResultEvidence();
     QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
+    std::vector<std::uint64_t> GetRoiVertices(DataRevisionRef roi, DataRevisionRef source, DataRevisionRef mesh) const;
     QJsonObject ReadTransform();
     static std::size_t GetGraySampleStride(std::size_t total, const std::array<int,3>& dimensions);
     StatisticsSamples ReadGraySamples(DataRevisionRef source, DataRevisionRef roi, std::size_t offset, GrayPointFilter filter = {});

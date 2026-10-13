@@ -117,6 +117,8 @@ struct ThicknessParams final
     double maxBoundaryError = 0.0;
     ThicknessBoundaryPolicy boundaryPolicy = ThicknessBoundaryPolicy::Complete;
     std::optional<std::array<double, 6>> evaluationBounds;
+    // 只限制输出评价点；完整源数据仍用于搜索真实对侧。与显式 bounds 同时提供时取交集。
+    std::optional<DataRevisionRef> evaluationRoi;
 };
 
 struct ThicknessEvaluation final

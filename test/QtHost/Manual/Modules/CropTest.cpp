@@ -1,6 +1,7 @@
 // 测试用途：验证裁剪控件调整、预览确认、历史导航、发布结果及恢复源数据的业务闭环。
 #include "ModuleFactories.h"
 #include "Host/CropHostFeature.h"
+#include "Support/RoiSelection.h"
 #include <QPointer>
 #include <QTimer>
 #include <algorithm>
@@ -116,6 +117,33 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         if(!admission)flow->pending=0;
         panel->SetAdmission(id,admission.isAccepted);
     },TestPolicy::Interaction,true);
+    panel->AttachAction("PrepareRoi",{{"inputRoi",""}},[panel,feature,flow](auto id,const auto& p) {
+        const auto source=panel->GetSession()->GetImageDescriptor();
+        if(!source)throw std::invalid_argument("请先选择源体数据");
+        const auto roi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],source->dataRevision);
+        if(!roi)throw std::invalid_argument("请选择已有区域");
+        const auto confirm=[owner=QPointer<ModulePanel>(panel),feature,flow,id,roi=*roi] {
+            if(!owner)return;
+            owner->SetParameterPatch("BuildResult",{{"inputRoi",GetRefText(roi)}});
+            const auto history=feature->GetHistory();flow->isConfirmed=true;
+            flow->confirmedDocument=history.documentId;flow->confirmedNode=history.appliedHead;
+            flow->confirmedRevision=history.stateRevision;flow->confirmedInputRoi=GetRefText(roi);
+            flow->pending=0;
+            owner->SetComplete(id,"PreviewConfirmed",{{"roi",GetRefText(roi)},
+                {"message","从文档源数据按已有区域生成；不叠加、也不删除交互裁剪历史。"}});
+        };
+        const auto history=feature->GetHistory();
+        if(history.documentId && history.sourceRevision==source->dataRevision){confirm();return;}
+        CropDocumentRequest request;request.action=CropDocumentAction::CreateDocument;
+        request.requestId=CropHostFeature::CreateRequestId();request.target=GetCropTarget();request.sourceRevision=source->dataRevision;
+        flow->pending=id;
+        const auto admission=feature->SendRequest(request,[owner=QPointer<ModulePanel>(panel),flow,id,confirm](CropDocumentOutcome result) {
+            if(!owner)return;
+            if(result.status==CropEditStatus::Succeeded)confirm();
+            else{flow->pending=0;owner->SetComplete(id,"Failed",{{"failureReason",int(result.failureReason)}});}
+        });
+        if(!admission)flow->pending=0;panel->SetAdmission(id,admission.isAccepted);
+    },TestPolicy::Change,true);
     for(const auto& action:std::vector<std::pair<QString,CropHostAction>>{{"Box",CropHostAction::Box},{"Plane",CropHostAction::Plane},{"Sphere",CropHostAction::Sphere},{"Cylinder",CropHostAction::Cylinder}})
         panel->AttachAction(action.first,{},[startWidget,flow,action](auto id,const auto&){startWidget(id,action.second,flow->preferredMode);},TestPolicy::Interaction,true);
     panel->AttachAction("Mode",{{"removalMode","KeepInside"}},[panel,feature,flow](auto id,const auto& p){
@@ -210,7 +238,7 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         const auto history=feature->GetHistory();CropBuildRequest request;
         request.documentId=history.documentId;request.nodeId=GetId(p["nodeId"]);if(!request.nodeId)request.nodeId=history.appliedHead;
         request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;
-        if(!GetText(p,"inputRoi").isEmpty())request.inputRoi=GetRef(p["inputRoi"]);
+        request.inputRoi=GetSelectedRoi(*panel->GetSession(),p["inputRoi"],history.sourceRevision);
         flow->pending=id;
         const auto admission=feature->SendRequest(request,[owner=QPointer<ModulePanel>(panel),flow,id](CropBuildResult result){
             if(!owner)return;if(flow->pending==id)flow->pending=0;
@@ -284,6 +312,12 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
     panel->onStop=[panel]{panel->SendAction("RestoreSource",{});};
     panel->getGrayScope=[panel,feature] {
         GrayStatisticsScope scope;const auto state=feature->GetState();const auto history=feature->GetHistory();
+        const auto selected=panel->GetActionParameters("BuildResult")["inputRoi"].toString();
+        if(history.documentId && !selected.isEmpty() && !GetDataRevisionRefValid(state.outputRevision)) {
+            scope.source=history.sourceRevision;scope.roi=GetRef(selected);
+            scope.title="用于生成裁剪结果的已有区域灰度分布";
+            scope.description="区域 ∩ 文档源有效域；交互裁剪历史不叠加";return scope;
+        }
         if(!history.documentId || !state.history.operationCount || GetDataRevisionRefValid(state.outputRevision))return scope;
         scope.source=history.sourceRevision;scope.title="当前裁剪预览保留区的灰度分布";
         scope.key=QString("preview:%1:%2:%3").arg(history.documentId).arg(history.renderedHead).arg(history.stateRevision);

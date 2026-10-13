@@ -25,6 +25,24 @@ bool ReferenceDataSource::DetachHost()
     m_data.reset(); m_views.reset();
     return true;
 }
+std::vector<std::uint64_t> ReferenceDataSource::GetRoiVertices(DataRevisionRef ref,
+    DataRevisionRef source, DataRevisionRef meshRef) const
+{
+    if(!m_data)throw std::invalid_argument("区域读取入口未挂载");
+    const auto graph=m_data->GetDataGraph();
+    const auto roi=m_data->GetRoi(graph,ref,source);
+    if(roi.error!=RoiError::None || !roi.roi)
+        throw std::invalid_argument("区域不可读或源修订不匹配："+roi.message);
+    const auto data=m_data->GetData(graph,meshRef);
+    const auto mesh=data?std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload):nullptr;
+    if(!mesh)throw std::invalid_argument("区域选点的精确网格修订不可读");
+    const auto& points=mesh->GetVertices();std::vector<std::uint64_t> selected;
+    for(std::size_t i=0;i<points.size()/3;++i)
+        if(roi.roi->GetContains({points[3*i],points[3*i+1],points[3*i+2]}))selected.push_back(i);
+    // 原生空顶点列表表示全网格；空 ROI 不能变成整件选区。
+    if(selected.empty())throw std::invalid_argument("区域内没有网格顶点，未生成全网格选区");
+    return selected;
+}
 QJsonObject ReferenceDataSource::GetViewTransforms()
 {
     QJsonArray values;

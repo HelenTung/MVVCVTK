@@ -1,5 +1,6 @@
 #pragma once
 #include "Host/HostFeature.h"
+#include "Data/RoiTypes.h"
 
 struct RoiEditingConfig final {
     HostViewTarget referenceView;
@@ -9,7 +10,7 @@ enum class RoiEditingAction : std::uint8_t { Begin, SetDraft, Commit, Cancel, Se
 struct RoiEditingRequest final {
     RoiEditingAction action = RoiEditingAction::Begin;
     std::optional<RoiRequest> draft;
-    std::optional<std::array<double,16>> boxToSource;
+    std::optional<RoiPrimitive> primitive;
     std::optional<bool> isVisible;
 };
 struct RoiEditingState final {

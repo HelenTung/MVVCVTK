@@ -5,6 +5,7 @@
 #include "Support/JsonInput.h"
 #include "Support/UiText.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Support/SceneGraph.h"
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
@@ -1384,20 +1385,26 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     GetComplete(window, SendUnavailable(window, "Wall", "Start"), "Rejected");
     const auto parts = GetComplete(window, Click(window, "Part", "Start", {{"threshold", 500.}, {"minPartVoxels", "1"}}), "Succeeded");
     GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "Largest"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
-        {"roiModelBounds", QJsonValue()}}), "Succeeded");
+        {"analysisRoi", ""}}), "Succeeded");
+    RoiRequest evaluation; evaluation.definition.source=window.GetSession()->GetImageDescriptor()->dataRevision;
+    const auto catalog=window.GetSession()->GetRoiDescriptors(true);
+    evaluation.expectedCatalogRevision=catalog.empty()?0:catalog.front().catalogRevision;evaluation.metadata.name="壁厚评价范围";
+    RoiNode region;region.primitive.localToSource={5.5,0,0,15.5,0,5.5,0,15.5,0,0,15.5,15.5,0,0,0,1};evaluation.definition.nodes={region};
+    const auto evaluatedRoi=window.GetSession()->SetRoi(evaluation);
+    Check(evaluatedRoi.error==RoiError::None && evaluatedRoi.roi,"wall workflow saves an independent evaluation ROI");
     const auto local = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5},
-        {"directionCount",1},{"evaluationBounds",QJsonArray{10,21,10,21,0,31}}}), "Succeeded");
+        {"directionCount",1},{"evaluationRoi",GetRefText(evaluatedRoi.roi->revision)}}), "Succeeded");
     Check(local["result"].toObject()["validCount"].toString().toULongLong()>0
         && local["result"].toObject()["algorithmVersion"]=="wall-thickness-cuda-gray-ray-field-4",
         "local gray wall measurement accepts component-filtered sampling seeds");
     const auto surface = GetComplete(window, Click(window, "Surface", "GlobalAutomatic", {{"componentSelection", "All"}, {"initialIsoValue", 500.}, {"materialRange", QJsonArray{0.,1000.}},
-        {"roiModelBounds", QJsonValue()}}), "Succeeded");
+        {"analysisRoi", ""}}), "Succeeded");
     const auto savedLabels = window.GetWorkflow().getPartLabels;
     const auto savedSurface = window.GetWorkflow().getMeasurementSurface;
     window.GetWorkflow().getPartLabels = [] { return DataRevisionRef{}; };
     window.GetWorkflow().getMeasurementSurface = [] { return std::optional<MeasurementSurface>{}; };
     const auto record = GetComplete(window, Click(window, "Wall", "Start", {{"maxDistance", 24.}, {"sampleSpacing", 1.},
-        {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationBounds", QJsonArray{10,21,10,21,0,31}},
+        {"maxBoundaryError", 0.5}, {"directionCount", 1}, {"evaluationRoi", GetRefText(evaluatedRoi.roi->revision)},
         {"labels",parts["result"].toObject()["labelMap"]},{"mesh",surface["result"].toObject()["mesh"]},{"materialThreshold",500.}}), "Succeeded");
     window.GetWorkflow().getPartLabels = savedLabels;
     window.GetWorkflow().getMeasurementSurface = savedSurface;
@@ -1463,6 +1470,73 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
     if (GetEnabled(window, "Artifact")) {
         window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); window.grab().save("artifact-buttons-ui.png");
     }
+}
+void CheckSharedRoi(TestWindow& window)
+{
+#if defined(MANUAL_ROI)
+    const auto source=window.GetSession()->GetImageDescriptor()->dataRevision;
+    GetComplete(window,Send(window,"Roi","Begin",{{"name","共享区域"}}),"Succeeded");
+    const auto record=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded");
+    const auto ref=GetRef(record["result"].toObject()["roi"]);
+    Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"saving a region preserves the business input");
+    Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
+    for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
+        {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
+        auto* page=window.GetModule(use[0]);page->Observe();
+        if(auto* form=page->GetParameterEditor(use[1]))if(auto* field=form->GetField(use[2])) {
+            const auto* choices=field->findChild<QComboBox*>("value");
+            Check(choices && choices->findData(GetRefText(ref))>=0,"saved ROI is selectable in the consumer form");
+        }
+    }
+    auto* surface=window.GetModule("Surface");surface->Observe();
+    const auto createRegion=[&] {
+        surface->Observe();
+        auto* button=surface->GetParameterEditor("GlobalAutomatic")->GetField("analysisRoi")->findChild<QPushButton*>("createRegion");
+        Check(button!=nullptr,"business range exposes the shared region editor");button->click();
+    };
+    createRegion();
+    GetComplete(window,Send(window,"Roi","Begin",{{"name","业务内新区域"}}),"Succeeded");
+    const auto created=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
+    if(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]!=created || !window.GetWorkflow().roiConsumer.isEmpty())
+        std::cerr<<GetJsonText(QJsonObject{{"expectedRoi",created},
+            {"actualRoi",surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]},
+            {"consumer",window.GetWorkflow().roiConsumer}}).toStdString();
+    Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==created
+        && window.GetWorkflow().roiConsumer.isEmpty(),"saving a new region returns its exact revision to the requesting business");
+    surface->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});
+    createRegion();
+    GetComplete(window,Send(window,"Roi","Begin"),"Succeeded");
+    window.GetModule("Roi")->onStop();
+    Check(window.GetWorkflow().roiConsumer.isEmpty(),"stopping the shared editor clears the old return destination");
+#if defined(MANUAL_CROP)
+    GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"PreviewConfirmed");
+    Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"preparing a saved ROI for crop preserves the source input");
+    window.GetModule("Crop")->SetParameterPatch("BuildResult",{{"inputRoi",""}});
+    GetComplete(window,Send(window,"Crop","CloseDocument"),"Succeeded");
+#endif
+    GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",true}}),"Succeeded");
+    Check(GetRoiChoices(*window.GetSession(),source).size()==1
+        && GetRoiChoices(*window.GetSession(),source,true).size()==2,"archived regions remain manageable and leave consumer choices");
+    bool rejected=false;try{(void)GetSelectedRoi(*window.GetSession(),GetRefText(ref),source);}catch(const std::invalid_argument&){rejected=true;}
+    Check(rejected,"an archived region cannot silently run as a selected analysis range");
+    GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",false}}),"Succeeded");
+    auto other=source;++other.generation;rejected=false;
+    try{(void)GetSelectedRoi(*window.GetSession(),GetRefText(ref),other);}catch(const std::invalid_argument&){rejected=true;}
+    Check(rejected,"a saved ROI from another source revision is explicitly rejected");
+    window.GetModule("Roi")->Observe();
+    Check(FindNode(window.GetModule("Roi")->GetCatalogTree(),"roi:"+GetRefText(ref))!=nullptr,"region management exposes the saved catalog object");
+    const auto image=window.GetSession()->GetImageDescriptor();std::array<double,3> center=image->origin;
+    for(int row=0;row<3;++row)for(int axis=0;axis<3;++axis)
+        center[row]+=image->direction[row*3+axis]*image->spacing[axis]*(image->extent[axis*2]+image->extent[axis*2+1])*.5;
+    for(const auto* shape:{"Sphere","Cylinder"}) {
+        GetComplete(window,Send(window,"Roi","Begin",{{"shape",shape},{"center",GetValues(center)},
+            {"radius",2.0},{"height",4.0}}),"Succeeded");
+        const auto curve=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
+        const auto descriptor=window.GetSession()->GetRoiDescriptor(GetRef(curve));
+        Check(descriptor && descriptor->definition.nodes.front().primitive.origin==center
+            && descriptor->definition.nodes.front().primitive.radius==2.0,"curve editor fields save the intended source-space geometry");
+    }
+#endif
 }
 void StartSelfTest(TestWindow& window)
 {
@@ -1543,7 +1617,7 @@ void StartSelfTest(TestWindow& window)
     if (GetEnabled(window, "Alignment")) {
         const auto volume = GetComplete(window, Send(window, "Alignment", "EvaluateVoxelVolume", {
             {"source", GetRefText(original.dataRevision)}, {"extent", QJsonArray{0,1,0,1,0,1}},
-            {"storedValueRange", QJsonArray{0,1000}}, {"requireEnclosedSelection", false}}), "FullyDetermined")["result"].toObject()["voxelVolume"];
+            {"storedValueRange", QJsonArray{0,1000}}, {"requireEnclosedSelection", false}}), "FullyDetermined").value("result").toObject().value("voxelVolume");
         const auto stats = GetComplete(window, Send(window, "Alignment", "VoxelVolumeResult", {{"voxelVolume", volume}}), "Observed")["result"].toObject();
         Check(stats["total"]=="8" && stats["selected"]=="8" && stats["volumeMm3"].toDouble()==8.,
             "independent voxel result preserves the known eight unit cells before any alignment");
@@ -1562,9 +1636,9 @@ void StartSelfTest(TestWindow& window)
         if (!state || state->isoThreshold != initialIso) return false;
         return true;
     }), "initial isosurface commits the native scalar-range midpoint with the data load");
-    const auto maskA = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 A"}}), "MaskPublished")["result"].toObject()["mask"];
+    const auto maskA = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 A"}}), "MaskPublished").value("result").toObject().value("mask");
     GetComplete(window,Send(window,"Data","KeepResult",{{"graphRevision",maskA}}),"Succeeded");
-    const auto maskB = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 B"}}), "MaskPublished")["result"].toObject()["mask"];
+    const auto maskB = GetComplete(window, Send(window, "Data", "CreateMask", {{"purpose", "分支来源 B"}}), "MaskPublished").value("result").toObject().value("mask");
     const auto graph = window.GetWorkflow().getPublishedGraph();
     for (const auto ref : {maskA, maskB}) {
         bool matched = false;
@@ -1584,6 +1658,7 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, Send(window, "Data", "Select", {{"revision", GetRefText(original.dataRevision)}, {"expectedBindingRevision", "0"}}), "Failed");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"iso", 50.0}}), "Succeeded");
     CheckBooleanRequests(window);
+    CheckSharedRoi(window);
     CheckViewCapabilities(window);
     const auto burstStart = window.GetUpdateCount();
     std::vector<std::uint64_t> burst;
@@ -1708,14 +1783,14 @@ void StartSelfTest(TestWindow& window)
         Check(primary && primary->isEnabled() && primary->text().contains("发布并使用"),"ready candidate presents a concrete publish-and-use primary");
         const auto publishId=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
         primary->click();
-        const auto child = GetComplete(window,publishId,"Published")["result"].toObject()["correctedVolume"];
+        const auto child = GetComplete(window,publishId,"Published").value("result").toObject().value("correctedVolume");
         GetComplete(window,publishId+1,"Succeeded");
         Check(GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision)==child.toString(),"actual stage primary adopts the exact published candidate and advances the input");
         // 历史分支比较显式保留；默认重复发布不再无限持有未使用的整卷结果。
         GetComplete(window, Send(window,"Data","KeepResult",{{"graphRevision",child}}),"Succeeded");
         selectPublished(GetRefText(original.dataRevision));
         GetComplete(window, Send(window, "Artifact", "Diffusion"), "Ready");
-        const auto sibling = GetComplete(window, Send(window, "Artifact", "Commit"), "Published")["result"].toObject()["correctedVolume"];
+        const auto sibling = GetComplete(window, Send(window, "Artifact", "Commit"), "Published").value("result").toObject().value("correctedVolume");
         const auto published = window.GetWorkflow().getPublishedGraph()["nodes"].toArray();
         for (const auto expected : {std::make_pair(child, QJsonValue(firstOutput)), std::make_pair(sibling, QJsonValue(GetRefText(original.dataRevision)))}) {
             bool found = false;

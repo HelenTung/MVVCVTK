@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "Support/ColorSegmentInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/RoiSelection.h"
 #include "Host/WallThicknessHostFeature.h"
 #include <QPointer>
 #include <QCryptographicHash>
@@ -107,7 +108,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabels":[],"unit":"Millimeter",
         "maxDistance":null,"sampleSpacing":null,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"SourceExtentLocal",
-        "maxBoundaryError":null,"evaluationBounds":null})"), [panel, send](auto id, const auto& p) {
+        "maxBoundaryError":null,"evaluationRoi":""})"), [panel, send](auto id, const auto& p) {
         ThicknessInputSelection selection;
         if (GetText(p, "source") != "current") selection.source = GetRef(p["source"]);
         if (GetText(p, "labels") != "parts") selection.labels = GetRef(p["labels"]);
@@ -133,7 +134,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         params.boundaryPolicy = GetEnum<ThicknessBoundaryPolicy>(p, "boundaryPolicy", {
             {"Complete", ThicknessBoundaryPolicy::Complete}, {"SourceExtentLocal", ThicknessBoundaryPolicy::SourceExtentLocal}});
         params.maxBoundaryError = GetInputNumber(p,"maxBoundaryError",0.5 * GetVoxelSpacing(*source));
-        if (!p["evaluationBounds"].isNull()) params.evaluationBounds = GetArray<double, 6>(p["evaluationBounds"]);
+        params.evaluationRoi=GetSelectedRoi(*panel->GetSession(),p["evaluationRoi"],source->dataRevision);
         auto request = workflow.BuildThicknessRequest(*panel->GetSession(), selection, std::move(params));
         ThicknessDisplay display; display.targetViews = GetAllViews(); display.range = {0, request.params.maxDistance};
         display.rangeMode = ThicknessRangeMode::Result; request.display = display;
