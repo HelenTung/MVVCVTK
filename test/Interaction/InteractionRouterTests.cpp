@@ -883,11 +883,11 @@ void StartNativeWidgetCase(int& failureCount)
     }
     SetExpect(exports==0&&exits==0&&camera->GetParallelScale()==3,"禁用或未匹配字符不得回落到 VTK 重置相机或退出",failureCount);
     context->GetInteractor()->RemoveObserver(exitTag);(void)controller->RemoveAction("application.resetProbe");
-    HostInputEvent event;event.viewId="native";event.x=150;event.y=150;event.kind=HostInputKind::PrimaryPress;
+    HostInputEvent event;event.viewId="native";event.displayPosition=std::array<double,2>{150.25,150.25};event.displayScale=2;event.kind=HostInputKind::PrimaryPress;
     const auto pressed=registry.SendInput(event);SetExpect(pressed.isSucceeded&&pressed.isHandled&&!context->GetIsInputIdle(),"原生控件按下须同时建立 SDK 捕获",failureCount);
     SetExpect(context->GetNavigation()->ZoomBy(1.1)==NavigationStatus::Busy,"业务捕获期间相机写入应拒绝",failureCount);
     BindingPatch patch;patch.Disable("test.widget.drag");SetExpect(controller->ApplyBindings(patch).status==InputBindingStatus::Applied,"控件拖动期间可改绑定",failureCount);
-    event.kind=HostInputKind::PointerMove;event.x=175;SetExpect(registry.SendInput(event).isSucceeded,"控件抓取焦点后仍须经过 SDK 输入桥",failureCount);
+    event.kind=HostInputKind::PointerMove;event.displayPosition=std::array<double,2>{175.25,150.25};SetExpect(registry.SendInput(event).isSucceeded,"控件抓取焦点后仍须经过 SDK 输入桥",failureCount);
     vtkNew<vtkTransform> transform;representation->GetTransform(transform);
     SetExpect(std::abs(transform->GetMatrix()->GetElement(0,3))>0&&camera->GetParallelScale()==3,"控件只执行一次且不重复修改相机",failureCount);
     event.kind=HostInputKind::PrimaryRelease;SetExpect(registry.SendInput(event).isSucceeded&&input.completed==1&&context->GetIsInputIdle(),"原生释放必须结束同一捕获且完成一次",failureCount);

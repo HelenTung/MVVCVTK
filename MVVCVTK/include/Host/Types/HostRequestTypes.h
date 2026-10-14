@@ -66,7 +66,7 @@ struct HostInputEvent final {
     std::uint32_t key=0;
     bool isAutoRepeat=false;
     InputArea area=InputArea::View;
-    std::optional<std::array<double,2>> displayPosition;
+    std::optional<std::array<double,2>> displayPosition; // 提供时作为位置真值；VTK 整数坐标由它取整。
     double displayScale=1;
     std::optional<double> wheelDelta;
     WheelUnit wheelUnit=WheelUnit::Steps;

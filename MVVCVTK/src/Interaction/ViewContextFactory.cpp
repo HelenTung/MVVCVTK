@@ -22,6 +22,8 @@
 #include <vtkRenderWindowInteractor.h>
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -885,12 +887,19 @@ InteractionResult StdViewContext::SendInput(
     }
     if (!m_isInputEnabled||!m_isHostInjected) return getFailure();
     if(event.area!=InputArea::View&&event.area!=InputArea::Application)return {};
+    int displayX=event.x,displayY=event.y;
+    if(event.displayPosition) {
+        const double x=std::round((*event.displayPosition)[0]),y=std::round((*event.displayPosition)[1]);
+        if(!std::isfinite(x)||!std::isfinite(y)||x<std::numeric_limits<int>::min()||x>std::numeric_limits<int>::max()
+            ||y<std::numeric_limits<int>::min()||y>std::numeric_limits<int>::max())return getFailure();
+        displayX=static_cast<int>(x);displayY=static_cast<int>(y);
+    }
     struct InjectGuard { const InteractionEvent*& slot; InjectGuard(const InteractionEvent*& s,const InteractionEvent& e):slot(s){slot=&e;} ~InjectGuard(){slot=nullptr;} };
     InjectGuard original(m_injectedEvent,event);
 
     m_interactor->SetEventInformation(
-        event.x,
-        event.y,
+        displayX,
+        displayY,
         event.isCtrlDown ? 1 : 0,
         event.isShiftDown ? 1 : 0,
         event.keyCode,
