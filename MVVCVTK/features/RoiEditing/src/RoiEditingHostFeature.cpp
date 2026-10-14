@@ -340,7 +340,7 @@ public:
             definition.nodes.push_back(selection.nodes.front());definition.nodes.push_back({m_selection==RoiSelectionMode::Add ? RoiNodeKind::Union:m_selection==RoiSelectionMode::Subtract ? RoiNodeKind::Difference:RoiNodeKind::Intersection,{},left,right});
         } else if (m_selection!=RoiSelectionMode::Replace) return RoiError::InvalidRequest;
         const auto previous=m_tool;m_tool=primitive;m_toolNodeIndex=definition.nodes.size()==1?0:definition.nodes.size()-2;const auto error=SetDefinition(std::move(definition));
-        if(error==RoiError::None){++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_operation.reset();m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;}
+        if(error==RoiError::None){++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_operation.reset();m_operationApplied=false;m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;}
         if (error!=RoiError::None) m_tool=previous;
         return error;
     }
@@ -349,13 +349,13 @@ public:
         RoiSelectionMode selection=RoiSelectionMode::Replace;
         std::optional<DataRevisionRef> updateTarget;
         std::optional<RoiOperationRequest> operation;
-        RoiOperationResult candidate;
+        RoiOperationResult candidate;bool operationApplied=false;
     };
-    EditState GetEditState()const{return {m_request,m_tool,m_toolNodeIndex,m_selection,m_updateTarget,m_operation,m_state.operation};}
+    EditState GetEditState()const{return {m_request,m_tool,m_toolNodeIndex,m_selection,m_updateTarget,m_operation,m_state.operation,m_operationApplied};}
     RoiError SetEditState(const EditState& edit){
         const auto preview=m_data->GetRoiPreview(m_data->GetDataGraph(),edit.request.definition);if(preview.error!=RoiError::None)return preview.error;
         ++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_saveSerial.reset();m_state.isSaving=false;m_state.isComputing=false;
-        m_request=edit.request;m_tool=edit.tool;m_toolNodeIndex=edit.toolNodeIndex;m_selection=edit.selection;m_updateTarget=edit.updateTarget;m_operation=edit.operation;m_state.operation=edit.candidate;
+        m_request=edit.request;m_tool=edit.tool;m_toolNodeIndex=edit.toolNodeIndex;m_selection=edit.selection;m_updateTarget=edit.updateTarget;m_operation=edit.operation;m_state.operation=edit.candidate;m_operationApplied=edit.operationApplied;
         m_applied=edit.request.definition;return SetDefinition(edit.request.definition);
     }
     RoiError GetOutputError(RoiOutputMode output)const noexcept{
@@ -389,14 +389,21 @@ public:
         m_applied=m_request.definition;m_history.push_back(GetEditState());m_redo.clear();
         m_state.undoCount=m_history.size()-1;m_state.redoCount=0;
     }
+    void ApplyCandidate(){
+        AcceptOperation();
+        const auto* components=m_operation?std::get_if<RoiComponentParams>(&m_operation->params):nullptr;
+        m_operationApplied=components && components->operation==RoiComponentOperation::Split;
+        if(!m_operationApplied){m_operation.reset();m_state.operation={};}
+        SetHistory();
+    }
     RoiError StartOperation(const RoiOperationRequest& request,bool begins)
     {
-        if (!m_state.hasDraft || m_state.isDragging) return RoiError::InvalidRequest;
+        if (!m_state.hasDraft || m_state.isDragging || (!begins && m_operationApplied)) return RoiError::InvalidRequest;
         if (begins || !m_operation){m_operationStart=m_request.definition;m_operationOrigin=GetEditState();}
         auto operation=request;operation.source=m_request.definition.source;operation.input=m_operationStart;
         operation.target=m_updateTarget;operation.metadata=m_request.metadata;operation.expectedSourceBinding=m_request.expectedSourceBinding;
         if (!operation.target) operation.output=RoiOutputMode::CreateNew;
-        ++m_serial;if (m_cancel) m_cancel->store(true);m_pending=operation;m_operation=std::move(operation);
+        ++m_serial;if (m_cancel) m_cancel->store(true);m_pending=operation;m_operation=std::move(operation);m_operationApplied=false;
         m_saveSerial.reset();m_state.isComputing=true;m_state.isSaving=false;m_state.operation={};m_state.operation.error=RoiError::Pending;
         if(m_displayFuture.valid() && m_displayCancel)m_displayCancel->store(true);
         StartPendingOperation();return m_state.isComputing?RoiError::Pending:m_state.error;
@@ -553,7 +560,7 @@ public:
         if(m_displayCancel)m_displayCancel->store(true);
         if(!m_displayFuture.valid() && m_worker.joinable())m_worker.join();
         m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& w){return !w.ref;}),m_displayQueue.end());
-        m_pending.reset();m_operation.reset();m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;
+        m_pending.reset();m_operation.reset();m_operationApplied=false;m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;
         if (m_widget) {
             m_widget->RemoveAllObservers(); m_widget->Off(); m_widget->SetInteractor(nullptr);
             m_widget=nullptr; m_representation=nullptr;
@@ -860,6 +867,7 @@ public:
     std::vector<EditState> m_history,m_redo;
     EditState m_operationOrigin;
     std::optional<DataRevisionRef> m_updateTarget;
+    bool m_operationApplied=false;
     std::optional<std::uint64_t> m_saveSerial;
     RoiSelectionMode m_selection=RoiSelectionMode::Replace;
     RegionMesh m_draftMesh;
@@ -990,15 +998,15 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
             result.error=request.roi ? state.ShowRoi(*request.roi,request.isVisible.value_or(true)):RoiError::InvalidRequest;break;
         case RoiEditingAction::ApplySelection:
             if (!state.m_state.hasDraft || state.m_state.isComputing) {result.error=RoiError::InvalidRequest;break;}
-            state.AcceptOperation();state.SetHistory();if(!state.m_operation || !std::get_if<RoiComponentParams>(&state.m_operation->params) || std::get<RoiComponentParams>(state.m_operation->params).operation!=RoiComponentOperation::Split){state.m_operation.reset();state.m_state.operation={};}result.error=RoiError::None;break;
+            state.ApplyCandidate();result.error=RoiError::None;break;
         case RoiEditingAction::BeginOperation:
         case RoiEditingAction::SetOperation:
             result.error=state.StartOperation(*request.operation,request.action==RoiEditingAction::BeginOperation);break;
         case RoiEditingAction::ApplyOperation:
             if (!state.m_state.hasDraft || state.m_state.isComputing || state.m_state.operation.error!=RoiError::None) {result.error=RoiError::InvalidRequest;break;}
-            state.AcceptOperation();state.SetHistory();if(!state.m_operation || !std::get_if<RoiComponentParams>(&state.m_operation->params) || std::get<RoiComponentParams>(state.m_operation->params).operation!=RoiComponentOperation::Split){state.m_operation.reset();state.m_state.operation={};}result.error=RoiError::None;break;
+            state.ApplyCandidate();result.error=RoiError::None;break;
         case RoiEditingAction::CancelOperation:
-            if (!state.m_state.hasDraft || !state.m_operation) {result.error=RoiError::InvalidRequest;break;}
+            if (!state.m_state.hasDraft || !state.m_operation || state.m_operationApplied) {result.error=RoiError::InvalidRequest;break;}
             ++state.m_serial;if (state.m_cancel) state.m_cancel->store(true);state.m_pending.reset();state.m_operation.reset();
             state.m_state.isComputing=false;state.m_state.isSaving=false;state.m_state.operation={};result.error=state.SetEditState(state.m_operationOrigin);break;
         case RoiEditingAction::Undo:
