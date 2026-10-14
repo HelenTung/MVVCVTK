@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <iostream>
 #include <map>
 #include <set>
 #include <utility>
@@ -47,6 +48,14 @@ RoiResult GetFailure(RoiError error,const char* message)
 }
 }
 
+bool RoiService::GetInputTransient(const DataSnapshot& input) noexcept
+{
+    // Host 原始体数据也有 owner scope，但其来源由 Session 管理，不属于 Feature 临时结果。
+    return input && GetDataEntityIdValid(input->lifetimeScope)
+        && (input->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement
+            || !input->provenance || input->provenance->producerId != "org.mvvcvtk.host");
+}
+
 bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
     std::vector<DataEntityId>& releasingScopes)
 {
@@ -57,6 +66,23 @@ bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
     if (!graph.view) return releasingScopes.empty();
     std::map<DataEntityId, DataLifetimeState> scopes;
     std::set<DataRevisionRef> retiringRefs;
+    const auto dependsOnFeatureResult = [&](const DataSnapshot& revision) {
+        std::vector<DataRevisionRef> pending;
+        std::set<DataRevisionRef> visited;
+        for (const auto& input : revision->inputs) pending.push_back(input.source);
+        while (!pending.empty()) {
+            const auto ref = pending.back(); pending.pop_back();
+            if (!visited.insert(ref).second) continue;
+            const auto input = graph.view->GetData(ref);
+            if (!input) continue;
+            const bool isHostRoi = input->type == DataTypes::roiGeometry || input->type == DataTypes::roiCatalog
+                || (input->provenance && input->provenance->producerId == "Host.Roi");
+            const bool isHostSource = input->provenance && input->provenance->producerId == "org.mvvcvtk.host";
+            if (GetDataEntityIdValid(input->lifetimeScope) && !isHostRoi && !isHostSource) return true;
+            for (const auto& parent : input->inputs) pending.push_back(parent.source);
+        }
+        return false;
+    };
     {
         const auto revisions = graph.view->GetDataQuery({});
         for (const auto& revision : revisions.data) {
@@ -66,7 +92,7 @@ bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
                 || (revision->provenance && revision->provenance->producerId == "Host.Roi"
                     && revision->type == DataTypes::labelMap3D);
             if (!isRoi || revision->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement
-                || !GetDataEntityIdValid(revision->lifetimeScope)) continue;
+                || !GetDataEntityIdValid(revision->lifetimeScope) || !dependsOnFeatureResult(revision)) continue;
             const auto lifetime = data.GetDataLifetime(revision->lifetimeScope);
             if (lifetime.status == DataLifetimeStatus::Published) {
                 scopes.emplace(lifetime.scopeId, lifetime);
@@ -75,6 +101,32 @@ bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
         }
     }
     if (scopes.empty()) return releasingScopes.empty();
+    const auto scopeCount = scopes.size();
+    // ROI 可能再次成为裁切等生产者的输入。先回收没有集合外消费者的叶层，
+    // 其余 scope 等对应 Feature 关闭后重试，不能让上游 ROI 阻塞整个清理批次。
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto scope = scopes.begin(); scope != scopes.end();) {
+            bool blocked = false;
+            for (const auto& revision : scope->second.ownedRevisions)
+                for (const auto& derived : graph.view->GetDerivedData(revision))
+                    if (!retiringRefs.count(derived) && graph.view->GetData(derived)) blocked = true;
+            if (!blocked) { ++scope; continue; }
+            for (const auto& revision : scope->second.ownedRevisions)
+                for (const auto& derived : graph.view->GetDerivedData(revision)) {
+                    const auto dependent = graph.view->GetData(derived);
+                    if (!retiringRefs.count(derived) && dependent)
+                        std::cerr << "[Roi] Transient scope waits for type=" << dependent->type.name
+                            << " producer=" << (dependent->provenance ? dependent->provenance->producerId : "none")
+                            << " operation=" << (dependent->provenance ? dependent->provenance->operationId : "none") << '\n';
+                }
+            for (const auto& revision : scope->second.ownedRevisions) retiringRefs.erase(revision);
+            scope = scopes.erase(scope);
+            changed = true;
+        }
+    }
+    if (scopes.empty()) return false;
     DataTransaction transaction;
     for (const auto& item : scopes)
         transaction.retireScopes.push_back({item.first, DataLifetimeStatus::Published,
@@ -98,16 +150,32 @@ bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
                 DataTypes::roiCatalog, std::move(inputs),
                 std::make_shared<const RoiCatalogPayload>(std::move(entries)),
                 DataProvenance{"Host.Roi", "release-transient-scopes", "1", {}}});
+            // 只要保留项仍依赖 scoped ROI，替代目录仍需可退休，不能制造永久结构 blocker。
+            for (const auto& input : transaction.outputs.back().inputs)
+                if (GetInputTransient(graph.view->GetData(input.source))) {
+                    transaction.outputs.back().lifetimeScope = data.CreateDataEntityId();
+                    transaction.outputs.back().lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
+                    break;
+                }
         }
         transaction.bindings.push_back({binding.name, binding.revision, true, binding.target, replacement});
     }
     const auto committed = data.SetDataCommit(std::move(transaction));
-    if (committed.status != DataCommitStatus::Succeeded) return false;
+    if (committed.status != DataCommitStatus::Succeeded) {
+        std::cerr << "[Roi] Transient retirement pending: " << committed.message << '\n';
+        for (const auto& blocker : committed.blockers) {
+            const auto blocked = graph.view->GetData(blocker.revision);
+            std::cerr << "[Roi] Retirement blocker: " << blocker.owner
+                << " type=" << (blocked ? blocked->type.name : "unavailable")
+                << " scoped=" << (blocked && GetDataEntityIdValid(blocked->lifetimeScope)) << '\n';
+        }
+        return false;
+    }
     for (const auto& item : scopes) releasingScopes.push_back(item.first);
     releasingScopes.erase(std::remove_if(releasingScopes.begin(), releasingScopes.end(),
         [&](const auto& scope) { return data.SetDataRelease(scope).status == DataLifetimeStatus::Released; }),
         releasingScopes.end());
-    return releasingScopes.empty();
+    return scopes.size() == scopeCount && releasingScopes.empty();
 }
 
 std::optional<RoiDescriptor> RoiService::GetDescriptor(const DataGraphSnapshot& graph,const DataRevisionRef& ref)
@@ -264,7 +332,7 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
             bool explicitRetirement = false;
             for (const auto& input : output.inputs) {
                 const auto source = graph.view->GetData(input.source);
-                if (source && GetDataEntityIdValid(source->lifetimeScope)) explicitRetirement = true;
+                if (GetInputTransient(source)) explicitRetirement = true;
                 for (const auto& staged : transaction.outputs)
                     if (staged.entityId == input.source.entityId && staged.expectedGeneration + 1 == input.source.generation
                         && staged.lifetimeScope) explicitRetirement = true;

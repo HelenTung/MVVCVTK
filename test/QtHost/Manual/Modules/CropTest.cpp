@@ -335,6 +335,17 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
             results.append(QJsonObject{{"node",QString::number(result.nodeId)},{"output",GetRefText(result.outputRevision)},{"source",GetRefText(result.sourceRevision)},{"inputRoi",inputRoi}});
         }
         QJsonArray nodes;for(const auto& node:history.nodes)nodes.append(QJsonObject{{"nodeId",QString::number(node.nodeId)},{"parentNodeId",QString::number(node.parentNodeId)}});
+        QJsonObject appliedOperation;
+        for (const auto& node : history.nodes) if (node.nodeId == history.appliedHead && node.operation) {
+            const auto& op = *node.operation;
+            const auto shape = op.geometryType == CropShape::Box ? "Box" : op.geometryType == CropShape::Plane ? "Plane"
+                : op.geometryType == CropShape::Sphere ? "Sphere" : "Cylinder";
+            appliedOperation = {{"shape", shape}, {"removalMode", int(op.removalMode)},
+                {"matrix", GetValues(op.boxToInputModelMatrix)},
+                {"center", GetValues(op.geometryType == CropShape::Plane ? op.planeCenterInInputModel : op.centerInInputModel)},
+                {"axis", GetValues(op.geometryType == CropShape::Plane ? op.planeNormalInInputModel : op.axisInInputModel)},
+                {"radius", op.radius}, {"height", op.height}};
+        }
         QJsonArray documents;for(const auto document:feature->GetDocuments())documents.append(QString::number(document));
         panel->SetState({{"nextPageAfter",QString::number(history.nextPageAfter)},{"documents",documents},{"documentId",QString::number(history.documentId)},{"nodes",nodes},
             {"appliedHead",QString::number(state.history.appliedHead)},{"renderedHead",QString::number(state.history.renderedHead)},
@@ -342,7 +353,7 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
             {"framesReady",framesReady},{"editMode",int(state.history.editMode)},{"isConfirmed",flow->isConfirmed},{"source",GetDataRevisionRefValid(state.sourceRevision)?GetRefText(state.sourceRevision):QString()},{"output",GetDataRevisionRefValid(state.outputRevision)?GetRefText(state.outputRevision):QString()},
             {"documentStatus",int(state.documentStatus)},{"failureReason",int(state.failureReason)},{"blockerCount",int(state.blockers.size())},{"disabled",disabled},
             {"outputMatchesPreview",outputMatches},{"viewingOutput",GetDataRevisionRefValid(flow->viewedOutput)},{"viewedOutput",GetDataRevisionRefValid(flow->viewedOutput)?GetRefText(flow->viewedOutput):QString()},
-            {"hasCurrentPreview",state.history.nodeCount>0 || roiRoot},{"roiOnly",roiRoot},{"results",results}});
+            {"hasCurrentPreview",state.history.nodeCount>0 || roiRoot},{"roiOnly",roiRoot},{"results",results},{"appliedOperation",appliedOperation}});
     };
     panel->onStop=[panel]{panel->SendAction("RestoreSource",{});};
     panel->stopDescription="返回源体、结束预览并尝试释放本次裁剪输出；下游仍引用时保留结果。已有生成任务需要先结束，此动作不是独立取消生成。";

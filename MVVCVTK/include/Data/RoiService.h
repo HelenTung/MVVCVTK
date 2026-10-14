@@ -29,6 +29,7 @@ public:
     RoiResult LoadArchive(const RoiArchive& archive, const std::string& sourceKey,
         const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
 private:
+    static bool GetInputTransient(const DataSnapshot& input) noexcept;
     RoiResult SetRoiCommit(const RoiRequest& request, std::vector<DataRevisionDraft> masks);
     DataGraphStore& m_store;
 };
