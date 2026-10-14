@@ -2,6 +2,7 @@
 #include "ModuleFactories.h"
 #include "AlignmentInput.h"
 #include "Support/ParameterEditor.h"
+#include "Support/ColorSegmentInput.h"
 #include "Support/RoiSelection.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include <QPointer>
@@ -189,14 +190,54 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
             {"unit", static_cast<int>(snapshot->unit)}, {"verdict", Verdict(snapshot->verdict)},
             {"forward", Statistics(*snapshot->forward)}, {"reverse", snapshot->reverse ? QJsonValue(Statistics(*snapshot->reverse)) : QJsonValue()}});
     }, TestPolicy::Read);
-    panel->AttachAction("SetDeviationDisplay", GetJson(R"({"deviation":"current","range":null,"useToleranceColors":false,"isVisible":true,"selectedVertex":null})"),
-        [selected, send](auto id, const auto& p) {
+    panel->AttachAction("SetDeviationDisplay", GetJson(R"({"deviation":"current","rangeMode":"Result","range":[0,1],"palette":"HueLoop","constantColor":[0.7,0.7,0.7],"lowColor":[0.294,0.294,0.84],"highColor":[0.84,0.294,0.294],"belowColor":[0.64,0.29,0.78],"aboveColor":[0.84,0.29,0.65],"segments":[],"isReversed":false,"hasLegend":true,"legendPosition":[0.025,0.20],"opacity":1,"useToleranceColors":false,"isVisible":true,"selectedVertex":null})"),
+        [selected,send,feature](auto id,const auto& p) {
             AlignmentDeviationDisplay display; display.result = p["deviation"] == "current" ? selected->deviation : GetRef(p["deviation"]);
-            if (!p["range"].isNull()) display.range = GetArray<double, 2>(p["range"]);
+            display.rangeMode=GetEnum<AlignmentRangeMode>(p,"rangeMode",{{"Result",AlignmentRangeMode::Result},{"Manual",AlignmentRangeMode::Manual}});
+            display.range=GetArray<double,2>(p["range"]);
+            const std::initializer_list<std::pair<const char*,AlignmentColorMode>> modes{
+                {"Constant",AlignmentColorMode::Constant},{"Gradient",AlignmentColorMode::Gradient},{"Rainbow",AlignmentColorMode::Rainbow},
+                {"InverseRainbow",AlignmentColorMode::InverseRainbow},{"HueLoop",AlignmentColorMode::HueLoop},{"Diverging",AlignmentColorMode::Diverging}};
+            display.palette=GetEnum<AlignmentColorMode>(p,"palette",modes);
+            display.constantColor=GetArray<double,3>(p["constantColor"]);display.lowColor=GetArray<double,3>(p["lowColor"]);
+            display.highColor=GetArray<double,3>(p["highColor"]);display.belowColor=GetArray<double,3>(p["belowColor"]);display.aboveColor=GetArray<double,3>(p["aboveColor"]);
+            display.segments=GetColorSegments<AlignmentColorSegment,AlignmentColorMode>(p,modes);
+            display.legendPosition=GetArray<double,2>(p["legendPosition"]);
+            display.hasLegend=GetBool(p,"hasLegend");display.isReversed=GetBool(p,"isReversed");display.opacity=GetNumber(p,"opacity");
             display.useToleranceColors = GetBool(p, "useToleranceColors"); display.isVisible = GetBool(p, "isVisible");
             if (!p["selectedVertex"].isNull()) display.selectedVertex = GetId(p["selectedVertex"]);
+            if(const auto saved=feature->GetDeviationDisplay(display.result)){display.hiddenLegendViews=saved->hiddenLegendViews;display.legendPositions=saved->legendPositions;}
+            if(!p["legendView"].toString().isEmpty())display.legendPositions[p["legendView"].toString().toStdString()]=display.legendPosition;
             AlignmentRequest request; request.action = AlignmentAction::SetDeviationDisplay; request.deviationDisplay = display; send(id, std::move(request));
         }, TestPolicy::View);
+    panel->getColorParameters=[panel,selected,feature] {
+        if(!GetDataRevisionRefValid(selected->deviation))return QJsonObject{};
+        auto p=panel->GetActionParameters("SetDeviationDisplay");const auto d=feature->GetDeviationDisplay(selected->deviation).value_or(AlignmentDeviationDisplay{});
+        const auto colors=GetColorBandJson(d.palette,d.constantColor,d.lowColor,d.highColor,d.belowColor,d.aboveColor,d.segments,d.isReversed);
+        for(auto i=colors.begin();i!=colors.end();++i)p[i.key()]=i.value();
+        p["rangeMode"]=d.rangeMode==AlignmentRangeMode::Result ? "Result":"Manual";p["range"]=GetValues(d.range);
+        p["useToleranceColors"]=d.useToleranceColors;p["hasLegend"]=d.hasLegend;p["opacity"]=d.opacity;p["isVisible"]=d.isVisible;
+        p["selectedVertex"]=d.selectedVertex ? QJsonValue(QString::number(*d.selectedVertex)):QJsonValue();
+        p["legendPosition"]=GetValues(d.legendPosition);p["deviation"]=GetRefText(selected->deviation);return p;
+    };
+    panel->getColorPosition=[feature](const QString& id) {
+        const auto d=feature->GetState().deviationDisplay.value_or(AlignmentDeviationDisplay{});const auto i=d.legendPositions.find(id.toStdString());const auto p=i==d.legendPositions.end() ? d.legendPosition:i->second;return QPointF(p[0],p[1]);
+    };
+    panel->getColorSurface=[feature] { const auto state=feature->GetState();const auto result=state.deviationDisplay ? feature->GetDeviation(state.deviationDisplay->result):std::nullopt;return result ? GetRefText(result->sourceMesh):QString(); };
+    panel->setColorVisible=[feature](bool visible){const auto state=feature->GetState();if(!state.deviationDisplay)return;auto d=*state.deviationDisplay;d.isVisible=visible;AlignmentRequest r;r.action=AlignmentAction::SetDeviationDisplay;r.deviationDisplay=d;feature->SendRequest(r);};
+    panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
+        const auto state=feature->GetState();if(!state.deviationDisplay)return;
+        auto d=*state.deviationDisplay;const auto view=id.toStdString();
+        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
+        AlignmentRequest request;request.action=AlignmentAction::SetDeviationDisplay;request.deviationDisplay=d;feature->SendRequest(request);
+    };
+    panel->getColorDescription=[feature] {
+        const auto state=feature->GetState();if(!state.deviationDisplay)return QString("偏差显示尚未应用");
+        QString text="计量偏差 · "+GetRefText(state.deviationDisplay->result);
+        if(state.deviationDisplayRange)text+=QString("\n生效范围：%1 ～ %2").arg((*state.deviationDisplayRange)[0],0,'g',8).arg((*state.deviationDisplayRange)[1],0,'g',8);
+        return text;
+    };
     panel->AttachAction("ApplyModelPose", {{"result", "current"}}, [alignment, send](auto id, const auto& p) {
         AlignmentRequest request; request.action = AlignmentAction::ApplyModelPose; request.resultRef = alignment(p); send(id, std::move(request));
     }, TestPolicy::View, true);

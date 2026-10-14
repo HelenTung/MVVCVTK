@@ -2,31 +2,36 @@
 #include "AlignmentDeviationData.h"
 #include "AlignmentDeviationColors.h"
 #include "AlignmentMath.h"
+#include "App/Services/FeatureViewService.h"
 #include <stdexcept>
 
 void AlignmentDeviationDisplayController::Clear() noexcept {
     for (auto i=m_bindings.rbegin();i!=m_bindings.rend();++i) i->port->RemoveOverlay(i->overlay);
-    m_bindings.clear(); m_product.reset(); m_request.reset();
+    m_bindings.clear(); m_product.reset();m_marker=nullptr;m_request.reset();m_resolved.reset();
 }
 bool AlignmentDeviationDisplayController::GetReady(const DataGraphSnapshot &graph) const {
-    if (!m_product || !m_request || m_bindings.empty()) return false;
+    if (!m_product || !m_request || !m_request->isVisible || m_bindings.empty()) return false;
     const auto result=AlignmentDeviationDataStore::GetResult(graph,m_request->result);
     return result && result->isCurrent;
 }
 void AlignmentDeviationDisplayController::Refresh(const DataGraphSnapshot &graph) {
-    if (m_request && !GetReady(graph)) Clear();
+    if (m_request) { const auto result=AlignmentDeviationDataStore::GetResult(graph,m_request->result);if(!result || !result->isCurrent)Clear(); }
 }
 AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, FeatureViewDirectory *views,
     const AlignmentConfig &config, const AlignmentDeviationDisplay &request) {
     AlignmentResult result;
-    if (!request.isVisible) { Clear(); result.status=AlignmentStatus::FullyDetermined; return result; }
     const auto graph=data.GetDataGraph();
     const auto deviation=AlignmentDeviationDataStore::GetResult(graph,request.result);
-    const auto resolved=deviation ? AlignmentDeviationColors::GetResolvedDisplay(request,*deviation) : std::nullopt;
+    const bool sameResult=m_product && m_request && m_request->result==request.result && deviation && m_product->field==deviation->forward;
+    const auto resolved=deviation ? AlignmentDeviationColors::GetResolvedDisplay(request,*deviation,sameResult ? &m_product->actualRange:nullptr):std::nullopt;
     if (!resolved)
         throw std::invalid_argument("Invalid deviation display parameters.");
     if (!deviation->isCurrent) { result.status=AlignmentStatus::Stale; return result; }
     if (!views) { result.status=AlignmentStatus::Unavailable; return result; }
+    auto applied=request;AnalysisColorStyle::SetTailColors(applied);
+    std::map<DataRevisionRef,AlignmentDeviationDisplay> saved;saved.emplace(request.result,applied);
+    auto resolvedCopy=*resolved;
+    auto commit=[&]{m_request=std::move(applied);m_resolved=std::move(resolvedCopy);m_saved.erase(request.result);m_saved.insert(saved.extract(saved.begin()));};
     std::vector<Binding> next;
     try {
         const auto targets=views->GetViews(config.targetViews);
@@ -38,19 +43,38 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             if (!port) throw std::runtime_error("Deviation overlay port unavailable.");
             next.push_back({port,{}});
         }
-        if (m_request && m_product && m_request->result==request.result && m_request->range==resolved->range &&
-            m_request->useToleranceColors==request.useToleranceColors && m_request->selectedVertex==request.selectedVertex &&
-            next.size()==m_bindings.size() && std::equal(next.begin(),next.end(),m_bindings.begin(),
-                [](const auto &a,const auto &b) { return a.port==b.port; })) {
-            // 相同请求不重建颜色、mapper 或 GPU 缓存。
-            result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result; result.isDisplayReady=true;
-            return result;
+        auto appearance=[&](std::size_t index) {
+            auto value=request;value.legendPosition=AnalysisColorStyle::GetLegendPosition(request,targets[index].id);value.hasLegend=request.hasLegend && std::find(request.hiddenLegendViews.begin(),request.hiddenLegendViews.end(),targets[index].id)==request.hiddenLegendViews.end();return value;
+        };
+        std::vector<AlignmentDeviationDisplay> appearances;
+        for(std::size_t i=0;i<next.size();++i)appearances.push_back(appearance(i));
+        const auto notify=[&] {
+            for(const auto& view:targets)if(auto port=views->GetFeaturePort(view.id))port->SetRenderNeeded();
+        };
+        const bool sameViews=m_request && m_product && m_request->result==request.result && next.size()==m_bindings.size()
+            && std::equal(next.begin(),next.end(),m_bindings.begin(),[](const auto& a,const auto& b){return a.port==b.port;});
+        const auto parameters=AlignmentDeviationColors::GetRampParameters(*resolved,deviation->parameters->tolerance);
+        if(sameViews && m_resolved->range==resolved->range && AnalysisColorStyle::GetRampEqual(m_product->ramp,parameters)) {
+            // 选点／整体透明度／图例显隐不改颜色数组，也不重建 mapper 或几何。
+            auto marker=m_request->selectedVertex==request.selectedVertex ? m_marker:AlignmentDeviationOverlay::BuildMarker(m_product->source,*deviation,request.selectedVertex);
+            notify();
+            for(std::size_t i=0;i<m_bindings.size();++i) { m_bindings[i].overlay->SetSelection(marker);m_bindings[i].overlay->SetPresentation(appearances[i]); }
+            m_marker=marker;commit();
+            result.status=AlignmentStatus::FullyDetermined;result.deviationResult=request.result;result.isDisplayReady=request.isVisible;return result;
         }
         const auto mesh=data.GetSurfaceMesh(graph,deviation->sourceMesh);
-        if (!mesh) throw std::runtime_error("Measured surface render view unavailable.");
-        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,*resolved);
+        if(!mesh)throw std::runtime_error("Measured surface render view unavailable.");
+        const auto product=AlignmentDeviationOverlay::Build(mesh,*deviation,*resolved,sameViews ? m_product.get():nullptr,
+            sameViews && m_request->selectedVertex==request.selectedVertex ? std::optional<vtkSmartPointer<vtkPolyData>>(m_marker):std::nullopt);
+        if(sameViews) {
+            notify();
+            for(std::size_t i=0;i<m_bindings.size();++i) { m_bindings[i].overlay->SetProduct(product);m_bindings[i].overlay->SetPresentation(appearances[i]); }
+            m_product=product;m_marker=product->marker;commit();
+            result.status=AlignmentStatus::FullyDetermined;result.deviationResult=request.result;result.isDisplayReady=request.isVisible;return result;
+        }
         for (auto &binding:next) {
             binding.overlay=std::make_shared<AlignmentDeviationOverlay>(product);
+            binding.overlay->SetPresentation(appearances[static_cast<std::size_t>(&binding-next.data())]);
             if (!binding.port->AttachOverlay(binding.overlay)) throw std::runtime_error("Deviation overlay attach failed.");
         }
         // 挂载完成后再核对真源；端口回调不能把过期表面变为当前显示。
@@ -60,8 +84,8 @@ AlignmentResult AlignmentDeviationDisplayController::Set(TrustedDataPort &data, 
             for (auto i=next.rbegin();i!=next.rend();++i) if (i->overlay) i->port->RemoveOverlay(i->overlay);
             return result;
         }
-        Clear(); m_bindings=std::move(next); m_product=product; m_request=*resolved;
-        result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result; result.isDisplayReady=true;
+        Clear(); m_bindings=std::move(next); m_product=product;m_marker=product->marker;commit();
+        result.status=AlignmentStatus::FullyDetermined; result.deviationResult=request.result;result.isDisplayReady=request.isVisible;
         return result;
     } catch (const std::length_error &e) { result.status=AlignmentStatus::ResourceExhausted; result.message=e.what(); }
       catch (const std::bad_alloc &) { result.status=AlignmentStatus::ResourceExhausted; }

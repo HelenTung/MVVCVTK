@@ -71,7 +71,7 @@ MetrologyReport Fixture() {
     v=r.voxelVolumes.front();v.result=Ref(24);vp=std::make_shared<VoxelVolumeRequest>(*v.parameters);vp->requireEnclosedSelection=true;v.parameters=vp;
     v.statistics.volumeMm3.reset();v.statistics.validity=VoxelVolumeValidity::TouchesBoundary;r.voxelVolumes.push_back(v);
     r.presentation.source=MetrologyReportDisplaySource::ExplicitConfiguration;
-    MetrologyReportDeviationDisplay display;display.parameters.result=deviation.result;display.parameters.range={0,.5};display.parameters.selectedVertex=0;
+    MetrologyReportDeviationDisplay display;display.parameters.result=deviation.result;display.parameters.rangeMode=AlignmentRangeMode::Manual;display.parameters.range={0,.5};display.mappingRange=display.parameters.range;display.parameters.selectedVertex=0;
     display.legendRgb=AlignmentDeviationColors::GetLegend(display.parameters,params->tolerance);
     AlignmentDeviationSelection selection;selection.result=deviation.result;selection.vertex=0;selection.sourcePoint={0,0,0};selection.alignedPoint={1.5,0,0};selection.sample=field->samples[0];display.selection=selection;r.presentation.deviations.push_back(display);
     MetrologyReportSceneDisplay scene;auto layout=std::make_shared<AlignmentSceneDisplay>();layout->anchorAlignment=a.result;

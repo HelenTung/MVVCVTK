@@ -945,6 +945,14 @@ void Display()
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto recolor=display;recolor.colorBand.mode=ThicknessColorMode::Gradient;
+    const auto recolored=ThicknessOverlay::BuildData(record,*w.mesh,recolor,&prepared);
+    Check(recolored.mesh->GetPoints()==prepared.mesh->GetPoints() && recolored.mesh->GetPolys()==prepared.mesh->GetPolys()
+        && recolored.mesh->GetCellData()->GetArray("thickness.sample")==prepared.mesh->GetCellData()->GetArray("thickness.sample"),
+        "recolor preserves points, cells and sample IDs without reconstructing footprints");
+    const auto appearance=ThicknessOverlay::BuildData(record,*w.mesh,display,&prepared);
+    Check(appearance.mesh==prepared.mesh && appearance.mesh->GetCellData()->GetScalars()==prepared.mesh->GetCellData()->GetScalars(),
+        "appearance-only update preserves the original color array");
     auto inclined=display;inclined.style=ThicknessDisplayStyle::Inclined;
     const auto faded=ThicknessOverlay::BuildData(record,*w.mesh,inclined);
     auto* fadeColors=faded.mesh->GetCellData()->GetScalars();
@@ -1007,7 +1015,7 @@ void Display()
     auto overlay = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                       HostRenderViewRole::Primary3D);
     overlay->AttachRenderer(renderer);
-    Check(renderer->GetViewProps()->GetNumberOfItems() == 4,
+    Check(renderer->GetViewProps()->GetNumberOfItems() == 3,
           "feature owns surface, query marker, scale and invalid swatch");
     auto *colors = prepared.mesh->GetCellData()->GetScalars();
     Check(colors && colors->GetNumberOfComponents() == 3,
@@ -1021,13 +1029,11 @@ void Display()
         colored = colored || (rgb[0] != 128 || rgb[1] != 128 || rgb[2] != 128);
     }
     Check(grey && colored, "valid and invalid have distinct colors");
-    bool hasInvalidLegend = false;
+    bool hasInvalidLegend=false;
     renderer->GetViewProps()->InitTraversal();
-    while (auto *prop = renderer->GetViewProps()->GetNextProp())
-        if (auto *legend = vtkLegendBoxActor::SafeDownCast(prop))
-            hasInvalidLegend = legend->GetNumberOfEntries() == 1 &&
-                               std::string(legend->GetEntryString(0)) == u8"无效/未测";
-    Check(hasInvalidLegend, "invalid color has an explicit legend entry");
+    while(auto* prop=renderer->GetViewProps()->GetNextProp())if(auto* legend=AnalysisLegend::SafeDownCast(prop))
+        hasInvalidLegend=legend->GetDrawNanAnnotation() && std::string(legend->GetNanAnnotation())==u8"无效／未测";
+    Check(hasInvalidLegend,"invalid data is explicitly distinguished from both range exterior swatches");
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
     window->SetOffScreenRendering(1);
     window->SetSize(400, 400);
@@ -1089,8 +1095,8 @@ void Display()
     auto slice = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                     HostRenderViewRole::TopDownSlice);
     slice->AttachRenderer(renderer);
-    Check(renderer->GetViewProps()->GetNumberOfItems()==5,
-        "slice owns colored field contour, contrast outline, query marker and both legends");
+    Check(renderer->GetViewProps()->GetNumberOfItems()==4,
+        "slice owns colored field contour, contrast outline, query marker and the complete legend");
     FeatureOverlayState state;
     state.cursor = {3, 3, 2.5};
     slice->SetOverlayState(state);

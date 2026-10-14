@@ -1054,11 +1054,26 @@ template <> struct Codec<VoxelVolumeSnapshot> {
     j.End();
   }
 };
+template <> struct Codec<std::map<std::string,std::array<double,2>>> {
+  static void Write(Json& j,const std::map<std::string,std::array<double,2>>& v) {
+    j.Object();for(const auto& p:v)j.Field(p.first,p.second);j.End();
+  }
+};
+template <> struct Codec<AlignmentColorSegment> {
+  static void Write(Json& j,const AlignmentColorSegment& v) {
+    j.Object();j.Field("lower",v.lower);j.Field("upper",v.upper);j.Field("mode",static_cast<unsigned>(v.mode));
+    j.Field("lowColor",v.lowColor);j.Field("highColor",v.highColor);j.End();
+  }
+};
 template <> struct Codec<AlignmentDeviationDisplay> {
   static void Write(Json &j, const AlignmentDeviationDisplay &v) {
     j.Object();
     j.Field("result", v.result);
-    j.Field("range", v.range);
+    j.Field("range",v.range);j.Field("rangeMode",static_cast<unsigned>(v.rangeMode));
+    j.Field("palette",static_cast<unsigned>(v.palette));j.Field("segments",v.segments);
+    j.Field("constantColor",v.constantColor);j.Field("lowColor",v.lowColor);j.Field("highColor",v.highColor);
+    j.Field("belowColor",v.belowColor);j.Field("aboveColor",v.aboveColor);
+    j.Field("isReversed",v.isReversed);j.Field("hasLegend",v.hasLegend);j.Field("hiddenLegendViews",v.hiddenLegendViews);j.Field("legendPosition",v.legendPosition);j.Field("legendPositions",v.legendPositions);j.Field("opacity",v.opacity);
     j.Field("useToleranceColors", v.useToleranceColors);
     j.Field("isVisible", v.isVisible);
     j.Field("selectedVertex", v.selectedVertex);
@@ -1081,6 +1096,7 @@ template <> struct Codec<MetrologyReportDeviationDisplay> {
   static void Write(Json &j, const MetrologyReportDeviationDisplay &v) {
     j.Object();
     j.Field("parameters", v.parameters);
+    j.Field("mappingRange",v.mappingRange);
     j.Field("colorMapVersion", v.colorMapVersion);
     j.Field("legendRgb", v.legendRgb);
     j.Field("invalidRgb", v.invalidRgb);
@@ -1210,7 +1226,7 @@ const MetrologyReportAlignment &Owner(const MetrologyReport &r,
   return *found;
 }
 void Validate(const MetrologyReport &r, Sink &sink) {
-  Require(r.schemaVersion == 3 && !r.id.empty() &&
+  Require(r.schemaVersion == 4 && !r.id.empty() &&
               r.capturedUnixMilliseconds > 0 &&
               (!r.alignments.empty() || !r.voxelVolumes.empty()),
           "Invalid frozen report header.");

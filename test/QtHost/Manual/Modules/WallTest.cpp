@@ -68,7 +68,9 @@ ThicknessDisplay Display(const QJsonObject& p)
     ThicknessDisplay value; value.targetViews = GetAllViews();
     value.mode = GetEnum<ThicknessDisplayMode>(p, "mode", {{"Continuous", ThicknessDisplayMode::Continuous}, {"Tolerance", ThicknessDisplayMode::Tolerance}});
     if (p.contains("range")) value.range = GetArray<double, 2>(p["range"]);
+    value.legendPosition=GetArray<double,2>(p["legendPosition"]);
     value.opacity = GetNumber(p, "opacity");
+    if(p.contains("isReversed"))value.colorBand.isReversed=GetBool(p,"isReversed");
     if (p.contains("rangeMode")) value.rangeMode = GetEnum<ThicknessRangeMode>(p, "rangeMode", {
         {"Manual", ThicknessRangeMode::Manual}, {"Result", ThicknessRangeMode::Result}, {"Histogram", ThicknessRangeMode::Histogram}});
     if (p.contains("palette")) value.colorBand.mode = GetEnum<ThicknessColorMode>(p, "palette", {
@@ -86,6 +88,9 @@ ThicknessDisplay Display(const QJsonObject& p)
         {"Overlay",ThicknessDisplayStyle::Overlay},{"Constant",ThicknessDisplayStyle::Constant},
         {"Inclined",ThicknessDisplayStyle::Inclined},{"InverseInclined",ThicknessDisplayStyle::InverseInclined}});
     if(p.contains("opacityRange"))value.opacityRange=GetArray<double,2>(p["opacityRange"]);
+    value.toleranceBelowColor=GetArray<double,3>(p["toleranceBelowColor"]);
+    value.toleranceWithinColor=GetArray<double,3>(p["toleranceWithinColor"]);
+    value.toleranceAboveColor=GetArray<double,3>(p["toleranceAboveColor"]);
     value.isVisible = GetBool(p, "isVisible"); value.hasLegend = GetBool(p, "hasLegend"); return value;
 }
 }
@@ -175,11 +180,45 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             if (p["histogramRange"].isNull()) parameters["histogramRange"] = QJsonArray{0.,parameters["upper"]};
             send(id, ThicknessEvaluationRequest{Evaluation(parameters)});
         }, TestPolicy::Compute);
-    panel->AttachAction("SetDisplay", GetJson(R"({"mode":"Continuous","rangeMode":"Result","range":[0,1],"palette":"InverseRainbow",
-        "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
+    panel->AttachAction("SetDisplay", GetJson(R"({"result":"current","isReversed":false,"mode":"Continuous","rangeMode":"Result","range":[0,1],"palette":"InverseRainbow",
+        "toleranceBelowColor":[0.8156862745098039,0.34509803921568627,0.34901960784313724],"toleranceWithinColor":[0.3803921568627451,0.7019607843137254,0.44313725490196076],"toleranceAboveColor":[0.3254901960784314,0.4470588235294118,0.7372549019607844],"constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
         "segments":[],"displayStyle":"Overlay","opacityRange":[0.15,1],
-        "opacity":1,"isVisible":true,"hasLegend":true})"),
-        [send](auto id, const auto& p) { ThicknessRequest r; r = ThicknessDisplayRequest{}; std::get<ThicknessDisplayRequest>(r).display = Display(p); send(id, r); }, TestPolicy::View);
+        "legendPosition":[0.025,0.20],"opacity":1,"isVisible":true,"hasLegend":true})"),
+        [send,resolveResult,feature](auto id,const auto& p) {
+            auto d=Display(p);const auto ref=resolveResult(p);const auto snapshot=feature->GetResult(ref);
+            if(snapshot && snapshot->appliedDisplay){d.hiddenLegendViews=snapshot->appliedDisplay->hiddenLegendViews;d.legendPositions=snapshot->appliedDisplay->legendPositions;}
+            if(!p["legendView"].toString().isEmpty())d.legendPositions[p["legendView"].toString().toStdString()]=d.legendPosition;
+            send(id,ThicknessDisplayRequest{d,ref});
+        }, TestPolicy::View);
+    panel->getColorParameters=[panel,feature,appliedDisplays] {
+        const auto ref=feature->GetState().result;if(!GetDataRevisionRefValid(ref))return QJsonObject{};
+        auto p=panel->GetActionParameters("SetDisplay");
+        const auto snapshot=feature->GetResult(ref);const auto d=snapshot && snapshot->appliedDisplay ? *snapshot->appliedDisplay:ThicknessDisplay{};
+        const auto& band=d.colorBand;const auto colors=GetColorBandJson(band.mode,band.constantColor,band.lowColor,band.highColor,band.belowColor,band.aboveColor,band.segments,band.isReversed);
+        for(auto i=colors.begin();i!=colors.end();++i)p[i.key()]=i.value();
+        const char* ranges[]{"Manual","Result","Histogram"};const char* styles[]{"Overlay","Constant","Inclined","InverseInclined"};
+        p["rangeMode"]=ranges[static_cast<unsigned>(d.rangeMode)];p["range"]=GetValues(d.range);p["displayStyle"]=styles[static_cast<unsigned>(d.style)];
+        p["toleranceBelowColor"]=GetValues(d.toleranceBelowColor);p["toleranceWithinColor"]=GetValues(d.toleranceWithinColor);p["toleranceAboveColor"]=GetValues(d.toleranceAboveColor);
+        p["mode"]=d.mode==ThicknessDisplayMode::Continuous ? "Continuous":"Tolerance";p["opacity"]=d.opacity;p["hasLegend"]=d.hasLegend;p["isVisible"]=d.isVisible;p["opacityRange"]=GetValues(d.opacityRange);
+        p["legendPosition"]=GetValues(d.legendPosition);p["result"]=GetRefText(ref);return p;
+    };
+    panel->getColorPosition=[feature](const QString& id) {
+        const auto d=feature->GetState().appliedDisplay.value_or(ThicknessDisplay{});const auto i=d.legendPositions.find(id.toStdString());const auto p=i==d.legendPositions.end() ? d.legendPosition:i->second;return QPointF(p[0],p[1]);
+    };
+    panel->getColorSurface=[feature] { const auto state=feature->GetState();const auto result=feature->GetResult(state.result);return result ? GetRefText(result->archive.input.mesh):QString(); };
+    panel->setColorVisible=[feature](bool visible){const auto state=feature->GetState();if(!state.appliedDisplay)return;auto d=*state.appliedDisplay;d.isVisible=visible;feature->SendRequest(ThicknessDisplayRequest{d,state.result});};
+    panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
+        const auto state=feature->GetState();if(!state.appliedDisplay)return;
+        auto d=*state.appliedDisplay;const auto view=id.toStdString();
+        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
+        feature->SendRequest(ThicknessDisplayRequest{d,state.result});
+    };
+    panel->getColorDescription=[feature] {
+        const auto state=feature->GetState();QString text="壁厚 · "+GetRefText(state.result);
+        if(state.displayRange)text+=QString("\n生效范围：%1 ～ %2").arg((*state.displayRange)[0],0,'g',8).arg((*state.displayRange)[1],0,'g',8);
+        return text+(state.isDisplayReady ? "\n显示就绪":"\n结果已就绪，显示未就绪／隐藏");
+    };
     panel->AttachAction("SetActive", {{"result", "current"}}, [panel,send, resolveResult](auto id, const auto& p) {
         const auto ref=resolveResult(p);panel->SetParameterPatch("Result",{{"result",GetRefText(ref)}});
         ThicknessRequest r; r = ThicknessActivationRequest{}; std::get<ThicknessActivationRequest>(r).resultRevision = ref; send(id, r);

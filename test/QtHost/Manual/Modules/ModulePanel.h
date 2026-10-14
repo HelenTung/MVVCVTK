@@ -11,6 +11,7 @@
 #include <QWidget>
 #include <QMap>
 #include <QSet>
+#include <QPointer>
 #include <functional>
 #include <map>
 #include <set>
@@ -31,6 +32,7 @@ class QMenu;
 
 namespace Manual {
 class ParameterEditor;
+class ColorLegendEditor;
 struct TestContext { TestSession& runtime; TestWorkflow& workflow; TestRecordWriter& records; };
 class ModulePanel : public QWidget {
 public:
@@ -63,6 +65,13 @@ public:
     void ShowSources(DataRevisionRef root);
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
+    void ShowColorEditor(const QPoint& position,const QString& viewId={});
+    std::function<QJsonObject()> getColorParameters;
+    std::function<QString()> getColorDescription;
+    std::function<QPointF(const QString&)> getColorPosition;
+    std::function<QString()> getColorSurface;
+    std::function<void(bool)> setColorVisible;
+    std::function<void(const QString&,bool,int)> setViewLegend;
     void SelectAction(const QString& action);
     bool SelectNodeGroup(const QString& id);
     bool SelectPartTarget(const QJsonObject& binding);
@@ -92,6 +101,7 @@ private:
     struct Entry { QJsonObject defaults; Action action; TestPolicy policy; bool exitTools = false; };
     QString m_name;
     QString m_notice;
+    QPointer<ColorLegendEditor> m_colorEditor;
     std::map<QString, Entry> m_entries;
     QString m_currentAction;
     std::set<std::uint64_t> m_pending;

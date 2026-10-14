@@ -42,6 +42,7 @@
 #include <QMimeData>
 #include <QUrl>
 #include <QApplication>
+#include <QSignalBlocker>
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QCheckBox>
@@ -161,6 +162,35 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
 }
 std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
+    if ((action == "SetDisplay" && (module == "Wall" || module == "Gap")) ||
+        (action == "SetDeviationDisplay" && module == "Alignment")) {
+        auto* legend = window.findChild<QToolButton*>("legend_" + module + "_primary-3d");
+        Check(Wait([&] { return legend && legend->isVisible() && legend->isEnabled(); }, 2000),
+            "actual viewport legend entry is available");
+        if (legend->isChecked()) {
+            const QSignalBlocker blocker(legend);
+            legend->setChecked(false);
+        }
+        legend->click();
+        auto* panel = window.GetModule(module);
+        QWidget* form = nullptr;
+        QPushButton* apply = nullptr;
+        Check(Wait([&] {
+            for (auto* widget : panel->findChildren<QWidget*>("colorLegendParameters"))
+                if (widget->isVisible()) form = widget;
+            for (auto* button : panel->findChildren<QPushButton*>("applyColorLegend"))
+                if (button->isVisible()) apply = button;
+            return form && apply && apply->isEnabled();
+        }, 2000), "floating color editor exposes the pinned result configuration");
+        auto* editor = dynamic_cast<ParameterEditor*>(form);
+        Check(editor != nullptr, "floating color editor uses the actual parameter form");
+        editor->SetPatch(patch);
+        const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
+        apply->click();
+        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000),
+            "color editor apply reaches the feature display request");
+        return id;
+    }
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
     auto* tree = panel->GetCatalogTree(); ClickNode(tree, tree->topLevelItem(0));
     panel->SetParameterPatch(action, patch);

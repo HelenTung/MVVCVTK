@@ -179,6 +179,7 @@ bool ParameterEditor::GetFieldApplicable(const QString& key) const
             if(key=="highColor")return field("palette")=="Gradient";
             return true;
         }
+        if(key.startsWith("tolerance") && key.endsWith("Color"))return m_module=="Wall" && field("mode")=="Tolerance";
         if (m_module == "Wall" && field("mode") == "Tolerance"
             && (key == "palette" || key == "constantColor" || key == "lowColor" || key == "highColor"
                 || key == "belowColor" || key == "aboveColor" || key=="segments")) return false;
@@ -533,7 +534,9 @@ QJsonValue ParameterEditor::GetValue() const
     if (m_type == QJsonValue::Object) {
         QJsonObject value;
         for (const auto& field : m_fields) {
-            if (!GetFieldApplicable(field.first)) continue;
+            const bool colorEditor=(m_module=="Wall" || m_module=="Gap" || m_module=="Alignment")
+                && (m_action=="SetDisplay" || m_action=="SetDeviationDisplay");
+            if(!colorEditor && !GetFieldApplicable(field.first))continue;
             const auto v = field.second->GetValue();
             value[field.first] = v;
         }

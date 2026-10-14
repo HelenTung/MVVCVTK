@@ -25,4 +25,23 @@ std::vector<Segment> GetColorSegments(const QJsonObject& params,
     }
     return segments;
 }
+template<class Mode,class Segment>
+QJsonObject GetColorBandJson(Mode mode,const std::array<double,3>& constant,
+    const std::array<double,3>& low,const std::array<double,3>& high,
+    const std::array<double,3>& below,const std::array<double,3>& above,
+    const std::vector<Segment>& segments,bool reversed)
+{
+    const char* names[]{"Constant","Gradient","Rainbow","InverseRainbow","HueLoop","Diverging"};
+    QJsonArray rows;for(const auto& segment:segments)if(segment.lower && segment.upper)rows.append(QJsonObject{
+        {"segmentFrom",segment.lower ? QJsonValue(*segment.lower):QJsonValue()},
+        {"segmentTo",segment.upper ? QJsonValue(*segment.upper):QJsonValue()},
+        {"palette",names[static_cast<unsigned>(segment.mode)]},{"lowColor",GetValues(segment.lowColor)},{"highColor",GetValues(segment.highColor)}});
+    const auto tailLow=!segments.empty() && !segments.front().lower ? segments.front().lowColor:below;
+    const auto tailHigh=!segments.empty() && !segments.back().upper ? segments.back().lowColor:above;
+    const bool uniform=segments.size()==1 && !segments.front().lower && !segments.front().upper;
+    return {{"palette",uniform ? "Constant":names[static_cast<unsigned>(mode)]},{"constantColor",GetValues(uniform ? segments.front().lowColor:constant)},
+        {"lowColor",GetValues(low)},{"highColor",GetValues(high)},{"belowColor",GetValues(tailLow)},
+        {"aboveColor",GetValues(tailHigh)},{"segments",rows},{"isReversed",reversed}};
+}
+
 }

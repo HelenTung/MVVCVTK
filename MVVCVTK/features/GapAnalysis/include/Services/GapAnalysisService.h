@@ -11,6 +11,7 @@
 
 #include <functional>
 #include <memory>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,7 @@ struct GapViewRequest final {
     vtkSmartPointer<vtkImageData> inputImage;
     // 非零表示有效体素；DefX 暂无对应入口，worker 会在私有 float 副本中以有效体素最小值填充无效域。
     vtkSmartPointer<vtkImageData> validityMask;
+    std::map<OverlayService*,std::string> viewIds;
     GapSurfaceConfig surface; // DefX 材料均值与等值面阈值配置快照。
     GapVoidParams voidParams; // DefX 过滤开关与最小体积参数快照。
     RoiReadSnapshot evaluationRoi, detectionRoi;
@@ -83,6 +85,7 @@ public:
     bool SwitchOverlay();
     bool SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay = {});
     GapDisplayParams GetDisplayParams() const;
+    std::optional<std::array<double,2>> GetDisplayRange() const;
     // 清除显示会话与已挂载 overlay；若 worker 正在执行，仅发布停止请求。
     bool ExitView();
     void ClearView();
@@ -99,7 +102,7 @@ public:
     // 仅接纳从已提交 revision 重新解析出的 view；显示失败不改变正式数据。
     bool SetCommittedView(
         VtkLabelMapSnapshot labels,
-        VtkSurfaceMeshSnapshot mesh);
+        VtkSurfaceMeshSnapshot mesh,const DataRevisionRef& result,const std::optional<GapDisplayParams>& inherited={});
     // 数据事务失败时关闭本轮显示消费，但保留历史 revision 的可查询性。
     void SetViewCommitFailed();
 

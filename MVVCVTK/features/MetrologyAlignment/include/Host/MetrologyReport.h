@@ -52,7 +52,8 @@ struct MetrologyReportInput final {
 enum class MetrologyReportDisplaySource : std::uint8_t { None, ExplicitConfiguration, CurrentFeatureState };
 struct MetrologyReportDeviationDisplay final {
     AlignmentDeviationDisplay parameters;
-    std::string colorMapVersion="deviation-hue-loop-2";
+    std::optional<std::array<double,2>> mappingRange;
+    std::string colorMapVersion="deviation-mapping-3";
     // 257 个均匀取值的实际色标 RGB；逐点颜色按同版本分段规则计算，显示截断不修改统计。
     std::array<std::array<std::uint8_t,3>,257> legendRgb{};
     std::array<std::uint8_t,3> invalidRgb{128,128,128},selectedRgb{255,255,0};
@@ -71,7 +72,7 @@ struct MetrologyReportPresentation final {
     std::optional<MetrologyReportSceneDisplay> scene;
 };
 struct MetrologyReport final {
-    std::uint32_t schemaVersion=3;
+    std::uint32_t schemaVersion=4;
     std::string id, title;
     DataCommitId capturedCommit=0;
     std::int64_t capturedUnixMilliseconds=0;
@@ -108,7 +109,7 @@ struct MetrologyReportWriteResult final {
 };
 // 可在后台只读写出 GetReport 返回的冻结对象；不访问 Host/VTK，不构造整份字符串。
 // UTF-8 JSON 保留完整上下文；非有限浮点数用 {"numericState":"NaN|PositiveInfinity|NegativeInfinity"} 表达。
-// JSON/CSV schema 3 加入冻结显示配置与色标；CSV configuration_json 列流式保留完整配置。
+// JSON/CSV schema 4 冻结显式范围模式、色带与实际映射范围；CSV configuration_json 列流式保留完整配置。
 // 体素行无对齐归属，空矩阵不代表单位矩阵；显示配置行不产生测量值或公差判定。
 // CSV 是尺寸/偏差/体素统计视图（偏差行 verdict 属于整个评价）；以空白、公式前缀或单引号起始的文本前加单引号，JSON 保留原文。
 // 逐点偏差默认省略并明确标记；CSV 明细的非 Valid 测量值留空。失败可能留下前缀，调用方负责丢弃/原子提交。

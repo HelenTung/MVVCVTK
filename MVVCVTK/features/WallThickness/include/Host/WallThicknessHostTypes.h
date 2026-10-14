@@ -4,6 +4,7 @@
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
+#include <map>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -82,6 +83,7 @@ struct ThicknessColorBand final
     std::array<double, 3> belowColor{0.64, 0.29, 0.78};
     std::array<double, 3> aboveColor{0.84, 0.29, 0.65};
     std::vector<ThicknessColorSegment> segments;
+    bool isReversed=false;
 };
 
 struct ThicknessInput final
@@ -138,7 +140,13 @@ struct ThicknessDisplay final
     double opacity = 1.0;
     bool isVisible = true;
     bool hasLegend = true;
+    std::vector<std::string> hiddenLegendViews;
+    std::array<double,2> legendPosition{.025,.20};
+    std::map<std::string,std::array<double,2>> legendPositions;
     ThicknessColorBand colorBand;
+    std::array<double,3> toleranceBelowColor{208/255.0,88/255.0,89/255.0};
+    std::array<double,3> toleranceWithinColor{97/255.0,179/255.0,113/255.0};
+    std::array<double,3> toleranceAboveColor{83/255.0,114/255.0,188/255.0};
     ThicknessRangeMode rangeMode = ThicknessRangeMode::Manual;
     ThicknessDisplayStyle style=ThicknessDisplayStyle::Overlay;
     // 渐变的相对叠加强度；最终透明度仍乘以 opacity，不改变公差分类。
@@ -226,6 +234,7 @@ struct ThicknessSnapshot final
     // 原始网格最大边长/显示间距的诊断上界；实际显示密度由各三角形最长边局部控制。
     std::uint32_t subdivisionCount = 0;
     bool isCurrent = false;
+    std::optional<ThicknessDisplay> appliedDisplay;
 };
 
 struct ThicknessStartRequest final {
@@ -239,7 +248,10 @@ struct ThicknessCancelRequest final {
 };
 struct ThicknessClearRequest final {};
 struct ThicknessEvaluationRequest final { ThicknessEvaluation evaluation; };
-struct ThicknessDisplayRequest final { ThicknessDisplay display; };
+struct ThicknessDisplayRequest final {
+    ThicknessDisplay display;
+    DataRevisionRef result; // 必须显式绑定结果，不能以当前页面代替编辑目标。
+};
 struct ThicknessActivationRequest final {
     DataRevisionRef resultRevision;
     std::optional<ThicknessDisplay> display;
@@ -279,4 +291,6 @@ struct ThicknessState final
     ThicknessStatus status = ThicknessStatus::Unavailable;
     std::optional<std::size_t> selectedSample;
     std::optional<std::array<double, 2>> displayRange;
+    std::optional<ThicknessDisplay> appliedDisplay;
+    DataRevisionRef displayResult;
 };

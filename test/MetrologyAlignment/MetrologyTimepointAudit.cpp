@@ -552,7 +552,7 @@ void CaptureReport(MetrologyAlignmentHostFeature &feature,TestDataPort &data,con
     MetrologyReportRequest request; request.id="real-ct-inspection"; request.title="Frozen real ROI measurement contexts"; request.inspections=inspections;
     request.deviations=deviations;request.voxelVolumes=volumes;
     for(const auto &ref:deviations){const auto value=feature.GetDeviation(ref);Require(value && value->forward,"Report colorbar source unavailable.");
-        AlignmentDeviationDisplay colorbar;colorbar.result=ref;colorbar.range={0,1e-6};
+        AlignmentDeviationDisplay colorbar;colorbar.rangeMode=AlignmentRangeMode::Manual;colorbar.result=ref;colorbar.range={0,1e-6};
         const auto sample=std::find_if(value->forward->samples.begin(),value->forward->samples.end(),[](const auto &v){return v.state==AlignmentDeviationState::Valid;});
         if(sample!=value->forward->samples.end())colorbar.selectedVertex=static_cast<std::uint64_t>(sample-value->forward->samples.begin());request.deviationDisplays.push_back(colorbar);}
     if(!inspections.empty()){const auto value=feature.GetInspection(inspections.front());Require(value && !value->plan->items.empty(),"Report scene source unavailable.");

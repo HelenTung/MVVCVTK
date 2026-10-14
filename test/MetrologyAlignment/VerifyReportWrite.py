@@ -188,24 +188,27 @@ def verify_report(json_path, csv_path, fixture=False):
         row = expect("deviation-display",deviation["result"],deviation["alignmentResult"],metric="display-configuration",status=presentation["source"],current_at_capture=str(deviation["isCurrent"]).lower())
         require(json.loads(row["configuration_json"]) == display, "CSV deviation display configuration mismatch")
         require(all(row[k] == "" for k in ("measured","nominal","deviation","lower_limit","upper_limit","verdict")), "Display row fabricates a measurement")
-        low, high = parameters["range"]; tolerance = deviation["parameters"]["tolerance"]
-        def hue(fraction):
-            return [math.floor(v*255+.5) for v in colorsys.hsv_to_rgb(min(1,max(0,fraction)),.65,.84)]
+        low, high = display["mappingRange"]; tolerance = deviation["parameters"]["tolerance"]
+        def byte_color(rgb): return [math.floor(v*255+.5) for v in rgb]
         def color(value):
-            if value < low: return [163,74,199]
-            if value > high: return [214,74,166]
             if parameters["useToleranceColors"] and tolerance:
-                a,b = tolerance
-                if a <= value <= b: return [60,180,95]
-                return hue((value-low)/(a-low) if value<a else (value-b)/(high-b))
-            # 锁定 VTK 9.4.2 的 LUT 先计算 scale 再乘值；交换除乘顺序会使边界索引差一格。
-            # 依据 vtkLookupTable.cxx 的 vtkLookupShiftAndScale/vtkLinearIndexLookupMain，保留逐 RGB 精确断言。
-            span = high-low
-            scale = 0.0 if span < sys.float_info.min*256 else 256/span
-            index = min(255,math.floor((value-low)*scale))
-            return hue(index/255)
+                a,b=tolerance
+                return byte_color(parameters["belowColor"]) if value<a else byte_color(parameters["aboveColor"]) if value>b else [60,180,95]
+            if value < low: return byte_color(parameters["belowColor"])
+            if value > high: return byte_color(parameters["aboveColor"])
+            f=.5 if high==low else (value-low)/(high-low)
+            if parameters["isReversed"]: f=1-f
+            palette=parameters["palette"]
+            if palette==0:return byte_color(parameters["constantColor"])
+            if palette==1:return byte_color([a+f*(b-a) for a,b in zip(parameters["lowColor"],parameters["highColor"])])
+            if palette==5:
+                a,b=([.294,.294,.84],[.88,.88,.88]) if f<.5 else ([.88,.88,.88],[.84,.294,.294])
+                t=2*f if f<.5 else 2*f-1
+                return byte_color([x+t*(y-x) for x,y in zip(a,b)])
+            hue=(1-f)*2/3 if palette==2 else f*2/3 if palette==3 else f
+            return byte_color(colorsys.hsv_to_rgb(hue,.65,.84))
         require(display["legendRgb"] == [color(low+(high-low)*(i/256)) for i in range(257)], "Independent colorbar calculation mismatch")
-        require(display["colorMapVersion"] == "deviation-hue-loop-2" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
+        require(display["colorMapVersion"] == "deviation-mapping-3" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
         selection = display["selection"]
         require((selection is not None) == (parameters["selectedVertex"] is not None), "Selection capture mismatch")
         if selection:

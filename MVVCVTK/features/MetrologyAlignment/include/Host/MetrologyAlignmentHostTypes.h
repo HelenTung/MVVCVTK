@@ -5,6 +5,7 @@
 #include "Host/VoxelVolume.h"
 
 #include <array>
+#include <map>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -352,13 +353,27 @@ struct AlignmentDeviationSnapshot final {
     bool isCurrent = false;
 };
 
+enum class AlignmentRangeMode : std::uint8_t { Result, Manual };
+enum class AlignmentColorMode : std::uint8_t { Constant, Gradient, Rainbow, InverseRainbow, HueLoop, Diverging };
+struct AlignmentColorSegment final {
+    std::optional<double> lower,upper;
+    AlignmentColorMode mode=AlignmentColorMode::Gradient;
+    std::array<double,3> lowColor{.294,.294,.84},highColor{.84,.294,.294};
+};
 struct AlignmentDeviationDisplay final {
     DataRevisionRef result;
-    // 两端均为 NaN 时按有效样本自动定范围；有限端点表示固定范围，截断只影响颜色。
-    // 公差色显式启用；自动范围此时一并覆盖公差区间。
-    std::array<double,2> range{std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN()};
-    bool useToleranceColors = false;
-    bool isVisible = true;
+    AlignmentRangeMode rangeMode=AlignmentRangeMode::Result;
+    // 自动范围不覆盖手动区间；恢复手动时继续使用用户输入。
+    std::array<double,2> range{0,1};
+    AlignmentColorMode palette=AlignmentColorMode::HueLoop;
+    std::vector<AlignmentColorSegment> segments;
+    std::array<double,3> constantColor{.7,.7,.7},lowColor{.294,.294,.84},highColor{.84,.294,.294};
+    std::array<double,3> belowColor{.64,.29,.78},aboveColor{.84,.29,.65};
+    bool isReversed=false,useToleranceColors=false,isVisible=true,hasLegend=true;
+    double opacity=1;
+    std::vector<std::string> hiddenLegendViews;
+    std::array<double,2> legendPosition{.025,.20};
+    std::map<std::string,std::array<double,2>> legendPositions;
     std::optional<std::uint64_t> selectedVertex;
 };
 struct AlignmentDeviationSelection final {
@@ -643,6 +658,7 @@ struct AlignmentState final {
     DataRevisionRef activeResult;
     AlignmentStatus lastStatus = AlignmentStatus::Unavailable;
     std::optional<AlignmentDeviationDisplay> deviationDisplay;
+    std::optional<std::array<double,2>> deviationDisplayRange;
     bool isDeviationDisplayReady = false;
     AlignmentModelPoseState modelPose;
     std::shared_ptr<const AlignmentSceneDisplay> sceneDisplay;
