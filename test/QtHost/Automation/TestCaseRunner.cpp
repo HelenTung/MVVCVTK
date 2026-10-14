@@ -2645,6 +2645,10 @@ void StartSequence(TestWindow& window, const QString& path)
             Check(regions.size()==static_cast<std::size_t>(step["expectRoiCount"].toInt()),"formal ROI count matches the requested output mode");
             if(step["expectRoiShape"]=="Sphere") {
                 const auto roi=window.GetSession()->GetRoiDescriptor(GetRef(record["result"].toObject()["roi"]));
+                if(roi && !(roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==RoiShape::Sphere)) {
+                    QJsonArray nodes;for(const auto& node:roi->definition.nodes)nodes.append(QJsonObject{{"kind",int(node.kind)},{"shape",int(node.primitive.shape)},{"radius",node.primitive.radius}});
+                    std::cerr<<"ROI saved geometry diagnostic: "<<GetJsonText(QJsonObject{{"nodes",nodes},{"form",window.GetModule("Roi")->GetActionParameters("SetDraft")}}).toStdString()<<std::endl;
+                }
                 Check(roi && roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==RoiShape::Sphere,"formal saved ROI preserves the spherical draft geometry");
             }
             if(step.contains("expectRetainedRoi")) {

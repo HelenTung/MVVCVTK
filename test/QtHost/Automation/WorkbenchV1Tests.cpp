@@ -4,6 +4,7 @@
 #include "Support/ObjectBrowser.h"
 #include <QCoreApplication>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QTabBar>
 #include <QTreeWidget>
 #include <QPushButton>
@@ -16,6 +17,13 @@ namespace Manual {
 namespace { void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);} }
 void CheckWorkbenchV1(TestWindow& window)
 {
+    ParameterEditor optional("Roi","SetDraft","planeToSource",QJsonValue(),QJsonValue());
+    int optionalEdits=0;optional.onEdited=[&]{++optionalEdits;};
+    QJsonArray identity;for(int i=0;i<16;++i)identity.append(i%5==0?1:0);
+    optional.SetValue(identity);optional.SetValue(QJsonValue());
+    Require(optionalEdits==0,"programmatic optional geometry updates never notify an intermediate edit");
+    optional.findChild<QCheckBox*>("specified")->click();
+    Require(optionalEdits==1 && optional.GetValue()==identity,"explicit optional-parameter toggle still publishes one edit");
     const auto count=window.GetRecords().GetRecords()["records"].toArray().size();
     if(auto* roi=window.GetModule("Roi"))if(!roi->GetActions().isEmpty()) {
         auto* tabs=roi->findChild<QTabBar*>("businessTaskTabs");Require(tabs && tabs->count()==4,"ROI has creation, edit, operation and management tasks");

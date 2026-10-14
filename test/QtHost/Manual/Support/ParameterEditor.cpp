@@ -356,6 +356,8 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     UpdateBooleanState();
     SetFieldVisibility();
     if (m_specified) {
+        // 程序回填开关不能发布编辑事件，否则整组补丁未完成时会提交旧几何。
+        const QSignalBlocker blocker(m_specified);
         m_specified->setChecked(!value.isNull()); m_body->setEnabled(!value.isNull());
         if (m_type == QJsonValue::Object) m_body->setVisible(!value.isNull());
     }
