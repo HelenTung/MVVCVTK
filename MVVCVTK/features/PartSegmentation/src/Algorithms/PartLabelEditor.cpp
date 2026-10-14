@@ -381,6 +381,9 @@ private:
         m_extent = v.extent;
         SetRoiInput(m_input.editRoi,m_input.request.scope.editRoi);
         SetRoiInput(m_input.protectionRoi,m_input.request.scope.protectionRoi);
+        const auto prepare=[](const RoiReadSnapshot& read){if(!read)return std::unique_ptr<RoiQuery>{};auto query=read->GetQuery();
+            if(query.error==RoiError::TooLarge)throw std::bad_alloc();if(query.error!=RoiError::None || !query.query)SetFailure(PartFailureReason::InvalidGeometry,"ROI query preparation failed.");return std::move(query.query);};
+        m_editQuery=prepare(m_input.editRoi);m_protectionQuery=prepare(m_input.protectionRoi);
         m_locked.resize(m_old->partsByLabel.size(), false);
         for (std::size_t i = 0; i < m_input.request.scope.protectedParts.size(); ++i) {
             CheckStop(i); m_locked[GetLabel(m_input.request.scope.protectedParts[i])] = true;
@@ -392,8 +395,8 @@ private:
         // 保护身份必须取编辑开始时的标签，不能随候选标签变化。
         const auto label = (*m_input.previous.labels)[i];
         if (m_locked[label] || !GetInside(GetIndex(i), m_extent)
-            || (m_input.protectionRoi && m_input.protectionRoi->GetContains(GetPhysical(GetIndex(i))))
-            || (m_input.editRoi && !m_input.editRoi->GetContains(GetPhysical(GetIndex(i))))) return false;
+            || (m_input.protectionRoi && m_protectionQuery->GetContains(GetPhysical(GetIndex(i))))
+            || (m_input.editRoi && !m_editQuery->GetContains(GetPhysical(GetIndex(i))))) return false;
         const double validity = m_input.volume.validity ? GetScalar(*m_input.volume.validity, i) : 1.0;
         return std::isfinite(validity) && validity != 0.0;
     }
@@ -857,6 +860,7 @@ private:
         return catalog;
     }
 
+    std::unique_ptr<RoiQuery> m_editQuery,m_protectionQuery;
     const PartEditInput& m_input;
     PartIdentityFactory& m_ids;
     const std::function<bool()>& m_stop;

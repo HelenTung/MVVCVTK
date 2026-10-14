@@ -40,7 +40,7 @@ struct RoiTriangleSelection final {
 struct RoiMaskRequest final {
     ImageReadRegion region;
     std::size_t voxelOffset = 0;
-    std::size_t maxBytes = roiCopyLimit;
+    std::size_t chunkBytes = roiChunkBytes;
     // 可能由多个 worker 调用；只读且线程安全。抛异常按取消处理。
     std::function<bool()> getCancelled;
 };
@@ -55,6 +55,19 @@ struct RoiMaskResult final {
 
 enum class RoiBlockClassification : std::uint8_t { Unavailable, Outside, Inside, Boundary };
 struct RoiBlockResult final {RoiError error=RoiError::Unavailable;RoiBlockClassification classification=RoiBlockClassification::Unavailable;};
+
+// 查询准备可能失败；成功后单个 worker 独占并复用工作区，逐点判定不再分配。
+class RoiQuery {
+public:
+    virtual ~RoiQuery() noexcept = default;
+    virtual bool GetContains(const std::array<double,3>& sourcePoint) const noexcept = 0;
+};
+struct RoiQueryResult final {
+    RoiError error = RoiError::Unavailable;
+    std::unique_ptr<RoiQuery> query;
+};
+using RoiTriangle = std::array<std::array<double,3>,3>;
+using RoiTriangleCallback = std::function<bool(const std::vector<RoiTriangle>&)>;
 
 // 不可变、可跨 worker 只读持有，不包含 Session 或可写 VTK identity。
 class RoiReadView {
@@ -76,17 +89,21 @@ public:
     virtual const RoiDefinition& GetDefinition() const noexcept = 0;
     virtual const std::vector<DataRevisionRef>& GetDependencies() const noexcept = 0;
     virtual std::array<double, 6> GetBounds() const noexcept = 0;
-    virtual bool GetContains(const std::array<double, 3>& sourcePoint) const noexcept = 0;
+    virtual RoiQueryResult GetQuery() const = 0;
+    // 单点便捷入口可能分配；失败以异常传出，不能冒充区域外。
+    virtual bool GetContains(const std::array<double, 3>& sourcePoint) const = 0;
     virtual RoiPointsResult GetPoints(
-        const std::vector<std::array<double, 3>>& sourcePoints,
-        std::size_t maxBytes = roiCopyLimit) const = 0;
+        const std::vector<std::array<double, 3>>& sourcePoints) const = 0;
     virtual RoiPlanesResult GetClipPlanes() const = 0;
-    virtual RoiTriangleSelection GetTriangleSelection(const std::array<std::array<double,3>,3>&,
-        std::size_t = roiCopyLimit,double = 0,std::function<bool()> = {}) const = 0;
+    virtual RoiTriangleSelection GetTriangleSelection(const RoiTriangle& triangle,
+        double tolerance = 0,std::function<bool()> getCancelled = {}) const = 0;
+    // 每批最多 chunkTriangles 个片段；仅最终 None 表示完整，失败时已消费的前缀须丢弃。
+    virtual RoiTriangleSelection GetTriangleChunks(const RoiTriangle& triangle,
+        std::size_t chunkTriangles,const RoiTriangleCallback& onTriangles,
+        double tolerance = 0,std::function<bool()> getCancelled = {}) const = 0;
     // 单个三角形与凸 ROI 的精确平面交，最多 planeCount+3 个顶点；不生成封口面。
     virtual RoiPolygonResult GetClippedTriangle(
-        const std::array<std::array<double,3>,3>& triangle,
-        std::size_t maxBytes = roiCopyLimit) const = 0;
+        const std::array<std::array<double,3>,3>& triangle) const = 0;
     // 仅凸平面区域内点支持到边界的距离；区域外或不支持的表达式返回 NaN。
     virtual double GetBoundaryDistance(
         const std::array<double, 3>& sourcePoint) const noexcept = 0;

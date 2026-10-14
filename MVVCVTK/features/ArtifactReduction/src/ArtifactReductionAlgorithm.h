@@ -54,6 +54,7 @@ public:
 private:
     std::array<double, 3> GetPoint(std::size_t index) const noexcept;
     const AlgorithmInput& m_input;
+    std::unique_ptr<RoiQuery> m_processing,m_protection,m_material;
     const std::vector<float>* m_values = nullptr;
 };
 

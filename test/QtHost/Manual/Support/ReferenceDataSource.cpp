@@ -129,7 +129,7 @@ QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef so
     const auto& grid = image->GetGeometry();
     RoiMaskRequest request; request.region.offset = {0,0,0};
     for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
-    request.maxBytes=8U*1024U*1024U;
+    request.chunkBytes=roiChunkBytes;
     std::uint64_t selected=0,total=0; QCryptographicHash hash(QCryptographicHash::Sha256);
     for (;;) {
         const auto chunk=read.roi->GetMaskChunk(request);

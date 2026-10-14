@@ -465,11 +465,13 @@ public:
     const RoiDefinition &GetDefinition() const noexcept override{return m_inner->GetDefinition();}
     const std::vector<DataRevisionRef> &GetDependencies() const noexcept override{return m_inner->GetDependencies();}
     std::array<double,6> GetBounds() const noexcept override{return m_inner->GetBounds();}
-    bool GetContains(const std::array<double,3>&p) const noexcept override{return m_inner->GetContains(p);}
-    RoiPointsResult GetPoints(const std::vector<std::array<double,3>>&p,std::size_t b) const override{return m_inner->GetPoints(p,b);}
+    RoiQueryResult GetQuery() const override{return m_inner->GetQuery();}
+    bool GetContains(const std::array<double,3>&p) const override{return m_inner->GetContains(p);}
+    RoiPointsResult GetPoints(const std::vector<std::array<double,3>>&p) const override{return m_inner->GetPoints(p);}
     RoiPlanesResult GetClipPlanes() const override{return m_inner->GetClipPlanes();}
-    RoiTriangleSelection GetTriangleSelection(const std::array<std::array<double,3>,3>& p,std::size_t bytes,double tolerance,std::function<bool()> cancel)const override{return m_inner->GetTriangleSelection(p,bytes,tolerance,std::move(cancel));}
-    RoiPolygonResult GetClippedTriangle(const std::array<std::array<double,3>,3>&p,std::size_t b) const override{return m_inner->GetClippedTriangle(p,b);}
+    RoiTriangleSelection GetTriangleSelection(const std::array<std::array<double,3>,3>& p,double tolerance,std::function<bool()> cancel)const override{return m_inner->GetTriangleSelection(p,tolerance,std::move(cancel));}
+    RoiTriangleSelection GetTriangleChunks(const RoiTriangle& p,std::size_t count,const RoiTriangleCallback& callback,double tolerance,std::function<bool()> cancel)const override{return m_inner->GetTriangleChunks(p,count,callback,tolerance,std::move(cancel));}
+    RoiPolygonResult GetClippedTriangle(const std::array<std::array<double,3>,3>&p) const override{return m_inner->GetClippedTriangle(p);}
     double GetBoundaryDistance(const std::array<double,3>&p) const noexcept override{
         queries.fetch_add(1,std::memory_order_relaxed);return m_fixed?*m_fixed:m_inner->GetBoundaryDistance(p);
     }

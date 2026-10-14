@@ -6,8 +6,10 @@
 // Host 私有薄服务：唯一正式状态位于传入的 DataGraphStore。
 class RoiService final {
 public:
-    static RoiArchiveBundleResult GetArchiveBundle(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&,std::size_t maxBytes);
-    RoiArchiveRestoreResult LoadArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&,std::size_t maxBytes);
+    static RoiArchiveReadResult GetArchiveReader(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
+    RoiArchiveRestoreResult LoadArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&);
+    static RoiArchiveBundleResult GetArchiveBundle(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
+    RoiArchiveRestoreResult LoadArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&);
     explicit RoiService(DataGraphStore& store) noexcept : m_store(store) {}
     RoiResult SetRoi(const RoiRequest& request);
     static RoiOperationResult GetOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request);
@@ -18,9 +20,9 @@ public:
     static std::optional<RoiDescriptor> GetDescriptor(
         const DataGraphSnapshot& graph, const DataRevisionRef& ref);
     static RoiArchiveResult GetArchive(const DataGraphSnapshot& graph,
-        const DataRevisionRef& ref, const std::string& sourceKey, std::size_t maxBytes);
+        const DataRevisionRef& ref, const std::string& sourceKey);
     RoiResult LoadArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision, std::size_t maxBytes);
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
 private:
     RoiResult SetRoiCommit(const RoiRequest& request, std::vector<DataRevisionDraft> masks);
     DataGraphStore& m_store;

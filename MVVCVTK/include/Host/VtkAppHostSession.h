@@ -109,14 +109,14 @@ public:
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
-    // 归档同步复制按显式预算或当前可用内存检查；0 表示自动预算。
-    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection,std::size_t maxBytes=0);
-    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes=0);
-    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey,
-        std::size_t maxBytes = 0);
+    // 大载荷先规划再逐批读取；完整便捷入口不设置 ROI 总量预算。
+    RoiArchiveReadResult GetRoiArchiveReader(const std::vector<RoiArchiveSelection>& selection);
+    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings);
+    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection);
+    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings);
+    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey);
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision,
-        std::size_t maxBytes = 0);
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
 
     // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();

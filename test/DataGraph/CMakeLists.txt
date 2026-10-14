@@ -40,6 +40,7 @@ SetTestRuntime(DataGraph.VtkBridge mvvcvtk_vtk_data_bridge_tests)
 
 add_executable(mvvcvtk_roi_tests
     RoiTests.cpp
+    RoiReadExecutionTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiService.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiOperations.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiArchive.cpp"

@@ -771,15 +771,15 @@ bool StartPublicRoiExtentCase()
     const auto roi=data.GetRoi(data.GetDataGraph(),made.roi->revision,view->data->self);
     CropInputSnapshot input; input.graph=view->graph; input.binding=view->binding; input.data=view->data; input.image=view;
     image->GetBounds(input.inputModelBounds.data());
-    const auto result=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,{});
+    const auto result=CropAlgorithm::GetRoiResult(input,roi.roi,{});
     if (!SetExpect(result.isSucceeded && result.maskImage && result.imageData,"nonzero extent ROI crop failed")) return false;
     const auto* mask=static_cast<const unsigned char*>(result.maskImage->GetScalarPointer());
     const auto* copied=static_cast<const unsigned char*>(result.imageData->GetScalarPointer());
     for (int i=0;i<12;++i) if ((mask[i]!=0)!=(i/3%2==0 && i!=0) || copied[i]!=values[i])
         return SetExpect(false,"nonzero extent/rotated physical mapping or existing validity changed");
-    const auto cancelled=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[]{return true;});
+    const auto cancelled=CropAlgorithm::GetRoiResult(input,roi.roi,[]{return true;});
     if(!SetExpect(!cancelled.isSucceeded && cancelled.isCancelled && !cancelled.imageData,"cancelled public ROI crop leaked output"))return false;
-    int polls=0;const auto midChunk=CropAlgorithm::GetRoiResult(input,roi.roi,128ULL*1024*1024,[&]{return ++polls>2;});
+    int polls=0;const auto midChunk=CropAlgorithm::GetRoiResult(input,roi.roi,[&]{return ++polls>2;});
     return SetExpect(midChunk.isCancelled&&!midChunk.isSucceeded&&midChunk.failureReason==CropFailure::Cancelled&&!midChunk.outputPayload,
         "ROI chunk cancellation must use the public Cancelled terminal without publishing a partial mask.");
 }

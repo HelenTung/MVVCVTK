@@ -65,7 +65,11 @@ ArtifactError TaskControl::GetError() const noexcept
     return std::chrono::steady_clock::now() >= deadline ? ArtifactError::TimedOut : ArtifactError::None;
 }
 
-VolumeView::VolumeView(const AlgorithmInput& input) : m_input(input) {}
+VolumeView::VolumeView(const AlgorithmInput& input) : m_input(input) {
+    const auto prepare=[](const RoiReadSnapshot& read){if(!read)return std::unique_ptr<RoiQuery>{};auto result=read->GetQuery();
+        if(result.error==RoiError::TooLarge)throw std::bad_alloc();if(result.error!=RoiError::None || !result.query)throw std::runtime_error("ROI query preparation failed.");return std::move(result.query);};
+    m_processing=prepare(input.processing);m_protection=prepare(input.protection);m_material=prepare(input.material);
+}
 
 double VolumeView::GetValue(std::size_t index) const noexcept
 {
@@ -106,22 +110,22 @@ std::array<double,3> VolumeView::GetPoint(std::size_t index) const noexcept
 
 bool VolumeView::GetProtected(std::size_t index) const noexcept
 {
-    return m_input.protection && m_input.protection->GetContains(GetPoint(index));
+    return m_input.protection && m_protection->GetContains(GetPoint(index));
 }
 
 bool VolumeView::GetWritable(std::size_t index) const noexcept
 {
-    return (!m_input.processing || m_input.processing->GetContains(GetPoint(index)))
+    return (!m_input.processing || m_processing->GetContains(GetPoint(index)))
         && !GetProtected(index) && GetValid(index);
 }
 
 bool VolumeView::GetMaterial(std::size_t index) const noexcept
 {
-    return m_input.material && m_input.material->GetContains(GetPoint(index));
+    return m_input.material && m_material->GetContains(GetPoint(index));
 }
 bool VolumeView::GetQuality(std::size_t index) const noexcept
 {
-    return !m_input.material || m_input.material->GetContains(GetPoint(index));
+    return !m_input.material || m_material->GetContains(GetPoint(index));
 }
 
 void VolumeView::SetValues(const std::vector<float>& values) noexcept { m_values = &values; }
