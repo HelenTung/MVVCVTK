@@ -33,6 +33,13 @@ std::size_t Count(const QJsonObject& p, const char* key, std::size_t limit)
 QJsonObject Statistics(const ThicknessSnapshot& result)
 {
     const auto& s = result.statistics;
+    QJsonObject reasonCounts, reasonAreas;
+    const char* reasons[] = {"Valid", "LowSurfaceQuality", "AmbiguousOpposite", "SharpFeature", "TruncatedSupport",
+        "SearchLimitReached", "InvalidMaterialPath", "OutsideEvaluation", "NoValidSource"};
+    for (std::size_t index = 0; index < static_cast<std::size_t>(ThicknessValidity::Count); ++index) {
+        reasonCounts[reasons[index]] = QString::number(s.reasonCounts[index]);
+        reasonAreas[reasons[index]] = s.reasonAreas[index];
+    }
     return {{"result", GetRefText(result.result)}, {"isCurrent", result.isCurrent},
         {"source",GetRefText(result.archive.input.source)},{"labels",GetRefText(result.archive.input.labels)},
         {"mesh",GetRefText(result.archive.input.mesh)},
@@ -44,7 +51,7 @@ QJsonObject Statistics(const ThicknessSnapshot& result)
         {"coverage", s.coverage}, {"minimum", s.minimum ? QJsonValue(*s.minimum) : QJsonValue()},
         {"minimumSampleIndex", s.minimumSample ? QJsonValue(QString::number(*s.minimumSample)) : QJsonValue()},
         {"maximum", s.maximum ? QJsonValue(*s.maximum) : QJsonValue()}, {"mean", s.mean ? QJsonValue(*s.mean) : QJsonValue()},
-        {"regionCount", QString::number(result.regions.size())}};
+        {"regionCount", QString::number(result.regions.size())}, {"reasonCounts", reasonCounts}, {"reasonAreas", reasonAreas}};
 }
 ThicknessEvaluation Evaluation(const QJsonObject& p)
 {
