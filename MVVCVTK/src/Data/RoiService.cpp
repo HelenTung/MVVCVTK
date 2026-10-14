@@ -1,12 +1,8 @@
 #include "Data/RoiService.h"
-#include "Data/DataService.h"
 #include "Geometry/RoiEvaluator.h"
 
 #include <algorithm>
 #include <limits>
-#include <iostream>
-#include <map>
-#include <set>
 #include <utility>
 
 namespace {
@@ -54,128 +50,6 @@ bool RoiService::GetInputTransient(const DataSnapshot& input) noexcept
     return input && GetDataEntityIdValid(input->lifetimeScope)
         && (input->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement
             || !input->provenance || input->provenance->producerId != "org.mvvcvtk.host");
-}
-
-bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
-    std::vector<DataEntityId>& releasingScopes)
-{
-    releasingScopes.erase(std::remove_if(releasingScopes.begin(), releasingScopes.end(),
-        [&](const auto& scope) { return data.SetDataRelease(scope).status == DataLifetimeStatus::Released; }),
-        releasingScopes.end());
-    const auto graph = data.GetDataGraph();
-    if (!graph.view) return releasingScopes.empty();
-    std::map<DataEntityId, DataLifetimeState> scopes;
-    std::set<DataRevisionRef> retiringRefs;
-    const auto dependsOnFeatureResult = [&](const DataSnapshot& revision) {
-        std::vector<DataRevisionRef> pending;
-        std::set<DataRevisionRef> visited;
-        for (const auto& input : revision->inputs) pending.push_back(input.source);
-        while (!pending.empty()) {
-            const auto ref = pending.back(); pending.pop_back();
-            if (!visited.insert(ref).second) continue;
-            const auto input = graph.view->GetData(ref);
-            if (!input) continue;
-            const bool isHostRoi = input->type == DataTypes::roiGeometry || input->type == DataTypes::roiCatalog
-                || (input->provenance && input->provenance->producerId == "Host.Roi");
-            const bool isHostSource = input->provenance && input->provenance->producerId == "org.mvvcvtk.host";
-            if (GetDataEntityIdValid(input->lifetimeScope) && !isHostRoi && !isHostSource) return true;
-            for (const auto& parent : input->inputs) pending.push_back(parent.source);
-        }
-        return false;
-    };
-    {
-        const auto revisions = graph.view->GetDataQuery({});
-        for (const auto& revision : revisions.data) {
-            // ROI 几何/目录由 Host 薄服务管理；掩码仅接管同一服务产生的输出。
-            const bool isRoi = revision->type == DataTypes::roiGeometry
-                || revision->type == DataTypes::roiCatalog
-                || (revision->provenance && revision->provenance->producerId == "Host.Roi"
-                    && revision->type == DataTypes::labelMap3D);
-            if (!isRoi || revision->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement
-                || !GetDataEntityIdValid(revision->lifetimeScope) || !dependsOnFeatureResult(revision)) continue;
-            const auto lifetime = data.GetDataLifetime(revision->lifetimeScope);
-            if (lifetime.status == DataLifetimeStatus::Published) {
-                scopes.emplace(lifetime.scopeId, lifetime);
-                retiringRefs.insert(lifetime.ownedRevisions.begin(), lifetime.ownedRevisions.end());
-            }
-        }
-    }
-    if (scopes.empty()) return releasingScopes.empty();
-    const auto scopeCount = scopes.size();
-    // ROI 可能再次成为裁切等生产者的输入。先回收没有集合外消费者的叶层，
-    // 其余 scope 等对应 Feature 关闭后重试，不能让上游 ROI 阻塞整个清理批次。
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto scope = scopes.begin(); scope != scopes.end();) {
-            bool blocked = false;
-            for (const auto& revision : scope->second.ownedRevisions)
-                for (const auto& derived : graph.view->GetDerivedData(revision))
-                    if (!retiringRefs.count(derived) && graph.view->GetData(derived)) blocked = true;
-            if (!blocked) { ++scope; continue; }
-            for (const auto& revision : scope->second.ownedRevisions)
-                for (const auto& derived : graph.view->GetDerivedData(revision)) {
-                    const auto dependent = graph.view->GetData(derived);
-                    if (!retiringRefs.count(derived) && dependent)
-                        std::cerr << "[Roi] Transient scope waits for type=" << dependent->type.name
-                            << " producer=" << (dependent->provenance ? dependent->provenance->producerId : "none")
-                            << " operation=" << (dependent->provenance ? dependent->provenance->operationId : "none") << '\n';
-                }
-            for (const auto& revision : scope->second.ownedRevisions) retiringRefs.erase(revision);
-            scope = scopes.erase(scope);
-            changed = true;
-        }
-    }
-    if (scopes.empty()) return false;
-    DataTransaction transaction;
-    for (const auto& item : scopes)
-        transaction.retireScopes.push_back({item.first, DataLifetimeStatus::Published,
-            item.second.ownedRevisions, true});
-    for (const auto& binding : graph.view->GetDataBindings()) {
-        if (!binding.target || !retiringRefs.count(*binding.target)) continue;
-        std::optional<DataRevisionRef> replacement;
-        if (binding.name == roiCatalogBinding) {
-            const auto catalog = GetCatalog(graph);
-            if (!catalog.isReadable || !catalog.data
-                || catalog.data->self.generation == std::numeric_limits<DataGeneration>::max()) return false;
-            auto entries = catalog.entries;
-            entries.erase(std::remove_if(entries.begin(), entries.end(),
-                [&](const auto& entry) { return retiringRefs.count(entry.geometry) != 0; }), entries.end());
-            // 保留普通来源的 ROI 与原目录身份，不将其他数据集一并清空。
-            replacement = DataRevisionRef{catalog.data->self.entityId, catalog.data->self.generation + 1};
-            std::vector<DataInputRef> inputs;
-            for (std::size_t index = 0; index < entries.size(); ++index)
-                inputs.push_back({"roi-" + std::to_string(index), entries[index].geometry});
-            transaction.outputs.push_back({replacement->entityId, replacement->generation - 1,
-                DataTypes::roiCatalog, std::move(inputs),
-                std::make_shared<const RoiCatalogPayload>(std::move(entries)),
-                DataProvenance{"Host.Roi", "release-transient-scopes", "1", {}}});
-            // 只要保留项仍依赖 scoped ROI，替代目录仍需可退休，不能制造永久结构 blocker。
-            for (const auto& input : transaction.outputs.back().inputs)
-                if (GetInputTransient(graph.view->GetData(input.source))) {
-                    transaction.outputs.back().lifetimeScope = data.CreateDataEntityId();
-                    transaction.outputs.back().lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
-                    break;
-                }
-        }
-        transaction.bindings.push_back({binding.name, binding.revision, true, binding.target, replacement});
-    }
-    const auto committed = data.SetDataCommit(std::move(transaction));
-    if (committed.status != DataCommitStatus::Succeeded) {
-        std::cerr << "[Roi] Transient retirement pending: " << committed.message << '\n';
-        for (const auto& blocker : committed.blockers) {
-            const auto blocked = graph.view->GetData(blocker.revision);
-            std::cerr << "[Roi] Retirement blocker: " << blocker.owner
-                << " type=" << (blocked ? blocked->type.name : "unavailable")
-                << " scoped=" << (blocked && GetDataEntityIdValid(blocked->lifetimeScope)) << '\n';
-        }
-        return false;
-    }
-    for (const auto& item : scopes) releasingScopes.push_back(item.first);
-    releasingScopes.erase(std::remove_if(releasingScopes.begin(), releasingScopes.end(),
-        [&](const auto& scope) { return data.SetDataRelease(scope).status == DataLifetimeStatus::Released; }),
-        releasingScopes.end());
-    return scopes.size() == scopeCount && releasingScopes.empty();
 }
 
 std::optional<RoiDescriptor> RoiService::GetDescriptor(const DataGraphSnapshot& graph,const DataRevisionRef& ref)

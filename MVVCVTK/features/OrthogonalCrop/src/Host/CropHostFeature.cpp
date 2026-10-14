@@ -425,6 +425,20 @@ bool CropHostFeature::Impl::Document::DetachHost()
 
     if (m_bridge && m_bridge->GetCropHistory().documentId) {
         if (!m_pendingDocumentRequest) {
+            // 占用未改变时不重复准备同一失败候选；消费者关闭/Reader 释放后再恢复。
+            if (m_dataState.failureReason == CropFailure::ResultInUse) {
+                const auto graph = m_data->GetDataGraph();
+                const auto results = m_bridge->GetHistory(0, 1).results;
+                for (const auto& blocker : m_dataState.blockers) {
+                    if (blocker.owner == "DerivedRevision" && graph.view->GetData(blocker.revision)) return false;
+                    for (const auto& result : results) {
+                        const auto lifetime = m_data->GetDataLifetime(result.scopeId);
+                        if (std::any_of(lifetime.blockers.begin(), lifetime.blockers.end(), [&](const auto& live) {
+                            return live.revision == blocker.revision && live.owner == blocker.owner;
+                        })) return false;
+                    }
+                }
+            }
             const auto history=m_bridge->GetCropHistory();
             CropDocumentRequest closing;closing.action=CropDocumentAction::CloseDocument;
             closing.documentId=history.documentId;closing.requestId=CropHistory::CreateNodeId();

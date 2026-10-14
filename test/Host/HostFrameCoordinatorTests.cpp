@@ -563,6 +563,10 @@ bool GetWorkSignalValid()
     signal.Stop();
     signal.SendUpdates();
     if (signal.SendWorkAvailable() || notifications != 2) return false;
+    int stopNotifications = 0;
+    HostWorkSignal cleanup([&notifications] { ++notifications; }, [&stopNotifications] { ++stopNotifications; });
+    cleanup.Stop();
+    if (cleanup.SendWorkAvailable() || notifications != 2 || stopNotifications != 1) return false;
     int attempts = 0;
     HostWorkSignal throwing([&attempts] {
         ++attempts;

@@ -8,13 +8,19 @@
 // 在途通知允许晚到，接收方必须按自身生命周期拒绝失效的排队工作。
 class HostWorkSignal final {
 public:
-    explicit HostWorkSignal(std::function<void()> onWorkAvailable)
-        : m_onWorkAvailable(std::move(onWorkAvailable)) {}
+    explicit HostWorkSignal(std::function<void()> onWorkAvailable,
+        std::function<void()> onStopWorkAvailable = {})
+        : m_onWorkAvailable(std::move(onWorkAvailable))
+        , m_onStopWorkAvailable(std::move(onStopWorkAvailable)) {}
 
     bool SendWorkAvailable() noexcept
     {
         auto expected = State::Idle;
         if (!m_state.compare_exchange_strong(expected, State::Pending)) {
+            // 普通 frame admission 已关闭，清理任务仍可通知组合根排队重试 Stop。
+            if (expected == State::Stopped && m_onStopWorkAvailable) {
+                try { m_onStopWorkAvailable(); } catch (...) {}
+            }
             return expected == State::Pending;
         }
         try {
@@ -38,4 +44,5 @@ private:
     enum class State { Idle, Pending, Stopped };
     std::atomic<State> m_state{State::Idle};
     const std::function<void()> m_onWorkAvailable;
+    const std::function<void()> m_onStopWorkAvailable;
 };
