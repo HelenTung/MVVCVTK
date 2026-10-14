@@ -33,6 +33,7 @@ public:
     bool isImporting=false;
     std::function<void()> onBindingsChanged;
     std::function<ActionTriggerResult(std::string_view,const ActionContext&)> fallback;
+    std::function<ActionTriggerResult(const ActionContext&)> cancelCapture;
     std::vector<InteractionView> views;
     std::vector<std::shared_ptr<Entry>> actions;
     std::vector<BindingChange> changes;
@@ -198,6 +199,13 @@ ActionTriggerResult InteractionController::Trigger(std::string_view id,const Act
     if(context.viewId.empty()&&(id.substr(0,11)=="navigation."||id.substr(0,12)=="interaction."))return {ActionTriggerStatus::Invalid,0};
     if(!context.viewId.empty()&&std::none_of(m_impl->views.begin(),m_impl->views.end(),[&](const auto& v){return v.id==context.viewId;}))return {ActionTriggerStatus::Invalid,0};
     if(m_impl->isTriggering||m_impl->isApplying||m_impl->isImporting) return {ActionTriggerStatus::Busy,0};
+    if(id=="interaction.cancel"&&m_impl->cancelCapture) {
+        const auto cancel=m_impl->cancelCapture;m_impl->isTriggering=true;
+        ActionTriggerResult result;
+        try { result=cancel(context); } catch(...) { result={ActionTriggerStatus::Failed,0}; }
+        m_impl->isTriggering=false;
+        if(result.status!=ActionTriggerStatus::Unavailable||!m_impl->Valid())return result;
+    }
     const auto owner=InteractionControllerAccess::GetOwner(*this,context.viewId);
     const bool isGeneric=id.substr(0,12)=="interaction.";
     std::shared_ptr<Impl::Entry> selected;
@@ -278,10 +286,11 @@ void InteractionControllerAccess::ClearKeys(InteractionController& c,const std::
     for(auto it=c.m_impl->pressedKeys.begin();it!=c.m_impl->pressedKeys.end();)if(it->second.viewId==viewId)it=c.m_impl->pressedKeys.erase(it);else ++it;
 }
 void InteractionControllerAccess::SetFallbackAction(InteractionController& c,std::function<ActionTriggerResult(std::string_view,const ActionContext&)> callback){c.m_impl->fallback=std::move(callback);}
+void InteractionControllerAccess::SetCaptureCancel(InteractionController& c,std::function<ActionTriggerResult(const ActionContext&)> callback){c.m_impl->cancelCapture=std::move(callback);}
 void InteractionControllerAccess::SetBindingsChanged(InteractionController& c,std::function<void()> callback){c.m_impl->onBindingsChanged=std::move(callback);}
 bool InteractionControllerAccess::GetIsValid(const InteractionController& c){return c.m_impl->Valid();}
 void InteractionControllerAccess::Stop(InteractionController& c) {
-    c.m_impl->cache.clear();c.m_impl->isValid=false;c.m_impl->fallback={};c.m_impl->onBindingsChanged={};c.m_impl->getNavigation={};c.m_impl->setNavigation={};c.m_impl->actions.clear();c.m_impl->owners.clear();c.m_impl->pressedKeys.clear();
+    c.m_impl->cache.clear();c.m_impl->isValid=false;c.m_impl->fallback={};c.m_impl->cancelCapture={};c.m_impl->onBindingsChanged={};c.m_impl->getNavigation={};c.m_impl->setNavigation={};c.m_impl->actions.clear();c.m_impl->owners.clear();c.m_impl->pressedKeys.clear();
 }
 bool InteractionControllerAccess::Register(InteractionController& c,InteractionActionInfo info,std::vector<std::string> ids,
     std::function<ActionTriggerResult(const ActionContext&)> execute) {

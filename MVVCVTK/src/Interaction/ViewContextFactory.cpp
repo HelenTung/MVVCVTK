@@ -102,6 +102,13 @@ public:
         if(!GetIsOwnerThread())return NavigationStatus::WrongThread;
         if(!m_navigation)return NavigationStatus::Unbound;m_navigation->SetMode(m_currentMode);return m_navigation->Trigger(id,input);
     }
+    InteractionResult CancelCurrentCapture() override {
+        if(!GetIsOwnerThread())return {true,true,false,InteractionFailureReason::StateRejected};
+        if(!m_interactionRouter.GetHasCapture())return {};
+        InteractionEvent cancel;cancel.eventKind=InteractionEventKind::Cancel;cancel.isUserCancel=true;
+        cancel.viewId=m_viewId;cancel.vizMode=m_currentMode;cancel.toolMode=m_toolMode;
+        return m_interactionRouter.CancelCurrentCapture(cancel);
+    }
     bool ResetCamera() override { const bool result=AbstractViewContext::ResetCamera(); if(result&&m_navigation)m_navigation->ResetReference();return result; }
     bool SetInteractorReady() override;
     bool SetInputEnabled(bool isEnabled) override;

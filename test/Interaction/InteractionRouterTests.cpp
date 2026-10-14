@@ -849,11 +849,13 @@ void StartNativeWidgetCase(int& failureCount)
         if(event==vtkCommand::EndInteractionEvent){if(!state.failCleanup)state.active=false;++state.completed;}
     });
     widget->AddObserver(vtkCommand::StartInteractionEvent,callback);widget->AddObserver(vtkCommand::EndInteractionEvent,callback);
-    const auto controller=registry.GetController();
+    const auto controller=registry.GetController();int toolCancels=0;
     HostInputBinding binding;binding.featureId="native-widget";binding.targetViews=targets;
     InteractionActionInfo action;action.actionId="test.widget.edit";action.ownerId=binding.featureId;
     action.bindings.push_back({"test.widget.drag",{InputTriggerKind::Drag,InputMouseButton::Primary},true,{},"widget:test",{InputTriggerKind::Drag}});binding.actions.push_back(action);
-    binding.getIsActionAvailable=[&](std::string_view,const InteractionEvent& e){return representation->ComputeInteractionState(e.x,e.y)!=vtkBoxRepresentation::Outside;};
+    InteractionActionInfo cancelTool;cancelTool.actionId="interaction.cancel";cancelTool.ownerId=binding.featureId;cancelTool.isCurrentToolCommand=true;cancelTool.isTriggerable=true;
+    binding.actions.push_back(cancelTool);binding.onTrigger=[&](std::string_view,const ActionContext&){++toolCancels;return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    binding.getIsActionAvailable=[&](std::string_view id,const InteractionEvent& e){return id!="test.widget.edit"||representation->ComputeInteractionState(e.x,e.y)!=vtkBoxRepresentation::Outside;};
     binding.getIsCaptureActive=[&](std::string_view){return input.active;};
     binding.onBindingsChanged=[&](const std::vector<EffectiveBinding>& values){if(!input.active)FeatureSupport::SetWidgetBindings(widget,values,{{"test.widget.drag",vtkWidgetEvent::Translate}});};
     binding.onAction=[&](std::string_view,const InteractionEvent& e,const std::optional<HostSemanticTarget>&){
@@ -861,6 +863,7 @@ void StartNativeWidgetCase(int& failureCount)
         if(e.eventKind==InteractionEventKind::PrimaryPress)input.active=true;return InteractionResult{true,false,true};
     };
     SetExpect(registry.GetFeaturePort().AttachInput(std::move(binding)),"原生控件动作装配失败",failureCount);
+    SetExpect(registry.GetFeaturePort().SetInputOwner("native-widget",true,{"native"}),"原生控件编辑 owner 设置失败",failureCount);
     context->GetRenderWindow()->SetOffScreenRendering(1);context->GetRenderWindow()->Render();
     int exports=0;ApplicationAction reset;reset.info.actionId="application.resetProbe";reset.info.ownerId="application";
     reset.info.bindings.push_back({"application.resetProbe.key",{InputTriggerKind::KeyPress,InputMouseButton::None,0,7,'R'}});
@@ -899,7 +902,9 @@ void StartNativeWidgetCase(int& failureCount)
     event.kind=HostInputKind::PrimaryRelease;(void)registry.SendInput(event);
     SetExpect(!context->GetIsInputIdle(),"原生 release 后清理未完成须保留 SDK 捕获",failureCount);
     event.kind=HostInputKind::Cancel;SetExpect(!registry.SendInput(event).isSucceeded&&!context->GetIsInputIdle(),"失败取消不能丢弃原生捕获",failureCount);
-    input.failCleanup=false;SetExpect(registry.SendInput(event).isSucceeded&&context->GetIsInputIdle(),"原生清理应可以重试",failureCount);
+    input.failCleanup=false;ActionContext cancelContext;cancelContext.viewId="native";
+    SetExpect(controller->Trigger("interaction.cancel",cancelContext).status==ActionTriggerStatus::Completed&&context->GetIsInputIdle()&&toolCancels==0,"按钮取消须优先重试捕获，不继续退出编辑工具",failureCount);
+    SetExpect(controller->Trigger("interaction.cancel",cancelContext).status==ActionTriggerStatus::Completed&&toolCancels==1,"无捕获后按钮取消才交给当前工具",failureCount);
     ApplicationAction collision;collision.info.actionId="application.widgetCollision";collision.info.ownerId="application";
     collision.info.bindings.push_back({"application.widgetCollision.press",{InputTriggerKind::PointerPress,InputMouseButton::Primary},true,{},"widget:test",{InputTriggerKind::PointerPress}});
     collision.execute=[](const ActionContext&){return ActionTriggerResult{ActionTriggerStatus::Completed,0};};

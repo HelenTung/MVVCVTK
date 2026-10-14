@@ -381,6 +381,12 @@ bool HostInputRegistry::Impl::Start(const HostViewTargets& allViews)
             const auto r=d?d->GetViewRoute(HostViewTarget{id}):std::optional<HostViewRoute>{};
             const auto c=r?r->context.lock():nullptr;return c?c->SetNavigation(std::move(n)):NavigationStatus::Unbound;
         });
+    InteractionControllerAccess::SetCaptureCancel(*controller,[weakOwner](const ActionContext& context){
+        const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+        const auto r=d?d->GetViewRoute(HostViewTarget{context.viewId}):std::optional<HostViewRoute>{};const auto view=r?r->context.lock():nullptr;
+        const auto result=view?view->CancelCurrentCapture():InteractionResult{};
+        return ActionTriggerResult{!result.isHandled?ActionTriggerStatus::Unavailable:result.isSucceeded?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,0};
+    });
     NavigationBindings::RegisterActions(*controller,[weakOwner](std::string_view id,const ActionContext& c){
         const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
         const auto r=d?d->GetViewRoute(HostViewTarget{c.viewId}):std::optional<HostViewRoute>{};const auto view=r?r->context.lock():nullptr;

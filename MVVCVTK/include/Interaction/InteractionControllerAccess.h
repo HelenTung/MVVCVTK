@@ -17,6 +17,7 @@ public:
     static void SetKeyHandled(InteractionController&,const InteractionEvent&,bool);
     static void ClearKeys(InteractionController&,const std::string&);
     static void SetFallbackAction(InteractionController&,std::function<ActionTriggerResult(std::string_view,const ActionContext&)>);
+    static void SetCaptureCancel(InteractionController&,std::function<ActionTriggerResult(const ActionContext&)>);
     static void SetBindingsChanged(InteractionController&,std::function<void()>);
     static bool Register(InteractionController&,InteractionActionInfo,
         std::vector<std::string> viewIds,std::function<ActionTriggerResult(const ActionContext&)>);
