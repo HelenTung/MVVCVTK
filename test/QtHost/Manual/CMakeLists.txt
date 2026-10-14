@@ -59,6 +59,8 @@ list(APPEND manual_inputs
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/OrthogonalCropTypes.h"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ArtifactReduction/src/ArtifactReductionHostFeature.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ArtifactReduction/include/Host/ArtifactReductionHostFeature.h"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/RoiEditing/src/RoiEditingHostFeature.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/RoiEditing/include/Host/RoiEditingHostFeature.h"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src/MetrologyAlignmentHostFeature.cpp")
 list(APPEND manual_inputs
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/include/SurfaceRecipe.h"

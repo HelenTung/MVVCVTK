@@ -182,15 +182,46 @@ void TestCurves()
 }
 class Controller final:public FeatureHostControl {
 public:
-    HostInputBinding binding;std::atomic<unsigned> signals{0};
+    HostInputBinding binding;std::shared_ptr<std::atomic<unsigned>> signals=std::make_shared<std::atomic<unsigned>>(0);
     bool AttachInput(HostInputBinding value)override{binding=std::move(value);return true;}
     bool DetachInput(std::string_view)override{binding={};return true;}
     bool SetActiveViews(const std::vector<std::string>&)override{return true;}
     bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
     bool SendSceneDelta(FeatureSceneDelta)override{return true;}
     bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
-    bool SendWorkAvailable()override{++signals;return true;}
+    bool SendWorkAvailable()override{++*signals;return true;}
 };
+void TestOperationNotificationLifetime()
+{
+    auto data=std::make_shared<TestDataPort>();
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    auto host=std::make_shared<Controller>();const auto signals=host->signals;const std::weak_ptr<Controller> weakHost=host;
+    {
+        HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+        Require(editor->AttachHost(context),"notification lifetime attach failed");
+    }
+    host.reset(); // 挂载参数只是临时上下文，不能承担异步任务的通知端口寿命。
+    RoiRequest draft;draft.metadata.name="通知生命周期";draft.definition.source=source;
+    RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=RoiOperationRequest{};
+    start.operation->params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};
+    Require(editor->SendRequest(start).error==RoiError::Pending,"notification operation was not deferred");
+    unsigned consumed=0;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor->GetState().isComputing && std::chrono::steady_clock::now()<deadline) {
+        const auto available=signals->load();
+        if(available!=consumed){consumed=available;Require(editor->OnHostTick(),"notified owner update failed");}
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Require(consumed && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,
+        "operation lost its work notification after the attachment context was released");
+    Require(editor->DetachHost() && weakHost.expired(),"notification port survived worker detach");
+}
 void TestDrawingAndLatestOperation()
 {
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
@@ -228,5 +259,5 @@ void TestDrawingAndLatestOperation()
 }
 int main()
 {
-    try {TestEditor();TestCurves();TestDrawingAndLatestOperation(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {TestEditor();TestCurves();TestOperationNotificationLifetime();TestDrawingAndLatestOperation(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }
