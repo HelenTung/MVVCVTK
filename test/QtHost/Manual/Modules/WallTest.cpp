@@ -34,6 +34,9 @@ QJsonObject Statistics(const ThicknessSnapshot& result)
 {
     const auto& s = result.statistics;
     return {{"result", GetRefText(result.result)}, {"isCurrent", result.isCurrent},
+        {"source",GetRefText(result.archive.input.source)},{"labels",GetRefText(result.archive.input.labels)},
+        {"mesh",GetRefText(result.archive.input.mesh)},
+        {"evaluationRoi",result.archive.params.evaluationRoi?QJsonValue(GetRefText(*result.archive.params.evaluationRoi)):QJsonValue()},
         {"sampleCount", QString::number(s.sampleCount)}, {"validCount", QString::number(s.validCount)},
         {"unmeasuredCount",QString::number(s.sampleCount-s.validCount)},
         {"algorithmVersion",QString::fromStdString(result.archive.algorithmVersion)},

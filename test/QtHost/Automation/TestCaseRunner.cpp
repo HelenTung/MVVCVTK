@@ -2541,6 +2541,20 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto expectedResult=GetResolved(step["expectResult"],results).toObject();
         for(auto field=expectedResult.begin();field!=expectedResult.end();++field)
             Check(record["result"].toObject()[field.key()]==field.value(),("business result matches "+field.key()).toStdString().c_str());
+        const auto metrics=GetResolved(step["expectMetrics"],results).toObject();
+        for(auto field=metrics.begin();field!=metrics.end();++field) {
+            QJsonValue actual=record["result"];
+            for(const auto& key:field.key().split('.'))actual=actual.toObject().value(key);
+            bool valid=actual.isDouble();const auto number=actual.isString()?actual.toString().toDouble(&valid):actual.toDouble();
+            Check(valid && std::isfinite(number),("business metric is finite: "+field.key()).toStdString().c_str());
+            const auto bounds=field.value().toObject();
+            if(bounds.contains("min"))Check(number>=GetNumber(bounds,"min"),("business metric meets minimum: "+field.key()).toStdString().c_str());
+            if(bounds.contains("max"))Check(number<=GetNumber(bounds,"max"),("business metric meets maximum: "+field.key()).toStdString().c_str());
+        }
+        if(step.contains("expectCurrentInput")) {
+            const auto current=window.GetSession()->GetImageDescriptor();
+            Check(current && GetRefText(current->dataRevision)==GetResolved(step["expectCurrentInput"],results).toString(),"business step retains the expected exact input revision");
+        }
         checkObserved(step);
         if(step.contains("expectFollowupStatus")) {
             const bool followed=Wait([&]{return !window.GetRecords().GetRecord(id+1).isEmpty();},2000);
@@ -2686,13 +2700,30 @@ void StartSequence(TestWindow& window, const QString& path)
         if(step.contains("expectRoiCount")) {
             const auto regions=window.GetSession()->GetRoiDescriptors(true);
             Check(regions.size()==static_cast<std::size_t>(step["expectRoiCount"].toInt()),"formal ROI count matches the requested output mode");
-            if(step["expectRoiShape"]=="Sphere") {
+            if(step["expectRoiShape"].isString()) {
                 const auto roi=window.GetSession()->GetRoiDescriptor(GetRef(record["result"].toObject()["roi"]));
-                if(roi && !(roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==RoiShape::Sphere)) {
+                const auto shape=GetEnum<RoiShape>(step,"expectRoiShape",{{"Box",RoiShape::Box},{"Sphere",RoiShape::Sphere},{"Cylinder",RoiShape::Cylinder},{"Ellipsoid",RoiShape::Ellipsoid},{"HalfSpace",RoiShape::HalfSpace},{"Contour",RoiShape::Contour},{"EllipticCylinder",RoiShape::EllipticCylinder}});
+                if(roi && !(roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==shape)) {
                     QJsonArray nodes;for(const auto& node:roi->definition.nodes)nodes.append(QJsonObject{{"kind",int(node.kind)},{"shape",int(node.primitive.shape)},{"radius",node.primitive.radius}});
                     std::cerr<<"ROI saved geometry diagnostic: "<<GetJsonText(QJsonObject{{"nodes",nodes},{"form",window.GetModule("Roi")->GetActionParameters("SetDraft")}}).toStdString()<<std::endl;
                 }
-                Check(roi && roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==RoiShape::Sphere,"formal saved ROI preserves the spherical draft geometry");
+                Check(roi && roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==shape,"formal saved ROI preserves the requested primitive shape");
+                if(step.contains("expectRoiSource"))Check(GetRefText(roi->definition.source)==GetResolved(step["expectRoiSource"],results).toString(),"formal ROI binds its exact declared source");
+                const auto& p=roi->definition.nodes.front().primitive;
+                const QJsonObject geometry{{"origin",GetValues(p.origin)},{"matrix",GetValues(p.localToSource)},{"radius",p.radius},{"height",p.height},{"axis",GetValues(p.normal)}};
+                const auto expectedGeometry=GetResolved(step["expectRoiGeometry"],results).toObject();
+                for(auto field=expectedGeometry.begin();field!=expectedGeometry.end();++field) {
+                    const auto near=[](double a,double b){return std::isfinite(a) && std::isfinite(b) && std::abs(a-b)<=1e-10*std::max({1.,std::abs(a),std::abs(b)});};
+                    const auto actual=geometry.value(field.key());
+                    if(field.value().isArray()) {
+                        const auto a=actual.toArray(),b=field.value().toArray();Check(actual.isArray() && a.size()==b.size(),"ROI geometry array shape matches the declared primitive");
+                        for(int i=0;i<a.size();++i)Check(near(a[i].toDouble(),b[i].toDouble()),"ROI geometry matches declared model coordinates");
+                    } else Check(actual.isDouble() && near(actual.toDouble(),field.value().toDouble()),"ROI geometric value matches the declared primitive");
+                }
+                if(step.contains("roiAudit")) {
+                    auto audit=geometry;audit["roi"]=GetRefText(roi->revision);audit["source"]=GetRefText(roi->definition.source);audit["shape"]=int(p.shape);
+                    ExportJson(GetText(step,"roiAudit"),audit);
+                }
             }
             if(step.contains("expectRetainedRoi")) {
                 const auto original=GetRef(GetResolved(step["expectRetainedRoi"],results));
