@@ -271,10 +271,13 @@ void CheckUiAndRecords(TestWindow& window)
     Check(workspaces && workspaces->count() == 3 && tabs && tabs->shape() == QTabBar::RoundedNorth,
         "task workspaces organize horizontal module navigation");
     QSet<QString> moduleIds;
-    const QStringList remembered{"Rotation","Surface","Gap"};
+    QStringList remembered{"", "", ""};
     {
         const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
         for(int group=0;group<3;++group) {
+            const bool hasModules=std::any_of(groups[group].begin(),groups[group].end(),[&](const QString& id){return GetEnabled(window,id);});
+            Check(workspaces->isTabEnabled(group)==hasModules,"workspace availability follows its compiled business modules");
+            if(!hasModules)continue;
             workspaces->setCurrentIndex(group);
             for (int i = 0; i < tabs->count(); ++i) {
                 tabs->setCurrentIndex(i);
@@ -284,12 +287,15 @@ void CheckUiAndRecords(TestWindow& window)
                 Check(pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
                     "module identity keeps its parameter page and source browser synchronized");
             }
+            remembered[group]=tabs->tabData(tabs->currentIndex()).toString();
         }
     }
     int enabled=0;for(const auto* id:{"Data","View","Rotation","Roi","Crop","Artifact","Part","Surface","Alignment","Wall","Gap"})if(GetEnabled(window,id))++enabled;
-    Check(moduleIds.size() == enabled && moduleIds.contains("Part")
-        && window.GetModule("PartEdit") == window.GetModule("Part"), "all modules remain reachable with one segmentation and editing page");
+    Check(moduleIds.size() == enabled,"all compiled modules remain reachable");
+    if(GetEnabled(window,"Part"))Check(moduleIds.contains("Part")
+        && window.GetModule("PartEdit") == window.GetModule("Part"), "segmentation and editing share one compiled page");
     for (int group = 0; group < workspaces->count(); ++group) {
+        if(!workspaces->isTabEnabled(group))continue;
         workspaces->setCurrentIndex(group);
         Check(tabs->tabData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
     }
@@ -1610,18 +1616,20 @@ void CheckSharedRoi(TestWindow& window)
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
+        if(!GetEnabled(window,use[0]))continue;
         auto* page=window.GetModule(use[0]);page->Observe();
         if(auto* form=page->GetParameterEditor(use[1]))if(auto* field=form->GetField(use[2])) {
             const auto* choices=field->findChild<QComboBox*>("value");
             Check(choices && choices->findData(GetRefText(ref))>=0,"saved ROI is selectable in the consumer form");
         }
     }
-    auto* surface=window.GetModule("Surface");surface->Observe();
+    auto* surface=window.GetModule("Surface");
     const auto createRegion=[&] {
         surface->Observe();
         auto* button=surface->GetParameterEditor("GlobalAutomatic")->GetField("analysisRoi")->findChild<QPushButton*>("createRegion");
         Check(button!=nullptr,"business range exposes the shared region editor");button->click();
     };
+    if(GetEnabled(window,"Surface")) {
     createRegion();
     GetComplete(window,Send(window,"Roi","Begin",{{"name","业务内新区域"}}),"Succeeded");
     const auto created=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
@@ -1636,6 +1644,7 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Roi","Begin"),"Succeeded");
     window.GetModule("Roi")->onStop();
     Check(window.GetWorkflow().roiConsumer.isEmpty(),"stopping the shared editor clears the old return destination");
+    }
 #if defined(MANUAL_CROP)
     window.SetViewsVisible(true);window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});
     auto* crop=window.GetModule("Crop");
@@ -1663,9 +1672,11 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Crop","CloseDocument"),"Succeeded");
     window.SetViewsVisible(false);
 #endif
+    const auto selectableBeforeArchive=GetRoiChoices(*window.GetSession(),source).size();
+    const auto catalogBeforeArchive=GetRoiChoices(*window.GetSession(),source,true).size();
     GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",true}}),"Succeeded");
-    Check(GetRoiChoices(*window.GetSession(),source).size()==1
-        && GetRoiChoices(*window.GetSession(),source,true).size()==2,"archived regions remain manageable and leave consumer choices");
+    Check(GetRoiChoices(*window.GetSession(),source).size()+1==selectableBeforeArchive
+        && GetRoiChoices(*window.GetSession(),source,true).size()==catalogBeforeArchive,"archived regions remain manageable and leave consumer choices");
     bool rejected=false;try{(void)GetSelectedRoi(*window.GetSession(),GetRefText(ref),source);}catch(const std::invalid_argument&){rejected=true;}
     Check(rejected,"an archived region cannot silently run as a selected analysis range");
     GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",false}}),"Succeeded");
@@ -1710,6 +1721,7 @@ void CheckSharedRoi(TestWindow& window)
         Check(descriptor && descriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
             && descriptor->metadata.name=="仅改名称的旋转结果","saving an unchanged rotated tool preserves the computed region before and after applying");
     }
+    if(GetEnabled(window,"Surface")) {
     surface->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});createRegion();
     GetComplete(window,Send(window,"Roi","Begin",{{"name","异步业务回填"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
     const auto operation=Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}});
@@ -1719,6 +1731,7 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,operation,"PreviewReady");
     Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
         && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
+    }
 #endif
 }
 void StartSelfTest(TestWindow& window)

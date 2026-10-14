@@ -6,6 +6,7 @@
 #include "Render/Support/RenderTextStyle.h"
 #include "Render/Contracts/SlicePlaneState.h"
 #include "Render/Support/SliceContourPlane.h"
+#include "Render/CropSphereVisual.h"
 #include <vtkActor.h>
 #include <vtkCubeSource.h>
 #include <vtkCutter.h>
@@ -14,7 +15,6 @@
 #include <vtkPlane.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
-#include <vtkSphereSource.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
@@ -22,6 +22,7 @@
 #include <vtkNew.h>
 #include <cmath>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 // 私有几何投影不参与裁切 predicate、物化或历史计算。
@@ -32,12 +33,17 @@ public:
         m_axis = role == HostRenderViewRole::TopDownSlice ? 2
             : role == HostRenderViewRole::FrontBackSlice ? 1
             : role == HostRenderViewRole::LeftRightSlice ? 0 : -1;
+        if(m_axis<0)m_sphereVisual=std::make_unique<CropSphereVisual>();
         m_mapper->ScalarVisibilityOff(); m_actor->SetMapper(m_mapper);
         m_actor->GetProperty()->SetColor(0.95, 0.2, 0.2);
         m_actor->GetProperty()->SetRepresentationToWireframe();
         m_actor->GetProperty()->LightingOff(); m_actor->GetProperty()->SetLineWidth(1.5);
         m_actor->PickableOff();
         if (m_axis >= 0) {
+            // 交圆与图像平面重合；只偏移深度绘制，避免改变模型坐标和球面交线。
+            m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
+            m_mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0,-4);
+            m_mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-4);
             std::array<double,3> normal{}; normal[m_axis] = 1;
             m_sliceNormal=normal;
             m_plane->SetNormal(normal.data()); m_cutter->SetCutFunction(m_plane);
@@ -52,10 +58,29 @@ public:
         m_text->SetPosition(12, 12);
         m_text->PickableOff(); AttachProp(m_text);
     }
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
+    {
+        FeatureOverlayBase::AttachRenderer(renderer);
+        if(m_sphereVisual)m_sphereVisual->AttachRenderer(renderer);
+    }
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
+    {
+        if(m_sphereVisual)m_sphereVisual->DetachRenderer();
+        FeatureOverlayBase::DetachRenderer(renderer);
+    }
+    void SetSphereEditing(bool editing)
+    {
+        m_sphereEditing=editing;
+        if(m_sphereVisual)m_sphereVisual->SetVisible(m_shape==CropShape::Sphere&&!editing);
+    }
     void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
     void SetOverlayState(const FeatureOverlayState& state) override
     {
         (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_sliceNormal,state.modelToWorld);
+        m_modelToWorld->DeepCopy(state.modelToWorld.data());
+        if(m_shape==CropShape::Sphere) {
+            UpdateSphere();Set3DPropsTransform(state.modelToWorld);return;
+        }
         double n[3];m_plane->GetNormal(n);
         const double dot=n[0]*m_normal[0]+n[1]*m_normal[1]+n[2]*m_normal[2];
         const double length=std::hypot(n[0],n[1],n[2])*std::hypot(m_normal[0],m_normal[1],m_normal[2]);
@@ -68,6 +93,7 @@ public:
     void SetOperation(const CropOpItem& op, const CropBoundsDouble6Array& bounds)
     {
         m_shape=op.geometryType;
+        if(m_sphereVisual)m_sphereVisual->SetVisible(false);m_text->SetVisibility(true);
         m_center=op.planeCenterInInputModel;
         m_normal=op.planeNormalInInputModel;
         auto mesh = vtkSmartPointer<vtkPolyData>::New();
@@ -83,9 +109,9 @@ public:
             }
             text << " mm";
         } else if (op.geometryType == CropShape::Sphere) {
-            vtkNew<vtkSphereSource> source; source->SetCenter(op.centerInInputModel.data());
-            source->SetRadius(op.radius);source->SetThetaResolution(64);source->SetPhiResolution(48);source->Update();
-            mesh->ShallowCopy(source->GetOutput()); text << u8"半径：" << op.radius << " mm";
+            m_center=op.centerInInputModel;m_radius=op.radius;UpdateSphere();
+            text << u8"半径：" << op.radius << " mm";m_text->SetInput(text.str().c_str());
+            m_text->SetVisibility(m_axis>=0);return;
         } else if (op.geometryType == CropShape::Cylinder) {
             vtkNew<vtkCylinderSource> source;source->SetRadius(op.radius);source->SetHeight(op.height);
             source->SetResolution(64);source->CappingOn();source->Update();mesh->ShallowCopy(source->GetOutput());
@@ -117,10 +143,26 @@ public:
         vtkNew<vtkTransform> transform;transform->SetMatrix(matrix);
         vtkNew<vtkTransformPolyDataFilter> filter;filter->SetTransform(transform);filter->SetInputData(mesh);
         filter->Update();m_mesh->ShallowCopy(filter->GetOutput());
-        m_cutter->SetInputData(m_mesh);m_text->SetInput(text.str().c_str());
+        m_cutter->SetInputData(m_mesh);m_mapper->SetInputConnection(m_cutter->GetOutputPort());
+        m_text->SetInput(text.str().c_str());
     }
 private:
+    void UpdateSphere()
+    {
+        if(m_axis>=0) {
+            CropSphereVisual::BuildSection(*m_mesh,m_center,m_radius,*m_plane);
+            m_mapper->SetInputData(m_mesh);m_actor->GetProperty()->SetPointSize(4);
+        } else {
+            m_sphereVisual->SetGeometry(m_center,m_radius,m_modelToWorld);
+            m_sphereVisual->SetState(CropSphereVisual::State::Passive);
+            m_sphereVisual->SetVisible(!m_sphereEditing);
+        }
+    }
     CropShape m_shape=CropShape::Box;
+    std::unique_ptr<CropSphereVisual> m_sphereVisual;
+    bool m_sphereEditing=false;
+    double m_radius=1;
+    vtkSmartPointer<vtkMatrix4x4> m_modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();
     std::array<double,3> m_center{},m_normal{};
     std::array<double,3> m_sliceNormal{0,0,1};
     int m_axis=-1;

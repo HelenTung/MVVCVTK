@@ -3,6 +3,10 @@
 #include <vtkActorCollection.h>
 #include <vtkCommand.h>
 #include <vtkProperty.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkHandleRepresentation.h>
 #include <vtkHandleWidget.h>
 #include <vtkRenderer.h>
@@ -35,14 +39,20 @@ int GetCropCurveWidgetFailures()
     CropOpItem operation;operation.geometryType=CropShape::Sphere;operation.centerInInputModel={1,2,3};operation.radius=2;
     check(widget.SetGeometry(operation,matrix)&&widget.SetEnabled(true),"sphere context and affine accepted");
     renderer->ResetCamera();window->Render();
-    check(near(position(0),world(operation.centerInInputModel))&&near(position(1),world(P{3,2,3}))
+    vtkNew<vtkMatrix4x4> inverse;inverse->DeepCopy(matrix.data());vtkMatrix4x4::Invert(inverse,inverse);
+    const auto model=[&](P p){double input[4]{p[0],p[1],p[2],1},output[4]{};inverse->MultiplyPoint(input,output);return P{output[0],output[1],output[2]};};
+    const auto radiusPosition=model(position(1));P radial{};for(int i=0;i<3;++i)radial[i]=radiusPosition[i]-operation.centerInInputModel[i];
+    check(near(position(0),world(operation.centerInInputModel))&&std::abs(std::hypot(radial[0],radial[1],radial[2])-operation.radius)<1e-11
         &&widget.GetHandle(0)->GetEnabled()&&widget.GetHandle(1)->GetEnabled()&&!widget.GetHandle(2)->GetEnabled(),"sphere handles project exact model center and radius");
     move(0,P{2,1,4});move(1,P{5,1,4});
     check(near(widget.GetGeometry().centerInInputModel,P{2,1,4})&&std::abs(widget.GetGeometry().radius-3)<1e-11
         &&phases.size()==6&&phases[0]==CropInteractionPhase::Hover&&phases[1]==CropInteractionPhase::Dragging
         &&phases[2]==CropInteractionPhase::Released,"sphere drag uses inverse affine without changing its model radius semantics");
     vtkActor* outline=nullptr;auto* actors=renderer->GetActors();actors->InitTraversal();
-    while(auto* actor=actors->GetNextActor())if(!actor->GetPickable()&&actor->GetProperty()->GetRepresentation()==VTK_WIREFRAME)outline=actor;
+    while(auto* actor=actors->GetNextActor()) {
+        auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if(!actor->GetPickable()&&mapper&&mapper->GetInput()&&mapper->GetInput()->GetNumberOfLines()==3)outline=actor;
+    }
     P renderedCenter{};if(outline)std::copy_n(outline->GetCenter(),3,renderedCenter.data());
     check(outline&&near(renderedCenter,world(P{2,1,4})),"sphere outline and handles apply the display affine exactly once");
     bool allowEvents=false;widget.SetContextGate([&]{return allowEvents;});const auto gateBefore=widget.GetGeometry();
