@@ -2713,12 +2713,12 @@ void StartSequence(TestWindow& window, const QString& path)
                 const QJsonObject geometry{{"origin",GetValues(p.origin)},{"matrix",GetValues(p.localToSource)},{"radius",p.radius},{"height",p.height},{"axis",GetValues(p.normal)}};
                 const auto expectedGeometry=GetResolved(step["expectRoiGeometry"],results).toObject();
                 for(auto field=expectedGeometry.begin();field!=expectedGeometry.end();++field) {
-                    const auto near=[](double a,double b){return std::isfinite(a) && std::isfinite(b) && std::abs(a-b)<=1e-10*std::max({1.,std::abs(a),std::abs(b)});};
+                    const auto geometryMatches=[](double a,double b){return std::isfinite(a) && std::isfinite(b) && std::abs(a-b)<=1e-10*std::max({1.,std::abs(a),std::abs(b)});};
                     const auto actual=geometry.value(field.key());
                     if(field.value().isArray()) {
                         const auto a=actual.toArray(),b=field.value().toArray();Check(actual.isArray() && a.size()==b.size(),"ROI geometry array shape matches the declared primitive");
-                        for(int i=0;i<a.size();++i)Check(near(a[i].toDouble(),b[i].toDouble()),"ROI geometry matches declared model coordinates");
-                    } else Check(actual.isDouble() && near(actual.toDouble(),field.value().toDouble()),"ROI geometric value matches the declared primitive");
+                        for(int i=0;i<a.size();++i)Check(geometryMatches(a[i].toDouble(),b[i].toDouble()),"ROI geometry matches declared model coordinates");
+                    } else Check(actual.isDouble() && geometryMatches(actual.toDouble(),field.value().toDouble()),"ROI geometric value matches the declared primitive");
                 }
                 if(step.contains("roiAudit")) {
                     auto audit=geometry;audit["roi"]=GetRefText(roi->revision);audit["source"]=GetRefText(roi->definition.source);audit["shape"]=int(p.shape);
