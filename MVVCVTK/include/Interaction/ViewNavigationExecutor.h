@@ -14,6 +14,7 @@ public:
     NavigationStatus SetNavigation(std::shared_ptr<ViewNavigation>);
     void ResetReference();
     void SetMode(VizMode);
+    void SetPointerPosition(std::optional<std::array<double,2>>,double displayScale=1);
     InteractionResult Send(const InteractionEvent&,const NavigationBindings&);
     NavigationStatus Trigger(std::string_view,const NavigationInput&);
     InteractionCaptureKey GetCaptureKey() const noexcept;

@@ -659,6 +659,7 @@ bool StdViewContext::StopInput()
     // P0 先关闭业务 admission；底层 timer/observer 清理失败也不得继续接收输入。
     m_isInputEnabled = false;
     m_isNavigationStopped = true;
+    if(m_navigation)m_navigation->SetPointerPosition(std::nullopt);
     InteractionEvent cancel;
     cancel.vizMode = m_currentMode;
     cancel.toolMode = m_toolMode;
@@ -1170,6 +1171,10 @@ void StdViewContext::OnVTKEvent(
     BooleanGuard routing(m_isRoutingInput);
     InteractionEvent event;
     BuildInteractionEvent(event, interactor, eventKind);
+    // 在捕获分发前保存 display 坐标；业务捕获期间也不丢失最新指针位置。
+    if(m_navigation&&event.area==InputArea::View&&GetIsRoutedInputEvent(eventKind)
+        &&eventKind!=InteractionEventKind::KeyPress&&eventKind!=InteractionEventKind::KeyRelease&&eventKind!=InteractionEventKind::TextInput)
+        m_navigation->SetPointerPosition(event.displayPosition.value_or(std::array<double,2>{static_cast<double>(event.x),static_cast<double>(event.y)}),event.displayScale);
     bool releasedHandled=false;
     if(const auto c=m_controller.lock())releasedHandled=InteractionControllerAccess::PrepareKeyEvent(*c,event);
     else if(eventKind==InteractionEventKind::KeyPress) {

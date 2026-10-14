@@ -33,6 +33,7 @@ public:
     ZoomAnchor anchor;
     InteractionEventKind release=InteractionEventKind::None;
     std::array<double,2> lastPosition{};
+    std::optional<std::array<double,2>> pointerPosition;
     bool isWheelGesture=false;
     InteractionSource source{"ViewNavigation",{}};
     explicit Impl(InteractionPorts p,vtkRenderer* r,std::function<bool()> valid,std::function<bool()> captured):ports(std::move(p)),renderer(r) {
@@ -40,7 +41,7 @@ public:
         endpoint->isValid=std::move(valid);endpoint->hasCapture=std::move(captured);
         endpoint->state=[this]{return State();};
         endpoint->zoom=[this](const auto& v){return Zoom(v);};
-        endpoint->pan=[this](const auto& v){return Pan(v,1);};
+        endpoint->pan=[this](const auto& v){return Pan(v,displayScale);};
         endpoint->rotate=[this](const auto& v){return Rotate(v);};
         endpoint->scroll=[this](double v){return Scroll(v);};
         endpoint->windowLevel=[this](const auto& v){return WindowLevel(v);};
@@ -90,6 +91,7 @@ public:
             renderer->SetWorldPoint(world[0],world[1],world[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
             display={d[0],d[1]};return std::isfinite(d[0])&&std::isfinite(d[1]);
         }
+        if(a.mode==ZoomAnchorMode::Pointer&&pointerPosition)display=*pointerPosition;
         if(a.mode==ZoomAnchorMode::DisplayPoint)display={a.point[0],a.point[1]};
         if(a.mode==ZoomAnchorMode::NormalizedPoint) {
             if(a.point[0]<0||a.point[0]>1||a.point[1]<0||a.point[1]>1)return false;
@@ -225,6 +227,11 @@ NavigationStatus ViewNavigationExecutor::SetNavigation(std::shared_ptr<ViewNavig
     NavigationAccess::Unbind(*m_impl->navigation);m_impl->navigation=std::move(n);return NavigationStatus::Applied;
 }
 void ViewNavigationExecutor::SetMode(VizMode mode){m_impl->currentMode=mode;}
+void ViewNavigationExecutor::SetPointerPosition(std::optional<std::array<double,2>> position,double scale) {
+    if(m_impl->endpoint->owner!=std::this_thread::get_id())return;
+    if(!std::isfinite(scale)||scale<=0||position&&(!std::isfinite((*position)[0])||!std::isfinite((*position)[1])))return;
+    m_impl->pointerPosition=position;m_impl->displayScale=scale;
+}
 void ViewNavigationExecutor::ResetReference(){m_impl->referenceHeight=0;}
 InteractionCaptureKey ViewNavigationExecutor::GetCaptureKey() const noexcept{return {0,static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this))};}
 InteractionEventKind ViewNavigationExecutor::GetReleaseKind() const noexcept{return m_impl->release;}

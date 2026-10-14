@@ -792,6 +792,16 @@ void StartViewNavigationCase(int& failureCount)
     SetExpect(navigation->ZoomBy(1.5,ZoomAnchor::WorldPoint({3,0,7}))==NavigationStatus::Applied,"世界点缩放失败",failureCount);
     renderer->SetWorldPoint(3,0,7,1);renderer->WorldToDisplay();const auto* display=renderer->GetDisplayPoint();
     SetExpect(std::abs(display[0]-before[0])<tolerance&&std::abs(display[1]-before[1])<tolerance,"缩放锚点应保持原屏幕位置",failureCount);
+    InteractionEvent pointer;pointer.viewId="slice";pointer.eventKind=InteractionEventKind::PointerMove;
+    pointer.displayPosition=std::array<double,2>{140.25,130.75};pointer.displayScale=2;(void)context->SendInput(pointer);
+    renderer->SetDisplayPoint(140.25,130.75,0);renderer->DisplayToWorld();const auto* atPointer=renderer->GetWorldPoint();
+    std::array<double,3> pointerWorld{atPointer[0]/atPointer[3],atPointer[1]/atPointer[3],atPointer[2]/atPointer[3]};
+    SetExpect(navigation->ZoomBy(1.1,ZoomAnchor::Pointer())==NavigationStatus::Applied,"直接指针锚点缩放失败",failureCount);
+    renderer->SetWorldPoint(pointerWorld[0],pointerWorld[1],pointerWorld[2],1);renderer->WorldToDisplay();
+    SetExpect(std::abs(renderer->GetDisplayPoint()[0]-140.25)<tolerance&&std::abs(renderer->GetDisplayPoint()[1]-130.75)<tolerance,"未捕获的精确指针位置须用于直接缩放锚点",failureCount);
+    SetExpect(navigation->PanByPixels(10,5)==NavigationStatus::Applied,"直接逻辑像素平移失败",failureCount);
+    renderer->SetWorldPoint(pointerWorld[0],pointerWorld[1],pointerWorld[2],1);renderer->WorldToDisplay();
+    SetExpect(std::abs(renderer->GetDisplayPoint()[0]-160.25)<tolerance&&std::abs(renderer->GetDisplayPoint()[1]-140.75)<tolerance,"直接平移须使用最新输入的高 DPI 比例",failureCount);
     auto options=navigation->GetOptions();options.zoom.dragSensitivity=0.01;navigation->SetOptions(options);
     InteractionEvent input;input.viewId="slice";input.eventKind=InteractionEventKind::SecondaryPress;input.displayPosition=std::array<double,2>{100.25,100.5};input.displayScale=2;
     const double startScale=camera->GetParallelScale();
