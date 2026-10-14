@@ -264,11 +264,10 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
             bool explicitRetirement = false;
             for (const auto& input : output.inputs) {
                 const auto source = graph.view->GetData(input.source);
-                if (source && GetDataEntityIdValid(source->lifetimeScope)
-                    && source->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement) explicitRetirement = true;
+                if (source && GetDataEntityIdValid(source->lifetimeScope)) explicitRetirement = true;
                 for (const auto& staged : transaction.outputs)
                     if (staged.entityId == input.source.entityId && staged.expectedGeneration + 1 == input.source.generation
-                        && staged.lifetimeScope && staged.lifetimePolicy == DataLifetimePolicy::ExplicitRetirement) explicitRetirement = true;
+                        && staged.lifetimeScope) explicitRetirement = true;
             }
             if (explicitRetirement && !output.lifetimeScope) {
                 output.lifetimeScope = m_store.CreateDataEntityId();

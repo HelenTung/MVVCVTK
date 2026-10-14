@@ -620,8 +620,8 @@ RoiOperationResult RoiService::SetOperationCommit(const RoiOperationRequest& req
         tx.outputs.push_back({catalogRef.entityId,catalogRef.generation-1,DataTypes::roiCatalog,std::move(inputs),std::make_shared<const RoiCatalogPayload>(std::move(entries)),DataProvenance{"Host.Roi","set-catalog","1",{}}});
         for (auto& draft:tx.outputs) {
             bool explicitScope=false;for (const auto& input:draft.inputs) {
-                const auto data=graph.view->GetData(input.source);if (data && data->lifetimePolicy==DataLifetimePolicy::ExplicitRetirement) explicitScope=true;
-                for (const auto& staged:tx.outputs) if (staged.entityId==input.source.entityId && staged.lifetimePolicy==DataLifetimePolicy::ExplicitRetirement) explicitScope=true;
+                const auto data=graph.view->GetData(input.source);if (data && GetDataEntityIdValid(data->lifetimeScope)) explicitScope=true;
+                for (const auto& staged:tx.outputs) if (staged.entityId==input.source.entityId && staged.expectedGeneration+1==input.source.generation && staged.lifetimeScope) explicitScope=true;
             }if (explicitScope) {draft.lifetimeScope=m_store.CreateDataEntityId();draft.lifetimePolicy=DataLifetimePolicy::ExplicitRetirement;}
         }
         tx.bindings.push_back({std::string(roiCatalogBinding),binding.revision,true,binding.target,catalogRef});CheckCancel(request);
