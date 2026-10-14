@@ -81,6 +81,11 @@ void GapSavedParent(){
     const auto first=run(GapHostAction::Start,gapConfig.defaultStart);auto graph=probe->data->GetDataGraph();const auto saved=probe->data->GetData(graph,first.resultSet);const auto* collection=saved?dynamic_cast<const DataCollectionPayload*>(saved->payload.get()):nullptr;Require(collection,"saved gap collection missing");
     DataRevisionRef parentRecord;for(const auto& item:collection->GetItems())if(item.role=="parent-detection")parentRecord=item.data;
     const auto record=probe->data->GetData(graph,parentRecord);const auto* parent=record?dynamic_cast<const GapParentRecord*>(record->payload.get()):nullptr;Require(parent && parent->GetValid() && !parent->voids->empty(),"full saved gap parent missing defects");
+    const auto resultLabelNode=probe->data->GetData(graph,first.labelMap);
+    const auto resultLabels=resultLabelNode?std::dynamic_pointer_cast<const LabelMap3DPayload>(resultLabelNode->payload):nullptr;
+    Require(resultLabels && resultLabels->GetValueData()==parent->labels->GetValueData(),"unfiltered detection duplicated immutable parent labels");
+    Require(resultLabels->GetId()=="GapAnalysis.labels" && parent->labels->GetId()=="GapAnalysis.parent-labels"
+        && resultLabels->GetDisplayName()!=parent->labels->GetDisplayName(),"shared parent labels lost independent metadata");
     // 保存正式结果必须建立图中的保留关系；仅保存运行期 ref 不阻止 owner 结果退役。
     DataTransaction keep;keep.bindings.push_back({"test.roi-saved-gap-parent",0,true,{},first.resultSet});Require(probe->data->SetDataCommit(keep).status==DataCommitStatus::Succeeded,"saved parent retention binding failed");
     auto secondParams=gapConfig.defaultStart;secondParams.surface.absoluteIsoValue=60;const auto second=run(GapHostAction::Start,secondParams);Require(second.resultSet!=first.resultSet,"gap did not publish independent parent results");

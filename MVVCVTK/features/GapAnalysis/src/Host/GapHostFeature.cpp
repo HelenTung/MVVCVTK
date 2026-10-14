@@ -663,6 +663,10 @@ bool GapHostFeature::Impl::OnHostTick()
             if (m_service->GetCompletedResult(candidate)) {
                 (void)SetCompletedResult(candidate);
             }
+            if(m_isRequestPending) {
+                // 成功终态只能发布或明确失败，不能消耗完成唤醒后仍无限等待。
+                SetFailedResult(GapResultStatus::Failed,"Gap completed result could not be published.");
+            }
         }
         else if (analysisState == GapAnalysisState::Failed
             || analysisState == GapAnalysisState::Idle) {
@@ -1031,7 +1035,10 @@ bool GapHostFeature::Impl::SetCompletedResult(
     };
     for (auto& output:transaction.outputs)
         for (const auto& input:m_operation.inputs) if (input.role!="source-volume") output.inputs.push_back(input);
-    if (!prepared || !prepared->parentLabels || !prepared->parentVoids || !prepared->parentRecord) return false;
+    if (!prepared || !prepared->parentLabels || !prepared->parentVoids || !prepared->parentRecord) {
+        SetFailedResult(GapResultStatus::Failed,"Gap parent payload construction failed.");
+        return false;
+    }
     transaction.outputs.insert(transaction.outputs.begin(),{parentLabels.entityId,0,DataTypes::labelMap3D,{{"source-volume",sourceRef}},prepared->parentLabels,DataProvenance{std::string(featureId),"retain-parent-labels","1",m_requestParameters}});
     transaction.outputs.insert(transaction.outputs.begin()+1,{parentVoids.entityId,0,gapVoidTableType,{{"source-volume",sourceRef},{"labels",parentLabels}},prepared->parentVoids,DataProvenance{std::string(featureId),"retain-parent-defects","1",m_requestParameters}});
     transaction.outputs.insert(transaction.outputs.begin()+2,{parentRecord.entityId,0,gapParentRecordType,{{"source-volume",sourceRef},{"parent-labels",parentLabels},{"parent-void-regions",parentVoids}},prepared->parentRecord,DataProvenance{std::string(featureId),"retain-parent-detection","1",m_requestParameters}});

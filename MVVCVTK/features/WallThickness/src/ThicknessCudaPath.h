@@ -36,5 +36,5 @@ public:
     virtual ~Client()=default;
     virtual std::vector<Value> Measure(const std::vector<Measurement>& requests,const Params& params,const std::function<void()>& check)=0;
 };
-std::unique_ptr<Client> Create(const Input& input) noexcept;
+std::unique_ptr<Client> Create(const Input& input);
 }
