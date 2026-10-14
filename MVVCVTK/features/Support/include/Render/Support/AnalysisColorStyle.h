@@ -40,7 +40,9 @@ struct RampParams final {
     bool isReversed = false;
     // 公差上下限均属于区间内；独立于普通半开分段。
     std::optional<std::array<double,2>> tolerance;
+    std::array<double,3> toleranceBelowColor{0.64,0.29,0.78};
     std::array<double,3> toleranceColor{97/255.0,179/255.0,113/255.0};
+    std::array<double,3> toleranceAboveColor{0.84,0.29,0.65};
     std::vector<RampSegment> segments;
     BlendMode blend = BlendMode::Constant;
     std::array<double,2> opacityRange{0.15,1.0};
@@ -62,7 +64,8 @@ inline bool GetRampValid(const RampParams& params) noexcept
 {
     if (!GetModeValid(params.mode) || params.segments.size()>1024) return false;
     for (const auto& color : {params.constantColor, params.lowColor, params.highColor,
-             params.belowColor, params.aboveColor, params.invalidColor, params.toleranceColor})
+             params.belowColor, params.aboveColor, params.invalidColor,
+             params.toleranceBelowColor, params.toleranceColor, params.toleranceAboveColor})
         if (!GetColorValid(color)) return false;
     if (params.tolerance && (!std::isfinite((*params.tolerance)[0])
         || !std::isfinite((*params.tolerance)[1]) || (*params.tolerance)[0]>(*params.tolerance)[1])) return false;
@@ -117,6 +120,7 @@ inline bool GetRampEqual(const RampParams& a,const RampParams& b)
     if(a.mode!=b.mode || a.constantColor!=b.constantColor || a.lowColor!=b.lowColor || a.highColor!=b.highColor
         || a.belowColor!=b.belowColor || a.aboveColor!=b.aboveColor || a.invalidColor!=b.invalidColor
         || a.isReversed!=b.isReversed || a.tolerance!=b.tolerance || a.toleranceColor!=b.toleranceColor
+        || a.toleranceBelowColor!=b.toleranceBelowColor || a.toleranceAboveColor!=b.toleranceAboveColor
         || a.blend!=b.blend || a.opacityRange!=b.opacityRange || a.segments.size()!=b.segments.size())return false;
     for(std::size_t i=0;i<a.segments.size();++i) {
         const auto& x=a.segments[i];const auto& y=b.segments[i];
@@ -169,11 +173,12 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
     if (std::isfinite(value)) {
         const double fraction=GetFraction(range[0],range[1],value);
         alpha=GetOpacity(fraction,params);
-        if(params.tolerance) {
-            color=value<(*params.tolerance)[0] ? params.belowColor
-                : value>(*params.tolerance)[1] ? params.aboveColor:params.toleranceColor;
-        } else if(value<range[0])color=!params.segments.empty() && !params.segments.front().lower ? params.segments.front().lowColor:params.belowColor;
+        if(value<range[0])color=!params.segments.empty() && !params.segments.front().lower ? params.segments.front().lowColor:params.belowColor;
         else if(value>range[1])color=!params.segments.empty() && !params.segments.back().upper ? params.segments.back().lowColor:params.aboveColor;
+        else if(params.tolerance) {
+            color=value<(*params.tolerance)[0] ? params.toleranceBelowColor
+                : value>(*params.tolerance)[1] ? params.toleranceAboveColor:params.toleranceColor;
+        }
         else if(!params.segments.empty()) {
             color=params.aboveColor;
             if(params.segments.front().lower && value<*params.segments.front().lower)color=params.belowColor;

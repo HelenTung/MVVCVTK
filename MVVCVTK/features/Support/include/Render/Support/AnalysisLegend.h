@@ -123,13 +123,13 @@ class AnalysisLegend final : public vtkScalarBarActor {
         if (compact) {
             // 矮视窗横排端帽与有限段，不用给无界尾段伪造数值长度。
             const double left = x + 16, width = std::max(8., size[0] - x - 40.);
+            quad(x, x + 12, y, y + 10,
+                 {m_params.belowColor[0], m_params.belowColor[1], m_params.belowColor[2], 1});
+            text(u8"−∞", x, y - 12);
+            quad(left + width + 4, left + width + 16, y, y + 10,
+                 {m_params.aboveColor[0], m_params.aboveColor[1], m_params.aboveColor[2], 1});
+            text(u8"+∞", left + width, y - 12);
             if (m_hasValues) {
-                quad(x, x + 12, y, y + 10,
-                     {m_params.belowColor[0], m_params.belowColor[1], m_params.belowColor[2], 1});
-                text(u8"−∞", x, y - 12);
-                quad(left + width + 4, left + width + 16, y, y + 10,
-                     {m_params.aboveColor[0], m_params.aboveColor[1], m_params.aboveColor[2], 1});
-                text(u8"+∞", left + width, y - 12);
                 if (m_range[0] == m_range[1]) {
                     quad(left, left + width, y, y + 10,
                          AnalysisColorStyle::GetMappedColor(m_range, m_params, m_range[0]));
@@ -163,13 +163,18 @@ class AnalysisLegend final : public vtkScalarBarActor {
                     }
                 }
             } else
-                text(u8"暂无有效测量值", x, y);
+                text(u8"暂无有效测量值", left, y);
             quad(x, x + 10, 0, 10,
                  {m_params.invalidColor[0], m_params.invalidColor[1], m_params.invalidColor[2], 1});
             text(u8"无效／未测", x + 14, 0);
         } else if (!m_hasValues) {
-            box(y, y + 16, {.5, .5, .5, 1});
             text(u8"暂无有效测量值", x + 18, y);
+            box(y - 20, y - 8,
+                {m_params.belowColor[0], m_params.belowColor[1], m_params.belowColor[2], 1});
+            text(u8"下侧无界段 → −∞", x + 18, y - 20);
+            box(y + 20, y + 32,
+                {m_params.aboveColor[0], m_params.aboveColor[1], m_params.aboveColor[2], 1});
+            text(u8"上侧无界段 → +∞", x + 18, y + 20);
         } else if (m_range[0] == m_range[1]) {
             box(y, y + 16, AnalysisColorStyle::GetMappedColor(m_range, m_params, m_range[0]));
             std::ostringstream label;

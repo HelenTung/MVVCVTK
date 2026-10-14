@@ -68,9 +68,10 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
                                                  const ThicknessDisplay &display,const ThicknessDisplayData* previous)
 {
     auto ramp=GetColorRamp(display);
+    AnalysisColorStyle::SetTailColors(ramp);
     if(display.mode==ThicknessDisplayMode::Tolerance) {
         ramp.tolerance=std::array<double,2>{record.archive.evaluation.lower,record.archive.evaluation.upper};
-        ramp.belowColor=display.toleranceBelowColor;ramp.aboveColor=display.toleranceAboveColor;
+        ramp.toleranceBelowColor=display.toleranceBelowColor;ramp.toleranceAboveColor=display.toleranceAboveColor;
         ramp.toleranceColor=display.toleranceWithinColor;
         ramp.segments.clear();
     }

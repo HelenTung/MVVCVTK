@@ -979,13 +979,27 @@ void Display()
         if(id<0 || static_cast<std::size_t>(id)>=mixed->size()) {hasMappedTolerance=false;break;}
         const auto& sample=(*mixed)[static_cast<std::size_t>(id)];
         const std::array<double,3> expected=sample.validity!=ThicknessValidity::Valid ? std::array<double,3>{128,128,128}
+            : sample.thickness<display.range[0] ? std::array<double,3>{163,74,199}
+            : sample.thickness>display.range[1] ? std::array<double,3>{214,74,166}
             : sample.thickness<record.archive.evaluation.lower ? std::array<double,3>{208,88,89}
             : sample.thickness>record.archive.evaluation.upper ? std::array<double,3>{83,114,188}
             : std::array<double,3>{97,179,113};
         double actual[3];toleranceColors->GetTuple(cell,actual);
         hasMappedTolerance &= std::equal(actual,actual+3,expected.begin());
     }
-    Check(hasMappedTolerance,"each sample ID maps to its exact VG tolerance or invalid RGB");
+    Check(hasMappedTolerance,"each sample ID maps to its exact finite tolerance, unbounded tail or invalid RGB");
+    auto distinctTails=tolerance;
+    distinctTails.range={1,3};distinctTails.colorBand.belowColor={0,1,1};distinctTails.colorBand.aboveColor={1,1,0};
+    const auto tailData=ThicknessOverlay::BuildData(record,*w.mesh,distinctTails);
+    bool sawLowerTail=false,sawUpperTail=false;
+    for(vtkIdType cell=0;cell<toleranceIds->GetNumberOfValues();++cell) {
+        const auto& sample=(*mixed)[static_cast<std::size_t>(toleranceIds->GetValue(cell))];
+        if(sample.validity!=ThicknessValidity::Valid)continue;
+        double actual[3];tailData.mesh->GetCellData()->GetScalars()->GetTuple(cell,actual);
+        if(sample.thickness==.5)sawLowerTail=actual[0]==0 && actual[1]==255 && actual[2]==255;
+        if(sample.thickness==3.5)sawUpperTail=actual[0]==255 && actual[1]==255 && actual[2]==0;
+    }
+    Check(sawLowerTail && sawUpperTail,"tolerance display retains independently configured constant tails");
     auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
     bool hasMatchingFootprints=surfaceIds && surfaceIds->GetNumberOfValues()==prepared.mesh->GetNumberOfCells();
     // 用原始三角形和归档重心坐标独立重建面片，检查显示未替换测量几何。

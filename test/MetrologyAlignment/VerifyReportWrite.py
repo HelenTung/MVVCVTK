@@ -191,11 +191,11 @@ def verify_report(json_path, csv_path, fixture=False):
         low, high = display["mappingRange"]; tolerance = deviation["parameters"]["tolerance"]
         def byte_color(rgb): return [math.floor(v*255+.5) for v in rgb]
         def color(value):
+            if value < low: return byte_color(parameters["belowColor"])
+            if value > high: return byte_color(parameters["aboveColor"])
             if parameters["useToleranceColors"] and tolerance:
                 a,b=tolerance
                 return byte_color(parameters["belowColor"]) if value<a else byte_color(parameters["aboveColor"]) if value>b else [60,180,95]
-            if value < low: return byte_color(parameters["belowColor"])
-            if value > high: return byte_color(parameters["aboveColor"])
             f=.5 if high==low else (value-low)/(high-low)
             if parameters["isReversed"]: f=1-f
             palette=parameters["palette"]

@@ -195,6 +195,28 @@ void Display(const char *imagePath) {
     }
     for (const auto count:seen) Check(count>30,"offscreen pixels contain each intended surface classification");
     if (imagePath) { auto writer=vtkSmartPointer<vtkPNGWriter>::New(); writer->SetFileName(imagePath); writer->SetInputConnection(capture->GetOutputPort()); writer->Write(); }
+    auto emptyField=std::make_shared<AlignmentDeviationField>(*field);
+    for(auto& sample:emptyField->samples)sample.state=AlignmentDeviationState::InvalidSource;
+    auto emptyResult=result;emptyResult.forward=emptyField;
+    auto emptyDisplay=automatic;emptyDisplay.belowColor={0,1,1};emptyDisplay.aboveColor={1,1,0};
+    const auto emptyProduct=AlignmentDeviationOverlay::Build(source,emptyResult,emptyDisplay);
+    Check(!emptyProduct->actualRange && !emptyProduct->hasValues,"all-invalid display does not fabricate an actual range");
+    overlay->SetProduct(emptyProduct);
+    for(int height:{300,96}) {
+        window->SetSize(800,height);window->Render();window->WaitForCompletion();capture->Modified();capture->Update();
+        auto* emptyPixels=vtkUnsignedCharArray::SafeDownCast(capture->GetOutput()->GetPointData()->GetScalars());
+        std::size_t belowPixels=0,abovePixels=0;
+        if(emptyPixels)for(vtkIdType i=0;i<emptyPixels->GetNumberOfTuples();++i) {
+            const auto* p=emptyPixels->GetPointer(i*emptyPixels->GetNumberOfComponents());
+            if(p[0]==0 && p[1]==255 && p[2]==255)++belowPixels;
+            if(p[0]==255 && p[1]==255 && p[2]==0)++abovePixels;
+        }
+        Check(belowPixels>10 && abovePixels>10,"all-invalid full and compact legends retain both configured unbounded tails");
+        if(imagePath) {
+            const auto path=std::string(imagePath)+".empty-"+std::to_string(height)+".png";
+            auto writer=vtkSmartPointer<vtkPNGWriter>::New();writer->SetFileName(path.c_str());writer->SetInputConnection(capture->GetOutputPort());writer->Write();
+        }
+    }
     overlay->DetachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems()==0,"detach releases visible surface, legend and marker");
     AlignmentDeviationDisplay huge=display;huge.range={0,1e308};huge.useToleranceColors=false;

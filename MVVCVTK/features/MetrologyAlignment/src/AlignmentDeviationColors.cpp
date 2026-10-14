@@ -12,7 +12,8 @@ AnalysisColorStyle::RampParams GetRampParameters(const AlignmentDeviationDisplay
   params.belowColor=display.belowColor;params.aboveColor=display.aboveColor;
   for(const auto& segment:display.segments)params.segments.push_back({segment.lower,segment.upper,
       static_cast<AnalysisColorStyle::RampMode>(segment.mode),segment.lowColor,segment.highColor});
-  if(display.useToleranceColors && tolerance){params.tolerance=tolerance;params.toleranceColor={60/255.0,180/255.0,95/255.0};}
+  if(display.useToleranceColors && tolerance){params.tolerance=tolerance;params.toleranceBelowColor=display.belowColor;
+      params.toleranceAboveColor=display.aboveColor;params.toleranceColor={60/255.0,180/255.0,95/255.0};}
   AnalysisColorStyle::SetTailColors(params);return params;
 }
 Ramp::Ramp(const AlignmentDeviationDisplay& display,const std::optional<std::array<double,2>>& tolerance)
