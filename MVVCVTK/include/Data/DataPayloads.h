@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -459,11 +460,21 @@ struct MeshAttribute final {
 };
 
 class SurfaceMeshPayload final : public IDataPayload {
+    friend class RoiService;
+    class RoiMeshIndex;
     struct MeshData final {
+        MeshData(std::vector<double> points,std::vector<std::uint64_t> faces,
+            std::vector<MeshAttribute> pointData,std::vector<MeshAttribute> cellData)
+            : vertices(std::move(points)),triangles(std::move(faces)),
+              pointAttributes(std::move(pointData)),cellAttributes(std::move(cellData)) {}
         std::vector<double> vertices;
         std::vector<std::uint64_t> triangles;
         std::vector<MeshAttribute> pointAttributes;
         std::vector<MeshAttribute> cellAttributes;
+        // 索引只由不可变网格载荷拥有；任务借用拓扑时另外持有该载荷快照。
+        mutable std::mutex roiIndexMutex;
+        mutable std::array<double,16> roiIndexTransform{};
+        mutable std::shared_ptr<const RoiMeshIndex> roiIndex;
     };
 public:
     SurfaceMeshPayload(
@@ -472,8 +483,8 @@ public:
         std::vector<MeshAttribute> pointAttributes = {},
         std::string coordinateFrame = "RAS",
         std::vector<MeshAttribute> cellAttributes = {})
-        : m_mesh(std::make_shared<const MeshData>(MeshData{
-            std::move(vertices), std::move(triangles), std::move(pointAttributes),std::move(cellAttributes)}))
+        : m_mesh(std::make_shared<const MeshData>(
+            std::move(vertices), std::move(triangles), std::move(pointAttributes),std::move(cellAttributes)))
         , m_coordinateFrame(std::move(coordinateFrame))
         , m_isValid(GetMeshValid())
     {

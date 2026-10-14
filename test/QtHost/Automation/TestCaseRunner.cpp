@@ -54,6 +54,7 @@
 #include <cstring>
 #include <limits>
 #include <set>
+#include <cmath>
 #include <vtkCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindowInteractor.h>
@@ -1614,6 +1615,36 @@ void CheckSharedRoi(TestWindow& window)
         Check(descriptor && descriptor->definition.nodes.front().primitive.origin==center
             && descriptor->definition.nodes.front().primitive.radius==3.0 && descriptor->metadata.group=="曲面测试","curve editor fields save the intended source-space geometry");
     }
+    std::array<double,3> voxelCenter=image->origin;
+    for(int row=0;row<3;++row)for(int axis=0;axis<3;++axis)
+        voxelCenter[row]+=image->direction[row*3+axis]*image->spacing[axis]*((image->extent[axis*2]+image->extent[axis*2+1])/2);
+    const double angle=2*std::acos(-1.)/180.,half=.3;
+    const std::array<double,16> rotated{half*std::cos(angle),-half*std::sin(angle),0,voxelCenter[0],
+        half*std::sin(angle),half*std::cos(angle),0,voxelCenter[1],0,0,half,voxelCenter[2],0,0,0,1};
+    for(const bool apply:{false,true}){
+        GetComplete(window,Send(window,"Roi","Begin",{{"name","旋转盒候选"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
+        auto* roiPanel=window.GetModule("Roi");roiPanel->Observe();
+        Check(!roiPanel->GetObservedState()["draftParametersChanged"].toBool(),"an untouched rotated box is not an edited parameter draft");
+        GetComplete(window,Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}}),"PreviewReady");
+        if(apply)GetComplete(window,Send(window,"Roi","ApplyOperation"),"Succeeded");
+        const auto candidate=roiPanel->getGrayScope().key;
+        auto* name=roiPanel->GetParameterEditor("SetDraft")->GetField("name")->findChild<QLineEdit*>("value");
+        Check(name!=nullptr,"ROI metadata field is available");name->setText("仅改名称的旋转结果");
+        Check(roiPanel->getGrayScope().key==candidate,"metadata editing preserves the operation candidate version");
+        const auto saved=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
+        const auto descriptor=window.GetSession()->GetRoiDescriptor(GetRef(saved));
+        Check(descriptor && descriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
+            && descriptor->metadata.name=="仅改名称的旋转结果","saving an unchanged rotated tool preserves the computed region before and after applying");
+    }
+    surface->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});createRegion();
+    GetComplete(window,Send(window,"Roi","Begin",{{"name","异步业务回填"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
+    const auto operation=Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}});
+    const auto pending=Send(window,"Roi","Commit");
+    Check(!window.GetRecords().GetRecord(pending)["isTerminal"].toBool(),"saving during the operation uses the pending completion path");
+    const auto asynchronous=GetComplete(window,pending,"Succeeded").value("result").toObject().value("roi");
+    GetComplete(window,operation,"PreviewReady");
+    Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
+        && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
 #endif
 }
 void StartSelfTest(TestWindow& window)

@@ -1,5 +1,6 @@
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
+#include <set>
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -137,5 +138,63 @@ void PrecisionAndLimits(){
     RoiMaskRequest block;block.region={{0,0,0},{9,9,9}};block.chunkBytes=3;Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Boundary,"block classification lost mixed membership across chunks");block.getCancelled=[](){return true;};Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Unavailable,"cancelled block was classified as an empty ROI");
 }
 
+void ProcessingRegression(){
+    Fixture f;
+    RoiComponentParams split;split.operation=RoiComponentOperation::Split;
+    auto ordered=f.Create({{{2,1,1},1},{{1,7,7},1},{{2,7,7},1}});
+    auto parts=f.service.SetOperation(f.Operation(ordered,split));
+    Require(parts.error==RoiError::None && parts.componentVoxelCounts==std::vector<std::size_t>{2,1}
+        && f.Read(parts.rois.front())->GetContains({1,14,21}),"compressed components changed lexicographic label order");
+    auto diagonal=f.Create({{{1,1,1},1},{{2,2,2},1}});
+    parts=f.service.SetOperation(f.Operation(diagonal,split));Require(parts.rois.size()==2,"face connectivity joined diagonal voxels");
+    split.connectivity=RoiConnectivity::Full;parts=f.service.SetOperation(f.Operation(diagonal,split));
+    Require(parts.error==RoiError::None && parts.componentVoxelCounts==std::vector<std::size_t>{2},"full connectivity separated corner neighbours");
+
+    // 独立的离散集合真值，包含空洞与源边界；开闭仅在最终输出裁回有效域。
+    using Cell=std::array<int,3>;std::set<Cell> input;std::vector<RoiVoxel> voxels;
+    for(int z=2;z<=6;++z)for(int y=2;y<=6;++y)for(int x=2;x<=6;++x)if(Cell{x,y,z}!=Cell{3,3,3} && Cell{x,y,z}!=Cell{5,4,4})input.insert({x,y,z});
+    input.insert({0,0,0});for(const auto& cell:input)voxels.push_back({cell,1});const auto original=f.Create(std::move(voxels));
+    const std::array<Cell,7> kernel{{{0,0,0},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+    const auto reference=[&](const std::set<Cell>& cells,bool dilate){std::set<Cell> result;
+        for(const auto& cell:cells){bool kept=true;for(const auto& offset:kernel){Cell point{cell[0]+offset[0],cell[1]+offset[1],cell[2]+offset[2]};
+            if(dilate)result.insert(point);else if(!cells.count(point))kept=false;}if(!dilate && kept)result.insert(cell);}return result;};
+    for(const auto operation:{RoiMorphologyOperation::Dilate,RoiMorphologyOperation::Erode,RoiMorphologyOperation::Open,RoiMorphologyOperation::Close}){
+        auto expected=reference(input,operation==RoiMorphologyOperation::Dilate || operation==RoiMorphologyOperation::Close);
+        if(operation==RoiMorphologyOperation::Open || operation==RoiMorphologyOperation::Close)expected=reference(expected,operation==RoiMorphologyOperation::Open);
+        auto request=f.Operation(original,RoiMorphologyParams{operation,1,RoiRadiusUnit::Voxels});request.output=RoiOutputMode::CreateNew;
+        const auto result=f.service.SetOperation(request);Require(result.error==RoiError::None && result.rois.size()==1,"interval morphology failed");
+        const auto query=f.Read(result.rois.front())->GetQuery();Require(query.query!=nullptr,"morphology query unavailable");
+        for(int z=0;z<9;++z)for(int y=0;y<9;++y)for(int x=0;x<9;++x)
+            Require(query.query->GetContains({double(x),double(y*2),double(z*3)})==bool(expected.count({x,y,z})),"interval morphology differs from discrete neighbourhood truth");
+    }
+
+    const DataRevisionRef gray{f.store.CreateDataEntityId(),1};std::vector<float> values(729,10);
+    for(int z=0;z<9;++z)for(int y=0;y<9;++y)values[4+9*(y+9*z)]=0;
+    values[7+9*(7+9*7)]=std::numeric_limits<float>::quiet_NaN();
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(float));std::memcpy(bytes->data(),values.data(),bytes->size());
+    DataTransaction transaction;transaction.outputs={{gray.entityId,0,DataTypes::imageGrid3D,{},
+        std::make_shared<const ImageGrid3DPayload>(f.grid,ImageValueType::Float32,1,bytes)}};
+    Require(f.store.SetDataCommit(transaction).status==DataCommitStatus::Succeeded,"gray growth fixture failed");
+    RoiOperationRequest grow;grow.source=gray;grow.output=RoiOutputMode::CreateNew;RoiThresholdParams parameters;parameters.mode=RoiThresholdMode::SeedGrow;parameters.range={10,10};parameters.seeds={{1,2,3},{1,2,3}};grow.params=parameters;
+    const auto before=f.store.GetDataGraph().commitId;
+    Require(f.service.SetOperation(grow).error==RoiError::InvalidGeometry && f.store.GetDataGraph().commitId==before,"unreachable invalid gray no longer rejects the permitted domain");
+    auto mask=std::make_shared<std::vector<std::uint8_t>>(729,1);(*mask)[7+9*(7+9*7)]=0;
+    transaction.outputs={{gray.entityId,1,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(f.grid,ImageValueType::Float32,1,bytes,mask)}};
+    Require(f.store.SetDataCommit(transaction).status==DataCommitStatus::Succeeded,"masked growth fixture failed");grow.source.generation=2;
+    const auto grown=f.service.SetOperation(grow);Require(grown.error==RoiError::None && f.Count(grown.rois.front())==4*9*9,"frontier growth crossed a gray barrier or duplicated seeds");
+    parameters.seeds={{7,14,21}};grow.params=parameters;Require(f.service.SetOperation(grow).error==RoiError::InvalidRequest,"invalid source-mask seed was accepted");
+
+    std::weak_ptr<const void> meshStorage;std::weak_ptr<const DataRevision> meshRevision;
+    {Fixture owner;const DataRevisionRef mesh{owner.store.CreateDataEntityId(),1};
+        auto payload=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{1,2,12,7,2,12,4,14,12},std::vector<std::uint64_t>{0,1,2});
+        meshStorage=payload->GetDataResources().front();DataTransaction data;data.outputs={{mesh.entityId,0,DataTypes::surfaceMesh,{},payload}};
+        Require(owner.store.SetDataCommit(data).status==DataCommitStatus::Succeeded,"mesh lifetime fixture failed");meshRevision=owner.store.GetDataGraph().view->GetData(mesh);
+        RoiOperationRequest request;request.source=owner.source;request.output=RoiOutputMode::CreateNew;RoiMeshParams selection;selection.mesh=mesh;selection.mode=RoiMeshMode::Layer;selection.outward=.5;request.params=selection;
+        const auto first=owner.service.SetOperation(request),second=owner.service.SetOperation(request);
+        Require(first.error==RoiError::None && second.error==RoiError::None && owner.Count(first.rois.front())==owner.Count(second.rois.front()) && owner.Count(first.rois.front())>0,"repeated mesh selection changed membership");
+    }
+    Require(meshStorage.expired() && meshRevision.expired(),"ROI index cache retained mesh data after its graph owner was destroyed");
 }
-int main() {try {Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
+
+}
+int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}

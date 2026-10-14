@@ -443,17 +443,12 @@ class Kernel final
             return;
         }
         auto source=original;for(auto& point:source)point=Add(point,m_geometry.origin);
-        const auto selected=m_work.evaluationRoi->GetTriangleSelection(source,0,
-            [&]{CheckWork(m_work);return false;});
-        if(selected.error!=RoiError::None) {
-            CheckWork(m_work);
-            throw Failure{selected.error==RoiError::TooLarge?ThicknessStatus::BudgetExceeded:ThicknessStatus::InvalidInput,
-                "ROI surface selection failed."};
-        }
         const auto u=Sub(original[1],original[0]),v=Sub(original[2],original[0]);
         const double uu=Dot(u,u),uv=Dot(u,v),vv=Dot(v,v),denom=uu*vv-uv*uv;
         if(denom<=0)return;
-        for(const auto& piece:selected.triangles) {
+        std::exception_ptr consumerFailure;
+        const auto selected=m_work.evaluationRoi->GetTriangleChunks(source,1024,[&](const auto& pieces) {
+          try {for(const auto& piece:pieces) {
             ThicknessDisplaySampling::Corners corners{},bary{};
             for(unsigned k=0;k<3;++k) {
                 corners[k]=Sub(piece[k],m_geometry.origin);
@@ -469,6 +464,15 @@ class Kernel final
                 for(unsigned k=0;k<3;++k){mapped.bary[k]={};for(unsigned a=0;a<3;++a)mapped.bary[k]=Add(mapped.bary[k],Scale(bary[a],patch.bary[k][a]));}
                 emit(mapped);
             });
+          }return true;
+          }catch(...){consumerFailure=std::current_exception();return false;}
+        },0,[&]{CheckWork(m_work);return false;});
+        // 保留采样预算、期限和取消的原始异常；不把已消费前缀当成完整选区。
+        if(consumerFailure)std::rethrow_exception(consumerFailure);
+        if(selected.error!=RoiError::None) {
+            CheckWork(m_work);
+            throw Failure{selected.error==RoiError::TooLarge?ThicknessStatus::BudgetExceeded:ThicknessStatus::InvalidInput,
+                "ROI surface selection failed."};
         }
     }
     void BuildSampling()

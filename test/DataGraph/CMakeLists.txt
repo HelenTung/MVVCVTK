@@ -63,3 +63,4 @@ target_include_directories(mvvcvtk_roi_operation_tests PRIVATE "${PROJECT_SOURCE
 SetTargetDefaults(mvvcvtk_roi_operation_tests)
 set_target_properties(mvvcvtk_roi_operation_tests PROPERTIES PROJECT_LABEL RoiOperationTests FOLDER "MVVCVTK/test/Automation/DataGraph")
 add_test(NAME DataGraph.RoiOperations COMMAND mvvcvtk_roi_operation_tests)
+add_test(NAME DataGraph.RoiProcessingRegression COMMAND mvvcvtk_roi_operation_tests processing)
