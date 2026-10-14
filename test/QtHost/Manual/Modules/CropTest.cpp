@@ -36,8 +36,10 @@ QString GetDisplayProblem(ModulePanel* panel)
     const auto primary = panel->GetSession()->GetRenderViewState({"primary-3d"});
     if (primary && (primary->viewMode == HostRenderMode::IsoSurface || primary->viewMode == HostRenderMode::CompositeIsoSurface)
         && !(primary->isoThreshold > primary->scalarRange[0] && primary->isoThreshold < primary->scalarRange[1]))
-        return QString("主三维显示阈值 %1 未落在当前灰度范围 (%2, %3) 内，无法提交裁剪预览。请在“视图显示”设置有效的显示等值阈值，或切换为体渲染。")
+        return QString("主三维显示等值阈值 %1 未落在当前灰度范围 (%2, %3) 内，无法提交裁剪预览。请在“显示与导航”设置有效的显示等值阈值，或切换为体渲染。")
             .arg(primary->isoThreshold).arg(primary->scalarRange[0]).arg(primary->scalarRange[1]);
+    if(primary && (primary->viewMode==HostRenderMode::IsoSurface || primary->viewMode==HostRenderMode::CompositeIsoSurface) && primary->material.opacity<=0)
+        return "主三维灰度等值面当前隐藏，裁切预览无法完成。请在“显示与导航”恢复三维体数据显示，或明确切换为体渲染；正式分析结果会保留。";
     return {};
 }
 void ResetInitialCamera(ModulePanel* panel, bool first)
@@ -315,6 +317,8 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
             panel->SetComplete(id,"Succeeded",{{"nodeId",QString::number(state.history.appliedHead)},{"message","历史与已呈现画面均已更新。"}});
         }
         QJsonObject disabled;
+        const auto displayProblem=GetDisplayProblem(panel);
+        if(!displayProblem.isEmpty())for(const auto* action:{"Start","Box","Plane","Sphere","Cylinder","KeepInside","RemoveInside"})disabled[action]=displayProblem;
         const bool busy=flow->pending||state.isPublishing||state.history.pendingRequestCount||state.history.isDragging;
         if(busy||!framesReady)for(const auto* action:{"Start","Previous","Next","Node","ResetPreview","FinishEditing","PruneSubtree","PruneDescendants","PruneOutsidePaths","BuildResult","SaveRoi"})disabled[action]="请等待当前操作与视图完成。";
         if(!history.documentId)for(const auto* action:{"Box","Plane","Sphere","Cylinder","Previous","Next","Node","BuildResult","SaveRoi","CloseDocument","RestoreSource"})disabled[action]="请先创建裁剪文档。";

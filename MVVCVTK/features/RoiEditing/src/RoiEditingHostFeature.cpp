@@ -1026,6 +1026,7 @@ public:
     std::shared_ptr<RegionProduct> m_displayProduct;
     std::future<RoiOperationResult> m_future;
     std::thread m_worker;
+    // 挂载上下文是临时参数；端口必须保留到异步任务停止，保证完成通知可达。
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_cancel;
     std::optional<RoiOperationRequest> m_pending,m_operation;

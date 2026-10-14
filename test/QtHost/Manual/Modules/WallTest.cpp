@@ -403,12 +403,21 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         QJsonArray reasons;for(std::size_t i=0;i<s.reasonCounts.size();++i)if(s.reasonCounts[i])reasons.append(QJsonArray{QString::number(i),QString::number(s.reasonCounts[i]),s.reasonAreas[i]});
         panel->GetStatisticsWidget()->SetTable({"有效性原因编号","样本数","面积 mm²"},reasons);
         panel->GetStatisticsWidget()->onInterval=[panel,feature,ref](double low,double high) {
+            if(panel->GetStatisticsWidget()->GetInteractionMode()=="编辑评价区间") {
+                panel->SetParameterPatch("SetEvaluation",{{"lower",low},{"upper",high}});return;
+            }
             const auto snapshot=feature->GetResult(ref);if(!snapshot || !snapshot->samples)return;
             for(std::size_t i=0;i<snapshot->samples->size();++i){const auto& sample=(*snapshot->samples)[i];
                 if(sample.validity==ThicknessValidity::Valid && panel->GetStatisticsWidget()->ContainsInterval(sample.thickness,low,high)) {
                     panel->SendAction("SelectSample",{{"result",GetRefText(ref)},{"sampleIndex",QString::number(i)}});return;}}
             if(panel->onMessage)panel->onMessage("所选区间没有可定位的有效壁厚样本。");
         };
+        panel->GetStatisticsWidget()->SetInteractionModes({"定位有效壁厚","编辑评价区间"});
+        const auto evaluationDraft=panel->GetActionParameters("SetEvaluation");
+        panel->GetStatisticsWidget()->SetMarkers(QJsonArray{
+            QJsonObject{{"label","评价下限"},{"key","lower"},{"editable",true},{"value",GetInputNumber(evaluationDraft,"lower",e.lower)}},
+            QJsonObject{{"label","评价上限"},{"key","upper"},{"editable",true},{"value",GetInputNumber(evaluationDraft,"upper",e.upper)}}});
+        panel->GetStatisticsWidget()->onMarker=[panel](const QString& key,double value){if(panel->GetStatisticsWidget()->GetInteractionMode()=="编辑评价区间")panel->SetParameterPatch("SetEvaluation",{{key,value}});};
         return true;
     };
     return panel;

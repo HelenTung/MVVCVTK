@@ -61,6 +61,17 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
 {
     auto* panel = new ModulePanel(context, "View", parent);
     panel->SetNotice("中央保留一个三维视窗和三个切片图。三维可切换等值面与体渲染；切片可用滚轮逐层查看，也可通过“切片位置”定位。");
+    auto hiddenOpacity=std::make_shared<std::pair<QString,double>>(QString(),1.);
+    panel->AttachAction("SetVolumeVisible",{{"graphRevision",""},{"isVisible",true}},[panel,hiddenOpacity](auto id,const auto& params) {
+        const auto input=panel->GetSession()->GetImageDescriptor();const auto view=panel->GetSession()->GetRenderViewState({"primary-3d"});
+        const auto ref=GetText(params,"graphRevision");
+        if(!input || !view || GetRefText(input->dataRevision)!=ref || GetRefText(view->dataRevision)!=ref)throw std::invalid_argument("此体数据未在当前三维视窗显示；显隐不会替换工作输入。");
+        const bool visible=GetBool(params,"isVisible");
+        if(!visible && view->material.opacity>0)*hiddenOpacity={ref,view->material.opacity};
+        HostViewSetRequest request;request.targetView.viewId="primary-3d";
+        request.opacity=visible?(view->material.opacity>0?view->material.opacity:hiddenOpacity->first==ref?hiddenOpacity->second:1.):0.;
+        panel->SendHost(id,std::move(request));
+    },TestPolicy::View);
     panel->AttachAction("Set", GetJson(R"({"viewId":"primary-3d","mode":null,"iso":null,"opacity":null,"quality":null,"axes":null,"windowLevel":null,"transfer":null})"),
         [panel](auto id, const auto& params) {
             HostViewSetRequest request;
