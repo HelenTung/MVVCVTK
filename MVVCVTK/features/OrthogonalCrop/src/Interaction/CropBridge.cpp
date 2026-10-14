@@ -255,6 +255,12 @@ public:
     bool SendBuildResult();
     bool GetLeaseReady() const;
 
+public:
+    friend class CropBridge;
+    std::vector<EffectiveBinding> inputBindings;
+    bool hasInputGesture=false;
+    bool needsInputCleanup=false;
+    void ApplyInputBindings(){if(inputBindings.empty()||hasInputGesture||m_hasDrag)return;m_boxWidget.SetInputBindings(inputBindings);m_planeWidget.SetInputBindings(inputBindings);m_curveWidget.SetInputBindings(inputBindings);}
 private:
     bool StartBuildTask(std::packaged_task<CropMaterializationCandidate()> task,
         CropBuildParams params, std::shared_ptr<std::atomic<bool>> isCancelled, CropCandidateCallback onComplete);
@@ -361,6 +367,9 @@ CropBridge::Impl::Impl()
     m_planeSource.channelId = bridgeId + ":Plane";
     m_curveSource.channelId = bridgeId + ":Curve";
     m_curveWidget.SetCallback([this](CropInteractionPhase phase){OnCurveWidget(phase);});
+    m_curveWidget.SetRenderCallback([this] {
+        if(GetLeaseReady()&&m_referenceService)(void)m_referenceService->SetRenderNeeded();
+    });
     m_curveWidget.SetContextGate([this] {
         if(!GetLeaseReady()||!m_isActive||m_buildTask||m_sourceGate->isPending)return false;
         for(const auto& result:m_tree.GetResults())if(result.status==CropResultStatus::Building)return false;
@@ -906,6 +915,7 @@ bool CropBridge::Impl::SetCropMode(const CropRemovalMode mode)
 
 void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 {
+    struct UpdateBindings { Impl& p; bool end; ~UpdateBindings(){if(end){if(!p.needsInputCleanup)p.hasInputGesture=false;p.ApplyInputBindings();}} }; UpdateBindings projection{*this,phase==CropInteractionPhase::Released};
     SetGeometryViews();
     if (!GetLeaseReady()) {
         return;
@@ -957,6 +967,7 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 
 void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
 {
+    struct UpdateBindings { Impl& p; bool end; ~UpdateBindings(){if(end){if(!p.needsInputCleanup)p.hasInputGesture=false;p.ApplyInputBindings();}} }; UpdateBindings projection{*this,phase==CropInteractionPhase::Released};
     SetGeometryViews();
     if (!GetLeaseReady()) {
         return;
@@ -1050,6 +1061,7 @@ void CropBridge::Impl::SetGeometryViews()
                     return;
                 }
                 auto overlay=std::make_shared<CropGeometryOverlay>(target.role);
+                overlay->SetSphereEditing(m_curveWidget.GetEnabled());
                 overlay->SetOperation(*operation,m_input.inputModelBounds);
                 candidate.push_back({target,overlay});
                 if (!target.overlays->AttachOverlay(overlay)) {
@@ -1060,6 +1072,7 @@ void CropBridge::Impl::SetGeometryViews()
             m_geometryBindings=std::move(candidate);
         }
         for (const auto& binding:m_geometryBindings) {
+            binding.overlay->SetSphereEditing(m_curveWidget.GetEnabled());
             binding.overlay->SetOperation(*operation,m_input.inputModelBounds);
             (void)binding.target.view->SetRenderNeeded();
         }
@@ -1070,6 +1083,7 @@ void CropBridge::Impl::SetGeometryViews()
 }
 void CropBridge::Impl::OnCurveWidget(CropInteractionPhase phase)
 {
+    struct UpdateBindings { Impl& p; bool end; ~UpdateBindings(){if(end){if(!p.needsInputCleanup)p.hasInputGesture=false;p.ApplyInputBindings();}} }; UpdateBindings projection{*this,phase==CropInteractionPhase::Released};
     SetGeometryViews();
     if(!GetLeaseReady())return;
     if(!m_isActive||(m_geometryType!=CropShape::Sphere&&m_geometryType!=CropShape::Cylinder)||m_removalMode==CropRemovalMode::None) {
@@ -1687,8 +1701,9 @@ bool CropBridge::Impl::SetInteraction(
     const InteractionSource& source,
     const bool isInteracting)
 {
-    return m_referenceService
-        && m_referenceService->SetInteracting(source, isInteracting);
+    const bool ok=m_referenceService && m_referenceService->SetInteracting(source, isInteracting);
+    if(!ok&&!isInteracting&&hasInputGesture&&!(source==m_commitSource))needsInputCleanup=true;
+    return ok;
 }
 
 bool CropBridge::Impl::ClearInteractions()
@@ -1924,3 +1939,32 @@ std::optional<std::vector<CropOpItem>> CropBridge::Impl::GetCropOperations() con
 std::optional<std::vector<CropOpItem>> CropBridge::GetCropOperations() const {
     return m_impl ? m_impl->GetCropOperations():std::nullopt;
 }
+
+bool CropBridge::GetInputGestureActive() const {return m_impl->hasInputGesture||m_impl->needsInputCleanup;}
+bool CropBridge::GetInputAccepted(const InteractionEvent& event) const {
+    const auto& p=*m_impl;
+    if(!p.GetOwnerReady()||!p.m_isActive||!p.GetLeaseReady())return false;
+    return p.m_geometryType==CropShape::Box?p.m_boxWidget.GetInputAccepted(event.x,event.y):p.m_geometryType==CropShape::Plane?p.m_planeWidget.GetInputAccepted(event.x,event.y):p.m_curveWidget.GetInputAccepted(event.x,event.y);
+}
+InteractionResult CropBridge::SendWidgetInput(const InteractionEvent& event) {
+    auto& p=*m_impl;if(!p.GetOwnerReady())return {true,true,false,InteractionFailureReason::StateRejected};
+    if(event.eventKind==InteractionEventKind::Cancel) {
+        if(!p.hasInputGesture&&!p.needsInputCleanup&&!p.m_hasDrag)return {true,true,true};
+        // 所有 source 都尝试清理；拒绝时保留捕获和恢复快照，供下一次取消重试。
+        bool ok=p.SetInteraction(p.m_boxSource,false);
+        ok=p.SetInteraction(p.m_planeSource,false)&&ok;
+        ok=p.SetInteraction(p.m_curveSource,false)&&ok;
+        if(!ok)return {true,true,false,InteractionFailureReason::CleanupRejected};
+        p.needsInputCleanup=false;p.m_hasDrag=false;p.m_dragStart.reset();
+        if(p.m_geometryType==CropShape::Box)p.m_boxWidget.CancelGesture();
+        else if(p.m_geometryType==CropShape::Plane)p.m_planeWidget.CancelGesture();else p.m_curveWidget.CancelGesture();
+        p.hasInputGesture=false;p.ApplyInputBindings();
+        return {true,true,true};
+    }
+    if(event.eventKind==InteractionEventKind::PrimaryPress||event.eventKind==InteractionEventKind::SecondaryPress||event.eventKind==InteractionEventKind::MiddlePress) {
+        p.hasInputGesture=true;
+        if(p.m_geometryType==CropShape::Box)p.m_boxWidget.StartGesture();else if(p.m_geometryType==CropShape::Plane)p.m_planeWidget.StartGesture();else p.m_curveWidget.StartGesture();
+    }
+    return {true,false,true};
+}
+void CropBridge::SetInputBindings(const std::vector<EffectiveBinding>& values){m_impl->inputBindings=values;m_impl->ApplyInputBindings();}

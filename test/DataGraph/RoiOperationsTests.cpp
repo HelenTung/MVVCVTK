@@ -1,5 +1,6 @@
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
+#include <set>
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -73,28 +74,28 @@ void ShapesAndTriangles() {
     for (const auto& piece:selection.triangles) for (const auto& point:piece) Require(std::abs(point[2]-12)<1e-12,"ROI selection displaced the measurement surface");
 }
 void Archive() {
-    Fixture f;auto a=f.Create({{{2,3,4},1},{{6,7,8},2}});auto archive=RoiService::GetArchive(f.store.GetDataGraph(),a.revision,"ct",roiCopyLimit);
+    Fixture f;auto a=f.Create({{{2,3,4},1},{{6,7,8},2}});auto archive=RoiService::GetArchive(f.store.GetDataGraph(),a.revision,"ct");
     Require(archive.error==RoiError::None && archive.archive && archive.archive->voxels.size()==1 && !archive.archive->nodes[0].primitive.voxels,"sparse archive retained a process pointer or lost its data");
-    Fixture other;auto restored=other.service.LoadArchive(*archive.archive,"ct",other.source,0,roiCopyLimit);Require(restored.error==RoiError::None && restored.roi && other.Count(*restored.roi)==2,"sparse archive did not restore exact membership");
+    Fixture other;auto restored=other.service.LoadArchive(*archive.archive,"ct",other.source,0);Require(restored.error==RoiError::None && restored.roi && other.Count(*restored.roi)==2,"sparse archive did not restore exact membership");
     const DataRevisionRef labels{f.store.CreateDataEntityId(),1};auto values=std::make_shared<std::vector<std::uint64_t>>(729,0);(*values)[364]=0x100000001ULL;
     DataTransaction tx;tx.outputs={{labels.entityId,0,DataTypes::labelMap3D,{},std::make_shared<const LabelMap3DPayload>(f.grid,std::shared_ptr<const std::vector<std::uint64_t>>(values))}};Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"wide labels failed");
     RoiPrimitive primitive;primitive.shape=RoiShape::MaskReference;primitive.mask=labels;primitive.labels={0x100000001ULL};RoiRequest request;request.metadata.name="wide";request.definition={f.source,{{RoiNodeKind::Primitive,primitive}}};auto made=f.service.SetRoi(request);
-    archive=RoiService::GetArchive(f.store.GetDataGraph(),made.roi->revision,"ct",roiCopyLimit);Require(archive.archive && archive.archive->masks[0].values[364]==0x100000001ULL,"archive truncated a 64-bit label");
-    const auto catalog=other.service.GetDescriptors(other.store.GetDataGraph(),true);restored=other.service.LoadArchive(*archive.archive,"ct",other.source,catalog.front().catalogRevision,roiCopyLimit);
+    archive=RoiService::GetArchive(f.store.GetDataGraph(),made.roi->revision,"ct");Require(archive.archive && archive.archive->masks[0].values[364]==0x100000001ULL,"archive truncated a 64-bit label");
+    const auto catalog=other.service.GetDescriptors(other.store.GetDataGraph(),true);restored=other.service.LoadArchive(*archive.archive,"ct",other.source,catalog.front().catalogRevision);
     Require(restored.roi && other.Count(*restored.roi)==1,"restored wide label selector changed its membership");
 }
 void ArchiveBundleAndTransform() {
     Fixture f;auto input=f.Create({{{1,1,1},1},{{6,6,6},1}},std::string(256,'A'));RoiComponentParams split;split.operation=RoiComponentOperation::Split;
     const auto parts=f.service.SetOperation(f.Operation(input,split));Require(parts.error==RoiError::None && parts.rois.size()==2,"long-name split failed");
     std::vector<RoiArchiveSelection> selection;for(const auto& roi:parts.rois){Require(roi.metadata.name.size()<=256,"split name exceeds the metadata limit");selection.push_back({roi.revision,"ct"});}
-    const auto saved=RoiService::GetArchiveBundle(f.store.GetDataGraph(),selection,roiCopyLimit);
+    const auto saved=RoiService::GetArchiveBundle(f.store.GetDataGraph(),selection);
     Require(saved.archive && saved.archive->voxels.size()==1 && saved.archive->rois.size()==2,"bundle duplicated a shared split payload");
     Fixture target;const auto before=target.store.GetDataGraph().commitId;
-    const auto restored=target.service.LoadArchiveBundle(*saved.archive,{{"ct",target.source}},roiCopyLimit);
+    const auto restored=target.service.LoadArchiveBundle(*saved.archive,{{"ct",target.source}});
     Require(restored.error==RoiError::None && restored.rois.size()==2 && restored.revisionMapping.size()==2 && target.store.GetDataGraph().commitId==before+1,"bundle restore was not one atomic mapping transaction");
     Require(target.Count(restored.rois[0])==1 && target.Count(restored.rois[1])==1 && restored.rois[0].definition.nodes[0].primitive.voxels==restored.rois[1].definition.nodes[0].primitive.voxels,"bundle restore lost shared membership");
     auto bad=*saved.archive;bad.rois.back().voxels[0].sharedPayload=1234;const auto stable=target.store.GetDataGraph().commitId;
-    Require(target.service.LoadArchiveBundle(bad,{{"ct",target.source}},roiCopyLimit).error!=RoiError::None && target.store.GetDataGraph().commitId==stable,"invalid bundle published a partial batch");
+    Require(target.service.LoadArchiveBundle(bad,{{"ct",target.source}}).error!=RoiError::None && target.store.GetDataGraph().commitId==stable,"invalid bundle published a partial batch");
     RoiPrimitive sphere;sphere.shape=RoiShape::Sphere;sphere.origin={4,8,12};sphere.radius=.6;RoiRequest create;create.metadata.name="sphere";create.definition={f.source,{{RoiNodeKind::Primitive,sphere}}};const auto roi=f.service.SetRoi(create);
     RoiTransformParams transform;transform.sourceToTarget[3]=1.1;auto request=f.Operation(*roi.roi,transform);request.output=RoiOutputMode::CreateNew;
     const auto moved=f.service.SetOperation(request);Require(moved.error==RoiError::None && f.Read(moved.rois[0])->GetContains({5.1,8,12}) && !f.Read(moved.rois[0])->GetContains({4,8,12}),"analytic transform silently rasterized a sub-voxel sphere");
@@ -102,7 +103,7 @@ void ArchiveBundleAndTransform() {
     const auto prepared=RoiService::GetOperation(f.store.GetDataGraph(),f.Operation(input,RoiClearParams{}));auto changed=f.Operation(input,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels});
     Require(f.service.SetOperationCommit(changed,prepared).error==RoiError::InvalidRequest,"prepared output was submitted with different operation parameters");
     transform.rasterize=true;request.params=transform;request.output=RoiOutputMode::CreateNew;Require(f.service.SetOperation(request).error==RoiError::None,"explicit voxel resampling failed");
-    auto archive=RoiService::GetArchive(f.store.GetDataGraph(),moved.rois[0].revision,"ct",0);Require(archive.archive && archive.archive->provenance.operationId=="transform-analytic" && !archive.archive->provenance.canonicalParameters.empty(),"automatic archive budget or operation parameters were lost");
+    auto archive=RoiService::GetArchive(f.store.GetDataGraph(),moved.rois[0].revision,"ct");Require(archive.archive && archive.archive->provenance.operationId=="transform-analytic" && !archive.archive->provenance.canonicalParameters.empty(),"archive operation provenance or parameters were lost");
 }
 
 void MeshAndProjection(){
@@ -113,6 +114,11 @@ void MeshAndProjection(){
     const auto made=f.service.SetOperation(request);Require(made.error==RoiError::None && f.Count(made.rois[0])==124 && !f.Read(made.rois[0])->GetContains({4,8,12}),"nested closed shells lost their cavity");
     const DataRevisionRef open{f.store.CreateDataEntityId(),1};triangles.resize(3);tx={};tx.outputs.push_back({open.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(points,triangles)});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"open mesh fixture failed");params.mesh=open;request.params=params;const auto before=f.store.GetDataGraph().commitId;Require(f.service.SetOperation(request).error==RoiError::InvalidGeometry && f.store.GetDataGraph().commitId==before,"open surface was accepted as interior");
     params.mode=RoiMeshMode::Layer;params.inward=1;params.outward=1;request.params=params;Require(f.service.SetOperation(request).error==RoiError::None,"symmetric layer rejected an open surface");
+    const DataRevisionRef scaledMesh{f.store.CreateDataEntityId(),1};tx={};tx.outputs.push_back({scaledMesh.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(std::vector<double>{0,0,4,10,0,4,0,10,4},std::vector<std::uint64_t>{0,1,2})});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"scaled layer fixture failed");
+    params={};params.mesh=scaledMesh;params.mode=RoiMeshMode::Layer;params.meshToSource[0]=2;params.meshToSource[5]=2;params.meshToSource[10]=3;params.outward=1.5;request.params=params;
+    const auto layer=f.service.SetOperation(request);Require(layer.error==RoiError::None && f.Read(layer.rois[0])->GetContains({4,8,12}) && !f.Read(layer.rois[0])->GetContains({4,8,9}),"layer distance used mesh coordinates or nearest vertices");
+    params.outward=4;request.params=params;const auto thick=f.service.SetOperation(request);Require(thick.error==RoiError::None && f.Read(thick.rois[0])->GetContains({4,8,9}),"thickness-only change reused an obsolete selection");
+    params.outward=1.5;params.meshToSource[11]=3;request.params=params;const auto shifted=f.service.SetOperation(request);Require(shifted.error==RoiError::None && f.Read(shifted.rois[0])->GetContains({4,8,15}) && !f.Read(shifted.rois[0])->GetContains({4,8,12}),"mesh transform did not invalidate the spatial index");
     RoiPrimitive projected;projected.shape=RoiShape::ProjectedContour;projected.contours={{{-1,-1},{1,-1},{0,1}}};projected.depth={1,10};projected.viewToClip={};Require(RoiEvaluator::GetPreview(f.store.GetDataGraph(),{f.source,{{RoiNodeKind::Primitive,projected}}}).error==RoiError::InvalidGeometry,"singular frozen projection was accepted");
     RoiPrimitive contour;contour.shape=RoiShape::Contour;contour.contours={{{0,0},{1,1},{2,2}}};Require(RoiEvaluator::GetPreview(f.store.GetDataGraph(),{f.source,{{RoiNodeKind::Primitive,contour}}}).error==RoiError::InvalidGeometry,"collinear contour was accepted");
 }
@@ -120,17 +126,75 @@ void MeshAndProjection(){
 void PrecisionAndLimits(){
     Fixture f;RoiPrimitive ellipse;ellipse.shape=RoiShape::EllipticCylinder;ellipse.localToSource={.03,0,0,4.2,0,.05,0,8.3,0,0,1,12,0,0,0,1};ellipse.depth={-.1,.1};
     auto read=RoiEvaluator::GetPreview(f.store.GetDataGraph(),{f.source,{{RoiNodeKind::Primitive,ellipse}}});Require(read.roi && read.roi->GetContains({4.2,8.3,12}) && !read.roi->GetContains({4.24,8.3,12}),"finite ellipse predicate is invalid");
-    const std::array<std::array<double,3>,3> triangle{{{1,2,12},{7,2,12},{4,14,12}}};const auto pieces=read.roi->GetTriangleSelection(triangle,roiCopyLimit);
+    const std::array<std::array<double,3>,3> triangle{{{1,2,12},{7,2,12},{4,14,12}}};const auto pieces=read.roi->GetTriangleSelection(triangle);
     Require(pieces.error==RoiError::None && !pieces.triangles.empty() && pieces.boundaryTolerance<=.03/4,"sub-voxel ellipse wholly inside a triangle was missed");
     double area=0;for(const auto& piece:pieces.triangles){const auto& a=piece[0];const auto& b=piece[1];const auto& c=piece[2];area+=std::abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))*.5;}
     Require(area>.003 && area<.0065,"triangle sampling counted both sides of a shared sub-cell face");
-    auto a=f.Create({{{4,4,4},1}});auto request=f.Operation(a,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels});request.maxWorkingBytes=1;const auto before=f.store.GetDataGraph().commitId;
-    Require(f.service.SetOperation(request).error==RoiError::TooLarge && f.store.GetDataGraph().commitId==before,"resource failure changed the original ROI");
-    request.maxWorkingBytes=0;request.deadline=std::chrono::steady_clock::now();Require(f.service.SetOperation(request).error==RoiError::DeadlineExceeded,"expired ROI deadline was ignored");
+    auto a=f.Create({{{4,4,4},1}});auto request=f.Operation(a,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels});request.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,-1,RoiRadiusUnit::Voxels};const auto before=f.store.GetDataGraph().commitId;
+    Require(f.service.SetOperation(request).error==RoiError::InvalidRequest && f.store.GetDataGraph().commitId==before,"invalid morphology changed the original ROI");
+    request.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};request.deadline=std::chrono::steady_clock::now();Require(f.service.SetOperation(request).error==RoiError::DeadlineExceeded,"expired ROI deadline was ignored");
     RoiThresholdParams grow;grow.mode=RoiThresholdMode::SeedGrow;grow.range={10,10};request=f.Operation(a,grow);Require(f.service.SetOperation(request).error==RoiError::InvalidRequest,"missing seed became a whole threshold domain");
     grow.seeds={{4,8,12}};request.params=grow;const auto grown=f.service.SetOperation(request);Require(grown.error==RoiError::None && f.Count(grown.rois[0])==1,"seed growth escaped its fixed permitted ROI");
-    RoiMaskRequest block;block.region={{0,0,0},{9,9,9}};block.maxBytes=3;Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Boundary,"block classification lost mixed membership across chunks");block.getCancelled=[](){return true;};Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Unavailable,"cancelled block was classified as an empty ROI");
+    RoiMaskRequest block;block.region={{0,0,0},{9,9,9}};block.chunkBytes=3;Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Boundary,"block classification lost mixed membership across chunks");block.getCancelled=[](){return true;};Require(f.Read(a)->GetBlockClassification(block).classification==RoiBlockClassification::Unavailable,"cancelled block was classified as an empty ROI");
+}
+
+void ProcessingRegression(){
+    Fixture f;
+    RoiComponentParams split;split.operation=RoiComponentOperation::Split;
+    auto ordered=f.Create({{{2,1,1},1},{{1,7,7},1},{{2,7,7},1}});
+    auto parts=f.service.SetOperation(f.Operation(ordered,split));
+    Require(parts.error==RoiError::None && parts.componentVoxelCounts==std::vector<std::size_t>{2,1}
+        && f.Read(parts.rois.front())->GetContains({1,14,21}),"compressed components changed lexicographic label order");
+    auto diagonal=f.Create({{{1,1,1},1},{{2,2,2},1}});
+    parts=f.service.SetOperation(f.Operation(diagonal,split));Require(parts.rois.size()==2,"face connectivity joined diagonal voxels");
+    split.connectivity=RoiConnectivity::Full;parts=f.service.SetOperation(f.Operation(diagonal,split));
+    Require(parts.error==RoiError::None && parts.componentVoxelCounts==std::vector<std::size_t>{2},"full connectivity separated corner neighbours");
+
+    // 独立的离散集合真值，包含空洞与源边界；开闭仅在最终输出裁回有效域。
+    using Cell=std::array<int,3>;std::set<Cell> input;std::vector<RoiVoxel> voxels;
+    for(int z=2;z<=6;++z)for(int y=2;y<=6;++y)for(int x=2;x<=6;++x)if(Cell{x,y,z}!=Cell{3,3,3} && Cell{x,y,z}!=Cell{5,4,4})input.insert({x,y,z});
+    input.insert({0,0,0});for(const auto& cell:input)voxels.push_back({cell,1});const auto original=f.Create(std::move(voxels));
+    const std::array<Cell,7> kernel{{{0,0,0},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+    const auto reference=[&](const std::set<Cell>& cells,bool dilate){std::set<Cell> result;
+        for(const auto& cell:cells){bool kept=true;for(const auto& offset:kernel){Cell point{cell[0]+offset[0],cell[1]+offset[1],cell[2]+offset[2]};
+            if(dilate)result.insert(point);else if(!cells.count(point))kept=false;}if(!dilate && kept)result.insert(cell);}return result;};
+    for(const auto operation:{RoiMorphologyOperation::Dilate,RoiMorphologyOperation::Erode,RoiMorphologyOperation::Open,RoiMorphologyOperation::Close}){
+        auto expected=reference(input,operation==RoiMorphologyOperation::Dilate || operation==RoiMorphologyOperation::Close);
+        if(operation==RoiMorphologyOperation::Open || operation==RoiMorphologyOperation::Close)expected=reference(expected,operation==RoiMorphologyOperation::Open);
+        auto request=f.Operation(original,RoiMorphologyParams{operation,1,RoiRadiusUnit::Voxels});request.output=RoiOutputMode::CreateNew;
+        const auto result=f.service.SetOperation(request);Require(result.error==RoiError::None && result.rois.size()==1,"interval morphology failed");
+        const auto query=f.Read(result.rois.front())->GetQuery();Require(query.query!=nullptr,"morphology query unavailable");
+        for(int z=0;z<9;++z)for(int y=0;y<9;++y)for(int x=0;x<9;++x)
+            Require(query.query->GetContains({double(x),double(y*2),double(z*3)})==bool(expected.count({x,y,z})),"interval morphology differs from discrete neighbourhood truth");
+    }
+
+    const DataRevisionRef gray{f.store.CreateDataEntityId(),1};std::vector<float> values(729,10);
+    for(int z=0;z<9;++z)for(int y=0;y<9;++y)values[4+9*(y+9*z)]=0;
+    values[7+9*(7+9*7)]=std::numeric_limits<float>::quiet_NaN();
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(float));std::memcpy(bytes->data(),values.data(),bytes->size());
+    DataTransaction transaction;transaction.outputs={{gray.entityId,0,DataTypes::imageGrid3D,{},
+        std::make_shared<const ImageGrid3DPayload>(f.grid,ImageValueType::Float32,1,bytes)}};
+    Require(f.store.SetDataCommit(transaction).status==DataCommitStatus::Succeeded,"gray growth fixture failed");
+    RoiOperationRequest grow;grow.source=gray;grow.output=RoiOutputMode::CreateNew;RoiThresholdParams parameters;parameters.mode=RoiThresholdMode::SeedGrow;parameters.range={10,10};parameters.seeds={{1,2,3},{1,2,3}};grow.params=parameters;
+    const auto before=f.store.GetDataGraph().commitId;
+    Require(f.service.SetOperation(grow).error==RoiError::InvalidGeometry && f.store.GetDataGraph().commitId==before,"unreachable invalid gray no longer rejects the permitted domain");
+    auto mask=std::make_shared<std::vector<std::uint8_t>>(729,1);(*mask)[7+9*(7+9*7)]=0;
+    transaction.outputs={{gray.entityId,1,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(f.grid,ImageValueType::Float32,1,bytes,mask)}};
+    Require(f.store.SetDataCommit(transaction).status==DataCommitStatus::Succeeded,"masked growth fixture failed");grow.source.generation=2;
+    const auto grown=f.service.SetOperation(grow);Require(grown.error==RoiError::None && f.Count(grown.rois.front())==4*9*9,"frontier growth crossed a gray barrier or duplicated seeds");
+    parameters.seeds={{7,14,21}};grow.params=parameters;Require(f.service.SetOperation(grow).error==RoiError::InvalidRequest,"invalid source-mask seed was accepted");
+
+    std::weak_ptr<const void> meshStorage;std::weak_ptr<const DataRevision> meshRevision;
+    {Fixture owner;const DataRevisionRef mesh{owner.store.CreateDataEntityId(),1};
+        auto payload=std::make_shared<const SurfaceMeshPayload>(std::vector<double>{1,2,12,7,2,12,4,14,12},std::vector<std::uint64_t>{0,1,2});
+        meshStorage=payload->GetDataResources().front();DataTransaction data;data.outputs={{mesh.entityId,0,DataTypes::surfaceMesh,{},payload}};
+        Require(owner.store.SetDataCommit(data).status==DataCommitStatus::Succeeded,"mesh lifetime fixture failed");meshRevision=owner.store.GetDataGraph().view->GetData(mesh);
+        RoiOperationRequest request;request.source=owner.source;request.output=RoiOutputMode::CreateNew;RoiMeshParams selection;selection.mesh=mesh;selection.mode=RoiMeshMode::Layer;selection.outward=.5;request.params=selection;
+        const auto first=owner.service.SetOperation(request),second=owner.service.SetOperation(request);
+        Require(first.error==RoiError::None && second.error==RoiError::None && owner.Count(first.rois.front())==owner.Count(second.rois.front()) && owner.Count(first.rois.front())>0,"repeated mesh selection changed membership");
+    }
+    Require(meshStorage.expired() && meshRevision.expired(),"ROI index cache retained mesh data after its graph owner was destroyed");
 }
 
 }
-int main() {try {Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}

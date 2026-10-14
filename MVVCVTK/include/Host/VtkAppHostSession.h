@@ -4,7 +4,7 @@
 #include "Data/RoiTypes.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/Types/HostSessionTypes.h"
-#include "Interaction/InputBindings.h"
+#include "Interaction/InteractionController.h"
 
 #include <memory>
 #include <cstddef>
@@ -30,9 +30,7 @@ public:
 
     // 幂等构建；首次成功后复用既有服务和窗口，空 renderViews 或任一构建步骤失败返回 false。
     bool BuildSession();
-    // 只读取导航模块声明的操作并保存值快照；可在构建前或交互空闲时调用。
-    // 拒绝时保留原来的有效绑定。
-    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
+    std::shared_ptr<InteractionController> GetInteractionController();
     // 仅 Running/HostDriven/owner thread。只提交，不绘制；业务 callback
     // 在提交完成阶段兑现，不再等待窗口绘制。重入返回 Deferred。
     HostUpdateResult SendUpdates();
@@ -41,8 +39,6 @@ public:
     HostRenderResult SendRender(const HostRenderRequest& request);
     // 把主线程 TimerEvent pump 绑定到指定视图；重复调用会替换旧 timer handler。
     bool AttachTimer(const HostTimerConfig& config);
-    // 替换 standalone 按键 observer；主体热键直接进入统一请求路由。
-    bool AttachHotkeys(const HostHotkeyConfig& config);
     // HostDriven 的更新/绘制回调期间拒绝 Attach/Detach，避免改变正在遍历的拓扑。
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
@@ -109,14 +105,14 @@ public:
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
-    // 归档同步复制按显式预算或当前可用内存检查；0 表示自动预算。
-    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection,std::size_t maxBytes=0);
-    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings,std::size_t maxBytes=0);
-    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey,
-        std::size_t maxBytes = 0);
+    // 大载荷先规划再逐批读取；完整便捷入口不设置 ROI 总量预算。
+    RoiArchiveReadResult GetRoiArchiveReader(const std::vector<RoiArchiveSelection>& selection);
+    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings);
+    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection);
+    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings);
+    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey);
     RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision,
-        std::size_t maxBytes = 0);
+        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
 
     // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();

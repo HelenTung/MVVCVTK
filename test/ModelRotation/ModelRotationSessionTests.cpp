@@ -26,7 +26,7 @@
 #include <stdexcept>
 #include <thread>
 
-#define VERIFY(value) do { if (!(value)) throw std::runtime_error(#value); } while(false)
+#define VERIFY(value) do { if (!(value)) throw std::runtime_error(std::string(#value)+" at line "+std::to_string(__LINE__)); } while(false)
 
 // 使用真实 OpenGL 绘制，仅替换平台 timer/event loop，便于确定性泵送原生事件。
 class RotationInteractor final : public vtkRenderWindowInteractor {
@@ -259,8 +259,8 @@ void TestRotationSession()
     send(HostInputKind::PrimaryPress,170,128);
     const auto gestureToken = port->GetTransformState()->editToken;
     VERIFY(gestureToken != 0);
-    VERIFY(session.SetInputBindings(ConfigurableInputBindings{})
-        == InputBindingStatus::Busy);
+    VERIFY(session.GetInteractionController()->ImportBindings(ConfigurableInputBindings{}).status
+        == InputBindingStatus::Applied);
     const auto renderEpoch = session.GetSceneViewState({"rotation-0"})->renderedEpoch;
     for (int index=0;index<1000;++index) send(HostInputKind::PointerMove,180,130);
     VERIFY(port->GetTransformState()->hasPending);
@@ -287,12 +287,12 @@ void TestRotationSession()
         std::string(ModelRotationBindingKeys::EnabledDrag),
         InputBindingOverride::Replace,
         { InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 });
-    VERIFY(feature->SetInputBindings(rotationBindings)
+    VERIFY(session.GetInteractionController()->ImportBindings(rotationBindings).status
         == InputBindingStatus::Applied);
     send(HostInputKind::SecondaryPress,170,128,false,false,true);
     VERIFY(port->GetTransformState()->editToken != 0);
-    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
-        == InputBindingStatus::Busy);
+    VERIFY(session.GetInteractionController()->ImportBindings(ConfigurableInputBindings{}).status
+        == InputBindingStatus::Applied);
     send(HostInputKind::PointerMove,128,180,false,false,true);
     tick();
     send(HostInputKind::SecondaryRelease,128,180,false,false,true);
@@ -301,13 +301,13 @@ void TestRotationSession()
     VERIFY((feature->SendRequest(reboundUndo).status == ModelRotationAdmissionStatus::Accepted));
     wait([&]{return feature->GetState().status == ModelRotationStatus::Succeeded;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
-    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
+    VERIFY(session.GetInteractionController()->ImportBindings(ConfigurableInputBindings{}).status
         == InputBindingStatus::Applied);
     ConfigurableInputBindings cancelBindings;
-    cancelBindings.SetOverride(std::string(ModelRotationBindingKeys::CancelKey),
+    cancelBindings.SetOverride(std::string("interaction.cancel.key"),
         InputBindingOverride::Replace,
         { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 'q' });
-    VERIFY(feature->SetInputBindings(cancelBindings)
+    VERIFY(session.GetInteractionController()->ImportBindings(cancelBindings).status
         == InputBindingStatus::Applied);
     send(HostInputKind::PrimaryPress,170,128);
     HostInputEvent key;
@@ -316,14 +316,16 @@ void TestRotationSession()
     key.keyCode=27; key.keySym="Escape";
     VERIFY(input->SendInput(key).isSucceeded);
     VERIFY(port->GetTransformState()->editToken != 0);
+    key.kind=HostInputKind::KeyRelease;VERIFY(input->SendInput(key).isSucceeded);key.kind=HostInputKind::KeyPress;
     key.keyCode='q'; key.keySym="q";
     VERIFY(input->SendInput(key).isSucceeded);
     wait([&]{return feature->GetState().status == ModelRotationStatus::Cancelled;});
+    key.kind=HostInputKind::KeyRelease;VERIFY(input->SendInput(key).isSucceeded);
     HostInputEvent releaseAfterCancel;
     releaseAfterCancel.viewId="rotation-0";
     releaseAfterCancel.kind=HostInputKind::PrimaryRelease;
     VERIFY(input->SendInput(releaseAfterCancel).isSucceeded);
-    VERIFY(feature->SetInputBindings(ConfigurableInputBindings{})
+    VERIFY(session.GetInteractionController()->ImportBindings(ConfigurableInputBindings{}).status
         == InputBindingStatus::Applied);
 
     // 原生切片 Ctrl+拖拽只由 Feature 消费；Esc 恢复开始姿态，保留既有撤销项。
@@ -336,6 +338,7 @@ void TestRotationSession()
     tick();
     native->SetKeyEventInformation(0,0,27,0,"Escape");
     native->InvokeEvent(vtkCommand::KeyPressEvent);
+    native->InvokeEvent(vtkCommand::KeyReleaseEvent);
     wait([&]{return feature->GetState().status==ModelRotationStatus::Cancelled;});
     VERIFY(port->GetTransformState()->modelToWorld == rotated.modelToWorld);
     VERIFY(feature->GetState().undoCount == 1);

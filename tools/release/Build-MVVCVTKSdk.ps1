@@ -440,6 +440,19 @@ endif()
 
 #include <memory>
 #include <string_view>
+#include "MVVCVTK/API/Interaction/InteractionController.h"
+#include "MVVCVTK/API/Interaction/ViewNavigation.h"
+#include <cmath>
+
+class CleanRoomNavigation final:public ViewNavigation {
+public:
+    ZoomRequest BuildZoom(const NavigationInput& input,const NavigationContext& context) const override {
+        auto request=ViewNavigation::BuildZoom(input,context);
+        if(context.crosshairWorld)request.anchor=ZoomAnchor::WorldPoint(*context.crosshairWorld);
+        request.factor*=request.factor;
+        return request;
+    }
+};
 
 #if MVVCVTK_PROBE_CROP || MVVCVTK_PROBE_GAP
 class CleanRoomFeature final : public HostFeature {
@@ -460,6 +473,27 @@ int main()
         return 5;
     }
 
+    auto customNavigation=std::make_shared<CleanRoomNavigation>();
+    auto navigationOptions=customNavigation->GetOptions();navigationOptions.zoom.wheelFactorPerStep=1.08;
+    if(customNavigation->SetOptions(navigationOptions)!=NavigationStatus::Applied
+        ||customNavigation->ZoomBy(1.2)!=NavigationStatus::Unbound)return 8;
+    HostSessionConfig navigationConfig;HostRenderViewConfig navigationView;
+    navigationView.id="navigation-probe";navigationView.role=HostRenderViewRole::Primary3D;
+    navigationConfig.renderViews={navigationView};
+    VtkAppHostSession navigationSession{std::move(navigationConfig)};
+    if(!navigationSession.BuildSession())return 9;
+    auto interaction=navigationSession.GetInteractionController();
+    if(!interaction||!interaction->GetNavigation("navigation-probe")||interaction->GetNavigation("missing"))return 10;
+    if(interaction->SetNavigation("navigation-probe",customNavigation)!=NavigationStatus::Applied)return 11;
+    BindingPatch bindings;bindings.Disable("navigation.camera.zoom.forward");
+    if(interaction->ApplyBindings(bindings).status!=InputBindingStatus::Applied)return 12;
+    if(customNavigation->ZoomBy(1.2)!=NavigationStatus::Applied)return 13;
+    ActionContext navigationAction;navigationAction.viewId="navigation-probe";
+    navigationAction.input.isWheel=true;navigationAction.input.wheelDelta=1;
+    if(interaction->Trigger("navigation.zoom",navigationAction).status!=ActionTriggerStatus::Completed)return 14;
+    const auto navigationState=customNavigation->GetState();
+    if(!navigationState||std::abs(navigationState->zoomRatio-1.2*1.08*1.08)>1e-9)return 15;
+    if(!navigationSession.Stop()||customNavigation->ZoomBy(1.2)!=NavigationStatus::Unbound)return 16;
     VtkAppHostSession session{ HostSessionConfig{} };
     if (!session.GetIsStopped()) {
         return 1;

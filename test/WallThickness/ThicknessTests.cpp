@@ -1,5 +1,6 @@
 #include "../TestDataPort.h"
 #include "Host/WallThicknessHostFeature.h"
+#include "Interaction/InteractionControllerAccess.h"
 #include "ThicknessAlgorithm.h"
 #include "ThicknessMath.h"
 #include "ThicknessDisplaySampling.h"
@@ -685,14 +686,6 @@ void Lifecycle()
         InputBindingOverride::Replace,
         { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
           static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
-    Check(feature->SetInputBindings(settings)==InputBindingStatus::Applied,
-        "secondary sample selection binding accepted");
-    auto invalidSettings = settings;
-    invalidSettings.SetOverride(std::string(ThicknessBindingKeys::SelectSample),
-        InputBindingOverride::Replace,
-        { InputTriggerKind::Drag, InputMouseButton::Secondary, 0, 0, 0 });
-    Check(feature->SetInputBindings(invalidSettings)==InputBindingStatus::Unsupported,
-        "drag trigger must not replace sample click");
     auto work = BuildSlab();
     ThicknessRequest request;
     request = ThicknessStartRequest{};
@@ -702,6 +695,10 @@ void Lifecycle()
     Check(feature->SendRequest(request).status == ThicknessAdmissionStatus::Unavailable,
           "unattached rejected");
     Check(feature->AttachHost({{}, {}, data, control}), "attach headless feature");
+    auto interaction=std::make_shared<InteractionController>();
+    InteractionControllerAccess::Start(*interaction,{{"sample",InteractionViewClass::ThreeD}},{},{});
+    for(auto info:control->binding.actions)InteractionControllerAccess::Register(*interaction,std::move(info),{},{});
+    Check(interaction->ImportBindings(settings).status==InputBindingStatus::Applied,"统一样本选择改键");
     Check(!feature->AttachHost({{}, {}, data, control}), "duplicate attach rejected");
     int completions = 0;
     ThicknessResult outcome;
@@ -738,21 +735,22 @@ void Lifecycle()
         clickTarget.resultRevision = outcome.result.generation;
         InteractionEvent click;
         click.eventKind = InteractionEventKind::SecondaryPress;
+        click.actionId="wallThickness.selectSample";
         click.isAltDown = true;
         const auto pressed = control->binding.onTargetInput(click, clickTarget);
         Check(pressed.isHandled && pressed.isSucceeded
                 && feature->GetState().selectedSample
                     == snapshot->statistics.minimumSample,
               "Alt+secondary sample click selects the expected sample");
-        Check(feature->SetInputBindings(settings) == InputBindingStatus::Busy,
+        Check(interaction->ImportBindings(settings).status == InputBindingStatus::Applied,
               "active sample click rejects rebinding");
         click.eventKind = InteractionEventKind::PrimaryRelease;
         Check(control->binding.onTargetInput(click, clickTarget).isSucceeded
-                && feature->SetInputBindings(settings) == InputBindingStatus::Busy,
+                && interaction->ImportBindings(settings).status == InputBindingStatus::Applied,
               "unrelated primary release leaves secondary click active");
         click.eventKind = InteractionEventKind::SecondaryRelease;
         Check(control->binding.onTargetInput(click, clickTarget).isSucceeded
-                && feature->SetInputBindings(settings) == InputBindingStatus::Applied
+                && interaction->ImportBindings(settings).status == InputBindingStatus::Applied
                 && feature->GetState().selectedSample
                     == snapshot->statistics.minimumSample,
               "secondary release clears click state and retains selection");

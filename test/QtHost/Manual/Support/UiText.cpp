@@ -12,6 +12,13 @@ bool IsPartEditAction(const QString& action)
 }
 QString GetActionDescription(const QString& module, const QString& action)
 {
+    if(module=="Roi") {
+        if(action=="EndDrawing")return "完成当前轮廓绘制并形成选择；与形态学闭运算不同。";
+        if(action=="Close")return "按给定半径先膨胀再腐蚀；不是结束轮廓绘制。";
+        if(action=="Clear")return "清空范围并保留 ROI 对象；保存后生成新的范围修订。";
+        if(action=="Remove")return "删除正式 ROI 对象；实际引用关系由数据生命周期检查。";
+        if(action=="DrawContour3D")return "基于冻结投影视角和有限深度进行体积圈选；不是任意三维折线闭合成体。";
+    }
     if (action == "UseData") return "将所选已发布体数据设为当前输入，再执行所需业务；需要长期保留的旧结果请先选择保留。";
     if (action == "KeepResult") return "长期保留所选结果及其输入依赖，重复计算不会自动回收它。";
     if (action == "ReleaseResult") return "取消长期保留；当前结果和仍被业务依赖的结果继续保留，其余旧结果可以回收。";
@@ -63,10 +70,17 @@ QString GetModuleText(const QString& module)
     static const QHash<QString, QString> labels{{"Data", "数据输入"}, {"View", "视图显示"},
         {"Crop", "裁剪"}, {"Gap", "孔隙分析"}, {"Part", "分割与编辑"},
         {"Surface", "表面测定"}, {"Artifact", "伪影校正"}, {"Rotation", "模型旋转"}, {"Alignment", "计量对齐与检测"}, {"Wall", "壁厚分析"}, {"Roi","区域管理"}};
+    if(module=="Roi")return "感兴趣区域";
+    if(module=="View")return "显示与导航";
+    if(module=="Rotation")return "模型姿态";
+    if(module=="Part")return "分割与标签";
     return labels.value(module, module);
 }
 QString GetActionText(const QString& module, const QString& action)
 {
+    if(action=="SetVolumeVisible")return "设置当前三维体数据显隐";
+    if(module=="Roi" && action=="EndDrawing")return "完成轮廓";
+    if(module=="Roi" && action=="Clear")return "清空范围";
     if(action=="PrepareRoi")return "选用已有区域";
     if(action=="OpenCrop")return "进入裁剪";
     if(module=="Roi"){
@@ -85,7 +99,7 @@ QString GetActionText(const QString& module, const QString& action)
     if(action=="NextDefectPage")return "下一页缺陷";
     if(action=="LocateDefect")return "定位孔隙缺陷";
     if(action=="ResetDefectFilter")return "清除列表筛选";
-    if (action == "UseData") return "从此数据继续";
+    if (action == "UseData") return "设为工作输入";
     if (action == "GraphInfo") return "查看发布记录";
     if (action == "KeepResult") return "长期保留";
     if (action == "ReleaseResult") return "取消长期保留";
@@ -312,7 +326,7 @@ QString GetParameterHelp(const QString& key)
 ParameterChoices GetParameterChoices(const QString& module, const QString& key)
 {
     if (key.endsWith("Roi")) return {{"", key == "protectionRoi" ? "不附加保护区域" : "全部有效数据"}};
-    if (module == "Roi" && key == "roi") return {{"", "请选择已有区域"}};
+    if (module == "Roi" && (key == "roi" || key=="operands" || key=="domainRoi")) return {{"", key=="domainRoi"?"源有效域":"请选择正式区域"}};
     if (module == "Alignment") {
         if (key == "computeBackend") return {{"Cpu", "CPU"}, {"Cuda", "CUDA（显式）"}};
         if (key == "metric") return {{"UnsignedDistance", "无符号最近距离"}, {"NominalNormalProjection", "名义面法向投影"}};
@@ -354,7 +368,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
     if (module=="Gap" && key=="roiPolicy")return {{"InsideOnly","只评价区域内部分"},{"WholeIfIntersects","相交后保留整个缺陷"}};
     if (module == "Roi" && key == "shape") return {{"Box","区域盒"},{"Sphere","球形区域"},{"Cylinder","有限圆柱"},{"Ellipsoid","椭球"},{"EllipticCylinder","有限厚度椭圆区域"},{"HalfSpace","半空间"},{"Contour","平面轮廓与有限厚度"},{"ProjectedContour","冻结视图体积圈选"},{"Brush","画笔路径"},{"MaskReference","已有标签或掩膜"}};
-    if (module=="Roi" && key=="selectionMode") return {{"Replace","替换目标全部范围"},{"Add","添加本次选区"},{"Subtract","扣除本次选区"},{"Intersect","与本次选区求交"},{"NewRoi","另建独立区域"}};
+    if (module=="Roi" && key=="selectionMode") return {{"Replace","替换目标全部范围"},{"Add","添加本次选区"},{"Subtract","扣除本次选区"},{"Intersect","与本次选区求交"}};
     if (module=="Roi" && key=="outputMode") return {{"UpdateTarget","更新原区域"},{"CreateNew","建立新区域"}};
     if (module=="Roi" && key=="radiusUnit") return {{"Millimetres","毫米"},{"Voxels","索引体素"}};
     if (module=="Roi" && key=="connectivity") return {{"Faces","6 邻接"},{"Full","26 邻接"}};
@@ -366,7 +380,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "removalMode") return {{"None", "不移除"}, {"KeepInside", "保留内部"}, {"RemoveInside", "移除内部"}};
     if (key == "format") return {{"Raw", "原始体数据（RAW）"}, {"Ply", "多边形网格（PLY）"}, {"Stl", "三角网格（STL）"}, {"Obj", "网格模型（OBJ）"}};
     if (key == "evidenceKind") return {{"real-data", "真实数据"}, {"synthetic-regression", "合成回归数据"}};
-    if (module == "View" && key == "quality") return {{"Auto", "自动"}, {"Low", "低"}, {"High", "高"}, {"XHigh", "超高"}, {"Ultra", "原始分辨率"}};
+    if (module == "View" && key == "quality") return {{"Auto", "自动"}, {"Low", "低"}, {"High", "高"}, {"XHigh", "超高"}, {"Ultra", "Ultra（既有最高质量档）"}};
     if (module == "View" && key == "mode") return {{"CompositeIsoSurface", "等值面"}, {"CompositeVolume", "体渲染"},
         {"IsoSurface", "等值面（无参考平面）"}, {"Volume", "体渲染（无参考平面）"}};
     return {};
@@ -392,8 +406,13 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
-    if(module=="Roi" && key=="boxToSource")return "高级与诊断";
-    if(module=="Roi")return QStringList{"name","group","description","shape","roi","isArchived"}.contains(key)?"区域信息":"区域几何";
+    if(module=="Roi" && QStringList{"boxToSource","direction3D","planeToSource","sourceToView","viewToClip","contours","pathMM","sourceToTarget","meshToSource"}.contains(key))return "精确参数";
+    if(module=="Roi" && QStringList{"roi","operands","outputMode","targetSource","domainRoi"}.contains(key))return "输入与输出";
+    if(module=="Roi")return QStringList{"name","group","description","shape","selectionMode","isArchived"}.contains(key)?"区域信息":"区域几何";
+    if(module=="Surface") {
+        if(key=="parentGeneration")return "专家设置";
+        if(QStringList{"componentSelection","seedModelPoint","analysisRoi","minimumObjectVoxels"}.contains(key))return "高级设置";
+    }
     if (key.endsWith("Roi") || key == "roi") return "作用范围";
     if (key == "sourceDigest" || key == "evidenceKind") return "高级与诊断";
     if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "archivePath", "reference"}.contains(key))

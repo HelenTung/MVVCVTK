@@ -149,16 +149,16 @@ class HostControlProbe final : public FeatureHostControl {
 public:
     int inputCalls = 0;
     int statusCalls = 0;
-    bool AttachInput(HostInputBinding) override
+    bool AttachInput(HostInputBinding binding) override
     {
         ++inputCalls;
-        return false;
+        return bool(binding.onAction);
     }
 
     bool DetachInput(std::string_view) override
     {
         ++inputCalls;
-        return false;
+        return true;
     }
 
     bool SetActiveViews(
@@ -1330,12 +1330,12 @@ int GetCropFailCount()
     const auto controlProbe = std::dynamic_pointer_cast<HostControlProbe>(standaloneContext.host);
     const bool isInputIndependent = narrowFeature->AttachHost(standaloneContext)
         && narrowFeature->DetachHost() && narrowFeature->DetachHost()
-        && controlProbe && controlProbe->inputCalls == 0 && controlProbe->statusCalls == 0;
+        && controlProbe && controlProbe->inputCalls == 2 && controlProbe->statusCalls == 0;
     failureCount += GetCaseResult(
         isUnattachedRejected
             && unattachedCallbackCount == 0
             && isStandaloneRejected && isInputIndependent,
-        "Crop rejects invalid ownership and needs no application input or status port") ? 0 : 1;
+        "裁切拒绝无效所有权，成对登记统一输入且不要求应用状态端口") ? 0 : 1;
 
     std::shared_ptr<FeatureViewService> retiredService;
     bool isLeaseFixtureReady = false;
@@ -1389,8 +1389,7 @@ int GetCropFailCount()
         session.AttachFeature(tickGate);
     const bool isProbeAttached =
         session.AttachFeature(contextProbe);
-    const bool isInputAttached =
-        session.AttachHotkeys({});
+    const bool isInputAttached = bool(session.GetInteractionController());
     const auto* endpoint = session.GetPrimaryEndpoint();
     const auto* timerEndpoint =
         session.GetRenderViewEndpoint("crop-timer");

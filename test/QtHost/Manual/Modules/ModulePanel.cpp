@@ -59,9 +59,11 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true); layout->addWidget(m_businessSource);
     m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();layout->addWidget(m_businessDisplay);
     m_businessNext = new QLabel(this); m_businessNext->setObjectName("businessNext"); m_businessNext->setWordWrap(true); layout->addWidget(m_businessNext);
-    m_primary = new QPushButton(this); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); layout->addWidget(m_primary);
-    m_executionMessage = new QLabel(this); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); layout->addWidget(m_executionMessage);
-    m_nextActions = new QWidget(this); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); layout->addWidget(m_nextActions);
+    auto* commandFooter=new QWidget(this);commandFooter->setObjectName("businessCommandFooter");
+    auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,0,0,0);footerLayout->setSpacing(6);
+    m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
+    m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
+    m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
         Observe();const auto action=m_primary->property("businessAction").toString();
@@ -73,11 +75,21 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
     auto* navigation = new QHBoxLayout;
     m_parameterTabs = new QTabBar(this); m_parameterTabs->setObjectName("parameterTabs");
-    navigation->addWidget(new QLabel("常用操作", this),1);
+    navigation->addWidget(new QLabel("任务参数", this),1);
     m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setElideMode(Qt::ElideNone); m_parameterTabs->setDrawBase(false);
-    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("全部操作");
+    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("选择操作");
     m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_moreOperations->setMenu(m_operationMenu);
-    navigation->addWidget(m_moreOperations); layout->addLayout(navigation); layout->addWidget(m_parameterTabs);
+    navigation->addWidget(m_moreOperations); layout->addLayout(navigation);
+    m_taskTabs=new QTabBar(this);m_taskTabs->setObjectName("businessTaskTabs");m_taskTabs->setExpanding(false);m_taskTabs->setUsesScrollButtons(true);
+    const QStringList taskGroups=m_name=="Roi"?QStringList{"创建","编辑","运算","管理"}:m_name=="Alignment"?QStringList{"对齐","几何拟合","表面偏差","尺寸/形位","报告"}:QStringList{};
+    for(const auto& group:taskGroups){m_taskTabs->addTab(group);if(m_taskGroup.isEmpty())m_taskGroup=group;}
+    m_taskTabs->setVisible(!taskGroups.isEmpty());layout->addWidget(m_taskTabs);layout->addWidget(m_parameterTabs);
+    connect(m_taskTabs,&QTabBar::currentChanged,this,[this](int index) {
+        if(index<0)return;m_taskGroup=m_taskTabs->tabText(index);
+        auto action=m_taskSelections.value(m_taskGroup);
+        if(action.isEmpty())for(const auto& name:m_actionOrder)if(GetActionGroup(name)==m_taskGroup && m_commandRows.count(name)){action=name;break;}
+        if(!action.isEmpty())SelectAction(action);else {m_hasRefreshed=false;RefreshWorkflow();}
+    });
     connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
     });
@@ -140,15 +152,15 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
     m_parameterScroll = new QScrollArea(this); m_parameterScroll->setObjectName("operationScroll");
     m_parameterScroll->setWidgetResizable(true); m_parameterScroll->setFrameShape(QFrame::NoFrame);
-    m_parameterScroll->setMinimumHeight(96);
+    m_parameterScroll->setMinimumHeight(40);
     auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
     m_actionLayout->addWidget(m_operationTitle);m_actionLayout->addWidget(m_operationDescription);
     m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
     m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");
-    m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); m_actionLayout->addWidget(m_commandArea);
-    layout->addWidget(m_quickActions);
+    m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);footerLayout->addWidget(m_commandArea);
+    m_actionLayout->addWidget(m_quickActions);layout->addWidget(commandFooter);
     connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
         const auto id = item->data(0, Qt::UserRole).toJsonObject()["id"];
         for (QTreeWidgetItemIterator it(m_nodes); *it; ++it) {
@@ -256,7 +268,7 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         button->setProperty("primaryCommand",false);
         footer->addWidget(files); footer->addStretch(); footer->addWidget(button);
         m_commandArea->addWidget(commands); m_commandRows[name] = commands;
-        m_actionLayout->insertWidget(m_actionLayout->count()-1,card); m_cards[name] = card;
+        m_actionLayout->addWidget(card); m_cards[name] = card;
         const QSignalBlocker blocker(m_parameterTabs);
         const auto index = m_parameterTabs->addTab(GetParameterSectionText(m_name, name)); m_parameterTabs->setTabData(index, name);
         if (m_parameterAction.isEmpty()) m_parameterAction = name;
@@ -385,10 +397,11 @@ void ModulePanel::SetNode(QTreeWidgetItem* item)
     }
     m_node = node;
     m_sourceRoot.clear();
-    for (auto it = patches.begin(); it != patches.end(); ++it) if (m_entries.count(it.key())) SetParameterPatch(it.key(), it.value().toObject());
+    // 正式 ROI 的目录选择不改正在编辑的草稿或运算输出；只有明确选择操作才绑定目标。
+    if(m_name!="Roi")for (auto it = patches.begin(); it != patches.end(); ++it) if (m_entries.count(it.key())) SetParameterPatch(it.key(), it.value().toObject());
     if (onMessage) onMessage("选中：" + selectedText + (m_node["description"].toString().isEmpty() ? QString() : " ｜ " + m_node["description"].toString()));
     const auto actions = m_node["actions"].toArray();
-    if (!actions.isEmpty() && m_entries.count(actions.first().toString())) SelectAction(actions.first().toString());
+    if (m_name!="Roi" && !actions.isEmpty() && m_entries.count(actions.first().toString())) SelectAction(actions.first().toString());
     RefreshWorkflow();
     } catch (const std::exception& e) {
         // Qt 树事件不能向事件循环抛出参数异常；错误提示不覆盖真实业务状态。
@@ -433,7 +446,7 @@ void ModulePanel::RefreshWorkflow()
         if (session) {
             std::vector<std::pair<QString,ParameterEditor*>> roiFields;
             for (const auto* key : {"analysisRoi", "processingRoi", "protectionRoi", "qualityRoi",
-                "editRoi", "evaluationRoi", "inputRoi", "roi"})
+                "editRoi", "evaluationRoi", "inputRoi", "roi","domainRoi","operands"})
                 if(auto* field=form.second->GetField(key))roiFields.emplace_back(key,field);
             if(roiFields.empty())continue;
             auto source = descriptor ? descriptor->dataRevision : DataRevisionRef{};
@@ -547,20 +560,26 @@ void ModulePanel::RefreshWorkflow()
         }
     }
     QStringList allowed; for (const auto value : m_node["actions"].toArray()) allowed.append(value.toString());
-    static const QHash<QString, QStringList> globalActions{{"Data", {"Load"}}, {"View", {"Set", "Reset", "Visibility"}},
+    static const QHash<QString, QStringList> globalActions{{"Data", {"Load"}}, {"View", {"Set", "Reset", "Visibility","SetVolumeVisible"}},
         {"Crop", {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly"}}, {"Part", {"Start"}}, {"Gap", {"Start"}},
         {"Artifact", {"Ring", "Diffusion", "Combined"}}, {"Surface", {"GlobalAutomatic"}},
         {"Wall", {"Start", "Cancel", "Result", "Clear"}}, {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
     allowed.append(globalActions.value(m_name));
+    if(m_name=="Roi")allowed.append(actions);
     for (const auto& entry : m_entries) if (entry.second.policy == TestPolicy::Stop) allowed.append(entry.first);
     static const QHash<QString, QStringList> primaryPages{
         {"Data",{"Load","Select","ExportData"}}, {"View",{"Set","Visibility","Cursor"}},
         {"Part",{"Start","SetState","Paint","Split"}}, {"Surface",{"GlobalAutomatic","Visibility","SamplePoints"}},
         {"Wall",{"Start","SetDisplay","SetEvaluation","Result"}}, {"Artifact",{"Ring","Diffusion","Combined"}},
         {"Alignment",{"ImportReference","SaveRecipe","Start","Result"}}, {"Crop",{"Start","Mode","BuildResult","AppendExact"}},
-        {"Roi",{"Begin","SetDraft"}}, {"Rotation",{"Rotate","SetEnabled"}}, {"Gap",{"Start","SetDisplay"}}};
+        {"Roi",{"Begin","SetDraft"}}, {"Rotation",{"Rotate","SetEnabled"}}, {"Gap",{"Start","Evaluate","SetDisplay"}}};
     QStringList pages;
-    for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
+    if(m_taskTabs->count()) {
+        const auto group=GetActionGroup(m_parameterAction);
+        const auto tab=[&]{for(int i=0;i<m_taskTabs->count();++i)if(m_taskTabs->tabText(i)==group)return i;return -1;}();
+        if(tab>=0){const QSignalBlocker blocker(m_taskTabs);m_taskGroup=group;m_taskTabs->setCurrentIndex(tab);m_taskSelections[group]=m_parameterAction;}
+        for(const auto& name:m_actionOrder)if(GetActionGroup(name)==m_taskGroup && m_commandRows.count(name))pages.append(name);
+    } else for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
     if (m_commandRows.count(m_parameterAction) && !pages.contains(m_parameterAction)) pages.append(m_parameterAction);
     if (pages.isEmpty()) for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) { pages.append(name); break; }
     pages.removeAll("SetDisplay");pages.removeAll("SetDeviationDisplay");
@@ -592,7 +611,9 @@ void ModulePanel::RefreshWorkflow()
         {"Rotation", {"Cancel"}}, {"Gap", {"Overlay", "Exit"}}};
     QStringList visible;
     for (const auto& name : quickCommands.value(m_name))
-        if (m_entries.count(name) && m_cards.at(name) == m_buttons.at(name)) visible.append(name);
+        if (m_entries.count(name) && m_cards.at(name) == m_buttons.at(name) && name!=m_primary->property("businessAction").toString() && !m_nextActionIds.contains(name)) visible.append(name);
+    if(m_taskTabs->count())for(const auto& name:m_actionOrder)
+        if(GetActionGroup(name)==m_taskGroup && m_cards.at(name)==m_buttons.at(name) && name!=m_primary->property("businessAction").toString() && !m_nextActionIds.contains(name) && !visible.contains(name))visible.append(name);
     if (visible.size() != m_visibleActions.size() || !std::equal(visible.cbegin(), visible.cend(), m_visibleActions.cbegin())) {
         const TestTiming layoutTiming(m_context.records, "Layout.Rebuild." + m_name);
         while (auto* item = m_quickLayout->takeAt(0)) delete item;
@@ -606,6 +627,7 @@ void ModulePanel::RefreshWorkflow()
         const bool isColor=(m_name=="Wall" || m_name=="Gap" || m_name=="Alignment")
             && (name=="SetDisplay" || name=="SetDeviationDisplay");
         m_cards.at(name)->setVisible(shown && !isColor);
+        button->setVisible(shown && !isColor && (name!=m_primary->property("businessAction").toString() || m_primary->property("usesOutput").toBool()));
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
@@ -632,6 +654,10 @@ void ModulePanel::RefreshWorkflow()
     m_parameterScroll->setVisible(!m_commandRows.empty());
     m_operationTitle->setText(GetActionText(m_name, m_parameterAction));
     m_operationDescription->setText(GetActionDescription(m_name, m_parameterAction));
+    if(m_name=="Roi" && m_parameterAction=="Difference") {
+        const auto params=GetActionParameters("Difference");
+        m_operationDescription->setText("结果：输入 A − 输入 B。A 为本次编辑草稿或明确所选 ROI；B 为下方操作数，提交后输出目标固定。\n输出："+params["outputMode"].toString());
+    }
     m_operationTitle->setVisible(!m_parameterAction.isEmpty()); m_operationDescription->setVisible(!m_parameterAction.isEmpty());
     // QMenu::clear 不负责销毁子菜单；刷新前显式回收原分类容器。
     const auto oldMenus = m_operationMenu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
@@ -640,6 +666,7 @@ void ModulePanel::RefreshWorkflow()
     for (const auto& name : m_actionOrder) {
         if((m_name=="Wall" || m_name=="Gap" || m_name=="Alignment") && (name=="SetDisplay" || name=="SetDeviationDisplay"))continue;
         const auto group = GetActionGroup(name);
+        if(m_taskTabs->count() && group!=m_taskGroup && group!="数据与导出" && group!="确认与退出")continue;
         if (!menus.contains(group)) menus[group] = m_operationMenu->addMenu(group);
         const bool parameter = m_commandRows.count(name) != 0;
         auto* entry = menus[group]->addAction(GetActionText(m_name,name),this,[this,name,parameter]{
@@ -657,15 +684,21 @@ void ModulePanel::RefreshWorkflow()
 }
 QString ModulePanel::GetActionGroup(const QString& action) const
 {
+    if(m_name=="Roi") {
+        if(action=="Begin" || action.startsWith("Draw") || QStringList{"PickSeed","Threshold","Grow","SurfaceInterior","SurfaceLayer"}.contains(action))return "创建";
+        if(QStringList{"SetDraft","Edit","EditControlPoint","EndDrawing","ApplySelection","Undo","Redo"}.contains(action))return "编辑";
+        if(QStringList{"SetMetadata","Copy","Visibility","Remove","OpenCrop","OpenGap"}.contains(action))return "管理";
+        if(QStringList{"Union","Intersection","Difference","Merge","Dilate","Erode","Open","Close","RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Invert","Clear","Transform","ApplyOperation","CancelOperation"}.contains(action))return "运算";
+    }
     if (m_name == "Alignment") {
         if (action.startsWith("Export") && action.endsWith("Template")) return "参考模板";
-        if (QStringList{"ImportReference", "SaveRecipe", "Activate", "Deactivate"}.contains(action)) return "参考准备";
-        if (QStringList{"Start", "ApplyModelPose", "Cancel"}.contains(action)) return "对齐与应用";
-        if (QStringList{"InspectSection", "InspectGeometry", "InspectPair", "InspectionResult"}.contains(action)) return "尺寸检测";
+        if (QStringList{"ImportReference", "SaveRecipe", "Activate", "Deactivate","Start", "ApplyModelPose", "Cancel"}.contains(action)) return "对齐";
+        if(action=="InspectGeometry")return "几何拟合";
+        if (QStringList{"InspectSection", "InspectPair", "InspectionResult","EvaluateVoxelVolume","VoxelVolumeResult"}.contains(action)) return "尺寸/形位";
         if (QStringList{"ImportNominalMesh", "EvaluateSurface", "DeviationResult", "SetDeviationDisplay"}.contains(action)) return "表面偏差";
         if (QStringList{"Visibility", "Result", "SetSceneDisplay"}.contains(action)) return "显示与结果";
         if (QStringList{"EvaluateVoxelVolume", "VoxelVolumeResult"}.contains(action)) return "体素统计";
-        if (QStringList{"ExportArchive", "ExportReport", "Restore"}.contains(action)) return "报告与归档";
+        if (QStringList{"ExportArchive", "ExportReport", "Restore"}.contains(action)) return "报告";
     }
     if (m_name == "Crop") {
         if (QStringList{"Start", "FinishEditing", "BuildResult", "SelectOutput", "Exit", "ResetPreview"}.contains(action)) return "预览与发布";
@@ -799,6 +832,10 @@ std::uint64_t ModulePanel::SendAction(const QString& name, const QJsonObject& pa
         return id;
     }
     m_pending.insert(id);
+    if(m_name=="View" && entry.policy!=TestPolicy::Read
+        && params["viewId"].toString("primary-3d")=="primary-3d"
+        && params["viewScope"].toString("all")!="slices")
+        m_context.workflow.primaryPresentationCommand=id;
     try { entry.action(id, params); }
     catch (const std::exception& error) { SetComplete(id, "InvalidInput", {{"message", QString::fromUtf8(error.what())}}); }
     RefreshWorkflow();

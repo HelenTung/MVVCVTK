@@ -103,6 +103,9 @@ endfunction()
 SetSdkHeaderMap(
     "include/Host/VtkAppHostSession.h|MVVCVTK/API/Host/VtkAppHostSession.h"
     "include/Interaction/InputBindings.h|MVVCVTK/API/Interaction/InputBindings.h"
+    "include/Interaction/InteractionController.h|MVVCVTK/API/Interaction/InteractionController.h"
+    "include/Interaction/ViewNavigation.h|MVVCVTK/API/Interaction/ViewNavigation.h"
+    "include/Interaction/NavigationTypes.h|MVVCVTK/API/Interaction/NavigationTypes.h"
     "include/Host/Types/HostRequestTypes.h|MVVCVTK/API/Host/Types/HostRequestTypes.h"
     "include/Host/Types/HostSessionTypes.h|MVVCVTK/API/Host/Types/HostSessionTypes.h"
     "include/Host/Types/HostValueTypes.h|MVVCVTK/API/Host/Types/HostValueTypes.h"
@@ -441,7 +444,6 @@ set(MVVCVTK_HOST_SOURCES
     include/Host/HostCoreServices.h
     include/Host/HostFrameCoordinator.h
     include/Host/HostWorkSignal.h
-    include/Host/HostHotkeyRouter.h
     include/Host/HostInputRegistry.h
     include/Host/HostViewRuntimeRegistry.h
     include/Host/LoadCommitCoordinator.h
@@ -494,7 +496,6 @@ set(MVVCVTK_HOST_SOURCES
     include/Host/Internal/HostTransferCodec.h
     src/Host/HostCommandRouter.cpp
     src/Host/HostFrameCoordinator.cpp
-    src/Host/HostHotkeyRouter.cpp
     src/Host/HostInputRegistry.cpp
     src/Host/HostViewRuntimeRegistry.cpp
     src/Host/LoadCommitCoordinator.cpp
@@ -503,6 +504,9 @@ set(MVVCVTK_HOST_SOURCES
     src/Interaction/DefaultNavigationPolicy.cpp
     src/Interaction/InputCallbackHandler.cpp
     src/Interaction/NavigationBindings.cpp
+    src/Interaction/InteractionController.cpp
+    src/Interaction/ViewNavigation.cpp
+    src/Interaction/ViewNavigationExecutor.cpp
     src/Interaction/InteractionRouter.cpp
     src/Interaction/TimeUpdateHandler.cpp
     src/Interaction/ViewContextFactory.cpp
@@ -532,6 +536,9 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/VtkAppHostSession.h
     include/Interaction/InputBindings.h
+    include/Interaction/InteractionController.h
+    include/Interaction/ViewNavigation.h
+    include/Interaction/NavigationTypes.h
     include/Host/Types/HostRequestTypes.h
 )
 # Host 公开入口递归编译所需，但不作为独立顶层 API 宣传的支持头。
@@ -568,6 +575,10 @@ SetHeaderSurface(
     include/Data/ImageReadTypes.h
     include/Data/RoiTypes.h
     include/Host/Types/HostViewTypes.h
+    include/Interaction/InputBindings.h
+    include/Interaction/InteractionController.h
+    include/Interaction/ViewNavigation.h
+    include/Interaction/NavigationTypes.h
     include/Interaction/InteractionTypes.h
 )
 

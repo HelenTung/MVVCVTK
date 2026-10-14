@@ -37,38 +37,6 @@ void SendComplete(ThicknessCallback callback, const ThicknessResult &result) noe
     {
     }
 }
-constexpr std::uint8_t selectShift = static_cast<std::uint8_t>(InputModifierFlags::Shift);
-constexpr std::uint8_t selectCtrl = static_cast<std::uint8_t>(InputModifierFlags::Ctrl);
-constexpr std::uint8_t selectAlt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
-constexpr std::uint8_t selectModifiers = selectShift | selectCtrl | selectAlt;
-
-bool GetValidSelect(const InputBinding& binding) noexcept
-{
-    return binding.trigger == InputTriggerKind::PointerPress
-        && (binding.button == InputMouseButton::Primary
-            || binding.button == InputMouseButton::Secondary)
-        && binding.key == 0
-        && !((binding.requiredModifiers | binding.forbiddenModifiers)
-            & ~selectModifiers)
-        && !(binding.requiredModifiers & binding.forbiddenModifiers);
-}
-
-bool GetSelectMatched(
-    const InputBinding& binding, const InteractionEvent& event) noexcept
-{
-    if ((binding.button == InputMouseButton::Primary
-            && event.eventKind != InteractionEventKind::PrimaryPress)
-        || (binding.button == InputMouseButton::Secondary
-            && event.eventKind != InteractionEventKind::SecondaryPress)) {
-        return false;
-    }
-    const auto modifiers = (event.isShiftDown ? selectShift : 0)
-        | (event.isCtrlDown ? selectCtrl : 0)
-        | (event.isAltDown ? selectAlt : 0);
-    return (modifiers & binding.requiredModifiers)
-            == binding.requiredModifiers
-        && !(modifiers & binding.forbiddenModifiers);
-}
 } // namespace
 class WallThicknessHostFeature::Impl final
 {
@@ -140,12 +108,8 @@ class WallThicknessHostFeature::Impl final
     std::shared_ptr<Completion> m_completing;
     std::vector<Binding> m_bindings;
     std::shared_ptr<const ThicknessData::ResultPayload> m_active;
-    InputBinding m_selectBinding{ InputTriggerKind::PointerPress,
-        InputMouseButton::Primary, 0, 0, 0 };
-    bool m_isSelectEnabled = true;
     bool m_isClickActive = false;
     bool m_isDisplaying=false;
-    bool m_isSettingBindings = false;
     InteractionEventKind m_clickReleaseKind = InteractionEventKind::None;
 
     bool GetOwner() const
@@ -346,8 +310,7 @@ class WallThicknessHostFeature::Impl final
     }
     std::optional<HostSemanticTarget> GetTarget(const InteractionEvent &event)
     {
-        if (!GetOwner() || m_state.isStopping || !m_active || !GetState().isCurrent ||
-            !m_isSelectEnabled || !GetSelectMatched(m_selectBinding, event))
+        if (!GetOwner() || m_state.isStopping || !m_active || !GetState().isCurrent)
             return {};
         auto target = m_context.host->GetDisplayTarget(event.viewId, "thickness");
         if (!target || target->display.data != m_state.result ||
@@ -382,8 +345,7 @@ class WallThicknessHostFeature::Impl final
         if (!GetOwner() || !m_context.host->GetSemanticTargetValid(target) ||
             target.display.data != m_state.result)
             return {};
-        if (!m_isSelectEnabled
-            || !GetSelectMatched(m_selectBinding, event))
+        if(event.actionId!="wallThickness.selectSample"||event.eventKind!=InteractionEventKind::PrimaryPress&&event.eventKind!=InteractionEventKind::SecondaryPress&&event.eventKind!=InteractionEventKind::MiddlePress)
             return {true, true, true};
         try
         {
@@ -396,7 +358,7 @@ class WallThicknessHostFeature::Impl final
             if (selected) {
                 m_isClickActive = true;
                 m_clickReleaseKind =
-                    event.eventKind == InteractionEventKind::PrimaryPress
+                    event.eventKind == InteractionEventKind::MiddlePress ? InteractionEventKind::MiddleRelease : event.eventKind == InteractionEventKind::PrimaryPress
                     ? InteractionEventKind::PrimaryRelease
                     : InteractionEventKind::SecondaryRelease;
             }
@@ -433,33 +395,6 @@ class WallThicknessHostFeature::Impl final
     }
 
   public:
-    InputBindingStatus SetInputBindings(const IInputBindings& source)
-    {
-        if (m_state.isAttached && !GetOwner()) return InputBindingStatus::Failed;
-        if (m_isClickActive || m_isSettingBindings) return InputBindingStatus::Busy;
-        m_isSettingBindings = true;
-        InputBinding candidate{ InputTriggerKind::PointerPress,
-            InputMouseButton::Primary, 0, 0, 0 };
-        bool isEnabled = true;
-        InputBinding replacement;
-        InputBindingStatus status = InputBindingStatus::Applied;
-        switch (source.GetOverride(ThicknessBindingKeys::SelectSample, replacement)) {
-        case InputBindingOverride::UseDefault: break;
-        case InputBindingOverride::Replace:
-            if (!GetValidSelect(replacement)) status = InputBindingStatus::Unsupported;
-            else candidate = replacement;
-            break;
-        case InputBindingOverride::Disable: isEnabled = false; break;
-        default: status = InputBindingStatus::Invalid; break;
-        }
-        m_isSettingBindings = false;
-        if (status != InputBindingStatus::Applied) return status;
-        if (m_isClickActive) return InputBindingStatus::Busy;
-        m_selectBinding = candidate;
-        m_isSelectEnabled = isEnabled;
-        return InputBindingStatus::Applied;
-    }
-
     explicit Impl(ThicknessConfig config) : m_config(config) {}
     ~Impl() noexcept
     {
@@ -523,7 +458,12 @@ class WallThicknessHostFeature::Impl final
                 const auto s = weak.lock();
                 return s && s->owner ? s->owner->OnTarget(event, target) : InteractionResult{};
             };
-            input.onInput = [](const InteractionEvent &) { return InteractionResult{}; };
+            InteractionActionInfo select;select.actionId="wallThickness.selectSample";select.ownerId=input.featureId;
+            select.bindings.push_back({std::string(ThicknessBindingKeys::SelectSample),{InputTriggerKind::PointerPress,InputMouseButton::Primary},true,{},"target:thickness",{InputTriggerKind::PointerPress}});
+            input.actions.push_back(std::move(select));
+            input.getIsCaptureActive=[weak](std::string_view){const auto f=weak.lock();return f&&f->owner&&f->owner->m_isClickActive;};
+            const auto targetCallback=input.onTargetInput;
+            input.onAction=[targetCallback](std::string_view,const InteractionEvent& e,const std::optional<HostSemanticTarget>& target){return target?targetCallback(e,*target):InteractionResult{};};
             inputAttempted = true;
             if (!context.host->AttachInput(std::move(input)))
             {
@@ -1065,12 +1005,7 @@ WallThicknessHostFeature::WallThicknessHostFeature(ThicknessConfig config)
 {
 }
 WallThicknessHostFeature::~WallThicknessHostFeature() noexcept = default;
-InputBindingStatus WallThicknessHostFeature::SetInputBindings(
-    const IInputBindings& bindings)
-{
-    return m_impl ? m_impl->SetInputBindings(bindings)
-        : InputBindingStatus::Failed;
-}
+
 std::string_view WallThicknessHostFeature::GetFeatureId() const noexcept
 {
     return featureId;

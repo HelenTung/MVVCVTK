@@ -54,7 +54,7 @@ std::optional<RoiDescriptor> RoiService::GetDescriptor(const DataGraphSnapshot& 
     const auto catalogData=binding && binding->target ? graph.view->GetData(*binding->target):DataSnapshot{};
     const auto* catalog=catalogData ? dynamic_cast<const RoiCatalogPayload*>(catalogData->payload.get()):nullptr;
     if (!catalog) return {};
-    // 单对象读取不能先复制整个目录，尤其归档入口有独立的同步复制预算。
+    // 单对象读取只定位目录项，不复制整个目录。
     const auto& entries=catalog->GetEntries();
     const auto entry=std::find_if(entries.begin(),entries.end(),[&](const RoiCatalogEntry& item) {
         return item.geometry.entityId==ref.entityId;
@@ -94,6 +94,7 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
         const bool creates=request.action==RoiAction::Create || request.action==RoiAction::Copy;
         const bool removes=request.action==RoiAction::Remove;
         const bool writesGeometry=request.action!=RoiAction::SetMetadata && !removes;
+        if(!writesGeometry && (request.provenance || !request.inputs.empty()))return GetFailure(RoiError::InvalidRequest,"Metadata/removal requests cannot carry geometry provenance.");
         if (request.action!=RoiAction::Create && request.action!=RoiAction::Copy
             && request.action!=RoiAction::SetGeometry && request.action!=RoiAction::SetMetadata && !removes)
             return GetFailure(RoiError::InvalidRequest,"Unknown ROI action.");
@@ -155,7 +156,8 @@ RoiResult RoiService::SetRoiCommit(const RoiRequest& request,std::vector<DataRev
             }
             DataRevisionDraft draft{target.entityId,target.generation-1,DataTypes::roiGeometry,
                 RoiEvaluator::GetInputs(definition),std::make_shared<const RoiGeometryPayload>(definition),
-                DataProvenance{"Host.Roi","set-geometry","2",{}}};
+                request.provenance.value_or(DataProvenance{"Host.Roi","set-geometry","2",{}})};
+            draft.inputs.insert(draft.inputs.end(),request.inputs.begin(),request.inputs.end());
             if (request.copyFrom) draft.inputs.push_back({"copy-source",*request.copyFrom});
             const DataRevision candidate{target,draft.type,draft.inputs,draft.payload,draft.provenance};
             const auto error=RoiEvaluator::GetRelationsError(candidate,[&](const DataRevisionRef& ref)->DataSnapshot {

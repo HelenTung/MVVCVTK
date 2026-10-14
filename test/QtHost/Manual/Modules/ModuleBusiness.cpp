@@ -89,16 +89,38 @@ void ModulePanel::RefreshStatistics()
         if(owner->m_name=="Part") owner->SetParameterPatch("Start",{{"threshold",(low+high)*0.5}});
         else if(owner->m_name=="Surface")owner->SetParameterPatch("GlobalAutomatic",{{"initialIsoValue",(low+high)*0.5}});
         else if(owner->m_name=="Gap")owner->SetParameterPatch("Start",{{"isoMode","AbsoluteValue"},{"absoluteIsoValue",(low+high)*0.5}});
+        else if(owner->m_name=="Roi" && QStringList{"Threshold","Grow"}.contains(owner->m_parameterAction))owner->SetParameterPatch(owner->m_parameterAction,{{"grayRange",QJsonArray{low,high}}});
         else if(owner->m_name=="View") {
-            const auto mode=owner->m_observed["displayModeName"].toString();
-            if(mode.contains("IsoSurface"))owner->SetParameterPatch("Set",{{"iso",(low+high)*0.5}});
-            else if(mode.startsWith("Slice"))owner->SetParameterPatch("Set",{{"windowLevel",QJsonArray{high-low,(low+high)*0.5}}});
-            else {auto transfer=owner->GetActionParameters("Set")["transfer"].toObject();if(transfer.isEmpty())transfer=owner->m_observed["appliedDisplay"].toObject()["transfer"].toObject();transfer["opacityNodes"]=QJsonArray{QJsonArray{low,0.},QJsonArray{high,1.}};owner->SetParameterPatch("Set",{{"transfer",transfer}});}
+            const auto intent=owner->m_statistics->GetInteractionMode();
+            if(intent=="设置等值阈值")owner->SetParameterPatch("Set",{{"iso",(low+high)*0.5}});
+            else if(intent=="设置窗宽窗位")owner->SetParameterPatch("Set",{{"windowLevel",QJsonArray{high-low,(low+high)*0.5}}});
+            else if(intent=="添加透明度节点") {
+                auto transfer=owner->GetActionParameters("Set")["transfer"].toObject();if(transfer.isEmpty())transfer=owner->m_observed["appliedDisplay"].toObject()["transfer"].toObject();
+                auto nodes=transfer["opacityNodes"].toArray();const auto value=(low+high)*0.5;bool inserted=false;
+                for(int i=0;i<nodes.size();++i)if(nodes[i].toArray()[0].toDouble()==value){inserted=true;break;}else if(nodes[i].toArray()[0].toDouble()>value){nodes.insert(i,QJsonArray{value,0.5});inserted=true;break;}
+                if(!inserted)nodes.append(QJsonArray{value,0.5});transfer["opacityNodes"]=nodes;owner->SetParameterPatch("Set",{{"transfer",transfer}});
+            }
         }
         if(owner->onMessage)owner->onMessage("已选统计区间，参数为草稿；通过主动作明确提交。");
     };
+    if(m_name=="View") {
+        const auto mode=m_observed["displayModeName"].toString();
+        m_statistics->SetInteractionModes(mode.contains("IsoSurface")?QStringList{"设置等值阈值"}:mode.startsWith("Slice")?QStringList{"设置窗宽窗位"}:QStringList{"添加透明度节点"});
+    }else if(m_name=="Part")m_statistics->SetInteractionModes({"设置分割阈值"});
+    else if(m_name=="Gap")m_statistics->SetInteractionModes({"设置检出阈值"});
+    else if(m_name=="Surface") {
+        const auto* choice=findChild<QComboBox*>("surfaceParameterSource");const bool manual=choice && choice->currentData().toBool();
+        m_statistics->SetInteractionModes(manual?QStringList{"编辑手动 ISO"}:QStringList{});
+        if(manual){const auto params=GetActionParameters("GlobalAutomatic");m_statistics->SetMarkers(QJsonArray{QJsonObject{{"label","草稿 ISO"},{"key","initialIsoValue"},{"editable",true},{"value",GetInputNumber(params,"initialIsoValue",GetScalarMidpoint(*input))}}});m_statistics->onMarker=[owner](const QString& key,double value){if(owner)owner->SetParameterPatch("GlobalAutomatic",{{key,value}});};}
+    }else if(m_name=="Roi" && QStringList{"Threshold","Grow"}.contains(m_parameterAction)) {
+        m_statistics->SetInteractionModes({"编辑灰度范围"});
+        const auto range=GetActionParameters(m_parameterAction)["grayRange"].toArray();
+        m_statistics->SetMarkers(QJsonArray{QJsonObject{{"label","灰度下限"},{"key",m_parameterAction+":lower"},{"editable",true},{"value",range[0]}},QJsonObject{{"label","灰度上限"},{"key",m_parameterAction+":upper"},{"editable",true},{"value",range[1]}}});
+        m_statistics->onMarker=[owner](const QString& key,double value){if(!owner || key.section(':',0,0)!=owner->m_parameterAction)return;auto range=owner->GetActionParameters(owner->m_parameterAction)["grayRange"].toArray();range[key.section(':',1)=="lower"?0:1]=value;
+            if(range[0].toDouble()>=range[1].toDouble()){if(owner->onMessage)owner->onMessage("灰度下限必须小于上限；草稿保持原值。");return;}owner->SetParameterPatch(owner->m_parameterAction,{{"grayRange",range}});};
+    }else m_statistics->SetInteractionModes({});
     if(m_name=="View")m_statistics->SetMarkers(m_observed["displayMarkers"].toArray());
-    if(m_name=="Part"){const auto p=GetActionParameters("Start");m_statistics->SetMarkers(QJsonArray{QJsonObject{{"label","草稿材料阈值"},{"value",GetInputNumber(p,"threshold",GetScalarMidpoint(*input))}}});}
+    if(m_name=="Part"){const auto p=GetActionParameters("Start");m_statistics->SetMarkers(QJsonArray{QJsonObject{{"label","草稿材料阈值"},{"key","threshold"},{"editable",true},{"value",GetInputNumber(p,"threshold",GetScalarMidpoint(*input))}}});m_statistics->onMarker=[owner](const QString& key,double value){if(owner)owner->SetParameterPatch("Start",{{key,value}});};}
     if(m_name=="Gap"){const auto p=GetActionParameters("Start");QJsonArray markers{QJsonObject{{"label","草稿 BG"},{"value",GetInputNumber(p,"backgroundMean",input->scalarRange[0])}},QJsonObject{{"label","草稿 M"},{"value",GetInputNumber(p,"materialMean",input->scalarRange[1])}}};if(p["isoMode"]=="AbsoluteValue")markers.append(QJsonObject{{"label","草稿 ISO"},{"value",GetInputNumber(p,"absoluteIsoValue",GetScalarMidpoint(*input))}});m_statistics->SetMarkers(markers);}
     } catch(const std::exception& error){m_statistics->SetMessage("业务统计不可用",QString::fromUtf8(error.what()));}
 }

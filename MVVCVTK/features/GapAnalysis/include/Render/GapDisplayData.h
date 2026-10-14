@@ -187,7 +187,7 @@ struct GapDisplayData final {
                 while(triangles->GetNextCell(count,ids)){
                     if(count!=3)return {};
                     std::array<std::array<double,3>,3> triangle{};for(int k=0;k<3;++k)poly->GetPoint(ids[k],triangle[k].data());
-                    const auto selected=evaluationRoi->GetTriangleSelection(triangle,meshByteLimit-totalMeshBytes,0,[&]{return isStopping.load();});
+                    const auto selected=evaluationRoi->GetTriangleSelection(triangle,0,[&]{return isStopping.load();});
                     if(selected.error!=RoiError::None)return {};
                     for(const auto& piece:selected.triangles){
                         if(std::size_t(points->GetNumberOfPoints())> (meshByteLimit-totalMeshBytes)/(sizeof(double)*3+sizeof(vtkIdType)))return {};

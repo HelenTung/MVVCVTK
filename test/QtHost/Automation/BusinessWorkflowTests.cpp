@@ -79,7 +79,7 @@ void CheckBusinessWorkflow(TestWindow& window)
         auto* primary=page->findChild<QPushButton*>("businessPrimary");auto* stage=page->findChild<QLabel*>("businessStage");auto* scroll=page->findChild<QScrollArea*>("operationScroll");
         Require(primary && stage && scroll && !scroll->isAncestorOf(primary),"every business has a fixed stage primary outside parameter scrolling");
     }
-    Require(window.findChild<QLabel*>("messageDataSummary") && window.findChild<QWidget*>("diagnosticDetails")->isAncestorOf(window.findChild<QLabel*>("currentInputIdentity")) && !window.findChild<QWidget*>("currentInputBar"),"input data information lives in messages and diagnostics instead of a second toolbar row");
+    Require(window.findChild<QLabel*>("messageDataSummary") && window.findChild<QWidget*>("workbenchInput")->isAncestorOf(window.findChild<QLabel*>("currentInputIdentity")),"actual adopted input identity stays in the fixed input strip");
     const auto weighted=BuildHistogram({-1,0,1},{2,3,5},"area","fixed result","mm","mm2");
     Require(Sum(weighted)==10,"area histogram sums area rather than sample count");
     Require(BuildHistogram({std::numeric_limits<double>::quiet_NaN()},{},"invalid","invalid","gray","count")["counts"].toArray().isEmpty(),"invalid samples are not inserted in zero bin");
@@ -93,8 +93,8 @@ void CheckBusinessWorkflow(TestWindow& window)
     Require(!statistics.onInterval && !statistics.onRow && statistics.findChild<QTreeWidget*>("businessResultTable")->topLevelItemCount()==0,"equal chart data still replaces callbacks and table context");
     const auto edges=weighted["edges"].toArray();const auto boundary=edges[1].toDouble();
     Require(!statistics.ContainsInterval(boundary,edges[0].toDouble(),boundary) && statistics.ContainsInterval(boundary,boundary,edges[2].toDouble()) && statistics.ContainsInterval(edges.last().toDouble(),edges[edges.size()-2].toDouble(),edges.last().toDouble()),"bins are half-open with a closed final endpoint");
-    statistics.resize(500,300);statistics.show();QCoreApplication::processEvents();int selected=0;statistics.onInterval=[&](double,double){++selected;};auto* plot=statistics.findChild<QWidget*>("businessHistogramPlot");
-    const auto press=[&](const QPoint& pos,Qt::MouseButton button){QMouseEvent event(QEvent::MouseButtonPress,pos,button,button,Qt::NoModifier);QCoreApplication::sendEvent(plot,&event);};
+    statistics.resize(500,300);statistics.show();statistics.SetInteractionModes({"选择区间"});statistics.findChild<QComboBox*>("histogramInteraction")->setCurrentIndex(1);QCoreApplication::processEvents();int selected=0;statistics.onInterval=[&](double,double){++selected;};auto* plot=statistics.findChild<QWidget*>("businessHistogramPlot");
+    const auto press=[&](const QPoint& pos,Qt::MouseButton button){QMouseEvent event(QEvent::MouseButtonPress,pos,button,button,Qt::NoModifier);QCoreApplication::sendEvent(plot,&event);QMouseEvent release(QEvent::MouseButtonRelease,pos,button,Qt::NoButton,Qt::NoModifier);QCoreApplication::sendEvent(plot,&release);};
     press({80,3},Qt::LeftButton);press({80,30},Qt::RightButton);Require(selected==0,"chart margins and right click never select an interval");press({80,30},Qt::LeftButton);Require(selected==1,"left click within the plot selects an interval");statistics.hide();
     statistics.StartHistogram("R1","gray","gray","count",reader);
     Require(Await([&]{return statistics.GetHistogram()["title"]=="gray" && !statistics.GetHistogram()["counts"].toArray().isEmpty();}) && Sum(statistics.GetHistogram())==4,"static chart cannot impersonate a cached histogram from the same revision");

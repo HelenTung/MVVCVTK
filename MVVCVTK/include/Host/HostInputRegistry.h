@@ -22,6 +22,7 @@ public:
         std::weak_ptr<IHostViewDirectory> directory);
     ~HostInputRegistry();
 
+    std::shared_ptr<InteractionController> GetController() const;
     bool Start(HostViewTargets allViews);
     HostInputPort& GetFeaturePort();
     bool SetHostInput(HostViewTargets targets, HostCallback onInput);

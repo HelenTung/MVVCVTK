@@ -32,6 +32,9 @@ public:
 
     virtual InteractionCaptureKey GetKey() const noexcept = 0;
     virtual InteractionEventKind GetReleaseKind() const noexcept = 0;
+    virtual bool GetIsActive() const noexcept { return true; }
+    // 原生控件在 SDK release 返回后才结束，须由其存活谓词确认清理完成。
+    virtual bool GetCompletesOnRelease() const noexcept { return true; }
     virtual InteractionResult Send(const InteractionEvent& event) = 0;
 };
 
@@ -39,6 +42,7 @@ struct InteractionDispatch final
 {
     InteractionResult result;
     std::unique_ptr<IInteractionCapture> capture;
+    bool needsCaptureCleanup=false;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -53,6 +57,7 @@ public:
     virtual ~IInteractionHandler() = default;
 
     // 返回 isHandled=true 时，FirstMatch 模式的 Router 停止继续分发
+    virtual bool GetIsCaptureActive() const noexcept { return true; }
     virtual InteractionResult Send(const InteractionEvent& eve) = 0;
 
     // 只有需要建立指针捕获的组合 Handler 覆盖；默认仅返回处理结果。

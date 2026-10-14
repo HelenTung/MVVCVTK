@@ -14,6 +14,7 @@ class QVTKOpenGLNativeWidget;
 class QGridLayout;
 namespace Manual {
 class ResultReport;
+class ObjectBrowser;
 class TestWindow final : public QMainWindow {
 public:
     explicit TestWindow(std::uint64_t budgetMiB = 0);
@@ -47,6 +48,7 @@ private:
     void SetViewLayout(const QString& mode);
     void UpdateStopCommand();
     void UpdateInputIdentity();
+    void RefreshObjects();
     struct View { QString id; QVTKOpenGLNativeWidget* widget; vtkSmartPointer<vtkGenericOpenGLRenderWindow> window; QWidget* frame; };
     TestSession m_runtime;
     TestWorkflow m_workflow;
@@ -59,6 +61,8 @@ private:
     QStackedWidget* m_pages = nullptr;
     QStackedWidget* m_browsers = nullptr;
     QStackedWidget* m_statisticsPages = nullptr;
+    ObjectBrowser* m_objects = nullptr;
+    QTabWidget* m_resultTabs = nullptr;
     QToolButton* m_showStatistics = nullptr;
     QComboBox* m_renderMode = nullptr;
     QPushButton* m_openVolume = nullptr;
@@ -72,7 +76,14 @@ private:
     QLabel* m_inputGeometry = nullptr;
     QLabel* m_messageData = nullptr;
     QPushButton* m_sourceButton = nullptr;
+    QPushButton* m_originalInput = nullptr;
+    QString m_originalRevision;
     QString m_inputSummary;
+    QJsonObject m_objectGraph;
+    QJsonArray m_objectRegions;
+    std::vector<QJsonArray> m_objectModules;
+    QString m_objectInput;
+    std::optional<double> m_objectOpacity;
     QLabel* m_measurements = nullptr;
     QLabel* m_latestMessage = nullptr;
     QPlainTextEdit* m_log = nullptr;

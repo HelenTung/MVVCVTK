@@ -7,6 +7,7 @@ add_executable(
     CropGeometryTests.cpp
     CropMeshTests.cpp
     CropCurveWidgetTests.cpp
+    CropSphereVisualTests.cpp
     CropBridgeTests.cpp
     CropBridgeTests.h
     CropShaderPreviewTests.cpp
@@ -72,3 +73,6 @@ endif()
 
 add_test(NAME OrthogonalCrop.Widgets COMMAND mvvcvtk_crop_tests widgets)
 SetTestRuntime(OrthogonalCrop.Widgets mvvcvtk_crop_tests)
+
+add_test(NAME OrthogonalCrop.SphereVisual COMMAND mvvcvtk_crop_tests sphere-visual)
+SetTestRuntime(OrthogonalCrop.SphereVisual mvvcvtk_crop_tests)

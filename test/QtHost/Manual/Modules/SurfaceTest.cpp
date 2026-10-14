@@ -300,7 +300,17 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->GetStatisticsWidget()->SetHistogram({{"title","表面初始灰度估计分布"},{"description",description},{"counts",counts},{"edges",edges},
             {"xUnit","原始灰度"},{"yUnit","算法估计样本次数"},{"markers",QJsonArray{
                 QJsonObject{{"label","BG"},{"value",estimate->backgroundValue}},QJsonObject{{"label","M"},{"value",estimate->materialValue}},QJsonObject{{"label","ISO"},{"value",estimate->isoValue}}}}});
-        panel->GetStatisticsWidget()->onInterval=[panel](double low,double high){panel->SetParameterPatch("GlobalAutomatic",{{"initialIsoValue",(low+high)*0.5}});if(panel->onMessage)panel->onMessage("已形成手工 ISO 草稿；需明确重新生成表面。图中 BG/M 仍来自原估计。");};
+        const auto parameters=panel->GetActionParameters("GlobalAutomatic");
+        const auto* sourceChoice=panel->findChild<QComboBox*>("surfaceParameterSource");
+        const bool manual=sourceChoice && sourceChoice->currentData().toBool();
+        auto* statistics=panel->GetStatisticsWidget();statistics->SetInteractionModes(manual?QStringList{"编辑手动 ISO"}:QStringList{});
+        const auto iso=parameters["initialIsoValue"].isDouble()?parameters["initialIsoValue"].toDouble():estimate->isoValue;
+        statistics->SetMarkers(QJsonArray{QJsonObject{{"label","BG"},{"value",estimate->backgroundValue}},QJsonObject{{"label","M"},{"value",estimate->materialValue}},
+            QJsonObject{{"label",manual?"草稿 ISO":"ISO"},{"key","initialIsoValue"},{"editable",manual},{"value",iso}}});
+        if(manual) {
+            statistics->onInterval=[panel](double low,double high){panel->SetParameterPatch("GlobalAutomatic",{{"initialIsoValue",(low+high)*0.5}});if(panel->onMessage)panel->onMessage("已修改手动 ISO 草稿；BG/M 保持原估计，正式结果未改变。");};
+            statistics->onMarker=[panel](const QString& key,double value){panel->SetParameterPatch("GlobalAutomatic",{{key,value}});};
+        }
         return true;
     };
     return panel;

@@ -27,6 +27,8 @@ bool GetIsPointerEvent(InteractionEventKind eventKind) noexcept
     case InteractionEventKind::PrimaryRelease:
     case InteractionEventKind::SecondaryPress:
     case InteractionEventKind::SecondaryRelease:
+    case InteractionEventKind::MiddlePress:
+    case InteractionEventKind::MiddleRelease:
     case InteractionEventKind::PointerMove:
         return true;
     default:
@@ -37,7 +39,8 @@ bool GetIsPointerEvent(InteractionEventKind eventKind) noexcept
 bool GetIsPointerPress(InteractionEventKind eventKind) noexcept
 {
     return eventKind == InteractionEventKind::PrimaryPress
-        || eventKind == InteractionEventKind::SecondaryPress;
+        || eventKind == InteractionEventKind::SecondaryPress
+        || eventKind == InteractionEventKind::MiddlePress;
 }
 
 InteractionResult GetReentrantFailure() noexcept
@@ -151,10 +154,13 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
     }
     DispatchGuard guard(m_dispatchDepth);
 
-    if (m_capture && GetIsPointerEvent(eve.eventKind)) {
+    if(m_capture&&!m_capture->GetIsActive()){m_capture.reset();m_captureHandler=nullptr;}
+    if(m_capture&&GetIsPointerPress(eve.eventKind))return {true,true,true};
+    if (m_capture && (GetIsPointerEvent(eve.eventKind)||m_capture->GetReleaseKind()==InteractionEventKind::None
+        &&(eve.eventKind==InteractionEventKind::WheelForward||eve.eventKind==InteractionEventKind::WheelBackward))) {
         const auto releaseKind = m_capture->GetReleaseKind();
         const auto result = m_capture->Send(eve);
-        if (eve.eventKind == releaseKind && result.isSucceeded) {
+        if (!m_capture->GetIsActive() || ((eve.eventKind == releaseKind||releaseKind==InteractionEventKind::None&&eve.phase==InputPhase::End) && result.isSucceeded && m_capture->GetCompletesOnRelease())) {
             m_capture.reset();
             m_captureHandler = nullptr;
         }
@@ -187,8 +193,8 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
 
         if (mode == RouterDispatchMode::FirstMatch && result.isHandled) {
             aggregated.isHandled = true;
-            if (GetIsPointerPress(eve.eventKind)
-                && result.isSucceeded && routed.capture) {
+            if ((GetIsPointerPress(eve.eventKind)||eve.phase==InputPhase::Begin)
+                && (result.isSucceeded||routed.needsCaptureCleanup) && routed.capture && routed.capture->GetIsActive()) {
                 m_capture = std::move(routed.capture);
                 m_captureHandler = handler.get();
             }
@@ -201,4 +207,9 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
     }
 
     return aggregated;
+}
+
+InteractionResult InteractionRouter::CancelCurrentCapture(const InteractionEvent& event) {
+    if(!m_capture)return {};
+    return CancelCapture(m_capture->GetKey(),event);
 }

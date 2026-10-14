@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 class vtkActor;
 class vtkProp3D;
@@ -13,6 +14,7 @@ class RenderUpdatePort {
 public:
     virtual ~RenderUpdatePort() = default;
 
+    virtual std::optional<DataRevisionRef> GetNavigationSource() const { return {}; }
     virtual bool SendUpdates() = 0;
     // Session freeze 后只应用当前线程已经产生的 pending，不领取新 worker。
     virtual bool SendPendingUpdates() = 0;
@@ -45,6 +47,7 @@ public:
         int axis) = 0;
     virtual std::array<double, 3> GetCursorWorld() const = 0;
     virtual WindowLevelParams GetWindowLevel() const = 0;
+    virtual bool SetWindowLevel(double width,double center) { return SetWindowLevelDrag(0,0,1,1,width,center); }
     virtual bool SetWindowLevelDrag(
         int totalDx,
         int totalDy,

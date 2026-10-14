@@ -42,6 +42,7 @@ public:
     QWidget* GetBrowser() const;
     QTreeWidget* GetCatalogTree() const { return m_nodes; }
     QTreeWidget* GetSceneTree() const { return m_scene; }
+    QJsonArray GetObjectNodes() const { return m_sceneNodes; }
     void AttachAction(const QString& name, const QJsonObject& defaults, Action action,
         TestPolicy policy = TestPolicy::Change, bool exitTools = false);
     using Completion = std::function<void(const QString&, const QJsonObject&)>;
@@ -122,6 +123,9 @@ private:
     QStringList m_nextActionIds;
     QTabWidget* m_browser = nullptr;
     QTabBar* m_parameterTabs = nullptr;
+    QTabBar* m_taskTabs = nullptr;
+    QString m_taskGroup;
+    QMap<QString,QString> m_taskSelections;
     QString m_parameterAction;
     QLabel* m_noticeLabel = nullptr;
     QLabel* m_operationTitle = nullptr;

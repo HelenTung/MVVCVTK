@@ -13,6 +13,7 @@ class QGridLayout;
 class QCheckBox;
 class QLabel;
 class QPushButton;
+class QComboBox;
 namespace Manual {
 class ParameterEditor final : public QWidget {
 public:
@@ -56,6 +57,8 @@ private:
     QPushButton* m_unsetBoolean = nullptr;
     QWidget* m_body = nullptr;
     QWidget* m_input = nullptr;
+    QComboBox* m_parameterSource = nullptr;
+    bool m_isManualSource = false;
     QPushButton* m_createRegion = nullptr;
     std::function<void()> m_onCreateRegion;
     QVBoxLayout* m_rowLayout = nullptr;
