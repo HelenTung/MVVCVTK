@@ -4311,6 +4311,9 @@ public:
     {
     }
 
+    std::optional<DataRevisionRef> GetNavigationSource() const override {
+        return m_service?std::optional<DataRevisionRef>{m_service->GetRenderInputStamp().dataRevision}:std::nullopt;
+    }
     bool SendUpdates() override
     {
         return m_service && m_service->SendUpdates();
@@ -4420,6 +4423,7 @@ public:
             : WindowLevelParams{};
     }
 
+    bool SetWindowLevel(double width,double center) override { if(!m_service)return false;m_service->SetWindowLevel(width,center);return true; }
     bool SetWindowLevelDrag(
         int totalDx,
         int totalDy,

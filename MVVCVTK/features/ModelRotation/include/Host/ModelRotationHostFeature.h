@@ -22,7 +22,6 @@ public:
     ModelRotationHostFeature& operator=(ModelRotationHostFeature&&) = delete;
     std::string_view GetFeatureId() const noexcept override;
     bool AttachHost(const HostFeatureContext& context) override;
-    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     bool DetachHost() override;
     bool OnHostTick() override;
     // 拒绝不回调；Accepted 恰好一次 owner 回调。旋转/撤销成功在帧提交后兑现，失败或短命令可同步完成。

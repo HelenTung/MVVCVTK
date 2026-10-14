@@ -10,8 +10,8 @@ add_executable(
     Fakes/vtkPolyData.h
     HostCommandRouterTests.cpp
     HostCommandRouterTests.h
-    HostHotkeyRouterTests.cpp
-    HostHotkeyRouterTests.h
+    InteractionControllerTests.cpp
+    InteractionControllerTests.h
     HostInputRegistryTests.cpp
     HostInputRegistryTests.h
     InteractionRouterTests.cpp
@@ -37,6 +37,7 @@ target_link_libraries(
     PRIVATE
         mvvcvtk_host_test_internal
         MVVCVTK::Host
+        MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
 )
 

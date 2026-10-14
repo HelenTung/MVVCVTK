@@ -39,7 +39,7 @@ public:
     {
         if (m_isAttached
             || binding.featureId.empty()
-            || !binding.onInput) {
+            || (!binding.onInput&&!binding.onAction)) {
             return false;
         }
         m_featureId = std::move(binding.featureId);
@@ -458,8 +458,7 @@ int GetGapFailCount()
         isBuilt && session.AttachFeature(contextProbe);
     const bool isAttached =
         isProbeAttached && session.AttachFeature(feature);
-    const bool isInputAttached =
-        session.AttachHotkeys({});
+    const bool isInputAttached = bool(session.GetInteractionController());
     const auto* endpoint = session.GetPrimaryEndpoint();
     const auto* sliceEndpoint =
         session.GetRenderViewEndpoint("gap-slice");

@@ -139,6 +139,7 @@ private:
     bool m_isPublishing=false;
     std::vector<std::shared_ptr<Document>> m_documents;
     std::shared_ptr<Document> m_current;
+    std::weak_ptr<Document> m_inputDocument;
     HostFeatureContext m_context;
     CropHostFeature* m_owner=nullptr;
     std::shared_ptr<const std::thread::id> m_ownerThread;
@@ -637,6 +638,7 @@ bool CropHostFeature::Impl::Document::StartCrop(
     if (isStarted) {
         m_activeTarget = target;
         m_activeViewIds = std::move(activeViewIds);
+        if(m_host){m_bridge->SetInputBindings(m_host->GetInputBindings(referenceView->view.id));(void)m_host->SetInputOwner(kFeatureId,true,m_activeViewIds);}
     } else {
         (void)SetActiveViews(previousActive);
         if(!hadDocument){(void)m_bridge->ClearBindings();(void)m_bridge->ClearDocument();}
@@ -1385,6 +1387,7 @@ bool CropHostFeature::Impl::Document::SendRequest(
             const PublishGuard guard(m_isPublishing);
             const bool isExited=m_bridge->ExitCrop();
             const bool isQualityRestored=!isExited || m_bridge->GetShaderTickNeeded() || SetActiveViews({});
+            if(isExited&&isQualityRestored&&m_host)(void)m_host->SetInputOwner(kFeatureId,false,m_activeViewIds);
             return isExited && isQualityRestored;
         }
     case CropHostAction::None:
@@ -2121,7 +2124,69 @@ bool CropHostFeature::Impl::AttachHost(CropHostFeature& owner,const HostFeatureC
     if(!GetOwnerReady())return false;
     if(m_isAttached)return m_context.views==context.views&&m_context.data==context.data&&m_context.host==context.host;
     auto document=std::make_shared<Document>();if(!document->AttachHost(owner,context))return false;
-    m_documents.push_back(document);m_current=std::move(document);m_context=context;m_owner=&owner;m_isAttached=true;m_isStopping=false;return true;
+    m_documents.push_back(document);m_current=std::move(document);m_context=context;m_owner=&owner;m_isAttached=true;m_isStopping=false;
+    HostInputBinding binding;binding.featureId=std::string(kFeatureId);
+    binding.targetViews.viewRoles={HostRenderViewRole::Primary3D,HostRenderViewRole::Composite3D,HostRenderViewRole::TopDownSlice,HostRenderViewRole::FrontBackSlice,HostRenderViewRole::LeftRightSlice,HostRenderViewRole::Auxiliary};
+    InteractionActionInfo widget;widget.actionId="crop.widget.edit";widget.ownerId=binding.featureId;
+    const auto add=[&](const char* key,InputMouseButton button,std::uint8_t required,std::uint8_t forbidden){
+        BindingScope scope;scope.viewClass=InteractionViewClass::ThreeD;
+        widget.bindings.push_back({key,{InputTriggerKind::Drag,button,required,forbidden},true,scope,"widget:crop",{InputTriggerKind::Drag}});
+    };
+    add("crop.widget.select.drag",InputMouseButton::Primary,0,3);add("crop.widget.translate.drag",InputMouseButton::Middle,0,0);
+    add("crop.widget.translate.shift",InputMouseButton::Primary,1,2);add("crop.widget.scale.drag",InputMouseButton::Secondary,0,0);add("crop.widget.translate.ctrl",InputMouseButton::Primary,2,1);
+    binding.actions.push_back(std::move(widget));
+    for(const auto* id:{"interaction.confirm","interaction.cancel","interaction.undo","interaction.redo"}) {
+        InteractionActionInfo info;info.actionId=id;info.ownerId=binding.featureId;info.isTriggerable=true;info.isCurrentToolCommand=true;binding.actions.push_back(std::move(info));
+    }
+    const auto weak=owner.weak_from_this();
+    binding.getIsActionAvailable=[weak](std::string_view id,const InteractionEvent& event){
+        const auto f=weak.lock();if(!f)return false;if(id!="crop.widget.edit")return true;
+        for(const auto& d:f->m_impl->m_documents)if(d->m_activeTarget&&d->m_bridge) {
+            const auto view=d->m_views->GetInputView(d->m_activeTarget->referenceView);
+            if(view&&view->view.id==event.viewId&&d->m_bridge->GetInputAccepted(event))return true;
+        }
+        return false;
+    };
+    binding.onBindingsChanged=[weak](const std::vector<EffectiveBinding>& values){
+        const auto f=weak.lock();if(!f||values.empty())return;
+        for(const auto& d:f->m_impl->m_documents)if(d->m_activeTarget&&d->m_bridge) {
+            const auto view=d->m_views->GetInputView(d->m_activeTarget->referenceView);
+            if(view&&view->view.id==values.front().viewId)d->m_bridge->SetInputBindings(values);
+        }
+    };
+    const auto trigger=[weak](std::string_view id,const ActionContext& context)->ActionTriggerResult {
+        const auto f=weak.lock();if(!f)return {};
+        const auto matches=[&](const std::shared_ptr<Document>& candidate){return candidate&&candidate->m_activeTarget&&candidate->m_bridge&&candidate->m_bridge->GetCropActive()
+            &&std::find(candidate->m_activeViewIds.begin(),candidate->m_activeViewIds.end(),context.viewId)!=candidate->m_activeViewIds.end();};
+        std::shared_ptr<Document> d;
+        if(matches(f->m_impl->m_current))d=f->m_impl->m_current;
+        else for(const auto& candidate:f->m_impl->m_documents)if(matches(candidate)){if(d)return {ActionTriggerStatus::Invalid,0};d=candidate;}
+        if(!d)return {};
+        CropHostRequest request;
+        if(id=="interaction.confirm"){request.action=CropHostAction::BuildResult;request.target=d->m_activeTarget;}
+        else if(id=="interaction.undo")request.action=CropHostAction::Previous;
+        else if(id=="interaction.redo")request.action=CropHostAction::Next;
+        else if(id=="interaction.cancel")request.action=CropHostAction::Exit;else return {};
+        const bool ok=d->SendRequest(std::move(request),{});
+        if(ok&&id=="interaction.cancel")(void)f->m_impl->m_context.host->SetInputOwner(kFeatureId,false,d->m_activeViewIds);
+        return {ok?(id=="interaction.confirm"?ActionTriggerStatus::Accepted:ActionTriggerStatus::Completed):ActionTriggerStatus::Failed,0};
+    };
+    binding.onTrigger=trigger;
+    binding.getIsCaptureActive=[weak](std::string_view){const auto f=weak.lock();const auto d=f?f->m_impl->m_inputDocument.lock():nullptr;return d&&d->m_bridge&&d->m_bridge->GetInputGestureActive();};
+    binding.onAction=[weak,trigger](std::string_view id,const InteractionEvent& event,const std::optional<HostSemanticTarget>&){
+        const auto f=weak.lock();if(!f)return InteractionResult{};
+        if(id=="crop.widget.edit") {
+            auto d=f->m_impl->m_inputDocument.lock();
+            if(event.eventKind==InteractionEventKind::PrimaryPress||event.eventKind==InteractionEventKind::SecondaryPress||event.eventKind==InteractionEventKind::MiddlePress)
+                for(const auto& candidate:f->m_impl->m_documents)if(candidate->m_activeTarget&&candidate->m_bridge){const auto view=candidate->m_views->GetInputView(candidate->m_activeTarget->referenceView);if(view&&view->view.id==event.viewId&&candidate->m_bridge->GetInputAccepted(event)){d=candidate;f->m_impl->m_inputDocument=d;break;}}
+            return d&&d->m_bridge?d->m_bridge->SendWidgetInput(event):InteractionResult{true,true,true};
+        }
+        if(event.eventKind==InteractionEventKind::Cancel){if(const auto d=f->m_impl->m_inputDocument.lock())if(d->m_bridge)return d->m_bridge->SendWidgetInput(event);return InteractionResult{};}
+        ActionContext c;c.viewId=event.viewId;c.area=event.area;const auto result=trigger(id,c);
+        return InteractionResult{true,true,result.status==ActionTriggerStatus::Completed||result.status==ActionTriggerStatus::Accepted,result.status==ActionTriggerStatus::Failed?InteractionFailureReason::StateRejected:InteractionFailureReason::None};
+    };
+    if(!context.host->AttachInput(std::move(binding))){(void)m_current->DetachHost();m_documents.clear();m_current.reset();m_context={};m_owner=nullptr;m_isAttached=false;return false;}
+    return true;
 }
 bool CropHostFeature::Impl::DetachHost() {
     if(!GetOwnerReady())return !std::atomic_load(&m_ownerThread);
@@ -2132,7 +2197,8 @@ bool CropHostFeature::Impl::DetachHost() {
     const auto documents=m_documents;
     bool complete=true;for(const auto& document:documents){document->m_allowInputRestore=true;complete=document->DetachHost()&&complete;}
     if(!complete)return false;
-    m_documents.clear();m_current.reset();m_context={};m_owner=nullptr;m_isAttached=false;return true;
+    if(m_context.host&&!m_context.host->DetachInput(kFeatureId))return false;
+    m_inputDocument.reset();m_documents.clear();m_current.reset();m_context={};m_owner=nullptr;m_isAttached=false;return true;
 }
 bool CropHostFeature::Impl::OnHostTick() {
     if(!GetOwnerReady()||!m_isAttached)return false;

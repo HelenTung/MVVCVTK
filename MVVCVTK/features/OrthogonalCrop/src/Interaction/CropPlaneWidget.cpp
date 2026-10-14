@@ -5,6 +5,9 @@
 // =====================================================================
 
 #include "Interaction/CropPlaneWidget.h"
+#include "FeatureSupport/WidgetBindings.h"
+#include "FeatureSupport/RoutedWidgets.h"
+#include <vtkTransform.h>
 
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
@@ -53,6 +56,10 @@ public:
     bool SetEnabled(bool isEnabled);
     bool GetEnabled() const;
 
+public:
+    vtkSmartPointer<vtkTransform> inputTransform;
+    std::array<double,3> inputOrigin{},inputNormal{};
+    friend class CropPlaneWidget;
 private:
     static void SendWidgetEvent(
         vtkObject* caller,
@@ -93,7 +100,7 @@ private:
 CropPlaneWidget::Impl::Impl()
 {
     // 平面 widget 外观固定在控制器内，上层 bridge 只消费 world 中心点/法线。
-    m_widget = vtkSmartPointer<vtkImplicitPlaneWidget2>::New();
+    m_widget = vtkSmartPointer<FeatureSupport::RoutedPlaneWidget>::New();
     m_representation = vtkSmartPointer<vtkImplicitPlaneRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
     m_representation->DrawPlaneOn();
@@ -313,6 +320,7 @@ void CropPlaneWidget::Impl::SetPlaneRep()
 
 void CropPlaneWidget::Impl::OnWidgetEvent(unsigned long eventId)
 {
+    if(eventId==vtkCommand::StartInteractionEvent)static_cast<FeatureSupport::RoutedPlaneWidget*>(m_widget.GetPointer())->ReleaseInputFocus();
     if (!m_representation) {
         return;
     }
@@ -387,4 +395,21 @@ bool CropPlaneWidget::SetEnabled(bool isEnabled)
 bool CropPlaneWidget::GetEnabled() const
 {
     return m_impl->GetEnabled();
+}
+
+bool CropPlaneWidget::GetInputAccepted(int x,int y) const {
+    if(!m_impl->m_isEnabled)return false;
+    const auto interaction=m_impl->m_representation->GetInteractionState();
+    m_impl->m_representation->SetInteractionState(vtkImplicitPlaneRepresentation::Moving);
+    const bool hit=m_impl->m_representation->ComputeInteractionState(x,y)!=vtkImplicitPlaneRepresentation::Outside;
+    m_impl->m_representation->SetInteractionState(interaction);return hit;
+}
+void CropPlaneWidget::StartGesture(){std::copy_n(m_impl->m_representation->GetOrigin(),3,m_impl->inputOrigin.begin());std::copy_n(m_impl->m_representation->GetNormal(),3,m_impl->inputNormal.begin());}
+void CropPlaneWidget::CancelGesture(){m_impl->m_representation->SetOrigin(m_impl->inputOrigin.data());m_impl->m_representation->SetNormal(m_impl->inputNormal.data());static_cast<FeatureSupport::RoutedPlaneWidget*>(m_impl->m_widget.GetPointer())->StopGesture();}
+
+void CropPlaneWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){
+    FeatureSupport::SetWidgetBindings(m_impl->m_widget,values,{
+        {"crop.widget.select.drag",vtkWidgetEvent::Select},{"crop.widget.translate.drag",vtkWidgetEvent::Translate},
+        {"crop.widget.translate.shift",vtkWidgetEvent::Translate},{"crop.widget.scale.drag",vtkWidgetEvent::Scale},
+        {"crop.widget.translate.ctrl",vtkWidgetEvent::Translate}});
 }
