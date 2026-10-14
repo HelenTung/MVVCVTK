@@ -1623,13 +1623,13 @@ void CheckSharedRoi(TestWindow& window)
             Check(choices && choices->findData(GetRefText(ref))>=0,"saved ROI is selectable in the consumer form");
         }
     }
-    if(GetEnabled(window,"Surface")) {
-    auto* surface=window.GetModule("Surface");surface->Observe();
+    auto* surface=window.GetModule("Surface");
     const auto createRegion=[&] {
         surface->Observe();
         auto* button=surface->GetParameterEditor("GlobalAutomatic")->GetField("analysisRoi")->findChild<QPushButton*>("createRegion");
         Check(button!=nullptr,"business range exposes the shared region editor");button->click();
     };
+    if(GetEnabled(window,"Surface")) {
     createRegion();
     GetComplete(window,Send(window,"Roi","Begin",{{"name","业务内新区域"}}),"Succeeded");
     const auto created=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
@@ -1719,6 +1719,7 @@ void CheckSharedRoi(TestWindow& window)
         Check(descriptor && descriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
             && descriptor->metadata.name=="仅改名称的旋转结果","saving an unchanged rotated tool preserves the computed region before and after applying");
     }
+    if(GetEnabled(window,"Surface")) {
     surface->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});createRegion();
     GetComplete(window,Send(window,"Roi","Begin",{{"name","异步业务回填"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
     const auto operation=Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}});
@@ -1728,6 +1729,7 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,operation,"PreviewReady");
     Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
         && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
+    }
 #endif
 }
 void StartSelfTest(TestWindow& window)
