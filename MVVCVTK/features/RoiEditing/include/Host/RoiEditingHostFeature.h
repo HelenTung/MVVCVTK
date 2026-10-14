@@ -1,6 +1,7 @@
 #pragma once
 #include "Host/HostFeature.h"
 #include "Data/RoiTypes.h"
+#include <utility>
 
 struct RoiEditingConfig final {
     HostViewTarget referenceView;
@@ -8,12 +9,12 @@ struct RoiEditingConfig final {
 };
 enum class RoiEditingAction : std::uint8_t {
     Begin, SetDraft, Commit, Cancel, SetVisible, ApplySelection,
-    BeginOperation, SetOperation, ApplyOperation, CancelOperation, Undo, Redo, ShowRoi, SetMetadata, BeginDrawing, EndDrawing
+    BeginOperation, SetOperation, ApplyOperation, CancelOperation, Undo, Redo, ShowRoi, SetMetadata, BeginDrawing, EndDrawing, CancelSave
 };
 enum class RoiDrawingMode : std::uint8_t { SliceContour, SliceBrush, ProjectedContour, VisibleBrush, Seed, SliceRectangle, SliceEllipse, SliceCircle, EditControlPoint };
 struct RoiEditingRequest final {
     RoiEditingAction action = RoiEditingAction::Begin;
-    // Begin 的完整草稿；SetDraft 可选携带同源元信息，成功投影后与几何一起更新。
+    // Begin 的完整草稿；SetDraft 可选携带同源元信息，与有效几何一起更新。
     std::optional<RoiRequest> draft;
     std::optional<RoiPrimitive> primitive;
     std::optional<bool> isVisible;
@@ -21,7 +22,9 @@ struct RoiEditingRequest final {
     std::optional<RoiOperationRequest> operation;
     std::optional<DataRevisionRef> roi;
     std::optional<RoiDrawingMode> drawing;
+    std::optional<RoiOutputMode> output;
 };
+enum class RoiDisplayStatus : std::uint8_t { Updating, Displayed, Empty, Failed };
 struct RoiEditingState final {
     bool isAttached = false;
     bool hasDraft = false;
@@ -36,6 +39,10 @@ struct RoiEditingState final {
     std::size_t undoCount = 0, redoCount = 0;
     bool isComputing = false, isSaving = false;
     RoiError displayError = RoiError::None;
+    RoiDisplayStatus displayStatus = RoiDisplayStatus::Empty;
+    std::vector<std::pair<DataRevisionRef,RoiError>> displayFailures;
+    RoiSelectionMode selection = RoiSelectionMode::Replace;
+    RoiOutputMode output = RoiOutputMode::CreateNew;
     RoiOperationResult operation;
     std::vector<DataRevisionRef> visibleRois;
 };

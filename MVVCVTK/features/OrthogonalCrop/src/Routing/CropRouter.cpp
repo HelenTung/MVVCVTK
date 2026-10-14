@@ -259,8 +259,7 @@ std::optional<std::packaged_task<CropMaterializationCandidate()>> CropRouter::Bu
     if (!CropAlgorithm::GetInputValid(input) || !input.data || !roi || roi->GetSource()!=input.data->self) return {};
     return std::packaged_task<CropMaterializationCandidate()>(
         [input=std::move(input),params=std::move(params),roi=std::move(roi),getStopRequested=std::move(getStopRequested)] {
-            const auto budget=params.availableRamBytes ? params.availableRamBytes:GetRamBytes();
-            auto result=CropAlgorithm::GetRoiResult(input,roi,budget,getStopRequested);
+            auto result=CropAlgorithm::GetRoiResult(input,roi,getStopRequested);
             result.documentId=params.documentId;result.nodeId=params.nodeId;result.requestId=params.requestId;
             return result;
         });

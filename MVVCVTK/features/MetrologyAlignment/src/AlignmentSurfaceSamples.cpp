@@ -44,6 +44,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     const auto &region = work.recipe.surfaceFit->sourceRegion;
     Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
             "Surface selection belongs to another mesh revision.");
+    std::unique_ptr<RoiQuery> roiQuery;if(region && region->roi){const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");auto query=found->second->GetQuery();if(query.error!=RoiError::None || !query.query)throw std::bad_alloc();roiQuery=std::move(query.query);}
     const auto count = region && !region->vertexIds.empty() ? region->vertexIds.size() : v.size() / 3;
     const auto limit = std::numeric_limits<std::size_t>::max();
     const auto initialCapacity = region && region->targetBounds ? 0 : count;
@@ -61,11 +62,11 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         for (std::size_t i=0;i<triangles.size();i+=3) {
             if(i%768==0)CheckWork(work);std::array<AlignmentPoint,3> triangle{};
             for(int j=0;j<3;++j){const auto id=triangles[i+j];triangle[j]=Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}));}
-            const auto selected=roi->GetTriangleSelection(triangle,0,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});Require(selected.error==RoiError::None,"Alignment ROI triangle selection failed.");
+            const auto selected=roi->GetTriangleSelection(triangle,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});Require(selected.error==RoiError::None,"Alignment ROI triangle selection failed.");
             const bool valid=AlignmentGeometryFit::GetFaceValid(*work.mesh,i/3);
             for(const auto& piece:selected.triangles){
                 const AlignmentPoint center{(piece[0][0]+piece[1][0]+piece[2][0])/3,(piece[0][1]+piece[1][1]+piece[2][1])/3,(piece[0][2]+piece[1][2]+piece[2][2])/3};
-                if(!roi->GetContains(center))continue;const auto sourcePoint=Point(Transform(inverse,Vector(center)));
+                if(!roiQuery->GetContains(center))continue;const auto sourcePoint=Point(Transform(inverse,Vector(center)));
                 if(region->targetBounds){const auto p=Transform(initial,Vector(sourcePoint));bool inside=true;for(int a=0;a<3;++a)if(p[a]<(*region->targetBounds)[a*2] || p[a]>(*region->targetBounds)[a*2+1])inside=false;if(!inside)continue;}
                 const auto a=Transform(inverse,Vector(piece[0])),b=Transform(inverse,Vector(piece[1])),c=Transform(inverse,Vector(piece[2]));
                 const auto cross=(b-a).cross(c-a);const double area=cv::norm(cross)*.5;if(!(area>0))continue;
@@ -82,7 +83,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
         if (i % 256 == 0) CheckWork(work);
         const auto id = region && !region->vertexIds.empty() ? region->vertexIds[i] : i;
         Require(id < v.size() / 3, "Surface selection is out of bounds.");
-        if(region && region->roi){const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");if(!found->second->GetContains(Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}))))continue;}
+        if(region && region->roi){const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");if(!roiQuery->GetContains(Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}))))continue;}
         if (region && region->targetBounds) {
             const auto p = Transform(initial, {v[3 * id], v[3 * id + 1], v[3 * id + 2]});
             bool inside = true;
