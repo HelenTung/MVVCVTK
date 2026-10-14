@@ -23,6 +23,7 @@ Vec Vertex(const SurfaceMeshPayload &mesh, std::uint64_t id) {
 void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &selection,
              AlignmentDeviationField &field, std::vector<AlignmentPoint> &normals, std::size_t available,
              const RoiReadSnapshot& roi,const AlignmentMatrix& meshToRoi) {
+    const auto roiQuery=roi?roi->GetQuery():RoiQueryResult{};if(roi && (roiQuery.error!=RoiError::None || !roiQuery.query))throw std::bad_alloc();
     const auto &mesh = *work.mesh;
     const auto &triangles = mesh.GetTriangles();
     const auto count = selection.empty() ? triangles.size()/3 : selection.size();
@@ -47,12 +48,12 @@ void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &select
         Require(std::isfinite(area) && (area > 0 || !valid), "Evaluation contains a degenerate triangle.");
         if (roi) {
             const std::array<AlignmentPoint,3> roiTriangle{Point(Transform(meshToRoi,Vertex(mesh,a))),Point(Transform(meshToRoi,Vertex(mesh,b))),Point(Transform(meshToRoi,Vertex(mesh,c)))};
-            const auto selected=roi->GetTriangleSelection(roiTriangle,0,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});
+            const auto selected=roi->GetTriangleSelection(roiTriangle,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});
             Require(selected.error==RoiError::None,"Deviation ROI triangle selection failed.");field.roiBoundaryTolerance=std::max(field.roiBoundaryTolerance,selected.boundaryTolerance);
             const auto inverse=Inverse(meshToRoi);
             for (const auto& piece:selected.triangles) {
                 const AlignmentPoint center{(piece[0][0]+piece[1][0]+piece[2][0])/3,(piece[0][1]+piece[1][1]+piece[2][1])/3,(piece[0][2]+piece[1][2]+piece[2][2])/3};
-                if(!roi->GetContains(center))continue;AlignmentDeviationSample sample;sample.parentTriangle=triangle;sample.sourcePosition=Point(Transform(inverse,Vector(center)));
+                if(!roiQuery.query->GetContains(center))continue;AlignmentDeviationSample sample;sample.parentTriangle=triangle;sample.sourcePosition=Point(Transform(inverse,Vector(center)));
                 std::array<AlignmentPoint,3> positions{};for(int j=0;j<3;++j)positions[j]=Point(Transform(inverse,Vector(piece[j])));sample.sourceTriangle=positions;
                 const auto u=Vector(positions[1])-Vector(positions[0]),v=Vector(positions[2])-Vector(positions[0]);sample.area=cv::norm(u.cross(v))*.5;
                 if(!(sample.area>0))continue;if(!valid)sample.state=AlignmentDeviationState::InvalidSource;

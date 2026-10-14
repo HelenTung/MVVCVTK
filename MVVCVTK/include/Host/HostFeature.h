@@ -4,6 +4,7 @@
 #include "Host/TrustedDataPort.h"
 #include "Host/Types/HostViewTypes.h"
 #include "Interaction/InteractionTypes.h"
+#include "Interaction/InteractionController.h"
 #include "Render/Contracts/RenderEffect.h"
 
 #include <cstddef>
@@ -50,6 +51,16 @@ struct HostInputBinding final {
     std::function<std::optional<HostSemanticTarget>(const InteractionEvent&)> getTarget;
     std::function<InteractionResult(const InteractionEvent&,
         const HostSemanticTarget&)> onTargetInput;
+    std::vector<InteractionActionInfo> actions;
+    std::function<InteractionResult(std::string_view,const InteractionEvent&,
+        const std::optional<HostSemanticTarget>&)> onAction;
+    // owner thread 同步通知；可查询，配置写入重入返回 Busy。
+    std::function<void(const std::vector<EffectiveBinding>&)> onBindingsChanged;
+    // 纯查询；不能请求/修改 SDK 状态。
+    std::function<bool(std::string_view,const InteractionEvent&)> getIsActionAvailable;
+    std::function<ActionTriggerResult(std::string_view,const ActionContext&)> onTrigger;
+    // false 仅表示手势及清理已结束，不把后台任务当作鼠标捕获。
+    std::function<bool(std::string_view)> getIsCaptureActive;
 };
 
 class HostInputPort {
@@ -58,6 +69,9 @@ public:
 
     virtual bool AttachInput(HostInputBinding binding) = 0;
     virtual bool DetachInput(std::string_view featureId) = 0;
+    // 显式设置当前编辑工具；清除只影响本 owner，不猜测后台任务归属。
+    virtual bool SetInputOwner(std::string_view,bool,const std::vector<std::string>& = {}) { return false; }
+    virtual std::vector<EffectiveBinding> GetInputBindings(const std::string&) const { return {}; }
 };
 
 class FeatureViewDirectory {

@@ -27,6 +27,7 @@ public:
         const NavigationBindings* bindings = nullptr);
     ~Viewer3DHandler() override;
 
+    bool GetIsCaptureActive() const noexcept override { return m_isDragging||m_isModelDrag; }
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:

@@ -181,7 +181,8 @@ InspectionData AlignmentInspection::Build(const AlignmentWork &input,const Inspe
                         if(spec.fit.region.roi || spec.fit.region.targetBounds){
                             auto trace=std::make_shared<InspectionSectionTrace>(*geometry.section);AlignmentSamples selected;trace->parentSampleCount=trace->samples.size();trace->samples.clear();
                             RoiReadSnapshot roi;if(spec.fit.region.roi){const auto found=work.rois.find(*spec.fit.region.roi);Require(found!=work.rois.end(),"Inspection section ROI is unavailable.");roi=found->second;}
-                            for(std::size_t i=0;i<samples.points.size();++i){const auto& p=samples.points[i];bool inside=!roi || roi->GetContains(Point(Transform(spec.fit.region.meshToRoi,Vector(p))));
+                            const auto roiQuery=roi?roi->GetQuery():RoiQueryResult{};if(roi && (roiQuery.error!=RoiError::None || !roiQuery.query))throw std::bad_alloc();
+                            for(std::size_t i=0;i<samples.points.size();++i){const auto& p=samples.points[i];bool inside=!roi || roiQuery.query->GetContains(Point(Transform(spec.fit.region.meshToRoi,Vector(p))));
                                 if(spec.fit.region.targetBounds){const auto q=Transform(transform,Vector(p));for(int a=0;a<3;++a)if(q[a]<(*spec.fit.region.targetBounds)[a*2] || q[a]>(*spec.fit.region.targetBounds)[a*2+1])inside=false;}
                                 if(inside){selected.points.push_back(p);trace->samples.push_back(geometry.section->samples[i]);}else ++selected.rejected;
                             }

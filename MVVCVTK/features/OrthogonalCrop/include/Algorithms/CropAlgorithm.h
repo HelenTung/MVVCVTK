@@ -88,7 +88,7 @@ public:
 
     static CropMaterializationCandidate GetRoiResult(
         const CropInputSnapshot& input, RoiReadSnapshot roi,
-        std::size_t availableRamBytes, const std::function<bool()>& getStopRequested);
+        const std::function<bool()>& getStopRequested);
 
     static CropMaterializationCandidate GetResult(
         vtkImageData* image,

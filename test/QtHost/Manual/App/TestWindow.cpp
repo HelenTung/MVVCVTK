@@ -612,6 +612,16 @@ void TestWindow::closeEvent(QCloseEvent* event)
 void TestWindow::showEvent(QShowEvent* event) { QMainWindow::showEvent(event); m_pump.SetVisible(); }
 bool TestWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    // 原生鼠标/键盘仍仅走 QVTK；失焦只发送 SDK 生命周期取消。
+    if (m_isReady && !m_isClosing && (event->type() == QEvent::FocusOut || event->type() == QEvent::Hide)) {
+        const auto session = m_runtime.GetSession();
+        const auto endpoint = session ? session->GetInputEndpoint() : nullptr;
+        if (endpoint) for (const auto& view : m_views) if (view.widget == watched) {
+            HostInputEvent cancel; cancel.viewId = view.id.toStdString(); cancel.kind = HostInputKind::Cancel;
+            (void)endpoint->SendInput(cancel);
+            break;
+        }
+    }
     if (!m_visibilityQueued && (event->type() == QEvent::Show || event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange || event->type() == QEvent::Paint)) {
         m_visibilityQueued = true;
         QMetaObject::invokeMethod(&m_pump, [this] { m_visibilityQueued = false; m_pump.SetVisible(); }, Qt::QueuedConnection);

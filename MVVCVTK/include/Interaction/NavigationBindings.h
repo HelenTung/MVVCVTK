@@ -1,45 +1,26 @@
 #pragma once
-
-#include "Interaction/InputBindings.h"
-#include "Interaction/InteractionTypes.h"
-
-#include <array>
-#include <cstddef>
+#include "Interaction/InteractionControllerAccess.h"
+#include <memory>
 
 enum class NavigationAction : std::size_t {
-    SliceForward,
-    SliceBackward,
-    CrosshairDrag,
-    WindowLevelDrag,
-    ZoomDrag,
-    PlaneDrag,
-    ModelPanDrag,
-    ModelScaleDrag,
-    ModelSecondaryPanDrag,
-    Count
+    SliceForward, SliceBackward, CrosshairDrag, WindowLevelDrag, ZoomDrag,
+    PlaneDrag, ModelPanDrag, ModelScaleDrag, ModelSecondaryPanDrag,
+    ZoomWheelForward, ZoomWheelBackward, PanDrag, CameraRotateDrag, CameraPanDrag,
+    CameraZoomDrag, CameraZoomForward, CameraZoomBackward, CameraPanShift, CameraRollCtrl, CameraZoomShiftCtrl, Precision, Accelerated, Count
 };
-
-struct NavigationBinding final {
-    InputBinding input;
-    bool isEnabled = true;
-};
-
-// 配置阶段生成值快照；运行期匹配不访问外部提供方。
+// 只读匹配视图，所有有效绑定来自 Session 的同一控制器。
 class NavigationBindings final {
 public:
-    NavigationBindings() noexcept;
-
-    static InputBindingStatus Build(
-        const IInputBindings& source,
-        NavigationBindings& out) noexcept;
-
-    bool GetMatched(
-        NavigationAction action,
-        const InteractionEvent& event) const noexcept;
-
-    bool GetIsEnabled(NavigationAction action) const noexcept;
-
+    NavigationBindings();
+    void SetController(std::shared_ptr<InteractionController> controller,std::string viewId);
+    bool GetMatched(NavigationAction,const InteractionEvent&) const;
+    bool GetIsEnabled(NavigationAction) const;
+    std::optional<InputBinding> GetInputBinding(NavigationAction) const;
+    static void RegisterActions(InteractionController&,std::function<ActionTriggerResult(std::string_view,const ActionContext&)> execute={});
+    static std::string_view GetKey(NavigationAction);
 private:
-    std::array<NavigationBinding,
-        static_cast<std::size_t>(NavigationAction::Count)> m_rules;
+    void SetDefaults() const;
+    mutable std::shared_ptr<InteractionController> m_defaults;
+    mutable std::weak_ptr<InteractionController> m_controller;
+    std::string m_viewId;
 };

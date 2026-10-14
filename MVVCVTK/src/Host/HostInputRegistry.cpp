@@ -2,6 +2,7 @@
 
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Interaction/AbstractViewContext.h"
+#include "Interaction/InteractionControllerAccess.h"
 
 #include <algorithm>
 #include <atomic>
@@ -43,11 +44,13 @@ bool GetTargetMatched(
 bool GetIsPointerPress(InteractionEventKind kind) noexcept
 {
     return kind == InteractionEventKind::PrimaryPress
-        || kind == InteractionEventKind::SecondaryPress;
+        || kind == InteractionEventKind::SecondaryPress
+        || kind == InteractionEventKind::MiddlePress;
 }
 
 InteractionEventKind GetReleaseKind(InteractionEventKind kind) noexcept
 {
+    if(kind==InteractionEventKind::MiddlePress)return InteractionEventKind::MiddleRelease;
     return kind == InteractionEventKind::SecondaryPress
         ? InteractionEventKind::SecondaryRelease
         : InteractionEventKind::PrimaryRelease;
@@ -68,6 +71,8 @@ InteractionEventKind GetInteractionKind(HostInputKind kind) noexcept
         return InteractionEventKind::SecondaryPress;
     case HostInputKind::SecondaryRelease:
         return InteractionEventKind::SecondaryRelease;
+    case HostInputKind::MiddlePress:return InteractionEventKind::MiddlePress;
+    case HostInputKind::MiddleRelease:return InteractionEventKind::MiddleRelease;
     case HostInputKind::PointerMove:
         return InteractionEventKind::PointerMove;
     case HostInputKind::KeyPress:
@@ -140,6 +145,12 @@ public:
         std::function<InteractionResult(const InteractionEvent&,
             const HostSemanticTarget&)> onTargetInput;
         InputPhase phase = InputPhase::FeatureTool;
+        std::vector<InteractionActionInfo> actions;
+        std::function<InteractionResult(std::string_view,const InteractionEvent&,const std::optional<HostSemanticTarget>&)> onAction;
+        std::function<void(const std::vector<EffectiveBinding>&)> onBindingsChanged;
+        std::function<bool(std::string_view,const InteractionEvent&)> getIsActionAvailable;
+        std::function<ActionTriggerResult(std::string_view,const ActionContext&)> onTrigger;
+        std::function<bool(std::string_view)> getIsCaptureActive;
     };
 
     struct InstalledRoute final {
@@ -159,6 +170,21 @@ public:
             return m_owner.AttachInput(std::move(binding));
         }
 
+        bool SetInputOwner(std::string_view id,bool active,const std::vector<std::string>& viewIds) override {
+            const auto directory=m_owner.m_directory.lock();if(!directory)return false;
+            const auto found=std::find_if(m_owner.m_featureBindings.begin(),m_owner.m_featureBindings.end(),[&](const auto& b){return b->featureId==id;});
+            if(found==m_owner.m_featureBindings.end())return false;
+            const auto routes=directory->GetInputRoutes((*found)->targets);
+            for(const auto& viewId:viewIds)if(std::none_of(routes.begin(),routes.end(),[&](const auto& r){return r.id==viewId;}))return false;
+            bool ok=true;
+            for(const auto& r:routes) {
+                if(!viewIds.empty()&&std::find(viewIds.begin(),viewIds.end(),r.id)==viewIds.end())continue;
+                const auto current=InteractionControllerAccess::GetOwner(*m_owner.controller,r.id);
+                if(active||current==id)ok=InteractionControllerAccess::SetOwner(*m_owner.controller,r.id,active?std::string(id):std::string{})&&ok;
+            }
+            return ok;
+        }
+        std::vector<EffectiveBinding> GetInputBindings(const std::string& id) const override { return m_owner.controller->GetBindings(BindingScope::View(id)); }
         bool DetachInput(std::string_view featureId) override
         {
             return m_owner.DetachInput(featureId);
@@ -176,13 +202,14 @@ public:
             std::string viewId,
             HostRenderViewRole role,
             InteractionEventKind releaseKind,
-            std::optional<HostSemanticTarget> target)
+            std::optional<HostSemanticTarget> target, std::string actionId={})
             : m_owner(std::move(owner))
             , m_binding(std::move(binding))
             , m_viewId(std::move(viewId))
             , m_role(role)
             , m_releaseKind(releaseKind)
             , m_target(std::move(target))
+            , m_actionId(std::move(actionId))
         {
         }
 
@@ -199,12 +226,17 @@ public:
             return m_releaseKind;
         }
 
+        bool GetIsActive() const noexcept override {
+            try {return m_binding&&(!m_binding->getIsCaptureActive||m_binding->getIsCaptureActive(m_actionId));} catch(...) {return true;}
+        }
+        bool GetCompletesOnRelease() const noexcept override { return m_binding&&!m_binding->getIsCaptureActive; }
         InteractionResult Send(const InteractionEvent& event) override
         {
             const auto owner = m_owner.lock();
+            auto routed=event;routed.actionId=m_actionId;
             return owner && m_binding
                 ? owner->SendCaptured(
-                    *m_binding, event, m_viewId, m_role, m_target)
+                    *m_binding, routed, m_viewId, m_role, m_target)
                 : GetRouteFailure(event.eventKind);
         }
 
@@ -216,6 +248,7 @@ public:
         InteractionEventKind m_releaseKind =
             InteractionEventKind::PrimaryRelease;
         std::optional<HostSemanticTarget> m_target;
+        std::string m_actionId;
     };
 
     explicit Impl(std::weak_ptr<IHostViewDirectory> directory)
@@ -225,6 +258,7 @@ public:
     {
     }
 
+    std::shared_ptr<InteractionController> controller=std::make_shared<InteractionController>();
     bool Start(const HostViewTargets& allViews);
     HostInputPort& GetFeaturePort() noexcept { return m_inputPort; }
     bool AttachInput(HostInputBinding binding);
@@ -323,6 +357,8 @@ bool HostInputRegistry::Impl::Start(const HostViewTargets& allViews)
         InteractionEventKind::PrimaryRelease,
         InteractionEventKind::SecondaryPress,
         InteractionEventKind::SecondaryRelease,
+        InteractionEventKind::MiddlePress,
+        InteractionEventKind::MiddleRelease,
         InteractionEventKind::PointerMove,
         InteractionEventKind::KeyPress,
         InteractionEventKind::KeyRelease,
@@ -330,6 +366,48 @@ bool HostInputRegistry::Impl::Start(const HostViewTargets& allViews)
         InteractionEventKind::Cancel
     };
 
+    std::vector<InteractionView> interactionViews;
+    for(const auto& r:routes) {
+        const bool slice=r.role==HostRenderViewRole::TopDownSlice||r.role==HostRenderViewRole::FrontBackSlice||r.role==HostRenderViewRole::LeftRightSlice;
+        interactionViews.push_back({r.id,slice?InteractionViewClass::Slice:InteractionViewClass::ThreeD});
+    }
+    InteractionControllerAccess::Start(*controller,std::move(interactionViews),
+        [weakOwner](const std::string& id){
+            const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+            const auto r=d?d->GetViewRoute(HostViewTarget{id}):std::optional<HostViewRoute>{};
+            const auto c=r?r->context.lock():nullptr;return c?c->GetNavigation():nullptr;
+        },[weakOwner](const std::string& id,std::shared_ptr<ViewNavigation> n){
+            const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+            const auto r=d?d->GetViewRoute(HostViewTarget{id}):std::optional<HostViewRoute>{};
+            const auto c=r?r->context.lock():nullptr;return c?c->SetNavigation(std::move(n)):NavigationStatus::Unbound;
+        });
+    InteractionControllerAccess::SetCaptureCancel(*controller,[weakOwner](const ActionContext& context){
+        const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+        const auto r=d?d->GetViewRoute(HostViewTarget{context.viewId}):std::optional<HostViewRoute>{};const auto view=r?r->context.lock():nullptr;
+        const auto result=view?view->CancelCurrentCapture():InteractionResult{};
+        return ActionTriggerResult{!result.isHandled?ActionTriggerStatus::Unavailable:result.isSucceeded?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,0};
+    });
+    NavigationBindings::RegisterActions(*controller,[weakOwner](std::string_view id,const ActionContext& c){
+        const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+        const auto r=d?d->GetViewRoute(HostViewTarget{c.viewId}):std::optional<HostViewRoute>{};const auto view=r?r->context.lock():nullptr;
+        const auto status=view?view->TriggerNavigation(id,c.input):NavigationStatus::Unbound;
+        return ActionTriggerResult{status==NavigationStatus::Applied?ActionTriggerStatus::Completed:status==NavigationStatus::Busy?ActionTriggerStatus::Busy:status==NavigationStatus::Unbound||status==NavigationStatus::Unsupported?ActionTriggerStatus::Unavailable:ActionTriggerStatus::Failed,0};
+    });
+    InteractionControllerAccess::SetFallbackAction(*controller,[weakOwner](std::string_view id,const ActionContext& c){
+        if(id!="interaction.cancel")return ActionTriggerResult{};
+        const auto p=weakOwner.lock();const auto d=p?p->m_directory.lock():nullptr;
+        const auto r=d?d->GetViewRoute(HostViewTarget{c.viewId}):std::optional<HostViewRoute>{};const auto view=r?r->context.lock():nullptr;
+        if(!view||view->GetToolMode()==ToolMode::Navigation)return ActionTriggerResult{};
+        return ActionTriggerResult{view->SetToolMode(ToolMode::Navigation)?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,0};
+    });
+    InteractionControllerAccess::SetBindingsChanged(*controller,[weakOwner] {
+        const auto owner=weakOwner.lock();if(!owner)return;
+        const auto directory=owner->m_directory.lock();if(!directory)return;
+        const auto bindings=owner->m_featureBindings;
+        for(const auto& b:bindings)if(b->onBindingsChanged)for(const auto& r:directory->GetInputRoutes(b->targets)) {
+            try { b->onBindingsChanged(owner->controller->GetBindings(BindingScope::View(r.id))); }catch(...) {}
+        }
+    });
     bool isInstalled = true;
     for (const auto& route : routes) {
         const auto context = route.context.lock();
@@ -339,6 +417,7 @@ bool HostInputRegistry::Impl::Start(const HostViewTargets& allViews)
         }
         const auto viewId = route.id;
         const auto role = route.role;
+        (void)context->SetInteractionController(controller,viewId);
         if (!context->SetInputHandler(
                 [weakOwner, viewId, role](const InteractionEvent& event) {
                     const auto owner = weakOwner.lock();
@@ -376,7 +455,7 @@ bool HostInputRegistry::Impl::AttachInput(HostInputBinding binding)
 {
     if (!m_isStarted || m_dispatchDepth != 0
         || binding.featureId.empty()
-        || (!binding.onInput && !binding.onTargetInput)
+        || (!binding.onInput && !binding.onTargetInput && !binding.onAction)
         || static_cast<bool>(binding.getTarget) != static_cast<bool>(binding.onTargetInput)
         || !GetTargetsValid(binding.targetViews)) {
         return false;
@@ -396,13 +475,31 @@ bool HostInputRegistry::Impl::AttachInput(HostInputBinding binding)
         value->phase = InputPhase::FeatureTool;
         value->getTarget = std::move(binding.getTarget);
         value->onTargetInput = std::move(binding.onTargetInput);
+        value->actions=std::move(binding.actions);value->onAction=std::move(binding.onAction);
+        value->onBindingsChanged=std::move(binding.onBindingsChanged);
+        value->getIsActionAvailable=std::move(binding.getIsActionAvailable);value->onTrigger=std::move(binding.onTrigger);value->getIsCaptureActive=std::move(binding.getIsCaptureActive);
         value->callback = [callback = std::move(binding.onInput)](
             const InteractionEvent& event,
             const std::string&,
             HostRenderViewRole) {
             return callback ? callback(event) : InteractionResult{};
         };
+        std::vector<std::string> ids;
+        if(const auto d=m_directory.lock())for(const auto& r:d->GetInputRoutes(value->targets))ids.push_back(r.id);
+        const auto weak=weak_from_this();
+        for(auto info:value->actions) {
+            info.ownerId=value->featureId;const auto id=info.actionId;
+            if(!InteractionControllerAccess::Register(*controller,std::move(info),ids,[weak,value,id](const ActionContext& c){
+                const auto owner=weak.lock();if(!owner)return ActionTriggerResult{};
+                if(value->onTrigger)return value->onTrigger(id,c);
+                InteractionEvent e;e.viewId=c.viewId;e.area=c.area;e.actionId=id;
+                const auto result=owner->SendBinding(*value,e,c.viewId,HostRenderViewRole::Auxiliary);
+                return ActionTriggerResult{!result.isHandled?ActionTriggerStatus::Unavailable:result.isSucceeded?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,0};
+            })) {InteractionControllerAccess::RemoveOwner(*controller,value->featureId);return false;}
+        }
+        if(value->onBindingsChanged)for(const auto& id:ids)value->onBindingsChanged(controller->GetBindings(BindingScope::View(id)));
         m_featureBindings.push_back(std::move(value));
+        InteractionControllerAccess::NotifyBindingsChanged(*controller);
         return true;
     }
     catch (...) {
@@ -438,7 +535,9 @@ bool HostInputRegistry::Impl::DetachInput(
         });
     if (found == m_featureBindings.end()) return true;
     if (!CancelBinding(*found)) return false;
+    InteractionControllerAccess::RemoveOwner(*controller,featureId);
     m_featureBindings.erase(found);
+    InteractionControllerAccess::NotifyBindingsChanged(*controller);
     return true;
 }
 
@@ -486,8 +585,10 @@ InteractionResult HostInputRegistry::Impl::SendBinding(
     const HostRenderViewRole role,
     const std::optional<HostSemanticTarget>& target)
 {
-    if (!binding.callback) return {};
+    if (!binding.callback&&!binding.onAction) return {};
     try {
+        if(binding.onAction&&!event.actionId.empty())return binding.onAction(event.actionId,event,target);
+        if(binding.onAction&&event.eventKind==InteractionEventKind::Cancel)return binding.onAction({},event,target);
         if (target && binding.onTargetInput) return binding.onTargetInput(event, *target);
         return binding.callback(event, viewId, role);
     }
@@ -519,11 +620,11 @@ InteractionDispatch HostInputRegistry::Impl::Route(
     const std::string& viewId,
     const HostRenderViewRole role)
 {
-    if (m_dispatchDepth != 0 || event.eventKind == InteractionEventKind::Cancel) {
-        return event.eventKind == InteractionEventKind::Cancel
-            ? InteractionDispatch{}
-            : InteractionDispatch{
-                GetRouteFailure(event.eventKind), nullptr };
+    if(m_dispatchDepth!=0)return {GetRouteFailure(event.eventKind),nullptr};
+    if(event.eventKind==InteractionEventKind::Cancel) {
+        DispatchGuard guard(m_dispatchDepth);InteractionResult aggregate;
+        for(const auto& b:m_featureBindings)if(GetTargetMatched(b->targets,viewId,role))MergeResult(aggregate,SendBinding(*b,event,viewId,role));
+        return {aggregate,nullptr};
     }
 
     std::vector<std::shared_ptr<Binding>> candidates;
@@ -550,8 +651,21 @@ InteractionDispatch HostInputRegistry::Impl::Route(
     routedEvent.viewId = viewId;
     InteractionResult aggregate;
     const bool isPress = GetIsPointerPress(event.eventKind);
+    const auto matchedActions=InteractionControllerAccess::GetMatchedActions(*controller,routedEvent);
+    const auto currentOwner=InteractionControllerAccess::GetOwner(*controller,viewId);
+    if(!currentOwner.empty())std::stable_sort(candidates.begin(),candidates.end(),[&](const auto& a,const auto& b){return a->featureId==currentOwner&&b->featureId!=currentOwner;});
     const std::weak_ptr<Impl> weakOwner = shared_from_this();
     for (const auto& binding : candidates) {
+        auto actionEvent=routedEvent;
+        if(binding->onAction) {
+            for(const auto& a:binding->actions) if(std::find(matchedActions.begin(),matchedActions.end(),a.actionId)!=matchedActions.end()
+                &&(!a.isCurrentToolCommand||binding->featureId==currentOwner)
+                &&(!binding->getIsActionAvailable||binding->getIsActionAvailable(a.actionId,routedEvent))) {
+                if(!actionEvent.actionId.empty())return {GetRouteFailure(event.eventKind),nullptr};
+                actionEvent.actionId=a.actionId;
+            }
+            if(actionEvent.actionId.empty())continue;
+        }
         std::unique_ptr<IInteractionCapture> capture;
         std::optional<HostSemanticTarget> target;
         if (isPress) {
@@ -570,7 +684,7 @@ InteractionDispatch HostInputRegistry::Impl::Route(
                     binding,
                     viewId,
                     role,
-                    GetReleaseKind(event.eventKind), target);
+                    GetReleaseKind(event.eventKind), target,actionEvent.actionId);
             }
             catch (...) {
                 MergeResult(aggregate, GetRouteFailure(event.eventKind));
@@ -579,16 +693,29 @@ InteractionDispatch HostInputRegistry::Impl::Route(
         }
 
         const auto current = SendBinding(
-            *binding, routedEvent, viewId, role, target);
+            *binding, actionEvent, viewId, role, target);
         MergeResult(aggregate, current);
         if (isPress && current.isHandled) {
-            return {
-                aggregate,
-                current.isSucceeded ? std::move(capture) : nullptr };
+            const bool needsCleanup=!current.isSucceeded&&binding->getIsCaptureActive&&binding->getIsCaptureActive(actionEvent.actionId);
+            return {aggregate,current.isSucceeded||needsCleanup?std::move(capture):nullptr,needsCleanup};
         }
         if (aggregate.isPropagationStopped) {
             return { aggregate, nullptr };
         }
+    }
+    for(const auto& id:matchedActions) {
+        if(id.substr(0,11)=="navigation.")continue;
+        ActionContext context;context.viewId=viewId;context.area=event.area;
+        context.input.displayPosition=event.displayPosition.value_or(std::array<double,2>{static_cast<double>(event.x),static_cast<double>(event.y)});
+        context.input.hasPointer=event.eventKind==InteractionEventKind::PrimaryPress||event.eventKind==InteractionEventKind::SecondaryPress||event.eventKind==InteractionEventKind::MiddlePress||event.eventKind==InteractionEventKind::WheelForward||event.eventKind==InteractionEventKind::WheelBackward;
+        context.input.isWheel=event.eventKind==InteractionEventKind::WheelForward||event.eventKind==InteractionEventKind::WheelBackward;
+        context.input.wheelDelta=event.wheelDelta.value_or(event.eventKind==InteractionEventKind::WheelBackward?-1.0:1.0);
+        context.input.wheelUnit=event.wheelUnit;context.input.phase=event.phase;context.input.displayScale=event.displayScale;
+        const auto result=controller->Trigger(id,context);
+        if(result.status==ActionTriggerStatus::Completed||result.status==ActionTriggerStatus::Accepted)
+            return {{true,true,true},nullptr};
+        if(result.status==ActionTriggerStatus::Failed||result.status==ActionTriggerStatus::Invalid)
+            return {GetRouteFailure(event.eventKind),nullptr};
     }
     return { aggregate, nullptr };
 }
@@ -634,7 +761,7 @@ HostInputResult HostInputRegistry::Impl::SendInput(
             HostErrorCode::RequestRejected,
             "Host input view was not found." };
     }
-    if (routes.front().inputMode != HostInputMode::HostInjected) {
+    if (routes.front().inputMode != HostInputMode::HostInjected&&kind!=InteractionEventKind::Cancel) {
         return {
             false,
             false,
@@ -662,6 +789,9 @@ HostInputResult HostInputRegistry::Impl::SendInput(
     routed.isAltDown = event.isAltDown;
     routed.keyCode = event.keyCode;
     routed.keySym = event.keySym;
+    routed.key=event.key;routed.isAutoRepeat=event.isAutoRepeat;routed.area=event.area;
+    routed.displayPosition=event.displayPosition;routed.displayScale=event.displayScale;
+    routed.wheelDelta=event.wheelDelta;routed.wheelUnit=event.wheelUnit;routed.phase=event.phase;
     try {
         const auto result = context->SendInput(routed);
         return {
@@ -704,6 +834,7 @@ bool HostInputRegistry::Impl::Stop()
     }
     if (m_installedRoutes.empty()) {
         m_isStarted = false;
+        InteractionControllerAccess::Stop(*controller);
     }
     return isStopped && m_installedRoutes.empty();
 }
@@ -761,3 +892,5 @@ bool HostInputRegistry::Stop()
 {
     return m_impl && m_impl->Stop();
 }
+
+std::shared_ptr<InteractionController> HostInputRegistry::GetController() const {return m_impl?m_impl->controller:nullptr;}

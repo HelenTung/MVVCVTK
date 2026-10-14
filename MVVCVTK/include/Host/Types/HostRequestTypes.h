@@ -1,4 +1,6 @@
 #pragma once
+#include "Interaction/InputBindings.h"
+#include "Interaction/NavigationTypes.h"
 
 #include "Data/ImageReadTypes.h"
 #include "Host/Types/HostValueTypes.h"
@@ -41,6 +43,8 @@ enum class HostInputKind : std::uint8_t {
     PrimaryRelease,
     SecondaryPress,
     SecondaryRelease,
+    MiddlePress,
+    MiddleRelease,
     PointerMove,
     KeyPress,
     KeyRelease,
@@ -59,6 +63,14 @@ struct HostInputEvent final {
     bool isAltDown = false;
     char keyCode = 0;
     std::string keySym;
+    std::uint32_t key=0;
+    bool isAutoRepeat=false;
+    InputArea area=InputArea::View;
+    std::optional<std::array<double,2>> displayPosition; // 提供时作为位置真值；VTK 整数坐标由它取整。
+    double displayScale=1;
+    std::optional<double> wheelDelta;
+    WheelUnit wheelUnit=WheelUnit::Steps;
+    InputPhase phase=InputPhase::Discrete;
 };
 
 struct HostInputResult final {

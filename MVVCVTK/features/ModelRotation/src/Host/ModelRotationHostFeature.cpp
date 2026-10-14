@@ -15,73 +15,6 @@
 #include <utility>
 #include <vector>
 
-namespace {
-constexpr std::uint8_t shift = static_cast<std::uint8_t>(InputModifierFlags::Shift);
-constexpr std::uint8_t ctrl = static_cast<std::uint8_t>(InputModifierFlags::Ctrl);
-constexpr std::uint8_t alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
-constexpr std::uint8_t allModifiers = shift | ctrl | alt;
-
-bool GetValidDrag(const InputBinding& binding) noexcept
-{
-    return binding.trigger == InputTriggerKind::Drag
-        && (binding.button == InputMouseButton::Primary
-            || binding.button == InputMouseButton::Secondary)
-        && binding.key == 0
-        && !((binding.requiredModifiers | binding.forbiddenModifiers)
-            & ~allModifiers)
-        && !(binding.requiredModifiers & binding.forbiddenModifiers);
-}
-
-bool GetValidKey(const InputBinding& binding) noexcept
-{
-    return binding.trigger == InputTriggerKind::KeyPress
-        && binding.button == InputMouseButton::None
-        && binding.key > 0 && binding.key <= 127
-        && !((binding.requiredModifiers | binding.forbiddenModifiers)
-            & ~allModifiers)
-        && !(binding.requiredModifiers & binding.forbiddenModifiers);
-}
-
-bool GetMatchedKey(
-    const InputBinding& binding, const InteractionEvent& event) noexcept
-{
-    if (event.eventKind != InteractionEventKind::KeyPress) return false;
-    const auto keyCode = static_cast<unsigned char>(event.keyCode);
-    if (binding.key != keyCode
-        && !(binding.key == 27 && event.keySym == "Escape")) return false;
-    const auto modifiers = (event.isShiftDown ? shift : 0)
-        | (event.isCtrlDown ? ctrl : 0)
-        | (event.isAltDown ? alt : 0);
-    return (modifiers & binding.requiredModifiers)
-            == binding.requiredModifiers
-        && !(modifiers & binding.forbiddenModifiers);
-}
-
-bool GetMatchedDrag(
-    const InputBinding& binding, const InteractionEvent& event) noexcept
-{
-    if ((binding.button == InputMouseButton::Primary
-            && event.eventKind != InteractionEventKind::PrimaryPress)
-        || (binding.button == InputMouseButton::Secondary
-            && event.eventKind != InteractionEventKind::SecondaryPress)) {
-        return false;
-    }
-    const auto modifiers = (event.isShiftDown ? shift : 0)
-        | (event.isCtrlDown ? ctrl : 0)
-        | (event.isAltDown ? alt : 0);
-    return (modifiers & binding.requiredModifiers)
-            == binding.requiredModifiers
-        && !(modifiers & binding.forbiddenModifiers);
-}
-
-bool GetOverlap(const InputBinding& a, const InputBinding& b) noexcept
-{
-    return a.button == b.button
-        && !(a.requiredModifiers & b.forbiddenModifiers)
-        && !(b.requiredModifiers & a.forbiddenModifiers);
-}
-} // namespace
-
 class ModelRotationHostFeature::Impl final {
 public:
     using Math = ModelRotationAlgorithm;
@@ -112,61 +45,6 @@ public:
     explicit Impl(ModelRotationConfig config) : m_config(std::move(config))
     {
         m_history.reserve(100);
-    }
-
-    InputBindingStatus SetInputBindings(const IInputBindings& source)
-    {
-        if (m_port && m_owner != std::this_thread::get_id())
-            return InputBindingStatus::Failed;
-        if (m_gesture || m_isSettingBindings) return InputBindingStatus::Busy;
-        m_isSettingBindings = true;
-        InputBinding enabled{ InputTriggerKind::Drag,
-            InputMouseButton::Primary, 0, allModifiers, 0 };
-        InputBinding shortcut{ InputTriggerKind::Drag,
-            InputMouseButton::Primary, ctrl,
-            static_cast<std::uint8_t>(shift | alt), 0 };
-        InputBinding cancel{ InputTriggerKind::KeyPress,
-            InputMouseButton::None, 0, 0, 27 };
-        bool isEnabled = true;
-        bool isShortcut = true;
-        bool isCancelEnabled = true;
-        const auto load = [&source](std::string_view key,
-            InputBinding& binding, bool& isActive, bool isKey) {
-            InputBinding replacement;
-            switch (source.GetOverride(key, replacement)) {
-            case InputBindingOverride::UseDefault: return InputBindingStatus::Applied;
-            case InputBindingOverride::Replace:
-                if (!(isKey ? GetValidKey(replacement) : GetValidDrag(replacement)))
-                    return InputBindingStatus::Unsupported;
-                binding = replacement;
-                isActive = true;
-                return InputBindingStatus::Applied;
-            case InputBindingOverride::Disable:
-                isActive = false;
-                return InputBindingStatus::Applied;
-            default: return InputBindingStatus::Invalid;
-            }
-        };
-        auto status = load(ModelRotationBindingKeys::EnabledDrag,
-            enabled, isEnabled, false);
-        if (status == InputBindingStatus::Applied)
-            status = load(ModelRotationBindingKeys::SliceShortcutDrag,
-                shortcut, isShortcut, false);
-        if (status == InputBindingStatus::Applied)
-            status = load(ModelRotationBindingKeys::CancelKey,
-                cancel, isCancelEnabled, true);
-        m_isSettingBindings = false;
-        if (status != InputBindingStatus::Applied) return status;
-        if (isEnabled && isShortcut && GetOverlap(enabled, shortcut))
-            return InputBindingStatus::Conflict;
-        if (m_gesture) return InputBindingStatus::Busy;
-        m_enabledBinding = enabled;
-        m_sliceBinding = shortcut;
-        m_cancelBinding = cancel;
-        m_hasEnabledBinding = isEnabled;
-        m_hasSliceBinding = isShortcut;
-        m_hasCancelBinding = isCancelEnabled;
-        return InputBindingStatus::Applied;
     }
 
     bool GetOwnerReady() const
@@ -455,8 +333,7 @@ public:
         if (!SetCompletion()) return {};
         const bool isCancel = event.eventKind == InteractionEventKind::Cancel
             || event.eventKind == InteractionEventKind::Exit
-            || (m_hasCancelBinding
-                && GetMatchedKey(m_cancelBinding, event));
+            || event.actionId=="interaction.cancel";
         if (isCancel && m_gesture) return result(StopGesture());
         if (m_gesture) {
             if (event.viewId != m_gesture->viewId) return {};
@@ -484,13 +361,12 @@ public:
             }
             return result(true);
         }
+        if(event.eventKind!=InteractionEventKind::PrimaryPress&&event.eventKind!=InteractionEventKind::SecondaryPress&&event.eventKind!=InteractionEventKind::MiddlePress)return {};
         const bool isSlice = event.vizMode == VizMode::SliceTop_down
             || event.vizMode == VizMode::SliceFront_back
             || event.vizMode == VizMode::SliceLeft_right;
-        const bool isEnabledDrag = m_isEnabled && m_hasEnabledBinding
-            && GetMatchedDrag(m_enabledBinding, event);
-        const bool isSliceShortcut = isSlice && m_hasSliceBinding
-            && GetMatchedDrag(m_sliceBinding, event);
+        const bool isEnabledDrag = m_isEnabled && event.actionId=="modelRotation.rotate";
+        const bool isSliceShortcut = isSlice && event.actionId=="modelRotation.rotate" && event.toolMode==ToolMode::Navigation;
         if (!isEnabledDrag && !isSliceShortcut) return {};
         auto gesture = BuildGesture(event);
         if (!gesture || !StartEdit()) return result(false);
@@ -500,7 +376,7 @@ public:
             return result(false);
         }
         m_gesture = std::move(gesture);
-        m_releaseKind = event.eventKind == InteractionEventKind::PrimaryPress
+        m_releaseKind = event.eventKind == InteractionEventKind::MiddlePress ? InteractionEventKind::MiddleRelease : event.eventKind == InteractionEventKind::PrimaryPress
             ? InteractionEventKind::PrimaryRelease
             : InteractionEventKind::SecondaryRelease;
         m_status = ModelRotationStatus::Dragging;
@@ -515,17 +391,6 @@ public:
     ModelTransformSnapshot m_start;
     std::uint64_t m_token = 0, m_sequence = 0;
     std::optional<Gesture> m_gesture;
-    InputBinding m_enabledBinding{ InputTriggerKind::Drag,
-        InputMouseButton::Primary, 0, allModifiers, 0 };
-    InputBinding m_sliceBinding{ InputTriggerKind::Drag,
-        InputMouseButton::Primary, ctrl,
-        static_cast<std::uint8_t>(shift | alt), 0 };
-    InputBinding m_cancelBinding{ InputTriggerKind::KeyPress,
-        InputMouseButton::None, 0, 0, 27 };
-    bool m_hasEnabledBinding = true;
-    bool m_hasSliceBinding = true;
-    bool m_hasCancelBinding = true;
-    bool m_isSettingBindings = false;
     InteractionEventKind m_releaseKind = InteractionEventKind::None;
     std::vector<History> m_history;
     std::deque<QueuedRequest> m_requests;
@@ -538,12 +403,6 @@ public:
 ModelRotationHostFeature::ModelRotationHostFeature(ModelRotationConfig config)
     : m_impl(std::make_unique<Impl>(std::move(config))) {}
 ModelRotationHostFeature::~ModelRotationHostFeature() noexcept = default;
-InputBindingStatus ModelRotationHostFeature::SetInputBindings(
-    const IInputBindings& bindings)
-{
-    return m_impl ? m_impl->SetInputBindings(bindings)
-        : InputBindingStatus::Failed;
-}
 std::string_view ModelRotationHostFeature::GetFeatureId() const noexcept { return "model-rotation"; }
 
 bool ModelRotationHostFeature::AttachHost(const HostFeatureContext& context)
@@ -557,11 +416,35 @@ bool ModelRotationHostFeature::AttachHost(const HostFeatureContext& context)
     m_impl->m_context = { context.views, context.read, {}, context.host };
     m_impl->m_port = port;
     m_impl->m_owner = std::this_thread::get_id();
-    HostInputBinding binding{ std::string(GetFeatureId()), m_impl->m_config.targetViews,
-        [weak](const InteractionEvent& event) {
-            const auto feature = weak.lock();
-            return feature ? feature->m_impl->OnInput(event) : InteractionResult{};
-        } };
+    HostInputBinding binding;binding.featureId=std::string(GetFeatureId());binding.targetViews=m_impl->m_config.targetViews;
+    InteractionActionInfo rotate;rotate.actionId="modelRotation.rotate";rotate.ownerId=binding.featureId;
+    rotate.bindings.push_back({std::string(ModelRotationBindingKeys::EnabledDrag),{InputTriggerKind::Drag,InputMouseButton::Primary,0,7},true,{},binding.featureId,{InputTriggerKind::Drag}});
+    rotate.bindings.push_back({std::string(ModelRotationBindingKeys::SliceShortcutDrag),{InputTriggerKind::Drag,InputMouseButton::Primary,2,5},true,BindingScope::Slices(),"navigation",{InputTriggerKind::Drag}});
+    binding.actions.push_back(std::move(rotate));
+    InteractionActionInfo cancel;cancel.actionId="interaction.cancel";cancel.isTriggerable=true;cancel.ownerId=binding.featureId;cancel.isCurrentToolCommand=true;
+    cancel.bindings.push_back({std::string(ModelRotationBindingKeys::CancelKey),{InputTriggerKind::KeyPress,InputMouseButton::None,0,0,27},false,{},binding.featureId,{InputTriggerKind::KeyPress}});
+    binding.actions.push_back(std::move(cancel));
+    InteractionActionInfo undo;undo.actionId="interaction.undo";undo.isTriggerable=true;undo.ownerId=binding.featureId;undo.isCurrentToolCommand=true;binding.actions.push_back(std::move(undo));
+    binding.onAction=[weak](std::string_view action,const InteractionEvent& event,const std::optional<HostSemanticTarget>&){
+        const auto f=weak.lock();if(!f)return InteractionResult{};
+        if(action=="interaction.undo") {
+            ModelRotationRequest request;request.action=ModelRotationAction::Undo;
+            const auto admission=f->SendRequest(request);
+            const bool ok=admission.status==ModelRotationAdmissionStatus::Accepted;
+            return InteractionResult{true,true,ok,ok?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
+        }
+        auto routed=event;routed.actionId=std::string(action);return f->m_impl->OnInput(routed);
+    };
+    binding.getIsCaptureActive=[weak](std::string_view){const auto f=weak.lock();return f&&f->m_impl->m_gesture.has_value();};
+    binding.onTrigger=[weak](std::string_view id,const ActionContext&) {
+        const auto f=weak.lock();if(!f)return ActionTriggerResult{};
+        ModelRotationRequest request;
+        if(id=="interaction.cancel")request.action=ModelRotationAction::Cancel;
+        else if(id=="interaction.undo")request.action=ModelRotationAction::Undo;
+        else return ActionTriggerResult{};
+        const auto admission=f->SendRequest(request);
+        return ActionTriggerResult{admission.status==ModelRotationAdmissionStatus::Accepted?ActionTriggerStatus::Accepted:ActionTriggerStatus::Failed,admission.requestId};
+    };
     if (!context.host->AttachInput(std::move(binding))) {
         m_impl->m_context = {};
         m_impl->m_port.reset();
@@ -617,6 +500,7 @@ ModelRotationAdmission ModelRotationHostFeature::SendRequest(const ModelRotation
     case ModelRotationAction::SetEnabled:
         if (!request.isEnabled && !m_impl->StopGesture()) return {};
         m_impl->m_isEnabled = request.isEnabled;
+        if(m_impl->m_context.host)(void)m_impl->m_context.host->SetInputOwner(GetFeatureId(),request.isEnabled);
         m_impl->SendComplete(std::move(completion), ModelRotationStatus::Succeeded);
         return {ModelRotationAdmissionStatus::Accepted, requestId};
     case ModelRotationAction::Cancel:

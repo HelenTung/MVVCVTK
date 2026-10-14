@@ -803,6 +803,10 @@ std::uint64_t ModulePanel::SendAction(const QString& name, const QJsonObject& pa
         return id;
     }
     m_pending.insert(id);
+    if(m_name=="View" && entry.policy!=TestPolicy::Read
+        && params["viewId"].toString("primary-3d")=="primary-3d"
+        && params["viewScope"].toString("all")!="slices")
+        m_context.workflow.primaryPresentationCommand=id;
     try { entry.action(id, params); }
     catch (const std::exception& error) { SetComplete(id, "InvalidInput", {{"message", QString::fromUtf8(error.what())}}); }
     RefreshWorkflow();

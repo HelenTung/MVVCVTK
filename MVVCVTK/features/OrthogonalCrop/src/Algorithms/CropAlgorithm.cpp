@@ -818,7 +818,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
 
 CropMaterializationCandidate CropAlgorithm::GetRoiResult(
     const CropInputSnapshot& input, RoiReadSnapshot roi,
-    std::size_t availableRamBytes, const std::function<bool()>& getStopRequested)
+    const std::function<bool()>& getStopRequested)
 {
     CropMaterializationCandidate result;
     result.failureReason=CropFailure::BadInput;
@@ -839,10 +839,6 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
             const auto* image=dynamic_cast<const ImageGrid3DPayload*>(input.data->payload.get());
             if (!image || !image->GetValid()) return result;
             const auto count=*GetGridVoxelCount(image->GetGeometry());
-            const auto reserve=roiCopyLimit+16ULL*1024*1024;
-            if (availableRamBytes<reserve || count>(availableRamBytes-reserve)/3) {
-                result.failureReason=CropFailure::LowRam; return result;
-            }
             std::vector<std::uint8_t> values(count);
             RoiMaskRequest request;
             for (int a=0;a<3;++a) request.region.size[a]=static_cast<std::size_t>(image->GetGeometry().dimensions[a]);
@@ -870,8 +866,9 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
         } else if (input.mesh && input.mesh->mesh) {
             const auto* mesh=dynamic_cast<const SurfaceMeshPayload*>(input.data->payload.get());
             if(!mesh || !mesh->GetValid())return result;
-            std::vector<double> vertices;std::vector<std::uint64_t> topology;auto attributes=mesh->GetPointAttributes(),cellAttributes=mesh->GetCellAttributes();
-            for(auto& attribute:attributes)attribute.values.clear();for(auto& attribute:cellAttributes)attribute.values.clear();
+            std::vector<double> vertices;std::vector<std::uint64_t> topology;std::vector<MeshAttribute> attributes,cellAttributes;
+            for(const auto& attribute:mesh->GetPointAttributes())attributes.push_back({attribute.name,attribute.componentCount,{}});
+            for(const auto& attribute:mesh->GetCellAttributes())cellAttributes.push_back({attribute.name,attribute.componentCount,{}});
             MeshAttribute barycentric{"roi.barycentric",3,{}},parents{"roi.parent-triangle",1,{}};
             std::size_t bytes=0,pointWidth=sizeof(double)*6+sizeof(std::uint64_t),cellWidth=sizeof(double);
             for(const auto& attribute:attributes)pointWidth+=attribute.componentCount*sizeof(double);for(const auto& attribute:cellAttributes)cellWidth+=attribute.componentCount*sizeof(double);
@@ -879,14 +876,10 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
             for(std::size_t i=0;i<sourceTopology.size()/3;++i){
                 if(cancelled())return result;
                 std::array<std::array<double,3>,3> triangle{};for(int k=0;k<3;++k)std::copy_n(sourceVertices.data()+sourceTopology[i*3+k]*3,3,triangle[k].begin());
-                const auto selected=result.roi->GetTriangleSelection(triangle,availableRamBytes>bytes?availableRamBytes-bytes:0,0,getStopRequested);
-                if(selected.error!=RoiError::None){result.failureReason=selected.error==RoiError::TooLarge?CropFailure::LowRam:selected.error==RoiError::Cancelled?CropFailure::Cancelled:CropFailure::ClipFailed;result.isCancelled=selected.error==RoiError::Cancelled;return result;}
-                result.meshErrorBound=std::max(result.meshErrorBound,selected.boundaryTolerance);
                 std::array<double,3> u{},v{};double uu=0,vv=0,uv=0;for(int k=0;k<3;++k){u[k]=triangle[1][k]-triangle[0][k];v[k]=triangle[2][k]-triangle[0][k];uu+=u[k]*u[k];vv+=v[k]*v[k];uv+=u[k]*v[k];}const double determinant=uu*vv-uv*uv;if(!(determinant>0))continue;
-                // 栅格近似的面积误差采用父三角形面积上界，不能把空间容差当成面积精度。
-                if(selected.boundaryTolerance>0)result.meshAreaErrorBound+=.5*std::sqrt(determinant);
-                for(const auto& piece:selected.triangles){
-                    const auto cost=3*pointWidth+cellWidth;if(cost>availableRamBytes || bytes>availableRamBytes-cost){result.failureReason=CropFailure::LowRam;return result;}bytes+=cost;
+                const auto selected=result.roi->GetTriangleChunks(triangle,1024,[&](const auto& pieces){
+                    for(const auto& piece:pieces){
+                    const auto cost=3*pointWidth+cellWidth;if(cost>std::numeric_limits<std::size_t>::max()-bytes){throw std::length_error("ROI crop output size overflows.");}bytes+=cost;
                     for(const auto& point:piece){double qu=0,qv=0;for(int k=0;k<3;++k){qu+=(point[k]-triangle[0][k])*u[k];qv+=(point[k]-triangle[0][k])*v[k];}const double b=(qu*vv-qv*uv)/determinant,c=(qv*uu-qu*uv)/determinant;const std::array<double,3> weights{1-b-c,b,c};
                         topology.push_back(vertices.size()/3);vertices.insert(vertices.end(),point.begin(),point.end());barycentric.values.insert(barycentric.values.end(),weights.begin(),weights.end());
                         for(std::size_t ai=0;ai<attributes.size();++ai){const auto& source=mesh->GetPointAttributes()[ai];for(std::size_t component=0;component<source.componentCount;++component){double value=0;
@@ -895,7 +888,13 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
                         }}
                     }
                     parents.values.push_back(static_cast<double>(i));for(std::size_t ai=0;ai<cellAttributes.size();++ai){const auto& source=mesh->GetCellAttributes()[ai];cellAttributes[ai].values.insert(cellAttributes[ai].values.end(),source.values.begin()+i*source.componentCount,source.values.begin()+(i+1)*source.componentCount);}
-                }
+
+                    }return !getStopRequested || !getStopRequested();
+                },0,getStopRequested);
+                if(selected.error!=RoiError::None){result.failureReason=selected.error==RoiError::TooLarge?CropFailure::LowRam:selected.error==RoiError::Cancelled?CropFailure::Cancelled:CropFailure::ClipFailed;result.isCancelled=selected.error==RoiError::Cancelled;return result;}
+                result.meshErrorBound=std::max(result.meshErrorBound,selected.boundaryTolerance);
+                // 栅格近似的面积误差采用父三角形面积上界，不改变选片容差。
+                if(selected.boundaryTolerance>0)result.meshAreaErrorBound+=.5*std::sqrt(determinant);
             }
             if(topology.empty()){result.failureReason=CropFailure::EmptyResult;return result;}
             result.meshTriangleCount=topology.size()/3;

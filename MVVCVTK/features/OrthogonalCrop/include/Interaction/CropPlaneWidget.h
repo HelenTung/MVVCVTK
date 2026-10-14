@@ -7,6 +7,7 @@
 // =====================================================================
 
 #include "OrthogonalCropTypes.h"
+#include "Interaction/InputBindings.h"
 
 #include <array>
 #include <functional>
@@ -58,6 +59,10 @@ public:
     // 查询当前 widget 是否开启。
     bool GetEnabled() const;
 
+    bool GetInputAccepted(int x,int y) const;
+    void SetInputBindings(const std::vector<EffectiveBinding>& values);
+    void StartGesture();
+    void CancelGesture();
 private:
     class Impl;
     // 唯一拥有 VTK widget、representation、callback command、observer tag 与 world 平面缓存。

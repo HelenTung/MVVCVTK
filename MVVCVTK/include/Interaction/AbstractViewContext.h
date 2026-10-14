@@ -46,6 +46,11 @@ public:
     vtkRenderer* GetRenderer() const;
     vtkRenderWindow* GetRenderWindow() const;
 
+    virtual bool SetInteractionController(std::shared_ptr<InteractionController>,const std::string&) { return false; }
+    virtual std::shared_ptr<ViewNavigation> GetNavigation() const { return {}; }
+    virtual NavigationStatus SetNavigation(std::shared_ptr<ViewNavigation>) { return NavigationStatus::Unsupported; }
+    virtual NavigationStatus TriggerNavigation(std::string_view,const NavigationInput&) { return NavigationStatus::Unsupported; }
+    virtual InteractionResult CancelCurrentCapture() { return {}; }
     virtual bool SetCameraStyle(VizMode mode) = 0;
     virtual bool SetInteractorReady() = 0;
     virtual bool SetInputEnabled(bool isEnabled) = 0;

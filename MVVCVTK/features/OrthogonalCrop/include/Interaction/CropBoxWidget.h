@@ -9,6 +9,7 @@
 // 它不生成 request、不执行算法、不刷新 preview，让交互桥基于纯状态决定何时刷新裁切预览。
 
 #include "OrthogonalCropTypes.h"
+#include "Interaction/InputBindings.h"
 
 #include <array>
 #include <functional>
@@ -61,6 +62,10 @@ public:
     // 查询当前 widget 是否开启。
     bool GetEnabled() const;
 
+    bool GetInputAccepted(int x,int y) const;
+    void SetInputBindings(const std::vector<EffectiveBinding>& values);
+    void StartGesture();
+    void CancelGesture();
 private:
     class Impl;
     // 唯一拥有 VTK widget、representation、callback command、observer tag 与交互几何缓存。

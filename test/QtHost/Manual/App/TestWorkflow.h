@@ -30,6 +30,8 @@ class TestWorkflow final {
 public:
     TestResources resources;
     QJsonObject partEditContext;
+    // 仅识别用户的展示命令；不把 Host 内部展示提交误认成用户改动。
+    std::uint64_t primaryPresentationCommand = 0;
     bool StartOperation(std::uint64_t id, TestPolicy policy, bool exitTools, const QString& module = {});
     void SetComplete(std::uint64_t id);
     void Stop() { m_isClosing = true; }

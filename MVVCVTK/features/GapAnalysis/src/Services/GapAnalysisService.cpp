@@ -2,6 +2,7 @@
 #include "Services/GapAnalysisService.h"
 
 #include "Data/DataPayloads.h"
+#include "FeatureSupport/LabelMapBuilder.h"
 #include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"
@@ -1434,7 +1435,10 @@ void GapAnalysisService::Impl::StartWorker(
                         payloads->voids = CreateVoidTable(result.voids, m_isStopping);
                         payloads->statistics = CreateStatisticsTable(result.statistics);
                         if (result.parent) {
-                            payloads->parentLabels=CreateLabelPayload(result.parent->labelImage,source->GetGeometry(),m_isStopping,"GapAnalysis.parent-labels");
+                            payloads->parentLabels = result.parent->labelImage == result.labelImage
+                                ? LabelMapBuilder::ShareFrozen(payloads->labels,
+                                    "GapAnalysis.parent-labels", "Gap parent detection")
+                                : CreateLabelPayload(result.parent->labelImage,source->GetGeometry(),m_isStopping,"GapAnalysis.parent-labels");
                             payloads->parentVoids=CreateVoidTable(result.parent->voids,m_isStopping);
                             auto parent=std::make_shared<GapParentRecord>();parent->source=result.parent->sourceRevision;parent->parameters=result.parent->detectionParameters;parent->statistics=result.parent->statistics;parent->labels=payloads->parentLabels;parent->voids=std::make_shared<const std::vector<VoidRegion>>(result.parent->voids);if(parent->GetValid())payloads->parentRecord=std::move(parent);
                         }
@@ -2372,13 +2376,16 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     struct Intersection {std::size_t count=0;std::array<int,6> bounds{INT_MAX,INT_MIN,INT_MAX,INT_MIN,INT_MAX,INT_MIN};};
     std::unordered_map<int,Intersection> intersections;std::unordered_set<int> detected;
     std::size_t evaluated=0;int extent[6];result.labelImage->GetExtent(extent);
-    const auto belongs=[&](const RoiReadSnapshot& roi,std::size_t index) {if (!roi) return true;double point[3];result.labelImage->GetPoint(static_cast<vtkIdType>(index),point);return roi->GetContains({point[0],point[1],point[2]});};
+    auto evaluation=params.evaluationRoi?params.evaluationRoi->GetQuery():RoiQueryResult{};
+    auto detection=params.detectionRoi?params.detectionRoi->GetQuery():RoiQueryResult{};
+    if((params.evaluationRoi && (evaluation.error!=RoiError::None || !evaluation.query)) || (params.detectionRoi && (detection.error!=RoiError::None || !detection.query)))return false;
+    const auto belongs=[&](const std::unique_ptr<RoiQuery>& roi,std::size_t index) {if (!roi) return true;double point[3];result.labelImage->GetPoint(static_cast<vtkIdType>(index),point);return roi->GetContains({point[0],point[1],point[2]});};
     int dims[3];result.labelImage->GetDimensions(dims);
     for (std::size_t i=0;i<count;++i) {
         if (!(i%4096) && m_isStopping.load()) return false;
-        const bool selected=belongs(params.evaluationRoi,i);if (selected) ++evaluated;
+        const bool selected=belongs(evaluation.query,i);if (selected) ++evaluated;
         if (labels[i]<=0) continue;
-        if (belongs(params.detectionRoi,i)) detected.insert(labels[i]);
+        if (belongs(detection.query,i)) detected.insert(labels[i]);
         if (selected) {auto& intersection=intersections[labels[i]];++intersection.count;
             const std::array<int,3> index{extent[0]+static_cast<int>(i%static_cast<std::size_t>(dims[0])),
                 extent[2]+static_cast<int>((i/static_cast<std::size_t>(dims[0]))%static_cast<std::size_t>(dims[1])),
@@ -2405,7 +2412,7 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     if (partial || selectedRegions.size()!=result.voids.size()) {
         auto image=vtkSmartPointer<vtkImageData>::New();image->CopyStructure(result.labelImage);image->AllocateScalars(VTK_INT,1);auto* selected=static_cast<int*>(image->GetScalarPointer());if (!selected) return false;
         for (std::size_t i=0;i<count;++i) {if (!(i%4096) && m_isStopping.load()) return false;
-            selected[i]=kept.count(labels[i]) && (params.roiPolicy!=GapRoiPolicy::InsideOnly || belongs(params.evaluationRoi,i)) ? labels[i]:0;}
+            selected[i]=kept.count(labels[i]) && (params.roiPolicy!=GapRoiPolicy::InsideOnly || belongs(evaluation.query,i)) ? labels[i]:0;}
         image->Modified();result.labelImage=std::move(image);
     }
     result.voids=std::move(selectedRegions);
@@ -2678,7 +2685,7 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
         return {};
     }
     if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(std::int32_t)) return {};
-    auto values = std::make_shared<std::vector<std::int32_t>>(*voxelCount);
+    auto values = std::make_unique<std::vector<std::int32_t>>(*voxelCount);
     const auto* source = static_cast<const std::int32_t*>(scalars->GetVoidPointer(0));
     constexpr std::size_t copyBatch = 65536;
     for (std::size_t offset = 0; offset < values->size(); offset += copyBatch) {
@@ -2687,10 +2694,9 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
             values->data() + offset);
     }
     if (isStopping.load()) return {};
-    auto payload = std::make_shared<const LabelMap3DPayload>(
-        geometry, LabelMapValues{ std::shared_ptr<const std::vector<std::int32_t>>(std::move(values)) },
-        std::vector<LabelDefinition>{}, id, std::string_view(id)=="GapAnalysis.labels" ? "Gap analysis":"Gap parent detection");
-    return payload->GetValid() ? payload : nullptr;
+    return LabelMapBuilder::Build(geometry, std::move(values),
+        [&isStopping] { return isStopping.load(); }, id,
+        std::string_view(id)=="GapAnalysis.labels" ? "Gap analysis":"Gap parent detection");
 }
 
 std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPayload(

@@ -11,8 +11,15 @@
 #include "Viewer3DHandler.h"
 #include "AppStateTests.h"
 #include "HostCommandRouterTests.h"
-#include "HostHotkeyRouterTests.h"
+#include "InteractionControllerTests.h"
 #include "HostInputRegistryTests.h"
+#include "Host/HostInputRegistry.h"
+#include "Host/HostViewRuntimeRegistry.h"
+#include "FeatureSupport/RoutedWidgets.h"
+#include "FeatureSupport/WidgetBindings.h"
+#include <vtkBoxRepresentation.h>
+#include <vtkTransform.h>
+#include <vtkCallbackCommand.h>
 
 #include <array>
 #include <functional>
@@ -22,6 +29,10 @@
 #include <vector>
 
 #include <vtkCommand.h>
+#include <vtkCamera.h>
+#include <vtkRenderWindow.h>
+#include <cmath>
+#include <limits>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkInteractorStyle.h>
@@ -355,24 +366,7 @@ void StartFailureCase(int& failureCount)
         "Router should preserve handled ownership and the first failure reason.",
         failureCount);
 
-    TestStatePort state;
-    TestSlicePort slice;
-    TestModelPort model;
-    TestUpdatePort update;
-    slice.isScrollAccepted = false;
-    Viewer2DHandler viewer(
-        &state, &slice, &model, &update, nullptr, nullptr);
-    auto wheel = BuildEvent(InteractionEventKind::WheelForward);
-    wheel.vizMode = VizMode::SliceTop_down;
-    const auto wheelResult = viewer.Send(wheel);
-    SetExpect(wheelResult.isHandled
-            && wheelResult.isPropagationStopped
-            && !wheelResult.isSucceeded
-            && wheelResult.failureReason
-                == InteractionFailureReason::StateRejected
-            && slice.scrollCount == 1,
-        "Viewer2D should consume wheel input while reporting rejected slice state.",
-        failureCount);
+
 }
 
 class PickPointProbe final : public vtkPropPicker {
@@ -464,8 +458,8 @@ void StartCaptureCase(int& failureCount)
     SetExpect(
         press.isHandled && pressCount == 1
             && !wasAttachAccepted && !wasClearAccepted
-            && capturedPointerCount == 3 && fallbackMoveCount == 1,
-        "Pointer capture should exclusively route pointer events until release.",
+            && capturedPointerCount == 2 && fallbackMoveCount == 1,
+        "捕获移动和原按钮释放；额外按钮按下只消费，不重新开始手势。",
         failureCount);
 }
 
@@ -749,6 +743,7 @@ void StartDefaultNavigationPolicyCase(int& failureCount)
 
     auto press = BuildEvent(InteractionEventKind::PrimaryPress);
     press.vizMode = VizMode::SliceTop_down;
+    press.isShiftDown=true;
     const auto pressed = router.Dispatch(press);
     state.isStopAccepted = false;
     const auto firstCancel = router.SendCancel(
@@ -768,138 +763,160 @@ void StartDefaultNavigationPolicyCase(int& failureCount)
         "Default navigation cancel should retry once and become an inactive no-op.",
         failureCount);
 
-    auto wheel = BuildEvent(InteractionEventKind::WheelForward);
-    wheel.vizMode = VizMode::SliceFront_back;
-    const auto wheelResult = router.Dispatch(wheel);
-    SetExpect(
-        wheelResult.isHandled && slice.scrollCount == 1,
-        "Default navigation should preserve 2D FirstMatch behavior.",
-        failureCount);
+
 }
 
-void StartBindingOverrideCase(int& failureCount)
+void StartViewNavigationCase(int& failureCount)
 {
-    TestStatePort guardedState;
-    TestSlicePort guardedSlice;
-    TestModelPort guardedModel;
-    TestUpdatePort guardedUpdate;
-    Viewer2DHandler guardedViewer(&guardedState, &guardedSlice,
-        &guardedModel, &guardedUpdate, nullptr, nullptr);
-    auto guardedPress = BuildEvent(InteractionEventKind::PrimaryPress);
-    guardedPress.vizMode = VizMode::SliceTop_down;
-    guardedPress.isCtrlDown = true;
-    const auto rejected = guardedViewer.Send(guardedPress);
-    guardedPress.eventKind = InteractionEventKind::PrimaryRelease;
-    const auto rejectedRelease = guardedViewer.Send(guardedPress);
-    SetExpect(rejected.isHandled && !rejected.isSucceeded
-            && rejectedRelease.isHandled && rejectedRelease.isSucceeded
-            && guardedState.startCount == 0,
-        "Rejected Ctrl+primary input must also intercept its release.",
-        failureCount);
+    auto update=std::make_shared<TestUpdatePort>();auto state=std::make_shared<TestStatePort>();
+    auto slice=std::make_shared<TestSlicePort>();auto model=std::make_shared<TestModelPort>();
+    auto context=CreateViewContext({update,state,slice,model},true,true);
+    SetExpect(context&&context->SetInteractorReady()&&context->SetInputEnabled(true),"导航真实 Context 初始化失败",failureCount);
+    if(!context)return;
+    auto controller=std::make_shared<InteractionController>();
+    InteractionControllerAccess::Start(*controller,{{"slice",InteractionViewClass::Slice}},[context](const std::string&){return context->GetNavigation();},[context](const std::string&,std::shared_ptr<ViewNavigation> n){return context->SetNavigation(std::move(n));});
+    NavigationBindings::RegisterActions(*controller);
+    SetExpect(context->SetInteractionController(controller,"slice"),"导航绑定关联失败",failureCount);
+    SetExpect(context->SetInputHandler([](const InteractionEvent&){return InteractionDispatch{};},{InteractionEventKind::KeyPress}),"重建输入测试关联失败",failureCount);
+    SetExpect(context->SetCameraStyle(VizMode::SliceFront_back),"切片模式失败",failureCount);
+    context->SetWindowSize(400,300);
+    auto* renderer=context->GetRenderer();auto* camera=renderer->GetActiveCamera();
+    camera->SetParallelProjection(true);camera->SetPosition(0,-100,0);camera->SetFocalPoint(0,0,0);camera->SetViewUp(0,0,1);camera->SetParallelScale(20);
+    const auto navigation=context->GetNavigation();
+    const double tolerance=std::numeric_limits<double>::epsilon()*400*1024;
+    SetExpect(navigation&&navigation->GetState()&&navigation->GetState()->isSliceView,"默认导航应关联实际切片",failureCount);
+    const auto initial=*navigation->GetState();
+    SetExpect(navigation->SetZoomRatio(2)==NavigationStatus::Applied&&std::abs(camera->GetParallelScale()-10)<tolerance,"绝对倍率必须直接作用于参考状态",failureCount);
+    SetExpect(navigation->SetZoomRatio(1)==NavigationStatus::Applied&&std::abs(camera->GetParallelScale()-20)<tolerance,"绝对倍率反向恢复失败",failureCount);
+    renderer->SetWorldPoint(3,0,7,1);renderer->WorldToDisplay();std::array<double,2> before{renderer->GetDisplayPoint()[0],renderer->GetDisplayPoint()[1]};
+    SetExpect(navigation->ZoomBy(1.5,ZoomAnchor::WorldPoint({3,0,7}))==NavigationStatus::Applied,"世界点缩放失败",failureCount);
+    renderer->SetWorldPoint(3,0,7,1);renderer->WorldToDisplay();const auto* display=renderer->GetDisplayPoint();
+    SetExpect(std::abs(display[0]-before[0])<tolerance&&std::abs(display[1]-before[1])<tolerance,"缩放锚点应保持原屏幕位置",failureCount);
+    InteractionEvent pointer;pointer.viewId="slice";pointer.eventKind=InteractionEventKind::PointerMove;
+    pointer.displayPosition=std::array<double,2>{140.25,130.75};pointer.displayScale=2;(void)context->SendInput(pointer);
+    renderer->SetDisplayPoint(140.25,130.75,0);renderer->DisplayToWorld();const auto* atPointer=renderer->GetWorldPoint();
+    std::array<double,3> pointerWorld{atPointer[0]/atPointer[3],atPointer[1]/atPointer[3],atPointer[2]/atPointer[3]};
+    SetExpect(navigation->ZoomBy(1.1,ZoomAnchor::Pointer())==NavigationStatus::Applied,"直接指针锚点缩放失败",failureCount);
+    renderer->SetWorldPoint(pointerWorld[0],pointerWorld[1],pointerWorld[2],1);renderer->WorldToDisplay();
+    SetExpect(std::abs(renderer->GetDisplayPoint()[0]-140.25)<tolerance&&std::abs(renderer->GetDisplayPoint()[1]-130.75)<tolerance,"未捕获的精确指针位置须用于直接缩放锚点",failureCount);
+    SetExpect(navigation->PanByPixels(10,5)==NavigationStatus::Applied,"直接逻辑像素平移失败",failureCount);
+    renderer->SetWorldPoint(pointerWorld[0],pointerWorld[1],pointerWorld[2],1);renderer->WorldToDisplay();
+    SetExpect(std::abs(renderer->GetDisplayPoint()[0]-160.25)<tolerance&&std::abs(renderer->GetDisplayPoint()[1]-140.75)<tolerance,"直接平移须使用最新输入的高 DPI 比例",failureCount);
+    auto options=navigation->GetOptions();options.zoom.dragSensitivity=0.01;navigation->SetOptions(options);
+    InteractionEvent input;input.viewId="slice";input.eventKind=InteractionEventKind::SecondaryPress;input.displayPosition=std::array<double,2>{100.25,100.5};input.displayScale=2;
+    const double startScale=camera->GetParallelScale();
+    SetExpect(context->SendInput(input).isHandled,"导航拖动未获得捕获",failureCount);
+    options.zoom.dragSensitivity=0.1;navigation->SetOptions(options);
+    BindingPatch disabled;disabled.Disable(std::string(NavigationBindingKeys::ZoomDrag));
+    SetExpect(controller->ApplyBindings(disabled).status==InputBindingStatus::Applied,"捕获期间修改绑定不应重建路由器",failureCount);
+    input.eventKind=InteractionEventKind::PointerMove;input.displayPosition=std::array<double,2>{100.25,120.5};
+    SetExpect(context->SendInput(input).isSucceeded&&std::abs(camera->GetParallelScale()-startScale*std::exp(0.1))<tolerance,"高 DPI 增量与开始时参数应完整保留",failureCount);
+    input.eventKind=InteractionEventKind::SecondaryRelease;SetExpect(context->SendInput(input).isSucceeded&&context->GetIsInputIdle(),"拖动释放应保持原捕获归属",failureCount);
+    input.eventKind=InteractionEventKind::SecondaryPress;SetExpect(!context->SendInput(input).isHandled,"禁用后不得回落到 VTK 默认缩放",failureCount);
+    SetExpect(context->SetNavigation(nullptr)==NavigationStatus::Applied&&!navigation->GetState(),"替换后旧导航句柄必须解绑",failureCount);
+    const auto next=context->GetNavigation();SetExpect(next&&next!=navigation&&std::abs(next->GetState()->zoomRatio-initial.visibleWorldHeight/(2*camera->GetParallelScale()))<tolerance,"替换策略不应重置视图倍率基准",failureCount);
+    SetExpect(context->StopInput(),"导航停止清理失败",failureCount);
+    SetExpect(next->ZoomBy(1.1)==NavigationStatus::Unbound,"停止后旧导航不得继续修改相机",failureCount);
+    InteractionControllerAccess::Stop(*controller);
+}
 
-    const auto alt = static_cast<std::uint8_t>(InputModifierFlags::Alt);
-    ConfigurableInputBindings source;
-    NavigationBindings effective;
-    SetExpect(NavigationBindings::Build(source, effective)
-            == InputBindingStatus::Applied,
-        "Default binding snapshot should validate.", failureCount);
-
-    const InputBinding crosshair{
-        InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 };
-    const InputBinding zoom{
-        InputTriggerKind::Drag, InputMouseButton::Secondary, 0, alt, 0 };
-    source.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
-        InputBindingOverride::Replace, crosshair);
-    source.SetOverride(std::string(NavigationBindingKeys::ZoomDrag),
-        InputBindingOverride::Replace, zoom);
-    SetExpect(NavigationBindings::Build(source, effective)
-            == InputBindingStatus::Applied,
-        "Disjoint modifier rules may share a physical button.", failureCount);
-
-    TestStatePort state;
-    TestSlicePort slice;
-    TestModelPort model;
-    TestUpdatePort update;
-    Viewer2DHandler viewer(
-        &state, &slice, &model, &update, nullptr, nullptr, &effective);
-    auto press = BuildEvent(InteractionEventKind::SecondaryPress);
-    press.vizMode = VizMode::SliceTop_down;
-    press.isAltDown = true;
-    const auto started = viewer.Send(press);
-    auto oldRelease = press;
-    oldRelease.eventKind = InteractionEventKind::PrimaryRelease;
-    const auto unrelatedRelease = viewer.Send(oldRelease);
-    auto release = press;
-    release.eventKind = InteractionEventKind::SecondaryRelease;
-    const auto ended = viewer.Send(release);
-    SetExpect(started.isHandled && started.isSucceeded
-            && !unrelatedRelease.isHandled && state.stopCount == 1
-            && ended.isSucceeded,
-        "Rebound crosshair must end on its actual secondary release.",
-        failureCount);
-
-    ConfigurableInputBindings invalid;
-    invalid.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
-        InputBindingOverride::Replace,
-        { InputTriggerKind::Drag, InputMouseButton::Primary, 0, 0, 0 });
-    SetExpect(NavigationBindings::Build(invalid, effective)
-            == InputBindingStatus::Conflict
-            && effective.GetMatched(
-                NavigationAction::CrosshairDrag, press),
-        "Conflicting candidate must preserve the previous snapshot.",
-        failureCount);
-    invalid.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
-        InputBindingOverride::Replace,
-        { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 65 });
-    SetExpect(NavigationBindings::Build(invalid, effective)
-            == InputBindingStatus::Unsupported,
-        "Unsupported trigger must be rejected.", failureCount);
-
-    source.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
-        InputBindingOverride::Disable);
-    SetExpect(NavigationBindings::Build(source, effective)
-            == InputBindingStatus::Applied,
-        "Explicit disable should apply.", failureCount);
-    auto oldPress = BuildEvent(InteractionEventKind::PrimaryPress);
-    oldPress.vizMode = VizMode::SliceTop_down;
-    oldPress.isShiftDown = true;
-    const auto disabled = viewer.Send(oldPress);
-    SetExpect(!disabled.isHandled
-            && state.startCount == 1,
-        "Disabled crosshair must not fall back to its old gesture.",
-        failureCount);
-
-    ConfigurableInputBindings planeSource;
-    planeSource.SetOverride(std::string(NavigationBindingKeys::PlaneDrag),
-        InputBindingOverride::Replace,
-        { InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 });
-    NavigationBindings planeBindings;
-    SetExpect(NavigationBindings::Build(planeSource, planeBindings)
-            == InputBindingStatus::Applied,
-        "Reference-plane binding should accept supported secondary drag.",
-        failureCount);
-    TestStatePort planeState;
-    TestSlicePort planeSlice;
-    TestModelPort planeModel;
-    TestUpdatePort planeUpdate;
-    planeSlice.planeAxis = 1;
-    auto picker = vtkSmartPointer<PickPointProbe>::New();
-    auto renderer = vtkSmartPointer<vtkRenderer>::New();
-    Viewer3DHandler plane(&planeState, &planeSlice, &planeModel,
-        &planeUpdate, picker, renderer, &planeBindings);
-    auto planePress = BuildEvent(InteractionEventKind::SecondaryPress);
-    planePress.vizMode = VizMode::CompositeVolume;
-    planePress.isAltDown = true;
-    const auto planeStarted = plane.Send(planePress);
-    planePress.eventKind = InteractionEventKind::PrimaryRelease;
-    (void)plane.Send(planePress);
-    planePress.eventKind = InteractionEventKind::SecondaryRelease;
-    const auto planeEnded = plane.Send(planePress);
-    SetExpect(planeStarted.isHandled && planeStarted.isSucceeded
-            && planeEnded.isSucceeded && planeState.startCount == 1
-            && planeState.stopCount == 1,
-        "Reference plane must clean up on the rebound button.",
-        failureCount);
+void StartNativeWidgetCase(int& failureCount)
+{
+    auto update=std::make_shared<TestUpdatePort>();auto state=std::make_shared<TestStatePort>();
+    auto context=CreateViewContext({update,state,std::make_shared<TestSlicePort>(),std::make_shared<TestModelPort>()},true,true);
+    if(!context||!context->SetInteractorReady()||!context->SetInputEnabled(true)){SetExpect(false,"原生控件 Context 初始化失败",failureCount);return;}
+    class Directory final:public IHostViewDirectory {
+    public:
+        std::shared_ptr<AbstractViewContext> context;
+        std::optional<HostDataRoute> GetDataRoute(const HostViewTarget&) const override{return {};}
+        std::optional<HostViewRoute> GetViewRoute(const HostViewTarget& t) const override{if(t.viewId!="native")return {};return HostViewRoute{"native",HostRenderViewRole::Primary3D,{},{},context,{}};}
+        std::weak_ptr<AppSessionPort> GetSessionPort() const override{return {};}
+        std::vector<HostInputRoute> GetInputRoutes(const HostViewTargets&) const override{return {{"native",HostRenderViewRole::Primary3D,HostInputMode::HostInjected,context}};}
+        bool StopView(std::string_view) override{return true;}
+    };
+    auto directory=std::make_shared<Directory>();directory->context=context;
+    HostInputRegistry registry(directory);HostViewTargets targets;targets.viewIds={"native"};
+    SetExpect(registry.Start(targets),"原生控件输入注册失败",failureCount);
+    auto* renderer=context->GetRenderer();context->SetWindowSize(300,300);
+    auto* camera=renderer->GetActiveCamera();camera->SetParallelProjection(true);camera->SetParallelScale(3);camera->SetPosition(0,0,10);camera->SetFocalPoint(0,0,0);camera->SetViewUp(0,1,0);
+    auto widget=vtkSmartPointer<FeatureSupport::RoutedBoxWidget>::New();auto representation=vtkSmartPointer<vtkBoxRepresentation>::New();
+    double bounds[6]{-1,1,-1,1,-1,1};representation->SetPlaceFactor(1);representation->PlaceWidget(bounds);
+    widget->SetRepresentation(representation);widget->SetInteractor(context->GetInteractor());widget->SetCurrentRenderer(renderer);widget->SetDefaultRenderer(renderer);widget->On();
+    struct State {bool active=false;bool failCleanup=false;int completed=0;} input;
+    auto callback=vtkSmartPointer<vtkCallbackCommand>::New();callback->SetClientData(&input);
+    callback->SetCallback([](vtkObject* caller,unsigned long event,void* data,void*){
+        auto& state=*static_cast<State*>(data);if(event==vtkCommand::StartInteractionEvent){state.active=true;static_cast<FeatureSupport::RoutedBoxWidget*>(caller)->ReleaseInputFocus();}
+        if(event==vtkCommand::EndInteractionEvent){if(!state.failCleanup)state.active=false;++state.completed;}
+    });
+    widget->AddObserver(vtkCommand::StartInteractionEvent,callback);widget->AddObserver(vtkCommand::EndInteractionEvent,callback);
+    const auto controller=registry.GetController();int toolCancels=0;
+    HostInputBinding binding;binding.featureId="native-widget";binding.targetViews=targets;
+    InteractionActionInfo action;action.actionId="test.widget.edit";action.ownerId=binding.featureId;
+    action.bindings.push_back({"test.widget.drag",{InputTriggerKind::Drag,InputMouseButton::Primary},true,{},"widget:test",{InputTriggerKind::Drag}});binding.actions.push_back(action);
+    InteractionActionInfo cancelTool;cancelTool.actionId="interaction.cancel";cancelTool.ownerId=binding.featureId;cancelTool.isCurrentToolCommand=true;cancelTool.isTriggerable=true;
+    binding.actions.push_back(cancelTool);binding.onTrigger=[&](std::string_view,const ActionContext&){++toolCancels;return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    binding.getIsActionAvailable=[&](std::string_view id,const InteractionEvent& e){return id!="test.widget.edit"||representation->ComputeInteractionState(e.x,e.y)!=vtkBoxRepresentation::Outside;};
+    binding.getIsCaptureActive=[&](std::string_view){return input.active;};
+    binding.onBindingsChanged=[&](const std::vector<EffectiveBinding>& values){if(!input.active)FeatureSupport::SetWidgetBindings(widget,values,{{"test.widget.drag",vtkWidgetEvent::Translate}});};
+    binding.onAction=[&](std::string_view,const InteractionEvent& e,const std::optional<HostSemanticTarget>&){
+        if(e.eventKind==InteractionEventKind::Cancel){if(input.failCleanup)return InteractionResult{true,true,false,InteractionFailureReason::CleanupRejected};widget->StopGesture();input.active=false;return InteractionResult{true,true,true};}
+        if(e.eventKind==InteractionEventKind::PrimaryPress)input.active=true;return InteractionResult{true,false,true};
+    };
+    SetExpect(registry.GetFeaturePort().AttachInput(std::move(binding)),"原生控件动作装配失败",failureCount);
+    SetExpect(registry.GetFeaturePort().SetInputOwner("native-widget",true,{"native"}),"原生控件编辑 owner 设置失败",failureCount);
+    context->GetRenderWindow()->SetOffScreenRendering(1);context->GetRenderWindow()->Render();
+    int exports=0;ApplicationAction reset;reset.info.actionId="application.resetProbe";reset.info.ownerId="application";
+    reset.info.bindings.push_back({"application.resetProbe.key",{InputTriggerKind::KeyPress,InputMouseButton::None,0,7,'R'}});
+    reset.execute=[&](const ActionContext&){++exports;return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    SetExpect(controller->RegisterAction(std::move(reset)),"字符动作登记失败",failureCount);
+    BindingPatch disableReset;disableReset.Disable("application.resetProbe.key");SetExpect(controller->ApplyBindings(disableReset).status==InputBindingStatus::Applied,"字符动作禁用失败",failureCount);
+    int exits=0;auto exitObserver=vtkSmartPointer<vtkCallbackCommand>::New();exitObserver->SetClientData(&exits);
+    exitObserver->SetCallback([](vtkObject*,unsigned long,void* data,void*){++*static_cast<int*>(data);});
+    const auto exitTag=context->GetInteractor()->AddObserver(vtkCommand::ExitEvent,exitObserver);
+    for(const char key:{'r','q'}) {
+        const char name[]{key,0};context->GetInteractor()->SetEventPosition(150,150);
+        context->GetInteractor()->SetKeyEventInformation(0,0,key,0,name);
+        context->GetInteractor()->InvokeEvent(vtkCommand::KeyPressEvent);
+        // 直接检验原生样式收到未消费 Char 时的行为，避免 HostInjected 防重门禁掩盖回落。
+        vtkInteractorStyle::SafeDownCast(context->GetInteractor()->GetInteractorStyle())->OnChar();
+        context->GetInteractor()->InvokeEvent(vtkCommand::KeyReleaseEvent);
+    }
+    SetExpect(exports==0&&exits==0&&camera->GetParallelScale()==3,"禁用或未匹配字符不得回落到 VTK 重置相机或退出",failureCount);
+    context->GetInteractor()->RemoveObserver(exitTag);(void)controller->RemoveAction("application.resetProbe");
+    HostInputEvent event;event.viewId="native";event.displayPosition=std::array<double,2>{150.25,150.25};event.displayScale=2;event.kind=HostInputKind::PrimaryPress;
+    const auto pressed=registry.SendInput(event);SetExpect(pressed.isSucceeded&&pressed.isHandled&&!context->GetIsInputIdle(),"原生控件按下须同时建立 SDK 捕获",failureCount);
+    SetExpect(context->GetNavigation()->ZoomBy(1.1)==NavigationStatus::Busy,"业务捕获期间相机写入应拒绝",failureCount);
+    BindingPatch patch;patch.Disable("test.widget.drag");SetExpect(controller->ApplyBindings(patch).status==InputBindingStatus::Applied,"控件拖动期间可改绑定",failureCount);
+    event.kind=HostInputKind::PointerMove;event.displayPosition=std::array<double,2>{175.25,150.25};SetExpect(registry.SendInput(event).isSucceeded,"控件抓取焦点后仍须经过 SDK 输入桥",failureCount);
+    vtkNew<vtkTransform> transform;representation->GetTransform(transform);
+    SetExpect(std::abs(transform->GetMatrix()->GetElement(0,3))>0&&camera->GetParallelScale()==3,"控件只执行一次且不重复修改相机",failureCount);
+    event.kind=HostInputKind::PrimaryRelease;SetExpect(registry.SendInput(event).isSucceeded&&input.completed==1&&context->GetIsInputIdle(),"原生释放必须结束同一捕获且完成一次",failureCount);
+    FeatureSupport::SetWidgetBindings(widget,controller->GetBindings(BindingScope::View("native")),{{"test.widget.drag",vtkWidgetEvent::Translate}});
+    event.kind=HostInputKind::PrimaryPress;const auto before=input.completed;(void)registry.SendInput(event);
+    SetExpect(!input.active&&input.completed==before,"禁用后不得进入旧原生控件映射",failureCount);
+    // widget 禁用后仍可能由 SDK 导航接管按下，先完成该物理按键周期。
+    event.kind=HostInputKind::PrimaryRelease;(void)registry.SendInput(event);
+    BindingPatch restore;restore.UseDefault("test.widget.drag");SetExpect(controller->ApplyBindings(restore).status==InputBindingStatus::Applied,"控件恢复绑定失败",failureCount);
+    event.kind=HostInputKind::PrimaryPress;(void)registry.SendInput(event);
+    SetExpect(input.active&&!context->GetIsInputIdle(),"恢复后须建立原生控件捕获",failureCount);input.failCleanup=true;
+    event.kind=HostInputKind::PrimaryRelease;(void)registry.SendInput(event);
+    SetExpect(!context->GetIsInputIdle(),"原生 release 后清理未完成须保留 SDK 捕获",failureCount);
+    event.kind=HostInputKind::Cancel;SetExpect(!registry.SendInput(event).isSucceeded&&!context->GetIsInputIdle(),"失败取消不能丢弃原生捕获",failureCount);
+    input.failCleanup=false;ActionContext cancelContext;cancelContext.viewId="native";
+    SetExpect(controller->Trigger("interaction.cancel",cancelContext).status==ActionTriggerStatus::Completed&&context->GetIsInputIdle()&&toolCancels==0,"按钮取消须优先重试捕获，不继续退出编辑工具",failureCount);
+    SetExpect(controller->Trigger("interaction.cancel",cancelContext).status==ActionTriggerStatus::Completed&&toolCancels==1,"无捕获后按钮取消才交给当前工具",failureCount);
+    ApplicationAction collision;collision.info.actionId="application.widgetCollision";collision.info.ownerId="application";
+    collision.info.bindings.push_back({"application.widgetCollision.press",{InputTriggerKind::PointerPress,InputMouseButton::Primary},true,{},"widget:test",{InputTriggerKind::PointerPress}});
+    collision.execute=[](const ActionContext&){return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    SetExpect(controller->RegisterAction(std::move(collision)),"动态应用动作应登记并诊断冲突",failureCount);
+    event.kind=HostInputKind::PrimaryPress;(void)registry.SendInput(event);
+    SetExpect(!input.active,"动态冲突必须同时停用原生 widget translator",failureCount);
+    event.kind=HostInputKind::PrimaryRelease;(void)registry.SendInput(event);
+    SetExpect(controller->RemoveAction("application.widgetCollision"),"动态应用动作卸载失败",failureCount);
+    event.kind=HostInputKind::PrimaryPress;(void)registry.SendInput(event);
+    SetExpect(input.active,"卸载冲突动作后须刷新并恢复原生映射",failureCount);
+    event.kind=HostInputKind::Cancel;(void)registry.SendInput(event);
+    widget->Off();SetExpect(registry.GetFeaturePort().DetachInput("native-widget")&&registry.Stop()&&context->StopInput(),"原生控件退出清理失败",failureCount);
 }
 
 void StartContextThreadCase(int& failureCount)
@@ -1003,9 +1020,10 @@ void StartContextStyleCancelRetryCase(int& failureCount)
         StartCaptureReentrancyCase(failureCount);
         StartAtomicCaptureCase(failureCount);
         StartDefaultNavigationPolicyCase(failureCount);
-        StartBindingOverrideCase(failureCount);
 
-        StartContextThreadCase(failureCount);
+        StartViewNavigationCase(failureCount);
+    StartNativeWidgetCase(failureCount);
+    StartContextThreadCase(failureCount);
         StartContextStyleCancelRetryCase(failureCount);
         return failureCount;
     }
@@ -1015,7 +1033,7 @@ int main()
 {
     int failureCount = InteractionCases().GetFailCount();
     failureCount += HostRouterSuite().GetFailCount();
-    failureCount += HostHotkeySuite().GetFailCount();
+    failureCount += InteractionControllerSuite().GetFailCount();
     failureCount += HostInputRegistrySuite().GetFailCount();
     failureCount += AppStateSuite().GetFailCount();
 

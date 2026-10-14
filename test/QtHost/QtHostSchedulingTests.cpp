@@ -1,6 +1,7 @@
 // 测试用途：验证宿主驱动的更新与渲染调度、隐藏视图恢复和延迟绘制。
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostFeature.h"
+#include "Manual/Support/QtOwnerTaskQueue.h"
 #if defined(MVVCVTK_TEST_GAP)
 #include "Host/GapHostFeature.h"
 #endif
@@ -63,6 +64,7 @@ struct ScheduleState final {
     std::weak_ptr<VtkAppHostSession> session;
     std::atomic<int> notifications{0};
     int updates = 0;
+    int deferredUpdates = 0;
     bool isRunning = true;
     bool hasUnexpectedRender = false;
     std::array<int, 2> frames{};
@@ -108,6 +110,8 @@ bool Check(bool value, const char* message)
 bool TestScheduling()
 {
     QObject receiver;
+    Manual::QtOwnerTaskQueue ownerTasks(&receiver);
+    const auto post=ownerTasks.GetPoster();
     QTimer renderTimer(&receiver);
     renderTimer.setSingleShot(true);
     renderTimer.setTimerType(Qt::PreciseTimer);
@@ -153,20 +157,19 @@ bool TestScheduling()
         view.window.viewInit.isoThreshold = 50.0;
         config.renderViews.push_back(std::move(view));
     }
-    config.sendOwnerTask = [&receiver](std::function<void()> task) {
-        return QMetaObject::invokeMethod(&receiver, std::move(task), Qt::QueuedConnection);
-    };
-    config.onWorkAvailable = [weakState] {
+    config.sendOwnerTask=post;
+    config.onWorkAvailable = [weakState,post] {
         const auto current = weakState.lock();
         if (!current) return;
         ++current->notifications;
-        QMetaObject::invokeMethod(current->receiver, [weakState] {
+        const auto queued=post([weakState] {
             const auto current = weakState.lock();
             if (!current || !current->isRunning) return;
             const auto session = current->session.lock();
             if (!session) return;
             const auto before = current->frames;
             current->lastUpdate = session->SendUpdates();
+            if(current->lastUpdate.status==HostUpdateStatus::Deferred)++current->deferredUpdates;
             ++current->updates;
             current->hasUnexpectedRender |= current->frames != before;
             if (current->isAutomaticDrawing) {
@@ -174,7 +177,8 @@ bool TestScheduling()
                 if (!current->pendingDrawIds.empty() && !current->renderTimer->isActive())
                     current->renderTimer->start(0);
             }
-        }, Qt::QueuedConnection);
+        });
+        if(!queued)std::cerr<<"Host owner work event rejected\n";
     };
     auto session = std::make_shared<VtkAppHostSession>(std::move(config));
     state->session = session;
@@ -321,17 +325,25 @@ bool TestScheduling()
     gapConfig.keys.exit.keySym = "Escape";
     auto gap = std::make_shared<GapHostFeature>(gapConfig);
     int gapCompletions = 0;
+    int gapCallbacks = 0;
     GapHostRequest gapRequest;
     gapRequest.action = GapHostAction::Start;
     gapRequest.start = gapConfig.defaultStart;
     valid &= Check(session->AttachFeature(gap)
         && (gap->SendRequest(std::move(gapRequest), [&](GapHostResult result) {
+            ++gapCallbacks;
             if (result.status == GapResultStatus::Succeeded
                 || result.status == GapResultStatus::SucceededWithDisplayFailure)
                 ++gapCompletions;
             else std::cerr << "Gap result: " << result.message << '\n';
-        }).status == GapAdmissionStatus::Accepted) && Wait([&] { return gapCompletions == 1; }),
+        }).status == GapAdmissionStatus::Accepted) && Wait([&] { return gapCallbacks != 0; }) && gapCompletions==1,
         "Gap worker completes without rendering");
+    if(gapCallbacks==0) {
+        std::cerr<<"Gap timeout: notifications="<<state->notifications<<", updates="<<state->updates
+            <<", hostStatus="<<int(state->lastUpdate.status)<<", deferred="<<state->deferredUpdates<<'\n';
+        for(const auto& operation:gap->GetOperationStates())
+            std::cerr<<"Gap operation status="<<int(operation.status)<<", revision="<<operation.stateRevision<<'\n';
+    }
     valid &= Check(session->DetachFeature(*gap), "Gap detach");
 #endif
 #if defined(MVVCVTK_TEST_PART)
