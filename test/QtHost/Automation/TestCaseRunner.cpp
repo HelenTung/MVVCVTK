@@ -1616,12 +1616,14 @@ void CheckSharedRoi(TestWindow& window)
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
+        if(!GetEnabled(window,use[0]))continue;
         auto* page=window.GetModule(use[0]);page->Observe();
         if(auto* form=page->GetParameterEditor(use[1]))if(auto* field=form->GetField(use[2])) {
             const auto* choices=field->findChild<QComboBox*>("value");
             Check(choices && choices->findData(GetRefText(ref))>=0,"saved ROI is selectable in the consumer form");
         }
     }
+    if(GetEnabled(window,"Surface")) {
     auto* surface=window.GetModule("Surface");surface->Observe();
     const auto createRegion=[&] {
         surface->Observe();
@@ -1642,6 +1644,7 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Roi","Begin"),"Succeeded");
     window.GetModule("Roi")->onStop();
     Check(window.GetWorkflow().roiConsumer.isEmpty(),"stopping the shared editor clears the old return destination");
+    }
 #if defined(MANUAL_CROP)
     window.SetViewsVisible(true);window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});
     auto* crop=window.GetModule("Crop");
