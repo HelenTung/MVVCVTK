@@ -25,6 +25,8 @@
 #include <vtkNew.h>
 #include <vtkPlane.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkCompositePolyDataMapper.h>
+#include <vtkMultiBlockDataSet.h>
 #include <vtkProperty.h>
 #include <vtkTransform.h>
 #include <vtkTransformPolyDataFilter.h>
@@ -41,8 +43,20 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <limits>
 
 namespace {
+struct RegionProduct final {
+    std::shared_ptr<std::vector<vtkSmartPointer<vtkPolyData>>> blocks=std::make_shared<std::vector<vtkSmartPointer<vtkPolyData>>>();
+    std::map<std::string,std::pair<RoiPlane,vtkSmartPointer<vtkPolyData>>> slices;
+    bool isEmpty=false;
+    bool has3D=false;
+    bool isComplete=false;
+};
+using RegionMesh=std::shared_ptr<const RegionProduct>;
 bool GetMatrixValid(const std::array<double,16>& m)
 {
     if (!std::all_of(m.begin(),m.end(),[](double x){return std::isfinite(x);})
@@ -80,6 +94,7 @@ class RoiOverlay final : public FeatureOverlayBase {
 public:
     explicit RoiOverlay(HostRenderViewRole role)
     {
+        m_role=role;
         m_cube->SetBounds(-1,1,-1,1,-1,1);
         m_transformFilter->SetInputConnection(m_cube->GetOutputPort());
         m_transformFilter->SetTransform(m_transform);
@@ -94,6 +109,10 @@ public:
         m_actor->GetProperty()->SetRepresentationToWireframe(); m_actor->GetProperty()->SetColor(1,0.7,0.15);
         m_actor->GetProperty()->SetLighting(false); m_actor->GetProperty()->SetLineWidth(2);
         m_actor->PickableOff(); AttachProp(m_actor);
+        m_regionMapper->SetInputDataObject(m_regionData);m_regionMapper->ScalarVisibilityOff();m_regionActor->SetMapper(m_regionMapper);
+        m_regionActor->PickableOff();m_regionActor->SetVisibility(false);m_regionActor->GetProperty()->SetRepresentationToWireframe();
+        m_regionActor->GetProperty()->SetLighting(false);m_regionActor->GetProperty()->SetLineWidth(2);
+        if(axis<0)AttachProp(m_regionActor);
         m_handleMapper->SetInputData(m_handles);m_handleActor->SetMapper(m_handleMapper);m_handleActor->GetProperty()->SetColor(1,.9,.3);m_handleActor->GetProperty()->SetPointSize(7);m_handleActor->GetProperty()->SetLighting(false);m_handleActor->PickableOff();AttachProp(m_handleActor);
     }
     void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
@@ -101,10 +120,13 @@ public:
     {
         (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normal,state.modelToWorld);
         Set3DPropsTransform(state.modelToWorld);
+        if(m_regionRead){const auto plane=GetSlicePlane();if(plane.origin!=m_slicePlane.origin || plane.normal!=m_slicePlane.normal){m_sliceDirty=true;m_actor->SetVisibility(false);}}
     }
     RoiPlane GetSlicePlane() const {RoiPlane p;std::copy_n(m_plane->GetOrigin(),3,p.origin.begin());std::copy_n(m_plane->GetNormal(),3,p.normal.begin());return p;}
     void SetPrimitive(const RoiPrimitive& primitive,bool isVisible,bool isDraft=true)
     {
+        m_regionRead.reset();m_sliceDirty=false;m_regionActor->SetVisibility(false);
+        m_regionData->Initialize();m_regionBlocks.reset();m_regions.reset();m_blockCount=0;
         vtkNew<vtkMatrix4x4> matrix;
         if (primitive.shape==RoiShape::Box || primitive.shape==RoiShape::Ellipsoid) {
             matrix->DeepCopy(primitive.localToSource.data());
@@ -130,13 +152,67 @@ public:
         m_actor->GetProperty()->SetColor(isDraft ? 1.0 : 0.1, isDraft ? 0.7 : 0.95, isDraft ? 0.15 : 1.0);
     }
     void SetHandles(const RoiPrimitive& primitive,bool visible){const auto controls=GetControlPoints(primitive);vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> cells;for(const auto& p:controls){const auto id=points->InsertNextPoint(p.data());cells->InsertNextCell(1,&id);}m_handles->SetPoints(points);m_handles->SetVerts(cells);m_handleActor->SetVisibility(visible && !controls.empty());}
-    void SetColour(const std::array<double,3>& colour){m_actor->GetProperty()->SetColor(colour[0],colour[1],colour[2]);}
-    void SetRegion(vtkPolyData* region,bool isVisible,bool isDraft)
-    {
-        m_transform->Identity();m_transformFilter->SetInputData(region);m_actor->SetVisibility(isVisible);
-        m_actor->GetProperty()->SetColor(isDraft ? 1.0:0.1,isDraft ? 0.7:0.95,isDraft ? 0.15:1.0);
+    void SetColour(const std::array<double,3>& colour){m_colour=colour;m_actor->GetProperty()->SetColor(colour[0],colour[1],colour[2]);m_regionActor->GetProperty()->SetColor(colour[0],colour[1],colour[2]);}
+    void SetRegion(const RegionMesh& regions,const RoiReadSnapshot& read,bool isVisible,bool isDraft,const std::string& viewId){
+        m_actor->SetVisibility(false);
+        const bool slice=m_role==HostRenderViewRole::TopDownSlice || m_role==HostRenderViewRole::FrontBackSlice || m_role==HostRenderViewRole::LeftRightSlice;
+        if(slice){
+            if(m_regionRead!=read){m_regionRead=read;m_sliceDirty=true;}
+            const auto found=regions?regions->slices.find(viewId):std::map<std::string,std::pair<RoiPlane,vtkSmartPointer<vtkPolyData>>>::const_iterator{};
+            const auto plane=GetSlicePlane();
+            if(regions && found!=regions->slices.end() && found->second.first.origin==plane.origin && found->second.first.normal==plane.normal){m_mapper->SetInputData(found->second.second);m_slicePlane=plane;m_sliceDirty=false;}
+            m_actor->SetVisibility(isVisible && !m_sliceDirty);const auto colour=m_colour.value_or(std::array<double,3>{isDraft?1.:.1,isDraft?.7:.95,isDraft?.15:1.});m_actor->GetProperty()->SetColor(colour[0],colour[1],colour[2]);return;
+        }
+        const auto blocks=regions?regions->blocks:nullptr;
+        if(m_regionBlocks!=blocks || (blocks && blocks->size()<m_blockCount)){m_regionData->Initialize();m_blockCount=0;m_regionBlocks=blocks;}
+        if(blocks)for(;m_blockCount<blocks->size();++m_blockCount){
+            if(m_blockCount>=std::numeric_limits<unsigned>::max())throw RoiError::TooLarge;
+            m_regionData->SetBlock(static_cast<unsigned>(m_blockCount),(*blocks)[m_blockCount]);}
+        m_regions=regions;const auto colour=m_colour.value_or(std::array<double,3>{isDraft?1.:.1,isDraft?.7:.95,isDraft?.15:1.});
+        m_regionActor->SetVisibility(isVisible && blocks && !blocks->empty());m_regionActor->GetProperty()->SetColor(colour[0],colour[1],colour[2]);
+    }
+    void SetRegionVisible(bool visible){m_actor->SetVisibility(visible && (!m_regionRead || !m_sliceDirty));m_regionActor->SetVisibility(visible && m_blockCount>0);}
+    bool GetSliceDirty()const noexcept{return m_sliceDirty;}
+    bool GetIsSlice()const noexcept{return m_role==HostRenderViewRole::TopDownSlice || m_role==HostRenderViewRole::FrontBackSlice || m_role==HostRenderViewRole::LeftRightSlice;}
+    static vtkSmartPointer<vtkPolyData> BuildSlice(const RoiReadSnapshot& read,const DataSnapshot& source,const RoiPlane& slicePlane,const std::shared_ptr<std::atomic<bool>>& cancel){
+        const auto image=source?std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload):nullptr;if(!image)throw RoiError::UnsupportedRoi;
+        const auto prepared=read->GetQuery();if(prepared.error!=RoiError::None || !prepared.query)throw prepared.error;const auto& query=prepared.query;const auto& grid=image->GetGeometry();
+        const auto point=[&](const std::array<double,3>& i){auto p=grid.origin;for(int r=0;r<3;++r)for(int a=0;a<3;++a)p[r]+=grid.direction[r*3+a]*grid.spacing[a]*i[a];return p;};
+        std::array<double,3> coefficient{};double constant=0;
+        for(int r=0;r<3;++r){constant+=slicePlane.normal[r]*(grid.origin[r]-slicePlane.origin[r]);for(int a=0;a<3;++a)coefficient[a]+=slicePlane.normal[r]*grid.direction[r*3+a]*grid.spacing[a];}
+        int axis=0;for(int a=1;a<3;++a)if(std::abs(coefficient[a])>std::abs(coefficient[axis]))axis=a;
+        if(!std::isfinite(constant) || !std::all_of(coefficient.begin(),coefficient.end(),[](double value){return std::isfinite(value);}))throw RoiError::InvalidGeometry;
+        if(coefficient[axis]==0)throw std::runtime_error("Invalid ROI slice plane.");const int u=(axis+1)%3,v=(axis+2)%3;
+        const double halo=.5*(std::abs(coefficient[0])+std::abs(coefficient[1])+std::abs(coefficient[2]))/std::abs(coefficient[axis]);
+        vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> lines;
+        // 直接读取平面相交的体素层；不先生成整个三维边界。
+        for(std::int64_t y=grid.extent[u*2];y<=grid.extent[u*2+1];++y)for(std::int64_t z=grid.extent[v*2];z<=grid.extent[v*2+1];++z){
+            if(cancel->load())throw RoiError::Cancelled;
+            const double center=-(constant+coefficient[u]*y+coefficient[v]*z)/coefficient[axis];const double low=std::max(double(grid.extent[axis*2]),std::ceil(center-halo)),high=std::min(double(grid.extent[axis*2+1]),std::floor(center+halo));
+            if(low>high)continue;
+            for(std::int64_t x=static_cast<std::int64_t>(low);x<=high;++x){std::array<double,3> index{};index[axis]=double(x);index[u]=double(y);index[v]=double(z);if(!query->GetContains(point(index)))continue;
+                for(int faceAxis=0;faceAxis<3;++faceAxis)for(int side=0;side<2;++side){auto neighbour=index;neighbour[faceAxis]+=side?1:-1;if(query->GetContains(point(neighbour)))continue;
+                    std::array<std::array<double,3>,4> corners;const int a=(faceAxis+1)%3,b=(faceAxis+2)%3;
+                    for(int k=0;k<4;++k){auto i=index;i[faceAxis]+=side?.5:-.5;i[a]+=(k==1 || k==2)?.5:-.5;i[b]+=k>=2?.5:-.5;for(int n=0;n<3;++n)i[n]=std::clamp(i[n],double(grid.extent[n*2]),double(grid.extent[n*2+1]));corners[k]=i;}
+                    std::vector<std::array<double,3>> intersections;
+                    const auto distance=[&](const auto& i){return constant+coefficient[0]*i[0]+coefficient[1]*i[1]+coefficient[2]*i[2];};
+                    for(int k=0;k<4;++k){const auto& first=corners[k];const auto& second=corners[(k+1)%4];const double d=distance(first),e=distance(second);if(d==0)intersections.push_back(first);if((d<0 && e>0)||(d>0 && e<0)){auto i=first;for(int n=0;n<3;++n)i[n]+=d/(d-e)*(second[n]-first[n]);intersections.push_back(i);}}
+                    if(intersections.size()>=2){vtkIdType ids[2];for(int k=0;k<2;++k){const auto p=point(intersections[k]);ids[k]=points->InsertNextPoint(p.data());}lines->InsertNextCell(2,ids);}
+                }
+            }
+        }
+        auto mesh=vtkSmartPointer<vtkPolyData>::New();mesh->SetPoints(points);mesh->SetLines(lines);return mesh;
     }
 private:
+    HostRenderViewRole m_role=HostRenderViewRole::Primary3D;
+    std::optional<std::array<double,3>> m_colour;
+    RegionMesh m_regions;
+    std::shared_ptr<std::vector<vtkSmartPointer<vtkPolyData>>> m_regionBlocks;
+    std::size_t m_blockCount=0;
+    vtkSmartPointer<vtkMultiBlockDataSet> m_regionData=vtkSmartPointer<vtkMultiBlockDataSet>::New();
+    vtkSmartPointer<vtkCompositePolyDataMapper> m_regionMapper=vtkSmartPointer<vtkCompositePolyDataMapper>::New();
+    vtkSmartPointer<vtkActor> m_regionActor=vtkSmartPointer<vtkActor>::New();
+    RoiReadSnapshot m_regionRead;RoiPlane m_slicePlane;bool m_sliceDirty=false;
     vtkSmartPointer<vtkPolyData> m_handles=vtkSmartPointer<vtkPolyData>::New();
     vtkSmartPointer<vtkPolyDataMapper> m_handleMapper=vtkSmartPointer<vtkPolyDataMapper>::New();
     vtkSmartPointer<vtkActor> m_handleActor=vtkSmartPointer<vtkActor>::New();
@@ -161,8 +237,9 @@ public:
         std::shared_ptr<OverlayService> service;
         std::shared_ptr<FeatureViewService> view;
         std::shared_ptr<RoiOverlay> overlay;
+        std::string viewId;
     };
-    struct Shown final {DataRevisionRef source;RoiReadSnapshot read;std::vector<Binding> bindings;vtkSmartPointer<vtkPolyData> mesh;bool isVisible=true;};
+    struct Shown final {DataRevisionRef source;RoiReadSnapshot read;std::vector<Binding> bindings;RegionMesh mesh;bool isVisible=true;RoiError displayError=RoiError::None;};
     RoiError ShowRoi(const DataRevisionRef& ref,bool visible)
     {
         const auto graph=m_data->GetDataGraph();const auto data=m_data->GetData(graph,ref);
@@ -177,19 +254,22 @@ public:
             const auto& definition=shown.read->GetDefinition();const auto& p=definition.nodes.front().primitive;
             const bool simple=definition.nodes.size()==1 && definition.nodes.front().kind==RoiNodeKind::Primitive
                 && (p.shape==RoiShape::Box || p.shape==RoiShape::Sphere || p.shape==RoiShape::Cylinder || p.shape==RoiShape::Ellipsoid);
-            if (!simple && !shown.mesh) {QueueDisplay(shown.read,ref);return RoiError::None;}
+            const bool needsDisplay=!simple && (!shown.mesh || !shown.mesh->isComplete);
+            if(!simple && !shown.mesh)shown.mesh=std::make_shared<const RegionProduct>();
             for (const auto& view:m_views->GetViews(m_config.targetViews)) {
                 auto port=m_views->GetFeaturePort(view.id);auto overlays=m_views->GetOverlayPort(view.id);
                 const auto stamp=port ? port->GetRenderInputStamp():std::nullopt;if (!overlays || !stamp || stamp->dataRevision!=shown.read->GetSource()) continue;
-                if(std::any_of(shown.bindings.begin(),shown.bindings.end(),[&](const auto& b){return b.view==port;}))continue;
+                const auto existing=std::find_if(shown.bindings.begin(),shown.bindings.end(),[&](const auto& b){return b.view==port;});
+                if(existing!=shown.bindings.end()){if(!simple && shown.mesh){existing->overlay->SetRegion(shown.mesh,shown.read,true,false,view.id);(void)port->SetRenderNeeded();}continue;}
                 auto overlay=std::make_shared<RoiOverlay>(view.role);
                 if (simple) overlay->SetPrimitive(p,true,false);
-                else if (shown.mesh) overlay->SetRegion(shown.mesh,true,false);
-                else {m_state.displayError=RoiError::TooLarge;continue;}
+                else if (shown.mesh) overlay->SetRegion(shown.mesh,shown.read,true,false,view.id);
+                else {shown.displayError=RoiError::TooLarge;if(!m_state.hasDraft)m_state.displayError=shown.displayError;continue;}
                 std::uint64_t hash=1469598103934665603ULL;for(auto byte:ref.entityId.bytes){hash^=byte;hash*=1099511628211ULL;}const double angle=double(hash%1048576)/1048576*6.283185307179586;overlay->SetColour({.55+.4*std::cos(angle),.55+.4*std::cos(angle+2.094395102393195),.55+.4*std::cos(angle+4.188790204786391)});
-                shown.bindings.push_back({overlays,port,overlay});if (!overlays->AttachOverlay(overlay)) {overlays->RemoveOverlay(overlay);shown.bindings.pop_back();m_state.displayError=RoiError::Unavailable;continue;}
+                shown.bindings.push_back({overlays,port,overlay,view.id});if (!overlays->AttachOverlay(overlay)) {overlays->RemoveOverlay(overlay);shown.bindings.pop_back();shown.displayError=RoiError::Unavailable;if(!m_state.hasDraft)m_state.displayError=shown.displayError;continue;}
                 (void)port->SetRenderNeeded();
             }
+            if(needsDisplay && !shown.bindings.empty())QueueDisplay(shown.read,ref);
         }
         if (!visible) {for (auto& b:shown.bindings) {b.service->RemoveOverlay(b.overlay);(void)b.view->SetRenderNeeded();}shown.bindings.clear();}
         return RoiError::None;
@@ -204,80 +284,146 @@ public:
             }
         }
     }
+    bool GetDraftCurrent()const{
+        if(!m_state.hasDraft)return true;const auto lease=m_lease.lock();const auto stamp=m_reference?m_reference->GetRenderInputStamp():std::nullopt;
+        if(!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread() || !stamp || stamp->dataRevision!=m_request.definition.source)return false;
+        if(m_request.expectedSourceBinding){const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),m_request.expectedSourceBinding->name);if(!binding || binding->revision!=m_request.expectedSourceBinding->revision || binding->target!=m_request.expectedSourceBinding->target)return false;}return true;
+    }
     RoiError GetAccessError() const noexcept
     {
         if (m_owner!=std::thread::id{} && m_owner!=std::this_thread::get_id()) return RoiError::WrongThread;
         return m_state.isAttached && !m_isPublishing ? RoiError::None:RoiError::Unavailable;
     }
-    static vtkSmartPointer<vtkPolyData> BuildRegion(const RoiReadSnapshot& read,const DataSnapshot& source,const std::shared_ptr<std::atomic<bool>>& cancel)
+    static bool BuildRegion(const RoiReadSnapshot& read,const DataSnapshot& source,const std::shared_ptr<std::atomic<bool>>& cancel,
+        const std::function<void(vtkSmartPointer<vtkPolyData>)>& publish,const std::function<void()>& onBlockComplete)
     {
-        if (!read) return {};
+        if (!read)throw RoiError::Unavailable;
         const auto* image=source ? dynamic_cast<const ImageGrid3DPayload*>(source->payload.get()):nullptr;
-        if (!image) return {};
+        if (!image)throw RoiError::UnsupportedRoi;
         const auto& grid=image->GetGeometry();
         const auto point=[&](const std::array<double,3>& index) {auto p=grid.origin;for (int r=0;r<3;++r) for (int a=0;a<3;++a) p[r]+=grid.direction[r*3+a]*grid.spacing[a]*index[a];return p;};
-        vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> faces;
+        bool isEmpty=true;
+        const auto prepared=read->GetQuery();if(prepared.error!=RoiError::None)throw prepared.error;if(!prepared.query)throw RoiError::InvalidRequest;
         const auto bounds=read->GetBounds();auto extent=grid.extent;
         vtkNew<vtkMatrix4x4> inverse;for(int r=0;r<3;++r){for(int a=0;a<3;++a)inverse->SetElement(r,a,grid.direction[r*3+a]*grid.spacing[a]);inverse->SetElement(r,3,grid.origin[r]);}inverse->Invert();
         std::array<double,6> indexed{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
-        for(int a=0;a<3;++a)if(bounds[a*2]>bounds[a*2+1])return vtkSmartPointer<vtkPolyData>::New();
+        for(int a=0;a<3;++a)if(bounds[a*2]>bounds[a*2+1])return true;
         for(unsigned k=0;k<8;++k){const auto p=MapPoint(inverse,{bounds[(k&1)?1:0],bounds[(k&2)?3:2],bounds[(k&4)?5:4]});for(int a=0;a<3;++a){indexed[a*2]=std::min(indexed[a*2],p[a]);indexed[a*2+1]=std::max(indexed[a*2+1],p[a]);}}
-        for(int a=0;a<3;++a){const auto low=std::max(double(extent[a*2]),std::ceil(indexed[a*2])),high=std::min(double(extent[a*2+1]),std::floor(indexed[a*2+1]));if(low>high)return vtkSmartPointer<vtkPolyData>::New();extent[a*2]=int(low);extent[a*2+1]=int(high);}
-        for (std::int64_t z=extent[4];z<=extent[5];++z) for (std::int64_t y=extent[2];y<=extent[3];++y) for (std::int64_t x=extent[0];x<=extent[1];++x) {
-            if(cancel->load())return {};
+        const auto& nodes=read->GetDefinition().nodes;
+        const bool discrete=std::none_of(nodes.begin(),nodes.end(),[](const auto& node){return node.kind==RoiNodeKind::Primitive && node.primitive.shape!=RoiShape::MaskReference && node.primitive.shape!=RoiShape::VoxelSet;});
+        for(int a=0;a<3;++a){const auto low=std::max(double(extent[a*2]),std::ceil(indexed[a*2])),high=std::min(double(extent[a*2+1]),std::floor(indexed[a*2+1]));if(low>high){if(!discrete)throw RoiError::UnsupportedRoi;return true;}extent[a*2]=int(low);extent[a*2+1]=int(high);}
+        // 每块共享顶点，邻接成员从同一真实读取快照查询，不生成块缝。
+        for(std::int64_t bz=extent[4];bz<=extent[5];bz+=16)for(std::int64_t by=extent[2];by<=extent[3];by+=16)for(std::int64_t bx=extent[0];bx<=extent[1];bx+=16){
+            vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> faces;std::map<std::array<std::int64_t,3>,vtkIdType> vertices;
+        for(std::int64_t z=bz;z<=std::min<std::int64_t>(bz+15,extent[5]);++z)for(std::int64_t y=by;y<=std::min<std::int64_t>(by+15,extent[3]);++y)for(std::int64_t x=bx;x<=std::min<std::int64_t>(bx+15,extent[1]);++x) {
+            if(cancel->load())throw RoiError::Cancelled;
             const std::array<double,3> index{static_cast<double>(x),static_cast<double>(y),static_cast<double>(z)};
             const auto p=point(index);bool candidate=true;for (int a=0;a<3;++a) if (p[a]<bounds[a*2] || p[a]>bounds[a*2+1]) candidate=false;
-            if (!candidate || !read->GetContains(p)) continue;
+            if (!candidate || !prepared.query->GetContains(p)) continue;
             for (int axis=0;axis<3;++axis) for (int side=0;side<2;++side) {
-                auto neighbour=index;neighbour[axis]+=side ? 1:-1;if (read->GetContains(point(neighbour))) continue;
-                if (static_cast<std::size_t>(points->GetNumberOfPoints())>=roiCopyLimit/(sizeof(double)*3)) return {};
+                auto neighbour=index;neighbour[axis]+=side ? 1:-1;if (prepared.query->GetContains(point(neighbour))) continue;
                 vtkIdType ids[4];const int a=(axis+1)%3,b=(axis+2)%3;
                 for (int corner=0;corner<4;++corner) {auto vertex=index;vertex[axis]+=side ? .5:-.5;vertex[a]+=(corner==1 || corner==2) ? .5:-.5;vertex[b]+=corner>=2 ? .5:-.5;
                     for(int a=0;a<3;++a)vertex[a]=std::clamp(vertex[a],double(grid.extent[a*2]),double(grid.extent[a*2+1]));
-                    const auto world=point(vertex);ids[corner]=points->InsertNextPoint(world.data());}
+                    std::array<std::int64_t,3> key{};for(int n=0;n<3;++n)key[n]=static_cast<std::int64_t>(vertex[n]*2);
+                    auto found=vertices.find(key);if(found==vertices.end()){const auto world=point(vertex);found=vertices.emplace(key,points->InsertNextPoint(world.data())).first;}ids[corner]=found->second;}
                 faces->InsertNextCell(4,ids);
             }
         }
-        auto mesh=vtkSmartPointer<vtkPolyData>::New();mesh->SetPoints(points);mesh->SetPolys(faces);return mesh;
+            if(faces->GetNumberOfCells()){auto mesh=vtkSmartPointer<vtkPolyData>::New();mesh->SetPoints(points);mesh->SetPolys(faces);isEmpty=false;publish(std::move(mesh));}
+            onBlockComplete();
+        }
+        if(isEmpty && !discrete)throw RoiError::UnsupportedRoi;
+        return isEmpty;
     }
     RoiError SetDefinition(RoiDefinition definition)
     {
         const auto preview=m_data->GetRoiPreview(m_data->GetDataGraph(),definition);
         if (preview.error!=RoiError::None || !preview.roi) return preview.error;
         m_request.definition=std::move(definition);m_state.draft=m_request.definition;m_state.preview=preview.roi;
-        m_geometryChanged=m_history.empty() || !SameDefinition(m_request.definition,m_history.front());
+        m_geometryChanged=m_history.empty() || !SameDefinition(m_request.definition,m_history.front().request.definition);
         ++m_state.previewRevision;m_geometryDirty=true;
-        return SetProjection() ? RoiError::None:RoiError::Unavailable;
+        if(m_displayRunning && !m_displayRunning->ref)CancelDisplay();
+        m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& work){return !work.ref;}),m_displayQueue.end());
+        try{if(!SetProjection()){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}}catch(...){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}
+        return RoiError::None;
     }
     RoiError SetSelection(const RoiPrimitive& primitive)
     {
+        if(m_operation && m_state.operation.rois.size()>1)return RoiError::InvalidRequest;
         RoiDefinition selection{m_request.definition.source,{{RoiNodeKind::Primitive,primitive}}};
         auto definition=selection;
         if (m_selection==RoiSelectionMode::Add || m_selection==RoiSelectionMode::Subtract || m_selection==RoiSelectionMode::Intersect) {
-            definition=m_applied;const auto left=static_cast<std::uint32_t>(definition.nodes.size()-1),right=static_cast<std::uint32_t>(definition.nodes.size());
+            definition=m_applied;if(definition.nodes.size()>roiNodeLimit-2)return RoiError::TooLarge;const auto left=static_cast<std::uint32_t>(definition.nodes.size()-1),right=static_cast<std::uint32_t>(definition.nodes.size());
             definition.nodes.push_back(selection.nodes.front());definition.nodes.push_back({m_selection==RoiSelectionMode::Add ? RoiNodeKind::Union:m_selection==RoiSelectionMode::Subtract ? RoiNodeKind::Difference:RoiNodeKind::Intersection,{},left,right});
-        } else if (m_selection!=RoiSelectionMode::Replace && m_selection!=RoiSelectionMode::NewRoi) return RoiError::InvalidRequest;
+        } else if (m_selection!=RoiSelectionMode::Replace) return RoiError::InvalidRequest;
         const auto previous=m_tool;m_tool=primitive;m_toolNodeIndex=definition.nodes.size()==1?0:definition.nodes.size()-2;const auto error=SetDefinition(std::move(definition));
-        if(error==RoiError::None && m_operation){++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_operation.reset();m_state.operation={};}
+        if(error==RoiError::None){++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_operation.reset();m_operationApplied=false;m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;}
         if (error!=RoiError::None) m_tool=previous;
-        else if (m_selection==RoiSelectionMode::NewRoi) {m_request.action=RoiAction::Create;m_request.expectedRoi.reset();}
         return error;
     }
-    void SetHistory()
-    {
-        m_applied=m_request.definition;m_history.push_back(m_applied);m_redo.clear();
+    struct EditState final {
+        RoiRequest request;RoiPrimitive tool;std::size_t toolNodeIndex=0;
+        RoiSelectionMode selection=RoiSelectionMode::Replace;
+        std::optional<DataRevisionRef> updateTarget;
+        std::optional<RoiOperationRequest> operation;
+        RoiOperationResult candidate;bool operationApplied=false;
+    };
+    EditState GetEditState()const{return {m_request,m_tool,m_toolNodeIndex,m_selection,m_updateTarget,m_operation,m_state.operation,m_operationApplied};}
+    RoiError SetEditState(const EditState& edit){
+        const auto preview=m_data->GetRoiPreview(m_data->GetDataGraph(),edit.request.definition);if(preview.error!=RoiError::None)return preview.error;
+        ++m_serial;if(m_cancel)m_cancel->store(true);m_pending.reset();m_saveSerial.reset();m_state.isSaving=false;m_state.isComputing=false;
+        m_request=edit.request;m_tool=edit.tool;m_toolNodeIndex=edit.toolNodeIndex;m_selection=edit.selection;m_updateTarget=edit.updateTarget;m_operation=edit.operation;m_state.operation=edit.candidate;m_operationApplied=edit.operationApplied;
+        m_applied=edit.request.definition;return SetDefinition(edit.request.definition);
+    }
+    RoiError GetOutputError(RoiOutputMode output)const noexcept{
+        if(output!=RoiOutputMode::CreateNew && output!=RoiOutputMode::UpdateTarget)return RoiError::InvalidRequest;
+        return output==RoiOutputMode::UpdateTarget && !m_updateTarget?RoiError::MissingInput:RoiError::None;
+    }
+    RoiError SetOutput(RoiOutputMode output){
+        const auto error=GetOutputError(output);if(error!=RoiError::None)return error;
+        const auto previous=m_operation?m_operation->output:m_request.action==RoiAction::Create?RoiOutputMode::CreateNew:RoiOutputMode::UpdateTarget;
+        if(previous!=output){m_saveSerial.reset();m_state.isSaving=false;}
+        m_request.action=output==RoiOutputMode::CreateNew?RoiAction::Create:RoiAction::SetGeometry;
+        m_request.expectedRoi=output==RoiOutputMode::CreateNew?std::nullopt:m_updateTarget;
+        if(m_operation)m_operation->output=output;if(m_pending)m_pending->output=output;
+        auto& text=m_state.operation.provenance.canonicalParameters;const auto at=text.find(";output=");if(at!=std::string::npos){const auto end=text.find(';',at+1);text.replace(at+8,end-(at+8),std::to_string(int(output)));}
+        return RoiError::None;
+    }
+    void AcceptOperation(){
+        if(!m_operation)return;
+        (void)SetOutput(m_operation->output);
+        const auto add=[&](const DataRevisionRef& ref,const char* role){
+            if(std::any_of(m_request.inputs.begin(),m_request.inputs.end(),[&](const auto& input){return input.source==ref;}))return;
+            std::string name=role;name+=std::to_string(m_request.inputs.size());
+            m_request.inputs.push_back({std::move(name),ref});};
+        if(m_operation->target)add(*m_operation->target,"operation-input-");
+        if(const auto* p=std::get_if<RoiBooleanParams>(&m_operation->params))for(const auto& ref:p->operands)add(ref,"operation-input-");
+        if(const auto* p=std::get_if<RoiInvertParams>(&m_operation->params);p && p->domain)add(*p->domain,"operation-input-");
+        if(const auto* p=std::get_if<RoiMeshParams>(&m_operation->params))add(p->mesh,"operation-mesh-");
+        m_request.provenance=m_state.operation.provenance;
+    }
+    void SetHistory(){
+        m_applied=m_request.definition;m_history.push_back(GetEditState());m_redo.clear();
         m_state.undoCount=m_history.size()-1;m_state.redoCount=0;
+    }
+    void ApplyCandidate(){
+        AcceptOperation();
+        const auto* components=m_operation?std::get_if<RoiComponentParams>(&m_operation->params):nullptr;
+        m_operationApplied=components && components->operation==RoiComponentOperation::Split;
+        if(!m_operationApplied){m_operation.reset();m_state.operation={};}
+        SetHistory();
     }
     RoiError StartOperation(const RoiOperationRequest& request,bool begins)
     {
-        if (!m_state.hasDraft || m_state.isDragging) return RoiError::InvalidRequest;
-        if (begins || !m_operation) m_operationStart=m_request.definition;
+        if (!m_state.hasDraft || m_state.isDragging || (!begins && m_operationApplied)) return RoiError::InvalidRequest;
+        if (begins || !m_operation){m_operationStart=m_request.definition;m_operationOrigin=GetEditState();}
         auto operation=request;operation.source=m_request.definition.source;operation.input=m_operationStart;
-        operation.target=m_request.expectedRoi;operation.metadata=m_request.metadata;operation.expectedSourceBinding=m_request.expectedSourceBinding;
+        operation.target=m_updateTarget;operation.metadata=m_request.metadata;operation.expectedSourceBinding=m_request.expectedSourceBinding;
         if (!operation.target) operation.output=RoiOutputMode::CreateNew;
-        ++m_serial;if (m_cancel) m_cancel->store(true);m_pending=operation;m_operation=std::move(operation);
-        m_state.isComputing=true;m_state.isSaving=false;m_state.operation={};m_state.operation.error=RoiError::Pending;
-        if(m_displayFuture.valid() && m_displayCancel)m_displayCancel->store(true);
+        ++m_serial;if (m_cancel) m_cancel->store(true);m_pending=operation;m_operation=std::move(operation);m_operationApplied=false;
+        m_saveSerial.reset();m_state.isComputing=true;m_state.isSaving=false;m_state.operation={};m_state.operation.error=RoiError::Pending;
+        if(m_displayFuture.valid())CancelDisplay();
         StartPendingOperation();return m_state.isComputing?RoiError::Pending:m_state.error;
     }
     void StartPendingOperation()
@@ -296,7 +442,7 @@ public:
         m_cancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_cancel;const auto original=request.getCancelled;
         request.getCancelled=[cancel,original]{return cancel->load() || (original && original());};m_runningSerial=m_serial;
         std::packaged_task<RoiOperationResult()> task([data,graph,readers,request=std::move(request)]{return data->GetRoiOperation(graph,request);});
-        m_future=task.get_future();const auto host=m_host;
+        m_future=task.get_future();const std::weak_ptr<FeatureHostControl> host=m_host;
         try {m_worker=std::thread([task=std::move(task),host]()mutable{task();if(const auto owner=host.lock())(void)owner->SendWorkAvailable();});}
         catch(...){m_future={};m_state.isComputing=false;m_state.error=RoiError::TooLarge;m_state.operation.error=m_state.error;}
     }
@@ -317,44 +463,154 @@ public:
                     }
                     if (combined.source==m_request.definition.source) {const auto error=SetDefinition(std::move(combined));if (error!=RoiError::None) m_state.error=error;}
                 }
-                if (m_state.isSaving) {m_state.isSaving=false;if(m_state.error==RoiError::None) {const auto saved=CommitDraft();m_state.error=saved.error;}}
+                if (m_saveSerial && *m_saveSerial==m_runningSerial) {m_saveSerial.reset();m_state.isSaving=false;if(m_state.error==RoiError::None) {const auto saved=CommitDraft();m_state.error=saved.error;}}
             }
             StartPendingOperation();StartDisplay();
         }
     }
-    struct DisplayWork {RoiReadSnapshot read;DataSnapshot source;std::shared_ptr<const FeatureInternal::InputReads> readers;std::optional<DataRevisionRef> ref;std::uint64_t previewRevision=0;};
-    void QueueDisplay(const RoiReadSnapshot& read,std::optional<DataRevisionRef> ref={})
+    struct DisplayWork {RoiReadSnapshot read;DataSnapshot source;std::shared_ptr<const FeatureInternal::InputReads> readers;std::optional<DataRevisionRef> ref;std::uint64_t previewRevision=0;RegionMesh reuse;std::map<std::string,RoiPlane> planes;bool needs3D=false;};
+    struct DisplayResult {RoiError error=RoiError::None;bool isEmpty=false;bool has3D=false;};
+    struct DisplayBatch {std::string viewId;RoiPlane plane;vtkSmartPointer<vtkPolyData> mesh;};
+    struct DisplayChannel {
+        std::mutex mutex;std::condition_variable changed;std::deque<DisplayBatch> batches;
+        std::map<std::string,RoiPlane> pendingPlanes;
+    };
+    void CancelDisplay(){
+        if(m_displayCancel)m_displayCancel->store(true);
+        if(m_displayChannel)m_displayChannel->changed.notify_all();
+    }
+    void QueueDisplay(const RoiReadSnapshot& read,std::optional<DataRevisionRef> ref={},RegionMesh reuse={})
     {
         if(!read)return;
-        if(!ref){m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& w){return !w.ref;}),m_displayQueue.end());if(m_displayRunning && !m_displayRunning->ref && m_displayCancel)m_displayCancel->store(true);}
+        const auto matches=[&](const DisplayWork& work){
+            if(work.ref!=ref || work.read!=read || (!ref && work.previewRevision!=m_state.previewRevision))return false;
+            const auto& bindings=ref?m_shown.at(*ref).bindings:m_bindings;std::size_t count=0;
+            for(const auto& binding:bindings)if(binding.overlay->GetIsSlice()){++count;const auto plane=binding.overlay->GetSlicePlane();const auto found=work.planes.find(binding.viewId);if(found==work.planes.end() || found->second.origin!=plane.origin || found->second.normal!=plane.normal)return false;}
+            const bool needs3D=std::any_of(bindings.begin(),bindings.end(),[](const auto& binding){return !binding.overlay->GetIsSlice();});
+            return count==work.planes.size() && needs3D==work.needs3D;
+        };
+        if(m_displayRunning && !m_displayCancel->load() && m_displayRunning->ref==ref && m_displayRunning->read==read
+            && (ref || m_displayRunning->previewRevision==m_state.previewRevision)){
+            const auto& bindings=ref?m_shown.at(*ref).bindings:m_bindings;
+            // 平面更新由同一个 worker 在块边界优先处理，不取消正在构建的三维结果。
+            std::lock_guard<std::mutex> lock(m_displayChannel->mutex);
+            for(const auto& binding:bindings)if(binding.overlay->GetIsSlice()){
+                const auto plane=binding.overlay->GetSlicePlane();const auto found=m_displayRunning->planes.find(binding.viewId);
+                if(found==m_displayRunning->planes.end() || found->second.origin!=plane.origin || found->second.normal!=plane.normal){
+                    m_displayRunning->planes[binding.viewId]=plane;m_displayChannel->pendingPlanes[binding.viewId]=plane;}
+            }return;
+        }
+        if(!ref && std::any_of(m_displayQueue.begin(),m_displayQueue.end(),matches))return;
+        if(!ref){m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& w){return !w.ref;}),m_displayQueue.end());if(m_displayRunning && !m_displayRunning->ref)CancelDisplay();}
         else if((m_displayRunning && m_displayRunning->ref==ref) || std::any_of(m_displayQueue.begin(),m_displayQueue.end(),[&](const auto& w){return w.ref==ref;}))return;
         const auto graph=m_data->GetDataGraph();auto refs=read->GetDependencies();refs.push_back(read->GetSource());
-        auto readers=FeatureInternal::StartInputReads(graph,refs,"roi-display-reader");if(!readers){m_state.displayError=RoiError::Unavailable;return;}
-        m_displayQueue.push_back({read,m_data->GetData(graph,read->GetSource()),std::make_shared<const FeatureInternal::InputReads>(std::move(*readers)),ref,m_state.previewRevision});StartDisplay();
+        auto readers=FeatureInternal::StartInputReads(graph,refs,"roi-display-reader");if(!readers){if(ref)m_shown.at(*ref).displayError=RoiError::Unavailable;else{m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}return;}
+        DisplayWork work{read,m_data->GetData(graph,read->GetSource()),std::make_shared<const FeatureInternal::InputReads>(std::move(*readers)),ref,m_state.previewRevision,std::move(reuse),{}};
+        const auto& bindings=ref?m_shown.at(*ref).bindings:m_bindings;
+        for(const auto& binding:bindings)if(binding.overlay->GetIsSlice())work.planes.emplace(binding.viewId,binding.overlay->GetSlicePlane());
+        work.needs3D=std::any_of(bindings.begin(),bindings.end(),[](const auto& binding){return !binding.overlay->GetIsSlice();});
+        m_displayQueue.push_back(std::move(work));if(!ref)m_state.displayStatus=RoiDisplayStatus::Updating;StartDisplay();
     }
     void StartDisplay()
     {
         if(m_future.valid() || m_pending || m_displayFuture.valid() || m_displayQueue.empty())return;
         m_displayRunning=std::move(m_displayQueue.front());m_displayQueue.erase(m_displayQueue.begin());
-        m_displayCancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_displayCancel;const auto host=m_host;
+        m_displayCancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_displayCancel;const std::weak_ptr<FeatureHostControl> host=m_host;
         const auto work=*m_displayRunning;
-        std::packaged_task<vtkSmartPointer<vtkPolyData>()> task([work,cancel]{return BuildRegion(work.read,work.source,cancel);});
+        m_displayChannel=std::make_shared<DisplayChannel>();const auto channel=m_displayChannel;
+        m_displayProduct=std::make_shared<RegionProduct>();
+        if(work.reuse && work.reuse->has3D){if(work.reuse->blocks)m_displayProduct->blocks=work.reuse->blocks;m_displayProduct->has3D=true;m_displayProduct->isEmpty=work.reuse->isEmpty;}
+        std::packaged_task<DisplayResult()> task([work,cancel,channel,host]{
+            const auto publish=[&](DisplayBatch batch){
+                {std::unique_lock<std::mutex> lock(channel->mutex);
+                    channel->changed.wait(lock,[&]{return cancel->load() || channel->batches.size()<8;});
+                    if(cancel->load())throw RoiError::Cancelled;
+                    channel->batches.push_back(std::move(batch));}
+                if(const auto owner=host.lock())(void)owner->SendWorkAvailable();
+            };
+            const auto updateSlices=[&]{std::map<std::string,RoiPlane> planes;
+                {std::lock_guard<std::mutex> lock(channel->mutex);planes.swap(channel->pendingPlanes);}
+                for(const auto& plane:planes)publish({plane.first,plane.second,RoiOverlay::BuildSlice(work.read,work.source,plane.second,cancel)});
+            };
+            try{
+                // 切片分别交付；没有三维视图时不扫描/构建三维边界。
+                for(const auto& plane:work.planes)publish({plane.first,plane.second,RoiOverlay::BuildSlice(work.read,work.source,plane.second,cancel)});
+                if(work.needs3D){
+                    if(work.reuse && work.reuse->has3D)return DisplayResult{RoiError::None,work.reuse->isEmpty,true};
+                    const bool empty=BuildRegion(work.read,work.source,cancel,[&](auto mesh){publish({{},{},std::move(mesh)});},updateSlices);
+                    updateSlices();
+                    return DisplayResult{RoiError::None,empty,true};
+                }
+                // 切片未相交不代表正式区域为空。
+                return DisplayResult{RoiError::None,work.reuse?work.reuse->isEmpty:false,work.reuse?work.reuse->has3D:false};
+            }catch(RoiError error){return DisplayResult{error,{}};}catch(const std::bad_alloc&){return DisplayResult{RoiError::TooLarge,{}};}catch(...){return DisplayResult{RoiError::Unavailable,{}};}
+        });
         m_displayFuture=task.get_future();
         try{m_worker=std::thread([task=std::move(task),host]()mutable{task();if(const auto owner=host.lock())(void)owner->SendWorkAvailable();});}
-        catch(...){m_displayFuture={};m_displayRunning.reset();m_state.displayError=RoiError::TooLarge;}
+        catch(...){const auto ref=m_displayRunning->ref;m_displayFuture={};m_displayRunning.reset();
+            if(ref)m_shown.at(*ref).displayError=RoiError::Unavailable;
+            if(!ref || !m_state.hasDraft){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}}
     }
     void PollDisplay()
     {
-        if(m_displayFuture.valid() && m_displayFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){
-            vtkSmartPointer<vtkPolyData> mesh;try{mesh=m_displayFuture.get();}catch(...){}
-            if(m_worker.joinable())m_worker.join();const auto work=*m_displayRunning;m_displayRunning.reset();
-            if(!m_displayCancel->load()){
-                if(work.ref){const auto found=m_shown.find(*work.ref);if(found!=m_shown.end()){found->second.mesh=mesh?mesh:vtkSmartPointer<vtkPolyData>::New();(void)ShowRoi(*work.ref,found->second.isVisible);}}
-                else if(m_state.hasDraft && work.previewRevision==m_state.previewRevision){m_draftMesh=mesh?mesh:vtkSmartPointer<vtkPolyData>::New();(void)SetProjection();}
-                if(!mesh)m_state.displayError=RoiError::TooLarge;
-            }
-            StartPendingOperation();StartDisplay();
+      try {
+        if(!m_displayFuture.valid() || !m_displayRunning)return;
+        const auto work=*m_displayRunning;
+        const auto current=[&]{
+            if(m_displayCancel->load())return false;
+            if(!work.ref)return m_state.hasDraft && work.previewRevision==m_state.previewRevision && work.read==m_state.preview && GetDraftCurrent();
+            const auto found=m_shown.find(*work.ref);return found!=m_shown.end() && found->second.isVisible && found->second.read==work.read && GetSourceVisible(work.read->GetSource());
+        };
+        if(!current())CancelDisplay();
+        bool changed=false,more=false;
+        // 每 tick 至多四批；生产者最多保留八批，取消可唤醒等待中的生产者。
+        for(unsigned count=0;count<4;++count){
+            DisplayBatch batch;{std::lock_guard<std::mutex> lock(m_displayChannel->mutex);
+                if(m_displayChannel->batches.empty())break;
+                batch=std::move(m_displayChannel->batches.front());m_displayChannel->batches.pop_front();}
+            m_displayChannel->changed.notify_one();
+            if(!current())continue;
+            if(batch.viewId.empty())m_displayProduct->blocks->push_back(std::move(batch.mesh));
+            else m_displayProduct->slices[batch.viewId]={batch.plane,std::move(batch.mesh)};
+            changed=true;
         }
+        bool finished=false;
+        {std::lock_guard<std::mutex> lock(m_displayChannel->mutex);more=!m_displayChannel->batches.empty();
+            // 与生产者入队互斥地检查 EOF，避免检查空队列后又入队最后一批。
+            finished=!more && m_displayFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready;}
+        DisplayResult result;
+        if(finished){try{result=m_displayFuture.get();}catch(...){result.error=RoiError::Unavailable;}
+            if(m_worker.joinable())m_worker.join();
+            if(current()){
+                m_displayProduct->isComplete=result.error==RoiError::None;m_displayProduct->has3D=result.has3D;m_displayProduct->isEmpty=result.isEmpty;
+                if(result.error!=RoiError::None && !m_displayProduct->has3D)m_displayProduct->blocks->clear();
+                changed=true;
+            }
+        }
+        if(changed && current()){
+            if(work.ref){auto& shown=m_shown.at(*work.ref);shown.mesh=m_displayProduct;
+                if(finished)shown.displayError=result.error;
+                for(auto& binding:shown.bindings){const auto stamp=binding.view->GetRenderInputStamp();
+                    if(stamp && stamp->dataRevision==shown.source){binding.overlay->SetRegion(shown.mesh,shown.read,shown.isVisible,false,binding.viewId);(void)binding.view->SetRenderNeeded();}}
+                if(finished && result.error!=RoiError::None && !m_state.hasDraft){m_state.displayError=result.error;m_state.displayStatus=RoiDisplayStatus::Failed;}
+            }else{m_draftMesh=m_displayProduct;
+                if(finished){m_state.displayError=result.error;m_state.displayStatus=result.error!=RoiError::None?RoiDisplayStatus::Failed:result.isEmpty?RoiDisplayStatus::Empty:RoiDisplayStatus::Displayed;}
+                try{(void)SetProjection();}catch(...){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;CancelDisplay();}
+            }
+        }
+        if(more && m_host)(void)m_host->SendWorkAvailable();
+        if(finished){m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();StartPendingOperation();StartDisplay();}
+      }catch(RoiError error){FailDisplay(error);}
+       catch(const std::bad_alloc&){FailDisplay(RoiError::TooLarge);}
+       catch(...){FailDisplay(RoiError::Unavailable);}
+    }
+    void FailDisplay(RoiError error){
+        CancelDisplay();if(!m_displayRunning)return;const auto& work=*m_displayRunning;
+        if(work.ref){const auto found=m_shown.find(*work.ref);if(found!=m_shown.end()){
+            found->second.displayError=error;for(const auto& binding:found->second.bindings)if(!binding.overlay->GetIsSlice()){binding.overlay->SetRegionVisible(false);(void)binding.view->SetRenderNeeded();}}}
+        else if(m_state.hasDraft && work.previewRevision==m_state.previewRevision){m_state.displayError=error;m_state.displayStatus=RoiDisplayStatus::Failed;
+            for(const auto& binding:m_bindings)if(!binding.overlay->GetIsSlice()){binding.overlay->SetRegionVisible(false);(void)binding.view->SetRenderNeeded();}}
+        if(!m_displayFuture.valid()){m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();}
     }
     std::optional<RoiDescriptor> GetDraftDescriptor(const DataGraphSnapshot& graph,const DataRevisionRef& ref) const
     {
@@ -367,9 +623,7 @@ public:
     {
         RoiResult result;result.error=RoiError::InvalidRequest;
         if (!m_state.hasDraft || m_state.isDragging) return result;
-        if (m_state.isComputing) {m_state.isSaving=true;result.error=RoiError::Pending;return result;}
-        const auto stamp=m_reference->GetRenderInputStamp();const auto lease=m_lease.lock();
-        if (!lease || !lease->GetIsActive() || !stamp || stamp->dataRevision!=m_request.definition.source) {result.error=RoiError::SourceMismatch;return result;}
+        if (m_state.isComputing) {m_saveSerial=m_serial;m_state.isSaving=true;result.error=RoiError::Pending;return result;}
         if(m_request.expectedSourceBinding){const auto current=m_data->GetDataBinding(m_data->GetDataGraph(),m_request.expectedSourceBinding->name);if(!current || current->revision!=m_request.expectedSourceBinding->revision || current->target!=m_request.expectedSourceBinding->target){result.error=RoiError::RevisionConflict;return result;}}
         m_isPublishing=true;
         std::vector<RoiDescriptor> outputs;
@@ -382,7 +636,7 @@ public:
             } else if(m_request.action==RoiAction::SetGeometry && m_request.expectedRoi && !m_geometryChanged){
                 const auto graph=m_data->GetDataGraph();const auto descriptor=GetDraftDescriptor(graph,*m_request.expectedRoi);
                 if(!descriptor || descriptor->currentRevision!=*m_request.expectedRoi)result.error=RoiError::RevisionConflict;
-                else{auto request=m_request;request.action=RoiAction::SetMetadata;request.definition={};request.expectedSourceBinding.reset();
+                else{auto request=m_request;request.action=RoiAction::SetMetadata;request.definition={};request.expectedSourceBinding.reset();request.inputs.clear();request.provenance.reset();
                     if(request.metadata.name.empty())request.metadata=descriptor->metadata;result=m_data->SetRoi(request);}
             }else result=m_data->SetRoi(m_request);
         } catch (...) {m_isPublishing=false;throw;}
@@ -391,14 +645,18 @@ public:
             if (result.roi) m_state.committedRoi=result.roi->revision;
             if (!m_operation && result.roi) outputs.push_back(*result.roi);
             (void)ClearDraft();
-            for (const auto& roi:outputs) (void)ShowRoi(roi.revision,true);
+            for(const auto& roi:outputs)try{(void)ShowRoi(roi.revision,true);}catch(...){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}
         }return result;
+    }
+    void QueueSliceUpdates(){
+        if(m_state.hasDraft && m_draftMesh && std::any_of(m_bindings.begin(),m_bindings.end(),[](const auto& binding){return binding.overlay->GetSliceDirty();}))QueueDisplay(m_state.preview,{},m_draftMesh);
+        for(const auto& item:m_shown)if(item.second.read && item.second.mesh && item.second.displayError==RoiError::None && std::any_of(item.second.bindings.begin(),item.second.bindings.end(),[](const auto& binding){return binding.overlay->GetSliceDirty();}))QueueDisplay(item.second.read,item.first,item.second.mesh);
     }
     void StopDisplay()
     {
-        if(m_displayCancel)m_displayCancel->store(true);
+        CancelDisplay();
         if(m_displayFuture.valid()){m_displayFuture.wait();try{(void)m_displayFuture.get();}catch(...){}}
-        if(m_worker.joinable())m_worker.join();m_displayRunning.reset();
+        if(m_worker.joinable())m_worker.join();m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();
     }
     bool ClearDraft()
     {
@@ -406,10 +664,10 @@ public:
         CancelDrawing(false);m_drawing.reset();
         ++m_serial;if (m_cancel) m_cancel->store(true);
         if (m_future.valid()) {m_future.wait();try {(void)m_future.get();} catch (...) {}}
-        if(m_displayCancel)m_displayCancel->store(true);
-        if(!m_displayFuture.valid() && m_worker.joinable())m_worker.join();
+        CancelDisplay();
+        if(!m_displayFuture.valid()){if(m_worker.joinable())m_worker.join();m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();}
         m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& w){return !w.ref;}),m_displayQueue.end());
-        m_pending.reset();m_operation.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;
+        m_pending.reset();m_operation.reset();m_operationApplied=false;m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;
         if (m_widget) {
             m_widget->RemoveAllObservers(); m_widget->Off(); m_widget->SetInteractor(nullptr);
             m_widget=nullptr; m_representation=nullptr;
@@ -421,8 +679,8 @@ public:
             try { (void)binding.view->SetRenderNeeded(); } catch (...) {}
         }
         m_bindings.clear(); m_state.hasDraft=false; m_state.draft.reset(); m_request={}; m_reference.reset(); m_lease.reset();
-        m_state.preview.reset();m_draftReaders.reset();m_history.clear();m_redo.clear();m_state.undoCount=m_state.redoCount=0;
-        if(const auto host=m_host.lock())(void)host->SetInputOwner("roi-editing",false);
+        m_state.preview.reset();m_draftReaders.reset();m_draftMesh.reset();m_history.clear();m_redo.clear();m_state.undoCount=m_state.redoCount=0;
+        if(m_host)(void)m_host->SetInputOwner("roi-editing",false);
         return true;
     }
     void ClearCommitted()
@@ -448,12 +706,12 @@ public:
             const bool sourceVisible=GetSourceVisible(item.source);bool current=exists && sourceVisible;for(const auto& b:item.bindings){const auto stamp=b.view->GetRenderInputStamp();if(!stamp || stamp->dataRevision!=item.source)current=false;}
             if(!current){for(auto& b:item.bindings){b.service->RemoveOverlay(b.overlay);(void)b.view->SetRenderNeeded();}item.bindings.clear();}
             if(!exists){it=m_shown.erase(it);continue;}
-            if(item.isVisible && sourceVisible)for(const auto& view:m_views->GetViews(m_config.targetViews)){const auto port=m_views->GetFeaturePort(view.id);const auto stamp=port?port->GetRenderInputStamp():std::nullopt;if(stamp && stamp->dataRevision==item.source && std::none_of(item.bindings.begin(),item.bindings.end(),[&](const auto& b){return b.view==port;})){restore.push_back(it->first);break;}}
+            if(item.isVisible && sourceVisible && item.displayError==RoiError::None)for(const auto& view:m_views->GetViews(m_config.targetViews)){const auto port=m_views->GetFeaturePort(view.id);const auto stamp=port?port->GetRenderInputStamp():std::nullopt;if(stamp && stamp->dataRevision==item.source && std::none_of(item.bindings.begin(),item.bindings.end(),[&](const auto& b){return b.view==port;})){restore.push_back(it->first);break;}}
             if(!sourceVisible)item.read.reset();
             ++it;
         }
         m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[&](const auto& work){return work.ref && !GetSourceVisible(work.read->GetSource());}),m_displayQueue.end());
-        if(m_displayRunning && m_displayRunning->ref && !GetSourceVisible(m_displayRunning->read->GetSource()) && m_displayCancel)m_displayCancel->store(true);
+        if(m_displayRunning && m_displayRunning->ref && !GetSourceVisible(m_displayRunning->read->GetSource()))CancelDisplay();
         for(const auto& ref:restore)(void)ShowRoi(ref,true);
     }
     bool SetProjection()
@@ -462,12 +720,18 @@ public:
         const auto lease=m_lease.lock();
         if (!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread()) return false;
         const auto matrix=m_reference->GetModelToWorld();
-        if (!matrix || !GetMatrixValid(*matrix)) return false;
+        if (!matrix || !GetMatrixValid(*matrix)) {
+            m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;
+            if(m_widget)m_widget->SetEnabled(0);
+            for(auto& binding:m_bindings){binding.overlay->SetHandles(m_tool,false);binding.overlay->SetRegionVisible(false);(void)binding.view->SetRenderNeeded();}
+            return false;
+        }
         if (m_state.isDragging && *matrix!=m_displayMatrix) {
             m_state.isDragging=false; m_isDragCancelled=true;
             m_tool.localToSource=m_dragStart;(void)SetDefinition(m_dragDefinition);
             (void)m_reference->SetInteracting({"roi-editing","box"},false);
         }
+        if(m_state.displayError==RoiError::Unavailable)m_geometryDirty=true;
         m_displayMatrix=*matrix;
         vtkNew<vtkMatrix4x4> display; display->DeepCopy(matrix->data());
         vtkNew<vtkMatrix4x4> box; box->DeepCopy(m_tool.localToSource.data());
@@ -479,15 +743,18 @@ public:
             m_widget->SetEnabled(m_state.isVisible && m_toolNodeIndex<m_request.definition.nodes.size() && m_request.definition.nodes[m_toolNodeIndex].kind==RoiNodeKind::Primitive && m_request.definition.nodes[m_toolNodeIndex].primitive.shape==m_tool.shape && (m_tool.shape==RoiShape::Box || m_tool.shape==RoiShape::Ellipsoid) ? 1:0);
         }
         if (m_geometryDirty) {m_draftMesh=nullptr;m_state.displayError=RoiError::None;
-            if (!(m_request.definition.nodes.size()==1 && m_request.definition.nodes[0].kind==RoiNodeKind::Primitive
+            const auto bounds=m_state.preview->GetBounds();const bool emptyBounds=bounds[0]>bounds[1] || bounds[2]>bounds[3] || bounds[4]>bounds[5];
+            if(emptyBounds){m_draftMesh=std::make_shared<const RegionProduct>(RegionProduct{{},{},true});m_state.displayStatus=RoiDisplayStatus::Empty;}
+            else if (!(m_request.definition.nodes.size()==1 && m_request.definition.nodes[0].kind==RoiNodeKind::Primitive
                 && (m_tool.shape==RoiShape::Box || m_tool.shape==RoiShape::Sphere || m_tool.shape==RoiShape::Cylinder || m_tool.shape==RoiShape::Ellipsoid))) {
-                m_draftMesh=vtkSmartPointer<vtkPolyData>::New();QueueDisplay(m_state.preview);
-            }m_geometryDirty=false;
+                m_state.displayStatus=RoiDisplayStatus::Updating;QueueDisplay(m_state.preview);
+            }else m_state.displayStatus=RoiDisplayStatus::Displayed;m_geometryDirty=false;
         }
         for (auto& binding:m_bindings) {
             binding.overlay->SetHandles(m_tool,m_state.isVisible);
-            if (m_draftMesh) binding.overlay->SetRegion(m_draftMesh,m_state.isVisible,true);
-            else binding.overlay->SetPrimitive(m_request.definition.nodes.front().primitive,m_state.isVisible);
+            if (m_draftMesh) binding.overlay->SetRegion(m_draftMesh,m_state.preview,m_state.isVisible,true,binding.viewId);
+            else if(m_state.displayStatus==RoiDisplayStatus::Displayed)binding.overlay->SetPrimitive(m_request.definition.nodes.front().primitive,m_state.isVisible);
+            else binding.overlay->SetRegionVisible(false);
             (void)binding.view->SetRenderNeeded();
         }
         return true;
@@ -495,7 +762,7 @@ public:
     void SetWidgetBindings() {
         if(!m_widget||m_state.isDragging||m_nativeInputActive||!m_views)return;
         const auto input=m_views->GetInputView(m_config.referenceView);
-        const auto host=m_host.lock();if(!input||!host)return;
+        const auto host=m_host;if(!input||!host)return;
         FeatureSupport::SetWidgetBindings(m_widget,host->GetInputBindings(input->view.id),{
             {"roi.box.select.drag",vtkWidgetEvent::Select},{"roi.box.translate.drag",vtkWidgetEvent::Translate},
             {"roi.box.translate.shift",vtkWidgetEvent::Translate},{"roi.box.scale.drag",vtkWidgetEvent::Scale},
@@ -669,8 +936,10 @@ public:
         const auto preview=m_data->GetRoiPreview(graph,request.definition);
         if (preview.error!=RoiError::None || !preview.roi) return preview.error;
         const auto input=m_views->GetInputView(m_config.referenceView);
-        if (!input || !input->renderer || !input->interactor
-            || (input->view.role!=HostRenderViewRole::Primary3D && input->view.role!=HostRenderViewRole::Composite3D)) return RoiError::Unavailable;
+        if (!input || !input->renderer || !input->interactor) return RoiError::Unavailable;
+        const bool reference3D=input->view.role==HostRenderViewRole::Primary3D || input->view.role==HostRenderViewRole::Composite3D;
+        const bool referenceSlice=input->view.role==HostRenderViewRole::TopDownSlice || input->view.role==HostRenderViewRole::FrontBackSlice || input->view.role==HostRenderViewRole::LeftRightSlice;
+        if(!reference3D && !referenceSlice)return RoiError::Unavailable;
         const auto lease=input->lease.lock();
         if (!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread()) return RoiError::Unavailable;
         auto reference=m_views->GetFeaturePort(input->view.id);
@@ -689,14 +958,14 @@ public:
             if (!ids.insert(view.id).second) continue;
             auto port=m_views->GetFeaturePort(view.id); auto overlays=m_views->GetOverlayPort(view.id);
             if (!port || !overlays) return RoiError::Unavailable;
-            prepared.push_back({overlays,port,std::make_shared<RoiOverlay>(view.role)});
+            prepared.push_back({overlays,port,std::make_shared<RoiOverlay>(view.role),view.id});
         }
         if (!ids.count(input->view.id)) return RoiError::InvalidRequest;
         m_bindings.reserve(prepared.size());
         m_draftReaders=std::make_shared<const FeatureInternal::InputReads>(std::move(*draftReaders));m_request=request;
-        m_request.expectedCatalogRevision.reset();m_applied=request.definition;m_operationStart=request.definition;
+        m_request.expectedCatalogRevision.reset();m_updateTarget=request.expectedRoi;m_selection=RoiSelectionMode::Replace;m_applied=request.definition;m_operationStart=request.definition;
         m_tool=request.definition.nodes.front().primitive;m_toolNodeIndex=0;m_state.preview=preview.roi;m_geometryDirty=true;
-        m_history={request.definition};m_redo.clear();m_geometryChanged=false;++m_state.previewRevision;
+        m_history.clear();m_redo.clear();m_geometryChanged=false;++m_state.previewRevision;
         if (!m_request.expectedSourceBinding) {
             const auto primary=m_data->GetDataBinding(graph,primaryVolumeBinding);
             if (primary && primary->target==request.definition.source) m_request.expectedSourceBinding=primary;
@@ -708,7 +977,7 @@ public:
             const auto& attached=m_bindings.back();
             if (!attached.service->AttachOverlay(attached.overlay)) { (void)ClearDraft(); return RoiError::Unavailable; }
         }
-        if (request.definition.nodes.size()==1 && request.definition.nodes[0].kind==RoiNodeKind::Primitive && request.definition.nodes[0].primitive.shape==RoiShape::Box) {
+        if (reference3D && request.definition.nodes.size()==1 && request.definition.nodes[0].kind==RoiNodeKind::Primitive && request.definition.nodes[0].primitive.shape==RoiShape::Box) {
         m_representation=vtkSmartPointer<vtkBoxRepresentation>::New();
         m_representation->SetPlaceFactor(1);
         double bounds[6]{-1,1,-1,1,-1,1}; m_representation->PlaceWidget(bounds);
@@ -723,7 +992,8 @@ public:
             m_widget->AddObserver(event,callback);
         }
         m_state.hasDraft=true; m_state.draft=request.definition;
-        if (!SetProjection()) { (void)ClearDraft(); return RoiError::Unavailable; }
+        m_history={GetEditState()};
+        if(!SetProjection()){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}
         return RoiError::None;
     }
     std::optional<RoiDrawingMode> m_drawing;std::string m_drawView;bool m_drawIsSlice=false;
@@ -741,16 +1011,22 @@ public:
     RoiPrimitive m_tool;
     std::size_t m_toolNodeIndex=0,m_controlIndex=SIZE_MAX;
     RoiDefinition m_applied,m_operationStart,m_dragDefinition;
-    std::vector<RoiDefinition> m_history,m_redo;
+    std::vector<EditState> m_history,m_redo;
+    EditState m_operationOrigin;
+    std::optional<DataRevisionRef> m_updateTarget;
+    bool m_operationApplied=false;
+    std::optional<std::uint64_t> m_saveSerial;
     RoiSelectionMode m_selection=RoiSelectionMode::Replace;
-    vtkSmartPointer<vtkPolyData> m_draftMesh;
+    RegionMesh m_draftMesh;
     bool m_geometryDirty=false,m_geometryChanged=false;
-    std::future<vtkSmartPointer<vtkPolyData>> m_displayFuture;
+    std::future<DisplayResult> m_displayFuture;
     std::optional<DisplayWork> m_displayRunning;std::vector<DisplayWork> m_displayQueue;
     std::shared_ptr<std::atomic<bool>> m_displayCancel;
+    std::shared_ptr<DisplayChannel> m_displayChannel;
+    std::shared_ptr<RegionProduct> m_displayProduct;
     std::future<RoiOperationResult> m_future;
     std::thread m_worker;
-    std::weak_ptr<FeatureHostControl> m_host;
+    std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_cancel;
     std::optional<RoiOperationRequest> m_pending,m_operation;
     std::uint64_t m_serial=0,m_runningSerial=0;
@@ -842,7 +1118,7 @@ bool RoiEditingHostFeature::AttachHost(const HostFeatureContext& context)
             } else return ActionTriggerResult{};
             const auto result=f->SendRequest(request);return ActionTriggerResult{result.error==RoiError::None?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,result.commitId};
         };
-        if(!context.host->AttachInput(std::move(binding))){m_impl->m_data.reset();m_impl->m_views.reset();return false;}
+        if(!context.host->AttachInput(std::move(binding))){m_impl->m_host.reset();m_impl->m_data.reset();m_impl->m_views.reset();return false;}
     }
     m_impl->m_state.isAttached=true; return true;
 }
@@ -852,7 +1128,8 @@ bool RoiEditingHostFeature::DetachHost()
     if (!state.m_state.isAttached) return true;
     if (state.GetAccessError()!=RoiError::None || !state.ClearDraft()) return false;
     state.StopDisplay();
-    if(const auto host=state.m_host.lock())if(!host->DetachInput(GetFeatureId()))return false;
+    if(state.m_host && !state.m_host->DetachInput(GetFeatureId()))return false;
+    state.m_host.reset();
     state.ClearCommitted();
     state.m_data.reset(); state.m_views.reset(); state.m_state.isAttached=false; return true;
 }
@@ -860,7 +1137,8 @@ bool RoiEditingHostFeature::OnHostTick()
 {
     auto& state=*m_impl;
     if (state.GetAccessError()!=RoiError::None) return false;
-    state.PollDisplay();state.StartDisplay();state.SetCommittedCurrent();
+    if(!state.GetDraftCurrent()){state.m_state.error=RoiError::SourceMismatch;if(!state.ClearDraft())return false;}
+    state.SetCommittedCurrent();state.PollDisplay();state.QueueSliceUpdates();state.StartDisplay();
     if (!state.m_state.hasDraft) return true;
     const auto stamp=state.m_reference->GetRenderInputStamp();
     const auto lease=state.m_lease.lock();
@@ -876,7 +1154,9 @@ bool RoiEditingHostFeature::OnHostTick()
     const auto matrix=state.m_reference->GetModelToWorld();
     state.PollOperation();if (!state.m_state.hasDraft) return true;
     // 固定形状不每帧置脏；展示矩阵变化才重新投影。
-    if (!matrix || *matrix!=state.m_displayMatrix) return state.SetProjection();
+    if (!matrix || *matrix!=state.m_displayMatrix || state.m_state.displayError==RoiError::Unavailable) {
+        try{(void)state.SetProjection();}catch(...){state.m_state.displayError=RoiError::Unavailable;state.m_state.displayStatus=RoiDisplayStatus::Failed;}
+    }
     return true;
 }
 RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
@@ -888,6 +1168,9 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
         || (request.action==RoiEditingAction::SetDraft && !request.primitive)
         || (request.primitive && request.action!=RoiEditingAction::SetDraft && request.action!=RoiEditingAction::Commit)
         || ((request.action==RoiEditingAction::BeginOperation || request.action==RoiEditingAction::SetOperation)!=request.operation.has_value())
+        || (request.selection && request.action!=RoiEditingAction::SetDraft && request.action!=RoiEditingAction::Commit)
+        || (request.action==RoiEditingAction::Commit && request.selection && !request.primitive)
+        || (request.output && request.action!=RoiEditingAction::SetDraft && request.action!=RoiEditingAction::Commit && request.action!=RoiEditingAction::SetMetadata)
         || (request.action==RoiEditingAction::SetVisible && !request.isVisible)) {result.error=RoiError::InvalidRequest; return result;}
     try {
         switch (request.action) {
@@ -896,55 +1179,61 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
             if(!state.m_state.hasDraft || !request.drawing || (*request.drawing==RoiDrawingMode::EditControlPoint && (state.m_toolNodeIndex>=state.m_request.definition.nodes.size() || state.m_request.definition.nodes[state.m_toolNodeIndex].primitive.shape!=state.m_tool.shape || GetControlPoints(state.m_tool).empty())) || (*request.drawing==RoiDrawingMode::Seed && (!state.m_operation || !std::holds_alternative<RoiThresholdParams>(state.m_operation->params)))){result.error=RoiError::InvalidRequest;break;}state.CancelDrawing(true);state.m_drawing=request.drawing;result.error=RoiError::None;break;
         case RoiEditingAction::EndDrawing:state.CancelDrawing(true);state.m_drawing.reset();result.error=RoiError::None;break;
         case RoiEditingAction::SetDraft:
-            if (!state.m_state.hasDraft || state.m_state.isDragging || state.m_state.isComputing) {result.error=RoiError::InvalidRequest; break;}
+            if (!state.m_state.hasDraft || state.m_state.isDragging) {result.error=RoiError::InvalidRequest; break;}
             {
-                // 几何和同源元信息在成功投影后一起成为当前草稿。
+                // 有效几何和元信息成为草稿；显示状态独立报告。
                 if(request.draft && (request.draft->definition.source!=state.m_request.definition.source
                     || request.draft->metadata.name.empty() || request.draft->metadata.name.size()>256
                     || request.draft->metadata.group.size()>256 || request.draft->metadata.description.size()>4096)) {result.error=RoiError::InvalidRequest;break;}
                 if (!request.selection && (state.m_request.definition.nodes.size()!=1 || request.primitive->shape!=state.m_tool.shape)) {result.error=RoiError::InvalidRequest;break;}
+                const auto previousSelection=state.m_selection;
+                if(request.output){result.error=state.GetOutputError(*request.output);if(result.error!=RoiError::None)break;}
                 if (request.selection) state.m_selection=*request.selection;
                 result.error=state.SetSelection(*request.primitive);
+                if(result.error!=RoiError::None)state.m_selection=previousSelection;
+                else if(request.output)(void)state.SetOutput(*request.output);
                 if (result.error==RoiError::None && request.draft) state.m_request.metadata=request.draft->metadata;
             }
             break;
+        case RoiEditingAction::CancelSave:state.m_saveSerial.reset();state.m_state.isSaving=false;result.error=RoiError::None;break;
         case RoiEditingAction::Commit:
-            if(request.selection==RoiSelectionMode::NewRoi && !state.m_operation){state.m_request.action=RoiAction::Create;state.m_request.expectedRoi.reset();}
+            if(request.output){result.error=state.GetOutputError(*request.output);if(result.error!=RoiError::None)break;}
+            if(request.draft){const auto& metadata=request.draft->metadata;
+                if(metadata.name.empty() || metadata.name.size()>256 || metadata.group.size()>256 || metadata.description.size()>4096){result.error=RoiError::InvalidRequest;break;}}
             if (request.primitive) {
-                if (request.selection) state.m_selection=*request.selection;
-                result.error=state.SetSelection(*request.primitive);if (result.error!=RoiError::None) break;
+                const auto previousSelection=state.m_selection;if (request.selection) state.m_selection=*request.selection;
+                result.error=state.SetSelection(*request.primitive);if (result.error!=RoiError::None){state.m_selection=previousSelection;break;}
             }
-            if (request.draft) state.SetMetadata(request.draft->metadata);
-            result=state.CommitDraft();
-            break;
+            if(request.output)(void)state.SetOutput(*request.output);
+            if(request.draft)state.SetMetadata(request.draft->metadata);
+            result=state.CommitDraft();break;
         case RoiEditingAction::SetMetadata:
-            if (!state.m_state.hasDraft || !request.draft || request.draft->metadata.name.empty()) {result.error=RoiError::InvalidRequest;break;}
+            if (!state.m_state.hasDraft || !request.draft || request.draft->metadata.name.empty() || request.draft->metadata.name.size()>256 || request.draft->metadata.group.size()>256 || request.draft->metadata.description.size()>4096) {result.error=RoiError::InvalidRequest;break;}
+            if(request.output){result.error=state.SetOutput(*request.output);if(result.error!=RoiError::None)break;}
             state.SetMetadata(request.draft->metadata);result.error=RoiError::None;break;
         case RoiEditingAction::ShowRoi:
             result.error=request.roi ? state.ShowRoi(*request.roi,request.isVisible.value_or(true)):RoiError::InvalidRequest;break;
         case RoiEditingAction::ApplySelection:
             if (!state.m_state.hasDraft || state.m_state.isComputing) {result.error=RoiError::InvalidRequest;break;}
-            state.SetHistory();if(!state.m_operation || !std::get_if<RoiComponentParams>(&state.m_operation->params) || std::get<RoiComponentParams>(state.m_operation->params).operation!=RoiComponentOperation::Split){state.m_operation.reset();state.m_state.operation={};}result.error=RoiError::None;break;
+            state.ApplyCandidate();result.error=RoiError::None;break;
         case RoiEditingAction::BeginOperation:
         case RoiEditingAction::SetOperation:
             result.error=state.StartOperation(*request.operation,request.action==RoiEditingAction::BeginOperation);break;
         case RoiEditingAction::ApplyOperation:
-            if (!state.m_state.hasDraft || state.m_state.isComputing || state.m_state.operation.error!=RoiError::None || state.m_state.operation.rois.size()!=1) {result.error=RoiError::InvalidRequest;break;}
-            state.SetHistory();if(!state.m_operation || !std::get_if<RoiComponentParams>(&state.m_operation->params) || std::get<RoiComponentParams>(state.m_operation->params).operation!=RoiComponentOperation::Split){state.m_operation.reset();state.m_state.operation={};}result.error=RoiError::None;break;
+            if (!state.m_state.hasDraft || state.m_state.isComputing || state.m_state.operation.error!=RoiError::None) {result.error=RoiError::InvalidRequest;break;}
+            state.ApplyCandidate();result.error=RoiError::None;break;
         case RoiEditingAction::CancelOperation:
-            if (!state.m_state.hasDraft) {result.error=RoiError::InvalidRequest;break;}
+            if (!state.m_state.hasDraft || !state.m_operation || state.m_operationApplied) {result.error=RoiError::InvalidRequest;break;}
             ++state.m_serial;if (state.m_cancel) state.m_cancel->store(true);state.m_pending.reset();state.m_operation.reset();
-            state.m_state.isComputing=false;state.m_state.isSaving=false;state.m_state.operation={};result.error=state.SetDefinition(state.m_operationStart);break;
+            state.m_state.isComputing=false;state.m_state.isSaving=false;state.m_state.operation={};result.error=state.SetEditState(state.m_operationOrigin);break;
         case RoiEditingAction::Undo:
             if (!state.m_state.hasDraft || state.m_state.isComputing || state.m_history.size()<2) {result.error=RoiError::InvalidRequest;break;}
-            state.m_operation.reset();state.m_state.operation={};
-            state.m_redo.push_back(state.m_history.back());state.m_history.pop_back();state.m_applied=state.m_history.back();for(std::size_t i=0;i<state.m_applied.nodes.size();++i)if(state.m_applied.nodes[i].kind==RoiNodeKind::Primitive){state.m_toolNodeIndex=i;state.m_tool=state.m_applied.nodes[i].primitive;}
-            state.m_state.undoCount=state.m_history.size()-1;state.m_state.redoCount=state.m_redo.size();result.error=state.SetDefinition(state.m_applied);break;
+            state.m_redo.push_back(state.m_history.back());state.m_history.pop_back();result.error=state.SetEditState(state.m_history.back());
+            state.m_state.undoCount=state.m_history.size()-1;state.m_state.redoCount=state.m_redo.size();break;
         case RoiEditingAction::Redo:
             if (!state.m_state.hasDraft || state.m_state.isComputing || state.m_redo.empty()) {result.error=RoiError::InvalidRequest;break;}
-            state.m_operation.reset();state.m_state.operation={};
-            state.m_applied=state.m_redo.back();state.m_redo.pop_back();state.m_history.push_back(state.m_applied);for(std::size_t i=0;i<state.m_applied.nodes.size();++i)if(state.m_applied.nodes[i].kind==RoiNodeKind::Primitive){state.m_toolNodeIndex=i;state.m_tool=state.m_applied.nodes[i].primitive;}
-            state.m_state.undoCount=state.m_history.size()-1;state.m_state.redoCount=state.m_redo.size();result.error=state.SetDefinition(state.m_applied);break;
+            result.error=state.SetEditState(state.m_redo.back());if(result.error==RoiError::None){state.m_history.push_back(state.m_redo.back());state.m_redo.pop_back();}
+            state.m_state.undoCount=state.m_history.size()-1;state.m_state.redoCount=state.m_redo.size();break;
         case RoiEditingAction::Cancel: result.error=state.ClearDraft() ? RoiError::None:RoiError::Unavailable; break;
         case RoiEditingAction::SetVisible:
             {
@@ -962,7 +1251,7 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
         }
     } catch (...) { if (request.action==RoiEditingAction::Begin) (void)state.ClearDraft(); result.error=RoiError::Unavailable;}
     state.m_state.error=result.error;
-    if(result.error==RoiError::None)if(const auto host=state.m_host.lock()) {
+    if(result.error==RoiError::None)if(const auto host=state.m_host) {
         if(request.action==RoiEditingAction::Begin||request.action==RoiEditingAction::BeginDrawing)(void)host->SetInputOwner(GetFeatureId(),true);
         if(!state.m_state.hasDraft)(void)host->SetInputOwner(GetFeatureId(),false);
     }
@@ -973,5 +1262,5 @@ RoiEditingState RoiEditingHostFeature::GetState() const
     if (m_impl->m_owner!=std::thread::id{} && m_impl->m_owner!=std::this_thread::get_id()) {
         RoiEditingState state; state.error=RoiError::WrongThread; return state;
     }
-    auto state=m_impl->m_state;if(state.hasDraft && m_impl->m_toolNodeIndex<m_impl->m_request.definition.nodes.size() && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].kind==RoiNodeKind::Primitive && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].primitive.shape==m_impl->m_tool.shape)state.tool=m_impl->m_tool;state.visibleRois.clear();for(const auto& item:m_impl->m_shown) if(item.second.isVisible && !item.second.bindings.empty())state.visibleRois.push_back(item.first);return state;
+    auto state=m_impl->m_state;state.selection=m_impl->m_selection;state.output=m_impl->m_operation?m_impl->m_operation->output:m_impl->m_request.action==RoiAction::Create?RoiOutputMode::CreateNew:RoiOutputMode::UpdateTarget;if(state.hasDraft && m_impl->m_toolNodeIndex<m_impl->m_request.definition.nodes.size() && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].kind==RoiNodeKind::Primitive && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].primitive.shape==m_impl->m_tool.shape)state.tool=m_impl->m_tool;state.displayFailures.clear();for(const auto& item:m_impl->m_shown)if(item.second.displayError!=RoiError::None)state.displayFailures.emplace_back(item.first,item.second.displayError);state.visibleRois.clear();for(const auto& item:m_impl->m_shown) if(item.second.isVisible && !item.second.bindings.empty())state.visibleRois.push_back(item.first);return state;
 }

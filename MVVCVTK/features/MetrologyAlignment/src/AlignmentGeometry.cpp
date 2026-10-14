@@ -373,6 +373,7 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
     const std::size_t n = vertices.size() / 3;
     AlignmentSamples result;
     RoiReadSnapshot roi;if (region.roi) {const auto found=work.rois.find(*region.roi);Require(found!=work.rois.end(),"ROI read snapshot is missing.");roi=found->second;}
+    const auto roiQuery=roi?roi->GetQuery():RoiQueryResult{};if(roi && (roiQuery.error!=RoiError::None || !roiQuery.query))throw std::bad_alloc();
     std::set<std::uint64_t> seen;
     const auto checkStorage = [&](std::size_t count) {
         if (count > std::numeric_limits<std::size_t>::max() / 1024
@@ -384,7 +385,7 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
         Require(index < n, "Selection index is out of bounds.");
         const Vec source(vertices[3 * index], vertices[3 * index + 1], vertices[3 * index + 2]);
         Require(Finite(source), "Non-finite measurement position.");
-        if (roi && !roi->GetContains(Point(Transform(region.meshToRoi,source)))) return;
+        if (roi && !roiQuery.query->GetContains(Point(Transform(region.meshToRoi,source)))) return;
         if (region.targetBounds) {
             const auto p = Transform(pose, source);
             for (int j = 0; j < 3; ++j)
@@ -408,12 +409,12 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
             if (i%768==0 && GetWorkStatus(work)!=AlignmentStatus::FullyDetermined) throw std::runtime_error("Cancelled ROI extraction.");
             if (!GetFaceValid(*work.mesh,i/3)) {++result.rejected;continue;}
             std::array<AlignmentPoint,3> triangle{};for (int j=0;j<3;++j) {const auto id=triangles[i+j];triangle[j]=Point(Transform(region.meshToRoi,{vertices[3*id],vertices[3*id+1],vertices[3*id+2]}));}
-            const auto selected=roi->GetTriangleSelection(triangle,0,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});Require(selected.error==RoiError::None,"ROI triangle selection failed.");
+            const auto selected=roi->GetTriangleSelection(triangle,0,[&]{return AlignmentGeometryFit::GetWorkStatus(work)!=AlignmentStatus::FullyDetermined;});Require(selected.error==RoiError::None,"ROI triangle selection failed.");
             for (const auto& piece:selected.triangles) {
                 const AlignmentPoint center{(piece[0][0]+piece[1][0]+piece[2][0])/3,(piece[0][1]+piece[1][1]+piece[2][1])/3,(piece[0][2]+piece[1][2]+piece[2][2])/3};
                 // 每个实际面片的内部采样保留二维跨度，避免小选区在大父三角形中只剩一个点。
                 for(const auto& corner:piece){AlignmentPoint sample{};for(int a=0;a<3;++a)sample[a]=.75*corner[a]+.25*center[a];
-                    if(!roi->GetContains(sample))continue;const auto p=Point(Transform(inverse,Vector(sample)));
+                    if(!roiQuery.query->GetContains(sample))continue;const auto p=Point(Transform(inverse,Vector(sample)));
                     if(region.targetBounds){const auto target=Transform(pose,Vector(p));bool inside=true;for(int a=0;a<3;++a)if(target[a]<(*region.targetBounds)[a*2]||target[a]>(*region.targetBounds)[a*2+1])inside=false;if(!inside)continue;}
                     checkStorage(result.points.size()+1);result.points.push_back(p);
                 }

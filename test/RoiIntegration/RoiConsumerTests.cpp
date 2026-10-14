@@ -54,12 +54,12 @@ void MeshCrop(){Fixture f;const DataRevisionRef source{f.store.CreateDataEntityI
     DataTransaction tx;tx.outputs.push_back({source.entityId,0,DataTypes::surfaceMesh,{},payload});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"mesh source failed");
     RoiPrimitive p;p.shape=RoiShape::Sphere;p.origin={2,2,2};p.radius=.2;RoiRequest request;request.definition={source,{{RoiNodeKind::Primitive,p}}};request.metadata.name="mesh-sphere";
     const auto created=f.service.SetRoi(request);Require(created.roi.has_value(),"mesh ROI failed");
-    const auto archive=RoiService::GetArchive(f.store.GetDataGraph(),created.roi->revision,"mesh",0);Require(archive.archive && archive.archive->source.meshGeometryDigest=="77d72606163286d4011ae3be991abe3aba30542be67fd5d92ea50c7bbadf7455","mesh archive geometry SHA-256 is incorrect");
-    auto altered=payload->GetVertices();altered[0]=1;const DataRevisionRef other{f.store.CreateDataEntityId(),1};tx={};tx.outputs.push_back({other.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(altered,payload->GetTriangles())});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"changed mesh source failed");const auto beforeRestore=f.store.GetDataGraph().commitId;Require(f.service.LoadArchive(*archive.archive,"mesh",other,{},0).error==RoiError::SourceMismatch && f.store.GetDataGraph().commitId==beforeRestore,"same bounds/counts hid different mesh geometry at restore");
+    const auto archive=RoiService::GetArchive(f.store.GetDataGraph(),created.roi->revision,"mesh");Require(archive.archive && archive.archive->source.meshGeometryDigest=="77d72606163286d4011ae3be991abe3aba30542be67fd5d92ea50c7bbadf7455","mesh archive geometry SHA-256 is incorrect");
+    auto altered=payload->GetVertices();altered[0]=1;const DataRevisionRef other{f.store.CreateDataEntityId(),1};tx={};tx.outputs.push_back({other.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(altered,payload->GetTriangles())});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"changed mesh source failed");const auto beforeRestore=f.store.GetDataGraph().commitId;Require(f.service.LoadArchive(*archive.archive,"mesh",other,{}).error==RoiError::SourceMismatch && f.store.GetDataGraph().commitId==beforeRestore,"same bounds/counts hid different mesh geometry at restore");
     const auto graph=f.store.GetDataGraph();CropInputSnapshot input;input.graph=graph;input.data=f.store.GetData(graph,source);
     const auto prepared=VtkPreparedDataView::BuildDataView(payload);input.mesh=std::make_shared<const VtkSurfaceMeshView>(VtkSurfaceMeshView{input.data,prepared->mesh->mesh});input.inputModelBounds={.5,6,.5,6,2,2};
     const auto roi=RoiEvaluator::GetRoi(graph,created.roi->revision,source).roi;
-    const auto result=CropAlgorithm::GetRoiResult(input,roi,256ULL*1024*1024,{});const auto output=std::dynamic_pointer_cast<const SurfaceMeshPayload>(result.outputPayload);
+    const auto result=CropAlgorithm::GetRoiResult(input,roi,{});const auto output=std::dynamic_pointer_cast<const SurfaceMeshPayload>(result.outputPayload);
     Require(result.isSucceeded && output && output->GetCoordinateFrame()=="RAS" && result.meshTriangleCount>0 && result.meshErrorBound>0,"generic mesh crop missed ROI wholly inside a parent triangle");
     const auto& points=output->GetVertices();const auto& attributes=output->GetPointAttributes();Require(attributes.size()==3,"mesh crop lost point attributes");
     const auto& cells=output->GetCellAttributes();Require(cells.size()==2,"mesh crop lost cell attributes");
@@ -81,6 +81,11 @@ void GapSavedParent(){
     const auto first=run(GapHostAction::Start,gapConfig.defaultStart);auto graph=probe->data->GetDataGraph();const auto saved=probe->data->GetData(graph,first.resultSet);const auto* collection=saved?dynamic_cast<const DataCollectionPayload*>(saved->payload.get()):nullptr;Require(collection,"saved gap collection missing");
     DataRevisionRef parentRecord;for(const auto& item:collection->GetItems())if(item.role=="parent-detection")parentRecord=item.data;
     const auto record=probe->data->GetData(graph,parentRecord);const auto* parent=record?dynamic_cast<const GapParentRecord*>(record->payload.get()):nullptr;Require(parent && parent->GetValid() && !parent->voids->empty(),"full saved gap parent missing defects");
+    const auto resultLabelNode=probe->data->GetData(graph,first.labelMap);
+    const auto resultLabels=resultLabelNode?std::dynamic_pointer_cast<const LabelMap3DPayload>(resultLabelNode->payload):nullptr;
+    Require(resultLabels && resultLabels->GetValueData()==parent->labels->GetValueData(),"unfiltered detection duplicated immutable parent labels");
+    Require(resultLabels->GetId()=="GapAnalysis.labels" && parent->labels->GetId()=="GapAnalysis.parent-labels"
+        && resultLabels->GetDisplayName()!=parent->labels->GetDisplayName(),"shared parent labels lost independent metadata");
     // 保存正式结果必须建立图中的保留关系；仅保存运行期 ref 不阻止 owner 结果退役。
     DataTransaction keep;keep.bindings.push_back({"test.roi-saved-gap-parent",0,true,{},first.resultSet});Require(probe->data->SetDataCommit(keep).status==DataCommitStatus::Succeeded,"saved parent retention binding failed");
     auto secondParams=gapConfig.defaultStart;secondParams.surface.absoluteIsoValue=60;const auto second=run(GapHostAction::Start,secondParams);Require(second.resultSet!=first.resultSet,"gap did not publish independent parent results");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/ImageReadTypes.h"
+#include "Data/DataGraphTypes.h"
 
 #include <array>
 #include <cstddef>
@@ -18,7 +19,7 @@
 // 节点索引的表示上限；不按历史长度或 ROI 数量另设业务门槛。
 inline constexpr std::size_t roiNodeLimit = std::numeric_limits<std::uint32_t>::max();
 inline constexpr std::uint32_t roiSchemaVersion = 3;
-inline constexpr std::size_t roiCopyLimit = 8ULL * 1024 * 1024;
+inline constexpr std::size_t roiChunkBytes = 8ULL * 1024 * 1024;
 inline constexpr std::array<double, 16> roiIdentityMatrix = {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 inline constexpr std::string_view roiCatalogBinding = "session.roi.catalog";
@@ -122,6 +123,8 @@ struct RoiRequest final {
     std::optional<DataRevisionRef> copyFrom;
     // 当前绑定驱动的操作可冻结来源绑定；显式历史来源操作可省略。
     std::optional<DataBinding> expectedSourceBinding;
+    std::vector<DataInputRef> inputs;
+    std::optional<DataProvenance> provenance;
 };
 
 struct RoiResult final {
@@ -132,7 +135,7 @@ struct RoiResult final {
     DataCommitId commitId = 0;
 };
 
-enum class RoiSelectionMode : std::uint8_t { NewRoi, Replace, Add, Subtract, Intersect };
+enum class RoiSelectionMode : std::uint8_t { Replace, Add, Subtract, Intersect };
 enum class RoiOutputMode : std::uint8_t { UpdateTarget, CreateNew };
 enum class RoiBooleanOperation : std::uint8_t { Union, Intersection, Difference };
 enum class RoiMorphologyOperation : std::uint8_t { Dilate, Erode, Open, Close };
@@ -192,7 +195,6 @@ struct RoiOperationRequest final {
     RoiMetadata metadata;
     std::optional<DataBinding> expectedSourceBinding;
     std::function<bool()> getCancelled;
-    std::size_t maxWorkingBytes=0;
     std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::time_point::max();
 };
 struct RoiOperationResult final {
@@ -203,6 +205,7 @@ struct RoiOperationResult final {
     std::string message;
     // 临时候选绑定输入、参数和输出几何；不进入正式 ROI 或归档。
     std::string preparedSignature;
+    DataProvenance provenance;
 };
 
 // 来源的外部稳定身份由调用应用解析；image 内的运行期 revision 必须清除。
@@ -268,4 +271,33 @@ struct RoiArchiveRestoreResult final {
     DataCommitId commitId=0;
     std::vector<RoiDescriptor> rois;
     std::vector<std::pair<DataRevisionRef,DataRevisionRef>> revisionMapping;
+};
+
+struct RoiArchiveChunkRequest final {
+    std::size_t payloadIndex=0,elementOffset=0,chunkElements=65536;
+    std::function<bool()> getCancelled;
+};
+struct RoiArchiveMaskChunk final {
+    RoiError error=RoiError::Unavailable;
+    std::size_t nextOffset=0;bool isComplete=false;
+    std::vector<std::uint64_t> values;
+};
+struct RoiArchiveVoxelChunk final {
+    RoiError error=RoiError::Unavailable;
+    std::size_t nextOffset=0;bool isComplete=false;
+    std::vector<RoiVoxel> values;
+};
+// 元数据先返回，共享载荷逐批读取；只读实例可以跨 worker 持有。
+class RoiArchiveReader {
+public:
+    virtual ~RoiArchiveReader() noexcept=default;
+    virtual const RoiArchiveBundle& GetMetadata()const noexcept=0;
+    virtual std::optional<std::size_t> GetMaskCount(std::size_t payloadIndex)const noexcept=0;
+    virtual std::optional<std::size_t> GetVoxelCount(std::size_t payloadIndex)const noexcept=0;
+    virtual RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest&)const=0;
+    virtual RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest&)const=0;
+};
+struct RoiArchiveReadResult final {
+    RoiError error=RoiError::Unavailable;
+    std::shared_ptr<const RoiArchiveReader> reader;
 };

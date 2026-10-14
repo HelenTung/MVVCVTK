@@ -3,11 +3,19 @@
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
 #include <vtkCamera.h>
+#include <vtkActor.h>
+#include <vtkActorCollection.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkCompositePolyDataMapper.h>
+#include <vtkMultiBlockDataSet.h>
+#include <vtkCellArray.h>
 #include <vtkImageData.h>
 #include <vtkNew.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkWeakPointer.h>
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +24,7 @@
 #include <map>
 #include <stdexcept>
 #include <thread>
+#include <atomic>
 
 namespace {
 void Require(bool value,const char* message) { if (!value) throw std::runtime_error(message); }
@@ -37,7 +46,7 @@ public:
     bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay) override
     {
         overlay->AttachRenderer(renderer); overlays.push_back(overlay);
-        FeatureOverlayState state; state.modelToWorld=matrix; overlay->SetOverlayState(state);
+        FeatureOverlayState state; state.modelToWorld=matrix;state.cursor=cursor; overlay->SetOverlayState(state);
         return !isRejected; // 故意模拟已部分挂接后才返回失败的端口。
     }
     void RemoveOverlay(std::shared_ptr<FeatureOverlay> overlay) noexcept override
@@ -48,6 +57,7 @@ public:
     HostFeatureView view;
     DataRevisionRef source;
     std::array<double,16> matrix=roiIdentityMatrix;
+    std::array<double,3> cursor{};
     bool isRejected=false,isInteracting=false;
     int renders=0;
     std::vector<std::shared_ptr<FeatureOverlay>> overlays;
@@ -182,15 +192,28 @@ void TestCurves()
 }
 class Controller final:public FeatureHostControl {
 public:
-    HostInputBinding binding;std::atomic<unsigned> signals{0};
+    HostInputBinding binding;std::shared_ptr<std::atomic<unsigned>> signals=std::make_shared<std::atomic<unsigned>>(0);
     bool AttachInput(HostInputBinding value)override{binding=std::move(value);return true;}
     bool DetachInput(std::string_view)override{binding={};return true;}
     bool SetActiveViews(const std::vector<std::string>&)override{return true;}
     bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
     bool SendSceneDelta(FeatureSceneDelta)override{return true;}
     bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
-    bool SendWorkAvailable()override{++signals;return true;}
+    bool SendWorkAvailable()override{++*signals;return true;}
 };
+void TestOperationNotificationLifetime()
+{
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});auto host=std::make_shared<Controller>();const auto signals=host->signals;std::weak_ptr<Controller> weakHost=host;
+    {HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context),"notification attach failed");}host.reset();
+    RoiRequest draft;draft.metadata.name="通知生命周期";draft.definition.source=source;RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;RoiOperationRequest operation;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"notification operation was not deferred");
+    unsigned consumed=0;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor->GetState().isComputing && std::chrono::steady_clock::now()<until){const auto current=signals->load();if(current!=consumed){consumed=current;editor->OnHostTick();}else std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    Require(consumed>0 && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,"temporary attach context lost the operation notification port");
+    Require(editor->DetachHost() && weakHost.expired(),"detach retained the operation notification port");
+}
 void TestDrawingAndLatestOperation()
 {
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
@@ -214,9 +237,9 @@ void TestDrawingAndLatestOperation()
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor->GetState().hasDraft && std::chrono::steady_clock::now()<until){editor->OnHostTick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     const auto descriptors=RoiService::GetDescriptors(data->GetDataGraph());Require(!editor->GetState().hasDraft && descriptors.size()==1 && descriptors.front().metadata.name=="计算期间修改的名称" && data->GetDataGraph().commitId==before+1,"save used a stale candidate/name or published more than once");
     const auto read=data->GetRoi(data->GetDataGraph(),descriptors.front().revision,source);Require(read.roi->GetContains({2,2,2}) && !read.roi->GetContains({1,2,2}),"late dilation overwrote the latest zero-radius candidate");
-    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"failed-operation draft did not start");operation.maxWorkingBytes=1;start.action=RoiEditingAction::BeginOperation;start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"resource-limited operation not admitted");Require(editor->SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"failed-operation save wait did not start");
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"failed-operation draft did not start");operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,-1,RoiRadiusUnit::Voxels};start.action=RoiEditingAction::BeginOperation;start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"invalid-parameter operation not admitted");Require(editor->SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"failed-operation save wait did not start");
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor->GetState().isComputing && std::chrono::steady_clock::now()<deadline){editor->OnHostTick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
-    Require(!editor->GetState().isSaving && editor->GetState().hasDraft && editor->GetState().error==RoiError::TooLarge && data->GetDataGraph().commitId==before+1,"resource failure left save waiting or changed formal data");
+    Require(!editor->GetState().isSaving && editor->GetState().hasDraft && editor->GetState().error==RoiError::InvalidRequest && data->GetDataGraph().commitId==before+1,"invalid geometry left save waiting or changed formal data");
     Require(editor->SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"failed draft cancellation failed");
     RoiRequest contour;contour.metadata.name="curve";contour.definition.source=source;RoiNode curve;curve.primitive.shape=RoiShape::Contour;curve.primitive.localToSource[3]=2;curve.primitive.localToSource[7]=2;curve.primitive.localToSource[11]=2;curve.primitive.contours={{{-.5,-.5},{.5,-.5},{0,.5}}};contour.definition.nodes={curve};
     Require(editor->SendRequest({RoiEditingAction::Begin,contour}).error==RoiError::None,"control point draft failed");drawing.drawing=RoiDrawingMode::EditControlPoint;Require(editor->SendRequest(drawing).error==RoiError::None,"control point editing was not enabled");
@@ -225,8 +248,212 @@ void TestDrawingAndLatestOperation()
     Require(editor->DetachHost() && !host->binding.onAction && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
 }
 
+void WaitOperation(RoiEditingHostFeature& editor){
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor.GetState().isComputing && std::chrono::steady_clock::now()<deadline){Require(editor.OnHostTick(),"operation tick failed");std::this_thread::yield();}
+    Require(!editor.GetState().isComputing,"operation did not finish");
 }
-int main()
+void TestOutputIdentityAndDisplay(){
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};
+    RoiEditingHostFeature editor({{"main"},{{"main"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"identity editor attach failed");
+    const auto make=[&]{RoiRequest request;request.metadata.name="A";RoiPrimitive sphere;sphere.shape=RoiShape::Sphere;sphere.origin={2,2,2};sphere.radius=.4;request.definition={source,{{RoiNodeKind::Primitive,sphere}}};const auto result=data->SetRoi(request);Require(result.roi.has_value(),"formal identity fixture failed");return *result.roi;};
+    const auto edit=[&](const RoiDescriptor& roi){RoiRequest request;request.action=RoiAction::SetGeometry;request.definition=roi.definition;request.expectedRoi=roi.revision;request.metadata=roi.metadata;Require(editor.SendRequest({RoiEditingAction::Begin,request}).error==RoiError::None,"identity draft failed");};
+    const auto start=[&](RoiOutputMode output){RoiEditingRequest operation;operation.action=RoiEditingAction::BeginOperation;RoiOperationRequest request;request.output=output;request.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};operation.operation=request;Require(editor.SendRequest(operation).error==RoiError::Pending,"identity operation not admitted");WaitOperation(editor);Require(editor.GetState().error==RoiError::None,"identity operation failed");};
+    for(const auto output:{RoiOutputMode::CreateNew,RoiOutputMode::UpdateTarget})for(bool applied:{false,true}){
+        const auto original=make();edit(original);start(output);const auto before=data->GetDataGraph().commitId;
+        if(applied)Require(editor.SendRequest({RoiEditingAction::ApplyOperation}).error==RoiError::None && data->GetDataGraph().commitId==before,"apply published formal data");
+        const auto saved=editor.SendRequest({RoiEditingAction::Commit});Require(saved.error==RoiError::None && saved.roi,"identity save failed");
+        Require((saved.roi->revision.entityId==original.revision.entityId)==(output==RoiOutputMode::UpdateTarget),"apply changed new/update output identity");
+        const auto read=data->GetRoi(data->GetDataGraph(),saved.roi->revision,source);Require(read.roi && read.roi->GetContains({3,2,2}) && !read.roi->GetContains({4,2,2}),"save did not publish the dilation candidate");
+        const auto old=data->GetRoi(data->GetDataGraph(),original.revision,source);Require(old.roi && !old.roi->GetContains({3,2,2}),"formal input revision was mutated");
+    }
+    for(const auto output:{RoiOutputMode::CreateNew,RoiOutputMode::UpdateTarget}){
+        const auto original=make();edit(original);start(output);RoiEditingRequest save;save.action=RoiEditingAction::Commit;save.output=output==RoiOutputMode::CreateNew?RoiOutputMode::UpdateTarget:RoiOutputMode::CreateNew;
+        const auto result=editor.SendRequest(save);Require(result.roi && (result.roi->revision.entityId==original.revision.entityId)==(*save.output==RoiOutputMode::UpdateTarget),"commit-time output mode was ignored");
+    }
+    {
+        const auto original=make();edit(original);start(RoiOutputMode::UpdateTarget);
+        RoiEditingRequest invalid;invalid.action=RoiEditingAction::SetDraft;invalid.primitive=original.definition.nodes.front().primitive;invalid.primitive->radius=-1;invalid.selection=RoiSelectionMode::Replace;invalid.output=RoiOutputMode::CreateNew;
+        Require(editor.SendRequest(invalid).error==RoiError::InvalidGeometry && editor.GetState().output==RoiOutputMode::UpdateTarget,"failed draft changed output identity");
+        invalid.action=RoiEditingAction::Commit;invalid.primitive.reset();invalid.selection.reset();RoiRequest metadata;invalid.draft=metadata;
+        Require(editor.SendRequest(invalid).error==RoiError::InvalidRequest && editor.GetState().output==RoiOutputMode::UpdateTarget,"invalid commit metadata changed output identity");
+        const auto saved=editor.SendRequest({RoiEditingAction::Commit});Require(saved.roi && saved.roi->revision.entityId==original.revision.entityId,"failed request contaminated the retry target");
+    }
+    const auto original=make();edit(original);start(RoiOutputMode::CreateNew);Require(editor.SendRequest({RoiEditingAction::ApplyOperation}).error==RoiError::None,"new-mode apply failed");
+    RoiEditingRequest subtract;subtract.action=RoiEditingAction::SetDraft;subtract.primitive=original.definition.nodes.front().primitive;subtract.selection=RoiSelectionMode::Subtract;
+    subtract.selection=RoiSelectionMode::Intersect;Require(editor.SendRequest(subtract).error==RoiError::None && editor.GetState().preview->GetContains({2,2,2}) && !editor.GetState().preview->GetContains({3,2,2}),"selection-only intersection used stale geometry");
+    subtract.selection=RoiSelectionMode::Add;Require(editor.SendRequest(subtract).error==RoiError::None && editor.GetState().preview->GetContains({3,2,2}),"selection-only addition used stale geometry");
+    subtract.selection=RoiSelectionMode::Subtract;
+    Require(editor.SendRequest(subtract).error==RoiError::None && editor.SendRequest({RoiEditingAction::ApplySelection}).error==RoiError::None,"edit after apply failed");
+    Require(editor.SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor.GetState().output==RoiOutputMode::CreateNew && editor.GetState().preview->GetContains({2,2,2}),"undo lost the complete accepted edit state");
+    Require(editor.SendRequest({RoiEditingAction::CancelOperation}).error==RoiError::InvalidRequest && editor.GetState().preview->GetContains({2,2,2}),"undo revived an already applied operation");
+    Require(editor.SendRequest({RoiEditingAction::Redo}).error==RoiError::None && !editor.GetState().preview->GetContains({2,2,2}),"redo lost the subtraction");
+    Require(editor.SendRequest({RoiEditingAction::CancelOperation}).error==RoiError::InvalidRequest && !editor.GetState().preview->GetContains({2,2,2}),"cancel of an applied operation restored an obsolete edit state");
+    const auto edited=editor.SendRequest({RoiEditingAction::Commit});Require(edited.roi && edited.roi->revision.entityId!=original.revision.entityId && edited.roi->definition.nodes.back().kind==RoiNodeKind::Difference,"continued edit returned to the original update target");
+    const auto formal=data->GetData(data->GetDataGraph(),edited.roi->revision);Require(formal && formal->provenance && formal->provenance->operationId=="morphology" && std::any_of(formal->inputs.begin(),formal->inputs.end(),[&](const auto& input){return input.source==original.revision;}),"accepted operation provenance was dropped by editing");
+    edit(make());main->matrix[15]=0;RoiEditingRequest change;change.action=RoiEditingAction::SetDraft;change.primitive=original.definition.nodes.front().primitive;change.primitive->radius=.3;
+    Require(editor.SendRequest(change).error==RoiError::None && editor.GetState().displayStatus==RoiDisplayStatus::Failed && editor.GetState().preview->GetContains({2,2,2}),"display failure invalidated a valid draft");
+    Require(editor.OnHostTick() && editor.GetState().hasDraft && editor.GetState().displayStatus==RoiDisplayStatus::Failed,"host tick discarded a draft after projection failure");
+    const auto saved=editor.SendRequest({RoiEditingAction::Commit});Require(saved.error==RoiError::None && saved.roi && saved.roi->definition.nodes.front().primitive.radius==.3,"display projection failure blocked valid saving");main->matrix=roiIdentityMatrix;
+    edit(make());main->matrix[15]=0;Require(editor.OnHostTick() && editor.GetState().hasDraft && editor.GetState().displayStatus==RoiDisplayStatus::Failed,"late projection failure retained a misleading display status");
+    main->matrix=roiIdentityMatrix;Require(editor.OnHostTick() && editor.GetState().displayStatus==RoiDisplayStatus::Displayed,"valid projection did not restore the current display");Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"projection recovery cancel failed");
+    RoiRequest tiny;tiny.metadata.name="subvoxel analytic region";RoiPrimitive small;small.shape=RoiShape::Sphere;small.origin={1.25,1.25,1.25};small.radius=.05;
+    tiny.definition={source,{{RoiNodeKind::Primitive,small},{RoiNodeKind::Primitive,small},{RoiNodeKind::Union,{},0,1}}};
+    Require(editor.SendRequest({RoiEditingAction::Begin,tiny}).error==RoiError::None,"subvoxel analytic draft failed");const auto tinyDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<tinyDeadline){editor.OnHostTick();std::this_thread::yield();}
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Failed && editor.GetState().preview->GetContains(small.origin),"unsampled analytic geometry was reported as a true empty region");
+    Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None,"unsampled analytic display prevented valid saving");
+    RoiRequest empty;empty.metadata.name="empty";empty.definition={source,{{RoiNodeKind::Empty}}};Require(editor.SendRequest({RoiEditingAction::Begin,empty}).error==RoiError::None,"empty draft failed");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<deadline){editor.OnHostTick();std::this_thread::yield();}
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Empty && editor.GetState().displayError==RoiError::None,"real empty region was confused with a display failure");Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"empty draft cancel failed");
+    for(const auto shape:{RoiShape::HalfSpace,RoiShape::Brush}){
+        RoiRequest draft;draft.metadata.name="参数同步";RoiPrimitive primitive;primitive.shape=shape;
+        if(shape==RoiShape::HalfSpace){primitive.origin={2,2,2};primitive.normal={1,0,0};}
+        else{primitive.path={{2,2,2}};primitive.radius=1.1;primitive.localToSource[11]=2;primitive.depth={-.2,.2};}
+        draft.definition={source,{{RoiNodeKind::Primitive,primitive}}};Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"parameter draft failed");
+        RoiEditingRequest edit;edit.action=RoiEditingAction::SetDraft;edit.primitive=primitive;
+        if(shape==RoiShape::HalfSpace)edit.primitive->normal={-1,0,0};else edit.primitive->height=1;
+        Require(editor.SendRequest(edit).error==RoiError::None,"single-field parameter update failed");
+        const auto point=shape==RoiShape::HalfSpace?std::array<double,3>{3,2,2}:std::array<double,3>{2,2,3};Require(!editor.GetState().preview->GetContains(point) && editor.GetState().preview->GetContains({2,2,2}),"normal/brush mode update did not reach preview");
+        const auto saved=editor.SendRequest({RoiEditingAction::Commit});const auto read=saved.roi?data->GetRoi(data->GetDataGraph(),saved.roi->revision,source):RoiReadResult{};
+        Require(read.roi && !read.roi->GetContains(point) && read.roi->GetContains({2,2,2}),"normal/brush mode save differs from preview");
+    }
+    edit(make());start(RoiOutputMode::CreateNew);RoiEditingRequest next;next.action=RoiEditingAction::SetOperation;RoiOperationRequest operation;operation.output=RoiOutputMode::CreateNew;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,2,RoiRadiusUnit::Voxels};next.operation=operation;
+    Require(editor.SendRequest(next).error==RoiError::Pending && editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"versioned pending save failed");
+    const auto before=data->GetDataGraph().commitId;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,0,RoiRadiusUnit::Voxels};next.operation=operation;Require(editor.SendRequest(next).error==RoiError::Pending,"superseding operation failed");WaitOperation(editor);
+    Require(editor.GetState().hasDraft && !editor.GetState().isSaving && data->GetDataGraph().commitId==before,"old pending save committed newer parameters");
+    Require(editor.DetachHost() && main->overlays.empty(),"identity editor leaked display resources");
+}
+void TestAppliedSplit(){
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);const auto source=data->SetPrimaryImage(image)->data->self;
+    RoiRequest input;input.metadata.name="split";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=std::make_shared<const RoiVoxelSet>(std::vector<RoiVoxel>{{{1,1,1},1},{{3,3,3},1}});input.definition={source,{{RoiNodeKind::Primitive,primitive}}};const auto original=data->SetRoi(input);Require(original.roi.has_value(),"split editor fixture failed");
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};RoiEditingHostFeature editor({{"main"},{{"main"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"split editor attach failed");
+    input.action=RoiAction::SetGeometry;input.expectedRoi=original.roi->revision;Require(editor.SendRequest({RoiEditingAction::Begin,input}).error==RoiError::None,"split editor begin failed");RoiEditingRequest request;request.action=RoiEditingAction::BeginOperation;RoiOperationRequest operation;RoiComponentParams params;params.operation=RoiComponentOperation::Split;operation.params=params;request.operation=operation;Require(editor.SendRequest(request).error==RoiError::Pending,"split preview failed");WaitOperation(editor);
+    Require(editor.SendRequest({RoiEditingAction::ApplyOperation}).error==RoiError::None && editor.GetState().operation.rois.size()==2,"apply discarded the split output batch");
+    Require(editor.SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor.SendRequest({RoiEditingAction::Redo}).error==RoiError::None && editor.GetState().operation.rois.size()==2,"split history lost the applied batch");
+    Require(editor.SendRequest({RoiEditingAction::CancelOperation}).error==RoiError::InvalidRequest && editor.GetState().operation.rois.size()==2,"redo revived an applied split parameter preview");
+    request.action=RoiEditingAction::SetOperation;Require(editor.SendRequest(request).error==RoiError::InvalidRequest,"applied split still accepted old preview parameter changes");const auto before=data->GetDataGraph().commitId;
+    Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None && data->GetDataGraph().commitId==before+1 && RoiService::GetDescriptors(data->GetDataGraph()).size()==3,"applied split was saved as one union");Require(editor.DetachHost(),"split editor detach failed");
+}
+
+void TestChunkedDisplay(){
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(34,4,4);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),34*4*4,1);const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D),slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);main->source=slice->source=source;views->views={{"main",main},{"slice",slice}};
+    RoiEditingHostFeature editor({{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"block display attach failed");
+    std::vector<RoiVoxel> voxels;for(int x=1;x<=32;++x)for(int y=1;y<=2;++y)for(int z=1;z<=2;++z)voxels.push_back({{x,y,z},1});
+    RoiRequest draft;draft.metadata.name="块边界";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=std::make_shared<const RoiVoxelSet>(std::move(voxels));draft.definition={source,{{RoiNodeKind::Primitive,primitive}}};
+    Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"block display begin failed");FeatureOverlayState state;state.cursor={0,0,1};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(state);
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<deadline){editor.OnHostTick();std::this_thread::yield();}
+    // 仅读取本 fixture 拥有的 actor，核验块面没有内部接缝且复用了顶点。
+    const auto blocks=[&]{std::vector<vtkPolyData*> meshes;auto* collection=main->renderer->GetActors();collection->InitTraversal();while(auto* actor=collection->GetNextActor())if(actor->GetVisibility() && vtkCompositePolyDataMapper::SafeDownCast(actor->GetMapper())){
+        auto* data=vtkMultiBlockDataSet::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0));if(data)for(unsigned index=0;index<data->GetNumberOfBlocks();++index)meshes.push_back(vtkPolyData::SafeDownCast(data->GetBlock(index)));}return meshes;};
+    const auto initial=blocks();std::size_t faces=0,points=0;for(auto* mesh:initial){faces+=mesh->GetNumberOfPolys();points+=mesh->GetNumberOfPoints();}
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Displayed && initial.size()==2 && faces==2*(32*2+32*2+2*2) && points<faces*4,"block display created seams or repeated every face vertex");
+    const auto sliceLines=[&]{vtkPolyData* result=nullptr;auto* collection=slice->renderer->GetActors();collection->InitTraversal();while(auto* actor=collection->GetNextActor())if(actor->GetVisibility() && actor->GetMapper()){auto* mesh=vtkPolyData::SafeDownCast(actor->GetMapper()->GetInput());if(mesh && mesh->GetNumberOfLines())result=mesh;}return result;};
+    auto* contour=sliceLines();Require(contour,"direct slice contour did not finish");double length=0;vtkIdType count=0;const vtkIdType* ids=nullptr;auto* lines=contour->GetLines();lines->InitTraversal();while(lines->GetNextCell(count,ids)){Require(count==2,"slice emitted a non-segment");double a[3],b[3];contour->GetPoint(ids[0],a);contour->GetPoint(ids[1],b);Require(a[2]==1 && b[2]==1,"slice contour belongs to an old plane");length+=std::hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);}
+    Require(std::abs(length-2*(32+2))<1e-12,"slice contour perimeter differs from its voxel rectangle");
+    state.cursor={0,0,3};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(state);
+    bool completed=false;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(std::chrono::steady_clock::now()<until){editor.OnHostTick();if(editor.GetState().displayStatus!=RoiDisplayStatus::Updating && !sliceLines()){completed=true;break;}std::this_thread::yield();}
+    Require(completed && blocks()==initial && editor.GetState().preview->GetContains({10,1,1}),"slice movement rebuilt three-dimensional actors or changed formal membership");
+    main->lease->StopLease();Require(editor.OnHostTick() && !editor.GetState().hasDraft && data->GetDataGraph().view->GetData(source),"stopped view lease accepted a late display or deleted source data");
+    Require(editor.DetachHost() && main->overlays.empty() && slice->overlays.empty(),"block display resources leaked");
+}
+
+struct SliceQueries {std::atomic<std::size_t> total{0},outside{0};};
+class SliceQuery final:public RoiQuery {
+public:
+    SliceQuery(std::unique_ptr<RoiQuery> query,std::shared_ptr<SliceQueries> observed):m_query(std::move(query)),m_observed(std::move(observed)){}
+    bool GetContains(const std::array<double,3>& point)const noexcept override{
+        ++m_observed->total;if(point[2]<31 || point[2]>33)++m_observed->outside;return m_query->GetContains(point);
+    }
+private:std::unique_ptr<RoiQuery> m_query;std::shared_ptr<SliceQueries> m_observed;
+};
+class SliceRead final:public RoiReadView {
+public:
+    SliceRead(RoiReadSnapshot read,std::shared_ptr<SliceQueries> observed):m_read(std::move(read)),m_observed(std::move(observed)){}
+    DataRevisionRef GetRevision()const noexcept override{return m_read->GetRevision();}
+    DataRevisionRef GetSource()const noexcept override{return m_read->GetSource();}
+    const RoiDefinition& GetDefinition()const noexcept override{return m_read->GetDefinition();}
+    const std::vector<DataRevisionRef>& GetDependencies()const noexcept override{return m_read->GetDependencies();}
+    std::array<double,6> GetBounds()const noexcept override{return m_read->GetBounds();}
+    RoiQueryResult GetQuery()const override{auto result=m_read->GetQuery();if(result.query)result.query=std::make_unique<SliceQuery>(std::move(result.query),m_observed);return result;}
+    bool GetContains(const std::array<double,3>& point)const override{return m_read->GetContains(point);}
+    RoiPointsResult GetPoints(const std::vector<std::array<double,3>>& points)const override{return m_read->GetPoints(points);}
+    RoiPlanesResult GetClipPlanes()const override{return m_read->GetClipPlanes();}
+    RoiTriangleSelection GetTriangleSelection(const RoiTriangle& triangle,double tolerance,std::function<bool()> cancelled)const override{return m_read->GetTriangleSelection(triangle,tolerance,std::move(cancelled));}
+    RoiTriangleSelection GetTriangleChunks(const RoiTriangle& triangle,std::size_t count,const RoiTriangleCallback& consume,double tolerance,std::function<bool()> cancelled)const override{return m_read->GetTriangleChunks(triangle,count,consume,tolerance,std::move(cancelled));}
+    RoiPolygonResult GetClippedTriangle(const RoiTriangle& triangle)const override{return m_read->GetClippedTriangle(triangle);}
+    double GetBoundaryDistance(const std::array<double,3>& point)const noexcept override{return m_read->GetBoundaryDistance(point);}
+    RoiMaskResult GetMaskChunk(const RoiMaskRequest& request)const override{return m_read->GetMaskChunk(request);}
+private:RoiReadSnapshot m_read;std::shared_ptr<SliceQueries> m_observed;
+};
+class SliceData final:public TestDataPort {
+public:
+    RoiReadResult GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition)const override{
+        auto result=TestDataPort::GetRoiPreview(graph,definition);if(result.roi)result.roi=std::make_shared<const SliceRead>(result.roi,queries);return result;
+    }
+    std::shared_ptr<SliceQueries> queries=std::make_shared<SliceQueries>();
+};
+void TestSliceOnlyDisplay(){
+    auto data=std::make_shared<SliceData>();vtkNew<vtkImageData> image;image->SetDimensions(18,18,66);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),18*18*66,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);slice->source=source;slice->cursor={8,8,32};views->views={{"slice",slice}};
+    RoiEditingHostFeature editor({{"slice"},{{"slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"slice-only attach failed");
+    RoiRequest draft;draft.metadata.name="仅切片";draft.definition={source,{{RoiNodeKind::SourceDomain}}};
+    Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"slice-only begin failed");FeatureOverlayState plane;plane.cursor={8,8,32};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(plane);
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<until){editor.OnHostTick();std::this_thread::yield();}
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Displayed && data->queries->total>0 && data->queries->outside==0,"slice-only display scanned unrelated three-dimensional voxel layers");
+    Require(editor.DetachHost() && slice->overlays.empty(),"slice-only resources leaked");
+}
+void TestProgressiveDisplay(){
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(258,18,18);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),258*18*18,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    auto top=std::make_shared<View>("top",HostRenderViewRole::TopDownSlice),front=std::make_shared<View>("front",HostRenderViewRole::FrontBackSlice),side=std::make_shared<View>("side",HostRenderViewRole::LeftRightSlice);
+    for(const auto& view:{main,top,front,side}){view->source=source;view->cursor={128,8,8};views->views.emplace(view->view.id,view);}
+    RoiEditingHostFeature editor({{"main"},{{"main","top","front","side"},{}}});auto host=std::make_shared<Controller>();const auto signals=host->signals;std::weak_ptr<Controller> weakHost=host;
+    {HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor.AttachHost(context),"progressive attach failed");}host.reset();
+    RoiRequest draft;draft.metadata.name="渐进显示";draft.definition={source,{{RoiNodeKind::SourceDomain}}};
+    const auto begin=[&]{Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"progressive begin failed");FeatureOverlayState plane;plane.cursor={128,8,8};for(const auto& view:{top,front,side})for(const auto& overlay:view->overlays)overlay->SetOverlayState(plane);};begin();
+    const auto sliceMesh=[&](const std::shared_ptr<View>& view){vtkPolyData* result=nullptr;auto* actors=view->renderer->GetActors();actors->InitTraversal();while(auto* actor=actors->GetNextActor())if(actor->GetVisibility() && actor->GetMapper()){
+        auto* mesh=vtkPolyData::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0));if(mesh && mesh->GetNumberOfLines())result=mesh;}return result;};
+    const auto blockCount=[&]{unsigned count=0,actorsSeen=0;auto* actors=main->renderer->GetActors();actors->InitTraversal();while(auto* actor=actors->GetNextActor())if(actor->GetVisibility() && vtkCompositePolyDataMapper::SafeDownCast(actor->GetMapper())){
+        ++actorsSeen;count=vtkMultiBlockDataSet::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0))->GetNumberOfBlocks();}Require(actorsSeen<=1,"progressive display created one actor per block");return count;};
+    bool slicesEarly=false,movedEarly=false,requestedMove=false;unsigned previous=0,consumed=0;
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<until){
+        const auto current=signals->load();if(current==consumed){std::this_thread::yield();continue;}consumed=current;
+        editor.OnHostTick();const auto count=blockCount();Require(count>=previous && count-previous<=4,"one tick consumed an unbounded set of display blocks");previous=count;
+        if(sliceMesh(top) && sliceMesh(front) && sliceMesh(side) && editor.GetState().displayStatus==RoiDisplayStatus::Updating){slicesEarly=true;
+            if(!requestedMove){FeatureOverlayState plane;plane.cursor={128,8,15};for(const auto& overlay:top->overlays)overlay->SetOverlayState(plane);requestedMove=true;}}
+        if(requestedMove && sliceMesh(top)){double point[3];sliceMesh(top)->GetPoint(0,point);if(point[2]==15 && editor.GetState().displayStatus==RoiDisplayStatus::Updating)movedEarly=true;}
+        std::this_thread::yield();
+    }
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Displayed && slicesEarly && movedEarly && previous==17*2*2,"slice updates waited for complete construction or dropped the final display blocks");
+    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"progressive cancel failed");begin();
+    bool partial=false;const auto cancelUntil=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(std::chrono::steady_clock::now()<cancelUntil){editor.OnHostTick();if(blockCount()>0 && editor.GetState().displayStatus==RoiDisplayStatus::Updating){partial=true;break;}std::this_thread::yield();}
+    Require(partial,"progressive cancellation fixture did not reach a partial display");
+    vtkWeakPointer<vtkPolyData> stale;
+    auto* actors=main->renderer->GetActors();actors->InitTraversal();while(auto* actor=actors->GetNextActor())if(actor->GetVisibility() && vtkCompositePolyDataMapper::SafeDownCast(actor->GetMapper()))
+        stale=vtkPolyData::SafeDownCast(vtkMultiBlockDataSet::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0))->GetBlock(0));
+    Require(stale!=nullptr,"old display block fixture is missing");
+    RoiEditingRequest replacement;replacement.action=RoiEditingAction::SetDraft;replacement.selection=RoiSelectionMode::Replace;RoiPrimitive sphere;sphere.shape=RoiShape::Sphere;sphere.origin={10,8,8};sphere.radius=.1;replacement.primitive=sphere;
+    Require(editor.SendRequest(replacement).error==RoiError::None,"replacement during partial display failed");
+    const auto releaseUntil=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(stale && std::chrono::steady_clock::now()<releaseUntil){editor.OnHostTick();std::this_thread::yield();}
+    Require(!stale && blockCount()==0 && editor.GetState().preview->GetContains(sphere.origin) && !editor.GetState().preview->GetContains({100,8,8}),"old display batches survived a new draft or retained hidden mesh storage");
+    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"replacement cancel failed");begin();
+    partial=false;const auto sourceUntil=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(std::chrono::steady_clock::now()<sourceUntil){editor.OnHostTick();if(blockCount()>0 && editor.GetState().displayStatus==RoiDisplayStatus::Updating){partial=true;break;}std::this_thread::yield();}
+    Require(partial,"source expiry fixture did not reach a partial display");main->lease->StopLease();
+    Require(editor.OnHostTick() && !editor.GetState().hasDraft && blockCount()==0,"source lease expiry accepted queued display batches");
+    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && editor.DetachHost(),"cancel/Detach blocked a bounded display producer");
+    for(const auto& view:{main,top,front,side})Require(view->overlays.empty(),"cancelled progressive display retained an overlay");
+    Require(weakHost.expired(),"detach retained the display notification port");
+}
+
+}
+int main(int argc,char** argv)
 {
-    try {TestEditor();TestCurves();TestDrawingAndLatestOperation(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

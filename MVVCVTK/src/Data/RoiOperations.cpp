@@ -1,5 +1,4 @@
 #include "Data/RoiService.h"
-#include "Data/Internal/ReadBudget.h"
 #include "Geometry/RoiEvaluator.h"
 
 #include <algorithm>
@@ -13,18 +12,92 @@
 #include <map>
 #include <set>
 #include <stdexcept>
-#include <unordered_set>
+#include <mutex>
+#include <numeric>
 
 namespace {
 using Index=std::array<int,3>;
 using Point=std::array<double,3>;
 using Matrix=std::array<double,16>;
-struct IndexHash final {
-    std::size_t operator()(const Index& p) const noexcept {
-        std::size_t h=0;for (auto v:p) h^=std::hash<int>{}(v)+0x9e3779b9+(h<<6)+(h>>2);return h;
+void CheckCancel(const RoiOperationRequest& request);
+// X 连续区间按行保存；稠密选区不再为每个体素分配一个哈希节点。
+class Cells final {
+public:
+    using Runs=std::vector<std::pair<int,int>>;
+    using Rows=std::map<std::array<int,2>,Runs>;
+    struct Span {Index first;int last;};
+    const Rows& GetRows()const noexcept{return m_rows;}
+    const Runs& GetRow(const std::array<int,2>& row)const{
+        static const Runs empty;const auto found=m_rows.find(row);return found==m_rows.end()?empty:found->second;
     }
+    void InsertRun(const Index& first,int last){
+        auto& runs=m_rows[{first[1],first[2]}];int low=first[0],high=last;
+        auto begin=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,int x){return std::int64_t(run.second)+1<x;});
+        auto end=begin;std::size_t removed=0;
+        while(end!=runs.end() && std::int64_t(end->first)<=std::int64_t(high)+1){
+            low=std::min(low,end->first);high=std::max(high,end->second);removed+=std::size_t(std::int64_t(end->second)-end->first+1);++end;}
+        const auto added=std::size_t(std::int64_t(high)-low+1);
+        if(added>std::numeric_limits<std::size_t>::max()-(m_count-removed))throw std::length_error("ROI member count overflows.");
+        begin=runs.erase(begin,end);runs.insert(begin,{low,high});m_count=m_count-removed+added;
+    }
+    std::optional<Index> GetFirst(const RoiOperationRequest& request)const{
+        std::optional<Index> first;std::size_t visited=0;for(const auto& row:m_rows){if(!(visited++%1024))CheckCancel(request);Index point{row.second.front().first,row.first[0],row.first[1]};
+            if(!first || point<*first)first=point;}return first;
+    }
+    std::optional<Span> TakeRun(const std::array<int,2>& key,std::int64_t low,std::int64_t high){
+        const auto row=m_rows.find(key);if(row==m_rows.end())return {};
+        auto& runs=row->second;const auto run=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,std::int64_t x){return run.second<x;});
+        if(run==runs.end() || run->first>high)return {};
+        const Span taken{{run->first,key[0],key[1]},run->second};m_count-=std::size_t(std::int64_t(run->second)-run->first+1);
+        runs.erase(run);if(runs.empty())m_rows.erase(row);return taken;
+    }
+    class Iterator final {
+    public:
+        using iterator_category=std::input_iterator_tag;
+        using value_type=Index;using difference_type=std::ptrdiff_t;using pointer=void;using reference=Index;
+        Iterator(Rows::const_iterator row,Rows::const_iterator end):m_row(row),m_end(end)
+        {if(m_row!=m_end)m_x=m_row->second.front().first;}
+        Index operator*()const{return {m_x,m_row->first[0],m_row->first[1]};}
+        Iterator& operator++(){const auto& run=m_row->second[m_run];if(m_x<run.second)++m_x;
+            else if(++m_run<m_row->second.size())m_x=m_row->second[m_run].first;
+            else{++m_row;m_run=0;if(m_row!=m_end)m_x=m_row->second.front().first;}return *this;}
+        bool operator!=(const Iterator& other)const{return m_row!=other.m_row || (m_row!=m_end && (m_run!=other.m_run || m_x!=other.m_x));}
+    private:Rows::const_iterator m_row,m_end;std::size_t m_run=0;int m_x=0;
+    };
+    Iterator begin()const{return {m_rows.begin(),m_rows.end()};}
+    Iterator end()const{return {m_rows.end(),m_rows.end()};}
+    std::size_t size()const noexcept{return m_count;}
+    bool empty()const noexcept{return !m_count;}
+    bool count(const Index& i)const{
+        const auto row=m_rows.find({i[1],i[2]});if(row==m_rows.end())return false;
+        const auto& runs=row->second;auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        return next!=runs.begin() && std::prev(next)->second>=i[0];
+    }
+    bool insert(const Index& i){
+        auto& runs=m_rows[{i[1],i[2]}];auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        if(next!=runs.begin()){
+            auto previous=std::prev(next);if(previous->second>=i[0])return false;
+            if(std::int64_t(previous->second)+1==i[0]){previous->second=i[0];
+                if(next!=runs.end() && std::int64_t(i[0])+1==next->first){previous->second=next->second;runs.erase(next);}++m_count;return true;}
+        }
+        if(next!=runs.end() && std::int64_t(i[0])+1==next->first)next->first=i[0];
+        else runs.insert(next,{i[0],i[0]});++m_count;return true;
+    }
+    bool erase(const Index& i){
+        const auto row=m_rows.find({i[1],i[2]});if(row==m_rows.end())return false;auto& runs=row->second;
+        auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        if(next==runs.begin())return false;auto run=std::prev(next);if(run->second<i[0])return false;
+        if(run->first==run->second)runs.erase(run);
+        else if(run->first==i[0])++run->first;
+        else if(run->second==i[0])--run->second;
+        else{const int high=run->second;run->second=i[0]-1;runs.insert(next,{i[0]+1,high});}
+        if(runs.empty())m_rows.erase(row);--m_count;return true;
+    }
+    template<class Predicate> void Keep(Predicate predicate){
+        Cells kept;for(const auto& i:*this)if(predicate(i))kept.insert(i);*this=std::move(kept);
+    }
+private:Rows m_rows;std::size_t m_count=0;
 };
-using Cells=std::unordered_set<Index,IndexHash>;
 struct Failure final { RoiError error; const char* message; };
 void Require(bool condition,RoiError error,const char* message) {if (!condition) throw Failure{error,message};}
 void CheckCancel(const RoiOperationRequest& request) {
@@ -32,7 +105,7 @@ void CheckCancel(const RoiOperationRequest& request) {
     try {if (request.getCancelled && request.getCancelled()) throw Failure{RoiError::Cancelled,"ROI operation cancelled."};}
     catch (const Failure&) {throw;} catch (...) {throw Failure{RoiError::Cancelled,"ROI cancellation callback failed."};}
 }
-bool Insert(Cells& cells,const Index& index,const RoiOperationRequest& request){const bool added=cells.insert(index).second;Require(cells.size()<=GetReadBudget(request.maxWorkingBytes)/256,RoiError::TooLarge,"ROI working storage exceeds the resource budget.");return added;}
+bool Insert(Cells& cells,const Index& index,const RoiOperationRequest&){return cells.insert(index);}
 Point GetPoint(const GridGeometry3D& g,const Index& i) {
     Point p=g.origin;for (int r=0;r<3;++r) for (int a=0;a<3;++a) p[r]+=g.direction[r*3+a]*g.spacing[a]*i[a];return p;
 }
@@ -102,20 +175,23 @@ std::size_t GetOffset(const GridGeometry3D& g,const Index& i) {
 bool GetValidCell(const ImageGrid3DPayload& image,const Index& i) {
     return GetInGrid(image.GetGeometry(),i) && (!image.GetValidityMask() || (*image.GetValidityMask())[GetOffset(image.GetGeometry(),i)]!=0);
 }
-template<class F> void ForCells(const ImageGrid3DPayload& image,const RoiOperationRequest& request,F visit,
-    std::optional<std::array<double,6>> bounds={}) {
-    const auto& g=image.GetGeometry();
+std::optional<std::array<int,6>> GetCellExtent(const GridGeometry3D& g,const std::optional<std::array<double,6>>& bounds) {
     auto extent=g.extent;
     if(bounds){
-        for(int a=0;a<3;++a)if((*bounds)[a*2]>(*bounds)[a*2+1])return;
+        for(int a=0;a<3;++a)if((*bounds)[a*2]>(*bounds)[a*2+1])return {};
         Matrix matrix=roiIdentityMatrix;for(int r=0;r<3;++r){for(int a=0;a<3;++a)matrix[r*4+a]=g.direction[r*3+a]*g.spacing[a];matrix[r*4+3]=g.origin[r];}
         const auto inverse=Invert(matrix);std::array<double,6> indexed{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
         for(unsigned k=0;k<8;++k){const auto p=Transform(inverse,{(*bounds)[(k&1)?1:0],(*bounds)[(k&2)?3:2],(*bounds)[(k&4)?5:4]});for(int a=0;a<3;++a){indexed[a*2]=std::min(indexed[a*2],p[a]);indexed[a*2+1]=std::max(indexed[a*2+1],p[a]);}}
-        for(int a=0;a<3;++a){const double low=std::max(double(extent[a*2]),std::ceil(indexed[a*2]-1e-9)),high=std::min(double(extent[a*2+1]),std::floor(indexed[a*2+1]+1e-9));if(low>high)return;extent[a*2]=static_cast<int>(low);extent[a*2+1]=static_cast<int>(high);}
+        for(int a=0;a<3;++a){const double low=std::max(double(extent[a*2]),std::ceil(indexed[a*2]-1e-9)),high=std::min(double(extent[a*2+1]),std::floor(indexed[a*2+1]+1e-9));if(low>high)return {};extent[a*2]=static_cast<int>(low);extent[a*2+1]=static_cast<int>(high);}
     }
+    return extent;
+}
+template<class F> void ForCells(const ImageGrid3DPayload& image,const RoiOperationRequest& request,F visit,
+    std::optional<std::array<double,6>> bounds={}) {
+    const auto range=GetCellExtent(image.GetGeometry(),bounds);if(!range)return;const auto& extent=*range;
     for (std::int64_t z=extent[4];z<=extent[5];++z) for (std::int64_t y=extent[2];y<=extent[3];++y) {
         CheckCancel(request);
-        for (std::int64_t x=extent[0];x<=extent[1];++x) {Index i{static_cast<int>(x),static_cast<int>(y),static_cast<int>(z)};if (GetValidCell(image,i)) visit(i);}
+        for (std::int64_t x=extent[0];x<=extent[1];++x) {if(!((x-extent[0])%1024))CheckCancel(request);Index i{static_cast<int>(x),static_cast<int>(y),static_cast<int>(z)};if (GetValidCell(image,i)) visit(i);}
     }
 }
 RoiReadSnapshot GetRead(const DataGraphSnapshot& graph,const DataRevisionRef& ref,const DataRevisionRef& source) {
@@ -142,7 +218,8 @@ RoiDefinition GetVoxelDefinition(DataRevisionRef source,const Cells& cells) {
     return GetVoxelDefinition(source,std::make_shared<const RoiVoxelSet>(std::move(values)));
 }
 Cells GetCells(const ImageGrid3DPayload& image,const RoiReadSnapshot& read,const RoiOperationRequest& request) {
-    Cells cells;ForCells(image,request,[&](const Index& i){if (read->GetContains(GetPoint(image.GetGeometry(),i))) Insert(cells,i,request);},read->GetBounds());return cells;
+    const auto query=read->GetQuery();Require(query.error==RoiError::None && query.query,query.error,"ROI query preparation failed.");
+    Cells cells;ForCells(image,request,[&](const Index& i){if (query.query->GetContains(GetPoint(image.GetGeometry(),i))) Insert(cells,i,request);},read->GetBounds());return cells;
 }
 std::vector<Index> GetNeighbours(RoiConnectivity connectivity) {
     Require(connectivity==RoiConnectivity::Faces || connectivity==RoiConnectivity::Full,RoiError::InvalidRequest,"Invalid ROI connectivity.");
@@ -161,25 +238,47 @@ std::vector<Index> GetKernel(const GridGeometry3D& grid,const RoiMorphologyParam
     std::vector<Index> kernel;
     for (int z=-halo[2];z<=halo[2];++z) for (int y=-halo[1];y<=halo[1];++y) {CheckCancel(request);for (int x=-halo[0];x<=halo[0];++x) {
         const auto p=Transform(j,{static_cast<double>(x),static_cast<double>(y),static_cast<double>(z)});
-        if (std::hypot(p[0],p[1],p[2])<=params.radius){Require(kernel.size()<request.maxWorkingBytes/sizeof(Index),RoiError::TooLarge,"ROI kernel exceeds the resource budget.");kernel.push_back({x,y,z});}
+        if (std::hypot(p[0],p[1],p[2])<=params.radius){kernel.push_back({x,y,z});}
     }}return kernel;
 }
 Cells Morph(const Cells& cells,const std::vector<Index>& kernel,bool dilate,const RoiOperationRequest& request) {
     Cells out;std::size_t visited=0;
-    for (const auto& i:cells) {
-        if (!(visited++%1024)) CheckCancel(request);
-        if (dilate) for (const auto& d:kernel) {if (!(visited++%1024)) CheckCancel(request);Insert(out,Add(i,d),request);}
-        else {bool inside=true;for (const auto& d:kernel) {if (!(visited++%1024)) CheckCancel(request);if (!cells.count(Add(i,d))) {inside=false;break;}}if (inside) Insert(out,i,request);}
+    // 核仍按原物理度量生成；每个 X 区间整体平移/求交，不展开成员与核的笛卡尔积。
+    if(dilate){for(const auto& row:cells.GetRows())for(const auto& run:row.second)for(const auto& d:kernel){
+        if(!(visited++%1024))CheckCancel(request);
+        const auto low=Add({run.first,row.first[0],row.first[1]},d),high=Add({run.second,row.first[0],row.first[1]},d);
+        out.InsertRun(low,high[0]);}return out;}
+    out=cells;
+    for(const auto& d:kernel){
+        if(out.empty())break;Cells intersection;
+        for(const auto& row:out.GetRows())for(const auto& run:row.second){
+            if(!(visited++%1024))CheckCancel(request);
+            const auto low=Add({run.first,row.first[0],row.first[1]},d),high=Add({run.second,row.first[0],row.first[1]},d);
+            const auto& shifted=cells.GetRow({low[1],low[2]});
+            auto other=std::lower_bound(shifted.begin(),shifted.end(),low[0],[](const auto& r,int x){return r.second<x;});
+            for(;other!=shifted.end() && other->first<=high[0];++other){
+                if(!(visited++%1024))CheckCancel(request);
+                const int first=std::max(low[0],other->first)-d[0],last=std::min(high[0],other->second)-d[0];
+                intersection.InsertRun({first,row.first[0],row.first[1]},last);
+            }
+        }out=std::move(intersection);
     }return out;
 }
-std::vector<std::vector<Index>> GetComponents(Cells remaining,RoiConnectivity connectivity,const RoiOperationRequest& request) {
-    std::vector<Index> seeds(remaining.begin(),remaining.end());std::sort(seeds.begin(),seeds.end());
-    const auto neighbours=GetNeighbours(connectivity);std::vector<std::vector<Index>> components;
-    for (const auto& seed:seeds) if (remaining.erase(seed)) {
-        std::vector<Index> component{seed};
-        for (std::size_t cursor=0;cursor<component.size();++cursor) {
-            if (!(cursor%1024)) CheckCancel(request);
-            for (const auto& d:neighbours) {const auto next=Add(component[cursor],d);if (remaining.erase(next)) component.push_back(next);}
+std::vector<Cells> GetComponents(Cells remaining,RoiConnectivity connectivity,const RoiOperationRequest& request) {
+    Require(connectivity==RoiConnectivity::Faces || connectivity==RoiConnectivity::Full,RoiError::InvalidRequest,"Invalid ROI connectivity.");
+    std::vector<Cells> components;std::size_t visited=0;
+    // 分量顺序仍由最小 (x,y,z) 成员确定；队列与分量均保留行区间。
+    while(const auto seed=remaining.GetFirst(request)){
+        CheckCancel(request);Cells component;std::deque<Cells::Span> frontier;
+        const auto append=[&](Cells::Span span){component.InsertRun(span.first,span.last);frontier.push_back(span);};
+        append(*remaining.TakeRun({(*seed)[1],(*seed)[2]},(*seed)[0],(*seed)[0]));
+        while(!frontier.empty()){
+            if(!(visited++%1024))CheckCancel(request);const auto span=frontier.front();frontier.pop_front();
+            for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y){
+                if((!y && !z) || (connectivity==RoiConnectivity::Faces && std::abs(y)+std::abs(z)!=1))continue;
+                const auto next=Add(span.first,{0,y,z});const int margin=connectivity==RoiConnectivity::Full?1:0;
+                while(const auto joined=remaining.TakeRun({next[1],next[2]},std::int64_t(span.first[0])-margin,std::int64_t(span.last)+margin))append(*joined);
+            }
         }components.push_back(std::move(component));
     }return components;
 }
@@ -211,7 +310,71 @@ double GetTriangleDistance(const Point& p,const Point& a,const Point& b,const Po
         const Point r{q[0]-t*d[0],q[1]-t*d[1],q[2]-t*d[2]};result=std::min(result,std::sqrt(Dot(r,r)));
     }return result;
 }
-}
+} // namespace
+
+class SurfaceMeshPayload::RoiMeshIndex final {
+    struct Node final {std::array<double,6> bounds;std::size_t first=0,count=0,left=0,right=0;};
+public:
+    static std::shared_ptr<const RoiMeshIndex> Get(const DataSnapshot& data,const RoiMeshParams& params,const RoiOperationRequest& request){
+        const auto& mesh=dynamic_cast<const SurfaceMeshPayload&>(*data->payload);
+        const auto& owner=*mesh.m_mesh;
+        {const std::lock_guard<std::mutex> lock(owner.roiIndexMutex);
+            if(owner.roiIndex && owner.roiIndexTransform==params.meshToSource)return owner.roiIndex;}
+        auto prepared=std::make_shared<const RoiMeshIndex>(mesh,params.meshToSource,request);
+        {const std::lock_guard<std::mutex> lock(owner.roiIndexMutex);owner.roiIndexTransform=params.meshToSource;owner.roiIndex=prepared;}
+        return prepared;
+    }
+    RoiMeshIndex(const SurfaceMeshPayload& mesh,const Matrix& matrix,const RoiOperationRequest& request)
+        :m_triangles(mesh.GetTriangles()){
+        m_bounds={INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
+        m_points.reserve(mesh.GetVertices().size()/3);
+        for(std::size_t i=0;i<mesh.GetVertices().size();i+=3){if(i%768==0)CheckCancel(request);
+            const auto p=Transform(matrix,{mesh.GetVertices()[i],mesh.GetVertices()[i+1],mesh.GetVertices()[i+2]});
+            Require(std::all_of(p.begin(),p.end(),[](double value){return std::isfinite(value);}),RoiError::InvalidGeometry,"ROI transformed mesh is not finite.");
+            m_points.push_back(p);for(int a=0;a<3;++a){m_bounds[a*2]=std::min(m_bounds[a*2],p[a]);m_bounds[a*2+1]=std::max(m_bounds[a*2+1],p[a]);}}
+        const auto& triangles=mesh.GetTriangles();std::map<std::pair<std::uint64_t,std::uint64_t>,std::size_t> edges;
+        for(std::size_t i=0;i<triangles.size();i+=3){if(i%768==0)CheckCancel(request);
+            const auto normal=Cross(Subtract(m_points[triangles[i+1]],m_points[triangles[i]]),Subtract(m_points[triangles[i+2]],m_points[triangles[i]]));
+            Require(Dot(normal,normal)>0 && std::isfinite(Dot(normal,normal)),RoiError::InvalidGeometry,"ROI mesh contains a degenerate face.");
+            for(int e=0;e<3;++e){auto a=triangles[i+e],b=triangles[i+(e+1)%3];if(a>b)std::swap(a,b);++edges[{a,b}];}}
+        m_closed=!triangles.empty() && std::all_of(edges.begin(),edges.end(),[](const auto& e){return e.second==2;});
+        m_order.resize(triangles.size()/3);std::iota(m_order.begin(),m_order.end(),0);
+        if(!m_order.empty())Build(0,m_order.size(),request);
+    }
+    const std::array<double,6>& GetBounds()const noexcept{return m_bounds;}
+    bool GetClosed()const noexcept{return m_closed;}
+    double GetDistance(const Point& point,const RoiOperationRequest& request)const{double distance=INFINITY;if(!m_nodes.empty())Distance(0,point,distance,request);return distance;}
+    void GetHits(const Point& point,const Point& ray,std::vector<double>& hits,const RoiOperationRequest& request)const{hits.clear();if(!m_nodes.empty())Hits(0,point,ray,hits,request);}
+private:
+    std::array<Point,3> Triangle(std::size_t id)const{return {m_points[m_triangles[id*3]],m_points[m_triangles[id*3+1]],m_points[m_triangles[id*3+2]]};}
+    std::size_t Build(std::size_t first,std::size_t count,const RoiOperationRequest& request){
+        CheckCancel(request);Node node;node.bounds={INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};node.first=first;node.count=count;
+        for(std::size_t k=first;k<first+count;++k){if(k%1024==0)CheckCancel(request);for(const auto& p:Triangle(m_order[k]))for(int a=0;a<3;++a){node.bounds[a*2]=std::min(node.bounds[a*2],p[a]);node.bounds[a*2+1]=std::max(node.bounds[a*2+1],p[a]);}}
+        const auto id=m_nodes.size();m_nodes.push_back(node);
+        if(count>8){int axis=0;for(int a=1;a<3;++a)if(node.bounds[a*2+1]-node.bounds[a*2]>node.bounds[axis*2+1]-node.bounds[axis*2])axis=a;
+            const auto middle=first+count/2;std::nth_element(m_order.begin()+first,m_order.begin()+middle,m_order.begin()+first+count,[&](auto a,auto b){const auto x=Triangle(a),y=Triangle(b);return x[0][axis]/3+x[1][axis]/3+x[2][axis]/3<y[0][axis]/3+y[1][axis]/3+y[2][axis]/3;});
+            const auto left=Build(first,middle-first,request),right=Build(middle,first+count-middle,request);m_nodes[id].left=left;m_nodes[id].right=right;m_nodes[id].count=0;}
+        return id;
+    }
+    static double BoxDistance(const std::array<double,6>& box,const Point& p){double sum=0;for(int a=0;a<3;++a){const double delta=std::max({box[a*2]-p[a],0.,p[a]-box[a*2+1]});sum+=delta*delta;}return std::sqrt(sum);}
+    void Distance(std::size_t id,const Point& p,double& distance,const RoiOperationRequest& request)const{
+        const auto& node=m_nodes[id];if(BoxDistance(node.bounds,p)>distance)return;CheckCancel(request);
+        if(node.count){for(std::size_t k=node.first;k<node.first+node.count;++k){const auto t=Triangle(m_order[k]);distance=std::min(distance,GetTriangleDistance(p,t[0],t[1],t[2]));}}
+        else{auto first=node.left,second=node.right;if(BoxDistance(m_nodes[first].bounds,p)>BoxDistance(m_nodes[second].bounds,p))std::swap(first,second);Distance(first,p,distance,request);Distance(second,p,distance,request);}
+    }
+    void Hits(std::size_t id,const Point& p,const Point& ray,std::vector<double>& hits,const RoiOperationRequest& request)const{
+        const auto& node=m_nodes[id];double low=0,high=INFINITY;
+        for(int a=0;a<3;++a){const double pad=64*std::numeric_limits<double>::epsilon()*std::max({1.,std::abs(node.bounds[a*2]),std::abs(node.bounds[a*2+1])});
+            double near=(node.bounds[a*2]-pad-p[a])/ray[a],far=(node.bounds[a*2+1]+pad-p[a])/ray[a];if(near>far)std::swap(near,far);low=std::max(low,near);high=std::min(high,far);if(low>high)return;}
+        CheckCancel(request);
+        if(!node.count){Hits(node.left,p,ray,hits,request);Hits(node.right,p,ray,hits,request);return;}
+        for(std::size_t k=node.first;k<node.first+node.count;++k){const auto triangle=Triangle(m_order[k]);const auto& a=triangle[0];const auto ab=Subtract(triangle[1],a),ac=Subtract(triangle[2],a),h=Cross(ray,ac);const double det=Dot(ab,h);
+            if(std::abs(det)<=1e-14)continue;const auto q=Subtract(p,a);const double u=Dot(q,h)/det;if(u<0 || u>1)continue;
+            const auto cross=Cross(q,ab);const double v=Dot(ray,cross)/det,t=Dot(ac,cross)/det;if(v>=0 && u+v<=1 && t>0)hits.push_back(t);}
+    }
+    const std::vector<std::uint64_t>& m_triangles;
+    std::vector<Point> m_points;std::vector<std::size_t> m_order;std::vector<Node> m_nodes;std::array<double,6> m_bounds;bool m_closed=false;
+};
 
 namespace {
 std::string RevisionText(const DataRevisionRef& ref){std::ostringstream text;text<<std::hex<<std::setfill('0');for(auto byte:ref.entityId.bytes)text<<std::setw(2)<<unsigned(byte);text<<':'<<std::dec<<ref.generation;return text.str();}
@@ -243,7 +406,9 @@ std::uint64_t HashDefinition(const RoiDefinition& d){
     }return h;
 }
 std::string PreparedSignature(const RoiOperationRequest& request,const RoiOperationResult& result){
-    const auto provenance=GetOperationProvenance(request);std::ostringstream text;text<<provenance.operationId<<';'<<provenance.canonicalParameters<<';';
+    // 输出身份不参与几何计算；输入、算法参数和候选几何仍全部绑定。
+    auto geometryRequest=request;geometryRequest.output=RoiOutputMode::CreateNew;
+    const auto provenance=GetOperationProvenance(geometryRequest);std::ostringstream text;text<<provenance.operationId<<';'<<provenance.canonicalParameters<<';';
     if(request.input)text<<HashDefinition(*request.input);text<<';';
     for(const auto& roi:result.rois)text<<HashDefinition(roi.definition)<<',';text<<';';for(auto count:result.componentVoxelCounts)text<<count<<',';
     return text.str();
@@ -254,7 +419,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
 {
     RoiOperationResult result;
     try {
-        auto request=requested;request.maxWorkingBytes=GetReadBudget(request.maxWorkingBytes);
+        const auto& request=requested;
         CheckCancel(request);Require(graph.view!=nullptr,RoiError::Unavailable,"ROI graph is unavailable.");
         const auto source=graph.view->GetData(request.source);Require(source!=nullptr,RoiError::MissingInput,"ROI source is missing.");
         const auto* image=dynamic_cast<const ImageGrid3DPayload*>(source->payload.get());
@@ -264,6 +429,8 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
             auto preview=RoiEvaluator::GetPreview(graph,*request.input);
             Require(preview.error==RoiError::None && preview.roi,preview.error,"ROI preview cannot be read.");target=std::move(preview.roi);
         }
+        const auto targetQuery=target?target->GetQuery():RoiQueryResult{};
+        if(target)Require(targetQuery.error==RoiError::None && targetQuery.query,targetQuery.error,"ROI query preparation failed.");
         RoiMetadata metadata=request.metadata;
         if (metadata.name.empty() && request.target) {const auto descriptor=GetDescriptor(graph,*request.target);if (descriptor) metadata=descriptor->metadata;}
         if (metadata.name.empty()) metadata.name="ROI";
@@ -305,7 +472,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                     case RoiMorphologyOperation::Close:cells=Morph(Morph(cells,kernel,true,request),kernel,false,request);break;
                     default:throw Failure{RoiError::InvalidRequest,"Invalid ROI morphology operation."};
                     }
-                    for (auto it=cells.begin();it!=cells.end();) if (!GetValidCell(*image,*it)) it=cells.erase(it);else ++it;
+                    cells.Keep([&](const Index& i){return GetValidCell(*image,i);});
                     add(GetVoxelDefinition(request.source,cells));
                 } else if constexpr (std::is_same_v<T,RoiComponentParams>) {
                     Require(target!=nullptr,RoiError::MissingInput,"ROI target is required.");
@@ -345,14 +512,22 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                 } else if constexpr (std::is_same_v<T,RoiThresholdParams>) {
                     Require((params.mode==RoiThresholdMode::Threshold && params.seeds.empty()) || (params.mode==RoiThresholdMode::SeedGrow && !params.seeds.empty()),RoiError::InvalidRequest,"Seed grow needs at least one explicit seed; threshold has no seeds.");
                     Require(image->GetComponentCount()==1 && std::isfinite(params.range[0]) && std::isfinite(params.range[1]) && params.range[0]<=params.range[1],RoiError::InvalidRequest,"Invalid ROI gray range.");
-                    Cells eligible;ForCells(*image,request,[&](const Index& i){if(target && !target->GetContains(GetPoint(grid,i)))return;const double v=GetGray(*image,i);Require(std::isfinite(v),RoiError::InvalidGeometry,"ROI gray domain contains undefined scalar values.");if (v>=params.range[0] && v<=params.range[1]) Insert(eligible,i,request);},target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
+                    Cells eligible;ForCells(*image,request,[&](const Index& i){if(target && !targetQuery.query->GetContains(GetPoint(grid,i)))return;const double v=GetGray(*image,i);Require(std::isfinite(v),RoiError::InvalidGeometry,"ROI gray domain contains undefined scalar values.");
+                        // 保留全允许域的有限灰度校验；生长不再保存整域 eligible 副本。
+                        if(params.mode==RoiThresholdMode::Threshold && v>=params.range[0] && v<=params.range[1])Insert(eligible,i,request);},target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
                     if (params.mode==RoiThresholdMode::SeedGrow) {
                         Matrix j=roiIdentityMatrix;for (int r=0;r<3;++r) {for (int c=0;c<3;++c) j[r*4+c]=grid.direction[r*3+c]*grid.spacing[c];j[r*4+3]=grid.origin[r];}const auto inverse=Invert(j);
-                        Cells grown;std::vector<Index> queue;for (const auto& seed:params.seeds) {
+                        const auto domain=GetCellExtent(grid,target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
+                        const auto allowed=[&](const Index& i){if(!domain)return false;for(int axis=0;axis<3;++axis)if(i[axis]<(*domain)[axis*2] || i[axis]>(*domain)[axis*2+1])return false;
+                            if(!GetValidCell(*image,i) || (target && !targetQuery.query->GetContains(GetPoint(grid,i))))return false;
+                            const double value=GetGray(*image,i);return value>=params.range[0] && value<=params.range[1];};
+                        Cells grown;std::deque<Index> queue;for (const auto& seed:params.seeds) {
                             const auto p=Transform(inverse,seed);Index i{};for (int a=0;a<3;++a) {Require(std::isfinite(p[a]) && p[a]>=INT_MIN && p[a]<INT_MAX,RoiError::InvalidGeometry,"ROI seed is invalid.");i[a]=static_cast<int>(std::floor(p[a]+0.5));}
-                            Require(eligible.count(i)>0,RoiError::InvalidRequest,"ROI seed is outside the permitted gray domain.");if (Insert(grown,i,request)) queue.push_back(i);
+                            Require(allowed(i),RoiError::InvalidRequest,"ROI seed is outside the permitted gray domain.");if(Insert(grown,i,request))queue.push_back(i);
                         }
-                        const auto neighbours=GetNeighbours(params.connectivity);for (std::size_t k=0;k<queue.size();++k) {if (!(k%1024)) CheckCancel(request);for (const auto& d:neighbours) {const auto i=Add(queue[k],d);if (eligible.count(i) && Insert(grown,i,request)) queue.push_back(i);}}
+                        const auto neighbours=GetNeighbours(params.connectivity);std::size_t visited=0;
+                        while(!queue.empty()){if(!(visited++%1024))CheckCancel(request);const auto current=queue.front();queue.pop_front();
+                            for(const auto& d:neighbours){const auto i=Add(current,d);if(!grown.count(i) && allowed(i)){Insert(grown,i,request);queue.push_back(i);}}}
                         eligible=std::move(grown);
                     }add(GetVoxelDefinition(request.source,eligible));
                 } else if constexpr (std::is_same_v<T,RoiTransformParams>) {
@@ -362,39 +537,28 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                     const auto* targetImage=targetData ? dynamic_cast<const ImageGrid3DPayload*>(targetData->payload.get()):nullptr;
                     Require(targetImage && targetImage->GetValid(),RoiError::SourceMismatch,"ROI target source is not an image.");
                     if(!params.rasterize)add(TransformAnalytic(target->GetDefinition(),*image,targetRef,params.sourceToTarget));
-                    else{Cells cells;ForCells(*targetImage,request,[&](const Index& i){if (target->GetContains(Transform(inverse,GetPoint(targetImage->GetGeometry(),i)))) Insert(cells,i,request);});add(GetVoxelDefinition(targetRef,cells));}
+                    else{Cells cells;ForCells(*targetImage,request,[&](const Index& i){if (targetQuery.query->GetContains(Transform(inverse,GetPoint(targetImage->GetGeometry(),i)))) Insert(cells,i,request);});add(GetVoxelDefinition(targetRef,cells));}
                 } else if constexpr (std::is_same_v<T,RoiMeshParams>) {
                     Require(std::isfinite(params.inward) && std::isfinite(params.outward) && params.inward>=0 && params.outward>=0,RoiError::InvalidRequest,"Invalid ROI surface layer thickness.");
                     const auto data=graph.view->GetData(params.mesh);const auto* mesh=data ? dynamic_cast<const SurfaceMeshPayload*>(data->payload.get()):nullptr;
                     Require(mesh && mesh->GetValid(),RoiError::MissingInput,"ROI surface mesh is missing.");(void)Invert(params.meshToSource);
-                    Require(mesh->GetVertices().size()/3<=request.maxWorkingBytes/sizeof(Point) && mesh->GetTriangles().size()/3<=request.maxWorkingBytes/512,RoiError::TooLarge,"ROI mesh working storage exceeds the resource budget.");
-                    std::array<double,6> bounds{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};std::vector<Point> points;points.reserve(mesh->GetVertices().size()/3);
-                    for (std::size_t i=0;i<mesh->GetVertices().size();i+=3){if(i%768==0)CheckCancel(request);const auto point=Transform(params.meshToSource,{mesh->GetVertices()[i],mesh->GetVertices()[i+1],mesh->GetVertices()[i+2]});Require(std::all_of(point.begin(),point.end(),[](auto value){return std::isfinite(value);}),RoiError::InvalidGeometry,"ROI transformed mesh is not finite.");points.push_back(point);for(int a=0;a<3;++a){bounds[a*2]=std::min(bounds[a*2],point[a]);bounds[a*2+1]=std::max(bounds[a*2+1],point[a]);}}
+                    const auto spatial=SurfaceMeshPayload::RoiMeshIndex::Get(data,params,request);auto bounds=spatial->GetBounds();
                     const double margin=params.mode==RoiMeshMode::Layer?std::max(params.inward,params.outward):0;for(int a=0;a<3;++a){bounds[a*2]-=margin;bounds[a*2+1]+=margin;}
-                    const auto& triangles=mesh->GetTriangles();std::map<std::pair<std::uint64_t,std::uint64_t>,std::size_t> edges;
-                    for (std::size_t i=0;i<triangles.size();i+=3){if(i%768==0)CheckCancel(request);const auto cross=Cross(Subtract(points[triangles[i+1]],points[triangles[i]]),Subtract(points[triangles[i+2]],points[triangles[i]]));Require(Dot(cross,cross)>0 && std::isfinite(Dot(cross,cross)),RoiError::InvalidGeometry,"ROI mesh contains a degenerate face.");for (int e=0;e<3;++e) {auto a=triangles[i+e],b=triangles[i+(e+1)%3];if (a>b) std::swap(a,b);++edges[{a,b}];}}
-                    const bool closed=!triangles.empty() && std::all_of(edges.begin(),edges.end(),[](const auto& e){return e.second==2;});
+                    const bool closed=spatial->GetClosed();
                     Require(params.mode==RoiMeshMode::Interior || params.mode==RoiMeshMode::Layer,RoiError::InvalidRequest,"Invalid ROI mesh mode.");
                     Require((params.mode!=RoiMeshMode::Interior && !params.hasOrientation) || closed,RoiError::InvalidGeometry,"An open surface cannot define a reliable interior.");
-                    Cells cells;const Point ray{1,0.3713906763541037,0.529173652};
+                    Cells cells;const Point ray{1,0.3713906763541037,0.529173652};std::vector<double> hits;
                     ForCells(*image,request,[&](const Index& index){
-                        const auto p=GetPoint(grid,index);double distance=INFINITY;std::vector<double> hits;
-                        for (std::size_t i=0;i<triangles.size();i+=3) {
-                            if(i%768==0)CheckCancel(request);
-                            const auto& a=points[triangles[i]];const auto& b=points[triangles[i+1]];const auto& c=points[triangles[i+2]];
-                            distance=std::min(distance,GetTriangleDistance(p,a,b,c));const auto ab=Subtract(b,a),ac=Subtract(c,a),h=Cross(ray,ac);const double det=Dot(ab,h);
-                            if (std::abs(det)<=1e-14) continue;const auto q=Subtract(p,a);const double u=Dot(q,h)/det;if (u<0 || u>1) continue;
-                            const auto s=Cross(q,ab);const double v=Dot(ray,s)/det,t=Dot(ac,s)/det;if (v>=0 && u+v<=1 && t>0) hits.push_back(t);
-                        }
+                        const auto p=GetPoint(grid,index);const double distance=spatial->GetDistance(p,request);spatial->GetHits(p,ray,hits,request);
                         std::sort(hits.begin(),hits.end());hits.erase(std::unique(hits.begin(),hits.end(),[](double a,double b){return std::abs(a-b)<=1e-10*std::max({1.0,std::abs(a),std::abs(b)});}),hits.end());
                         const bool inside=hits.size()%2!=0 || distance==0;
                         const bool selected=params.mode==RoiMeshMode::Interior ? inside:distance<=(params.hasOrientation ? (inside ? params.inward:params.outward):std::max(params.inward,params.outward));
-                        if (selected && (!target || target->GetContains(p))) Insert(cells,index,request);
+                        if (selected && (!target || targetQuery.query->GetContains(p))) Insert(cells,index,request);
                     },bounds);add(GetVoxelDefinition(request.source,cells));
                 }
             }
         },request.params);
-        CheckCancel(request);result.error=RoiError::None;result.preparedSignature=PreparedSignature(request,result);
+        CheckCancel(request);result.error=RoiError::None;result.preparedSignature=PreparedSignature(request,result);result.provenance=GetOperationProvenance(request);
     } catch (const Failure& e) {result.error=e.error;result.message=e.message;result.rois.clear();}
     catch (const std::bad_alloc&) {result.error=RoiError::TooLarge;result.message="ROI allocation failed.";result.rois.clear();}
     catch (...) {result.error=RoiError::InvalidRequest;result.message="ROI operation failed.";result.rois.clear();}

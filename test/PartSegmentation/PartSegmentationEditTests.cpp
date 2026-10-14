@@ -1,7 +1,7 @@
 // 测试用途：验证涂绘、擦除、填充、生长、孤岛、拆分、合并及保护范围和掩码约束。
 #include "PartSegmentationTestCases.h"
 #include "Algorithms/PartLabelEditor.h"
-#include "Model/LabelMapBuilder.h"
+#include "FeatureSupport/LabelMapBuilder.h"
 #include "Data/DataGraphStore.h"
 #include "Geometry/RoiEvaluator.h"
 #include <cstring>
@@ -427,7 +427,8 @@ int GetPartEditFailCount()
         "External shared mutable labels retain defensive copy isolation");
     auto owned = std::make_unique<std::vector<std::uint32_t>>(std::initializer_list<std::uint32_t>{0, 4, 2, 1});
     const auto* ownedAddress = owned->data();
-    auto frozen = LabelMapBuilder::Build(ownedGrid, std::move(owned));
+    auto frozen = LabelMapBuilder::Build(ownedGrid, std::move(owned), nullptr,
+        "PartSegmentation.labels", "Part segmentation");
     auto snapshot = frozen ? std::dynamic_pointer_cast<const LabelMap3DPayload>(frozen->CreateSnapshot()) : nullptr;
     check(!owned && frozen && frozen->GetLabels()->data() == ownedAddress
         && frozen->GetScalarRange() == std::array<double, 2>{0, 4}
@@ -438,6 +439,23 @@ int GetPartEditFailCount()
         "Frozen labels remain alive after the producer payload is released");
     check(!LabelMapBuilder::Build(ownedGrid, std::make_unique<std::vector<std::uint32_t>>(4, 1), [] { return true; }),
         "Cancelled freeze does not publish partial labels");
+    auto signedLabels=std::make_unique<std::vector<std::int32_t>>(
+        std::initializer_list<std::int32_t>{0, 4, 2, 1});
+    const auto* signedAddress=signedLabels->data();
+    auto resultLabels=LabelMapBuilder::Build(ownedGrid,std::move(signedLabels),nullptr,
+        "GapAnalysis.labels","Gap analysis");
+    auto parentLabels=LabelMapBuilder::ShareFrozen(resultLabels,
+        "GapAnalysis.parent-labels","Gap parent detection");
+    check(resultLabels && parentLabels && resultLabels->GetValueData()==signedAddress
+        && parentLabels->GetValueData()==signedAddress
+        && resultLabels->GetId()=="GapAnalysis.labels"
+        && parentLabels->GetId()=="GapAnalysis.parent-labels"
+        && parentLabels->GetDisplayName()=="Gap parent detection"
+        && parentLabels->GetScalarRange()==std::array<double,2>{0,4},
+        "Signed result and parent labels share frozen storage with independent identities");
+    resultLabels.reset();
+    check(parentLabels && static_cast<const std::int32_t*>(parentLabels->GetValueData())[1]==4,
+        "Parent frozen labels outlive the independently released result payload");
     // 独立全网格参考用例：投影端点和体素后求线段距离，不使用候选包围范围。
     // 重点检出局部化遗漏：斜切片、非零extent、各向异性、反射/旋转direction和离面笔迹。
     for (int variant = 0; variant < 4; ++variant) {

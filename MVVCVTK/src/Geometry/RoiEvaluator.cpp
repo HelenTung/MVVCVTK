@@ -1,9 +1,6 @@
 #include "Geometry/RoiEvaluator.h"
-#include "Data/Internal/ReadBudget.h"
 
 #include <algorithm>
-#include <atomic>
-#include <thread>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -203,7 +200,7 @@ void AddBoxPlanes(std::vector<RoiPlane>& planes, const Matrix& inverse,
     }
 }
 
-class RoiView final : public RoiReadView {
+class RoiView final : public RoiReadView, public std::enable_shared_from_this<RoiView> {
 public:
     RoiView(DataSnapshot roi, DataSnapshot source, const RoiEvaluator::DataLookup& getData)
         : m_revision(roi->self), m_definition(dynamic_cast<const RoiGeometryPayload&>(*roi->payload).GetDefinition())
@@ -231,7 +228,6 @@ public:
         }
         if (!GetFinite(m_bounds)) throw std::runtime_error("Invalid source domain.");
         m_prepared.resize(m_definition.nodes.size());
-        if(m_definition.nodes.size()>128)m_scratch.resize(m_definition.nodes.size());
         m_planes.error=m_image && m_image->GetValidityMask()?RoiError::UnsupportedRoi:RoiError::None;
         for (std::size_t i=0;i<m_definition.nodes.size();++i) {
             const auto& node=m_definition.nodes[i];
@@ -337,19 +333,30 @@ public:
     const std::vector<DataRevisionRef>& GetDependencies() const noexcept override { return m_dependencies; }
     std::array<double,6> GetBounds() const noexcept override { return m_bounds; }
     RoiPlanesResult GetClipPlanes() const override { return m_planes; }
-    RoiTriangleSelection GetTriangleSelection(const std::array<Point,3>& triangle,std::size_t maxBytes,double tolerance,std::function<bool()> cancelled) const override
+    RoiTriangleSelection GetTriangleSelection(const RoiTriangle& triangle,double tolerance,std::function<bool()> cancelled) const override
+    {
+        std::vector<RoiTriangle> triangles;
+        auto result=GetTriangleChunks(triangle,1024,[&](const auto& batch){triangles.insert(triangles.end(),batch.begin(),batch.end());return true;},tolerance,std::move(cancelled));
+        if(result.error==RoiError::None)result.triangles=std::move(triangles);
+        return result;
+    }
+    RoiTriangleSelection GetTriangleChunks(const RoiTriangle& triangle,std::size_t chunkTriangles,
+        const RoiTriangleCallback& onTriangles,double tolerance,std::function<bool()> cancelled) const override
     {
         RoiTriangleSelection result;
-        maxBytes=GetReadBudget(maxBytes);
+        if(!chunkTriangles || !onTriangles){result.error=RoiError::InvalidRequest;return result;}
+        const auto flush=[&]{if(result.triangles.empty())return true;const bool accepted=onTriangles(result.triangles);result.triangles.clear();return accepted;};
+        const auto emit=[&](RoiTriangle piece){result.triangles.push_back(std::move(piece));return result.triangles.size()<chunkTriangles || flush();};
         if (!std::isfinite(tolerance) || tolerance<0) {result.error=RoiError::InvalidRequest;return result;}
         try {if(cancelled && cancelled()){result.error=RoiError::Cancelled;return result;}}
         catch(...){result.error=RoiError::Cancelled;return result;}
         if (m_planes.error==RoiError::None) {
-            const auto polygon=GetClippedTriangle(triangle,maxBytes);result.error=polygon.error;
-            if(polygon.error==RoiError::None && polygon.points.size()>2 && (polygon.points.size()-2)>maxBytes/(sizeof(Point)*3)){result.error=RoiError::TooLarge;return result;}
+            const auto polygon=GetClippedTriangle(triangle);result.error=polygon.error;
             try {if (polygon.error==RoiError::None) for (std::size_t i=2;i<polygon.points.size();++i)
-                result.triangles.push_back({polygon.points[0],polygon.points[i-1],polygon.points[i]});}
-            catch(...){result.triangles.clear();result.error=RoiError::TooLarge;}
+                if(!emit({polygon.points[0],polygon.points[i-1],polygon.points[i]})){result.error=RoiError::Cancelled;break;}
+                if(result.error==RoiError::None && !flush())result.error=RoiError::Cancelled;}
+            catch(const std::bad_alloc&){result.triangles.clear();result.error=RoiError::TooLarge;}
+            catch(...){result.triangles.clear();result.error=RoiError::InvalidRequest;}
             return result;
         }
         if (!std::isfinite(tolerance) || tolerance<0) {result.error=RoiError::InvalidRequest;return result;}
@@ -388,6 +395,7 @@ public:
         if (refine>static_cast<double>(std::numeric_limits<int>::max())) {result.error=RoiError::TooLarge;return result;}
         const int divisions=static_cast<int>(refine);result.boundaryTolerance=analytic ? diagonal/divisions:0;
         try {
+            const auto prepared=GetQuery();if(prepared.error!=RoiError::None){result.error=prepared.error;return result;}
             std::array<Point,3> indexed{};for (int i=0;i<3;++i) indexed[i]=Transform(sourceToIndex,triangle[i]);
             std::array<double,6> roiIndex{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
             for(int a=0;a<3;++a)if(m_bounds[a*2]>m_bounds[a*2+1]){result.error=RoiError::None;return result;}
@@ -419,7 +427,7 @@ public:
                         low[a]=std::max(low[a],static_cast<double>(grid.extent[a*2]));high[a]=std::min(high[a],static_cast<double>(grid.extent[a*2+1]));
                         center[a]=(low[a]+high[a])*0.5;if (low[a]>high[a]) overlaps=false;
                     }
-                    if (!overlaps || !GetContains(Transform(indexMatrix,center))) continue;
+                    if (!overlaps || !prepared.query->GetContains(Transform(indexMatrix,center))) continue;
                     std::vector<Point> polygon(indexed.begin(),indexed.end()),next;
                     for (int axis=0;axis<3 && !polygon.empty();++axis) for (int side=0;side<2;++side) {
                         if (polygon.empty()) break;next.clear();Point previous=polygon.back();
@@ -438,22 +446,21 @@ public:
                         std::array<Point,3> piece{Transform(indexMatrix,polygon[0]),Transform(indexMatrix,polygon[i-1]),Transform(indexMatrix,polygon[i])};
                         const Point a{piece[1][0]-piece[0][0],piece[1][1]-piece[0][1],piece[1][2]-piece[0][2]},b{piece[2][0]-piece[0][0],piece[2][1]-piece[0][1],piece[2][2]-piece[0][2]};
                         if (std::hypot(a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])==0) continue;
-                        if (result.triangles.size()>=maxBytes/sizeof(piece)) {result.triangles.clear();result.error=RoiError::TooLarge;return result;}
-                        result.triangles.push_back(std::move(piece));
+                        if(!emit(std::move(piece))){result.triangles.clear();result.error=RoiError::Cancelled;return result;}
                     }
                 }
             }
-            result.error=RoiError::None;
-        } catch (...) {result.triangles.clear();result.error=RoiError::TooLarge;}
+            result.error=flush()?RoiError::None:RoiError::Cancelled;
+        } catch (const std::bad_alloc&) {result.triangles.clear();result.error=RoiError::TooLarge;}
+        catch (...) {result.triangles.clear();result.error=RoiError::InvalidRequest;}
         return result;
     }
-    RoiPolygonResult GetClippedTriangle(const std::array<Point,3>& triangle,std::size_t maxBytes) const override
+    RoiPolygonResult GetClippedTriangle(const std::array<Point,3>& triangle) const override
     {
         RoiPolygonResult result;
         if (m_planes.error!=RoiError::None) return result;
         for (const auto& p:triangle) if (!GetFinite(p)) { result.error=RoiError::InvalidGeometry; return result; }
         result.requiredBytes=(m_planes.planes.size()+3)*sizeof(Point)*2;
-        if (result.requiredBytes>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
         try {
             std::vector<Point> polygon(triangle.begin(),triangle.end()), next;
             polygon.reserve(m_planes.planes.size()+3); next.reserve(m_planes.planes.size()+3);
@@ -481,7 +488,11 @@ public:
     }
     double GetBoundaryDistance(const Point& p) const noexcept override
     {
-        if (m_planes.error!=RoiError::None || !GetContains(p)) return NAN;
+        if(m_planes.error!=RoiError::None)return NAN;
+        Point index{};if(!GetSourceContains(p,index))return NAN;
+        // 凸定义只有交集，逐叶检查保留原成员容差，不需要表达式工作区。
+        for(std::size_t i=0;i<m_definition.nodes.size();++i)
+            if(m_definition.nodes[i].kind==RoiNodeKind::Primitive && !GetPrimitiveContains(i,p,index))return NAN;
         double distance=INFINITY;
         for (const auto& plane:m_planes.planes) {
             const Point offset{p[0]-plane.origin[0],p[1]-plane.origin[1],p[2]-plane.origin[2]};
@@ -489,10 +500,9 @@ public:
         }
         return distance;
     }
-    bool GetContains(const Point& p) const noexcept override
+    bool GetSourceContains(const Point& p,Point& index) const noexcept
     {
         if (!GetFinite(p)) return false;
-        Point index{};
         if (m_image) {
             index=Transform(m_sourceToIndex,p);
             const auto& extent=m_image->GetGeometry().extent;
@@ -505,49 +515,36 @@ public:
         } else {
             for (int a=0;a<3;++a) if (p[a]<m_bounds[a*2] || p[a]>m_bounds[a*2+1]) return false;
         }
-        // 定义已验证为拓扑有序；每个读取项都已在本轮写入。
-        // 常用定义使用栈上工作区；长历史的工作区在构建读取快照时分配，读取失败不能被解释为空。
-        std::array<std::uint8_t,128> local{};
-        struct Lock {std::atomic_flag* flag=nullptr;~Lock(){if(flag)flag->clear(std::memory_order_release);}} lock;
-        auto* values=local.data();
-        if(m_definition.nodes.size()>local.size()){
-            while(m_scratchBusy.test_and_set(std::memory_order_acquire))std::this_thread::yield();
-            lock.flag=&m_scratchBusy;values=m_scratch.data();
-        }
-        for (std::size_t i=0;i<m_definition.nodes.size();++i) {
-            const auto& node=m_definition.nodes[i];
-            switch (node.kind) {
-            case RoiNodeKind::Empty: values[i]=false; break;
-            case RoiNodeKind::SourceDomain: values[i]=true; break;
-            case RoiNodeKind::Union: values[i]=values[node.left]||values[node.right]; break;
-            case RoiNodeKind::Intersection: values[i]=values[node.left]&&values[node.right]; break;
-            case RoiNodeKind::Difference: values[i]=values[node.left]&&!values[node.right]; break;
-            case RoiNodeKind::Primitive: {
+        return true;
+    }
+    bool GetPrimitiveContains(std::size_t i,const Point& p,const Point& index) const noexcept
+    {
+        const auto& node=m_definition.nodes[i];bool contains=false;
                 const auto& primitive=node.primitive;
                 if (primitive.shape==RoiShape::Box) {
                     const auto local=Transform(m_prepared[i].inverse,p);
                     const double edge=primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? 1+1e-6:1+1e-12;
-                    values[i]=GetFinite(local) && std::abs(local[0])<=edge
+                    contains=GetFinite(local) && std::abs(local[0])<=edge
                         && std::abs(local[1])<=edge && std::abs(local[2])<=edge;
                 } else if (primitive.shape==RoiShape::HalfSpace) {
                     const double distance=Dot(m_prepared[i].normal,{p[0]-primitive.origin[0],p[1]-primitive.origin[1],p[2]-primitive.origin[2]});
-                    values[i]=primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? distance>0:distance>=0;
+                    contains=primitive.boundaryPolicy==RoiBoundaryPolicy::CropV1 ? distance>0:distance>=0;
                 } else if (primitive.shape==RoiShape::Sphere || primitive.shape==RoiShape::Cylinder) {
                     const Point offset{p[0]-primitive.origin[0],p[1]-primitive.origin[1],p[2]-primitive.origin[2]};
-                    if (primitive.shape==RoiShape::Sphere) values[i]=std::hypot(offset[0],offset[1],offset[2])<=primitive.radius;
+                    if (primitive.shape==RoiShape::Sphere) contains=std::hypot(offset[0],offset[1],offset[2])<=primitive.radius;
                     else {
                         const auto& axis=m_prepared[i].normal; const double axial=Dot(offset,axis);
-                        values[i]=std::abs(axial)<=primitive.height*0.5
+                        contains=std::abs(axial)<=primitive.height*0.5
                             && std::hypot(offset[0]-axial*axis[0],offset[1]-axial*axis[1],offset[2]-axial*axis[2])<=primitive.radius;
                     }
                 } else if (primitive.shape==RoiShape::Ellipsoid) {
                     const auto local=Transform(m_prepared[i].inverse,p);
-                    values[i]=Dot(local,local)<=1;
+                    contains=Dot(local,local)<=1;
                 } else if(primitive.shape==RoiShape::EllipticCylinder){
-                    const auto local=Transform(m_prepared[i].inverse,p);values[i]=local[0]*local[0]+local[1]*local[1]<=1 && local[2]>=primitive.depth[0] && local[2]<=primitive.depth[1];
+                    const auto local=Transform(m_prepared[i].inverse,p);contains=local[0]*local[0]+local[1]*local[1]<=1 && local[2]>=primitive.depth[0] && local[2]<=primitive.depth[1];
                 } else if (primitive.shape==RoiShape::Contour) {
                     const auto local=Transform(m_prepared[i].inverse,p);
-                    values[i]=local[2]>=primitive.depth[0] && local[2]<=primitive.depth[1]
+                    contains=local[2]>=primitive.depth[0] && local[2]<=primitive.depth[1]
                         && GetContourContains(primitive,{local[0],local[1]});
                 } else if (primitive.shape==RoiShape::ProjectedContour) {
                     const auto view=Transform(primitive.sourceToView,p);
@@ -556,11 +553,11 @@ public:
                     const double x=m[0]*view[0]+m[1]*view[1]+m[2]*view[2]+m[3];
                     const double y=m[4]*view[0]+m[5]*view[1]+m[6]*view[2]+m[7];
                     const double z=m[8]*view[0]+m[9]*view[1]+m[10]*view[2]+m[11];
-                    values[i]=w>0 && std::abs(x)<=w && std::abs(y)<=w && std::abs(z)<=w
+                    contains=w>0 && std::abs(x)<=w && std::abs(y)<=w && std::abs(z)<=w
                         && -view[2]/std::hypot(primitive.sourceToView[8],primitive.sourceToView[9],primitive.sourceToView[10])>=primitive.depth[0] && -view[2]/std::hypot(primitive.sourceToView[8],primitive.sourceToView[9],primitive.sourceToView[10])<=primitive.depth[1]
                         && GetContourContains(primitive,{x/w,y/w});
                 } else if (primitive.shape==RoiShape::Brush) {
-                    values[i]=false;
+                    contains=false;
                     const auto point=primitive.height>0 ? Transform(m_prepared[i].inverse,p):p;
                     for (std::size_t k=0;k<primitive.path.size();++k) {
                         auto a=primitive.path[k ? k-1:0], b=primitive.path[k];
@@ -569,8 +566,8 @@ public:
                         Point d{b[0]-a[0],b[1]-a[1],primitive.height>0 ? 0:b[2]-a[2]};
                         Point q{point[0]-a[0],point[1]-a[1],primitive.height>0 ? 0:point[2]-a[2]};
                         const double t=Dot(d,d)>0 ? std::clamp(Dot(q,d)/Dot(d,d),0.0,1.0):0;
-                        values[i]=std::hypot(q[0]-t*d[0],q[1]-t*d[1],q[2]-t*d[2])<=primitive.radius;
-                        if (values[i]) break;
+                        contains=std::hypot(q[0]-t*d[0],q[1]-t*d[1],q[2]-t*d[2])<=primitive.radius;
+                        if (contains) break;
                     }
                 } else {
                     const auto& grid=m_image->GetGeometry();
@@ -584,23 +581,49 @@ public:
                         stride*=static_cast<std::size_t>(grid.dimensions[a]);
                     }
                     const auto label=primitive.shape==RoiShape::VoxelSet ? primitive.voxels->GetLabel(voxel):GetMaskValue(m_prepared[i].mask,offset);
-                    values[i]=GetSelectedLabel(label,primitive.labels);
+                    contains=GetSelectedLabel(label,primitive.labels);
                 }
-                break;
-            }
+        return contains;
+    }
+    RoiQueryResult GetQuery() const override
+    {
+        try{return {RoiError::None,std::make_unique<Query>(shared_from_this())};}
+        catch(const std::bad_alloc&){return {RoiError::TooLarge,{}};}
+        catch(...){return {RoiError::Unavailable,{}};}
+    }
+    bool GetContains(const Point& p) const override
+    {
+        std::array<std::uint8_t,128> local{};
+        if(m_definition.nodes.size()<=local.size())return GetContains(p,local.data());
+        std::vector<std::uint8_t> scratch(m_definition.nodes.size());
+        return GetContains(p,scratch.data());
+    }
+    bool GetContains(const Point& p,std::uint8_t* values) const noexcept
+    {
+        Point index{};if(!GetSourceContains(p,index))return false;
+        // 定义已验证为拓扑有序，工作区由当前调用者独占。
+        for (std::size_t i=0;i<m_definition.nodes.size();++i) {
+            const auto& node=m_definition.nodes[i];
+            switch (node.kind) {
+            case RoiNodeKind::Empty: values[i]=false; break;
+            case RoiNodeKind::SourceDomain: values[i]=true; break;
+            case RoiNodeKind::Union: values[i]=values[node.left]||values[node.right]; break;
+            case RoiNodeKind::Intersection: values[i]=values[node.left]&&values[node.right]; break;
+            case RoiNodeKind::Difference: values[i]=values[node.left]&&!values[node.right]; break;
+            case RoiNodeKind::Primitive:values[i]=GetPrimitiveContains(i,p,index);break;
             }
         }
         return values[m_definition.nodes.size()-1];
     }
-    RoiPointsResult GetPoints(const std::vector<Point>& points,std::size_t maxBytes) const override
+    RoiPointsResult GetPoints(const std::vector<Point>& points) const override
     {
         RoiPointsResult result;
         result.requiredBytes=points.size();
-        if (points.size()>std::min(maxBytes,roiCopyLimit)) { result.error=RoiError::TooLarge; return result; }
         if (std::any_of(points.begin(),points.end(),[](const Point& p){return !GetFinite(p);})) return result;
         try {
+            const auto prepared=GetQuery();if(prepared.error!=RoiError::None){result.error=prepared.error;return result;}
             result.values.reserve(points.size());
-            for (const auto& p:points) result.values.push_back(GetContains(p)?1:0);
+            for (const auto& p:points) result.values.push_back(prepared.query->GetContains(p)?1:0);
             result.error=RoiError::None;
         } catch (...) { result.values.clear(); result.error=RoiError::TooLarge; }
         return result;
@@ -618,10 +641,11 @@ public:
                 || count>std::numeric_limits<std::size_t>::max()/request.region.size[a]) return result;
             count*=request.region.size[a];
         }
-        if (request.voxelOffset>count || request.maxBytes==0) return result;
-        const auto bytes=std::min({count-request.voxelOffset,request.maxBytes,roiCopyLimit});
+        if (request.voxelOffset>count || request.chunkBytes==0) return result;
+        const auto bytes=std::min(count-request.voxelOffset,request.chunkBytes);
         result.requiredBytes=bytes;
         try {
+            const auto prepared=GetQuery();if(prepared.error!=RoiError::None){result.error=prepared.error;return result;}
             result.values.resize(bytes);
             for (std::size_t i=0;i<bytes;++i) {
                 const auto offset=request.voxelOffset+i;
@@ -635,7 +659,7 @@ public:
                 Point index{static_cast<double>(grid.extent[0])+static_cast<double>(request.region.offset[0]+x),
                     static_cast<double>(grid.extent[2])+static_cast<double>(request.region.offset[1]+y),
                     static_cast<double>(grid.extent[4])+static_cast<double>(request.region.offset[2]+z)};
-                result.values[i]=GetContains(Transform(m_indexMatrix,index))?1:0;
+                result.values[i]=prepared.query->GetContains(Transform(m_indexMatrix,index))?1:0;
             }
             if (request.getCancelled && request.getCancelled()) { result.values.clear(); result.error=RoiError::Cancelled; return result; }
             result.error=RoiError::None;
@@ -649,8 +673,17 @@ private:
     struct Prepared final { Matrix inverse=roiIdentityMatrix; Point normal{}; DataSnapshot mask; };
     DataRevisionRef m_revision;
     RoiDefinition m_definition;
-    mutable std::vector<std::uint8_t> m_scratch;
-    mutable std::atomic_flag m_scratchBusy=ATOMIC_FLAG_INIT;
+    class Query final : public RoiQuery {
+    public:
+        explicit Query(std::shared_ptr<const RoiView> view):m_view(std::move(view))
+        {if(m_view->m_definition.nodes.size()>m_local.size())m_scratch.resize(m_view->m_definition.nodes.size());}
+        bool GetContains(const Point& point) const noexcept override
+        {return m_view->GetContains(point,m_scratch.empty()?m_local.data():m_scratch.data());}
+    private:
+        std::shared_ptr<const RoiView> m_view;
+        mutable std::array<std::uint8_t,128> m_local{};
+        mutable std::vector<std::uint8_t> m_scratch;
+    };
     std::vector<Prepared> m_prepared;
     std::vector<DataRevisionRef> m_dependencies;
     std::shared_ptr<const ImageGrid3DPayload> m_image;
@@ -763,7 +796,7 @@ RoiError RoiEvaluator::GetRelationsError(const DataRevision& roi,const DataLooku
         if (!roles.insert(input.role).second) return RoiError::InvalidRequest;
         const auto found=std::find_if(expected.begin(),expected.end(),[&](const DataInputRef& item){return item.role==input.role && item.source==input.source;});
         if (found==expected.end()) {
-            if (input.role=="operation-mesh") {
+            if (input.role=="operation-mesh" || input.role.rfind("operation-mesh-",0)==0) {
                 if(!checkProvenance)continue;
                 const auto mesh=getData(input.source);
                 if (!mesh || mesh->type!=DataTypes::surfaceMesh) return RoiError::MissingInput;

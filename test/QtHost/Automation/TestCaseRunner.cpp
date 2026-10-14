@@ -54,6 +54,7 @@
 #include <cstring>
 #include <limits>
 #include <set>
+#include <cmath>
 #include <vtkCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindowInteractor.h>
@@ -1438,8 +1439,25 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
     RoiNode region;region.primitive.localToSource={5.5,0,0,15.5,0,5.5,0,15.5,0,0,15.5,15.5,0,0,0,1};evaluation.definition.nodes={region};
     const auto evaluatedRoi=window.GetSession()->SetRoi(evaluation);
     Check(evaluatedRoi.error==RoiError::None && evaluatedRoi.roi,"wall workflow saves an independent evaluation ROI");
+    GetComplete(window,Click(window,"View","Set",{{"mode","CompositeVolume"}}),"Succeeded");
+    auto* preparation=window.GetModule("Wall");
+    auto cancelledParameters=preparation->GetActionParameters("Start");cancelledParameters["directionCount"]=1;
+    const auto cancelledStart=preparation->SendAction("Start",cancelledParameters);
+    const auto cancelledPreparation=preparation->SendAction("Cancel",{{"targetRequestId","0"}});
+    GetComplete(window,cancelledPreparation,"Succeeded");GetComplete(window,cancelledStart,"Cancelled");
+    Check(window.GetSession()->GetRenderViewState({"primary-3d"})->viewMode==HostRenderMode::CompositeVolume,
+        "cancelling display preparation restores the volume after its queued mode change");
+    const auto lateStart=preparation->SendAction("Start",cancelledParameters);
+    QCoreApplication::processEvents();
+    const auto lateCancel=preparation->SendAction("Cancel",{{"targetRequestId","0"}});
+    GetComplete(window,lateCancel,"Succeeded");GetComplete(window,lateStart,"Cancelled");
+    Check(window.GetSession()->GetRenderViewState({"primary-3d"})->viewMode==HostRenderMode::CompositeVolume,
+        "cancelling an already queued view transition restores the original volume");
     const auto local = GetComplete(window, Click(window, "Wall", "Start", {{"maxBoundaryError", 0.5},
         {"directionCount",1},{"evaluationRoi",GetRefText(evaluatedRoi.roi->revision)}}), "Succeeded");
+    Check(window.GetSession()->GetRenderViewState({"primary-3d"})->viewMode==HostRenderMode::CompositeVolume
+        && local["result"].toObject()["viewRestoreSucceeded"].toBool(),
+        "completed native wall measurement restores its original volume presentation");
     GetComplete(window,Click(window,"Wall","KeepResult",{{"graphRevision",local["result"].toObject()["result"]}}),"Succeeded");
     Check(local["result"].toObject()["validCount"].toString().toULongLong()>0
         && local["result"].toObject()["algorithmVersion"]=="wall-thickness-cuda-gray-ray-field-4",
@@ -1531,6 +1549,24 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Roi","Begin",{{"name","共享区域"}}),"Succeeded");
     const auto record=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded");
     const auto ref=GetRef(record["result"].toObject()["roi"]);
+    const auto defaultImage=window.GetSession()->GetImageDescriptor();
+    const auto region=window.GetSession()->GetRoiDescriptor(ref);
+    Check(defaultImage && region && region->definition.nodes.size()==1,
+        "default region preserves a single source-relative primitive");
+    const auto& box=region->definition.nodes.front().primitive.localToSource;
+    for(int row=0;row<3;++row) {
+        double center=defaultImage->origin[row];
+        for(int axis=0;axis<3;++axis) {
+            const auto expected=defaultImage->direction[row*3+axis]*defaultImage->spacing[axis]
+                *(defaultImage->extent[2*axis+1]-defaultImage->extent[2*axis]+1)*0.25;
+            Check(std::abs(box[row*4+axis]-expected)<=1e-10,
+                "default region affine axes follow half the physical source domain");
+            center+=defaultImage->direction[row*3+axis]*defaultImage->spacing[axis]
+                *(defaultImage->extent[2*axis]+defaultImage->extent[2*axis+1])*0.5;
+        }
+        Check(std::abs(box[row*4+3]-center)<=1e-10,
+            "default region remains centered in the source coordinate frame");
+    }
     Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"saving a region preserves the business input");
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
@@ -1614,6 +1650,36 @@ void CheckSharedRoi(TestWindow& window)
         Check(descriptor && descriptor->definition.nodes.front().primitive.origin==center
             && descriptor->definition.nodes.front().primitive.radius==3.0 && descriptor->metadata.group=="曲面测试","curve editor fields save the intended source-space geometry");
     }
+    std::array<double,3> voxelCenter=image->origin;
+    for(int row=0;row<3;++row)for(int axis=0;axis<3;++axis)
+        voxelCenter[row]+=image->direction[row*3+axis]*image->spacing[axis]*((image->extent[axis*2]+image->extent[axis*2+1])/2);
+    const double angle=2*std::acos(-1.)/180.,half=.3;
+    const std::array<double,16> rotated{half*std::cos(angle),-half*std::sin(angle),0,voxelCenter[0],
+        half*std::sin(angle),half*std::cos(angle),0,voxelCenter[1],0,0,half,voxelCenter[2],0,0,0,1};
+    for(const bool apply:{false,true}){
+        GetComplete(window,Send(window,"Roi","Begin",{{"name","旋转盒候选"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
+        auto* roiPanel=window.GetModule("Roi");roiPanel->Observe();
+        Check(!roiPanel->GetObservedState()["draftParametersChanged"].toBool(),"an untouched rotated box is not an edited parameter draft");
+        GetComplete(window,Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}}),"PreviewReady");
+        if(apply)GetComplete(window,Send(window,"Roi","ApplyOperation"),"Succeeded");
+        const auto candidate=roiPanel->getGrayScope().key;
+        auto* name=roiPanel->GetParameterEditor("SetDraft")->GetField("name")->findChild<QLineEdit*>("value");
+        Check(name!=nullptr,"ROI metadata field is available");name->setText("仅改名称的旋转结果");
+        Check(roiPanel->getGrayScope().key==candidate,"metadata editing preserves the operation candidate version");
+        const auto saved=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
+        const auto descriptor=window.GetSession()->GetRoiDescriptor(GetRef(saved));
+        Check(descriptor && descriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
+            && descriptor->metadata.name=="仅改名称的旋转结果","saving an unchanged rotated tool preserves the computed region before and after applying");
+    }
+    surface->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});createRegion();
+    GetComplete(window,Send(window,"Roi","Begin",{{"name","异步业务回填"},{"shape","Box"},{"boxToSource",GetValues(rotated)}}),"Succeeded");
+    const auto operation=Send(window,"Roi","Dilate",{{"radius",2.0},{"radiusUnit","Voxels"}});
+    const auto pending=Send(window,"Roi","Commit");
+    Check(!window.GetRecords().GetRecord(pending)["isTerminal"].toBool(),"saving during the operation uses the pending completion path");
+    const auto asynchronous=GetComplete(window,pending,"Succeeded").value("result").toObject().value("roi");
+    GetComplete(window,operation,"PreviewReady");
+    Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
+        && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
 #endif
 }
 void StartSelfTest(TestWindow& window)
@@ -2403,8 +2469,24 @@ void StartSequence(TestWindow& window, const QString& path)
         if(script["checkWindowStable"].toBool() || script["checkWindowLocked"].toBool())Check(window.size()==initialWindowSize,"business operations preserve the user-selected outer window size");
         if(step["showStatistics"].toBool()) {
             auto* panel=window.GetModule(GetText(step,"module"));window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();
-            if(step["waitHistogram"].toBool())Check(Wait([&]{return !panel->GetStatisticsWidget()->GetHistogram()["counts"].toArray().isEmpty();},timeout),"real statistics histogram completes its bounded data read");
-            if(step["waitStatistics"].toBool())Check(Wait([&]{const auto data=panel->GetStatisticsWidget()->GetHistogram();return data["cacheKey"].isString() && !data["description"].toString().contains("正在读取");},timeout),"real statistics completes including a valid empty result");
+            if(step["waitHistogram"].toBool() || step["waitStatistics"].toBool()) {
+                Check(Wait([&]{
+                    const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                    const bool directReady=step["waitHistogram"].toBool()
+                        && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                        && (data["status"].isUndefined() || data["status"]=="Ready");
+                    return directReady || (data["cacheKey"].isString()
+                        && QStringList{"Ready","Empty","Failed"}.contains(data["status"].toString()));
+                },timeout),"real statistics reaches a terminal state within the bounded read");
+                const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                const bool directReady=step["waitHistogram"].toBool()
+                    && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                    && (data["status"].isUndefined() || data["status"]=="Ready");
+                Check(directReady || data["status"]=="Ready" || data["status"]=="Empty",
+                    "real statistics succeeds including a valid empty result");
+                if(step["waitHistogram"].toBool() && data["status"]=="Ready")
+                    Check(!data["counts"].toArray().isEmpty(),"ready histogram contains its declared bins");
+            }
             if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),panel->GetStatisticsWidget()->GetHistogram());
             if(step.contains("statisticsScreenshot"))Check(panel->GetStatisticsWidget()->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
             // 关闭统计窗口后继续操作视图，避免弹窗覆盖正在等待呈现的裁剪视图。
@@ -2454,9 +2536,6 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto created=window.GetSession()->SetRoi(request);
             Check(created.error==RoiError::None && created.roi,"full-grid mask ROI is created");
             const auto key=descriptors.front().datasetId;
-            const auto bounded=window.GetSession()->GetRoiArchive(created.roi->revision,key,roiCopyLimit);
-            Check(bounded.error==RoiError::TooLarge && bounded.requiredBytes>roiCopyLimit,
-                "explicit ROI archive copy limit still rejects the full-grid mask");
             const auto saved=window.GetSession()->GetRoiArchive(created.roi->revision,key);
             Check(saved.error==RoiError::None && saved.archive && saved.archive->masks.size()==1
                 && saved.archive->masks.front().values.size()==1000000000ULL,
