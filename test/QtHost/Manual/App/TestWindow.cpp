@@ -5,6 +5,7 @@
 #include "Support/UiText.h"
 #include "Support/ResultReport.h"
 #include "Support/WorkbenchStyle.h"
+#include "Support/ObjectBrowser.h"
 #include <QMenu>
 #include <QAction>
 #include <QTabWidget>
@@ -37,7 +38,7 @@ namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
     m_workflow.resources = GetTestResources(budgetMiB);
-    setWindowTitle("全功能手动测试");
+    setWindowTitle("MVVCVTK 检测工作台 V1");
     setAcceptDrops(true);
     setFont(QFont("Microsoft YaHei UI", 9));
     setStyleSheet(GetWorkbenchStyle());
@@ -46,8 +47,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     const auto available=screen ? screen->availableGeometry().size()-QSize(32,64) : QSize(1560,920);
     const auto defaultSize=QSize(1560,920).boundedTo(available);
     setMinimumSize(QSize(1100,640).boundedTo(defaultSize));
-    // Windows 的默认跟踪上限受屏幕限制；明确给宽松上限以容纳向外展开的诊断。
-    setMaximumSize(32767,32767);resize(defaultSize);
+    resize(defaultSize);
     auto* root = new QWidget(this); root->setObjectName("workbench"); auto* layout = new QVBoxLayout(root); setCentralWidget(root);
     layout->setSizeConstraint(QLayout::SetNoConstraint);
     this->layout()->setSizeConstraint(QLayout::SetNoConstraint);
@@ -66,10 +66,13 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* performance = toolMenu->addAction("开始性能采样"); performance->setCheckable(true);
     performance->setObjectName("performanceCapture");
     m_sourceButton=new QPushButton("查看来源",toolbarFrame);m_sourceButton->setObjectName("showInputSources");m_sourceButton->setEnabled(false);
+    m_originalInput=new QPushButton("返回原始输入",toolbarFrame);m_originalInput->setObjectName("useOriginalInput");m_originalInput->setEnabled(false);
     toolbar->addWidget(m_openVolume);toolbar->addWidget(m_sourceButton);toolbar->addStretch(); toolbar->addWidget(m_stop); toolbar->addWidget(showReport); toolbar->addWidget(tools); layout->addWidget(toolbarFrame);
+    toolbar->insertWidget(2,m_originalInput);
+    connect(m_originalInput,&QPushButton::clicked,this,[this]{if(!m_originalRevision.isEmpty())if(auto* page=GetModule("Data"))page->SendAction("UseData",{{"graphRevision",m_originalRevision}});});
     connect(m_sourceButton,&QPushButton::clicked,this,[this] {
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
-        if(input)if(auto* page=static_cast<ModulePanel*>(m_pages->currentWidget()))page->ShowSources(input->dataRevision);
+        if(input)if(auto* page=static_cast<ModulePanel*>(m_pages->currentWidget())){page->ShowSources(input->dataRevision);m_showStatistics->setChecked(true);m_resultTabs->setCurrentIndex(1);}
     });
     connect(m_openVolume, &QPushButton::clicked, this, [this] {
         auto* page = GetModule("Data"); if (!m_isReady || m_isClosing || !page) return;
@@ -87,6 +90,10 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_featureTabs = new QTabBar(navigation); m_featureTabs->setObjectName("featureTabs"); m_featureTabs->setMinimumHeight(40);
     m_featureTabs->setExpanding(false); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
     navigationLayout->addWidget(m_featureTabs); layout->addWidget(navigation);
+    auto* inputStrip=new QWidget(root);inputStrip->setObjectName("workbenchInput");
+    auto* inputLayout=new QVBoxLayout(inputStrip);inputLayout->setContentsMargins(8,4,8,4);inputLayout->setSpacing(2);
+    m_inputIdentity=new QLabel("当前输入 · 尚未加载体数据",inputStrip);m_inputIdentity->setObjectName("currentInputIdentity");m_inputIdentity->setWordWrap(true);inputLayout->addWidget(m_inputIdentity);
+    m_inputGeometry=new QLabel(inputStrip);m_inputGeometry->setObjectName("currentInputGeometry");m_inputGeometry->setWordWrap(true);inputLayout->addWidget(m_inputGeometry);layout->addWidget(inputStrip);
     m_measurements = new QLabel(root); m_measurements->setObjectName("businessMeasurements");
     m_measurements->setWordWrap(true); m_measurements->setMinimumWidth(0);
     m_measurements->setToolTip("内存为当前测试进程的 OS 实测值，峰值从进程启动累计。加载为请求到终态；首次绘制和逐帧耗时到 Host/VTK Render 返回，不包含 GPU 完成或屏幕呈现。分项不可相加。");
@@ -98,7 +105,26 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     connect(objectToggle,&QToolButton::toggled,this,[split,objectColumn,objectToggle,objectSizes](bool shown){if(!shown)*objectSizes=split->sizes();objectColumn->setVisible(shown);if(shown && !objectSizes->isEmpty())split->setSizes(*objectSizes);objectToggle->setText(shown?"收起对象栏":"展开对象栏");});
     auto* objectLayout = new QVBoxLayout(objectColumn); objectLayout->setContentsMargins(8,8,8,8);
     auto* objectTitle = new QLabel("对象与结果", objectColumn); objectTitle->setObjectName("columnTitle"); objectLayout->addWidget(objectTitle);
-    m_browsers = new QStackedWidget(objectColumn); objectLayout->addWidget(m_browsers,1); m_browsers->setObjectName("browserStack"); m_browsers->setMinimumWidth(220);
+    m_objects=new ObjectBrowser(objectColumn);objectLayout->addWidget(m_objects,1);
+    m_objects->onAction=[this](const QString& module,const QString& action,const QJsonObject& patch) {
+        auto* page=GetModule(module);if(!page || !page->GetActions().contains(action)){ShowMessage("当前构建未启用所选操作。");return;}
+        auto values=patch;const auto objectId=values.take("$objectId").toString();
+        if(module!="Data" && module!="Roi" && !objectId.isEmpty()) {
+            page->Observe(false);const auto state=page->GetObservedState();
+            const auto ref=objectId.section(':',1);
+            const auto expected=module=="Surface"?objectId.startsWith("surface-preview:")?state["previewRequestId"]:state["mesh"]:
+                module=="Wall"?state["result"]:module=="Gap"?state["resultSet"]:QJsonValue(QJsonValue::Undefined);
+            if(!expected.isUndefined() && expected.toString()!=ref){ShowMessage("所选对象已经变化，请刷新目录后操作。");return;}
+        }
+        if(action=="UseData" || action=="GraphInfo" || action=="SetVolumeVisible" || (action=="Visibility" && patch.contains("isVisible"))) {
+            auto params=page->GetActionParameters(action);for(auto it=values.begin();it!=values.end();++it)params[it.key()]=it.value();
+            page->SendAction(action,params);
+            if(action=="GraphInfo")if(auto* active=static_cast<ModulePanel*>(m_pages->currentWidget())) {
+                active->ShowSources(GetRef(values["graphRevision"]));m_showStatistics->setChecked(true);m_resultTabs->setCurrentIndex(1);
+            }
+        } else {page->SetParameterPatch(action,values);m_pages->setCurrentWidget(page);}
+    };
+    m_browsers = new QStackedWidget(root); m_browsers->setObjectName("browserStack");
     m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(320);
     m_pages->setObjectName("parameterPages");
     connect(m_workspaceTabs, &QTabBar::currentChanged, this, &TestWindow::SetWorkspace);
@@ -117,24 +143,21 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     viewHeading->addWidget(viewLayoutChoice); viewLayout->addLayout(viewHeading);
     auto* statisticsToggle=new QToolButton(m_viewArea);m_showStatistics=statisticsToggle;statisticsToggle->setObjectName("showBusinessStatistics");statisticsToggle->setText("统计与结果");statisticsToggle->setCheckable(true);viewHeading->addWidget(statisticsToggle);
     m_statisticsPages=new QStackedWidget(m_viewArea);m_statisticsPages->setObjectName("businessStatisticsPages");
-    auto* statisticsDialog=new QDialog(this);statisticsDialog->setObjectName("businessStatisticsDialog");statisticsDialog->setWindowTitle("当前业务统计与结果");statisticsDialog->resize(960,620);
-    auto* statisticsLayout=new QVBoxLayout(statisticsDialog);
-    m_statisticsPages->setMaximumHeight(180);
+    m_resultTabs=new QTabWidget(m_viewArea);m_resultTabs->setObjectName("workbenchResultTabs");
+    m_resultTabs->addTab(m_statisticsPages,"统计与结果");m_resultTabs->addTab(m_browsers,"来源与历史");
+    m_resultTabs->setMaximumHeight(210);
     auto* expandStatistics=new QToolButton(m_viewArea);expandStatistics->setObjectName("expandBusinessStatistics");expandStatistics->setText("放大统计");viewHeading->addWidget(expandStatistics);
-    connect(statisticsToggle,&QToolButton::toggled,this,[this,statisticsDialog](bool shown) {
+    connect(statisticsToggle,&QToolButton::toggled,this,[this](bool shown) {
         if(auto* page=static_cast<ModulePanel*>(m_pages->currentWidget())) {
-            m_statisticsPreferences[page->GetName()]=shown;m_statisticsPages->setVisible(shown);
-            if(shown)page->RefreshStatistics();else {page->GetStatisticsWidget()->Cancel();statisticsDialog->close();}
+            m_statisticsPreferences[page->GetName()]=shown;m_resultTabs->setVisible(shown);
+            if(shown)page->RefreshStatistics();else page->GetStatisticsWidget()->Cancel();
         }
     });
-    connect(expandStatistics,&QToolButton::clicked,this,[this,statisticsDialog,statisticsLayout] {
-        m_showStatistics->setChecked(true);m_statisticsPages->setMaximumHeight(16777215);
-        for(auto* module:m_modules)module->GetStatisticsWidget()->SetCompact(false);
-        statisticsLayout->addWidget(m_statisticsPages);m_statisticsPages->show();statisticsDialog->show();statisticsDialog->raise();
-    });
-    connect(statisticsDialog,&QDialog::finished,this,[this,viewLayout](int){
-        for(auto* module:m_modules)module->GetStatisticsWidget()->SetCompact(true);
-        viewLayout->addWidget(m_statisticsPages);m_statisticsPages->setMaximumHeight(180);m_statisticsPages->setVisible(m_showStatistics->isChecked());
+    expandStatistics->setCheckable(true);
+    connect(expandStatistics,&QToolButton::toggled,this,[this,expandStatistics](bool expanded) {
+        m_showStatistics->setChecked(true);m_resultTabs->setMaximumHeight(expanded?16777215:210);
+        m_resultTabs->setMinimumHeight(expanded?300:0);expandStatistics->setText(expanded?"收起放大":"放大统计");
+        for(auto* module:m_modules)module->GetStatisticsWidget()->SetCompact(!expanded);
     });
     connect(viewLayoutChoice, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this,viewLayoutChoice](int index) { SetViewLayout(viewLayoutChoice->itemData(index).toString()); });
     // 四个图像区域共用同一网格和同高标题栏；窗口缩放不改变等分关系。
@@ -142,7 +165,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     viewGrid->setContentsMargins(0,0,0,0); viewGrid->setSpacing(6);
     for (int i = 0; i < 2; ++i) { viewGrid->setRowStretch(i, 1); viewGrid->setColumnStretch(i, 1); }
     viewLayout->addLayout(viewGrid, 1);
-    viewLayout->addWidget(m_statisticsPages);m_statisticsPages->hide();
+    viewLayout->addWidget(m_resultTabs,1);m_resultTabs->hide();
     constexpr int headerHeight = 36;
     auto* primaryFrame = new QWidget(m_viewArea); auto* primaryLayout = new QVBoxLayout(primaryFrame);
     primaryLayout->setContentsMargins(0,0,0,0); primaryLayout->setSpacing(6);
@@ -158,14 +181,17 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
     window->SetAlphaBitPlanes(1); window->SetMultiSamples(0);
     auto* widget = new QVTKOpenGLNativeWidget(primaryFrame); widget->setObjectName("primary3D");
-    widget->setMinimumSize(160, 160); widget->setRenderWindow(window); primaryLayout->addWidget(widget, 1);
+    widget->setMinimumSize(160, 96); widget->setRenderWindow(window); primaryLayout->addWidget(widget, 1);
     m_views.push_back({"primary-3d", widget, window, primaryFrame}); widget->installEventFilter(this);
     const QStringList sliceIds{"slice-top-down", "slice-front-back", "slice-left-right"};
     const QStringList sliceLabels{"上下切片", "前后切片", "左右切片"};
     for (int index = 0; index < 3; ++index) {
         auto* frame = new QWidget(m_viewArea); auto* frameLayout = new QVBoxLayout(frame);
         frameLayout->setContentsMargins(0,0,0,0); frameLayout->setSpacing(6);
-        auto* header = new QLabel(sliceLabels[index], frame); header->setObjectName("viewHeader"); header->setFixedHeight(headerHeight); frameLayout->addWidget(header);
+        auto* header = new QWidget(frame); header->setObjectName("viewHeader");header->setFixedHeight(headerHeight);
+        auto* sliceToolbar=new QHBoxLayout(header);sliceToolbar->setContentsMargins(0,0,0,0);sliceToolbar->addWidget(new QLabel(sliceLabels[index],header));sliceToolbar->addStretch();
+        auto* sliceFit=new QPushButton("适配",header);sliceFit->setObjectName("fit_"+sliceIds[index]);sliceToolbar->addWidget(sliceFit);
+        connect(sliceFit,&QPushButton::clicked,this,[this,id=sliceIds[index]]{if(m_isReady)if(auto* page=GetModule("View"))page->SendAction("Reset",{{"viewId",id}});});frameLayout->addWidget(header);
         viewGrid->addWidget(frame, (index+1)/2, (index+1)%2);
         auto sliceWindow = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New(); sliceWindow->SetAlphaBitPlanes(1); sliceWindow->SetMultiSamples(0);
         auto* slice = new QVTKOpenGLNativeWidget(frame); slice->setObjectName(sliceIds[index]); slice->setMinimumSize(160,96);
@@ -201,25 +227,15 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* diagnosticDetails = new QWidget(root); diagnosticDetails->setObjectName("diagnosticDetails");
     auto* diagnosticLayout = new QVBoxLayout(diagnosticDetails); diagnosticLayout->setContentsMargins(0,0,0,0);
     diagnosticLayout->addWidget(m_measurements);
-    m_inputIdentity=new QLabel("当前输入 · 尚未加载体数据",diagnosticDetails);m_inputIdentity->setObjectName("currentInputIdentity");m_inputIdentity->setWordWrap(true);diagnosticLayout->addWidget(m_inputIdentity);
-    m_inputGeometry=new QLabel(diagnosticDetails);m_inputGeometry->setObjectName("currentInputGeometry");m_inputGeometry->setWordWrap(true);diagnosticLayout->addWidget(m_inputGeometry);
     m_log = new QPlainTextEdit(diagnosticDetails); m_log->setReadOnly(true); m_log->setMaximumBlockCount(1000); m_log->setMaximumHeight(120);
-    diagnosticLayout->addWidget(m_log); layout->addWidget(diagnosticDetails); diagnosticDetails->hide();
+    diagnosticLayout->addWidget(m_log);m_resultTabs->addTab(diagnosticDetails,"诊断");
+    diagnosticDetails->hide();
     auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("运行结果报告"); reports->resize(940,620);
     auto* reportLayout = new QVBoxLayout(reports); reportLayout->setContentsMargins(8,8,8,8);
     m_report = new ResultReport(reports); reportLayout->addWidget(m_report);
-    auto diagnosticFromMaximized=std::make_shared<bool>(false);auto normalGeometryBeforeDiagnostics=std::make_shared<QRect>();auto expandedDiagnosticGeometry=std::make_shared<QRect>();
-    connect(logToggle, &QToolButton::toggled, this, [this,diagnosticDetails,logToggle,layout,split,diagnosticFromMaximized,normalGeometryBeforeDiagnostics,expandedDiagnosticGeometry](bool visible) {
-        const bool restoreMaximized=!visible && *diagnosticFromMaximized && geometry()==*expandedDiagnosticGeometry;
-        if(visible){*diagnosticFromMaximized=isMaximized();*normalGeometryBeforeDiagnostics=normalGeometry();}
-        if(isMaximized()){const auto before=size();showNormal();resize(before);layout->activate();}
-        const auto outerHeight=height();const auto extra=(visible?diagnosticDetails->sizeHint().height():diagnosticDetails->height())+layout->spacing();
-        diagnosticDetails->setVisible(visible);resize(width(),height()+(visible?extra:-extra));layout->activate();
-        // 首次显示后按实际布局高度补偿；隐藏时扣除同一块空间。
-        this->layout()->activate();layout->activate();
-        const auto desiredHeight=outerHeight+(visible?diagnosticDetails->height()+layout->spacing():-extra);
-        if(height()!=desiredHeight){resize(width(),desiredHeight);this->layout()->activate();layout->activate();}
-        if(visible)*expandedDiagnosticGeometry=geometry();else if(restoreMaximized){setGeometry(*normalGeometryBeforeDiagnostics);showMaximized();}
+    connect(logToggle, &QToolButton::toggled, this, [this,logToggle](bool visible) {
+        if(visible){m_showStatistics->setChecked(true);m_resultTabs->setCurrentIndex(2);}
+        else if(m_resultTabs->currentIndex()==2)m_resultTabs->setCurrentIndex(0);
         logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
     connect(showReport,&QPushButton::clicked,this,[reports]{reports->show();reports->raise();reports->activateWindow();});
@@ -300,13 +316,20 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
 void TestWindow::SetWorkspace(int index)
 {
     if (m_isClosing || index < 0 || index >= m_workspaceSelections.size()) return;
-    if (auto* page = GetModule(m_workspaceSelections[index])) m_pages->setCurrentWidget(page);
+    const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
+    auto* page=GetModule(m_workspaceSelections[index]);
+    if(!page || page->GetActions().isEmpty())for(const auto& id:groups[index])if(auto* available=GetModule(id))if(!available->GetActions().isEmpty()){page=available;break;}
+    if(page && !page->GetActions().isEmpty())m_pages->setCurrentWidget(page);
 }
 void TestWindow::SyncNavigation()
 {
     if (m_isClosing || m_modules.empty()) return;
     auto* page = static_cast<ModulePanel*>(m_pages->currentWidget()); if (!page) return;
-    const std::vector<QStringList> groups{{"Data", "View", "Rotation"}, {"Artifact", "Roi", "Crop", "Part", "Surface"}, {"Alignment", "Wall", "Gap"}};
+    const std::vector<QStringList> groups{{"Data", "View", "Rotation"}, {"Roi", "Crop", "Artifact", "Part", "Surface"}, {"Alignment", "Wall", "Gap"}};
+    for(int i=0;i<static_cast<int>(groups.size());++i) {
+        const bool enabled=std::any_of(groups[i].cbegin(),groups[i].cend(),[this](const QString& id){const auto* module=GetModule(id);return module && !module->GetActions().isEmpty();});
+        m_workspaceTabs->setTabEnabled(i,enabled);
+    }
     int workspace = -1;
     for (int i = 0; i < static_cast<int>(groups.size()); ++i) if (groups[i].contains(page->GetName())) workspace = i;
     if (workspace < 0) return;
@@ -315,7 +338,7 @@ void TestWindow::SyncNavigation()
     QStringList current;
     for (int i = 0; i < m_featureTabs->count(); ++i) current.append(m_featureTabs->tabData(i).toString());
     QStringList expected;
-    for(const auto& id:QStringList{"Data","View","Rotation","Artifact","Roi","Crop","Part","Surface","Alignment","Wall","Gap"})if(GetModule(id))expected.append(id);
+    for(const auto& id:groups[workspace])if(auto* module=GetModule(id))if(!module->GetActions().isEmpty())expected.append(id);
     if (current.size() != expected.size() || !std::equal(current.cbegin(), current.cend(), expected.cbegin())) {
         while (m_featureTabs->count()) m_featureTabs->removeTab(0);
         for (const auto& id : expected) {
@@ -326,13 +349,14 @@ void TestWindow::SyncNavigation()
     m_browsers->setCurrentWidget(page->GetBrowser());
     m_statisticsPages->setCurrentWidget(page->GetStatisticsWidget());
     for(auto* module:m_modules)if(module!=page)module->GetStatisticsWidget()->Cancel();
-    const bool statistics=m_statisticsPreferences.value(page->GetName(),page->GetName()!="Rotation" && !page->GetActions().isEmpty());
-    {const QSignalBlocker blocker(m_showStatistics);m_showStatistics->setChecked(statistics);}m_statisticsPages->setVisible(statistics);
+    const bool statistics=m_statisticsPreferences.value(page->GetName(),GetSession()->GetImageDescriptor().has_value() && page->GetName()!="Rotation" && !page->GetActions().isEmpty());
+    {const QSignalBlocker blocker(m_showStatistics);m_showStatistics->setChecked(statistics);}m_resultTabs->setVisible(statistics);
     if(!statistics)page->GetStatisticsWidget()->Cancel();
     if(page->GetName()=="Crop" && m_workflow.ensureCropViews)m_workflow.ensureCropViews();
     if (m_isReady) {
         page->Observe(); AppendLog("切换功能：" + page->GetDisplayName());
         if (!page->GetNotice().isEmpty()) AppendLog(page->GetNotice());
+        RefreshObjects();
     }
 }
 void TestWindow::SetViewLayout(const QString& mode)
@@ -386,10 +410,20 @@ void TestWindow::UpdateInputIdentity()
     const auto session=m_runtime.GetSession();
     const auto input=session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{};
     m_sourceButton->setEnabled(input.has_value());
-    if(!input){m_inputIdentity->setText("当前输入 · 尚未加载体数据");m_inputGeometry->clear();m_messageData->setText("数据 · 尚未加载体数据");m_inputSummary.clear();return;}
+    if(!input){m_inputIdentity->setText("当前输入 · 尚未加载体数据");m_inputGeometry->clear();m_messageData->setText("数据 · 尚未加载体数据");m_inputSummary.clear();m_originalRevision.clear();m_originalInput->setEnabled(false);return;}
     const auto ref=GetRefText(input->dataRevision);
     QString kind="原始体数据", domain="源图像有效域"; QStringList parents;
     const auto graph=m_workflow.getPublishedGraph ? m_workflow.getPublishedGraph() : QJsonObject{};
+    QMap<QString,QJsonObject> volumes;for(const auto value:graph["nodes"].toArray())if(value.toObject()["isVolume"].toBool())volumes[value.toObject()["ref"].toString()]=value.toObject();
+    QSet<QString> visited,originals;QStringList pending{ref};
+    for(int i=0;i<pending.size();++i) {
+        const auto revision=pending[i];if(visited.contains(revision) || !volumes.contains(revision))continue;visited.insert(revision);
+        const auto node=volumes.value(revision);bool hasSource=false;
+        for(const auto parent:node["parents"].toArray())if(volumes.contains(parent.toString())){hasSource=true;pending.append(parent.toString());}
+        if(!hasSource)originals.insert(revision);
+    }
+    m_originalRevision=originals.size()==1?*originals.cbegin():QString();m_originalInput->setEnabled(!m_isClosing && !m_originalRevision.isEmpty() && m_originalRevision!=ref);
+    m_originalInput->setToolTip("只切换工作输入，保留正式结果与分支历史。\n"+m_originalRevision);
     for(const auto value:graph["nodes"].toArray()) {
         const auto node=value.toObject(); if(node["ref"]!=ref) continue;
         const auto producer=node["producer"].toString();
@@ -402,8 +436,9 @@ void TestWindow::UpdateInputIdentity()
     m_inputIdentity->setText(title);
     m_inputIdentity->setToolTip("实际输入修订："+ref+"\n来源："+parents.join("\n")+"\n"+QString::fromStdString(input->metadata.source.uri));
     const auto bytes=input->metadata.source.byteSize;
-    const auto geometry=QString("网格 %1 × %2 × %3 · 间距 %4 × %5 × %6 mm · 原始灰度 · 有效域：%7")
-        .arg(input->dims[0]).arg(input->dims[1]).arg(input->dims[2]).arg(input->spacing[0]).arg(input->spacing[1]).arg(input->spacing[2]).arg(domain);
+    const auto geometry=QString("网格 %1 × %2 × %3 · 间距 %4 × %5 × %6 mm · RAS · %8 · 灰度单位 %9 · 有效域：%7")
+        .arg(input->dims[0]).arg(input->dims[1]).arg(input->dims[2]).arg(input->spacing[0]).arg(input->spacing[1]).arg(input->spacing[2]).arg(domain)
+        .arg(input->valueType==ImageValueType::Float32?QString("Float32"):QString("%1 字节标量").arg(input->componentBytes)).arg(QString::fromStdString(input->metadata.scalar.unit));
     m_inputGeometry->setText(geometry+QString(" · 数据 %1 字节 · 输入绑定版本 %2").arg(bytes).arg(input->bindingRevision));
     const auto summary=QString("数据 · %1 · %2 · %3 × %4 × %5 · %6 GiB · 间距 %7 × %8 × %9 mm")
         .arg(kind,QString::fromStdString(input->metadata.identity.datasetId)).arg(input->dims[0]).arg(input->dims[1]).arg(input->dims[2]).arg(bytes/(1024.*1024.*1024.),0,'f',2).arg(input->spacing[0]).arg(input->spacing[1]).arg(input->spacing[2]);
@@ -428,7 +463,30 @@ void TestWindow::QueueObserve()
             const TestTiming moduleTiming(m_records, "Observe." + panel->GetName());
             panel->Observe(active);
         }
+        RefreshObjects();
     }, Qt::QueuedConnection);
+}
+void TestWindow::RefreshObjects()
+{
+    if(!m_isReady || m_isClosing || !m_objects)return;
+    QJsonArray regions,nodes;std::vector<QJsonArray> projections;
+    const auto session=GetSession();const auto input=session->GetImageDescriptor();
+    for(const auto& roi:session->GetRoiDescriptors(true))regions.append(QJsonObject{
+        {"roi",GetRefText(roi.revision)},{"name",QString::fromStdString(roi.metadata.name)},
+        {"group",QString::fromStdString(roi.metadata.group)},{"description",QString::fromStdString(roi.metadata.description)},
+        {"isArchived",roi.metadata.isArchived},{"source",GetRefText(roi.definition.source)}});
+    const auto current=input?GetRefText(input->dataRevision):QString();
+    const auto presentation=session->GetRenderViewState({"primary-3d"});
+    const auto opacity=input && presentation && presentation->dataRevision==input->dataRevision?std::optional<double>(presentation->material.opacity):std::optional<double>{};
+    const auto graph=m_workflow.getPublishedGraph?m_workflow.getPublishedGraph():QJsonObject{};
+    for(auto* module:m_modules)projections.push_back(module->GetObjectNodes());
+    if(graph==m_objectGraph && regions==m_objectRegions && current==m_objectInput && projections==m_objectModules && opacity==m_objectOpacity)return;
+    m_objectGraph=graph;m_objectRegions=regions;m_objectInput=current;m_objectModules=projections;m_objectOpacity=opacity;
+    const std::function<void(const QJsonArray&,const QString&)> append=[&](const QJsonArray& values,const QString& module) {
+        for(const auto value:values){auto node=value.toObject();node["module"]=module;nodes.append(node);append(node["children"].toArray(),module);}
+    };
+    for(std::size_t i=0;i<m_modules.size();++i)append(projections[i],m_modules[i]->GetName());
+    m_objects->SetObjects(graph,regions,nodes,current,GetModule("Roi")?GetModule("Roi")->GetActions():QStringList{},opacity);
 }
 void TestWindow::AppendLog(const QString& message)
 {
@@ -496,7 +554,7 @@ void TestWindow::BuildSession()
             const auto* page = GetModule(module); return page && page->GetActions().contains(action);
         };
         m_workflow.onShowStatistics=[this](const QString& module) {
-            if(auto* page=GetModule(module)){m_pages->setCurrentWidget(page);m_showStatistics->setChecked(true);page->RefreshStatistics();}
+            if(auto* page=GetModule(module)){m_pages->setCurrentWidget(page);m_showStatistics->setChecked(true);m_resultTabs->setCurrentIndex(0);page->RefreshStatistics();}
         };
         m_workflow.ensureCropViews=[this] {
             auto* choice=findChild<QComboBox*>("viewLayout");if(choice && choice->currentData()=="ThreeDOnly") {
@@ -554,6 +612,16 @@ void TestWindow::closeEvent(QCloseEvent* event)
 void TestWindow::showEvent(QShowEvent* event) { QMainWindow::showEvent(event); m_pump.SetVisible(); }
 bool TestWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    // 原生鼠标/键盘仍仅走 QVTK；失焦只发送 SDK 生命周期取消。
+    if (m_isReady && !m_isClosing && (event->type() == QEvent::FocusOut || event->type() == QEvent::Hide)) {
+        const auto session = m_runtime.GetSession();
+        const auto endpoint = session ? session->GetInputEndpoint() : nullptr;
+        if (endpoint) for (const auto& view : m_views) if (view.widget == watched) {
+            HostInputEvent cancel; cancel.viewId = view.id.toStdString(); cancel.kind = HostInputKind::Cancel;
+            (void)endpoint->SendInput(cancel);
+            break;
+        }
+    }
     if (!m_visibilityQueued && (event->type() == QEvent::Show || event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange || event->type() == QEvent::Paint)) {
         m_visibilityQueued = true;
         QMetaObject::invokeMethod(&m_pump, [this] { m_visibilityQueued = false; m_pump.SetVisible(); }, Qt::QueuedConnection);

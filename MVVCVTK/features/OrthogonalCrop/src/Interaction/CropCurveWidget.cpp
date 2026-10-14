@@ -1,4 +1,6 @@
 #include "Interaction/CropCurveWidget.h"
+#include "FeatureSupport/WidgetBindings.h"
+#include "FeatureSupport/RoutedWidgets.h"
 #include "Algorithms/CropGeometry.h"
 #include "Render/CropSphereVisual.h"
 #include "Render/Support/RenderTextStyle.h"
@@ -72,7 +74,7 @@ public:
         });
         for(std::size_t i=0;i<handles.size();++i) {
             auto& handle=handles[i];handle.owner=this;handle.index=i;
-            handle.widget=vtkSmartPointer<vtkHandleWidget>::New();
+            handle.widget=vtkSmartPointer<FeatureSupport::RoutedHandleWidget>::New();
             handle.representation=vtkSmartPointer<vtkPointHandleRepresentation3D>::New();
             handle.representation->AllOff();handle.representation->TranslationModeOn();
             handle.representation->GetProperty()->SetColor(i==1?0.2:0.9,i==1?0.8:0.6,0.2);
@@ -97,6 +99,7 @@ public:
             handle.widget->SetDefaultRenderer(nullptr);handle.widget->SetCurrentRenderer(nullptr);
         }
     }
+    CropOpItem inputGeometry;
     void SetContext(vtkRenderWindowInteractor* value,vtkRenderer* target) {
         if(interactor==value&&renderer==target)return;
         SetEnabled(false);interactor=value;renderer=target;
@@ -213,6 +216,7 @@ public:
         if(!enabled||index>=(operation.geometryType==CropShape::Sphere?2U:4U))return;
         try {if(gate&&!gate()){active=-1;hover=false;hovered=-1;Sync();if(renderCallback)renderCallback();return;}}catch(...){active=-1;hover=false;hovered=-1;Sync();return;}
         if(event==vtkCommand::StartInteractionEvent) {
+            static_cast<FeatureSupport::RoutedHandleWidget*>(handles[index].widget.GetPointer())->ReleaseInputFocus();
             active=static_cast<int>(index);visualState=CropSphereVisual::State::Hover;
             if(operation.geometryType==CropShape::Sphere)ApplySphereStyle();
             if(renderCallback)renderCallback();if(callback)callback(CropInteractionPhase::Hover);return;
@@ -275,3 +279,12 @@ bool CropCurveWidget::GetTransformSame(const CropMatrixDouble16Array& matrix) co
     return true;
 }
 void CropCurveWidget::SetContextGate(std::function<bool()> gate){m_impl->gate=std::move(gate);}
+
+bool CropCurveWidget::GetInputAccepted(int x,int y) const {
+    if(!m_impl->enabled)return false;
+    for(const auto& h:m_impl->handles)if(h.widget->GetEnabled()&&h.representation->ComputeInteractionState(x,y)!=vtkHandleRepresentation::Outside)return true;
+    return false;
+}
+void CropCurveWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){for(auto& h:m_impl->handles)FeatureSupport::SetWidgetBindings(h.widget,values,{{"crop.widget.select.drag",vtkWidgetEvent::Select}});}
+void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;}
+void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->active=-1;m_impl->Sync();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}

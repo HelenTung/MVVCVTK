@@ -12,6 +12,9 @@ target_sources(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/SliceContourPlane.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/RenderTextStyle.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/WorkLimit.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/WidgetBindings.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/RoutedWidgets.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/LabelMapBuilder.h"
 )
 target_include_directories(
     mvvcvtk_feature_support

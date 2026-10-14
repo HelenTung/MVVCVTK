@@ -203,30 +203,48 @@ public:
 };
 void TestOperationNotificationLifetime()
 {
-    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
-    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};
-    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});auto host=std::make_shared<Controller>();const auto signals=host->signals;std::weak_ptr<Controller> weakHost=host;
-    {HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context),"notification attach failed");}host.reset();
-    RoiRequest draft;draft.metadata.name="通知生命周期";draft.definition.source=source;RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification draft failed");
-    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;RoiOperationRequest operation;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"notification operation was not deferred");
-    unsigned consumed=0;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
-    while(editor->GetState().isComputing && std::chrono::steady_clock::now()<until){const auto current=signals->load();if(current!=consumed){consumed=current;editor->OnHostTick();}else std::this_thread::sleep_for(std::chrono::milliseconds(1));}
-    Require(consumed>0 && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,"temporary attach context lost the operation notification port");
-    Require(editor->DetachHost() && weakHost.expired(),"detach retained the operation notification port");
+    auto data=std::make_shared<TestDataPort>();
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    auto host=std::make_shared<Controller>();const auto signals=host->signals;const std::weak_ptr<Controller> weakHost=host;
+    {
+        HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+        Require(editor->AttachHost(context),"notification lifetime attach failed");
+    }
+    host.reset(); // 挂载参数只是临时上下文，不能承担异步任务的通知端口寿命。
+    RoiRequest draft;draft.metadata.name="通知生命周期";draft.definition.source=source;
+    RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=RoiOperationRequest{};
+    start.operation->params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};
+    Require(editor->SendRequest(start).error==RoiError::Pending,"notification operation was not deferred");
+    unsigned consumed=0;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor->GetState().isComputing && std::chrono::steady_clock::now()<deadline) {
+        const auto available=signals->load();
+        if(available!=consumed){consumed=available;Require(editor->OnHostTick(),"notified owner update failed");}
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Require(consumed && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,
+        "operation lost its work notification after the attachment context was released");
+    Require(editor->DetachHost() && weakHost.expired(),"notification port survived worker detach");
 }
 void TestDrawingAndLatestOperation()
 {
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
     const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D),slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);
     main->source=slice->source=source;views->views={{"main",main},{"slice",slice}};auto host=std::make_shared<Controller>();
-    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context) && bool(host->binding.onInput),"drawing input was not registered");
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context) && bool(host->binding.onAction),"drawing input was not registered");
     RoiRequest draft;draft.metadata.name="old";draft.definition.source=source;RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"drawing draft failed");
     FeatureOverlayState overlay;overlay.cursor={0,0,2};for(auto& item:slice->overlays)item->SetOverlayState(overlay);
     slice->renderer->GetActiveCamera()->SetPosition(2,2,10);slice->renderer->GetActiveCamera()->SetFocalPoint(2,2,2);slice->renderer->GetActiveCamera()->ParallelProjectionOn();slice->renderer->GetActiveCamera()->SetParallelScale(3);
     const auto display=[&](double x,double y){slice->renderer->SetWorldPoint(x,y,2,1);slice->renderer->WorldToDisplay();const auto* p=slice->renderer->GetDisplayPoint();return std::array<int,2>{int(std::lround(p[0])),int(std::lround(p[1]))};};
     RoiEditingRequest drawing;drawing.action=RoiEditingAction::BeginDrawing;drawing.drawing=RoiDrawingMode::SliceRectangle;Require(editor->SendRequest(drawing).error==RoiError::None,"rectangle tool failed");
-    const auto first=display(1.2,1.2),last=display(2.8,2.8);InteractionEvent event;event.viewId="slice";event.x=first[0];event.y=first[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onInput(event).isHandled,"rectangle press not captured");
-    event.x=last[0];event.y=last[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onInput(event).isSucceeded,"rectangle update failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onInput(event).isSucceeded,"rectangle release failed");
+    const auto first=display(1.2,1.2),last=display(2.8,2.8);InteractionEvent event;event.viewId="slice";event.x=first[0];event.y=first[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onAction("roi.draw",event,{}).isHandled,"rectangle press not captured");
+    event.x=last[0];event.y=last[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"rectangle update failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"rectangle release failed");
     Require(editor->GetState().preview->GetContains({2,2,2}) && !editor->GetState().preview->GetContains({3,3,2}) && editor->GetState().undoCount==1,"slice rectangle ignored its plane or applied baseline");
     Require(editor->SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor->GetState().preview->GetContains({2.9,2.9,2}),"gesture undo did not restore the prior region");
     Require(editor->SendRequest({RoiEditingAction::Redo}).error==RoiError::None && !editor->GetState().preview->GetContains({2.9,2.9,2}),"gesture redo failed");
@@ -243,9 +261,9 @@ void TestDrawingAndLatestOperation()
     Require(editor->SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"failed draft cancellation failed");
     RoiRequest contour;contour.metadata.name="curve";contour.definition.source=source;RoiNode curve;curve.primitive.shape=RoiShape::Contour;curve.primitive.localToSource[3]=2;curve.primitive.localToSource[7]=2;curve.primitive.localToSource[11]=2;curve.primitive.contours={{{-.5,-.5},{.5,-.5},{0,.5}}};contour.definition.nodes={curve};
     Require(editor->SendRequest({RoiEditingAction::Begin,contour}).error==RoiError::None,"control point draft failed");drawing.drawing=RoiDrawingMode::EditControlPoint;Require(editor->SendRequest(drawing).error==RoiError::None,"control point editing was not enabled");
-    const auto control=display(2.5,1.5),moved=display(2.8,1.5);event.x=control[0];event.y=control[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onInput(event).isHandled,"control point was not hit");event.x=moved[0];event.y=moved[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onInput(event).isSucceeded,"control point move failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onInput(event).isSucceeded,"control point release failed");
+    const auto control=display(2.5,1.5),moved=display(2.8,1.5);event.x=control[0];event.y=control[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onAction("roi.draw",event,{}).isHandled,"control point was not hit");event.x=moved[0];event.y=moved[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"control point move failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"control point release failed");
     Require(editor->GetState().draft->nodes[0].primitive.contours[0][1][0]>.7,"control point movement changed another selection");Require(editor->SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor->GetState().tool->contours[0][1][0]==.5,"control point undo left stale handles");
-    Require(editor->DetachHost() && !host->binding.onInput && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
+    Require(editor->DetachHost() && !host->binding.onAction && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
 }
 
 void WaitOperation(RoiEditingHostFeature& editor){

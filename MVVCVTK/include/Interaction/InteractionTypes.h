@@ -1,6 +1,8 @@
 #pragma once
 
 #include "App/ViewTypes.h"
+#include "Interaction/InputBindings.h"
+#include "Interaction/NavigationTypes.h"
 
 #include <string>
 
@@ -15,6 +17,8 @@ enum class InteractionEventKind
     PrimaryRelease,
     SecondaryPress,
     SecondaryRelease,
+    MiddlePress,
+    MiddleRelease,
     PointerMove,
     KeyPress,
     KeyRelease,
@@ -56,6 +60,16 @@ struct InteractionEvent
     // ── RenderContext 在分发前写入的模式快照 ───────────────────────────
     VizMode vizMode = VizMode::Volume; // 决定 2D/3D Handler 的视图分支
     ToolMode toolMode = ToolMode::Navigation; // 决定导航或模型变换路径
+    std::uint32_t key=0;
+    bool isAutoRepeat=false;
+    InputArea area=InputArea::View;
+    std::optional<std::array<double,2>> displayPosition;
+    double displayScale=1;
+    std::optional<double> wheelDelta;
+    WheelUnit wheelUnit=WheelUnit::Steps;
+    InputPhase phase=InputPhase::Discrete;
+    std::string actionId; // 匹配后由注册中心填写，捕获期间保持不变
+    bool isUserCancel=false;
 };
 
 // ─────────────────────────────────────────────────────────────────────

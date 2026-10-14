@@ -25,7 +25,6 @@ class WallThicknessHostFeature final : public HostFeature,
     FeatureDataContract GetDataContract() const override;
     std::vector<FeatureOperationState> GetOperationStates() const override;
     bool AttachHost(const HostFeatureContext &context) override;
-    InputBindingStatus SetInputBindings(const IInputBindings& bindings);
     bool DetachHost() override;
     bool OnHostTick() override;
     ThicknessAdmission SendRequest(ThicknessRequest request, ThicknessCallback onComplete = {});

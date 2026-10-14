@@ -180,7 +180,7 @@ void TestRealInputBindings(const std::string& rawPath)
         InputBindingOverride::Replace,
         { InputTriggerKind::WheelForward, InputMouseButton::None, 0, 0, 0 }),
         "Backward wheel override rejected");
-    Expect(session.SetInputBindings(wheelBindings) == InputBindingStatus::Applied,
+    Expect(session.GetInteractionController()->ImportBindings(wheelBindings).status == InputBindingStatus::Applied,
         "Real binding wheel swap not applied");
     // SDK 保存值快照，运行时不再查询上位机提供对象。
     wheelBindings.SetOverride(std::string(NavigationBindingKeys::SliceForward),
@@ -198,7 +198,7 @@ void TestRealInputBindings(const std::string& rawPath)
     conflicting.SetOverride(std::string(NavigationBindingKeys::CrosshairDrag),
         InputBindingOverride::Replace,
         { InputTriggerKind::Drag, InputMouseButton::Primary, 0, 0, 0 });
-    Expect(session.SetInputBindings(conflicting) == InputBindingStatus::Conflict,
+    Expect(session.GetInteractionController()->ImportBindings(conflicting).status == InputBindingStatus::Conflict,
         "Conflicting Session candidate was accepted");
     Expect(send(HostInputKind::WheelForward).isDefaultSuppressed,
         "Previous wheel snapshot was lost after conflict");
@@ -216,7 +216,7 @@ void TestRealInputBindings(const std::string& rawPath)
     unsupported.SetOverride(std::string(NavigationBindingKeys::SliceForward),
         InputBindingOverride::Replace,
         { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 'x' });
-    Expect(session.SetInputBindings(unsupported)
+    Expect(session.GetInteractionController()->ImportBindings(unsupported).status
             == InputBindingStatus::Unsupported,
         "Unsupported Session candidate was accepted");
     Expect(send(HostInputKind::WheelForward).isDefaultSuppressed,
@@ -241,15 +241,15 @@ void TestRealInputBindings(const std::string& rawPath)
         InputBindingOverride::Replace,
         { InputTriggerKind::Drag, InputMouseButton::Secondary, 0, alt, 0 }),
         "Zoom drag override rejected");
-    Expect(session.SetInputBindings(dragBindings) == InputBindingStatus::Applied,
+    Expect(session.GetInteractionController()->ImportBindings(dragBindings).status == InputBindingStatus::Applied,
         "Real binding drag rules not applied");
     const auto originalWindow = getState().windowLevel;
     Expect(send(HostInputKind::SecondaryPress, 100, 100, true).isDefaultSuppressed,
         "Rebound drag press not captured");
     Expect(getState().isInteracting, "Rebound drag did not start interaction");
-    Expect(session.SetInputBindings(ConfigurableInputBindings{})
-            == InputBindingStatus::Busy,
-        "Session accepted a binding change during a real-data drag");
+    Expect(session.GetInteractionController()->ImportBindings(ConfigurableInputBindings{}).status
+            == InputBindingStatus::Applied,
+        "手势期间绑定更新应生效，已有捕获继续完成");
     Expect(send(HostInputKind::PointerMove, 150, 120, true).isDefaultSuppressed,
         "Rebound drag move not captured");
     const auto changedWindow = getState().windowLevel;
@@ -267,7 +267,7 @@ void TestRealInputBindings(const std::string& rawPath)
     ConfigurableInputBindings disabled;
     disabled.SetOverride(std::string(NavigationBindingKeys::SliceForward),
         InputBindingOverride::Disable);
-    Expect(session.SetInputBindings(disabled) == InputBindingStatus::Applied,
+    Expect(session.GetInteractionController()->ImportBindings(disabled).status == InputBindingStatus::Applied,
         "Real binding wheel disable not applied");
     const auto cursorBeforeDisable = getState().cursorWorld;
     (void)send(HostInputKind::WheelForward);
@@ -287,16 +287,16 @@ void TestRealInputBindings(const std::string& rawPath)
         { InputTriggerKind::Drag, InputMouseButton::Secondary, alt, 0, 0 }),
         "Real binding rotation drag override rejected");
     Expect(rotationBindings.SetOverride(
-        std::string(ModelRotationBindingKeys::CancelKey),
+        std::string("interaction.cancel.key"),
         InputBindingOverride::Replace,
         { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 'q' }),
         "Real binding rotation cancel override rejected");
-    Expect(rotation->SetInputBindings(rotationBindings)
+    Expect(session.GetInteractionController()->ImportBindings(rotationBindings).status
             == InputBindingStatus::Applied,
         "Real binding rotation overrides not applied");
     rotationBindings.SetOverride(std::string(ModelRotationBindingKeys::EnabledDrag),
         InputBindingOverride::UseDefault);
-    rotationBindings.SetOverride(std::string(ModelRotationBindingKeys::CancelKey),
+    rotationBindings.SetOverride(std::string("interaction.cancel.key"),
         InputBindingOverride::UseDefault);
 
     const auto send3D = [&](HostInputKind kind, int x, int y,

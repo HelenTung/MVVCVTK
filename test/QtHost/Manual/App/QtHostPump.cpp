@@ -1,6 +1,7 @@
 // 测试用途：为 Qt 功能测试合并工作通知，在所属线程推进更新并按需绘制可见视图。
 #include "QtHostPump.h"
 #include "Support/JsonInput.h"
+#include "Support/QtOwnerTaskQueue.h"
 #include <QCoreApplication>
 #include <QMetaObject>
 #include <QElapsedTimer>
@@ -21,20 +22,20 @@ void QtHostPump::SetConfig(HostSessionConfig& config)
     config.driveMode = HostDriveMode::HostDriven;
     // QApplication 比 Session 活得更久；最终停止投递不依赖算法页面。
     auto* receiver = QCoreApplication::instance();
-    config.sendOwnerTask = [receiver](std::function<void()> task) {
-        return receiver && task && QMetaObject::invokeMethod(receiver, std::move(task), Qt::QueuedConnection);
-    };
+    auto* tasks=new QtOwnerTaskQueue(receiver);
+    const auto post=tasks->GetPoster();
+    config.sendOwnerTask=post;
     const std::weak_ptr<Signal> weak = m_signal;
-    m_queueUpdates = [weak] {
+    m_queueUpdates = [weak,post] {
         const auto signal = weak.lock();
         if (!signal || signal->isStopped.load() || signal->isQueued.exchange(true)) return;
-        const bool posted = QMetaObject::invokeMethod(signal->receiver, [weak] {
+        const bool posted = post([weak] {
             const auto signal = weak.lock();
             if (!signal || signal->isStopped.load()) return;
             // 在消费前清门铃；本轮更新期间的新通知可再次排队。
             signal->isQueued.store(false);
             signal->owner->SendUpdates();
-        }, Qt::QueuedConnection);
+        });
         if (!posted) {
             signal->isQueued.store(false);
             std::fputs("Qt Host work event delivery failed\n", stderr);

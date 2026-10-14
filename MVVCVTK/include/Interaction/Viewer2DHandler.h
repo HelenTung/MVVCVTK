@@ -6,16 +6,7 @@
 class vtkPropPicker;
 class vtkRenderer;
 
-// ─────────────────────────────────────────────────────────────────────
-// Viewer2DHandler — 处理 SliceTop_down / SliceFront_back / SliceLeft_right 模式下的交互
-//
-// 支持的交互：
-//   滚轮前/后         → 切片步进
-//   默认 Shift+左键拖拽 → 拖拽十字线定位；实际触发由绑定决定
-//   定轴旋转由 ModelRotation Feature 通过统一输入绑定接管。
-//   默认左键拖拽       → 调窗
-//   默认右键拖拽       → 缩放
-// ─────────────────────────────────────────────────────────────────────
+// 切片十字线适配；相机、翻页和调窗由 ViewNavigationExecutor 统一执行。
 class Viewer2DHandler : public IInteractionHandler
 {
 public:
@@ -29,6 +20,7 @@ public:
         const NavigationBindings* bindings = nullptr);
     ~Viewer2DHandler() override;
 
+    bool GetIsCaptureActive() const noexcept override { return m_isDragCrosshair; }
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
@@ -44,21 +36,5 @@ private:
     const NavigationBindings* m_bindings = nullptr;
     InteractionEventKind m_dragReleaseKind = InteractionEventKind::None;
 
-    // 三种拖拽状态分别在对应 press 置位、release 清零，并驱动自身 interaction source。
-    bool m_isDragCrosshair = false;  // 当前操作：拖拽十字线
-    bool m_isDragWindowLevel = false; // 当前操作：调窗
-    bool m_isDragZoom = false;       // 当前操作：修改平行投影缩放
-    bool m_isPrimaryPressRejected = false; // Ctrl+左键保留原有拦截直到释放
-    // VTK display 坐标，单位像素、左下角为原点；每次旋转或调窗 MouseMove 后更新。
-    int  m_lastDragX = 0;
-    int  m_lastDragY = 0;
-    
-    // 调窗启动时的 display 像素与 WW/WC 快照；拖动全程相对该基线计算累计量。
-    int m_startDragX = 0;
-    int m_startDragY = 0;
-    double m_startWW = 0.0;
-    double m_startWC = 0.0;
-
-    int m_zoomStartY = 0; // 缩放启动时的 VTK display Y 像素
-    double m_startOriginValue = 1.0; // press 时 camera parallelScale，单位为 world 视口半高
+    bool m_isDragCrosshair=false;
 };

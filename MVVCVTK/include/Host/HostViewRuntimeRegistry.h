@@ -70,7 +70,7 @@ public:
 // 1. VtkAppHostSession 调用 Build 创建/接管窗口。
 // 2. Feature 只通过 id/role 查询目标窗口，不知道默认五窗口布局。
 // 3. 外部 Qt / 上位机只拿 endpoint，不直接碰内部端口。
-// 输入事件不在这里安装；独立 VTK 调试热键由 HostHotkeyRouter 安装 input handler 并翻译成 typed command。
+// 输入事件不在这里安装；统一交互入口由 HostInputRegistry 安装 input handler 并定向分发已登记动作。
 class HostViewRuntimeRegistry {
 public:
     HostViewRuntimeRegistry();

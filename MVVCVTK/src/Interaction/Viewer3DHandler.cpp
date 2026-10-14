@@ -1,10 +1,6 @@
 #include "Viewer3DHandler.h"
 #include "Host/FeatureModelTransformPort.h"
 #include <vtkActor.h>
-#include <vtkBoxRepresentation.h>
-#include <vtkHandleRepresentation.h>
-#include <vtkImplicitPlaneRepresentation.h>
-#include <vtkPropCollection.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -103,37 +99,13 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     }
 
     // 3D 模式只处理“参考切片平面拖拽”这一类交互；
-    // 其他鼠标事件继续交给 VTK 默认相机控制，避免把 3D 浏览手感全部吞掉。
+    // 相机操作由后续统一导航执行器处理；本类只保留平面和模型变换。
 
     // ── 左键按下：拾取切片平面 ────────────────────────────────────────
     if (m_bindings->GetMatched(NavigationAction::PlaneDrag, eve))
     {
         if (!m_picker || !m_renderer) {
             return {};
-        }
-
-        // Host 路由先于原生 VTK widget 执行。命中控件时让事件继续传给
-        // widget，避免位于控件后方的参考切片平面抢占整段拖动。
-        auto* props = m_renderer->GetViewProps();
-        vtkCollectionSimpleIterator cursor;
-        props->InitTraversal(cursor);
-        while (auto* prop = props->GetNextProp(cursor)) {
-            if (!prop->GetVisibility() || !prop->GetPickable()) continue;
-            if (auto* handle = vtkHandleRepresentation::SafeDownCast(prop)) {
-                if (handle->ComputeInteractionState(eve.x, eve.y) != vtkHandleRepresentation::Outside) return {};
-            } else if (auto* box = vtkBoxRepresentation::SafeDownCast(prop)) {
-                if (box->ComputeInteractionState(eve.x, eve.y) != vtkBoxRepresentation::Outside) return {};
-            } else if (auto* plane = vtkImplicitPlaneRepresentation::SafeDownCast(prop)) {
-                // 平面拾取需要先声明左键 Moving 意图；探测后还原状态，
-                // 实际拖动与高亮仍由 vtkImplicitPlaneWidget2 管理。
-                const auto interaction = plane->GetInteractionState();
-                const auto representation = plane->GetRepresentationState();
-                plane->SetInteractionState(vtkImplicitPlaneRepresentation::Moving);
-                const auto hit = plane->ComputeInteractionState(eve.x, eve.y);
-                plane->SetInteractionState(interaction);
-                plane->SetRepresentationState(representation);
-                if (hit != vtkImplicitPlaneRepresentation::Outside) return {};
-            }
         }
 
         if (m_picker->Pick(eve.x, eve.y, 0, m_renderer)) {
@@ -150,7 +122,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                 m_isDragging = isStarted;
                 m_dragAxis = isStarted ? axis : -1;
                 m_planeReleaseKind = isStarted
-                    ? (eve.eventKind == InteractionEventKind::PrimaryPress
+                    ? (eve.eventKind == InteractionEventKind::MiddlePress ? InteractionEventKind::MiddleRelease : eve.eventKind == InteractionEventKind::PrimaryPress
                         ? InteractionEventKind::PrimaryRelease
                         : InteractionEventKind::SecondaryRelease)
                     : InteractionEventKind::None;
@@ -266,7 +238,8 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
     }
     const bool isPrimary = event.eventKind == InteractionEventKind::PrimaryPress;
     const bool isSecondary = event.eventKind == InteractionEventKind::SecondaryPress;
-    if (!m_isModelDrag && (isPrimary || isSecondary)) {
+    const bool isMiddle=event.eventKind==InteractionEventKind::MiddlePress;
+    if (!m_isModelDrag && (isPrimary || isSecondary || isMiddle)) {
         // 旋转已由上游窄输入能力消费；此处只识别已声明的变换操作。
         const bool pan = m_bindings->GetMatched(
             NavigationAction::ModelPanDrag, event);
@@ -296,7 +269,7 @@ InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
         m_modelSequence = 0;
         m_modelStart = state->modelToWorld;
         m_isModelScale = scale;
-        m_modelReleaseKind = isPrimary
+        m_modelReleaseKind = isMiddle ? InteractionEventKind::MiddleRelease : isPrimary
             ? InteractionEventKind::PrimaryRelease
             : InteractionEventKind::SecondaryRelease;
         m_modelStartY = event.y;

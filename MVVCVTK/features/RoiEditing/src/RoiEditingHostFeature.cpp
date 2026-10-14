@@ -1,5 +1,7 @@
 #include "Host/RoiEditingHostFeature.h"
 #include "../../common/FeatureInputReads.h"
+#include "FeatureSupport/WidgetBindings.h"
+#include "FeatureSupport/RoutedWidgets.h"
 #include "Data/DataPayloads.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
@@ -671,13 +673,14 @@ public:
             m_widget=nullptr; m_representation=nullptr;
         }
         try { if (m_reference) (void)m_reference->SetInteracting({"roi-editing","box"},false); } catch (...) {}
-        m_state.isDragging=false; m_isDragCancelled=false;
+        m_state.isDragging=false; m_nativeInputActive=false; m_isDragCancelled=false;
         for (auto& binding:m_bindings) {
             binding.service->RemoveOverlay(binding.overlay);
             try { (void)binding.view->SetRenderNeeded(); } catch (...) {}
         }
         m_bindings.clear(); m_state.hasDraft=false; m_state.draft.reset(); m_request={}; m_reference.reset(); m_lease.reset();
         m_state.preview.reset();m_draftReaders.reset();m_draftMesh.reset();m_history.clear();m_redo.clear();m_state.undoCount=m_state.redoCount=0;
+        if(m_host)(void)m_host->SetInputOwner("roi-editing",false);
         return true;
     }
     void ClearCommitted()
@@ -735,6 +738,7 @@ public:
         vtkNew<vtkMatrix4x4> world; vtkMatrix4x4::Multiply4x4(display,box,world);
         vtkNew<vtkTransform> transform; transform->SetMatrix(world);
         if (m_widget) {
+            SetWidgetBindings();
             if (!m_state.isDragging) m_representation->SetTransform(transform);
             m_widget->SetEnabled(m_state.isVisible && m_toolNodeIndex<m_request.definition.nodes.size() && m_request.definition.nodes[m_toolNodeIndex].kind==RoiNodeKind::Primitive && m_request.definition.nodes[m_toolNodeIndex].primitive.shape==m_tool.shape && (m_tool.shape==RoiShape::Box || m_tool.shape==RoiShape::Ellipsoid) ? 1:0);
         }
@@ -755,6 +759,40 @@ public:
         }
         return true;
     }
+    void SetWidgetBindings() {
+        if(!m_widget||m_state.isDragging||m_nativeInputActive||!m_views)return;
+        const auto input=m_views->GetInputView(m_config.referenceView);
+        const auto host=m_host;if(!input||!host)return;
+        FeatureSupport::SetWidgetBindings(m_widget,host->GetInputBindings(input->view.id),{
+            {"roi.box.select.drag",vtkWidgetEvent::Select},{"roi.box.translate.drag",vtkWidgetEvent::Translate},
+            {"roi.box.translate.shift",vtkWidgetEvent::Translate},{"roi.box.scale.drag",vtkWidgetEvent::Scale},
+            {"roi.box.translate.ctrl",vtkWidgetEvent::Translate}});
+    }
+    bool FinishBoxGesture() {
+        if(!m_reference||!m_reference->SetInteracting({"roi-editing","box"},false))return false;
+        const bool applied=!m_isDragCancelled;
+        m_nativeInputActive=false;m_state.isDragging=false;m_isDragCancelled=false;
+        if(applied)SetHistory();
+        SetWidgetBindings();return true;
+    }
+    InteractionResult OnBoxInput(const InteractionEvent& event) {
+        const bool isPress=event.eventKind==InteractionEventKind::PrimaryPress||event.eventKind==InteractionEventKind::SecondaryPress||event.eventKind==InteractionEventKind::MiddlePress;
+        if(isPress) {
+            const auto matrix=m_reference?m_reference->GetModelToWorld():std::nullopt;
+            if(!matrix||!GetMatrixValid(*matrix)||!m_reference->SetInteracting({"roi-editing","box"},true))return {true,true,false,InteractionFailureReason::StateRejected};
+            m_nativeInputActive=true;m_state.isDragging=true;m_isDragCancelled=false;m_displayMatrix=*matrix;
+            m_dragStart=m_tool.localToSource;m_dragDefinition=m_request.definition;return {true,false,true};
+        }
+        if(event.eventKind!=InteractionEventKind::Cancel)return {true,false,true};
+        const bool active=m_nativeInputActive||m_state.isDragging;
+        if(m_state.isDragging) {
+            if(SetDefinition(m_dragDefinition)!=RoiError::None)return {true,true,false,InteractionFailureReason::CleanupRejected};
+            m_tool.localToSource=m_dragStart;m_isDragCancelled=true;
+        }
+        if(active&&m_widget)static_cast<FeatureSupport::RoutedBoxWidget*>(m_widget.GetPointer())->StopGesture();
+        if((m_state.isDragging||m_nativeInputActive)&&!FinishBoxGesture())return {true,true,false,InteractionFailureReason::CleanupRejected};
+        SetWidgetBindings();return {true,true,true};
+    }
     void OnWidget(unsigned long event)
     {
         if (GetAccessError()!=RoiError::None || !m_state.hasDraft || !m_reference) return;
@@ -762,10 +800,13 @@ public:
         if (!matrix || !GetMatrixValid(*matrix)) return;
         if (m_state.isDragging && *matrix!=m_displayMatrix) { (void)SetProjection(); }
         if (event==vtkCommand::StartInteractionEvent) {
-            m_isDragCancelled=false;
-            if (!m_reference->SetInteracting({"roi-editing","box"},true)) return;
-            m_state.isDragging=true; m_displayMatrix=*matrix;
-            m_dragStart=m_tool.localToSource;m_dragDefinition=m_request.definition;
+            static_cast<FeatureSupport::RoutedBoxWidget*>(m_widget.GetPointer())->ReleaseInputFocus();
+            m_nativeInputActive=true;
+            if(!m_state.isDragging) {
+                m_isDragCancelled=false;
+                if (!m_reference->SetInteracting({"roi-editing","box"},true)) return;
+                m_state.isDragging=true; m_displayMatrix=*matrix;m_dragStart=m_tool.localToSource;m_dragDefinition=m_request.definition;
+            }
         }
         if (m_state.isDragging && !m_isDragCancelled) {
             vtkNew<vtkTransform> world; m_representation->GetTransform(world);
@@ -775,9 +816,7 @@ public:
             if (GetMatrixValid(next) && m_toolNodeIndex<m_dragDefinition.nodes.size()) {auto definition=m_dragDefinition;auto primitive=m_tool;primitive.localToSource=next;definition.nodes[m_toolNodeIndex].primitive=primitive;if(SetDefinition(std::move(definition))==RoiError::None)m_tool=primitive;}
         }
         if (event==vtkCommand::EndInteractionEvent) {
-            const bool applied=!m_isDragCancelled;m_state.isDragging=false; m_isDragCancelled=false;
-            (void)m_reference->SetInteracting({"roi-editing","box"},false);
-            if(applied)SetHistory();
+            if(!FinishBoxGesture())return;
         }
         (void)SetProjection();
     }
@@ -810,10 +849,10 @@ public:
     InteractionResult OnInput(const InteractionEvent& event)
     {
         if(GetAccessError()!=RoiError::None || !m_state.hasDraft || !m_drawing)return {};
-        if(event.eventKind==InteractionEventKind::Cancel || (event.eventKind==InteractionEventKind::KeyPress && event.keySym=="Escape")){
+        if(event.eventKind==InteractionEventKind::Cancel){
             CancelDrawing(true);return {true,true,true};
         }
-        if(event.eventKind!=InteractionEventKind::PrimaryPress && event.eventKind!=InteractionEventKind::PointerMove && event.eventKind!=InteractionEventKind::PrimaryRelease)return {};
+        if(event.phase!=InputPhase::Begin && event.phase!=InputPhase::Update && event.phase!=InputPhase::End)return {};
         const auto input=m_views->GetInputView({event.viewId});if(!input || !input->renderer)return {};
         const auto lease=input->lease.lock();if(!lease || !lease->GetIsActive() || !lease->GetIsOwnerThread())return {};
         const auto port=m_views->GetFeaturePort(event.viewId);const auto stamp=port?port->GetRenderInputStamp():std::nullopt;
@@ -823,7 +862,7 @@ public:
         const bool edits=*m_drawing==RoiDrawingMode::EditControlPoint;
         const bool wantsSlice=edits?slice:planarShape || *m_drawing==RoiDrawingMode::SliceContour || *m_drawing==RoiDrawingMode::SliceBrush;
         if((*m_drawing!=RoiDrawingMode::Seed && !edits && slice!=wantsSlice) || m_state.isComputing)return {};
-        if(event.eventKind==InteractionEventKind::PrimaryPress){
+        if(event.phase==InputPhase::Begin){
             CancelDrawing(false);m_state.error=RoiError::None;m_drawStart=m_request.definition;m_drawToolStart=m_tool;m_drawToolIndexStart=m_toolNodeIndex;m_drawPoints.clear();m_drawView=event.viewId;m_drawIsSlice=slice;
             const auto matrix=port->GetModelToWorld();if(!matrix)return {};m_drawDisplay=*matrix;
             if(slice){const auto binding=std::find_if(m_bindings.begin(),m_bindings.end(),[&](const auto& b){return b.view==port;});if(binding==m_bindings.end())return {};m_drawPlane=binding->overlay->GetSlicePlane();}
@@ -870,7 +909,7 @@ public:
                     }
                     auto definition=m_drawStart;definition.nodes[m_toolNodeIndex].primitive=m_drawPrimitive;m_state.error=SetDefinition(std::move(definition));if(m_state.error==RoiError::None)m_tool=m_drawPrimitive;
                 }else if(*m_drawing==RoiDrawingMode::Seed){
-                    if(event.eventKind==InteractionEventKind::PrimaryPress && m_operation){auto request=*m_operation;auto* threshold=std::get_if<RoiThresholdParams>(&request.params);if(threshold){threshold->seeds.push_back(*point);CancelDrawing(false);m_state.error=StartOperation(request,false);return {true,true,true};}}
+                    if(event.phase==InputPhase::Begin && m_operation){auto request=*m_operation;auto* threshold=std::get_if<RoiThresholdParams>(&request.params);if(threshold){threshold->seeds.push_back(*point);CancelDrawing(false);m_state.error=StartOperation(request,false);return {true,true,true};}}
                 }else if(planarShape){
                     vtkNew<vtkMatrix4x4> inverse;inverse->DeepCopy(m_drawPlaneMatrix.data());inverse->Invert();const auto local=MapPoint(inverse,*point);m_drawPoints.push_back(local);
                     const auto& first=m_drawPoints.front();double x=(first[0]+local[0])*.5,y=(first[1]+local[1])*.5,rx=std::abs(first[0]-local[0])*.5,ry=std::abs(first[1]-local[1])*.5;
@@ -884,7 +923,7 @@ public:
         }
         const bool valid=edits?m_controlIndex!=SIZE_MAX:planarShape?m_drawPoints.size()>1 && GetMatrixValid(m_drawPrimitive.localToSource):m_drawPrimitive.shape==RoiShape::Brush?!m_drawPrimitive.path.empty():!m_drawPrimitive.contours.empty() && m_drawPrimitive.contours.front().size()>=3;
         if(valid && !edits && *m_drawing!=RoiDrawingMode::Seed){auto primitive=m_drawPrimitive;if(primitive.shape==RoiShape::Box)primitive.depth={-.5,.5};m_state.error=SetSelection(primitive);}
-        if(event.eventKind==InteractionEventKind::PrimaryRelease){const bool applied=valid && m_state.error==RoiError::None;CancelDrawing(!applied);if(applied)SetHistory();}
+        if(event.phase==InputPhase::End){const bool applied=valid && m_state.error==RoiError::None;CancelDrawing(!applied);if(applied)SetHistory();}
         return {true,true,m_state.error==RoiError::None,m_state.error==RoiError::None?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
     }
     RoiError Begin(const RoiRequest& request)
@@ -942,7 +981,8 @@ public:
         m_representation=vtkSmartPointer<vtkBoxRepresentation>::New();
         m_representation->SetPlaceFactor(1);
         double bounds[6]{-1,1,-1,1,-1,1}; m_representation->PlaceWidget(bounds);
-        m_widget=vtkSmartPointer<vtkBoxWidget2>::New(); m_widget->SetRepresentation(m_representation);
+        m_widget=vtkSmartPointer<FeatureSupport::RoutedBoxWidget>::New(); m_widget->SetRepresentation(m_representation);
+        SetWidgetBindings();
         m_widget->SetInteractor(input->interactor); m_widget->SetCurrentRenderer(input->renderer); m_widget->SetDefaultRenderer(input->renderer);
         vtkNew<vtkCallbackCommand> callback; callback->SetClientData(this);
         callback->SetCallback([](vtkObject*,unsigned long event,void* client,void*) {
@@ -986,6 +1026,7 @@ public:
     std::shared_ptr<RegionProduct> m_displayProduct;
     std::future<RoiOperationResult> m_future;
     std::thread m_worker;
+    // 挂载上下文是临时参数；端口必须保留到异步任务停止，保证完成通知可达。
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_cancel;
     std::optional<RoiOperationRequest> m_pending,m_operation;
@@ -996,6 +1037,7 @@ public:
     RoiEditingState m_state;
     std::array<double,16> m_displayMatrix=roiIdentityMatrix, m_dragStart=roiIdentityMatrix;
     bool m_isDragCancelled=false;
+    bool m_nativeInputActive=false;
     bool m_isPublishing=false;
 };
 RoiEditingHostFeature::RoiEditingHostFeature(RoiEditingConfig config):m_impl(std::make_unique<Impl>(std::move(config))) {}
@@ -1011,8 +1053,74 @@ bool RoiEditingHostFeature::AttachHost(const HostFeatureContext& context)
     if (m_impl->m_state.isAttached || !context.data || !context.views) return false;
     m_impl->m_owner=std::this_thread::get_id(); m_impl->m_data=context.data; m_impl->m_views=context.views;m_impl->m_host=context.host;
     const auto weak=weak_from_this();
-    if(context.host && !weak.expired()){HostInputBinding binding{std::string(GetFeatureId()),m_impl->m_config.targetViews,[weak](const InteractionEvent& event){const auto feature=weak.lock();return feature?feature->m_impl->OnInput(event):InteractionResult{};}};
-        if(!context.host->AttachInput(std::move(binding))){m_impl->m_host.reset();m_impl->m_data.reset();m_impl->m_views.reset();return false;}}
+    if(context.host && !weak.expired()) {
+        HostInputBinding binding;binding.featureId=std::string(GetFeatureId());binding.targetViews=m_impl->m_config.targetViews;
+        InteractionActionInfo draw;draw.actionId="roi.draw";draw.ownerId=binding.featureId;
+        draw.bindings.push_back({"roi.draw.drag",{InputTriggerKind::Drag,InputMouseButton::Primary},true,{},binding.featureId,{InputTriggerKind::Drag}});
+        binding.actions.push_back(std::move(draw));
+        InteractionActionInfo box;box.actionId="roi.box.edit";box.ownerId=binding.featureId;
+        const auto addBox=[&](const char* key,InputMouseButton button,std::uint8_t required,std::uint8_t forbidden){
+            BindingScope scope;scope.viewClass=InteractionViewClass::ThreeD;
+            box.bindings.push_back({key,{InputTriggerKind::Drag,button,required,forbidden},true,scope,"widget:roi",{InputTriggerKind::Drag}});
+        };
+        addBox("roi.box.select.drag",InputMouseButton::Primary,0,3);
+        addBox("roi.box.translate.drag",InputMouseButton::Middle,0,0);
+        addBox("roi.box.translate.shift",InputMouseButton::Primary,1,2);
+        addBox("roi.box.scale.drag",InputMouseButton::Secondary,0,0);
+        addBox("roi.box.translate.ctrl",InputMouseButton::Primary,2,1);
+        binding.actions.push_back(std::move(box));
+        binding.getIsActionAvailable=[weak](std::string_view id,const InteractionEvent& e){
+            const auto f=weak.lock();if(!f)return false;
+            if(id=="roi.draw")return f->m_impl->m_drawing.has_value();
+            if(id!="roi.box.edit")return true;
+            const auto& p=*f->m_impl;const auto input=p.m_views->GetInputView({e.viewId});
+            return !p.m_drawing&&p.m_widget&&p.m_widget->GetEnabled()&&input&&input->interactor==p.m_widget->GetInteractor()
+                &&p.m_representation->ComputeInteractionState(e.x,e.y)!=vtkBoxRepresentation::Outside;
+        };
+        binding.getIsCaptureActive=[weak](std::string_view){const auto f=weak.lock();return f&&(f->m_impl->m_state.isDragging||f->m_impl->m_nativeInputActive);};
+        binding.onBindingsChanged=[weak](const std::vector<EffectiveBinding>&){if(const auto f=weak.lock())f->m_impl->SetWidgetBindings();};
+        for(const auto* id:{"interaction.confirm","interaction.cancel","interaction.undo","interaction.redo","roi.commit"}) {
+            InteractionActionInfo info;info.actionId=id;info.ownerId=binding.featureId;info.isTriggerable=true;info.isCurrentToolCommand=info.actionId.substr(0,12)=="interaction.";binding.actions.push_back(std::move(info));
+        }
+        binding.onAction=[weak](std::string_view action,const InteractionEvent& event,const std::optional<HostSemanticTarget>&){
+            const auto f=weak.lock();if(!f)return InteractionResult{};
+            if(action=="roi.box.edit")return f->m_impl->OnBoxInput(event);
+            if(action=="roi.draw"||event.eventKind==InteractionEventKind::Cancel) {
+                auto routed=event;
+                routed.phase=event.eventKind==InteractionEventKind::PointerMove?InputPhase::Update
+                    :event.eventKind==InteractionEventKind::PrimaryRelease||event.eventKind==InteractionEventKind::SecondaryRelease||event.eventKind==InteractionEventKind::MiddleRelease?InputPhase::End:InputPhase::Begin;
+                return f->m_impl->OnInput(routed);
+            }
+            RoiEditingRequest request;
+            if(action=="interaction.confirm"||action=="roi.commit")request.action=RoiEditingAction::Commit;
+            else if(action=="interaction.undo")request.action=RoiEditingAction::Undo;
+            else if(action=="interaction.redo")request.action=RoiEditingAction::Redo;
+            else if(action=="interaction.cancel") {
+                if(f->m_impl->m_drawing){f->m_impl->CancelDrawing(true);f->m_impl->m_drawing.reset();return InteractionResult{true,true};}
+                request.action=RoiEditingAction::Cancel;
+            } else return InteractionResult{};
+            const auto result=f->SendRequest(request);const bool ok=result.error==RoiError::None||result.error==RoiError::Pending;
+            return InteractionResult{true,true,ok,ok?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
+        };
+        binding.onTrigger=[weak](std::string_view id,const ActionContext& context){
+            const auto f=weak.lock();if(!f)return ActionTriggerResult{};
+            if(id=="interaction.confirm"||id=="roi.commit") {
+                RoiEditingRequest request;request.action=RoiEditingAction::Commit;
+                const auto result=f->SendRequest(request);
+                return ActionTriggerResult{result.error==RoiError::Pending?ActionTriggerStatus::Accepted:result.error==RoiError::None?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,result.commitId};
+            }
+            InteractionEvent event;event.viewId=context.viewId;event.area=context.area;
+            RoiEditingRequest request;
+            if(id=="interaction.undo")request.action=RoiEditingAction::Undo;
+            else if(id=="interaction.redo")request.action=RoiEditingAction::Redo;
+            else if(id=="interaction.cancel") {
+                if(f->m_impl->m_drawing){f->m_impl->CancelDrawing(true);f->m_impl->m_drawing.reset();return ActionTriggerResult{ActionTriggerStatus::Completed,0};}
+                request.action=RoiEditingAction::Cancel;
+            } else return ActionTriggerResult{};
+            const auto result=f->SendRequest(request);return ActionTriggerResult{result.error==RoiError::None?ActionTriggerStatus::Completed:ActionTriggerStatus::Failed,result.commitId};
+        };
+        if(!context.host->AttachInput(std::move(binding))){m_impl->m_host.reset();m_impl->m_data.reset();m_impl->m_views.reset();return false;}
+    }
     m_impl->m_state.isAttached=true; return true;
 }
 bool RoiEditingHostFeature::DetachHost()
@@ -1144,6 +1252,10 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
         }
     } catch (...) { if (request.action==RoiEditingAction::Begin) (void)state.ClearDraft(); result.error=RoiError::Unavailable;}
     state.m_state.error=result.error;
+    if(result.error==RoiError::None)if(const auto host=state.m_host) {
+        if(request.action==RoiEditingAction::Begin||request.action==RoiEditingAction::BeginDrawing)(void)host->SetInputOwner(GetFeatureId(),true);
+        if(!state.m_state.hasDraft)(void)host->SetInputOwner(GetFeatureId(),false);
+    }
     return result;
 }
 RoiEditingState RoiEditingHostFeature::GetState() const

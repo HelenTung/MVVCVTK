@@ -1249,7 +1249,7 @@ bool BuildCoordinatedFrameProtocolTest()
     if (!session.BuildSession()
         || !session.AttachFeature(featureZ)
         || !session.AttachFeature(featureA)
-        || !session.AttachHotkeys({})) {
+        || !session.GetInteractionController()) {
         return false;
     }
     const auto* primaryEndpoint =
@@ -1569,8 +1569,9 @@ bool BuildStyleQualityTest()
         || std::abs(cameraAfter[2] - cameraBefore[2]) > 1e-9;
     const std::size_t cameraDirectRenderCount =
         renderWindow->GetRenderCount();
-    const bool hasCameraDirectRender =
-        cameraDirectRenderCount > cameraRenderCount;
+    // SDK 导航只登记 dirty，由同一个 Timer/frame 入口绘制。
+    const bool hasCameraDeferredRender =
+        cameraDirectRenderCount == cameraRenderCount;
     (void)SendTimer(interactor);
     const bool hasCameraFinalRender =
         renderWindow->GetRenderCount()
@@ -1757,7 +1758,7 @@ bool BuildStyleQualityTest()
         && isRepeatedBoundaryStable
         && isRestartBoundaryStable
         && isDefaultCameraActive
-        && hasCameraDirectRender
+        && hasCameraDeferredRender
         && hasCameraFinalRender
         && isReplaceStill
         && isOldDetached
@@ -1796,8 +1797,8 @@ bool BuildStyleQualityTest()
             << isRestartBoundaryStable
             << " default_camera_active="
             << isDefaultCameraActive
-            << " camera_direct_render="
-            << hasCameraDirectRender
+            << " camera_deferred_render="
+            << hasCameraDeferredRender
             << " camera_final_render="
             << hasCameraFinalRender
             << " replace_still=" << isReplaceStill
@@ -2384,6 +2385,8 @@ bool BuildZoomRenderTest()
     // Start 已完成并领取首帧 dirty，后续只观察右键缩放的 render 来源。
     const std::size_t renderCount = renderWindow->GetRenderCount();
     auto* camera = endpoint->renderer->GetActiveCamera();
+    // 此夹具尚未加载切片数据，显式设置要验证的平行投影路径。
+    camera->SetParallelProjection(true);
     const double startScale = camera->GetParallelScale();
     endpoint->interactor->SetEventPosition(100, 100);
     endpoint->interactor->InvokeEvent(

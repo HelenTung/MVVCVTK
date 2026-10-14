@@ -44,11 +44,13 @@ public:
         const InteractionEvent& eve);
 
     // 先收口 active capture，再对其余 Handler 广播 Cancel。
+    bool GetHasCapture() const noexcept { return m_capture&&m_capture->GetIsActive(); }
+    InteractionResult CancelCurrentCapture(const InteractionEvent& event);
     InteractionResult SendCancel(const InteractionEvent& eve);
 
     bool GetIsIdle() const noexcept
     {
-        return !m_capture && m_dispatchDepth == 0;
+        return (!m_capture||!m_capture->GetIsActive()) && m_dispatchDepth == 0;
     }
 
     // 分发事件

@@ -40,11 +40,16 @@ QJsonObject RoiGeometryParameters(const RoiPrimitive& primitive)
     for(int axis=0;axis<3;++axis){double length=0;for(int row=0;row<3;++row)length+=matrix[row*4+axis]*matrix[row*4+axis];size[axis]=2*std::sqrt(length);for(int row=0;row<3;++row)direction[row*3+axis]=matrix[row*4+axis]/(size[axis]*0.5);}
     return {{"shape",shape},{"centerMM",GetValues(center)},{"sizeMM",GetValues(size)},{"direction3D",GetValues(direction)},{"boxToSource",QJsonValue()}};
 }
-RoiPrimitive GetRoiPrimitive(const QJsonObject& p,const ImageDescriptor& source,RoiPrimitive primitive)
+RoiPrimitive GetRoiPrimitive(const QJsonObject& p,const ImageDescriptor& source,
+    std::optional<RoiPrimitive> existing={})
 {
+    auto primitive=existing ? std::move(*existing):RoiPrimitive{};
     const auto shape=p.contains("shape") ? GetEnum<RoiShape>(p,"shape",{{"Box",RoiShape::Box},{"Sphere",RoiShape::Sphere},{"Cylinder",RoiShape::Cylinder},{"Ellipsoid",RoiShape::Ellipsoid},{"EllipticCylinder",RoiShape::EllipticCylinder},{"HalfSpace",RoiShape::HalfSpace},{"Contour",RoiShape::Contour},{"ProjectedContour",RoiShape::ProjectedContour},{"Brush",RoiShape::Brush},{"MaskReference",RoiShape::MaskReference}}):primitive.shape;
+    const bool reuseGeometry=existing && shape==primitive.shape;
     if (shape!=primitive.shape) {primitive={};primitive.shape=shape;}
-    if(primitive.shape==RoiShape::Box || primitive.shape==RoiShape::Ellipsoid)primitive.localToSource=GetRoiBox(p,source,primitive.localToSource);
+    if(primitive.shape==RoiShape::Box || primitive.shape==RoiShape::Ellipsoid)
+        primitive.localToSource=GetRoiBox(p,source,reuseGeometry
+            ? std::optional<std::array<double,16>>{primitive.localToSource}:std::nullopt);
     else if (shape==RoiShape::Sphere || shape==RoiShape::Cylinder || shape==RoiShape::HalfSpace) {
         if(p.contains("centerMM") && !p["centerMM"].isNull())primitive.origin=GetArray<double,3>(p["centerMM"]);
         if (shape!=RoiShape::HalfSpace) primitive.radius=GetNumber(p,"radius");
@@ -154,7 +159,13 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
     panel->AttachAction("Begin",beginParameters,[panel,feature,remember](auto id,const auto& p) {
         const auto source=panel->GetSession()->GetImageDescriptor();if(!source)throw std::invalid_argument("没有当前体数据");
         RoiRequest draft;draft.definition.source=source->dataRevision;draft.metadata=GetRoiMetadata(p);
-        RoiNode node;auto values=p;if(!values.contains("centerMM") || values["centerMM"].isNull()){const auto matrix=GetRoiBox({},*source);values["centerMM"]=QJsonArray{matrix[3],matrix[7],matrix[11]};}node.primitive=GetRoiPrimitive(values,*source,node.primitive);
+        RoiNode node;auto values=p;
+        if(!values.contains("centerMM") || values["centerMM"].isNull()){
+            const auto matrix=GetRoiBox({},*source);
+            values["centerMM"]=QJsonArray{matrix[3],matrix[7],matrix[11]};
+        }
+        // 新建工具没有已有几何；按源范围初始化，不能把单位矩阵当成 2 mm 盒。
+        node.primitive=GetRoiPrimitive(values,*source);
         draft.definition.nodes.push_back(node);
         RoiEditingRequest request;request.action=RoiEditingAction::Begin;request.draft=std::move(draft);const auto result=feature->SendRequest(request);
         if(result.error==RoiError::None)remember(node.primitive,RoiMetadataParameters(p));

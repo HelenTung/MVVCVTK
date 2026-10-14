@@ -2,6 +2,7 @@
 #include "Services/GapAnalysisService.h"
 
 #include "Data/DataPayloads.h"
+#include "FeatureSupport/LabelMapBuilder.h"
 #include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"
@@ -1434,7 +1435,10 @@ void GapAnalysisService::Impl::StartWorker(
                         payloads->voids = CreateVoidTable(result.voids, m_isStopping);
                         payloads->statistics = CreateStatisticsTable(result.statistics);
                         if (result.parent) {
-                            payloads->parentLabels=CreateLabelPayload(result.parent->labelImage,source->GetGeometry(),m_isStopping,"GapAnalysis.parent-labels");
+                            payloads->parentLabels = result.parent->labelImage == result.labelImage
+                                ? LabelMapBuilder::ShareFrozen(payloads->labels,
+                                    "GapAnalysis.parent-labels", "Gap parent detection")
+                                : CreateLabelPayload(result.parent->labelImage,source->GetGeometry(),m_isStopping,"GapAnalysis.parent-labels");
                             payloads->parentVoids=CreateVoidTable(result.parent->voids,m_isStopping);
                             auto parent=std::make_shared<GapParentRecord>();parent->source=result.parent->sourceRevision;parent->parameters=result.parent->detectionParameters;parent->statistics=result.parent->statistics;parent->labels=payloads->parentLabels;parent->voids=std::make_shared<const std::vector<VoidRegion>>(result.parent->voids);if(parent->GetValid())payloads->parentRecord=std::move(parent);
                         }
@@ -2681,7 +2685,7 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
         return {};
     }
     if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(std::int32_t)) return {};
-    auto values = std::make_shared<std::vector<std::int32_t>>(*voxelCount);
+    auto values = std::make_unique<std::vector<std::int32_t>>(*voxelCount);
     const auto* source = static_cast<const std::int32_t*>(scalars->GetVoidPointer(0));
     constexpr std::size_t copyBatch = 65536;
     for (std::size_t offset = 0; offset < values->size(); offset += copyBatch) {
@@ -2690,10 +2694,9 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
             values->data() + offset);
     }
     if (isStopping.load()) return {};
-    auto payload = std::make_shared<const LabelMap3DPayload>(
-        geometry, LabelMapValues{ std::shared_ptr<const std::vector<std::int32_t>>(std::move(values)) },
-        std::vector<LabelDefinition>{}, id, std::string_view(id)=="GapAnalysis.labels" ? "Gap analysis":"Gap parent detection");
-    return payload->GetValid() ? payload : nullptr;
+    return LabelMapBuilder::Build(geometry, std::move(values),
+        [&isStopping] { return isStopping.load(); }, id,
+        std::string_view(id)=="GapAnalysis.labels" ? "Gap analysis":"Gap parent detection");
 }
 
 std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPayload(

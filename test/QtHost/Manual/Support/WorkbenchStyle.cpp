@@ -4,7 +4,7 @@ QString GetWorkbenchStyle()
 {
     return QStringLiteral(R"(
 QMainWindow, QWidget#workbench { background: #eaf0f6; color: #23364b; }
-QWidget#workbenchToolbar, QWidget#workbenchNavigation, QWidget#diagnosticBar,
+QWidget#workbenchToolbar, QWidget#workbenchNavigation, QWidget#workbenchInput, QWidget#diagnosticBar,
 QWidget#objectColumn, QWidget#parameterPages { background: #ffffff; }
 QLabel#currentInputIdentity { color: #214c7a; font-weight: 600; }
 QLabel#currentInputGeometry, QLabel#businessInput { color: #62758b; }

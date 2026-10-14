@@ -99,13 +99,51 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     };
     const auto viewed=[panel,resolveResult]{return resolveResult(panel->GetActionParameters("Result"));};
     auto appliedDisplays=std::make_shared<QMap<QString,QJsonObject>>();
-    const auto send = [panel, feature, visible,appliedDisplays](std::uint64_t id, ThicknessRequest request) {
+    struct ViewLease {
+        std::uint64_t action=0, presentationCommand=0;
+        HostRenderMode original=HostRenderMode::Volume;
+        DataRevisionRef source;
+        bool preparing=true, cancelled=false;
+    };
+    auto lease=std::make_shared<std::shared_ptr<ViewLease>>();
+    const QPointer<ModulePanel> wallOwner(panel);
+    const auto afterUpdates=[wallOwner](std::function<void()> next) {
+        // Host 写入回调与已提交的场景快照不是同一时钟；退出当前回调栈后推进展示事务。
+        if(wallOwner)QMetaObject::invokeMethod(wallOwner,[wallOwner,next]{
+            if(!wallOwner)return;
+            if(const auto session=wallOwner->GetSession())(void)session->SendUpdates();
+            next();
+        },Qt::QueuedConnection);
+    };
+    const auto restore=[wallOwner,lease,afterUpdates](std::uint64_t id,std::function<void(bool)> done) {
+        if(!wallOwner || !*lease || (*lease)->action!=id) {done(true);return;}
+        const auto saved=*lease;
+        const auto finish=[lease,saved,done](bool succeeded){if(*lease==saved)*lease={};done(succeeded);};
+        afterUpdates([wallOwner,saved,finish,afterUpdates]{
+        if(!wallOwner) {finish(false);return;}
+        const auto session=wallOwner->GetSession();
+        if(!session) {finish(false);return;}
+        const auto scenes=session->GetSceneViewStates();
+        const auto current=std::find_if(scenes.begin(),scenes.end(),[](const auto& view){return view.id=="primary-3d";});
+        // 用户改变展示或输入后保留其选择；只撤销本次测量取得的显示资源租约。
+        const auto preparedMode=saved->original==HostRenderMode::Volume?HostRenderMode::IsoSurface:HostRenderMode::CompositeIsoSurface;
+        if(current==scenes.end() || wallOwner->GetContext().workflow.primaryPresentationCommand!=saved->presentationCommand
+            || !current->presentation || current->presentation->dataRevision!=saved->source
+            || current->presentation->viewMode!=preparedMode) {finish(true);return;}
+        HostViewSetRequest request;request.targetView.viewId="primary-3d";request.mode=saved->original;
+        const auto admission=session->SendRequest(std::move(request),[finish,afterUpdates](HostResult result){
+            afterUpdates([finish,result]{finish(result.isSucceeded);});
+        });
+        if(admission.status!=HostAdmissionStatus::Accepted)finish(false);
+        });
+    };
+    const auto send = [panel, feature, visible,appliedDisplays,restore](std::uint64_t id, ThicknessRequest request) {
         std::optional<ThicknessDisplay> display;
         if (const auto* value = std::get_if<ThicknessStartRequest>(&request)) display = value->display;
         else if (const auto* value = std::get_if<ThicknessDisplayRequest>(&request)) display = value->display;
         else if (const auto* value = std::get_if<ThicknessActivationRequest>(&request)) display = value->display;
         const QPointer<ModulePanel> owner(panel);
-        const auto admission = feature->SendRequest(std::move(request), [owner, feature, visible, display, id,appliedDisplays](const ThicknessResult& result) {
+        const auto admission = feature->SendRequest(std::move(request), [owner, feature, visible, display, id,appliedDisplays,restore](const ThicknessResult& result) {
             if (!owner) return;
             if (display && result.status == ThicknessStatus::Succeeded) *visible = display->isVisible;
             const auto record=owner->GetContext().records.GetRecord(id);
@@ -118,10 +156,15 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             if (const auto snapshot = feature->GetResult(result.result)) {
                 const auto stats = Statistics(*snapshot); for (auto it = stats.begin(); it != stats.end(); ++it) info[it.key()] = it.value();
             }
-            owner->SetComplete(id, Status(result.status), info);
+            restore(id,[owner,id,status=Status(result.status),info](bool restored) mutable {
+                info["viewRestoreSucceeded"]=restored;
+                if(!restored && status=="Succeeded")status="SucceededWithDisplayFailure";
+                if(owner)owner->SetComplete(id,status,info);
+            });
         });
         panel->SetAdmission(id, admission.status == ThicknessAdmissionStatus::Accepted,
             {{"requestId", QString::number(admission.requestId)}, {"admissionStatus", static_cast<int>(admission.status)}});
+        if(admission.status!=ThicknessAdmissionStatus::Accepted)restore(id,[](bool){});
     };
     const auto build=[panel](const QJsonObject& p) {
         ThicknessInputSelection selection;
@@ -159,8 +202,51 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("Start", GetJson(R"({"source":"current","labels":"parts","mesh":"surface","materialLabels":[],"unit":"Millimeter",
         "maxDistance":null,"sampleSpacing":null,"materialThreshold":null,
         "coneAngleDegrees":30,"directionCount":9,"boundaryPolicy":"SourceExtentLocal",
-        "maxBoundaryError":null,"evaluationRoi":""})"), [build,send](auto id,const auto& p){send(id,build(p));}, TestPolicy::Compute, true);
-    panel->AttachAction("Cancel", {{"targetRequestId", "0"}}, [send](auto id, const auto& p) {
+        "maxBoundaryError":null,"evaluationRoi":""})"), [panel,feature,build,send,lease,restore,wallOwner,afterUpdates](auto id,const auto& p){
+        auto request=build(p);
+        if(*lease || feature->GetState().isBusy) {panel->SetAdmission(id,false,{{"message","壁厚测量正在进行"}});return;}
+        auto saved=std::make_shared<ViewLease>();saved->action=id;*lease=saved;
+        afterUpdates([wallOwner,lease,saved,request,send,restore,afterUpdates]() mutable {
+        if(!wallOwner || *lease!=saved)return;
+        if(saved->cancelled) {*lease={};wallOwner->SetComplete(saved->action,"Cancelled");return;}
+        const auto session=wallOwner->GetSession();
+        if(!session){*lease={};wallOwner->SetComplete(saved->action,"Failed");return;}
+        const auto view=session->GetRenderViewState({"primary-3d"});
+        if(!view || (view->viewMode!=HostRenderMode::Volume && view->viewMode!=HostRenderMode::CompositeVolume)) {*lease={};send(saved->action,std::move(request));return;}
+        saved->original=view->viewMode;saved->source=view->dataRevision;
+        saved->presentationCommand=wallOwner->GetContext().workflow.primaryPresentationCommand;
+        HostViewSetRequest display;display.targetView.viewId="primary-3d";
+        display.mode=view->viewMode==HostRenderMode::Volume?HostRenderMode::IsoSurface:HostRenderMode::CompositeIsoSurface;
+        // 原始灰度 CUDA 输入与体渲染纹理分时使用显存；不裁剪、降采样或替换测量输入。
+        const auto admission=session->SendRequest(std::move(display),[wallOwner,lease,saved,request,send,restore,afterUpdates](HostResult result) mutable {
+            afterUpdates([wallOwner,lease,saved,request,send,restore,result]() mutable {
+            if(!wallOwner || *lease!=saved)return;
+            if(saved->cancelled) {
+                restore(saved->action,[wallOwner,saved](bool restored){if(wallOwner)wallOwner->SetComplete(saved->action,"Cancelled",{{"viewRestoreSucceeded",restored}});});
+                return;
+            }
+            if(!result.isSucceeded) {
+                restore(saved->action,[wallOwner,saved,result](bool restored){if(wallOwner)wallOwner->SetComplete(saved->action,"Failed",{{"message",QString::fromStdString(result.message)},{"viewRestoreSucceeded",restored}});});
+                return;
+            }
+            const auto view=wallOwner->GetSession()->GetRenderViewState({"primary-3d"});
+            const auto preparedMode=saved->original==HostRenderMode::Volume?HostRenderMode::IsoSurface:HostRenderMode::CompositeIsoSurface;
+            if(!view || view->viewMode!=preparedMode || view->dataRevision!=saved->source) {
+                restore(saved->action,[wallOwner,saved](bool restored){if(wallOwner)wallOwner->SetComplete(saved->action,"Failed",
+                    {{"message","壁厚准备期间三维展示或输入已改变，未启动测量。"},{"viewRestoreSucceeded",restored}});});
+                return;
+            }
+            saved->preparing=false;send(saved->action,std::move(request));
+            });
+        });
+        if(admission.status!=HostAdmissionStatus::Accepted) {*lease={};wallOwner->SetComplete(saved->action,"Rejected",{{"message",QString::fromStdString(admission.message)}});}
+        });
+    }, TestPolicy::Compute, true);
+    panel->AttachAction("Cancel", {{"targetRequestId", "0"}}, [panel,send,lease](auto id, const auto& p) {
+        if(*lease && (*lease)->preparing && GetId(p["targetRequestId"])==0) {
+            (*lease)->cancelled=true;panel->SetAdmission(id,true);panel->SetComplete(id,"Succeeded");
+            return;
+        }
         ThicknessRequest r; r = ThicknessCancelRequest{}; std::get<ThicknessCancelRequest>(r).targetRequestId = GetId(p["targetRequestId"]); send(id, r);
     }, TestPolicy::Stop);
     panel->AttachAction("Clear", {}, [send](auto id, const auto&) {
@@ -216,9 +302,9 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         result["nodesSha256"]=QString::fromLatin1(nodeHash.result().toHex());
         panel->SetComplete(id,"Observed",result);
     },TestPolicy::Read);
-    panel->onObserve = [panel, feature, visible,viewed,build,appliedDisplays] {
+    panel->onObserve = [panel, feature, visible,viewed,build,appliedDisplays,lease] {
         const auto state = feature->GetState();
-        QJsonObject summary{{"isBusy", state.isBusy}, {"isCurrent", state.isCurrent}, {"requestId", QString::number(state.requestId)},
+        QJsonObject summary{{"isBusy", state.isBusy || bool(*lease)}, {"isCurrent", state.isCurrent}, {"requestId", QString::number(state.requestId)},
             {"result", GetRefText(state.result)}, {"isDisplayReady", state.isDisplayReady}, {"isVisible", *visible}};
         const auto result = feature->GetResult(viewed()); summary["hasResult"] = result.has_value();
         summary["activeResult"]=GetDataRevisionRefValid(state.result)?GetRefText(state.result):QString();
@@ -317,12 +403,21 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         QJsonArray reasons;for(std::size_t i=0;i<s.reasonCounts.size();++i)if(s.reasonCounts[i])reasons.append(QJsonArray{QString::number(i),QString::number(s.reasonCounts[i]),s.reasonAreas[i]});
         panel->GetStatisticsWidget()->SetTable({"有效性原因编号","样本数","面积 mm²"},reasons);
         panel->GetStatisticsWidget()->onInterval=[panel,feature,ref](double low,double high) {
+            if(panel->GetStatisticsWidget()->GetInteractionMode()=="编辑评价区间") {
+                panel->SetParameterPatch("SetEvaluation",{{"lower",low},{"upper",high}});return;
+            }
             const auto snapshot=feature->GetResult(ref);if(!snapshot || !snapshot->samples)return;
             for(std::size_t i=0;i<snapshot->samples->size();++i){const auto& sample=(*snapshot->samples)[i];
                 if(sample.validity==ThicknessValidity::Valid && panel->GetStatisticsWidget()->ContainsInterval(sample.thickness,low,high)) {
                     panel->SendAction("SelectSample",{{"result",GetRefText(ref)},{"sampleIndex",QString::number(i)}});return;}}
             if(panel->onMessage)panel->onMessage("所选区间没有可定位的有效壁厚样本。");
         };
+        panel->GetStatisticsWidget()->SetInteractionModes({"定位有效壁厚","编辑评价区间"});
+        const auto evaluationDraft=panel->GetActionParameters("SetEvaluation");
+        panel->GetStatisticsWidget()->SetMarkers(QJsonArray{
+            QJsonObject{{"label","评价下限"},{"key","lower"},{"editable",true},{"value",GetInputNumber(evaluationDraft,"lower",e.lower)}},
+            QJsonObject{{"label","评价上限"},{"key","upper"},{"editable",true},{"value",GetInputNumber(evaluationDraft,"upper",e.upper)}}});
+        panel->GetStatisticsWidget()->onMarker=[panel](const QString& key,double value){if(panel->GetStatisticsWidget()->GetInteractionMode()=="编辑评价区间")panel->SetParameterPatch("SetEvaluation",{{key,value}});};
         return true;
     };
     return panel;
