@@ -715,7 +715,14 @@ void CheckNodeErrorBoundary(TestWindow& window)
 }
 std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidgetItem* item, const QString& action)
 {
+    const auto nodeId=item->data(0,Qt::UserRole).toJsonObject()["id"].toString();
+    ModulePanel* owner=nullptr;for(auto* panel:window.findChildren<ModulePanel*>())if(panel->GetCatalogTree()==tree){owner=panel;break;}
+    Check(owner!=nullptr,"scene context menu has an actual owning business page");
+    // 后台 Send 不切页面；右键必须先走真实导航，不能向隐藏历史树伪造点击。
+    window.GetWorkflow().onNavigate(owner->GetName(),action,{});QCoreApplication::processEvents();
+    item=FindNode(tree,nodeId);Check(item!=nullptr,"scene context target survives business-page navigation");
     ClickNode(tree, item); tree->scrollToItem(tree->currentItem()); tree->doItemsLayout();
+    Check(tree->isVisible(),"scene context menu uses a visible history tree");
     const auto point = tree->visualItemRect(tree->currentItem()).center();
     const auto clicked = std::make_shared<bool>(false);
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
