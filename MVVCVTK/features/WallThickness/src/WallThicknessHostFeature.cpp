@@ -524,7 +524,7 @@ class WallThicknessHostFeature::Impl final
         RemoveDisplay();
         m_active.reset();
         // 先释放自身的几何/采样缓存；外部快照仍由 scope 的 Reader/probe 门禁保护。
-        m_resultDisplays.clear();m_displayData={};m_geometryMesh={};m_geometrySamples.reset();
+        m_displayData={};m_geometryMesh={};m_geometrySamples.reset();
         if (!m_resultScopes.Clear(*m_context.data)) return false;
         if (m_hasInput && !m_context.host->DetachInput(featureId))
             return false;
