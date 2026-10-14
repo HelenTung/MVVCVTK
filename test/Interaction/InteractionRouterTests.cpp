@@ -852,6 +852,24 @@ void StartNativeWidgetCase(int& failureCount)
     };
     SetExpect(registry.GetFeaturePort().AttachInput(std::move(binding)),"原生控件动作装配失败",failureCount);
     context->GetRenderWindow()->SetOffScreenRendering(1);context->GetRenderWindow()->Render();
+    int exports=0;ApplicationAction reset;reset.info.actionId="application.resetProbe";reset.info.ownerId="application";
+    reset.info.bindings.push_back({"application.resetProbe.key",{InputTriggerKind::KeyPress,InputMouseButton::None,0,7,'R'}});
+    reset.execute=[&](const ActionContext&){++exports;return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    SetExpect(controller->RegisterAction(std::move(reset)),"字符动作登记失败",failureCount);
+    BindingPatch disableReset;disableReset.Disable("application.resetProbe.key");SetExpect(controller->ApplyBindings(disableReset).status==InputBindingStatus::Applied,"字符动作禁用失败",failureCount);
+    int exits=0;auto exitObserver=vtkSmartPointer<vtkCallbackCommand>::New();exitObserver->SetClientData(&exits);
+    exitObserver->SetCallback([](vtkObject*,unsigned long,void* data,void*){++*static_cast<int*>(data);});
+    const auto exitTag=context->GetInteractor()->AddObserver(vtkCommand::ExitEvent,exitObserver);
+    for(const char key:{'r','q'}) {
+        const char name[]{key,0};context->GetInteractor()->SetEventPosition(150,150);
+        context->GetInteractor()->SetKeyEventInformation(0,0,key,0,name);
+        context->GetInteractor()->InvokeEvent(vtkCommand::KeyPressEvent);
+        // 直接检验原生样式收到未消费 Char 时的行为，避免 HostInjected 防重门禁掩盖回落。
+        vtkInteractorStyle::SafeDownCast(context->GetInteractor()->GetInteractorStyle())->OnChar();
+        context->GetInteractor()->InvokeEvent(vtkCommand::KeyReleaseEvent);
+    }
+    SetExpect(exports==0&&exits==0&&camera->GetParallelScale()==3,"禁用或未匹配字符不得回落到 VTK 重置相机或退出",failureCount);
+    context->GetInteractor()->RemoveObserver(exitTag);(void)controller->RemoveAction("application.resetProbe");
     HostInputEvent event;event.viewId="native";event.x=150;event.y=150;event.kind=HostInputKind::PrimaryPress;
     const auto pressed=registry.SendInput(event);SetExpect(pressed.isSucceeded&&pressed.isHandled&&!context->GetIsInputIdle(),"原生控件按下须同时建立 SDK 捕获",failureCount);
     SetExpect(context->GetNavigation()->ZoomBy(1.1)==NavigationStatus::Busy,"业务捕获期间相机写入应拒绝",failureCount);

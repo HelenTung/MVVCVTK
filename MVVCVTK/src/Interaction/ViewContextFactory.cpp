@@ -13,9 +13,7 @@
 #include <vtkCommand.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkInteractorStyle.h>
-#include <vtkInteractorStyleImage.h>
 #include <vtkInteractorStyleUser.h>
-#include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkOrientationMarkerWidget.h>
 #include <vtkProp3D.h>
 #include <vtkPropPicker.h>
@@ -32,6 +30,14 @@
 #include <vector>
 
 namespace {
+
+class SdkInputStyle final : public vtkInteractorStyleUser {
+public:
+    static SdkInputStyle* New() { return new SdkInputStyle; }
+    vtkTypeMacro(SdkInputStyle,vtkInteractorStyleUser);
+    // User style 无 Char observer 时仍回落到父类；字符动作只由 SDK 分发。
+    void OnChar() override {}
+};
 
 // 统一输入先于 VTK widget/style；被 Feature 接管的事件不会再次修改 Prop。
 constexpr double kObserverPriority = 1.0;
@@ -586,7 +592,7 @@ bool StdViewContext::SetInputStyle()
         }
     }
 
-    m_interactor->SetInteractorStyle(vtkSmartPointer<vtkInteractorStyleUser>::New());
+    m_interactor->SetInteractorStyle(vtkSmartPointer<SdkInputStyle>::New());
     return true;
 }
 
