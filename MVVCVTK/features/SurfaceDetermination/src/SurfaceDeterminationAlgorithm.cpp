@@ -2608,21 +2608,22 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
             const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
                 result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
-            const auto selected=inputs.roi->GetTriangleSelection(triangle,maxWorkingBytes.GetBound(SIZE_MAX),0,getCancelled);
-            if (selected.error!=RoiError::None) return fail(SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection could not be read.");
-            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
             const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
             const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
             if (!(denominator>0)) continue;
-            for (const auto& piece:selected.triangles) {
+            const auto selected=inputs.roi->GetTriangleChunks(triangle,1024,[&](const auto& pieces){
+                for(const auto& piece:pieces){
                 SurfaceSelectionPiece record;record.parentTriangle=i/3;record.points=piece;
                 for (int p=0;p<3;++p) {const auto q=Subtract(piece[p],triangle[0]);const double aq=Dot(a,q),bq=Dot(b,q);
                     const double v=(bb*aq-ab*bq)/denominator,w=(aa*bq-ab*aq)/denominator;record.barycentric[p]={1-v-w,v,w};}
                 const auto u=Subtract(piece[1],piece[0]),v=Subtract(piece[2],piece[0]);
                 result.selectedAreaMM2+=0.5*std::hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]);
-                if(result.selection.size()>=maxWorkingBytes/sizeof(SurfaceSelectionPiece))return fail(SurfaceFailureReason::BudgetExceeded,"ROI surface selection exceeds the budget.");
                 result.selection.push_back(std::move(record));
-            }
+
+                }return !GetCancelled(getCancelled);
+            },0,getCancelled);
+            if(selected.error!=RoiError::None)return fail(selected.error==RoiError::Cancelled?SurfaceFailureReason::Cancelled:selected.error==RoiError::TooLarge?SurfaceFailureReason::BudgetExceeded:SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection failed.");
+            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
         }
     }
     result.execution.estimatedWorkingBytes = result.requiredBytes;
@@ -2669,24 +2670,25 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
             if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
             const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
                 result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
-            const auto selected=inputs.roi->GetTriangleSelection(triangle,maxWorkingBytes.GetBound(SIZE_MAX),0,getCancelled);
-            if (selected.error!=RoiError::None) return fail(SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection could not be read.");
-            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
             const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
             const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
             if (!(denominator>0)) continue;
-            for (const auto& piece:selected.triangles) {
+            const auto selected=inputs.roi->GetTriangleChunks(triangle,1024,[&](const auto& pieces){
+                for(const auto& piece:pieces){
                 SurfaceSelectionPiece record;record.parentTriangle=i/3;record.points=piece;
                 for (int p=0;p<3;++p) {const auto q=Subtract(piece[p],triangle[0]);const double aq=Dot(a,q),bq=Dot(b,q);
                     const double v=(bb*aq-ab*bq)/denominator,w=(aa*bq-ab*aq)/denominator;record.barycentric[p]={1-v-w,v,w};}
                 const auto u=Subtract(piece[1],piece[0]),v=Subtract(piece[2],piece[0]);
                 result.selectedAreaMM2+=0.5*std::hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]);
-                if(result.selection.size()>=maxWorkingBytes/sizeof(SurfaceSelectionPiece))return fail(SurfaceFailureReason::BudgetExceeded,"ROI surface selection exceeds the budget.");
                 result.selection.push_back(std::move(record));
-            }
+
+                }return !GetCancelled(getCancelled);
+            },0,getCancelled);
+            if(selected.error!=RoiError::None)return fail(selected.error==RoiError::Cancelled?SurfaceFailureReason::Cancelled:selected.error==RoiError::TooLarge?SurfaceFailureReason::BudgetExceeded:SurfaceFailureReason::UnsupportedRoi,"ROI triangle selection failed.");
+            result.selectionToleranceMM=std::max(result.selectionToleranceMM,selected.boundaryTolerance);
         }
     }
-    if(!AddWorkingBytes(result.selection.size(),sizeof(SurfaceSelectionPiece),bytes) || bytes>maxWorkingBytes)return fail(SurfaceFailureReason::BudgetExceeded,"Surface selected fragments exceed working budget.");
+    if(!AddWorkingBytes(result.selection.size(),sizeof(SurfaceSelectionPiece),bytes))return fail(SurfaceFailureReason::BudgetExceeded,"Surface selected fragment size overflows.");
     result.requiredBytes=bytes;result.execution.estimatedWorkingBytes=bytes;result.execution.retainedBytes=bytes;
     result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Selected the immutable parent surface without measurement.";return result;
 }

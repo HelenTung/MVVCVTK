@@ -443,8 +443,7 @@ class Kernel final
             return;
         }
         auto source=original;for(auto& point:source)point=Add(point,m_geometry.origin);
-        const auto selected=m_work.evaluationRoi->GetTriangleSelection(source,
-            WorkLimit(m_work.archive.limits.maxWorkingBytes).GetBound(std::numeric_limits<std::size_t>::max()),0,
+        const auto selected=m_work.evaluationRoi->GetTriangleSelection(source,0,
             [&]{CheckWork(m_work);return false;});
         if(selected.error!=RoiError::None) {
             CheckWork(m_work);

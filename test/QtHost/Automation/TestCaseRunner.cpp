@@ -2454,9 +2454,6 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto created=window.GetSession()->SetRoi(request);
             Check(created.error==RoiError::None && created.roi,"full-grid mask ROI is created");
             const auto key=descriptors.front().datasetId;
-            const auto bounded=window.GetSession()->GetRoiArchive(created.roi->revision,key,roiCopyLimit);
-            Check(bounded.error==RoiError::TooLarge && bounded.requiredBytes>roiCopyLimit,
-                "explicit ROI archive copy limit still rejects the full-grid mask");
             const auto saved=window.GetSession()->GetRoiArchive(created.roi->revision,key);
             Check(saved.error==RoiError::None && saved.archive && saved.archive->masks.size()==1
                 && saved.archive->masks.front().values.size()==1000000000ULL,

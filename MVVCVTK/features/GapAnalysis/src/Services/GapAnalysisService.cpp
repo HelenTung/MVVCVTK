@@ -2372,13 +2372,16 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     struct Intersection {std::size_t count=0;std::array<int,6> bounds{INT_MAX,INT_MIN,INT_MAX,INT_MIN,INT_MAX,INT_MIN};};
     std::unordered_map<int,Intersection> intersections;std::unordered_set<int> detected;
     std::size_t evaluated=0;int extent[6];result.labelImage->GetExtent(extent);
-    const auto belongs=[&](const RoiReadSnapshot& roi,std::size_t index) {if (!roi) return true;double point[3];result.labelImage->GetPoint(static_cast<vtkIdType>(index),point);return roi->GetContains({point[0],point[1],point[2]});};
+    auto evaluation=params.evaluationRoi?params.evaluationRoi->GetQuery():RoiQueryResult{};
+    auto detection=params.detectionRoi?params.detectionRoi->GetQuery():RoiQueryResult{};
+    if((params.evaluationRoi && (evaluation.error!=RoiError::None || !evaluation.query)) || (params.detectionRoi && (detection.error!=RoiError::None || !detection.query)))return false;
+    const auto belongs=[&](const std::unique_ptr<RoiQuery>& roi,std::size_t index) {if (!roi) return true;double point[3];result.labelImage->GetPoint(static_cast<vtkIdType>(index),point);return roi->GetContains({point[0],point[1],point[2]});};
     int dims[3];result.labelImage->GetDimensions(dims);
     for (std::size_t i=0;i<count;++i) {
         if (!(i%4096) && m_isStopping.load()) return false;
-        const bool selected=belongs(params.evaluationRoi,i);if (selected) ++evaluated;
+        const bool selected=belongs(evaluation.query,i);if (selected) ++evaluated;
         if (labels[i]<=0) continue;
-        if (belongs(params.detectionRoi,i)) detected.insert(labels[i]);
+        if (belongs(detection.query,i)) detected.insert(labels[i]);
         if (selected) {auto& intersection=intersections[labels[i]];++intersection.count;
             const std::array<int,3> index{extent[0]+static_cast<int>(i%static_cast<std::size_t>(dims[0])),
                 extent[2]+static_cast<int>((i/static_cast<std::size_t>(dims[0]))%static_cast<std::size_t>(dims[1])),
@@ -2405,7 +2408,7 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     if (partial || selectedRegions.size()!=result.voids.size()) {
         auto image=vtkSmartPointer<vtkImageData>::New();image->CopyStructure(result.labelImage);image->AllocateScalars(VTK_INT,1);auto* selected=static_cast<int*>(image->GetScalarPointer());if (!selected) return false;
         for (std::size_t i=0;i<count;++i) {if (!(i%4096) && m_isStopping.load()) return false;
-            selected[i]=kept.count(labels[i]) && (params.roiPolicy!=GapRoiPolicy::InsideOnly || belongs(params.evaluationRoi,i)) ? labels[i]:0;}
+            selected[i]=kept.count(labels[i]) && (params.roiPolicy!=GapRoiPolicy::InsideOnly || belongs(evaluation.query,i)) ? labels[i]:0;}
         image->Modified();result.labelImage=std::move(image);
     }
     result.voids=std::move(selectedRegions);

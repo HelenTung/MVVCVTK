@@ -352,7 +352,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
     if (module=="Gap" && key=="roiPolicy")return {{"InsideOnly","只评价区域内部分"},{"WholeIfIntersects","相交后保留整个缺陷"}};
     if (module == "Roi" && key == "shape") return {{"Box","区域盒"},{"Sphere","球形区域"},{"Cylinder","有限圆柱"},{"Ellipsoid","椭球"},{"EllipticCylinder","有限厚度椭圆区域"},{"HalfSpace","半空间"},{"Contour","平面轮廓与有限厚度"},{"ProjectedContour","冻结视图体积圈选"},{"Brush","画笔路径"},{"MaskReference","已有标签或掩膜"}};
-    if (module=="Roi" && key=="selectionMode") return {{"Replace","替换目标全部范围"},{"Add","添加本次选区"},{"Subtract","扣除本次选区"},{"Intersect","与本次选区求交"},{"NewRoi","另建独立区域"}};
+    if (module=="Roi" && key=="selectionMode") return {{"Replace","替换目标全部范围"},{"Add","添加本次选区"},{"Subtract","扣除本次选区"},{"Intersect","与本次选区求交"}};
     if (module=="Roi" && key=="outputMode") return {{"UpdateTarget","更新原区域"},{"CreateNew","建立新区域"}};
     if (module=="Roi" && key=="radiusUnit") return {{"Millimetres","毫米"},{"Voxels","索引体素"}};
     if (module=="Roi" && key=="connectivity") return {{"Faces","6 邻接"},{"Full","26 邻接"}};
