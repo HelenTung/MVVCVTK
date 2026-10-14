@@ -8,6 +8,8 @@
 #include <vector>
 class QLabel;
 class QTreeWidget;
+class QComboBox;
+class QTabWidget;
 namespace Manual {
 using GrayPointFilter=std::function<std::vector<bool>(const std::vector<std::array<double,3>>&)>;
 struct GrayStatisticsScope {
@@ -35,16 +37,24 @@ public:
     void SetCompact(bool compact);
     bool ContainsInterval(double value,double low,double high) const;
     void SetMarkers(const QJsonArray& markers);
+    void SetInteractionModes(const QStringList& modes);
+    QString GetInteractionMode() const;
+    void ShowTable();
     QJsonObject GetHistogram() const { return m_data; }
     std::function<void(double,double)> onInterval;
     std::function<void(int)> onRow;
+    std::function<void(const QString&,double)> onMarker;
 private:
     class Plot;
     Plot* m_plot=nullptr;
     QLabel* m_title=nullptr;
     QLabel* m_description=nullptr;
     QTreeWidget* m_table=nullptr;
+    QComboBox* m_interaction=nullptr;
+    QTabWidget* m_tabs=nullptr;
     QJsonObject m_data;
+    QStringList m_tableHeadings;
+    QJsonArray m_tableRows;
     QTimer m_timer;
     QString m_key,m_jobTitle,m_xUnit,m_yUnit,m_jobDescription;
     std::function<StatisticsSamples(std::size_t)> m_read;

@@ -108,9 +108,12 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))throw std::invalid_argument("尚无已发布缺陷表");
         const auto page=panel->GetContext().workflow.readRecordPage(state.voidTable,GetId(p["pageOffset"]),128,*listRange);
         QJsonArray rows,indices;for(const auto value:page["rows"].toArray()) {
-            const auto row=value.toObject();rows.append(QJsonArray{row["void-id"],row["volume-mm3"],row["equivalent-diameter-mm"]});indices.append(row["rowIndex"]);
+            const auto row=value.toObject();rows.append(QJsonArray{row["void-id"],row["parent-volume-mm3"],row["intersection-volume-mm3"],
+                row["roi-partial"].isUndefined()?"—（未提供相交标志）":row["roi-partial"].toVariant().toULongLong()!=0?"部分相交":"完整",row["volume-mm3"],
+                row["whole-object-geometry"].isUndefined()?"—（未提供量值资格）":row["whole-object-geometry"].toVariant().toULongLong()!=0?"完整父缺陷":"ROI 片段（不是新封闭孔隙）"});indices.append(row["rowIndex"]);
         }
-        auto* widget=panel->GetStatisticsWidget();widget->SetTable({"缺陷编号","体积 mm³","等效直径 mm"},rows);
+        auto* widget=panel->GetStatisticsWidget();widget->SetTable({"父缺陷编号","完整体积 mm³","ROI 内体积 mm³","相交状态","本次统计体积 mm³","量值对象"},rows);
+        widget->ShowTable();
         widget->setProperty("defectRows",indices);widget->setProperty("defectNext",page["next"]);widget->setProperty("defectTotal",page["total"]);widget->setProperty("defectTable",GetRefText(state.voidTable));widget->setProperty("defectSource",GetRefText(state.sourceRevision));
         widget->onRow=[panel,widget](int row) {
             const auto indices=widget->property("defectRows").toJsonArray();if(row<0 || row>=indices.size())return;
@@ -143,6 +146,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             const auto upper=!edges.isEmpty() && high<edges.last().toDouble() ? std::nextafter(high,-std::numeric_limits<double>::infinity()) : high;
             *listRange=std::array<double,2>{low,upper};panel->SendAction("Defects",{{"pageOffset","0"}});
         };
+        panel->GetStatisticsWidget()->SetInteractionModes({"筛选缺陷列表"});
         return true;
     };
     panel->onObserve = [panel, feature,runParameters,listRange] {

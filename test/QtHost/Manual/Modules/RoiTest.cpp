@@ -265,16 +265,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         const auto state=feature->GetState();
         if(*pendingOperation && !state.isComputing){const auto id=**pendingOperation;pendingOperation->reset();panel->SetComplete(id,state.error==RoiError::None?"PreviewReady":"Failed",{{"error",int(state.error)},{"outputCount",int(state.operation.rois.size())}});}
         if(*pendingSave && !state.isComputing && !state.isSaving){const auto id=**pendingSave;pendingSave->reset();panel->SetComplete(id,!state.hasDraft && state.error==RoiError::None?"Succeeded":"Failed",{{"error",int(state.error)},{"roi",state.committedRoi?GetRefText(*state.committedRoi):QString()}});}
-        if(auto* form=panel->GetParameterEditor("SetDraft")) {
-            const auto shape=state.tool?state.tool->shape:RoiShape::Box;
-            const bool affine=shape==RoiShape::Box || shape==RoiShape::Ellipsoid;
-            form->SetFieldApplicability({{"boxToSource",affine},{"sizeMM",affine},{"direction3D",affine},
-                {"radius",shape==RoiShape::Sphere || shape==RoiShape::Cylinder || shape==RoiShape::Brush},
-                {"axis",shape==RoiShape::Cylinder || shape==RoiShape::HalfSpace},{"height",shape==RoiShape::Cylinder},
-                {"contours",shape==RoiShape::Contour || shape==RoiShape::ProjectedContour},{"planeToSource",shape==RoiShape::Contour || shape==RoiShape::Brush || shape==RoiShape::EllipticCylinder},
-                {"depthMM",shape==RoiShape::EllipticCylinder || shape==RoiShape::Contour || shape==RoiShape::ProjectedContour || shape==RoiShape::Brush},{"sourceToView",shape==RoiShape::ProjectedContour},{"viewToClip",shape==RoiShape::ProjectedContour},
-                {"pathMM",shape==RoiShape::Brush},{"isSliceBrush",shape==RoiShape::Brush},{"mask",shape==RoiShape::MaskReference},{"labels",shape==RoiShape::MaskReference}});
-        }
+        // 字段适用性由表单中的工具草稿决定；不能用已应用工具的形状覆盖尚未提交的形状选择。
         const auto input=panel->GetSession()->GetImageDescriptor();
         const auto roi=state.committedRoi?panel->GetSession()->GetRoiDescriptor(*state.committedRoi):std::optional<RoiDescriptor>{};
         bool dirty=false;

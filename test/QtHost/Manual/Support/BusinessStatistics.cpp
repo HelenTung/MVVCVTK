@@ -6,6 +6,13 @@
 #include <QPainter>
 #include <QMouseEvent>
 #include <QJsonArray>
+#include <QComboBox>
+#include <QTabWidget>
+#include <QToolButton>
+#include <QHBoxLayout>
+#include <QSignalBlocker>
+#include <QWheelEvent>
+#include <QKeyEvent>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -37,7 +44,8 @@ QJsonObject BuildHistogram(const std::vector<double>& values,const std::vector<d
 }
 class BusinessStatistics::Plot final : public QWidget {
 public:
-    explicit Plot(BusinessStatistics& owner):QWidget(&owner),m_owner(owner){setObjectName("businessHistogramPlot");setMinimumHeight(125);setMouseTracking(true);}
+    explicit Plot(BusinessStatistics& owner):QWidget(&owner),m_owner(owner){setObjectName("businessHistogramPlot");setMinimumHeight(125);setMouseTracking(true);setFocusPolicy(Qt::StrongFocus);}
+    void ResetRange(){m_hasRange=false;update();}
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this); painter.fillRect(rect(),Qt::white); painter.setPen(QColor("#62758b"));
@@ -45,27 +53,36 @@ protected:
         const auto comparison=m_owner.m_data["comparisonCounts"].toArray();
         if(counts.isEmpty() || edges.size()!=counts.size()+1){painter.drawText(rect(),Qt::AlignCenter,"暂无可用分布数据");return;}
         const QRectF area(62,24,width()-82,height()-60);
+        if(area.width()<=0 || area.height()<=0)return;
+        const auto fullLow=edges.first().toDouble(),fullHigh=edges.last().toDouble();
+        if(!(fullHigh>fullLow))return;
+        if(m_edges!=edges){m_edges=edges;m_hasRange=false;m_dragKey.clear();}
+        const auto low=m_hasRange?m_low:fullLow,high=m_hasRange?m_high:fullHigh;
         double maximum=0;for(const auto value:counts) maximum=std::max(maximum,value.toDouble());
         for(const auto value:comparison)maximum=std::max(maximum,value.toDouble());
         painter.drawText(QRectF(4,2,width()-8,18),Qt::AlignLeft,m_owner.m_data["yUnit"].toString());
         const int gridSteps=area.height()<60?2:3;
         for(int i=0;i<=gridSteps;++i){const auto y=area.bottom()-area.height()*i/gridSteps;painter.setPen(QColor("#e0e8f1"));painter.drawLine(QPointF(area.left(),y),QPointF(area.right(),y));painter.setPen(QColor("#62758b"));painter.drawText(QRectF(0,y-8,56,16),Qt::AlignRight,QString::number(maximum*i/gridSteps,'g',4));}
         painter.setPen(Qt::NoPen);painter.setBrush(QColor("#7ba4cc"));
-        const auto span=edges.last().toDouble()-edges.first().toDouble();
-        for(int i=0;i<counts.size();++i){const auto h=maximum>0 ? area.height()*counts[i].toDouble()/maximum : 0;const auto x=area.left()+area.width()*(edges[i].toDouble()-edges.first().toDouble())/span;const auto w=area.width()*(edges[i+1].toDouble()-edges[i].toDouble())/span;
+        const auto span=high-low;painter.save();painter.setClipRect(area);
+        for(int i=0;i<counts.size();++i){const auto h=maximum>0 ? area.height()*counts[i].toDouble()/maximum : 0;const auto x=area.left()+area.width()*(edges[i].toDouble()-low)/span;const auto w=area.width()*(edges[i+1].toDouble()-edges[i].toDouble())/span;
             painter.setBrush(QColor("#7ba4cc"));painter.drawRect(QRectF(x,area.bottom()-h,std::max(0.5,(comparison.isEmpty()?w:w*0.5)-0.5),h));
             if(comparison.size()==counts.size()){const auto other=maximum>0?area.height()*comparison[i].toDouble()/maximum:0;painter.setBrush(QColor("#c58d4e"));painter.drawRect(QRectF(x+w*0.5,area.bottom()-other,std::max(0.5,w*0.5-0.5),other));}}
-        painter.setPen(QColor("#62758b"));
-        painter.drawText(QRectF(area.left()-12,area.bottom()+4,100,18),Qt::AlignLeft,QString::number(edges.first().toDouble(),'g',6));
-        painter.drawText(QRectF(area.right()-100,area.bottom()+4,110,18),Qt::AlignRight,QString::number(edges.last().toDouble(),'g',6));
+        painter.restore();painter.setPen(QColor("#62758b"));
+        painter.drawText(QRectF(area.left()-12,area.bottom()+4,100,18),Qt::AlignLeft,QString::number(low,'g',6));
+        painter.drawText(QRectF(area.right()-100,area.bottom()+4,110,18),Qt::AlignRight,QString::number(high,'g',6));
         painter.drawText(QRectF(area.left(),height()-18,area.width(),18),Qt::AlignCenter,m_owner.m_data["xUnit"].toString());
-        const auto low=edges.first().toDouble(),high=edges.last().toDouble();
         if(high>low) for(const auto marker:m_owner.m_data["markers"].toArray()) {
-            const auto item=marker.toObject(); const auto value=item["value"].toDouble();if(value<low || value>high)continue;
+            const auto item=marker.toObject(); const auto value=item["key"].toString(item["label"].toString())==m_dragKey?m_candidate:item["value"].toDouble();if(value<low || value>high)continue;
             const auto x=area.left()+area.width()*(value-low)/(high-low);painter.setPen(QColor("#b87724"));painter.drawLine(QPointF(x,area.top()),QPointF(x,area.bottom()));painter.drawText(QRectF(x+2,6,90,18),item["label"].toString());
         }
     }
     void mouseMoveEvent(QMouseEvent* event) override {
+        if(!m_dragKey.isEmpty()) {
+            if(m_dragSource!=m_owner.m_data["description"].toString() || !m_owner.onMarker){m_dragKey.clear();return;}
+            if(m_owner.GetInteractionMode()=="查看分布"){m_dragKey.clear();update();return;}
+            m_candidate=ValueAt(event->pos().x());update();return;
+        }
         const auto counts=m_owner.m_data["counts"].toArray(),edges=m_owner.m_data["edges"].toArray();
         const auto i=GetBin(event->pos(),counts.size());
         if(i>=0 && edges.size()==counts.size()+1) {
@@ -76,18 +93,61 @@ protected:
         } else setToolTip({});
     }
     void mousePressEvent(QMouseEvent* event) override {
+        if(event->button()!=Qt::LeftButton)return;setFocus();
+        const auto edges=m_owner.m_data["edges"].toArray();if(edges.size()<2)return;
+        const auto low=m_hasRange?m_low:edges.first().toDouble(),high=m_hasRange?m_high:edges.last().toDouble();
+        if(m_owner.GetInteractionMode()!="查看分布" && m_owner.onMarker && high>low)for(const auto value:m_owner.m_data["markers"].toArray()) {
+            const auto marker=value.toObject();if(!marker["editable"].toBool())continue;
+            const auto x=62+(width()-82)*(marker["value"].toDouble()-low)/(high-low);
+            if(std::abs(event->pos().x()-x)<=8 && event->pos().y()>=4 && event->pos().y()<=height()-36) {
+                m_dragKey=marker["key"].toString(marker["label"].toString());m_candidate=marker["value"].toDouble();m_dragSource=m_owner.m_data["description"].toString();m_dragMode=m_owner.GetInteractionMode();return;
+            }
+        }
+        m_pressX=event->pos().x();m_pressBin=GetBin(event->pos(),edges.size()-1);
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
         if(event->button()!=Qt::LeftButton)return;
+        if(!m_dragKey.isEmpty()){
+            const auto key=m_dragKey;const auto value=m_candidate;m_dragKey.clear();update();
+            if(m_dragSource==m_owner.m_data["description"].toString() && m_owner.GetInteractionMode()==m_dragMode && m_owner.GetInteractionMode()!="查看分布" && m_owner.onMarker)m_owner.onMarker(key,value);
+            return;
+        }
         const auto edges=m_owner.m_data["edges"].toArray();const auto i=GetBin(event->pos(),edges.size()-1);
         const auto select=m_owner.onInterval;
-        if(i>=0 && select) select(edges[i].toDouble(),edges[i+1].toDouble());
+        if(i>=0 && m_pressBin>=0 && select && m_owner.GetInteractionMode()!="查看分布") {
+            if(std::abs(event->pos().x()-m_pressX)>4)select(std::min(ValueAt(m_pressX),ValueAt(event->pos().x())),std::max(ValueAt(m_pressX),ValueAt(event->pos().x())));
+            else select(edges[i].toDouble(),edges[i+1].toDouble());
+        }
+        m_pressBin=-1;
+    }
+    void wheelEvent(QWheelEvent* event) override {
+        const auto edges=m_owner.m_data["edges"].toArray();if(edges.size()<2)return;
+        const auto low=m_hasRange?m_low:edges.first().toDouble(),high=m_hasRange?m_high:edges.last().toDouble();
+        const auto center=ValueAt(event->pos().x()),factor=event->angleDelta().y()>0?0.8:1.25;
+        m_low=std::max(edges.first().toDouble(),center-(center-low)*factor);m_high=std::min(edges.last().toDouble(),center+(high-center)*factor);
+        if(m_high>m_low){m_hasRange=true;update();}event->accept();
+    }
+    void keyPressEvent(QKeyEvent* event) override {
+        if(event->key()==Qt::Key_Escape && !m_dragKey.isEmpty()) {
+            m_dragKey.clear();update();
+        }else QWidget::keyPressEvent(event);
     }
 private:
     BusinessStatistics& m_owner;
+    QJsonArray m_edges;
+    bool m_hasRange=false;
+    double m_low=0,m_high=1,m_candidate=0;
+    QString m_dragKey,m_dragSource,m_dragMode;
+    int m_pressX=0,m_pressBin=-1;
+    double ValueAt(int x) const {
+        const auto edges=m_owner.m_data["edges"].toArray();if(edges.size()<2 || width()<=82)return 0;
+        const auto low=m_hasRange?m_low:edges.first().toDouble(),high=m_hasRange?m_high:edges.last().toDouble();
+        return low+(high-low)*std::clamp((x-62)/(width()-82.),0.,1.);
+    }
     int GetBin(const QPoint& point,int count) const {
         const auto edges=m_owner.m_data["edges"].toArray();
         if(count<=0 || edges.size()!=count+1 || width()<=82 || height()<=60 || !QRectF(62,24,width()-82,height()-60).contains(point))return -1;
-        const auto x=point.x();
-        const auto value=edges.first().toDouble()+(edges.last().toDouble()-edges.first().toDouble())*(x-62)/(width()-82.0);
+        const auto value=ValueAt(point.x());
         int low=0,high=count;while(low+1<high){const auto middle=(low+high)/2;if(value>=edges[middle].toDouble())low=middle;else high=middle;}return low;
     }
 };
@@ -95,8 +155,14 @@ BusinessStatistics::BusinessStatistics(QWidget* parent):QWidget(parent)
 {
     setObjectName("businessStatistics");auto* layout=new QVBoxLayout(this);layout->setContentsMargins(8,4,8,4);layout->setSpacing(4);
     m_title=new QLabel(this);m_title->setObjectName("statisticsTitle");m_description=new QLabel(this);m_description->setWordWrap(true);m_description->setObjectName("statisticsProvenance");
-    layout->addWidget(m_title);layout->addWidget(m_description);m_plot=new Plot(*this);layout->addWidget(m_plot);
-    m_table=new QTreeWidget(this);m_table->setObjectName("businessResultTable");m_table->setRootIsDecorated(false);m_table->setMaximumHeight(150);m_table->hide();layout->addWidget(m_table);
+    layout->addWidget(m_title);layout->addWidget(m_description);
+    m_tabs=new QTabWidget(this);m_tabs->setObjectName("statisticsContentTabs");layout->addWidget(m_tabs,1);
+    auto* chart=new QWidget(m_tabs);auto* chartLayout=new QVBoxLayout(chart);chartLayout->setContentsMargins(0,0,0,0);chartLayout->setSpacing(2);
+    auto* controls=new QHBoxLayout;m_interaction=new QComboBox(chart);m_interaction->setObjectName("histogramInteraction");m_interaction->addItem("查看分布");controls->addWidget(m_interaction,1);
+    auto* reset=new QToolButton(chart);reset->setText("适配坐标轴");reset->setObjectName("resetHistogramRange");controls->addWidget(reset);chartLayout->addLayout(controls);
+    m_plot=new Plot(*this);m_plot->setToolTip("滚轮缩放坐标轴；先选择用途，再点击区间或拖动可编辑标记。Esc 取消标记编辑。");chartLayout->addWidget(m_plot,1);
+    connect(reset,&QToolButton::clicked,this,[this]{m_plot->ResetRange();});m_tabs->addTab(chart,"直方图");
+    m_table=new QTreeWidget(this);m_table->setObjectName("businessResultTable");m_table->setRootIsDecorated(false);m_tabs->addTab(m_table,"结果列表");
     connect(m_table,&QTreeWidget::itemClicked,this,[this](QTreeWidgetItem* item,int){if(onRow)onRow(item->data(0,Qt::UserRole).toInt());});
     m_timer.setSingleShot(true);connect(&m_timer,&QTimer::timeout,this,[this]{ReadBlock();});
 }
@@ -110,22 +176,34 @@ void BusinessStatistics::Present(const QJsonObject& data)
     m_data=data;m_title->setText(data["title"].toString());m_description->setText(data["description"].toString());m_description->setToolTip(data["description"].toString());
     m_plot->setVisible(!data["counts"].toArray().isEmpty() || m_state==State::Loading);m_plot->update();
 }
-void BusinessStatistics::ResetPresentation(){onInterval={};onRow={};m_table->clear();m_table->hide();}
-void BusinessStatistics::SetMessage(const QString& title,const QString& message){SetHistogram({{"title",title},{"description",message}});m_table->hide();}
+void BusinessStatistics::ResetPresentation(){onInterval={};onRow={};onMarker={};m_tableRows={};m_tableHeadings.clear();m_table->clear();m_tabs->setTabEnabled(1,false);}
+void BusinessStatistics::SetMessage(const QString& title,const QString& message){SetHistogram({{"title",title},{"description",message}});}
 void BusinessStatistics::SetTable(const QStringList& headings,const QJsonArray& rows)
 {
+    if(rows==m_tableRows && headings.size()==m_tableHeadings.size() && std::equal(headings.cbegin(),headings.cend(),m_tableHeadings.cbegin()))return;
+    m_tableRows=rows;m_tableHeadings=headings;
     m_table->clear();m_table->setHeaderLabels(headings);
     for(int i=0;i<rows.size();++i){QStringList cells;for(const auto value:rows[i].toArray())cells.append(value.isString()?value.toString():value.isNull()?"未测":QString::number(value.toDouble(),'g',8));auto* item=new QTreeWidgetItem(m_table,cells);item->setData(0,Qt::UserRole,i);}
-    m_table->header()->setSectionResizeMode(QHeaderView::ResizeToContents);m_table->setVisible(!rows.isEmpty() && (!m_compact || m_data["counts"].toArray().isEmpty()));
+    m_table->header()->setSectionResizeMode(QHeaderView::ResizeToContents);m_tabs->setTabEnabled(1,!headings.isEmpty());
+    if(m_data["counts"].toArray().isEmpty() && !headings.isEmpty())m_tabs->setCurrentIndex(1);
 }
 void BusinessStatistics::StopRead(){++m_generation;m_timer.stop();m_read={};}
-void BusinessStatistics::Cancel(){StopRead();onInterval={};onRow={};if(m_state==State::Loading){m_state=State::Cancelled;m_data["status"]="Cancelled";m_key.clear();}}
+void BusinessStatistics::Cancel(){StopRead();onInterval={};onRow={};onMarker={};if(m_state==State::Loading){m_state=State::Cancelled;m_data["status"]="Cancelled";m_key.clear();}}
 void BusinessStatistics::SetCompact(bool compact)
 {
     m_compact=compact;m_title->setMaximumHeight(compact?22:16777215);m_description->setMaximumHeight(compact?32:16777215);
-    m_plot->setMinimumHeight(compact?95:125);m_table->setMaximumHeight(compact?115:250);
-    m_table->setVisible(m_table->topLevelItemCount()>0 && (!compact || m_data["counts"].toArray().isEmpty()));
+    m_plot->setMinimumHeight(compact?72:125);
 }
+void BusinessStatistics::SetInteractionModes(const QStringList& modes)
+{
+    QStringList next{"查看分布"};next.append(modes);
+    QStringList old;for(int i=0;i<m_interaction->count();++i)old.append(m_interaction->itemText(i));
+    if(next.size()==old.size() && std::equal(next.cbegin(),next.cend(),old.cbegin()))return;
+    const auto selected=m_interaction->currentText();const QSignalBlocker blocker(m_interaction);m_interaction->clear();m_interaction->addItems(next);
+    m_interaction->setCurrentIndex(std::max(0,m_interaction->findText(selected)));
+}
+QString BusinessStatistics::GetInteractionMode() const{return m_interaction->currentText();}
+void BusinessStatistics::ShowTable(){if(m_tabs->isTabEnabled(1))m_tabs->setCurrentIndex(1);}
 bool BusinessStatistics::ContainsInterval(double value,double low,double high) const
 {
     const auto edges=m_data["edges"].toArray();return value>=low && (value<high || (!edges.isEmpty() && high==edges.last().toDouble() && value==high));

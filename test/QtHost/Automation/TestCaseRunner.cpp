@@ -1,6 +1,7 @@
 // 测试用途：自动执行实际页面入口的合成回归或指定用例，验证中文分派、业务日志和生命周期。
 #include "TestCaseRunner.h"
 #include "BusinessWorkflowTests.h"
+#include "WorkbenchV1Tests.h"
 #include "App/TestWindow.h"
 #include "Support/JsonInput.h"
 #include "Support/UiText.h"
@@ -144,6 +145,8 @@ bool GetEnabled(TestWindow& window, const QString& module)
 void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
     const auto key = item->data(0, Qt::UserRole).toJsonObject()["id"].toString();
+    if(auto* statistics=tree->window()->findChild<QToolButton*>("showBusinessStatistics"))statistics->setChecked(true);
+    if(auto* results=tree->window()->findChild<QTabWidget*>("workbenchResultTabs"))results->setCurrentIndex(1);
     for (auto* page = tree->parentWidget(); page; page = page->parentWidget()) {
         auto* tabs = qobject_cast<QTabWidget*>(page->parentWidget() ? page->parentWidget()->parentWidget() : nullptr);
         if (tabs && tabs->indexOf(page) >= 0) { tabs->setCurrentWidget(page); break; }
@@ -169,14 +172,18 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         const auto* current = panel->findChild<QPushButton*>("action_" + action);
         const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
         const auto* command = menu->findChild<QAction*>("command_" + action);
-        return current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled()));
+        const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+        const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
+        return current && current->isEnabled() && (current->isVisible() || atPrimary || (command && command->isEnabled()));
     }, 2000);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
     Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
     Check(button && button->isEnabled(), "actual business command is enabled");
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    if (button->isVisible()) button->click();
+    auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    if(!button->isVisible() && primary && primary->property("businessAction")==action && !primary->property("usesOutput").toBool())primary->click();
+    else if (button->isVisible()) button->click();
     else {
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
         Check(command && command->isEnabled(), "direct command remains available in the classified menu");
@@ -229,7 +236,8 @@ void CheckFourViewGeometry(TestWindow& window)
             minHeight = std::min(minHeight, view->height()); maxHeight = std::max(maxHeight, view->height());
         }
         // 奇数像素的等分最多有一个像素的取整差。
-        return maxWidth-minWidth <= 1 && maxHeight-minHeight <= 1 && minWidth >= 160 && minHeight >= 160;
+        return maxWidth-minWidth <= 1 && maxHeight-minHeight <= 1
+            && std::all_of(views.begin(),views.end(),[](const auto* view){return view->width()>=view->minimumWidth() && view->height()>=view->minimumHeight();});
     };
     Check(window.minimumSize()!=window.maximumSize(),"manual window has a resizable default size");
     Check(Wait(sameSize,3000),"four-view layout has equal image regions inside the current window");
@@ -264,15 +272,21 @@ void CheckUiAndRecords(TestWindow& window)
     QSet<QString> moduleIds;
     const QStringList remembered{"Rotation","Surface","Gap"};
     {
-        for (int i = 0; i < tabs->count(); ++i) {
-            tabs->setCurrentIndex(i);
-            const auto id = tabs->tabData(i).toString(); moduleIds.insert(id);
-            auto* module = window.GetModule(id);
-            Check(module && pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
-                "module identity keeps its parameter page and object browser synchronized");
+        const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
+        for(int group=0;group<3;++group) {
+            workspaces->setCurrentIndex(group);
+            for (int i = 0; i < tabs->count(); ++i) {
+                tabs->setCurrentIndex(i);
+                const auto id = tabs->tabData(i).toString(); moduleIds.insert(id);
+                auto* module = window.GetModule(id);
+                Check(groups[group].contains(id) && module && !module->GetActions().isEmpty(),"group navigation shows only compiled business pages");
+                Check(pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
+                    "module identity keeps its parameter page and source browser synchronized");
+            }
         }
     }
-    Check(moduleIds.size() == (window.GetModule("Roi") ? 11 : 10) && moduleIds.contains("Part")
+    int enabled=0;for(const auto* id:{"Data","View","Rotation","Roi","Crop","Artifact","Part","Surface","Alignment","Wall","Gap"})if(GetEnabled(window,id))++enabled;
+    Check(moduleIds.size() == enabled && moduleIds.contains("Part")
         && window.GetModule("PartEdit") == window.GetModule("Part"), "all modules remain reachable with one segmentation and editing page");
     for (int group = 0; group < workspaces->count(); ++group) {
         workspaces->setCurrentIndex(group);
@@ -284,18 +298,16 @@ void CheckUiAndRecords(TestWindow& window)
     auto* details = window.findChild<QWidget*>("diagnosticDetails");
     Check(diagnostics && details && details->isHidden() && window.findChild<QLabel*>("latestMessage")->isVisible(),
         "latest feedback stays visible while detailed diagnostics are collapsed");
-    const auto compactSize=window.size();auto* workspace=window.findChild<QSplitter*>();const auto workspaceHeight=workspace->height();
-    diagnostics->click();const bool grewOutside=Wait([&]{return details->isVisible() && window.height()>compactSize.height() && std::abs(workspace->height()-workspaceHeight)<=1;},3000);
-    if(!grewOutside)window.grab().save("diagnostic-layout-failure.png");
-    else window.grab().save("diagnostics-expanded.png");
-    Check(grewOutside,QString("diagnostics grow outside: window %1 -> %2, workspace %3 -> %4, details %5").arg(compactSize.height()).arg(window.height()).arg(workspaceHeight).arg(workspace->height()).arg(details->height()).toStdString().c_str());diagnostics->click();Check(Wait([&]{return window.size()==compactSize;},3000),"closing diagnostics restores the prior outer height");
+    const auto compactSize=window.size();
+    diagnostics->click();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
+    window.grab().save("diagnostics-expanded.png");diagnostics->click();Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
     auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QWidget*>("objectColumn");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
     const auto resized=compactSize+QSize(40,20);window.resize(resized);
     Check(Wait([&]{return window.size()==resized;},3000),"user can resize the main window beyond its default size");
     window.resize(compactSize);QCoreApplication::processEvents();window.grab().save("workbench-default.png");
     window.showMaximized();Check(Wait([&]{return window.isMaximized();},3000),"main window can be maximized");QCoreApplication::processEvents();
-    const auto maximizedWorkspaceHeight=workspace->height();diagnostics->click();
-    Check(Wait([&]{return !window.isMaximized() && details->isVisible() && std::abs(workspace->height()-maximizedWorkspaceHeight)<=1;},3000),"diagnostics also grow outward from a maximized window");
+    diagnostics->click();
+    Check(Wait([&]{return window.isMaximized() && details->isVisible();},3000),"diagnostics keep a maximized window maximized");
     diagnostics->click();Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
     window.showNormal();window.resize(compactSize);QCoreApplication::processEvents();
     Check(window.findChild<QToolButton*>("testTools")->menu()->findChild<QAction*>("performanceCapture")
@@ -1114,16 +1126,27 @@ void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
 {
     const auto original = *window.GetSession()->GetImageDescriptor();
     const auto* endpoint = window.GetSession()->GetPrimaryEndpoint();
-        std::array<double, 3> world = original.origin;
-        for (int row = 0; row < 3; ++row) for (int axis = 0; axis < 3; ++axis)
-            world[row] += original.direction[row*3+axis] * original.spacing[axis]
-                * (original.extent[axis*2] + fraction[axis] * (original.extent[axis*2+1]-original.extent[axis*2]));
+        std::optional<std::array<double,16>> modelToWorld;
+        for(const auto value:window.GetWorkflow().getViewTransforms()["views"].toArray())if(value.toObject()["view"]==QString::fromStdString(endpoint->id))modelToWorld=GetAffineMatrix(value.toObject()["modelToWorld"]);
+        Check(modelToWorld.has_value(),"crop input has an explicit model-to-world transform");
+        std::array<double,6> bounds{std::numeric_limits<double>::max(),std::numeric_limits<double>::lowest(),std::numeric_limits<double>::max(),std::numeric_limits<double>::lowest(),std::numeric_limits<double>::max(),std::numeric_limits<double>::lowest()};
+        // 描述符是模型坐标；盒控件位于世界 AABB，先变换八角点再选取世界面中心。
+        for(int corner=0;corner<8;++corner) {
+            auto model=original.origin;
+            for(int row=0;row<3;++row)for(int axis=0;axis<3;++axis)model[row]+=original.direction[row*3+axis]*original.spacing[axis]*original.extent[2*axis+((corner>>axis)&1)];
+            for(int row=0;row<3;++row){double point=(*modelToWorld)[row*4+3];for(int axis=0;axis<3;++axis)point+=(*modelToWorld)[row*4+axis]*model[axis];bounds[2*row]=std::min(bounds[2*row],point);bounds[2*row+1]=std::max(bounds[2*row+1],point);}
+        }
+        std::array<double,3> world{};for(int axis=0;axis<3;++axis)world[axis]=bounds[2*axis]+fraction[axis]*(bounds[2*axis+1]-bounds[2*axis]);
         endpoint->renderer->SetWorldPoint(world[0], world[1], world[2], 1.0); endpoint->renderer->WorldToDisplay();
         const auto* display = endpoint->renderer->GetDisplayPoint();
-        const int x = static_cast<int>(display[0]), y = static_cast<int>(display[1]);
-        endpoint->interactor->SetEventPosition(x, y); endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
-        endpoint->interactor->SetEventPosition(x+8, y); endpoint->interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
-        endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
+        auto* widget=window.findChild<QVTKOpenGLNativeWidget*>("primary3D");const auto size=endpoint->renderWindow->GetSize();
+        Check(widget && size[0]>0 && size[1]>0,"crop pointer target has an actual rendered viewport");
+        const QPointF start(display[0]*widget->width()/size[0],(size[1]-1-display[1])*widget->height()/size[1]);
+        const QPointF end=start+QPointF(8,0);
+        // 经实际 Qt/VTK 适配器投递，正确转换像素比例、Y 方向与按钮状态。
+        QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(widget,&press);QCoreApplication::processEvents();
+        QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(widget,&move);QCoreApplication::processEvents();
+        QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(widget,&release);QCoreApplication::processEvents();
 }
 void CheckCropWorkflow(TestWindow& window)
 {
@@ -1138,11 +1161,11 @@ void CheckCropWorkflow(TestWindow& window)
     Check(firstDocument!=secondDocument,"each explicit document has a new identity");
     GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",firstDocument}}),"Succeeded");
     GetComplete(window, Send(window, "View", "Set", {{"iso", 1000.0}}), "Succeeded");
-    const auto unavailable = GetComplete(window, Click(window, "Crop", "Box"), "Rejected");
+    const auto unavailable = GetComplete(window, SendUnavailable(window, "Crop", "Box"), "Rejected");
     Check(unavailable["result"].toObject()["message"].toString().contains("显示等值阈值") && panel->GetObservedState()["operationCount"].toString()=="0" && panel->GetObservedState()["editMode"].toInt()==0, "empty display is rejected before enabling a crop tool or accumulating invisible previews");
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().size()==1,"empty iso display still allows document cleanup");
-    GetComplete(window, Send(window, "View", "Set", {{"iso", 50.0}}), "Succeeded");
+    GetComplete(window, Send(window, "View", "Set", {{"iso", 50.0},{"opacity",1.0}}), "Succeeded");
     GetComplete(window,Send(window,"Crop","ActivateDocument",{{"documentId",secondDocument}}),"Succeeded");
     Check(Wait([&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); }),
         "reactivated crop document renders before history actions");
@@ -1622,6 +1645,7 @@ void StartSelfTest(TestWindow& window)
     CheckFourViewGeometry(window);
     CheckUiAndRecords(window);
     CheckBusinessWorkflow(window);
+    CheckWorkbenchV1(window);
     CheckSceneRefresh(window);
     CheckParameterLayout(window);
     CheckBusinessParameters(window);
@@ -1630,7 +1654,7 @@ void StartSelfTest(TestWindow& window)
     view->SetParameterPatch("Reset", {{"viewId", "missing"}});
     GetComplete(window, SendUnavailable(window, "View", "Reset"), "Rejected");
     const auto* log = window.findChild<QPlainTextEdit*>("businessLog");
-    Check(log && log->toPlainText().contains("视图显示 · 重置视图") && log->toPlainText().contains("操作被拒绝"),
+    Check(log && log->toPlainText().contains("显示与导航 · 重置视图") && log->toPlainText().contains("操作被拒绝"),
         "unavailable display commands retain Chinese rejection details for programmatic requests");
     Check(log->toPlainText().contains(QRegularExpression("\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\]")),
         "business timestamps use readable ASCII digits regardless of system locale");
@@ -2274,6 +2298,11 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto params = GetResolved(step["parameters"], results).toObject();
         if(step["control"]=="checkPage") {
             const auto module=GetText(step,"module");auto* tabs=window.findChild<QTabBar*>("featureTabs");int index=-1;
+            const int group=QStringList{"Data","View","Rotation"}.contains(module)?0:QStringList{"Roi","Crop","Artifact","Part","Surface"}.contains(module)?1:2;
+            auto* workspaces=window.findChild<QTabBar*>("workspaceTabs");Check(workspaces->isTabEnabled(group),"planned business group is compiled");
+            const auto groupPoint=workspaces->tabRect(group).center();
+            QMouseEvent groupPress(QEvent::MouseButtonPress,groupPoint,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupPress);
+            QMouseEvent groupRelease(QEvent::MouseButtonRelease,groupPoint,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupRelease);QCoreApplication::processEvents();
             for(int i=0;i<tabs->count();++i)if(tabs->tabData(i)==module)index=i;
             Check(index>=0,"planned business tab is present");
             const auto point=tabs->tabRect(index).center();
@@ -2407,8 +2436,8 @@ void StartSequence(TestWindow& window, const QString& path)
             if(step["waitStatistics"].toBool())Check(Wait([&]{const auto data=panel->GetStatisticsWidget()->GetHistogram();return data["cacheKey"].isString() && !data["description"].toString().contains("正在读取");},timeout),"real statistics completes including a valid empty result");
             if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),panel->GetStatisticsWidget()->GetHistogram());
             if(step.contains("statisticsScreenshot"))Check(panel->GetStatisticsWidget()->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
-            // 关闭统计窗口后继续操作视图，避免弹窗覆盖正在等待呈现的裁剪视图。
-            window.findChild<QDialog*>("businessStatisticsDialog")->close();QCoreApplication::processEvents();
+            // 统计在主窗口内部，不再有遮挡裁切视窗的浮动统计窗口。
+            QCoreApplication::processEvents();
         }
         switching.stop(); cancellation.stop();
         if (GetText(step, "module") == "View" && GetText(step, "action") == "Set"
@@ -2491,7 +2520,7 @@ void StartSequence(TestWindow& window, const QString& path)
                 panel->Observe(); const auto state = panel->GetObservedState();
                 return state["framesReady"].toBool() && state["appliedHead"] == state["renderedHead"];
             }, timeout);
-            const QJsonObject audit{{"operationCountBefore", QString::number(before)}, {"probes", probes},
+            const QJsonObject audit{{"operationCountBefore", QString::number(before)}, {"probes", probes},{"viewTransforms",window.GetWorkflow().getViewTransforms()},
                 {"hasCommittedDrag", hasDragged}, {"framesReady", framesReady}, {"finalState", panel->GetObservedState()}};
             if (step.contains("cropDragAudit")) ExportJson(GetText(step, "cropDragAudit"), audit);
             if (!hasDragged || !framesReady) std::cerr << "Crop drag diagnostic: " << GetJsonText(audit).toStdString() << std::endl;
@@ -2515,6 +2544,18 @@ void StartSequence(TestWindow& window, const QString& path)
             const QJsonValue count = record["result"].toObject()["partCount"];
             Check((count.isString() ? GetId(count) : static_cast<std::uint64_t>(count.toInt())) == static_cast<std::uint64_t>(step["expectPartCount"].toInt()),
                 "formal catalog has the expected part count");
+        }
+        if(step.contains("expectRoiCount")) {
+            const auto regions=window.GetSession()->GetRoiDescriptors(true);
+            Check(regions.size()==static_cast<std::size_t>(step["expectRoiCount"].toInt()),"formal ROI count matches the requested output mode");
+            if(step["expectRoiShape"]=="Sphere") {
+                const auto roi=window.GetSession()->GetRoiDescriptor(GetRef(record["result"].toObject()["roi"]));
+                Check(roi && roi->definition.nodes.size()==1 && roi->definition.nodes.front().kind==RoiNodeKind::Primitive && roi->definition.nodes.front().primitive.shape==RoiShape::Sphere,"formal saved ROI preserves the spherical draft geometry");
+            }
+            if(step.contains("expectRetainedRoi")) {
+                const auto original=GetRef(GetResolved(step["expectRetainedRoi"],results));
+                Check(window.GetSession()->GetRoiDescriptor(original).has_value() && GetRef(record["result"].toObject()["roi"])!=original,"save as new ROI preserves the original exact revision");
+            }
         }
         if (step.contains("expectEditingCount")) {
             auto* panel = window.GetModule("Part"); panel->Observe();

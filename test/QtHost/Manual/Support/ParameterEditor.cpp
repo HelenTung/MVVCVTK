@@ -158,12 +158,45 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
 bool ParameterEditor::GetFieldApplicable(const QString& key) const
 {
     if (m_applicableFields.contains(key) && !m_applicableFields[key].toBool()) return false;
-    if(m_key.isEmpty() && m_module=="Roi" && m_action=="Begin") {
+    if(m_key.isEmpty() && m_module=="Roi" && (m_action=="Begin" || m_action=="SetDraft")) {
         const auto shape=m_fields.find("shape");
         const auto selected=shape==m_fields.end()?QString("Box"):shape->second->GetValue().toString();
-        if(key=="boxToSource" || key=="sizeMM" || key=="direction3D")return selected=="Box";
-        if(key=="radius")return selected!="Box";
-        if(key=="axis" || key=="height")return selected=="Cylinder";
+        const bool affine=selected=="Box" || selected=="Ellipsoid";
+        if(key=="boxToSource" || key=="sizeMM" || key=="direction3D")return affine;
+        if(key=="radius")return selected=="Sphere" || selected=="Cylinder" || selected=="Brush";
+        if(key=="axis")return selected=="Cylinder" || selected=="HalfSpace";
+        if(key=="height")return selected=="Cylinder";
+        if(key=="contours")return selected=="Contour" || selected=="ProjectedContour";
+        if(key=="planeToSource")return selected=="Contour" || selected=="Brush" || selected=="EllipticCylinder";
+        if(key=="depthMM")return selected=="Contour" || selected=="ProjectedContour" || selected=="Brush" || selected=="EllipticCylinder";
+        if(key=="sourceToView" || key=="viewToClip")return selected=="ProjectedContour";
+        if(key=="pathMM" || key=="isSliceBrush")return selected=="Brush";
+        if(key=="mask" || key=="labels")return selected=="MaskReference";
+    }
+    if(m_key.isEmpty() && m_module=="Surface" && m_action=="GlobalAutomatic" && (key=="initialIsoValue" || key=="materialRange"))return m_isManualSource;
+    if(m_key.isEmpty() && m_module=="Gap") {
+        if(m_action=="Evaluate" && QStringList{"isoMode","dataRangeRatio","absoluteIsoValue","backgroundMean","materialMean","detectionRoi"}.contains(key))return false;
+        if(m_action=="Start" && key=="parentResult")return false;
+        const auto mode=m_fields.find("isoMode");
+        if(mode!=m_fields.end() && key=="dataRangeRatio")return mode->second->GetValue()=="DataRangeRatio";
+        if(mode!=m_fields.end() && key=="absoluteIsoValue")return mode->second->GetValue()=="AbsoluteValue";
+    }
+    if(m_key.isEmpty() && m_module=="Roi" && m_schema.toObject().contains("outputMode")) {
+        const auto action=m_action;
+        if(key=="roi" || key=="outputMode")return true;
+        if(key=="operands")return QStringList{"Union","Intersection","Difference","Merge"}.contains(action);
+        if(key=="radius" || key=="radiusUnit")return QStringList{"Dilate","Erode","Open","Close"}.contains(action);
+        if(key=="connectivity")return QStringList{"RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Grow"}.contains(action);
+        if(key=="minimumVolumeMM3")return action=="RemoveSmall";
+        if(key=="maximumHoleVolumeMM3")return action=="FillHoles";
+        if(key=="componentLabels")return action=="KeepSelected";
+        if(key=="keepInput")return action=="Split";
+        if(key=="grayRange")return action=="Threshold" || action=="Grow";
+        if(key=="seedsMM")return action=="Grow";
+        if(key=="domainRoi")return action=="Invert";
+        if(key=="sourceToTarget" || key=="rasterize" || key=="targetSource")return action=="Transform";
+        if(key=="mesh" || key=="meshToSource")return action=="SurfaceInterior" || action=="SurfaceLayer";
+        if(key=="inwardMM" || key=="outwardMM" || key=="hasOrientation")return action=="SurfaceLayer";
     }
     if (m_key.isEmpty() && m_module == "Surface" && key == "seedModelPoint") {
         const auto selection = m_fields.find("componentSelection");
@@ -269,6 +302,7 @@ void ParameterEditor::SetDefaultValue(const QJsonValue& value)
 }
 void ParameterEditor::SetReferenceChoices(const ParameterChoices& choices)
 {
+    if(m_type==QJsonValue::Array){for(const auto& row:m_rows)row.second->SetReferenceChoices(choices);return;}
     auto* input = qobject_cast<QComboBox*>(m_input);
     if (!input || m_type != QJsonValue::String) return;
     auto next = GetParameterChoices(m_module, m_key);
@@ -312,7 +346,7 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     auto effective = value;
     if (effective.isNull()) effective = m_schema.isNull() ? Shape(m_key) : m_schema;
     if (m_body) { m_layout->removeWidget(m_body); delete m_body; }
-    m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr; m_createRegion = nullptr;
+    m_fields.clear(); m_rows.clear(); m_input = nullptr; m_rowLayout = nullptr; m_createRegion = nullptr;m_parameterSource=nullptr;
     m_groupPages.clear(); m_groupSections.clear();
     m_booleanState = nullptr; m_unsetBoolean = nullptr; m_booleanSpecified = !value.isNull();
     if (m_stateBound) m_booleanEdited = value.isBool();
@@ -348,6 +382,15 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(10);
             grids[QString()] = grid;
         }
+        if(m_module=="Surface" && m_key.isEmpty() && m_action=="GlobalAutomatic") {
+            m_isManualSource=!object["initialIsoValue"].isNull() || !object["materialRange"].isNull();
+            auto* sourceRow=new QWidget(m_body);auto* row=new QHBoxLayout(sourceRow);row->setContentsMargins(0,0,0,0);row->addWidget(new QLabel("参数来源",sourceRow));
+            m_parameterSource=new QComboBox(sourceRow);m_parameterSource->setObjectName("surfaceParameterSource");
+            m_parameterSource->addItem("自动（BG / M / ISO 估计）",false);m_parameterSource->addItem("手动初始参数",true);m_parameterSource->setCurrentIndex(m_isManualSource?1:0);row->addWidget(m_parameterSource,1);
+            if(sections)sections->addWidget(sourceRow);else grids.at(QString())->addWidget(sourceRow,rows[QString()]++,0);
+            // 参数来源只控制提交值，切回自动不会销毁手动草稿。
+            connect(m_parameterSource,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int index){m_isManualSource=index==1;NotifyEdited();});
+        }
         for (const auto& key : keys) {
             const auto group = grouped ? GetParameterGroup(m_module, key) : QString();
             QWidget* page = m_body;
@@ -359,7 +402,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
                     auto* toggle = new QToolButton(section); toggle->setObjectName("sectionToggle"); toggle->setText(group);
                     toggle->setProperty("parameterSection", true); toggle->setCheckable(true);
                     toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-                    const bool expanded = group != "高级与诊断";
+                    const bool expanded = group != "高级与诊断" && group!="精确参数" && group!="高级设置" && group!="专家设置";
                     toggle->setChecked(expanded); toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
                     page = new QWidget(section); page->setObjectName("sectionFields"); page->setVisible(expanded);
                     sectionLayout->addWidget(toggle); sectionLayout->addWidget(page); sections->addWidget(section);
@@ -388,6 +431,10 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             for (const auto& name : {"输入与结果", "空间与矩阵", "作用范围", "零件属性", "环状校正", "扩散校正", "孔隙筛选", "算法参数", "显示设置", "导出与诊断", "高级与诊断"}) {
                 const auto section = m_groupSections.find(name);
                 if (section != m_groupSections.end()) { sections->removeWidget(section->second); sections->addWidget(section->second); }
+            }
+            if(m_module=="Surface" && m_groupSections.count("高级设置") && m_groupSections.count("专家设置")) {
+                auto* expert=m_groupSections.at("专家设置");sections->removeWidget(expert);
+                auto* advanced=m_groupPages.at("高级设置");auto* grid=static_cast<QGridLayout*>(advanced->layout());grid->addWidget(expert,grid->rowCount(),0);
             }
         }
         return;
@@ -533,7 +580,11 @@ QJsonValue ParameterEditor::GetValue() const
     if (m_type == QJsonValue::Object) {
         QJsonObject value;
         for (const auto& field : m_fields) {
-            if (!GetFieldApplicable(field.first)) continue;
+            if (!GetFieldApplicable(field.first)) {
+                if(m_parameterSource && (field.first=="initialIsoValue" || field.first=="materialRange"))value[field.first]=QJsonValue();
+                else if(m_module=="Gap" && m_key.isEmpty())value[field.first]=m_schema.toObject()[field.first];
+                continue;
+            }
             const auto v = field.second->GetValue();
             value[field.first] = v;
         }
@@ -557,6 +608,12 @@ QJsonValue ParameterEditor::GetValue() const
 }
 void ParameterEditor::SetPatch(const QJsonObject& patch)
 {
+    if(m_parameterSource && (patch.contains("initialIsoValue") || patch.contains("materialRange"))) {
+        const auto iso=patch.contains("initialIsoValue")?patch["initialIsoValue"]:m_fields.at("initialIsoValue")->GetValue();
+        const auto range=patch.contains("materialRange")?patch["materialRange"]:m_fields.at("materialRange")->GetValue();
+        m_isManualSource=!iso.isNull() || !range.isNull();
+        const QSignalBlocker blocker(m_parameterSource);m_parameterSource->setCurrentIndex(m_isManualSource?1:0);
+    }
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         const auto field = m_fields.find(it.key());
         if (field == m_fields.end()) throw std::invalid_argument(("未知参数：" + it.key()).toStdString());
