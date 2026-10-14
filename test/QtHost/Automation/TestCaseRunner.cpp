@@ -1672,9 +1672,11 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Crop","CloseDocument"),"Succeeded");
     window.SetViewsVisible(false);
 #endif
+    const auto selectableBeforeArchive=GetRoiChoices(*window.GetSession(),source).size();
+    const auto catalogBeforeArchive=GetRoiChoices(*window.GetSession(),source,true).size();
     GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",true}}),"Succeeded");
-    Check(GetRoiChoices(*window.GetSession(),source).size()==1
-        && GetRoiChoices(*window.GetSession(),source,true).size()==2,"archived regions remain manageable and leave consumer choices");
+    Check(GetRoiChoices(*window.GetSession(),source).size()+1==selectableBeforeArchive
+        && GetRoiChoices(*window.GetSession(),source,true).size()==catalogBeforeArchive,"archived regions remain manageable and leave consumer choices");
     bool rejected=false;try{(void)GetSelectedRoi(*window.GetSession(),GetRefText(ref),source);}catch(const std::invalid_argument&){rejected=true;}
     Check(rejected,"an archived region cannot silently run as a selected analysis range");
     GetComplete(window,Send(window,"Roi","SetMetadata",{{"roi",GetRefText(ref)},{"isArchived",false}}),"Succeeded");
