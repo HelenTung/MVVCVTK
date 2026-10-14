@@ -721,6 +721,8 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
     Check(owner!=nullptr,"scene context menu has an actual owning business page");
     // 后台 Send 不切页面；右键必须先走真实导航，不能向隐藏历史树伪造点击。
     window.GetWorkflow().onNavigate(owner->GetName(),action,{});QCoreApplication::processEvents();
+    // 工作台的来源/历史已位于视图区；先结束“隐藏视图也可提交输入”的独立场景。
+    window.SetViewsVisible(true);
     item=FindNode(tree,nodeId);Check(item!=nullptr,"scene context target survives business-page navigation");
     ClickNode(tree, item); tree->scrollToItem(tree->currentItem()); tree->doItemsLayout();
     Check(tree->isVisible(),"scene context menu uses a visible history tree");
