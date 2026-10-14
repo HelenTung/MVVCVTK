@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <array>
+#include <map>
 #include <optional>
 #include <vector>
 #include <string>
@@ -78,6 +79,11 @@ struct GapColorSegment final {
 // 色带只投影已发布的缺陷体积；不改变标签、筛选、网格和统计。
 struct GapDisplayParams final {
     GapColorMode mode = GapColorMode::Rainbow;
+    bool isReversed=false,hasLegend=true;
+    std::vector<std::string> hiddenLegendViews;
+    std::array<double,2> legendPosition{.025,.20};
+    std::map<std::string,std::array<double,2>> legendPositions;
+    double opacity=1;
     std::array<double, 3> constantColor{0.70, 0.70, 0.70};
     std::array<double, 3> lowColor{0.294, 0.294, 0.84};
     std::array<double, 3> highColor{0.84, 0.294, 0.294};
@@ -105,6 +111,7 @@ struct GapHostState final {
     bool isExitPending = false;
     bool isOverlayVisible = false;
     GapDisplayParams display;
+    std::optional<std::array<double,2>> displayRange;
 };
 
 struct GapHostResult final {

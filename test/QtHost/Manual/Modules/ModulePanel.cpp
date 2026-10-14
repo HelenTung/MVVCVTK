@@ -1,5 +1,6 @@
 // 测试用途：用场景节点选择对象，通过业务按钮直接分派请求并编辑紧凑参数。
 #include "ModulePanel.h"
+#include "Support/ColorLegendEditor.h"
 #include "Support/UiText.h"
 #include "Support/ActionPolicy.h"
 #include "Support/SceneNodes.h"
@@ -305,6 +306,30 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         },TestPolicy::Input,true);
     }
 }
+void ModulePanel::ShowColorEditor(const QPoint& position,const QString& viewId)
+{
+    const QString action=m_name=="Alignment" ? "SetDeviationDisplay":"SetDisplay";
+    if(!getColorParameters || !m_entries.count(action))return;
+    try {
+        auto parameters=getColorParameters();
+        if(getColorPosition && !viewId.isEmpty()){const auto p=getColorPosition(viewId);parameters["legendPosition"]=QJsonArray{p.x(),p.y()};}
+        if(parameters.isEmpty()){if(onMessage)onMessage("暂无可编辑的分析结果。");return;}
+        if(m_colorEditor)m_colorEditor->close();
+        const QPointer<ModulePanel> colorOwner(this);
+        m_colorEditor=new ColorLegendEditor(m_name,action,parameters,[colorOwner,action,viewId](QJsonObject draft) {
+            if(!colorOwner)return;
+            draft["legendView"]=viewId;
+            colorOwner->SendAction(action,draft,[owner=colorOwner](const QString& status,const QJsonObject&) {
+                if(!owner)return;
+                const auto text=owner->getColorDescription ? owner->getColorDescription():QString();
+                if(owner->m_colorEditor)owner->m_colorEditor->SetApplied(status+"\n"+text);
+                if(status=="Rejected" || status=="Failed")if(owner->onMessage)owner->onMessage("色标更新失败，保留此前生效配置。"+text);
+            });
+        },this);
+        m_colorEditor->SetApplied(getColorDescription ? getColorDescription():QString());
+        m_colorEditor->move(position);m_colorEditor->show();
+    } catch(const std::exception& e){if(onMessage)onMessage(QString::fromUtf8(e.what()));}
+}
 void ModulePanel::SelectAction(const QString& action)
 {
     if (action.isEmpty()) return;
@@ -557,6 +582,7 @@ void ModulePanel::RefreshWorkflow()
     } else for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
     if (m_commandRows.count(m_parameterAction) && !pages.contains(m_parameterAction)) pages.append(m_parameterAction);
     if (pages.isEmpty()) for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) { pages.append(name); break; }
+    pages.removeAll("SetDisplay");pages.removeAll("SetDeviationDisplay");
     {
         const QSignalBlocker blocker(m_parameterTabs);
         QStringList previous;
@@ -598,8 +624,10 @@ void ModulePanel::RefreshWorkflow()
     for (const auto& name : m_actionOrder) {
         auto* button = m_buttons.at(name); const auto& entry = m_entries.at(name);
         const bool shown = m_cards.at(name) == button ? visible.contains(name) : name == m_parameterAction;
-        m_cards.at(name)->setVisible(shown);
-        button->setVisible(shown && (name!=m_primary->property("businessAction").toString() || m_primary->property("usesOutput").toBool()));
+        const bool isColor=(m_name=="Wall" || m_name=="Gap" || m_name=="Alignment")
+            && (name=="SetDisplay" || name=="SetDeviationDisplay");
+        m_cards.at(name)->setVisible(shown && !isColor);
+        button->setVisible(shown && !isColor && (name!=m_primary->property("businessAction").toString() || m_primary->property("usesOutput").toBool()));
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
@@ -617,7 +645,7 @@ void ModulePanel::RefreshWorkflow()
             button->setChecked(state["isActive"].toBool() && state["editMode"].toInt() == (name == "KeepInside" ? 1 : name == "RemoveInside" ? 2 : 0));
         }
     }
-    if (m_commandRows.count(m_parameterAction)) {
+    if (m_parameterAction!="SetDisplay" && m_parameterAction!="SetDeviationDisplay" && m_commandRows.count(m_parameterAction)) {
         m_commandArea->setCurrentWidget(m_commandRows.at(m_parameterAction)); m_commandArea->show();
     } else m_commandArea->hide();
     m_quickActions->setVisible(!visible.isEmpty());
@@ -636,6 +664,7 @@ void ModulePanel::RefreshWorkflow()
     m_operationMenu->clear(); qDeleteAll(oldMenus);
     QMap<QString, QMenu*> menus;
     for (const auto& name : m_actionOrder) {
+        if((m_name=="Wall" || m_name=="Gap" || m_name=="Alignment") && (name=="SetDisplay" || name=="SetDeviationDisplay"))continue;
         const auto group = GetActionGroup(name);
         if(m_taskTabs->count() && group!=m_taskGroup && group!="数据与导出" && group!="确认与退出")continue;
         if (!menus.contains(group)) menus[group] = m_operationMenu->addMenu(group);

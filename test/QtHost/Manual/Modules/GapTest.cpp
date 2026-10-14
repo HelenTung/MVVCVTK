@@ -61,11 +61,13 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             }).status == GapAdmissionStatus::Accepted);
             panel->SetAdmission(id, accepted);
         }, TestPolicy::Compute, true);
-    panel->AttachAction("SetDisplay", GetJson(R"({"palette":"Rainbow","rangeMode":"Result","range":[0,1],
+    panel->AttachAction("SetDisplay", GetJson(R"({"result":"current","isReversed":false,"hasLegend":true,"legendPosition":[0.025,0.20],"opacity":1,"palette":"Rainbow","rangeMode":"Result","range":[0,1],
         "constantColor":null,"lowColor":null,"highColor":null,"belowColor":null,"aboveColor":null,
         "segments":[],"displayStyle":"Constant","opacityRange":[0.15,1]})"),
         [panel, feature](auto id, const auto& p) {
             GapDisplayParams display;
+            display.legendPosition=GetArray<double,2>(p["legendPosition"]);
+            display.hasLegend=GetBool(p,"hasLegend");display.isReversed=GetBool(p,"isReversed");display.opacity=GetNumber(p,"opacity");
             if(p.contains("palette"))display.mode = GetEnum<GapColorMode>(p, "palette", {{"Constant", GapColorMode::Constant},
                 {"Gradient", GapColorMode::Gradient}, {"Rainbow", GapColorMode::Rainbow},
                 {"InverseRainbow", GapColorMode::InverseRainbow}, {"HueLoop", GapColorMode::HueLoop}});
@@ -83,14 +85,41 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             if(p.contains("displayStyle"))display.style=GetEnum<GapDisplayStyle>(p,"displayStyle",{
                 {"Constant",GapDisplayStyle::Constant},{"Inclined",GapDisplayStyle::Inclined},{"InverseInclined",GapDisplayStyle::InverseInclined}});
             if(p.contains("opacityRange"))display.opacityRange=GetArray<double,2>(p["opacityRange"]);
+            display.hiddenLegendViews=feature->GetState().display.hiddenLegendViews;display.legendPositions=feature->GetState().display.legendPositions;
+            if(!p["legendView"].toString().isEmpty())display.legendPositions[p["legendView"].toString().toStdString()]=display.legendPosition;
             GapHostRequest request; request.action = GapHostAction::SetDisplay; request.display = display;
+            request.displayResult=p["result"]=="current" ? feature->GetState().resultSet:GetRef(p["result"]);
             const bool isAccepted = (feature->SendRequest(std::move(request)).status == GapAdmissionStatus::Accepted);
             const auto state = feature->GetState();
             panel->SetComplete(id, isAccepted ? "Succeeded" : "Rejected",
-                {{"isOverlayVisible", state.isOverlayVisible}, {"range", GetValues(state.display.range)},
+                {{"isOverlayVisible", state.isOverlayVisible}, {"range", state.displayRange ? QJsonValue(GetValues(*state.displayRange)):QJsonValue()},
                     {"palette", static_cast<int>(state.display.mode)}, {"displayStyle",static_cast<int>(state.display.style)},
                     {"segmentCount",static_cast<int>(state.display.segments.size())},{"resultSet", GetRefText(state.resultSet)}});
         }, TestPolicy::View);
+    panel->getColorParameters=[panel,feature] {
+        const auto ref=feature->GetState().resultSet;if(!GetDataRevisionRefValid(ref))return QJsonObject{};
+        auto p=panel->GetActionParameters("SetDisplay");const auto d=feature->GetState().display;
+        const auto colors=GetColorBandJson(d.mode,d.constantColor,d.lowColor,d.highColor,d.belowColor,d.aboveColor,d.segments,d.isReversed);
+        for(auto i=colors.begin();i!=colors.end();++i)p[i.key()]=i.value();
+        p["rangeMode"]=d.rangeMode==GapRangeMode::Result ? "Result":"SelectedInterval";p["range"]=GetValues(d.range);
+        const char* styles[]{"Constant","Inclined","InverseInclined"};p["displayStyle"]=styles[static_cast<unsigned>(d.style)];
+        p["hasLegend"]=d.hasLegend;p["opacity"]=d.opacity;p["opacityRange"]=GetValues(d.opacityRange);p["legendPosition"]=GetValues(d.legendPosition);p["result"]=GetRefText(ref);return p;
+    };
+    panel->getColorPosition=[feature](const QString& id) {
+        const auto d=feature->GetState().display;const auto i=d.legendPositions.find(id.toStdString());const auto p=i==d.legendPositions.end() ? d.legendPosition:i->second;return QPointF(p[0],p[1]);
+    };
+    panel->getColorSurface=[feature] { return QString(); };
+    panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
+        const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.resultSet))return;
+        auto d=state.display;const auto view=id.toStdString();
+        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
+        GapHostRequest request;request.action=GapHostAction::SetDisplay;request.display=d;request.displayResult=state.resultSet;feature->SendRequest(request);
+    };
+    panel->getColorDescription=[feature] {
+        const auto state=feature->GetState();QString text="孔隙 · "+GetRefText(state.resultSet)+"\n缺陷体积 / mm³";
+        return state.displayRange ? text+QString("\n生效范围：%1 ～ %2").arg((*state.displayRange)[0],0,'g',8).arg((*state.displayRange)[1],0,'g',8):text+"\n暂无有效测量值";
+    };
     for (const bool exit : {false, true}) panel->AttachAction(exit ? "Exit" : "Overlay", {},
         [panel, feature, exit](auto id, const auto&) {
             GapHostRequest request; request.action = exit ? GapHostAction::Exit : GapHostAction::Overlay;

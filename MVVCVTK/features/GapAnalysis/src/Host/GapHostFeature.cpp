@@ -1,6 +1,7 @@
 #include "../GapParentRecord.h"
 #include "../../../common/FeatureInputReads.h"
 #include "Host/GapHostFeature.h"
+#include "Render/Support/AnalysisColorStyle.h"
 
 #include "App/Services/FeatureViewService.h"
 #include "Data/DataPayloads.h"
@@ -95,6 +96,11 @@ public:
         GapHostRequest request,
         GapHostCallback onComplete);
     GapHostState GetState() const;
+    std::optional<GapDisplayParams> GetDisplay(const DataRevisionRef& ref) const {
+        if(!GetOwnerThread() || !m_data)return {};
+        const auto graph=m_data->GetDataGraph();if(!graph.view || !graph.view->GetData(ref))return {};
+        const auto i=m_resultDisplays.find(ref);return i==m_resultDisplays.end() ? std::nullopt:std::optional<GapDisplayParams>(i->second);
+    }
     std::vector<FeatureOperationState> GetOperationStates() const;
 
     static constexpr std::string_view FeatureId =
@@ -155,6 +161,8 @@ private:
     std::vector<DataLifetimeRetirement> m_resultScopes;
     bool m_isClosing=false;
     GapHostState m_state;
+    std::map<DataRevisionRef,GapDisplayParams> m_resultDisplays;
+    std::optional<GapDisplayParams> m_inheritedDisplay;
     FeatureOperationState m_operation;
     std::string m_requestParameters;
     bool m_hasScenePending = false;
@@ -462,6 +470,7 @@ GapHostFeature::Impl::GetViewCandidate(
             continue;
         }
         candidate.activeViewIds.push_back(view.id);
+        candidate.request.viewIds[port.get()]=view.id;
         if (view.role
                 == HostRenderViewRole::Primary3D
             || view.role
@@ -555,7 +564,7 @@ bool GapHostFeature::Impl::AttachHost(
     m_isAttached = true;m_isClosing=false;
     m_isExitPending = false;
     m_isRequestPending = false;
-    m_state = {};
+    m_state = {};m_resultDisplays.clear();m_inheritedDisplay.reset();
     m_operation = {};
     m_hasScenePending = false;
     return true;
@@ -710,7 +719,12 @@ GapAdmission GapHostFeature::Impl::SendRequest(
         if (!request.start) return {};
         if (request.action==GapHostAction::Evaluate) request.start->isEvaluationOnly=true;
         if (m_isRequestPending || m_isExitPending) return {GapAdmissionStatus::Busy, 0};
-        if (!StartView(*request.start, std::move(onComplete))) return {};
+        {
+            const auto parent=request.start->parentResult.value_or(m_state.resultSet);
+            const auto inherited=request.action==GapHostAction::Evaluate ? GetDisplay(parent):std::nullopt;
+            if (!StartView(*request.start, std::move(onComplete))) return {};
+            m_inheritedDisplay=inherited;
+        }
         return {GapAdmissionStatus::Accepted, m_activeRequestId};
     case GapHostAction::Overlay:
         if (request.start) return {};
@@ -722,9 +736,15 @@ GapAdmission GapHostFeature::Impl::SendRequest(
         break;
     case GapHostAction::SetDisplay:
         if (m_isRequestPending || m_isExitPending) return {GapAdmissionStatus::Busy, 0};
-        if (!request.display || request.start || !GetResultCurrent()) return {};
-        succeeded = m_service->SetDisplay(*request.display,
-            [this] { return SendSceneDelta(FeatureScenePriority::Overlay); });
+        if (!request.display || request.start || !GetResultCurrent() || request.displayResult!=m_state.resultSet) return {};
+        {
+            try {
+                auto saved=*request.display;AnalysisColorStyle::SetTailColors(saved);
+                std::map<DataRevisionRef,GapDisplayParams> candidate;candidate.emplace(request.displayResult,std::move(saved));
+                succeeded=m_service->SetDisplay(*request.display,[this]{return SendSceneDelta(FeatureScenePriority::Overlay);});
+                if(succeeded){m_resultDisplays.erase(request.displayResult);m_resultDisplays.insert(candidate.extract(candidate.begin()));}
+            } catch(...) { return {GapAdmissionStatus::Unavailable,0}; }
+        }
         break;
     case GapHostAction::None:
         return {};
@@ -757,6 +777,7 @@ GapHostState GapHostFeature::Impl::GetState() const
     state.isExitPending = m_isExitPending;
     state.isOverlayVisible = m_service->GetDisplayOn();
     state.display = m_service->GetDisplayParams();
+    state.displayRange=m_service->GetDisplayRange();
     return state;
 }
 
@@ -1074,7 +1095,9 @@ bool GapHostFeature::Impl::SetCompletedResult(
     auto labelView = m_data->GetLabelMap(graph, labelRef);
     auto meshView = m_data->GetSurfaceMesh(graph, meshRef);
     bool isDisplayed = m_service->SetCommittedView(
-        std::move(labelView), std::move(meshView));
+        std::move(labelView), std::move(meshView),resultRef,m_inheritedDisplay);
+    m_inheritedDisplay.reset();
+    if(isDisplayed) m_resultDisplays[resultRef]=m_service->GetDisplayParams();
     const bool isDeltaSent = SendSceneDelta(FeatureScenePriority::Overlay);
     isDisplayed = isDisplayed && isDeltaSent;
     const auto callback = m_completeItem;
@@ -1338,4 +1361,8 @@ GapHostState GapHostFeature::GetState() const
 std::vector<FeatureOperationState> GapHostFeature::GetOperationStates() const
 {
     return m_impl ? m_impl->GetOperationStates() : std::vector<FeatureOperationState>{};
+}
+
+std::optional<GapDisplayParams> GapHostFeature::GetDisplay(const DataRevisionRef& result) const {
+    return m_impl ? m_impl->GetDisplay(result):std::nullopt;
 }

@@ -19,10 +19,12 @@ namespace
 constexpr std::string_view featureId = "wall-thickness";
 bool GetDisplayValid(const ThicknessDisplay& requested) noexcept
 {
+    try {
     auto display = requested;
     // 自动范围的输入占位不参与判定；正式范围在准备显示时由本 Feature 解析。
     if (display.rangeMode != ThicknessRangeMode::Manual) display.range = {0,1};
     return ThicknessOverlay::GetColorValid(display) && ThicknessAlgorithm::GetDisplayValid(display);
+    } catch(...) { return false; }
 }
 void SendComplete(ThicknessCallback callback, const ThicknessResult &result) noexcept
 {
@@ -83,7 +85,20 @@ class WallThicknessHostFeature::Impl final
     FeatureInternal::ResultScopes m_resultScopes;
     ThicknessState m_state;
     FeatureOperationState m_operation, m_displayOperation;
-    ThicknessDisplay m_display;
+    std::vector<std::pair<DataRevisionRef,ThicknessDisplay>> m_resultDisplays;
+    ThicknessDisplayData m_displayData;
+    DataRevisionRef m_geometryMesh;
+    std::shared_ptr<const std::vector<ThicknessSample>> m_geometrySamples;
+    ThicknessDisplay GetSavedDisplay(const DataRevisionRef& ref) const {
+        for(const auto& entry:m_resultDisplays)if(entry.first==ref)return entry.second;
+        return ThicknessDisplay{};
+    }
+    void SaveDisplay(ThicknessDisplay&& requested,const std::array<double,2>& range) {
+        auto found=std::find_if(m_resultDisplays.begin(),m_resultDisplays.end(),[&](const auto& e){return e.first==m_state.result;});
+        if(found==m_resultDisplays.end())m_resultDisplays.emplace_back(m_state.result,std::move(requested));else found->second=std::move(requested);
+        m_state.displayRange=m_active && !m_active->GetRecord().statistics.validCount ? std::nullopt:std::optional<std::array<double,2>>(range);
+        m_state.displayResult=m_state.result;
+    }
     std::thread::id m_ownerThread;
     std::shared_ptr<Signal> m_signal;
     DataObserverId m_observer = 0;
@@ -94,6 +109,7 @@ class WallThicknessHostFeature::Impl final
     std::vector<Binding> m_bindings;
     std::shared_ptr<const ThicknessData::ResultPayload> m_active;
     bool m_isClickActive = false;
+    bool m_isDisplaying=false;
     InteractionEventKind m_clickReleaseKind = InteractionEventKind::None;
 
     bool GetOwner() const
@@ -168,21 +184,39 @@ class WallThicknessHostFeature::Impl final
         }
         RemoveBindings(m_bindings);
         m_state.isDisplayReady = false;
+        m_state.displayResult={};
     }
     bool SetDisplay(const ThicknessDisplay &requested)
     {
         if (!m_active || !ThicknessOverlay::GetColorValid(requested) || !m_context.views)
             return false;
+        if(m_isDisplaying)return false;
+        struct Guard { bool& flag;~Guard(){flag=false;} };m_isDisplaying=true;const Guard guard{m_isDisplaying};
+        const auto resultRef=m_state.result;const auto active=m_active;const auto generation=m_generation;
+        const auto stillCurrent=[&] {
+            if(!GetOwner() || generation!=m_generation || m_active!=active || m_state.result!=resultRef || !m_context.data)return false;
+            const auto current=m_context.data->GetDataGraph();return ThicknessData::GetBinding(current).target==resultRef
+                && ThicknessData::GetCurrent(current,active->GetRecord().expectations);
+        };
         auto display = requested;
         const auto& record = m_active->GetRecord();
+        auto saved=requested;AnalysisColorStyle::SetTailColors(saved.colorBand);
+        if(std::none_of(m_resultDisplays.begin(),m_resultDisplays.end(),[&](const auto& e){return e.first==resultRef;}))
+            m_resultDisplays.reserve(m_resultDisplays.size()+1);
         if (display.rangeMode == ThicknessRangeMode::Result) {
-            if (!record.statistics.minimum || !record.statistics.maximum) return false;
-            display.range = {*record.statistics.minimum, *record.statistics.maximum};
-            if (display.range[0] == display.range[1])
-                display.range[1] = std::nextafter(display.range[1], std::numeric_limits<double>::infinity());
+            display.range=record.statistics.minimum && record.statistics.maximum
+                ? std::array<double,2>{*record.statistics.minimum,*record.statistics.maximum}:std::array<double,2>{0,0};
         } else if (display.rangeMode == ThicknessRangeMode::Histogram)
             display.range = record.archive.evaluation.histogramRange;
-        if (!ThicknessAlgorithm::GetDisplayValid(display)) return false;
+        if(display.mode==ThicknessDisplayMode::Tolerance) {
+            if(display.rangeMode==ThicknessRangeMode::Manual &&
+                (display.range[0]>record.archive.evaluation.lower || display.range[1]<record.archive.evaluation.upper))return false;
+            display.range[0]=std::min(display.range[0],record.archive.evaluation.lower);
+            display.range[1]=std::max(display.range[1],record.archive.evaluation.upper);
+        }
+        auto checked=display;
+        if(checked.range[0]==checked.range[1])checked.range={0,1};
+        if (!ThicknessAlgorithm::GetDisplayValid(checked)) return false;
         const auto graph = m_context.data->GetDataGraph();
         if (ThicknessData::GetBinding(graph).target != m_state.result ||
             !ThicknessData::GetCurrent(graph, m_active->GetRecord().expectations))
@@ -191,8 +225,7 @@ class WallThicknessHostFeature::Impl final
             (display.targetViews.viewIds.empty() && display.targetViews.viewRoles.empty()))
         {
             RemoveDisplay();
-            m_display = display;
-            m_state.displayRange = display.range;
+            SaveDisplay(std::move(saved),display.range);
             return true;
         }
         auto views = m_context.views->GetViews(display.targetViews);
@@ -205,7 +238,21 @@ class WallThicknessHostFeature::Impl final
                      : nullptr;
         if (!mesh)
             return false;
-        auto prepared = ThicknessOverlay::BuildData(m_active->GetRecord(), *mesh, display);
+        const bool reuse=m_displayData.mesh && m_geometryMesh==meshRef && m_geometrySamples==record.field.samples;
+        auto ramp=ThicknessOverlay::BuildData; // 只用同一结果的几何；发布新结果时失效。
+        auto prepared=ramp(record,*mesh,display,reuse ? &m_displayData:nullptr);
+        prepared.resultLabel=AnalysisColorStyle::GetResultLabel(m_state.result);
+        const bool sameViews=reuse && views.size()==m_bindings.size() && std::equal(views.begin(),views.end(),m_bindings.begin(),
+            [](const auto& view,const auto& binding){return view.id==binding.viewId;});
+        if(sameViews) {
+            if(!SendDisplayDelta(m_bindings) || !stillCurrent())return false;
+            for(auto& b:m_bindings) {
+                auto appearance=display;appearance.legendPosition=AnalysisColorStyle::GetLegendPosition(display,b.viewId);appearance.hasLegend=display.hasLegend && std::find(display.hiddenLegendViews.begin(),display.hiddenLegendViews.end(),b.viewId)==display.hiddenLegendViews.end();
+                b.overlay->SetDisplayData(prepared,appearance);
+                if(auto view=m_context.views->GetFeaturePort(b.viewId))view->SetRenderNeeded();
+            }
+            m_displayData=std::move(prepared);SaveDisplay(std::move(saved),display.range);m_state.isDisplayReady=true;return true;
+        }
         std::vector<Binding> candidate;
         try
         {
@@ -216,8 +263,9 @@ class WallThicknessHostFeature::Impl final
                 const auto port = m_context.views->GetOverlayPort(view.id);
                 if (!port)
                     throw std::runtime_error("Overlay port unavailable.");
+                auto appearance=display;appearance.legendPosition=AnalysisColorStyle::GetLegendPosition(display,view.id);appearance.hasLegend=display.hasLegend && std::find(display.hiddenLegendViews.begin(),display.hiddenLegendViews.end(),view.id)==display.hiddenLegendViews.end();
                 auto overlay = std::make_shared<ThicknessOverlay>(
-                    prepared, display, m_active->GetRecord().archive.input.unit, view.role);
+                    prepared, appearance, m_active->GetRecord().archive.input.unit, view.role);
                 candidate.push_back({view.id, port, overlay});
                 if (!port->AttachOverlay(overlay))
                     throw std::runtime_error("Overlay attach rejected.");
@@ -227,7 +275,7 @@ class WallThicknessHostFeature::Impl final
                         &(*m_active->GetRecord().field.samples)[*m_state.selectedSample]);
             }
             // 新投影与props准备好后再替换；任何失败保留旧显示。
-            if (!SendDisplayDelta(candidate))
+            if (!SendDisplayDelta(candidate) || !stillCurrent())
                 throw std::runtime_error("Scene projection rejected.");
         }
         catch (...)
@@ -237,8 +285,8 @@ class WallThicknessHostFeature::Impl final
         }
         RemoveBindings(m_bindings);
         m_bindings = std::move(candidate);
-        m_display = display;
-        m_state.displayRange = display.range;
+        m_displayData=std::move(prepared);m_geometryMesh=meshRef;m_geometrySamples=record.field.samples;
+        SaveDisplay(std::move(saved),display.range);
         m_state.isDisplayReady = true;
         return true;
     }
@@ -496,6 +544,7 @@ class WallThicknessHostFeature::Impl final
             m_signal->owner = nullptr;
         m_signal.reset();
         m_context = {};
+        m_resultDisplays.clear();m_displayData={};m_geometryMesh={};m_geometrySamples.reset();
         ++m_generation;
         m_state = {};
         m_isClickActive = false;
@@ -521,6 +570,8 @@ class WallThicknessHostFeature::Impl final
             return {ThicknessAdmissionStatus::Unavailable, 0};
         if (m_state.isStopping)
             return {ThicknessAdmissionStatus::Stopping, 0};
+        if(m_isDisplaying && !std::holds_alternative<ThicknessCancelRequest>(request)
+            && !std::holds_alternative<ThicknessSampleRequest>(request))return {ThicknessAdmissionStatus::Busy,0};
         const auto* start = std::get_if<ThicknessStartRequest>(&request);
         const auto* cancel = std::get_if<ThicknessCancelRequest>(&request);
         const auto* evaluation = std::get_if<ThicknessEvaluationRequest>(&request);
@@ -573,7 +624,8 @@ class WallThicknessHostFeature::Impl final
                 task->completion = std::make_shared<Completion>();
                 task->completion->requestId = task->requestId;
                 task->completion->callback = std::move(callback);
-                task->display = display ? std::optional<ThicknessDisplay>(*display) : std::nullopt;
+                task->display = display ? std::optional<ThicknessDisplay>(*display)
+                    : previous ? std::optional<ThicknessDisplay>(GetSavedDisplay(m_state.result)):std::nullopt;
                 const auto id = task->requestId;
                 auto operation = BuildOperation(id, archive);
                 Task *raw = task.get();
@@ -620,8 +672,10 @@ class WallThicknessHostFeature::Impl final
                 m_task->work.cancelled->store(true);
                 succeeded = true;
             }
-            else if (displayRequest)
-                succeeded = SetDisplay(displayRequest->display);
+            else if (displayRequest) {
+                if(!GetDataRevisionRefValid(displayRequest->result) || displayRequest->result!=m_state.result)return {};
+                succeeded=SetDisplay(displayRequest->display);
+            }
             else if (sample)
                 succeeded = SelectSample(sample->resultRevision, sample->sampleIndex);
             else if (std::holds_alternative<ThicknessClearRequest>(request))
@@ -649,7 +703,8 @@ class WallThicknessHostFeature::Impl final
                     else
                     {
                         RemoveDisplay();
-                        m_active.reset();
+                        m_active.reset();m_resultDisplays.clear();m_displayData={};m_geometryMesh={};m_geometrySamples.reset();
+                        m_state.appliedDisplay.reset();m_state.displayRange.reset();
                         m_state.result = {};
                         m_state.isCurrent = false;
                         m_state.selectedSample.reset();
@@ -688,8 +743,10 @@ class WallThicknessHostFeature::Impl final
                         m_displayOperation.status = FeatureRunStatus::Succeeded;
                         m_displayOperation.outputs = {activation->resultRevision};
                         m_displayOperation.progress = 1;
-                        if (!SetDisplay(activation->display.value_or(m_display)))
-                            RemoveDisplay();
+                        m_state.isDisplayReady=false;m_state.appliedDisplay.reset();m_state.displayRange.reset();
+                        if (!SetDisplay(activation->display.value_or(GetSavedDisplay(activation->resultRevision)))) {
+                            RemoveDisplay();controlStatus=ThicknessStatus::DisplayFailed;
+                        }
                     }
                     else
                     {
@@ -701,7 +758,7 @@ class WallThicknessHostFeature::Impl final
             if (!succeeded)
                 return {};
             const bool isCurrent =
-                controlStatus == ThicknessStatus::Succeeded && GetState().isCurrent;
+                (controlStatus==ThicknessStatus::Succeeded || controlStatus==ThicknessStatus::DisplayFailed) && GetState().isCurrent;
             const ThicknessResult result{id,
                                          controlStatus,
                                          controlRef.value_or(m_state.result),
@@ -818,8 +875,10 @@ class WallThicknessHostFeature::Impl final
                         m_displayOperation = m_operation;
                         try
                         {
-                            SetDisplay(task->display.value_or(m_display));
-                            result.isDisplayReady = m_state.isDisplayReady;
+                            m_state.isDisplayReady=false;m_state.appliedDisplay.reset();m_state.displayRange.reset();
+                            const bool applied=SetDisplay(task->display.value_or(ThicknessDisplay{}));
+                            result.isDisplayReady=applied && m_state.isDisplayReady && m_state.displayResult==ref;
+                            if(!applied)result.message="Result is ready; display is not ready.";
                         }
                         catch (...)
                         {
@@ -885,13 +944,14 @@ class WallThicknessHostFeature::Impl final
     ThicknessState GetState() const
     {
         auto state = m_state;
+        for(const auto& e:m_resultDisplays)if(e.first==state.result){state.appliedDisplay=e.second;break;}
         if (GetOwner() && m_active)
         {
             const auto graph = m_context.data->GetDataGraph();
             state.isCurrent = ThicknessData::GetBinding(graph).target == state.result &&
                               ThicknessData::GetCurrent(graph, m_active->GetRecord().expectations);
         }
-        if (!state.isCurrent)
+        if (!state.isCurrent || state.displayResult!=state.result)
             state.isDisplayReady = false;
         return state;
     }
@@ -911,7 +971,11 @@ class WallThicknessHostFeature::Impl final
                                  r.statistics,
                                  r.regions,
                                  r.field.subdivisions,
-                                 ThicknessData::GetCurrent(graph, r.expectations)};
+                                 ThicknessData::GetCurrent(graph, r.expectations),
+                                 [&]() -> std::optional<ThicknessDisplay> {
+                                     for(const auto& e:m_resultDisplays)if(e.first==ref)return e.second;
+                                     return {};
+                                 }()};
     }
     std::vector<FeatureOperationState> GetOperations() const
     {

@@ -537,11 +537,13 @@ void TestSession(Acceptance c, bool useRoi = false)
     ThicknessRequest color;
     color = ThicknessDisplayRequest{};
     std::get<ThicknessDisplayRequest>(color).display = display;
+    std::get<ThicknessDisplayRequest>(color).result=completed->result;
     std::get<ThicknessDisplayRequest>(color).display.mode = ThicknessDisplayMode::Tolerance;
     std::array<int,4> oldProps{};
     for(std::size_t i=0;i<oldProps.size();++i)
         oldProps[i]=probe->context.views->GetInputView({display.targetViews.viewIds[i]})->renderer->GetViewProps()->GetNumberOfItems();
     const auto graphCommit=probe->context.data->GetDataGraph().commitId;
+    std::get<ThicknessDisplayRequest>(color).display.targetViews.viewIds.erase(std::get<ThicknessDisplayRequest>(color).display.targetViews.viewIds.begin());
     displayFault->isEnabled=true;
     Require(wall->SendRequest(color).status != ThicknessAdmissionStatus::Accepted
         && displayFault->candidates.empty(),"Partially attached wall candidate was not fully removed.");
@@ -551,6 +553,7 @@ void TestSession(Acceptance c, bool useRoi = false)
     Require(probe->context.data->GetDataGraph().commitId==graphCommit
         && wall->GetResult(completed->result)->samples==before,"Failed display changed published numerical data.");
     displayFault->isEnabled=false;
+    std::get<ThicknessDisplayRequest>(color).display.targetViews=display.targetViews;
     Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
             "Tolerance display rejected.");
     Require(wall->GetResult(completed->result)->samples == before &&
@@ -581,6 +584,34 @@ void TestSession(Acceptance c, bool useRoi = false)
         && wall->GetState().displayRange == previousRange
         && wall->GetResult(completed->result)->samples == before,
         "Invalid palette must retain the existing result and display range.");
+    // A 的完整色环（包含两尾）保存；新评价 B 按父结果意图继承，显式编辑后再切回 A。
+    const auto a=completed->result;const auto aDisplay=wall->GetResult(a)->appliedDisplay;
+    Require(aDisplay.has_value(),"Result A has no applied color configuration.");
+    DataTransaction retain;retain.bindings.push_back({"color-regression.keep-a",0,true,{},a});
+    Require(probe->context.data->SetDataCommit(std::move(retain)).status==DataCommitStatus::Succeeded,"Keep historical A for result switching.");
+    std::optional<ThicknessResult> evaluated;
+    Require(wall->SendRequest(ThicknessEvaluationRequest{c.evaluation},[&](auto r){evaluated=r;}).status==ThicknessAdmissionStatus::Accepted,"Evaluation B rejected.");
+    wait([&]{return evaluated.has_value();});
+    Require(evaluated->isActivated && evaluated->isDisplayReady,"New evaluation result was not displayed.");
+    const auto b=evaluated->result;auto bDisplay=*wall->GetResult(b)->appliedDisplay;
+    bDisplay.rangeMode=ThicknessRangeMode::Manual;bDisplay.range={0,c.params.maxDistance};
+    bDisplay.colorBand.belowColor={1,0,0};bDisplay.colorBand.aboveColor={0,1,1};
+    Require(wall->SendRequest(ThicknessDisplayRequest{bDisplay,b}).status==ThicknessAdmissionStatus::Accepted,"Result B color edit rejected.");
+    Require(wall->SendRequest(ThicknessDisplayRequest{*aDisplay,a}).status==ThicknessAdmissionStatus::InvalidRequest
+        && wall->GetState().result==b && wall->GetState().appliedDisplay->colorBand.aboveColor==bDisplay.colorBand.aboveColor,"Draft A must not overwrite newly active B.");
+    ThicknessResult activation;const auto activateA=wall->SendRequest(ThicknessActivationRequest{a,{}},[&](auto r){activation=r;});
+    if(activateA.status!=ThicknessAdmissionStatus::Accepted || !wall->GetState().appliedDisplay
+        || wall->GetState().appliedDisplay->colorBand.belowColor!=aDisplay->colorBand.belowColor)
+        std::cerr<<"activation A admission="<<int(activateA.status)<<" resultExists="<<bool(wall->GetResult(a))<<" status="<<int(activation.status)<<" ready="<<activation.isDisplayReady<<'\n';
+    Require(activateA.status==ThicknessAdmissionStatus::Accepted
+        && wall->GetState().appliedDisplay->colorBand.belowColor==aDisplay->colorBand.belowColor
+        && wall->GetState().appliedDisplay->colorBand.aboveColor==aDisplay->colorBand.aboveColor
+        && wall->GetState().appliedDisplay->rangeMode==aDisplay->rangeMode,"A to B to A must restore the complete color ramp and range intent.");
+    Require(wall->SendRequest(ThicknessActivationRequest{b,{}}).status==ThicknessAdmissionStatus::Accepted
+        && wall->GetState().appliedDisplay->colorBand.aboveColor==bDisplay.colorBand.aboveColor,"B retains its own unbounded tail color.");
+    const auto retained=probe->context.data->GetDataBinding(probe->context.data->GetDataGraph(),"color-regression.keep-a");
+    DataTransaction release;release.bindings.push_back({"color-regression.keep-a",retained->revision,true,retained->target,{}});
+    Require(probe->context.data->SetDataCommit(std::move(release)).status==DataCommitStatus::Succeeded,"Release test-owned A retention.");
     Require(session.DetachFeature(*wallMount) && session.DetachFeature(*surface) &&
                 session.DetachFeature(*part) && session.DetachFeature(*probe),
             "Public feature detach failed.");

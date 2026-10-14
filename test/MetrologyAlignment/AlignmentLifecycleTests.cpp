@@ -989,7 +989,7 @@ void AutomaticReferenceLifecycle() {
     Check(f.feature->GetState().activeResult == result.result, "evaluation leaves alignment activation unchanged");
     AlignmentRequest display; display.action = AlignmentAction::SetDeviationDisplay;
     display.deviationDisplay = AlignmentDeviationDisplay{};
-    display.deviationDisplay->result = deviationRef; display.deviationDisplay->range = {0,.1};
+    display.deviationDisplay->result = deviationRef;display.deviationDisplay->rangeMode=AlignmentRangeMode::Manual; display.deviationDisplay->range = {0,.1};
     display.deviationDisplay->selectedVertex = 0;
     AlignmentResult displayed;
     const auto displayCommit = f.data->GetDataGraph().commitId;
@@ -1020,19 +1020,17 @@ void AutomaticReferenceLifecycle() {
     show();
     Check(displayed.isDisplayReady && views->overlay->overlays.back()==oldOverlay,
           "identical display request reuses geometry, colors and overlay objects");
-    views->overlay->rejectsAttach = true; display.deviationDisplay->range = {0,.2}; show(); views->overlay->rejectsAttach = false;
-    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
-          views->overlay->overlays.back() == oldOverlay && f.feature->GetState().isDeviationDisplayReady &&
-          f.feature->GetState().deviationDisplay->range[1] == .1,
-          "failed display replacement preserves previous complete overlay and settings");
-    views->overlay->onAttach = [] { throw 42; }; show(); views->overlay->onAttach = {};
-    Check(displayed.status == AlignmentStatus::InternalError && views->overlay->overlays.size() == 2 &&
-          views->overlay->overlays.back() == oldOverlay,"nonstandard port exception rolls back partial display attachment");
+    display.deviationDisplay->range={0,.2};show();
+    Check(displayed.isDisplayReady && views->overlay->overlays.back()==oldOverlay,"same-result recolor does not replace overlay bindings");
+    display.deviationDisplay->range={0,.1};show();
+    views->overlay->rejectsAttach=true;display.deviationDisplay->result=DataRevisionRef{};
+    Check(f.feature->SendRequest(display).status==AlignmentAdmissionStatus::InvalidRequest,"invalid display target rejected before touching current props");
+    views->overlay->rejectsAttach=false;display.deviationDisplay->result=deviationRef;
     display.deviationDisplay->range = {1,0};
     Check(f.feature->SendRequest(display).status == AlignmentAdmissionStatus::InvalidRequest &&
           views->overlay->overlays.back() == oldOverlay,"invalid color range leaves current display untouched");
     display.deviationDisplay->range = {0,.1}; display.deviationDisplay->isVisible = false; show();
-    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.size() == 1 &&
+    Check(!f.feature->GetState().isDeviationDisplayReady && views->overlay->overlays.size() == 2 &&
           f.data->GetDataGraph().commitId == displayCommit,"hiding deviation releases overlay without changing detection data");
     display.deviationDisplay->isVisible = true;
     views->overlay->onAttach = [&] {
@@ -1043,19 +1041,19 @@ void AutomaticReferenceLifecycle() {
     Check(f.feature->GetScopeState(f.input.scope).isDeviationDisplayReady &&
           !f.feature->GetScopeState("other-part").deviationDisplay,
           "deviation display state is scoped to its bound alignment part");
-    display.deviationDisplay->range=AlignmentDeviationDisplay{}.range;show();
+    display.deviationDisplay->rangeMode=AlignmentRangeMode::Result;show();
     const auto automaticDisplay=f.feature->GetState().deviationDisplay;
     Check(automaticDisplay && displayed.isDisplayReady && !automaticDisplay->useToleranceColors &&
-          std::isfinite(automaticDisplay->range[0]) && std::isfinite(automaticDisplay->range[1]) &&
-          automaticDisplay->range[0]<=deviation->forward->statistics.minimum &&
-          automaticDisplay->range[1]>=deviation->forward->statistics.maximum,
+          f.feature->GetState().deviationDisplayRange &&
+          (*f.feature->GetState().deviationDisplayRange)[0]<=deviation->forward->statistics.minimum &&
+          (*f.feature->GetState().deviationDisplayRange)[1]>=deviation->forward->statistics.maximum,
           "public default display resolves the current field range before storing visible state");
     paletteRequest.deviations.clear();paletteRequest.deviationDisplays.clear();paletteRequest.captureCurrentDisplay=true;
     const auto automaticCapture=f.feature->GetReport(paletteRequest);
     Check(automaticDisplay && automaticCapture.report && !automaticCapture.report->presentation.deviations.empty() &&
-          automaticCapture.report->presentation.deviations[0].parameters.range==automaticDisplay->range,
+          automaticCapture.report->presentation.deviations[0].mappingRange==f.feature->GetState().deviationDisplayRange,
           "capturing automatic display freezes the same resolved range as the live overlay");
-    display.deviationDisplay->range={0,.1};
+    display.deviationDisplay->rangeMode=AlignmentRangeMode::Manual;display.deviationDisplay->range={0,.1};
     AlignmentConfig limitedConfig;
     auto limitedDisplay = std::make_shared<MetrologyAlignmentHostFeature>(limitedConfig);
     HostFeatureContext limitedContext; limitedContext.data=f.data; limitedContext.views=views;

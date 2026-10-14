@@ -73,7 +73,7 @@ int wmain(int argc,wchar_t **argv) {
         auto parameters=std::make_shared<AlignmentDeviationRequest>();
         parameters->metric=AlignmentDeviationMetric::NominalNormalProjection;
         parameters->tolerance=std::array<double,2>{-.1,.1}; snapshot.parameters=parameters;
-        AlignmentDeviationDisplay display; display.result=snapshot.result; display.range={-1,1};
+        AlignmentDeviationDisplay display;display.rangeMode=AlignmentRangeMode::Manual; display.result=snapshot.result; display.range={-1,1};
         const auto colorStart=std::chrono::steady_clock::now();
         auto product=AlignmentDeviationOverlay::Build(view,snapshot,display);
         const double colorMs=Milliseconds(colorStart); const auto afterColor=ReadMemory();

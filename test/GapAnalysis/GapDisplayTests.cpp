@@ -175,9 +175,10 @@ bool CommitDisplayResult(GapAnalysisService& service)
     }
     TestDataPort committedData;
     auto views = committedData.SetLabelAndMesh(std::move(labels), std::move(mesh));
+    const auto displayResult=views.second ? views.second->data->self:DataRevisionRef{};
     return views.first && views.second
         && service.SetCommittedView(
-            std::move(views.first), std::move(views.second));
+            std::move(views.first), std::move(views.second),displayResult);
 }
 
 bool StartDisplay(

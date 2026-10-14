@@ -84,7 +84,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         }
         if (GetIsOwner()) {
             ClearDisplay();
-            m_deviationDisplay.Clear();
+            m_deviationDisplay.Reset();
             m_sceneDisplay.Clear();
             if (m_data && m_observer)
                 m_data->DetachDataChange(m_observer);
@@ -144,7 +144,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             return false;
         m_observer = 0;
         ClearDisplay();
-        m_deviationDisplay.Clear();
+        m_deviationDisplay.Reset();
         m_sceneDisplay.Clear();
         if (!m_resultScopes.Clear(*m_data)) return false;
         m_data.reset();
@@ -157,6 +157,10 @@ class MetrologyAlignmentHostFeature::Impl final {
         m_state.isCurrent = false;
         return true;
     }
+    std::optional<AlignmentDeviationDisplay> GetDeviationDisplay(const DataRevisionRef& ref) const {
+        if(!GetIsOwner() || !m_data || !AlignmentDeviationDataStore::GetResult(m_data->GetDataGraph(),ref))return {};
+        return m_deviationDisplay.GetSaved(ref);
+    }
     AlignmentState GetState() const {
         if (!GetIsOwner())
             return {};
@@ -165,6 +169,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         state.sceneDisplay=m_sceneDisplay.GetRequest();state.sceneWorkingBytes=m_sceneDisplay.GetWorkingBytes();
         state.isSceneDisplayReady=m_data && m_sceneDisplay.GetReady(m_data->GetDataGraph());
         state.deviationDisplay = m_deviationDisplay.GetRequest();
+        state.deviationDisplayRange=m_deviationDisplay.GetRange();
         state.isDeviationDisplayReady = m_data && m_deviationDisplay.GetReady(m_data->GetDataGraph());
         if (m_data && GetDataRevisionRefValid(state.activeResult)) {
             const auto graph = m_data->GetDataGraph();
@@ -210,7 +215,7 @@ class MetrologyAlignmentHostFeature::Impl final {
         const auto graph=m_data->GetDataGraph();AlignmentReport::CurrentDisplay current;
         if(request.captureCurrentDisplay) {
             current.supplied=true;current.deviation=m_deviationDisplay.GetRequest();current.scene=m_sceneDisplay.GetRequest();
-            if((current.deviation && !m_deviationDisplay.GetReady(graph)) || (current.scene && !m_sceneDisplay.GetReady(graph)))
+            if((current.deviation && current.deviation->isVisible && !m_deviationDisplay.GetReady(graph)) || (current.scene && !m_sceneDisplay.GetReady(graph)))
                 return {AlignmentStatus::Stale,{},"Current display dependencies are stale."};
         }
         return AlignmentReport::Capture(graph,request,m_config,current);
@@ -1121,4 +1126,8 @@ std::optional<AlignmentSceneVertex> MetrologyAlignmentHostFeature::GetSceneVerte
 
 std::optional<AlignmentSceneItem> MetrologyAlignmentHostFeature::GetSceneItem(const std::string &part,const std::string &item) const {
     return m_impl->GetSceneItem(part,item);
+}
+
+std::optional<AlignmentDeviationDisplay> MetrologyAlignmentHostFeature::GetDeviationDisplay(const DataRevisionRef& ref) const {
+    return m_impl->GetDeviationDisplay(ref);
 }

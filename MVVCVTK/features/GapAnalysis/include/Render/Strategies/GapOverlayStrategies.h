@@ -3,6 +3,7 @@
 #include "Render/Contracts/SlicePlaneState.h"
 #include "App/ViewTypes.h"
 #include "Render/Support/FeatureOverlayBase.h"
+#include "Render/Support/AnalysisLegend.h"
 #include "Render/GapDisplayData.h"
 #include "Render/Support/SliceContourPlane.h"
 #include <vtkCutter.h>
@@ -22,6 +23,7 @@ class GapMeshOverlayStrategy : public FeatureOverlayBase {
 private:
     // 构造期创建的 3D overlay prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkActor> m_actor;
+    vtkSmartPointer<AnalysisLegend> m_legend;
     // actor 使用的 mapper；SetInputData 通过 VTK 引用计数保留最新 void mesh。
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
 
@@ -40,10 +42,13 @@ public:
             m_mapper->SetScalarModeToUseCellData();
             m_mapper->SetLookupTable(display->labels);
             m_mapper->UseLookupTableScalarRangeOn();
-            auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
+            m_actor->GetProperty()->SetOpacity(display->params.opacity);
+            m_legend=vtkSmartPointer<AnalysisLegend>::New();auto& legend=m_legend;
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
-            legend->SetVisibility(display->hasRegions);
+            AnalysisColorStyle::SetLegend(*legend, (std::string(u8"孔隙 · ")+display->resultLabel+"\n"+u8"缺陷体积 [mm³]").c_str());
+            legend->SetMapping(display->mappingRange,GapDisplayData::GetColorRamp(display->params),display->hasRegions);
+            legend->SetPosition(display->params.legendPosition[0],display->params.legendPosition[1]);
+            legend->SetVisibility(display->params.hasLegend);
             AttachProp(legend);
         }
 
@@ -53,6 +58,9 @@ public:
     }
 
     // 只接受 vtkPolyData；类型不匹配时保留 mapper 当前输入，调用方清场应走 overlay detach/clear 生命周期。
+    void SetPresentation(const GapDisplayParams& params) {
+        m_actor->GetProperty()->SetOpacity(params.opacity);if(m_legend){m_legend->SetVisibility(params.hasLegend);m_legend->SetPosition(params.legendPosition[0],params.legendPosition[1]);}
+    }
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto poly = vtkPolyData::SafeDownCast(data);
         if (poly) {
@@ -74,6 +82,7 @@ class GapSliceOverlayStrategy : public FeatureOverlayBase {
 private:
     // 构造期创建的 2D label prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkImageSlice> m_slice;
+    vtkSmartPointer<AnalysisLegend> m_legend;
     // label image reslice mapper；持有最新输入和 SetInputData 创建的 slice plane。
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     // 生命周期覆盖整个策略的标签 LUT：0 透明，所有正标签统一为不透明红色。
@@ -102,11 +111,13 @@ public:
         m_lut->Build(); // 生效
         if (display) {
             m_lut = display->labels;
-            m_slice->GetProperty()->SetOpacity(0.35);
-            auto legend = vtkSmartPointer<vtkScalarBarActor>::New();
+            m_slice->GetProperty()->SetOpacity(0.35*display->params.opacity);
+            m_legend=vtkSmartPointer<AnalysisLegend>::New();auto& legend=m_legend;
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, u8"体积 [mm³]");
-            legend->SetVisibility(display->hasRegions);
+            AnalysisColorStyle::SetLegend(*legend, (std::string(u8"孔隙 · ")+display->resultLabel+"\n"+u8"缺陷体积 [mm³]").c_str());
+            legend->SetMapping(display->mappingRange,GapDisplayData::GetColorRamp(display->params),display->hasRegions);
+            legend->SetPosition(display->params.legendPosition[0],display->params.legendPosition[1]);
+            legend->SetVisibility(display->params.hasLegend);
             AttachProp(legend);
             m_contour = vtkSmartPointer<vtkCutter>::New();
             m_contour->SetInputData(display->mesh);
@@ -130,6 +141,9 @@ public:
     }
 
     // 输入 label image 后建立固定轴向切片平面；LUT 把 0 当背景、所有正标签统一显示为红色。
+    void SetPresentation(const GapDisplayParams& params) {
+        m_slice->GetProperty()->SetOpacity(.35*params.opacity);if(m_legend){m_legend->SetVisibility(params.hasLegend);m_legend->SetPosition(params.legendPosition[0],params.legendPosition[1]);}
+    }
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto img = vtkImageData::SafeDownCast(data);
         if (!img) return;

@@ -13,7 +13,8 @@ BuildDeviation(const AlignmentDeviationDisplay &display,
   if (!resolved)
     throw std::invalid_argument("Invalid report colorbar configuration.");
   MetrologyReportDeviationDisplay output;
-  output.parameters = *resolved;
+  output.parameters=display;AnalysisColorStyle::SetTailColors(output.parameters);
+  output.mappingRange=AlignmentDeviationColors::GetEffectiveRange(*result.forward) ? std::optional<std::array<double,2>>(resolved->range):std::nullopt;
   output.legendRgb = AlignmentDeviationColors::GetLegend(
       *resolved, result.parameters->tolerance);
   if (display.selectedVertex) {
@@ -48,15 +49,18 @@ bool GetValid(const MetrologyReport &r) {
     const auto result = std::find_if(
         r.deviations.begin(), r.deviations.end(),
         [&](const auto &v) { return v.result == d.parameters.result; });
-    if (!std::isfinite(d.parameters.range[0]) || !std::isfinite(d.parameters.range[1]) ||
+    const auto resolved=result!=r.deviations.end() ? AlignmentDeviationColors::GetResolvedDisplay(d.parameters,*result):std::nullopt;
+    if (!resolved ||
         !displays.insert(d.parameters.result).second ||
         result == r.deviations.end() ||
         !AlignmentDeviationColors::GetDisplayValid(d.parameters, *result) ||
+        d.mappingRange != (AlignmentDeviationColors::GetEffectiveRange(*result->forward)
+            ? std::optional<std::array<double,2>>(resolved->range):std::nullopt) ||
         d.colorMapVersion != AlignmentDeviationColors::version ||
         d.invalidRgb != AlignmentDeviationColors::invalidColor ||
         d.selectedRgb != AlignmentDeviationColors::selectedColor ||
         d.legendRgb != AlignmentDeviationColors::GetLegend(
-                           d.parameters, result->parameters->tolerance))
+                           *resolved, result->parameters->tolerance))
       return false;
     if (d.selection.has_value() != d.parameters.selectedVertex.has_value())
       return false;

@@ -943,6 +943,14 @@ void Display()
     ThicknessDisplay display;
     display.range = {0, 4};
     auto prepared = ThicknessOverlay::BuildData(record, *w.mesh, display);
+    auto recolor=display;recolor.colorBand.mode=ThicknessColorMode::Gradient;
+    const auto recolored=ThicknessOverlay::BuildData(record,*w.mesh,recolor,&prepared);
+    Check(recolored.mesh->GetPoints()==prepared.mesh->GetPoints() && recolored.mesh->GetPolys()==prepared.mesh->GetPolys()
+        && recolored.mesh->GetCellData()->GetArray("thickness.sample")==prepared.mesh->GetCellData()->GetArray("thickness.sample"),
+        "recolor preserves points, cells and sample IDs without reconstructing footprints");
+    const auto appearance=ThicknessOverlay::BuildData(record,*w.mesh,display,&prepared);
+    Check(appearance.mesh==prepared.mesh && appearance.mesh->GetCellData()->GetScalars()==prepared.mesh->GetCellData()->GetScalars(),
+        "appearance-only update preserves the original color array");
     auto inclined=display;inclined.style=ThicknessDisplayStyle::Inclined;
     const auto faded=ThicknessOverlay::BuildData(record,*w.mesh,inclined);
     auto* fadeColors=faded.mesh->GetCellData()->GetScalars();
@@ -969,13 +977,27 @@ void Display()
         if(id<0 || static_cast<std::size_t>(id)>=mixed->size()) {hasMappedTolerance=false;break;}
         const auto& sample=(*mixed)[static_cast<std::size_t>(id)];
         const std::array<double,3> expected=sample.validity!=ThicknessValidity::Valid ? std::array<double,3>{128,128,128}
+            : sample.thickness<display.range[0] ? std::array<double,3>{163,74,199}
+            : sample.thickness>display.range[1] ? std::array<double,3>{214,74,166}
             : sample.thickness<record.archive.evaluation.lower ? std::array<double,3>{208,88,89}
             : sample.thickness>record.archive.evaluation.upper ? std::array<double,3>{83,114,188}
             : std::array<double,3>{97,179,113};
         double actual[3];toleranceColors->GetTuple(cell,actual);
         hasMappedTolerance &= std::equal(actual,actual+3,expected.begin());
     }
-    Check(hasMappedTolerance,"each sample ID maps to its exact VG tolerance or invalid RGB");
+    Check(hasMappedTolerance,"each sample ID maps to its exact finite tolerance, unbounded tail or invalid RGB");
+    auto distinctTails=tolerance;
+    distinctTails.range={1,3};distinctTails.colorBand.belowColor={0,1,1};distinctTails.colorBand.aboveColor={1,1,0};
+    const auto tailData=ThicknessOverlay::BuildData(record,*w.mesh,distinctTails);
+    bool sawLowerTail=false,sawUpperTail=false;
+    for(vtkIdType cell=0;cell<toleranceIds->GetNumberOfValues();++cell) {
+        const auto& sample=(*mixed)[static_cast<std::size_t>(toleranceIds->GetValue(cell))];
+        if(sample.validity!=ThicknessValidity::Valid)continue;
+        double actual[3];tailData.mesh->GetCellData()->GetScalars()->GetTuple(cell,actual);
+        if(sample.thickness==.5)sawLowerTail=actual[0]==0 && actual[1]==255 && actual[2]==255;
+        if(sample.thickness==3.5)sawUpperTail=actual[0]==255 && actual[1]==255 && actual[2]==0;
+    }
+    Check(sawLowerTail && sawUpperTail,"tolerance display retains independently configured constant tails");
     auto* surfaceIds=vtkIdTypeArray::SafeDownCast(prepared.mesh->GetCellData()->GetArray("thickness.sample"));
     bool hasMatchingFootprints=surfaceIds && surfaceIds->GetNumberOfValues()==prepared.mesh->GetNumberOfCells();
     // 用原始三角形和归档重心坐标独立重建面片，检查显示未替换测量几何。
@@ -1005,7 +1027,7 @@ void Display()
     auto overlay = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                       HostRenderViewRole::Primary3D);
     overlay->AttachRenderer(renderer);
-    Check(renderer->GetViewProps()->GetNumberOfItems() == 4,
+    Check(renderer->GetViewProps()->GetNumberOfItems() == 3,
           "feature owns surface, query marker, scale and invalid swatch");
     auto *colors = prepared.mesh->GetCellData()->GetScalars();
     Check(colors && colors->GetNumberOfComponents() == 3,
@@ -1019,13 +1041,11 @@ void Display()
         colored = colored || (rgb[0] != 128 || rgb[1] != 128 || rgb[2] != 128);
     }
     Check(grey && colored, "valid and invalid have distinct colors");
-    bool hasInvalidLegend = false;
+    bool hasInvalidLegend=false;
     renderer->GetViewProps()->InitTraversal();
-    while (auto *prop = renderer->GetViewProps()->GetNextProp())
-        if (auto *legend = vtkLegendBoxActor::SafeDownCast(prop))
-            hasInvalidLegend = legend->GetNumberOfEntries() == 1 &&
-                               std::string(legend->GetEntryString(0)) == u8"无效/未测";
-    Check(hasInvalidLegend, "invalid color has an explicit legend entry");
+    while(auto* prop=renderer->GetViewProps()->GetNextProp())if(auto* legend=AnalysisLegend::SafeDownCast(prop))
+        hasInvalidLegend=legend->GetDrawNanAnnotation() && std::string(legend->GetNanAnnotation())==u8"无效／未测";
+    Check(hasInvalidLegend,"invalid data is explicitly distinguished from both range exterior swatches");
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
     window->SetOffScreenRendering(1);
     window->SetSize(400, 400);
@@ -1087,8 +1107,8 @@ void Display()
     auto slice = std::make_shared<ThicknessOverlay>(prepared, display, w.archive.input.unit,
                                                     HostRenderViewRole::TopDownSlice);
     slice->AttachRenderer(renderer);
-    Check(renderer->GetViewProps()->GetNumberOfItems()==5,
-        "slice owns colored field contour, contrast outline, query marker and both legends");
+    Check(renderer->GetViewProps()->GetNumberOfItems()==4,
+        "slice owns colored field contour, contrast outline, query marker and the complete legend");
     FeatureOverlayState state;
     state.cursor = {3, 3, 2.5};
     slice->SetOverlayState(state);

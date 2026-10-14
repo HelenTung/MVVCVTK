@@ -30,6 +30,7 @@ struct GapHostRequest {
     GapHostAction action = GapHostAction::None;
     std::optional<GapHostStartParams> start;
     std::optional<GapDisplayParams> display;
+    DataRevisionRef displayResult;
 };
 
 struct GapHostKeys {
@@ -71,6 +72,7 @@ public:
         GapHostRequest request,
         GapHostCallback onComplete = nullptr);
     GapHostState GetState() const;
+    std::optional<GapDisplayParams> GetDisplay(const DataRevisionRef& result) const;
 
 private:
     class Impl;

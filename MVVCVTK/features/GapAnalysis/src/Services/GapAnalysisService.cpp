@@ -114,6 +114,10 @@ public:
     bool StartView(GapViewRequest request, std::function<void(bool)> onComplete);
     bool SwitchOverlay();
     bool SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay);
+    std::optional<std::array<double,2>> GetDisplayRange() const {
+        return GetViewThread() && m_displayData && m_displayData->hasRegions
+            ? std::optional<std::array<double,2>>(m_displayData->mappingRange):std::nullopt;
+    }
     GapDisplayParams GetDisplayParams() const
     { return GetViewThread() && m_displayData ? m_displayData->params : GapDisplayParams{}; }
     bool ExitView();
@@ -124,7 +128,7 @@ public:
     bool GetCompletedResult(GapAnalysisResult& result);
     bool SetCommittedView(
         VtkLabelMapSnapshot labels,
-        VtkSurfaceMeshSnapshot mesh);
+        VtkSurfaceMeshSnapshot mesh,const DataRevisionRef& result,const std::optional<GapDisplayParams>& inherited={});
     void SetViewCommitFailed();
 
 private:
@@ -203,6 +207,7 @@ private:
         std::shared_ptr<OverlayService> service;
         // 与 service 中同一 overlay 实例的共享 owner，确保 RemoveOverlay 前对象仍有效。
         std::shared_ptr<FeatureOverlay> overlay;
+        std::string viewId;
     };
 
     void SetCompletionCallback(std::function<void(bool)> callback);
@@ -339,6 +344,7 @@ private:
     std::thread::id m_viewThreadId;
     // StartView 过滤并保留 3D target 的 shared owner，ClearDisplayState 统一释放。
     std::vector<std::shared_ptr<OverlayService>> m_meshTargets;
+    std::map<OverlayService*,std::string> m_viewIds;
     // 2D target 的 [orientation, service] shared owner；orientation 在创建 slice overlay 时固化。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> m_sliceTargets;
     // 当前已实际 Attach 的 service/strategy 对；SetOverlayOff 逐项 Remove 后清空。
@@ -667,6 +673,8 @@ bool GapAnalysisService::SwitchOverlay()
     return m_impl->SwitchOverlay();
 }
 
+std::optional<std::array<double,2>> GapAnalysisService::GetDisplayRange() const { return m_impl->GetDisplayRange(); }
+
 bool GapAnalysisService::SetDisplay(const GapDisplayParams& params, std::function<bool()> acceptDisplay)
 {
     return m_impl->SetDisplay(params, std::move(acceptDisplay));
@@ -709,10 +717,10 @@ bool GapAnalysisService::GetCompletedResult(GapAnalysisResult& result)
 
 bool GapAnalysisService::SetCommittedView(
     VtkLabelMapSnapshot labels,
-    VtkSurfaceMeshSnapshot mesh)
+    VtkSurfaceMeshSnapshot mesh,const DataRevisionRef& result,const std::optional<GapDisplayParams>& inherited)
 {
     return m_impl->SetCommittedView(
-        std::move(labels), std::move(mesh));
+        std::move(labels), std::move(mesh),result,inherited);
 }
 
 void GapAnalysisService::SetViewCommitFailed()
@@ -1079,6 +1087,7 @@ bool GapAnalysisService::Impl::StartView(
         m_surfParams = params.surfParams;
         m_voidParams = params.voidParams;
     }
+    m_viewIds=std::move(request.viewIds);
     m_meshTargets = std::move(meshTargets);
     m_sliceTargets = std::move(sliceTargets);
     m_displayVoidMesh = nullptr;
@@ -1285,7 +1294,7 @@ bool GapAnalysisService::Impl::GetCompletedResult(
 
 bool GapAnalysisService::Impl::SetCommittedView(
     VtkLabelMapSnapshot labels,
-    VtkSurfaceMeshSnapshot mesh)
+    VtkSurfaceMeshSnapshot mesh,const DataRevisionRef& result,const std::optional<GapDisplayParams>& inherited)
 {
     if (!GetViewThread()
         || m_viewPhase.load() != GapViewPhase::AwaitingResult
@@ -1299,7 +1308,11 @@ bool GapAnalysisService::Impl::SetCommittedView(
     m_displayLabelImage = m_displayLabelOwner->labels;
     {
         std::lock_guard<std::mutex> lock(m_resultMutex);
-        m_displayData = m_result.display;
+        try { if(m_result.display) {
+            auto display=std::make_shared<GapDisplayData>(*m_result.display);
+            display->resultLabel=AnalysisColorStyle::GetResultLabel(result);
+            m_displayData=inherited ? GapDisplayData::CreateColors(*display,*inherited):std::move(display);
+        } else m_displayData.reset(); } catch(...) { m_displayData.reset(); }
     }
     m_displayVoidMesh = m_displayData ? m_displayData->mesh : nullptr;
     SetOverlayOff();
@@ -1510,6 +1523,14 @@ bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
 bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayData> display,
     const std::function<bool()>& acceptDisplay) {
     if (!display) return false;
+    if(m_displayData && m_displayData->labels==display->labels && !m_displayOverlayBindings.empty()) {
+        if(acceptDisplay && !acceptDisplay())return false;
+        for(auto& binding:m_displayOverlayBindings) {
+            if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))mesh->SetPresentation([&]{auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,binding.viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),binding.viewId)==p.hiddenLegendViews.end();return p;}());
+            if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))slice->SetPresentation([&]{auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,binding.viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),binding.viewId)==p.hiddenLegendViews.end();return p;}());
+        }
+        m_displayData=std::move(display);return true;
+    }
     std::vector<GapOverlayBinding> candidate;
     const auto rollback = [&] {
         for (auto item = candidate.rbegin(); item != candidate.rend(); ++item)
@@ -1523,7 +1544,9 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!service) { rollback(); return false; }
             auto overlay = std::make_shared<GapMeshOverlayStrategy>(display);
             overlay->SetInputData(m_displayVoidMesh);
-            candidate.push_back({service, overlay});
+            const auto viewId=m_viewIds.count(service.get()) ? m_viewIds.at(service.get()):std::string{};
+            auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);
+            candidate.push_back({service,overlay,viewId});
             if (!service->AttachOverlay(overlay)) { rollback(); return false; }
         }
         for (const auto& target : m_sliceTargets) {
@@ -1531,7 +1554,9 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!target.second) { rollback(); return false; }
             auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, display);
             overlay->SetInputData(m_displayLabelImage);
-            candidate.push_back({target.second, overlay});
+            const auto viewId=m_viewIds.count(target.second.get()) ? m_viewIds.at(target.second.get()):std::string{};
+            auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);
+            candidate.push_back({target.second,overlay,viewId});
             if (!target.second->AttachOverlay(overlay)) { rollback(); return false; }
         }
         if (acceptDisplay && !acceptDisplay()) { rollback(); return false; }
@@ -1545,7 +1570,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
 
 void GapAnalysisService::Impl::ClearDisplayState() {
     m_displayData.reset();
-    m_meshTargets.clear();
+    m_viewIds.clear();m_meshTargets.clear();
     m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;

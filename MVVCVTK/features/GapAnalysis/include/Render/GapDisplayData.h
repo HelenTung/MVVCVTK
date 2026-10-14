@@ -25,9 +25,11 @@ struct GapDisplayData final {
     vtkSmartPointer<vtkLookupTable> labels;
     vtkSmartPointer<vtkLookupTable> volumes;
     bool hasRegions = false;
+    std::string resultLabel;
     // 稀疏 ID 与其正式体积只供重新着色，切换不重新提取网格或修改标签。
     std::vector<std::pair<std::int32_t, double>> regionVolumes;
-    std::array<double, 2> resultRange{0, 1};
+    std::array<double, 2> resultRange{0, 0};
+    std::array<double,2> mappingRange{0,0};
     GapDisplayParams params;
 
     static AnalysisColorStyle::RampMode GetRampMode(GapColorMode mode)
@@ -44,6 +46,7 @@ struct GapDisplayData final {
     static AnalysisColorStyle::RampParams GetColorRamp(const GapDisplayParams& params)
     {
         AnalysisColorStyle::RampParams ramp;ramp.mode=GetRampMode(params.mode);
+        ramp.isReversed=params.isReversed;
         ramp.constantColor = params.constantColor; ramp.lowColor = params.lowColor;
         ramp.highColor = params.highColor; ramp.belowColor = params.belowColor;
         ramp.aboveColor = params.aboveColor;
@@ -59,7 +62,7 @@ struct GapDisplayData final {
 
     static bool GetParamsValid(const GapDisplayParams& params) noexcept
     {
-        if(params.segments.size()>1024)return false;
+        if(!AnalysisColorStyle::GetLegendLayoutValid(params) || params.segments.size()>1024 || !std::isfinite(params.opacity) || params.opacity<0 || params.opacity>1)return false;
         try { return AnalysisColorStyle::GetRampValid(GetColorRamp(params))
             && (params.rangeMode == GapRangeMode::Result
                 || (params.rangeMode == GapRangeMode::SelectedInterval
@@ -73,10 +76,11 @@ struct GapDisplayData final {
     {
         if (!GetParamsValid(params)) return {};
         auto result = std::make_shared<GapDisplayData>(source);
-        result->params = params;
-        result->params.range = params.rangeMode == GapRangeMode::Result ? source.resultRange : params.range;
+        result->params = params;AnalysisColorStyle::SetTailColors(result->params);
+        result->mappingRange = params.rangeMode == GapRangeMode::Result ? source.resultRange : params.range;
         const auto ramp=GetColorRamp(params);
-        result->volumes = AnalysisColorStyle::BuildRamp(result->params.range,ramp);
+        if(result->mappingRange==source.mappingRange && AnalysisColorStyle::GetRampEqual(ramp,GetColorRamp(source.params)))return result;
+        result->volumes = AnalysisColorStyle::BuildRamp(result->mappingRange,ramp);
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
         result->labels->IndexedLookupOn();
@@ -85,7 +89,7 @@ struct GapDisplayData final {
         result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
         for (std::size_t index = 0; index < source.regionVolumes.size(); ++index) {
             const auto& region = source.regionVolumes[index];
-            const auto rgba=AnalysisColorStyle::GetMappedColor(*result->volumes,ramp,region.second);
+            const auto rgba=AnalysisColorStyle::GetMappedColor(result->mappingRange,ramp,region.second);
             result->labels->SetAnnotation(vtkVariant(region.first), std::to_string(region.first));
             result->labels->SetTableValue(static_cast<vtkIdType>(index + 1),rgba.data());
         }
@@ -112,12 +116,8 @@ struct GapDisplayData final {
             range[1] = std::max(range[1], double(region.volumeMM3));
         }
         result->hasRegions = !regions.empty();
-        if (regions.empty()) range = {0, 1};
-        // 单值结果只扩展颜色映射区间，不改变任何缺陷值。
-        if (range[0] == range[1]) range[1] = std::nextafter(range[1],
-            std::numeric_limits<double>::infinity());
-        result->resultRange = range;
-        result->params.range = range;
+        if (regions.empty()) range = {0, 0};
+        result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(regions.size() + 1));
