@@ -1673,6 +1673,7 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     auto* oldContext = oldRenderer
         ? oldRenderer->GetRenderWindow() : nullptr;
     auto* nextContext = ren ? ren->GetRenderWindow() : nullptr;
+    if (oldContext && oldContext != nextContext) (void)ClearGpuInput();
     if (m_resources && oldContext && oldContext != nextContext) {
         (void)m_resources->ClearGpuReservation(oldContext, this);
     }
@@ -1686,6 +1687,8 @@ void VolumeStrategy::DetachRenderer(
 {
     auto* current = m_renderer.GetPointer();
     auto* context = current ? current->GetRenderWindow() : nullptr;
+    // 仍持有旧 renderer/context 时释放纹理，避免模式切换后占用业务计算显存。
+    if (current == renderer.GetPointer()) (void)ClearGpuInput();
     if (m_resources && context) {
         (void)m_resources->ClearGpuReservation(context, this);
     }

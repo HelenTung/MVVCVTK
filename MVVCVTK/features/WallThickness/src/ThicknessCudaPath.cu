@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 
 namespace ThicknessCudaPath {
 namespace {
@@ -205,7 +206,9 @@ public:
         m_allocations.reserve(10);
         std::size_t free=0,total=0;Check(cudaMemGetInfo(&free,&total));
         const auto bytes=input.valueBytes+input.maskBytes+input.signCount+input.offsetCount*sizeof(std::uint32_t)+input.childBytes;
-        if (free<bytes || free-bytes<512U*1024U*1024U) throw std::runtime_error("Insufficient CUDA memory for immutable wall input.");
+        if (free<bytes || free-bytes<512U*1024U*1024U)
+            throw std::runtime_error("Insufficient CUDA memory for immutable wall input: free="
+                +std::to_string(free)+", input="+std::to_string(bytes)+", reserve=536870912 bytes.");
         m_field.extent=input.extent;m_field.blocks=input.blocks;m_field.threshold=input.threshold;m_field.scalarType=input.scalarType;
         m_field.strides={1,std::size_t(std::int64_t(input.extent[1])-input.extent[0]+1),0};
         m_field.strides[2]=m_field.strides[1]*std::size_t(std::int64_t(input.extent[3])-input.extent[2]+1);
@@ -254,8 +257,8 @@ public:
     }
 };
 }
-std::unique_ptr<Client> Create(const Input& input) noexcept {
-    try {auto client=std::make_unique<Implementation>();client->Initialize(input);return client;}
-    catch (...) {return {};}
+std::unique_ptr<Client> Create(const Input& input) {
+    // 私有入口保留 CUDA 原因，由既有 BuildField 终态路径向调用方报告。
+    auto client=std::make_unique<Implementation>();client->Initialize(input);return client;
 }
 }

@@ -1,6 +1,6 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Services/PartSegmentationService.h"
-#include "Model/LabelMapBuilder.h"
+#include "FeatureSupport/LabelMapBuilder.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
@@ -723,7 +723,8 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
 
         const auto freezeStarted = std::chrono::steady_clock::now();
         candidate.labelPayload = LabelMapBuilder::Build(geometry,
-            std::make_unique<std::vector<PartLabelId>>(std::move(result.labels)), getStopped);
+            std::make_unique<std::vector<PartLabelId>>(std::move(result.labels)), getStopped,
+            "PartSegmentation.labels", "Part segmentation");
         freezeMs = elapsedMs(freezeStarted);
         if (!candidate.labelPayload) {
             candidate.status = getStopped() ? PartResultStatus::Cancelled : PartResultStatus::Failed;

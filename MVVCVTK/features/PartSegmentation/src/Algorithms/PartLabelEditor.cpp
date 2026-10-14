@@ -1,6 +1,6 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Algorithms/PartLabelEditor.h"
-#include "Model/LabelMapBuilder.h"
+#include "FeatureSupport/LabelMapBuilder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -144,7 +144,8 @@ public:
             CheckStop(0);
             SetFailure(PartFailureReason::InternalError, "Edited catalog is inconsistent.");
         }
-        auto payload = LabelMapBuilder::Build(m_geometry, std::move(m_labels), m_stop);
+        auto payload = LabelMapBuilder::Build(m_geometry, std::move(m_labels), m_stop,
+            "PartSegmentation.labels", "Part segmentation");
         if (!payload) {
             CheckStop(0);
             SetFailure(PartFailureReason::InvalidGeometry, "Edited label payload is invalid.");
