@@ -79,7 +79,7 @@ protected:
     }
     void mouseMoveEvent(QMouseEvent* event) override {
         if(!m_dragKey.isEmpty()) {
-            if(m_dragSource!=m_owner.m_data["description"].toString() || !m_owner.onMarker){m_dragKey.clear();return;}
+            if(m_dragSource!=GetSourceStamp() || !m_owner.onMarker){m_dragKey.clear();return;}
             if(m_owner.GetInteractionMode()=="查看分布"){m_dragKey.clear();update();return;}
             m_candidate=ValueAt(event->pos().x());update();return;
         }
@@ -93,28 +93,29 @@ protected:
         } else setToolTip({});
     }
     void mousePressEvent(QMouseEvent* event) override {
-        if(event->button()!=Qt::LeftButton)return;setFocus();
+        if(event->button()!=Qt::LeftButton)return;setFocus();m_dragKey.clear();m_pressBin=-1;
         const auto edges=m_owner.m_data["edges"].toArray();if(edges.size()<2)return;
         const auto low=m_hasRange?m_low:edges.first().toDouble(),high=m_hasRange?m_high:edges.last().toDouble();
         if(m_owner.GetInteractionMode()!="查看分布" && m_owner.onMarker && high>low)for(const auto value:m_owner.m_data["markers"].toArray()) {
             const auto marker=value.toObject();if(!marker["editable"].toBool())continue;
             const auto x=62+(width()-82)*(marker["value"].toDouble()-low)/(high-low);
             if(std::abs(event->pos().x()-x)<=8 && event->pos().y()>=4 && event->pos().y()<=height()-36) {
-                m_dragKey=marker["key"].toString(marker["label"].toString());m_candidate=marker["value"].toDouble();m_dragSource=m_owner.m_data["description"].toString();m_dragMode=m_owner.GetInteractionMode();return;
+                m_dragKey=marker["key"].toString(marker["label"].toString());m_candidate=marker["value"].toDouble();m_dragSource=GetSourceStamp();m_dragMode=m_owner.GetInteractionMode();return;
             }
         }
-        m_pressX=event->pos().x();m_pressBin=GetBin(event->pos(),edges.size()-1);
+        m_pressX=event->pos().x();m_pressBin=GetBin(event->pos(),edges.size()-1);m_pressSource=GetSourceStamp();m_pressMode=m_owner.GetInteractionMode();
     }
     void mouseReleaseEvent(QMouseEvent* event) override {
         if(event->button()!=Qt::LeftButton)return;
         if(!m_dragKey.isEmpty()){
             const auto key=m_dragKey;const auto value=m_candidate;m_dragKey.clear();update();
-            if(m_dragSource==m_owner.m_data["description"].toString() && m_owner.GetInteractionMode()==m_dragMode && m_owner.GetInteractionMode()!="查看分布" && m_owner.onMarker)m_owner.onMarker(key,value);
+            if(m_dragSource==GetSourceStamp() && m_owner.GetInteractionMode()==m_dragMode && m_owner.GetInteractionMode()!="查看分布" && m_owner.onMarker)m_owner.onMarker(key,value);
             return;
         }
         const auto edges=m_owner.m_data["edges"].toArray();const auto i=GetBin(event->pos(),edges.size()-1);
         const auto select=m_owner.onInterval;
-        if(i>=0 && m_pressBin>=0 && select && m_owner.GetInteractionMode()!="查看分布") {
+        if(i>=0 && m_pressBin>=0 && select && m_pressSource==GetSourceStamp()
+            && m_owner.GetInteractionMode()==m_pressMode && m_owner.GetInteractionMode()!="查看分布") {
             if(std::abs(event->pos().x()-m_pressX)>4)select(std::min(ValueAt(m_pressX),ValueAt(event->pos().x())),std::max(ValueAt(m_pressX),ValueAt(event->pos().x())));
             else select(edges[i].toDouble(),edges[i+1].toDouble());
         }
@@ -137,8 +138,13 @@ private:
     QJsonArray m_edges;
     bool m_hasRange=false;
     double m_low=0,m_high=1,m_candidate=0;
-    QString m_dragKey,m_dragSource,m_dragMode;
+    QString m_dragKey,m_dragMode,m_pressMode;
+    QJsonObject m_dragSource,m_pressSource;
     int m_pressX=0,m_pressBin=-1;
+    QJsonObject GetSourceStamp() const {
+        // 同一源的不同 ROI 预览可有相同描述与分布，拖动必须绑定精确缓存键。
+        return {{"cacheKey",m_owner.m_data["cacheKey"]},{"description",m_owner.m_data["description"]}};
+    }
     double ValueAt(int x) const {
         const auto edges=m_owner.m_data["edges"].toArray();if(edges.size()<2 || width()<=82)return 0;
         const auto low=m_hasRange?m_low:edges.first().toDouble(),high=m_hasRange?m_high:edges.last().toDouble();

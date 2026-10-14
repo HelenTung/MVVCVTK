@@ -69,6 +69,19 @@ void CheckWorkbenchV1(TestWindow& window)
     QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QCoreApplication::sendEvent(plot,&press);
     QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QCoreApplication::sendEvent(plot,&move);Require(edits==1,"marker motion only previews a value");
     QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QCoreApplication::sendEvent(plot,&escape);Require(edits==1,"Escape discards an uncommitted marker drag");
+    auto first=histogram;first["cacheKey"]="same-source:preview:1";auto second=first;second["cacheKey"]="same-source:preview:2";
+    statistics.SetHistogram(first);statistics.onMarker=[&](const QString&,double){++edits;};
+    QCoreApplication::sendEvent(plot,&press);QCoreApplication::sendEvent(plot,&move);
+    statistics.SetHistogram(second);statistics.onMarker=[&](const QString&,double){++edits;};
+    QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QCoreApplication::sendEvent(plot,&release);
+    Require(edits==1,"equal descriptions and distributions cannot apply an old marker to a new ROI preview");
+    int intervals=0;const QPointF intervalStart(62+(plot->width()-82)*0.25,40);
+    QMouseEvent intervalPress(QEvent::MouseButtonPress,intervalStart,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+    statistics.SetHistogram(first);statistics.onInterval=[&](double,double){++intervals;};QCoreApplication::sendEvent(plot,&intervalPress);
+    statistics.SetHistogram(second);statistics.onInterval=[&](double,double){++intervals;};QCoreApplication::sendEvent(plot,&release);
+    Require(intervals==0,"old histogram interval selection cannot edit a new ROI preview");
+    QCoreApplication::sendEvent(plot,&intervalPress);QCoreApplication::sendEvent(plot,&release);
+    Require(intervals==1,"unchanged histogram source still accepts one interval selection");
     statistics.hide();
     window.GetWorkflow().onNavigate("Data","Load",{});
 }

@@ -727,6 +727,12 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
     }, Qt::QueuedConnection);
     QContextMenuEvent event(QContextMenuEvent::Mouse, point, tree->viewport()->mapToGlobal(point));
     QApplication::sendEvent(tree->viewport(), &event);
+    if(!*clicked) {
+        const auto* hit=tree->itemAt(point);
+        std::cerr<<"Scene menu diagnostic: visible="<<tree->isVisible()<<" viewport="<<tree->viewport()->width()<<'x'<<tree->viewport()->height()
+            <<" point="<<point.x()<<','<<point.y()<<" action="<<action.toStdString()
+            <<" hit="<<(hit?GetJsonText(hit->data(0,Qt::UserRole).toJsonObject()).toStdString():"none")<<std::endl;
+    }
     Check(*clicked, "actual scene context menu dispatches requested node operation");
     return id;
 }
