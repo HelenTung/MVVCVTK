@@ -42,6 +42,11 @@ public:
     std::function<std::shared_ptr<ViewNavigation>(const std::string&)> getNavigation;
     std::function<NavigationStatus(const std::string&,std::shared_ptr<ViewNavigation>)> setNavigation;
     bool Valid() const { return isValid&&owner==std::this_thread::get_id(); }
+    void NotifyBindingsChanged() {
+        if(!onBindingsChanged)return;
+        struct Guard {bool& flag;bool previous;~Guard(){flag=previous;}} guard{isApplying,isApplying};
+        isApplying=true;onBindingsChanged();
+    }
     bool ValidKeys(const InteractionActionInfo& info) const {
         std::set<std::string> keys;
         for(const auto& b:info.bindings) {
@@ -218,11 +223,11 @@ bool InteractionController::RegisterAction(ApplicationAction a) {
         if(b.bindingKey.empty()||!InputBindingMatch::Valid(b.defaultBinding)||b.defaultBinding.trigger==InputTriggerKind::Drag||b.defaultBinding.trigger==InputTriggerKind::Modifiers)return false;
         b.supportedTriggers={InputTriggerKind::KeyPress,InputTriggerKind::PointerPress,InputTriggerKind::WheelForward,InputTriggerKind::WheelBackward};
     }
-    m_impl->actions.push_back(std::make_shared<Impl::Entry>(Impl::Entry{std::move(a.info),{},std::move(a.execute),true}));m_impl->cache.clear();return true;
+    m_impl->actions.push_back(std::make_shared<Impl::Entry>(Impl::Entry{std::move(a.info),{},std::move(a.execute),true}));m_impl->cache.clear();m_impl->NotifyBindingsChanged();return true;
 }
 bool InteractionController::RemoveAction(std::string_view id) {
     if(!m_impl->Valid()||m_impl->isTriggering||m_impl->isApplying||m_impl->isImporting) return false;
-    m_impl->actions.erase(std::remove_if(m_impl->actions.begin(),m_impl->actions.end(),[&](const auto& e){return e->isApplication&&e->info.actionId==id;}),m_impl->actions.end());m_impl->cache.clear();return true;
+    m_impl->actions.erase(std::remove_if(m_impl->actions.begin(),m_impl->actions.end(),[&](const auto& e){return e->isApplication&&e->info.actionId==id;}),m_impl->actions.end());m_impl->cache.clear();m_impl->NotifyBindingsChanged();return true;
 }
 InteractionSettings InteractionController::GetSettings() const {
     InteractionSettings out;if(!m_impl->Valid()) return out;out.bindings=m_impl->changes;

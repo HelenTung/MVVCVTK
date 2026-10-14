@@ -872,6 +872,17 @@ void StartNativeWidgetCase(int& failureCount)
     SetExpect(!context->GetIsInputIdle(),"原生 release 后清理未完成须保留 SDK 捕获",failureCount);
     event.kind=HostInputKind::Cancel;SetExpect(!registry.SendInput(event).isSucceeded&&!context->GetIsInputIdle(),"失败取消不能丢弃原生捕获",failureCount);
     input.failCleanup=false;SetExpect(registry.SendInput(event).isSucceeded&&context->GetIsInputIdle(),"原生清理应可以重试",failureCount);
+    ApplicationAction collision;collision.info.actionId="application.widgetCollision";collision.info.ownerId="application";
+    collision.info.bindings.push_back({"application.widgetCollision.press",{InputTriggerKind::PointerPress,InputMouseButton::Primary},true,{},"widget:test",{InputTriggerKind::PointerPress}});
+    collision.execute=[](const ActionContext&){return ActionTriggerResult{ActionTriggerStatus::Completed,0};};
+    SetExpect(controller->RegisterAction(std::move(collision)),"动态应用动作应登记并诊断冲突",failureCount);
+    event.kind=HostInputKind::PrimaryPress;(void)registry.SendInput(event);
+    SetExpect(!input.active,"动态冲突必须同时停用原生 widget translator",failureCount);
+    event.kind=HostInputKind::PrimaryRelease;(void)registry.SendInput(event);
+    SetExpect(controller->RemoveAction("application.widgetCollision"),"动态应用动作卸载失败",failureCount);
+    event.kind=HostInputKind::PrimaryPress;(void)registry.SendInput(event);
+    SetExpect(input.active,"卸载冲突动作后须刷新并恢复原生映射",failureCount);
+    event.kind=HostInputKind::Cancel;(void)registry.SendInput(event);
     widget->Off();SetExpect(registry.GetFeaturePort().DetachInput("native-widget")&&registry.Stop()&&context->StopInput(),"原生控件退出清理失败",failureCount);
 }
 
