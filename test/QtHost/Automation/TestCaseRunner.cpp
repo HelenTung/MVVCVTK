@@ -716,7 +716,8 @@ void CheckNodeErrorBoundary(TestWindow& window)
 std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidgetItem* item, const QString& action)
 {
     const auto nodeId=item->data(0,Qt::UserRole).toJsonObject()["id"].toString();
-    ModulePanel* owner=nullptr;for(auto* panel:window.findChildren<ModulePanel*>())if(panel->GetCatalogTree()==tree){owner=panel;break;}
+    auto* pages=window.findChild<QStackedWidget*>("parameterPages");
+    ModulePanel* owner=nullptr;if(pages)for(int i=0;i<pages->count();++i)if(auto* panel=dynamic_cast<ModulePanel*>(pages->widget(i)))if(panel->GetCatalogTree()==tree){owner=panel;break;}
     Check(owner!=nullptr,"scene context menu has an actual owning business page");
     // 后台 Send 不切页面；右键必须先走真实导航，不能向隐藏历史树伪造点击。
     window.GetWorkflow().onNavigate(owner->GetName(),action,{});QCoreApplication::processEvents();
