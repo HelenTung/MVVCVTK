@@ -78,6 +78,23 @@ bool SameRoiPrimitive(const RoiPrimitive& a,const RoiPrimitive& b)
         && a.mask==b.mask && a.voxels==b.voxels && a.sourceToView==b.sourceToView && a.viewToClip==b.viewToClip;
 }
 QJsonObject RoiMetadataParameters(const QJsonObject& p){return {{"name",GetText(p,"name")},{"group",GetText(p,"group")},{"description",GetText(p,"description")}};}
+QJsonObject RoiToolParameters(QJsonObject parameters)
+{
+    for(const auto* key:{"name","group","description","outputMode"})parameters.remove(key);
+    return parameters;
+}
+void SetRoiFields(ParameterEditor& form)
+{
+    const auto* field=form.GetField("shape");const auto shape=field?field->GetValue().toString():QString("Box");
+    const bool affine=shape=="Box" || shape=="Ellipsoid";
+    form.SetFieldApplicability({{"boxToSource",affine},{"sizeMM",affine},{"direction3D",affine},
+        {"radius",shape=="Sphere" || shape=="Cylinder" || shape=="Brush"},
+        {"axis",shape=="Cylinder" || shape=="HalfSpace"},{"height",shape=="Cylinder"},
+        {"contours",shape=="Contour" || shape=="ProjectedContour"},{"planeToSource",shape=="Contour" || shape=="Brush" || shape=="EllipticCylinder"},
+        {"depthMM",shape=="EllipticCylinder" || shape=="Contour" || shape=="ProjectedContour" || shape=="Brush"},
+        {"sourceToView",shape=="ProjectedContour"},{"viewToClip",shape=="ProjectedContour"},
+        {"pathMM",shape=="Brush"},{"isSliceBrush",shape=="Brush"},{"mask",shape=="MaskReference"},{"labels",shape=="MaskReference"}});
+}
 RoiMetadata GetRoiMetadata(const QJsonObject& p){return {GetText(p,"name").toStdString(),GetText(p,"group").toStdString(),GetText(p,"description").toStdString(),false};}
 
 RoiOperationRequest GetOperationRequest(const QString& action,const QJsonObject& p)
@@ -116,14 +133,27 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         {"depthMM",QJsonArray{-0.5,0.5}},{"contours",QJsonArray{QJsonArray{QJsonArray{-1,-1},QJsonArray{1,-1},QJsonArray{1,1},QJsonArray{-1,1}}}},
         {"pathMM",QJsonArray{QJsonArray{0,0,0}}},{"isSliceBrush",false},{"mask",""},{"labels",QJsonArray{}}};
     auto appliedMetadata=std::make_shared<QJsonObject>();auto observedPrimitive=std::make_shared<std::optional<RoiPrimitive>>();
+    auto appliedToolParameters=std::make_shared<QJsonObject>();
     auto pendingSave=std::make_shared<std::optional<std::uint64_t>>();auto pendingOperation=std::make_shared<std::optional<std::uint64_t>>();
     auto operationAction=std::make_shared<QString>();auto operationParametersSeen=std::make_shared<QJsonObject>();
-    const auto remember=[panel,feature,appliedMetadata,observedPrimitive](const RoiPrimitive& primitive,const QJsonObject& metadata) {
+    const auto remember=[panel,feature,appliedMetadata,observedPrimitive,appliedToolParameters](const RoiPrimitive& primitive,const QJsonObject& metadata) {
         *appliedMetadata=metadata;*observedPrimitive=primitive;
         auto patch=RoiGeometryParameters(primitive);for(auto it=metadata.begin();it!=metadata.end();++it)patch[it.key()]=it.value();
         const auto state=feature->GetState();patch["outputMode"]=state.output==RoiOutputMode::CreateNew?"CreateNew":"UpdateTarget";
         patch["selectionMode"]=state.selection==RoiSelectionMode::Add?"Add":state.selection==RoiSelectionMode::Subtract?"Subtract":state.selection==RoiSelectionMode::Intersect?"Intersect":"Replace";
         panel->SetParameterPatch("SetDraft",patch);
+        // 以控件实际呈现的值记录对应关系；矩阵分解往返不代表用户编辑了几何。
+        *appliedToolParameters=RoiToolParameters(panel->GetActionParameters("SetDraft"));
+    };
+    const auto finishSave=[panel](std::uint64_t id,const QString& status,RoiError error,std::optional<DataRevisionRef> saved) {
+        panel->SetComplete(id,status,{{"error",int(error)},{"roi",saved?GetRefText(*saved):QString()},
+            {"message",saved?"区域已保存，可用于分析":""}});
+        auto& workflow=panel->GetContext().workflow;
+        if(status=="Succeeded" && saved && !workflow.roiConsumer.isEmpty()){
+            const auto consumer=workflow.roiConsumer;workflow.roiConsumer={};
+            if(workflow.onNavigate)workflow.onNavigate(consumer["module"].toString(),consumer["action"].toString(),
+                {{consumer["key"].toString(),GetRefText(*saved)}});
+        }
     };
     auto beginParameters=parameters;beginParameters["shape"]="Box";
     panel->AttachAction("Begin",beginParameters,[panel,feature,remember](auto id,const auto& p) {
@@ -154,7 +184,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
     for (const auto& action:std::vector<std::pair<QString,RoiEditingAction>>{
         {"Commit",RoiEditingAction::Commit},{"Cancel",RoiEditingAction::Cancel},{"Visibility",RoiEditingAction::SetVisible}}) {
         panel->AttachAction(action.first,action.second==RoiEditingAction::SetVisible?QJsonObject{{"isVisible",true},{"roi",""}}:QJsonObject{},
-            [panel,feature,action,pendingSave,pendingOperation,observedPrimitive,operationAction,operationParametersSeen](auto id,const auto& p) {
+            [panel,feature,action,pendingSave,pendingOperation,observedPrimitive,appliedToolParameters,finishSave,operationAction,operationParametersSeen](auto id,const auto& p) {
                 RoiEditingRequest request;request.action=action.second;
                 if(request.action==RoiEditingAction::SetVisible){request.isVisible=GetBool(p,"isVisible");if(!p["roi"].toString().isEmpty())request.roi=GetRef(p["roi"]);}
                 auto state=feature->GetState();
@@ -165,8 +195,8 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
                     request.output=GetEnum<RoiOutputMode>(current,"outputMode",{{"CreateNew",RoiOutputMode::CreateNew},{"UpdateTarget",RoiOutputMode::UpdateTarget}});
                     const auto selection=GetEnum<RoiSelectionMode>(current,"selectionMode",{{"Replace",RoiSelectionMode::Replace},{"Add",RoiSelectionMode::Add},{"Subtract",RoiSelectionMode::Subtract},{"Intersect",RoiSelectionMode::Intersect}});
                     const auto source=panel->GetSession()->GetImageDescriptor();if(!source)throw std::invalid_argument("源数据不可用");
-                    if(state.tool || *observedPrimitive){const auto base=state.tool?*state.tool:**observedPrimitive;const auto primitive=GetRoiPrimitive(current,*source,base);
-                        if(!SameRoiPrimitive(primitive,base) || selection!=state.selection){request.primitive=primitive;request.selection=selection;}}
+                    if((state.tool || *observedPrimitive) && RoiToolParameters(current)!=*appliedToolParameters){
+                        request.primitive=GetRoiPrimitive(current,*source,state.tool?*state.tool:**observedPrimitive);request.selection=selection;}
                     if(!request.primitive && !operationAction->isEmpty() && state.operation.error!=RoiError::Unavailable){
                         const auto parameters=panel->GetActionParameters(*operationAction);
                         const auto operation=GetOperationRequest(*operationAction,parameters);
@@ -178,15 +208,9 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
                 const auto result=feature->SendRequest(request);
                 if(request.action==RoiEditingAction::Cancel){if(*pendingSave){const auto old=**pendingSave;pendingSave->reset();panel->SetComplete(old,"Cancelled");}if(*pendingOperation){const auto old=**pendingOperation;pendingOperation->reset();panel->SetComplete(old,"Cancelled");}}
                 if(result.error==RoiError::Pending){*pendingSave=id;panel->SetAdmission(id,true);return;}
-                panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",
-                    {{"error",static_cast<int>(result.error)},{"roi",result.roi?GetRefText(result.roi->revision):QString()},
-                     {"message",result.roi?"区域已保存，可用于分析":""}});
-                auto& workflow=panel->GetContext().workflow;
-                if (result.roi && !workflow.roiConsumer.isEmpty()) {
-                    const auto consumer=workflow.roiConsumer;workflow.roiConsumer={};
-                    if (workflow.onNavigate) workflow.onNavigate(consumer["module"].toString(),consumer["action"].toString(),
-                        {{consumer["key"].toString(),GetRefText(result.roi->revision)}});
-                } else if (request.action==RoiEditingAction::Cancel) workflow.roiConsumer={};
+                finishSave(id,result.error==RoiError::None?"Succeeded":"Failed",result.error,
+                    result.roi?std::optional<DataRevisionRef>{result.roi->revision}:std::nullopt);
+                if(request.action==RoiEditingAction::Cancel)panel->GetContext().workflow.roiConsumer={};
             },action.second==RoiEditingAction::Cancel?TestPolicy::Stop:TestPolicy::View);
     }
     panel->AttachAction("Edit",{{"roi",""}},[panel,feature,remember](auto id,const auto& p) {
@@ -245,24 +269,24 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         if(result.error==RoiError::Pending){panel->SetParameterPatch("SetDraft",{{"outputMode",feature->GetState().output==RoiOutputMode::CreateNew?"CreateNew":"UpdateTarget"}});*operationParametersSeen=p;*operationAction=action;*pendingOperation=id;panel->SetAdmission(id,true);}else panel->SetComplete(id,"Failed",{{"error",int(result.error)}});
     },TestPolicy::Interaction);
     for(const auto& entry:std::vector<std::pair<QString,RoiEditingAction>>{{"ApplySelection",RoiEditingAction::ApplySelection},{"ApplyOperation",RoiEditingAction::ApplyOperation},{"CancelOperation",RoiEditingAction::CancelOperation},{"Undo",RoiEditingAction::Undo},{"Redo",RoiEditingAction::Redo}})
-        panel->AttachAction(entry.first,{},[panel,feature,entry,pendingOperation,pendingSave](auto id,const auto&){RoiEditingRequest request;request.action=entry.second;const auto result=feature->SendRequest(request);if(result.error==RoiError::None && feature->GetState().hasDraft){const auto state=feature->GetState();QJsonObject patch{{"outputMode",state.output==RoiOutputMode::CreateNew?"CreateNew":"UpdateTarget"},{"selectionMode",state.selection==RoiSelectionMode::Add?"Add":state.selection==RoiSelectionMode::Subtract?"Subtract":state.selection==RoiSelectionMode::Intersect?"Intersect":"Replace"}};if(state.tool){const auto geometry=RoiGeometryParameters(*state.tool);for(auto it=geometry.begin();it!=geometry.end();++it)patch[it.key()]=it.value();}panel->SetParameterPatch("SetDraft",patch);}
+        panel->AttachAction(entry.first,{},[panel,feature,entry,pendingOperation,pendingSave,appliedToolParameters](auto id,const auto&){RoiEditingRequest request;request.action=entry.second;const auto result=feature->SendRequest(request);if(result.error==RoiError::None && feature->GetState().hasDraft){const auto state=feature->GetState();QJsonObject patch{{"outputMode",state.output==RoiOutputMode::CreateNew?"CreateNew":"UpdateTarget"},{"selectionMode",state.selection==RoiSelectionMode::Add?"Add":state.selection==RoiSelectionMode::Subtract?"Subtract":state.selection==RoiSelectionMode::Intersect?"Intersect":"Replace"}};if(state.tool){const auto geometry=RoiGeometryParameters(*state.tool);for(auto it=geometry.begin();it!=geometry.end();++it)patch[it.key()]=it.value();}panel->SetParameterPatch("SetDraft",patch);*appliedToolParameters=RoiToolParameters(panel->GetActionParameters("SetDraft"));}
             if(entry.second==RoiEditingAction::CancelOperation){if(*pendingOperation){const auto old=**pendingOperation;pendingOperation->reset();panel->SetComplete(old,"Cancelled");}if(*pendingSave){const auto old=**pendingSave;pendingSave->reset();panel->SetComplete(old,"Cancelled");}}
             panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)}});});
     for(const auto& entry:std::vector<std::pair<QString,RoiDrawingMode>>{{"DrawRectangle2D",RoiDrawingMode::SliceRectangle},{"DrawCircle2D",RoiDrawingMode::SliceCircle},{"DrawEllipse2D",RoiDrawingMode::SliceEllipse},{"DrawContour2D",RoiDrawingMode::SliceContour},{"DrawBrush2D",RoiDrawingMode::SliceBrush},{"DrawContour3D",RoiDrawingMode::ProjectedContour},{"DrawBrush3D",RoiDrawingMode::VisibleBrush},{"PickSeed",RoiDrawingMode::Seed},{"EditControlPoint",RoiDrawingMode::EditControlPoint}})
         panel->AttachAction(entry.first,{},[panel,feature,entry](auto id,const auto&){RoiEditingRequest request;request.action=RoiEditingAction::BeginDrawing;request.drawing=entry.second;const auto result=feature->SendRequest(request);panel->SetComplete(id,result.error==RoiError::None?"PreviewReady":"Failed",{{"error",int(result.error)}});});
     panel->AttachAction("EndDrawing",{},[panel,feature](auto id,const auto&){RoiEditingRequest request;request.action=RoiEditingAction::EndDrawing;const auto result=feature->SendRequest(request);panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)}});});
     panel->AttachAction("Remove",{{"roi",""}},[panel](auto id,const auto& p){RoiRequest request;request.action=RoiAction::Remove;request.expectedRoi=GetRef(p["roi"]);const auto result=panel->GetSession()->SetRoi(request);panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)}});});
-    panel->onParametersEdited=[panel,feature,remember,observedPrimitive,operationActions,operationAction,operationParametersSeen](const QString& action,const QJsonObject& p) {
+    panel->onParametersEdited=[panel,feature,remember,observedPrimitive,appliedToolParameters,operationActions,operationAction,operationParametersSeen](const QString& action,const QJsonObject& p) {
         const auto state=feature->GetState();if(!state.hasDraft || state.isDragging)return;
         RoiEditingRequest request;const auto currentSource=panel->GetSession()->GetImageDescriptor();
         if(action=="SetDraft"){
             if(!currentSource)return;
             const auto base=state.tool?*state.tool:*observedPrimitive?**observedPrimitive:state.draft->nodes.front().primitive;
-            const auto primitive=GetRoiPrimitive(p,*currentSource,base);
             const auto selection=GetEnum<RoiSelectionMode>(p,"selectionMode",{{"Replace",RoiSelectionMode::Replace},{"Add",RoiSelectionMode::Add},{"Subtract",RoiSelectionMode::Subtract},{"Intersect",RoiSelectionMode::Intersect}});
             const auto output=GetEnum<RoiOutputMode>(p,"outputMode",{{"CreateNew",RoiOutputMode::CreateNew},{"UpdateTarget",RoiOutputMode::UpdateTarget}});
             RoiRequest draft;draft.definition.source=state.draft->source;draft.metadata=GetRoiMetadata(p);request.draft=std::move(draft);
-            if(!SameRoiPrimitive(primitive,base) || selection!=state.selection){
+            if(RoiToolParameters(p)!=*appliedToolParameters){
+                const auto primitive=GetRoiPrimitive(p,*currentSource,base);
                 request.action=RoiEditingAction::SetDraft;request.primitive=primitive;request.selection=selection;request.output=output;
                 if(feature->SendRequest(request).error==RoiError::None)remember(primitive,RoiMetadataParameters(p));
             }else{request.action=RoiEditingAction::SetMetadata;request.output=output;(void)feature->SendRequest(request);}
@@ -282,33 +306,25 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         panel->SetComplete(id,"ParametersCopied",{{"roi",GetRefText(*roi)}});
     },TestPolicy::Read);
 #endif
-    panel->onObserve=[panel,feature,appliedMetadata,observedPrimitive,pendingSave,pendingOperation] {
+    panel->onObserve=[panel,feature,appliedMetadata,observedPrimitive,appliedToolParameters,pendingSave,pendingOperation,finishSave] {
         const auto state=feature->GetState();
         if(*pendingOperation && !state.isComputing){const auto id=**pendingOperation;pendingOperation->reset();panel->SetComplete(id,state.error==RoiError::None?"PreviewReady":"Failed",{{"error",int(state.error)},{"outputCount",int(state.operation.rois.size())}});}
-        if(*pendingSave && !state.isComputing && !state.isSaving){const auto id=**pendingSave;pendingSave->reset();panel->SetComplete(id,!state.hasDraft && state.error==RoiError::None?"Succeeded":state.hasDraft && state.error==RoiError::None?"Cancelled":"Failed",{{"error",int(state.error)},{"roi",state.committedRoi?GetRefText(*state.committedRoi):QString()}});}
-        if(auto* form=panel->GetParameterEditor("SetDraft")) {
-            const auto shape=state.tool?state.tool->shape:RoiShape::Box;
-            const bool affine=shape==RoiShape::Box || shape==RoiShape::Ellipsoid;
-            form->SetFieldApplicability({{"boxToSource",affine},{"sizeMM",affine},{"direction3D",affine},
-                {"radius",shape==RoiShape::Sphere || shape==RoiShape::Cylinder || shape==RoiShape::Brush},
-                {"axis",shape==RoiShape::Cylinder || shape==RoiShape::HalfSpace},{"height",shape==RoiShape::Cylinder},
-                {"contours",shape==RoiShape::Contour || shape==RoiShape::ProjectedContour},{"planeToSource",shape==RoiShape::Contour || shape==RoiShape::Brush || shape==RoiShape::EllipticCylinder},
-                {"depthMM",shape==RoiShape::EllipticCylinder || shape==RoiShape::Contour || shape==RoiShape::ProjectedContour || shape==RoiShape::Brush},{"sourceToView",shape==RoiShape::ProjectedContour},{"viewToClip",shape==RoiShape::ProjectedContour},
-                {"pathMM",shape==RoiShape::Brush},{"isSliceBrush",shape==RoiShape::Brush},{"mask",shape==RoiShape::MaskReference},{"labels",shape==RoiShape::MaskReference}});
-        }
+        if(*pendingSave && !state.isComputing && !state.isSaving){const auto id=**pendingSave;pendingSave->reset();const bool saved=!state.hasDraft && state.error==RoiError::None;
+            finishSave(id,saved?"Succeeded":state.hasDraft && state.error==RoiError::None?"Cancelled":"Failed",state.error,saved?state.committedRoi:std::nullopt);}
+        // 控件形状草稿决定字段可用性；候选运算暂时没有原工具时也保留原表单。
+        if(auto* form=panel->GetParameterEditor("SetDraft"))SetRoiFields(*form);
         const auto input=panel->GetSession()->GetImageDescriptor();
         const auto roi=state.committedRoi?panel->GetSession()->GetRoiDescriptor(*state.committedRoi):std::optional<RoiDescriptor>{};
         bool dirty=false;
-        if(state.draft && input && state.draft->source==input->dataRevision && state.tool && state.draft->nodes.size()==1 && state.operation.error==RoiError::Unavailable) {
-            const auto primitive=state.draft->nodes.front().primitive;
+        if(state.draft && input && state.draft->source==input->dataRevision) {
             try {auto p=panel->GetActionParameters("SetDraft");
-                if(*observedPrimitive && !SameRoiPrimitive(**observedPrimitive,primitive) && RoiMetadataParameters(p)==*appliedMetadata
-                    && SameRoiPrimitive(GetRoiPrimitive(p,*input,**observedPrimitive),**observedPrimitive)) {
-                    panel->SetParameterPatch("SetDraft",RoiGeometryParameters(primitive));p=panel->GetActionParameters("SetDraft");
+                if(state.tool && (!*observedPrimitive || !SameRoiPrimitive(**observedPrimitive,*state.tool))
+                    && RoiToolParameters(p)==*appliedToolParameters) {
+                    panel->SetParameterPatch("SetDraft",RoiGeometryParameters(*state.tool));p=panel->GetActionParameters("SetDraft");
+                    *appliedToolParameters=RoiToolParameters(p);*observedPrimitive=*state.tool;
                 }
-                dirty=RoiMetadataParameters(p)!=*appliedMetadata || !SameRoiPrimitive(GetRoiPrimitive(p,*input,primitive),primitive);
+                dirty=RoiMetadataParameters(p)!=*appliedMetadata || RoiToolParameters(p)!=*appliedToolParameters;
             }catch(const std::exception&){dirty=true;}
-            *observedPrimitive=primitive;
         }
         QJsonArray regions;for(const auto& item:panel->GetSession()->GetRoiDescriptors(true))regions.append(QJsonObject{
             {"roi",GetRefText(item.revision)},{"name",QString::fromStdString(item.metadata.name)},
@@ -353,9 +369,11 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
     for(const auto& action:forms)if(auto* form=panel->GetParameterEditor(action)){
         const auto onEdited=form->onEdited;
         // 未完成或非法输入也立即撤销旧保存意图，再让原通知链解析当前控件。
-        form->onEdited=[panel,feature,pendingSave,onEdited]{
+        form->onEdited=[panel,feature,pendingSave,onEdited,finishSave,form,action]{
             const auto state=feature->GetState();if(state.isSaving)(void)feature->SendRequest({RoiEditingAction::CancelSave});
-            if(*pendingSave){const auto id=**pendingSave;pendingSave->reset();panel->SetComplete(id,!state.hasDraft && state.error==RoiError::None?"Succeeded":"Cancelled",{{"roi",state.committedRoi?GetRefText(*state.committedRoi):QString()}});}
+            if(*pendingSave){const auto id=**pendingSave;pendingSave->reset();const bool saved=!state.hasDraft && state.error==RoiError::None;
+                finishSave(id,saved?"Succeeded":"Cancelled",state.error,saved?state.committedRoi:std::nullopt);}
+            if(action=="SetDraft")SetRoiFields(*form);
             if(onEdited)onEdited();
         };
     }
