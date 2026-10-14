@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -101,12 +102,6 @@ public:
 
 private:
     static bool GetImageReady(vtkImageData* image);
-    static bool GetCharMatched(
-        const InteractionEvent& event,
-        char keyCode);
-    static bool GetChordMatched(
-        const InteractionEvent& event,
-        const HostKeyChord& chord);
     static bool GetChordValid(const HostKeyChord& chord);
     static bool GetStartValid(
         const GapHostStartParams& params);
@@ -166,8 +161,6 @@ private:
     std::thread::id m_ownerThread;
     std::uint64_t m_nextSceneRequestId = 1;
     std::uint64_t m_activeRequestId = 0;
-    bool m_isSwitchDown = false;
-    bool m_isExitDown = false;
     bool m_isExitPending = false;
     bool m_isRequestPending = false;
     bool m_isInputAttached = false;
@@ -185,36 +178,6 @@ bool GapHostFeature::Impl::GetImageReady(
     return dimensions[0] > 0
         && dimensions[1] > 0
         && dimensions[2] > 0;
-}
-
-bool GapHostFeature::Impl::GetCharMatched(
-    const InteractionEvent& event,
-    const char keyCode)
-{
-    if (keyCode == 0) {
-        return false;
-    }
-    const char upper = keyCode >= 'a' && keyCode <= 'z'
-        ? static_cast<char>(keyCode - 'a' + 'A')
-        : keyCode;
-    return event.keyCode == keyCode
-        || event.keyCode == upper
-        || event.keySym == std::string(1, keyCode)
-        || event.keySym == std::string(1, upper);
-}
-
-bool GapHostFeature::Impl::GetChordMatched(
-    const InteractionEvent& event,
-    const HostKeyChord& chord)
-{
-    const bool hasKey = GetCharMatched(
-        event, chord.keyCode)
-        || (!chord.keySym.empty()
-            && event.keySym == chord.keySym);
-    return hasKey
-        && event.isCtrlDown == chord.isCtrlDown
-        && event.isAltDown == chord.isAltDown
-        && event.isShiftDown == chord.isShiftDown;
 }
 
 bool GapHostFeature::Impl::GetChordValid(
@@ -561,12 +524,27 @@ bool GapHostFeature::Impl::AttachHost(
     HostInputBinding binding;
     binding.featureId = std::string(FeatureId);
     binding.targetViews = m_config.inputViews;
-    binding.onInput = [weakOwner](
-        const InteractionEvent& event) {
-        const auto feature = weakOwner.lock();
-        return feature && feature->m_impl
-            ? feature->m_impl->OnInput(event)
-            : InteractionResult{};
+    const auto toBinding=[](const HostKeyChord& chord) {
+        InteractionEvent e;e.keyCode=chord.keyCode;e.keySym=chord.keySym;
+        InputBinding input{InputTriggerKind::KeyPress,InputMouseButton::None};input.key=e.keyCode?static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(e.keyCode))):e.keySym=="Escape"?27:e.keySym=="F9"?static_cast<std::uint32_t>(InputKey::F9):e.keySym.size()==1?static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(e.keySym[0]))):0;
+        input.requiredModifiers=(chord.isShiftDown?1:0)|(chord.isCtrlDown?2:0)|(chord.isAltDown?4:0);
+        input.forbiddenModifiers=static_cast<std::uint8_t>(7&~input.requiredModifiers);return input;
+    };
+    InteractionActionInfo toggle;toggle.actionId="gap.toggleOverlay";toggle.isTriggerable=true;toggle.ownerId=binding.featureId;
+    toggle.bindings.push_back({"gap.toggleOverlay.key",toBinding(m_config.keys.switchOverlay),true,{},"",{InputTriggerKind::KeyPress}});
+    InteractionActionInfo exit;exit.actionId="gap.exit";exit.isTriggerable=true;exit.ownerId=binding.featureId;
+    exit.bindings.push_back({"gap.exit.key",toBinding(m_config.keys.exit),true,{},"",{InputTriggerKind::KeyPress}});
+    binding.actions={std::move(toggle),std::move(exit)};
+    binding.onAction=[weakOwner](std::string_view id,const InteractionEvent& e,const std::optional<HostSemanticTarget>&) {
+        const auto f=weakOwner.lock();if(!f)return InteractionResult{};auto event=e;event.actionId=std::string(id);return f->m_impl->OnInput(event);
+    };
+    binding.onTrigger=[weakOwner](std::string_view id,const ActionContext&) {
+        const auto f=weakOwner.lock();if(!f)return ActionTriggerResult{};auto& p=*f->m_impl;GapHostRequest request;
+        if(id=="gap.exit"){if(!p.m_service->GetViewOn()||p.m_isExitPending)return ActionTriggerResult{};request.action=GapHostAction::Exit;}
+        else if(id=="gap.toggleOverlay") {if(p.m_service->GetViewOn()&&!p.m_isExitPending)request.action=GapHostAction::Overlay;else{request.action=GapHostAction::Start;request.start=p.m_config.defaultStart;}}
+        else return ActionTriggerResult{};
+        const auto admission=p.SendRequest(std::move(request),nullptr);
+        return ActionTriggerResult{admission.status==GapAdmissionStatus::Accepted?ActionTriggerStatus::Accepted:ActionTriggerStatus::Failed,admission.requestId};
     };
     if (!m_host->AttachInput(std::move(binding))) {
         ClearBorrowed();
@@ -575,8 +553,6 @@ bool GapHostFeature::Impl::AttachHost(
 
     m_isInputAttached = true;
     m_isAttached = true;m_isClosing=false;
-    m_isSwitchDown = false;
-    m_isExitDown = false;
     m_isExitPending = false;
     m_isRequestPending = false;
     m_state = {};
@@ -619,7 +595,7 @@ bool GapHostFeature::Impl::DetachHost()
     m_requestSource.reset();
     if (!SetActiveViews({}) || !ClearResultScopes()) return false;
     m_requestResultBinding={};m_state={};m_isRequestPending=false;
-    m_isSwitchDown=false;m_isExitDown=false;m_isExitPending=false;
+    m_isExitPending=false;
     if (!isInputDetached) return false;
 
     m_isAttached = false;
@@ -1219,74 +1195,18 @@ void GapHostFeature::Impl::SetFailedResult(
     }
 }
 
-InteractionResult GapHostFeature::Impl::OnInput(
-    const InteractionEvent& event)
+InteractionResult GapHostFeature::Impl::OnInput(const InteractionEvent& event)
 {
-    const bool isSwitch = GetChordMatched(
-        event, m_config.keys.switchOverlay);
-    const bool isExit = GetChordMatched(
-        event, m_config.keys.exit);
-    if (!isSwitch && !isExit) {
-        return {};
-    }
-
-    if (event.eventKind
-        == InteractionEventKind::KeyRelease) {
-        const bool wasDown =
-            (isSwitch && m_isSwitchDown)
-            || (isExit && m_isExitDown);
-        if (isSwitch) {
-            m_isSwitchDown = false;
-        }
-        if (isExit) {
-            m_isExitDown = false;
-        }
-        return wasDown
-            ? InteractionResult{ true, true }
-            : InteractionResult{};
-    }
-    if (event.eventKind
-        == InteractionEventKind::TextInput) {
-        return (isSwitch && m_isSwitchDown)
-                || (isExit && m_isExitDown)
-            ? InteractionResult{ true, true }
-            : InteractionResult{};
-    }
-    if (event.eventKind
-        != InteractionEventKind::KeyPress) {
-        return {};
-    }
-
-    if (isExit) {
-        if (!m_service->GetViewOn()
-            || m_isExitPending) {
-            return {};
-        }
-        if (m_isExitDown) {
-            return { true, true };
-        }
-        m_isExitDown = true;
-        GapHostRequest request;
-        request.action = GapHostAction::Exit;
-        (void)SendRequest(std::move(request), nullptr);
-        return { true, true };
-    }
-
-    if (m_isSwitchDown) {
-        return { true, true };
-    }
-    m_isSwitchDown = true;
     GapHostRequest request;
-    if (m_service->GetViewOn()
-        && !m_isExitPending) {
-        request.action = GapHostAction::Overlay;
-    }
-    else {
-        request.action = GapHostAction::Start;
-        request.start = m_config.defaultStart;
-    }
-    (void)SendRequest(std::move(request), nullptr);
-    return { true, true };
+    if(event.actionId=="gap.exit") {
+        if(!m_service->GetViewOn()||m_isExitPending)return {};
+        request.action=GapHostAction::Exit;
+    } else if(event.actionId=="gap.toggleOverlay") {
+        if(m_service->GetViewOn()&&!m_isExitPending)request.action=GapHostAction::Overlay;
+        else {request.action=GapHostAction::Start;request.start=m_config.defaultStart;}
+    } else return {};
+    const bool accepted=SendRequest(std::move(request),nullptr).status==GapAdmissionStatus::Accepted;
+    return {true,true,accepted,accepted?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
 }
 
 bool GapHostFeature::Impl::SetActiveViews(

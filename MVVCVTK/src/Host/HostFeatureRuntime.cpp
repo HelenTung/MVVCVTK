@@ -211,6 +211,12 @@ public:
                 && ports.input->AttachInput(std::move(binding));
         }
 
+        bool SetInputOwner(std::string_view id,bool active,const std::vector<std::string>& viewIds) {
+            const auto ports=GetOwnerPorts();return ports.input&&ports.input->SetInputOwner(id,active,viewIds);
+        }
+        std::vector<EffectiveBinding> GetInputBindings(const std::string& id) const {
+            const auto ports=GetOwnerPorts();return ports.input?ports.input->GetInputBindings(id):std::vector<EffectiveBinding>{};
+        }
         bool DetachInput(
             const std::string_view featureId)
         {
@@ -732,11 +738,26 @@ public:
                     return callback(event, target);
                 };
             }
+            if(binding.onAction)binding.onAction=[callback=std::move(binding.onAction),bridge=m_bridge,lifetime=m_lifetime,id=m_featureId](
+                std::string_view action,const InteractionEvent& event,const std::optional<HostSemanticTarget>& target) {
+                if(target&&event.eventKind!=InteractionEventKind::Cancel&&!GetTargetValid(bridge,lifetime,id,*target)) {
+                    auto cancel=event;cancel.eventKind=InteractionEventKind::Cancel;(void)callback(action,cancel,target);
+                    return InteractionResult{true,true,false,InteractionFailureReason::StateRejected};
+                }
+                return callback(action,event,target);
+            };
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->AttachInput(std::move(binding));
         }
 
+        bool SetInputOwner(std::string_view id,bool active,const std::vector<std::string>& viewIds) override {
+            if(GetAttachmentId()==0||id!=m_featureId)return false;
+            const auto bridge=m_bridge.lock();return bridge&&bridge->SetInputOwner(id,active,viewIds);
+        }
+        std::vector<EffectiveBinding> GetInputBindings(const std::string& id) const override {
+            const auto bridge=m_bridge.lock();return GetAttachmentId()!=0&&bridge?bridge->GetInputBindings(id):std::vector<EffectiveBinding>{};
+        }
         bool DetachInput(
             const std::string_view featureId) override
         {

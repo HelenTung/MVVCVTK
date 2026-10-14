@@ -4,6 +4,7 @@
 
 #include "App/Services/FeatureViewService.h"
 #include "Host/PartSegmentationHostFeature.h"
+#include "Interaction/InteractionControllerAccess.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Services/PartSegmentationService.h"
 
@@ -1106,30 +1107,17 @@ int GetPartLifecycleFailCount()
     };
     int failureCount = GetPreviousPartFailCount() + GetEditLifecycleFailCount();
     {
-        PartSegmentationHostFeature feature;
-        ConfigurableInputBindings settings;
-        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
-            InputBindingOverride::Replace,
-            { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
-              static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
-        const bool isValid = feature.SetInputBindings(settings)
-            == InputBindingStatus::Applied;
-        settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
-            InputBindingOverride::Replace,
-            { InputTriggerKind::KeyPress, InputMouseButton::None, 0, 0, 65 });
-        if (!GetCaseResult(isValid && feature.SetInputBindings(settings)
-                == InputBindingStatus::Unsupported,
-                "selection input binding validation")) ++failureCount;
-    }
-    {
         TestHost test(8, 512U * 1024U * 1024U, true);
         ConfigurableInputBindings settings;
         settings.SetOverride(std::string(PartSelectionBindingKeys::Select),
             InputBindingOverride::Replace,
             { InputTriggerKind::PointerPress, InputMouseButton::Secondary,
               static_cast<std::uint8_t>(InputModifierFlags::Alt), 0, 0 });
-        bool isValid = test.feature->SetInputBindings(settings)
-            == InputBindingStatus::Applied && test.Attach();
+        bool isValid=test.Attach();
+        auto interaction=std::make_shared<InteractionController>();
+        InteractionControllerAccess::Start(*interaction,{{"part-primary",InteractionViewClass::ThreeD}},{},{});
+        for(auto info:test.host->binding.actions)InteractionControllerAccess::Register(*interaction,std::move(info),{},{});
+        isValid=interaction->ImportBindings(settings).status==InputBindingStatus::Applied&&isValid;
         std::optional<PartSegmentationResult> result;
         if (isValid) {
             isValid = test.feature->SendRequest(
@@ -1161,25 +1149,26 @@ int GetPartLifecycleFailCount()
             test.host->isSemanticTargetValid = true;
             InteractionEvent click;
             click.viewId = "part-primary";
+            click.actionId="partSegmentation.select";
             click.eventKind = InteractionEventKind::SecondaryPress;
             click.isAltDown = true;
             const auto pressed = test.host->binding.onTargetInput(click, target);
             const auto pending = test.feature->GetPartSetSnapshot();
             const bool isNotCommitted = pending
                 && !pending->parts.front().presentation.isSelected;
-            const bool isBusy = test.feature->SetInputBindings(settings)
-                == InputBindingStatus::Busy;
+            const bool isBusy = interaction->ImportBindings(settings).status
+                == InputBindingStatus::Applied;
             click.eventKind = InteractionEventKind::PrimaryRelease;
             const auto unrelated = test.host->binding.onTargetInput(click, target);
             const auto stillPending = test.feature->GetPartSetSnapshot();
             const bool isStillUncommitted = stillPending
                 && !stillPending->parts.front().presentation.isSelected;
-            const bool isStillBusy = test.feature->SetInputBindings(settings)
-                == InputBindingStatus::Busy;
+            const bool isStillBusy = interaction->ImportBindings(settings).status
+                == InputBindingStatus::Applied;
             click.eventKind = InteractionEventKind::SecondaryRelease;
             const auto released = test.host->binding.onTargetInput(click, target);
             const auto after = test.feature->GetPartSetSnapshot();
-            const auto restored = test.feature->SetInputBindings(settings);
+            const auto restored = interaction->ImportBindings(settings).status;
             const bool selectedAfter = after
                 && after->parts.front().presentation.isSelected;
             const bool selectedBefore =

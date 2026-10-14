@@ -440,6 +440,17 @@ endif()
 
 #include <memory>
 #include <string_view>
+#include "MVVCVTK/API/Interaction/InteractionController.h"
+#include "MVVCVTK/API/Interaction/ViewNavigation.h"
+
+class CleanRoomNavigation final:public ViewNavigation {
+public:
+    ZoomRequest BuildZoom(const NavigationInput& input,const NavigationContext& context) const override {
+        auto request=ViewNavigation::BuildZoom(input,context);
+        if(context.crosshairWorld)request.anchor=ZoomAnchor::WorldPoint(*context.crosshairWorld);
+        return request;
+    }
+};
 
 #if MVVCVTK_PROBE_CROP || MVVCVTK_PROBE_GAP
 class CleanRoomFeature final : public HostFeature {
@@ -460,6 +471,22 @@ int main()
         return 5;
     }
 
+    auto customNavigation=std::make_shared<CleanRoomNavigation>();
+    auto navigationOptions=customNavigation->GetOptions();navigationOptions.zoom.wheelFactorPerStep=1.08;
+    if(customNavigation->SetOptions(navigationOptions)!=NavigationStatus::Applied
+        ||customNavigation->ZoomBy(1.2)!=NavigationStatus::Unbound)return 8;
+    HostSessionConfig navigationConfig;HostRenderViewConfig navigationView;
+    navigationView.id="navigation-probe";navigationView.role=HostRenderViewRole::Primary3D;
+    navigationConfig.renderViews={navigationView};
+    VtkAppHostSession navigationSession{std::move(navigationConfig)};
+    if(!navigationSession.BuildSession())return 9;
+    auto interaction=navigationSession.GetInteractionController();
+    if(!interaction||!interaction->GetNavigation("navigation-probe")||interaction->GetNavigation("missing"))return 10;
+    if(interaction->SetNavigation("navigation-probe",customNavigation)!=NavigationStatus::Applied)return 11;
+    BindingPatch bindings;bindings.Disable("navigation.camera.zoom.forward");
+    if(interaction->ApplyBindings(bindings).status!=InputBindingStatus::Applied)return 12;
+    if(customNavigation->ZoomBy(1.2)!=NavigationStatus::Applied||!navigationSession.Stop()
+        ||customNavigation->ZoomBy(1.2)!=NavigationStatus::Unbound)return 13;
     VtkAppHostSession session{ HostSessionConfig{} };
     if (!session.GetIsStopped()) {
         return 1;

@@ -9,6 +9,9 @@
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
 #include "Interaction/CropBoxWidget.h"
+#include "FeatureSupport/WidgetBindings.h"
+#include "FeatureSupport/RoutedWidgets.h"
+#include <vtkTransform.h>
 
 #include <vtkBoxRepresentation.h>
 #include <vtkBoxWidget2.h>
@@ -55,6 +58,10 @@ public:
     bool SetEnabled(bool isEnabled);
     bool GetEnabled() const;
 
+public:
+    vtkSmartPointer<vtkTransform> inputTransform;
+    std::array<double,3> inputOrigin{},inputNormal{};
+    friend class CropBoxWidget;
 private:
     static void SendWidgetEvent(
         vtkObject* caller,
@@ -94,7 +101,7 @@ CropBoxWidget::Impl::Impl()
 {
     // 初始化 widget 和 representation；
     // 普通态使用中性色，是因为裁切盒只是空间手柄；只有被 VTK 选中/拖拽时才用高亮色提示交互焦点。
-    m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
+    m_widget = vtkSmartPointer<FeatureSupport::RoutedBoxWidget>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
 
@@ -349,6 +356,7 @@ void CropBoxWidget::Impl::AttachObservers()
 
 void CropBoxWidget::Impl::OnWidgetEvent(unsigned long eventId)
 {
+    if(eventId==vtkCommand::StartInteractionEvent)static_cast<FeatureSupport::RoutedBoxWidget*>(m_widget.GetPointer())->ReleaseInputFocus();
     const auto interactionPhase = GetEventPhase(eventId);
     SetVisualState(eventId == vtkCommand::StartInteractionEvent
             ? CropInteractionPhase::Dragging
@@ -451,4 +459,17 @@ bool CropBoxWidget::SetEnabled(bool isEnabled)
 bool CropBoxWidget::GetEnabled() const
 {
     return m_impl->GetEnabled();
+}
+
+bool CropBoxWidget::GetInputAccepted(int x,int y) const {
+    return m_impl->m_isEnabled&&m_impl->m_representation->ComputeInteractionState(x,y)!=vtkBoxRepresentation::Outside;
+}
+void CropBoxWidget::StartGesture(){m_impl->inputTransform=vtkSmartPointer<vtkTransform>::New();m_impl->m_representation->GetTransform(m_impl->inputTransform);}
+void CropBoxWidget::CancelGesture(){if(m_impl->inputTransform){m_impl->m_representation->SetTransform(m_impl->inputTransform);m_impl->inputTransform=nullptr;}static_cast<FeatureSupport::RoutedBoxWidget*>(m_impl->m_widget.GetPointer())->StopGesture();}
+
+void CropBoxWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){
+    FeatureSupport::SetWidgetBindings(m_impl->m_widget,values,{
+        {"crop.widget.select.drag",vtkWidgetEvent::Select},{"crop.widget.translate.drag",vtkWidgetEvent::Translate},
+        {"crop.widget.translate.shift",vtkWidgetEvent::Translate},{"crop.widget.scale.drag",vtkWidgetEvent::Scale},
+        {"crop.widget.translate.ctrl",vtkWidgetEvent::Translate}});
 }

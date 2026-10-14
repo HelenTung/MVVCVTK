@@ -71,6 +71,7 @@ public:
         const InteractionSource& source,
         const bool isInteracting) override
     {
+        if(!isInteracting&&isCleanupFailing)return false;
         const auto sourceIt = std::find(
             m_sources.begin(), m_sources.end(), source);
         if (isInteracting && sourceIt == m_sources.end()) {
@@ -81,6 +82,7 @@ public:
         }
         return true;
     }
+    bool isCleanupFailing=false;
     bool GetIsInteracting() const { return !m_sources.empty(); }
     std::optional<std::array<double, 16>>
         GetModelToWorld() const override
@@ -288,6 +290,20 @@ CropEditRequest Request(CropBridge& bridge,CropEditKind kind,CropNodeId node) {
 }
 CropEditAdmission Append(CropBridge& bridge,CropNodeId parent) {return bridge.SendRequest(Request(bridge,CropEditKind::Append,parent));}
 
+bool GetInputCancelRetry() {
+    Fixture f;if(!f.ready||!f.bridge.SwitchCropBox())return false;
+    const auto nodes=f.bridge.GetHistory().totalNodeCount;
+    InteractionEvent event;event.eventKind=InteractionEventKind::PrimaryPress;
+    if(!f.bridge.SendWidgetInput(event).isSucceeded||!f.bridge.GetInputGestureActive())return false;
+    f.service->isCleanupFailing=true;event.eventKind=InteractionEventKind::Cancel;
+    const auto failed=f.bridge.SendWidgetInput(event);
+    f.service->isCleanupFailing=false;
+    if(!Check(!failed.isSucceeded&&failed.failureReason==InteractionFailureReason::CleanupRejected
+        &&f.bridge.GetInputGestureActive(),"失败取消丢失原生控件捕获"))return false;
+    f.service->isCleanupFailing=false;
+    return Check(f.bridge.SendWidgetInput(event).isSucceeded&&!f.bridge.GetInputGestureActive()
+        &&f.bridge.GetHistory().totalNodeCount==nodes,"重试取消未完成或产生裁剪历史");
+}
 bool GetWidgetAndSiblingEdits() {
     Fixture f;if(!f.ready||!f.bridge.SwitchCropBox())return false;
     if(!Check(SendWidgetInput(f.renderer,f.interactor)&&!f.bridge.GetShaderTickNeeded()
@@ -726,6 +742,7 @@ int CropBridgeSuite::GetFailCount() const
 {
     int failures=0;
     const auto run=[&](bool result,const char* name){if(!result){std::cerr<<"Bridge scenario failed: "<<name<<'\n';++failures;}};
+    run(GetInputCancelRetry(),"原生输入取消重试");
     run(GetWidgetAndSiblingEdits(),"widget edits and sibling replacement");
     run(GetCurvedWidgetHistory(),"curved widgets and immutable history");
     run(GetBranchesAndFrozenBuilds(),"branches and fixed Root materialization");

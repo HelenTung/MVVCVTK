@@ -7,8 +7,8 @@
 #include "Host/Internal/HostImageReadRuntime.h"
 #include "Host/HostFrameCoordinator.h"
 #include "Host/HostWorkSignal.h"
-#include "Host/HostHotkeyRouter.h"
 #include "Host/HostInputRegistry.h"
+#include "Interaction/InteractionControllerAccess.h"
 #include "Host/HostViewRuntimeRegistry.h"
 
 #include "App/AppState.h"
@@ -130,14 +130,12 @@ public:
     static std::size_t GetPendingStopCount() noexcept;
 
     HostSessionConfig config;
-    NavigationBindings bindings;
     HostCoreServices core;
     HostViewRuntimeRegistry renderViews;
     std::shared_ptr<HostFrameCoordinator> frameCoordinator;
     std::shared_ptr<HostCommandRouter> commandRouter;
     std::vector<HostRenderViewEndpoint> endpoints;
     std::unique_ptr<HostInputRegistry> inputRegistry;
-    std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
     InputEndpoint inputEndpoint;
     HostFeatureRuntime featureRuntime;
     std::shared_ptr<HostImageReadRuntime> imageReadRuntime;
@@ -150,7 +148,6 @@ public:
     bool isStarted = false;
     bool isFrameExecuting = false;
     bool isRendering = false;
-    bool isSettingBindings = false;
     std::shared_ptr<HostWorkSignal> workSignal;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
     mutable std::recursive_mutex m_sessionMutex;
@@ -283,16 +280,11 @@ bool VtkAppHostSession::Impl::BuildSession()
             if (frameCoordinator) frameCoordinator->Stop();
             (void)featureRuntime.StopOwner();
             endpoints.clear();
-            const bool isHotkeyStopped =
-                !hotkeyRouter || hotkeyRouter->ClearHotkeys();
-            const bool isInputStopped =
-                isHotkeyStopped
-                && (!inputRegistry || inputRegistry->Stop());
+            const bool isInputStopped = !inputRegistry || inputRegistry->Stop();
             if (!isInputStopped) {
                 stopState = HostStopState::StopPending;
                 return false;
             }
-            hotkeyRouter.reset();
             inputRegistry.reset();
             commandRouter.reset();
             isStopped = renderViews.StopLease();
@@ -327,7 +319,7 @@ bool VtkAppHostSession::Impl::BuildSession()
                     (void)signal->SendWorkAvailable();
             };
         }
-        if (!renderViews.Build(core, config.renderViews, &bindings)) {
+        if (!renderViews.Build(core, config.renderViews)) {
             (void)clearBuild();
             return false;
         }
@@ -418,12 +410,6 @@ bool VtkAppHostSession::Impl::BuildSession()
         }
         if (!inputRegistry
             || !inputRegistry->Start(std::move(allViews))) {
-            (void)clearBuild();
-            return false;
-        }
-        hotkeyRouter = std::make_unique<HostHotkeyRouter>(
-            *inputRegistry, commandRouter);
-        if (!hotkeyRouter) {
             (void)clearBuild();
             return false;
         }
@@ -1004,11 +990,8 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             stopState = HostStopState::StopPending;
             return false;
         }
+        if(inputRegistry)if(const auto c=inputRegistry->GetController())InteractionControllerAccess::Stop(*c);
         if (!renderViews.SetDataTasksStopping() || !DetachFeatures()) {
-            stopState = HostStopState::StopPending;
-            return false;
-        }
-        if (hotkeyRouter && !hotkeyRouter->ClearHotkeys()) {
             stopState = HostStopState::StopPending;
             return false;
         }
@@ -1040,7 +1023,6 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             ownerCompleteState->isActive = false;
             ownerCompleteState->completes.clear();
         }
-        hotkeyRouter.reset();
         inputRegistry.reset();
         commandRouter.reset();
         frameCoordinator.reset();
@@ -1066,7 +1048,6 @@ bool VtkAppHostSession::Impl::GetIsStopped() const noexcept
         && ownerThread == std::thread::id{}
         && endpoints.empty()
         && !frameCoordinator
-        && !hotkeyRouter
         && !inputRegistry
         && featureRuntime.GetIsEmpty();
 }
@@ -1288,54 +1269,15 @@ bool VtkAppHostSession::BuildSession()
     return m_impl && m_impl->BuildSession();
 }
 
-InputBindingStatus VtkAppHostSession::SetInputBindings(
-    const IInputBindings& source)
-{
-    if (!m_impl) return InputBindingStatus::Failed;
-    const std::lock_guard<std::recursive_mutex> lock(
-        m_impl->m_sessionMutex);
-    const auto state = m_impl->stopState.load();
-    if ((state != HostStopState::Stopped
-            && state != HostStopState::Running)
-        || (m_impl->ownerThread != std::thread::id{}
-            && m_impl->ownerThread != std::this_thread::get_id())) {
-        return InputBindingStatus::Failed;
-    }
-    if (m_impl->isSettingBindings) return InputBindingStatus::Busy;
-    m_impl->isSettingBindings = true;
-    NavigationBindings candidate;
-    const auto status = NavigationBindings::Build(source, candidate);
-    m_impl->isSettingBindings = false;
-    if (status != InputBindingStatus::Applied) return status;
-    if (m_impl->stopState.load() != state) return InputBindingStatus::Busy;
-    if (m_impl->isBuilt
-        && (m_impl->isFrameExecuting || m_impl->isRendering
-            || !m_impl->core.sharedState
-            || m_impl->core.sharedState->GetIsInteracting()
-            || !m_impl->renderViews.GetInputsIdle())) {
-        return InputBindingStatus::Busy;
-    }
-    m_impl->bindings = candidate;
-    return InputBindingStatus::Applied;
+std::shared_ptr<InteractionController> VtkAppHostSession::GetInteractionController() {
+    if(!m_impl||!BuildSession()||m_impl->ownerThread!=std::this_thread::get_id())return {};
+    return m_impl->inputRegistry?m_impl->inputRegistry->GetController():nullptr;
 }
 
 bool VtkAppHostSession::AttachTimer(
     const HostTimerConfig& config)
 {
     return BuildSession() && m_impl->AttachTimer(config);
-}
-
-bool VtkAppHostSession::AttachHotkeys(
-    const HostHotkeyConfig& config)
-{
-    if (!m_impl) return false;
-    const std::lock_guard<std::recursive_mutex> lock(
-        m_impl->m_sessionMutex);
-    return BuildSession()
-        && (m_impl->config.driveMode == HostDriveMode::Native
-            || (!config.isContextInputEnabled && !config.isCommandInputEnabled))
-        && m_impl->hotkeyRouter
-        && m_impl->hotkeyRouter->AttachHotkeys(config);
 }
 
 bool VtkAppHostSession::AttachFeature(

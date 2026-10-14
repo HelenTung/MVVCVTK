@@ -1,4 +1,5 @@
 #pragma once
+#include "Interaction/InteractionTypes.h"
 
 #include "OrthogonalCropTypes.h"
 #include "Interaction/CropHistoryQueue.h"
@@ -39,6 +40,11 @@ using CropCandidateCallback =
     std::function<void(CropMaterializationCandidate)>;
 
 class CropBridge final {
+public:
+    bool GetInputAccepted(const InteractionEvent&) const;
+    bool GetInputGestureActive() const;
+    InteractionResult SendWidgetInput(const InteractionEvent&);
+    void SetInputBindings(const std::vector<EffectiveBinding>&);
 private:
     class Impl;
 

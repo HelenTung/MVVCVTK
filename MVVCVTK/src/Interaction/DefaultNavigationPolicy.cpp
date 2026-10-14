@@ -23,6 +23,7 @@ void MergeResult(
 InteractionEventKind GetReleaseKind(
     InteractionEventKind pressKind) noexcept
 {
+    if(pressKind==InteractionEventKind::MiddlePress)return InteractionEventKind::MiddleRelease;
     return pressKind == InteractionEventKind::SecondaryPress
         ? InteractionEventKind::SecondaryRelease
         : InteractionEventKind::PrimaryRelease;
@@ -52,6 +53,7 @@ public:
         return m_releaseKind;
     }
 
+    bool GetIsActive() const noexcept override { return m_handler.GetIsCaptureActive(); }
     InteractionResult Send(const InteractionEvent& event) override
     {
         return m_handler.Send(event);
@@ -110,7 +112,8 @@ InteractionDispatch DefaultNavigationPolicy::Route(
 {
     const bool isPress =
         event.eventKind == InteractionEventKind::PrimaryPress
-        || event.eventKind == InteractionEventKind::SecondaryPress;
+        || event.eventKind == InteractionEventKind::SecondaryPress
+        || event.eventKind == InteractionEventKind::MiddlePress;
     if (!isPress) {
         return { Send(event), nullptr };
     }

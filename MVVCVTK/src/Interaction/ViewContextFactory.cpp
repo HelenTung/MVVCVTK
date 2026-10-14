@@ -4,6 +4,9 @@
 #include "Interaction/InputCallbackHandler.h"
 #include "Interaction/InteractionRouter.h"
 #include "Interaction/TimeUpdateHandler.h"
+#include "Interaction/ViewNavigationExecutor.h"
+#include "Interaction/InputBindingMatch.h"
+#include <set>
 
 #include <vtkAxesActor.h>
 #include <vtkCallbackCommand.h>
@@ -46,6 +49,8 @@ bool GetIsRoutedInputEvent(InteractionEventKind kind) noexcept
     case InteractionEventKind::PrimaryRelease:
     case InteractionEventKind::SecondaryPress:
     case InteractionEventKind::SecondaryRelease:
+    case InteractionEventKind::MiddlePress:
+    case InteractionEventKind::MiddleRelease:
     case InteractionEventKind::PointerMove:
     case InteractionEventKind::KeyPress:
     case InteractionEventKind::KeyRelease:
@@ -84,6 +89,14 @@ public:
     static void RemoveContext(
         AbstractViewContext* context) noexcept;
 
+    bool SetInteractionController(std::shared_ptr<InteractionController>,const std::string&) override;
+    std::shared_ptr<ViewNavigation> GetNavigation() const override { if(!GetIsOwnerThread()||!m_navigation)return {};m_navigation->SetMode(m_currentMode);return m_navigation->GetNavigation(); }
+    NavigationStatus SetNavigation(std::shared_ptr<ViewNavigation>) override;
+    NavigationStatus TriggerNavigation(std::string_view id,const NavigationInput& input) override {
+        if(!GetIsOwnerThread())return NavigationStatus::WrongThread;
+        if(!m_navigation)return NavigationStatus::Unbound;m_navigation->SetMode(m_currentMode);return m_navigation->Trigger(id,input);
+    }
+    bool ResetCamera() override { const bool result=AbstractViewContext::ResetCamera(); if(result&&m_navigation)m_navigation->ResetReference();return result; }
     bool SetInteractorReady() override;
     bool SetInputEnabled(bool isEnabled) override;
     bool GetIsInputIdle() const override;
@@ -149,6 +162,11 @@ private:
         vtkRenderWindowInteractor* interactor,
         InteractionEventKind eventKind) const;
 
+    std::string m_viewId;
+    std::weak_ptr<InteractionController> m_controller;
+    std::shared_ptr<ViewNavigationExecutor> m_navigation;
+    const InteractionEvent* m_injectedEvent=nullptr;
+    std::set<std::uint32_t> m_pressedKeys;
     InteractionPorts m_ports;
     vtkSmartPointer<vtkRenderWindowInteractor> m_interactor;
     vtkSmartPointer<vtkCallbackCommand> m_eventCallback;
@@ -163,6 +181,7 @@ private:
     int m_timerId = 0;
     bool m_isInteractorReady = false;
     bool m_isInputEnabled = false;
+    bool m_isNavigationStopped = false;
     InteractionRouteCallback m_inputHandler;
     std::vector<InteractionEventKind> m_inputEventKinds;
     std::function<void()> m_timerHandler;
@@ -185,6 +204,7 @@ private:
     bool m_isWindowReady = false;
     bool m_isSendingInput = false;
     bool m_hasInjectedResult = false;
+    bool m_isRoutingInput=false;
     InteractionResult m_injectedResult;
 };
 
@@ -312,7 +332,7 @@ bool StdViewContext::AttachObservers()
     if (!m_interactor || !m_eventCallback) return false;
 
     if (m_observerTags.empty()) {
-        const std::array<unsigned long, 13> events = {
+        const std::array<unsigned long, 15> events = {
             vtkCommand::MouseWheelForwardEvent,
             vtkCommand::MouseWheelBackwardEvent,
             vtkCommand::LeftButtonPressEvent,
@@ -324,6 +344,8 @@ bool StdViewContext::AttachObservers()
             vtkCommand::ExitEvent,
             vtkCommand::RightButtonPressEvent,
             vtkCommand::RightButtonReleaseEvent,
+        vtkCommand::MiddleButtonPressEvent,
+        vtkCommand::MiddleButtonReleaseEvent,
             vtkCommand::RenderEvent,
             vtkCommand::WindowResizeEvent
         };
@@ -476,6 +498,7 @@ bool StdViewContext::SetInteractorReady()
         && AttachObservers()
         && AttachTimer();
     m_isInteractorReady = isReady;
+    if(isReady)m_isNavigationStopped=false;
     return isReady;
 }
 
@@ -515,6 +538,7 @@ bool StdViewContext::RebuildInteractionRouter(
     }
 
     try {
+        if(!m_navigation) m_navigation=std::make_shared<ViewNavigationExecutor>(m_ports,m_renderer.GetPointer(),[this]{const auto c=m_controller.lock();return GetIsOwnerThread()&&!m_isNavigationStopped&&(m_viewId.empty()||(c&&InteractionControllerAccess::GetIsValid(*c)));},[this]{return m_interactionRouter.GetHasCapture();});
         InteractionRouter candidate;
         // 顺序就是 FirstMatch 优先级；Timer 使用 Broadcast 单独处理。
         if (!m_isHostDriven && !candidate.AttachHandler(
@@ -541,6 +565,7 @@ bool StdViewContext::RebuildInteractionRouter(
                     m_bindings))) {
             return false;
         }
+        if(!candidate.AttachHandler(std::make_unique<ViewNavigationHandler>(m_navigation,*m_bindings)))return false;
         m_interactionRouter = std::move(candidate);
         return true;
     }
@@ -561,23 +586,7 @@ bool StdViewContext::SetInputStyle()
         }
     }
 
-    if (m_toolMode == ToolMode::ModelTransform) {
-        m_interactor->SetInteractorStyle(
-            vtkSmartPointer<vtkInteractorStyleUser>::New());
-        return true;
-    }
-
-    if (m_currentMode == VizMode::SliceTop_down
-        || m_currentMode == VizMode::SliceFront_back
-        || m_currentMode == VizMode::SliceLeft_right) {
-        auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
-        style->SetInteractionModeToImage2D();
-        m_interactor->SetInteractorStyle(style);
-        return true;
-    }
-
-    m_interactor->SetInteractorStyle(
-        vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New());
+    m_interactor->SetInteractorStyle(vtkSmartPointer<vtkInteractorStyleUser>::New());
     return true;
 }
 
@@ -643,6 +652,7 @@ bool StdViewContext::StopInput()
     if (!GetIsOwnerThread()) return false;
     // P0 先关闭业务 admission；底层 timer/observer 清理失败也不得继续接收输入。
     m_isInputEnabled = false;
+    m_isNavigationStopped = true;
     InteractionEvent cancel;
     cancel.vizMode = m_currentMode;
     cancel.toolMode = m_toolMode;
@@ -675,7 +685,11 @@ bool StdViewContext::SetCameraStyle(const VizMode mode)
 
     m_currentMode = mode;
     const bool isStyleSet = SetInputStyle() && AttachObservers();
-    if (isStyleSet) return true;
+    if (isStyleSet) {
+        if(const auto c=m_controller.lock())InteractionControllerAccess::SetViewClass(*c,m_viewId,
+            mode==VizMode::SliceTop_down||mode==VizMode::SliceFront_back||mode==VizMode::SliceLeft_right?InteractionViewClass::Slice:InteractionViewClass::ThreeD);
+        return true;
+    }
 
     // style/observer 是一个提交单元；失败时恢复旧 mode 与旧 style。
     (void)RemoveObservers();
@@ -846,15 +860,19 @@ InteractionResult StdViewContext::SendInput(
             false,
             InteractionFailureReason::StateRejected };
     };
-    if (!GetIsOwnerThread() || !m_isHostInjected
+    if (!GetIsOwnerThread()
         || !m_isInteractorReady || !m_interactor
         || m_isSendingInput) {
         return getFailure();
     }
     if (event.eventKind == InteractionEventKind::Cancel) {
+        m_pressedKeys.clear();if(const auto c=m_controller.lock())InteractionControllerAccess::ClearKeys(*c,m_viewId);
         return SendCancel(event);
     }
-    if (!m_isInputEnabled) return getFailure();
+    if (!m_isInputEnabled||!m_isHostInjected) return getFailure();
+    if(event.area!=InputArea::View&&event.area!=InputArea::Application)return {};
+    struct InjectGuard { const InteractionEvent*& slot; InjectGuard(const InteractionEvent*& s,const InteractionEvent& e):slot(s){slot=&e;} ~InjectGuard(){slot=nullptr;} };
+    InjectGuard original(m_injectedEvent,event);
 
     m_interactor->SetEventInformation(
         event.x,
@@ -889,6 +907,8 @@ InteractionResult StdViewContext::SendInput(
         case InteractionEventKind::SecondaryRelease:
             m_interactor->RightButtonReleaseEvent();
             break;
+        case InteractionEventKind::MiddlePress: m_interactor->MiddleButtonPressEvent();break;
+        case InteractionEventKind::MiddleRelease: m_interactor->MiddleButtonReleaseEvent();break;
         case InteractionEventKind::PointerMove:
             m_interactor->MouseMoveEvent();
             break;
@@ -977,6 +997,8 @@ InteractionEventKind StdViewContext::GetEventKind(
         return InteractionEventKind::SecondaryPress;
     case vtkCommand::RightButtonReleaseEvent:
         return InteractionEventKind::SecondaryRelease;
+    case vtkCommand::MiddleButtonPressEvent:return InteractionEventKind::MiddlePress;
+    case vtkCommand::MiddleButtonReleaseEvent:return InteractionEventKind::MiddleRelease;
     case vtkCommand::MouseMoveEvent:
         return InteractionEventKind::PointerMove;
     case vtkCommand::KeyPressEvent:
@@ -999,6 +1021,8 @@ void StdViewContext::BuildInteractionEvent(
     vtkRenderWindowInteractor* interactor,
     const InteractionEventKind eventKind) const
 {
+    if(m_injectedEvent&&m_injectedEvent->eventKind==eventKind)event=*m_injectedEvent;
+    event.viewId=m_viewId;
     event.eventKind = eventKind;
     const int* position = interactor->GetEventPosition();
     if (position) {
@@ -1013,6 +1037,7 @@ void StdViewContext::BuildInteractionEvent(
     event.keySym = interactor->GetKeySym()
         ? interactor->GetKeySym()
         : "";
+    if(!m_injectedEvent)event.isAutoRepeat=interactor->GetRepeatCount()!=0;
     event.vizMode = m_currentMode;
     event.toolMode = m_toolMode;
 }
@@ -1052,6 +1077,7 @@ void StdViewContext::OnVTKEvent(
         }
     }
     const auto eventKind = GetEventKind(eventId);
+    if(GetIsRoutedInputEvent(eventKind)&&!m_isInputEnabled){if(m_eventCallback)m_eventCallback->SetAbortFlag(1);return;}
     // 注入模式在启动前也保持原生事件隔离；关闭门禁不能让重复事件下落到 VTK。
     if (m_isHostInjected && !m_isSendingInput
         && GetIsRoutedInputEvent(eventKind)) {
@@ -1134,8 +1160,24 @@ void StdViewContext::OnVTKEvent(
         vtkRenderWindowInteractor::SafeDownCast(caller);
     if (!interactor) return;
 
+    if(GetIsRoutedInputEvent(eventKind)&&m_isRoutingInput){if(m_eventCallback)m_eventCallback->SetAbortFlag(1);return;}
+    BooleanGuard routing(m_isRoutingInput);
     InteractionEvent event;
     BuildInteractionEvent(event, interactor, eventKind);
+    bool releasedHandled=false;
+    if(const auto c=m_controller.lock())releasedHandled=InteractionControllerAccess::PrepareKeyEvent(*c,event);
+    else if(eventKind==InteractionEventKind::KeyPress) {
+        const auto key=InputBindingMatch::GetKey(event);if(!m_pressedKeys.insert(key).second)event.isAutoRepeat=true;
+    } else if(eventKind==InteractionEventKind::KeyRelease)m_pressedKeys.erase(InputBindingMatch::GetKey(event));
+    if(releasedHandled){if(m_isSendingInput){m_injectedResult={true,true,true};m_hasInjectedResult=true;}if(m_eventCallback)m_eventCallback->SetAbortFlag(1);return;}
+    if(const auto controller=m_controller.lock();controller&&InteractionControllerAccess::GetCancelMatched(*controller,event)&&m_interactionRouter.GetHasCapture()) {
+        event.isUserCancel=true;
+        InteractionControllerAccess::SetKeyHandled(*controller,event,true);
+        const auto result=m_interactionRouter.CancelCurrentCapture(event);
+        if(m_isSendingInput){m_injectedResult=result;m_hasInjectedResult=true;}
+        if(m_eventCallback)m_eventCallback->SetAbortFlag(1);
+        return;
+    }
     const auto dispatchMode =
         eventKind == InteractionEventKind::Timer
         ? RouterDispatchMode::Broadcast
@@ -1151,7 +1193,8 @@ void StdViewContext::OnVTKEvent(
             false,
             InteractionFailureReason::StateRejected };
     }
-    if (m_isSendingInput) {
+    if(const auto c=m_controller.lock())InteractionControllerAccess::SetKeyHandled(*c,event,result.isHandled);
+    if (m_isSendingInput&&m_injectedEvent&&eventKind==m_injectedEvent->eventKind) {
         m_injectedResult = result;
         m_hasInjectedResult = true;
     }
@@ -1167,4 +1210,21 @@ double StdViewContext::GetRenderRate(
     constexpr double staticRate = 0.001;
     constexpr double fastRate = 15.0;
     return isInteracting ? fastRate : staticRate;
+}
+
+bool StdViewContext::SetInteractionController(std::shared_ptr<InteractionController> c,const std::string& id) {
+    if(!GetIsOwnerThread()||!c||id.empty())return false;
+    m_controller=c;m_viewId=id;m_defaultBindings.SetController(c,id);m_bindings=&m_defaultBindings;
+    InteractionControllerAccess::SetViewClass(*c,id,m_currentMode==VizMode::SliceTop_down||m_currentMode==VizMode::SliceFront_back||m_currentMode==VizMode::SliceLeft_right?InteractionViewClass::Slice:InteractionViewClass::ThreeD);
+    return true;
+}
+NavigationStatus StdViewContext::SetNavigation(std::shared_ptr<ViewNavigation> n) {
+    if(!GetIsOwnerThread())return NavigationStatus::WrongThread;
+    if(!m_navigation)return NavigationStatus::Unbound;
+    if(n&&n==m_navigation->GetNavigation())return NavigationStatus::Applied;
+    if(m_navigation->GetIsActive()) {
+        InteractionEvent event;event.eventKind=InteractionEventKind::Cancel;
+        if(!m_interactionRouter.CancelCapture(m_navigation->GetCaptureKey(),event).isSucceeded)return NavigationStatus::Failed;
+    }
+    return m_navigation->SetNavigation(std::move(n));
 }
