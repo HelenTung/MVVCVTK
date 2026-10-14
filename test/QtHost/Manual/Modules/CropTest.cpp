@@ -93,7 +93,7 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         flow->pending=0;flow->preferredMode=mode;flow->isConfirmed=false;flow->viewedOutput={};flow->roiOnly=false;
         panel->SetParameterPatch("BuildResult",{{"inputRoi",""}});
         const QString hint=shape==CropHostAction::Sphere
-            ? "球裁剪：拖动中心控制点移动球体，拖动绿色控制点调整半径。"
+            ? "球裁剪：暖白色手柄移动球心，浅金色手柄调整半径；三圆环表示空间范围，亮色外轮廓随视角更新。"
             : shape==CropHostAction::Cylinder
                 ? "圆柱裁剪：拖动中心控制点平移，绿色控制点调整半径，两端控制点调整方向和长度。"
                 : shape==CropHostAction::Box
