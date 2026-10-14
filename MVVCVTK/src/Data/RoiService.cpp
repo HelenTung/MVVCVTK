@@ -1,8 +1,11 @@
 #include "Data/RoiService.h"
+#include "Data/DataService.h"
 #include "Geometry/RoiEvaluator.h"
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
 #include <utility>
 
 namespace {
@@ -42,6 +45,69 @@ RoiResult GetFailure(RoiError error,const char* message)
 {
     RoiResult result; result.error=error; result.message=message; return result;
 }
+}
+
+bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
+    std::vector<DataEntityId>& releasingScopes)
+{
+    releasingScopes.erase(std::remove_if(releasingScopes.begin(), releasingScopes.end(),
+        [&](const auto& scope) { return data.SetDataRelease(scope).status == DataLifetimeStatus::Released; }),
+        releasingScopes.end());
+    const auto graph = data.GetDataGraph();
+    if (!graph.view) return releasingScopes.empty();
+    std::map<DataEntityId, DataLifetimeState> scopes;
+    std::set<DataRevisionRef> retiringRefs;
+    {
+        const auto revisions = graph.view->GetDataQuery({});
+        for (const auto& revision : revisions.data) {
+            // ROI 几何/目录由 Host 薄服务管理；掩码仅接管同一服务产生的输出。
+            const bool isRoi = revision->type == DataTypes::roiGeometry
+                || revision->type == DataTypes::roiCatalog
+                || (revision->provenance && revision->provenance->producerId == "Host.Roi"
+                    && revision->type == DataTypes::labelMap3D);
+            if (!isRoi || revision->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement
+                || !GetDataEntityIdValid(revision->lifetimeScope)) continue;
+            const auto lifetime = data.GetDataLifetime(revision->lifetimeScope);
+            if (lifetime.status == DataLifetimeStatus::Published) {
+                scopes.emplace(lifetime.scopeId, lifetime);
+                retiringRefs.insert(lifetime.ownedRevisions.begin(), lifetime.ownedRevisions.end());
+            }
+        }
+    }
+    if (scopes.empty()) return releasingScopes.empty();
+    DataTransaction transaction;
+    for (const auto& item : scopes)
+        transaction.retireScopes.push_back({item.first, DataLifetimeStatus::Published,
+            item.second.ownedRevisions, true});
+    for (const auto& binding : graph.view->GetDataBindings()) {
+        if (!binding.target || !retiringRefs.count(*binding.target)) continue;
+        std::optional<DataRevisionRef> replacement;
+        if (binding.name == roiCatalogBinding) {
+            const auto catalog = GetCatalog(graph);
+            if (!catalog.isReadable || !catalog.data
+                || catalog.data->self.generation == std::numeric_limits<DataGeneration>::max()) return false;
+            auto entries = catalog.entries;
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                [&](const auto& entry) { return retiringRefs.count(entry.geometry) != 0; }), entries.end());
+            // 保留普通来源的 ROI 与原目录身份，不将其他数据集一并清空。
+            replacement = DataRevisionRef{catalog.data->self.entityId, catalog.data->self.generation + 1};
+            std::vector<DataInputRef> inputs;
+            for (std::size_t index = 0; index < entries.size(); ++index)
+                inputs.push_back({"roi-" + std::to_string(index), entries[index].geometry});
+            transaction.outputs.push_back({replacement->entityId, replacement->generation - 1,
+                DataTypes::roiCatalog, std::move(inputs),
+                std::make_shared<const RoiCatalogPayload>(std::move(entries)),
+                DataProvenance{"Host.Roi", "release-transient-scopes", "1", {}}});
+        }
+        transaction.bindings.push_back({binding.name, binding.revision, true, binding.target, replacement});
+    }
+    const auto committed = data.SetDataCommit(std::move(transaction));
+    if (committed.status != DataCommitStatus::Succeeded) return false;
+    for (const auto& item : scopes) releasingScopes.push_back(item.first);
+    releasingScopes.erase(std::remove_if(releasingScopes.begin(), releasingScopes.end(),
+        [&](const auto& scope) { return data.SetDataRelease(scope).status == DataLifetimeStatus::Released; }),
+        releasingScopes.end());
+    return releasingScopes.empty();
 }
 
 std::optional<RoiDescriptor> RoiService::GetDescriptor(const DataGraphSnapshot& graph,const DataRevisionRef& ref)

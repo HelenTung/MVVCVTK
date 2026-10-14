@@ -2895,10 +2895,12 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
         if (selfTest) StartSelfTest(window); else StartSequence(window, path);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
+    const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
     const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); });
     if (!stopped) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }
     try { if (!recordPath.isEmpty()) { auto records = window.GetRecords().GetRecords(); records["resources"] = window.GetWorkflow().resources.GetJson(); records["hostDiagnostics"] = window.GetDiagnostics();
+        records["businessDiagnostics"] = businessDiagnostics;
         records["shutdown"] = QJsonObject{{"isStopped", stopped}, {"elapsedMs", QString::number(stopClock.elapsed())}, {"attempts", stopAttempts}};
         ExportJson(recordPath, records); } }
     catch (const std::exception& error) { std::cerr << error.what() << std::endl; result = 1; }

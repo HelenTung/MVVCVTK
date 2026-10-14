@@ -133,6 +133,7 @@ public:
 
     HostSessionConfig config;
     HostCoreServices core;
+    std::vector<DataEntityId> roiReleasingScopes;
     HostViewRuntimeRegistry renderViews;
     std::shared_ptr<HostFrameCoordinator> frameCoordinator;
     std::shared_ptr<HostCommandRouter> commandRouter;
@@ -993,7 +994,19 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             return false;
         }
         if(inputRegistry)if(const auto c=inputRegistry->GetController())InteractionControllerAccess::Stop(*c);
-        if (!renderViews.SetDataTasksStopping() || !DetachFeatures()) {
+        if (!renderViews.SetDataTasksStopping()) {
+            stopState = HostStopState::StopPending;
+            return false;
+        }
+        // 全部 Feature 的停止需要反复解除生产者/消费者依赖。ROI 正式状态属于
+        // Host 数据服务，编辑器卸载只释放交互；临时 ROI 由组合根在此退休。
+        if (core.sharedDataMgr)
+            (void)RoiService::ReleaseTransientScopes(*core.sharedDataMgr, roiReleasingScopes);
+        const bool areFeaturesDetached = DetachFeatures();
+        const bool areRoisReleased = !core.sharedDataMgr
+            || RoiService::ReleaseTransientScopes(*core.sharedDataMgr, roiReleasingScopes);
+        if (!areFeaturesDetached || !areRoisReleased) {
+            SendDiagnostic("[Host] Stop pending at data tasks / feature detach.");
             stopState = HostStopState::StopPending;
             return false;
         }
@@ -1002,6 +1015,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             return false;
         }
         if (!renderViews.StopLease()) {
+            SendDiagnostic("[Host] Stop pending at render view lease.");
             stopState = HostStopState::StopPending;
             return false;
         }

@@ -3016,6 +3016,9 @@ DataStageStatus AppRuntime::SetDataStageReady(
         return stage.status;
     }
     if (!stage.nextStrategy->SetProductCommit()) {
+        const auto failed = stage.nextStrategy->GetTransitionState();
+        std::cerr << "[SetDataStageReady] Product commit failed: "
+            << static_cast<int>(failed.failureReason) << ' ' << failed.message << '\n';
         stage.status = DataStageStatus::Failed;
         return stage.status;
     }

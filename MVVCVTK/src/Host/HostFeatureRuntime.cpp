@@ -1083,7 +1083,10 @@ bool HostFeatureRuntime::Impl::DetachFeatures()
                 if (!m_ports.views || !m_ports.views->SetFeatureViews(entry.id,{}) || !entry.feature) continue;
                 bool detached=false;
                 try {detached=entry.feature->DetachHost();} catch (...) {}
-                if (!detached) continue;
+                if (!detached) {
+                    std::cerr << "[Host] Feature detach pending: " << entry.id << '\n';
+                    continue;
+                }
                 entry.isHostDetached=true;entry.lifetime->Stop(true);progressed=true;
             }
             if (!m_ports.input || !m_ports.input->DetachInput(entry.id)) continue;

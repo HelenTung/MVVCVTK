@@ -244,7 +244,17 @@ void Run(const char* sample, double spacing, const std::array<double, 3>& origin
     selectCrop.expectedBindingRevision=session.GetImageDescriptor()->bindingRevision;
     Check((session.SendRequest(std::move(selectCrop),[&](HostResult value){selectCropResult=std::move(value);selectedCrop=true;}).status == HostAdmissionStatus::Accepted),"选择裁切结果作为 Surface 来源");
     Pump(session,[&]{return selectedCrop;});Check(selectCropResult.isSucceeded,"裁切结果选择完成");
-    surfaceParams.analysisRoi.reset();surfaceParams.sourceVolume=cropResult.outputRevision;
+    RoiRequest derivedRoi = create;
+    derivedRoi.definition.source = cropResult.outputRevision;
+    derivedRoi.metadata.name = "crop-derived-roi";
+    const auto catalogBinding = probe->data->GetDataBinding(probe->data->GetDataGraph(), roiCatalogBinding);
+    derivedRoi.expectedCatalogRevision = catalogBinding->revision;
+    const auto derived = session.SetRoi(derivedRoi);
+    Check(derived.error == RoiError::None && derived.roi, "裁切输出上创建正式 ROI");
+    auto scopedRoi = probe->data->GetData(probe->data->GetDataGraph(), derived.roi->revision);
+    Check(scopedRoi && scopedRoi->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement,
+        "派生 ROI 继承临时来源的显式退役契约");
+    surfaceParams.analysisRoi = derived.roi->revision;surfaceParams.sourceVolume=cropResult.outputRevision;
     std::get<SurfaceStartRequest>(extract).start=surfaceParams;surfaced=false;surfaceResult={};
     Check(surface->SendRequest(extract,[&](SurfaceDeterminationResult value){surfaceResult=std::move(value);surfaced=true;}).status==SurfaceAdmissionStatus::Accepted,"Surface 接纳临时裁切来源");
     Pump(session,[&]{return surfaced;});auto scopedSurface=surface->GetSurfaceSnapshot();
@@ -256,6 +266,7 @@ void Run(const char* sample, double spacing, const std::array<double, 3>& origin
     heldPoints.reset();
     bool surfaceDetached=false;Pump(session,[&]{if(!surfaceDetached)surfaceDetached=session.DetachFeature(*surface);return surfaceDetached;});
     croppedImage.reset();
+    scopedRoi.reset();
     Pump(session,[&]{return session.Stop();});
     Check(session.Stop(),"Session 停止完整释放消费者");
     std::cout << "EVIDENCE voxels=" << count << " selected=" << count/8 << " artifactChanged=" << changed

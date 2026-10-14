@@ -1506,6 +1506,10 @@ bool VolumeStrategy::SetGpuInput(
             && m_resources->SetGpuReservation(
                 contextIdentity, this, blockBytes);
         if (!hasGpuLease) {
+            std::cerr << "[VolumeLod] GPU reservation rejected"
+                << " context_budget=" << contextBudget
+                << " other_bytes=" << otherBytes
+                << " requested_bytes=" << blockBytes << '\n';
             (void)restoreGpuLease();
             (void)restore();
             setUploadDuration();

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cmath>
 #include <exception>
+#include <iostream>
 #include <mutex>
 #include <limits>
 #include <map>
@@ -432,7 +433,17 @@ bool CropHostFeature::Impl::Document::DetachHost()
         }
         // Detach/Stop retries pump the same close transaction even when ordinary frames are stopped.
         (void)OnHostTick();
-        if (m_bridge->GetCropHistory().documentId) return false;
+        if (m_bridge->GetCropHistory().documentId) {
+            std::cerr << "[Crop] Document detach pending"
+                << " editing=" << m_isEditingDocument
+                << " transition=" << static_cast<bool>(m_sourceTransition)
+                << " source_committed=" << m_documentSourceCommitted
+                << " failure=" << static_cast<int>(m_dataState.failureReason)
+                << " blockers=" << m_dataState.blockers.size() << '\n';
+            for (const auto& blocker : m_dataState.blockers)
+                std::cerr << "[Crop] Release blocker: " << blocker.owner << '\n';
+            return false;
+        }
     }
     const PublishGuard guard(m_isPublishing);
     if (!CancelSourcePreview()) return false;

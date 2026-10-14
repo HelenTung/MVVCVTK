@@ -3,9 +3,14 @@
 #include "Data/DataGraphStore.h"
 #include "Data/RoiTypes.h"
 
+class AbstractDataManager;
+
 // Host 私有薄服务：唯一正式状态位于传入的 DataGraphStore。
 class RoiService final {
 public:
+    // Session 退出时回收依赖临时来源的 Host ROI；独立 Feature 卸载不调用此清理。
+    static bool ReleaseTransientScopes(AbstractDataManager& data,
+        std::vector<DataEntityId>& releasingScopes);
     static RoiArchiveReadResult GetArchiveReader(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
     RoiArchiveRestoreResult LoadArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&);
     static RoiArchiveBundleResult GetArchiveBundle(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
