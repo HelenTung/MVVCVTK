@@ -440,7 +440,7 @@ public:
         m_cancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_cancel;const auto original=request.getCancelled;
         request.getCancelled=[cancel,original]{return cancel->load() || (original && original());};m_runningSerial=m_serial;
         std::packaged_task<RoiOperationResult()> task([data,graph,readers,request=std::move(request)]{return data->GetRoiOperation(graph,request);});
-        m_future=task.get_future();const auto host=m_host;
+        m_future=task.get_future();const std::weak_ptr<FeatureHostControl> host=m_host;
         try {m_worker=std::thread([task=std::move(task),host]()mutable{task();if(const auto owner=host.lock())(void)owner->SendWorkAvailable();});}
         catch(...){m_future={};m_state.isComputing=false;m_state.error=RoiError::TooLarge;m_state.operation.error=m_state.error;}
     }
@@ -513,7 +513,7 @@ public:
     {
         if(m_future.valid() || m_pending || m_displayFuture.valid() || m_displayQueue.empty())return;
         m_displayRunning=std::move(m_displayQueue.front());m_displayQueue.erase(m_displayQueue.begin());
-        m_displayCancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_displayCancel;const auto host=m_host;
+        m_displayCancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_displayCancel;const std::weak_ptr<FeatureHostControl> host=m_host;
         const auto work=*m_displayRunning;
         m_displayChannel=std::make_shared<DisplayChannel>();const auto channel=m_displayChannel;
         m_displayProduct=std::make_shared<RegionProduct>();
@@ -596,7 +596,7 @@ public:
                 try{(void)SetProjection();}catch(...){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;CancelDisplay();}
             }
         }
-        if(more)if(const auto host=m_host.lock())(void)host->SendWorkAvailable();
+        if(more && m_host)(void)m_host->SendWorkAvailable();
         if(finished){m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();StartPendingOperation();StartDisplay();}
       }catch(RoiError error){FailDisplay(error);}
        catch(const std::bad_alloc&){FailDisplay(RoiError::TooLarge);}
@@ -986,7 +986,7 @@ public:
     std::shared_ptr<RegionProduct> m_displayProduct;
     std::future<RoiOperationResult> m_future;
     std::thread m_worker;
-    std::weak_ptr<FeatureHostControl> m_host;
+    std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_cancel;
     std::optional<RoiOperationRequest> m_pending,m_operation;
     std::uint64_t m_serial=0,m_runningSerial=0;
@@ -1012,7 +1012,7 @@ bool RoiEditingHostFeature::AttachHost(const HostFeatureContext& context)
     m_impl->m_owner=std::this_thread::get_id(); m_impl->m_data=context.data; m_impl->m_views=context.views;m_impl->m_host=context.host;
     const auto weak=weak_from_this();
     if(context.host && !weak.expired()){HostInputBinding binding{std::string(GetFeatureId()),m_impl->m_config.targetViews,[weak](const InteractionEvent& event){const auto feature=weak.lock();return feature?feature->m_impl->OnInput(event):InteractionResult{};}};
-        if(!context.host->AttachInput(std::move(binding))){m_impl->m_data.reset();m_impl->m_views.reset();return false;}}
+        if(!context.host->AttachInput(std::move(binding))){m_impl->m_host.reset();m_impl->m_data.reset();m_impl->m_views.reset();return false;}}
     m_impl->m_state.isAttached=true; return true;
 }
 bool RoiEditingHostFeature::DetachHost()
@@ -1021,7 +1021,8 @@ bool RoiEditingHostFeature::DetachHost()
     if (!state.m_state.isAttached) return true;
     if (state.GetAccessError()!=RoiError::None || !state.ClearDraft()) return false;
     state.StopDisplay();
-    if(const auto host=state.m_host.lock())if(!host->DetachInput(GetFeatureId()))return false;
+    if(state.m_host && !state.m_host->DetachInput(GetFeatureId()))return false;
+    state.m_host.reset();
     state.ClearCommitted();
     state.m_data.reset(); state.m_views.reset(); state.m_state.isAttached=false; return true;
 }

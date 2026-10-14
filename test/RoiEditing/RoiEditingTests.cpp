@@ -192,15 +192,28 @@ void TestCurves()
 }
 class Controller final:public FeatureHostControl {
 public:
-    HostInputBinding binding;std::atomic<unsigned> signals{0};
+    HostInputBinding binding;std::shared_ptr<std::atomic<unsigned>> signals=std::make_shared<std::atomic<unsigned>>(0);
     bool AttachInput(HostInputBinding value)override{binding=std::move(value);return true;}
     bool DetachInput(std::string_view)override{binding={};return true;}
     bool SetActiveViews(const std::vector<std::string>&)override{return true;}
     bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
     bool SendSceneDelta(FeatureSceneDelta)override{return true;}
     bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
-    bool SendWorkAvailable()override{++signals;return true;}
+    bool SendWorkAvailable()override{++*signals;return true;}
 };
+void TestOperationNotificationLifetime()
+{
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});auto host=std::make_shared<Controller>();const auto signals=host->signals;std::weak_ptr<Controller> weakHost=host;
+    {HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor->AttachHost(context),"notification attach failed");}host.reset();
+    RoiRequest draft;draft.metadata.name="通知生命周期";draft.definition.source=source;RoiNode node;node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;RoiOperationRequest operation;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};start.operation=operation;Require(editor->SendRequest(start).error==RoiError::Pending,"notification operation was not deferred");
+    unsigned consumed=0;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor->GetState().isComputing && std::chrono::steady_clock::now()<until){const auto current=signals->load();if(current!=consumed){consumed=current;editor->OnHostTick();}else std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    Require(consumed>0 && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,"temporary attach context lost the operation notification port");
+    Require(editor->DetachHost() && weakHost.expired(),"detach retained the operation notification port");
+}
 void TestDrawingAndLatestOperation()
 {
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
@@ -397,16 +410,18 @@ void TestProgressiveDisplay(){
     const auto source=data->SetPrimaryImage(image)->data->self;auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
     auto top=std::make_shared<View>("top",HostRenderViewRole::TopDownSlice),front=std::make_shared<View>("front",HostRenderViewRole::FrontBackSlice),side=std::make_shared<View>("side",HostRenderViewRole::LeftRightSlice);
     for(const auto& view:{main,top,front,side}){view->source=source;view->cursor={128,8,8};views->views.emplace(view->view.id,view);}
-    RoiEditingHostFeature editor({{"main"},{{"main","top","front","side"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"progressive attach failed");
+    RoiEditingHostFeature editor({{"main"},{{"main","top","front","side"},{}}});auto host=std::make_shared<Controller>();const auto signals=host->signals;std::weak_ptr<Controller> weakHost=host;
+    {HostFeatureContext context;context.data=data;context.views=views;context.host=host;Require(editor.AttachHost(context),"progressive attach failed");}host.reset();
     RoiRequest draft;draft.metadata.name="渐进显示";draft.definition={source,{{RoiNodeKind::SourceDomain}}};
     const auto begin=[&]{Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"progressive begin failed");FeatureOverlayState plane;plane.cursor={128,8,8};for(const auto& view:{top,front,side})for(const auto& overlay:view->overlays)overlay->SetOverlayState(plane);};begin();
     const auto sliceMesh=[&](const std::shared_ptr<View>& view){vtkPolyData* result=nullptr;auto* actors=view->renderer->GetActors();actors->InitTraversal();while(auto* actor=actors->GetNextActor())if(actor->GetVisibility() && actor->GetMapper()){
         auto* mesh=vtkPolyData::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0));if(mesh && mesh->GetNumberOfLines())result=mesh;}return result;};
     const auto blockCount=[&]{unsigned count=0,actorsSeen=0;auto* actors=main->renderer->GetActors();actors->InitTraversal();while(auto* actor=actors->GetNextActor())if(actor->GetVisibility() && vtkCompositePolyDataMapper::SafeDownCast(actor->GetMapper())){
         ++actorsSeen;count=vtkMultiBlockDataSet::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0))->GetNumberOfBlocks();}Require(actorsSeen<=1,"progressive display created one actor per block");return count;};
-    bool slicesEarly=false,movedEarly=false,requestedMove=false;unsigned previous=0;
+    bool slicesEarly=false,movedEarly=false,requestedMove=false;unsigned previous=0,consumed=0;
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
     while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<until){
+        const auto current=signals->load();if(current==consumed){std::this_thread::yield();continue;}consumed=current;
         editor.OnHostTick();const auto count=blockCount();Require(count>=previous && count-previous<=4,"one tick consumed an unbounded set of display blocks");previous=count;
         if(sliceMesh(top) && sliceMesh(front) && sliceMesh(side) && editor.GetState().displayStatus==RoiDisplayStatus::Updating){slicesEarly=true;
             if(!requestedMove){FeatureOverlayState plane;plane.cursor={128,8,15};for(const auto& overlay:top->overlays)overlay->SetOverlayState(plane);requestedMove=true;}}
@@ -434,10 +449,11 @@ void TestProgressiveDisplay(){
     Require(editor.OnHostTick() && !editor.GetState().hasDraft && blockCount()==0,"source lease expiry accepted queued display batches");
     Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && editor.DetachHost(),"cancel/Detach blocked a bounded display producer");
     for(const auto& view:{main,top,front,side})Require(view->overlays.empty(),"cancelled progressive display retained an overlay");
+    Require(weakHost.expired(),"detach retained the display notification port");
 }
 
 }
 int main(int argc,char** argv)
 {
-    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOutputIdentityAndDisplay();TestAppliedSplit(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }
