@@ -17,6 +17,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <cstdlib>
 #include <Windows.h>
 #include <bcrypt.h>
 
@@ -120,9 +121,12 @@ void Run(const char *filePath, const char *expectedSha256) {
             complete->result=std::move(value); complete->isDone=true;
         });
         Require(admission.status==AlignmentAdmissionStatus::Accepted, "SDK request must be admitted.");
-        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(180000);
-        while (!complete->isDone && std::chrono::steady_clock::now()<deadline) { session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-        Require(complete->isDone, "SDK request must finish within the real-audit deadline.");
+        // 默认等待完整业务完成；非零环境参数仅用于调用方显式选择的测试进程保护。
+        const auto text=std::getenv("MVVCVTK_SDK_AUDIT_TIMEOUT_MS");
+        const auto timeout=text?std::stoull(text):0;
+        const auto started=std::chrono::steady_clock::now();
+        while (!complete->isDone && (!timeout || std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<double(timeout))) { session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Require(complete->isDone, "SDK request did not finish within the caller-selected audit deadline.");
         const auto &result=complete->result;
         if (result.status!=AlignmentStatus::FullyDetermined) std::cerr<<result.message<<'\n';
         Require(result.status==AlignmentStatus::FullyDetermined, "SDK business result must complete.");

@@ -1,5 +1,5 @@
-#include "Data/DataPayloads.h"
 #pragma once
+#include "Data/DataPayloads.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
