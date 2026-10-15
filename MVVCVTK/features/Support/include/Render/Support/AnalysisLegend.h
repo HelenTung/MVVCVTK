@@ -65,7 +65,7 @@ class AnalysisLegend final : public vtkScalarBarActor {
     bool GetIsCustom(vtkViewport *v) {
         const std::string title = GetTitle() ? GetTitle() : "";
         const auto lines = 1 + std::count(title.begin(), title.end(), '\n');
-        return m_exact || v->GetSize()[1] < 320 || v->GetSize()[1] < 38 + 28 + 13 * lines + 24 + 8;
+        return m_exact || v->GetSize()[1] < 38 + 28 + 13 * lines + 24 + 8;
     }
     void Build(vtkViewport *v) {
         const auto *size = v->GetSize();
@@ -78,7 +78,7 @@ class AnalysisLegend final : public vtkScalarBarActor {
         const double y = compact ? 28 : std::max(42., position[1] * size[1]);
         const double height =
             std::max(8., std::min({GetHeight() * size[1], double(GetMaximumHeightInPixels()),
-                                   size[1] - y - 13 * titleLines - 82.}));
+                                   size[1] - y - 13 * titleLines - 44.}));
         auto points = vtkSmartPointer<vtkPoints>::New();
         auto cells = vtkSmartPointer<vtkCellArray>::New();
         auto colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
@@ -92,8 +92,7 @@ class AnalysisLegend final : public vtkScalarBarActor {
             a->GetTextProperty()->SetFontSize(compact ? 9 : 11);
             m_text.push_back(a);
         };
-        // 顶部留给宿主业务标题；矮视口的标题随横向色带排在下部。
-        text(title, x, compact ? y + 14 : y + height + 38);
+        text(title, x, compact ? size[1] - 13 * titleLines - 2 : y + height + 38);
         auto quad = [&](double left, double right, double low, double high,
                         const std::array<double, 4> &c) {
             vtkIdType ids[4];

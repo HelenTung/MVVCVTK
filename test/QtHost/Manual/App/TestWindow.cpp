@@ -398,7 +398,10 @@ void TestWindow::UpdateMeasurements()
         entry.button->setVisible(!p.isEmpty());entry.button->setEnabled(!m_isClosing);
         entry.button->setText((entry.button->isChecked() ? "▾ ":"▸ ")+module->GetDisplayName()+" · "+ref.section(':',0,0).right(8));
         entry.button->setToolTip("色标绑定 "+ref+"；点击编辑，Ctrl 点击并排对照。\n"+(module->getColorDescription ? module->getColorDescription():QString()));
-        entry.button->adjustSize();entry.button->raise();
+        entry.button->adjustSize();
+        // 业务开关靠右上，保留左侧原生图例的完整标题、单位和读数。
+        entry.button->move(std::max(12,entry.button->parentWidget()->width()-entry.button->width()-12),entry.button->y());
+        entry.button->raise();
         if(!ref.isEmpty() && ref!=entry.result) {
             const bool anyExpanded=std::any_of(m_legends.begin(),m_legends.end(),[&](const auto& other){return other.viewId==entry.viewId && other.button!=entry.button && other.button->isVisible() && other.button->isChecked();});
             if(!anyExpanded){const QSignalBlocker blocker(entry.button);entry.button->setChecked(true);}
