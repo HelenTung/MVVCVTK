@@ -2921,13 +2921,19 @@ void StartSequence(TestWindow& window, const QString& path)
                             vtkNew<vtkPropCollection> parts;bar->GetActors2D(parts);
                             for(vtkIdType i=0;i<parts->GetNumberOfItems();++i)if(auto* actor=vtkActor2D::SafeDownCast(parts->GetItemAsObject(i))) {
                                 if(auto* mapper=vtkPolyDataMapper2D::SafeDownCast(actor->GetMapper())){const auto* bounds=mapper->GetInput()->GetBounds();result.first=std::max(result.first,bounds[1]-bounds[0]);}
-                                if(auto* mapper=vtkTextMapper::SafeDownCast(actor->GetMapper()))result.second=std::max(result.second,mapper->GetTextProperty()->GetFontSize());
+                                // DPI 会换算 point size；验收实际字形像素高度。
+                                if(auto* mapper=vtkTextMapper::SafeDownCast(actor->GetMapper())){int pixels[2]{};mapper->GetSize(endpoint->renderer,pixels);result.second=std::max(result.second,pixels[1]);}
                             }
                         }
                         return result;
                     };
                     const auto before=layout();const auto original=window.size();window.resize(original*1.2);
-                    Check(Wait([&]{const auto after=layout();return after.first>before.first*1.05&&after.second>before.second;}),
+                    const bool grew=Wait([&]{const auto after=layout();return after.first>before.first*1.05&&after.second>before.second;});
+                    const auto grown=layout();const auto* viewport=endpoint->renderer->GetSize();
+                    std::cout<<"Legend resize: strip="<<before.first<<" -> "<<grown.first<<" glyphPixels="<<before.second<<" -> "<<grown.second
+                        <<" window="<<original.width()<<'x'<<original.height()<<" -> "<<window.width()<<'x'<<window.height()
+                        <<" viewport="<<viewport[0]<<'x'<<viewport[1]<<" dpi="<<endpoint->renderWindow->GetDPI()<<std::endl;
+                    Check(grew,
                         "growing the actual Qt viewport enlarges both the legend geometry and font");
                     window.resize(original);
                     Check(Wait([&]{const auto after=layout();return std::abs(after.first-before.first)<.1&&after.second==before.second;}),
