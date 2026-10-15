@@ -12,6 +12,7 @@
 #include <vtkRenderWindow.h>
 #include <vtkWindowToImageFilter.h>
 #include <vtkTextActor.h>
+#include <vtkTextMapper.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkPointData.h>
 #include <cstring>
@@ -42,7 +43,7 @@ int main()
     for(const auto range : {std::array<double,2>{0,5}, {0,24}, {.1197,.3321}, {-1.3,2.1}, {1e-8,3e-8}}) {
         const auto labels=AnalysisColorStyle::BuildLabels(range);
         const auto format=AnalysisColorStyle::GetLabelFormat(*labels);
-        bool isRegular=labels->GetNumberOfValues()>1;
+        bool isRegular=labels->GetNumberOfValues()==17&&labels->GetValue(0)==range[0]&&labels->GetValue(16)==range[1];
         const double step=labels->GetValue(1)-labels->GetValue(0);
         std::set<std::string> texts;
         for(vtkIdType i=0;i<labels->GetNumberOfValues();++i) {
@@ -52,12 +53,21 @@ int main()
             char text[64];std::snprintf(text,sizeof(text),format.c_str(),value);texts.insert(text);
         }
         Check(isRegular && texts.size()==static_cast<std::size_t>(labels->GetNumberOfValues()),
-            "legend ticks increase uniformly with distinct formatted values inside the unchanged range");
+            "four midpoint subdivisions retain both true endpoints and 17 uniformly placed values");
     }
-    const auto single=AnalysisColorStyle::BuildLabels({2,std::nextafter(2.0,3.0)});
+    const auto halves=AnalysisColorStyle::BuildLabels({.37,2.49});
+    Check(std::abs(halves->GetValue(8)-1.43)<1e-14&&std::abs(halves->GetValue(4)-.9)<1e-14
+        &&std::abs(halves->GetValue(12)-1.96)<1e-14,"midpoint recursion uses actual measurement values instead of preferred integers");
+    const auto adjacent=AnalysisColorStyle::BuildLabels({2,std::nextafter(2.0,3.0)});
+    char firstText[64],lastText[64];const auto adjacentFormat=AnalysisColorStyle::GetLabelFormat(*adjacent);
+    std::snprintf(firstText,sizeof(firstText),adjacentFormat.c_str(),adjacent->GetValue(0));
+    std::snprintf(lastText,sizeof(lastText),adjacentFormat.c_str(),adjacent->GetValue(16));
+    Check(adjacent->GetNumberOfValues()==17&&std::strcmp(firstText,lastText)!=0,"adjacent finite endpoints remain distinct without inventing a wider interval");
+    const auto single=AnalysisColorStyle::BuildLabels({2,2});
     Check(single->GetNumberOfValues()==1 && single->GetValue(0)==2,"single-value legend avoids repeated fake precision");
     const auto extreme=AnalysisColorStyle::BuildLabels({-std::numeric_limits<double>::max(),std::numeric_limits<double>::max()});
-    Check(extreme->GetNumberOfValues()==2 && AnalysisColorStyle::GetLabelFormat(*extreme)=="%.6g",
+    Check(extreme->GetNumberOfValues()==17 && extreme->GetValue(8)==0
+        &&std::isfinite(extreme->GetValue(1))&&AnalysisColorStyle::GetLabelFormat(*extreme)=="%.6g",
         "extreme finite endpoints do not overflow formatting precision conversion");
     vtkNew<vtkScalarBarActor> legend;legend->SetLookupTable(thickness);
     AnalysisColorStyle::SetLegend(*legend,u8"壁厚 [mm]");
@@ -86,6 +96,31 @@ int main()
         std::size_t readable=0;
         for(int y=80;y<220;++y)for(int x=22;x<90;++x){const auto* rgb=static_cast<unsigned char*>(capture->GetOutput()->GetScalarPointer(x,y,0));readable+=rgb[0]>180&&rgb[1]>180&&rgb[2]>180;}
         Check(readable>20,"actual rendered finite scale contains readable numeric labels");
+        if(mode==AnalysisColorStyle::RampMode::Rainbow){
+            // 从实际生成的 VTK props 和帧缓冲核验尺寸变化，而非只检查配置值。
+            vtkNew<vtkPropCollection> parts;
+            const auto geometry=[&](){parts->RemoveAllItems();bar->GetActors2D(parts);return vtkPolyDataMapper2D::SafeDownCast(vtkActor2D::SafeDownCast(parts->GetItemAsObject(0))->GetMapper())->GetInput();};
+            const auto midpoint=[&](){
+                for(vtkIdType i=1;i<parts->GetNumberOfItems();++i){auto* mapper=vtkTextMapper::SafeDownCast(vtkActor2D::SafeDownCast(parts->GetItemAsObject(i))->GetMapper());if(mapper&&std::strcmp(mapper->GetInput(),"1.43")==0)return mapper;}
+                return static_cast<vtkTextMapper*>(nullptr);
+            };
+            double smallBounds[6];auto* data=geometry();data->GetBounds(smallBounds);int ticks=0;
+            for(vtkIdType i=0;i<data->GetNumberOfCells();++i){double c[4];data->GetCellData()->GetScalars()->GetTuple(i,c);ticks+=c[0]==255&&c[1]==255&&c[2]==255;}
+            auto* number=midpoint();int smallText[2]{};if(number)number->GetSize(view,smallText);
+            const int smallFont=number?number->GetTextProperty()->GetFontSize():0;
+            Check(ticks==17&&number&&smallText[1]>0,"all 17 subdivision ticks and the real midpoint label are rendered");
+            frame->SetSize(400,600);frame->Render();double largeBounds[6];geometry()->GetBounds(largeBounds);number=midpoint();int largeText[2]{};if(number)number->GetSize(view,largeText);
+            bool scales=true;for(int i=0;i<4;++i)scales&=std::abs(largeBounds[i]-2*smallBounds[i])<1e-3;
+            Check(scales&&number&&number->GetTextProperty()->GetFontSize()==2*smallFont&&largeText[1]>smallText[1],
+                "doubling the viewport scales the strip, tails, ticks and actual text together");
+            frame->SetDPI(144);frame->Render();geometry();number=midpoint();int dpiText[2]{};if(number)number->GetSize(view,dpiText);
+            Check(number&&number->GetTextProperty()->GetFontSize()==smallFont&&std::abs(dpiText[1]-largeText[1])<=2,
+                "DPI-only changes rebuild typography without applying device scaling twice");
+            frame->SetSize(400,192);frame->Render();double compactBounds[6];geometry()->GetBounds(compactBounds);
+            Check(compactBounds[1]-compactBounds[0]>3*(compactBounds[3]-compactBounds[2]),
+                "high-DPI short viewports use the compact layout in logical pixels");
+            frame->SetDPI(72);frame->SetSize(200,300);frame->Render();capture->Modified();capture->Update();
+        }
         const auto lower=AnalysisColorStyle::GetMappedColor({.37,2.49},params,-1),upper=AnalysisColorStyle::GetMappedColor({.37,2.49},params,10);
         const auto expectedLow=mode==AnalysisColorStyle::RampMode::Constant?params.constantColor:AnalysisColorStyle::GetSegmentColor({0,1,mode,params.lowColor,params.highColor},0);
         const auto expectedHigh=mode==AnalysisColorStyle::RampMode::Constant?params.constantColor:AnalysisColorStyle::GetSegmentColor({0,1,mode,params.lowColor,params.highColor},1);

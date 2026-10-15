@@ -1,4 +1,9 @@
 #include <vtkScalarBarActor.h>
+#include <vtkActor2D.h>
+#include <vtkPolyDataMapper2D.h>
+#include <vtkPropCollection.h>
+#include <vtkTextMapper.h>
+#include <vtkTextProperty.h>
 #include <QRegularExpression>
 // 测试用途：自动执行实际页面入口的合成回归或指定用例，验证中文分派、业务日志和生命周期。
 #include "TestCaseRunner.h"
@@ -2921,6 +2926,38 @@ void StartSequence(TestWindow& window, const QString& path)
                 }
                 Check(checked,"current measured result exposes its legend");
                 Check(window.findChildren<QToolButton*>(QRegularExpression("^legend_")).isEmpty(),"viewport contains no floating business legend controls");
+                if(step["checkLegendResize"].toBool()) {
+                    const auto layout=[&](){
+                        std::pair<double,int> result{};auto* items=endpoint->renderer->GetViewProps();items->InitTraversal();
+                        while(auto* prop=items->GetNextProp())if(auto* bar=vtkScalarBarActor::SafeDownCast(prop);bar&&bar->GetVisibility()) {
+                            vtkNew<vtkPropCollection> parts;bar->GetActors2D(parts);
+                            for(vtkIdType i=0;i<parts->GetNumberOfItems();++i)if(auto* actor=vtkActor2D::SafeDownCast(parts->GetItemAsObject(i))) {
+                                if(auto* mapper=vtkPolyDataMapper2D::SafeDownCast(actor->GetMapper())){const auto* bounds=mapper->GetInput()->GetBounds();result.first=std::max(result.first,bounds[1]-bounds[0]);}
+                                // DPI 会换算 point size；验收实际字形像素高度。
+                                if(auto* mapper=vtkTextMapper::SafeDownCast(actor->GetMapper())){int pixels[2]{};mapper->GetSize(endpoint->renderer,pixels);result.second=std::max(result.second,pixels[1]);}
+                            }
+                        }
+                        return result;
+                    };
+                    // 参数页/统计页会先改变布局；用一次真实缩窗及 owner 绘制建立稳定基准。
+                    const auto original=window.size();const auto prior=window.GetRenderCount();window.resize(original*.85);
+                    Check(Wait([&]{return window.GetRenderCount()>prior&&!window.GetWorkflow().getRenderPending("primary-3d");}),
+                        "initial Qt viewport shrink completes an owner-rendered frame");
+                    const auto reducedSize=window.size();const auto before=layout();window.resize(original);
+                    const bool grew=Wait([&]{const auto after=layout();return after.first>before.first*1.05&&after.second>before.second;});
+                    const auto grown=layout();const auto* viewport=endpoint->renderer->GetSize();
+                    std::cout<<"Legend resize: strip="<<before.first<<" -> "<<grown.first<<" glyphPixels="<<before.second<<" -> "<<grown.second
+                        <<" window="<<reducedSize.width()<<'x'<<reducedSize.height()<<" -> "<<window.width()<<'x'<<window.height()
+                        <<" viewport="<<viewport[0]<<'x'<<viewport[1]<<" dpi="<<endpoint->renderWindow->GetDPI()<<std::endl;
+                    Check(grew,
+                        "growing the actual Qt viewport enlarges both the legend geometry and font");
+                    window.resize(reducedSize);
+                    Check(Wait([&]{const auto after=layout();return std::abs(after.first-before.first)<.1&&after.second==before.second;}),
+                        "shrinking the actual Qt viewport restores both legend geometry and font");
+                    const auto lastRender=window.GetRenderCount();window.resize(original);
+                    Check(Wait([&]{return window.GetRenderCount()>lastRender&&!window.GetWorkflow().getRenderPending("primary-3d");}),
+                        "original Qt viewport is rendered before the final screenshot");
+                }
             }
             std::cout<<"CAPTURE: saving window"<<std::endl;
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");

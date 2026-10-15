@@ -100,6 +100,7 @@ public:
     }
     CropOpItem inputGeometry,dragGeometry;
     P radial{1,0,0},inputRadial{1,0,0},dragRadial{1,0,0},dragLever{},rotationOffset{0,0,1},inputRotation{0,0,1};
+    double rotationLength=0,inputRotationLength=0;
     bool hasRadial=false;
     // 最小旋转传递局部径向，轴连续变化时不重新选择参考坐标轴。
     static P Rotate(const P& p,const P& from,const P& to) {
@@ -107,7 +108,7 @@ public:
         if(c<-.999999999){const P n=Radial(from);return Add(Add(P{},p,-1),n,2*Dot(n,p));}
         return Add(Add(p,Cross(cross,p)),Cross(cross,Cross(cross,p)),1/(1+c));
     }
-    P RotationLever() const {return Add(operation.centerInInputModel,rotationOffset,1.5*std::max(operation.radius,operation.height/2));}
+    P RotationLever() const {return Add(operation.centerInInputModel,rotationOffset,rotationLength>0?rotationLength:1.5*std::max(operation.radius,operation.height/2));}
 
     void SetContext(vtkRenderWindowInteractor* value,vtkRenderer* target) {
         if(interactor==value&&renderer==target)return;
@@ -130,7 +131,7 @@ public:
             if(hasRadial&&operation.geometryType==CropShape::Cylinder){
                 radial=Rotate(radial,operation.axisInInputModel,next.axisInInputModel);
                 rotationOffset=Rotate(rotationOffset,operation.axisInInputModel,next.axisInInputModel);
-            }else{radial=Radial(next.axisInInputModel);rotationOffset=Unit(Add(next.axisInInputModel,radial));}
+            }else{radial=Radial(next.axisInInputModel);rotationOffset=Unit(Add(next.axisInInputModel,radial));rotationLength=0;}
             radial=Unit(Add(radial,next.axisInInputModel,-Dot(radial,next.axisInInputModel)));hasRadial=true;
         }
         operation=next;modelToWorld->DeepCopy(candidate);worldToModel->DeepCopy(inverse);ready=true;
@@ -210,20 +211,44 @@ public:
     void UpdateRotationHandle() {
         const auto* origin=renderer->GetOrigin();const auto* size=renderer->GetSize();std::array<P,4> occupied{};
         for(int i=0;i<4;++i){P p{};handles[i].representation->GetWorldPosition(p.data());renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();std::copy_n(renderer->GetDisplayPoint(),3,occupied[i].data());}
-        const auto quality=[&](const P& direction){
-            const auto p=Transform(modelToWorld,Add(operation.centerInInputModel,direction,1.5*std::max(operation.radius,operation.height/2)));
+        const auto quality=[&](const P& direction,double length){
+            const auto p=Transform(modelToWorld,Add(operation.centerInInputModel,direction,length));
             renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
             if(!std::isfinite(d[0])||!std::isfinite(d[1])||!std::isfinite(d[2])||d[2]<0||d[2]>1)return -1.;
             double score=std::min({d[0]-origin[0],origin[0]+size[0]-d[0],d[1]-origin[1],origin[1]+size[1]-d[1]});if(score<8)return -1.;
             for(const auto& other:occupied)if(other[2]>=0&&other[2]<=1){const double distance=std::hypot(d[0]-other[0],d[1]-other[1]);if(distance<16)return -1.;score=std::min(score,distance);}
             return score+.001*(1-d[2]);
         };
-        if(quality(rotationOffset)>=0)return;
-        const auto tangent=Cross(operation.axisInInputModel,radial);double best=-1;P chosen=rotationOffset;
+        const double preferred=1.5*std::max(operation.radius,operation.height/2);
+        if(quality(rotationOffset,rotationLength>0?rotationLength:preferred)>=0)return;
+        const auto tangent=Cross(operation.axisInInputModel,radial);double best=-1,chosenLength=preferred;P chosen=rotationOffset;
+        std::array<P,65> directions{};directions[0]=rotationOffset;int index=1;
         for(int sign:{-1,1})for(int i=0;i<32;++i){const double angle=6.283185307179586*i/32;const auto& a=operation.axisInInputModel;
             const auto direction=Unit(Add(Add(P{sign*a[0],sign*a[1],sign*a[2]},radial,std::cos(angle)),tangent,std::sin(angle)));
-            const double score=quality(direction);if(score>best){best=score;chosen=direction;}}
-        if(best<0)return;rotationOffset=chosen;auto p=Transform(modelToWorld,RotationLever());handles[4].representation->SetWorldPosition(p.data());
+            directions[index++]=direction;const double score=quality(direction,preferred);if(score>best){best=score;chosen=direction;}}
+        if(best<0&&size[0]>18&&size[1]>18) {
+            // 仅缩短显示杠杆：解析求每条候选射线在带边距视锥内的长度区间。
+            // 保留方向的轴向分量，轴向视角下拖动仍能把圆柱转出正视。
+            vtkNew<vtkMatrix4x4> clip;vtkMatrix4x4::Multiply4x4(renderer->GetActiveCamera()->GetCompositeProjectionTransformMatrix(renderer->GetTiledAspectRatio(),0,1),modelToWorld,clip);
+            const auto& center=operation.centerInInputModel;const double base[4]{center[0],center[1],center[2],1};double c[4];clip->MultiplyPoint(base,c);
+            for(const auto& direction:directions) {
+                const double vector[4]{direction[0],direction[1],direction[2],0};double d[4];clip->MultiplyPoint(vector,d);
+                if(!std::all_of(c,c+4,[](double x){return std::isfinite(x);})||!std::all_of(d,d+4,[](double x){return std::isfinite(x);}))continue;
+                double low=0,high=preferred;
+                for(int plane=0;plane<6&&low<=high;++plane) {
+                    const int axis=plane/2;const double sign=plane%2?-1:1;
+                    const double inset=axis<2?1-18.0/size[axis]:1;
+                    const double a=(plane==4?0:inset*c[3])+sign*c[axis],b=(plane==4?0:inset*d[3])+sign*d[axis];
+                    if(b>0)low=std::max(low,-a/b);else if(b<0)high=std::min(high,-a/b);else if(a<0){high=-1;break;}
+                }
+                if(!(high>0)||low>high)continue;
+                for(double fraction:{.25,.5,.75}) {
+                    const double length=low+(high-low)*fraction;if(!(length>0)||!std::isfinite(length))continue;
+                    const double score=quality(direction,length);if(score>best){best=score;chosen=direction;chosenLength=length;}
+                }
+            }
+        }
+        if(best<0)return;rotationOffset=chosen;rotationLength=chosenLength;auto p=Transform(modelToWorld,RotationLever());handles[4].representation->SetWorldPosition(p.data());
     }
     void ApplySphereStyle() {
         const auto state=active>=0?visualState:(hover?CropSphereVisual::State::Hover:CropSphereVisual::State::Idle);
@@ -352,5 +377,5 @@ bool CropCurveWidget::GetInputAccepted(int x,int y) const {
     return false;
 }
 void CropCurveWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){for(auto& h:m_impl->handles)FeatureSupport::SetWidgetBindings(h.widget,values,{{"crop.widget.select.drag",vtkWidgetEvent::Select}});}
-void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;m_impl->inputRadial=m_impl->radial;m_impl->inputRotation=m_impl->rotationOffset;}
-void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->radial=m_impl->inputRadial;m_impl->rotationOffset=m_impl->inputRotation;m_impl->active=-1;m_impl->hover=false;m_impl->hovered=-1;m_impl->Sync();m_impl->SyncView();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}
+void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;m_impl->inputRadial=m_impl->radial;m_impl->inputRotation=m_impl->rotationOffset;m_impl->inputRotationLength=m_impl->rotationLength;}
+void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->radial=m_impl->inputRadial;m_impl->rotationOffset=m_impl->inputRotation;m_impl->rotationLength=m_impl->inputRotationLength;m_impl->active=-1;m_impl->hover=false;m_impl->hovered=-1;m_impl->Sync();m_impl->SyncView();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}
