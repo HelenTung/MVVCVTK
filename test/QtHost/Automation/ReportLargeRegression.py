@@ -69,7 +69,7 @@ step('Alignment', 'InspectGeometry', dict(result='current', id='full-real-surfac
      sectionPlaneVertexIds=[], sectionPlaneBounds=None, sectionPlaneNormal=[0, 0, 1],
      measurementMetric='CenterX', nominal=None, nominalSource='', deviationLimits=None), status='FullyDetermined')
 case = output / 'case.json'
-case.write_text(json.dumps(dict(schema='qt-control-scenario-1', viewsVisible=False,
+case.write_text(json.dumps(dict(schema='qt-control-scenario-1', viewsVisible=False, shutdownTimeoutMs=0,
                 checkReports=True, checkLargeReports=True, steps=steps), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 command = f'call "{launcher}" --background --case "{case}" --record "{output / "record.json"}"'
 with (output / 'run.log').open('wb') as log:

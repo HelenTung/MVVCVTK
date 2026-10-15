@@ -100,8 +100,11 @@ bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
         if(done())return true;
         const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
         if(timeoutMs>0 && remaining<=0)return false;
-        QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
-        QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
+        QEventLoop loop;QTimer deadline,observer;deadline.setSingleShot(true);
+        if(timeoutMs==0) {
+            // StopPending 等状态未必继续投递事件；观察周期不构成任务期限。
+            QObject::connect(&observer,&QTimer::timeout,&loop,[&]{if(done())loop.quit();});observer.start(10);
+        } else QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
             [&]{if(done())loop.quit();});
         QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
         if(timeoutMs>0)deadline.start(static_cast<int>(remaining));loop.exec();
@@ -221,7 +224,7 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
     QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, modifiers);
     QApplication::sendEvent(tree->viewport(), &press); QApplication::sendEvent(tree->viewport(), &release);
 }
-std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
+std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {}, int timeoutMs = 2000)
 {
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
     // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
@@ -240,7 +243,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         const auto* editor=panel->GetParameterEditor(action);
         const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
         return atPrimary || atNext || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
-    }, 2000);
+    }, timeoutMs);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
     Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
@@ -258,7 +261,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
         Check(command && command->isEnabled(), "direct command remains available in the classified menu");
         command->trigger();
-        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000), "menu dispatch reaches the original business path");
+        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, timeoutMs), "menu dispatch reaches the original business path");
     }
     return id;
 }
@@ -2435,9 +2438,15 @@ QJsonObject CheckPartDisplay(TestWindow& window)
     Check(true, "part colours, visibility and selection match the catalog in the current 3D mode");
     return {{"catalog", catalog}, {"views", views}};
 }
-void StartSequence(TestWindow& window, const QString& path)
+void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeoutMs)
 {
     const auto script = LoadJson(path);
+    const auto steps=script["steps"].toArray();
+    const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject()["timeoutMs"];return timeout.isDouble() && timeout.toDouble()==0;});
+    const auto shutdown=script.contains("shutdownTimeoutMs")?GetNumber(script,"shutdownTimeoutMs"):(unbounded?0.:30000.);
+    if(shutdown<0 || shutdown>std::numeric_limits<int>::max() || shutdown!=std::trunc(shutdown))
+        throw std::invalid_argument("用例 shutdownTimeoutMs 必须为 0..2147483647 毫秒整数；0 表示不设退出期限");
+    shutdownTimeoutMs=static_cast<int>(shutdown);
     if(script.contains("windowSize")) {
         const auto size=script["windowSize"].toArray();
         Check(size.size()==2 && size[0].toInt()>=1000 && size[1].toInt()>=800,
@@ -2586,7 +2595,7 @@ void StartSequence(TestWindow& window, const QString& path)
             std::cout<<"PRIMARY CLICK: "<<module.toStdString()<<"."<<action.toStdString()<<" record="<<id<<std::endl;
             button->click();
             std::cout<<"PRIMARY RETURN: "<<module.toStdString()<<"."<<action.toStdString()<<std::endl;
-            const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},2000);
+            const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},timeout);
             if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
                 <<" primary="<<button->property("businessAction").toString().toStdString()<<" enabled="<<button->isEnabled()
                 <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
@@ -2612,7 +2621,7 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto module=GetText(step,"module"),action=GetText(step,"action");
             window.GetWorkflow().onNavigate(module,action,params);
             id=SendUnavailable(window,module,action);
-        } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
+        } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params,timeout);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
         else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、unavailableAction、checkPage");
         QTimer switching, cancellation;
@@ -2631,8 +2640,8 @@ void StartSequence(TestWindow& window, const QString& path)
         if (step.contains("cancelAfterMs")) {
             const auto delay = GetNumber(step, "cancelAfterMs");
             auto* module = window.GetModule(GetText(step, "module"));
-            if (delay < 1 || delay >= timeout || std::trunc(delay) != delay || !module->onStop)
-                throw std::invalid_argument("取消审计需要有效的取消入口和小于等待时限的延迟");
+            if (delay < 1 || (timeout>0 && delay >= timeout) || delay>std::numeric_limits<int>::max() || std::trunc(delay) != delay || !module->onStop)
+                throw std::invalid_argument("取消审计需要有效的取消入口及 Qt 可表示的延迟；仅在设置等待期限时要求延迟小于期限");
             QString exactTarget;
             if(step["cancelExactRequestId"].toBool()) {
                 Check(module->GetName()=="Surface","exact cancellation targets the supported surface request family");
@@ -3058,17 +3067,17 @@ void StartSequence(TestWindow& window, const QString& path)
 }
 int StartTestCase(TestWindow& window, const QString& path, const QString& recordPath, bool selfTest)
 {
-    int result = 0;
+    int result = 0,shutdownTimeoutMs=30000;
     try {
         Check(Wait([&] { return window.GetIsReady() || !window.GetFailure().isEmpty(); }), "window initializes");
         Check(window.GetIsReady(), window.GetFailure().toStdString().c_str());
         Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
-        if (selfTest) StartSelfTest(window); else StartSequence(window, path);
+        if (selfTest) StartSelfTest(window); else StartSequence(window, path,shutdownTimeoutMs);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
     const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
-    const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); });
+    const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); },shutdownTimeoutMs);
     if (!stopped) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }
     try { if (!recordPath.isEmpty()) { auto records = window.GetRecords().GetRecords(); records["resources"] = window.GetWorkflow().resources.GetJson(); records["hostDiagnostics"] = window.GetDiagnostics();
         records["businessDiagnostics"] = businessDiagnostics;
