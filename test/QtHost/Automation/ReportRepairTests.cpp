@@ -234,8 +234,7 @@ void CheckWideRowAddressing() {
     Require(GetReportCount(QJsonValue(2147483860.))==count && GetReportCount(QJsonValue(QString("9007199254740993")))==9007199254740993LL
         && GetReportCountValue(9007199254740993LL).isString(),"report metadata narrows a 64-bit count or loses JSON integer precision");
     ReportDocument doc;doc.id="wide-row-contract";doc.title="64 位分页契约";doc.category="本次会话结果";doc.module="Gap";
-    doc.columns={{"void_id",{},{},false},{"value","体积","mm3",true}};doc.table=std::make_shared<ReportTable>();
-    doc.table->SetRows(static_cast<std::size_t>(count),[](ReportRowId row){return QStringList{QString::number(row),QString::number(row+1)};});
+    doc.columns={{"void_id",{},{},false},{"value","体积","mm3",true}};doc.table=std::make_shared<ReportTable>(count,[](ReportRowId row){return QStringList{QString::number(row),QString::number(row+1)};});
     Require(doc.table->GetCount()==count && doc.table->Read(count-1)[0]==QString::number(count-1),"report source truncates global row IDs to int");
     ResultReport view;ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};view.AddReport(doc);view.show();
     view.findChild<QPushButton*>("reportLast")->click();QCoreApplication::processEvents();auto* table=view.findChild<QTableView*>("reportTable");

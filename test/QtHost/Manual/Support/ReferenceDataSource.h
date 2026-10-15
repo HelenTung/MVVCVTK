@@ -39,6 +39,7 @@ public:
     QJsonObject ReadRecordPage(DataRevisionRef table, std::size_t offset, std::size_t count,
         std::optional<std::array<double,2>> volumeRange = {});
     std::array<double,3> GetRecordLocation(DataRevisionRef table, std::size_t row, DataRevisionRef source);
+    std::array<double,3> GetModelWorldPosition(DataRevisionRef source,const std::array<double,3>& model);
 private:
     std::shared_ptr<TrustedDataPort> m_data;
     FeatureInternal::ResultScopes m_resultScopes;

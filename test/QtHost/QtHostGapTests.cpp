@@ -5,11 +5,15 @@
 
 #include "Data/DataPayloads.h"
 #include "Host/GapHostFeature.h"
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+#include "Host/SurfaceDeterminationHostFeature.h"
+#endif
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
 #include <vtkActor.h>
+#include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkImageSlice.h>
 #include <vtkPropCollection.h>
@@ -21,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -354,7 +359,7 @@ bool GetFormalGapResultValid(
         return false;
     }
 
-    constexpr std::array<std::string_view, 33> voidColumns = {
+    constexpr std::array<std::string_view, 39> voidColumns = {
         "void-id", "voxel-count", "volume-mm3",
         "equivalent-diameter-mm", "radius-mm", "diameter-mm",
         "center-mm", "centroid-mm", "voxel-bbox", "seed-voxel",
@@ -365,7 +370,8 @@ bool GetFormalGapResultValid(
         "pca-minimum-deviation-ratio", "projected-area-x-mm2",
         "projected-area-y-mm2", "projected-area-z-mm2",
         "projected-size-voxel", "defect-probability", "parent-voxel-count", "intersection-voxel-count",
-        "parent-volume-mm3", "intersection-volume-mm3", "roi-partial", "whole-object-geometry"
+        "parent-volume-mm3", "intersection-volume-mm3", "roi-partial", "whole-object-geometry",
+        "object-row-by-id","mesh-first-point","mesh-point-count","mesh-first-triangle","mesh-triangle-count","mesh-range-valid"
     };
     const auto& columns = voidTable->GetColumns();
     const bool hasEveryVoidColumn = columns.size() == voidColumns.size()
@@ -579,6 +585,66 @@ int GetGapFailCount()
     hotkeyReadRequest.id = "GapAnalysis.labels";
     const auto hotkeyRead = session.GetLabelMapReadResult(
         hotkeyReadRequest);
+    {
+        const auto reader=feature->GetResultReader(hotkeyStartState.resultSet);
+        const auto page=reader?reader->GetObjects(0,1):GapObjectPage{};
+        const auto select=[&](DataRevisionRef ref,std::optional<std::int32_t> object,bool isolated=false){
+            GapHostRequest request;request.action=GapHostAction::SelectObject;request.selection=GapObjectSelection{ref,object,isolated};
+            return feature->SendRequest(std::move(request)).status==GapAdmissionStatus::Accepted;
+        };
+        const auto mode=[&](bool enabled){GapHostRequest request;request.action=GapHostAction::SetObjectPicking;request.isObjectPickingEnabled=enabled;
+            return feature->SendRequest(std::move(request)).status==GapAdmissionStatus::Accepted;};
+        const auto click=[&](int x,int y,bool ctrl){
+            SendTicks(*endpoint,1);endpoint->renderWindow->Render();
+            endpoint->interactor->SetEventInformation(x,y,ctrl?1:0,0);
+            const bool handled=endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent)!=0;
+            endpoint->interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);SendTicks(*endpoint,1);return handled;
+        };
+        bool valid=page.error==GapReadError::None&&!page.objects.empty();
+        if(valid) {
+            const auto object=page.objects.front();const auto graph=contextProbe->m_data->GetDataGraph().commitId;
+            valid=select(hotkeyStartState.resultSet,object.id,true)&&feature->GetState().selectedObject==object.id
+                &&feature->GetState().isSelectionIsolated&&contextProbe->m_data->GetDataGraph().commitId==graph
+                &&!select(hotkeyStartState.resultSet,0)&&!select(hotkeyStartState.resultSet,INT32_MAX)
+                &&select(hotkeyStartState.resultSet,{})&&mode(true);
+            endpoint->renderer->ResetCamera();
+            for(int poll=0;poll<500;++poll){endpoint->renderWindow->Render();SendTicks(*endpoint,1);
+                if(feature->GetState().isDisplayComplete)break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+            const auto& b=object.boundsModel;
+            endpoint->renderer->SetWorldPoint((b[0]+b[1])*.5,(b[2]+b[3])*.5,(b[4]+b[5])*.5,1);endpoint->renderer->WorldToDisplay();
+            double display[3];endpoint->renderer->GetDisplayPoint(display);const auto x=static_cast<int>(std::lround(display[0])),y=static_cast<int>(std::lround(display[1]));
+            click(x,y,false);
+            valid=valid&&!feature->GetState().selectedObject&&click(x,y,true)&&feature->GetState().selectedObject==object.id;
+            valid=valid&&select(hotkeyStartState.resultSet,{})&&click(-100,-100,true)&&!feature->GetState().selectedObject;
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+            auto surface=std::make_shared<SurfaceDeterminationHostFeature>();
+            bool completed=false;SurfaceDeterminationStartParams params;params.targetViews.viewIds={"gap-primary","gap-slice"};params.initialIsoValue=.5;
+            const bool attached=session.AttachFeature(surface);
+            const bool started=attached&&surface->SendRequest(SurfaceStartRequest{params},[&](auto){completed=true;}).status==SurfaceAdmissionStatus::Accepted;
+            for(int poll=0;started&&!completed&&poll<2000;++poll){SendTicks(*endpoint,1);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+            const auto snapshot=surface->GetSurfaceSnapshot();
+            bool routed=completed&&snapshot&&snapshot->objects&&!snapshot->objects->empty();
+            if(routed) {
+                const auto clearSurface=[&]{return surface->SendRequest(SurfaceObjectSelectionRequest{snapshot->dataRevision,{},false}).status==SurfaceAdmissionStatus::Accepted;};
+                routed=surface->SendRequest(SurfaceObjectPickModeRequest{true}).status==SurfaceAdmissionStatus::Accepted;
+                endpoint->renderer->ResetCamera();
+                for(int poll=0;poll<500;++poll){endpoint->renderWindow->Render();SendTicks(*endpoint,1);
+                    if(surface->GetState().isDisplayComplete&&feature->GetState().isDisplayComplete)break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+                // 两个 Feature 同时显示且都请求拾取时，仅当前 owner 接收 Ctrl 点击。
+                routed=routed&&click(80,80,true)&&surface->GetState().selectedObject.has_value()&&!feature->GetState().selectedObject;
+                routed=routed&&clearSurface()&&mode(true)&&click(80,80,true)&&feature->GetState().selectedObject==object.id&&!surface->GetState().selectedObject;
+                routed=routed&&mode(false)&&select(hotkeyStartState.resultSet,{})&&clearSurface();
+                click(80,80,true);routed=routed&&!feature->GetState().selectedObject&&!surface->GetState().selectedObject;
+            }
+            valid=valid&&started&&routed;
+            if(attached)valid=session.DetachFeature(*surface)&&valid;
+#endif
+            valid=mode(false)&&select(hotkeyStartState.resultSet,{})&&valid;
+            valid=valid&&contextProbe->m_data->GetData(contextProbe->m_data->GetDataGraph(),hotkeyStartState.resultSet)
+                &&reader->GetObjects(0,1).objects.front().id==object.id;
+        }
+        failureCount+=GetCaseResult(valid,"Native object selection keeps formal IDs and routes Ctrl clicks only to the active Feature owner")?0:1;
+    }
     const bool isExitKeyHandled =
         GetKeyHandled(*endpoint, 0, "Escape");
     for (int poll = 0;
@@ -606,9 +672,9 @@ int GetGapFailCount()
             && hotkeyStartState.isViewActive
             && hasFormalGapResult
             && hotkeyPrimaryPropCount
-                == primaryBasePropCount + 2
+                == primaryBasePropCount + 3 // 网格、图例、按需显示状态。
             && hotkeySlicePropCount
-                == sliceBasePropCount + 3
+                == sliceBasePropCount + 4 // 标签、轮廓、图例、按需显示状态。
             && hotkeyPrimaryActorCount
                 == primaryBaseActorCount + 1
             && hotkeySliceImageCount
@@ -754,11 +820,13 @@ int GetGapFailCount()
         transaction.bindings.push_back({ current->name, current->revision, true, current->target, target });
         return contextProbe->m_data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
     };
+    GapHostRequest enablePicking;enablePicking.action=GapHostAction::SetObjectPicking;enablePicking.isObjectPickingEnabled=true;
+    const bool wasPicking=feature->SendRequest(enablePicking).status==GapAdmissionStatus::Accepted;
     const bool hasExternalAba = gapBinding && setGapBinding({}) && setGapBinding(gapBinding->target);
     const auto externalCommit = contextProbe->m_data->GetDataGraph().commitId;
     SendTicks(*endpoint, 3);
     const auto reboundState = feature->GetState();
-    failureCount += GetCaseResult(hasExternalAba
+    failureCount += GetCaseResult(hasExternalAba&&wasPicking&&!reboundState.isObjectPickingEnabled
             && reboundState.analysisState == GapAnalysisState::Stale && !reboundState.isViewActive
             && contextProbe->m_data->GetDataGraph().commitId == externalCommit
             && contextProbe->m_data->GetData(contextProbe->m_data->GetDataGraph(), reboundState.resultSet),

@@ -74,6 +74,11 @@ QJsonObject ReferenceDataSource::GetResultEvidence()
             using Value=typename std::decay_t<decltype(values)>::value_type;
             if constexpr(std::is_same_v<Value,std::string>) {
                 for(const auto& value:values){const std::uint64_t length=value.size();bytes(&length,sizeof(length));bytes(value.data(),value.size());}
+            } else if constexpr(std::is_same_v<std::decay_t<decltype(values)>,MeshAttributeValues>) {
+                // 摘要仍按原 double 逻辑序列计算，与整数/区间物理布局无关。
+                for(std::size_t offset=0;offset<values.size();) {
+                    const auto chunk=values.GetChunk(offset,65536);bytes(chunk.data(),chunk.size()*sizeof(double));offset+=chunk.size();
+                }
             } else bytes(values.data(),values.size()*sizeof(Value));
         };
         const auto geometry=[&](const GridGeometry3D& g) {

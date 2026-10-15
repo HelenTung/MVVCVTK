@@ -9,24 +9,26 @@
 #include <QRegularExpression>
 #include <QHash>
 #include <array>
+#include <QThread>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
 namespace Manual {
-QJsonValue GetReportCountValue(ReportRowId count)
+QJsonValue GetReportCountValue(quint64 count)
 {
-    return count<=9007199254740991LL?QJsonValue(static_cast<double>(count)):QJsonValue(QString::number(count));
+    return count<=9007199254740991ULL?QJsonValue(static_cast<double>(count)):QJsonValue(QString::number(count));
 }
-ReportRowId GetReportCount(const QJsonValue& value)
+quint64 GetReportCount(const QJsonValue& value)
 {
     if(value.isString()) {
-        const auto text=value.toString();bool ok=false;const auto count=text.toLongLong(&ok);
-        if(ok && count>=0 && QRegularExpression("^[0-9]+$").match(text).hasMatch())return count;
+        const auto text=value.toString();bool ok=false;const auto count=text.toULongLong(&ok);
+        if(ok && QRegularExpression("^[0-9]+$").match(text).hasMatch())return count;
     } else if(value.isDouble()) {
         const auto number=value.toDouble();
-        if(std::isfinite(number) && number>=0 && number<=9007199254740991. && number==std::trunc(number))return static_cast<ReportRowId>(number);
+        if(std::isfinite(number) && number>=0 && number<=9007199254740991. && number==std::trunc(number))return static_cast<quint64>(number);
     }
     throw std::invalid_argument("报告计数必须为精确非负整数；大整数使用十进制字符串");
 }
@@ -41,6 +43,11 @@ QString CsvCell(QString value)
         value.replace('"', "\"\""); return '"' + value + '"';
     }
     return value;
+}
+bool GetResultIdentityValid(const QString& value) {
+    if(!QRegularExpression("^[0-9a-fA-F]{32}:[0-9]+$").match(value).hasMatch()
+        ||value.left(32)==QString(32,'0'))return false;
+    bool valid=false;const auto revision=value.mid(33).toULongLong(&valid);return valid&&revision>0;
 }
 }
 class ReportTable::Impl {
@@ -57,6 +64,8 @@ public:
     mutable int indexCount = 0;
     mutable QByteArray indexPage;
     mutable bool indexDirty=false;
+    std::function<QStringList(ReportRowId)> readRow;
+    mutable std::atomic<bool> isFrozen{false},isPrepared{false};
 };
 namespace {
 qint64 ReadOffset(QFile& index,ReportRowId row,ReportRowId count,ReportRowId& start,int& length,QByteArray& page)
@@ -79,9 +88,16 @@ ReportTable::ReportTable() : m_impl(std::make_unique<Impl>())
     m_impl->filePath=m_impl->file.fileName();
     m_impl->indexPath=m_impl->index.fileName();
 }
+ReportTable::ReportTable(quint64 count,std::function<QStringList(ReportRowId)> readRow):m_impl(std::make_unique<Impl>()) {
+    if(!readRow)throw std::invalid_argument("报告只读目录不可用");
+    if(count>static_cast<quint64>(std::numeric_limits<ReportRowId>::max()))throw std::overflow_error("报告目录地址溢出");
+    m_impl->sourceCount=count;m_impl->readRow=std::move(readRow);
+}
 ReportTable::~ReportTable() = default;
 void ReportTable::Append(const QStringList& row)
 {
+    if(m_impl->readRow||m_impl->isFrozen)throw std::logic_error("不可向冻结报告追加行");
+    m_impl->isPrepared=false;
     if(m_impl->rowCount>=std::numeric_limits<qint64>::max()/static_cast<qint64>(sizeof(qint64)))throw std::overflow_error("报告偏移索引地址溢出");
     auto& file = m_impl->file;
     if (!file.seek(file.size())) throw std::runtime_error("报告临时表定位失败");
@@ -99,6 +115,7 @@ QStringList ReportTable::Read(ReportRowId row) const
     if (row < 0 || row >= GetCount()) throw std::out_of_range("报告行不存在");
     if (row >= m_impl->rowCount && m_impl->readSource) return m_impl->readSource(row);
     if (m_impl->cachedRow == row) return m_impl->cached;
+    if(m_impl->readRow){auto cells=m_impl->readRow(row);m_impl->cachedRow=row;m_impl->cached=cells;return cells;}
     if(m_impl->indexDirty){if(!m_impl->index.flush())throw std::runtime_error("报告索引刷新失败");m_impl->indexDirty=false;}
     const auto offset=ReadOffset(m_impl->index,row,m_impl->rowCount,m_impl->indexStart,m_impl->indexCount,m_impl->indexPage);
     if (!m_impl->file.seek(offset)) throw std::runtime_error("报告临时表读取失败");
@@ -112,10 +129,10 @@ QStringList ReportTable::Read(ReportRowId row) const
     m_impl->cachedRow = row; m_impl->cached = cells;
     return cells;
 }
-ReportRowId ReportTable::GetCount() const { return m_impl->readSource ? m_impl->sourceCount : m_impl->rowCount; }
+ReportRowId ReportTable::GetCount() const { return m_impl->readRow || m_impl->readSource ? m_impl->sourceCount : m_impl->rowCount; }
 void ReportTable::SetRows(std::size_t count, std::function<QStringList(ReportRowId)> read)
 {
-    if (m_impl->rowCount || m_impl->readSource || (count && !read) || count > std::size_t(std::numeric_limits<ReportRowId>::max()))
+    if (m_impl->rowCount || m_impl->readSource || m_impl->readRow || m_impl->isFrozen || (count && !read) || count > std::size_t(std::numeric_limits<ReportRowId>::max()))
         throw std::invalid_argument("报告源行数或构建状态无效");
     m_impl->sourceCount = static_cast<ReportRowId>(count);
     if (count) m_impl->readSource = std::move(read);
@@ -130,13 +147,21 @@ bool ReportTable::ContinueBuild()
 bool ReportTable::GetIsComplete() const { return !m_impl->readSource; }
 void ReportTable::PrepareRead()
 {
+    if(m_impl->readRow)return;
     if (!m_impl->file.flush() || !m_impl->index.flush()) throw std::runtime_error("报告临时表或索引刷新失败");
-    m_impl->indexDirty=false;
+    m_impl->indexDirty=false;m_impl->isPrepared=true;
 }
 void ReportTable::SetOwnerThread(QThread* owner) { m_impl->file.moveToThread(owner);m_impl->index.moveToThread(owner); }
 std::function<QStringList(ReportRowId)> ReportTable::CreateReader() const
 {
     if (!GetIsComplete()) throw std::logic_error("原生报告尚未完成物化");
+    if(m_impl->readRow)return m_impl->readRow;
+    if(!m_impl->isPrepared) {
+        if(m_impl->file.thread()!=QThread::currentThread())throw std::logic_error("后台读取前须在 owner 线程冻结报告");
+        if(!m_impl->file.flush() || !m_impl->index.flush())throw std::runtime_error("报告临时表或索引刷新失败");
+        m_impl->indexDirty=false;m_impl->isPrepared=true;
+    }
+    m_impl->isFrozen=true;
     struct Cursor {
         QFile file;
         QFile index;
@@ -171,11 +196,23 @@ ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const Repor
     doc.title = title; doc.category = "导入报告"; doc.table = std::make_shared<ReportTable>();
     QString cell; QStringList row;
     bool quoted = false, closed = false, started = false, skipLf = false, first = true, header = true;
+    int scopedColumn=-1;
     const auto emitRow = [&] {
         row.append(cell); cell.clear();
         if (header) {
             if (std::all_of(row.cbegin(),row.cend(),[](const QString& name){return name.trimmed().isEmpty();})) throw std::runtime_error("CSV 缺少列名");
-            for (const auto& name : row) doc.columns.append({name, {}, {}, false});
+            // 身份属于列头注记，文件始终只有一行表头和同宽数据行，通用 CSV 工具可直接读取。
+            for (auto name : row) {
+                const auto annotated=QRegularExpression("^(.+) \\[mvvcvtk-result=([^\\]]+)\\]$").match(name);
+                if(annotated.hasMatch()) {
+                    const auto ref=annotated.captured(2);
+                    if(!GetResultIdentityValid(ref)||!doc.identityResult.isEmpty())throw std::runtime_error("CSV 结果编号上下文无效或重复");
+                    const auto identity=ref.left(32).toLower()+":"+QString::number(ref.mid(33).toULongLong());
+                    doc.identityResult=identity;doc.result=identity;doc.relatedResults.append(identity);name=annotated.captured(1);
+                    scopedColumn=doc.columns.size();
+                }
+                doc.columns.append({name, {}, {}, false});
+            }
             header = false;
         } else {
             if (row.size() != doc.columns.size()) throw std::runtime_error("CSV 行的列数与表头不一致");
@@ -257,6 +294,14 @@ ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const Repor
         }
     }
     if(doc.identityColumn==-2)doc.identityColumn=-1;
+    // 点级表中的 object_id 可以重复；全局 point_id 才是该结果内的行身份。
+    int pointColumn=-1;
+    for(int i=0;i<doc.columns.size();++i)if(doc.columns[i].name=="point_id") {
+        if(pointColumn>=0){pointColumn=-2;break;}pointColumn=i;
+    }
+    if(pointColumn>=0)doc.identityColumn=pointColumn;
+    if(scopedColumn>=0&&scopedColumn!=doc.identityColumn)
+        throw std::runtime_error("CSV 结果身份注记必须属于实际编号列");
     doc.description = "独立只读表格；导入不会恢复 SDK 结果或修改当前输入。";
     if(doc.columns.size()==4 && doc.columns[0].name=="分组" && doc.columns[1].name=="字段" && doc.columns[2].name=="类型" && doc.columns[3].name=="值")
         doc.description="旧版运行记录；保留原文件字段，不表示已恢复完整测点或孔隙业务结果。";
@@ -273,6 +318,11 @@ void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const ReportRo
     QStringList headings; for (const auto& column : doc.columns)
         headings.append(column.numeric && !column.quantity.isEmpty() && !column.unit.isEmpty()
             ? column.name+" ["+column.quantity+"; "+column.unit+"]" : column.name);
+    if(!doc.identityResult.isEmpty()) {
+        if(!GetResultIdentityValid(doc.identityResult)||doc.identityColumn<0||doc.identityColumn>=headings.size())
+            throw std::runtime_error("报告结果编号上下文无效或缺少对应编号列");
+        headings[doc.identityColumn]+=" [mvvcvtk-result="+doc.identityResult+"]";
+    }
     write(headings);
     if (!doc.table) return;
     const auto count=doc.table->GetCount();

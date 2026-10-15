@@ -46,8 +46,8 @@ void SetActorStyle(vtkActor& actor, bool isSlice, bool isPreview)
 } // namespace
 
 SurfaceOverlayStrategy::SurfaceOverlayStrategy(bool isPreview)
-    : m_actor(vtkSmartPointer<vtkActor>::New())
-    , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
+    : m_actor(m_stream.GetActor())
+    , m_mapper(m_stream.GetMapper())
 {
     m_mapper->ScalarVisibilityOff();
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
@@ -63,16 +63,30 @@ void SurfaceOverlayStrategy::SetInputData(
     if (!surface) return;
     m_mapper->SetInputData(surface);
 }
+void SurfaceOverlayStrategy::SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,
+    std::size_t capacity,std::function<void()> requestFrame)
+{
+    m_stream.SetCache(std::move(cache),capacity,std::move(requestFrame));AttachProp(m_stream.GetStatusProp());
+}
+void SurfaceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    FeatureOverlayBase::AttachRenderer(renderer);m_stream.AttachRenderer(renderer);
+}
+void SurfaceOverlayStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    m_stream.DetachRenderer();FeatureOverlayBase::DetachRenderer(renderer);
+}
 
 void SurfaceOverlayStrategy::SetOverlayState(
     const FeatureOverlayState& state)
 {
     Set3DPropsTransform(state.modelToWorld);
+    m_stream.SetState(state);
 }
 
 SurfaceSliceOverlayStrategy::SurfaceSliceOverlayStrategy(
     std::array<double, 3> normalModel, bool isPreview)
-    : m_actor(vtkSmartPointer<vtkActor>::New())
+    : m_actor(m_stream.GetActor())
     , m_cutter(vtkSmartPointer<vtkCutter>::New())
     , m_plane(vtkSmartPointer<vtkPlane>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
@@ -99,10 +113,25 @@ void SurfaceSliceOverlayStrategy::SetInputData(
     if (!surface) return;
     m_cutter->SetInputData(surface);
 }
+void SurfaceSliceOverlayStrategy::SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,
+    std::size_t capacity,std::function<void()> requestFrame)
+{
+    m_stream.SetCache(std::move(cache),capacity,std::move(requestFrame),m_normalModel);
+    m_actor->SetMapper(m_stream.GetMapper());AttachProp(m_stream.GetStatusProp());
+}
+void SurfaceSliceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    FeatureOverlayBase::AttachRenderer(renderer);m_stream.AttachRenderer(renderer);
+}
+void SurfaceSliceOverlayStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer)
+{
+    m_stream.DetachRenderer();FeatureOverlayBase::DetachRenderer(renderer);
+}
 
 void SurfaceSliceOverlayStrategy::SetOverlayState(
     const FeatureOverlayState& state)
 {
     (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_normalModel,state.modelToWorld);
     Set3DPropsTransform(state.modelToWorld);
+    m_stream.SetState(state);
 }

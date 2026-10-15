@@ -63,11 +63,11 @@ void TestTypedSeed(Checks &checks, int type)
     grid.readScalar = [](const void *data, std::size_t i) { return double(static_cast<const T *>(data)[i]); };
     grid.validity = mask.data();
     const std::array<double, 2> range{1, 3};
-    std::vector<Point3> referencePoints;
-    std::vector<SurfaceSeedTriangle> referenceTriangles;
+    DataArray<Point3> referencePoints;
+    DataArray<SurfaceSeedTriangle> referenceTriangles;
     const auto verify = [&](std::uint32_t depth, double iso = 2, double expectedX = 0) {
-        std::vector<Point3> points;
-        std::vector<SurfaceSeedTriangle> triangles;
+        DataArray<Point3> points;
+        DataArray<SurfaceSeedTriangle> triangles;
         SurfaceExecutionStats stats;
         const auto status = SurfaceSeedBuilder::BuildMesh(grid, iso, {}, 0, depth, 1024U * 1024U,
                                                           [] { return false; }, points, triangles, stats);
@@ -102,7 +102,7 @@ void TestTypedSeed(Checks &checks, int type)
         values[(z*3+y)*5+x]=static_cast<T>(x<2?0:4);
     verify(1,1.5,-0.75);
     const auto verifyMissing = [&] {
-        std::vector<Point3> points; std::vector<SurfaceSeedTriangle> triangles; SurfaceExecutionStats stats;
+        DataArray<Point3> points; DataArray<SurfaceSeedTriangle> triangles; SurfaceExecutionStats stats;
         checks.Get(SurfaceSeedBuilder::BuildMesh(grid,1.5,{},0,1,1024U*1024U,{},points,triangles,stats)
                        ==SurfaceSeedStatus::NoSurface && points.empty() && triangles.empty(),
                    "missing nodes on every crossing cell cannot create a typed surface");
@@ -117,8 +117,8 @@ void TestTypedSeed(Checks &checks, int type)
         verifyMissing();
     }
     grid.dimensions[0] = 4;
-    std::vector<Point3> points;
-    std::vector<SurfaceSeedTriangle> triangles;
+    DataArray<Point3> points;
+    DataArray<SurfaceSeedTriangle> triangles;
     SurfaceExecutionStats stats;
     checks.Get(SurfaceSeedBuilder::BuildMesh(grid, 2, {}, 0, 1, 1024U * 1024U, {}, points, triangles, stats)
                    == SurfaceSeedStatus::InvalidInput, "inconsistent extent cannot enter compact key encoding");
@@ -136,7 +136,7 @@ void TestEdgeAxes(Checks &checks)
             const int coordinates[]{x,y,z};
             values[(z*4+y)*4+x] = axis < 3 ? coordinates[axis] : x+y+z;
         }
-        std::vector<Point3> points; std::vector<SurfaceSeedTriangle> triangles; SurfaceExecutionStats stats;
+        DataArray<Point3> points; DataArray<SurfaceSeedTriangle> triangles; SurfaceExecutionStats stats;
         const double iso = axis < 3 ? 1.0 : 3.0;
         const auto status = SurfaceSeedBuilder::BuildMesh(grid, iso, {}, 0, 1, 1024U*1024U, {}, points, triangles, stats);
         checks.Get(status == SurfaceSeedStatus::Succeeded && points.size() == (axis < 3 ? 16U : 10U)
@@ -529,7 +529,7 @@ void TestDiagonalRoiSeedClip(Checks &checks)
     grid.indexToModel=grid.modelToIndex={1,0,0,0,1,0,0,0,1};
     grid.values=grid.scalarValues=source->image->GetScalarPointer();grid.scalarType=VTK_FLOAT;
     grid.readScalar=[](const void*p,std::size_t i){return double(static_cast<const float*>(p)[i]);};
-    std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+    DataArray<Point3> points;DataArray<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
     const auto status=SurfaceSeedBuilder::BuildMesh(grid,3.5,roi,0,2,WorkLimit{}, {},points,triangles,stats);
     checks.Get(status==SurfaceSeedStatus::Succeeded && !triangles.empty() &&
         std::all_of(points.begin(),points.end(),[](const auto&p){return p[2]==3.5 &&
@@ -733,8 +733,8 @@ void TestSeedCacheTails(Checks &checks, int type)
             return double(static_cast<const T *>(data)[index]);
         };
         for (double iso : {1.5,4.0}) {
-            std::vector<Point3> baselinePoints, cachedPoints;
-            std::vector<SurfaceSeedTriangle> baselineTriangles, cachedTriangles;
+            DataArray<Point3> baselinePoints, cachedPoints;
+            DataArray<SurfaceSeedTriangle> baselineTriangles, cachedTriangles;
             SurfaceExecutionStats baselineStats, cachedStats;
             grid.scalarValues = nullptr;
             const auto baseline = SurfaceSeedBuilder::BuildMesh(grid,iso,{},0,2,WorkLimit{},
@@ -780,8 +780,8 @@ void TestSeedClassificationCache(Checks &checks)
     };
     struct Mesh final {
         SurfaceSeedStatus status;
-        std::vector<Point3> points;
-        std::vector<SurfaceSeedTriangle> triangles;
+        DataArray<Point3> points;
+        DataArray<SurfaceSeedTriangle> triangles;
         SurfaceExecutionStats stats;
         SurfaceSeedAudit audit;
         std::size_t callbackReads;
@@ -838,7 +838,7 @@ void TestSeedClassificationCache(Checks &checks)
         uniformGrid.cacheAllocationCheckpoint=CheckCacheAllocation;
         for(std::size_t allocation=1;allocation<=2;++allocation){
             failCacheAllocation=allocation;cacheAllocationCount=0;
-            std::vector<Point3> points;std::vector<SurfaceSeedTriangle> triangles;
+            DataArray<Point3> points;DataArray<SurfaceSeedTriangle> triangles;
             SurfaceExecutionStats stats;SurfaceSeedAudit audit;uniformGrid.audit=&audit;
             const auto budget=std::size_t(64*1024+2*64*64);
             const auto status=SurfaceSeedBuilder::BuildMesh(uniformGrid,1.5,{},0,2,budget,
@@ -884,7 +884,7 @@ void TestSortedTopology(Checks &checks)
 {
     const auto verify=[&](std::initializer_list<std::array<std::uint32_t,3>> triangles,
                          std::uint64_t boundary,std::uint64_t nonManifold,bool oriented) {
-        std::vector<std::uint64_t> keys;
+        DataArray<std::uint64_t> keys;
         for(const auto &tri:triangles) for(unsigned e=0;e<3;++e)
             keys.push_back(GetSurfaceDirectedEdgeKey(tri[e],tri[(e+1)%3]));
         const auto result=GetSortedSurfaceEdgeTopology(keys,{});
@@ -901,7 +901,7 @@ void TestSortedTopology(Checks &checks)
     const auto reverse=GetSurfaceDirectedEdgeKey(0x7fffffffU,0);
     checks.Get((forward&~std::uint64_t(1))==(reverse&~std::uint64_t(1))&&forward!=reverse&&
                forward!=GetSurfaceDirectedEdgeKey(0,0x7ffffffeU),"31-bit boundary keys retain identity and direction");
-    std::vector<std::uint64_t> keys(10000);
+    DataArray<std::uint64_t> keys(10000);
     std::iota(keys.rbegin(),keys.rend(),0U);
     bool interrupted=false;
     try { GetSortedSurfaceEdgeTopology(keys,[]{throw std::runtime_error("sort cancellation probe");}); }

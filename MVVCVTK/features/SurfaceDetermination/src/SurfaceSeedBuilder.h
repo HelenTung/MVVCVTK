@@ -55,7 +55,7 @@ class SurfaceSeedBuilder final
                                        const RoiReadSnapshot &roi, double haloModel,
                                        std::uint32_t blockDepth, WorkLimit budgetBytes,
                                        const std::function<bool()> &cancelled,
-                                       std::vector<std::array<double, 3>> &points,
-                                       std::vector<SurfaceSeedTriangle> &triangles,
+                                       DataArray<std::array<double, 3>> &points,
+                                       DataArray<SurfaceSeedTriangle> &triangles,
                                        SurfaceExecutionStats &statistics);
 };

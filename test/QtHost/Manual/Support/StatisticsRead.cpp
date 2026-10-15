@@ -67,7 +67,7 @@ StatisticsSamples ReferenceDataSource::ReadRecordSamples(DataRevisionRef ref,con
     if(!m_data)throw std::runtime_error("统计读取器已停止");const auto data=m_data->GetData(m_data->GetDataGraph(),ref);
     const auto table=data ? std::dynamic_pointer_cast<const RecordTablePayload>(data->payload) : nullptr;
     if(!table || !table->GetValid())throw std::runtime_error("结果表修订不可读");const auto* column=Column(*table,name);
-    const auto* values=column ? std::get_if<std::vector<double>>(&column->values) : nullptr;if(!values)throw std::runtime_error("结果表缺少所需数值列");
+    const auto* values=column ? std::get_if<DataArray<double>>(&column->values) : nullptr;if(!values)throw std::runtime_error("结果表缺少所需数值列");
     StatisticsSamples result;result.total=values->size();result.next=std::min(result.total,offset+4096);
     result.description="来源 "+GetRefText(ref)+" · 已发布结果表 · 全量缺陷 · "+QString::fromStdString(name);
     for(std::size_t i=offset;i<result.next;++i)if(std::isfinite((*values)[i]) && (*values)[i]>=0)result.values.push_back((*values)[i]);else ++result.excluded;
@@ -79,7 +79,7 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
     const auto table=data ? std::dynamic_pointer_cast<const RecordTablePayload>(data->payload) : nullptr;
     if(!table || !table->GetValid())throw std::runtime_error("结果表修订不可读");
     QJsonArray rows;auto next=std::min(offset,table->GetRowCount());const auto end=next+std::min<std::size_t>(8192,table->GetRowCount()-next);
-    const auto* volumeColumn=Column(*table,"volume-mm3");const auto* volumes=volumeColumn ? std::get_if<std::vector<double>>(&volumeColumn->values) : nullptr;
+    const auto* volumeColumn=Column(*table,"volume-mm3");const auto* volumes=volumeColumn ? std::get_if<DataArray<double>>(&volumeColumn->values) : nullptr;
     for(std::size_t i=next;i<end && rows.size()<static_cast<int>(count);++i) {
         next=i+1;
         if(volumeRange && (!volumes || (*volumes)[i]<(*volumeRange)[0] || (*volumes)[i]>(*volumeRange)[1]))continue;
@@ -102,18 +102,23 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
 std::array<double,3> ReferenceDataSource::GetRecordLocation(DataRevisionRef ref,std::size_t row,DataRevisionRef source)
 {
     if(!m_data || !m_views)throw std::runtime_error("定位不可用");const auto graph=m_data->GetDataGraph();
-    const auto binding=m_data->GetDataBinding(graph,primaryVolumeBinding);
-    if(!binding || !binding->target || *binding->target!=source)throw std::runtime_error("该缺陷来源与当前输入不同，请先显式采用对应体数据");
     const auto tableData=m_data->GetData(graph,ref),sourceData=m_data->GetData(graph,source);
     if(!tableData || std::none_of(tableData->inputs.begin(),tableData->inputs.end(),[source](const auto& input){return input.source==source;}))throw std::runtime_error("缺陷表的实际来源与定位输入不匹配");
     const auto table=tableData ? std::dynamic_pointer_cast<const RecordTablePayload>(tableData->payload) : nullptr;
     const auto image=sourceData ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(sourceData->payload) : nullptr;
     const auto* column=table ? Column(*table,"seed-voxel") : nullptr;
-    const auto* seeds=column ? std::get_if<std::vector<std::array<std::int64_t,3>>>(&column->values) : nullptr;
+    const auto* seeds=column ? std::get_if<DataArray<std::array<std::int64_t,3>>>(&column->values) : nullptr;
     if(!seeds || row>=seeds->size() || !image)throw std::runtime_error("缺陷定位种子不可读");
     const auto& grid=image->GetGeometry();auto point=grid.origin;
     for(int axis=0;axis<3;++axis)if((*seeds)[row][axis]<grid.extent[2*axis] || (*seeds)[row][axis]>grid.extent[2*axis+1])throw std::runtime_error("缺陷种子越界");
     for(int k=0;k<3;++k)for(int axis=0;axis<3;++axis)point[k]+=grid.direction[k*3+axis]*grid.spacing[axis]*(*seeds)[row][axis];
+    return GetModelWorldPosition(source,point);
+}
+std::array<double,3> ReferenceDataSource::GetModelWorldPosition(DataRevisionRef source,const std::array<double,3>& point)
+{
+    if(!m_data||!m_views)throw std::runtime_error("定位不可用");
+    const auto binding=m_data->GetDataBinding(m_data->GetDataGraph(),primaryVolumeBinding);
+    if(!binding||!binding->target||*binding->target!=source)throw std::runtime_error("结果来源与当前输入不同，请先显式采用对应体数据");
     const auto port=m_views->GetFeaturePort("primary-3d");const auto matrix=port ? port->GetModelToWorld() : std::optional<std::array<double,16>>{};
     if(!matrix)throw std::runtime_error("当前模型姿态不可读");
     std::array<double,3> world{};for(int k=0;k<3;++k){world[k]=(*matrix)[4*k+3];for(int axis=0;axis<3;++axis)world[k]+=(*matrix)[4*k+axis]*point[axis];}return world;

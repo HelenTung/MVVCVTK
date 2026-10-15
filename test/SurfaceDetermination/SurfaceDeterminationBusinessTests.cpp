@@ -100,10 +100,20 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
     c.Get(otherRoiResult.status == SurfaceResultStatus::Succeeded
         && otherRoiResult.parameterFingerprint != first.parameterFingerprint,
         "ROI identity participates in the surface fingerprint even for equal geometry");
-    const auto refused =
-        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 64 * 1024, [] { return false; }, {});
-    c.Get(refused.failureReason == SurfaceFailureReason::BudgetExceeded && refused.points.empty(),
-          "explicit mesh budget refuses allocation before publication");
+    const auto tinyTarget =
+        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 0, [] { return false; }, {});
+    const auto backed=SurfaceDeterminationAlgorithm::BuildSurface(source,GetParams(),64*1024,[]{return false;},{});
+    const auto reference=Run(source,GetParams());
+    c.Get(tinyTarget.status==SurfaceResultStatus::Succeeded&&tinyTarget.points.size()==reference.points.size()
+        &&tinyTarget.triangleIndices==reference.triangleIndices&&tinyTarget.triangleValidity==reference.triangleValidity,
+        "a tiny working target still completes the same formal geometry through backing storage");
+    bool sameBacked=backed.status==SurfaceResultStatus::Succeeded&&backed.points.size()==reference.points.size()
+        &&backed.triangleIndices==reference.triangleIndices&&backed.triangleValidity==reference.triangleValidity
+        &&backed.objects.size()==reference.objects.size()&&backed.initialIsoValue==reference.initialIsoValue;
+    if(sameBacked)for(std::size_t i=0;i<backed.points.size();++i)sameBacked=sameBacked
+        &&backed.points[i].positionModel==reference.points[i].positionModel&&backed.points[i].flags==reference.points[i].flags
+        &&backed.points[i].objectIndex==reference.points[i].objectIndex;
+    c.Get(sameBacked,"backing storage preserves every point, face, object and threshold when logical result exceeds heap target");
 }
 void TestReviewedFailureBoundaries(Checks &c)
 {

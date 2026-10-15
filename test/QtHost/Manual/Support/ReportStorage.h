@@ -16,6 +16,7 @@ public:
     ReportRowId Read(ReportRowId row) const;
     ReportRowId GetCount() const;
     void PrepareRead() const;
+    void SetOwnerThread(QThread* owner);
     std::function<ReportRowId(ReportRowId)> CreateReader() const;
 private:
     class Impl;

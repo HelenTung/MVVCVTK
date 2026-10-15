@@ -133,15 +133,14 @@ void ExportReportCsv(const QString& path, const QJsonObject& record)
 }
 class ResultReport::RowScan final {
 public:
-    explicit RowScan(Qt::SortOrder direction):sorter(direction){}
+    // 文档留在 owner，后台读者退出后才释放；候选索引只在完整完成后发布。
     ReportDocument document;
-    QString search;
-    int column=-1,sortColumn=-1;
-    ReportRowId next=0,count=0;
-    double low=0,high=0;
-    bool hasLow=false,hasHigh=false;
-    std::shared_ptr<ReportIndex> rows=std::make_shared<ReportIndex>();
-    ReportSorter sorter;
+    std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<ReportRowId>> next=std::make_shared<std::atomic<ReportRowId>>(0);
+    std::shared_ptr<std::atomic<bool>> ordering=std::make_shared<std::atomic<bool>>(false);
+    ReportRowId count=0;
+    std::future<std::shared_ptr<ReportIndex>> future;
+    ~RowScan(){cancelled->store(true);if(future.valid())future.wait();}
 };
 class ResultReport::Task final {
 public:
@@ -313,7 +312,7 @@ public:
     QVariant headerData(int section,Qt::Orientation orientation,int role) const override {
         if(role!=Qt::DisplayRole)return {};
         if(section<0 || (orientation==Qt::Horizontal?section>=document.columns.size():section>=rows.size()))return {};
-        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant(rows[section]+1);
+        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant::fromValue<qulonglong>(rows[section]+1);
     }
 };
 }
@@ -321,6 +320,7 @@ void ResultReport::AddReport(ReportDocument doc,bool select)
 {
     if(doc.id.isEmpty() || !doc.table)return;
     doc.table->PrepareRead();
+    (void)doc.table->CreateReader();
     const bool added=!m_documents.contains(doc.id);
     if(!added && doc.category!="运行记录")return; // 精确结果的表格冻结后不被后续运行替换。
     m_documents[doc.id]=doc;
@@ -494,6 +494,7 @@ void ResultReport::ContinueGeneration()
                 if((!resultHint || !sourceHint) && !std::any_of(documents.cbegin(),documents.cend(),[&](const auto& doc){
                     return MatchesSource(doc,m_sourceFilter) && MatchesResult(doc,m_resultFilter) && MatchesModule(doc,m_moduleFilter);
                 })){m_buildingOperation.clear();continue;}
+                m_buildingViewRevision=m_viewRevision;
                 m_buildingReports=std::move(documents);
                 break;
             }
@@ -517,10 +518,17 @@ void ResultReport::ContinueGeneration()
         setProperty("reportGenerationProgress",m_generationProgress);
         if(m_buildingIndex<m_buildingReports.size()){m_buildTimer->start(0);return;}
         auto documents=std::move(m_buildingReports);m_buildingReports.clear();
+        const bool select=m_buildingViewRevision==m_viewRevision&&(m_selected.id.isEmpty()||m_follow->isChecked());
         m_completedOperations.insert(m_buildingOperation);m_pendingReports.remove(m_buildingOperation);m_buildingOperation.clear();
-        const auto source=m_sourceFilter,result=m_resultFilter,module=m_moduleFilter;
-        for(auto& doc:documents)AddReport(std::move(doc));
-        ShowReports(source,result,module);setProperty("reportGenerationBusy",false);
+        QString firstNew;
+        for(auto& doc:documents){
+            if(firstNew.isEmpty()&&!m_documents.contains(doc.id)&&MatchesSource(doc,m_sourceFilter)
+                &&MatchesResult(doc,m_resultFilter)&&MatchesModule(doc,m_moduleFilter))firstNew=doc.id;
+            AddReport(std::move(doc),false);
+        }
+        // 空任务不重选已有文档；生成期间的用户选择也不能被旧完成覆盖。
+        if(select&&!firstNew.isEmpty())SelectReport(firstNew);
+        setProperty("reportGenerationBusy",false);
         m_taskStatus->setText(documents.isEmpty()?"没有新增报告；已归档、已移除或精确结果已不可读取。":"业务报告已生成");
         m_buildTimer->start(0);
     }catch(const std::exception& e) {
@@ -609,58 +617,58 @@ void ResultReport::RefreshRows()
     if((hasLow && !GetReportNumber(m_minimum->text(),low)) || (hasHigh && !GetReportNumber(m_maximum->text(),high)) || (hasLow && hasHigh && low>high)) {
         RefreshPage();m_range->setText("请输入有效数值区间");return;
     }
-    // 无筛选/排序时直接按原行号分页，不读取全表或物化完整行号数组。
-    if(search.isEmpty() && !(column>=0 && (hasLow || hasHigh)) && m_sortColumn<0){m_allRows=true;m_rowsReady=true;RefreshPage();return;}
-    m_rowScan=std::make_unique<RowScan>(m_sortOrder);auto& scan=*m_rowScan;
-    scan.document=m_selected;scan.search=search;scan.column=column;scan.sortColumn=m_sortColumn;
-    scan.low=low;scan.high=high;scan.hasLow=hasLow;scan.hasHigh=hasHigh;scan.count=m_selected.table->GetCount();
+    // 自然顺序无需扫描；筛选/外排由独立读者执行，不占用 owner 事件循环。
+    if(search.isEmpty() && !(column>=0 && (hasLow || hasHigh)) && m_sortColumn<0){
+        m_allRows=true;m_rowsReady=true;RefreshPage();return;
+    }
+    m_selected.table->PrepareRead();m_rowScan=std::make_unique<RowScan>();auto& scan=*m_rowScan;
+    scan.document=m_selected;scan.count=m_selected.table->GetCount();
+    const auto document=scan.document;const auto cancelled=scan.cancelled;const auto next=scan.next;const auto ordering=scan.ordering;
+    const auto sortColumn=m_sortColumn;const auto direction=m_sortOrder;auto* owner=thread();
+    scan.future=std::async(std::launch::async,[document,cancelled,next,ordering,search,column,low,high,hasLow,hasHigh,sortColumn,direction,owner]{
+        const ReportCheckpoint check=[cancelled]{
+            if(cancelled->load())throw std::runtime_error("报告筛选 / 排序已取消");
+        };
+        const auto read=document.table->CreateReader();const auto count=document.table->GetCount();
+        auto rows=std::make_shared<ReportIndex>();ReportSorter sorter(direction);
+        for(ReportRowId i=0;i<count;++i){
+            check();
+            if(sortColumn>=0)while(!sorter.GetCanAdd()){check();sorter.Continue();}
+            const auto row=read(i);next->store(i+1,std::memory_order_relaxed);
+            if(!search.isEmpty()&&!row.join('\t').contains(search,Qt::CaseInsensitive))continue;
+            if(column>=0&&(hasLow||hasHigh)){double value;if(!GetReportNumber(GetReportCell(row,column),value)||(hasLow&&value<low)||(hasHigh&&value>high))continue;}
+            if(sortColumn<0)rows->Append(i);
+            else {
+                ReportSortKey key{i,GetReportCell(row,sortColumn)};const auto& definition=document.columns[sortColumn];
+                const bool identifier=sortColumn==document.identityColumn||definition.name=="id"||definition.name.endsWith("_id");
+                key.numeric=!identifier&&GetReportNumber(key.text,key.number);sorter.Add(std::move(key));
+            }
+        }
+        if(sortColumn>=0){ordering->store(true);sorter.Finish();while(!sorter.Continue())check();rows=sorter.GetRows();}
+        check();rows->PrepareRead();rows->SetOwnerThread(owner);return rows;
+    });
     setProperty("reportRowsBusy",true);RefreshPage();m_range->setText("正在筛选 / 排序完整报告…");m_scanTimer->start(0);
 }
 void ResultReport::ContinueRows()
 {
     if(!m_rowScan)return;
+    const auto next=m_rowScan->next->load(std::memory_order_relaxed);
+    setProperty("reportRowsProgress",next);setProperty("reportRowsPhase",m_rowScan->ordering->load()?"order":"read");
+    if(m_rowScan->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){
+        m_range->setText(QString("正在筛选 / 外部排序 · 已读取 %1 / %2").arg(next).arg(m_rowScan->count));m_scanTimer->start(1);return;
+    }
     try {
-        auto& scan=*m_rowScan;QElapsedTimer elapsed;elapsed.start();int work=0;
-        // 每轮有界处理；排序段和行号索引落盘，所有输入仍处理到结束。
-        bool complete=false;
-        while(work++<256 && elapsed.elapsed()<4) {
-            if(scan.sortColumn>=0 && !scan.sorter.GetCanAdd()){
-                complete=scan.sorter.Continue();if(complete)break;
-                if(scan.next==scan.count)continue;
-                if(!scan.sorter.GetCanAdd())continue;
-            }
-            if(scan.next==scan.count){
-                if(scan.sortColumn<0){complete=true;break;}
-                scan.sorter.Finish();continue;
-            }
-            const auto index=scan.next++;const auto row=scan.document.table->Read(index);
-            if(!scan.search.isEmpty() && !row.join('\t').contains(scan.search,Qt::CaseInsensitive))continue;
-            if(scan.column>=0 && (scan.hasLow || scan.hasHigh)){double value;if(!GetReportNumber(GetReportCell(row,scan.column),value) || (scan.hasLow && value<scan.low) || (scan.hasHigh && value>scan.high))continue;}
-            if(scan.sortColumn<0)scan.rows->Append(index);
-            else {ReportSortKey key{index,GetReportCell(row,scan.sortColumn)};
-                const auto& column=scan.document.columns[scan.sortColumn];
-                const bool identifier=scan.sortColumn==scan.document.identityColumn || column.name=="id" || column.name.endsWith("_id");
-                key.numeric=!identifier && GetReportNumber(key.text,key.number);scan.sorter.Add(std::move(key));}
-        }
-        setProperty("reportRowsProgress",scan.next);
-        setProperty("reportRowsPhase",scan.next<scan.count?"read":"order");
-        if(!complete) {
-            m_range->setText(QString("正在筛选 / 排序 · 已读取 %1 / %2").arg(scan.next).arg(scan.count));m_scanTimer->start(0);return;
-        }
-        m_rows=scan.sortColumn>=0?scan.sorter.GetRows():scan.rows;m_rows->PrepareRead();m_rowScan.reset();m_rowsReady=true;setProperty("reportRowsBusy",false);
-        if(m_sortColumn>=0) {
-            m_table->horizontalHeader()->setSortIndicator(m_sortColumn,m_sortOrder);
-            m_table->horizontalHeader()->setSortIndicatorShown(true);
-        }
+        auto rows=m_rowScan->future.get();m_rowScan.reset();m_rows=std::move(rows);m_rowsReady=true;setProperty("reportRowsBusy",false);
+        if(m_sortColumn>=0){m_table->horizontalHeader()->setSortIndicator(m_sortColumn,m_sortOrder);m_table->horizontalHeader()->setSortIndicatorShown(true);}
         RefreshPage();
-    } catch(const std::exception& e) {
+    } catch(const std::exception& error) {
         m_rowScan.reset();setProperty("reportRowsBusy",false);m_rows.reset();RefreshPage();
-        setProperty("reportRowsError",QString::fromUtf8(e.what()));
-        m_range->setText("报告筛选 / 排序失败："+QString::fromUtf8(e.what()));
+        setProperty("reportRowsError",QString::fromUtf8(error.what()));m_range->setText("报告筛选 / 排序失败："+QString::fromUtf8(error.what()));
     }
 }
 void ResultReport::RefreshPage()
 {
+    const auto total=GetRowCount();m_page=total>0?std::min<ReportRowId>(m_page,(total-1)/200):0;
     // 保留模型身份；Qt5 清空全部列时不替换仍被表头/选择模型观察的对象。
     auto* model=dynamic_cast<ReportPageModel*>(m_table->model());
     if(!model){model=new ReportPageModel(m_table);m_table->setModel(model);}

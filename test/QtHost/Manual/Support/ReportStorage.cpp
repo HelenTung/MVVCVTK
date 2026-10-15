@@ -50,6 +50,7 @@ ReportIndex::ReportIndex():m_impl(std::make_unique<Impl>()){}
 ReportIndex::~ReportIndex()=default;
 void ReportIndex::Append(ReportRowId value){if(m_impl->count>=std::numeric_limits<qint64>::max()/static_cast<qint64>(sizeof(value)))throw std::overflow_error("报告行号索引地址溢出");auto& file=m_impl->file;if(!file.seek(file.size()) || file.write(reinterpret_cast<const char*>(&value),sizeof(value))!=sizeof(value))throw std::runtime_error("报告行号索引写入失败");++m_impl->count;m_impl->cursor.reset();}
 ReportRowId ReportIndex::GetCount() const{return m_impl->count;}
+void ReportIndex::SetOwnerThread(QThread* owner){m_impl->cursor.reset();m_impl->file.moveToThread(owner);}
 void ReportIndex::PrepareRead() const{if(!m_impl->file.flush())throw std::runtime_error("报告行号索引刷新失败");}
 ReportRowId ReportIndex::Read(ReportRowId row) const{if(!m_impl->cursor){PrepareRead();m_impl->cursor=std::make_shared<IndexCursor>(m_impl->file.fileName(),m_impl->count);}return m_impl->cursor->Read(row);}
 std::function<ReportRowId(ReportRowId)> ReportIndex::CreateReader() const{auto cursor=std::make_shared<IndexCursor>(m_impl->file.fileName(),m_impl->count);return [cursor](ReportRowId row){return cursor->Read(row);};}
