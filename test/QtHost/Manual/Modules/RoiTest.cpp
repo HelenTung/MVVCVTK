@@ -320,7 +320,10 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
             try {auto p=panel->GetActionParameters("SetDraft");
                 if(state.tool && (!*observedPrimitive || !SameRoiPrimitive(**observedPrimitive,*state.tool))
                     && RoiToolParameters(p)==*appliedToolParameters) {
-                    panel->SetParameterPatch("SetDraft",RoiGeometryParameters(*state.tool));p=panel->GetActionParameters("SetDraft");
+                    panel->SetParameterPatch("SetDraft",RoiGeometryParameters(*state.tool));
+                    // 重入观察被保护时，先同步新形状的字段适用性，再记录控件基线。
+                    if(auto* form=panel->GetParameterEditor("SetDraft"))SetRoiFields(*form);
+                    p=panel->GetActionParameters("SetDraft");
                     *appliedToolParameters=RoiToolParameters(p);*observedPrimitive=*state.tool;
                 }
                 dirty=RoiMetadataParameters(p)!=*appliedMetadata || RoiToolParameters(p)!=*appliedToolParameters;

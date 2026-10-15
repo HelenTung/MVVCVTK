@@ -250,15 +250,16 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         const auto* command = menu->findChild<QAction*>("command_" + action);
         const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
         const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
-        return current && current->isEnabled() && (current->isVisible() || atPrimary || (command && command->isEnabled()));
+        return atPrimary || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
     }, 2000);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
     Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
-    Check(button && button->isEnabled(), "actual business command is enabled");
-    const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     auto* primary=panel->findChild<QPushButton*>("businessPrimary");
-    if(!button->isVisible() && primary && primary->property("businessAction")==action && !primary->property("usesOutput").toBool())primary->click();
+    const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
+    Check(button && (atPrimary || button->isEnabled()), "actual business command is enabled");
+    const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
+    if(atPrimary)primary->click();
     else if (button->isVisible()) button->click();
     else {
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
@@ -1688,6 +1689,18 @@ void CheckSharedRoi(TestWindow& window)
             "default region remains centered in the source coordinate frame");
     }
     Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"saving a region preserves the business input");
+    // 不同工具形状切换后直接保存运算候选，不能把适用字段变化当作几何编辑。
+    const std::array<double,3> center{box[3],box[7],box[11]};
+    const auto radius=1.2*std::sqrt(box[0]*box[0]+box[4]*box[4]+box[8]*box[8]);
+    GetComplete(window,Click(window,"Roi","Begin",{{"name","运算另一形状"},{"shape","Sphere"},{"centerMM",GetValues(center)},{"radius",radius}}),"Succeeded");
+    const auto other=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    GetComplete(window,Click(window,"Roi","Union",{{"roi",GetRefText(ref)},{"operands",QJsonArray{other}},{"outputMode","CreateNew"}}),"PreviewReady");
+    const auto combined=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto combinedRoi=window.GetSession()->GetRoiDescriptor(GetRef(combined));
+    Check(combinedRoi && combinedRoi->definition.nodes.back().kind==RoiNodeKind::Union,
+        "direct business save preserves the cross-shape Boolean candidate instead of its primitive input");
+    GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
+    GetComplete(window,Send(window,"Roi","Remove",{{"roi",other}}),"Succeeded");
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
@@ -2575,6 +2588,10 @@ void StartSequence(TestWindow& window, const QString& path)
                 return false;
             }),"catalog exposes the exact requested history identity");
             id=ClickNodeAction(window,tree,target,action);
+        } else if(control=="unavailableAction") {
+            const auto module=GetText(step,"module"),action=GetText(step,"action");
+            window.GetWorkflow().onNavigate(module,action,params);
+            id=SendUnavailable(window,module,action);
         } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
         else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、checkPage");
