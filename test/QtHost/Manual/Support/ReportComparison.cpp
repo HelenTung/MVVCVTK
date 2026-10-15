@@ -103,13 +103,14 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
         const auto append = [&](const ReportDocument& doc, int column, double scale) {
             int valid = 0; double mean = 0, low = std::numeric_limits<double>::infinity(), high = -low;
             const auto& read=&doc==&a?readA:readB;
-            for (int i = 0; i < doc.table->GetCount(); ++i) {
+            const int count=&doc==&a?ac:bc;
+            for (int i = 0; i < count; ++i) {
                 check(); const auto row = read(i); double value = 0;
                 if (!Valid(doc,row) || !GetReportNumber(GetReportCell(row,column),value) || !std::isfinite(value *= scale)) continue;
                 ++valid; mean = mean*(static_cast<double>(valid-1)/valid)+value/valid;
                 low = std::min(low,value); high = std::max(high,value);
             }
-            result.table->Append({doc.title,QString::number(doc.table->GetCount()),QString::number(valid),
+            result.table->Append({doc.title,QString::number(count),QString::number(valid),
                 valid?Number(mean):QString(),valid?Number(low):QString(),valid?Number(high):QString()});
         };
         append(a,o.baselineColumn,1); append(b,o.currentColumn,factor);

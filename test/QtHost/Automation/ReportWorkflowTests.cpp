@@ -52,6 +52,21 @@ void WaitTasks(ResultReport& view,int timeoutMs=30000,bool success=true) {
     while(view.property("reportTaskBusy").toBool() && elapsed.elapsed()<timeoutMs)QCoreApplication::processEvents(QEventLoop::AllEvents,20);
     Require(!view.property("reportTaskBusy").toBool() && (!success || view.property("reportTaskError").toString().isEmpty()),"report task did not complete successfully");
 }
+void CheckVolumeColumns(ResultReport& view,const ReportDocument& native,const ReportDocument& copy,int timeoutMs) {
+    Require(native.validityColumn==-1 && copy.validityColumn==-1,"volume completeness became a whole-row validity filter");
+    for(int column=0;column<native.columns.size();++column)if(native.columns[column].numeric) {
+        view.SelectReport(native.id);view.findChild<QPushButton*>("setReportBaseline")->click();view.SelectReport(copy.id);
+        QTimer::singleShot(0,&view,[column]{auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog,"volume column mapping dialog missing");
+            dialog->findChild<QComboBox*>("reportBaselineValueColumn")->setCurrentIndex(column+1);
+            dialog->findChild<QComboBox*>("reportCurrentValueColumn")->setCurrentIndex(column+1);dialog->accept();});
+        view.findChild<QPushButton*>("compareReports")->click();WaitTasks(view,timeoutMs);
+        auto compared=view.GetSelectedReport();const auto a=compared.table->Read(0),b=compared.table->Read(1);
+        int valid=0;for(int row=0;row<native.table->GetCount();++row){double value;if(GetReportNumber(GetReportCell(native.table->Read(row),column),value))++valid;}
+        Require(a[2]==QString::number(valid) && b[2]==a[2] && b[3]==a[3] && b[4]==a[4] && b[5]==a[5],"real volume per-column count or statistics changed on automatic CSV mapping");
+        view.RemoveReport(compared.id);
+        std::cout<<"PASS: real volume column "<<native.columns[column].name.toStdString()<<" valid="<<valid<<std::endl;
+    }
+}
 void SortRows(ResultReport& view,int column) {
     auto* table=view.findChild<QTableView*>("reportTable");
     QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,column));WaitRows(view);
@@ -188,7 +203,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto module=record["module"].toString(),action=record["action"].toString();
     const auto summary=record["result"].toObject();
     const auto observedDeviation=summary["deviation"].toString();
-    const bool requiresReport=(module=="Wall" && action=="Start") || (module=="Gap" && (action=="Start" || action=="Evaluate"))
+    const bool requiresReport=(module=="Wall" && (action=="Start" || action=="Result")) || (module=="Gap" && (action=="Start" || action=="Evaluate"))
         || (module=="Surface" && (action=="GlobalAutomatic" || action=="Determine")) || (module=="Artifact" && action=="Commit")
         || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface","EvaluateVoxelVolume"}.contains(action))
         || (module=="Alignment" && action=="DeviationResult" && !observedDeviation.isEmpty()&&!observedDeviation.endsWith(":0"));
@@ -255,6 +270,19 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         WaitRows(*view,timeoutMs);
         Require(view->findChild<QPushButton*>("copyReportCsv")->isEnabled() && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview uses complete rows rather than a cancelled or failed partial scan");
         Require(view->GetSelectedReport().table->GetCount()==doc.table->GetCount(),"native business full row count");
+        if(module=="Alignment" && action=="EvaluateVoxelVolume" && record["parameters"].toObject()["requireEnclosedSelection"].toBool()) {
+            const auto row=doc.table->Read(0);double observed=0;
+            Require(row[4]=="2" && row[2].isEmpty() && GetReportNumber(row[3],observed) && observed>0,"real full-volume boundary case did not preserve incomplete full volume and usable observed volume");
+        }
+        if(module=="Wall") {
+            const auto measurement=doc.conditions["计算参数"].toObject(),evaluation=doc.conditions["评价参数"].toObject();
+            Require(measurement.contains("maxDistance") && measurement.contains("sampleSpacing") && measurement.contains("materialThreshold")
+                && measurement["source"]==doc.source && evaluation.contains("histogramBins"),"wall report conditions are not the frozen measurement/evaluation archive");
+            auto query=record;query["action"]="Result";query["operationId"]="query-conditions-check";query["parameters"]=QJsonObject{{"result","current"}};
+            const auto queried=provider->second(query,{});
+            Require(!queried.isEmpty() && queried.first().conditions==doc.conditions,"wall query parameters changed frozen business conditions");
+            std::cout<<"PASS: real wall frozen archive conditions action="<<action.toStdString()<<" operation="<<record["operationId"].toString().toStdString()<<std::endl;
+        }
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {
             const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
@@ -354,6 +382,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             view->RemoveReport(compared.id);
         }
         if(checkLarge && doc.table->GetCount()>4096)CheckLargeReportOperations(*view,doc,copy,path,timeoutMs);
+        if(module=="Alignment" && doc.columns.size()>4 && doc.columns[4].name=="selection_completeness")CheckVolumeColumns(*view,doc,copy,timeoutMs);
         std::weak_ptr<ReportTable> importedStorage=copy.table;const auto importedId=copy.id;copy.table.reset();
         view->RemoveReport(importedId);Require(importedStorage.expired() && QFile::exists(path),"real imported report storage was retained or its original CSV deleted");
         view->SelectReport(doc.id);

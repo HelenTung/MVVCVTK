@@ -12,6 +12,7 @@
 #endif
 #if defined(MANUAL_WALL)
 #include "Host/WallThicknessHostFeature.h"
+#include "WallParameters.h"
 #endif
 #if defined(MANUAL_SURFACE)
 #include "Host/SurfaceDeterminationHostFeature.h"
@@ -102,6 +103,9 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<WallThicknessHost
         const auto snapshot=feature->GetResult(GetRef(ref));if(!snapshot || !snapshot->samples)return reports;
         const auto unit=snapshot->archive.input.unit==ThicknessUnit::Millimeter?QString("mm"):snapshot->archive.input.unit==ThicknessUnit::Meter?QString("m"):QString("model");
         auto doc=Document(record,"wall",ref,GetRefText(snapshot->archive.input.source),"壁厚明细");
+        doc.conditions["计算参数"]=GetWallMeasurementJson(snapshot->archive.input,snapshot->archive.params);
+        doc.conditions["评价参数"]=GetWallEvaluationJson(snapshot->archive.evaluation);
+        doc.conditions["算法版本"]=QString::fromStdString(snapshot->archive.algorithmVersion);
         doc.description="聚合节点场查询值；sample_id 只在本报告内编号，不是跨结果稳定测点。无效厚度留空。";doc.coordinateFrame="源模型坐标";
         doc.columns={{"sample_id",{},{},false},{"x_"+unit,"坐标 X",unit,true},{"y_"+unit,"坐标 Y",unit,true},{"z_"+unit,"坐标 Z",unit,true},
             {"thickness_"+unit,"聚合节点厚度场值",unit,true},{"area_"+unit+"2","样本面积",unit+"2",true},{"validity",{},{},false},{"reason",{},{},false}};
@@ -201,7 +205,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                 auto doc=Document(record,"voxel-volume",volume,GetRefText(snapshot->source),"选区单元体积");const auto& stats=snapshot->statistics;
                 doc.description="完整体积与有效选中部分体积含义不同；不可观测或完整性条件未满足时，完整体积留空。";
                 doc.columns={{"item_id",{},{},false},{"selected_cells","选中单元数","1",true},{"selected_cell_volume_mm3","选区单元体积和","mm3",true},
-                    {"observed_volume_mm3","有效选中部分体积","mm3",true},{"validity",{},{},false},{"reason",{},{},false}};
+                    {"observed_volume_mm3","有效选中部分体积","mm3",true},{"selection_completeness",{},{},false},{"reason",{},{},false}};
                 doc.valueColumn=2;doc.identityColumn=0;doc.table=std::make_shared<ReportTable>();
                 const QStringList reasons{"完整","存在不可观测单元","接触索引区域边界","空选区"};
                 doc.table->Append({"voxel-volume",QString::number(stats.selected),stats.volumeMm3?Number(*stats.volumeMm3):QString(),Number(stats.observedVolumeMm3),

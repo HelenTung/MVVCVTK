@@ -31,6 +31,7 @@ public:
     mutable QTemporaryFile file;
     QString filePath;
     QVector<qint64> offsets;
+    int rowCount = 0;
     mutable int cachedRow = -1;
     mutable QStringList cached;
     int sourceCount = 0;
@@ -50,13 +51,14 @@ void ReportTable::Append(const QStringList& row)
     const auto offset = file.pos();
     WriteBytes(file, QJsonDocument(QJsonArray::fromStringList(row)).toJson(QJsonDocument::Compact) + '\n');
     m_impl->offsets.append(offset);
+    ++m_impl->rowCount;
 }
 QStringList ReportTable::Read(int row) const
 {
     if (row < 0 || row >= GetCount()) throw std::out_of_range("报告行不存在");
     if (row >= m_impl->offsets.size() && m_impl->readSource) return m_impl->readSource(row);
     if (m_impl->cachedRow == row) return m_impl->cached;
-    if (!m_impl->file.seek(m_impl->offsets[row])) throw std::runtime_error("报告临时表读取失败");
+    if (!m_impl->file.seek(m_impl->offsets.at(row))) throw std::runtime_error("报告临时表读取失败");
     QJsonParseError error;
     const auto values = QJsonDocument::fromJson(m_impl->file.readLine(), &error);
     if (error.error != QJsonParseError::NoError || !values.isArray()) throw std::runtime_error("报告临时表损坏");
@@ -65,7 +67,7 @@ QStringList ReportTable::Read(int row) const
     m_impl->cachedRow = row; m_impl->cached = cells;
     return cells;
 }
-int ReportTable::GetCount() const { return m_impl->readSource ? m_impl->sourceCount : m_impl->offsets.size(); }
+int ReportTable::GetCount() const { return m_impl->readSource ? m_impl->sourceCount : m_impl->rowCount; }
 void ReportTable::SetRows(std::size_t count, std::function<QStringList(int)> read)
 {
     if (!m_impl->offsets.isEmpty() || m_impl->readSource || (count && !read) || count > std::size_t(std::numeric_limits<int>::max()))
@@ -91,14 +93,14 @@ std::function<QStringList(int)> ReportTable::CreateReader() const
     if (!GetIsComplete()) throw std::logic_error("原生报告尚未完成物化");
     struct Cursor {
         QFile file;
-        QVector<qint64> offsets;
+        const QVector<qint64> offsets;
         Cursor(const QString& path, QVector<qint64> positions) : file(path), offsets(std::move(positions))
         { if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error("报告读取器打开失败"); }
     };
-    // 写入已结束；每个任务有自己的 QFile、偏移快照，不共享游标或单行缓存。
+    // 写入已结束；每个任务有自己的 QFile，偏移快照只读，禁止读取触发 Qt 写时分离。
     auto cursor = std::make_shared<Cursor>(m_impl->filePath, m_impl->offsets);
     return [cursor](int row) {
-        if (row < 0 || row >= cursor->offsets.size() || !cursor->file.seek(cursor->offsets[row]))
+        if (row < 0 || row >= cursor->offsets.size() || !cursor->file.seek(cursor->offsets.at(row)))
             throw std::out_of_range("报告读取器行不存在");
         QJsonParseError error;
         const auto values = QJsonDocument::fromJson(cursor->file.readLine(), &error);
@@ -221,10 +223,11 @@ void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const QVector<
             ? column.name+" ["+column.quantity+"; "+column.unit+"]" : column.name);
     write(headings);
     if (!doc.table) return;
+    const int count=doc.table->GetCount();
     if(!checkpoint)doc.table->PrepareRead(); // 后台入口在 owner thread 准备，同步调用在此刷新。
     const auto read=doc.table->GetIsComplete()?doc.table->CreateReader():[&doc](int row){return doc.table->Read(row);};
     if (rows) { for (const auto row : *rows) {if(checkpoint)checkpoint();write(read(row));} }
-    else for (int row = 0; row < doc.table->GetCount(); ++row) {if(checkpoint)checkpoint();write(read(row));}
+    else for (int row = 0; row < count; ++row) {if(checkpoint)checkpoint();write(read(row));}
 }
 void ExportReport(const QString& path, const ReportDocument& doc, const QVector<int>* rows, const ReportCheckpoint& checkpoint)
 {

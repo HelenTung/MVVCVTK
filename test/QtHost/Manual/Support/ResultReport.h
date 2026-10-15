@@ -5,7 +5,6 @@
 #include <QMap>
 #include <QVector>
 #include <QSet>
-#include <QDeadlineTimer>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -62,23 +61,26 @@ private:
     void CompareSelected();
     void ClearSelection();
     void ContinueGeneration();
+    void RefreshFailures();
     void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {});
     void ContinueTask();
     QMap<QString, QJsonObject> m_records;
     QMap<QString, ReportDocument> m_documents;
     QMap<QString, QJsonObject> m_pendingReports;
+    QMap<QString, QString> m_failedReports;
     QSet<QString> m_completedOperations, m_removedReports;
     QVector<ReportDocument> m_buildingReports;
     QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
     int m_buildingIndex = 0;
     qulonglong m_generationProgress = 0;
-    QDeadlineTimer m_generationDeadline;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;
     std::unique_ptr<Task> m_task;
     QLabel* m_taskStatus = nullptr;
     QPushButton* m_cancelTask = nullptr;
+    QComboBox* m_failedReport = nullptr;
+    QPushButton* m_retryReport = nullptr;
     ReportDocument m_selected;
     QString m_baseline, m_sourceFilter, m_resultFilter, m_moduleFilter;
     QTreeWidget* m_reports = nullptr;

@@ -47,7 +47,6 @@
 #include <algorithm>
 namespace Manual {
 namespace {
-constexpr int reportTaskTimeoutMs=30*60*1000;
 QString CsvCell(QString value)
 {
     value.replace('"', "\"\"");
@@ -188,6 +187,14 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* saveConditions=new QPushButton("保存汇总与条件…",this);saveConditions->setObjectName("saveReportConditions");reportActions->addWidget(saveConditions);
     m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");reportActions->addWidget(m_cancelTask);
     m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");reportActions->addWidget(m_taskStatus,1);layout->addLayout(reportActions);
+    auto* failures=new QHBoxLayout;
+    m_failedReport=new QComboBox(this);m_failedReport->setObjectName("failedReportOperations");failures->addWidget(m_failedReport,1);
+    m_retryReport=new QPushButton("重试所选失败报告",this);m_retryReport->setObjectName("retryFailedReport");failures->addWidget(m_retryReport);layout->addLayout(failures);
+    connect(m_retryReport,&QPushButton::clicked,this,[this]{
+        const auto id=m_failedReport->currentData().toString();if(!m_failedReports.remove(id))return;
+        RefreshFailures();ShowReports();
+    });
+    RefreshFailures();
     m_buildTimer=new QTimer(this);m_buildTimer->setSingleShot(true);
     connect(m_buildTimer,&QTimer::timeout,this,[this]{ContinueGeneration();});
     m_taskTimer=new QTimer(this);m_taskTimer->setInterval(10);
@@ -437,6 +444,7 @@ void ResultReport::QueueReport(const QJsonObject& record)
     const auto id=record["operationId"].toString();
     if(id.isEmpty() || m_completedOperations.contains(id) || m_pendingReports.value(id)==record)return;
     m_pendingReports[id]=record;
+    m_failedReports.remove(id);RefreshFailures();
     if(isVisible())m_buildTimer->start(0);
 }
 bool ResultReport::GetReportAvailable(const QString& module,const QString& result) const
@@ -446,12 +454,25 @@ bool ResultReport::GetReportAvailable(const QString& module,const QString& resul
     for(const auto& record:m_pendingReports)if(record["module"].toString()==module && GetPendingResults(record).contains(result))return true;
     return false;
 }
+void ResultReport::RefreshFailures()
+{
+    const auto selected=m_failedReport->currentData().toString();m_failedReport->clear();
+    for(auto it=m_failedReports.cbegin();it!=m_failedReports.cend();++it) {
+        const auto module=m_pendingReports.value(it.key())["module"].toString();
+        m_failedReport->addItem(QString("%1 · 操作 %2 · %3").arg(GetModuleText(module),it.key(),it.value()),it.key());
+    }
+    const int index=m_failedReport->findData(selected);if(index>=0)m_failedReport->setCurrentIndex(index);
+    const bool failed=!m_failedReports.isEmpty();m_failedReport->setVisible(failed);m_retryReport->setVisible(failed);
+    m_retryReport->setEnabled(failed && !m_task);
+    setProperty("reportFailureCount",m_failedReports.size());
+}
 void ResultReport::ContinueGeneration()
 {
     if(!isVisible() || m_task)return;
     try {
         if(m_buildingOperation.isEmpty()) {
             for(auto it=m_pendingReports.cbegin();it!=m_pendingReports.cend();++it) {
+                if(m_failedReports.contains(it.key()))continue;
                 const auto& record=it.value();
                 if(!m_moduleFilter.isEmpty() && record["module"].toString()!=m_moduleFilter)continue;
                 const bool resultHint=m_resultFilter.isEmpty() || GetPendingResults(record).contains(m_resultFilter);
@@ -459,20 +480,18 @@ void ResultReport::ContinueGeneration()
                     || record["result"].toObject()["source"].toString()==m_sourceFilter;
                 // 计量报告的父对齐结果和真实来源在冻结快照中，不一定出现在运行摘要里。
                 if((!resultHint || !sourceHint) && record["module"].toString()!="Alignment")continue;
+                m_buildingOperation=it.key();m_buildingIndex=0;m_generationProgress=0;
+                setProperty("reportGenerationProgress",qulonglong(0));setProperty("reportGenerationError",QString());
                 auto documents=onReadReports?onReadReports(record,GetReportIds()+m_removedReports):QVector<ReportDocument>{};
                 if((!resultHint || !sourceHint) && !std::any_of(documents.cbegin(),documents.cend(),[&](const auto& doc){
                     return MatchesSource(doc,m_sourceFilter) && MatchesResult(doc,m_resultFilter) && MatchesModule(doc,m_moduleFilter);
-                }))continue;
-                m_buildingOperation=it.key();m_buildingIndex=0;m_generationProgress=0;
-                setProperty("reportGenerationProgress",qulonglong(0));setProperty("reportGenerationError",QString());
-                m_generationDeadline.setRemainingTime(reportTaskTimeoutMs);
+                })){m_buildingOperation.clear();continue;}
                 m_buildingReports=std::move(documents);
                 break;
             }
             if(m_buildingOperation.isEmpty()) {setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);return;}
         }
         setProperty("reportGenerationBusy",true);m_cancelTask->setEnabled(true);m_taskStatus->setText("正在生成业务报告…");
-        if(m_generationDeadline.hasExpired())throw std::runtime_error("报告任务超过运行期限");
         QElapsedTimer elapsed;elapsed.start();int work=0;
         while(m_buildingIndex<m_buildingReports.size() && work++<256 && elapsed.elapsed()<4) {
             ++m_generationProgress;
@@ -497,9 +516,12 @@ void ResultReport::ContinueGeneration()
         m_taskStatus->setText(documents.isEmpty()?"没有新增报告；已归档、已移除或精确结果已不可读取。":"业务报告已生成");
         m_buildTimer->start(0);
     }catch(const std::exception& e) {
+        const auto failed=m_buildingOperation;
         m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);
         setProperty("reportGenerationError",QString::fromUtf8(e.what()));
-        m_taskStatus->setText("业务结果保留，报告读取失败，重新打开可重试："+QString::fromUtf8(e.what()));
+        if(!failed.isEmpty())m_failedReports[failed]=QString::fromUtf8(e.what());RefreshFailures();
+        m_taskStatus->setText("报告读取失败，其他报告继续生成；可选择失败项重试："+QString::fromUtf8(e.what()));
+        if(isVisible())m_buildTimer->start(0);
     }
 }
 void ResultReport::StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work,QVector<ReportDocument> inputs)
@@ -507,13 +529,12 @@ void ResultReport::StartTask(std::function<ReportDocument(const ReportCheckpoint
     if(m_task)throw std::runtime_error("请等待当前报告任务完成或取消后重试");
     m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);
     m_task=std::make_unique<Task>();m_task->inputs=std::move(inputs);m_task->viewRevision=m_viewRevision;
+    RefreshFailures();
     const auto cancelled=m_task->cancelled;const auto progress=m_task->progress;auto* owner=thread();
-    // 运行上限只限制这个宿主任务，非性能达标线；取消在每行/空间候选观察。
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(reportTaskTimeoutMs);
-    m_task->future=std::async(std::launch::async,[work=std::move(work),cancelled,progress,deadline,owner] {
-        const ReportCheckpoint checkpoint=[cancelled,progress,deadline] {
+    // 正常推进的报告不设默认硬时限；取消仍在解析行、输出行和空间候选观察。
+    m_task->future=std::async(std::launch::async,[work=std::move(work),cancelled,progress,owner] {
+        const ReportCheckpoint checkpoint=[cancelled,progress] {
             if(cancelled->load())throw std::runtime_error("报告任务已取消");
-            if(std::chrono::steady_clock::now()>=deadline)throw std::runtime_error("报告任务超过运行期限");
             progress->fetch_add(1,std::memory_order_relaxed);
         };
         checkpoint();auto document=work(checkpoint);checkpoint();
@@ -536,6 +557,7 @@ void ResultReport::ContinueTask()
         m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
     }catch(const std::exception& e){m_task.reset();setProperty("reportTaskError",QString::fromUtf8(e.what()));m_taskStatus->setText(QString::fromUtf8(e.what()));}
     m_taskTimer->stop();setProperty("reportTaskBusy",false);m_cancelTask->setEnabled(false);
+    RefreshFailures();
     if(!cancelled && isVisible() && !m_pendingReports.isEmpty())m_buildTimer->start(0);
 }
 void ResultReport::CancelTasks()
@@ -643,11 +665,12 @@ void ResultReport::CompareSelected()
     QDialog dialog(this);dialog.setWindowTitle("核对比较指标、单位与匹配依据");auto* layout=new QVBoxLayout(&dialog);
     layout->addWidget(new QLabel("A · "+a.title+"\nB · "+b.title+"\n编号只有在确认为同一业务对象时才能配对；空间匹配需要同一坐标系。",&dialog));
     struct Mapping { QComboBox *value,*identity,*validity,*x,*y,*z,*unit,*coordinateUnit;QLineEdit *quantity,*validValues; };
-    const auto addMapping=[&](const QString& title,const ReportDocument& doc) {
+    const auto addMapping=[&](const QString& title,const ReportDocument& doc,const QString& prefix) {
         auto* box=new QWidget(&dialog);auto* form=new QFormLayout(box);form->addRow(new QLabel(title,box));Mapping m;
         const auto combo=[&](int selected){auto* c=new QComboBox(box);c->addItem("未指定",-1);for(int i=0;i<doc.columns.size();++i)c->addItem(doc.columns[i].name,i);c->setCurrentIndex(selected+1);return c;};
         int numeric=doc.valueColumn;if(numeric<0)for(int i=0;i<doc.columns.size();++i)if(doc.columns[i].numeric){numeric=i;break;}
         m.value=combo(numeric);m.identity=combo(doc.identityColumn);m.validity=combo(doc.validityColumn);
+        m.value->setObjectName(prefix+"ValueColumn");
         m.x=combo(doc.xColumn);m.y=combo(doc.yColumn);m.z=combo(doc.zColumn);
         m.unit=new QComboBox(box);m.unit->setEditable(true);m.unit->addItems({"","mm","m","mm2","m2","mm3","m3","deg","1"});
         m.coordinateUnit=new QComboBox(box);m.coordinateUnit->setEditable(true);m.coordinateUnit->addItems({"mm","m","cm","um"});
@@ -662,8 +685,8 @@ void ResultReport::CompareSelected()
     };
     auto* sideBySide=new QHBoxLayout;layout->addLayout(sideBySide);
     // 两个映射面板并排，避免在小屏幕上形成过长向导。
-    const auto am=addMapping("基准 A",a);sideBySide->addWidget(am.value->parentWidget());
-    const auto bm=addMapping("待比较 B",b);sideBySide->addWidget(bm.value->parentWidget());
+    const auto am=addMapping("基准 A",a,"reportBaseline");sideBySide->addWidget(am.value->parentWidget());
+    const auto bm=addMapping("待比较 B",b,"reportCurrent");sideBySide->addWidget(bm.value->parentWidget());
     auto* form=new QFormLayout;layout->addLayout(form);
     auto* mode=new QComboBox(&dialog);mode->setObjectName("reportMatchMode");mode->addItems({"仅分布比较","稳定业务标识","唯一空间匹配"});form->addRow("匹配方式",mode);
     auto* confirmed=new QCheckBox("已确认编号跨报告稳定，或坐标属于同一坐标系（并已核对坐标单位）",&dialog);confirmed->setObjectName("reportMatchConfirmed");layout->addWidget(confirmed);

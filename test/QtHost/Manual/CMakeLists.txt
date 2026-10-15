@@ -27,6 +27,8 @@ foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;Par
         elseif(key STREQUAL "ALIGNMENT")
             target_sources(qt_feature_test_support PRIVATE Modules/AlignmentInput.cpp Modules/AlignmentInspection.cpp
                 Support/InspectionReport.cpp Support/InspectionReport.h)
+        elseif(key STREQUAL "WALL")
+            target_sources(qt_feature_test_support PRIVATE Support/WallParameters.cpp Support/WallParameters.h)
         endif()
     endif()
 endforeach()

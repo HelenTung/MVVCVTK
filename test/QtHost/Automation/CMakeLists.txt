@@ -38,7 +38,7 @@ if(MVVCVTK_QT_REPORT_INPUT)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME QtFeature.ReportsLarge COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ReportLargeRegression.py"
         --input "${MVVCVTK_QT_REPORT_INPUT}" --spacing "${MVVCVTK_QT_REPORT_SPACING_MM}"
-        --output "${CMAKE_CURRENT_BINARY_DIR}/report-large-$<CONFIG>" --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
+        --output "${CMAKE_CURRENT_BINARY_DIR}/report-large-correctness-$<CONFIG>" --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
     # 包含整卷算法、原生物化、所有行排序/比较及独立空间参考；这是运行上限而非响应达标线。
     set_tests_properties(QtFeature.ReportsLarge PROPERTIES LABELS "real-data;Reports;large" RUN_SERIAL TRUE TIMEOUT 21600)
 endif()
