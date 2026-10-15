@@ -630,6 +630,30 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
         auto stamp=service?service->GetRenderInputStamp():std::optional<RenderInputStamp>{};
         return state&&state->dataRevision==result.outputRevision&&stamp&&stamp->dataRevision==result.outputRevision;
     }))return false;
+    if(consumerKind==5) {
+        // 编辑文档仍在，但用户通过 Host 选择另一体数据；关闭不得恢复旧 Root。
+        held=nullptr;loaded=false;loadOk=false;
+        if(!SendReload(session,loaded,loadOk)||!wait([&]{return loaded;})||!loadOk)return false;
+        const auto alternate=session.GetImageDescriptor();
+        if(!alternate||alternate->dataRevision==root->data->self)return false;
+        const auto matches=[&](const DataRevisionRef& ref) {
+            const auto descriptor=session.GetImageDescriptor();
+            const auto stamp=probe->GetViewService("crop-primary")->GetRenderInputStamp();
+            return descriptor&&descriptor->dataRevision==ref&&stamp&&stamp->dataRevision==ref;
+        };
+        if(!SetSelectedData(session,root->data->self)||!wait([&]{return matches(root->data->self);})
+            ||!SetSelectedData(session,alternate->dataRevision)||!wait([&]{return matches(alternate->dataRevision);}))return false;
+        const auto bindingRevision=session.GetImageDescriptor()->bindingRevision;
+        CropDocumentRequest closing;closing.action=CropDocumentAction::CloseDocument;
+        closing.documentId=history.documentId;closing.requestId=CropHostFeature::CreateRequestId();
+        closing.expectedRevision=feature->GetHistory().stateRevision;
+        if(!feature->SendRequest(closing)||!wait([&]{const auto out=feature->GetDocumentOutcome(history.documentId,closing.requestId);
+            return out&&out->status==CropEditStatus::Succeeded;}))return false;
+        if(!matches(alternate->dataRevision)||session.GetImageDescriptor()->bindingRevision!=bindingRevision
+            ||probe->m_data->GetPrimaryImage()->data->self!=alternate->dataRevision
+            ||probe->m_data->GetDataLifetime(result.scopeId).status!=DataLifetimeStatus::Released)return false;
+        return wait([&]{return session.DetachFeature(*feature);})&&session.DetachFeature(*probe)&&session.Stop();
+    }
     if(consumerKind==3) {
         const auto original=result;
         const auto oldGraph=probe->m_data->GetDataGraph();
@@ -1335,6 +1359,7 @@ int GetCropLifecycleFailCount()
     failures+=GetCaseResult(GetMeshRootLifecycle(),"Mesh Root uses real dual-view preview, repeated publication and allocation-aware Return/Close")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true,3),"Repeated build preserves binding on retirement failure and publishes Root plus replacement atomically")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true,4),"Publishing a sibling branch from Root preserves historical outputs with live readers")?0:1;
+    failures+=GetCaseResult(GetCropCloseRetryValid(true,5),"Closing an editing document preserves an externally selected primary revision and binding")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(false),"Detach cancels Building exactly once and retries the same close before releasing ports")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true),"Session Stop keeps Crop owned while a bare result array prevents release")?0:1;
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
