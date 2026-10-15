@@ -89,16 +89,19 @@ void CheckReportWorkflow()
     view.findChild<QCheckBox*>("followLatestReport")->setChecked(false);view.SelectReport("large");view.show();QCoreApplication::processEvents();
     std::cout<<"Reports: table shown"<<std::endl;
     auto* table=view.findChild<QTableView*>("reportTable");Require(table && table->model()->rowCount()==200,"report uses bounded page model");
+    Require(!table->horizontalHeader()->isSortIndicatorShown(),"native row order does not display a fake sorting arrow");
     for(int i=0;i<6;++i)view.findChild<QPushButton*>("reportNext")->click();
     Require(table->model()->rowCount()==3 && table->model()->data(table->model()->index(2,0)).toString()=="1202","complete report browses beyond 1000 rows");
     std::cout<<"Reports: paging complete"<<std::endl;
     QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,1));
     Require(table->model()->data(table->model()->index(0,0)).toString()=="1202","numeric sorting covers the complete table, not the current page");
+    Require(table->horizontalHeader()->isSortIndicatorShown()&&table->horizontalHeader()->sortIndicatorSection()==1,"sorting indicator follows the actual selected sort column");
     view.findChild<QLineEdit*>("reportSearch")->setText("1202");Require(view.GetFilteredRows().size()==2,"search covers all rows, including unloaded pages");
     std::cout<<"Reports: sorting and search complete"<<std::endl;
     QTemporaryDir directory;const auto path=directory.filePath("报告.csv");ExportReport(path,large);std::cout<<"Reports: full export complete"<<std::endl;view.ImportReport(path);
     std::cout<<"Reports: independent import complete"<<std::endl;
     Require(view.GetSelectedReport().table->GetCount()==1203,"independent import/export preserves entire report");
+    Require(!table->horizontalHeader()->isSortIndicatorShown(),"selecting another report clears the old sort indicator");
     view.ShowReports("data-a","missing-result");Require(!view.GetSelectedReport().table,"missing exact result never leaves unrelated old details visible");
     std::cout<<"Reports: missing result cleared"<<std::endl;
     view.ShowReports("data-a","result-a");Require(view.GetSelectedReport().result=="result-a","data/result context selects exact report");
@@ -128,6 +131,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const bool successful=QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Published","Observed"}.contains(record["status"].toString());
     const auto provider=window.GetWorkflow().readReports.find(module);
     if(provider==window.GetWorkflow().readReports.end()){Require(!requiresReport||!successful,"successful business module has a registered native report source");return;}
+    if(!successful)return; // 导出、候选等终态不等于新增一份已发布业务报告。
     QCoreApplication::processEvents();
     const auto input=window.GetSession()->GetImageDescriptor();const auto graph=window.GetWorkflow().getPublishedGraph();
     auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");
@@ -206,7 +210,13 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
                 Require(painted,"visible native report first cell contains rendered text pixels");
             }
         };
-        checkPage(0);QJsonArray pages{0};const auto details=capture("details");
+        checkPage(0);Require(!table->horizontalHeader()->isSortIndicatorShown(),"fresh report preview declares its original native row order");
+        QJsonArray pages{0};const auto details=capture("details");QString rightColumns;
+        if(table->model()->rowCount()&&table->horizontalScrollBar()->maximum()>0) {
+            table->horizontalScrollBar()->setValue(table->horizontalScrollBar()->maximum());QCoreApplication::processEvents();
+            Require(table->viewport()->rect().intersects(table->visualRect(table->model()->index(0,doc.columns.size()-1))),"rightmost report columns can be previewed through the actual scrollbar");
+            rightColumns=capture("right-columns");table->horizontalScrollBar()->setValue(0);QCoreApplication::processEvents();
+        }
         if(doc.table->GetCount()>200) {
             view->findChild<QPushButton*>("reportNext")->click();QCoreApplication::processEvents();checkPage(200);pages.append(200);capture("next-page");
             view->findChild<QPushButton*>("reportPrevious")->click();QCoreApplication::processEvents();checkPage(0);
@@ -215,7 +225,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         Require(conditions->isVisible()&&conditions->toPlainText()==QString::fromUtf8(QJsonDocument(doc.conditions).toJson(QJsonDocument::Indented)),"visible report conditions belong to the exact document");
         const auto conditionImage=capture("conditions");tabs->setCurrentWidget(table);
         previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",doc.table->GetCount()},
-            {"pageOffsets",pages},{"details",details},{"conditions",conditionImage},{"opened",true}});++reportIndex;
+            {"pageOffsets",pages},{"details",details},{"rightColumns",rightColumns},{"conditions",conditionImage},{"opened",true}});++reportIndex;
         if(checkExport) {
         const auto path=directory.filePath("native.csv");ExportReport(path,doc);QFile inputFile(path);Require(inputFile.open(QIODevice::ReadOnly),"native CSV readable");const auto copy=ReadReportCsv(inputFile,"原生报告回读");
         Require(copy.table->GetCount()==doc.table->GetCount(),"native full CSV count matches source");

@@ -280,6 +280,7 @@ void ResultReport::SelectCurrent()
     const auto* item=m_reports->currentItem();if(!item)return;
     const auto id=item->data(0,Qt::UserRole).toString();if(!m_documents.contains(id))return;
     m_selected=m_documents.value(id);m_sortColumn=-1;m_page=0;
+    m_table->horizontalHeader()->setSortIndicatorShown(false);
     const QSignalBlocker block(m_filterColumn),searchBlock(m_search);
     m_search->clear();m_minimum->clear();m_maximum->clear();m_filterColumn->clear();m_filterColumn->addItem("数值筛选列",-1);
     for(int i=0;i<m_selected.columns.size();++i)m_filterColumn->addItem(m_selected.columns[i].name,i);
@@ -328,6 +329,7 @@ void ResultReport::RefreshRows()
             return m_sortOrder==Qt::AscendingOrder?order<0:order>0;
         });
         m_table->horizontalHeader()->setSortIndicator(m_sortColumn,m_sortOrder);
+        m_table->horizontalHeader()->setSortIndicatorShown(true);
     }
     RefreshPage();
 }

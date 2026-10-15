@@ -95,14 +95,18 @@ namespace Manual {
 namespace {
 bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
 {
-    if (done()) return true;
-    QEventLoop loop; QTimer deadline;
-    deadline.setSingleShot(true);
-    QObject::connect(QAbstractEventDispatcher::instance(), &QAbstractEventDispatcher::aboutToBlock, &loop,
-        [&] { if (done()) loop.quit(); });
-    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
-    deadline.start(timeoutMs); loop.exec();
-    return done();
+    QElapsedTimer elapsed;elapsed.start();
+    for(;;) {
+        if(done())return true;
+        const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
+        if(remaining<=0)return false;
+        QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
+        QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
+            [&]{if(done())loop.quit();});
+        QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
+        deadline.start(static_cast<int>(remaining));loop.exec();
+        // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
+    }
 }
 void Check(bool condition, const char* message)
 {
@@ -1831,6 +1835,12 @@ void CheckSharedRoi(TestWindow& window)
 }
 void StartSelfTest(TestWindow& window)
 {
+    // 重现就绪观察在退出内层事件循环时回退；不能把暂态回退当成已经超时。
+    int phase=0;QTimer first,settled;first.setSingleShot(true);settled.setSingleShot(true);
+    QObject::connect(&first,&QTimer::timeout,&first,[&]{phase=1;});
+    QObject::connect(&settled,&QTimer::timeout,&settled,[&]{phase=3;});first.start(0);
+    Check(Wait([&]{if(phase==1){phase=2;return true;}if(phase==2){phase=0;settled.start(0);}return phase==3;},1000)
+        && phase==3,"event wait retries transient readiness without weakening its final predicate or deadline");
     QCoreApplication::processEvents();
     CheckFourViewGeometry(window);
     CheckUiAndRecords(window);
