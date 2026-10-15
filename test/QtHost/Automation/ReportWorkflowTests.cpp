@@ -109,6 +109,13 @@ void CheckReportGenerationSelection() {
     view.QueueReport(operation("late-generation"));
     wait([&]{return picked&&rows==50000&&!view.property("reportGenerationBusy").toBool();});
     Require(view.GetSelectedReport().id==second.id&&view.GetReportIds().contains(late.id),"late generation lost the full document or replaced a newer user selection");
+    auto* follow=view.findChild<QCheckBox*>("followLatestReport");Require(follow!=nullptr,"report follow control is available");
+    for(const bool enabled:{false,true}) {
+        follow->setChecked(enabled);auto next=first;next.id=enabled?"generation-follow":"generation-preserve";
+        view.onReadReports=[next](const auto&,const auto&){return QVector<ReportDocument>{next};};view.QueueReport(operation(next.id));
+        wait([&]{return view.GetReportIds().contains(next.id)&&!view.property("reportGenerationBusy").toBool();});
+        Require(view.GetSelectedReport().id==(enabled?next.id:second.id),"generation ignored the explicit report follow setting");
+    }
 }
 #if defined(MANUAL_SURFACE)
 void CheckSurfaceReads() {
