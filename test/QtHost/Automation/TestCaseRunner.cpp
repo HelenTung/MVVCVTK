@@ -2408,6 +2408,12 @@ QJsonObject CheckPartDisplay(TestWindow& window)
 void StartSequence(TestWindow& window, const QString& path)
 {
     const auto script = LoadJson(path);
+    if(script.contains("windowSize")) {
+        const auto size=script["windowSize"].toArray();
+        Check(size.size()==2 && size[0].toInt()>=1000 && size[1].toInt()>=800,
+            "scenario declares a usable business screenshot window");
+        window.resize(size[0].toInt(),size[1].toInt());QCoreApplication::processEvents();
+    }
     const auto initialWindowSize=window.size();
     if(script["viewLayout"].isString()) {
         auto* choice=window.findChild<QComboBox*>("viewLayout");const auto index=choice->findData(script["viewLayout"].toString());
