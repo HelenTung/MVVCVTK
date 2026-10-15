@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <cmath>
 #include <future>
+#include <chrono>
+#include <climits>
 
 namespace {
 void Require(bool value,const char* message) {if (!value) throw std::runtime_error(message);}
@@ -18,13 +20,19 @@ struct Fixture {
         DataTransaction tx;tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,std::make_shared<const std::vector<std::uint8_t>>(729,10))}};
         Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
     }
+    Fixture(GridGeometry3D geometry,std::vector<std::uint8_t> values):grid(std::move(geometry)) {
+        DataTransaction tx;tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},
+            std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,
+                std::make_shared<const std::vector<std::uint8_t>>(std::move(values)))}};
+        Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
+    }
     RoiDescriptor Create(std::vector<RoiVoxel> voxels,std::string name="A") {
         RoiNode node;node.primitive.shape=RoiShape::VoxelSet;node.primitive.voxels=MakeRoiVoxelFixture(voxels);
         RoiRequest request;request.definition={source,{node}};request.metadata.name=std::move(name);const auto result=service.SetRoi(request);
         Require(result.error==RoiError::None && result.roi,"ROI fixture failed");return *result.roi;
     }
     RoiReadSnapshot Read(const RoiDescriptor& roi) {auto read=RoiEvaluator::GetRoi(store.GetDataGraph(),roi.revision,roi.definition.source);Require(read.error==RoiError::None && read.roi,"ROI read failed");return read.roi;}
-    std::size_t Count(const RoiDescriptor& roi) {auto read=Read(roi);RoiMaskRequest r;r.region={{0,0,0},{9,9,9}};const auto mask=read->GetMaskChunk(r);Require(mask.error==RoiError::None,"mask read failed");std::size_t count=0;for (auto v:mask.values) count+=v;return count;}
+    std::size_t Count(const RoiDescriptor& roi) {auto read=Read(roi);RoiMaskRequest r;r.region={{0,0,0},{std::size_t(grid.dimensions[0]),std::size_t(grid.dimensions[1]),std::size_t(grid.dimensions[2])}};const auto mask=read->GetMaskChunk(r);Require(mask.error==RoiError::None,"mask read failed");std::size_t count=0;for (auto v:mask.values) count+=v;return count;}
     RoiOperationRequest Operation(const RoiDescriptor& target,RoiOperationParams params) {RoiOperationRequest r;r.source=source;r.target=target.revision;r.params=std::move(params);return r;}
 };
 void Morphology() {
@@ -256,5 +264,56 @@ void Compressed() {
     Require(count==729&&payload->GetRuns().size()==81,"archive paging lost members or changed compressed storage");
     std::cout<<"ROI compressed: members="<<large.GetVoxelCount()<<" runs="<<large.GetRuns().size()<<" publishedMembers=729 publishedRuns="<<payload->GetRuns().size()<<'\n';
 }
+void Islands() {
+    // 分散到不同的行并打乱 X 顺序，独立核对编号；耗时只作同条件比较，不设机器相关门限。
+    for(const int count:{4000,8000,16000}) {
+        GridGeometry3D grid;grid.extent={0,2,0,count*2-1,0,0};grid.dimensions={3,count*2,1};
+        Fixture f(grid,std::vector<std::uint8_t>(std::size_t(count)*6,10));
+        std::vector<RoiVoxel> voxels;std::vector<std::array<int,3>> ordered;
+        for(int i=0;i<count;++i){const std::array<int,3> point{(count-i)%3,i*2,0};voxels.push_back({point,1});ordered.push_back(point);}
+        std::sort(ordered.begin(),ordered.end());const auto input=f.Create(std::move(voxels));
+        RoiComponentParams params;params.operation=RoiComponentOperation::RemoveSmall;
+        auto request=f.Operation(input,params);request.output=RoiOutputMode::CreateNew;
+        const auto start=std::chrono::steady_clock::now();
+        const auto result=RoiService::GetOperation(f.store.GetDataGraph(),request);
+        const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        Require(result.error==RoiError::None && result.rois.size()==1 && result.componentVoxelCounts==std::vector<std::size_t>(count,1),"island membership/counts changed");
+        const auto& payload=result.rois.front().definition.nodes.front().primitive.voxels;
+        Require(payload && payload->GetRuns().size()==std::size_t(count),"islands lost compressed storage");
+        for(int i=0;i<count;++i)Require(payload->GetLabel(ordered[i])==std::uint32_t(i+1),"island labels changed lexicographic order");
+        std::cout<<"ROI islands="<<count<<" elapsedMs="<<elapsed<<std::endl;
+    }
 }
-int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}if(argc==2 && std::string(argv[1])=="compressed"){Compressed();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
+void IndexEndpoints() {
+    for(const int low:{INT_MIN,INT_MAX-2}) {
+        GridGeometry3D grid;grid.extent={low,low+2,low,low+2,low,low+2};grid.dimensions={3,3,3};
+        grid.origin={-double(low),-double(low),-double(low)};Fixture f(grid,std::vector<std::uint8_t>(27,10));
+        const auto center=f.Create({{{low+1,low+1,low+1},1}});
+        const auto countOperation=[&](const RoiDescriptor& roi,RoiOperationParams params){auto request=f.Operation(roi,std::move(params));request.output=RoiOutputMode::CreateNew;const auto result=f.service.SetOperation(request);Require(result.error==RoiError::None && result.rois.size()==1,"legal endpoint ROI operation failed");return f.Count(result.rois.front());};
+        Require(countOperation(center,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels})==7,"endpoint dilation changed neighbourhood");
+        Require(countOperation(center,RoiMorphologyParams{RoiMorphologyOperation::Erode,1,RoiRadiusUnit::Voxels})==0,"endpoint erosion changed neighbourhood");
+        Require(countOperation(center,RoiMorphologyParams{RoiMorphologyOperation::Open,1,RoiRadiusUnit::Voxels})==0,"endpoint opening changed support");
+        for(const int index:{low,low+2}) {
+            const auto corner=f.Create({{{index,index,index},1}});
+            Require(countOperation(corner,RoiMorphologyParams{RoiMorphologyOperation::Close,1,RoiRadiusUnit::Voxels})==1,"endpoint closing clipped intermediate halo");
+            Require(countOperation(corner,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels})==4,"endpoint dilation did not clip final support");
+        }
+        const auto corners=f.Create({{{low,low,low},1},{{low+2,low+2,low+2},1}});
+        for(const auto connectivity:{RoiConnectivity::Faces,RoiConnectivity::Full}) {
+            RoiComponentParams split;split.operation=RoiComponentOperation::Split;split.connectivity=connectivity;
+            const auto result=f.service.SetOperation(f.Operation(corners,split));
+            Require(result.error==RoiError::None && result.componentVoxelCounts==std::vector<std::size_t>{1,1}
+                && f.Read(result.rois.front())->GetContains({0,0,0}),"endpoint components or numbering changed");
+            RoiThresholdParams grow;grow.mode=RoiThresholdMode::SeedGrow;grow.range={10,10};grow.seeds={{2,2,2}};grow.connectivity=connectivity;
+            RoiOperationRequest request;request.source=f.source;request.output=RoiOutputMode::CreateNew;request.params=grow;
+            const auto grown=f.service.SetOperation(request);Require(grown.error==RoiError::None && f.Count(grown.rois.front())==27,"endpoint seed growth rejected legal terminal index");
+        }
+        std::vector<RoiVoxel> shell;
+        for(int z=0;z<3;++z)for(int y=0;y<3;++y)for(int x=0;x<3;++x)
+            if(std::array<int,3>{x,y,z}!=std::array<int,3>{1,1,1} && std::array<int,3>{x,y,z}!=std::array<int,3>{2,2,2})shell.push_back({{low+x,low+y,low+z},1});
+        RoiComponentParams fill;fill.operation=RoiComponentOperation::FillHoles;
+        Require(countOperation(f.Create(std::move(shell)),fill)==26,"endpoint fill did not distinguish cavity from exterior");
+    }
+}
+}
+int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="endpoints"){IndexEndpoints();return 0;}if(argc==2 && std::string(argv[1])=="islands"){Islands();return 0;}if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}if(argc==2 && std::string(argv[1])=="compressed"){Compressed();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
