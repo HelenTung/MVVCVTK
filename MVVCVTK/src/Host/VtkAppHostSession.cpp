@@ -83,6 +83,20 @@ bool RoiService::ReleaseTransientScopes(AbstractDataManager& data,
         }
     }
     if (scopes.empty()) return releasingScopes.empty();
+    // 显式 ROI 的下游 Surface/计量等结果同样保留到用户卸载，Feature detach 不负责退休。
+    // Session 停止时收集这一显式派生闭包；OwnerRetirement 消费者仍由其 Feature 先清理。
+    std::vector<DataRevisionRef> pending(retiringRefs.begin(), retiringRefs.end());
+    for (std::size_t index = 0; index < pending.size(); ++index)
+        for (const auto& ref : graph.view->GetDerivedData(pending[index])) {
+            const auto derived = graph.view->GetData(ref);
+            if (!derived || derived->lifetimePolicy != DataLifetimePolicy::ExplicitRetirement
+                || !GetDataEntityIdValid(derived->lifetimeScope) || scopes.count(derived->lifetimeScope)) continue;
+            const auto lifetime = data.GetDataLifetime(derived->lifetimeScope);
+            if (lifetime.status != DataLifetimeStatus::Published) continue;
+            scopes.emplace(lifetime.scopeId, lifetime);
+            for (const auto& owned : lifetime.ownedRevisions)
+                if (retiringRefs.insert(owned).second) pending.push_back(owned);
+        }
     const auto scopeCount = scopes.size();
     // ROI 可能再次成为裁切等生产者的输入。先回收没有集合外消费者的叶层，
     // 其余 scope 等对应 Feature 关闭后重试，不能让上游 ROI 阻塞整个清理批次。

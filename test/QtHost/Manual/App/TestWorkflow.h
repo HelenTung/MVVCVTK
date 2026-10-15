@@ -54,6 +54,8 @@ public:
     std::function<void(const QString&)> onShowStatistics;
     std::map<QString,std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)>> readReports;
     std::function<void(const QString&,const QString&)> onShowReports;
+    std::function<void(const QString&,const QString&)> onShowBusinessReport;
+    std::function<bool(const QString&,const QString&)> getReportAvailable;
     std::function<void()> ensureCropViews;
     std::function<bool(const QString&, const QString&)> getActionAvailable;
     std::function<bool(const std::string&)> getRenderPending;

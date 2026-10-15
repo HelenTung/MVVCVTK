@@ -7,6 +7,10 @@
 #include <QPointer>
 #include <QFile>
 #include <QTextStream>
+#include <QDir>
+#include <QFileInfo>
+#include <QSaveFile>
+#include <QLocale>
 #include <cmath>
 namespace Manual {
 namespace {
@@ -178,6 +182,53 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         panel->SetComplete(id, "Observed", {{"mesh", GetRefText(snapshot->meshRevision)}, {"source", GetRefText(snapshot->sourceRevision)},
             {"samples", samples}, {"totalPoints", QString::number(points.size())}});
     }, TestPolicy::Read);
+    panel->AttachAction("ExportNominalMeshFixture", {{"outputPath", ""}, {"transform", GetValues(roiIdentityMatrix)}, {"selectionOnly", true}},
+        [panel, feature](auto id, const auto& p) {
+            const auto input = panel->GetSession()->GetImageDescriptor();
+            const auto snapshot = feature->GetSurfaceSnapshot();
+            if (!snapshot || !input || snapshot->sourceRevision != input->dataRevision
+                || !snapshot->points || !snapshot->triangleIndices || snapshot->triangleIndices->empty())
+                throw std::invalid_argument("当前输入没有正式测量表面");
+            const auto transform = GetAffineMatrix(p["transform"], true);
+            const auto path = GetText(p, "outputPath");
+            if (!QDir().mkpath(QFileInfo(path).absolutePath())) throw std::runtime_error("无法创建参考网格目录");
+            QSaveFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) throw std::runtime_error("无法保存参考网格");
+            QTextStream text(&file); text.setLocale(QLocale::c()); text.setRealNumberPrecision(17);
+            // 仅供真实 CT 已知刚体变换回归；不作为外部名义 CAD 或计量精度参考。
+            text << "solid measured_surface_regression\n";
+            const auto& triangles = *snapshot->triangleIndices;
+            if (triangles.size() % 3) throw std::runtime_error("正式表面三角形索引不完整");
+            std::size_t triangleCount = 0;
+            const auto facet = [&](const std::array<std::array<double,3>,3>& points) {
+                text << "facet normal 0 0 0\nouter loop\n";
+                for (const auto& point : points) {
+                    text << "vertex";
+                    for (int row = 0; row < 3; ++row)
+                        text << ' ' << transform[row*4]*point[0] + transform[row*4+1]*point[1]
+                            + transform[row*4+2]*point[2] + transform[row*4+3];
+                    text << '\n';
+                }
+                text << "endloop\nendfacet\n";
+                ++triangleCount;
+            };
+            if (GetBool(p,"selectionOnly") && snapshot->selection) {
+                for (const auto& piece : *snapshot->selection) facet(piece.points);
+            } else for (std::size_t face = 0; face < triangles.size(); face += 3) {
+                std::array<std::array<double,3>,3> points;
+                for (std::size_t corner = 0; corner < 3; ++corner) {
+                    const auto index = triangles[face + corner];
+                    if (index >= snapshot->points->size()) throw std::runtime_error("正式表面三角形索引越界");
+                    points[corner] = (*snapshot->points)[index].positionModel;
+                }
+                facet(points);
+            }
+            if (!triangleCount) throw std::runtime_error("参考表面选区为空");
+            text << "endsolid measured_surface_regression\n"; text.flush();
+            if (text.status() != QTextStream::Ok || !file.commit()) throw std::runtime_error("参考网格输出不完整");
+            panel->SetComplete(id, "Exported", {{"mesh", GetRefText(snapshot->meshRevision)},
+                {"source", GetRefText(snapshot->sourceRevision)}, {"triangleCount", QString::number(triangleCount)}});
+        }, TestPolicy::Read);
     panel->AttachAction("MeasurementSelection", {{"minSupportRatio", .5}, {"maxLocalizationSigma", .5}, {"maxSurfaceFitResidual", 1.}},
         [panel, feature](auto id, const auto& p) {
             const auto snapshot = feature->GetSurfaceSnapshot();

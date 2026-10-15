@@ -114,6 +114,16 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
                 {"dims", GetValues(value.dims)}});
         panel->SetComplete(id, "Observed", {{"labels", labels}});
     }, TestPolicy::Read);
+    panel->AttachAction("RoiDescriptors", {{"namePrefix", ""}}, [panel](auto id, const auto& params) {
+        QJsonArray rois;
+        for (const auto& value : panel->GetSession()->GetRoiDescriptors()) {
+            if (!QString::fromStdString(value.metadata.name).startsWith(GetText(params, "namePrefix"))) continue;
+            rois.append(QJsonObject{{"roi", GetRefText(value.revision)},
+                {"source", GetRefText(value.definition.source)},
+                {"name", QString::fromStdString(value.metadata.name)}});
+        }
+        panel->SetComplete(id, "Observed", {{"rois", rois}, {"count", rois.size()}});
+    }, TestPolicy::Read);
     panel->AttachAction("ReadWallInputs", {{"labels", ""}, {"mesh", ""}}, [panel, reference](auto id, const auto& params) {
         panel->SetComplete(id, "Observed", reference->ReadWallInputs(GetRef(params["labels"]), GetRef(params["mesh"])));
     }, TestPolicy::Read);

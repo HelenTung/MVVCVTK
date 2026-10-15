@@ -51,7 +51,7 @@ std::string CreateParameters(const ArtifactRequest& request)
     if (request.diffusion) {
         const auto& d = *request.diffusion;
         stream << "{\"iterations\":" << d.iterations << ",\"threshold\":" << d.threshold << ",\"factor\":" << d.factor
-            << ",\"slabDepth\":" << d.slabDepth << ",\"neighbors\":26,\"gradientMagnitude\":false}";
+            << ",\"slabDepth\":" << d.slabDepth << ",\"neighbors\":26,\"gradientMagnitude\":false,\"explicitMaskBoundary\":\"no-flux\"}";
     }
     else stream << "null";
     stream << ",\"timeoutMs\":" << (WorkLimit(request.timeoutMs).GetValue() ? WorkLimit(request.timeoutMs).GetText() : "null") << '}';
@@ -218,17 +218,28 @@ AlgorithmResult BuildArtifactCandidate(const AlgorithmInput& input,
         result.error = GetInputError(input, request, config, result.requiredBytes, &diffusionWorkers);
         if (result.error != ArtifactError::None) return result;
         const VolumeView source(input);
-        const bool hasProcessing = (request.ring && request.ring->strength > 0.0)
+        const bool hasRing = request.ring && request.ring->strength > 0.0;
+        const bool hasProcessing = hasRing
             || (request.diffusion && request.diffusion->factor > 0.0);
+        const auto& validity = input.image->GetValidityMask();
         std::vector<float> values(source.GetCount());
-        // 1. 转换到独立float32缓冲；任何缺失估计上下文均拒绝，不做填零恢复。
+        // 1. 转换到独立 float32 缓冲。显式裁切外域作为扩散无通量边界，不能参与邻域估计。
         for (std::size_t i = 0; i < values.size(); ++i) {
             if ((i & 4095) == 0) {
                 result.error = control.GetError();
                 if (result.error != ArtifactError::None) return result;
                 control.progress.store(static_cast<unsigned int>(10.0 * i / values.size()), std::memory_order_relaxed);
             }
-            if (hasProcessing && !source.GetValid(i)) { result.error = ArtifactError::UnsupportedValidity; return result; }
+            if (hasProcessing && !source.GetValid(i)) {
+                // VTK 9.4.2 的逐邻点梯度阈值仅累加 fabs(delta)<threshold 的贡献；
+                // NaN 屏障会一直保持且不向有效邻点扩散。最终写回恢复外域原始字节。
+                // 环形核仍要求完整截面；未由显式掩码排除的 NaN/NoData 继续拒绝。
+                if (hasRing || !validity || (*validity)[i] != 0) {
+                    result.error = ArtifactError::UnsupportedValidity; return result;
+                }
+                values[i] = std::numeric_limits<float>::quiet_NaN();
+                continue;
+            }
             if (input.image->GetValueType() == ImageValueType::Float32)
                 std::memcpy(&values[i], input.image->GetValues()->data() + i * sizeof(float), sizeof(float));
             else values[i] = static_cast<float>(source.GetValue(i));
