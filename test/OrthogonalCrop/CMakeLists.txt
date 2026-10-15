@@ -8,6 +8,7 @@ add_executable(
     CropMeshTests.cpp
     CropCurveWidgetTests.cpp
     CropSphereVisualTests.cpp
+    CropCylinderVisualTests.cpp
     CropBridgeTests.cpp
     CropBridgeTests.h
     CropShaderPreviewTests.cpp
@@ -76,3 +77,8 @@ SetTestRuntime(OrthogonalCrop.Widgets mvvcvtk_crop_tests)
 
 add_test(NAME OrthogonalCrop.SphereVisual COMMAND mvvcvtk_crop_tests sphere-visual)
 SetTestRuntime(OrthogonalCrop.SphereVisual mvvcvtk_crop_tests)
+
+add_test(NAME OrthogonalCrop.CylinderVisual COMMAND mvvcvtk_crop_tests cylinder-visual)
+SetTestRuntime(OrthogonalCrop.CylinderVisual mvvcvtk_crop_tests)
+add_test(NAME OrthogonalCrop.ShaderPreview COMMAND mvvcvtk_crop_tests shader)
+SetTestRuntime(OrthogonalCrop.ShaderPreview mvvcvtk_crop_tests)

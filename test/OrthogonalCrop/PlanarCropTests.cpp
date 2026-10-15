@@ -10,6 +10,7 @@ int GetCropGeometryFailures();
 int GetCropMeshFailures();
 int GetCropCurveWidgetFailures();
 int GetCropSphereVisualFailures();
+int GetCropCylinderVisualFailures();
 
 int main(int argc, char* argv[])
 {
@@ -17,6 +18,7 @@ int main(int argc, char* argv[])
         argc > 1 && argv[1] ? argv[1] : "all";
     if (suite == "widgets") return GetCropCurveWidgetFailures() == 0 ? 0 : 1;
     if (suite == "sphere-visual") return GetCropSphereVisualFailures() == 0 ? 0 : 1;
+    if (suite == "cylinder-visual") return GetCropCylinderVisualFailures() == 0 ? 0 : 1;
     if (suite == "history") return GetCropHistoryFailures() == 0 ? 0 : 1;
     if (suite == "mesh") return GetCropMeshFailures() == 0 ? 0 : 1;
     if (suite == "geometry") return GetCropGeometryFailures() == 0 ? 0 : 1;
@@ -43,6 +45,7 @@ int main(int argc, char* argv[])
 
     int failureCount = GetCropHistoryFailures() + GetCropGeometryFailures() + GetCropMeshFailures() + GetCropCurveWidgetFailures();
     failureCount += GetCropSphereVisualFailures();
+    failureCount += GetCropCylinderVisualFailures();
     failureCount += CropAlgorithmSuite().GetFailCount();
     failureCount += CropBridgeSuite().GetFailCount();
     failureCount += CropShaderPreviewSuite().GetFailCount();
