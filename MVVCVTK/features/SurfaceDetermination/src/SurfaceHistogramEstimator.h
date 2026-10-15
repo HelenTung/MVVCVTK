@@ -19,8 +19,10 @@ struct SurfaceHistogramInput final
 class SurfaceHistogramEstimator final
 {
 public:
-    static constexpr std::size_t GetWorkingBytes() noexcept { return 64U * 1024U; }
+    static constexpr std::size_t GetWorkingBytes() noexcept { return 64U * 1024U + fineBinCount*sizeof(std::uint64_t); }
     static SurfaceFailureReason BuildEstimate(const SurfaceHistogramInput& input, WorkLimit budget,
         const std::function<bool()>& cancelled, std::optional<SurfaceIsoEstimate>& estimate,
         std::string& message);
+private:
+    static constexpr std::size_t fineBinCount = 65536;
 };

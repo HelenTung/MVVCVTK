@@ -1783,6 +1783,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     result.requiredBytes = 64 * 1024;
     if (maxWorkingBytes < result.requiredBytes)
         return fail(SurfaceFailureReason::BudgetExceeded, "Surface fixed workspace exceeds the budget.");
+    if (!inputParams.initialIsoValue && !inputParams.materialRange)
+        result.requiredBytes = SurfaceHistogramEstimator::GetWorkingBytes();
     SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
     params.roi = inputs.roi;

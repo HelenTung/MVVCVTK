@@ -10,6 +10,24 @@
 namespace {
 constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
+// 冻结的统一计数起伏规则；它用于识别浅谷，不是空间独立性或物理置信度声明。
+constexpr double peakCountMargin = 5.0;
+template<class Counts> double GetSmoothCount(const Counts& counts, const std::size_t index,
+    const std::size_t radius=2, const bool isEdgeNormalized=true)
+{
+    double sum = 0, weight = 0;
+    const auto begin = index > radius ? index-radius : 0;
+    const auto end = std::min(counts.size()-1,index+radius);
+    for (auto i=begin; i<=end; ++i) {
+        const auto distance=i>index ? i-index : index-i;
+        const auto w=static_cast<double>(radius+1-distance);
+        sum += w*static_cast<double>(counts[i]);
+        weight += w;
+    }
+    // 细桶用固定核质量，范围外为零；不能在首尾重新放大截断核，使端点尖峰压过邻近总体。
+    const auto fullWeight=static_cast<double>(radius+1)*static_cast<double>(radius+1);
+    return sum/(isEdgeNormalized ? weight : fullWeight);
+}
 std::size_t GetIndex(const SurfaceHistogramInput& input, const std::int64_t x,
     const std::int64_t y, const std::int64_t z)
 {
@@ -31,6 +49,7 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
             return SurfaceFailureReason::InvalidGeometry;
         count *= static_cast<std::size_t>(dimension);
     }
+    if (cancelled && cancelled()) return SurfaceFailureReason::Cancelled;
     if (budget < GetWorkingBytes()) {
         message = "Surface histogram workspace exceeds the budget.";
         return SurfaceFailureReason::BudgetExceeded;
@@ -44,9 +63,9 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
     {
         sampleSteps[a] = (static_cast<std::int64_t>(input.dimensions[a]) + 127) / 128;
     }
-    // 范围和直方图使用同一采样集合。独立的 16^3 预采样会避开薄壁材料，
-    // 随后把真正的材料峰作为越界值丢弃，并把背景附近的次峰误认作材料。
-    // 只保留每侧 17 个极值，以固定空间排除最多 16 个孤立极端样本。
+    // 固定格点先界定健壮灰度范围；不使用更稀疏的独立16^3预采样，避免漏掉薄材料。
+    // 随后的全有效域计数明确排除越界值，粗细桶共用同一个范围和体素集合。
+    // 定范围时每侧只保留17个采样极值，最多跳过其中16个；全卷越界体素另计排除数。
     constexpr std::size_t tailCapacity = 17;
     std::array<double, tailCapacity> lowest{}, highest{};
     lowest.fill(std::numeric_limits<double>::max());
@@ -54,7 +73,7 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
     for (std::int64_t z = extent[4] + sampleSteps[2] / 2; z <= extent[5]; z += sampleSteps[2])
         for (std::int64_t y = extent[2] + sampleSteps[1] / 2; y <= extent[3]; y += sampleSteps[1])
         {
-            if ((cancelled && cancelled()))
+            if (cancelled && cancelled())
                 return SurfaceFailureReason::Cancelled;
             for (std::int64_t x = extent[0] + sampleSteps[0] / 2; x <= extent[1]; x += sampleSteps[0])
             {
@@ -88,62 +107,41 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
         return SurfaceFailureReason::ThresholdUnreliable;
     }
 
+    // 同一原始有效集合同时进入粗细桶；越出健壮范围和非有限值计入排除数。
     validCount = 0;
     std::array<std::uint64_t, histogramBinCount> histogram{};
-    const double scale = static_cast<double>(histogramBinCount - 1)
-        / (maximum - minimum);
-    for (std::int64_t zValue = extent[4] + sampleSteps[2] / 2;
-        zValue <= static_cast<std::int64_t>(extent[5]); zValue += sampleSteps[2]) {
-        const int z = static_cast<int>(zValue);
-        if ((cancelled && cancelled())) {
-            message = "Surface threshold estimation was cancelled.";
+    std::vector<std::uint64_t> fineHistogram(fineBinCount);
+    const double scale = static_cast<double>(histogramBinCount-1)/(maximum-minimum);
+    const auto fineWidth = (maximum-minimum)/static_cast<double>(fineBinCount-1);
+    const auto fineScale = static_cast<double>(fineBinCount-1)/(maximum-minimum);
+    for (std::size_t index=0; index<count; ++index) {
+        if ((index & 65535U)==0 && cancelled && cancelled()) {
+            message = "Surface histogram estimation was cancelled.";
             return SurfaceFailureReason::Cancelled;
         }
-        for (std::int64_t yValue = extent[2] + sampleSteps[1] / 2;
-            yValue <= static_cast<std::int64_t>(extent[3]); yValue += sampleSteps[1]) {
-            const int y = static_cast<int>(yValue);
-            for (std::int64_t xValue = extent[0] + sampleSteps[0] / 2;
-                xValue <= static_cast<std::int64_t>(extent[1]); xValue += sampleSteps[0]) {
-                const int x = static_cast<int>(xValue);
-                const std::size_t tupleIndex = GetIndex(input, x, y, z);
-                if (input.validity && input.validity[tupleIndex] == 0) {
-                    continue;
-                }
-                const double value = input.readScalar(input.values, tupleIndex);
-                if (!std::isfinite(value) || value < minimum || value > maximum)
-                {
-                    ++excludedCount;
-                    continue;
-                }
-                ++validCount;
-                const auto bin = static_cast<std::size_t>(std::clamp(
-                    std::llround((value - minimum) * scale),
-                    0LL,
-                    static_cast<long long>(histogramBinCount - 1)));
-                ++histogram[bin];
-            }
+        if (input.validity && input.validity[index]==0) continue;
+        const auto value = input.readScalar(input.values,index);
+        if (!std::isfinite(value) || value<minimum || value>maximum) {
+            ++excludedCount;
+            continue;
         }
+        ++validCount;
+        const auto coarse = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*scale),
+            0LL,static_cast<long long>(histogramBinCount-1)));
+        const auto fine = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*fineScale),
+            0LL,static_cast<long long>(fineBinCount-1)));
+        ++histogram[coarse];
+        ++fineHistogram[fine];
     }
 
     std::array<double, histogramBinCount> smooth{};
-    for (std::size_t index = 0; index < histogramBinCount; ++index) {
-        double sum = 0.0;
-        double weight = 0.0;
-        const std::size_t begin = index > 2 ? index - 2 : 0;
-        const std::size_t end = std::min(
-            histogramBinCount - 1, index + 2);
-        for (std::size_t sample = begin; sample <= end; ++sample) {
-            const double localWeight = sample == index ? 3.0
-                : (sample + 1 == index || sample == index + 1 ? 2.0 : 1.0);
-            sum += localWeight * static_cast<double>(histogram[sample]);
-            weight += localWeight;
-        }
-        smooth[index] = sum / weight;
-    }
+    for (std::size_t index = 0; index < histogramBinCount; ++index)
+        smooth[index] = GetSmoothCount(histogram,index);
 
     struct Peak final {
         std::size_t index = 0;
         double height = 0.0;
+        std::size_t left = 0, right = histogramBinCount;
     };
     std::vector<Peak> peaks;
     peaks.reserve(histogramBinCount);
@@ -175,7 +173,10 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
                 const auto low = std::min(peak.index, group.index), high = std::max(peak.index, group.index);
                 if (high-low < minimumSeparation) return false;
                 const auto valley = *std::min_element(smooth.begin()+low, smooth.begin()+high+1);
-                return valley <= 0.7 * std::min(peak.height, group.height);
+                const auto lowerPeak = std::min(peak.height, group.height);
+                // 保留深谷及薄材料原规则；计数充足的浅谷也能与局部计数起伏区分。
+                return valley <= 0.7 * lowerPeak
+                    || lowerPeak-valley >= peakCountMargin*std::sqrt(lowerPeak+valley);
             });
             if (separated) groups.push_back(peak);
         }
@@ -187,6 +188,8 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
             const auto right = i+1 < groups.size()
                 ? std::min_element(smooth.begin()+groups[i].index, smooth.begin()+groups[i+1].index+1)-smooth.begin()
                 : static_cast<std::ptrdiff_t>(histogramBinCount);
+            groups[i].left = static_cast<std::size_t>(left);
+            groups[i].right = static_cast<std::size_t>(right);
             counts.push_back(std::accumulate(histogram.begin()+left, histogram.begin()+right, std::uint64_t{0}));
         }
         if (!counts.empty()) {
@@ -209,11 +212,45 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
 
     const double binWidth = (maximum - minimum)
         / static_cast<double>(histogramBinCount - 1);
-    const double background = minimum
-        + static_cast<double>(selected->first.index) * binWidth;
-    const double material = minimum
-        + static_cast<double>(selected->second.index) * binWidth;
-    isoValue = 0.5 * (background + material);
+    // 同一集合的512桶用于分群及诊断，细桶只在已选峰的局部范围细化峰位。
+    // 不使用最终表面或参考答案重建灰度分布。
+    // 粗核[1,2,3,2,1]/9的方差为4/3个粗桶平方。连续三角核方差为r²/6，
+    // 因此用sqrt(8)个粗桶确定细核半径；不能把整数灰度量化的小起伏当成更精细的峰。
+    const auto fineRadius=static_cast<std::size_t>(std::ceil(std::sqrt(8.0)*
+        static_cast<double>(fineBinCount-1)/static_cast<double>(histogramBinCount-1)));
+    bool refinementCancelled=false;
+    const auto getPeakValue = [&](const Peak& peak) -> std::optional<double> {
+        if (refinementCancelled) return std::nullopt;
+        const auto valleyLeft = peak.left==0 ? minimum : minimum+(static_cast<double>(peak.left)-0.5)*binWidth;
+        const auto valleyRight = peak.right==histogramBinCount ? maximum : minimum+(static_cast<double>(peak.right)-0.5)*binWidth;
+        // 细化不越过粗峰的半个分离间距，避免把已合并的背景次峰重新选成薄材料。
+        const auto halfDistance = 0.5*static_cast<double>(minimumSeparation);
+        const auto left = std::max(valleyLeft,minimum+(static_cast<double>(peak.index)-halfDistance)*binWidth);
+        const auto right = std::min(valleyRight,minimum+(static_cast<double>(peak.index)+halfDistance)*binWidth);
+        const auto first = static_cast<std::size_t>(std::clamp(std::ceil((left-minimum)/fineWidth),
+            0.0,static_cast<double>(fineBinCount-1)));
+        const auto last = static_cast<std::size_t>(std::clamp(std::floor((right-minimum)/fineWidth),
+            0.0,static_cast<double>(fineBinCount-1)));
+        double height = 0;
+        auto selectedIndex = first;
+        for (auto i=first; i<=last; ++i) {
+            if ((i&63U)==0 && cancelled && cancelled()) {refinementCancelled=true;return std::nullopt;}
+            const auto value = GetSmoothCount(fineHistogram,i,fineRadius,false);
+            if (value>height) { height=value; selectedIndex=i; }
+        }
+        return height>0 ? std::optional<double>{minimum+static_cast<double>(selectedIndex)*fineWidth} : std::nullopt;
+    };
+    const auto backgroundPeak = getPeakValue(selected->first), materialPeak = getPeakValue(selected->second);
+    if (refinementCancelled) {
+        message="Surface peak refinement was cancelled.";
+        return SurfaceFailureReason::Cancelled;
+    }
+    if (!backgroundPeak || !materialPeak) {
+        message = "Selected material groups have no finite full-volume histogram support.";
+        return SurfaceFailureReason::ThresholdUnreliable;
+    }
+    const double background = *backgroundPeak, material = *materialPeak;
+    isoValue = 0.5 * background + 0.5 * material;
     if (!std::isfinite(isoValue) || material <= background) {
         message = "Surface material range estimation produced an invalid threshold.";
         return SurfaceFailureReason::ThresholdUnreliable;
@@ -221,12 +258,11 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
     estimate = SurfaceIsoEstimate{
         isoValue,      background,
         material,      validCount,
-        excludedCount, double(selected->second.index - selected->first.index) / (histogramBinCount - 1)};
+        excludedCount, (material-background)/(maximum-minimum)};
     estimate->histogramCounts=histogram;
     estimate->histogramEdges.front()=minimum;
     estimate->histogramEdges.back()=maximum;
     for(std::size_t i=1;i<histogramBinCount;++i) estimate->histogramEdges[i]=minimum+(static_cast<double>(i)-0.5)*binWidth;
-    for(std::size_t axis=0;axis<3;++axis) estimate->histogramSampleSteps[axis]=static_cast<int>(sampleSteps[axis]);
+    estimate->histogramSampleSteps = {1,1,1};
     return SurfaceFailureReason::None;
 }
-

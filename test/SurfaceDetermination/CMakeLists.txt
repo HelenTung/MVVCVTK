@@ -3,6 +3,7 @@ add_executable(
     SurfaceDeterminationAlgorithmTests.cpp
     SurfaceDeterminationHistogramTests.cpp
     SurfaceHistogramAudit.cpp
+    SurfaceHistogramSessionTests.cpp
     SurfaceDeterminationOptimizationTests.cpp
     SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
@@ -75,6 +76,12 @@ unset(_mvvcvtk_surface_suite)
 add_test(NAME SurfaceDetermination.histogram-audit-schema
     COMMAND mvvcvtk_surface_determination_tests --histogram-audit-schema)
 SetTestRuntime(SurfaceDetermination.histogram-audit-schema mvvcvtk_surface_determination_tests)
+set(MVVCVTK_SURFACE_SESSION_AUDIT_ARGS "" CACHE STRING "Optional real Host Surface session audit arguments")
+if(MVVCVTK_SURFACE_SESSION_AUDIT_ARGS)
+    add_test(NAME SurfaceDetermination.real-histogram-session
+        COMMAND mvvcvtk_surface_determination_tests --real-histogram-session ${MVVCVTK_SURFACE_SESSION_AUDIT_ARGS})
+    SetTestRuntime(SurfaceDetermination.real-histogram-session mvvcvtk_surface_determination_tests)
+endif()
 
 # 同一审计入口分别链接原始基线与候选，实现数值、资源及端到端对照。
 add_executable(mvvcvtk_surface_acceleration_audit SurfaceAccelerationAudit.cpp)

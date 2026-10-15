@@ -10,6 +10,7 @@ int GetSurfaceRealInputFailCount(const char* path,int nx,int ny,int nz,double is
 int GetSurfaceAlgorithmFailCount();
 int GetSurfaceHistogramFailCount();
 int GetSurfaceHistogramAuditResult(int argc, char* argv[]);
+int GetSurfaceHistogramSessionResult(int argc, char* argv[]);
 int GetSurfaceGeometryFailCount();
 int GetSurfaceLifecycleFailCount();
 int GetSurfaceDisplayFailCount();

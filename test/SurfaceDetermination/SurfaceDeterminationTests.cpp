@@ -45,6 +45,10 @@ int main(int argc, char* argv[])
         try { return GetSurfaceHistogramAuditResult(argc, argv); }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 2; }
     }
+    if (argc>1 && std::string_view(argv[1])=="--real-histogram-session") {
+        try { return GetSurfaceHistogramSessionResult(argc,argv); }
+        catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+    }
     if(argc==9&&std::string_view(argv[1])=="--real-entry") {
         try {
             return GetSurfaceRealInputFailCount(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),
