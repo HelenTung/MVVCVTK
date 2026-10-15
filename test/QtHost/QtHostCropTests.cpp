@@ -2623,6 +2623,13 @@ int GetCropFailCount()
     }
     const auto finalSnapshot =
         contextProbe->m_data->GetPrimaryImage();
+    if (secondExpected && secondSnapshot && secondSnapshot->binding->revision != secondExpected->binding->revision)
+        std::cerr << "Repeated crop binding diagnostic: before=" << secondExpected->binding->revision
+            << " after=" << secondSnapshot->binding->revision << " built=" << isSecondBuilt
+            << " completions=" << secondCompleteCount << " succeeded=" << secondResult.isSucceeded
+            << " expectedRoot=" << (secondExpected->data->self == fixedRoot)
+            << " actualRoot=" << (secondSnapshot->data->self == fixedRoot)
+            << " sourceRoot=" << (secondResult.sourceRevision == fixedRoot) << std::endl;
     failureCount += GetCaseResult(
         isRestarted
             && isRestartModeSet
@@ -2652,7 +2659,8 @@ int GetCropFailCount()
             && GetDataRevisionRefValid(secondResult.outputRevision)
             && secondSnapshot
             && secondSnapshot->data->self == fixedRoot
-            && secondSnapshot->binding->revision == secondExpected->binding->revision + 1
+            // 已在固定 Root 上发布历史结果，不应无故改版主输入绑定。
+            && secondSnapshot->binding->revision == secondExpected->binding->revision
             && isFinalReloadSent
             && isFinalReloadComplete
             && isFinalReloadSucceeded

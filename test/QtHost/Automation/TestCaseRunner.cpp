@@ -2650,6 +2650,8 @@ void StartSequence(TestWindow& window, const QString& path)
         }
         const auto record = GetComplete(window, id, {}, static_cast<int>(timeout));
         // 合法终态集合只描述可观测结局；实际质量状态仍完整保留在 record 中。
+        if (!expected.contains(record["status"].toString()) && step.contains("businessCapture"))
+            SaveBusinessCapture(window,GetText(step,"businessCapture"),step,id);
         Check(expected.contains(record["status"].toString()), ("expected terminal status " + expected.join(" / ")).toStdString().c_str());
         if (step.contains("expectMessageContains"))
             Check(record["result"].toObject()["message"].toString().contains(GetText(step,"expectMessageContains")),

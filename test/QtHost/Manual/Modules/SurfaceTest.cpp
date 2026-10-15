@@ -92,7 +92,8 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 summary["requestId"] = QString::number(result.requestId);
                 summary["failureReason"] = static_cast<int>(result.failureReason);
                 summary["status"] = static_cast<int>(result.status);
-                summary["message"] = QString::fromStdString(result.message);
+                summary["message"] = result.status == SurfaceResultStatus::Cancelled
+                    ? QString("表面测定已取消。") : QString::fromStdString(result.message);
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"
                     : result.status == SurfaceResultStatus::Cancelled ? "Cancelled" : "Failed", summary);
             });

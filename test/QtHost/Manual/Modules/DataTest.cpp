@@ -114,6 +114,9 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
                 {"dims", GetValues(value.dims)}});
         panel->SetComplete(id, "Observed", {{"labels", labels}});
     }, TestPolicy::Read);
+    panel->AttachAction("ReadWallInputs", {{"labels", ""}, {"mesh", ""}}, [panel, reference](auto id, const auto& params) {
+        panel->SetComplete(id, "Observed", reference->ReadWallInputs(GetRef(params["labels"]), GetRef(params["mesh"])));
+    }, TestPolicy::Read);
     panel->AttachAction("ReadLabelRegion", GetJson(R"({"id":"","revision":"","offset":[0,0,0],"size":[1,1,1]})"),
         [panel](auto id, const auto& params) {
             LabelMapReadRequest request;
