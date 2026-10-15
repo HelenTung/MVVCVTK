@@ -11,6 +11,7 @@
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
 #include "Support/ResultReport.h"
+#include "ReportWorkflowTests.h"
 #include "Support/WorkbenchStyle.h"
 #include <QTabWidget>
 #include <QDialog>
@@ -997,13 +998,11 @@ void CheckParameterLayout(TestWindow& window)
     QJsonArray largeReport; for (int index = 0; index < 1010; ++index) largeReport.append(index);
     secondRecord["result"] = QJsonObject{{"rows",largeReport}};
     reportView.SetRecord(firstRecord); reportView.SetRecord(secondRecord);
-    Check(reportView.findChild<QComboBox*>("reportOperation")->count() == 2
-        && reportView.GetSelectedRecord()["operationId"] == "8", "report stores terminal operations and selects the latest completion");
+    Check(reportView.GetSelectedRecord()["operationId"] == "7", "new completion preserves report selection");
+    reportView.SelectReport("operation:8");
     reportView.show(); QCoreApplication::processEvents();
-    bool reportLimited = false;
-    for (auto* table : reportView.findChildren<QTableWidget*>("reportTable")) reportLimited = reportLimited || table->rowCount() == 1000;
-    Check(reportLimited && GetReportCsv(reportView.GetSelectedRecord()).contains("rows[1009]"), "report preview is bounded while CSV includes the final row");
-    reportView.findChild<QComboBox*>("reportOperation")->setCurrentIndex(0);
+    Check(reportView.GetSelectedReport().table->GetCount() > 1000 && GetReportCsv(reportView.GetSelectedRecord()).contains("rows[1009]"), "report keeps all rows in a paged model");
+    reportView.SelectReport("operation:7");
     Check(reportView.GetSelectedRecord()["operationId"] == "7", "report can select an earlier completed operation without changing business state");
     reportView.hide();
 #if defined(MANUAL_ROI)
@@ -2874,6 +2873,7 @@ void StartSequence(TestWindow& window, const QString& path)
             CheckNodeParameters(window);
         }
         if (step.contains("saveAs")) results[GetText(step, "saveAs")] = record;
+        if(script["checkReports"].toBool())CheckBusinessReport(window,record);
         if (step.contains("expectedTransform")) {
             const auto expectedTransform = GetArray<double, 16>(step["expectedTransform"]);
             const auto actual = GetArray<double, 16>(record["result"].toObject()["sourceToTarget"]);

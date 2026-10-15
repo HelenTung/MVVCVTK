@@ -17,6 +17,7 @@ public:
         const QJsonArray& moduleNodes, const QString& current, const QStringList& roiActions,
         std::optional<double> currentOpacity = {});
     std::function<void(const QString&, const QString&, const QJsonObject&)> onAction;
+    std::function<void(const QString&,const QString&)> onReport;
 private:
     void SetSelection();
     void FilterObjects();
