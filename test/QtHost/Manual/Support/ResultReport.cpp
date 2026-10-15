@@ -467,7 +467,8 @@ void ResultReport::ContinueGeneration()
         m_completedOperations.insert(m_buildingOperation);m_pendingReports.remove(m_buildingOperation);m_buildingOperation.clear();
         const auto source=m_sourceFilter,result=m_resultFilter,module=m_moduleFilter;
         for(auto& doc:documents)AddReport(std::move(doc));
-        ShowReports(source,result,module);setProperty("reportGenerationBusy",false);m_taskStatus->setText("业务报告已生成");
+        ShowReports(source,result,module);setProperty("reportGenerationBusy",false);
+        m_taskStatus->setText(documents.isEmpty()?"没有新增报告；已归档、已移除或精确结果已不可读取。":"业务报告已生成");
         m_buildTimer->start(0);
     }catch(const std::exception& e) {
         m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);
