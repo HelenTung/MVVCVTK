@@ -12,7 +12,9 @@ struct PartPreviewDisplay : std::enable_shared_from_this<PartPreviewDisplay> {
     std::map<std::string, View> views;
     void Observe(ModulePanel* panel, bool previewEnabled)
     {
-        if (panel->GetContext().workflow.GetIsClosing()) return;
+        // 计算/输入事务包含临时视图准备与恢复，自动材质更新须等该事务完成。
+        if (panel->GetContext().workflow.GetIsClosing()
+            || panel->GetContext().workflow.GetBusyOperation()!=0) return;
         for (const auto* id : {"primary-3d"}) {
             auto& view = views[id];
             if (view.pending) continue;
