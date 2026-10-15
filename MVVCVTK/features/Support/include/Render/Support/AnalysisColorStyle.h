@@ -161,15 +161,14 @@ inline std::array<double,3> GetSegmentColor(const RampSegment& segment,double va
 // 未显式分段时，整条色带共用同一调色板；两端保留短过渡，避免独立状态色。
 inline void SetTailColors(RampParams& params)
 {
-    if (!params.segments.empty()) {
-        if (!params.segments.front().lower) params.belowColor=params.segments.front().lowColor;
-        if (!params.segments.back().upper) params.aboveColor=params.segments.back().lowColor;
-    } else if (params.tolerance) {
-        // 显式公差配色继续采用调用方指定的无界端色。
-    } else {
+    if(params.tolerance){params.belowColor=params.toleranceBelowColor;params.aboveColor=params.toleranceAboveColor;}
+    else if(!params.segments.empty()){
+        if(!params.segments.front().lower)params.belowColor=params.segments.front().lowColor;
+        if(!params.segments.back().upper)params.aboveColor=params.segments.back().lowColor;
+    }else{
         RampSegment segment{0,1,params.mode,params.lowColor,params.highColor};
-        params.belowColor=params.mode==RampMode::Constant ? params.constantColor:GetSegmentColor(segment,params.isReversed?1:0);
-        params.aboveColor=params.mode==RampMode::Constant ? params.constantColor:GetSegmentColor(segment,params.isReversed?0:1);
+        params.belowColor=params.mode==RampMode::Constant?params.constantColor:GetSegmentColor(segment,params.isReversed?1:0);
+        params.aboveColor=params.mode==RampMode::Constant?params.constantColor:GetSegmentColor(segment,params.isReversed?0:1);
     }
 }
 
@@ -188,16 +187,8 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
     if (std::isfinite(value)) {
         const double fraction=GetFraction(range[0],range[1],value);
         alpha=GetOpacity(fraction,params);
-        const auto tail=[&](bool above) {
-            if(!params.segments.empty())return above ? (!params.segments.back().upper?params.segments.back().lowColor:params.aboveColor)
-                : (!params.segments.front().lower?params.segments.front().lowColor:params.belowColor);
-            if(params.tolerance)return above?params.aboveColor:params.belowColor;
-            if(params.mode==RampMode::Constant)return params.constantColor;
-            return GetSegmentColor({0,1,params.mode,params.lowColor,params.highColor},above!=params.isReversed?1:0);
-        };
-        if(value<range[0])color=tail(false);
-        else if(value>range[1])color=tail(true);
-        else if(params.tolerance) {
+        // 显式分段与公差定义整个数轴；有效测量范围只决定刻度，不截断映射。
+        if(params.tolerance) {
             color=value<(*params.tolerance)[0] ? params.toleranceBelowColor
                 : value>(*params.tolerance)[1] ? params.toleranceAboveColor:params.toleranceColor;
         }
@@ -217,7 +208,8 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
         } else if(params.mode==RampMode::Constant)color=params.constantColor;
         else {
             RampSegment s{0,1,params.mode,params.lowColor,params.highColor};
-            color=GetSegmentColor(s,params.isReversed ? 1-(.04+.92*fraction):.04+.92*fraction);
+            const double position=value<range[0]?0:value>range[1]?1:.04+.92*fraction;
+            color=GetSegmentColor(s,params.isReversed?1-position:position);
         }
     }
     return {color[0],color[1],color[2],alpha};

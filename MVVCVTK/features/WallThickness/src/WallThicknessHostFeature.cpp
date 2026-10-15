@@ -208,11 +208,6 @@ class WallThicknessHostFeature::Impl final
                 ? std::array<double,2>{*record.statistics.minimum,*record.statistics.maximum}:std::array<double,2>{0,0};
         } else if (display.rangeMode == ThicknessRangeMode::Histogram)
             display.range = record.archive.evaluation.histogramRange;
-        if(display.mode==ThicknessDisplayMode::Tolerance) {
-            if(display.rangeMode==ThicknessRangeMode::Manual &&
-                (display.range[0]>record.archive.evaluation.lower || display.range[1]<record.archive.evaluation.upper))return false;
-
-        }
         auto checked=display;
         if(checked.range[0]==checked.range[1])checked.range={0,1};
         if (!ThicknessAlgorithm::GetDisplayValid(checked)) return false;

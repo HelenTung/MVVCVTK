@@ -562,6 +562,11 @@ void TestSession(Acceptance c, bool useRoi = false)
     Require(wall->GetResult(completed->result)->samples == before &&
                 wall->GetResult(completed->result)->nodes == nodesBefore,
             "Display changes numerical buffer.");
+    auto& numericAxis=std::get<ThicknessDisplayRequest>(color).display;numericAxis.rangeMode=ThicknessRangeMode::Manual;
+    numericAxis.range={*result->statistics.minimum-.01,*result->statistics.maximum+.01};
+    Require(wall->SendRequest(color).status==ThicknessAdmissionStatus::Accepted
+        &&wall->GetState().displayRange==std::optional<std::array<double,2>>(numericAxis.range),
+        "A manual numerical axis must not truncate the tolerance mapping domain.");
     for (const auto mode : {ThicknessColorMode::Constant, ThicknessColorMode::Gradient,
              ThicknessColorMode::Rainbow, ThicknessColorMode::InverseRainbow, ThicknessColorMode::HueLoop}) {
         std::get<ThicknessDisplayRequest>(color).display.mode = ThicknessDisplayMode::Continuous;

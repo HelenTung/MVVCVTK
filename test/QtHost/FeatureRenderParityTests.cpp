@@ -120,6 +120,12 @@ int main()
         Check(lower[0]==153&&lower[1]==51&&lower[2]==179&&upper[0]==51&&upper[1]==77&&upper[2]==204,
             "explicit constant segments retain hard color changes instead of forced smoothing at either tail");
     }
+    const auto outsideLow=AnalysisColorStyle::GetMappedColor({1.2,1.8},segmented,1.05),outsideHigh=AnalysisColorStyle::GetMappedColor({1.2,1.8},segmented,1.95);
+    Check(std::abs(outsideLow[0]-.05)<1e-10&&outsideLow[1]==1&&std::abs(outsideHigh[0]-.95)<1e-10&&outsideHigh[1]==1,
+        "all explicit color segments apply outside the finite measurement axis");
+    AnalysisColorStyle::RampParams tolerance;tolerance.tolerance=std::array<double,2>{1,3};
+    for(double value:{1.5,2.5}){const auto c=AnalysisColorStyle::GetMappedColor({1.8,2.2},tolerance,value);
+        Check(std::equal(tolerance.toleranceColor.begin(),tolerance.toleranceColor.end(),c.begin()),"out-of-axis values still use the complete tolerance mapping");}
     auto narrow=segmented;narrow.segments[1].upper=1.000001;narrow.segments[2].lower=1.000001;
     const auto narrowTable=AnalysisColorStyle::BuildRamp({0,4},narrow);
     const auto exact=AnalysisColorStyle::GetMappedColor(*narrowTable,narrow,1.0000005);

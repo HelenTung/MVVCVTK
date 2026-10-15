@@ -68,11 +68,17 @@ private:
         };
         const auto low=AnalysisColorStyle::GetMappedColor(m_range,m_params,m_range[0]);
         const auto high=AnalysisColorStyle::GetMappedColor(m_range,m_params,m_range[1]);
+        const long double span=std::max(static_cast<long double>(m_range[1])-m_range[0],
+            std::max(1.L,std::max(std::abs(static_cast<long double>(m_range[0])),std::abs(static_cast<long double>(m_range[1]))))*16*std::numeric_limits<double>::epsilon());
         for(int i=0;i<8;++i) {
-            std::array<double,4> a{},b{};
-            // 无界端块也来自当前映射；色块相接不强制插入额外的平滑颜色。
-            for(int k=0;k<3;++k){a[k]=m_params.belowColor[k];b[k]=m_params.aboveColor[k];}
-            a[3]=low[3];b[3]=high[3];box(origin+tail*i/8,origin+tail*(i+1)/8,a);
+            const long double f=(i+.5L)/8;
+            // 两个短端段压缩无穷区间，仍逐点调用同一映射；不另造颜色或强制平滑。
+            const double below=static_cast<double>(m_range[0]-span*(1-f)/f),above=static_cast<double>(m_range[1]+span*f/(1-f));
+            const auto a=std::isfinite(below)?AnalysisColorStyle::GetMappedColor(m_range,m_params,below)
+                :std::array<double,4>{m_params.belowColor[0],m_params.belowColor[1],m_params.belowColor[2],low[3]};
+            const auto b=std::isfinite(above)?AnalysisColorStyle::GetMappedColor(m_range,m_params,above)
+                :std::array<double,4>{m_params.aboveColor[0],m_params.aboveColor[1],m_params.aboveColor[2],high[3]};
+            box(origin+tail*i/8,origin+tail*(i+1)/8,a);
             box(origin+height-tail+tail*i/8,origin+height-tail+tail*(i+1)/8,b);
         }
         std::vector<double> bounds{m_range[0],m_range[1]};
@@ -88,8 +94,8 @@ private:
                 AnalysisColorStyle::GetMappedColor(m_range,m_params,.5*a+.5*b));
         }
         // 极窄范围增加有效位，避免两个真实端点显示成同一个数。
-        const double scale=std::max(std::abs(m_range[0]),std::abs(m_range[1])),span=m_range[1]-m_range[0];
-        const int digits=span>0&&scale>0?int(std::clamp(std::ceil(std::log10(scale)-std::log10(span))+3,6.,17.)):6;
+        const double scale=std::max(std::abs(m_range[0]),std::abs(m_range[1])),finiteSpan=m_range[1]-m_range[0];
+        const int digits=finiteSpan>0&&scale>0?int(std::clamp(std::ceil(std::log10(scale)-std::log10(finiteSpan))+3,6.,17.)):6;
         const auto label=[&](double value){std::ostringstream out;out<<std::setprecision(digits)<<value;return out.str();};
         if(compact){
             // 矮切片视窗横排，在下沿容纳数值和单位，给左上场景坐标留空间。

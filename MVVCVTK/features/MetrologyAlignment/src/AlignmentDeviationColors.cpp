@@ -52,8 +52,6 @@ std::optional<AlignmentDeviationDisplay> GetResolvedDisplay(
       || (input.rangeMode==AlignmentRangeMode::Manual && d.range[0]==d.range[1])
       || !std::isfinite(d.range[1]-d.range[0]) || !std::isfinite(d.opacity) || d.opacity<0 || d.opacity>1
       || (r.parameters->metric==AlignmentDeviationMetric::UnsignedDistance && d.range[0]<0))return {};
-  if(d.rangeMode==AlignmentRangeMode::Manual && d.useToleranceColors && r.parameters->tolerance && actualRange &&
-      (d.range[0]>(*r.parameters->tolerance)[0] || d.range[1]<(*r.parameters->tolerance)[1]))return {};
   try { if(!AnalysisColorStyle::GetRampValid(GetRampParameters(d,r.parameters->tolerance)))return {}; } catch(...) { return {}; }
   return d;
 }
