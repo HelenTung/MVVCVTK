@@ -38,7 +38,7 @@ if(MVVCVTK_QT_REPORT_INPUT)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME QtFeature.ReportsLarge COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ReportLargeRegression.py"
         --input "${MVVCVTK_QT_REPORT_INPUT}" --spacing "${MVVCVTK_QT_REPORT_SPACING_MM}"
-        --output "${CMAKE_CURRENT_BINARY_DIR}/report-large-capacity-$<CONFIG>" --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
+        --output "${CMAKE_CURRENT_BINARY_DIR}/report-large-final-$<CONFIG>" --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
     # 整卷按全量完成判定，不因固定小时数终止正常的大数据任务。
     set_tests_properties(QtFeature.ReportsLarge PROPERTIES LABELS "real-data;Reports;large" RUN_SERIAL TRUE TIMEOUT 0)
 endif()

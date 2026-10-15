@@ -31,6 +31,12 @@
 namespace Manual {
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+std::uint64_t ReportCount(const QJsonValue& value) {
+    if(value.isString())return GetId(value);
+    const auto number=value.toDouble(-1);
+    Require(value.isDouble() && std::isfinite(number) && number>=0 && number<=9007199254740991. && number==std::trunc(number),"report count is not an exact nonnegative JSON integer");
+    return static_cast<std::uint64_t>(number);
+}
 template<class Predicate> void Wait(Predicate complete,int timeoutMs) {
     QElapsedTimer elapsed;elapsed.start();
     while(!complete() && (timeoutMs==0 || elapsed.elapsed()<timeoutMs))QCoreApplication::processEvents(QEventLoop::AllEvents,10);
@@ -103,8 +109,8 @@ void CheckPairedRows(const ReportDocument& native,const ReportDocument& result,i
         }
         if(i%256==0)Require(timeoutMs==0 || elapsed.elapsed()<timeoutMs,"full paired-row validation exceeded its scenario deadline");
     }
-    Require(GetId(result.conditions["有效配对数"])==static_cast<std::uint64_t>(validPairs) && GetId(result.conditions["无效/缺测配对数"])==static_cast<std::uint64_t>(invalidPairs)
-        && GetId(result.conditions["歧义基准项数"])==static_cast<std::uint64_t>(ambiguous),"paired summary changed the independently checked populations");
+    Require(ReportCount(result.conditions["有效配对数"])==static_cast<std::uint64_t>(validPairs) && ReportCount(result.conditions["无效/缺测配对数"])==static_cast<std::uint64_t>(invalidPairs)
+        && ReportCount(result.conditions["歧义基准项数"])==static_cast<std::uint64_t>(ambiguous),"paired summary changed the independently checked populations");
     Require(result.table->GetCount()==count+ambiguous,"paired report dropped unpaired B rows or added duplicate rows");
     for(ReportRowId i=count;i<result.table->GetCount();++i){const auto row=paired(i);Require(row[0].isEmpty()&&!row[7].isEmpty()&&row[4].isEmpty()&&row[8].isEmpty()&&row[6].contains("歧义"),"unpaired B evidence was fabricated");}
     std::cout<<"PASS: full real paired rows mode="<<mode<<" input="<<count<<" valid="<<validPairs<<" invalid="<<invalidPairs<<" ambiguous="<<ambiguous<<std::endl;
