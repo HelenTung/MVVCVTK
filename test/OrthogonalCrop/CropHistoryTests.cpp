@@ -89,6 +89,25 @@ bool GetPruneProtected()
     history.SetCommit(std::move(prune));
     return Check(!history.GetNode(b)&&!history.GetNode(c)&&history.GetNode(d).has_value(),"released subtree prune damaged sibling");
 }
+bool GetMultiplePublishedValid()
+{
+    auto history=CropHistory::Create(Ref(1));const auto root=history.GetRootId();
+    const auto a=Append(history,root,1),b=Append(history,root,2);
+    auto first=Result(a),second=Result(b);second.resultId=101;
+    second.scopeId=Ref(8).entityId;second.recipeRevision=Ref(9);second.outputRevision=Ref(10);
+    if(!Check(history.GetResultsValid({first,second}),"independent published branches were rejected"))return false;
+    history.SetResults({first,second});
+    for(const auto node:{a,b}){
+        CropPruneRequest prune;prune.nodeIds={node};
+        if(!Check(history.GetPruneImpact(prune).failureReason==CropFailure::PublishedResultDependency,
+            "a retained published branch lost its node protection"))return false;
+    }
+    const auto archive=history.GetArchive();
+    if(!Check(archive.result && archive.result->resultId==second.resultId,
+        "archive no longer selects the latest published result"))return false;
+    second.resultId=first.resultId;
+    return Check(!history.GetResultsValid({first,second}),"duplicate result identity was accepted");
+}
 bool GetFallbackValid()
 {
     auto history=CropHistory::Create(Ref(1)); const auto root=history.GetRootId();
@@ -169,5 +188,5 @@ bool GetLargeHistoryValid()
 int GetCropHistoryQueueFailures();
 int GetCropHistoryFailures()
 {
-    return GetCropHistoryQueueFailures()+(!GetBranchesValid())+(!GetPruneProtected())+(!GetFallbackValid())+(!GetNoPartialStage())+(!GetLargeHistoryValid());
+    return GetCropHistoryQueueFailures()+(!GetBranchesValid())+(!GetPruneProtected())+(!GetMultiplePublishedValid())+(!GetFallbackValid())+(!GetNoPartialStage())+(!GetLargeHistoryValid());
 }

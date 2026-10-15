@@ -671,7 +671,10 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
         auto reader=issued->lifetime.lock()->StartResourceUse(issued->self,"historical-branch-reader");
         issued.reset();
         if(!GetCaseResult(SetSelectedData(session,root->data->self)&&wait([&]{
-            const auto state=session.GetImageDescriptor();return state&&state->dataRevision==root->data->self;
+            const auto state=session.GetImageDescriptor();
+            const auto service=probe->GetViewService("crop-primary");
+            const auto stamp=service?service->GetRenderInputStamp():std::optional<RenderInputStamp>{};
+            return state&&state->dataRevision==root->data->self&&stamp&&stamp->dataRevision==root->data->self;
         }),"Historical branch returns to the exact Root input"))return false;
         CropDocumentRequest activate;activate.action=CropDocumentAction::ActivateDocument;
         activate.documentId=history.documentId;activate.requestId=CropHostFeature::CreateRequestId();

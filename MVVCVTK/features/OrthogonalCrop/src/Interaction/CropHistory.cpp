@@ -276,7 +276,7 @@ bool CropHistory::GetResultsValid(const std::vector<CropResultRecord>& results) 
 {
     if (m_revision==std::numeric_limits<std::uint64_t>::max()) return false;
     if (results.size()>1024) return false;
-    std::size_t published=0, building=0;
+    std::size_t building=0;
     for (std::size_t index=0;index<results.size();++index) {
         const auto& result=results[index];
         if (!result.resultId || (result.inputRoi && !GetDataRevisionRefValid(*result.inputRoi)) || (result.nodeId==m_root && !result.inputRoi) || !m_nodes.count(result.nodeId)
@@ -284,7 +284,8 @@ bool CropHistory::GetResultsValid(const std::vector<CropResultRecord>& results) 
         for (std::size_t previous=0;previous<index;++previous) if (results[previous].resultId==result.resultId) return false;
         switch (result.status) {
         case CropResultStatus::Published:
-            if (++published>1 || !GetDataEntityIdValid(result.scopeId)
+            // 多个历史分支可各自保留正式结果；Building 仍只能有一个。
+            if (!GetDataEntityIdValid(result.scopeId)
                 || !GetDataRevisionRefValid(result.outputRevision) || !GetDataRevisionRefValid(result.recipeRevision)) return false;
             break;
         case CropResultStatus::Building:
