@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -382,7 +383,12 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
         const std::int32_t isConsumed = sink(&result, context);
         return isConsumed != 0 ? 1 : 0;
     }
+    catch (const std::exception& error) {
+        std::cerr << "[GapAnalysis][DefX] Result bridge failed: " << error.what() << '\n';
+        return 0;
+    }
     catch (...) {
+        std::cerr << "[GapAnalysis][DefX] Result bridge failed: unknown exception.\n";
         return 0;
     }
 }
