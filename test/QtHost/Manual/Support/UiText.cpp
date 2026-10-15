@@ -126,7 +126,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Begin","开始编辑"},{"ResultEvidence","读取回归证据"},{"ImageEvidence","读取影像有效域证据"},
         {"ActivateAccepted", "重试显示已加载数据"}, {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
-        {"ReadLabelRegion", "读取标签区域"}, {"CreateMask", "创建测试掩码"},
+        {"ReadLabelRegion", "读取标签区域"}, {"ReadWallInputs", "读取精确壁厚输入"}, {"CreateMask", "创建测试掩码"},
         {"EditRoiBox", "提交区域盒"}, {"ReadTransform", "读取模型变换"}, {"ReadRoi", "读取区域数据"},
         {"AppendExact", "追加精确裁剪"}, {"ExportComparison", "导出比较数据"},
         {"Set", "设置视图"}, {"Cursor", "设置游标"}, {"Reset", "重置视图"}, {"State", "查看状态"},

@@ -158,6 +158,23 @@ QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const
     return result;
 }
 
+QJsonObject ReferenceDataSource::ReadWallInputs(DataRevisionRef labelsRef, DataRevisionRef meshRef) const
+{
+    if (!m_data) throw std::invalid_argument("可信输入适配器尚未挂载");
+    const auto graph = m_data->GetDataGraph();
+    const auto labelData = m_data->GetData(graph, labelsRef);
+    const auto meshData = m_data->GetData(graph, meshRef);
+    const auto labels = labelData ? std::dynamic_pointer_cast<const LabelMap3DPayload>(labelData->payload) : nullptr;
+    const auto mesh = meshData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(meshData->payload) : nullptr;
+    // 精确读取载荷，不能用目录中仍存在的元信息代替旧输入可用性。
+    if (!labels || !labels->GetValid() || !mesh || !mesh->GetValid() || mesh->GetVertices().empty()
+        || mesh->GetTriangles().empty()) throw std::invalid_argument("精确标签或网格载荷不可读");
+    return {{"labels", GetRefText(labelsRef)}, {"mesh", GetRefText(meshRef)},
+        {"labelValueCount", QString::number(labels->GetValueCount())},
+        {"meshPointCount", QString::number(mesh->GetVertices().size() / 3)},
+        {"meshTriangleCount", QString::number(mesh->GetTriangles().size() / 3)}};
+}
+
 QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)
 {
     const auto graph = m_data->GetDataGraph();
