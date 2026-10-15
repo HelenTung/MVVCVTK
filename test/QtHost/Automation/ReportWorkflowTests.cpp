@@ -103,13 +103,14 @@ void CheckReportGenerationSelection() {
     view.QueueReport(operation("empty-generation"));view.SelectReport(second.id);
     wait([&]{return calls>0&&!view.property("reportGenerationBusy").toBool();});
     Require(view.GetSelectedReport().id==second.id,"empty queued generation overwrote the selected frozen report");
+    auto* follow=view.findChild<QCheckBox*>("followLatestReport");Require(follow!=nullptr,"report follow control is available");
+    follow->setChecked(true);view.SelectReport(first.id);
     bool picked=false;int rows=0;auto late=first;late.id="generation-late";late.table=std::make_shared<ReportTable>();
     late.table->SetRows(50000,[&](quint64 row){++rows;if(row==0)QTimer::singleShot(0,&view,[&]{picked=true;view.SelectReport(second.id);});return QStringList{QString::number(row)};});
     view.onReadReports=[late](const auto&,const auto&){return QVector<ReportDocument>{late};};
     view.QueueReport(operation("late-generation"));
     wait([&]{return picked&&rows==50000&&!view.property("reportGenerationBusy").toBool();});
     Require(view.GetSelectedReport().id==second.id&&view.GetReportIds().contains(late.id),"late generation lost the full document or replaced a newer user selection");
-    auto* follow=view.findChild<QCheckBox*>("followLatestReport");Require(follow!=nullptr,"report follow control is available");
     for(const bool enabled:{false,true}) {
         follow->setChecked(enabled);auto next=first;next.id=enabled?"generation-follow":"generation-preserve";
         view.onReadReports=[next](const auto&,const auto&){return QVector<ReportDocument>{next};};view.QueueReport(operation(next.id));
