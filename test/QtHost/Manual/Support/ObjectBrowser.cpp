@@ -42,6 +42,14 @@ ObjectBrowser::ObjectBrowser(QWidget* parent) : QWidget(parent)
     connect(m_tree,&QTreeWidget::customContextMenuRequested,this,[this](const QPoint& point) {
         auto* item=m_tree->itemAt(point); if(!item) return; m_tree->setCurrentItem(item);
         const auto node=item->data(0,Qt::UserRole).toJsonObject(); QMenu menu(this);
+        const auto ref=node["ref"].toString();
+        if(!ref.isEmpty())menu.addAction("查看报告",this,[this,id=node["id"].toString()] {
+            for(const auto group:m_objects)for(const auto value:group.toObject()["children"].toArray()) {
+                const auto current=value.toObject();if(current["id"]==id && onReport) {
+                    onReport(current["isVolume"].toBool()?current["ref"].toString():QString(),current["isVolume"].toBool()?QString():current["ref"].toString());return;
+                }
+            }
+        });
         if(node["isVolume"].toBool() && node["actions"].toArray().contains("SetVolumeVisible"))for(const bool visible:{true,false})
             menu.addAction(visible?"显示当前三维体数据":"隐藏当前三维体数据",this,[this,id=node["id"].toString(),visible]{SendObjectAction(id,"SetVolumeVisible",{{"isVisible",visible}});});
         for(const auto value:node["actions"].toArray()) {

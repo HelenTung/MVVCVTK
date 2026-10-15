@@ -63,7 +63,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* tools = new QToolButton(root); tools->setObjectName("testTools"); tools->setText("测试工具");
     tools->setPopupMode(QToolButton::InstantPopup); auto* toolMenu = new QMenu(tools); tools->setMenu(toolMenu);
     auto* exportRecords = toolMenu->addAction("导出测试记录"); exportRecords->setObjectName("exportTestRecords");
-    auto* showReport = new QPushButton("结果报告 / CSV", root); showReport->setObjectName("showResultReport");
+    auto* showReport = new QPushButton("报告与归档", root); showReport->setObjectName("showResultReport");
     auto* performance = toolMenu->addAction("开始性能采样"); performance->setCheckable(true);
     performance->setObjectName("performanceCapture");
     m_sourceButton=new QPushButton("查看来源",toolbarFrame);m_sourceButton->setObjectName("showInputSources");m_sourceButton->setEnabled(false);
@@ -231,7 +231,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_log = new QPlainTextEdit(diagnosticDetails); m_log->setReadOnly(true); m_log->setMaximumBlockCount(1000); m_log->setMaximumHeight(120);
     diagnosticLayout->addWidget(m_log);m_resultTabs->addTab(diagnosticDetails,"诊断");
     diagnosticDetails->hide();
-    auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("运行结果报告"); reports->resize(940,620);
+    auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("报告与归档"); reports->resize(1180,720);
     auto* reportLayout = new QVBoxLayout(reports); reportLayout->setContentsMargins(8,8,8,8);
     m_report = new ResultReport(reports); reportLayout->addWidget(m_report);
     connect(logToggle, &QToolButton::toggled, this, [this,logToggle](bool visible) {
@@ -239,7 +239,16 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         else if(m_resultTabs->currentIndex()==2)m_resultTabs->setCurrentIndex(0);
         logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
-    connect(showReport,&QPushButton::clicked,this,[reports]{reports->show();reports->raise();reports->activateWindow();});
+    m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);reports->show();reports->raise();reports->activateWindow();};
+    m_objects->onReport=m_workflow.onShowReports;
+    m_report->onLocate=[this](const ReportDocument& doc,int row){
+        const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
+        if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
+        const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);
+        HostSessionSetRequest request;request.cursor=HostCursorParams{point,-1};
+        const auto admission=session->SendRequest(std::move(request));if(admission.status!=HostAdmissionStatus::Accepted)throw std::runtime_error("视图未接纳定位请求");
+    };
+    connect(showReport,&QPushButton::clicked,this,[this]{m_workflow.onShowReports({},{});});
     m_log->setObjectName("businessLog");
     m_log->setAccessibleName("业务流程诊断");
     m_log->setPlaceholderText("业务步骤、提交、进度、结果与输入切换的完整流程将在这里显示。");
@@ -247,6 +256,12 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         AppendLog(GetFlowText(record));
         ShowMessage(GetFlowText(record,false));
         m_report->SetRecord(record);
+        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed"}.contains(record["status"].toString())) {
+            const auto found=m_workflow.readReports.find(record["module"].toString());
+            if(found!=m_workflow.readReports.end())try {
+                for(auto doc:found->second(record,m_report->GetReportIds()))m_report->AddReport(std::move(doc));
+            } catch(const std::exception& e) {ShowMessage("业务结果已保留，报告读取失败："+QString::fromUtf8(e.what()));}
+        }
         UpdateMeasurements();
         QueueObserve();
     };

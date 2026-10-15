@@ -117,6 +117,7 @@ private:
     QLabel* m_businessDisplay = nullptr;
     QLabel* m_executionMessage = nullptr;
     QPushButton* m_primary = nullptr;
+    QPushButton* m_viewReport = nullptr;
     BusinessStatistics* m_statistics = nullptr;
     QWidget* m_nextActions = nullptr;
     QGridLayout* m_nextLayout = nullptr;
