@@ -2729,15 +2729,16 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto created=window.GetSession()->SetRoi(request);
             Check(created.error==RoiError::None && created.roi,"full-grid mask ROI is created");
             const auto key=descriptors.front().datasetId;
-            const auto saved=window.GetSession()->GetRoiArchive(created.roi->revision,key);
-            Check(saved.error==RoiError::None && saved.archive && saved.archive->masks.size()==1
-                && saved.archive->masks.front().values.size()==1000000000ULL,
-                "default ROI archive retains the entire native mask");
-            const auto restored=window.GetSession()->LoadRoiArchive(*saved.archive,key,source->dataRevision,
-                created.roi->catalogRevision);
-            Check(restored.error==RoiError::None && restored.roi
-                && restored.roi->revision.entityId!=created.roi->revision.entityId,
-                "full-grid mask ROI archive restores with an independent identity");
+            const auto saved=window.GetSession()->GetRoiArchiveReader({{created.roi->revision,key}});
+            Check(saved.error==RoiError::None&&saved.reader&&saved.reader->GetMetadata().masks.size()==1
+                &&saved.reader->GetMaskCount(0)==1000000000ULL,"ROI archive describes the entire mask without aggregating its values");
+            RoiArchiveChunkRequest chunk;chunk.elementOffset=999999999;chunk.chunkElements=1;
+            const auto tail=saved.reader->GetMaskChunk(chunk);
+            Check(tail.error==RoiError::None&&tail.values.size()==1&&tail.isComplete,"full-grid archive exposes a bounded tail chunk");
+            const auto restored=window.GetSession()->LoadRoiArchiveReader(*saved.reader,{{key,source->dataRevision}},{created.roi->catalogRevision});
+            Check(restored.error==RoiError::None&&restored.rois.size()==1
+                &&restored.rois[0].revision.entityId!=created.roi->revision.entityId,
+                "full-grid ROI reader restores an independent identity in one publication");
         }
         if (step["cropDrag"].toBool()) {
             // 复用已有公共 interactor 鼠标路径，真实产生裁剪历史节点，禁止空发布冒充裁切。

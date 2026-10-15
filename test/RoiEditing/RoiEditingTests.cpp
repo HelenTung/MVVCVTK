@@ -1,3 +1,4 @@
+#include "../DataGraph/RoiArchiveTestReader.h"
 #include "Host/RoiEditingHostFeature.h"
 #include "TestDataPort.h"
 #include "App/Services/FeatureViewService.h"
@@ -345,7 +346,7 @@ void TestOutputIdentityAndDisplay(){
 }
 void TestAppliedSplit(){
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);const auto source=data->SetPrimaryImage(image)->data->self;
-    RoiRequest input;input.metadata.name="split";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=std::make_shared<const RoiVoxelSet>(std::vector<RoiVoxel>{{{1,1,1},1},{{3,3,3},1}});input.definition={source,{{RoiNodeKind::Primitive,primitive}}};const auto original=data->SetRoi(input);Require(original.roi.has_value(),"split editor fixture failed");
+    RoiRequest input;input.metadata.name="split";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=MakeRoiVoxelFixture(std::vector<RoiVoxel>{{{1,1,1},1},{{3,3,3},1}});input.definition={source,{{RoiNodeKind::Primitive,primitive}}};const auto original=data->SetRoi(input);Require(original.roi.has_value(),"split editor fixture failed");
     auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);main->source=source;views->views={{"main",main}};RoiEditingHostFeature editor({{"main"},{{"main"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"split editor attach failed");
     input.action=RoiAction::SetGeometry;input.expectedRoi=original.roi->revision;Require(editor.SendRequest({RoiEditingAction::Begin,input}).error==RoiError::None,"split editor begin failed");RoiEditingRequest request;request.action=RoiEditingAction::BeginOperation;RoiOperationRequest operation;RoiComponentParams params;params.operation=RoiComponentOperation::Split;operation.params=params;request.operation=operation;Require(editor.SendRequest(request).error==RoiError::Pending,"split preview failed");WaitOperation(editor);
     Require(editor.SendRequest({RoiEditingAction::ApplyOperation}).error==RoiError::None && editor.GetState().operation.rois.size()==2,"apply discarded the split output batch");
@@ -360,7 +361,7 @@ void TestChunkedDisplay(){
     auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D),slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);main->source=slice->source=source;views->views={{"main",main},{"slice",slice}};
     RoiEditingHostFeature editor({{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"block display attach failed");
     std::vector<RoiVoxel> voxels;for(int x=1;x<=32;++x)for(int y=1;y<=2;++y)for(int z=1;z<=2;++z)voxels.push_back({{x,y,z},1});
-    RoiRequest draft;draft.metadata.name="块边界";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=std::make_shared<const RoiVoxelSet>(std::move(voxels));draft.definition={source,{{RoiNodeKind::Primitive,primitive}}};
+    RoiRequest draft;draft.metadata.name="块边界";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=MakeRoiVoxelFixture(voxels);draft.definition={source,{{RoiNodeKind::Primitive,primitive}}};
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"block display begin failed");FeatureOverlayState state;state.cursor={0,0,1};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(state);
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<deadline){editor.OnHostTick();std::this_thread::yield();}
     // 仅读取本 fixture 拥有的 actor，核验块面没有内部接缝且复用了顶点。

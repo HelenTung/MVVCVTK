@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <type_traits>
 
 namespace {
 // Windows x64 数据契约按小端 uint64/f64 编码；摘要不包含运行期 ID 或地址。
@@ -78,70 +79,31 @@ bool GetSameSource(const RoiSourceDescriptor& a,const RoiSourceDescriptor& b) no
         && x.metadata.identity.batchId==y.metadata.identity.batchId && x.metadata.source.digest==y.metadata.source.digest;
 }
 
-bool AddBytes(std::size_t& total,std::size_t count,std::size_t width=1) noexcept
-{
-    if (width && count>(std::numeric_limits<std::size_t>::max()-total)/width) return false;
-    total+=count*width; return true;
-}
-
-bool AddNodeBytes(std::size_t& count,const std::vector<RoiNode>& nodes) noexcept
-{
-    if(!AddBytes(count,nodes.size(),sizeof(RoiNode)))return false;
-    for(const auto& node:nodes){const auto& p=node.primitive;
-        if(!AddBytes(count,p.contours.size(),sizeof(std::vector<std::array<double,2>>))
-            || !AddBytes(count,p.path.size(),sizeof(std::array<double,3>))
-            || !AddBytes(count,p.labels.size(),sizeof(std::uint64_t)))return false;
-        for(const auto& ring:p.contours)if(!AddBytes(count,ring.size(),sizeof(std::array<double,2>)))return false;
-    }return true;
-}
-std::size_t GetArchiveBytes(const RoiArchive& archive) noexcept
-{
-    std::size_t count=sizeof(RoiArchive);
-    if (!AddNodeBytes(count,archive.nodes)
-        || !AddBytes(count,archive.sourceKey.size(),2)
-        || !AddBytes(count,archive.metadata.name.size()+archive.metadata.group.size()+archive.metadata.description.size(),2)
-        || !AddBytes(count,archive.source.coordinateFrame.size()+archive.source.meshGeometryDigest.size(),2)
-        || !AddBytes(count,archive.provenance.producerId.size()+archive.provenance.operationId.size()+archive.provenance.algorithmVersion.size()+archive.provenance.canonicalParameters.size(),3)) return std::numeric_limits<std::size_t>::max();
-    if (archive.source.image) {
-        const auto& m=archive.source.image->metadata;
-        for (const auto* text:{&m.identity.datasetId,&m.source.uri,&m.scalar.quantity,&m.scalar.unit})
-            if (!AddBytes(count,text->size(),2)) return std::numeric_limits<std::size_t>::max();
-        for (const auto* text:{&m.identity.inspectionId,&m.identity.objectId,&m.identity.batchId,&m.source.digest})
-            if (*text && !AddBytes(count,(*text)->size(),2)) return std::numeric_limits<std::size_t>::max();
-        // 归档源描述不保存可扩张的任意属性或原文件路径。
-        if (!m.attributes.empty() || !m.source.uri.empty()) return std::numeric_limits<std::size_t>::max();
-    }
-    for (const auto& mask:archive.masks) {
-        if (!AddBytes(count,mask.values.size(),sizeof(std::uint64_t)) || !AddBytes(count,mask.nodeIndices.size(),sizeof(std::uint32_t))
-            || !AddBytes(count,sizeof(RoiArchiveMask))) return std::numeric_limits<std::size_t>::max();
-    }
-    for (const auto& saved:archive.voxels)
-        if (!AddBytes(count,sizeof(saved)) || !AddBytes(count,saved.values.size(),sizeof(RoiVoxel)) || !AddBytes(count,saved.nodeIndices.size(),sizeof(std::uint32_t))) return std::numeric_limits<std::size_t>::max();
-    return count;
-}
 }
 
 namespace {
 template<class Result,class Values> Result GetPayloadChunk(const RoiArchiveChunkRequest& request,const Values& values){
-    Result result;if(!request.chunkElements || request.elementOffset>values.size()){result.error=RoiError::InvalidRequest;return result;}
+    Result result;
+    auto& output=[&]()->auto&{if constexpr(std::is_same_v<Result,RoiArchiveMaskChunk>)return result.values;else return result.runs;}();
+    if(!request.chunkElements || request.elementOffset>values.size()){result.error=RoiError::InvalidRequest;return result;}
     try{if(request.getCancelled && request.getCancelled()){result.error=RoiError::Cancelled;return result;}
         const auto count=std::min(request.chunkElements,values.size()-request.elementOffset);
-        result.values.assign(values.begin()+request.elementOffset,values.begin()+request.elementOffset+count);
-        if(request.getCancelled && request.getCancelled()){result.values.clear();result.error=RoiError::Cancelled;return result;}
+        output.assign(values.begin()+request.elementOffset,values.begin()+request.elementOffset+count);
+        if(request.getCancelled && request.getCancelled()){output.clear();result.error=RoiError::Cancelled;return result;}
         result.nextOffset=request.elementOffset+count;result.isComplete=result.nextOffset==values.size();result.error=RoiError::None;
     }catch(const std::bad_alloc&){result.error=RoiError::TooLarge;}catch(...){result.error=RoiError::Cancelled;}return result;
 }
 class ArchiveReader final:public RoiArchiveReader {
 public:
-    RoiArchiveBundle metadata;
+    RoiArchiveDescriptor metadata;
     std::vector<DataSnapshot> masks;
     std::vector<std::shared_ptr<const RoiVoxelSet>> voxels;
-    const RoiArchiveBundle& GetMetadata()const noexcept override{return metadata;}
+    const RoiArchiveDescriptor& GetMetadata()const noexcept override{return metadata;}
     std::optional<std::size_t> GetMaskCount(std::size_t index)const noexcept override{
         if(index>=masks.size())return {};if(const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(masks[index]->payload.get()))return mask->GetValues()->size();
         const auto& labels=dynamic_cast<const LabelMap3DPayload&>(*masks[index]->payload);return std::visit([](const auto& values){return values->size();},labels.GetValues());
     }
-    std::optional<std::size_t> GetVoxelCount(std::size_t index)const noexcept override{return index<voxels.size()?std::optional<std::size_t>{voxels[index]->GetVoxelCount()}:std::nullopt;}
+    std::optional<std::size_t> GetVoxelPayloadCount(std::size_t index)const noexcept override{return index<voxels.size()?std::optional<std::size_t>{voxels[index]->GetRuns().size()}:std::nullopt;}
 
     RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest& request)const override{
         if(request.payloadIndex>=masks.size())return {RoiError::InvalidRequest};
@@ -150,35 +112,30 @@ public:
         const auto& labels=dynamic_cast<const LabelMap3DPayload&>(*data->payload);
         return std::visit([&](const auto& values){return GetPayloadChunk<RoiArchiveMaskChunk>(request,*values);},labels.GetValues());
     }
-    RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest& request)const override{
+    RoiArchiveVoxelPayloadChunk GetVoxelPayloadChunk(const RoiArchiveChunkRequest& request)const override{
         if(request.payloadIndex>=voxels.size())return {RoiError::InvalidRequest};
-        RoiArchiveVoxelChunk result;const auto& payload=*voxels[request.payloadIndex];
-        if(!request.chunkElements||request.elementOffset>payload.GetVoxelCount())return {RoiError::InvalidRequest};
-        try {
-            if(request.getCancelled&&request.getCancelled())return {RoiError::Cancelled};
-            result.values=payload.GetVoxelChunk(request.elementOffset,request.chunkElements);
-            if(request.getCancelled&&request.getCancelled())return {RoiError::Cancelled};
-            result.nextOffset=request.elementOffset+result.values.size();result.isComplete=result.nextOffset==payload.GetVoxelCount();result.error=RoiError::None;
-        }catch(const std::bad_alloc&){result.error=RoiError::TooLarge;}catch(...){result.error=RoiError::Cancelled;}
-        return result;
+        return GetPayloadChunk<RoiArchiveVoxelPayloadChunk>(request,voxels[request.payloadIndex]->GetRuns());
     }
 };
-class BundleReader final:public RoiArchiveReader {
-public:
-    explicit BundleReader(const RoiArchiveBundle& bundle):m_bundle(bundle){}
-    const RoiArchiveBundle& GetMetadata()const noexcept override{return m_bundle;}
-    std::optional<std::size_t> GetMaskCount(std::size_t index)const noexcept override{return index<m_bundle.masks.size()?std::optional<std::size_t>{m_bundle.masks[index].values.size()}:std::nullopt;}
-    std::optional<std::size_t> GetVoxelCount(std::size_t index)const noexcept override{return index<m_bundle.voxels.size()?std::optional<std::size_t>{m_bundle.voxels[index].values.size()}:std::nullopt;}
-
-    RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest& request)const override{return request.payloadIndex<m_bundle.masks.size()?GetPayloadChunk<RoiArchiveMaskChunk>(request,m_bundle.masks[request.payloadIndex].values):RoiArchiveMaskChunk{RoiError::InvalidRequest};}
-    RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest& request)const override{return request.payloadIndex<m_bundle.voxels.size()?GetPayloadChunk<RoiArchiveVoxelChunk>(request,m_bundle.voxels[request.payloadIndex].values):RoiArchiveVoxelChunk{RoiError::InvalidRequest};}
-private:const RoiArchiveBundle& m_bundle;
-};
-template<class Chunk,class Read> std::vector<typename decltype(Chunk{}.values)::value_type> ReadPayload(std::size_t id,std::optional<std::size_t> expectedCount,Read read){
-    if(!expectedCount)throw RoiError::InvalidRequest;decltype(Chunk{}.values) values;values.reserve(*expectedCount);RoiArchiveChunkRequest request;request.payloadIndex=id;
-    for(;;){auto chunk=read(request);if(chunk.error!=RoiError::None)throw chunk.error;
-        if(chunk.nextOffset>*expectedCount || chunk.isComplete!=(chunk.nextOffset==*expectedCount) || chunk.values.size()>SIZE_MAX-request.elementOffset || chunk.nextOffset!=request.elementOffset+chunk.values.size() || (!chunk.isComplete && chunk.nextOffset<=request.elementOffset))throw RoiError::InvalidRequest;
-        values.insert(values.end(),chunk.values.begin(),chunk.values.end());if(chunk.isComplete)return values;request.elementOffset=chunk.nextOffset;}
+void CheckCancelled(const std::function<bool()>& getCancelled){
+    try{if(getCancelled&&getCancelled())throw RoiError::Cancelled;}catch(...){throw RoiError::Cancelled;}
+}
+// 验证每块边界后立即消费；这里不聚合任何完整输入载荷。
+template<class Read,class Size,class Consume>
+void ReadChunks(std::size_t id,std::optional<std::size_t> expected,const RoiArchiveRestoreOptions& options,
+    Read read,Size size,Consume consume){
+    if(!expected||!options.chunkElements)throw RoiError::InvalidRequest;
+    RoiArchiveChunkRequest request;request.payloadIndex=id;request.chunkElements=options.chunkElements;request.getCancelled=options.getCancelled;
+    for(;;){
+        CheckCancelled(options.getCancelled);
+        auto chunk=read(request);if(chunk.error!=RoiError::None)throw chunk.error;
+        const auto count=size(chunk);
+        if(count>request.chunkElements||count>SIZE_MAX-request.elementOffset||chunk.nextOffset!=request.elementOffset+count
+            ||chunk.nextOffset>*expected||chunk.isComplete!=(chunk.nextOffset==*expected)||(!chunk.isComplete&&!count))throw RoiError::InvalidRequest;
+        CheckCancelled(options.getCancelled);
+        consume(chunk,request.elementOffset);
+        if(chunk.isComplete)return;request.elementOffset=chunk.nextOffset;
+    }
 }
 }
 RoiArchiveReadResult RoiService::GetArchiveReader(const DataGraphSnapshot& graph,const std::vector<RoiArchiveSelection>& selection){
@@ -190,7 +147,7 @@ RoiArchiveReadResult RoiService::GetArchiveReader(const DataGraphSnapshot& graph
             if(!ids.insert(selected.roi).second)throw RoiError::InvalidRequest;
             const auto descriptor=GetDescriptor(graph,selected.roi);if(!descriptor)throw RoiError::MissingInput;
             const auto source=graph.view->GetData(descriptor->definition.source);if(!source)throw RoiError::SourceUnresolved;
-            RoiArchive item;item.sourceKey=selected.sourceKey;item.source=GetSourceDescriptor(source);item.metadata=descriptor->metadata;item.nodes=descriptor->definition.nodes;item.originalRevision=selected.roi;
+            RoiArchiveItem item;item.sourceKey=selected.sourceKey;item.source=GetSourceDescriptor(source);item.metadata=descriptor->metadata;item.nodes=descriptor->definition.nodes;item.originalRevision=selected.roi;
             item.provenance=graph.view->GetData(selected.roi)->provenance.value_or(DataProvenance{});
             std::map<std::uint32_t,std::vector<std::uint32_t>> localMasks,localVoxels;
             for(std::size_t i=0;i<item.nodes.size();++i){auto& primitive=item.nodes[i].primitive;
@@ -210,98 +167,16 @@ RoiArchiveReadResult RoiService::GetArchiveReader(const DataGraphSnapshot& graph
         result.reader=std::move(reader);result.error=RoiError::None;
     }catch(RoiError error){result.error=error;}catch(const std::bad_alloc&){result.error=RoiError::TooLarge;}catch(...){result.error=RoiError::InvalidRequest;}return result;
 }
-RoiArchiveResult RoiService::GetArchive(const DataGraphSnapshot& graph,const DataRevisionRef& ref,const std::string& key){
-    auto bundle=GetArchiveBundle(graph,{{ref,key}});RoiArchiveResult result;result.error=bundle.error;result.requiredBytes=bundle.requiredBytes;
-    if(bundle.archive){auto item=std::move(bundle.archive->rois.front());for(auto& mask:item.masks){mask.values=std::move(bundle.archive->masks[*mask.sharedPayload].values);mask.sharedPayload.reset();}
-        for(auto& voxels:item.voxels){voxels.values=std::move(bundle.archive->voxels[*voxels.sharedPayload].values);voxels.sharedPayload.reset();}result.archive=std::move(item);}return result;
-}
-
-RoiResult RoiService::LoadArchive(const RoiArchive& archive,const std::string& sourceKey,
-    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision)
-{
-    RoiResult result;
-    result.requiredBytes=GetArchiveBytes(archive);
-    if (result.requiredBytes==std::numeric_limits<std::size_t>::max()) { result.error=RoiError::TooLarge; return result; }
-    if (sourceKey.empty() || sourceKey!=archive.sourceKey || sourceKey.size()>256) { result.error=RoiError::SourceUnresolved; return result; }
-    if (archive.schemaVersion!=roiSchemaVersion || archive.nodes.empty() || archive.nodes.size()>roiNodeLimit
-        || archive.masks.size()>roiNodeLimit) { result.error=RoiError::InvalidRequest; return result; }
-    try {
-        const auto graph=m_store.GetDataGraph();
-        const auto source=graph.view->GetData(sourceRef);
-        if (!source) { result.error=RoiError::SourceUnresolved; return result; }
-        if (!GetSameSource(archive.source,GetSourceDescriptor(source))) { result.error=RoiError::SourceMismatch; return result; }
-        if (archive.source.image && (GetDataRevisionRefValid(archive.source.image->dataRevision)
-            || archive.source.image->bindingRevision!=0)) { result.error=RoiError::InvalidRequest; return result; }
-        RoiRequest request; request.definition={sourceRef,archive.nodes}; request.metadata=archive.metadata;
-        request.expectedCatalogRevision=expectedCatalogRevision;
-        for (const auto& node:request.definition.nodes) if (node.primitive.mask || node.primitive.voxels) { result.error=RoiError::InvalidRequest; return result; }
-        std::vector<DataRevisionDraft> masks;
-        std::set<std::uint32_t> mapped;
-        for (const auto& mask:archive.masks) {
-            if(mask.sharedPayload){result.error=RoiError::InvalidRequest;return result;}
-            if (!archive.source.image || !GetSameGrid(*archive.source.image,mask.grid)
-                || mask.grid.valueType!=ImageValueType::UInt64 || mask.grid.componentCount!=1 || mask.grid.componentBytes!=8
-                || mask.nodeIndices.empty() || GetDataRevisionRefValid(mask.grid.dataRevision) || mask.grid.bindingRevision!=0) {
-                result.error=RoiError::SourceMismatch; return result;
-            }
-            GridGeometry3D grid{mask.grid.extent,mask.grid.dims,mask.grid.spacing,mask.grid.origin,mask.grid.direction,archive.source.coordinateFrame};
-            const auto count=GetGridVoxelCount(grid);
-            if (!count || *count!=mask.values.size()) { result.error=RoiError::InvalidGeometry; return result; }
-            const DataRevisionRef ref{m_store.CreateDataEntityId(),1};
-            for (const auto index:mask.nodeIndices) {
-                if (index>=request.definition.nodes.size() || !mapped.insert(index).second
-                    || request.definition.nodes[index].kind!=RoiNodeKind::Primitive
-                    || request.definition.nodes[index].primitive.shape!=RoiShape::MaskReference) { result.error=RoiError::InvalidRequest; return result; }
-                request.definition.nodes[index].primitive.mask=ref;
-            }
-            masks.push_back({ref.entityId,0,DataTypes::labelMap3D,{{"source-volume",sourceRef}},
-                std::make_shared<const LabelMap3DPayload>(grid,std::make_shared<const std::vector<std::uint64_t>>(mask.values)),
-                DataProvenance{"Host.Roi","restore-mask","1",{}}});
-        }
-        for (const auto& saved:archive.voxels) {
-            if(saved.sharedPayload){result.error=RoiError::InvalidRequest;return result;}
-            auto shared=std::make_shared<const RoiVoxelSet>(saved.values);
-            if (saved.nodeIndices.empty()) {result.error=RoiError::InvalidRequest;return result;}
-            for (auto index:saved.nodeIndices) {
-                if (index>=request.definition.nodes.size() || !mapped.insert(index).second
-                    || request.definition.nodes[index].kind!=RoiNodeKind::Primitive
-                    || request.definition.nodes[index].primitive.shape!=RoiShape::VoxelSet) {result.error=RoiError::InvalidRequest;return result;}
-                request.definition.nodes[index].primitive.voxels=shared;
-            }
-        }
-        const auto requiredBytes=result.requiredBytes;
-        result=SetRoiCommit(request,std::move(masks));
-        result.requiredBytes=requiredBytes;
-    } catch (const std::bad_alloc&) { result.error=RoiError::TooLarge; }
-    catch (...) { result.error=RoiError::InvalidRequest; }
-    return result;
-}
-
-namespace {
-std::size_t GetBundleBytes(const RoiArchiveBundle& bundle) noexcept
-{
-    std::size_t bytes=sizeof(bundle);for(const auto& item:bundle.rois)if(!AddBytes(bytes,GetArchiveBytes(item)))return SIZE_MAX;
-    for(const auto& mask:bundle.masks)if(!AddBytes(bytes,mask.values.size(),sizeof(std::uint64_t)) || !AddBytes(bytes,mask.nodeIndices.size(),sizeof(std::uint32_t)) || !AddBytes(bytes,sizeof(mask)))return SIZE_MAX;
-    for(const auto& data:bundle.voxels)if(!AddBytes(bytes,data.values.size(),sizeof(RoiVoxel)) || !AddBytes(bytes,data.nodeIndices.size(),sizeof(std::uint32_t)) || !AddBytes(bytes,sizeof(data)))return SIZE_MAX;
-    return bytes;
-}
-}
-RoiArchiveBundleResult RoiService::GetArchiveBundle(const DataGraphSnapshot& graph,const std::vector<RoiArchiveSelection>& selection){
-    RoiArchiveBundleResult result;const auto planned=GetArchiveReader(graph,selection);result.error=planned.error;if(!planned.reader)return result;
-    try{auto bundle=planned.reader->GetMetadata();for(std::size_t i=0;i<bundle.masks.size();++i)bundle.masks[i].values=ReadPayload<RoiArchiveMaskChunk>(i,planned.reader->GetMaskCount(i),[&](const auto& request){return planned.reader->GetMaskChunk(request);});
-        for(std::size_t i=0;i<bundle.voxels.size();++i)bundle.voxels[i].values=ReadPayload<RoiArchiveVoxelChunk>(i,planned.reader->GetVoxelCount(i),[&](const auto& request){return planned.reader->GetVoxelChunk(request);});
-        result.requiredBytes=GetBundleBytes(bundle);result.archive=std::move(bundle);result.error=RoiError::None;
-    }catch(RoiError error){result.error=error;}catch(const std::bad_alloc&){result.error=RoiError::TooLarge;}catch(...){result.error=RoiError::InvalidRequest;}return result;
-}
-RoiArchiveRestoreResult RoiService::LoadArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings){return LoadArchiveReader(BundleReader(bundle),mappings);}
-RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings)
+RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings,const RoiArchiveRestoreOptions& options)
 {
     RoiArchiveRestoreResult result;const auto& bundle=reader.GetMetadata();
-    if(bundle.schemaVersion!=roiSchemaVersion || bundle.rois.empty()){result.error=RoiError::InvalidRequest;return result;}
+    if((bundle.schemaVersion!=roiSchemaVersion&&bundle.schemaVersion!=3) || bundle.rois.empty() || !options.chunkElements){result.error=RoiError::InvalidRequest;return result;}
     try{
         const auto graph=m_store.GetDataGraph();std::map<std::string,DataRevisionRef> sources;
         for(const auto& mapping:mappings)if(mapping.sourceKey.empty() || mapping.sourceKey.size()>256 || !GetDataRevisionRefValid(mapping.source) || !sources.emplace(mapping.sourceKey,mapping.source).second){result.error=RoiError::SourceUnresolved;return result;}
         const auto binding=graph.view->GetDataBinding(roiCatalogBinding).value_or(DataBinding{std::string(roiCatalogBinding)});
+        if(options.expectedCatalogRevision&&*options.expectedCatalogRevision!=binding.revision){result.error=RoiError::RevisionConflict;return result;}
+        CheckCancelled(options.getCancelled);
         const auto catalogData=binding.target?graph.view->GetData(*binding.target):DataSnapshot{};
         const auto* catalog=catalogData?dynamic_cast<const RoiCatalogPayload*>(catalogData->payload.get()):nullptr;
         if(binding.target && !catalog){result.error=RoiError::MissingInput;return result;}
@@ -311,7 +186,7 @@ RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& re
         std::map<std::uint32_t,std::shared_ptr<const RoiVoxelSet>> voxelData;
         std::set<DataRevisionRef> originalIds;
         for(const auto& item:bundle.rois){
-            if(item.schemaVersion!=roiSchemaVersion || !GetDataRevisionRefValid(item.originalRevision) || !originalIds.insert(item.originalRevision).second
+            if(item.schemaVersion!=bundle.schemaVersion || !GetDataRevisionRefValid(item.originalRevision) || !originalIds.insert(item.originalRevision).second
                 || item.metadata.name.empty() || item.metadata.name.size()>256 || item.metadata.group.size()>256 || item.metadata.description.size()>4096){result.error=RoiError::InvalidRequest;return result;}
             if(item.nodes.empty() || item.nodes.size()>roiNodeLimit || (item.source.image && (GetDataRevisionRefValid(item.source.image->dataRevision) || item.source.image->bindingRevision!=0 || !item.source.image->metadata.attributes.empty() || !item.source.image->metadata.source.uri.empty()))){result.error=RoiError::InvalidRequest;return result;}
             const auto mapped=sources.find(item.sourceKey);if(mapped==sources.end()){result.error=RoiError::SourceUnresolved;return result;}
@@ -320,7 +195,7 @@ RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& re
             RoiDefinition definition{mapped->second,item.nodes};std::set<std::uint32_t> nodes;
             for(const auto& node:definition.nodes)if(node.primitive.mask || node.primitive.voxels){result.error=RoiError::InvalidRequest;return result;}
             for(const auto& mask:item.masks){
-                if(!mask.sharedPayload || *mask.sharedPayload>=bundle.masks.size() || !mask.values.empty() || mask.nodeIndices.empty()){result.error=RoiError::InvalidRequest;return result;}
+                if(!mask.sharedPayload || *mask.sharedPayload>=bundle.masks.size() || mask.nodeIndices.empty()){result.error=RoiError::InvalidRequest;return result;}
                 const auto& payload=bundle.masks[*mask.sharedPayload];
                 if(!item.source.image || !GetSameGrid(*item.source.image,payload.grid) || payload.sharedPayload || !payload.nodeIndices.empty()
                     || payload.grid.valueType!=ImageValueType::UInt64 || payload.grid.componentCount!=1 || payload.grid.componentBytes!=8
@@ -329,15 +204,27 @@ RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& re
                 const auto count=GetGridVoxelCount(grid);if(!count){result.error=RoiError::InvalidGeometry;return result;}
                 const auto key=std::make_pair(*mask.sharedPayload,mapped->second);auto found=maskRefs.find(key);
                 if(found==maskRefs.end()){const DataRevisionRef ref{m_store.CreateDataEntityId(),1};found=maskRefs.emplace(key,ref).first;
-                    auto values=ReadPayload<RoiArchiveMaskChunk>(*mask.sharedPayload,reader.GetMaskCount(*mask.sharedPayload),[&](const auto& request){return reader.GetMaskChunk(request);});
-                    if(values.size()!=*count){result.error=RoiError::InvalidGeometry;return result;}
-                    tx.outputs.push_back({ref.entityId,0,DataTypes::labelMap3D,{{"source-volume",mapped->second}},std::make_shared<const LabelMap3DPayload>(grid,std::make_shared<const std::vector<std::uint64_t>>(std::move(values))),DataProvenance{"Host.Roi","restore-mask","3",{}}});}
+                    if(reader.GetMaskCount(*mask.sharedPayload)!=count){result.error=RoiError::InvalidGeometry;return result;}
+                    auto values=std::make_shared<std::vector<std::uint64_t>>(*count);
+                    ReadChunks(*mask.sharedPayload,count,options,[&](const auto& request){return reader.GetMaskChunk(request);},
+                        [](const auto& chunk){return chunk.values.size();},[&](const auto& chunk,std::size_t offset){std::copy(chunk.values.begin(),chunk.values.end(),values->begin()+offset);});
+                    tx.outputs.push_back({ref.entityId,0,DataTypes::labelMap3D,{{"source-volume",mapped->second}},std::make_shared<const LabelMap3DPayload>(grid,std::move(values)),DataProvenance{"Host.Roi","restore-mask","3",{}}});}
                 for(auto index:mask.nodeIndices){if(index>=definition.nodes.size() || !nodes.insert(index).second || definition.nodes[index].kind!=RoiNodeKind::Primitive || definition.nodes[index].primitive.shape!=RoiShape::MaskReference){result.error=RoiError::InvalidRequest;return result;}definition.nodes[index].primitive.mask=found->second;}
             }
             for(const auto& saved:item.voxels){
-                if(!saved.sharedPayload || *saved.sharedPayload>=bundle.voxels.size() || !saved.values.empty() || saved.nodeIndices.empty()){result.error=RoiError::InvalidRequest;return result;}
+                if(!saved.sharedPayload || *saved.sharedPayload>=bundle.voxels.size() || saved.nodeIndices.empty()){result.error=RoiError::InvalidRequest;return result;}
                 const auto& payload=bundle.voxels[*saved.sharedPayload];if(payload.sharedPayload || !payload.nodeIndices.empty()){result.error=RoiError::InvalidRequest;return result;}
-                auto found=voxelData.find(*saved.sharedPayload);if(found==voxelData.end())found=voxelData.emplace(*saved.sharedPayload,std::make_shared<const RoiVoxelSet>(ReadPayload<RoiArchiveVoxelChunk>(*saved.sharedPayload,reader.GetVoxelCount(*saved.sharedPayload),[&](const auto& request){return reader.GetVoxelChunk(request);}))).first;
+                auto found=voxelData.find(*saved.sharedPayload);
+                if(found==voxelData.end()){
+                    RoiVoxelBuilder builder;const bool legacy=bundle.schemaVersion==3;
+                    ReadChunks(*saved.sharedPayload,reader.GetVoxelPayloadCount(*saved.sharedPayload),options,
+                        [&](const auto& request){return reader.GetVoxelPayloadChunk(request);},
+                        [&](const auto& chunk){
+                            if(legacy?!chunk.runs.empty():!chunk.legacyVoxels.empty())throw RoiError::InvalidRequest;
+                            return legacy?chunk.legacyVoxels.size():chunk.runs.size();
+                        },[&](const auto& chunk,std::size_t){if(legacy)builder.AppendVoxels(chunk.legacyVoxels);else builder.AppendRuns(chunk.runs);});
+                    found=voxelData.emplace(*saved.sharedPayload,builder.Finish()).first;
+                }
                 for(auto index:saved.nodeIndices){if(index>=definition.nodes.size() || !nodes.insert(index).second || definition.nodes[index].kind!=RoiNodeKind::Primitive || definition.nodes[index].primitive.shape!=RoiShape::VoxelSet){result.error=RoiError::InvalidRequest;return result;}definition.nodes[index].primitive.voxels=found->second;}
             }
             const auto definitionError=RoiEvaluator::GetDefinitionError(definition);if(definitionError!=RoiError::None){result.error=definitionError;return result;}
@@ -352,6 +239,7 @@ RoiArchiveRestoreResult RoiService::LoadArchiveReader(const RoiArchiveReader& re
         tx.outputs.push_back({catalogRef.entityId,catalogRef.generation-1,DataTypes::roiCatalog,std::move(inputs),std::make_shared<const RoiCatalogPayload>(std::move(entries)),DataProvenance{"Host.Roi","restore-bundle","3",{}}});
         for(auto& output:tx.outputs){for(const auto& input:output.inputs){const auto data=graph.view->GetData(input.source);bool explicitScope=GetInputTransient(data);for(const auto& staged:tx.outputs)if(staged.entityId==input.source.entityId && staged.expectedGeneration+1==input.source.generation && staged.lifetimeScope)explicitScope=true;if(explicitScope){output.lifetimeScope=m_store.CreateDataEntityId();output.lifetimePolicy=DataLifetimePolicy::ExplicitRetirement;break;}}}
         tx.bindings.push_back({std::string(roiCatalogBinding),binding.revision,true,binding.target,catalogRef});
+        CheckCancelled(options.getCancelled);
         const auto committed=m_store.SetDataCommit(std::move(tx));
         if(committed.status!=DataCommitStatus::Succeeded){result.error=committed.failureReason==DataCommitFailure::ExpectationFailed?RoiError::RevisionConflict:RoiError::CommitFailed;result.rois.clear();result.revisionMapping.clear();return result;}
         result.error=RoiError::None;result.commitId=committed.commitId;result.rois=std::move(restored);result.revisionMapping=std::move(revisionMapping);

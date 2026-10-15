@@ -105,14 +105,9 @@ public:
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived = false);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     // 纯值持久化契约；应用负责文件 I/O 和 sourceKey 到精确来源的可靠映射。
-    // 大载荷先规划再逐批读取；完整便捷入口不设置 ROI 总量预算。
+    // 元数据与分块载荷分离；恢复完成且未取消时一次发布。
     RoiArchiveReadResult GetRoiArchiveReader(const std::vector<RoiArchiveSelection>& selection);
-    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings);
-    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection);
-    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings);
-    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref, const std::string& sourceKey);
-    RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
+    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings,const RoiArchiveRestoreOptions& options = {});
 
     // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
