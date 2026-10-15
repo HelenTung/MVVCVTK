@@ -12,6 +12,7 @@ int GetLoadFailCount();
 int GetConsumerContractFailCount();
 int GetRenderProductFailCount();
 int GetViewFailCount();
+int GetHistogramExportFailCount();
 int GetCropFailCount();
 int GetCropLifecycleFailCount();
 int GetCropArchiveFailCount();

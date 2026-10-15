@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
+#include <vector>
 
 namespace {
 using P = CropVectorDouble3Array;
@@ -102,7 +104,11 @@ void CropSphereVisual::SetGeometry(const P& center, double radius, vtkMatrix4x4*
     m_viewDirty=true; UpdateView();
 }
 void CropSphereVisual::SetVisible(bool visible) { m_visible=visible; ApplyStyle(); }
-void CropSphereVisual::SetState(State state) { if(m_state==state)return; m_state=state; ApplyStyle(); }
+void CropSphereVisual::SetState(State state) {
+    if(m_state==state)return;
+    if((m_state==State::Hover||m_state==State::Dragging)&&state!=State::Hover&&state!=State::Dragging)m_handleDirty=true;
+    m_state=state; ApplyStyle();
+}
 void CropSphereVisual::SetRadiusHandleDirection(const P& direction) {
     if(!std::isfinite(Dot(direction,direction))||Dot(direction,direction)==0)return;
     m_handleDirection=Unit(direction); m_hasHandleDirection=true;
@@ -134,30 +140,93 @@ P CropSphereVisual::Project(const P& point) const {
 }
 void CropSphereVisual::AppendCircle(vtkPolyData& output,const P& center,double radius,const P& a,const P& b) {
     const auto point=[&](double angle) { P p{}; for(int j=0;j<3;++j)p[j]=center[j]+radius*(a[j]*std::cos(angle)+b[j]*std::sin(angle));return p; };
-    int segments=32;
-    // 全圆按投影弦差细分，避免视口边缘的短弧被漏判；极端近裁面投影保持有界。
-    for(;segments<65536;segments*=2) {
-        bool refine=false;
-        for(int i=0;i<segments&&!refine;++i) {
-            const auto p=Project(point(tau*i/segments)),q=Project(point(tau*(i+1)/segments));
-            const auto mid=Project(point(tau*(i+.5)/segments));
+    // 1. 齐次裁剪平面在圆上均为 c + u*cos(t) + v*sin(t)。
+    // 先解析求交，只有位于视锥内的连续弧段参与屏幕弦差；不跨越近裁面或相机平面。
+    vtkNew<vtkMatrix4x4> clip;
+    vtkMatrix4x4::Multiply4x4(m_camera->GetCompositeProjectionTransformMatrix(m_renderer->GetTiledAspectRatio(),0,1),m_modelToWorld,clip);
+    std::array<double,4> c{},u{},v{};
+    const double input[4]{center[0],center[1],center[2],1};
+    const double axisA[4]{radius*a[0],radius*a[1],radius*a[2],0},axisB[4]{radius*b[0],radius*b[1],radius*b[2],0};
+    clip->MultiplyPoint(input,c.data());clip->MultiplyPoint(axisA,u.data());clip->MultiplyPoint(axisB,v.data());
+    std::array<std::array<double,3>,6> planes{};
+    for(int k=0;k<6;++k) {
+        const int axis=k/2;const double sign=k%2?-1:1;
+        for(int j=0;j<3;++j) {
+            const auto& value=j==0?c:j==1?u:v;
+            planes[k][j]=(k==4?0:value[3])+sign*value[axis];
+        }
+    }
+    std::vector<double> breaks{0,tau};
+    for(const auto& plane:planes) {
+        const double amplitude=std::hypot(plane[1],plane[2]);
+        if(amplitude==0||std::abs(plane[0])>amplitude)continue;
+        const double phase=std::atan2(plane[2],plane[1]),delta=std::acos(std::clamp(-plane[0]/amplitude,-1.0,1.0));
+        for(double angle:{phase-delta,phase+delta}){angle=std::fmod(angle+tau,tau);if(angle>0&&angle<tau)breaks.push_back(angle);}
+    }
+    std::sort(breaks.begin(),breaks.end());breaks.erase(std::unique(breaks.begin(),breaks.end()),breaks.end());
+    auto* points=output.GetPoints();auto* lines=output.GetLines();
+    for(std::size_t interval=1;interval<breaks.size();++interval) {
+        const double low=breaks[interval-1],high=breaks[interval],middle=(low+high)*.5;
+        if(!std::all_of(planes.begin(),planes.end(),[&](const auto& p){return p[0]+p[1]*std::cos(middle)+p[2]*std::sin(middle)>=0;}))continue;
+        std::vector<P> samples{point(low)};
+        const auto append=[&](auto&& self,double from,double to,const P& p,const P& q,int depth)->void {
+            const double angle=(from+to)*.5;const auto mid=Project(point(angle));
             const double dx=q[0]-p[0],dy=q[1]-p[1],length=dx*dx+dy*dy;
             const double t=length>0?std::clamp(((mid[0]-p[0])*dx+(mid[1]-p[1])*dy)/length,0.0,1.0):0;
-            refine=std::hypot(mid[0]-p[0]-t*dx,mid[1]-p[1]-t*dy)>pixelError;
+            const double error=std::hypot(mid[0]-p[0]-t*dx,mid[1]-p[1]-t*dy);
+            if(depth<16&&std::isfinite(error)&&error>pixelError) {
+                self(self,from,angle,p,mid,depth+1);self(self,angle,to,mid,q,depth+1);
+            } else samples.push_back(point(to));
+        };
+        const int segments=std::max(1,static_cast<int>(std::ceil((high-low)*32/tau)));
+        for(int i=0;i<segments;++i) {
+            const double from=low+(high-low)*i/segments,to=low+(high-low)*(i+1)/segments;
+            append(append,from,to,Project(point(from)),Project(point(to)),0);
         }
-        if(!refine)break;
+        const bool closed=low==0&&high==tau;
+        const auto first=points->GetNumberOfPoints();lines->InsertNextCell(static_cast<int>(samples.size()));
+        for(std::size_t i=0;i<samples.size();++i)
+            lines->InsertCellPoint(closed&&i+1==samples.size()?first:points->InsertNextPoint(samples[i].data()));
     }
-    auto* points=output.GetPoints();auto* lines=output.GetLines();const auto first=points->GetNumberOfPoints();
-    lines->InsertNextCell(segments+1);
-    for(int i=0;i<segments;++i) { const auto p=point(tau*i/segments);lines->InsertCellPoint(points->InsertNextPoint(p.data())); }
-    lines->InsertCellPoint(first); points->Modified();lines->Modified();output.Modified();
+    points->Modified();lines->Modified();output.Modified();
 }
-bool CropSphereVisual::GetHandleUsable() const {
-    const auto center=Project(m_center),handle=Project(m_radiusHandle);
+bool CropSphereVisual::GetHandleUsable(const P& point) const {
+    const auto center=Project(m_center),handle=Project(point);
     // 两个 8 px 手柄的命中区应分离；悬停/拖动时由 UpdateView 禁止自动摆位。
-    return handle[2]>=0&&handle[2]<=1&&handle[0]>=m_viewportPixels[0]+8&&handle[0]<=m_viewportPixels[2]-8
+    return std::all_of(handle.begin(),handle.end(),[](double v){return std::isfinite(v);})
+        &&handle[2]>=0&&handle[2]<=1&&handle[0]>=m_viewportPixels[0]+8&&handle[0]<=m_viewportPixels[2]-8
         &&handle[1]>=m_viewportPixels[1]+8&&handle[1]<=m_viewportPixels[3]-8
-        &&std::hypot(center[0]-handle[0],center[1]-handle[1])>=16;
+        &&(!(center[2]>=0&&center[2]<=1)||std::hypot(center[0]-handle[0],center[1]-handle[1])>=16);
+}
+void CropSphereVisual::UpdateHandle() {
+    if(m_hasHandleDirection&&(m_state==State::Hover||m_state==State::Dragging||GetHandleUsable(m_radiusHandle)))return;
+    // 优先保留已选方向；需要恢复时只从实际可见曲线选择，并验证新位置。
+    const double x=m_viewportPixels[0]+.75*(m_viewportPixels[2]-m_viewportPixels[0]);
+    const double y=m_viewportPixels[1]+.75*(m_viewportPixels[3]-m_viewportPixels[1]);
+    double best=std::numeric_limits<double>::infinity();P selected{};
+    const auto consider=[&](const P& candidate) {
+        if(!GetHandleUsable(candidate))return;
+        const auto display=Project(candidate);const double score=std::hypot(display[0]-x,display[1]-y);
+        if(score<best){best=score;selected=candidate;}
+    };
+    for(auto* data:{m_outline.GetPointer(),m_rings.GetPointer()}) {
+        for(vtkIdType i=0;i<data->GetNumberOfPoints();++i) {
+            P candidate{};data->GetPoint(i,candidate.data());consider(candidate);
+        }
+        // 几乎直线的可见弧可能只有边缘端点；在原圆上检查段内候选，不加密曲线缓存。
+        P circleCenter=m_center;double circleRadius=m_radius;
+        if(data==m_outline){for(int j=0;j<3;++j)circleCenter[j]+=m_viewNormal[j]*m_tangentOffset;circleRadius=std::sqrt(std::max(0.,m_radius*m_radius-m_tangentOffset*m_tangentOffset));}
+        auto* lines=data->GetLines();lines->InitTraversal();vtkIdType count=0;const vtkIdType* ids=nullptr;
+        while(lines->GetNextCell(count,ids))for(vtkIdType i=1;i<count;++i) {
+            P a{},b{};data->GetPoint(ids[i-1],a.data());data->GetPoint(ids[i],b.data());
+            for(double t:{.25,.5,.75}) {
+                P radial{};for(int j=0;j<3;++j)radial[j]=a[j]*(1-t)+b[j]*t-circleCenter[j];
+                radial=Unit(radial);for(int j=0;j<3;++j)radial[j]=circleCenter[j]+circleRadius*radial[j];consider(radial);
+            }
+        }
+        if(std::isfinite(best))break;
+    }
+    if(std::isfinite(best)){for(int j=0;j<3;++j)selected[j]-=m_center[j];SetRadiusHandleDirection(selected);}
 }
 void CropSphereVisual::UpdateView() {
     if(!m_renderer)return;
@@ -165,7 +234,10 @@ void CropSphereVisual::UpdateView() {
     auto* camera=m_renderer->GetActiveCamera();
     const auto* origin=m_renderer->GetOrigin(); const auto* size=m_renderer->GetSize();
     const std::array<int,4> viewport{origin[0],origin[1],origin[0]+size[0],origin[1]+size[1]};
-    if(!m_viewDirty&&m_camera==camera&&m_cameraTime==camera->GetMTime()&&m_viewportPixels==viewport)return;
+    if(!m_viewDirty&&m_camera==camera&&m_cameraTime==camera->GetMTime()&&m_viewportPixels==viewport) {
+        if(m_handleDirty){UpdateHandle();m_handleDirty=false;}
+        return;
+    }
     m_viewportPixels=viewport;
     m_camera=camera; m_cameraTime=camera->GetMTime(); m_viewDirty=false;
     P normal{}, circleCenter=m_center; double circleRadius=m_radius;m_tangentOffset=0;
@@ -213,17 +285,7 @@ void CropSphereVisual::UpdateView() {
     m_rings->GetPoints()->Modified();m_rings->GetLines()->Modified();m_rings->Modified();
     m_outline->GetPoints()->Modified();m_outline->GetLines()->Modified();m_outline->Modified();
     // 3. 方向缓存属于显示层；悬停/拖动时冻结，空闲且确实不可操作时才重新摆位。
-    if(m_hasHandleDirection&&(m_state==State::Hover||m_state==State::Dragging||GetHandleUsable())) { ApplyStyle();return; }
-    if(!hasOutline) { ApplyStyle();return; }
-    P direction{}, up{}; camera->GetDirectionOfProjection(direction.data()); camera->GetViewUp(up.data());
-    const auto right=Unit(Cross(direction,up)); const auto screenUp=Unit(Cross(right,direction));
-    P diagonal{}; for(int i=0;i<3;++i)diagonal[i]=right[i]+screenUp[i];
-    diagonal=Transform(*m_worldToModel,diagonal,0); const double along=Dot(diagonal,normal);
-    for(int i=0;i<3;++i)diagonal[i]-=along*normal[i];
-    diagonal=Unit(diagonal); if(Dot(diagonal,diagonal)==0)diagonal=Perpendicular(normal);
-    P handleDirection{};
-    for(int i=0;i<3;++i)handleDirection[i]=(circleCenter[i]-m_center[i]+circleRadius*diagonal[i])/m_radius;
-    SetRadiusHandleDirection(handleDirection);
+    UpdateHandle();m_handleDirty=false;
     ApplyStyle();
 }
 P CropSphereVisual::GetRadiusHandle() const { return m_radiusHandle; }
@@ -234,8 +296,9 @@ bool CropSphereVisual::GetNearOutline(int x,int y) const {
         m_renderer->SetWorldPoint(p[0],p[1],p[2],1); m_renderer->WorldToDisplay();
         const auto* display=m_renderer->GetDisplayPoint(); return P{display[0],display[1],display[2]};
     };
-    for(vtkIdType i=0;i<m_outline->GetNumberOfPoints();++i) {
-        const auto a=project(i), b=project((i+1)%m_outline->GetNumberOfPoints());
+    auto* lines=m_outline->GetLines();lines->InitTraversal();vtkIdType count=0;const vtkIdType* ids=nullptr;
+    while(lines->GetNextCell(count,ids))for(vtkIdType i=1;i<count;++i) {
+        const auto a=project(ids[i-1]), b=project(ids[i]);
         if(a[2]<0||a[2]>1||b[2]<0||b[2]>1)continue;
         const double dx=b[0]-a[0],dy=b[1]-a[1],length=dx*dx+dy*dy;
         const double t=length>0?std::clamp(((x-a[0])*dx+(y-a[1])*dy)/length,0.0,1.0):0;

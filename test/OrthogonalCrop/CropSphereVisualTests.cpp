@@ -48,7 +48,7 @@ Actors GetActors(vtkRenderer& renderer) {
         if(actor->GetPickable()||!mapper)continue;
         mapper->Update();auto* data=mapper->GetInput();if(!data)continue;
         if(data->GetPointData()->GetScalars())result.rings=actor;
-        else if(data->GetNumberOfLines()==1)result.outline=actor;
+        else if(data->GetNumberOfLines()>0)result.outline=actor;
         else if(data->GetNumberOfPolys()>0)result.shell=actor;
     }
     return result;
@@ -134,7 +134,7 @@ int GetCropSphereVisualFailures() {
         widget.GetHandle(1)->GetHandleRepresentation()->GetWorldPosition(radius.data());
         const auto project=[&](const P& p){renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();return P{d[0],d[1],d[2]};};
         const auto c=project(center),r=project(radius);
-        check(std::hypot(r[0]-c[0],r[1]-c[1])>20,"camera-facing radius handle remains separate from center");
+        check(std::hypot(r[0]-c[0],r[1]-c[1])>=16,"two 8 px native handle hit regions remain separate");
         int redraws=0;widget.SetRenderCallback([&]{++redraws;});
         interactor->SetEventPosition(int(c[0]),int(c[1]));interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
         const auto hoverWidth=actors.outline->GetProperty()->GetLineWidth();
@@ -229,20 +229,37 @@ int GetCropSphereVisualFailures() {
         visual.SetRadiusHandleDirection({0,0,1});visual.SetState(CropSphereVisual::State::Hover);
         camera->SetParallelScale(3.1);window->Render();
         check(visual.GetRadiusHandle()==P{0,0,2},"hover freezes automatic placement even when handle projects onto center");
-        visual.SetState(CropSphereVisual::State::Idle);camera->SetParallelScale(3.2);window->Render();
+        const auto hoverGeometryTime=GetData(direct.outline)->GetMTime();
+        visual.SetState(CropSphereVisual::State::Idle);window->Render();
         check(visual.GetRadiusHandle()!=P{0,0,2},"unhovered unusable handle can move back to silhouette");
+        check(GetData(direct.outline)->GetMTime()==hoverGeometryTime,"unhover restores handle without rebuilding cached curves");
         // 400 px 视口中的可见圆弧来自 2000 px 半径，超过旧 96 段的半像素弦差目标。
         camera->SetPosition(2,0,20);camera->SetFocalPoint(2,0,0);camera->SetParallelScale(.2);window->Render();
         auto* sampled=GetData(direct.outline);const auto count=sampled->GetNumberOfPoints();
         const auto project=[&](const P& p){renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();return P{d[0],d[1],d[2]};};
         double maxError=0;
-        for(vtkIdType i=0;i<count;++i) {
-            P a{},b{},mid{};sampled->GetPoint(i,a.data());sampled->GetPoint((i+1)%count,b.data());
+        vtkIdType cellSize=0;const vtkIdType* ids=nullptr;sampled->GetLines()->InitTraversal();
+        while(sampled->GetLines()->GetNextCell(cellSize,ids))for(vtkIdType i=1;i<cellSize;++i) {
+            P a{},b{},mid{};sampled->GetPoint(ids[i-1],a.data());sampled->GetPoint(ids[i],b.data());
             for(int j=0;j<3;++j)mid[j]=a[j]+b[j];const auto length=std::hypot(mid[0],mid[1],mid[2]);for(auto& value:mid)value*=2/length;
             const auto p=project(a),q=project(b),m=project(mid);
             maxError=std::max(maxError,std::hypot(m[0]-(p[0]+q[0])*.5,m[1]-(p[1]+q[1])*.5));
         }
-        check(count>96&&maxError<=.5,"large projected circle meets the requested half-pixel chord error");
+        check(count>1&&maxError<=.5,"visible local arc meets the requested half-pixel chord error");
+        const auto handle=project(visual.GetRadiusHandle());
+        check(handle[0]>=8&&handle[0]<=392&&handle[1]>=8&&handle[1]<=392&&handle[2]>=0&&handle[2]<=1,
+            "visible local boundary provides an operable fallback radius handle");
+        camera->ParallelProjectionOff();camera->SetPosition(0,0,1);camera->SetFocalPoint(0,0,0);window->Render();
+        auto* visible=GetData(direct.rings);
+        check(visible->GetNumberOfPoints()>0,"inside-sphere perspective retains visible ring arcs");
+        for(vtkIdType i=0;i<visible->GetNumberOfPoints();++i) {
+            P point{};visible->GetPoint(i,point.data());const auto screen=project(point);
+            check(std::all_of(screen.begin(),screen.end(),[](double value){return std::isfinite(value);})
+                &&screen[2]>=-tolerance&&screen[2]<=1+tolerance&&screen[0]>=-tolerance&&screen[0]<=400+tolerance&&screen[1]>=-tolerance&&screen[1]<=400+tolerance,
+                "perspective sampling excludes invisible and discontinuous projection intervals");
+        }
+        std::cout<<"Sphere visual: inside perspective ring points="<<visible->GetNumberOfPoints()<<'\n';
+        camera->ParallelProjectionOn();camera->SetPosition(2,0,20);camera->SetFocalPoint(2,0,0);window->Render();
         const auto beforeResize=sampled->GetMTime();window->SetSize(600,600);window->Render();
         check(sampled->GetMTime()>beforeResize,"viewport resize invalidates display sampling");window->SetSize(400,400);
         visual.DetachRenderer();
@@ -266,6 +283,9 @@ int GetCropSphereVisualFailures() {
     }
     {
         std::cout<<"Sphere visual: passive overlay"<<std::endl;
+        camera->ParallelProjectionOn();camera->SetFocalPoint(op.centerInInputModel.data());
+        camera->SetPosition(op.centerInInputModel[0]+14,op.centerInInputModel[1]+10,op.centerInInputModel[2]+30);
+        camera->SetParallelScale(8);camera->SetClippingRange(.1,1000);
         CropGeometryOverlay passive(HostRenderViewRole::Primary3D);passive.SetOperation(op,{-5,5,-5,5,-5,5});passive.AttachRenderer(renderer);
         window->Render();const auto passiveActors=GetActors(*renderer);
         check(passiveActors.rings&&passiveActors.outline&&!passiveActors.shell

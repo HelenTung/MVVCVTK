@@ -10,7 +10,8 @@
 #include <cmath>
 namespace Manual {
 namespace {
-QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature,QJsonObject& formalStatistics)
+QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature,QJsonObject& formalStatistics,
+    std::size_t objectOffset=0,std::size_t objectLimit=256)
 {
     const auto state = feature->GetState();
     QJsonObject summary{{"stage", static_cast<int>(state.stage)}, {"failureReason", static_cast<int>(state.failureReason)},
@@ -44,17 +45,22 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     summary["method"] = static_cast<int>(snapshot->method);
     if (!state.isoEstimate && snapshot->isoEstimate) summary["isoEstimate"] = describeEstimate(*snapshot->isoEstimate);
     QJsonArray objects;
-    if (snapshot->objects) for (const auto& object : *snapshot->objects) {
+    const auto objectCount=snapshot->objects?snapshot->objects->size():0;
+    if(objectOffset>objectCount)throw std::invalid_argument("对象分页偏移超过完整对象数量");
+    const auto objectEnd=objectOffset+std::min(objectLimit,objectCount-objectOffset);
+    for(auto index=objectOffset;index<objectEnd;++index) {
+        const auto& object=(*snapshot->objects)[index];
         objects.append(QJsonObject{{"objectIndex", static_cast<int>(object.objectIndex)}, {"closed", object.isClosed},
             {"manifold", object.isManifold}, {"truncated", object.isTruncated}, {"orientationValid", object.isOrientationValid},
             {"areaValidity", static_cast<int>(object.areaValidity)}, {"volumeValidity", static_cast<int>(object.volumeValidity)},
             {"area", object.areaModelUnit2 ? QJsonValue(*object.areaModelUnit2) : QJsonValue()},
             {"volume", object.volumeModelUnit3 ? QJsonValue(*object.volumeModelUnit3) : QJsonValue()}});
-        if (objects.size() >= 256) break;
     }
     summary["objects"] = objects;
     summary["objectCount"] = snapshot->objects?static_cast<int>(snapshot->objects->size()):0;
-    summary["objectSummaryLimit"] = 256;
+    summary["objectSummaryLimit"] = static_cast<int>(objectLimit);
+    summary["objectOffset"]=QString::number(objectOffset);summary["nextObjectOffset"]=QString::number(objectEnd);
+    summary["objectsComplete"]=objectEnd==objectCount;
     return summary;
 }
 }
@@ -65,6 +71,13 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"analysisRoi":"","parentGeneration":"","minimumObjectVoxels":"0"})");
     auto requestedParameters=std::make_shared<QJsonObject>();
     auto formalStatistics=std::make_shared<QJsonObject>();
+    panel->AttachAction("ReadObjects",{{"pageOffset","0"},{"pageSize","256"}},
+        [panel,feature,formalStatistics](auto id,const auto& p) {
+            const auto offset=GetId(p["pageOffset"]),count=GetId(p["pageSize"]);
+            if(!count||count>4096)throw std::invalid_argument("对象分页大小必须为 1～4096");
+            if(!feature->GetSurfaceSnapshot())throw std::invalid_argument("当前没有正式表面对象");
+            panel->SetComplete(id,"Observed",GetSurface(feature,*formalStatistics,static_cast<std::size_t>(offset),static_cast<std::size_t>(count)));
+        },TestPolicy::Read);
     {
         const auto send=[panel, feature,requestedParameters,formalStatistics](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
             SurfaceDeterminationStartParams start;

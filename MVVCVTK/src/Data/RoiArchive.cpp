@@ -141,7 +141,7 @@ public:
         if(index>=masks.size())return {};if(const auto* mask=dynamic_cast<const BinaryMask3DPayload*>(masks[index]->payload.get()))return mask->GetValues()->size();
         const auto& labels=dynamic_cast<const LabelMap3DPayload&>(*masks[index]->payload);return std::visit([](const auto& values){return values->size();},labels.GetValues());
     }
-    std::optional<std::size_t> GetVoxelCount(std::size_t index)const noexcept override{return index<voxels.size()?std::optional<std::size_t>{voxels[index]->GetVoxels().size()}:std::nullopt;}
+    std::optional<std::size_t> GetVoxelCount(std::size_t index)const noexcept override{return index<voxels.size()?std::optional<std::size_t>{voxels[index]->GetVoxelCount()}:std::nullopt;}
 
     RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest& request)const override{
         if(request.payloadIndex>=masks.size())return {RoiError::InvalidRequest};
@@ -152,7 +152,15 @@ public:
     }
     RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest& request)const override{
         if(request.payloadIndex>=voxels.size())return {RoiError::InvalidRequest};
-        return GetPayloadChunk<RoiArchiveVoxelChunk>(request,voxels[request.payloadIndex]->GetVoxels());
+        RoiArchiveVoxelChunk result;const auto& payload=*voxels[request.payloadIndex];
+        if(!request.chunkElements||request.elementOffset>payload.GetVoxelCount())return {RoiError::InvalidRequest};
+        try {
+            if(request.getCancelled&&request.getCancelled())return {RoiError::Cancelled};
+            result.values=payload.GetVoxelChunk(request.elementOffset,request.chunkElements);
+            if(request.getCancelled&&request.getCancelled())return {RoiError::Cancelled};
+            result.nextOffset=request.elementOffset+result.values.size();result.isComplete=result.nextOffset==payload.GetVoxelCount();result.error=RoiError::None;
+        }catch(const std::bad_alloc&){result.error=RoiError::TooLarge;}catch(...){result.error=RoiError::Cancelled;}
+        return result;
     }
 };
 class BundleReader final:public RoiArchiveReader {

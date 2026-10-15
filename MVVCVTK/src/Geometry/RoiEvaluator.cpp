@@ -6,29 +6,88 @@
 #include <set>
 #include <stdexcept>
 #include <utility>
+#include <mutex>
+#include <tuple>
 
-RoiVoxelSet::RoiVoxelSet(std::vector<RoiVoxel> voxels) : m_voxels(std::move(voxels))
-{
-    std::sort(m_voxels.begin(),m_voxels.end(),[](const RoiVoxel& a,const RoiVoxel& b){return a.index<b.index;});
-    for (std::size_t i=0;i<m_voxels.size();++i){
-        if (!m_voxels[i].label || (i && m_voxels[i-1].index==m_voxels[i].index))throw std::invalid_argument("Invalid ROI voxel labels.");
-        auto found=m_labelBounds.emplace(m_voxels[i].label,std::array<double,6>{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY}).first;
-        for(int a=0;a<3;++a){found->second[a*2]=std::min(found->second[a*2],m_voxels[i].index[a]-.5);found->second[a*2+1]=std::max(found->second[a*2+1],m_voxels[i].index[a]+.5);}
+class RoiVoxelSet::Impl final {
+public:
+    std::vector<RoiVoxelRun> runs;
+    std::vector<std::size_t> offsets{0};
+    std::map<std::uint32_t,std::array<double,6>> bounds;
+    std::once_flag expanded;
+    std::vector<RoiVoxel> voxels;
+};
+RoiVoxelSet::RoiVoxelSet(std::vector<RoiVoxel> voxels)
+    :RoiVoxelSet([&] {
+        std::sort(voxels.begin(),voxels.end(),[](const auto& a,const auto& b){return std::tie(a.index[1],a.index[2],a.index[0])<std::tie(b.index[1],b.index[2],b.index[0]);});
+        std::vector<RoiVoxelRun> runs;
+        for(const auto& voxel:voxels) {
+            if(!runs.empty()&&runs.back().first[1]==voxel.index[1]&&runs.back().first[2]==voxel.index[2]) {
+                auto& previous=runs.back();if(previous.last>=voxel.index[0])throw std::invalid_argument("Duplicate ROI voxel.");
+                if(previous.label==voxel.label&&std::int64_t(previous.last)+1==voxel.index[0]){previous.last=voxel.index[0];continue;}
+            }
+            runs.push_back({voxel.index,voxel.index[0],voxel.label});
+        }
+        return runs;
+    }()) {}
+RoiVoxelSet::RoiVoxelSet(std::vector<RoiVoxelRun> runs):m_impl(std::make_shared<Impl>()) {
+    std::sort(runs.begin(),runs.end(),[](const auto& a,const auto& b){return std::tie(a.first[1],a.first[2],a.first[0])<std::tie(b.first[1],b.first[2],b.first[0]);});
+    for(const auto& run:runs) {
+        if(!run.label||run.first[0]>run.last)throw std::invalid_argument("Invalid ROI voxel run.");
+        if(!m_impl->runs.empty()) {
+            auto& previous=m_impl->runs.back();
+            if(previous.first[1]==run.first[1]&&previous.first[2]==run.first[2]) {
+                if(previous.last>=run.first[0])throw std::invalid_argument("Overlapping ROI voxel runs.");
+                if(previous.label==run.label&&std::int64_t(previous.last)+1==run.first[0]){previous.last=run.last;continue;}
+            }
+        }
+        m_impl->runs.push_back(run);
     }
+    for(const auto& run:m_impl->runs) {
+        const auto count=static_cast<std::size_t>(std::int64_t(run.last)-run.first[0]+1);
+        if(count>std::numeric_limits<std::size_t>::max()-m_impl->offsets.back())throw std::length_error("ROI voxel count overflows.");
+        m_impl->offsets.push_back(m_impl->offsets.back()+count);
+        auto& bounds=m_impl->bounds.emplace(run.label,std::array<double,6>{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY}).first->second;
+        for(int a=0;a<3;++a){bounds[a*2]=std::min(bounds[a*2],run.first[a]-.5);bounds[a*2+1]=std::max(bounds[a*2+1],(a==0?run.last:run.first[a])+.5);}
+    }
+}
+const std::vector<RoiVoxelRun>& RoiVoxelSet::GetRuns()const noexcept{return m_impl->runs;}
+std::size_t RoiVoxelSet::GetVoxelCount()const noexcept{return m_impl->offsets.back();}
+std::vector<RoiVoxel> RoiVoxelSet::GetVoxelChunk(std::size_t offset,std::size_t count)const {
+    if(offset>GetVoxelCount())throw std::out_of_range("ROI voxel chunk offset.");
+    count=std::min(count,GetVoxelCount()-offset);std::vector<RoiVoxel> result;result.reserve(count);
+    auto run=static_cast<std::size_t>(std::upper_bound(m_impl->offsets.begin(),m_impl->offsets.end(),offset)-m_impl->offsets.begin()-1);
+    while(result.size()<count) {
+        const auto& span=m_impl->runs[run];const auto first=std::int64_t(span.first[0])+static_cast<std::int64_t>(offset-m_impl->offsets[run]);
+        const auto take=std::min(count-result.size(),m_impl->offsets[run+1]-offset);
+        for(std::size_t i=0;i<take;++i)result.push_back({{static_cast<int>(first+static_cast<std::int64_t>(i)),span.first[1],span.first[2]},span.label});
+        offset+=take;++run;
+    }
+    return result;
+}
+const std::vector<RoiVoxel>& RoiVoxelSet::GetVoxels()const {
+    std::call_once(m_impl->expanded,[&] {
+        auto values=GetVoxelChunk(0,GetVoxelCount());
+        std::sort(values.begin(),values.end(),[](const auto& a,const auto& b){return a.index<b.index;});
+        m_impl->voxels=std::move(values);
+    });
+    return m_impl->voxels;
 }
 std::uint32_t RoiVoxelSet::GetLabel(const std::array<int,3>& index) const noexcept
 {
-    const auto found=std::lower_bound(m_voxels.begin(),m_voxels.end(),index,
-        [](const RoiVoxel& voxel,const std::array<int,3>& key){return voxel.index<key;});
-    return found!=m_voxels.end() && found->index==index ? found->label:0;
+    const auto found=std::upper_bound(m_impl->runs.begin(),m_impl->runs.end(),index,
+        [](const auto& key,const auto& run){return std::tie(key[1],key[2],key[0])<std::tie(run.first[1],run.first[2],run.first[0]);});
+    if(found==m_impl->runs.begin())return 0;
+    const auto& run=*std::prev(found);
+    return run.first[1]==index[1]&&run.first[2]==index[2]&&index[0]<=run.last?run.label:0;
 }
 
 std::array<double,6> RoiVoxelSet::GetIndexBounds(const std::vector<std::uint64_t>& labels) const noexcept
 {
     std::array<double,6> result{INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
     const auto add=[&](const auto& bounds){for(int a=0;a<3;++a){result[a*2]=std::min(result[a*2],bounds[a*2]);result[a*2+1]=std::max(result[a*2+1],bounds[a*2+1]);}};
-    if(labels.empty())for(const auto& entry:m_labelBounds)add(entry.second);
-    else for(auto label:labels){if(label>UINT32_MAX)continue;const auto found=m_labelBounds.find(static_cast<std::uint32_t>(label));if(found!=m_labelBounds.end())add(found->second);}
+    if(labels.empty())for(const auto& entry:m_impl->bounds)add(entry.second);
+    else for(auto label:labels){if(label>UINT32_MAX)continue;const auto found=m_impl->bounds.find(static_cast<std::uint32_t>(label));if(found!=m_impl->bounds.end())add(found->second);}
     return result;
 }
 
@@ -44,6 +103,13 @@ template<std::size_t N> bool GetFinite(const std::array<double, N>& values) noex
 double Dot(const Point& a, const Point& b) noexcept
 {
     return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+Point GetEdgeIntersection(const Point& a,const Point& b,double distanceA,double distanceB) noexcept {
+    // 共享边始终按同一端点顺序插值，使相邻三角形的交点可精确复用，不做近似焊接。
+    const bool reverse=b<a;const auto& first=reverse?b:a;const auto& second=reverse?a:b;
+    const double from=reverse?distanceB:distanceA,to=reverse?distanceA:distanceB,t=from/(from-to);
+    return {first[0]+(second[0]-first[0])*t,first[1]+(second[1]-first[1])*t,first[2]+(second[2]-first[2])*t};
 }
 
 bool GetProjectiveValid(const Matrix& matrix) noexcept
@@ -436,8 +502,7 @@ public:
                         for (const auto& point:polygon) {
                             const double distance=sign*(point[axis]-limit);
                             if ((distance>=0)!=(previousDistance>=0)) {
-                                const double t=previousDistance/(previousDistance-distance);Point intersection{};
-                                for (int a=0;a<3;++a) intersection[a]=previous[a]+t*(point[a]-previous[a]);next.push_back(intersection);
+                                next.push_back(GetEdgeIntersection(previous,point,previousDistance,distance));
                             }
                             if (distance>=0) next.push_back(point);previous=point;previousDistance=distance;
                         }polygon.swap(next);
@@ -473,9 +538,7 @@ public:
                 for (const auto& point:polygon) {
                     const double currentDistance=distance(point);
                     if ((currentDistance>=0)!=(previousDistance>=0)) {
-                        const double t=previousDistance/(previousDistance-currentDistance);
-                        next.push_back({previous[0]+(point[0]-previous[0])*t,
-                            previous[1]+(point[1]-previous[1])*t,previous[2]+(point[2]-previous[2])*t});
+                        next.push_back(GetEdgeIntersection(previous,point,previousDistance,currentDistance));
                     }
                     if (currentDistance>=0) next.push_back(point);
                     previous=point; previousDistance=currentDistance;
@@ -823,9 +886,9 @@ RoiError RoiEvaluator::GetRelationsError(const DataRevision& roi,const DataLooku
     for (const auto& node:definition.nodes) if (node.kind==RoiNodeKind::Primitive && node.primitive.shape==RoiShape::VoxelSet) {
         if (!image) return RoiError::SourceMismatch;
         const auto& extent=image->GetGeometry().extent;
-        for (const auto& voxel:node.primitive.voxels->GetVoxels())
+        for (const auto& run:node.primitive.voxels->GetRuns())
             for (int axis=0;axis<3;++axis)
-                if (voxel.index[axis]<extent[axis*2] || voxel.index[axis]>extent[axis*2+1]) return RoiError::InvalidGeometry;
+                if (run.first[axis]<extent[axis*2] || (axis==0?run.last:run.first[axis])>extent[axis*2+1]) return RoiError::InvalidGeometry;
     }
     for (std::size_t i=1;i<expected.size();++i) {
         const auto mask=getData(expected[i].source);

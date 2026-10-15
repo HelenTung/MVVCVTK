@@ -39,12 +39,13 @@ private:
     void AppendCircle(vtkPolyData& output, const CropVectorDouble3Array& center,
         double radius, const CropVectorDouble3Array& a, const CropVectorDouble3Array& b);
     CropVectorDouble3Array Project(const CropVectorDouble3Array& point) const;
-    bool GetHandleUsable() const;
+    bool GetHandleUsable(const CropVectorDouble3Array& point) const;
+    void UpdateHandle();
     CropVectorDouble3Array m_center{}, m_radiusHandle{};
     CropVectorDouble3Array m_handleDirection{}, m_viewNormal{};
     double m_radius = 1;
     double m_tangentOffset = 0;
-    bool m_visible = false, m_viewDirty = true, m_hasHandleDirection = false;
+    bool m_visible = false, m_viewDirty = true, m_hasHandleDirection = false, m_handleDirty = true;
     std::array<int, 4> m_viewportPixels{};
     State m_state = State::Idle;
     vtkWeakPointer<vtkRenderer> m_renderer;

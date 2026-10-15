@@ -145,9 +145,33 @@ void Display(const char *imagePath) {
     auto mixed=std::make_shared<AlignmentDeviationField>(*field);mixed->samples[0].value=-.5;mixed->samples[1].value=0;mixed->samples[2].value=.5;
     auto mixedResult=result;mixedResult.forward=mixed;const auto mixedDisplay=AlignmentDeviationOverlay::Build(source,mixedResult,display);
     auto* categorical=vtkUnsignedCharArray::SafeDownCast(mixedDisplay->surface->GetCellData()->GetScalars());
-    Check(mixedDisplay->usesCellColors && categorical && categorical->GetPointer(0)[0]==163
+    Check(mixedDisplay->usesCellColors && categorical && categorical->GetPointer(0)[0]==AlignmentDeviationColors::mixedToleranceColor[0]
         && mixedDisplay->samplePoints->GetPoints()==points,"categorical colors use existing samples on unchanged geometry");
     Check(mixedDisplay->samplePoints->GetPointData()->GetScalars()->GetTuple3(1)[1]==180,"actual tolerance sample is green without RGB category interpolation");
+    auto classified=std::make_shared<AlignmentDeviationField>(*field);
+    const auto checkClass=[&](std::array<double,3> values,unsigned char category,AlignmentDeviationColors::Color expected) {
+        for(int i=0;i<3;++i){classified->samples[i].value=values[i];classified->samples[i].state=AlignmentDeviationState::Valid;}
+        auto snapshot=result;snapshot.forward=classified;
+        const auto data=AlignmentDeviationOverlay::Build(source,snapshot,display);
+        auto* types=vtkUnsignedCharArray::SafeDownCast(data->surface->GetCellData()->GetArray("metrology.deviation.cell.class"));
+        auto* rgb=vtkUnsignedCharArray::SafeDownCast(data->surface->GetCellData()->GetScalars());unsigned char color[3];rgb->GetTypedTuple(0,color);
+        Check(types&&types->GetValue(0)==category&&std::equal(expected.begin(),expected.end(),color),"triangle tolerance classification preserves both extrema");
+    };
+    const AlignmentDeviationColors::Ramp ramp(display,parameters->tolerance);
+    checkClass({.01,.01,.20},2,ramp.ColorAt(.20));
+    checkClass({-.20,.01,.01},1,ramp.ColorAt(-.20));
+    checkClass({-.20,.01,.20},3,AlignmentDeviationColors::mixedToleranceColor);
+    checkClass({-.1,0,.1},0,ramp.ColorAt(0));
+    auto continuousField=std::make_shared<AlignmentDeviationField>(*field);
+    for(auto& sample:continuousField->samples)sample.state=AlignmentDeviationState::Valid;
+    auto continuousResult=result;continuousResult.forward=continuousField;
+    const auto continuous=AlignmentDeviationOverlay::Build(source,continuousResult,automatic);
+    Check(!continuous->usesCellColors&&!continuous->samplePoints&&!continuous->colored->GetPointData()->GetScalars(),
+        "continuous display holds no hidden sample topology or RGB array");
+    const auto categoricalFromContinuous=AlignmentDeviationOverlay::Build(source,continuousResult,display,continuous.get());
+    const auto continuousAgain=AlignmentDeviationOverlay::Build(source,continuousResult,automatic,categoricalFromContinuous.get());
+    Check(categoricalFromContinuous->samplePoints&&categoricalFromContinuous->samplePoints->GetNumberOfVerts()==12&&!continuousAgain->samplePoints,
+        "mode switches create categorical sample connectivity only when required");
     const auto recast=AlignmentDeviationOverlay::Build(source,mixedResult,display,mixedDisplay.get());
     Check(recast->samplePoints->GetVerts()==mixedDisplay->samplePoints->GetVerts() && recast->surface->GetPolys()==triangles,
         "recolor reuses both original triangles and sample connectivity");

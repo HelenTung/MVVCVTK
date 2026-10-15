@@ -4,14 +4,16 @@
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
+#include <future>
 
 namespace {
 void Require(bool value,const char* message) {if (!value) throw std::runtime_error(message);}
 struct Fixture {
     DataGraphStore store;RoiService service{store};GridGeometry3D grid;
     DataRevisionRef source{store.CreateDataEntityId(),1};
-    Fixture() {
+    explicit Fixture(std::array<double,9> direction={1,0,0,0,1,0,0,0,1}) {
         grid.extent={0,8,0,8,0,8};grid.dimensions={9,9,9};grid.spacing={1,2,3};
+        grid.direction=direction;
         DataTransaction tx;tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,std::make_shared<const std::vector<std::uint8_t>>(729,10))}};
         Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
     }
@@ -154,7 +156,7 @@ void ProcessingRegression(){
     using Cell=std::array<int,3>;std::set<Cell> input;std::vector<RoiVoxel> voxels;
     for(int z=2;z<=6;++z)for(int y=2;y<=6;++y)for(int x=2;x<=6;++x)if(Cell{x,y,z}!=Cell{3,3,3} && Cell{x,y,z}!=Cell{5,4,4})input.insert({x,y,z});
     input.insert({0,0,0});for(const auto& cell:input)voxels.push_back({cell,1});const auto original=f.Create(std::move(voxels));
-    const std::array<Cell,7> kernel{{{0,0,0},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+    std::vector<Cell> kernel{{0,0,0},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     const auto reference=[&](const std::set<Cell>& cells,bool dilate){std::set<Cell> result;
         for(const auto& cell:cells){bool kept=true;for(const auto& offset:kernel){Cell point{cell[0]+offset[0],cell[1]+offset[1],cell[2]+offset[2]};
             if(dilate)result.insert(point);else if(!cells.count(point))kept=false;}if(!dilate && kept)result.insert(cell);}return result;};
@@ -166,6 +168,20 @@ void ProcessingRegression(){
         const auto query=f.Read(result.rois.front())->GetQuery();Require(query.query!=nullptr,"morphology query unavailable");
         for(int z=0;z<9;++z)for(int y=0;y<9;++y)for(int x=0;x<9;++x)
             Require(query.query->GetContains({double(x),double(y*2),double(z*3)})==bool(expected.count({x,y,z})),"interval morphology differs from discrete neighbourhood truth");
+    }
+    Fixture skewed({1,.2,0,0,1,.3,0,0,1});std::vector<RoiVoxel> skewedInput;for(const auto& cell:input)skewedInput.push_back({cell,1});
+    const auto skewedRoi=skewed.Create(std::move(skewedInput));kernel.clear();
+    const auto physical=[&](Cell index){std::array<double,3> p{};for(int r=0;r<3;++r)for(int a=0;a<3;++a)p[r]+=skewed.grid.direction[r*3+a]*skewed.grid.spacing[a]*index[a];return p;};
+    // 3 mm 半径的独立逐偏移真值；此网格逆矩阵给出的各轴包围范围均小于 4。
+    for(int z=-4;z<=4;++z)for(int y=-4;y<=4;++y)for(int x=-4;x<=4;++x){const auto p=physical({x,y,z});if(std::hypot(p[0],p[1],p[2])<=3)kernel.push_back({x,y,z});}
+    for(const auto operation:{RoiMorphologyOperation::Dilate,RoiMorphologyOperation::Erode,RoiMorphologyOperation::Open,RoiMorphologyOperation::Close}) {
+        auto expected=reference(input,operation==RoiMorphologyOperation::Dilate||operation==RoiMorphologyOperation::Close);
+        if(operation==RoiMorphologyOperation::Open||operation==RoiMorphologyOperation::Close)expected=reference(expected,operation==RoiMorphologyOperation::Open);
+        auto request=skewed.Operation(skewedRoi,RoiMorphologyParams{operation,3,RoiRadiusUnit::Millimetres});request.output=RoiOutputMode::CreateNew;
+        const auto result=skewed.service.SetOperation(request);Require(result.error==RoiError::None&&!result.rois.empty(),"physical interval kernel failed");
+        const auto query=skewed.Read(result.rois.front())->GetQuery();
+        for(int z=0;z<9;++z)for(int y=0;y<9;++y)for(int x=0;x<9;++x)
+            Require(query.query->GetContains(physical({x,y,z}))==bool(expected.count({x,y,z})),"compressed physical kernel changed shear or radius inclusion");
     }
 
     const DataRevisionRef gray{f.store.CreateDataEntityId(),1};std::vector<float> values(729,10);
@@ -196,5 +212,33 @@ void ProcessingRegression(){
     Require(meshStorage.expired() && meshRevision.expired(),"ROI index cache retained mesh data after its graph owner was destroyed");
 }
 
+void Compressed() {
+    // 十亿成员由一条区间表示；仅取末尾三项，不物化完整体素向量。
+    RoiVoxelSet large(std::vector<RoiVoxelRun>{{{0,1,2},999999999,7}});
+    Require(large.GetRuns().size()==1&&large.GetVoxelCount()==1000000000,"dense ROI lost compressed storage");
+    const auto tail=large.GetVoxelChunk(999999997,3);
+    Require(tail.size()==3&&tail[0].index==std::array<int,3>{999999997,1,2}&&tail[2].index[0]==999999999
+        &&large.GetLabel({999999999,1,2})==7&&large.GetLabel({1000000000,1,2})==0,"compressed chunk or label boundary changed");
+    RoiVoxelSet small(std::vector<RoiVoxelRun>{{{-3,2,1},3,4},{{2,0,0},4,9},{{4,2,1},5,4}});
+    Require(small.GetRuns().size()==2&&small.GetVoxelCount()==12,"adjacent runs were not coalesced");
+    const auto read=[&]()->const std::vector<RoiVoxel>*{return &small.GetVoxels();};
+    auto first=std::async(std::launch::async,read),second=std::async(std::launch::async,read);
+    const auto* expanded=first.get();Require(second.get()==expanded&&expanded->size()==12,"legacy expansion is not stable across readers");
+    Require(std::is_sorted(expanded->begin(),expanded->end(),[](const auto& a,const auto& b){return a.index<b.index;}),"legacy absolute index order changed");
+    bool rejected=false;try{RoiVoxelSet invalid(std::vector<RoiVoxelRun>{{{0,0,0},3,1},{{3,0,0},4,2}});}catch(const std::invalid_argument&){rejected=true;}
+    Require(rejected,"overlapping labels were accepted");
+    Fixture f;RoiOperationRequest request;request.source=f.source;request.output=RoiOutputMode::CreateNew;request.params=RoiThresholdParams{RoiThresholdMode::Threshold,{10,10}};
+    const auto result=f.service.SetOperation(request);
+    Require(result.error==RoiError::None&&result.rois.size()==1&&f.Count(result.rois.front())==729,"dense threshold publication changed membership");
+    const auto payload=result.rois.front().definition.nodes.front().primitive.voxels;
+    Require(payload&&payload->GetRuns().size()==81&&payload->GetVoxelCount()==729,"operation output expanded row intervals");
+    const auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{result.rois.front().revision,"dense"}});
+    Require(archive.error==RoiError::None&&archive.reader&&archive.reader->GetVoxelCount(0)==729,"compressed archive count failed");
+    RoiArchiveChunkRequest chunk;chunk.chunkElements=7;std::size_t count=0;
+    do {const auto page=archive.reader->GetVoxelChunk(chunk);Require(page.error==RoiError::None,"compressed archive chunk failed");
+        count+=page.values.size();chunk.elementOffset=page.nextOffset;if(page.isComplete)break;}while(true);
+    Require(count==729&&payload->GetRuns().size()==81,"archive paging lost members or changed compressed storage");
+    std::cout<<"ROI compressed: members="<<large.GetVoxelCount()<<" runs="<<large.GetRuns().size()<<" publishedMembers=729 publishedRuns="<<payload->GetRuns().size()<<'\n';
 }
-int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}if(argc==2 && std::string(argv[1])=="compressed"){Compressed();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
