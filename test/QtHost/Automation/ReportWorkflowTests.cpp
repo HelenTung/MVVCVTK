@@ -66,7 +66,7 @@ void CheckReportWorkflow()
     auto distribution=Options();distribution.match=ReportMatch::Distribution;const auto stats=CompareReports(a,a,distribution);Require(stats.table->GetCount()==2 && stats.table->Read(0)[2]=="3","distribution excludes missing/invalid measurements without fake pairs");
     std::cout<<"Reports: table selection and paging"<<std::endl;
     ResultReport view;ReportDocument large;large.id="large";large.title="大报告";large.category="导入报告";large.source="data-a";large.result="result-a";
-    large.relatedResults={"alignment-a"};large.columns={{"id",{},{},false},{"value","数值","1",true}};large.table=std::make_shared<ReportTable>();
+    large.relatedResults.append("alignment-a");large.columns={{"id",{},{},false},{"value","数值","1",true}};large.table=std::make_shared<ReportTable>();
     for(int i=0;i<1203;++i)large.table->Append({QString::number(i),QString::number(1203-i)});
     std::cout<<"Reports: table stored"<<std::endl;
     view.AddReport(large);auto newer=large;newer.id="newer";newer.source="data-b";newer.result="result-b";view.AddReport(newer);
