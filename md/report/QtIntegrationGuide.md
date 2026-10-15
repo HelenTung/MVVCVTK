@@ -479,7 +479,7 @@ Gap 有 **5 个有效动作**：`Start/Overlay/Exit/SetDisplay/Evaluate`。每�
 
 ### 7.1 启动
 
-输入：已加载的主图像、非空目标视图、ISO 参数、背景/材料均值、体积过滤参数。比例模式 `dataRangeRatio` 在 `[0,1]`；绝对模式填写 `absoluteIsoValue`。数值必须有限，背景均值不大于材料均值，最小体积非负。
+输入：已加载的主图像、非空目标视图、ISO 参数、背景/材料均值、体积过滤参数。背景/材料均值使用输入体素的灰度域。比例模式 `dataRangeRatio` 在 `[0,1]`；绝对模式填写 `absoluteIsoValue`。数值必须有限，背景均值不大于材料均值，最小体积非负。
 
 ```cpp
 QPointer<CtWindow> owner(&window);
