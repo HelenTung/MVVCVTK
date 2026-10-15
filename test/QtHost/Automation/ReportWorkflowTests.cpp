@@ -38,9 +38,16 @@
 #include <algorithm>
 #include <future>
 #include <atomic>
+#include <cmath>
 namespace Manual {
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+quint64 GetReportCount(const QJsonValue& value) {
+    if(value.isString())return GetId(value);
+    const auto count=value.toDouble(-1);
+    Require(value.isDouble()&&count>=0&&count<=9007199254740991.0&&std::floor(count)==count,"report numeric count is not an exact nonnegative JSON integer");
+    return static_cast<quint64>(count);
+}
 bool SameRow(const QStringList& a,const QStringList& b){return a.size()==b.size() && std::equal(a.cbegin(),a.cend(),b.cbegin());}
 bool SameIndices(const ReportRows& rows,std::initializer_list<int> expected){return rows.size()==expected.size() && std::equal(rows.cbegin(),rows.cend(),expected.begin());}
 ReportDocument Read(QByteArray bytes){QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"测试报告");}
@@ -155,6 +162,8 @@ void CheckMixedSortAndCancellation() {
 }
 void CheckReportWorkflow()
 {
+    Require(GetReportCount(QJsonValue(4294967419.0))==4294967419ULL&&GetReportCount(QJsonValue(QString("18446744073709551615")))==UINT64_MAX,"native report counts preserve wide numeric and uint64 string forms");
+    Reject([]{GetReportCount(QJsonValue(9007199254740992.0));},"unsafe JSON numeric count must not be rounded into an ID");
     std::cout<<"Reports: CSV parsing"<<std::endl;
     const auto special=Read(QByteArray("\xef\xbb\xbf")+"id,value,note\r\n9007199254740993,2.5,\"comma, quote\"\" and\r\nline\"\r\nempty,,\r\n");
     Require(special.table->GetCount()==2 && special.table->Read(0)[0]=="9007199254740993" && special.table->Read(0)[2]=="comma, quote\" and\r\nline" && special.table->Read(1)[1].isEmpty(),"CSV quoting, UTF-8 BOM, large IDs and missing values");
@@ -352,7 +361,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
         }
         if(doc.id.startsWith("surface:") && summary.contains("objectCount")) {
-            Require(doc.table->GetCount()==GetId(summary["objectCount"]),"surface report covers all native objects");
+            Require(doc.table->GetCount()==GetReportCount(summary["objectCount"]),"surface report covers all native objects");
             // 独立摘要直接读取原生快照，限定面积有值时也须保留，不能按资格二次抹空。
             const auto objects=summary["objects"].toArray();const auto offset=GetId(summary["objectOffset"]);
             Require(offset<=static_cast<std::uint64_t>(doc.table->GetCount())
