@@ -2931,15 +2931,15 @@ void StartSequence(TestWindow& window, const QString& path)
                     const auto original=window.size();const auto prior=window.GetRenderCount();window.resize(original*.85);
                     Check(Wait([&]{return window.GetRenderCount()>prior&&!window.GetWorkflow().getRenderPending("primary-3d");}),
                         "initial Qt viewport shrink completes an owner-rendered frame");
-                    const auto small=window.size();const auto before=layout();window.resize(original);
+                    const auto reducedSize=window.size();const auto before=layout();window.resize(original);
                     const bool grew=Wait([&]{const auto after=layout();return after.first>before.first*1.05&&after.second>before.second;});
                     const auto grown=layout();const auto* viewport=endpoint->renderer->GetSize();
                     std::cout<<"Legend resize: strip="<<before.first<<" -> "<<grown.first<<" glyphPixels="<<before.second<<" -> "<<grown.second
-                        <<" window="<<small.width()<<'x'<<small.height()<<" -> "<<window.width()<<'x'<<window.height()
+                        <<" window="<<reducedSize.width()<<'x'<<reducedSize.height()<<" -> "<<window.width()<<'x'<<window.height()
                         <<" viewport="<<viewport[0]<<'x'<<viewport[1]<<" dpi="<<endpoint->renderWindow->GetDPI()<<std::endl;
                     Check(grew,
                         "growing the actual Qt viewport enlarges both the legend geometry and font");
-                    window.resize(small);
+                    window.resize(reducedSize);
                     Check(Wait([&]{const auto after=layout();return std::abs(after.first-before.first)<.1&&after.second==before.second;}),
                         "shrinking the actual Qt viewport restores both legend geometry and font");
                     const auto lastRender=window.GetRenderCount();window.resize(original);
