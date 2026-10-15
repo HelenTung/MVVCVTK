@@ -120,7 +120,7 @@ QJsonObject ReferenceDataSource::ReadTransform()
     if (!matrix) throw std::runtime_error("model transform unavailable");
     return {{"modelToWorld", GetValues(*matrix)}};
 }
-QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const QString& maskPath)
+QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const QString& maskPath, bool compareScalars)
 {
     const auto graph = m_data->GetDataGraph();
     const auto data = m_data->GetData(graph, source);
@@ -129,10 +129,9 @@ QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const
     const auto& g = image->GetGeometry();
     std::size_t count = 1; for (const auto size : g.dimensions) count *= size;
     const auto& mask = image->GetValidityMask();
-    QByteArray allValid;
-    if (!mask) allValid = QByteArray(static_cast<qsizetype>(count), char(1));
-    const auto* maskData = mask ? reinterpret_cast<const char*>(mask->data()) : allValid.constData();
-    std::uint64_t selected = 0; for (std::size_t i = 0; i < count; ++i) selected += maskData[i] != 0;
+    const auto* maskData = mask ? reinterpret_cast<const char*>(mask->data()) : nullptr;
+    std::uint64_t selected = mask ? 0 : count;
+    if(mask)for (std::size_t i = 0; i < count; ++i) selected += maskData[i] != 0;
     const auto digest = [](const char* values, std::size_t size) {
         QCryptographicHash hash(QCryptographicHash::Sha256);
         while (size) { const auto part = std::min<std::size_t>(size, 8U*1024U*1024U);
@@ -142,16 +141,21 @@ QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const
     if (!maskPath.isEmpty()) {
         if (!QDir().mkpath(QFileInfo(maskPath).absolutePath())) throw std::runtime_error("无法创建掩码输出目录");
         QFile file(maskPath);
-        if (!file.open(QIODevice::WriteOnly) || file.write(maskData, static_cast<qint64>(count)) != static_cast<qint64>(count))
-            throw std::runtime_error("无法保存有效域掩码");
+        if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error("无法保存有效域掩码");
+        if(maskData){
+            if(file.write(maskData,static_cast<qint64>(count))!=static_cast<qint64>(count))throw std::runtime_error("有效域掩码输出不完整");
+        }else{
+            // 原始全有效域分块输出，不额外分配一份整卷掩码。
+            const QByteArray block(1024*1024,char(1));
+            for(std::size_t offset=0;offset<count;){const auto part=std::min<std::size_t>(block.size(),count-offset);
+                if(file.write(block.constData(),static_cast<qint64>(part))!=static_cast<qint64>(part))throw std::runtime_error("有效域掩码输出不完整");offset+=part;}
+        }
     }
-    QJsonArray inputs; for (const auto& input : data->inputs)
-        inputs.append(QJsonObject{{"role", QString::fromStdString(input.role)}, {"source", GetRefText(input.source)}});
-    return {{"source",GetRefText(source)},{"extent",GetValues(g.extent)},{"dimensions",GetValues(g.dimensions)},
+    QJsonObject result{{"source",GetRefText(source)},{"extent",GetValues(g.extent)},{"dimensions",GetValues(g.dimensions)},
         {"spacing",GetValues(g.spacing)},{"origin",GetValues(g.origin)},{"direction",GetValues(g.direction)},
-        {"gridCount",QString::number(count)},{"validCount",QString::number(selected)},
-        {"scalarSha256",digest(reinterpret_cast<const char*>(image->GetValues()->data()),image->GetValues()->size())},
-        {"maskSha256",digest(maskData,count)},{"maskPath",maskPath},{"inputs",inputs}};
+        {"gridCount",static_cast<double>(count)},{"validCount",static_cast<double>(selected)}};
+    if(compareScalars)result["scalarSha256"]=digest(reinterpret_cast<const char*>(image->GetValues()->data()),image->GetValues()->size());
+    return result;
 }
 
 QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)

@@ -209,6 +209,7 @@ QString GetParameterText(const QString& key)
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
         {"filePath", "输入文件路径"}, {"outputPath", "输出文件路径"}, {"outputDir", "输出目录"}, {"archivePath", "归档文件路径"},
         {"maskPath", "掩码证据输出路径（可选）"}, {"parentNodeId", "父裁剪节点（Root / Applied / 编号）"},
+        {"compareScalars", "比较体素值"},
         {"matrix", "局部到源坐标矩阵"}, {"center", "源模型坐标中心"}, {"radius", "半径"}, {"height", "高度"}, {"roi", "区域修订"},
         {"centerMM","区域中心（源模型坐标）"},{"sizeMM","区域完整尺寸（模型长度单位）"},{"direction3D","区域方向（正交轴）"},
         {"datasetId", "数据集标识"}, {"dimensions", "各轴体素数量"}, {"spacingLPS", "体素间距（LPS）"},

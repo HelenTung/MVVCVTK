@@ -73,11 +73,11 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("ResultEvidence",{},[panel,reference](auto id,const auto&) {
         panel->SetComplete(id,"Observed",reference->GetResultEvidence());
     },TestPolicy::Read);
-    panel->AttachAction("ImageEvidence",{{"revision","current"},{"maskPath",""}},[panel,reference](auto id,const auto& p) {
+    panel->AttachAction("ImageEvidence",{{"revision","current"},{"maskPath",""},{"compareScalars",false}},[panel,reference](auto id,const auto& p) {
         const auto input = panel->GetSession()->GetImageDescriptor();
         if (!input) throw std::invalid_argument("没有当前影像");
         const auto ref = GetText(p,"revision") == "current" ? input->dataRevision : GetRef(p["revision"]);
-        panel->SetComplete(id,"Observed",reference->ReadImageEvidence(ref,GetText(p,"maskPath")));
+        panel->SetComplete(id,"Observed",reference->ReadImageEvidence(ref,GetText(p,"maskPath"),GetBool(p,"compareScalars")));
     },TestPolicy::Read);
     panel->AttachAction("Select", {{"revision", ""}, {"expectedBindingRevision", "current"}},
         [panel](auto id, const auto& params) {

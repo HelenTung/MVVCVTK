@@ -142,7 +142,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
             {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()}});
     ExportJson(QDir(folder).filePath("capture.json"),{{"operationId",QString::number(operationId)},
         {"label",step["stageLabel"]},{"module",step["module"]},{"action",step["action"]},
-        {"capturedUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}, {"views",files},{"scenes",scenes}});
+        {"views",files},{"scenes",scenes}});
 }
 std::uint64_t Send(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
