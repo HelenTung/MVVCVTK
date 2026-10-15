@@ -258,8 +258,15 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
         Check(command && command->isEnabled(), "direct command remains available in the classified menu");
         command->trigger();
-        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000), "menu dispatch reaches the original business path");
     }
+    const bool dispatched=Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); },2000);
+    if(!dispatched)std::cerr<<"ACTION DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+    Check(dispatched,"actual command click creates its operation record");
+    const auto record=window.GetRecords().GetRecord(id);
+    Check(record["module"].toString()==module && record["action"].toString()==action,
+        "actual command dispatch preserves the requested module and action");
     return id;
 }
 std::uint64_t ClickCurrentPrimary(TestWindow& window,const QString& module,const QString& expected)
