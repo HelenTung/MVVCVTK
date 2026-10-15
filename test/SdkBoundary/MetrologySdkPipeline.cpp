@@ -17,7 +17,6 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
-#include <cstdlib>
 #include <Windows.h>
 #include <bcrypt.h>
 
@@ -122,8 +121,10 @@ void Run(const char *filePath, const char *expectedSha256) {
         });
         Require(admission.status==AlignmentAdmissionStatus::Accepted, "SDK request must be admitted.");
         // 默认等待完整业务完成；非零环境参数仅用于调用方显式选择的测试进程保护。
-        const auto text=std::getenv("MVVCVTK_SDK_AUDIT_TIMEOUT_MS");
-        const auto timeout=text?std::stoull(text):0;
+        std::array<char,64> setting{};
+        const auto length=GetEnvironmentVariableA("MVVCVTK_SDK_AUDIT_TIMEOUT_MS",setting.data(),static_cast<DWORD>(setting.size()));
+        Require(length<setting.size(),"Caller-selected audit deadline is invalid.");
+        const auto timeout=length?std::stoull(setting.data()):0;
         const auto started=std::chrono::steady_clock::now();
         while (!complete->isDone && (!timeout || std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<double(timeout))) { session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
         Require(complete->isDone, "SDK request did not finish within the caller-selected audit deadline.");
