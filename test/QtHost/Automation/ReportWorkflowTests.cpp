@@ -109,7 +109,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record)
     const auto reports=provider->second(record,{});auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");
     const auto module=record["module"].toString(),action=record["action"].toString();
     const bool requiresReport=(module=="Wall" && action=="Start") || (module=="Gap" && (action=="Start" || action=="Evaluate"))
-        || (module=="Surface" && action=="GlobalAutomatic") || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface"}.contains(action));
+        || (module=="Surface" && action=="GlobalAutomatic") || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface","EvaluateVoxelVolume"}.contains(action));
     if(requiresReport && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(record["status"].toString()))Require(!reports.isEmpty(),"successful business computation must expose its native report");
     QTemporaryDir directory;
     const auto summary=record["result"].toObject();int inspectionRows=0;
@@ -123,8 +123,9 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record)
         }
         if(doc.id.startsWith("surface:") && summary.contains("objectCount"))Require(doc.table->GetCount()==summary["objectCount"].toInt(),"surface report covers all native objects");
         if(doc.id.startsWith("inspection"))inspectionRows+=doc.table->GetCount();
-        if(doc.id.startsWith("deviation:") && summary.contains("forward")) {
-            std::uint64_t count=0;for(const auto value:summary["forward"].toObject()["counts"].toArray())count+=GetId(value);
+        const auto field=doc.id.startsWith("deviation-reverse:")?QString("reverse"):doc.id.startsWith("deviation:")?QString("forward"):QString();
+        if(!field.isEmpty() && summary[field].isObject()) {
+            std::uint64_t count=0;for(const auto value:summary[field].toObject()["counts"].toArray())count+=GetId(value);
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==count,"deviation report includes every native validity state");
         }
         const auto path=directory.filePath("native.csv");ExportReport(path,doc);QFile inputFile(path);Require(inputFile.open(QIODevice::ReadOnly),"native CSV readable");const auto copy=ReadReportCsv(inputFile,"原生报告回读");

@@ -128,7 +128,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
 void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmentHostFeature> feature)
 {
     workflow.readReports["Alignment"]=[feature](const QJsonObject& record,const QSet<QString>& known) {
-        QVector<ReportDocument> reports;const auto r=record["result"].toObject();const auto inspection=r["inspection"].toString(),deviation=r["deviation"].toString();
+        QVector<ReportDocument> reports;const auto r=record["result"].toObject();const auto inspection=r["inspection"].toString(),deviation=r["deviation"].toString(),volume=r["voxelVolume"].toString();
         const auto length=[](AlignmentUnit unit){return unit==AlignmentUnit::Millimeter?QString("mm"):unit==AlignmentUnit::Meter?QString("m"):QString("model");};
         if(HasRevision(inspection) && !known.contains("inspection:"+inspection)) {
             const auto snapshot=feature->GetInspection(GetRef(inspection));
@@ -157,18 +157,36 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
         if(HasRevision(deviation) && !known.contains("deviation:"+deviation)) {
             const auto snapshot=feature->GetDeviation(GetRef(deviation));
             if(snapshot && snapshot->forward) {
-                auto doc=Document(record,"deviation",deviation,GetRefText(snapshot->sourceMesh),"表面偏差明细");
+                const auto fieldReport=[&](const AlignmentDeviationField& field,const QString& prefix,const QString& title,const QString& quantity) {
+                auto doc=Document(record,prefix,deviation,GetRefText(snapshot->sourceMesh),title);
                 if(const auto alignment=feature->GetResult(snapshot->alignmentResult))doc.source=GetRefText(alignment->input.source);
-                const auto unit=length(snapshot->unit);const auto quantity=snapshot->parameters && snapshot->parameters->metric==AlignmentDeviationMetric::NominalNormalProjection?QString("名义法向投影偏差"):QString("无符号最近距离");
+                const auto unit=length(snapshot->unit);
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};
                 doc.identityColumn=0;doc.validityColumn=3;doc.table=std::make_shared<ReportTable>();std::size_t index=0;
                 const QStringList reasons{"未选择","有效","源无效","目标无效","超过距离","法向不匹配","缺少法向"};
-                for(const auto& sample:snapshot->forward->samples){const bool valid=sample.state==AlignmentDeviationState::Valid;
+                for(const auto& sample:field.samples){const bool valid=sample.state==AlignmentDeviationState::Valid;
                     doc.table->Append({QString::number(index++),valid?Number(sample.value):QString(),valid?Number(sample.distance):QString(),valid?"0":QString::number(static_cast<int>(sample.state)+1),reasons.value(static_cast<int>(sample.state),"未知状态")});}
-                const auto& stats=snapshot->forward->statistics;
-                doc.conditions["汇总"]=QJsonObject{{"样本数",QString::number(snapshot->forward->samples.size())},{"有效数",QString::number(stats.counts[static_cast<std::size_t>(AlignmentDeviationState::Valid)])},
+                const auto& stats=field.statistics;
+                doc.conditions["汇总"]=QJsonObject{{"样本数",QString::number(field.samples.size())},{"有效数",QString::number(stats.counts[static_cast<std::size_t>(AlignmentDeviationState::Valid)])},
                     {"最小值",stats.hasValues?QJsonValue(stats.minimum):QJsonValue()},{"最大值",stats.hasValues?QJsonValue(stats.maximum):QJsonValue()},
                     {"平均值",stats.hasValues?QJsonValue(stats.mean):QJsonValue()},{"RMS",stats.hasValues?QJsonValue(stats.rms):QJsonValue()},{"单位",unit}};
+                return doc;
+                };
+                const auto quantity=snapshot->parameters && snapshot->parameters->metric==AlignmentDeviationMetric::NominalNormalProjection?QString("名义法向投影偏差"):QString("无符号最近距离");
+                reports.append(fieldReport(*snapshot->forward,"deviation","实测到名义偏差明细",quantity));
+                if(snapshot->reverse)reports.append(fieldReport(*snapshot->reverse,"deviation-reverse","名义到实测覆盖明细","名义到实测无符号覆盖距离"));
+            }
+        }
+        if(HasRevision(volume) && !known.contains("voxel-volume:"+volume)) {
+            if(const auto snapshot=feature->GetVoxelVolume(GetRef(volume))) {
+                auto doc=Document(record,"voxel-volume",volume,GetRefText(snapshot->source),"选区单元体积");const auto& stats=snapshot->statistics;
+                doc.description="完整体积与有效选中部分体积含义不同；不可观测或完整性条件未满足时，完整体积留空。";
+                doc.columns={{"item_id",{},{},false},{"selected_cells","选中单元数","1",true},{"volume_mm3","选区单元体积和","mm3",true},
+                    {"observed_volume_mm3","有效选中部分体积","mm3",true},{"validity",{},{},false},{"reason",{},{},false}};
+                doc.valueColumn=2;doc.identityColumn=0;doc.table=std::make_shared<ReportTable>();
+                const QStringList reasons{"完整","存在不可观测单元","接触索引区域边界","空选区"};
+                doc.table->Append({"voxel-volume",QString::number(stats.selected),stats.volumeMm3?Number(*stats.volumeMm3):QString(),Number(stats.observedVolumeMm3),
+                    QString::number(static_cast<int>(stats.validity)),reasons.value(static_cast<int>(stats.validity),"未知状态")});
                 reports.append(std::move(doc));
             }
         }

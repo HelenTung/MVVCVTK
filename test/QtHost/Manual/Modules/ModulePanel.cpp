@@ -856,7 +856,7 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
         if(!preferred.isEmpty() && !result[preferred].toString().isEmpty() && !result[preferred].toString().endsWith(":0")) {
             m_viewReport->setProperty("reportResult",result[preferred].toString());m_viewReport->show();
         } else
-        for(const auto* key:{"inspection","deviation","resultSet","mesh","result"}) {
+        for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","result"}) {
             const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0")){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
         }
     }
