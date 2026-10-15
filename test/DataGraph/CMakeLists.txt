@@ -4,6 +4,7 @@ add_executable(mvvcvtk_data_graph_tests
     DataLifetimeTests.cpp
     ResultRetentionTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
 target_include_directories(
@@ -41,10 +42,12 @@ SetTestRuntime(DataGraph.VtkBridge mvvcvtk_vtk_data_bridge_tests)
 add_executable(mvvcvtk_roi_tests
     RoiTests.cpp
     RoiReadExecutionTests.cpp
+    RoiArchiveTestReader.h
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiService.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiOperations.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiArchive.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
 target_include_directories(mvvcvtk_roi_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
@@ -58,6 +61,7 @@ add_executable(mvvcvtk_roi_operation_tests RoiOperationsTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiOperations.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/RoiArchive.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp")
 target_include_directories(mvvcvtk_roi_operation_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
 SetTargetDefaults(mvvcvtk_roi_operation_tests)

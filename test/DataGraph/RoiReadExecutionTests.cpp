@@ -1,3 +1,4 @@
+#include "RoiArchiveTestReader.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 #include <atomic>
@@ -64,18 +65,34 @@ void LargeChunk(){
 class InterruptedReader final:public RoiArchiveReader {
 public:
     explicit InterruptedReader(std::shared_ptr<const RoiArchiveReader> reader,bool early=false):m_reader(std::move(reader)),m_early(early){}
-    const RoiArchiveBundle& GetMetadata()const noexcept override{return m_reader->GetMetadata();}
+    const RoiArchiveDescriptor& GetMetadata()const noexcept override{return m_reader->GetMetadata();}
     std::optional<std::size_t> GetMaskCount(std::size_t index)const noexcept override{return m_reader->GetMaskCount(index);}
-    std::optional<std::size_t> GetVoxelCount(std::size_t index)const noexcept override{return m_reader->GetVoxelCount(index);}
+    std::optional<std::size_t> GetVoxelPayloadCount(std::size_t index)const noexcept override{return m_reader->GetVoxelPayloadCount(index);}
     RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest& request)const override{return m_reader->GetMaskChunk(request);}
-    RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest& request)const override{
-        if(request.elementOffset)return {RoiError::Cancelled};auto small=request;small.chunkElements=1;auto chunk=m_reader->GetVoxelChunk(small);if(m_early)chunk.isComplete=true;return chunk;
+    RoiArchiveVoxelPayloadChunk GetVoxelPayloadChunk(const RoiArchiveChunkRequest& request)const override{
+        if(request.elementOffset)return {RoiError::Cancelled};auto small=request;small.chunkElements=1;auto chunk=m_reader->GetVoxelPayloadChunk(small);if(m_early)chunk.isComplete=true;return chunk;
     }
 private:std::shared_ptr<const RoiArchiveReader> m_reader;bool m_early=false;
 };
+// 历史 v3 解码器仍逐块给出体素；新 C++ 接口不携带完整历史载荷。
+class LegacyReader final:public RoiArchiveTestReader {
+public:
+    explicit LegacyReader(std::shared_ptr<const RoiArchiveReader> reader):RoiArchiveTestReader(std::move(reader)){
+        metadata.schemaVersion=3;for(auto& item:metadata.rois)item.schemaVersion=3;
+    }
+    mutable std::size_t calls=0;
+    std::optional<std::size_t> GetVoxelPayloadCount(std::size_t i)const noexcept override{return i==0?std::optional<std::size_t>(2):std::nullopt;}
+    RoiArchiveVoxelPayloadChunk GetVoxelPayloadChunk(const RoiArchiveChunkRequest& r)const override{
+        ++calls;RoiArchiveVoxelPayloadChunk result;const std::array<RoiVoxel,2> values{{{{7,7,7},2},{{1,1,1},1}}};
+        if(r.payloadIndex||r.elementOffset>values.size()||!r.chunkElements)return {RoiError::InvalidRequest};
+        const auto count=std::min(r.chunkElements,values.size()-r.elementOffset);
+        result.legacyVoxels.assign(values.begin()+r.elementOffset,values.begin()+r.elementOffset+count);
+        result.error=RoiError::None;result.nextOffset=r.elementOffset+count;result.isComplete=result.nextOffset==values.size();return result;
+    }
+};
 void SharedArchive(){
     Fixture source;RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;
-    primitive.voxels=std::make_shared<const RoiVoxelSet>(std::vector<RoiVoxel>{{{1,1,1},1},{{7,7,7},1}});
+    primitive.voxels=MakeRoiVoxelFixture(std::vector<RoiVoxel>{{{1,1,1},1},{{7,7,7},1}});
     RoiRequest request;request.metadata.name="共享拆分";request.definition={source.source,{{RoiNodeKind::Primitive,primitive}}};
     const auto created=source.service.SetRoi(request);Require(created.roi.has_value(),"archive fixture ROI failed");
     RoiOperationRequest split;split.source=source.source;split.target=created.roi->revision;RoiComponentParams parameters;parameters.operation=RoiComponentOperation::Split;split.params=parameters;
@@ -83,15 +100,32 @@ void SharedArchive(){
     const auto planned=RoiService::GetArchiveReader(source.store.GetDataGraph(),{{parts.rois[0].revision,"ct"},{parts.rois[1].revision,"ct"}});
     Require(planned.error==RoiError::None && planned.reader,"streamed archive planning failed");
     const auto& metadata=planned.reader->GetMetadata();
-    Require(metadata.rois.size()==2 && metadata.voxels.size()==1 && metadata.voxels.front().values.empty(),"payload copied before shared archive planning");
-    RoiArchiveChunkRequest chunk;chunk.chunkElements=1;const auto first=planned.reader->GetVoxelChunk(chunk);chunk.elementOffset=first.nextOffset;
-    const auto second=planned.reader->GetVoxelChunk(chunk);
-    Require(first.error==RoiError::None && !first.isComplete && first.values.size()==1 && first.values[0].index==std::array<int,3>{1,1,1}
-        && second.error==RoiError::None && second.isComplete && second.values.size()==1 && second.values[0].index==std::array<int,3>{7,7,7},"payload chunks did not preserve exact indices");
+    Require(metadata.rois.size()==2 && metadata.voxels.size()==1,"payload copied before shared archive planning");
+    RoiArchiveChunkRequest chunk;chunk.chunkElements=1;const auto first=planned.reader->GetVoxelPayloadChunk(chunk);chunk.elementOffset=first.nextOffset;
+    const auto second=planned.reader->GetVoxelPayloadChunk(chunk);
+    Require(first.error==RoiError::None && !first.isComplete && first.runs.size()==1 && first.runs[0].first==std::array<int,3>{1,1,1}
+        && second.error==RoiError::None && second.isComplete && second.runs.size()==1 && second.runs[0].first==std::array<int,3>{7,7,7},"payload chunks did not preserve exact indices");
     Fixture target;const auto before=target.store.GetDataGraph().commitId;
     const auto interrupted=target.service.LoadArchiveReader(InterruptedReader(planned.reader),{{"ct",target.source}});
     Require(interrupted.error==RoiError::Cancelled && interrupted.rois.empty() && target.store.GetDataGraph().commitId==before,"interrupted payload published a partial catalog");
     const auto truncated=target.service.LoadArchiveReader(InterruptedReader(planned.reader,true),{{"ct",target.source}});Require(truncated.error==RoiError::InvalidRequest && target.store.GetDataGraph().commitId==before,"premature complete flag restored truncated voxel support");
+    RoiArchiveRestoreOptions cancelled;cancelled.getCancelled=[] {return true;};
+    Require(target.service.LoadArchiveReader(*planned.reader,{{"ct",target.source}},cancelled).error==RoiError::Cancelled
+        &&target.store.GetDataGraph().commitId==before,"explicit restore cancellation published a candidate");
+    cancelled.getCancelled=[]()->bool {throw std::runtime_error("cancelled reader");};
+    Require(target.service.LoadArchiveReader(*planned.reader,{{"ct",target.source}},cancelled).error==RoiError::Cancelled
+        &&target.store.GetDataGraph().commitId==before,"throwing cancellation callback changed error semantics or published data");
+    for(std::size_t width:{1,2,7}){
+        Fixture legacyTarget;LegacyReader legacy(planned.reader);RoiArchiveRestoreOptions options;options.chunkElements=width;
+        const auto loaded=legacyTarget.service.LoadArchiveReader(legacy,{{"ct",legacyTarget.source}},options);
+        Require(loaded.error==RoiError::None&&loaded.rois.size()==2&&legacy.calls==(width==1?2:1),"legacy chunks were duplicated or not restored");
+        const auto& shared=loaded.rois[0].definition.nodes[0].primitive.voxels;
+        Require(shared==loaded.rois[1].definition.nodes[0].primitive.voxels&&shared->GetLabel({1,1,1})==1&&shared->GetLabel({7,7,7})==2,
+            "legacy block boundaries changed exact labels or shared payload ownership");
+    }
+    RoiArchiveTestReader unsupported(planned.reader);unsupported.metadata.schemaVersion=99;
+    Require(target.service.LoadArchiveReader(unsupported,{{"ct",target.source}}).error==RoiError::InvalidRequest
+        &&target.store.GetDataGraph().commitId==before,"unsupported schema was silently interpreted as current data");
     const auto restored=target.service.LoadArchiveReader(*planned.reader,{{"ct",target.source}});
     Require(restored.error==RoiError::None && restored.rois.size()==2 && target.store.GetDataGraph().commitId==before+1,"streamed restore was not atomic");
     const auto& a=restored.rois[0].definition.nodes.front().primitive;const auto& b=restored.rois[1].definition.nodes.front().primitive;

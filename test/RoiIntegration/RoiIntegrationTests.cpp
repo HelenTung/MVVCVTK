@@ -220,16 +220,16 @@ void Run(const char* sample, double spacing, const std::array<double, 3>& origin
     Check(surfaceResult.isPublished && reused && reused->meshRevision==mesh->meshRevision && reused->points==mesh->points && reused->triangleIndices==mesh->triangleIndices
         && reused->execution.scannedCellCount==0 && reused->selection && reused->selection->size()==mesh->selection->size(),"ROI 重新选片复用原测量点、网格与完整支撑，不重新扫描体素");
     surfaceParams.parentGeneration.reset();
-    const auto archive=session.GetRoiArchive(ref,d.metadata.identity.datasetId);
-    Check(archive.error==RoiError::None && archive.archive,"带来源 URI 的纯值归档成功");
-    const auto restored=session.LoadRoiArchive(*archive.archive,d.metadata.identity.datasetId,source,renamed.roi->catalogRevision);
-    Check(restored.error==RoiError::None && restored.roi && restored.roi->revision.entityId!=ref.entityId,"归档显式映射来源并恢复新身份");
+    const auto archive=session.GetRoiArchiveReader({{ref,d.metadata.identity.datasetId}});
+    Check(archive.error==RoiError::None && archive.reader,"带来源 URI 的纯值归档成功");
+    const auto restored=session.LoadRoiArchiveReader(*archive.reader,{{d.metadata.identity.datasetId,source}},{renamed.roi->catalogRevision});
+    Check(restored.error==RoiError::None && restored.rois.size()==1 && restored.rois[0].revision.entityId!=ref.entityId,"归档显式映射来源并恢复新身份");
     // 精确几何头改变后，CurrentPrimary 模式不能提交旧 ROI 的候选。
     Check(artifact->SendRequest(prepare).error==ArtifactError::None,"再次冻结旧 ROI 候选");
     Pump(session,[&] { return artifact->GetState().status!=ArtifactStatus::Running; });
     Check(artifact->GetState().status==ArtifactStatus::Ready,"几何冲突前候选已就绪");
     RoiRequest change=create; change.metadata={}; change.action=RoiAction::SetGeometry; change.expectedRoi=ref;
-    change.expectedCatalogRevision=restored.roi->catalogRevision;
+    change.expectedCatalogRevision=restored.rois[0].catalogRevision;
     // 旋转数据的第一列可能有零项，改动非零列方向。
     for (int r=0;r<3;++r) change.definition.nodes[0].primitive.localToSource[r*4]*=.8;
     Check(session.SetRoi(change).error==RoiError::None,"公共几何修改创建新修订");

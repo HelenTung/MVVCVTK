@@ -1,3 +1,4 @@
+#include "RoiArchiveTestReader.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 #include <set>
@@ -18,7 +19,7 @@ struct Fixture {
         Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
     }
     RoiDescriptor Create(std::vector<RoiVoxel> voxels,std::string name="A") {
-        RoiNode node;node.primitive.shape=RoiShape::VoxelSet;node.primitive.voxels=std::make_shared<const RoiVoxelSet>(std::move(voxels));
+        RoiNode node;node.primitive.shape=RoiShape::VoxelSet;node.primitive.voxels=MakeRoiVoxelFixture(voxels);
         RoiRequest request;request.definition={source,{node}};request.metadata.name=std::move(name);const auto result=service.SetRoi(request);
         Require(result.error==RoiError::None && result.roi,"ROI fixture failed");return *result.roi;
     }
@@ -76,28 +77,31 @@ void ShapesAndTriangles() {
     for (const auto& piece:selection.triangles) for (const auto& point:piece) Require(std::abs(point[2]-12)<1e-12,"ROI selection displaced the measurement surface");
 }
 void Archive() {
-    Fixture f;auto a=f.Create({{{2,3,4},1},{{6,7,8},2}});auto archive=RoiService::GetArchive(f.store.GetDataGraph(),a.revision,"ct");
-    Require(archive.error==RoiError::None && archive.archive && archive.archive->voxels.size()==1 && !archive.archive->nodes[0].primitive.voxels,"sparse archive retained a process pointer or lost its data");
-    Fixture other;auto restored=other.service.LoadArchive(*archive.archive,"ct",other.source,0);Require(restored.error==RoiError::None && restored.roi && other.Count(*restored.roi)==2,"sparse archive did not restore exact membership");
+    Fixture f;auto a=f.Create({{{2,3,4},1},{{6,7,8},2}});auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{a.revision,"ct"}});
+    Require(archive.error==RoiError::None&&archive.reader&&archive.reader->GetMetadata().voxels.size()==1
+        &&!archive.reader->GetMetadata().rois[0].nodes[0].primitive.voxels,"sparse archive retained a process pointer or lost its data");
+    Fixture other;auto restored=other.service.LoadArchiveReader(*archive.reader,{{"ct",other.source}});
+    Require(restored.error==RoiError::None&&restored.rois.size()==1&&other.Count(restored.rois[0])==2,"sparse archive did not restore exact membership");
     const DataRevisionRef labels{f.store.CreateDataEntityId(),1};auto values=std::make_shared<std::vector<std::uint64_t>>(729,0);(*values)[364]=0x100000001ULL;
     DataTransaction tx;tx.outputs={{labels.entityId,0,DataTypes::labelMap3D,{},std::make_shared<const LabelMap3DPayload>(f.grid,std::shared_ptr<const std::vector<std::uint64_t>>(values))}};Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"wide labels failed");
     RoiPrimitive primitive;primitive.shape=RoiShape::MaskReference;primitive.mask=labels;primitive.labels={0x100000001ULL};RoiRequest request;request.metadata.name="wide";request.definition={f.source,{{RoiNodeKind::Primitive,primitive}}};auto made=f.service.SetRoi(request);
-    archive=RoiService::GetArchive(f.store.GetDataGraph(),made.roi->revision,"ct");Require(archive.archive && archive.archive->masks[0].values[364]==0x100000001ULL,"archive truncated a 64-bit label");
-    const auto catalog=other.service.GetDescriptors(other.store.GetDataGraph(),true);restored=other.service.LoadArchive(*archive.archive,"ct",other.source,catalog.front().catalogRevision);
-    Require(restored.roi && other.Count(*restored.roi)==1,"restored wide label selector changed its membership");
+    archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{made.roi->revision,"ct"}});RoiArchiveChunkRequest chunk;chunk.elementOffset=364;chunk.chunkElements=1;
+    Require(archive.reader&&archive.reader->GetMaskChunk(chunk).values==std::vector<std::uint64_t>{0x100000001ULL},"archive truncated a 64-bit label");
+    restored=other.service.LoadArchiveReader(*archive.reader,{{"ct",other.source}});
+    Require(restored.rois.size()==1&&other.Count(restored.rois[0])==1,"restored wide label selector changed its membership");
 }
 void ArchiveBundleAndTransform() {
     Fixture f;auto input=f.Create({{{1,1,1},1},{{6,6,6},1}},std::string(256,'A'));RoiComponentParams split;split.operation=RoiComponentOperation::Split;
     const auto parts=f.service.SetOperation(f.Operation(input,split));Require(parts.error==RoiError::None && parts.rois.size()==2,"long-name split failed");
     std::vector<RoiArchiveSelection> selection;for(const auto& roi:parts.rois){Require(roi.metadata.name.size()<=256,"split name exceeds the metadata limit");selection.push_back({roi.revision,"ct"});}
-    const auto saved=RoiService::GetArchiveBundle(f.store.GetDataGraph(),selection);
-    Require(saved.archive && saved.archive->voxels.size()==1 && saved.archive->rois.size()==2,"bundle duplicated a shared split payload");
+    const auto saved=RoiService::GetArchiveReader(f.store.GetDataGraph(),selection);
+    Require(saved.reader && saved.reader->GetMetadata().voxels.size()==1 && saved.reader->GetMetadata().rois.size()==2,"bundle duplicated a shared split payload");
     Fixture target;const auto before=target.store.GetDataGraph().commitId;
-    const auto restored=target.service.LoadArchiveBundle(*saved.archive,{{"ct",target.source}});
+    const auto restored=target.service.LoadArchiveReader(*saved.reader,{{"ct",target.source}});
     Require(restored.error==RoiError::None && restored.rois.size()==2 && restored.revisionMapping.size()==2 && target.store.GetDataGraph().commitId==before+1,"bundle restore was not one atomic mapping transaction");
     Require(target.Count(restored.rois[0])==1 && target.Count(restored.rois[1])==1 && restored.rois[0].definition.nodes[0].primitive.voxels==restored.rois[1].definition.nodes[0].primitive.voxels,"bundle restore lost shared membership");
-    auto bad=*saved.archive;bad.rois.back().voxels[0].sharedPayload=1234;const auto stable=target.store.GetDataGraph().commitId;
-    Require(target.service.LoadArchiveBundle(bad,{{"ct",target.source}}).error!=RoiError::None && target.store.GetDataGraph().commitId==stable,"invalid bundle published a partial batch");
+    RoiArchiveTestReader bad(saved.reader);bad.metadata.rois.back().voxels[0].sharedPayload=1234;const auto stable=target.store.GetDataGraph().commitId;
+    Require(target.service.LoadArchiveReader(bad,{{"ct",target.source}}).error!=RoiError::None && target.store.GetDataGraph().commitId==stable,"invalid bundle published a partial batch");
     RoiPrimitive sphere;sphere.shape=RoiShape::Sphere;sphere.origin={4,8,12};sphere.radius=.6;RoiRequest create;create.metadata.name="sphere";create.definition={f.source,{{RoiNodeKind::Primitive,sphere}}};const auto roi=f.service.SetRoi(create);
     RoiTransformParams transform;transform.sourceToTarget[3]=1.1;auto request=f.Operation(*roi.roi,transform);request.output=RoiOutputMode::CreateNew;
     const auto moved=f.service.SetOperation(request);Require(moved.error==RoiError::None && f.Read(moved.rois[0])->GetContains({5.1,8,12}) && !f.Read(moved.rois[0])->GetContains({4,8,12}),"analytic transform silently rasterized a sub-voxel sphere");
@@ -105,7 +109,7 @@ void ArchiveBundleAndTransform() {
     const auto prepared=RoiService::GetOperation(f.store.GetDataGraph(),f.Operation(input,RoiClearParams{}));auto changed=f.Operation(input,RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels});
     Require(f.service.SetOperationCommit(changed,prepared).error==RoiError::InvalidRequest,"prepared output was submitted with different operation parameters");
     transform.rasterize=true;request.params=transform;request.output=RoiOutputMode::CreateNew;Require(f.service.SetOperation(request).error==RoiError::None,"explicit voxel resampling failed");
-    auto archive=RoiService::GetArchive(f.store.GetDataGraph(),moved.rois[0].revision,"ct");Require(archive.archive && archive.archive->provenance.operationId=="transform-analytic" && !archive.archive->provenance.canonicalParameters.empty(),"archive operation provenance or parameters were lost");
+    auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{moved.rois[0].revision,"ct"}});Require(archive.reader && archive.reader->GetMetadata().rois[0].provenance.operationId=="transform-analytic" && !archive.reader->GetMetadata().rois[0].provenance.canonicalParameters.empty(),"archive operation provenance or parameters were lost");
 }
 
 void MeshAndProjection(){
@@ -213,6 +217,18 @@ void ProcessingRegression(){
 }
 
 void Compressed() {
+    std::vector<RoiVoxelRun> owned{{{0,0,0},31,3},{{0,1,0},31,4}};const auto* address=owned.data();RoiVoxelSet adopted(std::move(owned));
+    Require(adopted.GetRuns().data()==address&&adopted.GetVoxelCount()==64,"ordered runs were copied instead of adopted");
+    for(std::size_t width:{1,3,17}){
+        RoiVoxelBuilder builder;
+        std::vector<RoiVoxel> batch;for(int x=31;x>=0;--x){batch.push_back({{x,2,3},5});if(batch.size()==width){builder.AppendVoxels(batch);batch.clear();}}
+        if(!batch.empty())builder.AppendVoxels(batch);const auto compressed=builder.Finish();
+        Require(compressed->GetRuns().size()==1&&compressed->GetVoxelCount()==32&&compressed->GetLabel({17,2,3})==5,"voxel input blocks changed compression or membership");
+    }
+    RoiVoxelBuilder failed;failed.AppendRuns({{{0,0,0},2,1}});bool duplicate=false,unpublished=false;
+    try{failed.AppendRuns({{{2,0,0},4,1}});}catch(const std::invalid_argument&){duplicate=true;}
+    try{failed.Finish();}catch(const std::logic_error&){unpublished=true;}
+    Require(duplicate&&unpublished,"failed incremental candidate remained publishable");
     // 十亿成员由一条区间表示；仅取末尾三项，不物化完整体素向量。
     RoiVoxelSet large(std::vector<RoiVoxelRun>{{{0,1,2},999999999,7}});
     Require(large.GetRuns().size()==1&&large.GetVoxelCount()==1000000000,"dense ROI lost compressed storage");
@@ -221,10 +237,10 @@ void Compressed() {
         &&large.GetLabel({999999999,1,2})==7&&large.GetLabel({1000000000,1,2})==0,"compressed chunk or label boundary changed");
     RoiVoxelSet small(std::vector<RoiVoxelRun>{{{-3,2,1},3,4},{{2,0,0},4,9},{{4,2,1},5,4}});
     Require(small.GetRuns().size()==2&&small.GetVoxelCount()==12,"adjacent runs were not coalesced");
-    const auto read=[&]()->const std::vector<RoiVoxel>*{return &small.GetVoxels();};
+    const auto read=[&]{return small.GetVoxelChunk(2,3);};
     auto first=std::async(std::launch::async,read),second=std::async(std::launch::async,read);
-    const auto* expanded=first.get();Require(second.get()==expanded&&expanded->size()==12,"legacy expansion is not stable across readers");
-    Require(std::is_sorted(expanded->begin(),expanded->end(),[](const auto& a,const auto& b){return a.index<b.index;}),"legacy absolute index order changed");
+    const auto chunkA=first.get(),chunkB=second.get();Require(chunkA.size()==3&&chunkB.size()==3
+        &&chunkA.front().index==chunkB.front().index&&small.GetRuns().size()==2,"concurrent bounded reads changed compressed payload");
     bool rejected=false;try{RoiVoxelSet invalid(std::vector<RoiVoxelRun>{{{0,0,0},3,1},{{3,0,0},4,2}});}catch(const std::invalid_argument&){rejected=true;}
     Require(rejected,"overlapping labels were accepted");
     Fixture f;RoiOperationRequest request;request.source=f.source;request.output=RoiOutputMode::CreateNew;request.params=RoiThresholdParams{RoiThresholdMode::Threshold,{10,10}};
@@ -233,10 +249,10 @@ void Compressed() {
     const auto payload=result.rois.front().definition.nodes.front().primitive.voxels;
     Require(payload&&payload->GetRuns().size()==81&&payload->GetVoxelCount()==729,"operation output expanded row intervals");
     const auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{result.rois.front().revision,"dense"}});
-    Require(archive.error==RoiError::None&&archive.reader&&archive.reader->GetVoxelCount(0)==729,"compressed archive count failed");
+    Require(archive.error==RoiError::None&&archive.reader&&archive.reader->GetVoxelPayloadCount(0)==81,"compressed archive count failed");
     RoiArchiveChunkRequest chunk;chunk.chunkElements=7;std::size_t count=0;
-    do {const auto page=archive.reader->GetVoxelChunk(chunk);Require(page.error==RoiError::None,"compressed archive chunk failed");
-        count+=page.values.size();chunk.elementOffset=page.nextOffset;if(page.isComplete)break;}while(true);
+    do {const auto page=archive.reader->GetVoxelPayloadChunk(chunk);Require(page.error==RoiError::None,"compressed archive chunk failed");
+        for(const auto& run:page.runs)count+=std::size_t(std::int64_t(run.last)-run.first[0]+1);chunk.elementOffset=page.nextOffset;if(page.isComplete)break;}while(true);
     Require(count==729&&payload->GetRuns().size()==81,"archive paging lost members or changed compressed storage");
     std::cout<<"ROI compressed: members="<<large.GetVoxelCount()<<" runs="<<large.GetRuns().size()<<" publishedMembers=729 publishedRuns="<<payload->GetRuns().size()<<'\n';
 }

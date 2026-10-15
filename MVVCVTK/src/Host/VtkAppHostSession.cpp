@@ -222,12 +222,7 @@ public:
     RoiResult SetRoi(const RoiRequest& request);
     RoiOperationResult SetRoiOperation(const RoiOperationRequest& request);
     RoiArchiveReadResult GetRoiArchiveReader(const std::vector<RoiArchiveSelection>&);
-    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&);
-    RoiArchiveBundleResult GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>&);
-    RoiArchiveRestoreResult LoadRoiArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&);
-    RoiArchiveResult GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey);
-    RoiResult LoadRoiArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
+    RoiArchiveRestoreResult LoadRoiArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&,const RoiArchiveRestoreOptions& options);
     std::vector<RoiDescriptor> GetRoiDescriptors(bool includeArchived);
     std::optional<RoiDescriptor> GetRoiDescriptor(const DataRevisionRef& ref);
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
@@ -735,22 +730,6 @@ std::optional<ImageDescriptor> VtkAppHostSession::Impl::GetImageDescriptor()
     return core.sharedDataMgr->GetImageDescriptor();
 }
 
-RoiArchiveResult VtkAppHostSession::Impl::GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey)
-{
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
-    if (!GetIsReady() || !core.sharedDataMgr) return {};
-    return RoiService::GetArchive(core.sharedDataMgr->GetDataGraph(),ref,sourceKey);
-}
-RoiResult VtkAppHostSession::Impl::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
-    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision)
-{
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id()) return {RoiError::WrongThread};
-    if (!GetIsReady() || !core.sharedDataMgr) return {};
-    const auto data=core.sharedDataMgr;
-    return data->LoadRoiArchive(archive,sourceKey,sourceRef,expectedCatalogRevision);
-}
 
 RoiResult VtkAppHostSession::Impl::SetRoi(const RoiRequest& request)
 {
@@ -1857,34 +1836,7 @@ HostRenderResult VtkAppHostSession::SendRender(const HostRenderRequest& request)
     return m_impl ? m_impl->SendRender(request) : HostRenderResult{HostRenderStatus::Stopped};
 }
 
-RoiArchiveResult VtkAppHostSession::GetRoiArchive(const DataRevisionRef& ref,const std::string& sourceKey)
-{
-    return m_impl ? m_impl->GetRoiArchive(ref,sourceKey):RoiArchiveResult{};
-}
-RoiResult VtkAppHostSession::LoadRoiArchive(const RoiArchive& archive,const std::string& sourceKey,
-    const DataRevisionRef& sourceRef,DataBindingRevision expectedCatalogRevision)
-{
-    return m_impl ? m_impl->LoadRoiArchive(archive,sourceKey,sourceRef,expectedCatalogRevision):RoiResult{};
-}
 
-RoiArchiveBundleResult VtkAppHostSession::Impl::GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection)
-{
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if(ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id())return {RoiError::WrongThread};
-    if(!GetIsReady() || !core.sharedDataMgr)return {};
-    return RoiService::GetArchiveBundle(core.sharedDataMgr->GetDataGraph(),selection);
-}
-RoiArchiveRestoreResult VtkAppHostSession::Impl::LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings)
-{
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if(ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id())return {RoiError::WrongThread};
-    if(!GetIsReady() || !core.sharedDataMgr)return {};
-    const auto data=core.sharedDataMgr;return data->LoadRoiArchiveBundle(bundle,mappings);
-}
-RoiArchiveBundleResult VtkAppHostSession::GetRoiArchiveBundle(const std::vector<RoiArchiveSelection>& selection)
-{return m_impl?m_impl->GetRoiArchiveBundle(selection):RoiArchiveBundleResult{};}
-RoiArchiveRestoreResult VtkAppHostSession::LoadRoiArchiveBundle(const RoiArchiveBundle& bundle,const std::vector<RoiSourceMapping>& mappings)
-{return m_impl?m_impl->LoadRoiArchiveBundle(bundle,mappings):RoiArchiveRestoreResult{};}
 
 RoiArchiveReadResult VtkAppHostSession::Impl::GetRoiArchiveReader(const std::vector<RoiArchiveSelection>& selection){
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
@@ -1892,13 +1844,13 @@ RoiArchiveReadResult VtkAppHostSession::Impl::GetRoiArchiveReader(const std::vec
     if(!GetIsReady() || !core.sharedDataMgr)return {};
     return RoiService::GetArchiveReader(core.sharedDataMgr->GetDataGraph(),selection);
 }
-RoiArchiveRestoreResult VtkAppHostSession::Impl::LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings){
+RoiArchiveRestoreResult VtkAppHostSession::Impl::LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings,const RoiArchiveRestoreOptions& options){
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
     if(ownerThread!=std::thread::id{} && ownerThread!=std::this_thread::get_id())return {RoiError::WrongThread};
     if(!GetIsReady() || !core.sharedDataMgr)return {};
-    const auto data=core.sharedDataMgr;return data->LoadRoiArchiveReader(reader,mappings);
+    const auto data=core.sharedDataMgr;return data->LoadRoiArchiveReader(reader,mappings,options);
 }
 RoiArchiveReadResult VtkAppHostSession::GetRoiArchiveReader(const std::vector<RoiArchiveSelection>& selection)
 {return m_impl?m_impl->GetRoiArchiveReader(selection):RoiArchiveReadResult{};}
-RoiArchiveRestoreResult VtkAppHostSession::LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings)
-{return m_impl?m_impl->LoadRoiArchiveReader(reader,mappings):RoiArchiveRestoreResult{};}
+RoiArchiveRestoreResult VtkAppHostSession::LoadRoiArchiveReader(const RoiArchiveReader& reader,const std::vector<RoiSourceMapping>& mappings,const RoiArchiveRestoreOptions& options)
+{return m_impl?m_impl->LoadRoiArchiveReader(reader,mappings,options):RoiArchiveRestoreResult{};}
