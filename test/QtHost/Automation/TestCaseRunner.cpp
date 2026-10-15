@@ -1718,6 +1718,18 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",other}}),"Succeeded");
     }
+    // 各分量操作的表单会剔除其他操作字段；必须经过真按钮验证请求仍可接纳。
+    for(const auto& action:QStringList{"RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Threshold","Grow"}) {
+        QJsonObject parameters{{"roi",GetRefText(ref)},{"outputMode","CreateNew"}};
+        if(action=="KeepSelected")parameters["componentLabels"]=QJsonArray{"1"};
+        if(action=="Threshold" || action=="Grow")parameters["grayRange"]=GetValues(defaultImage->scalarRange);
+        if(action=="Grow")parameters["seedsMM"]=QJsonArray{QJsonValue(QJsonArray{box[3],box[7],box[11]})};
+        const auto preview=GetComplete(window,Click(window,"Roi",action,parameters),"PreviewReady");
+        Check(preview["result"].toObject()["error"].toInt(-1)==0
+            &&preview["result"].toObject()["outputCount"].toInt()==1,
+            "ROI form submits only its applicable fields and preserves the selected component");
+        GetComplete(window,Click(window,"Roi","Cancel"),"Succeeded");
+    }
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {

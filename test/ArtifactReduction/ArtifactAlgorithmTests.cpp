@@ -135,6 +135,77 @@ void TestDiffusion()
     std::cout << "diffusion material std: " << full.quality.materialStdBefore << " -> " << full.quality.materialStdAfter << '\n';
 }
 
+void TestCroppedDiffusion()
+{
+    // 单行三个有效点的解析扩散：外域不参与通量，仍沿 VTK 的 26 邻点归一化。
+    auto grid = CreateGrid(7, 1, 1);
+    std::vector<float> values{std::numeric_limits<float>::quiet_NaN(), 1000, 0, 10, 0, 1000, 1000};
+    auto mask = std::make_shared<std::vector<std::uint8_t>>(7, 0);
+    (*mask)[2] = (*mask)[3] = (*mask)[4] = 1;
+    ArtifactReduction::AlgorithmInput input;
+    input.image = CreateImage(grid, ImageValueType::Float32, values, mask);
+    ArtifactRequest request;
+    request.diffusion = ArtifactDiffusionParams{1, 1000000, 0.5, 1};
+    const auto result = BuildCandidate(input, request);
+    Require(result.error == ArtifactError::None && result.image, "cropped validity is supported by diffusion");
+    const auto actual = GetValues(*result.image);
+    const double weight = 0.5 / (6 + 12 / std::sqrt(2.) + 8 / std::sqrt(3.));
+    const double tolerance = 4 * std::numeric_limits<float>::epsilon() * 10;
+    Require(std::abs(actual[2] - 10 * weight) <= tolerance
+        && std::abs(actual[3] - (10 - 20 * weight)) <= tolerance
+        && std::abs(actual[4] - 10 * weight) <= tolerance, "masked diffusion matches independent no-flux equation");
+    for (std::size_t i = 0; i < values.size(); ++i) if (!(*mask)[i])
+        Require(std::memcmp(&actual[i], &values[i], sizeof(float)) == 0, "invalid source bytes remain unchanged");
+    Require(*result.image->GetValidityMask() == *mask && result.quality.validCount == 3,
+        "diffusion preserves cropped validity and counts only valid measurements");
+
+    grid = CreateGrid(9, 7, 9);
+    const auto count = *GetGridVoxelCount(grid);
+    values.assign(count, 1000);
+    mask = std::make_shared<std::vector<std::uint8_t>>(count, 0);
+    std::vector<std::uint8_t> processing(count, 0), protection(count, 0);
+    for (int z = 3; z <= 5; ++z) for (int y = 2; y <= 4; ++y) for (int x = 2; x <= 6; ++x) {
+        const auto i = (static_cast<std::size_t>(z) * 7 + y) * 9 + x;
+        (*mask)[i] = 1; values[i] = static_cast<float>((x + 3*y + 7*z) % 11);
+        processing[i] = x < 6; protection[i] = x == 2;
+    }
+    (*mask)[(4 * 7 + 3) * 9 + 4] = 0;
+    input.image = CreateImage(grid, ImageValueType::Float32, values, mask);
+    input.processing = CreateRegion(input.image, grid, processing);
+    input.protection = CreateRegion(input.image, grid, protection);
+    request.diffusion = ArtifactDiffusionParams{2, 1000000, 0.5, 9};
+    const auto full = BuildCandidate(input, request);
+    Require(full.error == ArtifactError::None && full.image && full.quality.changedCount > 0,
+        "cropped ROI and protection masks produce a real correction");
+    const auto expected = GetValues(*full.image);
+    for (std::size_t i = 0; i < count; ++i) if (!(*mask)[i] || !processing[i] || protection[i])
+        Require(expected[i] == values[i], "cropped/protected/unselected values are preserved");
+    for (int slab : {1, 3}) {
+        request.diffusion->slabDepth = slab;
+        const auto blocked = BuildCandidate(input, request);
+        Require(blocked.error == ArtifactError::None && *blocked.image->GetValues() == *full.image->GetValues(),
+            "masked multi-iteration halo and empty slabs preserve exact results");
+    }
+    for (std::size_t i = 0; i < count; ++i) if (!(*mask)[i]) values[i] = -1000;
+    input.image = CreateImage(grid, ImageValueType::Float32, values, mask);
+    const auto changedOutside = BuildCandidate(input, request);
+    Require(changedOutside.error == ArtifactError::None && changedOutside.image, "alternate invalid-domain values");
+    const auto alternate = GetValues(*changedOutside.image);
+    for (std::size_t i = 0; i < count; ++i) if ((*mask)[i])
+        Require(alternate[i] == expected[i], "invalid-domain intensities never influence valid correction");
+    grid = CreateGrid(64, 64, 2);
+    mask = std::make_shared<std::vector<std::uint8_t>>(*GetGridVoxelCount(grid), 1); (*mask)[0] = 0;
+    input = {}; input.image = CreateImage(grid, ImageValueType::Float32, std::vector<float>(mask->size(), 7), mask);
+    ArtifactRingParams ring; ring.centerIndex = {32, 32}; ring.ringWidth = 1;
+    ring.threshMin = 0; ring.threshMax = 20; ring.threshold = 1;
+    ArtifactReduction::RingLayout layout;
+    Require(ArtifactReduction::GetRingLayout(grid, ring, layout) == ArtifactError::None,
+        "masked ring rejection has valid kernel geometry and parameters");
+    request.ring = ring;
+    Require(BuildCandidate(input, request).error == ArtifactError::UnsupportedValidity,
+        "ring combination still requires complete cross-section context");
+}
+
 void TestLongAxes()
 {
     auto grid = CreateGrid(16385, 1, 1);
@@ -225,6 +296,7 @@ void TestAlgorithm()
 {
     TestTypesAndMasks();
     TestDiffusion();
+    TestCroppedDiffusion();
     TestLongAxes();
     TestRing();
 }

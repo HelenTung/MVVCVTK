@@ -110,14 +110,18 @@ RoiOperationRequest GetOperationRequest(const QString& action,const QJsonObject&
         params.radius=GetNumber(p,"radius");params.unit=GetEnum<RoiRadiusUnit>(p,"radiusUnit",{{"Millimetres",RoiRadiusUnit::Millimetres},{"Voxels",RoiRadiusUnit::Voxels}});request.params=params;
     } else if(QStringList{"RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles"}.contains(action)) {
         RoiComponentParams params;params.operation=action=="KeepLargest"?RoiComponentOperation::KeepLargest:action=="KeepSelected"?RoiComponentOperation::KeepSelected:action=="Split"?RoiComponentOperation::Split:action=="FillHoles"?RoiComponentOperation::FillHoles:RoiComponentOperation::RemoveSmall;
-        params.connectivity=connectivity();params.minimumVolume=GetNumber(p,"minimumVolumeMM3");params.maximumHoleVolume=GetNumber(p,"maximumHoleVolumeMM3");params.keepInput=GetBool(p,"keepInput");
-        for(const auto& value:p["componentLabels"].toArray()){const auto label=GetId(value);if(label>UINT32_MAX)throw std::invalid_argument("分量标签超出表示范围");params.labels.push_back(static_cast<std::uint32_t>(label));}request.params=std::move(params);
+        params.connectivity=connectivity();
+        // 表单只提交本操作适用的字段，不能要求用户填写其他分量操作的隐藏参数。
+        if(action=="RemoveSmall")params.minimumVolume=GetNumber(p,"minimumVolumeMM3");
+        if(action=="FillHoles")params.maximumHoleVolume=GetNumber(p,"maximumHoleVolumeMM3");
+        if(action=="Split")params.keepInput=GetBool(p,"keepInput");
+        if(action=="KeepSelected")for(const auto& value:p["componentLabels"].toArray()){const auto label=GetId(value);if(label>UINT32_MAX)throw std::invalid_argument("分量标签超出表示范围");params.labels.push_back(static_cast<std::uint32_t>(label));}request.params=std::move(params);
     } else if(action=="Threshold" || action=="Grow") {
-        RoiThresholdParams params;params.mode=action=="Grow"?RoiThresholdMode::SeedGrow:RoiThresholdMode::Threshold;params.range=GetArray<double,2>(p["grayRange"]);params.connectivity=connectivity();if(action=="Grow")for(const auto& point:p["seedsMM"].toArray())params.seeds.push_back(GetArray<double,3>(point));request.params=std::move(params);
+        RoiThresholdParams params;params.mode=action=="Grow"?RoiThresholdMode::SeedGrow:RoiThresholdMode::Threshold;params.range=GetArray<double,2>(p["grayRange"]);if(action=="Grow"){params.connectivity=connectivity();for(const auto& point:p["seedsMM"].toArray())params.seeds.push_back(GetArray<double,3>(point));}request.params=std::move(params);
     } else if(action=="Invert") {RoiInvertParams params;if(!p["domainRoi"].toString().isEmpty())params.domain=GetRef(p["domainRoi"]);request.params=params;}
     else if(action=="Clear")request.params=RoiClearParams{};
     else if(action=="Transform") {RoiTransformParams params;params.sourceToTarget=GetAffineMatrix(p["sourceToTarget"]);params.rasterize=GetBool(p,"rasterize");if(!p["targetSource"].toString().isEmpty())params.targetSource=GetRef(p["targetSource"]);request.params=params;}
-    else {RoiMeshParams params;params.mesh=GetRef(p["mesh"]);params.meshToSource=GetAffineMatrix(p["meshToSource"]);params.mode=action=="SurfaceInterior"?RoiMeshMode::Interior:RoiMeshMode::Layer;params.inward=GetNumber(p,"inwardMM");params.outward=GetNumber(p,"outwardMM");params.hasOrientation=GetBool(p,"hasOrientation");request.params=params;}
+    else {RoiMeshParams params;params.mesh=GetRef(p["mesh"]);params.meshToSource=GetAffineMatrix(p["meshToSource"]);params.mode=action=="SurfaceInterior"?RoiMeshMode::Interior:RoiMeshMode::Layer;if(action=="SurfaceLayer"){params.inward=GetNumber(p,"inwardMM");params.outward=GetNumber(p,"outwardMM");params.hasOrientation=GetBool(p,"hasOrientation");}request.params=params;}
     return request;
 }
 
