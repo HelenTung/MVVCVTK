@@ -1369,6 +1369,7 @@ void GapAnalysisService::Impl::StartWorker(
     // DefX 同步调用前后及 DTO 投影阶段观察取消；取消和算法异常都映射为 Failed。
     bool isSuccess = false;
     GapAnalysisResult result;
+    const char* stage = "input";
 
     if (!inputSnapshot || !inputSnapshot->volume.GetVoxelReady()
         || !inputSnapshot->image || m_isStopping.load()) {
@@ -1397,6 +1398,7 @@ void GapAnalysisService::Impl::StartWorker(
             // 2. bridge 在自己的 DLL 内完成唯一一次 DefX 调用；同步 callback
             // 形成原始 label image，并复制小得多的 header/region。
             // DefX 没有取消入口，因此这里只能在调用前后观察停止标志。
+            if (hasKernelInput) stage = "kernel-result";
             const bool hasKernelResult = hasKernelInput
                 && BuildKernelResult(
                     kernelVolume,
@@ -1406,6 +1408,7 @@ void GapAnalysisService::Impl::StartWorker(
                 && !m_isStopping.load();
 
             // 3. 验证原始 DTO 后，Gap 按自身尺寸条件选择结果；保留供应商检测值和区域编号。
+            if (hasKernelResult) stage = "result-payload";
             hasPayload = hasKernelResult
                 && BuildResultPayload(
                     batch,
@@ -1415,17 +1418,26 @@ void GapAnalysisService::Impl::StartWorker(
                 && !m_isStopping.load();
             if (hasPayload) {result.sourceRevision=inputSnapshot->graphOwner ? inputSnapshot->graphOwner->data->self:DataRevisionRef{};result.detectionParameters=params.surfParams;}
         }
-        if (hasPayload) hasPayload=SetRoiEvaluation(params,result) && !m_isStopping.load();
+        if (hasPayload) {
+            stage = "roi-evaluation";
+            hasPayload=SetRoiEvaluation(params,result) && !m_isStopping.load();
+        }
 
         // KernelBatch 在进入全分辨率 mesh 构建前已释放，避免 region 中间量继续叠加峰值。
         if (hasPayload) {
+            stage = "void-mesh";
             // SurfaceMesh 是正式输出；无 3D target 也必须在 worker 内构建候选。
             try {
                 const bool clipped=params.evaluationRoi&&params.roiPolicy==GapRoiPolicy::InsideOnly&&result.parent;
                 result.voidMesh=GapSurfaceBuilder::Build(clipped?result.parent->labelImage:result.labelImage,
                     result.voids,m_isStopping,clipped?params.evaluationRoi:RoiReadSnapshot{},clipped?&result.parent->voids:nullptr);
             }
+            catch (const std::exception& error) {
+                std::cerr << "[GapAnalysis] Void mesh failed: " << error.what() << '\n';
+                result.voidMesh = nullptr;
+            }
             catch (...) {
+                std::cerr << "[GapAnalysis] Void mesh failed: unknown exception.\n";
                 result.voidMesh = nullptr;
             }
             bool isPrepared = !m_isStopping.load() && result.voidMesh;
@@ -1434,15 +1446,19 @@ void GapAnalysisService::Impl::StartWorker(
                     inputSnapshot->graphOwner->data->payload.get());
                 auto payloads = std::make_shared<GapResultPayloads>();
                 if (source && source->GetValid()) {
+                    stage = "labels-payload";
                     payloads->labels = CreateLabelPayload(result.labelImage,
                         source->GetGeometry(), m_isStopping);
                     if (payloads->labels && !m_isStopping.load()) {
+                        stage = "mesh-payload";
                         payloads->mesh = CreateMeshPayload(result.voidMesh, m_isStopping,source->GetGeometry().coordinateFrame);
                     }
                     if (payloads->mesh && !m_isStopping.load()) {
+                        stage = "report-payloads";
                         payloads->voids = CreateVoidTable(result.voids, m_isStopping);
                         payloads->statistics = CreateStatisticsTable(result.statistics);
                         if (result.parent) {
+                            stage = "parent-payloads";
                             payloads->parentLabels = result.parent->labelImage == result.labelImage
                                 ? LabelMapBuilder::ShareFrozen(payloads->labels,
                                     "GapAnalysis.parent-labels", "Gap parent detection")
@@ -1455,6 +1471,11 @@ void GapAnalysisService::Impl::StartWorker(
                 isPrepared = payloads->labels && payloads->mesh
                     && payloads->voids && payloads->statistics && (!result.parent || (payloads->parentLabels && payloads->parentVoids && payloads->parentRecord)) && !m_isStopping.load();
                 if (isPrepared) result.payloads = std::move(payloads);
+                else if (!m_isStopping.load())
+                    std::cerr << "[GapAnalysis] Payload preparation failed: labels=" << bool(payloads->labels)
+                        << " mesh=" << bool(payloads->mesh) << " voids=" << bool(payloads->voids)
+                        << " statistics=" << bool(payloads->statistics) << " parentLabels=" << bool(payloads->parentLabels)
+                        << " parentVoids=" << bool(payloads->parentVoids) << " parentRecord=" << bool(payloads->parentRecord) << '\n';
             }
             if (isPrepared && !m_isStopping.load()) {
                 // 显示失败不把已经有效的正式数据改报为算法失败。
@@ -1480,12 +1501,17 @@ void GapAnalysisService::Impl::StartWorker(
             }
         }
     }
-    catch (const std::exception&) {
+    catch (const std::exception& error) {
+        std::cerr << "[GapAnalysis] Worker exception at " << stage << ": " << error.what() << '\n';
         isSuccess = false;
     }
     catch (...) {
+        std::cerr << "[GapAnalysis] Worker exception at " << stage << ": unknown exception.\n";
         isSuccess = false;
     }
+
+    if (!isSuccess && !m_isStopping.load())
+        std::cerr << "[GapAnalysis] Worker preparation failed at " << stage << '\n';
 
     // 终态发布与 StopAsync 串行：取消若先取得锁，本轮不得再提交成功；
     // worker 若先提交，StopAsync 只会在完整结果、状态和 callback 门铃发布后返回。
@@ -1951,7 +1977,12 @@ GapAnalysisService::Impl::SetKernelResult(
         *sinkContext->output = std::move(batch);
         return 1;
     }
+    catch (const std::exception& error) {
+        std::cerr << "[GapAnalysis] Kernel result projection failed: " << error.what() << '\n';
+        return 0;
+    }
     catch (...) {
+        std::cerr << "[GapAnalysis] Kernel result projection failed: unknown exception.\n";
         return 0;
     }
 }
