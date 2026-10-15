@@ -26,7 +26,7 @@ public:
         if(!image||image->GetScalarType()!=VTK_INT||image->GetNumberOfScalarComponents()!=1)return {};
         auto output=vtkSmartPointer<vtkPolyData>::New();
         vtkNew<vtkPoints> points;points->SetDataTypeToDouble();vtkNew<vtkCellArray> cells;vtkNew<vtkIntArray> labels;
-        labels->SetName("gap.region.id");output->SetPoints(points);output->SetPolys(cells);output->GetCellData()->SetScalars(labels);
+        labels->SetName("gap.region.id");output->SetPoints(points);output->SetPolys(cells);output->GetCellData()->AddArray(labels);
         int source[6];image->GetExtent(source);
         vtkIdType expected=1;
         for(int axis=0;axis<3;++axis) {

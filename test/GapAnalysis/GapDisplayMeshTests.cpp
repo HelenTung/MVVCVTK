@@ -3,6 +3,7 @@
 #include "Data/DataGraphStore.h"
 #include "Geometry/RoiEvaluator.h"
 #include <vtkUnsignedCharArray.h>
+#include <vtkTriangleFilter.h>
 #include <iostream>
 
 namespace {
@@ -15,6 +16,10 @@ bool Geometry() {
     for(int x=-63;x<=66;++x)*static_cast<int*>(image->GetScalarPointer(x,1,12))=region.id;
     const auto mesh=GapSurfaceBuilder::Build(image,{region},stopping);
     if(!mesh||mesh->GetNumberOfPoints()!=4*region.voxelCount+2||mesh->GetNumberOfCells()!=8*region.voxelCount)return false;
+    const auto empty=GapSurfaceBuilder::Build(image,{},stopping);
+    vtkNew<vtkTriangleFilter> triangulated;triangulated->SetInputData(empty);triangulated->Update();
+    auto* emptyIds=triangulated->GetOutput()->GetCellData()->GetArray("gap.region.id");
+    if(!emptyIds||emptyIds->GetNumberOfTuples()!=0||empty->GetCellData()->GetScalars()!=nullptr)return false;
     const auto* bounds=mesh->GetBounds();
     const double roundoff=8*std::numeric_limits<double>::epsilon()*1e8;
     if(std::abs(bounds[0]-(1e8-1.2*1.5))>roundoff||std::abs(bounds[1]-(1e8-1.2*.5))>roundoff

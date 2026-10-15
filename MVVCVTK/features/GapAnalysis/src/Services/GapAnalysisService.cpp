@@ -2769,7 +2769,8 @@ std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPa
     }
     auto* regionIds=vtkIntArray::SafeDownCast(output->GetCellData()->GetArray("gap.region.id"));
     if(!regionIds||regionIds->GetNumberOfTuples()!=output->GetNumberOfCells())return {};
-    MeshAttribute regions;regions.name="gap.region.id";regions.componentCount=1;regions.activeRoles=MeshAttributeRoles::scalars;
+    // 编号是正式归属属性；默认着色仍由独立显示产物决定。
+    MeshAttribute regions;regions.name="gap.region.id";regions.componentCount=1;
     regions.values.reserve(static_cast<std::size_t>(regionIds->GetNumberOfTuples()));
     for(vtkIdType i=0;i<regionIds->GetNumberOfTuples();++i) {
         if(!(i%4096)&&isStopping.load())return {};
