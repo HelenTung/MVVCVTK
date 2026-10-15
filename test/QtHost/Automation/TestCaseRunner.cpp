@@ -1,4 +1,8 @@
 #include <vtkScalarBarActor.h>
+#include <vtkActor2D.h>
+#include <vtkPolyDataMapper2D.h>
+#include <vtkPropCollection.h>
+#include <vtkTextMapper.h>
 #include <QRegularExpression>
 // 测试用途：自动执行实际页面入口的合成回归或指定用例，验证中文分派、业务日志和生命周期。
 #include "TestCaseRunner.h"
@@ -2909,6 +2913,25 @@ void StartSequence(TestWindow& window, const QString& path)
                 }
                 Check(checked,"current measured result exposes its legend");
                 Check(window.findChildren<QToolButton*>(QRegularExpression("^legend_")).isEmpty(),"viewport contains no floating business legend controls");
+                if(step["checkLegendResize"].toBool()) {
+                    const auto layout=[&](){
+                        std::pair<double,int> result{};auto* items=endpoint->renderer->GetViewProps();items->InitTraversal();
+                        while(auto* prop=items->GetNextProp())if(auto* bar=vtkScalarBarActor::SafeDownCast(prop);bar&&bar->GetVisibility()) {
+                            vtkNew<vtkPropCollection> parts;bar->GetActors2D(parts);
+                            for(vtkIdType i=0;i<parts->GetNumberOfItems();++i)if(auto* actor=vtkActor2D::SafeDownCast(parts->GetItemAsObject(i))) {
+                                if(auto* mapper=vtkPolyDataMapper2D::SafeDownCast(actor->GetMapper())){const auto* bounds=mapper->GetInput()->GetBounds();result.first=std::max(result.first,bounds[1]-bounds[0]);}
+                                if(auto* mapper=vtkTextMapper::SafeDownCast(actor->GetMapper()))result.second=std::max(result.second,mapper->GetTextProperty()->GetFontSize());
+                            }
+                        }
+                        return result;
+                    };
+                    const auto before=layout();const auto original=window.size();window.resize(original*1.2);
+                    Check(Wait([&]{const auto after=layout();return after.first>before.first*1.05&&after.second>before.second;}),
+                        "growing the actual Qt viewport enlarges both the legend geometry and font");
+                    window.resize(original);
+                    Check(Wait([&]{const auto after=layout();return std::abs(after.first-before.first)<.1&&after.second==before.second;}),
+                        "shrinking the actual Qt viewport restores both legend geometry and font");
+                }
             }
             std::cout<<"CAPTURE: saving window"<<std::endl;
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");

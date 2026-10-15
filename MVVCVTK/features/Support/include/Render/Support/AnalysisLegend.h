@@ -6,11 +6,14 @@
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper2D.h>
+#include <vtkPropCollection.h>
 #include <vtkTextMapper.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkViewport.h>
+#include <vtkWindow.h>
+#include <cstdio>
 
-// 有限数值轴与无穷端段共用连续条带；端段只占固定像素，不伪造数值跨度。
+// 有限数值轴与无穷端段共用条带；尺寸随视窗缩放，不伪造无穷区间的数值跨度。
 class AnalysisLegend final : public vtkScalarBarActor {
 public:
     static AnalysisLegend* New() { return new AnalysisLegend; }
@@ -20,10 +23,15 @@ public:
     }
     const std::array<double,2>& GetMappingRange() const { return m_range; }
     const AnalysisColorStyle::RampParams& GetMapping() const { return m_params; }
+    void GetActors2D(vtkPropCollection* props) override {
+        if(!m_hasValues)return;
+        props->AddItem(m_bar);for(auto& t:m_text)props->AddItem(t);
+    }
     int RenderOpaqueGeometry(vtkViewport* v) override {
         if(!m_hasValues)return 0;
         const auto* size=v->GetSize();
-        if(m_stamp<GetMTime()||m_size!=std::array<int,2>{size[0],size[1]})Build(v);
+        if(size[0]<=0||size[1]<=0)return 0;
+        if(NeedsBuild(v))Build(v);
         int rendered=m_bar->RenderOpaqueGeometry(v);
         for(auto& t:m_text)rendered+=t->RenderOpaqueGeometry(v);
         return rendered;
@@ -32,7 +40,8 @@ public:
     int RenderOverlay(vtkViewport* v) override {
         if(!m_hasValues)return 0;
         const auto* size=v->GetSize();
-        if(m_stamp<GetMTime()||m_size!=std::array<int,2>{size[0],size[1]})Build(v);
+        if(size[0]<=0||size[1]<=0)return 0;
+        if(NeedsBuild(v))Build(v);
         int rendered=m_bar->RenderOverlay(v);
         for(auto& t:m_text)rendered+=t->RenderOverlay(v);
         return rendered;
@@ -43,29 +52,38 @@ public:
     }
 private:
     AnalysisLegend():m_bar(vtkSmartPointer<vtkActor2D>::New()) { m_bar->PickableOff();m_bar->UseBoundsOff();UseBoundsOff(); }
+    bool NeedsBuild(vtkViewport* v) {
+        const auto* size=v->GetSize();
+        return m_stamp<GetMTime()||m_size!=std::array<int,2>{size[0],size[1]}||m_dpi!=v->GetVTKWindow()->GetDPI();
+    }
     void Build(vtkViewport* v) {
         const auto* size=v->GetSize();m_size={size[0],size[1]};m_text.clear();
-        const bool compact=size[1]<150;
-        const double x=GetPosition()[0]*size[0],y=compact?16:std::max(18.,GetPosition()[1]*size[1]);
-        const double height=compact?std::max(24.,std::min(220.,size[0]-x-100.))
-            :std::max(12.,std::min({GetHeight()*size[1],double(GetMaximumHeightInPixels()),size[1]-y-29.}));
+        m_dpi=v->GetVTKWindow()->GetDPI();const double dpiScale=std::max(1,m_dpi)/72.;
+        const bool compact=size[1]/dpiScale<150;
+        const double scale=std::max(.01,std::min(size[0]/200.,size[1]/(compact?96.:300.)));
+        const int font=std::max(1,int(std::lround((compact?9:11)*scale/dpiScale)));
+        const double x=GetPosition()[0]*size[0],y=compact?16*scale:std::max(18*scale,GetPosition()[1]*size[1]);
+        const double height=compact?std::max(24*scale,std::min(220*scale,size[0]-x-100*scale))
+            :std::max(12*scale,std::min({GetHeight()*size[1],GetMaximumHeightInPixels()*scale,size[1]-y-29*scale}));
         const double origin=compact?x:y;
-        const double tail=std::min(8.,height*.12),finiteHeight=height-2*tail;
+        const double tail=std::min(8*scale,height*.12),finiteHeight=height-2*tail,barWidth=(compact?8:12)*scale;
         auto points=vtkSmartPointer<vtkPoints>::New();auto cells=vtkSmartPointer<vtkCellArray>::New();
         auto colors=vtkSmartPointer<vtkUnsignedCharArray>::New();colors->SetNumberOfComponents(4);
         const auto text=[&](const std::string& value,double tx,double ty,int alignment=VTK_TEXT_LEFT) {
             auto t=vtkSmartPointer<vtkActor2D>::New();auto mapper=vtkSmartPointer<vtkTextMapper>::New();
             mapper->SetInput(value.c_str());mapper->GetTextProperty()->ShallowCopy(GetLabelTextProperty());
-            mapper->GetTextProperty()->SetFontSize(compact?9:11);mapper->GetTextProperty()->SetJustification(alignment);t->SetMapper(mapper);t->SetPosition(tx,ty);
+            mapper->GetTextProperty()->SetFontSize(font);mapper->GetTextProperty()->SetJustification(alignment);
+            mapper->GetTextProperty()->SetVerticalJustificationToBottom();t->SetMapper(mapper);t->SetPosition(tx,ty);
             t->PickableOff();t->UseBoundsOff();m_text.push_back(t);
         };
-        const auto box=[&](double low,double high,const std::array<double,4>& color) {
+        const auto quad=[&](double low,double high,double acrossLow,double acrossHigh,const std::array<double,4>& color) {
             const auto point=[&](double across,double along){return compact?points->InsertNextPoint(along,y+across,0):points->InsertNextPoint(x+across,along,0);};
-            const double width=compact?8:12;vtkIdType ids[4]{point(0,low),point(width,low),point(width,high),point(0,high)};
+            vtkIdType ids[4]{point(acrossLow,low),point(acrossHigh,low),point(acrossHigh,high),point(acrossLow,high)};
             cells->InsertNextCell(4,ids);unsigned char rgba[4];
             for(int k=0;k<4;++k)rgba[k]=static_cast<unsigned char>(std::lround(255*std::clamp(color[k],0.,1.)));
             colors->InsertNextTypedTuple(rgba);
         };
+        const auto box=[&](double low,double high,const std::array<double,4>& color){quad(low,high,0,barWidth,color);};
         const auto low=AnalysisColorStyle::GetMappedColor(m_range,m_params,m_range[0]);
         const auto high=AnalysisColorStyle::GetMappedColor(m_range,m_params,m_range[1]);
         const long double span=std::max(static_cast<long double>(m_range[1])-m_range[0],
@@ -93,33 +111,41 @@ private:
                 origin+tail+finiteHeight*AnalysisColorStyle::GetFraction(m_range[0],m_range[1],b),
                 AnalysisColorStyle::GetMappedColor(m_range,m_params,.5*a+.5*b));
         }
-        // 极窄范围增加有效位，避免两个真实端点显示成同一个数。
-        const double scale=std::max(std::abs(m_range[0]),std::abs(m_range[1])),finiteSpan=m_range[1]-m_range[0];
-        const int digits=finiteSpan>0&&scale>0?int(std::clamp(std::ceil(std::log10(scale)-std::log10(finiteSpan))+3,6.,17.)):6;
-        const auto label=[&](double value){std::ostringstream out;out<<std::setprecision(digits)<<value;return out.str();};
+        const auto labels=AnalysisColorStyle::BuildLabels(m_range);const auto format=AnalysisColorStyle::GetLabelFormat(*labels);
+        std::vector<std::string> values;int textWidth=0,textHeight=0;
+        for(vtkIdType i=0;i<labels->GetNumberOfValues();++i){
+            char value[64];std::snprintf(value,sizeof(value),format.c_str(),labels->GetValue(i)==0?0:labels->GetValue(i));values.emplace_back(value);
+            vtkNew<vtkTextMapper> measure;measure->SetInput(value);measure->GetTextProperty()->ShallowCopy(GetLabelTextProperty());
+            measure->GetTextProperty()->SetFontSize(font);int bounds[2]{};measure->GetSize(v,bounds);
+            textWidth=std::max(textWidth,bounds[0]);textHeight=std::max(textHeight,bounds[1]);
+        }
+        const int last=int(values.size())-1;int stride=1;
+        const double spacing=compact?textWidth+6*scale:textHeight+2*scale;
+        while(stride<last&&finiteHeight*stride/last<spacing)stride*=2;
+        std::string previous;
+        for(int i=0;i<=last;++i){
+            const double along=last?origin+tail+finiteHeight*i/last:origin+height/2;
+            const double length=(i==0||i==last||i==8?5:i%4==0?4:2)*scale;
+            quad(along-.5*scale,along+.5*scale,compact?-length:barWidth+scale,compact?-scale:barWidth+scale+length,{1,1,1,1});
+            if((i%stride==0||i==last)&&values[i]!=previous){
+                if(compact)text(values[i],along,y+barWidth+3*scale,i==0?VTK_TEXT_LEFT:i==last?VTK_TEXT_RIGHT:VTK_TEXT_CENTERED);
+                else text(values[i],x+barWidth+8*scale,along-textHeight/2.);
+                previous=values[i];
+            }
+        }
         if(compact){
             // 矮切片视窗横排，在下沿容纳数值和单位，给左上场景坐标留空间。
-            text(u8"−∞",x,1);text(u8"+∞",x+height,1,VTK_TEXT_RIGHT);
-            text(GetTitle()?GetTitle():"",x+height/2,y+23,VTK_TEXT_CENTERED);
-            text(label(m_range[0]),x+tail,y+10);
-            if(m_range[0]!=m_range[1])text(label(m_range[1]),x+height-tail,y+10,VTK_TEXT_RIGHT);
+            text(u8"−∞",x,scale);text(u8"+∞",x+height,scale,VTK_TEXT_RIGHT);
+            text(GetTitle()?GetTitle():"",x+height/2,y+barWidth+textHeight+8*scale,VTK_TEXT_CENTERED);
         }else{
-            text(GetTitle()?GetTitle():"",x,y+height+12);
-            text(u8"−∞",x+17,y-12);text(u8"+∞",x+17,y+height);
-            text(label(m_range[0]),x+17,y+tail-4);
-            if(m_range[0]!=m_range[1]){
-                text(label(m_range[1]),x+17,y+height-tail-4);
-                auto labels=AnalysisColorStyle::BuildLabels(m_range);double previous=y+tail;
-                for(vtkIdType i=0;i<labels->GetNumberOfValues();++i){
-                    const double value=labels->GetValue(i),ly=y+tail+finiteHeight*AnalysisColorStyle::GetFraction(m_range[0],m_range[1],value);
-                    if(ly-previous>=14&&y+height-tail-ly>=14){text(label(value),x+17,ly-4);previous=ly;}
-                }
-            }
+            text(GetTitle()?GetTitle():"",x,y+height+textHeight+5*scale);
+            text(u8"−∞",x+barWidth+8*scale,y-textHeight-3*scale);
+            text(u8"+∞",x+barWidth+8*scale,y+height+2*scale);
         }
         auto data=vtkSmartPointer<vtkPolyData>::New();data->SetPoints(points);data->SetPolys(cells);data->GetCellData()->SetScalars(colors);
         auto mapper=vtkSmartPointer<vtkPolyDataMapper2D>::New();mapper->SetInputData(data);mapper->SetColorModeToDirectScalars();m_bar->SetMapper(mapper);m_stamp=GetMTime();
     }
     std::array<double,2> m_range{};AnalysisColorStyle::RampParams m_params;bool m_hasValues=true;
-    vtkMTimeType m_stamp=0;std::array<int,2> m_size{};vtkSmartPointer<vtkActor2D> m_bar;
+    vtkMTimeType m_stamp=0;std::array<int,2> m_size{};int m_dpi=0;vtkSmartPointer<vtkActor2D> m_bar;
     std::vector<vtkSmartPointer<vtkActor2D>> m_text;
 };
