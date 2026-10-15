@@ -19,6 +19,17 @@ QJsonValue GetReportCountValue(ReportRowId count)
 {
     return count<=9007199254740991LL?QJsonValue(static_cast<double>(count)):QJsonValue(QString::number(count));
 }
+ReportRowId GetReportCount(const QJsonValue& value)
+{
+    if(value.isString()) {
+        const auto text=value.toString();bool ok=false;const auto count=text.toLongLong(&ok);
+        if(ok && count>=0 && QRegularExpression("^[0-9]+$").match(text).hasMatch())return count;
+    } else if(value.isDouble()) {
+        const auto number=value.toDouble();
+        if(std::isfinite(number) && number>=0 && number<=9007199254740991. && number==std::trunc(number))return static_cast<ReportRowId>(number);
+    }
+    throw std::invalid_argument("报告计数必须为精确非负整数；大整数使用十进制字符串");
+}
 namespace {
 void WriteBytes(QIODevice& output, const QByteArray& bytes)
 {

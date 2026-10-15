@@ -261,8 +261,15 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
         Check(command && command->isEnabled(), "direct command remains available in the classified menu");
         command->trigger();
-        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, timeoutMs), "menu dispatch reaches the original business path");
     }
+    const bool dispatched=Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); },timeoutMs);
+    if(!dispatched)std::cerr<<"ACTION DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+    Check(dispatched,"actual command click creates its operation record");
+    const auto record=window.GetRecords().GetRecord(id);
+    Check(record["module"].toString()==module && record["action"].toString()==action,
+        "actual command dispatch preserves the requested module and action");
     return id;
 }
 std::uint64_t ClickCurrentPrimary(TestWindow& window,const QString& module,const QString& expected)
@@ -1531,6 +1538,32 @@ void CheckRenderModeSwitch(TestWindow& window)
         }
         Check(slices == 3, "all three slices remain available after 3D mode switching");
         if (window.GetModule("Part")->GetObservedState()["hasCurrentParts"].toBool()) (void)CheckPartDisplay(window);
+    }
+    auto* part=window.GetModule("Part");
+    if(part && part->GetObservedState()["hasCurrentParts"].toBool()) {
+        const bool wasVisible=part->GetObservedState()["isOverlayVisible"].toBool();
+        if(!wasVisible)GetComplete(window,Click(window,"Part","Visibility",{{"isVisible",true}}),"Accepted");
+        Check(Wait([&]{part->Observe();const auto state=part->GetObservedState();return state["isOverlayVisible"].toBool()
+            && state["isDisplayReady"].toBool() && state["sourcePreviewReady"].toBool();}),"part material regression has a ready visible native preview");
+        for(const auto target:{HostRenderMode::CompositeVolume,HostRenderMode::CompositeIsoSurface}) {
+            auto& workflow=window.GetWorkflow();const auto busy=std::numeric_limits<std::uint64_t>::max();
+            Check(workflow.StartOperation(busy,TestPolicy::Compute,false),"part material regression reserves a calculation transaction");
+            try {
+                const auto before=window.GetSession()->GetRenderViewState({"primary-3d"});
+                auto completed=std::make_shared<std::optional<bool>>();
+                HostViewSetRequest request;request.targetView.viewId="primary-3d";request.mode=target;
+                const auto admission=window.GetSession()->SendRequest(std::move(request),[completed](HostResult result){*completed=result.isSucceeded;});
+                Check(admission.status==HostAdmissionStatus::Accepted,"temporary mode request is admitted during calculation");
+                // 提交模式但尚未绘制时，确定性触发后台观察，而非依赖定时器碰巧交错。
+                (void)window.GetSession()->SendUpdates();
+                part->Observe();const auto after=window.GetSession()->GetRenderViewState({"primary-3d"});
+                Check(before && after && after->material.opacity==before->material.opacity,"busy calculation defers automatic part material changes");
+                Check(Wait([&]{return completed->has_value();}) && completed->value(),"temporary mode completion survives background part observation");
+            } catch(...) {workflow.SetComplete(busy);throw;}
+            workflow.SetComplete(busy);part->Observe();
+            (void)CheckPartDisplay(window);
+        }
+        if(!wasVisible)GetComplete(window,Click(window,"Part","Visibility",{{"isVisible",false}}),"Accepted");
     }
 }
 void CheckWallWorkflow(TestWindow& window, const QString& directory)

@@ -4,6 +4,7 @@
 #include "Support/ParameterEditor.h"
 #include "Support/ReferenceDataSource.h"
 #include "Support/RoiSelection.h"
+#include "Support/ReportDocument.h"
 #include <QPointer>
 #include <QFile>
 #include <QTextStream>
@@ -54,14 +55,14 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     const auto objectEnd=objectOffset+std::min(objectLimit,objectCount-objectOffset);
     for(auto index=objectOffset;index<objectEnd;++index) {
         const auto& object=(*snapshot->objects)[index];
-        objects.append(QJsonObject{{"objectIndex", static_cast<int>(object.objectIndex)}, {"closed", object.isClosed},
+        objects.append(QJsonObject{{"objectIndex", GetReportCountValue(static_cast<ReportRowId>(object.objectIndex))}, {"closed", object.isClosed},
             {"manifold", object.isManifold}, {"truncated", object.isTruncated}, {"orientationValid", object.isOrientationValid},
             {"areaValidity", static_cast<int>(object.areaValidity)}, {"volumeValidity", static_cast<int>(object.volumeValidity)},
             {"area", object.areaModelUnit2 ? QJsonValue(*object.areaModelUnit2) : QJsonValue()},
             {"volume", object.volumeModelUnit3 ? QJsonValue(*object.volumeModelUnit3) : QJsonValue()}});
     }
     summary["objects"] = objects;
-    summary["objectCount"] = snapshot->objects?static_cast<int>(snapshot->objects->size()):0;
+    summary["objectCount"] = GetReportCountValue(static_cast<ReportRowId>(objectCount));
     summary["objectSummaryLimit"] = static_cast<int>(objectLimit);
     summary["objectOffset"]=QString::number(objectOffset);summary["nextObjectOffset"]=QString::number(objectEnd);
     summary["objectsComplete"]=objectEnd==objectCount;
@@ -278,7 +279,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         out<<"vertex_id,x_mm,y_mm,z_mm,nx,ny,nz,flags,support_ratio,fit_residual,localization_sigma_mm\n";
         std::size_t i=0;for(const auto& v:*snapshot->points){out<<qulonglong(i++);for(auto x:v.positionModel)out<<','<<x;for(auto x:v.normalModel)out<<','<<x;out<<','<<int(v.flags)<<','<<v.validSupportRatio<<','<<v.fitResidual<<','<<v.estimatedLocalizationSigma<<'\n';}
         out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("surface write failed");
-        QJsonArray objects;if(snapshot->objects)for(const auto& o:*snapshot->objects)objects.append(QJsonObject{{"objectIndex",int(o.objectIndex)},{"area",o.areaModelUnit2?QJsonValue(*o.areaModelUnit2):QJsonValue()},{"volume",o.volumeModelUnit3?QJsonValue(*o.volumeModelUnit3):QJsonValue()},{"closed",o.isClosed},{"manifold",o.isManifold}});
+        QJsonArray objects;if(snapshot->objects)for(const auto& o:*snapshot->objects)objects.append(QJsonObject{{"objectIndex",GetReportCountValue(static_cast<ReportRowId>(o.objectIndex))},{"area",o.areaModelUnit2?QJsonValue(*o.areaModelUnit2):QJsonValue()},{"volume",o.volumeModelUnit3?QJsonValue(*o.volumeModelUnit3):QJsonValue()},{"closed",o.isClosed},{"manifold",o.isManifold}});
         panel->SetComplete(id,"Exported",{{"points",QString::number(i)},{"triangles",QString::number(snapshot->triangleIndices?snapshot->triangleIndices->size()/3:0)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"objects",objects},{"coordinateFrame",QString::fromStdString(snapshot->coordinateFrame)}});
     },TestPolicy::Read);
 #if defined(MANUAL_ALIGNMENT)

@@ -57,4 +57,5 @@ void ExportReport(const QString& path, const ReportDocument& document, const Rep
 QString GetReportCell(const QStringList& row, int column);
 bool GetReportNumber(const QString& text, double& value);
 QJsonValue GetReportCountValue(ReportRowId count);
+ReportRowId GetReportCount(const QJsonValue& value);
 }

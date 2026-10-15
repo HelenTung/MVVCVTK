@@ -1937,10 +1937,33 @@ HostViewRuntimeRegistry::Impl::GetTaskExecutor() const
 bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
 {
     if (m_lease && !m_lease->GetIsOwnerThread()) return false;
+    if (m_featureTransition) {
+        const auto stopped=StopDataTransition(m_featureTransition->ownerId,m_featureTransition->request.requestId);
+        if (stopped.status==FeatureRunStatus::Running) return false;
+    }
     bool stopping=true;
     for (const auto& view:m_views)
         stopping=view.taskControl && view.taskControl->SetDataTaskStopping() && stopping;
-    return stopping;
+    if (!stopping) return false;
+    // primary 已切换时，显示镜像仍可能属于上一结果；只归还 Host 自己各视图
+    // 的实际镜像，不按全局绑定猜测，也不清除外部 Reader 或普通消费绑定。
+    for (auto& view:m_views) {
+        if (!view.featureView || !view.dataStage) {if(view.isAvailable)return false;continue;}
+        const auto stamp=view.featureView->GetRenderInputStamp();
+        if (stamp && GetDataEntityIdValid(stamp->dataRevision.entityId)
+            && !view.dataStage->ClearRenderInput(stamp->dataRevision.entityId)) return false;
+    }
+    const auto data=m_transitionData.lock();
+    if (!data) return true;
+    const auto graph=data->GetDataGraph();
+    const auto binding=data->GetDataBinding(graph,primaryVolumeBinding);
+    const auto input=binding&&binding->target?data->GetData(graph,*binding->target):nullptr;
+    if (!input || !GetDataEntityIdValid(input->lifetimeScope)
+        || input->lifetimePolicy!=DataLifetimePolicy::OwnerRetirement) return true;
+    // 镜像已归还，再以原绑定版本清除当前 Owner 选择；原始普通输入仍保留绑定。
+    DataTransaction transaction;
+    transaction.bindings.push_back({std::string(primaryVolumeBinding),binding->revision,true,binding->target,{}});
+    return data->SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded;
 }
 
 bool HostViewRuntimeRegistry::Impl::StopLease()

@@ -1,6 +1,7 @@
 // 文档中的阶段转换及统计来源回归，配合实际 Qt 业务操作检查。
 #include "BusinessWorkflowTests.h"
 #include "App/TestWindow.h"
+#include "Modules/ModulePanel.h"
 #include "Support/BusinessStep.h"
 #include "Support/BusinessStatistics.h"
 #include "Support/ReferenceDataSource.h"
@@ -25,9 +26,38 @@ namespace {
 void Require(bool valid,const char* message){if(!valid)throw std::runtime_error(message);}
 bool Await(const std::function<bool()>& ready){QElapsedTimer timer;timer.start();while(timer.elapsed()<3000){QCoreApplication::processEvents(QEventLoop::AllEvents,10);if(ready())return true;}return false;}
 double Sum(const QJsonObject& data){double sum=0;for(const auto value:data["counts"].toArray())sum+=value.toDouble();return sum;}
+void CheckPrimaryDispatch()
+{
+    for(const bool changesAction:{false,true}) {
+        TestSession runtime;TestWorkflow workflow;TestRecordWriter records;
+        ModulePanel panel({runtime,workflow,records},"Data");
+        int executions=0;
+        const auto action=[&](std::uint64_t id,const QJsonObject&) {++executions;panel.SetComplete(id,"Succeeded");};
+        panel.AttachAction("Load",{},action);panel.AttachAction("ActivateAccepted",{},action);
+        bool changesOnRefresh=false;
+        panel.onObserve=[&] {
+            panel.SetState(!changesOnRefresh?QJsonObject{}:changesAction
+                ?QJsonObject{{"activationFailed",true},{"acceptedRevision","new-input"}}
+                :QJsonObject{{"isBusy",true}});
+        };
+        panel.Observe();
+        auto* primary=panel.findChild<QPushButton*>("businessPrimary");
+        Require(primary && primary->isEnabled() && primary->property("businessAction")=="Load",
+            "primary dispatch fixture starts with an enabled exact action");
+        // 点击处理内的刷新模拟异步业务状态刚好变化；点击意图仍应留有原动作的终态记录。
+        changesOnRefresh=true;primary->click();
+        const auto record=records.GetRecord(1);
+        Require(records.GetRecords()["records"].toArray().size()==1 && record["action"]=="Load",
+            "primary refresh cannot silently drop a click or replace its requested action");
+        Require(record["status"]=="Rejected" && record["isTerminal"].toBool()
+            && record["completeCount"].toInt()==1 && executions==0,
+            "captured primary action retains fresh session rejection and exactly one completion");
+    }
+}
 }
 void CheckBusinessWorkflow(TestWindow& window)
 {
+    CheckPrimaryDispatch();
 #if defined(MANUAL_ALIGNMENT)
     AlignmentRegion selection;selection.vertexIds={1,3,8};
     DataRevisionRef mesh;mesh.entityId.bytes[0]=1;mesh.generation=1;

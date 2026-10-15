@@ -231,6 +231,8 @@ void CheckConcurrentReportReads() {
 void CheckWideRowAddressing() {
     // 虚拟来源只验证类型边界与分页寻址，不冒充真实吞吐或二十亿行物化测试。
     const ReportRowId count=static_cast<ReportRowId>(std::numeric_limits<int>::max())+213;
+    Require(GetReportCount(QJsonValue(2147483860.))==count && GetReportCount(QJsonValue(QString("9007199254740993")))==9007199254740993LL
+        && GetReportCountValue(9007199254740993LL).isString(),"report metadata narrows a 64-bit count or loses JSON integer precision");
     ReportDocument doc;doc.id="wide-row-contract";doc.title="64 位分页契约";doc.category="本次会话结果";doc.module="Gap";
     doc.columns={{"void_id",{},{},false},{"value","体积","mm3",true}};doc.table=std::make_shared<ReportTable>();
     doc.table->SetRows(static_cast<std::size_t>(count),[](ReportRowId row){return QStringList{QString::number(row),QString::number(row+1)};});
