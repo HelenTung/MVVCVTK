@@ -118,12 +118,12 @@ int GetCropCurveWidgetFailures()
     move(1,P{std::numeric_limits<double>::infinity(),0,0});const auto stableHandle=position(1);
     check(widget.GetGeometry().radius==radiusBeforeInvalid&&near(stableHandle,duringRadius)
         &&std::all_of(stableHandle.begin(),stableHandle.end(),[](double v){return std::isfinite(v);}),"invalid native drag cannot corrupt the retained radial frame");
-    widget.StartGesture();const auto beforeRotation=widget.GetGeometry();const auto savedRadius=position(1);
+    widget.StartGesture();const auto beforeRotation=widget.GetGeometry();const auto savedRadius=position(1),savedRotation=position(4);
     move(4,P{4,2,-3});const auto rotated=widget.GetGeometry();
     check(!near(rotated.axisInInputModel,beforeRotation.axisInInputModel)&&rotated.height==beforeRotation.height
         &&rotated.radius==beforeRotation.radius&&near(rotated.centerInInputModel,beforeRotation.centerInInputModel),"dedicated rotation changes only axis and transported radial frame");
     widget.CancelGesture();
-    check(near(widget.GetGeometry().axisInInputModel,beforeRotation.axisInInputModel)&&near(position(1),savedRadius),"cancel restores cylinder parameters and radial handle frame");
+    check(near(widget.GetGeometry().axisInInputModel,beforeRotation.axisInInputModel)&&near(position(1),savedRadius)&&near(position(4),savedRotation),"cancel restores cylinder parameters and both handle frames");
     const auto beforeView=widget.GetGeometry();const auto predicate=CropGeometry::Build(beforeView);
     renderer->GetActiveCamera()->SetPosition(8,5,20);renderer->GetActiveCamera()->SetFocalPoint(0,0,0);window->Render();
     check(near(widget.GetGeometry().axisInInputModel,beforeView.axisInInputModel)&&widget.GetGeometry().radius==beforeView.radius
@@ -175,6 +175,11 @@ int GetCropCurveWidgetFailures()
         input->InvokeEvent(vtkCommand::LeaveEvent);frame->Render();center=project({0,0,0});radius=project(getPosition());
         check(std::hypot(radius[0]-center[0],radius[1]-center[1])>=16&&side.GetGeometry().radius==3
             &&side.GetGeometry().height==4&&side.GetGeometry().axisInInputModel==P{0,1,0},"leaving hover restores the cylinder handle without another camera change or parameter mutation");
+        side.SetEnabled(false);cylinder.axisInInputModel={0,0,1};cylinder.radius=3;
+        camera->SetPosition(0,0,20);side.SetGeometry(cylinder,CropMatrixDouble16Array{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});side.SetEnabled(true);frame->Render();
+        P rotate{};side.GetHandle(4)->GetHandleRepresentation()->GetWorldPosition(rotate.data());const auto rotateDisplay=project(rotate);radius=project(getPosition());
+        check(rotateDisplay[0]>=8&&rotateDisplay[0]<=392&&rotateDisplay[1]>=8&&rotateDisplay[1]<=392
+            &&std::hypot(rotateDisplay[0]-radius[0],rotateDisplay[1]-radius[1])>=16,"axial view keeps the rotation entry visible and distinct from the radius handle");
         side.SetEnabled(false);side.SetContext(nullptr,nullptr);frame->Finalize();
     }
     widget.SetContext(nullptr,nullptr);check(!widget.SetEnabled(true),"missing view context rejects enable");window->Finalize();
