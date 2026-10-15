@@ -9,25 +9,25 @@
 class QIODevice;
 class QThread;
 namespace Manual {
-using ReportIndex = qint64;
-using ReportRows = MeshReadArray<ReportIndex>;
-ReportRows GetReportRowRange(ReportIndex count);
+using ReportRowId = qint64;
+using ReportRows = MeshReadArray<ReportRowId>;
+ReportRows GetReportRowRange(ReportRowId count);
 // 仅保存表格；不拥有 Session、体数据或原生结果快照。
 class ReportTable final {
 public:
     ReportTable();
-    ReportTable(quint64 count,std::function<QStringList(ReportIndex)> readRow);
+    ReportTable(quint64 count,std::function<QStringList(ReportRowId)> readRow);
     ~ReportTable();
     void Append(const QStringList& row);
-    QStringList Read(ReportIndex row) const;
-    ReportIndex GetCount() const;
-    void SetRows(std::size_t count, std::function<QStringList(ReportIndex)> read);
+    QStringList Read(ReportRowId row) const;
+    ReportRowId GetCount() const;
+    void SetRows(std::size_t count, std::function<QStringList(ReportRowId)> read);
     bool ContinueBuild();
     bool GetIsComplete() const;
     void PrepareRead();
     void SetOwnerThread(QThread* owner);
     // 独立文件游标；调用方持有 table，且仅在物化完成后创建读取器。
-    std::function<QStringList(ReportIndex)> CreateReader() const;
+    std::function<QStringList(ReportRowId)> CreateReader() const;
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -51,6 +51,8 @@ struct ReportDocument final {
     bool identityStable = false;
     bool mappingRequired = false;
     QStringList validValues{"0","Valid"};
+    // 所属线程每次只准备一个工作单元；完成后替换为实际分组，取消直接释放候选。
+    std::function<bool(QVector<ReportDocument>&)> prepareReports;
 };
 using ReportCheckpoint = std::function<void()>;
 using ReportPreparation = std::function<QVector<ReportDocument>(const ReportCheckpoint&)>;
@@ -59,4 +61,6 @@ void WriteReportCsv(QIODevice& output, const ReportDocument& document, const Rep
 void ExportReport(const QString& path, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
 QString GetReportCell(const QStringList& row, int column);
 bool GetReportNumber(const QString& text, double& value);
+QJsonValue GetReportCountValue(quint64 count);
+quint64 GetReportCount(const QJsonValue& value);
 }

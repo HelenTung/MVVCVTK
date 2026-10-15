@@ -1,6 +1,11 @@
 #include "ReportWorkflowTests.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
+#include "Support/ReportStorage.h"
+#if defined(MANUAL_ALIGNMENT)
+#include "Support/InspectionReport.h"
+#include "Support/JsonInput.h"
+#endif
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
@@ -22,6 +27,9 @@
 #include <cmath>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <limits>
 #include <iostream>
 #include <stdexcept>
 
@@ -110,6 +118,9 @@ void CheckSpatialEvidence() {
     const auto result=CompareReports(a,b,o);const auto pair=result.table->Read(0),unmatched=result.table->Read(1);
     Require(pair[0]=="a" && pair[7]=="b" && std::abs(pair[8].toDouble()-.005)<1e-12,"spatial report lost A/B IDs or physical pairing distance");
     Require(unmatched[0].isEmpty() && unmatched[7]=="missing" && unmatched[8].isEmpty() && unmatched[4].isEmpty(),"unmatched B point fabricated baseline identity, distance or delta");
+    auto far=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nfar,1e20,0,0,3\nnear,0,0,0,4\n");
+    o.distanceTolerance=1e-9;const auto fallback=CompareReports(far,far,o);
+    Require(fallback.conditions["有效配对数"]==2 && fallback.table->GetCount()==2 && fallback.table->Read(0)[8]=="0", "spatial acceleration range rejected valid finite coordinates instead of completing a full scan");
 }
 void CheckGenerationAndTasks() {
     ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
@@ -117,7 +128,7 @@ void CheckGenerationAndTasks() {
     view.onReadReports=[&](const QJsonObject&,const QSet<QString>&) {
         ++prepared;auto doc=Document("lazy","聚合节点厚度场值",0);doc.module="Wall";
         auto held=std::make_shared<int>(1);lease=held;
-        doc.table->SetRows(50000,[&,held](ReportIndex row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
+        doc.table->SetRows(50000,[&,held](ReportRowId row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
         return QVector<ReportDocument>{doc};
     };
     view.QueueReport(record);QCoreApplication::processEvents();
@@ -155,7 +166,7 @@ void CheckGenerationAndTasks() {
     retry.onReadReports=[&](const QJsonObject&,const QSet<QString>&){if(fail)throw std::runtime_error("暂时不可读取");return QVector<ReportDocument>{Document("retry")};};
     retry.QueueReport(record);retry.show();QCoreApplication::processEvents();
     Require(retry.GetReportAvailable("Wall","lazy-result") && retry.GetReportIds().isEmpty(),"read failure permanently discarded the retryable operation");
-    fail=false;retry.ShowReports();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
+    fail=false;retry.findChild<QPushButton*>("retryFailedReport")->click();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
     ResultReport failedPreparation;std::atomic<int> attempts{0};
     failedPreparation.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
         return [&](const ReportCheckpoint&){++attempts;throw std::runtime_error("持续准备失败");return QVector<ReportDocument>{};};
@@ -177,9 +188,119 @@ void CheckGenerationAndTasks() {
     parentView.hide();
     view.hide();
 }
+void CheckFailureIsolation() {
+    ResultReport view;int attempts=0,partialAttempts=0;bool unreadable=true,writeFailure=true;
+    view.onReadReports=[&](const QJsonObject& record,const QSet<QString>&){const auto id=record["operationId"].toString();
+        if(id=="1"){++attempts;if(unreadable)throw std::runtime_error("结果表修订不可读");}
+        auto doc=Document("isolated-"+id, "厚度",0);
+        if(id=="2"){++partialAttempts;doc.table->SetRows(3,[&](ReportRowId index){if(writeFailure&&index==1)throw std::runtime_error("报告文件写入失败");return QStringList{QString::number(index),QString::number(index)};});}
+        else doc.table->Append({"item","12.5"});return QVector<ReportDocument>{doc};};
+    for(const auto id:{"1","2","3"})view.QueueReport({{"operationId",id},{"module","Wall"},{"result",QJsonObject{{"result",QString("result-")+id}}}});
+    view.show();Wait([&]{return !view.GetReportIds().contains("isolated-3");});
+    Require(view.property("reportFailureCount").toInt()==2 && attempts==1 && partialAttempts==1,"one failed report blocked others or retried itself automatically");
+    auto* errors=view.findChild<QComboBox*>("failedReportOperations");Require(errors->count()==2 && errors->itemText(0).contains("结果表修订不可读"),"individual report failure state is missing");
+    view.hide();view.ShowReports();view.show();QCoreApplication::processEvents();Require(attempts==1&&partialAttempts==1,"reopening retried quarantined failures");
+    unreadable=false;view.ShowReports("other-data");errors->setCurrentIndex(errors->findData("1"));view.findChild<QPushButton*>("retryFailedReport")->click();Wait([&]{return !view.GetReportIds().contains("isolated-1");});
+    Require(attempts==2 && partialAttempts==1 && view.property("reportFailureCount").toInt()==1,"explicit retry affected another failed operation");
+    writeFailure=false;errors->setCurrentIndex(errors->findData("2"));view.findChild<QPushButton*>("retryFailedReport")->click();Wait([&]{return !view.GetReportIds().contains("isolated-2");});
+    Require(partialAttempts==2 && view.property("reportFailureCount").toInt()==0 && !errors->isVisible(),"retried report did not clear its own error state");view.hide();
+}
+void CheckVolumeCompleteness() {
+    for(const auto state:{"1","2","3"}) {
+        auto native=Document("volume","选区单元体积和",0);
+        native.columns={{"item_id",{},{},false},{"selected_cell_volume_mm3","选区单元体积和","mm3",true},
+            {"observed_volume_mm3","有效选中部分体积","mm3",true},{"selection_completeness",{},{},false}};
+        native.table->Append({"volume",{},QString(state)=="3"?"0":"12.5",state});QByteArray bytes;QBuffer file(&bytes);file.open(QIODevice::WriteOnly);WriteReportCsv(file,native);file.close();auto copy=Read(bytes);
+        Require(copy.validityColumn==-1,"selection completeness was inferred as measurement validity");
+        for(int column=1;column<=2;++column) {
+            ReportComparisonOptions o;o.match=ReportMatch::Distribution;o.baselineColumn=o.currentColumn=column;
+            o.baselineQuantity=native.columns[column].quantity;o.currentQuantity=copy.columns[column].quantity;
+            o.baselineUnit=native.columns[column].unit;o.currentUnit=copy.columns[column].unit;
+            const auto result=CompareReports(native,copy,o);const auto a=result.table->Read(0),b=result.table->Read(1);
+            Require(a[2]==b[2] && a[3]==b[3] && a[2]==(column==1?"0":"1"),"incomplete volume roundtrip changed per-metric availability");
+        }
+    }
+    const auto wall=Read("sample_id,thickness_mm,validity\n0,12.5,1\n");
+    ReportComparisonOptions o;o.match=ReportMatch::Distribution;o.baselineColumn=o.currentColumn=1;o.baselineQuantity=o.currentQuantity=wall.columns[1].quantity;o.baselineUnit=o.currentUnit="mm";
+    Require(CompareReports(wall,wall,o).table->Read(0)[2]=="0","completeness repair made invalid wall samples valid");
+}
+void CheckConcurrentReportReads() {
+    auto native=Document("concurrent-read","体积",50000);native.table->PrepareRead();
+    const auto start=[native]{return std::async(std::launch::async,[native]{QByteArray bytes;QBuffer file(&bytes);file.open(QIODevice::WriteOnly);
+        WriteReportCsv(file,native,nullptr,[]{});return bytes;});};
+    auto first=start(),second=start();int ownerReads=0;bool overlapped=false;
+    Wait([&]{const bool pending=first.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready || second.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready;
+        overlapped=overlapped||pending;const int index=ownerReads++%50000;const auto row=native.table->Read(index);
+        Require(row[0]==QString("point-%1").arg(index)&&row[1]==QString::number(index+1),"owner reads changed while independent exports were running");
+        return pending;});
+    Require(overlapped,"concurrent export did not overlap owner reads");
+    for(const auto bytes:{first.get(),second.get()}){const auto copy=Read(bytes);Require(copy.table->GetCount()==50000,"concurrent full export changed its frozen row count");
+        for(int index=0;index<50000;++index){const auto row=copy.table->Read(index);Require(row[0]==QString("point-%1").arg(index)&&row[1]==QString::number(index+1),"concurrent export changed a frozen row");}}
+    std::cout<<"PASS: frozen report concurrent owner reads and independent full exports"<<std::endl;
+}
+void CheckWideRowAddressing() {
+    // 虚拟来源只验证类型边界与分页寻址，不冒充真实吞吐或二十亿行物化测试。
+    const ReportRowId count=static_cast<ReportRowId>(std::numeric_limits<int>::max())+213;
+    Require(GetReportCount(QJsonValue(2147483860.))==count && GetReportCount(QJsonValue(QString("9007199254740993")))==9007199254740993LL
+        && GetReportCountValue(9007199254740993LL).isString(),"report metadata narrows a 64-bit count or loses JSON integer precision");
+    ReportDocument doc;doc.id="wide-row-contract";doc.title="64 位分页契约";doc.category="本次会话结果";doc.module="Gap";
+    doc.columns={{"void_id",{},{},false},{"value","体积","mm3",true}};doc.table=std::make_shared<ReportTable>(count,[](ReportRowId row){return QStringList{QString::number(row),QString::number(row+1)};});
+    Require(doc.table->GetCount()==count && doc.table->Read(count-1)[0]==QString::number(count-1),"report source truncates global row IDs to int");
+    ResultReport view;ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};view.AddReport(doc);view.show();
+    view.findChild<QPushButton*>("reportLast")->click();QCoreApplication::processEvents();auto* table=view.findChild<QTableView*>("reportTable");
+    const int local=table->model()->rowCount()-1;Require(local>=0 && table->model()->data(table->model()->index(local,0)).toString()==QString::number(count-1),"last report page truncates a 64-bit row");
+    table->selectRow(local);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==count-1,"locate callback truncates a 64-bit global row");
+    view.findChild<QPushButton*>("reportFirst")->click();Require(table->model()->data(table->model()->index(0,0)).toString()=="0","first report page lost original order");view.hide();
+}
+void CheckDiskIndexPages() {
+    ReportTable table;ReportIndex indices;ReportDiskArray<qint64> mapped(2053);
+    for(ReportRowId row=0;row<2053;++row){table.Append({QString::number(row),QString(static_cast<int>(row%73),'x')});indices.Append(row*1000000123LL);}
+    table.PrepareRead();indices.PrepareRead();const auto read=table.CreateReader();const auto index=indices.CreateReader();
+    for(int pass=0;pass<2;++pass)for(ReportRowId i=0;i<2053;++i){const auto row=pass?2052-i:i;
+        Require(table.Read(row)[0]==QString::number(row) && read(row)[0]==QString::number(row),"owner or independent report reader corrupted a binary offset page boundary");
+        Require(indices.Read(row)==row*1000000123LL && index(row)==indices.Read(row),"64-bit row index corrupted a page boundary or tail page");}
+    for(ReportRowId row=0;row<2053;++row){Require(mapped[row]==0,"disk-backed state initialization missed a block");mapped[row]=row*1000000123LL;}
+    for(ReportRowId row=2052;row>=0;--row)Require(mapped[row]==row*1000000123LL,"disk-backed state changed a 64-bit record");
+}
+#if defined(MANUAL_ALIGNMENT)
+void CheckInspectionPreparation() {
+    ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
+    DataRevisionRef ref;ref.entityId.bytes[0]=31;ref.generation=1;const auto text=GetRefText(ref);
+    const QJsonObject record{{"operationId","inspection-preparation"},{"module","Alignment"},{"result",QJsonObject{{"inspection",text}}}};
+    view.onReadReports=[&](const QJsonObject& input,const QSet<QString>&) {
+        auto plan=std::make_shared<InspectionPlan>();auto report=std::make_shared<InspectionReport>();
+        for(int i=0;i<50000;++i){InspectionItem spec;spec.id=std::to_string(i);spec.name="name-"+spec.id;
+            spec.measured.metric=i%2?InspectionMetric::OrientedDirectionAngleDegrees:InspectionMetric::Radius;plan->items.push_back(spec);}
+        for(int i=49999;i>=0;--i){InspectionItemResult row;row.id=std::to_string(i);row.nominal=i;row.measured=i+.5;row.deviation=.5;row.message="original";report->items.push_back(row);}
+        auto repeated=plan->items.front();repeated.name="wrong duplicate";plan->items.push_back(repeated);
+        InspectionItemResult unknown;unknown.id="unknown";report->items.push_back(unknown);
+        InspectionSnapshot snapshot;snapshot.result=ref;snapshot.alignmentResult=ref;snapshot.sourceMesh=ref;snapshot.unit=AlignmentUnit::Millimeter;
+        snapshot.plan=plan;snapshot.report=report;planLease=plan;reportLease=report;
+        auto doc=CreateInspectionReport(input,snapshot,"data-a");Require(!doc.table && bool(doc.prepareReports),"inspection provider eagerly materialized its plan or rows");
+        return QVector<ReportDocument>{std::move(doc)};
+    };
+    view.QueueReport(record);view.ShowReports({},text,"Alignment");view.show();
+    Wait([&]{return view.property("reportGenerationProgress").toULongLong()<256;});
+    Require(view.property("reportGenerationBusy").toBool()&&!planLease.expired(),"inspection preparation failed to yield before finishing its index");
+    view.CancelTasks();Require(planLease.expired()&&reportLease.expired()&&view.GetReportIds().isEmpty(),"cancelled inspection preparation retained snapshots or published a group");
+    view.ShowReports({},text,"Alignment");Wait([&]{return view.property("reportGenerationPhase").toString()!="rows";});
+    Require(view.property("reportGenerationBusy").toBool()&&view.GetReportIds().isEmpty(),"inspection row writing failed to yield before publication");
+    view.CancelTasks();Require(planLease.expired()&&reportLease.expired(),"cancelled inspection row writing retained snapshots");
+    view.ShowReports({},text,"Alignment");Wait([&]{return view.GetReports("Alignment",{text}).size()!=2 || view.property("reportGenerationBusy").toBool();});
+    const auto groups=view.GetReports("Alignment",{text});Require(planLease.expired()&&reportLease.expired(),"completed inspection groups retained the native plan or results");
+    int total=0;for(const auto& doc:groups){Require(doc.table->GetCount()==25000,"inspection grouping changed its complete population");const bool angle=doc.columns[3].unit=="deg";
+        Require(angle||doc.columns[3].unit=="mm","inspection grouping lost units");
+        for(int i=0;i<doc.table->GetCount();++i){const int original=(angle?49999:49998)-2*i;const auto row=doc.table->Read(i);
+            Require(row[0]==QString::number(original)&&row[1]=="name-"+row[0]&&row[2]==QString::number(original)&&row[3]==QString::number(original+.5,'g',17)&&row[4]=="0.5"&&row[6]=="original","inspection preparation changed IDs, order, names, values or original reason");}total+=doc.table->GetCount();}
+    Require(total==50000,"inspection preparation lost or duplicated report items");view.hide();
+}
+#endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();
+    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();
+#if defined(MANUAL_ALIGNMENT)
+    CheckInspectionPreparation();
+#endif
     std::cout<<"PASS: report semantics, associations, spatial evidence, lazy generation, cancellation and resource release"<<std::endl;
 }
 }

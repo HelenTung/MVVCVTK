@@ -13,12 +13,14 @@
 #endif
 #if defined(MANUAL_WALL)
 #include "Host/WallThicknessHostFeature.h"
+#include "WallParameters.h"
 #endif
 #if defined(MANUAL_SURFACE)
 #include "Host/SurfaceDeterminationHostFeature.h"
 #endif
 #if defined(MANUAL_ALIGNMENT)
 #include "Host/MetrologyAlignmentHostFeature.h"
+#include "InspectionReport.h"
 #endif
 namespace Manual {
 namespace {
@@ -41,7 +43,7 @@ template<class Read>
 void SetPagedRows(ReportDocument& doc, const QString& ref, Read read, QStringList keys, QJsonObject first)
 {
     const auto count=GetId(first["total"]);
-    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=ReportIndex{0}](ReportIndex index) mutable {
+    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=ReportRowId{0}](ReportRowId index) mutable {
         auto rows=first["rows"].toArray();
         if(index<offset || index>=offset+rows.size()) {
             offset=index/256*256; first=read(GetRef(ref),static_cast<std::size_t>(offset),256,std::nullopt);rows=first["rows"].toArray();
@@ -91,7 +93,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature> f
             {"intersection_volume_mm3","ROI 内相交体积","mm3",true},{"gap_statistics_volume_mm3","本次统计体积","mm3",true},
             {"equivalent_diameter_mm","本次统计等效直径","mm",true},{"roi_partial",{},{},false},{"whole_object_geometry",{},{},false}};
         doc.identityColumn=0;
-        doc.table=std::make_shared<ReportTable>(reader->GetMetadata().objectCount,[reader](quint64 row){
+        doc.table=std::make_shared<ReportTable>(reader->GetMetadata().objectCount,[reader](ReportRowId row){
             const auto page=reader->GetObjects(row,1);
             if(page.error!=GapReadError::None||page.objects.size()!=1)throw std::runtime_error("孔隙报告对象行不可读");
             const auto& object=page.objects[0];
@@ -110,13 +112,16 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<WallThicknessHost
         const auto snapshot=feature->GetResult(GetRef(ref));if(!snapshot || !snapshot->samples)return reports;
         const auto unit=snapshot->archive.input.unit==ThicknessUnit::Millimeter?QString("mm"):snapshot->archive.input.unit==ThicknessUnit::Meter?QString("m"):QString("model");
         auto doc=Document(record,"wall",ref,GetRefText(snapshot->archive.input.source),"壁厚明细");
+        doc.conditions["计算参数"]=GetWallMeasurementJson(snapshot->archive.input,snapshot->archive.params);
+        doc.conditions["评价参数"]=GetWallEvaluationJson(snapshot->archive.evaluation);
+        doc.conditions["算法版本"]=QString::fromStdString(snapshot->archive.algorithmVersion);
         doc.description="聚合节点场查询值；sample_id 只在本报告内编号，不是跨结果稳定测点。无效厚度留空。";doc.coordinateFrame="源模型坐标";
         doc.columns={{"sample_id",{},{},false},{"x_"+unit,"坐标 X",unit,true},{"y_"+unit,"坐标 Y",unit,true},{"z_"+unit,"坐标 Z",unit,true},
             {"thickness_"+unit,"聚合节点厚度场值",unit,true},{"area_"+unit+"2","样本面积",unit+"2",true},{"validity",{},{},false},{"reason",{},{},false}};
         doc.identityColumn=0;doc.valueColumn=4;doc.xColumn=1;doc.yColumn=2;doc.zColumn=3;doc.validityColumn=6;doc.table=std::make_shared<ReportTable>();
         const QStringList reasons{"有效","表面质量不足","对面歧义","尖锐特征","支持截断","达到搜索上限","材料路径无效","评价范围外","无有效源"};
         const auto samples=snapshot->samples;
-        doc.table->SetRows(samples->size(),[samples,reasons](ReportIndex index) {
+        doc.table->SetRows(samples->size(),[samples,reasons](ReportRowId index) {
             const auto& sample=(*samples)[index];
             const int validity=static_cast<int>(sample.validity);
             return QStringList{QString::number(index),Number(sample.source[0]),Number(sample.source[1]),Number(sample.source[2]),
@@ -146,7 +151,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
             {"area_validity",{},{},false},{"volume_validity",{},{},false},{"closed",{},{},false},{"manifold",{},{},false}};
         if(!snapshot->objects)throw std::runtime_error("表面正式对象目录不可读");
         const auto objects=snapshot->objects;doc.identityColumn=0;
-        doc.table=std::make_shared<ReportTable>(objects->size(),[objects](quint64 row){
+        doc.table=std::make_shared<ReportTable>(objects->size(),[objects](ReportRowId row){
             const auto& object=objects->at(static_cast<std::size_t>(row));
             return QStringList{QString::number(object.objectIndex),
                 // 限定面积仍是正式原生量值，资格单独保留。
@@ -229,7 +234,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};
                 doc.identityColumn=0;doc.validityColumn=3;doc.table=std::make_shared<ReportTable>();
                 const QStringList reasons{"未选择","有效","源无效","目标无效","超过距离","法向不匹配","缺少法向"};
-                doc.table->SetRows(field.samples.size(),[samples,reasons](ReportIndex index){const auto& sample=samples->samples[index];const bool valid=sample.state==AlignmentDeviationState::Valid;
+                doc.table->SetRows(field.samples.size(),[samples,reasons](ReportRowId index){const auto& sample=samples->samples[index];const bool valid=sample.state==AlignmentDeviationState::Valid;
                     return QStringList{QString::number(index),valid?Number(sample.value):QString(),valid?Number(sample.distance):QString(),valid?"0":QString::number(static_cast<int>(sample.state)+1),reasons.value(static_cast<int>(sample.state),"未知状态")};});
                 const auto& stats=field.statistics;
                 doc.conditions["汇总"]=QJsonObject{{"样本数",QString::number(field.samples.size())},{"有效数",QString::number(stats.counts[static_cast<std::size_t>(AlignmentDeviationState::Valid)])},
@@ -247,7 +252,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                 auto doc=Document(record,"voxel-volume",volume,GetRefText(snapshot->source),"选区单元体积");const auto& stats=snapshot->statistics;
                 doc.description="完整体积与有效选中部分体积含义不同；不可观测或完整性条件未满足时，完整体积留空。";
                 doc.columns={{"item_id",{},{},false},{"selected_cells","选中单元数","1",true},{"selected_cell_volume_mm3","选区单元体积和","mm3",true},
-                    {"observed_volume_mm3","有效选中部分体积","mm3",true},{"validity",{},{},false},{"reason",{},{},false}};
+                    {"observed_volume_mm3","有效选中部分体积","mm3",true},{"selection_completeness",{},{},false},{"reason",{},{},false}};
                 doc.valueColumn=2;doc.identityColumn=0;doc.table=std::make_shared<ReportTable>();
                 const QStringList reasons{"完整","存在不可观测单元","接触索引区域边界","空选区"};
                 doc.table->Append({"voxel-volume",QString::number(stats.selected),stats.volumeMm3?Number(*stats.volumeMm3):QString(),Number(stats.observedVolumeMm3),

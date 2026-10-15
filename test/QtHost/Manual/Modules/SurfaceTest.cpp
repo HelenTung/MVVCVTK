@@ -4,6 +4,7 @@
 #include "Support/ParameterEditor.h"
 #include "Support/ReferenceDataSource.h"
 #include "Support/RoiSelection.h"
+#include "Support/ReportDocument.h"
 #include "Support/SurfaceRead.h"
 #include <QPointer>
 #include <QFile>
@@ -82,7 +83,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
             {"boundsModel",GetValues(object.boundsModel)}});
     }
     summary["objects"] = objects;
-    summary["objectCount"] = QString::number(objectCount);
+    summary["objectCount"] = GetReportCountValue(static_cast<quint64>(objectCount));
     summary["objectSummaryLimit"] = static_cast<int>(objectLimit);
     summary["objectOffset"]=QString::number(objectOffset);summary["nextObjectOffset"]=QString::number(objectEnd);
     summary["objectsComplete"]=objectEnd==objectCount;
