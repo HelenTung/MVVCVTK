@@ -12,7 +12,9 @@
 #include <vtkCoordinate.h>
 #include <vtkCubeSource.h>
 #include <vtkCutter.h>
-#include <vtkCylinderSource.h>
+#include <vtkCamera.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
 #include <vtkFeatureEdges.h>
 #include <vtkPlaneSource.h>
 #include <vtkPlane.h>
@@ -33,6 +35,8 @@ class CropGeometryOverlay final : public FeatureOverlayBase {
 public:
     explicit CropGeometryOverlay(HostRenderViewRole role)
     {
+        m_sectionObserver=vtkSmartPointer<vtkCallbackCommand>::New();m_sectionObserver->SetClientData(this);
+        m_sectionObserver->SetCallback([](vtkObject*,unsigned long,void* self,void*){if(self)static_cast<CropGeometryOverlay*>(self)->UpdateCylinderSection();});
         m_axis = role == HostRenderViewRole::TopDownSlice ? 2
             : role == HostRenderViewRole::FrontBackSlice ? 1
             : role == HostRenderViewRole::LeftRightSlice ? 0 : -1;
@@ -64,13 +68,20 @@ public:
         m_text->SetPosition(12, 12);
         m_text->PickableOff();m_text->UseBoundsOff(); AttachProp(m_text);
     }
+    ~CropGeometryOverlay() override {
+        if(m_renderer)DetachRenderer(m_renderer.GetPointer());
+        m_sectionObserver->SetClientData(nullptr);
+    }
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
+        if(!renderer)return;
+        if(m_renderer.GetPointer()!=renderer.GetPointer())StopSectionObserver();
         FeatureOverlayBase::AttachRenderer(renderer);
-        m_renderer=renderer;UpdateCurveRenderer();
+        m_renderer=renderer;m_sectionDirty=true;UpdateCurveRenderer();UpdateCylinderSection();
     }
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
+        StopSectionObserver();
         if(m_sphereVisual)m_sphereVisual->DetachRenderer();
         if(m_cylinderVisual)m_cylinderVisual->DetachRenderer();
         m_renderer=nullptr;
@@ -92,6 +103,7 @@ public:
             UpdateSphere();Set3DPropsTransform(state.modelToWorld);return;
         }
         if(m_shape==CropShape::Cylinder&&m_cylinderVisual)m_cylinderVisual->SetGeometry(m_operation,m_modelToWorld);
+        if(m_shape==CropShape::Cylinder) {UpdateCylinderSection();Set3DPropsTransform(state.modelToWorld);return;}
         double n[3];m_plane->GetNormal(n);
         const double dot=n[0]*m_normal[0]+n[1]*m_normal[1]+n[2]*m_normal[2];
         const double length=std::hypot(n[0],n[1],n[2])*std::hypot(m_normal[0],m_normal[1],m_normal[2]);
@@ -108,6 +120,11 @@ public:
         if(m_sphereVisual)m_sphereVisual->SetVisible(false);m_text->SetVisibility(true);
         m_center=op.planeCenterInInputModel;
         m_normal=op.planeNormalInInputModel;
+        if(op.geometryType==CropShape::Cylinder) {
+            m_sectionDirty=true;UpdateCylinderSection();
+            std::ostringstream text;text<<std::fixed<<std::setprecision(2)<<u8"半径："<<op.radius<<u8" mm  长度："<<op.height<<" mm";
+            m_text->SetInput(text.str().c_str());m_text->SetVisibility(m_axis>=0);return;
+        }
         auto mesh = vtkSmartPointer<vtkPolyData>::New();
         std::ostringstream text; text << std::fixed << std::setprecision(2);
         vtkNew<vtkMatrix4x4> matrix; matrix->Identity();
@@ -124,21 +141,6 @@ public:
             m_center=op.centerInInputModel;m_radius=op.radius;UpdateSphere();
             text << u8"半径：" << op.radius << " mm";m_text->SetInput(text.str().c_str());
             m_text->SetVisibility(m_axis>=0);return;
-        } else if (op.geometryType == CropShape::Cylinder) {
-            vtkNew<vtkCylinderSource> source;source->SetRadius(op.radius);source->SetHeight(op.height);
-            source->SetResolution(64);source->CappingOn();source->Update();mesh->ShallowCopy(source->GetOutput());
-            const auto& axis=op.axisInInputModel;
-            std::array<double,3> radial{axis[1],-axis[0],0};
-            if(std::hypot(radial[0],radial[1])<1e-12)radial={1,0,0};
-            const double length=std::hypot(radial[0],radial[1],radial[2]);
-            for(auto& value:radial)value/=length;
-            const std::array<double,3> third{radial[1]*axis[2]-radial[2]*axis[1],
-                radial[2]*axis[0]-radial[0]*axis[2],radial[0]*axis[1]-radial[1]*axis[0]};
-            for(int row=0;row<3;++row) {
-                matrix->SetElement(row,0,radial[row]);matrix->SetElement(row,1,axis[row]);
-                matrix->SetElement(row,2,third[row]);matrix->SetElement(row,3,op.centerInInputModel[row]);
-            }
-            text<<u8"半径："<<op.radius<<u8" mm  长度："<<op.height<<" mm";
         } else {
             const auto& n=op.planeNormalInInputModel;
             const double radius=std::hypot(bounds[1]-bounds[0],bounds[3]-bounds[2],bounds[5]-bounds[4])*0.5;
@@ -160,10 +162,29 @@ public:
         if(m_shape==CropShape::Cylinder)m_text->SetVisibility(m_axis>=0);
     }
 private:
+    void StopSectionObserver(){if(m_renderer&&m_sectionTag)m_renderer->RemoveObserver(m_sectionTag);m_sectionTag=0;}
     void UpdateCurveRenderer(){
-        if(!m_renderer||m_axis>=0)return;
+        if(!m_renderer)return;
+        if(m_axis>=0){
+            if(m_shape==CropShape::Cylinder){if(!m_sectionTag)m_sectionTag=m_renderer->AddObserver(vtkCommand::StartEvent,m_sectionObserver,1.f);}
+            else StopSectionObserver();
+            return;
+        }
         if(m_shape==CropShape::Sphere)m_sphereVisual->AttachRenderer(m_renderer);else m_sphereVisual->DetachRenderer();
         if(m_shape==CropShape::Cylinder)m_cylinderVisual->AttachRenderer(m_renderer);else m_cylinderVisual->DetachRenderer();
+    }
+    void UpdateCylinderSection(){
+        if(m_axis<0||m_shape!=CropShape::Cylinder||!m_renderer||!m_actor->GetVisibility())return;
+        auto* camera=m_renderer->GetActiveCamera();const auto* size=m_renderer->GetSize();const auto* viewport=m_renderer->GetViewport();
+        if(size[0]<=0||size[1]<=0)return;
+        const std::array<int,2> dimensions{size[0],size[1]};const std::array<double,4> area{viewport[0],viewport[1],viewport[2],viewport[3]};
+        if(!m_sectionDirty&&m_sectionCamera==camera&&m_sectionCameraTime==camera->GetMTime()
+            &&m_sectionPlaneTime==m_plane->GetMTime()&&m_sectionTransformTime==m_modelToWorld->GetMTime()
+            &&m_sectionSize==dimensions&&m_sectionViewport==area)return;
+        CropCylinderVisual::BuildSection(*m_mesh,m_operation,*m_plane,m_renderer,m_modelToWorld);
+        m_displayGeometry->SetInputData(m_mesh);m_actor->GetProperty()->SetPointSize(4);
+        m_sectionDirty=false;m_sectionCamera=camera;m_sectionCameraTime=camera->GetMTime();
+        m_sectionPlaneTime=m_plane->GetMTime();m_sectionTransformTime=m_modelToWorld->GetMTime();m_sectionSize=dimensions;m_sectionViewport=area;
     }
     void UpdateSphere()
     {
@@ -180,6 +201,9 @@ private:
     std::unique_ptr<CropSphereVisual> m_sphereVisual;
     std::unique_ptr<CropCylinderVisual> m_cylinderVisual;
     vtkWeakPointer<vtkRenderer> m_renderer;CropOpItem m_operation;
+    vtkSmartPointer<vtkCallbackCommand> m_sectionObserver;vtkWeakPointer<vtkCamera> m_sectionCamera;unsigned long m_sectionTag=0;
+    bool m_sectionDirty=true;unsigned long long m_sectionCameraTime=0,m_sectionPlaneTime=0,m_sectionTransformTime=0;
+    std::array<int,2> m_sectionSize{};std::array<double,4> m_sectionViewport{};
     bool m_curveEditing=false;
     double m_radius=1;
     vtkSmartPointer<vtkMatrix4x4> m_modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();
