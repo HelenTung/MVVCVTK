@@ -1,6 +1,6 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Algorithms/PartLabelEditor.h"
-#include "FeatureSupport/LabelMapBuilder.h"
+#include "LabelMapBuilder.h"
 
 #include <algorithm>
 #include <cmath>

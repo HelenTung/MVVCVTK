@@ -15,12 +15,13 @@ target_sources(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/WorkLimit.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/WidgetBindings.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/RoutedWidgets.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/LabelMapBuilder.h"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/LabelMapBuilder.h"
 )
 target_include_directories(
     mvvcvtk_feature_support
     INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support>"
 )
 SetApiDefaults(mvvcvtk_feature_support)
 target_link_libraries(
