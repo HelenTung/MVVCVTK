@@ -136,8 +136,9 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
             {"area_validity",{},{},false},{"volume_validity",{},{},false},{"closed",{},{},false},{"manifold",{},{},false}};
         doc.identityColumn=0;doc.table=std::make_shared<ReportTable>();
         const auto objects=snapshot->objects;
+        // 开口等限定状态仍可有原生面积，量值与资格分别保留。
         if(objects)doc.table->SetRows(objects->size(),[objects](int index) {const auto& object=(*objects)[index];return QStringList{QString::number(object.objectIndex),
-            object.areaValidity==SurfaceMetricValidity::Valid && object.areaModelUnit2?Number(*object.areaModelUnit2):QString(),
+            object.areaModelUnit2?Number(*object.areaModelUnit2):QString(),
             object.volumeValidity==SurfaceMetricValidity::Valid && object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
             QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};});
         doc.conditions["正式计算条件"]=QJsonDocument::fromJson(QByteArray::fromStdString(snapshot->canonicalParameters)).object();

@@ -257,7 +257,24 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
         }
-        if(doc.id.startsWith("surface:") && summary.contains("objectCount"))Require(doc.table->GetCount()==summary["objectCount"].toInt(),"surface report covers all native objects");
+        if(doc.id.startsWith("surface:") && summary.contains("objectCount")) {
+            Require(doc.table->GetCount()==summary["objectCount"].toInt(),"surface report covers all native objects");
+            // 独立摘要直接读取原生快照，限定面积有值时也须保留，不能按资格二次抹空。
+            const auto objects=summary["objects"].toArray();const auto offset=GetId(summary["objectOffset"]);
+            Require(offset<=static_cast<std::uint64_t>(doc.table->GetCount())
+                && static_cast<std::uint64_t>(objects.size())<=doc.table->GetCount()-offset,"native surface object page is within the full report");
+            int index=0;for(const auto value:objects) {
+                const auto object=value.toObject();
+                const auto number=[&](const char* key){const auto v=object[key];return v.isDouble()?QString::number(v.toDouble(),'g',17):QString();};
+                const QStringList expected{QString::number(object["objectIndex"].toInt()),number("area"),number("volume"),
+                    QString::number(object["areaValidity"].toInt()),QString::number(object["volumeValidity"].toInt()),
+                    object["closed"].toBool()?"true":"false",object["manifold"].toBool()?"true":"false"};
+                const auto row=static_cast<int>(offset)+index++;
+                Require(SameRow(doc.table->Read(row),expected),"surface report preserves native quantities and their separate qualification");
+                if(row<table->model()->rowCount())for(int column=0;column<expected.size();++column)
+                    Require(table->model()->data(table->model()->index(row,column)).toString()==expected[column],"surface report page preserves every native object field");
+            }
+        }
         if(doc.id.startsWith("inspection"))inspectionRows+=doc.table->GetCount();
         const auto field=doc.id.startsWith("deviation-reverse:")?QString("reverse"):doc.id.startsWith("deviation:")?QString("forward"):QString();
         if(!field.isEmpty() && summary[field].isObject()) {
