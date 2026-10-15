@@ -664,6 +664,38 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
         if(!output||!output->validityMask)return false;
         held=output->validityMask->GetPointData()->GetScalars();output.reset();
     }
+    if(consumerKind==4) {
+        const auto original=result;
+        const auto oldGraph=probe->m_data->GetDataGraph();
+        auto issued=probe->m_data->GetData(oldGraph,original.outputRevision);
+        auto reader=issued->lifetime.lock()->StartResourceUse(issued->self,"historical-branch-reader");
+        issued.reset();
+        if(!SetSelectedData(session,root->data->self)||!wait([&]{
+            const auto state=session.GetImageDescriptor();return state&&state->dataRevision==root->data->self;
+        }))return false;
+        auto sibling=append;sibling.requestId=CropHostFeature::CreateRequestId();
+        sibling.expectedRevision=feature->GetState().history.stateRevision;
+        sibling.operation.planeCenterInInputModel[0]=(bounds[0]+3*bounds[1])*.25;
+        const auto edited=feature->SendRequest(sibling);
+        if(!edited||!wait([&]{const auto out=feature->GetOutcome(history.documentId,sibling.requestId);
+            return out&&out->status==CropEditStatus::Succeeded;}))return false;
+        CropBuildRequest build;build.documentId=history.documentId;build.nodeId=edited.nodeId;
+        build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=feature->GetState().history.stateRevision;
+        CropBuildResult repeated;int repeatCount=0;
+        if(!feature->SendRequest(build,[&](auto value){repeated=std::move(value);++repeatCount;})
+            ||!wait([&]{return repeatCount!=0;}))return false;
+        const auto results=feature->GetHistory().results;
+        if(repeatCount!=1||!repeated.isSucceeded||repeated.nodeId!=edited.nodeId
+            ||repeated.outputRevision==original.outputRevision||repeated.sourceRevision!=root->data->self
+            ||session.GetImageDescriptor()->dataRevision!=root->data->self
+            ||probe->m_data->GetDataLifetime(original.scopeId).status!=DataLifetimeStatus::Published
+            ||!oldGraph.view->GetData(original.outputRevision)||results.size()!=2
+            ||std::any_of(results.begin(),results.end(),[](const auto& value){return value.status!=CropResultStatus::Published;}))return false;
+        reader.reset();held=nullptr;result=std::move(repeated);
+        output=probe->m_data->GetImageGrid(probe->m_data->GetDataGraph(),result.outputRevision);
+        if(!output||!output->validityMask)return false;
+        held=output->validityMask->GetPointData()->GetScalars();output.reset();
+    }
     DataGraphSnapshot consumerGraph;DataRevisionRef consumerRef;DataEntityId consumerScope;
     vtkSmartPointer<vtkDataArray> heldConsumer;
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
@@ -1290,6 +1322,7 @@ int GetCropLifecycleFailCount()
     failures+=GetCaseResult(GetMultiDocumentLifecycle(true),"Dependent document Roots close before their producer scopes and render inputs")?0:1;
     failures+=GetCaseResult(GetMeshRootLifecycle(),"Mesh Root uses real dual-view preview, repeated publication and allocation-aware Return/Close")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true,3),"Repeated build preserves binding on retirement failure and publishes Root plus replacement atomically")?0:1;
+    failures+=GetCaseResult(GetCropCloseRetryValid(true,4),"Publishing a sibling branch from Root preserves historical outputs with live readers")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(false),"Detach cancels Building exactly once and retries the same close before releasing ports")?0:1;
     failures+=GetCaseResult(GetCropCloseRetryValid(true),"Session Stop keeps Crop owned while a bare result array prevents release")?0:1;
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS

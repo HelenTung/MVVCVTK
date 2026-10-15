@@ -832,7 +832,10 @@ std::optional<CropBuildResult> CropHostFeature::Impl::Document::SetBuildResult(
             hasBuilding=true;record.status=CropResultStatus::Published;
             record.recipeRevision=recipeRef;record.outputRevision=outputRef;
             record.meshErrorBound=candidate.meshErrorBound;record.meshAreaErrorBound=candidate.meshAreaErrorBound;record.meshTriangleCount=candidate.meshTriangleCount;
-        } else if (record.status==CropResultStatus::Published) {
+        } else if (record.status==CropResultStatus::Published && completeItem->primaryBinding
+            && completeItem->primaryBinding->target==std::optional<DataRevisionRef>{record.outputRevision}) {
+            // 替换正在采用的输出仍须原子退役；非当前历史由图的依赖保留策略回收。
+            // 回到 Root 后发布兄弟分支，不应强制删除仍被下游业务使用的旧输出。
             transaction.retireScopes.push_back({record.scopeId,DataLifetimeStatus::Published,
                 {record.recipeRevision,record.outputRevision},true});
             record.status=CropResultStatus::Releasing;
@@ -1600,8 +1603,13 @@ bool CropHostFeature::Impl::Document::SendResultReleases()
     if (!batch) return false;
     bool changed=false;
     for (auto record=records.begin();record!=records.end();) {
+        const auto lifetime=m_data->GetDataLifetime(record->scopeId).status;
+        if(record->status==CropResultStatus::Published && lifetime==DataLifetimeStatus::Releasing){
+            record->status=CropResultStatus::Releasing;changed=true;
+        }
         if (record->status==CropResultStatus::Releasing
-            && m_data->SetDataRelease(record->scopeId).status==DataLifetimeStatus::Released) {
+            && (lifetime==DataLifetimeStatus::Released
+                || m_data->SetDataRelease(record->scopeId).status==DataLifetimeStatus::Released)) {
             record=records.erase(record);changed=true;
         } else ++record;
     }

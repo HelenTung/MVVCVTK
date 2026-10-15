@@ -250,16 +250,23 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         const auto* command = menu->findChild<QAction*>("command_" + action);
         const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
         const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
-        return atPrimary || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
+        const auto* next=panel->findChild<QPushButton*>("next_"+action);
+        const auto* editor=panel->GetParameterEditor(action);
+        const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
+        return atPrimary || atNext || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
     }, 2000);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
     Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
     auto* primary=panel->findChild<QPushButton*>("businessPrimary");
     const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
-    Check(button && (atPrimary || button->isEnabled()), "actual business command is enabled");
+    auto* next=panel->findChild<QPushButton*>("next_"+action);
+    const auto* editor=panel->GetParameterEditor(action);
+    const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
+    Check(button && (atPrimary || atNext || button->isEnabled()), "actual business command is enabled");
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     if(atPrimary)primary->click();
+    else if(atNext)next->click();
     else if (button->isVisible()) button->click();
     else {
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
@@ -2596,7 +2603,7 @@ void StartSequence(TestWindow& window, const QString& path)
             id=SendUnavailable(window,module,action);
         } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
-        else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、checkPage");
+        else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、unavailableAction、checkPage");
         QTimer switching, cancellation;
         int switchCount = 0;
         if (step["switchFeaturesWhilePending"].toBool()) {
