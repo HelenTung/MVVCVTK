@@ -240,7 +240,16 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
     m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);reports->show();reports->raise();reports->activateWindow();};
+    m_workflow.getReportAvailable=[this](const QString& module,const QString& result){return m_report->GetReportAvailable(module,result);};
+    m_workflow.onShowBusinessReport=[this,reports](const QString& module,const QString& result){m_report->ShowReports({},result,module);reports->show();reports->raise();reports->activateWindow();};
     m_objects->onReport=m_workflow.onShowReports;
+    m_report->onReadReports=[this](const QJsonObject& record,const QSet<QString>& known){
+        if(m_isClosing)return QVector<ReportDocument>{};
+        const auto provider=m_workflow.readReports.find(record["module"].toString());
+        return provider==m_workflow.readReports.end()?QVector<ReportDocument>{}:provider->second(record,known);
+    };
+    m_report->getSources=[this]{QMap<QString,QString> sources;if(m_workflow.getPublishedGraph)
+        for(const auto value:m_workflow.getPublishedGraph()["nodes"].toArray()) {const auto node=value.toObject();sources[node["ref"].toString()]=node["type"].toString();}return sources;};
     m_report->onLocate=[this](const ReportDocument& doc,int row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
         if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
@@ -256,11 +265,9 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         AppendLog(GetFlowText(record));
         ShowMessage(GetFlowText(record,false));
         m_report->SetRecord(record);
-        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed"}.contains(record["status"].toString())) {
+        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed","Published"}.contains(record["status"].toString())) {
             const auto found=m_workflow.readReports.find(record["module"].toString());
-            if(found!=m_workflow.readReports.end())try {
-                for(auto doc:found->second(record,m_report->GetReportIds()))m_report->AddReport(std::move(doc));
-            } catch(const std::exception& e) {ShowMessage("业务结果已保留，报告读取失败："+QString::fromUtf8(e.what()));}
+            if(!m_isClosing && found!=m_workflow.readReports.end())m_report->QueueReport(record);
         }
         UpdateMeasurements();
         QueueObserve();
@@ -533,6 +540,7 @@ TestWindow::~TestWindow()
 {
     // 正常路径只在 Stop 成功后进入析构；页面先于运行记录/工作流成员销毁。
     m_isClosing = true;
+    m_report->CancelTasks();m_report->onReadReports={};m_report->getSources={};
     const QSignalBlocker pagesBlocker(m_pages), workspaceBlocker(m_workspaceTabs), featureBlocker(m_featureTabs);
     for (auto* module : m_modules) delete module;
     m_modules.clear();
@@ -615,6 +623,7 @@ bool TestWindow::StopSession()
 {
     if (!m_isClosing) AppendLog("正在关闭测试会话，停止计算并释放视图资源。");
     m_isClosing = true; m_openVolume->setEnabled(false); m_stop->setEnabled(false); m_workflow.Stop(); m_pump.Stop();
+    m_report->CancelTasks();
     for(auto* module:m_modules)module->GetStatisticsWidget()->Cancel();
     const auto session = m_runtime.GetSession();
     const auto current = GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{});

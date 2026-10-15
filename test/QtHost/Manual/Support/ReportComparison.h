@@ -13,5 +13,5 @@ struct ReportComparisonOptions final {
     double distanceTolerance = 0, valueTolerance = 0;
 };
 ReportDocument CompareReports(const ReportDocument& baseline, const ReportDocument& current,
-    const ReportComparisonOptions& options);
+    const ReportComparisonOptions& options, const ReportCheckpoint& checkpoint = {});
 }

@@ -1468,13 +1468,22 @@ bool CropHostFeature::Impl::Document::StartSourcePreview(bool isDocument,bool is
 {
     if (m_sourceTransition || (!isDocument && !isActivation && !m_bridge->GetSourceTransitionNeeded())) return false;
     const auto source=m_bridge->GetSource();
-    const bool offline=isDocument&&!m_isEditingDocument;
     if ((!source.image&&!source.mesh) || !source.data) return false;
     const auto graph=m_data->GetDataGraph();
     auto binding=m_data->GetDataBinding(graph,primaryVolumeBinding).value_or(DataBinding{std::string(primaryVolumeBinding)});
     const auto id=GetNextSceneRequestId();
     if (!id || binding.revision==std::numeric_limits<DataBindingRevision>::max()) return false;
     const auto history=m_bridge->GetHistory(0,1);
+    // Data.Select 等业务可以在编辑文档未切换时采用其他输入。关闭后台文档不能
+    // 再把 primary 恢复成它的 Root，否则可能重新占用正等待卸载的上游结果。
+    const bool ownsPrimary=binding.target==std::optional<DataRevisionRef>{source.data->self}
+        || std::any_of(history.results.begin(),history.results.end(),[&](const auto& record) {
+            return record.status==CropResultStatus::Published
+                && binding.target==std::optional<DataRevisionRef>{record.outputRevision};
+        });
+    const bool closesDocument=isDocument
+        && m_documentCommands.at(m_pendingDocumentRequest).request.action==CropDocumentAction::CloseDocument;
+    const bool offline=isDocument&&(!m_isEditingDocument||(closesDocument&&!ownsPrimary));
     // During Feature/Session shutdown an already closed consumer document may
     // leave this producer's result as the primary input. Restore its Root through
     // the real view transaction; a still-live consumer Root Reader blocks it.

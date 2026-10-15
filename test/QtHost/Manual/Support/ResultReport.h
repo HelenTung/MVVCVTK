@@ -5,6 +5,8 @@
 #include <QMap>
 #include <QVector>
 #include <QSet>
+#include <QDeadlineTimer>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include "ReportDocument.h"
@@ -30,16 +32,26 @@ public:
     ~ResultReport() override;
     void SetRecord(const QJsonObject& record);
     QJsonObject GetSelectedRecord() const;
-    void AddReport(ReportDocument document);
+    void AddReport(ReportDocument document, bool select = true);
     bool SelectReport(const QString& id);
-    void ShowReports(const QString& source = {}, const QString& result = {});
+    void ShowReports(const QString& source = {}, const QString& result = {}, const QString& module = {});
     void ImportReport(const QString& path);
+    void ExportReportFile(const QString& path, bool filtered = false);
+    void QueueReport(const QJsonObject& record);
+    bool GetReportAvailable(const QString& module, const QString& result) const;
+    void RemoveReport(QString id);
+    void SetReportSource(const QString& id, const QString& source);
+    void CancelTasks();
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
+    QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
     QVector<int> GetFilteredRows() const;
     std::function<void(const ReportDocument&,int)> onLocate;
+    std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)> onReadReports;
+    std::function<QMap<QString,QString>()> getSources;
 protected:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 private:
     void Refresh();
     void SelectCurrent();
@@ -48,10 +60,26 @@ private:
     int GetRowCount() const;
     void RefreshPage();
     void CompareSelected();
+    void ClearSelection();
+    void ContinueGeneration();
+    void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {});
+    void ContinueTask();
     QMap<QString, QJsonObject> m_records;
     QMap<QString, ReportDocument> m_documents;
+    QMap<QString, QJsonObject> m_pendingReports;
+    QSet<QString> m_completedOperations, m_removedReports;
+    QVector<ReportDocument> m_buildingReports;
+    QString m_buildingOperation;
+    std::uint64_t m_viewRevision = 0;
+    int m_buildingIndex = 0;
+    QDeadlineTimer m_generationDeadline;
+    QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
+    class Task;
+    std::unique_ptr<Task> m_task;
+    QLabel* m_taskStatus = nullptr;
+    QPushButton* m_cancelTask = nullptr;
     ReportDocument m_selected;
-    QString m_baseline, m_sourceFilter, m_resultFilter;
+    QString m_baseline, m_sourceFilter, m_resultFilter, m_moduleFilter;
     QTreeWidget* m_reports = nullptr;
     QTableView* m_table = nullptr;
     QLineEdit *m_search = nullptr, *m_minimum = nullptr, *m_maximum = nullptr;

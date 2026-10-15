@@ -1,6 +1,7 @@
 #include "../TestDataPort.h"
 #include "../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include "Data/DataManager.h"
+#include "Data/RoiService.h"
 #include "App/AppStateEvents.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
@@ -422,12 +423,74 @@ bool GetScopedConsumerChainReleased()
     return Check(surface.Clear(data)&&bool(data.GetData(data.GetDataGraph(),saved)),"ordinary feature results remain persistent");
 }
 
+bool GetRoiExplicitClosureReleased()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();
+    const auto root=Publish(data,false);
+    if(!SetPrimary(data,root))return false;
+    const auto mesh=[] {return std::make_shared<const SurfaceMeshPayload>(
+        std::vector<double>{0,0,0,1,0,0,0,1,0},std::vector<std::uint64_t>{0,1,2});};
+    const auto publish=[&](DataRevisionRef input,DataLifetimePolicy policy,const std::string& binding) {
+        Source result{{data->CreateDataEntityId(),1},data->CreateDataEntityId()};
+        DataTransaction tx;tx.outputs.push_back({result.ref.entityId,0,DataTypes::surfaceMesh,
+            {{"source",input}},mesh(),DataProvenance{"test.feature","derived","1",{}},result.scope,{},policy});
+        if(!binding.empty())tx.bindings.push_back({binding,0,true,{},result.ref});
+        if(data->SetDataCommit(std::move(tx)).status!=DataCommitStatus::Succeeded)return Source{};
+        return result;
+    };
+    const auto createRoi=[&](DataRevisionRef featureInput) {
+        RoiRequest request;request.definition.source=root.ref;
+        request.metadata.name="生命周期回归区域";
+        request.definition.nodes={{RoiNodeKind::SourceDomain}};
+        if(GetDataRevisionRefValid(featureInput))request.inputs.push_back({"operation-mesh",featureInput});
+        const auto binding=data->GetDataBinding(data->GetDataGraph(),roiCatalogBinding);
+        request.expectedCatalogRevision=binding?binding->revision:0;
+        const auto result=data->SetRoi(request);
+        return result.error==RoiError::None&&result.roi?result.roi->revision:DataRevisionRef{};
+    };
+    const auto ordinary=createRoi({});
+    const auto feature=publish(root.ref,DataLifetimePolicy::OwnerRetirement,{});
+    const auto first=createRoi(feature.ref);
+    const auto surface=publish(first,DataLifetimePolicy::ExplicitRetirement,"test.explicit.surface");
+    const auto second=createRoi(surface.ref);
+    const auto deviation=publish(second,DataLifetimePolicy::ExplicitRetirement,"test.explicit.deviation");
+    const auto activeOwner=publish(deviation.ref,DataLifetimePolicy::OwnerRetirement,{});
+    const auto unrelated=publish(root.ref,DataLifetimePolicy::ExplicitRetirement,"test.unrelated");
+    if(!Check(GetDataRevisionRefValid(ordinary)&&GetDataRevisionRefValid(first)&&GetDataRevisionRefValid(second)
+        &&GetDataRevisionRefValid(deviation.ref)&&GetDataRevisionRefValid(activeOwner.ref)
+        &&GetDataRevisionRefValid(unrelated.ref),"ROI explicit consumer closure publication"))return false;
+    auto held=data->GetData(data->GetDataGraph(),deviation.ref)->payload;
+    std::vector<DataEntityId> releasing;
+    if(!Check(!RoiService::ReleaseTransientScopes(*data,releasing)
+        &&data->GetData(data->GetDataGraph(),activeOwner.ref)
+        &&data->GetData(data->GetDataGraph(),first),"active owner consumer must not be retired by ROI cleanup"))return false;
+    if(!Check(Retire(data,activeOwner).status==DataCommitStatus::Succeeded
+        &&data->SetDataRelease(activeOwner.scope).status==DataLifetimeStatus::Released,
+        "owner consumer releases before its explicit inputs"))return false;
+    if(!Check(!RoiService::ReleaseTransientScopes(*data,releasing)
+        &&!data->GetData(data->GetDataGraph(),deviation.ref)
+        &&!data->GetData(data->GetDataGraph(),first),"explicit downstream closure retires but awaits held payload"))return false;
+    held.reset();
+    if(!Check(RoiService::ReleaseTransientScopes(*data,releasing)&&releasing.empty(),
+        "explicit ROI closure finishes after its last borrowed payload"))return false;
+    const auto binding=data->GetDataBinding(data->GetDataGraph(),roiCatalogBinding);
+    const auto catalogData=binding&&binding->target?data->GetData(data->GetDataGraph(),*binding->target):nullptr;
+    const auto* catalog=catalogData?dynamic_cast<const RoiCatalogPayload*>(catalogData->payload.get()):nullptr;
+    if(!Check(catalog&&catalog->GetEntries().size()==1&&catalog->GetEntries().front().geometry==ordinary
+        &&data->GetData(data->GetDataGraph(),ordinary)&&data->GetData(data->GetDataGraph(),unrelated.ref),
+        "ordinary ROI and unrelated explicit feature result are preserved"))return false;
+    return Check(Retire(data,feature).status==DataCommitStatus::Succeeded
+        &&data->SetDataRelease(feature.scope).status==DataLifetimeStatus::Released,
+        "ROI closure no longer permanently blocks its producer");
+}
+
 }
 
 bool GetResourceLifetimeTests()
 {
     bool passed=GetLoadedGenerationsReleased();
     passed=GetScopedConsumerChainReleased()&&passed;
+    passed=GetRoiExplicitClosureReleased()&&passed;
     passed=GetQueuedExportsProtected()&&passed;
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;

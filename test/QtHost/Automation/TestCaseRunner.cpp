@@ -95,14 +95,18 @@ namespace Manual {
 namespace {
 bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
 {
-    if (done()) return true;
-    QEventLoop loop; QTimer deadline;
-    deadline.setSingleShot(true);
-    QObject::connect(QAbstractEventDispatcher::instance(), &QAbstractEventDispatcher::aboutToBlock, &loop,
-        [&] { if (done()) loop.quit(); });
-    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
-    deadline.start(timeoutMs); loop.exec();
-    return done();
+    QElapsedTimer elapsed;elapsed.start();
+    for(;;) {
+        if(done())return true;
+        const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
+        if(remaining<=0)return false;
+        QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
+        QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
+            [&]{if(done())loop.quit();});
+        QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
+        deadline.start(static_cast<int>(remaining));loop.exec();
+        // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
+    }
 }
 void Check(bool condition, const char* message)
 {
@@ -1696,6 +1700,18 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",other}}),"Succeeded");
     }
+    // 各分量操作的表单会剔除其他操作字段；必须经过真按钮验证请求仍可接纳。
+    for(const auto& action:QStringList{"RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Threshold","Grow"}) {
+        QJsonObject parameters{{"roi",GetRefText(ref)},{"outputMode","CreateNew"}};
+        if(action=="KeepSelected")parameters["componentLabels"]=QJsonArray{"1"};
+        if(action=="Threshold" || action=="Grow")parameters["grayRange"]=GetValues(defaultImage->scalarRange);
+        if(action=="Grow")parameters["seedsMM"]=QJsonArray{QJsonValue(QJsonArray{box[3],box[7],box[11]})};
+        const auto preview=GetComplete(window,Click(window,"Roi",action,parameters),"PreviewReady");
+        Check(preview["result"].toObject()["error"].toInt(-1)==0
+            &&preview["result"].toObject()["outputCount"].toInt()==1,
+            "ROI form submits only its applicable fields and preserves the selected component");
+        GetComplete(window,Click(window,"Roi","Cancel"),"Succeeded");
+    }
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
@@ -1820,6 +1836,12 @@ void CheckSharedRoi(TestWindow& window)
 void StartSelfTest(TestWindow& window)
 {
     QCoreApplication::processEvents();
+    // 重现就绪观察在退出内层事件循环时回退；不能把暂态回退当成已经超时。
+    int phase=0;QTimer first,settled;first.setSingleShot(true);settled.setSingleShot(true);
+    QObject::connect(&first,&QTimer::timeout,&first,[&]{phase=1;});
+    QObject::connect(&settled,&QTimer::timeout,&settled,[&]{phase=3;});first.start(0);
+    Check(Wait([&]{if(phase==1){phase=2;return true;}if(phase==2){phase=0;settled.start(0);}return phase==3;})
+        && phase==3,"event wait retries transient readiness without weakening its final predicate or deadline");
     CheckFourViewGeometry(window);
     CheckUiAndRecords(window);
     CheckBusinessWorkflow(window);
@@ -2852,7 +2874,11 @@ void StartSequence(TestWindow& window, const QString& path)
             CheckNodeParameters(window);
         }
         if (step.contains("saveAs")) results[GetText(step, "saveAs")] = record;
-        if(script["checkReports"].toBool())CheckBusinessReport(window,record);
+        if(script["checkReports"].toBool()||script["checkReportPreviews"].toBool()) {
+            const auto preview=step.contains("reportPreview")?GetText(step,"reportPreview"):
+                QDir::current().filePath(QString("report-previews-%1/%2-%3").arg(QCoreApplication::applicationPid()).arg(GetText(record,"module"),GetText(record,"operationId")));
+            CheckBusinessReport(window,record,script["checkReports"].toBool(),preview,timeout);
+        }
         if (step.contains("expectedTransform")) {
             const auto expectedTransform = GetArray<double, 16>(step["expectedTransform"]);
             const auto actual = GetArray<double, 16>(record["result"].toObject()["sourceToTarget"]);
