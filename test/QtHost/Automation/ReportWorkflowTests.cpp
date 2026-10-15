@@ -1,5 +1,6 @@
 #include "ReportWorkflowTests.h"
 #include "App/TestWindow.h"
+#include "Modules/ModulePanel.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
 #include "Support/JsonInput.h"
@@ -20,6 +21,13 @@
 #include <QComboBox>
 #include <QApplication>
 #include <QDir>
+#include <QFileInfo>
+#include <QImage>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QPlainTextEdit>
+#include <QTabWidget>
+#include <QTreeWidgetItemIterator>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <iostream>
@@ -123,26 +131,34 @@ void CheckReportWorkflow()
     auto distribution=Options();distribution.match=ReportMatch::Distribution;const auto stats=CompareReports(a,a,distribution);Require(stats.table->GetCount()==2 && stats.table->Read(0)[2]=="3","distribution excludes missing/invalid measurements without fake pairs");
     std::cout<<"Reports: table selection and paging"<<std::endl;
     ResultReport view;ReportDocument large;large.id="large";large.title="大报告";large.category="导入报告";large.source="data-a";large.result="result-a";
-    large.relatedResults.append("alignment-a");large.columns={{"id",{},{},false},{"value","数值","1",true}};large.table=std::make_shared<ReportTable>();
+    large.module="Wall";large.relatedResults.append("alignment-a");large.columns={{"id",{},{},false},{"value","数值","1",true}};large.table=std::make_shared<ReportTable>();
     for(int i=0;i<1203;++i)large.table->Append({QString::number(i),QString::number(1203-i)});
     std::cout<<"Reports: table stored"<<std::endl;
     view.AddReport(large);auto newer=large;newer.id="newer";newer.source="data-b";newer.result="result-b";view.AddReport(newer);
     Require(view.GetSelectedReport().id=="large","new report preserves explicit selection");
+    Require(view.GetReports("Wall",{"result-a"}).size()==1 && view.GetReports("Wall",{"alignment-a"}).size()==2
+        && view.GetReports("Wall",{"data-a"}).isEmpty() && view.GetReports("Gap",{"result-a"}).isEmpty()
+        && view.GetReports("Wall",{}).isEmpty(),"report lookup freezes exact result and module identities");
+    ResultReport scoped;auto foreign=large;foreign.id="foreign";foreign.module="Gap";scoped.AddReport(foreign);scoped.AddReport(large);
+    scoped.ShowReports({},"result-a","Wall");Require(scoped.GetSelectedReport().id=="large","business report entry excludes another module with the same related result");
     std::cout<<"Reports: initial selection"<<std::endl;
     view.findChild<QCheckBox*>("followLatestReport")->setChecked(true);auto latest=large;latest.id="latest";view.AddReport(latest);Require(view.GetSelectedReport().id=="latest","follow latest is opt-in");
     view.findChild<QCheckBox*>("followLatestReport")->setChecked(false);view.SelectReport("large");view.show();QCoreApplication::processEvents();
     std::cout<<"Reports: table shown"<<std::endl;
     auto* table=view.findChild<QTableView*>("reportTable");Require(table && table->model()->rowCount()==200,"report uses bounded page model");
+    Require(!table->horizontalHeader()->isSortIndicatorShown(),"native row order does not display a fake sorting arrow");
     for(int i=0;i<6;++i)view.findChild<QPushButton*>("reportNext")->click();
     Require(table->model()->rowCount()==3 && table->model()->data(table->model()->index(2,0)).toString()=="1202","complete report browses beyond 1000 rows");
     std::cout<<"Reports: paging complete"<<std::endl;
     SortRows(view,1);
     Require(table->model()->data(table->model()->index(0,0)).toString()=="1202","numeric sorting covers the complete table, not the current page");
+    Require(table->horizontalHeader()->isSortIndicatorShown()&&table->horizontalHeader()->sortIndicatorSection()==1,"sorting indicator follows the actual selected sort column");
     view.findChild<QLineEdit*>("reportSearch")->setText("1202");WaitRows(view);Require(view.GetFilteredRows().size()==2,"search covers all rows, including unloaded pages");
     std::cout<<"Reports: sorting and search complete"<<std::endl;
     QTemporaryDir directory;const auto path=directory.filePath("报告.csv");ExportReport(path,large);std::cout<<"Reports: full export complete"<<std::endl;view.ImportReport(path);
     std::cout<<"Reports: independent import complete"<<std::endl;
     Require(view.GetSelectedReport().table->GetCount()==1203,"independent import/export preserves entire report");
+    Require(!table->horizontalHeader()->isSortIndicatorShown(),"selecting another report clears the old sort indicator");
     view.ShowReports("data-a","missing-result");Require(!view.GetSelectedReport().table,"missing exact result never leaves unrelated old details visible");
     std::cout<<"Reports: missing result cleared"<<std::endl;
     view.ShowReports("data-a","result-a");Require(view.GetSelectedReport().result=="result-a","data/result context selects exact report");
@@ -160,19 +176,60 @@ void CheckReportWorkflow()
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
     view.hide();CheckMixedSortAndCancellation();std::cout<<"PASS: Report CSV, units, matching, selection, full-table paging and responsive sorting"<<std::endl;
 }
-void CheckBusinessReport(TestWindow& window,const QJsonObject& record)
+void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport,const QString& previewPath)
 {
-    const auto provider=window.GetWorkflow().readReports.find(record["module"].toString());if(provider==window.GetWorkflow().readReports.end())return;
-    const auto input=window.GetSession()->GetImageDescriptor();const auto graph=window.GetWorkflow().getPublishedGraph();
-    const auto reports=provider->second(record,{});auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");
     const auto module=record["module"].toString(),action=record["action"].toString();
+    const auto summary=record["result"].toObject();
+    const auto observedDeviation=summary["deviation"].toString();
     const bool requiresReport=(module=="Wall" && action=="Start") || (module=="Gap" && (action=="Start" || action=="Evaluate"))
-        || (module=="Surface" && action=="GlobalAutomatic") || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface","EvaluateVoxelVolume"}.contains(action));
-    if(requiresReport && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(record["status"].toString()))Require(!reports.isEmpty(),"successful business computation must expose its native report");
+        || (module=="Surface" && (action=="GlobalAutomatic" || action=="Determine")) || (module=="Artifact" && action=="Commit")
+        || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface","EvaluateVoxelVolume"}.contains(action))
+        || (module=="Alignment" && action=="DeviationResult" && !observedDeviation.isEmpty()&&!observedDeviation.endsWith(":0"));
+    const bool successful=QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Published","Observed"}.contains(record["status"].toString());
+    const auto provider=window.GetWorkflow().readReports.find(module);
+    if(provider==window.GetWorkflow().readReports.end()){Require(!requiresReport||!successful,"successful business module has a registered native report source");return;}
+    if(!successful)return; // 导出、候选等终态不等于新增一份已发布业务报告。
+    QCoreApplication::processEvents();
+    const auto input=window.GetSession()->GetImageDescriptor();const auto graph=window.GetWorkflow().getPublishedGraph();
+    auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");
+    QSet<QString> refs;
+    for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","generation","qualityReport","correctedVolume","result"}) {
+        const auto ref=summary[key].toString();if(!ref.isEmpty()&&!ref.endsWith(":0"))refs.insert(ref);
+    }
+    // 复用 UI 已冻结的完整报告，避免为打开预览再次复制数百万条原生偏差样本。
+    const auto reports=view->GetReports(module,refs);
+    if(requiresReport&&successful)Require(!reports.isEmpty(),"successful business computation must expose its native report");
+    if(reports.isEmpty())return;
+    auto* panel=window.GetModule(module);Require(panel!=nullptr,"business report module exists");
+    const auto actions=panel->GetActions();window.GetWorkflow().onNavigate(module,actions.contains(action)?action:actions.value(0),{});
+    QCoreApplication::processEvents();
+    auto* open=panel->findChild<QPushButton*>("viewBusinessReport");auto* dialog=window.findChild<QDialog*>("operationReports");
+    Require(open&&dialog&&open->isVisible()&&open->isEnabled(),"native report has a visible enabled user entry");
+    for(auto* parent=open->parentWidget();parent;parent=parent->parentWidget())if(auto* scroll=qobject_cast<QScrollArea*>(parent)) {
+        scroll->ensureWidgetVisible(open);QCoreApplication::processEvents();
+        Require(scroll->viewport()->rect().intersects(QRect(open->mapTo(scroll->viewport(),QPoint()),open->size())),"business report entry lies inside its visible scroll viewport");
+    }
+    dialog->close();open->click();QCoreApplication::processEvents();
+    Require(dialog->isVisible()&&view->isVisible(),"actual business report button opens the report window");
+    Require(std::any_of(reports.begin(),reports.end(),[&](const auto& doc){return doc.id==view->GetSelectedReport().id;}),"report entry selects the exact completed result");
+    auto* tree=view->findChild<QTreeWidget*>("reportList");auto* table=view->findChild<QTableView*>("reportTable");
+    auto* conditions=view->findChild<QPlainTextEdit*>("reportConditions");auto* tabs=view->findChild<QTabWidget*>();
+    Require(tree&&table&&conditions&&tabs,"report preview exposes details and calculation conditions");
+    QJsonArray previews;int reportIndex=0;
+    const auto capture=[&](const QString& suffix) {
+        if(previewPath.isEmpty())return QString();
+        const auto path=previewPath+QString("-%1-%2.png").arg(reportIndex).arg(suffix);
+        Require(QDir().mkpath(QFileInfo(path).absolutePath()),"report preview output directory exists");
+        const auto pixels=dialog->grab();Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
+    };
     QTemporaryDir directory;
-    const auto summary=record["result"].toObject();int inspectionRows=0;
+    int inspectionRows=0;
     for(const auto& doc:reports) {
-        Require(view->GetReportIds().contains(doc.id) && view->SelectReport(doc.id),"native business report registered with exact identity");
+        QTreeWidgetItem* item=nullptr;for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toString()==doc.id){item=*it;break;}
+        Require(item&&!item->isHidden(),"exact native report is visible in the report tree");tree->scrollToItem(item);tree->setCurrentItem(item);QCoreApplication::processEvents();
+        Require(view->GetSelectedReport().id==doc.id,"report tree selection opens the requested frozen document");
+        WaitRows(*view);
+        Require(view->findChild<QPushButton*>("copyReportCsv")->isEnabled() && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview uses complete rows rather than a cancelled or failed partial scan");
         Require(view->GetSelectedReport().table->GetCount()==doc.table->GetCount(),"native business full row count");
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {
@@ -186,6 +243,49 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record)
             std::uint64_t count=0;for(const auto value:summary[field].toObject()["counts"].toArray())count+=GetId(value);
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==count,"deviation report includes every native validity state");
         }
+        if(doc.module=="Artifact") {
+            const auto native=window.GetWorkflow().readRecordPage(GetRef(doc.result),0,256,std::nullopt);
+            Require(doc.source==native["source"].toString() && doc.conditions["计算参数"].toObject()==QJsonDocument::fromJson(native["canonicalParameters"].toString().toUtf8()).object(),"artifact report source and conditions are frozen from the native published revision");
+            Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(native["total"]),"artifact report covers the native quality table");
+            int rowIndex=0;for(const auto value:native["rows"].toArray()) {
+                const auto row=value.toObject();const auto actual=doc.table->Read(rowIndex++);
+                Require(actual[0]==row["metric"].toString()&&actual[1]==QString::number(row["value"].toDouble(),'g',17)&&actual[2]==row["unit"].toString(),"artifact preview preserves native metric, value and unit");
+                if(row["metric"]=="fidelity-verified")Require(actual[1]=="0","artifact report does not promote gray change into verified fidelity");
+            }
+        }
+        tabs->setCurrentWidget(table);QCoreApplication::processEvents();
+        const auto checkPage=[&](int offset) {
+            Require(table->isVisible()&&table->model()->rowCount()==std::min(200,doc.table->GetCount()-offset),"visible report preview uses a bounded native page");
+            if(table->model()->rowCount()) {
+                const auto expected=doc.table->Read(offset);
+                for(int column=0;column<doc.columns.size();++column)Require(table->model()->data(table->model()->index(0,column)).toString()==GetReportCell(expected,column),"visible report cells preserve native text, missing values and precision");
+                const auto visible=table->visualRect(table->model()->index(0,0)).intersected(table->viewport()->rect());
+                Require(!visible.isEmpty(),"report first row lies within the visible viewport");
+                const auto image=table->viewport()->grab().toImage().scaled(table->viewport()->size());const auto textArea=visible.adjusted(4,4,-4,-4);
+                bool painted=false;if(!textArea.isEmpty()) {
+                    const auto background=image.pixel(textArea.topLeft());
+                    for(int y=textArea.top();y<=textArea.bottom()&&!painted;++y)for(int x=textArea.left();x<=textArea.right();++x)if(image.pixel(x,y)!=background){painted=true;break;}
+                }
+                Require(painted,"visible native report first cell contains rendered text pixels");
+            }
+        };
+        checkPage(0);Require(!table->horizontalHeader()->isSortIndicatorShown(),"fresh report preview declares its original native row order");
+        QJsonArray pages{0};const auto details=capture("details");QString rightColumns;
+        if(table->model()->rowCount()&&table->horizontalScrollBar()->maximum()>0) {
+            table->horizontalScrollBar()->setValue(table->horizontalScrollBar()->maximum());QCoreApplication::processEvents();
+            Require(table->viewport()->rect().intersects(table->visualRect(table->model()->index(0,doc.columns.size()-1))),"rightmost report columns can be previewed through the actual scrollbar");
+            rightColumns=capture("right-columns");table->horizontalScrollBar()->setValue(0);QCoreApplication::processEvents();
+        }
+        if(doc.table->GetCount()>200) {
+            view->findChild<QPushButton*>("reportNext")->click();QCoreApplication::processEvents();checkPage(200);pages.append(200);capture("next-page");
+            view->findChild<QPushButton*>("reportPrevious")->click();QCoreApplication::processEvents();checkPage(0);
+        }
+        tabs->setCurrentWidget(conditions);conditions->verticalScrollBar()->setValue(0);QCoreApplication::processEvents();
+        Require(conditions->isVisible()&&conditions->toPlainText()==QString::fromUtf8(QJsonDocument(doc.conditions).toJson(QJsonDocument::Indented)),"visible report conditions belong to the exact document");
+        const auto conditionImage=capture("conditions");tabs->setCurrentWidget(table);
+        previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",doc.table->GetCount()},
+            {"pageOffsets",pages},{"details",details},{"rightColumns",rightColumns},{"conditions",conditionImage},{"opened",true}});++reportIndex;
+        if(checkExport) {
         const auto path=directory.filePath("native.csv");ExportReport(path,doc);QFile inputFile(path);Require(inputFile.open(QIODevice::ReadOnly),"native CSV readable");const auto copy=ReadReportCsv(inputFile,"原生报告回读");
         Require(copy.table->GetCount()==doc.table->GetCount(),"native full CSV count matches source");
         if(doc.table->GetCount())Require(SameRow(copy.table->Read(doc.table->GetCount()-1),doc.table->Read(doc.table->GetCount()-1)),"native final row remains exact");
@@ -195,10 +295,13 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record)
             const auto compared=CompareReports(doc,copy,o);Require(compared.table->GetCount()==2 && compared.table->Read(0)[2]==compared.table->Read(1)[2]
                 && compared.table->Read(0)[3]==compared.table->Read(1)[3],"native/imported valid counts and unrounded mean agree");break;
         }
-        std::cout<<"PASS: native report "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
+        }
+        std::cout<<"PASS: visible native report "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
     }
+    dialog->close();QCoreApplication::processEvents();Require(!dialog->isVisible(),"report preview closes without stopping the business session");
+    if(!previewPath.isEmpty())ExportJson(previewPath+"-reports.json",{{"module",module},{"operationId",record["operationId"]},{"reports",previews}});
     if(summary.contains("items") && summary.contains("inspection"))Require(inspectionRows==summary["items"].toArray().size(),"inspection metric tables preserve all independently read items");
-    const auto after=window.GetSession()->GetImageDescriptor();Require((!input && !after) || (input && after && input->dataRevision==after->dataRevision),"report operations preserve input");
+    const auto after=window.GetSession()->GetImageDescriptor();Require((!input && !after) || (input && after && input->dataRevision==after->dataRevision&&input->bindingRevision==after->bindingRevision),"report operations preserve exact input and binding");
     Require(window.GetWorkflow().getPublishedGraph()==graph,"report operations preserve result graph and active bindings");
 }
 }

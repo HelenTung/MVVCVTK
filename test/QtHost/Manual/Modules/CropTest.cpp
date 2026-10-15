@@ -254,6 +254,8 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
             flow->isConfirmed=action=="FinishEditing"&&(feature->GetState().history.nodeCount>0 || roiRoot);
             flow->confirmedDocument=history.documentId;flow->confirmedNode=history.appliedHead;flow->confirmedRevision=history.stateRevision;
             flow->confirmedInputRoi=panel->GetActionParameters("BuildResult")["inputRoi"].toString();
+            // 目录跳转曾带入旧节点；确认新分支预览后，发布目标必须指向本次确认的节点。
+            if(flow->isConfirmed)panel->SetParameterPatch("BuildResult",{{"nodeId",QString::number(history.appliedHead)}});
         }
         panel->SetComplete(id,accepted?(flow->isConfirmed?"PreviewConfirmed":"Exited"):"Rejected");
     },TestPolicy::Change);

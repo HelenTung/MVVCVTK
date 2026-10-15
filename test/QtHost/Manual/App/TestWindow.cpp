@@ -240,6 +240,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
     m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);reports->show();reports->raise();reports->activateWindow();};
+    m_workflow.getReportAvailable=[this](const QString& module,const QString& result){return !m_report->GetReports(module,{result}).isEmpty();};
+    m_workflow.onShowBusinessReport=[this,reports](const QString& module,const QString& result){m_report->ShowReports({},result,module);reports->show();reports->raise();reports->activateWindow();};
     m_objects->onReport=m_workflow.onShowReports;
     m_report->onLocate=[this](const ReportDocument& doc,int row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
@@ -256,7 +258,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         AppendLog(GetFlowText(record));
         ShowMessage(GetFlowText(record,false));
         m_report->SetRecord(record);
-        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed"}.contains(record["status"].toString())) {
+        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed","Published"}.contains(record["status"].toString())) {
             const auto found=m_workflow.readReports.find(record["module"].toString());
             if(found!=m_workflow.readReports.end())try {
                 for(auto doc:found->second(record,m_report->GetReportIds()))m_report->AddReport(std::move(doc));
