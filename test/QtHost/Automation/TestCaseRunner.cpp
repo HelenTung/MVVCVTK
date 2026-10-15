@@ -1711,6 +1711,8 @@ void CheckSharedRoi(TestWindow& window)
     const auto combinedRoi=window.GetSession()->GetRoiDescriptor(GetRef(combined));
     Check(combinedRoi && combinedRoi->definition.nodes.back().kind==RoiNodeKind::Union,
         "direct business save preserves the cross-shape Boolean candidate instead of its primitive input");
+    if(combinedRoi && combinedRoi->metadata.name!=region->metadata.name)
+        std::cerr<<"Boolean metadata mismatch: expected="<<region->metadata.name<<" actual="<<combinedRoi->metadata.name<<std::endl;
     Check(combinedRoi && combinedRoi->metadata.name==region->metadata.name,
         "Boolean save inherits the selected input name instead of the previously edited region");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
@@ -2487,14 +2489,17 @@ void StartSequence(TestWindow& window, const QString& path)
     const auto checkObserved=[&](const QJsonObject& step) {
         auto* panel=window.GetModule(GetText(step,"module"));
         const auto expected=GetResolved(step["expectState"],results).toObject();QJsonObject actual;
+        const auto observedValue=[&](const QString& key){
+            QJsonValue value=actual;for(const auto& part:key.split('.'))value=value.toObject().value(part);return value;
+        };
         // 请求终态可以早于 Host 提交场景；等待页面观察到实际提交值，保持原断言。
         const bool settled=Wait([&] {
             panel->Observe();actual=panel->GetObservedState();
-            for(auto it=expected.begin();it!=expected.end();++it)if(actual[it.key()]!=it.value())return false;
+            for(auto it=expected.begin();it!=expected.end();++it)if(observedValue(it.key())!=it.value())return false;
             return true;
         },std::min(getWaitMilliseconds(step),30000));
         if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
-        for(auto it=expected.begin();it!=expected.end();++it)Check(actual[it.key()]==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
+        for(auto it=expected.begin();it!=expected.end();++it)Check(observedValue(it.key())==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
         if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
     };
     for (const auto value : script["steps"].toArray()) {
