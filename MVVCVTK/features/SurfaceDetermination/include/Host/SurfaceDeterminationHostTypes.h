@@ -94,8 +94,14 @@ struct SurfaceStopRequest final {
 struct SurfaceVisibilityRequest final { bool isVisible = true; };
 struct SurfaceClearRequest final {};
 struct SurfaceClearPreviewRequest final {};
+// 对象身份来自精确 generation；省略 objectIndex 只清除高亮，不重算或改变正式绑定。
+struct SurfaceObjectSelectionRequest final {
+    DataRevisionRef generation;
+    std::optional<std::uint32_t> objectIndex;
+    HostViewTargets targetViews;
+};
 using SurfaceDeterminationRequest = std::variant<SurfaceStartRequest, SurfaceStopRequest,
-    SurfaceVisibilityRequest, SurfaceClearRequest, SurfaceClearPreviewRequest>;
+    SurfaceVisibilityRequest, SurfaceClearRequest, SurfaceClearPreviewRequest, SurfaceObjectSelectionRequest>;
 
 enum class SurfaceAdmissionStatus : std::uint8_t {
     Accepted,

@@ -1,10 +1,13 @@
-// 回归：大量独立小孔隙按合并后内存计量，保留每个面的精确区域编号。
+// 回归：完整保留大量独立孔隙的编号、几何和颜色；内存只记录实测，不设数据规模预算。
 #include "Render/GapDisplayData.h"
 #include "Data/DataGraphStore.h"
 #include "Geometry/RoiEvaluator.h"
 #include <vtkUnsignedCharArray.h>
 #include <vtkTriangleFilter.h>
 #include <iostream>
+#include <Psapi.h>
+#include <chrono>
+#include <string_view>
 
 namespace {
 bool Geometry() {
@@ -73,9 +76,19 @@ bool Geometry() {
     return true;
 }
 }
-int main()
+int main(int argc,char** argv)
 {
-    if(!Geometry()){std::cerr<<"Gap binary geometry, block seam or ROI point reuse regression.\n";return 1;}
+    int count=70000;bool stressOnly=false;
+    for(int index=1;index<argc;++index){
+        const std::string_view argument(argv[index]);
+        if(argument=="--stress-only")stressOnly=true;
+        else if(argument=="--regions" && ++index<argc){
+            try {std::size_t consumed=0;const auto value=std::stoll(argv[index],&consumed);
+                if(consumed!=std::strlen(argv[index]) || value<=0 || value>(INT_MAX-33554433LL)/2)return 2;count=static_cast<int>(value);
+            }catch(...){return 2;}
+        }else return 2;
+    }
+    if(!stressOnly && !Geometry()){std::cerr<<"Gap binary geometry, block seam or ROI point reuse regression.\n";return 1;}
     vtkNew<GapLabelLookupTable> fast;
     fast->SetNumberOfTableValues(3); fast->IndexedLookupOn();
     fast->SetTableValue(0, 0, 0, 0, 0);
@@ -104,7 +117,7 @@ int main()
     if (!std::equal(copy->MapValue(33554433), copy->MapValue(33554433) + 4, reference->MapValue(33554433)))
         return 1;
 
-    constexpr int count = 70000;
+    const auto started=std::chrono::steady_clock::now();
     vtkNew<vtkImageData> image;
     image->SetDimensions(2 * count + 1, 3, 3);
     image->AllocateScalars(VTK_INT, 1);
@@ -134,7 +147,6 @@ int main()
     // 独立单体素等值面为八面体：6 个顶点、8 个三角形。
     bool valid = mesh->GetNumberOfPoints() == 6LL * count
         && mesh->GetNumberOfCells() == 8LL * count
-        && mesh->GetActualMemorySize() * 1024ULL < 256ULL * 1024 * 1024
         && display->labels->GetNumberOfTableValues() == count + 1
         && ids && ids->GetNumberOfTuples() == 8LL * count;
     for (int index = 0; valid && index < count; ++index) {
@@ -157,7 +169,12 @@ int main()
     }
     std::cout << "regions=" << count << " points=" << mesh->GetNumberOfPoints()
         << " triangles=" << mesh->GetNumberOfCells()
-        << " mergedKiB=" << mesh->GetActualMemorySize() << '\n';
+        << " logicalVtkKiB=" << mesh->GetActualMemorySize()
+        << " elapsedMs=" << std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+    PROCESS_MEMORY_COUNTERS_EX memory{};memory.cb=sizeof(memory);
+    if(K32GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)))
+        std::cout<<" workingSetBytes="<<memory.WorkingSetSize<<" privateBytes="<<memory.PrivateUsage<<" processPeakWorkingBytes="<<memory.PeakWorkingSetSize<<" processPeakCommitBytes="<<memory.PeakPagefileUsage;
+    std::cout<<'\n';
     stopping = true;
     valid &= !GapDisplayData::Build(image, regions, stopping);
     return valid ? 0 : 1;

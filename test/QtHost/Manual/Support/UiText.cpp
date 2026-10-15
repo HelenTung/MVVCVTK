@@ -131,6 +131,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"ReadLabelRegion", "读取标签区域"}, {"ReadWallInputs", "读取精确壁厚输入"}, {"CreateMask", "创建测试掩码"},
         {"EditRoiBox", "提交区域盒"}, {"ReadTransform", "读取模型变换"}, {"ReadRoi", "读取区域数据"},
         {"AppendExact", "追加精确裁剪"}, {"ExportComparison", "导出比较数据"}, {"ReadObjects", "查看表面对象列表"},
+        {"HighlightObject","高亮指定表面对象"},{"ClearObjectHighlight","清除表面对象高亮"},
         {"Set", "设置视图"}, {"Cursor", "设置游标"}, {"Reset", "重置视图"}, {"State", "查看状态"},
         {"Box", "盒裁剪"}, {"Plane", "平面裁剪"}, {"Sphere", "球裁剪"}, {"Cylinder", "圆柱裁剪"},
         {"CreateDocument", "新建裁剪文档"}, {"ActivateDocument", "切换裁剪文档"}, {"CloseDocument", "关闭裁剪文档"},
@@ -179,6 +180,8 @@ QString GetParameterText(const QString& key)
     if(regionLabels.contains(key))return regionLabels.value(key);
     static const QHash<QString,QString> operationLabels{{"selectionMode","区域作用方式"},{"planeToSource","轮廓平面到源坐标变换"},{"sourceToView","冻结源到视图变换"},{"viewToClip","冻结投影变换"},{"depthMM","有限深度（毫米）"},{"contours","轮廓环与孔"},{"pathMM","画笔路径（源坐标毫米）"},{"isSliceBrush","限制到切片厚度"},{"outputMode","输出区域方式"},{"operands","操作数区域"},{"radiusUnit","半径单位"},{"connectivity","邻接方式"},{"minimumVolumeMM3","最小分量体积（立方毫米）"},{"maximumHoleVolumeMM3","最大填孔体积（零表示全部）"},{"componentLabels","保留的分量标签"},{"keepInput","保留原区域"},{"grayRange","闭区间灰度范围"},{"seedsMM","生长种子（源坐标毫米）"},{"domainRoi","反选允许域"},{"rasterize","显式按目标网格重采样"},{"sourceToTarget","源到目标坐标变换"},{"targetSource","目标源修订"},{"meshToSource","网格到源坐标变换"},{"inwardMM","向内厚度（毫米）"},{"outwardMM","向外厚度（毫米）"},{"hasOrientation","按内外侧分别取薄层"}};
     if(operationLabels.contains(key))return operationLabels.value(key);
+    if(key=="generation")return "正式表面结果修订（留空使用当前结果）";
+    if(key=="objectIndex")return "表面对象编号";
     if(key=="pageOffset")return "列表起始行（从零开始）";
     if(key=="pageSize")return "每页条目数";
     if(key=="rowIndex")return "缺陷表原始行号";

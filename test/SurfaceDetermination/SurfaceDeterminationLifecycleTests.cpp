@@ -5,6 +5,8 @@
 #include "SurfaceDeterminationService.h"
 #include "SurfaceGenerationStore.h"
 #include "SurfaceContracts.h"
+#include "SurfaceGeometryStorage.h"
+#include <vtkPolyData.h>
 #include "SurfaceDeterminationTestSupport.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -900,6 +902,55 @@ void TestExplicitScopesAndHistory(Checks& checks)
     checks.Get(feature.DetachHost(),"scope fixture detaches");
 }
 
+void TestObjectHistoryAndSelection(Checks& checks)
+{
+    TestHost host(BuildSphere());SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context),"object range fixture attaches");
+    std::vector<SurfaceDeterminationResult> completed;
+    const auto firstAdmission=feature.SendRequest(GetStartRequest(),[&](auto result){completed.push_back(std::move(result));});
+    checks.Get(firstAdmission.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return completed.size()==1;}),"first formal object result completes");
+    const auto first=feature.GetSurfaceSnapshot();if(!first || !first->objects || first->objects->empty()){(void)feature.DetachHost();checks.Get(false,"object fixture has formal records");return;}
+    const auto object=first->objects->front();const auto display=BuildSurfaceObjectDisplay(*first,object,{});
+    checks.Get(display && std::uint64_t(display->GetNumberOfPoints())==object.pointCount && std::uint64_t(display->GetNumberOfCells())==object.triangleCount,"object range prepares only its declared points and triangles");
+    const auto secondAdmission=feature.SendRequest(GetStartRequest(),[&](auto result){completed.push_back(std::move(result));});
+    checks.Get(secondAdmission.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return completed.size()==2;}),"second formal result completes");
+    const auto second=feature.GetSurfaceSnapshot();const auto before=host.data->GetDataGraph();
+    const auto selected=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
+    checks.Get(selected.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return completed.size()==3;}),"exact historical object highlight completes");
+    checks.Get(completed.size()==3 && completed.back().status==SurfaceResultStatus::Succeeded && completed.back().dataRevision==first->dataRevision
+        && !completed.back().isPublished && !completed.back().isActivated && feature.GetSurfaceSnapshot()==second
+        && host.data->GetDataGraph().commitId==before.commitId,"highlight preserves formal binding, graph and exact historical identity");
+    checks.Get(std::any_of(host.host->lastDelta.displays.begin(),host.host->lastDelta.displays.end(),[&](const auto& value){return value.localId=="surface-object" && value.data==first->meshRevision;}),"scene records the selected history mesh separately from formal display");
+    checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted
+        && std::none_of(host.host->lastDelta.displays.begin(),host.host->lastDelta.displays.end(),[](const auto& value){return value.localId=="surface-object";}),"clear retires the selected scene role");
+    const auto pending=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
+    checks.Get(pending.status==SurfaceAdmissionStatus::Accepted && feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted
+        && completed.size()==4 && completed.back().status==SurfaceResultStatus::Cancelled,"pending highlight cancellation completes exactly once");
+    host.data->SetCurrent(BuildPlane());
+    checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews}).status==SurfaceAdmissionStatus::Unavailable
+        && feature.GetSurfaceSnapshot(first->dataRevision)==first,"different primary input rejects display but preserves history reading");
+    checks.Get(feature.DetachHost(),"object fixture detaches");
+}
+
+void TestHeadlessObjectClearAndReentry(Checks& checks)
+{
+    TestHost host(BuildSphere());SurfaceDeterminationHostFeature feature(GetConfig());checks.Get(feature.AttachHost(host.context),"headless selection fixture attaches");
+    auto start=GetStartRequest();start.start->targetViews={};bool ready=false;
+    checks.Get(feature.SendRequest(start,[&](auto){ready=true;}).status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return ready;}),"headless formal result is ready");
+    const auto generation=feature.GetSurfaceSnapshot();if(!generation || generation->objects->empty()){(void)feature.DetachHost();checks.Get(false,"headless selection has an object");return;}
+    const auto request=SurfaceObjectSelectionRequest{generation->dataRevision,generation->objects->front().objectIndex,GetParams().targetViews};
+    int calls=0;SurfaceDeterminationAdmission nested;
+    const auto pending=feature.SendRequest(request,[&](auto value){++calls;if(value.status==SurfaceResultStatus::Cancelled)nested=feature.SendRequest(request,[&](auto result){++calls;checks.Get(result.status==SurfaceResultStatus::Succeeded,"nested newer selection completes");});});
+    const auto superseded=feature.SendRequest(request);
+    checks.Get(pending.status==SurfaceAdmissionStatus::Accepted && nested.status==SurfaceAdmissionStatus::Accepted && superseded.status!=SurfaceAdmissionStatus::Accepted
+        && WaitUntil(feature,[&]{return calls==2;}),"cancel callback reentry preserves the newer accepted selection");
+    checks.Get(host.views->overlay->overlays.size()==1,"headless result creates only the selected object overlay");
+    checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted && host.views->overlay->overlays.empty()
+        && host.host->lastDelta.hasDisplayUpdate && host.host->lastDelta.displays.empty() && host.host->activeViews.empty(),"headless selection clear retires the scene role and view ownership");
+    int detached=0;checks.Get(feature.SendRequest(request,[&](auto result){if(result.status==SurfaceResultStatus::Cancelled)++detached;}).status==SurfaceAdmissionStatus::Accepted
+        && feature.DetachHost() && detached==1,"detach cancels a pending selection exactly once");
+}
+
 void TestPurposeChannelsAndAdmission(Checks& checks)
 {
     TestHost host(BuildSphere()); SurfaceDeterminationHostFeature feature(GetConfig());
@@ -1112,6 +1163,8 @@ int GetSurfaceLifecycleFailCount()
     TestCompletionCapacity(checks);
     TestPurposeIsolation(checks);
     TestExplicitScopesAndHistory(checks);
+    TestObjectHistoryAndSelection(checks);
+    TestHeadlessObjectClearAndReentry(checks);
     TestPurposeChannelsAndAdmission(checks);
     TestCoordinateFramePropagation(checks);
     TestCancelBeforeOwnerCommit(checks);

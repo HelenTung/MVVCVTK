@@ -359,6 +359,26 @@ public:
     }
 };
 
+template<class Value> class MeshRangeSource final:public MeshValueSource<Value> {
+public:
+    MeshRangeSource(MeshReadArray<Value> source,std::size_t offset,std::size_t count)
+        :m_source(std::move(source)),m_offset(offset),m_count(count){
+        if(offset>m_source.size() || count>m_source.size()-offset)throw std::out_of_range("Mesh range is invalid.");
+    }
+    std::size_t GetCount()const noexcept override{return m_count;}
+    std::size_t GetResidentBytes()const noexcept override{return m_source.GetResidentBytes();}
+    void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
+        if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh range block is invalid.");
+        while(count){const auto chunk=m_source.GetChunk(m_offset+offset,count);
+            if(chunk.error!=MeshReadError::None || chunk.values.empty())throw std::runtime_error("Mesh range read failed.");
+            std::copy(chunk.values.begin(),chunk.values.end(),target);target+=chunk.values.size();offset+=chunk.values.size();count-=chunk.values.size();}
+    }
+private:MeshReadArray<Value> m_source;std::size_t m_offset,m_count;
+};
+template<class Value> MeshReadArray<Value> GetMeshRange(MeshReadArray<Value> source,std::size_t offset,std::size_t count){
+    return MeshReadArray<Value>(std::make_shared<const MeshRangeSource<Value>>(std::move(source),offset,count));
+}
+
 struct MeshFieldWriter final {
     std::string name;std::size_t componentCount=0;PagedArray<double> values;std::uint32_t activeRoles=0;
     MeshField Finish(){return {std::move(name),componentCount,values.Finish(),activeRoles};}

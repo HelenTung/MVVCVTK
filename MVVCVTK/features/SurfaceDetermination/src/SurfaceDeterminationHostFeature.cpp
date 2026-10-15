@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -170,6 +171,19 @@ private:
         std::string viewId;
     };
 
+    struct ObjectJob final {
+        std::uint64_t id=0;
+        std::shared_ptr<const SurfaceGenerationSnapshot> generation;
+        SurfaceObjectRecord object;
+        VtkImageGridSnapshot source;
+        std::vector<HostFeatureView> views;
+        SurfaceDeterminationCallback callback;
+        std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+        std::future<vtkSmartPointer<vtkPolyData>> future;
+        ~ObjectJob(){cancelled->store(true);if(future.valid())future.wait();}
+    };
+    bool ClearObjectSelection();
+    void ContinueObjectSelection();
     struct RequestEntry final {
         VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
@@ -259,7 +273,12 @@ private:
     std::vector<HostFeatureView> m_previewViews;
     VtkImageGridSnapshot m_activeSource;
     std::vector<HostFeatureView> m_activeViews;
-    std::vector<OverlayBinding> m_bindings;
+    std::vector<OverlayBinding> m_bindings,m_objectBindings;
+    std::unique_ptr<ObjectJob> m_objectJob;
+    std::shared_ptr<const SurfaceGenerationSnapshot> m_objectGeneration;
+    VtkImageGridSnapshot m_objectSource;
+    FeatureOperationState m_objectOperation;
+    std::uint64_t m_objectIntent=0;
     vtkSmartPointer<vtkPolyData> m_displayData;
     std::thread::id m_ownerThread;
     std::uint64_t m_nextRequestId = 1;
@@ -373,6 +392,8 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
         SetSourceStale();
     }
     SetBindingProjection();
+    ContinueObjectSelection();
+    if(!m_isAttached || !m_service)return false;
     for (auto& item : m_requests) {
         RequestEntry& request = item.second;
         if (!request.isSourceChanged && !GetRequestInputsSame(request))
@@ -414,6 +435,37 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     }
     SetBindingProjection();
 
+    if(const auto* select=std::get_if<SurfaceObjectSelectionRequest>(&request)) {
+        if(!select->objectIndex) {
+            const auto id=GetNextRequestId();if(!ClearObjectSelection())return admission;
+            admission={SurfaceAdmissionStatus::Accepted,id};
+            SendComplete(std::move(onComplete),BuildResult(id,SurfaceResultStatus::Succeeded,SurfaceFailureReason::None,{},m_resultRevision,0,0,"Surface object highlight cleared."));
+            return admission;
+        }
+        const auto generation=m_store.GetGeneration(select->generation);
+        if(!generation || !generation->objects || *select->objectIndex>=generation->objects->size())return admission;
+        const auto object=(*generation->objects)[*select->objectIndex];if(object.objectIndex!=*select->objectIndex)return admission;
+        const auto source=m_data->GetImageGrid(m_data->GetDataGraph(),generation->sourceRevision);
+        const auto primary=m_data->GetPrimaryImage();
+        if(!primary || !primary->data || primary->data->self!=generation->sourceRevision || !source || !GetSourceSame(source)){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
+        auto views=GetTargetViews(select->targetViews);if(views.empty())return admission;
+        const auto intention=m_objectIntent+1;
+        if(!ClearObjectSelection())return admission;
+        // 清除旧高亮的回调可能解绑；重新核对，不能在重入后使用失效的 Host。
+        if(m_objectIntent!=intention || !m_isAttached || m_isDetaching || !m_host)return admission;
+        auto job=std::make_unique<ObjectJob>();job->id=GetNextRequestId();job->generation=generation;
+        job->object=object;job->source=source;job->views=std::move(views);job->callback=std::move(onComplete);
+        const auto cancelled=job->cancelled;
+        try {job->future=std::async(std::launch::async,[generation,object,cancelled,weakHost=std::weak_ptr<FeatureHostControl>(m_host)]{
+            struct Notify { std::weak_ptr<FeatureHostControl> host; ~Notify(){if(auto live=host.lock())(void)live->SendWorkAvailable();} } notify{weakHost};
+            return BuildSurfaceObjectDisplay(*generation,object,[cancelled]{return cancelled->load();});
+        });}catch(...){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
+        admission={SurfaceAdmissionStatus::Accepted,job->id};
+        m_objectOperation={};m_objectOperation.operation={std::string(featureId),m_host->GetAttachmentId(),job->id};
+        m_objectOperation.status=FeatureRunStatus::Running;m_objectOperation.stateRevision=1;
+        m_objectOperation.inputs={{"source-volume",generation->sourceRevision},{"generation",generation->dataRevision},{"mesh",generation->meshRevision}};
+        m_objectJob=std::move(job);(void)m_host->SendWorkAvailable();return admission;
+    }
     if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
         auto params = start->start.value_or(m_config.defaultStart);
         if (params.businessMode != SurfaceBusinessMode::Production) {
@@ -941,8 +993,60 @@ void SurfaceDeterminationHostFeature::Impl::RemoveBindings(
     bindings.clear();
 }
 
+bool SurfaceDeterminationHostFeature::Impl::ClearObjectSelection()
+{
+    ++m_objectIntent;
+    auto job=std::move(m_objectJob);if(job)job->cancelled->store(true);
+    const auto source=m_objectSource;std::vector<std::string> retiredViews;
+    for(const auto& binding:m_objectBindings)retiredViews.push_back(binding.viewId);
+    RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();
+    m_objectOperation.status=FeatureRunStatus::Cancelled;++m_objectOperation.stateRevision;
+    bool updated=SendDisplayDelta();
+    if(m_bindings.empty() && source && source->data && !retiredViews.empty() && m_host) {
+        std::sort(retiredViews.begin(),retiredViews.end());retiredViews.erase(std::unique(retiredViews.begin(),retiredViews.end()),retiredViews.end());
+        FeatureSceneDelta delta;delta.requestId=GetNextRequestId();delta.priority=FeatureScenePriority::Scene;delta.scope=FeatureSceneScope::RequiredAllViews;
+        delta.viewIds=retiredViews;delta.inputStamp={source->data->self};delta.inputs={{"source-volume",source->data->self}};delta.hasDisplayUpdate=true;
+        updated=m_host->SendSceneDelta(std::move(delta)) && m_host->SetActiveViews({});
+    }
+
+    if(job) {
+        auto result=BuildResult(job->id,SurfaceResultStatus::Cancelled,SurfaceFailureReason::Cancelled,job->generation->sourceRevision,
+            job->generation->resultRevision,0,0,"Surface object highlight was cancelled.");
+        result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
+        SendComplete(std::move(job->callback),std::move(result));
+    }
+    return updated;
+}
+void SurfaceDeterminationHostFeature::Impl::ContinueObjectSelection()
+{
+    const auto primary=m_data->GetPrimaryImage();
+    const auto same=[&](const VtkImageGridSnapshot& source){return primary && primary->data && source && source->data && primary->data->self==source->data->self && GetSourceSame(source);};
+    if(m_objectSource && !same(m_objectSource)){(void)ClearObjectSelection();return;}
+    if(!m_objectJob)return;
+    if(!same(m_objectJob->source)){(void)ClearObjectSelection();return;}
+    if(m_objectJob->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+    auto job=std::move(m_objectJob);
+    auto result=BuildResult(job->id,SurfaceResultStatus::Failed,SurfaceFailureReason::DisplayFailed,job->generation->sourceRevision,
+        job->generation->resultRevision,job->object.pointCount,1,"Surface object highlight preparation failed.");
+    result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
+    try {
+        const auto display=job->future.get();
+        if(display && BuildBindings(display,job->views,job->source,m_objectBindings,true)) {
+            m_objectGeneration=job->generation;m_objectSource=job->source;
+            m_objectOperation.status=FeatureRunStatus::Succeeded;m_objectOperation.progress=1;++m_objectOperation.stateRevision;
+            auto active=GetViewIds(job->views);for(const auto& binding:m_bindings)active.push_back(binding.viewId);
+            std::sort(active.begin(),active.end());active.erase(std::unique(active.begin(),active.end()),active.end());
+            if(m_host->SetActiveViews(active) && SendDisplayDelta()) {
+                result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Surface object range highlighted without re-extraction.";
+            }
+        }
+    }catch(const std::exception& error){result.message=error.what();}
+    if(result.status!=SurfaceResultStatus::Succeeded){RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();m_objectOperation.status=FeatureRunStatus::Failed;++m_objectOperation.stateRevision;(void)SendDisplayDelta();}
+    SendComplete(std::move(job->callback),std::move(result));
+}
 bool SurfaceDeterminationHostFeature::Impl::RemoveDisplay()
 {
+    (void)ClearObjectSelection();
     RemoveBindings(m_bindings);
     m_displayData = nullptr;
     return !m_host || m_host->SetActiveViews({});
@@ -957,26 +1061,32 @@ SurfaceDeterminationHostFeature::Impl::GetDisplayGeneration() const
 
 bool SurfaceDeterminationHostFeature::Impl::SendDisplayDelta()
 {
-    if (m_bindings.empty()) return true;
+    if (m_bindings.empty() && m_objectBindings.empty()) return true;
     try {
         const auto generation = GetDisplayGeneration();
         const bool isPreview = generation && generation->purpose == SurfaceTaskPurpose::Preview;
-        const auto source = isPreview ? m_previewSource : m_activeSource;
+        const auto source = m_bindings.empty()?m_objectSource:(isPreview?m_previewSource:m_activeSource);
         const auto& views = isPreview ? m_previewViews : m_activeViews;
-        if (!m_host || !source || !source->data || !generation) return false;
+        if (!m_host || !source || !source->data) return false;
         FeatureSceneDelta delta;
         delta.requestId = GetNextRequestId();
         delta.priority = FeatureScenePriority::Scene;
         delta.scope = FeatureSceneScope::RequiredAllViews;
         delta.inputStamp = { source->data->self };
         delta.viewIds = GetViewIds(views);
+        for(const auto& binding:m_objectBindings)delta.viewIds.push_back(binding.viewId);
+        std::sort(delta.viewIds.begin(),delta.viewIds.end());delta.viewIds.erase(std::unique(delta.viewIds.begin(),delta.viewIds.end()),delta.viewIds.end());
         delta.hasDisplayUpdate = true;
         delta.inputs = { { "source-volume", source->data->self } };
-        if (!isPreview) {
+        if (!isPreview && generation && !m_bindings.empty()) {
             delta.inputs.push_back({ "mesh", generation->meshRevision });
             for (const auto& binding : m_bindings)
                 delta.displays.push_back({ binding.viewId, std::string(featureId), "surface",
                     generation->meshRevision, m_displayOperation.operation });
+        }
+        if(m_objectGeneration && !m_objectBindings.empty()) {
+            delta.inputs.push_back({"object-generation",m_objectGeneration->dataRevision});delta.inputs.push_back({"object-mesh",m_objectGeneration->meshRevision});
+            for(const auto& binding:m_objectBindings)delta.displays.push_back({binding.viewId,std::string(featureId),"surface-object",m_objectGeneration->meshRevision,m_objectOperation.operation});
         }
         return m_host->SendSceneDelta(std::move(delta));
     }
@@ -1002,6 +1112,7 @@ std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::Impl::GetOpe
         && m_displayOperation.operation.requestId != m_lastOperation.operation.requestId
         && m_requests.find(m_displayOperation.operation.requestId) == m_requests.end())
         states.push_back(m_displayOperation);
+    if(m_objectJob || !m_objectBindings.empty())states.push_back(m_objectOperation);
     return states;
 }
 

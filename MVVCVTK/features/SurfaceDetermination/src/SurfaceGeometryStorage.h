@@ -14,6 +14,24 @@ struct SurfacePreparedGeometry final {
     vtkSmartPointer<vtkPolyData> display;
 };
 
+inline vtkSmartPointer<vtkPolyData> BuildSurfaceObjectDisplay(
+    const SurfaceGenerationSnapshot& generation,const SurfaceObjectRecord& object,const SurfaceCancelCheck& cancelled)
+{
+    if(!generation.points || !generation.triangleIndices || object.firstPoint>generation.points->size()
+        || object.pointCount>generation.points->size()-object.firstPoint
+        || object.firstTriangle>generation.triangleIndices->size()/3
+        || object.triangleCount>generation.triangleIndices->size()/3-object.firstTriangle)return {};
+    const auto records=GetMeshRange(*generation.points,std::size_t(object.firstPoint),std::size_t(object.pointCount));
+    const auto points=ConvertMeshArray<double>(records,3,[](const auto& point,std::size_t component){return point.positionModel[component];});
+    const auto indices=GetMeshRange(*generation.triangleIndices,std::size_t(object.firstTriangle*3),std::size_t(object.triangleCount*3));
+    const auto triangles=ConvertMeshArray<std::uint64_t>(indices,1,[first=object.firstPoint,count=object.pointCount](auto id,std::size_t){
+        if(id<first || std::uint64_t(id)-first>=count)throw std::runtime_error("Surface object connectivity is outside its point range.");
+        return std::uint64_t(id)-first;
+    });
+    // 只准备这个对象的连接数组；点仍共享原来的块来源，不扫描其余对象或重新提面。
+    return MeshVtkStorage::Build(points,triangles,{}, {},cancelled);
+}
+
 inline std::shared_ptr<const SurfacePreparedGeometry> PrepareSurfaceGeometry(
     SurfaceAlgorithmResult& result,const std::string& frame,bool completeBoundary,const SurfaceCancelCheck& cancelled,
     const std::shared_ptr<const SurfacePreparedGeometry>& parent={})

@@ -1,5 +1,6 @@
 // 测试用途：左侧对象、中间三维视窗、右侧功能参数，统一管理会话生命周期。
 #include "TestWindow.h"
+#include <limits>
 #include "FeatureSetup.h"
 #include "Support/JsonInput.h"
 #include "Support/UiText.h"
@@ -257,6 +258,12 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_report->onLocate=[this](const ReportDocument& doc,ReportIndex row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
         if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
+        if(doc.module=="Surface" && doc.id.startsWith("surface:")) {
+            const auto object=GetId(GetReportCell(doc.table->Read(row),doc.identityColumn));
+            if(object>std::numeric_limits<std::uint32_t>::max() || !m_workflow.highlightSurfaceObject
+                || !m_workflow.highlightSurfaceObject(GetRef(doc.id.mid(8)),static_cast<std::uint32_t>(object)))throw std::runtime_error("视图未接纳指定历史对象的高亮请求");
+            return;
+        }
         const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);
         HostSessionSetRequest request;request.cursor=HostCursorParams{point,-1};
         const auto admission=session->SendRequest(std::move(request));if(admission.status!=HostAdmissionStatus::Accepted)throw std::runtime_error("视图未接纳定位请求");

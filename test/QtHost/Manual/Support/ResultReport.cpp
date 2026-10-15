@@ -633,7 +633,7 @@ void ResultReport::RefreshPage()
     m_copy->setEnabled(m_selected.table && m_rowsReady);m_export->setEnabled(m_selected.table!=nullptr);
     m_exportFiltered->setEnabled(m_selected.table && m_rowsReady);m_cancelScan->setEnabled(m_rowScan!=nullptr);
     m_locate->setEnabled(m_rowsReady);
-    m_locate->setVisible(m_selected.module=="Gap" && m_selected.category=="本次会话结果" && bool(onLocate));
+    m_locate->setVisible((m_selected.module=="Gap" || (m_selected.module=="Surface" && m_selected.id.startsWith("surface:"))) && m_selected.category=="本次会话结果" && bool(onLocate));
 }
 void ResultReport::CompareSelected()
 {

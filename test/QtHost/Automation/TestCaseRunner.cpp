@@ -2117,7 +2117,8 @@ void StartSelfTest(TestWindow& window)
         SaveScene(window, dataTree, "scene-ui-published-branches.png");
     }
     if (GetEnabled(window, "Surface")) {
-        GetComplete(window, Send(window, "Surface", "GlobalAutomatic"), "Succeeded");
+        const auto firstObjectGeneration=GetComplete(window, Send(window, "Surface", "GlobalAutomatic"), "Succeeded")["result"].toObject()["generation"].toString();
+        GetComplete(window,window.GetModule("Surface")->SendAction("KeepResult",{{"graphRevision",firstObjectGeneration}}),"Succeeded");
         window.GetModule("Surface")->Observe();
         Check(!window.GetModule("Surface")->GetObservedState()["parametersChanged"].toBool(),"a formal surface does not treat an inapplicable seed field as a changed parameter");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeVolume"}}), "Succeeded");
@@ -2127,6 +2128,16 @@ void StartSelfTest(TestWindow& window)
         Check(window.GetModule("Surface")->findChild<QPushButton*>("action_CopyIsoToDisplay")->isEnabled(),
             "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
+        const auto objects=GetComplete(window,window.GetModule("Surface")->SendAction("ReadObjects",{{"generation",firstObjectGeneration},{"pageOffset","0"},{"pageSize","1"}}),"Observed")["result"].toObject();
+        Check(objects["generation"]==firstObjectGeneration && objects["objects"].toArray().size()==1,"object UI reads a bounded exact historical generation");
+        const auto object=objects["objects"].toArray().first().toObject();
+        Check(GetId(object["pointCount"])>0 && GetId(object["triangleCount"])>0,"object UI exposes its immutable geometry ranges");
+        const auto graphBeforeObject=window.GetWorkflow().getPublishedGraph();
+        const auto selectedObject=GetComplete(window,window.GetModule("Surface")->SendAction("HighlightObject",{{"generation",firstObjectGeneration},{"objectIndex",object["objectIndex"]}}),"Succeeded")["result"].toObject();
+        Check(selectedObject["generation"]==firstObjectGeneration && window.GetWorkflow().getPublishedGraph()==graphBeforeObject,"historical UI highlighting does not republish geometry or alter bindings");
+        const auto scene=window.GetSession()->GetSceneViewState({"primary-3d"});
+        Check(scene && std::any_of(scene->displays.begin(),scene->displays.end(),[](const auto& value){return value.localId=="surface-object";}),"actual Host scene contains the object selection role");
+        GetComplete(window,window.GetModule("Surface")->SendAction("ClearObjectHighlight",{}),"Succeeded");
         CheckOverlaySwitch(window, "Surface");
         Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)), "material surface is a formal metrology input");
 #if defined(MANUAL_ALIGNMENT)
