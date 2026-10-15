@@ -30,7 +30,7 @@
 
 ## 2. 配置工程并部署 DLL
 
-准备 SDK 解压目录和 Qt 安装目录。`SDK_ROOT` 是直接包含 `include`、`lib`、`deps` 的目录；头文件、Debug/Release 库与 runtime 使用同一份 SDK。
+准备 SDK 解压目录和 Qt 安装目录。`SDK_ROOT` 是直接包含 `include`、`lib`、`deps` 的目录；头文件、Debug/Release 库与 runtime 使用同一份 SDK。更新 SDK 时整体替换本次使用的包，并重新编译上位机。
 
 新建目录，放入本节的 `CMakeLists.txt`、`QtStlCompat.h` 和第 3 节的 `main.cpp`。
 
@@ -102,13 +102,22 @@ foreach ($config in @('Debug', 'Release')) {
 }
 ```
 
-成功：对应配置的 VTK/OpenCV DLL、`GapKernel.dll`、`DefXAnalysis.dll` 及 Qt platform plugin 位于程序目录。失败：文件不存在或部署命令报错时先补齐依赖。若机器设置了 `MVVCVTK_GAP_RUNTIME_DIR`，它必须指向相同配置的有效 Gap runtime 目录；它会优先于 exe 同目录查找。
+成功：对应配置的 VTK/OpenCV DLL、`GapKernel.dll`、`DefXAnalysis.dll` 及 Qt platform plugin 位于程序目录。Debug/Release 分别部署，不能混用；上述两个 Gap runtime 文件在两种配置下同名，按来源目录区分。失败：文件不存在或部署命令报错时先补齐依赖。若机器设置了 `MVVCVTK_GAP_RUNTIME_DIR`，它必须指向相同配置的有效 Gap runtime 目录；它会优先于 exe 同目录查找，目录无效时不会自动改用 exe 同目录。
 
 ## 3. main.cpp：建立 Session、四视图和关闭流程
 
 这份程序包含以下 8 个动作：设置 Qt 数值格式和 OpenGL 格式、创建四视图、`BuildSession`、挂载 Crop/Gap、启动 GUI 调度、发送加载请求、更新/绘制、停止并释放。
 
-保留 `CtView::initializeGL()` 中的 `window->Start()/End()`：在 Qt 上下文建立后初始化帧缓冲。场景绘制通过 `SendRender()` 执行。Qt 宿主只运行 `app.exec()`，不调用 Session 的 `Start()`。
+按以下顺序初始化：
+
+| 顺序 | 上位机执行的动作 | 检查结果 |
+| --- | --- | --- |
+| 1 | 在创建 `QApplication` 和数值控件前，调用 `QLocale::setDefault(QLocale::c())`、设置 `QVTKOpenGLNativeWidget::defaultFormat()` | 尺寸、间距、ISO、均值控件使用 `0–9` 和小数点；已有窗口显式设置 locale 时也使用 C locale |
+| 2 | 每个 `CtView` 绑定一个独立 render window；先设置 AlphaBitPlanes=1、MultiSamples=0，再 `setRenderWindow()`；把同一 window 传给 Session | 四个控件与四个视图 ID 一一对应 |
+| 3 | 保留下面的 `CtView::initializeGL()`：先调用基类，再在 ReadyForRendering 时执行 window 的 `Start()/End()` | Qt 上下文建立后完成帧缓冲初始化；四个控件均使用此派生类 |
+| 4 | `BuildSession`、挂载业务、启动 GUI pump，进入 `app.exec()` | 每次先 `SendUpdates()`，再按需 `SendRender()`；场景绘制统一走该流程 |
+
+这里的 `window->Start()/End()` 是 render window 初始化。Qt 宿主不调用 Session 的 `Start()`；也不在按钮或 timer 中直接调用 render window 的 `Render()`。
 
 ```cpp
 #include <MVVCVTK/API/Host/VtkAppHostSession.h>
@@ -159,6 +168,9 @@ public:
         config.driveMode = HostDriveMode::HostDriven;
         config.sendOwnerTask = [](std::function<void()> task) {
             return task && QMetaObject::invokeMethod(qApp, std::move(task), Qt::QueuedConnection);
+        };
+        config.sendDiagnostic = [](const std::string& message) {
+            qWarning().noquote() << QString::fromStdString(message);
         };
         const HostRenderViewRole roles[] = {HostRenderViewRole::Primary3D,
             HostRenderViewRole::TopDownSlice, HostRenderViewRole::FrontBackSlice,
@@ -228,9 +240,12 @@ private:
                 && windows_[i]->GetReadyForRendering()) request.viewIds.push_back(ids_[i]);
         if (request.viewIds.empty()) return;
         const auto result = session_->SendRender(request);
-        for (const auto& view : result.views)
+        for (const auto& view : result.views) {
             if (view.status == HostRenderStatus::Rendered || view.status == HostRenderStatus::Unchanged)
                 pending_.erase(view.viewId);
+            else if (view.status == HostRenderStatus::Failed)
+                qWarning() << "SendRender failed:" << QString::fromStdString(view.viewId);
+        }
     }
     const std::array<std::string, 4> ids_{"primary-3d", "slice-top-down", "slice-front-back", "slice-left-right"};
     std::array<CtView*, 4> widgets_{};
@@ -260,6 +275,7 @@ HostAdmission LoadVolume(CtWindow& window, const QString& path,
     request.metadata.source.kind = ImageSourceKind::RawFile;
     request.metadata.source.uri = request.filePath;
     QPointer<CtWindow> owner(&window);
+    window.statusBar()->showMessage(QStringLiteral("正在加载数据……"));
     return window.session().SendRequest(std::move(request), [owner](HostResult result) {
         if (!owner) return;
         if (!result.isSucceeded) {
@@ -305,9 +321,20 @@ int main(int argc, char** argv) {
 | `AttachFeature(crop/gap)` | 已创建的 `shared_ptr` | `true` | `false` | Session 管理已挂载业务；失败时进入 Stop 收口 |
 | `SendUpdates()` | 无参数，GUI 线程调用 | `status=Completed`，附 `renderViewIds` | `Deferred/Failed/Stopped` | 收集待画 ID；`Deferred` 留到下一次 GUI 调度 |
 | `SendRender(request)` | 非空、无重复的有效 `viewIds` | 每视图 `Rendered/Unchanged` | 每视图 `Deferred/Failed/Stopped` | 仅移除已完成的待画项；失败项保留并报告 |
-| `Stop()` | GUI 线程调用同一 Session | `true`，`GetIsStopped()==true` | `false` | 失败保留全部对象并在后续事件循环重试；成功才释放 Feature、Session、window 和 widget |
+| `Stop()` | GUI 线程调用同一 Session | `true`，`GetIsStopped()==true` | `false` | 保留全部对象并在后续事件循环重试；查询 `GetStopState()`，若有 `sendDiagnostic` 消息则一并记录；成功才释放 Feature、Session、window 和 widget |
 
 `HostRenderRequest::desiredUpdateRate` 保持缺省值即可；33 ms 是宿主 timer 周期，两者不是同一个参数。所有 Host/Feature 请求、查询和窗口写入都在 GUI/owner thread。
+
+### 3.2 按这个顺序更新界面状态
+
+以下规则适用于 Host 和 Gap 的 admission 请求；Crop 各请求的返回类型见第 6 节。
+
+1. **发送前**设置“正在加载/分析/退出”，禁用重复提交按钮，并准备好回调要保存的状态。
+2. **同步拒绝**时结束本次 UI 等待，显示拒绝原因；不会再收到完成回调。
+3. **Accepted** 对已提供的回调恰好兑现一次；继续 Qt 事件循环和 GUI pump。短请求可能在发送函数返回前已完成，返回后不能无条件再写“正在处理”。
+4. **完成回调**先保存结果、刷新按钮，再显示终态消息。访问窗口使用 `QPointer`。定时刷新可以更新运行状态和按钮，不得覆盖已经收到的终态消息。
+
+关闭整个窗口时直接进入第 3 节的 `Stop()` 流程；`Stop()==false` 期间继续事件循环，保留 Session、Feature、视图和 render window，直到返回 `true`。
 
 ## 4. 加载真实 RAW 文件
 
@@ -319,14 +346,18 @@ int main(int argc, char** argv) {
 
 示例输入为无文件头、float32、小端、X 最快的 RAW；尺寸乘积乘 4 必须等于文件字节数。程序缺省原点为 LPS `(0,0,0)`、方向为单位阵；有真实原点/方向时填写 `geometry.origin/direction`，方向矩阵按 3×3 行主序。
 
+加载对话框按文件的实际元信息填写这些值。间距控件的小数位必须能保留输入精度，例如 `0.0389` 不能被控件舍入为 `0.039` 后再提交；体积统计使用实际提交的几何。首次接入先检查尺寸、间距、原点及孔隙参数的数字显示和读回值，再加载文件。
+
 | 阶段 | 成功 | 失败 | 预期输出 |
 | --- | --- | --- | --- |
 | 同步发送 `HostLoadRequest` | `HostAdmission.status == Accepted` | `Rejected`；读取 `errorCode/message`，结束 UI 等待 | Accepted 只表示请求已接纳 |
 | 完成回调 | `HostResult.isSucceeded == true` | `false`；读取 `errorCode/message` | 成功后取得图像描述，状态栏显示“加载完成” |
 | `GetImageDescriptor()` | 返回有值的 `optional<ImageDescriptor>` | 空 optional | `dims`、`spacing`、`origin`、`direction`、`scalarRange`、`dataRevision`、`bindingRevision`；几何已转为内部 RAS |
-| 后续 GUI 更新/绘制 | 四个窗口出现数据 | 逐视图绘制失败时保留待画项并处理错误 | 3D 与三切片显示同一数据；业务完成和画面完成分别确认 |
+| 后续 GUI 更新/绘制 | `SendUpdates()` 提交变化；目标视图 `SendRender()` 返回 `Rendered/Unchanged` | `Deferred` 保留待画项；`Failed` 报告视图 ID 并排查 | 完成回调后仍需继续 pump，不能立即停 timer |
+| 逐视图读取 `GetSceneViewState({id})` | 有值、`isAvailable=true`，`presentation` 的数据修订匹配加载结果，`renderedEpoch >= sceneEpoch` | 空值、不可用、修订不匹配或画面尚未覆盖当前提交 | 对第 1 节的 4 个 ID 分别检查 |
+| Qt 控件实际显示 | 3D 与三切片出现对应数据，窗口最大化/还原、最小化恢复后仍显示正常 | 黑屏、旧帧或恢复后空白 | 实际画面检查通过，才结束首帧等待 |
 
-Host 请求统一遵循：**Rejected 不执行完成回调；Accepted 对已提供的回调恰好完成一次，短请求可能在发送函数返回前完成。** 等待状态应在发送前设置，不能在返回 Accepted 后覆盖已到达的完成提示。回调访问 Qt 对象时使用 `QPointer`。
+`Rendered` 表示 VTK 绘制结束，仍需确认 Qt 控件实际呈现该帧。四视图空白时依次检查第 3 节的初始化顺序、控件可见性及 ReadyForRendering、待画 ID 是否保留、每视图绘制返回和 Qt 画面；加载回调成功不能替代这些检查。
 
 ## 5. Host 有 12 种请求
 
@@ -479,7 +510,14 @@ Gap 有 **5 个有效动作**：`Start/Overlay/Exit/SetDisplay/Evaluate`。每�
 
 ### 7.1 启动
 
-输入：已加载的主图像、非空目标视图、ISO 参数、背景/材料均值、体积过滤参数。背景/材料均值使用输入体素的灰度域。比例模式 `dataRangeRatio` 在 `[0,1]`；绝对模式填写 `absoluteIsoValue`。数值必须有限，背景均值不大于材料均值，最小体积非负。
+先加载主图像，再填写以下输入：
+
+| 输入 | 填写要求 | 不满足时 |
+| --- | --- | --- |
+| `targetViews` | 使用已建立的非空视图集合 | 拒绝请求 |
+| `surface.isoMode` 和对应阈值 | `DataRangeRatio` 填 `[0,1]` 内的 `dataRangeRatio`，阈值为 `min+(max-min)*ratio`；`AbsoluteValue` 填输入体素灰度域的 `absoluteIsoValue` | 越界比例不会被自动钳制；无效数值拒绝请求 |
+| `surface.backgroundMean/materialMean` | 输入体素灰度域的有限值，且背景均值不大于材料均值 | 拒绝请求；不要填写渲染背景色或材质参数 |
+| `voidParams` | `isFilterEnabled` 控制体积过滤；`minVolumeMM3` 为非负有限值，且能表示为 float，单位 mm³ | 无效数值拒绝请求；关闭过滤时此阈值不参与筛选 |
 
 ```cpp
 QPointer<CtWindow> owner(&window);
@@ -496,17 +534,23 @@ auto gapResult = window.gapResultState;
 GapHostRequest request;
 request.action = GapHostAction::Start;
 request.start = params;
+window.statusBar()->showMessage(QStringLiteral("正在分析孔隙……"));
 const auto gapAdmission = window.gap().SendRequest(request,
     [owner, gapResult](GapHostResult result) {
         if (!owner) return;
         *gapResult = std::move(result);
-        owner->statusBar()->showMessage(
-            gapResult->status == GapResultStatus::Succeeded
-            ? QStringLiteral("孔隙结果已挂载")
-            : QString::fromStdString(gapResult->message));
+        if (gapResult->status == GapResultStatus::Succeeded)
+            owner->statusBar()->showMessage(QStringLiteral("孔隙分析完成，等待画面刷新"));
+        else if (gapResult->status == GapResultStatus::SucceededWithDisplayFailure)
+            owner->statusBar()->showMessage(QStringLiteral("孔隙结果已生成，显示失败：")
+                + QString::fromStdString(gapResult->message));
+        else
+            owner->statusBar()->showMessage(QString::fromStdString(gapResult->message));
     });
 if (gapAdmission.status != GapAdmissionStatus::Accepted) {
     // InvalidRequest/Busy/Stopping/Unavailable：不等回调，结束 UI 等待。
+    window.statusBar()->showMessage(QStringLiteral("孔隙请求未接纳，检查参数和会话状态"));
+    qWarning() << "Gap admission:" << static_cast<int>(gapAdmission.status);
 }
 ```
 
@@ -519,6 +563,10 @@ if (gapAdmission.status != GapAdmissionStatus::Accepted) {
 | 结果已产生、显示失败 | `SucceededWithDisplayFailure` | 此状态不能记为画面成功 | 保存已发布结果，报告显示失败；不要反报“没有分析结果” |
 
 `GetState().analysisState` 为 `Idle/Running/Succeeded/Failed/Stale`；`Stale` 表示输入已变化，需要重新分析。`statistics` 包含物体/孔隙体素数、体积、`porosityRatio` 和 `isPorosityAvailable`；体积单位 mm³，比例不是百分数。
+
+收到 `Succeeded` 或 `SucceededWithDisplayFailure` 后保存统计和全部结果修订。只有 `isPorosityAvailable=true` 时显示孔隙率，可用 `porosityRatio*100` 显示百分数。`GetDisplay(resultSet)` 返回当前显示参数，有值不等于 Qt 画面已经呈现；显示验收仍按第 4 节逐视图检查，并确认结果色带、显隐控制及窗口恢复后画面正常。`SucceededWithDisplayFailure` 单独提示显示错误，保留已生成结果。
+
+计算、结果绘制和文件导出分别等待各自完成条件。GUI 线程保持事件循环，不用 `sleep`、忙循环或同步等待回调；也不要在回调中复制整卷或写大文件。等待时间按数据规模和 Debug/Release 分别设置，Debug 整卷分析可能耗时数十分钟；`Running` 本身不能判为宕机。应用等待超时时报告“超时，完成状态待确认”，保留会话、数据和已完成结果；需要关闭时走 `Stop()` 流程。
 
 ### 7.2 其余 4 个动作
 
@@ -535,6 +583,7 @@ if (gapAdmission.status != GapAdmissionStatus::Accepted) {
 QPointer<CtWindow> owner(&window);
 GapHostRequest exit;
 exit.action = GapHostAction::Exit;
+window.statusBar()->showMessage(QStringLiteral("正在退出孔隙分析……"));
 const auto exitAdmission = window.gap().SendRequest(exit,
     [owner](GapHostResult result) {
         if (!owner) return;
@@ -543,8 +592,11 @@ const auto exitAdmission = window.gap().SendRequest(exit,
     });
 if (exitAdmission.status != GapAdmissionStatus::Accepted) {
     // 结束 UI 退出等待；查询当前状态。
+    window.statusBar()->showMessage(QStringLiteral("退出请求未接纳，请查询当前孔隙状态"));
 }
 ```
+
+退出完成以回调成功且 `isViewActive=false,isExitPending=false` 为准；`analysisState` 可以仍为 `Succeeded`，不要等待它变成 `Idle`。退出待处理期间继续 GUI pump，保留关联视图。若此时关闭整个宿主，按 Session `Stop()` 收口，不再单独等待 Gap Exit 成功。
 
 普通 API 输出聚合统计和结果标识，**没有逐孔隙明细行读取或明细 CSV 导出方法**。`voidTable` 是标识，不是行集合。可把公开 statistics 保存为上位机自己的文件；不要编写不存在的 `Export` action 或 `GetVoidRegions()` 调用。
 
