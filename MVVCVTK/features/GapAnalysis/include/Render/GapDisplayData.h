@@ -3,6 +3,7 @@
 #include "GapAnalysisTypes.h"
 #include "Host/RoiReadTypes.h"
 #include "Render/Support/AnalysisColorStyle.h"
+#include "Render/GapLabelLookupTable.h"
 #include <vtkCellData.h>
 #include <vtkCellArray.h>
 #include <vtkPoints.h>
@@ -81,7 +82,7 @@ struct GapDisplayData final {
         const auto ramp=GetColorRamp(params);
         if(result->mappingRange==source.mappingRange && AnalysisColorStyle::GetRampEqual(ramp,GetColorRamp(source.params)))return result;
         result->volumes = AnalysisColorStyle::BuildRamp(result->mappingRange,ramp);
-        result->labels = vtkSmartPointer<vtkLookupTable>::New();
+        result->labels = vtkSmartPointer<GapLabelLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
         result->labels->IndexedLookupOn();
         vtkNew<vtkIntArray> annotationIds;
@@ -130,7 +131,7 @@ struct GapDisplayData final {
         if (regions.empty()) range = {0, 0};
         result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
-        result->labels = vtkSmartPointer<vtkLookupTable>::New();
+        result->labels = vtkSmartPointer<GapLabelLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(regions.size() + 1));
         result->labels->IndexedLookupOn();
         vtkNew<vtkIntArray> annotationIds;

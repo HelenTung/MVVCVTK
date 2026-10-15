@@ -1,9 +1,38 @@
 // 回归：大量独立小孔隙按合并后内存计量，保留每个面的精确区域编号。
 #include "Render/GapDisplayData.h"
+#include <vtkUnsignedCharArray.h>
 #include <iostream>
 
 int main()
 {
+    vtkNew<GapLabelLookupTable> fast;
+    fast->SetNumberOfTableValues(3); fast->IndexedLookupOn();
+    fast->SetTableValue(0, 0, 0, 0, 0);
+    fast->SetTableValue(1, .2, .4, .8, .7);
+    fast->SetTableValue(2, .8, .3, .1, .6);
+    vtkNew<vtkIntArray> smallIds; vtkNew<vtkStringArray> names;
+    for (const int id : {0, 60001, 33554433}) {
+        smallIds->InsertNextValue(id); names->InsertNextValue(std::to_string(id));
+    }
+    fast->SetAnnotations(smallIds, names); fast->Build();
+    vtkNew<vtkLookupTable> reference; reference->DeepCopy(fast);
+    double samples[]{0, 60001, 33554433, -1, 1.5,
+        std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()};
+    for (const double alpha : {0.0, .35, 1.0}) {
+        fast->SetAlpha(alpha); reference->SetAlpha(alpha);
+        for (const int format : {VTK_LUMINANCE, VTK_LUMINANCE_ALPHA, VTK_RGB, VTK_RGBA}) {
+            unsigned char actual[28]{}, expected[28]{};
+            fast->MapScalarsThroughTable2(samples, actual, VTK_DOUBLE, 7, 1, format);
+            reference->MapScalarsThroughTable2(samples, expected, VTK_DOUBLE, 7, 1, format);
+            if (!std::equal(actual, actual + 7 * format, expected)) {
+                std::cerr << "Fast label colors differ from VTK categorical colors.\n"; return 1;
+            }
+        }
+    }
+    vtkNew<GapLabelLookupTable> copy; copy->DeepCopy(fast);
+    if (!std::equal(copy->MapValue(33554433), copy->MapValue(33554433) + 4, reference->MapValue(33554433)))
+        return 1;
+
     constexpr int count = 70000;
     vtkNew<vtkImageData> image;
     image->SetDimensions(2 * count + 1, 3, 3);
@@ -16,7 +45,7 @@ int main()
         VoidRegion region;
         region.id = 33554433 + 2 * index;
         region.voxelCount = 1;
-        region.volumeMM3 = 1;
+        region.volumeMM3 = static_cast<float>(1 + index % 3);
         const int x = 2 * index + 1;
         region.bbox = {x, x, 1, 1, 1, 1};
         *static_cast<int*>(image->GetScalarPointer(x, 1, 1)) = region.id;
@@ -44,6 +73,17 @@ int main()
     }
     for (const int index : {0, count / 2, count - 1})
         valid &= display->labels->GetAnnotatedValueIndex(vtkVariant(regions[index].id)) == index + 1;
+    vtkSmartPointer<vtkUnsignedCharArray> colors;
+    colors.TakeReference(display->labels->MapScalars(ids, VTK_COLOR_MODE_MAP_SCALARS, 0));
+    valid &= colors && colors->GetNumberOfComponents() == 4
+        && colors->GetNumberOfTuples() == mesh->GetNumberOfCells();
+    for (int index = 0; valid && index < count; ++index) {
+        const auto* expected = display->labels->GetPointer(index + 1);
+        for (int cell = 0; cell < 8; ++cell) {
+            unsigned char actual[4]; colors->GetTypedTuple(8LL * index + cell, actual);
+            valid &= std::equal(actual, actual + 4, expected);
+        }
+    }
     std::cout << "regions=" << count << " points=" << mesh->GetNumberOfPoints()
         << " triangles=" << mesh->GetNumberOfCells()
         << " mergedKiB=" << mesh->GetActualMemorySize() << '\n';
