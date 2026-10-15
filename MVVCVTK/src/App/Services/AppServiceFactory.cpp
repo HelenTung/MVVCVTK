@@ -557,7 +557,15 @@ bool AppRuntime::SetDataTaskStopping()
         if (m_dataManager) (void)m_dataManager->ClearLoadStage();
         SetCompletion(false, std::move(pending.callback));
     }
-    return !m_taskExecutor || m_taskExecutor->StartDataStop();
+    if (m_taskExecutor && !m_taskExecutor->StartDataStop()) return false;
+    // 自动输入刷新不属于外部发布事务；关闭接纳后取消候选，避免 Stop 等待
+    // 已经不会再进入 BuildPipeline 的 stage，同时保留既有可绘制输入。
+    if (m_dataStage && m_dataStage->isRefresh) {
+        const auto revision = m_dataStage->transactionRevision;
+        if (m_dataStage->isCommitted) SetDataStageComplete(revision);
+        else if (!ClearDataStage(revision)) return false;
+    }
+    return true;
 }
 
 bool AppRuntime::SetTaskStopping()

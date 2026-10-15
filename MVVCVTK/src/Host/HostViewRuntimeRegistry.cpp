@@ -1937,10 +1937,22 @@ HostViewRuntimeRegistry::Impl::GetTaskExecutor() const
 bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
 {
     if (m_lease && !m_lease->GetIsOwnerThread()) return false;
+    if (m_featureTransition) {
+        const auto stopped=StopDataTransition(m_featureTransition->ownerId,m_featureTransition->request.requestId);
+        if (stopped.status==FeatureRunStatus::Running) return false;
+    }
     bool stopping=true;
     for (const auto& view:m_views)
         stopping=view.taskControl && view.taskControl->SetDataTaskStopping() && stopping;
     if (!stopping) return false;
+    // primary 已切换时，显示镜像仍可能属于上一结果；只归还 Host 自己各视图
+    // 的实际镜像，不按全局绑定猜测，也不清除外部 Reader 或普通消费绑定。
+    for (auto& view:m_views) {
+        if (!view.featureView || !view.dataStage) {if(view.isAvailable)return false;continue;}
+        const auto stamp=view.featureView->GetRenderInputStamp();
+        if (stamp && GetDataEntityIdValid(stamp->dataRevision.entityId)
+            && !view.dataStage->ClearRenderInput(stamp->dataRevision.entityId)) return false;
+    }
     const auto data=m_transitionData.lock();
     if (!data) return true;
     const auto graph=data->GetDataGraph();
@@ -1948,11 +1960,7 @@ bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
     const auto input=binding&&binding->target?data->GetData(graph,*binding->target):nullptr;
     if (!input || !GetDataEntityIdValid(input->lifetimeScope)
         || input->lifetimePolicy!=DataLifetimePolicy::OwnerRetirement) return true;
-    // 全会话退出先归还 Host 自己的显示镜像与选择；否则当前 Owner 结果会被
-    // primary 绑定或镜像字节反向阻塞。外部 Reader、普通绑定及外部字节引用仍保留。
-    // 镜像未清完时保留绑定，下一次 Stop 仍能以同一实体重试。
-    for (auto& view:m_views)
-        if (view.isAvailable && (!view.dataStage || !view.dataStage->ClearRenderInput(input->self.entityId))) return false;
+    // 镜像已归还，再以原绑定版本清除当前 Owner 选择；原始普通输入仍保留绑定。
     DataTransaction transaction;
     transaction.bindings.push_back({std::string(primaryVolumeBinding),binding->revision,true,binding->target,{}});
     return data->SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded;

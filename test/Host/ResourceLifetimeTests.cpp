@@ -7,6 +7,7 @@
 #include "Data/VtkDataBridge.h"
 #include "App/Tasks/AppDataExportTaskService.h"
 #include "App/Services/AppServiceFactory.h"
+#include "App/Services/FeatureViewService.h"
 #include "Host/Internal/HostImageReadRuntime.h"
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostFeature.h"
@@ -489,28 +490,30 @@ bool GetRoiExplicitClosureReleased()
 class OwnedStopFeature final : public HostFeature {
 public:
     std::shared_ptr<TrustedDataPort> data;
+    std::shared_ptr<FeatureViewService> view;
     Source output;
+    std::vector<Source> outputs;
     std::optional<DataRevisionRef> primaryAtDetach;
     bool released=false;
     DataCommitFailure failure=DataCommitFailure::None;
     std::vector<DataLifetimeBlocker> blockers;
     std::string_view GetFeatureId()const noexcept override{return "ResourceLifetime.OwnedPrimary";}
-    bool AttachHost(const HostFeatureContext& context)override{data=context.data;return bool(data);}
+    bool AttachHost(const HostFeatureContext& context)override{data=context.data;view=context.views->GetFeaturePort("primary");return data&&view;}
     bool OnHostTick()override{return false;}
     bool DetachHost()override {
         if(!data)return true;
         const auto binding=data->GetDataBinding(data->GetDataGraph(),primaryVolumeBinding);
         primaryAtDetach=binding?binding->target:std::nullopt;
-        if(GetDataEntityIdValid(output.scope)) {
-            if(data->GetDataLifetime(output.scope).status==DataLifetimeStatus::Published) {
-                DataTransaction tx;tx.retireScopes.push_back({output.scope,DataLifetimeStatus::Published,{output.ref},true});
+        for(auto it=outputs.rbegin();it!=outputs.rend();++it)if(GetDataEntityIdValid(it->scope)) {
+            if(data->GetDataLifetime(it->scope).status==DataLifetimeStatus::Published) {
+                DataTransaction tx;tx.retireScopes.push_back({it->scope,DataLifetimeStatus::Published,{it->ref},true});
                 const auto result=data->SetDataCommit(std::move(tx));failure=result.failureReason;blockers=result.blockers;
                 if(result.status!=DataCommitStatus::Succeeded)return false;
             }
-            const auto result=data->SetDataRelease(output.scope);blockers=result.blockers;
+            const auto result=data->SetDataRelease(it->scope);blockers=result.blockers;
             if(result.status!=DataLifetimeStatus::Released)return false;
         }
-        released=true;data.reset();return true;
+        released=true;view.reset();data.reset();return true;
     }
     bool Publish(bool owned=true) {
         auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(4,4,4);image->AllocateScalars(VTK_FLOAT,1);
@@ -518,14 +521,15 @@ public:
         output={{data->CreateDataEntityId(),1},owned?data->CreateDataEntityId():DataEntityId{}};
         DataTransaction tx;tx.outputs.push_back({output.ref.entityId,0,DataTypes::imageGrid3D,{},bridge.CreateImagePayload(image),{},
             owned?std::optional<DataEntityId>{output.scope}:std::nullopt});
-        return data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+        const bool published=data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+        if(published)outputs.push_back(output);return published;
     }
 };
 
 bool GetOwnedPrimaryStopValid()
 {
     bool passed=true;
-    for(int protection=0;protection<5;++protection) {
+    for(int protection=0;protection<7;++protection) {
         HostRenderViewConfig view;view.id="primary";view.role=HostRenderViewRole::Primary3D;
         view.window.viewInit.viewMode=HostRenderMode::Volume;view.inputMode=HostInputMode::HostInjected;
         view.renderWindow=vtkSmartPointer<vtkRenderWindow>::New();view.renderWindow->SetOffScreenRendering(1);view.renderWindow->SetSize(64,64);
@@ -548,11 +552,25 @@ bool GetOwnedPrimaryStopValid()
         do {
             session.SendUpdates();
             const auto scenes=session.GetSceneViewStates();
+            const auto stamp=feature->view->GetRenderInputStamp();
             presented=!scenes.empty()&&scenes.front().presentation
-                &&scenes.front().presentation->dataRevision==feature->output.ref;
+                &&scenes.front().presentation->dataRevision==feature->output.ref
+                &&stamp&&stamp->dataRevision==feature->output.ref;
+            if(protection==5)break;
             if(!presented)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }while(!presented&&std::chrono::steady_clock::now()<until);
-        if(!Check(complete&&selected&&presented,"Host adopts and prepares the actual owned image presentation"))return false;
+        if(!Check(complete&&selected&&(presented||protection==5),"Host adopts its owned image; immediate Stop need not await presentation"))return false;
+        if(protection==6) {
+            const auto previous=feature->output.ref;
+            if(!Check(feature->Publish(),"publish second owned input"))return false;
+            const auto current=port->GetDataBinding(port->GetDataGraph(),primaryVolumeBinding);
+            HostDataSelectRequest next;next.dataRevision=feature->output.ref;next.expectedBindingRevision=current->revision;
+            const auto admitted=session.SendRequest(std::move(next),[](HostResult){});
+            const auto stamp=feature->view->GetRenderInputStamp();
+            const auto chosen=port->GetDataBinding(port->GetDataGraph(),primaryVolumeBinding);
+            if(!Check(admitted.status==HostAdmissionStatus::Accepted&&chosen&&chosen->target==feature->output.ref&&stamp&&stamp->dataRevision==previous,
+                "new primary is adopted while the actual Host mirror still holds the previous owner"))return false;
+        }
         std::shared_ptr<const DataResourceLease> reader;
         std::shared_ptr<const void> legacyBytes;
         if(protection==1) {
@@ -569,7 +587,7 @@ bool GetOwnedPrimaryStopValid()
             if(!Check(bool(legacyBytes),"external immutable byte ownership admission"))return false;
         }
         const bool stopped=session.Stop();
-        if(protection==0||protection==3) {
+        if(protection==0||protection==3||protection==5||protection==6) {
             passed=Check(stopped&&feature->released,"Host Stop releases its adopted owner result")&&passed;
             if(protection==3)passed=Check(feature->primaryAtDetach==std::optional<DataRevisionRef>{feature->output.ref},
                 "Stop preserves an ordinary unscoped primary input")&&passed;
@@ -589,7 +607,9 @@ bool GetOwnedPrimaryStopValid()
         if(!stopped) {
             if(protection==2)(void)bind("test.external-consumer",{});
             (void)bind(std::string(primaryVolumeBinding),{});
-            passed=Check(session.Stop(),"owned primary Stop fixture cleanup")&&passed;
+            const bool cleaned=session.Stop();passed=Check(cleaned,"owned primary Stop fixture cleanup")&&passed;
+            // 红测保留失败结论后放弃仅属于本 fixture 的 scope 退休，令 Host 能销毁现场。
+            if(!cleaned){feature->outputs.clear();passed=Check(session.Stop(),"failed fixture releases its private runtime")&&passed;}
         }
     }
     return passed;
