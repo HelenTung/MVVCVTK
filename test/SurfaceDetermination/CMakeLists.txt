@@ -2,6 +2,7 @@ add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
     SurfaceDeterminationHistogramTests.cpp
+    SurfaceHistogramAudit.cpp
     SurfaceDeterminationOptimizationTests.cpp
     SurfaceDeterminationBusinessTests.cpp
     SurfaceDeterminationContractTests.cpp
@@ -69,6 +70,11 @@ foreach(_mvvcvtk_surface_suite IN ITEMS algorithm histogram geometry lifecycle d
     )
 endforeach()
 unset(_mvvcvtk_surface_suite)
+
+# 复用现有测试工程承载真实灰度采样审计；说明检查不计为真实数据业务验收。
+add_test(NAME SurfaceDetermination.histogram-audit-schema
+    COMMAND mvvcvtk_surface_determination_tests --histogram-audit-schema)
+SetTestRuntime(SurfaceDetermination.histogram-audit-schema mvvcvtk_surface_determination_tests)
 
 # 同一审计入口分别链接原始基线与候选，实现数值、资源及端到端对照。
 add_executable(mvvcvtk_surface_acceleration_audit SurfaceAccelerationAudit.cpp)
