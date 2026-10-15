@@ -363,7 +363,11 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
                 CheckNativeReportCancellation(*view,open,timeoutMs);
             open();
         }
-        do {QCoreApplication::processEvents(QEventLoop::AllEvents,20);}
+        do {
+            QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+            if(!view->property("reportGenerationError").toString().isEmpty()&&!view->property("reportGenerationBusy").toBool()&&view->GetReports(module,refs).isEmpty())
+                throw std::runtime_error(view->property("reportGenerationError").toString().toStdString());
+        }
         while((view->property("reportGenerationBusy").toBool() || view->GetReports(module,refs).isEmpty()) && (timeoutMs==0 || generation.elapsed()<timeoutMs));
         Require(!view->property("reportGenerationBusy").toBool(),"native report generation exceeded the scenario deadline");
         // 同期渲染事件与定时器分派顺序会影响总耗时，不能据此推断报告回调阻塞。
