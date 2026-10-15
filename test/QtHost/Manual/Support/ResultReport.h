@@ -29,10 +29,11 @@ public:
     QJsonObject GetSelectedRecord() const;
     void AddReport(ReportDocument document);
     bool SelectReport(const QString& id);
-    void ShowReports(const QString& source = {}, const QString& result = {});
+    void ShowReports(const QString& source = {}, const QString& result = {}, const QString& module = {});
     void ImportReport(const QString& path);
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
+    QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
     QVector<int> GetFilteredRows() const;
     std::function<void(const ReportDocument&,int)> onLocate;
 protected:
@@ -46,7 +47,7 @@ private:
     QMap<QString, QJsonObject> m_records;
     QMap<QString, ReportDocument> m_documents;
     ReportDocument m_selected;
-    QString m_baseline, m_sourceFilter, m_resultFilter;
+    QString m_baseline, m_sourceFilter, m_resultFilter, m_moduleFilter;
     QTreeWidget* m_reports = nullptr;
     QTableView* m_table = nullptr;
     QLineEdit *m_search = nullptr, *m_minimum = nullptr, *m_maximum = nullptr;

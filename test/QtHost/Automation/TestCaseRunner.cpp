@@ -2864,7 +2864,11 @@ void StartSequence(TestWindow& window, const QString& path)
             CheckNodeParameters(window);
         }
         if (step.contains("saveAs")) results[GetText(step, "saveAs")] = record;
-        if(script["checkReports"].toBool())CheckBusinessReport(window,record);
+        if(script["checkReports"].toBool()||script["checkReportPreviews"].toBool()) {
+            const auto preview=step.contains("reportPreview")?GetText(step,"reportPreview"):
+                QDir::current().filePath(QString("report-previews-%1/%2-%3").arg(QCoreApplication::applicationPid()).arg(GetText(record,"module"),GetText(record,"operationId")));
+            CheckBusinessReport(window,record,script["checkReports"].toBool(),preview);
+        }
         if (step.contains("expectedTransform")) {
             const auto expectedTransform = GetArray<double, 16>(step["expectedTransform"]);
             const auto actual = GetArray<double, 16>(record["result"].toObject()["sourceToTarget"]);

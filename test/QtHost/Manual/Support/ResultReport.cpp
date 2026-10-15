@@ -229,7 +229,8 @@ void ResultReport::AddReport(ReportDocument doc)
     if(!item)item=new QTreeWidgetItem(group);
     item->setText(0,doc.title);item->setData(0,Qt::UserRole,doc.id);
     item->setToolTip(0,doc.description+"\n结果修订："+doc.result+"\n数据："+doc.source);
-    item->setHidden((!m_sourceFilter.isEmpty() && doc.source!=m_sourceFilter) || !MatchesResult(doc,m_resultFilter));
+    item->setHidden((!m_sourceFilter.isEmpty() && doc.source!=m_sourceFilter)
+        || (!m_moduleFilter.isEmpty() && doc.module!=m_moduleFilter) || !MatchesResult(doc,m_resultFilter));
     if(!item->isHidden())group->setHidden(false);
     if(m_selected.id.isEmpty() || (added && m_follow->isChecked())) {
         if(item->isHidden()){m_sourceFilter.clear();m_resultFilter.clear();ShowReports();}m_reports->setCurrentItem(item);
@@ -239,21 +240,23 @@ void ResultReport::AddReport(ReportDocument doc)
 bool ResultReport::SelectReport(const QString& id)
 {
     if(!m_documents.contains(id))return false;
-    if((!m_sourceFilter.isEmpty() && m_documents[id].source!=m_sourceFilter) || !MatchesResult(m_documents[id],m_resultFilter))ShowReports();
+    if((!m_sourceFilter.isEmpty() && m_documents[id].source!=m_sourceFilter)
+        || (!m_moduleFilter.isEmpty() && m_documents[id].module!=m_moduleFilter) || !MatchesResult(m_documents[id],m_resultFilter))ShowReports();
     for(int i=0;i<m_reports->topLevelItemCount();++i)for(int j=0;j<m_reports->topLevelItem(i)->childCount();++j) {
         auto* item=m_reports->topLevelItem(i)->child(j);
         if(item->data(0,Qt::UserRole)==id){m_reports->setCurrentItem(item);SelectCurrent();return true;}
     }
     return false;
 }
-void ResultReport::ShowReports(const QString& source,const QString& result)
+void ResultReport::ShowReports(const QString& source,const QString& result,const QString& module)
 {
-    m_sourceFilter=source;m_resultFilter=result;QString select;
+    m_sourceFilter=source;m_resultFilter=result;m_moduleFilter=module;QString select;
     for(int i=0;i<m_reports->topLevelItemCount();++i) {
         auto* group=m_reports->topLevelItem(i);bool visible=false;
         for(int j=0;j<group->childCount();++j) {
             auto* item=group->child(j);const auto doc=m_documents.value(item->data(0,Qt::UserRole).toString());
-            const bool match=(source.isEmpty() || doc.source==source) && MatchesResult(doc,result);item->setHidden(!match);visible=visible||match;
+            const bool match=(source.isEmpty() || doc.source==source) && (module.isEmpty() || doc.module==module)
+                && MatchesResult(doc,result);item->setHidden(!match);visible=visible||match;
             if(select.isEmpty() && match && !result.isEmpty() && doc.category!="运行记录")select=doc.id;
         }
         group->setHidden(!visible);
@@ -288,6 +291,16 @@ void ResultReport::SelectCurrent()
 }
 QVector<int> ResultReport::GetFilteredRows() const { return m_rows; }
 QSet<QString> ResultReport::GetReportIds() const { QSet<QString> ids;for(auto it=m_documents.cbegin();it!=m_documents.cend();++it)ids.insert(it.key());return ids; }
+QVector<ReportDocument> ResultReport::GetReports(const QString& module,const QSet<QString>& results) const
+{
+    QVector<ReportDocument> reports;
+    for(const auto& doc:m_documents) {
+        if(doc.module!=module || doc.category=="运行记录")continue;
+        if(results.contains(doc.result) || std::any_of(doc.relatedResults.begin(),doc.relatedResults.end(),
+            [&](const auto& ref){return results.contains(ref);}))reports.append(doc);
+    }
+    return reports;
+}
 void ResultReport::RefreshRows()
 {
     m_rows.clear();m_page=0;
@@ -297,7 +310,10 @@ void ResultReport::RefreshRows()
     if((hasLow && !GetReportNumber(m_minimum->text(),low)) || (hasHigh && !GetReportNumber(m_maximum->text(),high)) || (hasLow && hasHigh && low>high)) {
         RefreshPage();m_range->setText("请输入有效数值区间");return;
     }
-    for(int i=0;i<m_selected.table->GetCount();++i) {
+    if(search.isEmpty() && !(column>=0 && (hasLow || hasHigh))) {
+        // 默认预览只需建立行号；不为显示前 200 行逐条读取、解析整份百万行报告。
+        m_rows.resize(m_selected.table->GetCount());std::iota(m_rows.begin(),m_rows.end(),0);
+    } else for(int i=0;i<m_selected.table->GetCount();++i) {
         const auto row=m_selected.table->Read(i);
         if(!search.isEmpty() && !row.join('\t').contains(search,Qt::CaseInsensitive))continue;
         if(column>=0 && (hasLow || hasHigh)){double value;if(!GetReportNumber(GetReportCell(row,column),value) || (hasLow && value<low) || (hasHigh && value>high))continue;}

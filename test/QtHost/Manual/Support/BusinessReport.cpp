@@ -37,6 +37,36 @@ ReportDocument Document(const QJsonObject& record,const QString& prefix,const QS
     doc.conditions={{"计算参数",record["parameters"]}};return doc;
 }
 }
+#if defined(MANUAL_ARTIFACT)
+void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<ArtifactReductionHostFeature>)
+{
+    const auto read=workflow.readRecordPage;
+    workflow.readReports["Artifact"]=[read](const QJsonObject& record,const QSet<QString>& known) {
+        QVector<ReportDocument> reports;const auto r=record["result"].toObject();const auto ref=r["qualityReport"].toString();
+        if(!HasRevision(ref) || known.contains("artifact:"+ref))return reports;
+        const auto first=read(GetRef(ref),0,256,std::nullopt);
+        if(!HasRevision(first["source"].toString()))throw std::runtime_error("去伪影质量报告缺少原生源修订");
+        auto doc=Document(record,"artifact",ref,first["source"].toString(),"去伪影质量明细");
+        doc.conditions["计算参数"]=QJsonDocument::fromJson(first["canonicalParameters"].toString().toUtf8()).object();
+        doc.conditions["源修订"]=doc.source;doc.conditions["校正结果修订"]=r["correctedVolume"];doc.conditions["质量表修订"]=ref;
+        doc.relatedResults.append(r["correctedVolume"].toString());
+        doc.description="每行使用原生质量表的指标与单位；灰度变化不能单独证明校正保真，不同指标不混合统计。";
+        doc.columns={{"metric",{},{},false},{"value",{},{},true},{"unit",{},{},false}};
+        doc.identityColumn=0;doc.identityStable=true;doc.table=std::make_shared<ReportTable>();
+        std::size_t offset=0;
+        for(;;) {
+            const auto page=offset==0?first:read(GetRef(ref),offset,256,std::nullopt);
+            for(const auto value:page["rows"].toArray()) {
+                const auto row=value.toObject();doc.table->Append({Cell(row["metric"]),Cell(row["value"]),Cell(row["unit"])});
+            }
+            const auto next=GetId(page["next"]),total=GetId(page["total"]);
+            if(next>=total)break;
+            if(next<=offset)throw std::runtime_error("去伪影质量报告分页没有前进");offset=static_cast<std::size_t>(next);
+        }
+        reports.append(std::move(doc));return reports;
+    };
+}
+#endif
 #if defined(MANUAL_GAP)
 void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature>)
 {

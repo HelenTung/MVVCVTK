@@ -73,8 +73,9 @@ def write(name,steps):
     for n,s in enumerate(steps):
         if s.get('generateKnownTransformReference'): continue
         s.setdefault('stateAudit',str(folder/f'{n:03d}-{s["module"]}-{s["action"]}.json').replace('\\','/'))
+        s.setdefault('reportPreview',str(folder/f'report-{n:03d}-{s["module"]}-{s["action"]}').replace('\\','/'))
     (folder/'case.json').write_text(json.dumps(dict(schema='qt-control-scenario-1',
-        checkWindowStable=True,viewsVisible=True,viewLayout='Inspection',steps=steps),ensure_ascii=False,indent=2),encoding='utf-8')
+        checkWindowStable=True,checkReportPreviews=True,viewsVisible=True,viewLayout='Inspection',steps=steps),ensure_ascii=False,indent=2),encoding='utf-8')
     written.append(name)
 
 def operation(steps,action,target,name,**params):

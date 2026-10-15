@@ -19,7 +19,7 @@ add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
-set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 60 LABELS "Reports")
+set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 60 LABELS "Reports;preview")
 # Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")
 
@@ -48,6 +48,6 @@ if(MVVCVTK_QT_ROI_CHAIN_INPUT)
                 --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd" --case "${scenario}")
         # 最大单步壁厚等待为 1 h；进程上限另留前后处理和退出余量，不是性能达标阈值。
         set_tests_properties(QtFeature.RoiContinuous.${scenario} PROPERTIES
-            LABELS "real-data;roi;continuous" RUN_SERIAL TRUE TIMEOUT 7200)
+            LABELS "real-data;roi;continuous;Reports;preview" RUN_SERIAL TRUE TIMEOUT 7200)
     endforeach()
 endif()

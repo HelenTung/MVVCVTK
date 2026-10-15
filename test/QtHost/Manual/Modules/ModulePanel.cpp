@@ -64,7 +64,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
     m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
     m_viewReport=new QPushButton("查看结果明细",commandFooter);m_viewReport->setObjectName("viewBusinessReport");m_viewReport->hide();footerLayout->addWidget(m_viewReport);
-    connect(m_viewReport,&QPushButton::clicked,this,[this]{if(m_context.workflow.onShowReports)m_context.workflow.onShowReports({},m_viewReport->property("reportResult").toString());});
+    connect(m_viewReport,&QPushButton::clicked,this,[this]{if(m_context.workflow.onShowBusinessReport)m_context.workflow.onShowBusinessReport(m_name,m_viewReport->property("reportResult").toString());});
     m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
@@ -851,14 +851,16 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
     m_context.records.SetComplete(id, status, result,
         GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{}));
     m_context.workflow.SetComplete(id);
-    if(m_context.workflow.readReports.count(m_name) && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(status)) {
+    m_viewReport->hide();m_viewReport->setProperty("reportResult",QString());
+    if(m_context.workflow.getReportAvailable && m_context.workflow.readReports.count(m_name)
+        && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed","Published"}.contains(status)) {
         const auto action=m_context.records.GetRecord(id)["action"].toString();
-        const auto preferred=m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action=="Inspect"?QString("inspection"):QString();
-        if(!preferred.isEmpty() && !result[preferred].toString().isEmpty() && !result[preferred].toString().endsWith(":0")) {
+        const auto preferred=m_name=="Artifact"?QString("qualityReport"):m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action.startsWith("Inspect")?QString("inspection"):QString();
+        if(!preferred.isEmpty() && m_context.workflow.getReportAvailable(m_name,result[preferred].toString())) {
             m_viewReport->setProperty("reportResult",result[preferred].toString());m_viewReport->show();
         } else
-        for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","result"}) {
-            const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0")){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
+        for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","generation","qualityReport","result"}) {
+            const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0") && m_context.workflow.getReportAvailable(m_name,ref)){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
         }
     }
     if(QStringList{"Failed","Rejected","InvalidInput","SourceChanged"}.contains(status)) {

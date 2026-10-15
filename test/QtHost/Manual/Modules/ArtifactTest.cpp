@@ -123,6 +123,7 @@ ModulePanel* CreateArtifactTest(TestContext context, std::shared_ptr<ArtifactRed
                 if (admission.error == ArtifactError::None && request.action == ArtifactAction::Commit && state.correctedVolume)
                     pending->output = *state.correctedVolume;
                 auto result = GetArtifact(state);
+                result["source"]=GetDataRevisionRefValid(pending->source)?GetRefText(pending->source):QString();
                 if (admission.error != ArtifactError::None) { result["errorCode"] = static_cast<int>(admission.error); result["message"] = GetArtifactErrorText(admission.error); }
                 panel->SetComplete(id, admission.error != ArtifactError::None ? "Rejected"
                     : request.action == ArtifactAction::Commit ? "Published" : "Accepted", result);

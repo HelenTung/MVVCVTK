@@ -4,8 +4,12 @@ class GapHostFeature;
 class WallThicknessHostFeature;
 class SurfaceDeterminationHostFeature;
 class MetrologyAlignmentHostFeature;
+class ArtifactReductionHostFeature;
 namespace Manual {
 class TestWorkflow;
+#if defined(MANUAL_ARTIFACT)
+void AttachReportSource(TestWorkflow&,std::shared_ptr<ArtifactReductionHostFeature>);
+#endif
 #if defined(MANUAL_GAP)
 void AttachReportSource(TestWorkflow&,std::shared_ptr<GapHostFeature>);
 #endif
