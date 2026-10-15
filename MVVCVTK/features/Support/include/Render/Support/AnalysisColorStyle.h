@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <string>
 #include <sstream>
 #include <iomanip>
@@ -271,51 +272,36 @@ inline std::array<double,4> GetMappedColor(vtkLookupTable& table,const RampParam
 inline vtkSmartPointer<vtkDoubleArray> BuildLabels(const std::array<double, 2>& range)
 {
     auto labels = vtkSmartPointer<vtkDoubleArray>::New();
-    const double span = range[1] - range[0];
-    const double scale = std::max({std::abs(range[0]), std::abs(range[1]), 1.0});
-    if (span <= 32 * std::numeric_limits<double>::epsilon() * scale) {
+    if (!std::isfinite(range[0]) || !std::isfinite(range[1]) || range[0] > range[1]) return labels;
+    if (range[0] == range[1]) {
         labels->InsertNextValue(range[0]);
         return labels;
     }
-    if (!std::isfinite(span)) {
-        labels->InsertNextValue(range[0]); labels->InsertNextValue(range[1]);
-        return labels;
-    }
-    const double rawStep = span / 10;
-    const double magnitude = std::pow(10.0, std::floor(std::log10(rawStep)));
-    if (magnitude == 0 || !std::isfinite(magnitude)) {
-        labels->InsertNextValue(range[0]); return labels;
-    }
-    const double fraction = rawStep / magnitude;
-    const double factor = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
-    const long double step = factor * magnitude;
-    const long double first = std::ceil(static_cast<long double>(range[0]) / step);
-    // 仅在原映射范围内放置等步长刻度，绝不为漂亮端点扩展业务显示范围。
-    for (int index = 0; index < 32; ++index) {
-        double value = static_cast<double>((first + index) * step);
-        if (value > range[1]) break;
-        if (value < range[0] || (labels->GetNumberOfValues() && value <= labels->GetValue(labels->GetNumberOfValues() - 1))) continue;
-        if (std::abs(value) < double(step) * 1e-10) value = 0;
-        labels->InsertNextValue(value);
-    }
-    if (!labels->GetNumberOfValues()) labels->InsertNextValue(range[0]);
+    // 有效范围递归取中点四层：16 个区间，端点和 15 个中点均保留。
+    labels->SetNumberOfValues(17);labels->SetValue(0,range[0]);labels->SetValue(16,range[1]);
+    const auto bisect=[&](auto&& self,vtkIdType first,vtkIdType last)->void {
+        if(last-first<2)return;
+        const double lower=labels->GetValue(first),upper=labels->GetValue(last),span=upper-lower;
+        const auto middle=(first+last)/2;
+        labels->SetValue(middle,std::isfinite(span)?lower+span*.5:lower*.5+upper*.5);
+        self(self,first,middle);self(self,middle,last);
+    };
+    bisect(bisect,0,16);
     return labels;
 }
 
 inline std::string GetLabelFormat(vtkDoubleArray& labels)
 {
-    if (labels.GetNumberOfValues() < 2) return "%.6g";
-    const double step = labels.GetValue(1) - labels.GetValue(0);
-    if (!std::isfinite(step) || step <= 0) return "%.6g";
-    const int exponent = static_cast<int>(std::floor(std::log10(step)));
-    const double fraction = step / std::pow(10.0, exponent);
-    const int decimals = std::max(0, -exponent) + (std::abs(fraction - std::round(fraction)) > 1e-7 ? 1 : 0);
-    const double scale = std::max(std::abs(labels.GetValue(0)), std::abs(labels.GetValue(labels.GetNumberOfValues() - 1)));
-    if (decimals > 6 || scale >= 1e7) {
-        const int digits = static_cast<int>(std::clamp(std::ceil(std::log10(scale) - std::log10(step)) + 1, 2.0, 16.0));
-        return "%." + std::to_string(digits) + "e";
+    for(int digits=6;digits<17;++digits) {
+        std::map<std::string,double> seen;bool distinct=true;
+        for(vtkIdType i=0;i<labels.GetNumberOfValues();++i) {
+            std::ostringstream out;out<<std::setprecision(digits)<<labels.GetValue(i);
+            const auto inserted=seen.emplace(out.str(),labels.GetValue(i));
+            if(!inserted.second && inserted.first->second!=labels.GetValue(i)){distinct=false;break;}
+        }
+        if(distinct)return "%."+std::to_string(digits)+"g";
     }
-    return "%." + std::to_string(decimals) + "f";
+    return "%.17g";
 }
 
 inline void SetLegend(vtkScalarBarActor& legend, const char* title)
