@@ -53,7 +53,7 @@ enum class MetrologyReportDisplaySource : std::uint8_t { None, ExplicitConfigura
 struct MetrologyReportDeviationDisplay final {
     AlignmentDeviationDisplay parameters;
     std::optional<std::array<double,2>> mappingRange;
-    std::string colorMapVersion="deviation-mapping-3";
+    std::string colorMapVersion="deviation-mapping-4";
     // 257 个均匀取值的实际色标 RGB；逐点颜色按同版本分段规则计算，显示截断不修改统计。
     std::array<std::array<std::uint8_t,3>,257> legendRgb{};
     std::array<std::uint8_t,3> invalidRgb{128,128,128},selectedRgb{255,255,0};

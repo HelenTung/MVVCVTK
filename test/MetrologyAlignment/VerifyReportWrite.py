@@ -197,8 +197,10 @@ def verify_report(json_path, csv_path, fixture=False):
                 a,b=tolerance
                 return byte_color(parameters["belowColor"]) if value<a else byte_color(parameters["aboveColor"]) if value>b else [60,180,95]
             f=.5 if high==low else (value-low)/(high-low)
-            if parameters["isReversed"]: f=1-f
             palette=parameters["palette"]
+            # v4 的连续色带在数据范围内保留两端各 4% 的短过渡。
+            if palette!=0:f=.04+.92*f
+            if parameters["isReversed"]: f=1-f
             if palette==0:return byte_color(parameters["constantColor"])
             if palette==1:return byte_color([a+f*(b-a) for a,b in zip(parameters["lowColor"],parameters["highColor"])])
             if palette==5:
@@ -208,7 +210,7 @@ def verify_report(json_path, csv_path, fixture=False):
             hue=(1-f)*2/3 if palette==2 else f*2/3 if palette==3 else f
             return byte_color(colorsys.hsv_to_rgb(hue,.65,.84))
         require(display["legendRgb"] == [color(low+(high-low)*(i/256)) for i in range(257)], "Independent colorbar calculation mismatch")
-        require(display["colorMapVersion"] == "deviation-mapping-3" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
+        require(display["colorMapVersion"] == "deviation-mapping-4" and display["invalidRgb"] == [128,128,128] and display["selectedRgb"] == [255,255,0] and not display["clippingAffectsStatistics"], "Colorbar semantics mismatch")
         selection = display["selection"]
         require((selection is not None) == (parameters["selectedVertex"] is not None), "Selection capture mismatch")
         if selection:
