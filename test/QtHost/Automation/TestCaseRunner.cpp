@@ -1366,7 +1366,7 @@ void CheckCropWorkflow(TestWindow& window)
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
 }
-void CheckCropMouseInteraction(TestWindow& window)
+void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
 {
     if (!GetEnabled(window, "Crop")) return;
     auto* panel = window.GetModule("Crop");
@@ -1380,6 +1380,7 @@ void CheckCropMouseInteraction(TestWindow& window)
         GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", renderMode}}), "Succeeded");
         Check(Wait(settled), "display mode settles before crop input");
         for (const auto* shape : {"Box", "Plane", "Sphere", "Cylinder"}) {
+            if(cylinderOnly&&QString(shape)!="Cylinder")continue;
             for (const auto* removal : {"KeepInside", "RemoveInside", "PositionOnly"}) {
                 auto* historyTree=panel->GetCatalogTree();
                 GetComplete(window,ClickNodeAction(window,historyTree,FindNode(historyTree,"crop-history"),"ResetPreview"),"Succeeded");
@@ -2983,6 +2984,7 @@ void StartSequence(TestWindow& window, const QString& path)
         Check(preparingSamples > 0 && !hasHiddenSource, "observed pending part surface without hiding the source model");
         if (script.contains("partPreparationScreenshot")) Check(hasPreparationCapture, "pending part surface screenshot captured");
     }
+    if(script["checkCylinderMouse"].toBool())CheckCropMouseInteraction(window,true);
     if (script["checkIdle"].toBool()) CheckIdle(window);
     if (script.contains("maximumUpdateFailures")) {
         const auto diagnostics = window.GetDiagnostics();
