@@ -23,7 +23,6 @@ file(
     "${_gap_root}/CMakeLists.txt"
 )
 set(_legacy_tokens
-    "Algorithms/"
     "SurfaceRefiner"
     "VolumeBuffer.h"
     "GapVolumeBuffer"

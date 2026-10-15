@@ -68,8 +68,11 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
-        Observe();const auto action=m_primary->property("businessAction").toString();
-        if (!action.isEmpty() && m_primary->isEnabled()) SendBusinessAction(action,m_primary->property("usesOutput").toBool());
+        // 保留点击意图；SendAction 会重新观察并校验当前状态，必要时生成 Rejected 终态。
+        // 此处先刷新会把主动作换掉或禁用按钮，导致已经发生的点击没有任何操作记录。
+        const auto action=m_primary->property("businessAction").toString();
+        const auto usesOutput=m_primary->property("usesOutput").toBool();
+        if (!action.isEmpty()) SendBusinessAction(action,usesOutput);
         } catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}
     });
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。

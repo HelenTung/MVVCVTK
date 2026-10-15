@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QTextStream>
 #include <algorithm>
+#include <iostream>
 #include <limits>
 namespace Manual {
 namespace {
@@ -146,10 +147,29 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             || !current->presentation || current->presentation->dataRevision!=saved->source
             || current->presentation->viewMode!=preparedMode) {finish(true);return;}
         HostViewSetRequest request;request.targetView.viewId="primary-3d";request.mode=saved->original;
-        const auto admission=session->SendRequest(std::move(request),[finish,afterUpdates](HostResult result){
-            afterUpdates([finish,result]{finish(result.isSucceeded);});
+        const auto admission=session->SendRequest(std::move(request),[wallOwner,saved,finish,afterUpdates](HostResult result){
+            afterUpdates([wallOwner,saved,finish,result]{
+                if(!result.isSucceeded) {
+                    std::cerr<<"[Wall] View restore failed action="<<saved->action<<" error="<<static_cast<int>(result.errorCode)
+                        <<" message="<<result.message<<" targetMode="<<static_cast<int>(saved->original)
+                        <<" source="<<GetRefText(saved->source).toStdString()<<std::endl;
+                    if(wallOwner)if(const auto session=wallOwner->GetSession())for(const auto& view:session->GetSceneViewStates())if(view.id=="primary-3d") {
+                        std::cerr<<"[Wall] Restore scene presentationRevision="<<view.presentationRevision<<" sceneEpoch="<<view.sceneEpoch
+                            <<" renderedEpoch="<<view.renderedEpoch<<" command="<<wallOwner->GetContext().workflow.primaryPresentationCommand
+                            <<" expectedCommand="<<saved->presentationCommand;
+                        if(view.presentation)std::cerr<<" mode="<<static_cast<int>(view.presentation->viewMode)
+                            <<" source="<<GetRefText(view.presentation->dataRevision).toStdString();
+                        std::cerr<<std::endl;
+                    }
+                }
+                finish(result.isSucceeded);
+            });
         });
-        if(admission.status!=HostAdmissionStatus::Accepted)finish(false);
+        if(admission.status!=HostAdmissionStatus::Accepted) {
+            std::cerr<<"[Wall] View restore rejected action="<<saved->action<<" error="<<static_cast<int>(admission.errorCode)
+                <<" message="<<admission.message<<std::endl;
+            finish(false);
+        }
         });
     };
     const auto send = [panel, feature, visible,appliedDisplays,restore](std::uint64_t id, ThicknessRequest request) {
