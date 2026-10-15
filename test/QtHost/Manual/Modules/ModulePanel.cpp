@@ -63,6 +63,8 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,0,0,0);footerLayout->setSpacing(6);
     m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
     m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
+    m_viewReport=new QPushButton("查看结果明细",commandFooter);m_viewReport->setObjectName("viewBusinessReport");m_viewReport->hide();footerLayout->addWidget(m_viewReport);
+    connect(m_viewReport,&QPushButton::clicked,this,[this]{if(m_context.workflow.onShowReports)m_context.workflow.onShowReports({},m_viewReport->property("reportResult").toString());});
     m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
@@ -848,6 +850,16 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
     m_context.records.SetComplete(id, status, result,
         GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{}));
     m_context.workflow.SetComplete(id);
+    if(m_context.workflow.readReports.count(m_name) && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(status)) {
+        const auto action=m_context.records.GetRecord(id)["action"].toString();
+        const auto preferred=m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action=="Inspect"?QString("inspection"):QString();
+        if(!preferred.isEmpty() && !result[preferred].toString().isEmpty() && !result[preferred].toString().endsWith(":0")) {
+            m_viewReport->setProperty("reportResult",result[preferred].toString());m_viewReport->show();
+        } else
+        for(const auto* key:{"inspection","deviation","resultSet","mesh","result"}) {
+            const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0")){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
+        }
+    }
     if(QStringList{"Failed","Rejected","InvalidInput","SourceChanged"}.contains(status)) {
         m_executionMessage->setText("上次操作 · "+result["message"].toString("操作未完成，请检查输入与前置条件。")); m_executionMessage->show();
     } else if(status!="Observed" && status!="ParametersCopied") { m_executionMessage->clear(); m_executionMessage->hide(); }

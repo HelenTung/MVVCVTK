@@ -1,6 +1,7 @@
 {
   "schema": "qt-control-scenario-1",
   "checkWindowLocked": true,
+  "checkReports": true,
   "viewsVisible": true,
   "viewLayout": "Inspection",
   "steps": [
