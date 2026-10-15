@@ -119,6 +119,8 @@ add_test(NAME Host.HistogramExport COMMAND mvvcvtk_host_method_tests --case hist
 SetTestRuntime(Host.HistogramExport mvvcvtk_host_method_tests)
 add_test(NAME Host.ConsumerContract COMMAND mvvcvtk_host_method_tests --case consumer-contract)
 SetTestRuntime(Host.ConsumerContract mvvcvtk_host_method_tests)
+add_test(NAME Host.LabelMap COMMAND mvvcvtk_host_method_tests --case label-map)
+SetTestRuntime(Host.LabelMap mvvcvtk_host_method_tests)
 set(MVVCVTK_HOST_CONSUMER_REAL_MANIFEST "" CACHE FILEPATH "Real CT ROI manifest for Host consumer contract regression")
 if(MVVCVTK_HOST_CONSUMER_REAL_MANIFEST)
     if(NOT EXISTS "${MVVCVTK_HOST_CONSUMER_REAL_MANIFEST}")
