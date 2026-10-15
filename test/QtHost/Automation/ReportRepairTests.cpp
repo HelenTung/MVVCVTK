@@ -21,6 +21,7 @@
 #include <QTreeWidget>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <stdexcept>
 
@@ -116,21 +117,22 @@ void CheckGenerationAndTasks() {
     view.onReadReports=[&](const QJsonObject&,const QSet<QString>&) {
         ++prepared;auto doc=Document("lazy","聚合节点厚度场值",0);doc.module="Wall";
         auto held=std::make_shared<int>(1);lease=held;
-        doc.table->SetRows(50000,[&,held](int row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
+        doc.table->SetRows(50000,[&,held](ReportIndex row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
         return QVector<ReportDocument>{doc};
     };
     view.QueueReport(record);QCoreApplication::processEvents();
     Require(prepared==0 && view.GetReportAvailable("Wall","lazy-result"),"closed report window eagerly reads native data or hides the pending report entry");
     Require(!view.GetReportAvailable("Wall","input-mesh"),"pending report availability mistakes the input mesh for its output result");
     view.ShowReports({},"lazy-result","Wall");view.show();
-    Wait([&]{return !view.property("reportGenerationBusy").toBool();});
-    Require(readRows>0 && readRows<50000 && !lease.expired(),"native generation did not yield a bounded owner chunk");
-    view.findChild<QPushButton*>("cancelReportTask")->click();QCoreApplication::processEvents();
-    Require(lease.expired() && !view.GetReportIds().contains("lazy"),"cancelled native generation retained its snapshot or published partial rows");
-    view.ShowReports({},"lazy-result","Wall");
     Wait([&]{return !view.GetReportIds().contains("lazy");});
-    Require(lease.expired() && view.GetSelectedReport().table->GetCount()==50000,"retry failed to materialize all rows and release its native source");
-    QTemporaryDir directory;const auto path=directory.filePath("original.csv");ExportReport(path,view.GetSelectedReport());
+    Require(readRows<50000 && !lease.expired() && view.GetReportIds().contains("lazy"),"native preview eagerly materialized all rows or lost its precise row source");
+    const auto lazy=view.GetSelectedReport();Require(lazy.table && lazy.table->GetCount()==50000 && !lazy.table->GetIsComplete(),"lazy report lost its full count or eagerly completed");
+    const auto last=lazy.table->Read(49999);Require(last[0]=="49999" && readRows<50000,"random native page required a full-prefix scan");
+    QTemporaryDir directory;const auto path=directory.filePath("original.csv");
+    view.ExportReportFile(path);QTimer::singleShot(0,&view,[&]{view.CancelTasks();});Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(!QFile::exists(path) && view.GetReportIds().contains("lazy"),"cancelled export committed partial data or removed the native report");
+    view.ExportReportFile(path);Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(lease.expired() && lazy.table->GetIsComplete() && lazy.table->GetCount()==50000 && QFile::exists(path),"full export failed to materialize all rows or release its native source");
     const auto before=view.GetReportIds();view.ImportReport(path);Require(view.property("reportTaskBusy").toBool(),"import did not return after admission");
     bool heartbeat=false;QTimer::singleShot(0,&view,[&]{heartbeat=true;view.findChild<QPushButton*>("cancelReportTask")->click();});
     Wait([&]{return view.property("reportTaskBusy").toBool();});
@@ -154,6 +156,14 @@ void CheckGenerationAndTasks() {
     retry.QueueReport(record);retry.show();QCoreApplication::processEvents();
     Require(retry.GetReportAvailable("Wall","lazy-result") && retry.GetReportIds().isEmpty(),"read failure permanently discarded the retryable operation");
     fail=false;retry.ShowReports();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
+    ResultReport failedPreparation;std::atomic<int> attempts{0};
+    failedPreparation.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
+        return [&](const ReportCheckpoint&){++attempts;throw std::runtime_error("持续准备失败");return QVector<ReportDocument>{};};
+    };
+    failedPreparation.QueueReport(record);failedPreparation.show();Wait([&]{return attempts==0 || failedPreparation.property("reportTaskBusy").toBool();});
+    for(int i=0;i<20;++i)QCoreApplication::processEvents(QEventLoop::AllEvents,10);
+    Require(attempts==1 && !failedPreparation.property("reportTaskError").toString().isEmpty() && failedPreparation.GetReportAvailable("Wall","lazy-result"),"failed preparation immediately retried forever or discarded the source");
+    failedPreparation.hide();
     ResultReport parentView;
     parentView.onReadReports=[](const QJsonObject&,const QSet<QString>&){
         auto doc=Document("parent-inspection");doc.module="Alignment";doc.source="data-a";doc.result="child-inspection";

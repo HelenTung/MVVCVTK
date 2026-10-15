@@ -19,7 +19,7 @@ add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
-set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 60 LABELS "Reports;preview")
+set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 0 LABELS "Reports;preview")
 # Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")
 

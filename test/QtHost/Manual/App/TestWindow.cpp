@@ -248,9 +248,13 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         const auto provider=m_workflow.readReports.find(record["module"].toString());
         return provider==m_workflow.readReports.end()?QVector<ReportDocument>{}:provider->second(record,known);
     };
+    m_report->onPrepareReports=[this](const QJsonObject& record,const QSet<QString>& known)->ReportPreparation {
+        if(m_isClosing)return {};const auto provider=m_workflow.prepareReports.find(record["module"].toString());
+        return provider==m_workflow.prepareReports.end()?ReportPreparation{}:provider->second(record,known);
+    };
     m_report->getSources=[this]{QMap<QString,QString> sources;if(m_workflow.getPublishedGraph)
         for(const auto value:m_workflow.getPublishedGraph()["nodes"].toArray()) {const auto node=value.toObject();sources[node["ref"].toString()]=node["type"].toString();}return sources;};
-    m_report->onLocate=[this](const ReportDocument& doc,int row){
+    m_report->onLocate=[this](const ReportDocument& doc,ReportIndex row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
         if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
         const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);

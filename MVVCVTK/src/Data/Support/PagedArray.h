@@ -77,6 +77,12 @@ public:
         if(!CopyBytes(static_cast<const unsigned char*>(m_data)+offset,destination,bytes))throw std::runtime_error("Mesh storage read failed.");
         VirtualUnlock(static_cast<unsigned char*>(m_data)+offset,bytes);
     }
+    void CopyWindow(std::size_t offset,std::size_t bytes,void* destination)const {
+        if(offset>m_capacity || bytes>m_capacity-offset)throw std::out_of_range("Mesh storage read is outside the file.");
+        if(!bytes)return;
+        for(auto byte=offset;byte<offset+bytes;byte=(byte/pageBytes+1)*pageBytes)Touch(byte);
+        if(!CopyBytes(static_cast<const unsigned char*>(m_data)+offset,destination,bytes))throw std::runtime_error("Mesh storage read failed.");
+    }
     std::size_t GetResidentBound()const noexcept{return std::min(m_capacity,residentPages*pageBytes);}
 private:
     static bool CopyBytes(const void* source,void* target,std::size_t bytes)noexcept {
@@ -195,6 +201,13 @@ public:
     const Value* data()const noexcept{return m_file?static_cast<const Value*>(m_file->GetData()):m_small.data();}
     void swap(PagedArray& other)noexcept{m_file.swap(other.m_file);m_small.swap(other.m_small);std::swap(m_size,other.m_size);}
     void ReleasePages()const{if(m_file)m_file->Release();}
+    // 随机短记录不预取整页缓存；调用方提供有界工作区，文件读取保留 I/O 错误转换。
+    void CopyValues(std::size_t offset,std::size_t count,Value* target)const {
+        if(offset>m_size || count>m_size-offset)throw std::out_of_range("Paged value range is invalid.");
+        if(!count)return;
+        if(m_file)m_file->CopyWindow(offset*sizeof(Value),count*sizeof(Value),target);
+        else std::copy_n(m_small.begin()+offset,count,target);
+    }
     MeshReadArray<Value> GetReadSnapshot()const {
         if(!m_size)return {};
         if(!m_file)return MeshReadArray<Value>(m_small);

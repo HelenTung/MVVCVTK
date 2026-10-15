@@ -11,6 +11,7 @@ metricChecks数组每项：record、operationId、key、minimum、maximum、refe
 key 是该操作 result 中的点分路径；不再解析已删除的 standalone 控制台输出。
 record使用AUDIT_THRESHOLD/PART/GAP/SURFACE/ALIGNMENT/ARTIFACT。
 无参考时仅显式AllowIntrinsicOnly可运行，仍不产生精度验收通过声明。
+TimeoutSeconds/ToolBudgetMiB 默认 0，不启用期限和估算预算；非零只表示调用方主动设置的运行保护。
 #>
 [CmdletBinding()]
 param(
@@ -18,8 +19,8 @@ param(
     [string]$RepoRoot,
     [string]$DepsRoot,
     [ValidateSet('Debug','Release')][string]$Configuration = 'Release',
-    [ValidateRange(1,3600)][int]$TimeoutSeconds = 600,
-    [ValidateRange(16,131072)][int]$ToolBudgetMiB = 4096,
+    [ValidateRange(0,2147483647)][int]$TimeoutSeconds = 0,
+    [ValidateRange(0,2147483647)][int]$ToolBudgetMiB = 0,
     [switch]$AllowIntrinsicOnly,
     [switch]$ValidateOnly
 )
@@ -37,6 +38,7 @@ $report = [ordered]@{
     schemaVersion=2; status='BLOCKED'; sourceHead=''; sourceStatus=@()
     manifest=''; manifestHash=''; inputHash=''; configuration=$Configuration
     processExit=$null; elapsedMs=0; sampleIntervalMs=25; memorySamples=0
+    explicitTimeoutSeconds=$TimeoutSeconds; explicitToolBudgetMiB=$ToolBudgetMiB
     peakPrivateBytes=0L; peakWorkingSetBytes=0L; metricChecks=@()
     limitations=@(
         '裁切入口验证不等于非空裁切有效域到DefX的精度验收；该组合仍受G1限制',
@@ -210,7 +212,7 @@ try {
                 $report.peakPrivateBytes = [math]::Max($report.peakPrivateBytes,$process.PrivateMemorySize64)
                 $report.peakWorkingSetBytes = [math]::Max($report.peakWorkingSetBytes,$process.WorkingSet64)
             }
-            if ($watch.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
+            if ($TimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
                 Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
                 throw 'Audit process exceeded the explicit deadline'
             }

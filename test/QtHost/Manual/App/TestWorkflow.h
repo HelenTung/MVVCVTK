@@ -53,6 +53,8 @@ public:
     QJsonObject roiConsumer;
     std::function<void(const QString&)> onShowStatistics;
     std::map<QString,std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)>> readReports;
+    // owner thread 只冻结输入；返回的纯只读准备任务可在后台建立文件索引。
+    std::map<QString,std::function<ReportPreparation(const QJsonObject&,const QSet<QString>&)>> prepareReports;
     std::function<void(const QString&,const QString&)> onShowReports;
     std::function<void(const QString&,const QString&)> onShowBusinessReport;
     std::function<bool(const QString&,const QString&)> getReportAvailable;

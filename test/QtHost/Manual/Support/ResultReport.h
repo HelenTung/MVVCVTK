@@ -45,9 +45,10 @@ public:
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
     QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
-    QVector<int> GetFilteredRows() const;
-    std::function<void(const ReportDocument&,int)> onLocate;
+    ReportRows GetFilteredRows() const;
+    std::function<void(const ReportDocument&,ReportIndex)> onLocate;
     std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)> onReadReports;
+    std::function<ReportPreparation(const QJsonObject&,const QSet<QString>&)> onPrepareReports;
     std::function<QMap<QString,QString>()> getSources;
 protected:
     void showEvent(QShowEvent* event) override;
@@ -57,22 +58,19 @@ private:
     void SelectCurrent();
     void RefreshRows();
     void ContinueRows();
-    int GetRowCount() const;
+    ReportIndex GetRowCount() const;
     void RefreshPage();
     void CompareSelected();
     void ClearSelection();
     void ContinueGeneration();
     void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {});
+    void StartReportsTask(ReportPreparation work,QVector<ReportDocument> inputs,const QString& operation = {});
     void ContinueTask();
     QMap<QString, QJsonObject> m_records;
     QMap<QString, ReportDocument> m_documents;
     QMap<QString, QJsonObject> m_pendingReports;
     QSet<QString> m_completedOperations, m_removedReports;
-    QVector<ReportDocument> m_buildingReports;
-    QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
-    int m_buildingIndex = 0;
-    QDeadlineTimer m_generationDeadline;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;
     std::unique_ptr<Task> m_task;
@@ -89,14 +87,15 @@ private:
     QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
     QPushButton *m_previous = nullptr, *m_next = nullptr;
     QPushButton* m_locate = nullptr;
-    QVector<int> m_rows;
+    ReportRows m_rows;
     class RowScan;
     std::unique_ptr<RowScan> m_rowScan;
     QTimer* m_scanTimer = nullptr;
     QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
     bool m_allRows = false;
     bool m_rowsReady = false;
-    int m_page = 0, m_sortColumn = -1;
+    ReportIndex m_page = 0;
+    int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
     QPushButton* m_copy = nullptr;
