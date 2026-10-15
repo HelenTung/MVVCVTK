@@ -1,4 +1,5 @@
 #include "ReportWorkflowTests.h"
+#include "ReportLargeTests.h"
 #include "App/TestWindow.h"
 #include "Modules/ModulePanel.h"
 #include "Support/ResultReport.h"
@@ -182,7 +183,7 @@ void CheckReportWorkflow()
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
     view.hide();CheckMixedSortAndCancellation();CheckReportRepairs();std::cout<<"PASS: Report CSV, units, matching, selection, full-table paging and responsive sorting"<<std::endl;
 }
-void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport,const QString& previewPath,int timeoutMs)
+void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport,const QString& previewPath,int timeoutMs,bool checkLarge)
 {
     const auto module=record["module"].toString(),action=record["action"].toString();
     const auto summary=record["result"].toObject();
@@ -208,7 +209,12 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     if(requiresReport && !refs.isEmpty()) {
         std::cout<<"REPORT: preparing native "<<module.toStdString()<<std::endl;
         QString selected;for(const auto& ref:refs)if(view->GetReportAvailable(module,ref)){selected=ref;break;}
-        if(!selected.isEmpty())window.GetWorkflow().onShowBusinessReport(module,selected);
+        if(!selected.isEmpty()) {
+            const auto open=[&]{window.GetWorkflow().onShowBusinessReport(module,selected);};
+            if(checkLarge && QStringList{"Surface","Wall","Gap"}.contains(module) && view->GetReports(module,refs).isEmpty())
+                CheckNativeReportCancellation(*view,open,timeoutMs);
+            open();
+        }
         QElapsedTimer generation;generation.start();
         do {QCoreApplication::processEvents(QEventLoop::AllEvents,20);}
         while((view->property("reportGenerationBusy").toBool() || view->GetReports(module,refs).isEmpty()) && generation.elapsed()<timeoutMs);
@@ -347,6 +353,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
                 && compared.table->Read(0)[2]==compared.table->Read(1)[2] && compared.table->Read(0)[3]==compared.table->Read(1)[3],"real UI automatic mapping changed full-data valid counts or mean");
             view->RemoveReport(compared.id);
         }
+        if(checkLarge && doc.table->GetCount()>4096)CheckLargeReportOperations(*view,doc,copy,path,timeoutMs);
         std::weak_ptr<ReportTable> importedStorage=copy.table;const auto importedId=copy.id;copy.table.reset();
         view->RemoveReport(importedId);Require(importedStorage.expired() && QFile::exists(path),"real imported report storage was retained or its original CSV deleted");
         view->SelectReport(doc.id);

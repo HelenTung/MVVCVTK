@@ -18,6 +18,7 @@
 #endif
 #if defined(MANUAL_ALIGNMENT)
 #include "Host/MetrologyAlignmentHostFeature.h"
+#include "InspectionReport.h"
 #endif
 namespace Manual {
 namespace {
@@ -165,26 +166,9 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
         if(HasRevision(inspection) && !known.contains("inspection:"+inspection)) {
             const auto snapshot=feature->GetInspection(GetRef(inspection));
             if(snapshot && snapshot->report && snapshot->plan) {
-                QMap<int,ReportDocument> groups;
-                const QStringList metrics{"半径","直径","中心 X","中心 Y","中心 Z","中心距离","有向角度","平行平面有符号距离","拟合 RMS","拟合最大残差"};
-                for(const auto& item:snapshot->report->items) {
-                    const auto spec=std::find_if(snapshot->plan->items.begin(),snapshot->plan->items.end(),[&](const InspectionItem& value){return value.id==item.id;});
-                    if(spec==snapshot->plan->items.end())continue;const int metric=static_cast<int>(spec->measured.metric);
-                    if(!groups.contains(metric)) {
-                        const auto unit=spec->measured.metric==InspectionMetric::OrientedDirectionAngleDegrees?QString("deg"):length(snapshot->unit);
-                        auto doc=Document(record,"inspection-"+QString::number(metric),inspection,GetRefText(snapshot->sourceMesh),"计量 · "+metrics.value(metric,"项目"));
-                        doc.relatedResults.append(GetRefText(snapshot->alignmentResult));
-                        if(const auto alignment=feature->GetResult(snapshot->alignmentResult))doc.source=GetRefText(alignment->input.source);
-                        doc.columns={{"item_id",{},{},false},{"name",{},{},false},{"nominal_"+unit,metrics.value(metric),unit,true},
-                            {"measured_"+unit,metrics.value(metric),unit,true},{"deviation_"+unit,metrics.value(metric)+"相对名义偏差",unit,true},{"verdict",{},{},false},{"reason",{},{},false}};
-                        doc.identityColumn=0;doc.valueColumn=3;doc.identityStable=true;doc.table=std::make_shared<ReportTable>();groups[metric]=std::move(doc);
-                    }
-                    groups[metric].table->Append({QString::fromStdString(item.id),QString::fromStdString(spec->name),item.nominal?Number(*item.nominal):QString(),
-                        item.measured?Number(*item.measured):QString(),item.deviation?Number(*item.deviation):QString(),QString::number(static_cast<int>(item.verdict)),QString::fromStdString(item.message)});
-                }
-                for(auto it=groups.begin();it!=groups.end();++it)reports.append(it.value());
-                if(reports.isEmpty()){auto empty=Document(record,"inspection",inspection,GetRefText(snapshot->sourceMesh),"计量明细（空结果）");empty.columns={{"item_id",{},{},false}};empty.table=std::make_shared<ReportTable>();reports.append(std::move(empty));}
-                reports.first().id="inspection:"+inspection;
+                auto source=GetRefText(snapshot->sourceMesh);
+                if(const auto alignment=feature->GetResult(snapshot->alignmentResult))source=GetRefText(alignment->input.source);
+                reports.append(CreateInspectionReport(record,*snapshot,source));
             }
         }
         if(HasRevision(deviation) && !known.contains("deviation:"+deviation)) {

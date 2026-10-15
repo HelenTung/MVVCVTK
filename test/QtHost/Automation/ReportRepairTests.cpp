@@ -1,6 +1,10 @@
 #include "ReportWorkflowTests.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
+#if defined(MANUAL_ALIGNMENT)
+#include "Support/InspectionReport.h"
+#include "Support/JsonInput.h"
+#endif
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
@@ -167,9 +171,42 @@ void CheckGenerationAndTasks() {
     parentView.hide();
     view.hide();
 }
+#if defined(MANUAL_ALIGNMENT)
+void CheckInspectionPreparation() {
+    ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
+    DataRevisionRef ref;ref.entityId.bytes[0]=31;ref.generation=1;const auto text=GetRefText(ref);
+    const QJsonObject record{{"operationId","inspection-preparation"},{"module","Alignment"},{"result",QJsonObject{{"inspection",text}}}};
+    view.onReadReports=[&](const QJsonObject& input,const QSet<QString>&) {
+        auto plan=std::make_shared<InspectionPlan>();auto report=std::make_shared<InspectionReport>();
+        for(int i=0;i<50000;++i){InspectionItem spec;spec.id=std::to_string(i);spec.name="name-"+spec.id;
+            spec.measured.metric=i%2?InspectionMetric::OrientedDirectionAngleDegrees:InspectionMetric::Radius;plan->items.push_back(spec);}
+        for(int i=49999;i>=0;--i){InspectionItemResult row;row.id=std::to_string(i);row.nominal=i;row.measured=i+.5;row.deviation=.5;row.message="original";report->items.push_back(row);}
+        auto repeated=plan->items.front();repeated.name="wrong duplicate";plan->items.push_back(repeated);
+        InspectionItemResult unknown;unknown.id="unknown";report->items.push_back(unknown);
+        InspectionSnapshot snapshot;snapshot.result=ref;snapshot.alignmentResult=ref;snapshot.sourceMesh=ref;snapshot.unit=AlignmentUnit::Millimeter;
+        snapshot.plan=plan;snapshot.report=report;planLease=plan;reportLease=report;
+        auto doc=CreateInspectionReport(input,snapshot,"data-a");Require(!doc.table && bool(doc.prepareReports),"inspection provider eagerly materialized its plan or rows");
+        return QVector<ReportDocument>{std::move(doc)};
+    };
+    view.QueueReport(record);view.ShowReports({},text,"Alignment");view.show();
+    Wait([&]{return view.property("reportGenerationProgress").toULongLong()<256;});
+    Require(view.property("reportGenerationBusy").toBool()&&!planLease.expired(),"inspection preparation failed to yield before finishing its index");
+    view.CancelTasks();Require(planLease.expired()&&reportLease.expired()&&view.GetReportIds().isEmpty(),"cancelled inspection preparation retained snapshots or published a group");
+    view.ShowReports({},text,"Alignment");Wait([&]{return view.GetReports("Alignment",{text}).size()!=2 || view.property("reportGenerationBusy").toBool();});
+    const auto groups=view.GetReports("Alignment",{text});Require(planLease.expired()&&reportLease.expired(),"completed inspection groups retained the native plan or results");
+    int total=0;for(const auto& doc:groups){Require(doc.table->GetCount()==25000,"inspection grouping changed its complete population");const bool angle=doc.columns[3].unit=="deg";
+        Require(angle||doc.columns[3].unit=="mm","inspection grouping lost units");
+        for(int i=0;i<doc.table->GetCount();++i){const int original=(angle?49999:49998)-2*i;const auto row=doc.table->Read(i);
+            Require(row[0]==QString::number(original)&&row[1]=="name-"+row[0]&&row[2]==QString::number(original)&&row[3]==QString::number(original+.5,'g',17)&&row[4]=="0.5"&&row[6]=="original","inspection preparation changed IDs, order, names, values or original reason");}total+=doc.table->GetCount();}
+    Require(total==50000,"inspection preparation lost or duplicated report items");view.hide();
+}
+#endif
 }
 void CheckReportRepairs() {
     CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();
+#if defined(MANUAL_ALIGNMENT)
+    CheckInspectionPreparation();
+#endif
     std::cout<<"PASS: report semantics, associations, spatial evidence, lazy generation, cancellation and resource release"<<std::endl;
 }
 }

@@ -158,6 +158,7 @@ public:
 class ResultReport::Task final {
 public:
     std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<qulonglong>> progress=std::make_shared<std::atomic<qulonglong>>(0);
     QVector<ReportDocument> inputs;
     std::uint64_t viewRevision=0;
     std::future<ReportDocument> future;
@@ -462,7 +463,8 @@ void ResultReport::ContinueGeneration()
                 if((!resultHint || !sourceHint) && !std::any_of(documents.cbegin(),documents.cend(),[&](const auto& doc){
                     return MatchesSource(doc,m_sourceFilter) && MatchesResult(doc,m_resultFilter) && MatchesModule(doc,m_moduleFilter);
                 }))continue;
-                m_buildingOperation=it.key();m_buildingIndex=0;
+                m_buildingOperation=it.key();m_buildingIndex=0;m_generationProgress=0;
+                setProperty("reportGenerationProgress",qulonglong(0));setProperty("reportGenerationError",QString());
                 m_generationDeadline.setRemainingTime(reportTaskTimeoutMs);
                 m_buildingReports=std::move(documents);
                 break;
@@ -473,9 +475,19 @@ void ResultReport::ContinueGeneration()
         if(m_generationDeadline.hasExpired())throw std::runtime_error("报告任务超过运行期限");
         QElapsedTimer elapsed;elapsed.start();int work=0;
         while(m_buildingIndex<m_buildingReports.size() && work++<256 && elapsed.elapsed()<4) {
+            ++m_generationProgress;
+            auto& candidate=m_buildingReports[m_buildingIndex];
+            if(candidate.prepareReports) {
+                QVector<ReportDocument> prepared;
+                if(!candidate.prepareReports(prepared))continue;
+                m_buildingReports.removeAt(m_buildingIndex);
+                for(int index=0;index<prepared.size();++index)m_buildingReports.insert(m_buildingIndex+index,std::move(prepared[index]));
+                continue;
+            }
             const auto table=m_buildingReports[m_buildingIndex].table;
             if(!table || table->ContinueBuild()){if(table)table->PrepareRead();++m_buildingIndex;}
         }
+        setProperty("reportGenerationProgress",m_generationProgress);
         if(m_buildingIndex<m_buildingReports.size()){m_buildTimer->start(0);return;}
         auto documents=std::move(m_buildingReports);m_buildingReports.clear();
         m_completedOperations.insert(m_buildingOperation);m_pendingReports.remove(m_buildingOperation);m_buildingOperation.clear();
@@ -486,6 +498,7 @@ void ResultReport::ContinueGeneration()
         m_buildTimer->start(0);
     }catch(const std::exception& e) {
         m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);
+        setProperty("reportGenerationError",QString::fromUtf8(e.what()));
         m_taskStatus->setText("业务结果保留，报告读取失败，重新打开可重试："+QString::fromUtf8(e.what()));
     }
 }
@@ -494,24 +507,27 @@ void ResultReport::StartTask(std::function<ReportDocument(const ReportCheckpoint
     if(m_task)throw std::runtime_error("请等待当前报告任务完成或取消后重试");
     m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);
     m_task=std::make_unique<Task>();m_task->inputs=std::move(inputs);m_task->viewRevision=m_viewRevision;
-    const auto cancelled=m_task->cancelled;auto* owner=thread();
+    const auto cancelled=m_task->cancelled;const auto progress=m_task->progress;auto* owner=thread();
     // 运行上限只限制这个宿主任务，非性能达标线；取消在每行/空间候选观察。
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(reportTaskTimeoutMs);
-    m_task->future=std::async(std::launch::async,[work=std::move(work),cancelled,deadline,owner] {
-        const ReportCheckpoint checkpoint=[cancelled,deadline] {
+    m_task->future=std::async(std::launch::async,[work=std::move(work),cancelled,progress,deadline,owner] {
+        const ReportCheckpoint checkpoint=[cancelled,progress,deadline] {
             if(cancelled->load())throw std::runtime_error("报告任务已取消");
             if(std::chrono::steady_clock::now()>=deadline)throw std::runtime_error("报告任务超过运行期限");
+            progress->fetch_add(1,std::memory_order_relaxed);
         };
         checkpoint();auto document=work(checkpoint);checkpoint();
         if(document.table)document.table->SetOwnerThread(owner);
         return document;
     });
-    setProperty("reportTaskBusy",true);setProperty("reportTaskError",QString());
+    setProperty("reportTaskBusy",true);setProperty("reportTaskError",QString());setProperty("reportTaskProgress",qulonglong(0));
     m_taskStatus->setText("正在处理报告…");m_cancelTask->setEnabled(true);m_taskTimer->start();
 }
 void ResultReport::ContinueTask()
 {
-    if(!m_task || m_task->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+    if(!m_task)return;
+    setProperty("reportTaskProgress",m_task->progress->load(std::memory_order_relaxed));
+    if(m_task->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
     const bool cancelled=m_task->cancelled->load();
     const bool select=m_task->viewRevision==m_viewRevision;
     try {
@@ -553,6 +569,7 @@ void ResultReport::SetReportSource(const QString& id,const QString& source)
 void ResultReport::RefreshRows()
 {
     m_scanTimer->stop();m_rowScan.reset();setProperty("reportRowsBusy",false);
+    setProperty("reportRowsProgress",0);setProperty("reportRowsPhase",QString());
     m_rows.clear();m_allRows=false;m_rowsReady=false;m_page=0;
     m_table->horizontalHeader()->setSortIndicatorShown(false);
     if(!m_selected.table){RefreshPage();return;}
@@ -587,6 +604,8 @@ void ResultReport::ContinueRows()
         while(scan.next==scan.count && !scan.keys.empty() && work++<256 && elapsed.elapsed()<4) {
             scan.rows.append(scan.keys.top().row);scan.keys.pop();
         }
+        setProperty("reportRowsProgress",scan.next);
+        setProperty("reportRowsPhase",scan.next<scan.count?"read":"order");
         if(scan.next<scan.count || !scan.keys.empty()) {
             m_range->setText(QString("正在筛选 / 排序 · 已读取 %1 / %2").arg(scan.next).arg(scan.count));m_scanTimer->start(0);return;
         }
@@ -649,7 +668,7 @@ void ResultReport::CompareSelected()
     auto* mode=new QComboBox(&dialog);mode->setObjectName("reportMatchMode");mode->addItems({"仅分布比较","稳定业务标识","唯一空间匹配"});form->addRow("匹配方式",mode);
     auto* confirmed=new QCheckBox("已确认编号跨报告稳定，或坐标属于同一坐标系（并已核对坐标单位）",&dialog);confirmed->setObjectName("reportMatchConfirmed");layout->addWidget(confirmed);
     auto* mapping=new QCheckBox("已核对重名列的映射与有效性定义",&dialog);mapping->setVisible(a.mappingRequired || b.mappingRequired);layout->addWidget(mapping);
-    auto* distance=new QDoubleSpinBox(&dialog);distance->setDecimals(9);distance->setRange(.000000001,1e12);distance->setValue(.01);form->addRow("空间距离容差 mm",distance);
+    auto* distance=new QDoubleSpinBox(&dialog);distance->setObjectName("reportDistanceTolerance");distance->setDecimals(9);distance->setRange(.000000001,1e12);distance->setValue(.01);form->addRow("空间距离容差 mm",distance);
     auto* tolerance=new QDoubleSpinBox(&dialog);tolerance->setDecimals(9);tolerance->setRange(0,1e12);form->addRow("数值容差（基准单位）",tolerance);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);layout->addWidget(buttons);
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);

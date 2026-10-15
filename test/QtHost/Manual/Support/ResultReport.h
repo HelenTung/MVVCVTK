@@ -72,6 +72,7 @@ private:
     QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
     int m_buildingIndex = 0;
+    qulonglong m_generationProgress = 0;
     QDeadlineTimer m_generationDeadline;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;

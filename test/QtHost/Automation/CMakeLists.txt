@@ -1,9 +1,9 @@
 add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp BusinessWorkflowTests.cpp WorkbenchV1Tests.cpp
-    ReportWorkflowTests.cpp ReportWorkflowTests.h ReportRepairTests.cpp
+    ReportWorkflowTests.cpp ReportWorkflowTests.h ReportRepairTests.cpp ReportLargeTests.cpp ReportLargeTests.h
     Scenarios/business-primary.json Scenarios/business-crop.json
     Scenarios/business-artifact.json Scenarios/business-measurement.json
     Scenarios/frontend-context-regression.json Scenarios/frontend-analysis-regression.json Scenarios/workbench-v1.json
-    RoiContinuousRegression.py)
+    RoiContinuousRegression.py ReportLargeRegression.py)
 target_link_libraries(qt_feature_tests PRIVATE qt_feature_test_support)
 SetQtTargetDefaults(qt_feature_tests)
 set_target_properties(qt_feature_tests PROPERTIES OUTPUT_NAME QtFeatureTests
@@ -22,6 +22,26 @@ SetTestRuntime(QtFeature.Reports qt_feature_tests)
 set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 60 LABELS "Reports;preview")
 # Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")
+
+# 大报告专项完整读取真实 600 整卷；不裁 ROI、不截取结果行。
+set(MVVCVTK_QT_REPORT_INPUT "" CACHE FILEPATH "600x1800x600 float32 报告专项真实 CT")
+set(MVVCVTK_QT_REPORT_SPACING_MM "" CACHE STRING "报告专项真实 CT 的等距体素间距，mm")
+if(MVVCVTK_QT_REPORT_INPUT)
+    if(NOT EXISTS "${MVVCVTK_QT_REPORT_INPUT}" OR NOT MVVCVTK_QT_REPORT_SPACING_MM)
+        message(FATAL_ERROR "真实大报告回归需要存在的 RAW 和明确的 MVVCVTK_QT_REPORT_SPACING_MM")
+    endif()
+    foreach(feature IN ITEMS SurfaceDetermination PartSegmentation GapAnalysis MetrologyAlignment WallThickness)
+        if(NOT TARGET MVVCVTK::${feature})
+            message(FATAL_ERROR "真实大报告回归缺少 ${feature}")
+        endif()
+    endforeach()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME QtFeature.ReportsLarge COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ReportLargeRegression.py"
+        --input "${MVVCVTK_QT_REPORT_INPUT}" --spacing "${MVVCVTK_QT_REPORT_SPACING_MM}"
+        --output "${CMAKE_CURRENT_BINARY_DIR}/report-large-$<CONFIG>" --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
+    # 包含整卷算法、原生物化、所有行排序/比较及独立空间参考；这是运行上限而非响应达标线。
+    set_tests_properties(QtFeature.ReportsLarge PROPERTIES LABELS "real-data;Reports;large" RUN_SERIAL TRUE TIMEOUT 21600)
+endif()
 
 # 真实整卷回归显式启用，不用合成输入替代缺失的 CT 或采集间距。
 set(MVVCVTK_QT_ROI_CHAIN_INPUT "" CACHE FILEPATH "600x1800x600 float32 真实 CT")

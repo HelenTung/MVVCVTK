@@ -8,7 +8,7 @@
 class QIODevice;
 class QThread;
 namespace Manual {
-// 仅保存表格；不拥有 Session、体数据或原生结果快照。
+// 完成后只保存表格；构建候选可暂持只读原生数据，物化或取消后释放。
 class ReportTable final {
 public:
     ReportTable();
@@ -44,6 +44,8 @@ struct ReportDocument final {
     bool identityStable = false;
     bool mappingRequired = false;
     QStringList validValues{"0","Valid"};
+    // 所属线程每次只准备一个工作单元；完成后替换为实际分组，取消直接释放候选。
+    std::function<bool(QVector<ReportDocument>&)> prepareReports;
 };
 using ReportCheckpoint = std::function<void()>;
 ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const ReportCheckpoint& checkpoint = {});
