@@ -284,7 +284,7 @@ if(TARGET MVVCVTK::GapAnalysis AND TARGET MVVCVTK::SurfaceDetermination AND TARG
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include")
-    target_link_libraries(feature_render_parity_tests PRIVATE MVVCVTK::Host MVVCVTK::SurfaceDetermination
+    target_link_libraries(feature_render_parity_tests PRIVATE MVVCVTK::Host MVVCVTK::SurfaceDetermination MVVCVTK::OrthogonalCrop
         MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
     SetTargetDefaults(feature_render_parity_tests)
     set_target_properties(feature_render_parity_tests PROPERTIES

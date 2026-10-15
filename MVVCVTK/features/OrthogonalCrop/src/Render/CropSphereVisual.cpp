@@ -1,4 +1,5 @@
 #include "Render/CropSphereVisual.h"
+#include "Render/CropCurveProjection.h"
 #include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCamera.h>
@@ -139,57 +140,9 @@ P CropSphereVisual::Project(const P& point) const {
     const auto* display=m_renderer->GetDisplayPoint(); return {display[0],display[1],display[2]};
 }
 void CropSphereVisual::AppendCircle(vtkPolyData& output,const P& center,double radius,const P& a,const P& b) {
-    const auto point=[&](double angle) { P p{}; for(int j=0;j<3;++j)p[j]=center[j]+radius*(a[j]*std::cos(angle)+b[j]*std::sin(angle));return p; };
-    // 1. 齐次裁剪平面在圆上均为 c + u*cos(t) + v*sin(t)。
-    // 先解析求交，只有位于视锥内的连续弧段参与屏幕弦差；不跨越近裁面或相机平面。
-    vtkNew<vtkMatrix4x4> clip;
-    vtkMatrix4x4::Multiply4x4(m_camera->GetCompositeProjectionTransformMatrix(m_renderer->GetTiledAspectRatio(),0,1),m_modelToWorld,clip);
-    std::array<double,4> c{},u{},v{};
-    const double input[4]{center[0],center[1],center[2],1};
-    const double axisA[4]{radius*a[0],radius*a[1],radius*a[2],0},axisB[4]{radius*b[0],radius*b[1],radius*b[2],0};
-    clip->MultiplyPoint(input,c.data());clip->MultiplyPoint(axisA,u.data());clip->MultiplyPoint(axisB,v.data());
-    std::array<std::array<double,3>,6> planes{};
-    for(int k=0;k<6;++k) {
-        const int axis=k/2;const double sign=k%2?-1:1;
-        for(int j=0;j<3;++j) {
-            const auto& value=j==0?c:j==1?u:v;
-            planes[k][j]=(k==4?0:value[3])+sign*value[axis];
-        }
-    }
-    std::vector<double> breaks{0,tau};
-    for(const auto& plane:planes) {
-        const double amplitude=std::hypot(plane[1],plane[2]);
-        if(amplitude==0||std::abs(plane[0])>amplitude)continue;
-        const double phase=std::atan2(plane[2],plane[1]),delta=std::acos(std::clamp(-plane[0]/amplitude,-1.0,1.0));
-        for(double angle:{phase-delta,phase+delta}){angle=std::fmod(angle+tau,tau);if(angle>0&&angle<tau)breaks.push_back(angle);}
-    }
-    std::sort(breaks.begin(),breaks.end());breaks.erase(std::unique(breaks.begin(),breaks.end()),breaks.end());
-    auto* points=output.GetPoints();auto* lines=output.GetLines();
-    for(std::size_t interval=1;interval<breaks.size();++interval) {
-        const double low=breaks[interval-1],high=breaks[interval],middle=(low+high)*.5;
-        if(!std::all_of(planes.begin(),planes.end(),[&](const auto& p){return p[0]+p[1]*std::cos(middle)+p[2]*std::sin(middle)>=0;}))continue;
-        std::vector<P> samples{point(low)};
-        const auto append=[&](auto&& self,double from,double to,const P& p,const P& q,int depth)->void {
-            const double angle=(from+to)*.5;const auto mid=Project(point(angle));
-            const double dx=q[0]-p[0],dy=q[1]-p[1],length=dx*dx+dy*dy;
-            const double t=length>0?std::clamp(((mid[0]-p[0])*dx+(mid[1]-p[1])*dy)/length,0.0,1.0):0;
-            const double error=std::hypot(mid[0]-p[0]-t*dx,mid[1]-p[1]-t*dy);
-            if(depth<16&&std::isfinite(error)&&error>pixelError) {
-                self(self,from,angle,p,mid,depth+1);self(self,angle,to,mid,q,depth+1);
-            } else samples.push_back(point(to));
-        };
-        const int segments=std::max(1,static_cast<int>(std::ceil((high-low)*32/tau)));
-        for(int i=0;i<segments;++i) {
-            const double from=low+(high-low)*i/segments,to=low+(high-low)*(i+1)/segments;
-            append(append,from,to,Project(point(from)),Project(point(to)),0);
-        }
-        const bool closed=low==0&&high==tau;
-        const auto first=points->GetNumberOfPoints();lines->InsertNextCell(static_cast<int>(samples.size()));
-        for(std::size_t i=0;i<samples.size();++i)
-            lines->InsertCellPoint(closed&&i+1==samples.size()?first:points->InsertNextPoint(samples[i].data()));
-    }
-    points->Modified();lines->Modified();output.Modified();
+    CropCurveProjection::AppendCircle(m_renderer,m_modelToWorld,output,center,radius,a,b);
 }
+
 bool CropSphereVisual::GetHandleUsable(const P& point) const {
     const auto center=Project(m_center),handle=Project(point);
     // 两个 8 px 手柄的命中区应分离；悬停/拖动时由 UpdateView 禁止自动摆位。

@@ -7,6 +7,7 @@
 #include "Render/Contracts/SlicePlaneState.h"
 #include "Render/Support/SliceContourPlane.h"
 #include "Render/CropSphereVisual.h"
+#include "Render/CropCylinderVisual.h"
 #include <vtkActor2D.h>
 #include <vtkCoordinate.h>
 #include <vtkCubeSource.h>
@@ -35,7 +36,7 @@ public:
         m_axis = role == HostRenderViewRole::TopDownSlice ? 2
             : role == HostRenderViewRole::FrontBackSlice ? 1
             : role == HostRenderViewRole::LeftRightSlice ? 0 : -1;
-        if(m_axis<0)m_sphereVisual=std::make_unique<CropSphereVisual>();
+        if(m_axis<0){m_sphereVisual=std::make_unique<CropSphereVisual>();m_cylinderVisual=std::make_unique<CropCylinderVisual>();}
         m_projection->SetCoordinateSystemToWorld();
         m_mapper->SetTransformCoordinate(m_projection);m_mapper->TransformCoordinateUseDoubleOn();
         m_mapper->SetInputConnection(m_displayGeometry->GetOutputPort());
@@ -66,17 +67,20 @@ public:
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
         FeatureOverlayBase::AttachRenderer(renderer);
-        if(m_sphereVisual)m_sphereVisual->AttachRenderer(renderer);
+        m_renderer=renderer;UpdateCurveRenderer();
     }
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
         if(m_sphereVisual)m_sphereVisual->DetachRenderer();
+        if(m_cylinderVisual)m_cylinderVisual->DetachRenderer();
+        m_renderer=nullptr;
         FeatureOverlayBase::DetachRenderer(renderer);
     }
-    void SetSphereEditing(bool editing)
+    void SetCurveEditing(bool editing)
     {
-        m_sphereEditing=editing;
+        m_curveEditing=editing;
         if(m_sphereVisual)m_sphereVisual->SetVisible(m_shape==CropShape::Sphere&&!editing);
+        if(m_cylinderVisual)m_cylinderVisual->SetVisible(m_shape==CropShape::Cylinder&&!editing);
     }
     void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
     void SetOverlayState(const FeatureOverlayState& state) override
@@ -87,6 +91,7 @@ public:
         if(m_shape==CropShape::Sphere) {
             UpdateSphere();Set3DPropsTransform(state.modelToWorld);return;
         }
+        if(m_shape==CropShape::Cylinder&&m_cylinderVisual)m_cylinderVisual->SetGeometry(m_operation,m_modelToWorld);
         double n[3];m_plane->GetNormal(n);
         const double dot=n[0]*m_normal[0]+n[1]*m_normal[1]+n[2]*m_normal[2];
         const double length=std::hypot(n[0],n[1],n[2])*std::hypot(m_normal[0],m_normal[1],m_normal[2]);
@@ -98,7 +103,8 @@ public:
     }
     void SetOperation(const CropOpItem& op, const CropBoundsDouble6Array& bounds)
     {
-        m_shape=op.geometryType;
+        m_shape=op.geometryType;m_operation=op;UpdateCurveRenderer();
+        if(m_cylinderVisual){m_cylinderVisual->SetGeometry(op,m_modelToWorld);m_cylinderVisual->SetVisible(m_shape==CropShape::Cylinder&&!m_curveEditing);}
         if(m_sphereVisual)m_sphereVisual->SetVisible(false);m_text->SetVisibility(true);
         m_center=op.planeCenterInInputModel;
         m_normal=op.planeNormalInInputModel;
@@ -151,8 +157,14 @@ public:
         filter->Update();m_mesh->ShallowCopy(filter->GetOutput());
         m_cutter->SetInputData(m_mesh);m_displayGeometry->SetInputConnection(m_cutter->GetOutputPort());
         m_text->SetInput(text.str().c_str());
+        if(m_shape==CropShape::Cylinder)m_text->SetVisibility(m_axis>=0);
     }
 private:
+    void UpdateCurveRenderer(){
+        if(!m_renderer||m_axis>=0)return;
+        if(m_shape==CropShape::Sphere)m_sphereVisual->AttachRenderer(m_renderer);else m_sphereVisual->DetachRenderer();
+        if(m_shape==CropShape::Cylinder)m_cylinderVisual->AttachRenderer(m_renderer);else m_cylinderVisual->DetachRenderer();
+    }
     void UpdateSphere()
     {
         if(m_axis>=0) {
@@ -161,12 +173,14 @@ private:
         } else {
             m_sphereVisual->SetGeometry(m_center,m_radius,m_modelToWorld);
             m_sphereVisual->SetState(CropSphereVisual::State::Passive);
-            m_sphereVisual->SetVisible(!m_sphereEditing);
+            m_sphereVisual->SetVisible(!m_curveEditing);
         }
     }
     CropShape m_shape=CropShape::Box;
     std::unique_ptr<CropSphereVisual> m_sphereVisual;
-    bool m_sphereEditing=false;
+    std::unique_ptr<CropCylinderVisual> m_cylinderVisual;
+    vtkWeakPointer<vtkRenderer> m_renderer;CropOpItem m_operation;
+    bool m_curveEditing=false;
     double m_radius=1;
     vtkSmartPointer<vtkMatrix4x4> m_modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();
     std::array<double,3> m_center{},m_normal{};
