@@ -2609,7 +2609,8 @@ void AppRuntime::SendViewUpdateFlags(
 
 bool AppRuntime::GetCanClearRenderInput() const
 {
-    return GetIsOwnerThread() && m_isAccepting.load() && !m_dataStage
+    // 关闭新数据接纳后仍须归还已停用的输入镜像；清理不重新打开任务接纳。
+    return GetIsOwnerThread() && !m_dataStage
         && m_sharedState && !m_sharedState->GetIsLoadActive();
 }
 

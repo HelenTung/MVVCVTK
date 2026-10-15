@@ -8,6 +8,8 @@
 #include "App/Tasks/AppDataExportTaskService.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Host/Internal/HostImageReadRuntime.h"
+#include "Host/VtkAppHostSession.h"
+#include "Host/HostFeature.h"
 #include "Render/Internal/VolumeLodProductBuilder.h"
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 #include "Render/Support/RenderFrameLifetime.h"
@@ -484,6 +486,115 @@ bool GetRoiExplicitClosureReleased()
         "ROI closure no longer permanently blocks its producer");
 }
 
+class OwnedStopFeature final : public HostFeature {
+public:
+    std::shared_ptr<TrustedDataPort> data;
+    Source output;
+    std::optional<DataRevisionRef> primaryAtDetach;
+    bool released=false;
+    DataCommitFailure failure=DataCommitFailure::None;
+    std::vector<DataLifetimeBlocker> blockers;
+    std::string_view GetFeatureId()const noexcept override{return "ResourceLifetime.OwnedPrimary";}
+    bool AttachHost(const HostFeatureContext& context)override{data=context.data;return bool(data);}
+    bool OnHostTick()override{return false;}
+    bool DetachHost()override {
+        if(!data)return true;
+        const auto binding=data->GetDataBinding(data->GetDataGraph(),primaryVolumeBinding);
+        primaryAtDetach=binding?binding->target:std::nullopt;
+        if(GetDataEntityIdValid(output.scope)) {
+            if(data->GetDataLifetime(output.scope).status==DataLifetimeStatus::Published) {
+                DataTransaction tx;tx.retireScopes.push_back({output.scope,DataLifetimeStatus::Published,{output.ref},true});
+                const auto result=data->SetDataCommit(std::move(tx));failure=result.failureReason;blockers=result.blockers;
+                if(result.status!=DataCommitStatus::Succeeded)return false;
+            }
+            const auto result=data->SetDataRelease(output.scope);blockers=result.blockers;
+            if(result.status!=DataLifetimeStatus::Released)return false;
+        }
+        released=true;data.reset();return true;
+    }
+    bool Publish(bool owned=true) {
+        auto image=vtkSmartPointer<vtkImageData>::New();image->SetDimensions(4,4,4);image->AllocateScalars(VTK_FLOAT,1);
+        std::fill_n(static_cast<float*>(image->GetScalarPointer()),64,1.F);VtkDataBridge bridge;
+        output={{data->CreateDataEntityId(),1},owned?data->CreateDataEntityId():DataEntityId{}};
+        DataTransaction tx;tx.outputs.push_back({output.ref.entityId,0,DataTypes::imageGrid3D,{},bridge.CreateImagePayload(image),{},
+            owned?std::optional<DataEntityId>{output.scope}:std::nullopt});
+        return data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+    }
+};
+
+bool GetOwnedPrimaryStopValid()
+{
+    bool passed=true;
+    for(int protection=0;protection<5;++protection) {
+        HostRenderViewConfig view;view.id="primary";view.role=HostRenderViewRole::Primary3D;
+        view.window.viewInit.viewMode=HostRenderMode::Volume;view.inputMode=HostInputMode::HostInjected;
+        view.renderWindow=vtkSmartPointer<vtkRenderWindow>::New();view.renderWindow->SetOffScreenRendering(1);view.renderWindow->SetSize(64,64);
+        HostSessionConfig config;config.renderViews={view};config.driveMode=HostDriveMode::HostDriven;config.onWorkAvailable=[]{};
+        VtkAppHostSession session(config);auto feature=std::make_shared<OwnedStopFeature>();
+        if(!Check(session.BuildSession()&&session.AttachFeature(feature)&&feature->Publish(protection!=3),"owned primary Stop fixture"))return false;
+        const auto port=feature->data;
+        const auto bind=[&](const std::string& name,std::optional<DataRevisionRef> target) {
+            const auto current=port->GetDataBinding(port->GetDataGraph(),name);
+            DataTransaction tx;tx.bindings.push_back({name,current?current->revision:0,true,current?current->target:std::nullopt,target});
+            return port->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+        };
+        const auto initial=port->GetDataBinding(port->GetDataGraph(),primaryVolumeBinding);
+        HostDataSelectRequest select;select.dataRevision=feature->output.ref;select.expectedBindingRevision=initial?initial->revision:0;
+        bool selected=false,complete=false;
+        const auto admission=session.SendRequest(std::move(select),[&](HostResult result){selected=result.isSucceeded;complete=true;});
+        if(!Check(admission.status==HostAdmissionStatus::Accepted,"Host adoption request admission"))return false;
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+        bool presented=false;
+        do {
+            session.SendUpdates();
+            const auto scenes=session.GetSceneViewStates();
+            presented=!scenes.empty()&&scenes.front().presentation
+                &&scenes.front().presentation->dataRevision==feature->output.ref;
+            if(!presented)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }while(!presented&&std::chrono::steady_clock::now()<until);
+        if(!Check(complete&&selected&&presented,"Host adopts and prepares the actual owned image presentation"))return false;
+        std::shared_ptr<const DataResourceLease> reader;
+        std::shared_ptr<const void> legacyBytes;
+        if(protection==1) {
+            const auto snapshot=port->GetData(port->GetDataGraph(),feature->output.ref);
+            const auto access=snapshot?snapshot->lifetime.lock():nullptr;
+            if(access)reader=access->StartResourceUse(feature->output.ref,"test.external-reader");
+            if(!Check(bool(reader),"external Reader admission"))return false;
+        }
+        if(protection==2&&!Check(bind("test.external-consumer",feature->output.ref),"ordinary external binding admission"))return false;
+        if(protection==4) {
+            const auto snapshot=port->GetData(port->GetDataGraph(),feature->output.ref);
+            const auto payload=snapshot?std::dynamic_pointer_cast<const ImageGrid3DPayload>(snapshot->payload):nullptr;
+            if(payload)legacyBytes=payload->GetValues();
+            if(!Check(bool(legacyBytes),"external immutable byte ownership admission"))return false;
+        }
+        const bool stopped=session.Stop();
+        if(protection==0||protection==3) {
+            passed=Check(stopped&&feature->released,"Host Stop releases its adopted owner result")&&passed;
+            if(protection==3)passed=Check(feature->primaryAtDetach==std::optional<DataRevisionRef>{feature->output.ref},
+                "Stop preserves an ordinary unscoped primary input")&&passed;
+            if(!stopped)for(const auto& blocker:feature->blockers)std::cerr<<"Owned primary blocker: "<<blocker.owner<<'\n';
+        } else {
+            passed=Check(!stopped&&!feature->released,"external Reader, ordinary consumer or byte owner still blocks Stop")&&passed;
+            const auto expected=protection==1?"test.external-reader":protection==2?"test.external-consumer":"LegacyOwner:shared-bytes";
+            passed=Check(std::any_of(feature->blockers.begin(),feature->blockers.end(),[&](const auto& blocker){return blocker.owner==expected;}),
+                "Stop reaches the exact external ownership blocker")&&passed;
+            if(protection==2) {
+                const auto binding=port->GetDataBinding(port->GetDataGraph(),"test.external-consumer");
+                passed=Check(binding&&binding->target==std::optional<DataRevisionRef>{feature->output.ref},"Stop preserves external ordinary binding")&&passed;
+            }
+        }
+        // 红测也解除本 fixture 的占用，避免失败后的 Session 析构留下后台任务。
+        reader.reset();legacyBytes.reset();
+        if(!stopped) {
+            if(protection==2)(void)bind("test.external-consumer",{});
+            (void)bind(std::string(primaryVolumeBinding),{});
+            passed=Check(session.Stop(),"owned primary Stop fixture cleanup")&&passed;
+        }
+    }
+    return passed;
+}
+
 }
 
 bool GetResourceLifetimeTests()
@@ -491,6 +602,7 @@ bool GetResourceLifetimeTests()
     bool passed=GetLoadedGenerationsReleased();
     passed=GetScopedConsumerChainReleased()&&passed;
     passed=GetRoiExplicitClosureReleased()&&passed;
+    passed=GetOwnedPrimaryStopValid()&&passed;
     passed=GetQueuedExportsProtected()&&passed;
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;

@@ -1940,7 +1940,22 @@ bool HostViewRuntimeRegistry::Impl::SetDataTasksStopping()
     bool stopping=true;
     for (const auto& view:m_views)
         stopping=view.taskControl && view.taskControl->SetDataTaskStopping() && stopping;
-    return stopping;
+    if (!stopping) return false;
+    const auto data=m_transitionData.lock();
+    if (!data) return true;
+    const auto graph=data->GetDataGraph();
+    const auto binding=data->GetDataBinding(graph,primaryVolumeBinding);
+    const auto input=binding&&binding->target?data->GetData(graph,*binding->target):nullptr;
+    if (!input || !GetDataEntityIdValid(input->lifetimeScope)
+        || input->lifetimePolicy!=DataLifetimePolicy::OwnerRetirement) return true;
+    // 全会话退出先归还 Host 自己的显示镜像与选择；否则当前 Owner 结果会被
+    // primary 绑定或镜像字节反向阻塞。外部 Reader、普通绑定及外部字节引用仍保留。
+    // 镜像未清完时保留绑定，下一次 Stop 仍能以同一实体重试。
+    for (auto& view:m_views)
+        if (view.isAvailable && (!view.dataStage || !view.dataStage->ClearRenderInput(input->self.entityId))) return false;
+    DataTransaction transaction;
+    transaction.bindings.push_back({std::string(primaryVolumeBinding),binding->revision,true,binding->target,{}});
+    return data->SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded;
 }
 
 bool HostViewRuntimeRegistry::Impl::StopLease()
