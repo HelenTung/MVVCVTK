@@ -3,6 +3,7 @@
 #include <vtkPolyDataMapper2D.h>
 #include <vtkPropCollection.h>
 #include <vtkTextMapper.h>
+#include <vtkTextProperty.h>
 #include <QRegularExpression>
 // 测试用途：自动执行实际页面入口的合成回归或指定用例，验证中文分派、业务日志和生命周期。
 #include "TestCaseRunner.h"
