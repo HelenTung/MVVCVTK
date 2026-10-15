@@ -134,6 +134,15 @@ void CheckReportGenerationSelection() {
         wait([&]{return view.GetReportIds().contains(next.id)&&!view.property("reportGenerationBusy").toBool();});
         Require(view.GetSelectedReport().id==(enabled?next.id:second.id),"generation ignored the explicit report follow setting");
     }
+    auto lazy=first;lazy.id="generation-lazy-native";lazy.table=std::make_shared<ReportTable>();
+    const auto lazyReads=std::make_shared<std::size_t>(0);
+    lazy.table->SetRows(50000,[lazyReads](ReportRowId row){++*lazyReads;return QStringList{QString::number(row)};});
+    view.onReadReports=[lazy](const auto&,const auto&){return QVector<ReportDocument>{lazy};};
+    CheckNativeReportCancellation(view,[&]{view.QueueReport(operation("lazy-native-generation"));},0);
+    Require(view.GetReportIds().contains(lazy.id)&&!lazy.table->GetIsComplete()&&*lazyReads>0&&*lazyReads<50000,
+        "native cancellation audit forced full materialization or rejected lazy publication");
+    Require(SameRow(lazy.table->Read(49999),QStringList{"49999"})&&!lazy.table->GetIsComplete(),
+        "lazy published native table lost its tail or materialized its full prefix");
 }
 #if defined(MANUAL_SURFACE)
 void CheckSurfaceReads() {

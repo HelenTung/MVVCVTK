@@ -123,7 +123,9 @@ void CheckNativeReportCancellation(ResultReport& view,const std::function<void()
     std::vector<std::weak_ptr<ReportTable>> storage;bool observed=false,needsBuild=false;
     view.onReadReports=[&](const QJsonObject& record,const QSet<QString>& known){
         auto docs=restore.provider(record,known);observed=true;
-        for(const auto& doc:docs){needsBuild=needsBuild||bool(doc.prepareReports)||(doc.table&&!doc.table->GetIsComplete());if(doc.table)storage.push_back(doc.table);}
+        // 只有显式要求物化的候选需要经历长生成；普通冻结原生表可直接分页发布。
+        for(const auto& doc:docs){needsBuild=needsBuild||bool(doc.prepareReports)
+            ||(doc.materializeBeforePublish&&doc.table&&!doc.table->GetIsComplete());if(doc.table)storage.push_back(doc.table);}
         return docs;
     };
     const auto ids=view.GetReportIds();open();
