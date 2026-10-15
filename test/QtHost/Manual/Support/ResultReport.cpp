@@ -453,12 +453,18 @@ void ResultReport::ContinueGeneration()
             for(auto it=m_pendingReports.cbegin();it!=m_pendingReports.cend();++it) {
                 const auto& record=it.value();
                 if(!m_moduleFilter.isEmpty() && record["module"].toString()!=m_moduleFilter)continue;
-                if(!m_resultFilter.isEmpty() && !GetPendingResults(record).contains(m_resultFilter))continue;
-                if(!m_sourceFilter.isEmpty() && record["source"].toObject()["dataRevision"].toString()!=m_sourceFilter
-                    && record["result"].toObject()["source"].toString()!=m_sourceFilter)continue;
+                const bool resultHint=m_resultFilter.isEmpty() || GetPendingResults(record).contains(m_resultFilter);
+                const bool sourceHint=m_sourceFilter.isEmpty() || record["source"].toObject()["dataRevision"].toString()==m_sourceFilter
+                    || record["result"].toObject()["source"].toString()==m_sourceFilter;
+                // 计量报告的父对齐结果和真实来源在冻结快照中，不一定出现在运行摘要里。
+                if((!resultHint || !sourceHint) && record["module"].toString()!="Alignment")continue;
+                auto documents=onReadReports?onReadReports(record,GetReportIds()+m_removedReports):QVector<ReportDocument>{};
+                if((!resultHint || !sourceHint) && !std::any_of(documents.cbegin(),documents.cend(),[&](const auto& doc){
+                    return MatchesSource(doc,m_sourceFilter) && MatchesResult(doc,m_resultFilter) && MatchesModule(doc,m_moduleFilter);
+                }))continue;
                 m_buildingOperation=it.key();m_buildingIndex=0;
                 m_generationDeadline.setRemainingTime(reportTaskTimeoutMs);
-                if(onReadReports)m_buildingReports=onReadReports(record,GetReportIds()+m_removedReports);
+                m_buildingReports=std::move(documents);
                 break;
             }
             if(m_buildingOperation.isEmpty()) {setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);return;}

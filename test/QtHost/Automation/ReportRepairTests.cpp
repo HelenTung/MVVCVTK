@@ -154,6 +154,17 @@ void CheckGenerationAndTasks() {
     retry.QueueReport(record);retry.show();QCoreApplication::processEvents();
     Require(retry.GetReportAvailable("Wall","lazy-result") && retry.GetReportIds().isEmpty(),"read failure permanently discarded the retryable operation");
     fail=false;retry.ShowReports();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
+    ResultReport parentView;
+    parentView.onReadReports=[](const QJsonObject&,const QSet<QString>&){
+        auto doc=Document("parent-inspection");doc.module="Alignment";doc.source="data-a";doc.result="child-inspection";
+        doc.relatedResults=QStringList{"parent-alignment"};return QVector<ReportDocument>{doc};
+    };
+    parentView.QueueReport({{"operationId","parent-op"},{"module","Alignment"},
+        {"source",QJsonObject{{"dataRevision","data-b"}}},{"result",QJsonObject{{"inspection","child-inspection"}}}});
+    parentView.ShowReports("data-a","parent-alignment","Alignment");parentView.show();
+    Wait([&]{return parentView.GetSelectedReport().id!="parent-inspection";});
+    Require(parentView.GetSelectedReport().source=="data-a","lazy parent entry used the current input instead of the frozen report source");
+    parentView.hide();
     view.hide();
 }
 }
