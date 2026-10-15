@@ -47,7 +47,7 @@ step('Alignment', 'EvaluateVoxelVolume', dict(source='current', extent=None,
 for _ in range(2):
     step('Alignment', 'VoxelVolumeResult', dict(voxelVolume='current'), status='Observed', deferReportCheck=True)
 step('Surface', 'SamplePoints', dict(maxPoints='4096'), status='Observed', saveAs='samples', deferReportCheck=True)
-# 第 9 次计算后，第 10 次查询才打开报告，覆盖 QString 队列中查询先于计算的情形。
+# 计算后经查询打开冻结报告；UI 自动读取也会登记操作，按实际结果修订核对归属。
 step('Wall', 'Start', dict(source='current', labels='parts', mesh='surface', materialLabels=[],
      maxDistance=20, evaluationRoi=''), control='businessPrimary', expectPrimaryAction='Start', deferReportCheck=True)
 step('Wall', 'Result', dict(result='current'), status='Observed')
@@ -76,8 +76,11 @@ with (output / 'run.log').open('wb') as log:
     result = subprocess.run(command, shell=True, cwd=output, stdout=log, stderr=subprocess.STDOUT)
 if result.returncode == 0:
     records = json.loads((output / 'record.json').read_text(encoding='utf-8-sig'))['records']
-    wall = {row['action']: row['operationId'] for row in records if row['module'] == 'Wall'}
-    if str(wall.get('Start')) != '9' or str(wall.get('Result')) != '10':
-        raise RuntimeError('壁厚计算/查询编号不符合 9/10 队列反例')
+    wall = {row['action']: row for row in records if row['module'] == 'Wall'}
+    start, query = wall['Start'], wall['Result']
+    result_ref = start['result']['result']
+    if not result_ref or result_ref.endswith(':0') or query['result']['result'] != result_ref:
+        raise RuntimeError('壁厚查询没有绑定本次计算的精确结果修订')
+    print(f"Wall frozen-result identity Start={start['operationId']} Result={query['operationId']}", flush=True)
 print(f'Real full-volume report acceptance exitCode={result.returncode}', flush=True)
 raise SystemExit(result.returncode)

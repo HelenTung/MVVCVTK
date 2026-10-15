@@ -53,6 +53,7 @@ void CheckMidTaskCancel(ResultReport& view,const std::function<void()>& start,in
     }
     const auto progress=view.property("reportTaskProgress").toULongLong();QElapsedTimer cancellation;cancellation.start();
     view.findChild<QPushButton*>("cancelReportTask")->click();WaitTask(view,timeoutMs,false);
+    const auto error=view.property("reportTaskError").toString();Require(error.isEmpty()||error=="报告任务已取消","IO or processing failure was misreported as a successful cancellation");
     Require(view.GetReportIds()==ids && view.GetSelectedReport().id==selected,"cancelled real task published partial data or stole selection");
     std::cout<<"PASS: real mid-task cancel "<<phase<<" checkpoints="<<progress<<" cancelMs="<<cancellation.elapsed()<<std::endl;
 }
@@ -127,16 +128,17 @@ void CheckNativeReportCancellation(ResultReport& view,const std::function<void()
     };
     const auto ids=view.GetReportIds();open();
     Wait([&]{return (observed&&(!view.property("reportGenerationBusy").toBool()||view.property("reportGenerationProgress").toULongLong()>=4096))
-        || !view.property("reportGenerationError").toString().isEmpty();},timeoutMs);
+        || !view.property("reportGenerationError").toString().isEmpty() || !view.GetGenerationPending();},timeoutMs);
     if(!view.property("reportGenerationError").toString().isEmpty())throw std::runtime_error(view.property("reportGenerationError").toString().toStdString());
     if(!needsBuild){
         Require(observed&&!storage.empty()&&!view.property("reportGenerationBusy").toBool(),"readonly native catalog did not publish its complete report");
         std::cout<<"PASS: native readonly catalog completes without full-row materialization; worker cancellation is checked during full CSV/search/sort/comparison"<<std::endl;
         return;
     }
-    Require(view.property("reportGenerationBusy").toBool() && !storage.empty(),"real native generation did not expose partial bounded work");
+    Require(observed && view.property("reportGenerationBusy").toBool() && !storage.empty(),"real native generation did not expose partial bounded work");
     const auto progress=view.property("reportGenerationProgress").toULongLong();QElapsedTimer cancellation;cancellation.start();
     view.findChild<QPushButton*>("cancelReportTask")->click();
+    Require(view.property("reportGenerationError").toString().isEmpty(),"native generation failure was misreported as cancellation");
     Require(!view.property("reportGenerationBusy").toBool() && view.GetReportIds()==ids,"cancelled native generation published a partial report");
     for(const auto& weak:storage)Require(weak.expired(),"cancelled native report retained its temporary storage or source callback");
     std::cout<<"PASS: real native generation mid-cancel progress="<<progress<<" cancelMs="<<cancellation.elapsed()<<std::endl;
@@ -160,6 +162,7 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
         }
         const auto progress=view.property("reportRowsProgress").toLongLong();QElapsedTimer elapsed;elapsed.start();
         view.findChild<QPushButton*>("cancelReportRows")->click();QCoreApplication::processEvents();
+        Require(view.property("reportRowsError").toString().isEmpty(),"row processing failure was misreported as cancellation");
         Require(view.GetFilteredCount()==0 && !view.property("reportRowsBusy").toBool() && !view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"cancelled real scan exposed partial or exportable rows");
         std::cout<<"PASS: real mid-scan cancel "<<phase<<" rows="<<progress<<" cancelMs="<<elapsed.elapsed()<<std::endl;
     };

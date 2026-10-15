@@ -356,6 +356,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     if(requiresReport && !refs.isEmpty()) {
         std::cout<<"REPORT: preparing native "<<module.toStdString()<<std::endl;
         QString selected;for(const auto& ref:refs)if(view->GetReportAvailable(module,ref)){selected=ref;break;}
+        Require(!selected.isEmpty(),"successful business result has no frozen or pending native report");
         const auto beforeGeneration=heartbeats;QElapsedTimer generation;generation.start();
         if(!selected.isEmpty()) {
             const auto open=[&]{window.GetWorkflow().onShowBusinessReport(module,selected);};
@@ -367,6 +368,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             QCoreApplication::processEvents(QEventLoop::AllEvents,20);
             if(!view->property("reportGenerationError").toString().isEmpty()&&!view->property("reportGenerationBusy").toBool()&&view->GetReports(module,refs).isEmpty())
                 throw std::runtime_error(view->property("reportGenerationError").toString().toStdString());
+            Require(view->GetGenerationPending() || !view->GetReports(module,refs).isEmpty(),"native report request ended without publishing its exact result");
         }
         while((view->property("reportGenerationBusy").toBool() || view->GetReports(module,refs).isEmpty()) && (timeoutMs==0 || generation.elapsed()<timeoutMs));
         Require(!view->property("reportGenerationBusy").toBool(),"native report generation exceeded the scenario deadline");

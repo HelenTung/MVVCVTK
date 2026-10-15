@@ -39,6 +39,7 @@ public:
     void ExportReportFile(const QString& path, bool filtered = false);
     void QueueReport(const QJsonObject& record);
     bool GetReportAvailable(const QString& module, const QString& result) const;
+    bool GetGenerationPending() const;
     void RemoveReport(QString id);
     void SetReportSource(const QString& id, const QString& source);
     void CancelTasks();

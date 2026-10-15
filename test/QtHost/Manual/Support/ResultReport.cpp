@@ -462,6 +462,7 @@ bool ResultReport::GetReportAvailable(const QString& module,const QString& resul
     for(const auto& record:m_pendingReports)if(record["module"].toString()==module && GetPendingResults(record).contains(result))return true;
     return false;
 }
+bool ResultReport::GetGenerationPending() const {return m_buildTimer->isActive() || !m_buildingOperation.isEmpty() || bool(m_task);}
 void ResultReport::RefreshFailures()
 {
     const auto selected=m_failedReport->currentData().toString();m_failedReport->clear();
