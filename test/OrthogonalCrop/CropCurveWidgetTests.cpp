@@ -180,6 +180,26 @@ int GetCropCurveWidgetFailures()
         P rotate{};side.GetHandle(4)->GetHandleRepresentation()->GetWorldPosition(rotate.data());const auto rotateDisplay=project(rotate);radius=project(getPosition());
         check(rotateDisplay[0]>=8&&rotateDisplay[0]<=392&&rotateDisplay[1]>=8&&rotateDisplay[1]<=392
             &&std::hypot(rotateDisplay[0]-radius[0],rotateDisplay[1]-radius[1])>=16,"axial view keeps the rotation entry visible and distinct from the radius handle");
+        side.SetEnabled(false);cylinder.height=40;camera->SetParallelScale(10);camera->SetPosition(0,0,100);camera->SetClippingRange(.1,300);
+        side.SetGeometry(cylinder,CropMatrixDouble16Array{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});side.SetEnabled(true);frame->Render();
+        side.GetHandle(4)->GetHandleRepresentation()->GetWorldPosition(rotate.data());const auto slenderDisplay=project(rotate);
+        std::cout<<"Slender cylinder rotation handle: "<<slenderDisplay[0]<<", "<<slenderDisplay[1]<<'\n';
+        check(slenderDisplay[0]>=8&&slenderDisplay[0]<=392&&slenderDisplay[1]>=8&&slenderDisplay[1]<=392,
+            "visible end face of a slender cylinder retains a usable rotation handle");
+        check(side.GetGeometry().radius==3&&side.GetGeometry().height==40&&side.GetGeometry().axisInInputModel==P{0,0,1}
+            &&side.GetGeometry().centerInInputModel==P{0,0,0},"rotation handle placement does not change finite cylinder parameters");
+        const auto savedLever=rotate;side.StartGesture();auto* rotationHandle=side.GetHandle(4);rotationHandle->InvokeEvent(vtkCommand::StartInteractionEvent);
+        const P turned{savedLever[0]*std::cos(.15)+savedLever[2]*std::sin(.15),savedLever[1],-savedLever[0]*std::sin(.15)+savedLever[2]*std::cos(.15)};
+        rotationHandle->GetHandleRepresentation()->SetWorldPosition(turned.data());rotationHandle->InvokeEvent(vtkCommand::InteractionEvent);
+        P during{};rotationHandle->GetHandleRepresentation()->GetWorldPosition(during.data());
+        check(near(during,turned)&&!near(side.GetGeometry().axisInInputModel,P{0,0,1})&&side.GetGeometry().height==40&&side.GetGeometry().radius==3
+            &&side.GetGeometry().centerInInputModel==P{0,0,0},"shortened rotation lever keeps drag direction and finite geometry sizes consistent");
+        rotationHandle->InvokeEvent(vtkCommand::EndInteractionEvent);side.CancelGesture();rotationHandle->GetHandleRepresentation()->GetWorldPosition(rotate.data());
+        check(near(rotate,savedLever)&&side.GetGeometry().axisInInputModel==P{0,0,1},"cancel restores the shortened rotation lever as well as cylinder geometry");
+        frame->SetSize(640,360);view->SetViewport(.25,0,1,1);frame->Render();rotationHandle->GetHandleRepresentation()->GetWorldPosition(rotate.data());
+        const auto resized=project(rotate);const auto* origin=view->GetOrigin();const auto* size=view->GetSize();
+        check(resized[0]>=origin[0]+8&&resized[0]<=origin[0]+size[0]-8&&resized[1]>=origin[1]+8&&resized[1]<=origin[1]+size[1]-8
+            &&side.GetGeometry().height==40&&side.GetGeometry().radius==3,"split viewport and resize preserve a usable lever without changing cylinder dimensions");
         side.SetEnabled(false);side.SetContext(nullptr,nullptr);frame->Finalize();
     }
     widget.SetContext(nullptr,nullptr);check(!widget.SetEnabled(true),"missing view context rejects enable");window->Finalize();
