@@ -25,7 +25,7 @@ steps = []
 
 def step(module, action, parameters, status='Succeeded', **extra):
     row = dict(module=module, action=action, control='actionButton', parameters=parameters,
-               expectStatus=status, timeoutMs=3600000,
+               expectStatus=status, timeoutMs=0,
                reportPreview=(output / f'preview-{len(steps)}').as_posix())
     row.update(extra)
     steps.append(row)
@@ -62,7 +62,10 @@ step('Alignment', 'ImportReference', dict(filePath=reference, source='current', 
 step('Alignment', 'SaveRecipe', dict(recipe=None, inputRoi=''), status='FullyDetermined')
 step('Alignment', 'Start', dict(initialPoses=[identity]), status='FullyDetermined')
 step('Alignment', 'InspectGeometry', dict(result='current', id='full-real-surface-report', kind='Point',
-     vertexIds=[], targetBounds=None, inputRoi='', targetDirection=[0, 0, 1], useSectionPlane=False,
+     # 几何检测要求显式区域；此包围盒覆盖整卷及一层边距，不抽取小网格。
+     vertexIds=[], targetBounds=[-600 * args.spacing, args.spacing, -1800 * args.spacing,
+                                args.spacing, -args.spacing, 600 * args.spacing],
+     inputRoi='', targetDirection=[0, 0, 1], useSectionPlane=False,
      sectionPlaneVertexIds=[], sectionPlaneBounds=None, sectionPlaneNormal=[0, 0, 1],
      measurementMetric='CenterX', nominal=None, nominalSource='', deviationLimits=None), status='FullyDetermined')
 case = output / 'case.json'

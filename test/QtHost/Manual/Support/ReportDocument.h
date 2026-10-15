@@ -5,24 +5,27 @@
 #include <memory>
 #include <functional>
 #include <cstddef>
+#include <vector>
 class QIODevice;
 class QThread;
 namespace Manual {
+using ReportRowId = qint64;
+using ReportRows = std::vector<ReportRowId>;
 // 完成后只保存表格；构建候选可暂持只读原生数据，物化或取消后释放。
 class ReportTable final {
 public:
     ReportTable();
     ~ReportTable();
     void Append(const QStringList& row);
-    QStringList Read(int row) const;
-    int GetCount() const;
-    void SetRows(std::size_t count, std::function<QStringList(int)> read);
+    QStringList Read(ReportRowId row) const;
+    ReportRowId GetCount() const;
+    void SetRows(std::size_t count, std::function<QStringList(ReportRowId)> read);
     bool ContinueBuild();
     bool GetIsComplete() const;
     void PrepareRead();
     void SetOwnerThread(QThread* owner);
     // 独立文件游标；调用方持有 table，且仅在物化完成后创建读取器。
-    std::function<QStringList(int)> CreateReader() const;
+    std::function<QStringList(ReportRowId)> CreateReader() const;
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -49,8 +52,9 @@ struct ReportDocument final {
 };
 using ReportCheckpoint = std::function<void()>;
 ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const ReportCheckpoint& checkpoint = {});
-void WriteReportCsv(QIODevice& output, const ReportDocument& document, const QVector<int>* rows = nullptr, const ReportCheckpoint& checkpoint = {});
-void ExportReport(const QString& path, const ReportDocument& document, const QVector<int>* rows = nullptr, const ReportCheckpoint& checkpoint = {});
+void WriteReportCsv(QIODevice& output, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
+void ExportReport(const QString& path, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
 QString GetReportCell(const QStringList& row, int column);
 bool GetReportNumber(const QString& text, double& value);
+QJsonValue GetReportCountValue(ReportRowId count);
 }

@@ -99,12 +99,12 @@ bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
     for(;;) {
         if(done())return true;
         const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
-        if(remaining<=0)return false;
+        if(timeoutMs>0 && remaining<=0)return false;
         QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
         QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
             [&]{if(done())loop.quit();});
         QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
-        deadline.start(static_cast<int>(remaining));loop.exec();
+        if(timeoutMs>0)deadline.start(static_cast<int>(remaining));loop.exec();
         // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
     }
 }
@@ -2476,8 +2476,8 @@ void StartSequence(TestWindow& window, const QString& path)
     // 执行加载/计算前校验全部等待参数；范围来自 Qt 的 int 毫秒计时接口，不设业务时限。
     const auto getWaitMilliseconds=[](const QJsonObject& step){
         const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):30000.;
-        if(timeout<1 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
-            throw std::invalid_argument("用例 timeoutMs 必须为 1..2147483647 毫秒整数");
+        if(timeout<0 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
+            throw std::invalid_argument("用例 timeoutMs 必须为 0..2147483647 毫秒整数；0 表示不设期限");
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())

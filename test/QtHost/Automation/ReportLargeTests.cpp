@@ -1,5 +1,7 @@
 #include "ReportLargeTests.h"
 #include "Support/ResultReport.h"
+#include "Support/ReportStorage.h"
+#include "Support/JsonInput.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -31,7 +33,7 @@ namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class Predicate> void Wait(Predicate complete,int timeoutMs) {
     QElapsedTimer elapsed;elapsed.start();
-    while(!complete() && elapsed.elapsed()<timeoutMs)QCoreApplication::processEvents(QEventLoop::AllEvents,10);
+    while(!complete() && (timeoutMs==0 || elapsed.elapsed()<timeoutMs))QCoreApplication::processEvents(QEventLoop::AllEvents,10);
     Require(complete(),"large real report operation exceeded its scenario deadline");
 }
 void WaitTask(ResultReport& view,int timeoutMs,bool success=true) {
@@ -66,26 +68,31 @@ bool Valid(const ReportDocument& doc,const QStringList& row) {
     return false;
 }
 void CheckPairedRows(const ReportDocument& native,const ReportDocument& result,int mode,int timeoutMs) {
-    const auto read=native.table->CreateReader(),paired=result.table->CreateReader();const int count=native.table->GetCount();
+    const auto read=native.table->CreateReader(),paired=result.table->CreateReader();const auto count=native.table->GetCount();
     vtkNew<vtkPoints> points;vtkNew<vtkPolyData> cloud;vtkNew<vtkStaticPointLocator> locator;
     vtkNew<vtkIdList> neighbors;
+    ReportDiskArray<unsigned char> neighborCounts(mode==2?count:0);
     if(mode==2) {
-        points->SetDataTypeToDouble();points->SetNumberOfPoints(count);
-        for(int i=0;i<count;++i) {
-            const auto row=read(i);double p[3];const int columns[]{native.xColumn,native.yColumn,native.zColumn};
-            for(int axis=0;axis<3;++axis)Require(GetReportNumber(GetReportCell(row,columns[axis]),p[axis]),"real spatial fixture contains a missing coordinate");
-            points->SetPoint(i,p);
+        // 参考定位器分块覆盖全部 B 点；每块遍历全部 A，候选数落盘累加，不截断输入。
+        constexpr ReportRowId block=4000000;
+        const auto position=[&](const QStringList& row,double* p){const int columns[]{native.xColumn,native.yColumn,native.zColumn};
+            for(int axis=0;axis<3;++axis)Require(GetReportNumber(GetReportCell(row,columns[axis]),p[axis]),"real spatial fixture contains a missing coordinate");};
+        for(ReportRowId first=0;first<count;first+=std::min(block,count-first)) {
+            const auto length=std::min(block,count-first);points->SetDataTypeToDouble();points->SetNumberOfPoints(length);
+            for(ReportRowId i=0;i<length;++i){double p[3];position(read(first+i),p);points->SetPoint(i,p);}
+            points->Modified();cloud->SetPoints(points);cloud->Modified();locator->SetDataSet(cloud);locator->BuildLocator();
+            for(ReportRowId i=0;i<count;++i){double p[3];position(read(i),p);locator->FindPointsWithinRadius(1e-9,p,neighbors);
+                neighborCounts[i]=static_cast<unsigned char>(std::min<vtkIdType>(2,neighborCounts[i]+neighbors->GetNumberOfIds()));}
         }
-        cloud->SetPoints(points);locator->SetDataSet(cloud);locator->BuildLocator();
     }
-    int validPairs=0,invalidPairs=0,ambiguous=0;
+    ReportRowId validPairs=0,invalidPairs=0,ambiguous=0;
     QElapsedTimer elapsed;elapsed.start();
-    for(int i=0;i<count;++i) {
+    for(ReportRowId i=0;i<count;++i) {
         const auto source=read(i),row=paired(i);
         Require(row[0]==source[native.identityColumn],"paired report lost the actual baseline identifier or native row order");
         double value=0;const bool valid=Valid(native,source)&&GetReportNumber(GetReportCell(source,native.valueColumn),value);
         bool unique=true;
-        if(mode==2){double p[3];points->GetPoint(i,p);locator->FindPointsWithinRadius(1e-9,p,neighbors);unique=neighbors->GetNumberOfIds()==1;}
+        if(mode==2)unique=neighborCounts[i]==1;
         if(unique) {
             Require(row[7]==row[0],"same-result roundtrip paired to another identifier");
             if(mode==2)Require(row[8]=="0","same-result coordinates have nonzero matched distance");
@@ -94,12 +101,12 @@ void CheckPairedRows(const ReportDocument& native,const ReportDocument& result,i
         } else {
             Require(row[7].isEmpty() && row[8].isEmpty() && row[4].isEmpty() && row[6].contains("歧义"),"coincident real points were arbitrarily paired");++ambiguous;
         }
-        if(i%256==0)Require(elapsed.elapsed()<timeoutMs,"full paired-row validation exceeded its scenario deadline");
+        if(i%256==0)Require(timeoutMs==0 || elapsed.elapsed()<timeoutMs,"full paired-row validation exceeded its scenario deadline");
     }
-    Require(result.conditions["有效配对数"].toInt()==validPairs && result.conditions["无效/缺测配对数"].toInt()==invalidPairs
-        && result.conditions["歧义基准项数"].toInt()==ambiguous,"paired summary changed the independently checked populations");
+    Require(GetId(result.conditions["有效配对数"])==static_cast<std::uint64_t>(validPairs) && GetId(result.conditions["无效/缺测配对数"])==static_cast<std::uint64_t>(invalidPairs)
+        && GetId(result.conditions["歧义基准项数"])==static_cast<std::uint64_t>(ambiguous),"paired summary changed the independently checked populations");
     Require(result.table->GetCount()==count+ambiguous,"paired report dropped unpaired B rows or added duplicate rows");
-    for(int i=count;i<result.table->GetCount();++i){const auto row=paired(i);Require(row[0].isEmpty()&&!row[7].isEmpty()&&row[4].isEmpty()&&row[8].isEmpty()&&row[6].contains("歧义"),"unpaired B evidence was fabricated");}
+    for(ReportRowId i=count;i<result.table->GetCount();++i){const auto row=paired(i);Require(row[0].isEmpty()&&!row[7].isEmpty()&&row[4].isEmpty()&&row[8].isEmpty()&&row[6].contains("歧义"),"unpaired B evidence was fabricated");}
     std::cout<<"PASS: full real paired rows mode="<<mode<<" input="<<count<<" valid="<<validPairs<<" invalid="<<invalidPairs<<" ambiguous="<<ambiguous<<std::endl;
 }
 }
@@ -121,17 +128,17 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
 {
     auto native=input;
     if(native.valueColumn<0)for(int column=0;column<native.columns.size();++column)if(native.columns[column].numeric){native.valueColumn=column;break;}
-    const int count=native.table->GetCount();Require(count>4096 && native.valueColumn>=0,"large report acceptance needs the full native numeric report");
+    const auto count=native.table->GetCount();Require(count>4096 && native.valueColumn>=0,"large report acceptance needs the full native numeric report");
     int heartbeats=0; qint64 maximumGap=0;QElapsedTimer clock;clock.start();qint64 previous=0;
     QTimer heartbeat;heartbeat.setInterval(10);QObject::connect(&heartbeat,&QTimer::timeout,&view,[&]{const auto now=clock.elapsed();maximumGap=std::max(maximumGap,now-previous);previous=now;++heartbeats;});heartbeat.start();
     auto* search=view.findChild<QLineEdit*>("reportSearch");auto* table=view.findChild<QTableView*>("reportTable");
     const auto sort=[&]{QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,native.valueColumn));};
     const auto cancelScan=[&](const char* phase){
-        Wait([&]{return view.property("reportRowsProgress").toInt()>=4096 || !view.property("reportRowsBusy").toBool();},timeoutMs);
+        Wait([&]{return view.property("reportRowsProgress").toLongLong()>=4096 || !view.property("reportRowsBusy").toBool();},timeoutMs);
         Require(view.property("reportRowsBusy").toBool(),"real scan completed before its planned in-progress cancellation");
-        const auto progress=view.property("reportRowsProgress").toInt();QElapsedTimer elapsed;elapsed.start();
+        const auto progress=view.property("reportRowsProgress").toLongLong();QElapsedTimer elapsed;elapsed.start();
         view.findChild<QPushButton*>("cancelReportRows")->click();QCoreApplication::processEvents();
-        Require(view.GetFilteredRows().isEmpty() && !view.property("reportRowsBusy").toBool() && !view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"cancelled real scan exposed partial or exportable rows");
+        Require(view.GetFilteredRows().empty() && !view.property("reportRowsBusy").toBool() && !view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"cancelled real scan exposed partial or exportable rows");
         std::cout<<"PASS: real mid-scan cancel "<<phase<<" rows="<<progress<<" cancelMs="<<elapsed.elapsed()<<std::endl;
     };
     view.SelectReport(native.id);search->setText("__cancel_full_real_scan__");cancelScan("search");
@@ -139,18 +146,21 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
     std::cout<<"REPORT: full real search rows="<<count<<std::endl;
     view.SelectReport(native.id);const auto needle=native.table->Read(count-1).join('\t');search->setText(needle);
     const auto beforeSearch=heartbeats;Wait([&]{return !view.property("reportRowsBusy").toBool();},timeoutMs);
-    QVector<int> expected;const auto read=native.table->CreateReader();
-    for(int i=0;i<count;++i){if(read(i).join('\t').contains(needle,Qt::CaseInsensitive))expected.append(i);if(i%256==0)QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
-    const auto found=view.GetFilteredRows();Require(found.size()==expected.size() && std::equal(found.cbegin(),found.cend(),expected.cbegin()) && found.contains(count-1),"real full-table search lost rows outside the displayed page");
+    const auto read=native.table->CreateReader();const auto found=view.CreateFilteredReader();ReportRowId matched=0;bool lastFound=false;
+    for(ReportRowId i=0;i<count;++i){if(read(i).join('\t').contains(needle,Qt::CaseInsensitive)){
+            Require(matched<view.GetFilteredCount() && found(matched)==i,"real full-table search lost or reordered rows");++matched;if(i==count-1)lastFound=true;}
+        if(i%256==0)QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
+    Require(matched==view.GetFilteredCount() && lastFound,"real full-table search lost rows outside the displayed page");
     Require(heartbeats>beforeSearch,"real full-table search blocked owner events");
-    std::cout<<"PASS: full real search rows="<<count<<" matched="<<found.size()<<std::endl;
+    std::cout<<"PASS: full real search rows="<<count<<" matched="<<matched<<std::endl;
     std::cout<<"REPORT: full real numeric sort rows="<<count<<std::endl;
     view.SelectReport(native.id);sort();const auto beforeSort=heartbeats;
     Wait([&]{return !view.property("reportRowsBusy").toBool();},timeoutMs);
     {
-        const auto rows=view.GetFilteredRows();Require(rows.size()==count,"real sorting truncated its full permutation");std::vector<bool> seen(count,false);
-        QString lastText;double lastValue=0;bool lastNumeric=false;int lastIndex=-1;
-        for(const auto index:rows){Require(index>=0&&index<count&&!seen[index],"real sorting repeated or lost an original row");seen[index]=true;
+        const auto rows=view.CreateFilteredReader();Require(view.GetFilteredCount()==count,"real sorting truncated its full permutation");
+        QString lastText;double lastValue=0;bool lastNumeric=false;ReportRowId lastIndex=-1;
+        // N 个范围内行号，在含原行号的严格全序中递增，便同时证明无重复与完整排列。
+        for(ReportRowId position=0;position<count;++position){const auto index=rows(position);Require(index>=0&&index<count,"real sorting returned an invalid original row");
             const auto text=GetReportCell(read(index),native.valueColumn);double value=0;const bool numeric=GetReportNumber(text,value);
             if(lastIndex>=0){Require(!(!lastNumeric&&numeric),"numeric rows appear after text rows");
                 if(lastNumeric&&numeric)Require(lastValue<=value,"real numeric sort is not monotonic");
@@ -169,7 +179,7 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
     for(int mode=1;mode<=2;++mode) {
         if(mode==2 && (native.xColumn<0||native.yColumn<0||native.zColumn<0))continue;
         // 空间比较本轮只接受 mm 坐标的整卷原生壁厚表，参考定位器独立校验所有候选数。
-        if(mode==2)Require(native.columns[native.xColumn].unit=="mm","real spatial reference expects explicit mm coordinates");
+        if(mode==2)for(const auto column:{native.xColumn,native.yColumn,native.zColumn})Require(native.columns[column].unit=="mm","real spatial reference expects explicit mm coordinates");
         view.SelectReport(imported.id);
         CheckMidTaskCancel(view,[&]{StartComparison(view,native,imported,mode);},timeoutMs,mode==1?"identity comparison":"spatial comparison");
         std::cout<<"REPORT: full real paired comparison mode="<<mode<<" input="<<count<<std::endl;

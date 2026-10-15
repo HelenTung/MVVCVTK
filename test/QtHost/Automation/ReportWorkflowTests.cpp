@@ -38,18 +38,18 @@ namespace Manual {
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 bool SameRow(const QStringList& a,const QStringList& b){return a.size()==b.size() && std::equal(a.cbegin(),a.cend(),b.cbegin());}
-bool SameIndices(const QVector<int>& rows,std::initializer_list<int> expected){return std::size_t(rows.size())==expected.size() && std::equal(rows.cbegin(),rows.cend(),expected.begin());}
+bool SameIndices(const ReportRows& rows,std::initializer_list<ReportRowId> expected){return std::size_t(rows.size())==expected.size() && std::equal(rows.cbegin(),rows.cend(),expected.begin());}
 ReportDocument Read(QByteArray bytes){QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"测试报告");}
 template<class F> void Reject(F action,const char* message){bool rejected=false;try{action();}catch(const std::exception&){rejected=true;}Require(rejected,message);}
 ReportComparisonOptions Options(){ReportComparisonOptions o;o.baselineColumn=o.currentColumn=1;o.baselineIdentity=o.currentIdentity=0;o.baselineQuantity=o.currentQuantity="厚度";o.baselineUnit=o.currentUnit="mm";o.match=ReportMatch::Identity;o.identitiesConfirmed=true;return o;}
 void WaitRows(ResultReport& view,int timeoutMs=30000) {
     QElapsedTimer elapsed;elapsed.start();
-    while(view.property("reportRowsBusy").toBool() && elapsed.elapsed()<timeoutMs)QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+    while(view.property("reportRowsBusy").toBool() && (timeoutMs==0 || elapsed.elapsed()<timeoutMs))QCoreApplication::processEvents(QEventLoop::AllEvents,20);
     Require(!view.property("reportRowsBusy").toBool(),"report row processing did not finish within test deadline");
 }
 void WaitTasks(ResultReport& view,int timeoutMs=30000,bool success=true) {
     QElapsedTimer elapsed;elapsed.start();
-    while(view.property("reportTaskBusy").toBool() && elapsed.elapsed()<timeoutMs)QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+    while(view.property("reportTaskBusy").toBool() && (timeoutMs==0 || elapsed.elapsed()<timeoutMs))QCoreApplication::processEvents(QEventLoop::AllEvents,20);
     Require(!view.property("reportTaskBusy").toBool() && (!success || view.property("reportTaskError").toString().isEmpty()),"report task did not complete successfully");
 }
 void CheckVolumeColumns(ResultReport& view,const ReportDocument& native,const ReportDocument& copy,int timeoutMs) {
@@ -61,7 +61,7 @@ void CheckVolumeColumns(ResultReport& view,const ReportDocument& native,const Re
             dialog->findChild<QComboBox*>("reportCurrentValueColumn")->setCurrentIndex(column+1);dialog->accept();});
         view.findChild<QPushButton*>("compareReports")->click();WaitTasks(view,timeoutMs);
         auto compared=view.GetSelectedReport();const auto a=compared.table->Read(0),b=compared.table->Read(1);
-        int valid=0;for(int row=0;row<native.table->GetCount();++row){double value;if(GetReportNumber(GetReportCell(native.table->Read(row),column),value))++valid;}
+        int valid=0;for(ReportRowId row=0;row<native.table->GetCount();++row){double value;if(GetReportNumber(GetReportCell(native.table->Read(row),column),value))++valid;}
         Require(a[2]==QString::number(valid) && b[2]==a[2] && b[3]==a[3] && b[4]==a[4] && b[5]==a[5],"real volume per-column count or statistics changed on automatic CSV mapping");
         view.RemoveReport(compared.id);
         std::cout<<"PASS: real volume column "<<native.columns[column].name.toStdString()<<" valid="<<valid<<std::endl;
@@ -94,10 +94,10 @@ void CheckMixedSortAndCancellation() {
     ReportDocument large;large.id="responsive";large.title="响应性";large.category="本次会话结果";large.module="Gap";
     large.columns={{"id",{},{},false},{"value",{},{},true}};large.table=std::make_shared<ReportTable>();
     for(int i=0;i<50000;++i)large.table->Append({QString("row-%1").arg(i),QString::number(50000-i)});
-    int located=-1;view.onLocate=[&](const ReportDocument& document,int row){Require(document.id==large.id,"locate changed selected report identity");located=row;};
+    ReportRowId located=-1;view.onLocate=[&](const ReportDocument& document,ReportRowId row){Require(document.id==large.id,"locate changed selected report identity");located=row;};
     view.AddReport(large);view.SelectReport(large.id);auto* table=view.findChild<QTableView*>("reportTable");
     QElapsedTimer elapsed;elapsed.start();QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,1));
-    Require(view.property("reportRowsBusy").toBool() && view.GetFilteredRows().isEmpty(),"sorting blocks admission or exposes partial rows");
+    Require(view.property("reportRowsBusy").toBool() && view.GetFilteredRows().empty(),"sorting blocks admission or exposes partial rows");
     bool yielded=false;QTimer::singleShot(0,&view,[&]{yielded=view.property("reportRowsBusy").toBool();});WaitRows(view);
     Require(yielded && view.GetFilteredRows().size()==50000 && table->model()->data(table->model()->index(0,0)).toString()=="row-49999","complete sorting did not yield to owner events or lost rows");
     table->selectRow(0);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==49999,"sorted page location did not map to original row");
@@ -107,9 +107,13 @@ void CheckMixedSortAndCancellation() {
     QTemporaryDir directory;const auto path=directory.filePath("filtered.csv");const auto filteredRows=view.GetFilteredRows();ExportReport(path,large,&filteredRows);
     QFile filteredInput(path);Require(filteredInput.open(QIODevice::ReadOnly),"filtered export unreadable");const auto filtered=ReadReportCsv(filteredInput,"筛选结果");
     Require(filtered.table->GetCount()==1 && SameRow(filtered.table->Read(0),large.table->Read(49999)),"filtered export lost original row identity or values");
+    const auto asyncPath=directory.filePath("filtered-async.csv");view.ExportReportFile(asyncPath,true);view.SelectReport(ties.id);WaitTasks(view);
+    QFile asyncInput(asyncPath);Require(asyncInput.open(QIODevice::ReadOnly),"asynchronous filtered export unreadable");const auto asyncCopy=ReadReportCsv(asyncInput,"筛选导出");
+    Require(asyncCopy.table->GetCount()==1 && SameRow(asyncCopy.table->Read(0),large.table->Read(49999)),"selection change released or altered the disk-backed export index");
+    view.SelectReport(large.id);
     search->setText("row-");bool cancelledWhileBusy=false;
     QTimer::singleShot(0,&view,[&]{cancelledWhileBusy=view.property("reportRowsBusy").toBool();view.findChild<QPushButton*>("cancelReportRows")->click();});WaitRows(view);
-    Require(cancelledWhileBusy && view.GetFilteredRows().isEmpty(),"cancelled scan published partial or late results");
+    Require(cancelledWhileBusy && view.GetFilteredRows().empty(),"cancelled scan published partial or late results");
     Require(!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("copyReportCsv")->isEnabled(),"cancelled scan is presented as an exportable complete result");
     search->setText("row-4");view.SelectReport(ties.id);QCoreApplication::processEvents();
     Require(view.GetSelectedReport().id==ties.id && view.GetFilteredRows().size()==8,"old report scan overwrote a new selection");
@@ -232,7 +236,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         }
         QElapsedTimer generation;generation.start();
         do {QCoreApplication::processEvents(QEventLoop::AllEvents,20);}
-        while((view->property("reportGenerationBusy").toBool() || view->GetReports(module,refs).isEmpty()) && generation.elapsed()<timeoutMs);
+        while((view->property("reportGenerationBusy").toBool() || view->GetReports(module,refs).isEmpty()) && (timeoutMs==0 || generation.elapsed()<timeoutMs));
         Require(!view->property("reportGenerationBusy").toBool(),"native report generation exceeded the scenario deadline");
         if(generation.elapsed()>heartbeat.interval()*2)Require(heartbeats>0,"native report generation blocked owner events");
     }
@@ -262,7 +266,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         const auto pixels=dialog->grab();Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
     };
     QTemporaryDir directory;
-    int inspectionRows=0;
+    ReportRowId inspectionRows=0;
     for(const auto& doc:reports) {
         QTreeWidgetItem* item=nullptr;for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toString()==doc.id){item=*it;break;}
         Require(item&&!item->isHidden(),"exact native report is visible in the report tree");tree->scrollToItem(item);tree->setCurrentItem(item);QCoreApplication::processEvents();
@@ -307,7 +311,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         }
         tabs->setCurrentWidget(table);QCoreApplication::processEvents();
         const auto checkPage=[&](int offset) {
-            Require(table->isVisible()&&table->model()->rowCount()==std::min(200,doc.table->GetCount()-offset),"visible report preview uses a bounded native page");
+            Require(table->isVisible()&&table->model()->rowCount()==std::min<ReportRowId>(200,doc.table->GetCount()-offset),"visible report preview uses a bounded native page");
             if(table->model()->rowCount()) {
                 const auto expected=doc.table->Read(offset);
                 for(int column=0;column<doc.columns.size();++column)Require(table->model()->data(table->model()->index(0,column)).toString()==GetReportCell(expected,column),"visible report cells preserve native text, missing values and precision");
@@ -335,7 +339,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         tabs->setCurrentWidget(conditions);conditions->verticalScrollBar()->setValue(0);QCoreApplication::processEvents();
         Require(conditions->isVisible()&&conditions->toPlainText()==QString::fromUtf8(QJsonDocument(doc.conditions).toJson(QJsonDocument::Indented)),"visible report conditions belong to the exact document");
         const auto conditionImage=capture("conditions");tabs->setCurrentWidget(table);
-        previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",doc.table->GetCount()},
+        previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",GetReportCountValue(doc.table->GetCount())},
             {"pageOffsets",pages},{"details",details},{"rightColumns",rightColumns},{"conditions",conditionImage},{"opened",true}});++reportIndex;
         if(checkExport) {
         const auto path=directory.filePath("native.csv");
@@ -360,9 +364,9 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::cout<<"REPORT: full row fidelity "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         {
             const auto original=doc.table->CreateReader(),restored=copy.table->CreateReader();QElapsedTimer fidelity;fidelity.start();
-            for(int row=0;row<doc.table->GetCount();++row) {
+            for(ReportRowId row=0;row<doc.table->GetCount();++row) {
                 Require(SameRow(original(row),restored(row)),"native/imported report differs in an actual full-data row");
-                if(row%256==0){Require(fidelity.elapsed()<timeoutMs,"full report row validation exceeded the scenario deadline");QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
+                if(row%256==0){Require(timeoutMs==0 || fidelity.elapsed()<timeoutMs,"full report row validation exceeded the scenario deadline");QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
             }
         }
         int value=doc.valueColumn;

@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <iostream>
 #include <stdexcept>
 
@@ -115,6 +116,9 @@ void CheckSpatialEvidence() {
     const auto result=CompareReports(a,b,o);const auto pair=result.table->Read(0),unmatched=result.table->Read(1);
     Require(pair[0]=="a" && pair[7]=="b" && std::abs(pair[8].toDouble()-.005)<1e-12,"spatial report lost A/B IDs or physical pairing distance");
     Require(unmatched[0].isEmpty() && unmatched[7]=="missing" && unmatched[8].isEmpty() && unmatched[4].isEmpty(),"unmatched B point fabricated baseline identity, distance or delta");
+    auto far=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nfar,1e20,0,0,3\nnear,0,0,0,4\n");
+    o.distanceTolerance=1e-9;const auto fallback=CompareReports(far,far,o);
+    Require(fallback.conditions["有效配对数"]==2 && fallback.table->GetCount()==2 && fallback.table->Read(0)[8]=="0", "spatial acceleration range rejected valid finite coordinates instead of completing a full scan");
 }
 void CheckGenerationAndTasks() {
     ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
@@ -122,7 +126,7 @@ void CheckGenerationAndTasks() {
     view.onReadReports=[&](const QJsonObject&,const QSet<QString>&) {
         ++prepared;auto doc=Document("lazy","聚合节点厚度场值",0);doc.module="Wall";
         auto held=std::make_shared<int>(1);lease=held;
-        doc.table->SetRows(50000,[&,held](int row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
+        doc.table->SetRows(50000,[&,held](ReportRowId row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
         return QVector<ReportDocument>{doc};
     };
     view.QueueReport(record);QCoreApplication::processEvents();
@@ -178,7 +182,7 @@ void CheckFailureIsolation() {
     view.onReadReports=[&](const QJsonObject& record,const QSet<QString>&){const auto id=record["operationId"].toString();
         if(id=="1"){++attempts;if(unreadable)throw std::runtime_error("结果表修订不可读");}
         auto doc=Document("isolated-"+id, "厚度",0);
-        if(id=="2"){++partialAttempts;doc.table->SetRows(3,[&](int index){if(writeFailure&&index==1)throw std::runtime_error("报告文件写入失败");return QStringList{QString::number(index),QString::number(index)};});}
+        if(id=="2"){++partialAttempts;doc.table->SetRows(3,[&](ReportRowId index){if(writeFailure&&index==1)throw std::runtime_error("报告文件写入失败");return QStringList{QString::number(index),QString::number(index)};});}
         else doc.table->Append({"item","12.5"});return QVector<ReportDocument>{doc};};
     for(const auto id:{"1","2","3"})view.QueueReport({{"operationId",id},{"module","Wall"},{"result",QJsonObject{{"result",QString("result-")+id}}}});
     view.show();Wait([&]{return !view.GetReportIds().contains("isolated-3");});
@@ -223,6 +227,19 @@ void CheckConcurrentReportReads() {
         for(int index=0;index<50000;++index){const auto row=copy.table->Read(index);Require(row[0]==QString("point-%1").arg(index)&&row[1]==QString::number(index+1),"concurrent export changed a frozen row");}}
     std::cout<<"PASS: frozen report concurrent owner reads and independent full exports"<<std::endl;
 }
+void CheckWideRowAddressing() {
+    // 虚拟来源只验证类型边界与分页寻址，不冒充真实吞吐或二十亿行物化测试。
+    const ReportRowId count=static_cast<ReportRowId>(std::numeric_limits<int>::max())+213;
+    ReportDocument doc;doc.id="wide-row-contract";doc.title="64 位分页契约";doc.category="本次会话结果";doc.module="Gap";
+    doc.columns={{"void_id",{},{},false},{"value","体积","mm3",true}};doc.table=std::make_shared<ReportTable>();
+    doc.table->SetRows(static_cast<std::size_t>(count),[](ReportRowId row){return QStringList{QString::number(row),QString::number(row+1)};});
+    Require(doc.table->GetCount()==count && doc.table->Read(count-1)[0]==QString::number(count-1),"report source truncates global row IDs to int");
+    ResultReport view;ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};view.AddReport(doc);view.show();
+    view.findChild<QPushButton*>("reportLast")->click();QCoreApplication::processEvents();auto* table=view.findChild<QTableView*>("reportTable");
+    const int local=table->model()->rowCount()-1;Require(local>=0 && table->model()->data(table->model()->index(local,0)).toString()==QString::number(count-1),"last report page truncates a 64-bit row");
+    table->selectRow(local);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==count-1,"locate callback truncates a 64-bit global row");
+    view.findChild<QPushButton*>("reportFirst")->click();Require(table->model()->data(table->model()->index(0,0)).toString()=="0","first report page lost original order");view.hide();
+}
 #if defined(MANUAL_ALIGNMENT)
 void CheckInspectionPreparation() {
     ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
@@ -258,7 +275,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();
+    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();
 #if defined(MANUAL_ALIGNMENT)
     CheckInspectionPreparation();
 #endif

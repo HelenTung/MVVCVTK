@@ -42,13 +42,13 @@ template<class Read>
 void SetPagedRows(ReportDocument& doc, const QString& ref, Read read, QStringList keys, QJsonObject first)
 {
     const auto count=GetId(first["total"]);
-    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=0](int index) mutable {
+    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=ReportRowId(0)](ReportRowId index) mutable {
         auto rows=first["rows"].toArray();
         if(index<offset || index>=offset+rows.size()) {
             offset=index/256*256; first=read(GetRef(ref),static_cast<std::size_t>(offset),256,std::nullopt);rows=first["rows"].toArray();
         }
         if(index<offset || index>=offset+rows.size())throw std::runtime_error("业务报告分页缺少预期行");
-        const auto row=rows[index-offset].toObject();QStringList cells;
+        const auto row=rows[static_cast<int>(index-offset)].toObject();QStringList cells;
         for(const auto& key:keys)cells.append(Cell(row[key]));return cells;
     });
 }
@@ -112,7 +112,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<WallThicknessHost
         doc.identityColumn=0;doc.valueColumn=4;doc.xColumn=1;doc.yColumn=2;doc.zColumn=3;doc.validityColumn=6;doc.table=std::make_shared<ReportTable>();
         const QStringList reasons{"有效","表面质量不足","对面歧义","尖锐特征","支持截断","达到搜索上限","材料路径无效","评价范围外","无有效源"};
         const auto samples=snapshot->samples;
-        doc.table->SetRows(samples->size(),[samples,reasons](int index) {
+        doc.table->SetRows(samples->size(),[samples,reasons](ReportRowId index) {
             const auto& sample=(*samples)[index];
             const int validity=static_cast<int>(sample.validity);
             return QStringList{QString::number(index),Number(sample.source[0]),Number(sample.source[1]),Number(sample.source[2]),
@@ -141,7 +141,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
             {"area_validity",{},{},false},{"volume_validity",{},{},false},{"closed",{},{},false},{"manifold",{},{},false}};
         doc.identityColumn=0;doc.table=std::make_shared<ReportTable>();
         const auto objects=snapshot->objects;
-        if(objects)doc.table->SetRows(objects->size(),[objects](int index) {const auto& object=(*objects)[index];return QStringList{QString::number(object.objectIndex),
+        if(objects)doc.table->SetRows(objects->size(),[objects](ReportRowId index) {const auto& object=(*objects)[index];return QStringList{QString::number(object.objectIndex),
             object.areaValidity==SurfaceMetricValidity::Valid && object.areaModelUnit2?Number(*object.areaModelUnit2):QString(),
             object.volumeValidity==SurfaceMetricValidity::Valid && object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
             QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};});
@@ -187,7 +187,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};
                 doc.identityColumn=0;doc.validityColumn=3;doc.table=std::make_shared<ReportTable>();
                 const QStringList reasons{"未选择","有效","源无效","目标无效","超过距离","法向不匹配","缺少法向"};
-                doc.table->SetRows(field.samples.size(),[samples,reasons](int index){const auto& sample=samples->samples[index];const bool valid=sample.state==AlignmentDeviationState::Valid;
+                doc.table->SetRows(field.samples.size(),[samples,reasons](ReportRowId index){const auto& sample=samples->samples[index];const bool valid=sample.state==AlignmentDeviationState::Valid;
                     return QStringList{QString::number(index),valid?Number(sample.value):QString(),valid?Number(sample.distance):QString(),valid?"0":QString::number(static_cast<int>(sample.state)+1),reasons.value(static_cast<int>(sample.state),"未知状态")};});
                 const auto& stats=field.statistics;
                 doc.conditions["汇总"]=QJsonObject{{"样本数",QString::number(field.samples.size())},{"有效数",QString::number(stats.counts[static_cast<std::size_t>(AlignmentDeviationState::Valid)])},
