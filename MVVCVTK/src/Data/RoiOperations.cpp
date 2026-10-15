@@ -214,7 +214,8 @@ RoiDefinition GetVoxelDefinition(DataRevisionRef source,std::shared_ptr<const Ro
     RoiNode node;node.primitive.shape=RoiShape::VoxelSet;node.primitive.voxels=std::move(voxels);node.primitive.labels=std::move(labels);return {source,{std::move(node)}};
 }
 RoiDefinition GetVoxelDefinition(DataRevisionRef source,const Cells& cells) {
-    std::vector<RoiVoxel> values;values.reserve(cells.size());for (const auto& i:cells) values.push_back({i,1});
+    std::vector<RoiVoxelRun> values;
+    for(const auto& row:cells.GetRows())for(const auto& run:row.second)values.push_back({{run.first,row.first[0],row.first[1]},run.second,1});
     return GetVoxelDefinition(source,std::make_shared<const RoiVoxelSet>(std::move(values)));
 }
 Cells GetCells(const ImageGrid3DPayload& image,const RoiReadSnapshot& read,const RoiOperationRequest& request) {
@@ -229,37 +230,61 @@ std::vector<Index> GetNeighbours(RoiConnectivity connectivity) {
 Index Add(const Index& a,const Index& b) {
     Index result{};for (int k=0;k<3;++k) {const auto n=static_cast<std::int64_t>(a[k])+b[k];Require(n>=INT_MIN && n<=INT_MAX,RoiError::TooLarge,"ROI index overflow.");result[k]=static_cast<int>(n);}return result;
 }
-std::vector<Index> GetKernel(const GridGeometry3D& grid,const RoiMorphologyParams& params,const RoiOperationRequest& request) {
+std::vector<Cells::Span> GetKernel(const GridGeometry3D& grid,const RoiMorphologyParams& params,const RoiOperationRequest& request) {
     Require(std::isfinite(params.radius) && params.radius>=0,RoiError::InvalidRequest,"ROI radius must be nonnegative.");
     Require(params.unit==RoiRadiusUnit::Millimetres || params.unit==RoiRadiusUnit::Voxels,RoiError::InvalidRequest,"Invalid ROI radius unit.");
     Matrix j=roiIdentityMatrix;for (int r=0;r<3;++r) for (int c=0;c<3;++c) j[r*4+c]=params.unit==RoiRadiusUnit::Voxels ? (r==c ? 1.0:0.0):grid.direction[r*3+c]*grid.spacing[c];
     const auto inverse=Invert(j);Index halo{};
     for (int a=0;a<3;++a) {const double size=std::ceil(params.radius*std::hypot(inverse[a*4],inverse[a*4+1],inverse[a*4+2]));Require(std::isfinite(size) && size<INT_MAX,RoiError::TooLarge,"ROI neighbourhood exceeds index range.");halo[a]=static_cast<int>(size);}
-    std::vector<Index> kernel;
-    for (int z=-halo[2];z<=halo[2];++z) for (int y=-halo[1];y<=halo[1];++y) {CheckCancel(request);for (int x=-halo[0];x<=halo[0];++x) {
-        const auto p=Transform(j,{static_cast<double>(x),static_cast<double>(y),static_cast<double>(z)});
-        if (std::hypot(p[0],p[1],p[2])<=params.radius){kernel.push_back({x,y,z});}
-    }}return kernel;
+    std::vector<Cells::Span> kernel;
+    // 固定 Y/Z 后，物理球沿 X 的交集是一个区间；在离散最小值两侧二分，完全沿用 hypot 包含规则。
+    const long double a=j[0]*j[0]+j[4]*j[4]+j[8]*j[8];
+    for(int z=-halo[2];z<=halo[2];++z)for(int y=-halo[1];y<=halo[1];++y) {
+        CheckCancel(request);const auto p=Transform(j,{0.,double(y),double(z)});
+        const long double b=j[0]*p[0]+j[4]*p[1]+j[8]*p[2];
+        const auto inside=[&](std::int64_t x){const auto q=Transform(j,{double(x),double(y),double(z)});return std::hypot(q[0],q[1],q[2])<=params.radius;};
+        const double center=static_cast<double>(-b/a);
+        if(!std::isfinite(center)) {
+            // 极端尺度使二次系数溢出/下溢时，按原度量扫描这一行，仍只保存连续区间。
+            std::optional<int> first;
+            for(std::int64_t x=-halo[0];x<=halo[0];++x) {
+                if(!((x+halo[0])%1024))CheckCancel(request);
+                if(inside(x)){if(!first)first=static_cast<int>(x);}
+                else if(first){kernel.push_back({{*first,y,z},static_cast<int>(x-1)});first.reset();}
+            }
+            if(first)kernel.push_back({{*first,y,z},halo[0]});
+            continue;
+        }
+        auto seed=static_cast<std::int64_t>(std::floor(std::clamp(center,-double(halo[0]),double(halo[0]))));
+        if(!inside(seed)){if(seed==halo[0]||!inside(seed+1))continue;++seed;}
+        std::int64_t low=-halo[0],high=seed;
+        while(low<high){const auto mid=low+(high-low)/2;if(inside(mid))high=mid;else low=mid+1;}const auto first=low;
+        low=seed;high=halo[0];
+        while(low<high){const auto mid=low+(high-low+1)/2;if(inside(mid))low=mid;else high=mid-1;}
+        kernel.push_back({{static_cast<int>(first),y,z},static_cast<int>(low)});
+    }
+    return kernel;
 }
-Cells Morph(const Cells& cells,const std::vector<Index>& kernel,bool dilate,const RoiOperationRequest& request) {
+Cells Morph(const Cells& cells,const std::vector<Cells::Span>& kernel,bool dilate,const RoiOperationRequest& request) {
     Cells out;std::size_t visited=0;
     // 核仍按原物理度量生成；每个 X 区间整体平移/求交，不展开成员与核的笛卡尔积。
     if(dilate){for(const auto& row:cells.GetRows())for(const auto& run:row.second)for(const auto& d:kernel){
         if(!(visited++%1024))CheckCancel(request);
-        const auto low=Add({run.first,row.first[0],row.first[1]},d),high=Add({run.second,row.first[0],row.first[1]},d);
+        const auto low=Add({run.first,row.first[0],row.first[1]},d.first),high=Add({run.second,row.first[0],row.first[1]},{d.last,d.first[1],d.first[2]});
         out.InsertRun(low,high[0]);}return out;}
     out=cells;
     for(const auto& d:kernel){
         if(out.empty())break;Cells intersection;
         for(const auto& row:out.GetRows())for(const auto& run:row.second){
             if(!(visited++%1024))CheckCancel(request);
-            const auto low=Add({run.first,row.first[0],row.first[1]},d),high=Add({run.second,row.first[0],row.first[1]},d);
+            const auto low=Add({run.first,row.first[0],row.first[1]},d.first),high=Add({run.second,row.first[0],row.first[1]},{d.last,d.first[1],d.first[2]});
             const auto& shifted=cells.GetRow({low[1],low[2]});
             auto other=std::lower_bound(shifted.begin(),shifted.end(),low[0],[](const auto& r,int x){return r.second<x;});
             for(;other!=shifted.end() && other->first<=high[0];++other){
                 if(!(visited++%1024))CheckCancel(request);
-                const int first=std::max(low[0],other->first)-d[0],last=std::min(high[0],other->second)-d[0];
-                intersection.InsertRun({first,row.first[0],row.first[1]},last);
+                const auto first=std::max(std::int64_t(run.first),std::int64_t(other->first)-d.first[0]);
+                const auto last=std::min(std::int64_t(run.second),std::int64_t(other->second)-d.last);
+                if(first<=last)intersection.InsertRun({static_cast<int>(first),row.first[0],row.first[1]},static_cast<int>(last));
             }
         }out=std::move(intersection);
     }return out;
@@ -495,7 +520,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                     } else {
                         const auto components=GetComponents(std::move(cells),params.connectivity,request);
                         std::size_t largest=0;for (std::size_t i=0;i<components.size();++i) {result.componentVoxelCounts.push_back(components[i].size());if (components[i].size()>components[largest].size()) largest=i;}
-                        std::vector<RoiVoxel> values;std::vector<std::uint32_t> selected;
+                        std::vector<RoiVoxelRun> values;std::vector<std::uint32_t> selected;
                         Require(components.size()<UINT32_MAX,RoiError::TooLarge,"ROI component labels overflow.");
                         for (std::size_t i=0;i<components.size();++i) {
                             const auto label=static_cast<std::uint32_t>(i+1);
@@ -503,7 +528,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                             if (params.operation==RoiComponentOperation::KeepLargest) keep=i==largest;
                             else if (params.operation==RoiComponentOperation::KeepSelected) keep=std::find(params.labels.begin(),params.labels.end(),label)!=params.labels.end();
                             else Require(params.operation==RoiComponentOperation::RemoveSmall || params.operation==RoiComponentOperation::Split,RoiError::InvalidRequest,"Invalid ROI component operation.");
-                            if (keep) {selected.push_back(label);for (const auto& index:components[i]) values.push_back({index,label});}
+                            if (keep) {selected.push_back(label);for(const auto& row:components[i].GetRows())for(const auto& run:row.second)values.push_back({{run.first,row.first[0],row.first[1]},run.second,label});}
                         }
                         auto shared=std::make_shared<const RoiVoxelSet>(std::move(values));
                         if (params.operation==RoiComponentOperation::Split) for (auto label:selected) add(GetVoxelDefinition(request.source,shared,{label})," / "+std::to_string(label));

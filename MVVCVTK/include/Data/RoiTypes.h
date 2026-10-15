@@ -34,16 +34,28 @@ struct RoiVoxel final {
     std::uint32_t label = 1;
 };
 
-// 正式稀疏载荷，按绝对源索引排序；拆分结果共享一次标记的数据。
+// 同一 (Y,Z) 行上的闭 X 区间，first[0] <= last；标签沿整个区间保持不变。
+struct RoiVoxelRun final {
+    std::array<int,3> first{};
+    int last = 0;
+    std::uint32_t label = 1;
+};
+
+// 正式载荷保留行区间；拆分结果共享一次标记的数据。
 class RoiVoxelSet final {
 public:
     explicit RoiVoxelSet(std::vector<RoiVoxel> voxels);
-    const std::vector<RoiVoxel>& GetVoxels() const noexcept { return m_voxels; }
+    explicit RoiVoxelSet(std::vector<RoiVoxelRun> runs);
+    const std::vector<RoiVoxelRun>& GetRuns() const noexcept;
+    std::size_t GetVoxelCount() const noexcept;
+    // 分块按 (Y,Z,X) 顺序展开；旧接口仍按绝对 (X,Y,Z) 排序并惰性保留完整向量。
+    std::vector<RoiVoxel> GetVoxelChunk(std::size_t offset, std::size_t count) const;
+    const std::vector<RoiVoxel>& GetVoxels() const;
     std::uint32_t GetLabel(const std::array<int,3>& index) const noexcept;
     std::array<double,6> GetIndexBounds(const std::vector<std::uint64_t>& labels) const noexcept;
 private:
-    std::vector<RoiVoxel> m_voxels;
-    std::map<std::uint32_t,std::array<double,6>> m_labelBounds;
+    class Impl;
+    std::shared_ptr<Impl> m_impl;
 };
 // Closed 保持已有 ROI 语义；CropV1 保留裁切 Box 容差和 Plane 严格正侧。
 enum class RoiBoundaryPolicy : std::uint8_t { Closed, CropV1 };

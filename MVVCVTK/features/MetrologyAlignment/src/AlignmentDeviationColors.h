@@ -4,7 +4,8 @@
 namespace AlignmentDeviationColors {
 using Color = std::array<std::uint8_t, 3>;
 inline constexpr Color invalidColor{128, 128, 128}, selectedColor{255, 255, 0};
-inline constexpr const char *version = "deviation-mapping-3";
+inline constexpr Color mixedToleranceColor{230,166,38};
+inline constexpr const char *version = "deviation-mapping-4";
 class Ramp final {
 public:
   Ramp(const AlignmentDeviationDisplay &display,

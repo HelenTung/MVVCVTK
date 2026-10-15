@@ -96,7 +96,7 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
 
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
-            int binIdx = (x * binCount) / W;
+            const auto binIdx = static_cast<std::size_t>((static_cast<std::int64_t>(x) * binCount) / W);
             int h_limit = static_cast<int>((logHist[binIdx] / (maxLog > 0.0 ? maxLog : 1.0)) * H * 0.9);
             unsigned char* pix = ptr + (y * W + x) * 3;
 

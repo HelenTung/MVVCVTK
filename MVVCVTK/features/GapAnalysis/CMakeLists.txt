@@ -1,4 +1,5 @@
 set(MVVCVTK_GAP_SOURCES
+    include/Algorithms/GapSurfaceBuilder.h
     include/Render/GapDisplayData.h
     include/Render/GapLabelLookupTable.h
     include/Render/Strategies/GapOverlayStrategies.h

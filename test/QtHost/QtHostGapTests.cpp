@@ -343,9 +343,14 @@ bool GetFormalGapResultValid(
     const auto* resultSet = result
         ? dynamic_cast<const DataCollectionPayload*>(result->payload.get())
         : nullptr;
+    const auto* surface=mesh?dynamic_cast<const SurfaceMeshPayload*>(mesh->payload.get()):nullptr;
+    const auto regionAttribute=surface?std::find_if(surface->GetCellAttributes().begin(),surface->GetCellAttributes().end(),
+        [](const auto& attribute){return attribute.name=="gap.region.id";}):std::vector<MeshAttribute>::const_iterator{};
     if (!labels || !voidTable || !mesh || !statisticsTable || !resultSet
         || !voidTable->GetValid() || !statisticsTable->GetValid()
-        || !resultSet->GetValid()) {
+        || !resultSet->GetValid() || !surface || regionAttribute==surface->GetCellAttributes().end()
+        || regionAttribute->componentCount!=1 || regionAttribute->values.size()!=surface->GetTriangles().size()/3
+        || !std::all_of(regionAttribute->values.begin(),regionAttribute->values.end(),[](double id){return id>0&&id<=INT32_MAX&&std::floor(id)==id;})) {
         return false;
     }
 

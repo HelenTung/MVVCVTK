@@ -1,10 +1,76 @@
 // 回归：大量独立小孔隙按合并后内存计量，保留每个面的精确区域编号。
 #include "Render/GapDisplayData.h"
+#include "Data/DataGraphStore.h"
+#include "Geometry/RoiEvaluator.h"
 #include <vtkUnsignedCharArray.h>
 #include <iostream>
 
+namespace {
+bool Geometry() {
+    std::atomic<bool> stopping{false};vtkNew<vtkImageData> image;
+    image->SetExtent(-64,67,-1,4,10,15);image->SetSpacing(.7,1.2,2.3);image->SetOrigin(1e8,-3,9);
+    const double direction[]{0,-1,0,1,0,0,0,0,1};image->SetDirectionMatrix(direction);
+    image->AllocateScalars(VTK_INT,1);std::fill_n(static_cast<int*>(image->GetScalarPointer()),image->GetNumberOfPoints(),0);
+    VoidRegion region;region.id=2;region.voxelCount=130;region.volumeMM3=130;region.bbox={-63,66,1,1,12,12};
+    for(int x=-63;x<=66;++x)*static_cast<int*>(image->GetScalarPointer(x,1,12))=region.id;
+    const auto mesh=GapSurfaceBuilder::Build(image,{region},stopping);
+    if(!mesh||mesh->GetNumberOfPoints()!=4*region.voxelCount+2||mesh->GetNumberOfCells()!=8*region.voxelCount)return false;
+    const auto* bounds=mesh->GetBounds();
+    const double roundoff=8*std::numeric_limits<double>::epsilon()*1e8;
+    if(std::abs(bounds[0]-(1e8-1.2*1.5))>roundoff||std::abs(bounds[1]-(1e8-1.2*.5))>roundoff
+        ||std::abs(bounds[2]-(-3+.7*-63.5))>roundoff||std::abs(bounds[3]-(-3+.7*66.5))>roundoff
+        ||std::abs(bounds[4]-(9+2.3*11.5))>roundoff||std::abs(bounds[5]-(9+2.3*12.5))>roundoff)return false;
+    std::map<std::pair<vtkIdType,vtkIdType>,int> edges;vtkIdType size=0;const vtkIdType* corners=nullptr;mesh->GetPolys()->InitTraversal();
+    while(mesh->GetPolys()->GetNextCell(size,corners))for(int j=0;j<3;++j)++edges[std::minmax(corners[j],corners[(j+1)%3])];
+    if(!std::all_of(edges.begin(),edges.end(),[](const auto& edge){return edge.second==2;}))return false;
+    // 仅重编号，跨块几何必须逐点不变；大物理原点和旋转方向不参与顶点焊接键。
+    region.id=33554433;for(int x=-63;x<=66;++x)*static_cast<int*>(image->GetScalarPointer(x,1,12))=region.id;image->Modified();
+    const auto renumbered=GapSurfaceBuilder::Build(image,{region},stopping);
+    if(!renumbered||renumbered->GetNumberOfPoints()!=mesh->GetNumberOfPoints())return false;
+    for(vtkIdType i=0;i<mesh->GetNumberOfPoints();++i){double p[3],q[3];mesh->GetPoint(i,p);renumbered->GetPoint(i,q);if(!std::equal(p,p+3,q))return false;}
+    DataGraphStore store;GridGeometry3D grid;grid.extent={-64,67,-1,4,10,15};grid.dimensions={132,6,6};grid.spacing={.7,1.2,2.3};grid.origin={1e8,-3,9};std::copy(direction,direction+9,grid.direction.begin());
+    const DataRevisionRef source{store.CreateDataEntityId(),1};DataTransaction tx;
+    tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,std::make_shared<const std::vector<std::uint8_t>>(132*6*6,0))}};
+    if(store.SetDataCommit(tx).status!=DataCommitStatus::Succeeded)return false;
+    RoiPrimitive box;box.localToSource={1e9,0,0,0,0,1e9,0,0,0,0,1e9,0,0,0,0,1};
+    const auto roi=RoiEvaluator::GetPreview(store.GetDataGraph(),{source,{{RoiNodeKind::Primitive,box}}});
+    if(roi.error!=RoiError::None||!roi.roi)return false;
+    const auto clipped=GapSurfaceBuilder::Build(image,{region},stopping,roi.roi);
+    if(!clipped||clipped->GetNumberOfCells()!=mesh->GetNumberOfCells()||clipped->GetNumberOfPoints()!=mesh->GetNumberOfPoints())return false;
+    RoiPrimitive half;half.shape=RoiShape::HalfSpace;half.origin={0,-2.741,0};half.normal={0,1,0};
+    const auto selection=RoiEvaluator::GetPreview(store.GetDataGraph(),{source,{{RoiNodeKind::Primitive,half}}});
+    if(!selection.roi)return false;
+    const auto cut=GapSurfaceBuilder::Build(image,{region},stopping,selection.roi);
+    if(!cut||!cut->GetNumberOfCells()||cut->GetNumberOfCells()>=mesh->GetNumberOfCells())return false;
+    edges.clear();cut->GetPolys()->InitTraversal();
+    while(cut->GetPolys()->GetNextCell(size,corners))for(int j=0;j<3;++j)++edges[std::minmax(corners[j],corners[(j+1)%3])];
+    for(const auto& edge:edges) {
+        if(edge.second==2)continue;if(edge.second!=1)return false;
+        double a[3],b[3];cut->GetPoint(edge.first.first,a);cut->GetPoint(edge.first.second,b);
+        if(std::abs(a[1]-half.origin[1])>1e-11||std::abs(b[1]-half.origin[1])>1e-11)return false;
+    }
+    const auto display=GapDisplayData::Build(image,{region},stopping,{},nullptr,nullptr,renumbered);
+    if(!display||display->mesh->GetPoints()!=renumbered->GetPoints()||!renumbered->GetCellData()->GetArray("gap.region.id")
+        ||!display->mesh->GetCellData()->GetArray("gap.display.id"))return false;
+    // 三条相连细线的 bbox 临时字节数超过旧 64 MiB 限制；结果仍只含这些细线。
+    vtkNew<vtkImageData> large;large->SetDimensions(408,408,408);large->AllocateScalars(VTK_INT,1);
+    std::fill_n(static_cast<int*>(large->GetScalarPointer()),large->GetNumberOfPoints(),0);
+    VoidRegion sparse;sparse.id=17;sparse.voxelCount=3*406-2;sparse.volumeMM3=static_cast<float>(sparse.voxelCount);sparse.bbox={1,406,1,406,1,406};
+    for(int i=1;i<=406;++i){*static_cast<int*>(large->GetScalarPointer(i,1,1))=17;*static_cast<int*>(large->GetScalarPointer(406,i,1))=17;*static_cast<int*>(large->GetScalarPointer(406,406,i))=17;}
+    const auto surface=GapSurfaceBuilder::Build(large,{sparse},stopping);
+    if(!surface||!surface->GetNumberOfCells())return false;
+    vtkNew<vtkImageData> binary;binary->SetDimensions(408,408,408);binary->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(binary->GetScalarPointer()),binary->GetNumberOfPoints(),0);
+    for(int i=1;i<=406;++i){*static_cast<unsigned char*>(binary->GetScalarPointer(i,1,1))=1;*static_cast<unsigned char*>(binary->GetScalarPointer(406,i,1))=1;*static_cast<unsigned char*>(binary->GetScalarPointer(406,406,i))=1;}
+    vtkNew<vtkFlyingEdges3D> reference;reference->SetInputData(binary);reference->SetValue(0,.5);reference->Update();
+    if(surface->GetNumberOfCells()!=reference->GetOutput()->GetNumberOfCells()||surface->GetNumberOfPoints()!=reference->GetOutput()->GetNumberOfPoints())return false;
+    std::cout<<"Gap geometry: rodPoints="<<mesh->GetNumberOfPoints()<<" sparseBBoxBytes="<<408ULL*408*408<<" sparseTriangles="<<surface->GetNumberOfCells()<<'\n';
+    return true;
+}
+}
 int main()
 {
+    if(!Geometry()){std::cerr<<"Gap binary geometry, block seam or ROI point reuse regression.\n";return 1;}
     vtkNew<GapLabelLookupTable> fast;
     fast->SetNumberOfTableValues(3); fast->IndexedLookupOn();
     fast->SetTableValue(0, 0, 0, 0, 0);

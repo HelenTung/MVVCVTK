@@ -115,6 +115,8 @@ add_test(
     COMMAND mvvcvtk_host_method_tests
 )
 SetTestRuntime(QtHost.Methods mvvcvtk_host_method_tests)
+add_test(NAME Host.HistogramExport COMMAND mvvcvtk_host_method_tests --case histogram-export)
+SetTestRuntime(Host.HistogramExport mvvcvtk_host_method_tests)
 add_test(NAME Host.ConsumerContract COMMAND mvvcvtk_host_method_tests --case consumer-contract)
 SetTestRuntime(Host.ConsumerContract mvvcvtk_host_method_tests)
 set(MVVCVTK_HOST_CONSUMER_REAL_MANIFEST "" CACHE FILEPATH "Real CT ROI manifest for Host consumer contract regression")

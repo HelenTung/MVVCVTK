@@ -141,9 +141,11 @@ void Render(TestDataPort &data,const DataRevisionRef &meshRef,const AlignmentDev
 }
 int wmain(int argc,wchar_t **argv) {
     try {
-        Require(argc==3 || argc==19,"Usage: deviation-render-audit source.vtp output-directory [16 solved matrix values]");
+        const bool cpuOnly=argc>1&&std::wstring(argv[argc-1])==L"--cpu-only";
+        const int positional=argc-(cpuOnly?1:0);
+        Require(positional==3 || positional==19,"Usage: deviation-render-audit source.vtp output-directory [16 solved matrix values] [--cpu-only]");
         auto solvedPose=alignmentIdentity;
-        if(argc==19)for(int i=0;i<16;++i)solvedPose[i]=std::stod(std::wstring(argv[3+i]));
+        if(positional==19)for(int i=0;i<16;++i)solvedPose[i]=std::stod(std::wstring(argv[3+i]));
         const auto path=std::filesystem::path(argv[1]),folder=std::filesystem::path(argv[2]);
         std::filesystem::create_directories(folder);Require(!std::filesystem::exists(folder/"render.json"),"Use a new output directory.");
         auto reader=vtkSmartPointer<vtkXMLPolyDataReader>::New();reader->SetFileName(path.u8string().c_str());reader->Update();
@@ -164,7 +166,7 @@ int wmain(int argc,wchar_t **argv) {
             pointQuality->values[triangles[3*i+1]]==1 && pointQuality->values[triangles[3*i+2]]==1)request->sourceTriangles.push_back(i);
         request->referenceTriangles=request->sourceTriangles;
         std::ofstream out(folder/"render.json");out<<std::setprecision(17)
-            <<"{\"schema\":\"deviation-render-audit-2\",\"scope\":\"real C3 mesh; known rigid perturbation versus supplied public solve pose or exact identity; not cross-acquisition or CAD nominal acceptance\",\"afterPoseFromPublicSolve\":"<<(argc==19 ? "true" : "false")<<",\"rangeMode\":\"effective finite Valid sample range per field, shared by 2D and 3D\",\"useToleranceColors\":false,\"viewport\":[1024,768],\"points\":"
+            <<"{\"schema\":\"deviation-render-audit-2\",\"scope\":\"real C3 mesh; known rigid perturbation versus supplied public solve pose or exact identity; not cross-acquisition or CAD nominal acceptance\",\"afterPoseFromPublicSolve\":"<<(positional==19 ? "true" : "false")<<",\"backends\":\""<<(cpuOnly?"cpu":"cpu,cuda")<<"\",\"rangeMode\":\"effective finite Valid sample range per field, shared by 2D and 3D\",\"useToleranceColors\":false,\"viewport\":[1024,768],\"points\":"
             <<payload->GetVertices().size()/3<<",\"triangles\":"<<triangles.size()/3<<",\"cases\":[";
         for(int phase=0;phase<2;++phase) {
             if(phase)out<<',';const std::string name=phase ? "aligned" : "perturbed";
@@ -172,27 +174,32 @@ int wmain(int argc,wchar_t **argv) {
             request->computeBackend=AlignmentComputeBackend::Cpu;const auto start=std::chrono::steady_clock::now();
             const auto cpu=AlignmentDeviation::Build(work,*request,pose);const auto cpuMs=Ms(start);
             Require(cpu.status==AlignmentStatus::FullyDetermined && cpu.forward,"CPU evaluation failed.");
-            request->computeBackend=AlignmentComputeBackend::Cuda;const auto gpuStart=std::chrono::steady_clock::now();
-            const auto gpu=AlignmentDeviation::Build(work,*request,pose);const auto gpuMs=Ms(gpuStart);
-            Require(gpu.status==AlignmentStatus::FullyDetermined && gpu.forward,"CUDA evaluation failed.");
-            Require(cpu.forward->samples.size()==gpu.forward->samples.size(),"CPU/CUDA sample count differs.");
-            std::size_t mismatches=0;double maximumDelta=0;
-            for(std::size_t i=0;i<cpu.forward->samples.size();++i) {
-                const auto &a=cpu.forward->samples[i],&b=gpu.forward->samples[i];maximumDelta=std::max(maximumDelta,std::abs(a.value-b.value));
-                mismatches+=a.value!=b.value || a.distance!=b.distance || a.closestTriangle!=b.closestTriangle || a.state!=b.state || a.area!=b.area;
+            std::size_t mismatches=0;double maximumDelta=0,gpuMs=0;
+            if(!cpuOnly) {
+                request->computeBackend=AlignmentComputeBackend::Cuda;const auto gpuStart=std::chrono::steady_clock::now();
+                const auto gpu=AlignmentDeviation::Build(work,*request,pose);gpuMs=Ms(gpuStart);
+                Require(gpu.status==AlignmentStatus::FullyDetermined && gpu.forward,"CUDA evaluation failed.");
+                Require(cpu.forward->samples.size()==gpu.forward->samples.size(),"CPU/CUDA sample count differs.");
+                for(std::size_t i=0;i<cpu.forward->samples.size();++i) {
+                    const auto &a=cpu.forward->samples[i],&b=gpu.forward->samples[i];maximumDelta=std::max(maximumDelta,std::abs(a.value-b.value));
+                    mismatches+=a.value!=b.value || a.distance!=b.distance || a.closestTriangle!=b.closestTriangle || a.state!=b.state || a.area!=b.area;
+                }
             }
             out<<"{\"phase\":\""<<name<<"\",\"sourceToTarget\":[";
             for(int i=0;i<16;++i){if(i)out<<',';out<<pose[i];}
             const auto &stats=cpu.forward->statistics;
-            out<<"],\"cpuCoreMs\":"<<cpuMs<<",\"cudaCoreMs\":"<<gpuMs<<",\"cpuCudaMismatchSamples\":"<<mismatches
-                <<",\"cpuCudaMaximumValueDeltaMm\":"<<maximumDelta<<",\"minimumMm\":"<<stats.minimum<<",\"maximumMm\":"<<stats.maximum
+            out<<"],\"cpuCoreMs\":"<<cpuMs;
+            if(!cpuOnly)out<<",\"cudaCoreMs\":"<<gpuMs<<",\"cpuCudaMismatchSamples\":"<<mismatches<<",\"cpuCudaMaximumValueDeltaMm\":"<<maximumDelta;
+            out<<",\"minimumMm\":"<<stats.minimum<<",\"maximumMm\":"<<stats.maximum
                 <<",\"rmsMm\":"<<stats.rms<<",\"validSamples\":"<<stats.counts[static_cast<std::size_t>(AlignmentDeviationState::Valid)]<<",\"render\":";
             auto cpuRequest=std::make_shared<AlignmentDeviationRequest>(*request);cpuRequest->computeBackend=AlignmentComputeBackend::Cpu;
             AlignmentDeviationSnapshot snapshot;snapshot.sourceMesh=meshRef;snapshot.result={data.CreateDataEntityId(),1};
             snapshot.forward=cpu.forward;snapshot.parameters=cpuRequest;snapshot.unit=AlignmentUnit::Millimeter;snapshot.sourceToTarget=pose;
             Render(data,meshRef,snapshot,folder,name,out);out<<'}';
-            Require(mismatches==0,"CPU/CUDA sample mismatch; retained report must not claim equality.");
-            std::cout<<"RENDER "<<name<<" rms_mm="<<stats.rms<<" mismatch_samples="<<mismatches<<'\n'<<std::flush;
+            if(!cpuOnly)Require(mismatches==0,"CPU/CUDA sample mismatch; retained report must not claim equality.");
+            std::cout<<"RENDER "<<name<<" rms_mm="<<stats.rms;
+            if(!cpuOnly)std::cout<<" mismatch_samples="<<mismatches;else std::cout<<" backend=cpu";
+            std::cout<<'\n'<<std::flush;
         }
         out<<"],\"status\":\"PASS\"}\n";out.close();Require(bool(out),"Render report write failed.");return 0;
     } catch(const std::exception &e) {std::cerr<<"RENDER_AUDIT_ERROR: "<<e.what()<<'\n';return 1;}

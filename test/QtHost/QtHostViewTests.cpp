@@ -33,6 +33,7 @@
 #include <vtkImageReslice.h>
 #include <vtkInformation.h>
 #include <vtkPiecewiseFunction.h>
+#include <vtkPNGReader.h>
 #include <vtkPoints.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
@@ -280,7 +281,16 @@ int GetHistogramFailCount()
         std::filesystem::exists(pngPath)
             && std::filesystem::exists(jpegPath),
         "Histogram UTF-8 PNG and fallback JPEG export") ? 0 : 1;
-    std::error_code error;
+    // 537 * 4,000,000 超出 int32；回读右侧像素，防止错误索引仅偶然未崩溃。
+    const auto largePngPath=tempDir/std::filesystem::u8path(u8"mvvcvtk-直方图-é-"+fileId+"-4m.png");
+    std::error_code error;std::filesystem::remove(largePngPath,error);
+    converter.SetBinCount(4'000'000);converter.ExportHistogram(image,largePngPath.u8string());
+    auto read=vtkSmartPointer<vtkPNGReader>::New();read->SetFileName(largePngPath.u8string().c_str());read->Update();
+    auto* exported=read->GetOutput();
+    failureCount+=GetCaseResult(exported&&exported->GetDimensions()[0]==800&&exported->GetDimensions()[1]==600
+        &&exported->GetScalarComponentAsDouble(799,0,0,0)==(799*255)/800&&exported->GetScalarComponentAsDouble(0,0,0,0)==128,
+        "Histogram export keeps high-bin canvas indexing in range")?0:1;
+    std::filesystem::remove(largePngPath,error);
     std::filesystem::remove(pngPath, error);
     error.clear();
     std::filesystem::remove(jpegPath, error);
@@ -3118,6 +3128,8 @@ int GetRenderContractFailCount()
 }
 
 }
+
+int GetHistogramExportFailCount(){return GetHistogramFailCount();}
 
 int GetViewFailCount()
 {

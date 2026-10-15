@@ -48,7 +48,7 @@ add_executable(gap_display_mesh_tests GapDisplayMeshTests.cpp)
 target_include_directories(gap_display_mesh_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include")
 target_link_libraries(gap_display_mesh_tests PRIVATE
-    MVVCVTK::Host MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+    mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(gap_display_mesh_tests)
 vtk_module_autoinit(TARGETS gap_display_mesh_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME GapAnalysis.DisplayMesh COMMAND gap_display_mesh_tests)

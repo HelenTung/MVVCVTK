@@ -81,6 +81,10 @@ int GetCropCurveWidgetFailures()
     allowEvents=true;
     operation.centerInInputModel={1e8,1e8,1e8};operation.radius=.1;
     check(widget.SetGeometry(operation,matrix),"large model center remains representable by the controller");
+    const auto largeCenter=world(operation.centerInInputModel);
+    renderer->GetActiveCamera()->SetFocalPoint(largeCenter.data());
+    renderer->GetActiveCamera()->SetPosition(largeCenter[0]+10,largeCenter[1]+10,largeCenter[2]+30);
+    renderer->GetActiveCamera()->SetClippingRange(.1,1000);window->Render();
     if(outline) {
         const auto* bounds=outline->GetBounds();
         check(bounds[1]>bounds[0]&&bounds[3]>bounds[2]&&bounds[5]>bounds[4],"double outline points preserve a small sphere at a large model center");

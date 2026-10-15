@@ -60,7 +60,7 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
 }};
 
 constexpr std::string_view methodCaseNames =
-    "load|consumer-contract|render|label-map|view"
+    "load|consumer-contract|render|label-map|view|histogram-export"
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     "|crop|crop-lifecycle|crop-archive|crop-real"
 #endif
@@ -134,6 +134,7 @@ int main(int argc, char* argv[])
 
     const std::string_view selectedCase =
         isSingleCase ? std::string_view(argv[2]) : std::string_view{};
+    if(isSingleCase&&selectedCase=="histogram-export")return GetHistogramExportFailCount()?1:0;
 #if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     // Real production inputs are explicit; absence is NOT RUN with a nonzero
     // exit status, never a passing synthetic/default test case.

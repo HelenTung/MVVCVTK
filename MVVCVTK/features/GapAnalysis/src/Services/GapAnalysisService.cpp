@@ -265,8 +265,6 @@ private:
         std::size_t labelCount,
         vtkImageData* inputImage,
         std::shared_ptr<const void> labelOwner) const;
-    vtkSmartPointer<vtkPolyData> BuildVoidMesh(
-        vtkImageData* labelImage) const;
 
     InputSnapshot GetInputSnapshot() const;
     GapParamSnapshot GetParamSnapshot() const;
@@ -276,7 +274,7 @@ private:
     static std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
         vtkImageData*, const GridGeometry3D&, const std::atomic<bool>&,const char* id="GapAnalysis.labels");
     static std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
-        vtkPolyData*, const std::atomic<bool>&);
+        vtkPolyData*, const std::atomic<bool>&,const std::string& coordinateFrame);
     static std::shared_ptr<const RecordTablePayload> CreateVoidTable(
         const std::vector<VoidRegion>&, const std::atomic<bool>&);
     static std::shared_ptr<const RecordTablePayload> CreateStatisticsTable(
@@ -888,18 +886,16 @@ GapStatistics GapAnalysisService::Impl::GetStatistics() const
 
 vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh() const {
     vtkSmartPointer<vtkPolyData> voidMesh;
-    vtkSmartPointer<vtkImageData> labelImage;
     {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         if (!m_result.isSucceeded || !m_result.labelImage) {
             return nullptr;
         }
         voidMesh = m_result.voidMesh;
-        labelImage = m_result.labelImage;
     }
 
     if (!voidMesh) {
-        return BuildVoidMesh(labelImage);
+        return nullptr;
     }
 
     // 显示缓存保持只读；显式读取 API 返回独立副本，避免调用方修改后污染重新显示。
@@ -1425,10 +1421,9 @@ void GapAnalysisService::Impl::StartWorker(
         if (hasPayload) {
             // SurfaceMesh 是正式输出；无 3D target 也必须在 worker 内构建候选。
             try {
-                if(params.evaluationRoi && params.roiPolicy==GapRoiPolicy::InsideOnly && result.parent){
-                    result.display=GapDisplayData::Build(result.parent->labelImage,result.voids,m_isStopping,params.evaluationRoi,&result.parent->voids);
-                    result.voidMesh=result.display?result.display->mesh:nullptr;
-                }else result.voidMesh = BuildVoidMesh(result.labelImage);
+                const bool clipped=params.evaluationRoi&&params.roiPolicy==GapRoiPolicy::InsideOnly&&result.parent;
+                result.voidMesh=GapSurfaceBuilder::Build(clipped?result.parent->labelImage:result.labelImage,
+                    result.voids,m_isStopping,clipped?params.evaluationRoi:RoiReadSnapshot{},clipped?&result.parent->voids:nullptr);
             }
             catch (...) {
                 result.voidMesh = nullptr;
@@ -1442,7 +1437,7 @@ void GapAnalysisService::Impl::StartWorker(
                     payloads->labels = CreateLabelPayload(result.labelImage,
                         source->GetGeometry(), m_isStopping);
                     if (payloads->labels && !m_isStopping.load()) {
-                        payloads->mesh = CreateMeshPayload(result.voidMesh, m_isStopping);
+                        payloads->mesh = CreateMeshPayload(result.voidMesh, m_isStopping,source->GetGeometry().coordinateFrame);
                     }
                     if (payloads->mesh && !m_isStopping.load()) {
                         payloads->voids = CreateVoidTable(result.voids, m_isStopping);
@@ -1467,7 +1462,7 @@ void GapAnalysisService::Impl::StartWorker(
                     if (!result.display) {
                         std::string reason;
                         result.display = GapDisplayData::Build(result.labelImage, result.voids,
-                            m_isStopping, {}, nullptr, &reason);
+                            m_isStopping, {}, nullptr, &reason,result.voidMesh);
                         if (!result.display && !m_isStopping.load())
                             std::cerr << "[GapAnalysis] Display preparation failed: " << reason << '\n';
                     }
@@ -2691,23 +2686,6 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
     return image;
 }
 
-vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh(
-    vtkImageData* labelImage) const
-{
-    if (!labelImage) {
-        return nullptr;
-    }
-
-    // labelImage 中 0 为背景、正整数为任一区域；等值 0.5 把所有正标签合并成一张空洞外表面。
-    // 结果不保留区域间的标签边界，也不在此计算法线；当前显示路径把它作为 3D overlay 输入。
-    auto filter = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    filter->SetInputData(labelImage);
-    filter->SetValue(0, 0.5); // label > 0 即为空洞区域
-    filter->ComputeNormalsOff();
-    filter->Update();
-    return filter->GetOutput();
-}
-
 std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPayload(
     vtkImageData* labels,
     const GridGeometry3D& geometry,
@@ -2741,7 +2719,7 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
 
 std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPayload(
     vtkPolyData* mesh,
-    const std::atomic<bool>& isStopping)
+    const std::atomic<bool>& isStopping,const std::string& coordinateFrame)
 {
     if (!mesh || isStopping.load()) return {};
     auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
@@ -2789,8 +2767,16 @@ std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPa
     else if (output->GetNumberOfCells() != 0) {
         return {};
     }
+    auto* regionIds=vtkIntArray::SafeDownCast(output->GetCellData()->GetArray("gap.region.id"));
+    if(!regionIds||regionIds->GetNumberOfTuples()!=output->GetNumberOfCells())return {};
+    MeshAttribute regions;regions.name="gap.region.id";regions.componentCount=1;regions.activeRoles=MeshAttributeRoles::scalars;
+    regions.values.reserve(static_cast<std::size_t>(regionIds->GetNumberOfTuples()));
+    for(vtkIdType i=0;i<regionIds->GetNumberOfTuples();++i) {
+        if(!(i%4096)&&isStopping.load())return {};
+        regions.values.push_back(regionIds->GetValue(i));
+    }
     auto payload = std::make_shared<const SurfaceMeshPayload>(
-        std::move(vertices), std::move(cells));
+        std::move(vertices), std::move(cells),std::vector<MeshAttribute>{},coordinateFrame,std::vector<MeshAttribute>{std::move(regions)});
     return payload->GetValid() ? payload : nullptr;
 }
 
