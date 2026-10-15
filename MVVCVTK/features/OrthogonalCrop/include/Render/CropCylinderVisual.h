@@ -10,6 +10,7 @@ public:
     void AttachRenderer(vtkRenderer*);void DetachRenderer();
     void SetGeometry(const CropOpItem&,vtkMatrix4x4*);
     void SetVisible(bool);void SetRadiusActive(bool);void UpdateView();
+    CropVectorDouble3Array GetRadiusHandleDirection(const CropVectorDouble3Array&) const;
 private:
     CropOpItem m_op;bool m_visible=false,m_radiusActive=false,m_dirty=true;
     vtkSmartPointer<vtkPolyData> m_outline,m_auxiliary;

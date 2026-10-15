@@ -180,6 +180,13 @@ public:
             cylinderVisual.UpdateView();
             // 轴向正视时不让端点与中心争夺同一命中区域；旋转柄仍可用于转出正视。
             if(active<0&&!hover){
+                const auto direction=cylinderVisual.GetRadiusHandleDirection(radial);
+                if(direction!=radial){
+                    radial=direction;
+                    auto radius=Transform(modelToWorld,Add(operation.centerInInputModel,radial,operation.radius));
+                    auto rotation=Transform(modelToWorld,RotationLever());
+                    handles[1].representation->SetWorldPosition(radius.data());handles[4].representation->SetWorldPosition(rotation.data());
+                }
                 std::vector<P> display;
                 for(int i:{0,1,4,2,3}){
                     P world{};handles[i].representation->GetWorldPosition(world.data());

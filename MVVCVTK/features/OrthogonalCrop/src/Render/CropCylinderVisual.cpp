@@ -63,3 +63,33 @@ void CropCylinderVisual::UpdateView(){
     m_auxActor->GetProperty()->SetColor(m_radiusActive?.85:.48,m_radiusActive?.48:.30,m_radiusActive?.20:.20);
     for(auto* d:{m_outline.GetPointer(),m_auxiliary.GetPointer()}){d->GetPoints()->Modified();d->GetLines()->Modified();d->Modified();}
 }
+P CropCylinderVisual::GetRadiusHandleDirection(const P& previous) const {
+    if(!m_renderer)return previous;
+    const auto* origin=m_renderer->GetOrigin();const auto* size=m_renderer->GetSize();
+    const auto center=CropCurveProjection::Project(m_renderer,m_matrix,m_op.centerInInputModel);
+    const auto usable=[&](const P& p){
+        return std::all_of(p.begin(),p.end(),[](double x){return std::isfinite(x);})&&p[2]>=0&&p[2]<=1
+            &&p[0]>=origin[0]+8&&p[0]<=origin[0]+size[0]-8&&p[1]>=origin[1]+8&&p[1]<=origin[1]+size[1]-8
+            &&(!(center[2]>=0&&center[2]<=1)||std::hypot(p[0]-center[0],p[1]-center[1])>=16);
+    };
+    if(usable(CropCurveProjection::Project(m_renderer,m_matrix,Add(m_op.centerInInputModel,previous,m_op.radius))))return previous;
+    P result=previous;double best=-1;
+    const auto consider=[&](const P& p){
+        auto radial=Add(p,m_op.centerInInputModel,-1);radial=Add(radial,m_op.axisInInputModel,-Dot(radial,m_op.axisInInputModel));
+        const double length=std::hypot(radial[0],radial[1],radial[2]);if(!std::isfinite(length)||length==0)return;
+        for(auto& x:radial)x/=length;
+        const auto display=CropCurveProjection::Project(m_renderer,m_matrix,Add(m_op.centerInInputModel,radial,m_op.radius));
+        if(!usable(display))return;
+        const double margin=std::min({display[0]-origin[0],origin[0]+size[0]-display[0],display[1]-origin[1],origin[1]+size[1]-display[1]});
+        const double score=std::isfinite(center[0])&&std::isfinite(center[1])?std::min(margin,std::hypot(display[0]-center[0],display[1]-center[1])):margin;
+        if(score>best){best=score;result=radial;}
+    };
+    // 从已裁剪的可见弧段产生候选；投回中间截面后再验证，不让屏幕位置改变裁切体。
+    for(auto* data:{m_outline.GetPointer(),m_auxiliary.GetPointer()}){
+        for(vtkIdType i=0;i<data->GetNumberOfPoints();++i){P p{};data->GetPoint(i,p.data());consider(p);}
+        auto* lines=data->GetLines();lines->InitTraversal();vtkIdType count=0;const vtkIdType* ids=nullptr;
+        while(lines->GetNextCell(count,ids))for(vtkIdType i=1;i<count;++i){P a{},b{};data->GetPoint(ids[i-1],a.data());data->GetPoint(ids[i],b.data());
+            for(double t:{.25,.5,.75})consider(Add(P{a[0]*(1-t),a[1]*(1-t),a[2]*(1-t)},b,t));}
+    }
+    return result;
+}
