@@ -148,7 +148,8 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
         doc.table=std::make_shared<ReportTable>(objects->size(),[objects](quint64 row){
             const auto& object=objects->at(static_cast<std::size_t>(row));
             return QStringList{QString::number(object.objectIndex),
-                object.areaValidity==SurfaceMetricValidity::Valid&&object.areaModelUnit2?Number(*object.areaModelUnit2):QString(),
+                // 限定面积仍是正式原生量值，资格单独保留。
+                object.areaModelUnit2?Number(*object.areaModelUnit2):QString(),
                 object.volumeValidity==SurfaceMetricValidity::Valid&&object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
                 QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};
         });
