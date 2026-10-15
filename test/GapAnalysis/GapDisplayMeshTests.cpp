@@ -76,6 +76,37 @@ bool Geometry() {
     return true;
 }
 }
+bool OccupiedBlocksMatch()
+{
+    vtkNew<vtkImageData> image;image->SetExtent(-65,64,-65,64,-65,64);image->AllocateScalars(VTK_INT,1);
+    image->SetSpacing(.7,1.2,2.3);image->SetOrigin(1e8,-3,9);
+    std::fill_n(static_cast<int*>(image->GetScalarPointer()),image->GetNumberOfPoints(),0);
+    DataArray<VoidRegion> regions(3);
+    for(std::size_t n=0;n<regions.size();++n){regions[n].id=static_cast<int>(33554433+2*n);regions[n].voxelCount=128;regions[n].bbox={-64,63,-64,63,-64,63};}
+    for(int i=-64;i<=63;++i) {
+        *static_cast<int*>(image->GetScalarPointer(i,i,i))=regions[0].id;
+        *static_cast<int*>(image->GetScalarPointer(i,i,-1-i))=regions[1].id;
+        *static_cast<int*>(image->GetScalarPointer(i,-1-i,i))=regions[2].id;
+    }
+    std::atomic<bool> stopping{false};GapRegionIndex parents;
+    const auto directory=GetGapOccupiedBlocks(image,regions,parents,false,stopping);
+    if(!directory||!directory->isIndexed||directory->blocks.size()>=3*27)return false;
+    DataArray<GapSurfaceRange> indexedRanges,directRanges;
+    const auto indexed=GapSurfaceBuilder::Build(image,regions,stopping,{},nullptr,&indexedRanges);
+    const auto direct=GapSurfaceBuilder::Build(image,regions,stopping,{},nullptr,&directRanges,false);
+    if(!indexed||!direct||indexed->GetNumberOfPoints()!=direct->GetNumberOfPoints()
+        ||indexed->GetNumberOfCells()!=direct->GetNumberOfCells()||indexedRanges.size()!=directRanges.size())return false;
+    for(vtkIdType i=0;i<indexed->GetNumberOfPoints();++i){double a[3],b[3];indexed->GetPoint(i,a);direct->GetPoint(i,b);if(!std::equal(a,a+3,b))return false;}
+    auto* a=indexed->GetPolys()->GetConnectivityArray();auto* b=direct->GetPolys()->GetConnectivityArray();
+    for(vtkIdType i=0;i<a->GetNumberOfValues();++i)if(a->GetComponent(i,0)!=b->GetComponent(i,0))return false;
+    for(std::size_t i=0;i<indexedRanges.size();++i){const auto& x=indexedRanges[i];const auto& y=directRanges[i];if(x.id!=y.id||x.firstPoint!=y.firstPoint||x.pointCount!=y.pointCount||x.firstTriangle!=y.firstTriangle||x.triangleCount!=y.triangleCount)return false;}
+    auto children=regions;for(auto& child:children){child.voxelCount=1;child.bbox={0,0,0,0,0,0};}
+    const auto parentIndexed=GapSurfaceBuilder::Build(image,children,stopping,{},&regions);
+    if(!parentIndexed||parentIndexed->GetNumberOfPoints()!=direct->GetNumberOfPoints()
+        ||parentIndexed->GetNumberOfCells()!=direct->GetNumberOfCells())return false;
+    for(vtkIdType i=0;i<direct->GetNumberOfPoints();++i){double p[3],q[3];parentIndexed->GetPoint(i,p);direct->GetPoint(i,q);if(!std::equal(p,p+3,q))return false;}
+    std::cout<<"Gap occupied blocks="<<directory->blocks.size()<<" bboxBlocks="<<3*27<<'\n';return true;
+}
 int main(int argc,char** argv)
 {
     int count=70000;bool stressOnly=false;
@@ -88,18 +119,21 @@ int main(int argc,char** argv)
             }catch(...){return 2;}
         }else return 2;
     }
-    if(!stressOnly && !Geometry()){std::cerr<<"Gap binary geometry, block seam or ROI point reuse regression.\n";return 1;}
+    if(!stressOnly && (!Geometry()||!OccupiedBlocksMatch())){std::cerr<<"Gap binary geometry, block seam or ROI point reuse regression.\n";return 1;}
     vtkNew<GapLabelLookupTable> fast;
-    fast->SetNumberOfTableValues(3); fast->IndexedLookupOn();
-    fast->SetTableValue(0, 0, 0, 0, 0);
-    fast->SetTableValue(1, .2, .4, .8, .7);
-    fast->SetTableValue(2, .8, .3, .1, .6);
+    const auto directory=std::make_shared<const GapRegionVolumes>(GapRegionVolumes{{60001,1},{33554433,2}});
+    AnalysisColorStyle::RampParams ramp;ramp.blend=AnalysisColorStyle::BlendMode::Inclined;
+    fast->SetRegions(directory,{1,2},ramp);
+    vtkNew<vtkLookupTable> reference;
+    reference->SetNumberOfTableValues(3);reference->IndexedLookupOn();
+    reference->SetTableValue(0,0,0,0,0);reference->SetNanColor(.5,.5,.5,1);
+    for(int i=0;i<2;++i){const auto color=AnalysisColorStyle::GetMappedColor({1,2},ramp,1+i);reference->SetTableValue(i+1,color.data());}
     vtkNew<vtkIntArray> smallIds; vtkNew<vtkStringArray> names;
     for (const int id : {0, 60001, 33554433}) {
         smallIds->InsertNextValue(id); names->InsertNextValue(std::to_string(id));
     }
-    fast->SetAnnotations(smallIds, names); fast->Build();
-    vtkNew<vtkLookupTable> reference; reference->DeepCopy(fast);
+    reference->SetAnnotations(smallIds,names);reference->Build();
+    if(fast->GetNumberOfAnnotatedValues()!=0||fast->GetNumberOfTableValues()!=1)return 1;
     double samples[]{0, 60001, 33554433, -1, 1.5,
         std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()};
     for (const double alpha : {0.0, .35, 1.0}) {
@@ -116,6 +150,10 @@ int main(int argc,char** argv)
     vtkNew<GapLabelLookupTable> copy; copy->DeepCopy(fast);
     if (!std::equal(copy->MapValue(33554433), copy->MapValue(33554433) + 4, reference->MapValue(33554433)))
         return 1;
+    vtkNew<GapLabelLookupTable> isolated;isolated->DeepCopy(fast);isolated->SetOnlyRegion(33554433);
+    std::array<unsigned char,4> selectedColor;std::copy_n(fast->MapValue(33554433),4,selectedColor.begin());
+    if(isolated->GetOpacity(60001)!=0||isolated->GetOpacity(0)!=0||fast->GetOpacity(60001)==0
+        ||!std::equal(selectedColor.begin(),selectedColor.end(),isolated->MapValue(33554433)))return 1;
 
     const auto started=std::chrono::steady_clock::now();
     vtkNew<vtkImageData> image;
@@ -147,21 +185,22 @@ int main(int argc,char** argv)
     // 独立单体素等值面为八面体：6 个顶点、8 个三角形。
     bool valid = mesh->GetNumberOfPoints() == 6LL * count
         && mesh->GetNumberOfCells() == 8LL * count
-        && display->labels->GetNumberOfTableValues() == count + 1
+        && display->labels->GetNumberOfTableValues() == 1
+        && display->labels->GetNumberOfAnnotatedValues() == 0
         && ids && ids->GetNumberOfTuples() == 8LL * count;
     for (int index = 0; valid && index < count; ++index) {
         for (int cell = 0; cell < 8; ++cell)
             valid &= ids->GetComponent(8LL * index + cell,0) == regions[index].id;
         valid &= *static_cast<int*>(image->GetScalarPointer(2 * index + 1, 1, 1)) == regions[index].id;
     }
-    for (const int index : {0, count / 2, count - 1})
-        valid &= display->labels->GetAnnotatedValueIndex(vtkVariant(regions[index].id)) == index + 1;
+    const auto recolored=GapDisplayData::CreateColors(*display,GapDisplayParams{});
+    valid &= recolored&&recolored->regionVolumes==display->regionVolumes;
     vtkSmartPointer<vtkUnsignedCharArray> colors;
     colors.TakeReference(display->labels->MapScalars(ids, VTK_COLOR_MODE_MAP_SCALARS, 0));
     valid &= colors && colors->GetNumberOfComponents() == 4
         && colors->GetNumberOfTuples() == mesh->GetNumberOfCells();
     for (int index = 0; valid && index < count; ++index) {
-        const auto* expected = display->labels->GetPointer(index + 1);
+        const auto* expected = display->volumes->MapValue(regions[index].volumeMM3);
         for (int cell = 0; cell < 8; ++cell) {
             unsigned char actual[4]; colors->GetTypedTuple(8LL * index + cell, actual);
             valid &= std::equal(actual, actual + 4, expected);

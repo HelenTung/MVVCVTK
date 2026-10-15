@@ -68,10 +68,13 @@ std::optional<std::size_t> GetWorkingEstimate(const std::size_t pointCount,
 bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const WorkLimit budget,
                SurfaceExecutionStats &stats)
 {
+    (void)budget;
     const auto estimate = GetWorkingEstimate(pointCount, triangleCount);
     if (!estimate) return false;
     stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
-    return *estimate <= budget;
+    // 后备数组的逻辑总量不是 RAM 工作区；索引/字节溢出仍在上面拒绝。
+    // 目标工作集只影响可重建缓存，不拒绝可表示的完整结果。
+    return true;
 }
 
 SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit budget,
@@ -234,7 +237,7 @@ SurfaceSeedStatus BuildSeedMesh(
     const auto meshBudget = [&](std::size_t pointCount, std::size_t triangleCount) {
         if (cacheBytes) {
             const auto estimate = GetWorkingEstimate(pointCount, triangleCount, cacheBytes);
-            if (estimate && *estimate <= budget) {
+            if (estimate && (DataArrayStorage::GetCurrent() || *estimate <= budget)) {
                 stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
                 return true;
             }

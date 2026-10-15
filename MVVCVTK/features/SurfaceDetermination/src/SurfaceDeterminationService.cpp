@@ -27,6 +27,7 @@ SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
             m_isStopping = true;
+            m_reads->StopLocked();
             if (m_activeCancel) {
                 m_activeCancel->store(true, std::memory_order_release);
             }
@@ -46,8 +47,7 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return SurfaceAdmissionStatus::Stopping;
-    if (!source || !source->image || requestId == 0
-        || maxWorkingBytes == 0) {
+    if (!source || !source->image || requestId == 0) {
         return SurfaceAdmissionStatus::InvalidRequest;
     }
     const auto maxSlots = m_complete.max_size();
@@ -97,7 +97,8 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
             PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
             PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
             PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
-            complete.result.prepared.reset();
+            PagedArray<SurfaceSelectionPiece>().swap(complete.result.selection);
+            complete.meshes={};complete.result.prepared.reset();
             complete.result.requiredBytes = 0;
         }
     }
@@ -134,7 +135,8 @@ bool SurfaceDeterminationService::StopRequest(
         PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
         PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
         PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
-        complete.result.prepared.reset();
+        PagedArray<SurfaceSelectionPiece>().swap(complete.result.selection);
+        complete.meshes={};complete.result.prepared.reset();
             complete.result.requiredBytes = 0;
         didStop = true;
     }
@@ -168,13 +170,11 @@ FeatureOperationState SurfaceDeterminationService::GetExecutionState(const std::
     return state;
 }
 
-std::optional<SurfaceJobComplete> SurfaceDeterminationService::GetComplete(const bool retainForPublication)
+std::optional<SurfaceJobComplete> SurfaceDeterminationService::GetComplete()
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_complete.empty()) return std::nullopt;
     SurfaceJobComplete complete = std::move(m_complete.front());
-    if (retainForPublication)
-        m_handoffBytes = complete.result.requiredBytes;
     m_complete.erase(m_complete.begin());
     ++m_executionRevision;
     return complete;
@@ -213,6 +213,7 @@ bool SurfaceDeterminationService::Stop(
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
         m_isStopping = true;
+        m_reads->StopLocked();
         ++m_executionRevision;
         if (m_activeCancel) {
             m_activeCancel->store(true, std::memory_order_release);
@@ -277,33 +278,33 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
 {
     for (;;) {
         Job job;
+        std::optional<FeatureInternal::ReadTaskQueue::Job> read;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_workReady.wait(lock, [this] {
-                return m_isStopping || !m_pendingJobs.empty();
+                return m_isStopping || !m_pendingJobs.empty() || m_reads->GetHasPendingLocked();
             });
             if (m_isStopping && m_pendingJobs.empty()) break;
-            job = std::move(m_pendingJobs.front());
-            m_pendingJobs.pop_front();
-            m_activeScope = job.params.resultScope;
-            m_activePurpose = SurfaceContract::GetPurpose(job.params);
-            m_activeRequestId = job.requestId;
-            m_activeCancel = job.isCancelled;
-            ++m_executionRevision;
+            if(m_pendingJobs.empty())read=m_reads->TakeLocked();
+            else {
+                job = std::move(m_pendingJobs.front());
+                m_pendingJobs.pop_front();
+                m_activeScope = job.params.resultScope;
+                m_activePurpose = SurfaceContract::GetPurpose(job.params);
+                m_activeRequestId = job.requestId;
+                m_activeCancel = job.isCancelled;
+                ++m_executionRevision;
+            }
+        }
+        if(read) {
+            try {read->task([token=read->cancelled]{return token->load(std::memory_order_acquire);});}catch(...){}
+            {const std::lock_guard<std::mutex> lock(m_mutex);m_reads->FinishLocked();}
+            try {if(m_onWorkAvailable)m_onWorkAvailable();}catch(...){}
+            continue;
         }
 
-        WorkLimit available = job.maxWorkingBytes;
-        {
-            const std::lock_guard<std::mutex> lock(m_mutex);
-            const auto subtract = [&](std::size_t amount) {
-                available = amount >= available ? 0 : available - amount;
-            };
-            subtract(m_retainedBytes);
-            subtract(m_handoffBytes);
-            for (const auto &pending : m_complete)
-                if (pending.result.status == SurfaceResultStatus::Succeeded)
-                    subtract(pending.result.requiredBytes);
-        }
+        // 已冻结结果由各自后备存储保活；其逻辑长度不能扣减本次活动工作区。
+        const WorkLimit available = job.maxWorkingBytes;
         SurfaceJobComplete complete;
         complete.requestId = job.requestId;
         if (job.isCancelled->load(std::memory_order_acquire)) {
@@ -330,13 +331,21 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
                     }
                 } catch(const std::exception& error){complete.result.status=SurfaceResultStatus::Failed;complete.result.failureReason=SurfaceFailureReason::InternalError;complete.result.message=error.what();}
             }
+            if(complete.result.status==SurfaceResultStatus::Succeeded) {
+                complete.meshes.measurement=complete.result.prepared->mesh;
+                complete.meshes.selection=complete.result.prepared->selectionMesh;
+                try {
+                    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get());
+                    complete.meshes.display=PrepareSurfaceDisplay(complete.result,complete.meshes,job.inputs,
+                        image->GetGeometry().coordinateFrame,job.maxWorkingBytes,[cancel=job.isCancelled]{return cancel->load();});
+                }catch(const std::exception& error){complete.meshes.displayError=error.what();}
+                catch(...){complete.meshes.displayError="Surface spatial display preparation failed.";}
+            }
         }
 
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
-            if (job.isCancelled->load(std::memory_order_acquire)
-                && complete.result.status
-                    == SurfaceResultStatus::Succeeded) {
+            if (job.isCancelled->load(std::memory_order_acquire)) {
                 complete = BuildCancelled(job);
             }
             // Start 为每个已接纳请求预留一个 completion 槽位，不能在此
@@ -356,12 +365,4 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
         m_hasExited = true;
     }
     m_workerExited.notify_all();
-}
-
-void SurfaceDeterminationService::SetRetainedBytes(const std::size_t bytes, const bool releaseHandoff)
-{
-    const std::lock_guard<std::mutex> lock(m_mutex);
-    m_retainedBytes = bytes;
-    if (releaseHandoff)
-        m_handoffBytes = 0;
 }

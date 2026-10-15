@@ -3,6 +3,8 @@
 #include "../TestDataPort.h"
 
 #include "Services/GapAnalysisService.h"
+#include "Render/GapDisplayData.h"
+#include "Geometry/RoiEvaluator.h"
 #include "Render/Contracts/FeatureOverlay.h"
 #include "Render/Contracts/OverlayService.h"
 
@@ -781,9 +783,51 @@ int GapDisplaySuite::GetFailCount() const
         && graphShortPayloads->voids && graphShortPayloads->voids->GetValid()
         && graphShortPayloads->statistics && graphShortPayloads->statistics->GetValid(),
         "Non-float graph conversion must preserve publication payloads.");
+    if(hasGraphShortResult&&graphShortPayloads&&graphShortPayloads->mesh&&graphShortResult.voidMesh) {
+        auto* geometry=graphShortResult.voidMesh.GetPointer();
+        const auto& formal=*graphShortPayloads->mesh;
+        bool same=geometry->GetNumberOfPoints()==static_cast<vtkIdType>(formal.GetPointValues().size()/3)
+            &&geometry->GetNumberOfCells()==static_cast<vtkIdType>(formal.GetTriangleIndices().size()/3);
+        for(vtkIdType i=0;same&&i<geometry->GetNumberOfPoints();++i){double point[3];geometry->GetPoint(i,point);
+            for(unsigned c=0;c<3;++c)same=same&&point[c]==formal.GetPointValues()[static_cast<std::size_t>(3*i+c)];}
+        auto* cells=geometry->GetPolys()->GetConnectivityArray();
+        for(vtkIdType i=0;same&&i<cells->GetNumberOfValues();++i)same=static_cast<std::uint64_t>(cells->GetComponent(i,0))==formal.GetTriangleIndices()[static_cast<std::size_t>(i)];
+        expect(same,"Worker VTK geometry must preserve the complete readonly publication values and connectivity.");
+    }
     expect(CommitDisplayResult(graphShortService)
         && graphShortCompleteCount == 1 && isGraphShortSucceeded,
         "Non-float graph publication must complete exactly once.");
+    if(hasGraphShortResult&&graphShortPayloads&&graphShortPayloads->mesh) {
+        expect(graphShortResult.display&&graphShortResult.display->spatial
+            && &graphShortResult.display->spatial->GetMesh()==graphShortPayloads->mesh.get(),
+            "Graph display must read the exact frozen formal mesh.");
+        RoiPrimitive half;half.shape=RoiShape::HalfSpace;half.origin={2.25,0,0};half.normal={1,0,0};
+        const auto roi=RoiEvaluator::GetPreview(graphShortInput->graph,{graphShortInput->data->self,{{RoiNodeKind::Primitive,half}}});
+        expect(roi.error==RoiError::None&&roi.roi,"Saved-parent display ROI must resolve against its source.");
+        if(roi.roi&&graphShortResult.display&&graphShortResult.display->spatial) {
+            GapAnalysisService childService;GapViewRequest childRequest;
+            childRequest.graphInput=graphShortInput;childRequest.surface=surfaceConfig;childRequest.voidParams=voidParams;
+            childRequest.savedParent=std::make_shared<const GapAnalysisResult>(graphShortResult);
+            childRequest.isEvaluationOnly=true;childRequest.evaluationRoi=roi.roi;childRequest.roiPolicy=GapRoiPolicy::InsideOnly;
+            childRequest.meshTargets={std::make_shared<OverlayStub>()};
+            expect(childService.StartView(std::move(childRequest)),"Saved-parent child view must be accepted.");
+            const auto childDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+            while(childService.GetAnalysisState()==GapAnalysisState::Running&&std::chrono::steady_clock::now()<childDeadline)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            childService.OnDisplayTick(nullptr);GapAnalysisResult child;
+            expect(childService.GetCompletedResult(child)&&child.payloads&&child.payloads->mesh&&child.display&&child.display->spatial
+                && &child.display->spatial->GetMesh()==child.payloads->mesh.get()
+                &&child.display!=graphShortResult.display&&child.display->spatial!=graphShortResult.display->spatial,
+                "ROI child display must use child formal geometry rather than the parent's cached display.");
+            expect(CommitDisplayResult(childService),"Saved-parent child display must commit independently.");
+            childService.ExitView();childService.OnDisplayTick(nullptr);
+        }
+    }
+    auto rawReplacement=vtkSmartPointer<vtkImageData>::New();rawReplacement->SetDimensions(5,5,5);rawReplacement->AllocateScalars(VTK_FLOAT,1);
+    std::fill_n(static_cast<float*>(rawReplacement->GetScalarPointer()),125,100.F);*static_cast<float*>(rawReplacement->GetScalarPointer(1,1,1))=0.F;
+    auto rawOverlay=std::make_shared<OverlayStub>();GapViewRequest rawRequest;rawRequest.inputImage=rawReplacement;rawRequest.surface=surfaceConfig;rawRequest.voidParams=voidParams;rawRequest.meshTargets={rawOverlay};
+    expect(StartDisplay(graphShortService,std::move(rawRequest),rawReplacement),"A raw view may replace an already consumed graph view.");
+    auto* rawMesh=vtkPolyData::SafeDownCast(rawOverlay->GetInput(0));
+    expect(rawMesh&&rawMesh->GetBounds()[1]<2,"Graph-to-raw replacement must not reuse old spatial batches.");
     expect(graphShortService.ExitView(), "Non-float graph view must exit cleanly.");
     graphShortService.OnDisplayTick(nullptr);
 

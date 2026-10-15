@@ -12,6 +12,10 @@ bool IsPartEditAction(const QString& action)
 }
 QString GetActionDescription(const QString& module, const QString& action)
 {
+    if((module=="Surface"||module=="Gap")&&action=="ObjectPicking")return "启用后用 Ctrl + 点击选择本功能显示的对象；普通拖动继续旋转或平移。其他工具启用时按宿主输入归属切换。";
+    if((module=="Surface"||module=="Gap")&&action=="SelectObject")return "按列表保存的正式结果修订和原始编号高亮并定位对象；历史结果与当前显示不一致时拒绝选择。";
+    if((module=="Surface"||module=="Gap")&&action=="IsolateObject")return "只显示所选对象并高亮；对象编号、正式几何及统计不变。";
+    if((module=="Surface"||module=="Gap")&&action=="ClearObjectSelection")return "清除当前对象高亮与隔离，恢复完整结果的按需显示。";
     if(module=="Roi") {
         if(action=="EndDrawing")return "完成当前轮廓绘制并形成选择；与形态学闭运算不同。";
         if(action=="Close")return "按给定半径先膨胀再腐蚀；不是结束轮廓绘制。";
@@ -78,6 +82,12 @@ QString GetModuleText(const QString& module)
 }
 QString GetActionText(const QString& module, const QString& action)
 {
+    if(module=="Surface"||module=="Gap") {
+        if(action=="SelectObject")return "选择并定位对象";
+        if(action=="IsolateObject")return "隔离此对象";
+        if(action=="ClearObjectSelection")return "清除选择与隔离";
+        if(action=="ObjectPicking")return "对象拾取模式";
+    }
     if(action=="SetVolumeVisible")return "设置当前三维体数据显隐";
     if(module=="Roi" && action=="EndDrawing")return "完成轮廓";
     if(module=="Roi" && action=="Clear")return "清空范围";
@@ -98,6 +108,12 @@ QString GetActionText(const QString& module, const QString& action)
     if(action=="Defects")return "查看缺陷目录";
     if(action=="NextDefectPage")return "下一页缺陷";
     if(action=="LocateDefect")return "定位孔隙缺陷";
+    if(action=="LocateDefectById")return "按原始编号定位孔隙";
+    if(action=="ReadDefectGeometry")return "读取孔隙几何页";
+    if(action=="NextObjectPage")return "下一页表面对象";
+    if(action=="LocateObject")return "定位表面对象";
+    if(action=="ReadObjectPoints")return "读取对象点页";
+    if(action=="ReadObjectTriangles")return "读取对象三角形页";
     if(action=="ResetDefectFilter")return "清除列表筛选";
     if (action == "UseData") return "设为工作输入";
     if (action == "GraphInfo") return "查看发布记录";
@@ -151,6 +167,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
         {"MeasurementSelection", "读取有效计量选区"},
+        {"ReadMeasurementSelection", "查看计量选区编号"}, {"CancelRead", "取消读取或导出"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
         {"SetEnabled", "设置旋转启用状态"}, {"Rotate", "旋转模型"},
         {"ExportSequentialPlanesTemplate", "导出顺序平面对齐模板"}, {"ExportPlaneTwoHolesTemplate", "导出一面两孔对齐模板"},
@@ -184,6 +201,12 @@ QString GetParameterText(const QString& key)
     if(key=="objectIndex")return "表面对象编号";
     if(key=="pageOffset")return "列表起始行（从零开始）";
     if(key=="pageSize")return "每页条目数";
+    if(key=="generation")return "表面结果修订";
+    if(key=="selectionId")return "计量筛选编号（latest 表示最近完成）";
+    if(key=="objectIndex")return "表面对象编号";
+    if(key=="regionId")return "孔隙原始编号";
+    if(key=="pointOffset")return "对象内点起始位置";
+    if(key=="triangleOffset")return "对象内三角形起始位置";
     if(key=="rowIndex")return "缺陷表原始行号";
     if(key=="table")return "缺陷表修订";
     static const QHash<QString, QString> inspectionLabels{

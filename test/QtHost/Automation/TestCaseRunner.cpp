@@ -93,18 +93,21 @@
 #include <QVTKOpenGLNativeWidget.h>
 namespace Manual {
 namespace {
-bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
+bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
 {
     QElapsedTimer elapsed;elapsed.start();
     for(;;) {
         if(done())return true;
         const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
-        if(remaining<=0)return false;
+        if(timeoutMs>0&&remaining<=0)return false;
         QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
+        bool quitting=false;
+        QObject::connect(QCoreApplication::instance(),&QCoreApplication::aboutToQuit,&loop,[&]{quitting=true;loop.quit();});
         QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
             [&]{if(done())loop.quit();});
         QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
-        deadline.start(static_cast<int>(remaining));loop.exec();
+        if(timeoutMs>0)deadline.start(static_cast<int>(remaining));loop.exec();
+        if(quitting)return false;
         // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
     }
 }
@@ -134,7 +137,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
                 && scene.sceneEpoch == scenes.front().sceneEpoch && scene.renderedEpoch > 0
                 && scene.renderedEpoch <= scene.sceneEpoch && !window.GetWorkflow().getRenderPending(scene.id);
         });
-    },step["timeoutMs"].toInt(30000)), "business capture waits for committed 2D/3D scenes and actual renders");
+    },step["timeoutMs"].toInt(0)), "business capture waits for committed 2D/3D scenes and actual renders");
     Check(QDir().mkpath(folder), "business capture directory is available");
     QCoreApplication::processEvents();
     QJsonArray files, scenes;
@@ -163,7 +166,7 @@ std::uint64_t Send(TestWindow& window, const QString& module, const QString& act
     panel->SetParameterPatch(action, patch);
     return panel->SendAction(action, panel->GetParameters());
 }
-QJsonObject GetComplete(TestWindow& window, std::uint64_t id, const QString& status = {}, int timeoutMs = 30000)
+QJsonObject GetComplete(TestWindow& window, std::uint64_t id, const QString& status = {}, int timeoutMs = 0)
 {
     const bool completed = Wait([&] { return window.GetRecords().GetRecord(id)["isTerminal"].toBool(); }, timeoutMs);
     if (!completed) {
@@ -2171,6 +2174,13 @@ void StartSelfTest(TestWindow& window)
         const auto scene=window.GetSession()->GetSceneViewState({"primary-3d"});
         Check(scene && std::any_of(scene->displays.begin(),scene->displays.end(),[](const auto& value){return value.localId=="surface-object";}),"actual Host scene contains the object selection role");
         GetComplete(window,window.GetModule("Surface")->SendAction("ClearObjectHighlight",{}),"Succeeded");
+        const auto selected=GetComplete(window,Click(window,"Surface","MeasurementSelection"),"Observed")["result"].toObject();
+        Check(selected["triangleIds"].toArray().size()<=256&&selected["vertexIds"].toArray().size()<=256,"measurement result record contains only bounded ID pages");
+        const auto page=GetComplete(window,Click(window,"Surface","ReadMeasurementSelection",{{"selectionId",selected["selectionId"]},{"pageSize","1"}}),"Observed")["result"].toObject();
+        Check(page["generation"]==selected["generation"]&&page["total"]==selected["selectedTriangles"]&&page["ids"].toArray().size()<=1,"measurement pages retain the complete fixed selection and original IDs");
+        const auto surfaceExport=directory.filePath("surface-points.csv");
+        const auto exported=GetComplete(window,Click(window,"Surface","ExportComparison",{{"outputPath",surfaceExport}}),"Exported")["result"].toObject();
+        Check(exported["generation"]==selected["generation"]&&QFileInfo(surfaceExport).size()>0,"background point export uses the captured formal revision");
         CheckOverlaySwitch(window, "Surface");
         Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)), "material surface is a formal metrology input");
 #if defined(MANUAL_ALIGNMENT)
@@ -2519,9 +2529,9 @@ void StartSequence(TestWindow& window, const QString& path)
     if (!script["steps"].isArray() || script["steps"].toArray().isEmpty()) throw std::invalid_argument("用例必须包含非空 steps");
     // 执行加载/计算前校验全部等待参数；范围来自 Qt 的 int 毫秒计时接口，不设业务时限。
     const auto getWaitMilliseconds=[](const QJsonObject& step){
-        const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):30000.;
-        if(timeout<1 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
-            throw std::invalid_argument("用例 timeoutMs 必须为 1..2147483647 毫秒整数");
+        const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):0.;
+        if(timeout<0 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
+            throw std::invalid_argument("用例 timeoutMs 必须为 0..2147483647 毫秒整数；0 表示持续等待或用户取消");
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
@@ -2541,7 +2551,7 @@ void StartSequence(TestWindow& window, const QString& path)
             panel->Observe();actual=panel->GetObservedState();
             for(auto it=expected.begin();it!=expected.end();++it)if(observedValue(it.key())!=it.value())return false;
             return true;
-        },std::min(getWaitMilliseconds(step),30000));
+        },getWaitMilliseconds(step));
         if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
         for(auto it=expected.begin();it!=expected.end();++it)Check(observedValue(it.key())==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
         if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
@@ -2620,7 +2630,7 @@ void StartSequence(TestWindow& window, const QString& path)
             else window.GetWorkflow().onNavigate(module,parameterAction,params);
             QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
-            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},std::min(timeout,30000));
+            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},timeout);
             if(!available)std::cout << "CONTROL BLOCKED: " << module.toStdString() << "." << action.toStdString()
                 << " tooltip=" << (button ? button->toolTip().toStdString() : "missing control") << " state="
                 << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;

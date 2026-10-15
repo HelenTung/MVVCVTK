@@ -1,5 +1,6 @@
 #pragma once
 #include "AlignmentData.h"
+#include "Data/DataPayloads.h"
 #include "Render/Support/FeatureOverlayBase.h"
 
 class vtkActor;

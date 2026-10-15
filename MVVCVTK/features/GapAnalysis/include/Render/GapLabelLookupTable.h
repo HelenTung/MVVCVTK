@@ -1,104 +1,118 @@
 #pragma once
 
-#include <vtkIntArray.h>
+#include "Data/DataPayloads.h"
+#include "Render/Support/AnalysisColorStyle.h"
 #include <vtkLookupTable.h>
 #include <vtkObjectFactory.h>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <unordered_map>
+#include <memory>
 
-// Gap 私有分类色表。按区域编号建索引，避免 VTK 对每个面片/像素线性扫描注释。
-// 正式标签和稀疏编号保持不变；空间占用只与区域数量有关。
+// 共享、按正式编号排序的紧凑目录。不为全体对象生成颜色项、注释文字或哈希节点。
+using GapRegionVolumes = DataArray<std::pair<std::int32_t, double>>;
+
 class GapLabelLookupTable final : public vtkLookupTable {
 public:
     static GapLabelLookupTable* New();
     vtkTypeMacro(GapLabelLookupTable, vtkLookupTable);
+    void SetOnlyRegion(std::optional<std::int32_t> id){m_onlyRegion=id;this->Modified();}
 
-    void SetAnnotations(vtkAbstractArray* values, vtkStringArray* names) override {
-        this->Superclass::SetAnnotations(values, names);
-        RebuildIndex();
+    void SetRegions(std::shared_ptr<const GapRegionVolumes> regions,
+        std::array<double, 2> range, AnalysisColorStyle::RampParams ramp,
+        vtkSmartPointer<vtkLookupTable> initialColors = {})
+    {
+        m_regions=std::move(regions);m_range=range;m_ramp=std::move(ramp);
+        m_onlyRegion.reset();
+        m_initialColors=std::move(initialColors);
+        this->SetNumberOfTableValues(1);
+        this->SetTableValue(0,0,0,0,0);
+        this->SetNanColor(.5,.5,.5,1);
+        this->Modified();
     }
-    void DeepCopy(vtkScalarsToColors* source) override {
+    void DeepCopy(vtkScalarsToColors* source) override
+    {
         this->Superclass::DeepCopy(source);
-        RebuildIndex();
+        if(auto* labels=GapLabelLookupTable::SafeDownCast(source)) {
+            m_regions=labels->m_regions;m_range=labels->m_range;m_ramp=labels->m_ramp;
+            m_initialColors=labels->m_initialColors;m_onlyRegion=labels->m_onlyRegion;
+        }else {m_regions.reset();m_initialColors=nullptr;m_onlyRegion.reset();}
     }
-    const unsigned char* MapValue(double value) override {
-        if (!this->GetIndexedLookup() || !hasIndex_)
-            return this->Superclass::MapValue(value);
-        const auto index = Find(value);
-        return index < 0 ? this->GetNanColorAsUnsignedChars() : this->GetPointer(index);
-    }
-    void GetColor(double value, double rgb[3]) override {
-        if (!this->GetIndexedLookup() || !hasIndex_) {
-            this->Superclass::GetColor(value, rgb); return;
+    const unsigned char* MapValue(double value) override
+    {
+        // VTK 可并行映射切片；返回缓冲按线程隔离，目录和配色均只读。
+        thread_local std::array<unsigned char,4> color;
+        const auto invalid=[&]() -> const unsigned char* {
+            this->GetColorAsUnsignedChars(this->GetNanColor(),color.data());return color.data();
+        };
+        if(!std::isfinite(value)||value<std::numeric_limits<std::int32_t>::min()
+            ||value>std::numeric_limits<std::int32_t>::max()||std::trunc(value)!=value)
+            return invalid();
+        const auto id=static_cast<std::int32_t>(value);
+        if(id==0)return this->GetPointer(0);
+        if(m_onlyRegion&&id!=*m_onlyRegion)return this->GetPointer(0);
+        if(!m_regions)return invalid();
+        const auto found=std::lower_bound(m_regions->begin(),m_regions->end(),id,
+            [](const auto& entry,std::int32_t key){return entry.first<key;});
+        if(found==m_regions->end()||found->first!=id)return invalid();
+        if(m_initialColors) {
+            // 初次显示保持既有 256 项体积色表的量化规则。
+            std::copy_n(m_initialColors->MapValue(found->second),4,color.begin());
+        }else {
+            const auto rgba=AnalysisColorStyle::GetMappedColor(m_range,m_ramp,found->second);
+            for(int c=0;c<4;++c)color[c]=static_cast<unsigned char>(255*rgba[c]+.5);
         }
-        const auto* color = MapValue(value);
-        for (int i = 0; i < 3; ++i) rgb[i] = color[i] / 255.0;
+        return color.data();
     }
-    double GetOpacity(double value) override {
-        if (!this->GetIndexedLookup() || !hasIndex_)
-            return this->Superclass::GetOpacity(value);
-        return MapValue(value)[3] / 255.0;
+    void GetColor(double value,double rgb[3]) override
+    {
+        const auto* color=MapValue(value);
+        for(int c=0;c<3;++c)rgb[c]=color[c]/255.;
     }
-    void MapScalarsThroughTable2(void* input, unsigned char* output, int type,
-        int count, int increment, int format) override {
-        if (!this->GetIndexedLookup() || !hasIndex_
-            || format < VTK_LUMINANCE || format > VTK_RGBA) {
-            this->Superclass::MapScalarsThroughTable2(input, output, type, count, increment, format);
-            return;
+    double GetOpacity(double value) override {return MapValue(value)[3]/255.;}
+    void MapScalarsThroughTable2(void* input,unsigned char* output,int type,
+        int count,int increment,int format) override
+    {
+        if(format<VTK_LUMINANCE||format>VTK_RGBA) {
+            this->Superclass::MapScalarsThroughTable2(input,output,type,count,increment,format);return;
         }
-        switch (type) {
-            vtkTemplateMacro(MapRows(static_cast<const VTK_TT*>(input), output, count, increment, format));
-        default:
-            this->Superclass::MapScalarsThroughTable2(input, output, type, count, increment, format);
-            break;
+        switch(type) {
+            vtkTemplateMacro(MapRows(static_cast<const VTK_TT*>(input),output,count,increment,format));
+        default:this->Superclass::MapScalarsThroughTable2(input,output,type,count,increment,format);break;
         }
     }
 
 protected:
-    GapLabelLookupTable() = default;
-    ~GapLabelLookupTable() override = default;
-
+    GapLabelLookupTable()=default;
+    ~GapLabelLookupTable() override=default;
 private:
-    void RebuildIndex() {
-        indices_.clear();
-        auto* values = vtkIntArray::SafeDownCast(this->GetAnnotatedValues());
-        hasIndex_ = values != nullptr;
-        if (!values) return;
-        indices_.reserve(static_cast<std::size_t>(values->GetNumberOfValues()));
-        for (vtkIdType i = 0; i < values->GetNumberOfValues(); ++i)
-            indices_.emplace(values->GetValue(i), i);
-    }
-    vtkIdType Find(double value) {
-        if (!std::isfinite(value) || value < std::numeric_limits<std::int32_t>::min()
-            || value > std::numeric_limits<std::int32_t>::max() || std::trunc(value) != value)
-            return -1;
-        const auto found = indices_.find(static_cast<std::int32_t>(value));
-        const auto size = this->GetNumberOfTableValues();
-        return found == indices_.end() || size <= 0 ? -1 : found->second % size;
-    }
     template<class Value>
-    void MapRows(const Value* input, unsigned char* output, int count, int increment, int format) {
-        unsigned char nan[4];
-        this->GetColorAsUnsignedChars(this->GetNanColor(), nan);
-        const auto alpha = this->GetAlpha();
-        for (int i = 0; i < count; ++i, input += increment, output += format) {
-            const auto index = Find(static_cast<double>(*input));
-            const auto* color = index < 0 ? nan : this->GetPointer(index);
-            if (format == VTK_RGB || format == VTK_RGBA) {
-                for (int c = 0; c < 3; ++c) output[c] = color[c];
-                if (format == VTK_RGBA)
-                    output[3] = static_cast<unsigned char>(color[3] * alpha + 0.5);
-            } else {
-                output[0] = static_cast<unsigned char>(color[0] * .30 + color[1] * .59 + color[2] * .11 + .5);
-                if (format == VTK_LUMINANCE_ALPHA)
-                    output[1] = static_cast<unsigned char>(color[3] * alpha + .5);
+    void MapRows(const Value* input,unsigned char* output,int count,int increment,int format)
+    {
+        const auto alpha=this->GetAlpha();
+        bool hasLast=false;double lastValue=0;std::array<unsigned char,4> cached;
+        for(int i=0;i<count;++i,input+=increment,output+=format) {
+            const double value=static_cast<double>(*input);
+            if(!hasLast||value!=lastValue) {
+                std::copy_n(MapValue(value),4,cached.begin());hasLast=true;lastValue=value;
+            }
+            const auto* color=cached.data();
+            if(format==VTK_RGB||format==VTK_RGBA) {
+                std::copy_n(color,3,output);
+                if(format==VTK_RGBA)output[3]=static_cast<unsigned char>(color[3]*alpha+.5);
+            }else {
+                output[0]=static_cast<unsigned char>(color[0]*.30+color[1]*.59+color[2]*.11+.5);
+                if(format==VTK_LUMINANCE_ALPHA)output[1]=static_cast<unsigned char>(color[3]*alpha+.5);
             }
         }
     }
-    std::unordered_map<std::int32_t, vtkIdType> indices_;
-    bool hasIndex_ = false;
+    std::shared_ptr<const GapRegionVolumes> m_regions;
+    std::array<double,2> m_range{0,0};
+    AnalysisColorStyle::RampParams m_ramp;
+    vtkSmartPointer<vtkLookupTable> m_initialColors;
+    std::optional<std::int32_t> m_onlyRegion;
 };
 
 inline vtkStandardNewMacro(GapLabelLookupTable);

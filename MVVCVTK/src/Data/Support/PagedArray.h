@@ -343,7 +343,27 @@ template<class Value,class Less> void SortPagedArray(PagedArray<Value>& values,L
 }
 
 class MeshPayloadBuilder final {
+    template<class Value> class ArraySource final:public MeshValueSource<Value> {
+    public:
+        explicit ArraySource(std::shared_ptr<const DataArray<Value>> source):m_source(std::move(source)){}
+        std::size_t GetCount()const noexcept override{return m_source->size();}
+        std::size_t GetResidentBytes()const noexcept override{return m_source->get_allocator().storage?0:m_source->capacity()*sizeof(Value);}
+        void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
+            if(offset>m_source->size() || count>m_source->size()-offset)throw std::out_of_range("Mesh shared array range is invalid.");
+            std::copy_n(m_source->begin()+offset,count,target);
+        }
+    private:std::shared_ptr<const DataArray<Value>> m_source;
+    };
 public:
+    static std::shared_ptr<const SurfaceMeshPayload> Build(
+        std::shared_ptr<const DataArray<double>> points,std::shared_ptr<const DataArray<std::uint64_t>> faces,
+        std::vector<MeshAttribute> pointData={},std::string frame="RAS",std::vector<MeshAttribute> cellData={},
+        const std::function<bool()>& cancelled={}) {
+        if(!points||!faces)return {};
+        return Build(MeshReadArray<double>(std::make_shared<const ArraySource<double>>(std::move(points))),
+            MeshReadArray<std::uint64_t>(std::make_shared<const ArraySource<std::uint64_t>>(std::move(faces))),
+            SurfaceMeshPayload::GetFields(std::move(pointData)),std::move(frame),SurfaceMeshPayload::GetFields(std::move(cellData)),cancelled);
+    }
     template<class Value> static PagedArray<Value> ShareFrozen(const MeshReadArray<Value>& input,const std::function<bool()>& cancelled={}){
         if(auto file=std::dynamic_pointer_cast<const MeshStorage::Source<Value>>(input.m_source))return PagedArray<Value>::ShareFile(file->GetFile(),input.size());
         PagedArray<Value> values;values.reserve(input.size());

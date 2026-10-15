@@ -487,6 +487,10 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/Support/LabelMapBuilder.h
     src/Data/Support/PagedArray.h
     src/Data/Support/MeshVtkStorage.h
+    src/Data/Support/MappedArrayStorage.h
+    src/Data/Support/BackedVtkArray.h
+    src/Data/Support/MeshPayloadBuilder.h
+    src/Data/Support/VtkDataResourceLease.h
     include/Geometry/RoiEvaluator.h
     src/Geometry/RoiVoxelSet.cpp
     src/Geometry/RoiEvaluator.cpp

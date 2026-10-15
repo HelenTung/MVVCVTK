@@ -78,6 +78,11 @@ QJsonObject ReferenceDataSource::GetResultEvidence()
                 for(std::size_t offset=0;offset<values.size();){auto chunk=values.GetChunk(offset,1024*1024/sizeof(Value));
                     if(chunk.error!=MeshReadError::None)throw std::runtime_error("Mesh digest block read failed.");
                     bytes(chunk.values.data(),chunk.values.size()*sizeof(Value));offset=chunk.nextOffset;}
+            } else if constexpr(std::is_same_v<std::decay_t<decltype(values)>,MeshAttributeValues>) {
+                // 摘要仍按原 double 逻辑序列计算，与整数/区间物理布局无关。
+                for(std::size_t offset=0;offset<values.size();) {
+                    const auto chunk=values.GetChunk(offset,65536);bytes(chunk.data(),chunk.size()*sizeof(double));offset+=chunk.size();
+                }
             } else bytes(values.data(),values.size()*sizeof(Value));
         };
         const auto geometry=[&](const GridGeometry3D& g) {

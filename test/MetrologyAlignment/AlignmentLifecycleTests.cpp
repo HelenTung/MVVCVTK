@@ -127,7 +127,7 @@ struct Fixture final {
     AlignmentRecipe recipe;
     DataRevisionRef recipeRef;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
-    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false) {
+    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false,std::size_t sourceDepth=0) {
         input.source = {data->CreateDataEntityId(), 1};
         input.mesh = {data->CreateDataEntityId(), 1};
         input.scopeData = {data->CreateDataEntityId(), 1};
@@ -157,8 +157,11 @@ struct Fixture final {
         DataTransaction tx;
         for (const auto ref : {input.source, input.scopeData, nominal})
             tx.outputs.push_back({ref.entityId, 0, DataTypes::recordTable, {}, table, {}});
+        auto source=input.source;
+        for(std::size_t i=0;i<sourceDepth;++i){const DataRevisionRef next{data->CreateDataEntityId(),1};
+            tx.outputs.push_back({next.entityId,0,DataTypes::recordTable,{{"parent",source}},table,{}});source=next;}
         tx.outputs.push_back(
-            {input.mesh.entityId, 0, DataTypes::surfaceMesh, {{"source", input.source}}, mesh, {}});
+            {input.mesh.entityId, 0, DataTypes::surfaceMesh, {{"source", source}}, mesh, {}});
         tx.bindings = {{input.sourceBinding, 0, true, {}, input.source},
                        {input.meshBinding, 0, true, {}, input.mesh}};
         Check(data->SetDataCommit(std::move(tx)).status == DataCommitStatus::Succeeded,
@@ -238,6 +241,18 @@ struct Fixture final {
         Check(feature->DetachHost(), "detach idempotent");
     }
 };
+void DeepSourceGraph() {
+    Fixture f({}, {},false,1100);
+    const auto result=f.Solve();
+    Check(result.status==AlignmentStatus::FullyDetermined,"source graphs beyond 1024 nodes remain valid alignment inputs");
+    const auto archive=f.feature->GetArchive(result.result);
+    AlignmentRequest restore;restore.action=AlignmentAction::Restore;restore.archive=archive;
+    restore.input=f.input;restore.restoredNominal=f.recipe.nominalData;
+    AlignmentResult restored;
+    Check(archive&&f.feature->SendRequest(restore,[&](auto value){restored=std::move(value);}).status==AlignmentAdmissionStatus::Accepted
+        &&GetDataRevisionRefValid(restored.recipe),"archive restore traverses the complete deep source graph");
+}
+
 void Lifecycle() {
     Fixture f;
     const auto contract = f.feature->GetDataContract();
@@ -1137,6 +1152,7 @@ int main() {
     run("SurfaceReferenceLifecycle", SurfaceReferenceLifecycle);
     run("WorkNotifications", WorkNotifications);
     run("Lifecycle", Lifecycle);
+    run("DeepSourceGraph", DeepSourceGraph);
     run("Currentness", Currentness);
     run("Display", Display);
     run("Reentry", Reentry);

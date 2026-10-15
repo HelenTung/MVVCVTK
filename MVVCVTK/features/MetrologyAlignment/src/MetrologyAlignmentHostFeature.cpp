@@ -18,6 +18,7 @@
 #include <vtkPolyData.h>
 #include <limits>
 #include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -48,19 +49,17 @@ void SendComplete(AlignmentCallback callback, AlignmentResult result) noexcept {
 }
 bool GetSourceRelated(const DataGraphSnapshot &graph, const DataRevisionRef &mesh,
                       const DataRevisionRef &source) {
-    std::vector<DataRevisionRef> pending{mesh}, visited;
-    while (!pending.empty() && visited.size() < 1024) {
+    std::vector<DataRevisionRef> pending{mesh};
+    std::set<DataRevisionRef> visited;
+    while (!pending.empty()) {
         const auto ref = pending.back();
         pending.pop_back();
         if (ref == source)
             return true;
-        if (std::find(visited.begin(), visited.end(), ref) != visited.end())
-            continue;
-        visited.push_back(ref);
+        if (!visited.insert(ref).second)continue;
         const auto data = graph.view->GetData(ref);
         if (!data)
             return false;
-        if (data->inputs.size() > 1024 - std::min<std::size_t>(pending.size(), 1024)) return false;
         for (const auto &input : data->inputs)
             pending.push_back(input.source);
     }
@@ -283,12 +282,12 @@ class MetrologyAlignmentHostFeature::Impl final {
         const auto &columns = table->GetColumns();
         if (columns.size() != 6)
             return {};
-        const auto *ids = std::get_if<std::vector<std::string>>(&columns[0].values);
-        const auto *residuals = std::get_if<std::vector<double>>(&columns[1].values);
-        const auto *tolerances = std::get_if<std::vector<double>>(&columns[2].values);
-        const auto *kinds = std::get_if<std::vector<std::uint64_t>>(&columns[3].values);
-        const auto *priorities = std::get_if<std::vector<std::uint64_t>>(&columns[4].values);
-        const auto *used = std::get_if<std::vector<std::uint8_t>>(&columns[5].values);
+        const auto *ids = std::get_if<DataArray<std::string>>(&columns[0].values);
+        const auto *residuals = std::get_if<DataArray<double>>(&columns[1].values);
+        const auto *tolerances = std::get_if<DataArray<double>>(&columns[2].values);
+        const auto *kinds = std::get_if<DataArray<std::uint64_t>>(&columns[3].values);
+        const auto *priorities = std::get_if<DataArray<std::uint64_t>>(&columns[4].values);
+        const auto *used = std::get_if<DataArray<std::uint8_t>>(&columns[5].values);
         if (!ids || !residuals || !tolerances || !kinds || !priorities || !used ||
             !table->GetValid())
             return {};

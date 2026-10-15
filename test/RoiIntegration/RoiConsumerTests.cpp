@@ -43,10 +43,10 @@ void GapSurface(){Fixture f;auto image=vtkSmartPointer<vtkImageData>::New();imag
     VoidRegion parent;parent.id=7;parent.bbox={1,5,1,5,1,5};parent.voxelCount=125;parent.volumeMM3=125;
     auto selected=parent;selected.bbox[1]=3;selected.voxelCount=75;selected.volumeMM3=75;
     RoiPrimitive p;p.shape=RoiShape::HalfSpace;p.origin={3.2,0,0};p.normal={-1,0,0};const auto roi=RoiEvaluator::GetPreview(f.store.GetDataGraph(),{f.source,{{RoiNodeKind::Primitive,p}}}).roi;
-    const std::vector<VoidRegion> full{parent};std::atomic<bool> cancel{false};const auto display=GapDisplayData::Build(image,{selected},cancel,roi,&full);
+    const DataArray<VoidRegion> full{parent};std::atomic<bool> cancel{false};const auto display=GapDisplayData::Build(image,{selected},cancel,roi,&full);
     Require(display && display->mesh && display->mesh->GetNumberOfCells()>0,"gap selected surface is empty");
     for(vtkIdType i=0;i<display->mesh->GetNumberOfCells();++i){auto* cell=display->mesh->GetCell(i);bool cap=true;for(vtkIdType k=0;k<cell->GetNumberOfPoints();++k){double q[3];display->mesh->GetPoint(cell->GetPointId(k),q);Require(q[0]<=3.2+1e-10,"gap surface exceeds evaluation ROI");cap=cap && std::abs(q[0]-3.2)<1e-10;}Require(!cap,"gap ROI introduced an artificial cut cap");}
-    Require(display->regionVolumes.size()==1 && display->regionVolumes[0].first==7 && display->regionVolumes[0].second==75,"gap display lost parent ID or selected volume");
+    Require(display->regionVolumes && display->regionVolumes->size()==1 && (*display->regionVolumes)[0].first==7 && (*display->regionVolumes)[0].second==75,"gap display lost parent ID or selected volume");
 }
 
 void MeshCrop(){Fixture f;const DataRevisionRef source{f.store.CreateDataEntityId(),1};

@@ -36,6 +36,7 @@
 #include <QScreen>
 #include <QMouseEvent>
 #include <algorithm>
+#include <climits>
 namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {

@@ -89,7 +89,7 @@ CpuSamplingPlan GetCpuSamplingPlan()
     if (!bytes || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
         return plan;
     try {
-        std::vector<std::uint64_t> storage((std::size_t(bytes) + 7) / 8);
+        DataArray<std::uint64_t> storage((std::size_t(bytes) + 7) / 8);
         auto *data = reinterpret_cast<unsigned char *>(storage.data());
         if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
                 reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(data), &bytes))
@@ -1076,7 +1076,7 @@ SurfaceFailureReason GetMaterialRange(
             if (separated) groups.push_back(peak);
         }
         std::sort(groups.begin(), groups.end(), [](const Peak& a, const Peak& b) { return a.index < b.index; });
-        std::vector<std::uint64_t> counts;
+        DataArray<std::uint64_t> counts;
         for (std::size_t i = 0; i < groups.size(); ++i) {
             const auto left = i == 0 ? std::ptrdiff_t{0}
                 : std::min_element(smooth.begin()+groups[i-1].index, smooth.begin()+groups[i].index+1)-smooth.begin();
@@ -1878,17 +1878,18 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         result.message = message;
         result.status = reason == SurfaceFailureReason::Cancelled ? SurfaceResultStatus::Cancelled
                                                                   : SurfaceResultStatus::Failed;
-        result.points.clear();
-        result.triangleIndices.clear();
-        result.triangleValidity.clear();
-        result.objects.clear();
+        PagedArray<SurfacePointRecord>().swap(result.points);
+        PagedArray<std::uint32_t>().swap(result.triangleIndices);
+        PagedArray<std::uint8_t>().swap(result.triangleValidity);
+        PagedArray<SurfaceObjectRecord>().swap(result.objects);
         result.interfaces.clear();
         result.acceptedPointCount = 0;
         result.rejectedPointCount = 0;
         result.lowContrastPointCount = 0;
         result.truncatedPointCount = 0;
         result.nonManifoldObjectCount = 0;
-        return result;
+        PagedArray<SurfaceSelectionPiece>().swap(result.selection);
+        return std::move(result);
     };
     SendProgress(onProgress, SurfaceDeterminationStage::Preparing, 0.01);
     VolumeView volume;
@@ -1899,8 +1900,6 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
     result.requiredBytes = 64 * 1024;
-    if (maxWorkingBytes < result.requiredBytes)
-        return fail(SurfaceFailureReason::BudgetExceeded, "Surface fixed workspace exceeds the budget.");
     SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
     params.roi = inputs.roi;
@@ -1962,10 +1961,9 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         if (!AddPagedWorkingBytes(result.points.capacity(), sizeof(SurfacePointRecord), retained) ||
             !AddPagedWorkingBytes(result.triangleIndices.capacity(), sizeof(std::uint32_t), retained) ||
             !AddPagedWorkingBytes(result.triangleValidity.capacity(), sizeof(std::uint8_t), retained) ||
-            !AddPagedWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained) ||
-            retained > maxWorkingBytes)
+            !AddPagedWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained))
             return fail(SurfaceFailureReason::BudgetExceeded,
-                        "Surface retained interfaces exceed the budget.");
+                        "Surface retained interface count overflows.");
         PagedArray<Point3> meshPoints;
         PagedArray<Triangle> meshTriangles;
         SurfaceExecutionStats statistics;
@@ -1975,7 +1973,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         grid.audit = &seedAudit;
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
             grid, params.initialIsoValue, {}, halo,
-            inputParams.seedBlockDepth, maxWorkingBytes - retained, getCancelled, meshPoints,
+            inputParams.seedBlockDepth, maxWorkingBytes, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
             std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained);
@@ -2029,9 +2027,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             ||!AddPagedWorkingBytes(outputPoints,sizeof(SurfacePointRecord),reservedBytes)
             ||!AddPagedWorkingBytes(outputTriangles*3,sizeof(std::uint32_t),reservedBytes)
             ||!AddPagedWorkingBytes(outputTriangles,sizeof(std::uint8_t),reservedBytes)
-            ||!AddPagedWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes)
-            ||reservedBytes>maxWorkingBytes)
-            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation exceeds budget.");
+            ||!AddPagedWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes))
+            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation count overflows.");
         if(GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"Surface reservation was cancelled.");
         result.points.reserve(outputPoints);
         result.triangleIndices.reserve(outputTriangles*3);
@@ -2559,8 +2556,8 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
     if(inputError!=SurfaceFailureReason::None)return fail(inputError,"Surface selection inputs are invalid.");
     std::size_t bytes=0;
     if(!AddPagedWorkingBytes(parent.points->size(),sizeof(SurfacePointRecord),bytes) || !AddPagedWorkingBytes(parent.triangleIndices->size(),sizeof(std::uint32_t),bytes)
-        || !AddPagedWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddPagedWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes) || bytes>maxWorkingBytes)
-        return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface selection exceeds working budget.");
+        || !AddPagedWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddPagedWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes))
+        return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface selection count overflows.");
     result.sourceRevision=parent.sourceRevision;result.algorithmRevision=parent.algorithmRevision;result.method=parent.method;result.isoEstimate=parent.isoEstimate;
     result.resolvedParams=parent.resolvedParams;result.resolvedParams.analysisRoi=params.analysisRoi;result.resolvedParams.parentGeneration=params.parentGeneration;
     result.points=MeshPayloadBuilder::ShareFrozen(*parent.points,getCancelled);result.triangleIndices=MeshPayloadBuilder::ShareFrozen(*parent.triangleIndices,getCancelled);result.objects=MeshPayloadBuilder::ShareFrozen(*parent.objects,getCancelled);result.triangleValidity=MeshPayloadBuilder::ShareFrozen(*parent.triangleValidity,getCancelled);
@@ -2568,13 +2565,15 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
     result.parameterFingerprint=parent.parameterFingerprint;
     for(auto byte:parent.dataRevision.entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}
     if(inputs.roi){for(auto byte:inputs.roi->GetRevision().entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}result.parameterFingerprint^=inputs.roi->GetRevision().generation;}
-    for(const auto& point:result.points){if(SurfaceContract::GetPointValid(point,parent.method))++result.acceptedPointCount;else ++result.rejectedPointCount;if(GetSurfaceFlag(point.flags,SurfacePointFlags::LowContrast))++result.lowContrastPointCount;}
+    const auto& points=result.points;const auto& triangles=result.triangleIndices;
+    std::size_t checked=0;
+    for(const auto& point:points){CheckCancellation(checked,getCancelled);if(SurfaceContract::GetPointValid(point,parent.method))++result.acceptedPointCount;else ++result.rejectedPointCount;if(GetSurfaceFlag(point.flags,SurfacePointFlags::LowContrast))++result.lowContrastPointCount;}
     if (inputs.roi) {
         // 在完整正式表面上选片，保留父三角形及重心来源，不生成封口或移动新点。
-        for (std::size_t i=0;i<result.triangleIndices.size();i+=3) {
+        for (std::size_t i=0;i<triangles.size();i+=3) {
             if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
-            const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
-                result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
+            const std::array<Point3,3> triangle{points[triangles[i]].positionModel,
+                points[triangles[i+1]].positionModel,points[triangles[i+2]].positionModel};
             const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
             const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
             if (!(denominator>0)) continue;
@@ -2623,7 +2622,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
         result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
         result.method = params.method;
         result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface allocation failed within the configured budget.";
+        result.message = "Surface storage allocation failed.";
         return result;
     }
     catch (...) {

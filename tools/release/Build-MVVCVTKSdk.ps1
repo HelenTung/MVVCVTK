@@ -545,12 +545,19 @@ int main()
 #endif
 
 #if MVVCVTK_PROBE_GAP
-    const std::shared_ptr<HostFeature> gap =
+    const auto gap =
         std::make_shared<GapHostFeature>(GapHostConfig{});
     if (!gap || gap->GetFeatureId()
             != std::string_view{ "GapAnalysis" }) {
         return 3;
     }
+    // 安装态必须实际链接新增 reader/选择入口；无 Host 时保持 Unavailable 契约。
+    if(gap->GetResultReader({}))return 17;
+    GapHostRequest selection;selection.action=GapHostAction::SelectObject;
+    selection.selection=GapObjectSelection{};
+    if(gap->SendRequest(selection).status!=GapAdmissionStatus::Unavailable)return 18;
+    GapHostRequest picking;picking.action=GapHostAction::SetObjectPicking;picking.isObjectPickingEnabled=false;
+    if(gap->SendRequest(picking).status!=GapAdmissionStatus::Unavailable)return 19;
 #endif
 
     return 0;

@@ -112,7 +112,7 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
                 check(); const auto row = read(i); double value = 0;
                 if (!Valid(doc,row) || !GetReportNumber(GetReportCell(row,column),value) || !std::isfinite(value *= scale)) continue;
                 ++valid; mean = mean*(static_cast<double>(valid-1)/valid)+value/valid;
-                low = std::min(low,value); high = std::max(high,value);
+                low = (std::min)(low,value); high = (std::max)(high,value);
             }
             result.table->Append({doc.title,QString::number(doc.table->GetCount()),QString::number(valid),
                 valid?Number(mean):QString(),valid?Number(low):QString(),valid?Number(high):QString()});
@@ -121,6 +121,8 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
         result.conditions["匹配方式"] = "仅分布统计，不生成逐项差值";
         return result;
     }
+    if(o.match==ReportMatch::Identity&&(!a.identityResult.isEmpty()||!b.identityResult.isEmpty())&&a.identityResult!=b.identityResult)
+        throw std::runtime_error("对象/点编号的正式结果身份不同或缺失，不能按相同编号直接配对；请使用明确的跨结果匹配。");
     PagedArray<Candidate> candidates(static_cast<std::size_t>(ac));
     PagedArray<std::uint8_t> incoming(static_cast<std::size_t>(bc),0);
     if(o.match==ReportMatch::Identity) {
@@ -207,7 +209,7 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
             if (vb) current = Number(bv);
             if (!va || !vb || !std::isfinite(bv-av)) { status = "无效或缺测/差值超出数值范围"; ++invalid; }
             else { const auto d = bv-av, ad = std::abs(d); delta = Number(d); absolute = Number(ad); ++pairs;
-                mean = mean*(static_cast<double>(pairs-1)/pairs)+ad/pairs; maximum = std::max(maximum,ad);
+                mean = mean*(static_cast<double>(pairs-1)/pairs)+ad/pairs; maximum = (std::max)(maximum,ad);
                 status = ad <= o.valueTolerance ? "已匹配：容差内" : "已匹配：超出容差"; }
         }
         const int identityColumn=o.baselineIdentity>=0?o.baselineIdentity:a.identityColumn;

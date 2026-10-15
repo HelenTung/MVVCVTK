@@ -3,6 +3,11 @@
 
 #include "Data/DataPayloads.h"
 #include "LabelMapBuilder.h"
+#include "MappedArrayStorage.h"
+#include "BackedVtkArray.h"
+#include "MeshPayloadBuilder.h"
+#include "FeatureSupport/ReadTaskQueue.h"
+#include <numeric>
 #include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"
@@ -124,6 +129,12 @@ public:
     void ClearView();
     bool GetViewOn() const;
     bool GetDisplayTickNeeded() const;
+    void PumpReads();
+    GapDisplayLoadState GetDisplayLoadState() const;
+    bool SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,
+        std::optional<std::int32_t> regionId,bool isolated,const std::function<bool()>& accept);
+    std::optional<std::int32_t> GetPickedRegion(const std::string& viewId,int x,int y,vtkRenderer* renderer);
+    std::shared_ptr<FeatureInternal::ReadTaskQueue> GetReadQueue() const {return m_reads;}
     bool OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
     bool GetCompletedResult(GapAnalysisResult& result);
     bool SetCommittedView(
@@ -200,6 +211,7 @@ private:
         RoiReadSnapshot evaluationRoi,detectionRoi;
         GapRoiPolicy roiPolicy=GapRoiPolicy::WholeIfIntersects;
         std::shared_ptr<const GapAnalysisResult> parent;
+        std::shared_ptr<const DataArray<VoidRegion>> parentVoids;
     };
 
     struct GapOverlayBinding {
@@ -274,7 +286,7 @@ private:
     static std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
         vtkImageData*, const GridGeometry3D&, const std::atomic<bool>&,const char* id="GapAnalysis.labels");
     static std::shared_ptr<const RecordTablePayload> CreateVoidTable(
-        const std::vector<VoidRegion>&, const std::atomic<bool>&);
+        const DataArray<VoidRegion>&, const std::atomic<bool>&,const DataArray<GapSurfaceRange>* ranges=nullptr);
     static std::shared_ptr<const RecordTablePayload> CreateStatisticsTable(
         const GapStatistics&);
     void StopWorker();
@@ -326,6 +338,8 @@ private:
     mutable std::mutex m_workerMutex;
     // Impl 唯一拥有的 worker 线程；复用或析构前由 owner 接管点 join，禁止越过 Impl 生命周期。
     std::thread m_workerThread;
+    const std::shared_ptr<FeatureInternal::ReadTaskQueue> m_reads=std::make_shared<FeatureInternal::ReadTaskQueue>();
+    std::atomic<bool> m_isReading{false};
     // stopMutex 只线性化取消与终态发布；算法内部仍通过原子值协作式观察。
     mutable std::mutex m_stopMutex;
     // 取消请求轴：StopAsync 置位，下一次被接受的 StartAsync 清零。
@@ -350,6 +364,11 @@ private:
     // 成功结果中 2D label image 的只读强引用；完整继承输入快照几何，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     std::shared_ptr<const GapDisplayData> m_displayData;
+    std::string m_displayError;
+    std::shared_ptr<FeatureInternal::SpatialMeshCache> m_displayCache;
+    std::optional<std::pair<std::uint64_t,std::uint64_t>> m_selectionRange;
+    std::optional<std::int32_t> m_selectedRegion;
+    bool m_isSelectionIsolated=false;
     // 显示缓存必须由正式 revision 的 typed view 持有，不再把 worker candidate 当成权威 owner。
     VtkSurfaceMeshSnapshot m_displayMeshOwner;
     VtkLabelMapSnapshot m_displayLabelOwner;
@@ -561,6 +580,7 @@ GapAnalysisService::Impl::GetKernelPath()
 
 GapAnalysisService::Impl::~Impl()
 {
+    {const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->StopLocked();}
     if (GetViewOn()) {
         if (GetViewThread()) {
             ExitViewState();
@@ -700,6 +720,20 @@ bool GapAnalysisService::GetDisplayTickNeeded() const
 {
     return m_impl->GetDisplayTickNeeded();
 }
+std::shared_ptr<FeatureInternal::ReadTaskQueue> GapAnalysisService::GetReadQueue() const
+{
+    return m_impl->GetReadQueue();
+}
+GapDisplayLoadState GapAnalysisService::GetDisplayLoadState() const {return m_impl->GetDisplayLoadState();}
+bool GapAnalysisService::SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,
+    std::optional<std::int32_t> regionId,bool isolated,std::function<bool()> accept)
+{
+    return m_impl->SetObjectSelection(range,regionId,isolated,accept);
+}
+std::optional<std::int32_t> GapAnalysisService::GetPickedRegion(const std::string& viewId,int x,int y,vtkRenderer* renderer)
+{
+    return m_impl->GetPickedRegion(viewId,x,y,renderer);
+}
 
 bool GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
 {
@@ -795,6 +829,7 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
     }
 
     // 2. 上一轮已结束线程在复用 std::thread 前必须 join；此处不会与新 worker 并行。
+    {const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->CancelLocked();}
     if (m_workerThread.joinable()) {
         m_workerThread.join();
     }
@@ -843,6 +878,7 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
 }
 
 void GapAnalysisService::Impl::StopAsync() {
+    {const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->CancelLocked();}
     // 取消与 worker 的成功发布线性化；返回仍不表示线程已退出。
     std::lock_guard<std::mutex> stopLock(m_stopMutex);
     m_isStopping.store(true);
@@ -872,7 +908,7 @@ GapAnalysisState GapAnalysisService::Impl::GetAnalysisState() const {
 
 std::vector<VoidRegion> GapAnalysisService::Impl::GetVoidRegions() const {
     std::lock_guard<std::mutex> lk(m_resultMutex);
-    return m_result.voids;
+    return {m_result.voids.begin(),m_result.voids.end()};
 }
 
 GapStatistics GapAnalysisService::Impl::GetStatistics() const
@@ -990,7 +1026,7 @@ bool GapAnalysisService::Impl::StartView(
     params.evaluationRoi=request.evaluationRoi;params.detectionRoi=request.detectionRoi;params.roiPolicy=request.roiPolicy;
     if (params.roiPolicy!=GapRoiPolicy::InsideOnly && params.roiPolicy!=GapRoiPolicy::WholeIfIntersects) return false;
     if (request.isEvaluationOnly) {
-        if(request.savedParent){params.parent=request.savedParent;}
+        if(request.savedParent){params.parent=request.savedParent;params.parentVoids=request.savedParentVoids;}
         else{std::lock_guard<std::mutex> resultLock(m_resultMutex);if(!m_result.isSucceeded || !m_result.parent)return false;params.parent=m_result.parent;}
         if(!inputSnapshot->graphOwner || !params.parent || params.parent->sourceRevision!=inputSnapshot->graphOwner->data->self)return false;
         if (params.parent->detectionParameters.isoValue!=params.surfParams.isoValue
@@ -1020,6 +1056,7 @@ bool GapAnalysisService::Impl::StartView(
             return false;
         }
 
+        {const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->CancelLocked();}
         if (m_workerThread.joinable()) {
             m_workerThread.join();
         }
@@ -1088,6 +1125,9 @@ bool GapAnalysisService::Impl::StartView(
     m_displayLabelImage = nullptr;
     m_displayMeshOwner.reset();
     m_displayLabelOwner.reset();
+    m_displayCache.reset();
+    m_selectionRange.reset();m_selectedRegion.reset();m_isSelectionIsolated=false;
+    m_displayError.clear();
     m_displaySurfaceConfig = request.surface;
     m_displayVoidParams = request.voidParams;
     m_viewCallback = std::move(onComplete);
@@ -1122,7 +1162,11 @@ bool GapAnalysisService::Impl::SwitchOverlay() {
         return true;
     }
 
-    return SetStoredView(m_displayData);
+    bool attached=false;
+    try{attached=SetStoredView(m_displayData);}catch(const std::exception& error){m_displayError=error.what();}
+    catch(...){m_displayError="Gap display attachment failed.";}
+    if(!attached&&m_displayError.empty())m_displayError="Gap display attachment failed.";
+    return attached;
 }
 
 bool GapAnalysisService::Impl::SetDisplay(const GapDisplayParams& params,
@@ -1170,6 +1214,57 @@ bool GapAnalysisService::Impl::GetViewOn() const {
 
 bool GapAnalysisService::Impl::GetDisplayTickNeeded() const {
     return m_viewPhase.load() != GapViewPhase::Idle;
+}
+GapDisplayLoadState GapAnalysisService::Impl::GetDisplayLoadState() const
+{
+    GapDisplayLoadState result;if(!GetViewThread())return result;
+    if(!m_displayError.empty()){result.isComplete=false;result.hasFailure=true;result.message=m_displayError;}
+    for(const auto& binding:m_displayOverlayBindings) {
+        FeatureInternal::SpatialMeshView* view=nullptr;
+        if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))view=&mesh->GetDisplay();
+        else if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))view=&slice->GetDisplay();
+        if(!view)continue;const auto& state=view->GetProgress();
+        result.isComplete=result.isComplete&&state.isComplete;result.hasFailure=result.hasFailure||state.hasFailure;
+        result.requested+=state.requested;result.loaded+=state.loaded;if(!state.message.empty())result.message=state.message;
+    }
+    return result;
+}
+
+bool GapAnalysisService::Impl::SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,
+    std::optional<std::int32_t> regionId,bool isolated,const std::function<bool()>& accept)
+{
+    if(!GetViewThread()||!GetViewOn()||(range.has_value()!=regionId.has_value())
+        ||(regionId&&*regionId<=0)||(!regionId&&isolated))return false;
+    if(range&&(range->first>range->second||(m_displayCache&&range->second>m_displayCache->GetSource().GetFaceCount())))return false;
+    const auto apply=[&](const auto& selected,const auto& id,bool isIsolated){
+        for(auto& binding:m_displayOverlayBindings) {
+            if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))mesh->GetDisplay().SetObjectRange(selected,isIsolated);
+            else if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))slice->SetObjectSelection(selected,id,isIsolated);
+        }
+    };
+    try {apply(range,regionId,isolated);if(accept&&!accept())throw std::runtime_error("Gap selection scene change rejected.");}
+    catch(...) {try{apply(m_selectionRange,m_selectedRegion,m_isSelectionIsolated);}catch(...){}return false;}
+    m_selectionRange=range;m_selectedRegion=regionId;m_isSelectionIsolated=isolated;return true;
+}
+
+std::optional<std::int32_t> GapAnalysisService::Impl::GetPickedRegion(const std::string& viewId,int x,int y,vtkRenderer* renderer)
+{
+    if(!GetViewThread()||!m_displayCache||!renderer)return {};
+    std::optional<std::uint64_t> face;
+    for(const auto& binding:m_displayOverlayBindings)if(binding.viewId==viewId) {
+        if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))face=mesh->GetDisplay().GetPickedFace(x,y,renderer);
+        else if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay)) {
+            if(const auto id=slice->GetPickedRegion(x,y,renderer))return id;
+            face=slice->GetDisplay().GetPickedFace(x,y,renderer);
+        }
+        break;
+    }
+    if(!face)return {};
+    const auto& attributes=m_displayCache->GetSource().GetMesh().GetCellFields();
+    const auto found=std::find_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="gap.region.id"&&a.componentCount==1;});
+    if(found==attributes.end()||*face>=found->values.size())return {};
+    const auto id=found->values[static_cast<std::size_t>(*face)];
+    return id>0&&id<=INT_MAX&&std::trunc(id)==id?std::optional<std::int32_t>{static_cast<std::int32_t>(id)}:std::nullopt;
 }
 
 void GapAnalysisService::Impl::ClearView()
@@ -1220,7 +1315,13 @@ bool GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
     // 1. Consumed 只阻止重复挂载；退出请求仍必须经过下方 join 与状态清理。
     if (m_viewPhase.load() == GapViewPhase::Consumed
         && !m_isExitPending) {
-        return false;
+        bool changed=false;
+        for(auto& binding:m_displayOverlayBindings) {
+            if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))changed=mesh->GetDisplay().Refresh()||changed;
+            else if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))changed=slice->GetDisplay().Refresh()||changed;
+        }
+        PumpReads();
+        return changed;
     }
 
     // 2. 显示线程先用原子执行状态判断是否到达终态；Idle/Running 均没有可消费的终态结果。
@@ -1276,6 +1377,7 @@ bool GapAnalysisService::Impl::GetCompletedResult(
         result.voidMesh = m_result.voidMesh;
         result.payloads = m_result.payloads;
         result.display = m_result.display;
+        result.displayError = m_result.displayError;
         result.statistics = m_result.statistics;
         result.parent=m_result.parent;result.sourceRevision=m_result.sourceRevision;result.detectionParameters=m_result.detectionParameters;
         result.isSucceeded = true;
@@ -1302,16 +1404,20 @@ bool GapAnalysisService::Impl::SetCommittedView(
     m_displayLabelImage = m_displayLabelOwner->labels;
     {
         std::lock_guard<std::mutex> lock(m_resultMutex);
+        m_displayError=m_result.displayError;
         try { if(m_result.display) {
             auto display=std::make_shared<GapDisplayData>(*m_result.display);
             display->resultLabel=AnalysisColorStyle::GetResultLabel(result);
             m_displayData=inherited ? GapDisplayData::CreateColors(*display,*inherited):std::move(display);
-        } else m_displayData.reset(); } catch(...) { m_displayData.reset(); }
+        } else m_displayData.reset(); }
+        catch(const std::exception& error){m_displayData.reset();m_displayError=error.what();}
+        catch(...) {m_displayData.reset();m_displayError="Gap display preparation failed.";}
     }
     m_displayVoidMesh = m_displayData ? m_displayData->mesh : nullptr;
     SetOverlayOff();
 
     bool isDisplayed = m_displayData != nullptr;
+    if(!isDisplayed&&m_displayError.empty())m_displayError="Gap display preparation is unavailable.";
     if (m_isOverlayOn && isDisplayed) {
         try {
             isDisplayed = SetStoredView(m_displayData);
@@ -1321,6 +1427,7 @@ bool GapAnalysisService::Impl::SetCommittedView(
             isDisplayed = false;
         }
     }
+    if(!isDisplayed&&m_displayError.empty())m_displayError="Gap display attachment failed.";
     m_viewPhase.store(GapViewPhase::Consumed);
     auto callback = std::move(m_viewCallback);
     if (callback) {
@@ -1332,10 +1439,10 @@ bool GapAnalysisService::Impl::SetCommittedView(
 
 void GapAnalysisService::Impl::SetViewCommitFailed()
 {
-    if (!GetViewThread()
-        || m_viewPhase.load() != GapViewPhase::AwaitingResult) {
+    if (!GetViewThread() || m_viewPhase.load()==GapViewPhase::Idle) {
         return;
     }
+    if(m_displayError.empty())m_displayError="Gap display attachment failed.";
     SetOverlayOff();
     m_viewPhase.store(GapViewPhase::Consumed);
     auto callback = std::move(m_viewCallback);
@@ -1379,7 +1486,14 @@ void GapAnalysisService::Impl::StartWorker(
 
     try {
         bool hasPayload = false;
-        if (params.parent) {result=*params.parent;hasPayload=true;}
+        ResultArrayScope summariesStorage;
+        result.voids=DataArray<VoidRegion>{};
+        if(params.parentVoids) {
+            auto parent=std::make_shared<GapAnalysisResult>(*params.parent);
+            parent->voids=DataArray<VoidRegion>(params.parentVoids->begin(),params.parentVoids->end());
+            params.parent=std::move(parent);
+        }
+        if (params.parent) {result=*params.parent;result.display.reset();result.displayError.clear();result.payloads.reset();hasPayload=true;}
         else {
             KernelBatch batch;
             vtkSmartPointer<vtkImageData> kernelImage;
@@ -1425,13 +1539,16 @@ void GapAnalysisService::Impl::StartWorker(
         if (hasPayload) {
             stage = "void-mesh";
             // SurfaceMesh 是正式输出；无 3D target 也必须在 worker 内构建候选。
+            DataArray<GapSurfaceRange> geometryRanges;
             std::shared_ptr<const SurfaceMeshPayload> surfacePayload;
             try {
                 const bool clipped=params.evaluationRoi&&params.roiPolicy==GapRoiPolicy::InsideOnly&&result.parent;
                 const auto* grid=inputSnapshot->graphOwner?dynamic_cast<const ImageGrid3DPayload*>(inputSnapshot->graphOwner->data->payload.get()):nullptr;
                 surfacePayload=GapSurfaceBuilder::BuildPayload(clipped?result.parent->labelImage:result.labelImage,
                     result.voids,m_isStopping,clipped?params.evaluationRoi:RoiReadSnapshot{},clipped?&result.parent->voids:nullptr,
-                    grid?grid->GetGeometry().coordinateFrame:"RAS");
+                    grid?grid->GetGeometry().coordinateFrame:"RAS",&geometryRanges);
+                std::sort(geometryRanges.begin(),geometryRanges.end(),[&](const auto& a,const auto& b){
+                    if(m_isStopping.load())throw std::runtime_error("Gap result preparation cancelled.");return a.id<b.id;});
                 result.voidMesh=surfacePayload?MeshVtkStorage::Build(*surfacePayload,[&]{return m_isStopping.load();}):nullptr;
             }
             catch (const std::exception& error) {
@@ -1457,7 +1574,7 @@ void GapAnalysisService::Impl::StartWorker(
                     }
                     if (payloads->mesh && !m_isStopping.load()) {
                         stage = "report-payloads";
-                        payloads->voids = CreateVoidTable(result.voids, m_isStopping);
+                        payloads->voids = CreateVoidTable(result.voids, m_isStopping,&geometryRanges);
                         payloads->statistics = CreateStatisticsTable(result.statistics);
                         if (result.parent) {
                             stage = "parent-payloads";
@@ -1466,7 +1583,7 @@ void GapAnalysisService::Impl::StartWorker(
                                     "GapAnalysis.parent-labels", "Gap parent detection")
                                 : CreateLabelPayload(result.parent->labelImage,source->GetGeometry(),m_isStopping,"GapAnalysis.parent-labels");
                             payloads->parentVoids=CreateVoidTable(result.parent->voids,m_isStopping);
-                            auto parent=std::make_shared<GapParentRecord>();parent->source=result.parent->sourceRevision;parent->parameters=result.parent->detectionParameters;parent->statistics=result.parent->statistics;parent->labels=payloads->parentLabels;parent->voids=std::make_shared<const std::vector<VoidRegion>>(result.parent->voids);if(parent->GetValid())payloads->parentRecord=std::move(parent);
+                            auto parent=std::make_shared<GapParentRecord>();parent->source=result.parent->sourceRevision;parent->parameters=result.parent->detectionParameters;parent->statistics=result.parent->statistics;parent->labels=payloads->parentLabels;parent->voids=std::make_shared<const DataArray<VoidRegion>>(result.parent->voids.begin(),result.parent->voids.end());if(parent->GetValid())payloads->parentRecord=std::move(parent);
                         }
                     }
                 }
@@ -1483,21 +1600,23 @@ void GapAnalysisService::Impl::StartWorker(
                 // 显示失败不把已经有效的正式数据改报为算法失败。
                 try {
                     if (!result.display) {
-                        std::string reason;
                         result.display = GapDisplayData::Build(result.labelImage, result.voids,
-                            m_isStopping, {}, nullptr, &reason,result.voidMesh);
+                            m_isStopping, {}, nullptr, &result.displayError,result.voidMesh,result.payloads?result.payloads->mesh:nullptr);
                         if (!result.display && !m_isStopping.load())
-                            std::cerr << "[GapAnalysis] Display preparation failed: " << reason << '\n';
+                            std::cerr << "[GapAnalysis] Display preparation failed: " << result.displayError << '\n';
                     }
                 }
                 catch (const std::exception& error) {
                     std::cerr << "[GapAnalysis] Display preparation failed: " << error.what() << '\n';
                     result.display.reset();
+                    result.displayError=error.what();
                 }
                 catch (...) {
                     std::cerr << "[GapAnalysis] Display preparation failed: unknown exception.\n";
                     result.display.reset();
+                    result.displayError="Gap display preparation failed: unknown exception.";
                 }
+                summariesStorage.Finish();
                 result.isSucceeded = true;
                 isSuccess = true;
             }
@@ -1540,6 +1659,36 @@ void GapAnalysisService::Impl::StopWorker() {
     }
 }
 
+void GapAnalysisService::Impl::PumpReads()
+{
+    // 与检测复用同一个线程槽；检测优先，读取最多保留八个在途批次。
+    if(!GetViewThread()||GetAnalysisState()==GapAnalysisState::Running||m_isExitPending)return;
+    const std::lock_guard<std::mutex> workerLock(m_workerMutex);
+    if(m_isReading.load(std::memory_order_acquire))return;
+    {const std::lock_guard<std::mutex> lock(m_reads->mutex);if(!m_reads->GetHasPendingLocked())return;}
+    if(m_workerThread.joinable())m_workerThread.join();
+    m_isReading.store(true,std::memory_order_release);
+    try {
+        m_workerThread=std::thread([this,onWork=onWorkAvailable]{
+            try {
+                for(;;) {
+                    std::optional<FeatureInternal::ReadTaskQueue::Job> job;
+                    {const std::lock_guard<std::mutex> lock(m_reads->mutex);job=m_reads->TakeLocked();}
+                    if(!job)break;
+                    try {job->task([token=job->cancelled]{return token->load(std::memory_order_acquire);});}catch(...){}
+                    {const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->FinishLocked();}
+                    try {if(onWork)onWork();}catch(...){}
+                }
+            }catch(...){}
+            m_isReading.store(false,std::memory_order_release);
+            try {if(onWork)onWork();}catch(...){}
+        });
+    }catch(...) {
+        m_isReading.store(false,std::memory_order_release);
+        const std::lock_guard<std::mutex> lock(m_reads->mutex);m_reads->CancelLocked();
+    }
+}
+
 void GapAnalysisService::Impl::SetAnalysisState(GapAnalysisState state) {
     if (state == GapAnalysisState::Running) SetExecutionState(FeatureRunStatus::Preparing);
     m_analysisState.store(static_cast<int>(state));
@@ -1567,7 +1716,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))mesh->SetPresentation([&]{auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,binding.viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),binding.viewId)==p.hiddenLegendViews.end();return p;}());
             if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))slice->SetPresentation([&]{auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,binding.viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),binding.viewId)==p.hiddenLegendViews.end();return p;}());
         }
-        m_displayData=std::move(display);return true;
+        m_displayData=std::move(display);m_displayError.clear();return true;
     }
     std::vector<GapOverlayBinding> candidate;
     const auto rollback = [&] {
@@ -1575,13 +1724,30 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             item->service->RemoveOverlay(item->overlay);
     };
     try {
+        auto cache=display->spatial?m_displayCache:nullptr;
+        if(display->spatial&&(!cache||cache->GetSourceOwner()!=display->spatial)) {
+            cache=std::make_shared<FeatureInternal::SpatialMeshCache>(display->spatial,m_reads,
+                128,
+                [](vtkPolyData& mesh,const auto& source,const auto& cancel){
+                    const auto& attributes=source.GetMesh().GetCellFields();
+                    const auto found=std::find_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="gap.region.id"&&a.componentCount==1;});
+                    auto* faces=vtkIdTypeArray::SafeDownCast(mesh.GetCellData()->GetArray(FeatureInternal::SpatialMeshSource::faceIds));
+                    if(found==attributes.end()||!faces)throw std::runtime_error("Formal Gap object identity is unavailable.");
+                    vtkNew<vtkIntArray> ids;ids->SetName("gap.display.id");ids->SetNumberOfValues(faces->GetNumberOfValues());
+                    for(vtkIdType i=0;i<faces->GetNumberOfValues();++i){if(!(i%4096)&&cancel())throw std::runtime_error("Gap batch cancelled.");
+                        const auto value=found->values.at(static_cast<std::size_t>(faces->GetValue(i)));
+                        if(value<=0||value>INT_MAX||std::trunc(value)!=value)throw std::runtime_error("Invalid formal Gap object identity.");ids->SetValue(i,static_cast<int>(value));}
+                    mesh.GetCellData()->SetScalars(ids);
+                });
+        }
         const bool hasMesh = GetMeshVisible(m_displayVoidMesh);
         const bool hasLabels = GetLabelExtent(m_displayLabelImage);
         for (const auto& service : m_meshTargets) {
             if (!hasMesh) continue;
             if (!service) { rollback(); return false; }
             auto overlay = std::make_shared<GapMeshOverlayStrategy>(display);
-            overlay->SetInputData(m_displayVoidMesh);
+            if(cache){overlay->SetDisplayCache(cache,128,onWorkAvailable);overlay->GetDisplay().SetObjectRange(m_selectionRange,m_isSelectionIsolated);}
+            else overlay->SetInputData(m_displayVoidMesh);
             const auto viewId=m_viewIds.count(service.get()) ? m_viewIds.at(service.get()):std::string{};
             auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);
             candidate.push_back({service,overlay,viewId});
@@ -1591,6 +1757,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!hasLabels) continue;
             if (!target.second) { rollback(); return false; }
             auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, display);
+            if(cache){overlay->SetDisplayCache(cache,128,onWorkAvailable);overlay->SetObjectSelection(m_selectionRange,m_selectedRegion,m_isSelectionIsolated);}
             overlay->SetInputData(m_displayLabelImage);
             const auto viewId=m_viewIds.count(target.second.get()) ? m_viewIds.at(target.second.get()):std::string{};
             auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);
@@ -1598,16 +1765,21 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!target.second->AttachOverlay(overlay)) { rollback(); return false; }
         }
         if (acceptDisplay && !acceptDisplay()) { rollback(); return false; }
+        m_displayCache=std::move(cache);
     } catch (...) { rollback(); return false; }
     // 新目标全部挂接成功，才清退本 Feature 的旧绑定。
     SetOverlayOff();
     m_displayOverlayBindings.swap(candidate);
     m_displayData = std::move(display);
-    return !m_displayOverlayBindings.empty() || !m_displayData->hasRegions;
+    const bool attached=!m_displayOverlayBindings.empty() || !m_displayData->hasRegions;
+    if(attached)m_displayError.clear();return attached;
 }
 
 void GapAnalysisService::Impl::ClearDisplayState() {
+    m_displayError.clear();
     m_displayData.reset();
+    m_displayCache.reset();
+    m_selectionRange.reset();m_selectedRegion.reset();m_isSelectionIsolated=false;
     m_viewIds.clear();m_meshTargets.clear();
     m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;
@@ -2224,7 +2396,7 @@ bool GapAnalysisService::Impl::BuildResultPayload(
 
     GapAnalysisResult candidate;
     candidate.voids.reserve(batch.regions.size());
-    std::unordered_set<std::int32_t> regionIds;
+    std::unordered_set<std::int32_t,std::hash<std::int32_t>,std::equal_to<std::int32_t>,DataArrayAllocator<std::int32_t>> regionIds;
     std::uint64_t voidVoxelCount = 0;
     for (const auto& source : batch.regions) {
         if (m_isStopping.load()) {
@@ -2442,7 +2614,9 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     result.statistics.actualSupportVoxelCount=count;
     result.parent=params.parent ? params.parent:std::make_shared<const GapAnalysisResult>(result);
     struct Intersection {std::size_t count=0;std::array<int,6> bounds{INT_MAX,INT_MIN,INT_MAX,INT_MIN,INT_MAX,INT_MIN};};
-    std::unordered_map<int,Intersection> intersections;std::unordered_set<int> detected;
+    std::unordered_map<int,Intersection,std::hash<int>,std::equal_to<int>,DataArrayAllocator<std::pair<const int,Intersection>>> intersections;
+    using RegionSet=std::unordered_set<int,std::hash<int>,std::equal_to<int>,DataArrayAllocator<int>>;
+    RegionSet detected;
     std::size_t evaluated=0;int extent[6];result.labelImage->GetExtent(extent);
     auto evaluation=params.evaluationRoi?params.evaluationRoi->GetQuery():RoiQueryResult{};
     auto detection=params.detectionRoi?params.detectionRoi->GetQuery():RoiQueryResult{};
@@ -2463,7 +2637,7 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     }
     double spacing[3];result.labelImage->GetSpacing(spacing);
     const double voxelVolume=spacing[0]*spacing[1]*spacing[2]*std::abs(result.labelImage->GetDirectionMatrix()->Determinant());
-    std::unordered_set<int> kept;std::vector<VoidRegion> selectedRegions;std::size_t selectedVoxels=0;double selectedVolume=0;
+    RegionSet kept;DataArray<VoidRegion> selectedRegions;std::size_t selectedVoxels=0;double selectedVolume=0;
     for (auto region:result.voids) {
         if (params.detectionRoi && !detected.count(region.id)) continue;
         const auto found=intersections.find(region.id);if (params.evaluationRoi && found==intersections.end()) continue;
@@ -2751,36 +2925,38 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
 }
 
 std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTable(
-    const std::vector<VoidRegion>& regions,
-    const std::atomic<bool>& isStopping)
+    const DataArray<VoidRegion>& regions,
+    const std::atomic<bool>& isStopping,const DataArray<GapSurfaceRange>* ranges)
 {
-    std::vector<std::int64_t> ids;
-    std::vector<std::int64_t> voxelCounts;
-    std::vector<double> volumes;
-    std::vector<double> equivalentDiameters;
-    std::vector<double> radii;
-    std::vector<double> diameters;
-    std::vector<std::array<double, 3>> centers;
-    std::vector<std::array<std::int64_t, 3>> centroids;
-    std::vector<std::array<std::int64_t, 6>> boxes;
-    std::vector<std::array<std::int64_t, 3>> seeds;
-    std::vector<double> minimumGrayValues;
-    std::vector<double> maximumGrayValues;
-    std::vector<double> meanGrayValues;
-    std::vector<double> grayStandardDeviations;
-    std::vector<double> grayDeviations;
-    std::vector<double> gaps;
-    std::vector<double> compactnessValues;
-    std::vector<double> surfaceAreas;
-    std::vector<double> sphericityValues;
-    std::vector<std::array<double, 3>> pcaDeviations;
-    std::vector<double> pcaMaximumDeviationRatios;
-    std::vector<double> pcaMinimumDeviationRatios;
-    std::vector<double> projectedAreasX;
-    std::vector<double> projectedAreasY;
-    std::vector<double> projectedAreasZ;
-    std::vector<std::array<double, 3>> projectedSizes;
-    std::vector<double> probabilities;
+    ResultArrayScope columnsStorage;
+
+    DataArray<std::int64_t> ids;
+    DataArray<std::int64_t> voxelCounts;
+    DataArray<double> volumes;
+    DataArray<double> equivalentDiameters;
+    DataArray<double> radii;
+    DataArray<double> diameters;
+    DataArray<std::array<double, 3>> centers;
+    DataArray<std::array<std::int64_t, 3>> centroids;
+    DataArray<std::array<std::int64_t, 6>> boxes;
+    DataArray<std::array<std::int64_t, 3>> seeds;
+    DataArray<double> minimumGrayValues;
+    DataArray<double> maximumGrayValues;
+    DataArray<double> meanGrayValues;
+    DataArray<double> grayStandardDeviations;
+    DataArray<double> grayDeviations;
+    DataArray<double> gaps;
+    DataArray<double> compactnessValues;
+    DataArray<double> surfaceAreas;
+    DataArray<double> sphericityValues;
+    DataArray<std::array<double, 3>> pcaDeviations;
+    DataArray<double> pcaMaximumDeviationRatios;
+    DataArray<double> pcaMinimumDeviationRatios;
+    DataArray<double> projectedAreasX;
+    DataArray<double> projectedAreasY;
+    DataArray<double> projectedAreasZ;
+    DataArray<std::array<double, 3>> projectedSizes;
+    DataArray<double> probabilities;
     ids.reserve(regions.size());
     voxelCounts.reserve(regions.size());
     volumes.reserve(regions.size());
@@ -2865,6 +3041,20 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTa
             static_cast<double>(region.projectedSize[2]) });
         probabilities.push_back(region.defectProbability);
     }
+    DataArray<std::uint64_t> sortedRows(regions.size());std::iota(sortedRows.begin(),sortedRows.end(),0);
+    std::sort(sortedRows.begin(),sortedRows.end(),[&](auto a,auto b){
+        if(isStopping.load())throw std::runtime_error("Gap object indexing cancelled.");return regions[a].id<regions[b].id;});
+    DataArray<std::uint64_t> pointFirst,pointCounts,triangleFirst,triangleCounts;
+    DataArray<std::uint8_t> hasGeometry;
+    for(const auto& region:regions) {
+        if(isStopping.load())return {};
+        const GapSurfaceRange* range=nullptr;
+        if(ranges){const auto found=std::lower_bound(ranges->begin(),ranges->end(),region.id,
+            [](const auto& row,auto id){return row.id<id;});if(found!=ranges->end()&&found->id==region.id)range=&*found;}
+        pointFirst.push_back(range?range->firstPoint:0);pointCounts.push_back(range?range->pointCount:0);
+        triangleFirst.push_back(range?range->firstTriangle:0);triangleCounts.push_back(range?range->triangleCount:0);
+        hasGeometry.push_back(range?1:0);
+    }
     auto table = std::make_shared<const RecordTablePayload>(
         gapVoidTableType,
         "gap-analysis.void-regions",
@@ -2899,13 +3089,17 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTa
             { "projected-area-z-mm2", std::move(projectedAreasZ) },
             { "projected-size-voxel", std::move(projectedSizes) },
             { "defect-probability", std::move(probabilities) },
-            { "parent-voxel-count",[&]{std::vector<std::int64_t> v;for(const auto& r:regions)v.push_back(r.parentVoxelCount);return v;}() },
-            { "intersection-voxel-count",[&]{std::vector<std::int64_t> v;for(const auto& r:regions)v.push_back(r.intersectionVoxelCount);return v;}() },
-            { "parent-volume-mm3",[&]{std::vector<double> v;for(const auto& r:regions)v.push_back(r.parentVolumeMM3);return v;}() },
-            { "intersection-volume-mm3",[&]{std::vector<double> v;for(const auto& r:regions)v.push_back(r.intersectionVolumeMM3);return v;}() },
-            { "roi-partial",[&]{std::vector<std::uint64_t> v;for(const auto& r:regions)v.push_back(r.isRoiPartial?1:0);return v;}() },
-            { "whole-object-geometry",[&]{std::vector<std::uint64_t> v;for(const auto& r:regions)v.push_back(r.hasWholeObjectGeometry?1:0);return v;}() } });
-    return table->GetValid() ? table : nullptr;
+            { "parent-voxel-count",[&]{DataArray<std::int64_t> v;for(const auto& r:regions)v.push_back(r.parentVoxelCount);return v;}() },
+            { "intersection-voxel-count",[&]{DataArray<std::int64_t> v;for(const auto& r:regions)v.push_back(r.intersectionVoxelCount);return v;}() },
+            { "parent-volume-mm3",[&]{DataArray<double> v;for(const auto& r:regions)v.push_back(r.parentVolumeMM3);return v;}() },
+            { "intersection-volume-mm3",[&]{DataArray<double> v;for(const auto& r:regions)v.push_back(r.intersectionVolumeMM3);return v;}() },
+            { "roi-partial",[&]{DataArray<std::uint64_t> v;for(const auto& r:regions)v.push_back(r.isRoiPartial?1:0);return v;}() },
+            { "whole-object-geometry",[&]{DataArray<std::uint64_t> v;for(const auto& r:regions)v.push_back(r.hasWholeObjectGeometry?1:0);return v;}() },
+            { "object-row-by-id",std::move(sortedRows) },
+            { "mesh-first-point",std::move(pointFirst) },{ "mesh-point-count",std::move(pointCounts) },
+            { "mesh-first-triangle",std::move(triangleFirst) },{ "mesh-triangle-count",std::move(triangleCounts) },
+            { "mesh-range-valid",std::move(hasGeometry) } });
+    columnsStorage.Finish();return table->GetValid() ? table : nullptr;
 }
 
 std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateStatisticsTable(
@@ -2934,4 +3128,6 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateStatis
 void GapAnalysisService::SetWorkAvailable(std::function<void()> onWorkAvailable)
 {
     m_impl->onWorkAvailable = std::move(onWorkAvailable);
+    const auto queue=m_impl->GetReadQueue();
+    const std::lock_guard<std::mutex> lock(queue->mutex);queue->onPending=m_impl->onWorkAvailable;
 }

@@ -605,9 +605,11 @@ bool GetConcurrentCasValid()
 bool GetDataLifetimeTests();
 bool GetResultRetentionTests();
 bool GetMeshPagedStorageTests();
+bool GetDataArrayTests();
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "arrays") return GetDataArrayTests() ? 0 : 1;
     if (argc == 2 && std::string(argv[1]) == "lifetime") return GetDataLifetimeTests() ? 0 : 1;
     if (argc == 2 && std::string(argv[1]) == "retention") return GetResultRetentionTests() ? 0 : 1;
     if (argc == 2 && std::string(argv[1]) == "mesh-blocks") return GetMeshPagedStorageTests() ? 0 : 1;

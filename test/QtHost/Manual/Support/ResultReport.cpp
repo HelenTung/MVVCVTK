@@ -334,7 +334,7 @@ public:
     QVariant headerData(int section,Qt::Orientation orientation,int role) const override {
         if(role!=Qt::DisplayRole)return {};
         if(section<0 || (orientation==Qt::Horizontal?section>=document.columns.size():section>=rows.size()))return {};
-        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant(rows[section]+1);
+        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant::fromValue<qulonglong>(rows[section]+1);
     }
 };
 }
@@ -478,6 +478,7 @@ void ResultReport::ContinueGeneration()
             const bool sourceHint=m_sourceFilter.isEmpty() || record["source"].toObject()["dataRevision"].toString()==m_sourceFilter
                 || record["result"].toObject()["source"].toString()==m_sourceFilter;
             if((!resultHint || !sourceHint) && record["module"].toString()!="Alignment")continue;
+            const auto generationViewRevision=m_viewRevision;
             const auto known=GetReportIds()+m_removedReports;
             if(auto prepare=onPrepareReports?onPrepareReports(record,known):ReportPreparation{}) {
                 StartReportsTask(std::move(prepare),{},it.key());setProperty("reportGenerationBusy",true);return;
@@ -488,8 +489,15 @@ void ResultReport::ContinueGeneration()
             }))continue;
             const auto operation=it.key();m_completedOperations.insert(operation);m_pendingReports.remove(operation);
             // 登记完整结果身份和原生行来源。查看仅读取可见页；全量物化留给查询、比较和导出。
-            for(auto& doc:documents)AddReport(std::move(doc));
-            ShowReports(m_sourceFilter,m_resultFilter,m_moduleFilter);setProperty("reportGenerationBusy",false);
+            const bool select=generationViewRevision==m_viewRevision&&(m_selected.id.isEmpty()||m_follow->isChecked());
+            QString firstNew;
+            for(auto& doc:documents){
+                if(firstNew.isEmpty()&&!m_documents.contains(doc.id)&&MatchesSource(doc,m_sourceFilter)
+                    &&MatchesResult(doc,m_resultFilter)&&MatchesModule(doc,m_moduleFilter))firstNew=doc.id;
+                AddReport(std::move(doc),false);
+            }
+            if(select&&!firstNew.isEmpty())SelectReport(firstNew);
+            setProperty("reportGenerationBusy",false);
             m_taskStatus->setText(documents.isEmpty()?"没有新增报告；精确结果已不可读取。":"报告明细可按页读取");
             if(!m_pendingReports.isEmpty())m_buildTimer->start(0);return;
         }
@@ -516,7 +524,8 @@ void ResultReport::ContinueTask()
 {
     if(!m_task)return;
     const bool cancelled=m_task->cancelled->load();
-    const bool select=m_task->viewRevision==m_viewRevision;
+    const bool select=m_task->viewRevision==m_viewRevision
+        &&(m_task->nativeOperation.isEmpty()||m_selected.id.isEmpty()||m_follow->isChecked());
     bool failed=false;
     try {
         if(!m_task->future.valid()) {
@@ -540,7 +549,7 @@ void ResultReport::ContinueTask()
             if(!operation.isEmpty()){m_completedOperations.insert(operation);m_pendingReports.remove(operation);}
             else if(select && !documents.isEmpty())ShowReports();
             for(auto& document:documents){const auto id=document.id;AddReport(std::move(document),select);if(select && operation.isEmpty())SelectReport(id);}
-            if(select && !operation.isEmpty())ShowReports(m_sourceFilter,m_resultFilter,m_moduleFilter);
+            if(select && !operation.isEmpty() && !documents.isEmpty())ShowReports(m_sourceFilter,m_resultFilter,m_moduleFilter);
         }
         m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
     }catch(const std::exception& e){failed=true;m_task.reset();setProperty("reportTaskError",QString::fromUtf8(e.what()));m_taskStatus->setText(QString::fromUtf8(e.what()));}
@@ -622,6 +631,7 @@ void ResultReport::ContinueRows()
 }
 void ResultReport::RefreshPage()
 {
+    const auto rowCount=GetRowCount();m_page=rowCount?std::min<ReportIndex>(m_page,(rowCount-1)/200):0;
     // 保留模型身份；Qt5 清空全部列时不替换仍被表头/选择模型观察的对象。
     auto* model=dynamic_cast<ReportPageModel*>(m_table->model());
     if(!model){model=new ReportPageModel(m_table);m_table->setModel(model);}

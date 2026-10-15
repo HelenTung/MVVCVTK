@@ -5,7 +5,6 @@
 #include <QMap>
 #include <QVector>
 #include <QSet>
-#include <QDeadlineTimer>
 #include <cstdint>
 #include <functional>
 #include <memory>

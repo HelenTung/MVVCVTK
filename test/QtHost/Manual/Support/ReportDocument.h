@@ -16,6 +16,7 @@ ReportRows GetReportRowRange(ReportIndex count);
 class ReportTable final {
 public:
     ReportTable();
+    ReportTable(quint64 count,std::function<QStringList(ReportIndex)> readRow);
     ~ReportTable();
     void Append(const QStringList& row);
     QStringList Read(ReportIndex row) const;
@@ -37,6 +38,8 @@ struct ReportColumn final {
 };
 struct ReportDocument final {
     QString id, title, category, module, source, result, description;
+    // 仅在该正式结果内稳定的对象/点编号；与跨结果稳定的外部业务编号分开。
+    QString identityResult;
     QString coordinateFrame;
     QStringList relatedResults, relatedSources, relatedModules;
     QVector<ReportColumn> columns;

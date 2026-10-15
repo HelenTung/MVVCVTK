@@ -4,6 +4,7 @@
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceGenerationStore.h"
+#include "SurfaceOverlayStrategy.h"
 #include "SurfaceContracts.h"
 #include "SurfaceGeometryStorage.h"
 #include <vtkPolyData.h>
@@ -126,8 +127,9 @@ public:
 
 class HostControlStub final : public FeatureHostControl {
 public:
-    bool AttachInput(HostInputBinding) override { return true; }
-    bool DetachInput(std::string_view) override { return true; }
+    bool AttachInput(HostInputBinding binding) override {input=std::move(binding);return true;}
+    bool DetachInput(std::string_view) override {input={};inputOwner.clear();return true;}
+    bool SetInputOwner(std::string_view id,bool enabled,const std::vector<std::string>&) override {if(isInputOwnerRejected)return false;inputOwner=enabled?std::string(id):std::string{};return true;}
 
     bool SetActiveViews(
         const std::vector<std::string>& viewIds) override
@@ -160,9 +162,12 @@ public:
     }
 
     std::vector<std::string> activeViews;
+    HostInputBinding input;
+    std::string inputOwner;
     FeatureSceneDelta lastDelta;
     bool isActiveViewsRejected = false;
     bool isSceneRejected = false;
+    bool isInputOwnerRejected=false;
     int sceneCount = 0;
 };
 
@@ -278,6 +283,40 @@ void TestSuccessVisibilityAndClear(Checks& checks)
             && snapshot->sourceRevision == testHost.data->GetPrimaryImage()->data->self,
         "successful request publishes immutable generation");
     if (snapshot) {
+        const auto objectPage=snapshot->GetObjectPage(0,SIZE_MAX);
+        checks.Get(objectPage && objectPage->generation==snapshot->dataRevision
+            && objectPage->objects.size()==std::min<std::size_t>(4096,snapshot->objects->size())
+            && !snapshot->GetObjectPage(snapshot->objects->size()+1,1),
+            "object pages are bounded and keep their exact formal generation");
+        bool pointPages=true;
+        for(const auto& object:*snapshot->objects) {
+            std::uint64_t offset=0;
+            do {
+                const auto page=snapshot->GetObjectPoints(object.objectIndex,offset,17);
+                if(!page || page->generation!=snapshot->dataRevision || page->firstPoint!=object.firstPoint+offset
+                    || page->points.size()>17 || page->next!=offset+page->points.size()){pointPages=false;break;}
+                for(std::size_t i=0;i<page->points.size();++i)
+                    pointPages=pointPages&&page->points[i].positionModel==(*snapshot->points)[object.firstPoint+offset+i].positionModel;
+                offset=page->next;
+            }while(offset<object.pointCount);
+        }
+        checks.Get(pointPages,"object point pages preserve global ranges and original coordinates including object zero");
+        bool trianglePages=true;
+        for(const auto& object:*snapshot->objects) {
+            std::uint64_t offset=0;
+            do {
+                const auto page=snapshot->GetObjectTriangles(object.objectIndex,offset,19);
+                if(!page||page->generation!=snapshot->dataRevision||page->firstTriangle!=object.firstTriangle+offset
+                    ||page->triangles.size()>19||page->next!=offset+page->triangles.size()){trianglePages=false;break;}
+                for(std::size_t i=0;i<page->triangles.size();++i) {
+                    const auto global=object.firstTriangle+offset+i;
+                    for(int c=0;c<3;++c)trianglePages=trianglePages&&page->triangles[i].vertices[c]==(*snapshot->triangleIndices)[global*3+c];
+                    trianglePages=trianglePages&&page->triangles[i].validity==(*snapshot->triangleValidity)[global];
+                }
+                offset=page->next;
+            }while(offset<object.triangleCount);
+        }
+        checks.Get(trianglePages,"object triangle pages preserve exact global point IDs and per-face validity");
         const auto graph = testHost.data->GetDataGraph();
         const auto data = graph.view->GetData(snapshot->meshRevision);
         const auto mesh = data
@@ -370,6 +409,81 @@ void TestSuccessVisibilityAndClear(Checks& checks)
 }
 
 
+
+void TestCacheTargetDoesNotLimitResults(Checks& checks)
+{
+    MeshReadArray<std::uint32_t> expectedTriangles;MeshReadArray<SurfacePointRecord> expectedPoints;
+    for(const auto bytes:{std::size_t{0},std::size_t{1}}) {
+        TestHost host(BuildSphere());auto config=GetConfig();config.maxWorkingBytes=bytes;
+        SurfaceDeterminationHostFeature feature(config);checks.Get(feature.AttachHost(host.context),"zero and tiny cache targets are valid");
+        bool done=false;SurfaceDeterminationResult result;
+        const auto admission=feature.SendRequest(GetStartRequest(),[&](auto value){result=std::move(value);done=true;});
+        checks.Get(admission.status==SurfaceAdmissionStatus::Accepted&&WaitUntil(feature,[&]{return done;}),"cache target does not impose a result admission budget");
+        const auto snapshot=feature.GetSurfaceSnapshot();
+        checks.Get(result.status==SurfaceResultStatus::Succeeded&&snapshot&&snapshot->points->size()>0,"complete geometry publishes with a zero or one-byte cache target");
+        if(snapshot){
+            if(expectedPoints.empty()){expectedPoints=*snapshot->points;expectedTriangles=*snapshot->triangleIndices;}
+            else {
+                bool same=expectedPoints.size()==snapshot->points->size()&&expectedTriangles==*snapshot->triangleIndices;
+                for(std::size_t i=0;same&&i<expectedPoints.size();++i)same=expectedPoints[i].positionModel==(*snapshot->points)[i].positionModel;
+                checks.Get(same,"cache target changes neither complete coordinates nor formal connectivity");
+            }
+        }
+        checks.Get(feature.DetachHost(),"cache target fixture detaches");
+    }
+}
+
+void TestObjectSelection(Checks& checks)
+{
+    TestHost host(BuildSphere());auto feature=std::make_shared<SurfaceDeterminationHostFeature>(GetConfig());
+    checks.Get(feature->AttachHost(host.context),"object selection fixture attaches");
+    const auto run=[&] {
+        auto done=std::make_shared<std::atomic<bool>>(false);
+        const auto admission=feature->SendRequest(GetStartRequest(),[done](auto){done->store(true);});
+        checks.Get(admission.status==SurfaceAdmissionStatus::Accepted&&WaitUntil(*feature,[done]{return done->load();}),"object selection fixture publishes a generation");
+        return feature->GetSurfaceSnapshot();
+    };
+    const auto first=run();
+    if(!first||!first->GetObjectById(0)){checks.Get(false,"surface object zero must exist");feature->DetachHost();return;}
+    const auto graph=host.data->GetDataGraph();
+    const auto select=[&](const DataRevisionRef& ref,std::optional<std::uint32_t> object,bool isolate=false){return feature->SendRequest(SurfaceObjectSelectionRequest{ref,object,isolate}).status;};
+    checks.Get(select(first->dataRevision,0)==SurfaceAdmissionStatus::Accepted&&feature->GetState().selectedObject==std::optional<std::uint32_t>{0}
+        &&feature->GetState().selectionGeneration==first->dataRevision,"surface object zero is selected with its exact formal generation");
+    checks.Get(feature->GetSurfaceSnapshot()==first&&host.data->GetDataGraph().view==graph.view,"selection publishes no new formal data or geometry");
+    auto overlay=std::dynamic_pointer_cast<SurfaceOverlayStrategy>(host.views->overlay->overlays.front());
+    checks.Get(overlay&&overlay->GetDisplay().GetSelection(),"Feature request installs one bounded highlight");
+    host.host->isSceneRejected=true;
+    checks.Get(select(first->dataRevision,{})==SurfaceAdmissionStatus::InvalidRequest&&feature->GetState().selectedObject==std::optional<std::uint32_t>{0}
+        &&overlay->GetDisplay().GetSelection(),"rejected scene change retains the previous selection and highlight");
+    host.host->isSceneRejected=false;
+    checks.Get(select(first->dataRevision,0,true)==SurfaceAdmissionStatus::Accepted&&feature->GetState().isSelectionIsolated,"isolation belongs to display state");
+    checks.Get(feature->SendRequest(SurfaceVisibilityRequest{false}).status==SurfaceAdmissionStatus::Accepted
+        &&feature->SendRequest(SurfaceVisibilityRequest{true}).status==SurfaceAdmissionStatus::Accepted
+        &&feature->GetState().selectedObject==std::optional<std::uint32_t>{0},"visibility changes preserve selection within one generation");
+    checks.Get(feature->SendRequest(SurfaceObjectPickModeRequest{true}).status==SurfaceAdmissionStatus::Accepted
+        &&feature->GetState().isObjectPickingEnabled&&!host.host->inputOwner.empty(),"explicit picking mode uses the existing view input owner");
+    checks.Get(host.host->input.actions.size()==1&&host.host->input.actions[0].isCurrentToolCommand
+        &&host.host->input.actions[0].bindings[0].defaultBinding.requiredModifiers==2
+        &&host.host->input.actions[0].bindings[0].defaultBinding.forbiddenModifiers==5,"picking is owner-scoped Ctrl press and leaves ordinary camera gestures unmatched");
+    const auto second=run();
+    checks.Get(second&&second->dataRevision!=first->dataRevision&&!feature->GetState().selectedObject
+        &&!feature->GetState().isObjectPickingEnabled&&host.host->inputOwner.empty(),"new generation clears prior object identity and picking mode");
+    checks.Get(select(first->dataRevision,0)==SurfaceAdmissionStatus::InvalidRequest&&first->GetObjectPoints(0,0,1).has_value(),"stale selection is rejected while its fixed historical reader remains valid");
+    if(second)checks.Get(select(second->dataRevision,UINT32_MAX)==SurfaceAdmissionStatus::InvalidRequest,"unknown object ID never selects a list row accidentally");
+    checks.Get(feature->SendRequest(SurfaceObjectPickModeRequest{true}).status==SurfaceAdmissionStatus::Accepted,"picking may activate on the new generation");
+    const auto savedInput=host.host->input;
+    host.host->isInputOwnerRejected=true;
+    checks.Get(!feature->DetachHost()&&feature->GetState().stage==SurfaceDeterminationStage::Stopping
+        &&feature->SendRequest(SurfaceObjectPickModeRequest{true}).status==SurfaceAdmissionStatus::Stopping,
+        "failed input cleanup keeps the attachment closing and rejects new work");
+    InteractionEvent stoppingEvent;stoppingEvent.eventKind=InteractionEventKind::PrimaryPress;
+    checks.Get(savedInput.onAction&&!savedInput.onAction("surface.object.select",stoppingEvent,{}).isHandled,
+        "failed detach never re-enables a stopped input callback");
+    host.host->isInputOwnerRejected=false;
+    checks.Get(feature->DetachHost()&&host.host->inputOwner.empty(),"owner cleanup can be retried without reviving the stopped Feature");feature.reset();
+    InteractionEvent event;event.eventKind=InteractionEventKind::PrimaryPress;
+    checks.Get(savedInput.onAction&&!savedInput.onAction("surface.object.select",event,{}).isHandled,"detached input callback cannot access a destroyed Feature");
+}
 
 void TestCancelAndSupersede(Checks& checks)
 {
@@ -915,7 +1029,7 @@ void TestObjectHistoryAndSelection(Checks& checks)
     const auto secondAdmission=feature.SendRequest(GetStartRequest(),[&](auto result){completed.push_back(std::move(result));});
     checks.Get(secondAdmission.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return completed.size()==2;}),"second formal result completes");
     const auto second=feature.GetSurfaceSnapshot();const auto before=host.data->GetDataGraph();
-    const auto selected=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
+    const auto selected=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,false,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
     checks.Get(selected.status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return completed.size()==3;}),"exact historical object highlight completes");
     checks.Get(completed.size()==3 && completed.back().status==SurfaceResultStatus::Succeeded && completed.back().dataRevision==first->dataRevision
         && !completed.back().isPublished && !completed.back().isActivated && feature.GetSurfaceSnapshot()==second
@@ -923,11 +1037,11 @@ void TestObjectHistoryAndSelection(Checks& checks)
     checks.Get(std::any_of(host.host->lastDelta.displays.begin(),host.host->lastDelta.displays.end(),[&](const auto& value){return value.localId=="surface-object" && value.data==first->meshRevision;}),"scene records the selected history mesh separately from formal display");
     checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted
         && std::none_of(host.host->lastDelta.displays.begin(),host.host->lastDelta.displays.end(),[](const auto& value){return value.localId=="surface-object";}),"clear retires the selected scene role");
-    const auto pending=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
+    const auto pending=feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,false,GetParams().targetViews},[&](auto result){completed.push_back(std::move(result));});
     checks.Get(pending.status==SurfaceAdmissionStatus::Accepted && feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted
         && completed.size()==4 && completed.back().status==SurfaceResultStatus::Cancelled,"pending highlight cancellation completes exactly once");
     host.data->SetCurrent(BuildPlane());
-    checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,GetParams().targetViews}).status==SurfaceAdmissionStatus::Unavailable
+    checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{first->dataRevision,object.objectIndex,false,GetParams().targetViews}).status==SurfaceAdmissionStatus::Unavailable
         && feature.GetSurfaceSnapshot(first->dataRevision)==first,"different primary input rejects display but preserves history reading");
     checks.Get(feature.DetachHost(),"object fixture detaches");
 }
@@ -938,7 +1052,7 @@ void TestHeadlessObjectClearAndReentry(Checks& checks)
     auto start=GetStartRequest();start.start->targetViews={};bool ready=false;
     checks.Get(feature.SendRequest(start,[&](auto){ready=true;}).status==SurfaceAdmissionStatus::Accepted && WaitUntil(feature,[&]{return ready;}),"headless formal result is ready");
     const auto generation=feature.GetSurfaceSnapshot();if(!generation || generation->objects->empty()){(void)feature.DetachHost();checks.Get(false,"headless selection has an object");return;}
-    const auto request=SurfaceObjectSelectionRequest{generation->dataRevision,generation->objects->front().objectIndex,GetParams().targetViews};
+    const auto request=SurfaceObjectSelectionRequest{generation->dataRevision,generation->objects->front().objectIndex,false,GetParams().targetViews};
     int calls=0;SurfaceDeterminationAdmission nested;
     const auto pending=feature.SendRequest(request,[&](auto value){++calls;if(value.status==SurfaceResultStatus::Cancelled)nested=feature.SendRequest(request,[&](auto result){++calls;checks.Get(result.status==SurfaceResultStatus::Succeeded,"nested newer selection completes");});});
     const auto superseded=feature.SendRequest(request);
@@ -1018,7 +1132,8 @@ void TestCancelBeforeOwnerCommit(Checks& checks)
     checks.Get(!service.GetIsBusy() && service.StopRequest(1),"cancel covers completed but unpublished candidates");
     const auto result=service.GetComplete();
     checks.Get(result && result->result.status==SurfaceResultStatus::Cancelled && result->result.points.empty()
-        && !service.GetComplete(),"ready cancellation produces exactly one empty cancelled completion");
+        && !result->meshes.measurement&&!result->meshes.selection
+        && !service.GetComplete(),"ready cancellation produces exactly one empty cancelled completion without prepared payload owners");
     checks.Get(service.Stop(std::chrono::steady_clock::now()+std::chrono::seconds(2)),"ready cancellation stops worker");
 }
 
@@ -1155,6 +1270,8 @@ int GetSurfaceLifecycleFailCount()
     TestBusinessInputLifecycle(checks);
     TestAttachAndOwnerThread(checks);
     TestSuccessVisibilityAndClear(checks);
+    TestObjectSelection(checks);
+    TestCacheTargetDoesNotLimitResults(checks);
     TestCancelAndSupersede(checks);
     TestSourceStaleAndRollback(checks);
     TestBindingProjection(checks);

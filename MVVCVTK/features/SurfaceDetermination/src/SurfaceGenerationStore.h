@@ -2,6 +2,7 @@
 
 #include "Host/SurfaceDeterminationHostTypes.h"
 #include "Host/TrustedDataPort.h"
+#include "FeatureSupport/SpatialMeshSource.h"
 
 #include <memory>
 #include <mutex>
@@ -25,8 +26,9 @@ public:
     };
     explicit SurfaceGenerationPayload(
         std::shared_ptr<const SurfaceGenerationSnapshot> generation,
-        Statistics statistics,std::shared_ptr<const SurfacePreparedGeometry> storage={})
-        : m_generation(std::move(generation)), m_storage(std::move(storage)),m_statistics(statistics) {}
+        Statistics statistics,std::shared_ptr<const SurfacePreparedGeometry> storage={},
+        std::shared_ptr<const FeatureInternal::SpatialMeshSource> display={},std::string displayError={})
+        : m_generation(std::move(generation)), m_storage(std::move(storage)),m_statistics(statistics),m_display(std::move(display)),m_displayError(std::move(displayError)) {}
     DataTypeId GetDataType() const override { return surfaceGenerationType; }
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
@@ -40,14 +42,18 @@ public:
     {
         if (!m_generation) return {};
         return {m_generation,m_generation->points,m_generation->triangleIndices,m_generation->objects,
-            m_generation->triangleValidity,m_generation->interfaces,m_generation->selection,m_storage};
+            m_generation->triangleValidity,m_generation->interfaces,m_generation->selection,m_storage,m_display};
     }
+    const std::shared_ptr<const FeatureInternal::SpatialMeshSource>& GetDisplaySource()const noexcept{return m_display;}
+    const std::string& GetDisplayError()const noexcept{return m_displayError;}
     const Statistics& GetStatistics() const noexcept { return m_statistics; }
     const std::shared_ptr<const SurfacePreparedGeometry>& GetStorage()const noexcept{return m_storage;}
 private:
     std::shared_ptr<const SurfaceGenerationSnapshot> m_generation;
     std::shared_ptr<const SurfacePreparedGeometry> m_storage;
     Statistics m_statistics;
+    std::shared_ptr<const FeatureInternal::SpatialMeshSource> m_display;
+    std::string m_displayError;
 };
 
 class SurfaceGenerationStore final {

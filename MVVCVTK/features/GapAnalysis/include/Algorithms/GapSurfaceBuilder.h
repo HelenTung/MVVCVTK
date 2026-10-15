@@ -4,6 +4,9 @@
 #include "PagedArray.h"
 #include "MeshVtkStorage.h"
 #include "Host/RoiReadTypes.h"
+#include "BackedVtkArray.h"
+#include "MappedArrayStorage.h"
+#include "GapOccupiedBlocks.h"
 #include <vtkCellArray.h>
 #include <vtkCellData.h>
 #include <vtkFlyingEdges3D.h>
@@ -19,14 +22,21 @@
 #include <map>
 #include <stdexcept>
 
+struct GapSurfaceRange final {
+    std::int32_t id = 0;
+    std::uint64_t firstPoint = 0, pointCount = 0, firstTriangle = 0, triangleCount = 0;
+};
 // 正式提面直接写入几何文件；临时掩膜和点复用表均不累积完整 RAM 网格。
 class GapSurfaceBuilder final {
+    template<class Key> using PointMap = std::map<Key,vtkIdType,std::less<Key>,
+        DataArrayAllocator<std::pair<const Key,vtkIdType>>>;
 public:
     static std::shared_ptr<const SurfaceMeshPayload> BuildPayload(vtkImageData* image,
-        const std::vector<VoidRegion>& regions,const std::atomic<bool>& stopping,
-        const RoiReadSnapshot& roi={},const std::vector<VoidRegion>* parents=nullptr,const std::string& frame="RAS") {
+        const DataArray<VoidRegion>& regions,const std::atomic<bool>& stopping,
+        const RoiReadSnapshot& roi={},const DataArray<VoidRegion>* parents=nullptr,const std::string& frame="RAS",DataArray<GapSurfaceRange>* ranges=nullptr,bool useOccupancyIndex=true) {
         if(!image||image->GetScalarType()!=VTK_INT||image->GetNumberOfScalarComponents()!=1)return {};
         PagedArray<double> points,labels;PagedArray<std::uint64_t> cells;
+        if(ranges)ranges->clear();
         int source[6];image->GetExtent(source);
         vtkIdType expected=1;
         for(int axis=0;axis<3;++axis) {
@@ -36,8 +46,10 @@ public:
         }
         auto* scalars=image->GetPointData()->GetScalars();
         if(!scalars||scalars->GetNumberOfTuples()!=expected||!scalars->GetVoidPointer(0))return {};
-        PagedMap<std::int32_t,const VoidRegion*> parentIndex;
-        if(parents)for(const auto& region:*parents){if(parentIndex.Find(region.id))return {};parentIndex.Insert(region.id,&region);}
+        GapRegionIndex parentIndex;
+        if(parents)for(const auto& region:*parents)if(!parentIndex.emplace(region.id,&region).second)return {};
+        const auto directory=GetGapOccupiedBlocks(image,regions,parentIndex,parents!=nullptr,stopping,useOccupancyIndex);
+        if(!directory)return {};
         vtkNew<vtkImageData> mask;vtkNew<vtkFlyingEdges3D> filter;
         filter->SetInputData(mask);filter->SetValue(0,.5);filter->ComputeNormalsOff();filter->ComputeScalarsOff();
         // 64 个 cell 及共享的一层采样点，临时字节数至多 65^3；相邻块不重复 cell。
@@ -46,9 +58,10 @@ public:
         for(const auto& region:regions) {
             if(stopping.load())return {};
             if(region.id<=0||seen.Find(region.id))return {};seen.Insert(region.id,true);
-            if(region.voxelCount==0)continue;
+            if(region.voxelCount==0){if(ranges)ranges->push_back({region.id,points.size()/3,0,cells.size()/3,0});continue;}
+            const auto firstPoint=points.size()/3,firstTriangle=cells.size()/3;
             const VoidRegion* parent=&region;
-            if(parents){const auto found=parentIndex.Find(region.id);if(!found)return {};parent=*found;}
+            if(parents){const auto found=parentIndex.find(region.id);if(found==parentIndex.end())return {};parent=found->second;}
             for(int axis=0;axis<3;++axis)if(parent->bbox[axis*2]<source[axis*2]||parent->bbox[axis*2+1]>source[axis*2+1]
                 ||parent->bbox[axis*2]>parent->bbox[axis*2+1]||parent->bbox[axis*2]==INT_MIN||parent->bbox[axis*2+1]==INT_MAX)return {};
             // 不同孔隙绝不焊接。未裁剪顶点以半网格整数索引复用，避免大物理原点及跨块浮点误差。
@@ -62,9 +75,20 @@ public:
                 if(cells.size()/3>=std::size_t(std::numeric_limits<vtkIdType>::max()/4))throw std::length_error("Gap cell indices overflow.");
                 for(int i=0;i<3;++i)cells.push_back(static_cast<std::uint64_t>(ids[i]));labels.push_back(region.id);
             };
-            for(std::int64_t z=std::int64_t(parent->bbox[4])-1;z<std::int64_t(parent->bbox[5])+1;z+=blockCells)
-            for(std::int64_t y=std::int64_t(parent->bbox[2])-1;y<std::int64_t(parent->bbox[3])+1;y+=blockCells)
-            for(std::int64_t x=std::int64_t(parent->bbox[0])-1;x<std::int64_t(parent->bbox[1])+1;x+=blockCells) {
+            const auto firstBlock=std::lower_bound(directory->blocks.begin(),directory->blocks.end(),region.id,
+                [](const auto& block,auto id){return block.id<id;});
+            const auto lastBlock=std::upper_bound(firstBlock,directory->blocks.end(),region.id,
+                [](auto id,const auto& block){return id<block.id;});
+            const std::uint64_t nx=(std::int64_t(parent->bbox[1])-parent->bbox[0]+1)/blockCells+1;
+            const std::uint64_t ny=(std::int64_t(parent->bbox[3])-parent->bbox[2]+1)/blockCells+1;
+            const std::uint64_t nz=(std::int64_t(parent->bbox[5])-parent->bbox[4]+1)/blockCells+1;
+            if(nx>UINT64_MAX/ny||nx*ny>UINT64_MAX/nz)return {};
+            const auto blockCount=directory->isIndexed?static_cast<std::uint64_t>(lastBlock-firstBlock):nx*ny*nz;
+            for(std::uint64_t block=0;block<blockCount;++block) {
+                const auto* indexed=directory->isIndexed?&firstBlock[static_cast<std::ptrdiff_t>(block)]:nullptr;
+                const auto x=std::int64_t(parent->bbox[0])-1+blockCells*(indexed?indexed->x:static_cast<std::int64_t>(block%nx));
+                const auto y=std::int64_t(parent->bbox[2])-1+blockCells*(indexed?indexed->y:static_cast<std::int64_t>((block/nx)%ny));
+                const auto z=std::int64_t(parent->bbox[4])-1+blockCells*(indexed?indexed->z:static_cast<std::int64_t>(block/(nx*ny)));
                 if(stopping.load())return {};
                 const std::array<std::int64_t,3> start{x,y,z};
                 const std::array<int,3> dimensions{
@@ -120,12 +144,15 @@ public:
                     }
                 }
             }
+            if(ranges)ranges->push_back({region.id,firstPoint,points.size()/3-firstPoint,
+                firstTriangle,cells.size()/3-firstTriangle});
         }
         return stopping.load()?nullptr:MeshPayloadBuilder::Build(points.Finish(),cells.Finish(),{},frame,{{"gap.region.id",1,labels.Finish(),0}},[&]{return stopping.load();});
     }
-    static vtkSmartPointer<vtkPolyData> Build(vtkImageData* image,const std::vector<VoidRegion>& regions,
-        const std::atomic<bool>& stopping,const RoiReadSnapshot& roi={},const std::vector<VoidRegion>* parents=nullptr){
-        const auto payload=BuildPayload(image,regions,stopping,roi,parents);
+    static vtkSmartPointer<vtkPolyData> Build(vtkImageData* image,const DataArray<VoidRegion>& regions,
+        const std::atomic<bool>& stopping,const RoiReadSnapshot& roi={},const DataArray<VoidRegion>* parents=nullptr,
+        DataArray<GapSurfaceRange>* ranges=nullptr,bool useOccupancyIndex=true){
+        const auto payload=BuildPayload(image,regions,stopping,roi,parents,"RAS",ranges,useOccupancyIndex);
         return payload?MeshVtkStorage::Build(*payload,[&]{return stopping.load();}):nullptr;
     }
 };

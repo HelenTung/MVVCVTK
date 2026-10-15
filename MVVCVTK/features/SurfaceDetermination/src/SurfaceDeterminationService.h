@@ -1,7 +1,9 @@
 #pragma once
 #include "FeatureSupport/WorkLimit.h"
+#include "FeatureSupport/ReadTaskQueue.h"
 
 #include "SurfaceDeterminationAlgorithm.h"
+#include "SurfaceMeshPreparation.h"
 
 #include <atomic>
 #include <functional>
@@ -24,6 +26,7 @@ struct SurfaceRequestProgress final {
 struct SurfaceJobComplete final {
     std::uint64_t requestId = 0;
     SurfaceAlgorithmResult result;
+    SurfacePreparedMeshes meshes;
 };
 
 class SurfaceDeterminationService final {
@@ -40,11 +43,11 @@ public:
                                  WorkLimit maxWorkingBytes, std::uint64_t requestId,
                                  SurfaceAlgorithmInputs inputs = {});
     bool StopRequest(std::uint64_t requestId) noexcept;
-    std::optional<SurfaceJobComplete> GetComplete(bool retainForPublication = false);
+    std::optional<SurfaceJobComplete> GetComplete();
     std::optional<SurfaceRequestProgress> GetProgress(
         std::uint64_t requestId) const noexcept;
     bool GetIsBusy() const;
-    void SetRetainedBytes(std::size_t bytes, bool releaseHandoff = false);
+    std::shared_ptr<FeatureInternal::ReadTaskQueue> GetReadQueue() const noexcept {return m_reads;}
     FeatureOperationState GetExecutionState(std::uint64_t requestId) const;
     bool Stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
@@ -66,8 +69,9 @@ private:
         double progress) noexcept;
 
     const std::function<void()> m_onWorkAvailable;
-    mutable std::mutex m_mutex;
-    std::condition_variable m_workReady;
+    const std::shared_ptr<FeatureInternal::ReadTaskQueue> m_reads=std::make_shared<FeatureInternal::ReadTaskQueue>();
+    std::mutex& m_mutex=m_reads->mutex;
+    std::condition_variable& m_workReady=m_reads->ready;
     std::condition_variable m_workerExited;
     std::deque<Job> m_pendingJobs;
     std::string m_activeScope;
@@ -81,8 +85,6 @@ private:
     std::atomic<std::uint32_t> m_progressPermille{ 0 };
     std::atomic<std::uint8_t> m_progressStage{
         static_cast<std::uint8_t>(SurfaceDeterminationStage::Preparing) };
-    std::size_t m_retainedBytes = 0;
-    std::size_t m_handoffBytes = 0;
     bool m_isStopping = false;
     bool m_hasExited = false;
     std::uint64_t m_executionRevision = 0;

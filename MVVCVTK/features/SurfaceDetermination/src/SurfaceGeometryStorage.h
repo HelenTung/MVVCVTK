@@ -14,7 +14,7 @@ struct SurfacePreparedGeometry final {
     vtkSmartPointer<vtkPolyData> display;
 };
 
-inline vtkSmartPointer<vtkPolyData> BuildSurfaceObjectDisplay(
+inline std::shared_ptr<const SurfaceMeshPayload> BuildSurfaceObjectMesh(
     const SurfaceGenerationSnapshot& generation,const SurfaceObjectRecord& object,const SurfaceCancelCheck& cancelled)
 {
     if(!generation.points || !generation.triangleIndices || object.firstPoint>generation.points->size()
@@ -29,7 +29,14 @@ inline vtkSmartPointer<vtkPolyData> BuildSurfaceObjectDisplay(
         return std::uint64_t(id)-first;
     });
     // 只准备这个对象的连接数组；点仍共享原来的块来源，不扫描其余对象或重新提面。
-    return MeshVtkStorage::Build(points,triangles,{}, {},cancelled);
+    return MeshPayloadBuilder::Build(points,triangles,{},generation.coordinateFrame,{},cancelled);
+}
+
+inline vtkSmartPointer<vtkPolyData> BuildSurfaceObjectDisplay(
+    const SurfaceGenerationSnapshot& generation,const SurfaceObjectRecord& object,const SurfaceCancelCheck& cancelled)
+{
+    const auto mesh=BuildSurfaceObjectMesh(generation,object,cancelled);
+    return mesh?MeshVtkStorage::Build(*mesh,cancelled):nullptr;
 }
 
 inline std::shared_ptr<const SurfacePreparedGeometry> PrepareSurfaceGeometry(

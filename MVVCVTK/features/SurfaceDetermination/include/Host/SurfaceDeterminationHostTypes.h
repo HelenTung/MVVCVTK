@@ -6,6 +6,7 @@
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
+#include <string_view>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -42,6 +43,28 @@ struct SurfaceSelectionPiece final {
     std::array<std::array<double,3>,3> points{};
     std::array<std::array<double,3>,3> barycentric{};
 };
+struct SurfaceObjectPage final {
+    DataRevisionRef generation;
+    std::uint64_t total = 0, next = 0;
+    std::vector<SurfaceObjectRecord> objects;
+};
+struct SurfaceObjectPointPage final {
+    DataRevisionRef generation;
+    std::uint32_t objectIndex = 0;
+    std::uint64_t firstPoint = 0, total = 0, next = 0;
+    std::vector<SurfacePointRecord> points;
+};
+struct SurfaceTriangleRecord final {
+    // 全局正式点编号，不是当前读取页内的局部编号。
+    std::array<std::uint32_t,3> vertices{};
+    std::uint8_t validity=0;
+};
+struct SurfaceObjectTrianglePage final {
+    DataRevisionRef generation;
+    std::uint32_t objectIndex=0;
+    std::uint64_t firstTriangle=0,total=0,next=0;
+    std::vector<SurfaceTriangleRecord> triangles;
+};
 struct SurfaceGenerationSnapshot final {
     // Preview 的两个图引用为空；requestId 标识临时候选。
     std::uint64_t requestId = 0;
@@ -75,10 +98,53 @@ struct SurfaceGenerationSnapshot final {
     std::vector<DataInputRef> inputs;
     SurfaceExecutionStats execution;
     std::shared_ptr<const std::vector<SurfaceInterfaceRecord>> interfaces;
+
+    // 对象目录与点目录分别读取；只复制当前页，不扫描完整点集。
+    std::optional<SurfaceObjectPage> GetObjectPage(std::uint64_t offset, std::size_t count) const {
+        if (!objects || !count || offset > objects->size()) return {};
+        SurfaceObjectPage page; page.generation = dataRevision; page.total = objects->size();
+        page.next = offset + std::min<std::uint64_t>({count,4096,page.total - offset});
+        page.objects.assign(objects->begin() + static_cast<std::size_t>(offset),
+            objects->begin() + static_cast<std::size_t>(page.next));
+        return page;
+    }
+    std::optional<SurfaceObjectRecord> GetObjectById(std::uint32_t id) const {
+        if (!objects) return {};
+        std::size_t first=0,last=objects->size();
+        while(first<last){const auto middle=first+(last-first)/2;const auto object=(*objects)[middle];
+            if(object.objectIndex<id)first=middle+1;else last=middle;}
+        if(first==objects->size())return {};
+        const auto object=(*objects)[first];return object.objectIndex==id?std::optional<SurfaceObjectRecord>(object):std::nullopt;
+    }
+    std::optional<SurfaceObjectPointPage> GetObjectPoints(std::uint32_t id, std::uint64_t offset, std::size_t count) const {
+        const auto object = GetObjectById(id);
+        if (!object || !points || !count || offset > object->pointCount
+            || object->firstPoint > points->size() || object->pointCount > points->size() - object->firstPoint) return {};
+        SurfaceObjectPointPage page; page.generation = dataRevision; page.objectIndex = id;
+        page.total = object->pointCount; page.next = offset + std::min<std::uint64_t>({count,65536,page.total - offset});
+        page.firstPoint = object->firstPoint + offset;
+        page.points.assign(points->begin() + static_cast<std::size_t>(page.firstPoint),
+            points->begin() + static_cast<std::size_t>(object->firstPoint + page.next));
+        return page;
+    }
+    std::optional<SurfaceObjectTrianglePage> GetObjectTriangles(std::uint32_t id,std::uint64_t offset,std::size_t count)const {
+        const auto object=GetObjectById(id);
+        if(!object||!triangleIndices||!triangleValidity||!count||triangleIndices->size()%3
+            ||triangleValidity->size()!=triangleIndices->size()/3||offset>object->triangleCount
+            ||object->firstTriangle>triangleValidity->size()
+            ||object->triangleCount>triangleValidity->size()-object->firstTriangle)return {};
+        SurfaceObjectTrianglePage page;page.generation=dataRevision;page.objectIndex=id;
+        page.total=object->triangleCount;page.next=offset+std::min<std::uint64_t>({count,65536,page.total-offset});
+        page.firstTriangle=object->firstTriangle+offset;page.triangles.reserve(static_cast<std::size_t>(page.next-offset));
+        for(auto triangle=page.firstTriangle;triangle<object->firstTriangle+page.next;++triangle)
+            page.triangles.push_back({{(*triangleIndices)[triangle*3],(*triangleIndices)[triangle*3+1],(*triangleIndices)[triangle*3+2]},(*triangleValidity)[triangle]});
+        return page;
+    }
 };
 
 struct SurfaceDeterminationConfig final {
     SurfaceDeterminationStartParams defaultStart;
+    // 仅选择工作缓存和文件后备；不是正式结果大小或任务准入上限。
     std::optional<std::size_t> maxWorkingBytes {};
     bool isOverlayVisible = true;
 };
@@ -94,14 +160,18 @@ struct SurfaceStopRequest final {
 struct SurfaceVisibilityRequest final { bool isVisible = true; };
 struct SurfaceClearRequest final {};
 struct SurfaceClearPreviewRequest final {};
-// 对象身份来自精确 generation；省略 objectIndex 只清除高亮，不重算或改变正式绑定。
 struct SurfaceObjectSelectionRequest final {
     DataRevisionRef generation;
+    // 0 是合法表面对象编号；缺省表示清除本代选择。
     std::optional<std::uint32_t> objectIndex;
+    bool isIsolated=false;
     HostViewTargets targetViews;
 };
+struct SurfaceObjectPickModeRequest final {bool isEnabled=false;};
+namespace SurfaceObjectBindingKeys {inline constexpr std::string_view Select="surface.object.select.pointer";}
 using SurfaceDeterminationRequest = std::variant<SurfaceStartRequest, SurfaceStopRequest,
-    SurfaceVisibilityRequest, SurfaceClearRequest, SurfaceClearPreviewRequest, SurfaceObjectSelectionRequest>;
+    SurfaceVisibilityRequest, SurfaceClearRequest, SurfaceClearPreviewRequest,
+    SurfaceObjectSelectionRequest,SurfaceObjectPickModeRequest>;
 
 enum class SurfaceAdmissionStatus : std::uint8_t {
     Accepted,
@@ -197,6 +267,13 @@ struct SurfaceDeterminationState final {
     std::uint32_t nonManifoldObjectCount = 0;
     bool isOverlayVisible = true;
     std::string errorMessage;
+    // 正式测定终态与当前视域几何的准备状态分开。
+    bool isDisplayComplete=true,hasDisplayFailure=false;
+    std::uint64_t displayRequestedBatches=0,displayLoadedBatches=0;
+    std::string displayMessage;
+    DataRevisionRef selectionGeneration;
+    std::optional<std::uint32_t> selectedObject;
+    bool isSelectionIsolated=false,isObjectPickingEnabled=false;
 };
 
 enum class SurfaceRestoreStatus : std::uint8_t

@@ -884,7 +884,7 @@ void TestSortedTopology(Checks &checks)
 {
     const auto verify=[&](std::initializer_list<std::array<std::uint32_t,3>> triangles,
                          std::uint64_t boundary,std::uint64_t nonManifold,bool oriented) {
-        std::vector<std::uint64_t> keys;
+        DataArray<std::uint64_t> keys;
         for(const auto &tri:triangles) for(unsigned e=0;e<3;++e)
             keys.push_back(GetSurfaceDirectedEdgeKey(tri[e],tri[(e+1)%3]));
         const auto result=GetSortedSurfaceEdgeTopology(keys,{});
@@ -901,7 +901,7 @@ void TestSortedTopology(Checks &checks)
     const auto reverse=GetSurfaceDirectedEdgeKey(0x7fffffffU,0);
     checks.Get((forward&~std::uint64_t(1))==(reverse&~std::uint64_t(1))&&forward!=reverse&&
                forward!=GetSurfaceDirectedEdgeKey(0,0x7ffffffeU),"31-bit boundary keys retain identity and direction");
-    std::vector<std::uint64_t> keys(10000);
+    DataArray<std::uint64_t> keys(10000);
     std::iota(keys.rbegin(),keys.rend(),0U);
     bool interrupted=false;
     try { GetSortedSurfaceEdgeTopology(keys,[]{throw std::runtime_error("sort cancellation probe");}); }

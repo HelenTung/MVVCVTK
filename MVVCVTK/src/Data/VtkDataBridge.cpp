@@ -1,6 +1,8 @@
 #include "Data/VtkDataBridge.h"
 
-#include "Data/Internal/VtkDataResourceLease.h"
+#include "Support/VtkDataResourceLease.h"
+#include "Support/BackedVtkArray.h"
+#include "Support/MappedArrayStorage.h"
 #include "Support/LabelMapBuilder.h"
 #include "Support/MeshVtkStorage.h"
 
