@@ -189,7 +189,7 @@ int GetCropCurveWidgetFailures()
         check(side.GetGeometry().radius==3&&side.GetGeometry().height==40&&side.GetGeometry().axisInInputModel==P{0,0,1}
             &&side.GetGeometry().centerInInputModel==P{0,0,0},"rotation handle placement does not change finite cylinder parameters");
         const auto savedLever=rotate;side.StartGesture();auto* rotationHandle=side.GetHandle(4);rotationHandle->InvokeEvent(vtkCommand::StartInteractionEvent);
-        const P turned{savedLever[0]*std::cos(.15)+savedLever[2]*std::sin(.15),savedLever[1],-savedLever[0]*std::sin(.15)+savedLever[2]*std::cos(.15)};
+        P turned{savedLever[0]*std::cos(.15)+savedLever[2]*std::sin(.15),savedLever[1],-savedLever[0]*std::sin(.15)+savedLever[2]*std::cos(.15)};
         rotationHandle->GetHandleRepresentation()->SetWorldPosition(turned.data());rotationHandle->InvokeEvent(vtkCommand::InteractionEvent);
         P during{};rotationHandle->GetHandleRepresentation()->GetWorldPosition(during.data());
         check(near(during,turned)&&!near(side.GetGeometry().axisInInputModel,P{0,0,1})&&side.GetGeometry().height==40&&side.GetGeometry().radius==3

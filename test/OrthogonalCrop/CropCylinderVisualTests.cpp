@@ -111,7 +111,7 @@ int GetCropCylinderVisualFailures() {
             const auto time=mapper->GetInput()->GetMTime();window->Render();check(mapper->GetInput()->GetMTime()==time,"unchanged slice render reuses contour data");
             FeatureOverlayState state;state.cursor={0,0,5};overlay->SetOverlayState(state);window->Render();bool zPlane=true;auto* data=mapper->GetInput();for(vtkIdType i=0;i<data->GetNumberOfPoints();++i){P p{};data->GetPoint(i,p.data());zPlane=zPlane&&std::abs(p[2]-5)<1e-9;}check(zPlane,"cursor update moves the analytic section onto the new slice plane");
         }
-        overlay.reset();check(renderer->GetViewProps()->GetNumberOfItems()==props,"overlay destruction detaches its props and camera observer");window->Render();
+        overlay->AttachRenderer(nullptr);overlay.reset();check(renderer->GetViewProps()->GetNumberOfItems()==props,"overlay destruction detaches its props and camera observer after an empty attach");window->Render();
     }
     {
         camera->SetParallelScale(20);CropCylinderVisual visual;visual.SetGeometry(op,identity);visual.AttachRenderer(renderer);visual.SetVisible(true);window->Render();

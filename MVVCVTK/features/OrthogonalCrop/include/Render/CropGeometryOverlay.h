@@ -74,6 +74,7 @@ public:
     }
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
+        if(!renderer)return;
         if(m_renderer.GetPointer()!=renderer.GetPointer())StopSectionObserver();
         FeatureOverlayBase::AttachRenderer(renderer);
         m_renderer=renderer;m_sectionDirty=true;UpdateCurveRenderer();UpdateCylinderSection();
