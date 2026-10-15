@@ -117,23 +117,40 @@ public:
     }
     std::size_t GetCount()const noexcept override{return m_count;}
     const std::shared_ptr<const File>& GetFile()const noexcept{return m_file;}
-    std::size_t GetResidentBytes()const noexcept override{return std::min(m_count,cacheValues)*sizeof(Value);}
+    std::size_t GetResidentBytes()const noexcept override{return std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);}
     void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
         if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh block is outside the array.");
         if(!count)return;
         const std::lock_guard<std::mutex> lock(m_mutex);
         if(count>cacheValues){m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;}
-        if(m_cache.capacity()<std::min(cacheValues,m_count))m_cache.reserve(std::min(cacheValues,m_count));
-        if(offset<m_start || offset-m_start>m_cache.size() || count>m_cache.size()-(offset-m_start)) {
-            m_start=offset;m_cache.resize(std::min(cacheValues,m_count-m_start));
-            m_file->Copy(m_start*sizeof(Value),m_cache.size()*sizeof(Value),m_cache.data());
+        while(count) {
+            const auto start=offset/cacheValues*cacheValues;
+            auto index=cacheWindows;
+            for(std::size_t i=0;i<cacheWindows;++i)if(m_cache[i].start==start){index=i;break;}
+            if(index==cacheWindows) {
+                index=m_next++%cacheWindows;
+                auto& window=m_cache[index];window.start=SIZE_MAX;
+                try {window.values.resize(std::min(cacheValues,m_count-start));}
+                catch(const std::bad_alloc&) {
+                    // 缓存是加速选项；目标缓冲已存在时，不因额外窗口分配失败拒绝读取。
+                    m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;
+                }
+                m_file->Copy(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
+                window.start=start;
+            }
+            const auto& window=m_cache[index];
+            const auto read=std::min(count,window.values.size()-(offset-start));
+            std::copy_n(window.values.begin()+(offset-start),read,target);
+            offset+=read;count-=read;target+=read;
         }
-        std::copy_n(m_cache.begin()+(offset-m_start),count,target);
     }
 private:
     static constexpr std::size_t cacheValues=std::max<std::size_t>(1,65536/sizeof(Value));
+    // 对齐的多个窗口保留三角形的远端顶点，避免单窗口在顶点之间反复读放大。
+    static constexpr std::size_t cacheWindows=8;
+    struct Window final {std::size_t start=SIZE_MAX;std::vector<Value> values;};
     std::shared_ptr<const File> m_file;std::size_t m_count=0;
-    mutable std::mutex m_mutex;mutable std::size_t m_start=SIZE_MAX;mutable std::vector<Value> m_cache;
+    mutable std::mutex m_mutex;mutable std::size_t m_next=0;mutable std::array<Window,cacheWindows> m_cache;
 };
 }
 

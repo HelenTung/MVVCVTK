@@ -31,7 +31,19 @@ bool GetMeshPagedStorageTests()
             const auto large=values.Finish();const auto chunk=large.GetChunk(0,SIZE_MAX);
             require(chunk.error==MeshReadError::None && chunk.values.size()*sizeof(double)<=imageChunkLimit
                 && !chunk.isComplete && chunk.nextOffset==chunk.values.size(),"large read exceeded the SPI block bound");
-            for(std::size_t i=0;i<large.size();i+=8191)require(large[i]==double(i)*.25,"page eviction changed stored geometry");}
+            for(std::size_t i=0;i<large.size();i+=8191)require(large[i]==double(i)*.25,"page eviction changed stored geometry");
+            const auto sparse=[&] {
+                for(std::size_t i=0;i<12000;++i)for(const auto base:{std::size_t(0),std::size_t(900000),std::size_t(1900000)}) {
+                    const auto index=base+i%1000;
+                    if(large[index]!=double(index)*.25)return false;
+                    if(!(i%257)) {const auto page=large.GetChunk(index,8193);
+                        if(page.error!=MeshReadError::None || page.values.size()!=8193)return false;
+                        for(std::size_t j=0;j<page.values.size();++j)if(page.values[j]!=double(index+j)*.25)return false;}
+                }
+                return true;
+            };
+            auto first=std::async(std::launch::async,sparse),second=std::async(std::launch::async,sparse);
+            require(first.get()&&second.get(),"distant concurrent point reads changed cached values or block boundaries");}
         {PagedMap<std::array<std::uint64_t,2>,std::uint64_t,PagedArrayHash<std::uint64_t,2>> lookup;
             for(std::uint64_t i=0;i<5000;++i)require(lookup.Insert({i,i+1},i*3)==i*3,"lookup insert changed point identity");
             for(std::uint64_t i=0;i<5000;++i)require(lookup.Find({i,i+1})==i*3 && lookup.Insert({i,i+1},9)==i*3,"lookup growth changed deduplication");
