@@ -1690,17 +1690,19 @@ void CheckSharedRoi(TestWindow& window)
     }
     Check(window.GetSession()->GetImageDescriptor()->dataRevision==source,"saving a region preserves the business input");
     // 不同工具形状切换后直接保存运算候选，不能把适用字段变化当作几何编辑。
+    {
     const std::array<double,3> center{box[3],box[7],box[11]};
     const auto radius=1.2*std::sqrt(box[0]*box[0]+box[4]*box[4]+box[8]*box[8]);
     GetComplete(window,Click(window,"Roi","Begin",{{"name","运算另一形状"},{"shape","Sphere"},{"centerMM",GetValues(center)},{"radius",radius}}),"Succeeded");
-    const auto other=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto other=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
     GetComplete(window,Click(window,"Roi","Union",{{"roi",GetRefText(ref)},{"operands",QJsonArray{other}},{"outputMode","CreateNew"}}),"PreviewReady");
-    const auto combined=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto combined=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded").value("result").toObject().value("roi");
     const auto combinedRoi=window.GetSession()->GetRoiDescriptor(GetRef(combined));
     Check(combinedRoi && combinedRoi->definition.nodes.back().kind==RoiNodeKind::Union,
         "direct business save preserves the cross-shape Boolean candidate instead of its primitive input");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",other}}),"Succeeded");
+    }
     Check(GetSelectedRoi(*window.GetSession(),GetRefText(ref),source)==ref,"selection freezes the exact saved region revision");
     for(const auto& use:std::vector<std::array<QString,3>>{{"Surface","GlobalAutomatic","analysisRoi"},
         {"Artifact","Diffusion","processingRoi"},{"Part","Paint","editRoi"},{"Alignment","SaveRecipe","inputRoi"}}) {
