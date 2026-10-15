@@ -484,6 +484,7 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/RoiService.cpp
     src/Data/RoiOperations.cpp
     src/Data/RoiArchive.cpp
+    src/Data/Support/LabelMapBuilder.h
     include/Geometry/RoiEvaluator.h
     src/Geometry/RoiVoxelSet.cpp
     src/Geometry/RoiEvaluator.cpp
