@@ -93,7 +93,8 @@ Acceptance ReadCase(const char *path, const char *fieldOutput = nullptr)
         std::size_t count = 0;
         std::string tag;
         input >> tag >> count;
-        Require(tag == "field-queries-1" && count > 0 && count <= 10000, "Invalid field queries.");
+        Require(bool(input) && tag == "field-queries-1" && count > 0 && count <= c.queries.max_size(),
+                "Invalid or unrepresentable field query count.");
         c.queries.resize(count);
         for (auto &q : c.queries)
         {
@@ -108,11 +109,14 @@ Acceptance ReadCase(const char *path, const char *fieldOutput = nullptr)
     }
     std::string extra;
     Require(!(input >> extra), "Unexpected acceptance fields.");
+    const auto maximum = std::min({c.volume.voxels.max_size(),
+        static_cast<std::size_t>(std::numeric_limits<std::streamoff>::max()) / sizeof(float),
+        static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(float)});
     std::size_t count = 1;
     for (auto d : c.volume.geometry.dimensions)
     {
-        Require(d > 0 && count <= std::size_t(512) * 1024 * 1024 / static_cast<std::size_t>(d),
-                "Acceptance volume budget exceeded.");
+        Require(d > 0 && count <= maximum / static_cast<std::size_t>(d),
+                "Acceptance volume shape is not representable.");
         count *= static_cast<std::size_t>(d);
     }
     c.volume.voxels.resize(count);
@@ -285,9 +289,14 @@ void TestSession(Acceptance c, bool useRoi = false)
     Require(!session.Start(), "HostDriven must reject the native event-loop entry.");
     const auto wait = [&](const auto &ready)
     {
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(std::max<std::size_t>(90000U,
-                c.limits.deadlineMilliseconds.value_or(0) + 30000U));
+        const auto start = std::chrono::steady_clock::now();
+        auto deadline = std::chrono::steady_clock::time_point::max();
+        if (c.limits.deadlineMilliseconds) {
+            const auto available = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - start).count();
+            const auto requested = *c.limits.deadlineMilliseconds;
+            if (available > 30000 && requested < static_cast<std::size_t>(available - 30000))
+                deadline = start + std::chrono::milliseconds(requested + 30000);
+        }
         while (!ready() && std::chrono::steady_clock::now() < deadline)
         {
             session.SendUpdates();
