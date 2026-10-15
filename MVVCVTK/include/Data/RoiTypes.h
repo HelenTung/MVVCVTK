@@ -18,7 +18,7 @@
 
 // 节点索引的表示上限；不按历史长度或 ROI 数量另设业务门槛。
 inline constexpr std::size_t roiNodeLimit = std::numeric_limits<std::uint32_t>::max();
-inline constexpr std::uint32_t roiSchemaVersion = 3;
+inline constexpr std::uint32_t roiSchemaVersion = 4;
 inline constexpr std::size_t roiChunkBytes = 8ULL * 1024 * 1024;
 inline constexpr std::array<double, 16> roiIdentityMatrix = {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -44,18 +44,28 @@ struct RoiVoxelRun final {
 // 正式载荷保留行区间；拆分结果共享一次标记的数据。
 class RoiVoxelSet final {
 public:
-    explicit RoiVoxelSet(std::vector<RoiVoxel> voxels);
     explicit RoiVoxelSet(std::vector<RoiVoxelRun> runs);
+    // 只读借用，引用有效期不超过本载荷的生命期。
     const std::vector<RoiVoxelRun>& GetRuns() const noexcept;
     std::size_t GetVoxelCount() const noexcept;
-    // 分块按 (Y,Z,X) 顺序展开；旧接口仍按绝对 (X,Y,Z) 排序并惰性保留完整向量。
+    // 仅展开明确请求的块，按 (Y,Z,X) 排序；不在对象中缓存展开结果。
     std::vector<RoiVoxel> GetVoxelChunk(std::size_t offset, std::size_t count) const;
-    const std::vector<RoiVoxel>& GetVoxels() const;
     std::uint32_t GetLabel(const std::array<int,3>& index) const noexcept;
     std::array<double,6> GetIndexBounds(const std::vector<std::uint64_t>& labels) const noexcept;
 private:
     class Impl;
     std::shared_ptr<Impl> m_impl;
+};
+// 有序区间直接追加；外部逐体素输入可无序分块接入并即时合并，不保留完整体素数组。
+// 一次构建只使用一种输入方式；出错后不可发布，Finish 后不可继续使用。
+class RoiVoxelBuilder final {
+public:
+    RoiVoxelBuilder();~RoiVoxelBuilder();
+    void AppendRuns(const std::vector<RoiVoxelRun>& runs);
+    void AppendVoxels(const std::vector<RoiVoxel>& voxels);
+    std::shared_ptr<const RoiVoxelSet> Finish();
+private:
+    class Impl;std::unique_ptr<Impl> m_impl;
 };
 // Closed 保持已有 ROI 语义；CropV1 保留裁切 Box 容差和 Plane 严格正侧。
 enum class RoiBoundaryPolicy : std::uint8_t { Closed, CropV1 };
@@ -234,17 +244,15 @@ struct RoiSourceDescriptor final {
 struct RoiArchiveMask final {
     ImageDescriptor grid;
     std::vector<std::uint32_t> nodeIndices;
-    std::vector<std::uint64_t> values;
     std::optional<std::uint32_t> sharedPayload;
 };
 
 struct RoiArchiveVoxels final {
     std::vector<std::uint32_t> nodeIndices;
-    std::vector<RoiVoxel> values;
     std::optional<std::uint32_t> sharedPayload;
 };
 
-struct RoiArchive final {
+struct RoiArchiveItem final {
     std::uint32_t schemaVersion = roiSchemaVersion;
     std::string sourceKey;
     RoiSourceDescriptor source;
@@ -257,26 +265,14 @@ struct RoiArchive final {
     std::vector<RoiArchiveVoxels> voxels;
 };
 
-struct RoiArchiveResult final {
-    RoiError error = RoiError::Unavailable;
-    std::size_t requiredBytes = 0;
-    std::optional<RoiArchive> archive;
-    std::string message;
-};
-
 struct RoiArchiveSelection final {DataRevisionRef roi;std::string sourceKey;};
 struct RoiSourceMapping final {std::string sourceKey;DataRevisionRef source;};
 // 多对象文件只保存一次共享标签/稀疏载荷，节点通过包内索引引用。
-struct RoiArchiveBundle final {
+struct RoiArchiveDescriptor final {
     std::uint32_t schemaVersion=roiSchemaVersion;
-    std::vector<RoiArchive> rois;
+    std::vector<RoiArchiveItem> rois;
     std::vector<RoiArchiveMask> masks;
     std::vector<RoiArchiveVoxels> voxels;
-};
-struct RoiArchiveBundleResult final {
-    RoiError error=RoiError::Unavailable;
-    std::optional<RoiArchiveBundle> archive;
-    std::size_t requiredBytes=0;
 };
 struct RoiArchiveRestoreResult final {
     RoiError error=RoiError::Unavailable;
@@ -294,22 +290,32 @@ struct RoiArchiveMaskChunk final {
     std::size_t nextOffset=0;bool isComplete=false;
     std::vector<std::uint64_t> values;
 };
-struct RoiArchiveVoxelChunk final {
+struct RoiArchiveVoxelPayloadChunk final {
     RoiError error=RoiError::Unavailable;
     std::size_t nextOffset=0;bool isComplete=false;
-    std::vector<RoiVoxel> values;
+    // v4 只允许 runs；v3 只允许 legacyVoxels。元素偏移按所选版本的元素计数。
+    std::vector<RoiVoxelRun> runs;
+    std::vector<RoiVoxel> legacyVoxels;
 };
 // 元数据先返回，共享载荷逐批读取；只读实例可以跨 worker 持有。
 class RoiArchiveReader {
 public:
     virtual ~RoiArchiveReader() noexcept=default;
-    virtual const RoiArchiveBundle& GetMetadata()const noexcept=0;
+    virtual const RoiArchiveDescriptor& GetMetadata()const noexcept=0;
     virtual std::optional<std::size_t> GetMaskCount(std::size_t payloadIndex)const noexcept=0;
-    virtual std::optional<std::size_t> GetVoxelCount(std::size_t payloadIndex)const noexcept=0;
+    virtual std::optional<std::size_t> GetVoxelPayloadCount(std::size_t payloadIndex)const noexcept=0;
     virtual RoiArchiveMaskChunk GetMaskChunk(const RoiArchiveChunkRequest&)const=0;
-    virtual RoiArchiveVoxelChunk GetVoxelChunk(const RoiArchiveChunkRequest&)const=0;
+    virtual RoiArchiveVoxelPayloadChunk GetVoxelPayloadChunk(const RoiArchiveChunkRequest&)const=0;
 };
 struct RoiArchiveReadResult final {
     RoiError error=RoiError::Unavailable;
     std::shared_ptr<const RoiArchiveReader> reader;
+};
+
+// 所有恢复候选完整验证后一次发布；未指定目录版本时仍检查加载期间的目录变更。
+struct RoiArchiveRestoreOptions final {
+    std::optional<DataBindingRevision> expectedCatalogRevision;
+    // 返回 true 或抛异常均视为取消；只丢弃未提交候选。
+    std::function<bool()> getCancelled;
+    std::size_t chunkElements=65536;
 };

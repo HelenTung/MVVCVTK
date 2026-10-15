@@ -1,3 +1,4 @@
+#include "../DataGraph/RoiArchiveTestReader.h"
 // 测试用途：真实公共 ROI 读取驱动大父三角形内的局部选择，核对面积、来源与无盖面语义。
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
@@ -54,8 +55,8 @@ void MeshCrop(){Fixture f;const DataRevisionRef source{f.store.CreateDataEntityI
     DataTransaction tx;tx.outputs.push_back({source.entityId,0,DataTypes::surfaceMesh,{},payload});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"mesh source failed");
     RoiPrimitive p;p.shape=RoiShape::Sphere;p.origin={2,2,2};p.radius=.2;RoiRequest request;request.definition={source,{{RoiNodeKind::Primitive,p}}};request.metadata.name="mesh-sphere";
     const auto created=f.service.SetRoi(request);Require(created.roi.has_value(),"mesh ROI failed");
-    const auto archive=RoiService::GetArchive(f.store.GetDataGraph(),created.roi->revision,"mesh");Require(archive.archive && archive.archive->source.meshGeometryDigest=="77d72606163286d4011ae3be991abe3aba30542be67fd5d92ea50c7bbadf7455","mesh archive geometry SHA-256 is incorrect");
-    auto altered=payload->GetVertices();altered[0]=1;const DataRevisionRef other{f.store.CreateDataEntityId(),1};tx={};tx.outputs.push_back({other.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(altered,payload->GetTriangles())});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"changed mesh source failed");const auto beforeRestore=f.store.GetDataGraph().commitId;Require(f.service.LoadArchive(*archive.archive,"mesh",other,{}).error==RoiError::SourceMismatch && f.store.GetDataGraph().commitId==beforeRestore,"same bounds/counts hid different mesh geometry at restore");
+    const auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{created.roi->revision,"mesh"}});Require(archive.reader && archive.reader->GetMetadata().rois[0].source.meshGeometryDigest=="77d72606163286d4011ae3be991abe3aba30542be67fd5d92ea50c7bbadf7455","mesh archive geometry SHA-256 is incorrect");
+    auto altered=payload->GetVertices();altered[0]=1;const DataRevisionRef other{f.store.CreateDataEntityId(),1};tx={};tx.outputs.push_back({other.entityId,0,DataTypes::surfaceMesh,{},std::make_shared<const SurfaceMeshPayload>(altered,payload->GetTriangles())});Require(f.store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"changed mesh source failed");const auto beforeRestore=f.store.GetDataGraph().commitId;Require(f.service.LoadArchiveReader(*archive.reader,{{"mesh",other}}).error==RoiError::SourceMismatch && f.store.GetDataGraph().commitId==beforeRestore,"same bounds/counts hid different mesh geometry at restore");
     const auto graph=f.store.GetDataGraph();CropInputSnapshot input;input.graph=graph;input.data=f.store.GetData(graph,source);
     const auto prepared=VtkPreparedDataView::BuildDataView(payload);input.mesh=std::make_shared<const VtkSurfaceMeshView>(VtkSurfaceMeshView{input.data,prepared->mesh->mesh});input.inputModelBounds={.5,6,.5,6,2,2};
     const auto roi=RoiEvaluator::GetRoi(graph,created.roi->revision,source).roi;

@@ -1,3 +1,4 @@
+#include "RoiArchiveTestReader.h"
 #include "Data/DataGraphStore.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
@@ -188,26 +189,27 @@ bool GetArchiveValid()
     RoiRequest create; create.definition={f.source,{node}}; create.metadata.name="persisted";
     RoiService service(f.store); const auto first=service.SetRoi(create);
     if (!Check(first.error==RoiError::None && first.roi,"archive fixture failed")) return false;
-    const auto exported=RoiService::GetArchive(f.store.GetDataGraph(),first.roi->revision,"sample-key");
-    if (!Check(exported.error==RoiError::None && exported.archive && !exported.archive->nodes[0].primitive.mask
-        && exported.archive->masks.size()==1,"archive retained runtime mask identity")) return false;
-    Fixture target; DataTransaction source; source.outputs={target.GetImage()}; target.store.SetDataCommit(source);
-    RoiService restored(target.store);
-    const auto before=target.store.GetDataGraph().commitId;
-    if (!Check(restored.LoadArchive(*exported.archive,"wrong-key",target.source,0).error==RoiError::SourceUnresolved
-        && target.store.GetDataGraph().commitId==before,"unresolved source restore wrote data")) return false;
-    auto wrong=*exported.archive; wrong.source.image->origin[0]+=1;
-    if (!Check(restored.LoadArchive(wrong,"sample-key",target.source,0).error==RoiError::SourceMismatch
-        && target.store.GetDataGraph().commitId==before,"wrong physical source accepted")) return false;
-    wrong=*exported.archive; wrong.masks[0].nodeIndices.push_back(0);
-    if (!Check(restored.LoadArchive(wrong,"sample-key",target.source,0).error==RoiError::InvalidRequest
-        && target.store.GetDataGraph().commitId==before,"duplicate mask mapping partially restored")) return false;
-    const auto loaded=restored.LoadArchive(*exported.archive,"sample-key",target.source,0);
-    if (!Check(loaded.error==RoiError::None && loaded.roi && loaded.roi->definition.source==target.source
-        && target.store.GetDataGraph().commitId==before+1,"restore was not one atomic transaction")) return false;
-    const auto roi=RoiEvaluator::GetRoi(target.store.GetDataGraph(),loaded.roi->revision,target.source);
-    return Check(roi.roi && roi.roi->GetContains({-5,9,44})
-        && loaded.roi->definition.nodes[0].primitive.mask!=mask,"restored ROI lost selection or reused runtime IDs");
+    const auto exported=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{first.roi->revision,"sample-key"}});
+    if(!Check(exported.error==RoiError::None&&exported.reader&&!exported.reader->GetMetadata().rois[0].nodes[0].primitive.mask
+        &&exported.reader->GetMetadata().masks.size()==1,"archive retained runtime mask identity"))return false;
+    Fixture target;DataTransaction source;source.outputs={target.GetImage()};target.store.SetDataCommit(source);
+    RoiService restored(target.store);const auto before=target.store.GetDataGraph().commitId;
+    if(!Check(restored.LoadArchiveReader(*exported.reader,{{"wrong-key",target.source}}).error==RoiError::SourceUnresolved
+        &&target.store.GetDataGraph().commitId==before,"unresolved source restore wrote data"))return false;
+    RoiArchiveTestReader wrong(exported.reader);wrong.metadata.rois[0].source.image->origin[0]+=1;
+    if(!Check(restored.LoadArchiveReader(wrong,{{"sample-key",target.source}}).error==RoiError::SourceMismatch
+        &&target.store.GetDataGraph().commitId==before,"wrong physical source accepted"))return false;
+    wrong.metadata=exported.reader->GetMetadata();wrong.metadata.rois[0].masks[0].nodeIndices.push_back(0);
+    if(!Check(restored.LoadArchiveReader(wrong,{{"sample-key",target.source}}).error==RoiError::InvalidRequest
+        &&target.store.GetDataGraph().commitId==before,"duplicate mask mapping partially restored"))return false;
+    const auto loaded=restored.LoadArchiveReader(*exported.reader,{{"sample-key",target.source}},{0});
+    if(!Check(loaded.error==RoiError::None&&loaded.rois.size()==1&&loaded.rois[0].definition.source==target.source
+        &&target.store.GetDataGraph().commitId==before+1,"restore was not one atomic transaction"))return false;
+    if(!Check(restored.LoadArchiveReader(*exported.reader,{{"sample-key",target.source}},{0}).error==RoiError::RevisionConflict
+        &&target.store.GetDataGraph().commitId==before+1,"stale caller catalog version accepted"))return false;
+    const auto roi=RoiEvaluator::GetRoi(target.store.GetDataGraph(),loaded.rois[0].revision,target.source);
+    return Check(roi.roi&&roi.roi->GetContains({-5,9,44})
+        &&loaded.rois[0].definition.nodes[0].primitive.mask!=mask,"restored ROI lost selection or reused runtime IDs");
 }
 
 bool GetArchiveNoBudgetValid()
@@ -222,8 +224,8 @@ bool GetArchiveNoBudgetValid()
     const auto made=service.SetRoi(request);
     if (!Check(made.roi.has_value(),"large identity ROI fixture failed")) return false;
     const auto before=f.store.GetDataGraph().commitId;
-    const auto archive=RoiService::GetArchive(f.store.GetDataGraph(),made.roi->revision,"key");
-    return Check(archive.error==RoiError::None && archive.archive && archive.archive->source.image->metadata.identity.datasetId==metadata.identity.datasetId
+    const auto archive=RoiService::GetArchiveReader(f.store.GetDataGraph(),{{made.roi->revision,"key"}});
+    return Check(archive.error==RoiError::None && archive.reader && archive.reader->GetMetadata().rois[0].source.image->metadata.identity.datasetId==metadata.identity.datasetId
         && f.store.GetDataGraph().commitId==before,"large source descriptor was rejected by an artificial budget");
 }
 

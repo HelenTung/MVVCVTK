@@ -12,9 +12,7 @@ public:
     static bool ReleaseTransientScopes(AbstractDataManager& data,
         std::vector<DataEntityId>& releasingScopes);
     static RoiArchiveReadResult GetArchiveReader(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
-    RoiArchiveRestoreResult LoadArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&);
-    static RoiArchiveBundleResult GetArchiveBundle(const DataGraphSnapshot&,const std::vector<RoiArchiveSelection>&);
-    RoiArchiveRestoreResult LoadArchiveBundle(const RoiArchiveBundle&,const std::vector<RoiSourceMapping>&);
+    RoiArchiveRestoreResult LoadArchiveReader(const RoiArchiveReader&,const std::vector<RoiSourceMapping>&,const RoiArchiveRestoreOptions& options = {});
     explicit RoiService(DataGraphStore& store) noexcept : m_store(store) {}
     RoiResult SetRoi(const RoiRequest& request);
     static RoiOperationResult GetOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request);
@@ -24,10 +22,6 @@ public:
         const DataGraphSnapshot& graph, bool includeArchived = false);
     static std::optional<RoiDescriptor> GetDescriptor(
         const DataGraphSnapshot& graph, const DataRevisionRef& ref);
-    static RoiArchiveResult GetArchive(const DataGraphSnapshot& graph,
-        const DataRevisionRef& ref, const std::string& sourceKey);
-    RoiResult LoadArchive(const RoiArchive& archive, const std::string& sourceKey,
-        const DataRevisionRef& sourceRef, DataBindingRevision expectedCatalogRevision);
 private:
     static bool GetInputTransient(const DataSnapshot& input) noexcept;
     RoiResult SetRoiCommit(const RoiRequest& request, std::vector<DataRevisionDraft> masks);
