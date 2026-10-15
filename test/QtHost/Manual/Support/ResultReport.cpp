@@ -514,7 +514,7 @@ void ResultReport::ContinueGeneration()
                 const bool sourceHint=m_sourceFilter.isEmpty()||record["source"].toObject()["dataRevision"].toString()==m_sourceFilter
                     ||record["result"].toObject()["source"].toString()==m_sourceFilter;
                 if((!resultHint||!sourceHint)&&record["module"].toString()!="Alignment")continue;
-                m_buildingOperation=it.key();m_buildingViewRevision=m_viewRevision;m_buildingIndex=0;m_generationProgress=0;
+                m_buildingOperation=it.key();m_buildingViewRevision=m_viewRevision;m_buildingIndex=0;m_buildingPreviewRow=0;m_generationProgress=0;
                 setProperty("reportGenerationProgress",qulonglong(0));setProperty("reportGenerationError",QString());
                 const auto known=GetReportIds()+m_removedReports;
                 if(auto prepare=onPrepareReports?onPrepareReports(record,known):ReportPreparation{}) {
@@ -542,7 +542,12 @@ void ResultReport::ContinueGeneration()
             }
             setProperty("reportGenerationPhase","rows");
             const auto table=candidate.table;
-            if(!table||table->ContinueBuild()){if(table)table->PrepareRead();++m_buildingIndex;}
+            if(table&&!candidate.materializeBeforePublish&&!table->GetIsComplete()
+                &&m_buildingPreviewRow<std::min<ReportRowId>(200,table->GetCount())) {
+                // 只检查首个可见页，提前报告读取失败；不为准入扫描完整原生表。
+                (void)table->Read(m_buildingPreviewRow++);continue;
+            }
+            if(!table||!candidate.materializeBeforePublish||table->ContinueBuild()){if(table)table->PrepareRead();++m_buildingIndex;m_buildingPreviewRow=0;}
         }
         setProperty("reportGenerationProgress",m_generationProgress);
         if(m_buildingIndex<m_buildingReports.size()){m_buildTimer->start(0);return;}

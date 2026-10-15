@@ -67,6 +67,7 @@ ReportDocument CreateInspectionReport(const QJsonObject& record,const Inspection
             doc.columns={{"item_id",{},{},false},{"name",{},{},false},{"nominal_"+unit,quantity,unit,true},
                 {"measured_"+unit,quantity,unit,true},{"deviation_"+unit,quantity+"相对名义偏差",unit,true},{"verdict",{},{},false},{"reason",{},{},false}};
             doc.identityColumn=0;doc.valueColumn=3;doc.identityStable=true;doc.table=std::make_shared<ReportTable>();
+            doc.materializeBeforePublish=true;
             const auto rows=std::make_shared<const MeshReadArray<InspectionRows::Row>>(it.value()->GetReadSnapshot());doc.table->SetRows(rows->size(),[plan,report,rows](ReportRowId index) {
                 const auto& mapping=(*rows)[index];const auto& item=report->items[mapping.first];const auto& spec=plan->items[mapping.second];
                 return QStringList{QString::fromStdString(item.id),QString::fromStdString(spec.name),Number(item.nominal),Number(item.measured),Number(item.deviation),

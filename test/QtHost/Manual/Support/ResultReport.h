@@ -77,6 +77,7 @@ private:
     std::uint64_t m_viewRevision = 0;
     std::uint64_t m_buildingViewRevision = 0;
     int m_buildingIndex = 0;
+    ReportRowId m_buildingPreviewRow = 0;
     qulonglong m_generationProgress = 0;
     QString m_buildingOperation;
     QVector<ReportDocument> m_buildingReports;

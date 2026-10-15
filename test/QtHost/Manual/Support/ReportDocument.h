@@ -53,6 +53,8 @@ struct ReportDocument final {
     QStringList validValues{"0","Valid"};
     // 所属线程每次只准备一个工作单元；完成后替换为实际分组，取消直接释放候选。
     std::function<bool(QVector<ReportDocument>&)> prepareReports;
+    // 分组候选需要释放原生计划时，先完成文件物化再发布；普通原生表仍可直接分页。
+    bool materializeBeforePublish = false;
 };
 using ReportCheckpoint = std::function<void()>;
 using ReportPreparation = std::function<QVector<ReportDocument>(const ReportCheckpoint&)>;
