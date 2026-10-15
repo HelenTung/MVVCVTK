@@ -88,6 +88,9 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 if (!owner) return;
                 if(result.status==SurfaceResultStatus::Succeeded && purpose==SurfaceTaskPurpose::Determine)*requestedParameters=params;
                 auto summary = GetSurface(feature,*formalStatistics);
+                // 取消后可保留旧正式快照，完成记录仍须属于本次回调请求。
+                summary["requestId"] = QString::number(result.requestId);
+                summary["failureReason"] = static_cast<int>(result.failureReason);
                 summary["status"] = static_cast<int>(result.status);
                 summary["message"] = QString::fromStdString(result.message);
                 owner->SetComplete(id, result.status == SurfaceResultStatus::Succeeded ? "Succeeded"

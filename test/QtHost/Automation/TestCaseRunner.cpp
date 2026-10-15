@@ -2596,9 +2596,18 @@ void StartSequence(TestWindow& window, const QString& path)
             auto* module = window.GetModule(GetText(step, "module"));
             if (delay < 1 || delay >= timeout || std::trunc(delay) != delay || !module->onStop)
                 throw std::invalid_argument("取消审计需要有效的取消入口和小于等待时限的延迟");
+            QString exactTarget;
+            if(step["cancelExactRequestId"].toBool()) {
+                Check(module->GetName()=="Surface","exact cancellation targets the supported surface request family");
+                exactTarget=window.GetRecords().GetRecord(id)["admission"].toObject()["requestId"].toString();
+                Check(GetId(QJsonValue(exactTarget))!=0,"exact cancellation freezes the admitted request ID");
+            }
             cancellation.setSingleShot(true);
-            QObject::connect(&cancellation, &QTimer::timeout, &window, [&, module] {
-                if (!window.GetRecords().GetRecord(id)["isTerminal"].toBool()) module->onStop();
+            QObject::connect(&cancellation, &QTimer::timeout, &window, [&, module,exactTarget] {
+                if (!window.GetRecords().GetRecord(id)["isTerminal"].toBool()) {
+                    if(exactTarget.isEmpty())module->onStop();
+                    else module->SendAction("Stop",{{"targetRequestId",exactTarget}});
+                }
             });
             cancellation.start(static_cast<int>(delay));
         }
