@@ -1,6 +1,6 @@
 # Qt 上位机 API 接入文档
 
-本文按“建立四视图 → 加载真实文件 → 调用业务 → 读取结果 → 关闭”接入。代码使用 `MVVCVTK/API/` 入口，适用于 Windows x64、MSVC v145、Qt 5.14.2 Widgets；SDK 使用 C++17，Debug 使用 `/MDd`，Release 使用 `/MD`。
+本文按“建立四视图 → 加载真实文件 → 调用业务 → 读取结果 → 关闭”接入。代码使用 `MVVCVTK/API/` 入口，适用于 Windows x64、MSVC v145、Qt 5.14.2 Widgets；SDK 使用 C++17，Debug 使用 `/MDd`，Release 使用 `/MD`。Release 运行 CPU 需支持 AVX2。
 
 ## 1. 先建立这些对象
 
