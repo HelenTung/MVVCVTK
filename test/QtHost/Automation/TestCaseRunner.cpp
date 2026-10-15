@@ -241,7 +241,10 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         return id;
     }
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
-    // 执行动作不隐式选择目录首项；重新选择旧 ROI 会把其几何回填到运算候选表单。
+    // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
+    if(module!="Roi") {
+        auto* tree=panel->GetCatalogTree();ClickNode(tree,tree->topLevelItem(0));
+    }
     panel->SetParameterPatch(action, patch);
     // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
     const bool ready = Wait([&] {
