@@ -35,6 +35,11 @@
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QInputDialog>
+#include <QHideEvent>
+#include <future>
+#include <atomic>
+#include <chrono>
 #include <queue>
 #include <cmath>
 #include <functional>
@@ -42,6 +47,7 @@
 #include <algorithm>
 namespace Manual {
 namespace {
+constexpr int reportTaskTimeoutMs=30*60*1000;
 QString CsvCell(QString value)
 {
     value.replace('"', "\"\"");
@@ -54,6 +60,26 @@ bool IsMatrix(const QString& key)
 bool MatchesResult(const ReportDocument& doc,const QString& result)
 {
     return result.isEmpty() || doc.result==result || doc.relatedResults.contains(result);
+}
+bool MatchesSource(const ReportDocument& doc,const QString& source)
+{
+    return source.isEmpty() || doc.source==source || doc.relatedSources.contains(source);
+}
+bool MatchesModule(const ReportDocument& doc,const QString& module)
+{
+    return module.isEmpty() || doc.module==module || doc.relatedModules.contains(module);
+}
+QStringList GetPendingResults(const QJsonObject& record)
+{
+    const auto module=record["module"].toString();const auto result=record["result"].toObject();QStringList keys,refs;
+    // 这里只列报告生产者的输出；mesh/source 等字段在壁厚、计量记录中是输入。
+    if(module=="Wall")keys=QStringList{"result"};
+    else if(module=="Surface")keys=QStringList{"mesh","generation"};
+    else if(module=="Gap")keys=QStringList{"resultSet","voidTable"};
+    else if(module=="Artifact")keys=QStringList{"qualityReport","correctedVolume"};
+    else if(module=="Alignment")keys=QStringList{"inspection","deviation","voxelVolume"};
+    for(const auto& key:keys){const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0"))refs.append(ref);}
+    return refs;
 }
 }
 QVector<ReportRow> GetReportRows(const QJsonObject& record)
@@ -129,7 +155,19 @@ public:
     QVector<int> rows;
     std::priority_queue<Key,std::vector<Key>,Compare> keys;
 };
-ResultReport::~ResultReport() = default;
+class ResultReport::Task final {
+public:
+    std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+    QVector<ReportDocument> inputs;
+    std::uint64_t viewRevision=0;
+    std::future<ReportDocument> future;
+};
+ResultReport::~ResultReport()
+{
+    CancelTasks();
+    // 取消点覆盖解析行和空间候选；析构等待唯一任务退出，禁止脱离线程访问窗口。
+    if(m_task && m_task->future.valid())m_task->future.wait();
+}
 ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
 {
     setObjectName("resultReport");
@@ -139,10 +177,35 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* baseline = new QPushButton("设为基准 A",this); baseline->setObjectName("setReportBaseline"); toolbar->addWidget(baseline);
     auto* compare = new QPushButton("与基准比较…",this); compare->setObjectName("compareReports"); toolbar->addWidget(compare);
     m_copy = new QPushButton("复制选中行",this); m_copy->setObjectName("copyReportCsv"); toolbar->addWidget(m_copy);
-    m_export = new QPushButton("导出完整报告…",this); m_export->setObjectName("exportReportCsv"); toolbar->addWidget(m_export);
+    m_export = new QPushButton("导出完整明细…",this); m_export->setObjectName("exportReportCsv"); toolbar->addWidget(m_export);
     m_exportFiltered = new QPushButton("导出筛选结果…",this);m_exportFiltered->setObjectName("exportFilteredReport");toolbar->addWidget(m_exportFiltered);
     m_locate=new QPushButton("定位到视图",this);m_locate->setObjectName("locateReportRow");m_locate->hide();toolbar->addWidget(m_locate);
     layout->addLayout(toolbar);
+    auto* reportActions=new QHBoxLayout;
+    auto* associate=new QPushButton("关联到数据…",this);associate->setObjectName("associateReportSource");reportActions->addWidget(associate);
+    auto* remove=new QPushButton("移除报告",this);remove->setObjectName("removeReport");reportActions->addWidget(remove);
+    auto* saveConditions=new QPushButton("保存汇总与条件…",this);saveConditions->setObjectName("saveReportConditions");reportActions->addWidget(saveConditions);
+    m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");reportActions->addWidget(m_cancelTask);
+    m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");reportActions->addWidget(m_taskStatus,1);layout->addLayout(reportActions);
+    m_buildTimer=new QTimer(this);m_buildTimer->setSingleShot(true);
+    connect(m_buildTimer,&QTimer::timeout,this,[this]{ContinueGeneration();});
+    m_taskTimer=new QTimer(this);m_taskTimer->setInterval(10);
+    connect(m_taskTimer,&QTimer::timeout,this,[this]{ContinueTask();});
+    connect(m_cancelTask,&QPushButton::clicked,this,[this]{CancelTasks();m_taskStatus->setText("报告任务已取消；未加入部分结果，可重新打开报告重试。");});
+    m_cancelTask->setEnabled(false);
+    connect(remove,&QPushButton::clicked,this,[this]{RemoveReport(m_selected.id);});
+    connect(associate,&QPushButton::clicked,this,[this]{
+        if(m_selected.category!="导入报告" || !getSources)return;
+        const auto sources=getSources();QStringList labels{"独立报告（解除关联）"};QStringList refs{QString()};
+        for(auto it=sources.cbegin();it!=sources.cend();++it){labels.append(it.value()+" · "+it.key());refs.append(it.key());}
+        bool accepted=false;const auto label=QInputDialog::getItem(this,"仅设置报告归属，不改变工作输入","数据修订",labels,0,false,&accepted);
+        if(accepted)SetReportSource(m_selected.id,refs.value(labels.indexOf(label)));
+    });
+    connect(saveConditions,&QPushButton::clicked,this,[this]{
+        if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,"保存业务汇总与计算条件",{},"文本 (*.txt)");if(path.isEmpty())return;
+        QSaveFile file(path);const auto bytes=(m_selected.title+"\n"+m_selected.description+"\n"+QString::fromUtf8(QJsonDocument(m_selected.conditions).toJson(QJsonDocument::Indented))).toUtf8();
+        if(!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit())QMessageBox::warning(this,"保存失败","无法保存汇总与计算条件");
+    });
     auto* choices = new QHBoxLayout;
     auto* all = new QPushButton("全部报告",this); all->setObjectName("showAllReports"); choices->addWidget(all);
     m_follow = new QCheckBox("跟随最新结果",this); m_follow->setObjectName("followLatestReport"); choices->addWidget(m_follow);
@@ -198,8 +261,10 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         QApplication::clipboard()->setText(lines.join("\r\n"));
     });
     const auto save=[this](bool filtered){
-        if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,filtered?"导出全部筛选行":"导出完整报告",{},"CSV (*.csv)");if(path.isEmpty())return;
-        try{ExportReport(path,m_selected,filtered && !m_allRows?&m_rows:nullptr);}catch(const std::exception& e){QMessageBox::warning(this,"导出失败",QString::fromUtf8(e.what()));}
+        if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,filtered?"导出全部筛选行":"导出完整明细",{},"CSV (*.csv)");if(path.isEmpty())return;
+        const auto doc=m_selected;doc.table->PrepareRead();const bool selected=filtered && !m_allRows;const auto rows=selected?m_rows:QVector<int>{};
+        try{StartTask([doc,path,selected,rows](const ReportCheckpoint& checkpoint){ExportReport(path,doc,selected?&rows:nullptr,checkpoint);return ReportDocument{};},{doc});}
+        catch(const std::exception& e){QMessageBox::warning(this,"导出失败",QString::fromUtf8(e.what()));}
     };
     connect(m_export,&QPushButton::clicked,this,[save]{save(false);});
     connect(m_exportFiltered,&QPushButton::clicked,this,[save]{save(true);});
@@ -223,7 +288,8 @@ void ResultReport::SetRecord(const QJsonObject& record)
     AddReport(std::move(doc));
 }
 QJsonObject ResultReport::GetSelectedRecord() const { return m_records.value(m_selected.id.startsWith("operation:")?m_selected.id.mid(10):QString()); }
-void ResultReport::showEvent(QShowEvent* event) { QWidget::showEvent(event); Refresh(); }
+void ResultReport::showEvent(QShowEvent* event) { QWidget::showEvent(event); if(!m_rowsReady && m_selected.table)RefreshRows();else Refresh(); if(!m_pendingReports.isEmpty())m_buildTimer->start(0); }
+void ResultReport::hideEvent(QHideEvent* event) { CancelTasks(); QWidget::hideEvent(event); }
 void ResultReport::Refresh()
 {
     RefreshPage();
@@ -250,9 +316,10 @@ public:
     }
 };
 }
-void ResultReport::AddReport(ReportDocument doc)
+void ResultReport::AddReport(ReportDocument doc,bool select)
 {
     if(doc.id.isEmpty() || !doc.table)return;
+    doc.table->PrepareRead();
     const bool added=!m_documents.contains(doc.id);
     if(!added && doc.category!="运行记录")return; // 精确结果的表格冻结后不被后续运行替换。
     m_documents[doc.id]=doc;
@@ -264,19 +331,19 @@ void ResultReport::AddReport(ReportDocument doc)
     if(!item)item=new QTreeWidgetItem(group);
     item->setText(0,doc.title);item->setData(0,Qt::UserRole,doc.id);
     item->setToolTip(0,doc.description+"\n结果修订："+doc.result+"\n数据："+doc.source);
-    item->setHidden((!m_sourceFilter.isEmpty() && doc.source!=m_sourceFilter)
-        || (!m_moduleFilter.isEmpty() && doc.module!=m_moduleFilter) || !MatchesResult(doc,m_resultFilter));
+    item->setHidden(!MatchesSource(doc,m_sourceFilter)
+        || !MatchesModule(doc,m_moduleFilter) || !MatchesResult(doc,m_resultFilter));
     if(!item->isHidden())group->setHidden(false);
-    if(m_selected.id.isEmpty() || (added && m_follow->isChecked())) {
-        if(item->isHidden()){m_sourceFilter.clear();m_resultFilter.clear();ShowReports();}m_reports->setCurrentItem(item);
-    } else if(added)m_summary->setText(m_selected.title+" · 有新报告，已保留当前选择");
+    if(select && !item->isHidden() && (m_selected.id.isEmpty() || (added && m_follow->isChecked()))) {
+        m_reports->setCurrentItem(item);
+    } else if(added && !m_selected.id.isEmpty())m_summary->setText(m_selected.title+" · 有新报告，已保留当前选择");
     else if(m_selected.id==doc.id)SelectCurrent();
 }
 bool ResultReport::SelectReport(const QString& id)
 {
     if(!m_documents.contains(id))return false;
-    if((!m_sourceFilter.isEmpty() && m_documents[id].source!=m_sourceFilter)
-        || (!m_moduleFilter.isEmpty() && m_documents[id].module!=m_moduleFilter) || !MatchesResult(m_documents[id],m_resultFilter))ShowReports();
+    if(!MatchesSource(m_documents[id],m_sourceFilter)
+        || !MatchesModule(m_documents[id],m_moduleFilter) || !MatchesResult(m_documents[id],m_resultFilter))ShowReports();
     for(int i=0;i<m_reports->topLevelItemCount();++i)for(int j=0;j<m_reports->topLevelItem(i)->childCount();++j) {
         auto* item=m_reports->topLevelItem(i)->child(j);
         if(item->data(0,Qt::UserRole)==id){m_reports->setCurrentItem(item);SelectCurrent();return true;}
@@ -285,35 +352,51 @@ bool ResultReport::SelectReport(const QString& id)
 }
 void ResultReport::ShowReports(const QString& source,const QString& result,const QString& module)
 {
+    ++m_viewRevision;
+    if(source!=m_sourceFilter || result!=m_resultFilter || module!=m_moduleFilter) {
+        m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);
+    }
     m_sourceFilter=source;m_resultFilter=result;m_moduleFilter=module;QString select;
     for(int i=0;i<m_reports->topLevelItemCount();++i) {
         auto* group=m_reports->topLevelItem(i);bool visible=false;
         for(int j=0;j<group->childCount();++j) {
             auto* item=group->child(j);const auto doc=m_documents.value(item->data(0,Qt::UserRole).toString());
-            const bool match=(source.isEmpty() || doc.source==source) && (module.isEmpty() || doc.module==module)
+            const bool match=MatchesSource(doc,source) && MatchesModule(doc,module)
                 && MatchesResult(doc,result);item->setHidden(!match);visible=visible||match;
             if(select.isEmpty() && match && !result.isEmpty() && doc.category!="运行记录")select=doc.id;
         }
         group->setHidden(!visible);
     }
     if(!select.isEmpty())SelectReport(select);
-    else if(result.isEmpty() && !source.isEmpty() && m_selected.source!=source) {
-        m_reports->setCurrentItem(nullptr);m_selected={};RefreshRows();m_summary->setText("所选数据的已有报告；尚无匹配项时，可先完成相应业务计算。");
+    else if(!m_selected.id.isEmpty() && (!MatchesSource(m_selected,source) || !MatchesModule(m_selected,module))) {
+        ClearSelection();m_summary->setText("所选数据的已有报告；尚无匹配项时，可先完成相应业务计算。");
     }
     if(!result.isEmpty() && select.isEmpty()) {
-        m_reports->setCurrentItem(nullptr);m_selected={};m_conditions->clear();RefreshRows();
+        ClearSelection();
         m_summary->setText("尚无该精确结果的业务报告，或结果明细已不可读取。");
     }
+    if(isVisible() && !m_pendingReports.isEmpty())m_buildTimer->start(0);
 }
 void ResultReport::ImportReport(const QString& path)
 {
-    QFile file(path);if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("无法打开 CSV 文件");
-    auto doc=ReadReportCsv(file,QFileInfo(path).fileName());const auto id=doc.id;ShowReports();AddReport(std::move(doc));SelectReport(id);
+    StartTask([path](const ReportCheckpoint& checkpoint){
+        QFile file(path);if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("无法打开 CSV 文件");
+        return ReadReportCsv(file,QFileInfo(path).fileName(),checkpoint);
+    });
+}
+void ResultReport::ClearSelection()
+{
+    const QSignalBlocker treeBlock(m_reports),filterBlock(m_filterColumn),searchBlock(m_search);
+    m_reports->setCurrentItem(nullptr);m_selected={};m_conditions->clear();
+    m_summary->setText("请选择报告");
+    m_search->clear();m_minimum->clear();m_maximum->clear();m_filterColumn->clear();m_sortColumn=-1;
+    RefreshRows();
 }
 void ResultReport::SelectCurrent()
 {
-    const auto* item=m_reports->currentItem();if(!item)return;
-    const auto id=item->data(0,Qt::UserRole).toString();if(!m_documents.contains(id))return;
+    ++m_viewRevision;
+    const auto* item=m_reports->currentItem();if(!item){ClearSelection();return;}
+    const auto id=item->data(0,Qt::UserRole).toString();if(!m_documents.contains(id)){ClearSelection();return;}
     m_selected=m_documents.value(id);m_sortColumn=-1;m_page=0;
     const QSignalBlocker block(m_filterColumn),searchBlock(m_search);
     m_search->clear();m_minimum->clear();m_maximum->clear();m_filterColumn->clear();m_filterColumn->addItem("数值筛选列",-1);
@@ -334,11 +417,123 @@ QVector<ReportDocument> ResultReport::GetReports(const QString& module,const QSe
 {
     QVector<ReportDocument> reports;
     for(const auto& doc:m_documents) {
-        if(doc.module!=module || doc.category=="运行记录")continue;
+        if(!MatchesModule(doc,module) || doc.category=="运行记录")continue;
         if(results.contains(doc.result) || std::any_of(doc.relatedResults.begin(),doc.relatedResults.end(),
             [&](const auto& ref){return results.contains(ref);}))reports.append(doc);
     }
     return reports;
+}
+void ResultReport::QueueReport(const QJsonObject& record)
+{
+    const auto id=record["operationId"].toString();
+    if(id.isEmpty() || m_completedOperations.contains(id) || m_pendingReports.value(id)==record)return;
+    m_pendingReports[id]=record;
+    if(isVisible())m_buildTimer->start(0);
+}
+bool ResultReport::GetReportAvailable(const QString& module,const QString& result) const
+{
+    if(!GetReports(module,{result}).isEmpty())return true;
+    if(result.isEmpty())return false;
+    for(const auto& record:m_pendingReports)if(record["module"].toString()==module && GetPendingResults(record).contains(result))return true;
+    return false;
+}
+void ResultReport::ContinueGeneration()
+{
+    if(!isVisible() || m_task)return;
+    try {
+        if(m_buildingOperation.isEmpty()) {
+            for(auto it=m_pendingReports.cbegin();it!=m_pendingReports.cend();++it) {
+                const auto& record=it.value();
+                if(!m_moduleFilter.isEmpty() && record["module"].toString()!=m_moduleFilter)continue;
+                if(!m_resultFilter.isEmpty() && !GetPendingResults(record).contains(m_resultFilter))continue;
+                if(!m_sourceFilter.isEmpty() && record["source"].toObject()["dataRevision"].toString()!=m_sourceFilter
+                    && record["result"].toObject()["source"].toString()!=m_sourceFilter)continue;
+                m_buildingOperation=it.key();m_buildingIndex=0;
+                m_generationDeadline.setRemainingTime(reportTaskTimeoutMs);
+                if(onReadReports)m_buildingReports=onReadReports(record,GetReportIds()+m_removedReports);
+                break;
+            }
+            if(m_buildingOperation.isEmpty()) {setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);return;}
+        }
+        setProperty("reportGenerationBusy",true);m_cancelTask->setEnabled(true);m_taskStatus->setText("正在生成业务报告…");
+        if(m_generationDeadline.hasExpired())throw std::runtime_error("报告任务超过运行期限");
+        QElapsedTimer elapsed;elapsed.start();int work=0;
+        while(m_buildingIndex<m_buildingReports.size() && work++<256 && elapsed.elapsed()<4) {
+            const auto table=m_buildingReports[m_buildingIndex].table;
+            if(!table || table->ContinueBuild()){if(table)table->PrepareRead();++m_buildingIndex;}
+        }
+        if(m_buildingIndex<m_buildingReports.size()){m_buildTimer->start(0);return;}
+        auto documents=std::move(m_buildingReports);m_buildingReports.clear();
+        m_completedOperations.insert(m_buildingOperation);m_pendingReports.remove(m_buildingOperation);m_buildingOperation.clear();
+        const auto source=m_sourceFilter,result=m_resultFilter,module=m_moduleFilter;
+        for(auto& doc:documents)AddReport(std::move(doc));
+        ShowReports(source,result,module);setProperty("reportGenerationBusy",false);m_taskStatus->setText("业务报告已生成");
+        m_buildTimer->start(0);
+    }catch(const std::exception& e) {
+        m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);m_cancelTask->setEnabled(false);
+        m_taskStatus->setText("业务结果保留，报告读取失败，重新打开可重试："+QString::fromUtf8(e.what()));
+    }
+}
+void ResultReport::StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work,QVector<ReportDocument> inputs)
+{
+    if(m_task)throw std::runtime_error("请等待当前报告任务完成或取消后重试");
+    m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();setProperty("reportGenerationBusy",false);
+    m_task=std::make_unique<Task>();m_task->inputs=std::move(inputs);m_task->viewRevision=m_viewRevision;
+    const auto cancelled=m_task->cancelled;auto* owner=thread();
+    // 运行上限只限制这个宿主任务，非性能达标线；取消在每行/空间候选观察。
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(reportTaskTimeoutMs);
+    m_task->future=std::async(std::launch::async,[work=std::move(work),cancelled,deadline,owner] {
+        const ReportCheckpoint checkpoint=[cancelled,deadline] {
+            if(cancelled->load())throw std::runtime_error("报告任务已取消");
+            if(std::chrono::steady_clock::now()>=deadline)throw std::runtime_error("报告任务超过运行期限");
+        };
+        checkpoint();auto document=work(checkpoint);checkpoint();
+        if(document.table)document.table->SetOwnerThread(owner);
+        return document;
+    });
+    setProperty("reportTaskBusy",true);setProperty("reportTaskError",QString());
+    m_taskStatus->setText("正在处理报告…");m_cancelTask->setEnabled(true);m_taskTimer->start();
+}
+void ResultReport::ContinueTask()
+{
+    if(!m_task || m_task->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+    const bool cancelled=m_task->cancelled->load();
+    const bool select=m_task->viewRevision==m_viewRevision;
+    try {
+        auto document=m_task->future.get();m_task.reset();
+        if(!cancelled && document.table) {const auto id=document.id;if(select)ShowReports();AddReport(std::move(document),select);if(select)SelectReport(id);}
+        m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
+    }catch(const std::exception& e){m_task.reset();setProperty("reportTaskError",QString::fromUtf8(e.what()));m_taskStatus->setText(QString::fromUtf8(e.what()));}
+    m_taskTimer->stop();setProperty("reportTaskBusy",false);m_cancelTask->setEnabled(false);
+    if(!cancelled && isVisible() && !m_pendingReports.isEmpty())m_buildTimer->start(0);
+}
+void ResultReport::CancelTasks()
+{
+    if(m_rowScan){m_scanTimer->stop();m_rowScan.reset();setProperty("reportRowsBusy",false);m_rows.clear();m_allRows=false;m_rowsReady=false;RefreshPage();}
+    m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();m_buildingIndex=0;
+    setProperty("reportGenerationBusy",false);
+    if(m_task)m_task->cancelled->store(true);
+    m_cancelTask->setEnabled(false);
+}
+void ResultReport::RemoveReport(QString id)
+{
+    if(!m_documents.contains(id))return;
+    CancelTasks();m_removedReports.insert(id);
+    if(id==m_baseline){m_baseline.clear();m_baselineLabel->setText("尚未选择基准");}
+    if(id==m_selected.id)ClearSelection();
+    m_documents.remove(id);if(id.startsWith("operation:"))m_records.remove(id.mid(10));
+    for(int i=0;i<m_reports->topLevelItemCount();++i){auto* group=m_reports->topLevelItem(i);
+        for(int j=group->childCount()-1;j>=0;--j)if(group->child(j)->data(0,Qt::UserRole).toString()==id)delete group->takeChild(j);
+        if(!group->childCount())group->setHidden(true);
+    }
+    m_summary->setText("报告已移除；用户原始 CSV 和业务结果保留。");
+}
+void ResultReport::SetReportSource(const QString& id,const QString& source)
+{
+    auto found=m_documents.find(id);if(found==m_documents.end() || found->category!="导入报告")return;
+    found->source=source;found->relatedSources.clear();
+    const auto filter=m_sourceFilter,result=m_resultFilter,module=m_moduleFilter;
+    if(m_selected.id==id)m_selected=found.value();ShowReports(filter,result,module);
 }
 void ResultReport::RefreshRows()
 {
@@ -369,7 +564,10 @@ void ResultReport::ContinueRows()
             if(!scan.search.isEmpty() && !row.join('\t').contains(scan.search,Qt::CaseInsensitive))continue;
             if(scan.column>=0 && (scan.hasLow || scan.hasHigh)){double value;if(!GetReportNumber(GetReportCell(row,scan.column),value) || (scan.hasLow && value<scan.low) || (scan.hasHigh && value>scan.high))continue;}
             if(scan.sortColumn<0)scan.rows.append(index);
-            else {RowScan::Key key{index,GetReportCell(row,scan.sortColumn)};key.numeric=GetReportNumber(key.text,key.number);scan.keys.push(std::move(key));}
+            else {RowScan::Key key{index,GetReportCell(row,scan.sortColumn)};
+                const auto& column=scan.document.columns[scan.sortColumn];
+                const bool identifier=scan.sortColumn==scan.document.identityColumn || column.name=="id" || column.name.endsWith("_id");
+                key.numeric=!identifier && GetReportNumber(key.text,key.number);scan.keys.push(std::move(key));}
         }
         while(scan.next==scan.count && !scan.keys.empty() && work++<256 && elapsed.elapsed()<4) {
             scan.rows.append(scan.keys.top().row);scan.keys.pop();
@@ -447,6 +645,8 @@ void ResultReport::CompareSelected()
     o.baselineQuantity=am.quantity->text().trimmed();o.currentQuantity=bm.quantity->text().trimmed();o.baselineUnit=am.unit->currentText();o.currentUnit=bm.unit->currentText();
     o.match=mode->currentIndex()==1?ReportMatch::Identity:mode->currentIndex()==2?ReportMatch::Position:ReportMatch::Distribution;
     o.mappingConfirmed=mapping->isChecked();o.identitiesConfirmed=o.coordinatesConfirmed=confirmed->isChecked();o.baselineCoordinateUnit=am.coordinateUnit->currentText();o.currentCoordinateUnit=bm.coordinateUnit->currentText();
-    o.distanceTolerance=distance->value();o.valueTolerance=tolerance->value();auto result=CompareReports(a,b,o);const auto id=result.id;ShowReports();AddReport(std::move(result));SelectReport(id);
+    o.distanceTolerance=distance->value();o.valueTolerance=tolerance->value();
+    a.table->PrepareRead();b.table->PrepareRead();
+    StartTask([a,b,o](const ReportCheckpoint& checkpoint){return CompareReports(a,b,o,checkpoint);},{a,b});
 }
 }

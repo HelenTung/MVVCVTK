@@ -1,0 +1,164 @@
+#include "ReportWorkflowTests.h"
+#include "Support/ResultReport.h"
+#include "Support/ReportComparison.h"
+#include <QApplication>
+#include <QBuffer>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QFile>
+#include <QHeaderView>
+#include <QInputDialog>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QTableView>
+#include <QTemporaryDir>
+#include <QTimer>
+#include <QTreeWidget>
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+#include <stdexcept>
+
+namespace Manual {
+namespace {
+void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+template<class F> void Wait(F pending) {
+    QElapsedTimer elapsed;elapsed.start();
+    do {QCoreApplication::processEvents(QEventLoop::AllEvents,10);}while(pending() && elapsed.elapsed()<30000);
+    Require(!pending(),"report repair test timed out");
+}
+ReportDocument Read(QByteArray bytes) {
+    QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"外部报告");
+}
+ReportDocument Document(const QString& id,const QString& quantity="表面对象体积",int count=2) {
+    ReportDocument doc;doc.id=id;doc.title=id;doc.category="本次会话结果";doc.module="Surface";
+    doc.source="data-a";doc.result=id+"-result";doc.relatedResults=QStringList{id+"-generation"};
+    doc.columns={{"object_id",{},{},false},{"surface_object_volume_mm3",quantity,"mm3",true}};
+    doc.identityColumn=0;doc.valueColumn=1;doc.table=std::make_shared<ReportTable>();
+    doc.conditions={{"阈值",42},{"方法","正式表面"}};
+    for(int i=0;i<count;++i)doc.table->Append({QString("point-%1").arg(i),QString::number(i+1)});
+    return doc;
+}
+ReportComparisonOptions Options(const ReportDocument& a,const ReportDocument& b) {
+    ReportComparisonOptions o;o.baselineColumn=o.currentColumn=1;
+    o.baselineQuantity=a.columns[1].quantity;o.currentQuantity=b.columns[1].quantity;
+    o.baselineUnit=a.columns[1].unit;o.currentUnit=b.columns[1].unit;
+    o.baselineIdentity=o.currentIdentity=0;o.match=ReportMatch::Identity;o.identitiesConfirmed=true;return o;
+}
+bool Visible(ResultReport& view,const QString& id) {
+    const auto tree=view.findChild<QTreeWidget*>("reportList");
+    for(int i=0;i<tree->topLevelItemCount();++i)for(int j=0;j<tree->topLevelItem(i)->childCount();++j){const auto item=tree->topLevelItem(i)->child(j);
+        if(item->data(0,Qt::UserRole).toString()==id)return !item->isHidden();}
+    return false;
+}
+void CheckSemanticRoundtrip() {
+    for(const auto& quantity:QStringList{"表面对象体积","选区单元体积和","本次统计体积","半径相对名义偏差"}) {
+        auto native=Document(quantity,quantity);
+        QByteArray bytes;QBuffer output(&bytes);output.open(QIODevice::WriteOnly);WriteReportCsv(output,native);output.close();
+        auto copy=Read(bytes);
+        Require(copy.columns[1].quantity==quantity && copy.columns[1].unit=="mm3","CSV roundtrip lost business semantics");
+        const auto original=native.table->Read(1),restored=copy.table->Read(1);
+        Require(copy.columns[1].name==native.columns[1].name && original.size()==restored.size() && std::equal(original.cbegin(),original.cend(),restored.cbegin()),"CSV roundtrip changed headings or exact values");
+        const auto compared=CompareReports(native,copy,Options(native,copy));
+        Require(compared.conditions["有效配对数"]==2 && compared.table->Read(0)[4]=="0" && compared.table->Read(1)[4]=="0","automatic imported mapping fails native comparison");
+    }
+    const auto generic=Read("item_id,volume_mm3\nv,1\n");
+    Require(generic.columns[1].quantity=="体积","generic external volume must not claim gap semantics");
+    auto source=Document("source"),other=Document("other","选区单元体积和");
+    bool rejected=false;try{CompareReports(source,other,Options(source,other));}catch(const std::invalid_argument&){rejected=true;}
+    Require(rejected,"different native volume quantities were compared as one metric");
+}
+void CheckAssociationsAndClearing() {
+    ResultReport view;auto a=Document("a"),b=Document("b");a.table->PrepareRead();b.table->PrepareRead();
+    auto result=CompareReports(a,b,Options(a,b));
+    Require(result.source=="data-a" && result.relatedResults.contains(a.result) && result.relatedResults.contains(b.relatedResults.first()),"comparison lost same-source or result associations");
+    view.AddReport(a);view.AddReport(b);view.AddReport(result);view.SelectReport(a.id);
+    auto* conditions=view.findChild<QPlainTextEdit*>("reportConditions");Require(conditions->toPlainText().contains("阈值"),"fixture did not display calculation conditions");
+    view.ShowReports("data-b");
+    Require(!view.GetSelectedReport().table && conditions->toPlainText().isEmpty() && view.findChild<QLineEdit*>("reportSearch")->text().isEmpty(),"source switch kept old conditions, details or filters");
+    Require(!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"cleared selection can still locate an old row");
+    view.ShowReports("data-a");Require(Visible(view,result.id),"same-source comparison hidden from data entry");
+    view.ShowReports({},b.relatedResults.first());Require(Visible(view,result.id),"comparison hidden from original related result entry");
+    b.source="data-b";auto cross=CompareReports(a,b,Options(a,b));view.AddReport(cross);
+    Require(cross.source.isEmpty() && cross.relatedSources.contains("data-a") && cross.relatedSources.contains("data-b"),"cross-source comparison was assigned to one side");
+    view.ShowReports("data-a");Require(Visible(view,cross.id),"cross-source report missing from A");
+    view.ShowReports("data-b");Require(Visible(view,cross.id),"cross-source report missing from B");
+    b.module="Wall";const auto crossModule=CompareReports(a,b,Options(a,b));view.AddReport(crossModule);
+    view.ShowReports({},b.result,"Wall");Require(Visible(view,crossModule.id),"comparison missing from the other business module entry");
+    auto imported=Read("item_id,volume_mm3\nexternal,7\n");view.AddReport(imported);view.SelectReport(imported.id);
+    view.getSources=[]{return QMap<QString,QString>{{"data-b","测试体数据"}};};
+    QTimer::singleShot(0,[]{auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());Require(dialog,"source association chooser missing");dialog->findChild<QComboBox*>()->setCurrentIndex(1);dialog->accept();});
+    view.findChild<QPushButton*>("associateReportSource")->click();
+    view.ShowReports("data-b");Require(Visible(view,imported.id),"explicit imported report association was not used by filtering");
+    view.SetReportSource(imported.id,{});view.ShowReports("data-b");Require(!Visible(view,imported.id),"removing association left stale source membership");
+    auto removable=Document("remove");std::weak_ptr<ReportTable> storage=removable.table;view.AddReport(removable);view.SelectReport(removable.id);
+    view.findChild<QPushButton*>("setReportBaseline")->click();removable.table.reset();view.RemoveReport(removable.id);
+    Require(storage.expired() && !view.GetReportIds().contains("remove") && !view.GetSelectedReport().table,"removed report retained page, scan or document storage");
+}
+void CheckSpatialEvidence() {
+    auto a=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\na,0,0,0,1\n");
+    auto b=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nb,0.003,0.004,0,2\nmissing,3,0,0,9\n");
+    auto o=Options(a,b);o.baselineColumn=o.currentColumn=4;o.baselineQuantity=o.currentQuantity=a.columns[4].quantity;
+    o.baselineUnit=o.currentUnit="mm";o.match=ReportMatch::Position;o.coordinatesConfirmed=true;
+    o.baselineCoordinateUnit=o.currentCoordinateUnit="mm";o.distanceTolerance=.01;
+    const auto result=CompareReports(a,b,o);const auto pair=result.table->Read(0),unmatched=result.table->Read(1);
+    Require(pair[0]=="a" && pair[7]=="b" && std::abs(pair[8].toDouble()-.005)<1e-12,"spatial report lost A/B IDs or physical pairing distance");
+    Require(unmatched[0].isEmpty() && unmatched[7]=="missing" && unmatched[8].isEmpty() && unmatched[4].isEmpty(),"unmatched B point fabricated baseline identity, distance or delta");
+}
+void CheckGenerationAndTasks() {
+    ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
+    const QJsonObject record{{"operationId","lazy"},{"module","Wall"},{"source",QJsonObject{{"dataRevision","data-a"}}},{"result",QJsonObject{{"result","lazy-result"},{"mesh","input-mesh"}}}};
+    view.onReadReports=[&](const QJsonObject&,const QSet<QString>&) {
+        ++prepared;auto doc=Document("lazy","聚合节点厚度场值",0);doc.module="Wall";
+        auto held=std::make_shared<int>(1);lease=held;
+        doc.table->SetRows(50000,[&,held](int row){++readRows;return QStringList{QString::number(row),QString::number(row+1)};});
+        return QVector<ReportDocument>{doc};
+    };
+    view.QueueReport(record);QCoreApplication::processEvents();
+    Require(prepared==0 && view.GetReportAvailable("Wall","lazy-result"),"closed report window eagerly reads native data or hides the pending report entry");
+    Require(!view.GetReportAvailable("Wall","input-mesh"),"pending report availability mistakes the input mesh for its output result");
+    view.ShowReports({},"lazy-result","Wall");view.show();
+    Wait([&]{return !view.property("reportGenerationBusy").toBool();});
+    Require(readRows>0 && readRows<50000 && !lease.expired(),"native generation did not yield a bounded owner chunk");
+    view.findChild<QPushButton*>("cancelReportTask")->click();QCoreApplication::processEvents();
+    Require(lease.expired() && !view.GetReportIds().contains("lazy"),"cancelled native generation retained its snapshot or published partial rows");
+    view.ShowReports({},"lazy-result","Wall");
+    Wait([&]{return !view.GetReportIds().contains("lazy");});
+    Require(lease.expired() && view.GetSelectedReport().table->GetCount()==50000,"retry failed to materialize all rows and release its native source");
+    QTemporaryDir directory;const auto path=directory.filePath("original.csv");ExportReport(path,view.GetSelectedReport());
+    const auto before=view.GetReportIds();view.ImportReport(path);Require(view.property("reportTaskBusy").toBool(),"import did not return after admission");
+    bool heartbeat=false;QTimer::singleShot(0,&view,[&]{heartbeat=true;view.findChild<QPushButton*>("cancelReportTask")->click();});
+    Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(heartbeat && view.GetReportIds()==before && QFile::exists(path),"cancelled import blocked events, published partial data or removed source CSV");
+    view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.property("reportTaskError").toString().isEmpty() && view.GetSelectedReport().table->GetCount()==50000,"retry import lost rows");
+    const auto importedId=view.GetSelectedReport().id;view.RemoveReport(importedId);Require(QFile::exists(path),"removing report deleted original CSV");
+    view.ImportReport(path);view.ShowReports("data-b");
+    Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(!view.GetSelectedReport().table,"late import stole a newer source-filtered selection");
+    view.ShowReports();
+    view.SelectReport("lazy");view.findChild<QPushButton*>("setReportBaseline")->click();
+    auto current=Document("current","聚合节点厚度场值",50000);view.AddReport(current);view.SelectReport(current.id);
+    QTimer::singleShot(0,[]{auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog,"comparison mapping dialog missing");dialog->accept();});
+    view.findChild<QPushButton*>("compareReports")->click();Require(view.property("reportTaskBusy").toBool(),"comparison blocked its UI admission");
+    const auto comparisonIds=view.GetReportIds();QTimer::singleShot(0,&view,[&]{view.findChild<QPushButton*>("cancelReportTask")->click();});
+    Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.GetReportIds()==comparisonIds && view.GetSelectedReport().id==current.id,"cancelled comparison published a partial result or changed selection");
+    bool fail=true;ResultReport retry;
+    retry.onReadReports=[&](const QJsonObject&,const QSet<QString>&){if(fail)throw std::runtime_error("暂时不可读取");return QVector<ReportDocument>{Document("retry")};};
+    retry.QueueReport(record);retry.show();QCoreApplication::processEvents();
+    Require(retry.GetReportAvailable("Wall","lazy-result") && retry.GetReportIds().isEmpty(),"read failure permanently discarded the retryable operation");
+    fail=false;retry.ShowReports();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
+    view.hide();
+}
+}
+void CheckReportRepairs() {
+    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();
+    std::cout<<"PASS: report semantics, associations, spatial evidence, lazy generation, cancellation and resource release"<<std::endl;
+}
+}
