@@ -1604,7 +1604,8 @@ bool CropHostFeature::Impl::Document::SendResultReleases()
     bool changed=false;
     for (auto record=records.begin();record!=records.end();) {
         const auto lifetime=m_data->GetDataLifetime(record->scopeId).status;
-        if(record->status==CropResultStatus::Published && lifetime==DataLifetimeStatus::Releasing){
+        if(record->status==CropResultStatus::Published
+            && (lifetime==DataLifetimeStatus::Releasing || lifetime==DataLifetimeStatus::Released)){
             record->status=CropResultStatus::Releasing;changed=true;
         }
         if (record->status==CropResultStatus::Releasing

@@ -670,27 +670,35 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
         auto issued=probe->m_data->GetData(oldGraph,original.outputRevision);
         auto reader=issued->lifetime.lock()->StartResourceUse(issued->self,"historical-branch-reader");
         issued.reset();
-        if(!SetSelectedData(session,root->data->self)||!wait([&]{
+        if(!GetCaseResult(SetSelectedData(session,root->data->self)&&wait([&]{
             const auto state=session.GetImageDescriptor();return state&&state->dataRevision==root->data->self;
-        }))return false;
+        }),"Historical branch returns to the exact Root input"))return false;
+        CropDocumentRequest activate;activate.action=CropDocumentAction::ActivateDocument;
+        activate.documentId=history.documentId;activate.requestId=CropHostFeature::CreateRequestId();
+        activate.expectedRevision=feature->GetHistory().stateRevision;
+        if(!GetCaseResult(bool(feature->SendRequest(activate))&&wait([&]{
+            const auto out=feature->GetDocumentOutcome(history.documentId,activate.requestId);
+            return out&&out->status==CropEditStatus::Succeeded;
+        }),"Historical branch explicitly activates its original document"))return false;
         auto sibling=append;sibling.requestId=CropHostFeature::CreateRequestId();
         sibling.expectedRevision=feature->GetState().history.stateRevision;
         sibling.operation.planeCenterInInputModel[0]=(bounds[0]+3*bounds[1])*.25;
         const auto edited=feature->SendRequest(sibling);
-        if(!edited||!wait([&]{const auto out=feature->GetOutcome(history.documentId,sibling.requestId);
-            return out&&out->status==CropEditStatus::Succeeded;}))return false;
+        if(!GetCaseResult(bool(edited)&&wait([&]{const auto out=feature->GetOutcome(history.documentId,sibling.requestId);
+            return out&&out->status==CropEditStatus::Succeeded;}),"Historical branch appends its sibling node"))return false;
         CropBuildRequest build;build.documentId=history.documentId;build.nodeId=edited.nodeId;
         build.requestId=CropHostFeature::CreateRequestId();build.expectedRevision=feature->GetState().history.stateRevision;
         CropBuildResult repeated;int repeatCount=0;
-        if(!feature->SendRequest(build,[&](auto value){repeated=std::move(value);++repeatCount;})
-            ||!wait([&]{return repeatCount!=0;}))return false;
+        if(!GetCaseResult(bool(feature->SendRequest(build,[&](auto value){repeated=std::move(value);++repeatCount;}))
+            &&wait([&]{return repeatCount!=0;}),"Historical branch build completes"))return false;
         const auto results=feature->GetHistory().results;
-        if(repeatCount!=1||!repeated.isSucceeded||repeated.nodeId!=edited.nodeId
+        if(!GetCaseResult(!(repeatCount!=1||!repeated.isSucceeded||repeated.nodeId!=edited.nodeId
             ||repeated.outputRevision==original.outputRevision||repeated.sourceRevision!=root->data->self
             ||session.GetImageDescriptor()->dataRevision!=root->data->self
             ||probe->m_data->GetDataLifetime(original.scopeId).status!=DataLifetimeStatus::Published
             ||!oldGraph.view->GetData(original.outputRevision)||results.size()!=2
-            ||std::any_of(results.begin(),results.end(),[](const auto& value){return value.status!=CropResultStatus::Published;}))return false;
+            ||std::any_of(results.begin(),results.end(),[](const auto& value){return value.status!=CropResultStatus::Published;})),
+            "Historical branch publishes without retiring its live predecessor"))return false;
         reader.reset();held=nullptr;result=std::move(repeated);
         output=probe->m_data->GetImageGrid(probe->m_data->GetDataGraph(),result.outputRevision);
         if(!output||!output->validityMask)return false;

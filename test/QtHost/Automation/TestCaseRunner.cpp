@@ -1329,14 +1329,14 @@ void CheckCropWorkflow(TestWindow& window)
     Check(panel->GetObservedState()["appliedHead"].toString()==otherNode&&panel->GetObservedState()["renderedHead"].toString()==otherNode,"selected node and presented node agree");
     GetComplete(window,Click(window,"Crop","Previous"),"Succeeded");
     GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
-    GetComplete(window,Click(window,"Crop","ResetPreview"),"Succeeded");
+    GetComplete(window,ClickNodeAction(window,tree,FindNode(tree,"crop-history"),"ResetPreview"),"Succeeded");
     Check(panel->GetObservedState()["appliedHead"].toString()==rootNode,"Root selection retains the tree");
     int rootChildren=0;for(const auto item:history)rootChildren+=item.toObject()["parentNodeId"].toString()==rootNode;
     GetComplete(window,Click(window,"Crop","Next"),rootChildren==1?"Succeeded":"Rejected");
     GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
     GetComplete(window,Send(window,"Crop","Node",{{"nodeId","18446744073709551615"}}),"Rejected");
     // 从 Root 再次开始实际拖动，显式创建分支；连续拖动可以合法地形成单条路径。
-    GetComplete(window,Click(window,"Crop","ResetPreview"),"Succeeded");
+    GetComplete(window,ClickNodeAction(window,tree,FindNode(tree,"crop-history"),"ResetPreview"),"Succeeded");
     GetComplete(window,Click(window,"Crop","Box"),"Succeeded");
     Check(Wait([&]{return panel->GetObservedState()["framesReady"].toBool();}),"branch widget renders");
     for(const auto& fraction:fractions){drag(fraction);
@@ -1405,7 +1405,8 @@ void CheckCropMouseInteraction(TestWindow& window)
         Check(Wait(settled), "display mode settles before crop input");
         for (const auto* shape : {"Box", "Plane", "Sphere", "Cylinder"}) {
             for (const auto* removal : {"KeepInside", "RemoveInside", "PositionOnly"}) {
-                GetComplete(window, Click(window, "Crop", "ResetPreview"), "Succeeded");
+                auto* historyTree=panel->GetCatalogTree();
+                GetComplete(window,ClickNodeAction(window,historyTree,FindNode(historyTree,"crop-history"),"ResetPreview"),"Succeeded");
                 GetComplete(window, Click(window, "Crop", shape), "Succeeded");
                 GetComplete(window, Click(window, "Crop", removal), "Succeeded");
                 Check(Wait(settled), "crop controls render before mouse input");
