@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/DataGraphTypes.h"
+#include "Data/DataPayloads.h"
 #include "SurfaceRecipe.h"
 #include "Host/Types/HostViewTypes.h"
 
@@ -56,7 +57,7 @@ struct SurfaceGenerationSnapshot final {
     DataRevisionRef dataRevision;
     DataRevisionRef meshRevision;
     DataRevisionRef selectionMeshRevision;
-    std::shared_ptr<const std::vector<SurfaceSelectionPiece>> selection;
+    std::shared_ptr<const MeshReadArray<SurfaceSelectionPiece>> selection;
     double selectedAreaMM2 = 0;
     double selectionToleranceMM = 0;
     DataRevisionRef sourceRevision;
@@ -65,12 +66,12 @@ struct SurfaceGenerationSnapshot final {
     std::uint32_t algorithmRevision = 0;
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::GlobalAutomatic;
-    std::shared_ptr<const std::vector<SurfacePointRecord>> points;
-    std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
-    std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
+    std::shared_ptr<const MeshReadArray<SurfacePointRecord>> points;
+    std::shared_ptr<const MeshReadArray<std::uint32_t>> triangleIndices;
+    std::shared_ptr<const MeshReadArray<SurfaceObjectRecord>> objects;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     // 每三角形一个值；仅证明本 Feature 明确检查的有效性条件。
-    std::shared_ptr<const std::vector<std::uint8_t>> triangleValidity;
+    std::shared_ptr<const MeshReadArray<std::uint8_t>> triangleValidity;
     std::vector<DataInputRef> inputs;
     SurfaceExecutionStats execution;
     std::shared_ptr<const std::vector<SurfaceInterfaceRecord>> interfaces;

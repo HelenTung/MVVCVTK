@@ -104,8 +104,8 @@ std::optional<AlignmentDeviationSelection> AlignmentDeviationDisplayController::
     if (!result || vertex>=result->forward->samples.size()) return {};
     const auto node=graph.view->GetData(result->sourceMesh);
     const auto mesh=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
-    if (!mesh || (vertex>=mesh->GetVertices().size()/3 && !result->forward->samples[vertex].sourcePosition)) return {};
-    const auto &v=mesh->GetVertices();
+    if (!mesh || (vertex>=mesh->GetPointValues().size()/3 && !result->forward->samples[vertex].sourcePosition)) return {};
+    const auto &v=mesh->GetPointValues();
     AlignmentDeviationSelection value;
     value.result=ref; value.vertex=vertex;
     if(result->forward->samples[vertex].sourcePosition)value.sourcePoint=*result->forward->samples[vertex].sourcePosition;else value.sourcePoint={v[3*vertex],v[3*vertex+1],v[3*vertex+2]};

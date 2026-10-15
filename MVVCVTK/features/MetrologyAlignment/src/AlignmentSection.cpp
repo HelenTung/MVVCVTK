@@ -33,7 +33,7 @@ void Check(const AlignmentWork &work) {
         throw std::runtime_error("Section extraction cancelled.");
 }
 Vec Vertex(const SurfaceMeshPayload &mesh,std::uint64_t id) {
-    const auto &v=mesh.GetVertices(); return {v[3*id],v[3*id+1],v[3*id+2]};
+    const auto &v=mesh.GetPointValues(); return {v[3*id],v[3*id+1],v[3*id+2]};
 }
 std::size_t Root(VectorList<Node> &nodes,std::size_t id) {
     auto root=id; while (nodes[root].parent!=root) root=nodes[root].parent;
@@ -44,10 +44,10 @@ double DistanceSquared(const Vec &point,const Vec &a,const Vec &b) {
     const auto d=b-a; const double t=std::clamp((point-a).dot(d)/d.dot(d),0.0,1.0);
     const auto q=point-a-t*d; return q.dot(q);
 }
-const MeshAttribute *FaceValidity(const AlignmentWork &work) {
-    const MeshAttribute *result=nullptr;
-    for (const auto &a:work.mesh->GetCellAttributes()) if (a.name=="measurement.valid") {
-        Require(!result && a.componentCount==1 && a.values.size()==work.mesh->GetTriangles().size()/3,"Invalid face validity schema."); result=&a;
+const MeshField *FaceValidity(const AlignmentWork &work) {
+    const MeshField *result=nullptr;
+    for (const auto &a:work.mesh->GetCellFields()) if (a.name=="measurement.valid") {
+        Require(!result && a.componentCount==1 && a.values.size()==work.mesh->GetTriangleIndices().size()/3,"Invalid face validity schema."); result=&a;
     }
     Require(result || !work.recipe.requiresMeasurementQuality,"Section requires published face validity for measurement-quality input.");
     return result;
@@ -106,7 +106,7 @@ bool AlignmentSection::GetValid(const InspectionSection &s) {
 AlignmentSectionData AlignmentSection::Build(const AlignmentWork &work,const InspectionSection &s,const AlignmentMatrix &pose) {
     Check(work); Require(GetValid(s) && Rigid(pose) && work.mesh && work.mesh->GetValid() && s.pinnedMesh==work.input.mesh,"Invalid section input or mesh revision.");
     const auto inverse=Inverse(pose); const auto origin=Transform(inverse,Vector(s.planePoint)),normal=Unit(Rotate(inverse,Vector(s.planeNormal)));
-    const auto &mesh=*work.mesh; const auto &tri=mesh.GetTriangles(); const auto *validity=FaceValidity(work);
+    const auto &mesh=*work.mesh; const auto &tri=mesh.GetTriangleIndices(); const auto *validity=FaceValidity(work);
     AllocationAccounting budget{std::numeric_limits<std::size_t>::max(),0};
     budget.Acquire(4096);
     // MSVC Debug 的 allocator-only 构造标为 noexcept，但会分配迭代器代理。

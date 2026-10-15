@@ -130,7 +130,7 @@ int main()
         return 1;
     }
     auto* mesh = display->mesh.GetPointer();
-    auto* ids = vtkIntArray::SafeDownCast(mesh->GetCellData()->GetScalars());
+    auto* ids = vtkDataArray::SafeDownCast(mesh->GetCellData()->GetScalars());
     // 独立单体素等值面为八面体：6 个顶点、8 个三角形。
     bool valid = mesh->GetNumberOfPoints() == 6LL * count
         && mesh->GetNumberOfCells() == 8LL * count
@@ -139,7 +139,7 @@ int main()
         && ids && ids->GetNumberOfTuples() == 8LL * count;
     for (int index = 0; valid && index < count; ++index) {
         for (int cell = 0; cell < 8; ++cell)
-            valid &= ids->GetValue(8LL * index + cell) == regions[index].id;
+            valid &= ids->GetComponent(8LL * index + cell,0) == regions[index].id;
         valid &= *static_cast<int*>(image->GetScalarPointer(2 * index + 1, 1, 1)) == regions[index].id;
     }
     for (const int index : {0, count / 2, count - 1})

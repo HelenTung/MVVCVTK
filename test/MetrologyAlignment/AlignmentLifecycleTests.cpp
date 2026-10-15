@@ -353,7 +353,7 @@ void Display() {
     }
     AlignmentRecipe bestFit; bestFit.method=AlignmentMethod::ConstrainedBestFit;
     AlignmentFitPair pair; pair.vertexId=0; pair.nominalPoint={2,3,4}; bestFit.fitPairs={pair};
-    const std::vector<double> modelVertices{1,2,3};
+    const MeshReadArray<double> modelVertices(std::vector<double>{1,2,3});
     const auto pairs=AlignmentOverlay::BuildData(alignmentIdentity,{},bestFit,1,&modelVertices);
     Check(pairs && pairs->GetNumberOfVerts()==1 && pairs->GetNumberOfLines()==4,
         "best-fit inputs have a position marker and actual correspondence line with one coordinate triad");
@@ -552,7 +552,7 @@ void SurfaceReferenceLifecycle() {
           std::abs(archive->sourceToTarget[7] + 0.2) < 1e-7 &&
           std::abs(archive->sourceToTarget[11] - 0.3) < 1e-7,
           "public dynamic surface alignment publishes analytic transform");
-    Check(f.mesh->GetVertices() == measured && reference->GetVertices() == referenceVertices,
+    Check(f.mesh->GetPointValues() == MeshReadArray<double>(measured) && reference->GetPointValues() == MeshReadArray<double>(referenceVertices),
           "public alignment preserves both immutable input meshes");
     DataTransaction replace;
     replace.outputs.push_back({f.recipe.nominalData.entityId, 1, DataTypes::surfaceMesh, {}, reference, {}});
@@ -731,7 +731,7 @@ void ModelPoseLifecycle() {
     }
     auto host=std::make_shared<PoseControl>();Fixture f({},host);host->state.dataRevision=f.input.mesh;
     const auto solved=f.Solve();const auto archive=f.feature->GetArchive(solved.result);const auto active=f.feature->GetState().activeResult;
-    const auto graphBefore=f.data->GetDataGraph().commitId;const auto *vertices=f.mesh->GetVertices().data();
+    const auto graphBefore=f.data->GetDataGraph().commitId;const auto *vertices=&f.mesh->GetPointValues();
     AlignmentRequest apply;apply.action=AlignmentAction::ApplyModelPose;apply.resultRef=solved.result;
     int calls=0;AlignmentResult completed;
     const auto start=[&] { return f.feature->SendRequest(apply,[&](AlignmentResult r){completed=std::move(r);++calls;}); };
@@ -747,7 +747,7 @@ void ModelPoseLifecycle() {
     host->Frame();f.feature->OnHostTick();
     Check(calls==1 && completed.status==AlignmentStatus::FullyDetermined && completed.isModelPoseApplied && archive &&
         host->state.modelToWorld==archive->sourceToTarget && f.feature->GetState().modelPose.isCurrent,"acknowledged absolute pose matches formal result");
-    Check(f.feature->GetState().activeResult==active && f.data->GetDataGraph().commitId==graphBefore && f.mesh->GetVertices().data()==vertices,
+    Check(f.feature->GetState().activeResult==active && f.data->GetDataGraph().commitId==graphBefore && &f.mesh->GetPointValues()==vertices,
         "display pose changes no data graph, active result or mesh storage");
     Check(!GetDataRevisionRefValid(f.feature->GetScopeState("unrelated").modelPose.alignmentResult),"scope state does not attribute model pose to another part");
     host->state.modelToWorld[3]+=2;++host->state.transformRevision;
@@ -976,7 +976,7 @@ void AutomaticReferenceLifecycle() {
     const auto deviation = f.feature->GetDeviation(deviationRef);
     Check(deviation && deviation->isCurrent && deviation->alignmentResult == result.result &&
           deviation->sourceMesh == f.input.mesh && deviation->referenceMesh == f.recipe.nominalData &&
-          deviation->verdict == AlignmentInspectionVerdict::Pass && deviation->forward->samples.size() == f.mesh->GetVertices().size()/3,
+          deviation->verdict == AlignmentInspectionVerdict::Pass && deviation->forward->samples.size() == f.mesh->GetPointValues().size()/3,
           "dense evaluation independently records mesh/alignment/parameters and verdict");
     const auto again = f.feature->GetDeviation(deviationRef);
     Check(deviation && again && deviation->forward == again->forward && deviation->reverse == again->reverse && deviation->parameters == again->parameters,
@@ -1003,11 +1003,12 @@ void AutomaticReferenceLifecycle() {
           "deviation colors coexist with alignment marker without republishing numerical data");
     const auto selected = f.feature->GetDeviationSample(deviationRef,0);
     Check(selected && selected->isCurrent && selected->sample.distance < 1e-7 &&
-          std::abs(selected->alignedPoint[0]-model.referenceMesh->GetVertices()[0]) < 1e-7,
+          std::abs(selected->alignedPoint[0]-model.referenceMesh->GetPointValues()[0]) < 1e-7,
           "selected deviation locates original sample and aligned reference-space point");
-    Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetVertices().size()/3),"selection bounds checked");
+    Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetPointValues().size()/3),"selection bounds checked");
     MetrologyReportRequest paletteRequest;paletteRequest.id="current-colorbar";paletteRequest.captureCurrentDisplay=true;
     const auto paletteCapture=f.feature->GetReport(paletteRequest);
+    if(!paletteCapture.report)std::cerr<<"Palette capture failure: "<<int(paletteCapture.status)<<" "<<paletteCapture.message<<"\n";
     Check(paletteCapture.report && paletteCapture.report->deviations.size()==1 && paletteCapture.report->presentation.deviations.size()==1 &&
         paletteCapture.report->presentation.deviations[0].parameters.range==std::array<double,2>{0,.1} &&
         paletteCapture.report->presentation.deviations[0].selection && selected && paletteCapture.report->presentation.deviations[0].selection->sourcePoint==selected->sourcePoint &&
@@ -1050,6 +1051,7 @@ void AutomaticReferenceLifecycle() {
           "public default display resolves the current field range before storing visible state");
     paletteRequest.deviations.clear();paletteRequest.deviationDisplays.clear();paletteRequest.captureCurrentDisplay=true;
     const auto automaticCapture=f.feature->GetReport(paletteRequest);
+    if(!automaticCapture.report)std::cerr<<"Automatic capture failure: "<<int(automaticCapture.status)<<" "<<automaticCapture.message<<"\n";
     Check(automaticDisplay && automaticCapture.report && !automaticCapture.report->presentation.deviations.empty() &&
           automaticCapture.report->presentation.deviations[0].mappingRange==f.feature->GetState().deviationDisplayRange,
           "capturing automatic display freezes the same resolved range as the live overlay");

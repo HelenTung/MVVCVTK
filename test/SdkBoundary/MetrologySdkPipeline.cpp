@@ -87,8 +87,8 @@ void Run(const char *filePath, const char *expectedSha256) {
     auto *pointValidity=poly->GetPointData()->GetArray("measurement.valid");
     auto *faceValidity=poly->GetCellData()->GetArray("measurement.valid");
     Require(pointValidity && faceValidity, "Real C3 point and cell quality must be present.");
-    const auto &faces=mesh->GetTriangles();
-    std::vector<bool> selected(mesh->GetVertices().size()/3,false), faceUsable(faces.size()/3,false);
+    const auto &faces=mesh->GetTriangleIndices();
+    std::vector<bool> selected(mesh->GetPointValues().size()/3,false), faceUsable(faces.size()/3,false);
     std::vector<std::uint64_t> validFaces;
     for (std::size_t i=0;i<faces.size()/3;++i) {
         bool valid=faceValidity->GetComponent(static_cast<vtkIdType>(i),0)==1;
@@ -156,7 +156,7 @@ void Run(const char *filePath, const char *expectedSha256) {
     std::ostringstream json; const auto written=WriteMetrologyReport(*report.report,json);
     Require(written.status==MetrologyReportWriteStatus::Succeeded && written.bytesWritten==json.str().size(), "SDK report writer must preserve complete output.");
     Require(session.DetachFeature(*feature) && session.DetachFeature(*inputFeature) && session.Stop(), "SDK features and Host must stop cleanly.");
-    std::cout<<"RealC3SdkPipeline points="<<mesh->GetVertices().size()/3<<" triangles="<<faces.size()/3
+    std::cout<<"RealC3SdkPipeline points="<<mesh->GetPointValues().size()/3<<" triangles="<<faces.size()/3
              <<" validTriangles="<<validFaces.size()<<" rms="<<solved.diagnostics.rms<<" evaluatedArea="<<field->forward->statistics.evaluatedArea
              <<" sha256="<<sha256<<'\n';
 }

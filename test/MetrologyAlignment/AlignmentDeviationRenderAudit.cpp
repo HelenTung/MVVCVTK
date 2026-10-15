@@ -157,17 +157,17 @@ int wmain(int argc,wchar_t **argv) {
         auto request=std::make_shared<AlignmentDeviationRequest>();request->alignmentResult={data.CreateDataEntityId(),1};
         request->metric=AlignmentDeviationMetric::NominalNormalProjection;request->requiresMeasurementQuality=true;
         request->reverseCoverage=false;request->maxDistance=5;request->tolerance=std::array<double,2>{-.05,.05};
-        const MeshAttribute *pointQuality=nullptr,*faceQuality=nullptr;
-        for(const auto &a:payload->GetPointAttributes())if(a.name=="measurement.valid")pointQuality=&a;
-        for(const auto &a:payload->GetCellAttributes())if(a.name=="measurement.valid")faceQuality=&a;
+        const MeshField *pointQuality=nullptr,*faceQuality=nullptr;
+        for(const auto &a:payload->GetPointFields())if(a.name=="measurement.valid")pointQuality=&a;
+        for(const auto &a:payload->GetCellFields())if(a.name=="measurement.valid")faceQuality=&a;
         Require(pointQuality && faceQuality,"Measurement quality missing.");
-        const auto &triangles=payload->GetTriangles();
+        const auto &triangles=payload->GetTriangleIndices();
         for(std::size_t i=0;i<triangles.size()/3;++i)if(faceQuality->values[i]==1 && pointQuality->values[triangles[3*i]]==1 &&
             pointQuality->values[triangles[3*i+1]]==1 && pointQuality->values[triangles[3*i+2]]==1)request->sourceTriangles.push_back(i);
         request->referenceTriangles=request->sourceTriangles;
         std::ofstream out(folder/"render.json");out<<std::setprecision(17)
             <<"{\"schema\":\"deviation-render-audit-2\",\"scope\":\"real C3 mesh; known rigid perturbation versus supplied public solve pose or exact identity; not cross-acquisition or CAD nominal acceptance\",\"afterPoseFromPublicSolve\":"<<(positional==19 ? "true" : "false")<<",\"backends\":\""<<(cpuOnly?"cpu":"cpu,cuda")<<"\",\"rangeMode\":\"effective finite Valid sample range per field, shared by 2D and 3D\",\"useToleranceColors\":false,\"viewport\":[1024,768],\"points\":"
-            <<payload->GetVertices().size()/3<<",\"triangles\":"<<triangles.size()/3<<",\"cases\":[";
+            <<payload->GetPointValues().size()/3<<",\"triangles\":"<<triangles.size()/3<<",\"cases\":[";
         for(int phase=0;phase<2;++phase) {
             if(phase)out<<',';const std::string name=phase ? "aligned" : "perturbed";
             auto pose=phase ? solvedPose : alignmentIdentity;if(!phase) { const double a=.01;pose[0]=pose[5]=std::cos(a);pose[1]=-std::sin(a);pose[4]=std::sin(a);pose[3]=.15;pose[7]=-.12;pose[11]=.08; }

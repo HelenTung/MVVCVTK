@@ -18,6 +18,9 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <functional>
+#include <iterator>
+#include <stdexcept>
 
 namespace DataTypes {
 inline const DataTypeId labelMap3D{
@@ -459,24 +462,139 @@ struct MeshAttribute final {
     std::uint32_t activeRoles = 0;
 };
 
+enum class MeshReadError : std::uint8_t { None, InvalidRange, Cancelled, AllocationFailed, ReadFailed };
+template<class Value> struct MeshReadChunk final {
+    MeshReadError error = MeshReadError::None;
+    std::vector<Value> values;
+    std::size_t nextOffset = 0;
+    bool isComplete = false;
+};
+
+// 可信 SPI 的只读值源。实现必须保证深层不可变、并发读取和 owner 有效期；不得返回借用指针。
+template<class Value> class MeshValueSource {
+public:
+    virtual ~MeshValueSource() = default;
+    virtual std::size_t GetCount() const noexcept = 0;
+    virtual std::size_t GetResidentBytes()const noexcept {return GetCount()>SIZE_MAX/sizeof(Value)?SIZE_MAX:GetCount()*sizeof(Value);}
+    virtual void ReadValues(std::size_t offset,std::size_t count,Value* destination) const = 0;
+};
+
+template<class Value> class MeshReadArray final {
+    class Memory final : public MeshValueSource<Value> {
+    public:
+        explicit Memory(std::vector<Value> input):values(std::move(input)){}
+        std::size_t GetCount()const noexcept override{return values.size();}
+        std::size_t GetResidentBytes()const noexcept override{return values.capacity()*sizeof(Value);}
+        void ReadValues(std::size_t offset,std::size_t count,Value* out)const override {
+            if(offset>values.size() || count>values.size()-offset)throw std::out_of_range("Mesh read range is invalid.");
+            std::copy_n(values.begin()+offset,count,out);
+        }
+    private:const std::vector<Value> values;
+    };
+public:
+    using value_type=Value;
+    MeshReadArray() = default;
+    explicit MeshReadArray(std::vector<Value> values):m_source(std::make_shared<const Memory>(std::move(values))){}
+    explicit MeshReadArray(std::shared_ptr<const MeshValueSource<Value>> source):m_source(std::move(source)){}
+    std::size_t GetCount()const noexcept{return m_source?m_source->GetCount():0;}
+    std::size_t GetResidentBytes()const noexcept{return m_source?m_source->GetResidentBytes():0;}
+    // STL 范围协议只逐值读取；没有 data()、完整 vector 或可写别名。
+    std::size_t size()const noexcept{return GetCount();}
+    bool empty()const noexcept{return !GetCount();}
+    Value at(std::size_t index)const {
+        if(index>=GetCount())throw std::out_of_range("Mesh element is outside the array.");
+        Value value{};m_source->ReadValues(index,1,&value);return value;
+    }
+    Value operator[](std::size_t index)const{return at(index);}
+    Value front()const{return at(0);}
+    Value back()const{return at(GetCount()-1);}
+    MeshReadChunk<Value> GetChunk(std::size_t offset,std::size_t count,
+        const std::function<bool()>& getCancelled={})const {
+        MeshReadChunk<Value> result;result.nextOffset=offset;
+        if(offset>GetCount() || !count){result.error=MeshReadError::InvalidRange;return result;}
+        const auto stopped=[&]{try{return getCancelled && getCancelled();}catch(...){return true;}};
+        if(stopped()){result.error=MeshReadError::Cancelled;return result;}
+        try {
+            count=std::min({count,GetCount()-offset,imageChunkLimit/sizeof(Value)});
+            if(!count && offset!=GetCount()){result.error=MeshReadError::InvalidRange;return result;}
+            result.values.resize(count);
+            if(count)m_source->ReadValues(offset,count,result.values.data());
+            if(stopped()){result.values.clear();result.error=MeshReadError::Cancelled;return result;}
+            result.nextOffset=offset+count;result.isComplete=result.nextOffset==GetCount();
+        }catch(const std::bad_alloc&){result.values.clear();result.error=MeshReadError::AllocationFailed;}
+        catch(...){result.values.clear();result.error=MeshReadError::ReadFailed;}
+        return result;
+    }
+    class Iterator final {
+    public:
+        using iterator_category=std::input_iterator_tag;
+        using value_type=Value;using difference_type=std::ptrdiff_t;using reference=Value;using pointer=void;
+        Iterator()=default;Iterator(const MeshReadArray* owner,std::size_t index):m_owner(owner),m_index(index){}
+        Value operator*()const{return (*m_owner)[m_index];}
+        Value operator[](difference_type n)const{return *(*this+n);}
+        Iterator& operator++(){++m_index;return *this;}Iterator operator++(int){auto old=*this;++*this;return old;}
+        Iterator& operator--(){--m_index;return *this;}Iterator operator--(int){auto old=*this;--*this;return old;}
+        Iterator& operator+=(difference_type n){m_index=std::size_t(difference_type(m_index)+n);return *this;}
+        Iterator& operator-=(difference_type n){return *this+=-n;}
+        Iterator operator+(difference_type n)const{auto value=*this;return value+=n;}
+        friend Iterator operator+(difference_type n,Iterator value){return value+=n;}
+        Iterator operator-(difference_type n)const{auto value=*this;return value-=n;}
+        difference_type operator-(const Iterator& other)const{return difference_type(m_index)-difference_type(other.m_index);}
+        bool operator==(const Iterator& other)const{return m_owner==other.m_owner && m_index==other.m_index;}
+        bool operator!=(const Iterator& other)const{return !(*this==other);}
+        bool operator<(const Iterator& other)const{return m_index<other.m_index;}
+        bool operator>(const Iterator& other)const{return other<*this;}
+        bool operator<=(const Iterator& other)const{return !(other<*this);}
+        bool operator>=(const Iterator& other)const{return !(*this<other);}
+    private:const MeshReadArray* m_owner=nullptr;std::size_t m_index=0;
+    };
+    Iterator begin()const{return {this,0};}Iterator end()const{return {this,GetCount()};}
+    template<class Predicate> bool All(Predicate predicate,const std::function<bool()>& cancelled={})const {
+        for(std::size_t offset=0;offset<size();) {
+            auto chunk=GetChunk(offset,65536/sizeof(Value)+1,cancelled);
+            if(chunk.error!=MeshReadError::None)throw std::runtime_error("Mesh validation read failed.");
+            if(!std::all_of(chunk.values.begin(),chunk.values.end(),predicate))return false;
+            offset=chunk.nextOffset;
+        }
+        return true;
+    }
+    bool operator==(const MeshReadArray& other)const{return size()==other.size() && std::equal(begin(),end(),other.begin());}
+    bool operator!=(const MeshReadArray& other)const{return !(*this==other);}
+private:
+    friend class MeshPayloadBuilder;
+    std::shared_ptr<const MeshValueSource<Value>> m_source;
+};
+
+struct MeshField final {
+    std::string name;
+    std::size_t componentCount=0;
+    MeshReadArray<double> values;
+    std::uint32_t activeRoles=0;
+};
+
 class SurfaceMeshPayload final : public IDataPayload {
     friend class RoiService;
+    friend class MeshPayloadBuilder;
     class RoiMeshIndex;
     struct MeshData final {
-        MeshData(std::vector<double> points,std::vector<std::uint64_t> faces,
-            std::vector<MeshAttribute> pointData,std::vector<MeshAttribute> cellData)
+        MeshData(MeshReadArray<double> points,MeshReadArray<std::uint64_t> faces,
+            std::vector<MeshField> pointData,std::vector<MeshField> cellData)
             : vertices(std::move(points)),triangles(std::move(faces)),
               pointAttributes(std::move(pointData)),cellAttributes(std::move(cellData)) {}
-        std::vector<double> vertices;
-        std::vector<std::uint64_t> triangles;
-        std::vector<MeshAttribute> pointAttributes;
-        std::vector<MeshAttribute> cellAttributes;
+        MeshReadArray<double> vertices;
+        MeshReadArray<std::uint64_t> triangles;
+        std::vector<MeshField> pointAttributes;
+        std::vector<MeshField> cellAttributes;
         // 索引只由不可变网格载荷拥有；任务借用拓扑时另外持有该载荷快照。
         mutable std::mutex roiIndexMutex;
         mutable std::array<double,16> roiIndexTransform{};
         mutable std::shared_ptr<const RoiMeshIndex> roiIndex;
     };
 public:
+    SurfaceMeshPayload(MeshReadArray<double> vertices,MeshReadArray<std::uint64_t> triangles,
+        std::vector<MeshField> pointFields,std::string coordinateFrame,std::vector<MeshField> cellFields={})
+        :SurfaceMeshPayload(std::move(vertices),std::move(triangles),std::move(pointFields),
+            std::move(coordinateFrame),std::move(cellFields),ReadUse{}){}
     SurfaceMeshPayload(
         std::vector<double> vertices,
         std::vector<std::uint64_t> triangles,
@@ -484,7 +602,8 @@ public:
         std::string coordinateFrame = "RAS",
         std::vector<MeshAttribute> cellAttributes = {})
         : m_mesh(std::make_shared<const MeshData>(
-            std::move(vertices), std::move(triangles), std::move(pointAttributes),std::move(cellAttributes)))
+            MeshReadArray<double>(std::move(vertices)), MeshReadArray<std::uint64_t>(std::move(triangles)),
+            GetFields(std::move(pointAttributes)),GetFields(std::move(cellAttributes))))
         , m_coordinateFrame(std::move(coordinateFrame))
         , m_isValid(GetMeshValid())
     {
@@ -501,16 +620,16 @@ public:
         }
     }
 
-    const std::vector<double>& GetVertices() const noexcept { return m_mesh->vertices; }
-    const std::vector<std::uint64_t>& GetTriangles() const noexcept
+    const MeshReadArray<double>& GetPointValues() const noexcept { return m_mesh->vertices; }
+    const MeshReadArray<std::uint64_t>& GetTriangleIndices() const noexcept
     {
         return m_mesh->triangles;
     }
-    const std::vector<MeshAttribute>& GetPointAttributes() const noexcept
+    const std::vector<MeshField>& GetPointFields() const noexcept
     {
         return m_mesh->pointAttributes;
     }
-    const std::vector<MeshAttribute>& GetCellAttributes() const noexcept { return m_mesh->cellAttributes; }
+    const std::vector<MeshField>& GetCellFields() const noexcept { return m_mesh->cellAttributes; }
     const std::string& GetCoordinateFrame() const noexcept
     {
         return m_coordinateFrame;
@@ -522,26 +641,35 @@ public:
     }
 
 private:
-    bool GetMeshValid() const noexcept
+    struct ReadUse final {std::function<bool()> cancelled;};
+    SurfaceMeshPayload(MeshReadArray<double> points,MeshReadArray<std::uint64_t> faces,
+        std::vector<MeshField> pointData,std::string frame,std::vector<MeshField> cellData,ReadUse use)
+        :m_mesh(std::make_shared<const MeshData>(std::move(points),std::move(faces),std::move(pointData),std::move(cellData))),
+         m_coordinateFrame(std::move(frame)),m_isValid(GetMeshValid(use.cancelled)){}
+    static std::vector<MeshField> GetFields(std::vector<MeshAttribute> input) {
+        std::vector<MeshField> fields;fields.reserve(input.size());
+        for(auto& field:input)fields.push_back({std::move(field.name),field.componentCount,MeshReadArray<double>(std::move(field.values)),field.activeRoles});
+        return fields;
+    }
+    bool GetMeshValid(const std::function<bool()>& cancelled={}) const noexcept
     {
+        try {
         if (m_mesh->vertices.size() % 3 != 0
             || m_mesh->triangles.size() % 3 != 0
             || (m_mesh->vertices.empty() && !m_mesh->triangles.empty())
             || m_coordinateFrame.empty()
-            || !std::all_of(
-                m_mesh->vertices.begin(), m_mesh->vertices.end(),
-                [](const double value) { return std::isfinite(value); })) {
+            || !m_mesh->vertices.All(
+                [](const double value) { return std::isfinite(value); },cancelled)) {
             return false;
         }
         const auto pointCount = m_mesh->vertices.size() / 3;
-        if (!std::all_of(
-                m_mesh->triangles.begin(), m_mesh->triangles.end(),
+        if (!m_mesh->triangles.All(
                 [pointCount](const std::uint64_t value) {
                     return value < pointCount;
-                })) {
+                },cancelled)) {
             return false;
         }
-        const auto validAttributes=[](const std::vector<MeshAttribute>& attributes,std::size_t tuples) noexcept {
+        const auto validAttributes=[&cancelled](const std::vector<MeshField>& attributes,std::size_t tuples) {
             std::uint32_t roles=0;
             for(std::size_t index=0;index<attributes.size();++index) {
                 const auto& attribute=attributes[index];
@@ -550,7 +678,7 @@ private:
                     ||tuples>std::numeric_limits<std::size_t>::max()/attribute.componentCount
                     ||attribute.values.size()!=tuples*attribute.componentCount
                     ||(attribute.activeRoles&~MeshAttributeRoles::all)||(roles&attribute.activeRoles)
-                    ||!std::all_of(attribute.values.begin(),attribute.values.end(),[](double v){return std::isfinite(v);}))return false;
+                    ||!attribute.values.All([](double v){return std::isfinite(v);},cancelled))return false;
                 for(std::size_t prior=0;prior<index;++prior)if(attributes[prior].name==attribute.name)return false;
                 if((attribute.activeRoles&(MeshAttributeRoles::normals|MeshAttributeRoles::vectors))&&attribute.componentCount!=3)return false;
                 if((attribute.activeRoles&MeshAttributeRoles::tensors)&&attribute.componentCount!=9)return false;
@@ -562,6 +690,7 @@ private:
         if(!validAttributes(m_mesh->pointAttributes,pointCount)
             ||!validAttributes(m_mesh->cellAttributes,m_mesh->triangles.size()/3))return false;
         return true;
+        }catch(...){return false;}
     }
 
 private:

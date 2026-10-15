@@ -72,11 +72,11 @@ public:
         std::size_t pointComponents=0,cellComponents=0,canonical=0;
         if(m_canonical) {
             if(!m_canonical->GetValid())throw Failure{CropFailure::BadInput,"Canonical Root mesh is invalid."};
-            AddBytes(canonical,multiply(m_canonical->GetVertices().size(),sizeof(double)));
-            AddBytes(canonical,multiply(m_canonical->GetTriangles().size(),sizeof(std::uint64_t)));
-            for(const auto* attributes:{&m_canonical->GetPointAttributes(),&m_canonical->GetCellAttributes()})
+            AddBytes(canonical,multiply(m_canonical->GetPointValues().size(),sizeof(double)));
+            AddBytes(canonical,multiply(m_canonical->GetTriangleIndices().size(),sizeof(std::uint64_t)));
+            for(const auto* attributes:{&m_canonical->GetPointFields(),&m_canonical->GetCellFields()})
                 for(const auto& attribute:*attributes) {
-                    AddBytes(attributes==&m_canonical->GetPointAttributes()?pointComponents:cellComponents,attribute.componentCount);
+                    AddBytes(attributes==&m_canonical->GetPointFields()?pointComponents:cellComponents,attribute.componentCount);
                     AddBytes(canonical,multiply(attribute.values.size(),sizeof(double)));
                     AddBytes(m_fixed,4096+4*attribute.name.size());
                 }

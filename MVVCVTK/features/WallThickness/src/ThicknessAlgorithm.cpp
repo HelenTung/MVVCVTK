@@ -332,14 +332,15 @@ class Kernel final
 
     ThicknessPoint Vertex(std::uint64_t id) const
     {
-        const auto *v = m_mesh.GetVertices().data() + id * 3;
+        const auto& values=m_mesh.GetPointValues();
+        const ThicknessPoint v{values[id*3],values[id*3+1],values[id*3+2]};
         return Sub({v[0], v[1], v[2]}, m_geometry.origin);
     }
     ThicknessPoint Interpolate(std::uint64_t triangle, const ThicknessPoint &bary) const
     {
         ThicknessPoint p{};
         for (std::size_t k = 0; k < 3; ++k)
-            p = Add(p, Scale(Vertex(m_mesh.GetTriangles()[triangle * 3 + k]), bary[k]));
+            p = Add(p, Scale(Vertex(m_mesh.GetTriangleIndices()[triangle * 3 + k]), bary[k]));
         return p;
     }
     ThicknessPoint Index(const ThicknessPoint &p) const
@@ -393,7 +394,7 @@ class Kernel final
     void ValidateInput()
     {
         if (!m_work.source->GetValid() || !m_work.labels->GetValid() || !m_mesh.GetValid() ||
-            m_mesh.GetVertices().empty() || m_mesh.GetTriangles().empty())
+            m_mesh.GetPointValues().empty() || m_mesh.GetTriangleIndices().empty())
             throw Failure{ThicknessStatus::InvalidInput, "Invalid input payload."};
         const auto &g = m_work.source->GetGeometry();
         if (m_work.source->GetComponentCount() != 1 ||
@@ -437,7 +438,7 @@ class Kernel final
     template<class Emit> void VisitEvaluation(std::size_t triangle,const Emit& emit)
     {
         ThicknessDisplaySampling::Corners original{};
-        for (unsigned k=0;k<3;++k) original[k]=Vertex(m_mesh.GetTriangles()[triangle*3+k]);
+        for (unsigned k=0;k<3;++k) original[k]=Vertex(m_mesh.GetTriangleIndices()[triangle*3+k]);
         if (!m_work.evaluationRoi) {
             ThicknessDisplaySampling::Visit(original,m_params.sampleSpacing,[&]{CheckWork(m_work);},emit);
             return;
@@ -477,7 +478,7 @@ class Kernel final
     }
     void BuildSampling()
     {
-        const auto pc=m_mesh.GetVertices().size()/3, tc=m_mesh.GetTriangles().size()/3;
+        const auto pc=m_mesh.GetPointValues().size()/3, tc=m_mesh.GetTriangleIndices().size()/3;
         const auto& limits=m_work.archive.limits;
         auto minimum=Vertex(0), maximum=minimum;
         for (std::size_t i=0;i<pc;++i) {
@@ -501,7 +502,7 @@ class Kernel final
         for (std::size_t i=0;i<tc;++i) {
             if ((i&255U)==0) CheckWork(m_work);
             std::array<ThicknessPoint,3> p{};
-            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangles()[i*3+k]);
+            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangleIndices()[i*3+k]);
             const double area=.5*Length(Cross(Sub(p[1],p[0]),Sub(p[2],p[0])));
             if (!std::isfinite(area)) throw Failure{ThicknessStatus::InvalidInput,"Triangle area overflow."};
             // 退化的种子面没有正面积来源；不使其他局部来源整体失败。
@@ -729,11 +730,11 @@ class Kernel final
                 {
                     sample.barycentricCorners[k][a] = patch.bary[k][a];
                     if (patch.bary[k][a])
-                        key[count++] = {m_mesh.GetTriangles()[triangle * 3 + a], patch.bary[k][a]};
+                        key[count++] = {m_mesh.GetTriangleIndices()[triangle * 3 + a], patch.bary[k][a]};
                 }
                 std::sort(key.begin(), key.begin() + count);
                 ids[k] = count==1 ? static_cast<std::size_t>(key[0].first)
-                    : vertices.emplace(key,m_mesh.GetVertices().size()/3+vertices.size()).first->second;
+                    : vertices.emplace(key,m_mesh.GetPointValues().size()/3+vertices.size()).first->second;
                 bary = Add(bary, Scale(sample.barycentricCorners[k], 1.0 / 3));
             }
             const auto p = Interpolate(triangle, bary);
@@ -917,13 +918,14 @@ ThicknessPoint GetSampleCorner(const SurfaceMeshPayload &mesh, const ThicknessSa
                                std::size_t corner)
 {
     // 先减局部参考再加回，避免大原点重心和的放大误差。
-    const auto first = mesh.GetTriangles().at(sample.sourceTriangle * 3);
-    const auto *origin = mesh.GetVertices().data() + first * 3;
+    const auto first = mesh.GetTriangleIndices().at(sample.sourceTriangle * 3);
+    const auto& values=mesh.GetPointValues();
+    const ThicknessPoint origin{values[first*3],values[first*3+1],values[first*3+2]};
     ThicknessPoint point{origin[0], origin[1], origin[2]};
     for (std::size_t k = 0; k < 3; ++k)
     {
-        const auto id = mesh.GetTriangles().at(sample.sourceTriangle * 3 + k);
-        const auto *vertex = mesh.GetVertices().data() + id * 3;
+        const auto id = mesh.GetTriangleIndices().at(sample.sourceTriangle * 3 + k);
+        const ThicknessPoint vertex{values[id*3],values[id*3+1],values[id*3+2]};
         for (std::size_t a = 0; a < 3; ++a)
             point[a] += (vertex[a] - origin[a]) * sample.barycentricCorners.at(corner)[k];
     }

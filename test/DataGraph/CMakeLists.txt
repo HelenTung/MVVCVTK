@@ -3,6 +3,7 @@ add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
     DataLifetimeTests.cpp
     ResultRetentionTests.cpp
+    MeshPagedStorageTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
@@ -10,6 +11,7 @@ add_executable(mvvcvtk_data_graph_tests
 target_include_directories(
     mvvcvtk_data_graph_tests
     PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support"
 )
 SetTargetDefaults(mvvcvtk_data_graph_tests)
 set_target_properties(
@@ -19,6 +21,7 @@ set_target_properties(
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
 add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
 add_test(NAME DataGraph.ResultRetention COMMAND mvvcvtk_data_graph_tests retention)
+add_test(NAME DataGraph.MeshBlocks COMMAND mvvcvtk_data_graph_tests mesh-blocks)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp

@@ -71,7 +71,7 @@ void Features() {
 }
 void AutomaticAlignment() {
     auto w = Model();
-    const auto measured = w.mesh->GetVertices();
+    const auto measured = w.mesh->GetPointValues();
     const auto seeds = AlignmentPrealign::BuildCandidates(w);
     std::cerr << "prealignment: " << seeds.statistics.sourceSamples << '/' << seeds.statistics.referenceSamples
               << " samples, " << seeds.statistics.sourceFeatures << '/' << seeds.statistics.referenceFeatures
@@ -89,14 +89,14 @@ void AutomaticAlignment() {
     for (std::size_t i = 0; i < truth.size(); ++i)
         Check(std::abs(result.sourceToTarget[i] - truth[i]) < numericTolerance,
               "large initial pose recovered from asymmetric surface");
-    Check(w.mesh->GetVertices() == measured, "automatic work sampling does not mutate measured surface");
+    Check(w.mesh->GetPointValues() == measured, "automatic work sampling does not mutate measured surface");
     auto noAutomatic = w; noAutomatic.recipe.prealignment.reset();
     const auto uninitialized = AlignmentSolver::BuildResult(noAutomatic);
     Check(uninitialized.diagnostics.status != AlignmentStatus::FullyDetermined || !uninitialized.diagnostics.isQualityPassed,
           "fixture requires prealignment instead of already being locally aligned");
 
     w.recipe.surfaceFit.reset(); w.recipe.method = AlignmentMethod::Rps;
-    const auto &nominal = w.referenceMesh->GetVertices();
+    const auto &nominal = w.referenceMesh->GetPointValues();
     for (const std::uint64_t id : {0,12,130}) {
         AlignmentGeometrySpec geometry;
         geometry.id = "point-" + std::to_string(id); geometry.kind = AlignmentGeometryKind::Point;
@@ -147,11 +147,11 @@ void FailureAndAmbiguity() {
 }
 void SelectionAndRepresentation() {
     auto w = Model();
-    auto triangles = w.referenceMesh->GetTriangles();
+    std::vector<std::uint64_t> triangles(w.referenceMesh->GetTriangleIndices().begin(),w.referenceMesh->GetTriangleIndices().end());
     for (std::size_t i = 0; i < triangles.size() / 6; ++i)
         for (std::size_t j = 0; j < 3; ++j)
             std::swap(triangles[3*i+j], triangles[triangles.size()-3*(i+1)+j]);
-    w.referenceMesh = std::make_shared<const SurfaceMeshPayload>(w.referenceMesh->GetVertices(), std::move(triangles));
+    w.referenceMesh = std::make_shared<const SurfaceMeshPayload>(w.referenceMesh->GetPointValues(),MeshReadArray<std::uint64_t>(std::move(triangles)),std::vector<MeshField>{},w.referenceMesh->GetCoordinateFrame());
     const auto reordered = AlignmentSolver::BuildResult(w);
     std::cerr << "reordered reference: " << static_cast<int>(reordered.diagnostics.status) << ' '
               << reordered.diagnostics.message << " rms=" << reordered.diagnostics.rms << '\n';
@@ -168,7 +168,7 @@ void SelectionAndRepresentation() {
     Check(AlignmentSolver::BuildResult(w).diagnostics.status == AlignmentStatus::InvalidInput,
           "duplicate prealignment triangle selection rejected");
     w.recipe.prealignment->sourceTriangles.clear();
-    w.recipe.prealignment->referenceTriangles = {w.referenceMesh->GetTriangles().size()/3};
+    w.recipe.prealignment->referenceTriangles = {w.referenceMesh->GetTriangleIndices().size()/3};
     Check(AlignmentSolver::BuildResult(w).diagnostics.status == AlignmentStatus::InvalidInput,
           "reference triangle index bounds checked");
     w = Work();

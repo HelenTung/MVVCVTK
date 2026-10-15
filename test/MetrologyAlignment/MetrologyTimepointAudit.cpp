@@ -187,7 +187,7 @@ struct Surface final {
     DataRevisionRef source,mesh,generation;
     std::shared_ptr<const SurfaceMeshPayload> payload;
     std::vector<std::uint64_t> validVertices,validTriangles;
-    std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
+    std::shared_ptr<const MeshReadArray<SurfaceObjectRecord>> objects;
     std::optional<double> iso;
 };
 Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,const Scan &scan,const Manifest &m,std::ostream &out,const std::filesystem::path &folder) {
@@ -223,19 +223,19 @@ Surface Determine(TestDataPort &data,SurfaceDeterminationHostFeature &feature,co
         Require(bool(surface.payload),"Formal surface mesh unavailable.");
         const std::array<double,6> expectedBounds{-scan.nativeRoi[1]*scan.spacing,-scan.nativeRoi[0]*scan.spacing,
             -scan.nativeRoi[3]*scan.spacing,-scan.nativeRoi[2]*scan.spacing,scan.nativeRoi[4]*scan.spacing,scan.nativeRoi[5]*scan.spacing};
-        const auto &positions=surface.payload->GetVertices();
+        const auto &positions=surface.payload->GetPointValues();
         for (std::size_t i=0;i<positions.size();++i) Require(positions[i]>=expectedBounds[2*(i%3)]-1e-8 &&
             positions[i]<=expectedBounds[2*(i%3)+1]+1e-8,"Published point violates native-ROI physical bounds.");
         const bool fullVolume=scan.nativeRoi==std::array<int,6>{0,1535,0,1535,0,1535};
         out<<",\"physicalBoundsChecked\":true,\"inputIsCroppedFromParent\":"<<(fullVolume ? "false" : "true")<<",\"voxelCenterBoundsRAS\":[";
         for (std::size_t i=0;i<6;++i) { if (i) out<<','; out<<expectedBounds[i]; } out<<']';
-        const MeshAttribute *valid=nullptr;
-        for (const auto &a:surface.payload->GetPointAttributes()) if (a.name=="measurement.valid") valid=&a;
-        Require(valid && valid->values.size()==surface.payload->GetVertices().size()/3,"Measurement validity attributes missing.");
+        const MeshField *valid=nullptr;
+        for (const auto &a:surface.payload->GetPointFields()) if (a.name=="measurement.valid") valid=&a;
+        Require(valid && valid->values.size()==surface.payload->GetPointValues().size()/3,"Measurement validity attributes missing.");
         for (std::size_t i=0;i<valid->values.size();++i) if (valid->values[i]==1) surface.validVertices.push_back(i);
-        const auto &tri=surface.payload->GetTriangles();
-        const MeshAttribute *faceValidity=nullptr;
-        for (const auto &a:surface.payload->GetCellAttributes()) if (a.name=="measurement.valid") faceValidity=&a;
+        const auto &tri=surface.payload->GetTriangleIndices();
+        const MeshField *faceValidity=nullptr;
+        for (const auto &a:surface.payload->GetCellFields()) if (a.name=="measurement.valid") faceValidity=&a;
         Require(faceValidity && faceValidity->componentCount==1 && faceValidity->values.size()==tri.size()/3 &&
             snapshot->triangleValidity && faceValidity->values.size()==snapshot->triangleValidity->size() &&
             std::equal(faceValidity->values.begin(),faceValidity->values.end(),snapshot->triangleValidity->begin()),
@@ -301,8 +301,8 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
     recipe.requiresMeasurementQuality=true; recipe.surfaceFit=AlignmentSurfaceFit{};
     recipe.surfaceFit->referenceTriangles=surface.validTriangles;
     AlignmentRegion region; region.pinnedMesh=surface.mesh;
-    std::vector<bool> selected(surface.payload->GetVertices().size()/3,false);
-    const auto &tri=surface.payload->GetTriangles();
+    std::vector<bool> selected(surface.payload->GetPointValues().size()/3,false);
+    const auto &tri=surface.payload->GetTriangleIndices();
     for (auto i:surface.validTriangles) for (std::size_t j=0;j<3;++j) selected[tri[3*i+j]]=true;
     // 100% 覆盖控制只选取整个邻面支撑均有效的顶点；不能把有效面的边界顶点
     // 隐含连接的无效面删除后，仍将该顶点选区称为完整有效。
@@ -374,7 +374,7 @@ bool IdentityControl(MetrologyAlignmentHostFeature &feature,const Surface &surfa
 }
 AlignmentResult NativeFrame(MetrologyAlignmentHostFeature &feature,const Surface &surface,const Manifest &m) {
     Require(surface.payload && surface.validVertices.size()>=3,"Native frame needs three valid surface points.");
-    const auto &v=surface.payload->GetVertices();
+    const auto &v=surface.payload->GetPointValues();
     const auto point=[&](std::uint64_t id) { return AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]}; };
     const auto distance=[](const AlignmentPoint &a,const AlignmentPoint &b) { double d=0; for (int j=0;j<3;++j) d+=(a[j]-b[j])*(a[j]-b[j]); return d; };
     std::array<std::uint64_t,3> anchors{surface.validVertices.front(),0,0};
@@ -404,7 +404,7 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
              std::vector<DataRevisionRef> &reports) {
     if (!surface.payload || surface.validVertices.size()<3) { out<<"{\"attempted\":false}"; return false; }
     const auto started=std::chrono::steady_clock::now(); bool passed=false;
-    const auto &v=surface.payload->GetVertices();
+    const auto &v=surface.payload->GetPointValues();
     const auto point=[&](std::uint64_t id) { return AlignmentPoint{v[3*id],v[3*id+1],v[3*id+2]}; };
     const auto alignment=NativeFrame(feature,surface,m);
     out<<"{\"attempted\":true,\"scope\":\"native RAW coordinate assignment, not alignment to independent nominal geometry\",\"alignmentStatus\":"<<unsigned(alignment.status);
@@ -412,8 +412,8 @@ bool RingFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,const
         InspectionPlan plan; plan.id="ring-local-wall"; plan.alignmentResult=alignment.result; plan.requiresMeasurementQuality=true;
         InspectionGeometrySpec cylinder; cylinder.fit.id="outer-wall-patch"; cylinder.fit.kind=AlignmentGeometryKind::Cylinder;
         cylinder.fit.targetDirection={1,0,0}; cylinder.fit.maxFitRms=.0778; cylinder.fit.region.pinnedMesh=surface.mesh;
-        const MeshAttribute *normals=nullptr;
-        for (const auto &attribute:surface.payload->GetPointAttributes()) if (attribute.name=="measurement.normal") normals=&attribute;
+        const MeshField *normals=nullptr;
+        for (const auto &attribute:surface.payload->GetPointFields()) if (attribute.name=="measurement.normal") normals=&attribute;
         Require(normals && normals->componentCount==3,"Ring source normals missing.");
         for (auto i:surface.validVertices) if (std::abs(normals->values[3*i])<.3) cylinder.fit.region.vertexIds.push_back(i);
         out<<",\"selectedPoints\":"<<cylinder.fit.region.vertexIds.size(); plan.geometries.push_back(std::move(cylinder));
@@ -473,7 +473,7 @@ bool SectionFit(MetrologyAlignmentHostFeature &feature,const Surface &surface,co
     const auto alignment=NativeFrame(feature,surface,m);
     Require(alignment.status==AlignmentStatus::FullyDetermined && alignment.diagnostics.isQualityPassed,"Section native frame assignment failed.");
     const auto archive=feature.GetArchive(alignment.result); Require(bool(archive),"Section frame unavailable.");
-    const auto &vertices=surface.payload->GetVertices(); const auto &triangles=surface.payload->GetTriangles();
+    const auto &vertices=surface.payload->GetPointValues(); const auto &triangles=surface.payload->GetTriangleIndices();
     const auto prefix=scan.id+"-section";
     std::ofstream points(folder/(prefix+"-points.csv")),faces(folder/(prefix+"-triangles.csv"));
     points.imbue(std::locale::classic()); faces.imbue(std::locale::classic()); points<<std::setprecision(17);

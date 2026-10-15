@@ -1,3 +1,4 @@
+#include "Support/PagedArray.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 
@@ -356,19 +357,21 @@ public:
         return prepared;
     }
     RoiMeshIndex(const SurfaceMeshPayload& mesh,const Matrix& matrix,const RoiOperationRequest& request)
-        :m_triangles(mesh.GetTriangles()){
+        :m_triangles(mesh.GetTriangleIndices()){
         m_bounds={INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
-        m_points.reserve(mesh.GetVertices().size()/3);
-        for(std::size_t i=0;i<mesh.GetVertices().size();i+=3){if(i%768==0)CheckCancel(request);
-            const auto p=Transform(matrix,{mesh.GetVertices()[i],mesh.GetVertices()[i+1],mesh.GetVertices()[i+2]});
+        m_points.reserve(mesh.GetPointValues().size()/3);
+        for(std::size_t i=0;i<mesh.GetPointValues().size();i+=3){if(i%768==0)CheckCancel(request);
+            const auto p=Transform(matrix,{mesh.GetPointValues()[i],mesh.GetPointValues()[i+1],mesh.GetPointValues()[i+2]});
             Require(std::all_of(p.begin(),p.end(),[](double value){return std::isfinite(value);}),RoiError::InvalidGeometry,"ROI transformed mesh is not finite.");
             m_points.push_back(p);for(int a=0;a<3;++a){m_bounds[a*2]=std::min(m_bounds[a*2],p[a]);m_bounds[a*2+1]=std::max(m_bounds[a*2+1],p[a]);}}
-        const auto& triangles=mesh.GetTriangles();std::map<std::pair<std::uint64_t,std::uint64_t>,std::size_t> edges;
+        const auto& triangles=mesh.GetTriangleIndices();PagedArray<std::array<std::uint64_t,2>> edges;
         for(std::size_t i=0;i<triangles.size();i+=3){if(i%768==0)CheckCancel(request);
             const auto normal=Cross(Subtract(m_points[triangles[i+1]],m_points[triangles[i]]),Subtract(m_points[triangles[i+2]],m_points[triangles[i]]));
             Require(Dot(normal,normal)>0 && std::isfinite(Dot(normal,normal)),RoiError::InvalidGeometry,"ROI mesh contains a degenerate face.");
-            for(int e=0;e<3;++e){auto a=triangles[i+e],b=triangles[i+(e+1)%3];if(a>b)std::swap(a,b);++edges[{a,b}];}}
-        m_closed=!triangles.empty() && std::all_of(edges.begin(),edges.end(),[](const auto& e){return e.second==2;});
+            for(int e=0;e<3;++e){auto a=triangles[i+e],b=triangles[i+(e+1)%3];if(a>b)std::swap(a,b);edges.push_back({a,b});}}
+        SortPagedArray(edges,std::less<std::array<std::uint64_t,2>>{},[&]{CheckCancel(request);});
+        m_closed=!triangles.empty();
+        for(std::size_t first=0;first<edges.size();){CheckCancel(request);auto end=first+1;while(end<edges.size() && edges[end]==edges[first])++end;if(end-first!=2)m_closed=false;first=end;}
         m_order.resize(triangles.size()/3);std::iota(m_order.begin(),m_order.end(),0);
         if(!m_order.empty())Build(0,m_order.size(),request);
     }
@@ -403,8 +406,8 @@ private:
             if(std::abs(det)<=1e-14)continue;const auto q=Subtract(p,a);const double u=Dot(q,h)/det;if(u<0 || u>1)continue;
             const auto cross=Cross(q,ab);const double v=Dot(ray,cross)/det,t=Dot(ac,cross)/det;if(v>=0 && u+v<=1 && t>0)hits.push_back(t);}
     }
-    const std::vector<std::uint64_t>& m_triangles;
-    std::vector<Point> m_points;std::vector<std::size_t> m_order;std::vector<Node> m_nodes;std::array<double,6> m_bounds;bool m_closed=false;
+    MeshReadArray<std::uint64_t> m_triangles;
+    PagedArray<Point> m_points;PagedArray<std::size_t> m_order;PagedArray<Node> m_nodes;std::array<double,6> m_bounds;bool m_closed=false;
 };
 
 namespace {

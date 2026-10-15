@@ -132,7 +132,7 @@ void SelectionAndQuality() {
     r = AlignmentSolver::BuildResult(w);
     Check(r.diagnostics.status != AlignmentStatus::FullyDetermined && r.geometries.empty(),
           "required missing quality rejected");
-    auto vertices = w.mesh->GetVertices();
+    std::vector<double> vertices(w.mesh->GetPointValues().begin(),w.mesh->GetPointValues().end());
     std::vector<MeshAttribute> attrs{
         {"measurement.valid", 1, {1, 1, 1, 0, 1}},
         {"measurement.support-ratio", 1, {1, 1, 1, 1, 1}},

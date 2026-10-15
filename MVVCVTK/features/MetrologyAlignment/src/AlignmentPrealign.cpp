@@ -137,11 +137,11 @@ void CheckBudget(const AlignmentWork &work, std::size_t source, std::size_t refe
 }
 struct Face final { std::array<Vec, 3> points{}; std::array<std::size_t, 3> ids{}; Vec normal{}; double area = 0; };
 Face GetFace(const SurfaceMeshPayload &mesh, std::uint64_t id, bool usable = true) {
-    Require(id < mesh.GetTriangles().size() / 3, "Prealignment triangle selection is out of bounds.");
+    Require(id < mesh.GetTriangleIndices().size() / 3, "Prealignment triangle selection is out of bounds.");
     Face face;
-    const auto &vertices = mesh.GetVertices();
+    const auto &vertices = mesh.GetPointValues();
     for (std::size_t j = 0; j < 3; ++j) {
-        face.ids[j] = static_cast<std::size_t>(mesh.GetTriangles()[3 * id + j]);
+        face.ids[j] = static_cast<std::size_t>(mesh.GetTriangleIndices()[3 * id + j]);
         const auto offset = 3 * face.ids[j];
         face.points[j] = {vertices[offset], vertices[offset + 1], vertices[offset + 2]};
     }
@@ -153,7 +153,7 @@ Face GetFace(const SurfaceMeshPayload &mesh, std::uint64_t id, bool usable = tru
 }
 bool GetFaceUsable(const AlignmentWork &work, const SurfaceMeshPayload &mesh, std::uint64_t id, bool source) {
     if (!AlignmentGeometryFit::GetFaceValid(mesh, id)) return false;
-    const auto &ids = mesh.GetTriangles();
+    const auto &ids = mesh.GetTriangleIndices();
     return !source || (AlignmentGeometryFit::GetPointUsable(work, ids[3*id]) &&
         AlignmentGeometryFit::GetPointUsable(work, ids[3*id+1]) && AlignmentGeometryFit::GetPointUsable(work, ids[3*id+2]));
 }
@@ -165,7 +165,7 @@ struct SamplePlan final {
 SamplePlan PlanSamples(const SurfaceMeshPayload &mesh, const std::vector<std::uint64_t> &selection,
                        const AlignmentWork &work, bool source) {
     CheckWork(work);
-    Require(mesh.GetValid() && !mesh.GetTriangles().empty(), "Prealignment requires a triangle mesh.");
+    Require(mesh.GetValid() && !mesh.GetTriangleIndices().empty(), "Prealignment requires a triangle mesh.");
     SamplePlan plan; plan.selected = selection;
     std::size_t comparisons = 0;
     std::sort(plan.selected.begin(), plan.selected.end(), [&](auto a, auto b) {
@@ -173,7 +173,7 @@ SamplePlan PlanSamples(const SurfaceMeshPayload &mesh, const std::vector<std::ui
     });
     Require(std::adjacent_find(plan.selected.begin(), plan.selected.end()) == plan.selected.end(),
             "Duplicate prealignment triangle selection.");
-    const auto count = plan.selected.empty() ? mesh.GetTriangles().size() / 3 : plan.selected.size();
+    const auto count = plan.selected.empty() ? mesh.GetTriangleIndices().size() / 3 : plan.selected.size();
     double correction = 0;
     for (std::size_t i = 0; i < count; ++i) {
         if (i % 256 == 0) CheckWork(work);
@@ -203,7 +203,7 @@ AlignmentFeatureCloud SampleMesh(const SurfaceMeshPayload &mesh, const SamplePla
                                  const AlignmentWork &work, bool source) {
     AlignmentFeatureCloud cloud;
     cloud.points.reserve(plan.count); cloud.normals.reserve(plan.count);
-    const auto count = plan.selected.empty() ? mesh.GetTriangles().size() / 3 : plan.selected.size();
+    const auto count = plan.selected.empty() ? mesh.GetTriangleIndices().size() / 3 : plan.selected.size();
     double cumulative = 0, correction = 0;
     std::size_t sample = 0;
     for (std::size_t i = 0; i < count && sample < plan.count; ++i) {

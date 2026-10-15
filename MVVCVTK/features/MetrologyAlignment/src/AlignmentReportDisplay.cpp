@@ -13,6 +13,7 @@ BuildDeviation(const AlignmentDeviationDisplay &display,
   if (!resolved)
     throw std::invalid_argument("Invalid report colorbar configuration.");
   MetrologyReportDeviationDisplay output;
+  output.colorMapVersion=AlignmentDeviationColors::version;
   output.parameters=display;AnalysisColorStyle::SetTailColors(output.parameters);
   output.mappingRange=AlignmentDeviationColors::GetEffectiveRange(*result.forward) ? std::optional<std::array<double,2>>(resolved->range):std::nullopt;
   output.legendRgb = AlignmentDeviationColors::GetLegend(

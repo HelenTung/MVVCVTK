@@ -313,11 +313,11 @@ bool GetMeshRoundTripValid()
     for(vtkIdType i=0;i<3;++i)wide->SetValue(i,9007199254740993ULL);
     mesh->GetPointData()->AddArray(wide);
     const bool rejectsLoss=!bridge.CreateMeshPayload(mesh);mesh->GetPointData()->RemoveArray("WideId");
-    auto duplicate=payload?payload->GetPointAttributes():std::vector<MeshAttribute>{};
+    auto duplicate=payload?payload->GetPointFields():std::vector<MeshField>{};
     if(!duplicate.empty())duplicate.push_back(duplicate.front());
-    const SurfaceMeshPayload invalidAttributes(payload->GetVertices(),payload->GetTriangles(),std::move(duplicate));
+    const SurfaceMeshPayload invalidAttributes(payload->GetPointValues(),payload->GetTriangleIndices(),std::move(duplicate),payload->GetCoordinateFrame());
     return Check(rejectsLoss&&!invalidAttributes.GetValid(),"mesh integer precision loss or ambiguous attributes were accepted")
-        &&Check(payload&&payload->GetPointAttributes().size()==2&&payload->GetCellAttributes().size()==1
+        &&Check(payload&&payload->GetPointFields().size()==2&&payload->GetCellFields().size()==1
             &&view&&view->mesh->GetPointData()->GetNormals()&&view->mesh->GetPointData()->GetScalars()
             &&view->mesh->GetCellData()->GetScalars()
             &&view->mesh->GetPointData()->GetNormals()->GetComponent(0,2)==1
@@ -525,25 +525,28 @@ bool GetMeasurementRoundTripValid()
     const auto view = bridge.GetSurfaceMesh(data);
     const auto roundTrip = view ? bridge.CreateMeshPayload(view->mesh) : nullptr;
     bool valid = Check(view && view->mesh->GetPoints()->GetDataType() == VTK_DOUBLE
-        && roundTrip && roundTrip->GetVertices() == payload->GetVertices()
-        && roundTrip->GetPointAttributes().size() == 3,
+        && roundTrip && roundTrip->GetPointValues() == payload->GetPointValues()
+        && roundTrip->GetPointFields().size() == 3,
         "measurement coordinates and named arrays survive VTK round trip");
     if (roundTrip) {
-        const auto& attributes = roundTrip->GetPointAttributes();
+        const auto& attributes = roundTrip->GetPointFields();
         for (std::size_t i = 0; i < attributes.size(); ++i) {
-            valid = Check(attributes[i].name == payload->GetPointAttributes()[i].name
-                && attributes[i].componentCount == payload->GetPointAttributes()[i].componentCount
-                && attributes[i].values == payload->GetPointAttributes()[i].values,
+            valid = Check(attributes[i].name == payload->GetPointFields()[i].name
+                && attributes[i].componentCount == payload->GetPointFields()[i].componentCount
+                && attributes[i].values == payload->GetPointFields()[i].values,
                 "measurement values and component shape remain exact") && valid;
         }
     }
     if (view) {
-        auto* array = view->mesh->GetPointData()->GetArray("measurement.fit-residual");
+        auto modified=vtkSmartPointer<vtkPolyData>::New();modified->DeepCopy(view->mesh);
+        auto array=vtkSmartPointer<vtkDoubleArray>::New();array->SetName("measurement.fit-residual");
+        array->SetNumberOfTuples(3);array->FillValue(0);
         array->SetComponent(0, 0, std::numeric_limits<double>::quiet_NaN());
-        valid = Check(!bridge.CreateMeshPayload(view->mesh),
+        modified->GetPointData()->RemoveArray("measurement.fit-residual");modified->GetPointData()->AddArray(array);
+        valid = Check(!bridge.CreateMeshPayload(modified),
             "nonfinite measurement attributes fail instead of being silently discarded") && valid;
         array->SetNumberOfTuples(1);
-        valid = Check(!bridge.CreateMeshPayload(view->mesh),
+        valid = Check(!bridge.CreateMeshPayload(modified),
             "malformed point attributes fail") && valid;
     }
     return valid;

@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceContracts.h"
+#include "SurfaceGeometryStorage.h"
 #include <vtkImageData.h>
 
 #include <algorithm>
@@ -92,10 +93,11 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
             complete.result.status = SurfaceResultStatus::Cancelled;
             complete.result.failureReason = SurfaceFailureReason::Cancelled;
             complete.result.points = {};
-            std::vector<SurfacePointRecord>().swap(complete.result.points);
-            std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
-            std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
-            std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
+            PagedArray<SurfacePointRecord>().swap(complete.result.points);
+            PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
+            PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
+            PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
+            complete.result.prepared.reset();
             complete.result.requiredBytes = 0;
         }
     }
@@ -128,11 +130,12 @@ bool SurfaceDeterminationService::StopRequest(
     for (auto& complete : m_complete) if (complete.requestId == requestId) {
         complete.result.status = SurfaceResultStatus::Cancelled;
         complete.result.failureReason = SurfaceFailureReason::Cancelled;
-        std::vector<SurfacePointRecord>().swap(complete.result.points);
-        std::vector<std::uint32_t>().swap(complete.result.triangleIndices);
-        std::vector<std::uint8_t>().swap(complete.result.triangleValidity);
-        std::vector<SurfaceObjectRecord>().swap(complete.result.objects);
-        complete.result.requiredBytes = 0;
+        PagedArray<SurfacePointRecord>().swap(complete.result.points);
+        PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
+        PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
+        PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
+        complete.result.prepared.reset();
+            complete.result.requiredBytes = 0;
         didStop = true;
     }
     if (didStop) ++m_executionRevision;
@@ -315,6 +318,18 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
                     SetProgress(requestId, stage, progress);
                 },
                 job.inputs);
+            if(complete.result.status==SurfaceResultStatus::Succeeded){
+                try {
+                    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get());
+                    complete.result.prepared=image?PrepareSurfaceGeometry(complete.result,image->GetGeometry().coordinateFrame,
+                        job.params.componentSelection==SurfaceComponentSelection::All && !job.params.analysisRoi && job.params.minimumObjectVoxels<=1,
+                        [cancel=job.isCancelled]{return cancel->load();},job.inputs.parentStorage):nullptr;
+                    if(!complete.result.prepared){
+                        if(job.isCancelled->load())complete=BuildCancelled(job);
+                        else {complete.result.status=SurfaceResultStatus::Failed;complete.result.failureReason=SurfaceFailureReason::InvalidGeometry;complete.result.message="Surface storage preparation failed.";}
+                    }
+                } catch(const std::exception& error){complete.result.status=SurfaceResultStatus::Failed;complete.result.failureReason=SurfaceFailureReason::InternalError;complete.result.message=error.what();}
+            }
         }
 
         {

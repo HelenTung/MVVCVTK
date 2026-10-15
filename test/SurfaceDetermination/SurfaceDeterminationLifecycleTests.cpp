@@ -281,26 +281,26 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         const auto mesh = data
             ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
             : nullptr;
-        checks.Get(mesh && mesh->GetPointAttributes().size() == 9,
+        checks.Get(mesh && mesh->GetPointFields().size() == 9,
                    "generic mesh publishes measurement quality attributes");
-        checks.Get(mesh && mesh->GetCellAttributes().size() == 1,
+        checks.Get(mesh && mesh->GetCellFields().size() == 1,
                    "generic mesh publishes per-triangle measurement validity");
-        if (mesh && mesh->GetCellAttributes().size() == 1) {
-            const auto& validity = mesh->GetCellAttributes().front();
+        if (mesh && mesh->GetCellFields().size() == 1) {
+            const auto& validity = mesh->GetCellFields().front();
             checks.Get(validity.name == "measurement.valid" && validity.componentCount == 1
-                && validity.values.size() == mesh->GetTriangles().size() / 3
+                && validity.values.size() == mesh->GetTriangleIndices().size() / 3
                 && snapshot->triangleValidity
                 && validity.values.size() == snapshot->triangleValidity->size()
                 && std::equal(validity.values.begin(), validity.values.end(),
                     snapshot->triangleValidity->begin()),
                 "published face validity preserves exact C3 triangle order and values");
             const auto copy = std::dynamic_pointer_cast<const SurfaceMeshPayload>(mesh->CreateSnapshot());
-            checks.Get(copy && &copy->GetCellAttributes() == &mesh->GetCellAttributes(),
+            checks.Get(copy && &copy->GetCellFields() == &mesh->GetCellFields(),
                 "immutable mesh snapshots share face quality storage");
         }
-        if (mesh && mesh->GetPointAttributes().size() == 9)
+        if (mesh && mesh->GetPointFields().size() == 9)
         {
-            const auto& attributes = mesh->GetPointAttributes();
+            const auto& attributes = mesh->GetPointFields();
             checks.Get(std::all_of(attributes.begin(), attributes.end(), [&](const auto& attribute) {
                 return attribute.values.size() == snapshot->points->size() * attribute.componentCount;
             }) && attributes[6].name == "measurement.flags"

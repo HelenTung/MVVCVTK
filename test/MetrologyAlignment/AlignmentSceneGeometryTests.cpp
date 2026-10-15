@@ -33,10 +33,10 @@ void Semantics() {
     item.measured.first={0,1};item.measured.second=InspectionOperand{2,3};item.nominalMeasure=InspectionMeasure{};
     item.nominalMeasure->first={4,5};item.nominalMeasure->second=InspectionOperand{6,7};plan.items.push_back(item);
     CHECK(AlignmentSceneGeometry::GetItemGeometries(plan,0)==std::vector<std::size_t>({0,1,2,3,4,5,6,7}));
-    Fixture f;const auto *original=f.mesh.GetVertices().data();f.Build();CHECK(f.product.glyphs.size()==2 && f.part.regions.size()==1);
+    Fixture f;const auto *original=&f.mesh.GetPointValues();f.Build();CHECK(f.product.glyphs.size()==2 && f.part.regions.size()==1);
     const auto &region=f.part.regions[0];CHECK(region.kind==AlignmentSceneRegionKind::VertexCandidates && region.sourceCount==9 && region.drawnMarkers==3);
     auto marks=f.product.glyphs.back().data;CHECK(marks->GetNumberOfPoints()==3 && marks->GetPoint(0)[0]==10 && marks->GetPoint(1)[0]==13 && marks->GetPoint(2)[0]==16);
-    CHECK(f.mesh.GetVertices().data()==original && f.plan->geometries[0].fit.region.vertexIds.size()==9 && f.product.glyphs[0].data->GetNumberOfPoints()==1);
+    CHECK(&f.mesh.GetPointValues()==original && f.plan->geometries[0].fit.region.vertexIds.size()==9 && f.product.glyphs[0].data->GetNumberOfPoints()==1);
     Fixture bounds;bounds.plan->geometries[0].fit.region.vertexIds.clear();bounds.plan->geometries[0].fit.region.targetBounds=std::array<double,6>{10,12,20,22,30,32};bounds.Build(0);
     CHECK(bounds.part.regions[0].kind==AlignmentSceneRegionKind::TargetBounds && !bounds.part.regions[0].sourceCount && bounds.part.regions[0].drawnMarkers==0);
     auto box=bounds.product.glyphs.back().data;CHECK(box->GetNumberOfPoints()==8 && box->GetNumberOfLines()==12 && box->GetPoint(0)[0]==10 && box->GetPoint(7)[2]==32);

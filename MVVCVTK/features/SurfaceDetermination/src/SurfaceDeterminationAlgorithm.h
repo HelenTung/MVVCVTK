@@ -1,5 +1,6 @@
 #pragma once
 #include "FeatureSupport/WorkLimit.h"
+#include "PagedArray.h"
 #include "SurfaceCudaTypes.h"
 
 #include "Host/TrustedDataPort.h"
@@ -19,13 +20,16 @@ inline constexpr std::uint32_t surfaceAlgorithmRevision = 8;
 // 点细化可由请求内 CPU worker 并发查询取消状态；调用方必须提供可并发调用的
 // 只读检查。进度回调只在 BuildSurface 的调用线程执行。
 
+struct SurfacePreparedGeometry;
 struct SurfaceAlgorithmInputs final
 {
     RoiReadSnapshot roi;
     std::shared_ptr<const SurfaceGenerationSnapshot> parent;
+    std::shared_ptr<const SurfacePreparedGeometry> parentStorage;
 };
 
 struct SurfaceAlgorithmResult final {
+    std::shared_ptr<const SurfacePreparedGeometry> prepared;
     SurfaceExecutionStats execution;
     std::vector<SurfaceInterfaceRecord> interfaces;
     SurfaceResultStatus status = SurfaceResultStatus::Failed;
@@ -36,17 +40,17 @@ struct SurfaceAlgorithmResult final {
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = surfaceAlgorithmRevision;
     SurfaceDeterminationStartParams resolvedParams;
-    std::vector<std::uint8_t> triangleValidity;
+    PagedArray<std::uint8_t> triangleValidity;
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::GlobalAutomatic;
     double initialIsoValue = 0.0;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::size_t requiredBytes = 0;
-    std::vector<SurfacePointRecord> points;
-    std::vector<std::uint32_t> triangleIndices;
-    std::vector<SurfaceSelectionPiece> selection;
+    PagedArray<SurfacePointRecord> points;
+    PagedArray<std::uint32_t> triangleIndices;
+    PagedArray<SurfaceSelectionPiece> selection;
     double selectedAreaMM2 = 0, selectionToleranceMM = 0;
-    std::vector<SurfaceObjectRecord> objects;
+    PagedArray<SurfaceObjectRecord> objects;
     std::uint64_t acceptedPointCount = 0;
     std::uint64_t lowContrastPointCount = 0;
     std::uint64_t rejectedPointCount = 0;

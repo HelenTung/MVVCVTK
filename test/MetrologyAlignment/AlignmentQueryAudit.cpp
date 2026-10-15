@@ -31,7 +31,7 @@ int wmain(int argc,wchar_t **argv) {
         const auto importStart=Clock::now();auto imported=AlignmentReferenceLoader::Load(input,work);
         Require(imported.status==AlignmentStatus::FullyDetermined && imported.mesh,"STL import failed");
         const double importMs=Ms(importStart);
-        const auto &vertices=imported.mesh->GetVertices();const auto available=vertices.size()/3;
+        const auto &vertices=imported.mesh->GetPointValues();const auto available=vertices.size()/3;
         const auto count=std::min(available,argc==4 ? static_cast<std::size_t>(std::stoull(argv[3])) : std::size_t{131072});
         Require(count>0 && count<=static_cast<std::size_t>(INT_MAX),"Invalid audit query count");
         std::vector<AlignmentPoint> points(count);
@@ -88,7 +88,7 @@ int wmain(int argc,wchar_t **argv) {
         std::ofstream out(std::filesystem::path(argv[2]),std::ios::binary);
         out<<std::setprecision(12)<<"{\n\"scope\":\"real STL geometry, synthetic offsets; query hotspot only, no CT accuracy claim\",\n"
            <<"\"status\":\"PASS\",\"sourceSha256\":"<<std::quoted(imported.metadata.sha256)
-           <<",\"device\":"<<std::quoted(device)<<",\"points\":"<<available<<",\"triangles\":"<<imported.mesh->GetTriangles().size()/3
+           <<",\"device\":"<<std::quoted(device)<<",\"points\":"<<available<<",\"triangles\":"<<imported.mesh->GetTriangleIndices().size()/3
            <<",\"queries\":"<<count<<",\"cpuThreads\":"<<cv::getNumThreads()<<",\"importMs\":"<<importMs
            <<",\"cpuIndexMs\":"<<indexMs<<",\"serialQueryMs\":"<<serialMs<<",\"parallelQueryMs\":"<<parallelMs
            <<",\"cudaInitializeMs\":"<<initMs<<",\"cudaUploadMs\":"<<uploadMs<<",\"hybridQueryMs\":"<<gpuMs

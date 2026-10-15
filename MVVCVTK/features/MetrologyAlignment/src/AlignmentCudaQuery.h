@@ -1,3 +1,4 @@
+#include "Data/DataPayloads.h"
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -22,11 +23,9 @@ public:
 };
 class AlignmentCudaQuery final {
 public:
-    AlignmentCudaQuery(const void *nodes, std::size_t nodeCount,
-                       const std::uint64_t *order, std::size_t orderCount,
-                       const double *vertices, std::size_t vertexValues,
-                       const std::uint64_t *triangles, std::size_t triangleValues,
-                       std::size_t batchCapacity);
+    AlignmentCudaQuery(MeshReadArray<AlignmentCudaNode> nodes,MeshReadArray<std::uint64_t> order,
+                       MeshReadArray<double> vertices,MeshReadArray<std::uint64_t> triangles,
+                       std::size_t batchCapacity,const std::function<void()>& checkpoint={});
     ~AlignmentCudaQuery();
     AlignmentCudaQuery(const AlignmentCudaQuery &) = delete;
     AlignmentCudaQuery &operator=(const AlignmentCudaQuery &) = delete;

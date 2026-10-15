@@ -316,8 +316,8 @@ AlignmentReferenceData AlignmentReferenceLoader::Load(const AlignmentReferenceRe
         result.metadata.fileUnit = request.fileUnit;
         result.metadata.unit = request.unit;
         result.metadata.sourceBytes = reader.GetSize();
-        result.metadata.pointCount = result.mesh->GetVertices().size() / 3;
-        result.metadata.triangleCount = result.mesh->GetTriangles().size() / 3;
+        result.metadata.pointCount = result.mesh->GetPointValues().size() / 3;
+        result.metadata.triangleCount = result.mesh->GetTriangleIndices().size() / 3;
         CheckWork(work);
         result.status = AlignmentStatus::FullyDetermined;
     } catch (const std::length_error &error) { result.status = AlignmentStatus::ResourceExhausted; result.message = error.what(); }

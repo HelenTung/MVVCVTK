@@ -43,7 +43,7 @@ std::shared_ptr<const SurfaceMeshPayload> Triangle(double height = 0) {
 void QueryGeometry() {
     auto work = Work();
     auto mesh = Triangle();
-    const auto original = mesh->GetVertices();
+    const auto original = mesh->GetPointValues();
     AlignmentMeshQuery query(mesh, work);
     const auto inside = query.GetClosest({1, 1, 3});
     Check(inside.isValid && std::abs(inside.distanceSquared - 9) < numericTolerance &&
@@ -52,7 +52,7 @@ void QueryGeometry() {
     Check(edge.isValid && edge.point == AlignmentPoint{2, 2, 0} &&
           std::abs(edge.distanceSquared - 3) < numericTolerance, "closest point lies on edge");
     Check(query.GetClosest({-1, -2, 0}).point == AlignmentPoint{0, 0, 0}, "closest vertex region");
-    Check(mesh->GetVertices() == original, "query leaves original positions unchanged");
+    Check(mesh->GetPointValues() == original, "query leaves original positions unchanged");
     std::weak_ptr<const SurfaceMeshPayload> retained = mesh;
     mesh.reset();
     Check(!retained.expired() && query.GetClosest({1, 1, 3}).isValid, "query pins immutable input owner");
@@ -116,7 +116,7 @@ AlignmentWork Planes(double referenceZ = 0) {
 }
 void SurfaceAlignment() {
     auto work = Planes();
-    const auto positions = work.mesh->GetVertices();
+    const auto positions = work.mesh->GetPointValues();
     auto result = AlignmentSolver::BuildResult(work);
     std::cerr << "surface status " << static_cast<int>(result.diagnostics.status) << ' '
               << result.diagnostics.message << '\n';
@@ -126,7 +126,7 @@ void SurfaceAlignment() {
           std::abs(result.sourceToTarget[11] - 0.15) < numericTolerance &&
           std::abs(result.sourceToTarget[1] + std::sin(0.02)) < numericTolerance,
           "dynamic plane correspondences recover analytic rigid transform");
-    Check(work.mesh->GetVertices() == positions, "ICP preserves source mesh coordinates");
+    Check(work.mesh->GetPointValues() == positions, "ICP preserves source mesh coordinates");
     work.recipe.surfaceFit->referenceTriangles = {0};
     work.recipe.maxPairDistance = 20;
     work.recipe.maxAlignmentRms = 20;
@@ -176,7 +176,7 @@ AlignmentWork DensePlanes() {
 }
 void MultiscaleAlignment() {
     auto work = DensePlanes();
-    const auto original = work.mesh->GetVertices();
+    const auto original = work.mesh->GetPointValues();
     Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::FullyDetermined,"dense equations run without a resource quota");
     work.recipe.surfaceFit->scales = {{1,2,40},{.5,.1,40}};
     const auto result = AlignmentSolver::BuildResult(work);
@@ -198,7 +198,7 @@ void MultiscaleAlignment() {
               std::abs(stages[1].acceptedArea-108) < numericTolerance,
               "coarsening preserves analytic selected surface area");
     }
-    Check(work.mesh->GetVertices() == original, "multiscale keeps full source immutable");
+    Check(work.mesh->GetPointValues() == original, "multiscale keeps full source immutable");
     work.recipe.surfaceFit->scales.push_back({0,.1,40});
     Check(AlignmentSolver::BuildResult(work).diagnostics.status == AlignmentStatus::FullyDetermined,
           "full final stage runs without a point quota");

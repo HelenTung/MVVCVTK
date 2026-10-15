@@ -16,6 +16,7 @@ set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceContracts.h
     src/SurfaceContracts.cpp
     src/SurfaceDeterminationAlgorithm.h
+    src/SurfaceGeometryStorage.h
     src/SurfaceDeterminationAlgorithm.cpp
     src/SurfaceDeterminationHostFeature.cpp
     src/SurfaceDeterminationService.h
