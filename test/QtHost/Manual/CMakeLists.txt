@@ -12,6 +12,7 @@ add_library(qt_feature_test_support STATIC
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
+target_link_libraries(qt_feature_test_support PRIVATE MVVCVTKInternal::FeatureSupport)
 foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;PartSegmentation;Part"
     "SURFACE;SurfaceDetermination;Surface" "ARTIFACT;ArtifactReduction;Artifact" "ROTATION;ModelRotation;Rotation"
     "ALIGNMENT;MetrologyAlignment;Alignment" "WALL;WallThickness;Wall" "ROI;RoiEditing;Roi")
@@ -26,6 +27,8 @@ foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;Par
             target_sources(qt_feature_test_support PRIVATE Modules/PartInput.cpp Modules/PartEditTest.cpp)
         elseif(key STREQUAL "ALIGNMENT")
             target_sources(qt_feature_test_support PRIVATE Modules/AlignmentInput.cpp Modules/AlignmentInspection.cpp)
+        elseif(key STREQUAL "SURFACE")
+            target_sources(qt_feature_test_support PRIVATE Support/SurfaceRead.cpp Support/SurfaceRead.h)
         endif()
     endif()
 endforeach()

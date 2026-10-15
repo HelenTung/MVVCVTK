@@ -5,7 +5,6 @@
 #include <QMap>
 #include <QVector>
 #include <QSet>
-#include <QDeadlineTimer>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -45,8 +44,8 @@ public:
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
     QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
-    QVector<int> GetFilteredRows() const;
-    std::function<void(const ReportDocument&,int)> onLocate;
+    const ReportRows& GetFilteredRows() const;
+    std::function<void(const ReportDocument&,quint64)> onLocate;
     std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)> onReadReports;
     std::function<QMap<QString,QString>()> getSources;
 protected:
@@ -57,7 +56,7 @@ private:
     void SelectCurrent();
     void RefreshRows();
     void ContinueRows();
-    int GetRowCount() const;
+    quint64 GetRowCount() const;
     void RefreshPage();
     void CompareSelected();
     void ClearSelection();
@@ -71,8 +70,8 @@ private:
     QVector<ReportDocument> m_buildingReports;
     QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
+    std::uint64_t m_buildingViewRevision = 0;
     int m_buildingIndex = 0;
-    QDeadlineTimer m_generationDeadline;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;
     std::unique_ptr<Task> m_task;
@@ -89,14 +88,15 @@ private:
     QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
     QPushButton *m_previous = nullptr, *m_next = nullptr;
     QPushButton* m_locate = nullptr;
-    QVector<int> m_rows;
+    ReportRows m_rows;
+    quint64 m_page = 0;
     class RowScan;
     std::unique_ptr<RowScan> m_rowScan;
     QTimer* m_scanTimer = nullptr;
     QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
     bool m_allRows = false;
     bool m_rowsReady = false;
-    int m_page = 0, m_sortColumn = -1;
+    int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
     QPushButton* m_copy = nullptr;

@@ -12,7 +12,7 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
-// 租约跟随真实 VTK 对象；仅保留 points、cells 或数组也必须等待释放。
+// 仓内可信投影共用的资源租约；仅保留 points、cells 或数组也必须等待释放。
 namespace VtkDataResourceLease {
 class Observer final : public vtkCommand {
 public:

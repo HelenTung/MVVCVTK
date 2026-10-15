@@ -13,7 +13,9 @@ enum class GapHostAction {
     Overlay,
     Exit,
     SetDisplay, // owner thread 的短显示命令；失败保留原显示。
-    Evaluate
+    Evaluate,
+    SelectObject,
+    SetObjectPicking
 };
 
 struct GapHostStartParams {
@@ -31,6 +33,8 @@ struct GapHostRequest {
     std::optional<GapHostStartParams> start;
     std::optional<GapDisplayParams> display;
     DataRevisionRef displayResult;
+    std::optional<GapObjectSelection> selection;
+    std::optional<bool> isObjectPickingEnabled;
 };
 
 struct GapHostKeys {
@@ -73,6 +77,7 @@ public:
         GapHostCallback onComplete = nullptr);
     GapHostState GetState() const;
     std::optional<GapDisplayParams> GetDisplay(const DataRevisionRef& result) const;
+    std::shared_ptr<const GapResultReader> GetResultReader(const DataRevisionRef& result) const;
 
 private:
     class Impl;

@@ -35,6 +35,7 @@
 #include <QScreen>
 #include <QMouseEvent>
 #include <algorithm>
+#include <climits>
 namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
@@ -250,7 +251,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     };
     m_report->getSources=[this]{QMap<QString,QString> sources;if(m_workflow.getPublishedGraph)
         for(const auto value:m_workflow.getPublishedGraph()["nodes"].toArray()) {const auto node=value.toObject();sources[node["ref"].toString()]=node["type"].toString();}return sources;};
-    m_report->onLocate=[this](const ReportDocument& doc,int row){
+    m_report->onLocate=[this](const ReportDocument& doc,quint64 row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
         if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
         const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);

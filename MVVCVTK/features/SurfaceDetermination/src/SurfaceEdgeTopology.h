@@ -1,4 +1,5 @@
 #pragma once
+#include "Data/DataPayloads.h"
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -17,7 +18,7 @@ inline std::uint64_t GetSurfaceDirectedEdgeKey(std::uint32_t from, std::uint32_t
            (std::uint64_t(std::max(from, to)) << 1U) | (from < to ? 1U : 0U);
 }
 
-inline SurfaceEdgeTopology GetSortedSurfaceEdgeTopology(std::vector<std::uint64_t> &keys,
+inline SurfaceEdgeTopology GetSortedSurfaceEdgeTopology(DataArray<std::uint64_t> &keys,
                                                          const std::function<void()> &checkpoint)
 {
     std::size_t work = 0;

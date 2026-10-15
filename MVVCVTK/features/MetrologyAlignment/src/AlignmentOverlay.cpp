@@ -33,7 +33,7 @@ void AlignmentOverlay::SetOverlayState(const FeatureOverlayState &state) {
 }
 vtkSmartPointer<vtkPolyData> AlignmentOverlay::BuildData(
     const AlignmentMatrix &sourceToTarget, const std::vector<AlignmentGeometry> &geometries,
-    const AlignmentRecipe &recipe, double axisLength, const std::vector<double>* modelVertices,bool showFrame,std::function<void()> check) {
+    const AlignmentRecipe &recipe, double axisLength, const DataArray<double>* modelVertices,bool showFrame,std::function<void()> check) {
     using namespace AlignmentMath;
     if (!Rigid(sourceToTarget) || !std::isfinite(axisLength) || axisLength <= 0)
         return {};

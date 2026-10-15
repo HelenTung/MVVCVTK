@@ -6,15 +6,20 @@ QString GetActionRequirement(const QString& module, const QString& action, const
 {
     if (module == "Data" && action == "ActivateAccepted") return s["acceptedRevision"].toString().isEmpty() ? "没有已接纳的数据可激活。" : QString();
     if (action == "GraphInfo") return {};
+    if (action == "CancelRead" || action == "ReadMeasurementSelection") return {};
     if (action == "KeepResult" || action == "ReleaseResult" || action == "UnloadResult") return {};
     if (action == "UseData") return hasInput ? QString() : "请先加载输入数据。";
     const bool readableResult = (module == "Wall" || module == "Alignment")
         && (action == "Result" || action == "ResultEvidence" || action == "ExportArchive")
         && s["selectedResults"].toObject()[action].toBool();
     const bool inspectionRead = module == "Alignment" && (action == "InspectionResult" || action == "DeviationResult" || action == "VoxelVolumeResult");
-    if (!hasInput && !readableResult && !inspectionRead && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
+    const bool objectRead=(module=="Surface"&&QStringList{"ReadObjects","NextObjectPage","ReadObjectPoints","ReadObjectTriangles"}.contains(action))
+        ||(module=="Gap"&&QStringList{"Defects","NextDefectPage","ReadDefectGeometry"}.contains(action));
+    if (!hasInput && !readableResult && !inspectionRead && !objectRead && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
+    if((module=="Surface"||module=="Gap")&&QStringList{"SelectObject","IsolateObject","ClearObjectSelection","ObjectPicking"}.contains(action)
+        &&!(module=="Surface"?s["isFormalCurrent"].toBool():s["isCurrent"].toBool()))return "请先生成当前输入的正式结果。";
     if(module=="Roi" && action=="Commit" && s["isDragging"].toBool())return "请先结束区域拖动，再保存正式 ROI。";
     if (module == "Gap" && (action == "Overlay" || action == "SetDisplay") && !s["isCurrent"].toBool()) return "先完成当前输入的孔隙分析，才能切换结果显示。";
     if (module == "Gap" && action == "NextDefectPage" && !s["hasNextDefectPage"].toBool())return "当前已经是缺陷列表末页。";

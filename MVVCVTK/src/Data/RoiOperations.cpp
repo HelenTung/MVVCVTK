@@ -403,7 +403,7 @@ private:
             if(std::abs(det)<=1e-14)continue;const auto q=Subtract(p,a);const double u=Dot(q,h)/det;if(u<0 || u>1)continue;
             const auto cross=Cross(q,ab);const double v=Dot(ray,cross)/det,t=Dot(ac,cross)/det;if(v>=0 && u+v<=1 && t>0)hits.push_back(t);}
     }
-    const std::vector<std::uint64_t>& m_triangles;
+    const DataArray<std::uint64_t>& m_triangles;
     std::vector<Point> m_points;std::vector<std::size_t> m_order;std::vector<Node> m_nodes;std::array<double,6> m_bounds;bool m_closed=false;
 };
 

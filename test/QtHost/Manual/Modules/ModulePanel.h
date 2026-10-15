@@ -34,6 +34,11 @@ namespace Manual {
 class ParameterEditor;
 class ColorLegendEditor;
 struct TestContext { TestSession& runtime; TestWorkflow& workflow; TestRecordWriter& records; };
+struct ReadTaskContext final {
+    ReportCheckpoint checkpoint;
+    // 提交与取消争用同一状态：开始提交后，取消明确不再被接纳。
+    std::function<void(const std::function<void()>&)> commit;
+};
 class ModulePanel : public QWidget {
 public:
     using Action = std::function<void(std::uint64_t, const QJsonObject&)>;
@@ -49,6 +54,11 @@ public:
     std::uint64_t SendAction(const QString& name, const QJsonObject& params, Completion onComplete = {});
     void SetComplete(std::uint64_t id, const QString& status, QJsonObject result = {});
     void SetAdmission(std::uint64_t id, bool accepted, QJsonObject raw = {});
+    // 只读长任务持有固定输入，在后台工作；完成回调和记录仍在界面线程执行。
+    void StartReadTask(std::uint64_t id, QString status,
+        std::function<QJsonObject(const ReadTaskContext&)> work,
+        std::function<void()> onSucceeded = {});
+    std::size_t CancelReadTasks();
     void SetState(const QJsonObject& value);
     void SetNotice(const QString& text);
     QString GetNotice() const { return m_notice; }
@@ -99,6 +109,8 @@ protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 private:
+    class ReadTask;
+    std::map<std::uint64_t, std::unique_ptr<ReadTask>> m_readTasks;
     struct Entry { QJsonObject defaults; Action action; TestPolicy policy; bool exitTools = false; };
     QString m_name;
     QString m_notice;

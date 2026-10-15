@@ -15,6 +15,7 @@ using SurfaceCancelCheck = std::function<bool()>;
 using SurfaceProgressCallback =
     std::function<void(SurfaceDeterminationStage, double)>;
 inline constexpr std::uint32_t surfaceAlgorithmRevision = 8;
+namespace FeatureInternal {class SpatialMeshSource;}
 
 // 点细化可由请求内 CPU worker 并发查询取消状态；调用方必须提供可并发调用的
 // 只读检查。进度回调只在 BuildSurface 的调用线程执行。
@@ -23,9 +24,12 @@ struct SurfaceAlgorithmInputs final
 {
     RoiReadSnapshot roi;
     std::shared_ptr<const SurfaceGenerationSnapshot> parent;
+    std::shared_ptr<const SurfaceMeshPayload> parentMesh;
+    std::shared_ptr<const FeatureInternal::SpatialMeshSource> parentDisplay;
 };
 
 struct SurfaceAlgorithmResult final {
+    std::shared_ptr<const SurfaceGenerationSnapshot> sharedParent;
     SurfaceExecutionStats execution;
     std::vector<SurfaceInterfaceRecord> interfaces;
     SurfaceResultStatus status = SurfaceResultStatus::Failed;
@@ -36,17 +40,17 @@ struct SurfaceAlgorithmResult final {
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = surfaceAlgorithmRevision;
     SurfaceDeterminationStartParams resolvedParams;
-    std::vector<std::uint8_t> triangleValidity;
+    DataArray<std::uint8_t> triangleValidity;
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::GlobalAutomatic;
     double initialIsoValue = 0.0;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     std::size_t requiredBytes = 0;
-    std::vector<SurfacePointRecord> points;
-    std::vector<std::uint32_t> triangleIndices;
-    std::vector<SurfaceSelectionPiece> selection;
+    DataArray<SurfacePointRecord> points;
+    DataArray<std::uint32_t> triangleIndices;
+    DataArray<SurfaceSelectionPiece> selection;
     double selectedAreaMM2 = 0, selectionToleranceMM = 0;
-    std::vector<SurfaceObjectRecord> objects;
+    DataArray<SurfaceObjectRecord> objects;
     std::uint64_t acceptedPointCount = 0;
     std::uint64_t lowContrastPointCount = 0;
     std::uint64_t rejectedPointCount = 0;

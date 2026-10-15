@@ -8,6 +8,7 @@
 #include <QMetaObject>
 #include <QVTKOpenGLNativeWidget.h>
 #include <iostream>
+#include <climits>
 #include <cstring>
 #include <string>
 #ifdef Q_OS_WIN

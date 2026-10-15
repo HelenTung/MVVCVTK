@@ -353,7 +353,7 @@ void Display() {
     }
     AlignmentRecipe bestFit; bestFit.method=AlignmentMethod::ConstrainedBestFit;
     AlignmentFitPair pair; pair.vertexId=0; pair.nominalPoint={2,3,4}; bestFit.fitPairs={pair};
-    const std::vector<double> modelVertices{1,2,3};
+    const DataArray<double> modelVertices{1,2,3};
     const auto pairs=AlignmentOverlay::BuildData(alignmentIdentity,{},bestFit,1,&modelVertices);
     Check(pairs && pairs->GetNumberOfVerts()==1 && pairs->GetNumberOfLines()==4,
         "best-fit inputs have a position marker and actual correspondence line with one coordinate triad");
@@ -552,7 +552,8 @@ void SurfaceReferenceLifecycle() {
           std::abs(archive->sourceToTarget[7] + 0.2) < 1e-7 &&
           std::abs(archive->sourceToTarget[11] - 0.3) < 1e-7,
           "public dynamic surface alignment publishes analytic transform");
-    Check(f.mesh->GetVertices() == measured && reference->GetVertices() == referenceVertices,
+    const auto matches=[](const auto& actual,const auto& expected){return actual.size()==expected.size()&&std::equal(actual.begin(),actual.end(),expected.begin());};
+    Check(matches(f.mesh->GetVertices(),measured) && matches(reference->GetVertices(),referenceVertices),
           "public alignment preserves both immutable input meshes");
     DataTransaction replace;
     replace.outputs.push_back({f.recipe.nominalData.entityId, 1, DataTypes::surfaceMesh, {}, reference, {}});
@@ -1008,6 +1009,7 @@ void AutomaticReferenceLifecycle() {
     Check(!f.feature->GetDeviationSample(deviationRef,f.mesh->GetVertices().size()/3),"selection bounds checked");
     MetrologyReportRequest paletteRequest;paletteRequest.id="current-colorbar";paletteRequest.captureCurrentDisplay=true;
     const auto paletteCapture=f.feature->GetReport(paletteRequest);
+    if(!paletteCapture.report)std::cerr<<"colorbar capture status="<<static_cast<int>(paletteCapture.status)<<" message="<<paletteCapture.message<<'\n';
     Check(paletteCapture.report && paletteCapture.report->deviations.size()==1 && paletteCapture.report->presentation.deviations.size()==1 &&
         paletteCapture.report->presentation.deviations[0].parameters.range==std::array<double,2>{0,.1} &&
         paletteCapture.report->presentation.deviations[0].selection && selected && paletteCapture.report->presentation.deviations[0].selection->sourcePoint==selected->sourcePoint &&
@@ -1050,6 +1052,7 @@ void AutomaticReferenceLifecycle() {
           "public default display resolves the current field range before storing visible state");
     paletteRequest.deviations.clear();paletteRequest.deviationDisplays.clear();paletteRequest.captureCurrentDisplay=true;
     const auto automaticCapture=f.feature->GetReport(paletteRequest);
+    if(!automaticCapture.report)std::cerr<<"automatic colorbar capture status="<<static_cast<int>(automaticCapture.status)<<" message="<<automaticCapture.message<<'\n';
     Check(automaticDisplay && automaticCapture.report && !automaticCapture.report->presentation.deviations.empty() &&
           automaticCapture.report->presentation.deviations[0].mappingRange==f.feature->GetState().deviationDisplayRange,
           "capturing automatic display freezes the same resolved range as the live overlay");

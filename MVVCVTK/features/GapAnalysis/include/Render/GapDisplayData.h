@@ -5,6 +5,8 @@
 #include "Host/RoiReadTypes.h"
 #include "Render/Support/AnalysisColorStyle.h"
 #include "Render/GapLabelLookupTable.h"
+#include "MappedArrayStorage.h"
+#include "FeatureSupport/SpatialMeshSource.h"
 #include <vtkCellData.h>
 #include <vtkCellArray.h>
 #include <vtkPoints.h>
@@ -19,17 +21,17 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
-#include <set>
 
 // 私有显示产物不发布到 DataGraph，正式标签、网格与供应商统计完全独立。
 struct GapDisplayData final {
     vtkSmartPointer<vtkPolyData> mesh;
     vtkSmartPointer<vtkLookupTable> labels;
     vtkSmartPointer<vtkLookupTable> volumes;
+    std::shared_ptr<const FeatureInternal::SpatialMeshSource> spatial;
     bool hasRegions = false;
     std::string resultLabel;
     // 稀疏 ID 与其正式体积只供重新着色，切换不重新提取网格或修改标签。
-    std::vector<std::pair<std::int32_t, double>> regionVolumes;
+    std::shared_ptr<const GapRegionVolumes> regionVolumes;
     std::array<double, 2> resultRange{0, 0};
     std::array<double,2> mappingRange{0,0};
     GapDisplayParams params;
@@ -83,31 +85,17 @@ struct GapDisplayData final {
         const auto ramp=GetColorRamp(params);
         if(result->mappingRange==source.mappingRange && AnalysisColorStyle::GetRampEqual(ramp,GetColorRamp(source.params)))return result;
         result->volumes = AnalysisColorStyle::BuildRamp(result->mappingRange,ramp);
-        result->labels = vtkSmartPointer<GapLabelLookupTable>::New();
-        result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
-        result->labels->IndexedLookupOn();
-        vtkNew<vtkIntArray> annotationIds;
-        vtkNew<vtkStringArray> annotationNames;
-        annotationIds->InsertNextValue(0);
-        annotationNames->InsertNextValue("background");
-        result->labels->SetTableValue(0, 0, 0, 0, 0);
-        result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
-        for (std::size_t index = 0; index < source.regionVolumes.size(); ++index) {
-            const auto& region = source.regionVolumes[index];
-            const auto rgba=AnalysisColorStyle::GetMappedColor(result->mappingRange,ramp,region.second);
-            annotationIds->InsertNextValue(region.first);
-            annotationNames->InsertNextValue(std::to_string(region.first));
-            result->labels->SetTableValue(static_cast<vtkIdType>(index + 1),rgba.data());
-        }
-        result->labels->SetAnnotations(annotationIds, annotationNames);
-        result->labels->Build();
+        auto labels=vtkSmartPointer<GapLabelLookupTable>::New();
+        labels->SetRegions(source.regionVolumes,result->mappingRange,ramp);
+        result->labels=labels;
         return result;
     }
 
     static std::shared_ptr<const GapDisplayData> Build(vtkImageData* image,
-        const std::vector<VoidRegion>& regions, const std::atomic<bool>& isStopping,
-        const RoiReadSnapshot& evaluationRoi={},const std::vector<VoidRegion>* parentRegions=nullptr,
-        std::string* failureReason=nullptr,vtkPolyData* preparedMesh=nullptr)
+        const DataArray<VoidRegion>& regions, const std::atomic<bool>& isStopping,
+        const RoiReadSnapshot& evaluationRoi={},const DataArray<VoidRegion>* parentRegions=nullptr,
+        std::string* failureReason=nullptr,vtkPolyData* preparedMesh=nullptr,
+        std::shared_ptr<const SurfaceMeshPayload> preparedPayload={})
     {
         if (failureReason) failureReason->clear();
         const auto fail = [&](const std::string& reason) -> std::shared_ptr<const GapDisplayData> {
@@ -119,34 +107,32 @@ struct GapDisplayData final {
         auto result = std::make_shared<GapDisplayData>();
         std::array<double, 2> range{std::numeric_limits<double>::max(),
             std::numeric_limits<double>::lowest()};
-        std::set<std::int32_t> ids;
+        ResultArrayScope directoryStorage;
+        auto directory=std::make_shared<GapRegionVolumes>();
+        directory->reserve(regions.size());
         for (const auto& region : regions) {
-            if (region.id <= 0 || !ids.insert(region.id).second
+            if(isStopping.load())return {};
+            if (region.id <= 0
                 || !std::isfinite(region.volumeMM3) || region.volumeMM3 < 0) return {};
             if(region.voxelCount<=0)continue;
-            result->hasRegions=true;
+            directory->emplace_back(region.id,region.volumeMM3);
             range[0] = std::min(range[0], double(region.volumeMM3));
             range[1] = std::max(range[1], double(region.volumeMM3));
         }
+        try {
+            std::sort(directory->begin(),directory->end(),[&](const auto& a,const auto& b){
+                if(isStopping.load())throw std::runtime_error("Gap display directory cancelled.");return a.first<b.first;});
+        }catch(const std::runtime_error&){if(isStopping.load())return {};throw;}
+        if(std::adjacent_find(directory->begin(),directory->end(),[](const auto& a,const auto& b){return a.first==b.first;})!=directory->end())return {};
+        directoryStorage.Finish();
+        result->regionVolumes=std::move(directory);
+        result->hasRegions = !result->regionVolumes->empty();
         if (!result->hasRegions) range = {0, 0};
         result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
-        result->labels = vtkSmartPointer<GapLabelLookupTable>::New();
-        result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(regions.size() + 1));
-        result->labels->IndexedLookupOn();
-        vtkNew<vtkIntArray> annotationIds;
-        vtkNew<vtkStringArray> annotationNames;
-        annotationIds->InsertNextValue(0);
-        annotationNames->InsertNextValue("background");
-        result->labels->SetTableValue(0, 0, 0, 0, 0);
-        result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
-        for (std::size_t index=0;index<regions.size();++index) {
-            if(isStopping.load())return {};
-            const auto& region=regions[index];result->regionVolumes.emplace_back(region.id,region.volumeMM3);
-            double rgb[3];result->volumes->GetColor(region.volumeMM3,rgb);
-            annotationIds->InsertNextValue(region.id);annotationNames->InsertNextValue(std::to_string(region.id));
-            result->labels->SetTableValue(static_cast<vtkIdType>(index+1),rgb[0],rgb[1],rgb[2],1);
-        }
+        auto labels=vtkSmartPointer<GapLabelLookupTable>::New();
+        labels->SetRegions(result->regionVolumes,range,GetColorRamp(result->params),result->volumes);
+        result->labels=labels;
         auto geometry=preparedMesh?vtkSmartPointer<vtkPolyData>(preparedMesh):GapSurfaceBuilder::Build(image,regions,isStopping,evaluationRoi,parentRegions);
         if(!geometry)return fail("Gap surface construction failed or was cancelled.");
         result->mesh=vtkSmartPointer<vtkPolyData>::New();result->mesh->ShallowCopy(geometry);
@@ -155,8 +141,7 @@ struct GapDisplayData final {
         // 显示只创建数组外壳，共享正式几何与编号缓冲，不修改正式候选的属性名。
         vtkNew<vtkIntArray> displayIds;displayIds->ShallowCopy(regionIds);displayIds->SetName("gap.display.id");
         result->mesh->GetCellData()->RemoveArray("gap.region.id");result->mesh->GetCellData()->SetScalars(displayIds);
-        result->labels->SetAnnotations(annotationIds, annotationNames);
-        result->labels->Build();
+        if(preparedPayload)result->spatial=FeatureInternal::SpatialMeshSource::Build(std::move(preparedPayload),[&]{return isStopping.load();});
         return isStopping.load() ? nullptr : result;
     }
 };
