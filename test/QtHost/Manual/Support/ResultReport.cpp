@@ -262,8 +262,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     });
     const auto save=[this](bool filtered){
         if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,filtered?"导出全部筛选行":"导出完整明细",{},"CSV (*.csv)");if(path.isEmpty())return;
-        const auto doc=m_selected;doc.table->PrepareRead();const bool selected=filtered && !m_allRows;const auto rows=selected?m_rows:QVector<int>{};
-        try{StartTask([doc,path,selected,rows](const ReportCheckpoint& checkpoint){ExportReport(path,doc,selected?&rows:nullptr,checkpoint);return ReportDocument{};},{doc});}
+        try{ExportReportFile(path,filtered);}
         catch(const std::exception& e){QMessageBox::warning(this,"导出失败",QString::fromUtf8(e.what()));}
     };
     connect(m_export,&QPushButton::clicked,this,[save]{save(false);});
@@ -383,6 +382,15 @@ void ResultReport::ImportReport(const QString& path)
         QFile file(path);if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("无法打开 CSV 文件");
         return ReadReportCsv(file,QFileInfo(path).fileName(),checkpoint);
     });
+}
+void ResultReport::ExportReportFile(const QString& path,bool filtered)
+{
+    if(!m_selected.table || (filtered && !m_rowsReady))throw std::runtime_error("报告或完整筛选结果尚未就绪");
+    const auto doc=m_selected;doc.table->PrepareRead();const bool selected=filtered && !m_allRows;
+    const auto rows=selected?m_rows:QVector<int>{};
+    StartTask([doc,path,selected,rows](const ReportCheckpoint& checkpoint){
+        ExportReport(path,doc,selected?&rows:nullptr,checkpoint);return ReportDocument{};
+    },{doc});
 }
 void ResultReport::ClearSelection()
 {

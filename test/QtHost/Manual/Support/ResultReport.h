@@ -36,6 +36,7 @@ public:
     bool SelectReport(const QString& id);
     void ShowReports(const QString& source = {}, const QString& result = {}, const QString& module = {});
     void ImportReport(const QString& path);
+    void ExportReportFile(const QString& path, bool filtered = false);
     void QueueReport(const QJsonObject& record);
     bool GetReportAvailable(const QString& module, const QString& result) const;
     void RemoveReport(QString id);
