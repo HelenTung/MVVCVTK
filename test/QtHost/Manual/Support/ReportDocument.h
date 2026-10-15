@@ -24,6 +24,7 @@ struct ReportColumn final {
 struct ReportDocument final {
     QString id, title, category, module, source, result, description;
     QString coordinateFrame;
+    QStringList relatedResults;
     QVector<ReportColumn> columns;
     std::shared_ptr<ReportTable> table;
     QJsonObject conditions;

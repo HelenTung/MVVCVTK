@@ -47,6 +47,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature>)
         auto doc=Document(record,"gap",table,r["source"].toString(),"孔隙明细");if(known.contains(doc.id))return reports;
         doc.conditions["汇总"]=QJsonObject{{"对象体积 mm3",r["objectVolumeMM3"]},{"孔隙体积 mm3",r["voidVolumeMM3"]},{"孔隙率",r["porosityRatio"]}};
         doc.result=r["resultSet"].toString();doc.description="一行一个父缺陷/ROI 相交记录；ROI 片段不是新封闭孔隙。";
+        doc.relatedResults={table};
         doc.columns={{"void_id",{},{},false},{"parent_volume_mm3","完整父缺陷体积","mm3",true},
             {"intersection_volume_mm3","ROI 内相交体积","mm3",true},{"volume_mm3","本次统计体积","mm3",true},
             {"equivalent_diameter_mm","本次统计等效直径","mm",true},{"roi_partial",{},{},false},{"whole_object_geometry",{},{},false}};
@@ -101,6 +102,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
         if(!HasRevision(generation) || known.contains("surface:"+generation))return reports;
         const auto snapshot=feature->GetSurfaceSnapshot(GetRef(generation));if(!snapshot || snapshot->purpose!=SurfaceTaskPurpose::Determine)return reports;
         auto doc=Document(record,"surface",generation,GetRefText(snapshot->sourceRevision),"表面对象明细");doc.result=GetRefText(snapshot->meshRevision);
+        doc.relatedResults={generation};
         doc.description="一行一个实际表面对象；面积和体积资格分别保存，缺失量值留空。";const auto unit=QString::fromStdString(snapshot->modelUnit);
         doc.columns={{"object_id",{},{},false},{"area_"+unit+"2","表面对象面积",unit+"2",true},{"volume_"+unit+"3","表面对象体积",unit+"3",true},
             {"area_validity",{},{},false},{"volume_validity",{},{},false},{"closed",{},{},false},{"manifold",{},{},false}};
@@ -114,6 +116,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
         reports.append(std::move(doc));
         if(snapshot->isoEstimate) {
             auto params=Document(record,"surface-parameters",generation,GetRefText(snapshot->sourceRevision),"表面 BG / M / ISO");params.result=GetRefText(snapshot->meshRevision);
+            params.relatedResults={generation};
             params.columns={{"parameter",{},{},false},{"value","表面灰度参数","1",true}};params.identityColumn=0;params.identityStable=true;params.table=std::make_shared<ReportTable>();
             const auto& estimate=*snapshot->isoEstimate;
             params.table->Append({"ISO",Number(estimate.isoValue)});
@@ -141,6 +144,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                     if(!groups.contains(metric)) {
                         const auto unit=spec->measured.metric==InspectionMetric::OrientedDirectionAngleDegrees?QString("deg"):length(snapshot->unit);
                         auto doc=Document(record,"inspection-"+QString::number(metric),inspection,GetRefText(snapshot->sourceMesh),"计量 · "+metrics.value(metric,"项目"));
+                        doc.relatedResults={GetRefText(snapshot->alignmentResult)};
                         if(const auto alignment=feature->GetResult(snapshot->alignmentResult))doc.source=GetRefText(alignment->input.source);
                         doc.columns={{"item_id",{},{},false},{"name",{},{},false},{"nominal_"+unit,metrics.value(metric),unit,true},
                             {"measured_"+unit,metrics.value(metric),unit,true},{"deviation_"+unit,metrics.value(metric)+"相对名义偏差",unit,true},{"verdict",{},{},false},{"reason",{},{},false}};
@@ -159,6 +163,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
             if(snapshot && snapshot->forward) {
                 const auto fieldReport=[&](const AlignmentDeviationField& field,const QString& prefix,const QString& title,const QString& quantity) {
                 auto doc=Document(record,prefix,deviation,GetRefText(snapshot->sourceMesh),title);
+                doc.relatedResults={GetRefText(snapshot->alignmentResult)};
                 if(const auto alignment=feature->GetResult(snapshot->alignmentResult))doc.source=GetRefText(alignment->input.source);
                 const auto unit=length(snapshot->unit);
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};

@@ -48,6 +48,10 @@ bool IsMatrix(const QString& key)
 {
     return key.contains("matrix", Qt::CaseInsensitive) || QStringList{"directionLPS", "directionRAS", "boxToSource", "localToSource", "sourceToTarget", "modelToWorld"}.contains(key);
 }
+bool MatchesResult(const ReportDocument& doc,const QString& result)
+{
+    return result.isEmpty() || doc.result==result || doc.relatedResults.contains(result);
+}
 }
 QVector<ReportRow> GetReportRows(const QJsonObject& record)
 {
@@ -225,7 +229,7 @@ void ResultReport::AddReport(ReportDocument doc)
     if(!item)item=new QTreeWidgetItem(group);
     item->setText(0,doc.title);item->setData(0,Qt::UserRole,doc.id);
     item->setToolTip(0,doc.description+"\n结果修订："+doc.result+"\n数据："+doc.source);
-    item->setHidden((!m_sourceFilter.isEmpty() && doc.source!=m_sourceFilter) || (!m_resultFilter.isEmpty() && doc.result!=m_resultFilter));
+    item->setHidden((!m_sourceFilter.isEmpty() && doc.source!=m_sourceFilter) || !MatchesResult(doc,m_resultFilter));
     if(!item->isHidden())group->setHidden(false);
     if(m_selected.id.isEmpty() || (added && m_follow->isChecked())) {
         if(item->isHidden()){m_sourceFilter.clear();m_resultFilter.clear();ShowReports();}m_reports->setCurrentItem(item);
@@ -235,7 +239,7 @@ void ResultReport::AddReport(ReportDocument doc)
 bool ResultReport::SelectReport(const QString& id)
 {
     if(!m_documents.contains(id))return false;
-    if((!m_sourceFilter.isEmpty() && m_documents[id].source!=m_sourceFilter) || (!m_resultFilter.isEmpty() && m_documents[id].result!=m_resultFilter))ShowReports();
+    if((!m_sourceFilter.isEmpty() && m_documents[id].source!=m_sourceFilter) || !MatchesResult(m_documents[id],m_resultFilter))ShowReports();
     for(int i=0;i<m_reports->topLevelItemCount();++i)for(int j=0;j<m_reports->topLevelItem(i)->childCount();++j) {
         auto* item=m_reports->topLevelItem(i)->child(j);
         if(item->data(0,Qt::UserRole)==id){m_reports->setCurrentItem(item);SelectCurrent();return true;}
@@ -249,8 +253,8 @@ void ResultReport::ShowReports(const QString& source,const QString& result)
         auto* group=m_reports->topLevelItem(i);bool visible=false;
         for(int j=0;j<group->childCount();++j) {
             auto* item=group->child(j);const auto doc=m_documents.value(item->data(0,Qt::UserRole).toString());
-            const bool match=(source.isEmpty() || doc.source==source) && (result.isEmpty() || doc.result==result);item->setHidden(!match);visible=visible||match;
-            if(select.isEmpty() && match && !result.isEmpty() && doc.result==result && doc.category!="运行记录")select=doc.id;
+            const bool match=(source.isEmpty() || doc.source==source) && MatchesResult(doc,result);item->setHidden(!match);visible=visible||match;
+            if(select.isEmpty() && match && !result.isEmpty() && doc.category!="运行记录")select=doc.id;
         }
         group->setHidden(!visible);
     }
