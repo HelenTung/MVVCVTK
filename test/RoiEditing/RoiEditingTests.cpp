@@ -470,8 +470,30 @@ void TestProgressiveDisplay(){
     Require(weakHost.expired(),"detach retained the display notification port");
 }
 
+void TestCommittedComplexDisplayStatus()
+{
+    auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;
+    image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};auto host=std::make_shared<Controller>();
+    RoiEditingHostFeature editor({{"main"},{{"main"},{}}});HostFeatureContext context;
+    context.data=data;context.views=views;context.host=host;Require(editor.AttachHost(context),"formal display attach failed");
+    RoiRequest draft;draft.metadata.name="正式复杂区域";
+    draft.definition={source,{{RoiNodeKind::SourceDomain}}};
+    Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"formal display begin failed");
+    Require(editor.GetState().displayStatus==RoiDisplayStatus::Updating,"complex draft did not schedule display");
+    Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None,"formal display commit failed");
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<until){editor.OnHostTick();std::this_thread::yield();}
+    Require(!editor.GetState().hasDraft && editor.GetState().displayStatus==RoiDisplayStatus::Displayed
+        && editor.GetState().displayError==RoiError::None && editor.GetState().visibleRois.size()==1,
+        "formal display retained the discarded draft status after rendering completed");
+    Require(editor.DetachHost(),"formal display detach failed");
+}
 }
 int main(int argc,char** argv)
 {
-    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();TestCommittedComplexDisplayStatus();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit();TestCommittedComplexDisplayStatus(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

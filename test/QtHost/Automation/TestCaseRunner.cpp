@@ -29,6 +29,8 @@
 #include <QEventLoop>
 #include <QAbstractEventDispatcher>
 #include <QFile>
+#include <QDir>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QPushButton>
@@ -98,6 +100,49 @@ void Check(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
     std::cout << "PASS: " << message << std::endl;
+}
+void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonObject& step,
+    std::uint64_t operationId)
+{
+    Check(Wait([&] {
+        const auto session = window.GetSession();
+        const auto input = session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{};
+        const auto scenes = session ? session->GetSceneViewStates() : std::vector<HostSceneViewState>{};
+        if (!input || scenes.size() != 4 || scenes.front().sceneEpoch == 0
+            || !window.GetWorkflow().getRenderPending || GetId(window.GetDiagnostics()["pendingUpdateFailures"]) != 0) return false;
+        if (step["waitForRoiDisplay"].toBool()) {
+            auto* roi = window.GetModule("Roi"); roi->Observe();
+            const auto state = roi->GetObservedState();
+            if (state["isSaving"].toBool() || state["isComputing"].toBool() || state["displayStatus"].toInt() == 0) return false;
+            Check(state["displayStatus"].toInt()!=3 && state["displayError"].toInt()==0
+                && state["displayFailures"].toArray().isEmpty(),"business ROI display succeeds before capture");
+        }
+        return std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
+            return scene.isAvailable && scene.presentation && scene.presentation->dataRevision == input->dataRevision
+                && scene.sceneEpoch == scenes.front().sceneEpoch && scene.renderedEpoch > 0
+                && scene.renderedEpoch <= scene.sceneEpoch && !window.GetWorkflow().getRenderPending(scene.id);
+        });
+    },step["timeoutMs"].toInt(30000)), "business capture waits for committed 2D/3D scenes and actual renders");
+    Check(QDir().mkpath(folder), "business capture directory is available");
+    QCoreApplication::processEvents();
+    QJsonArray files, scenes;
+    for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
+        const auto frame = widget->grabFramebuffer();
+        Check(!frame.isNull() && frame.size() == widget->size() * widget->devicePixelRatioF(),
+            "business capture reads the actual visible framebuffer");
+        const auto name = widget->objectName() + ".png";
+        Check(frame.save(QDir(folder).filePath(name)), "business 2D/3D framebuffer saved");
+        files.append(QJsonObject{{"view",widget->objectName()},{"file",name},{"width",frame.width()},{"height",frame.height()}});
+    }
+    Check(files.size() == 4, "business capture contains one 3D and three 2D views");
+    Check(window.grab().save(QDir(folder).filePath("window.png")), "business window context saved");
+    for (const auto& scene : window.GetSession()->GetSceneViewStates())
+        scenes.append(QJsonObject{{"view",QString::fromStdString(scene.id)}, {"sceneEpoch",QString::number(scene.sceneEpoch)},
+            {"renderedEpoch",QString::number(scene.renderedEpoch)},
+            {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()}});
+    ExportJson(QDir(folder).filePath("capture.json"),{{"operationId",QString::number(operationId)},
+        {"label",step["stageLabel"]},{"module",step["module"]},{"action",step["action"]},
+        {"capturedUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}, {"views",files},{"scenes",scenes}});
 }
 std::uint64_t Send(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
@@ -196,7 +241,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         return id;
     }
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
-    auto* tree = panel->GetCatalogTree(); ClickNode(tree, tree->topLevelItem(0));
+    // 执行动作不隐式选择目录首项；重新选择旧 ROI 会把其几何回填到运算候选表单。
     panel->SetParameterPatch(action, patch);
     // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
     const bool ready = Wait([&] {
@@ -2508,9 +2553,25 @@ void StartSequence(TestWindow& window, const QString& path)
                 <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
                 <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
             Check(dispatched,"primary click creates the actual operation record");
+        } else if(control=="catalogAction") {
+            const auto module=GetText(step,"module"),action=GetText(step,"action");
+            auto* panel=window.GetModule(module);
+            window.GetWorkflow().onNavigate(module,action,{});QCoreApplication::processEvents();panel->Observe();
+            auto* tree=panel->GetCatalogTree();QTreeWidgetItem* target=nullptr;
+            Check(Wait([&] {
+                panel->Observe();
+                for(QTreeWidgetItemIterator it(tree);*it;++it) {
+                    const auto patch=(*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()[action].toObject();
+                    if(patch.isEmpty())continue;
+                    bool matches=true;for(auto p=params.begin();p!=params.end();++p)matches=matches && patch[p.key()]==p.value();
+                    if(matches){target=*it;return true;}
+                }
+                return false;
+            }),"catalog exposes the exact requested history identity");
+            id=ClickNodeAction(window,tree,target,action);
         } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
-        else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、checkPage");
+        else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、checkPage");
         QTimer switching, cancellation;
         int switchCount = 0;
         if (step["switchFeaturesWhilePending"].toBool()) {
@@ -2538,6 +2599,9 @@ void StartSequence(TestWindow& window, const QString& path)
         const auto record = GetComplete(window, id, {}, static_cast<int>(timeout));
         // 合法终态集合只描述可观测结局；实际质量状态仍完整保留在 record 中。
         Check(expected.contains(record["status"].toString()), ("expected terminal status " + expected.join(" / ")).toStdString().c_str());
+        if (step.contains("expectMessageContains"))
+            Check(record["result"].toObject()["message"].toString().contains(GetText(step,"expectMessageContains")),
+                "negative request reports its declared input error");
         const auto expectedResult=GetResolved(step["expectResult"],results).toObject();
         for(auto field=expectedResult.begin();field!=expectedResult.end();++field)
             Check(record["result"].toObject()[field.key()]==field.value(),("business result matches "+field.key()).toStdString().c_str());
@@ -2849,6 +2913,7 @@ void StartSequence(TestWindow& window, const QString& path)
                 }
             }
         }
+        if (step.contains("businessCapture")) SaveBusinessCapture(window,GetText(step,"businessCapture"),step,id);
         if (!checkpointPath.isEmpty()) {
             QJsonArray viewports;
             for (const auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) viewports.append(QJsonObject{

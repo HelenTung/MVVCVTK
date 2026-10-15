@@ -158,9 +158,12 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         const auto accepted=feature->SendRequest(request);if(accepted){flow->preferredMode=*request.removalMode;flow->isConfirmed=false;flow->viewedOutput={};}
         panel->SetComplete(id,accepted?"Succeeded":"Rejected");
     },TestPolicy::Interaction,true);
-    panel->AttachAction("AppendExact",GetJson(R"({"shape":"Box","removalMode":"KeepInside","matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"center":[0,0,0],"axis":[0,0,1],"radius":1,"height":1})"),[panel,feature,flow](auto id,const auto& p){
+    panel->AttachAction("AppendExact",GetJson(R"({"parentNodeId":"Root","shape":"Box","removalMode":"KeepInside","matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"center":[0,0,0],"axis":[0,0,1],"radius":1,"height":1})"),[panel,feature,flow](auto id,const auto& p){
         const auto history=feature->GetHistory();
         CropEditRequest request;request.documentId=history.documentId;request.nodeId=history.rootNodeId;
+        const auto parent = GetText(p, "parentNodeId");
+        if (parent == "Applied") request.nodeId = history.appliedHead;
+        else if (parent != "Root") request.nodeId = GetId(p["parentNodeId"]);
         request.requestId=CropHostFeature::CreateRequestId();request.expectedRevision=history.stateRevision;request.kind=CropEditKind::Append;
         auto& op=request.operation;
         op.geometryType=GetEnum<CropShape>(p,"shape",{{"Box",CropShape::Box},{"Plane",CropShape::Plane},{"Sphere",CropShape::Sphere},{"Cylinder",CropShape::Cylinder}});

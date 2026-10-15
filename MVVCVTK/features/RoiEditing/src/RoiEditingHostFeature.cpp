@@ -1263,5 +1263,28 @@ RoiEditingState RoiEditingHostFeature::GetState() const
     if (m_impl->m_owner!=std::thread::id{} && m_impl->m_owner!=std::this_thread::get_id()) {
         RoiEditingState state; state.error=RoiError::WrongThread; return state;
     }
-    auto state=m_impl->m_state;state.selection=m_impl->m_selection;state.output=m_impl->m_operation?m_impl->m_operation->output:m_impl->m_request.action==RoiAction::Create?RoiOutputMode::CreateNew:RoiOutputMode::UpdateTarget;if(state.hasDraft && m_impl->m_toolNodeIndex<m_impl->m_request.definition.nodes.size() && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].kind==RoiNodeKind::Primitive && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].primitive.shape==m_impl->m_tool.shape)state.tool=m_impl->m_tool;state.displayFailures.clear();for(const auto& item:m_impl->m_shown)if(item.second.displayError!=RoiError::None)state.displayFailures.emplace_back(item.first,item.second.displayError);state.visibleRois.clear();for(const auto& item:m_impl->m_shown) if(item.second.isVisible && !item.second.bindings.empty())state.visibleRois.push_back(item.first);return state;
+    auto state=m_impl->m_state;
+    state.selection=m_impl->m_selection;
+    state.output=m_impl->m_operation?m_impl->m_operation->output:m_impl->m_request.action==RoiAction::Create?RoiOutputMode::CreateNew:RoiOutputMode::UpdateTarget;
+    if(state.hasDraft && m_impl->m_toolNodeIndex<m_impl->m_request.definition.nodes.size()
+        && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].kind==RoiNodeKind::Primitive
+        && m_impl->m_request.definition.nodes[m_impl->m_toolNodeIndex].primitive.shape==m_impl->m_tool.shape)state.tool=m_impl->m_tool;
+    state.displayFailures.clear();state.visibleRois.clear();
+    bool updating=false,nonEmpty=false;RoiError displayError=RoiError::None;
+    for(const auto& item:m_impl->m_shown){
+        const auto& shown=item.second;
+        if(shown.displayError!=RoiError::None)state.displayFailures.emplace_back(item.first,shown.displayError);
+        if(!shown.isVisible || shown.bindings.empty() || !m_impl->GetSourceVisible(shown.source))continue;
+        state.visibleRois.push_back(item.first);
+        if(shown.displayError!=RoiError::None)displayError=shown.displayError;
+        updating=updating || (shown.mesh && !shown.mesh->isComplete);
+        nonEmpty=nonEmpty || !shown.mesh || !shown.mesh->isEmpty;
+    }
+    // 正式区域的异步显示有自己的生命周期，不能沿用已清除草稿的 Updating 状态。
+    if(!state.hasDraft){
+        state.displayError=displayError;
+        state.displayStatus=displayError!=RoiError::None?RoiDisplayStatus::Failed
+            :updating?RoiDisplayStatus::Updating:nonEmpty?RoiDisplayStatus::Displayed:RoiDisplayStatus::Empty;
+    }
+    return state;
 }

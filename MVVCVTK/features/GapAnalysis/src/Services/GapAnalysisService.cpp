@@ -1463,8 +1463,23 @@ void GapAnalysisService::Impl::StartWorker(
             }
             if (isPrepared && !m_isStopping.load()) {
                 // 显示失败不把已经有效的正式数据改报为算法失败。
-                try { if(!result.display)result.display = GapDisplayData::Build(result.labelImage, result.voids, m_isStopping); }
-                catch (...) { result.display.reset(); }
+                try {
+                    if (!result.display) {
+                        std::string reason;
+                        result.display = GapDisplayData::Build(result.labelImage, result.voids,
+                            m_isStopping, {}, nullptr, &reason);
+                        if (!result.display && !m_isStopping.load())
+                            std::cerr << "[GapAnalysis] Display preparation failed: " << reason << '\n';
+                    }
+                }
+                catch (const std::exception& error) {
+                    std::cerr << "[GapAnalysis] Display preparation failed: " << error.what() << '\n';
+                    result.display.reset();
+                }
+                catch (...) {
+                    std::cerr << "[GapAnalysis] Display preparation failed: unknown exception.\n";
+                    result.display.reset();
+                }
                 result.isSucceeded = true;
                 isSuccess = true;
             }

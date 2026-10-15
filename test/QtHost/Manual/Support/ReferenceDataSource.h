@@ -28,7 +28,8 @@ public:
     DataRevisionRef CreateMask(DataRevisionRef source, const QJsonObject& params);
     QJsonObject GetViewTransforms();
     QJsonObject GetResultEvidence();
-    QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source);
+    QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source, const QString& maskPath = {});
+    QJsonObject ReadImageEvidence(DataRevisionRef source, const QString& maskPath);
     std::vector<std::uint64_t> GetRoiVertices(DataRevisionRef roi, DataRevisionRef source, DataRevisionRef mesh) const;
     QJsonObject ReadTransform();
     static std::size_t GetGraySampleStride(std::size_t total, const std::array<int,3>& dimensions);

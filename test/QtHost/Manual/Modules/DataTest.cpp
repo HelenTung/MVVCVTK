@@ -73,6 +73,12 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("ResultEvidence",{},[panel,reference](auto id,const auto&) {
         panel->SetComplete(id,"Observed",reference->GetResultEvidence());
     },TestPolicy::Read);
+    panel->AttachAction("ImageEvidence",{{"revision","current"},{"maskPath",""}},[panel,reference](auto id,const auto& p) {
+        const auto input = panel->GetSession()->GetImageDescriptor();
+        if (!input) throw std::invalid_argument("没有当前影像");
+        const auto ref = GetText(p,"revision") == "current" ? input->dataRevision : GetRef(p["revision"]);
+        panel->SetComplete(id,"Observed",reference->ReadImageEvidence(ref,GetText(p,"maskPath")));
+    },TestPolicy::Read);
     panel->AttachAction("Select", {{"revision", ""}, {"expectedBindingRevision", "current"}},
         [panel](auto id, const auto& params) {
             const auto ref = GetRef(params["revision"]);
@@ -161,13 +167,13 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
     panel->AttachAction("ReadTransform", {}, [panel, reference](auto id,const auto&) {
         panel->SetComplete(id,"Observed",reference->ReadTransform());
     },TestPolicy::Read);
-    panel->AttachAction("ReadRoi", {{"roi","latest"}}, [panel, reference](auto id,const auto& p) {
+    panel->AttachAction("ReadRoi", {{"roi","latest"},{"maskPath",""}}, [panel, reference](auto id,const auto& p) {
         const auto input=panel->GetSession()->GetImageDescriptor();
         if(!input)throw std::runtime_error("source unavailable");
         const auto catalog=panel->GetSession()->GetRoiDescriptors();
         if(catalog.empty())throw std::runtime_error("ROI unavailable");
         const auto ref=GetText(p,"roi")=="latest"?catalog.back().revision:GetRef(p["roi"]);
-        panel->SetComplete(id,"Observed",reference->ReadRoi(ref,input->dataRevision));
+        panel->SetComplete(id,"Observed",reference->ReadRoi(ref,input->dataRevision,GetText(p,"maskPath")));
     },TestPolicy::Read);
     return panel;
 }

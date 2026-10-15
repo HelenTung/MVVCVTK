@@ -9,6 +9,7 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QJsonDocument>
 #include "App/Services/FeatureViewService.h"
 namespace Manual {
@@ -119,7 +120,41 @@ QJsonObject ReferenceDataSource::ReadTransform()
     if (!matrix) throw std::runtime_error("model transform unavailable");
     return {{"modelToWorld", GetValues(*matrix)}};
 }
-QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source)
+QJsonObject ReferenceDataSource::ReadImageEvidence(DataRevisionRef source, const QString& maskPath)
+{
+    const auto graph = m_data->GetDataGraph();
+    const auto data = m_data->GetData(graph, source);
+    const auto image = data ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload) : nullptr;
+    if (!image) throw std::invalid_argument("所选影像不可读");
+    const auto& g = image->GetGeometry();
+    std::size_t count = 1; for (const auto size : g.dimensions) count *= size;
+    const auto& mask = image->GetValidityMask();
+    QByteArray allValid;
+    if (!mask) allValid = QByteArray(static_cast<qsizetype>(count), char(1));
+    const auto* maskData = mask ? reinterpret_cast<const char*>(mask->data()) : allValid.constData();
+    std::uint64_t selected = 0; for (std::size_t i = 0; i < count; ++i) selected += maskData[i] != 0;
+    const auto digest = [](const char* values, std::size_t size) {
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        while (size) { const auto part = std::min<std::size_t>(size, 8U*1024U*1024U);
+            hash.addData(values, static_cast<int>(part)); values += part; size -= part; }
+        return QString::fromLatin1(hash.result().toHex());
+    };
+    if (!maskPath.isEmpty()) {
+        if (!QDir().mkpath(QFileInfo(maskPath).absolutePath())) throw std::runtime_error("无法创建掩码输出目录");
+        QFile file(maskPath);
+        if (!file.open(QIODevice::WriteOnly) || file.write(maskData, static_cast<qint64>(count)) != static_cast<qint64>(count))
+            throw std::runtime_error("无法保存有效域掩码");
+    }
+    QJsonArray inputs; for (const auto& input : data->inputs)
+        inputs.append(QJsonObject{{"role", QString::fromStdString(input.role)}, {"source", GetRefText(input.source)}});
+    return {{"source",GetRefText(source)},{"extent",GetValues(g.extent)},{"dimensions",GetValues(g.dimensions)},
+        {"spacing",GetValues(g.spacing)},{"origin",GetValues(g.origin)},{"direction",GetValues(g.direction)},
+        {"gridCount",QString::number(count)},{"validCount",QString::number(selected)},
+        {"scalarSha256",digest(reinterpret_cast<const char*>(image->GetValues()->data()),image->GetValues()->size())},
+        {"maskSha256",digest(maskData,count)},{"maskPath",maskPath},{"inputs",inputs}};
+}
+
+QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)
 {
     const auto graph = m_data->GetDataGraph();
     const auto read = m_data->GetRoi(graph, ref, source);
@@ -130,12 +165,17 @@ QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef so
     RoiMaskRequest request; request.region.offset = {0,0,0};
     for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
     request.chunkBytes=roiChunkBytes;
+    QFile output(maskPath);
+    if (!maskPath.isEmpty() && (!QDir().mkpath(QFileInfo(maskPath).absolutePath()) || !output.open(QIODevice::WriteOnly)))
+        throw std::runtime_error("无法保存 ROI 掩码");
     std::uint64_t selected=0,total=0; QCryptographicHash hash(QCryptographicHash::Sha256);
     for (;;) {
         const auto chunk=read.roi->GetMaskChunk(request);
         if (chunk.error!=RoiError::None) throw std::runtime_error("ROI read failed");
         for (auto value:chunk.values) selected += value!=0;
         total+=chunk.values.size();
+        if (!maskPath.isEmpty() && output.write(reinterpret_cast<const char*>(chunk.values.data()),static_cast<qint64>(chunk.values.size())) != static_cast<qint64>(chunk.values.size()))
+            throw std::runtime_error("ROI 掩码输出不完整");
         hash.addData(reinterpret_cast<const char*>(chunk.values.data()),static_cast<int>(chunk.values.size()));
         if(chunk.isComplete)break;
         request.voxelOffset=chunk.nextOffset;

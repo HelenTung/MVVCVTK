@@ -3,12 +3,12 @@
 #include "GapAnalysisTypes.h"
 #include "Host/RoiReadTypes.h"
 #include "Render/Support/AnalysisColorStyle.h"
-#include <vtkAppendPolyData.h>
 #include <vtkCellData.h>
 #include <vtkCellArray.h>
 #include <vtkPoints.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkIntArray.h>
+#include <vtkStringArray.h>
 #include <vtkPointData.h>
 #include <vtkVariant.h>
 #include <vtkCallbackCommand.h>
@@ -84,23 +84,34 @@ struct GapDisplayData final {
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(source.regionVolumes.size() + 1));
         result->labels->IndexedLookupOn();
-        result->labels->SetAnnotation(vtkVariant(0), "background");
+        vtkNew<vtkIntArray> annotationIds;
+        vtkNew<vtkStringArray> annotationNames;
+        annotationIds->InsertNextValue(0);
+        annotationNames->InsertNextValue("background");
         result->labels->SetTableValue(0, 0, 0, 0, 0);
         result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
         for (std::size_t index = 0; index < source.regionVolumes.size(); ++index) {
             const auto& region = source.regionVolumes[index];
             const auto rgba=AnalysisColorStyle::GetMappedColor(result->mappingRange,ramp,region.second);
-            result->labels->SetAnnotation(vtkVariant(region.first), std::to_string(region.first));
+            annotationIds->InsertNextValue(region.first);
+            annotationNames->InsertNextValue(std::to_string(region.first));
             result->labels->SetTableValue(static_cast<vtkIdType>(index + 1),rgba.data());
         }
+        result->labels->SetAnnotations(annotationIds, annotationNames);
         result->labels->Build();
         return result;
     }
 
     static std::shared_ptr<const GapDisplayData> Build(vtkImageData* image,
         const std::vector<VoidRegion>& regions, const std::atomic<bool>& isStopping,
-        const RoiReadSnapshot& evaluationRoi={},const std::vector<VoidRegion>* parentRegions=nullptr)
+        const RoiReadSnapshot& evaluationRoi={},const std::vector<VoidRegion>* parentRegions=nullptr,
+        std::string* failureReason=nullptr)
     {
+        if (failureReason) failureReason->clear();
+        const auto fail = [&](const std::string& reason) -> std::shared_ptr<const GapDisplayData> {
+            if (failureReason) *failureReason = reason;
+            return {};
+        };
         if (!image || image->GetScalarType() != VTK_INT
             || image->GetNumberOfScalarComponents() != 1) return {};
         constexpr std::size_t roiByteLimit = 64U * 1024U * 1024U;
@@ -122,18 +133,36 @@ struct GapDisplayData final {
         result->labels = vtkSmartPointer<vtkLookupTable>::New();
         result->labels->SetNumberOfTableValues(static_cast<vtkIdType>(regions.size() + 1));
         result->labels->IndexedLookupOn();
-        result->labels->SetAnnotation(vtkVariant(0), "background");
+        vtkNew<vtkIntArray> annotationIds;
+        vtkNew<vtkStringArray> annotationNames;
+        annotationIds->InsertNextValue(0);
+        annotationNames->InsertNextValue("background");
         result->labels->SetTableValue(0, 0, 0, 0, 0);
         result->labels->SetNanColor(0.5, 0.5, 0.5, 1);
-        auto append = vtkSmartPointer<vtkAppendPolyData>::New();
-        std::size_t totalMeshBytes = 0;
+        // 逐孔隙临时网格立即写入共享数组，不保留成千上万个 polydata。
+        // 预算按合并后的点、连通性和标签字节计量，最后再核对实际分配。
+        auto meshPoints = vtkSmartPointer<vtkPoints>::New();
+        meshPoints->SetDataType(evaluationRoi ? VTK_DOUBLE : VTK_FLOAT);
+        auto meshCells = vtkSmartPointer<vtkCellArray>::New();
+        auto meshIds = vtkSmartPointer<vtkIntArray>::New();
+        meshIds->SetName("gap.display.id");
+        const auto meshFits = [&](vtkIdType points, vtkIdType cells) {
+            constexpr auto cellBytes = 4 * sizeof(vtkIdType) + sizeof(int);
+            const auto pointBytes = 3 * (evaluationRoi ? sizeof(double) : sizeof(float));
+            if (points < 0 || cells < 0 || std::uint64_t(points) > meshByteLimit / pointBytes)
+                return false;
+            const auto remaining = meshByteLimit - std::size_t(points) * pointBytes;
+            return remaining >= sizeof(vtkIdType)
+                && std::uint64_t(cells) <= (remaining - sizeof(vtkIdType)) / cellBytes;
+        };
         int sourceExtent[6]; image->GetExtent(sourceExtent);
         for (std::size_t index = 0; index < regions.size(); ++index) {
             if (isStopping.load()) return {};
             const auto& region = regions[index];
             result->regionVolumes.emplace_back(region.id, region.volumeMM3);
             double rgb[3]; result->volumes->GetColor(region.volumeMM3, rgb);
-            result->labels->SetAnnotation(vtkVariant(region.id), std::to_string(region.id));
+            annotationIds->InsertNextValue(region.id);
+            annotationNames->InsertNextValue(std::to_string(region.id));
             result->labels->SetTableValue(static_cast<vtkIdType>(index + 1), rgb[0], rgb[1], rgb[2], 1);
             if (region.voxelCount == 0) continue;
             // 从完整父标签提面；评价区域只选择原表面的面片，不产生截断盖面。
@@ -150,7 +179,7 @@ struct GapDisplayData final {
                 extent[2 * axis + 1] = parent->bbox[2 * axis + 1] + 1;
                 const auto size = std::size_t(std::int64_t(extent[2 * axis + 1])
                     - extent[2 * axis] + 1);
-                if (size > roiByteLimit / count) return {};
+                if (size > roiByteLimit / count) return fail("Region " + std::to_string(region.id) + " mask exceeds 64 MiB display budget.");
                 count *= size;
             }
             auto mask = vtkSmartPointer<vtkImageData>::New();
@@ -190,28 +219,41 @@ struct GapDisplayData final {
                     const auto selected=evaluationRoi->GetTriangleSelection(triangle,0,[&]{return isStopping.load();});
                     if(selected.error!=RoiError::None)return {};
                     for(const auto& piece:selected.triangles){
-                        if(std::size_t(points->GetNumberOfPoints())> (meshByteLimit-totalMeshBytes)/(sizeof(double)*3+sizeof(vtkIdType)))return {};
+                        if (!meshFits(meshPoints->GetNumberOfPoints() + points->GetNumberOfPoints() + 3,
+                            meshCells->GetNumberOfCells() + cells->GetNumberOfCells() + 1))
+                            return fail("ROI display mesh exceeds 256 MiB budget.");
                         vtkIdType corners[3];for(int k=0;k<3;++k)corners[k]=points->InsertNextPoint(piece[k].data());cells->InsertNextCell(3,corners);
                     }
                 }
                 poly=vtkSmartPointer<vtkPolyData>::New();poly->SetPoints(points);poly->SetPolys(cells);
             }
-            auto labels = vtkSmartPointer<vtkIntArray>::New();
-            labels->SetName("gap.display.id");
-            labels->SetNumberOfTuples(poly->GetNumberOfCells());
-            labels->FillComponent(0, region.id);
-            poly->GetCellData()->SetScalars(labels);
-            const auto bytes = std::size_t(poly->GetActualMemorySize()) * 1024;
-            if (bytes > meshByteLimit - totalMeshBytes) return {};
-            totalMeshBytes += bytes;
-            append->AddInputData(poly);
+            const auto pointOffset = meshPoints->GetNumberOfPoints();
+            if (!meshFits(pointOffset + poly->GetNumberOfPoints(),
+                    meshCells->GetNumberOfCells() + poly->GetNumberOfCells()))
+                return fail("Merged display mesh exceeds 256 MiB budget at region " + std::to_string(region.id) + ".");
+            for (vtkIdType point = 0; point < poly->GetNumberOfPoints(); ++point) {
+                double position[3]; poly->GetPoint(point, position);
+                meshPoints->InsertNextPoint(position);
+            }
+            vtkIdType cellSize = 0; const vtkIdType* corners = nullptr;
+            auto* triangles = poly->GetPolys(); triangles->InitTraversal();
+            while (triangles->GetNextCell(cellSize, corners)) {
+                if (isStopping.load()) return {};
+                if (cellSize != 3) return fail("Display surface contains a non-triangle cell.");
+                const vtkIdType triangle[3]{corners[0] + pointOffset, corners[1] + pointOffset, corners[2] + pointOffset};
+                meshCells->InsertNextCell(3, triangle);
+                meshIds->InsertNextValue(region.id);
+            }
         }
+        result->labels->SetAnnotations(annotationIds, annotationNames);
         result->labels->Build();
+        meshPoints->Squeeze(); meshCells->Squeeze(); meshIds->Squeeze();
         result->mesh = vtkSmartPointer<vtkPolyData>::New();
-        if (!regions.empty()) {
-            if (isStopping.load()) return {};
-            append->Update(); result->mesh->ShallowCopy(append->GetOutput());
-        }
+        result->mesh->SetPoints(meshPoints);
+        result->mesh->SetPolys(meshCells);
+        result->mesh->GetCellData()->SetScalars(meshIds);
+        if (std::size_t(result->mesh->GetActualMemorySize()) * 1024 > meshByteLimit)
+            return fail("Merged display mesh allocation exceeds 256 MiB budget.");
         return isStopping.load() ? nullptr : result;
     }
 };
