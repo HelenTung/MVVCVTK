@@ -58,10 +58,10 @@ public:
     Impl() {
         modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();worldToModel=vtkSmartPointer<vtkMatrix4x4>::New();
         mapper=vtkSmartPointer<vtkPolyDataMapper>::New();actor=vtkSmartPointer<vtkActor>::New();actor->SetMapper(mapper);
-        actor->SetPickable(false);actor->GetProperty()->SetRepresentationToWireframe();
+        actor->SetPickable(false);actor->UseBoundsOff();actor->GetProperty()->SetRepresentationToWireframe();
         actor->GetProperty()->SetColor(0.95,0.2,0.2);actor->GetProperty()->SetLineWidth(1.5);
         actor->GetProperty()->LightingOff();
-        text=vtkSmartPointer<vtkTextActor>::New();text->PickableOff();text->SetPosition(12,36);
+        text=vtkSmartPointer<vtkTextActor>::New();text->PickableOff();text->UseBoundsOff();text->SetPosition(12,36);
         text->GetTextProperty()->SetFontSize(12);text->GetTextProperty()->SetColor(1,.86,.62);
         RenderTextStyle::SetFont(*text->GetTextProperty());text->GetTextProperty()->ShadowOn();text->VisibilityOff();
         viewObserver=vtkSmartPointer<vtkCallbackCommand>::New();viewObserver->SetClientData(this);
@@ -76,6 +76,7 @@ public:
             auto& handle=handles[i];handle.owner=this;handle.index=i;
             handle.widget=vtkSmartPointer<FeatureSupport::RoutedHandleWidget>::New();
             handle.representation=vtkSmartPointer<vtkPointHandleRepresentation3D>::New();
+            handle.representation->UseBoundsOff();
             handle.representation->AllOff();handle.representation->TranslationModeOn();
             handle.representation->GetProperty()->SetColor(i==1?0.2:0.9,i==1?0.8:0.6,0.2);
             handle.representation->GetSelectedProperty()->SetColor(1,0.68,0.16);
@@ -239,6 +240,8 @@ public:
             }
             const auto valid=CropGeometry::Build(next);
             if(!valid){Sync();return;}
+            if(operation.geometryType==CropShape::Sphere&&index==1)
+                sphereVisual.SetRadiusHandleDirection(Add(position,operation.centerInInputModel,-1));
             operation=valid->GetOperation();visualState=CropSphereVisual::State::Dragging;Sync(static_cast<int>(index));
             if(callback)callback(CropInteractionPhase::Dragging);
         } else if(event==vtkCommand::EndInteractionEvent) {

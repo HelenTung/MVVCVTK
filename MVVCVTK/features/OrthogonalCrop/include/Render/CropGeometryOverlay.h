@@ -7,14 +7,16 @@
 #include "Render/Contracts/SlicePlaneState.h"
 #include "Render/Support/SliceContourPlane.h"
 #include "Render/CropSphereVisual.h"
-#include <vtkActor.h>
+#include <vtkActor2D.h>
+#include <vtkCoordinate.h>
 #include <vtkCubeSource.h>
 #include <vtkCutter.h>
 #include <vtkCylinderSource.h>
+#include <vtkFeatureEdges.h>
 #include <vtkPlaneSource.h>
 #include <vtkPlane.h>
-#include <vtkPolyDataMapper.h>
-#include <vtkProperty.h>
+#include <vtkPolyDataMapper2D.h>
+#include <vtkProperty2D.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
@@ -34,21 +36,24 @@ public:
             : role == HostRenderViewRole::FrontBackSlice ? 1
             : role == HostRenderViewRole::LeftRightSlice ? 0 : -1;
         if(m_axis<0)m_sphereVisual=std::make_unique<CropSphereVisual>();
+        m_projection->SetCoordinateSystemToWorld();
+        m_mapper->SetTransformCoordinate(m_projection);m_mapper->TransformCoordinateUseDoubleOn();
+        m_mapper->SetInputConnection(m_displayGeometry->GetOutputPort());
+        m_displayTransform->SetMatrix(m_modelToWorld);m_displayGeometry->SetTransform(m_displayTransform);
+        m_planeEdges->SetInputData(m_mesh);m_planeEdges->BoundaryEdgesOn();
+        m_planeEdges->FeatureEdgesOff();m_planeEdges->NonManifoldEdgesOff();m_planeEdges->ManifoldEdgesOff();
         m_mapper->ScalarVisibilityOff(); m_actor->SetMapper(m_mapper);
         m_actor->GetProperty()->SetColor(0.95, 0.2, 0.2);
-        m_actor->GetProperty()->SetRepresentationToWireframe();
-        m_actor->GetProperty()->LightingOff(); m_actor->GetProperty()->SetLineWidth(1.5);
-        m_actor->PickableOff();
+        m_actor->GetProperty()->SetLineWidth(1.5);
+        m_actor->PickableOff();m_actor->UseBoundsOff();
         if (m_axis >= 0) {
-            // 交圆与图像平面重合；只偏移深度绘制，避免改变模型坐标和球面交线。
-            m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
-            m_mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0,-4);
-            m_mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-4);
+            // 切片辅助线通过本 prop 的前景投影绘制，不修改 VTK 全局重合几何模式。
+            m_actor->GetProperty()->SetDisplayLocationToForeground();
             std::array<double,3> normal{}; normal[m_axis] = 1;
             m_sliceNormal=normal;
             m_plane->SetNormal(normal.data()); m_cutter->SetCutFunction(m_plane);
             m_cutter->GenerateTrianglesOff();
-            m_mapper->SetInputConnection(m_cutter->GetOutputPort());
+            m_displayGeometry->SetInputConnection(m_cutter->GetOutputPort());
             AttachProp(m_actor);
         }
         m_text->GetTextProperty()->SetFontSize(12);
@@ -56,7 +61,7 @@ public:
         m_text->GetTextProperty()->SetColor(1, 1, 1);
         m_text->GetTextProperty()->ShadowOn();
         m_text->SetPosition(12, 12);
-        m_text->PickableOff(); AttachProp(m_text);
+        m_text->PickableOff();m_text->UseBoundsOff(); AttachProp(m_text);
     }
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {
@@ -78,6 +83,7 @@ public:
     {
         (void)SliceContourPlane::SetPlane(*m_plane,state.cursor,m_sliceNormal,state.modelToWorld);
         m_modelToWorld->DeepCopy(state.modelToWorld.data());
+        m_displayTransform->SetMatrix(m_modelToWorld);
         if(m_shape==CropShape::Sphere) {
             UpdateSphere();Set3DPropsTransform(state.modelToWorld);return;
         }
@@ -86,8 +92,8 @@ public:
         const double length=std::hypot(n[0],n[1],n[2])*std::hypot(m_normal[0],m_normal[1],m_normal[2]);
         const bool isCoplanar=m_shape==CropShape::Plane && length>0 && std::abs(dot)/length>1-1e-8
             && std::abs(m_plane->EvaluateFunction(m_center.data()))<1e-6;
-        if(isCoplanar)m_mapper->SetInputData(m_mesh);
-        else m_mapper->SetInputConnection(m_cutter->GetOutputPort());
+        if(isCoplanar)m_displayGeometry->SetInputConnection(m_planeEdges->GetOutputPort());
+        else m_displayGeometry->SetInputConnection(m_cutter->GetOutputPort());
         Set3DPropsTransform(state.modelToWorld);
     }
     void SetOperation(const CropOpItem& op, const CropBoundsDouble6Array& bounds)
@@ -143,7 +149,7 @@ public:
         vtkNew<vtkTransform> transform;transform->SetMatrix(matrix);
         vtkNew<vtkTransformPolyDataFilter> filter;filter->SetTransform(transform);filter->SetInputData(mesh);
         filter->Update();m_mesh->ShallowCopy(filter->GetOutput());
-        m_cutter->SetInputData(m_mesh);m_mapper->SetInputConnection(m_cutter->GetOutputPort());
+        m_cutter->SetInputData(m_mesh);m_displayGeometry->SetInputConnection(m_cutter->GetOutputPort());
         m_text->SetInput(text.str().c_str());
     }
 private:
@@ -151,7 +157,7 @@ private:
     {
         if(m_axis>=0) {
             CropSphereVisual::BuildSection(*m_mesh,m_center,m_radius,*m_plane);
-            m_mapper->SetInputData(m_mesh);m_actor->GetProperty()->SetPointSize(4);
+            m_displayGeometry->SetInputData(m_mesh);m_actor->GetProperty()->SetPointSize(4);
         } else {
             m_sphereVisual->SetGeometry(m_center,m_radius,m_modelToWorld);
             m_sphereVisual->SetState(CropSphereVisual::State::Passive);
@@ -169,7 +175,11 @@ private:
     vtkSmartPointer<vtkPolyData> m_mesh=vtkSmartPointer<vtkPolyData>::New();
     vtkSmartPointer<vtkPlane> m_plane=vtkSmartPointer<vtkPlane>::New();
     vtkSmartPointer<vtkCutter> m_cutter=vtkSmartPointer<vtkCutter>::New();
-    vtkSmartPointer<vtkPolyDataMapper> m_mapper=vtkSmartPointer<vtkPolyDataMapper>::New();
-    vtkSmartPointer<vtkActor> m_actor=vtkSmartPointer<vtkActor>::New();
+    vtkSmartPointer<vtkFeatureEdges> m_planeEdges=vtkSmartPointer<vtkFeatureEdges>::New();
+    vtkSmartPointer<vtkTransform> m_displayTransform=vtkSmartPointer<vtkTransform>::New();
+    vtkSmartPointer<vtkTransformPolyDataFilter> m_displayGeometry=vtkSmartPointer<vtkTransformPolyDataFilter>::New();
+    vtkSmartPointer<vtkCoordinate> m_projection=vtkSmartPointer<vtkCoordinate>::New();
+    vtkSmartPointer<vtkPolyDataMapper2D> m_mapper=vtkSmartPointer<vtkPolyDataMapper2D>::New();
+    vtkSmartPointer<vtkActor2D> m_actor=vtkSmartPointer<vtkActor2D>::New();
     vtkSmartPointer<vtkTextActor> m_text=vtkSmartPointer<vtkTextActor>::New();
 };

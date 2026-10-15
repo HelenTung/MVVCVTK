@@ -1,10 +1,12 @@
 #include "Interaction/CropCurveWidget.h"
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
+#include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkProperty.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPointData.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkHandleRepresentation.h>
@@ -38,7 +40,10 @@ int GetCropCurveWidgetFailures()
     };
     CropOpItem operation;operation.geometryType=CropShape::Sphere;operation.centerInInputModel={1,2,3};operation.radius=2;
     check(widget.SetGeometry(operation,matrix)&&widget.SetEnabled(true),"sphere context and affine accepted");
-    renderer->ResetCamera();window->Render();
+    const auto initialCenter=world(operation.centerInInputModel);
+    renderer->GetActiveCamera()->SetFocalPoint(initialCenter.data());
+    renderer->GetActiveCamera()->SetPosition(initialCenter[0]+10,initialCenter[1]+10,initialCenter[2]+30);
+    renderer->GetActiveCamera()->SetClippingRange(.1,1000);window->Render();
     vtkNew<vtkMatrix4x4> inverse;inverse->DeepCopy(matrix.data());vtkMatrix4x4::Invert(inverse,inverse);
     const auto model=[&](P p){double input[4]{p[0],p[1],p[2],1},output[4]{};inverse->MultiplyPoint(input,output);return P{output[0],output[1],output[2]};};
     const auto radiusPosition=model(position(1));P radial{};for(int i=0;i<3;++i)radial[i]=radiusPosition[i]-operation.centerInInputModel[i];
@@ -48,10 +53,25 @@ int GetCropCurveWidgetFailures()
     check(near(widget.GetGeometry().centerInInputModel,P{2,1,4})&&std::abs(widget.GetGeometry().radius-3)<1e-11
         &&phases.size()==6&&phases[0]==CropInteractionPhase::Hover&&phases[1]==CropInteractionPhase::Dragging
         &&phases[2]==CropInteractionPhase::Released,"sphere drag uses inverse affine without changing its model radius semantics");
+    check(near(position(1),world(P{5,1,4})),"radius handle keeps the released direction under full affine");
+    window->Render();check(near(position(1),world(P{5,1,4})),"render after release does not reset the radius handle");
+    // 负方向是旧实现松手后跳回相机对角线的反例。
+    move(1,P{-1,1,4});
+    check(near(position(1),world(P{-1,1,4}))&&widget.GetGeometry().radius==3,"negative radius direction survives release");
+    const auto released=position(1),centerAfterDrag=position(0);
+    renderer->SetWorldPoint(released[0],released[1],released[2],1);renderer->WorldToDisplay();
+    const auto* display=renderer->GetDisplayPoint();interactor->SetEventPosition(int(std::lround(display[0])),int(std::lround(display[1])));
+    interactor->InvokeEvent(vtkCommand::MouseMoveEvent);
+    vtkNew<vtkCamera> savedCamera;savedCamera->DeepCopy(renderer->GetActiveCamera());
+    renderer->GetActiveCamera()->SetPosition(centerAfterDrag[0]+10*(released[0]-centerAfterDrag[0]),
+        centerAfterDrag[1]+10*(released[1]-centerAfterDrag[1]),centerAfterDrag[2]+10*(released[2]-centerAfterDrag[2]));
+    renderer->GetActiveCamera()->SetFocalPoint(centerAfterDrag.data());window->Render();
+    check(near(position(1),released),"native radius hover freezes placement when camera makes handle overlap center");
+    interactor->InvokeEvent(vtkCommand::LeaveEvent);renderer->GetActiveCamera()->DeepCopy(savedCamera);window->Render();
     vtkActor* outline=nullptr;auto* actors=renderer->GetActors();actors->InitTraversal();
     while(auto* actor=actors->GetNextActor()) {
         auto* mapper=vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
-        if(!actor->GetPickable()&&mapper&&mapper->GetInput()&&mapper->GetInput()->GetNumberOfLines()==3)outline=actor;
+        if(!actor->GetPickable()&&mapper&&mapper->GetInput()&&mapper->GetInput()->GetPointData()->GetScalars())outline=actor;
     }
     P renderedCenter{};if(outline)std::copy_n(outline->GetCenter(),3,renderedCenter.data());
     check(outline&&near(renderedCenter,world(P{2,1,4})),"sphere outline and handles apply the display affine exactly once");
