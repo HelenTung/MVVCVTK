@@ -8,6 +8,7 @@
 #include <limits>
 
 bool TestRoiReadExecution();
+bool TestRoiMaskArchive();
 
 namespace {
 bool Check(bool value, const char* message)
@@ -275,7 +276,8 @@ bool GetCropBoundariesValid()
 }
 
 }
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "mask-archive") return TestRoiMaskArchive() ? 0 : 1;
     return TestRoiReadExecution() && GetCropBoundariesValid() && GetGeometryValid() && GetDefinitionRejected() && GetMasksAndBooleanValid() && GetServiceValid() && GetArchiveValid() && GetArchiveNoBudgetValid() && GetSourceBindingCasValid() ? 0 : 1;
 }
