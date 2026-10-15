@@ -539,6 +539,7 @@ void TestSession(Acceptance c, bool useRoi = false)
     std::get<ThicknessDisplayRequest>(color).display = display;
     std::get<ThicknessDisplayRequest>(color).result=completed->result;
     std::get<ThicknessDisplayRequest>(color).display.mode = ThicknessDisplayMode::Tolerance;
+    std::get<ThicknessDisplayRequest>(color).display.rangeMode = ThicknessRangeMode::Result;
     std::array<int,4> oldProps{};
     for(std::size_t i=0;i<oldProps.size();++i)
         oldProps[i]=probe->context.views->GetInputView({display.targetViews.viewIds[i]})->renderer->GetViewProps()->GetNumberOfItems();
@@ -556,6 +557,8 @@ void TestSession(Acceptance c, bool useRoi = false)
     std::get<ThicknessDisplayRequest>(color).display.targetViews=display.targetViews;
     Require(wall->SendRequest(color).status == ThicknessAdmissionStatus::Accepted,
             "Tolerance display rejected.");
+    Require(wall->GetState().displayRange==std::optional<std::array<double,2>>({*result->statistics.minimum,*result->statistics.maximum}),
+            "Tolerance classification must retain the measured result range.");
     Require(wall->GetResult(completed->result)->samples == before &&
                 wall->GetResult(completed->result)->nodes == nodesBefore,
             "Display changes numerical buffer.");
@@ -568,7 +571,7 @@ void TestSession(Acceptance c, bool useRoi = false)
             "Color mode switch rejected.");
         const auto range = wall->GetState().displayRange;
         Require(range && (*range)[0] == *result->statistics.minimum
-            && (*range)[1] >= *result->statistics.maximum,
+            && (*range)[1] == *result->statistics.maximum,
             "Automatic legend range does not follow the valid measured thickness.");
         Require(wall->GetResult(completed->result)->samples == before
             && probe->context.data->GetDataGraph().commitId == graphCommit,

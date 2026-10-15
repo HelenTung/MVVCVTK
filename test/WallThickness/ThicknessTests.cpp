@@ -1028,7 +1028,7 @@ void Display()
                                                       HostRenderViewRole::Primary3D);
     overlay->AttachRenderer(renderer);
     Check(renderer->GetViewProps()->GetNumberOfItems() == 3,
-          "feature owns surface, query marker, scale and invalid swatch");
+          "feature owns surface, query marker and contiguous scale");
     auto *colors = prepared.mesh->GetCellData()->GetScalars();
     Check(colors && colors->GetNumberOfComponents() == 3,
           "cell RGB prevents invalid interpolation");
@@ -1044,8 +1044,8 @@ void Display()
     bool hasInvalidLegend=false;
     renderer->GetViewProps()->InitTraversal();
     while(auto* prop=renderer->GetViewProps()->GetNextProp())if(auto* legend=AnalysisLegend::SafeDownCast(prop))
-        hasInvalidLegend=legend->GetDrawNanAnnotation() && std::string(legend->GetNanAnnotation())==u8"无效／未测";
-    Check(hasInvalidLegend,"invalid data is explicitly distinguished from both range exterior swatches");
+        hasInvalidLegend=!legend->GetDrawNanAnnotation();
+    Check(hasInvalidLegend,"measurement legend does not add an invalid-data swatch");
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
     window->SetOffScreenRendering(1);
     window->SetSize(400, 400);

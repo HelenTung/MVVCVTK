@@ -45,17 +45,14 @@ std::optional<AlignmentDeviationDisplay> GetResolvedDisplay(
   const auto actualRange=cachedRange ? *cachedRange:GetEffectiveRange(*r.forward);
   if(d.rangeMode==AlignmentRangeMode::Result) {
     d.range=actualRange.value_or(std::array<double,2>{0,0});
-    if(d.useToleranceColors && r.parameters->tolerance && actualRange) {
-      d.range[0]=std::min(d.range[0],(*r.parameters->tolerance)[0]);
-      d.range[1]=std::max(d.range[1],(*r.parameters->tolerance)[1]);
-    }
+
   } else if(d.rangeMode!=AlignmentRangeMode::Manual)return {};
   if(!AnalysisColorStyle::GetLegendLayoutValid(d))return {};
   if(!std::isfinite(d.range[0]) || !std::isfinite(d.range[1]) || d.range[0]>d.range[1]
       || (input.rangeMode==AlignmentRangeMode::Manual && d.range[0]==d.range[1])
       || !std::isfinite(d.range[1]-d.range[0]) || !std::isfinite(d.opacity) || d.opacity<0 || d.opacity>1
       || (r.parameters->metric==AlignmentDeviationMetric::UnsignedDistance && d.range[0]<0))return {};
-  if(d.useToleranceColors && r.parameters->tolerance && actualRange &&
+  if(d.rangeMode==AlignmentRangeMode::Manual && d.useToleranceColors && r.parameters->tolerance && actualRange &&
       (d.range[0]>(*r.parameters->tolerance)[0] || d.range[1]<(*r.parameters->tolerance)[1]))return {};
   try { if(!AnalysisColorStyle::GetRampValid(GetRampParameters(d,r.parameters->tolerance)))return {}; } catch(...) { return {}; }
   return d;

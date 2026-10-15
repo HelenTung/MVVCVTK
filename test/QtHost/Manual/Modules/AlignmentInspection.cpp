@@ -228,7 +228,7 @@ void AttachInspectionActions(ModulePanel* panel, std::shared_ptr<MetrologyAlignm
     panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
         const auto state=feature->GetState();if(!state.deviationDisplay)return;
         auto d=*state.deviationDisplay;const auto view=id.toStdString();
-        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        if(visible){d.hasLegend=true;if(slot>=0)d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
         auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
         AlignmentRequest request;request.action=AlignmentAction::SetDeviationDisplay;request.deviationDisplay=d;feature->SendRequest(request);
     };

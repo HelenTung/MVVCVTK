@@ -120,8 +120,7 @@ std::shared_ptr<const AlignmentDeviationRenderData> AlignmentDeviationOverlay::B
     }
     output->lookup=ramp.GetLookup();output->ramp=ramp.GetParameters();
     const char *unit=result.unit == AlignmentUnit::Millimeter ? "mm" : result.unit == AlignmentUnit::Meter ? "m" : "model unit";
-    output->title=std::string(u8"计量 · ")+AnalysisColorStyle::GetResultLabel(result.result)+"\n"+ (result.parameters->metric == AlignmentDeviationMetric::UnsignedDistance ? u8"距离":u8"法向偏差")+" ("+unit+")";
-    if(display.useToleranceColors&&result.parameters->tolerance)output->title+=u8"\n橙色：上下超差混合";
+    output->title=std::string(result.parameters->metric == AlignmentDeviationMetric::UnsignedDistance ? u8"距离":u8"法向偏差")+" ("+unit+")";
     output->marker=previousMarker ? *previousMarker:BuildMarker(output->source,result,display.selectedVertex);
     // 诊断记录显示缓存实际保留的数组容量；共享的原始网格与测量场不重复计入。
     output->workingBytes=65536;

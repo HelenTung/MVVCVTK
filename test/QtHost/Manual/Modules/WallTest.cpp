@@ -306,7 +306,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
         const auto state=feature->GetState();if(!state.appliedDisplay)return;
         auto d=*state.appliedDisplay;const auto view=id.toStdString();
-        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        if(visible){d.hasLegend=true;if(slot>=0)d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
         auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
         feature->SendRequest(ThicknessDisplayRequest{d,state.result});
     };

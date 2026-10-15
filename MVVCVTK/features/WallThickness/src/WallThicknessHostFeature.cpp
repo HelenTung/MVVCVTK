@@ -211,8 +211,7 @@ class WallThicknessHostFeature::Impl final
         if(display.mode==ThicknessDisplayMode::Tolerance) {
             if(display.rangeMode==ThicknessRangeMode::Manual &&
                 (display.range[0]>record.archive.evaluation.lower || display.range[1]<record.archive.evaluation.upper))return false;
-            display.range[0]=std::min(display.range[0],record.archive.evaluation.lower);
-            display.range[1]=std::max(display.range[1],record.archive.evaluation.upper);
+
         }
         auto checked=display;
         if(checked.range[0]==checked.range[1])checked.range={0,1};

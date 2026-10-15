@@ -158,6 +158,21 @@ inline std::array<double,3> GetSegmentColor(const RampSegment& segment,double va
     }
     return color;
 }
+// 未显式分段时，整条色带共用同一调色板；两端保留短过渡，避免独立状态色。
+inline void SetTailColors(RampParams& params)
+{
+    if (!params.segments.empty()) {
+        if (!params.segments.front().lower) params.belowColor=params.segments.front().lowColor;
+        if (!params.segments.back().upper) params.aboveColor=params.segments.back().lowColor;
+    } else if (params.tolerance) {
+        // 显式公差配色继续采用调用方指定的无界端色。
+    } else {
+        RampSegment segment{0,1,params.mode,params.lowColor,params.highColor};
+        params.belowColor=params.mode==RampMode::Constant ? params.constantColor:GetSegmentColor(segment,params.isReversed?1:0);
+        params.aboveColor=params.mode==RampMode::Constant ? params.constantColor:GetSegmentColor(segment,params.isReversed?0:1);
+    }
+}
+
 inline double GetOpacity(double fraction,const RampParams& params)
 {
     if (params.blend==BlendMode::Constant) return 1;
@@ -173,8 +188,15 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
     if (std::isfinite(value)) {
         const double fraction=GetFraction(range[0],range[1],value);
         alpha=GetOpacity(fraction,params);
-        if(value<range[0])color=!params.segments.empty() && !params.segments.front().lower ? params.segments.front().lowColor:params.belowColor;
-        else if(value>range[1])color=!params.segments.empty() && !params.segments.back().upper ? params.segments.back().lowColor:params.aboveColor;
+        const auto tail=[&](bool above) {
+            if(!params.segments.empty())return above ? (!params.segments.back().upper?params.segments.back().lowColor:params.aboveColor)
+                : (!params.segments.front().lower?params.segments.front().lowColor:params.belowColor);
+            if(params.tolerance)return above?params.aboveColor:params.belowColor;
+            if(params.mode==RampMode::Constant)return params.constantColor;
+            return GetSegmentColor({0,1,params.mode,params.lowColor,params.highColor},above!=params.isReversed?1:0);
+        };
+        if(value<range[0])color=tail(false);
+        else if(value>range[1])color=tail(true);
         else if(params.tolerance) {
             color=value<(*params.tolerance)[0] ? params.toleranceBelowColor
                 : value>(*params.tolerance)[1] ? params.toleranceAboveColor:params.toleranceColor;
@@ -195,7 +217,7 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
         } else if(params.mode==RampMode::Constant)color=params.constantColor;
         else {
             RampSegment s{0,1,params.mode,params.lowColor,params.highColor};
-            color=GetSegmentColor(s,params.isReversed ? 1-fraction:fraction);
+            color=GetSegmentColor(s,params.isReversed ? 1-(.04+.92*fraction):.04+.92*fraction);
         }
     }
     return {color[0],color[1],color[2],alpha};
@@ -314,9 +336,9 @@ inline void SetLegend(vtkScalarBarActor& legend, const char* title)
         legend.UseCustomLabelsOn();
         legend.SetLabelFormat(GetLabelFormat(*labels).c_str());
     }
-    legend.DrawBelowRangeSwatchOn();legend.SetBelowRangeAnnotation(u8"下侧无界段 → −∞");
-    legend.DrawAboveRangeSwatchOn();legend.SetAboveRangeAnnotation(u8"上侧无界段 → +∞");
-    legend.DrawNanAnnotationOn();legend.SetNanAnnotation(u8"无效／未测");
+    legend.DrawBelowRangeSwatchOn();legend.SetBelowRangeAnnotation(u8"−∞");
+    legend.DrawAboveRangeSwatchOn();legend.SetAboveRangeAnnotation(u8"+∞");
+    legend.DrawNanAnnotationOff();legend.SetNanAnnotation("");
     legend.SetWidth(0.20);
     legend.SetBarRatio(0.13);
     legend.SetMaximumNumberOfColors(256);

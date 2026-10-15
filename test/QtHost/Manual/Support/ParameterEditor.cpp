@@ -202,6 +202,22 @@ bool ParameterEditor::GetFieldApplicable(const QString& key) const
         const auto selection = m_fields.find("componentSelection");
         return selection != m_fields.end() && selection->second->GetValue() == "Seeded";
     }
+    if(m_key.isEmpty() && ((m_action=="SetDisplay"&&(m_module=="Wall"||m_module=="Gap"))
+        || (m_module=="Alignment"&&m_action=="SetDeviationDisplay"))) {
+        const auto field=[&](const QString& name){const auto i=m_fields.find(name);return i==m_fields.end()?QJsonValue():i->second->GetValue();};
+        const bool tolerance=m_module=="Alignment"?field("useToleranceColors").toBool():field("mode").toString()=="Tolerance";
+        const auto segments=m_fields.find("segments");const bool segmented=segments!=m_fields.end()&&segments->second->GetCount()>0;
+        if(key=="belowColor"||key=="aboveColor")return (m_module=="Alignment"&&tolerance)||(!tolerance&&segmented);
+        if(m_module=="Alignment") {
+            if(key=="range")return field("rangeMode").toString()=="Manual";
+            if(key=="palette"||key=="constantColor"||key=="lowColor"||key=="highColor"||key=="isReversed"||key=="segments") {
+                if(tolerance)return false;
+                if(segmented&&key!="segments"&&key!="isReversed")return false;
+                if(key=="constantColor")return field("palette").toString()=="Constant";
+                if(key=="lowColor"||key=="highColor")return field("palette").toString()=="Gradient";
+            }
+        }
+    }
     if ((m_key.isEmpty() || m_key=="segments") && (m_module == "Wall" || m_module == "Gap") && m_action == "SetDisplay") {
         const auto field = [&](const QString& name) {
             const auto found = m_fields.find(name);
