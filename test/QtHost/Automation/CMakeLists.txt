@@ -1,5 +1,5 @@
 add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp BusinessWorkflowTests.cpp WorkbenchV1Tests.cpp
-    ReportWorkflowTests.cpp ReportWorkflowTests.h
+    ReportWorkflowTests.cpp ReportWorkflowTests.h ReportRepairTests.cpp
     Scenarios/business-primary.json Scenarios/business-crop.json
     Scenarios/business-artifact.json Scenarios/business-measurement.json
     Scenarios/frontend-context-regression.json Scenarios/frontend-analysis-regression.json Scenarios/workbench-v1.json
