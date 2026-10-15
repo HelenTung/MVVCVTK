@@ -1,6 +1,6 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "Services/PartSegmentationService.h"
-#include "FeatureSupport/LabelMapBuilder.h"
+#include "LabelMapBuilder.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>

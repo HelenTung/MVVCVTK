@@ -63,6 +63,8 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,0,0,0);footerLayout->setSpacing(6);
     m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
     m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
+    m_viewReport=new QPushButton("查看结果明细",commandFooter);m_viewReport->setObjectName("viewBusinessReport");m_viewReport->hide();footerLayout->addWidget(m_viewReport);
+    connect(m_viewReport,&QPushButton::clicked,this,[this]{if(m_context.workflow.onShowReports)m_context.workflow.onShowReports({},m_viewReport->property("reportResult").toString());});
     m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
@@ -561,9 +563,9 @@ void ModulePanel::RefreshWorkflow()
     }
     QStringList allowed; for (const auto value : m_node["actions"].toArray()) allowed.append(value.toString());
     static const QHash<QString, QStringList> globalActions{{"Data", {"Load"}}, {"View", {"Set", "Reset", "Visibility","SetVolumeVisible"}},
-        {"Crop", {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly"}}, {"Part", {"Start"}}, {"Gap", {"Start"}},
+        {"Crop", {"Box", "Plane", "KeepInside", "RemoveInside", "PositionOnly"}}, {"Part", {"Start"}}, {"Gap", {"Start","SetDisplay"}},
         {"Artifact", {"Ring", "Diffusion", "Combined"}}, {"Surface", {"GlobalAutomatic"}},
-        {"Wall", {"Start", "Cancel", "Result", "Clear"}}, {"Alignment", {"ImportReference"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
+        {"Wall", {"Start", "Cancel", "Result", "Clear","SetDisplay"}}, {"Alignment", {"ImportReference","SetDeviationDisplay"}}, {"Rotation", {"Rotate", "SetEnabled"}}};
     allowed.append(globalActions.value(m_name));
     if(m_name=="Roi")allowed.append(actions);
     for (const auto& entry : m_entries) if (entry.second.policy == TestPolicy::Stop) allowed.append(entry.first);
@@ -582,7 +584,7 @@ void ModulePanel::RefreshWorkflow()
     } else for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
     if (m_commandRows.count(m_parameterAction) && !pages.contains(m_parameterAction)) pages.append(m_parameterAction);
     if (pages.isEmpty()) for (const auto& name : m_actionOrder) if (m_commandRows.count(name)) { pages.append(name); break; }
-    pages.removeAll("SetDisplay");pages.removeAll("SetDeviationDisplay");
+
     {
         const QSignalBlocker blocker(m_parameterTabs);
         QStringList previous;
@@ -624,10 +626,8 @@ void ModulePanel::RefreshWorkflow()
     for (const auto& name : m_actionOrder) {
         auto* button = m_buttons.at(name); const auto& entry = m_entries.at(name);
         const bool shown = m_cards.at(name) == button ? visible.contains(name) : name == m_parameterAction;
-        const bool isColor=(m_name=="Wall" || m_name=="Gap" || m_name=="Alignment")
-            && (name=="SetDisplay" || name=="SetDeviationDisplay");
-        m_cards.at(name)->setVisible(shown && !isColor);
-        button->setVisible(shown && !isColor && (name!=m_primary->property("businessAction").toString() || m_primary->property("usesOutput").toBool()));
+        m_cards.at(name)->setVisible(shown);
+        button->setVisible(shown && (name!=m_primary->property("businessAction").toString() || m_primary->property("usesOutput").toBool()));
         auto reason = GetActionRequirement(m_name, name, state, descriptor.has_value());
         if (m_context.workflow.GetBusyOperation() && entry.policy != TestPolicy::Read && entry.policy != TestPolicy::View && entry.policy != TestPolicy::Stop)
             reason = "当前任务未完成，请等待或取消。";
@@ -645,7 +645,7 @@ void ModulePanel::RefreshWorkflow()
             button->setChecked(state["isActive"].toBool() && state["editMode"].toInt() == (name == "KeepInside" ? 1 : name == "RemoveInside" ? 2 : 0));
         }
     }
-    if (m_parameterAction!="SetDisplay" && m_parameterAction!="SetDeviationDisplay" && m_commandRows.count(m_parameterAction)) {
+    if (m_commandRows.count(m_parameterAction)) {
         m_commandArea->setCurrentWidget(m_commandRows.at(m_parameterAction)); m_commandArea->show();
     } else m_commandArea->hide();
     m_quickActions->setVisible(!visible.isEmpty());
@@ -664,7 +664,7 @@ void ModulePanel::RefreshWorkflow()
     m_operationMenu->clear(); qDeleteAll(oldMenus);
     QMap<QString, QMenu*> menus;
     for (const auto& name : m_actionOrder) {
-        if((m_name=="Wall" || m_name=="Gap" || m_name=="Alignment") && (name=="SetDisplay" || name=="SetDeviationDisplay"))continue;
+
         const auto group = GetActionGroup(name);
         if(m_taskTabs->count() && group!=m_taskGroup && group!="数据与导出" && group!="确认与退出")continue;
         if (!menus.contains(group)) menus[group] = m_operationMenu->addMenu(group);
@@ -781,6 +781,9 @@ void ModulePanel::SetParameterPatch(const QString& action, const QJsonObject& pa
 {
     if (!m_entries.count(action)) throw std::invalid_argument("参数目标不存在");
     if(action=="GraphInfo" && patch.contains("graphRevision"))m_sourceRoot.clear();
+    if(m_currentAction!=action && getColorParameters && (action=="SetDisplay"||action=="SetDeviationDisplay")) {
+        if(auto* form=GetParameterEditor(action)){const auto applied=getColorParameters();if(!applied.isEmpty())form->SetPatch(applied);}
+    }
     m_currentAction = action;
     if (auto* form = GetParameterEditor(action)) {
         if (form->GetHasInputs()) m_parameterAction = action;
@@ -848,6 +851,16 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
     m_context.records.SetComplete(id, status, result,
         GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{}));
     m_context.workflow.SetComplete(id);
+    if(m_context.workflow.readReports.count(m_name) && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(status)) {
+        const auto action=m_context.records.GetRecord(id)["action"].toString();
+        const auto preferred=m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action=="Inspect"?QString("inspection"):QString();
+        if(!preferred.isEmpty() && !result[preferred].toString().isEmpty() && !result[preferred].toString().endsWith(":0")) {
+            m_viewReport->setProperty("reportResult",result[preferred].toString());m_viewReport->show();
+        } else
+        for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","result"}) {
+            const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0")){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
+        }
+    }
     if(QStringList{"Failed","Rejected","InvalidInput","SourceChanged"}.contains(status)) {
         m_executionMessage->setText("上次操作 · "+result["message"].toString("操作未完成，请检查输入与前置条件。")); m_executionMessage->show();
     } else if(status!="Observed" && status!="ParametersCopied") { m_executionMessage->clear(); m_executionMessage->hide(); }

@@ -55,9 +55,8 @@ private:
     TestRecordWriter m_records;
     QtHostPump m_pump;
     std::vector<View> m_views;
-    struct LegendEntry { QString module,viewId,result;QToolButton* button=nullptr; };
-    std::vector<LegendEntry> m_legends;
     std::vector<ModulePanel*> m_modules;
+    QString m_colorModule;QJsonObject m_colorParameters;
     QStackedWidget* m_pages = nullptr;
     QStackedWidget* m_browsers = nullptr;
     QStackedWidget* m_statisticsPages = nullptr;

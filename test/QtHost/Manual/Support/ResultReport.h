@@ -4,11 +4,19 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QVector>
+#include <QSet>
+#include <functional>
+#include "ReportDocument.h"
 class QComboBox;
 class QTabWidget;
 class QTableWidget;
 class QPushButton;
 class QLabel;
+class QTreeWidget;
+class QTableView;
+class QLineEdit;
+class QCheckBox;
+class QPlainTextEdit;
 namespace Manual {
 struct ReportRow final { QString section, field, type, value; };
 QVector<ReportRow> GetReportRows(const QJsonObject& record);
@@ -19,14 +27,38 @@ public:
     explicit ResultReport(QWidget* parent = nullptr);
     void SetRecord(const QJsonObject& record);
     QJsonObject GetSelectedRecord() const;
+    void AddReport(ReportDocument document);
+    bool SelectReport(const QString& id);
+    void ShowReports(const QString& source = {}, const QString& result = {});
+    void ImportReport(const QString& path);
+    const ReportDocument& GetSelectedReport() const { return m_selected; }
+    QSet<QString> GetReportIds() const;
+    QVector<int> GetFilteredRows() const;
+    std::function<void(const ReportDocument&,int)> onLocate;
 protected:
     void showEvent(QShowEvent* event) override;
 private:
     void Refresh();
+    void SelectCurrent();
+    void RefreshRows();
+    void RefreshPage();
+    void CompareSelected();
     QMap<QString, QJsonObject> m_records;
-    QComboBox* m_operations = nullptr;
-    QTabWidget* m_groups = nullptr;
-    QMap<QString, QTableWidget*> m_tables;
+    QMap<QString, ReportDocument> m_documents;
+    ReportDocument m_selected;
+    QString m_baseline, m_sourceFilter, m_resultFilter;
+    QTreeWidget* m_reports = nullptr;
+    QTableView* m_table = nullptr;
+    QLineEdit *m_search = nullptr, *m_minimum = nullptr, *m_maximum = nullptr;
+    QComboBox* m_filterColumn = nullptr;
+    QCheckBox* m_follow = nullptr;
+    QPlainTextEdit* m_conditions = nullptr;
+    QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
+    QPushButton *m_previous = nullptr, *m_next = nullptr;
+    QPushButton* m_locate = nullptr;
+    QVector<int> m_rows;
+    int m_page = 0, m_sortColumn = -1;
+    Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
     QPushButton* m_copy = nullptr;
     QLabel* m_summary = nullptr;

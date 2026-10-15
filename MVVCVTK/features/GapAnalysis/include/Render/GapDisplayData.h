@@ -123,11 +123,12 @@ struct GapDisplayData final {
         for (const auto& region : regions) {
             if (region.id <= 0 || !ids.insert(region.id).second
                 || !std::isfinite(region.volumeMM3) || region.volumeMM3 < 0) return {};
+            if(region.voxelCount<=0)continue;
+            result->hasRegions=true;
             range[0] = std::min(range[0], double(region.volumeMM3));
             range[1] = std::max(range[1], double(region.volumeMM3));
         }
-        result->hasRegions = !regions.empty();
-        if (regions.empty()) range = {0, 0};
+        if (!result->hasRegions) range = {0, 0};
         result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
         result->labels = vtkSmartPointer<GapLabelLookupTable>::New();

@@ -220,10 +220,38 @@ void Run(const char* sample, double spacing, const std::array<double, 3>& origin
     Check(surfaceResult.isPublished && reused && reused->meshRevision==mesh->meshRevision && reused->points==mesh->points && reused->triangleIndices==mesh->triangleIndices
         && reused->execution.scannedCellCount==0 && reused->selection && reused->selection->size()==mesh->selection->size(),"ROI 重新选片复用原测量点、网格与完整支撑，不重新扫描体素");
     surfaceParams.parentGeneration.reset();
-    const auto archive=session.GetRoiArchiveReader({{ref,d.metadata.identity.datasetId}});
+    // 将真实分割标签通过公共 ROI 归档入口往返，检查恢复类型和逐体素成员。
+    const auto labelData=probe->data->GetData(graph,partResult.labelMap);
+    const auto* labelPayload=labelData?dynamic_cast<const LabelMap3DPayload*>(labelData->payload.get()):nullptr;
+    Check(labelPayload && labelPayload->GetValueCount()==count,"读取真实分割标签存储类型");
+    RoiRequest labelRoi;labelRoi.metadata.name="segmented-label-roi";
+    RoiNode labelNode;labelNode.primitive.shape=RoiShape::MaskReference;
+    labelNode.primitive.mask=partResult.labelMap;labelNode.primitive.labels={(*preview->labels)[0]};
+    labelRoi.definition={source,{labelNode}};
+    const auto labelCreated=session.SetRoi(labelRoi);
+    Check(labelCreated.error==RoiError::None && labelCreated.roi,"公共入口创建分割标签 ROI");
+    const auto archive=session.GetRoiArchiveReader({{ref,d.metadata.identity.datasetId},
+        {labelCreated.roi->revision,d.metadata.identity.datasetId}});
     Check(archive.error==RoiError::None && archive.reader,"带来源 URI 的纯值归档成功");
-    const auto restored=session.LoadRoiArchiveReader(*archive.reader,{{d.metadata.identity.datasetId,source}},{renamed.roi->catalogRevision});
-    Check(restored.error==RoiError::None && restored.rois.size()==1 && restored.rois[0].revision.entityId!=ref.entityId,"归档显式映射来源并恢复新身份");
+    Check(archive.reader->GetMetadata().masks.size()==1
+        && archive.reader->GetMetadata().masks[0].grid.valueType==labelPayload->GetValueType(),"掩码归档保留原始整数类型");
+    RoiArchiveRestoreOptions restoreOptions;restoreOptions.expectedCatalogRevision=labelCreated.roi->catalogRevision;
+    restoreOptions.chunkElements=4093;
+    const auto restored=session.LoadRoiArchiveReader(*archive.reader,{{d.metadata.identity.datasetId,source}},restoreOptions);
+    Check(restored.error==RoiError::None && restored.rois.size()==2 && restored.rois[0].revision.entityId!=ref.entityId,"归档显式映射来源并恢复新身份");
+    graph=probe->data->GetDataGraph();
+    const auto maskData=probe->data->GetData(graph,*restored.rois[1].definition.nodes[0].primitive.mask);
+    const auto* restoredLabels=maskData?dynamic_cast<const LabelMap3DPayload*>(maskData->payload.get()):nullptr;
+    Check(restoredLabels && restoredLabels->GetValueType()==labelPayload->GetValueType()
+        && restoredLabels->GetValueCount()==count
+        && std::memcmp(restoredLabels->GetValueData(),labelPayload->GetValueData(),
+            count*GetImageValueBytes(labelPayload->GetValueType()))==0,"真实分割标签归档恢复后类型与全部数值一致");
+    const auto restoredMask=probe->data->GetRoi(graph,restored.rois[1].revision,source);
+    Check(restoredMask.error==RoiError::None && restoredMask.roi,"读取归档恢复后的标签 ROI");
+    const auto selectedLabels=restoredMask.roi->GetMaskChunk(maskRequest);
+    exact=selectedLabels.error==RoiError::None && selectedLabels.isComplete && selectedLabels.values.size()==count;
+    for(std::size_t i=0;exact && i<count;++i)exact=(selectedLabels.values[i]!=0)==((*preview->labels)[i]==(*preview->labels)[0]);
+    Check(exact,"真实标签选择逐体素往返一致，分块不改变成员");
     // 精确几何头改变后，CurrentPrimary 模式不能提交旧 ROI 的候选。
     Check(artifact->SendRequest(prepare).error==ArtifactError::None,"再次冻结旧 ROI 候选");
     Pump(session,[&] { return artifact->GetState().status!=ArtifactStatus::Running; });

@@ -19,6 +19,8 @@
 // 节点索引的表示上限；不按历史长度或 ROI 数量另设业务门槛。
 inline constexpr std::size_t roiNodeLimit = std::numeric_limits<std::uint32_t>::max();
 inline constexpr std::uint32_t roiSchemaVersion = 4;
+// 归档编码独立演进，不改变几何类型身份或算法参数指纹。
+inline constexpr std::uint32_t roiArchiveSchemaVersion = 5;
 inline constexpr std::size_t roiChunkBytes = 8ULL * 1024 * 1024;
 inline constexpr std::array<double, 16> roiIdentityMatrix = {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -242,6 +244,7 @@ struct RoiSourceDescriptor final {
 };
 
 struct RoiArchiveMask final {
+    // v5 保留原整数类型；v3/v4 的掩码存储类型固定为 UInt64。
     ImageDescriptor grid;
     std::vector<std::uint32_t> nodeIndices;
     std::optional<std::uint32_t> sharedPayload;
@@ -253,7 +256,7 @@ struct RoiArchiveVoxels final {
 };
 
 struct RoiArchiveItem final {
-    std::uint32_t schemaVersion = roiSchemaVersion;
+    std::uint32_t schemaVersion = roiArchiveSchemaVersion;
     std::string sourceKey;
     RoiSourceDescriptor source;
     RoiMetadata metadata;
@@ -269,7 +272,7 @@ struct RoiArchiveSelection final {DataRevisionRef roi;std::string sourceKey;};
 struct RoiSourceMapping final {std::string sourceKey;DataRevisionRef source;};
 // 多对象文件只保存一次共享标签/稀疏载荷，节点通过包内索引引用。
 struct RoiArchiveDescriptor final {
-    std::uint32_t schemaVersion=roiSchemaVersion;
+    std::uint32_t schemaVersion=roiArchiveSchemaVersion;
     std::vector<RoiArchiveItem> rois;
     std::vector<RoiArchiveMask> masks;
     std::vector<RoiArchiveVoxels> voxels;
@@ -288,12 +291,14 @@ struct RoiArchiveChunkRequest final {
 struct RoiArchiveMaskChunk final {
     RoiError error=RoiError::Unavailable;
     std::size_t nextOffset=0;bool isComplete=false;
+    // 标签值逐块传输；有符号负数按转换到 uint64_t 的模 2^64 值编码。
+    // v5 恢复时按 masks[payloadIndex].grid 的原类型校验并还原，不截断标签。
     std::vector<std::uint64_t> values;
 };
 struct RoiArchiveVoxelPayloadChunk final {
     RoiError error=RoiError::Unavailable;
     std::size_t nextOffset=0;bool isComplete=false;
-    // v4 只允许 runs；v3 只允许 legacyVoxels。元素偏移按所选版本的元素计数。
+    // v4/v5 只允许 runs；v3 只允许 legacyVoxels。元素偏移按所选版本的元素计数。
     std::vector<RoiVoxelRun> runs;
     std::vector<RoiVoxel> legacyVoxels;
 };

@@ -45,7 +45,7 @@ public:
             m_actor->GetProperty()->SetOpacity(display->params.opacity);
             m_legend=vtkSmartPointer<AnalysisLegend>::New();auto& legend=m_legend;
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, (std::string(u8"孔隙 · ")+display->resultLabel+"\n"+u8"缺陷体积 [mm³]").c_str());
+            AnalysisColorStyle::SetLegend(*legend, u8"孔隙体积 [mm³]");
             legend->SetMapping(display->mappingRange,GapDisplayData::GetColorRamp(display->params),display->hasRegions);
             legend->SetPosition(display->params.legendPosition[0],display->params.legendPosition[1]);
             legend->SetVisibility(display->params.hasLegend);
@@ -114,7 +114,7 @@ public:
             m_slice->GetProperty()->SetOpacity(0.35*display->params.opacity);
             m_legend=vtkSmartPointer<AnalysisLegend>::New();auto& legend=m_legend;
             legend->SetLookupTable(display->volumes);
-            AnalysisColorStyle::SetLegend(*legend, (std::string(u8"孔隙 · ")+display->resultLabel+"\n"+u8"缺陷体积 [mm³]").c_str());
+            AnalysisColorStyle::SetLegend(*legend, u8"孔隙体积 [mm³]");
             legend->SetMapping(display->mappingRange,GapDisplayData::GetColorRamp(display->params),display->hasRegions);
             legend->SetPosition(display->params.legendPosition[0],display->params.legendPosition[1]);
             legend->SetVisibility(display->params.hasLegend);

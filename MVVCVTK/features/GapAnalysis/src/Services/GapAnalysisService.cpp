@@ -2,7 +2,7 @@
 #include "Services/GapAnalysisService.h"
 
 #include "Data/DataPayloads.h"
-#include "FeatureSupport/LabelMapBuilder.h"
+#include "LabelMapBuilder.h"
 #include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"

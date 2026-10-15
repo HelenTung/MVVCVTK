@@ -186,6 +186,11 @@ BuildForbiddenProbe(
     Render/Support/FeatureOverlayBase.h
 )
 BuildForbiddenProbe(
+    MVVCVTK_FORBID_LABEL_BUILDER_PROBE
+    ForbiddenLabelMapBuilderProbe.cpp
+    LabelMapBuilder.h
+)
+BuildForbiddenProbe(
     MVVCVTK_FORBID_VISUAL_STRATEGY_PROBE
     ForbiddenVisualStrategyProbe.cpp
     Render/Contracts/VisualStrategy.h
@@ -583,6 +588,18 @@ SetHeaderGuard(
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
 SetHeaderGuard(
+    "${MVVCVTK_FORBID_LABEL_BUILDER_PROBE}"
+    LabelMapBuilder.h
+    HostApi
+    "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
+)
+SetHeaderGuard(
+    "${MVVCVTK_FORBID_LABEL_BUILDER_PROBE}"
+    LabelMapBuilder.h
+    FeatureSpi
+    "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
+)
+SetHeaderGuard(
     "${MVVCVTK_FORBID_VISUAL_STRATEGY_PROBE}"
     Render/Contracts/VisualStrategy.h
     FeatureSpi
@@ -634,6 +651,7 @@ unset(MVVCVTK_FORBID_HOST_PROBE)
 unset(MVVCVTK_FORBID_HOST_VALUE_PROBE)
 unset(MVVCVTK_FORBID_SLICE_PROBE)
 unset(MVVCVTK_FORBID_SUPPORT_PROBE)
+unset(MVVCVTK_FORBID_LABEL_BUILDER_PROBE)
 unset(MVVCVTK_GAP_DEPENDENCY_FILES)
 unset(MVVCVTK_GAP_ENTRY_HEADERS)
 unset(MVVCVTK_GAP_PROBES)

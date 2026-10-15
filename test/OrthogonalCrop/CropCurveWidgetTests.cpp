@@ -1,4 +1,9 @@
 #include "Interaction/CropCurveWidget.h"
+#include "Algorithms/CropGeometry.h"
+#include "Render/CropCylinderVisual.h"
+#include <vtkCellArray.h>
+#include <vtkWindowToImageFilter.h>
+#include <vtkPNGWriter.h>
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
 #include <vtkCamera.h>
@@ -18,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 int GetCropCurveWidgetFailures()
@@ -93,14 +99,89 @@ int GetCropCurveWidgetFailures()
     check(widget.SetEnabled(false)&&widget.SetGeometry(operation,matrix)&&widget.SetEnabled(true),"finite cylinder enabled");
     window->Render();const auto initial=widget.GetGeometry();const auto lower=position(2);
     move(3,P{2,1,3});const auto changed=widget.GetGeometry();
-    P expectedCenter{},delta{};for(int i=0;i<3;++i){const double bottom=-initial.axisInInputModel[i];expectedCenter[i]=(P{2,1,3}[i]+bottom)*.5;delta[i]=P{2,1,3}[i]-bottom;}
+    P expectedCenter{};double projection=0;for(int i=0;i<3;++i)projection+=(P{2,1,3}[i]+initial.axisInInputModel[i])*initial.axisInInputModel[i];
+    for(int i=0;i<3;++i)expectedCenter[i]=initial.axisInInputModel[i]*(-1+projection/2);
     check(near(position(2),lower)&&near(changed.centerInInputModel,expectedCenter)
-        &&std::abs(changed.height-std::hypot(delta[0],delta[1],delta[2]))<1e-11
-        &&changed.radius==1&&widget.GetHandle(3)->GetEnabled(),"cap drag preserves opposite cap and derives arbitrary model axis and height");
-    const auto old=changed;auto invalid=matrix;invalid[0]=invalid[1]=invalid[2]=0;
+        &&std::abs(changed.height-projection)<1e-11&&near(changed.axisInInputModel,initial.axisInInputModel)
+        &&changed.radius==1&&widget.GetHandle(4)->GetEnabled(),"height drag constrains to original axis and preserves opposite cap");
+    // 半径柄含轴向偏移的输入必须在交互帧内回到中间截面，而非松手后修正。
+    widget.SetGeometry(initial,matrix);auto* radiusHandle=widget.GetHandle(1);radiusHandle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    const P rawRadius{3,-1,2};auto radiusWorld=world(rawRadius);radiusHandle->GetHandleRepresentation()->SetWorldPosition(radiusWorld.data());
+    radiusHandle->InvokeEvent(vtkCommand::InteractionEvent);
+    P projected=rawRadius;double axial=0;for(int i=0;i<3;++i)axial+=rawRadius[i]*initial.axisInInputModel[i];
+    for(int i=0;i<3;++i)projected[i]-=axial*initial.axisInInputModel[i];
+    check(near(model(position(1)),projected)&&widget.GetGeometry().height==initial.height
+        &&near(widget.GetGeometry().axisInInputModel,initial.axisInInputModel),"radius drag stays on center section without changing height or axis");
+    const auto duringRadius=position(1);radiusHandle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    check(near(position(1),duringRadius),"released cylinder radius handle retains its chosen direction");
+    const auto radiusBeforeInvalid=widget.GetGeometry().radius;
+    move(1,P{std::numeric_limits<double>::infinity(),0,0});const auto stableHandle=position(1);
+    check(widget.GetGeometry().radius==radiusBeforeInvalid&&near(stableHandle,duringRadius)
+        &&std::all_of(stableHandle.begin(),stableHandle.end(),[](double v){return std::isfinite(v);}),"invalid native drag cannot corrupt the retained radial frame");
+    widget.StartGesture();const auto beforeRotation=widget.GetGeometry();const auto savedRadius=position(1),savedRotation=position(4);
+    move(4,P{4,2,-3});const auto rotated=widget.GetGeometry();
+    check(!near(rotated.axisInInputModel,beforeRotation.axisInInputModel)&&rotated.height==beforeRotation.height
+        &&rotated.radius==beforeRotation.radius&&near(rotated.centerInInputModel,beforeRotation.centerInInputModel),"dedicated rotation changes only axis and transported radial frame");
+    widget.CancelGesture();
+    check(near(widget.GetGeometry().axisInInputModel,beforeRotation.axisInInputModel)&&near(position(1),savedRadius)&&near(position(4),savedRotation),"cancel restores cylinder parameters and both handle frames");
+    const auto beforeView=widget.GetGeometry();const auto predicate=CropGeometry::Build(beforeView);
+    renderer->GetActiveCamera()->SetPosition(8,5,20);renderer->GetActiveCamera()->SetFocalPoint(0,0,0);window->Render();
+    check(near(widget.GetGeometry().axisInInputModel,beforeView.axisInInputModel)&&widget.GetGeometry().radius==beforeView.radius
+        &&widget.GetGeometry().height==beforeView.height,"camera updates leave finite crop parameters unchanged");
+    const auto afterPredicate=CropGeometry::Build(widget.GetGeometry());bool sameMembership=true;
+    for(int z=-3;z<=3;++z)for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x)
+        sameMembership&=predicate->GetInside({double(x),double(y),double(z)})==afterPredicate->GetInside({double(x),double(y),double(z)});
+    check(sameMembership,"camera-only redraw preserves independent finite-cylinder membership samples");
+    const auto old=widget.GetGeometry();auto invalid=matrix;invalid[0]=invalid[1]=invalid[2]=0;
     check(!widget.SetGeometry(operation,invalid)&&near(widget.GetGeometry().centerInInputModel,old.centerInInputModel),"singular transform leaves previous geometry intact");
     const auto calls=phases.size();widget.SetEnabled(false);move(0,P{9,9,9});
     check(!widget.GetEnabled()&&phases.size()==calls&&near(widget.GetGeometry().centerInInputModel,old.centerInInputModel),"disabled or detached handles cannot publish interaction");
+    {
+        vtkNew<vtkRenderer> view;vtkNew<vtkRenderWindow> frame;frame->SetOffScreenRendering(1);frame->SetSize(400,400);frame->SetMultiSamples(0);frame->AddRenderer(view);
+        vtkNew<vtkMatrix4x4> identity;CropOpItem cylinder;cylinder.geometryType=CropShape::Cylinder;cylinder.axisInInputModel={0,1,0};cylinder.radius=2;cylinder.height=4;
+        CropCylinderVisual visual;visual.SetGeometry(cylinder,identity);visual.AttachRenderer(view);visual.SetVisible(true);
+        view->GetActiveCamera()->SetPosition(0,0,20);view->GetActiveCamera()->SetFocalPoint(0,0,0);view->GetActiveCamera()->SetClippingRange(.1,100);frame->Render();
+        auto* actors=view->GetActors();actors->InitTraversal();auto* contour=actors->GetNextActor();auto* data=vtkPolyDataMapper::SafeDownCast(contour->GetMapper())->GetInput();
+        int generators=0;bool tangent=true;vtkIdType count=0;const vtkIdType* ids=nullptr;data->GetLines()->InitTraversal();
+        while(data->GetLines()->GetNextCell(count,ids))if(count==2){P a{},b{};data->GetPoint(ids[0],a.data());data->GetPoint(ids[1],b.data());
+            if(std::abs(a[1]-b[1])>3.9){++generators;tangent&=std::abs(20*a[2]-4)<1e-10&&std::abs(a[0]*a[0]+a[2]*a[2]-4)<1e-10;}}
+        check(generators==2&&tangent&&!contour->GetUseBounds(),"perspective cylinder side lines satisfy the analytic tangent condition and stay outside framing bounds");
+        vtkNew<vtkWindowToImageFilter> pixels;pixels->SetInput(frame);pixels->ReadFrontBufferOff();pixels->Update();vtkNew<vtkPNGWriter> writer;writer->SetFileName("cylinder-perspective.png");writer->SetInputConnection(pixels->GetOutputPort());writer->Write();
+        cylinder.axisInInputModel={0,0,1};visual.SetGeometry(cylinder,identity);frame->Render();
+        bool endOnly=data->GetNumberOfPoints()>16;
+        for(vtkIdType i=0;i<data->GetNumberOfPoints();++i){P p{};data->GetPoint(i,p.data());endOnly&=std::abs(p[2]-2)<1e-10;}
+        check(endOnly,"axial view naturally shows the front circular silhouette without fabricated long sides");
+        cylinder.axisInInputModel={0,1,0};visual.SetGeometry(cylinder,identity);view->GetActiveCamera()->SetPosition(0,0,1);frame->Render();
+        vtkIdType sampled=0;actors->InitTraversal();while(auto* actor=actors->GetNextActor())sampled+=vtkPolyDataMapper::SafeDownCast(actor->GetMapper())->GetInput()->GetNumberOfPoints();
+        check(sampled<1000,"camera inside cylinder does not refine invisible or projection-discontinuous arcs to a global maximum");
+        visual.DetachRenderer();frame->Finalize();
+    }
+    {
+        vtkNew<vtkRenderer> view;vtkNew<vtkRenderWindow> frame;vtkNew<vtkRenderWindowInteractor> input;
+        frame->SetOffScreenRendering(1);frame->SetSize(400,400);frame->AddRenderer(view);input->SetRenderWindow(frame);
+        auto* camera=view->GetActiveCamera();camera->ParallelProjectionOn();camera->SetParallelScale(4);camera->SetPosition(0,0,20);camera->SetFocalPoint(0,0,0);camera->SetClippingRange(.1,100);
+        CropCurveWidget side;side.SetContext(input,view);vtkNew<vtkMatrix4x4> identity;
+        CropOpItem cylinder;cylinder.geometryType=CropShape::Cylinder;cylinder.axisInInputModel={0,1,0};cylinder.radius=2;cylinder.height=4;
+        check(side.SetGeometry(cylinder,CropMatrixDouble16Array{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1})&&side.SetEnabled(true),"side-view cylinder accepts identity placement");frame->Render();
+        const auto getPosition=[&]{P p{};side.GetHandle(1)->GetHandleRepresentation()->GetWorldPosition(p.data());return p;};
+        const auto project=[&](const P& p){view->SetWorldPoint(p[0],p[1],p[2],1);view->WorldToDisplay();const auto* d=view->GetDisplayPoint();return P{d[0],d[1],d[2]};};
+        auto center=project({0,0,0}),radius=project(getPosition());
+        check(std::hypot(radius[0]-center[0],radius[1]-center[1])>=16,"side view restores a radius handle that would overlap the center");
+        auto* handle=side.GetHandle(1);handle->InvokeEvent(vtkCommand::StartInteractionEvent);P dragged{-3,1,0};handle->GetHandleRepresentation()->SetWorldPosition(dragged.data());handle->InvokeEvent(vtkCommand::InteractionEvent);handle->InvokeEvent(vtkCommand::EndInteractionEvent);frame->Render();
+        check(near(getPosition(),P{-3,0,0})&&side.GetGeometry().radius==3,"usable radius direction persists after constrained release");
+        radius=project(getPosition());input->SetEventPosition(int(std::lround(radius[0])),int(std::lround(radius[1])));input->InvokeEvent(vtkCommand::MouseMoveEvent);
+        const auto held=getPosition();camera->SetPosition(-20,0,0);frame->Render();
+        check(near(getPosition(),held),"cylinder hover freezes radius placement while camera moves");
+        input->InvokeEvent(vtkCommand::LeaveEvent);frame->Render();center=project({0,0,0});radius=project(getPosition());
+        check(std::hypot(radius[0]-center[0],radius[1]-center[1])>=16&&side.GetGeometry().radius==3
+            &&side.GetGeometry().height==4&&side.GetGeometry().axisInInputModel==P{0,1,0},"leaving hover restores the cylinder handle without another camera change or parameter mutation");
+        side.SetEnabled(false);cylinder.axisInInputModel={0,0,1};cylinder.radius=3;
+        camera->SetPosition(0,0,20);side.SetGeometry(cylinder,CropMatrixDouble16Array{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});side.SetEnabled(true);frame->Render();
+        P rotate{};side.GetHandle(4)->GetHandleRepresentation()->GetWorldPosition(rotate.data());const auto rotateDisplay=project(rotate);radius=project(getPosition());
+        check(rotateDisplay[0]>=8&&rotateDisplay[0]<=392&&rotateDisplay[1]>=8&&rotateDisplay[1]<=392
+            &&std::hypot(rotateDisplay[0]-radius[0],rotateDisplay[1]-radius[1])>=16,"axial view keeps the rotation entry visible and distinct from the radius handle");
+        side.SetEnabled(false);side.SetContext(nullptr,nullptr);frame->Finalize();
+    }
     widget.SetContext(nullptr,nullptr);check(!widget.SetEnabled(true),"missing view context rejects enable");window->Finalize();
     return failures;
 }

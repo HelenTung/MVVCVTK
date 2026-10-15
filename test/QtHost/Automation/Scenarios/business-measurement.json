@@ -1,5 +1,5 @@
 {
-  "schema":"qt-control-scenario-1","checkWindowLocked":true,"viewsVisible":true,"viewLayout":"Inspection",
+  "schema":"qt-control-scenario-1","checkWindowLocked":true,"viewsVisible":true,"viewLayout":"Inspection","checkReports":true,
   "steps":[
     {"control":"businessPrimary","module":"Data","action":"Load","parameters":{},"expectStatus":"Succeeded","saveAs":"loaded","performanceCheckpoint":"@Output/load-performance.json"},
     {"control":"businessPrimary","module":"Surface","action":"Determine","parameterAction":"GlobalAutomatic","parameters":{"initialIsoValue":null,"materialRange":null,"componentSelection":"Largest","analysisRoi":""},"expectStatus":"Succeeded","saveAs":"surface"},

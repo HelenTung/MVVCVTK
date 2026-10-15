@@ -3,6 +3,8 @@
 #include "FeatureSupport/RoutedWidgets.h"
 #include "Algorithms/CropGeometry.h"
 #include "Render/CropSphereVisual.h"
+#include "Render/CropCylinderVisual.h"
+#include "Render/CropCurveProjection.h"
 #include "Render/Support/RenderTextStyle.h"
 #include <vtkActor.h>
 #include <vtkAlgorithm.h>
@@ -57,10 +59,6 @@ public:
     };
     Impl() {
         modelToWorld=vtkSmartPointer<vtkMatrix4x4>::New();worldToModel=vtkSmartPointer<vtkMatrix4x4>::New();
-        mapper=vtkSmartPointer<vtkPolyDataMapper>::New();actor=vtkSmartPointer<vtkActor>::New();actor->SetMapper(mapper);
-        actor->SetPickable(false);actor->UseBoundsOff();actor->GetProperty()->SetRepresentationToWireframe();
-        actor->GetProperty()->SetColor(0.95,0.2,0.2);actor->GetProperty()->SetLineWidth(1.5);
-        actor->GetProperty()->LightingOff();
         text=vtkSmartPointer<vtkTextActor>::New();text->PickableOff();text->UseBoundsOff();text->SetPosition(12,36);
         text->GetTextProperty()->SetFontSize(12);text->GetTextProperty()->SetColor(1,.86,.62);
         RenderTextStyle::SetFont(*text->GetTextProperty());text->GetTextProperty()->ShadowOn();text->VisibilityOff();
@@ -100,7 +98,17 @@ public:
             handle.widget->SetDefaultRenderer(nullptr);handle.widget->SetCurrentRenderer(nullptr);
         }
     }
-    CropOpItem inputGeometry;
+    CropOpItem inputGeometry,dragGeometry;
+    P radial{1,0,0},inputRadial{1,0,0},dragRadial{1,0,0},dragLever{},rotationOffset{0,0,1},inputRotation{0,0,1};
+    bool hasRadial=false;
+    // 最小旋转传递局部径向，轴连续变化时不重新选择参考坐标轴。
+    static P Rotate(const P& p,const P& from,const P& to) {
+        const auto cross=Cross(from,to);const double c=std::clamp(Dot(from,to),-1.,1.);
+        if(c<-.999999999){const P n=Radial(from);return Add(Add(P{},p,-1),n,2*Dot(n,p));}
+        return Add(Add(p,Cross(cross,p)),Cross(cross,Cross(cross,p)),1/(1+c));
+    }
+    P RotationLever() const {return Add(operation.centerInInputModel,rotationOffset,1.5*std::max(operation.radius,operation.height/2));}
+
     void SetContext(vtkRenderWindowInteractor* value,vtkRenderer* target) {
         if(interactor==value&&renderer==target)return;
         SetEnabled(false);interactor=value;renderer=target;
@@ -117,28 +125,35 @@ public:
         const auto determinant=candidate->Determinant();if(!std::isfinite(determinant)||determinant==0)return false;
         vtkNew<vtkMatrix4x4> inverse;vtkMatrix4x4::Invert(candidate,inverse);
         for(int row=0;row<4;++row)for(int col=0;col<4;++col)if(!std::isfinite(inverse->GetElement(row,col)))return false;
-        operation=valid->GetOperation();modelToWorld->DeepCopy(candidate);worldToModel->DeepCopy(inverse);ready=true;
+        const auto next=valid->GetOperation();
+        if(next.geometryType==CropShape::Cylinder){
+            if(hasRadial&&operation.geometryType==CropShape::Cylinder){
+                radial=Rotate(radial,operation.axisInInputModel,next.axisInInputModel);
+                rotationOffset=Rotate(rotationOffset,operation.axisInInputModel,next.axisInInputModel);
+            }else{radial=Radial(next.axisInInputModel);rotationOffset=Unit(Add(next.axisInInputModel,radial));}
+            radial=Unit(Add(radial,next.axisInInputModel,-Dot(radial,next.axisInInputModel)));hasRadial=true;
+        }
+        operation=next;modelToWorld->DeepCopy(candidate);worldToModel->DeepCopy(inverse);ready=true;
         Sync();return true;
     }
     bool SetEnabled(bool value) {
         if(value&&(!ready||!interactor||!renderer))return false;
         enabled=false;active=-1;hovered=-1;hover=false;
         for(auto& handle:handles)handle.widget->Off();
-        sphereVisual.DetachRenderer();sphereVisual.SetVisible(false);
-        if(renderer){renderer->RemoveObserver(viewTag);renderer->RemoveActor(actor);renderer->RemoveViewProp(text);}
+        sphereVisual.DetachRenderer();sphereVisual.SetVisible(false);cylinderVisual.DetachRenderer();cylinderVisual.SetVisible(false);
+        if(renderer){renderer->RemoveObserver(viewTag);renderer->RemoveViewProp(text);}
         if(interactor){interactor->RemoveObserver(mouseTag);interactor->RemoveObserver(leaveTag);}
         viewTag=mouseTag=leaveTag=0;
         if(!value)return true;
         Sync();enabled=true;
-        if(operation.geometryType==CropShape::Sphere) {
-            sphereVisual.AttachRenderer(renderer);sphereVisual.SetVisible(true);renderer->AddViewProp(text);
-            viewTag=renderer->AddObserver(vtkCommand::StartEvent,viewObserver,.5f);
-            mouseTag=interactor->AddObserver(vtkCommand::MouseMoveEvent,mouseObserver,.6f);
-            leaveTag=interactor->AddObserver(vtkCommand::LeaveEvent,mouseObserver,.6f);
-            SyncView();
-        } else renderer->AddActor(actor);
-        const auto count=operation.geometryType==CropShape::Sphere?2:4;
+        if(operation.geometryType==CropShape::Sphere) {sphereVisual.AttachRenderer(renderer);sphereVisual.SetVisible(true);}
+        else {cylinderVisual.AttachRenderer(renderer);cylinderVisual.SetVisible(true);}
+        renderer->AddViewProp(text);viewTag=renderer->AddObserver(vtkCommand::StartEvent,viewObserver,.5f);
+        mouseTag=interactor->AddObserver(vtkCommand::MouseMoveEvent,mouseObserver,.6f);
+        leaveTag=interactor->AddObserver(vtkCommand::LeaveEvent,mouseObserver,.6f);
+        const auto count=operation.geometryType==CropShape::Sphere?2:5;
         for(int i=0;i<count;++i)handles[i].widget->On();
+        SyncView();
         return true;
     }
     void Sync(int skip=-1) {
@@ -146,44 +161,69 @@ public:
         const bool isSphere=operation.geometryType==CropShape::Sphere;
         const auto& center=operation.centerInInputModel;const auto& axis=operation.axisInInputModel;
         if(isSphere)sphereVisual.SetGeometry(center,operation.radius,modelToWorld);
-        const P radial=isSphere?P{1,0,0}:Radial(axis);
-        const std::array<P,4> positions{center,Add(center,radial,operation.radius),
-            Add(center,axis,-operation.height/2),Add(center,axis,operation.height/2)};
-        for(int i=0;i<4;++i)if(i!=skip) {
+        const P direction=isSphere?P{1,0,0}:radial;
+        const std::array<P,5> positions{center,Add(center,direction,operation.radius),
+            Add(center,axis,-operation.height/2),Add(center,axis,operation.height/2),RotationLever()};
+        for(int i=0;i<(isSphere?2:5);++i)if(i!=skip) {
             auto world=Transform(modelToWorld,isSphere&&i==1?sphereVisual.GetRadiusHandle():positions[i]);
             handles[i].representation->SetWorldPosition(world.data());
         }
         if(isSphere) {
             ApplySphereStyle();
         } else {
-            for(std::size_t i=0;i<handles.size();++i) {
-                handles[i].representation->GetProperty()->SetColor(i==1?.2:.9,i==1?.8:.6,.2);
-                handles[i].representation->GetProperty()->SetOpacity(1);handles[i].representation->SetHandleSize(8);
-            }
-            // 三个圆环和四条母线表示圆柱，避免封盖三角扇成为视觉噪声。
-            auto points=vtkSmartPointer<vtkPoints>::New();points->SetDataTypeToDouble();
-            auto lines=vtkSmartPointer<vtkCellArray>::New();
-            constexpr double tau=6.283185307179586;
-            for(int ring=0;ring<3;++ring) {
-                const double y=(ring-1)*operation.height/2;
-                for(int i=0;i<64;++i)points->InsertNextPoint(operation.radius*std::cos(tau*i/64),y,operation.radius*std::sin(tau*i/64));
-                for(int i=0;i<64;++i){const vtkIdType ids[]{ring*64+i,ring*64+(i+1)%64};lines->InsertNextCell(2,ids);}
-            }
-            for(int i=0;i<64;i+=16){const vtkIdType ids[]{i,128+i};lines->InsertNextCell(2,ids);}
-            auto outline=vtkSmartPointer<vtkPolyData>::New();outline->SetPoints(points);outline->SetLines(lines);
-            mapper->SetInputData(outline);
-            const auto z=Cross(radial,axis);vtkNew<vtkMatrix4x4> local;local->Identity();
-            for(int row=0;row<3;++row) {local->SetElement(row,0,radial[row]);local->SetElement(row,1,axis[row]);local->SetElement(row,2,z[row]);local->SetElement(row,3,center[row]);}
-            vtkNew<vtkMatrix4x4> world;vtkMatrix4x4::Multiply4x4(modelToWorld,local,world);actor->SetUserMatrix(world);
+            cylinderVisual.SetGeometry(operation,modelToWorld);
+            ApplyCylinderStyle();
+
         }
     }
     void SyncView() {
-        if(!enabled||operation.geometryType!=CropShape::Sphere)return;
+        if(!enabled)return;
+        if(operation.geometryType==CropShape::Cylinder){
+            cylinderVisual.UpdateView();
+            // 轴向正视时不让端点与中心争夺同一命中区域；旋转柄仍可用于转出正视。
+            if(active<0&&!hover){
+                const auto direction=cylinderVisual.GetRadiusHandleDirection(radial);
+                if(direction!=radial){
+                    radial=direction;
+                    auto radius=Transform(modelToWorld,Add(operation.centerInInputModel,radial,operation.radius));
+                    auto rotation=Transform(modelToWorld,RotationLever());
+                    handles[1].representation->SetWorldPosition(radius.data());handles[4].representation->SetWorldPosition(rotation.data());
+                }
+                UpdateRotationHandle();
+                std::vector<P> display;
+                for(int i:{0,1,4,2,3}){
+                    P world{};handles[i].representation->GetWorldPosition(world.data());
+                    renderer->SetWorldPoint(world[0],world[1],world[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
+                    const bool separate=i<2||i==4||std::all_of(display.begin(),display.end(),[&](const P& p){return std::hypot(d[0]-p[0],d[1]-p[1])>=16;});
+                    handles[i].representation->SetVisibility(separate);handles[i].widget->SetProcessEvents(separate);
+                    if(separate)display.push_back({d[0],d[1],d[2]});
+                }
+            }
+            return;
+        }
         sphereVisual.UpdateView();
         if(active!=1) {
             auto world=Transform(modelToWorld,sphereVisual.GetRadiusHandle());
             handles[1].representation->SetWorldPosition(world.data());
         }
+    }
+    void UpdateRotationHandle() {
+        const auto* origin=renderer->GetOrigin();const auto* size=renderer->GetSize();std::array<P,4> occupied{};
+        for(int i=0;i<4;++i){P p{};handles[i].representation->GetWorldPosition(p.data());renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();std::copy_n(renderer->GetDisplayPoint(),3,occupied[i].data());}
+        const auto quality=[&](const P& direction){
+            const auto p=Transform(modelToWorld,Add(operation.centerInInputModel,direction,1.5*std::max(operation.radius,operation.height/2)));
+            renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
+            if(!std::isfinite(d[0])||!std::isfinite(d[1])||!std::isfinite(d[2])||d[2]<0||d[2]>1)return -1.;
+            double score=std::min({d[0]-origin[0],origin[0]+size[0]-d[0],d[1]-origin[1],origin[1]+size[1]-d[1]});if(score<8)return -1.;
+            for(const auto& other:occupied)if(other[2]>=0&&other[2]<=1){const double distance=std::hypot(d[0]-other[0],d[1]-other[1]);if(distance<16)return -1.;score=std::min(score,distance);}
+            return score+.001*(1-d[2]);
+        };
+        if(quality(rotationOffset)>=0)return;
+        const auto tangent=Cross(operation.axisInInputModel,radial);double best=-1;P chosen=rotationOffset;
+        for(int sign:{-1,1})for(int i=0;i<32;++i){const double angle=6.283185307179586*i/32;const auto& a=operation.axisInInputModel;
+            const auto direction=Unit(Add(Add(P{sign*a[0],sign*a[1],sign*a[2]},radial,std::cos(angle)),tangent,std::sin(angle)));
+            const double score=quality(direction);if(score>best){best=score;chosen=direction;}}
+        if(best<0)return;rotationOffset=chosen;auto p=Transform(modelToWorld,RotationLever());handles[4].representation->SetWorldPosition(p.data());
     }
     void ApplySphereStyle() {
         const auto state=active>=0?visualState:(hover?CropSphereVisual::State::Hover:CropSphereVisual::State::Idle);
@@ -201,64 +241,87 @@ public:
         } else label<<"R = "<<operation.radius<<" mm";
         text->SetInput(label.str().c_str());
     }
+    void ApplyCylinderStyle() {
+        cylinderVisual.SetRadiusActive(active==1||hovered==1);
+        for(int i=0;i<5;++i){const bool selected=active==i||hovered==i;
+            handles[i].representation->GetProperty()->SetColor(i==1?.2:i==4?.45:.95,i==1?.8:i==4?.65:.65,i==4?1:.2);
+            handles[i].representation->GetProperty()->SetOpacity(selected?1:.8);handles[i].representation->SetHandleSize(selected?10:8);}
+        text->SetVisibility(hover||active>=0);std::ostringstream label;label<<std::fixed<<std::setprecision(2);
+        const int handle=active>=0?active:hovered;
+        if(handle==0)label<<u8"移动中心";
+        else if(handle==1)label<<u8"调整半径  R = "<<operation.radius<<" mm";
+        else if(handle==2||handle==3)label<<u8"调整高度  H = "<<operation.height<<" mm";
+        else if(handle==4)label<<u8"旋转圆柱";
+        text->SetInput(label.str().c_str());
+    }
     void OnMouse(unsigned long event) {
-        if(!enabled||active>=0||operation.geometryType!=CropShape::Sphere)return;
+        if(!enabled||active>=0)return;
         bool allowed=true;try{if(gate)allowed=gate();}catch(...){allowed=false;}
         const auto* position=interactor->GetEventPosition();int nextHandle=-1;bool nextHover=false;
         if(allowed&&event!=vtkCommand::LeaveEvent&&renderer->IsInViewport(position[0],position[1])) {
             SyncView();
-            for(int i=0;i<2;++i)if(handles[i].representation->ComputeInteractionState(position[0],position[1])!=vtkHandleRepresentation::Outside){nextHandle=i;break;}
-            nextHover=nextHandle>=0||sphereVisual.GetNearOutline(position[0],position[1]);
+            for(int i=0;i<(operation.geometryType==CropShape::Sphere?2:5);++i)if(handles[i].representation->GetVisibility()&&handles[i].representation->ComputeInteractionState(position[0],position[1])!=vtkHandleRepresentation::Outside){nextHandle=i;break;}
+            nextHover=nextHandle>=0||(operation.geometryType==CropShape::Sphere&&sphereVisual.GetNearOutline(position[0],position[1]));
         }
         if(nextHover==hover&&nextHandle==hovered)return;
-        hover=nextHover;hovered=nextHandle;ApplySphereStyle();if(renderCallback)renderCallback();
+        hover=nextHover;hovered=nextHandle;if(operation.geometryType==CropShape::Sphere)ApplySphereStyle();else ApplyCylinderStyle();if(renderCallback)renderCallback();
     }
     void OnEvent(std::size_t index,unsigned long event) {
-        if(!enabled||index>=(operation.geometryType==CropShape::Sphere?2U:4U))return;
+        if(!enabled||index>=(operation.geometryType==CropShape::Sphere?2U:5U))return;
         try {if(gate&&!gate()){active=-1;hover=false;hovered=-1;Sync();if(renderCallback)renderCallback();return;}}catch(...){active=-1;hover=false;hovered=-1;Sync();return;}
         if(event==vtkCommand::StartInteractionEvent) {
             static_cast<FeatureSupport::RoutedHandleWidget*>(handles[index].widget.GetPointer())->ReleaseInputFocus();
+            dragGeometry=operation;dragRadial=radial;dragLever=Unit(Add(RotationLever(),operation.centerInInputModel,-1));
             active=static_cast<int>(index);visualState=CropSphereVisual::State::Hover;
-            if(operation.geometryType==CropShape::Sphere)ApplySphereStyle();
+            if(operation.geometryType==CropShape::Sphere)ApplySphereStyle();else ApplyCylinderStyle();
             if(renderCallback)renderCallback();if(callback)callback(CropInteractionPhase::Hover);return;
         }
         if(active!=static_cast<int>(index)){Sync();return;}
         if(event==vtkCommand::InteractionEvent) {
             P position;handles[index].representation->GetWorldPosition(position.data());position=Transform(worldToModel,position);
-            auto next=operation;
+            if(!std::all_of(position.begin(),position.end(),[](double v){return std::isfinite(v);})){Sync();return;}
+            auto next=operation;auto nextRadial=radial,nextRotation=rotationOffset;
             if(index==0)next.centerInInputModel=position;
             else if(index==1) {
                 auto delta=Add(position,operation.centerInInputModel,-1);
                 if(operation.geometryType==CropShape::Cylinder)delta=Add(delta,operation.axisInInputModel,-Dot(delta,operation.axisInInputModel));
                 next.radius=std::hypot(delta[0],delta[1],delta[2]);
+                if(operation.geometryType==CropShape::Cylinder&&next.radius>0&&std::isfinite(next.radius))nextRadial=Unit(delta);
+            } else if(index==4) {
+                const auto delta=Add(position,dragGeometry.centerInInputModel,-1);
+                const double length=std::hypot(delta[0],delta[1],delta[2]);
+                if(!std::isfinite(length)||length<1e-10){Sync();return;}
+                const auto direction=Unit(delta);
+                next.axisInInputModel=Rotate(dragGeometry.axisInInputModel,dragLever,direction);
+                nextRadial=Rotate(dragRadial,dragLever,direction);nextRotation=direction;
             } else {
-                const auto opposite=Add(operation.centerInInputModel,operation.axisInInputModel,(index==2?1:-1)*operation.height/2);
-                auto axis=index==2?Add(opposite,position,-1):Add(position,opposite,-1);
-                next.height=std::hypot(axis[0],axis[1],axis[2]);
-                if(next.height>0)next.axisInInputModel=Unit(axis);
-                for(int i=0;i<3;++i)next.centerInInputModel[i]=position[i]*0.5+opposite[i]*0.5;
+                const auto& axis=operation.axisInInputModel;
+                const auto opposite=Add(operation.centerInInputModel,axis,(index==2?1:-1)*operation.height/2);
+                const double length=(index==2?-1:1)*Dot(Add(position,opposite,-1),axis);
+                if(length<=0){Sync();return;}
+                next.height=length;next.centerInInputModel=Add(opposite,axis,(index==2?-1:1)*length/2);
             }
             const auto valid=CropGeometry::Build(next);
             if(!valid){Sync();return;}
             if(operation.geometryType==CropShape::Sphere&&index==1)
                 sphereVisual.SetRadiusHandleDirection(Add(position,operation.centerInInputModel,-1));
-            operation=valid->GetOperation();visualState=CropSphereVisual::State::Dragging;Sync(static_cast<int>(index));
+            radial=nextRadial;rotationOffset=nextRotation;operation=valid->GetOperation();visualState=CropSphereVisual::State::Dragging;Sync(operation.geometryType==CropShape::Sphere?static_cast<int>(index):-1);
             if(callback)callback(CropInteractionPhase::Dragging);
         } else if(event==vtkCommand::EndInteractionEvent) {
-            active=-1;Sync();if(callback)callback(CropInteractionPhase::Released);
+            active=-1;if(operation.geometryType==CropShape::Cylinder){hover=false;hovered=-1;}Sync();SyncView();if(callback)callback(CropInteractionPhase::Released);
         }
     }
     CropOpItem operation;bool ready=false,enabled=false;int active=-1;
     vtkRenderWindowInteractor* interactor=nullptr;vtkWeakPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkMatrix4x4> modelToWorld,worldToModel;
-    vtkSmartPointer<vtkPolyDataMapper> mapper;vtkSmartPointer<vtkActor> actor;
+    CropCylinderVisual cylinderVisual;
     CropSphereVisual sphereVisual;
     CropSphereVisual::State visualState=CropSphereVisual::State::Idle;
     bool hover=false;int hovered=-1;
     unsigned long viewTag=0,mouseTag=0,leaveTag=0;
     vtkSmartPointer<vtkCallbackCommand> viewObserver,mouseObserver;
     vtkSmartPointer<vtkTextActor> text;
-    std::array<Handle,4> handles;
+    std::array<Handle,5> handles;
     std::function<void(CropInteractionPhase)> callback;
     std::function<bool()> gate;
     std::function<void()> renderCallback;
@@ -285,9 +348,9 @@ void CropCurveWidget::SetContextGate(std::function<bool()> gate){m_impl->gate=st
 
 bool CropCurveWidget::GetInputAccepted(int x,int y) const {
     if(!m_impl->enabled)return false;
-    for(const auto& h:m_impl->handles)if(h.widget->GetEnabled()&&h.representation->ComputeInteractionState(x,y)!=vtkHandleRepresentation::Outside)return true;
+    for(const auto& h:m_impl->handles)if(h.widget->GetEnabled()&&h.representation->GetVisibility()&&h.representation->ComputeInteractionState(x,y)!=vtkHandleRepresentation::Outside)return true;
     return false;
 }
 void CropCurveWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){for(auto& h:m_impl->handles)FeatureSupport::SetWidgetBindings(h.widget,values,{{"crop.widget.select.drag",vtkWidgetEvent::Select}});}
-void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;}
-void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->active=-1;m_impl->Sync();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}
+void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;m_impl->inputRadial=m_impl->radial;m_impl->inputRotation=m_impl->rotationOffset;}
+void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->radial=m_impl->inputRadial;m_impl->rotationOffset=m_impl->inputRotation;m_impl->active=-1;m_impl->hover=false;m_impl->hovered=-1;m_impl->Sync();m_impl->SyncView();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}

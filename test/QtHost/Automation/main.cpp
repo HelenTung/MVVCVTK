@@ -1,6 +1,7 @@
 // 测试用途：启动功能自动化测试，执行默认回归或指定 JSON 用例并导出记录。
 #include "App/TestWindow.h"
 #include "TestCaseRunner.h"
+#include "ReportWorkflowTests.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QSurfaceFormat>
@@ -78,6 +79,7 @@ int main(int argc, char* argv[])
     parser.addHelpOption();
     parser.addOption({"case", "执行指定的 JSON 用例文件", "path"});
     parser.addOption({"record", "导出自动化操作记录", "path"});
+    parser.addOption({"reports-only", "仅执行独立报告导入、比较、分页与选择回归，不创建业务会话"});
     parser.addOption({"background", "在独立后台桌面运行实际 Qt/VTK 窗口，不显示在用户桌面"});
     parser.addOption({"background-child", "内部测试子进程桌面标识", "name"});
     parser.addOption({"memory-budget-mib", "算法工作集上限（MiB），0 为不启用估算工作集硬限额", "MiB", "0"});
@@ -85,6 +87,7 @@ int main(int argc, char* argv[])
     bool valid = false; const auto budget = parser.value("memory-budget-mib").toULongLong(&valid);
     if (!valid) parser.showHelp(2);
     try {
+    if(parser.isSet("reports-only")){Manual::CheckReportWorkflow();return 0;}
     Manual::TestWindow window(budget);
     window.setWindowTitle("功能自动化测试");
     if(parser.isSet("background")){window.setAttribute(Qt::WA_ShowWithoutActivating,true);window.setWindowFlag(Qt::WindowDoesNotAcceptFocus,true);window.setWindowFlag(Qt::WindowTransparentForInput,true);}

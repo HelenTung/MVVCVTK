@@ -112,6 +112,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Alignment.InspectionResult", "查看尺寸检测结果"}, {"Alignment.DeviationResult", "查看偏差统计"},
         {"Alignment.ApplyModelPose", "应用模型显示姿态"}, {"Alignment.SetSceneDisplay", "显示检测场景"},
         {"Alignment.EvaluateVoxelVolume", "统计体素体积"}, {"Alignment.VoxelVolumeResult", "查看体素体积"}, {"Alignment.ExportReport", "导出计量报告"},
+        {"Wall.ExportComparison", "导出壁厚明细"},
         {"Wall.Start", "计算局部壁厚"}, {"Wall.Result", "查看壁厚结果"}, {"Wall.SetEvaluation", "更新壁厚公差"},
         {"Wall.SetDisplay", "应用壁厚显示"}, {"Wall.SetActive", "激活壁厚结果"}, {"Wall.SelectSample", "定位壁厚采样"},
         {"Crop.Start", "开始裁剪"}, {"Gap.Start", "开始孔隙分析"}, {"Part.Start", "开始分割"},

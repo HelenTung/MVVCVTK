@@ -25,10 +25,7 @@ namespace {
 void SetThicknessLegend(AnalysisLegend& legend, const char* title)
 {
     AnalysisColorStyle::SetLegend(legend, title);
-    // 完整结果标识需要足够的标题宽度，色带仍保持窄条，避免文字向左裁出视口。
-    legend.SetWidth(.38);
-    legend.SetMaximumWidthInPixels(220);
-    legend.SetBarRatio(.06);
+
 }
 
 AnalysisColorStyle::RampMode GetRampMode(ThicknessColorMode mode)
@@ -77,13 +74,13 @@ ThicknessDisplayData ThicknessOverlay::BuildData(const ThicknessData::Record &re
                                                  const ThicknessDisplay &display,const ThicknessDisplayData* previous)
 {
     auto ramp=GetColorRamp(display);
-    AnalysisColorStyle::SetTailColors(ramp);
     if(display.mode==ThicknessDisplayMode::Tolerance) {
         ramp.tolerance=std::array<double,2>{record.archive.evaluation.lower,record.archive.evaluation.upper};
         ramp.toleranceBelowColor=display.toleranceBelowColor;ramp.toleranceAboveColor=display.toleranceAboveColor;
         ramp.toleranceColor=display.toleranceWithinColor;
         ramp.segments.clear();
     }
+    AnalysisColorStyle::SetTailColors(ramp);
     if(previous && previous->range==display.range && AnalysisColorStyle::GetRampEqual(previous->ramp,ramp))return *previous;
     auto lookup=AnalysisColorStyle::BuildRamp(display.range,ramp);
     const bool hasAlpha=display.style==ThicknessDisplayStyle::Inclined || display.style==ThicknessDisplayStyle::InverseInclined;
@@ -187,7 +184,7 @@ ThicknessOverlay::ThicknessOverlay(ThicknessDisplayData data, const ThicknessDis
     m_legend->SetLookupTable(data.lookup);
     const std::string title =
         std::string(display.mode == ThicknessDisplayMode::Tolerance ? u8"壁厚公差" : u8"壁厚") +
-        " · "+data.resultLabel+(unit == ThicknessUnit::Millimeter ? " [mm]" : " [m]");
+        (unit == ThicknessUnit::Millimeter ? " [mm]" : " [m]");
     SetThicknessLegend(*m_legend, title.c_str());
     m_legend->SetPosition(display.legendPosition[0],display.legendPosition[1]);
     m_legend->SetPosition(display.legendPosition[0],display.legendPosition[1]);
@@ -200,7 +197,7 @@ void ThicknessOverlay::SetDisplayData(const ThicknessDisplayData& data,const Thi
     SetInputData(data.mesh);m_actor->GetProperty()->SetOpacity(display.opacity);m_actor->SetVisibility(display.isVisible);
     if(m_contourActor)m_contourActor->SetVisibility(display.isVisible);
     SetThicknessLegend(*m_legend,(std::string(display.mode==ThicknessDisplayMode::Tolerance ? u8"壁厚公差":u8"壁厚")
-        +" · "+m_resultLabel+(m_unit==ThicknessUnit::Millimeter ? " [mm]":" [m]")).c_str());
+        +(m_unit==ThicknessUnit::Millimeter ? " [mm]":" [m]")).c_str());
     m_legend->SetLookupTable(data.lookup);m_legend->SetMapping(data.range,data.ramp,data.hasValues);
     m_legend->SetPosition(display.legendPosition[0],display.legendPosition[1]);
     m_legend->SetVisibility(display.isVisible && display.hasLegend);

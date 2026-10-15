@@ -1,3 +1,5 @@
+#include <vtkScalarBarActor.h>
+#include <QRegularExpression>
 // 测试用途：自动执行实际页面入口的合成回归或指定用例，验证中文分派、业务日志和生命周期。
 #include "TestCaseRunner.h"
 #include "BusinessWorkflowTests.h"
@@ -11,6 +13,7 @@
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
 #include "Support/ResultReport.h"
+#include "ReportWorkflowTests.h"
 #include "Support/WorkbenchStyle.h"
 #include <QTabWidget>
 #include <QDialog>
@@ -211,35 +214,6 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
 }
 std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
-    if ((action == "SetDisplay" && (module == "Wall" || module == "Gap")) ||
-        (action == "SetDeviationDisplay" && module == "Alignment")) {
-        auto* legend = window.findChild<QToolButton*>("legend_" + module + "_primary-3d");
-        Check(Wait([&] { return legend && legend->isVisible() && legend->isEnabled(); }, 2000),
-            "actual viewport legend entry is available");
-        if (legend->isChecked()) {
-            const QSignalBlocker blocker(legend);
-            legend->setChecked(false);
-        }
-        legend->click();
-        auto* panel = window.GetModule(module);
-        QWidget* form = nullptr;
-        QPushButton* apply = nullptr;
-        Check(Wait([&] {
-            for (auto* widget : panel->findChildren<QWidget*>("colorLegendParameters"))
-                if (widget->isVisible()) form = widget;
-            for (auto* button : panel->findChildren<QPushButton*>("applyColorLegend"))
-                if (button->isVisible()) apply = button;
-            return form && apply && apply->isEnabled();
-        }, 2000), "floating color editor exposes the pinned result configuration");
-        auto* editor = dynamic_cast<ParameterEditor*>(form);
-        Check(editor != nullptr, "floating color editor uses the actual parameter form");
-        editor->SetPatch(patch);
-        const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-        apply->click();
-        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000),
-            "color editor apply reaches the feature display request");
-        return id;
-    }
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
     // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
     if(module!="Roi") {
@@ -997,13 +971,11 @@ void CheckParameterLayout(TestWindow& window)
     QJsonArray largeReport; for (int index = 0; index < 1010; ++index) largeReport.append(index);
     secondRecord["result"] = QJsonObject{{"rows",largeReport}};
     reportView.SetRecord(firstRecord); reportView.SetRecord(secondRecord);
-    Check(reportView.findChild<QComboBox*>("reportOperation")->count() == 2
-        && reportView.GetSelectedRecord()["operationId"] == "8", "report stores terminal operations and selects the latest completion");
+    Check(reportView.GetSelectedRecord()["operationId"] == "7", "new completion preserves report selection");
+    reportView.SelectReport("operation:8");
     reportView.show(); QCoreApplication::processEvents();
-    bool reportLimited = false;
-    for (auto* table : reportView.findChildren<QTableWidget*>("reportTable")) reportLimited = reportLimited || table->rowCount() == 1000;
-    Check(reportLimited && GetReportCsv(reportView.GetSelectedRecord()).contains("rows[1009]"), "report preview is bounded while CSV includes the final row");
-    reportView.findChild<QComboBox*>("reportOperation")->setCurrentIndex(0);
+    Check(reportView.GetSelectedReport().table->GetCount() > 1000 && GetReportCsv(reportView.GetSelectedRecord()).contains("rows[1009]"), "report keeps all rows in a paged model");
+    reportView.SelectReport("operation:7");
     Check(reportView.GetSelectedRecord()["operationId"] == "7", "report can select an earlier completed operation without changing business state");
     reportView.hide();
 #if defined(MANUAL_ROI)
@@ -1393,7 +1365,7 @@ void CheckCropWorkflow(TestWindow& window)
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
 }
-void CheckCropMouseInteraction(TestWindow& window)
+void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
 {
     if (!GetEnabled(window, "Crop")) return;
     auto* panel = window.GetModule("Crop");
@@ -1407,6 +1379,7 @@ void CheckCropMouseInteraction(TestWindow& window)
         GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", renderMode}}), "Succeeded");
         Check(Wait(settled), "display mode settles before crop input");
         for (const auto* shape : {"Box", "Plane", "Sphere", "Cylinder"}) {
+            if(cylinderOnly&&QString(shape)!="Cylinder")continue;
             for (const auto* removal : {"KeepInside", "RemoveInside", "PositionOnly"}) {
                 auto* historyTree=panel->GetCatalogTree();
                 GetComplete(window,ClickNodeAction(window,historyTree,FindNode(historyTree,"crop-history"),"ResetPreview"),"Succeeded");
@@ -1441,7 +1414,7 @@ void CheckCropMouseInteraction(TestWindow& window)
                     for (const auto& position : handles) { const auto p = position(); values.insert(values.end(), p.begin(), p.end()); }
                     return values;
                 };
-                const int expected = QString(shape) == "Cylinder" ? 4 : QString(shape) == "Box" ? 3 : QString(shape) == "Plane" ? 1 : 2;
+                const int expected = QString(shape) == "Cylinder" ? 5 : QString(shape) == "Box" ? 3 : QString(shape) == "Plane" ? 1 : 2;
                 Check(handles.size() == expected, "crop exposes its controls in the 3D renderer");
                 for (const auto& handle : handles) {
                     const auto before = geometry(); const auto point = handle();
@@ -2886,6 +2859,7 @@ void StartSequence(TestWindow& window, const QString& path)
             CheckNodeParameters(window);
         }
         if (step.contains("saveAs")) results[GetText(step, "saveAs")] = record;
+        if(script["checkReports"].toBool())CheckBusinessReport(window,record);
         if (step.contains("expectedTransform")) {
             const auto expectedTransform = GetArray<double, 16>(step["expectedTransform"]);
             const auto actual = GetArray<double, 16>(record["result"].toObject()["sourceToTarget"]);
@@ -2934,6 +2908,19 @@ void StartSequence(TestWindow& window, const QString& path)
                 const auto frame = widget->grabFramebuffer();
                 Check(!frame.isNull() && frame.size() == widget->size() * widget->devicePixelRatioF(),
                     "visible view framebuffer is readable at its current size");
+            }
+            if(step["checkLegendText"].toBool()) {
+                auto* view=window.findChild<QVTKOpenGLNativeWidget*>("primary3D");const auto* endpoint=window.GetSession()->GetPrimaryEndpoint();
+                Check(view&&endpoint,"legend text check has an actual primary framebuffer");const auto image=view->grabFramebuffer();
+                bool checked=false;auto* props=endpoint->renderer->GetViewProps();props->InitTraversal();
+                while(auto* prop=props->GetNextProp())if(auto* legend=vtkScalarBarActor::SafeDownCast(prop);legend&&legend->GetVisibility()) {
+                    const int x0=int(legend->GetPosition()[0]*image.width()),y0=int(legend->GetPosition()[1]*image.height());std::size_t white=0;
+                    for(int y=y0+12;y<std::min(image.height()-24,y0+int(.6*image.height())-12);++y)
+                        for(int x=x0+17;x<std::min(image.width(),x0+70);++x){const auto pixel=image.pixelColor(x,image.height()-1-y);white+=pixel.red()>180&&pixel.green()>180&&pixel.blue()>180;}
+                    Check(white>20,"Qt framebuffer contains actual readable measurement scale labels");checked=true;
+                }
+                Check(checked,"current measured result exposes its legend");
+                Check(window.findChildren<QToolButton*>(QRegularExpression("^legend_")).isEmpty(),"viewport contains no floating business legend controls");
             }
             std::cout<<"CAPTURE: saving window"<<std::endl;
             Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
@@ -3009,6 +2996,7 @@ void StartSequence(TestWindow& window, const QString& path)
         Check(preparingSamples > 0 && !hasHiddenSource, "observed pending part surface without hiding the source model");
         if (script.contains("partPreparationScreenshot")) Check(hasPreparationCapture, "pending part surface screenshot captured");
     }
+    if(script["checkCylinderMouse"].toBool())CheckCropMouseInteraction(window,true);
     if (script["checkIdle"].toBool()) CheckIdle(window);
     if (script.contains("maximumUpdateFailures")) {
         const auto diagnostics = window.GetDiagnostics();

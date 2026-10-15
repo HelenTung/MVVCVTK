@@ -3,6 +3,7 @@
 #include "Modules/ModuleFactories.h"
 #include "Support/ReferenceDataSource.h"
 #include "Support/ResultRetention.h"
+#include "Support/BusinessReport.h"
 #if defined(MANUAL_ROI)
 #include "Host/RoiEditingHostFeature.h"
 #endif
@@ -154,6 +155,18 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     modules.push_back(CreateWallTest(context, wall, parent));
 #else
     unavailable("Wall");
+#endif
+#if defined(MANUAL_GAP)
+    AttachReportSource(context.workflow,gap);
+#endif
+#if defined(MANUAL_SURFACE)
+    AttachReportSource(context.workflow,surface);
+#endif
+#if defined(MANUAL_ALIGNMENT)
+    AttachReportSource(context.workflow,alignment);
+#endif
+#if defined(MANUAL_WALL)
+    AttachReportSource(context.workflow,wall);
 #endif
     return modules;
 }

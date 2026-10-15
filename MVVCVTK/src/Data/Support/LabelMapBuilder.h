@@ -4,7 +4,7 @@
 
 #include <functional>
 
-// 不进入 SDK surface。生产者交出唯一可写 owner 后，只能取得冻结快照。
+// Data 内部构建能力，不进入 SDK surface；Host 和仓内 Feature 共用独占存储移交。
 class LabelMapBuilder final {
 public:
     template<class Value>

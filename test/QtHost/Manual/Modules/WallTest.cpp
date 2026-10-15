@@ -306,7 +306,7 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->setViewLegend=[feature](const QString& id,bool visible,int slot) {
         const auto state=feature->GetState();if(!state.appliedDisplay)return;
         auto d=*state.appliedDisplay;const auto view=id.toStdString();
-        if(visible){d.hasLegend=true;d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
+        if(visible){d.hasLegend=true;if(slot>=0)d.legendPositions[id.toStdString()]={.025+.25*slot,.20};}
         auto& hidden=d.hiddenLegendViews;hidden.erase(std::remove(hidden.begin(),hidden.end(),view),hidden.end());if(!visible)hidden.push_back(view);
         feature->SendRequest(ThicknessDisplayRequest{d,state.result});
     };
@@ -427,11 +427,11 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
     panel->AttachAction("ExportComparison",{{"outputPath",""}},[panel,feature,viewed](auto id,const auto& p){
         const auto snapshot=feature->GetResult(viewed());
         if(!snapshot||!snapshot->samples)throw std::runtime_error("wall result unavailable");
-        QFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
-        // 聚合节点场没有唯一对端；比较文件只导出查询位置及对应场值。
-        QTextStream out(&file);out.setRealNumberPrecision(17);out<<"sample_id,x_mm,y_mm,z_mm,thickness_mm,area_mm2,validity\n";
-        std::size_t i=0;for(const auto& s:*snapshot->samples){out<<qulonglong(i++);for(auto x:s.source)out<<','<<x;out<<','<<s.thickness<<','<<s.area<<','<<int(s.validity)<<'\n';}
-        out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("wall write failed");
+        // 与窗口共用精确结果的业务表，无效厚度留空，单位来自结果契约。
+        auto record=panel->GetContext().records.GetRecord(id);record["result"]=QJsonObject{{"result",GetRefText(snapshot->result)}};
+        const auto reports=panel->GetContext().workflow.readReports.at("Wall")(record,{});
+        if(reports.isEmpty())throw std::runtime_error("wall report unavailable");
+        ExportReport(GetText(p,"outputPath"),reports.first());
         QJsonArray histogram,reasons,regions;const auto& s=snapshot->statistics;
         for(auto x:s.histogramAreas)histogram.append(x);
         for(std::size_t j=0;j<s.reasonCounts.size();++j)reasons.append(QJsonObject{{"reason",int(j)},{"count",QString::number(s.reasonCounts[j])},{"area",s.reasonAreas[j]}});

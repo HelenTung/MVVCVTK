@@ -63,7 +63,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* tools = new QToolButton(root); tools->setObjectName("testTools"); tools->setText("测试工具");
     tools->setPopupMode(QToolButton::InstantPopup); auto* toolMenu = new QMenu(tools); tools->setMenu(toolMenu);
     auto* exportRecords = toolMenu->addAction("导出测试记录"); exportRecords->setObjectName("exportTestRecords");
-    auto* showReport = new QPushButton("结果报告 / CSV", root); showReport->setObjectName("showResultReport");
+    auto* showReport = new QPushButton("报告与归档", root); showReport->setObjectName("showResultReport");
     auto* performance = toolMenu->addAction("开始性能采样"); performance->setCheckable(true);
     performance->setObjectName("performanceCapture");
     m_sourceButton=new QPushButton("查看来源",toolbarFrame);m_sourceButton->setObjectName("showInputSources");m_sourceButton->setEnabled(false);
@@ -231,7 +231,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_log = new QPlainTextEdit(diagnosticDetails); m_log->setReadOnly(true); m_log->setMaximumBlockCount(1000); m_log->setMaximumHeight(120);
     diagnosticLayout->addWidget(m_log);m_resultTabs->addTab(diagnosticDetails,"诊断");
     diagnosticDetails->hide();
-    auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("运行结果报告"); reports->resize(940,620);
+    auto* reports = new QDialog(this); reports->setObjectName("operationReports"); reports->setWindowTitle("报告与归档"); reports->resize(1180,720);
     auto* reportLayout = new QVBoxLayout(reports); reportLayout->setContentsMargins(8,8,8,8);
     m_report = new ResultReport(reports); reportLayout->addWidget(m_report);
     connect(logToggle, &QToolButton::toggled, this, [this,logToggle](bool visible) {
@@ -239,7 +239,16 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         else if(m_resultTabs->currentIndex()==2)m_resultTabs->setCurrentIndex(0);
         logToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
     });
-    connect(showReport,&QPushButton::clicked,this,[reports]{reports->show();reports->raise();reports->activateWindow();});
+    m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);reports->show();reports->raise();reports->activateWindow();};
+    m_objects->onReport=m_workflow.onShowReports;
+    m_report->onLocate=[this](const ReportDocument& doc,int row){
+        const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
+        if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
+        const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);
+        HostSessionSetRequest request;request.cursor=HostCursorParams{point,-1};
+        const auto admission=session->SendRequest(std::move(request));if(admission.status!=HostAdmissionStatus::Accepted)throw std::runtime_error("视图未接纳定位请求");
+    };
+    connect(showReport,&QPushButton::clicked,this,[this]{m_workflow.onShowReports({},{});});
     m_log->setObjectName("businessLog");
     m_log->setAccessibleName("业务流程诊断");
     m_log->setPlaceholderText("业务步骤、提交、进度、结果与输入切换的完整流程将在这里显示。");
@@ -247,6 +256,12 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         AppendLog(GetFlowText(record));
         ShowMessage(GetFlowText(record,false));
         m_report->SetRecord(record);
+        if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed"}.contains(record["status"].toString())) {
+            const auto found=m_workflow.readReports.find(record["module"].toString());
+            if(found!=m_workflow.readReports.end())try {
+                for(auto doc:found->second(record,m_report->GetReportIds()))m_report->AddReport(std::move(doc));
+            } catch(const std::exception& e) {ShowMessage("业务结果已保留，报告读取失败："+QString::fromUtf8(e.what()));}
+        }
         UpdateMeasurements();
         QueueObserve();
     };
@@ -392,20 +407,20 @@ void TestWindow::UpdateStopCommand()
 void TestWindow::UpdateMeasurements()
 {
     UpdateStopCommand();
-    for(auto& entry:m_legends) {
-        auto* module=GetModule(entry.module);if(!module || !module->getColorParameters)continue;
-        const auto p=module->getColorParameters();const auto ref=p[entry.module=="Alignment" ? "deviation":"result"].toString();
-        entry.button->setVisible(!p.isEmpty());entry.button->setEnabled(!m_isClosing);
-        entry.button->setText((entry.button->isChecked() ? "▾ ":"▸ ")+module->GetDisplayName()+" · "+ref.section(':',0,0).right(8));
-        entry.button->setToolTip("色标绑定 "+ref+"；点击编辑，Ctrl 点击并排对照。\n"+(module->getColorDescription ? module->getColorDescription():QString()));
-        entry.button->adjustSize();
-        // 业务开关靠右上，保留左侧原生图例的完整标题、单位和读数。
-        entry.button->move(std::max(12,entry.button->parentWidget()->width()-entry.button->width()-12),entry.button->y());
-        entry.button->raise();
-        if(!ref.isEmpty() && ref!=entry.result) {
-            const bool anyExpanded=std::any_of(m_legends.begin(),m_legends.end(),[&](const auto& other){return other.viewId==entry.viewId && other.button!=entry.button && other.button->isVisible() && other.button->isChecked();});
-            if(!anyExpanded){const QSignalBlocker blocker(entry.button);entry.button->setChecked(true);}
-            entry.result=ref;module->setViewLegend(entry.viewId,entry.button->isChecked(),0);
+    // 当前业务页选择图例；视口不承载业务按钮，也不让多个图例互相覆盖。
+    auto* color=dynamic_cast<ModulePanel*>(m_pages->currentWidget());
+    if(color&&color->getColorParameters){
+        const auto parameters=color->getColorParameters();
+        if(!parameters.isEmpty()&&(m_colorModule!=color->GetName()||m_colorParameters!=parameters)){
+            m_colorModule=color->GetName();m_colorParameters=parameters;
+            for(auto* other:m_modules)if(other->setViewLegend)for(const auto& view:m_views){
+                if(other->GetName()=="Alignment"&&view.id!="primary-3d")continue;
+                other->setViewLegend(view.id,other==color&&parameters["hasLegend"].toBool()&&parameters["isVisible"].toBool(),-1);
+            }
+            if(parameters["isVisible"].toBool()&&color->getColorSurface){
+                const auto surface=color->getColorSurface();
+                if(!surface.isEmpty())for(auto* other:m_modules)if(other!=color&&other->getColorSurface&&other->setColorVisible&&other->getColorSurface()==surface)other->setColorVisible(false);
+            }
         }
     }
     const auto measured = m_records.GetMeasurements();
@@ -540,34 +555,6 @@ void TestWindow::BuildSession()
         if (!m_runtime.BuildSession(std::move(config))) throw std::runtime_error("测试会话创建失败");
         m_pump.SetSession(m_runtime.GetSession());
         m_modules = BuildModules({m_runtime, m_workflow, m_records}, m_pages);
-        for(const auto& view:m_views) {
-            int row=0;
-            for(const auto& name:{QString("Wall"),QString("Gap"),QString("Alignment")}) {
-                if(name=="Alignment" && view.id!="primary-3d")continue;
-                auto* module=GetModule(name);if(!module || !module->setViewLegend)continue;
-                auto* button=new QToolButton(view.widget);button->setCheckable(true);button->setChecked(row==0);
-                button->setObjectName("legend_"+name+"_"+view.id);button->move(12,8+30*row++);button->hide();
-                m_legends.push_back({name,view.id,{},button});
-                connect(button,&QToolButton::toggled,this,[this,name,id=view.id,button](bool expanded) {
-                    int slot=0;auto* module=GetModule(name);if(!module)return;
-                    if(expanded) {
-                        const bool compare=QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
-                        for(auto& other:m_legends)if(other.viewId==id && other.button!=button && other.button->isChecked()) {
-                            if(compare)++slot;
-                            else {const QSignalBlocker blocker(other.button);other.button->setChecked(false);if(auto* panel=GetModule(other.module))panel->setViewLegend(id,false,0);}
-                        }
-                    }
-                    if(expanded && module->getColorSurface) {
-                        const auto surface=module->getColorSurface();
-                        if(!surface.isEmpty())for(const auto& other:m_modules)if(other!=module && other->getColorSurface && other->setColorVisible && other->getColorSurface()==surface)other->setColorVisible(false);
-                        if(module->setColorVisible)module->setColorVisible(true);
-                    }
-                    module->setViewLegend(id,expanded,slot);
-                    if(expanded)module->ShowColorEditor(button->mapToGlobal(QPoint(button->width()+8,0)),id);
-                });
-            }
-        }
-
         if (m_workflow.resources.hasExplicitWorkingLimit)
             AppendLog(QString("显式工作集上限 %1 GiB；伪影单次发布上限 %2 GiB。").arg(m_workflow.resources.workingBytes / (1024.*1024.*1024.), 0, 'f', 2).arg(m_workflow.resources.publishBytes / (1024.*1024.*1024.), 0, 'f', 2));
         else
@@ -670,18 +657,6 @@ bool TestWindow::eventFilter(QObject* watched, QEvent* event)
     if (!m_visibilityQueued && (event->type() == QEvent::Show || event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange || event->type() == QEvent::Paint)) {
         m_visibilityQueued = true;
         QMetaObject::invokeMethod(&m_pump, [this] { m_visibilityQueued = false; m_pump.SetVisible(); }, Qt::QueuedConnection);
-    }
-    if(event->type()==QEvent::MouseButtonPress) {
-        const auto* mouse=static_cast<QMouseEvent*>(event);
-        if(mouse->button()==Qt::LeftButton)for(const auto& view:m_views)if(watched==view.widget) {
-            for(const auto& entry:m_legends)if(entry.viewId==view.id && entry.button->isChecked() && entry.button->isVisible()) {
-                auto* module=GetModule(entry.module);const auto position=module->getColorPosition ? module->getColorPosition(view.id):QPointF(.025,.20);
-                const double x=position.x()*view.widget->width(),y=(1-position.y())*view.widget->height();
-                if(mouse->pos().x()>=x && mouse->pos().x()<=x+24 && mouse->pos().y()<=y && mouse->pos().y()>=y-std::min(260.,.6*view.widget->height())) {
-                    module->ShowColorEditor(view.widget->mapToGlobal(mouse->pos()+QPoint(16,0)),view.id);return true;
-                }
-            }
-        }
     }
     return QMainWindow::eventFilter(watched, event);
 }

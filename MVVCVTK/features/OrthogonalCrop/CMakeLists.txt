@@ -11,6 +11,8 @@ set(MVVCVTK_CROP_SOURCES
     include/Interaction/CropPlaneWidget.h
     include/Render/CropShaderController.h
     include/Render/CropGeometryOverlay.h
+    include/Render/CropCylinderVisual.h
+    include/Render/CropCurveProjection.h
     include/Render/CropSphereVisual.h
     include/Routing/CropRouter.h
     src/Algorithms/CropAlgorithm.cpp
@@ -24,6 +26,7 @@ set(MVVCVTK_CROP_SOURCES
     src/Interaction/CropBridge.cpp
     src/Interaction/CropPlaneWidget.cpp
     src/Render/CropShaderController.cpp
+    src/Render/CropCylinderVisual.cpp
     src/Render/CropSphereVisual.cpp
     src/Routing/CropRouter.cpp
 )
