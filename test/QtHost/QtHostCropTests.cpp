@@ -677,6 +677,7 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
             return state&&state->dataRevision==root->data->self&&stamp&&stamp->dataRevision==root->data->self;
         }),"Historical branch returns to the exact Root input"))return false;
         CropDocumentRequest activate;activate.action=CropDocumentAction::ActivateDocument;
+        activate.target=target;
         activate.documentId=history.documentId;activate.requestId=CropHostFeature::CreateRequestId();
         activate.expectedRevision=feature->GetHistory().stateRevision;
         if(!GetCaseResult(bool(feature->SendRequest(activate))&&wait([&]{
