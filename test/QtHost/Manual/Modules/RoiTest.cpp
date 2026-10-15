@@ -252,7 +252,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         {"domainRoi",""},{"rasterize",false},{"sourceToTarget",GetValues(roiIdentityMatrix)},{"targetSource",""},{"mesh",""},{"meshToSource",GetValues(roiIdentityMatrix)},
         {"inwardMM",0.0},{"outwardMM",1.0},{"hasOrientation",false}};
     const QStringList operationActions{"Union","Intersection","Difference","Merge","Dilate","Erode","Open","Close","RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Threshold","Grow","Invert","Clear","Transform","SurfaceInterior","SurfaceLayer"};
-    for(const auto& action:operationActions)panel->AttachAction(action,operationParameters,[panel,feature,pendingOperation,operationAction,operationParametersSeen,action](auto id,const auto& p) {
+    for(const auto& action:operationActions)panel->AttachAction(action,operationParameters,[panel,feature,pendingOperation,operationAction,operationParametersSeen,appliedMetadata,action](auto id,const auto& p) {
         if(!feature->GetState().hasDraft) {
             const auto input=panel->GetSession()->GetImageDescriptor();if(!input)throw std::invalid_argument("请先选择源数据");
             RoiRequest draft;draft.definition.source=input->dataRevision;draft.metadata.name="区域";
@@ -263,6 +263,11 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
             else throw std::invalid_argument("请先选择正式区域或开始编辑草稿");
             RoiEditingRequest begin;begin.action=RoiEditingAction::Begin;begin.draft=draft;const auto ready=feature->SendRequest(begin);
             if(ready.error!=RoiError::None){panel->SetComplete(id,"Failed",{{"error",int(ready.error)}});return;}
+            // 运算隐式开始编辑所选区域时，同步名称等信息，避免沿用上一个区域的表单。
+            const QJsonObject metadata{{"name",QString::fromStdString(draft.metadata.name)},
+                {"group",QString::fromStdString(draft.metadata.group)},
+                {"description",QString::fromStdString(draft.metadata.description)}};
+            panel->SetParameterPatch("SetDraft",metadata);*appliedMetadata=metadata;
         }
         RoiEditingRequest request;request.action=RoiEditingAction::BeginOperation;request.operation=GetOperationRequest(action,p);
         const auto result=feature->SendRequest(request);if(*pendingOperation){const auto old=**pendingOperation;pendingOperation->reset();panel->SetComplete(old,"Cancelled");}

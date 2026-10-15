@@ -1711,6 +1711,8 @@ void CheckSharedRoi(TestWindow& window)
     const auto combinedRoi=window.GetSession()->GetRoiDescriptor(GetRef(combined));
     Check(combinedRoi && combinedRoi->definition.nodes.back().kind==RoiNodeKind::Union,
         "direct business save preserves the cross-shape Boolean candidate instead of its primitive input");
+    Check(combinedRoi && combinedRoi->metadata.name==region->metadata.name,
+        "Boolean save inherits the selected input name instead of the previously edited region");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",combined}}),"Succeeded");
     GetComplete(window,Send(window,"Roi","Remove",{{"roi",other}}),"Succeeded");
     }
