@@ -13,6 +13,7 @@
 #include <limits>
 #include <algorithm>
 #include <stdexcept>
+#include <cstring>
 namespace Manual {
 QJsonValue GetReportCountValue(ReportRowId count)
 {
@@ -43,21 +44,22 @@ public:
     std::function<QStringList(ReportRowId)> readSource;
     mutable ReportRowId indexStart = -1;
     mutable int indexCount = 0;
-    mutable std::array<qint64,1024> indexPage{};
+    mutable QByteArray indexPage;
     mutable bool indexDirty=false;
 };
 namespace {
-qint64 ReadOffset(QFile& index,ReportRowId row,ReportRowId count,ReportRowId& start,int& length,std::array<qint64,1024>& page)
+qint64 ReadOffset(QFile& index,ReportRowId row,ReportRowId count,ReportRowId& start,int& length,QByteArray& page)
 {
     if(row<start || row>=start+length) {
-        const auto first=row/static_cast<ReportRowId>(page.size())*static_cast<ReportRowId>(page.size());
-        const auto records=std::min<ReportRowId>(count-first,static_cast<ReportRowId>(page.size()));
+        const auto first=row/1024*1024;
+        const ReportRowId records=count-first<1024?count-first:1024;
         const auto bytes=records*static_cast<qint64>(sizeof(qint64));
-        if(!index.seek(first*static_cast<qint64>(sizeof(qint64))) || index.read(reinterpret_cast<char*>(page.data()),bytes)!=bytes)
-            throw std::runtime_error("报告偏移索引读取失败");
+        if(!index.seek(first*static_cast<qint64>(sizeof(qint64))))throw std::runtime_error("报告偏移索引定位失败");
+        auto loaded=index.read(bytes);if(loaded.size()!=bytes)throw std::runtime_error("报告偏移索引读取失败");
+        page=std::move(loaded);
         start=first;length=static_cast<int>(records);
     }
-    return page[static_cast<std::size_t>(row-start)];
+    qint64 offset;std::memcpy(&offset,page.constData()+(row-start)*sizeof(qint64),sizeof(offset));return offset;
 }
 }
 ReportTable::ReportTable() : m_impl(std::make_unique<Impl>())
@@ -69,7 +71,7 @@ ReportTable::ReportTable() : m_impl(std::make_unique<Impl>())
 ReportTable::~ReportTable() = default;
 void ReportTable::Append(const QStringList& row)
 {
-    if(m_impl->rowCount>=std::numeric_limits<qint64>::max()/sizeof(qint64))throw std::overflow_error("报告偏移索引地址溢出");
+    if(m_impl->rowCount>=std::numeric_limits<qint64>::max()/static_cast<qint64>(sizeof(qint64)))throw std::overflow_error("报告偏移索引地址溢出");
     auto& file = m_impl->file;
     if (!file.seek(file.size())) throw std::runtime_error("报告临时表定位失败");
     const auto offset = file.pos();
@@ -90,8 +92,10 @@ QStringList ReportTable::Read(ReportRowId row) const
     const auto offset=ReadOffset(m_impl->index,row,m_impl->rowCount,m_impl->indexStart,m_impl->indexCount,m_impl->indexPage);
     if (!m_impl->file.seek(offset)) throw std::runtime_error("报告临时表读取失败");
     QJsonParseError error;
-    const auto values = QJsonDocument::fromJson(m_impl->file.readLine(), &error);
-    if (error.error != QJsonParseError::NoError || !values.isArray()) throw std::runtime_error("报告临时表损坏");
+    const auto bytes=m_impl->file.readLine();const auto values = QJsonDocument::fromJson(bytes, &error);
+    if (error.error != QJsonParseError::NoError || !values.isArray()) {
+        throw std::runtime_error(QString("报告临时表损坏：行 %1，偏移 %2，字节数 %3，%4").arg(row).arg(offset).arg(bytes.size()).arg(error.errorString()).toStdString());
+    }
     QStringList cells;
     for (const auto cell : values.array()) cells.append(cell.toString());
     m_impl->cachedRow = row; m_impl->cached = cells;
@@ -128,7 +132,7 @@ std::function<QStringList(ReportRowId)> ReportTable::CreateReader() const
         const ReportRowId count;
         ReportRowId start=-1;
         int length=0;
-        std::array<qint64,1024> page{};
+        QByteArray page;
         Cursor(const QString& path,const QString& indexPath,ReportRowId rows) : file(path),index(indexPath),count(rows)
         { if (!file.open(QIODevice::ReadOnly) || !index.open(QIODevice::ReadOnly)) throw std::runtime_error("报告读取器打开失败"); }
     };

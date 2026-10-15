@@ -600,6 +600,7 @@ void ResultReport::RefreshRows()
 {
     m_scanTimer->stop();m_rowScan.reset();setProperty("reportRowsBusy",false);
     setProperty("reportRowsProgress",0);setProperty("reportRowsPhase",QString());
+    setProperty("reportRowsError",QString());
     m_rows.reset();m_allRows=false;m_rowsReady=false;m_page=0;
     m_table->horizontalHeader()->setSortIndicatorShown(false);
     if(!m_selected.table){RefreshPage();return;}
@@ -654,6 +655,7 @@ void ResultReport::ContinueRows()
         RefreshPage();
     } catch(const std::exception& e) {
         m_rowScan.reset();setProperty("reportRowsBusy",false);m_rows.reset();RefreshPage();
+        setProperty("reportRowsError",QString::fromUtf8(e.what()));
         m_range->setText("报告筛选 / 排序失败："+QString::fromUtf8(e.what()));
     }
 }

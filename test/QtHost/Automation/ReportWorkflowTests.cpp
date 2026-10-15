@@ -46,6 +46,7 @@ void WaitRows(ResultReport& view,int timeoutMs=30000) {
     QElapsedTimer elapsed;elapsed.start();
     while(view.property("reportRowsBusy").toBool() && (timeoutMs==0 || elapsed.elapsed()<timeoutMs))QCoreApplication::processEvents(QEventLoop::AllEvents,20);
     Require(!view.property("reportRowsBusy").toBool(),"report row processing did not finish within test deadline");
+    if(!view.property("reportRowsError").toString().isEmpty())throw std::runtime_error(view.property("reportRowsError").toString().toStdString());
 }
 void WaitTasks(ResultReport& view,int timeoutMs=30000,bool success=true) {
     QElapsedTimer elapsed;elapsed.start();
@@ -176,7 +177,8 @@ void CheckReportWorkflow()
     Require(table->model()->rowCount()==3 && table->model()->data(table->model()->index(2,0)).toString()=="1202","complete report browses beyond 1000 rows");
     std::cout<<"Reports: paging complete"<<std::endl;
     SortRows(view,1);
-    Require(table->model()->data(table->model()->index(0,0)).toString()=="1202","numeric sorting covers the complete table, not the current page");
+    const auto sortedFirst=table->model()->data(table->model()->index(0,0)).toString();
+    if(sortedFirst!="1202")throw std::runtime_error("numeric sorting covers the complete table, not the current page: actual="+sortedFirst.toStdString()+" count="+std::to_string(view.GetFilteredCount()));
     Require(table->horizontalHeader()->isSortIndicatorShown()&&table->horizontalHeader()->sortIndicatorSection()==1,"sorting indicator follows the actual selected sort column");
     view.findChild<QLineEdit*>("reportSearch")->setText("1202");WaitRows(view);Require(view.GetFilteredRows().size()==2,"search covers all rows, including unloaded pages");
     std::cout<<"Reports: sorting and search complete"<<std::endl;

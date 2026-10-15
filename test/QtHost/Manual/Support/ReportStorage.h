@@ -32,7 +32,7 @@ public:
         std::array<T,1024> zero{};
         for(ReportRowId next=0;next<count;) {
             if(checkpoint)checkpoint();
-            const auto records=std::min<ReportRowId>(count-next,zero.size());const auto bytes=records*static_cast<qint64>(sizeof(T));
+            const ReportRowId records=count-next<1024?count-next:1024;const auto bytes=records*static_cast<qint64>(sizeof(T));
             if(m_file.write(reinterpret_cast<const char*>(zero.data()),bytes)!=bytes)throw std::runtime_error("报告匹配索引空间分配失败");
             next+=records;
         }

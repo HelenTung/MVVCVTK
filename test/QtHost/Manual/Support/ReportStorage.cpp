@@ -3,19 +3,21 @@
 #include <QFile>
 #include <algorithm>
 #include <queue>
+#include <cstring>
 namespace Manual {
 namespace {
 struct IndexCursor {
     QFile file;
     ReportRowId count,start=-1;
     int length=0;
-    std::array<ReportRowId,1024> page{};
+    QByteArray page;
     IndexCursor(const QString& path,ReportRowId rows):file(path),count(rows){if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("报告行号索引打开失败");}
     ReportRowId Read(ReportRowId row) {
         if(row<0 || row>=count)throw std::out_of_range("报告行号索引越界");
         if(row<start || row>=start+length){start=row/1024*1024;length=static_cast<int>(std::min<ReportRowId>(1024,count-start));const auto bytes=length*static_cast<qint64>(sizeof(ReportRowId));
-            if(!file.seek(start*sizeof(ReportRowId)) || file.read(reinterpret_cast<char*>(page.data()),bytes)!=bytes)throw std::runtime_error("报告行号索引读取失败");}
-        return page[static_cast<std::size_t>(row-start)];
+            if(!file.seek(start*static_cast<qint64>(sizeof(ReportRowId))))throw std::runtime_error("报告行号索引定位失败");
+            auto loaded=file.read(bytes);if(loaded.size()!=bytes)throw std::runtime_error("报告行号索引读取失败");page=std::move(loaded);}
+        ReportRowId value;std::memcpy(&value,page.constData()+(row-start)*sizeof(ReportRowId),sizeof(value));return value;
     }
 };
 bool Before(const ReportSortKey& a,const ReportSortKey& b,Qt::SortOrder direction) {
@@ -46,7 +48,7 @@ public:
 };
 ReportIndex::ReportIndex():m_impl(std::make_unique<Impl>()){}
 ReportIndex::~ReportIndex()=default;
-void ReportIndex::Append(ReportRowId value){if(m_impl->count>=std::numeric_limits<qint64>::max()/sizeof(value))throw std::overflow_error("报告行号索引地址溢出");auto& file=m_impl->file;if(!file.seek(file.size()) || file.write(reinterpret_cast<const char*>(&value),sizeof(value))!=sizeof(value))throw std::runtime_error("报告行号索引写入失败");++m_impl->count;m_impl->cursor.reset();}
+void ReportIndex::Append(ReportRowId value){if(m_impl->count>=std::numeric_limits<qint64>::max()/static_cast<qint64>(sizeof(value)))throw std::overflow_error("报告行号索引地址溢出");auto& file=m_impl->file;if(!file.seek(file.size()) || file.write(reinterpret_cast<const char*>(&value),sizeof(value))!=sizeof(value))throw std::runtime_error("报告行号索引写入失败");++m_impl->count;m_impl->cursor.reset();}
 ReportRowId ReportIndex::GetCount() const{return m_impl->count;}
 void ReportIndex::PrepareRead() const{if(!m_impl->file.flush())throw std::runtime_error("报告行号索引刷新失败");}
 ReportRowId ReportIndex::Read(ReportRowId row) const{if(!m_impl->cursor){PrepareRead();m_impl->cursor=std::make_shared<IndexCursor>(m_impl->file.fileName(),m_impl->count);}return m_impl->cursor->Read(row);}

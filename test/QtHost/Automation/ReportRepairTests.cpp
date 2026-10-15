@@ -1,6 +1,7 @@
 #include "ReportWorkflowTests.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
+#include "Support/ReportStorage.h"
 #if defined(MANUAL_ALIGNMENT)
 #include "Support/InspectionReport.h"
 #include "Support/JsonInput.h"
@@ -240,6 +241,16 @@ void CheckWideRowAddressing() {
     table->selectRow(local);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==count-1,"locate callback truncates a 64-bit global row");
     view.findChild<QPushButton*>("reportFirst")->click();Require(table->model()->data(table->model()->index(0,0)).toString()=="0","first report page lost original order");view.hide();
 }
+void CheckDiskIndexPages() {
+    ReportTable table;ReportIndex indices;ReportDiskArray<qint64> mapped(2053);
+    for(ReportRowId row=0;row<2053;++row){table.Append({QString::number(row),QString(static_cast<int>(row%73),'x')});indices.Append(row*1000000123LL);}
+    table.PrepareRead();indices.PrepareRead();const auto read=table.CreateReader();const auto index=indices.CreateReader();
+    for(int pass=0;pass<2;++pass)for(ReportRowId i=0;i<2053;++i){const auto row=pass?2052-i:i;
+        Require(table.Read(row)[0]==QString::number(row) && read(row)[0]==QString::number(row),"owner or independent report reader corrupted a binary offset page boundary");
+        Require(indices.Read(row)==row*1000000123LL && index(row)==indices.Read(row),"64-bit row index corrupted a page boundary or tail page");}
+    for(ReportRowId row=0;row<2053;++row){Require(mapped[row]==0,"disk-backed state initialization missed a block");mapped[row]=row*1000000123LL;}
+    for(ReportRowId row=2052;row>=0;--row)Require(mapped[row]==row*1000000123LL,"disk-backed state changed a 64-bit record");
+}
 #if defined(MANUAL_ALIGNMENT)
 void CheckInspectionPreparation() {
     ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
@@ -275,7 +286,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();
+    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();
 #if defined(MANUAL_ALIGNMENT)
     CheckInspectionPreparation();
 #endif
