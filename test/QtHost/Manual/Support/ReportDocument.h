@@ -5,63 +5,32 @@
 #include <memory>
 #include <functional>
 #include <cstddef>
-#include <iterator>
+#include <vector>
 class QIODevice;
 class QThread;
 namespace Manual {
+using ReportRowId = qint64;
+using ReportRows = std::vector<ReportRowId>;
 using ReportCheckpoint = std::function<void()>;
-// 仅持有所需的只读目录或临时表；不拥有 Session、体数据或完整几何。
+// 完成后只保存表格；构建候选可暂持只读原生数据，物化或取消后释放。
 class ReportTable final {
 public:
     ReportTable();
-    ReportTable(quint64 count,std::function<QStringList(quint64)> readRow);
+    ReportTable(quint64 count,std::function<QStringList(ReportRowId)> readRow);
     ~ReportTable();
     void Append(const QStringList& row);
-    QStringList Read(quint64 row) const;
-    quint64 GetCount() const;
-    void SetRows(quint64 count, std::function<QStringList(quint64)> read);
+    QStringList Read(ReportRowId row) const;
+    ReportRowId GetCount() const;
+    void SetRows(std::size_t count, std::function<QStringList(ReportRowId)> read);
     bool ContinueBuild();
     bool GetIsComplete() const;
     void PrepareRead();
     void SetOwnerThread(QThread* owner);
     // 独立文件游标；调用方持有 table，且仅在物化完成后创建读取器。
-    std::function<QStringList(quint64)> CreateReader() const;
+    std::function<QStringList(ReportRowId)> CreateReader() const;
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
-};
-struct ReportDocument;
-// 自然顺序只保存总数；筛选/排序目录使用同一后备存储，不与 Qt 页内 int 行号混用。
-class ReportRows final {
-public:
-    class const_iterator final {
-    public:
-        using value_type=quint64;using difference_type=std::ptrdiff_t;
-        using pointer=void;using reference=quint64;using iterator_category=std::forward_iterator_tag;
-        const_iterator(const ReportRows* rows,quint64 offset):m_rows(rows),m_offset(offset){}
-        quint64 operator*()const{return (*m_rows)[m_offset];}
-        const_iterator& operator++(){++m_offset;return *this;}
-        const_iterator operator++(int){auto before=*this;++*this;return before;}
-        bool operator==(const const_iterator& other)const{return m_rows==other.m_rows&&m_offset==other.m_offset;}
-        bool operator!=(const const_iterator& other)const{return !(*this==other);}
-    private:const ReportRows* m_rows;quint64 m_offset;
-    };
-    ReportRows()=default;
-    static ReportRows Natural(quint64 count);
-    quint64 size() const;
-    bool isEmpty() const {return size()==0;}
-    const_iterator begin()const{return {this,0};}const_iterator end()const{return {this,size()};}
-    const_iterator cbegin()const{return begin();}const_iterator cend()const{return end();}
-    quint64 operator[](quint64 offset) const;
-    QVector<quint64> mid(quint64 offset,int count) const;
-    void clear();
-    void append(quint64 row);
-    void Sort(const ReportDocument& document,int column,bool ascending,bool numeric=true,
-        const ReportCheckpoint& checkpoint={},bool ignoreCase=false);
-private:
-    class Impl;
-    std::shared_ptr<Impl> m_impl;
-    quint64 m_naturalCount=0;
 };
 struct ReportColumn final {
     QString name, quantity, unit;
@@ -82,10 +51,14 @@ struct ReportDocument final {
     bool identityStable = false;
     bool mappingRequired = false;
     QStringList validValues{"0","Valid"};
+    // 所属线程每次只准备一个工作单元；完成后替换为实际分组，取消直接释放候选。
+    std::function<bool(QVector<ReportDocument>&)> prepareReports;
 };
 ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const ReportCheckpoint& checkpoint = {});
 void WriteReportCsv(QIODevice& output, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
 void ExportReport(const QString& path, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
 QString GetReportCell(const QStringList& row, int column);
 bool GetReportNumber(const QString& text, double& value);
+QJsonValue GetReportCountValue(quint64 count);
+quint64 GetReportCount(const QJsonValue& value);
 }

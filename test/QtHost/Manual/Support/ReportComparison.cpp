@@ -1,11 +1,15 @@
 #include "ReportComparison.h"
-#include "MappedArrayStorage.h"
+#include "ReportStorage.h"
+#include <QHash>
 #include <QUuid>
 #include <array>
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
+#include <vector>
+#include <optional>
 namespace Manual {
 namespace {
 struct Unit { int dimension; double scale; };
@@ -42,18 +46,79 @@ bool ReadPosition(const ReportDocument& doc, const QStringList& row, double scal
     }
     return true;
 }
-std::array<qint64,3> Grid(const Position& position, double distance)
+std::optional<std::array<qint64,3>> Grid(const Position& position, double distance)
 {
     std::array<qint64,3> cell{};
     for (int axis = 0; axis < 3; ++axis) {
         const auto value = std::floor(position[axis]/distance);
         // 留出邻域 +/-1，同时避免 double 到整数的越界转换。
-        if (value <= -9e18 || value >= 9e18) throw std::invalid_argument("空间坐标与容差比例超出可匹配范围");
+        if (!std::isfinite(value) || value <= -9e18 || value >= 9e18) return {};
         cell[axis] = static_cast<qint64>(value);
     }
     return cell;
 }
-QJsonValue Count(quint64 count) {return count<=9007199254740991ULL?QJsonValue(static_cast<double>(count)):QJsonValue(QString::number(count));}
+struct GridHash {
+    std::size_t operator()(const std::array<qint64,3>& cell) const noexcept {
+        std::size_t hash=0;for(const auto value:cell)hash^=std::hash<qint64>{}(value)+0x9e3779b97f4a7c15ULL+(hash<<6)+(hash>>2);return hash;
+    }
+};
+struct IdentityHash {
+    std::size_t operator()(const QString& text) const noexcept {
+        quint64 hash=14695981039346656037ULL;for(const auto c:text){hash^=c.unicode();hash*=1099511628211ULL;}return static_cast<std::size_t>(hash);
+    }
+};
+struct Candidate {ReportRowId first=0;unsigned char count=0;};
+struct IdentityGroup {ReportRowId first=0,count=0;};
+ReportRowId BucketCount(ReportRowId rows) {
+    ReportRowId count=1;while(count<rows/2){if(count>std::numeric_limits<ReportRowId>::max()/2)throw std::overflow_error("报告匹配索引地址溢出");count*=2;}return count;
+}
+class IdentityIndex final {
+    struct Node {quint64 hash=0;ReportRowId next=0,first=0,count=0;};
+public:
+    IdentityIndex(ReportRowId count,std::function<QStringList(ReportRowId)> read,int column,const ReportCheckpoint& check)
+        :m_buckets(BucketCount(count)),m_heads(m_buckets,check),m_nodes(count,check),m_read(std::move(read)),m_column(column),m_check(check){}
+    void Add(ReportRowId row,const QString& id){
+        if(id.isEmpty())return;const auto hash=IdentityHash{}(id);const auto bucket=hash%static_cast<quint64>(m_buckets);
+        for(auto entry=m_heads[bucket];entry;entry=m_nodes[entry-1].next){if(m_check)m_check();auto& node=m_nodes[entry-1];
+            if(node.hash==hash && GetReportCell(m_read(node.first),m_column)==id){++node.count;return;}}
+        auto& node=m_nodes[row];node={hash,m_heads[bucket],row,1};m_heads[bucket]=row+1;
+    }
+    IdentityGroup Find(const QString& id) const{
+        if(id.isEmpty())return {};const auto hash=IdentityHash{}(id);
+        for(auto entry=m_heads[hash%static_cast<quint64>(m_buckets)];entry;entry=m_nodes[entry-1].next){if(m_check)m_check();const auto& node=m_nodes[entry-1];
+            if(node.hash==hash && GetReportCell(m_read(node.first),m_column)==id)return {node.first,node.count};}return {};
+    }
+private:
+    ReportRowId m_buckets;
+    ReportDiskArray<ReportRowId> m_heads;
+    ReportDiskArray<Node> m_nodes;
+    std::function<QStringList(ReportRowId)> m_read;
+    int m_column;
+    ReportCheckpoint m_check;
+};
+class PositionIndex final {
+    struct Node {std::array<qint64,3> cell{};Position position{};ReportRowId next=0;};
+public:
+    PositionIndex(ReportRowId count,const ReportCheckpoint& check):m_buckets(BucketCount(count)),m_heads(m_buckets,check),m_nodes(count,check),m_check(check){}
+    void Add(ReportRowId row,const Position& position,double tolerance){
+        const auto cell=Grid(position,tolerance);if(!cell){m_gridAvailable=false;return;}
+        const auto bucket=GridHash{}(*cell)%static_cast<quint64>(m_buckets);
+        m_nodes[row]={*cell,position,m_heads[bucket]};m_heads[bucket]=row+1;
+    }
+    bool GetGridAvailable() const{return m_gridAvailable;}
+    template<class Found> void Find(const std::array<qint64,3>& cell,const Position& position,double tolerance,Found found) const{
+        for(auto entry=m_heads[GridHash{}(cell)%static_cast<quint64>(m_buckets)];entry;entry=m_nodes[entry-1].next){
+            if(m_check)m_check();const auto& node=m_nodes[entry-1];const auto& q=node.position;
+            if(node.cell==cell && std::hypot(std::hypot(position[0]-q[0],position[1]-q[1]),position[2]-q[2])<=tolerance)found(entry-1);
+        }
+    }
+private:
+    ReportRowId m_buckets;
+    ReportDiskArray<ReportRowId> m_heads;
+    ReportDiskArray<Node> m_nodes;
+    ReportCheckpoint m_check;
+    bool m_gridAvailable=true;
+};
 }
 ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, const ReportComparisonOptions& o, const ReportCheckpoint& checkpoint)
 {
@@ -92,24 +157,25 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
     if(result.relatedModules.size()==1)result.module=result.relatedModules.first();
     result.conditions = {{"基准报告",a.title},{"待比较报告",b.title},{"基准版本",a.id},{"待比较版本",b.id},
         {"比较指标",o.baselineQuantity},{"输出单位",o.baselineUnit},{"数值容差",o.valueTolerance}};
-    const quint64 ac = a.table->GetCount(), bc = b.table->GetCount();
-    const auto readA=a.table->GetIsComplete()?a.table->CreateReader():[&a](quint64 row){return a.table->Read(row);};
-    const auto readB=b.table->GetIsComplete()?b.table->CreateReader():[&b](quint64 row){return b.table->Read(row);};
+    const auto ac = a.table->GetCount(), bc = b.table->GetCount();
+    const auto readA=a.table->GetIsComplete()?a.table->CreateReader():[&a](ReportRowId row){return a.table->Read(row);};
+    const auto readB=b.table->GetIsComplete()?b.table->CreateReader():[&b](ReportRowId row){return b.table->Read(row);};
     if (o.match == ReportMatch::Distribution) {
         result.columns = {{"报告",{},{},false},{"总数",{},"1",true},{"有效数",{},"1",true},
             {"平均值_"+o.baselineUnit,o.baselineQuantity,o.baselineUnit,true},
             {"最小值_"+o.baselineUnit,o.baselineQuantity,o.baselineUnit,true},
             {"最大值_"+o.baselineUnit,o.baselineQuantity,o.baselineUnit,true}};
         const auto append = [&](const ReportDocument& doc, int column, double scale) {
-            quint64 valid = 0; double mean = 0, low = std::numeric_limits<double>::infinity(), high = -low;
+            ReportRowId valid = 0; double mean = 0, low = std::numeric_limits<double>::infinity(), high = -low;
             const auto& read=&doc==&a?readA:readB;
-            for (quint64 i = 0; i < doc.table->GetCount(); ++i) {
-                check();const auto row = read(i); double value = 0;
+            const auto count=&doc==&a?ac:bc;
+            for (ReportRowId i = 0; i < count; ++i) {
+                check(); const auto row = read(i); double value = 0;
                 if (!Valid(doc,row) || !GetReportNumber(GetReportCell(row,column),value) || !std::isfinite(value *= scale)) continue;
                 ++valid; mean = mean*(static_cast<double>(valid-1)/valid)+value/valid;
                 low = (std::min)(low,value); high = (std::max)(high,value);
             }
-            result.table->Append({doc.title,QString::number(doc.table->GetCount()),QString::number(valid),
+            result.table->Append({doc.title,QString::number(count),QString::number(valid),
                 valid?Number(mean):QString(),valid?Number(low):QString(),valid?Number(high):QString()});
         };
         append(a,o.baselineColumn,1); append(b,o.currentColumn,factor);
@@ -119,30 +185,22 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
     if(o.match==ReportMatch::Identity && (!a.identityResult.isEmpty() || !b.identityResult.isEmpty())
         && a.identityResult!=b.identityResult)
         throw std::runtime_error("对象/点编号的正式结果身份不同或缺失，不能按相同编号直接配对；请使用明确的跨结果匹配。");
-    ResultArrayScope comparisonStorage;
-    struct Candidate {quint64 row=0;std::uint8_t count=0;};
-    DataArray<Candidate> candidates(static_cast<std::size_t>(ac));
-    DataArray<std::uint8_t> incoming(static_cast<std::size_t>(bc),0),duplicate(static_cast<std::size_t>(ac),0);
+    ReportDiskArray<Candidate> candidates(ac,checkpoint);ReportDiskArray<unsigned char> incoming(bc,checkpoint),duplicate(ac,checkpoint);
     if (o.match == ReportMatch::Identity) {
         if (!o.identitiesConfirmed || o.baselineIdentity < 0 || o.currentIdentity < 0
             || o.baselineIdentity >= a.columns.size() || o.currentIdentity >= b.columns.size())
             throw std::invalid_argument("必须确认标识在两份报告之间稳定；行号和临时样本编号不能自动配对");
-        auto left=ReportRows::Natural(ac),right=ReportRows::Natural(bc);
-        left.Sort(a,o.baselineIdentity,true,false,checkpoint);right.Sort(b,o.currentIdentity,true,false,checkpoint);
-        quint64 i=0,j=0;
-        while(i<ac) {
-            check();
-            const auto key=GetReportCell(readA(left[i]),o.baselineIdentity);
-            auto end=i+1;while(end<ac&&GetReportCell(readA(left[end]),o.baselineIdentity)==key){check();++end;}
-            if(key.isEmpty()){i=end;continue;}
-            while(j<bc&&QString::compare(GetReportCell(readB(right[j]),o.currentIdentity),key)<0){check();++j;}
-            auto matchEnd=j;while(matchEnd<bc&&GetReportCell(readB(right[matchEnd]),o.currentIdentity)==key){check();++matchEnd;}
-            if(end-i!=1 || matchEnd-j>1) {
-                for(auto p=i;p<end;++p){check();duplicate[left[p]]=1;}
-                for(auto p=j;p<matchEnd;++p){check();incoming[right[p]]=2;}
-            } else if(matchEnd>j){candidates[left[i]]={right[j],1};incoming[right[j]]=1;}
-            i=end;j=matchEnd;
+        IdentityIndex left(ac,readA,o.baselineIdentity,checkpoint),right(bc,readB,o.currentIdentity,checkpoint);
+        for(ReportRowId i=0;i<ac;++i){check();left.Add(i,GetReportCell(readA(i),o.baselineIdentity));}
+        for(ReportRowId j=0;j<bc;++j){check();right.Add(j,GetReportCell(readB(j),o.currentIdentity));}
+        for(ReportRowId i=0;i<ac;++i) {
+            check();const auto id=GetReportCell(readA(i),o.baselineIdentity);const auto l=left.Find(id),r=right.Find(id);
+            if(!l.count)continue;
+            if(l.count!=1 || r.count>1)duplicate[i]=true;
+            else if(r.count)candidates[i]={r.first,1};
         }
+        for(ReportRowId j=0;j<bc;++j){check();const auto id=GetReportCell(readB(j),o.currentIdentity);const auto l=left.Find(id),r=right.Find(id);
+            if(l.count)incoming[j]=l.count!=1 || r.count>1?2:1;}
         result.conditions["匹配方式"] = "已确认稳定业务标识";
     } else {
         if (!o.coordinatesConfirmed || !std::isfinite(o.distanceTolerance) || o.distanceTolerance <= 0)
@@ -151,26 +209,21 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
         if (ax.dimension != 1 || bx.dimension != 1) throw std::invalid_argument("坐标单位必须为长度");
         if (a.xColumn < 0 || a.yColumn < 0 || a.zColumn < 0 || b.xColumn < 0 || b.yColumn < 0 || b.zColumn < 0)
             throw std::invalid_argument("请映射两侧三个坐标列");
-        struct SpatialEntry {std::array<qint64,3> cell;Position point;quint64 row;};
-        DataArray<SpatialEntry> positions;
-        for(quint64 j=0;j<bc;++j){check();Position p;if(ReadPosition(b,readB(j),bx.scale,p))positions.push_back({Grid(p,o.distanceTolerance),p,j});}
-        std::sort(positions.begin(),positions.end(),[&](const auto& x,const auto& y){check();return x.cell!=y.cell?x.cell<y.cell:x.row<y.row;});
-        for (quint64 i = 0; i < ac; ++i) {
-            check();Position p;
-            if (!ReadPosition(a,readA(i),ax.scale,p)) continue;
+        PositionIndex positions(bc,checkpoint);
+        for (ReportRowId j = 0; j < bc; ++j) { check();Position p;if(ReadPosition(b,readB(j),bx.scale,p))positions.Add(j,p,o.distanceTolerance); }
+        for (ReportRowId i = 0; i < ac; ++i) {
+            check(); const auto row=readA(i);
+            Position p;
+            if (!ReadPosition(a,row,ax.scale,p)) continue;
             const auto cell = Grid(p,o.distanceTolerance);
-            for (int x = -1; x <= 1; ++x) for (int y = -1; y <= 1; ++y) for (int z = -1; z <= 1; ++z)
-            {
-                const std::array<qint64,3> key{cell[0]+x,cell[1]+y,cell[2]+z};
-                auto found=std::lower_bound(positions.begin(),positions.end(),key,[](const auto& entry,const auto& k){return entry.cell<k;});
-                for(;found!=positions.end()&&found->cell==key;++found) {
-                    check();const auto& q=found->point;const auto j=found->row;
-                    if(std::hypot(std::hypot(p[0]-q[0],p[1]-q[1]),p[2]-q[2])<=o.distanceTolerance) {
-                        if(!candidates[i].count)candidates[i].row=j;
-                        candidates[i].count=std::min<unsigned>(2,candidates[i].count+1);
-                        incoming[j]=std::min<unsigned>(2,incoming[j]+1);
-                    }
-                }
+            const auto found=[&](ReportRowId j){auto& candidate=candidates[i];if(!candidate.count)candidate.first=j;if(candidate.count<2)++candidate.count;if(incoming[j]<2)++incoming[j];};
+            // 网格是加速结构，量化不能表示的合法坐标仍用完整扫描精确匹配。
+            if(!cell || !positions.GetGridAvailable()){
+                for(ReportRowId j=0;j<bc;++j){check();Position q;if(ReadPosition(b,readB(j),bx.scale,q) && std::hypot(std::hypot(p[0]-q[0],p[1]-q[1]),p[2]-q[2])<=o.distanceTolerance)found(j);}
+                continue;
+            }
+            for (int x = -1; x <= 1; ++x) for (int y = -1; y <= 1; ++y) for (int z = -1; z <= 1; ++z) {
+                positions.Find({(*cell)[0]+x,(*cell)[1]+y,(*cell)[2]+z},p,o.distanceTolerance,found);
             }
         }
         result.conditions["匹配方式"] = "确认同一坐标系的唯一空间配对";
@@ -182,20 +235,20 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
         {"差值"+suffix,o.baselineQuantity,o.baselineUnit,true},{"绝对差"+suffix,o.baselineQuantity,o.baselineUnit,true},{"状态/原因",{},{},false},
         {"当前对象/测点",{},{},false},{"配对距离_mm","配对距离","mm",true}};
     result.columns[0].name="基准对象/测点";
-    DataArray<std::uint8_t> used(static_cast<std::size_t>(bc),0);
-    quint64 pairs = 0, invalid = 0, missingA = 0, missingB = 0, ambiguous = 0, validA = 0, validB = 0;
+    ReportDiskArray<unsigned char> used(bc,checkpoint);
+    ReportRowId pairs = 0, invalid = 0, missingA = 0, missingB = 0, ambiguous = 0, validA = 0, validB = 0;
     double mean = 0, maximum = 0;
-    for (quint64 i = 0; i < ac; ++i) {check();double value; const auto row = readA(i); if (Valid(a,row) && GetReportNumber(GetReportCell(row,o.baselineColumn),value)) ++validA; }
-    for (quint64 i = 0; i < bc; ++i) {check();double value; const auto row = readB(i); if (Valid(b,row) && GetReportNumber(GetReportCell(row,o.currentColumn),value) && std::isfinite(value*factor)) ++validB; }
-    for (quint64 i = 0; i < ac; ++i) {
-        check();const auto ar = readA(i); double av = 0, bv = 0;
+    for (ReportRowId i = 0; i < ac; ++i) { check(); double value; const auto row = readA(i); if (Valid(a,row) && GetReportNumber(GetReportCell(row,o.baselineColumn),value)) ++validA; }
+    for (ReportRowId i = 0; i < bc; ++i) { check(); double value; const auto row = readB(i); if (Valid(b,row) && GetReportNumber(GetReportCell(row,o.currentColumn),value) && std::isfinite(value*factor)) ++validB; }
+    for (ReportRowId i = 0; i < ac; ++i) {
+        check(); const auto ar = readA(i); double av = 0, bv = 0;
         const bool va = Valid(a,ar) && GetReportNumber(GetReportCell(ar,o.baselineColumn),av);
         QString current, delta, absolute, status, currentId, distance;
         if(duplicate[i]){status="歧义：重复业务标识";++ambiguous;}
         else if (!candidates[i].count) { status = "当前缺少对应项或标识/坐标缺失"; ++missingB; }
-        else if (candidates[i].count != 1 || incoming[candidates[i].row] != 1) { status = "歧义：重复标识或空间多重匹配"; ++ambiguous; }
+        else if (candidates[i].count != 1 || incoming[candidates[i].first] != 1) { status = "歧义：重复标识或空间多重匹配"; ++ambiguous; }
         else {
-            const auto j = candidates[i].row; used[j] = 1; const auto br = readB(j);
+            const auto j = candidates[i].first; used[j] = true; const auto br = readB(j);
             const int idColumn=o.currentIdentity>=0?o.currentIdentity:b.identityColumn;
             currentId=idColumn>=0?GetReportCell(br,idColumn):QString::number(j);
             if(o.match==ReportMatch::Position) {
@@ -209,11 +262,12 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
                 mean = mean*(static_cast<double>(pairs-1)/pairs)+ad/pairs; maximum = (std::max)(maximum,ad);
                 status = ad <= o.valueTolerance ? "已匹配：容差内" : "已匹配：超出容差"; }
         }
-        const int identityColumn=o.match==ReportMatch::Identity?o.baselineIdentity:(o.baselineIdentity>=0?o.baselineIdentity:a.identityColumn);
-        result.table->Append({identityColumn>=0?GetReportCell(ar,identityColumn):QString::number(i),o.baselineQuantity,va?Number(av):QString(),current,delta,absolute,status,currentId,distance});
+        const int idColumn=o.baselineIdentity>=0?o.baselineIdentity:a.identityColumn;
+        const auto identity=idColumn>=0?GetReportCell(ar,idColumn):QString::number(i);
+        result.table->Append({identity,o.baselineQuantity,va?Number(av):QString(),current,delta,absolute,status,currentId,distance});
     }
-    for (quint64 j = 0; j < bc; ++j) if (!used[j]) {
-        check();const auto row = readB(j); double value = 0;
+    for (ReportRowId j = 0; j < bc; ++j) if (!used[j]) {
+        check(); const auto row = readB(j); double value = 0;
         const bool valid = Valid(b,row) && GetReportNumber(GetReportCell(row,o.currentColumn),value) && std::isfinite(value *= factor);
         const int idColumn=o.currentIdentity>=0?o.currentIdentity:b.identityColumn;
         const auto id=idColumn>=0?GetReportCell(row,idColumn):QString::number(j);
@@ -222,10 +276,10 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
     }
     result.conditions["两侧总数"] = QString("%1 / %2").arg(ac).arg(bc);
     result.conditions["有效数"] = QString("%1 / %2").arg(validA).arg(validB);
-    result.conditions["有效配对数"] = Count(pairs); result.conditions["无效/缺测配对数"] = Count(invalid);
-    result.conditions["基准未匹配数"] = Count(ac-pairs-invalid); result.conditions["当前未匹配数"] = Count(bc-pairs-invalid);
-    result.conditions["基准侧无候选数"] = Count(missingB);result.conditions["当前侧无候选数"] = Count(missingA);
-    result.conditions["歧义基准项数"] = Count(ambiguous);
+    result.conditions["有效配对数"] = GetReportCountValue(pairs); result.conditions["无效/缺测配对数"] = GetReportCountValue(invalid);
+    result.conditions["基准未匹配数"] = GetReportCountValue(ac-pairs-invalid); result.conditions["当前未匹配数"] = GetReportCountValue(bc-pairs-invalid);
+    result.conditions["基准侧无候选数"] = GetReportCountValue(missingB);result.conditions["当前侧无候选数"] = GetReportCountValue(missingA);
+    result.conditions["歧义基准项数"] = GetReportCountValue(ambiguous);
     result.conditions["平均绝对差"] = pairs ? QJsonValue(mean) : QJsonValue();
     result.conditions["最大绝对差"] = pairs ? QJsonValue(maximum) : QJsonValue();
     result.conditions["报告匹配覆盖率"] = ac ? QJsonValue(static_cast<double>(pairs+invalid)/ac) : QJsonValue();
