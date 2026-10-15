@@ -1,4 +1,4 @@
-#include "Data/Internal/VtkDataResourceLease.h"
+#include "../../Data/Support/VtkDataResourceLease.h"
 #include "Render/Internal/VolumeLodProductBuilder.h"
 
 #include "Data/ImageProcessor.h"

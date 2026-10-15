@@ -1,11 +1,14 @@
 set(MVVCVTK_GAP_SOURCES
     include/Algorithms/GapSurfaceBuilder.h
+    include/Algorithms/GapOccupiedBlocks.h
     include/Render/GapDisplayData.h
     include/Render/GapLabelLookupTable.h
     include/Render/Strategies/GapOverlayStrategies.h
     include/Services/GapAnalysisService.h
     src/GapParentRecord.h
     src/Host/GapHostFeature.cpp
+    src/GapResultReader.cpp
+    src/GapResultReader.h
     src/Services/GapAnalysisService.cpp
     src/Services/GapInputBuffer.h
 )

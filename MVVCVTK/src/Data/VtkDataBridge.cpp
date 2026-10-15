@@ -1,6 +1,8 @@
 #include "Data/VtkDataBridge.h"
 
-#include "Data/Internal/VtkDataResourceLease.h"
+#include "Support/VtkDataResourceLease.h"
+#include "Support/BackedVtkArray.h"
+#include "Support/MappedArrayStorage.h"
 
 #include <vtkCellArray.h>
 #include <vtkCallbackCommand.h>
@@ -68,6 +70,11 @@ std::optional<std::vector<MeshAttribute>> BuildMeshAttributes(vtkDataSetAttribut
         if(!array||!array->GetName()||array->GetNumberOfTuples()!=tuples||array->GetNumberOfComponents()<=0)return {};
         MeshAttribute attribute;attribute.name=array->GetName();attribute.componentCount=array->GetNumberOfComponents();
         if(static_cast<std::uint64_t>(tuples)>std::numeric_limits<std::size_t>::max()/attribute.componentCount)return {};
+        if(auto* integers=vtkIntArray::SafeDownCast(array)) {
+            DataArray<std::int32_t> values(static_cast<std::size_t>(tuples)*attribute.componentCount);
+            for(std::size_t i=0;i<values.size();++i)values[i]=integers->GetValue(static_cast<vtkIdType>(i));
+            attribute.values=MeshAttributeValues::FromIntegers(std::move(values));
+        } else {
         attribute.values.reserve(static_cast<std::size_t>(tuples)*attribute.componentCount);
         for(vtkIdType tuple=0;tuple<tuples;++tuple)for(int component=0;component<array->GetNumberOfComponents();++component) {
             const auto value=array->GetComponent(tuple,component);
@@ -83,6 +90,7 @@ std::optional<std::vector<MeshAttribute>> BuildMeshAttributes(vtkDataSetAttribut
             }
             attribute.values.push_back(value);
         }
+        }
         if(fields->GetScalars()==array)attribute.activeRoles|=MeshAttributeRoles::scalars;
         if(fields->GetVectors()==array)attribute.activeRoles|=MeshAttributeRoles::vectors;
         if(fields->GetNormals()==array)attribute.activeRoles|=MeshAttributeRoles::normals;
@@ -96,10 +104,20 @@ std::optional<std::vector<MeshAttribute>> BuildMeshAttributes(vtkDataSetAttribut
 void SetMeshAttributes(vtkDataSetAttributes* fields,const std::vector<MeshAttribute>& attributes)
 {
     for(const auto& attribute:attributes) {
-        auto array=vtkSmartPointer<vtkDoubleArray>::New();array->SetName(attribute.name.c_str());
-        array->SetNumberOfComponents(static_cast<int>(attribute.componentCount));
-        array->SetNumberOfTuples(static_cast<vtkIdType>(attribute.values.size()/attribute.componentCount));
-        if(!attribute.values.empty())std::memcpy(array->GetVoidPointer(0),attribute.values.data(),attribute.values.size()*sizeof(double));
+        vtkSmartPointer<vtkDataArray> array;
+        if(attribute.values.GetValueType()==ImageValueType::Int32) {
+            DataArray<std::int32_t> values(attribute.values.size());
+            if(const auto& runs=attribute.values.GetRuns()) {
+                for(const auto& run:*runs)std::fill_n(values.begin()+static_cast<std::size_t>(run.first),static_cast<std::size_t>(run.count),run.value);
+            } else std::copy(attribute.values.GetIntegers()->begin(),attribute.values.GetIntegers()->end(),values.begin());
+            auto typed=vtkSmartPointer<BackedVtkArray<std::int32_t,vtkIntArray>>::New();
+            typed->SetValues(std::move(values),static_cast<int>(attribute.componentCount));array=typed;
+        } else {
+            DataArray<double> values(attribute.values.begin(),attribute.values.end());
+            auto typed=vtkSmartPointer<BackedVtkArray<double,vtkDoubleArray>>::New();
+            typed->SetValues(std::move(values),static_cast<int>(attribute.componentCount));array=typed;
+        }
+        array->SetName(attribute.name.c_str());
         fields->AddArray(array);
         if(attribute.activeRoles&MeshAttributeRoles::scalars)fields->SetActiveScalars(attribute.name.c_str());
         if(attribute.activeRoles&MeshAttributeRoles::vectors)fields->SetActiveVectors(attribute.name.c_str());
@@ -462,10 +480,10 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
 {
     if (!mesh) return {};
     try {
-        auto isolated = vtkSmartPointer<vtkPolyData>::New();
-        isolated->DeepCopy(mesh);
+        ResultArrayScope storage;
         auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
-        triangles->SetInputData(isolated);
+        // 过滤器不修改输入；最终按值提取仍隔离外部 VTK 可写别名。
+        triangles->SetInputData(mesh);
         triangles->PassLinesOff();
         triangles->PassVertsOff();
         triangles->Update();
@@ -483,7 +501,7 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
             return payload->GetValid() ? payload : nullptr;
         }
 
-        std::vector<double> vertices;
+        DataArray<double> vertices;
         if (points->GetNumberOfPoints() < 0
             || static_cast<std::uint64_t>(points->GetNumberOfPoints())
                 > std::numeric_limits<std::size_t>::max() / 3U) return {};
@@ -491,7 +509,7 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
         for (vtkIdType index = 0; index < points->GetNumberOfPoints(); ++index) {
             points->GetPoint(index, vertices.data() + static_cast<std::size_t>(index) * 3);
         }
-        std::vector<std::uint64_t> cells;
+        DataArray<std::uint64_t> cells;
         auto ids = vtkSmartPointer<vtkIdList>::New();
         polys->InitTraversal();
         while (polys->GetNextCell(ids)) {
@@ -507,6 +525,7 @@ VtkDataBridge::CreateMeshPayload(vtkPolyData* mesh, std::string coordinateFrame)
         if(!pointAttributes||!cellAttributes)return {};
         auto payload = std::make_shared<const SurfaceMeshPayload>(
             std::move(vertices), std::move(cells),std::move(*pointAttributes),std::move(coordinateFrame),std::move(*cellAttributes));
+        storage.Finish();
         return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {

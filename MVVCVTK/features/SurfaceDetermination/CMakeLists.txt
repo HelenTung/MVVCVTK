@@ -20,6 +20,8 @@ set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceDeterminationHostFeature.cpp
     src/SurfaceDeterminationService.h
     src/SurfaceDeterminationService.cpp
+    src/SurfaceMeshPreparation.h
+    src/SurfaceMeshPreparation.cpp
     src/SurfaceGenerationStore.h
     src/SurfaceGenerationStore.cpp
     src/SurfaceOverlayStrategy.h

@@ -6,6 +6,7 @@
 #include "Render/Support/AnalysisLegend.h"
 #include "Render/GapDisplayData.h"
 #include "Render/Support/SliceContourPlane.h"
+#include "Render/Support/SpatialMeshView.h"
 #include <vtkCutter.h>
 #include <vtkActor.h>
 #include <vtkPolyDataMapper.h>
@@ -21,6 +22,7 @@
 // =====================================================================
 class GapMeshOverlayStrategy : public FeatureOverlayBase {
 private:
+    FeatureInternal::SpatialMeshView m_stream;
     // 构造期创建的 3D overlay prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<AnalysisLegend> m_legend;
@@ -29,8 +31,8 @@ private:
 
 public:
     explicit GapMeshOverlayStrategy(std::shared_ptr<const GapDisplayData> display = {}) {
-        m_actor = vtkSmartPointer<vtkActor>::New();
-        m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        m_actor = m_stream.GetActor();
+        m_mapper = m_stream.GetMapper();
         m_actor->SetMapper(m_mapper);
 
         m_actor->GetProperty()->SetColor(1.0, 0.0, 0.0); // 红色标出孔隙，和主模型材质色区分开
@@ -39,6 +41,7 @@ public:
         m_actor->SetPickable(false);
         AttachProp(m_actor);
         if (display) {
+            m_mapper->ScalarVisibilityOn();
             m_mapper->SetScalarModeToUseCellData();
             m_mapper->SetLookupTable(display->labels);
             m_mapper->UseLookupTableScalarRangeOn();
@@ -72,7 +75,14 @@ public:
         const FeatureOverlayState& state) override {
         // 自动跟随主视图的模型变换（鼠标拖拽旋转平移）。
         Set3DPropsTransform(state.modelToWorld);
+        m_stream.SetState(state);
     }
+    void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,std::size_t capacity,std::function<void()> notify) {
+        m_stream.SetCache(std::move(cache),capacity,std::move(notify));AttachProp(m_stream.GetStatusProp());
+    }
+    FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {FeatureOverlayBase::AttachRenderer(renderer);m_stream.AttachRenderer(renderer);}
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {m_stream.DetachRenderer();FeatureOverlayBase::DetachRenderer(renderer);}
 };
 
 // =====================================================================
@@ -80,6 +90,7 @@ public:
 // =====================================================================
 class GapSliceOverlayStrategy : public FeatureOverlayBase {
 private:
+    FeatureInternal::SpatialMeshView m_stream;
     // 构造期创建的 2D label prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<AnalysisLegend> m_legend;
@@ -87,6 +98,8 @@ private:
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     // 生命周期覆盖整个策略的标签 LUT：0 透明，所有正标签统一为不透明红色。
     vtkSmartPointer<vtkLookupTable> m_lut;
+    vtkSmartPointer<vtkLookupTable> m_baseLut;
+    std::optional<std::int32_t> m_onlyRegion;
     // 当前窗口固定轴向；构造后不变，用于选择 plane normal。
     Orientation m_orientation;
     vtkSmartPointer<vtkCutter> m_contour;
@@ -125,7 +138,7 @@ public:
             auto contourMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
             contourMapper->SetInputConnection(m_contour->GetOutputPort());
             contourMapper->ScalarVisibilityOff();
-            m_contourActor = vtkSmartPointer<vtkActor>::New();
+            m_contourActor = m_stream.GetActor();
             m_contourActor->SetMapper(contourMapper);
             m_contourActor->GetProperty()->SetColor(1, 1, 1);
             m_contourActor->GetProperty()->LightingOff();
@@ -134,6 +147,7 @@ public:
             AttachProp(m_contourActor);
         }
 
+        m_baseLut=m_lut;
         m_slice->GetProperty()->SetLookupTable(m_lut);
         m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
         m_slice->GetProperty()->SetLayerNumber(1); // 提高层级防止 Z-fighting
@@ -144,6 +158,29 @@ public:
     void SetPresentation(const GapDisplayParams& params) {
         m_slice->GetProperty()->SetOpacity(.35*params.opacity);if(m_legend){m_legend->SetVisibility(params.hasLegend);m_legend->SetPosition(params.legendPosition[0],params.legendPosition[1]);}
     }
+    void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,std::size_t capacity,std::function<void()> notify) {
+        m_contour=nullptr;
+        m_stream.SetCache(std::move(cache),capacity,std::move(notify),SlicePlaneState::Build(m_orientation,{}).worldNormal);
+        m_contourActor->SetMapper(m_stream.GetMapper());AttachProp(m_stream.GetStatusProp());
+    }
+    FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
+    void SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,std::optional<std::int32_t> id,bool isolated) {
+        vtkSmartPointer<vtkLookupTable> labels=m_baseLut;
+        if(isolated&&id){auto selected=vtkSmartPointer<GapLabelLookupTable>::New();selected->DeepCopy(m_baseLut);selected->SetOnlyRegion(id);labels=selected;}
+        m_stream.SetObjectRange(range,isolated);m_onlyRegion=isolated?id:std::nullopt;m_lut=labels;m_slice->GetProperty()->SetLookupTable(labels);
+    }
+    std::optional<std::int32_t> GetPickedRegion(int x,int y,vtkRenderer* renderer) {
+        if(!m_stream.GetIsRenderer(renderer)||!m_slice->GetVisibility())return {};
+        auto* image=m_mapper->GetInput();auto* values=image?vtkIntArray::SafeDownCast(image->GetPointData()->GetScalars()):nullptr;
+        if(!values)return {};
+        vtkNew<vtkImageSlice> candidate;candidate->ShallowCopy(m_slice);candidate->PickableOn();
+        vtkNew<vtkCellPicker> picker;picker->PickFromListOn();picker->AddPickList(candidate);
+        if(!picker->Pick(x,y,0,renderer))return {};
+        const auto point=picker->GetPointId();if(point<0||point>=values->GetNumberOfValues())return {};
+        const auto id=values->GetValue(point);return id>0&&(!m_onlyRegion||id==*m_onlyRegion)&&m_lut->GetOpacity(id)>0?std::optional<std::int32_t>{id}:std::nullopt;
+    }
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {FeatureOverlayBase::AttachRenderer(renderer);m_stream.AttachRenderer(renderer);}
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {m_stream.DetachRenderer();FeatureOverlayBase::DetachRenderer(renderer);}
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto img = vtkImageData::SafeDownCast(data);
         if (!img) return;
@@ -175,6 +212,7 @@ public:
             plane->SetNormal(planeState.worldNormal.data());
             if (m_contour) (void)SliceContourPlane::SetPlane(*m_contourPlane,
                 planeState.worldOrigin,planeState.worldNormal,state.modelToWorld);
+            auto contourState=state;contourState.cursor=planeState.worldOrigin;m_stream.SetState(contourState);
         }
     }
 };

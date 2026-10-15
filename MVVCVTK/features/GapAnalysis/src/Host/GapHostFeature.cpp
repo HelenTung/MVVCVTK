@@ -1,4 +1,6 @@
 #include "../GapParentRecord.h"
+#include "../GapResultReader.h"
+#include "VtkDataResourceLease.h"
 #include "../../../common/FeatureInputReads.h"
 #include "Host/GapHostFeature.h"
 #include "Render/Support/AnalysisColorStyle.h"
@@ -101,6 +103,27 @@ public:
         const auto graph=m_data->GetDataGraph();if(!graph.view || !graph.view->GetData(ref))return {};
         const auto i=m_resultDisplays.find(ref);return i==m_resultDisplays.end() ? std::nullopt:std::optional<GapDisplayParams>(i->second);
     }
+    std::shared_ptr<const GapResultReader> GetResultReader(const DataRevisionRef& ref) const {
+        if(!GetOwnerThread() || !m_data)return {};
+        try {
+            const auto graph=m_data->GetDataGraph();const auto data=m_data->GetData(graph,ref);
+            const auto* collection=data?dynamic_cast<const DataCollectionPayload*>(data->payload.get()):nullptr;
+            if(!collection || collection->GetDataType()!=gapResultSetType)return {};
+            std::shared_ptr<const RecordTablePayload> table;std::shared_ptr<const SurfaceMeshPayload> mesh;
+            std::optional<GridGeometry3D> geometry;
+            for(const auto& item:collection->GetItems()) {
+                const auto node=m_data->GetData(graph,item.data);if(!node)continue;
+                if(item.role=="void-regions")table=std::dynamic_pointer_cast<const RecordTablePayload>(node->payload);
+                if(item.role=="void-surface")mesh=std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload);
+                if(item.role=="labels")if(const auto* labels=dynamic_cast<const LabelMap3DPayload*>(node->payload.get()))geometry=labels->GetGeometry();
+            }
+            for(const auto& input:data->inputs)if(input.role=="source-volume") {
+                if(!geometry)return {};
+                return BuildGapResultReader(ref,input.source,std::move(table),std::move(mesh),*geometry);
+            }
+        }catch(...){return {};}
+        return {};
+    }
     std::vector<FeatureOperationState> GetOperationStates() const;
 
     static constexpr std::string_view FeatureId =
@@ -129,6 +152,9 @@ private:
         const GapHostStartParams& start,
         GapHostCallback onComplete);
     bool SwitchOverlay();
+    bool SetObjectSelection(const GapObjectSelection& selection);
+    bool SetObjectPicking(bool enabled);
+    InteractionResult OnObjectInput(const InteractionEvent& event);
     bool ExitView();
     bool SetDataTypes();
     bool GetSourceSame() const;
@@ -173,6 +199,7 @@ private:
     bool m_isRequestPending = false;
     bool m_isInputAttached = false;
     bool m_isAttached = false;
+    bool m_pickOwnerActive=false;
 };
 
 bool GapHostFeature::Impl::GetImageReady(
@@ -449,7 +476,7 @@ GapHostFeature::Impl::GetViewCandidate(
         const auto recordNode=get("parent-detection"),labelNode=get("parent-labels");const auto record=recordNode?std::dynamic_pointer_cast<const GapParentRecord>(recordNode->payload):nullptr;
         if(!record || !record->GetValid() || record->source!=snapshot->data->self || !labelNode || !std::dynamic_pointer_cast<const LabelMap3DPayload>(labelNode->payload) || std::dynamic_pointer_cast<const LabelMap3DPayload>(labelNode->payload)->GetValues()!=record->labels->GetValues())return std::nullopt;
         const auto labels=m_data->GetLabelMap(snapshot->graph,labelNode->self);if(!labels || !labels->labels || labels->labels->GetScalarType()!=VTK_INT)return std::nullopt;
-        auto parent=std::make_shared<GapAnalysisResult>();parent->sourceRevision=record->source;parent->detectionParameters=record->parameters;parent->statistics=record->statistics;parent->voids=*record->voids;parent->labelImage=labels->labels;parent->isSucceeded=true;candidate.request.savedParent=std::move(parent);
+        auto parent=std::make_shared<GapAnalysisResult>();parent->sourceRevision=record->source;parent->detectionParameters=record->parameters;parent->statistics=record->statistics;parent->labelImage=labels->labels;parent->isSucceeded=true;candidate.request.savedParent=std::move(parent);candidate.request.savedParentVoids=record->voids;
         candidate.inputs.push_back({"parent-result",*start.parentResult});candidate.inputs.push_back({"measurement-parent-detection",recordNode->self});candidate.inputs.push_back({"measurement-parent-labels",labelNode->self});
     }
     std::vector<DataRevisionRef> refs;for(const auto& input:candidate.inputs)refs.push_back(input.source);auto readers=FeatureInternal::StartInputReads(snapshot->graph,refs,"gap-roi-parent-reader");if(!readers)return std::nullopt;
@@ -543,10 +570,20 @@ bool GapHostFeature::Impl::AttachHost(
     toggle.bindings.push_back({"gap.toggleOverlay.key",toBinding(m_config.keys.switchOverlay),true,{},"",{InputTriggerKind::KeyPress}});
     InteractionActionInfo exit;exit.actionId="gap.exit";exit.isTriggerable=true;exit.ownerId=binding.featureId;
     exit.bindings.push_back({"gap.exit.key",toBinding(m_config.keys.exit),true,{},"",{InputTriggerKind::KeyPress}});
-    binding.actions={std::move(toggle),std::move(exit)};
+    InteractionActionInfo select;select.actionId="gap.object.select";select.ownerId=binding.featureId;select.isCurrentToolCommand=true;
+    InputBinding pointer{InputTriggerKind::PointerPress,InputMouseButton::Primary};pointer.requiredModifiers=2;pointer.forbiddenModifiers=5;
+    select.bindings.push_back({std::string(GapObjectBindingKeys::Select),pointer,true,{},binding.featureId,{InputTriggerKind::PointerPress}});
+    binding.actions={std::move(toggle),std::move(exit),std::move(select)};
     binding.onAction=[weakOwner](std::string_view id,const InteractionEvent& e,const std::optional<HostSemanticTarget>&) {
-        const auto f=weakOwner.lock();if(!f)return InteractionResult{};auto event=e;event.actionId=std::string(id);return f->m_impl->OnInput(event);
+        const auto f=weakOwner.lock();if(!f)return InteractionResult{};
+        if(id=="gap.object.select")return f->m_impl->OnObjectInput(e);
+        auto event=e;event.actionId=std::string(id);return f->m_impl->OnInput(event);
     };
+    binding.getIsActionAvailable=[weakOwner](std::string_view id,const InteractionEvent&){
+        const auto f=weakOwner.lock();if(!f)return false;const auto& p=*f->m_impl;
+        return !p.m_isClosing&&(id!="gap.object.select"||(!p.m_isRequestPending&&!p.m_isExitPending&&p.m_state.isObjectPickingEnabled&&p.m_service->GetDisplayOn()));
+    };
+    binding.getIsCaptureActive=[](std::string_view){return false;};
     binding.onTrigger=[weakOwner](std::string_view id,const ActionContext&) {
         const auto f=weakOwner.lock();if(!f)return ActionTriggerResult{};auto& p=*f->m_impl;GapHostRequest request;
         if(id=="gap.exit"){if(!p.m_service->GetViewOn()||p.m_isExitPending)return ActionTriggerResult{};request.action=GapHostAction::Exit;}
@@ -561,7 +598,7 @@ bool GapHostFeature::Impl::AttachHost(
     }
 
     m_isInputAttached = true;
-    m_isAttached = true;m_isClosing=false;
+    m_isAttached = true;m_isClosing=false;m_pickOwnerActive=false;
     m_isExitPending = false;
     m_isRequestPending = false;
     m_state = {};m_resultDisplays.clear();m_inheritedDisplay.reset();
@@ -578,6 +615,9 @@ bool GapHostFeature::Impl::DetachHost()
     if (!GetOwnerThread()) {
         return false;
     }
+    m_isClosing=true;
+    if(m_service)m_service->StopAsync();
+    if(!SetObjectPicking(false))return false;
 
     bool isInputDetached = !m_isInputAttached;
     if (m_isInputAttached && m_host) {
@@ -636,8 +676,9 @@ bool GapHostFeature::Impl::OnHostTick()
         return true;
     }
     SetBindingStale();
+    if(m_pickOwnerActive&&!m_state.isObjectPickingEnabled)(void)SetObjectPicking(false);
     if (m_service->GetDisplayTickNeeded()) {
-        m_service->OnDisplayTick(nullptr);
+        if(m_service->OnDisplayTick(nullptr))(void)SendSceneDelta(FeatureScenePriority::Overlay);
     }
     if (m_hasScenePending) (void)SendSceneDelta(FeatureScenePriority::Overlay);
 
@@ -674,6 +715,8 @@ bool GapHostFeature::Impl::OnHostTick()
             == DataRelationStatus::OutOfDateRelativeToCurrentBinding) {
             (void)ClearResultBinding();
             m_state.analysisState = GapAnalysisState::Stale;
+            m_state.isObjectPickingEnabled=false;
+            (void)SetObjectPicking(false);
             ClearComplete();
             if (m_service->ExitView()) {
                 m_isExitPending = true;
@@ -705,6 +748,8 @@ GapAdmission GapHostFeature::Impl::SendRequest(
 
     if (m_isClosing) return {GapAdmissionStatus::Stopping, 0};
     if (request.display && request.action != GapHostAction::SetDisplay) return {};
+    if(request.selection&&request.action!=GapHostAction::SelectObject)return {};
+    if(request.isObjectPickingEnabled&&request.action!=GapHostAction::SetObjectPicking)return {};
     SetBindingStale();
     std::shared_ptr<CompleteItem> control;
     if (request.action != GapHostAction::Start && request.action!=GapHostAction::Evaluate && onComplete) {
@@ -746,6 +791,12 @@ GapAdmission GapHostFeature::Impl::SendRequest(
             } catch(...) { return {GapAdmissionStatus::Unavailable,0}; }
         }
         break;
+    case GapHostAction::SelectObject:
+        if(!request.selection||request.start||request.display||request.isObjectPickingEnabled)return {};
+        succeeded=SetObjectSelection(*request.selection);break;
+    case GapHostAction::SetObjectPicking:
+        if(!request.isObjectPickingEnabled||request.start||request.display||request.selection)return {};
+        succeeded=SetObjectPicking(*request.isObjectPickingEnabled);break;
     case GapHostAction::None:
         return {};
     }
@@ -778,6 +829,8 @@ GapHostState GapHostFeature::Impl::GetState() const
     state.isOverlayVisible = m_service->GetDisplayOn();
     state.display = m_service->GetDisplayParams();
     state.displayRange=m_service->GetDisplayRange();
+    const auto display=m_service->GetDisplayLoadState();state.isDisplayComplete=display.isComplete;state.hasDisplayFailure=display.hasFailure;
+    state.displayRequestedBatches=display.requested;state.displayLoadedBatches=display.loaded;state.displayMessage=display.message;
     return state;
 }
 
@@ -812,6 +865,9 @@ bool GapHostFeature::Impl::StartView(
     if (!isAccepted) {
         return false;
     }
+    // 新请求已卸载旧显示；即使后续视图接纳失败，也必须撤销旧拾取权限。
+    m_state.isObjectPickingEnabled=false;
+    (void)SetObjectPicking(false);
     if (!SetActiveViews(candidate->activeViewIds)) {
         m_service->ClearView();
         ClearComplete();
@@ -819,6 +875,8 @@ bool GapHostFeature::Impl::StartView(
         m_requestResultBinding = {};
         m_isRequestPending = false;
         m_isExitPending = false;
+        m_state={};m_state.analysisState=GapAnalysisState::Failed;
+        (void)SendSceneDelta(FeatureScenePriority::Overlay);
         return false;
     }
 
@@ -846,8 +904,56 @@ bool GapHostFeature::Impl::StartView(
     return true;
 }
 
+bool GapHostFeature::Impl::SetObjectSelection(const GapObjectSelection& selection)
+{
+    if(m_isRequestPending||m_isExitPending||!GetResultCurrent()||selection.result!=m_state.resultSet)return false;
+    std::optional<std::pair<std::uint64_t,std::uint64_t>> range;
+    if(selection.regionId) {
+        if(*selection.regionId<=0)return false;
+        const auto reader=GetResultReader(selection.result);if(!reader)return false;
+        const auto found=reader->GetObjectById(*selection.regionId);if(found.error!=GapReadError::None||!found.object)return false;
+        const auto& object=*found.object;range=std::make_pair(object.firstTriangle,object.firstTriangle+object.triangleCount);
+    }else if(selection.isIsolated)return false;
+    if(!m_service->SetObjectSelection(range,selection.regionId,selection.isIsolated,[this]{return SendSceneDelta(FeatureScenePriority::Overlay);}))return false;
+    m_state.selectionResult=selection.result;m_state.selectedObject=selection.regionId;m_state.isSelectionIsolated=selection.isIsolated;return true;
+}
+
+bool GapHostFeature::Impl::SetObjectPicking(bool enabled)
+{
+    if(!m_host||!m_isInputAttached)return !enabled;
+    std::vector<std::string> views;
+    if(enabled) {
+        if(m_isRequestPending||m_isExitPending||!GetResultCurrent()||!m_service->GetDisplayOn())return false;
+        for(const auto& view:m_views->GetViews(m_config.inputViews))
+            if(std::find(m_activeViewIds.begin(),m_activeViewIds.end(),view.id)!=m_activeViewIds.end())views.push_back(view.id);
+        if(views.empty())return false;
+    }
+    if(enabled||m_pickOwnerActive) {
+        if(!m_host->SetInputOwner(featureId,enabled,views))return false;
+        m_pickOwnerActive=enabled;
+    }
+    m_state.isObjectPickingEnabled=enabled;
+    (void)m_host->SetViewStatus(m_activeViewIds,enabled?u8"Ctrl + 点击选择孔隙对象":"");return true;
+}
+
+InteractionResult GapHostFeature::Impl::OnObjectInput(const InteractionEvent& event)
+{
+    if(event.eventKind!=InteractionEventKind::PrimaryPress&&event.eventKind!=InteractionEventKind::SecondaryPress
+        &&event.eventKind!=InteractionEventKind::MiddlePress)return {true,true,true,InteractionFailureReason::None};
+    if(!GetOwnerThread()||m_isClosing||m_isRequestPending||m_isExitPending||!m_state.isObjectPickingEnabled||!m_views||!m_host)return {};
+    const auto target=m_host->GetDisplayTarget(event.viewId,"gaps");
+    if(!target||target->display.data!=m_state.resultSet||!(target->display.operation==m_operation.operation))return {true,true,true,InteractionFailureReason::None};
+    const auto view=m_views->GetInputView({event.viewId,false,HostRenderViewRole::Auxiliary});const auto lease=view?view->lease.lock():nullptr;
+    if(!view||!lease||!lease->GetIsActive()||!lease->GetIsOwnerThread()||!view->renderer)return {true,true,true,InteractionFailureReason::None};
+    const auto region=m_service->GetPickedRegion(event.viewId,event.x,event.y,view->renderer);
+    if(!region)return {true,true,true,InteractionFailureReason::None};
+    const bool success=SetObjectSelection({m_state.resultSet,*region,false});
+    return {true,true,success,success?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
+}
+
 bool GapHostFeature::Impl::SwitchOverlay()
 {
+    if(!SetObjectPicking(false))return false;
     const bool isSwitched = !m_isExitPending
         && m_service
         && m_service->GetViewOn()
@@ -858,6 +964,7 @@ bool GapHostFeature::Impl::SwitchOverlay()
 
 bool GapHostFeature::Impl::ExitView()
 {
+    if(!SetObjectPicking(false))return false;
     if (m_isExitPending
         || !m_service
         || !m_service->GetViewOn()) {
@@ -1092,13 +1199,33 @@ bool GapHostFeature::Impl::SetCompletedResult(
     m_operation.outputs = { labelRef, voidRef, meshRef, statisticsRef, resultRef,parentLabels,parentVoids,parentRecord };
 
     const auto graph = m_data->GetDataGraph();
-    auto labelView = m_data->GetLabelMap(graph, labelRef);
-    auto meshView = m_data->GetSurfaceMesh(graph, meshRef);
-    bool isDisplayed = m_service->SetCommittedView(
-        std::move(labelView), std::move(meshView),resultRef,m_inheritedDisplay);
+    bool isDisplayed=false;
+    try {
+        auto labelView=m_data->GetLabelMap(graph,labelRef);
+        const auto meshData=m_data->GetData(graph,meshRef);
+        VtkSurfaceMeshSnapshot meshView;
+        const auto* payload=meshData?dynamic_cast<const SurfaceMeshPayload*>(meshData->payload.get()):nullptr;
+        auto* geometry=candidate.voidMesh.GetPointer();
+        // worker 网格已将同一独占数组移交正式 payload；不为接纳显示重新复制整份网格。
+        if(payload&&geometry&&geometry->GetPoints()&&geometry->GetPolys()
+            &&static_cast<std::uint64_t>(geometry->GetNumberOfPoints())==payload->GetVertices().size()/3
+            &&static_cast<std::uint64_t>(geometry->GetNumberOfPolys())==payload->GetTriangles().size()/3
+            &&(payload->GetVertices().empty()||geometry->GetPoints()->GetData()->GetVoidPointer(0)==payload->GetVertices().data())
+            &&(payload->GetTriangles().empty()||geometry->GetPolys()->GetConnectivityArray()->GetVoidPointer(0)==payload->GetTriangles().data())) {
+            const auto lifetime=meshData->lifetime.lock();
+            const auto lease=lifetime?lifetime->StartResourceUse(meshRef,"GapAnalysis.display",DataResourceKind::RenderObject):nullptr;
+            if(!GetDataEntityIdValid(meshData->lifetimeScope)||lease) {
+                VtkDataResourceLease::AttachMesh(geometry,lease);
+                meshView=std::make_shared<const VtkSurfaceMeshView>(VtkSurfaceMeshView{meshData,geometry});
+            }
+        }
+        isDisplayed=m_service->SetCommittedView(std::move(labelView),std::move(meshView),resultRef,m_inheritedDisplay);
+    }catch(...){isDisplayed=false;}
+    if(!isDisplayed)m_service->SetViewCommitFailed();
     m_inheritedDisplay.reset();
     if(isDisplayed) m_resultDisplays[resultRef]=m_service->GetDisplayParams();
     const bool isDeltaSent = SendSceneDelta(FeatureScenePriority::Overlay);
+    if(!isDeltaSent)m_service->SetViewCommitFailed();
     isDisplayed = isDisplayed && isDeltaSent;
     const auto callback = m_completeItem;
     m_isRequestPending = false;
@@ -1187,6 +1314,8 @@ void GapHostFeature::Impl::SetBindingStale()
     if (!GetDataRevisionRefValid(m_state.resultSet) || GetResultCurrent()) return;
     // 正式历史仍然可读；外部换绑后不能继续显示旧结果，也不能清空外部新绑定。
     m_state.analysisState = GapAnalysisState::Stale;
+    m_state.isObjectPickingEnabled=false;
+    (void)SetObjectPicking(false);
     if (m_service && m_service->GetViewOn() && m_service->ExitView()) {
         m_isExitPending = true;
     }
@@ -1365,4 +1494,7 @@ std::vector<FeatureOperationState> GapHostFeature::GetOperationStates() const
 
 std::optional<GapDisplayParams> GapHostFeature::GetDisplay(const DataRevisionRef& result) const {
     return m_impl ? m_impl->GetDisplay(result):std::nullopt;
+}
+std::shared_ptr<const GapResultReader> GapHostFeature::GetResultReader(const DataRevisionRef& result) const {
+    return m_impl ? m_impl->GetResultReader(result):nullptr;
 }

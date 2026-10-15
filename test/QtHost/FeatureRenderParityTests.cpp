@@ -106,21 +106,21 @@ int main()
     VoidRegion c;c.id=33554433;c.voxelCount=1;c.volumeMM3=3.f;c.bbox={3,3,10,10,8,8};
     std::atomic<bool> stopping{false};
     const auto display=GapDisplayData::Build(image,{a,c},stopping);
-    Check(display && display->labels->GetNumberOfTableValues()==3,"sparse IDs allocate by region count");
+    Check(display && display->labels->GetNumberOfTableValues()==1 && display->labels->GetNumberOfAnnotatedValues()==0,"sparse IDs use the shared compact directory without per-object annotations");
     if (display) {
         GapDisplayParams segmentedGap;segmentedGap.style=GapDisplayStyle::Inclined;
         segmentedGap.segments={{std::nullopt,1,GapColorMode::Constant,{.6,.2,.7},{.6,.2,.7}},
             {1,2,GapColorMode::Gradient,{0,1,0},{1,1,0}},
             {2,std::nullopt,GapColorMode::Constant,{.2,.3,.8},{.2,.3,.8}}};
         const auto shaded=GapDisplayData::CreateColors(*display,segmentedGap);
-        Check(shaded && shaded->mesh==display->mesh && shaded->labels->MapValue(a.id)[3]<shaded->labels->MapValue(c.id)[3]
-            && shaded->labels->GetNumberOfTableValues()==3,"segmented inclined display keeps exact sparse IDs and display topology");
+        Check(shaded && shaded->mesh==display->mesh && shaded->labels->GetOpacity(a.id)<shaded->labels->GetOpacity(c.id)
+            && shaded->labels->GetNumberOfTableValues()==1 && shaded->regionVolumes==display->regionVolumes,"segmented inclined display keeps exact sparse IDs and display topology");
         for (const auto mode : {GapColorMode::Constant, GapColorMode::Gradient, GapColorMode::Rainbow,
                  GapColorMode::InverseRainbow, GapColorMode::HueLoop}) {
             GapDisplayParams params; params.mode = mode;
             const auto colored = GapDisplayData::CreateColors(*display, params);
-            Check(colored && colored->mesh == display->mesh && colored->labels->GetNumberOfTableValues() == 3
-                && colored->params.range == std::array<double,2>{.5,3},
+            Check(colored && colored->mesh == display->mesh && colored->labels->GetNumberOfTableValues() == 1
+                && colored->mappingRange == std::array<double,2>{.5,3},
                 "every palette keeps sparse IDs, display topology and data-derived volume range");
             if (!colored) continue;
             for (const auto& region : {a,c}) {
@@ -168,8 +168,9 @@ int main()
             && std::equal(wallLow,wallLow+3,low) && std::equal(wallHigh,wallHigh+3,high),
             "gap palette and range changes do not change wall colors or its independent range");
         const auto* background=display->labels->MapValue(0);
-        const auto* first=display->labels->MapValue(60001);
-        const auto* second=display->labels->MapValue(33554433);
+        std::array<unsigned char,4> first,second;
+        std::copy_n(display->labels->MapValue(60001),4,first.begin());
+        std::copy_n(display->labels->MapValue(33554433),4,second.begin());
         Check(background[3]==0 && first[2]>200 && second[0]>200,"background transparent and exact large IDs use volume colours");
         const auto* ids=vtkIntArray::SafeDownCast(display->mesh->GetCellData()->GetScalars());
         bool hasA=false,hasC=false;

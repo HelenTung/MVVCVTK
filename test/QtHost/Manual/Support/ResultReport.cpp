@@ -197,9 +197,9 @@ namespace {
 class ReportPageModel final : public QAbstractTableModel {
 public:
     ReportDocument document;
-    QVector<int> rows;
+    QVector<quint64> rows;
     explicit ReportPageModel(QObject* parent) : QAbstractTableModel(parent) {}
-    void SetPage(const ReportDocument& value,QVector<int> page) {beginResetModel();document=value;rows=std::move(page);endResetModel();}
+    void SetPage(const ReportDocument& value,QVector<quint64> page) {beginResetModel();document=value;rows=std::move(page);endResetModel();}
     int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid()?0:rows.size(); }
     int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid()?0:document.columns.size(); }
     QVariant data(const QModelIndex& index,int role) const override {
@@ -211,7 +211,7 @@ public:
     QVariant headerData(int section,Qt::Orientation orientation,int role) const override {
         if(role!=Qt::DisplayRole)return {};
         if(section<0 || (orientation==Qt::Horizontal?section>=document.columns.size():section>=rows.size()))return {};
-        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant(rows[section]+1);
+        return orientation==Qt::Horizontal?QVariant(document.columns[section].name):QVariant::fromValue<qulonglong>(rows[section]+1);
     }
 };
 }
@@ -286,7 +286,7 @@ void ResultReport::SelectCurrent()
     m_table->resizeColumnsToContents();
     for(int column=0;column<m_selected.columns.size();++column)m_table->setColumnWidth(column,std::clamp(m_table->columnWidth(column),90,220));
 }
-QVector<int> ResultReport::GetFilteredRows() const { return m_rows; }
+const ReportRows& ResultReport::GetFilteredRows() const { return m_rows; }
 QSet<QString> ResultReport::GetReportIds() const { QSet<QString> ids;for(auto it=m_documents.cbegin();it!=m_documents.cend();++it)ids.insert(it.key());return ids; }
 void ResultReport::RefreshRows()
 {
@@ -297,23 +297,20 @@ void ResultReport::RefreshRows()
     if((hasLow && !GetReportNumber(m_minimum->text(),low)) || (hasHigh && !GetReportNumber(m_maximum->text(),high)) || (hasLow && hasHigh && low>high)) {
         RefreshPage();m_range->setText("请输入有效数值区间");return;
     }
-    for(int i=0;i<m_selected.table->GetCount();++i) {
+    try {
+    if(search.isEmpty() && !(column>=0&&(hasLow||hasHigh)))m_rows=ReportRows::Natural(m_selected.table->GetCount());
+    else for(quint64 i=0;i<m_selected.table->GetCount();++i) {
         const auto row=m_selected.table->Read(i);
         if(!search.isEmpty() && !row.join('\t').contains(search,Qt::CaseInsensitive))continue;
         if(column>=0 && (hasLow || hasHigh)){double value;if(!GetReportNumber(GetReportCell(row,column),value) || (hasLow && value<low) || (hasHigh && value>high))continue;}
         m_rows.append(i);
     }
     if(m_sortColumn>=0) {
-        QHash<int,QString> keys;for(const auto row:m_rows)keys[row]=GetReportCell(m_selected.table->Read(row),m_sortColumn);
-        std::stable_sort(m_rows.begin(),m_rows.end(),[&](int a,int b){
-            double av,bv;int order;
-            if(GetReportNumber(keys[a],av) && GetReportNumber(keys[b],bv))order=av<bv?-1:av>bv?1:QString::compare(keys[a],keys[b]);
-            else order=QString::compare(keys[a],keys[b],Qt::CaseInsensitive);
-            return m_sortOrder==Qt::AscendingOrder?order<0:order>0;
-        });
+        m_rows.Sort(m_selected,m_sortColumn,m_sortOrder==Qt::AscendingOrder);
         m_table->horizontalHeader()->setSortIndicator(m_sortColumn,m_sortOrder);
     }
     RefreshPage();
+    }catch(const std::exception& error){m_rows.clear();RefreshPage();m_range->setText("报告查询失败："+QString::fromUtf8(error.what()));}
 }
 void ResultReport::RefreshPage()
 {
@@ -321,7 +318,7 @@ void ResultReport::RefreshPage()
     auto* model=dynamic_cast<ReportPageModel*>(m_table->model());
     if(!model){model=new ReportPageModel(m_table);m_table->setModel(model);}
     const auto offset=m_page*200;model->SetPage(m_selected,m_rows.mid(offset,200));
-    m_range->setText(QString("总数 %1 · 筛选后 %2 · 显示 %3–%4").arg(m_selected.table?m_selected.table->GetCount():0).arg(m_rows.size()).arg(m_rows.isEmpty()?0:offset+1).arg(std::min(offset+200,m_rows.size())));
+    m_range->setText(QString("总数 %1 · 筛选后 %2 · 显示 %3–%4").arg(m_selected.table?m_selected.table->GetCount():0).arg(m_rows.size()).arg(m_rows.isEmpty()?0:offset+1).arg(std::min<quint64>(offset+200,m_rows.size())));
     m_previous->setEnabled(m_page>0);m_next->setEnabled(offset+200<m_rows.size());
     m_copy->setEnabled(m_selected.table!=nullptr);m_export->setEnabled(m_selected.table!=nullptr);
     m_locate->setVisible(m_selected.module=="Gap" && m_selected.category=="本次会话结果" && bool(onLocate));

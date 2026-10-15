@@ -8,6 +8,7 @@
 #include "SurfaceBackendCost.h"
 #include <chrono>
 #include "Data/DataPayloads.h"
+#include "MappedArrayStorage.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
@@ -89,7 +90,7 @@ CpuSamplingPlan GetCpuSamplingPlan()
     if (!bytes || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
         return plan;
     try {
-        std::vector<std::uint64_t> storage((std::size_t(bytes) + 7) / 8);
+        DataArray<std::uint64_t> storage((std::size_t(bytes) + 7) / 8);
         auto *data = reinterpret_cast<unsigned char *>(storage.data());
         if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
                 reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(data), &bytes))
@@ -418,8 +419,8 @@ void MergeComponentTotals(SurfaceAlgorithmResult &result, const ComponentTotals 
 }
 
 struct MeshComponent final {
-    std::vector<std::uint32_t> sourcePointIds;
-    std::vector<Triangle> triangles;
+    DataArray<std::uint32_t> sourcePointIds;
+    DataArray<Triangle> triangles;
     std::uint32_t minimumPointId = 0;
     std::uint64_t estimatedVoxelCount = 0;
     bool isClosed = false;
@@ -1074,7 +1075,7 @@ SurfaceFailureReason GetMaterialRange(
             if (separated) groups.push_back(peak);
         }
         std::sort(groups.begin(), groups.end(), [](const Peak& a, const Peak& b) { return a.index < b.index; });
-        std::vector<std::uint64_t> counts;
+        DataArray<std::uint64_t> counts;
         for (std::size_t i = 0; i < groups.size(); ++i) {
             const auto left = i == 0 ? std::ptrdiff_t{0}
                 : std::min_element(smooth.begin()+groups[i-1].index, smooth.begin()+groups[i].index+1)-smooth.begin();
@@ -1259,12 +1260,12 @@ public:
         if (m_rank[leftRoot] == m_rank[rightRoot]) ++m_rank[leftRoot];
     }
 
-    std::vector<std::uint32_t> ReleaseParents() { return std::move(m_parent); }
-    std::vector<std::uint8_t> ReleaseRanks() { return std::move(m_rank); }
+    DataArray<std::uint32_t> ReleaseParents() { return std::move(m_parent); }
+    DataArray<std::uint8_t> ReleaseRanks() { return std::move(m_rank); }
 
 private:
-    std::vector<std::uint32_t> m_parent;
-    std::vector<std::uint8_t> m_rank;
+    DataArray<std::uint32_t> m_parent;
+    DataArray<std::uint8_t> m_rank;
 };
 
 std::uint64_t GetEdgeKey(
@@ -1277,7 +1278,7 @@ std::uint64_t GetEdgeKey(
         | static_cast<std::uint64_t>(maximum);
 }
 
-TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
+TopologyMetrics GetTopologyMetrics(const DataArray<Point3> &points, const DataArray<Triangle> &triangles,
                                    const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
@@ -1286,8 +1287,10 @@ TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std:
         int directionSum = 0;
     };
     const bool useCompact = points.size() <= (std::uint64_t(1) << 31U);
-    std::vector<std::uint64_t> edgeKeys;
-    std::optional<std::unordered_map<std::uint64_t, EdgeRecord>> edges;
+    DataArray<std::uint64_t> edgeKeys;
+    using EdgeMap=std::unordered_map<std::uint64_t,EdgeRecord,std::hash<std::uint64_t>,std::equal_to<std::uint64_t>,
+        DataArrayAllocator<std::pair<const std::uint64_t,EdgeRecord>>>;
+    std::optional<EdgeMap> edges;
     if (useCompact) {
         if (triangles.size() > edgeKeys.max_size() / 3U) throw std::bad_alloc{};
         edgeKeys.reserve(triangles.size() * 3U);
@@ -1357,8 +1360,8 @@ TopologyMetrics GetTopologyMetrics(const std::vector<Point3> &points, const std:
     return metrics;
 }
 
-std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
-                                           const std::vector<Triangle> &triangles, const double voxelVolume,
+DataArray<MeshComponent> BuildComponents(const DataArray<Point3> &points,
+                                           const DataArray<Triangle> &triangles, const double voxelVolume,
                                            const SurfaceCancelCheck &cancelled = {})
 {
     std::size_t cancellationBatch = 0;
@@ -1368,11 +1371,12 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
         sets.SetJoined(triangle.vertices[0], triangle.vertices[1]);
         sets.SetJoined(triangle.vertices[1], triangle.vertices[2]);
     }
-    using Group = std::pair<std::uint32_t, std::vector<Triangle>>;
-    using GroupMap = std::map<std::uint32_t, std::vector<Triangle>>;
-    std::vector<Group> groups;
+    using Group = std::pair<std::uint32_t, DataArray<Triangle>>;
+    using GroupMap = std::map<std::uint32_t, DataArray<Triangle>,std::less<std::uint32_t>,
+        DataArrayAllocator<std::pair<const std::uint32_t,DataArray<Triangle>>>>;
+    DataArray<Group> groups;
     std::optional<GroupMap> legacyGroups;
-    std::vector<std::uint32_t> localIds;
+    DataArray<std::uint32_t> localIds;
     // Union 已结束，GetRoot 不读取 rank；把 rank 缓冲改作根和点的标记。
     auto seen = sets.ReleaseRanks();
     for (auto &marker : seen) { CheckCancellation(cancellationBatch, cancelled); marker = 0; }
@@ -1392,7 +1396,7 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
             auto encoded = localIds[root];
             if (!(encoded & groupTag)) {
                 encoded = groupTag | static_cast<std::uint32_t>(groups.size());
-                groups.emplace_back(root, std::vector<Triangle>{});
+                groups.emplace_back(root, DataArray<Triangle>{});
                 localIds[root] = encoded;
             }
             while (!(localIds[point] & groupTag)) {
@@ -1425,13 +1429,13 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
         }
         localIds = sets.ReleaseParents();
     }
-    std::vector<MeshComponent> components;
+    DataArray<MeshComponent> components;
     components.reserve(legacyGroups ? legacyGroups->size() : groups.size());
     const auto appendComponent = [&](auto &item) {
         CheckCancellation(cancellationBatch, cancelled);
         MeshComponent component;
         component.triangles = std::move(item.second);
-        std::vector<std::uint32_t> pointIds;
+        DataArray<std::uint32_t> pointIds;
         pointIds.reserve(component.triangles.size());
         for (const Triangle& triangle : component.triangles) {
             CheckCancellation(cancellationBatch, cancelled);
@@ -1444,7 +1448,7 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
         component.minimumPointId = component.sourcePointIds.front();
 
         const bool hasAllPoints = component.sourcePointIds.size() == points.size();
-        std::vector<Point3> localPoints;
+        DataArray<Point3> localPoints;
         if (!hasAllPoints) localPoints.reserve(component.sourcePointIds.size());
         for (std::size_t index = 0;
             index < component.sourcePointIds.size(); ++index) {
@@ -1490,7 +1494,7 @@ std::vector<MeshComponent> BuildComponents(const std::vector<Point3> &points,
     return components;
 }
 
-double GetComponentDistanceSquared(const MeshComponent &component, const std::vector<Point3> &points,
+double GetComponentDistanceSquared(const MeshComponent &component, const DataArray<Point3> &points,
                                    const Point3 &seed, const SurfaceCancelCheck &cancelled = {},
                                    std::uint64_t *visited = nullptr)
 {
@@ -1505,14 +1509,14 @@ double GetComponentDistanceSquared(const MeshComponent &component, const std::ve
     return distance;
 }
 
-std::vector<std::size_t> GetSelectedComponents(const std::vector<MeshComponent> &components,
-                                               const std::vector<Point3> &points,
+DataArray<std::size_t> GetSelectedComponents(const DataArray<MeshComponent> &components,
+                                               const DataArray<Point3> &points,
                                                const ResolvedParams &params,
                                                const SurfaceCancelCheck &cancelled,
                                                std::uint64_t &candidateCount,std::uint64_t &pointVisits)
 {
     std::size_t cancellationBatch = 0;
-    std::vector<std::size_t> eligible;
+    DataArray<std::size_t> eligible;
     const auto score = [&components](const std::size_t index) {
         const MeshComponent& component = components[index];
         return std::make_pair(component.estimatedVoxelCount,
@@ -1554,14 +1558,14 @@ std::vector<std::size_t> GetSelectedComponents(const std::vector<MeshComponent> 
         }
     }
     if (params.componentSelection != SurfaceComponentSelection::All)
-        return best?std::vector<std::size_t>{*best}:std::vector<std::size_t>{};
+        return best?DataArray<std::size_t>{*best}:DataArray<std::size_t>{};
     // All 仍按原规则排序，保留全部对象和点、面的发布顺序。
     std::sort(eligible.begin(),eligible.end(),stableOrder);
     return eligible;
 }
 
-void GetLocalMesh(MeshComponent &component, std::vector<Point3> &sourcePoints,
-                  std::vector<Point3> &points, std::vector<Triangle> &triangles,
+void GetLocalMesh(MeshComponent &component, DataArray<Point3> &sourcePoints,
+                  DataArray<Point3> &points, DataArray<Triangle> &triangles,
                   const bool canConsumeSource,
                   const SurfaceCancelCheck &cancelled = {})
 {
@@ -1580,13 +1584,13 @@ void GetLocalMesh(MeshComponent &component, std::vector<Point3> &sourcePoints,
     triangles = std::move(component.triangles);
 }
 
-std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
-                                     const std::vector<Triangle> &triangles,
+DataArray<Point3> GetVertexNormals(const DataArray<Point3> &points,
+                                     const DataArray<Triangle> &triangles,
                                      const CpuSamplingPlan &cpuPlan, unsigned &normalizationThreads,
                                      const SurfaceCancelCheck &cancelled = {}, const bool ownsCpuQuota = false)
 {
     std::size_t cancellationBatch = 0;
-    std::vector<Point3> normals(points.size(), Point3{});
+    DataArray<Point3> normals(points.size(), Point3{});
     for (const Triangle& triangle : triangles) {
         CheckCancellation(cancellationBatch, cancelled);
         const Point3 normal = Cross(
@@ -1618,8 +1622,8 @@ std::vector<Point3> GetVertexNormals(const std::vector<Point3> &points,
 
 void SetOutwardWinding(
     const VolumeView& volume,
-    const std::vector<Point3>& points,
-    std::vector<Triangle>& triangles)
+    const DataArray<Point3>& points,
+    DataArray<Triangle>& triangles)
 {
     double orientationScore = 0.0;
     std::size_t sampleCount = 0;
@@ -1729,8 +1733,8 @@ bool GetPointAtDataBoundary(
     return false;
 }
 
-void SetMaterialTriangleFlags(const std::vector<Point3> &points, const std::vector<Triangle> &triangles,
-                              const std::vector<Point3> &normals, const double cornerCosine,
+void SetMaterialTriangleFlags(const DataArray<Point3> &points, const DataArray<Triangle> &triangles,
+                              const DataArray<Point3> &normals, const double cornerCosine,
                               SurfaceRecordRange records,
                               const SurfaceCancelCheck &cancelled = {})
 {
@@ -1797,8 +1801,8 @@ SurfaceMetricValidity GetAreaValidity(
 }
 
 void WriteObjectResult(const VolumeView &volume, const ResolvedParams &params, const std::uint32_t objectIndex,
-                     const std::vector<Point3> &originalPoints, const std::vector<Triangle> &triangles,
-                     SurfaceRecordRange records, std::vector<Point3>& classifications,
+                     const DataArray<Point3> &originalPoints, const DataArray<Triangle> &triangles,
+                     SurfaceRecordRange records, DataArray<Point3>& classifications,
                      const TopologyMetrics& cachedTopology, SurfaceAlgorithmResult &result, ComponentTotals &totals,
                      const SurfaceCancelCheck &cancelled = {})
 {
@@ -1954,7 +1958,12 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
                                         const SurfaceProgressCallback &onProgress,
                                         const SurfaceAlgorithmInputs &inputs)
 {
+    ResultArrayScope resultStorage(maxWorkingBytes.GetBound(8 * 1024 * 1024));
     SurfaceAlgorithmResult result;
+    // 报告只保留目录时，不让对象摘要延长整份点/面后备文件的寿命。
+    auto objectStorage=std::make_shared<MappedArrayStorage>(maxWorkingBytes.GetBound(8*1024*1024));
+    DataArrayAllocator<SurfaceObjectRecord> objectAllocator;objectAllocator.storage=objectStorage;
+    result.objects=DataArray<SurfaceObjectRecord>(objectAllocator);
     std::optional<std::pair<SurfaceBackendCalibrationCache::Key,SurfaceBackendCalibration>> completedCalibration;
     char profilingSetting[8]{};
     result.cudaProfilingRequested =
@@ -1976,17 +1985,19 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         result.message = message;
         result.status = reason == SurfaceFailureReason::Cancelled ? SurfaceResultStatus::Cancelled
                                                                   : SurfaceResultStatus::Failed;
-        result.points.clear();
-        result.triangleIndices.clear();
-        result.triangleValidity.clear();
-        result.objects.clear();
+        DataArray<SurfacePointRecord>().swap(result.points);
+        DataArray<std::uint32_t>().swap(result.triangleIndices);
+        DataArray<std::uint8_t>().swap(result.triangleValidity);
+        DataArray<SurfaceObjectRecord>().swap(result.objects);
         result.interfaces.clear();
         result.acceptedPointCount = 0;
         result.rejectedPointCount = 0;
         result.lowContrastPointCount = 0;
         result.truncatedPointCount = 0;
         result.nonManifoldObjectCount = 0;
-        return result;
+        DataArray<SurfaceSelectionPiece>().swap(result.selection);
+        result.sharedParent.reset();
+        return std::move(result);
     };
     SendProgress(onProgress, SurfaceDeterminationStage::Preparing, 0.01);
     VolumeView volume;
@@ -2060,12 +2071,11 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         if (!AddWorkingBytes(result.points.capacity(), sizeof(SurfacePointRecord), retained) ||
             !AddWorkingBytes(result.triangleIndices.capacity(), sizeof(std::uint32_t), retained) ||
             !AddWorkingBytes(result.triangleValidity.capacity(), sizeof(std::uint8_t), retained) ||
-            !AddWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained) ||
-            retained > maxWorkingBytes)
+            !AddWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained))
             return fail(SurfaceFailureReason::BudgetExceeded,
                         "Surface retained interfaces exceed the budget.");
-        std::vector<Point3> meshPoints;
-        std::vector<Triangle> meshTriangles;
+        DataArray<Point3> meshPoints;
+        DataArray<Triangle> meshTriangles;
         SurfaceExecutionStats statistics;
         SendProgress(onProgress, SurfaceDeterminationStage::SeedExtraction,
                      0.1 + 0.8 * pairIndex / pairCount);
@@ -2073,7 +2083,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
         grid.audit = &seedAudit;
         const auto seedStatus = SurfaceSeedBuilder::BuildMesh(
             grid, params.initialIsoValue, {}, halo,
-            inputParams.seedBlockDepth, maxWorkingBytes - retained, getCancelled, meshPoints,
+            inputParams.seedBlockDepth, maxWorkingBytes, getCancelled, meshPoints,
             meshTriangles, statistics);
         result.requiredBytes =
             std::max(result.requiredBytes, statistics.estimatedWorkingBytes + retained);
@@ -2106,7 +2116,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             BuildComponents(meshPoints, meshTriangles, volume.geometry.voxelVolume, getCancelled);
         result.componentsMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         [[maybe_unused]] const auto releasedTriangleBytes=meshTriangles.capacity()*sizeof(Triangle);
-        std::vector<Triangle>().swap(meshTriangles);
+        DataArray<Triangle>().swap(meshTriangles);
         const auto selectionStarted=std::chrono::steady_clock::now();
         const auto selected = GetSelectedComponents(components, meshPoints, params, getCancelled,
             result.componentCandidateCount,result.componentSelectionPointVisits);
@@ -2127,8 +2137,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             ||!AddWorkingBytes(outputPoints,sizeof(SurfacePointRecord),reservedBytes)
             ||!AddWorkingBytes(outputTriangles*3,sizeof(std::uint32_t),reservedBytes)
             ||!AddWorkingBytes(outputTriangles,sizeof(std::uint8_t),reservedBytes)
-            ||!AddWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes)
-            ||reservedBytes>maxWorkingBytes)
+            ||!AddWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes))
             return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation exceeds budget.");
         if(GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"Surface reservation was cancelled.");
         result.points.reserve(outputPoints);
@@ -2159,8 +2168,8 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             if (GetCancelled(getCancelled))
                 throw SurfaceCancelled{};
             const auto preparationStart=std::chrono::steady_clock::now();
-            std::vector<Point3> points;
-            std::vector<Triangle> triangles;
+            DataArray<Point3> points;
+            DataArray<Triangle> triangles;
             GetLocalMesh(components[selectedIndex], meshPoints, points, triangles,
                          !ownsCpuQuota && components.size() == 1, getCancelled);
             SetOutwardWinding(volume, points, triangles);
@@ -2638,13 +2647,16 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     SendProgress(onProgress, SurfaceDeterminationStage::TopologyValidation, 1);
     if(completedCalibration)SurfaceBackendCalibrationCache::Get().Store(completedCalibration->first,
         completedCalibration->second,std::chrono::steady_clock::now());
+    resultStorage.Finish();
+    objectStorage->Finish();
     return result;
 }
 
 SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,const SurfaceDeterminationStartParams& params,WorkLimit maxWorkingBytes,const SurfaceCancelCheck& getCancelled,const SurfaceAlgorithmInputs& inputs)
 {
+    ResultArrayScope resultStorage(maxWorkingBytes.GetBound(8*1024*1024));
     SurfaceAlgorithmResult result;
-    const auto fail=[&](SurfaceFailureReason reason,const std::string& message){result.failureReason=reason;result.status=reason==SurfaceFailureReason::Cancelled?SurfaceResultStatus::Cancelled:SurfaceResultStatus::Failed;result.message=message;return result;};
+    const auto fail=[&](SurfaceFailureReason reason,const std::string& message){result.failureReason=reason;result.status=reason==SurfaceFailureReason::Cancelled?SurfaceResultStatus::Cancelled:SurfaceResultStatus::Failed;result.message=message;DataArray<SurfaceSelectionPiece>().swap(result.selection);result.sharedParent.reset();return std::move(result);};
     const auto& parent=*inputs.parent;
     if(!source || !source->data || parent.sourceRevision!=source->data->self || !parent.points || !parent.triangleIndices || !parent.objects || !parent.triangleValidity
         || !params.parentGeneration || parent.dataRevision!=*params.parentGeneration || parent.algorithmRevision!=surfaceAlgorithmRevision)
@@ -2654,22 +2666,24 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
     if(inputError!=SurfaceFailureReason::None)return fail(inputError,"Surface selection inputs are invalid.");
     std::size_t bytes=0;
     if(!AddWorkingBytes(parent.points->size(),sizeof(SurfacePointRecord),bytes) || !AddWorkingBytes(parent.triangleIndices->size(),sizeof(std::uint32_t),bytes)
-        || !AddWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes) || bytes>maxWorkingBytes)
+        || !AddWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes))
         return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface selection exceeds working budget.");
     result.sourceRevision=parent.sourceRevision;result.algorithmRevision=parent.algorithmRevision;result.method=parent.method;result.isoEstimate=parent.isoEstimate;
     result.resolvedParams=parent.resolvedParams;result.resolvedParams.analysisRoi=params.analysisRoi;result.resolvedParams.parentGeneration=params.parentGeneration;
-    result.points=*parent.points;result.triangleIndices=*parent.triangleIndices;result.objects=*parent.objects;result.triangleValidity=*parent.triangleValidity;
+    result.sharedParent=inputs.parent;
+    const auto& points=*parent.points;const auto& triangles=*parent.triangleIndices;
     if(parent.interfaces)result.interfaces=*parent.interfaces;
     result.parameterFingerprint=parent.parameterFingerprint;
     for(auto byte:parent.dataRevision.entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}
     if(inputs.roi){for(auto byte:inputs.roi->GetRevision().entityId.bytes){result.parameterFingerprint^=byte;result.parameterFingerprint*=1099511628211ULL;}result.parameterFingerprint^=inputs.roi->GetRevision().generation;}
-    for(const auto& point:result.points){if(SurfaceContract::GetPointValid(point,parent.method))++result.acceptedPointCount;else ++result.rejectedPointCount;if(GetSurfaceFlag(point.flags,SurfacePointFlags::LowContrast))++result.lowContrastPointCount;}
+    std::size_t checked=0;
+    for(const auto& point:points){CheckCancellation(checked,getCancelled);if(SurfaceContract::GetPointValid(point,parent.method))++result.acceptedPointCount;else ++result.rejectedPointCount;if(GetSurfaceFlag(point.flags,SurfacePointFlags::LowContrast))++result.lowContrastPointCount;}
     if (inputs.roi) {
         // 在完整正式表面上选片，保留父三角形及重心来源，不生成封口或移动新点。
-        for (std::size_t i=0;i<result.triangleIndices.size();i+=3) {
+        for (std::size_t i=0;i<triangles.size();i+=3) {
             if (GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"ROI surface selection cancelled.");
-            const std::array<Point3,3> triangle{result.points[result.triangleIndices[i]].positionModel,
-                result.points[result.triangleIndices[i+1]].positionModel,result.points[result.triangleIndices[i+2]].positionModel};
+            const std::array<Point3,3> triangle{points[triangles[i]].positionModel,
+                points[triangles[i+1]].positionModel,points[triangles[i+2]].positionModel};
             const auto a=Subtract(triangle[1],triangle[0]),b=Subtract(triangle[2],triangle[0]);
             const double aa=Dot(a,a),bb=Dot(b,b),ab=Dot(a,b),denominator=aa*bb-ab*ab;
             if (!(denominator>0)) continue;
@@ -2690,6 +2704,7 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
     }
     if(!AddWorkingBytes(result.selection.size(),sizeof(SurfaceSelectionPiece),bytes))return fail(SurfaceFailureReason::BudgetExceeded,"Surface selected fragment size overflows.");
     result.requiredBytes=bytes;result.execution.estimatedWorkingBytes=bytes;result.execution.retainedBytes=bytes;
+    resultStorage.Finish();
     result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Selected the immutable parent surface without measurement.";return result;
 }
 

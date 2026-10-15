@@ -241,7 +241,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     });
     m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);reports->show();reports->raise();reports->activateWindow();};
     m_objects->onReport=m_workflow.onShowReports;
-    m_report->onLocate=[this](const ReportDocument& doc,int row){
+    m_report->onLocate=[this](const ReportDocument& doc,quint64 row){
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
         if(!input || GetRefText(input->dataRevision)!=doc.source)throw std::runtime_error("报告来源与当前输入不同，请明确选择正确数据后再定位。");
         const auto point=m_workflow.getRecordLocation(GetRef(doc.id.mid(4)),static_cast<std::size_t>(row),input->dataRevision);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Render/Support/FeatureOverlayBase.h"
+#include "Render/Support/SpatialMeshView.h"
 
 #include <vtkSmartPointer.h>
 
@@ -19,8 +20,14 @@ public:
         vtkSmartPointer<vtkDataObject> data) override;
     void SetOverlayState(
         const FeatureOverlayState& state) override;
+    void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,
+        std::size_t capacity,std::function<void()> requestFrame);
+    FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override;
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override;
 
 private:
+    FeatureInternal::SpatialMeshView m_stream;
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
 };
@@ -34,8 +41,14 @@ public:
         vtkSmartPointer<vtkDataObject> data) override;
     void SetOverlayState(
         const FeatureOverlayState& state) override;
+    void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,
+        std::size_t capacity,std::function<void()> requestFrame);
+    FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override;
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override;
 
 private:
+    FeatureInternal::SpatialMeshView m_stream;
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkCutter> m_cutter;
     vtkSmartPointer<vtkPlane> m_plane;

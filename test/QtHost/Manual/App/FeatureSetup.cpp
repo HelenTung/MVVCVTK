@@ -57,6 +57,7 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
     context.workflow.readRecordSamples=[reference](auto ref,const std::string& column,auto offset){return reference->ReadRecordSamples(ref,column,offset);};
     context.workflow.readRecordPage=[reference](auto ref,auto offset,auto count,auto range){return reference->ReadRecordPage(ref,offset,count,range);};
     context.workflow.getRecordLocation=[reference](auto table,auto row,auto source){return reference->GetRecordLocation(table,row,source);};
+    context.workflow.getModelWorldPosition=[reference](auto source,const auto& model){return reference->GetModelWorldPosition(source,model);};
     std::shared_ptr<RoiEditingHostFeature> roi;
 #if defined(MANUAL_ROI)
     RoiEditingConfig roiConfig; roiConfig.referenceView.viewId="primary-3d"; roiConfig.targetViews=GetAllViews();

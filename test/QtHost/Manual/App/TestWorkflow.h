@@ -69,6 +69,7 @@ public:
     std::function<StatisticsSamples(DataRevisionRef,const std::string&,std::size_t)> readRecordSamples;
     std::function<QJsonObject(DataRevisionRef,std::size_t,std::size_t,std::optional<std::array<double,2>>)> readRecordPage;
     std::function<std::array<double,3>(DataRevisionRef,std::size_t,DataRevisionRef)> getRecordLocation;
+    std::function<std::array<double,3>(DataRevisionRef,const std::array<double,3>&)> getModelWorldPosition;
     std::function<std::optional<MeasurementSurface>()> getMeasurementSurface;
     std::function<std::vector<std::uint64_t>(DataRevisionRef,DataRevisionRef,DataRevisionRef)> getRoiVertices;
 private:

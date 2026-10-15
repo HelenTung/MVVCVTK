@@ -20,6 +20,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
     auto* panel = new ModulePanel(context, "Gap", parent);
     auto runParameters=std::make_shared<QJsonObject>();
     auto listRange=std::make_shared<std::optional<std::array<double,2>>>();
+    auto listedReader=std::make_shared<std::shared_ptr<const GapResultReader>>();
     panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。结果区显示孔隙体积、孔隙率等统计与数据修订。");
     for(const auto& action:QStringList{"Start","Evaluate"})panel->AttachAction(action, GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0,"parentResult":"","evaluationRoi":"","detectionRoi":"","roiPolicy":"WholeIfIntersects"})"),
         [panel, feature,runParameters,action](auto id, const auto& params) {
@@ -133,23 +134,80 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
                 {{"requestId", QString::number(admission.requestId)}, {"admission", static_cast<int>(admission.status)}});
         }, exit ? TestPolicy::Stop : TestPolicy::View);
     panel->onStop = [panel] { panel->SendAction("Exit", {}); };
-    panel->AttachAction("Defects",{{"pageOffset","0"}},[panel,feature,listRange](auto id,const auto& p) {
-        const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))throw std::invalid_argument("尚无已发布缺陷表");
-        const auto page=panel->GetContext().workflow.readRecordPage(state.voidTable,GetId(p["pageOffset"]),128,*listRange);
-        QJsonArray rows,indices;for(const auto value:page["rows"].toArray()) {
-            const auto row=value.toObject();rows.append(QJsonArray{row["void-id"],row["parent-volume-mm3"],row["intersection-volume-mm3"],
-                row["roi-partial"].isUndefined()?"—（未提供相交标志）":row["roi-partial"].toVariant().toULongLong()!=0?"部分相交":"完整",row["volume-mm3"],
-                row["whole-object-geometry"].isUndefined()?"—（未提供量值资格）":row["whole-object-geometry"].toVariant().toULongLong()!=0?"完整父缺陷":"ROI 片段（不是新封闭孔隙）"});indices.append(row["rowIndex"]);
+    panel->AttachAction("Defects",{{"pageOffset","0"}},[panel,feature,listRange,listedReader](auto id,const auto& p) {
+        const auto state=feature->GetState();auto* widget=panel->GetStatisticsWidget();const auto offset=GetId(p["pageOffset"]);
+        const auto ref=offset?GetRef(widget->property("defectResult").toString()):state.resultSet;
+        const auto reader=*listedReader&&(*listedReader)->GetMetadata().result==ref?*listedReader:feature->GetResultReader(ref);
+        if(!reader)throw std::invalid_argument("所选正式孔隙结果不可读，请显式刷新目录首页");
+        *listedReader=reader;const auto source=reader->GetMetadata().source;
+        const auto table=offset?GetRef(widget->property("defectTable").toString()):state.voidTable;
+        QJsonArray rows,ids,indices,records;auto next=offset;const auto total=reader->GetMetadata().objectCount;
+        if(offset>total)throw std::invalid_argument("孔隙目录偏移越界");
+        while(rows.size()<128&&next<total) {
+            const auto page=reader->GetObjects(next,static_cast<std::size_t>(128-rows.size()));
+            if(page.error!=GapReadError::None||page.next<=next)throw std::runtime_error("孔隙对象页读取失败");
+            auto row=next;
+            for(const auto& object:page.objects) {
+                const auto rowIndex=row++;
+                if(*listRange&&(object.volumeMM3<(**listRange)[0]||object.volumeMM3>(**listRange)[1]))continue;
+                rows.append(QJsonArray{QString::number(object.id),object.parentVolumeMM3,object.intersectionVolumeMM3,
+                    object.isRoiPartial?"部分相交":"完整",object.volumeMM3,object.hasWholeObjectGeometry?"完整父缺陷":"ROI 片段（不是新封闭孔隙）"});
+                ids.append(QString::number(object.id));indices.append(QString::number(rowIndex));
+                records.append(QJsonObject{{"void-id",QString::number(object.id)},{"rowIndex",QString::number(rowIndex)},
+                    {"parent-volume-mm3",object.parentVolumeMM3},{"intersection-volume-mm3",object.intersectionVolumeMM3},
+                    {"volume-mm3",object.volumeMM3},{"roi-partial",object.isRoiPartial},{"whole-object-geometry",object.hasWholeObjectGeometry}});
+            }
+            next=page.next;
         }
-        auto* widget=panel->GetStatisticsWidget();widget->SetTable({"父缺陷编号","完整体积 mm³","ROI 内体积 mm³","相交状态","本次统计体积 mm³","量值对象"},rows);
-        widget->ShowTable();
-        widget->setProperty("defectRows",indices);widget->setProperty("defectNext",page["next"]);widget->setProperty("defectTotal",page["total"]);widget->setProperty("defectTable",GetRefText(state.voidTable));widget->setProperty("defectSource",GetRefText(state.sourceRevision));
-        widget->onRow=[panel,widget](int row) {
-            const auto indices=widget->property("defectRows").toJsonArray();if(row<0 || row>=indices.size())return;
-            panel->SendAction("LocateDefect",{{"rowIndex",indices[row]},{"table",widget->property("defectTable").toString()},{"source",widget->property("defectSource").toString()}});
-        };
-        panel->SetComplete(id,"Observed",{{"table",GetRefText(state.voidTable)},{"page",page}});
-        if(panel->onMessage)panel->onMessage(*listRange ? QString("列表体积筛选 [%1, %2] mm³；算法结果与全量直方图未变。").arg((**listRange)[0]).arg((**listRange)[1]) : "缺陷目录已更新；在“统计与结果”中选行可定位，翻页不重新运行算法。");
+        widget->SetTable({"父缺陷编号","完整体积 mm³","ROI 内体积 mm³","相交状态","本次统计体积 mm³","量值对象"},rows);widget->ShowTable();
+        widget->setProperty("defectRows",indices);widget->setProperty("defectIds",ids);widget->setProperty("defectNext",QJsonValue(QString::number(next)));
+        widget->setProperty("defectTotal",QJsonValue(QString::number(total)));widget->setProperty("defectTable",GetRefText(table));
+        widget->setProperty("defectSource",GetRefText(source));widget->setProperty("defectResult",GetRefText(ref));
+        widget->onRow=[panel,widget](int row){const auto ids=widget->property("defectIds").toJsonArray();if(row<0||row>=ids.size())return;
+            panel->SendAction("SelectObject",{{"regionId",ids[row]},{"result",widget->property("defectResult").toString()}});};
+        panel->SetComplete(id,"Observed",{{"resultSet",GetRefText(ref)},{"table",GetRefText(table)},
+            {"page",QJsonObject{{"rows",records},{"next",QString::number(next)},{"total",QString::number(total)},{"offset",QString::number(offset)}}}});
+        if(panel->onMessage)panel->onMessage(*listRange?QString("列表体积筛选 [%1, %2] mm³；算法结果未变。").arg((**listRange)[0]).arg((**listRange)[1]):"缺陷目录已更新；选行按原始编号定位，后续页保持当前结果修订。");
+    },TestPolicy::Read);
+    const auto getReader=[panel,feature,listedReader](const QJsonObject& p){
+        const auto text=p["result"].toString();const auto ref=text=="current"?feature->GetState().resultSet:GetRef(text=="listed"?panel->GetStatisticsWidget()->property("defectResult").toString():text);
+        const auto reader=*listedReader&&(*listedReader)->GetMetadata().result==ref?*listedReader:feature->GetResultReader(ref);
+        if(!reader)throw std::invalid_argument("所选正式孔隙结果不可读");return reader;
+    };
+    const auto getRegionId=[](const QJsonObject& p){const auto id=GetId(p["regionId"]);if(!id||id>INT32_MAX)throw std::invalid_argument("请输入有效的孔隙原始编号");return static_cast<std::int32_t>(id);};
+    for(const bool isolated:{false,true})panel->AttachAction(isolated?"IsolateObject":"SelectObject",{{"result","listed"},{"regionId","1"}},
+        [panel,feature,getReader,getRegionId,isolated](auto id,const auto& p){
+            const auto reader=getReader(p);const auto region=getRegionId(p);GapHostRequest request;
+            request.action=GapHostAction::SelectObject;request.selection=GapObjectSelection{reader->GetMetadata().result,region,isolated};
+            const bool accepted=feature->SendRequest(std::move(request)).status==GapAdmissionStatus::Accepted;
+            panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"resultSet",GetRefText(reader->GetMetadata().result)},{"regionId",QString::number(region)},{"isIsolated",isolated}});
+            if(accepted)panel->SendAction("LocateDefectById",{{"result",GetRefText(reader->GetMetadata().result)},{"regionId",QString::number(region)}});
+        },TestPolicy::View);
+    panel->AttachAction("ClearObjectSelection",{},[panel,feature](auto id,const auto&){
+        GapHostRequest request;request.action=GapHostAction::SelectObject;request.selection=GapObjectSelection{feature->GetState().resultSet,{},false};
+        panel->SetComplete(id,feature->SendRequest(std::move(request)).status==GapAdmissionStatus::Accepted?"Succeeded":"Rejected");
+    },TestPolicy::View);
+    panel->AttachAction("ObjectPicking",{{"isEnabled",false}},[panel,feature](auto id,const auto& p){
+        GapHostRequest request;request.action=GapHostAction::SetObjectPicking;request.isObjectPickingEnabled=GetBool(p,"isEnabled");
+        const bool accepted=feature->SendRequest(std::move(request)).status==GapAdmissionStatus::Accepted;
+        panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"isObjectPickingEnabled",feature->GetState().isObjectPickingEnabled}});
+    },TestPolicy::View);
+    panel->AttachAction("LocateDefectById",{{"result","listed"},{"regionId","1"}},[panel,getReader,getRegionId](auto id,const auto& p){
+        const auto reader=getReader(p);const auto geometry=reader->GetGeometry(getRegionId(p),0,0,1);
+        if(geometry.error!=GapReadError::None||geometry.points.empty())throw std::invalid_argument("该孔隙没有可定位的正式几何");
+        const auto world=panel->GetContext().workflow.getModelWorldPosition(reader->GetMetadata().source,geometry.points[0]);
+        HostSessionSetRequest request;request.cursor=HostCursorParams{world,-1};panel->SendHost(id,std::move(request));
+    },TestPolicy::View);
+    panel->AttachAction("ReadDefectGeometry",{{"result","listed"},{"regionId","1"},{"pointOffset","0"},{"triangleOffset","0"},{"pageSize","128"}},[panel,getReader,getRegionId](auto id,const auto& p){
+        const auto reader=getReader(p);const auto count=GetId(p["pageSize"]);if(!count||count>4096)throw std::invalid_argument("几何页大小必须为 1～4096");
+        const auto geometry=reader->GetGeometry(getRegionId(p),GetId(p["pointOffset"]),GetId(p["triangleOffset"]),static_cast<std::size_t>(count));
+        if(geometry.error!=GapReadError::None)throw std::invalid_argument("孔隙几何范围不可读");
+        QJsonArray points,triangles;for(const auto& point:geometry.points)points.append(GetValues(point));
+        for(std::size_t i=0;i<geometry.triangleIndices.size();i+=3)triangles.append(QJsonArray{QString::number(geometry.triangleIndices[i]),QString::number(geometry.triangleIndices[i+1]),QString::number(geometry.triangleIndices[i+2])});
+        panel->SetComplete(id,"Observed",{{"resultSet",GetRefText(geometry.result)},{"regionId",QString::number(geometry.objectId)},
+            {"firstPoint",QString::number(geometry.firstPoint)},{"firstTriangle",QString::number(geometry.firstTriangle)},
+            {"nextPoint",QString::number(geometry.nextPoint)},{"nextTriangle",QString::number(geometry.nextTriangle)},
+            {"totalPoints",QString::number(geometry.totalPoints)},{"totalTriangles",QString::number(geometry.totalTriangles)},{"points",points},{"triangles",triangles}});
     },TestPolicy::Read);
     panel->AttachAction("ResetDefectFilter",{},[panel,listRange](auto id,const auto&){listRange->reset();panel->SendAction("Defects",{{"pageOffset","0"}});panel->SetComplete(id,"Observed");},TestPolicy::Read);
     panel->AttachAction("NextDefectPage",{},[panel](auto id,const auto&) {
@@ -185,6 +243,14 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         summary["isExitPending"] = state.isExitPending;
         summary["isViewActive"] = state.isViewActive;
         summary["isOverlayVisible"] = state.isOverlayVisible;
+        summary["isDisplayComplete"]=state.isDisplayComplete;summary["hasDisplayFailure"]=state.hasDisplayFailure;
+        summary["displayRequestedBatches"]=QString::number(state.displayRequestedBatches);summary["displayLoadedBatches"]=QString::number(state.displayLoadedBatches);
+        summary["displayMessage"]=QString::fromStdString(state.displayMessage);
+        summary["hasDisplayGeometry"]=state.displayLoadedBatches>0;
+        summary["selectionResult"]=GetRefText(state.selectionResult);
+        summary["selectedObject"]=state.selectedObject?QJsonValue(QString::number(*state.selectedObject)):QJsonValue();
+        summary["isSelectionIsolated"]=state.isSelectionIsolated;summary["isObjectPickingEnabled"]=state.isObjectPickingEnabled;
+        panel->GetParameterEditor("ObjectPicking")->GetField("isEnabled")->SetAppliedBoolean(state.isObjectPickingEnabled,GetRefText(state.resultSet));
         summary["range"] = GetValues(state.display.range);
         summary["palette"] = static_cast<int>(state.display.mode);
         summary["source"] = GetRefText(state.sourceRevision);

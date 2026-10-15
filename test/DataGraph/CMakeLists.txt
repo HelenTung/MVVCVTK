@@ -3,13 +3,14 @@ add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
     DataLifetimeTests.cpp
     ResultRetentionTests.cpp
+    DataArrayTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp"
 )
 target_include_directories(
     mvvcvtk_data_graph_tests
-    PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
+    PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include" "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support"
 )
 SetTargetDefaults(mvvcvtk_data_graph_tests)
 set_target_properties(
@@ -19,6 +20,25 @@ set_target_properties(
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
 add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
 add_test(NAME DataGraph.ResultRetention COMMAND mvvcvtk_data_graph_tests retention)
+add_test(NAME DataGraph.ResultArrays COMMAND mvvcvtk_data_graph_tests arrays)
+
+add_executable(mvvcvtk_spatial_mesh_tests SpatialMeshTests.cpp)
+target_link_libraries(mvvcvtk_spatial_mesh_tests PRIVATE MVVCVTKInternal::FeatureSupport
+    VTK::CommonCore VTK::CommonDataModel)
+SetTargetDefaults(mvvcvtk_spatial_mesh_tests)
+target_compile_definitions(mvvcvtk_spatial_mesh_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+set_target_properties(mvvcvtk_spatial_mesh_tests PROPERTIES FOLDER "MVVCVTK/test/Automation/DataGraph")
+add_test(NAME DataGraph.SpatialMesh COMMAND mvvcvtk_spatial_mesh_tests)
+SetTestRuntime(DataGraph.SpatialMesh mvvcvtk_spatial_mesh_tests)
+
+add_executable(mvvcvtk_spatial_mesh_view_tests SpatialMeshViewTests.cpp)
+target_link_libraries(mvvcvtk_spatial_mesh_view_tests PRIVATE MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
+target_compile_definitions(mvvcvtk_spatial_mesh_view_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+SetTargetDefaults(mvvcvtk_spatial_mesh_view_tests)
+set_target_properties(mvvcvtk_spatial_mesh_view_tests PROPERTIES FOLDER "MVVCVTK/test/Automation/DataGraph")
+vtk_module_autoinit(TARGETS mvvcvtk_spatial_mesh_view_tests MODULES ${MVVCVTK_VTK_TARGETS})
+add_test(NAME DataGraph.SpatialMeshView COMMAND mvvcvtk_spatial_mesh_view_tests)
+SetTestRuntime(DataGraph.SpatialMeshView mvvcvtk_spatial_mesh_view_tests)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp
@@ -29,7 +49,7 @@ target_include_directories(
 )
 target_link_libraries(
     mvvcvtk_vtk_data_bridge_tests
-    PRIVATE MVVCVTK::Host
+    PRIVATE MVVCVTK::Host MVVCVTKInternal::FeatureSupport
 )
 SetTargetDefaults(mvvcvtk_vtk_data_bridge_tests)
 set_target_properties(

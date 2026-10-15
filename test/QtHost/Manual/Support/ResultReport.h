@@ -33,8 +33,8 @@ public:
     void ImportReport(const QString& path);
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
-    QVector<int> GetFilteredRows() const;
-    std::function<void(const ReportDocument&,int)> onLocate;
+    const ReportRows& GetFilteredRows() const;
+    std::function<void(const ReportDocument&,quint64)> onLocate;
 protected:
     void showEvent(QShowEvent* event) override;
 private:
@@ -56,8 +56,9 @@ private:
     QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
     QPushButton *m_previous = nullptr, *m_next = nullptr;
     QPushButton* m_locate = nullptr;
-    QVector<int> m_rows;
-    int m_page = 0, m_sortColumn = -1;
+    ReportRows m_rows;
+    quint64 m_page = 0;
+    int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
     QPushButton* m_copy = nullptr;

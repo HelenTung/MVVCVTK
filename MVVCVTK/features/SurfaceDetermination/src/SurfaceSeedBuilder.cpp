@@ -69,16 +69,18 @@ bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, co
     const auto estimate = GetWorkingEstimate(pointCount, triangleCount);
     if (!estimate) return false;
     stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
-    return *estimate <= budget;
+    // 后备数组的逻辑总量不是 RAM 工作区；索引/字节溢出仍在上面拒绝。
+    return DataArrayStorage::GetCurrent() || *estimate <= budget;
 }
 
 SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit budget,
-                           const std::function<bool()> &cancelled, std::vector<Point> &points,
-                           std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+                           const std::function<bool()> &cancelled, DataArray<Point> &points,
+                           DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
-    std::map<std::tuple<std::uint32_t, std::uint32_t, unsigned>, std::uint32_t> intersections;
-    std::vector<SurfaceSeedTriangle> clipped;
-    std::vector<std::uint32_t> polygon, next;
+    using Key=std::tuple<std::uint32_t,std::uint32_t,unsigned>;
+    std::map<Key,std::uint32_t,std::less<Key>,DataArrayAllocator<std::pair<const Key,std::uint32_t>>> intersections;
+    DataArray<SurfaceSeedTriangle> clipped;
+    DataArray<std::uint32_t> polygon, next;
     polygon.reserve(10);
     next.reserve(10);
     for (std::size_t t = 0; t < triangles.size(); ++t)
@@ -149,8 +151,8 @@ template <bool HasMask, class ScalarReader>
 SurfaceSeedStatus BuildSeedMesh(
     const SurfaceSeedGrid &grid, const double iso,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
-    const WorkLimit budget, const std::function<bool()> &cancelled, std::vector<Point> &points,
-    std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats,
+    const WorkLimit budget, const std::function<bool()> &cancelled, DataArray<Point> &points,
+    DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats,
     const ScalarReader &readScalar)
 {
     const auto started = std::chrono::steady_clock::now();
@@ -232,7 +234,7 @@ SurfaceSeedStatus BuildSeedMesh(
     const auto meshBudget = [&](std::size_t pointCount, std::size_t triangleCount) {
         if (cacheBytes) {
             const auto estimate = GetWorkingEstimate(pointCount, triangleCount, cacheBytes);
-            if (estimate && *estimate <= budget) {
+            if (estimate && (DataArrayStorage::GetCurrent() || *estimate <= budget)) {
                 stats.estimatedWorkingBytes = std::max(stats.estimatedWorkingBytes, *estimate);
                 return true;
             }
@@ -275,7 +277,9 @@ SurfaceSeedStatus BuildSeedMesh(
     };
     {
         // 两层只做查找/插入，输出仍按原单元/MC 边顺序创建。
-        std::array<std::map<std::uint64_t, std::uint32_t>, 2> edgeLayers;
+        using EdgeMap=std::map<std::uint64_t,std::uint32_t,std::less<std::uint64_t>,
+            DataArrayAllocator<std::pair<const std::uint64_t,std::uint32_t>>>;
+        std::array<EdgeMap,2> edgeLayers;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
         for (std::int64_t block = range[4]; block < range[5]; block += blockDepth)
         {
@@ -471,7 +475,7 @@ SurfaceSeedStatus BuildSeedMesh(
             return status;
     }
     // 删除未被最终 ROI 三角形引用的 seed 顶点，索引按首次生成顺序稳定压缩。
-    std::vector<std::uint32_t> remap(points.size(), UINT32_MAX);
+    DataArray<std::uint32_t> remap(points.size(), UINT32_MAX);
     for (const auto &triangle : triangles)
         for (auto id : triangle.vertices)
             remap[id] = 0;
@@ -495,8 +499,8 @@ SurfaceSeedStatus BuildSeedMesh(
 SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     const SurfaceSeedGrid &grid, const double iso, const RoiReadSnapshot &roi,
     const double haloModel, const std::uint32_t blockDepth, const WorkLimit budget,
-    const std::function<bool()> &cancelled, std::vector<Point> &points,
-    std::vector<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+    const std::function<bool()> &cancelled, DataArray<Point> &points,
+    DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
     if (grid.audit) *grid.audit = {};
     for (unsigned axis = 0; axis < 3; ++axis) {

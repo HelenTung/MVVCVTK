@@ -3,6 +3,8 @@
 #include "Data/DataManager.h"
 #include "Data/DataPayloads.h"
 #include "Data/VtkDataBridge.h"
+#include "BackedVtkArray.h"
+#include "MappedArrayStorage.h"
 
 #include <vtkCellArray.h>
 #include <vtkCellData.h>
@@ -538,6 +540,9 @@ bool GetMeasurementRoundTripValid()
     if (view) {
         auto* array = view->mesh->GetPointData()->GetArray("measurement.fit-residual");
         array->SetComponent(0, 0, std::numeric_limits<double>::quiet_NaN());
+        view->mesh->GetPoints()->SetPoint(0,9,9,9);
+        valid=Check(payload->GetVertices()[0]==1e8&&payload->GetPointAttributes()[2].values[0]==0.01,
+            "external VTK view mutated the published mesh or frozen quality attributes")&&valid;
         valid = Check(!bridge.CreateMeshPayload(view->mesh),
             "nonfinite measurement attributes fail instead of being silently discarded") && valid;
         array->SetNumberOfTuples(1);
@@ -547,11 +552,50 @@ bool GetMeasurementRoundTripValid()
     return valid;
 }
 
+bool GetBackedArrayShallowCopyValid()
+{
+    std::weak_ptr<DataArrayStorage> owner;
+    auto alias=vtkSmartPointer<vtkIntArray>::New();
+    {
+        ResultArrayScope scope(0);
+        DataArray<std::int32_t> values{33554433,17,INT32_MAX};
+        owner=values.get_allocator().storage;
+        auto original=vtkSmartPointer<BackedVtkArray<std::int32_t,vtkIntArray>>::New();
+        original->SetValues(std::move(values));alias->ShallowCopy(original);
+        scope.Finish();
+    }
+    bool valid=Check(!owner.expired()&&alias->GetValue(0)==33554433&&alias->GetValue(2)==INT32_MAX,
+        "array-level VTK shallow copy lost its backing owner when original shell was released");
+    alias->InsertNextValue(29);
+    valid=Check(alias->GetValue(3)==29,"mutable VTK resize did not detach safely from an external backing buffer")&&valid;
+    alias=nullptr;
+    return Check(owner.expired(),"shared VTK buffer leaked its backing owner")&&valid;
+}
+bool GetBackedCellsValid()
+{
+    std::weak_ptr<DataArrayStorage> owner;
+    auto cells=vtkSmartPointer<vtkCellArray>::New();
+    {
+        ResultArrayScope scope(0);
+        DataArray<std::uint64_t> faces{0,1,2},offsets{0,3};owner=faces.get_allocator().storage;
+        auto vertices=vtkSmartPointer<BackedVtkArray<std::uint64_t,vtkTypeInt64Array>>::New();
+        auto ends=vtkSmartPointer<BackedVtkArray<std::uint64_t,vtkTypeInt64Array>>::New();
+        vertices->SetValues(std::move(faces));ends->SetValues(std::move(offsets));
+        cells->SetData(ends,vertices);scope.Finish();
+        if(!Check(cells->GetConnectivityArray()==vertices.GetPointer()
+            &&vertices->GetValues()&&vertices->GetValues()->data()==reinterpret_cast<const void*>(cells->GetConnectivityArray()->GetVoidPointer(0)),
+            "cell-array input replaced its backed array shell or lost direct formal-array adoption"))return false;
+    }
+    vtkIdType count=0;const vtkIdType* ids=nullptr;cells->GetCellAtId(0,count,ids);
+    if(!Check(!owner.expired()&&count==3&&ids[0]==0&&ids[1]==1&&ids[2]==2,
+        "cell array lost its immutable storage owner"))return false;
+    cells=nullptr;return Check(owner.expired(),"cell array kept a released backing file alive");
+}
 } // namespace
 
 int main()
 {
-    return GetBorrowedRenderResourceReleased() && GetPreparedResultReleased() && GetArrayLeaseValid()
+    return GetBackedCellsValid() && GetBackedArrayShallowCopyValid() && GetBorrowedRenderResourceReleased() && GetPreparedResultReleased() && GetArrayLeaseValid()
         && GetImageRoundTripValid()
         && GetScalarRangeReuseValid()
         && GetScalarRangeNonfiniteValid()

@@ -68,7 +68,7 @@ void Benchmark(std::size_t count, std::size_t repeats) {
         const auto table = std::dynamic_pointer_cast<const RecordTablePayload>(tx.outputs[2].payload);
         Require(table && table->GetValid() && table->GetRowCount()==count && table->GetColumns().size()==6,
                 "Published residual table must retain all six columns and all rows.");
-        Require(std::get<std::vector<double>>(table->GetColumns()[1].values).back()==static_cast<double>((count-1)%17),
+        Require(std::get<DataArray<double>>(table->GetColumns()[1].values).back()==static_cast<double>((count-1)%17),
                 "Published last residual must retain its value.");
         PROCESS_MEMORY_COUNTERS_EX memory{}; memory.cb = sizeof(memory);
         Require(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)),

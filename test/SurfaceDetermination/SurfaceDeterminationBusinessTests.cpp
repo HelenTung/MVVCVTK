@@ -101,9 +101,18 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
         && otherRoiResult.parameterFingerprint != first.parameterFingerprint,
         "ROI identity participates in the surface fingerprint even for equal geometry");
     const auto refused =
-        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 64 * 1024, [] { return false; }, {});
+        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 64 * 1024-1, [] { return false; }, {});
     c.Get(refused.failureReason == SurfaceFailureReason::BudgetExceeded && refused.points.empty(),
-          "explicit mesh budget refuses allocation before publication");
+          "insufficient fixed workspace refuses the candidate before publication");
+    const auto backed=SurfaceDeterminationAlgorithm::BuildSurface(source,GetParams(),64*1024,[]{return false;},{});
+    const auto reference=Run(source,GetParams());
+    bool sameBacked=backed.status==SurfaceResultStatus::Succeeded&&backed.points.size()==reference.points.size()
+        &&backed.triangleIndices==reference.triangleIndices&&backed.triangleValidity==reference.triangleValidity
+        &&backed.objects.size()==reference.objects.size()&&backed.initialIsoValue==reference.initialIsoValue;
+    if(sameBacked)for(std::size_t i=0;i<backed.points.size();++i)sameBacked=sameBacked
+        &&backed.points[i].positionModel==reference.points[i].positionModel&&backed.points[i].flags==reference.points[i].flags
+        &&backed.points[i].objectIndex==reference.points[i].objectIndex;
+    c.Get(sameBacked,"backing storage preserves every point, face, object and threshold when logical result exceeds heap target");
 }
 void TestReviewedFailureBoundaries(Checks &c)
 {

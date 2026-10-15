@@ -6,12 +6,13 @@
 #include "Support/RoiSelection.h"
 #include <QPointer>
 #include <QFile>
+#include <QSaveFile>
 #include <QTextStream>
 #include <cmath>
 namespace Manual {
 namespace {
 QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature,QJsonObject& formalStatistics,
-    std::size_t objectOffset=0,std::size_t objectLimit=256)
+    std::size_t objectOffset=0,std::size_t objectLimit=256,std::shared_ptr<const SurfaceGenerationSnapshot> anchored={})
 {
     const auto state = feature->GetState();
     QJsonObject summary{{"stage", static_cast<int>(state.stage)}, {"failureReason", static_cast<int>(state.failureReason)},
@@ -21,6 +22,13 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
         {"lowContrastPoints", QString::number(state.lowContrastPointCount)}, {"rejectedPoints", QString::number(state.rejectedPointCount)},
         {"truncatedPoints", QString::number(state.truncatedPointCount)}, {"error", QString::fromStdString(state.errorMessage)}};
     summary["purpose"] = static_cast<int>(state.purpose);
+    summary["isDisplayComplete"]=state.isDisplayComplete;summary["hasDisplayFailure"]=state.hasDisplayFailure;
+    summary["displayRequestedBatches"]=QString::number(state.displayRequestedBatches);summary["displayLoadedBatches"]=QString::number(state.displayLoadedBatches);
+    summary["displayMessage"]=QString::fromStdString(state.displayMessage);
+    summary["hasDisplayGeometry"]=state.displayLoadedBatches>0;
+    summary["selectionGeneration"]=GetRefText(state.selectionGeneration);
+    summary["selectedObject"]=state.selectedObject?QJsonValue(QString::number(*state.selectedObject)):QJsonValue();
+    summary["isSelectionIsolated"]=state.isSelectionIsolated;summary["isObjectPickingEnabled"]=state.isObjectPickingEnabled;
     summary["taskDiagnostics"]=QJsonObject{{"points",summary["points"]},{"acceptedPoints",summary["acceptedPoints"]},{"rejectedPoints",summary["rejectedPoints"]},{"purpose",summary["purpose"]}};
     const auto describeEstimate=[](const SurfaceIsoEstimate& value) {
         QJsonObject result{{"iso",value.isoValue},{"samples",QString::number(value.sampleCount)},{"isAutomatic",value.sampleCount>0}};
@@ -33,8 +41,16 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     summary["previewRequestId"] = preview ? QString::number(preview->requestId) : QString();
     summary["previewPoints"]=preview && preview->points?QString::number(preview->points->size()):QString();
     // 只在当前调用范围持有正式网格；预览和估计不替换正式结果身份。
-    const auto snapshot = feature->GetSurfaceSnapshot();
+    const auto snapshot = anchored ? anchored : feature->GetSurfaceSnapshot();
     if (!snapshot) return summary;
+    if(anchored) {
+        const auto currentTask=summary;
+        summary={{"currentTask",currentTask},{"requestId",QString::number(snapshot->requestId)},
+            {"source",GetRefText(snapshot->sourceRevision)},{"purpose",static_cast<int>(snapshot->purpose)},
+            {"stage",static_cast<int>(SurfaceDeterminationStage::Ready)},{"progress",1.0},
+            {"failureReason",static_cast<int>(SurfaceFailureReason::None)},{"error",QString()}};
+        if(snapshot->isoEstimate)summary["isoEstimate"]=describeEstimate(*snapshot->isoEstimate);
+    }
     summary["mesh"] = GetRefText(snapshot->meshRevision);
     summary["generation"]=GetRefText(snapshot->dataRevision);summary["selectedAreaMM2"]=snapshot->selectedAreaMM2;summary["selectionToleranceMM"]=snapshot->selectionToleranceMM;summary["selectionMesh"]=GetRefText(snapshot->selectionMeshRevision);
     summary["formalSource"]=GetRefText(snapshot->sourceRevision);
@@ -48,16 +64,17 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     const auto objectCount=snapshot->objects?snapshot->objects->size():0;
     if(objectOffset>objectCount)throw std::invalid_argument("对象分页偏移超过完整对象数量");
     const auto objectEnd=objectOffset+std::min(objectLimit,objectCount-objectOffset);
-    for(auto index=objectOffset;index<objectEnd;++index) {
-        const auto& object=(*snapshot->objects)[index];
-        objects.append(QJsonObject{{"objectIndex", static_cast<int>(object.objectIndex)}, {"closed", object.isClosed},
+    const auto page=snapshot->GetObjectPage(objectOffset,objectLimit);
+    if(!page)throw std::invalid_argument("对象页不可读");
+    for(const auto& object:page->objects) {
+        objects.append(QJsonObject{{"objectIndex", QString::number(object.objectIndex)}, {"closed", object.isClosed},
             {"manifold", object.isManifold}, {"truncated", object.isTruncated}, {"orientationValid", object.isOrientationValid},
             {"areaValidity", static_cast<int>(object.areaValidity)}, {"volumeValidity", static_cast<int>(object.volumeValidity)},
             {"area", object.areaModelUnit2 ? QJsonValue(*object.areaModelUnit2) : QJsonValue()},
             {"volume", object.volumeModelUnit3 ? QJsonValue(*object.volumeModelUnit3) : QJsonValue()}});
     }
     summary["objects"] = objects;
-    summary["objectCount"] = snapshot->objects?static_cast<int>(snapshot->objects->size()):0;
+    summary["objectCount"] = static_cast<double>(objectCount);
     summary["objectSummaryLimit"] = static_cast<int>(objectLimit);
     summary["objectOffset"]=QString::number(objectOffset);summary["nextObjectOffset"]=QString::number(objectEnd);
     summary["objectsComplete"]=objectEnd==objectCount;
@@ -71,12 +88,86 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
     const auto parameters = GetJson(R"({"componentSelection":"All","initialIsoValue":null,"materialRange":null,"seedModelPoint":null,"analysisRoi":"","parentGeneration":"","minimumObjectVoxels":"0"})");
     auto requestedParameters=std::make_shared<QJsonObject>();
     auto formalStatistics=std::make_shared<QJsonObject>();
-    panel->AttachAction("ReadObjects",{{"pageOffset","0"},{"pageSize","256"}},
-        [panel,feature,formalStatistics](auto id,const auto& p) {
+    auto listedSurface=std::make_shared<std::shared_ptr<const SurfaceGenerationSnapshot>>();
+    panel->AttachAction("ReadObjects",{{"pageOffset","0"},{"pageSize","256"},{"generation","current"}},
+        [panel,feature,formalStatistics,listedSurface](auto id,const auto& p) {
             const auto offset=GetId(p["pageOffset"]),count=GetId(p["pageSize"]);
             if(!count||count>4096)throw std::invalid_argument("对象分页大小必须为 1～4096");
-            if(!feature->GetSurfaceSnapshot())throw std::invalid_argument("当前没有正式表面对象");
-            panel->SetComplete(id,"Observed",GetSurface(feature,*formalStatistics,static_cast<std::size_t>(offset),static_cast<std::size_t>(count)));
+            DataRevisionRef revision;
+            if(p["generation"]!="current")revision=GetRef(p["generation"]);
+            else if(offset)revision=GetRef(panel->property("surfaceObjectsGeneration").toString());
+            else { const auto snapshot=feature->GetSurfaceSnapshot();if(snapshot)revision=snapshot->dataRevision; }
+            const auto snapshot=*listedSurface&&(*listedSurface)->dataRevision==revision?*listedSurface:feature->GetSurfaceSnapshot(revision);
+            if(!GetDataRevisionRefValid(revision)||!snapshot)throw std::invalid_argument("正式表面修订不可读；请从第一页显式刷新");
+            *listedSurface=snapshot;
+            panel->setProperty("surfaceObjectsGeneration",GetRefText(revision));
+            const auto page=snapshot->GetObjectPage(offset,static_cast<std::size_t>(count));
+            if(!page)throw std::invalid_argument("表面对象页不可读");
+            QJsonArray rows,ids;
+            for(const auto& object:page->objects) {
+                rows.append(QJsonArray{QString::number(object.objectIndex),QString::number(object.pointCount),QString::number(object.triangleCount),
+                    object.areaModelUnit2?QJsonValue(*object.areaModelUnit2):QJsonValue(),object.volumeModelUnit3?QJsonValue(*object.volumeModelUnit3):QJsonValue(),
+                    static_cast<int>(object.areaValidity),static_cast<int>(object.volumeValidity)});
+                ids.append(QString::number(object.objectIndex));
+            }
+            auto* widget=panel->GetStatisticsWidget();widget->SetTable({"对象编号","点数","三角形数","面积","体积","面积有效性","体积有效性"},rows);widget->ShowTable();
+            widget->setProperty("surfaceObjectIds",ids);widget->setProperty("surfaceObjectNext",QString::number(page->next));widget->setProperty("surfaceObjectTotal",QString::number(page->total));
+            widget->setProperty("surfaceObjectGeneration",GetRefText(revision));
+            widget->onRow=[panel,widget](int row){const auto ids=widget->property("surfaceObjectIds").toJsonArray();if(row<0||row>=ids.size())return;
+                panel->SendAction("SelectObject",{{"objectIndex",ids[row]},{"generation",widget->property("surfaceObjectGeneration").toString()}});};
+            panel->SetComplete(id,"Observed",GetSurface(feature,*formalStatistics,static_cast<std::size_t>(offset),static_cast<std::size_t>(count),snapshot));
+        },TestPolicy::Read);
+    panel->AttachAction("NextObjectPage",{},[panel](auto id,const auto&){
+        auto* widget=panel->GetStatisticsWidget();const auto next=widget->property("surfaceObjectNext").toString().toULongLong();
+        if(next>=widget->property("surfaceObjectTotal").toString().toULongLong())throw std::invalid_argument("当前已是表面对象列表末页");
+        auto parameters=panel->GetActionParameters("ReadObjects");parameters["pageOffset"]=QString::number(next);parameters["generation"]=widget->property("surfaceObjectGeneration").toString();
+        panel->SendAction("ReadObjects",parameters);panel->SetComplete(id,"Observed");
+    },TestPolicy::Read);
+    const auto getObjectSnapshot=[panel,feature,listedSurface](const QJsonObject& p){
+        const auto text=p["generation"].toString();
+        const auto revision=text=="current"?DataRevisionRef{}:GetRef(text=="listed"?panel->property("surfaceObjectsGeneration").toString():text);
+        const auto snapshot=text=="current"?feature->GetSurfaceSnapshot():*listedSurface&&(*listedSurface)->dataRevision==revision?*listedSurface:feature->GetSurfaceSnapshot(revision);
+        if(!snapshot)throw std::invalid_argument("所选正式表面修订不可读");return snapshot;
+    };
+    const auto getObjectIndex=[](const QJsonObject& p){const auto index=GetId(p["objectIndex"]);if(index>UINT32_MAX)throw std::invalid_argument("表面对象编号越界");return static_cast<std::uint32_t>(index);};
+    for(const bool isolated:{false,true})panel->AttachAction(isolated?"IsolateObject":"SelectObject",{{"generation","listed"},{"objectIndex","0"}},
+        [panel,feature,getObjectSnapshot,getObjectIndex,isolated](auto id,const auto& p){
+            const auto snapshot=getObjectSnapshot(p);const auto object=getObjectIndex(p);
+            const auto admission=feature->SendRequest(SurfaceObjectSelectionRequest{snapshot->dataRevision,object,isolated});
+            const bool accepted=admission.status==SurfaceAdmissionStatus::Accepted;
+            panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"generation",GetRefText(snapshot->dataRevision)},{"objectIndex",QString::number(object)},{"isIsolated",isolated}});
+            if(accepted)panel->SendAction("LocateObject",{{"generation",GetRefText(snapshot->dataRevision)},{"objectIndex",QString::number(object)}});
+        },TestPolicy::View);
+    panel->AttachAction("ClearObjectSelection",{},[panel,feature](auto id,const auto&){
+        const auto snapshot=feature->GetSurfaceSnapshot();
+        const bool accepted=snapshot&&feature->SendRequest(SurfaceObjectSelectionRequest{snapshot->dataRevision,{},false}).status==SurfaceAdmissionStatus::Accepted;
+        panel->SetComplete(id,accepted?"Succeeded":"Rejected");
+    },TestPolicy::View);
+    panel->AttachAction("ObjectPicking",{{"isEnabled",false}},[panel,feature](auto id,const auto& p){
+        const bool accepted=feature->SendRequest(SurfaceObjectPickModeRequest{GetBool(p,"isEnabled")}).status==SurfaceAdmissionStatus::Accepted;
+        panel->SetComplete(id,accepted?"Succeeded":"Rejected",{{"isObjectPickingEnabled",feature->GetState().isObjectPickingEnabled}});
+    },TestPolicy::View);
+    panel->AttachAction("LocateObject",{{"generation","listed"},{"objectIndex","0"}},[panel,getObjectSnapshot,getObjectIndex](auto id,const auto& p){
+        const auto snapshot=getObjectSnapshot(p);const auto page=snapshot->GetObjectPoints(getObjectIndex(p),0,1);
+        if(!page||page->points.empty())throw std::invalid_argument("该对象没有可定位的正式网格点");
+        const auto world=panel->GetContext().workflow.getModelWorldPosition(snapshot->sourceRevision,page->points[0].positionModel);
+        HostSessionSetRequest request;request.cursor=HostCursorParams{world,-1};panel->SendHost(id,std::move(request));
+    },TestPolicy::View);
+    for(const bool points:{true,false})panel->AttachAction(points?"ReadObjectPoints":"ReadObjectTriangles",
+        {{"generation","listed"},{"objectIndex","0"},{"pageOffset","0"},{"pageSize","128"}},
+        [panel,getObjectSnapshot,getObjectIndex,points](auto id,const auto& p){
+            const auto snapshot=getObjectSnapshot(p);const auto object=getObjectIndex(p);const auto offset=GetId(p["pageOffset"]),count=GetId(p["pageSize"]);
+            if(!count||count>4096)throw std::invalid_argument("明细页大小必须为 1～4096");
+            QJsonArray rows;std::uint64_t next=0,total=0,first=0;
+            if(points){const auto page=snapshot->GetObjectPoints(object,offset,static_cast<std::size_t>(count));if(!page)throw std::invalid_argument("对象点范围不可读");
+                first=page->firstPoint;next=page->next;total=page->total;
+                for(std::size_t i=0;i<page->points.size();++i){const auto& point=page->points[i];rows.append(QJsonObject{{"pointId",QString::number(first+i)},{"position",GetValues(point.positionModel)},{"flags",QString::number(static_cast<std::uint32_t>(point.flags))}});}
+            }else{const auto page=snapshot->GetObjectTriangles(object,offset,static_cast<std::size_t>(count));if(!page)throw std::invalid_argument("对象三角形范围不可读");
+                first=page->firstTriangle;next=page->next;total=page->total;
+                for(std::size_t i=0;i<page->triangles.size();++i){const auto& triangle=page->triangles[i];rows.append(QJsonObject{{"triangleId",QString::number(first+i)},
+                    {"vertices",QJsonArray{QString::number(triangle.vertices[0]),QString::number(triangle.vertices[1]),QString::number(triangle.vertices[2])}},{"validity",triangle.validity}});}}
+            panel->SetComplete(id,"Observed",{{"generation",GetRefText(snapshot->dataRevision)},{"objectIndex",QString::number(object)},
+                {"first",QString::number(first)},{"next",QString::number(next)},{"total",QString::number(total)},{"rows",rows}});
         },TestPolicy::Read);
     {
         const auto send=[panel, feature,requestedParameters,formalStatistics](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
@@ -222,13 +313,15 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         auto snapshot=feature->GetSurfaceSnapshot();
         if(!snapshot)snapshot=feature->GetPreviewSnapshot();
         if(!snapshot||!snapshot->points)throw std::runtime_error("surface unavailable");
-        QFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
+        QSaveFile file(GetText(p,"outputPath"));if(!file.open(QIODevice::WriteOnly|QIODevice::Text))throw std::runtime_error("export open failed");
         QTextStream out(&file);out.setRealNumberPrecision(17);
-        out<<"vertex_id,x_mm,y_mm,z_mm,nx,ny,nz,flags,support_ratio,fit_residual,localization_sigma_mm\n";
-        std::size_t i=0;for(const auto& v:*snapshot->points){out<<qulonglong(i++);for(auto x:v.positionModel)out<<','<<x;for(auto x:v.normalModel)out<<','<<x;out<<','<<int(v.flags)<<','<<v.validSupportRatio<<','<<v.fitResidual<<','<<v.estimatedLocalizationSigma<<'\n';}
+        out<<"object_id,point_id";
+        if(GetDataRevisionRefValid(snapshot->dataRevision))out<<" [mvvcvtk-result="<<GetRefText(snapshot->dataRevision)<<']';
+        out<<",x_mm,y_mm,z_mm,nx,ny,nz,flags,support_ratio,fit_residual,localization_sigma_mm\n";
+        std::size_t i=0;for(const auto& v:*snapshot->points){out<<qulonglong(v.objectIndex)<<','<<qulonglong(i++);for(auto x:v.positionModel)out<<','<<x;for(auto x:v.normalModel)out<<','<<x;out<<','<<int(v.flags)<<','<<v.validSupportRatio<<','<<v.fitResidual<<','<<v.estimatedLocalizationSigma<<'\n';}
         out.flush();if(file.error()!=QFile::NoError)throw std::runtime_error("surface write failed");
-        QJsonArray objects;if(snapshot->objects)for(const auto& o:*snapshot->objects)objects.append(QJsonObject{{"objectIndex",int(o.objectIndex)},{"area",o.areaModelUnit2?QJsonValue(*o.areaModelUnit2):QJsonValue()},{"volume",o.volumeModelUnit3?QJsonValue(*o.volumeModelUnit3):QJsonValue()},{"closed",o.isClosed},{"manifold",o.isManifold}});
-        panel->SetComplete(id,"Exported",{{"points",QString::number(i)},{"triangles",QString::number(snapshot->triangleIndices?snapshot->triangleIndices->size()/3:0)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"objects",objects},{"coordinateFrame",QString::fromStdString(snapshot->coordinateFrame)}});
+        if(!file.commit())throw std::runtime_error("surface export commit failed");
+        panel->SetComplete(id,"Exported",{{"points",QString::number(i)},{"triangles",QString::number(snapshot->triangleIndices?snapshot->triangleIndices->size()/3:0)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"objectCount",QString::number(snapshot->objects?snapshot->objects->size():0)},{"generation",GetRefText(snapshot->dataRevision)},{"coordinateFrame",QString::fromStdString(snapshot->coordinateFrame)}});
     },TestPolicy::Read);
 #if defined(MANUAL_ALIGNMENT)
     panel->AttachAction("OpenAlignment", {}, [panel,feature](auto id, const auto&) {
@@ -280,6 +373,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         summary["isOverlayVisible"] = state.isOverlayVisible;
         const auto displayKey = hasPreview ? QString::number(preview->requestId) : summary["mesh"].toString();
         panel->GetParameterEditor("Visibility")->GetField("isVisible")->SetAppliedBoolean(summary["hasMesh"].toBool() ? QJsonValue(state.isOverlayVisible) : QJsonValue(), displayKey, summary["hasMesh"].toBool() ? QString() : "当前没有可用表面");
+        panel->GetParameterEditor("ObjectPicking")->GetField("isEnabled")->SetAppliedBoolean(state.isObjectPickingEnabled,GetRefText(state.selectionGeneration));
         summary["hasMeasurement"] = measured;
         summary["isFormalCurrent"]=current;
         try {

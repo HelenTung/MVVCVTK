@@ -16,6 +16,13 @@
 #include <vector>
 
 class OverlayService;
+class vtkRenderer;
+namespace FeatureInternal {class ReadTaskQueue;}
+struct GapDisplayLoadState final {
+    bool isComplete=true,hasFailure=false;
+    std::uint64_t requested=0,loaded=0;
+    std::string message;
+};
 
 struct GapViewRequest final {
     // GapHost 从 DataGraph 取得的不可变 typed view；存在时只共享 scalar，不复制整卷。
@@ -31,6 +38,8 @@ struct GapViewRequest final {
     GapRoiPolicy roiPolicy = GapRoiPolicy::WholeIfIntersects;
     bool isEvaluationOnly = false;
     std::shared_ptr<const GapAnalysisResult> savedParent;
+    // Host 只移交不可变目录 owner；全量候选复制在 worker 的后备存储中完成。
+    std::shared_ptr<const DataArray<VoidRegion>> savedParentVoids;
     std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets; // 轴向与 2D label overlay 目标配对。
 };
@@ -91,6 +100,11 @@ public:
     void ClearView();
     bool GetViewOn() const;
     bool GetDisplayTickNeeded() const;
+    std::shared_ptr<FeatureInternal::ReadTaskQueue> GetReadQueue() const;
+    GapDisplayLoadState GetDisplayLoadState() const;
+    bool SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,
+        std::optional<std::int32_t> regionId,bool isIsolated,std::function<bool()> accept={});
+    std::optional<std::int32_t> GetPickedRegion(const std::string& viewId,int x,int y,vtkRenderer* renderer);
     // 宿主主线程 tick 只消费已接纳 worker 的终态；inputImage 保留为兼容形参，不再延迟启动任务。
     // 非绑定线程调用会被拒绝，不读取或修改 VTK/overlay 会话状态。
     // 返回 true 表示本次 tick 已挂接新的可见 overlay；Host 据此提交

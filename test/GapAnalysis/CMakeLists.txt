@@ -34,6 +34,7 @@ function(BuildGapTests target outputName projectLabel)
             mvvcvtk_host_test_internal
             MVVCVTK::Host
             MVVCVTK::GapAnalysis
+            MVVCVTKInternal::FeatureSupport
             ${MVVCVTK_VTK_TARGETS}
     )
 
@@ -55,6 +56,15 @@ add_test(NAME GapAnalysis.DisplayMesh COMMAND gap_display_mesh_tests)
 SetTestRuntime(GapAnalysis.DisplayMesh gap_display_mesh_tests)
 # 调试 CRT 下逐个提取 7 万个独立表面耗时较长；此超时只限制测试运行，不改变几何/内存断言。
 set_tests_properties(GapAnalysis.DisplayMesh PROPERTIES TIMEOUT 600)
+
+add_executable(gap_result_reader_tests GapResultReaderTests.cpp)
+target_include_directories(gap_result_reader_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/src")
+target_link_libraries(gap_result_reader_tests PRIVATE MVVCVTK::GapAnalysis MVVCVTKInternal::FeatureSupport)
+SetTargetDefaults(gap_result_reader_tests)
+set_target_properties(gap_result_reader_tests PROPERTIES FOLDER "MVVCVTK/test/Automation")
+add_test(NAME GapAnalysis.ResultReader COMMAND gap_result_reader_tests)
+SetTestRuntime(GapAnalysis.ResultReader gap_result_reader_tests)
 
 BuildGapTests(
     mvvcvtk_gap_main_tests
