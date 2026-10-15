@@ -1835,13 +1835,13 @@ void CheckSharedRoi(TestWindow& window)
 }
 void StartSelfTest(TestWindow& window)
 {
+    QCoreApplication::processEvents();
     // 重现就绪观察在退出内层事件循环时回退；不能把暂态回退当成已经超时。
     int phase=0;QTimer first,settled;first.setSingleShot(true);settled.setSingleShot(true);
     QObject::connect(&first,&QTimer::timeout,&first,[&]{phase=1;});
     QObject::connect(&settled,&QTimer::timeout,&settled,[&]{phase=3;});first.start(0);
-    Check(Wait([&]{if(phase==1){phase=2;return true;}if(phase==2){phase=0;settled.start(0);}return phase==3;},1000)
+    Check(Wait([&]{if(phase==1){phase=2;return true;}if(phase==2){phase=0;settled.start(0);}return phase==3;})
         && phase==3,"event wait retries transient readiness without weakening its final predicate or deadline");
-    QCoreApplication::processEvents();
     CheckFourViewGeometry(window);
     CheckUiAndRecords(window);
     CheckBusinessWorkflow(window);
