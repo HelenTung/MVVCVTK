@@ -100,12 +100,13 @@ void TestBlocksRoiOverridesAndInitialMesh(Checks &c)
     c.Get(otherRoiResult.status == SurfaceResultStatus::Succeeded
         && otherRoiResult.parameterFingerprint != first.parameterFingerprint,
         "ROI identity participates in the surface fingerprint even for equal geometry");
-    const auto refused =
-        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 64 * 1024-1, [] { return false; }, {});
-    c.Get(refused.failureReason == SurfaceFailureReason::BudgetExceeded && refused.points.empty(),
-          "insufficient fixed workspace refuses the candidate before publication");
+    const auto tinyTarget =
+        SurfaceDeterminationAlgorithm::BuildSurface(source, GetParams(), 0, [] { return false; }, {});
     const auto backed=SurfaceDeterminationAlgorithm::BuildSurface(source,GetParams(),64*1024,[]{return false;},{});
     const auto reference=Run(source,GetParams());
+    c.Get(tinyTarget.status==SurfaceResultStatus::Succeeded&&tinyTarget.points.size()==reference.points.size()
+        &&tinyTarget.triangleIndices==reference.triangleIndices&&tinyTarget.triangleValidity==reference.triangleValidity,
+        "a tiny working target still completes the same formal geometry through backing storage");
     bool sameBacked=backed.status==SurfaceResultStatus::Succeeded&&backed.points.size()==reference.points.size()
         &&backed.triangleIndices==reference.triangleIndices&&backed.triangleValidity==reference.triangleValidity
         &&backed.objects.size()==reference.objects.size()&&backed.initialIsoValue==reference.initialIsoValue;

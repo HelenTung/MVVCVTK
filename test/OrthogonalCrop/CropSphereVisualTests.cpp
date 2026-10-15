@@ -290,7 +290,7 @@ int GetCropSphereVisualFailures() {
         window->Render();const auto passiveActors=GetActors(*renderer);
         check(passiveActors.rings&&passiveActors.outline&&!passiveActors.shell
             &&passiveActors.rings->GetProperty()->GetOpacity()==1,"passive sphere uses dim opaque curves without shell or handles");
-        passive.SetSphereEditing(true);check(passiveActors.rings&&!passiveActors.rings->GetVisibility(),"editing sphere suppresses duplicate passive volume geometry");
+        passive.SetCurveEditing(true);check(passiveActors.rings&&!passiveActors.rings->GetVisibility(),"editing sphere suppresses duplicate passive volume geometry");
         passive.DetachRenderer(renderer);
     }
     check(renderer->GetViewProps()->GetNumberOfItems()==0,"overlay detach removes all owned resources");

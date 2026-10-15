@@ -66,7 +66,7 @@ struct GapDisplayData final {
 
     static bool GetParamsValid(const GapDisplayParams& params) noexcept
     {
-        if(!params.maxVisibleBatches||params.maxVisibleBatches>UINT_MAX||!AnalysisColorStyle::GetLegendLayoutValid(params) || params.segments.size()>1024 || !std::isfinite(params.opacity) || params.opacity<0 || params.opacity>1)return false;
+        if(!AnalysisColorStyle::GetLegendLayoutValid(params) || params.segments.size()>1024 || !std::isfinite(params.opacity) || params.opacity<0 || params.opacity>1)return false;
         try { return AnalysisColorStyle::GetRampValid(GetColorRamp(params))
             && (params.rangeMode == GapRangeMode::Result
                 || (params.rangeMode == GapRangeMode::SelectedInterval
@@ -114,6 +114,7 @@ struct GapDisplayData final {
             if(isStopping.load())return {};
             if (region.id <= 0
                 || !std::isfinite(region.volumeMM3) || region.volumeMM3 < 0) return {};
+            if(region.voxelCount<=0)continue;
             directory->emplace_back(region.id,region.volumeMM3);
             range[0] = std::min(range[0], double(region.volumeMM3));
             range[1] = std::max(range[1], double(region.volumeMM3));
@@ -125,8 +126,8 @@ struct GapDisplayData final {
         if(std::adjacent_find(directory->begin(),directory->end(),[](const auto& a,const auto& b){return a.first==b.first;})!=directory->end())return {};
         directoryStorage.Finish();
         result->regionVolumes=std::move(directory);
-        result->hasRegions = !regions.empty();
-        if (regions.empty()) range = {0, 0};
+        result->hasRegions = !result->regionVolumes->empty();
+        if (!result->hasRegions) range = {0, 0};
         result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
         auto labels=vtkSmartPointer<GapLabelLookupTable>::New();

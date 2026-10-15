@@ -242,6 +242,8 @@ bool GetLabelRoundTripValid()
     values[1] = 42;
     VtkDataBridge bridge;
     const auto payload = bridge.CreateLabelPayload(labels);
+    // 导入必须隔离外部 VTK；内部移交不能把仍可写的原数组借给正式载荷。
+    values[0]=99;values[1]=100;
     const auto definedPayload = payload
         ? std::make_shared<const LabelMap3DPayload>(
             payload->GetGeometry(),

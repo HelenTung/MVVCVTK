@@ -51,6 +51,7 @@ target_include_directories(gap_display_mesh_tests PRIVATE
 target_link_libraries(gap_display_mesh_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTKInternal::FeatureSupport ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(gap_display_mesh_tests)
+set_target_properties(gap_display_mesh_tests PROPERTIES FOLDER "MVVCVTK/test/Automation")
 vtk_module_autoinit(TARGETS gap_display_mesh_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME GapAnalysis.DisplayMesh COMMAND gap_display_mesh_tests)
 SetTestRuntime(GapAnalysis.DisplayMesh gap_display_mesh_tests)

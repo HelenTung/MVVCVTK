@@ -16,23 +16,24 @@
 #include <numeric>
 
 namespace {
-using Index=std::array<int,3>;
+// 邻域及形态学中间 halo 可越过 int 端点；只有最终域内载荷才收窄。
+using Index=std::array<std::int64_t,3>;
 using Point=std::array<double,3>;
 using Matrix=std::array<double,16>;
 void CheckCancel(const RoiOperationRequest& request);
 // X 连续区间按行保存；稠密选区不再为每个体素分配一个哈希节点。
 class Cells final {
 public:
-    using Runs=std::vector<std::pair<int,int>>;
-    using Rows=std::map<std::array<int,2>,Runs>;
-    struct Span {Index first;int last;};
+    using Runs=std::vector<std::pair<std::int64_t,std::int64_t>>;
+    using Rows=std::map<std::array<std::int64_t,2>,Runs>;
+    struct Span {Index first;std::int64_t last;};
     const Rows& GetRows()const noexcept{return m_rows;}
-    const Runs& GetRow(const std::array<int,2>& row)const{
+    const Runs& GetRow(const std::array<std::int64_t,2>& row)const{
         static const Runs empty;const auto found=m_rows.find(row);return found==m_rows.end()?empty:found->second;
     }
-    void InsertRun(const Index& first,int last){
-        auto& runs=m_rows[{first[1],first[2]}];int low=first[0],high=last;
-        auto begin=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,int x){return std::int64_t(run.second)+1<x;});
+    void InsertRun(const Index& first,std::int64_t last){
+        auto& runs=m_rows[{first[1],first[2]}];std::int64_t low=first[0],high=last;
+        auto begin=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,std::int64_t x){return run.second+1<x;});
         auto end=begin;std::size_t removed=0;
         while(end!=runs.end() && std::int64_t(end->first)<=std::int64_t(high)+1){
             low=std::min(low,end->first);high=std::max(high,end->second);removed+=std::size_t(std::int64_t(end->second)-end->first+1);++end;}
@@ -40,11 +41,7 @@ public:
         if(added>std::numeric_limits<std::size_t>::max()-(m_count-removed))throw std::length_error("ROI member count overflows.");
         begin=runs.erase(begin,end);runs.insert(begin,{low,high});m_count=m_count-removed+added;
     }
-    std::optional<Index> GetFirst(const RoiOperationRequest& request)const{
-        std::optional<Index> first;std::size_t visited=0;for(const auto& row:m_rows){if(!(visited++%1024))CheckCancel(request);Index point{row.second.front().first,row.first[0],row.first[1]};
-            if(!first || point<*first)first=point;}return first;
-    }
-    std::optional<Span> TakeRun(const std::array<int,2>& key,std::int64_t low,std::int64_t high){
+    std::optional<Span> TakeRun(const std::array<std::int64_t,2>& key,std::int64_t low,std::int64_t high){
         const auto row=m_rows.find(key);if(row==m_rows.end())return {};
         auto& runs=row->second;const auto run=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,std::int64_t x){return run.second<x;});
         if(run==runs.end() || run->first>high)return {};
@@ -62,7 +59,7 @@ public:
             else if(++m_run<m_row->second.size())m_x=m_row->second[m_run].first;
             else{++m_row;m_run=0;if(m_row!=m_end)m_x=m_row->second.front().first;}return *this;}
         bool operator!=(const Iterator& other)const{return m_row!=other.m_row || (m_row!=m_end && (m_run!=other.m_run || m_x!=other.m_x));}
-    private:Rows::const_iterator m_row,m_end;std::size_t m_run=0;int m_x=0;
+    private:Rows::const_iterator m_row,m_end;std::size_t m_run=0;std::int64_t m_x=0;
     };
     Iterator begin()const{return {m_rows.begin(),m_rows.end()};}
     Iterator end()const{return {m_rows.end(),m_rows.end()};}
@@ -70,11 +67,11 @@ public:
     bool empty()const noexcept{return !m_count;}
     bool count(const Index& i)const{
         const auto row=m_rows.find({i[1],i[2]});if(row==m_rows.end())return false;
-        const auto& runs=row->second;auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        const auto& runs=row->second;auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](std::int64_t x,const auto& run){return x<run.first;});
         return next!=runs.begin() && std::prev(next)->second>=i[0];
     }
     bool insert(const Index& i){
-        auto& runs=m_rows[{i[1],i[2]}];auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        auto& runs=m_rows[{i[1],i[2]}];auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](std::int64_t x,const auto& run){return x<run.first;});
         if(next!=runs.begin()){
             auto previous=std::prev(next);if(previous->second>=i[0])return false;
             if(std::int64_t(previous->second)+1==i[0]){previous->second=i[0];
@@ -85,12 +82,12 @@ public:
     }
     bool erase(const Index& i){
         const auto row=m_rows.find({i[1],i[2]});if(row==m_rows.end())return false;auto& runs=row->second;
-        auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](int x,const auto& run){return x<run.first;});
+        auto next=std::upper_bound(runs.begin(),runs.end(),i[0],[](std::int64_t x,const auto& run){return x<run.first;});
         if(next==runs.begin())return false;auto run=std::prev(next);if(run->second<i[0])return false;
         if(run->first==run->second)runs.erase(run);
         else if(run->first==i[0])++run->first;
         else if(run->second==i[0])--run->second;
-        else{const int high=run->second;run->second=i[0]-1;runs.insert(next,{i[0]+1,high});}
+        else{const auto high=run->second;run->second=i[0]-1;runs.insert(next,{i[0]+1,high});}
         if(runs.empty())m_rows.erase(row);--m_count;return true;
     }
     template<class Predicate> void Keep(Predicate predicate){
@@ -213,9 +210,14 @@ RoiDefinition Combine(RoiDefinition a,const RoiDefinition& b,RoiNodeKind kind) {
 RoiDefinition GetVoxelDefinition(DataRevisionRef source,std::shared_ptr<const RoiVoxelSet> voxels,std::vector<std::uint64_t> labels={}) {
     RoiNode node;node.primitive.shape=RoiShape::VoxelSet;node.primitive.voxels=std::move(voxels);node.primitive.labels=std::move(labels);return {source,{std::move(node)}};
 }
+RoiVoxelRun GetVoxelRun(const Cells::Span& span,std::uint32_t label) {
+    for(const auto value:span.first)Require(value>=INT_MIN && value<=INT_MAX,RoiError::TooLarge,"ROI output index overflow.");
+    Require(span.last>=span.first[0] && span.last<=INT_MAX,RoiError::TooLarge,"ROI output run overflow.");
+    return {{int(span.first[0]),int(span.first[1]),int(span.first[2])},int(span.last),label};
+}
 RoiDefinition GetVoxelDefinition(DataRevisionRef source,const Cells& cells) {
     std::vector<RoiVoxelRun> values;
-    for(const auto& row:cells.GetRows())for(const auto& run:row.second)values.push_back({{run.first,row.first[0],row.first[1]},run.second,1});
+    for(const auto& row:cells.GetRows())for(const auto& run:row.second)values.push_back(GetVoxelRun({{run.first,row.first[0],row.first[1]},run.second},1));
     return GetVoxelDefinition(source,std::make_shared<const RoiVoxelSet>(std::move(values)));
 }
 Cells GetCells(const ImageGrid3DPayload& image,const RoiReadSnapshot& read,const RoiOperationRequest& request) {
@@ -228,7 +230,8 @@ std::vector<Index> GetNeighbours(RoiConnectivity connectivity) {
         if ((x||y||z) && (connectivity==RoiConnectivity::Full || std::abs(x)+std::abs(y)+std::abs(z)==1)) offsets.push_back({x,y,z});return offsets;
 }
 Index Add(const Index& a,const Index& b) {
-    Index result{};for (int k=0;k<3;++k) {const auto n=static_cast<std::int64_t>(a[k])+b[k];Require(n>=INT_MIN && n<=INT_MAX,RoiError::TooLarge,"ROI index overflow.");result[k]=static_cast<int>(n);}return result;
+    // 输入 int 网格加最多两步 int 半径，临时索引始终在 int64_t 内。
+    return {a[0]+b[0],a[1]+b[1],a[2]+b[2]};
 }
 std::vector<Cells::Span> GetKernel(const GridGeometry3D& grid,const RoiMorphologyParams& params,const RoiOperationRequest& request) {
     Require(std::isfinite(params.radius) && params.radius>=0,RoiError::InvalidRequest,"ROI radius must be nonnegative.");
@@ -239,7 +242,7 @@ std::vector<Cells::Span> GetKernel(const GridGeometry3D& grid,const RoiMorpholog
     std::vector<Cells::Span> kernel;
     // 固定 Y/Z 后，物理球沿 X 的交集是一个区间；在离散最小值两侧二分，完全沿用 hypot 包含规则。
     const long double a=j[0]*j[0]+j[4]*j[4]+j[8]*j[8];
-    for(int z=-halo[2];z<=halo[2];++z)for(int y=-halo[1];y<=halo[1];++y) {
+    for(std::int64_t z=-halo[2];z<=halo[2];++z)for(std::int64_t y=-halo[1];y<=halo[1];++y) {
         CheckCancel(request);const auto p=Transform(j,{0.,double(y),double(z)});
         const long double b=j[0]*p[0]+j[4]*p[1]+j[8]*p[2];
         const auto inside=[&](std::int64_t x){const auto q=Transform(j,{double(x),double(y),double(z)});return std::hypot(q[0],q[1],q[2])<=params.radius;};
@@ -279,24 +282,25 @@ Cells Morph(const Cells& cells,const std::vector<Cells::Span>& kernel,bool dilat
             if(!(visited++%1024))CheckCancel(request);
             const auto low=Add({run.first,row.first[0],row.first[1]},d.first),high=Add({run.second,row.first[0],row.first[1]},{d.last,d.first[1],d.first[2]});
             const auto& shifted=cells.GetRow({low[1],low[2]});
-            auto other=std::lower_bound(shifted.begin(),shifted.end(),low[0],[](const auto& r,int x){return r.second<x;});
+            auto other=std::lower_bound(shifted.begin(),shifted.end(),low[0],[](const auto& r,std::int64_t x){return r.second<x;});
             for(;other!=shifted.end() && other->first<=high[0];++other){
                 if(!(visited++%1024))CheckCancel(request);
                 const auto first=std::max(std::int64_t(run.first),std::int64_t(other->first)-d.first[0]);
                 const auto last=std::min(std::int64_t(run.second),std::int64_t(other->second)-d.last);
-                if(first<=last)intersection.InsertRun({static_cast<int>(first),row.first[0],row.first[1]},static_cast<int>(last));
+                if(first<=last)intersection.InsertRun({first,row.first[0],row.first[1]},last);
             }
         }out=std::move(intersection);
     }return out;
 }
-std::vector<Cells> GetComponents(Cells remaining,RoiConnectivity connectivity,const RoiOperationRequest& request) {
+struct Component final {Index first;Cells cells;};
+std::vector<Component> GetComponents(Cells remaining,RoiConnectivity connectivity,const RoiOperationRequest& request) {
     Require(connectivity==RoiConnectivity::Faces || connectivity==RoiConnectivity::Full,RoiError::InvalidRequest,"Invalid ROI connectivity.");
-    std::vector<Cells> components;std::size_t visited=0;
-    // 分量顺序仍由最小 (x,y,z) 成员确定；队列与分量均保留行区间。
-    while(const auto seed=remaining.GetFirst(request)){
-        CheckCancel(request);Cells component;std::deque<Cells::Span> frontier;
-        const auto append=[&](Cells::Span span){component.InsertRun(span.first,span.last);frontier.push_back(span);};
-        append(*remaining.TakeRun({(*seed)[1],(*seed)[2]},(*seed)[0],(*seed)[0]));
+    std::vector<Component> components;std::size_t visited=0;
+    // 任取剩余行，提取时记录分量最小坐标；最后统一排序，避免每个孤岛扫描所有行。
+    while(!remaining.empty()){
+        CheckCancel(request);const auto seed=*remaining.begin();Component component{seed,{}};std::deque<Cells::Span> frontier;
+        const auto append=[&](Cells::Span span){component.first=std::min(component.first,span.first);component.cells.InsertRun(span.first,span.last);frontier.push_back(span);};
+        append(*remaining.TakeRun({seed[1],seed[2]},seed[0],seed[0]));
         while(!frontier.empty()){
             if(!(visited++%1024))CheckCancel(request);const auto span=frontier.front();frontier.pop_front();
             for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y){
@@ -305,7 +309,9 @@ std::vector<Cells> GetComponents(Cells remaining,RoiConnectivity connectivity,co
                 while(const auto joined=remaining.TakeRun({next[1],next[2]},std::int64_t(span.first[0])-margin,std::int64_t(span.last)+margin))append(*joined);
             }
         }components.push_back(std::move(component));
-    }return components;
+    }
+    std::sort(components.begin(),components.end(),[&](const auto& a,const auto& b){if(!(visited++%1024))CheckCancel(request);return a.first<b.first;});
+    CheckCancel(request);return components;
 }
 template<class T> double ReadValue(const std::uint8_t* bytes) {T value;std::memcpy(&value,bytes,sizeof(T));return static_cast<double>(value);}
 double GetGray(const ImageGrid3DPayload& image,const Index& i) {
@@ -507,28 +513,29 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                     if (params.operation==RoiComponentOperation::FillHoles) {
                         std::array<int,6> extent=grid.extent;
                         if(cells.empty()){add(GetVoxelDefinition(request.source,cells));return;}
-                        for(int a=0;a<3;++a){int low=INT_MAX,high=INT_MIN;for(const auto& i:cells){low=std::min(low,i[a]);high=std::max(high,i[a]);}extent[a*2]=static_cast<int>(std::max(std::int64_t(grid.extent[a*2]),std::int64_t(low)-1));extent[a*2+1]=static_cast<int>(std::min(std::int64_t(grid.extent[a*2+1]),std::int64_t(high)+1));}
+                        for(int a=0;a<3;++a){std::int64_t low=INT_MAX,high=INT_MIN;for(const auto& i:cells){low=std::min(low,i[a]);high=std::max(high,i[a]);}extent[a*2]=static_cast<int>(std::max(std::int64_t(grid.extent[a*2]),low-1));extent[a*2+1]=static_cast<int>(std::min(std::int64_t(grid.extent[a*2+1]),high+1));}
                         const auto inside=[&](const Index& i){for(int a=0;a<3;++a)if(i[a]<extent[a*2] || i[a]>extent[a*2+1])return false;return true;};
                         Cells background;
                         for(std::int64_t z=extent[4];z<=extent[5];++z)for(std::int64_t y=extent[2];y<=extent[3];++y){CheckCancel(request);for(std::int64_t x=extent[0];x<=extent[1];++x){Index i{int(x),int(y),int(z)};if(GetValidCell(*image,i) && !cells.count(i))Insert(background,i,request);}}
                         const auto components=GetComponents(std::move(background),params.connectivity,request);
                         const auto neighbours=GetNeighbours(params.connectivity);
+                        std::size_t visited=0;
                         for (const auto& component:components) {
-                            bool exterior=false;for (const auto& i:component) {for (const auto& d:neighbours) if (!inside(Add(i,d)) || !GetValidCell(*image,Add(i,d))) {exterior=true;break;}if (exterior) break;}
-                            if (!exterior && (!params.maximumHoleVolume || component.size()*volume<=params.maximumHoleVolume)) for(const auto& i:component)Insert(cells,i,request);
+                            bool exterior=false;for (const auto& i:component.cells) {if(!(visited++%1024))CheckCancel(request);for (const auto& d:neighbours) {const auto next=Add(i,d);if (!inside(next) || !GetValidCell(*image,next)) {exterior=true;break;}}if (exterior) break;}
+                            if (!exterior && (!params.maximumHoleVolume || component.cells.size()*volume<=params.maximumHoleVolume)) for(const auto& i:component.cells){if(!(visited++%1024))CheckCancel(request);Insert(cells,i,request);}
                         }add(GetVoxelDefinition(request.source,cells));
                     } else {
                         const auto components=GetComponents(std::move(cells),params.connectivity,request);
-                        std::size_t largest=0;for (std::size_t i=0;i<components.size();++i) {result.componentVoxelCounts.push_back(components[i].size());if (components[i].size()>components[largest].size()) largest=i;}
+                        std::size_t largest=0;for (std::size_t i=0;i<components.size();++i) {result.componentVoxelCounts.push_back(components[i].cells.size());if (components[i].cells.size()>components[largest].cells.size()) largest=i;}
                         std::vector<RoiVoxelRun> values;std::vector<std::uint32_t> selected;
                         Require(components.size()<UINT32_MAX,RoiError::TooLarge,"ROI component labels overflow.");
                         for (std::size_t i=0;i<components.size();++i) {
                             const auto label=static_cast<std::uint32_t>(i+1);
-                            bool keep=components[i].size()*volume>=params.minimumVolume;
+                            bool keep=components[i].cells.size()*volume>=params.minimumVolume;
                             if (params.operation==RoiComponentOperation::KeepLargest) keep=i==largest;
                             else if (params.operation==RoiComponentOperation::KeepSelected) keep=std::find(params.labels.begin(),params.labels.end(),label)!=params.labels.end();
                             else Require(params.operation==RoiComponentOperation::RemoveSmall || params.operation==RoiComponentOperation::Split,RoiError::InvalidRequest,"Invalid ROI component operation.");
-                            if (keep) {selected.push_back(label);for(const auto& row:components[i].GetRows())for(const auto& run:row.second)values.push_back({{run.first,row.first[0],row.first[1]},run.second,label});}
+                            if (keep) {selected.push_back(label);for(const auto& row:components[i].cells.GetRows())for(const auto& run:row.second)values.push_back(GetVoxelRun({{run.first,row.first[0],row.first[1]},run.second},label));}
                         }
                         auto shared=std::make_shared<const RoiVoxelSet>(std::move(values));
                         if (params.operation==RoiComponentOperation::Split) for (auto label:selected) add(GetVoxelDefinition(request.source,shared,{label})," / "+std::to_string(label));
@@ -547,7 +554,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                             if(!GetValidCell(*image,i) || (target && !targetQuery.query->GetContains(GetPoint(grid,i))))return false;
                             const double value=GetGray(*image,i);return value>=params.range[0] && value<=params.range[1];};
                         Cells grown;std::deque<Index> queue;for (const auto& seed:params.seeds) {
-                            const auto p=Transform(inverse,seed);Index i{};for (int a=0;a<3;++a) {Require(std::isfinite(p[a]) && p[a]>=INT_MIN && p[a]<INT_MAX,RoiError::InvalidGeometry,"ROI seed is invalid.");i[a]=static_cast<int>(std::floor(p[a]+0.5));}
+                            const auto p=Transform(inverse,seed);Index i{};for (int a=0;a<3;++a) {const auto rounded=std::floor(p[a]+0.5);Require(std::isfinite(rounded) && rounded>=INT_MIN && rounded<=INT_MAX,RoiError::InvalidGeometry,"ROI seed is invalid.");i[a]=static_cast<std::int64_t>(rounded);}
                             Require(allowed(i),RoiError::InvalidRequest,"ROI seed is outside the permitted gray domain.");if(Insert(grown,i,request))queue.push_back(i);
                         }
                         const auto neighbours=GetNeighbours(params.connectivity);std::size_t visited=0;

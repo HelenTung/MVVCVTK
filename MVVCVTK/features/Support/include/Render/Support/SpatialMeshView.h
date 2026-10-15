@@ -3,6 +3,7 @@
 #include "Render/Contracts/FeatureOverlay.h"
 #include "Render/Support/RenderTextStyle.h"
 #include "Render/Support/SliceContourPlane.h"
+#include "Render/Support/SpatialMeshMapper.h"
 #include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCamera.h>
@@ -29,11 +30,11 @@ class SpatialMeshView final {
 public:
     struct Progress final {
         std::size_t requested=0,loaded=0;
-        bool isComplete=true,hasCapacityIssue=false,hasFailure=false;
+        bool isComplete=true,hasFailure=false;
         std::string message;
     };
     SpatialMeshView()
-        :m_actor(vtkSmartPointer<vtkActor>::New()),m_mapper(vtkSmartPointer<vtkCompositePolyDataMapper>::New()),
+        :m_actor(vtkSmartPointer<vtkActor>::New()),m_mapper(vtkSmartPointer<SpatialMeshMapper>::New()),
         m_blocks(vtkSmartPointer<vtkMultiBlockDataSet>::New()),m_status(vtkSmartPointer<vtkTextActor>::New()),
         m_observer(vtkSmartPointer<vtkCallbackCommand>::New())
     {
@@ -60,24 +61,24 @@ public:
         auto progress=m_progress;
         if(m_selection){const auto selected=m_selection->GetProgress();progress.requested+=selected.requested;progress.loaded+=selected.loaded;
             progress.isComplete=progress.isComplete&&selected.isComplete;progress.hasFailure=progress.hasFailure||selected.hasFailure;
-            progress.hasCapacityIssue=progress.hasCapacityIssue||selected.hasCapacityIssue;if(!selected.message.empty())progress.message=selected.message;}
+            if(!selected.message.empty())progress.message=selected.message;}
         return progress;
     }
     const vtkSmartPointer<vtkMultiBlockDataSet>& GetBlocks() const noexcept {return m_blocks;}
     void SetInputData(vtkDataObject* data){m_cache.reset();m_mapper->SetInputDataObject(data);}
-    void SetCache(std::shared_ptr<SpatialMeshCache> cache,std::size_t visibleCapacity,
+    void SetCache(std::shared_ptr<SpatialMeshCache> cache,std::size_t cacheTarget,
         std::function<void()> requestFrame={},std::optional<std::array<double,3>> sliceNormal={})
     {
-        if(!cache||!visibleCapacity||visibleCapacity>UINT_MAX)throw std::invalid_argument("Invalid exact display capacity.");
+        if(!cache||!cacheTarget)throw std::invalid_argument("Invalid display cache target.");
         SetObjectRange({});m_firstFace=0;m_endFace=UINT64_MAX;
-        m_cache=std::move(cache);m_capacity=visibleCapacity;m_requestFrame=std::move(requestFrame);m_sliceNormal=std::move(sliceNormal);
-        if(m_sliceNormal)m_cache=std::make_shared<SpatialMeshCache>(m_cache->GetSourceOwner(),m_cache->GetQueue(),m_capacity);
+        m_cache=std::move(cache);m_cacheTarget=cacheTarget;m_requestFrame=std::move(requestFrame);m_sliceNormal=std::move(sliceNormal);
+        if(m_sliceNormal)m_cache=std::make_shared<SpatialMeshCache>(m_cache->GetSourceOwner(),m_cache->GetQueue(),m_cacheTarget);
         m_mapper->SetInputDataObject(m_blocks);m_dirty=true;m_planeDirty=true;m_cameraTime=0;m_cacheRevision=0;
-        m_blocks->Initialize();m_current.clear();m_visible.clear();m_progress={};m_progress.isComplete=false;SetStatus(u8"精确几何准备中");
+        m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress={};m_progress.isComplete=false;SetStatus(u8"精确几何准备中");
     }
     void SetRange(std::uint64_t firstFace=0,std::uint64_t endFace=UINT64_MAX)
     {
-        if(firstFace!=m_firstFace||endFace!=m_endFace){m_firstFace=firstFace;m_endFace=endFace;m_dirty=true;m_blocks->Initialize();m_current.clear();m_visible.clear();}
+        if(firstFace!=m_firstFace||endFace!=m_endFace){m_firstFace=firstFace;m_endFace=endFace;m_dirty=true;m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();}
     }
     void SetState(const FeatureOverlayState& state)
     {
@@ -97,7 +98,7 @@ public:
         }
         if(!m_cache||range->first>range->second||range->second>m_cache->GetSource().GetFaceCount())throw std::invalid_argument("Object geometry range is unavailable.");
         auto selected=std::make_unique<SpatialMeshView>();
-        selected->SetCache(m_cache,m_capacity,m_requestFrame,m_sliceNormal);selected->SetRange(range->first,range->second);selected->SetState(m_state);
+        selected->SetCache(m_cache,m_cacheTarget,m_requestFrame,m_sliceNormal);selected->SetRange(range->first,range->second);selected->SetState(m_state);
         auto* actor=selected->GetActor();actor->GetProperty()->SetColor(1,.75,.1);actor->GetProperty()->LightingOff();
         actor->GetProperty()->SetLineWidth(2.5F);if(!m_sliceNormal)actor->GetProperty()->SetRepresentationToWireframe();
         if(m_renderer){try{m_renderer->AddActor(actor);selected->AttachRenderer(m_renderer);}catch(...){m_renderer->RemoveActor(actor);throw;}}
@@ -128,7 +129,7 @@ public:
         try {
             bool changed=RefreshImpl();
             if(m_selection){changed=m_selection->Refresh()||changed;const auto selected=m_selection->GetProgress();
-                if(m_progress.isComplete){if(selected.hasFailure)SetStatus(u8"所选对象高亮准备失败；正式结果仍可读取");else if(selected.hasCapacityIssue)SetStatus(u8"所选对象当前范围需更多显示容量");else if(!selected.isComplete)SetStatus(u8"所选对象精确几何准备中");else SetStatus({});}}
+                if(m_progress.isComplete){if(selected.hasFailure)SetStatus(u8"所选对象高亮准备失败；正式结果仍可读取");else if(!selected.isComplete)SetStatus(u8"所选对象精确几何准备中");else SetStatus({});}}
             return changed;
         }
         catch(const std::exception& error){try{SetFailure(error.what());}catch(...){m_progress.isComplete=false;m_progress.hasFailure=true;}}
@@ -149,7 +150,6 @@ public:
         const auto before=m_progress;
         if(m_failedRefresh&&!m_dirty&&cameraTime==m_cameraTime&&aspect==m_aspect&&cacheRevision==m_cacheRevision)return false;
         m_failedRefresh=false;
-        if(!m_dirty&&cameraTime==m_cameraTime&&aspect==m_aspect&&m_progress.hasCapacityIssue)return false;
         if(!m_dirty&&cameraTime==m_cameraTime&&aspect==m_aspect&&cacheRevision==m_cacheRevision&&m_progress.isComplete)return false;
         if(m_dirty||cameraTime!=m_cameraTime||aspect!=m_aspect) {
             const bool recut=m_sliceNormal&&m_planeDirty;
@@ -174,39 +174,38 @@ public:
             SpatialMeshSource::Planes model{};
             for(unsigned p=0;p<6;++p)for(unsigned col=0;col<4;++col)for(unsigned row=0;row<4;++row)
                 model[p][col]+=world[4*p+row]*m_state.modelToWorld[4*row+col];
-            const auto query=m_cache->GetSource().Find(model,m_capacity,m_firstFace,m_endFace,{},section);
+            // 缓存目标只影响回收和并发；完整可见集合始终持续排队，不因总页数拒绝。
+            const auto query=m_cache->GetSource().Find(model,m_cache->GetSource().GetBatchCount(),m_firstFace,m_endFace,{},section);
             m_cameraTime=cameraTime;m_aspect=aspect;m_dirty=false;m_planeDirty=false;
-            if(!query.isComplete) {
-                m_blocks->Initialize();m_current.clear();m_visible.clear();m_progress={};m_progress.isComplete=false;m_progress.hasCapacityIssue=true;
-                m_progress.message="Exact visible geometry exceeds the configured display capacity.";
-                SetStatus(u8"当前范围尚不能完整显示精确几何，请放大视图或提高显示容量");return true;
-            }
+            if(!query.isComplete||query.batches.size()>UINT_MAX)throw std::length_error("Display block index representation overflow.");
             if(recut||m_visible!=query.batches) {
                 std::vector<vtkSmartPointer<vtkPolyData>> next(query.batches.size());
-                if(!recut)for(std::size_t i=0;i<query.batches.size();++i){const auto old=std::lower_bound(m_visible.begin(),m_visible.end(),query.batches[i]);if(old!=m_visible.end()&&*old==query.batches[i])next[i]=m_current[static_cast<std::size_t>(old-m_visible.begin())];}
+                std::vector<std::uint64_t> styles(next.size());std::vector<std::shared_ptr<const void>> tickets(next.size());
+                if(!recut)for(std::size_t i=0;i<query.batches.size();++i){const auto old=std::lower_bound(m_visible.begin(),m_visible.end(),query.batches[i]);if(old!=m_visible.end()&&*old==query.batches[i]){const auto index=static_cast<std::size_t>(old-m_visible.begin());next[i]=m_current[index];styles[i]=m_styles[index];tickets[i]=m_tickets[index];}}
                 m_blocks->SetNumberOfBlocks(static_cast<unsigned>(next.size()));
                 for(std::size_t i=0;i<next.size();++i)m_blocks->SetBlock(static_cast<unsigned>(i),next[i]);
-                m_visible=query.batches;m_current=std::move(next);changed=true;
+                m_visible=query.batches;m_current=std::move(next);m_styles=std::move(styles);m_tickets=std::move(tickets);changed=true;
             }
             m_progress={};m_progress.requested=m_visible.size();
         }
         m_progress.loaded=0;m_progress.hasFailure=false;m_progress.message.clear();
-        std::size_t adopted=0;
+        std::size_t adopted=0,requests=0;const auto style=m_cache->GetStyleVersion();
         for(std::size_t i=0;i<m_visible.size();++i) {
-            const auto read=m_cache->Get({m_visible[i],m_firstFace,m_endFace});
+            if(m_current[i]&&m_styles[i]==style){++m_progress.loaded;continue;}
+            if(adopted==4||requests==8)continue;
+            ++requests;const auto read=m_cache->Get({m_visible[i],m_firstFace,m_endFace},m_current[i]);m_tickets[i]=read.ticket;
             if(!read.error.empty()){m_progress.hasFailure=true;m_progress.message=read.error;}
-            if(read.mesh&&read.mesh==m_current[i])++m_progress.loaded;
-            else if(read.mesh&&adopted<4) {
-                m_current[i]=read.mesh;m_blocks->SetBlock(static_cast<unsigned>(i),read.mesh);++adopted;++m_progress.loaded;changed=true;
+            if(read.mesh) {
+                m_current[i]=read.mesh;m_styles[i]=read.styleVersion;m_tickets[i].reset();m_blocks->SetBlock(static_cast<unsigned>(i),read.mesh);++adopted;++m_progress.loaded;changed=true;
             }
         }
         m_progress.isComplete=m_progress.loaded==m_visible.size()&&!m_progress.hasFailure;
         m_cacheRevision=m_cache->GetRevision();
         if(m_progress.hasFailure)SetStatus(u8"精确几何显示准备失败；正式结果仍可读取");
         else if(m_progress.isComplete)SetStatus({});else SetStatus(u8"当前视域精确几何准备中");
-        if(adopted==4&&!m_progress.isComplete&&m_requestFrame)m_requestFrame();
+        if(!m_progress.isComplete&&!m_progress.hasFailure&&m_requestFrame)m_requestFrame();
         return changed||before.loaded!=m_progress.loaded||before.isComplete!=m_progress.isComplete
-            ||before.hasCapacityIssue!=m_progress.hasCapacityIssue||before.hasFailure!=m_progress.hasFailure;
+            ||before.hasFailure!=m_progress.hasFailure;
     }
     std::optional<std::uint64_t> GetPickedFace(int x,int y,vtkRenderer* renderer)
     {
@@ -221,7 +220,7 @@ public:
     }
 private:
     void SetStatus(const std::string& text){m_status->SetInput(text.c_str());m_status->SetVisibility(!text.empty());}
-    void SetFailure(const std::string& error){m_blocks->Initialize();m_current.clear();m_visible.clear();m_progress.isComplete=false;m_progress.hasFailure=true;m_progress.message=error;SetStatus(u8"精确几何显示准备失败；正式结果仍可读取");}
+    void SetFailure(const std::string& error){m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress.isComplete=false;m_progress.hasFailure=true;m_progress.message=error;SetStatus(u8"精确几何显示准备失败；正式结果仍可读取");}
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkCompositePolyDataMapper> m_mapper;
     vtkSmartPointer<vtkMultiBlockDataSet> m_blocks;
@@ -239,8 +238,10 @@ private:
     FeatureOverlayState m_state;
     std::vector<std::uint64_t> m_visible;
     std::vector<vtkSmartPointer<vtkPolyData>> m_current;
+    std::vector<std::uint64_t> m_styles;
+    std::vector<std::shared_ptr<const void>> m_tickets;
     std::uint64_t m_cacheRevision=0,m_firstFace=0,m_endFace=UINT64_MAX;
-    std::size_t m_capacity=64;
+    std::size_t m_cacheTarget=128;
     bool m_dirty=true,m_planeDirty=true,m_failedRefresh=false,m_isIsolated=false;
     Progress m_progress;
 };

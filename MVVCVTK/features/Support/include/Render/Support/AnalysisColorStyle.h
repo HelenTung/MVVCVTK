@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <string>
 #include <sstream>
 #include <iomanip>
@@ -158,6 +159,20 @@ inline std::array<double,3> GetSegmentColor(const RampSegment& segment,double va
     }
     return color;
 }
+// 未显式分段时，整条色带共用同一调色板；两端保留短过渡，避免独立状态色。
+inline void SetTailColors(RampParams& params)
+{
+    if(params.tolerance){params.belowColor=params.toleranceBelowColor;params.aboveColor=params.toleranceAboveColor;}
+    else if(!params.segments.empty()){
+        if(!params.segments.front().lower)params.belowColor=params.segments.front().lowColor;
+        if(!params.segments.back().upper)params.aboveColor=params.segments.back().lowColor;
+    }else{
+        RampSegment segment{0,1,params.mode,params.lowColor,params.highColor};
+        params.belowColor=params.mode==RampMode::Constant?params.constantColor:GetSegmentColor(segment,params.isReversed?1:0);
+        params.aboveColor=params.mode==RampMode::Constant?params.constantColor:GetSegmentColor(segment,params.isReversed?0:1);
+    }
+}
+
 inline double GetOpacity(double fraction,const RampParams& params)
 {
     if (params.blend==BlendMode::Constant) return 1;
@@ -173,9 +188,8 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
     if (std::isfinite(value)) {
         const double fraction=GetFraction(range[0],range[1],value);
         alpha=GetOpacity(fraction,params);
-        if(value<range[0])color=!params.segments.empty() && !params.segments.front().lower ? params.segments.front().lowColor:params.belowColor;
-        else if(value>range[1])color=!params.segments.empty() && !params.segments.back().upper ? params.segments.back().lowColor:params.aboveColor;
-        else if(params.tolerance) {
+        // 显式分段与公差定义整个数轴；有效测量范围只决定刻度，不截断映射。
+        if(params.tolerance) {
             color=value<(*params.tolerance)[0] ? params.toleranceBelowColor
                 : value>(*params.tolerance)[1] ? params.toleranceAboveColor:params.toleranceColor;
         }
@@ -195,7 +209,8 @@ inline std::array<double,4> GetMappedColor(const std::array<double,2>& range,
         } else if(params.mode==RampMode::Constant)color=params.constantColor;
         else {
             RampSegment s{0,1,params.mode,params.lowColor,params.highColor};
-            color=GetSegmentColor(s,params.isReversed ? 1-fraction:fraction);
+            const double position=value<range[0]?0:value>range[1]?1:.04+.92*fraction;
+            color=GetSegmentColor(s,params.isReversed?1-position:position);
         }
     }
     return {color[0],color[1],color[2],alpha};
@@ -257,51 +272,36 @@ inline std::array<double,4> GetMappedColor(vtkLookupTable& table,const RampParam
 inline vtkSmartPointer<vtkDoubleArray> BuildLabels(const std::array<double, 2>& range)
 {
     auto labels = vtkSmartPointer<vtkDoubleArray>::New();
-    const double span = range[1] - range[0];
-    const double scale = std::max({std::abs(range[0]), std::abs(range[1]), 1.0});
-    if (span <= 32 * std::numeric_limits<double>::epsilon() * scale) {
+    if (!std::isfinite(range[0]) || !std::isfinite(range[1]) || range[0] > range[1]) return labels;
+    if (range[0] == range[1]) {
         labels->InsertNextValue(range[0]);
         return labels;
     }
-    if (!std::isfinite(span)) {
-        labels->InsertNextValue(range[0]); labels->InsertNextValue(range[1]);
-        return labels;
-    }
-    const double rawStep = span / 10;
-    const double magnitude = std::pow(10.0, std::floor(std::log10(rawStep)));
-    if (magnitude == 0 || !std::isfinite(magnitude)) {
-        labels->InsertNextValue(range[0]); return labels;
-    }
-    const double fraction = rawStep / magnitude;
-    const double factor = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
-    const long double step = factor * magnitude;
-    const long double first = std::ceil(static_cast<long double>(range[0]) / step);
-    // 仅在原映射范围内放置等步长刻度，绝不为漂亮端点扩展业务显示范围。
-    for (int index = 0; index < 32; ++index) {
-        double value = static_cast<double>((first + index) * step);
-        if (value > range[1]) break;
-        if (value < range[0] || (labels->GetNumberOfValues() && value <= labels->GetValue(labels->GetNumberOfValues() - 1))) continue;
-        if (std::abs(value) < double(step) * 1e-10) value = 0;
-        labels->InsertNextValue(value);
-    }
-    if (!labels->GetNumberOfValues()) labels->InsertNextValue(range[0]);
+    // 有效范围递归取中点四层：16 个区间，端点和 15 个中点均保留。
+    labels->SetNumberOfValues(17);labels->SetValue(0,range[0]);labels->SetValue(16,range[1]);
+    const auto bisect=[&](auto&& self,vtkIdType first,vtkIdType last)->void {
+        if(last-first<2)return;
+        const double lower=labels->GetValue(first),upper=labels->GetValue(last),span=upper-lower;
+        const auto middle=(first+last)/2;
+        labels->SetValue(middle,std::isfinite(span)?lower+span*.5:lower*.5+upper*.5);
+        self(self,first,middle);self(self,middle,last);
+    };
+    bisect(bisect,0,16);
     return labels;
 }
 
 inline std::string GetLabelFormat(vtkDoubleArray& labels)
 {
-    if (labels.GetNumberOfValues() < 2) return "%.6g";
-    const double step = labels.GetValue(1) - labels.GetValue(0);
-    if (!std::isfinite(step) || step <= 0) return "%.6g";
-    const int exponent = static_cast<int>(std::floor(std::log10(step)));
-    const double fraction = step / std::pow(10.0, exponent);
-    const int decimals = std::max(0, -exponent) + (std::abs(fraction - std::round(fraction)) > 1e-7 ? 1 : 0);
-    const double scale = std::max(std::abs(labels.GetValue(0)), std::abs(labels.GetValue(labels.GetNumberOfValues() - 1)));
-    if (decimals > 6 || scale >= 1e7) {
-        const int digits = static_cast<int>(std::clamp(std::ceil(std::log10(scale) - std::log10(step)) + 1, 2.0, 16.0));
-        return "%." + std::to_string(digits) + "e";
+    for(int digits=6;digits<17;++digits) {
+        std::map<std::string,double> seen;bool distinct=true;
+        for(vtkIdType i=0;i<labels.GetNumberOfValues();++i) {
+            std::ostringstream out;out<<std::setprecision(digits)<<labels.GetValue(i);
+            const auto inserted=seen.emplace(out.str(),labels.GetValue(i));
+            if(!inserted.second && inserted.first->second!=labels.GetValue(i)){distinct=false;break;}
+        }
+        if(distinct)return "%."+std::to_string(digits)+"g";
     }
-    return "%." + std::to_string(decimals) + "f";
+    return "%.17g";
 }
 
 inline void SetLegend(vtkScalarBarActor& legend, const char* title)
@@ -314,9 +314,9 @@ inline void SetLegend(vtkScalarBarActor& legend, const char* title)
         legend.UseCustomLabelsOn();
         legend.SetLabelFormat(GetLabelFormat(*labels).c_str());
     }
-    legend.DrawBelowRangeSwatchOn();legend.SetBelowRangeAnnotation(u8"下侧无界段 → −∞");
-    legend.DrawAboveRangeSwatchOn();legend.SetAboveRangeAnnotation(u8"上侧无界段 → +∞");
-    legend.DrawNanAnnotationOn();legend.SetNanAnnotation(u8"无效／未测");
+    legend.DrawBelowRangeSwatchOn();legend.SetBelowRangeAnnotation(u8"−∞");
+    legend.DrawAboveRangeSwatchOn();legend.SetAboveRangeAnnotation(u8"+∞");
+    legend.DrawNanAnnotationOff();legend.SetNanAnnotation("");
     legend.SetWidth(0.20);
     legend.SetBarRatio(0.13);
     legend.SetMaximumNumberOfColors(256);

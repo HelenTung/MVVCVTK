@@ -160,6 +160,9 @@ std::vector<ModulePanel*> BuildModules(TestContext context, QWidget* parent)
 #if defined(MANUAL_GAP)
     AttachReportSource(context.workflow,gap);
 #endif
+#if defined(MANUAL_ARTIFACT)
+    AttachReportSource(context.workflow,artifact);
+#endif
 #if defined(MANUAL_SURFACE)
     AttachReportSource(context.workflow,surface);
 #endif

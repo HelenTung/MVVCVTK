@@ -143,6 +143,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"Begin","开始编辑"},{"ResultEvidence","读取回归证据"},{"ImageEvidence","读取影像有效域证据"},
         {"ActivateAccepted", "重试显示已加载数据"}, {"Load", "加载体数据"}, {"Descriptor", "查看数据描述"}, {"Select", "选择当前输入"},
         {"ExportData", "导出数据"}, {"ExportSlices", "导出切片"}, {"LabelDescriptors", "查看标签描述"},
+        {"RoiDescriptors", "查看区域描述"}, {"ExportNominalMeshFixture", "导出已知变换参考网格"},
         {"ReadLabelRegion", "读取标签区域"}, {"ReadWallInputs", "读取精确壁厚输入"}, {"CreateMask", "创建测试掩码"},
         {"EditRoiBox", "提交区域盒"}, {"ReadTransform", "读取模型变换"}, {"ReadRoi", "读取区域数据"},
         {"AppendExact", "追加精确裁剪"}, {"ExportComparison", "导出比较数据"}, {"ReadObjects", "查看表面对象列表"},
@@ -165,6 +166,7 @@ QString GetActionText(const QString& module, const QString& action)
         {"CopyIsoToDisplay", "将阈值复制到视图"}, {"CopyIsoToGap", "将阈值复制到孔隙分析"},
         {"CopyIsoToPart", "将阈值复制到零件分割"}, {"SamplePoints", "读取表面采样点"},
         {"MeasurementSelection", "读取有效计量选区"},
+        {"ReadMeasurementSelection", "查看计量选区编号"}, {"CancelRead", "取消读取或导出"},
         {"Ring", "环形伪影校正"}, {"Diffusion", "扩散滤波"}, {"Combined", "环形校正与扩散滤波"},
         {"SetEnabled", "设置旋转启用状态"}, {"Rotate", "旋转模型"},
         {"ExportSequentialPlanesTemplate", "导出顺序平面对齐模板"}, {"ExportPlaneTwoHolesTemplate", "导出一面两孔对齐模板"},
@@ -197,6 +199,7 @@ QString GetParameterText(const QString& key)
     if(key=="pageOffset")return "列表起始行（从零开始）";
     if(key=="pageSize")return "每页条目数";
     if(key=="generation")return "表面结果修订";
+    if(key=="selectionId")return "计量筛选编号（latest 表示最近完成）";
     if(key=="objectIndex")return "表面对象编号";
     if(key=="regionId")return "孔隙原始编号";
     if(key=="pointOffset")return "对象内点起始位置";
@@ -231,6 +234,7 @@ QString GetParameterText(const QString& key)
         {"histogramRange", "直方图范围"}, {"histogramBins", "直方图分箱数"}, {"minRegionArea", "最小异常区域面积"},
         {"range", "颜色映射范围"}, {"hasLegend", "显示图例"}, {"sampleIndex", "采样编号"},
         {"filePath", "输入文件路径"}, {"outputPath", "输出文件路径"}, {"outputDir", "输出目录"}, {"archivePath", "归档文件路径"},
+        {"namePrefix", "区域名称前缀"}, {"selectionOnly", "仅导出表面选区"}, {"transform", "已知刚体变换"},
         {"maskPath", "掩码证据输出路径（可选）"}, {"parentNodeId", "父裁剪节点（Root / Applied / 编号）"},
         {"compareScalars", "比较体素值"},
         {"matrix", "局部到源坐标矩阵"}, {"center", "源模型坐标中心"}, {"radius", "半径"}, {"height", "高度"}, {"roi", "区域修订"},

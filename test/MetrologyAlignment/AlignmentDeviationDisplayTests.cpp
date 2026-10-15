@@ -30,12 +30,12 @@ DataRevisionRef Ref(unsigned char id) { DataRevisionRef r; r.entityId.bytes[0]=i
 void Colors() {
     AlignmentDeviationDisplay display;display.rangeMode=AlignmentRangeMode::Manual;display.range={0,1};display.palette=AlignmentColorMode::HueLoop;
     const AlignmentDeviationColors::Ramp hue(display,{});
-    Check(hue.ColorAt(0)==AlignmentDeviationColors::Color{214,75,75} && hue.ColorAt(1.0/3)==AlignmentDeviationColors::Color{75,214,75}
-        && hue.ColorAt(2.0/3)==AlignmentDeviationColors::Color{75,75,214} && hue.ColorAt(1)==hue.ColorAt(0),"HueLoop exact anchors");
+    Check(hue.ColorAt(-1)==AlignmentDeviationColors::Color{214,75,75} && hue.ColorAt(2)==hue.ColorAt(-1)
+        && hue.ColorAt(0)!=hue.ColorAt(-1) && hue.ColorAt(1)!=hue.ColorAt(2),"HueLoop covers the complete strip including both short endpoint transitions");
     display.palette=AlignmentColorMode::Diverging;
     const AlignmentDeviationColors::Ramp diverging(display,{});
-    Check(diverging.ColorAt(0)==AlignmentDeviationColors::Color{75,75,214} && diverging.ColorAt(.5)==AlignmentDeviationColors::Color{224,224,224}
-        && diverging.ColorAt(1)==AlignmentDeviationColors::Color{214,75,75},"diverging signed-deviation preset has a neutral midpoint");
+    Check(diverging.ColorAt(-1)==AlignmentDeviationColors::Color{75,75,214} && diverging.ColorAt(.5)==AlignmentDeviationColors::Color{224,224,224}
+        && diverging.ColorAt(2)==AlignmentDeviationColors::Color{214,75,75},"diverging signed-deviation preset has a neutral midpoint");
     display.useToleranceColors=true;
     const AlignmentDeviationColors::Ramp narrow(display,std::array<double,2>{.50001,.50002});
     Check(narrow.ColorAt(.50001)==AlignmentDeviationColors::Color{60,180,95} && narrow.ColorAt(.50002)==AlignmentDeviationColors::Color{60,180,95}
@@ -58,6 +58,8 @@ void Colors() {
         && complete.ColorAt(100)==AlignmentDeviationColors::Color{255,255,0},"complete ramp owns both constant unbounded tails and finite endpoints");
     Check(complete.GetParameters().belowColor==std::array<double,3>{1,0,0}
         && complete.GetParameters().aboveColor==std::array<double,3>{1,1,0},"tail fields resolve to the same configuration as explicit unbounded segments");
+    auto zoomed=display;zoomed.range={2,3};const AlignmentDeviationColors::Ramp outsideAxis(zoomed,{});
+    Check(outsideAxis.ColorAt(.6)==AlignmentDeviationColors::Color{0,170,85},"explicit segments keep mapping values outside the measured axis");
     const auto shifted=AnalysisColorStyle::BuildRamp({2,3},complete.GetParameters());
     Check(AnalysisColorStyle::GetMappedColor(*shifted,complete.GetParameters(),1)[0]==1
         && AnalysisColorStyle::GetMappedColor(*shifted,complete.GetParameters(),4)[1]==1,"changing finite automatic bounds retains the complete tails");
@@ -88,7 +90,7 @@ void EffectiveRange() {
     Check(AlignmentDeviationColors::GetResolvedDisplay(fixed,snapshot)->range==fixed.range,"explicit clipping range is preserved");
     automatic.useToleranceColors=true;
     const auto tolerance=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
-    Check(tolerance && tolerance->range==std::array<double,2>{-.05,.05},"explicit tolerance colors include the full tolerance range");
+    Check(tolerance && tolerance->range==std::array<double,2>{-.002,.006},"tolerance classification does not expand the measured numerical axis");
     automatic.useToleranceColors=false;field->samples[1].value=field->samples[0].value;
     const auto constant=AlignmentDeviationColors::GetResolvedDisplay(automatic,snapshot);
     Check(constant && constant->range==std::array<double,2>{-.002,-.002},"constant field gets finite numerical LUT padding");
@@ -235,7 +237,7 @@ void Display(const char *imagePath) {
             if(p[0]==0 && p[1]==255 && p[2]==255)++belowPixels;
             if(p[0]==255 && p[1]==255 && p[2]==0)++abovePixels;
         }
-        Check(belowPixels>10 && abovePixels>10,"all-invalid full and compact legends retain both configured unbounded tails");
+        Check(belowPixels==0 && abovePixels==0,"all-invalid views do not display a fabricated measurement legend");
         if(imagePath) {
             const auto path=std::string(imagePath)+".empty-"+std::to_string(height)+".png";
             auto writer=vtkSmartPointer<vtkPNGWriter>::New();writer->SetFileName(path.c_str());writer->SetInputConnection(capture->GetOutputPort());writer->Write();
@@ -248,7 +250,7 @@ void Display(const char *imagePath) {
     const auto hugeLegend=AlignmentDeviationColors::GetLegend(huge,{});
     Check(hugeLegend[128]==AlignmentDeviationColors::Color{75,214,214},"wide range retains finite HueLoop midpoint");
     display.range={0,0}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"zero-width color range rejected");
-    display.range={-.01,.01}; Check(!AlignmentDeviationOverlay::GetDisplayValid(display,result),"tolerance axis must contain both finite classification boundaries");
+    display.range={-.01,.01}; Check(AlignmentDeviationOverlay::GetDisplayValid(display,result),"a narrow numeric axis does not restrict the full tolerance mapping");
 }
 } // namespace
 int main(int argc,char **argv) {

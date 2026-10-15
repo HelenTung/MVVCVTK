@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <new>
 #include <vector>
 
@@ -25,6 +26,13 @@ ArtifactError BuildSlab(const GridGeometry3D& grid, const ArtifactDiffusionParam
     const int end = slab + std::min(params.slabDepth, dims[2] - slab);
     const int beginHalo = std::max(0, slab - params.iterations);
     const int endHalo = end + std::min(params.iterations, dims[2] - end);
+    const auto first = values.begin() + plane * slab;
+    const auto last = values.begin() + plane * end;
+    if (std::none_of(first, last, [](float value) { return std::isfinite(value); })) {
+        // 裁切后整块都在有效域外时，不创建滤波工作集；无通量边界不会产生新有效点。
+        std::copy(first, last, output.begin() + plane * slab);
+        return control.GetError();
+    }
     // 所有块从同一份阶段输入读取完整迭代 halo，只写各自中心区。
     // 保持原 VTK 滤波参数与同步迭代顺序，不依赖相邻块的完成顺序。
     vtkNew<vtkImageData> input;

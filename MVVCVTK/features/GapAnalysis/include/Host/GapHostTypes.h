@@ -150,7 +150,6 @@ struct GapDisplayParams final {
     // 按本 Feature 当前体积范围渐变的相对叠加强度，仍乘以各视图原有透明度。
     std::array<double,2> opacityRange{0.15,1.0};
     // 当前视域的精确几何批次驻留目标，不限制正式对象数量。
-    std::size_t maxVisibleBatches=64;
 };
 
 struct GapObjectSelection final {

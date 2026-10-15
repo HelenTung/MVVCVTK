@@ -9,6 +9,7 @@ target_sources(
     INTERFACE
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/FeatureOverlayBase.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/SpatialMeshView.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/SpatialMeshMapper.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/AnalysisColorStyle.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/AnalysisLegend.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/SliceContourPlane.h"

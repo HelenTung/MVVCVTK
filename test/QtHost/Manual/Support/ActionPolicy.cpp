@@ -6,6 +6,7 @@ QString GetActionRequirement(const QString& module, const QString& action, const
 {
     if (module == "Data" && action == "ActivateAccepted") return s["acceptedRevision"].toString().isEmpty() ? "没有已接纳的数据可激活。" : QString();
     if (action == "GraphInfo") return {};
+    if (action == "CancelRead" || action == "ReadMeasurementSelection") return {};
     if (action == "KeepResult" || action == "ReleaseResult" || action == "UnloadResult") return {};
     if (action == "UseData") return hasInput ? QString() : "请先加载输入数据。";
     const bool readableResult = (module == "Wall" || module == "Alignment")

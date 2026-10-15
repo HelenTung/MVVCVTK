@@ -58,7 +58,6 @@ bool GetRoleSupported(const HostRenderViewRole role)
 
 bool GetConfigValid(const SurfaceDeterminationConfig& config)
 {
-    if (WorkLimit(config.maxWorkingBytes) == 0||!config.maxDisplayBatches||config.maxDisplayBatches>UINT_MAX) return false;
     auto params = config.defaultStart;
     if (!GetTargetsUsed(params.targetViews)) {
         params.targetViews.viewRoles.push_back(
@@ -411,7 +410,7 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
         if(!view)continue;
         try {changed=view->Refresh()||changed;}catch(const std::exception& error){displayComplete=false;displayFailed=true;displayMessage=error.what();}
         const auto& progress=view->GetProgress();requested+=progress.requested;loaded+=progress.loaded;
-        displayComplete=displayComplete&&progress.isComplete;displayFailed=displayFailed||progress.hasCapacityIssue||progress.hasFailure;
+        displayComplete=displayComplete&&progress.isComplete;displayFailed=displayFailed||progress.hasFailure;
         if(!progress.message.empty())displayMessage=progress.message;
     }
     {const std::lock_guard<std::mutex> lock(m_stateMutex);m_state.isDisplayComplete=displayComplete;m_state.hasDisplayFailure=displayFailed;
@@ -956,8 +955,8 @@ bool SurfaceDeterminationHostFeature::Impl::BuildBindings(
         }
         const std::weak_ptr<FeatureHostControl> weakHost=m_host;
         auto notify=[weakHost]{if(const auto host=weakHost.lock())host->SendWorkAvailable();};
-        if(auto mesh=std::dynamic_pointer_cast<SurfaceOverlayStrategy>(overlay))mesh->SetDisplayCache(displayData,m_config.maxDisplayBatches,notify);
-        else if(auto slice=std::dynamic_pointer_cast<SurfaceSliceOverlayStrategy>(overlay))slice->SetDisplayCache(displayData,m_config.maxDisplayBatches,notify);
+        if(auto mesh=std::dynamic_pointer_cast<SurfaceOverlayStrategy>(overlay))mesh->SetDisplayCache(displayData,128,notify);
+        else if(auto slice=std::dynamic_pointer_cast<SurfaceSliceOverlayStrategy>(overlay))slice->SetDisplayCache(displayData,128,notify);
         else {RemoveBindings(bindings);return false;}
         if(!isPreview) {
             const auto state=GetState();const auto generation=GetDisplayGeneration();
@@ -1244,7 +1243,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
         if(!display)return false;
         m_displayPrepareError.clear();
         m_displayData=std::make_shared<FeatureInternal::SpatialMeshCache>(std::move(display),m_service->GetReadQueue(),
-            m_config.maxDisplayBatches>SIZE_MAX/2?m_config.maxDisplayBatches:2*m_config.maxDisplayBatches);
+            128);
     }
     if (m_bindings.empty()) {
         std::vector<OverlayBinding> bindings;

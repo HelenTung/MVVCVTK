@@ -5,6 +5,7 @@
 #include <QSurfaceFormat>
 #include <QVTKOpenGLNativeWidget.h>
 #include <iostream>
+#include <climits>
 
 int main(int argc, char* argv[])
 {

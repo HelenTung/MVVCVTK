@@ -1226,7 +1226,7 @@ GapDisplayLoadState GapAnalysisService::Impl::GetDisplayLoadState() const
         if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))view=&mesh->GetDisplay();
         else if(auto slice=std::dynamic_pointer_cast<GapSliceOverlayStrategy>(binding.overlay))view=&slice->GetDisplay();
         if(!view)continue;const auto& state=view->GetProgress();
-        result.isComplete=result.isComplete&&state.isComplete;result.hasFailure=result.hasFailure||state.hasCapacityIssue||state.hasFailure;
+        result.isComplete=result.isComplete&&state.isComplete;result.hasFailure=result.hasFailure||state.hasFailure;
         result.requested+=state.requested;result.loaded+=state.loaded;if(!state.message.empty())result.message=state.message;
     }
     return result;
@@ -1682,7 +1682,7 @@ bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
 bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayData> display,
     const std::function<bool()>& acceptDisplay) {
     if (!display) return false;
-    if(m_displayData && m_displayData->labels==display->labels && m_displayData->params.maxVisibleBatches==display->params.maxVisibleBatches && !m_displayOverlayBindings.empty()) {
+    if(m_displayData && m_displayData->labels==display->labels && !m_displayOverlayBindings.empty()) {
         if(acceptDisplay && !acceptDisplay())return false;
         for(auto& binding:m_displayOverlayBindings) {
             if(auto mesh=std::dynamic_pointer_cast<GapMeshOverlayStrategy>(binding.overlay))mesh->SetPresentation([&]{auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,binding.viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),binding.viewId)==p.hiddenLegendViews.end();return p;}());
@@ -1699,7 +1699,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
         auto cache=display->spatial?m_displayCache:nullptr;
         if(display->spatial&&(!cache||cache->GetSourceOwner()!=display->spatial)) {
             cache=std::make_shared<FeatureInternal::SpatialMeshCache>(display->spatial,m_reads,
-                display->params.maxVisibleBatches>SIZE_MAX/2?display->params.maxVisibleBatches:2*display->params.maxVisibleBatches,
+                128,
                 [](vtkPolyData& mesh,const auto& source,const auto& cancel){
                     const auto& attributes=source.GetMesh().GetCellAttributes();
                     const auto found=std::find_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="gap.region.id"&&a.componentCount==1;});
@@ -1718,7 +1718,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!hasMesh) continue;
             if (!service) { rollback(); return false; }
             auto overlay = std::make_shared<GapMeshOverlayStrategy>(display);
-            if(cache){overlay->SetDisplayCache(cache,display->params.maxVisibleBatches,onWorkAvailable);overlay->GetDisplay().SetObjectRange(m_selectionRange,m_isSelectionIsolated);}
+            if(cache){overlay->SetDisplayCache(cache,128,onWorkAvailable);overlay->GetDisplay().SetObjectRange(m_selectionRange,m_isSelectionIsolated);}
             else overlay->SetInputData(m_displayVoidMesh);
             const auto viewId=m_viewIds.count(service.get()) ? m_viewIds.at(service.get()):std::string{};
             auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);
@@ -1729,7 +1729,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             if (!hasLabels) continue;
             if (!target.second) { rollback(); return false; }
             auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first, display);
-            if(cache){overlay->SetDisplayCache(cache,display->params.maxVisibleBatches,onWorkAvailable);overlay->SetObjectSelection(m_selectionRange,m_selectedRegion,m_isSelectionIsolated);}
+            if(cache){overlay->SetDisplayCache(cache,128,onWorkAvailable);overlay->SetObjectSelection(m_selectionRange,m_selectedRegion,m_isSelectionIsolated);}
             overlay->SetInputData(m_displayLabelImage);
             const auto viewId=m_viewIds.count(target.second.get()) ? m_viewIds.at(target.second.get()):std::string{};
             auto p=display->params;p.legendPosition=AnalysisColorStyle::GetLegendPosition(p,viewId);p.hasLegend=p.hasLegend && std::find(p.hiddenLegendViews.begin(),p.hiddenLegendViews.end(),viewId)==p.hiddenLegendViews.end();overlay->SetPresentation(p);

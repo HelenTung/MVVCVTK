@@ -16,7 +16,12 @@ public:
         std::uint64_t batch=0,firstFace=0,endFace=UINT64_MAX;
         bool operator<(const Key& other) const {return std::tie(batch,firstFace,endFace)<std::tie(other.batch,other.firstFace,other.endFace);}
     };
-    struct Read final {vtkSmartPointer<vtkPolyData> mesh;std::string error;bool isPending=false,isThrottled=false;};
+    struct Read final {
+        vtkSmartPointer<vtkPolyData> mesh;std::string error;bool isPending=false,isThrottled=false;
+        std::uint64_t styleVersion=0;
+        // 等待接纳的视图保留 ticket；LRU 不撤销仍有接收方的读取或就绪页。
+        std::shared_ptr<const void> ticket;
+    };
     struct Counters final {std::uint64_t batchesRead=0,pointsRead=0,facesRead=0,indexRecordsRead=0,cacheHits=0;std::size_t entries=0;};
     using Decorate=std::function<void(vtkPolyData&,const SpatialMeshSource&,const ReadTaskQueue::Cancel&)>;
     SpatialMeshCache(std::shared_ptr<const SpatialMeshSource> source,std::shared_ptr<ReadTaskQueue> queue,
@@ -29,28 +34,36 @@ public:
     const std::shared_ptr<const SpatialMeshSource>& GetSourceOwner() const noexcept {return m_source;}
     const std::shared_ptr<ReadTaskQueue>& GetQueue() const noexcept {return m_queue;}
     std::uint64_t GetRevision() const noexcept {return m_revision.load(std::memory_order_acquire);}
+    std::uint64_t GetStyleVersion() const {const std::lock_guard<std::mutex> lock(m_mutex);return m_styleVersion;}
     Counters GetCounters() const {const std::lock_guard<std::mutex> lock(m_mutex);auto result=m_counters;result.entries=m_entries.size();return result;}
 
     // owner 调用；返回已有批次或提交有限读取，绝不在本调用栈解码几何。
-    Read Get(const Key& key)
+    Read Get(const Key& key,vtkSmartPointer<vtkPolyData> heldGeometry={})
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         auto found=m_entries.find(key);
         if(found!=m_entries.end()) {
             found->second->used=++m_clock;
-            if(found->second->mesh){++m_counters.cacheHits;return {found->second->mesh,{},false};}
-            if(!found->second->error.empty())return {{},found->second->error,false};
-            if(found->second->isPending&&found->second->queueToken&&!found->second->queueToken->load(std::memory_order_acquire))return {{},{},true};
+            if(found->second->mesh){++m_counters.cacheHits;return {found->second->mesh,{},false,false,m_styleVersion,found->second};}
+            if(!found->second->error.empty())return {{},found->second->error,false,false,m_styleVersion,found->second};
+            if(found->second->isPending&&found->second->queueToken&&!found->second->queueToken->load(std::memory_order_acquire))return {{},{},true,false,m_styleVersion,found->second};
             found->second->isPending=false;
         }
         if(found==m_entries.end()) {
-            if(m_entries.size()==m_capacity) {
-                auto oldest=m_entries.begin();for(auto i=m_entries.begin();i!=m_entries.end();++i)if(i->second->used<oldest->second->used)oldest=i;
-                oldest->second->cancelled.store(true,std::memory_order_release);m_entries.erase(oldest);
+            while(m_entries.size()>=m_capacity) {
+                auto oldest=m_entries.end();
+                for(auto i=m_entries.begin();i!=m_entries.end();++i) {
+                    const auto& token=i->second->queueToken;
+                    const bool abandoned=i->second->isPending&&token&&token->load(std::memory_order_acquire);
+                    if(i->second.use_count()==1&&(!i->second->isPending||abandoned)&&(oldest==m_entries.end()||i->second->used<oldest->second->used))oldest=i;
+                }
+                if(oldest==m_entries.end())break;
+                m_entries.erase(oldest);
             }
             found=m_entries.emplace(key,std::make_shared<Entry>()).first;
         }
         const auto entry=found->second;entry->used=++m_clock;entry->isPending=true;
+        if(!entry->previous&&m_reuseGeometry)entry->previous=std::move(heldGeometry);
         const auto weak=weak_from_this();const auto version=m_styleVersion;
         const std::weak_ptr<Entry> weakEntry=entry;
         std::shared_ptr<std::atomic<bool>> admitted;
@@ -81,9 +94,10 @@ public:
         entry->queueToken=std::move(admitted);
         if(!entry->queueToken) {
             entry->isPending=false;
+            m_entries.erase(found);
             return m_queue->GetIsStopping()?Read{{},"Display reader has stopped.",false,false}:Read{{},{},false,true};
         }
-        return {{},{},true};
+        return {{},{},true,false,m_styleVersion,entry};
     }
 
     // 色带变更只重建有界缓存的显示属性；正式几何及已解码 points/cells 继续共享。
@@ -96,13 +110,13 @@ public:
             auto next=std::make_shared<Entry>();if(reuseGeometry)next->previous=old->mesh?old->mesh:old->previous;next->used=old->used;replacement.emplace(item.first,std::move(next));
         }
         for(auto& item:m_entries)item.second->cancelled.store(true,std::memory_order_release);
-        m_entries.swap(replacement);++m_styleVersion;m_decorate=std::move(decorate);
+        m_entries.swap(replacement);++m_styleVersion;m_reuseGeometry=reuseGeometry;m_decorate=std::move(decorate);
         m_revision.fetch_add(1,std::memory_order_release);
     }
     void Clear() noexcept
     {
         const std::lock_guard<std::mutex> lock(m_mutex);for(auto& item:m_entries)item.second->cancelled.store(true,std::memory_order_release);
-        m_entries.clear();m_revision.fetch_add(1,std::memory_order_release);
+        m_entries.clear();++m_styleVersion;m_reuseGeometry=false;m_revision.fetch_add(1,std::memory_order_release);
     }
 private:
     struct Entry final {vtkSmartPointer<vtkPolyData> mesh,previous;std::string error;std::uint64_t used=0;bool isPending=false;std::atomic<bool> cancelled{false};std::shared_ptr<std::atomic<bool>> queueToken;};
@@ -114,6 +128,7 @@ private:
     Decorate m_decorate;
     Counters m_counters;
     std::uint64_t m_clock=0,m_styleVersion=0;
+    bool m_reuseGeometry=true;
     std::atomic<std::uint64_t> m_revision{1};
 };
 } // namespace FeatureInternal

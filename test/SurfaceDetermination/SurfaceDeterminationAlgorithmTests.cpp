@@ -140,8 +140,10 @@ void TestMaterialRangeEstimation(Checks& checks)
         "threshold sampling is deterministic with nonzero negative extents");
     checks.Get(Build(flat, threshold).failureReason == SurfaceFailureReason::ThresholdUnreliable,
         "material estimation refuses degenerate data instead of fabricating an iso");
-    checks.Get(Build(artifact, threshold, 1024U).failureReason == SurfaceFailureReason::BudgetExceeded,
-        "threshold workspace budget is enforced independently of mesh budget");
+    const auto smallTarget=Build(artifact,threshold,1024U);
+    checks.Get(smallTarget.status==SurfaceResultStatus::Succeeded&&smallTarget.isoEstimate&&estimate.isoEstimate
+        &&smallTarget.isoEstimate->isoValue==estimate.isoEstimate->isoValue&&smallTarget.triangleIndices==estimate.triangleIndices,
+        "a small cache target preserves the automatic threshold and complete formal topology");
     const auto cancelled = SurfaceDeterminationAlgorithm::BuildSurface(artifact, threshold,
         64U * 1024U, [] { return true; }, {});
     checks.Get(cancelled.status == SurfaceResultStatus::Cancelled && !cancelled.isoEstimate,
@@ -321,10 +323,12 @@ void TestCancellationAndBudget(Checks& checks)
         cancelled.points.empty() && cancelled.triangleIndices.empty(),
         "cancelled algorithm does not expose a partial generation");
 
-    const auto budget = Build(BuildSphere(), params, 1024U);
+    const auto smallWorkingTarget = Build(BuildSphere(), params, 1024U);
+    const auto reference=Build(BuildSphere(),params);
     checks.Get(
-        budget.failureReason == SurfaceFailureReason::BudgetExceeded,
-        "algorithm rejects insufficient budget before extraction");
+        smallWorkingTarget.status==SurfaceResultStatus::Succeeded&&smallWorkingTarget.points.size()==reference.points.size()
+            &&smallWorkingTarget.triangleIndices==reference.triangleIndices&&smallWorkingTarget.triangleValidity==reference.triangleValidity,
+        "a small working target completes the unchanged full result");
 }
 
 void TestGlobalAutomatic(Checks &checks)

@@ -141,10 +141,9 @@ struct SurfaceGenerationSnapshot final {
 
 struct SurfaceDeterminationConfig final {
     SurfaceDeterminationStartParams defaultStart;
+    // 仅选择工作缓存和文件后备；不是正式结果大小或任务准入上限。
     std::optional<std::size_t> maxWorkingBytes {};
     bool isOverlayVisible = true;
-    // 控制当前视域的精确显示驻留；不限制正式对象或结果大小。
-    std::size_t maxDisplayBatches = 64;
 };
 
 struct SurfaceStartRequest final {

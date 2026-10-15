@@ -1,6 +1,8 @@
 #include "FeatureSupport/SpatialMeshCache.h"
 #include <iostream>
 #include <thread>
+#include <chrono>
+#include <Psapi.h>
 
 namespace {
 void Require(bool valid,const char* message){if(!valid)throw std::runtime_error(message);}
@@ -19,9 +21,46 @@ bool Drain(const std::shared_ptr<FeatureInternal::ReadTaskQueue>& queue)
     return true;
 }
 }
-int main()
+// 显式大规模存储/访问验证；不把合成几何冒充供应商检测或真实 CT 全链验证。
+int CheckLargeAccess(std::uint64_t count)
+{
+    if(count<3||count>UINT32_MAX)throw std::invalid_argument("large point count is outside the formal index range");
+    using Clock=std::chrono::steady_clock;const auto start=Clock::now();
+    const auto elapsed=[&]{return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-start).count();};
+    IO_COUNTERS before{};GetProcessIoCounters(GetCurrentProcess(),&before);
+    ResultArrayScope storage(0);
+    DataArray<double> vertices(static_cast<std::size_t>(count)*3);
+    DataArray<std::uint64_t> faces(static_cast<std::size_t>(count/3)*3);
+    for(std::uint64_t point=0;point<count;++point){const auto face=point/3,corner=point%3;
+        vertices[3*point]=double(face%8192)*2+(corner==1);vertices[3*point+1]=double(face/8192)*2+(corner==2);vertices[3*point+2]=0;
+        if(point<faces.size())faces[point]=point;
+    }
+    const auto* coordinates=vertices.data();const auto* topology=faces.data();
+    auto mesh=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),std::move(faces));storage.Finish();
+    Require(mesh->GetVertices().data()==coordinates&&mesh->GetTriangles().data()==topology,"large formal arrays were copied at adoption");
+    const auto formalMs=elapsed();std::cout<<"large formal ready points="<<count<<" faces="<<count/3<<" elapsedMs="<<formalMs<<std::endl;
+    auto source=Source::Build(mesh);std::weak_ptr<const SurfaceMeshPayload> weak=mesh;mesh.reset();
+    const auto indexMs=elapsed()-formalMs;std::cout<<"large spatial index ready indexMs="<<indexMs<<std::endl;
+    const auto query=source->Find(Box(199.9,201.1),8);
+    Require(query.isComplete&&!query.batches.empty(),"large local view exceeded its exact page target");
+    const auto viewStart=elapsed();auto page=source->Read(query.batches.front());
+    Require(page.sourceFacesRead<=Source::facesPerBatch&&page.sourcePointsRead<=3*Source::facesPerBatch,"large view decoded full geometry");
+    for(int i=0;i<100;++i)Require(source->Find(Box(199.9,201.1),8).batches==query.batches,"large query identity changed");
+    PROCESS_MEMORY_COUNTERS_EX memory{};memory.cb=sizeof(memory);
+    Require(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory))!=0,"cannot read large-run memory counters");
+    IO_COUNTERS after{};GetProcessIoCounters(GetCurrentProcess(),&after);
+    std::cout<<"large-access points="<<count<<" faces="<<source->GetFaceCount()<<" formalBytes="<<(count*3*sizeof(double)+(count/3)*3*sizeof(std::uint64_t))
+        <<" formalMs="<<formalMs<<" indexMs="<<indexMs<<" local100QueriesAndReadMs="<<elapsed()-viewStart
+        <<" queryNodes="<<query.visitedNodes<<" visibleBatches="<<query.batches.size()<<" decodedFaces="<<page.sourceFacesRead<<" decodedPoints="<<page.sourcePointsRead
+        <<" peakWorkingSetBytes="<<memory.PeakWorkingSetSize<<" currentPrivateBytes="<<memory.PrivateUsage
+        <<" processReadTransferBytes="<<after.ReadTransferCount-before.ReadTransferCount<<" processWriteTransferBytes="<<after.WriteTransferCount-before.WriteTransferCount<<std::endl;
+    source.reset();Require(weak.expired(),"large formal owner leaked after source release");return 0;
+}
+int main(int argc,char** argv)
 {
     try {
+        if(argc==3&&std::string(argv[1])=="--large-points")return CheckLargeAccess(std::stoull(argv[2]));
+        if(argc!=1)throw std::invalid_argument("use --large-points <count> for explicit large-result validation");
         Require(FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(0)
             &&FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(std::uint64_t{UINT32_MAX}+1)
             &&!FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(std::uint64_t{UINT32_MAX}+2),"index width changes only when an actual face ID exceeds 32 bits");
@@ -96,6 +135,17 @@ int main()
         while(Drain(queue)){}
         Require(cache->GetCounters().batchesRead==before,"expired display request cannot republish old geometry");
         cache.reset();
+        {
+            const auto abandonedQueue=std::make_shared<FeatureInternal::ReadTaskQueue>();
+            const auto abandonedCache=std::make_shared<FeatureInternal::SpatialMeshCache>(source,abandonedQueue,1);
+            for(std::uint64_t i=0;i<64;++i){
+                {const auto request=abandonedCache->Get({i});Require(request.isPending,"cancel test page was not admitted");}
+                {const std::lock_guard<std::mutex> lock(abandonedQueue->mutex);abandonedQueue->CancelLocked();}
+                Require(abandonedCache->GetCounters().entries<=1,"cancelled pages outside the next view remain permanently pending in LRU");
+            }
+            Require(abandonedCache->Get({64}).isPending&&Drain(abandonedQueue)&&abandonedCache->Get({64}).mesh
+                &&abandonedCache->GetCounters().batchesRead==1,"a new view completes after repeatedly cancelling disjoint pages");
+        }
         {
             DataArray<std::uint64_t> interleaved;interleaved.reserve(batches*Source::facesPerBatch*3);
             for(std::size_t i=0;i<batches*Source::facesPerBatch;++i)for(unsigned corner=0;corner<3;++corner)interleaved.push_back((i%batches)*3+corner);

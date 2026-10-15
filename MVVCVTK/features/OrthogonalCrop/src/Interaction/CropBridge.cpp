@@ -1061,7 +1061,7 @@ void CropBridge::Impl::SetGeometryViews()
                     return;
                 }
                 auto overlay=std::make_shared<CropGeometryOverlay>(target.role);
-                overlay->SetSphereEditing(m_curveWidget.GetEnabled());
+                overlay->SetCurveEditing(m_curveWidget.GetEnabled());
                 overlay->SetOperation(*operation,m_input.inputModelBounds);
                 candidate.push_back({target,overlay});
                 if (!target.overlays->AttachOverlay(overlay)) {
@@ -1072,7 +1072,7 @@ void CropBridge::Impl::SetGeometryViews()
             m_geometryBindings=std::move(candidate);
         }
         for (const auto& binding:m_geometryBindings) {
-            binding.overlay->SetSphereEditing(m_curveWidget.GetEnabled());
+            binding.overlay->SetCurveEditing(m_curveWidget.GetEnabled());
             binding.overlay->SetOperation(*operation,m_input.inputModelBounds);
             (void)binding.target.view->SetRenderNeeded();
         }

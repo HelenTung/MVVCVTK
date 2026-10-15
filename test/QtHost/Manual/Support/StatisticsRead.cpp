@@ -84,7 +84,7 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
         next=i+1;
         if(volumeRange && (!volumes || (*volumes)[i]<(*volumeRange)[0] || (*volumes)[i]>(*volumeRange)[1]))continue;
         QJsonObject row;
-        for(const auto* name:{"void-id","volume-mm3","equivalent-diameter-mm","seed-voxel","parent-volume-mm3","intersection-volume-mm3","roi-partial","whole-object-geometry"})if(const auto* column=Column(*table,name))
+        for(const auto* name:{"void-id","volume-mm3","equivalent-diameter-mm","seed-voxel","parent-volume-mm3","intersection-volume-mm3","roi-partial","whole-object-geometry","metric","value","unit"})if(const auto* column=Column(*table,name))
             row[name]=std::visit([i](const auto& values)->QJsonValue{
                 using Value=typename std::decay_t<decltype(values)>::value_type;
                 if constexpr(std::is_same_v<Value,double>)return std::isfinite(values[i]) ? QJsonValue(values[i]) : QJsonValue();
@@ -94,7 +94,10 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
             },column->values);
         row["rowIndex"]=QString::number(i);rows.append(row);
     }
-    return {{"rows",rows},{"offset",QString::number(offset)},{"total",QString::number(table->GetRowCount())},{"next",QString::number(next)}};
+    QString source;
+    for(const auto& input:data->inputs)if(input.role=="source-volume"){source=GetRefText(input.source);break;}
+    return {{"rows",rows},{"offset",QString::number(offset)},{"total",QString::number(table->GetRowCount())},{"next",QString::number(next)},
+        {"source",source},{"canonicalParameters",data->provenance?QString::fromStdString(data->provenance->canonicalParameters):QString()}};
 }
 std::array<double,3> ReferenceDataSource::GetRecordLocation(DataRevisionRef ref,std::size_t row,DataRevisionRef source)
 {

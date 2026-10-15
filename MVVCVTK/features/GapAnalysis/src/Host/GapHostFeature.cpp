@@ -1158,9 +1158,6 @@ bool GapHostFeature::Impl::SetCompletedResult(
     auto scopes=m_resultScopes;
     if (GetDataEntityIdValid(m_requestSource->data->lifetimeScope)) {
         const auto policy = m_requestSource->data->lifetimePolicy;
-        if (policy == DataLifetimePolicy::OwnerRetirement && scopes.size()>=1024) {
-            SetFailedResult(GapResultStatus::Failed,"Controlled Gap result history limit reached.");return false;
-        }
         const auto scope=m_data->CreateDataEntityId();
         for (auto& draft:transaction.outputs) { draft.lifetimeScope=scope; draft.lifetimePolicy=policy; }
         if (policy == DataLifetimePolicy::OwnerRetirement)

@@ -2008,8 +2008,6 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
     result.requiredBytes = 64 * 1024;
-    if (maxWorkingBytes < result.requiredBytes)
-        return fail(SurfaceFailureReason::BudgetExceeded, "Surface fixed workspace exceeds the budget.");
     SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
     params.roi = inputs.roi;
@@ -2073,7 +2071,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             !AddWorkingBytes(result.triangleValidity.capacity(), sizeof(std::uint8_t), retained) ||
             !AddWorkingBytes(result.objects.capacity(), sizeof(SurfaceObjectRecord), retained))
             return fail(SurfaceFailureReason::BudgetExceeded,
-                        "Surface retained interfaces exceed the budget.");
+                        "Surface retained interface byte count overflows.");
         DataArray<Point3> meshPoints;
         DataArray<Triangle> meshTriangles;
         SurfaceExecutionStats statistics;
@@ -2138,7 +2136,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
             ||!AddWorkingBytes(outputTriangles*3,sizeof(std::uint32_t),reservedBytes)
             ||!AddWorkingBytes(outputTriangles,sizeof(std::uint8_t),reservedBytes)
             ||!AddWorkingBytes(outputObjects,sizeof(SurfaceObjectRecord),reservedBytes))
-            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation exceeds budget.");
+            return fail(SurfaceFailureReason::BudgetExceeded,"Surface output reservation byte count overflows.");
         if(GetCancelled(getCancelled)) return fail(SurfaceFailureReason::Cancelled,"Surface reservation was cancelled.");
         result.points.reserve(outputPoints);
         result.triangleIndices.reserve(outputTriangles*3);
@@ -2667,7 +2665,7 @@ SurfaceAlgorithmResult SelectParentSurface(const VtkImageGridSnapshot& source,co
     std::size_t bytes=0;
     if(!AddWorkingBytes(parent.points->size(),sizeof(SurfacePointRecord),bytes) || !AddWorkingBytes(parent.triangleIndices->size(),sizeof(std::uint32_t),bytes)
         || !AddWorkingBytes(parent.triangleValidity->size(),sizeof(std::uint8_t),bytes) || !AddWorkingBytes(parent.objects->size(),sizeof(SurfaceObjectRecord),bytes))
-        return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface selection exceeds working budget.");
+        return fail(SurfaceFailureReason::BudgetExceeded,"Parent surface byte count overflows.");
     result.sourceRevision=parent.sourceRevision;result.algorithmRevision=parent.algorithmRevision;result.method=parent.method;result.isoEstimate=parent.isoEstimate;
     result.resolvedParams=parent.resolvedParams;result.resolvedParams.analysisRoi=params.analysisRoi;result.resolvedParams.parentGeneration=params.parentGeneration;
     result.sharedParent=inputs.parent;
@@ -2733,7 +2731,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
         result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
         result.method = params.method;
         result.failureReason = SurfaceFailureReason::BudgetExceeded;
-        result.message = "Surface allocation failed within the configured budget.";
+        result.message = "Surface storage allocation failed.";
         return result;
     }
     catch (...) {
