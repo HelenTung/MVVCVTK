@@ -90,6 +90,26 @@ void CheckReadTaskCoordinator() {
     panel.StartReadTask(failId,"Observed",[](const ReadTaskContext&)->QJsonObject{throw std::runtime_error("read IO failure");});wait();
     Require(records.GetRecord(failId)["status"]=="Failed","read failure reported as success");
 }
+void CheckReportGenerationSelection() {
+    ResultReport view;const QString result="11111111111111111111111111111111:1";
+    ReportDocument first;first.id="generation-first";first.result=result;first.module="Surface";first.category="本次会话结果";first.columns={{"value",{},{},true}};
+    first.table=std::make_shared<ReportTable>(1,[](quint64){return QStringList{"1"};});
+    auto second=first;second.id="generation-second";
+    view.AddReport(first);view.AddReport(second);view.ShowReports({},result,"Surface");view.show();
+    int calls=0;
+    const auto wait=[&](const auto& done){QElapsedTimer elapsed;elapsed.start();while(!done()&&elapsed.elapsed()<30000)QCoreApplication::processEvents(QEventLoop::AllEvents,20);Require(done(),"report generation selection regression did not finish");};
+    view.onReadReports=[&](const auto&,const auto&){++calls;return QVector<ReportDocument>{};};
+    const auto operation=[&](const QString& id){return QJsonObject{{"operationId",id},{"module","Surface"},{"result",QJsonObject{{"mesh",result}}}};};
+    view.QueueReport(operation("empty-generation"));view.SelectReport(second.id);
+    wait([&]{return calls>0&&!view.property("reportGenerationBusy").toBool();});
+    Require(view.GetSelectedReport().id==second.id,"empty queued generation overwrote the selected frozen report");
+    bool picked=false;int rows=0;auto late=first;late.id="generation-late";late.table=std::make_shared<ReportTable>();
+    late.table->SetRows(50000,[&](quint64 row){++rows;if(row==0)QTimer::singleShot(0,&view,[&]{picked=true;view.SelectReport(second.id);});return QStringList{QString::number(row)};});
+    view.onReadReports=[late](const auto&,const auto&){return QVector<ReportDocument>{late};};
+    view.QueueReport(operation("late-generation"));
+    wait([&]{return picked&&rows==50000&&!view.property("reportGenerationBusy").toBool();});
+    Require(view.GetSelectedReport().id==second.id&&view.GetReportIds().contains(late.id),"late generation lost the full document or replaced a newer user selection");
+}
 #if defined(MANUAL_SURFACE)
 void CheckSurfaceReads() {
     SurfaceGenerationSnapshot snapshot;snapshot.dataRevision=GetRef("00000000000000000000000000000001:17");
@@ -279,7 +299,7 @@ void CheckReportWorkflow()
     WaitTasks(compareView);
     Require(compareView.GetSelectedReport().category=="对比结果" && compareView.GetSelectedReport().table->Read(0)[4]=="3","actual report UI creates and selects comparison without input data");
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
-    view.hide();CheckMixedSortAndCancellation();CheckReportRepairs();CheckReadTaskCoordinator();
+    view.hide();CheckMixedSortAndCancellation();CheckReportRepairs();CheckReadTaskCoordinator();CheckReportGenerationSelection();
 #if defined(MANUAL_SURFACE)
     CheckSurfaceReads();
 #endif

@@ -70,6 +70,7 @@ private:
     QVector<ReportDocument> m_buildingReports;
     QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
+    std::uint64_t m_buildingViewRevision = 0;
     int m_buildingIndex = 0;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;

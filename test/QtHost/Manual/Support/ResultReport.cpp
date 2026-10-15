@@ -446,6 +446,7 @@ void ResultReport::ContinueGeneration()
                     return MatchesSource(doc,m_sourceFilter) && MatchesResult(doc,m_resultFilter) && MatchesModule(doc,m_moduleFilter);
                 }))continue;
                 m_buildingOperation=it.key();m_buildingIndex=0;
+                m_buildingViewRevision=m_viewRevision;
                 m_buildingReports=std::move(documents);
                 break;
             }
@@ -459,10 +460,13 @@ void ResultReport::ContinueGeneration()
         }
         if(m_buildingIndex<m_buildingReports.size()){m_buildTimer->start(0);return;}
         auto documents=std::move(m_buildingReports);m_buildingReports.clear();
+        const bool select=m_buildingViewRevision==m_viewRevision;
         m_completedOperations.insert(m_buildingOperation);m_pendingReports.remove(m_buildingOperation);m_buildingOperation.clear();
         const auto source=m_sourceFilter,result=m_resultFilter,module=m_moduleFilter;
-        for(auto& doc:documents)AddReport(std::move(doc));
-        ShowReports(source,result,module);setProperty("reportGenerationBusy",false);
+        for(auto& doc:documents)AddReport(std::move(doc),select);
+        // 空任务不重选已有文档；生成期间的用户选择也不能被旧完成覆盖。
+        if(select&&!documents.isEmpty())ShowReports(source,result,module);
+        setProperty("reportGenerationBusy",false);
         m_taskStatus->setText(documents.isEmpty()?"没有新增报告；已归档、已移除或精确结果已不可读取。":"业务报告已生成");
         m_buildTimer->start(0);
     }catch(const std::exception& e) {
