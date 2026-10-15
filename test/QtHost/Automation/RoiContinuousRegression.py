@@ -140,6 +140,7 @@ steps.append(step('Roi','Commit',save='A2',expectRoiSource=SOURCE))
 crop(steps,ref('A2'),'V2');evidence(steps,'second',50**3)
 select(steps,SOURCE)
 crop(steps,ref('A'),'V1again');evidence(steps,'firstAgain',40**3)
+surface(steps,'','revisionSurface')
 write('02-roi-revisions',steps)
 
 # 三个分量的布尔/形态/拆分/部分合并链。
@@ -171,6 +172,7 @@ operation(steps,'Intersection',ref('A2'),'A3',operands=[ref('B2')])
 read_roi(steps,ref('A3'),'intersection')
 crop(steps,ref('C2'),'VC');evidence(steps,'Coutput')
 select(steps,SOURCE);crop(steps,ref('A3'),'VA');evidence(steps,'Aoutput')
+surface(steps,'','alternatingSurface')
 write('01-alternating-rois',steps)
 
 steps=start();roi(steps,'A',A);crop(steps,ref('A'),'V1')
