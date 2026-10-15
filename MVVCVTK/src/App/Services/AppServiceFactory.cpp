@@ -309,6 +309,7 @@ private:
     bool GetOwnedLoad(LoadEventKind loadEventKind) const;
     bool SetOwnedLoad(LoadEventKind loadEventKind);
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
+    void ClearStoppedOwnedLoad();
     bool SetPreparingLoadReplaced(
         LoadEventKind loadEventKind,
         bool& isReplaced);
@@ -558,6 +559,28 @@ bool AppRuntime::SetDataTaskStopping()
         SetCompletion(false, std::move(pending.callback));
     }
     if (m_taskExecutor && !m_taskExecutor->StartDataStop()) return false;
+    // 只领取已经完成的加载 worker；仍在写 pending 的任务继续保留 admission。
+    // 先收尾加载，Host 才能归还输入镜像并进入后续 Feature/完整任务清理。
+    std::list<ActiveTask> stoppedLoads;
+    bool hasPendingLoad = false;
+    {
+        const std::lock_guard<std::mutex> lock(m_activeTaskMutex);
+        for (auto entry = m_activeTasks.begin(); entry != m_activeTasks.end();) {
+            if (entry->loadKind == LoadEventKind::None) { ++entry; continue; }
+            if (!entry->result.valid() || entry->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                hasPendingLoad = true;
+                ++entry;
+                continue;
+            }
+            const auto ready = entry++;
+            stoppedLoads.splice(stoppedLoads.end(), m_activeTasks, ready);
+        }
+    }
+    for (auto& task : stoppedLoads) {
+        try { (void)task.result.get(); } catch (...) {}
+        SetCompletion(false, std::move(task.callback));
+    }
+    if (!hasPendingLoad) ClearStoppedOwnedLoad();
     // 自动输入刷新不属于外部发布事务；关闭接纳后取消候选，避免 Stop 等待
     // 已经不会再进入 BuildPipeline 的 stage，同时保留既有可绘制输入。
     if (m_dataStage && m_dataStage->isRefresh) {
@@ -616,25 +639,7 @@ bool AppRuntime::StopTasks(
         }
     }
 
-    const auto ownedLoadKind = static_cast<LoadEventKind>(
-        m_ownedLoadKind.exchange(static_cast<int>(LoadEventKind::None)));
-    if (ownedLoadKind != LoadEventKind::None) {
-        if (m_dataManager) m_dataManager->ClearLoadStage();
-        m_readyState.reset();
-        if (m_sharedState) {
-            if (ownedLoadKind == LoadEventKind::Reload
-                && m_sharedState->GetReloadLoadState()
-                    == LoadState::Loading) {
-                m_sharedState->SetReloadLoadFailed();
-            }
-            else if (ownedLoadKind == LoadEventKind::File
-                && m_sharedState->GetFileLoadState()
-                    == LoadState::Loading) {
-                m_sharedState->SetFileLoadFailed();
-            }
-            (void)m_sharedState->ResetLoad(ownedLoadKind);
-        }
-    }
+    ClearStoppedOwnedLoad();
     {
         const std::lock_guard<std::mutex> lock(m_loadNoticeMutex);
         m_loadNotices.clear();
@@ -2775,6 +2780,21 @@ bool AppRuntime::ResetOwnedLoad(LoadEventKind loadEventKind)
     return m_ownedLoadKind.compare_exchange_strong(
         expectedKind,
         static_cast<int>(LoadEventKind::None));
+}
+
+void AppRuntime::ClearStoppedOwnedLoad()
+{
+    const auto kind = static_cast<LoadEventKind>(
+        m_ownedLoadKind.exchange(static_cast<int>(LoadEventKind::None)));
+    if (kind == LoadEventKind::None) return;
+    if (m_dataManager) m_dataManager->ClearLoadStage();
+    m_readyState.reset();
+    if (!m_sharedState) return;
+    if (kind == LoadEventKind::Reload && m_sharedState->GetReloadLoadState() == LoadState::Loading)
+        m_sharedState->SetReloadLoadFailed();
+    else if (kind == LoadEventKind::File && m_sharedState->GetFileLoadState() == LoadState::Loading)
+        m_sharedState->SetFileLoadFailed();
+    (void)m_sharedState->ResetLoad(kind);
 }
 
 void AppRuntime::SetDataRefresh()

@@ -189,6 +189,45 @@ bool GetConsumerStopKeepsRenderReady()
     return Check(renderReady&&stopped,"data consumer stop disabled Root candidate rendering or prevented final stop");
 }
 
+bool GetStoppingLoadReleasesAdmission()
+{
+    auto data=std::make_shared<RawVolumeDataManager>();
+    auto broadcaster=std::make_shared<SharedStateBroadcaster>();
+    auto state=std::make_shared<SharedInteractionState>(broadcaster);
+    std::promise<void> gate;const auto go=gate.get_future().share();
+    auto executor=CreateAppTaskExecutor([go](AppWorkerWork work) {
+        return std::thread([go,work=std::move(work)] {go.wait();work();});
+    });
+    AppServiceArgs args;args.dataManager=data;args.interactionState=state;
+    args.eventSource=broadcaster;args.taskExecutor=executor;
+    auto ports=CreateAppPorts(std::move(args));
+    ImageMetadata metadata;metadata.identity.datasetId="stopping-load";
+    metadata.source.kind=ImageSourceKind::Memory;metadata.source.uri="memory://stopping-load";
+    const auto layout=VolumeLayout::Create({2,2,2},{1,1,1},{},{1,0,0,0,1,0,0,0,1},metadata);
+    const auto buffer=layout?VolumeBuffer::Create(std::vector<float>(8,1),*layout):std::nullopt;
+    if(!buffer){gate.set_value();return false;}
+    int completions=0;bool succeeded=true;
+    const auto admitted=ports.app.data->ReloadFromBufferAsync(*buffer,[&](bool value){++completions;succeeded=value;});
+    bool passed=Check(admitted==TaskAdmissionResult::Accepted&&state->GetIsLoadActive(),"gated load owns admission before stop");
+    passed=Check(ports.taskControl->SetDataTaskStopping()&&state->GetIsLoadActive()&&completions==0,
+        "stop keeps active worker admission and callback protected")&&passed;
+    gate.set_value();
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(state->GetIsLoadActive()&&std::chrono::steady_clock::now()<until) {
+        (void)ports.taskControl->SetDataTaskStopping();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    passed=Check(!state->GetIsLoadActive()&&completions==0&&!data->GetLoadStage(),
+        "completed cancelled load releases mirror cleanup before final task stop")&&passed;
+    RenderLaneWork render([](TaskStopToken stop){return !stop.GetIsStopped();});auto rendered=render.get_future();
+    passed=Check(SendRenderTask(executor,std::move(render))
+        &&rendered.wait_for(std::chrono::seconds(3))==std::future_status::ready&&rendered.get(),
+        "load cancellation keeps render preparation available")&&passed;
+    const bool stopped=ports.taskControl->StopTasks(std::chrono::steady_clock::now()+std::chrono::seconds(3));
+    return Check(stopped&&completions==1&&!succeeded&&!state->GetIsLoadActive(),
+        "final stop delivers the cancelled load exactly once")&&passed;
+}
+
 bool GetLoadedGenerationsReleased()
 {
     auto data=std::make_shared<RawVolumeDataManager>();
@@ -627,6 +666,7 @@ bool GetResourceLifetimeTests()
     passed=GetFrozenReadsProtected()&&passed;
     passed=GetQueuedReadProtected()&&passed;
     passed=GetConsumerStopKeepsRenderReady()&&passed;
+    passed=GetStoppingLoadReleasesAdmission()&&passed;
     passed=GetDerivedProductsProtected()&&passed;
     passed=GetGpuFrameResourcesProtected()&&passed;
     passed=GetLargeFrameCollectionValid()&&passed;
