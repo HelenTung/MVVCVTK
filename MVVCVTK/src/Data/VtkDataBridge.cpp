@@ -1,6 +1,7 @@
 #include "Data/VtkDataBridge.h"
 
 #include "Data/Internal/VtkDataResourceLease.h"
+#include "Support/LabelMapBuilder.h"
 
 #include <vtkCellArray.h>
 #include <vtkCallbackCommand.h>
@@ -434,11 +435,10 @@ VtkDataBridge::CreateLabelPayload(vtkImageData* labels) const
         const auto create = [&](auto value) -> std::shared_ptr<const LabelMap3DPayload> {
             using Integer = decltype(value);
             if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(Integer)) return {};
-            auto values = std::make_shared<std::vector<Integer>>(*voxelCount);
+            auto values = std::make_unique<std::vector<Integer>>(*voxelCount);
             std::memcpy(values->data(), source, values->size() * sizeof(Integer));
-            auto payload = std::make_shared<const LabelMap3DPayload>(
-                *geometry, LabelMapValues{ std::shared_ptr<const std::vector<Integer>>(std::move(values)) });
-            return payload->GetValid() ? payload : nullptr;
+            // 外部 VTK 只复制一次；内部独占候选直接冻结，公开共享构造仍隔离可写别名。
+            return LabelMapBuilder::Build(*geometry, std::move(values));
         };
         switch (GetImageValueType(scalars->GetDataType())) {
         case ImageValueType::Int8: return create(std::int8_t{});

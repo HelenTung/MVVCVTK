@@ -28,6 +28,8 @@
 #include <QPlainTextEdit>
 #include <QTabWidget>
 #include <QTreeWidgetItemIterator>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
@@ -35,9 +37,64 @@ namespace Manual {
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 bool SameRow(const QStringList& a,const QStringList& b){return a.size()==b.size() && std::equal(a.cbegin(),a.cend(),b.cbegin());}
+bool SameIndices(const QVector<int>& rows,std::initializer_list<int> expected){return std::size_t(rows.size())==expected.size() && std::equal(rows.cbegin(),rows.cend(),expected.begin());}
 ReportDocument Read(QByteArray bytes){QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"测试报告");}
 template<class F> void Reject(F action,const char* message){bool rejected=false;try{action();}catch(const std::exception&){rejected=true;}Require(rejected,message);}
 ReportComparisonOptions Options(){ReportComparisonOptions o;o.baselineColumn=o.currentColumn=1;o.baselineIdentity=o.currentIdentity=0;o.baselineQuantity=o.currentQuantity="厚度";o.baselineUnit=o.currentUnit="mm";o.match=ReportMatch::Identity;o.identitiesConfirmed=true;return o;}
+void WaitRows(ResultReport& view) {
+    QElapsedTimer elapsed;elapsed.start();
+    while(view.property("reportRowsBusy").toBool() && elapsed.elapsed()<30000)QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+    Require(!view.property("reportRowsBusy").toBool(),"report row processing did not finish within test deadline");
+}
+void SortRows(ResultReport& view,int column) {
+    auto* table=view.findChild<QTableView*>("reportTable");
+    QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,column));WaitRows(view);
+}
+void CheckMixedSortAndCancellation() {
+    ResultReport view;
+    QStringList values{"2","10","1x"};
+    // 六种输入顺序都应得到同一数值/文本顺序，直接覆盖旧比较器的三项循环。
+    std::sort(values.begin(),values.end());int sequence=0;
+    do {
+        ReportDocument document;document.id=QString("mixed-%1").arg(sequence++);document.title="混合键";document.category="导入报告";
+        document.columns={{"value",{},{},true}};document.table=std::make_shared<ReportTable>();
+        for(const auto& value:values)document.table->Append({value});view.AddReport(document);view.SelectReport(document.id);
+        SortRows(view,0);auto rows=view.GetFilteredRows();QStringList sorted;for(const auto row:rows)sorted.append(document.table->Read(row).front());
+        Require(SameRow(sorted,QStringList{"2","10","1x"}),"mixed numeric/text ascending order depends on input permutation");
+        SortRows(view,0);sorted.clear();for(const auto row:view.GetFilteredRows())sorted.append(document.table->Read(row).front());
+        Require(SameRow(sorted,QStringList{"1x","10","2"}),"mixed numeric/text descending order is inconsistent");
+    } while(std::next_permutation(values.begin(),values.end()));
+    auto ties=Read("value\n2\n02\n2\na\nA\nnan\ninf\n");
+    // 空值用有明确定界的 CSV 行，避免把空行误当记录。
+    ties.table->Append({""});view.AddReport(ties);view.SelectReport(ties.id);SortRows(view,0);
+    Require(SameIndices(view.GetFilteredRows(),{1,0,2,7,3,4,6,5}),"numeric ties, text ties or nonfinite keys changed stable order");
+    SortRows(view,0);Require(SameIndices(view.GetFilteredRows(),{5,6,3,4,7,0,2,1}),"descending equal keys did not retain original rows");
+
+    ReportDocument large;large.id="responsive";large.title="响应性";large.category="本次会话结果";large.module="Gap";
+    large.columns={{"id",{},{},false},{"value",{},{},true}};large.table=std::make_shared<ReportTable>();
+    for(int i=0;i<50000;++i)large.table->Append({QString("row-%1").arg(i),QString::number(50000-i)});
+    int located=-1;view.onLocate=[&](const ReportDocument& document,int row){Require(document.id==large.id,"locate changed selected report identity");located=row;};
+    view.AddReport(large);view.SelectReport(large.id);auto* table=view.findChild<QTableView*>("reportTable");
+    QElapsedTimer elapsed;elapsed.start();QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,1));
+    Require(view.property("reportRowsBusy").toBool() && view.GetFilteredRows().isEmpty(),"sorting blocks admission or exposes partial rows");
+    bool yielded=false;QTimer::singleShot(0,&view,[&]{yielded=view.property("reportRowsBusy").toBool();});WaitRows(view);
+    Require(yielded && view.GetFilteredRows().size()==50000 && table->model()->data(table->model()->index(0,0)).toString()=="row-49999","complete sorting did not yield to owner events or lost rows");
+    table->selectRow(0);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==49999,"sorted page location did not map to original row");
+    std::cout<<"Reports: 50000-row sort elapsedMs="<<elapsed.elapsed()<<std::endl;
+    auto* search=view.findChild<QLineEdit*>("reportSearch");search->setText("row-");search->setText("row-49999");WaitRows(view);
+    Require(SameIndices(view.GetFilteredRows(),{49999}),"superseded search committed stale rows");
+    QTemporaryDir directory;const auto path=directory.filePath("filtered.csv");const auto filteredRows=view.GetFilteredRows();ExportReport(path,large,&filteredRows);
+    QFile filteredInput(path);Require(filteredInput.open(QIODevice::ReadOnly),"filtered export unreadable");const auto filtered=ReadReportCsv(filteredInput,"筛选结果");
+    Require(filtered.table->GetCount()==1 && SameRow(filtered.table->Read(0),large.table->Read(49999)),"filtered export lost original row identity or values");
+    search->setText("row-");bool cancelledWhileBusy=false;
+    QTimer::singleShot(0,&view,[&]{cancelledWhileBusy=view.property("reportRowsBusy").toBool();view.findChild<QPushButton*>("cancelReportRows")->click();});WaitRows(view);
+    Require(cancelledWhileBusy && view.GetFilteredRows().isEmpty(),"cancelled scan published partial or late results");
+    Require(!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("copyReportCsv")->isEnabled(),"cancelled scan is presented as an exportable complete result");
+    search->setText("row-4");view.SelectReport(ties.id);QCoreApplication::processEvents();
+    Require(view.GetSelectedReport().id==ties.id && view.GetFilteredRows().size()==8,"old report scan overwrote a new selection");
+    {ResultReport pending;pending.AddReport(large);auto* pendingTable=pending.findChild<QTableView*>("reportTable");QMetaObject::invokeMethod(pendingTable->horizontalHeader(),"sectionClicked",Q_ARG(int,1));}
+    QCoreApplication::processEvents();
+}
 }
 void CheckReportWorkflow()
 {
@@ -93,10 +150,10 @@ void CheckReportWorkflow()
     for(int i=0;i<6;++i)view.findChild<QPushButton*>("reportNext")->click();
     Require(table->model()->rowCount()==3 && table->model()->data(table->model()->index(2,0)).toString()=="1202","complete report browses beyond 1000 rows");
     std::cout<<"Reports: paging complete"<<std::endl;
-    QMetaObject::invokeMethod(table->horizontalHeader(),"sectionClicked",Q_ARG(int,1));
+    SortRows(view,1);
     Require(table->model()->data(table->model()->index(0,0)).toString()=="1202","numeric sorting covers the complete table, not the current page");
     Require(table->horizontalHeader()->isSortIndicatorShown()&&table->horizontalHeader()->sortIndicatorSection()==1,"sorting indicator follows the actual selected sort column");
-    view.findChild<QLineEdit*>("reportSearch")->setText("1202");Require(view.GetFilteredRows().size()==2,"search covers all rows, including unloaded pages");
+    view.findChild<QLineEdit*>("reportSearch")->setText("1202");WaitRows(view);Require(view.GetFilteredRows().size()==2,"search covers all rows, including unloaded pages");
     std::cout<<"Reports: sorting and search complete"<<std::endl;
     QTemporaryDir directory;const auto path=directory.filePath("报告.csv");ExportReport(path,large);std::cout<<"Reports: full export complete"<<std::endl;view.ImportReport(path);
     std::cout<<"Reports: independent import complete"<<std::endl;
@@ -117,7 +174,7 @@ void CheckReportWorkflow()
     compareView.findChild<QPushButton*>("compareReports")->click();
     Require(compareView.GetSelectedReport().category=="对比结果" && compareView.GetSelectedReport().table->Read(0)[4]=="3","actual report UI creates and selects comparison without input data");
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
-    view.hide();std::cout<<"PASS: Report CSV, units, matching, selection and full-table paging"<<std::endl;
+    view.hide();CheckMixedSortAndCancellation();std::cout<<"PASS: Report CSV, units, matching, selection, full-table paging and responsive sorting"<<std::endl;
 }
 void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport,const QString& previewPath)
 {
@@ -171,6 +228,8 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         QTreeWidgetItem* item=nullptr;for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toString()==doc.id){item=*it;break;}
         Require(item&&!item->isHidden(),"exact native report is visible in the report tree");tree->scrollToItem(item);tree->setCurrentItem(item);QCoreApplication::processEvents();
         Require(view->GetSelectedReport().id==doc.id,"report tree selection opens the requested frozen document");
+        WaitRows(*view);
+        Require(view->findChild<QPushButton*>("copyReportCsv")->isEnabled() && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview uses complete rows rather than a cancelled or failed partial scan");
         Require(view->GetSelectedReport().table->GetCount()==doc.table->GetCount(),"native business full row count");
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {

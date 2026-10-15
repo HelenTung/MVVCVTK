@@ -72,3 +72,5 @@ set_target_properties(mvvcvtk_roi_operation_tests PROPERTIES PROJECT_LABEL RoiOp
 add_test(NAME DataGraph.RoiOperations COMMAND mvvcvtk_roi_operation_tests)
 add_test(NAME DataGraph.RoiProcessingRegression COMMAND mvvcvtk_roi_operation_tests processing)
 add_test(NAME DataGraph.RoiCompressed COMMAND mvvcvtk_roi_operation_tests compressed)
+add_test(NAME DataGraph.RoiIslands COMMAND mvvcvtk_roi_operation_tests islands)
+add_test(NAME DataGraph.RoiIndexEndpoints COMMAND mvvcvtk_roi_operation_tests endpoints)

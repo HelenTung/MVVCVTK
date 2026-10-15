@@ -6,6 +6,7 @@
 #include <QVector>
 #include <QSet>
 #include <functional>
+#include <memory>
 #include "ReportDocument.h"
 class QComboBox;
 class QTabWidget;
@@ -17,6 +18,7 @@ class QTableView;
 class QLineEdit;
 class QCheckBox;
 class QPlainTextEdit;
+class QTimer;
 namespace Manual {
 struct ReportRow final { QString section, field, type, value; };
 QVector<ReportRow> GetReportRows(const QJsonObject& record);
@@ -25,6 +27,7 @@ void ExportReportCsv(const QString& path, const QJsonObject& record);
 class ResultReport final : public QWidget {
 public:
     explicit ResultReport(QWidget* parent = nullptr);
+    ~ResultReport() override;
     void SetRecord(const QJsonObject& record);
     QJsonObject GetSelectedRecord() const;
     void AddReport(ReportDocument document);
@@ -42,6 +45,8 @@ private:
     void Refresh();
     void SelectCurrent();
     void RefreshRows();
+    void ContinueRows();
+    int GetRowCount() const;
     void RefreshPage();
     void CompareSelected();
     QMap<QString, QJsonObject> m_records;
@@ -58,6 +63,12 @@ private:
     QPushButton *m_previous = nullptr, *m_next = nullptr;
     QPushButton* m_locate = nullptr;
     QVector<int> m_rows;
+    class RowScan;
+    std::unique_ptr<RowScan> m_rowScan;
+    QTimer* m_scanTimer = nullptr;
+    QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
+    bool m_allRows = false;
+    bool m_rowsReady = false;
     int m_page = 0, m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
