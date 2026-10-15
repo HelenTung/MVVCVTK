@@ -1481,7 +1481,9 @@ bool CropHostFeature::Impl::Document::StartSourcePreview(bool isDocument,bool is
             return record.status==CropResultStatus::Published
                 && binding.target==std::optional<DataRevisionRef>{record.outputRevision};
         });
-    const bool offline=isDocument&&(!m_isEditingDocument||!ownsPrimary);
+    const bool closesDocument=isDocument
+        && m_documentCommands.at(m_pendingDocumentRequest).request.action==CropDocumentAction::CloseDocument;
+    const bool offline=isDocument&&(!m_isEditingDocument||(closesDocument&&!ownsPrimary));
     // During Feature/Session shutdown an already closed consumer document may
     // leave this producer's result as the primary input. Restore its Root through
     // the real view transaction; a still-live consumer Root Reader blocks it.
