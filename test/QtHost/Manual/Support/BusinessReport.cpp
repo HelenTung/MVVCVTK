@@ -163,7 +163,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
                 object.volumeValidity==SurfaceMetricValidity::Valid&&object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
                 QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};
         });
-        const auto parameters=QJsonDocument::fromJson(QByteArray::fromStdString(snapshot->canonicalParameters)).object();
+        const auto parameters=QString::fromStdString(snapshot->canonicalParameters);
         doc.conditions["计算参数"]=parameters;doc.conditions["正式计算条件"]=parameters;
         doc.conditions["对象总数"]=QString::number(doc.table->GetCount());
         reports.append(std::move(doc));

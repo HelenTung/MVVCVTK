@@ -497,6 +497,15 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
         }
+        if(doc.module=="Surface") {
+            // 原生表面条件采用版本化文本；不能把解析失败的空 JSON 对象当成冻结条件。
+            const auto native=summary["canonicalParameters"].toString();
+            Require(native.startsWith("surface-parameters 3 ") && doc.conditions["计算参数"].isString()
+                && doc.conditions["计算参数"].toString()==native,"surface report preserves the complete native canonical parameter text");
+            if(doc.id.startsWith("surface:"))Require(doc.conditions["正式计算条件"].isString()
+                && doc.conditions["正式计算条件"].toString()==native,"surface object report preserves the exact formal native conditions");
+            std::cout<<"PASS: real surface frozen native parameter text operation="<<record["operationId"].toString().toStdString()<<std::endl;
+        }
         if(doc.id.startsWith("surface:") && summary.contains("objectCount")) {
             Require(doc.table->GetCount()==GetReportCount(summary["objectCount"]),"surface report covers all native objects");
             // 独立摘要直接读取原生快照，限定面积有值时也须保留，不能按资格二次抹空。

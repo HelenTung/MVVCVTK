@@ -60,6 +60,7 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
     summary["mesh"] = GetRefText(snapshot->meshRevision);
     summary["generation"]=GetRefText(snapshot->dataRevision);summary["selectedAreaMM2"]=snapshot->selectedAreaMM2;summary["selectionToleranceMM"]=snapshot->selectionToleranceMM;summary["selectionMesh"]=GetRefText(snapshot->selectionMeshRevision);
     summary["formalSource"]=GetRefText(snapshot->sourceRevision);
+    summary["canonicalParameters"]=QString::fromStdString(snapshot->canonicalParameters);
     summary["points"]=snapshot->points?QString::number(snapshot->points->size()):QString();
     if(state.purpose==SurfaceTaskPurpose::Determine && state.requestId==snapshot->requestId)
         formalStatistics={{"mesh",summary["mesh"]},{"acceptedPoints",QString::number(state.acceptedPointCount)},{"lowContrastPoints",QString::number(state.lowContrastPointCount)},{"rejectedPoints",QString::number(state.rejectedPointCount)},{"truncatedPoints",QString::number(state.truncatedPointCount)}};
