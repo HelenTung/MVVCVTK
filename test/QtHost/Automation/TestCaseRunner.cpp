@@ -2496,7 +2496,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
 {
     const auto script = LoadJson(path);
     const auto steps=script["steps"].toArray();
-    const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject()["timeoutMs"];return timeout.isUndefined() || (timeout.isDouble() && timeout.toDouble()==0);});
+    const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject().value("timeoutMs");return timeout.isUndefined() || (timeout.isDouble() && timeout.toDouble()==0);});
     const auto shutdown=script.contains("shutdownTimeoutMs")?GetNumber(script,"shutdownTimeoutMs"):(unbounded?0.:30000.);
     if(shutdown<0 || shutdown>std::numeric_limits<int>::max() || shutdown!=std::trunc(shutdown))
         throw std::invalid_argument("用例 shutdownTimeoutMs 必须为 0..2147483647 毫秒整数；0 表示不设退出期限");

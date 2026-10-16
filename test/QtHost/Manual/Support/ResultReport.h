@@ -42,7 +42,8 @@ public:
     bool GetGenerationPending() const;
     void RemoveReport(QString id);
     void SetReportSource(const QString& id, const QString& source);
-    void CancelTasks();
+    // 普通取消立即返回；最终关闭先等读者退出，再释放会话结果与临时文件。
+    void CancelTasks(bool waitForExit = false);
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
     QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
@@ -59,9 +60,11 @@ private:
     void Refresh();
     void SelectCurrent();
     void RefreshRows();
+    void CancelRows();
     void ContinueRows();
     ReportRowId GetRowCount() const;
     void RefreshPage();
+    void SetReadFailure(const QString& error);
     void CompareSelected();
     void ClearSelection();
     void ContinueGeneration();
@@ -104,6 +107,8 @@ private:
     QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
     bool m_allRows = false;
     bool m_rowsReady = false;
+    bool m_pageReady = false;
+    bool m_rowsPending = false;
     ReportRowId m_page = 0;
     int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
