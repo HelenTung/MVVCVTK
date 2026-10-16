@@ -113,20 +113,26 @@ public:
     Buffer<double> vertices,points;
     Buffer<AlignmentCudaHit> hits;
     std::size_t capacity;
-    Impl(const void *nodeData,std::size_t nodeCount,const std::uint64_t *orderData,std::size_t orderCount,
-         const double *vertexData,std::size_t vertexValues,const std::uint64_t *triangleData,std::size_t triangleValues,
-         std::size_t batchCapacity) : capacity(batchCapacity) {
-        if(!nodeCount || !orderCount || !vertexValues || !triangleValues || !capacity ||
-           capacity>std::numeric_limits<std::size_t>::max()/3)
-            throw std::invalid_argument("Invalid CUDA triangle index or batch capacity.");
-        nodes.Allocate(nodeCount);order.Allocate(orderCount);triangles.Allocate(triangleValues);vertices.Allocate(vertexValues);
-        points.Allocate(3*capacity);hits.Allocate(capacity);
-        CheckCuda(cudaMemcpyAsync(nodes.data,nodeData,nodeCount*sizeof(AlignmentCudaNode),cudaMemcpyHostToDevice,stream.handle));
-        CheckCuda(cudaMemcpyAsync(order.data,orderData,orderCount*sizeof(std::uint64_t),cudaMemcpyHostToDevice,stream.handle));
-        CheckCuda(cudaMemcpyAsync(triangles.data,triangleData,triangleValues*sizeof(std::uint64_t),cudaMemcpyHostToDevice,stream.handle));
-        CheckCuda(cudaMemcpyAsync(vertices.data,vertexData,vertexValues*sizeof(double),cudaMemcpyHostToDevice,stream.handle));
-        CheckCuda(cudaStreamSynchronize(stream.handle));
+    template<class T> void Upload(Buffer<T>& destination,const MeshReadArray<T>& source,const std::function<void()>& checkpoint){
+        destination.Allocate(source.size());
+        for(std::size_t offset=0;offset<source.size();){
+            if(checkpoint)checkpoint();auto chunk=source.GetChunk(offset,std::max<std::size_t>(1,1024*1024/sizeof(T)));
+            if(chunk.error!=MeshReadError::None)throw std::runtime_error("CUDA mesh source block read failed.");
+            CheckCuda(cudaMemcpyAsync(destination.data+offset,chunk.values.data(),chunk.values.size()*sizeof(T),cudaMemcpyHostToDevice,stream.handle));
+            // 本批缓冲必须活到上传完成；不再取得全网格连续主机指针。
+            CheckCuda(cudaStreamSynchronize(stream.handle));offset=chunk.nextOffset;
+        }
+        if(checkpoint)checkpoint();
     }
+    Impl(const MeshReadArray<AlignmentCudaNode>& nodeData,const MeshReadArray<std::uint64_t>& orderData,
+         const MeshReadArray<double>& vertexData,const MeshReadArray<std::uint64_t>& triangleData,
+         std::size_t batchCapacity,const std::function<void()>& checkpoint):capacity(batchCapacity){
+        if(nodeData.empty() || orderData.empty() || vertexData.empty() || triangleData.empty() || !capacity ||
+            capacity>std::numeric_limits<std::size_t>::max()/3)throw std::invalid_argument("Invalid CUDA triangle index or batch capacity.");
+        Upload(nodes,nodeData,checkpoint);Upload(order,orderData,checkpoint);Upload(triangles,triangleData,checkpoint);Upload(vertices,vertexData,checkpoint);
+        points.Allocate(3*capacity);hits.Allocate(capacity);
+    }
+
 };
 bool AlignmentCudaQuery::GetAvailable(std::string &reason) {
     int count=0;const auto status=cudaGetDeviceCount(&count);
@@ -141,11 +147,10 @@ bool AlignmentCudaQuery::GetAvailable(std::string &reason) {
     reason=std::string(properties.name)+"; runtime="+std::to_string(runtime)+"; driver="+std::to_string(driver);
     return true;
 }
-AlignmentCudaQuery::AlignmentCudaQuery(const void *nodes,std::size_t nodeCount,
-    const std::uint64_t *order,std::size_t orderCount,const double *vertices,std::size_t vertexValues,
-    const std::uint64_t *triangles,std::size_t triangleValues,std::size_t batchCapacity) {
+AlignmentCudaQuery::AlignmentCudaQuery(MeshReadArray<AlignmentCudaNode> nodes,MeshReadArray<std::uint64_t> order,
+    MeshReadArray<double> vertices,MeshReadArray<std::uint64_t> triangles,std::size_t batchCapacity,const std::function<void()>& checkpoint){
     std::string reason;if(!GetAvailable(reason))throw AlignmentCudaUnavailable(reason);
-    m_impl=std::make_unique<Impl>(nodes,nodeCount,order,orderCount,vertices,vertexValues,triangles,triangleValues,batchCapacity);
+    m_impl=std::make_unique<Impl>(nodes,order,vertices,triangles,batchCapacity,checkpoint);
 }
 AlignmentCudaQuery::~AlignmentCudaQuery() = default;
 void AlignmentCudaQuery::Query(const double *points,std::size_t count,AlignmentCudaHit *hits) {

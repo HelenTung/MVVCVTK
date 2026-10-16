@@ -90,8 +90,8 @@ std::optional<AlignmentDeviationSnapshot> GetResult(const DataGraphSnapshot &gra
     const auto sourceData = graph.view->GetData(s.sourceMesh), referenceData = graph.view->GetData(s.referenceMesh);
     const auto source = sourceData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(sourceData->payload) : nullptr;
     const auto reference = referenceData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(referenceData->payload) : nullptr;
-    if (!source || !reference || !s.forward || s.forward->originalVertexCount != source->GetVertices().size()/3 || s.forward->samples.size()<s.forward->originalVertexCount ||
-        (s.reverse && (s.reverse->originalVertexCount != reference->GetVertices().size()/3 || s.reverse->samples.size()<s.reverse->originalVertexCount))) return {};
+    if (!source || !reference || !s.forward || s.forward->originalVertexCount != source->GetPointValues().size()/3 || s.forward->samples.size()<s.forward->originalVertexCount ||
+        (s.reverse && (s.reverse->originalVertexCount != reference->GetPointValues().size()/3 || s.reverse->samples.size()<s.reverse->originalVertexCount))) return {};
     for (const auto &input : Inputs(s)) {
         if(input.role=="evaluation-roi"){if(!graph.view->GetData(input.source) || std::none_of(data->inputs.begin(),data->inputs.end(),[&](const auto& i){return i.role==input.role && i.source==input.source;}))return {};continue;}
         if (std::none_of(data->inputs.begin(), data->inputs.end(), [&](const auto &i) { return i.role == input.role && i.source == input.source; }) ||

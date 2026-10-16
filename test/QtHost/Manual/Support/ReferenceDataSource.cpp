@@ -37,7 +37,7 @@ std::vector<std::uint64_t> ReferenceDataSource::GetRoiVertices(DataRevisionRef r
     const auto data=m_data->GetData(graph,meshRef);
     const auto mesh=data?std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload):nullptr;
     if(!mesh)throw std::invalid_argument("区域选点的精确网格修订不可读");
-    const auto& points=mesh->GetVertices();std::vector<std::uint64_t> selected;
+    const auto& points=mesh->GetPointValues();std::vector<std::uint64_t> selected;
     for(std::size_t i=0;i<points.size()/3;++i)
         if(roi.roi->GetContains({points[3*i],points[3*i+1],points[3*i+2]}))selected.push_back(i);
     // 原生空顶点列表表示全网格；空 ROI 不能变成整件选区。
@@ -74,6 +74,10 @@ QJsonObject ReferenceDataSource::GetResultEvidence()
             using Value=typename std::decay_t<decltype(values)>::value_type;
             if constexpr(std::is_same_v<Value,std::string>) {
                 for(const auto& value:values){const std::uint64_t length=value.size();bytes(&length,sizeof(length));bytes(value.data(),value.size());}
+            } else if constexpr(std::is_same_v<std::decay_t<decltype(values)>,MeshReadArray<Value>>) {
+                for(std::size_t offset=0;offset<values.size();){auto chunk=values.GetChunk(offset,1024*1024/sizeof(Value));
+                    if(chunk.error!=MeshReadError::None)throw std::runtime_error("Mesh digest block read failed.");
+                    bytes(chunk.values.data(),chunk.values.size()*sizeof(Value));offset=chunk.nextOffset;}
             } else if constexpr(std::is_same_v<std::decay_t<decltype(values)>,MeshAttributeValues>) {
                 // 摘要仍按原 double 逻辑序列计算，与整数/区间物理布局无关。
                 for(std::size_t offset=0;offset<values.size();) {
@@ -90,8 +94,8 @@ QJsonObject ReferenceDataSource::GetResultEvidence()
         if(const auto* labels=dynamic_cast<const LabelMap3DPayload*>(data->payload.get())) {
             geometry(labels->GetGeometry());std::visit([&](const auto& values){vector(*values);},labels->GetValues());
         } else if(const auto* mesh=dynamic_cast<const SurfaceMeshPayload*>(data->payload.get())) {
-            vector(mesh->GetVertices());vector(mesh->GetTriangles());
-            for(const auto* attributes:{&mesh->GetPointAttributes(),&mesh->GetCellAttributes()})
+            vector(mesh->GetPointValues());vector(mesh->GetTriangleIndices());
+            for(const auto* attributes:{&mesh->GetPointFields(),&mesh->GetCellFields()})
                 for(const auto& attribute:*attributes){bytes(attribute.name.data(),attribute.name.size());vector(attribute.values);}
         } else if(const auto* table=dynamic_cast<const RecordTablePayload*>(data->payload.get())) {
             schema=QString::fromStdString(table->GetSchemaName());
@@ -172,12 +176,12 @@ QJsonObject ReferenceDataSource::ReadWallInputs(DataRevisionRef labelsRef, DataR
     const auto labels = labelData ? std::dynamic_pointer_cast<const LabelMap3DPayload>(labelData->payload) : nullptr;
     const auto mesh = meshData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(meshData->payload) : nullptr;
     // 精确读取载荷，不能用目录中仍存在的元信息代替旧输入可用性。
-    if (!labels || !labels->GetValid() || !mesh || !mesh->GetValid() || mesh->GetVertices().empty()
-        || mesh->GetTriangles().empty()) throw std::invalid_argument("精确标签或网格载荷不可读");
+    if (!labels || !labels->GetValid() || !mesh || !mesh->GetValid() || mesh->GetPointValues().empty()
+        || mesh->GetTriangleIndices().empty()) throw std::invalid_argument("精确标签或网格载荷不可读");
     return {{"labels", GetRefText(labelsRef)}, {"mesh", GetRefText(meshRef)},
         {"labelValueCount", QString::number(labels->GetValueCount())},
-        {"meshPointCount", QString::number(mesh->GetVertices().size() / 3)},
-        {"meshTriangleCount", QString::number(mesh->GetTriangles().size() / 3)}};
+        {"meshPointCount", QString::number(mesh->GetPointValues().size() / 3)},
+        {"meshTriangleCount", QString::number(mesh->GetTriangleIndices().size() / 3)}};
 }
 
 QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)

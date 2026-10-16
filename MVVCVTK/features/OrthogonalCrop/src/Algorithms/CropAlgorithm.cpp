@@ -1,3 +1,4 @@
+#include "PagedArray.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "Algorithms/CropMeshAlgorithm.h"
 
@@ -866,28 +867,28 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
         } else if (input.mesh && input.mesh->mesh) {
             const auto* mesh=dynamic_cast<const SurfaceMeshPayload*>(input.data->payload.get());
             if(!mesh || !mesh->GetValid())return result;
-            std::vector<double> vertices;std::vector<std::uint64_t> topology;std::vector<MeshAttribute> attributes,cellAttributes;
-            for(const auto& attribute:mesh->GetPointAttributes())attributes.push_back({attribute.name,attribute.componentCount,{}});
-            for(const auto& attribute:mesh->GetCellAttributes())cellAttributes.push_back({attribute.name,attribute.componentCount,{}});
-            MeshAttribute barycentric{"roi.barycentric",3,{}},parents{"roi.parent-triangle",1,{}};
+            PagedArray<double> vertices;PagedArray<std::uint64_t> topology;std::vector<MeshFieldWriter> attributes,cellAttributes;
+            for(const auto& attribute:mesh->GetPointFields())attributes.push_back({attribute.name,attribute.componentCount,{}});
+            for(const auto& attribute:mesh->GetCellFields())cellAttributes.push_back({attribute.name,attribute.componentCount,{}});
+            MeshFieldWriter barycentric{"roi.barycentric",3,{}},parents{"roi.parent-triangle",1,{}};
             std::size_t bytes=0,pointWidth=sizeof(double)*6+sizeof(std::uint64_t),cellWidth=sizeof(double);
             for(const auto& attribute:attributes)pointWidth+=attribute.componentCount*sizeof(double);for(const auto& attribute:cellAttributes)cellWidth+=attribute.componentCount*sizeof(double);
-            const auto& sourceVertices=mesh->GetVertices();const auto& sourceTopology=mesh->GetTriangles();
+            const auto& sourceVertices=mesh->GetPointValues();const auto& sourceTopology=mesh->GetTriangleIndices();
             for(std::size_t i=0;i<sourceTopology.size()/3;++i){
                 if(cancelled())return result;
-                std::array<std::array<double,3>,3> triangle{};for(int k=0;k<3;++k)std::copy_n(sourceVertices.data()+sourceTopology[i*3+k]*3,3,triangle[k].begin());
+                std::array<std::array<double,3>,3> triangle{};for(int k=0;k<3;++k)for(int axis=0;axis<3;++axis)triangle[k][axis]=sourceVertices[sourceTopology[i*3+k]*3+axis];
                 std::array<double,3> u{},v{};double uu=0,vv=0,uv=0;for(int k=0;k<3;++k){u[k]=triangle[1][k]-triangle[0][k];v[k]=triangle[2][k]-triangle[0][k];uu+=u[k]*u[k];vv+=v[k]*v[k];uv+=u[k]*v[k];}const double determinant=uu*vv-uv*uv;if(!(determinant>0))continue;
                 const auto selected=result.roi->GetTriangleChunks(triangle,1024,[&](const auto& pieces){
                     for(const auto& piece:pieces){
                     const auto cost=3*pointWidth+cellWidth;if(cost>std::numeric_limits<std::size_t>::max()-bytes){throw std::length_error("ROI crop output size overflows.");}bytes+=cost;
                     for(const auto& point:piece){double qu=0,qv=0;for(int k=0;k<3;++k){qu+=(point[k]-triangle[0][k])*u[k];qv+=(point[k]-triangle[0][k])*v[k];}const double b=(qu*vv-qv*uv)/determinant,c=(qv*uu-qu*uv)/determinant;const std::array<double,3> weights{1-b-c,b,c};
                         topology.push_back(vertices.size()/3);vertices.insert(vertices.end(),point.begin(),point.end());barycentric.values.insert(barycentric.values.end(),weights.begin(),weights.end());
-                        for(std::size_t ai=0;ai<attributes.size();++ai){const auto& source=mesh->GetPointAttributes()[ai];for(std::size_t component=0;component<source.componentCount;++component){double value=0;
+                        for(std::size_t ai=0;ai<attributes.size();++ai){const auto& source=mesh->GetPointFields()[ai];for(std::size_t component=0;component<source.componentCount;++component){double value=0;
                             if(source.name=="measurement.valid"){value=1;for(int k=0;k<3;++k)if(weights[k]>1e-12)value=std::min(value,source.values[sourceTopology[i*3+k]*source.componentCount+component]);}
                             else for(int k=0;k<3;++k)value+=weights[k]*source.values[sourceTopology[i*3+k]*source.componentCount+component];attributes[ai].values.push_back(value);
                         }}
                     }
-                    parents.values.push_back(static_cast<double>(i));for(std::size_t ai=0;ai<cellAttributes.size();++ai){const auto& source=mesh->GetCellAttributes()[ai];cellAttributes[ai].values.insert(cellAttributes[ai].values.end(),source.values.begin()+i*source.componentCount,source.values.begin()+(i+1)*source.componentCount);}
+                    parents.values.push_back(static_cast<double>(i));for(std::size_t ai=0;ai<cellAttributes.size();++ai){const auto& source=mesh->GetCellFields()[ai];cellAttributes[ai].values.insert(cellAttributes[ai].values.end(),source.values.begin()+i*source.componentCount,source.values.begin()+(i+1)*source.componentCount);}
 
                     }return !getStopRequested || !getStopRequested();
                 },0,getStopRequested);
@@ -900,7 +901,7 @@ CropMaterializationCandidate CropAlgorithm::GetRoiResult(
             result.meshTriangleCount=topology.size()/3;
             attributes.erase(std::remove_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="roi.barycentric";}),attributes.end());cellAttributes.erase(std::remove_if(cellAttributes.begin(),cellAttributes.end(),[](const auto& a){return a.name=="roi.parent-triangle";}),cellAttributes.end());
             attributes.push_back(std::move(barycentric));cellAttributes.push_back(std::move(parents));
-            result.outputPayload=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),std::move(topology),std::move(attributes),mesh->GetCoordinateFrame(),std::move(cellAttributes));
+            result.outputPayload=MeshPayloadBuilder::Build(vertices.Finish(),topology.Finish(),FinishMeshFields(std::move(attributes)),mesh->GetCoordinateFrame(),FinishMeshFields(std::move(cellAttributes)),getStopRequested);
             result.preparedView=VtkPreparedDataView::BuildDataView(result.outputPayload);
         } else return result;
         result.recipePayload=std::make_shared<const RoiGeometryPayload>(result.roi->GetDefinition());

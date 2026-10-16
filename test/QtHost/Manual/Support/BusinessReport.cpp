@@ -1,4 +1,5 @@
 #include "BusinessReport.h"
+#include "ReportStorage.h"
 #include "App/TestWorkflow.h"
 #include "JsonInput.h"
 #include <QJsonArray>
@@ -42,7 +43,7 @@ template<class Read>
 void SetPagedRows(ReportDocument& doc, const QString& ref, Read read, QStringList keys, QJsonObject first)
 {
     const auto count=GetId(first["total"]);
-    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=ReportRowId(0)](ReportRowId index) mutable {
+    doc.table->SetRows(static_cast<std::size_t>(count),[ref,read,keys,first,offset=ReportRowId{0}](ReportRowId index) mutable {
         auto rows=first["rows"].toArray();
         if(index<offset || index>=offset+rows.size()) {
             offset=index/256*256; first=read(GetRef(ref),static_cast<std::size_t>(offset),256,std::nullopt);rows=first["rows"].toArray();
@@ -177,25 +178,58 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
 #if defined(MANUAL_ALIGNMENT)
 void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmentHostFeature> feature)
 {
-    workflow.readReports["Alignment"]=[feature](const QJsonObject& record,const QSet<QString>& known) {
+    const auto prepare=[feature](const QJsonObject& record,const QSet<QString>& known)->ReportPreparation {
+        const auto r=record["result"].toObject();
+        const auto inspectionInput=HasRevision(r["inspection"].toString())?feature->GetInspection(GetRef(r["inspection"])):std::optional<InspectionSnapshot>{};
+        const auto deviationInput=HasRevision(r["deviation"].toString())?feature->GetDeviation(GetRef(r["deviation"])):std::optional<AlignmentDeviationSnapshot>{};
+        const auto volumeInput=HasRevision(r["voxelVolume"].toString())?feature->GetVoxelVolume(GetRef(r["voxelVolume"])):std::optional<VoxelVolumeSnapshot>{};
+        const auto source=[feature](DataRevisionRef ref){const auto parent=feature->GetResult(ref);return parent?GetRefText(parent->input.source):QString();};
+        const auto inspectionSource=inspectionInput?source(inspectionInput->alignmentResult):QString();
+        const auto deviationSource=deviationInput?source(deviationInput->alignmentResult):QString();
+        return [record,known,inspectionInput,deviationInput,volumeInput,inspectionSource,deviationSource](const ReportCheckpoint& checkpoint) {
+        const auto check=[&]{if(checkpoint)checkpoint();};check();
         QVector<ReportDocument> reports;const auto r=record["result"].toObject();const auto inspection=r["inspection"].toString(),deviation=r["deviation"].toString(),volume=r["voxelVolume"].toString();
         const auto length=[](AlignmentUnit unit){return unit==AlignmentUnit::Millimeter?QString("mm"):unit==AlignmentUnit::Meter?QString("m"):QString("model");};
         if(HasRevision(inspection) && !known.contains("inspection:"+inspection)) {
-            const auto snapshot=feature->GetInspection(GetRef(inspection));
+            const auto snapshot=inspectionInput;
             if(snapshot && snapshot->report && snapshot->plan) {
-                auto source=GetRefText(snapshot->sourceMesh);
-                if(const auto alignment=feature->GetResult(snapshot->alignmentResult))source=GetRefText(alignment->input.source);
-                reports.append(CreateInspectionReport(record,*snapshot,source));
+                QMap<int,ReportDocument> groups;
+                const QStringList metrics{"半径","直径","中心 X","中心 Y","中心 Z","中心距离","有向角度","平行平面有符号距离","拟合 RMS","拟合最大残差"};
+                struct SpecEntry { ReportTextRef id,name; std::size_t order; int metric; };
+                PagedArray<SpecEntry> specs;ReportTextStore texts;
+                for(std::size_t index=0;index<snapshot->plan->items.size();++index) {
+                    check();const auto& spec=snapshot->plan->items[index];specs.push_back({texts.Append(QString::fromStdString(spec.id)),texts.Append(QString::fromStdString(spec.name)),index,static_cast<int>(spec.measured.metric)});
+                }
+                texts.Finish();SortPagedArray(specs,[&](const SpecEntry& a,const SpecEntry& b){const auto order=QString::compare(texts.Read(a.id),texts.Read(b.id),Qt::CaseSensitive);return order?order<0:a.order<b.order;},check);
+                for(const auto& item:snapshot->report->items) {
+                    check();const auto id=QString::fromStdString(item.id);std::size_t first=0,last=specs.size();
+                    while(first<last){check();const auto middle=first+(last-first)/2;if(texts.Read(specs[middle].id)<id)first=middle+1;else last=middle;}
+                    if(first==specs.size() || texts.Read(specs[first].id)!=id)continue;const auto spec=specs[first];const int metric=spec.metric;
+                    if(!groups.contains(metric)) {
+                        const auto unit=metric==static_cast<int>(InspectionMetric::OrientedDirectionAngleDegrees)?QString("deg"):length(snapshot->unit);
+                        auto doc=Document(record,"inspection-"+QString::number(metric),inspection,GetRefText(snapshot->sourceMesh),"计量 · "+metrics.value(metric,"项目"));
+                        doc.relatedResults.append(GetRefText(snapshot->alignmentResult));
+                        if(!inspectionSource.isEmpty())doc.source=inspectionSource;
+                        doc.columns={{"item_id",{},{},false},{"name",{},{},false},{"nominal_"+unit,metrics.value(metric),unit,true},
+                            {"measured_"+unit,metrics.value(metric),unit,true},{"deviation_"+unit,metrics.value(metric)+"相对名义偏差",unit,true},{"verdict",{},{},false},{"reason",{},{},false}};
+                        doc.identityColumn=0;doc.valueColumn=3;doc.identityStable=true;doc.table=std::make_shared<ReportTable>();groups[metric]=std::move(doc);
+                    }
+                    groups[metric].table->Append({QString::fromStdString(item.id),texts.Read(spec.name),item.nominal?Number(*item.nominal):QString(),
+                        item.measured?Number(*item.measured):QString(),item.deviation?Number(*item.deviation):QString(),QString::number(static_cast<int>(item.verdict)),QString::fromStdString(item.message)});
+                }
+                for(auto it=groups.begin();it!=groups.end();++it)reports.append(it.value());
+                if(reports.isEmpty()){auto empty=Document(record,"inspection",inspection,GetRefText(snapshot->sourceMesh),"计量明细（空结果）");empty.columns={{"item_id",{},{},false}};empty.table=std::make_shared<ReportTable>();reports.append(std::move(empty));}
+                reports.first().id="inspection:"+inspection;
             }
         }
         if(HasRevision(deviation) && !known.contains("deviation:"+deviation)) {
-            const auto snapshot=feature->GetDeviation(GetRef(deviation));
+            const auto snapshot=deviationInput;
             if(snapshot && snapshot->forward) {
                 const auto fieldReport=[&](std::shared_ptr<const AlignmentDeviationField> samples,const QString& prefix,const QString& title,const QString& quantity) {
                 const auto& field=*samples;
                 auto doc=Document(record,prefix,deviation,GetRefText(snapshot->sourceMesh),title);
                 doc.relatedResults.append(GetRefText(snapshot->alignmentResult));
-                if(const auto alignment=feature->GetResult(snapshot->alignmentResult))doc.source=GetRefText(alignment->input.source);
+                if(!deviationSource.isEmpty())doc.source=deviationSource;
                 const auto unit=length(snapshot->unit);
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};
                 doc.identityColumn=0;doc.validityColumn=3;doc.table=std::make_shared<ReportTable>();
@@ -214,7 +248,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
             }
         }
         if(HasRevision(volume) && !known.contains("voxel-volume:"+volume)) {
-            if(const auto snapshot=feature->GetVoxelVolume(GetRef(volume))) {
+            if(const auto snapshot=volumeInput) {
                 auto doc=Document(record,"voxel-volume",volume,GetRefText(snapshot->source),"选区单元体积");const auto& stats=snapshot->statistics;
                 doc.description="完整体积与有效选中部分体积含义不同；不可观测或完整性条件未满足时，完整体积留空。";
                 doc.columns={{"item_id",{},{},false},{"selected_cells","选中单元数","1",true},{"selected_cell_volume_mm3","选区单元体积和","mm3",true},
@@ -226,8 +260,11 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                 reports.append(std::move(doc));
             }
         }
-        return reports;
+        check();return reports;
+        };
     };
+    workflow.prepareReports["Alignment"]=prepare;
+    workflow.readReports["Alignment"]=[prepare](const QJsonObject& record,const QSet<QString>& known){return prepare(record,known)({});};
 }
 #endif
 }

@@ -50,7 +50,7 @@ int wmain(int argc,wchar_t **argv) {
         auto imported=AlignmentReferenceLoader::Load(input,work);
         if (imported.status!=AlignmentStatus::FullyDetermined || !imported.mesh) throw std::runtime_error(imported.message);
         const double importMs=Milliseconds(importStart); const auto afterImport=ReadMemory();
-        const auto points=imported.mesh->GetVertices().size()/3, triangles=imported.mesh->GetTriangles().size()/3;
+        const auto points=imported.mesh->GetPointValues().size()/3, triangles=imported.mesh->GetTriangleIndices().size()/3;
         TestDataPort data;
         const DataRevisionRef meshRef{data.CreateDataEntityId(),1};
         DataTransaction tx; tx.outputs.push_back({meshRef.entityId,0,DataTypes::surfaceMesh,{},imported.mesh,{}});
@@ -60,7 +60,7 @@ int wmain(int argc,wchar_t **argv) {
         if (!view) throw std::runtime_error("Audit render view unavailable.");
         const double viewMs=Milliseconds(viewStart); const auto afterView=ReadMemory();
         auto field=std::make_shared<AlignmentDeviationField>();field->originalVertexCount=points; field->samples.resize(points);
-        const auto &coordinates=imported.mesh->GetVertices();
+        const auto &coordinates=imported.mesh->GetPointValues();
         double low=coordinates[0], high=coordinates[0];
         for (std::size_t i=0;i<points;++i) { low=std::min(low,coordinates[3*i]); high=std::max(high,coordinates[3*i]); }
         for (std::size_t i=0;i<points;++i) {

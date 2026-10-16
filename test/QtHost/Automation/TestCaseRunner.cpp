@@ -93,7 +93,7 @@
 #include <QVTKOpenGLNativeWidget.h>
 namespace Manual {
 namespace {
-bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
+bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
 {
     QElapsedTimer elapsed;elapsed.start();
     for(;;) {
@@ -169,7 +169,7 @@ std::uint64_t Send(TestWindow& window, const QString& module, const QString& act
     panel->SetParameterPatch(action, patch);
     return panel->SendAction(action, panel->GetParameters());
 }
-QJsonObject GetComplete(TestWindow& window, std::uint64_t id, const QString& status = {}, int timeoutMs = 30000)
+QJsonObject GetComplete(TestWindow& window, std::uint64_t id, const QString& status = {}, int timeoutMs = 0)
 {
     const bool completed = Wait([&] { return window.GetRecords().GetRecord(id)["isTerminal"].toBool(); }, timeoutMs);
     if (!completed) {
@@ -1870,6 +1870,22 @@ void CheckSharedRoi(TestWindow& window)
     Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
         && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
     }
+    // 已保存的派生区域再次运算后直接提交，不能被残留的解析工具控件覆盖。
+    GetComplete(window,Click(window,"Roi","Threshold",{{"roi",""},{"outputMode","CreateNew"},
+        {"grayRange",GetValues(image->scalarRange)}}),"PreviewReady");
+    const auto whole=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto beforeClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}}),"Observed")["result"].toObject();
+    GetComplete(window,Click(window,"Roi","Close",{{"roi",whole},{"outputMode","CreateNew"},
+        {"radius",1.0},{"radiusUnit","Voxels"}}),"PreviewReady");
+    const auto closed=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto afterClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",closed},{"maskPath",""}}),"Observed")["result"].toObject();
+    const auto closedDescriptor=window.GetSession()->GetRoiDescriptor(GetRef(closed));
+    Check(closedDescriptor && closedDescriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
+        && beforeClose["voxelCount"].toString().toULongLong()>0
+        && beforeClose["voxelCount"]==beforeClose["gridCount"]
+        && beforeClose["voxelCount"]==afterClose["voxelCount"]
+        && beforeClose["binaryMaskSha256"]==afterClose["binaryMaskSha256"],
+        "closing a saved full-source threshold preserves all members when committed through the real ROI buttons");
 #endif
 }
 void StartSelfTest(TestWindow& window)
@@ -2156,7 +2172,8 @@ void StartSelfTest(TestWindow& window)
         SaveScene(window, dataTree, "scene-ui-published-branches.png");
     }
     if (GetEnabled(window, "Surface")) {
-        GetComplete(window, Send(window, "Surface", "GlobalAutomatic"), "Succeeded");
+        const auto firstObjectGeneration=GetComplete(window, Send(window, "Surface", "GlobalAutomatic"), "Succeeded")["result"].toObject()["generation"].toString();
+        GetComplete(window,window.GetModule("Surface")->SendAction("KeepResult",{{"graphRevision",firstObjectGeneration}}),"Succeeded");
         window.GetModule("Surface")->Observe();
         Check(!window.GetModule("Surface")->GetObservedState()["parametersChanged"].toBool(),"a formal surface does not treat an inapplicable seed field as a changed parameter");
         GetComplete(window, window.GetModule("View")->SendAction("Set", {{"viewId", "primary-3d"}, {"mode", "CompositeVolume"}}), "Succeeded");
@@ -2166,6 +2183,16 @@ void StartSelfTest(TestWindow& window)
         Check(window.GetModule("Surface")->findChild<QPushButton*>("action_CopyIsoToDisplay")->isEnabled(),
             "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
+        const auto objects=GetComplete(window,window.GetModule("Surface")->SendAction("ReadObjects",{{"generation",firstObjectGeneration},{"pageOffset","0"},{"pageSize","1"}}),"Observed")["result"].toObject();
+        Check(objects["generation"]==firstObjectGeneration && objects["objects"].toArray().size()==1,"object UI reads a bounded exact historical generation");
+        const auto object=objects["objects"].toArray().first().toObject();
+        Check(GetId(object["pointCount"])>0 && GetId(object["triangleCount"])>0,"object UI exposes its immutable geometry ranges");
+        const auto graphBeforeObject=window.GetWorkflow().getPublishedGraph();
+        const auto selectedObject=GetComplete(window,window.GetModule("Surface")->SendAction("HighlightObject",{{"generation",firstObjectGeneration},{"objectIndex",object["objectIndex"]}}),"Succeeded")["result"].toObject();
+        Check(selectedObject["generation"]==firstObjectGeneration && window.GetWorkflow().getPublishedGraph()==graphBeforeObject,"historical UI highlighting does not republish geometry or alter bindings");
+        const auto scene=window.GetSession()->GetSceneViewState({"primary-3d"});
+        Check(scene && std::any_of(scene->displays.begin(),scene->displays.end(),[](const auto& value){return value.localId=="surface-object";}),"actual Host scene contains the object selection role");
+        GetComplete(window,window.GetModule("Surface")->SendAction("ClearObjectHighlight",{}),"Succeeded");
         const auto selected=GetComplete(window,Click(window,"Surface","MeasurementSelection"),"Observed")["result"].toObject();
         Check(selected["triangleIds"].toArray().size()<=256&&selected["vertexIds"].toArray().size()<=256,"measurement result record contains only bounded ID pages");
         const auto page=GetComplete(window,Click(window,"Surface","ReadMeasurementSelection",{{"selectionId",selected["selectionId"]},{"pageSize","1"}}),"Observed")["result"].toObject();

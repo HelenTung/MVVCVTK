@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AlignmentGeometry.h"
+#include "PagedArray.h"
 #include <limits>
 
 struct AlignmentMeshHit final {
@@ -37,6 +38,6 @@ class AlignmentMeshQuery final {
     void CheckWork() const;
     std::shared_ptr<const SurfaceMeshPayload> m_mesh;
     std::shared_ptr<std::atomic<bool>> m_cancelled;
-    std::vector<std::uint64_t> m_triangles;
-    std::vector<Node> m_nodes;
+    PagedArray<std::uint64_t> m_triangles;
+    PagedArray<Node> m_nodes;
 };

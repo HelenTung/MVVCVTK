@@ -22,6 +22,8 @@ target_sources(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/WidgetBindings.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/FeatureSupport/RoutedWidgets.h"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/LabelMapBuilder.h"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/PagedArray.h"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/MeshVtkStorage.h"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/MappedArrayStorage.h"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/BackedVtkArray.h"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support/MeshPayloadBuilder.h"

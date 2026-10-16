@@ -11,6 +11,7 @@ add_library(qt_feature_test_support STATIC
     Support/BusinessReport.cpp Support/BusinessReport.h
     Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/ResultRetention.cpp Support/TestRecordWriter.cpp Support/ProcessMeasurements.cpp Support/TestResources.cpp Support/UiText.cpp Support/WorkbenchStyle.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
+target_include_directories(qt_feature_test_support PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/src")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
 target_link_libraries(qt_feature_test_support PRIVATE MVVCVTKInternal::FeatureSupport)

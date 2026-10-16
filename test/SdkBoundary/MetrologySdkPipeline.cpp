@@ -87,8 +87,8 @@ void Run(const char *filePath, const char *expectedSha256) {
     auto *pointValidity=poly->GetPointData()->GetArray("measurement.valid");
     auto *faceValidity=poly->GetCellData()->GetArray("measurement.valid");
     Require(pointValidity && faceValidity, "Real C3 point and cell quality must be present.");
-    const auto &faces=mesh->GetTriangles();
-    std::vector<bool> selected(mesh->GetVertices().size()/3,false), faceUsable(faces.size()/3,false);
+    const auto &faces=mesh->GetTriangleIndices();
+    std::vector<bool> selected(mesh->GetPointValues().size()/3,false), faceUsable(faces.size()/3,false);
     std::vector<std::uint64_t> validFaces;
     for (std::size_t i=0;i<faces.size()/3;++i) {
         bool valid=faceValidity->GetComponent(static_cast<vtkIdType>(i),0)==1;
@@ -120,9 +120,14 @@ void Run(const char *filePath, const char *expectedSha256) {
             complete->result=std::move(value); complete->isDone=true;
         });
         Require(admission.status==AlignmentAdmissionStatus::Accepted, "SDK request must be admitted.");
-        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(180000);
-        while (!complete->isDone && std::chrono::steady_clock::now()<deadline) { session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-        Require(complete->isDone, "SDK request must finish within the real-audit deadline.");
+        // 默认等待完整业务完成；非零环境参数仅用于调用方显式选择的测试进程保护。
+        std::array<char,64> setting{};
+        const auto length=GetEnvironmentVariableA("MVVCVTK_SDK_AUDIT_TIMEOUT_MS",setting.data(),static_cast<DWORD>(setting.size()));
+        Require(length<setting.size(),"Caller-selected audit deadline is invalid.");
+        const auto timeout=length?std::stoull(setting.data()):0;
+        const auto started=std::chrono::steady_clock::now();
+        while (!complete->isDone && (!timeout || std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()<double(timeout))) { session.SendUpdates(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Require(complete->isDone, "SDK request did not finish within the caller-selected audit deadline.");
         const auto &result=complete->result;
         if (result.status!=AlignmentStatus::FullyDetermined) std::cerr<<result.message<<'\n';
         Require(result.status==AlignmentStatus::FullyDetermined, "SDK business result must complete.");
@@ -156,7 +161,7 @@ void Run(const char *filePath, const char *expectedSha256) {
     std::ostringstream json; const auto written=WriteMetrologyReport(*report.report,json);
     Require(written.status==MetrologyReportWriteStatus::Succeeded && written.bytesWritten==json.str().size(), "SDK report writer must preserve complete output.");
     Require(session.DetachFeature(*feature) && session.DetachFeature(*inputFeature) && session.Stop(), "SDK features and Host must stop cleanly.");
-    std::cout<<"RealC3SdkPipeline points="<<mesh->GetVertices().size()/3<<" triangles="<<faces.size()/3
+    std::cout<<"RealC3SdkPipeline points="<<mesh->GetPointValues().size()/3<<" triangles="<<faces.size()/3
              <<" validTriangles="<<validFaces.size()<<" rms="<<solved.diagnostics.rms<<" evaluatedArea="<<field->forward->statistics.evaluatedArea
              <<" sha256="<<sha256<<'\n';
 }

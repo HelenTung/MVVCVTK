@@ -1,6 +1,7 @@
 #include "FeatureSupport/WorkLimit.h"
 #include "SurfaceDeterminationService.h"
 #include "SurfaceContracts.h"
+#include "SurfaceGeometryStorage.h"
 #include <vtkImageData.h>
 
 #include <algorithm>
@@ -46,8 +47,7 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return SurfaceAdmissionStatus::Stopping;
-    if (!source || !source->image || requestId == 0
-        || maxWorkingBytes == 0) {
+    if (!source || !source->image || requestId == 0) {
         return SurfaceAdmissionStatus::InvalidRequest;
     }
     const auto maxSlots = m_complete.max_size();
@@ -93,13 +93,12 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(VtkImageGridSnapshot s
             complete.result.status = SurfaceResultStatus::Cancelled;
             complete.result.failureReason = SurfaceFailureReason::Cancelled;
             complete.result.points = {};
-            DataArray<SurfacePointRecord>().swap(complete.result.points);
-            DataArray<std::uint32_t>().swap(complete.result.triangleIndices);
-            DataArray<std::uint8_t>().swap(complete.result.triangleValidity);
-            DataArray<SurfaceObjectRecord>().swap(complete.result.objects);
-            DataArray<SurfaceSelectionPiece>().swap(complete.result.selection);
-            complete.result.sharedParent.reset();
-            complete.meshes={};
+            PagedArray<SurfacePointRecord>().swap(complete.result.points);
+            PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
+            PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
+            PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
+            PagedArray<SurfaceSelectionPiece>().swap(complete.result.selection);
+            complete.meshes={};complete.result.prepared.reset();
             complete.result.requiredBytes = 0;
         }
     }
@@ -132,14 +131,13 @@ bool SurfaceDeterminationService::StopRequest(
     for (auto& complete : m_complete) if (complete.requestId == requestId) {
         complete.result.status = SurfaceResultStatus::Cancelled;
         complete.result.failureReason = SurfaceFailureReason::Cancelled;
-        DataArray<SurfacePointRecord>().swap(complete.result.points);
-        DataArray<std::uint32_t>().swap(complete.result.triangleIndices);
-        DataArray<std::uint8_t>().swap(complete.result.triangleValidity);
-        DataArray<SurfaceObjectRecord>().swap(complete.result.objects);
-        DataArray<SurfaceSelectionPiece>().swap(complete.result.selection);
-        complete.result.sharedParent.reset();
-        complete.meshes={};
-        complete.result.requiredBytes = 0;
+        PagedArray<SurfacePointRecord>().swap(complete.result.points);
+        PagedArray<std::uint32_t>().swap(complete.result.triangleIndices);
+        PagedArray<std::uint8_t>().swap(complete.result.triangleValidity);
+        PagedArray<SurfaceObjectRecord>().swap(complete.result.objects);
+        PagedArray<SurfaceSelectionPiece>().swap(complete.result.selection);
+        complete.meshes={};complete.result.prepared.reset();
+            complete.result.requiredBytes = 0;
         didStop = true;
     }
     if (didStop) ++m_executionRevision;
@@ -321,40 +319,27 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
                     SetProgress(requestId, stage, progress);
                 },
                 job.inputs);
-            if(complete.result.status==SurfaceResultStatus::Succeeded
-                &&SurfaceContract::GetPurpose(job.params)==SurfaceTaskPurpose::Determine) {
-                const auto started=std::chrono::steady_clock::now();
+            if(complete.result.status==SurfaceResultStatus::Succeeded){
                 try {
-                    const auto* image=job.source&&job.source->data
-                        ?dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get()):nullptr;
-                    if(!image)throw std::invalid_argument("Surface preparation source is unavailable.");
-                    complete.meshes=PrepareSurfaceMeshes(complete.result,job.params,image->GetGeometry().coordinateFrame,
-                        bool(job.inputs.roi),job.maxWorkingBytes,[cancel=job.isCancelled]{return cancel->load(std::memory_order_acquire);});
-                    complete.result.execution.publicationPreparationMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-                }catch(const std::exception& error) {
-                    const bool cancelled=job.isCancelled->load();
-                    complete.meshes={};complete.result.status=cancelled?SurfaceResultStatus::Cancelled:SurfaceResultStatus::Failed;
-                    complete.result.failureReason=cancelled?SurfaceFailureReason::Cancelled:SurfaceFailureReason::PublishFailed;
-                    complete.result.message=error.what();
-                }catch(...) {
-                    complete.meshes={};complete.result.status=SurfaceResultStatus::Failed;
-                    complete.result.failureReason=SurfaceFailureReason::PublishFailed;
-                    complete.result.message="Surface mesh preparation failed.";
-                }
+                    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get());
+                    complete.result.prepared=image?PrepareSurfaceGeometry(complete.result,image->GetGeometry().coordinateFrame,
+                        job.params.componentSelection==SurfaceComponentSelection::All && !job.params.analysisRoi && job.params.minimumObjectVoxels<=1,
+                        [cancel=job.isCancelled]{return cancel->load();},job.inputs.parentStorage):nullptr;
+                    if(!complete.result.prepared){
+                        if(job.isCancelled->load())complete=BuildCancelled(job);
+                        else {complete.result.status=SurfaceResultStatus::Failed;complete.result.failureReason=SurfaceFailureReason::InvalidGeometry;complete.result.message="Surface storage preparation failed.";}
+                    }
+                } catch(const std::exception& error){complete.result.status=SurfaceResultStatus::Failed;complete.result.failureReason=SurfaceFailureReason::InternalError;complete.result.message=error.what();}
             }
             if(complete.result.status==SurfaceResultStatus::Succeeded) {
+                complete.meshes.measurement=complete.result.prepared->mesh;
+                complete.meshes.selection=complete.result.prepared->selectionMesh;
                 try {
-                    const auto* image=job.source&&job.source->data?dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get()):nullptr;
-                    if(!image)throw std::runtime_error("Surface display source is unavailable.");
+                    const auto* image=dynamic_cast<const ImageGrid3DPayload*>(job.source->data->payload.get());
                     complete.meshes.display=PrepareSurfaceDisplay(complete.result,complete.meshes,job.inputs,
-                        image->GetGeometry().coordinateFrame,job.maxWorkingBytes,[cancel=job.isCancelled]{return cancel->load(std::memory_order_acquire);});
+                        image->GetGeometry().coordinateFrame,job.maxWorkingBytes,[cancel=job.isCancelled]{return cancel->load();});
                 }catch(const std::exception& error){complete.meshes.displayError=error.what();}
                 catch(...){complete.meshes.displayError="Surface spatial display preparation failed.";}
-            }
-            if(complete.result.status!=SurfaceResultStatus::Succeeded) {
-                auto failed=BuildCancelled(job);
-                failed.result.status=complete.result.status;failed.result.failureReason=complete.result.failureReason;
-                failed.result.message=std::move(complete.result.message);complete=std::move(failed);
             }
         }
 

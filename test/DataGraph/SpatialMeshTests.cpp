@@ -35,9 +35,9 @@ int CheckLargeAccess(std::uint64_t count)
         vertices[3*point]=double(face%8192)*2+(corner==1);vertices[3*point+1]=double(face/8192)*2+(corner==2);vertices[3*point+2]=0;
         if(point<faces.size())faces[point]=point;
     }
-    const auto* coordinates=vertices.data();const auto* topology=faces.data();
+    std::weak_ptr<DataArrayStorage> coordinateOwner=vertices.get_allocator().storage;
     auto mesh=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),std::move(faces));storage.Finish();
-    Require(mesh->GetVertices().data()==coordinates&&mesh->GetTriangles().data()==topology,"large formal arrays were copied at adoption");
+    Require(!coordinateOwner.expired()&&mesh->GetPointValues().size()==count*3&&mesh->GetTriangleIndices().size()==(count/3)*3,"large formal arrays lost their backing owner or length at adoption");
     const auto formalMs=elapsed();std::cout<<"large formal ready points="<<count<<" faces="<<count/3<<" elapsedMs="<<formalMs<<std::endl;
     auto source=Source::Build(mesh);std::weak_ptr<const SurfaceMeshPayload> weak=mesh;mesh.reset();
     const auto indexMs=elapsed()-formalMs;std::cout<<"large spatial index ready indexMs="<<indexMs<<std::endl;
@@ -91,7 +91,7 @@ int main(int argc,char** argv)
         auto* ids=vtkIdTypeArray::SafeDownCast(batch.mesh->GetCellData()->GetArray(Source::faceIds));
         Require(points&&ids&&ids->GetNumberOfValues()==Source::facesPerBatch,"exact integer picking maps exist");
         for(vtkIdType i=0;i<ids->GetNumberOfValues();++i)Require(ids->GetValue(i)==selected*Source::facesPerBatch+i,"face IDs preserve formal order");
-        for(vtkIdType i=0;i<3;++i){double p[3];batch.mesh->GetPoint(i,p);Require(points->GetValue(i)==selected*3+i,"point IDs preserve global identity");const auto locked=weak.lock();Require(std::equal(p,p+3,locked->GetVertices().data()+3*points->GetValue(i)),"coordinates exactly equal formal data");}
+        for(vtkIdType i=0;i<3;++i){double p[3];batch.mesh->GetPoint(i,p);Require(points->GetValue(i)==selected*3+i,"point IDs preserve global identity");const auto locked=weak.lock();Require(std::equal(p,p+3,locked->GetPointValues().begin()+3*points->GetValue(i)),"coordinates exactly equal formal data");}
         for(vtkIdType face=0;face<10;++face){vtkIdType count=0;const vtkIdType* corners=nullptr;batch.mesh->GetPolys()->GetCellAtId(face,count,corners);Require(count==3,"triangle remains triangular");for(unsigned j=0;j<3;++j)Require(points->GetValue(corners[j])==selected*3+(j+face%3)%3,"local connectivity restores exact global corner order");}
         const auto first=selected*Source::facesPerBatch+10;
         const auto detail=source->Read(selected,{},first,first+3);
@@ -149,8 +149,8 @@ int main(int argc,char** argv)
         {
             DataArray<std::uint64_t> interleaved;interleaved.reserve(batches*Source::facesPerBatch*3);
             for(std::size_t i=0;i<batches*Source::facesPerBatch;++i)for(unsigned corner=0;corner<3;++corner)interleaved.push_back((i%batches)*3+corner);
-            auto shuffledMesh=std::make_shared<const SurfaceMeshPayload>(source->GetMesh().GetVertices(),std::move(interleaved));
-            const auto* formal=shuffledMesh->GetTriangles().data();const auto shuffled=Source::Build(shuffledMesh);
+            auto shuffledMesh=std::make_shared<const SurfaceMeshPayload>(source->GetMesh().GetPointValues(),MeshReadArray<std::uint64_t>(std::move(interleaved)),std::vector<MeshField>{},"RAS");
+            const auto formal=shuffledMesh->GetDataResources();const auto shuffled=Source::Build(shuffledMesh);
             const auto local=shuffled->Find(Box(selected*10-.1,selected*10+1.1),4);
             Require(local.isComplete&&local.batches==query.batches&&local.visitedNodes<32,"interleaved formal faces still produce genuinely spatial batches");
             const auto geometry=shuffled->Read(selected);auto* exact=vtkIdTypeArray::SafeDownCast(geometry.mesh->GetCellData()->GetArray(Source::faceIds));
@@ -159,8 +159,8 @@ int main(int argc,char** argv)
             const auto object=shuffled->Find(Box(-1,2000),1,17,18);
             Require(object.isComplete&&object.batches==std::vector<std::uint64_t>{17}&&object.indexRecordsRead==1,"small object lookup uses one inverse record rather than scanning full face order");
             const auto one=shuffled->Read(17,{},17,18);Require(one.sourceFacesRead==1&&one.sourcePointsRead==3,"single-object display range keeps exact formal membership after reordering");
-            Require(formal==shuffledMesh->GetTriangles().data()&& &shuffled->GetMesh()==shuffledMesh.get(),"display indexing never replaces the formal mesh arrays");
-            for(std::size_t i=0;i<shuffledMesh->GetTriangles().size();++i)Require(shuffledMesh->GetTriangles()[i]==((i/3)%batches)*3+i%3,"formal face order remains unchanged");
+            Require(formal==shuffledMesh->GetDataResources()&& &shuffled->GetMesh()==shuffledMesh.get(),"display indexing never replaces the formal mesh arrays");
+            for(std::size_t i=0;i<shuffledMesh->GetTriangleIndices().size();++i)Require(shuffledMesh->GetTriangleIndices()[i]==((i/3)%batches)*3+i%3,"formal face order remains unchanged");
         }
         source.reset();Require(weak.expired()&&batch.mesh->GetNumberOfCells()==Source::facesPerBatch,"returned batch owns bounded geometry independently");
         auto empty=Source::Build(std::make_shared<const SurfaceMeshPayload>(DataArray<double>{},DataArray<std::uint64_t>{}));
@@ -176,7 +176,7 @@ int main(int argc,char** argv)
                 Require(chunk.sourceFacesRead<=page&&faceIds&&pointIds,"display workspace follows configured page size");
                 for(vtkIdType i=0;i<faceIds->GetNumberOfValues();++i){const auto formal=static_cast<std::size_t>(faceIds->GetValue(i));Require(formal<seen.size()&&!seen[formal],"cross-page formal face identity is unique");seen[formal]=true;
                     vtkIdType count=0;const vtkIdType* corners=nullptr;chunk.mesh->GetPolys()->GetCellAtId(i,count,corners);Require(count==3,"page size preserves triangles");
-                    for(unsigned c=0;c<3;++c)Require(static_cast<std::uint64_t>(pointIds->GetValue(corners[c]))==compact->GetTriangles()[3*formal+c],"page size never changes formal connectivity");}
+                    for(unsigned c=0;c<3;++c)Require(static_cast<std::uint64_t>(pointIds->GetValue(corners[c]))==compact->GetTriangleIndices()[3*formal+c],"page size never changes formal connectivity");}
             }
             Require(std::all_of(seen.begin(),seen.end(),[](bool value){return value;}),"page size never loses formal faces");
         }

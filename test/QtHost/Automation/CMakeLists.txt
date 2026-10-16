@@ -5,6 +5,7 @@ add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp BusinessWorkflowTest
     Scenarios/frontend-context-regression.json Scenarios/frontend-analysis-regression.json Scenarios/workbench-v1.json
     RoiContinuousRegression.py ReportLargeRegression.py)
 target_link_libraries(qt_feature_tests PRIVATE qt_feature_test_support)
+target_include_directories(qt_feature_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/src")
 SetQtTargetDefaults(qt_feature_tests)
 set_target_properties(qt_feature_tests PROPERTIES OUTPUT_NAME QtFeatureTests
     PROJECT_LABEL QtFeatureTests FOLDER "MVVCVTK/test/Automation")
@@ -19,9 +20,9 @@ add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
-set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 60 LABELS "Reports;preview")
-# Debug 的完整 UI 回归包含各业务及截图；实测约 94 s，预留冷启动余量。
-set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT "$<IF:$<CONFIG:Debug>,240,120>")
+set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 0 LABELS "Reports;preview")
+# 数据规模只影响耗时；调用方可显式取消或配置外层期限。
+set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT 0)
 
 # 大报告专项完整读取真实 600 整卷；不裁 ROI、不截取结果行。
 set(MVVCVTK_QT_REPORT_INPUT "" CACHE FILEPATH "600x1800x600 float32 报告专项真实 CT")

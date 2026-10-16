@@ -130,7 +130,7 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
     const auto pose = spec.source == InspectionGeometrySource::MeasuredSurface
                           ? snapshot.sourceToTarget
                           : alignmentIdentity;
-    const auto &xyz = mesh->GetVertices();
+    const auto &xyz = mesh->GetPointValues();
     const auto point = [&](std::uint64_t id) {
       if (id >= xyz.size() / 3)
         throw std::invalid_argument("Inspection region vertex is unavailable.");
@@ -146,7 +146,7 @@ void Build(AlignmentSceneProduct &product, AlignmentScenePartData &part,
         charge(count, 128);
         for (std::size_t v = 0; v < viewCount; ++v)
           charge(count, 128);
-        const auto &tri = mesh->GetTriangles();
+        const auto &tri = mesh->GetTriangleIndices();
         const auto n = Vector(g.section->sourcePlaneNormal);
         Slots(g.section->samples.size(), count, [&](std::size_t slot) {
                 const auto &sample = g.section->samples[slot];

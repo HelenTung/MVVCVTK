@@ -7,7 +7,7 @@ class SurfaceCudaCompute final {
     ~SurfaceCudaCompute() noexcept;
     SurfaceCudaCompute(const SurfaceCudaCompute &) = delete;
     SurfaceCudaCompute &operator=(const SurfaceCudaCompute &) = delete;
-    bool Start(const SurfaceCudaVolume &volume, std::size_t releasedBytes, std::size_t deviceLimit);
+    bool Start(const SurfaceCudaVolume &volume, std::size_t hostCredit, std::size_t deviceLimit);
     // 只读部署代际提示，不加载 DLL；不代表设备/驱动可用性或内容摘要。
     static std::uint64_t GetBackendStamp() noexcept;
     bool Read(const double *points, std::size_t count, SurfaceCudaSample *output);
@@ -21,6 +21,7 @@ class SurfaceCudaCompute final {
     bool GetActive() const noexcept { return m_session != nullptr; }
     void Reset() noexcept;
     std::size_t GetDeviceBytes() const noexcept { return m_deviceBytes; }
+    std::size_t GetHostBytes() const noexcept {return m_hostBytes;}
 
   private:
     void *m_library = nullptr;
@@ -32,6 +33,6 @@ class SurfaceCudaCompute final {
     SurfaceCudaTestFaultCallback m_testFault = nullptr;
     SurfaceCudaProfileCallback m_profile = nullptr;
     SurfaceCudaClose m_close = nullptr;
-    std::size_t m_deviceBytes = 0;
+    std::size_t m_deviceBytes = 0,m_hostBytes=0;
     std::uint64_t m_epoch = 0;
 };

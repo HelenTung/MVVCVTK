@@ -132,7 +132,7 @@ struct ImageReadRegion final {
 struct ImageReadRequest final {
     // 空 region 表示整卷；显式 region 的 size 不允许为 0。
     std::optional<ImageReadRegion> region;
-    // 0 selects available physical memory at copy time; nonzero is an explicit limit.
+    // 0 不启用估算复制预算；非零为调用方显式限制。
     std::size_t maxBytes = 0;
 };
 
@@ -237,7 +237,7 @@ struct LabelMapDescriptor final {
 struct LabelMapReadRequest final {
     std::string id;
     std::optional<ImageReadRegion> region;
-    // 0 selects available physical memory at copy time; nonzero is an explicit limit.
+    // 0 不启用估算复制预算；非零为调用方显式限制。
     std::size_t maxBytes = 0;
     std::optional<DataRevisionRef> expectedRevision;
 };

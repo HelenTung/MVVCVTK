@@ -201,7 +201,7 @@ public:
             std::copy(m_image->GetGeometry().extent.begin(),m_image->GetGeometry().extent.end(),ext.begin());
             AddBoxPlanes(m_planes.planes,m_sourceToIndex,ext);
         } else {
-            const auto& vertices=dynamic_cast<const SurfaceMeshPayload&>(*source->payload).GetVertices();
+            const auto& vertices=dynamic_cast<const SurfaceMeshPayload&>(*source->payload).GetPointValues();
             m_bounds={ INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY };
             for (std::size_t i=0;i<vertices.size();++i) {
                 const auto a=i%3;
@@ -800,7 +800,7 @@ RoiError RoiEvaluator::GetRelationsError(const DataRevision& roi,const DataLooku
         Matrix inverse;
         if (!image->GetValid() || !Invert(GetIndexMatrix(image->GetGeometry()),inverse)
             || !GetFinite(GetGridBounds(GetIndexMatrix(image->GetGeometry()),image->GetGeometry().extent))) return RoiError::InvalidGeometry;
-    } else if (!mesh->GetValid() || mesh->GetVertices().empty()) return RoiError::InvalidGeometry;
+    } else if (!mesh->GetValid() || mesh->GetPointValues().empty()) return RoiError::InvalidGeometry;
     for (const auto& node:definition.nodes) if (node.kind==RoiNodeKind::Primitive && node.primitive.shape==RoiShape::VoxelSet) {
         if (!image) return RoiError::SourceMismatch;
         const auto& extent=image->GetGeometry().extent;

@@ -1,4 +1,5 @@
 #include "Routing/CropRouter.h"
+#include "PagedArray.h"
 
 #include "Algorithms/CropAlgorithm.h"
 #include "Interaction/CropHistory.h"
@@ -176,9 +177,19 @@ bool CropRouter::GetRecipeSame(const RoiGeometryPayload& recipe,const std::vecto
 
 namespace {
 struct RestoreCancelled final {};
-template<class Values> Values CopyRestoreArray(const Values& source,const std::function<bool()>& stop) {
-    Values result;result.reserve(source.size());
-    constexpr std::size_t chunk=1024*1024/sizeof(typename Values::value_type);
+template<class T> MeshReadArray<T> CopyRestoreMeshArray(const MeshReadArray<T>& source,const std::function<bool()>& stop){
+    PagedArray<T> result;result.reserve(source.size());
+    for(std::size_t offset=0;offset<source.size();){
+        auto chunk=source.GetChunk(offset,std::max<std::size_t>(1,1024*1024/sizeof(T)),stop);
+        if(chunk.error==MeshReadError::Cancelled)throw RestoreCancelled{};
+        if(chunk.error!=MeshReadError::None)throw std::runtime_error("Mesh restore block read failed.");
+        result.insert(result.end(),chunk.values.begin(),chunk.values.end());offset=chunk.nextOffset;
+    }
+    return result.Finish();
+}
+template<class T> std::vector<T> CopyRestoreArray(const std::vector<T>& source,const std::function<bool()>& stop) {
+    std::vector<T> result;result.reserve(source.size());
+    constexpr std::size_t chunk=1024*1024/sizeof(T);
     for(std::size_t offset=0;offset<source.size();) {
         if(stop&&stop())throw RestoreCancelled{};
         const auto end=offset+std::min(chunk,source.size()-offset);
@@ -186,10 +197,7 @@ template<class Values> Values CopyRestoreArray(const Values& source,const std::f
     }
     return result;
 }
-bool AddRestoreBytes(std::size_t count,std::size_t size,std::size_t& bytes) {
-    if(count>(std::numeric_limits<std::size_t>::max()-bytes)/size)return false;
-    bytes+=count*size;return true;
-}
+
 }
 std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
     CropInputSnapshot input,CropBuildParams params,DataSnapshot output,
@@ -220,19 +228,12 @@ std::packaged_task<CropMaterializationCandidate()> CropRouter::BuildRestoreTask(
                 if(!source||!source->GetValid()||!mesh->GetValid()||source->GetCoordinateFrame()!=mesh->GetCoordinateFrame()) {
                     result.failureReason=CropFailure::BadInput;return result;
                 }
-                std::size_t bytes=0;bool valid=AddRestoreBytes(mesh->GetVertices().size(),sizeof(double),bytes)
-                    &&AddRestoreBytes(mesh->GetTriangles().size(),sizeof(std::uint64_t),bytes);
-                for(const auto* attributes:{&mesh->GetPointAttributes(),&mesh->GetCellAttributes()})for(const auto& attribute:*attributes)
-                    valid=valid&&AddRestoreBytes(attribute.values.size(),sizeof(double),bytes)&&AddRestoreBytes(attribute.name.size()+1,1,bytes);
-                if(!valid||params.availableRamBytes<margin||bytes>(params.availableRamBytes-margin)/5){result.failureReason=CropFailure::ResourceLimit;return result;}
-                auto vertices=CopyRestoreArray(mesh->GetVertices(),stop);auto triangles=CopyRestoreArray(mesh->GetTriangles(),stop);
-                const auto copyAttributes=[&](const std::vector<MeshAttribute>& input) {
-                    std::vector<MeshAttribute> attributes;attributes.reserve(input.size());
-                    for(const auto& item:input)attributes.push_back({item.name,item.componentCount,CopyRestoreArray(item.values,stop),item.activeRoles});
-                    return attributes;
-                };
-                auto points=copyAttributes(mesh->GetPointAttributes());auto cells=copyAttributes(mesh->GetCellAttributes());
-                result.outputPayload=std::make_shared<const SurfaceMeshPayload>(std::move(vertices),std::move(triangles),std::move(points),mesh->GetCoordinateFrame(),std::move(cells));
+                if(params.availableRamBytes<margin){result.failureReason=CropFailure::ResourceLimit;return result;}
+                // 归档恢复保留独立资源所有权；逐块写入新文件，不恢复完整 RAM vectors。
+                const auto copyFields=[&](const std::vector<MeshField>& source){std::vector<MeshField> fields;fields.reserve(source.size());
+                    for(const auto& field:source)fields.push_back({field.name,field.componentCount,CopyRestoreMeshArray(field.values,stop),field.activeRoles});return fields;};
+                result.outputPayload=MeshPayloadBuilder::Build(CopyRestoreMeshArray(mesh->GetPointValues(),stop),CopyRestoreMeshArray(mesh->GetTriangleIndices(),stop),
+                    copyFields(mesh->GetPointFields()),mesh->GetCoordinateFrame(),copyFields(mesh->GetCellFields()),stop);
             } else {result.failureReason=CropFailure::BadInput;return result;}
             result.inputRoi=record.inputRoi;
             result.recipePayload=std::make_shared<const RoiGeometryPayload>(recipe->GetDefinition());

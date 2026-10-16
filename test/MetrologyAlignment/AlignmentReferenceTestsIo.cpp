@@ -74,9 +74,9 @@ void Loader(const std::filesystem::path &folder) {
     if (result.mesh) {
         Check(result.metadata.pointCount == 4 && result.metadata.triangleCount == 2,
               "exact coordinate welding preserves square topology");
-        Check(result.mesh->GetVertices() == DataArray<double>{0,0,0, 1000,0,0, 0,1000,0, 1000,1000,0},
+        Check(result.mesh->GetPointValues() == MeshReadArray<double>(std::vector<double>{0,0,0, 1000,0,0, 0,1000,0, 1000,1000,0}),
               "explicit meter to millimeter conversion");
-        Check(result.mesh->GetTriangles() == DataArray<std::uint64_t>{0,1,2, 1,3,2},
+        Check(result.mesh->GetTriangleIndices() == MeshReadArray<std::uint64_t>(std::vector<std::uint64_t>{0,1,2, 1,3,2}),
               "source facet winding retained");
         // 此固定摘要由 .NET SHA256 对上面的 UTF-8/LF 字面量独立计算。
         Check(result.metadata.sourceBytes == ascii.size() && result.metadata.sha256 ==
@@ -86,7 +86,7 @@ void Loader(const std::filesystem::path &folder) {
     const auto originalDigest = result.metadata.sha256;
     request.unit = AlignmentUnit::Meter;
     result = AlignmentReferenceLoader::Load(request, work);
-    Check(result.mesh && result.mesh->GetVertices()[3] == 1 && result.metadata.sha256 == originalDigest &&
+    Check(result.mesh && result.mesh->GetPointValues()[3] == 1 && result.metadata.sha256 == originalDigest &&
           result.metadata.unit == AlignmentUnit::Meter, "file digest independent of explicit unit interpretation");
     request.fileUnit = AlignmentUnit::ModelUnit;
     Check(!AlignmentReferenceLoader::GetRequestValid(request), "unknown units cannot be guessed as meters");
@@ -101,7 +101,7 @@ void Loader(const std::filesystem::path &folder) {
     auto binaryRequest = Request(binaryPath);
     binaryRequest.fileUnit = AlignmentUnit::Millimeter;
     result = AlignmentReferenceLoader::Load(binaryRequest, work);
-    Check(result.mesh && result.mesh->GetVertices() == DataArray<double>{0,0,0, 1,0,0, 0,1,0},
+    Check(result.mesh && result.mesh->GetPointValues() == MeshReadArray<double>(std::vector<double>{0,0,0, 1,0,0, 0,1,0}),
           "binary STL with solid header recognized by exact length");
     // 50-byte facet 跨越 64 KiB 输入块时仍保留准确的坐标与连接关系。
     const std::uint32_t facetCount = 65536 / 50 + 2;
@@ -112,11 +112,11 @@ void Loader(const std::filesystem::path &folder) {
     Write(folder / "cross-block.stl", crossed);
     result = AlignmentReferenceLoader::Load(Request(folder / "cross-block.stl"), work);
     Check(result.mesh && result.metadata.pointCount == 3 && result.metadata.triangleCount == facetCount &&
-          result.mesh->GetVertices() == DataArray<double>{0,0,0, 1000,0,0, 0,1000,0},
+          result.mesh->GetPointValues() == MeshReadArray<double>(std::vector<double>{0,0,0, 1000,0,0, 0,1000,0}),
           "binary facet spanning an IO block retains geometry");
     if (result.mesh)
-        for (std::size_t i = 0; i < result.mesh->GetTriangles().size(); ++i)
-            Check(result.mesh->GetTriangles()[i] == i % 3, "cross-block triangle connectivity retained");
+        for (std::size_t i = 0; i < result.mesh->GetTriangleIndices().size(); ++i)
+            Check(result.mesh->GetTriangleIndices()[i] == i % 3, "cross-block triangle connectivity retained");
     Write(folder / "truncated.stl", Binary().substr(0, 130));
     Check(AlignmentReferenceLoader::Load(Request(folder / "truncated.stl"), work).status == AlignmentStatus::InvalidInput,
           "truncated binary rejected");

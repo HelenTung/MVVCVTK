@@ -1,4 +1,7 @@
 #include "RoiArchiveTestReader.h"
+#include "Support/RoiOperationDiagnostics.h"
+#include <queue>
+#include <cstring>
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 #include <set>
@@ -20,10 +23,10 @@ struct Fixture {
         DataTransaction tx;tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,std::make_shared<const std::vector<std::uint8_t>>(729,10))}};
         Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
     }
-    Fixture(GridGeometry3D geometry,std::vector<std::uint8_t> values):grid(std::move(geometry)) {
+    Fixture(GridGeometry3D geometry,std::vector<std::uint8_t> values,DataBytes mask={}):grid(std::move(geometry)) {
         DataTransaction tx;tx.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},
             std::make_shared<const ImageGrid3DPayload>(grid,ImageValueType::UInt8,1,
-                std::make_shared<const std::vector<std::uint8_t>>(std::move(values)))}};
+                std::make_shared<const std::vector<std::uint8_t>>(std::move(values)),std::move(mask))}};
         Require(store.SetDataCommit(tx).status==DataCommitStatus::Succeeded,"source fixture failed");
     }
     RoiDescriptor Create(std::vector<RoiVoxel> voxels,std::string name="A") {
@@ -284,6 +287,110 @@ void Islands() {
         std::cout<<"ROI islands="<<count<<" elapsedMs="<<elapsed<<std::endl;
     }
 }
+void ComponentSuccessors() {
+    using Cell=std::array<int,3>;
+    for(const auto connectivity:{RoiConnectivity::Faces,RoiConnectivity::Full})for(int pattern=0;pattern<3;++pattern) {
+        std::size_t previous=0;
+        for(const int count:{128,256,512}) {
+            GridGeometry3D grid;grid.extent={0,count*2,0,4,0,2};grid.dimensions={count*2+1,5,3};
+            if(pattern==1){grid.extent={0,2,0,count*2-1,0,0};grid.dimensions={3,count*2,1};}
+            Fixture f(grid,std::vector<std::uint8_t>(std::size_t(grid.dimensions[0])*grid.dimensions[1]*grid.dimensions[2],10));std::set<Cell> input;
+            for(int i=0;i<count;++i)input.insert(pattern==1?Cell{i%3,i*2,0}:Cell{i*2,0,0});
+            if(pattern==2){for(int x=count/2;x<count;++x)input.insert({x,1,0});for(int i=0;i<count/4;++i)input.insert({i*3,3,2});}
+            std::vector<RoiVoxel> voxels;for(const auto& cell:input)voxels.push_back({cell,1});auto remaining=input;
+            std::vector<std::set<Cell>> expected;
+            while(!remaining.empty()) {
+                std::set<Cell> component;std::queue<Cell> queue;queue.push(*remaining.begin());remaining.erase(remaining.begin());
+                while(!queue.empty()){const auto cell=queue.front();queue.pop();component.insert(cell);
+                    for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
+                        if(!(x||y||z)||(connectivity==RoiConnectivity::Faces && std::abs(x)+std::abs(y)+std::abs(z)!=1))continue;
+                        const Cell next{cell[0]+x,cell[1]+y,cell[2]+z};const auto found=remaining.find(next);if(found!=remaining.end()){queue.push(next);remaining.erase(found);}}}
+                expected.push_back(std::move(component));
+            }
+            std::sort(expected.begin(),expected.end(),[](const auto& a,const auto& b){return *a.begin()<*b.begin();});
+            const auto original=f.Create(voxels);RoiComponentParams params;params.operation=RoiComponentOperation::RemoveSmall;params.connectivity=connectivity;
+            RoiOperationDiagnostics::Reset();const auto result=RoiService::GetOperation(f.store.GetDataGraph(),f.Operation(original,params));const auto counters=RoiOperationDiagnostics::Get();
+            Require(result.error==RoiError::None && result.rois.size()==1 && result.componentVoxelCounts.size()==expected.size(),"successor components changed population");
+            const auto payload=result.rois.front().definition.nodes.front().primitive.voxels;
+            Require(payload && payload->GetVoxelCount()==input.size(),"successor components lost or added members");
+            for(std::size_t i=0;i<expected.size();++i){Require(result.componentVoxelCounts[i]==expected[i].size(),"successor component size/order differs from BFS");
+                for(const auto& cell:expected[i])Require(payload->GetLabel(cell)==std::uint32_t(i+1),"successor component membership/number differs from BFS");}
+            const auto work=counters.componentComparisons+counters.componentSuccessorSteps;
+            // 本组每行至多 512 个区间，8 邻行查询及 successor 跳转采用离散访问上界，独立于机器耗时。
+            Require(counters.componentConsumedRuns>0 && work<256*input.size(),"component interval accesses grew beyond the logarithmic search bound");
+            if(previous && pattern!=1)Require(work<=previous*3+128,"doubling islands caused quadratic interval access growth");previous=work;
+        }
+    }
+}
+void FinalClipping() {
+    // 带孔洞有效域的独立集合真值：中间运算不裁剪，最后才求源域交集。
+    GridGeometry3D grid;grid.extent={0,8,0,8,0,8};grid.dimensions={9,9,9};
+    auto mask=std::make_shared<std::vector<std::uint8_t>>(729,1);(*mask)[4+9*(4+9*4)]=0;(*mask)[0]=0;
+    Fixture f(grid,std::vector<std::uint8_t>(729,10),mask);using Cell=std::array<int,3>;std::set<Cell> input;std::vector<RoiVoxel> voxels;
+    for(int z=0;z<6;++z)for(int y=0;y<6;++y)for(int x=0;x<6;++x){voxels.push_back({{x,y,z},1});if((*mask)[x+9*(y+9*z)])input.insert({x,y,z});}
+    const auto original=f.Create(voxels);const std::array<Cell,7> kernel{{{0,0,0},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+    const auto morph=[&](const std::set<Cell>& cells,bool dilate){std::set<Cell> out;for(const auto& cell:cells){bool keep=true;for(const auto& d:kernel){const Cell at{cell[0]+d[0],cell[1]+d[1],cell[2]+d[2]};if(dilate)out.insert(at);else if(!cells.count(at))keep=false;}if(!dilate&&keep)out.insert(cell);}return out;};
+    for(const auto operation:{RoiMorphologyOperation::Dilate,RoiMorphologyOperation::Erode,RoiMorphologyOperation::Open,RoiMorphologyOperation::Close}) {
+        auto expected=morph(input,operation==RoiMorphologyOperation::Dilate||operation==RoiMorphologyOperation::Close);
+        if(operation==RoiMorphologyOperation::Open||operation==RoiMorphologyOperation::Close)expected=morph(expected,operation==RoiMorphologyOperation::Open);
+        const auto result=RoiService::GetOperation(f.store.GetDataGraph(),f.Operation(original,RoiMorphologyParams{operation,1,RoiRadiusUnit::Voxels}));
+        Require(result.error==RoiError::None && result.rois.size()==1,"final masked clipping failed");const auto payload=result.rois.front().definition.nodes.front().primitive.voxels;
+        for(int z=0;z<9;++z)for(int y=0;y<9;++y)for(int x=0;x<9;++x)Require(bool(payload->GetLabel({x,y,z}))==(expected.count({x,y,z}) && (*mask)[x+9*(y+9*z)]),"final clipping changed morphology boundary/mask membership");
+    }
+    constexpr int width=131100;GridGeometry3D line;line.extent={0,width-1,0,0,0,0};line.dimensions={width,1,1};
+    for(const bool masked:{false,true}) {
+        auto validity=masked?std::make_shared<std::vector<std::uint8_t>>(width,1):std::shared_ptr<std::vector<std::uint8_t>>{};
+        if(validity)for(const int x:{0,65535,65536,65537,width-1})(*validity)[x]=0;
+        Fixture owner(line,std::vector<std::uint8_t>(width,10),validity);RoiNode node;node.primitive.shape=RoiShape::VoxelSet;
+        node.primitive.voxels=std::make_shared<const RoiVoxelSet>(std::vector<RoiVoxelRun>{{{0,0,0},width-1,1}});
+        RoiRequest create;create.metadata.name="final-line";create.definition={owner.source,{node}};const auto roi=owner.service.SetRoi(create);Require(roi.roi.has_value(),"line clip fixture failed");
+        auto request=owner.Operation(*roi.roi,RoiMorphologyParams{RoiMorphologyOperation::Dilate,2,RoiRadiusUnit::Voxels});request.output=RoiOutputMode::CreateNew;
+        RoiOperationDiagnostics::Reset();const auto result=RoiService::GetOperation(owner.store.GetDataGraph(),request);const auto stats=RoiOperationDiagnostics::Get();
+        Require(result.error==RoiError::None && result.rois.size()==1,"long final interval clipping failed");const auto payload=result.rois.front().definition.nodes.front().primitive.voxels;
+        for(int x=0;x<width;++x)Require(bool(payload->GetLabel({x,0,0}))==(!validity||(*validity)[x]),"mask chunk boundary changed final membership");
+        if(!masked)Require(stats.clipMaskValues==0 && stats.clipRuns==1,"unmasked final crop expanded its full interval");
+        else {Require(stats.clipMaskValues==width && stats.clipCheckpoints>=3,"masked clipping did not visit the complete bounded chunks");
+            RoiOperationDiagnostics::Reset();const auto before=owner.store.GetDataGraph().commitId;
+            request.getCancelled=[] {return RoiOperationDiagnostics::Get().clipMaskValues>0;};
+            const auto cancelled=owner.service.SetOperation(request);
+            Require(cancelled.error==RoiError::Cancelled && cancelled.rois.empty() && owner.store.GetDataGraph().commitId==before,"cancellation during final clipping published a partial candidate");}
+    }
+}
+template<class T> void GrayCase(ImageValueType type,const std::vector<T>& values,std::array<double,2> range,const std::vector<bool>& expected) {
+    Fixture owner;GridGeometry3D grid;grid.extent={0,int(values.size())-1,0,0,0,0};grid.dimensions={int(values.size()),1,1};
+    auto bytes=std::make_shared<std::vector<std::uint8_t>>(values.size()*sizeof(T));std::memcpy(bytes->data(),values.data(),bytes->size());
+    const DataRevisionRef source{owner.store.CreateDataEntityId(),1};DataTransaction transaction;transaction.outputs={{source.entityId,0,DataTypes::imageGrid3D,{},std::make_shared<const ImageGrid3DPayload>(grid,type,1,bytes)}};
+    Require(owner.store.SetDataCommit(transaction).status==DataCommitStatus::Succeeded,"typed gray fixture failed");
+    RoiThresholdParams params;params.range=range;RoiOperationRequest request;request.source=source;request.output=RoiOutputMode::CreateNew;request.params=params;
+    const auto threshold=RoiService::GetOperation(owner.store.GetDataGraph(),request);Require(threshold.error==RoiError::None && threshold.rois.size()==1,"typed threshold failed");
+    const auto payload=threshold.rois.front().definition.nodes.front().primitive.voxels;
+    for(std::size_t i=0;i<values.size();++i){Require(bool(payload->GetLabel({int(i),0,0}))==expected[i],"typed threshold rounded an original scalar");
+        params.mode=RoiThresholdMode::SeedGrow;params.seeds={{{double(i),0,0}}};request.params=params;
+        const auto grown=RoiService::GetOperation(owner.store.GetDataGraph(),request);
+        if(!expected[i])Require(grown.error==RoiError::InvalidRequest,"seed range disagrees with integer threshold rejection");
+        else {Require(grown.error==RoiError::None && grown.rois.size()==1,"valid typed seed rejected");const auto members=grown.rois.front().definition.nodes.front().primitive.voxels;
+            Require(members->GetLabel({int(i),0,0})!=0,"typed seed omitted itself");for(std::size_t j=0;j<values.size();++j)Require(!members->GetLabel({int(j),0,0})||expected[j],"typed seed grew through a value rejected by threshold");}}
+}
+void IntegerRanges() {
+    GrayCase<std::int8_t>(ImageValueType::Int8,{-2,-1,0,1,2},{-1.9,.9},{false,true,true,false,false});
+    GrayCase<std::uint8_t>(ImageValueType::UInt8,{0,1,2,255},{-.9,1.1},{true,true,false,false});
+    GrayCase<std::int16_t>(ImageValueType::Int16,{-32768,0,32767},{-1e20,1e20},{true,true,true});
+    GrayCase<std::uint16_t>(ImageValueType::UInt16,{0,1,65535},{.1,.9},{false,false,false});
+    GrayCase<std::int32_t>(ImageValueType::Int32,{INT_MIN,0,INT_MAX},{double(INT_MIN),double(INT_MAX)},{true,true,true});
+    GrayCase<std::uint32_t>(ImageValueType::UInt32,{0,1,UINT32_MAX},{double(UINT32_MAX),1e20},{false,false,true});
+    constexpr std::int64_t exact=9007199254740992LL;const auto low=std::numeric_limits<std::int64_t>::min(),high=std::numeric_limits<std::int64_t>::max();
+    GrayCase<std::int64_t>(ImageValueType::Int64,{exact-1,exact,exact+1,exact+2},{double(exact),double(exact)},{false,true,false,false});
+    GrayCase<std::int64_t>(ImageValueType::Int64,{-exact-2,-exact-1,-exact,-exact+1},{-double(exact),-double(exact)},{false,false,true,false});
+    GrayCase<std::uint64_t>(ImageValueType::UInt64,{std::uint64_t(exact-1),std::uint64_t(exact),std::uint64_t(exact+1),std::uint64_t(exact+2)},{double(exact),double(exact)},{false,true,false,false});
+    GrayCase<std::int64_t>(ImageValueType::Int64,{low,low+1,0,high},{-std::ldexp(1.,63),-std::ldexp(1.,63)},{true,false,false,false});
+    GrayCase<std::int64_t>(ImageValueType::Int64,{low,0,high-1024,high-1023,high},{std::ldexp(1.,63)-1024,std::ldexp(1.,63)},{false,false,false,true,true});
+    GrayCase<std::int64_t>(ImageValueType::Int64,{low,high},{std::ldexp(1.,63),std::ldexp(1.,63)},{false,false});
+    constexpr auto maximum=std::numeric_limits<std::uint64_t>::max();
+    GrayCase<std::uint64_t>(ImageValueType::UInt64,{0,maximum-2048,maximum-2047,maximum-1,maximum},{std::ldexp(1.,64)-2048,std::ldexp(1.,64)},{false,false,true,true,true});
+    GrayCase<std::uint64_t>(ImageValueType::UInt64,{0,maximum},{std::ldexp(1.,64),std::ldexp(1.,64)},{false,false});
+    GrayCase<float>(ImageValueType::Float32,{1,1.5f,2,2.5f,3},{1.5,2.5},{false,true,true,true,false});
+    GrayCase<double>(ImageValueType::Float64,{1,1.5,2,2.5,3},{1.5,2.5},{false,true,true,true,false});
+}
 void IndexEndpoints() {
     for(const int low:{INT_MIN,INT_MAX-2}) {
         GridGeometry3D grid;grid.extent={low,low+2,low,low+2,low,low+2};grid.dimensions={3,3,3};
@@ -316,4 +423,4 @@ void IndexEndpoints() {
     }
 }
 }
-int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="endpoints"){IndexEndpoints();return 0;}if(argc==2 && std::string(argv[1])=="islands"){Islands();return 0;}if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}if(argc==2 && std::string(argv[1])=="compressed"){Compressed();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv) {try {if(argc==2 && std::string(argv[1])=="successors"){ComponentSuccessors();return 0;}if(argc==2 && std::string(argv[1])=="clipping"){FinalClipping();return 0;}if(argc==2 && std::string(argv[1])=="integer-range"){IntegerRanges();return 0;}if(argc==2 && std::string(argv[1])=="endpoints"){IndexEndpoints();return 0;}if(argc==2 && std::string(argv[1])=="islands"){Islands();return 0;}if(argc==2 && std::string(argv[1])=="processing"){ProcessingRegression();return 0;}if(argc==2 && std::string(argv[1])=="compressed"){Compressed();return 0;}Morphology();ComponentsAndHoles();LocalConflictAndHistory();ShapesAndTriangles();Archive();ArchiveBundleAndTransform();MeshAndProjection();PrecisionAndLimits();return 0;}catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}}

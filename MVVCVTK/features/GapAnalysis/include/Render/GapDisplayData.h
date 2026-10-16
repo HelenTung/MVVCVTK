@@ -136,10 +136,11 @@ struct GapDisplayData final {
         auto geometry=preparedMesh?vtkSmartPointer<vtkPolyData>(preparedMesh):GapSurfaceBuilder::Build(image,regions,isStopping,evaluationRoi,parentRegions);
         if(!geometry)return fail("Gap surface construction failed or was cancelled.");
         result->mesh=vtkSmartPointer<vtkPolyData>::New();result->mesh->ShallowCopy(geometry);
-        auto* regionIds=vtkIntArray::SafeDownCast(geometry->GetCellData()->GetArray("gap.region.id"));
+        auto* regionIds=vtkDataArray::SafeDownCast(geometry->GetCellData()->GetArray("gap.region.id"));
         if(!regionIds)return fail("Gap surface region identifiers are missing.");
         // 显示只创建数组外壳，共享正式几何与编号缓冲，不修改正式候选的属性名。
-        vtkNew<vtkIntArray> displayIds;displayIds->ShallowCopy(regionIds);displayIds->SetName("gap.display.id");
+        auto displayIds=MeshVtkStorage::GetIntegerIds(regionIds,[&]{return isStopping.load();});
+        if(!displayIds)return fail("Gap surface region identifiers are invalid or cancelled.");displayIds->SetName("gap.display.id");
         result->mesh->GetCellData()->RemoveArray("gap.region.id");result->mesh->GetCellData()->SetScalars(displayIds);
         if(preparedPayload)result->spatial=FeatureInternal::SpatialMeshSource::Build(std::move(preparedPayload),[&]{return isStopping.load();});
         return isStopping.load() ? nullptr : result;

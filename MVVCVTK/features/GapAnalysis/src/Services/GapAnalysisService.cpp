@@ -285,8 +285,6 @@ private:
         GapParamSnapshot params);
     static std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
         vtkImageData*, const GridGeometry3D&, const std::atomic<bool>&,const char* id="GapAnalysis.labels");
-    static std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
-        vtkPolyData*, const std::atomic<bool>&,const std::string& coordinateFrame);
     static std::shared_ptr<const RecordTablePayload> CreateVoidTable(
         const DataArray<VoidRegion>&, const std::atomic<bool>&,const DataArray<GapSurfaceRange>* ranges=nullptr);
     static std::shared_ptr<const RecordTablePayload> CreateStatisticsTable(
@@ -1262,7 +1260,7 @@ std::optional<std::int32_t> GapAnalysisService::Impl::GetPickedRegion(const std:
         break;
     }
     if(!face)return {};
-    const auto& attributes=m_displayCache->GetSource().GetMesh().GetCellAttributes();
+    const auto& attributes=m_displayCache->GetSource().GetMesh().GetCellFields();
     const auto found=std::find_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="gap.region.id"&&a.componentCount==1;});
     if(found==attributes.end()||*face>=found->values.size())return {};
     const auto id=found->values[static_cast<std::size_t>(*face)];
@@ -1542,12 +1540,16 @@ void GapAnalysisService::Impl::StartWorker(
             stage = "void-mesh";
             // SurfaceMesh 是正式输出；无 3D target 也必须在 worker 内构建候选。
             DataArray<GapSurfaceRange> geometryRanges;
+            std::shared_ptr<const SurfaceMeshPayload> surfacePayload;
             try {
                 const bool clipped=params.evaluationRoi&&params.roiPolicy==GapRoiPolicy::InsideOnly&&result.parent;
-                result.voidMesh=GapSurfaceBuilder::Build(clipped?result.parent->labelImage:result.labelImage,
-                    result.voids,m_isStopping,clipped?params.evaluationRoi:RoiReadSnapshot{},clipped?&result.parent->voids:nullptr,&geometryRanges);
+                const auto* grid=inputSnapshot->graphOwner?dynamic_cast<const ImageGrid3DPayload*>(inputSnapshot->graphOwner->data->payload.get()):nullptr;
+                surfacePayload=GapSurfaceBuilder::BuildPayload(clipped?result.parent->labelImage:result.labelImage,
+                    result.voids,m_isStopping,clipped?params.evaluationRoi:RoiReadSnapshot{},clipped?&result.parent->voids:nullptr,
+                    grid?grid->GetGeometry().coordinateFrame:"RAS",&geometryRanges);
                 std::sort(geometryRanges.begin(),geometryRanges.end(),[&](const auto& a,const auto& b){
                     if(m_isStopping.load())throw std::runtime_error("Gap result preparation cancelled.");return a.id<b.id;});
+                result.voidMesh=surfacePayload?MeshVtkStorage::Build(*surfacePayload,[&]{return m_isStopping.load();}):nullptr;
             }
             catch (const std::exception& error) {
                 std::cerr << "[GapAnalysis] Void mesh failed: " << error.what() << '\n';
@@ -1568,7 +1570,7 @@ void GapAnalysisService::Impl::StartWorker(
                         source->GetGeometry(), m_isStopping);
                     if (payloads->labels && !m_isStopping.load()) {
                         stage = "mesh-payload";
-                        payloads->mesh = CreateMeshPayload(result.voidMesh, m_isStopping,source->GetGeometry().coordinateFrame);
+                        payloads->mesh = surfacePayload;
                     }
                     if (payloads->mesh && !m_isStopping.load()) {
                         stage = "report-payloads";
@@ -1727,7 +1729,7 @@ bool GapAnalysisService::Impl::SetStoredView(std::shared_ptr<const GapDisplayDat
             cache=std::make_shared<FeatureInternal::SpatialMeshCache>(display->spatial,m_reads,
                 128,
                 [](vtkPolyData& mesh,const auto& source,const auto& cancel){
-                    const auto& attributes=source.GetMesh().GetCellAttributes();
+                    const auto& attributes=source.GetMesh().GetCellFields();
                     const auto found=std::find_if(attributes.begin(),attributes.end(),[](const auto& a){return a.name=="gap.region.id"&&a.componentCount==1;});
                     auto* faces=vtkIdTypeArray::SafeDownCast(mesh.GetCellData()->GetArray(FeatureInternal::SpatialMeshSource::faceIds));
                     if(found==attributes.end()||!faces)throw std::runtime_error("Formal Gap object identity is unavailable.");
@@ -2920,99 +2922,6 @@ std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPa
     return LabelMapBuilder::Build(geometry, std::move(values),
         [&isStopping] { return isStopping.load(); }, id,
         std::string_view(id)=="GapAnalysis.labels" ? "Gap analysis":"Gap parent detection");
-}
-
-std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPayload(
-    vtkPolyData* mesh,
-    const std::atomic<bool>& isStopping,const std::string& coordinateFrame)
-{
-    if (!mesh || isStopping.load()) return {};
-    ResultArrayScope storage;
-    const auto freezeRegions=[&](vtkIntArray* ids) {
-        DataArray<MeshValueRun> runs;
-        for(vtkIdType i=0;i<ids->GetNumberOfTuples();++i) {
-            if(!(i%4096)&&isStopping.load())throw std::runtime_error("Gap mesh freezing cancelled.");
-            const auto id=ids->GetValue(i);
-            if(!runs.empty()&&runs.back().value==id)++runs.back().count;
-            else runs.push_back({static_cast<std::uint64_t>(i),1,id});
-            // 无连续性的数据使用原整数宽度；不让区间元信息反而扩大载荷。
-            if(runs.size()>static_cast<std::size_t>(ids->GetNumberOfTuples())*sizeof(std::int32_t)/sizeof(MeshValueRun)) {
-                DataArray<std::int32_t> values(static_cast<std::size_t>(ids->GetNumberOfTuples()));
-                for(std::size_t n=0;n<values.size();++n) {
-                    if(!(n%4096)&&isStopping.load())throw std::runtime_error("Gap mesh freezing cancelled.");
-                    values[n]=ids->GetValue(static_cast<vtkIdType>(n));
-                }
-                return MeshAttributeValues::FromIntegers(std::move(values));
-            }
-        }
-        return MeshAttributeValues::FromRuns(std::move(runs));
-    };
-    if(auto* points=mesh->GetPoints())if(auto* polys=mesh->GetPolys()) {
-        const auto* vertices=dynamic_cast<BackedVtkArray<double,vtkDoubleArray>*>(points->GetData());
-        const auto* faces=dynamic_cast<BackedVtkArray<std::uint64_t,vtkTypeInt64Array>*>(polys->GetConnectivityArray());
-        auto* ids=vtkIntArray::SafeDownCast(mesh->GetCellData()->GetArray("gap.region.id"));
-        if(vertices && faces && ids && !mesh->GetNumberOfVerts() && !mesh->GetNumberOfLines() && !mesh->GetNumberOfStrips()
-            && ids->GetNumberOfTuples()==mesh->GetNumberOfCells()) {
-            MeshAttribute regions;regions.name="gap.region.id";regions.componentCount=1;
-            regions.values=freezeRegions(ids);
-            auto payload=MeshPayloadBuilder::Build(vertices->GetValues(),faces->GetValues(),{},coordinateFrame,
-                std::vector<MeshAttribute>{std::move(regions)},[&isStopping]{return isStopping.load();});
-            storage.Finish();return payload;
-        }
-    }
-    auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
-    triangles->SetInputData(mesh);
-    triangles->PassLinesOff();
-    triangles->PassVertsOff();
-    triangles->Update();
-    if (isStopping.load()) return {};
-    auto* output = triangles->GetOutput();
-    if (!output) return {};
-
-    DataArray<double> vertices;
-    if (auto* points = output->GetPoints()) {
-        if (points->GetNumberOfPoints() < 0
-            || static_cast<std::uint64_t>(points->GetNumberOfPoints())
-                > std::numeric_limits<std::size_t>::max() / (3 * sizeof(double))) return {};
-        vertices.resize(
-            static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
-        for (vtkIdType index = 0;
-            index < points->GetNumberOfPoints(); ++index) {
-            if (index % 4096 == 0 && isStopping.load()) return {};
-            points->GetPoint(
-                index,
-                vertices.data() + static_cast<std::size_t>(index) * 3);
-        }
-    }
-    else if (output->GetNumberOfPoints() != 0) {
-        return {};
-    }
-
-    DataArray<std::uint64_t> cells;
-    if (auto* polys = output->GetPolys()) {
-        auto ids = vtkSmartPointer<vtkIdList>::New();
-        polys->InitTraversal();
-        while (polys->GetNextCell(ids)) {
-            if (cells.size() % 12288 == 0 && isStopping.load()) return {};
-            if (ids->GetNumberOfIds() != 3) return {};
-            for (vtkIdType index = 0; index < 3; ++index) {
-                const auto value = ids->GetId(index);
-                if (value < 0) return {};
-                cells.push_back(static_cast<std::uint64_t>(value));
-            }
-        }
-    }
-    else if (output->GetNumberOfCells() != 0) {
-        return {};
-    }
-    auto* regionIds=vtkIntArray::SafeDownCast(output->GetCellData()->GetArray("gap.region.id"));
-    if(!regionIds||regionIds->GetNumberOfTuples()!=output->GetNumberOfCells())return {};
-    // 编号是正式归属属性；默认着色仍由独立显示产物决定。
-    MeshAttribute regions;regions.name="gap.region.id";regions.componentCount=1;
-    regions.values=freezeRegions(regionIds);
-    auto payload = std::make_shared<const SurfaceMeshPayload>(
-        std::move(vertices), std::move(cells),std::vector<MeshAttribute>{},coordinateFrame,std::vector<MeshAttribute>{std::move(regions)});
-    storage.Finish();return payload->GetValid() ? payload : nullptr;
 }
 
 std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTable(

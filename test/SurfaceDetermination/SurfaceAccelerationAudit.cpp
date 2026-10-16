@@ -1,4 +1,5 @@
 #include "SurfaceDeterminationAlgorithm.h"
+#include "SurfaceGeometryStorage.h"
 #include "SurfaceDeterminationTestSupport.h"
 #include "SurfaceMeasurementSerialization.h"
 #include <Windows.h>
@@ -26,11 +27,11 @@ int main(int argc, char **argv) {
     if (argc < 7) {
         std::cerr << "SurfaceAccelerationAudit raw nx ny nz iso output-prefix [--metrics-only|--binary-stdout] "
                      "[--roi-box xmin xmax ymin ymax zmin zmax] [--work-limit bytes] [--retry-finalizer-fault] "
-                     "[--largest|--seed-model x y z] [--repeat 2..8] [--alternate-cpu-plan] [--full-measurements]\n";
+                     "[--largest|--seed-model x y z] [--repeat 2..8] [--alternate-cpu-plan] [--full-measurements] [--prepare-formal]\n";
         return 2;
     }
     try {
-        bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false,fullMeasurements=false;
+        bool streamBinary=false,metricsOnly=false,retryFinalizerFault=false,fullMeasurements=false,prepareFormal=false;
         std::optional<std::array<double,6>> roiBounds;
         WorkLimit workingLimit;
         unsigned repeats=1;
@@ -43,6 +44,8 @@ int main(int argc, char **argv) {
             if(option=="--binary-stdout" || option=="--metrics-only") {
                 if(streamBinary || metricsOnly)return 2;
                 streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
+            } else if(option=="--prepare-formal") {
+                if(prepareFormal)return 2;prepareFormal=true;
             } else if(option=="--full-measurements") {
                 if(fullMeasurements)return 2;
                 fullMeasurements=true;
@@ -135,6 +138,15 @@ int main(int argc, char **argv) {
             if(!SetEnvironmentVariableA("MVVCVTK_SURFACE_FINALIZER_TEST_FAULT","0"))return 2;
             result=SurfaceDeterminationAlgorithm::BuildSurface(
                 source,params,workingLimit,[]{return false;},{},inputs);
+        }
+        std::shared_ptr<const SurfacePreparedGeometry> formal;
+        double formalMs=0;
+        if(prepareFormal && result.status==SurfaceResultStatus::Succeeded) {
+            const auto formalStart=std::chrono::steady_clock::now();
+            formal=PrepareSurfaceGeometry(result,"RAS",params.componentSelection==SurfaceComponentSelection::All && !params.analysisRoi,[]{return false;});
+            formalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-formalStart).count();
+            if(!formal || !formal->mesh || !formal->mesh->GetValid() || formal->mesh->GetPointValues().size()!=result.points.size()*3
+                || formal->mesh->GetTriangleIndices().size()!=result.triangleIndices.size())throw std::runtime_error("Formal block storage did not preserve the complete result.");
         }
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -230,6 +242,7 @@ int main(int argc, char **argv) {
              << ",\"componentParallelMs\":" << result.componentParallelMs
 
 #endif
+             << ",\"formalPrepared\":" << (formal?"true":"false") << ",\"formalPreparationMs\":" << formalMs
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage

@@ -484,7 +484,10 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/RoiService.cpp
     src/Data/RoiOperations.cpp
     src/Data/RoiArchive.cpp
+    src/Data/Support/RoiOperationDiagnostics.h
     src/Data/Support/LabelMapBuilder.h
+    src/Data/Support/PagedArray.h
+    src/Data/Support/MeshVtkStorage.h
     src/Data/Support/MappedArrayStorage.h
     src/Data/Support/BackedVtkArray.h
     src/Data/Support/MeshPayloadBuilder.h

@@ -47,10 +47,10 @@ void SurfaceCudaCompute::Reset() noexcept {
     m_testFault = nullptr;
     m_profile = nullptr;
     m_close = nullptr;
-    m_deviceBytes = 0;
+    m_deviceBytes = 0;m_hostBytes=0;
     ++m_epoch;
 }
-bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t releasedBytes,
+bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t hostCredit,
                                std::size_t deviceLimit) {
     Reset();
 #ifdef MVVCVTK_SURFACE_CUDA_ENABLED
@@ -62,8 +62,8 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
         return false;
     // 实测初始化可能消耗数百 MiB 主机内存；低额度请求在加载 DLL 前直接走 CPU。
     // 主机门限是准入预留，不代表驱动的峰值或常驻内存上界。
-    if (releasedBytes < MVVCVTK_SURFACE_CUDA_DEVICE_BYTES ||
-        releasedBytes < MVVCVTK_SURFACE_CUDA_HOST_BYTES)
+    if (hostCredit < MVVCVTK_SURFACE_CUDA_DEVICE_BYTES ||
+        hostCredit < MVVCVTK_SURFACE_CUDA_HOST_BYTES)
         return false;
     HMODULE owner = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -96,7 +96,7 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
     m_close = reinterpret_cast<SurfaceCudaClose>(
         GetProcAddress(static_cast<HMODULE>(m_library), "SurfaceCudaDestroy"));
     if (!open || !m_read || !m_prepare || !m_submit || !m_collect || !m_close ||
-        !open(&volume, deviceLimit, releasedBytes, &m_session, &m_deviceBytes)) {
+        !open(&volume, deviceLimit, hostCredit, &m_session, &m_deviceBytes)) {
         Reset();
         return false;
     }
@@ -106,10 +106,11 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
                          sizeof(after));
     if (!before.PrivateUsage || !after.PrivateUsage ||
         (after.PrivateUsage > before.PrivateUsage &&
-         after.PrivateUsage - before.PrivateUsage > releasedBytes)) {
+         after.PrivateUsage - before.PrivateUsage > hostCredit)) {
         Reset();
         return false;
     }
+m_hostBytes=after.PrivateUsage>before.PrivateUsage?after.PrivateUsage-before.PrivateUsage:0;
 #ifdef MVVCVTK_SURFACE_CUDA_TESTING
     char fault[4]{};
     if (GetEnvironmentVariableA("MVVCVTK_SURFACE_CUDA_TEST_FAULT",fault,sizeof(fault))==1 &&
@@ -118,7 +119,7 @@ bool SurfaceCudaCompute::Start(const SurfaceCudaVolume &volume, std::size_t rele
     return true;
 #else
     (void)volume;
-    (void)releasedBytes;
+    (void)hostCredit;
     (void)deviceLimit;
     return false;
 #endif

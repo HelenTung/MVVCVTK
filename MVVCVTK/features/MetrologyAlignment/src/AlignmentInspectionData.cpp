@@ -112,7 +112,7 @@ std::optional<InspectionSnapshot> GetResult(const DataGraphSnapshot &graph,const
         const auto meshRef=g.source==InspectionGeometrySource::MeasuredSurface ? s.sourceMesh : s.referenceData;
         const auto source=graph.view->GetData(meshRef);
         const auto *mesh=source ? dynamic_cast<const SurfaceMeshPayload *>(source->payload.get()) : nullptr;
-        if (!mesh || g.section->sourceTriangleCount!=mesh->GetTriangles().size()/3) return {};
+        if (!mesh || g.section->sourceTriangleCount!=mesh->GetTriangleIndices().size()/3) return {};
     }
     for (const auto &input:Inputs(s)) {
         if(input.role.rfind("evaluation-roi-",0)==0){if(!graph.view->GetData(input.source) || std::none_of(node->inputs.begin(),node->inputs.end(),[&](const auto& i){return i.role==input.role && i.source==input.source;}))return {};continue;}
