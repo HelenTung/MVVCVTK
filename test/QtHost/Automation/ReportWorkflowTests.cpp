@@ -458,6 +458,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto reports=view->GetReports(module,refs);
     if(requiresReport&&successful)Require(!reports.isEmpty(),"successful business computation must expose its native report");
     if(reports.isEmpty())return;
+    if(!previewPath.isEmpty())Require(!QFileInfo::exists(previewPath+"-reports.json"),"report preview output prefix must be fresh");
     if(requiresReport) {
         // 相同正式结果首次回读时，查询选择器不得替换已经冻结的计算条件。
         // 直接比较两次原生回读，避免相关结果筛选带入其他已缓存文档。
@@ -493,6 +494,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto capture=[&](const QString& suffix) {
         if(previewPath.isEmpty())return QString();
         const auto path=previewPath+QString("-%1-%2.png").arg(reportIndex).arg(suffix);
+        Require(!QFileInfo::exists(path),"report preview never overwrites an existing screenshot");
         Require(QDir().mkpath(QFileInfo(path).absolutePath()),"report preview output directory exists");
         const auto pixels=dialog->grab();Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
     };
@@ -601,7 +603,9 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",GetReportCountValue(doc.table->GetCount())},
             {"pageOffsets",pages},{"details",details},{"rightColumns",rightColumns},{"conditions",conditionImage},{"opened",true}});++reportIndex;
         if(checkExport) {
-        const auto path=directory.filePath("native.csv");
+        const auto path=previewPath.isEmpty()?directory.filePath("native.csv")
+            :previewPath+QString("-%1-full.csv").arg(reportIndex-1);
+        if(!previewPath.isEmpty())Require(!QFileInfo::exists(path),"full report CSV has its own unused preview path");
         std::cout<<"REPORT: async full export "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         view->ExportReportFile(path);Require(view->property("reportTaskBusy").toBool(),"real report export returns after asynchronous admission");WaitTasks(*view,timeoutMs);
         if(doc.table->GetCount()>200) {
@@ -624,6 +628,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::cout<<"PASS: full content SHA256 "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()
             <<" digest="<<originalHash.toHex().constData()<<std::endl;
         int value=doc.valueColumn;
+        bool comparisonPerformed=false;
         if(value<0)for(int c=0;c<doc.columns.size();++c)if(doc.columns[c].numeric){value=c;break;}
         if(value>=0 && !doc.columns[value].quantity.isEmpty() && !doc.columns[value].unit.startsWith("model")) {
             view->SelectReport(doc.id);view->findChild<QPushButton*>("setReportBaseline")->click();view->SelectReport(copy.id);
@@ -636,6 +641,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             compare();Require(view->property("reportTaskBusy").toBool(),"real report comparison returns after asynchronous admission");WaitTasks(*view,timeoutMs);
             const auto compared=view->GetSelectedReport();Require(compared.category=="对比结果" && compared.table->GetCount()==2
                 && compared.table->Read(0)[2]==compared.table->Read(1)[2] && compared.table->Read(0)[3]==compared.table->Read(1)[3],"real UI automatic mapping changed full-data valid counts or mean");
+            comparisonPerformed=true;
             view->RemoveReport(compared.id);
         }
         if(checkLarge && doc.table->GetCount()>4096)CheckLargeReportOperations(*view,doc,copy,path,timeoutMs);
@@ -643,12 +649,19 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::weak_ptr<ReportTable> importedStorage=copy.table;const auto importedId=copy.id;copy.table.reset();
         view->RemoveReport(importedId);Require(importedStorage.expired() && QFile::exists(path),"real imported report storage was retained or its original CSV deleted");
         view->SelectReport(doc.id);
+        if(!previewPath.isEmpty()) {
+            auto preview=previews[reportIndex-1].toObject();
+            preview["csv"]=path;preview["fullTableSha256"]=QString::fromLatin1(originalHash.toHex());
+            preview["csvReadbackSha256"]=QString::fromLatin1(restoredHash.toHex());preview["csvReadbackMatches"]=true;
+            preview["comparisonPerformed"]=comparisonPerformed;
+            if(comparisonPerformed)preview["comparisonMatches"]=true;
+            previews[reportIndex-1]=preview;
+        }
         std::cout<<"PASS: full real report async export/import/compare and content hash "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         }
         std::cout<<"PASS: visible native report "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
     }
     dialog->close();QCoreApplication::processEvents();Require(!dialog->isVisible(),"report preview closes without stopping the business session");
-    if(!previewPath.isEmpty())ExportJson(previewPath+"-reports.json",{{"module",module},{"operationId",record["operationId"]},{"reports",previews}});
     if(summary.contains("items") && summary.contains("inspection"))Require(inspectionRows==summary["items"].toArray().size(),"inspection metric tables preserve all independently read items");
     if(requiresReport&&QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(record["status"].toString())
         &&(module=="Surface"||module=="Gap")) {
@@ -694,6 +707,9 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     }
     const auto after=window.GetSession()->GetImageDescriptor();Require((!input && !after) || (input && after && input->dataRevision==after->dataRevision&&input->bindingRevision==after->bindingRevision),"report operations preserve exact input and binding");
     Require(window.GetWorkflow().getPublishedGraph()==graph,"report operations preserve result graph and active bindings");
+    if(!previewPath.isEmpty())ExportJson(previewPath+"-reports.json",{{"module",module},{"operationId",record["operationId"]},{"reports",previews},
+        {"selectedDataRevision",input?GetRefText(input->dataRevision):QString()},
+        {"selectedBindingRevision",QString::number(input?input->bindingRevision:0)}});
 }
 }
 
