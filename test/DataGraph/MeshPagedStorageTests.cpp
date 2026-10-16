@@ -43,7 +43,29 @@ bool GetMeshPagedStorageTests()
                 return true;
             };
             auto first=std::async(std::launch::async,sparse),second=std::async(std::launch::async,sparse);
-            require(first.get()&&second.get(),"distant concurrent point reads changed cached values or block boundaries");}
+            require(first.get()&&second.get(),"distant concurrent point reads changed cached values or block boundaries");
+            // 超过短缓存窗口并轮换整个映射页集合，验证冻结后的淘汰和共享字段仍保持原值。
+            const auto converted=ConvertMeshArray<double>(large,3,[](double value,std::size_t component){return value+double(component);});
+            const auto windows=[&](bool reverse) {
+                const auto pages=large.size()/8192;
+                for(std::size_t round=0;round<2;++round)for(std::size_t page=0;page<pages;++page) {
+                    const auto selected=reverse?pages-1-page:page;
+                    const auto index=selected*8192+8190;
+                    const auto block=converted.GetChunk(index*3+2,7);
+                    if(block.error!=MeshReadError::None || block.values.size()!=7)return false;
+                    for(std::size_t j=0;j<block.values.size();++j){
+                        const auto offset=index*3+2+j;
+                        if(block.values[j]!=double(offset/3)*.25+double(offset%3))return false;
+                    }
+                }
+                return true;
+            };
+            auto forward=std::async(std::launch::async,[&]{return windows(false);});
+            auto backward=std::async(std::launch::async,[&]{return windows(true);});
+            require(forward.get()&&backward.get(),"frozen mapped-page eviction changed shared converted field values");
+            const auto bound=8*1024*1024+8*65536;
+            require(large.GetResidentBytes()>0 && large.GetResidentBytes()<=bound
+                && converted.GetResidentBytes()==large.GetResidentBytes(),"frozen snapshot did not report its bounded shared storage residency");}
         {PagedMap<std::array<std::uint64_t,2>,std::uint64_t,PagedArrayHash<std::uint64_t,2>> lookup;
             for(std::uint64_t i=0;i<5000;++i)require(lookup.Insert({i,i+1},i*3)==i*3,"lookup insert changed point identity");
             for(std::uint64_t i=0;i<5000;++i)require(lookup.Find({i,i+1})==i*3 && lookup.Insert({i,i+1},9)==i*3,"lookup growth changed deduplication");

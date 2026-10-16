@@ -117,7 +117,9 @@ public:
     }
     std::size_t GetCount()const noexcept override{return m_count;}
     const std::shared_ptr<const File>& GetFile()const noexcept{return m_file;}
-    std::size_t GetResidentBytes()const noexcept override{return std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);}
+    std::size_t GetResidentBytes()const noexcept override{
+        return m_file->GetResidentBound()+std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);
+    }
     void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
         if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh block is outside the array.");
         if(!count)return;
@@ -135,7 +137,8 @@ public:
                     // 缓存是加速选项；目标缓冲已存在时，不因额外窗口分配失败拒绝读取。
                     m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;
                 }
-                m_file->Copy(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
+                // 短读取复用已有的有界映射页；立即移出工作集会让 BVH 随机访问反复缺页。
+                m_file->CopyWindow(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
                 window.start=start;
             }
             const auto& window=m_cache[index];
