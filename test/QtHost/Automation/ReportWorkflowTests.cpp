@@ -388,11 +388,13 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
 {
     const auto module=record["module"].toString(),action=record["action"].toString();
     const auto summary=record["result"].toObject();
-    const auto observedDeviation=summary["deviation"].toString();
+    const auto hasPublishedResult=[&](const char* key){const auto ref=summary[key].toString();return !ref.isEmpty() && !ref.endsWith(":0");};
     const bool requiresReport=(module=="Wall" && (action=="Start" || action=="Result")) || (module=="Gap" && (action=="Start" || action=="Evaluate"))
         || (module=="Surface" && (action=="GlobalAutomatic" || action=="Determine")) || (module=="Artifact" && action=="Commit")
-        || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","EvaluateSurface","EvaluateVoxelVolume"}.contains(action))
-        || (module=="Alignment" && action=="DeviationResult" && !observedDeviation.isEmpty()&&!observedDeviation.endsWith(":0"));
+        || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","InspectPair","EvaluateSurface","EvaluateVoxelVolume"}.contains(action))
+        || (module=="Alignment" && ((action=="DeviationResult" && hasPublishedResult("deviation"))
+            || (action=="InspectionResult" && hasPublishedResult("inspection"))
+            || (action=="VoxelVolumeResult" && hasPublishedResult("voxelVolume"))));
     const bool successful=QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Published","Observed"}.contains(record["status"].toString());
     const auto provider=window.GetWorkflow().readReports.find(module);
     if(provider==window.GetWorkflow().readReports.end()){Require(!requiresReport||!successful,"successful business module has a registered native report source");return;}
