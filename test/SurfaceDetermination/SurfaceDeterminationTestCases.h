@@ -18,3 +18,6 @@ int GetSurfaceDisplayFailCount();
 int GetSurfaceContractFailCount();
 
 int GetSurfaceBusinessFailCount();
+
+int GetSurfaceObjectRetirementFailCount();
+int GetSurfaceObjectOwnerWaitFailCount();

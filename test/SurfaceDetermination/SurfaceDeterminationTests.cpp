@@ -21,11 +21,14 @@ int GetSuiteFailCount(const std::string_view suite)
     if (suite == "optimization") return GetSurfaceOptimizationFailCount();
     if (suite == "lifecycle") return GetSurfaceLifecycleFailCount();
     if (suite == "display") return GetSurfaceDisplayFailCount();
+    if (suite == "object-retirement") return GetSurfaceObjectRetirementFailCount();
+    if (suite == "object-owner-wait") return GetSurfaceObjectOwnerWaitFailCount();
     if (suite == "all") {
         return GetSurfaceBusinessFailCount() + GetSurfaceContractFailCount() +
                GetSurfaceAlgorithmFailCount() + GetSurfaceGeometryFailCount() +
                GetSurfaceLifecycleFailCount() + GetSurfaceDisplayFailCount() + GetSurfaceSeedWindowFailCount() +
-               GetSurfaceOptimizationFailCount()+GetSurfaceHistogramFailCount();
+               GetSurfaceOptimizationFailCount()+GetSurfaceHistogramFailCount() +
+               GetSurfaceObjectRetirementFailCount()+GetSurfaceObjectOwnerWaitFailCount();
     }
     return 1;
 }
