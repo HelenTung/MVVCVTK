@@ -35,6 +35,8 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <new>
+#include <stdexcept>
 #include <set>
 #include <thread>
 
@@ -109,6 +111,42 @@ ThicknessAlgorithm::Work BuildSlab(double origin = 0.0, double scale = 1.0)
     w.cancelled = std::make_shared<std::atomic<bool>>(false);
     w.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     return w;
+}
+// 只注入读取故障，源几何和取值保持不可变；发布前验证阶段关闭故障。
+template<class Value> class FailedSamplingRead final : public MeshValueSource<Value> {
+public:
+    FailedSamplingRead(MeshReadArray<Value> values,bool allocation,std::shared_ptr<std::atomic<bool>> armed,
+        std::shared_ptr<std::atomic<unsigned>> failures):m_values(std::move(values)),m_allocation(allocation),m_armed(std::move(armed)),m_failures(std::move(failures)){}
+    std::size_t GetCount()const noexcept override{return m_values.size();}
+    void ReadValues(std::size_t offset,std::size_t count,Value* output)const override {
+        // 单个坐标/拓扑记录有3个值，采样预处理批读才触发故障。
+        if(m_armed->load() && count>3){++*m_failures;if(m_allocation)throw std::bad_alloc{};throw std::runtime_error("injected sampling read failure");}
+        if(offset>m_values.size() || count>m_values.size()-offset)throw std::out_of_range("injected source range");
+        for(std::size_t i=0;i<count;++i)output[i]=m_values[offset+i];
+    }
+private:
+    const MeshReadArray<Value> m_values;const bool m_allocation;
+    const std::shared_ptr<std::atomic<bool>> m_armed;
+    const std::shared_ptr<std::atomic<unsigned>> m_failures;
+};
+void SamplingReadFailures() {
+    for(const bool points:{true,false})for(const bool allocation:{true,false}) {
+        auto work=BuildSlab();const auto mesh=work.mesh;
+        auto armed=std::make_shared<std::atomic<bool>>(false);auto failures=std::make_shared<std::atomic<unsigned>>(0);
+        auto coordinates=mesh->GetPointValues();auto triangles=mesh->GetTriangleIndices();
+        if(points)coordinates=MeshReadArray<double>(std::make_shared<FailedSamplingRead<double>>(coordinates,allocation,armed,failures));
+        else triangles=MeshReadArray<std::uint64_t>(std::make_shared<FailedSamplingRead<std::uint64_t>>(triangles,allocation,armed,failures));
+        work.mesh=std::make_shared<const SurfaceMeshPayload>(coordinates,triangles,mesh->GetPointFields(),mesh->GetCoordinateFrame());
+        Check(work.mesh->GetValid() && ThicknessAlgorithm::BuildField(work).status==ThicknessStatus::Succeeded,
+            "sampling read failure fixture preserves valid geometry and successful unarmed analysis");
+        armed->store(true);const auto result=ThicknessAlgorithm::BuildField(work);
+        const auto expected=allocation?ThicknessStatus::BudgetExceeded:ThicknessStatus::InternalError;
+        std::cout<<"sampling-block-fault component="<<(points?"coordinates":"topology")<<" kind="<<(allocation?"allocation":"read")
+            <<" status="<<static_cast<int>(result.status)<<" expected="<<static_cast<int>(expected)<<" injectedReads="<<failures->load()
+            <<" hasSamples="<<bool(result.field.samples)<<" hasNodes="<<bool(result.field.nodes)<<" message="<<result.message<<'\n';
+        Check(failures->load()==1 && result.status==expected && !result.field.samples && !result.field.nodes && result.regions.empty(),
+            "sampling read failure preserves allocation/I/O status and publishes no partial field");
+    }
 }
 void SetAnalyticRadialSource(ThicknessAlgorithm::Work& w, bool sphere)
 {
@@ -1209,7 +1247,9 @@ int main(int argc, char **argv)
         return 2;
     const std::string suite = argv[1];
     if (suite == "algorithm")
-        Algorithm();
+    {
+        Algorithm();SamplingReadFailures();
+    }
     else if (suite == "evaluation")
         Evaluation();
     else if (suite == "lifecycle")

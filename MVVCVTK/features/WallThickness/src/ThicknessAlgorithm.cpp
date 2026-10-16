@@ -39,6 +39,15 @@ void CheckWork(const Work &work)
     if (std::chrono::steady_clock::now() >= work.deadline)
         throw Failure{ThicknessStatus::DeadlineExceeded, "Thickness deadline exceeded."};
 }
+// GetChunk 已把异常转成读取状态，采样层保留原有分配失败和内部读取失败语义。
+void CheckSamplingBlock(MeshReadError error,bool empty,const char* message)
+{
+    if(error==MeshReadError::None && !empty)return;
+    if(error==MeshReadError::AllocationFailed)throw Failure{ThicknessStatus::BudgetExceeded,"Sampling block allocation failed."};
+    if(error==MeshReadError::ReadFailed)throw Failure{ThicknessStatus::InternalError,message};
+    if(error==MeshReadError::Cancelled)throw Failure{ThicknessStatus::Cancelled,message};
+    throw Failure{ThicknessStatus::InvalidInput,message};
+}
 bool Positive(double v)
 {
     return std::isfinite(v) && v > 0;
@@ -498,7 +507,7 @@ class Kernel final
         auto minimum=Vertex(0), maximum=minimum;
         for(std::size_t first=0;first<pc;) {
             CheckWork(m_work);const auto block=m_mesh.GetPointValues().GetChunk(first*3,3*std::min(batchRecords,pc-first));
-            if(block.error!=MeshReadError::None || block.values.empty())throw Failure{ThicknessStatus::InvalidInput,"Coordinate block read failed."};
+            CheckSamplingBlock(block.error,block.values.empty(),"Coordinate block read failed.");
             for(std::size_t local=0;local<block.values.size()/3;++local) {
                 if(!(local&255U))CheckWork(m_work);
                 const auto p=Sub({block.values[local*3],block.values[local*3+1],block.values[local*3+2]},m_geometry.origin);
@@ -518,7 +527,7 @@ class Kernel final
             ((WorkLimit(limits.maxWorkingBytes)-areaBytes)/perSample).GetBound(std::numeric_limits<std::size_t>::max()));
         for(std::size_t first=0;first<tc;) {
           CheckWork(m_work);const auto block=m_mesh.GetTriangleIndices().GetChunk(first*3,3*std::min(batchRecords,tc-first));
-          if(block.error!=MeshReadError::None || block.values.empty())throw Failure{ThicknessStatus::InvalidInput,"Topology block read failed."};
+          CheckSamplingBlock(block.error,block.values.empty(),"Topology block read failed.");
           for(std::size_t local=0;local<block.values.size()/3;++local) {
             const auto i=first+local;
             if ((i&255U)==0) CheckWork(m_work);
