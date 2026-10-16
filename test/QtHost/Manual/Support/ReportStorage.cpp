@@ -14,9 +14,15 @@ struct IndexCursor {
     IndexCursor(const QString& path,ReportRowId rows):file(path),count(rows){if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("报告行号索引打开失败");}
     ReportRowId Read(ReportRowId row) {
         if(row<0 || row>=count)throw std::out_of_range("报告行号索引越界");
-        if(row<start || row>=start+length){start=row/1024*1024;length=static_cast<int>(std::min<ReportRowId>(1024,count-start));const auto bytes=length*static_cast<qint64>(sizeof(ReportRowId));
-            if(!file.seek(start*static_cast<qint64>(sizeof(ReportRowId))))throw std::runtime_error("报告行号索引定位失败");
-            auto loaded=file.read(bytes);if(loaded.size()!=bytes)throw std::runtime_error("报告行号索引读取失败");page=std::move(loaded);}
+        if(row<start || row>=start+length){
+            const auto first=row/1024*1024;
+            const auto records=static_cast<int>(std::min<ReportRowId>(1024,count-first));
+            const auto bytes=records*static_cast<qint64>(sizeof(ReportRowId));
+            if(!file.seek(first*static_cast<qint64>(sizeof(ReportRowId))))throw std::runtime_error("报告行号索引定位失败");
+            auto loaded=file.read(bytes);if(loaded.size()!=bytes)throw std::runtime_error("报告行号索引读取失败");
+            // 页身份与内容一起提交；短读或定位失败后仍可安全重试。
+            page=std::move(loaded);start=first;length=records;
+        }
         ReportRowId value;std::memcpy(&value,page.constData()+(row-start)*sizeof(ReportRowId),sizeof(value));return value;
     }
 };
