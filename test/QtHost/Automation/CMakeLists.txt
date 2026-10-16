@@ -19,8 +19,7 @@ add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
     --background --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
 add_test(NAME QtFeature.CaptureConsistency COMMAND qt_feature_tests --background --capture-consistency-only
-    --capture-output "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>"
-    --record "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>-record.json")
+    --capture-output "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>")
 SetTestRuntime(QtFeature.CaptureConsistency qt_feature_tests)
 set_tests_properties(QtFeature.CaptureConsistency PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "capture")
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)

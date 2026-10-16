@@ -82,7 +82,7 @@ int main(int argc, char* argv[])
     parser.addOption({"case", "执行指定的 JSON 用例文件", "path"});
     parser.addOption({"record", "导出自动化操作记录", "path"});
     parser.addOption({"capture-consistency-only", "仅验证四视图整组截图的绑定切换、重拍和保存失败"});
-    parser.addOption({"capture-output", "四视图截图守卫的全新输出目录", "path"});
+    parser.addOption({"capture-output", "四视图截图守卫的输出根目录，每次保留独立 attempt", "path"});
     parser.addOption({"report-spatial-only", "仅复跑完整 CSV 的空间配对阶段"});
     parser.addOption({"report-csv", "复用已保存的完整 CSV 验证生产配对", "path"});
     parser.addOption({"gap-boundary-reports-only", "仅验证 Gap 边界对象的实际报告、列表、统计及 CSV"});
