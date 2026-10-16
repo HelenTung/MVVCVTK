@@ -78,7 +78,7 @@ public:
         m_stream.SetState(state);
     }
     void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,std::size_t capacity,std::function<void()> notify) {
-        m_stream.SetCache(std::move(cache),capacity,std::move(notify));AttachProp(m_stream.GetStatusProp());
+        m_stream.SetCache(std::move(cache),capacity,std::move(notify));
     }
     FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {FeatureOverlayBase::AttachRenderer(renderer);m_stream.AttachRenderer(renderer);}
@@ -161,7 +161,7 @@ public:
     void SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,std::size_t capacity,std::function<void()> notify) {
         m_contour=nullptr;
         m_stream.SetCache(std::move(cache),capacity,std::move(notify),SlicePlaneState::Build(m_orientation,{}).worldNormal);
-        m_contourActor->SetMapper(m_stream.GetMapper());AttachProp(m_stream.GetStatusProp());
+        m_contourActor->SetMapper(m_stream.GetMapper());
     }
     FeatureInternal::SpatialMeshView& GetDisplay() noexcept {return m_stream;}
     void SetObjectSelection(std::optional<std::pair<std::uint64_t,std::uint64_t>> range,std::optional<std::int32_t> id,bool isolated) {

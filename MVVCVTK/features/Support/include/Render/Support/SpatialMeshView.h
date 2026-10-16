@@ -1,7 +1,6 @@
 #pragma once
 #include "FeatureSupport/SpatialMeshCache.h"
 #include "Render/Contracts/FeatureOverlay.h"
-#include "Render/Support/RenderTextStyle.h"
 #include "Render/Support/SliceContourPlane.h"
 #include "Render/Support/SpatialMeshMapper.h"
 #include <vtkActor.h>
@@ -14,7 +13,6 @@
 #include <vtkPlane.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
-#include <vtkTextActor.h>
 #include <vtkWeakPointer.h>
 #include <functional>
 #include <climits>
@@ -35,14 +33,11 @@ public:
     };
     SpatialMeshView()
         :m_actor(vtkSmartPointer<vtkActor>::New()),m_mapper(vtkSmartPointer<SpatialMeshMapper>::New()),
-        m_blocks(vtkSmartPointer<vtkMultiBlockDataSet>::New()),m_status(vtkSmartPointer<vtkTextActor>::New()),
+        m_blocks(vtkSmartPointer<vtkMultiBlockDataSet>::New()),
         m_observer(vtkSmartPointer<vtkCallbackCommand>::New())
     {
         m_actor->SetMapper(m_mapper);m_actor->PickableOff();m_mapper->ScalarVisibilityOff();
         m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
-        m_status->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();m_status->SetPosition(.02,.97);
-        m_status->GetTextProperty()->SetVerticalJustificationToTop();m_status->GetTextProperty()->SetFontSize(15);
-        RenderTextStyle::SetFont(*m_status->GetTextProperty());m_status->VisibilityOff();m_status->PickableOff();
         m_observer->SetClientData(this);
         m_observer->SetCallback([](vtkObject*,unsigned long,void* client,void*){
             auto* view=static_cast<SpatialMeshView*>(client);try{view->Refresh();}catch(...){view->SetFailure("Display view update failed.");}
@@ -55,7 +50,6 @@ public:
     SpatialMeshView& operator=(SpatialMeshView&&)=delete;
     vtkActor* GetActor() const noexcept {return m_actor;}
     vtkCompositePolyDataMapper* GetMapper() const noexcept {return m_mapper;}
-    vtkTextActor* GetStatusProp() const noexcept {return m_status;}
     Progress GetProgress() const
     {
         auto progress=m_progress;
@@ -74,7 +68,7 @@ public:
         m_cache=std::move(cache);m_cacheTarget=cacheTarget;m_requestFrame=std::move(requestFrame);m_sliceNormal=std::move(sliceNormal);
         if(m_sliceNormal)m_cache=std::make_shared<SpatialMeshCache>(m_cache->GetSourceOwner(),m_cache->GetQueue(),m_cacheTarget);
         m_mapper->SetInputDataObject(m_blocks);m_dirty=true;m_planeDirty=true;m_cameraTime=0;m_cacheRevision=0;
-        m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress={};m_progress.isComplete=false;SetStatus(u8"精确几何准备中");
+        m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress={};m_progress.isComplete=false;
     }
     void SetRange(std::uint64_t firstFace=0,std::uint64_t endFace=UINT64_MAX)
     {
@@ -128,8 +122,7 @@ public:
     {
         try {
             bool changed=RefreshImpl();
-            if(m_selection){changed=m_selection->Refresh()||changed;const auto selected=m_selection->GetProgress();
-                if(m_progress.isComplete){if(selected.hasFailure)SetStatus(u8"所选对象高亮准备失败；正式结果仍可读取");else if(!selected.isComplete)SetStatus(u8"所选对象精确几何准备中");else SetStatus({});}}
+            if(m_selection)changed=m_selection->Refresh()||changed;
             return changed;
         }
         catch(const std::exception& error){try{SetFailure(error.what());}catch(...){m_progress.isComplete=false;m_progress.hasFailure=true;}}
@@ -201,8 +194,6 @@ public:
         }
         m_progress.isComplete=m_progress.loaded==m_visible.size()&&!m_progress.hasFailure;
         m_cacheRevision=m_cache->GetRevision();
-        if(m_progress.hasFailure)SetStatus(u8"精确几何显示准备失败；正式结果仍可读取");
-        else if(m_progress.isComplete)SetStatus({});else SetStatus(u8"当前视域精确几何准备中");
         if(!m_progress.isComplete&&!m_progress.hasFailure&&m_requestFrame)m_requestFrame();
         return changed||before.loaded!=m_progress.loaded||before.isComplete!=m_progress.isComplete
             ||before.hasFailure!=m_progress.hasFailure;
@@ -219,12 +210,10 @@ public:
         return static_cast<std::uint64_t>(ids->GetValue(cell));
     }
 private:
-    void SetStatus(const std::string& text){m_status->SetInput(text.c_str());m_status->SetVisibility(!text.empty());}
-    void SetFailure(const std::string& error){m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress.isComplete=false;m_progress.hasFailure=true;m_progress.message=error;SetStatus(u8"精确几何显示准备失败；正式结果仍可读取");}
+    void SetFailure(const std::string& error){m_blocks->Initialize();m_current.clear();m_styles.clear();m_tickets.clear();m_visible.clear();m_progress.isComplete=false;m_progress.hasFailure=true;m_progress.message=error;}
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkCompositePolyDataMapper> m_mapper;
     vtkSmartPointer<vtkMultiBlockDataSet> m_blocks;
-    vtkSmartPointer<vtkTextActor> m_status;
     vtkSmartPointer<vtkCallbackCommand> m_observer;
     vtkWeakPointer<vtkRenderer> m_renderer;
     unsigned long m_observerTag=0;
