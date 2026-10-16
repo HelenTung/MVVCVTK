@@ -7,6 +7,7 @@
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
 #include <vtkCamera.h>
+#include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkProperty.h>
 #include <vtkPolyData.h>
@@ -21,6 +22,7 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -201,6 +203,66 @@ int GetCropCurveWidgetFailures()
         check(resized[0]>=origin[0]+8&&resized[0]<=origin[0]+size[0]-8&&resized[1]>=origin[1]+8&&resized[1]<=origin[1]+size[1]-8
             &&side.GetGeometry().height==40&&side.GetGeometry().radius==3,"split viewport and resize preserve a usable lever without changing cylinder dimensions");
         side.SetEnabled(false);side.SetContext(nullptr,nullptr);frame->Finalize();
+    }
+    {
+        vtkNew<vtkRenderer> view;vtkNew<vtkRenderWindow> frame;vtkNew<vtkRenderWindowInteractor> input;
+        frame->SetOffScreenRendering(1);frame->SetSize(400,400);frame->SetMultiSamples(0);frame->AddRenderer(view);input->SetRenderWindow(frame);input->Initialize();
+        auto* camera=view->GetActiveCamera();camera->ParallelProjectionOn();camera->SetPosition(0,0,100);camera->SetFocalPoint(0,0,0);camera->SetClippingRange(.1,1000);
+        CropCurveWidget target;target.SetContext(input,view);
+        EffectiveBinding binding;binding.bindingKey="crop.widget.select.drag";binding.isAvailable=binding.isEnabled=true;target.SetInputBindings({binding});
+        std::array<int,5> starts{};std::array<vtkSmartPointer<vtkCallbackCommand>,5> observers;
+        for(int i=0;i<5;++i){observers[i]=vtkSmartPointer<vtkCallbackCommand>::New();observers[i]->SetClientData(&starts[i]);observers[i]->SetCallback([](vtkObject*,unsigned long,void* value,void*){++*static_cast<int*>(value);});target.GetHandle(i)->AddObserver(vtkCommand::StartInteractionEvent,observers[i]);}
+        const CropMatrixDouble16Array identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        const auto getPosition=[&](int i){P p{};target.GetHandle(i)->GetHandleRepresentation()->GetWorldPosition(p.data());return p;};
+        const auto project=[&](const P& p){view->SetWorldPoint(p[0],p[1],p[2],1);view->WorldToDisplay();const auto* d=view->GetDisplayPoint();return P{d[0],d[1],d[2]};};
+        const auto pointer=[&](unsigned long event,int x,int y){input->SetEventInformation(x,y);input->InvokeEvent(event);};
+        const auto drag=[&](bool cancel){
+            const auto before=target.GetGeometry();const auto lever=getPosition(4),display=project(lever);const int x=int(std::lround(display[0])),y=int(std::lround(display[1]));
+            const auto center=project({0,0,0});const double dx=display[0]-center[0],dy=display[1]-center[1];
+            const int moveX=std::abs(dx)>std::abs(dy)?(dx>0?24:-24):12,moveY=std::abs(dy)>=std::abs(dx)?(dy>0?24:-24):10;
+            auto* rotation=target.GetHandle(4);check(rotation->GetProcessEvents()&&rotation->GetHandleRepresentation()->GetVisibility(),"small screen target has a visible enabled rotation entry");
+            bool independent=true;for(int i=0;i<4;++i){auto* other=target.GetHandle(i);if(other->GetProcessEvents()&&other->GetHandleRepresentation()->GetVisibility())independent&=other->GetHandleRepresentation()->ComputeInteractionState(x,y)==vtkHandleRepresentation::Outside;}
+            check(independent&&target.GetInputAccepted(x,y),"rotation center is independently hit through the existing input acceptance path");
+            const auto previous=starts;pointer(vtkCommand::MouseMoveEvent,x,y);target.StartGesture();pointer(vtkCommand::LeftButtonPressEvent,x,y);
+            check(starts[4]==previous[4]+1&&std::equal(starts.begin(),starts.begin()+4,previous.begin()),"real native press selects rotation instead of another handle");
+            pointer(vtkCommand::MouseMoveEvent,x+moveX/2,y+moveY/2);pointer(vtkCommand::MouseMoveEvent,x+moveX,y+moveY);
+            const auto during=getPosition(4);const auto rotated=target.GetGeometry();
+            check(!near(rotated.axisInInputModel,before.axisInInputModel)&&rotated.radius==before.radius&&rotated.height==before.height&&near(rotated.centerInInputModel,before.centerInInputModel),"native mouse drag rotates without changing center radius or height");
+            check(std::abs(std::hypot(during[0],during[1],during[2])-std::hypot(lever[0],lever[1],lever[2]))<1e-9,"native rotation retains its display lever length during the gesture");
+            if(cancel){target.CancelGesture();check(near(getPosition(4),lever)&&near(target.GetGeometry().axisInInputModel,before.axisInInputModel),"native drag cancellation restores geometry and lever");}
+            else {pointer(vtkCommand::LeftButtonReleaseEvent,x+moveX,y+moveY);const auto released=getPosition(4);
+                if(!near(released,during))std::cerr<<"Rotation release lever: before="<<during[0]<<','<<during[1]<<','<<during[2]<<" after="<<released[0]<<','<<released[1]<<','<<released[2]<<'\n';
+                check(near(released,during),"usable rotation position does not jump on native release");}
+            pointer(vtkCommand::LeaveEvent,x+moveX,y+moveY);
+        };
+        for(double scale:{1.,100.}){
+            CropOpItem cylinder;cylinder.geometryType=CropShape::Cylinder;cylinder.axisInInputModel={0,0,1};cylinder.radius=.1*scale;cylinder.height=.2*scale;
+            target.SetEnabled(false);camera->SetParallelScale(10*scale);target.SetGeometry(cylinder,identity);target.SetEnabled(true);frame->Render();
+            drag(false);drag(true);
+        }
+        target.SetEnabled(false);CropOpItem cylinder;cylinder.geometryType=CropShape::Cylinder;cylinder.axisInInputModel={0,0,1};cylinder.radius=.1;cylinder.height=.2;
+        camera->SetParallelScale(10);target.SetGeometry(cylinder,identity);target.SetEnabled(true);frame->Render();
+        frame->SetSize(16,16);frame->Render();auto* rotation=target.GetHandle(4);
+        check(!rotation->GetProcessEvents()&&!rotation->GetHandleRepresentation()->GetVisibility(),"viewport with no independent hit region disables and hides rotation");
+        target.GetInputAccepted(0,0);pointer(vtkCommand::MouseMoveEvent,0,0);
+        check(!rotation->GetHandleRepresentation()->GetVisibility(),"hover and input acceptance do not revive an unavailable handle");
+        pointer(vtkCommand::LeaveEvent,0,0);frame->SetSize(640,360);view->SetViewport(.25,0,1,1);frame->Render();
+        check(rotation->GetProcessEvents()&&rotation->GetHandleRepresentation()->GetVisibility(),"rotation entry recovers after viewport space becomes available");
+        target.SetEnabled(false);camera->ParallelProjectionOff();
+        const CropMatrixDouble16Array affine{2,.2,0,1,0,1,0,-1,0,0,1,0,0,0,0,1};target.SetGeometry(cylinder,affine);target.SetEnabled(true);frame->Render();
+        const auto before=target.GetGeometry();const auto p=project(getPosition(4));bool isolated=true;
+        for(int i=0;i<4;++i){auto* h=target.GetHandle(i);if(h->GetProcessEvents()&&h->GetHandleRepresentation()->GetVisibility())isolated&=h->GetHandleRepresentation()->ComputeInteractionState(int(std::lround(p[0])),int(std::lround(p[1])))==vtkHandleRepresentation::Outside;}
+        check(rotation->GetProcessEvents()&&isolated&&target.GetInputAccepted(int(std::lround(p[0])),int(std::lround(p[1])))&&near(before.axisInInputModel,target.GetGeometry().axisInInputModel),"perspective split viewport and affine use final display coordinates for independent picking");
+        for(const auto clipping:std::array<std::array<double,2>,2>{{{99.8,100.2},{.1,1.}}}){
+            camera->SetClippingRange(clipping.data());frame->Render();
+            if(rotation->GetProcessEvents()){
+                auto* representation=rotation->GetHandleRepresentation();representation->BuildRepresentation();const auto* bounds=representation->GetBounds();bool complete=true;
+                for(int corner=0;corner<8;++corner){const auto d=project({bounds[corner&1?1:0],bounds[corner&2?3:2],bounds[corner&4?5:4]});complete&=d[2]>=-1e-10&&d[2]<=1+1e-10;}
+                check(complete,"available rotation handle retains its complete geometry inside the near and far clip planes");
+            } else check(!rotation->GetHandleRepresentation()->GetVisibility(),"clipped rotation entry cannot receive hidden picks");
+        }
+        camera->SetClippingRange(.1,1000);frame->Render();check(rotation->GetProcessEvents(),"restoring the depth range restores the rotation entry");
+        target.SetEnabled(false);target.SetContext(nullptr,nullptr);frame->Finalize();
     }
     widget.SetContext(nullptr,nullptr);check(!widget.SetEnabled(true),"missing view context rejects enable");window->Finalize();
     return failures;
