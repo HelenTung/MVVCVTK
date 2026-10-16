@@ -14,6 +14,7 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QSignalBlocker>
+#include <QScopeGuard>
 #include <QFileInfo>
 #include <QFile>
 #include <QDialog>
@@ -520,7 +521,7 @@ void ResultReport::RefreshFailures()
 }
 void ResultReport::ContinueGeneration()
 {
-    if(!m_acceptingRequests||!isVisible())return;
+    if(!m_acceptingRequests||!isVisible()||m_comparisonMapping)return;
     // 重开窗口时旧取消任务可能仍在收尾，保留这次恢复队列的请求。
     if(m_task){m_buildTimer->start(10);return;}
     try {
@@ -790,6 +791,14 @@ void ResultReport::CompareSelected()
     if(!m_documents.contains(m_baseline) || !m_selected.table)throw std::invalid_argument("请先选择基准 A，再选择待比较报告 B");
     auto a=m_documents.value(m_baseline),b=m_selected;
     if(a.id==b.id)throw std::invalid_argument("请选择另一份报告作为 B");
+    if(m_task||m_comparisonMapping)throw std::runtime_error("请等待当前报告任务完成或取消后重试");
+    // 模态窗口仍处理计时器；映射确认前为这次比较保留任务入口。
+    m_comparisonMapping=true;
+    const auto resumeGeneration=qScopeGuard([this]{
+        m_comparisonMapping=false;
+        if(m_acceptingRequests&&isVisible()&&!m_task&&!m_pendingReports.isEmpty())m_buildTimer->start(0);
+    });
+    m_buildTimer->stop();
     QDialog dialog(this);dialog.setWindowTitle("核对比较指标、单位与匹配依据");auto* layout=new QVBoxLayout(&dialog);
     layout->addWidget(new QLabel("A · "+a.title+"\nB · "+b.title+"\n编号只有在确认为同一业务对象时才能配对；空间匹配需要同一坐标系。",&dialog));
     struct Mapping { QComboBox *value,*identity,*validity,*x,*y,*z,*unit,*coordinateUnit;QLineEdit *quantity,*validValues; };

@@ -45,7 +45,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_part_suite IN ITEMS algorithm catalog lifecycle lineage display scale edit surface-product)
+foreach(_mvvcvtk_part_suite IN ITEMS algorithm catalog lifecycle scope-lifecycle lineage display scale edit surface-product)
     add_test(
         NAME "PartSegmentation.${_mvvcvtk_part_suite}"
         COMMAND mvvcvtk_part_segmentation_tests ${_mvvcvtk_part_suite}
