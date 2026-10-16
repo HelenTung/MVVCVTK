@@ -473,6 +473,8 @@ set(MVVCVTK_HOST_SOURCES
     include/Render/Strategies/VolumeStrategy.h
     include/Render/Support/BaseVisualStrategy.h
     src/App/AppState.cpp
+    src/App/AppRuntime.h
+    src/App/AppRuntime.cpp
     include/App/VolumePresentationTypes.h
     src/App/Services/AppServiceFactory.cpp
     src/App/Services/AppTaskExecutor.cpp
