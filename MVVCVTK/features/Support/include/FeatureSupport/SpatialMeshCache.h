@@ -2,6 +2,7 @@
 #include "FeatureSupport/SpatialMeshSource.h"
 #include "FeatureSupport/ReadTaskQueue.h"
 #include <atomic>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <string>
@@ -45,7 +46,11 @@ public:
         if(found!=m_entries.end()) {
             found->second->used=++m_clock;
             if(found->second->mesh){++m_counters.cacheHits;return {found->second->mesh,{},false,false,m_styleVersion,found->second};}
-            if(!found->second->error.empty())return {{},found->second->error,false,false,m_styleVersion,found->second};
+            if(found->second->failure) {
+                try {std::rethrow_exception(found->second->failure);}
+                catch(const std::exception& error){return {{},error.what(),false,false,m_styleVersion,found->second};}
+                catch(...){return {{},"Display batch preparation failed.",false,false,m_styleVersion,found->second};}
+            }
             if(found->second->isPending&&found->second->queueToken&&!found->second->queueToken->load(std::memory_order_acquire))return {{},{},true,false,m_styleVersion,found->second};
             found->second->isPending=false;
         }
@@ -71,24 +76,33 @@ public:
             admitted=m_queue->Submit([weak,weakEntry,key,version](const auto& stopped){
                 const auto self=weak.lock();const auto pending=weakEntry.lock();
                 if(!self||!pending)return;
-                const auto cancel=[&]{return stopped()||pending->cancelled.load(std::memory_order_acquire);};
-                vtkSmartPointer<vtkPolyData> mesh;SpatialMeshSource::Batch decoded;std::string error;
                 try {
+                    const auto cancel=[&]{return stopped()||pending->cancelled.load(std::memory_order_acquire);};
                     if(cancel())return;
+                    vtkSmartPointer<vtkPolyData> mesh;SpatialMeshSource::Batch decoded;
                     Decorate decorate;vtkSmartPointer<vtkPolyData> previous;
                     {const std::lock_guard<std::mutex> lock(self->m_mutex);decorate=self->m_decorate;previous=pending->previous;}
                     if(previous){mesh=vtkSmartPointer<vtkPolyData>::New();mesh->ShallowCopy(previous);}
                     else {decoded=self->m_source->Read(key.batch,cancel,key.firstFace,key.endFace);mesh=decoded.mesh;}
                     if(decorate)decorate(*mesh,*self->m_source,cancel);
                     if(cancel())return;
-                }catch(const std::exception& failure){if(cancel())return;error=failure.what();mesh=nullptr;}
-                catch(...){if(cancel())return;error="Display batch preparation failed.";mesh=nullptr;}
-                const std::lock_guard<std::mutex> lock(self->m_mutex);
-                const auto current=self->m_entries.find(key);
-                if(version!=self->m_styleVersion||current==self->m_entries.end()||current->second!=pending||cancel())return;
-                pending->mesh=std::move(mesh);pending->previous=nullptr;pending->error=std::move(error);pending->isPending=false;
-                if(decoded.mesh){++self->m_counters.batchesRead;self->m_counters.pointsRead+=decoded.sourcePointsRead;self->m_counters.facesRead+=decoded.sourceFacesRead;self->m_counters.indexRecordsRead+=decoded.sourceIndexRecordsRead;}
-                self->m_revision.fetch_add(1,std::memory_order_release);
+                    const std::lock_guard<std::mutex> lock(self->m_mutex);
+                    const auto current=self->m_entries.find(key);
+                    if(version!=self->m_styleVersion||current==self->m_entries.end()||current->second!=pending||cancel())return;
+                    pending->mesh=std::move(mesh);pending->previous=nullptr;pending->isPending=false;
+                    if(decoded.mesh){++self->m_counters.batchesRead;self->m_counters.pointsRead+=decoded.sourcePointsRead;self->m_counters.facesRead+=decoded.sourceFacesRead;self->m_counters.indexRecordsRead+=decoded.sourceIndexRecordsRead;}
+                    self->m_revision.fetch_add(1,std::memory_order_release);
+                }catch(...) {
+                    // 保存异常本身，避免错误字符串分配或再次调用 cancel 时抛出而遗留 pending。
+                    const auto failure=std::current_exception();
+                    const std::lock_guard<std::mutex> lock(self->m_mutex);
+                    const auto current=self->m_entries.find(key);
+                    if(version!=self->m_styleVersion||current==self->m_entries.end()||current->second!=pending
+                        ||pending->cancelled.load(std::memory_order_acquire)
+                        ||(pending->queueToken&&pending->queueToken->load(std::memory_order_acquire)))return;
+                    pending->failure=failure;pending->isPending=false;
+                    self->m_revision.fetch_add(1,std::memory_order_release);
+                }
             });
         }catch(...){entry->isPending=false;throw;}
         entry->queueToken=std::move(admitted);
@@ -97,7 +111,11 @@ public:
             m_entries.erase(found);
             return m_queue->GetIsStopping()?Read{{},"Display reader has stopped.",false,false}:Read{{},{},false,true};
         }
-        return {{},{},true,false,m_styleVersion,entry};
+        Read result{{},{},true,false,m_styleVersion,entry};
+        const auto queue=m_queue;
+        lock.unlock();
+        queue->SendPending();
+        return result;
     }
 
     // 色带变更只重建有界缓存的显示属性；正式几何及已解码 points/cells 继续共享。
@@ -119,7 +137,7 @@ public:
         m_entries.clear();++m_styleVersion;m_reuseGeometry=false;m_revision.fetch_add(1,std::memory_order_release);
     }
 private:
-    struct Entry final {vtkSmartPointer<vtkPolyData> mesh,previous;std::string error;std::uint64_t used=0;bool isPending=false;std::atomic<bool> cancelled{false};std::shared_ptr<std::atomic<bool>> queueToken;};
+    struct Entry final {vtkSmartPointer<vtkPolyData> mesh,previous;std::exception_ptr failure;std::uint64_t used=0;bool isPending=false;std::atomic<bool> cancelled{false};std::shared_ptr<std::atomic<bool>> queueToken;};
     std::shared_ptr<const SpatialMeshSource> m_source;
     std::shared_ptr<ReadTaskQueue> m_queue;
     const std::size_t m_capacity;

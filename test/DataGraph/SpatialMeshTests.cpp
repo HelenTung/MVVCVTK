@@ -1,4 +1,5 @@
 #include "FeatureSupport/SpatialMeshCache.h"
+#include "MeshPayloadBuilder.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -19,6 +20,54 @@ bool Drain(const std::shared_ptr<FeatureInternal::ReadTaskQueue>& queue)
     job->task([cancelled=job->cancelled]{return cancelled->load(std::memory_order_acquire);});
     {const std::lock_guard<std::mutex> lock(queue->mutex);queue->FinishLocked();}
     return true;
+}
+void CheckPagedMeshCache()
+{
+    // 超过文件后备阈值，并跨越一个完整显示页；正式 ID 由解析三角形定义。
+    constexpr std::size_t faces=Source::facesPerBatch+1;
+    PagedArray<double> points;
+    PagedArray<std::uint64_t> triangles;
+    for(std::size_t face=0;face<faces;++face)for(unsigned corner=0;corner<3;++corner) {
+        points.push_back(double(face*2)+(corner==1));
+        points.push_back(double(corner==2));
+        points.push_back(0);
+        triangles.push_back(face*3+corner);
+    }
+    const auto mesh=MeshPayloadBuilder::Build(points.Finish(),triangles.Finish(),{},"RAS");
+    const auto source=Source::Build(mesh);
+    const auto queue=std::make_shared<FeatureInternal::ReadTaskQueue>();
+    const auto cache=std::make_shared<FeatureInternal::SpatialMeshCache>(source,queue,1);
+    std::vector<bool> seen(faces,false);
+    Require(source->GetBatchCount()==2,"file-backed mesh lost the display page boundary");
+    for(std::uint64_t batch=0;batch<source->GetBatchCount();++batch) {
+        Require(cache->Get({batch}).isPending&&Drain(queue),"file-backed display page was not consumed");
+        const auto ready=cache->Get({batch});
+        Require(ready.mesh&&!ready.isPending&&ready.error.empty(),"file-backed display page did not complete");
+        Require(ready.mesh->GetNumberOfCells()==static_cast<vtkIdType>(batch==0?Source::facesPerBatch:1),
+            "file-backed display page seam changed the full-page or tail count");
+        auto* faceIds=vtkIdTypeArray::SafeDownCast(ready.mesh->GetCellData()->GetArray(Source::faceIds));
+        auto* pointIds=vtkIdTypeArray::SafeDownCast(ready.mesh->GetPointData()->GetArray(Source::pointIds));
+        Require(faceIds&&pointIds,"file-backed display lost formal identities");
+        for(vtkIdType i=0;i<pointIds->GetNumberOfValues();++i) {
+            const auto id=static_cast<std::uint64_t>(pointIds->GetValue(i));
+            double value[3];ready.mesh->GetPoint(i,value);
+            Require(id<faces*3&&value[0]==double((id/3)*2)+(id%3==1)
+                &&value[1]==double(id%3==2)&&value[2]==0,"file-backed coordinates changed across a page");
+        }
+        for(vtkIdType i=0;i<faceIds->GetNumberOfValues();++i) {
+            const auto id=static_cast<std::size_t>(faceIds->GetValue(i));
+            Require(id<faces&&!seen[id],"file-backed display duplicated a formal face");
+            seen[id]=true;
+            vtkIdType count=0;const vtkIdType* corners=nullptr;
+            ready.mesh->GetPolys()->GetCellAtId(i,count,corners);
+            Require(count==3,"file-backed display changed triangle topology");
+            for(unsigned corner=0;corner<3;++corner)
+                Require(pointIds->GetValue(corners[corner])==static_cast<vtkIdType>(id*3+corner),
+                    "file-backed display changed formal connectivity");
+        }
+    }
+    Require(std::all_of(seen.begin(),seen.end(),[](bool value){return value;})
+        &&cache->GetCounters().facesRead==faces,"file-backed cache lost formal faces at a page boundary");
 }
 }
 // 显式大规模存储/访问验证；不把合成几何冒充供应商检测或真实 CT 全链验证。
@@ -61,6 +110,7 @@ int main(int argc,char** argv)
     try {
         if(argc==3&&std::string(argv[1])=="--large-points")return CheckLargeAccess(std::stoull(argv[2]));
         if(argc!=1)throw std::invalid_argument("use --large-points <count> for explicit large-result validation");
+        CheckPagedMeshCache();
         Require(FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(0)
             &&FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(std::uint64_t{UINT32_MAX}+1)
             &&!FeatureInternal::SpatialFaceOrder::GetUses32BitForCount(std::uint64_t{UINT32_MAX}+2),"index width changes only when an actual face ID exceeds 32 bits");
@@ -125,6 +175,17 @@ int main(int argc,char** argv)
             &&colored.mesh->GetCellData()->GetScalars()->GetComponent(0,0)==17&&cache->GetCounters().batchesRead==1,"recolor shares points and cells without rereading source geometry");
         cache->SetDecoration([](auto&,const auto&,const auto&){throw std::runtime_error("injected display failure");});
         Require(cache->Get(key).isPending&&Drain(queue)&&!cache->Get(key).error.empty()&&weak.lock()->GetValid(),"display read failure preserves the formal result");
+        cache->Clear();
+        const auto errorRevision=cache->GetRevision();
+        Require(cache->Get(key).isPending,"throwing cancellation read was not admitted");
+        std::optional<FeatureInternal::ReadTaskQueue::Job> failedJob;
+        {const std::lock_guard<std::mutex> lock(queue->mutex);failedJob=queue->TakeLocked();}
+        Require(bool(failedJob),"throwing cancellation job missing");
+        failedJob->task([]()->bool{throw std::runtime_error("injected cancellation failure");});
+        {const std::lock_guard<std::mutex> lock(queue->mutex);queue->FinishLocked();}
+        const auto failedRead=cache->Get(key);
+        Require(!failedRead.isPending&&!failedRead.mesh&&failedRead.error=="injected cancellation failure"
+            &&cache->GetRevision()==errorRevision+1,"unexpected task exception must publish one error terminal state");
         cache->SetDecoration({});cache->Get(key);
         {const std::lock_guard<std::mutex> lock(queue->mutex);queue->CancelLocked();}
         Require(cache->Get(key).isPending&&Drain(queue)&&cache->Get(key).mesh,"abandoned queued read can be requested again");
@@ -167,6 +228,11 @@ int main(int argc,char** argv)
         Require(empty->GetBatchCount()==0&&empty->Find(Box(-1,1),8).batches.empty(),"empty formal mesh is a complete empty display");
         const auto compact=std::make_shared<const SurfaceMeshPayload>(DataArray<double>{0,0,0,1,0,0,0,1,0,0,0,1},
             DataArray<std::uint64_t>{0,1,2,0,2,3,0,3,1,1,3,2,2,1,0,3,2,0});
+        for(const auto invalidPage:{std::size_t{0},Source::facesPerBatch+1,std::numeric_limits<std::size_t>::max()}) {
+            bool rejected=false;
+            try{Source::Build(compact,{},invalidPage);}catch(const std::invalid_argument&){rejected=true;}
+            Require(rejected,"display batch size must obey the existing bounded 32-bit topology contract");
+        }
         for(const std::size_t page:{1,2,3,64,16384}) {
             const auto split=Source::Build(compact,{},page);std::array<bool,6> seen{};
             const auto all=split->Find({},64);Require(all.isComplete,"all display page sizes keep the complete formal face set");

@@ -42,6 +42,10 @@ set_target_properties(mvvcvtk_spatial_mesh_view_tests PROPERTIES FOLDER "MVVCVTK
 vtk_module_autoinit(TARGETS mvvcvtk_spatial_mesh_view_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME DataGraph.SpatialMeshView COMMAND mvvcvtk_spatial_mesh_view_tests)
 SetTestRuntime(DataGraph.SpatialMeshView mvvcvtk_spatial_mesh_view_tests)
+add_test(NAME DataGraph.SpatialMeshPendingReentry COMMAND mvvcvtk_spatial_mesh_view_tests pending-reentry)
+SetTestRuntime(DataGraph.SpatialMeshPendingReentry mvvcvtk_spatial_mesh_view_tests)
+# 同步重入应立即返回；沿用生命周期测试的安全超时捕获自锁。
+set_tests_properties(DataGraph.SpatialMeshPendingReentry PROPERTIES TIMEOUT 120)
 
 add_executable(mvvcvtk_vtk_data_bridge_tests
     VtkDataBridgeTests.cpp

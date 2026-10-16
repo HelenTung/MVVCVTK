@@ -232,7 +232,27 @@ private:
 class RoiEditingHostFeature::Impl final {
 public:
     explicit Impl(RoiEditingConfig config):m_config(std::move(config)) {}
-    ~Impl() { if (ClearDraft()) {StopDisplay();ClearCommitted();} }
+    ~Impl()
+    {
+        // 析构的最后防线不依赖 owner 线程；先唤醒生产者，再等待其退出。
+        // widget/overlay 的正常解绑仍必须由 owner 线程 DetachHost 完成。
+        ++m_serial;
+        if (m_cancel) m_cancel->store(true);
+        CancelDisplay();
+        if (m_future.valid()) m_future.wait();
+        if (m_displayFuture.valid()) m_displayFuture.wait();
+        if (m_worker.joinable()) m_worker.join();
+        if (ClearDraft()) {
+            StopDisplay();
+            ClearCommitted();
+        }
+    }
+    static void NotifyOwner(const std::weak_ptr<FeatureHostControl>& host) noexcept
+    {
+        try {
+            if (const auto owner=host.lock()) (void)owner->SendWorkAvailable();
+        } catch (...) {}
+    }
     struct Binding final {
         std::shared_ptr<OverlayService> service;
         std::shared_ptr<FeatureViewService> view;
@@ -443,7 +463,12 @@ public:
         request.getCancelled=[cancel,original]{return cancel->load() || (original && original());};m_runningSerial=m_serial;
         std::packaged_task<RoiOperationResult()> task([data,graph,readers,request=std::move(request)]{return data->GetRoiOperation(graph,request);});
         m_future=task.get_future();const std::weak_ptr<FeatureHostControl> host=m_host;
-        try {m_worker=std::thread([task=std::move(task),host]()mutable{task();if(const auto owner=host.lock())(void)owner->SendWorkAvailable();});}
+        try {
+            m_worker=std::thread([task=std::move(task),host]() mutable {
+                task();
+                NotifyOwner(host);
+            });
+        }
         catch(...){m_future={};m_state.isComputing=false;m_state.error=RoiError::TooLarge;m_state.operation.error=m_state.error;}
     }
     void PollOperation()
@@ -526,7 +551,7 @@ public:
                     channel->changed.wait(lock,[&]{return cancel->load() || channel->batches.size()<8;});
                     if(cancel->load())throw RoiError::Cancelled;
                     channel->batches.push_back(std::move(batch));}
-                if(const auto owner=host.lock())(void)owner->SendWorkAvailable();
+                NotifyOwner(host);
             };
             const auto updateSlices=[&]{std::map<std::string,RoiPlane> planes;
                 {std::lock_guard<std::mutex> lock(channel->mutex);planes.swap(channel->pendingPlanes);}
@@ -546,7 +571,12 @@ public:
             }catch(RoiError error){return DisplayResult{error,{}};}catch(const std::bad_alloc&){return DisplayResult{RoiError::TooLarge,{}};}catch(...){return DisplayResult{RoiError::Unavailable,{}};}
         });
         m_displayFuture=task.get_future();
-        try{m_worker=std::thread([task=std::move(task),host]()mutable{task();if(const auto owner=host.lock())(void)owner->SendWorkAvailable();});}
+        try {
+            m_worker=std::thread([task=std::move(task),host]() mutable {
+                task();
+                NotifyOwner(host);
+            });
+        }
         catch(...){const auto ref=m_displayRunning->ref;m_displayFuture={};m_displayRunning.reset();
             if(ref)m_shown.at(*ref).displayError=RoiError::Unavailable;
             if(!ref || !m_state.hasDraft){m_state.displayError=RoiError::Unavailable;m_state.displayStatus=RoiDisplayStatus::Failed;}}

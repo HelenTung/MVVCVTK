@@ -17,6 +17,12 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkWeakPointer.h>
+#include <vtkCallbackCommand.h>
+#include <future>
+#include <cstdlib>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -200,8 +206,89 @@ public:
     bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
     bool SendSceneDelta(FeatureSceneDelta)override{return true;}
     bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
-    bool SendWorkAvailable()override{++*signals;return true;}
+    bool throwOnWork=false;
+    const std::thread::id owner=std::this_thread::get_id();
+    std::atomic<unsigned> workerSignals{0};
+    bool SendWorkAvailable()override {
+        ++*signals;
+        if(std::this_thread::get_id()!=owner) {
+            ++workerSignals;
+            if(throwOnWork)throw std::runtime_error("injected notification failure");
+        }
+        return true;
+    }
 };
+void TestWorkerDestruction(bool throwOnWork,bool active=false)
+{
+    struct Deletions {std::thread::id owner=std::this_thread::get_id();unsigned total=0,foreign=0;} deletions;
+    class OperationPort final:public TestDataPort {
+    public:
+        bool waitForCancellation=false;
+        mutable std::promise<void> entered;
+        mutable std::atomic<bool> observedCancellation{false};
+        RoiOperationResult GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const override
+        {
+            if(waitForCancellation) {
+                entered.set_value();
+                const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+                while(!request.getCancelled()&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+                observedCancellation.store(request.getCancelled());
+            }
+            return TestDataPort::GetRoiOperation(graph,request);
+        }
+    };
+    auto data=std::make_shared<OperationPort>();data->waitForCancellation=active;
+    vtkNew<vtkImageData> image;
+    image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto source=data->SetPrimaryImage(image)->data->self;
+    auto views=std::make_shared<Views>();
+    auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto host=std::make_shared<Controller>();host->throwOnWork=throwOnWork;
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+    Require(editor->AttachHost(context),"worker destruction attach failed");
+    RoiRequest draft;draft.definition.source=source;
+    // 球体不创建交互 widget；overlay 由 owner 的 View 保活并在 owner 上清理。
+    RoiNode node;node.primitive.shape=throwOnWork?RoiShape::Box:RoiShape::Sphere;
+    if(throwOnWork)node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};
+    else {node.primitive.origin={2,2,2};node.primitive.radius=1;}
+    draft.definition.nodes={node};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"worker destruction draft failed");
+    vtkNew<vtkCallbackCommand> onDelete;onDelete->SetClientData(&deletions);
+    onDelete->SetCallback([](vtkObject*,unsigned long,void* value,void*) {
+        auto& observed=*static_cast<Deletions*>(value);++observed.total;
+        if(std::this_thread::get_id()!=observed.owner)++observed.foreign;
+    });
+    auto* actors=main->renderer->GetActors();actors->InitTraversal();
+    while(auto* actor=actors->GetNextActor())actor->AddObserver(vtkCommand::DeleteEvent,onDelete);
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=RoiOperationRequest{};
+    start.operation->params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};
+    Require(editor->SendRequest(start).error==RoiError::Pending,"worker destruction operation was not admitted");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    if(active)Require(data->entered.get_future().wait_until(deadline)==std::future_status::ready,"worker did not enter the operation");
+    else {
+        while(!host->signals->load()&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+        Require(host->signals->load()!=0,"worker did not reach completion notification");
+    }
+    if(throwOnWork) {
+        // 通知失败不能使已完成计算失败；owner tick 仍能消费结果并正常 Detach。
+        Require(editor->OnHostTick()&&!editor->GetState().isComputing,"notification exception lost the operation result");
+        Require(editor->GetState().operation.error==RoiError::None,"notification exception changed the successful operation outcome");
+        Require(editor->DetachHost()&&main->overlays.empty(),"owner detach did not release VTK resources");
+        // vtkRenderer::GetActors 的枚举缓存也持有 actor；刷新后才能观察最后一次释放。
+        (void)main->renderer->GetActors();
+        Require(deletions.total!=0&&deletions.foreign==0,"normal owner detach released overlay props on another thread");
+    }
+    const std::weak_ptr<RoiEditingHostFeature> released=editor;
+    std::thread destroy([value=std::move(editor)]()mutable{value.reset();});
+    destroy.join();
+    Require(released.expired(),"foreign release retained the feature");
+    if(active)Require(data->observedCancellation.load(),"destruction did not cancel the active operation");
+    // 非 owner 析构只覆盖 worker 最后防线；正常资源释放仍要求 owner Detach。
+    main->ClearOverlays();
+}
 void TestOperationNotificationLifetime()
 {
     auto data=std::make_shared<TestDataPort>();
@@ -356,10 +443,11 @@ void TestAppliedSplit(){
     Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None && data->GetDataGraph().commitId==before+1 && RoiService::GetDescriptors(data->GetDataGraph()).size()==3,"applied split was saved as one union");Require(editor.DetachHost(),"split editor detach failed");
 }
 
-void TestChunkedDisplay(){
+void TestChunkedDisplay(bool throwOnWork=false){
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(34,4,4);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),34*4*4,1);const auto source=data->SetPrimaryImage(image)->data->self;
     auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D),slice=std::make_shared<View>("slice",HostRenderViewRole::TopDownSlice);main->source=slice->source=source;views->views={{"main",main},{"slice",slice}};
-    RoiEditingHostFeature editor({{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;Require(editor.AttachHost(context),"block display attach failed");
+    auto host=std::make_shared<Controller>();host->throwOnWork=throwOnWork;
+    RoiEditingHostFeature editor({{"main"},{{"main","slice"},{}}});HostFeatureContext context;context.data=data;context.views=views;if(throwOnWork)context.host=host;Require(editor.AttachHost(context),"block display attach failed");
     std::vector<RoiVoxel> voxels;for(int x=1;x<=32;++x)for(int y=1;y<=2;++y)for(int z=1;z<=2;++z)voxels.push_back({{x,y,z},1});
     RoiRequest draft;draft.metadata.name="块边界";RoiPrimitive primitive;primitive.shape=RoiShape::VoxelSet;primitive.voxels=MakeRoiVoxelFixture(voxels);draft.definition={source,{{RoiNodeKind::Primitive,primitive}}};
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"block display begin failed");FeatureOverlayState state;state.cursor={0,0,1};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(state);
@@ -369,6 +457,7 @@ void TestChunkedDisplay(){
         auto* data=vtkMultiBlockDataSet::SafeDownCast(actor->GetMapper()->GetInputDataObject(0,0));if(data)for(unsigned index=0;index<data->GetNumberOfBlocks();++index)meshes.push_back(vtkPolyData::SafeDownCast(data->GetBlock(index)));}return meshes;};
     const auto initial=blocks();std::size_t faces=0,points=0;for(auto* mesh:initial){faces+=mesh->GetNumberOfPolys();points+=mesh->GetNumberOfPoints();}
     Require(editor.GetState().displayStatus==RoiDisplayStatus::Displayed && initial.size()==2 && faces==2*(32*2+32*2+2*2) && points<faces*4,"block display created seams or repeated every face vertex");
+    if(throwOnWork)Require(host->workerSignals.load()>1,"display batch and completion notification exceptions were not exercised");
     const auto sliceLines=[&]{vtkPolyData* result=nullptr;auto* collection=slice->renderer->GetActors();collection->InitTraversal();while(auto* actor=collection->GetNextActor())if(actor->GetVisibility() && actor->GetMapper()){auto* mesh=vtkPolyData::SafeDownCast(actor->GetMapper()->GetInput());if(mesh && mesh->GetNumberOfLines())result=mesh;}return result;};
     auto* contour=sliceLines();Require(contour,"direct slice contour did not finish");double length=0;vtkIdType count=0;const vtkIdType* ids=nullptr;auto* lines=contour->GetLines();lines->InitTraversal();while(lines->GetNextCell(count,ids)){Require(count==2,"slice emitted a non-segment");double a[3],b[3];contour->GetPoint(ids[0],a);contour->GetPoint(ids[1],b);Require(a[2]==1 && b[2]==1,"slice contour belongs to an old plane");length+=std::hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);}
     Require(std::abs(length-2*(32+2))<1e-12,"slice contour perimeter differs from its voxel rectangle");
@@ -496,5 +585,19 @@ void TestCommittedComplexDisplayStatus()
 }
 int main(int argc,char** argv)
 {
-    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();TestCommittedComplexDisplayStatus();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit();TestCommittedComplexDisplayStatus(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+#ifdef _MSC_VER
+    // 生命周期负例失败时向 CTest 返回错误，不弹出阻塞自动化的 CRT 对话框。
+    _set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);
+    _set_error_mode(_OUT_TO_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT,_CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT,_CRTDBG_FILE_STDERR);
+#endif
+    try {
+        if(argc==2&&std::string(argv[1])=="worker-cancellation"){TestWorkerDestruction(false,true);return 0;}
+        if(argc==2&&std::string(argv[1])=="worker-destruction"){TestWorkerDestruction(false);return 0;}
+        if(argc==2&&std::string(argv[1])=="notification-exception"){TestWorkerDestruction(true);TestChunkedDisplay(true);return 0;}
+        if(argc==2&&std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();TestCommittedComplexDisplayStatus();return 0;}
+        TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit();TestCommittedComplexDisplayStatus();
+        return 0;
+    }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

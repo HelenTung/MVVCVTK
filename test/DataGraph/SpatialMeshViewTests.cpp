@@ -68,10 +68,31 @@ void CheckSoftCacheProgress()
     for(unsigned i=0;i<batches;++i){auto* block=vtkPolyData::SafeDownCast(left.GetBlocks()->GetBlock(i));auto* style=block?vtkIntArray::SafeDownCast(block->GetFieldData()->GetArray("test.style")):nullptr;Require(style&&style->GetValue(0)==42,"held page carries the current style revision");}
     left.DetachRenderer();right.DetachRenderer();
 }
+void CheckPendingNotificationReentry()
+{
+    const auto queue=std::make_shared<FeatureInternal::ReadTaskQueue>();
+    const auto cache=std::make_shared<Cache>(Build(),queue);
+    unsigned notifications=0;
+    bool pendingObserved=false,readyObserved=false;
+    queue->onPending=[&] {
+        ++notifications;
+        const auto reentered=cache->Get({0});
+        pendingObserved=reentered.isPending;
+        Work(queue);
+        readyObserved=cache->Get({0}).mesh!=nullptr;
+    };
+    const auto requested=cache->Get({0});
+    Require(requested.isPending&&notifications==1&&pendingObserved&&readyObserved,
+        "notification observes admission and can synchronously consume the queued read");
+    Require(cache->Get({0}).mesh!=nullptr&&cache->GetCounters().batchesRead==1,
+        "reentry neither resubmits nor loses the prepared page");
 }
-int main()
+}
+int main(int argc,char** argv)
 {
     try {
+        if(argc==2&&std::string(argv[1])=="pending-reentry") {CheckPendingNotificationReentry();return 0;}
+        CheckPendingNotificationReentry();
         CheckSoftCacheProgress();
         const auto queue=std::make_shared<FeatureInternal::ReadTaskQueue>();
         const auto source=Build();auto cache=std::make_shared<Cache>(source,queue);
