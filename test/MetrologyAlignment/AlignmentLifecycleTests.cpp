@@ -38,6 +38,11 @@ void Check(bool value, const char *message) {
 class FaultDataPort final : public TestDataPort {
   public:
     bool rejectsCommit = false, throwsAfterCommit = false;
+    bool throwsAfterCommitOnce = false;
+    std::function<bool(const DataTransaction&)> afterCommitTarget;
+    std::size_t injectedCommits = 0;
+    DataCommitStatus injectedStatus = DataCommitStatus::Rejected;
+    bool injectedActivation = false;
     bool rejectsRetirement = false, throwsBeforeCommit = false;
     enum class RecoveryQuery { None, Lifetime, Graph, Binding };
     RecoveryQuery recoveryQuery = RecoveryQuery::None;
@@ -82,12 +87,15 @@ class FaultDataPort final : public TestDataPort {
             if (TestDataPort::GetDataLifetime(retirement.scopeId).status == DataLifetimeStatus::Unknown) ++unknownRetirements;
         if (throwsBeforeCommit) { recoveryArmed = true; throw std::bad_alloc(); }
         const bool isRetirement = !tx.retireScopes.empty();
+        const bool injectAfter = throwsAfterCommit && (!afterCommitTarget || afterCommitTarget(tx));
         auto r = TestDataPort::SetDataCommit(std::move(tx));
         if (!r.published.empty()) committedScope = r.published.back()->lifetimeScope;
         if (isRetirement && r.failureReason == DataCommitFailure::ResultInUse) ++retirementInUseCalls;
         if (onCommit)
             onCommit();
-        if (throwsAfterCommit) {
+        if (injectAfter) {
+            ++injectedCommits; injectedStatus = r.status; injectedActivation = r.isActivated;
+            if (throwsAfterCommitOnce) throwsAfterCommit = false;
             recoveryArmed = true;
             throw std::runtime_error("after commit");
         }
@@ -731,6 +739,120 @@ void ResultScopeLifecycle() {
 }
 
 // 相同临时输入的公开 Start 请求没有次数限制；1025 是被审计门槛的首个越界请求。
+void ScopeBindingAndUnscopedRecovery() {
+    for (const auto query : {FaultDataPort::RecoveryQuery::None, FaultDataPort::RecoveryQuery::Graph,
+                             FaultDataPort::RecoveryQuery::Binding}) {
+        ScopeFixture f;const auto first=f.Publish("");
+        auto activate=f.Binding("scope.recovered",first.ref);
+        f.data.throwsAfterCommit=true;f.data.throwsAfterCommitOnce=true;f.data.recoveryQuery=query;
+        bool original=false;
+        try{(void)f.scopes.Commit(f.data,std::move(activate));}
+        catch(const std::runtime_error& error){original=std::strcmp(error.what(),"after commit")==0;}
+        Check(original&&f.data.injectedCommits==1&&f.data.injectedStatus==DataCommitStatus::Succeeded
+              &&f.data.injectedActivation,"unbound owned result is truly activated before one original port exception");
+        if(query!=FaultDataPort::RecoveryQuery::None) {
+            const auto calls=f.data.commitCalls;DataTransaction blocked;
+            blocked.bindings.push_back({"scope.recovered",1,true,first.ref,{}});
+            bool changed=false;
+            try{changed=f.scopes.Commit(f.data,std::move(blocked)).status==DataCommitStatus::Succeeded;}catch(...){}
+            const auto actual=f.data.TestDataPort::GetDataBinding(f.data.TestDataPort::GetDataGraph(),"scope.recovered");
+            Check(!changed&&f.data.commitCalls==calls&&actual&&actual->target==first.ref,
+                  "unresolved recovery cannot erase the sole real activation evidence through a later unbind");
+        }
+        f.data.recoveryQuery=FaultDataPort::RecoveryQuery::None;
+        const auto binding=f.data.GetDataBinding(f.data.GetDataGraph(),"scope.recovered");
+        if(binding&&binding->target)Check(f.scopes.Commit(f.data,f.Binding("scope.recovered",{})).status==DataCommitStatus::Succeeded,
+                                       "activation recovery permits a normal unbind after query recovery");
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount()==0&&f.data.GetDataLifetime(first.scope).status==DataLifetimeStatus::Released,
+              "exceptional first activation then ordinary deactivation collects the owned scope before Clear");
+        Check(f.scopes.Clear(f.data),"binding recovery cleanup");
+    }
+    // 每个模式使用独立图；普通输入不继承 owned scope，同族身份由独立的 producer/operation/type 给出。
+    enum class Mode { Normal, Committed, Before, Rejected, Historical, HistoricalBinding, OtherKey, ExistingRevision };
+    for(const auto mode:{Mode::Normal,Mode::Committed,Mode::Before,Mode::Rejected,Mode::Historical,Mode::HistoricalBinding,Mode::OtherKey,Mode::ExistingRevision}) {
+        ScopeFixture f;const auto first=f.Publish("");
+        const DataRevisionRef ordinary{f.data.CreateDataEntityId(),1},output{f.data.CreateDataEntityId(),1};
+        DataTransaction input;input.outputs.push_back({ordinary.entityId,0,DataTypes::recordTable,{},ScopeFixture::Payload(),{}});
+        Check(f.data.SetDataCommit(std::move(input)).status==DataCommitStatus::Succeeded,"ordinary input publishes without an owner scope");
+        if(mode==Mode::HistoricalBinding) {
+            DataTransaction binding;binding.bindings.push_back({"ordinary.active",0,true,{},ordinary});
+            Check(f.data.SetDataCommit(std::move(binding)).status==DataCommitStatus::Succeeded,"historical CAS control starts with its desired target already bound");
+        }
+        const auto transaction=[&] {
+            DataTransaction tx;
+            tx.outputs.push_back({output.entityId,0,DataTypes::recordTable,{{"source",ordinary}},ScopeFixture::Payload(),
+                DataProvenance{"scope-test",mode==Mode::OtherKey?"different":"calculate","1","{}"}});
+            if(mode==Mode::Historical) {
+                tx.policy=DataPublishPolicy::AllowHistoricalResult;DataExpectation expected;
+                expected.kind=DataExpectationKind::Binding;expected.use=DataExpectationUse::Activation;
+                expected.binding="missing-activation";expected.expectedBindingRevision=1;tx.expectations.push_back(expected);
+            }
+            if(mode==Mode::HistoricalBinding) {
+                tx.policy=DataPublishPolicy::AllowHistoricalResult;
+                tx.bindings.push_back({"ordinary.active",0,true,{},ordinary});
+            }
+            return tx;
+        };
+        if(mode==Mode::ExistingRevision)Check(f.data.SetDataCommit(transaction()).status==DataCommitStatus::Succeeded,
+                                            "preexisting exact revision control publishes outside this helper attempt");
+        f.data.rejectsCommit=mode==Mode::Rejected;
+        f.data.throwsBeforeCommit=mode==Mode::Before||mode==Mode::ExistingRevision;
+        f.data.throwsAfterCommit=mode==Mode::Committed||mode==Mode::Historical||mode==Mode::HistoricalBinding||mode==Mode::OtherKey;
+        f.data.throwsAfterCommitOnce=true;
+        bool original=false;DataCommitResult returned;
+        try{returned=f.scopes.Commit(f.data,transaction());}
+        catch(const std::bad_alloc&){original=mode==Mode::Before||mode==Mode::ExistingRevision;}
+        catch(const std::runtime_error& error){original=std::strcmp(error.what(),"after commit")==0;}
+        f.data.throwsBeforeCommit=false;f.data.rejectsCommit=false;f.data.throwsAfterCommit=false;
+        if(mode==Mode::Normal)Check(returned.status==DataCommitStatus::Succeeded,"normal ordinary replacement commits without an exception");
+        else if(mode==Mode::Rejected)Check(returned.status==DataCommitStatus::Rejected,"ordinary replacement can be rejected before publication");
+        else Check(original,"ordinary replacement fault preserves the original exception");
+        const bool published=mode==Mode::Normal||mode==Mode::Committed||mode==Mode::Historical||mode==Mode::HistoricalBinding||mode==Mode::OtherKey||mode==Mode::ExistingRevision;
+        Check(bool(f.data.GetData(f.data.GetDataGraph(),output))==published,"ordinary replacement exact output publication is independently observable");
+        if(mode==Mode::Historical||mode==Mode::HistoricalBinding)Check(f.data.injectedStatus==DataCommitStatus::SucceededHistorical&&!f.data.injectedActivation,
+                                      "historical replacement control truly publishes without activation");
+        if(mode==Mode::Committed)Check(f.data.injectedStatus==DataCommitStatus::Succeeded&&f.data.injectedActivation,
+                                     "ordinary same-family replacement truly commits and activates before the wrapper throws");
+        f.scopes.Collect(f.data);
+        const bool replaced=mode==Mode::Normal||mode==Mode::Committed;
+        Check(f.scopes.GetScopeCount()==(replaced?std::size_t{0}:std::size_t{1})
+              &&f.data.GetDataLifetime(first.scope).status==(replaced?DataLifetimeStatus::Released:DataLifetimeStatus::Published),
+              replaced?"non-scoped same-family exceptional publication collects the previous owned result before Clear"
+                      :"precommit rejection, history, other family and preexisting revision never falsely supersede an unbound owner");
+        Check(f.scopes.Clear(f.data),"ordinary replacement recovery cleanup");
+    }
+    {
+        Fixture f({}, {}, false,0,true);
+        AlignmentResult produced;int starts=0;
+        auto start=f.Request();start.isActivationRequested=false;
+        Check(f.feature->SendRequest(start,[&](AlignmentResult value){produced=std::move(value);++starts;}).status==AlignmentAdmissionStatus::Accepted,
+              "real Alignment accepts a never-activated owned result");f.Drain();
+        Check(starts==1&&produced.status==AlignmentStatus::FullyDetermined&&!produced.isActivated
+              &&GetDataRevisionRefValid(produced.result),"real Alignment publishes exactly once without activating");
+        DataEntityId scope;
+        {const auto node=f.data->GetData(f.data->GetDataGraph(),produced.result);
+         Check(node&&node->lifetimePolicy==DataLifetimePolicy::OwnerRetirement,"real Alignment result owns its scoped lifetime");
+         if(node)scope=node->lifetimeScope;}
+        f.data->throwsAfterCommit=true;f.data->throwsAfterCommitOnce=true;
+        f.data->afterCommitTarget=[ref=produced.result](const DataTransaction& tx){return tx.outputs.empty()&&tx.bindings.size()==1&&tx.bindings.front().target==ref;};
+        AlignmentRequest activate;activate.action=AlignmentAction::Activate;activate.resultRef=produced.result;
+        AlignmentResult activated;int activations=0;
+        Check(f.feature->SendRequest(activate,[&](AlignmentResult value){activated=std::move(value);++activations;}).status==AlignmentAdmissionStatus::Accepted
+              &&activations==1&&activated.status==AlignmentStatus::FullyDetermined&&activated.isActivated
+              &&f.data->injectedCommits==1&&f.data->injectedStatus==DataCommitStatus::Succeeded&&f.data->injectedActivation,
+              "real Alignment recovers one truly committed first activation and sends one successful completion");
+        AlignmentRequest deactivate;deactivate.action=AlignmentAction::Deactivate;deactivate.input=f.input;
+        AlignmentResult deactivated;int deactivations=0;
+        Check(f.feature->SendRequest(deactivate,[&](AlignmentResult value){deactivated=std::move(value);++deactivations;}).status==AlignmentAdmissionStatus::Accepted
+              &&deactivations==1&&deactivated.status==AlignmentStatus::FullyDetermined&&!f.feature->GetScopeState(f.input.scope).isCurrent,
+              "real Alignment normally deactivates after the recovered first activation");
+        f.feature->OnHostTick();
+        Check(f.data->GetDataLifetime(scope).status==DataLifetimeStatus::Released,
+              "real Alignment releases the previously unbound owned result after exceptional activation and normal deactivation");
+    }
+}
+
 void OwnerScopedRepeatedAlignment() {
     Fixture f({}, {}, false, 0, true);
     const auto source = f.data->GetData(f.data->GetDataGraph(), f.input.source);
@@ -1687,6 +1809,7 @@ void AutomaticReferenceLifecycle() {
 int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--result-scope-lifecycle") == 0) {
         ResultScopeLifecycle();
+        ScopeBindingAndUnscopedRecovery();
         return failures ? 1 : 0;
     }
     if (argc == 2 && std::strcmp(argv[1], "--owner-scope-limit") == 0) {

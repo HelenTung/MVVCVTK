@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -28,7 +29,34 @@ class ResultScopes final {
         explicit Guard(bool& value) : flag(value) { flag = true; }
         ~Guard() { flag = false; }
     };
+    struct CommitRecovery final {
+        struct Binding final {
+            std::string name;
+            std::optional<DataRevisionRef> target;
+            DataBindingRevision revisionBefore = 0;
+        };
+        ResultKey resultKey;
+        DataEntityId newScope;
+        std::vector<DataRevisionRef> outputs;
+        std::vector<Binding> bindings;
+        bool wereOutputsAbsent = true;
+        bool requiresCurrentInputs = false;
+        CommitRecovery(TrustedDataPort& data, const DataGraphSnapshot& graph, const DataTransaction& transaction,
+                       const ResultKey& key, DataEntityId scope)
+            : resultKey(key), newScope(scope), requiresCurrentInputs(transaction.policy == DataPublishPolicy::RequireCurrentInputs) {
+            for (const auto& draft : transaction.outputs) {
+                const DataRevisionRef ref{draft.entityId, draft.expectedGeneration + 1};
+                outputs.push_back(ref);
+                wereOutputsAbsent = !data.GetData(graph, ref) && wereOutputsAbsent;
+            }
+            for (const auto& update : transaction.bindings) {
+                const auto before = data.GetDataBinding(graph, update.binding);
+                bindings.push_back({update.binding, update.target, before ? before->revision : 0});
+            }
+        }
+    };
     std::vector<Scope> m_scopes;
+    std::optional<CommitRecovery> m_commitRecovery;
     bool m_busy = false;
 
     static bool GetOwns(const Scope& scope, const DataRevisionRef& ref) {
@@ -92,8 +120,41 @@ class ResultScopes final {
         }
         return std::none_of(m_scopes.begin(), m_scopes.end(), [](const Scope& scope) { return scope.isPublicationPending; });
     }
+    bool ResolveCommit(TrustedDataPort& data) noexcept {
+        if (!ResolvePublications(data)) return false;
+        if (!m_commitRecovery) return true;
+        try {
+            const auto graph = data.GetDataGraph();
+            if (!graph.view) return false;
+            // 纯绑定事务没有新 scope；仍须记录真实绑定历史，不能等到解绑后才观察。
+            for (auto& scope : m_scopes)
+                if (GetBound(scope, data, graph)) scope.hasBoundResult = true;
+            const auto& recovery = *m_commitRecovery;
+            const bool published = !recovery.outputs.empty() && recovery.wereOutputsAbsent
+                && std::all_of(recovery.outputs.begin(), recovery.outputs.end(),
+                    [&](const auto& ref) { return bool(data.GetData(graph, ref)); });
+            if (published && !recovery.resultKey.empty()) {
+                // RequireCurrentInputs 若发布成功必为正式激活；允许历史发布时，只认本次实际绑定递增。
+                // entity head / Published 同样会被历史发布推进，不能用它们替代激活证据。
+                bool activated = recovery.requiresCurrentInputs;
+                if (!activated) for (const auto& expected : recovery.bindings) {
+                    const auto binding = data.GetDataBinding(graph, expected.name);
+                    if (binding && binding->target == expected.target && binding->revision > expected.revisionBefore
+                        && binding->revision - expected.revisionBefore == 1) { activated = true; break; }
+                }
+                if (activated) for (auto& scope : m_scopes)
+                    if (scope.retirement.scopeId != recovery.newScope && scope.resultKey == recovery.resultKey)
+                        scope.isSuperseded = true;
+            }
+            m_commitRecovery.reset();
+            return true;
+        } catch (...) {
+            // 保留提交前准备的精确线索；后续写入须先确认，避免解绑抹掉唯一的绑定证据。
+            return false;
+        }
+    }
     void CollectReleased(TrustedDataPort& data) noexcept {
-        (void)ResolvePublications(data);
+        if (!ResolveCommit(data)) return;
         // 从新到旧退役，使已替换的派生结果先解除对更早结果的保护。
         for (auto index = m_scopes.size(); index != 0;) {
             auto& scope = m_scopes[--index];
@@ -127,7 +188,7 @@ public:
 
     // 关闭显示或释放私有快照后可再次收敛；暂时受保护的结果继续由创建者持有。
     void Collect(TrustedDataPort& data) noexcept {
-        if (m_busy || m_scopes.empty()) return;
+        if (m_busy || (m_scopes.empty() && !m_commitRecovery)) return;
         try {
             Guard guard(m_busy);
             auto batch = data.StartDataChanges();
@@ -156,8 +217,9 @@ public:
                 draft.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
             }
         }
-        if (!scoped && m_scopes.empty()) return data.SetDataCommit(std::move(transaction));
+        if (!scoped && m_scopes.empty() && !m_commitRecovery) return data.SetDataCommit(std::move(transaction));
         Guard guard(m_busy);
+        if (!ResolveCommit(data)) return {};
         auto next = m_scopes;
         const auto resultKey = GetResultKey(transaction);
         if (scoped) {
@@ -179,6 +241,9 @@ public:
         // 通知释放前先采用完整账本，避免观察者重入关闭时丢失结果所有权。
         auto batch = data.StartDataChanges();
         if (!batch) return {};
+        // 所有恢复记录都在真实提交前分配，只保存修订/绑定时钟，不复制 payload 或结果缓存。
+        m_commitRecovery.emplace(data, graph, transaction, resultKey,
+            scoped ? next.back().retirement.scopeId : DataEntityId{});
         DataCommitResult committed;
         try {
             committed = data.SetDataCommit(std::move(transaction));
@@ -187,9 +252,10 @@ public:
             // swap 不分配；必须先接管，再调用任何可能继续抛出的恢复查询。
             // 绑定名只作所有权线索，Clear 仍按真实绑定目标核验，未提交的别名不会误解绑。
             m_scopes.swap(next);
-            (void)ResolvePublications(data);
+            (void)ResolveCommit(data);
             std::rethrow_exception(original);
         }
+        m_commitRecovery.reset();
         if (committed.status == DataCommitStatus::Succeeded || committed.status == DataCommitStatus::SucceededHistorical) {
             if (scoped) next.back().isPublicationPending = false;
             if (committed.status == DataCommitStatus::Succeeded) {
@@ -204,11 +270,11 @@ public:
     }
     bool Clear(TrustedDataPort& data) {
         if (m_busy) return false;
-        if (m_scopes.empty()) return true;
+        if (m_scopes.empty() && !m_commitRecovery) return true;
         Guard guard(m_busy);
         auto batch = data.StartDataChanges();
         if (!batch) return false;
-        if (!ResolvePublications(data)) return false;
+        if (!ResolveCommit(data)) return false;
         if (m_scopes.empty()) return true;
         DataTransaction transaction;
         std::set<std::string> names;
