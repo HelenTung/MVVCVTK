@@ -99,7 +99,7 @@ int main(int argc,char** argv)
         vtkNew<vtkRenderWindow> window;window->SetOffScreenRendering(1);window->SetSize(500,500);
         vtkNew<vtkRenderer> renderer;window->AddRenderer(renderer);
         auto* camera=renderer->GetActiveCamera();camera->ParallelProjectionOn();camera->SetPosition(0,.5,10);camera->SetFocalPoint(0,.5,0);camera->SetParallelScale(2);
-        FeatureInternal::SpatialMeshView view;renderer->AddActor(view.GetActor());renderer->AddViewProp(view.GetStatusProp());view.AttachRenderer(renderer);
+        FeatureInternal::SpatialMeshView view;renderer->AddActor(view.GetActor());view.AttachRenderer(renderer);
         view.SetCache(cache,4);Require(view.Refresh()&&view.GetProgress().requested==1&&!view.GetProgress().isComplete,"view requests one visible spatial batch");
         Work(queue);view.Refresh();Require(view.GetProgress().isComplete&&view.GetBlocks()->GetNumberOfBlocks()==1,"worker-prepared exact geometry becomes visible");
         vtkNew<UploadProbe> uploads;uploads->SetInputDataObject(view.GetBlocks());uploads->ScalarVisibilityOff();view.GetActor()->SetMapper(uploads);
@@ -168,7 +168,7 @@ int main(int argc,char** argv)
         FeatureOverlayState singular;singular.modelToWorld.fill(0);view.SetState(singular);view.Refresh();
         Require(view.GetProgress().hasFailure&&!view.GetProgress().isComplete&&source->GetMesh().GetValid(),"display transform failure stays inside the display boundary and preserves formal data");
         Require(!view.Refresh(),"unchanged failed display does not continuously resubmit or redraw");
-        view.DetachRenderer();renderer->RemoveActor(view.GetActor());renderer->RemoveViewProp(view.GetStatusProp());
+        view.DetachRenderer();renderer->RemoveActor(view.GetActor());
         std::cout<<"Spatial view: camera reuse, viewport resize, exact capacity, scoped picking, slice worker and replacement passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

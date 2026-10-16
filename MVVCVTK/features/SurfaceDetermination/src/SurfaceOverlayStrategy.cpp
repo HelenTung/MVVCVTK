@@ -66,7 +66,7 @@ void SurfaceOverlayStrategy::SetInputData(
 void SurfaceOverlayStrategy::SetDisplayCache(std::shared_ptr<FeatureInternal::SpatialMeshCache> cache,
     std::size_t capacity,std::function<void()> requestFrame)
 {
-    m_stream.SetCache(std::move(cache),capacity,std::move(requestFrame));AttachProp(m_stream.GetStatusProp());
+    m_stream.SetCache(std::move(cache),capacity,std::move(requestFrame));
 }
 void SurfaceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
 {
@@ -117,7 +117,7 @@ void SurfaceSliceOverlayStrategy::SetDisplayCache(std::shared_ptr<FeatureInterna
     std::size_t capacity,std::function<void()> requestFrame)
 {
     m_stream.SetCache(std::move(cache),capacity,std::move(requestFrame),m_normalModel);
-    m_actor->SetMapper(m_stream.GetMapper());AttachProp(m_stream.GetStatusProp());
+    m_actor->SetMapper(m_stream.GetMapper());
 }
 void SurfaceSliceOverlayStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer)
 {
