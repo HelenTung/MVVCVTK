@@ -39,6 +39,26 @@ class FaultDataPort final : public TestDataPort {
   public:
     bool rejectsCommit = false, throwsAfterCommit = false;
     bool rejectsRetirement = false, throwsBeforeCommit = false;
+    enum class RecoveryQuery { None, Lifetime, Graph, Binding };
+    RecoveryQuery recoveryQuery = RecoveryQuery::None;
+    bool recoveryArmed = false;
+    DataEntityId attemptedScope, committedScope;
+    std::size_t unknownRetirements = 0;
+    DataGraphSnapshot GetDataGraph() const override {
+        if (recoveryArmed && recoveryQuery == RecoveryQuery::Graph)
+            throw std::runtime_error("recovery graph failure");
+        return TestDataPort::GetDataGraph();
+    }
+    DataLifetimeState GetDataLifetime(const DataEntityId& id) const override {
+        if (recoveryArmed && recoveryQuery == RecoveryQuery::Lifetime)
+            throw std::runtime_error("recovery lifetime failure");
+        return TestDataPort::GetDataLifetime(id);
+    }
+    std::optional<DataBinding> GetDataBinding(const DataGraphSnapshot& graph, std::string_view name) const override {
+        if (recoveryArmed && recoveryQuery == RecoveryQuery::Binding)
+            throw std::runtime_error("recovery binding failure");
+        return TestDataPort::GetDataBinding(graph, name);
+    }
     enum class ReadFault { None, Throws, Omits };
     ReadFault readFault = ReadFault::None;
     std::optional<DataRevisionRef> faultReadRef;
@@ -57,14 +77,20 @@ class FaultDataPort final : public TestDataPort {
         ++commitCalls;
         if (rejectsCommit || (rejectsRetirement && !tx.retireScopes.empty()))
             return {};
-        if (throwsBeforeCommit) throw std::bad_alloc();
+        if (!tx.outputs.empty()) attemptedScope = tx.outputs.back().lifetimeScope.value_or(DataEntityId{});
+        for (const auto& retirement : tx.retireScopes)
+            if (TestDataPort::GetDataLifetime(retirement.scopeId).status == DataLifetimeStatus::Unknown) ++unknownRetirements;
+        if (throwsBeforeCommit) { recoveryArmed = true; throw std::bad_alloc(); }
         const bool isRetirement = !tx.retireScopes.empty();
         auto r = TestDataPort::SetDataCommit(std::move(tx));
+        if (!r.published.empty()) committedScope = r.published.back()->lifetimeScope;
         if (isRetirement && r.failureReason == DataCommitFailure::ResultInUse) ++retirementInUseCalls;
         if (onCommit)
             onCommit();
-        if (throwsAfterCommit)
+        if (throwsAfterCommit) {
+            recoveryArmed = true;
             throw std::runtime_error("after commit");
+        }
         return r;
     }
 };
@@ -624,6 +650,83 @@ void ResultScopeLifecycle() {
         node.reset();
         Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0,
               "postcommit owner ledger empties after the held payload ends");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish("");
+        f.data.throwsAfterCommit = true;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            bool original = false;
+            try { (void)f.Publish(""); }
+            catch (const std::runtime_error& error) { original = std::strcmp(error.what(), "after commit") == 0; }
+            Check(original, "repeated committed exceptions preserve the original error");
+        }
+        const auto latest = f.data.committedScope;
+        f.data.throwsAfterCommit = false;
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released
+              && f.data.GetDataLifetime(latest).status == DataLifetimeStatus::Published,
+              "three committed exceptions replace the same unbound result family and collect to one scope");
+        Check(f.scopes.Clear(f.data), "repeated committed exceptions clear every owned scope");
+    }
+    for (const auto query : {FaultDataPort::RecoveryQuery::Lifetime, FaultDataPort::RecoveryQuery::Graph,
+                             FaultDataPort::RecoveryQuery::Binding}) {
+        ScopeFixture f;
+        f.data.throwsAfterCommit = true;
+        f.data.recoveryQuery = query;
+        bool original = false;
+        try { (void)f.Publish(); }
+        catch (const std::runtime_error& error) { original = std::strcmp(error.what(), "after commit") == 0; }
+        Check(original, "a recovery query cannot replace the original postcommit error");
+        Check(f.scopes.GetScopeCount() == 1, "a committed scope remains owned when its recovery query throws");
+        bool cleared = false;
+        try { cleared = f.scopes.Clear(f.data); } catch (...) {}
+        Check(!cleared, "Clear cannot report success while publication confirmation is unavailable");
+        const auto published = f.data.committedScope;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        f.data.throwsAfterCommit = false;
+        Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0
+              && f.data.GetDataLifetime(published).status == DataLifetimeStatus::Released,
+              "retry releases the exact postcommit scope after recovery queries recover");
+    }
+    {
+        ScopeFixture f;
+        f.data.throwsBeforeCommit = true;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::Lifetime;
+        bool original = false;
+        try { (void)f.Publish(); } catch (const std::bad_alloc&) { original = true; } catch (...) {}
+        Check(original, "unconfirmed precommit failure preserves its original allocation error");
+        bool cleared = false;
+        try { cleared = f.scopes.Clear(f.data); } catch (...) {}
+        Check(!cleared, "an unconfirmed candidate cannot be silently forgotten by Clear");
+        const auto unpublished = f.data.attemptedScope;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        f.data.throwsBeforeCommit = false;
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 0 && f.scopes.Clear(f.data)
+              && f.data.GetDataLifetime(unpublished).status == DataLifetimeStatus::Unknown
+              && f.data.unknownRetirements == 0,
+              "a positively unpublished candidate is discarded without retiring an unknown lifetime");
+    }
+    {
+        ScopeFixture f;
+        const auto current = f.Publish();
+        f.data.throwsAfterCommit = true;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::Binding;
+        try { (void)f.Publish("scope.active", "calculate", {}, true); } catch (...) {}
+        const auto historical = f.data.committedScope;
+        f.data.throwsAfterCommit = false;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 2
+              && f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active")->target == current.ref
+              && f.data.GetDataLifetime(current.scope).status == DataLifetimeStatus::Published
+              && f.data.GetDataLifetime(historical).status == DataLifetimeStatus::Published,
+              "uncertain historical publication never supersedes the current bound result");
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1,
+              "the next confirmed current publication replaces its historical family after recovery");
+        Check(f.scopes.Clear(f.data), "historical exception recovery clears");
     }
 }
 

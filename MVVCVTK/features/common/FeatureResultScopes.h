@@ -3,6 +3,7 @@
 #include "Host/TrustedDataPort.h"
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <set>
 #include <string>
 #include <tuple>
@@ -19,6 +20,8 @@ class ResultScopes final {
         ResultKey resultKey;
         bool hasBoundResult = false;
         bool isSuperseded = false;
+        bool isPublicationPending = false;
+        bool requiresCurrentInputs = false;
     };
     struct Guard final {
         bool& flag;
@@ -58,15 +61,48 @@ class ResultScopes final {
                 if (!GetOwns(scope, derived) && data.GetData(graph, derived)) return true;
         return false;
     }
+    static void SetSuperseded(std::vector<Scope>& scopes, std::size_t before, const ResultKey& key) noexcept {
+        if (!key.empty())
+            for (std::size_t index = 0; index < before; ++index)
+                if (scopes[index].resultKey == key) scopes[index].isSuperseded = true;
+    }
+    bool ResolvePublications(TrustedDataPort& data) noexcept {
+        for (std::size_t index = 0; index < m_scopes.size();) {
+            auto& scope = m_scopes[index];
+            if (!scope.isPublicationPending) { ++index; continue; }
+            try {
+                const auto state = data.GetDataLifetime(scope.retirement.scopeId);
+                if (state.status == DataLifetimeStatus::Unknown) {
+                    // 只有未确认候选可由 Unknown 排除；它从未成为需要退役的正式 scope。
+                    m_scopes.erase(m_scopes.begin() + index);
+                    continue;
+                }
+                const auto graph = data.GetDataGraph();
+                if (!graph.view) { ++index; continue; }
+                const bool bound = GetBound(scope, data, graph);
+                // RequireCurrentInputs 的正式提交不会是历史发布；允许历史时必须另有绑定证据。
+                // 无法证明激活则只接管所有权，不把 Published 当成替换当前结果的依据。
+                if (scope.requiresCurrentInputs || bound) SetSuperseded(m_scopes, index, scope.resultKey);
+                scope.hasBoundResult = scope.hasBoundResult || bound;
+                scope.isPublicationPending = false;
+            } catch (...) {
+                // 原提交结果尚不可查；保守持有候选，后续 Collect/Clear 再确认。
+            }
+            ++index;
+        }
+        return std::none_of(m_scopes.begin(), m_scopes.end(), [](const Scope& scope) { return scope.isPublicationPending; });
+    }
     void CollectReleased(TrustedDataPort& data) noexcept {
+        (void)ResolvePublications(data);
         // 从新到旧退役，使已替换的派生结果先解除对更早结果的保护。
         for (auto index = m_scopes.size(); index != 0;) {
             auto& scope = m_scopes[--index];
+            if (scope.isPublicationPending) continue;
             try {
                 auto state = data.GetDataLifetime(scope.retirement.scopeId);
                 if (state.status == DataLifetimeStatus::Published) {
                     const auto graph = data.GetDataGraph();
-                    if (GetBound(scope, data, graph)) continue;
+                    if (GetBound(scope, data, graph)) { scope.hasBoundResult = true; continue; }
                     if (scope.hasBoundResult) scope.isSuperseded = true;
                     if (scope.isSuperseded) {
                         if (GetHasLiveDerived(scope, data, graph)) continue;
@@ -128,6 +164,8 @@ public:
             Scope scope;
             scope.retirement = {data.CreateDataEntityId(), DataLifetimeStatus::Published, {}, true};
             scope.resultKey = resultKey;
+            scope.isPublicationPending = true;
+            scope.requiresCurrentInputs = transaction.policy == DataPublishPolicy::RequireCurrentInputs;
             for (auto& draft : transaction.outputs) {
                 draft.lifetimeScope = scope.retirement.scopeId;
                 draft.lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
@@ -141,33 +179,21 @@ public:
         // 通知释放前先采用完整账本，避免观察者重入关闭时丢失结果所有权。
         auto batch = data.StartDataChanges();
         if (!batch) return {};
-        const auto pendingBindings = transaction.bindings;
         DataCommitResult committed;
         try {
             committed = data.SetDataCommit(std::move(transaction));
         } catch (...) {
-            // 私有端口包装可能在正式提交后抛出；仅在新 scope 或全部绑定确认已提交时接管候选。
-            bool isCommitted = scoped
-                && data.GetDataLifetime(next.back().retirement.scopeId).status != DataLifetimeStatus::Unknown;
-            const auto current = data.GetDataGraph();
-            if (!scoped && !pendingBindings.empty()) {
-                isCommitted = std::all_of(pendingBindings.begin(), pendingBindings.end(), [&](const auto& update) {
-                    const auto binding = data.GetDataBinding(current, update.binding);
-                    return binding && binding->revision == update.expectedRevision + 1 && binding->target == update.target;
-                });
-            }
-            if (isCommitted) {
-                m_scopes.swap(next);
-                for (auto& scope : m_scopes)
-                    if (GetBound(scope, data, current)) scope.hasBoundResult = true;
-            }
-            throw;
+            const auto original = std::current_exception();
+            // swap 不分配；必须先接管，再调用任何可能继续抛出的恢复查询。
+            // 绑定名只作所有权线索，Clear 仍按真实绑定目标核验，未提交的别名不会误解绑。
+            m_scopes.swap(next);
+            (void)ResolvePublications(data);
+            std::rethrow_exception(original);
         }
         if (committed.status == DataCommitStatus::Succeeded || committed.status == DataCommitStatus::SucceededHistorical) {
+            if (scoped) next.back().isPublicationPending = false;
             if (committed.status == DataCommitStatus::Succeeded) {
-                if (!resultKey.empty())
-                    for (auto index = std::size_t{0}; index < next.size() - (scoped ? 1 : 0); ++index)
-                        if (next[index].resultKey == resultKey) next[index].isSuperseded = true;
+                SetSuperseded(next, next.size() - (scoped ? 1 : 0), resultKey);
                 for (const auto& binding : committed.bindings) if (binding.target)
                     for (auto& scope : next) if (GetOwns(scope, *binding.target)) scope.hasBoundResult = true;
             }
@@ -182,6 +208,8 @@ public:
         Guard guard(m_busy);
         auto batch = data.StartDataChanges();
         if (!batch) return false;
+        if (!ResolvePublications(data)) return false;
+        if (m_scopes.empty()) return true;
         DataTransaction transaction;
         std::set<std::string> names;
         std::set<DataRevisionRef> refs;
