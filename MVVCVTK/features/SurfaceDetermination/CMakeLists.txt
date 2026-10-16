@@ -17,6 +17,10 @@ set(MVVCVTK_SURFACE_SOURCES
     src/SurfaceContracts.cpp
     src/SurfaceDeterminationAlgorithm.h
     src/SurfaceDeterminationAlgorithm.cpp
+    src/SurfaceCpuSampling.h
+    src/SurfaceHistogramWindow.h
+    src/SurfaceHistogramEstimator.h
+    src/SurfaceHistogramEstimator.cpp
     src/SurfaceDeterminationHostFeature.cpp
     src/SurfaceDeterminationService.h
     src/SurfaceDeterminationService.cpp

@@ -34,6 +34,21 @@ int GetSuiteFailCount(const std::string_view suite)
 
 int main(int argc, char* argv[])
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--histogram-audit-schema") {
+        std::cout << "SurfaceDeterminationTests --histogram-samples float32-raw nx ny nz histogram.csv\n"
+                     "SurfaceDeterminationTests --histogram-raw raw uint16|float32 nx ny nz histogram.csv\n"
+                     "Read-only scalar estimation audit; does not run or validate surface geometry.\n";
+        return 0;
+    }
+    if (argc > 1 && (std::string_view(argv[1]) == "--histogram-samples"
+        || std::string_view(argv[1]) == "--histogram-raw")) {
+        try { return GetSurfaceHistogramAuditResult(argc, argv); }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 2; }
+    }
+    if (argc>1 && std::string_view(argv[1])=="--real-histogram-session") {
+        try { return GetSurfaceHistogramSessionResult(argc,argv); }
+        catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+    }
     if(argc==9&&std::string_view(argv[1])=="--real-entry") {
         try {
             return GetSurfaceRealInputFailCount(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),

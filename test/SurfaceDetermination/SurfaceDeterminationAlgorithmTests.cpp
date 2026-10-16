@@ -131,7 +131,8 @@ void TestMaterialRangeEstimation(Checks& checks)
     checks.Get(estimate.status == SurfaceResultStatus::Succeeded
         && estimate.isoEstimate && estimate.isoEstimate->isoValue > 450.0
         && estimate.isoEstimate->isoValue < 550.0
-        && estimate.isoEstimate->sampleCount <= 128U * 128U * 128U
+        && estimate.isoEstimate->sampleCount + estimate.isoEstimate->excludedSampleCount == 129U * 129U * 129U
+        && estimate.isoEstimate->histogramSampleSteps == std::array<int,3>{1,1,1}
         && !estimate.points.empty() && !estimate.triangleIndices.empty(),
         "material estimation excludes low artifacts and publishes the same new surface");
     checks.Get(estimate.isoEstimate && repeated.isoEstimate

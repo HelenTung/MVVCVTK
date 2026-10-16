@@ -14,7 +14,7 @@
 using SurfaceCancelCheck = std::function<bool()>;
 using SurfaceProgressCallback =
     std::function<void(SurfaceDeterminationStage, double)>;
-inline constexpr std::uint32_t surfaceAlgorithmRevision = 8;
+inline constexpr std::uint32_t surfaceAlgorithmRevision = 9;
 namespace FeatureInternal {class SpatialMeshSource;}
 
 // 点细化可由请求内 CPU worker 并发查询取消状态；调用方必须提供可并发调用的
