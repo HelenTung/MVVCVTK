@@ -301,7 +301,10 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
                 {"normal", GetValues(points[index].normalModel)}, {"flags", static_cast<int>(points[index].flags)},
                 {"validSupportRatio", points[index].validSupportRatio}, {"fitResidual", points[index].fitResidual},
                 {"localizationSigma", points[index].estimatedLocalizationSigma}});
+        QJsonArray inputs;
+        for(const auto& input:snapshot->inputs)inputs.append(QJsonObject{{"role",QString::fromStdString(input.role)},{"revision",GetRefText(input.source)}});
         panel->SetComplete(id, "Observed", {{"mesh", GetRefText(snapshot->meshRevision)}, {"source", GetRefText(snapshot->sourceRevision)},
+            {"generation",GetRefText(snapshot->dataRevision)},{"canonicalParameters",QString::fromStdString(snapshot->canonicalParameters)},{"inputs",inputs},
             {"samples", samples}, {"totalPoints", QString::number(points.size())}});
     }, TestPolicy::Read);
     panel->AttachAction("ExportNominalMeshFixture", {{"outputPath", ""}, {"transform", GetValues(roiIdentityMatrix)}, {"selectionOnly", true}},

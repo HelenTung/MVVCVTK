@@ -46,7 +46,8 @@ step('Alignment', 'EvaluateVoxelVolume', dict(source='current', extent=None,
      status='FullyDetermined', control='businessPrimary', expectPrimaryAction='EvaluateVoxelVolume')
 for _ in range(2):
     step('Alignment', 'VoxelVolumeResult', dict(voxelVolume='current'), status='Observed', deferReportCheck=True)
-step('Surface', 'SamplePoints', dict(maxPoints='4096'), status='Observed', saveAs='samples', deferReportCheck=True)
+step('Surface', 'SamplePoints', dict(maxPoints='4096'), status='Observed', saveAs='samples', deferReportCheck=True,
+     expectResult={'generation': '$surface.result.generation', 'mesh': '$surface.result.mesh'})
 # 计算后经查询打开冻结报告；UI 自动读取也会登记操作，按实际结果修订核对归属。
 step('Wall', 'Start', dict(source='current', labels='parts', mesh='surface', materialLabels=[],
      maxDistance=20, evaluationRoi=''), control='businessPrimary', expectPrimaryAction='Start', deferReportCheck=True)
