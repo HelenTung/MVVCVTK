@@ -137,12 +137,15 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
         }
         return std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
             return scene.isAvailable && scene.presentation && scene.presentation->dataRevision == input->dataRevision
+                && scene.presentation->bindingRevision == input->bindingRevision
                 && scene.sceneEpoch == scenes.front().sceneEpoch && scene.renderedEpoch > 0
                 && scene.renderedEpoch <= scene.sceneEpoch && !window.GetWorkflow().getRenderPending(scene.id);
         });
     },step["timeoutMs"].toInt(0)), "business capture waits for committed 2D/3D scenes and actual renders");
     Check(QDir().mkpath(folder), "business capture directory is available");
     QCoreApplication::processEvents();
+    const auto capturedInput = window.GetSession()->GetImageDescriptor();
+    Check(capturedInput.has_value(), "business capture has an exact selected input and binding");
     QJsonArray files, scenes;
     for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
         const auto frame = widget->grabFramebuffer();
@@ -157,9 +160,12 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
     for (const auto& scene : window.GetSession()->GetSceneViewStates())
         scenes.append(QJsonObject{{"view",QString::fromStdString(scene.id)}, {"sceneEpoch",QString::number(scene.sceneEpoch)},
             {"renderedEpoch",QString::number(scene.renderedEpoch)},
-            {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()}});
+            {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()},
+            {"bindingRevision",QString::number(scene.presentation ? scene.presentation->bindingRevision : 0)}});
     ExportJson(QDir(folder).filePath("capture.json"),{{"operationId",QString::number(operationId)},
         {"label",step["stageLabel"]},{"module",step["module"]},{"action",step["action"]},
+        {"expectedDataRevision",GetRefText(capturedInput->dataRevision)},
+        {"expectedBindingRevision",QString::number(capturedInput->bindingRevision)},
         {"views",files},{"scenes",scenes}});
 }
 std::uint64_t Send(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
@@ -3103,6 +3109,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 return std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
                     return scene.isAvailable && scene.presentation
                         && scene.presentation->dataRevision == descriptor->dataRevision
+                        && scene.presentation->bindingRevision == descriptor->bindingRevision
                         && scene.sceneEpoch == scenes.front().sceneEpoch
                         // HostDriven 无 dirty 的视图保留最后实际绘制的 epoch；完成以 owner/render 队列为空为准。
                         && scene.renderedEpoch > 0 && scene.renderedEpoch <= scene.sceneEpoch
@@ -3115,12 +3122,14 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 for (const auto& scene : window.GetSession()->GetSceneViewStates())
                     scenes.append(QJsonObject{{"id", QString::fromStdString(scene.id)}, {"isAvailable", scene.isAvailable},
                         {"sceneEpoch", QString::number(scene.sceneEpoch)}, {"renderedEpoch", QString::number(scene.renderedEpoch)},
-                        {"dataRevision", scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()}});
+                        {"dataRevision", scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()},
+                        {"bindingRevision", QString::number(scene.presentation ? scene.presentation->bindingRevision : 0)}});
                 std::cerr << GetJsonText(QJsonObject{{"scenes", scenes},
                     {"selectedInput", descriptor ? GetRefText(descriptor->dataRevision) : QString()},
+                    {"selectedBindingRevision", QString::number(descriptor ? descriptor->bindingRevision : 0)},
                     {"hostDiagnostics", window.GetDiagnostics()}}).toStdString();
             }
-            Check(consistent, "all four committed scenes use the selected input and epoch with no pending updates or renders");
+            Check(consistent, "all four committed scenes use the selected data and binding revisions and epoch with no pending updates or renders");
             if (GetText(step, "module") == "Data" && GetText(step, "action") == "Load") {
                 const auto loaded = window.GetRecords().GetRecord(id);
                 const auto rendered = loaded["firstRenderedViews"].toObject();
