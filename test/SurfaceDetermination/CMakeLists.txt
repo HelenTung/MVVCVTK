@@ -61,7 +61,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_surface_suite IN ITEMS algorithm histogram geometry lifecycle display seed-window optimization object-retirement object-owner-wait)
+foreach(_mvvcvtk_surface_suite IN ITEMS algorithm histogram geometry lifecycle display seed-window optimization object-retirement object-owner-wait object-wakeup)
     add_test(
         NAME "SurfaceDetermination.${_mvvcvtk_surface_suite}"
         COMMAND mvvcvtk_surface_determination_tests ${_mvvcvtk_surface_suite}

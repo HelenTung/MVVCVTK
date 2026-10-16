@@ -14,6 +14,9 @@
 #include <deque>
 #include <chrono>
 #include <functional>
+#include <condition_variable>
+#include <mutex>
+#include <set>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -31,16 +34,34 @@ void Require(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
 }
 
+// 只拦截实际读取受控 points 的对象工作线程，避免把其他后台端口通知当成终末通知。
+class ObjectNoticeProbe final {
+public:
+    void RememberWorker() {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_workers.insert(std::this_thread::get_id());
+    }
+    void HoldTerminalNotice() {
+        bool objectWorker = false;
+        { const std::lock_guard<std::mutex> lock(m_mutex); objectWorker = m_workers.count(std::this_thread::get_id()) != 0; }
+        if (objectWorker) terminal->Hold();
+    }
+    std::shared_ptr<Gate> terminal = std::make_shared<Gate>();
+private:
+    std::mutex m_mutex;
+    std::set<std::thread::id> m_workers;
+};
+
 class HeldPoints final : public MeshValueSource<SurfacePointRecord> {
 public:
     HeldPoints(std::shared_ptr<const MeshReadArray<SurfacePointRecord>> points,
-        std::shared_ptr<Gate> gate)
-        : m_points(std::move(points)), m_gate(std::move(gate)), m_owner(std::this_thread::get_id()) {}
+        std::shared_ptr<Gate> gate, std::shared_ptr<ObjectNoticeProbe> notices)
+        : m_points(std::move(points)), m_gate(std::move(gate)), m_notices(std::move(notices)), m_owner(std::this_thread::get_id()) {}
     std::size_t GetCount() const noexcept override { return m_points->size(); }
     std::size_t GetResidentBytes() const noexcept override { return m_points->GetResidentBytes(); }
     void ReadValues(std::size_t offset, std::size_t count, SurfacePointRecord* output) const override
     {
-        if (std::this_thread::get_id() != m_owner) m_gate->Hold();
+        if (std::this_thread::get_id() != m_owner) { m_notices->RememberWorker(); m_gate->Hold(); }
         if (offset > m_points->size() || count > m_points->size() - offset)
             throw std::out_of_range("HeldPoints range");
         std::copy_n(m_points->begin() + offset, count, output);
@@ -48,12 +69,14 @@ public:
 private:
     std::shared_ptr<const MeshReadArray<SurfacePointRecord>> m_points;
     std::shared_ptr<Gate> m_gate;
+    std::shared_ptr<ObjectNoticeProbe> m_notices;
     std::thread::id m_owner;
 };
 
 class DataPort final : public TestDataPort {
 public:
-    explicit DataPort(std::shared_ptr<Gate> gate) : m_gate(std::move(gate)) {}
+    DataPort(std::shared_ptr<Gate> gate, std::shared_ptr<ObjectNoticeProbe> notices)
+        : m_gate(std::move(gate)), m_notices(std::move(notices)) {}
     DataCommitResult SetDataCommit(DataTransaction transaction) override
     {
         for (auto& output : transaction.outputs) {
@@ -67,7 +90,7 @@ public:
                 Require(payload && payload->GetGeneration(), "generation wrapper requires formal payload");
                 auto generation = std::make_shared<SurfaceGenerationSnapshot>(*payload->GetGeneration());
                 generation->points = std::make_shared<const MeshReadArray<SurfacePointRecord>>(
-                    std::make_shared<const HeldPoints>(generation->points, m_gate));
+                    std::make_shared<const HeldPoints>(generation->points, m_gate, m_notices));
                 output.payload = std::make_shared<const SurfaceGenerationPayload>(generation,
                     payload->GetStatistics(), payload->GetStorage(), payload->GetDisplaySource(), payload->GetDisplayError());
                 m_wrapped = true;
@@ -77,6 +100,7 @@ public:
     }
 private:
     std::shared_ptr<Gate> m_gate;
+    std::shared_ptr<ObjectNoticeProbe> m_notices;
     bool m_wrapped = false;
 };
 
@@ -167,11 +191,39 @@ public:
     {
         objectSubmitted = std::any_of(delta.displays.begin(), delta.displays.end(),
             [](const auto& display) { return display.localId == "surface-object"; });
-        return frames && frames->Enqueue(std::string(surfaceFeatureId), std::move(delta), GetAttachmentId());
+        const bool accepted = frames && frames->Enqueue(std::string(surfaceFeatureId), std::move(delta), GetAttachmentId());
+        if (accepted) (void)SendWorkAvailable();
+        return accepted;
     }
     bool SendOwnerComplete(std::function<void()> complete) override
-    { if (completeSynchronously) complete(); else completes.push_back(std::move(complete)); return true; }
-    bool SendWorkAvailable() override { return true; }
+    {
+        if (completeSynchronously) complete();
+        else { completes.push_back(std::move(complete)); (void)SendWorkAvailable(); }
+        return true;
+    }
+    bool SendWorkAvailable() override
+    {
+        { const std::lock_guard<std::mutex> lock(m_workMutex); m_pendingWork = true; }
+        m_workReady.notify_one();
+        if (notices) notices->HoldTerminalNotice();
+        return true;
+    }
+    bool GetWorkPending()
+    { const std::lock_guard<std::mutex> lock(m_workMutex); return m_pendingWork; }
+    bool TakeWork()
+    {
+        const std::lock_guard<std::mutex> lock(m_workMutex);
+        if (!std::exchange(m_pendingWork, false)) return false;
+        ++consumedNotices;
+        return true;
+    }
+    bool WaitTakeWork(std::chrono::steady_clock::time_point deadline)
+    {
+        std::unique_lock<std::mutex> lock(m_workMutex);
+        if (!m_workReady.wait_until(lock, deadline, [this] { return m_pendingWork; })) return false;
+        m_pendingWork = false; ++consumedNotices;
+        return true;
+    }
     std::uint64_t GetAttachmentId() const noexcept override { return 1; }
     std::optional<HostSemanticTarget> GetDisplayTarget(const std::string& view, const std::string& role) const override
     { return getDisplayTarget ? getDisplayTarget(view, role) : std::nullopt; }
@@ -189,11 +241,18 @@ public:
     bool objectSubmitted = false;
     bool completeSynchronously = false;
     int detachInputCount = 0;
+    std::shared_ptr<ObjectNoticeProbe> notices;
+    std::size_t consumedNotices = 0;
+private:
+    std::mutex m_workMutex;
+    std::condition_variable m_workReady;
+    bool m_pendingWork = false;
 };
 
 struct Fixture final {
     std::shared_ptr<Gate> gate = std::make_shared<Gate>();
-    std::shared_ptr<DataPort> data = std::make_shared<DataPort>(gate);
+    std::shared_ptr<ObjectNoticeProbe> notices = std::make_shared<ObjectNoticeProbe>();
+    std::shared_ptr<DataPort> data = std::make_shared<DataPort>(gate, notices);
     std::shared_ptr<HostControl> host = std::make_shared<HostControl>();
     std::shared_ptr<ViewDirectory> views = std::make_shared<ViewDirectory>();
     std::vector<HostRenderViewRuntime> participants{1};
@@ -209,6 +268,7 @@ struct Fixture final {
 
     Fixture()
     {
+        host->notices = notices;
         const auto sphere = SurfaceTest::BuildSphere();
         const auto source = data->SetPrimaryImage(sphere->image);
         Require(source && source->binding, "scoped primary source must publish");
@@ -255,7 +315,7 @@ struct Fixture final {
     }
     ~Fixture()
     {
-        gate->Release();
+        gate->Release(); notices->terminal->Release();
         if (feature) (void)feature->DetachHost();
         host->Drain();
         host->frames->Stop();
@@ -285,6 +345,38 @@ struct Fixture final {
         const auto deadline = std::chrono::steady_clock::now() + TaskInterleaving::synchronizationTimeout;
         while (!ready() && std::chrono::steady_clock::now() < deadline) { Tick(); std::this_thread::yield(); }
         return ready();
+    }
+    bool PumpQueued(const std::function<bool()>& ready, const std::function<void()>& afterEvent = {})
+    {
+        const auto deadline = std::chrono::steady_clock::now() + TaskInterleaving::synchronizationTimeout;
+        while (!ready() && std::chrono::steady_clock::now() < deadline) {
+            if (!host->WaitTakeWork(deadline)) return ready();
+            Tick();
+            if (afterEvent) afterEvent();
+        }
+        return ready();
+    }
+    void DrainQueued()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + TaskInterleaving::synchronizationTimeout;
+        while (host->TakeWork()) {
+            Tick();
+            Require(std::chrono::steady_clock::now() < deadline, "queued owner notifications did not drain");
+        }
+    }
+    void StartFormalFromNotices()
+    {
+        struct Completion { bool ready = false; SurfaceDeterminationResult result; };
+        const auto completed = std::make_shared<Completion>();
+        auto params = SurfaceTest::GetParams(); params.targetViews = {};
+        const auto admission = feature->SendRequest(SurfaceStartRequest{params}, [completed](auto value) {
+            completed->result = std::move(value); completed->ready = true;
+        });
+        Require(admission.status == SurfaceAdmissionStatus::Accepted && PumpQueued([&] { return completed->ready; }),
+            "formal control must complete using actual queued notifications only");
+        Require(completed->result.status == SurfaceResultStatus::Succeeded && completed->result.isPublished,
+            "event-driven formal control must publish");
+        DrainQueued();
     }
     void StartFormal()
     {
@@ -585,6 +677,90 @@ void TestBindingCancelDetach(Checks& checks, bool requestEntry)
         "synchronous cancel callback can detach without stale projection, port access or duplicate completion");
 }
 
+enum class NoticeAction { Success, Clear, Detach };
+
+void TestTerminalNoticeBeforeExit(Checks& checks, NoticeAction action)
+{
+    // 回调槽先于夹具声明，失败清理时也不会引用已经展开的栈对象。
+    int calls = 0, recoveredCalls = 0; bool callbackOnOwner = true, detached = false;
+    SurfaceDeterminationResult terminal, recovered;
+    const auto owner = std::this_thread::get_id();
+    Fixture fixture;
+    TaskInterleaving::ReleaseOnExit readRelease(fixture.gate);
+    TaskInterleaving::ReleaseOnExit noticeRelease(fixture.notices->terminal);
+    fixture.StartFormalFromNotices();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    Require(generation && generation->objects && !generation->objects->empty(), "notice fixture needs a formal object");
+    const auto scope = fixture.GetScope(generation->dataRevision);
+    const auto sourceScope = fixture.GetScope(generation->sourceRevision);
+    fixture.gate->Arm(); fixture.notices->terminal->Arm();
+    const SurfaceObjectSelectionRequest selection{generation->dataRevision, generation->objects->front().objectIndex,
+        false, SurfaceTest::GetParams().targetViews};
+    const auto admission = fixture.feature->SendRequest(selection, [&](auto value) {
+        terminal = std::move(value); ++calls; callbackOnOwner = callbackOnOwner && std::this_thread::get_id() == owner;
+    });
+    Require(admission.status == SurfaceAdmissionStatus::Accepted && fixture.gate->WaitEntered(),
+        "object worker must be held inside its immutable source");
+    if (action == NoticeAction::Clear)
+        Require(fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}).status == SurfaceAdmissionStatus::Accepted,
+            "event-driven clear must be accepted");
+    if (action == NoticeAction::Detach)
+        checks.Get(!fixture.feature->DetachHost(), "held work makes the first detach retryable");
+    fixture.DrainQueued();
+    const int expectedBeforeFinish = action == NoticeAction::Success ? 0 : 1;
+    Require(calls == expectedBeforeFinish && !fixture.host->GetWorkPending(), "initial notifications must be fully consumed");
+    fixture.gate->Release();
+    Require(fixture.notices->terminal->WaitEntered(), "terminal notification must enter before the worker returns");
+    bool followupQueued = false, retainedWhileHeld = false, callbackWaited = false;
+    const auto observation = TaskInterleaving::ObserveOwnerCall(fixture.notices->terminal, [&] {
+        Require(fixture.host->TakeWork(), "premature owner tick must consume the actual terminal notification");
+        fixture.Tick();
+        if (action == NoticeAction::Detach) detached = fixture.feature->DetachHost();
+        followupQueued = fixture.host->GetWorkPending();
+        retainedWhileHeld = fixture.notices->terminal->GetIsHeld()
+            && fixture.GetObjectReaderCount(scope) == 1 && fixture.GetObjectReaderCount(sourceScope) == 1;
+        callbackWaited = calls == expectedBeforeFinish && !detached;
+    });
+    checks.Get(observation.returnedWhileHeld && retainedWhileHeld && callbackWaited,
+        "owner polling and detach must not wait or adopt a worker still inside terminal notification");
+    checks.Get(followupQueued, "consuming a terminal notice before actual exit must leave a queued follow-up wake");
+    std::cout << "object-terminal-notice action=" << static_cast<int>(action)
+        << " returned_while_held=" << observation.returnedWhileHeld << " followup_queued=" << followupQueued
+        << " readers_held=" << retainedWhileHeld << '\n';
+    if (!followupQueued) return; // 旧实现的确定性失败；不靠新请求或额外 tick 救活。
+    if (action == NoticeAction::Success) {
+        Require(fixture.PumpQueued([&] { return calls == 1; }), "success must progress through queued notices alone");
+        checks.Get(terminal.status == SurfaceResultStatus::Succeeded && callbackOnOwner
+            && fixture.GetObjectCommitted(generation->meshRevision, admission.requestId),
+            "event-driven success corresponds to the exact adopted object frame");
+        Require(fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}).status == SurfaceAdmissionStatus::Accepted,
+            "completed event-driven object can be cleared");
+        fixture.DrainQueued();
+    }
+    else {
+        Require(fixture.PumpQueued([&] {
+            return fixture.GetObjectReaderCount(scope) == 0 && fixture.GetObjectReaderCount(sourceScope) == 0
+                && (action != NoticeAction::Detach || detached);
+        }, [&] { if (action == NoticeAction::Detach && !detached) detached = fixture.feature->DetachHost(); }),
+            "cancelled object must release Readers and finish detach from queued notices alone");
+        checks.Get(calls == 1 && callbackOnOwner && terminal.status == SurfaceResultStatus::Cancelled,
+            "event-driven cancellation completes once on the owner");
+    }
+    checks.Get(fixture.GetObjectReaderCount(scope) == 0 && fixture.GetObjectReaderCount(sourceScope) == 0,
+        "terminal event chain releases exact Readers without a new request or unconditional tick");
+    std::cout << "object-terminal-recovery action=" << static_cast<int>(action) << " callbacks=" << calls
+        << " readers_left=" << fixture.GetObjectReaderCount(scope) + fixture.GetObjectReaderCount(sourceScope)
+        << " detached=" << detached << " queued_events=" << fixture.host->consumedNotices << '\n';
+    if (action == NoticeAction::Clear) {
+        // 先证明租约已经自行释放，再发新请求，避免新请求中的回收掩盖名额泄漏。
+        const auto next = fixture.feature->SendRequest(selection, [&](auto value) { recovered = std::move(value); ++recoveredCalls; });
+        Require(next.status == SurfaceAdmissionStatus::Accepted && fixture.PumpQueued([&] { return recoveredCalls == 1; }),
+            "reclaimed object slot accepts and completes another highlight");
+        checks.Get(recovered.status == SurfaceResultStatus::Succeeded && calls == 1, "reclaimed capacity does not repeat cancelled completion");
+        (void)fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}); fixture.DrainQueued();
+    }
+}
+
 template<class Test> void Run(Checks& checks, const char* name, Test&& test)
 {
     try { test(); }
@@ -613,5 +789,14 @@ int GetSurfaceObjectOwnerWaitFailCount()
     Run(checks, "replace wait", [&] { TestObjectOwnerWait(checks, true); });
     Run(checks, "detach held", [&] { TestDetachHeldObject(checks); });
     Run(checks, "bounded backlog", [&] { TestObjectBacklog(checks); });
+    return checks.failureCount;
+}
+
+int GetSurfaceObjectWakeupFailCount()
+{
+    Checks checks;
+    Run(checks, "event-driven success", [&] { TestTerminalNoticeBeforeExit(checks, NoticeAction::Success); });
+    Run(checks, "event-driven clear", [&] { TestTerminalNoticeBeforeExit(checks, NoticeAction::Clear); });
+    Run(checks, "event-driven detach", [&] { TestTerminalNoticeBeforeExit(checks, NoticeAction::Detach); });
     return checks.failureCount;
 }

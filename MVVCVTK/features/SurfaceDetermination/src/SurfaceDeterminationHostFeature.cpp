@@ -21,6 +21,8 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -163,14 +165,21 @@ private:
         std::shared_ptr<const FeatureInternal::InputReads> readers;
         std::shared_ptr<std::atomic<bool>> active = std::make_shared<std::atomic<bool>>(true);
         std::future<std::shared_ptr<const FeatureInternal::SpatialMeshSource>> future;
+        std::thread worker;
+        std::atomic<bool> isFinishing{false};
         SurfaceDeterminationResult result;
         std::function<bool()> getApplied;
         bool isPrepared = false;
-        // 只有 future 已就绪才能在 owner 上销毁；取消只迁移所有权，不等待 worker。
+        // 正常路径只在线程实际退出后回收；取消仅转移所有权。
+        ~ObjectJob() {
+            // 调用方未完成 Detach 就销毁 Feature 时的最后防线，与原 future 析构的等待等价。
+            if (worker.joinable()) { active->store(false); worker.join(); }
+        }
     };
     bool ClearObjectSelection();
     void ContinueObjectSelection();
     void ReapObjectJobs();
+    bool PollObjectJob(ObjectJob& job);
     struct RequestEntry final {
         VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
@@ -516,8 +525,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         auto targets=select->targetViews;if(!GetTargetsUsed(targets))targets.viewRoles={HostRenderViewRole::Primary3D};
         auto views=GetTargetViews(targets);if(views.empty())return admission;
         ReapObjectJobs();
-        const auto running = m_retiredObjectJobs.size() + (m_objectJob && m_objectJob->future.valid()
-            && m_objectJob->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready ? 1U : 0U);
+        const auto running = m_retiredObjectJobs.size() + (m_objectJob && !PollObjectJob(*m_objectJob) ? 1U : 0U);
         if (running >= objectJobLimit) { admission.status = SurfaceAdmissionStatus::Busy; return admission; }
         auto readers = FeatureInternal::StartInputReads(graph,
             std::vector<DataRevisionRef>{generation->sourceRevision, generation->dataRevision, generation->meshRevision},
@@ -531,17 +539,31 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         job->object=object;job->source=source;job->views=std::move(views);job->callback=std::move(onComplete);
         job->readers = std::make_shared<const FeatureInternal::InputReads>(std::move(*readers));
         const auto active = job->active;
-        try {job->future=std::async(std::launch::async,[generation,object,active,weakHost=std::weak_ptr<FeatureHostControl>(m_host)]{
-            struct Notify { std::weak_ptr<FeatureHostControl> host; ~Notify(){if(auto live=host.lock())(void)live->SendWorkAvailable();} } notify{weakHost};
-            const auto stopped=[active]{return !active->load();};
-            const auto mesh=BuildSurfaceObjectMesh(*generation,object,stopped);
-            return mesh?FeatureInternal::SpatialMeshSource::Build(mesh,stopped):nullptr;
-        });}catch(...){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
-        admission={SurfaceAdmissionStatus::Accepted,job->id};
-        m_objectOperation={};m_objectOperation.operation={std::string(featureId),m_host->GetAttachmentId(),job->id};
-        m_objectOperation.status=FeatureRunStatus::Running;m_objectOperation.stateRevision=1;
-        m_objectOperation.inputs={{"source-volume",generation->sourceRevision},{"generation",generation->dataRevision},{"mesh",generation->meshRevision}};
-        m_objectJob=std::move(job);(void)m_host->SendWorkAvailable();return admission;
+        FeatureOperationState operation;
+        try {
+            // 全部可能分配的状态先准备好；线程启动后只做无失败的 owner 接管。
+            operation.operation = {std::string(featureId), m_host->GetAttachmentId(), job->id};
+            operation.status = FeatureRunStatus::Running; operation.stateRevision = 1;
+            operation.inputs = {{"source-volume", generation->sourceRevision}, {"generation", generation->dataRevision}, {"mesh", generation->meshRevision}};
+            std::packaged_task<std::shared_ptr<const FeatureInternal::SpatialMeshSource>()> task([generation, object, active] {
+                const auto stopped = [active] { return !active->load(); };
+                const auto mesh = BuildSurfaceObjectMesh(*generation, object, stopped);
+                return mesh ? FeatureInternal::SpatialMeshSource::Build(mesh, stopped) : nullptr;
+            });
+            job->future = task.get_future();
+            job->worker = std::thread([task = std::move(task), running = job.get(),
+                host = std::weak_ptr<FeatureHostControl>(m_host)]() mutable {
+                try { task(); } catch (...) {} // 计算异常由 packaged_task 保存，退出前仍完成收尾通知。
+                running->isFinishing.store(true, std::memory_order_release);
+                try { if (const auto owner = host.lock()) (void)owner->SendWorkAvailable(); } catch (...) {}
+            });
+        }
+        catch (...) { admission.status = SurfaceAdmissionStatus::Unavailable; return admission; }
+        admission = {SurfaceAdmissionStatus::Accepted, job->id};
+        m_objectOperation = std::move(operation);
+        m_objectJob = std::move(job);
+        try { (void)m_host->SendWorkAvailable(); } catch (...) {}
+        return admission;
     }
     if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
         auto params = start->start.value_or(m_config.defaultStart);
@@ -1094,12 +1116,26 @@ void SurfaceDeterminationHostFeature::Impl::RemoveBindings(
     bindings.clear();
 }
 
+bool SurfaceDeterminationHostFeature::Impl::PollObjectJob(ObjectJob& job)
+{
+    if (!job.worker.joinable()) return true;
+    // future 的零时等待仍会取得内部锁，ready 也不包含通知和捕获资源的销毁。
+    // 句柄只由本 owner 持有；零超时确认线程退出后，join/get 不再等待任何业务工作。
+    if (WaitForSingleObject(job.worker.native_handle(), 0) != WAIT_OBJECT_0) {
+        // 唯一终末通知可能先于退出被消费；仅在收尾阶段补排，计算期间不轮询。
+        if (job.isFinishing.load(std::memory_order_acquire) && m_host)
+            try { (void)m_host->SendWorkAvailable(); } catch (...) {}
+        return false;
+    }
+    job.worker.join();
+    return true;
+}
+
 void SurfaceDeterminationHostFeature::Impl::ReapObjectJobs()
 {
-    // 集合最多 objectJobLimit 项；只消费 ready future，VTK 快照和候选均在 owner 上释放。
+    // 集合最多 objectJobLimit 项；只消费已退出线程，VTK 快照和候选均在 owner 上释放。
     for (auto item = m_retiredObjectJobs.begin(); item != m_retiredObjectJobs.end();) {
-        if ((*item)->future.valid()
-            && (*item)->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        if (!PollObjectJob(**item)) {
             ++item;
             continue;
         }
@@ -1162,7 +1198,7 @@ void SurfaceDeterminationHostFeature::Impl::ContinueObjectSelection()
         try { if (job->callback) job->callback(std::move(job->result)); } catch (...) {}
         return;
     }
-    if (m_objectJob->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+    if (!PollObjectJob(*m_objectJob)) return;
     auto job = std::move(m_objectJob);
     auto result = BuildResult(job->id, SurfaceResultStatus::Failed, SurfaceFailureReason::DisplayFailed,
         job->generation->sourceRevision, job->generation->resultRevision, job->object.pointCount, 1,

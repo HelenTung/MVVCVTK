@@ -21,3 +21,4 @@ int GetSurfaceBusinessFailCount();
 
 int GetSurfaceObjectRetirementFailCount();
 int GetSurfaceObjectOwnerWaitFailCount();
+int GetSurfaceObjectWakeupFailCount();
