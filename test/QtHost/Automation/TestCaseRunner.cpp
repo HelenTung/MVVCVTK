@@ -1698,6 +1698,32 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
 void CheckSharedRoi(TestWindow& window)
 {
 #if defined(MANUAL_ROI)
+    {
+        // 可控观察状态覆盖输入切换窗口；请求必须重新检查，不能沿用先前启用的按钮。
+        TestWorkflow workflow;TestRecordWriter records;
+        ModulePanel panel({window.GetModule("Roi")->GetContext().runtime,workflow,records},"Roi");
+        int executions=0;bool inputReady=false,hasDraft=false;QJsonObject disabled;
+        for(const auto* action:{"Begin","Edit","Union","Cancel"})panel.AttachAction(action,{},[&](auto id,const auto&){
+            ++executions;panel.SetComplete(id,"Succeeded");
+        });
+        panel.onObserve=[&]{panel.SetState({{"isInputReady",inputReady},{"hasDraft",hasDraft},{"disabled",disabled}});};
+        for(int phase=0;phase<4;++phase) {
+            inputReady=phase==1;hasDraft=phase==3;
+            disabled=inputReady?QJsonObject{}:QJsonObject{{"Begin","输入切换"},{"Edit","输入切换"},{"Union","输入切换"}};
+            if(hasDraft)disabled.remove("Union");
+            panel.Observe();
+            for(const auto* action:{"Begin","Edit","Union","Cancel"}) {
+                const bool ready=inputReady || QString(action)=="Cancel" || (hasDraft && QString(action)=="Union");
+                auto* button=panel.findChild<QPushButton*>(QString("action_")+action);
+                Check(button && button->isEnabled()==ready && (ready || !button->toolTip().isEmpty()),
+                    "ROI draft entry controls follow reference input readiness and preserve cancellation");
+                const auto id=panel.SendAction(action,{});const auto record=records.GetRecord(id);
+                Check(record["status"].toString()==(ready?"Succeeded":"Rejected") && record["completeCount"].toInt()==1,
+                    "ROI readiness admission rejects stale input and completes exactly once");
+            }
+        }
+        Check(executions==8,"ROI readiness blocks stale draft entry and preserves settled or existing-draft operations");
+    }
     const auto source=window.GetSession()->GetImageDescriptor()->dataRevision;
     GetComplete(window,Send(window,"Roi","Begin",{{"name","共享区域"}}),"Succeeded");
     const auto record=GetComplete(window,Send(window,"Roi","Commit"),"Succeeded");

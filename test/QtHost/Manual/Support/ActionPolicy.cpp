@@ -18,6 +18,10 @@ QString GetActionRequirement(const QString& module, const QString& action, const
     if (!hasInput && !readableResult && !inspectionRead && !objectRead && module != "Data" && !(module == "Alignment" && action.startsWith("Export"))) return "请先加载输入数据。";
     if (module == "Data" && !hasInput && action != "Load" && action != "Select" && action != "Descriptor" && action != "LabelDescriptors") return "此操作需要当前输入数据。";
     if (module == "Crop") return s["disabled"].toObject()[action].toString();
+    if (module == "Roi") {
+        const auto reason=s["disabled"].toObject()[action].toString();
+        if(!reason.isEmpty())return reason;
+    }
     if((module=="Surface"||module=="Gap")&&QStringList{"SelectObject","IsolateObject","ClearObjectSelection","ObjectPicking"}.contains(action)
         &&!(module=="Surface"?s["isFormalCurrent"].toBool():s["isCurrent"].toBool()))return "请先生成当前输入的正式结果。";
     if(module=="Roi" && action=="Commit" && s["isDragging"].toBool())return "请先结束区域拖动，再保存正式 ROI。";
