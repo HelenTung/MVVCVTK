@@ -504,6 +504,11 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
                 && doc.conditions["计算参数"].toString()==native,"surface report preserves the complete native canonical parameter text");
             if(doc.id.startsWith("surface:"))Require(doc.conditions["正式计算条件"].isString()
                 && doc.conditions["正式计算条件"].toString()==native,"surface object report preserves the exact formal native conditions");
+            const auto inputs=summary["inputs"].toArray();
+            Require(!inputs.isEmpty() && doc.conditions["输入修订"].isArray() && doc.conditions["输入修订"].toArray()==inputs,
+                "surface report preserves every frozen native input role and revision");
+            Require(std::any_of(inputs.cbegin(),inputs.cend(),[&](const auto& value){const auto input=value.toObject();return input["role"]=="source-volume" && input["revision"]==doc.source;}),
+                "surface report source matches its frozen native source-volume input");
             std::cout<<"PASS: real surface frozen native parameter text operation="<<record["operationId"].toString().toStdString()<<std::endl;
         }
         if(doc.id.startsWith("surface:") && summary.contains("objectCount")) {
