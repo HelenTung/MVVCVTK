@@ -57,7 +57,12 @@ std::optional<std::array<qint64,3>> Grid(const Position& position, double distan
     return cell;
 }
 struct Candidate final { ReportRowId row=-1; std::uint8_t count=0; bool duplicate=false; };
-struct IdentityEntry final { ReportTextRef text; ReportRowId row; bool current; };
+// 哈希只用于排序加速；同哈希仍按完整 UTF-16 文本判等，不改变身份契约。
+std::uint64_t IdentityHash(const QString& text) {
+    std::uint64_t hash=14695981039346656037ULL;
+    for(const auto ch:text){hash^=ch.unicode();hash*=1099511628211ULL;}return hash;
+}
+struct IdentityEntry final { std::uint64_t hash; ReportTextRef text; ReportRowId row; bool current; };
 struct PositionEntry final { std::array<qint64,3> cell; ReportRowId row; Position point; };
 QJsonValue CountValue(ReportRowId count){return count<=9007199254740991LL?QJsonValue(static_cast<double>(count)):QJsonValue(QString::number(count));}
 
@@ -133,17 +138,18 @@ ReportDocument CompareReports(const ReportDocument& a, const ReportDocument& b, 
             || o.baselineIdentity>=a.columns.size() || o.currentIdentity>=b.columns.size())
             throw std::invalid_argument("必须确认标识在两份报告之间稳定；行号和临时样本编号不能自动配对");
         ReportTextStore texts;PagedArray<IdentityEntry> index;
-        for(ReportRowId i=0;i<ac;++i){check();const auto id=GetReportCell(readA(i),o.baselineIdentity);if(!id.isEmpty())index.push_back({texts.Append(id),i,false});}
-        for(ReportRowId i=0;i<bc;++i){check();const auto id=GetReportCell(readB(i),o.currentIdentity);if(!id.isEmpty())index.push_back({texts.Append(id),i,true});}
+        for(ReportRowId i=0;i<ac;++i){check();const auto id=GetReportCell(readA(i),o.baselineIdentity);if(!id.isEmpty())index.push_back({IdentityHash(id),texts.Append(id),i,false});}
+        for(ReportRowId i=0;i<bc;++i){check();const auto id=GetReportCell(readB(i),o.currentIdentity);if(!id.isEmpty())index.push_back({IdentityHash(id),texts.Append(id),i,true});}
         texts.Finish();
         SortPagedArray(index,[&](const IdentityEntry& left,const IdentityEntry& right) {
+            if(left.hash!=right.hash)return left.hash<right.hash;
             const auto order=QString::compare(texts.Read(left.text),texts.Read(right.text),Qt::CaseSensitive);
             if(order)return order<0;if(left.current!=right.current)return left.current<right.current;return left.row<right.row;
         },check);
         for(std::size_t first=0;first<index.size();) {
             check();auto last=first+1;const auto id=texts.Read(index[first].text);
             ReportRowId leftCount=0,rightCount=0,leftRow=-1,rightRow=-1;
-            while(last<index.size() && texts.Read(index[last].text)==id){check();++last;}
+            while(last<index.size() && index[last].hash==index[first].hash && texts.Read(index[last].text)==id){check();++last;}
             for(auto at=first;at<last;++at){check();const auto entry=index[at];if(entry.current){++rightCount;rightRow=entry.row;}else{++leftCount;leftRow=entry.row;}}
             if(leftCount) {
                 if(leftCount!=1 || rightCount>1) {

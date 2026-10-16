@@ -568,14 +568,10 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             Require(copy.columns[c].name==doc.columns[c].name,"native CSV changed a column name");
             if(!doc.columns[c].quantity.isEmpty())Require(copy.columns[c].quantity==doc.columns[c].quantity && copy.columns[c].unit==doc.columns[c].unit,"native CSV retains automatic business quantity and unit mapping");
         }
-        std::cout<<"REPORT: full row fidelity "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
-        {
-            const auto original=doc.table->CreateReader(),restored=copy.table->CreateReader();QElapsedTimer fidelity;fidelity.start();
-            for(ReportRowId row=0;row<doc.table->GetCount();++row) {
-                Require(SameRow(original(row),restored(row)),"native/imported report differs in an actual full-data row");
-                if(row%256==0){Require(timeoutMs==0 || fidelity.elapsed()<timeoutMs,"full report row validation exceeded the scenario deadline");QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
-            }
-        }
+        const auto originalHash=doc.table->GetContentHash(),restoredHash=copy.table->GetContentHash();
+        Require(originalHash==restoredHash,"native/imported normalized full-table SHA-256 differs");
+        std::cout<<"PASS: full content SHA256 "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()
+            <<" digest="<<originalHash.toHex().constData()<<std::endl;
         int value=doc.valueColumn;
         if(value<0)for(int c=0;c<doc.columns.size();++c)if(doc.columns[c].numeric){value=c;break;}
         if(value>=0 && !doc.columns[value].quantity.isEmpty() && !doc.columns[value].unit.startsWith("model")) {
@@ -596,7 +592,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::weak_ptr<ReportTable> importedStorage=copy.table;const auto importedId=copy.id;copy.table.reset();
         view->RemoveReport(importedId);Require(importedStorage.expired() && QFile::exists(path),"real imported report storage was retained or its original CSV deleted");
         view->SelectReport(doc.id);
-        std::cout<<"PASS: full real report async export/import/compare and row fidelity "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
+        std::cout<<"PASS: full real report async export/import/compare and content hash "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         }
         std::cout<<"PASS: visible native report "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
     }

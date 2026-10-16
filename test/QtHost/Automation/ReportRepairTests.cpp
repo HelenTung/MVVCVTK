@@ -66,10 +66,38 @@ bool Visible(ResultReport& view,const QString& id) {
     return false;
 }
 void CheckSemanticRoundtrip() {
+    const auto hashOf=[](const QStringList& cells){ReportTable table;table.Append(cells);return table.GetContentHash();};
+    Require(hashOf({"a,b","c"})!=hashOf({"a","b,c"}) && hashOf({"a"})!=hashOf({"a",""})
+        && hashOf({"a","b"})!=hashOf({"b","a"}),"normalized hash lost cell boundaries, missing values or column order");
+    ReportTable ordered,reversed;ordered.Append({"a"});ordered.Append({"b"});reversed.Append({"b"});reversed.Append({"a"});
+    Require(ordered.GetContentHash()!=reversed.GetContentHash(),"normalized hash lost native row order");
+    auto quoted=Read("item_id,thickness_mm\n\"中文,\"\"引号\"\"\n换行\",\n");
+    QByteArray quotedBytes;QBuffer quotedOutput(&quotedBytes);quotedOutput.open(QIODevice::WriteOnly);WriteReportCsv(quotedOutput,quoted);
+    Require(quoted.table->GetContentHash()==Read(quotedBytes).table->GetContentHash(),"CSV escaping changed normalized row hash");
+    int reads=0;auto callback=Document("hash-callback");
+    callback.table=std::make_shared<ReportTable>(3,[&](ReportRowId row){++reads;return QStringList{QString::number(row),"1"};});
+    QByteArray callbackBytes;QBuffer callbackOutput(&callbackBytes);callbackOutput.open(QIODevice::WriteOnly);WriteReportCsv(callbackOutput,callback);
+    const auto exportedReads=reads;
+    Require(callback.table->GetContentHash()==Read(callbackBytes).table->GetContentHash() && reads==exportedReads,
+        "full callback export did not retain its complete hash without another row traversal");
+
+    for(const bool filtered:{false,true}) {
+        int partialReads=0;auto partial=Document("partial-hash");
+        partial.table=std::make_shared<ReportTable>(3,[&](ReportRowId row){++partialReads;return QStringList{QString::number(row),"1"};});
+        QByteArray partialBytes;QBuffer partialOutput(&partialBytes);partialOutput.open(QIODevice::WriteOnly);
+        auto rows=GetReportRowRange(1);int checkpoints=0;
+        try{WriteReportCsv(partialOutput,partial,filtered?&rows:nullptr,[&]{if(++checkpoints==2)throw std::runtime_error("cancel");});}
+        catch(const std::runtime_error&){Require(!filtered,"filtered hash fixture unexpectedly failed");}
+        const auto before=partialReads;
+        Require(partial.table->GetContentHash()==callback.table->GetContentHash() && partialReads==before+3,
+            "partial or cancelled export published an incomplete full-table hash");
+    }
+
     for(const auto& quantity:QStringList{"表面对象体积","选区单元体积和","本次统计体积","半径相对名义偏差"}) {
         auto native=Document(quantity,quantity);
         QByteArray bytes;QBuffer output(&bytes);output.open(QIODevice::WriteOnly);WriteReportCsv(output,native);output.close();
         auto copy=Read(bytes);
+        Require(native.table->GetContentHash()==copy.table->GetContentHash(),"CSV roundtrip changed full normalized content hash");
         Require(copy.columns[1].quantity==quantity && copy.columns[1].unit=="mm3","CSV roundtrip lost business semantics");
         const auto original=native.table->Read(1),restored=copy.table->Read(1);
         Require(copy.columns[1].name==native.columns[1].name && original.size()==restored.size() && std::equal(original.cbegin(),original.cend(),restored.cbegin()),"CSV roundtrip changed headings or exact values");
@@ -118,6 +146,10 @@ void CheckSpatialEvidence() {
     const auto result=CompareReports(a,b,o);const auto pair=result.table->Read(0),unmatched=result.table->Read(1);
     Require(pair[0]=="a" && pair[7]=="b" && std::abs(pair[8].toDouble()-.005)<1e-12,"spatial report lost A/B IDs or physical pairing distance");
     Require(unmatched[0].isEmpty() && unmatched[7]=="missing" && unmatched[8].isEmpty() && unmatched[4].isEmpty(),"unmatched B point fabricated baseline identity, distance or delta");
+    auto coincident=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\na,0,0,0,1\nb,0,0,0,2\nc,1,0,0,3\n");
+    const auto duplicate=CompareReports(coincident,coincident,o);
+    Require(duplicate.conditions["有效配对数"]==1 && duplicate.conditions["歧义基准项数"]==2 && duplicate.table->GetCount()==5
+        && duplicate.table->Read(0)[7].isEmpty() && duplicate.table->Read(3)[0].isEmpty(),"coincident positions were arbitrarily paired or lost unmatched evidence");
     auto far=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nfar,1e20,0,0,3\nnear,0,0,0,4\n");
     o.distanceTolerance=1e-9;const auto fallback=CompareReports(far,far,o);
     Require(fallback.conditions["有效配对数"]==2 && fallback.table->GetCount()==2 && fallback.table->Read(0)[8]=="0", "spatial acceleration range rejected valid finite coordinates instead of completing a full scan");
