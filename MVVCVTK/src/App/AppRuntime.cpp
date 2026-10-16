@@ -3284,4 +3284,3 @@ AppRuntime::CreateStrategy(const VizMode mode)
 {
     return m_strategyCreate ? m_strategyCreate(mode) : nullptr;
 }
-
