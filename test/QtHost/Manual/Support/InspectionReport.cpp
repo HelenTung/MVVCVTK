@@ -1,4 +1,5 @@
 #include "InspectionReport.h"
+#include "AlignmentReportParameters.h"
 #include "JsonInput.h"
 #include <QMap>
 #include <cmath>
@@ -38,7 +39,7 @@ ReportDocument CreateInspectionReport(const QJsonObject& record,const Inspection
 {
     ReportDocument base;base.id="inspection:"+GetRefText(snapshot.result);base.title="计量明细（空结果） · "+record["operationId"].toString();
     base.category="本次会话结果";base.module=record["module"].toString();base.result=GetRefText(snapshot.result);base.source=source;
-    base.relatedResults.append(GetRefText(snapshot.alignmentResult));base.conditions={{"计算参数",record["parameters"]}};
+    base.relatedResults.append(GetRefText(snapshot.alignmentResult));base.conditions={{"计算参数",GetAlignmentReportParameters(*snapshot.plan)},{"算法版本",QString::fromStdString(snapshot.report->algorithmVersion)}};
     const auto plan=snapshot.plan;
     const auto report=snapshot.report;
     const auto state=std::make_shared<InspectionRows>();

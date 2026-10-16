@@ -21,6 +21,7 @@
 #if defined(MANUAL_ALIGNMENT)
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "InspectionReport.h"
+#include "AlignmentReportParameters.h"
 #endif
 namespace Manual {
 namespace {
@@ -37,7 +38,7 @@ ReportDocument Document(const QJsonObject& record,const QString& prefix,const QS
 {
     ReportDocument doc;doc.id=prefix+":"+ref;doc.title=title+" · "+record["operationId"].toString();
     doc.category="本次会话结果";doc.module=record["module"].toString();doc.result=ref;doc.source=source;
-    doc.conditions={{"计算参数",record["parameters"]}};return doc;
+    return doc;
 }
 template<class Read>
 void SetPagedRows(ReportDocument& doc, const QString& ref, Read read, QStringList keys, QJsonObject first)
@@ -78,10 +79,13 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<ArtifactReduction
 #if defined(MANUAL_GAP)
 void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature> feature)
 {
-    workflow.readReports["Gap"]=[feature](const QJsonObject& record,const QSet<QString>& known) {
+    const auto read=workflow.readRecordPage;
+    workflow.readReports["Gap"]=[feature,read](const QJsonObject& record,const QSet<QString>& known) {
         QVector<ReportDocument> reports;const auto r=record["result"].toObject();const auto table=r["voidTable"].toString();
         if(!HasRevision(table))return reports;
         auto doc=Document(record,"gap",table,r["source"].toString(),"孔隙明细");if(known.contains(doc.id))return reports;
+        const auto native=read(GetRef(table),0,1,std::nullopt);
+        doc.conditions["计算参数"]=native["canonicalParameters"];doc.conditions["输入修订"]=native["inputs"];
         doc.conditions["汇总"]=QJsonObject{{"对象体积 mm3",r["objectVolumeMM3"]},{"孔隙体积 mm3",r["voidVolumeMM3"]},{"孔隙率",r["porosityRatio"]}};
         doc.result=r["resultSet"].toString();doc.description="一行一个父缺陷/ROI 相交记录；ROI 片段不是新封闭孔隙。";
         const auto fullReader=feature->GetResultReader(GetRef(r["resultSet"]));
@@ -159,12 +163,13 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
                 object.volumeValidity==SurfaceMetricValidity::Valid&&object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
                 QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};
         });
-        doc.conditions["正式计算条件"]=QJsonDocument::fromJson(QByteArray::fromStdString(snapshot->canonicalParameters)).object();
+        const auto parameters=QJsonDocument::fromJson(QByteArray::fromStdString(snapshot->canonicalParameters)).object();
+        doc.conditions["计算参数"]=parameters;doc.conditions["正式计算条件"]=parameters;
         doc.conditions["对象总数"]=QString::number(doc.table->GetCount());
         reports.append(std::move(doc));
         if(snapshot->isoEstimate) {
             auto params=Document(record,"surface-parameters",generation,GetRefText(snapshot->sourceRevision),"表面 BG / M / ISO");params.result=GetRefText(snapshot->meshRevision);
-            params.relatedResults.append(generation);
+            params.relatedResults.append(generation);params.conditions["计算参数"]=parameters;
             params.columns={{"parameter",{},{},false},{"value","表面灰度参数","1",true}};params.identityColumn=0;params.identityStable=true;params.table=std::make_shared<ReportTable>();
             const auto& estimate=*snapshot->isoEstimate;
             params.table->Append({"ISO",Number(estimate.isoValue)});
@@ -193,6 +198,7 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
         if(HasRevision(inspection) && !known.contains("inspection:"+inspection)) {
             const auto snapshot=inspectionInput;
             if(snapshot && snapshot->report && snapshot->plan) {
+                const auto parameters=GetAlignmentReportParameters(*snapshot->plan,check);
                 QMap<int,ReportDocument> groups;
                 const QStringList metrics{"半径","直径","中心 X","中心 Y","中心 Z","中心距离","有向角度","平行平面有符号距离","拟合 RMS","拟合最大残差"};
                 struct SpecEntry { ReportTextRef id,name; std::size_t order; int metric; };
@@ -208,7 +214,8 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                     if(!groups.contains(metric)) {
                         const auto unit=metric==static_cast<int>(InspectionMetric::OrientedDirectionAngleDegrees)?QString("deg"):length(snapshot->unit);
                         auto doc=Document(record,"inspection-"+QString::number(metric),inspection,GetRefText(snapshot->sourceMesh),"计量 · "+metrics.value(metric,"项目"));
-                        doc.relatedResults.append(GetRefText(snapshot->alignmentResult));
+                        doc.relatedResults.append(GetRefText(snapshot->alignmentResult));doc.conditions["计算参数"]=parameters;
+                        doc.conditions["算法版本"]=QString::fromStdString(snapshot->report->algorithmVersion);
                         if(!inspectionSource.isEmpty())doc.source=inspectionSource;
                         doc.columns={{"item_id",{},{},false},{"name",{},{},false},{"nominal_"+unit,metrics.value(metric),unit,true},
                             {"measured_"+unit,metrics.value(metric),unit,true},{"deviation_"+unit,metrics.value(metric)+"相对名义偏差",unit,true},{"verdict",{},{},false},{"reason",{},{},false}};
@@ -218,17 +225,19 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
                         item.measured?Number(*item.measured):QString(),item.deviation?Number(*item.deviation):QString(),QString::number(static_cast<int>(item.verdict)),QString::fromStdString(item.message)});
                 }
                 for(auto it=groups.begin();it!=groups.end();++it)reports.append(it.value());
-                if(reports.isEmpty()){auto empty=Document(record,"inspection",inspection,GetRefText(snapshot->sourceMesh),"计量明细（空结果）");empty.columns={{"item_id",{},{},false}};empty.table=std::make_shared<ReportTable>();reports.append(std::move(empty));}
+                if(reports.isEmpty()){auto empty=Document(record,"inspection",inspection,GetRefText(snapshot->sourceMesh),"计量明细（空结果）");empty.conditions["计算参数"]=parameters;empty.conditions["算法版本"]=QString::fromStdString(snapshot->report->algorithmVersion);empty.columns={{"item_id",{},{},false}};empty.table=std::make_shared<ReportTable>();reports.append(std::move(empty));}
                 reports.first().id="inspection:"+inspection;
             }
         }
         if(HasRevision(deviation) && !known.contains("deviation:"+deviation)) {
             const auto snapshot=deviationInput;
             if(snapshot && snapshot->forward) {
+                if(!snapshot->parameters)throw std::runtime_error("偏差结果缺少冻结计算参数");
+                const auto parameters=GetAlignmentReportParameters(*snapshot->parameters,check);
                 const auto fieldReport=[&](std::shared_ptr<const AlignmentDeviationField> samples,const QString& prefix,const QString& title,const QString& quantity) {
                 const auto& field=*samples;
                 auto doc=Document(record,prefix,deviation,GetRefText(snapshot->sourceMesh),title);
-                doc.relatedResults.append(GetRefText(snapshot->alignmentResult));
+                doc.relatedResults.append(GetRefText(snapshot->alignmentResult));doc.conditions["计算参数"]=parameters;
                 if(!deviationSource.isEmpty())doc.source=deviationSource;
                 const auto unit=length(snapshot->unit);
                 doc.columns={{"sample_id",{},{},false},{"value_"+unit,quantity,unit,true},{"distance_"+unit,"最近距离",unit,true},{"validity",{},{},false},{"reason",{},{},false}};
@@ -249,7 +258,10 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<MetrologyAlignmen
         }
         if(HasRevision(volume) && !known.contains("voxel-volume:"+volume)) {
             if(const auto snapshot=volumeInput) {
+                if(!snapshot->parameters)throw std::runtime_error("体素体积结果缺少冻结计算参数");
                 auto doc=Document(record,"voxel-volume",volume,GetRefText(snapshot->source),"选区单元体积");const auto& stats=snapshot->statistics;
+                doc.conditions["计算参数"]=GetAlignmentReportParameters(*snapshot->parameters,check);
+                doc.conditions["算法版本"]=QString::fromStdString(snapshot->algorithmVersion);
                 doc.description="完整体积与有效选中部分体积含义不同；不可观测或完整性条件未满足时，完整体积留空。";
                 doc.columns={{"item_id",{},{},false},{"selected_cells","选中单元数","1",true},{"selected_cell_volume_mm3","选区单元体积和","mm3",true},
                     {"observed_volume_mm3","有效选中部分体积","mm3",true},{"selection_completeness",{},{},false},{"reason",{},{},false}};

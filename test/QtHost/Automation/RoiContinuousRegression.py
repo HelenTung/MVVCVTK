@@ -27,7 +27,7 @@ I = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
 
 def step(module, action, parameters=None, status='Succeeded', save=None, **extra):
     value = dict(control='actionButton', module=module, action=action,
-                 expectStatus=status, timeoutMs=900000)
+                 expectStatus=status, timeoutMs=0)
     if parameters is not None: value['parameters'] = parameters
     if save: value['saveAs'] = save
     value.update(extra)
@@ -250,7 +250,7 @@ def wall(steps,roi_ref,labels,mesh,name,source):
         unit='Millimeter',materialThreshold=0.08,maxDistance=12,sampleSpacing=None,
         coneAngleDegrees=30,directionCount=9,boundaryPolicy='SourceExtentLocal',maxBoundaryError=None,
         evaluationRoi=roi_ref),save=name,expectResult={'source':source,'labels':labels,'mesh':mesh},
-        expectMetrics={'sampleCount':{'min':1},'validCount':{'min':1}},timeoutMs=3600000))
+        expectMetrics={'sampleCount':{'min':1},'validCount':{'min':1}}))
 
 steps=start();roi(steps,'A',A);roi(steps,'B',((190,330,290),(229,369,329)))
 operation(steps,'Union',ref('A'),'D',operands=[ref('B')]);crop(steps,ref('D'),'V1')

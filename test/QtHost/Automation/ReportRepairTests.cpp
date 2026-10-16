@@ -4,6 +4,7 @@
 #include "Support/ReportStorage.h"
 #if defined(MANUAL_ALIGNMENT)
 #include "Support/InspectionReport.h"
+#include "Support/AlignmentReportParameters.h"
 #include "Support/JsonInput.h"
 #endif
 #include <QApplication>
@@ -502,6 +503,39 @@ void CheckSlowScanCancellation() {
     Require(retained.expired(),"completed cancelled scan retained its immutable source owner");
 }
 #if defined(MANUAL_ALIGNMENT)
+void CheckFrozenAlignmentParameters() {
+    DataRevisionRef ref;ref.entityId.bytes[0]=83;ref.generation=1;
+    // 第一个不能精确表示为 IEEE double 的正整数，验证编号不经浮点转换。
+    constexpr std::uint64_t large=9007199254740993ULL;const auto decimal=QStringLiteral("9007199254740993");
+    InspectionPlan plan;plan.id="frozen-plan";plan.alignmentResult=ref;plan.requiresMeasurementQuality=true;
+    InspectionGeometrySpec geometry;geometry.fit.kind=AlignmentGeometryKind::Circle;geometry.fit.region.pinnedMesh=ref;
+    geometry.fit.region.vertexIds={large};geometry.fit.region.roi=ref;
+    InspectionSection section;section.pinnedMesh=ref;section.triangles={large};section.selectionPoint=AlignmentPoint{1,2,3};geometry.section=section;
+    plan.geometries.push_back(geometry);
+    InspectionItem item;item.id="diameter";item.name="冻结直径";item.measured.metric=InspectionMetric::Diameter;item.nominal=3.75;item.deviationLimits=std::array<double,2>{-.1,.2};plan.items.push_back(item);
+    const auto saved=GetAlignmentReportParameters(plan);const auto savedGeometry=saved["geometries"].toArray().first().toObject();
+    const auto savedRegion=savedGeometry["fit"].toObject()["region"].toObject();const auto savedItem=saved["items"].toArray().first().toObject();
+    Require(saved["id"]=="frozen-plan" && saved["alignmentResult"]==GetRefText(ref) && saved["requiresMeasurementQuality"].toBool(),"inspection conditions lost frozen plan identity or quality policy");
+    Require(savedRegion["vertexIds"].toArray().first()==decimal && savedRegion["roi"]==GetRefText(ref)
+        && savedGeometry["section"].toObject()["triangles"].toArray().first()==decimal,"inspection condition indices lost 64-bit precision");
+    Require(savedItem["name"]=="冻结直径" && savedItem["nominal"]==3.75 && savedItem["measured"].toObject()["metric"]=="Diameter"
+        && savedItem["deviationLimits"].toArray()==QJsonArray({-.1,.2}),"inspection conditions lost item definition or tolerance");
+    AlignmentDeviationRequest deviation;deviation.alignmentResult=ref;deviation.evaluationRoi=ref;deviation.sourceTriangles={large};
+    deviation.metric=AlignmentDeviationMetric::NominalNormalProjection;deviation.computeBackend=AlignmentComputeBackend::Cuda;deviation.reverseCoverage=false;
+    const auto deviationJson=GetAlignmentReportParameters(deviation);
+    Require(deviationJson["evaluationRoi"]==GetRefText(ref) && deviationJson["sourceTriangles"].toArray().first()==decimal
+        && deviationJson["computeBackend"]=="Cuda" && deviationJson["metric"]=="NominalNormalProjection"
+        && deviationJson["tolerance"].isNull() && !deviationJson["reverseCoverage"].toBool(),"deviation conditions replaced frozen backend, selection, metric or absent tolerance");
+    VoxelVolumeRequest volume;volume.source=ref;volume.method=VoxelVolumeMethod::Labels;volume.labels={0,large};volume.validityImage=ref;volume.requireEnclosedSelection=true;
+    const auto volumeJson=GetAlignmentReportParameters(volume);
+    Require(volumeJson["source"]==GetRefText(ref) && volumeJson["validityImage"]==GetRefText(ref) && volumeJson["method"]=="Labels"
+        && volumeJson["labels"].toArray()==QJsonArray({QStringLiteral("0"),decimal}) && volumeJson["extent"].isNull()
+        && volumeJson["storedValueRange"].isNull() && volumeJson["requireEnclosedSelection"].toBool(),"volume conditions lost exact label selection, validity input or completeness policy");
+    int checkpoints=0;bool cancelled=false;
+    try {GetAlignmentReportParameters(plan,[&]{if(++checkpoints>1)throw std::runtime_error("parameter-json-cancelled");});}
+    catch(const std::runtime_error& error){cancelled=std::string(error.what())=="parameter-json-cancelled";}
+    Require(cancelled && checkpoints>1,"frozen parameter traversal ignored cancellation inside a collection");
+}
 void CheckInspectionPreparation() {
     ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
     DataRevisionRef ref;ref.entityId.bytes[0]=31;ref.generation=1;const auto text=GetRefText(ref);
@@ -538,7 +572,7 @@ void CheckInspectionPreparation() {
 void CheckReportRepairs() {
     CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
 #if defined(MANUAL_ALIGNMENT)
-    CheckInspectionPreparation();
+    CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif
     std::cout<<"PASS: report semantics, associations, spatial evidence, lazy generation, cancellation and resource release"<<std::endl;
 }

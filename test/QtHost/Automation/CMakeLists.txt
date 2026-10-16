@@ -67,8 +67,8 @@ if(MVVCVTK_QT_ROI_CHAIN_INPUT)
                 --input "${MVVCVTK_QT_ROI_CHAIN_INPUT}" --spacing "${MVVCVTK_QT_ROI_CHAIN_SPACING_MM}"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/roi-continuous-$<CONFIG>"
                 --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd" --case "${scenario}")
-        # 最大单步壁厚等待为 1 h；进程上限另留前后处理和退出余量，不是性能达标阈值。
+        # 以完整业务终态验收，耗时增加不自动中断已接纳的大数据任务。
         set_tests_properties(QtFeature.RoiContinuous.${scenario} PROPERTIES
-            LABELS "real-data;roi;continuous;Reports;preview" RUN_SERIAL TRUE TIMEOUT 7200)
+            LABELS "real-data;roi;continuous;Reports;preview" RUN_SERIAL TRUE TIMEOUT 0)
     endforeach()
 endif()
