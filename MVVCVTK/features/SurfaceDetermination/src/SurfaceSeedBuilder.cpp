@@ -61,7 +61,9 @@ std::optional<std::size_t> GetWorkingEstimate(const std::size_t pointCount,
     const auto base = fixed + extraBytes;
     if (pointCount > UINT32_MAX || pointCount > (SIZE_MAX - base) / perPoint ||
         triangleCount > (SIZE_MAX - base - pointCount * perPoint) / perTriangle) return {};
-    return base + pointCount * perPoint + triangleCount * perTriangle;
+    // 固定窗口覆盖 seed/组件/法向/输出文件和排序工作区；逻辑文件字节不作为 RAM 计费。
+    return base + std::min(pointCount*perPoint,std::size_t(192)*1024*1024)
+        + std::min(triangleCount*perTriangle,std::size_t(96)*1024*1024);
 }
 bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, const WorkLimit budget,
                SurfaceExecutionStats &stats)
@@ -76,13 +78,12 @@ bool GetBudget(const std::size_t pointCount, const std::size_t triangleCount, co
 }
 
 SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit budget,
-                           const std::function<bool()> &cancelled, DataArray<Point> &points,
-                           DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+                           const std::function<bool()> &cancelled, PagedArray<Point> &points,
+                           PagedArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
-    using Key=std::tuple<std::uint32_t,std::uint32_t,unsigned>;
-    std::map<Key,std::uint32_t,std::less<Key>,DataArrayAllocator<std::pair<const Key,std::uint32_t>>> intersections;
-    DataArray<SurfaceSeedTriangle> clipped;
-    DataArray<std::uint32_t> polygon, next;
+    PagedMap<std::array<std::uint32_t,3>,std::uint32_t,PagedArrayHash<std::uint32_t,3>> intersections;
+    PagedArray<SurfaceSeedTriangle> clipped;
+    std::vector<std::uint32_t> polygon, next;
     polygon.reserve(10);
     next.reserve(10);
     for (std::size_t t = 0; t < triangles.size(); ++t)
@@ -109,9 +110,9 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
                 if ((da < 0) == (db < 0) || da == 0 || db == 0)
                     continue;
                 const auto low = std::min(a, b), high = std::max(a, b);
-                const auto key = std::make_tuple(low, high, plane);
-                auto found = intersections.find(key);
-                if (found == intersections.end())
+                const std::array<std::uint32_t,3> key{low,high,plane};
+                auto found = intersections.Find(key);
+                if (!found)
                 {
                     if (!GetBudget(points.size() + 1, triangles.size() + clipped.size(), budget, stats))
                         return SurfaceSeedStatus::BudgetExceeded;
@@ -131,9 +132,9 @@ SurfaceSeedStatus ClipMesh(const std::vector<RoiPlane> &planes, const WorkLimit 
                         point[c] -= residual * clipping.normal[c] / normal2;
                     const auto id = static_cast<std::uint32_t>(points.size());
                     points.push_back(point);
-                    found = intersections.emplace(key, id).first;
+                    found = intersections.Insert(key, id);
                 }
-                next.push_back(found->second);
+                next.push_back(*found);
             }
             polygon.swap(next);
         }
@@ -153,8 +154,8 @@ template <bool HasMask, class ScalarReader>
 SurfaceSeedStatus BuildSeedMesh(
     const SurfaceSeedGrid &grid, const double iso,
     const RoiReadSnapshot &roi, const double haloModel, const std::uint32_t blockDepth,
-    const WorkLimit budget, const std::function<bool()> &cancelled, DataArray<Point> &points,
-    DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats,
+    const WorkLimit budget, const std::function<bool()> &cancelled, PagedArray<Point> &points,
+    PagedArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats,
     const ScalarReader &readScalar)
 {
     const auto started = std::chrono::steady_clock::now();
@@ -279,9 +280,7 @@ SurfaceSeedStatus BuildSeedMesh(
     };
     {
         // 两层只做查找/插入，输出仍按原单元/MC 边顺序创建。
-        using EdgeMap=std::map<std::uint64_t,std::uint32_t,std::less<std::uint64_t>,
-            DataArrayAllocator<std::pair<const std::uint64_t,std::uint32_t>>>;
-        std::array<EdgeMap,2> edgeLayers;
+        std::array<PagedMap<std::uint64_t,std::uint32_t>,2> edgeLayers;
         const auto *cases = vtkMarchingCubesTriangleCases::GetCases();
         for (std::int64_t block = range[4]; block < range[5]; block += blockDepth)
         {
@@ -436,8 +435,8 @@ SurfaceSeedStatus BuildSeedMesh(
                                                 std::uint64_t(edgeOrigin[0] - grid.extent[0]);
                                 const auto key = xy * 4U + axis;
                                 auto& edgeIds=edgeLayers[edgeOrigin[2]==zz?lowerLayer:upperLayer];
-                                auto found = edgeIds.find(key);
-                                if (found == edgeIds.end())
+                                auto found = edgeIds.Find(key);
+                                if (!found)
                                 {
                                     if (!meshBudget(points.size() + 1, triangles.size() + 1))
                                         return SurfaceSeedStatus::BudgetExceeded;
@@ -450,9 +449,9 @@ SurfaceSeedStatus BuildSeedMesh(
                                         return SurfaceSeedStatus::InvalidInput;
                                     const auto id = static_cast<std::uint32_t>(points.size());
                                     points.push_back(point);
-                                    found = edgeIds.emplace(key, id).first;
+                                    found = edgeIds.Insert(key, id);
                                 }
-                                cellIds[edgeId] = triangle.vertices[v] = found->second;
+                                cellIds[edgeId] = triangle.vertices[v] = *found;
                             }
                             if (triangle.vertices[0] != triangle.vertices[1] &&
                                 triangle.vertices[1] != triangle.vertices[2] &&
@@ -477,7 +476,7 @@ SurfaceSeedStatus BuildSeedMesh(
             return status;
     }
     // 删除未被最终 ROI 三角形引用的 seed 顶点，索引按首次生成顺序稳定压缩。
-    DataArray<std::uint32_t> remap(points.size(), UINT32_MAX);
+    PagedArray<std::uint32_t> remap(points.size(), UINT32_MAX);
     for (const auto &triangle : triangles)
         for (auto id : triangle.vertices)
             remap[id] = 0;
@@ -501,8 +500,8 @@ SurfaceSeedStatus BuildSeedMesh(
 SurfaceSeedStatus SurfaceSeedBuilder::BuildMesh(
     const SurfaceSeedGrid &grid, const double iso, const RoiReadSnapshot &roi,
     const double haloModel, const std::uint32_t blockDepth, const WorkLimit budget,
-    const std::function<bool()> &cancelled, DataArray<Point> &points,
-    DataArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
+    const std::function<bool()> &cancelled, PagedArray<Point> &points,
+    PagedArray<SurfaceSeedTriangle> &triangles, SurfaceExecutionStats &stats)
 {
     if (grid.audit) *grid.audit = {};
     for (unsigned axis = 0; axis < 3; ++axis) {

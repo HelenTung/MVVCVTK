@@ -1,6 +1,8 @@
 #pragma once
 
 #include "GapAnalysisTypes.h"
+#include "PagedArray.h"
+#include "MeshVtkStorage.h"
 #include "Host/RoiReadTypes.h"
 #include "BackedVtkArray.h"
 #include "MappedArrayStorage.h"
@@ -24,20 +26,17 @@ struct GapSurfaceRange final {
     std::int32_t id = 0;
     std::uint64_t firstPoint = 0, pointCount = 0, firstTriangle = 0, triangleCount = 0;
 };
-// 正式几何与显示共用提面核心；掩膜按块计算，已完成数组可以由文件后备换页。
+// 正式提面直接写入几何文件；临时掩膜和点复用表均不累积完整 RAM 网格。
 class GapSurfaceBuilder final {
     template<class Key> using PointMap = std::map<Key,vtkIdType,std::less<Key>,
         DataArrayAllocator<std::pair<const Key,vtkIdType>>>;
 public:
-    static vtkSmartPointer<vtkPolyData> Build(vtkImageData* image,
+    static std::shared_ptr<const SurfaceMeshPayload> BuildPayload(vtkImageData* image,
         const DataArray<VoidRegion>& regions,const std::atomic<bool>& stopping,
-        const RoiReadSnapshot& roi={},const DataArray<VoidRegion>* parents=nullptr,
-        DataArray<GapSurfaceRange>* ranges=nullptr,bool useOccupancyIndex=true) {
+        const RoiReadSnapshot& roi={},const DataArray<VoidRegion>* parents=nullptr,const std::string& frame="RAS",DataArray<GapSurfaceRange>* ranges=nullptr,bool useOccupancyIndex=true) {
         if(!image||image->GetScalarType()!=VTK_INT||image->GetNumberOfScalarComponents()!=1)return {};
-        ResultArrayScope resultStorage;
-        auto output=vtkSmartPointer<vtkPolyData>::New();
-        DataArray<double> positions;DataArray<std::uint64_t> connectivity,offsets{0};DataArray<std::int32_t> regionIds;
-        if(ranges)*ranges=DataArray<GapSurfaceRange>{};
+        PagedArray<double> points,labels;PagedArray<std::uint64_t> cells;
+        if(ranges)ranges->clear();
         int source[6];image->GetExtent(source);
         vtkIdType expected=1;
         for(int axis=0;axis<3;++axis) {
@@ -55,26 +54,26 @@ public:
         filter->SetInputData(mask);filter->SetValue(0,.5);filter->ComputeNormalsOff();filter->ComputeScalarsOff();
         // 64 个 cell 及共享的一层采样点，临时字节数至多 65^3；相邻块不重复 cell。
         constexpr std::int64_t blockCells=64;
+        PagedMap<std::int32_t,bool> seen;
         for(const auto& region:regions) {
             if(stopping.load())return {};
-            if(region.voxelCount==0){if(ranges)ranges->push_back({region.id,positions.size()/3,0,regionIds.size(),0});continue;}
+            if(region.id<=0||seen.Find(region.id))return {};seen.Insert(region.id,true);
+            if(region.voxelCount==0){if(ranges)ranges->push_back({region.id,points.size()/3,0,cells.size()/3,0});continue;}
+            const auto firstPoint=points.size()/3,firstTriangle=cells.size()/3;
             const VoidRegion* parent=&region;
             if(parents){const auto found=parentIndex.find(region.id);if(found==parentIndex.end())return {};parent=found->second;}
             for(int axis=0;axis<3;++axis)if(parent->bbox[axis*2]<source[axis*2]||parent->bbox[axis*2+1]>source[axis*2+1]
                 ||parent->bbox[axis*2]>parent->bbox[axis*2+1]||parent->bbox[axis*2]==INT_MIN||parent->bbox[axis*2+1]==INT_MAX)return {};
             // 不同孔隙绝不焊接。未裁剪顶点以半网格整数索引复用，避免大物理原点及跨块浮点误差。
-            const auto firstPoint=positions.size()/3,firstTriangle=regionIds.size();
-            PointMap<std::array<std::int64_t,3>> indexPoints;
-            PointMap<std::array<double,3>> clippedPoints;
+            PagedMap<std::array<std::int64_t,3>,vtkIdType,PagedArrayHash<std::int64_t,3>> indexPoints;
+            PagedMap<std::array<double,3>,vtkIdType,PagedArrayHash<double,3>> clippedPoints;
             const auto insertPoint=[&](const std::array<double,3>& p) {
-                if(positions.size()/3==static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()))throw std::length_error("Gap point indices overflow.");
-                const auto id=static_cast<vtkIdType>(positions.size()/3);
-                positions.insert(positions.end(),p.begin(),p.end());return id;
+                if(points.size()/3==std::size_t(std::numeric_limits<vtkIdType>::max()))throw std::length_error("Gap point indices overflow.");
+                const auto id=static_cast<vtkIdType>(points.size()/3);points.insert(points.end(),p.begin(),p.end());return id;
             };
             const auto insertCell=[&](const vtkIdType* ids) {
-                if(regionIds.size()>=static_cast<std::size_t>(std::numeric_limits<vtkIdType>::max()/4))throw std::length_error("Gap cell indices overflow.");
-                for(int corner=0;corner<3;++corner)connectivity.push_back(static_cast<std::uint64_t>(ids[corner]));
-                offsets.push_back(connectivity.size());regionIds.push_back(region.id);
+                if(cells.size()/3>=std::size_t(std::numeric_limits<vtkIdType>::max()/4))throw std::length_error("Gap cell indices overflow.");
+                for(int i=0;i<3;++i)cells.push_back(static_cast<std::uint64_t>(ids[i]));labels.push_back(region.id);
             };
             const auto firstBlock=std::lower_bound(directory->blocks.begin(),directory->blocks.end(),region.id,
                 [](const auto& block,auto id){return block.id<id;});
@@ -127,8 +126,8 @@ public:
                             for(const auto& piece:pieces) {
                                 vtkIdType ids[3];
                                 for(int corner=0;corner<3;++corner) {
-                                    const auto found=clippedPoints.find(piece[corner]);
-                                    ids[corner]=found==clippedPoints.end()?clippedPoints.emplace(piece[corner],insertPoint(piece[corner])).first->second:found->second;
+                                    const auto found=clippedPoints.Find(piece[corner]);
+                                    ids[corner]=found?*found:clippedPoints.Insert(piece[corner],insertPoint(piece[corner]));
                                 }
                                 insertCell(ids);
                             }
@@ -138,25 +137,22 @@ public:
                     } else {
                         vtkIdType ids[3];
                         for(int corner=0;corner<3;++corner) {
-                            const auto found=indexPoints.find(keys[corner]);
-                            ids[corner]=found==indexPoints.end()?indexPoints.emplace(keys[corner],insertPoint(triangle[corner])).first->second:found->second;
+                            const auto found=indexPoints.Find(keys[corner]);
+                            ids[corner]=found?*found:indexPoints.Insert(keys[corner],insertPoint(triangle[corner]));
                         }
                         insertCell(ids);
                     }
                 }
             }
-            if(ranges)ranges->push_back({region.id,firstPoint,positions.size()/3-firstPoint,
-                firstTriangle,regionIds.size()-firstTriangle});
+            if(ranges)ranges->push_back({region.id,firstPoint,points.size()/3-firstPoint,
+                firstTriangle,cells.size()/3-firstTriangle});
         }
-        if(stopping.load())return {};
-        vtkNew<BackedVtkArray<double,vtkDoubleArray>> coordinates;coordinates->SetValues(std::move(positions),3);
-        vtkNew<vtkPoints> points;points->SetData(coordinates);output->SetPoints(points);
-        // vtkCellArray 的 vtkIdTypeArray 便利重载会换数组外壳；直接使用实际 64 位存储类型。
-        vtkNew<BackedVtkArray<std::uint64_t,vtkTypeInt64Array>> cellsData,cellOffsets;
-        cellsData->SetValues(std::move(connectivity));cellOffsets->SetValues(std::move(offsets));
-        vtkNew<vtkCellArray> cells;cells->SetData(cellOffsets,cellsData);output->SetPolys(cells);
-        vtkNew<BackedVtkArray<std::int32_t,vtkIntArray>> labels;labels->SetValues(std::move(regionIds));
-        labels->SetName("gap.region.id");output->GetCellData()->AddArray(labels);
-        resultStorage.Finish();return output;
+        return stopping.load()?nullptr:MeshPayloadBuilder::Build(points.Finish(),cells.Finish(),{},frame,{{"gap.region.id",1,labels.Finish(),0}},[&]{return stopping.load();});
+    }
+    static vtkSmartPointer<vtkPolyData> Build(vtkImageData* image,const DataArray<VoidRegion>& regions,
+        const std::atomic<bool>& stopping,const RoiReadSnapshot& roi={},const DataArray<VoidRegion>* parents=nullptr,
+        DataArray<GapSurfaceRange>* ranges=nullptr,bool useOccupancyIndex=true){
+        const auto payload=BuildPayload(image,regions,stopping,roi,parents,"RAS",ranges,useOccupancyIndex);
+        return payload?MeshVtkStorage::Build(*payload,[&]{return stopping.load();}):nullptr;
     }
 };

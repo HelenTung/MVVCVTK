@@ -393,9 +393,11 @@ void Algorithm()
         for (int z=4;z<=19;++z) for (int y=0;y<8;++y) for (int x=0;x<8;++x) {
             const auto index=std::size_t(x+8*(y+8*z));(*values)[index]=100;(*labels)[index]=1;
         }
-        auto vertices=thick.mesh->GetVertices();
+        const auto& sourceVertices=thick.mesh->GetPointValues();
+        std::vector<double> vertices(sourceVertices.begin(),sourceVertices.end());
         for (std::size_t i=2;i<vertices.size();i+=3) vertices[i]=(vertices[i]-1.5)*8+3.5;
-        thick.mesh=std::make_shared<const SurfaceMeshPayload>(vertices,thick.mesh->GetTriangles(),thick.mesh->GetPointAttributes());
+        thick.mesh=std::make_shared<const SurfaceMeshPayload>(MeshReadArray<double>(std::move(vertices)),
+            thick.mesh->GetTriangleIndices(),thick.mesh->GetPointFields(),thick.mesh->GetCoordinateFrame());
         thick.labels=std::make_shared<const LabelMap3DPayload>(geometry,LabelMapValues{std::shared_ptr<const std::vector<std::uint64_t>>(labels)});
         thick.source=std::make_shared<const ImageGrid3DPayload>(geometry,ImageValueType::UInt8,1,values);
         thick.archive.params.maxDistance=30;thick.archive.evaluation.upper=30;thick.archive.evaluation.histogramRange={0,30};
@@ -433,7 +435,8 @@ void Algorithm()
     g.spacing = {1, 2, 3};
     g.origin = {10, 20, 30};
     g.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
-    auto vertices = rotated.mesh->GetVertices();
+    const auto& sourceVertices = rotated.mesh->GetPointValues();
+    std::vector<double> vertices(sourceVertices.begin(),sourceVertices.end());
     for (std::size_t i = 0; i < vertices.size(); i += 3)
     {
         const double x = vertices[i] - 4, y = vertices[i + 1] + 8, z = vertices[i + 2] + 2;
@@ -445,7 +448,8 @@ void Algorithm()
     rotated.source = std::make_shared<const ImageGrid3DPayload>(g, ImageValueType::UInt8, 1,
                                                                 rotated.source->GetValues());
     rotated.mesh = std::make_shared<const SurfaceMeshPayload>(
-        vertices, rotated.mesh->GetTriangles(), rotated.mesh->GetPointAttributes());
+        MeshReadArray<double>(std::move(vertices)), rotated.mesh->GetTriangleIndices(),
+        rotated.mesh->GetPointFields(), rotated.mesh->GetCoordinateFrame());
     rotated.archive.params.maxDistance = 30;
     rotated.archive.params.sampleSpacing = 3;
     rotated.archive.evaluation.upper = 10;
@@ -494,17 +498,18 @@ void Algorithm()
     Check(large.status == ThicknessStatus::Succeeded && large.statistics.minimum &&
               std::abs(*large.statistics.minimum - 0.002) < 5e-8,
           "large origin preserves small thickness");
-    auto attrs = w.mesh->GetPointAttributes();
-    attrs.back().values.assign(8, 0);
-    w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetVertices(),
-                                                        w.mesh->GetTriangles(), attrs);
+    auto attrs = w.mesh->GetPointFields();
+    attrs.back().values = MeshReadArray<double>(std::vector<double>(8, 0));
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetPointValues(),
+        w.mesh->GetTriangleIndices(), attrs, w.mesh->GetCoordinateFrame());
     Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::Succeeded,
           "local gray measurement accepts component-filtered seed provenance");
     w = BuildSlab();
-    auto triangles = w.mesh->GetTriangles();
+    const auto& sourceTriangles = w.mesh->GetTriangleIndices();
+    std::vector<std::uint64_t> triangles(sourceTriangles.begin(),sourceTriangles.end());
     triangles.resize(triangles.size() - 3);
-    w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetVertices(), triangles,
-                                                        w.mesh->GetPointAttributes());
+    w.mesh = std::make_shared<const SurfaceMeshPayload>(w.mesh->GetPointValues(),
+        MeshReadArray<std::uint64_t>(std::move(triangles)), w.mesh->GetPointFields(), w.mesh->GetCoordinateFrame());
     Check(ThicknessAlgorithm::BuildField(w).status == ThicknessStatus::Succeeded,
           "an open seed mesh retains supported local measurements");
     w = BuildSlab();
@@ -1012,8 +1017,8 @@ void Display()
             for(std::size_t axis=0;axis<3;++axis) {
                 double expected=0;
                 for(std::size_t vertex=0;vertex<3;++vertex) {
-                    const auto id=w.mesh->GetTriangles()[sample.sourceTriangle*3+vertex];
-                    expected+=sample.barycentricCorners[corner][vertex]*w.mesh->GetVertices()[id*3+axis];
+                    const auto id=w.mesh->GetTriangleIndices()[sample.sourceTriangle*3+vertex];
+                    expected+=sample.barycentricCorners[corner][vertex]*w.mesh->GetPointValues()[id*3+axis];
                 }
                 hasMatchingFootprints &= std::abs(actual[axis]-expected)<1e-12;
             }

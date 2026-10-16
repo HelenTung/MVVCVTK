@@ -3,6 +3,7 @@ add_executable(mvvcvtk_data_graph_tests
     DataGraphTests.cpp
     DataLifetimeTests.cpp
     ResultRetentionTests.cpp
+    MeshPagedStorageTests.cpp
     DataArrayTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
@@ -10,7 +11,8 @@ add_executable(mvvcvtk_data_graph_tests
 )
 target_include_directories(
     mvvcvtk_data_graph_tests
-    PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include" "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support"
+    PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support"
 )
 SetTargetDefaults(mvvcvtk_data_graph_tests)
 set_target_properties(
@@ -20,6 +22,7 @@ set_target_properties(
 add_test(NAME DataGraph.All COMMAND mvvcvtk_data_graph_tests)
 add_test(NAME DataGraph.Lifetime COMMAND mvvcvtk_data_graph_tests lifetime)
 add_test(NAME DataGraph.ResultRetention COMMAND mvvcvtk_data_graph_tests retention)
+add_test(NAME DataGraph.MeshBlocks COMMAND mvvcvtk_data_graph_tests mesh-blocks)
 add_test(NAME DataGraph.ResultArrays COMMAND mvvcvtk_data_graph_tests arrays)
 
 add_executable(mvvcvtk_spatial_mesh_tests SpatialMeshTests.cpp)
@@ -90,7 +93,9 @@ add_executable(mvvcvtk_roi_operation_tests RoiOperationsTests.cpp
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/DataGraphStore.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiVoxelSet.cpp"
     "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Geometry/RoiEvaluator.cpp")
-target_include_directories(mvvcvtk_roi_operation_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include")
+target_include_directories(mvvcvtk_roi_operation_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data")
+target_compile_definitions(mvvcvtk_roi_operation_tests PRIVATE MVVCVTK_ROI_DIAGNOSTICS=1)
 SetTargetDefaults(mvvcvtk_roi_operation_tests)
 set_target_properties(mvvcvtk_roi_operation_tests PROPERTIES PROJECT_LABEL RoiOperationTests FOLDER "MVVCVTK/test/Automation/DataGraph")
 add_test(NAME DataGraph.RoiOperations COMMAND mvvcvtk_roi_operation_tests)
@@ -98,3 +103,6 @@ add_test(NAME DataGraph.RoiProcessingRegression COMMAND mvvcvtk_roi_operation_te
 add_test(NAME DataGraph.RoiCompressed COMMAND mvvcvtk_roi_operation_tests compressed)
 add_test(NAME DataGraph.RoiIslands COMMAND mvvcvtk_roi_operation_tests islands)
 add_test(NAME DataGraph.RoiIndexEndpoints COMMAND mvvcvtk_roi_operation_tests endpoints)
+add_test(NAME DataGraph.RoiComponentSuccessors COMMAND mvvcvtk_roi_operation_tests successors)
+add_test(NAME DataGraph.RoiFinalClipping COMMAND mvvcvtk_roi_operation_tests clipping)
+add_test(NAME DataGraph.RoiIntegerRanges COMMAND mvvcvtk_roi_operation_tests integer-range)

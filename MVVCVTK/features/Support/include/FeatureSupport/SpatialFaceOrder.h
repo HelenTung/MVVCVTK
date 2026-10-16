@@ -20,7 +20,7 @@ public:
     {
         if(!page||page>pageFaces)throw std::invalid_argument("Invalid spatial display page size.");
         SpatialFaceOrder result;
-        if(GetUses32BitForCount(mesh.GetTriangles().size()/3))result.Set<std::uint32_t>(mesh,cancel,page);
+        if(GetUses32BitForCount(mesh.GetTriangleIndices().size()/3))result.Set<std::uint32_t>(mesh,cancel,page);
         else result.Set<std::uint64_t>(mesh,cancel,page);
         return result;
     }
@@ -48,11 +48,11 @@ private:
     }
     template<class Index> void Set(const SurfaceMeshPayload& mesh,const Cancel& cancel,std::size_t page)
     {
-        const auto count=mesh.GetTriangles().size()/3;
+        const auto count=mesh.GetTriangleIndices().size()/3;
         // 正式显示目录使用调用方的 owner；radix 工作文件在本函数结束时独立释放。
         DataArray<Index> order(count),inverse(count);
         if(!count){m_order=std::move(order);m_inverse=std::move(inverse);return;}
-        const auto& points=mesh.GetVertices();const auto& faces=mesh.GetTriangles();
+        const auto& points=mesh.GetPointValues();const auto& faces=mesh.GetTriangleIndices();
         const auto inf=std::numeric_limits<double>::infinity();
         std::array<double,3> low{inf,inf,inf},high{-inf,-inf,-inf};
         for(std::size_t i=0;i<points.size()/3;++i){if(!(i%4096))Check(cancel);for(unsigned a=0;a<3;++a){low[a]=std::min(low[a],points[3*i+a]);high[a]=std::max(high[a],points[3*i+a]);}}

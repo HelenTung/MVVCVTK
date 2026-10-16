@@ -1,5 +1,8 @@
 #include "ReportDocument.h"
 #include <QTemporaryFile>
+#include <QCryptographicHash>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -33,6 +36,10 @@ quint64 GetReportCount(const QJsonValue& value)
     throw std::invalid_argument("报告计数必须为精确非负整数；大整数使用十进制字符串");
 }
 namespace {
+QByteArray RowBytes(const QStringList& row)
+{
+    return QJsonDocument(QJsonArray::fromStringList(row)).toJson(QJsonDocument::Compact) + '\n';
+}
 void WriteBytes(QIODevice& output, const QByteArray& bytes)
 {
     if (output.write(bytes) != bytes.size()) throw std::runtime_error("报告文件写入失败");
@@ -50,8 +57,40 @@ bool GetResultIdentityValid(const QString& value) {
     bool valid=false;const auto revision=value.mid(33).toULongLong(&valid);return valid&&revision>0;
 }
 }
+namespace {
+qint64 ReadOffset(QIODevice& index, ReportRowId row)
+{
+    if(row<0 || row>std::numeric_limits<qint64>::max()/qint64(sizeof(qint64)) || !index.seek(row*qint64(sizeof(qint64))))
+        throw std::out_of_range("报告行偏移不存在");
+    qint64 offset=0;
+    if(index.read(reinterpret_cast<char*>(&offset),sizeof(offset))!=sizeof(offset))throw std::runtime_error("报告行索引损坏");
+    return offset;
+}
+QStringList ReadCells(QIODevice& file, qint64 offset)
+{
+    if(!file.seek(offset))throw std::runtime_error("报告临时表读取失败");
+    QJsonParseError error;const auto values=QJsonDocument::fromJson(file.readLine(),&error);
+    if(error.error!=QJsonParseError::NoError || !values.isArray())throw std::runtime_error("报告临时表损坏");
+    QStringList cells;for(const auto cell:values.array())cells.append(cell.toString());return cells;
+}
+class RowRange final:public MeshValueSource<ReportRowId> {
+public:
+    explicit RowRange(ReportRowId count):m_count(count){if(count<0)throw std::invalid_argument("报告行数无效");}
+    std::size_t GetCount()const noexcept override{return static_cast<std::size_t>(m_count);}
+    std::size_t GetResidentBytes()const noexcept override{return sizeof(*this);}
+    void ReadValues(std::size_t offset,std::size_t count,ReportRowId* target)const override {
+        if(offset>GetCount() || count>GetCount()-offset)throw std::out_of_range("报告区间无效");
+        for(std::size_t i=0;i<count;++i)target[i]=static_cast<ReportRowId>(offset+i);
+    }
+private:ReportRowId m_count;
+};
+}
+ReportRows GetReportRowRange(ReportRowId count){return ReportRows(std::make_shared<const RowRange>(count));}
 class ReportTable::Impl {
 public:
+    mutable QMutex hashMutex;
+    QCryptographicHash contentHash{QCryptographicHash::Sha256};
+    mutable QByteArray exportedHash;
     mutable QTemporaryFile file;
     mutable QTemporaryFile index;
     QString filePath,indexPath;
@@ -93,7 +132,7 @@ ReportTable::ReportTable(quint64 count,std::function<QStringList(ReportRowId)> r
     if(count>static_cast<quint64>(std::numeric_limits<ReportRowId>::max()))throw std::overflow_error("报告目录地址溢出");
     m_impl->sourceCount=count;m_impl->readRow=std::move(readRow);
 }
-ReportTable::~ReportTable() = default;
+ReportTable::~ReportTable()=default;
 void ReportTable::Append(const QStringList& row)
 {
     if(m_impl->readRow||m_impl->isFrozen)throw std::logic_error("不可向冻结报告追加行");
@@ -102,12 +141,14 @@ void ReportTable::Append(const QStringList& row)
     auto& file = m_impl->file;
     if (!file.seek(file.size())) throw std::runtime_error("报告临时表定位失败");
     const auto offset = file.pos();
-    WriteBytes(file, QJsonDocument(QJsonArray::fromStringList(row)).toJson(QJsonDocument::Compact) + '\n');
+    const auto bytes=RowBytes(row);
+    WriteBytes(file, bytes);
     auto& index=m_impl->index;
     if(!index.seek(index.size()) || index.write(reinterpret_cast<const char*>(&offset),sizeof(offset))!=sizeof(offset))
         throw std::runtime_error("报告偏移索引写入失败");
     m_impl->indexStart=-1;m_impl->indexCount=0;
     m_impl->indexDirty=true;
+    {QMutexLocker lock(&m_impl->hashMutex);m_impl->contentHash.addData(bytes);}
     ++m_impl->rowCount;
 }
 QStringList ReportTable::Read(ReportRowId row) const
@@ -144,7 +185,21 @@ bool ReportTable::ContinueBuild()
     if (m_impl->rowCount == m_impl->sourceCount) m_impl->readSource = {};
     return !m_impl->readSource;
 }
-bool ReportTable::GetIsComplete() const { return !m_impl->readSource; }
+bool ReportTable::GetIsComplete()const{return !m_impl->readSource;}
+QByteArray ReportTable::GetContentHash(const ReportCheckpoint& checkpoint) const
+{
+    if(!GetIsComplete())throw std::logic_error("报告尚未完成，不能确认整表哈希");
+    {
+        QMutexLocker lock(&m_impl->hashMutex);
+        if(!m_impl->readRow)return m_impl->contentHash.result();
+        if(!m_impl->exportedHash.isEmpty())return m_impl->exportedHash;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    const auto read=CreateReader();
+    for(ReportRowId row=0;row<GetCount();++row){if(checkpoint)checkpoint();hash.addData(RowBytes(read(row)));}
+    const auto value=hash.result();
+    QMutexLocker lock(&m_impl->hashMutex);m_impl->exportedHash=value;return value;
+}
 void ReportTable::PrepareRead()
 {
     if(m_impl->readRow)return;
@@ -154,7 +209,7 @@ void ReportTable::PrepareRead()
 void ReportTable::SetOwnerThread(QThread* owner) { m_impl->file.moveToThread(owner);m_impl->index.moveToThread(owner); }
 std::function<QStringList(ReportRowId)> ReportTable::CreateReader() const
 {
-    if (!GetIsComplete()) throw std::logic_error("原生报告尚未完成物化");
+    if(!GetIsComplete())throw std::logic_error("原生报告尚未完成物化");
     if(m_impl->readRow)return m_impl->readRow;
     if(!m_impl->isPrepared) {
         if(m_impl->file.thread()!=QThread::currentThread())throw std::logic_error("后台读取前须在 owner 线程冻结报告");
@@ -328,8 +383,12 @@ void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const ReportRo
     const auto count=doc.table->GetCount();
     if(!checkpoint)doc.table->PrepareRead(); // 后台入口在 owner thread 准备，同步调用在此刷新。
     const auto read=doc.table->GetIsComplete()?doc.table->CreateReader():[&doc](ReportRowId row){return doc.table->Read(row);};
+    // 只读原生回调没有落盘追加过程，在完整导出的既有遍历中累计；取消或筛选导出不发布整表摘要。
+    const bool hashRows=!rows && bool(doc.table->m_impl->readRow);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
     if (rows) { for (const auto row : *rows) {if(checkpoint)checkpoint();write(read(row));} }
-    else for (ReportRowId row = 0; row < count; ++row) {if(checkpoint)checkpoint();write(read(row));}
+    else for (ReportRowId row = 0; row < count; ++row) {if(checkpoint)checkpoint();const auto cells=read(row);write(cells);if(hashRows)hash.addData(RowBytes(cells));}
+    if(hashRows){QMutexLocker lock(&doc.table->m_impl->hashMutex);doc.table->m_impl->exportedHash=hash.result();}
 }
 void ExportReport(const QString& path, const ReportDocument& doc, const ReportRows* rows, const ReportCheckpoint& checkpoint)
 {

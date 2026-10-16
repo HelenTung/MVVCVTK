@@ -113,8 +113,8 @@ std::shared_ptr<const AlignmentReferenceSnapshot> GetReferenceShared(const DataG
     const auto reference = source ? std::dynamic_pointer_cast<const ReferencePayload>(source->payload) : nullptr;
     if (!reference || source->type != referenceType || reference->metadata.mesh != ref ||
         reference->metadata.coordinateFrame != mesh->GetCoordinateFrame() ||
-        reference->metadata.pointCount != mesh->GetVertices().size() / 3 ||
-        reference->metadata.triangleCount != mesh->GetTriangles().size() / 3) return {};
+        reference->metadata.pointCount != mesh->GetPointValues().size() / 3 ||
+        reference->metadata.triangleCount != mesh->GetTriangleIndices().size() / 3) return {};
     return std::shared_ptr<const AlignmentReferenceSnapshot>(reference,&reference->metadata);
 }
 std::optional<AlignmentReferenceSnapshot> GetReference(const DataGraphSnapshot &graph,const DataRevisionRef &ref) {

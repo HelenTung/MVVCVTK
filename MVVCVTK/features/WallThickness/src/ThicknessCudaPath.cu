@@ -204,11 +204,7 @@ class Implementation final : public Client {
 public:
     void Initialize(const Input& input) {
         m_allocations.reserve(10);
-        std::size_t free=0,total=0;Check(cudaMemGetInfo(&free,&total));
-        const auto bytes=input.valueBytes+input.maskBytes+input.signCount+input.offsetCount*sizeof(std::uint32_t)+input.childBytes;
-        if (free<bytes || free-bytes<512U*1024U*1024U)
-            throw std::runtime_error("Insufficient CUDA memory for immutable wall input: free="
-                +std::to_string(free)+", input="+std::to_string(bytes)+", reserve=536870912 bytes.");
+        // 显存可用性由完整输入和工作批次的实际分配结果确定。
         m_field.extent=input.extent;m_field.blocks=input.blocks;m_field.threshold=input.threshold;m_field.scalarType=input.scalarType;
         m_field.strides={1,std::size_t(std::int64_t(input.extent[1])-input.extent[0]+1),0};
         m_field.strides[2]=m_field.strides[1]*std::size_t(std::int64_t(input.extent[3])-input.extent[2]+1);

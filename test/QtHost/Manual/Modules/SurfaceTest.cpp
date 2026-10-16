@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QLocale>
 #include <cmath>
+#include <limits>
 namespace Manual {
 namespace {
 QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& feature,QJsonObject& formalStatistics,
@@ -76,7 +77,10 @@ QJsonObject GetSurface(const std::shared_ptr<SurfaceDeterminationHostFeature>& f
             {"manifold", object.isManifold}, {"truncated", object.isTruncated}, {"orientationValid", object.isOrientationValid},
             {"areaValidity", static_cast<int>(object.areaValidity)}, {"volumeValidity", static_cast<int>(object.volumeValidity)},
             {"area", object.areaModelUnit2 ? QJsonValue(*object.areaModelUnit2) : QJsonValue()},
-            {"volume", object.volumeModelUnit3 ? QJsonValue(*object.volumeModelUnit3) : QJsonValue()}});
+            {"volume", object.volumeModelUnit3 ? QJsonValue(*object.volumeModelUnit3) : QJsonValue()},
+            {"firstPoint",QString::number(object.firstPoint)},{"pointCount",QString::number(object.pointCount)},
+            {"firstTriangle",QString::number(object.firstTriangle)},{"triangleCount",QString::number(object.triangleCount)},
+            {"boundsModel",GetValues(object.boundsModel)}});
     }
     summary["objects"] = objects;
     summary["objectCount"] = GetReportCountValue(static_cast<quint64>(objectCount));
@@ -99,7 +103,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             const auto offset=GetId(p["pageOffset"]),count=GetId(p["pageSize"]);
             if(!count||count>4096)throw std::invalid_argument("对象分页大小必须为 1～4096");
             DataRevisionRef revision;
-            if(p["generation"]!="current")revision=GetRef(p["generation"]);
+            if(!p["generation"].toString().isEmpty()&&p["generation"]!="current")revision=GetRef(p["generation"]);
             else if(offset)revision=GetRef(panel->property("surfaceObjectsGeneration").toString());
             else { const auto snapshot=feature->GetSurfaceSnapshot();if(snapshot)revision=snapshot->dataRevision; }
             const auto snapshot=*listedSurface&&(*listedSurface)->dataRevision==revision?*listedSurface:feature->GetSurfaceSnapshot(revision);
@@ -174,6 +178,28 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
             panel->SetComplete(id,"Observed",{{"generation",GetRefText(snapshot->dataRevision)},{"objectIndex",QString::number(object)},
                 {"first",QString::number(first)},{"next",QString::number(next)},{"total",QString::number(total)},{"rows",rows}});
         },TestPolicy::Read);
+    context.workflow.highlightSurfaceObject=[feature](DataRevisionRef generation,std::uint32_t object) {
+        return feature->SendRequest(SurfaceObjectSelectionRequest{generation,object,false,GetAllViews()}).status==SurfaceAdmissionStatus::Accepted;
+    };
+    panel->AttachAction("HighlightObject",{{"generation",""},{"objectIndex","0"}},[panel,feature,formalStatistics](auto id,const auto& p) {
+        const auto snapshot=p["generation"].toString().isEmpty()?feature->GetSurfaceSnapshot():feature->GetSurfaceSnapshot(GetRef(p["generation"]));
+        if(!snapshot)throw std::invalid_argument("指定修订没有正式表面对象");
+        const auto index=GetId(p["objectIndex"]);if(index>std::numeric_limits<std::uint32_t>::max())throw std::invalid_argument("对象编号超出声明类型");
+        const QPointer<ModulePanel> owner(panel);const auto revision=snapshot->dataRevision;
+        const auto admission=feature->SendRequest(SurfaceObjectSelectionRequest{revision,static_cast<std::uint32_t>(index),false,GetAllViews()},
+            [owner,feature,formalStatistics,id,revision,index](SurfaceDeterminationResult result) {
+                if(!owner)return;auto summary=GetSurface(feature,*formalStatistics,static_cast<std::size_t>(index),1,feature->GetSurfaceSnapshot(revision));
+                summary["generation"]=GetRefText(revision);summary["formalSource"]=GetRefText(result.sourceRevision);
+                summary["selectedObject"]=QString::number(index);summary["message"]=QString::fromStdString(result.message);
+                owner->SetComplete(id,result.status==SurfaceResultStatus::Succeeded?"Succeeded":result.status==SurfaceResultStatus::Cancelled?"Cancelled":"Failed",summary);
+            });
+        panel->SetAdmission(id,admission.status==SurfaceAdmissionStatus::Accepted,{{"requestId",QString::number(admission.requestId)}});
+    },TestPolicy::View);
+    panel->AttachAction("ClearObjectHighlight",{},[panel,feature](auto id,const auto&) {
+        const QPointer<ModulePanel> owner(panel);const auto admission=feature->SendRequest(SurfaceObjectSelectionRequest{},[owner,id](auto result){
+            if(owner)owner->SetComplete(id,result.status==SurfaceResultStatus::Succeeded?"Succeeded":result.status==SurfaceResultStatus::Cancelled?"Cancelled":"Failed",{{"message",QString::fromStdString(result.message)}});
+        });panel->SetAdmission(id,admission.status==SurfaceAdmissionStatus::Accepted,{{"requestId",QString::number(admission.requestId)}});
+    },TestPolicy::View);
     {
         const auto send=[panel, feature,requestedParameters,formalStatistics](std::uint64_t id, const QJsonObject& params, SurfaceTaskPurpose purpose) {
             SurfaceDeterminationStartParams start;

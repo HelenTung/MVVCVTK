@@ -52,14 +52,14 @@ RoiSourceDescriptor GetSourceDescriptor(const DataSnapshot& source)
         grid.metadata.source.digest=image->GetMetadata().source.digest;
         result.image=std::move(grid); result.coordinateFrame=image->GetGeometry().coordinateFrame;
     } else if (const auto* mesh=dynamic_cast<const SurfaceMeshPayload*>(source->payload.get())) {
-        result.pointCount=mesh->GetVertices().size()/3; result.triangleCount=mesh->GetTriangles().size()/3;
+        result.pointCount=mesh->GetPointValues().size()/3; result.triangleCount=mesh->GetTriangleIndices().size()/3;
         result.sourceBounds={INFINITY,-INFINITY,INFINITY,-INFINITY,INFINITY,-INFINITY};
-        for (std::size_t i=0;i<mesh->GetVertices().size();++i) {
-            const auto a=i%3; const auto value=mesh->GetVertices()[i];
+        for (std::size_t i=0;i<mesh->GetPointValues().size();++i) {
+            const auto a=i%3; const auto value=mesh->GetPointValues()[i];
             result.sourceBounds[a*2]=std::min(result.sourceBounds[a*2],value);
             result.sourceBounds[a*2+1]=std::max(result.sourceBounds[a*2+1],value);
         }
-        result.coordinateFrame=mesh->GetCoordinateFrame();GeometryHash hash;hash.Add(static_cast<std::uint64_t>(result.pointCount));for(auto value:mesh->GetVertices())hash.Add(value);hash.Add(static_cast<std::uint64_t>(result.triangleCount));for(auto value:mesh->GetTriangles())hash.Add(value);result.meshGeometryDigest=hash.Finish();
+        result.coordinateFrame=mesh->GetCoordinateFrame();GeometryHash hash;hash.Add(static_cast<std::uint64_t>(result.pointCount));for(auto value:mesh->GetPointValues())hash.Add(value);hash.Add(static_cast<std::uint64_t>(result.triangleCount));for(auto value:mesh->GetTriangleIndices())hash.Add(value);result.meshGeometryDigest=hash.Finish();
     }
     return result;
 }

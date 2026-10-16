@@ -18,14 +18,14 @@ std::size_t Charge(std::size_t available, std::size_t count, std::size_t bytes) 
     return available - count * bytes;
 }
 Vec Vertex(const SurfaceMeshPayload &mesh, std::uint64_t id) {
-    const auto &v = mesh.GetVertices(); return {v[3*id],v[3*id+1],v[3*id+2]};
+    const auto &v = mesh.GetPointValues(); return {v[3*id],v[3*id+1],v[3*id+2]};
 }
 void Prepare(const AlignmentWork &work, const std::vector<std::uint64_t> &selection,
              AlignmentDeviationField &field, std::vector<AlignmentPoint> &normals, std::size_t available,
              const RoiReadSnapshot& roi,const AlignmentMatrix& meshToRoi) {
     const auto roiQuery=roi?roi->GetQuery():RoiQueryResult{};if(roi && (roiQuery.error!=RoiError::None || !roiQuery.query))throw std::bad_alloc();
     const auto &mesh = *work.mesh;
-    const auto &triangles = mesh.GetTriangles();
+    const auto &triangles = mesh.GetTriangleIndices();
     const auto count = selection.empty() ? triangles.size()/3 : selection.size();
     std::vector<std::uint64_t> sorted;
     if (!selection.empty()) {
@@ -125,7 +125,7 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
     const auto &selection = reverse ? request.referenceTriangles : request.sourceTriangles;
     const auto &targetSelection = reverse ? request.sourceTriangles : request.referenceTriangles;
     auto available = Charge(std::numeric_limits<std::size_t>::max(), retainedBytes, 1);
-    const auto baseCount = work.mesh->GetVertices().size()/3;
+    const auto baseCount = work.mesh->GetPointValues().size()/3;
     available = Charge(available, baseCount, sizeof(AlignmentDeviationSample));
     const bool needsNormals = request.minNormalCosine.has_value();
     if (needsNormals) available = Charge(available, baseCount, sizeof(AlignmentPoint));
@@ -159,7 +159,7 @@ std::shared_ptr<const AlignmentDeviationField> Evaluate(AlignmentWork work,
                 ? (point-Vector(hit.point)).dot(Vector(hit.normal)) : sample.distance;
             sample.state = AlignmentDeviationState::Valid;
             if (reverse) {
-                const auto &ids = work.referenceMesh->GetTriangles();
+                const auto &ids = work.referenceMesh->GetTriangleIndices();
                 for (std::size_t j = 0; j < 3; ++j)
                     if (!AlignmentGeometryFit::GetPointUsable(measuredWork, static_cast<std::size_t>(ids[3*hit.triangle+j])))
                         sample.state = AlignmentDeviationState::InvalidTarget;

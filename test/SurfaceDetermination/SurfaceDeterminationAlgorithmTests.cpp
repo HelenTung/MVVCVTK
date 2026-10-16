@@ -418,7 +418,7 @@ int GetSurfaceSeedWindowFailCount()
     grid.values=&values;grid.validity=mask.data();
     grid.readScalar=[](const void* p,std::size_t i){return (*static_cast<const std::vector<double>*>(p))[i];};
     const auto verify=[&](bool hasSurface,const char* message) {
-        DataArray<Point3> points;DataArray<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+        PagedArray<Point3> points;PagedArray<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
         const auto status=SurfaceSeedBuilder::BuildMesh(grid,0,{},0,1,1024U*1024U,[]{return false;},points,triangles,stats);
         checks.Get(hasSurface ? status==SurfaceSeedStatus::Succeeded&&points.size()==4&&triangles.size()==2
             &&std::all_of(points.begin(),points.end(),[](const auto& p){return p[0]==0;})
@@ -438,7 +438,7 @@ int GetSurfaceSeedWindowFailCount()
         values[(z*3+y)*5+x]=x-2.;
     grid.extent={-2,2,5,7,-4,-2};grid.dimensions={5,3,3};grid.validity=mask.data();
     mask[4]=0;
-    DataArray<Point3> points;DataArray<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
+    PagedArray<Point3> points;PagedArray<SurfaceSeedTriangle> triangles;SurfaceExecutionStats stats;
     const auto status=SurfaceSeedBuilder::BuildMesh(grid,0,{},0,1,1024U*1024U,[]{return false;},points,triangles,stats);
     checks.Get(status==SurfaceSeedStatus::Succeeded&&points.size()==9&&triangles.size()==8,
         "row-end invalid support resets before independent Y/Z crossing cells");

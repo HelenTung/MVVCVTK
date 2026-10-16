@@ -63,8 +63,8 @@ public:
         if(batches>SIZE_MAX/2)throw std::length_error("Display batch directory overflows.");
         result->m_bounds.reserve(static_cast<std::size_t>(batches));
         result->m_ranges.reserve(static_cast<std::size_t>(batches));
-        const auto& faces=result->m_mesh->GetTriangles();
-        const auto& points=result->m_mesh->GetVertices();
+        const auto& faces=result->m_mesh->GetTriangleIndices();
+        const auto& points=result->m_mesh->GetPointValues();
         for(std::uint64_t batch=0;batch<batches;++batch) {
             Check(cancel);Bounds bounds=EmptyBounds();std::array<std::uint64_t,2> range{UINT64_MAX,0};
             const auto end=std::min(count,(batch+1)*page);
@@ -90,7 +90,7 @@ public:
         if(batches)result->BuildNode(order,0,order.size(),cancel);
         Check(cancel);storage.Finish();return result;
     }
-    std::uint64_t GetFaceCount() const noexcept {return m_mesh->GetTriangles().size()/3;}
+    std::uint64_t GetFaceCount() const noexcept {return m_mesh->GetTriangleIndices().size()/3;}
     std::uint64_t GetBatchCount() const noexcept {return m_bounds.size();}
     bool GetIs32BitIndex() const noexcept {return m_order.GetIs32Bit();}
     const SurfaceMeshPayload& GetMesh() const noexcept {return *m_mesh;}
@@ -138,7 +138,7 @@ public:
         if(selected.empty())return result;
         result.firstFace=*std::min_element(selected.begin(),selected.end());
         const auto count=selected.size();
-        const auto& faces=m_mesh->GetTriangles();const auto& points=m_mesh->GetVertices();
+        const auto& faces=m_mesh->GetTriangleIndices();const auto& points=m_mesh->GetPointValues();
         std::vector<std::uint64_t> globals;globals.reserve(count*3);
         std::size_t visited=0;
         for(const auto face:selected) {
@@ -151,7 +151,8 @@ public:
         for(std::size_t i=0;i<globals.size();++i) {
             if(!(i%4096))Check(cancel);
             if(globals[i]>static_cast<std::uint64_t>(std::numeric_limits<vtkIdType>::max()))throw std::length_error("Display point identity overflows VTK id.");
-            coordinates->SetTypedTuple(static_cast<vtkIdType>(i),points.data()+static_cast<std::size_t>(3*globals[i]));
+            const auto base=static_cast<std::size_t>(3*globals[i]);const double position[3]{points[base],points[base+1],points[base+2]};
+            coordinates->SetTypedTuple(static_cast<vtkIdType>(i),position);
             globalPoints->SetValue(static_cast<vtkIdType>(i),static_cast<vtkIdType>(globals[i]));
         }
         vtkNew<vtkIntArray> offsets,connectivity;

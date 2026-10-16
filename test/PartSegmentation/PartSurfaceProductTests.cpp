@@ -17,7 +17,7 @@
 #include <vector>
 namespace {
 using Triangle = std::array<double, 10>;
-std::vector<Triangle> GetTriangles(vtkPolyData& mesh)
+std::vector<Triangle> GetTriangleIndices(vtkPolyData& mesh)
 {
     std::vector<Triangle> result;
     vtkIdType count = 0, cell = 0; const vtkIdType* ids = nullptr;
@@ -82,7 +82,7 @@ int GetPartSurfaceProductFailCount()
         const auto expected=GetReference(request); const auto actual=PartSurfaceProductBuilder::BuildProduct(request,{},{});
         check(actual.product && actual.failureReason==PartFailureReason::None && expected->GetNumberOfCells()>0
             && expected->GetNumberOfPoints()==actual.product->surface->GetNumberOfPoints()
-            && GetTriangles(*expected)==GetTriangles(*actual.product->surface),
+            && GetTriangleIndices(*expected)==GetTriangleIndices(*actual.product->surface),
             "Block extraction exactly preserves VTK labeled triangles, winding and shared vertices");
     }
     auto sparse=GetInput(); sparse.partCount=1470697;

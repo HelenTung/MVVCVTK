@@ -1205,10 +1205,10 @@ bool GapHostFeature::Impl::SetCompletedResult(
         auto* geometry=candidate.voidMesh.GetPointer();
         // worker 网格已将同一独占数组移交正式 payload；不为接纳显示重新复制整份网格。
         if(payload&&geometry&&geometry->GetPoints()&&geometry->GetPolys()
-            &&static_cast<std::uint64_t>(geometry->GetNumberOfPoints())==payload->GetVertices().size()/3
-            &&static_cast<std::uint64_t>(geometry->GetNumberOfPolys())==payload->GetTriangles().size()/3
-            &&(payload->GetVertices().empty()||geometry->GetPoints()->GetData()->GetVoidPointer(0)==payload->GetVertices().data())
-            &&(payload->GetTriangles().empty()||geometry->GetPolys()->GetConnectivityArray()->GetVoidPointer(0)==payload->GetTriangles().data())) {
+            &&static_cast<std::uint64_t>(geometry->GetNumberOfPoints())==payload->GetPointValues().size()/3
+            &&static_cast<std::uint64_t>(geometry->GetNumberOfPolys())==payload->GetTriangleIndices().size()/3
+            &&candidate.payloads&&candidate.payloads->mesh
+            &&payload->GetDataResources()==candidate.payloads->mesh->GetDataResources()) {
             const auto lifetime=meshData->lifetime.lock();
             const auto lease=lifetime?lifetime->StartResourceUse(meshRef,"GapAnalysis.display",DataResourceKind::RenderObject):nullptr;
             if(!GetDataEntityIdValid(meshData->lifetimeScope)||lease) {

@@ -13,7 +13,7 @@ public:
         if(m_mesh)m_mesh=std::dynamic_pointer_cast<const SurfaceMeshPayload>(m_mesh->CreateSnapshot());
         if(!m_table || !m_mesh || !m_table->GetValid() || !m_mesh->GetValid())throw GapReadError::Unavailable;
         m_metadata={result,source,m_mesh->GetCoordinateFrame(),m_table->GetRowCount(),
-            m_mesh->GetVertices().size()/3,m_mesh->GetTriangles().size()/3};
+            m_mesh->GetPointValues().size()/3,m_mesh->GetTriangleIndices().size()/3};
         m_ids=&Column<std::int64_t>("void-id");m_order=&Column<std::uint64_t>("object-row-by-id");
         m_firstPoint=&Column<std::uint64_t>("mesh-first-point");m_pointCount=&Column<std::uint64_t>("mesh-point-count");
         m_firstTriangle=&Column<std::uint64_t>("mesh-first-triangle");m_triangleCount=&Column<std::uint64_t>("mesh-triangle-count");
@@ -54,10 +54,10 @@ public:
             chunk.nextTriangle=triangleOffset+std::min<std::uint64_t>({count,65536,object.triangleCount-triangleOffset});
             chunk.points.reserve(static_cast<std::size_t>(chunk.nextPoint-pointOffset));
             for(auto i=chunk.firstPoint;i<object.firstPoint+chunk.nextPoint;++i) {
-                if(!(i%4096))Check(cancelled);const auto& points=m_mesh->GetVertices();
+                if(!(i%4096))Check(cancelled);const auto& points=m_mesh->GetPointValues();
                 chunk.points.push_back({points[i*3],points[i*3+1],points[i*3+2]});
             }
-            const auto& triangles=m_mesh->GetTriangles();
+            const auto& triangles=m_mesh->GetTriangleIndices();
             const auto first=chunk.firstTriangle*3,last=(object.firstTriangle+chunk.nextTriangle)*3;
             chunk.triangleIndices.reserve(static_cast<std::size_t>(last-first));
             for(auto i=first;i<last;++i) {

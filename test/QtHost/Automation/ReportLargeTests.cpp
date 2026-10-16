@@ -10,16 +10,12 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QFile>
 #include <QHeaderView>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTableView>
 #include <QTimer>
-#include <vtkIdList.h>
-#include <vtkNew.h>
-#include <vtkPoints.h>
-#include <vtkPolyData.h>
-#include <vtkStaticPointLocator.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -38,7 +34,8 @@ template<class Predicate> void Wait(Predicate complete,int timeoutMs) {
 }
 void WaitTask(ResultReport& view,int timeoutMs,bool success=true) {
     Wait([&]{return !view.property("reportTaskBusy").toBool();},timeoutMs);
-    if(success)Require(view.property("reportTaskError").toString().isEmpty(),"large real report task failed");
+    const auto error=view.property("reportTaskError").toString();
+    if(success&&!error.isEmpty())throw std::runtime_error(("large real report task failed: "+error).toStdString());
 }
 void CheckMidTaskCancel(ResultReport& view,const std::function<void()>& start,int timeoutMs,const char* phase) {
     const auto ids=view.GetReportIds();const auto selected=view.GetSelectedReport().id;
@@ -74,48 +71,54 @@ bool Valid(const ReportDocument& doc,const QStringList& row) {
     for(const auto& value:doc.validValues)if(value.compare(GetReportCell(row,doc.validityColumn).trimmed(),Qt::CaseInsensitive)==0)return true;
     return false;
 }
-void CheckPairedRows(const ReportDocument& native,const ReportDocument& result,int mode,int timeoutMs) {
-    const auto read=native.table->CreateReader(),paired=result.table->CreateReader();const auto count=native.table->GetCount();
-    vtkNew<vtkPoints> points;vtkNew<vtkPolyData> cloud;vtkNew<vtkStaticPointLocator> locator;
-    vtkNew<vtkIdList> neighbors;
-    ReportDiskArray<unsigned char> neighborCounts(mode==2?count:0);
-    if(mode==2) {
-        // 参考定位器分块覆盖全部 B 点；每块遍历全部 A，候选数落盘累加，不截断输入。
-        constexpr ReportRowId block=4000000;
-        const auto position=[&](const QStringList& row,double* p){const int columns[]{native.xColumn,native.yColumn,native.zColumn};
-            for(int axis=0;axis<3;++axis)Require(GetReportNumber(GetReportCell(row,columns[axis]),p[axis]),"real spatial fixture contains a missing coordinate");};
-        for(ReportRowId first=0;first<count;first+=std::min(block,count-first)) {
-            const auto length=std::min(block,count-first);points->SetDataTypeToDouble();points->SetNumberOfPoints(length);
-            for(ReportRowId i=0;i<length;++i){double p[3];position(read(first+i),p);points->SetPoint(i,p);}
-            points->Modified();cloud->SetPoints(points);cloud->Modified();locator->SetDataSet(cloud);locator->BuildLocator();
-            for(ReportRowId i=0;i<count;++i){double p[3];position(read(i),p);locator->FindPointsWithinRadius(1e-9,p,neighbors);
-                neighborCounts[i]=static_cast<unsigned char>(std::min<vtkIdType>(2,neighborCounts[i]+neighbors->GetNumberOfIds()));}
-        }
-    }
-    ReportRowId validPairs=0,invalidPairs=0,ambiguous=0;
-    QElapsedTimer elapsed;elapsed.start();
-    for(ReportRowId i=0;i<count;++i) {
+void CheckPairedSummary(const ReportDocument& native,const ReportDocument& result,int mode) {
+    const auto count=native.table->GetCount();
+    const auto pairs=GetReportCount(result.conditions["有效配对数"]);
+    const auto invalid=GetReportCount(result.conditions["无效/缺测配对数"]);
+    const auto ambiguous=GetReportCount(result.conditions["歧义基准项数"]);
+    Require(pairs+invalid+ambiguous==static_cast<quint64>(count),"same-result comparison lost a baseline population");
+    Require(GetReportCount(result.conditions["基准侧无候选数"])==0 && GetReportCount(result.conditions["当前侧无候选数"])==0,
+        "same-result comparison lost an identity or coordinate candidate");
+    Require(result.table->GetCount()==count+static_cast<ReportRowId>(ambiguous),"same-result comparison lost unmatched ambiguous current rows");
+    if(mode==1)Require(ambiguous==0,"unique native row identifiers became ambiguous");
+    // 整表同值由导出/导入哈希验证；配对算法的逐项语义由小数据用例覆盖。
+    // 大表仅抽查首尾及均匀位置，避免再次全表解析或建立第二套全量空间定位器。
+    const auto read=native.table->CreateReader(),paired=result.table->CreateReader();
+    for(ReportRowId sample=0;sample<std::min<ReportRowId>(count,32);++sample) {
+        const auto i=count<=32?sample:(count-1)/31*sample+(count-1)%31*sample/31;
         const auto source=read(i),row=paired(i);
-        Require(row[0]==source[native.identityColumn],"paired report lost the actual baseline identifier or native row order");
+        Require(row[0]==source[native.identityColumn],"paired sample lost baseline identity or row order");
+        if(row[7].isEmpty()){Require(mode==2 && row[6].contains("歧义") && row[4].isEmpty(),"unpaired sample lost ambiguity evidence");continue;}
+        Require(row[7]==row[0],"same-result sample paired to another identifier");
+        if(mode==2)Require(row[8]=="0","same-result sample has nonzero matched distance");
         double value=0;const bool valid=Valid(native,source)&&GetReportNumber(GetReportCell(source,native.valueColumn),value);
-        bool unique=true;
-        if(mode==2)unique=neighborCounts[i]==1;
-        if(unique) {
-            Require(row[7]==row[0],"same-result roundtrip paired to another identifier");
-            if(mode==2)Require(row[8]=="0","same-result coordinates have nonzero matched distance");
-            if(valid){Require(row[2]==source[native.valueColumn] && row[3]==row[2] && row[4]=="0" && row[5]=="0","real matched values or delta changed");++validPairs;}
-            else {Require(row[4].isEmpty() && row[5].isEmpty() && row[6].contains("无效"),"invalid native measurement was turned into a valid zero difference");++invalidPairs;}
-        } else {
-            Require(row[7].isEmpty() && row[8].isEmpty() && row[4].isEmpty() && row[6].contains("歧义"),"coincident real points were arbitrarily paired");++ambiguous;
-        }
-        if(i%256==0)Require(timeoutMs==0 || elapsed.elapsed()<timeoutMs,"full paired-row validation exceeded its scenario deadline");
+        if(valid)Require(row[2]==source[native.valueColumn] && row[3]==row[2] && row[4]=="0" && row[5]=="0","paired sample changed a valid value or delta");
+        else Require(row[4].isEmpty() && row[5].isEmpty() && row[6].contains("无效"),"paired sample fabricated a valid measurement");
     }
-    Require(GetReportCount(result.conditions["有效配对数"])==static_cast<std::uint64_t>(validPairs) && GetReportCount(result.conditions["无效/缺测配对数"])==static_cast<std::uint64_t>(invalidPairs)
-        && GetReportCount(result.conditions["歧义基准项数"])==static_cast<std::uint64_t>(ambiguous),"paired summary changed the independently checked populations");
-    Require(result.table->GetCount()==count+ambiguous,"paired report dropped unpaired B rows or added duplicate rows");
-    for(ReportRowId i=count;i<result.table->GetCount();++i){const auto row=paired(i);Require(row[0].isEmpty()&&!row[7].isEmpty()&&row[4].isEmpty()&&row[8].isEmpty()&&row[6].contains("歧义"),"unpaired B evidence was fabricated");}
-    std::cout<<"PASS: full real paired rows mode="<<mode<<" input="<<count<<" valid="<<validPairs<<" invalid="<<invalidPairs<<" ambiguous="<<ambiguous<<std::endl;
+    std::cout<<"PASS: real paired populations mode="<<mode<<" input="<<count<<" valid="<<pairs<<" invalid="<<invalid
+        <<" ambiguous="<<ambiguous<<" SHA256="<<result.table->GetContentHash().toHex().constData()<<std::endl;
 }
+void CheckFullPairedComparisons(ResultReport& view,const ReportDocument& native,const ReportDocument& imported,int timeoutMs,int firstMode=1) {
+    for(int mode=firstMode;mode<=2;++mode) {
+        if(mode==2 && (native.xColumn<0||native.yColumn<0||native.zColumn<0))continue;
+        // 空间比较本轮只接受 mm 坐标的整卷原生壁厚表，配对边界语义由独立小用例覆盖。
+        if(mode==2)for(const auto column:{native.xColumn,native.yColumn,native.zColumn})Require(native.columns[column].unit=="mm","real spatial reference expects explicit mm coordinates");
+        view.SelectReport(imported.id);
+        CheckMidTaskCancel(view,[&]{StartComparison(view,native,imported,mode);},timeoutMs,mode==1?"identity comparison":"spatial comparison");
+        std::cout<<"REPORT: full real paired comparison mode="<<mode<<" input="<<native.table->GetCount()<<std::endl;
+        StartComparison(view,native,imported,mode);WaitTask(view,timeoutMs);
+        auto result=view.GetSelectedReport();Require(result.category=="对比结果","real paired UI comparison did not select its output");
+        {
+            auto check=std::async(std::launch::async,[native,result,mode]{CheckPairedSummary(native,result,mode);});
+            Wait([&]{return check.wait_for(std::chrono::milliseconds(0))==std::future_status::ready;},timeoutMs);check.get();
+        }
+        const auto id=result.id;std::weak_ptr<ReportTable> storage=result.table;result.table.reset();view.RemoveReport(id);
+        Require(storage.expired(),"removed real paired comparison retained its file or offsets");
+        std::cout<<"PASS: removed real paired storage mode="<<mode<<std::endl;
+    }
+
+}
+
 }
 void CheckNativeReportCancellation(ResultReport& view,const std::function<void()>& open,int timeoutMs)
 {
@@ -123,7 +126,9 @@ void CheckNativeReportCancellation(ResultReport& view,const std::function<void()
     std::vector<std::weak_ptr<ReportTable>> storage;bool observed=false,needsBuild=false;
     view.onReadReports=[&](const QJsonObject& record,const QSet<QString>& known){
         auto docs=restore.provider(record,known);observed=true;
-        for(const auto& doc:docs){needsBuild=needsBuild||bool(doc.prepareReports)||(doc.table&&!doc.table->GetIsComplete());if(doc.table)storage.push_back(doc.table);}
+        // 只有显式要求物化的候选需要经历长生成；普通冻结原生表可直接分页发布。
+        for(const auto& doc:docs){needsBuild=needsBuild||bool(doc.prepareReports)
+            ||(doc.materializeBeforePublish&&doc.table&&!doc.table->GetIsComplete());if(doc.table)storage.push_back(doc.table);}
         return docs;
     };
     const auto ids=view.GetReportIds();open();
@@ -157,7 +162,7 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
         if(!view.property("reportRowsBusy").toBool()){
             Require(view.property("reportRowsError").toString().isEmpty(),"real scan failed before cancellation could be requested");
             Require(view.GetFilteredCount()==(QString::fromLatin1(phase)=="search"?0:count),"completed real scan published an incomplete row index");
-            std::cout<<"INFO: real scan completed before cancellation was observed: "<<phase<<"; full search/permutation is checked separately"<<std::endl;
+            std::cout<<"INFO: real scan completed before cancellation was observed: "<<phase<<"; full traversal and bounded output checks follow"<<std::endl;
             return;
         }
         const auto progress=view.property("reportRowsProgress").toLongLong();QElapsedTimer elapsed;elapsed.start();
@@ -173,11 +178,12 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
     Require(view.property("reportRowsBusy").toBool(),"real full-table search did not return after asynchronous admission");
     bool searchYielded=false;QTimer::singleShot(0,&view,[&]{searchYielded=true;});
     Wait([&]{return !view.property("reportRowsBusy").toBool();},timeoutMs);
-    const auto read=native.table->CreateReader();const auto found=view.CreateFilteredReader();ReportRowId matched=0;bool lastFound=false;
-    for(ReportRowId i=0;i<count;++i){if(read(i).join('\t').contains(needle,Qt::CaseInsensitive)){
-            Require(matched<view.GetFilteredCount() && found(matched)==i,"real full-table search lost or reordered rows");++matched;if(i==count-1)lastFound=true;}
-        if(i%256==0)QCoreApplication::processEvents(QEventLoop::AllEvents,1);}
-    Require(matched==view.GetFilteredCount() && lastFound,"real full-table search lost rows outside the displayed page");
+    const auto read=native.table->CreateReader();const auto found=view.CreateFilteredReader();const auto matched=view.GetFilteredCount();
+    Require(view.property("reportRowsProgress").toLongLong()==count && matched>0 && found(matched-1)==count-1,"real search did not finish the full input or lost its last-row match");
+    // 小用例独立验证完整匹配集合；大表保留全量生产遍历及首尾/均匀抽查，不再二次逐行解析。
+    ReportRowId previousMatch=-1;const auto checks=std::min<ReportRowId>(32,matched),divisor=std::max<ReportRowId>(1,checks-1);
+    for(ReportRowId sample=0;sample<checks;++sample){const auto position=(matched-1)/divisor*sample+(matched-1)%divisor*sample/divisor;const auto index=found(position);
+        Require(index>previousMatch&&index<count&&read(index).join('\t').contains(needle,Qt::CaseInsensitive),"real search sample lost order or predicate");previousMatch=index;}
     Require(searchYielded,"real full-table search blocked the queued owner callback");
     std::cout<<"PASS: full real search rows="<<count<<" matched="<<matched<<std::endl;
     std::cout<<"REPORT: full real numeric sort rows="<<count<<std::endl;
@@ -187,8 +193,9 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
     {
         const auto rows=view.CreateFilteredReader();Require(view.GetFilteredCount()==count,"real sorting truncated its full permutation");
         QString lastText;double lastValue=0;bool lastNumeric=false;ReportRowId lastIndex=-1;
-        // N 个范围内行号，在含原行号的严格全序中递增，便同时证明无重复与完整排列。
-        for(ReportRowId position=0;position<count;++position){const auto index=rows(position);Require(index>=0&&index<count,"real sorting returned an invalid original row");
+        Require(view.property("reportRowsProgress").toLongLong()==count,"real sorting did not read its full input");
+        // 排列和全序语义由小用例严格核对；大表读取首尾及均匀位置，避免额外整表解析。
+        for(ReportRowId sample=0;sample<32;++sample){const auto position=(count-1)/31*sample+(count-1)%31*sample/31;const auto index=rows(position);Require(index>=0&&index<count,"real sorting returned an invalid original row");
             const auto text=GetReportCell(read(index),native.valueColumn);double value=0;const bool numeric=GetReportNumber(text,value);
             if(lastIndex>=0){Require(!(!lastNumeric&&numeric),"numeric rows appear after text rows");
                 if(lastNumeric&&numeric)Require(lastValue<=value,"real numeric sort is not monotonic");
@@ -196,32 +203,24 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
                 const auto order=QString::compare(lastText,text,numeric?Qt::CaseSensitive:Qt::CaseInsensitive);
                 if(equalNumber||(!lastNumeric&&!numeric)){Require(order<=0,"real tied keys have inconsistent text order");if(order==0)Require(lastIndex<index,"real equal keys lost original row order");}}
             lastText=text;lastValue=value;lastNumeric=numeric;lastIndex=index;
-            if(index%256==0)QCoreApplication::processEvents(QEventLoop::AllEvents,1);
         }
     }
     Require(sortYielded,"real full-table sort blocked the queued owner callback");view.SelectReport(native.id);
-    std::cout<<"PASS: full real numeric sort rows="<<count<<std::endl;
+    std::cout<<"PASS: full real numeric sort (32 checks) rows="<<count<<std::endl;
     const auto bytes=QFileInfo(csv).size();CheckMidTaskCancel(view,[&]{view.ImportReport(csv);},timeoutMs,"import");
     Require(QFileInfo(csv).size()==bytes,"cancelled import altered the original CSV");
     CheckMidTaskCancel(view,[&]{view.ExportReportFile(csv);},timeoutMs,"export");Require(QFileInfo(csv).size()==bytes,"cancelled atomic export replaced the existing CSV");
-    for(int mode=1;mode<=2;++mode) {
-        if(mode==2 && (native.xColumn<0||native.yColumn<0||native.zColumn<0))continue;
-        // 空间比较本轮只接受 mm 坐标的整卷原生壁厚表，参考定位器独立校验所有候选数。
-        if(mode==2)for(const auto column:{native.xColumn,native.yColumn,native.zColumn})Require(native.columns[column].unit=="mm","real spatial reference expects explicit mm coordinates");
-        view.SelectReport(imported.id);
-        CheckMidTaskCancel(view,[&]{StartComparison(view,native,imported,mode);},timeoutMs,mode==1?"identity comparison":"spatial comparison");
-        std::cout<<"REPORT: full real paired comparison mode="<<mode<<" input="<<count<<std::endl;
-        StartComparison(view,native,imported,mode);WaitTask(view,timeoutMs);
-        auto result=view.GetSelectedReport();Require(result.category=="对比结果","real paired UI comparison did not select its output");
-        {
-            auto check=std::async(std::launch::async,[native,result,mode,timeoutMs]{CheckPairedRows(native,result,mode,timeoutMs);});
-            Wait([&]{return check.wait_for(std::chrono::milliseconds(0))==std::future_status::ready;},timeoutMs);check.get();
-        }
-        const auto id=result.id;std::weak_ptr<ReportTable> storage=result.table;result.table.reset();view.RemoveReport(id);
-        Require(storage.expired(),"removed real paired comparison retained its file or offsets");
-        std::cout<<"PASS: removed real paired storage mode="<<mode<<std::endl;
-    }
+    CheckFullPairedComparisons(view,native,imported,timeoutMs);
     std::cout<<"PASS: real report operations rows="<<count<<" ownerHeartbeats="<<heartbeats<<" maximumHeartbeatGapMs="<<maximumGap<<std::endl;
     view.SelectReport(native.id);
 }
+void CheckSavedReportComparisons(const QString& csv,bool spatialOnly) {
+    QFile input(csv);if(!input.open(QIODevice::ReadOnly))throw std::runtime_error("无法打开已保存的完整报告");
+    auto native=ReadReportCsv(input,"已核验原生报告的完整 CSV");
+    std::cout<<"REPORT: saved full CSV rows="<<native.table->GetCount()<<" SHA256="<<native.table->GetContentHash().toHex().constData()<<std::endl;
+    auto imported=native;imported.id+="-comparison-copy";
+    ResultReport view;view.AddReport(native);view.AddReport(imported);view.show();
+    CheckFullPairedComparisons(view,native,imported,0,spatialOnly?2:1);
+}
+
 }

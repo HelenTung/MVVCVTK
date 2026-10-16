@@ -786,9 +786,13 @@ int GapDisplaySuite::GetFailCount() const
     if(hasGraphShortResult&&graphShortPayloads&&graphShortPayloads->mesh&&graphShortResult.voidMesh) {
         auto* geometry=graphShortResult.voidMesh.GetPointer();
         const auto& formal=*graphShortPayloads->mesh;
-        expect((formal.GetVertices().empty()||geometry->GetPoints()->GetData()->GetVoidPointer(0)==formal.GetVertices().data())
-            &&(formal.GetTriangles().empty()||geometry->GetPolys()->GetConnectivityArray()->GetVoidPointer(0)==formal.GetTriangles().data()),
-            "Worker VTK geometry and frozen publication payload must share the original arrays.");
+        bool same=geometry->GetNumberOfPoints()==static_cast<vtkIdType>(formal.GetPointValues().size()/3)
+            &&geometry->GetNumberOfCells()==static_cast<vtkIdType>(formal.GetTriangleIndices().size()/3);
+        for(vtkIdType i=0;same&&i<geometry->GetNumberOfPoints();++i){double point[3];geometry->GetPoint(i,point);
+            for(unsigned c=0;c<3;++c)same=same&&point[c]==formal.GetPointValues()[static_cast<std::size_t>(3*i+c)];}
+        auto* cells=geometry->GetPolys()->GetConnectivityArray();
+        for(vtkIdType i=0;same&&i<cells->GetNumberOfValues();++i)same=static_cast<std::uint64_t>(cells->GetComponent(i,0))==formal.GetTriangleIndices()[static_cast<std::size_t>(i)];
+        expect(same,"Worker VTK geometry must preserve the complete readonly publication values and connectivity.");
     }
     expect(CommitDisplayResult(graphShortService)
         && graphShortCompleteCount == 1 && isGraphShortSucceeded,

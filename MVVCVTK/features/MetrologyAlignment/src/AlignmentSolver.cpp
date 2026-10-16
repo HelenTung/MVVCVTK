@@ -335,12 +335,12 @@ void SetSurfaceEquations(const AlignmentWork &work, const AlignmentMeshQuery &qu
                          const std::vector<AlignmentSurfaceSample> &samples,
                          const AlignmentMatrix &pose, std::vector<Equation> &equations,
                          AlignmentDiagnostics &diagnostics, AlignmentSurfaceStage &stage) {
-    const auto &v = work.mesh->GetVertices();
+    const auto &v = work.mesh->GetPointValues();
     double area = 0, acceptedArea = 0;
     diagnostics.rejectedPairs = 0;
-    const MeshAttribute *normal = nullptr;
+    const MeshField *normal = nullptr;
     if (work.recipe.minPairNormalCosine) {
-        for (const auto &attribute : work.mesh->GetPointAttributes())
+        for (const auto &attribute : work.mesh->GetPointFields())
             if (attribute.name == "measurement.normal") normal = &attribute;
         Require(normal && normal->componentCount == 3 && normal->values.size() == v.size(),
                 "Surface normal gate requires source measurement normals.");
@@ -482,7 +482,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
     if (recipe.method == AlignmentMethod::ConstrainedBestFit && !recipe.surfaceFit) {
         Require(recipe.exactMesh == work.input.mesh,
                 "Best-fit correspondence belongs to another mesh revision.");
-        const auto &v = work.mesh->GetVertices();
+        const auto &v = work.mesh->GetPointValues();
         std::size_t accepted = 0;
         for (std::size_t i = 0; i < recipe.fitPairs.size(); ++i) {
             CheckWork(work);
@@ -494,8 +494,8 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
             bool used = AlignmentGeometryFit::GetPointUsable(work, index) &&
                         cv::norm(Transform(output.sourceToTarget, p) - q) <= recipe.maxPairDistance;
             if (recipe.minPairNormalCosine) {
-                const MeshAttribute *normal = nullptr;
-                for (const auto &attribute : work.mesh->GetPointAttributes())
+                const MeshField *normal = nullptr;
+                for (const auto &attribute : work.mesh->GetPointFields())
                     if (attribute.name == "measurement.normal")
                         normal = &attribute;
                 Require(pair.targetNormal && normal && normal->componentCount == 3 &&
@@ -546,7 +546,7 @@ AlignmentCandidate SolvePose(const AlignmentWork &work, const AlignmentMatrix &i
         // 选区只在初始姿态确定一次；各级采样引用相同不可变顶点。
         const auto dense = AlignmentSurfaceSampling::Build(work, initial, baseBytes, needsDirections);
         Vec sourcePivot{};
-        const auto &vertices = work.mesh->GetVertices();
+        const auto &vertices = work.mesh->GetPointValues();
         for (const auto &sample : dense.points) {
             CheckWork(work);
             const auto id = sample.vertex;
@@ -621,7 +621,7 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
     AlignmentCandidate result;
     try {
         Require(AlignmentGeometryFit::GetRecipeValid(work.recipe, work.config), "Invalid recipe.");
-        Require(work.mesh && work.mesh->GetVertices().size() % 3 == 0 &&
+        Require(work.mesh && work.mesh->GetPointValues().size() % 3 == 0 &&
                     work.mesh->GetCoordinateFrame() == work.input.coordinateFrame && work.input.unit == work.recipe.unit,
                 "Invalid mesh or incompatible spatial units.");
         Require(!work.poses.empty() && work.poses.size() <= 8,
@@ -657,7 +657,7 @@ AlignmentCandidate AlignmentSolver::BuildResult(const AlignmentWork &work) {
                                                     work.recipe.surfaceFit->referenceTriangles);
         }
         std::vector<AlignmentMatrix> validPoses;
-        const auto &vertices = work.mesh->GetVertices();
+        const auto &vertices = work.mesh->GetPointValues();
         Vec center{};
         const auto pointCount = vertices.size() / 3;
         Require(pointCount > 0, "Empty source geometry.");

@@ -676,7 +676,7 @@ bool CropHostFeature::Impl::Document::SetPolyData(
 {
     if (!m_data || !polyData || m_isPublishing || m_sourceTransition) return false;
     auto payload = VtkPreparedDataView::BuildMeshPayload(polyData);
-    if (!payload || payload->GetVertices().empty()) return false;
+    if (!payload || payload->GetPointValues().empty()) return false;
 
     const auto graph = m_data->GetDataGraph();
     DataBinding inputBinding;

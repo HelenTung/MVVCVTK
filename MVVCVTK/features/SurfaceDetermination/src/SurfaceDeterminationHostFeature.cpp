@@ -10,6 +10,8 @@
 #include "SurfaceDeterminationService.h"
 #include "SurfaceGenerationStore.h"
 #include "SurfaceContracts.h"
+#include "SurfaceGeometryStorage.h"
+#include "MeshVtkStorage.h"
 #include "SurfaceOverlayStrategy.h"
 
 #include <vtkCellArray.h>
@@ -26,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -147,6 +150,19 @@ private:
         std::string viewId;
     };
 
+    struct ObjectJob final {
+        std::uint64_t id=0;
+        std::shared_ptr<const SurfaceGenerationSnapshot> generation;
+        SurfaceObjectRecord object;
+        VtkImageGridSnapshot source;
+        std::vector<HostFeatureView> views;
+        SurfaceDeterminationCallback callback;
+        std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+        std::future<std::shared_ptr<const FeatureInternal::SpatialMeshSource>> future;
+        ~ObjectJob(){cancelled->store(true);if(future.valid())future.wait();}
+    };
+    bool ClearObjectSelection();
+    void ContinueObjectSelection();
     struct RequestEntry final {
         VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
@@ -239,7 +255,12 @@ private:
     std::vector<HostFeatureView> m_previewViews;
     VtkImageGridSnapshot m_activeSource;
     std::vector<HostFeatureView> m_activeViews;
-    std::vector<OverlayBinding> m_bindings;
+    std::vector<OverlayBinding> m_bindings,m_objectBindings;
+    std::unique_ptr<ObjectJob> m_objectJob;
+    std::shared_ptr<const SurfaceGenerationSnapshot> m_objectGeneration;
+    VtkImageGridSnapshot m_objectSource;
+    FeatureOperationState m_objectOperation;
+    std::uint64_t m_objectIntent=0;
     std::shared_ptr<FeatureInternal::SpatialMeshCache> m_displayData;
     std::shared_ptr<const FeatureInternal::SpatialMeshSource> m_previewDisplay;
     std::string m_previewDisplayError,m_displayPrepareError;
@@ -381,6 +402,8 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
         SetSourceStale();
     }
     SetBindingProjection();
+    ContinueObjectSelection();
+    if(!m_isAttached || !m_service)return false;
     for (auto& item : m_requests) {
         RequestEntry& request = item.second;
         if (!request.isSourceChanged && !GetRequestInputsSame(request))
@@ -415,6 +438,10 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
     }
     {const std::lock_guard<std::mutex> lock(m_stateMutex);m_state.isDisplayComplete=displayComplete;m_state.hasDisplayFailure=displayFailed;
         m_state.displayRequestedBatches=requested;m_state.displayLoadedBatches=loaded;m_state.displayMessage=std::move(displayMessage);}
+    for(auto& binding:m_objectBindings) {
+        if(auto mesh=std::dynamic_pointer_cast<SurfaceOverlayStrategy>(binding.overlay))changed=mesh->GetDisplay().Refresh()||changed;
+        else if(auto slice=std::dynamic_pointer_cast<SurfaceSliceOverlayStrategy>(binding.overlay))changed=slice->GetDisplay().Refresh()||changed;
+    }
     if(changed)(void)SendDisplayDelta();
     return true;
 }
@@ -435,6 +462,50 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
     }
     SetBindingProjection();
 
+    if(const auto* select=std::get_if<SurfaceObjectSelectionRequest>(&request)) {
+        const auto displayed=GetDisplayGeneration();
+        if(!GetTargetsUsed(select->targetViews)&&displayed&&displayed->dataRevision==select->generation) {
+            if(!ClearObjectSelection()||!SetObjectSelection(*select))return admission;
+            const auto id=GetNextRequestId();const auto state=GetState();
+            auto result=BuildResult(id,SurfaceResultStatus::Succeeded,SurfaceFailureReason::None,state.sourceRevision,
+                state.resultRevision,state.pointCount,state.objectCount,"Surface object selection updated.");
+            result.dataRevision=select->generation;SendComplete(std::move(onComplete),std::move(result));
+            return {SurfaceAdmissionStatus::Accepted,id};
+        }
+        if(!select->objectIndex) {
+            const auto id=GetNextRequestId();if(!ClearObjectSelection())return admission;
+            admission={SurfaceAdmissionStatus::Accepted,id};
+            SendComplete(std::move(onComplete),BuildResult(id,SurfaceResultStatus::Succeeded,SurfaceFailureReason::None,{},m_resultRevision,0,0,"Surface object highlight cleared."));
+            return admission;
+        }
+        if(!GetTargetsUsed(select->targetViews))return admission;
+        const auto generation=m_store.GetGeneration(select->generation);
+        if(!generation || !generation->objects || *select->objectIndex>=generation->objects->size())return admission;
+        const auto object=(*generation->objects)[*select->objectIndex];if(object.objectIndex!=*select->objectIndex)return admission;
+        const auto source=m_data->GetImageGrid(m_data->GetDataGraph(),generation->sourceRevision);
+        const auto primary=m_data->GetPrimaryImage();
+        if(!primary || !primary->data || primary->data->self!=generation->sourceRevision || !source || !GetSourceSame(source)){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
+        auto targets=select->targetViews;if(!GetTargetsUsed(targets))targets.viewRoles={HostRenderViewRole::Primary3D};
+        auto views=GetTargetViews(targets);if(views.empty())return admission;
+        const auto intention=m_objectIntent+1;
+        if(!ClearObjectSelection())return admission;
+        // 清除旧高亮的回调可能解绑；重新核对，不能在重入后使用失效的 Host。
+        if(m_objectIntent!=intention || !m_isAttached || m_isDetaching || !m_host)return admission;
+        auto job=std::make_unique<ObjectJob>();job->id=GetNextRequestId();job->generation=generation;
+        job->object=object;job->source=source;job->views=std::move(views);job->callback=std::move(onComplete);
+        const auto cancelled=job->cancelled;
+        try {job->future=std::async(std::launch::async,[generation,object,cancelled,weakHost=std::weak_ptr<FeatureHostControl>(m_host)]{
+            struct Notify { std::weak_ptr<FeatureHostControl> host; ~Notify(){if(auto live=host.lock())(void)live->SendWorkAvailable();} } notify{weakHost};
+            const auto stopped=[cancelled]{return cancelled->load();};
+            const auto mesh=BuildSurfaceObjectMesh(*generation,object,stopped);
+            return mesh?FeatureInternal::SpatialMeshSource::Build(mesh,stopped):nullptr;
+        });}catch(...){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
+        admission={SurfaceAdmissionStatus::Accepted,job->id};
+        m_objectOperation={};m_objectOperation.operation={std::string(featureId),m_host->GetAttachmentId(),job->id};
+        m_objectOperation.status=FeatureRunStatus::Running;m_objectOperation.stateRevision=1;
+        m_objectOperation.inputs={{"source-volume",generation->sourceRevision},{"generation",generation->dataRevision},{"mesh",generation->meshRevision}};
+        m_objectJob=std::move(job);(void)m_host->SendWorkAvailable();return admission;
+    }
     if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
         auto params = start->start.value_or(m_config.defaultStart);
         if (params.businessMode != SurfaceBusinessMode::Production) {
@@ -464,12 +535,15 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
             if (!GetRoiCurrent(inputs.roi, params.sourcePolicy)) return admission;
         }
         if(params.parentGeneration){inputs.parent=m_store.GetGeneration(*params.parentGeneration);
+            const auto data=m_data->GetData(graph,*params.parentGeneration);
+            const auto* payload=data?dynamic_cast<const SurfaceGenerationPayload*>(data->payload.get()):nullptr;
+            if(payload)inputs.parentStorage=payload->GetStorage();
             if(!inputs.parent || inputs.parent->sourceRevision!=source->data->self || inputs.parent->algorithmRevision!=surfaceAlgorithmRevision
                 || SurfaceRecipeCodec::BuildText(params)!=SurfaceRecipeCodec::BuildText(inputs.parent->requestedParams))return admission;
             const auto parent=m_data->GetData(graph,inputs.parent->dataRevision);
             const auto mesh=m_data->GetData(graph,inputs.parent->meshRevision);
-            const auto* payload=parent?dynamic_cast<const SurfaceGenerationPayload*>(parent->payload.get()):nullptr;
-            if(payload)inputs.parentDisplay=payload->GetDisplaySource();
+            const auto* parentPayload=parent?dynamic_cast<const SurfaceGenerationPayload*>(parent->payload.get()):nullptr;
+            if(parentPayload)inputs.parentDisplay=parentPayload->GetDisplaySource();
             inputs.parentMesh=mesh?std::dynamic_pointer_cast<const SurfaceMeshPayload>(mesh->payload):nullptr;
             if(!inputs.parentMesh)return admission;
         }
@@ -578,13 +652,6 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
 
-    if(const auto* selection=std::get_if<SurfaceObjectSelectionRequest>(&request)) {
-        if(!SetObjectSelection(*selection))return admission;
-        const auto id=GetNextRequestId();const auto state=GetState();
-        auto result=BuildResult(id,SurfaceResultStatus::Succeeded,SurfaceFailureReason::None,state.sourceRevision,
-            state.resultRevision,state.pointCount,state.objectCount,"Surface object selection updated.");
-        result.dataRevision=selection->generation;SendComplete(std::move(onComplete),std::move(result));return {SurfaceAdmissionStatus::Accepted,id};
-    }
     if(const auto* mode=std::get_if<SurfaceObjectPickModeRequest>(&request)) {
         if(!SetObjectPicking(mode->isEnabled))return admission;
         const auto id=GetNextRequestId();const auto state=GetState();
@@ -689,20 +756,16 @@ std::size_t SurfaceDeterminationHostFeature::Impl::GetRetainedBytes() const
                 bytes += count * width;
             };
             if (generation->points)
-                add(generation->points->capacity(), sizeof(SurfacePointRecord));
+                add(generation->points->GetResidentBytes(),1);
             if (generation->triangleIndices)
-                add(generation->triangleIndices->capacity(), sizeof(std::uint32_t));
+                add(generation->triangleIndices->GetResidentBytes(),1);
             if (generation->triangleValidity)
-                add(generation->triangleValidity->capacity(), sizeof(std::uint8_t));
+                add(generation->triangleValidity->GetResidentBytes(),1);
             if (generation->objects)
-                add(generation->objects->capacity(), sizeof(SurfaceObjectRecord));
-            // 活跃通用网格及显示缓存保守覆盖；DataGraph 独立持有的历史与借用的源卷不在本工作集内。
-            if (generation->points)
-                add(generation->points->size(), 2 * 14 * sizeof(double));
-            if (generation->triangleIndices)
-                add(generation->triangleIndices->size(), 2 * sizeof(std::uint64_t));
-            if (generation->triangleValidity)
-                add(generation->triangleValidity->size(), 2 * sizeof(double));
+                add(generation->objects->GetResidentBytes(),1);
+            if(generation->selection)add(generation->selection->GetResidentBytes(),1);
+            // VTK 连接数组另计固定映射窗口，属性与点共享正式文件来源。
+            add(8*1024*1024,1);
         }
     return bytes;
 }
@@ -994,8 +1057,61 @@ void SurfaceDeterminationHostFeature::Impl::RemoveBindings(
     bindings.clear();
 }
 
+bool SurfaceDeterminationHostFeature::Impl::ClearObjectSelection()
+{
+    ++m_objectIntent;
+    auto job=std::move(m_objectJob);if(job)job->cancelled->store(true);
+    const auto source=m_objectSource;std::vector<std::string> retiredViews;
+    for(const auto& binding:m_objectBindings)retiredViews.push_back(binding.viewId);
+    RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();
+    m_objectOperation.status=FeatureRunStatus::Cancelled;++m_objectOperation.stateRevision;
+    bool updated=SendDisplayDelta();
+    if(m_bindings.empty() && source && source->data && !retiredViews.empty() && m_host) {
+        std::sort(retiredViews.begin(),retiredViews.end());retiredViews.erase(std::unique(retiredViews.begin(),retiredViews.end()),retiredViews.end());
+        FeatureSceneDelta delta;delta.requestId=GetNextRequestId();delta.priority=FeatureScenePriority::Scene;delta.scope=FeatureSceneScope::RequiredAllViews;
+        delta.viewIds=retiredViews;delta.inputStamp={source->data->self};delta.inputs={{"source-volume",source->data->self}};delta.hasDisplayUpdate=true;
+        updated=m_host->SendSceneDelta(std::move(delta)) && m_host->SetActiveViews({});
+    }
+
+    if(job) {
+        auto result=BuildResult(job->id,SurfaceResultStatus::Cancelled,SurfaceFailureReason::Cancelled,job->generation->sourceRevision,
+            job->generation->resultRevision,0,0,"Surface object highlight was cancelled.");
+        result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
+        SendComplete(std::move(job->callback),std::move(result));
+    }
+    return updated;
+}
+void SurfaceDeterminationHostFeature::Impl::ContinueObjectSelection()
+{
+    const auto primary=m_data->GetPrimaryImage();
+    const auto same=[&](const VtkImageGridSnapshot& source){return primary && primary->data && source && source->data && primary->data->self==source->data->self && GetSourceSame(source);};
+    if(m_objectSource && !same(m_objectSource)){(void)ClearObjectSelection();return;}
+    if(!m_objectJob)return;
+    if(!same(m_objectJob->source)){(void)ClearObjectSelection();return;}
+    if(m_objectJob->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+    auto job=std::move(m_objectJob);
+    auto result=BuildResult(job->id,SurfaceResultStatus::Failed,SurfaceFailureReason::DisplayFailed,job->generation->sourceRevision,
+        job->generation->resultRevision,job->object.pointCount,1,"Surface object highlight preparation failed.");
+    result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
+    try {
+        const auto source=job->future.get();
+        const auto display=source?std::make_shared<FeatureInternal::SpatialMeshCache>(source,m_service->GetReadQueue(),128):nullptr;
+        if(display && BuildBindings(display,job->views,job->source,m_objectBindings,true)) {
+            m_objectGeneration=job->generation;m_objectSource=job->source;
+            m_objectOperation.status=FeatureRunStatus::Succeeded;m_objectOperation.progress=1;++m_objectOperation.stateRevision;
+            auto active=GetViewIds(job->views);for(const auto& binding:m_bindings)active.push_back(binding.viewId);
+            std::sort(active.begin(),active.end());active.erase(std::unique(active.begin(),active.end()),active.end());
+            if(m_host->SetActiveViews(active) && SendDisplayDelta()) {
+                result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Surface object range highlighted without re-extraction.";
+            }
+        }
+    }catch(const std::exception& error){result.message=error.what();}
+    if(result.status!=SurfaceResultStatus::Succeeded){RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();m_objectOperation.status=FeatureRunStatus::Failed;++m_objectOperation.stateRevision;(void)SendDisplayDelta();}
+    SendComplete(std::move(job->callback),std::move(result));
+}
 bool SurfaceDeterminationHostFeature::Impl::RemoveDisplay()
 {
+    (void)ClearObjectSelection();
     (void)SetObjectPicking(false);
     RemoveBindings(m_bindings);
     m_displayData = nullptr;
@@ -1011,26 +1127,32 @@ SurfaceDeterminationHostFeature::Impl::GetDisplayGeneration() const
 
 bool SurfaceDeterminationHostFeature::Impl::SendDisplayDelta()
 {
-    if (m_bindings.empty()) return true;
+    if (m_bindings.empty() && m_objectBindings.empty()) return true;
     try {
         const auto generation = GetDisplayGeneration();
         const bool isPreview = generation && generation->purpose == SurfaceTaskPurpose::Preview;
-        const auto source = isPreview ? m_previewSource : m_activeSource;
+        const auto source = m_bindings.empty()?m_objectSource:(isPreview?m_previewSource:m_activeSource);
         const auto& views = isPreview ? m_previewViews : m_activeViews;
-        if (!m_host || !source || !source->data || !generation) return false;
+        if (!m_host || !source || !source->data) return false;
         FeatureSceneDelta delta;
         delta.requestId = GetNextRequestId();
         delta.priority = FeatureScenePriority::Scene;
         delta.scope = FeatureSceneScope::RequiredAllViews;
         delta.inputStamp = { source->data->self };
         delta.viewIds = GetViewIds(views);
+        for(const auto& binding:m_objectBindings)delta.viewIds.push_back(binding.viewId);
+        std::sort(delta.viewIds.begin(),delta.viewIds.end());delta.viewIds.erase(std::unique(delta.viewIds.begin(),delta.viewIds.end()),delta.viewIds.end());
         delta.hasDisplayUpdate = true;
         delta.inputs = { { "source-volume", source->data->self } };
-        if (!isPreview) {
+        if (!isPreview && generation && !m_bindings.empty()) {
             delta.inputs.push_back({ "mesh", generation->meshRevision });
             for (const auto& binding : m_bindings)
                 delta.displays.push_back({ binding.viewId, std::string(featureId), "surface",
                     generation->meshRevision, m_displayOperation.operation });
+        }
+        if(m_objectGeneration && !m_objectBindings.empty()) {
+            delta.inputs.push_back({"object-generation",m_objectGeneration->dataRevision});delta.inputs.push_back({"object-mesh",m_objectGeneration->meshRevision});
+            for(const auto& binding:m_objectBindings)delta.displays.push_back({binding.viewId,std::string(featureId),"surface-object",m_objectGeneration->meshRevision,m_objectOperation.operation});
         }
         return m_host->SendSceneDelta(std::move(delta));
     }
@@ -1056,6 +1178,7 @@ std::vector<FeatureOperationState> SurfaceDeterminationHostFeature::Impl::GetOpe
         && m_displayOperation.operation.requestId != m_lastOperation.operation.requestId
         && m_requests.find(m_displayOperation.operation.requestId) == m_requests.end())
         states.push_back(m_displayOperation);
+    if(m_objectJob || !m_objectBindings.empty())states.push_back(m_objectOperation);
     return states;
 }
 
@@ -1131,9 +1254,13 @@ InteractionResult SurfaceDeterminationHostFeature::Impl::OnObjectInput(const Int
     }
     if(!face||!generation->objects)return {true,true,true,InteractionFailureReason::None};
     const auto& objects=*generation->objects;
-    const auto object=std::lower_bound(objects.begin(),objects.end(),*face,[](const auto& record,std::uint64_t id){return id>=record.firstTriangle&&id-record.firstTriangle>=record.triangleCount;});
-    if(object==objects.end()||*face<object->firstTriangle||*face-object->firstTriangle>=object->triangleCount)return {true,true,true,InteractionFailureReason::None};
-    const bool succeeded=SetObjectSelection({generation->dataRevision,object->objectIndex,false});
+    std::size_t first=0,last=objects.size();
+    while(first<last){const auto middle=first+(last-first)/2;const auto object=objects[middle];
+        if(*face>=object.firstTriangle&&*face-object.firstTriangle>=object.triangleCount)first=middle+1;else last=middle;}
+    if(first==objects.size())return {true,true,true,InteractionFailureReason::None};
+    const auto object=objects[first];
+    if(*face<object.firstTriangle||*face-object.firstTriangle>=object.triangleCount)return {true,true,true,InteractionFailureReason::None};
+    const bool succeeded=SetObjectSelection({generation->dataRevision,object.objectIndex,false});
     return {true,true,succeeded,succeeded?InteractionFailureReason::None:InteractionFailureReason::StateRejected};
 }
 
@@ -1301,6 +1428,7 @@ void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
                 return;
             }
             m_store.SetGeneration(snapshot);
+            m_displayData.reset();
             // Historical activation is a new display attempt; it does not rewrite graph history.
             m_displayOperation = {};
             m_displayOperation.operation = { std::string(featureId), m_host->GetAttachmentId(), GetNextRequestId() };
@@ -1511,16 +1639,13 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
     const RequestEntry &request, SurfaceAlgorithmResult &result, const std::uint64_t requestId,
     const bool isFormal)
 {
-    if(result.sharedParent) {
-        if(result.sharedParent!=request.inputs.parent || !result.sharedParent->points || !result.sharedParent->triangleIndices
-            || !result.sharedParent->objects || !result.sharedParent->triangleValidity)return {};
-    } else if (result.points.empty() || result.triangleIndices.empty() || result.objects.empty()
+    if (!result.prepared || result.points.empty() || result.triangleIndices.empty() || result.objects.empty()
         || result.triangleValidity.size() != result.triangleIndices.size() / 3) return {};
     const auto* image = dynamic_cast<const ImageGrid3DPayload*>(request.source->data->payload.get());
     if (!image || image->GetGeometry().coordinateFrame.empty()) return {};
     SurfaceGenerationSnapshot generation;
     generation.inputs = request.operation.inputs;
-    if (request.inputs.roi) generation.selection=std::make_shared<const DataArray<SurfaceSelectionPiece>>(std::move(result.selection));
+    if (request.inputs.roi) generation.selection=std::make_shared<const MeshReadArray<SurfaceSelectionPiece>>(result.prepared->selection);
     generation.selectedAreaMM2=result.selectedAreaMM2;generation.selectionToleranceMM=result.selectionToleranceMM;
     generation.execution = result.execution;
     generation.interfaces =
@@ -1546,13 +1671,11 @@ std::shared_ptr<SurfaceGenerationSnapshot> SurfaceDeterminationHostFeature::Impl
     generation.algorithmRevision = result.algorithmRevision;
     generation.method = result.method;
     generation.isoEstimate = result.isoEstimate;
-    if(result.sharedParent){generation.points=result.sharedParent->points;generation.triangleIndices=result.sharedParent->triangleIndices;generation.triangleValidity=result.sharedParent->triangleValidity;generation.objects=result.sharedParent->objects;generation.interfaces=result.sharedParent->interfaces;}
-    else {
-        generation.points = std::make_shared<const DataArray<SurfacePointRecord>>(std::move(result.points));
-        generation.triangleIndices = std::make_shared<const DataArray<std::uint32_t>>(std::move(result.triangleIndices));
-        generation.triangleValidity = std::make_shared<const DataArray<std::uint8_t>>(std::move(result.triangleValidity));
-        generation.objects = std::make_shared<const DataArray<SurfaceObjectRecord>>(std::move(result.objects));
-    }
+    generation.points = std::make_shared<const MeshReadArray<SurfacePointRecord>>(result.prepared->points);
+    generation.triangleIndices = std::make_shared<const MeshReadArray<std::uint32_t>>(result.prepared->triangles);
+    generation.triangleValidity = std::make_shared<const MeshReadArray<std::uint8_t>>(result.prepared->validity);
+    generation.objects = std::make_shared<const MeshReadArray<SurfaceObjectRecord>>(result.prepared->objects);
+    if(request.inputs.parent){generation.points=request.inputs.parent->points;generation.triangleIndices=request.inputs.parent->triangleIndices;generation.triangleValidity=request.inputs.parent->triangleValidity;generation.objects=request.inputs.parent->objects;generation.interfaces=request.inputs.parent->interfaces;}
     return std::make_shared<SurfaceGenerationSnapshot>(std::move(generation));
 }
 
@@ -1598,15 +1721,9 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         publicationBytes += count * width;
         return true; // 正式结果由后备存储保活，总逻辑字节数不作为驻留准入。
     };
-    if (!charge(result.points.capacity(), sizeof(SurfacePointRecord)) ||
-        !charge(result.triangleIndices.capacity(), sizeof(std::uint32_t)) ||
-        !charge(result.triangleValidity.capacity(), sizeof(std::uint8_t)) ||
-        !charge(result.objects.capacity(), sizeof(SurfaceObjectRecord)) ||
-        !charge(result.selection.capacity(),sizeof(SurfaceSelectionPiece)+3*(7*sizeof(double)+sizeof(std::uint64_t))) ||
-        !charge(result.points.size(), 2 * 14 * sizeof(double)) ||
-        !charge(result.triangleValidity.size(), 2 * sizeof(double)) ||
-        !charge(result.triangleIndices.size(), 2 * sizeof(std::uint64_t)))
-        throw std::bad_alloc{};
+    if(!result.prepared || !charge(result.points.GetResidentBytes(),1) || !charge(result.triangleIndices.GetResidentBytes(),1)
+        || !charge(result.triangleValidity.GetResidentBytes(),1) || !charge(result.objects.GetResidentBytes(),1)
+        || !charge(result.selection.GetResidentBytes(),1))throw std::bad_alloc{};
     result.execution.estimatedWorkingBytes =
         std::max(result.execution.estimatedWorkingBytes, publicationBytes);
     const auto stagedGeneration = BuildGeneration(request, result, requestId, true);
@@ -1669,7 +1786,7 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         std::move(generationInputs),
         std::make_shared<const SurfaceGenerationPayload>(stagedGeneration,
             SurfaceGenerationPayload::Statistics{result.acceptedPointCount, result.lowContrastPointCount,
-                result.rejectedPointCount, result.truncatedPointCount, result.nonManifoldObjectCount},std::move(prepared.display),std::move(prepared.displayError)), provenance});
+                result.rejectedPointCount, result.truncatedPointCount, result.nonManifoldObjectCount},result.prepared,std::move(prepared.display),std::move(prepared.displayError)), provenance});
     if (!isHistorical) transaction.bindings.push_back({ expected.name,
         expected.revision, true, expected.target, generationRef });
 

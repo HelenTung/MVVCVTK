@@ -27,9 +27,12 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QThread>
+#include <condition_variable>
+#include <mutex>
 #include <QTreeWidget>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <atomic>
@@ -38,6 +41,17 @@
 #include <stdexcept>
 
 namespace Manual {
+class ReportTaskTestAccess final {
+public:
+    static void BeforeStart(ResultReport& view,std::function<void()> hook){view.m_beforeWorkerStart=std::move(hook);}
+    static void Start(ResultReport& view,std::function<ReportDocument(const ReportCheckpoint&)> work){view.StartTask(std::move(work));}
+    static bool HasTask(const ResultReport& view){return bool(view.m_task);}
+    static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
+    static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
+    static void Generate(ResultReport& view){view.ContinueGeneration();}
+    static ReportRows Rows(const ResultReport& view){return view.m_rows;}
+    static void SetRows(ResultReport& view,ReportRows rows){view.m_rows=std::move(rows);}
+};
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class F> void Wait(F pending) {
@@ -70,10 +84,38 @@ bool Visible(ResultReport& view,const QString& id) {
     return false;
 }
 void CheckSemanticRoundtrip() {
+    const auto hashOf=[](const QStringList& cells){ReportTable table;table.Append(cells);return table.GetContentHash();};
+    Require(hashOf({"a,b","c"})!=hashOf({"a","b,c"}) && hashOf({"a"})!=hashOf({"a",""})
+        && hashOf({"a","b"})!=hashOf({"b","a"}),"normalized hash lost cell boundaries, missing values or column order");
+    ReportTable ordered,reversed;ordered.Append({"a"});ordered.Append({"b"});reversed.Append({"b"});reversed.Append({"a"});
+    Require(ordered.GetContentHash()!=reversed.GetContentHash(),"normalized hash lost native row order");
+    auto quoted=Read("item_id,thickness_mm\n\"中文,\"\"引号\"\"\n换行\",\n");
+    QByteArray quotedBytes;QBuffer quotedOutput(&quotedBytes);quotedOutput.open(QIODevice::WriteOnly);WriteReportCsv(quotedOutput,quoted);
+    Require(quoted.table->GetContentHash()==Read(quotedBytes).table->GetContentHash(),"CSV escaping changed normalized row hash");
+    int reads=0;auto callback=Document("hash-callback");
+    callback.table=std::make_shared<ReportTable>(3,[&](ReportRowId row){++reads;return QStringList{QString::number(row),"1"};});
+    QByteArray callbackBytes;QBuffer callbackOutput(&callbackBytes);callbackOutput.open(QIODevice::WriteOnly);WriteReportCsv(callbackOutput,callback);
+    const auto exportedReads=reads;
+    Require(callback.table->GetContentHash()==Read(callbackBytes).table->GetContentHash() && reads==exportedReads,
+        "full callback export did not retain its complete hash without another row traversal");
+
+    for(const bool filtered:{false,true}) {
+        int partialReads=0;auto partial=Document("partial-hash");
+        partial.table=std::make_shared<ReportTable>(3,[&](ReportRowId row){++partialReads;return QStringList{QString::number(row),"1"};});
+        QByteArray partialBytes;QBuffer partialOutput(&partialBytes);partialOutput.open(QIODevice::WriteOnly);
+        auto rows=GetReportRowRange(1);int checkpoints=0;
+        try{WriteReportCsv(partialOutput,partial,filtered?&rows:nullptr,[&]{if(++checkpoints==2)throw std::runtime_error("cancel");});}
+        catch(const std::runtime_error&){Require(!filtered,"filtered hash fixture unexpectedly failed");}
+        const auto before=partialReads;
+        Require(partial.table->GetContentHash()==callback.table->GetContentHash() && partialReads==before+3,
+            "partial or cancelled export published an incomplete full-table hash");
+    }
+
     for(const auto& quantity:QStringList{"表面对象体积","选区单元体积和","本次统计体积","半径相对名义偏差"}) {
         auto native=Document(quantity,quantity);
         QByteArray bytes;QBuffer output(&bytes);output.open(QIODevice::WriteOnly);WriteReportCsv(output,native);output.close();
         auto copy=Read(bytes);
+        Require(native.table->GetContentHash()==copy.table->GetContentHash(),"CSV roundtrip changed full normalized content hash");
         Require(copy.columns[1].quantity==quantity && copy.columns[1].unit=="mm3","CSV roundtrip lost business semantics");
         const auto original=native.table->Read(1),restored=copy.table->Read(1);
         Require(copy.columns[1].name==native.columns[1].name && original.size()==restored.size() && std::equal(original.cbegin(),original.cend(),restored.cbegin()),"CSV roundtrip changed headings or exact values");
@@ -122,9 +164,93 @@ void CheckSpatialEvidence() {
     const auto result=CompareReports(a,b,o);const auto pair=result.table->Read(0),unmatched=result.table->Read(1);
     Require(pair[0]=="a" && pair[7]=="b" && std::abs(pair[8].toDouble()-.005)<1e-12,"spatial report lost A/B IDs or physical pairing distance");
     Require(unmatched[0].isEmpty() && unmatched[7]=="missing" && unmatched[8].isEmpty() && unmatched[4].isEmpty(),"unmatched B point fabricated baseline identity, distance or delta");
+    auto coincident=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\na,0,0,0,1\nb,0,0,0,2\nc,1,0,0,3\n");
+    const auto duplicate=CompareReports(coincident,coincident,o);
+    Require(duplicate.conditions["有效配对数"]==1 && duplicate.conditions["歧义基准项数"]==2 && duplicate.table->GetCount()==5
+        && duplicate.table->Read(0)[7].isEmpty() && duplicate.table->Read(3)[0].isEmpty(),"coincident positions were arbitrarily paired or lost unmatched evidence");
     auto far=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nfar,1e20,0,0,3\nnear,0,0,0,4\n");
     o.distanceTolerance=1e-9;const auto fallback=CompareReports(far,far,o);
     Require(fallback.conditions["有效配对数"]==2 && fallback.table->GetCount()==2 && fallback.table->Read(0)[8]=="0", "spatial acceleration range rejected valid finite coordinates instead of completing a full scan");
+}
+void CheckWorkerStartupAndRecovery() {
+    auto document=Document("launch-input");QTemporaryDir directory;const auto path=directory.filePath("input.csv");ExportReport(path,document);
+    ResultReport view;auto queued=Document("queued-after-launch-failure");
+    view.onReadReports=[queued](const QJsonObject&,const QSet<QString>&){return QVector<ReportDocument>{queued};};
+    view.QueueReport({{"operationId","queued-launch"},{"module","Surface"},{"result",QJsonObject{{"generation","queued-generation"}}}});view.show();
+    int starts=0;ReportTaskTestAccess::BeforeStart(view,[&]{if(++starts==1)throw std::runtime_error("injected worker startup failure");});
+    bool rejected=false;try{view.ImportReport(path);}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected&&!ReportTaskTestAccess::HasTask(view)&&!view.property("reportTaskBusy").toBool(),"failed worker startup retained a task placeholder");
+    Wait([&]{return !view.GetReportIds().contains(queued.id);});
+    view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.property("reportTaskError").toString().isEmpty()&&view.GetSelectedReport().table->GetCount()==2,"worker startup failure prevented retry or paused native generation permanently");
+    auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();auto entered=std::make_shared<std::atomic<bool>>(false);
+    struct ReleaseOnExit final {std::shared_ptr<std::promise<void>> promise;~ReleaseOnExit(){try{promise->set_value();}catch(...){}}} cleanup{release};
+    ReportTaskTestAccess::Start(view,[entered,ready](const ReportCheckpoint&)->ReportDocument{entered->store(true);if(ready.wait_for(std::chrono::seconds(30))!=std::future_status::ready)throw std::runtime_error("IO fixture release guard");throw std::runtime_error("injected IO failure");});
+    Wait([&]{return !entered->load();});view.CancelTasks();release->set_value();Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.property("reportTaskError").toString()=="injected IO failure","cancellation hid a real worker failure");
+    view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});Require(view.property("reportTaskError").toString().isEmpty(),"worker failure prevented a subsequent request");
+
+}
+void CheckReopenedGeneration() {
+    ResultReport view;const auto document=Document("reopened-native");int attempts=0;
+    auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();
+    auto entered=std::make_shared<std::atomic<bool>>(false);
+    struct ReleaseOnExit final {std::shared_ptr<std::promise<void>> promise;~ReleaseOnExit(){try{promise->set_value();}catch(...){}}} cleanup{release};
+    view.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
+        const bool first=++attempts==1;
+        return [first,ready,entered,document](const ReportCheckpoint& check) {
+            if(first){entered->store(true);if(ready.wait_for(std::chrono::seconds(30))!=std::future_status::ready)throw std::runtime_error("reopen fixture release guard");}
+            check();return QVector<ReportDocument>{document};
+        };
+    };
+    view.QueueReport({{"operationId","reopen-native"},{"module","Surface"},{"result",QJsonObject{{"generation","reopen-generation"}}}});view.show();
+    Wait([&]{return !entered->load();});view.close();view.show();
+    // 确定重开后的生成轮询先于旧 worker 完成，不依靠线程调度碰运气。
+    ReportTaskTestAccess::Generate(view);
+    Require(ReportTaskTestAccess::HasTask(view)&&attempts==1,"reopening launched another native worker before cancellation completed");
+    release->set_value();Wait([&]{return !view.GetReportIds().contains(document.id);});
+    Require(attempts==2&&!view.property("reportTaskError").toString().size(),"reopening lost the pending native report queue");
+}
+void CheckNonblockingRowLifecycle() {
+    struct Gate final {
+        std::mutex mutex;std::condition_variable changed;bool released=false;
+        std::atomic<bool> enabled{true},entered{false},exited{false},guarded{false};
+        void Hold(){if(!enabled.exchange(false))return;entered=true;std::unique_lock<std::mutex> lock(mutex);
+            // 只用于测试死锁时释放 fixture；正确性断言检查回调返回时 worker 尚未退出，不比较耗时。
+            if(!changed.wait_for(lock,std::chrono::seconds(30),[&]{return released;}))guarded=true;exited=true;}
+        void Release(){{std::lock_guard<std::mutex> lock(mutex);released=true;}changed.notify_all();}
+        void Reset(){std::lock_guard<std::mutex> lock(mutex);released=false;entered=false;exited=false;guarded=false;enabled=true;}
+    };
+    auto gate=std::make_shared<Gate>();auto destroyed=std::make_shared<std::atomic<bool>>(false);auto view=std::make_unique<ResultReport>();
+    QObject::connect(view.get(),&QObject::destroyed,[destroyed]{destroyed->store(true);});
+    struct ReleaseOnExit final {std::shared_ptr<Gate> gate;~ReleaseOnExit(){gate->Release();}} release{gate};
+    auto doc=Document("row-lifecycle","表面对象体积",0);auto* owner=QThread::currentThread();
+    doc.table=std::make_shared<ReportTable>(5000,[gate,owner,destroyed](ReportRowId row){if(QThread::currentThread()!=owner){gate->Hold();Require(!destroyed->load(),"report reader callback outlived the destroyed window");}return QStringList{QString::number(row),"1"};});
+    view->AddReport(doc);view->show();auto* search=view->findChild<QLineEdit*>("reportSearch");
+    int launches=0;ReportTaskTestAccess::BeforeStart(*view,[&]{if(++launches==1)throw std::runtime_error("injected row startup failure");});
+    search->setText("123");Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(!view->property("reportRowsError").toString().isEmpty()&&!ReportTaskTestAccess::HasScan(*view)&&!ReportTaskTestAccess::HasPendingScan(*view),"failed scan startup retained a placeholder");
+    search->setText("234");Wait([&]{return !gate->entered.load();});
+    search->setText("345");search->setText("456");search->setText("4999");
+    Require(!gate->exited.load()&&!gate->guarded.load()&&launches==2&&ReportTaskTestAccess::HasPendingScan(*view),"changing filters waited for the old worker or launched intermediate requests");
+    gate->Release();Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(launches==3&&view->GetFilteredCount()==1&&view->CreateFilteredReader()(0)==4999,"only the latest pending scan must be launched/published");
+    gate->Reset();search->setText("__cancel_blocked_worker__");Wait([&]{return !gate->entered.load();});
+    view->findChild<QPushButton*>("cancelReportRows")->click();
+    Require(!gate->exited.load()&&!gate->guarded.load()&&!view->property("reportRowsBusy").toBool()&&view->GetFilteredCount()==0,
+        "cancel callback waited for its running worker or exposed partial rows");
+    gate->Release();Wait([&]{return ReportTaskTestAccess::HasScan(*view);});
+    gate->Reset();search->setText("__close_blocked_worker__");Wait([&]{return !gate->entered.load();});
+    view->close();Require(!gate->exited.load()&&!gate->guarded.load(),"closing report UI synchronously waited for its row worker");
+    bool rejected=false;try{view->ImportReport("unused.csv");}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected,"closed report window admitted a new worker");
+    view->show();search->setText("4999");Require(!gate->exited.load()&&ReportTaskTestAccess::HasPendingScan(*view),"reopening waited for the canceled worker");
+    gate->Release();Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(view->GetFilteredCount()==1&&view->CreateFilteredReader()(0)==4999,"old canceled result overwrote the reopened request");
+    gate->Reset();search->setText("__destroy_blocked_worker__");Wait([&]{return !gate->entered.load();});view->close();
+    // 删除时才等待收尾，随后处理已排队事件，检查没有窗口存活期之外的回调。
+    auto completion=std::async(std::launch::async,[gate]{gate->Release();});view.reset();completion.get();
+    Require(gate->exited.load()&&!gate->guarded.load(),"report dependencies were released before the worker exited");QCoreApplication::processEvents();
 }
 void CheckGenerationAndTasks() {
     ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
@@ -139,14 +265,15 @@ void CheckGenerationAndTasks() {
     Require(prepared==0 && view.GetReportAvailable("Wall","lazy-result"),"closed report window eagerly reads native data or hides the pending report entry");
     Require(!view.GetReportAvailable("Wall","input-mesh"),"pending report availability mistakes the input mesh for its output result");
     view.ShowReports({},"lazy-result","Wall");view.show();
-    Wait([&]{return !view.property("reportGenerationBusy").toBool();});
-    Require(readRows>0 && readRows<50000 && !lease.expired(),"native generation did not yield a bounded owner chunk");
-    view.findChild<QPushButton*>("cancelReportTask")->click();QCoreApplication::processEvents();
-    Require(lease.expired() && !view.GetReportIds().contains("lazy"),"cancelled native generation retained its snapshot or published partial rows");
-    view.ShowReports({},"lazy-result","Wall");
     Wait([&]{return !view.GetReportIds().contains("lazy");});
-    Require(lease.expired() && view.GetSelectedReport().table->GetCount()==50000,"retry failed to materialize all rows and release its native source");
-    QTemporaryDir directory;const auto path=directory.filePath("original.csv");ExportReport(path,view.GetSelectedReport());
+    Require(readRows<50000 && !lease.expired() && view.GetReportIds().contains("lazy"),"native preview eagerly materialized all rows or lost its precise row source");
+    const auto lazy=view.GetSelectedReport();Require(lazy.table && lazy.table->GetCount()==50000 && !lazy.table->GetIsComplete(),"lazy report lost its full count or eagerly completed");
+    const auto last=lazy.table->Read(49999);Require(last[0]=="49999" && readRows<50000,"random native page required a full-prefix scan");
+    QTemporaryDir directory;const auto path=directory.filePath("original.csv");
+    view.ExportReportFile(path);QTimer::singleShot(0,&view,[&]{view.CancelTasks();});Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(!QFile::exists(path) && view.GetReportIds().contains("lazy"),"cancelled export committed partial data or removed the native report");
+    view.ExportReportFile(path);Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(lease.expired() && lazy.table->GetIsComplete() && lazy.table->GetCount()==50000 && QFile::exists(path),"full export failed to materialize all rows or release its native source");
     const auto before=view.GetReportIds();view.ImportReport(path);Require(view.property("reportTaskBusy").toBool(),"import did not return after admission");
     bool heartbeat=false;QTimer::singleShot(0,&view,[&]{heartbeat=true;view.findChild<QPushButton*>("cancelReportTask")->click();});
     Wait([&]{return view.property("reportTaskBusy").toBool();});
@@ -170,6 +297,14 @@ void CheckGenerationAndTasks() {
     retry.QueueReport(record);retry.show();QCoreApplication::processEvents();
     Require(retry.GetReportAvailable("Wall","lazy-result") && retry.GetReportIds().isEmpty(),"read failure permanently discarded the retryable operation");
     fail=false;retry.findChild<QPushButton*>("retryFailedReport")->click();Wait([&]{return !retry.GetReportIds().contains("retry");});retry.hide();
+    ResultReport failedPreparation;std::atomic<int> attempts{0};
+    failedPreparation.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
+        return [&](const ReportCheckpoint&){++attempts;throw std::runtime_error("持续准备失败");return QVector<ReportDocument>{};};
+    };
+    failedPreparation.QueueReport(record);failedPreparation.show();Wait([&]{return attempts==0 || failedPreparation.property("reportTaskBusy").toBool();});
+    for(int i=0;i<20;++i)QCoreApplication::processEvents(QEventLoop::AllEvents,10);
+    Require(attempts==1 && !failedPreparation.property("reportTaskError").toString().isEmpty() && failedPreparation.GetReportAvailable("Wall","lazy-result"),"failed preparation immediately retried forever or discarded the source");
+    failedPreparation.hide();
     ResultReport parentView;
     parentView.onReadReports=[](const QJsonObject&,const QSet<QString>&){
         auto doc=Document("parent-inspection");doc.module="Alignment";doc.source="data-a";doc.result="child-inspection";
@@ -286,7 +421,7 @@ void CheckIndexReadRecovery() {
     Require(index.Read(4096)==14096 && read(4096)==14096 && index.Read(6148)==16148 && read(6148)==16148,"repaired index did not retry the correct page and tail");
 }
 void CheckPageReadFailures() {
-    IndexFaultFiles files;std::atomic<ReportRowId> failRow{-1};std::atomic<int> reads{0};ResultReport view;
+    QTemporaryDir directory;std::atomic<ReportRowId> failRow{-1};std::atomic<int> reads{0};ResultReport view;
     auto doc=Document("page-io","体积",0);doc.module="Gap";
     doc.table=std::make_shared<ReportTable>(2053,[&](ReportRowId row){++reads;if(row==failRow.load())throw std::runtime_error("正文短读");return QStringList{QString("point-%1").arg(row),QString::number(row+1)};});
     ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};
@@ -294,14 +429,25 @@ void CheckPageReadFailures() {
     Require(reads<=400 && table->model()->rowCount()==200,"opening a page scanned the complete report");
     auto* search=view.findChild<QLineEdit*>("reportSearch");search->setText("point-");Wait([&]{return view.property("reportRowsBusy").toBool();});
     Require(view.property("reportRowsError").toString().isEmpty()&&view.GetFilteredCount()==2053,"filtered IO fixture failed");
-    QFile disk(files.GetIndexPath());Require(disk.open(QIODevice::ReadWrite),"filtered index file unavailable");const auto saved=disk.readAll();
-    Require(disk.resize(1024*sizeof(ReportRowId))&&disk.flush(),"filtered index short read injection failed");
+    // 小索引可驻留小段，大索引由文件后备；页面边界通过同一只读接口验证失败隔离。
+    // 真实 ReportIndex 文件的连续短读与恢复已由 CheckIndexReadRecovery 独立覆盖。
+    class FaultingRows final : public MeshValueSource<ReportRowId> {
+    public:
+        ReportRows original;std::atomic<bool> fail{true};
+        std::size_t GetCount()const noexcept override{return original.size();}
+        std::size_t GetResidentBytes()const noexcept override{return original.GetResidentBytes();}
+        void ReadValues(std::size_t offset,std::size_t count,ReportRowId* target)const override {
+            if(fail.load() && offset+count>1024)throw std::runtime_error("索引短读");
+            for(std::size_t i=0;i<count;++i)target[i]=original[offset+i];
+        }
+    };
+    auto index=std::make_shared<FaultingRows>();index->original=ReportTaskTestAccess::Rows(view);ReportTaskTestAccess::SetRows(view,ReportRows(index));
     view.findChild<QPushButton*>("reportLast")->click();
     Require(table->model()->rowCount()==0&&!view.property("reportRowsError").toString().isEmpty(),"failed page showed stale or partial data");
     for(const auto* action:{"copyReportCsv","locateReportRow","exportFilteredReport"})Require(!view.findChild<QPushButton*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
-    bool rejected=false;try{view.ExportReportFile(files.directory.filePath("invalid.csv"),true);}catch(const std::runtime_error&){rejected=true;}
-    Require(rejected&&!QFile::exists(files.directory.filePath("invalid.csv"))&&located==-1&&view.GetSelectedReport().table==doc.table,"page failure changed formal report or allowed filtered export");
-    Require(disk.seek(0)&&disk.write(saved)==saved.size()&&disk.flush(),"filtered index restoration failed");
+    bool rejected=false;try{view.ExportReportFile(directory.filePath("invalid.csv"),true);}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected&&!QFile::exists(directory.filePath("invalid.csv"))&&located==-1&&view.GetSelectedReport().table==doc.table,"page failure changed formal report or allowed filtered export");
+    index->fail=false;
     view.findChild<QPushButton*>("reportFirst")->click();view.findChild<QPushButton*>("reportLast")->click();
     Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->data(table->model()->index(52,0)).toString()=="point-2052","repaired filtered index did not recover exact original rows");
     view.findChild<QPushButton*>("reportFirst")->click();failRow=250;const auto before=reads.load();view.findChild<QPushButton*>("reportNext")->click();
@@ -339,7 +485,7 @@ void CheckSlowScanCancellation() {
     Require(gate->starts==1,"query replacement started an additional worker while the old scan was blocked");
     returned.set_value();Require(watchdog.get(),"ordinary cancellation or query replacement waited for the blocked reader");
     Wait([&]{return view.property("reportRowsBusy").toBool();});
-    Require(view.property("reportRowsError").toString().isEmpty()&&view.GetFilteredRows()==ReportRows{499}&&gate->starts==2,"coalesced latest query was lost or superseded by cancelled rows");
+    Require(view.property("reportRowsError").toString().isEmpty()&&view.GetFilteredCount()==1&&view.CreateFilteredReader()(0)==499&&gate->starts==2,"coalesced latest query was lost or superseded by cancelled rows");
     const auto closingGate=std::make_shared<Gate>();ReleaseGate closingRelease{closingGate};
     auto closing=Document("retiring-scan","体积",0);auto held=std::make_shared<int>(1);std::weak_ptr<int> retiring=held;
     closing.table=std::make_shared<ReportTable>(500,[closingGate,held,owner](ReportRowId row){
@@ -376,7 +522,7 @@ void CheckInspectionPreparation() {
     Wait([&]{return view.property("reportGenerationProgress").toULongLong()<256;});
     Require(view.property("reportGenerationBusy").toBool()&&!planLease.expired(),"inspection preparation failed to yield before finishing its index");
     view.CancelTasks();Require(planLease.expired()&&reportLease.expired()&&view.GetReportIds().isEmpty(),"cancelled inspection preparation retained snapshots or published a group");
-    view.ShowReports({},text,"Alignment");Wait([&]{return view.property("reportGenerationProgress").toULongLong()<150512;});
+    view.ShowReports({},text,"Alignment");Wait([&]{return view.property("reportGenerationPhase").toString()!="rows";});
     Require(view.property("reportGenerationBusy").toBool()&&view.GetReportIds().isEmpty(),"inspection row writing failed to yield before publication");
     view.CancelTasks();Require(planLease.expired()&&reportLease.expired(),"cancelled inspection row writing retained snapshots");
     view.ShowReports({},text,"Alignment");Wait([&]{return view.GetReports("Alignment",{text}).size()!=2 || view.property("reportGenerationBusy").toBool();});
@@ -390,7 +536,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
 #if defined(MANUAL_ALIGNMENT)
     CheckInspectionPreparation();
 #endif

@@ -23,7 +23,7 @@ bool GetDataArrayTests()
     try {
         std::weak_ptr<DataArrayStorage> storage;
         std::shared_ptr<const SurfaceMeshPayload> mesh;
-        const void* original = nullptr;
+        std::vector<std::shared_ptr<const void>> resources;
         {
             ResultArrayScope scope(0);
             DataArray<std::uint64_t> values;
@@ -47,18 +47,19 @@ bool GetDataArrayTests()
             Require(isAligned,"backing allocation alignment depends on the mapping base address");
             DataArray<double> points{0,0,0, 1,0,0, 0,1,0};
             DataArray<std::uint64_t> triangles{0,1,2};
-            original = points.data(); storage = points.get_allocator().storage;
+            storage = points.get_allocator().storage;
             mesh = MeshPayloadBuilder::Build(std::make_shared<const DataArray<double>>(std::move(points)),
                 std::make_shared<const DataArray<std::uint64_t>>(std::move(triangles)));
-            Require(mesh && mesh->GetVertices().data() == original, "mesh freezing copied the completed points");
+            Require(mesh && mesh->GetPointValues()[3]==1,"mesh freezing changed the completed points");
+            resources=mesh->GetDataResources();
             scope.Finish();
         }
-        Require(!storage.expired() && mesh->GetVertices()[3] == 1, "reader lost backing storage after producer exit");
+        Require(!storage.expired() && mesh->GetPointValues()[3] == 1, "reader lost backing storage after producer exit");
         auto snapshot = std::dynamic_pointer_cast<const SurfaceMeshPayload>(mesh->CreateSnapshot());
         mesh.reset();
-        Require(snapshot && snapshot->GetVertices().data() == original && !storage.expired(),
+        Require(snapshot && snapshot->GetDataResources()==resources && !storage.expired(),
             "graph snapshot copied or prematurely released frozen geometry");
-        snapshot.reset();
+        snapshot.reset();resources.clear();
         Require(storage.expired(), "backing store outlived its final result reader");
         {
             ResultArrayScope scope(0);std::size_t checks=0;

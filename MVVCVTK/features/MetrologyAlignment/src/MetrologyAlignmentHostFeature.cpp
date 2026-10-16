@@ -18,6 +18,7 @@
 #include <vtkPolyData.h>
 #include <limits>
 #include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -48,19 +49,17 @@ void SendComplete(AlignmentCallback callback, AlignmentResult result) noexcept {
 }
 bool GetSourceRelated(const DataGraphSnapshot &graph, const DataRevisionRef &mesh,
                       const DataRevisionRef &source) {
-    std::vector<DataRevisionRef> pending{mesh}, visited;
-    while (!pending.empty() && visited.size() < 1024) {
+    std::vector<DataRevisionRef> pending{mesh};
+    std::set<DataRevisionRef> visited;
+    while (!pending.empty()) {
         const auto ref = pending.back();
         pending.pop_back();
         if (ref == source)
             return true;
-        if (std::find(visited.begin(), visited.end(), ref) != visited.end())
-            continue;
-        visited.push_back(ref);
+        if (!visited.insert(ref).second)continue;
         const auto data = graph.view->GetData(ref);
         if (!data)
             return false;
-        if (data->inputs.size() > 1024 - std::min<std::size_t>(pending.size(), 1024)) return false;
         for (const auto &input : data->inputs)
             pending.push_back(input.source);
     }
@@ -998,7 +997,7 @@ class MetrologyAlignmentHostFeature::Impl final {
             const auto mesh = meshData ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(meshData->payload) : nullptr;
             const auto poly =
                 AlignmentOverlay::BuildData(matrix->GetSourceToTarget(), geometry->geometries,
-                                            recipe->recipe, m_config.axisLength, mesh ? &mesh->GetVertices() : nullptr);
+                                            recipe->recipe, m_config.axisLength, mesh ? &mesh->GetPointValues() : nullptr);
             if (!poly)
                 return;
             const auto views = m_views->GetViews(m_config.targetViews);

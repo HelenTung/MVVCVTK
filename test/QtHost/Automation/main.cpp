@@ -2,6 +2,7 @@
 #include "App/TestWindow.h"
 #include "TestCaseRunner.h"
 #include "ReportWorkflowTests.h"
+#include "ReportLargeTests.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QSurfaceFormat>
@@ -80,6 +81,8 @@ int main(int argc, char* argv[])
     parser.addHelpOption();
     parser.addOption({"case", "执行指定的 JSON 用例文件", "path"});
     parser.addOption({"record", "导出自动化操作记录", "path"});
+    parser.addOption({"report-spatial-only", "仅复跑完整 CSV 的空间配对阶段"});
+    parser.addOption({"report-csv", "复用已保存的完整 CSV 验证生产配对", "path"});
     parser.addOption({"reports-only", "仅执行独立报告导入、比较、分页与选择回归，不创建业务会话"});
     parser.addOption({"background", "在独立后台桌面运行实际 Qt/VTK 窗口，不显示在用户桌面"});
     parser.addOption({"background-child", "内部测试子进程桌面标识", "name"});
@@ -88,6 +91,7 @@ int main(int argc, char* argv[])
     bool valid = false; const auto budget = parser.value("memory-budget-mib").toULongLong(&valid);
     if (!valid) parser.showHelp(2);
     try {
+    if(parser.isSet("report-csv")){Manual::CheckSavedReportComparisons(parser.value("report-csv"),parser.isSet("report-spatial-only"));return 0;}
     if(parser.isSet("reports-only")){Manual::CheckReportWorkflow();return 0;}
     Manual::TestWindow window(budget);
     window.setWindowTitle("功能自动化测试");

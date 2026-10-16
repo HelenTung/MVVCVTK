@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/DataGraphTypes.h"
+#include "Data/DataPayloads.h"
 #include "SurfaceRecipe.h"
 #include "Host/Types/HostViewTypes.h"
 
@@ -79,7 +80,7 @@ struct SurfaceGenerationSnapshot final {
     DataRevisionRef dataRevision;
     DataRevisionRef meshRevision;
     DataRevisionRef selectionMeshRevision;
-    std::shared_ptr<const DataArray<SurfaceSelectionPiece>> selection;
+    std::shared_ptr<const MeshReadArray<SurfaceSelectionPiece>> selection;
     double selectedAreaMM2 = 0;
     double selectionToleranceMM = 0;
     DataRevisionRef sourceRevision;
@@ -88,12 +89,12 @@ struct SurfaceGenerationSnapshot final {
     std::uint32_t algorithmRevision = 0;
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::GlobalAutomatic;
-    std::shared_ptr<const DataArray<SurfacePointRecord>> points;
-    std::shared_ptr<const DataArray<std::uint32_t>> triangleIndices;
-    std::shared_ptr<const DataArray<SurfaceObjectRecord>> objects;
+    std::shared_ptr<const MeshReadArray<SurfacePointRecord>> points;
+    std::shared_ptr<const MeshReadArray<std::uint32_t>> triangleIndices;
+    std::shared_ptr<const MeshReadArray<SurfaceObjectRecord>> objects;
     std::optional<SurfaceIsoEstimate> isoEstimate;
     // 每三角形一个值；仅证明本 Feature 明确检查的有效性条件。
-    std::shared_ptr<const DataArray<std::uint8_t>> triangleValidity;
+    std::shared_ptr<const MeshReadArray<std::uint8_t>> triangleValidity;
     std::vector<DataInputRef> inputs;
     SurfaceExecutionStats execution;
     std::shared_ptr<const std::vector<SurfaceInterfaceRecord>> interfaces;
@@ -109,9 +110,11 @@ struct SurfaceGenerationSnapshot final {
     }
     std::optional<SurfaceObjectRecord> GetObjectById(std::uint32_t id) const {
         if (!objects) return {};
-        const auto found = std::lower_bound(objects->begin(), objects->end(), id,
-            [](const auto& object, auto value) { return object.objectIndex < value; });
-        return found != objects->end() && found->objectIndex == id ? std::optional<SurfaceObjectRecord>(*found) : std::nullopt;
+        std::size_t first=0,last=objects->size();
+        while(first<last){const auto middle=first+(last-first)/2;const auto object=(*objects)[middle];
+            if(object.objectIndex<id)first=middle+1;else last=middle;}
+        if(first==objects->size())return {};
+        const auto object=(*objects)[first];return object.objectIndex==id?std::optional<SurfaceObjectRecord>(object):std::nullopt;
     }
     std::optional<SurfaceObjectPointPage> GetObjectPoints(std::uint32_t id, std::uint64_t offset, std::size_t count) const {
         const auto object = GetObjectById(id);
@@ -162,6 +165,7 @@ struct SurfaceObjectSelectionRequest final {
     // 0 是合法表面对象编号；缺省表示清除本代选择。
     std::optional<std::uint32_t> objectIndex;
     bool isIsolated=false;
+    HostViewTargets targetViews;
 };
 struct SurfaceObjectPickModeRequest final {bool isEnabled=false;};
 namespace SurfaceObjectBindingKeys {inline constexpr std::string_view Select="surface.object.select.pointer";}

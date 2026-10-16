@@ -1,3 +1,4 @@
+#include <cstring>
 #include "AlignmentMeshQuery.h"
 #include "AlignmentMath.h"
 #include <algorithm>
@@ -53,9 +54,9 @@ AlignmentMeshQuery::AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload>
                                        const std::vector<std::uint64_t> &triangles)
     : m_mesh(std::move(mesh)), m_cancelled(work.cancelled) {
     CheckWork();
-    if (!m_mesh || !m_mesh->GetValid() || m_mesh->GetTriangles().empty())
+    if (!m_mesh || !m_mesh->GetValid() || m_mesh->GetTriangleIndices().empty())
         throw std::invalid_argument("Reference requires a valid triangle surface.");
-    const auto count = triangles.empty() ? m_mesh->GetTriangles().size() / 3 : triangles.size();
+    const auto count = triangles.empty() ? m_mesh->GetTriangleIndices().size() / 3 : triangles.size();
     const auto limit = std::numeric_limits<std::size_t>::max();
     // 中位数划分、叶最多八个三角形，非根叶至少四个；节点上界为 N/2+1。
     const auto nodeCount = count / 2 + 1;
@@ -64,7 +65,7 @@ AlignmentMeshQuery::AlignmentMeshQuery(std::shared_ptr<const SurfaceMeshPayload>
         throw std::length_error("Triangle index byte count overflows.");
     m_triangles.reserve(count);
     if (!triangles.empty()) {
-        m_triangles = triangles;
+        m_triangles.assign(triangles.begin(),triangles.end());
         std::size_t comparisons = 0;
         std::sort(m_triangles.begin(), m_triangles.end(), [&](auto a, auto b) {
             if (++comparisons % 256 == 0) CheckWork();
@@ -100,10 +101,10 @@ void AlignmentMeshQuery::CheckWork() const {
 }
 
 std::array<AlignmentPoint, 3> AlignmentMeshQuery::GetTriangle(std::uint64_t triangle) const {
-    const auto &ids = m_mesh->GetTriangles();
+    const auto &ids = m_mesh->GetTriangleIndices();
     if (triangle >= ids.size() / 3)
         throw std::invalid_argument("Reference triangle is out of bounds.");
-    const auto &vertices = m_mesh->GetVertices();
+    const auto &vertices = m_mesh->GetPointValues();
     std::array<AlignmentPoint, 3> result{};
     for (std::size_t j = 0; j < 3; ++j) {
         const auto index = static_cast<std::size_t>(ids[3 * static_cast<std::size_t>(triangle) + j]);
@@ -138,8 +139,8 @@ std::size_t AlignmentMeshQuery::BuildNode(std::size_t first, std::size_t count) 
             node.bounds[2 * axis + 1] - node.bounds[2 * axis]) axis = j;
     const auto middle = first + count / 2;
     std::size_t comparisons = 0;
-    const auto &vertices=m_mesh->GetVertices();
-    const auto &triangles=m_mesh->GetTriangles();
+    const auto &vertices=m_mesh->GetPointValues();
+    const auto &triangles=m_mesh->GetTriangleIndices();
     // 索引在构造阶段已校验；排序只读当前轴三坐标，不反复物化完整三角形。
     const auto center=[&](std::uint64_t triangle) {
         const auto base=3*triangle;
@@ -223,7 +224,7 @@ AlignmentMeshHit AlignmentMeshQuery::GetHit(const AlignmentPoint &point, std::ui
     return hit;
 }
 std::size_t AlignmentMeshQuery::GetWorkingBytes() const noexcept {
-    return m_nodes.capacity() * sizeof(Node) + m_triangles.capacity() * sizeof(std::uint64_t);
+    return m_nodes.GetResidentBytes()+m_triangles.GetResidentBytes();
 }
 #if MVVCVTK_METROLOGY_HAS_CUDA
 std::unique_ptr<AlignmentCudaQuery> AlignmentMeshQuery::BuildCudaQuery(std::size_t batchCapacity) const {
@@ -233,10 +234,10 @@ std::unique_ptr<AlignmentCudaQuery> AlignmentMeshQuery::BuildCudaQuery(std::size
                   offsetof(Node, count) == offsetof(AlignmentCudaNode, count) &&
                   offsetof(Node, left) == offsetof(AlignmentCudaNode, left) &&
                   offsetof(Node, right) == offsetof(AlignmentCudaNode, right));
-    // 只复制原始对象表示，不通过异型 CPU 指针解引用，避免第二份主机 BVH。
-    return std::make_unique<AlignmentCudaQuery>(m_nodes.data(), m_nodes.size(),
-        m_triangles.data(), m_triangles.size(), m_mesh->GetVertices().data(),
-        m_mesh->GetVertices().size(), m_mesh->GetTriangles().data(),
-        m_mesh->GetTriangles().size(), batchCapacity);
+    const auto nodes=ConvertMeshArray<AlignmentCudaNode>(m_nodes.GetReadSnapshot(),1,[](const Node& node,std::size_t){
+        AlignmentCudaNode converted{};std::memcpy(&converted,&node,sizeof(converted));return converted;
+    });
+    return std::make_unique<AlignmentCudaQuery>(nodes,m_triangles.GetReadSnapshot(),m_mesh->GetPointValues(),m_mesh->GetTriangleIndices(),batchCapacity,
+        [cancel=m_cancelled]{if(cancel && cancel->load())throw std::runtime_error("Triangle query cancelled.");});
 }
 #endif

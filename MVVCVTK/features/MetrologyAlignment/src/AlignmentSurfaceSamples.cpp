@@ -18,9 +18,9 @@ std::int8_t Direction(const Vec &n) {
     for (int i = 1; i < 3; ++i) if (std::abs(n[i]) > std::abs(n[axis])) axis = i;
     return static_cast<std::int8_t>(2 * axis + (n[axis] < 0 ? 1 : 0));
 }
-const MeshAttribute *Attribute(const SurfaceMeshPayload &mesh, const char *name, std::size_t components) {
-    for (const auto &attribute : mesh.GetPointAttributes()) if (attribute.name == name) {
-        Require(attribute.componentCount == components && attribute.values.size() == mesh.GetVertices().size() / 3 * components,
+const MeshField *Attribute(const SurfaceMeshPayload &mesh, const char *name, std::size_t components) {
+    for (const auto &attribute : mesh.GetPointFields()) if (attribute.name == name) {
+        Require(attribute.componentCount == components && attribute.values.size() == mesh.GetPointValues().size() / 3 * components,
                 "Invalid surface grouping attribute.");
         return &attribute;
     }
@@ -40,7 +40,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     const AlignmentMatrix &initial, std::size_t indexBytes, bool needsDirections) {
     CheckWork(work);
     Require(work.mesh && work.mesh->GetValid() && work.recipe.surfaceFit, "Invalid surface sampling input.");
-    const auto &v = work.mesh->GetVertices();
+    const auto &v = work.mesh->GetPointValues();
     const auto &region = work.recipe.surfaceFit->sourceRegion;
     Require(!region || region->vertexIds.empty() || region->pinnedMesh == work.input.mesh,
             "Surface selection belongs to another mesh revision.");
@@ -58,7 +58,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     if (region && region->roi && region->vertexIds.empty()) {
         Require(region->pinnedMesh==work.input.mesh,"ROI surface sampling belongs to another mesh revision.");
         const auto found=work.rois.find(*region->roi);Require(found!=work.rois.end(),"Alignment ROI read view is missing.");
-        const auto roi=found->second;const auto inverse=Inverse(region->meshToRoi);const auto& triangles=work.mesh->GetTriangles();
+        const auto roi=found->second;const auto inverse=Inverse(region->meshToRoi);const auto& triangles=work.mesh->GetTriangleIndices();
         for (std::size_t i=0;i<triangles.size();i+=3) {
             if(i%768==0)CheckWork(work);std::array<AlignmentPoint,3> triangle{};
             for(int j=0;j<3;++j){const auto id=triangles[i+j];triangle[j]=Point(Transform(region->meshToRoi,{v[3*id],v[3*id+1],v[3*id+2]}));}
@@ -111,7 +111,7 @@ AlignmentSurfaceSamples AlignmentSurfaceSampling::Build(const AlignmentWork &wor
     }
     if (needsFallback) output.directions.assign(samples.size(), -1);
     const bool direct = samples.size() == v.size() / 3;
-    const auto &triangles = work.mesh->GetTriangles();
+    const auto &triangles = work.mesh->GetTriangleIndices();
     Require(!triangles.empty(), "Surface fitting requires triangle connectivity.");
     for (std::size_t i = 0; i < triangles.size(); i += 3) {
         if (i % 768 == 0) CheckWork(work);
@@ -150,7 +150,7 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
     const AlignmentSurfaceSamples &source, double voxelSize, std::size_t indexBytes) {
     Require(std::isfinite(voxelSize) && voxelSize > 0, "Invalid surface voxel size.");
     CheckWork(work);
-    const auto &v = work.mesh->GetVertices();
+    const auto &v = work.mesh->GetPointValues();
     const auto *normals = Attribute(*work.mesh, "measurement.normal", 3);
     const auto *interfaces = Attribute(*work.mesh, "surface.interface-index", 1);
     const auto *overrides = Attribute(*work.mesh, "surface.override-index", 1);
@@ -164,7 +164,7 @@ std::vector<AlignmentSurfaceSample> AlignmentSurfaceSampling::Reduce(const Align
         groups(0, CellHash{}, std::equal_to<Cell>{}, AccountingAllocator<Entry>{&budget});
     std::vector<AlignmentSurfaceSample> result;
     const Vec origin(v[0], v[1], v[2]);
-    const auto regionId = [](const MeshAttribute *attribute, std::uint64_t id) -> std::int64_t {
+    const auto regionId = [](const MeshField *attribute, std::uint64_t id) -> std::int64_t {
         if (!attribute) return 0;
         const double value = attribute->values[static_cast<std::size_t>(id)];
         Require(value >= 0 && value <= std::numeric_limits<std::uint32_t>::max() && std::floor(value) == value,

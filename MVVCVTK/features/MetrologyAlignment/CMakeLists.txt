@@ -14,10 +14,12 @@ if(MVVCVTK_METROLOGY_ENABLE_CUDA)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/cuda/$<CONFIG>"
         COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" --compiler-bindir "${CMAKE_CXX_COMPILER}"
             --std=c++17 --fmad=false ${cudaArchitecture}
+            "-I${MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR}"
             "-Xcompiler=$<IF:$<CONFIG:Debug>,/MDd,/MD>,/EHsc,/utf-8"
             "$<IF:$<CONFIG:Debug>,-O0,-O3>" -c "${CMAKE_CURRENT_SOURCE_DIR}/src/AlignmentCudaQuery.cu"
             -o "${cudaObject}"
         DEPENDS src/AlignmentCudaQuery.cu src/AlignmentCudaQuery.h
+            ${MVVCVTK_FEATURE_SOURCE_SPI_HEADERS} ${_mvvcvtk_spi_stage_headers}
             "${CUDAToolkit_NVCC_EXECUTABLE}" "${CMAKE_CXX_COMPILER}" VERBATIM)
     set_source_files_properties("${cudaObject}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
     add_library(metrology_alignment_cuda STATIC "${cudaObject}" src/AlignmentCudaQuery.h)

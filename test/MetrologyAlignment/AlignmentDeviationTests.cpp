@@ -151,13 +151,13 @@ void AreaWeightAndBudget() {
     work.mesh = std::make_shared<const SurfaceMeshPayload>(
         std::vector<double>{0,0,1,1,0,1,0,1,1, 3,0,3,6,0,3,3,1,3},
         std::vector<std::uint64_t>{0,1,2,3,4,5});
-    const auto original = work.mesh->GetVertices();
+    const auto original = work.mesh->GetPointValues();
     auto result = AlignmentDeviation::Build(work,request,alignmentIdentity);
     Check(result.forward && std::abs(result.forward->statistics.mean-2.5) < epsilon &&
           std::abs(result.forward->statistics.rms-std::sqrt(7.0)) < epsilon &&
           result.forward->statistics.absoluteP95 == 3,
           "area weights prevent equal vertex counts from hiding larger high-deviation patch");
-    Check(work.mesh->GetVertices() == original, "evaluation does not transform underlying measurement mesh");
+    Check(work.mesh->GetPointValues() == original, "evaluation does not transform underlying measurement mesh");
     request.sourceTriangles = {0,0};
     Check(AlignmentDeviation::Build(work,request,alignmentIdentity).status == AlignmentStatus::InvalidInput,
           "duplicate selected triangles cannot double-count area");

@@ -131,7 +131,7 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
                     image->GetScalarRange(),bool(image->GetValidityMask())};
             } else if (const auto *mesh=dynamic_cast<const SurfaceMeshPayload *>(node->payload.get())) {
                 budget.Text(mesh->GetCoordinateFrame());
-                entry.mesh=MetrologyReportMesh{mesh->GetVertices().size()/3,mesh->GetTriangles().size()/3,mesh->GetCoordinateFrame()};
+                entry.mesh=MetrologyReportMesh{mesh->GetPointValues().size()/3,mesh->GetTriangleIndices().size()/3,mesh->GetCoordinateFrame()};
             }
             report->wereInputsCurrentAtCapture=report->wereInputsCurrentAtCapture && entry.wasCurrentAtCapture;
             report->inputs.push_back(std::move(entry));
@@ -142,7 +142,7 @@ MetrologyReportResult AlignmentReport::Capture(const DataGraphSnapshot &graph,co
         visitDisplays([&](const auto &d){const auto found=std::find_if(report->deviations.begin(),report->deviations.end(),[&](const auto &value){return value.result==d.result;});
             Require(found!=report->deviations.end(),"Report colorbar deviation is unavailable.");std::optional<AlignmentPoint> point;
             if(d.selectedVertex){const auto node=graph.view->GetData(found->sourceMesh);const auto mesh=node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(node->payload) : nullptr;
-                Require(mesh && *d.selectedVertex<mesh->GetVertices().size()/3,"Selected report vertex is unavailable.");const auto offset=3*(*d.selectedVertex);const auto &v=mesh->GetVertices();point=AlignmentPoint{v[offset],v[offset+1],v[offset+2]};}
+                Require(mesh && *d.selectedVertex<mesh->GetPointValues().size()/3,"Selected report vertex is unavailable.");const auto offset=3*(*d.selectedVertex);const auto &v=mesh->GetPointValues();point=AlignmentPoint{v[offset],v[offset+1],v[offset+2]};}
             presentation.deviations.push_back(AlignmentReportDisplay::BuildDeviation(d,*found,point));});
         if(scene){const auto anchor=std::find_if(report->alignments.begin(),report->alignments.end(),[&](const auto &a){return a.result==scene->anchorAlignment;});
             Require(anchor!=report->alignments.end(),"Report scene anchor is unavailable.");MetrologyReportSceneDisplay value;

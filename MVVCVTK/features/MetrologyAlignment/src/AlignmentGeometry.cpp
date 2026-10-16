@@ -13,10 +13,10 @@ void Require(bool condition, const char *message) {
     if (!condition)
         throw std::invalid_argument(message);
 }
-const MeshAttribute *Attribute(const SurfaceMeshPayload &mesh, const char *name,
+const MeshField *Attribute(const SurfaceMeshPayload &mesh, const char *name,
                                std::size_t components) {
-    const MeshAttribute *found = nullptr;
-    for (const auto &a : mesh.GetPointAttributes())
+    const MeshField *found = nullptr;
+    for (const auto &a : mesh.GetPointFields())
         if (a.name == name) {
             Require(!found && a.componentCount == components,
                     "Invalid measurement attribute schema.");
@@ -316,9 +316,9 @@ AlignmentStatus AlignmentGeometryFit::GetWorkStatus(const AlignmentWork &work) {
 }
 
 bool AlignmentGeometryFit::GetFaceValid(const SurfaceMeshPayload &mesh, std::size_t index) {
-    Require(index < mesh.GetTriangles().size() / 3, "Invalid measurement face index.");
-    for (const auto &attribute : mesh.GetCellAttributes()) if (attribute.name == "measurement.valid") {
-        Require(attribute.componentCount == 1 && attribute.values.size() == mesh.GetTriangles().size() / 3,
+    Require(index < mesh.GetTriangleIndices().size() / 3, "Invalid measurement face index.");
+    for (const auto &attribute : mesh.GetCellFields()) if (attribute.name == "measurement.valid") {
+        Require(attribute.componentCount == 1 && attribute.values.size() == mesh.GetTriangleIndices().size() / 3,
                 "Invalid surface cell quality attribute.");
         const double value = attribute.values[index];
         Require(value == 0 || value == 1, "Invalid surface cell quality value.");
@@ -329,9 +329,9 @@ bool AlignmentGeometryFit::GetFaceValid(const SurfaceMeshPayload &mesh, std::siz
 }
 
 bool AlignmentGeometryFit::GetPointUsable(const AlignmentWork &work, std::size_t index) {
-    Require(work.mesh && index < work.mesh->GetVertices().size() / 3,
+    Require(work.mesh && index < work.mesh->GetPointValues().size() / 3,
             "Invalid measurement point index.");
-    const auto count = work.mesh->GetVertices().size() / 3;
+    const auto count = work.mesh->GetPointValues().size() / 3;
     const auto attribute = [&](const char *name, std::size_t components) {
         const auto *value = Attribute(*work.mesh, name, components);
         Require(!value || value->values.size() == count * components,
@@ -366,10 +366,10 @@ bool AlignmentGeometryFit::GetPointUsable(const AlignmentWork &work, std::size_t
 AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
                                                     const AlignmentRegion &region,
                                                     const AlignmentMatrix &pose) {
-    Require(work.mesh && work.mesh->GetVertices().size() % 3 == 0, "Invalid mesh.");
+    Require(work.mesh && work.mesh->GetPointValues().size() % 3 == 0, "Invalid mesh.");
     Require(region.vertexIds.empty() || region.pinnedMesh == work.input.mesh,
             "Selection belongs to another mesh revision.");
-    const auto &vertices = work.mesh->GetVertices();
+    const auto &vertices = work.mesh->GetPointValues();
     const std::size_t n = vertices.size() / 3;
     AlignmentSamples result;
     RoiReadSnapshot roi;if (region.roi) {const auto found=work.rois.find(*region.roi);Require(found!=work.rois.end(),"ROI read snapshot is missing.");roi=found->second;}
@@ -404,7 +404,7 @@ AlignmentSamples AlignmentGeometryFit::BuildSamples(const AlignmentWork &work,
     };
     if (roi && region.vertexIds.empty()) {
         Require(region.pinnedMesh==work.input.mesh,"ROI sampling belongs to another mesh revision.");
-        const auto& triangles=work.mesh->GetTriangles();const auto inverse=Inverse(region.meshToRoi);
+        const auto& triangles=work.mesh->GetTriangleIndices();const auto inverse=Inverse(region.meshToRoi);
         for (std::size_t i=0;i<triangles.size();i+=3) {
             if (i%768==0 && GetWorkStatus(work)!=AlignmentStatus::FullyDetermined) throw std::runtime_error("Cancelled ROI extraction.");
             if (!GetFaceValid(*work.mesh,i/3)) {++result.rejected;continue;}

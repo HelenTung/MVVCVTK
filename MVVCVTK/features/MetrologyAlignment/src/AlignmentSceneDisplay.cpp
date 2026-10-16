@@ -148,12 +148,12 @@ AlignmentResult AlignmentSceneDisplayController::Set(
       for (const auto &entry : geometry)
         if (entry.first == ref)
           return entry.second;
-      Require((mesh.GetTriangles().size() / 3) > 0,
+      Require((mesh.GetTriangleIndices().size() / 3) > 0,
               "Scene display requires triangle surfaces.");
       // 保守缓存计账，含各视图并存的顶点/索引/GPU打包余量；不宣称驱动显存硬上限。
       for (std::size_t i = 0; i < targets.size(); ++i) {
-        budget.Add(mesh.GetVertices().size() / 3, 128);
-        budget.Add((mesh.GetTriangles().size() / 3), 64);
+        budget.Add(mesh.GetPointValues().size() / 3, 128);
+        budget.Add((mesh.GetTriangleIndices().size() / 3), 64);
       }
       const auto view = data.GetSurfaceMesh(graph, ref);
       if (!view || !view->mesh)
@@ -295,9 +295,9 @@ std::optional<AlignmentSceneVertex> AlignmentSceneDisplayController::GetVertex(
           node ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(
                      node->payload)
                : nullptr;
-      if (!mesh || vertex >= mesh->GetVertices().size() / 3)
+      if (!mesh || vertex >= mesh->GetPointValues().size() / 3)
         return {};
-      const auto &points = mesh->GetVertices();
+      const auto &points = mesh->GetPointValues();
       AlignmentSceneVertex value;
       value.partId = partId;
       value.alignmentResult = part.alignment;

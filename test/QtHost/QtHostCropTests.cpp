@@ -1174,8 +1174,8 @@ bool GetArchiveRestoreCase(bool meshCase)
         const auto graph=probe->m_data->GetDataGraph();const auto old=probe->m_data->GetData(graph,saved->result->outputRevision),copy=probe->m_data->GetData(graph,record.outputRevision);
         if(!old||!copy)return false;
         if(meshCase){const auto first=std::dynamic_pointer_cast<const SurfaceMeshPayload>(old->payload),second=std::dynamic_pointer_cast<const SurfaceMeshPayload>(copy->payload);
-            if(!check(first&&second&&&first->GetVertices()!=&second->GetVertices()&&first->GetVertices()==second->GetVertices()
-                &&first->GetTriangles()==second->GetTriangles(),"Restored mesh preserves geometry in independent arrays"))return false;
+            if(!check(first&&second&&&first->GetPointValues()!=&second->GetPointValues()&&first->GetPointValues()==second->GetPointValues()
+                &&first->GetTriangleIndices()==second->GetTriangleIndices(),"Restored mesh preserves geometry in independent arrays"))return false;
         } else {const auto first=std::dynamic_pointer_cast<const ImageGrid3DPayload>(old->payload),second=std::dynamic_pointer_cast<const ImageGrid3DPayload>(copy->payload);
             if(!check(first&&second&&first->GetValues()==second->GetValues()&&first->GetValidityMask()!=second->GetValidityMask()
                 &&*first->GetValidityMask()==*second->GetValidityMask(),"Restored volume shares fixed scalars and owns an identical independent mask"))return false;}
