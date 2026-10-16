@@ -1,5 +1,7 @@
 #include "../DataGraph/RoiArchiveTestReader.h"
+#include "../ControlledTaskGate.h"
 #include "Host/RoiEditingHostFeature.h"
+#include "Host/VtkAppHostSession.h"
 #include "TestDataPort.h"
 #include "App/Services/FeatureViewService.h"
 #include "Render/Contracts/OverlayService.h"
@@ -27,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -35,6 +38,35 @@
 
 namespace {
 void Require(bool value,const char* message) { if (!value) throw std::runtime_error(message); }
+bool DetachEditor(RoiEditingHostFeature& editor)
+{
+    const auto deadline=std::chrono::steady_clock::now()+TaskInterleaving::synchronizationTimeout;
+    do {
+        if(editor.DetachHost())return true;
+        std::this_thread::yield();
+    }while(std::chrono::steady_clock::now()<deadline);
+    return false;
+}
+void PumpEditor(RoiEditingHostFeature& editor,const std::function<bool()>& done)
+{
+    const auto deadline=std::chrono::steady_clock::now()+TaskInterleaving::synchronizationTimeout;
+    while(!done() && std::chrono::steady_clock::now()<deadline){(void)editor.OnHostTick();std::this_thread::yield();}
+    Require(done(),"editor work did not converge on owner ticks");
+}
+DataRevisionRef SetScopedImage(TestDataPort& data,vtkImageData* image,const DataEntityId& scope)
+{
+    VtkDataBridge bridge;const DataRevisionRef source{data.CreateDataEntityId(),1};
+    DataTransaction transaction;
+    transaction.outputs.push_back({source.entityId,0,DataTypes::imageGrid3D,{},bridge.CreateImagePayload(image),{},scope});
+    transaction.bindings.push_back({std::string(primaryVolumeBinding),0,true,{},source});
+    Require(data.SetDataCommit(std::move(transaction)).status==DataCommitStatus::Succeeded,"scoped source publication failed");
+    return source;
+}
+bool GetReaderHeld(const TestDataPort& data,const DataEntityId& scope,const char* owner)
+{
+    const auto lifetime=data.GetDataLifetime(scope);
+    return std::any_of(lifetime.blockers.begin(),lifetime.blockers.end(),[&](const auto& blocker){return blocker.owner==owner;});
+}
 class View final : public FeatureViewService, public OverlayService {
 public:
     View(std::string name,HostRenderViewRole role):view{std::move(name),role}
@@ -151,7 +183,7 @@ void TestEditor()
         && data->GetData(data->GetDataGraph(),saved.roi->revision),
         "ROI projection was attached to a wrong source view or deleted formal ROI");
     slice->source=source;Require(editor.OnHostTick() && main->overlays.size()==1 && slice->overlays.size()==1,"ROI projection did not return when its source view returned");
-    Require(editor.DetachHost() && editor.DetachHost() && main->overlays.empty() && slice->overlays.empty()
+    Require(DetachEditor(editor) && editor.DetachHost() && main->overlays.empty() && slice->overlays.empty()
         && data->GetData(data->GetDataGraph(),saved.roi->revision),"detach deleted formal ROI or left a projection");
     Require(editor.AttachHost(context),"reattach failed");
     RoiRequest edit; edit.action=RoiAction::SetGeometry; edit.definition=saved.roi->definition;
@@ -160,7 +192,7 @@ void TestEditor()
     data->SetPrimaryImage(image);
     Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::RevisionConflict,"changed source binding accepted");
     Require(editor.OnHostTick() && !editor.GetState().hasDraft,"stale draft not retired on owner tick");
-    Require(editor.DetachHost(),"final detach failed");
+    Require(DetachEditor(editor),"final detach failed");
 }
 void TestCurves()
 {
@@ -195,24 +227,27 @@ void TestCurves()
             && !read.roi->GetContains({3,2,2}) && read.roi->GetDefinition().nodes.front().primitive.radius==.75,
             "saved curve selection differs from its analytic radius");
     }
-    Require(editor.DetachHost() && main->overlays.empty(),"curve projection leaked on detach");
+    Require(DetachEditor(editor) && main->overlays.empty(),"curve projection leaked on detach");
 }
 class Controller final:public FeatureHostControl {
 public:
     HostInputBinding binding;std::shared_ptr<std::atomic<unsigned>> signals=std::make_shared<std::atomic<unsigned>>(0);
     bool AttachInput(HostInputBinding value)override{binding=std::move(value);return true;}
-    bool DetachInput(std::string_view)override{binding={};return true;}
+    unsigned detachFailures=0,detachCalls=0;
+    bool DetachInput(std::string_view)override{++detachCalls;if(detachFailures){--detachFailures;return false;}binding={};return true;}
     bool SetActiveViews(const std::vector<std::string>&)override{return true;}
     bool SetViewStatus(const std::vector<std::string>&,const std::string&)override{return true;}
     bool SendSceneDelta(FeatureSceneDelta)override{return true;}
     bool SendOwnerComplete(std::function<void()> complete)override{complete();return true;}
     bool throwOnWork=false;
+    std::shared_ptr<TaskInterleaving::Gate> workGate;
     const std::thread::id owner=std::this_thread::get_id();
     std::atomic<unsigned> workerSignals{0};
     bool SendWorkAvailable()override {
         ++*signals;
         if(std::this_thread::get_id()!=owner) {
             ++workerSignals;
+            if(workGate)workGate->Hold();
             if(throwOnWork)throw std::runtime_error("injected notification failure");
         }
         return true;
@@ -274,9 +309,9 @@ void TestWorkerDestruction(bool throwOnWork,bool active=false)
     }
     if(throwOnWork) {
         // 通知失败不能使已完成计算失败；owner tick 仍能消费结果并正常 Detach。
-        Require(editor->OnHostTick()&&!editor->GetState().isComputing,"notification exception lost the operation result");
+        PumpEditor(*editor,[&]{return !editor->GetState().isComputing;});
         Require(editor->GetState().operation.error==RoiError::None,"notification exception changed the successful operation outcome");
-        Require(editor->DetachHost()&&main->overlays.empty(),"owner detach did not release VTK resources");
+        Require(DetachEditor(*editor)&&main->overlays.empty(),"owner detach did not release VTK resources");
         // vtkRenderer::GetActors 的枚举缓存也持有 actor；刷新后才能观察最后一次释放。
         (void)main->renderer->GetActors();
         Require(deletions.total!=0&&deletions.foreign==0,"normal owner detach released overlay props on another thread");
@@ -289,6 +324,201 @@ void TestWorkerDestruction(bool throwOnWork,bool active=false)
     // 非 owner 析构只覆盖 worker 最后防线；正常资源释放仍要求 owner Detach。
     main->ClearOverlays();
 }
+class GatedOperationPort final : public TestDataPort {
+public:
+    explicit GatedOperationPort(std::shared_ptr<TaskInterleaving::Gate> value):gate(std::move(value)){}
+    RoiOperationResult GetRoiOperation(const DataGraphSnapshot& graph,const RoiOperationRequest& request) const override
+    {
+        gate->Hold();
+        return TestDataPort::GetRoiOperation(graph,request);
+    }
+    std::shared_ptr<TaskInterleaving::Gate> gate;
+};
+
+void TestOwnerOperationWait(bool detach)
+{
+    auto gate=std::make_shared<TaskInterleaving::Gate>();gate->Arm();
+    auto data=std::make_shared<GatedOperationPort>(gate);
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto scope=data->CreateDataEntityId();const auto source=SetScopedImage(*data,image,scope);
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    TaskInterleaving::ReleaseOnExit release(gate);
+    auto host=std::make_shared<Controller>();
+    HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+    Require(editor->AttachHost(context),"operation wait attach failed");
+    RoiRequest draft;draft.definition.source=source;RoiNode node;node.primitive.shape=RoiShape::Sphere;
+    node.primitive.origin={2,2,2};node.primitive.radius=1;draft.definition.nodes={node};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"operation wait draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=RoiOperationRequest{};
+    start.operation->params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,1,RoiRadiusUnit::Voxels};
+    Require(editor->SendRequest(start).error==RoiError::Pending,"operation wait task was not admitted");
+    Require(gate->WaitEntered(),"operation worker did not enter the gate");
+    const auto before=data->GetDataGraph().commitId;
+    Require(editor->SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"blocked operation save was not deferred");
+    auto replacement=draft;replacement.definition.nodes.front().primitive.origin={1,1,1};
+    replacement.definition.nodes.front().primitive.radius=.25;
+    const auto owner=std::this_thread::get_id();RoiError error=RoiError::Unavailable;bool detached=false;
+    const auto observation=TaskInterleaving::ObserveOwnerCall(gate,[&]{
+        Require(std::this_thread::get_id()==owner,"operation owner call changed threads");
+        if(detach){
+            detached=editor->DetachHost();
+            Require(!detached && editor->GetState().isAttached && !editor->GetState().hasDraft,"blocked detach falsely completed or retained the draft");
+            Require(!editor->DetachHost() && host->detachCalls==0,"blocked detach retry dropped input ownership");
+            Require(editor->SendRequest({RoiEditingAction::Begin,replacement}).error==RoiError::Unavailable,"detaching editor admitted a new draft");
+        }else{
+            error=editor->SendRequest({RoiEditingAction::Cancel}).error;
+            const auto cancelled=editor->GetState();
+            Require(!cancelled.hasDraft && !cancelled.preview && !cancelled.isComputing && !cancelled.isSaving && main->overlays.empty(),"cancel did not immediately invalidate logical draft state");
+            Require(editor->SendRequest({RoiEditingAction::Begin,replacement}).error==RoiError::None,"cancelled operation blocked immediate editing");
+            RoiEditingRequest change;change.action=RoiEditingAction::SetDraft;change.primitive=replacement.definition.nodes.front().primitive;change.primitive->radius=.5;
+            Require(editor->SendRequest(change).error==RoiError::None,"replacement draft could not be edited while old work was blocked");
+        }
+        Require(GetReaderHeld(*data,scope,"roi-operation-reader"),"cancel or detach released the blocked operation input lease");
+        Require(data->GetDataGraph().commitId==before,"cancel or detach published a deferred save");
+    });
+    if(detach){
+        // Stop 已停止普通帧推进；显式重试本身必须能够回收任务。
+        Require(DetachEditor(*editor),"operation detach retry failed without ticks");
+    }else{
+        PumpEditor(*editor,[&]{return !GetReaderHeld(*data,scope,"roi-operation-reader");});
+        Require(editor->GetState().draft->nodes.front().primitive.origin==std::array<double,3>{1,1,1}
+            && editor->GetState().draft->nodes.front().primitive.radius==.5 && data->GetDataGraph().commitId==before,"late cancelled operation replaced the new edit or committed its old save");
+        Require(editor->SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"replacement cancel failed");
+        Require(DetachEditor(*editor),"operation cancel cleanup detach failed");
+    }
+    Require(!GetReaderHeld(*data,scope,"roi-operation-reader") && !GetReaderHeld(*data,scope,"roi-draft-reader"),"finished operation retained an input lease");
+    std::cout<<(detach?"detach-operation-wait":"cancel-operation-wait")<<" elapsed_ms="<<observation.elapsedMs
+        <<" returned_while_held="<<observation.returnedWhileHeld<<'\n';
+    Require(detach?!detached:error==RoiError::None,"operation owner call violated retry/cancel semantics");
+    Require(observation.returnedWhileHeld,detach
+        ?"DetachHost waited for a blocked operation on the owner thread"
+        :"Cancel waited for a blocked operation on the owner thread");
+}
+
+class GatedQueryRead final : public RoiReadView {
+public:
+    GatedQueryRead(RoiReadSnapshot read,std::shared_ptr<TaskInterleaving::Gate> gate,std::thread::id owner)
+        :m_read(std::move(read)),m_gate(std::move(gate)),m_owner(owner){}
+    DataRevisionRef GetRevision()const noexcept override{return m_read->GetRevision();}
+    DataRevisionRef GetSource()const noexcept override{return m_read->GetSource();}
+    const RoiDefinition& GetDefinition()const noexcept override{return m_read->GetDefinition();}
+    const std::vector<DataRevisionRef>& GetDependencies()const noexcept override{return m_read->GetDependencies();}
+    std::array<double,6> GetBounds()const noexcept override{return m_read->GetBounds();}
+    RoiQueryResult GetQuery()const override{if(std::this_thread::get_id()!=m_owner)m_gate->Hold();return m_read->GetQuery();}
+    bool GetContains(const std::array<double,3>& p)const override{return m_read->GetContains(p);}
+    RoiPointsResult GetPoints(const std::vector<std::array<double,3>>& p)const override{return m_read->GetPoints(p);}
+    RoiPlanesResult GetClipPlanes()const override{return m_read->GetClipPlanes();}
+    RoiTriangleSelection GetTriangleSelection(const RoiTriangle& t,double tolerance,std::function<bool()> cancelled)const override{return m_read->GetTriangleSelection(t,tolerance,std::move(cancelled));}
+    RoiTriangleSelection GetTriangleChunks(const RoiTriangle& t,std::size_t count,const RoiTriangleCallback& consume,double tolerance,std::function<bool()> cancelled)const override{return m_read->GetTriangleChunks(t,count,consume,tolerance,std::move(cancelled));}
+    RoiPolygonResult GetClippedTriangle(const RoiTriangle& t)const override{return m_read->GetClippedTriangle(t);}
+    double GetBoundaryDistance(const std::array<double,3>& p)const noexcept override{return m_read->GetBoundaryDistance(p);}
+    RoiMaskResult GetMaskChunk(const RoiMaskRequest& request)const override{return m_read->GetMaskChunk(request);}
+private:
+    RoiReadSnapshot m_read;std::shared_ptr<TaskInterleaving::Gate> m_gate;std::thread::id m_owner;
+};
+
+class GatedDisplayPort final : public TestDataPort {
+public:
+    GatedDisplayPort(std::shared_ptr<TaskInterleaving::Gate> value,std::thread::id owner):gate(std::move(value)),ownerThread(owner){}
+    RoiReadResult GetRoiPreview(const DataGraphSnapshot& graph,const RoiDefinition& definition)const override
+    {
+        auto result=TestDataPort::GetRoiPreview(graph,definition);
+        if(result.roi)result.roi=std::make_shared<const GatedQueryRead>(result.roi,gate,ownerThread);
+        return result;
+    }
+    std::shared_ptr<TaskInterleaving::Gate> gate;std::thread::id ownerThread;
+};
+
+void TestOwnerDisplayWait(bool detach)
+{
+    auto gate=std::make_shared<TaskInterleaving::Gate>();gate->Arm();
+    auto data=std::make_shared<GatedDisplayPort>(gate,std::this_thread::get_id());
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto scope=data->CreateDataEntityId();const auto source=SetScopedImage(*data,image,scope);
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    TaskInterleaving::ReleaseOnExit release(gate);
+    auto host=std::make_shared<Controller>();
+    HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+    Require(editor->AttachHost(context),"display wait attach failed");
+    RoiRequest draft;draft.definition={source,{{RoiNodeKind::SourceDomain}}};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"display wait draft failed");
+    Require(gate->WaitEntered(),"display worker did not enter the query gate");
+    const auto owner=std::this_thread::get_id();RoiError error=RoiError::Unavailable;bool detached=false;
+    const auto observation=TaskInterleaving::ObserveOwnerCall(gate,[&]{
+        Require(std::this_thread::get_id()==owner,"display owner call changed threads");
+        if(detach){
+            detached=editor->DetachHost();
+            Require(!detached && editor->GetState().isAttached && !editor->GetState().hasDraft,"blocked display detach falsely completed");
+            Require(!editor->DetachHost() && host->detachCalls==0,"display detach retry released the input binding early");
+            Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::Unavailable,"detaching display admitted a new request");
+        }else{
+            error=editor->SendRequest({RoiEditingAction::Cancel}).error;
+            Require(!editor->GetState().hasDraft && !editor->GetState().preview && main->overlays.empty(),"display cancel retained its visible draft");
+        }
+        Require(GetReaderHeld(*data,scope,"roi-display-reader"),"blocked display lost its source reader lease");
+    });
+    if(!detach){
+        Require(error==RoiError::None,"display cancel failed");
+        // 没有草稿时也必须回收旧显示，后续编辑不能被旧 future 永久占住。
+        PumpEditor(*editor,[&]{return !GetReaderHeld(*data,scope,"roi-display-reader");});
+        Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"display cancellation prevented a later draft");
+        PumpEditor(*editor,[&]{return editor->GetState().displayStatus!=RoiDisplayStatus::Updating;});
+        Require(editor->GetState().displayStatus==RoiDisplayStatus::Displayed,"replacement display did not finish");
+        Require(editor->SendRequest({RoiEditingAction::Cancel}).error==RoiError::None,"replacement display cancel failed");
+    }else{
+        Require(!detached,"display detach reported success while the worker was blocked");
+        PumpEditor(*editor,[&]{return !GetReaderHeld(*data,scope,"roi-display-reader");});
+        host->detachFailures=1;
+        Require(!editor->DetachHost() && editor->GetState().isAttached && bool(host->binding.onAction),"failed input detach was reported as completed");
+        Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::Unavailable,"input-detach retry admitted requests");
+    }
+    Require(DetachEditor(*editor) && editor->DetachHost() && !host->binding.onAction,"display detach retry failed");
+    Require(!GetReaderHeld(*data,scope,"roi-display-reader") && !GetReaderHeld(*data,scope,"roi-draft-reader"),"display completion retained its input leases");
+    std::cout<<(detach?"detach-display-wait":"cancel-display-wait")<<" elapsed_ms="<<observation.elapsedMs
+        <<" returned_while_held="<<observation.returnedWhileHeld<<'\n';
+    Require(observation.returnedWhileHeld,detach
+        ?"DetachHost waited for a blocked display on the owner thread"
+        :"Cancel waited for a blocked display on the owner thread");
+}
+
+void TestOwnerNotificationWait()
+{
+    auto gate=std::make_shared<TaskInterleaving::Gate>();gate->Arm();
+    auto data=std::make_shared<TestDataPort>();
+    vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);
+    std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);
+    const auto scope=data->CreateDataEntityId();const auto source=SetScopedImage(*data,image,scope);
+    auto views=std::make_shared<Views>();auto main=std::make_shared<View>("main",HostRenderViewRole::Primary3D);
+    main->source=source;views->views={{"main",main}};
+    auto host=std::make_shared<Controller>();host->workGate=gate;
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    TaskInterleaving::ReleaseOnExit release(gate);
+    HostFeatureContext context;context.data=data;context.views=views;context.host=host;
+    Require(editor->AttachHost(context),"notification wait attach failed");
+    RoiRequest draft;draft.definition={source,{{RoiNodeKind::SourceDomain}}};
+    // 先使用解析球体，避免显示任务先进入通知门闩。
+    draft.definition.nodes.front().kind=RoiNodeKind::Primitive;
+    draft.definition.nodes.front().primitive.shape=RoiShape::Sphere;
+    draft.definition.nodes.front().primitive.origin={2,2,2};draft.definition.nodes.front().primitive.radius=1;
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"notification wait draft failed");
+    RoiEditingRequest start;start.action=RoiEditingAction::BeginOperation;start.operation=RoiOperationRequest{};
+    start.operation->params=RoiInvertParams{};
+    Require(editor->SendRequest(start).error==RoiError::Pending && gate->WaitEntered(),"operation did not reach the terminal notification");
+    const auto observation=TaskInterleaving::ObserveOwnerCall(gate,[&]{
+        Require(!editor->DetachHost() && editor->GetState().isAttached,"notification-in-flight detach falsely completed");
+        (void)editor->OnHostTick();
+        Require(GetReaderHeld(*data,scope,"roi-operation-reader"),"notification-in-flight task released its reader early");
+    });
+    Require(observation.returnedWhileHeld,"owner joined a thread still sending its completion notification");
+    Require(DetachEditor(*editor) && !GetReaderHeld(*data,scope,"roi-operation-reader"),"notification completion could not be reaped on retry");
+}
+
 void TestOperationNotificationLifetime()
 {
     auto data=std::make_shared<TestDataPort>();
@@ -318,7 +548,7 @@ void TestOperationNotificationLifetime()
     }
     Require(consumed && !editor->GetState().isComputing && editor->GetState().error==RoiError::None,
         "operation lost its work notification after the attachment context was released");
-    Require(editor->DetachHost() && weakHost.expired(),"notification port survived worker detach");
+    Require(DetachEditor(*editor) && weakHost.expired(),"notification port survived worker detach");
 }
 void TestDrawingAndLatestOperation()
 {
@@ -351,7 +581,7 @@ void TestDrawingAndLatestOperation()
     Require(editor->SendRequest({RoiEditingAction::Begin,contour}).error==RoiError::None,"control point draft failed");drawing.drawing=RoiDrawingMode::EditControlPoint;Require(editor->SendRequest(drawing).error==RoiError::None,"control point editing was not enabled");
     const auto control=display(2.5,1.5),moved=display(2.8,1.5);event.x=control[0];event.y=control[1];event.eventKind=InteractionEventKind::PrimaryPress;Require(host->binding.onAction("roi.draw",event,{}).isHandled,"control point was not hit");event.x=moved[0];event.y=moved[1];event.eventKind=InteractionEventKind::PointerMove;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"control point move failed");event.eventKind=InteractionEventKind::PrimaryRelease;Require(host->binding.onAction("roi.draw",event,{}).isSucceeded,"control point release failed");
     Require(editor->GetState().draft->nodes[0].primitive.contours[0][1][0]>.7,"control point movement changed another selection");Require(editor->SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor->GetState().tool->contours[0][1][0]==.5,"control point undo left stale handles");
-    Require(editor->DetachHost() && !host->binding.onAction && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
+    Require(DetachEditor(*editor) && !host->binding.onAction && main->overlays.empty() && slice->overlays.empty(),"drawing/worker detach leaked resources");
 }
 
 void WaitOperation(RoiEditingHostFeature& editor){
@@ -429,7 +659,7 @@ void TestOutputIdentityAndDisplay(){
     Require(editor.SendRequest(next).error==RoiError::Pending && editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::Pending,"versioned pending save failed");
     const auto before=data->GetDataGraph().commitId;operation.params=RoiMorphologyParams{RoiMorphologyOperation::Dilate,0,RoiRadiusUnit::Voxels};next.operation=operation;Require(editor.SendRequest(next).error==RoiError::Pending,"superseding operation failed");WaitOperation(editor);
     Require(editor.GetState().hasDraft && !editor.GetState().isSaving && data->GetDataGraph().commitId==before,"old pending save committed newer parameters");
-    Require(editor.DetachHost() && main->overlays.empty(),"identity editor leaked display resources");
+    Require(DetachEditor(editor) && main->overlays.empty(),"identity editor leaked display resources");
 }
 void TestAppliedSplit(){
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(5,5,5);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),125,1);const auto source=data->SetPrimaryImage(image)->data->self;
@@ -440,7 +670,7 @@ void TestAppliedSplit(){
     Require(editor.SendRequest({RoiEditingAction::Undo}).error==RoiError::None && editor.SendRequest({RoiEditingAction::Redo}).error==RoiError::None && editor.GetState().operation.rois.size()==2,"split history lost the applied batch");
     Require(editor.SendRequest({RoiEditingAction::CancelOperation}).error==RoiError::InvalidRequest && editor.GetState().operation.rois.size()==2,"redo revived an applied split parameter preview");
     request.action=RoiEditingAction::SetOperation;Require(editor.SendRequest(request).error==RoiError::InvalidRequest,"applied split still accepted old preview parameter changes");const auto before=data->GetDataGraph().commitId;
-    Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None && data->GetDataGraph().commitId==before+1 && RoiService::GetDescriptors(data->GetDataGraph()).size()==3,"applied split was saved as one union");Require(editor.DetachHost(),"split editor detach failed");
+    Require(editor.SendRequest({RoiEditingAction::Commit}).error==RoiError::None && data->GetDataGraph().commitId==before+1 && RoiService::GetDescriptors(data->GetDataGraph()).size()==3,"applied split was saved as one union");Require(DetachEditor(editor),"split editor detach failed");
 }
 
 void TestChunkedDisplay(bool throwOnWork=false){
@@ -465,7 +695,7 @@ void TestChunkedDisplay(bool throwOnWork=false){
     bool completed=false;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(std::chrono::steady_clock::now()<until){editor.OnHostTick();if(editor.GetState().displayStatus!=RoiDisplayStatus::Updating && !sliceLines()){completed=true;break;}std::this_thread::yield();}
     Require(completed && blocks()==initial && editor.GetState().preview->GetContains({10,1,1}),"slice movement rebuilt three-dimensional actors or changed formal membership");
     main->lease->StopLease();Require(editor.OnHostTick() && !editor.GetState().hasDraft && data->GetDataGraph().view->GetData(source),"stopped view lease accepted a late display or deleted source data");
-    Require(editor.DetachHost() && main->overlays.empty() && slice->overlays.empty(),"block display resources leaked");
+    Require(DetachEditor(editor) && main->overlays.empty() && slice->overlays.empty(),"block display resources leaked");
 }
 
 struct SliceQueries {std::atomic<std::size_t> total{0},outside{0};};
@@ -511,7 +741,7 @@ void TestSliceOnlyDisplay(){
     Require(editor.SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"slice-only begin failed");FeatureOverlayState plane;plane.cursor={8,8,32};for(const auto& overlay:slice->overlays)overlay->SetOverlayState(plane);
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(editor.GetState().displayStatus==RoiDisplayStatus::Updating && std::chrono::steady_clock::now()<until){editor.OnHostTick();std::this_thread::yield();}
     Require(editor.GetState().displayStatus==RoiDisplayStatus::Displayed && data->queries->total>0 && data->queries->outside==0,"slice-only display scanned unrelated three-dimensional voxel layers");
-    Require(editor.DetachHost() && slice->overlays.empty(),"slice-only resources leaked");
+    Require(DetachEditor(editor) && slice->overlays.empty(),"slice-only resources leaked");
 }
 void TestProgressiveDisplay(){
     auto data=std::make_shared<TestDataPort>();vtkNew<vtkImageData> image;image->SetDimensions(258,18,18);image->AllocateScalars(VTK_UNSIGNED_CHAR,1);std::fill_n(static_cast<unsigned char*>(image->GetScalarPointer()),258*18*18,1);
@@ -555,7 +785,7 @@ void TestProgressiveDisplay(){
     while(std::chrono::steady_clock::now()<sourceUntil){editor.OnHostTick();if(blockCount()>0 && editor.GetState().displayStatus==RoiDisplayStatus::Updating){partial=true;break;}std::this_thread::yield();}
     Require(partial,"source expiry fixture did not reach a partial display");main->lease->StopLease();
     Require(editor.OnHostTick() && !editor.GetState().hasDraft && blockCount()==0,"source lease expiry accepted queued display batches");
-    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && editor.DetachHost(),"cancel/Detach blocked a bounded display producer");
+    Require(editor.SendRequest({RoiEditingAction::Cancel}).error==RoiError::None && DetachEditor(editor),"cancel/Detach blocked a bounded display producer");
     for(const auto& view:{main,top,front,side})Require(view->overlays.empty(),"cancelled progressive display retained an overlay");
     Require(weakHost.expired(),"detach retained the display notification port");
 }
@@ -580,7 +810,102 @@ void TestCommittedComplexDisplayStatus()
     Require(!editor.GetState().hasDraft && editor.GetState().displayStatus==RoiDisplayStatus::Displayed
         && editor.GetState().displayError==RoiError::None && editor.GetState().visibleRois.size()==1,
         "formal display retained the discarded draft status after rendering completed");
-    Require(editor.DetachHost(),"formal display detach failed");
+    Require(DetachEditor(editor),"formal display detach failed");
+}
+void TestHostEditing(const char* sample)
+{
+    const int dimension=sample?64:8;
+    HostRenderViewConfig view;view.id="main";view.role=HostRenderViewRole::Primary3D;
+    view.inputMode=HostInputMode::HostInjected;view.window.viewInit.viewMode=HostRenderMode::Volume;
+    view.renderWindow=vtkSmartPointer<vtkRenderWindow>::New();view.renderWindow->SetOffScreenRendering(1);
+    HostSessionConfig config;config.renderViews={view};config.driveMode=HostDriveMode::HostDriven;config.onWorkAvailable=[]{};
+    VtkAppHostSession session(config);
+    struct StopGuard {VtkAppHostSession& session;~StopGuard(){(void)session.Stop();}} stop{session};
+    auto editor=std::make_shared<RoiEditingHostFeature>(RoiEditingConfig{{"main"},{{"main"},{}}});
+    Require(session.BuildSession() && session.AttachFeature(editor),"actual Host/editor attach failed");
+    // 60 秒沿用 RoiIntegrationTests 的实际 Host 加载/完成保护，非取消响应门限。
+    const auto pump=[&](const std::function<bool()>& done){
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        while(!done() && std::chrono::steady_clock::now()<deadline){(void)session.SendUpdates();std::this_thread::yield();}
+        Require(done(),"actual Host work did not converge");
+    };
+    bool loaded=false;HostResult loadResult;
+    const auto complete=[&](HostResult result){loadResult=std::move(result);loaded=true;};
+    if(sample){
+        HostLoadRequest load;load.filePath=sample;load.geometry.dimensions={dimension,dimension,dimension};
+        // 现有 archived-roi/real-source.json：1536^3 CT 的 64^3 区域，物理单位 mm。
+        load.geometry.spacing={.1537,.1537,.1537};load.geometry.origin={113.1232,87.3016,113.1232};
+        load.metadata.source.kind=ImageSourceKind::RawFile;load.metadata.identity.datasetId="roi-editing-real-region";load.metadata.source.uri=sample;
+        Require(session.SendRequest(std::move(load),complete).status==HostAdmissionStatus::Accepted,"real ROI input load rejected");
+    }else{
+        HostReloadRequest load;load.geometry.dimensions={dimension,dimension,dimension};load.geometry.spacing={.7,1.1,1.3};
+        load.geometry.origin={12,-17,23};load.geometry.direction={0,-1,0,1,0,0,0,0,1};
+        load.voxels.assign(std::size_t(dimension)*dimension*dimension,1);
+        load.metadata.source.kind=ImageSourceKind::Memory;load.metadata.identity.datasetId="roi-editor-host-retry";load.metadata.source.uri="memory://roi-editor-host-retry";
+        Require(session.SendRequest(std::move(load),complete).status==HostAdmissionStatus::Accepted,"Host retry input load rejected");
+    }
+    pump([&]{return loaded;});Require(loadResult.isSucceeded,"actual Host input load failed");
+    const auto descriptor=session.GetImageDescriptor();Require(bool(descriptor),"Host input descriptor missing");
+    const auto& geometry=*descriptor;RoiRequest draft;draft.metadata.name="实际宿主编辑";draft.definition.source=geometry.dataRevision;
+    RoiNode box;const double center=(dimension-1)*.5,half=(dimension/2-1)*.5;
+    for(int row=0;row<3;++row){
+        box.primitive.localToSource[row*4+3]=geometry.origin[row];
+        for(int axis=0;axis<3;++axis){
+            const auto coefficient=geometry.direction[row*3+axis]*geometry.spacing[axis];
+            box.primitive.localToSource[row*4+axis]=coefficient*half;
+            box.primitive.localToSource[row*4+3]+=coefficient*(geometry.extent[axis*2]+center);
+        }
+    }
+    draft.definition.nodes={box};
+    Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"actual Host draft rejected");
+    const auto checkMask=[&](bool inverted){
+        const auto state=editor->GetState();Require(bool(state.preview),"actual Host preview missing");
+        RoiMaskRequest request;
+        request.region.size={std::size_t(dimension),std::size_t(dimension),std::size_t(dimension)};
+        const auto mask=state.preview->GetMaskChunk(request);const auto count=std::size_t(dimension)*dimension*dimension;
+        Require(mask.error==RoiError::None && mask.isComplete && mask.values.size()==count,"actual Host ROI mask incomplete");
+        std::size_t selected=0;
+        for(std::size_t index=0;index<count;++index){
+            const int x=int(index%dimension),y=int(index/dimension%dimension),z=int(index/(dimension*dimension));
+            const bool inside=x>=dimension/4 && x<3*dimension/4 && y>=dimension/4 && y<3*dimension/4 && z>=dimension/4 && z<3*dimension/4;
+            const bool expected=inverted?!inside:inside;
+            Require((mask.values[index]!=0)==expected,"public ROI editing mask differs from the independent integer-index reference");
+            selected+=mask.values[index]!=0;
+        }
+        return selected;
+    };
+    const auto initialSelected=checkMask(false);
+    RoiEditingRequest operation;operation.action=RoiEditingAction::BeginOperation;operation.operation=RoiOperationRequest{};operation.operation->params=RoiInvertParams{};
+    Require(editor->SendRequest(operation).error==RoiError::Pending,"actual Host operation not admitted");
+    pump([&]{return !editor->GetState().isComputing;});
+    Require(editor->GetState().operation.error==RoiError::None,"actual Host operation failed");
+    const auto invertedSelected=checkMask(true);
+    const auto saved=editor->SendRequest({RoiEditingAction::Commit});
+    Require(saved.error==RoiError::None && saved.roi && !editor->GetState().hasDraft,"actual Host ROI commit failed");
+    const auto committed=session.GetRoiDescriptor(saved.roi->revision);
+    Require(committed && committed->definition.source==geometry.dataRevision && committed->metadata.name==draft.metadata.name,"actual Host committed ROI lost source or metadata");
+    for(bool stopSession:{false,true}){
+        auto gate=std::make_shared<TaskInterleaving::Gate>();gate->Arm();TaskInterleaving::ReleaseOnExit release(gate);
+        Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"Host retry draft failed");
+        auto blocked=operation;const auto owner=std::this_thread::get_id();
+        blocked.operation->getCancelled=[gate,owner]{if(std::this_thread::get_id()!=owner)gate->Hold();return false;};
+        Require(editor->SendRequest(blocked).error==RoiError::Pending,"Host retry operation not admitted");
+        pump([&]{return gate->GetIsHeld();});
+        const auto observation=TaskInterleaving::ObserveOwnerCall(gate,[&]{
+            const bool stopped=stopSession?session.Stop():session.DetachFeature(*editor);
+            Require(!stopped && editor->GetState().isAttached && !editor->GetState().hasDraft,"Host falsely completed detach/Stop with blocked ROI work");
+            Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::Unavailable,"Host-pending detach accepted editing");
+        });
+        Require(observation.returnedWhileHeld,"Host detach/Stop waited for a blocked ROI task");
+        const auto deadline=std::chrono::steady_clock::now()+TaskInterleaving::synchronizationTimeout;bool stopped=false;
+        while(!stopped && std::chrono::steady_clock::now()<deadline){stopped=stopSession?session.Stop():session.DetachFeature(*editor);std::this_thread::yield();}
+        Require(stopped && !editor->GetState().isAttached,"Host detach/Stop retry did not finish without ticks");
+        std::cout<<(stopSession?"host-stop-retry":"host-detach-retry")<<" elapsed_ms="<<observation.elapsedMs<<" returned_while_held="<<observation.returnedWhileHeld<<'\n';
+        if(!stopSession)Require(session.GetRoiDescriptor(saved.roi->revision) && session.AttachFeature(editor),"Host detach removed the formal ROI or prevented reattach");
+    }
+    Require(session.Stop(),"actual Host final Stop was not idempotent");
+    std::cout<<"roi-public-entry real="<<bool(sample)<<" voxels="<<std::size_t(dimension)*dimension*dimension
+        <<" initial_selected="<<initialSelected<<" inverted_selected="<<invertedSelected<<'\n';
 }
 }
 int main(int argc,char** argv)
@@ -593,6 +918,13 @@ int main(int argc,char** argv)
     _CrtSetReportFile(_CRT_ASSERT,_CRTDBG_FILE_STDERR);
 #endif
     try {
+        if(argc==3&&std::string(argv[1])=="real-ct"){TestHostEditing(argv[2]);return 0;}
+        if(argc==2&&std::string(argv[1])=="host-detach-retry"){TestHostEditing(nullptr);return 0;}
+        if(argc==2&&std::string(argv[1])=="detach-notification-wait"){TestOwnerNotificationWait();return 0;}
+        if(argc==2&&std::string(argv[1])=="cancel-operation-wait"){TestOwnerOperationWait(false);return 0;}
+        if(argc==2&&std::string(argv[1])=="detach-operation-wait"){TestOwnerOperationWait(true);return 0;}
+        if(argc==2&&std::string(argv[1])=="cancel-display-wait"){TestOwnerDisplayWait(false);return 0;}
+        if(argc==2&&std::string(argv[1])=="detach-display-wait"){TestOwnerDisplayWait(true);return 0;}
         if(argc==2&&std::string(argv[1])=="worker-cancellation"){TestWorkerDestruction(false,true);return 0;}
         if(argc==2&&std::string(argv[1])=="worker-destruction"){TestWorkerDestruction(false);return 0;}
         if(argc==2&&std::string(argv[1])=="notification-exception"){TestWorkerDestruction(true);TestChunkedDisplay(true);return 0;}

@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -665,60 +666,61 @@ int GetGapFailCount()
         GetPropCount<vtkActor>(endpoint->renderer);
     const int hotkeyExitSliceImageCount =
         GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
-    failureCount += GetCaseResult(
-        isHotkeyStartHandled
-            && hotkeyStartState.analysisState
-                == GapAnalysisState::Succeeded
-            && hotkeyStartState.isViewActive
-            && hasFormalGapResult
-            && hotkeyPrimaryPropCount
-                == primaryBasePropCount + 3 // 网格、图例、按需显示状态。
-            && hotkeySlicePropCount
-                == sliceBasePropCount + 4 // 标签、轮廓、图例、按需显示状态。
-            && hotkeyPrimaryActorCount
-                == primaryBaseActorCount + 1
-            && hotkeySliceImageCount
-                == sliceBaseImageCount + 1
-            && GetPropCount<vtkScalarBarActor>(endpoint->renderer)==0
-            && hotkeyMaps.size() == 2 && hotkeyMap!=hotkeyMaps.end()
-            && hotkeyMap->id == "GapAnalysis.labels"
-            && hotkeyMap->producerFeatureId == "GapAnalysis"
-            && hotkeyMap->datasetId == "qt-host-gap-tests"
-            && hotkeyMap->valueType == ImageValueType::Int32
-            && hotkeyMap->voxelCount == 125
-            && hotkeyRead.error == LabelMapError::None
-            && hotkeyRead.state
-            && hotkeyRead.state->values
-            && hotkeyRead.state->values->size()
-                == 125 * sizeof(std::int32_t)
-            && isExitKeyHandled
-            && hotkeyExitState.analysisState
-                == GapAnalysisState::Succeeded
-            && hotkeyExitState.commitId
-                == hotkeyStartState.commitId
-            && hotkeyExitState.sourceRevision
-                == hotkeyStartState.sourceRevision
-            && hotkeyExitState.labelMap
-                == hotkeyStartState.labelMap
-            && hotkeyExitState.voidTable
-                == hotkeyStartState.voidTable
-            && hotkeyExitState.voidMesh
-                == hotkeyStartState.voidMesh
-            && hotkeyExitState.statisticsData
-                == hotkeyStartState.statisticsData
-            && hotkeyExitState.resultSet
-                == hotkeyStartState.resultSet
-            && !hotkeyExitState.isViewActive
-            && !hotkeyExitState.isExitPending
-            && hotkeyExitPrimaryPropCount
-                == primaryBasePropCount
-            && hotkeyExitSlicePropCount
-                == sliceBasePropCount
-            && hotkeyExitPrimaryActorCount
-                == primaryBaseActorCount
-            && hotkeyExitSliceImageCount
-                == sliceBaseImageCount
-            && session.GetLabelMapDescriptors().empty(),
+    bool isHotkeyResultValid = true;
+    const auto checkHotkeyResult = [&](const char* condition, const auto& actual, const auto& expected) {
+        const bool isExpected = actual == expected;
+        std::cout << (isExpected ? "PASS: " : "FAIL: ") << "Gap " << condition
+            << " | actual=" << actual << " | expected=" << expected << '\n';
+        isHotkeyResultValid = isExpected && isHotkeyResultValid;
+    };
+    checkHotkeyResult("Start key handled", isHotkeyStartHandled, true);
+    checkHotkeyResult("Start analysis state", static_cast<int>(hotkeyStartState.analysisState),
+        static_cast<int>(GapAnalysisState::Succeeded));
+    checkHotkeyResult("Start view active", hotkeyStartState.isViewActive, true);
+    checkHotkeyResult("formal result valid", hasFormalGapResult, true);
+    // 已删除精确几何准备文字；主视图保留网格、图例，切片保留标签、图例、轮廓。
+    checkHotkeyResult("Start primary props", hotkeyPrimaryPropCount, primaryBasePropCount + 2);
+    checkHotkeyResult("Start slice props", hotkeySlicePropCount, sliceBasePropCount + 3);
+    checkHotkeyResult("Start primary actors", hotkeyPrimaryActorCount, primaryBaseActorCount + 1);
+    checkHotkeyResult("Start slice images", hotkeySliceImageCount, sliceBaseImageCount + 1);
+    checkHotkeyResult("Exit primary scalar bars", GetPropCount<vtkScalarBarActor>(endpoint->renderer), 0);
+    checkHotkeyResult("Start label descriptors", hotkeyMaps.size(), std::size_t{2});
+    checkHotkeyResult("Start Gap label descriptor present", hotkeyMap != hotkeyMaps.end(), true);
+    if (hotkeyMap != hotkeyMaps.end()) {
+        checkHotkeyResult("label id", hotkeyMap->id, "GapAnalysis.labels");
+        checkHotkeyResult("label producer", hotkeyMap->producerFeatureId, "GapAnalysis");
+        checkHotkeyResult("label dataset", hotkeyMap->datasetId, "qt-host-gap-tests");
+        checkHotkeyResult("label value type", static_cast<int>(hotkeyMap->valueType),
+            static_cast<int>(ImageValueType::Int32));
+        checkHotkeyResult("label voxel count", hotkeyMap->voxelCount, std::size_t{125});
+    }
+    checkHotkeyResult("label read error", static_cast<int>(hotkeyRead.error),
+        static_cast<int>(LabelMapError::None));
+    checkHotkeyResult("label read state present", bool(hotkeyRead.state), true);
+    if (hotkeyRead.state) {
+        checkHotkeyResult("label read values present", bool(hotkeyRead.state->values), true);
+        if (hotkeyRead.state->values) {
+            checkHotkeyResult("label read bytes", hotkeyRead.state->values->size(), 125 * sizeof(std::int32_t));
+        }
+    }
+    checkHotkeyResult("Exit key handled", isExitKeyHandled, true);
+    checkHotkeyResult("Exit analysis state", static_cast<int>(hotkeyExitState.analysisState),
+        static_cast<int>(GapAnalysisState::Succeeded));
+    checkHotkeyResult("Exit commit preserved", hotkeyExitState.commitId == hotkeyStartState.commitId, true);
+    checkHotkeyResult("Exit source revision preserved", hotkeyExitState.sourceRevision == hotkeyStartState.sourceRevision, true);
+    checkHotkeyResult("Exit label map preserved", hotkeyExitState.labelMap == hotkeyStartState.labelMap, true);
+    checkHotkeyResult("Exit void table preserved", hotkeyExitState.voidTable == hotkeyStartState.voidTable, true);
+    checkHotkeyResult("Exit void mesh preserved", hotkeyExitState.voidMesh == hotkeyStartState.voidMesh, true);
+    checkHotkeyResult("Exit statistics preserved", hotkeyExitState.statisticsData == hotkeyStartState.statisticsData, true);
+    checkHotkeyResult("Exit result set preserved", hotkeyExitState.resultSet == hotkeyStartState.resultSet, true);
+    checkHotkeyResult("Exit view active", hotkeyExitState.isViewActive, false);
+    checkHotkeyResult("Exit pending", hotkeyExitState.isExitPending, false);
+    checkHotkeyResult("Exit primary props", hotkeyExitPrimaryPropCount, primaryBasePropCount);
+    checkHotkeyResult("Exit slice props", hotkeyExitSlicePropCount, sliceBasePropCount);
+    checkHotkeyResult("Exit primary actors", hotkeyExitPrimaryActorCount, primaryBaseActorCount);
+    checkHotkeyResult("Exit slice images", hotkeyExitSliceImageCount, sliceBaseImageCount);
+    checkHotkeyResult("Exit label descriptors", session.GetLabelMapDescriptors().size(), std::size_t{0});
+    failureCount += GetCaseResult(isHotkeyResultValid,
         "Gap Start reuses one result in mesh and slice views, then Exit removes both") ? 0 : 1;
 
     int firstCompleteCount = 0;
