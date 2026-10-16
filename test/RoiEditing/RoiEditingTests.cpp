@@ -19,6 +19,10 @@
 #include <vtkWeakPointer.h>
 #include <vtkCallbackCommand.h>
 #include <future>
+#include <cstdlib>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -248,7 +252,9 @@ void TestWorkerDestruction(bool throwOnWork,bool active=false)
     RoiRequest draft;draft.definition.source=source;
     // 球体不创建交互 widget；overlay 由 owner 的 View 保活并在 owner 上清理。
     RoiNode node;node.primitive.shape=throwOnWork?RoiShape::Box:RoiShape::Sphere;
-    node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};draft.definition.nodes={node};
+    if(throwOnWork)node.primitive.localToSource={1,0,0,2,0,1,0,2,0,0,1,2,0,0,0,1};
+    else {node.primitive.origin={2,2,2};node.primitive.radius=1;}
+    draft.definition.nodes={node};
     Require(editor->SendRequest({RoiEditingAction::Begin,draft}).error==RoiError::None,"worker destruction draft failed");
     vtkNew<vtkCallbackCommand> onDelete;onDelete->SetClientData(&deletions);
     onDelete->SetCallback([](vtkObject*,unsigned long,void* value,void*) {
@@ -269,7 +275,10 @@ void TestWorkerDestruction(bool throwOnWork,bool active=false)
     if(throwOnWork) {
         // 通知失败不能使已完成计算失败；owner tick 仍能消费结果并正常 Detach。
         Require(editor->OnHostTick()&&!editor->GetState().isComputing,"notification exception lost the operation result");
+        Require(editor->GetState().operation.error==RoiError::None,"notification exception changed the successful operation outcome");
         Require(editor->DetachHost()&&main->overlays.empty(),"owner detach did not release VTK resources");
+        // vtkRenderer::GetActors 的枚举缓存也持有 actor；刷新后才能观察最后一次释放。
+        (void)main->renderer->GetActors();
         Require(deletions.total!=0&&deletions.foreign==0,"normal owner detach released overlay props on another thread");
     }
     const std::weak_ptr<RoiEditingHostFeature> released=editor;
@@ -576,8 +585,19 @@ void TestCommittedComplexDisplayStatus()
 }
 int main(int argc,char** argv)
 {
-    if(argc==2&&std::string(argv[1])=="worker-cancellation"){TestWorkerDestruction(false,true);return 0;}
-    if(argc==2&&std::string(argv[1])=="worker-destruction"){TestWorkerDestruction(false);return 0;}
-    if(argc==2&&std::string(argv[1])=="notification-exception"){TestWorkerDestruction(true);TestChunkedDisplay(true);return 0;}
-    try {if(argc==2 && std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();TestCommittedComplexDisplayStatus();return 0;}TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit();TestCommittedComplexDisplayStatus(); return 0;} catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+#ifdef _MSC_VER
+    // 生命周期负例失败时向 CTest 返回错误，不弹出阻塞自动化的 CRT 对话框。
+    _set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);
+    _set_error_mode(_OUT_TO_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT,_CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT,_CRTDBG_FILE_STDERR);
+#endif
+    try {
+        if(argc==2&&std::string(argv[1])=="worker-cancellation"){TestWorkerDestruction(false,true);return 0;}
+        if(argc==2&&std::string(argv[1])=="worker-destruction"){TestWorkerDestruction(false);return 0;}
+        if(argc==2&&std::string(argv[1])=="notification-exception"){TestWorkerDestruction(true);TestChunkedDisplay(true);return 0;}
+        if(argc==2&&std::string(argv[1])=="display"){TestChunkedDisplay();TestSliceOnlyDisplay();TestProgressiveDisplay();TestCommittedComplexDisplayStatus();return 0;}
+        TestEditor();TestCurves();TestDrawingAndLatestOperation();TestOperationNotificationLifetime();TestOutputIdentityAndDisplay();TestAppliedSplit();TestCommittedComplexDisplayStatus();
+        return 0;
+    }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
