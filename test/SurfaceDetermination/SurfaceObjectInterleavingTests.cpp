@@ -23,6 +23,27 @@
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <cstdlib>
+#include <cstdio>
+#include <new>
+#include <crtdbg.h>
+
+namespace SurfaceObjectAllocationProbe {
+thread_local std::size_t remaining = 0, hits = 0;
+void Arm(std::size_t count) noexcept { remaining = count; hits = 0; }
+void Stop() noexcept { remaining = 0; }
+struct Reset final { ~Reset() { Stop(); } };
+}
+// 只在测试 owner 的指定阶段启用一次；其他线程及其他用例沿用普通分配。
+void* operator new(std::size_t bytes)
+{
+    using namespace SurfaceObjectAllocationProbe;
+    if (remaining && --remaining == 0) { ++hits; throw std::bad_alloc(); }
+    if (auto* value = std::malloc(bytes ? bytes : 1)) return value;
+    throw std::bad_alloc();
+}
+void operator delete(void* value) noexcept { std::free(value); }
+void operator delete(void* value, std::size_t) noexcept { std::free(value); }
 
 namespace {
 using TaskInterleaving::Gate;
@@ -185,14 +206,17 @@ public:
     bool AttachInput(HostInputBinding) override { return true; }
     bool DetachInput(std::string_view) override { ++detachInputCount; return true; }
     bool SetInputOwner(std::string_view, bool, const std::vector<std::string>&) override { return true; }
-    bool SetActiveViews(const std::vector<std::string>& views) override { activeViews = views; return true; }
+    bool SetActiveViews(const std::vector<std::string>& views) override
+    { activeViews = views; if (afterActiveViews) afterActiveViews(); return true; }
     bool SetViewStatus(const std::vector<std::string>&, const std::string&) override { return true; }
     bool SendSceneDelta(FeatureSceneDelta delta) override
     {
+        ++sceneDeltaCalls;
         objectSubmitted = std::any_of(delta.displays.begin(), delta.displays.end(),
             [](const auto& display) { return display.localId == "surface-object"; });
         const bool accepted = frames && frames->Enqueue(std::string(surfaceFeatureId), std::move(delta), GetAttachmentId());
         if (accepted) (void)SendWorkAvailable();
+        if (afterSceneDelta) afterSceneDelta();
         return accepted;
     }
     bool SendOwnerComplete(std::function<void()> complete) override
@@ -238,11 +262,13 @@ public:
     std::vector<std::string> activeViews;
     std::function<std::optional<HostSemanticTarget>(const std::string&, const std::string&)> getDisplayTarget;
     std::function<void()> beforeDrain;
+    std::function<void()> afterActiveViews, afterSceneDelta;
     bool objectSubmitted = false;
     bool completeSynchronously = false;
     int detachInputCount = 0;
     std::shared_ptr<ObjectNoticeProbe> notices;
     std::size_t consumedNotices = 0;
+    std::size_t sceneDeltaCalls = 0;
 private:
     std::mutex m_workMutex;
     std::condition_variable m_workReady;
@@ -265,6 +291,7 @@ struct Fixture final {
     HostFrameCoordinator::FlushStatus lastFlush = HostFrameCoordinator::FlushStatus::Completed;
     std::size_t failedStages = 0;
     bool rejectObjectFrame = false;
+    std::size_t tickExceptions = 0;
 
     Fixture()
     {
@@ -284,7 +311,10 @@ struct Fixture final {
         Require(runtime.SetFrameGeneration(1), "frame generation must initialize");
         HostFrameCoordinator::Callbacks callbacks;
         callbacks.collectUpdates = [this] { return runtime.CollectFrameUpdates(); };
-        callbacks.sendFeatureTicks = [this] { if (feature) (void)feature->OnHostTick(); };
+        callbacks.sendFeatureTicks = [this] {
+            // 与真实 HostFeatureRuntime 一致：Feature 异常隔离在 owner tick 边界，不能变成夹具异常出口。
+            try { if (feature) (void)feature->OnHostTick(); } catch (...) { ++tickExceptions; }
+        };
         callbacks.setIntents = [this](const auto& intents) { return runtime.SetFrameIntents(intents); };
         callbacks.applyFeatureUpdates = [this] { return runtime.ApplyFrameUpdates(); };
         callbacks.buildStage = [this](auto epoch) {
@@ -315,6 +345,9 @@ struct Fixture final {
     }
     ~Fixture()
     {
+        SurfaceObjectAllocationProbe::Stop();
+        host->afterActiveViews = {}; host->afterSceneDelta = {};
+        host->getDisplayTarget = {};
         gate->Release(); notices->terminal->Release();
         if (feature) (void)feature->DetachHost();
         host->Drain();
@@ -495,7 +528,7 @@ void TestObjectOwnerWait(Checks& checks, bool replace)
         : "clearing a highlight must return while its cancelled worker is held");
 }
 
-void TestDetachHeldObject(Checks& checks)
+void TestDetachHeldObject(Checks& checks, bool stopFrames = false, bool retireBeforeStop = false)
 {
     Fixture fixture;
     TaskInterleaving::ReleaseOnExit release(fixture.gate);
@@ -511,6 +544,11 @@ void TestDetachHeldObject(Checks& checks)
     Require(fixture.feature->SendRequest(selection, [&](auto value) {
         result = std::move(value); ++calls; callbackOnOwner = std::this_thread::get_id() == owner;
     }).status == SurfaceAdmissionStatus::Accepted && fixture.gate->WaitEntered(), "detach worker must enter gate");
+    if (retireBeforeStop)
+        Require(fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}).status == SurfaceAdmissionStatus::Accepted
+            && calls == 1, "Stop control owns a previously cancelled retired worker");
+    if (stopFrames) fixture.host->frames->Stop();
+    const auto submittedBeforeStop = fixture.host->sceneDeltaCalls;
     bool detached = true; bool retained = false; SurfaceAdmissionStatus stopping{};
     const auto observation = TaskInterleaving::ObserveOwnerCall(fixture.gate, [&] {
         detached = fixture.feature->DetachHost();
@@ -521,10 +559,46 @@ void TestDetachHeldObject(Checks& checks)
     });
     checks.Get(!detached && retained && stopping == SurfaceAdmissionStatus::Stopping && observation.returnedWhileHeld,
         "detach must return retryable failure while preserving a held task, Readers and attachment");
-    Require(fixture.Pump([&] { return calls == 1 && fixture.GetObjectReaderCount(scope) == 0
+    Require(fixture.Pump([&] { if (stopFrames) detached = fixture.feature->DetachHost();
+        return calls == 1 && fixture.GetObjectReaderCount(scope) == 0
         && fixture.GetObjectReaderCount(sourceScope) == 0; }), "closing tick must reap the completed cancelled task");
     checks.Get(callbackOnOwner && result.status == SurfaceResultStatus::Cancelled && fixture.feature->DetachHost()
         && fixture.host->detachInputCount == 1 && calls == 1, "detach retry succeeds after owner reclamation without duplicate callback");
+    if (stopFrames) checks.Get(fixture.host->sceneDeltaCalls == submittedBeforeStop,
+        "held or retired object Stop never submits a new frame after frame admission closes");
+}
+
+void TestDetachClosedFrames(Checks& checks, bool highlight)
+{
+    int calls = 0;
+    Fixture fixture;
+    fixture.StartFormal();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    const auto scope = fixture.GetScope(generation->dataRevision);
+    if (highlight) {
+        const auto admission = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{
+            generation->dataRevision, generation->objects->front().objectIndex, false, SurfaceTest::GetParams().targetViews},
+            [&](auto result) { ++calls; checks.Get(result.status == SurfaceResultStatus::Succeeded,
+                "Stop control highlight is actually committed before frame admission closes"); });
+        Require(admission.status == SurfaceAdmissionStatus::Accepted && fixture.Pump([&] { return calls == 1; }),
+            "Stop control has a completed object highlight");
+    }
+    // 与 VtkAppHostSession::Stop 的顺序一致，先关闭普通帧准入，再解绑 Feature。
+    fixture.host->frames->Stop();
+    const auto submittedBeforeStop = fixture.host->sceneDeltaCalls;
+    const bool detached = fixture.feature->DetachHost();
+    checks.Get(detached, "Surface detaches after the Host has closed frame admission");
+    checks.Get(detached && fixture.views->port->overlays.empty()
+        && fixture.GetObjectReaderCount(scope) == 0 && fixture.host->detachInputCount == 1,
+        "closed-frame Stop releases overlays, exact object readers and input attachment");
+    const auto binding = fixture.data->GetDataBinding(fixture.data->GetDataGraph(), std::string(surfaceResultBinding));
+    checks.Get(detached && (!binding || !binding->target) && !fixture.feature->GetSurfaceSnapshot(),
+        "closed-frame Stop clears the actual formal result binding and private result owner");
+    checks.Get(fixture.host->sceneDeltaCalls == submittedBeforeStop,
+        "closed-frame Stop does not submit a new scene update");
+    fixture.host->Drain();
+    checks.Get(calls == (highlight ? 1 : 0), "closed-frame Stop does not repeat a completed highlight callback");
+    std::fprintf(stderr, "object-closed-frames highlight=%d detached=%d callbacks=%d\n", highlight, detached, calls);
 }
 
 void TestObjectBacklog(Checks& checks)
@@ -677,6 +751,159 @@ void TestBindingCancelDetach(Checks& checks, bool requestEntry)
         "synchronous cancel callback can detach without stale projection, port access or duplicate completion");
 }
 
+void TestAppliedQueryException(Checks& checks)
+{
+    int calls = 0; bool injected = false; SurfaceDeterminationResult result;
+    Fixture fixture;
+    fixture.StartFormal();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    const auto query = fixture.host->getDisplayTarget;
+    fixture.host->getDisplayTarget = [&, query](const auto& view, const auto& role) {
+        if (!injected && role == "surface-object") { injected = true; throw std::bad_alloc(); }
+        return query(view, role);
+    };
+    const auto admission = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{
+        generation->dataRevision, generation->objects->front().objectIndex, false, SurfaceTest::GetParams().targetViews},
+        [&](auto value) { result = std::move(value); ++calls; });
+    Require(admission.status == SurfaceAdmissionStatus::Accepted, "query-fault highlight is accepted");
+    bool escaped = false;
+    try { (void)fixture.Pump([&] { return calls == 1; }); } catch (const std::bad_alloc&) { escaped = true; }
+    checks.Get(injected && !escaped && calls == 1 && result.status == SurfaceResultStatus::Failed,
+        "display confirmation query failure completes the admitted request once instead of escaping its owner tick");
+    fixture.host->getDisplayTarget = query;
+    (void)fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}); fixture.Tick();
+    checks.Get(calls == 1, "confirmation failure cannot complete again during cleanup");
+    std::cout << "object-query-fault injected=" << injected << " escaped=" << escaped << " callbacks=" << calls << '\n';
+}
+
+void TestAdoptionAllocationException(Checks& checks)
+{
+    int calls = 0; bool ownerCallback = true, injected = false, escaped = false; SurfaceDeterminationResult result;
+    const auto owner = std::this_thread::get_id();
+    Fixture fixture;
+    SurfaceObjectAllocationProbe::Reset reset;
+    fixture.StartFormal(); fixture.DrainQueued();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    const auto admission = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{
+        generation->dataRevision, generation->objects->front().objectIndex, false, SurfaceTest::GetParams().targetViews},
+        [&](auto value) { result = std::move(value); ++calls; ownerCallback = std::this_thread::get_id() == owner; });
+    Require(admission.status == SurfaceAdmissionStatus::Accepted, "allocation-fault highlight is accepted");
+    fixture.host->afterSceneDelta = [&] {
+        if (!injected && fixture.host->objectSubmitted) {
+            injected = true;
+            // 旧路径先分配成功说明，下一次为 try 外捕获 views；按实际阶段而非进程总次数注入。
+            SurfaceObjectAllocationProbe::Arm(2);
+        }
+    };
+    try { (void)fixture.Pump([&] { return injected; }); } catch (const std::bad_alloc&) { escaped = true; }
+    SurfaceObjectAllocationProbe::Stop();
+    const auto hits = SurfaceObjectAllocationProbe::hits;
+    fixture.host->afterSceneDelta = {};
+    Require(injected, "fault probe reaches the actual object display adoption");
+    const bool completed = fixture.Pump([&] { return calls == 1; });
+    checks.Get(completed && calls == 1 && ownerCallback,
+        "an allocation fault after display adoption cannot destroy the admitted callback");
+    checks.Get(completed && ((result.status == SurfaceResultStatus::Succeeded)
+        == fixture.GetObjectCommitted(generation->meshRevision, admission.requestId)),
+        "allocation recovery success still requires the exact committed object display");
+    std::cout << "object-adoption-allocation injected=" << injected << " hits=" << hits
+        << " escaped=" << escaped << " callbacks=" << calls
+        << " tick_exceptions=" << fixture.tickExceptions << std::endl;
+    std::fputs("object-adoption cleanup begin\n", stderr); std::fflush(stderr);
+    (void)fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}); fixture.Tick();
+    std::fputs("object-adoption cleanup end\n", stderr); std::fflush(stderr);
+}
+
+void TestCancelAllocationException(Checks& checks, bool allocation)
+{
+    int calls = 0, clearCalls = 0; bool injected = false, escaped = false; SurfaceDeterminationResult result;
+    Fixture fixture;
+    SurfaceObjectAllocationProbe::Reset reset;
+    TaskInterleaving::ReleaseOnExit release(fixture.gate);
+    fixture.StartFormal(); fixture.DrainQueued();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    const auto scope = fixture.GetScope(generation->dataRevision);
+    fixture.gate->Arm();
+    const auto admission = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{
+        generation->dataRevision, generation->objects->front().objectIndex, false, SurfaceTest::GetParams().targetViews},
+        [&](auto value) { result = std::move(value); ++calls; });
+    Require(admission.status == SurfaceAdmissionStatus::Accepted && fixture.gate->WaitEntered(),
+        "cancel allocation probe holds a real admitted worker read");
+    fixture.host->afterSceneDelta = [&] {
+        if (!injected && !fixture.host->objectSubmitted) {
+            injected = true;
+            if (allocation) SurfaceObjectAllocationProbe::Arm(1);
+            else throw std::bad_alloc();
+        }
+    };
+    SurfaceDeterminationAdmission cleared; bool readersHeldAtReturn = false;
+    std::fputs("object-cancel action begin\n", stderr); std::fflush(stderr);
+    const auto observed = TaskInterleaving::ObserveOwnerCall(fixture.gate, [&] {
+        SurfaceObjectAllocationProbe::Reset stopInjection;
+        try { cleared = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}, [&](auto) { ++clearCalls; }); }
+        catch (const std::bad_alloc&) { escaped = true; }
+        SurfaceObjectAllocationProbe::Stop();
+        readersHeldAtReturn = fixture.gate->GetIsHeld() && fixture.GetObjectReaderCount(scope) == 1;
+    });
+    std::fputs("object-cancel action and gate join end\n", stderr); std::fflush(stderr);
+    const auto hits = SurfaceObjectAllocationProbe::hits;
+    fixture.host->afterSceneDelta = {};
+    checks.Get(injected && observed.returnedWhileHeld && !escaped,
+        "cancellation retains retirement ownership before any allocation and never joins a held worker on the owner");
+    checks.Get(calls == 1 && result.status == SurfaceResultStatus::Cancelled
+        && cleared.status == (allocation ? SurfaceAdmissionStatus::Accepted : SurfaceAdmissionStatus::InvalidRequest)
+        && clearCalls == (allocation ? 1 : 0),
+        "highlight completes once; a rejected clear projection is retryable and has no completion");
+    checks.Get(readersHeldAtReturn,
+        "cancellation keeps the exact reader until the held worker really exits");
+    std::cout << "object-cancel-fault mode=" << (allocation ? "allocation" : "scene-exception")
+        << " injected=" << injected << " hits=" << hits
+        << " escaped=" << escaped << " returned_while_held=" << observed.returnedWhileHeld
+        << " callbacks=" << calls << " clear_callbacks=" << clearCalls
+        << " tick_exceptions=" << fixture.tickExceptions << std::endl;
+    if (!allocation) {
+        cleared = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}, [&](auto) { ++clearCalls; });
+        checks.Get(cleared.status == SurfaceAdmissionStatus::Accepted && clearCalls == 1 && calls == 1,
+            "clear retry succeeds after the failed projection without repeating the highlight completion");
+    }
+    fixture.gate->Release();
+    Require(fixture.Pump([&] { return fixture.GetObjectReaderCount(scope) == 0; }), "cancelled allocation-probe reader eventually releases");
+    checks.Get(calls == 1, "retired allocation-probe worker cannot repeat completion");
+}
+
+class ObjectFailureMessage final : public std::exception {
+public:
+    const char* what() const noexcept override {
+        SurfaceObjectAllocationProbe::Arm(1);
+        return "original object display failure with an intentionally long diagnostic that cannot fit the prepared fallback string without allocation";
+    }
+};
+void TestFailureDiagnosticAllocation(Checks& checks)
+{
+    int calls = 0; bool injected = false, escaped = false; SurfaceDeterminationResult result;
+    Fixture fixture;
+    SurfaceObjectAllocationProbe::Reset reset;
+    fixture.StartFormal(); fixture.DrainQueued();
+    const auto generation = fixture.feature->GetSurfaceSnapshot();
+    const auto admission = fixture.feature->SendRequest(SurfaceObjectSelectionRequest{
+        generation->dataRevision, generation->objects->front().objectIndex, false, SurfaceTest::GetParams().targetViews},
+        [&](auto value) { result = std::move(value); ++calls; });
+    Require(admission.status == SurfaceAdmissionStatus::Accepted, "diagnostic-fault highlight is accepted");
+    fixture.host->afterActiveViews = [&] { if (!injected) { injected = true; throw ObjectFailureMessage{}; } };
+    try { (void)fixture.Pump([&] { return calls == 1; }); } catch (const std::bad_alloc&) { escaped = true; }
+    SurfaceObjectAllocationProbe::Stop();
+    const auto hits = SurfaceObjectAllocationProbe::hits;
+    checks.Get(injected && !escaped && calls == 1 && result.status == SurfaceResultStatus::Failed
+        && result.failureReason == SurfaceFailureReason::DisplayFailed,
+        "diagnostic allocation failure preserves one failed completion instead of replacing the original failure path");
+    checks.Get(calls == 1 && !result.message.empty(), "diagnostic allocation failure retains a prepared fallback message");
+    std::cout << "object-diagnostic-allocation injected=" << injected << " hits=" << hits
+        << " escaped=" << escaped << " callbacks=" << calls
+        << " tick_exceptions=" << fixture.tickExceptions << std::endl;
+    fixture.host->afterActiveViews = {};
+    (void)fixture.feature->SendRequest(SurfaceObjectSelectionRequest{}); fixture.Tick();
+}
+
 enum class NoticeAction { Success, Clear, Detach };
 
 void TestTerminalNoticeBeforeExit(Checks& checks, NoticeAction action)
@@ -763,13 +990,29 @@ void TestTerminalNoticeBeforeExit(Checks& checks, NoticeAction action)
 
 template<class Test> void Run(Checks& checks, const char* name, Test&& test)
 {
+    std::fprintf(stderr, "object-case-begin %s\n", name); std::fflush(stderr);
     try { test(); }
-    catch (const std::exception& error) { checks.Get(false, std::string(name) + ": " + error.what()); }
+    catch (...) {
+        // what() 本身是诊断分配故障的注入点；夹具出口不可再次调用或分配错误字符串。
+        SurfaceObjectAllocationProbe::Stop(); ++checks.failureCount;
+        std::fprintf(stderr, "FAILED: object case %s escaped its fixture\n", name); std::fflush(stderr);
+    }
+    std::fprintf(stderr, "object-case-end %s\n", name); std::fflush(stderr);
 }
 } // namespace
 
 int GetSurfaceObjectRetirementFailCount()
 {
+    // 故障注入的失败必须进入测试日志/退出码，不能停在交互式 CRT 错误窗口。
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    const auto previousTerminate = std::set_terminate([] {
+        std::fputs("object-probe terminate: ", stderr);
+        SurfaceObjectAllocationProbe::Stop();
+        std::fputs(std::current_exception() ? "active exception" : "no active exception", stderr);
+        std::fputc('\n', stderr); std::fflush(stderr); std::_Exit(86);
+    });
     Checks checks;
     Run(checks, "unleased retirement", [&] { TestObjectRetirement(checks, false); });
     Run(checks, "Reader control", [&] { TestObjectRetirement(checks, true); });
@@ -779,6 +1022,18 @@ int GetSurfaceObjectRetirementFailCount()
     Run(checks, "success callback reentry", [&] { TestSuccessCallbackReentry(checks); });
     Run(checks, "binding cancel detach tick", [&] { TestBindingCancelDetach(checks, false); });
     Run(checks, "binding cancel detach request", [&] { TestBindingCancelDetach(checks, true); });
+    Run(checks, "confirmation query exception", [&] { TestAppliedQueryException(checks); });
+    Run(checks, "adoption allocation exception", [&] { TestAdoptionAllocationException(checks); });
+    Run(checks, "cancellation scene exception", [&] { TestCancelAllocationException(checks, false); });
+#if _ITERATOR_DEBUG_LEVEL == 0
+    Run(checks, "cancellation allocation exception", [&] { TestCancelAllocationException(checks, true); });
+#else
+    // MSVC xstring 的 noexcept move 在 Debug 分配 iterator proxy；全局注入会终止于标准库，
+    // 无法作为本业务的有效分配负例。Debug 使用上面的端口异常，Release 另跑全局分配注入。
+    std::fputs("object-cancel-allocation NOT_RUN: Debug STL noexcept iterator-proxy allocation\n", stderr);
+#endif
+    Run(checks, "failure diagnostic allocation", [&] { TestFailureDiagnosticAllocation(checks); });
+    std::set_terminate(previousTerminate);
     return checks.failureCount;
 }
 
@@ -788,6 +1043,10 @@ int GetSurfaceObjectOwnerWaitFailCount()
     Run(checks, "clear wait", [&] { TestObjectOwnerWait(checks, false); });
     Run(checks, "replace wait", [&] { TestObjectOwnerWait(checks, true); });
     Run(checks, "detach held", [&] { TestDetachHeldObject(checks); });
+    Run(checks, "detach closed frames", [&] { TestDetachClosedFrames(checks, false); });
+    Run(checks, "detach highlighted closed frames", [&] { TestDetachClosedFrames(checks, true); });
+    Run(checks, "detach held closed frames", [&] { TestDetachHeldObject(checks, true); });
+    Run(checks, "detach retired closed frames", [&] { TestDetachHeldObject(checks, true, true); });
     Run(checks, "bounded backlog", [&] { TestObjectBacklog(checks); });
     return checks.failureCount;
 }
