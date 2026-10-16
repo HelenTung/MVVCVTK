@@ -1,4 +1,5 @@
 #include "Support/PagedArray.h"
+#include "Support/RoiOperationDiagnostics.h"
 #include "Data/RoiService.h"
 #include "Geometry/RoiEvaluator.h"
 
@@ -29,6 +30,7 @@ public:
     using Rows=std::map<std::array<std::int64_t,2>,Runs>;
     struct Span {Index first;std::int64_t last;};
     const Rows& GetRows()const noexcept{return m_rows;}
+    Rows ReleaseRows() && {m_count=0;return std::move(m_rows);}
     const Runs& GetRow(const std::array<std::int64_t,2>& row)const{
         static const Runs empty;const auto found=m_rows.find(row);return found==m_rows.end()?empty:found->second;
     }
@@ -41,13 +43,6 @@ public:
         const auto added=std::size_t(std::int64_t(high)-low+1);
         if(added>std::numeric_limits<std::size_t>::max()-(m_count-removed))throw std::length_error("ROI member count overflows.");
         begin=runs.erase(begin,end);runs.insert(begin,{low,high});m_count=m_count-removed+added;
-    }
-    std::optional<Span> TakeRun(const std::array<std::int64_t,2>& key,std::int64_t low,std::int64_t high){
-        const auto row=m_rows.find(key);if(row==m_rows.end())return {};
-        auto& runs=row->second;const auto run=std::lower_bound(runs.begin(),runs.end(),low,[](const auto& run,std::int64_t x){return run.second<x;});
-        if(run==runs.end() || run->first>high)return {};
-        const Span taken{{run->first,key[0],key[1]},run->second};m_count-=std::size_t(std::int64_t(run->second)-run->first+1);
-        runs.erase(run);if(runs.empty())m_rows.erase(row);return taken;
     }
     class Iterator final {
     public:
@@ -90,9 +85,6 @@ public:
         else if(run->second==i[0])--run->second;
         else{const auto high=run->second;run->second=i[0]-1;runs.insert(next,{i[0]+1,high});}
         if(runs.empty())m_rows.erase(row);--m_count;return true;
-    }
-    template<class Predicate> void Keep(Predicate predicate){
-        Cells kept;for(const auto& i:*this)if(predicate(i))kept.insert(i);*this=std::move(kept);
     }
 private:Rows m_rows;std::size_t m_count=0;
 };
@@ -293,13 +285,76 @@ Cells Morph(const Cells& cells,const std::vector<Cells::Span>& kernel,bool dilat
         }out=std::move(intersection);
     }return out;
 }
+// 只改变连通域提取期间的消费索引，区间数组保持有序且不搬移。
+class ComponentRuns final {
+    struct Row final {
+        Cells::Runs runs;std::vector<std::size_t> next;std::size_t remaining;
+        explicit Row(Cells::Runs values):runs(std::move(values)),next(runs.size()+1),remaining(runs.size()) {
+            std::iota(next.begin(),next.end(),std::size_t{0});
+        }
+        std::size_t Find(std::size_t index) {
+            auto root=index;
+            while(next[root]!=root){MVVCVTK_ROI_COUNT(componentSuccessorSteps,1);root=next[root];}
+            while(next[index]!=index){const auto following=next[index];next[index]=root;index=following;
+                MVVCVTK_ROI_COUNT(componentSuccessorSteps,1);}
+            return root;
+        }
+    };
+    std::map<std::array<std::int64_t,2>,Row> m_rows;
+public:
+    explicit ComponentRuns(Cells cells) {
+        for(auto& row:std::move(cells).ReleaseRows())m_rows.emplace(row.first,Row(std::move(row.second)));
+    }
+    bool empty()const{return m_rows.empty();}
+    Index First(){auto& row=*m_rows.begin();const auto index=row.second.Find(0);return {row.second.runs[index].first,row.first[0],row.first[1]};}
+    std::optional<Cells::Span> TakeRun(const std::array<std::int64_t,2>& key,std::int64_t low,std::int64_t high) {
+        const auto found=m_rows.find(key);if(found==m_rows.end())return {};
+        auto& row=found->second;
+        const auto first=std::lower_bound(row.runs.begin(),row.runs.end(),low,[](const auto& run,std::int64_t x){
+            MVVCVTK_ROI_COUNT(componentComparisons,1);return run.second<x;});
+        const auto index=row.Find(static_cast<std::size_t>(first-row.runs.begin()));
+        if(index==row.runs.size() || row.runs[index].first>high)return {};
+        const auto run=row.runs[index];const Cells::Span result{{run.first,key[0],key[1]},run.second};
+        row.next[index]=row.Find(index+1);MVVCVTK_ROI_COUNT(componentConsumedRuns,1);
+        if(!--row.remaining)m_rows.erase(found); // 整行已消费，立即释放区间和跳转索引。
+        return result;
+    }
+};
+Cells ClipSourceDomain(const Cells& cells,const ImageGrid3DPayload& image,const RoiOperationRequest& request) {
+    Cells result;const auto& grid=image.GetGeometry();const auto mask=image.GetValidityMask();
+    const auto check=[&]{MVVCVTK_ROI_COUNT(clipCheckpoints,1);CheckCancel(request);};
+    check();std::array<std::uint8_t,64*1024> buffer{};
+    for(const auto& row:cells.GetRows()) {
+        check();MVVCVTK_ROI_COUNT(clipRows,1);
+        if(row.first[0]<grid.extent[2] || row.first[0]>grid.extent[3] || row.first[1]<grid.extent[4] || row.first[1]>grid.extent[5])continue;
+        for(const auto& run:row.second) {
+            check();MVVCVTK_ROI_COUNT(clipRuns,1);
+            const auto first=std::max<std::int64_t>(run.first,grid.extent[0]),last=std::min<std::int64_t>(run.second,grid.extent[1]);
+            if(first>last)continue;
+            if(!mask){result.InsertRun({first,row.first[0],row.first[1]},last);continue;}
+            std::optional<std::int64_t> start;
+            for(auto x=first;x<=last;) {
+                check();const auto count=static_cast<std::size_t>(std::min<std::int64_t>(buffer.size(),last-x+1));
+                const auto offset=GetOffset(grid,{x,row.first[0],row.first[1]});
+                std::copy_n(mask->data()+offset,count,buffer.data());MVVCVTK_ROI_COUNT(clipMaskValues,count);
+                for(std::size_t i=0;i<count;++i){const auto at=x+static_cast<std::int64_t>(i);
+                    if(buffer[i]){if(!start)start=at;}
+                    else if(start){result.InsertRun({*start,row.first[0],row.first[1]},at-1);start.reset();}}
+                x+=static_cast<std::int64_t>(count);
+            }
+            if(start)result.InsertRun({*start,row.first[0],row.first[1]},last);
+        }
+    }
+    check();return result;
+}
 struct Component final {Index first;Cells cells;};
-std::vector<Component> GetComponents(Cells remaining,RoiConnectivity connectivity,const RoiOperationRequest& request) {
+std::vector<Component> GetComponents(Cells cells,RoiConnectivity connectivity,const RoiOperationRequest& request) {
+    ComponentRuns remaining(std::move(cells));
     Require(connectivity==RoiConnectivity::Faces || connectivity==RoiConnectivity::Full,RoiError::InvalidRequest,"Invalid ROI connectivity.");
     std::vector<Component> components;std::size_t visited=0;
     // 任取剩余行，提取时记录分量最小坐标；最后统一排序，避免每个孤岛扫描所有行。
     while(!remaining.empty()){
-        CheckCancel(request);const auto seed=*remaining.begin();Component component{seed,{}};std::deque<Cells::Span> frontier;
+        CheckCancel(request);const auto seed=remaining.First();Component component{seed,{}};std::deque<Cells::Span> frontier;
         const auto append=[&](Cells::Span span){component.first=std::min(component.first,span.first);component.cells.InsertRun(span.first,span.last);frontier.push_back(span);};
         append(*remaining.TakeRun({seed[1],seed[2]},seed[0],seed[0]));
         while(!frontier.empty()){
@@ -314,7 +369,8 @@ std::vector<Component> GetComponents(Cells remaining,RoiConnectivity connectivit
     std::sort(components.begin(),components.end(),[&](const auto& a,const auto& b){if(!(visited++%1024))CheckCancel(request);return a.first<b.first;});
     CheckCancel(request);return components;
 }
-template<class T> double ReadValue(const std::uint8_t* bytes) {T value;std::memcpy(&value,bytes,sizeof(T));return static_cast<double>(value);}
+template<class T> T ReadInteger(const std::uint8_t* bytes) {T value;std::memcpy(&value,bytes,sizeof(T));return value;}
+template<class T> double ReadValue(const std::uint8_t* bytes) {return static_cast<double>(ReadInteger<T>(bytes));}
 double GetGray(const ImageGrid3DPayload& image,const Index& i) {
     const auto* bytes=image.GetValues()->data()+GetOffset(image.GetGeometry(),i)*GetImageValueBytes(image.GetValueType());
     switch (image.GetValueType()) {
@@ -324,6 +380,25 @@ double GetGray(const ImageGrid3DPayload& image,const Index& i) {
     case ImageValueType::Int64:return ReadValue<std::int64_t>(bytes);case ImageValueType::UInt64:return ReadValue<std::uint64_t>(bytes);
     case ImageValueType::Float32:return ReadValue<float>(bytes);case ImageValueType::Float64:return ReadValue<double>(bytes);
     default:throw Failure{RoiError::UnsupportedRoi,"Unsupported ROI gray scalar type."};
+    }
+}
+template<class T> std::function<bool(const Index&)> IntegerGrayRange(const ImageGrid3DPayload& image,const std::array<double,2>& range) {
+    const auto low=std::ceil(range[0]),high=std::floor(range[1]);
+    // 2^digits 是精确可表示的排他上界；不把 int64/uint64 最大值先舍入成 double。
+    const auto upperExclusive=std::ldexp(1.,std::numeric_limits<T>::digits);
+    const auto minimum=std::is_signed_v<T> ? -upperExclusive:0.;
+    if(low>high || high<minimum || low>=upperExclusive)return [](const Index&){return false;};
+    const T first=low<=minimum?std::numeric_limits<T>::lowest():static_cast<T>(low);
+    const T last=high>=upperExclusive?std::numeric_limits<T>::max():static_cast<T>(high);
+    return [&image,first,last](const Index& index){const auto value=ReadInteger<T>(image.GetValues()->data()+GetOffset(image.GetGeometry(),index)*sizeof(T));return value>=first && value<=last;};
+}
+std::function<bool(const Index&)> GrayRange(const ImageGrid3DPayload& image,const std::array<double,2>& range) {
+    switch(image.GetValueType()) {
+    case ImageValueType::Int8:return IntegerGrayRange<std::int8_t>(image,range);case ImageValueType::UInt8:return IntegerGrayRange<std::uint8_t>(image,range);
+    case ImageValueType::Int16:return IntegerGrayRange<std::int16_t>(image,range);case ImageValueType::UInt16:return IntegerGrayRange<std::uint16_t>(image,range);
+    case ImageValueType::Int32:return IntegerGrayRange<std::int32_t>(image,range);case ImageValueType::UInt32:return IntegerGrayRange<std::uint32_t>(image,range);
+    case ImageValueType::Int64:return IntegerGrayRange<std::int64_t>(image,range);case ImageValueType::UInt64:return IntegerGrayRange<std::uint64_t>(image,range);
+    default:return [&image,range](const Index& index){const auto value=GetGray(image,index);return value>=range[0] && value<=range[1];};
     }
 }
 Point Subtract(Point a,const Point& b) {for (int i=0;i<3;++i) a[i]-=b[i];return a;}
@@ -506,7 +581,7 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                     case RoiMorphologyOperation::Close:cells=Morph(Morph(cells,kernel,true,request),kernel,false,request);break;
                     default:throw Failure{RoiError::InvalidRequest,"Invalid ROI morphology operation."};
                     }
-                    cells.Keep([&](const Index& i){return GetValidCell(*image,i);});
+                    cells=ClipSourceDomain(cells,*image,request);
                     add(GetVoxelDefinition(request.source,cells));
                 } else if constexpr (std::is_same_v<T,RoiComponentParams>) {
                     Require(target!=nullptr,RoiError::MissingInput,"ROI target is required.");
@@ -547,15 +622,17 @@ RoiOperationResult RoiService::GetOperation(const DataGraphSnapshot& graph,const
                 } else if constexpr (std::is_same_v<T,RoiThresholdParams>) {
                     Require((params.mode==RoiThresholdMode::Threshold && params.seeds.empty()) || (params.mode==RoiThresholdMode::SeedGrow && !params.seeds.empty()),RoiError::InvalidRequest,"Seed grow needs at least one explicit seed; threshold has no seeds.");
                     Require(image->GetComponentCount()==1 && std::isfinite(params.range[0]) && std::isfinite(params.range[1]) && params.range[0]<=params.range[1],RoiError::InvalidRequest,"Invalid ROI gray range.");
-                    Cells eligible;ForCells(*image,request,[&](const Index& i){if(target && !targetQuery.query->GetContains(GetPoint(grid,i)))return;const double v=GetGray(*image,i);Require(std::isfinite(v),RoiError::InvalidGeometry,"ROI gray domain contains undefined scalar values.");
+                    const auto inRange=GrayRange(*image,params.range);
+                    const bool floating=image->GetValueType()==ImageValueType::Float32 || image->GetValueType()==ImageValueType::Float64;
+                    Cells eligible;ForCells(*image,request,[&](const Index& i){if(target && !targetQuery.query->GetContains(GetPoint(grid,i)))return;if(floating)Require(std::isfinite(GetGray(*image,i)),RoiError::InvalidGeometry,"ROI gray domain contains undefined scalar values.");
                         // 保留全允许域的有限灰度校验；生长不再保存整域 eligible 副本。
-                        if(params.mode==RoiThresholdMode::Threshold && v>=params.range[0] && v<=params.range[1])Insert(eligible,i,request);},target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
+                        if(params.mode==RoiThresholdMode::Threshold && inRange(i))Insert(eligible,i,request);},target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
                     if (params.mode==RoiThresholdMode::SeedGrow) {
                         Matrix j=roiIdentityMatrix;for (int r=0;r<3;++r) {for (int c=0;c<3;++c) j[r*4+c]=grid.direction[r*3+c]*grid.spacing[c];j[r*4+3]=grid.origin[r];}const auto inverse=Invert(j);
                         const auto domain=GetCellExtent(grid,target?std::optional<std::array<double,6>>(target->GetBounds()):std::nullopt);
                         const auto allowed=[&](const Index& i){if(!domain)return false;for(int axis=0;axis<3;++axis)if(i[axis]<(*domain)[axis*2] || i[axis]>(*domain)[axis*2+1])return false;
                             if(!GetValidCell(*image,i) || (target && !targetQuery.query->GetContains(GetPoint(grid,i))))return false;
-                            const double value=GetGray(*image,i);return value>=params.range[0] && value<=params.range[1];};
+                            return inRange(i);};
                         Cells grown;std::deque<Index> queue;for (const auto& seed:params.seeds) {
                             const auto p=Transform(inverse,seed);Index i{};for (int a=0;a<3;++a) {const auto rounded=std::floor(p[a]+0.5);Require(std::isfinite(rounded) && rounded>=INT_MIN && rounded<=INT_MAX,RoiError::InvalidGeometry,"ROI seed is invalid.");i[a]=static_cast<std::int64_t>(rounded);}
                             Require(allowed(i),RoiError::InvalidRequest,"ROI seed is outside the permitted gray domain.");if(Insert(grown,i,request))queue.push_back(i);

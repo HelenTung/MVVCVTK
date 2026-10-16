@@ -256,7 +256,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         {"domainRoi",""},{"rasterize",false},{"sourceToTarget",GetValues(roiIdentityMatrix)},{"targetSource",""},{"mesh",""},{"meshToSource",GetValues(roiIdentityMatrix)},
         {"inwardMM",0.0},{"outwardMM",1.0},{"hasOrientation",false}};
     const QStringList operationActions{"Union","Intersection","Difference","Merge","Dilate","Erode","Open","Close","RemoveSmall","KeepLargest","KeepSelected","Split","FillHoles","Threshold","Grow","Invert","Clear","Transform","SurfaceInterior","SurfaceLayer"};
-    for(const auto& action:operationActions)panel->AttachAction(action,operationParameters,[panel,feature,pendingOperation,operationAction,operationParametersSeen,appliedMetadata,action](auto id,const auto& p) {
+    for(const auto& action:operationActions)panel->AttachAction(action,operationParameters,[panel,feature,pendingOperation,operationAction,operationParametersSeen,appliedMetadata,appliedToolParameters,action](auto id,const auto& p) {
         if(!feature->GetState().hasDraft) {
             const auto input=panel->GetSession()->GetImageDescriptor();if(!input)throw std::invalid_argument("请先选择源数据");
             RoiRequest draft;draft.definition.source=input->dataRevision;draft.metadata.name="区域";
@@ -271,6 +271,8 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
             const QJsonObject metadata{{"name",QString::fromStdString(draft.metadata.name)},
                 {"group",QString::fromStdString(draft.metadata.group)},
                 {"description",QString::fromStdString(draft.metadata.description)}};
+            // 重新开始已保存的派生区域时，旧工具控件只是显示基线；不能在提交运算时把它当成用户新画的 Box。
+            *appliedToolParameters=RoiToolParameters(panel->GetActionParameters("SetDraft"));
             panel->SetParameterPatch("SetDraft",metadata);*appliedMetadata=metadata;
         }
         RoiEditingRequest request;request.action=RoiEditingAction::BeginOperation;request.operation=GetOperationRequest(action,p);

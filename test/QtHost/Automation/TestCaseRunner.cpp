@@ -1870,6 +1870,22 @@ void CheckSharedRoi(TestWindow& window)
     Check(surface->GetActionParameters("GlobalAutomatic")["analysisRoi"]==asynchronous
         && window.GetWorkflow().roiConsumer.isEmpty(),"pending ROI save returns its exact result to the requesting business once");
     }
+    // 已保存的派生区域再次运算后直接提交，不能被残留的解析工具控件覆盖。
+    GetComplete(window,Click(window,"Roi","Threshold",{{"roi",""},{"outputMode","CreateNew"},
+        {"grayRange",GetValues(image->scalarRange)}}),"PreviewReady");
+    const auto whole=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto beforeClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}}),"Observed")["result"].toObject();
+    GetComplete(window,Click(window,"Roi","Close",{{"roi",whole},{"outputMode","CreateNew"},
+        {"radius",1.0},{"radiusUnit","Voxels"}}),"PreviewReady");
+    const auto closed=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
+    const auto afterClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",closed},{"maskPath",""}}),"Observed")["result"].toObject();
+    const auto closedDescriptor=window.GetSession()->GetRoiDescriptor(GetRef(closed));
+    Check(closedDescriptor && closedDescriptor->definition.nodes.front().primitive.shape==RoiShape::VoxelSet
+        && beforeClose["voxelCount"].toString().toULongLong()>0
+        && beforeClose["voxelCount"]==beforeClose["gridCount"]
+        && beforeClose["voxelCount"]==afterClose["voxelCount"]
+        && beforeClose["binaryMaskSha256"]==afterClose["binaryMaskSha256"],
+        "closing a saved full-source threshold preserves all members when committed through the real ROI buttons");
 #endif
 }
 void StartSelfTest(TestWindow& window)
