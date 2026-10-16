@@ -6,13 +6,16 @@
 #include "Host/GapHostFeature.h"
 #include <QPointer>
 #include <limits>
+#include <cmath>
 namespace Manual {
 namespace {
 QJsonObject GetStatistics(const GapStatistics& value)
 {
     return {{"objectVoxels", QString::number(value.objectVoxelCount)}, {"voidVoxels", QString::number(value.voidVoxelCount)},
         {"objectVolumeMM3", value.objectVolumeMM3}, {"voidVolumeMM3", value.voidVolumeMM3}, {"porosityRatio", value.isPorosityAvailable?QJsonValue(value.porosityRatio):QJsonValue()},
-        {"porosityAvailable",value.isPorosityAvailable},{"evaluationVoxels",QString::number(value.evaluationVoxelCount)},{"actualSupportVoxels",QString::number(value.actualSupportVoxelCount)}};
+        {"porosityAvailable",value.isPorosityAvailable},{"evaluationVoxels",QString::number(value.evaluationVoxelCount)},{"actualSupportVoxels",QString::number(value.actualSupportVoxelCount)},
+        {"voidCount",QString::number(value.voidCount)},{"boundaryUncertainCount",QString::number(value.boundaryUncertainCount)},
+        {"boundaryUncertainVoxels",QString::number(value.boundaryUncertainVoxelCount)},{"boundaryUncertainVolumeMM3",value.boundaryUncertainVolumeMM3}};
 }
 }
 ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> feature, QWidget* parent)
@@ -21,7 +24,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
     auto runParameters=std::make_shared<QJsonObject>();
     auto listRange=std::make_shared<std::optional<std::array<double,2>>>();
     auto listedReader=std::make_shared<std::shared_ptr<const GapResultReader>>();
-    panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。结果区显示孔隙体积、孔隙率等统计与数据修订。");
+    panel->SetNotice("切换结果叠加显示可隐藏或显示分析结果；退出分析需等待当前处理结束。正式孔隙统计、列表和分布排除边界不确定对象；其可见片段保留在叠加显示和报告中，并标明边界状态。");
     for(const auto& action:QStringList{"Start","Evaluate"})panel->AttachAction(action, GetJson(R"({"isoMode":"DataRangeRatio","dataRangeRatio":0.5,"absoluteIsoValue":null,"backgroundMean":null,"materialMean":null,"filter":false,"minVolumeMM3":0,"parentResult":"","evaluationRoi":"","detectionRoi":"","roiPolicy":"WholeIfIntersects"})"),
         [panel, feature,runParameters,action](auto id, const auto& params) {
             const auto input = panel->GetSession()->GetImageDescriptor();
@@ -149,6 +152,8 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             auto row=next;
             for(const auto& object:page.objects) {
                 const auto rowIndex=row++;
+                // 过滤后仍保留原目录行和对象编号，选行、高亮与定位不能用显示行号替代。
+                if(object.boundaryStatus!=GapBoundaryStatus::Interior)continue;
                 if(*listRange&&(object.volumeMM3<(**listRange)[0]||object.volumeMM3>(**listRange)[1]))continue;
                 rows.append(QJsonArray{QString::number(object.id),object.parentVolumeMM3,object.intersectionVolumeMM3,
                     object.isRoiPartial?"部分相交":"完整",object.volumeMM3,object.hasWholeObjectGeometry?"完整父缺陷":"ROI 片段（不是新封闭孔隙）"});
@@ -167,7 +172,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
             panel->SendAction("SelectObject",{{"regionId",ids[row]},{"result",widget->property("defectResult").toString()}});};
         panel->SetComplete(id,"Observed",{{"resultSet",GetRefText(ref)},{"table",GetRefText(table)},
             {"page",QJsonObject{{"rows",records},{"next",QString::number(next)},{"total",QString::number(total)},{"offset",QString::number(offset)}}}});
-        if(panel->onMessage)panel->onMessage(*listRange?QString("列表体积筛选 [%1, %2] mm³；算法结果未变。").arg((**listRange)[0]).arg((**listRange)[1]):"缺陷目录已更新；选行按原始编号定位，后续页保持当前结果修订。");
+        if(panel->onMessage)panel->onMessage(*listRange?QString("正式孔隙列表体积筛选 [%1, %2] mm³；边界不确定对象不计入。").arg((**listRange)[0]).arg((**listRange)[1]):"正式孔隙目录已更新，边界不确定对象请查看报告；选行按原始编号定位，后续页保持当前结果修订。");
     },TestPolicy::Read);
     const auto getReader=[panel,feature,listedReader](const QJsonObject& p){
         const auto text=p["result"].toString();const auto ref=text=="current"?feature->GetState().resultSet:GetRef(text=="listed"?panel->GetStatisticsWidget()->property("defectResult").toString():text);
@@ -224,9 +229,25 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
     panel->onStatistics=[panel,feature,listRange] {
         if(panel->GetObservedState()["parametersChanged"].toBool())return false;
         const auto state=feature->GetState();if(!GetDataRevisionRefValid(state.voidTable))return false;
-        const auto ref=state.voidTable;const auto read=panel->GetContext().workflow.readRecordSamples;
-        panel->GetStatisticsWidget()->StartHistogram(GetRefText(ref),"缺陷体积分布","缺陷体积 / mm³","缺陷数量",
-            [owner=QPointer<ModulePanel>(panel),read,ref](auto offset){if(!owner || owner->GetContext().workflow.GetIsClosing())throw std::runtime_error("统计已停止");return read(ref,"volume-mm3",offset);});
+        const auto ref=state.voidTable;const auto fullReader=feature->GetResultReader(state.resultSet);
+        if(!fullReader)throw std::runtime_error("孔隙正式对象目录不可读");
+        const auto reader=fullReader->CreateObjectReader();const auto statistics=state.statistics;
+        panel->GetStatisticsWidget()->StartHistogram(GetRefText(ref),"正式孔隙体积分布","正式孔隙体积 / mm³","正式孔数",
+            [owner=QPointer<ModulePanel>(panel),reader,statistics](auto offset){
+                if(!owner || owner->GetContext().workflow.GetIsClosing())throw std::runtime_error("统计已停止");
+                StatisticsSamples samples;samples.description=QString("边界不确定对象 %1 个不计入正式分布，可在报告中查看可见体积。").arg(statistics.boundaryUncertainCount);
+                // 核心正式孔数为零时返回空分布，不把可见对象数解释为抽样未命中，也不填零样本。
+                if(!statistics.voidCount)return samples;
+                const auto page=reader->GetObjects(offset,4096);
+                if(page.error!=GapReadError::None)throw std::runtime_error("孔隙统计对象页读取失败");
+                samples.next=page.next;samples.total=page.total;
+                for(const auto& object:page.objects) {
+                    if(object.boundaryStatus==GapBoundaryStatus::Interior && std::isfinite(object.volumeMM3) && object.volumeMM3>=0)
+                        samples.values.push_back(object.volumeMM3);
+                    else ++samples.excluded;
+                }
+                return samples;
+            });
         panel->GetStatisticsWidget()->onInterval=[panel,feature,listRange,ref](double low,double high){
             if(feature->GetState().voidTable!=ref){if(panel->onMessage)panel->onMessage("所显示分布的结果已变化，请刷新后再筛选。");return;}
             const auto edges=panel->GetStatisticsWidget()->GetHistogram()["edges"].toArray();

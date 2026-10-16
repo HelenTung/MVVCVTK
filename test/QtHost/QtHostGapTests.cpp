@@ -360,8 +360,8 @@ bool GetFormalGapResultValid(
         return false;
     }
 
-    constexpr std::array<std::string_view, 39> voidColumns = {
-        "void-id", "voxel-count", "volume-mm3",
+    constexpr std::array<std::string_view, 40> voidColumns = {
+        "void-id", "boundary-status", "voxel-count", "volume-mm3",
         "equivalent-diameter-mm", "radius-mm", "diameter-mm",
         "center-mm", "centroid-mm", "voxel-bbox", "seed-voxel",
         "gray-min", "gray-max", "gray-mean",
@@ -395,7 +395,7 @@ bool GetFormalGapResultValid(
             });
     };
     return hasEveryVoidColumn
-        && statisticsTable->GetColumns().size() == 8
+        && statisticsTable->GetColumns().size() == 12
         && resultSet->GetItems().size() == 7
         && hasResultItem("labels", state.labelMap)
         && hasResultItem("void-regions", state.voidTable)

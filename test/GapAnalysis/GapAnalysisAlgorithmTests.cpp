@@ -519,8 +519,17 @@ public:
     }
 };
 
-int main()
+int main(int argc, char** argv)
 {
+    if(argc==2 && std::string(argv[1])=="--mask-bridge")return GetGapMaskBridgeFailCount()?1:0;
+    if (argc > 1 && std::string(argv[1]) == "--connectivity") return GetGapConnectivityFailCount(argc > 2 ? argv[2] : "", argc > 3 && std::string(argv[3]) == "write");
+    if (argc == 2 && std::string(argv[1]) == "--mask-geometry") {
+        const auto failures = GetGapMaskGeometryFailCount();
+        return failures ? 1 : 0;
+    }
+    if ((argc == 3 || argc == 5) && std::string(argv[1]) == "--real-small-input") {
+        return GetGapRealSmallFailCount(argv[2],argc == 5 ? argv[3] : nullptr,argc == 5 && std::string(argv[4]) == "write") ? 1 : 0;
+    }
     int failureCount = GetGapLabelFailCount();
     failureCount += GapAlgorithmSuite().GetFailCount();
     failureCount += GapDisplaySuite().GetFailCount();

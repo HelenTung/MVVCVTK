@@ -15,6 +15,7 @@ public:
         m_metadata={result,source,m_mesh->GetCoordinateFrame(),m_table->GetRowCount(),
             m_mesh->GetPointValues().size()/3,m_mesh->GetTriangleIndices().size()/3};
         m_ids=&Column<std::int64_t>("void-id");m_order=&Column<std::uint64_t>("object-row-by-id");
+        m_boundaryStatus=&Column<std::uint64_t>("boundary-status");
         m_firstPoint=&Column<std::uint64_t>("mesh-first-point");m_pointCount=&Column<std::uint64_t>("mesh-point-count");
         m_firstTriangle=&Column<std::uint64_t>("mesh-first-triangle");m_triangleCount=&Column<std::uint64_t>("mesh-triangle-count");
         m_hasGeometry=&Column<std::uint8_t>("mesh-range-valid");
@@ -101,6 +102,9 @@ private:
         object.volumeMM3=Column<double>("volume-mm3")[row];object.parentVolumeMM3=Column<double>("parent-volume-mm3")[row];
         object.equivalentDiameterMM=Column<double>("equivalent-diameter-mm")[row];
         object.intersectionVolumeMM3=Column<double>("intersection-volume-mm3")[row];
+        const auto boundaryStatus=(*m_boundaryStatus)[row];
+        if(boundaryStatus>1)throw GapReadError::Failed;
+        object.boundaryStatus=static_cast<GapBoundaryStatus>(boundaryStatus);
         object.isRoiPartial=Column<std::uint64_t>("roi-partial")[row]!=0;
         object.hasWholeObjectGeometry=Column<std::uint64_t>("whole-object-geometry")[row]!=0;
         object.firstPoint=(*m_firstPoint)[row];object.pointCount=(*m_pointCount)[row];
@@ -125,6 +129,7 @@ private:
     std::shared_ptr<const SurfaceMeshPayload> m_mesh;
     GridGeometry3D m_grid;
     const DataArray<std::int64_t>* m_ids=nullptr;
+    const DataArray<std::uint64_t>* m_boundaryStatus=nullptr;
     const DataArray<std::uint64_t> *m_order=nullptr,*m_firstPoint=nullptr,*m_pointCount=nullptr,*m_firstTriangle=nullptr,*m_triangleCount=nullptr;
     const DataArray<std::uint8_t>* m_hasGeometry=nullptr;
 };

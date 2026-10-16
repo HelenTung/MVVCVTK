@@ -83,6 +83,9 @@ int main(int argc, char* argv[])
     parser.addOption({"record", "导出自动化操作记录", "path"});
     parser.addOption({"report-spatial-only", "仅复跑完整 CSV 的空间配对阶段"});
     parser.addOption({"report-csv", "复用已保存的完整 CSV 验证生产配对", "path"});
+    parser.addOption({"gap-boundary-reports-only", "仅验证 Gap 边界对象的实际报告、列表、统计及 CSV"});
+    parser.addOption({"gap-report-output", "Gap 报告定向验证输出目录", "path"});
+    parser.addOption({"gap-report-real-input", "可选的32立方真实 float32 小样本", "path"});
     parser.addOption({"reports-only", "仅执行独立报告导入、比较、分页与选择回归，不创建业务会话"});
     parser.addOption({"background", "在独立后台桌面运行实际 Qt/VTK 窗口，不显示在用户桌面"});
     parser.addOption({"background-child", "内部测试子进程桌面标识", "name"});
@@ -92,6 +95,7 @@ int main(int argc, char* argv[])
     if (!valid) parser.showHelp(2);
     try {
     if(parser.isSet("report-csv")){Manual::CheckSavedReportComparisons(parser.value("report-csv"),parser.isSet("report-spatial-only"));return 0;}
+    if(parser.isSet("gap-boundary-reports-only")){Manual::CheckGapBoundaryReports(parser.value("gap-report-output"),parser.value("gap-report-real-input"));return 0;}
     if(parser.isSet("reports-only")){Manual::CheckReportWorkflow();return 0;}
     Manual::TestWindow window(budget);
     window.setWindowTitle("功能自动化测试");

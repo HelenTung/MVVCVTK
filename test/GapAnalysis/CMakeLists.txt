@@ -3,6 +3,7 @@ function(BuildGapTests target outputName projectLabel)
         ${target}
         GapAnalysisAlgorithmTests.cpp
         GapDisplayTests.cpp
+        GapMaskBridgeTests.cpp
         GapDisplayTests.h
         GapKernelLabelViewTests.cpp
         GapKernelLabelViewTests.h
@@ -78,6 +79,19 @@ add_test(
     COMMAND mvvcvtk_gap_main_tests
 )
 SetTestRuntime(GapAnalysis.All mvvcvtk_gap_main_tests)
+add_test(NAME GapAnalysis.MaskGeometry COMMAND mvvcvtk_gap_main_tests --mask-geometry)
+SetTestRuntime(GapAnalysis.MaskGeometry mvvcvtk_gap_main_tests)
+set_tests_properties(GapAnalysis.MaskGeometry PROPERTIES TIMEOUT 120)
+add_test(NAME GapAnalysis.MaskBridge COMMAND mvvcvtk_gap_main_tests --mask-bridge)
+SetTestRuntime(GapAnalysis.MaskBridge mvvcvtk_gap_main_tests)
+add_test(NAME GapAnalysis.Connectivity COMMAND mvvcvtk_gap_main_tests --connectivity)
+SetTestRuntime(GapAnalysis.Connectivity mvvcvtk_gap_main_tests)
+set(MVVCVTK_GAP_REAL_SMALL_INPUT "" CACHE FILEPATH "Optional integration-20261011 consumer-real-32 float32 ROI for public Gap regression")
+if(MVVCVTK_GAP_REAL_SMALL_INPUT)
+    add_test(NAME GapAnalysis.RealSmallInput COMMAND mvvcvtk_gap_main_tests --real-small-input "${MVVCVTK_GAP_REAL_SMALL_INPUT}")
+    SetTestRuntime(GapAnalysis.RealSmallInput mvvcvtk_gap_main_tests)
+    set_tests_properties(GapAnalysis.RealSmallInput PROPERTIES TIMEOUT 90)
+endif()
 set_property(
     TEST GapAnalysis.All
     PROPERTY PASS_REGULAR_EXPRESSION

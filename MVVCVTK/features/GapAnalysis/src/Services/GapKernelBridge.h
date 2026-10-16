@@ -12,10 +12,11 @@
 
 #define MVVCVTK_GAP_KERNEL_CALL __cdecl
 
-inline constexpr std::uint32_t GapKernelAbiVersion = 5;
+inline constexpr std::uint32_t GapKernelAbiVersion = 6;
 
 // GapAnalysis 与私有算法 DLL 之间只交换固定宽度 POD 和调用方持有的原始缓冲区；
-// 供应商 C++/STL/VTK 类型不得越过此边界，bridge 也不得重算供应商输出。
+// 供应商 C++/STL/VTK 类型不得越过此边界；掩膜路径由 bridge 生成有效域派生结果。
+using GapKernelCancel = std::int32_t (MVVCVTK_GAP_KERNEL_CALL*)(void*) noexcept;
 struct GapKernelRequest final {
     std::uint32_t abiVersion;
     std::uint32_t structSize;
@@ -30,6 +31,11 @@ struct GapKernelRequest final {
     float materialMean;
     float isoThreshold;
     std::int32_t numberRuns;
+    const std::uint8_t* validityMask;
+    std::uint64_t validityCount;
+    // 同步调用期间可重入的只读取消查询；无锁、不修改调用方状态，context 活到返回。
+    GapKernelCancel getCancelled;
+    void* cancelContext;
     std::uint32_t reserved[8];
 };
 
@@ -82,6 +88,8 @@ struct GapKernelRegion final {
     float projectedSizeY;
     float projectedSizeZ;
     float defectProbability;
+    std::uint32_t boundaryStatus;
+    std::uint32_t hasWholeObjectGeometry;
 };
 
 using GapKernelLabelOwnerClone = void* (
@@ -125,14 +133,14 @@ MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
 
 static_assert(std::is_standard_layout_v<GapKernelRequest>);
 static_assert(std::is_trivially_copyable_v<GapKernelRequest>);
-static_assert(sizeof(GapKernelRequest) == 232);
+static_assert(sizeof(GapKernelRequest) == 264);
 static_assert(offsetof(GapKernelRequest, numberRuns) == 196);
 static_assert(std::is_standard_layout_v<GapKernelHeader>);
 static_assert(std::is_trivially_copyable_v<GapKernelHeader>);
 static_assert(sizeof(GapKernelHeader) == 72);
 static_assert(std::is_standard_layout_v<GapKernelRegion>);
 static_assert(std::is_trivially_copyable_v<GapKernelRegion>);
-static_assert(sizeof(GapKernelRegion) == 192);
+static_assert(sizeof(GapKernelRegion) == 200);
 static_assert(std::is_standard_layout_v<GapKernelResultView>);
 static_assert(std::is_trivially_copyable_v<GapKernelResultView>);
 static_assert(sizeof(GapKernelResultView) == 80);
