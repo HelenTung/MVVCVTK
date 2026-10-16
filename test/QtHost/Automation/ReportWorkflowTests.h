@@ -5,5 +5,5 @@ namespace Manual {
 class TestWindow;
 void CheckReportWorkflow();
 void CheckReportRepairs();
-void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport = true,const QString& previewPath = {},int timeoutMs = 30000);
+void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool checkExport = true,const QString& previewPath = {},int timeoutMs = 30000,bool checkLarge = false);
 }

@@ -283,12 +283,12 @@ class MetrologyAlignmentHostFeature::Impl final {
         const auto &columns = table->GetColumns();
         if (columns.size() != 6)
             return {};
-        const auto *ids = std::get_if<std::vector<std::string>>(&columns[0].values);
-        const auto *residuals = std::get_if<std::vector<double>>(&columns[1].values);
-        const auto *tolerances = std::get_if<std::vector<double>>(&columns[2].values);
-        const auto *kinds = std::get_if<std::vector<std::uint64_t>>(&columns[3].values);
-        const auto *priorities = std::get_if<std::vector<std::uint64_t>>(&columns[4].values);
-        const auto *used = std::get_if<std::vector<std::uint8_t>>(&columns[5].values);
+        const auto *ids = std::get_if<DataArray<std::string>>(&columns[0].values);
+        const auto *residuals = std::get_if<DataArray<double>>(&columns[1].values);
+        const auto *tolerances = std::get_if<DataArray<double>>(&columns[2].values);
+        const auto *kinds = std::get_if<DataArray<std::uint64_t>>(&columns[3].values);
+        const auto *priorities = std::get_if<DataArray<std::uint64_t>>(&columns[4].values);
+        const auto *used = std::get_if<DataArray<std::uint8_t>>(&columns[5].values);
         if (!ids || !residuals || !tolerances || !kinds || !priorities || !used ||
             !table->GetValid())
             return {};

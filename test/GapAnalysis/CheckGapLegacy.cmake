@@ -23,7 +23,7 @@ file(
     "${_gap_root}/CMakeLists.txt"
 )
 set(_legacy_tokens
-    "Algorithms/"
+    # 检查已退役检测器和接口，不能把当前分块几何头的目录登记判作旧检测器。
     "SurfaceRefiner"
     "VolumeBuffer.h"
     "GapVolumeBuffer"

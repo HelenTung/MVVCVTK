@@ -10,14 +10,72 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <iterator>
+#include <functional>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
+
+// 数组的存储 owner 不要求元素始终驻留 RAM。实现可以由仓内生产者提供文件后备，
+// 读取者继续使用只读连续范围；allocator owner 保活后备存储而不锁定物理页。
+class DataArrayStorage {
+public:
+    virtual ~DataArrayStorage() noexcept = default;
+    virtual void* Allocate(std::size_t bytes, std::size_t alignment) = 0;
+    virtual void Deallocate(void* data, std::size_t bytes, std::size_t alignment) noexcept = 0;
+    static std::shared_ptr<DataArrayStorage>& GetCurrent() {
+        thread_local std::shared_ptr<DataArrayStorage> storage;
+        return storage;
+    }
+};
+
+template<class T> class DataArrayAllocator {
+public:
+    using value_type = T;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    std::shared_ptr<DataArrayStorage> storage;
+    DataArrayAllocator() noexcept : storage(DataArrayStorage::GetCurrent()) {}
+    DataArrayAllocator(const DataArrayAllocator&) noexcept = default;
+    DataArrayAllocator& operator=(const DataArrayAllocator&) noexcept = default;
+    // 移动 allocator 仍保留源 owner；MSVC 的空容器调试 proxy 也需要原分配器释放。
+    DataArrayAllocator(DataArrayAllocator&& source) noexcept : storage(source.storage) {}
+    DataArrayAllocator& operator=(DataArrayAllocator&& source) noexcept { storage=source.storage;return *this; }
+    template<class U> DataArrayAllocator(const DataArrayAllocator<U>& source) noexcept : storage(source.storage) {}
+    T* allocate(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) throw std::bad_array_new_length();
+        return storage ? static_cast<T*>(storage->Allocate(count * sizeof(T), alignof(T)))
+            : std::allocator<T>{}.allocate(count);
+    }
+    void deallocate(T* data, std::size_t count) noexcept {
+        if (storage) storage->Deallocate(data, count * sizeof(T), alignof(T));
+        else std::allocator<T>{}.deallocate(data, count);
+    }
+    template<class U> bool operator==(const DataArrayAllocator<U>& other) const noexcept { return storage == other.storage; }
+    template<class U> bool operator!=(const DataArrayAllocator<U>& other) const noexcept { return !(*this == other); }
+};
+
+template<class T> class DataArray : public std::vector<T, DataArrayAllocator<T>> {
+    using Base = std::vector<T, DataArrayAllocator<T>>;
+public:
+    using Base::Base;
+    using Base::operator=;
+    DataArray() = default;
+    DataArray(const std::vector<T>& source) : Base(source.begin(), source.end()) {}
+    DataArray(std::vector<T>&& source)
+        : Base(std::make_move_iterator(source.begin()), std::make_move_iterator(source.end())) {}
+    DataArray& operator=(const std::vector<T>& source) { this->assign(source.begin(), source.end()); return *this; }
+    DataArray& operator=(std::vector<T>&& source) {
+        this->assign(std::make_move_iterator(source.begin()), std::make_move_iterator(source.end())); return *this;
+    }
+};
 
 namespace DataTypes {
 inline const DataTypeId labelMap3D{
@@ -452,23 +510,145 @@ inline constexpr std::uint32_t scalars=1, vectors=2, normals=4, textureCoordinat
 inline constexpr std::uint32_t all=scalars|vectors|normals|textureCoordinates|tensors;
 }
 
+struct MeshValueRun final {
+    std::uint64_t first = 0, count = 0;
+    std::int32_t value = 0;
+};
+// 浮点属性沿用连续数组；连续同值的整数归属保留区间，不生成等长 double 副本。
+class MeshAttributeValues final {
+public:
+    using value_type = double;
+    class const_iterator {
+    public:
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = double;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const double*;
+        using reference = double;
+        const_iterator() = default;
+        const_iterator(const MeshAttributeValues* values,std::size_t position) : m_values(values),m_position(position) {}
+        double operator*()const {return (*m_values)[m_position];}
+        double operator[](difference_type distance)const {return *(*this+distance);}
+        const_iterator& operator++(){++m_position;return *this;}
+        const_iterator operator++(int){auto previous=*this;++*this;return previous;}
+        const_iterator& operator--(){--m_position;return *this;}
+        const_iterator operator--(int){auto previous=*this;--*this;return previous;}
+        const_iterator& operator+=(difference_type distance){m_position=static_cast<std::size_t>(static_cast<difference_type>(m_position)+distance);return *this;}
+        const_iterator& operator-=(difference_type distance){return *this+=-distance;}
+        const_iterator operator+(difference_type distance)const {auto next=*this;return next+=distance;}
+        friend const_iterator operator+(difference_type distance,const_iterator position){return position+=distance;}
+        const_iterator operator-(difference_type distance)const {auto next=*this;return next-=distance;}
+        difference_type operator-(const const_iterator& other)const {return static_cast<difference_type>(m_position)-static_cast<difference_type>(other.m_position);}
+        bool operator==(const const_iterator& other)const {return m_values==other.m_values&&m_position==other.m_position;}
+        bool operator!=(const const_iterator& other)const {return !(*this==other);}
+        bool operator<(const const_iterator& other)const {return m_position<other.m_position;}
+        bool operator>(const const_iterator& other)const {return other<*this;}
+        bool operator<=(const const_iterator& other)const {return !(other<*this);}
+        bool operator>=(const const_iterator& other)const {return !(*this<other);}
+    private:
+        const MeshAttributeValues* m_values=nullptr;
+        std::size_t m_position=0;
+    };
+    MeshAttributeValues()=default;
+    MeshAttributeValues(std::initializer_list<double> values):m_values(values) {}
+    MeshAttributeValues(DataArray<double> values):m_values(std::move(values)) {}
+    MeshAttributeValues(std::vector<double> values):m_values(std::move(values)) {}
+    static MeshAttributeValues FromRuns(DataArray<MeshValueRun> runs) {
+        MeshAttributeValues values;std::uint64_t next=0;
+        for(const auto& run:runs) {
+            if(!run.count || run.first!=next || run.count>static_cast<std::uint64_t>(PTRDIFF_MAX)-next)
+                throw std::invalid_argument("Invalid integer attribute runs.");
+            next+=run.count;
+        }
+        values.m_count=static_cast<std::size_t>(next);
+        values.m_runs=std::make_shared<const DataArray<MeshValueRun>>(std::move(runs));
+        return values;
+    }
+    static MeshAttributeValues FromIntegers(DataArray<std::int32_t> integers) {
+        MeshAttributeValues values;
+        values.m_integers=std::make_shared<const DataArray<std::int32_t>>(std::move(integers));
+        return values;
+    }
+    std::size_t size()const noexcept {return m_runs?m_count:m_integers?m_integers->size():m_values.size();}
+    bool empty()const noexcept {return !size();}
+    friend bool operator==(const MeshAttributeValues& left,const MeshAttributeValues& right) {
+        return left.size()==right.size()&&std::equal(left.begin(),left.end(),right.begin());
+    }
+    friend bool operator!=(const MeshAttributeValues& left,const MeshAttributeValues& right){return !(left==right);}
+    ImageValueType GetValueType()const noexcept {return m_runs||m_integers?ImageValueType::Int32:ImageValueType::Float64;}
+    const std::shared_ptr<const DataArray<MeshValueRun>>& GetRuns()const noexcept {return m_runs;}
+    const std::shared_ptr<const DataArray<std::int32_t>>& GetIntegers()const noexcept {return m_integers;}
+    bool GetFinite()const noexcept {
+        return m_runs || m_integers || std::all_of(m_values.begin(),m_values.end(),[](double value){return std::isfinite(value);});
+    }
+    double operator[](std::size_t index)const {
+        if(m_integers)return (*m_integers)[index];
+        if(!m_runs)return m_values[index];
+        const auto next=std::upper_bound(m_runs->begin(),m_runs->end(),index,
+            [](auto value,const auto& run){return value<run.first;});
+        return static_cast<double>((next-1)->value);
+    }
+    double& operator[](std::size_t index){SetDense();return m_values[index];}
+    double at(std::size_t index)const {if(index>=size())throw std::out_of_range("Mesh attribute index");return (*this)[index];}
+    double& at(std::size_t index){SetDense();return m_values.at(index);}
+    double front()const {return (*this)[0];}
+    double back()const {return (*this)[size()-1];}
+    const_iterator begin()const noexcept {return {this,0};}
+    const_iterator end()const noexcept {return {this,size()};}
+    const_iterator cbegin()const noexcept {return begin();}
+    const_iterator cend()const noexcept {return end();}
+    void reserve(std::size_t count){SetDense();m_values.reserve(count);}
+    void resize(std::size_t count){SetDense();m_values.resize(count);}
+    void resize(std::size_t count,double value){SetDense();m_values.resize(count,value);}
+    void push_back(double value){SetDense();m_values.push_back(value);}
+    void clear()noexcept {m_runs.reset();m_integers.reset();m_count=0;m_values.clear();}
+    template<class Iterator> void assign(Iterator first,Iterator last){clear();m_values.assign(first,last);}
+    void assign(std::size_t count,double value){clear();m_values.assign(count,value);}
+    template<class Iterator> const_iterator insert(const_iterator position,Iterator first,Iterator last) {
+        const auto offset=position-begin();SetDense();m_values.insert(m_values.begin()+offset,first,last);return {this,static_cast<std::size_t>(offset)};
+    }
+    std::vector<double> GetChunk(std::size_t offset,std::size_t count)const {
+        if(offset>size())throw std::out_of_range("Mesh attribute chunk offset");
+        count=std::min(count,size()-offset);return {begin()+static_cast<std::ptrdiff_t>(offset),begin()+static_cast<std::ptrdiff_t>(offset+count)};
+    }
+private:
+    void SetDense() {
+        if(!m_runs&&!m_integers)return;
+        DataArray<double> values(m_values.get_allocator());values.resize(size());
+        if(m_runs)for(const auto& run:*m_runs)std::fill_n(values.begin()+static_cast<std::size_t>(run.first),static_cast<std::size_t>(run.count),static_cast<double>(run.value));
+        else std::copy(m_integers->begin(),m_integers->end(),values.begin());
+        m_values=std::move(values);m_runs.reset();m_integers.reset();m_count=0;
+    }
+    DataArray<double> m_values;
+    std::shared_ptr<const DataArray<MeshValueRun>> m_runs;
+    std::shared_ptr<const DataArray<std::int32_t>> m_integers;
+    std::size_t m_count=0;
+};
+
 struct MeshAttribute final {
     std::string name;
     std::size_t componentCount = 0;
-    std::vector<double> values;
+    MeshAttributeValues values;
     std::uint32_t activeRoles = 0;
 };
 
 class SurfaceMeshPayload final : public IDataPayload {
     friend class RoiService;
+    friend class MeshPayloadBuilder;
     class RoiMeshIndex;
     struct MeshData final {
-        MeshData(std::vector<double> points,std::vector<std::uint64_t> faces,
+        MeshData(DataArray<double> points,DataArray<std::uint64_t> faces,
+            std::vector<MeshAttribute> pointData,std::vector<MeshAttribute> cellData)
+            : vertices(std::make_shared<const DataArray<double>>(std::move(points))),
+              triangles(std::make_shared<const DataArray<std::uint64_t>>(std::move(faces))),
+              pointAttributes(std::move(pointData)),cellAttributes(std::move(cellData)) {}
+        MeshData(std::shared_ptr<const DataArray<double>> points,
+            std::shared_ptr<const DataArray<std::uint64_t>> faces,
             std::vector<MeshAttribute> pointData,std::vector<MeshAttribute> cellData)
             : vertices(std::move(points)),triangles(std::move(faces)),
               pointAttributes(std::move(pointData)),cellAttributes(std::move(cellData)) {}
-        std::vector<double> vertices;
-        std::vector<std::uint64_t> triangles;
+        std::shared_ptr<const DataArray<double>> vertices;
+        std::shared_ptr<const DataArray<std::uint64_t>> triangles;
         std::vector<MeshAttribute> pointAttributes;
         std::vector<MeshAttribute> cellAttributes;
         // 索引只由不可变网格载荷拥有；任务借用拓扑时另外持有该载荷快照。
@@ -478,8 +658,8 @@ class SurfaceMeshPayload final : public IDataPayload {
     };
 public:
     SurfaceMeshPayload(
-        std::vector<double> vertices,
-        std::vector<std::uint64_t> triangles,
+        DataArray<double> vertices,
+        DataArray<std::uint64_t> triangles,
         std::vector<MeshAttribute> pointAttributes = {},
         std::string coordinateFrame = "RAS",
         std::vector<MeshAttribute> cellAttributes = {})
@@ -501,10 +681,10 @@ public:
         }
     }
 
-    const std::vector<double>& GetVertices() const noexcept { return m_mesh->vertices; }
-    const std::vector<std::uint64_t>& GetTriangles() const noexcept
+    const DataArray<double>& GetVertices() const noexcept { return *m_mesh->vertices; }
+    const DataArray<std::uint64_t>& GetTriangles() const noexcept
     {
-        return m_mesh->triangles;
+        return *m_mesh->triangles;
     }
     const std::vector<MeshAttribute>& GetPointAttributes() const noexcept
     {
@@ -522,26 +702,29 @@ public:
     }
 
 private:
-    bool GetMeshValid() const noexcept
+    bool GetMeshValid(const std::function<bool()>& getCancelled = {}) const noexcept
     {
-        if (m_mesh->vertices.size() % 3 != 0
-            || m_mesh->triangles.size() % 3 != 0
-            || (m_mesh->vertices.empty() && !m_mesh->triangles.empty())
+        std::size_t visited=0;
+        const auto active=[&]()noexcept {try{return !getCancelled||!getCancelled();}catch(...){return false;}};
+        const auto check=[&]()noexcept {return (visited++&4095U)!=0||active();};
+        if (!active() || m_mesh->vertices->size() % 3 != 0
+            || m_mesh->triangles->size() % 3 != 0
+            || (m_mesh->vertices->empty() && !m_mesh->triangles->empty())
             || m_coordinateFrame.empty()
             || !std::all_of(
-                m_mesh->vertices.begin(), m_mesh->vertices.end(),
-                [](const double value) { return std::isfinite(value); })) {
+                m_mesh->vertices->begin(), m_mesh->vertices->end(),
+                [&](const double value) { return check()&&std::isfinite(value); })) {
             return false;
         }
-        const auto pointCount = m_mesh->vertices.size() / 3;
+        const auto pointCount = m_mesh->vertices->size() / 3;
         if (!std::all_of(
-                m_mesh->triangles.begin(), m_mesh->triangles.end(),
-                [pointCount](const std::uint64_t value) {
-                    return value < pointCount;
+                m_mesh->triangles->begin(), m_mesh->triangles->end(),
+                [&](const std::uint64_t value) {
+                    return check()&&value < pointCount;
                 })) {
             return false;
         }
-        const auto validAttributes=[](const std::vector<MeshAttribute>& attributes,std::size_t tuples) noexcept {
+        const auto validAttributes=[&](const std::vector<MeshAttribute>& attributes,std::size_t tuples) noexcept {
             std::uint32_t roles=0;
             for(std::size_t index=0;index<attributes.size();++index) {
                 const auto& attribute=attributes[index];
@@ -550,7 +733,8 @@ private:
                     ||tuples>std::numeric_limits<std::size_t>::max()/attribute.componentCount
                     ||attribute.values.size()!=tuples*attribute.componentCount
                     ||(attribute.activeRoles&~MeshAttributeRoles::all)||(roles&attribute.activeRoles)
-                    ||!std::all_of(attribute.values.begin(),attribute.values.end(),[](double v){return std::isfinite(v);}))return false;
+                    ||(attribute.values.GetValueType()!=ImageValueType::Int32
+                        &&!std::all_of(attribute.values.begin(),attribute.values.end(),[&](double value){return check()&&std::isfinite(value);})))return false;
                 for(std::size_t prior=0;prior<index;++prior)if(attributes[prior].name==attribute.name)return false;
                 if((attribute.activeRoles&(MeshAttributeRoles::normals|MeshAttributeRoles::vectors))&&attribute.componentCount!=3)return false;
                 if((attribute.activeRoles&MeshAttributeRoles::tensors)&&attribute.componentCount!=9)return false;
@@ -560,7 +744,7 @@ private:
             return true;
         };
         if(!validAttributes(m_mesh->pointAttributes,pointCount)
-            ||!validAttributes(m_mesh->cellAttributes,m_mesh->triangles.size()/3))return false;
+            ||!validAttributes(m_mesh->cellAttributes,m_mesh->triangles->size()/3))return false;
         return true;
     }
 
@@ -571,15 +755,15 @@ private:
 };
 
 using RecordColumnValues = std::variant<
-    std::vector<std::int64_t>,
-    std::vector<std::uint64_t>,
-    std::vector<double>,
-    std::vector<std::string>,
-    std::vector<std::array<std::int64_t, 3>>,
-    std::vector<std::array<std::int64_t, 6>>,
-    std::vector<std::array<double, 3>>,
-    std::vector<std::array<double, 6>>,
-    std::vector<std::uint8_t>>;
+    DataArray<std::int64_t>,
+    DataArray<std::uint64_t>,
+    DataArray<double>,
+    DataArray<std::string>,
+    DataArray<std::array<std::int64_t, 3>>,
+    DataArray<std::array<std::int64_t, 6>>,
+    DataArray<std::array<double, 3>>,
+    DataArray<std::array<double, 6>>,
+    DataArray<std::uint8_t>>;
 
 struct RecordColumn final {
     std::string name;
@@ -601,7 +785,7 @@ public:
         std::vector<RecordColumn> columns)
         : m_type(std::move(type))
         , m_schemaName(std::move(schemaName))
-        , m_columns(std::move(columns))
+        , m_columns(std::make_shared<const std::vector<RecordColumn>>(std::move(columns)))
     {
     }
 
@@ -609,8 +793,7 @@ public:
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
         try {
-            return std::make_shared<const RecordTablePayload>(
-                m_type, m_schemaName, m_columns);
+            return std::make_shared<const RecordTablePayload>(*this);
         }
         catch (...) {
             return {};
@@ -619,22 +802,23 @@ public:
     const std::string& GetSchemaName() const noexcept { return m_schemaName; }
     const std::vector<RecordColumn>& GetColumns() const noexcept
     {
-        return m_columns;
+        return *m_columns;
     }
     std::size_t GetRowCount() const noexcept
     {
-        return m_columns.empty() ? 0 : GetRecordColumnSize(m_columns.front());
+        return m_columns->empty() ? 0 : GetRecordColumnSize(m_columns->front());
     }
+    std::vector<std::shared_ptr<const void>> GetDataResources() const override { return {m_columns}; }
     bool GetValid() const noexcept
     {
         if (!GetDataTypeIdValid(m_type)
-            || m_schemaName.empty() || m_columns.empty()) {
+            || m_schemaName.empty() || m_columns->empty()) {
             return false;
         }
         const auto rowCount = GetRowCount();
         std::vector<std::string> names;
-        names.reserve(m_columns.size());
-        for (const auto& column : m_columns) {
+        names.reserve(m_columns->size());
+        for (const auto& column : *m_columns) {
             if (column.name.empty()
                 || GetRecordColumnSize(column) != rowCount
                 || std::find(names.begin(), names.end(), column.name)
@@ -649,7 +833,8 @@ public:
 private:
     DataTypeId m_type;
     std::string m_schemaName;
-    std::vector<RecordColumn> m_columns;
+    // 列在接纳时冻结；图快照和分页读者只共享 owner，不重复复制全表。
+    std::shared_ptr<const std::vector<RecordColumn>> m_columns;
 };
 
 class RoiGeometryPayload final : public IDataPayload {

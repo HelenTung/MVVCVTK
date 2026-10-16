@@ -5,7 +5,6 @@
 #include <QMap>
 #include <QVector>
 #include <QSet>
-#include <QDeadlineTimer>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -22,6 +21,7 @@ class QCheckBox;
 class QPlainTextEdit;
 class QTimer;
 namespace Manual {
+class ReportIndex;
 struct ReportRow final { QString section, field, type, value; };
 QVector<ReportRow> GetReportRows(const QJsonObject& record);
 QString GetReportCsv(const QJsonObject& record);
@@ -39,14 +39,17 @@ public:
     void ExportReportFile(const QString& path, bool filtered = false);
     void QueueReport(const QJsonObject& record);
     bool GetReportAvailable(const QString& module, const QString& result) const;
+    bool GetGenerationPending() const;
     void RemoveReport(QString id);
     void SetReportSource(const QString& id, const QString& source);
     void CancelTasks();
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
     QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
-    QVector<int> GetFilteredRows() const;
-    std::function<void(const ReportDocument&,int)> onLocate;
+    ReportRows GetFilteredRows() const;
+    ReportRowId GetFilteredCount() const;
+    std::function<ReportRowId(ReportRowId)> CreateFilteredReader() const;
+    std::function<void(const ReportDocument&,ReportRowId)> onLocate;
     std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)> onReadReports;
     std::function<QMap<QString,QString>()> getSources;
 protected:
@@ -57,27 +60,32 @@ private:
     void SelectCurrent();
     void RefreshRows();
     void ContinueRows();
-    int GetRowCount() const;
+    ReportRowId GetRowCount() const;
     void RefreshPage();
     void CompareSelected();
     void ClearSelection();
     void ContinueGeneration();
-    void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {});
+    void RefreshFailures();
+    void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {}, std::shared_ptr<ReportIndex> rows = {});
     void ContinueTask();
     QMap<QString, QJsonObject> m_records;
     QMap<QString, ReportDocument> m_documents;
     QMap<QString, QJsonObject> m_pendingReports;
+    QMap<QString, QString> m_failedReports;
     QSet<QString> m_completedOperations, m_removedReports;
     QVector<ReportDocument> m_buildingReports;
     QString m_buildingOperation;
     std::uint64_t m_viewRevision = 0;
+    std::uint64_t m_buildingViewRevision = 0;
     int m_buildingIndex = 0;
-    QDeadlineTimer m_generationDeadline;
+    qulonglong m_generationProgress = 0;
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;
     std::unique_ptr<Task> m_task;
     QLabel* m_taskStatus = nullptr;
     QPushButton* m_cancelTask = nullptr;
+    QComboBox* m_failedReport = nullptr;
+    QPushButton* m_retryReport = nullptr;
     ReportDocument m_selected;
     QString m_baseline, m_sourceFilter, m_resultFilter, m_moduleFilter;
     QTreeWidget* m_reports = nullptr;
@@ -87,16 +95,17 @@ private:
     QCheckBox* m_follow = nullptr;
     QPlainTextEdit* m_conditions = nullptr;
     QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
-    QPushButton *m_previous = nullptr, *m_next = nullptr;
+    QPushButton *m_first = nullptr, *m_previous = nullptr, *m_next = nullptr, *m_last = nullptr;
     QPushButton* m_locate = nullptr;
-    QVector<int> m_rows;
+    std::shared_ptr<ReportIndex> m_rows;
     class RowScan;
     std::unique_ptr<RowScan> m_rowScan;
     QTimer* m_scanTimer = nullptr;
     QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
     bool m_allRows = false;
     bool m_rowsReady = false;
-    int m_page = 0, m_sortColumn = -1;
+    ReportRowId m_page = 0;
+    int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
     QPushButton* m_copy = nullptr;

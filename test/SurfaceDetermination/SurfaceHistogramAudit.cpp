@@ -48,7 +48,7 @@ int GetSurfaceHistogramAuditResult(const int argc, char* argv[])
     std::optional<SurfaceIsoEstimate> estimate;
     std::string message;
     const auto started = std::chrono::steady_clock::now();
-    const auto failure = SurfaceHistogramEstimator::BuildEstimate(input, {}, [] { return false; }, estimate, message);
+    const auto failure = SurfaceHistogramEstimator::BuildEstimate(input, [] { return false; }, estimate, message);
     const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-started).count();
     if (failure != SurfaceFailureReason::None || !estimate) {
         std::cerr << "threshold-rejected reason=" << static_cast<unsigned>(failure) << " " << message << '\n';

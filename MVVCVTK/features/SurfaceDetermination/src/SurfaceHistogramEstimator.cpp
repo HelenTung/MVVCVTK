@@ -37,7 +37,7 @@ std::size_t GetIndex(const SurfaceHistogramInput& input, const std::int64_t x,
 }
 
 SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHistogramInput& input,
-    const WorkLimit budget, const std::function<bool()>& cancelled,
+    const std::function<bool()>& cancelled,
     std::optional<SurfaceIsoEstimate>& estimate, std::string& message)
 {
     estimate.reset();
@@ -50,10 +50,6 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
         count *= static_cast<std::size_t>(dimension);
     }
     if (cancelled && cancelled()) return SurfaceFailureReason::Cancelled;
-    if (budget < GetWorkingBytes()) {
-        message = "Surface histogram workspace exceeds the budget.";
-        return SurfaceFailureReason::BudgetExceeded;
-    }
     double isoValue = 0;
     double minimum = std::numeric_limits<double>::max(), maximum = std::numeric_limits<double>::lowest();
     std::uint64_t validCount = 0, excludedCount = 0;

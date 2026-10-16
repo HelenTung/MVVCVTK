@@ -376,6 +376,13 @@ template <class T> struct Codec<std::vector<T>> {
     j.End();
   }
 };
+template <class T> struct Codec<DataArray<T>> {
+  static void Write(Json &j, const DataArray<T> &v) {
+    j.Array();
+    for (const auto &x : v) j.Value(x);
+    j.End();
+  }
+};
 template <class T, std::size_t N> struct Codec<std::array<T, N>> {
   static void Write(Json &j, const std::array<T, N> &v) {
     j.Array();

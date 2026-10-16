@@ -7,11 +7,13 @@ add_library(qt_feature_test_support STATIC
     Support/ColorLegendEditor.cpp Support/ColorLegendEditor.h
     Support/BusinessStatistics.cpp Support/StatisticsRead.cpp Support/RoiSelection.cpp
     Support/ReportDocument.cpp Support/ReportDocument.h Support/ReportComparison.cpp Support/ReportComparison.h
+    Support/ReportStorage.cpp Support/ReportStorage.h
     Support/BusinessReport.cpp Support/BusinessReport.h
     Support/JsonInput.cpp Support/ReferenceDataSource.cpp Support/ResultRetention.cpp Support/TestRecordWriter.cpp Support/ProcessMeasurements.cpp Support/TestResources.cpp Support/UiText.cpp Support/WorkbenchStyle.cpp Support/ActionPolicy.cpp Support/SceneNodes.cpp Support/CatalogNodes.cpp Support/SceneGraph.cpp Support/PathInput.cpp Support/ParameterEditor.cpp Support/ResultReport.cpp)
 target_include_directories(qt_feature_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>")
 target_link_libraries(qt_feature_test_support PUBLIC MVVCVTK::Host MVVCVTK::FeatureSPI
     Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
+target_link_libraries(qt_feature_test_support PRIVATE MVVCVTKInternal::FeatureSupport)
 foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;PartSegmentation;Part"
     "SURFACE;SurfaceDetermination;Surface" "ARTIFACT;ArtifactReduction;Artifact" "ROTATION;ModelRotation;Rotation"
     "ALIGNMENT;MetrologyAlignment;Alignment" "WALL;WallThickness;Wall" "ROI;RoiEditing;Roi")
@@ -25,7 +27,12 @@ foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;Par
         if(key STREQUAL "PART")
             target_sources(qt_feature_test_support PRIVATE Modules/PartInput.cpp Modules/PartEditTest.cpp)
         elseif(key STREQUAL "ALIGNMENT")
-            target_sources(qt_feature_test_support PRIVATE Modules/AlignmentInput.cpp Modules/AlignmentInspection.cpp)
+            target_sources(qt_feature_test_support PRIVATE Modules/AlignmentInput.cpp Modules/AlignmentInspection.cpp
+                Support/InspectionReport.cpp Support/InspectionReport.h)
+        elseif(key STREQUAL "WALL")
+            target_sources(qt_feature_test_support PRIVATE Support/WallParameters.cpp Support/WallParameters.h)
+        elseif(key STREQUAL "SURFACE")
+            target_sources(qt_feature_test_support PRIVATE Support/SurfaceRead.cpp Support/SurfaceRead.h)
         endif()
     endif()
 endforeach()

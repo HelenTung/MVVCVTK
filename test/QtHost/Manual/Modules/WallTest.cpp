@@ -4,11 +4,13 @@
 #include "Support/ParameterEditor.h"
 #include "Support/RoiSelection.h"
 #include "Host/WallThicknessHostFeature.h"
+#include "Support/WallParameters.h"
 #include <QPointer>
 #include <QCryptographicHash>
 #include <QFile>
 #include <QTextStream>
 #include <algorithm>
+#include <iostream>
 #include <limits>
 namespace Manual {
 namespace {
@@ -59,19 +61,6 @@ ThicknessEvaluation Evaluation(const QJsonObject& p)
     value.histogramRange = GetArray<double, 2>(p["histogramRange"]);
     value.histogramBins = Count(p, "histogramBins", 65536); value.minRegionArea = GetNumber(p, "minRegionArea");
     return value;
-}
-QJsonObject EvaluationJson(const ThicknessEvaluation& v)
-{
-    return {{"lower",v.lower},{"upper",v.upper},{"histogramRange",GetValues(v.histogramRange)},{"histogramBins",double(v.histogramBins)},{"minRegionArea",v.minRegionArea}};
-}
-QJsonObject MeasurementJson(const ThicknessInput& input,const ThicknessParams& p)
-{
-    QJsonArray labels;for(auto id:input.materialLabels)labels.append(QString::number(id));
-    return {{"source",GetRefText(input.source)},{"labels",GetRefText(input.labels)},{"mesh",GetRefText(input.mesh)},{"materialLabels",labels},{"unit",int(input.unit)},
-        {"maxDistance",p.maxDistance},{"sampleSpacing",p.sampleSpacing},{"materialThreshold",p.materialThreshold?QJsonValue(*p.materialThreshold):QJsonValue()},
-        {"coneAngleDegrees",p.coneAngleDegrees},{"directionCount",int(p.directionCount)},{"boundaryPolicy",int(p.boundaryPolicy)},{"maxBoundaryError",p.maxBoundaryError},
-        {"evaluationBounds",p.evaluationBounds?QJsonValue(GetValues(*p.evaluationBounds)):QJsonValue()},
-        {"evaluationRoi",p.evaluationRoi?QJsonValue(GetRefText(*p.evaluationRoi)):QJsonValue()}};
 }
 ThicknessDisplay Display(const QJsonObject& p)
 {
@@ -146,10 +135,29 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
             || !current->presentation || current->presentation->dataRevision!=saved->source
             || current->presentation->viewMode!=preparedMode) {finish(true);return;}
         HostViewSetRequest request;request.targetView.viewId="primary-3d";request.mode=saved->original;
-        const auto admission=session->SendRequest(std::move(request),[finish,afterUpdates](HostResult result){
-            afterUpdates([finish,result]{finish(result.isSucceeded);});
+        const auto admission=session->SendRequest(std::move(request),[wallOwner,saved,finish,afterUpdates](HostResult result){
+            afterUpdates([wallOwner,saved,finish,result]{
+                if(!result.isSucceeded) {
+                    std::cerr<<"[Wall] View restore failed action="<<saved->action<<" error="<<static_cast<int>(result.errorCode)
+                        <<" message="<<result.message<<" targetMode="<<static_cast<int>(saved->original)
+                        <<" source="<<GetRefText(saved->source).toStdString()<<std::endl;
+                    if(wallOwner)if(const auto session=wallOwner->GetSession())for(const auto& view:session->GetSceneViewStates())if(view.id=="primary-3d") {
+                        std::cerr<<"[Wall] Restore scene presentationRevision="<<view.presentationRevision<<" sceneEpoch="<<view.sceneEpoch
+                            <<" renderedEpoch="<<view.renderedEpoch<<" command="<<wallOwner->GetContext().workflow.primaryPresentationCommand
+                            <<" expectedCommand="<<saved->presentationCommand;
+                        if(view.presentation)std::cerr<<" mode="<<static_cast<int>(view.presentation->viewMode)
+                            <<" source="<<GetRefText(view.presentation->dataRevision).toStdString();
+                        std::cerr<<std::endl;
+                    }
+                }
+                finish(result.isSucceeded);
+            });
         });
-        if(admission.status!=HostAdmissionStatus::Accepted)finish(false);
+        if(admission.status!=HostAdmissionStatus::Accepted) {
+            std::cerr<<"[Wall] View restore rejected action="<<saved->action<<" error="<<static_cast<int>(admission.errorCode)
+                <<" message="<<admission.message<<std::endl;
+            finish(false);
+        }
         });
     };
     const auto send = [panel, feature, visible,appliedDisplays,restore](std::uint64_t id, ThicknessRequest request) {
@@ -361,8 +369,8 @@ ModulePanel* CreateWallTest(TestContext context, std::shared_ptr<WallThicknessHo
         if(result){summary["viewedSource"]=GetRefText(result->archive.input.source);summary["viewedIsCurrent"]=result->isCurrent;summary["isCurrent"]=result->isCurrent;}
         const auto action=panel->GetParameterAction();
         try {
-            if(result && action=="Start"){const auto draft=build(panel->GetActionParameters("Start"));summary["measurementParametersChanged"]=MeasurementJson(draft.input,draft.params)!=MeasurementJson(result->archive.input,result->archive.params);}
-            if(result && action=="SetEvaluation"){auto p=panel->GetActionParameters("SetEvaluation");p["upper"]=GetInputNumber(p,"upper",result->statistics.maximum?std::max(*result->statistics.maximum,std::numeric_limits<double>::epsilon()):1.);if(p["histogramRange"].isNull())p["histogramRange"]=QJsonArray{0.,p["upper"]};summary["evaluationParametersChanged"]=EvaluationJson(Evaluation(p))!=EvaluationJson(result->archive.evaluation);}
+            if(result && action=="Start"){const auto draft=build(panel->GetActionParameters("Start"));summary["measurementParametersChanged"]=GetWallMeasurementJson(draft.input,draft.params)!=GetWallMeasurementJson(result->archive.input,result->archive.params);}
+            if(result && action=="SetEvaluation"){auto p=panel->GetActionParameters("SetEvaluation");p["upper"]=GetInputNumber(p,"upper",result->statistics.maximum?std::max(*result->statistics.maximum,std::numeric_limits<double>::epsilon()):1.);if(p["histogramRange"].isNull())p["histogramRange"]=QJsonArray{0.,p["upper"]};summary["evaluationParametersChanged"]=GetWallEvaluationJson(Evaluation(p))!=GetWallEvaluationJson(result->archive.evaluation);}
             summary["displayParametersChanged"]=result && action=="SetDisplay" && appliedDisplays->value(GetRefText(result->result))!=panel->GetActionParameters("SetDisplay");
         }catch(const std::exception&){summary["measurementParametersChanged"]=action=="Start";}
         ParameterChoices results;

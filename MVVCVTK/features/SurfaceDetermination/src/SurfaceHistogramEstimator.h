@@ -1,6 +1,5 @@
 #pragma once
 
-#include "FeatureSupport/WorkLimit.h"
 #include "SurfaceRecipe.h"
 
 #include <functional>
@@ -20,7 +19,7 @@ class SurfaceHistogramEstimator final
 {
 public:
     static constexpr std::size_t GetWorkingBytes() noexcept { return 64U * 1024U + fineBinCount*sizeof(std::uint64_t); }
-    static SurfaceFailureReason BuildEstimate(const SurfaceHistogramInput& input, WorkLimit budget,
+    static SurfaceFailureReason BuildEstimate(const SurfaceHistogramInput& input,
         const std::function<bool()>& cancelled, std::optional<SurfaceIsoEstimate>& estimate,
         std::string& message);
 private:

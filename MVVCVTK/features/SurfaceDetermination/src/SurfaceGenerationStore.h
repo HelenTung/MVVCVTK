@@ -2,6 +2,7 @@
 
 #include "Host/SurfaceDeterminationHostTypes.h"
 #include "Host/TrustedDataPort.h"
+#include "FeatureSupport/SpatialMeshSource.h"
 
 #include <memory>
 #include <mutex>
@@ -24,8 +25,8 @@ public:
     };
     explicit SurfaceGenerationPayload(
         std::shared_ptr<const SurfaceGenerationSnapshot> generation,
-        Statistics statistics)
-        : m_generation(std::move(generation)), m_statistics(statistics) {}
+        Statistics statistics,std::shared_ptr<const FeatureInternal::SpatialMeshSource> display={},std::string displayError={})
+        : m_generation(std::move(generation)), m_statistics(statistics),m_display(std::move(display)),m_displayError(std::move(displayError)) {}
     DataTypeId GetDataType() const override { return surfaceGenerationType; }
     std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
@@ -39,12 +40,16 @@ public:
     {
         if (!m_generation) return {};
         return {m_generation,m_generation->points,m_generation->triangleIndices,m_generation->objects,
-            m_generation->triangleValidity,m_generation->interfaces,m_generation->selection};
+            m_generation->triangleValidity,m_generation->interfaces,m_generation->selection,m_display};
     }
     const Statistics& GetStatistics() const noexcept { return m_statistics; }
+    const std::shared_ptr<const FeatureInternal::SpatialMeshSource>& GetDisplaySource() const noexcept {return m_display;}
+    const std::string& GetDisplayError() const noexcept {return m_displayError;}
 private:
     std::shared_ptr<const SurfaceGenerationSnapshot> m_generation;
     Statistics m_statistics;
+    std::shared_ptr<const FeatureInternal::SpatialMeshSource> m_display;
+    std::string m_displayError;
 };
 
 class SurfaceGenerationStore final {

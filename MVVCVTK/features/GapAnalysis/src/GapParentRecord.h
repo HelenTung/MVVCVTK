@@ -11,7 +11,7 @@ public:
     GapSurfaceParams parameters;
     GapStatistics statistics;
     std::shared_ptr<const LabelMap3DPayload> labels;
-    std::shared_ptr<const std::vector<VoidRegion>> voids;
+    std::shared_ptr<const DataArray<VoidRegion>> voids;
     DataTypeId GetDataType()const override{return gapParentRecordType;}
     std::shared_ptr<const IDataPayload> CreateSnapshot()const override{return std::make_shared<const GapParentRecord>(*this);}
     std::vector<std::shared_ptr<const void>> GetDataResources()const override{std::vector<std::shared_ptr<const void>> result{labels,voids};if(labels){const auto resources=labels->GetDataResources();result.insert(result.end(),resources.begin(),resources.end());}return result;}

@@ -99,12 +99,18 @@ bool Wait(const std::function<bool()>& done, int timeoutMs = 30000)
     for(;;) {
         if(done())return true;
         const auto remaining=static_cast<qint64>(timeoutMs)-elapsed.elapsed();
-        if(remaining<=0)return false;
-        QEventLoop loop;QTimer deadline;deadline.setSingleShot(true);
-        QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
+        if(timeoutMs>0 && remaining<=0)return false;
+        QEventLoop loop;QTimer deadline,observer;deadline.setSingleShot(true);
+        bool quitting=false;
+        QObject::connect(QCoreApplication::instance(),&QCoreApplication::aboutToQuit,&loop,[&]{quitting=true;loop.quit();});
+        if(timeoutMs==0) {
+            // StopPending 等状态未必继续投递事件；观察周期不构成任务期限。
+            QObject::connect(&observer,&QTimer::timeout,&loop,[&]{if(done())loop.quit();});observer.start(10);
+        } else QObject::connect(QAbstractEventDispatcher::instance(),&QAbstractEventDispatcher::aboutToBlock,&loop,
             [&]{if(done())loop.quit();});
         QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
-        deadline.start(static_cast<int>(remaining));loop.exec();
+        if(timeoutMs>0)deadline.start(static_cast<int>(remaining));loop.exec();
+        if(quitting)return false;
         // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
     }
 }
@@ -134,7 +140,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
                 && scene.sceneEpoch == scenes.front().sceneEpoch && scene.renderedEpoch > 0
                 && scene.renderedEpoch <= scene.sceneEpoch && !window.GetWorkflow().getRenderPending(scene.id);
         });
-    },step["timeoutMs"].toInt(30000)), "business capture waits for committed 2D/3D scenes and actual renders");
+    },step["timeoutMs"].toInt(0)), "business capture waits for committed 2D/3D scenes and actual renders");
     Check(QDir().mkpath(folder), "business capture directory is available");
     QCoreApplication::processEvents();
     QJsonArray files, scenes;
@@ -221,7 +227,7 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
     QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, modifiers);
     QApplication::sendEvent(tree->viewport(), &press); QApplication::sendEvent(tree->viewport(), &release);
 }
-std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
+std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {}, int timeoutMs = 2000)
 {
     auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
     // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
@@ -240,7 +246,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         const auto* editor=panel->GetParameterEditor(action);
         const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
         return atPrimary || atNext || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
-    }, 2000);
+    }, timeoutMs);
     if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
     Check(ready, "actual business button or classified menu command is available");
     auto* button = panel->findChild<QPushButton*>("action_" + action);
@@ -258,8 +264,15 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
         Check(command && command->isEnabled(), "direct command remains available in the classified menu");
         command->trigger();
-        Check(Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); }, 2000), "menu dispatch reaches the original business path");
     }
+    const bool dispatched=Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); },timeoutMs);
+    if(!dispatched)std::cerr<<"ACTION DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+    Check(dispatched,"actual command click creates its operation record");
+    const auto record=window.GetRecords().GetRecord(id);
+    Check(record["module"].toString()==module && record["action"].toString()==action,
+        "actual command dispatch preserves the requested module and action");
     return id;
 }
 std::uint64_t ClickCurrentPrimary(TestWindow& window,const QString& module,const QString& expected)
@@ -1529,6 +1542,32 @@ void CheckRenderModeSwitch(TestWindow& window)
         Check(slices == 3, "all three slices remain available after 3D mode switching");
         if (window.GetModule("Part")->GetObservedState()["hasCurrentParts"].toBool()) (void)CheckPartDisplay(window);
     }
+    auto* part=window.GetModule("Part");
+    if(part && part->GetObservedState()["hasCurrentParts"].toBool()) {
+        const bool wasVisible=part->GetObservedState()["isOverlayVisible"].toBool();
+        if(!wasVisible)GetComplete(window,Click(window,"Part","Visibility",{{"isVisible",true}}),"Accepted");
+        Check(Wait([&]{part->Observe();const auto state=part->GetObservedState();return state["isOverlayVisible"].toBool()
+            && state["isDisplayReady"].toBool() && state["sourcePreviewReady"].toBool();}),"part material regression has a ready visible native preview");
+        for(const auto target:{HostRenderMode::CompositeVolume,HostRenderMode::CompositeIsoSurface}) {
+            auto& workflow=window.GetWorkflow();const auto busy=std::numeric_limits<std::uint64_t>::max();
+            Check(workflow.StartOperation(busy,TestPolicy::Compute,false),"part material regression reserves a calculation transaction");
+            try {
+                const auto before=window.GetSession()->GetRenderViewState({"primary-3d"});
+                auto completed=std::make_shared<std::optional<bool>>();
+                HostViewSetRequest request;request.targetView.viewId="primary-3d";request.mode=target;
+                const auto admission=window.GetSession()->SendRequest(std::move(request),[completed](HostResult result){*completed=result.isSucceeded;});
+                Check(admission.status==HostAdmissionStatus::Accepted,"temporary mode request is admitted during calculation");
+                // 提交模式但尚未绘制时，确定性触发后台观察，而非依赖定时器碰巧交错。
+                (void)window.GetSession()->SendUpdates();
+                part->Observe();const auto after=window.GetSession()->GetRenderViewState({"primary-3d"});
+                Check(before && after && after->material.opacity==before->material.opacity,"busy calculation defers automatic part material changes");
+                Check(Wait([&]{return completed->has_value();}) && completed->value(),"temporary mode completion survives background part observation");
+            } catch(...) {workflow.SetComplete(busy);throw;}
+            workflow.SetComplete(busy);part->Observe();
+            (void)CheckPartDisplay(window);
+        }
+        if(!wasVisible)GetComplete(window,Click(window,"Part","Visibility",{{"isVisible",false}}),"Accepted");
+    }
 }
 void CheckWallWorkflow(TestWindow& window, const QString& directory)
 {
@@ -2127,6 +2166,13 @@ void StartSelfTest(TestWindow& window)
         Check(window.GetModule("Surface")->findChild<QPushButton*>("action_CopyIsoToDisplay")->isEnabled(),
             "estimated ISO can be applied again after returning to isosurface mode");
         GetComplete(window, Send(window, "Surface", "GlobalAutomatic", {{"initialIsoValue", 50.0}}), "Succeeded");
+        const auto selected=GetComplete(window,Click(window,"Surface","MeasurementSelection"),"Observed")["result"].toObject();
+        Check(selected["triangleIds"].toArray().size()<=256&&selected["vertexIds"].toArray().size()<=256,"measurement result record contains only bounded ID pages");
+        const auto page=GetComplete(window,Click(window,"Surface","ReadMeasurementSelection",{{"selectionId",selected["selectionId"]},{"pageSize","1"}}),"Observed")["result"].toObject();
+        Check(page["generation"]==selected["generation"]&&page["total"]==selected["selectedTriangles"]&&page["ids"].toArray().size()<=1,"measurement pages retain the complete fixed selection and original IDs");
+        const auto surfaceExport=directory.filePath("surface-points.csv");
+        const auto exported=GetComplete(window,Click(window,"Surface","ExportComparison",{{"outputPath",surfaceExport}}),"Exported")["result"].toObject();
+        Check(exported["generation"]==selected["generation"]&&QFileInfo(surfaceExport).size()>0,"background point export uses the captured formal revision");
         CheckOverlaySwitch(window, "Surface");
         Check((window.GetWorkflow().GetMeasurementSurface() && GetDataRevisionRefValid(window.GetWorkflow().GetMeasurementSurface()->mesh)), "material surface is a formal metrology input");
 #if defined(MANUAL_ALIGNMENT)
@@ -2435,9 +2481,15 @@ QJsonObject CheckPartDisplay(TestWindow& window)
     Check(true, "part colours, visibility and selection match the catalog in the current 3D mode");
     return {{"catalog", catalog}, {"views", views}};
 }
-void StartSequence(TestWindow& window, const QString& path)
+void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeoutMs)
 {
     const auto script = LoadJson(path);
+    const auto steps=script["steps"].toArray();
+    const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject()["timeoutMs"];return timeout.isUndefined() || (timeout.isDouble() && timeout.toDouble()==0);});
+    const auto shutdown=script.contains("shutdownTimeoutMs")?GetNumber(script,"shutdownTimeoutMs"):(unbounded?0.:30000.);
+    if(shutdown<0 || shutdown>std::numeric_limits<int>::max() || shutdown!=std::trunc(shutdown))
+        throw std::invalid_argument("用例 shutdownTimeoutMs 必须为 0..2147483647 毫秒整数；0 表示不设退出期限");
+    shutdownTimeoutMs=static_cast<int>(shutdown);
     if(script.contains("windowSize")) {
         const auto size=script["windowSize"].toArray();
         Check(size.size()==2 && size[0].toInt()>=1000 && size[1].toInt()>=800,
@@ -2475,9 +2527,9 @@ void StartSequence(TestWindow& window, const QString& path)
     if (!script["steps"].isArray() || script["steps"].toArray().isEmpty()) throw std::invalid_argument("用例必须包含非空 steps");
     // 执行加载/计算前校验全部等待参数；范围来自 Qt 的 int 毫秒计时接口，不设业务时限。
     const auto getWaitMilliseconds=[](const QJsonObject& step){
-        const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):30000.;
-        if(timeout<1 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
-            throw std::invalid_argument("用例 timeoutMs 必须为 1..2147483647 毫秒整数");
+        const auto timeout=step.contains("timeoutMs")?GetNumber(step,"timeoutMs"):0.;
+        if(timeout<0 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
+            throw std::invalid_argument("用例 timeoutMs 必须为 0..2147483647 毫秒整数；0 表示持续等待或用户取消");
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
@@ -2497,7 +2549,7 @@ void StartSequence(TestWindow& window, const QString& path)
             panel->Observe();actual=panel->GetObservedState();
             for(auto it=expected.begin();it!=expected.end();++it)if(observedValue(it.key())!=it.value())return false;
             return true;
-        },std::min(getWaitMilliseconds(step),30000));
+        },getWaitMilliseconds(step));
         if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
         for(auto it=expected.begin();it!=expected.end();++it)Check(observedValue(it.key())==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
         if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
@@ -2576,7 +2628,7 @@ void StartSequence(TestWindow& window, const QString& path)
             else window.GetWorkflow().onNavigate(module,parameterAction,params);
             QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
-            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},std::min(timeout,30000));
+            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},timeout);
             if(!available)std::cout << "CONTROL BLOCKED: " << module.toStdString() << "." << action.toStdString()
                 << " tooltip=" << (button ? button->toolTip().toStdString() : "missing control") << " state="
                 << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
@@ -2586,7 +2638,7 @@ void StartSequence(TestWindow& window, const QString& path)
             std::cout<<"PRIMARY CLICK: "<<module.toStdString()<<"."<<action.toStdString()<<" record="<<id<<std::endl;
             button->click();
             std::cout<<"PRIMARY RETURN: "<<module.toStdString()<<"."<<action.toStdString()<<std::endl;
-            const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},2000);
+            const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},timeout);
             if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
                 <<" primary="<<button->property("businessAction").toString().toStdString()<<" enabled="<<button->isEnabled()
                 <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
@@ -2612,7 +2664,7 @@ void StartSequence(TestWindow& window, const QString& path)
             const auto module=GetText(step,"module"),action=GetText(step,"action");
             window.GetWorkflow().onNavigate(module,action,params);
             id=SendUnavailable(window,module,action);
-        } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params);
+        } else if(control=="actionButton")id=Click(window,GetText(step,"module"),GetText(step,"action"),params,timeout);
         else if(control.isEmpty())id=Send(window,GetText(step,"module"),GetText(step,"action"),params);
         else throw std::invalid_argument("control 仅支持 currentPrimary、editParameters、businessPrimary、nextButton、actionButton、catalogAction、unavailableAction、checkPage");
         QTimer switching, cancellation;
@@ -2631,8 +2683,8 @@ void StartSequence(TestWindow& window, const QString& path)
         if (step.contains("cancelAfterMs")) {
             const auto delay = GetNumber(step, "cancelAfterMs");
             auto* module = window.GetModule(GetText(step, "module"));
-            if (delay < 1 || delay >= timeout || std::trunc(delay) != delay || !module->onStop)
-                throw std::invalid_argument("取消审计需要有效的取消入口和小于等待时限的延迟");
+            if (delay < 1 || (timeout>0 && delay >= timeout) || delay>std::numeric_limits<int>::max() || std::trunc(delay) != delay || !module->onStop)
+                throw std::invalid_argument("取消审计需要有效的取消入口及 Qt 可表示的延迟；仅在设置等待期限时要求延迟小于期限");
             QString exactTarget;
             if(step["cancelExactRequestId"].toBool()) {
                 Check(module->GetName()=="Surface","exact cancellation targets the supported surface request family");
@@ -2874,10 +2926,10 @@ void StartSequence(TestWindow& window, const QString& path)
             CheckNodeParameters(window);
         }
         if (step.contains("saveAs")) results[GetText(step, "saveAs")] = record;
-        if(script["checkReports"].toBool()||script["checkReportPreviews"].toBool()) {
+        if(!step["deferReportCheck"].toBool() && (script["checkReports"].toBool()||script["checkReportPreviews"].toBool())) {
             const auto preview=step.contains("reportPreview")?GetText(step,"reportPreview"):
                 QDir::current().filePath(QString("report-previews-%1/%2-%3").arg(QCoreApplication::applicationPid()).arg(GetText(record,"module"),GetText(record,"operationId")));
-            CheckBusinessReport(window,record,script["checkReports"].toBool(),preview,timeout);
+            CheckBusinessReport(window,record,script["checkReports"].toBool(),preview,timeout,script["checkLargeReports"].toBool());
         }
         if (step.contains("expectedTransform")) {
             const auto expectedTransform = GetArray<double, 16>(step["expectedTransform"]);
@@ -3058,17 +3110,17 @@ void StartSequence(TestWindow& window, const QString& path)
 }
 int StartTestCase(TestWindow& window, const QString& path, const QString& recordPath, bool selfTest)
 {
-    int result = 0;
+    int result = 0,shutdownTimeoutMs=30000;
     try {
         Check(Wait([&] { return window.GetIsReady() || !window.GetFailure().isEmpty(); }), "window initializes");
         Check(window.GetIsReady(), window.GetFailure().toStdString().c_str());
         Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
-        if (selfTest) StartSelfTest(window); else StartSequence(window, path);
+        if (selfTest) StartSelfTest(window); else StartSequence(window, path,shutdownTimeoutMs);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
     const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
-    const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); });
+    const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); },shutdownTimeoutMs);
     if (!stopped) { std::cerr << "FAIL: Stop remains pending" << std::endl; result = 1; }
     try { if (!recordPath.isEmpty()) { auto records = window.GetRecords().GetRecords(); records["resources"] = window.GetWorkflow().resources.GetJson(); records["hostDiagnostics"] = window.GetDiagnostics();
         records["businessDiagnostics"] = businessDiagnostics;

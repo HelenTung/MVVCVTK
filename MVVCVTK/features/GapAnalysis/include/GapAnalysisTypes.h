@@ -5,6 +5,7 @@
 // =====================================================================
 
 #include "Host/GapHostTypes.h"
+#include "Data/DataPayloads.h"
 
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
@@ -86,10 +87,11 @@ struct GapAnalysisResult {
     std::shared_ptr<const GapAnalysisResult> parent;
     // worker 准备的私有显示候选，不进入正式 payload 或导出。
     std::shared_ptr<const GapDisplayData> display;
+    std::string displayError;
     // worker 完成所有首次转换；Host 仍遵守 DataGraph 的防御性 snapshot/校验。
     std::shared_ptr<const GapResultPayloads> payloads;
     // 私有内核完成筛选后的原始区域集合。
-    std::vector<VoidRegion> voids;
+    DataArray<VoidRegion> voids;
     // 此 VTK_INT 图借用并持有私有内核原始标签 owner；不二值化、重编号或复制第二份整卷。
     // 标签体完整继承输入快照的 extent、spacing、origin 与 direction。
     vtkSmartPointer<vtkImageData> labelImage;

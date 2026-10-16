@@ -42,8 +42,20 @@
 #include <QTabWidget>
 #include <QTabBar>
 #include <QStackedWidget>
+#include <QTimer>
+#include <atomic>
+#include <future>
 #include <algorithm>
 namespace Manual {
+namespace { struct ReadTaskCancelled {}; }
+class ModulePanel::ReadTask final {
+public:
+    // 0=工作中，1=已接纳取消，2=完成/提交已开始。
+    std::shared_ptr<std::atomic_int> phase = std::make_shared<std::atomic_int>(0);
+    std::future<QJsonObject> future;
+    QTimer* timer = nullptr;
+    ~ReadTask() { int running=0;phase->compare_exchange_strong(running,1);if(timer)delete timer;if(future.valid())future.wait(); }
+};
 ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     : QWidget(parent), m_context(context), m_name(std::move(name))
 {
@@ -68,8 +80,11 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_nextActions = new QWidget(commandFooter); m_nextLayout = new QGridLayout(m_nextActions); m_nextLayout->setContentsMargins(0,0,0,0); m_nextLayout->setSpacing(4); footerLayout->addWidget(m_nextActions);
     connect(m_primary,&QPushButton::clicked,this,[this] {
         try {
-        Observe();const auto action=m_primary->property("businessAction").toString();
-        if (!action.isEmpty() && m_primary->isEnabled()) SendBusinessAction(action,m_primary->property("usesOutput").toBool());
+        // 保留点击意图；SendAction 会重新观察并校验当前状态，必要时生成 Rejected 终态。
+        // 此处先刷新会把主动作换掉或禁用按钮，导致已经发生的点击没有任何操作记录。
+        const auto action=m_primary->property("businessAction").toString();
+        const auto usesOutput=m_primary->property("usesOutput").toBool();
+        if (!action.isEmpty()) SendBusinessAction(action,usesOutput);
         } catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}
     });
     // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
@@ -172,7 +187,44 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
 }
 QWidget* ModulePanel::GetBrowser() const { return m_browser; }
-ModulePanel::~ModulePanel(){m_statistics->Cancel();delete m_statistics;}
+ModulePanel::~ModulePanel(){CancelReadTasks();m_readTasks.clear();m_statistics->Cancel();delete m_statistics;}
+void ModulePanel::StartReadTask(std::uint64_t id, QString status,
+    std::function<QJsonObject(const ReadTaskContext&)> work, std::function<void()> onSucceeded)
+{
+    if(!m_readTasks.empty())throw std::runtime_error("请等待当前读取任务完成或取消后重试");
+    auto task=std::make_unique<ReadTask>();const auto phase=task->phase;
+    task->future=std::async(std::launch::async,[work=std::move(work),phase] {
+        ReadTaskContext context;
+        context.checkpoint=[phase]{if(phase->load()==1)throw ReadTaskCancelled{};};
+        context.commit=[phase](const std::function<void()>& publish){
+            int running=0;
+            if(!phase->compare_exchange_strong(running,2)){
+                if(running==1)throw ReadTaskCancelled{};
+                throw std::logic_error("读取任务不能重复提交");
+            }
+            publish();
+        };
+        context.checkpoint();auto result=work(context);
+        int running=0;
+        if(!phase->compare_exchange_strong(running,2)&&running==1)throw ReadTaskCancelled{};
+        return result;
+    });
+    task->timer=new QTimer(this);task->timer->setInterval(10);
+    connect(task->timer,&QTimer::timeout,this,[this,id,status=std::move(status),onSucceeded=std::move(onSucceeded)] {
+        auto found=m_readTasks.find(id);if(found==m_readTasks.end())return;
+        auto& task=*found->second;
+        if(task.future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+        QJsonObject result;auto terminal=status;
+        try {result=task.future.get();if(onSucceeded)onSucceeded();}
+        catch(const ReadTaskCancelled&){terminal="Cancelled";result={{"message","读取任务已取消"}};}
+        catch(const std::exception& error){terminal="Failed";result={{"message",QString::fromUtf8(error.what())}};}
+        // timer 的信号回调仍在执行，延迟销毁 QObject。
+        task.timer->stop();task.timer->deleteLater();task.timer=nullptr;m_readTasks.erase(found);
+        setProperty("readTasksBusy",!m_readTasks.empty());SetComplete(id,terminal,std::move(result));
+    });
+    task->timer->start();m_readTasks.emplace(id,std::move(task));setProperty("readTasksBusy",true);
+}
+std::size_t ModulePanel::CancelReadTasks(){std::size_t accepted=0;for(auto& item:m_readTasks){int running=0;if(item.second->phase->compare_exchange_strong(running,1))++accepted;}return accepted;}
 
 void ModulePanel::SelectSceneItem(QTreeWidgetItem* item)
 {

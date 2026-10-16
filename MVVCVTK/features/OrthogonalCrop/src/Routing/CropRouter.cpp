@@ -176,9 +176,9 @@ bool CropRouter::GetRecipeSame(const RoiGeometryPayload& recipe,const std::vecto
 
 namespace {
 struct RestoreCancelled final {};
-template<class T> std::vector<T> CopyRestoreArray(const std::vector<T>& source,const std::function<bool()>& stop) {
-    std::vector<T> result;result.reserve(source.size());
-    constexpr std::size_t chunk=1024*1024/sizeof(T);
+template<class Values> Values CopyRestoreArray(const Values& source,const std::function<bool()>& stop) {
+    Values result;result.reserve(source.size());
+    constexpr std::size_t chunk=1024*1024/sizeof(typename Values::value_type);
     for(std::size_t offset=0;offset<source.size();) {
         if(stop&&stop())throw RestoreCancelled{};
         const auto end=offset+std::min(chunk,source.size()-offset);

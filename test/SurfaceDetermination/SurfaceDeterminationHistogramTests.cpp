@@ -38,7 +38,7 @@ int GetSurfaceHistogramFailCount()
     const SurfaceHistogramInput masked{{16,16,16},maskedValues.data(),readValue,validity.data()};
     std::optional<SurfaceIsoEstimate> maskedEstimate;
     std::string maskedMessage;
-    const auto maskedFailure=SurfaceHistogramEstimator::BuildEstimate(masked,1024U*1024U,
+    const auto maskedFailure=SurfaceHistogramEstimator::BuildEstimate(masked,
         []{return false;},maskedEstimate,maskedMessage);
     checks.Get(maskedFailure==SurfaceFailureReason::None && maskedEstimate
         && maskedEstimate->histogramCounts.front()==1946 && maskedEstimate->histogramCounts.back()==2048
@@ -49,7 +49,7 @@ int GetSurfaceHistogramFailCount()
     std::fill(largeValues.begin()+2048,largeValues.end(),1.1e308);
     const SurfaceHistogramInput large{{16,16,16},largeValues.data(),readValue,nullptr};
     std::optional<SurfaceIsoEstimate> largeEstimate;
-    checks.Get(SurfaceHistogramEstimator::BuildEstimate(large,1024U*1024U,[]{return false;},largeEstimate,maskedMessage)
+    checks.Get(SurfaceHistogramEstimator::BuildEstimate(large,[]{return false;},largeEstimate,maskedMessage)
         ==SurfaceFailureReason::None && largeEstimate
         && std::abs(largeEstimate->isoValue-1.05e308)<=4*std::numeric_limits<double>::epsilon()*1.05e308,
         "a finite ISO midpoint does not overflow when the sum of the two finite peaks would overflow");
@@ -88,7 +88,7 @@ int GetSurfaceHistogramFailCount()
     std::optional<SurfaceIsoEstimate> overlapEstimate;
     std::string message;
     const auto overlapFailure=SurfaceHistogramEstimator::BuildEstimate(
-        overlapInput,1024U*1024U,[]{return false;},overlapEstimate,message);
+        overlapInput,[]{return false;},overlapEstimate,message);
     checks.Get(overlapFailure==SurfaceFailureReason::None && overlapEstimate,
         "two resolved modes with a shallow valley are not rejected solely by a fixed valley ratio");
     if (overlapEstimate) {
@@ -100,14 +100,13 @@ int GetSurfaceHistogramFailCount()
     const auto unimodalValues=buildValues(0);
     const SurfaceHistogramInput unimodal{{128,128,128},unimodalValues.data(),overlapInput.readScalar,nullptr};
     auto unimodalEstimate=overlapEstimate;
-    checks.Get(SurfaceHistogramEstimator::BuildEstimate(unimodal,1024U*1024U,
+    checks.Get(SurfaceHistogramEstimator::BuildEstimate(unimodal,
         []{return false;},unimodalEstimate,message)==SurfaceFailureReason::ThresholdUnreliable && !unimodalEstimate,
         "a smooth single population is not split merely because its sample count is large");
     auto rejectedEstimate=overlapEstimate;
     checks.Get(SurfaceHistogramEstimator::BuildEstimate(overlapInput,
-        SurfaceHistogramEstimator::GetWorkingBytes()-1,[]{return false;},rejectedEstimate,message)
-        ==SurfaceFailureReason::BudgetExceeded && !rejectedEstimate,
-        "fine histogram workspace is admitted before allocation and cannot retain a stale estimate");
+        []{return true;},rejectedEstimate,message)==SurfaceFailureReason::Cancelled && !rejectedEstimate,
+        "cancellation before allocation cannot retain a stale histogram estimate");
     struct ReadAudit { const std::vector<double>* values; mutable std::size_t reads=0; } readAudit{&values};
     const SurfaceHistogramInput interrupted{{128,128,128},&readAudit,
         [](const void* data,std::size_t index) {
@@ -116,7 +115,7 @@ int GetSurfaceHistogramFailCount()
             return (*audit->values)[index];
         },nullptr};
     // 只在读取统计后半段注入取消，覆盖细化扫描尚未完成时不发布半份估计。
-    checks.Get(SurfaceHistogramEstimator::BuildEstimate(interrupted,1024U*1024U,
+    checks.Get(SurfaceHistogramEstimator::BuildEstimate(interrupted,
         [&]{return readAudit.reads>values.size()+values.size()/2;},rejectedEstimate,message)
         ==SurfaceFailureReason::Cancelled && !rejectedEstimate,
         "cancellation during full support collection publishes no partial or stale histogram estimate");
