@@ -72,10 +72,13 @@ public:
                 if(!(spatial%4096))Check(cancel);
                 const auto face=result->m_order.GetFace(static_cast<std::size_t>(spatial));
                 range[0]=std::min(range[0],face);range[1]=std::max(range[1],face);
+                std::array<std::uint64_t,3> triangle{};
+                MeshPayloadBuilder::CopyValues(faces,static_cast<std::size_t>(face)*3,3,triangle.data());
                 for(unsigned corner=0;corner<3;++corner) {
-                    const auto point=faces[static_cast<std::size_t>(face*3+corner)];
+                    std::array<double,3> position{};
+                    MeshPayloadBuilder::CopyValues(points,static_cast<std::size_t>(triangle[corner])*3,3,position.data());
                     for(unsigned axis=0;axis<3;++axis) {
-                        const double value=points[static_cast<std::size_t>(point*3+axis)];
+                        const double value=position[axis];
                         bounds[2*axis]=std::min(bounds[2*axis],value);
                         bounds[2*axis+1]=std::max(bounds[2*axis+1],value);
                     }
@@ -139,19 +142,23 @@ public:
         result.firstFace=*std::min_element(selected.begin(),selected.end());
         const auto count=selected.size();
         const auto& faces=m_mesh->GetTriangleIndices();const auto& points=m_mesh->GetPointValues();
-        std::vector<std::uint64_t> globals;globals.reserve(count*3);
+        // 只保存当前显示页拓扑，坐标和连接复用同一页，避免再次随机读取正式面数组。
+        std::vector<std::uint64_t> topology(count*3);
         std::size_t visited=0;
         for(const auto face:selected) {
-            if(!(visited++%4096))Check(cancel);
-            for(unsigned corner=0;corner<3;++corner)globals.push_back(faces[static_cast<std::size_t>(face*3+corner)]);
+            if(!(visited%4096))Check(cancel);
+            MeshPayloadBuilder::CopyValues(faces,static_cast<std::size_t>(face)*3,3,topology.data()+visited*3);
+            ++visited;
         }
+        auto globals=topology;
         std::sort(globals.begin(),globals.end());globals.erase(std::unique(globals.begin(),globals.end()),globals.end());
         vtkNew<vtkDoubleArray> coordinates;coordinates->SetNumberOfComponents(3);coordinates->SetNumberOfTuples(static_cast<vtkIdType>(globals.size()));
         vtkNew<vtkIdTypeArray> globalPoints;globalPoints->SetName(pointIds);globalPoints->SetNumberOfValues(static_cast<vtkIdType>(globals.size()));
         for(std::size_t i=0;i<globals.size();++i) {
             if(!(i%4096))Check(cancel);
             if(globals[i]>static_cast<std::uint64_t>(std::numeric_limits<vtkIdType>::max()))throw std::length_error("Display point identity overflows VTK id.");
-            const auto base=static_cast<std::size_t>(3*globals[i]);const double position[3]{points[base],points[base+1],points[base+2]};
+            const auto base=static_cast<std::size_t>(3*globals[i]);double position[3]{};
+            MeshPayloadBuilder::CopyValues(points,base,3,position);
             coordinates->SetTypedTuple(static_cast<vtkIdType>(i),position);
             globalPoints->SetValue(static_cast<vtkIdType>(i),static_cast<vtkIdType>(globals[i]));
         }
@@ -164,7 +171,7 @@ public:
             if(global>static_cast<std::uint64_t>(std::numeric_limits<vtkIdType>::max()))throw std::length_error("Display face identity overflows VTK id.");
             offsets->SetValue(static_cast<vtkIdType>(face),static_cast<int>(face*3));globalFaces->SetValue(static_cast<vtkIdType>(face),static_cast<vtkIdType>(global));
             for(unsigned corner=0;corner<3;++corner) {
-                const auto point=faces[static_cast<std::size_t>(global*3+corner)];
+                const auto point=topology[face*3+corner];
                 const auto local=std::lower_bound(globals.begin(),globals.end(),point)-globals.begin();
                 connectivity->SetValue(static_cast<vtkIdType>(face*3+corner),static_cast<int>(local));
             }

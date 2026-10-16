@@ -334,6 +334,12 @@ class MeshPayloadBuilder final {
     private:std::shared_ptr<const DataArray<Value>> m_source;
     };
 public:
+    // 仓内消费者把一个坐标/拓扑记录读到自有固定工作区；不暴露映射指针或扩张 SPI。
+    template<class Value> static void CopyValues(const MeshReadArray<Value>& source,
+        std::size_t offset,std::size_t count,Value* target) {
+        if(offset>source.size() || count>source.size()-offset)throw std::out_of_range("Mesh working range is invalid.");
+        if(count)source.m_source->ReadValues(offset,count,target);
+    }
     static std::shared_ptr<const SurfaceMeshPayload> Build(
         std::shared_ptr<const DataArray<double>> points,std::shared_ptr<const DataArray<std::uint64_t>> faces,
         std::vector<MeshAttribute> pointData={},std::string frame="RAS",std::vector<MeshAttribute> cellData={},

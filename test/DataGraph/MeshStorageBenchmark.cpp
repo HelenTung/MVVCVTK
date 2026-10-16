@@ -110,6 +110,14 @@ int main()
             std::fflush(stdout);
         }
         std::printf("write checksum=%.1f\n", expected);
+        const auto queryStart = Clock::now();
+        const auto residentBefore = writable.GetResidentBytes();
+        const auto queryMs = std::chrono::duration<double, std::milli>(Clock::now() - queryStart).count();
+        const auto releaseStart = Clock::now();
+        writable.ReleasePages();
+        const auto releaseMs = std::chrono::duration<double, std::milli>(Clock::now() - releaseStart).count();
+        std::printf("mapped resident before=%zu after=%zu query_ms=%.3f release_ms=%.3f\n",
+            residentBefore, writable.GetResidentBytes(), queryMs, releaseMs);
         return 0;
     } catch (const std::exception& error) {std::fprintf(stderr, "%s\n", error.what()); return 1;}
 }
