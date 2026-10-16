@@ -94,10 +94,10 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
             },column->values);
         row["rowIndex"]=QString::number(i);rows.append(row);
     }
-    QString source;
-    for(const auto& input:data->inputs)if(input.role=="source-volume"){source=GetRefText(input.source);break;}
+    QString source;QJsonArray inputs;
+    for(const auto& input:data->inputs){inputs.append(QJsonObject{{"role",QString::fromStdString(input.role)},{"revision",GetRefText(input.source)}});if(source.isEmpty() && input.role=="source-volume")source=GetRefText(input.source);}
     return {{"rows",rows},{"offset",QString::number(offset)},{"total",QString::number(table->GetRowCount())},{"next",QString::number(next)},
-        {"source",source},{"canonicalParameters",data->provenance?QString::fromStdString(data->provenance->canonicalParameters):QString()}};
+        {"source",source},{"inputs",inputs},{"canonicalParameters",data->provenance?QString::fromStdString(data->provenance->canonicalParameters):QString()}};
 }
 std::array<double,3> ReferenceDataSource::GetRecordLocation(DataRevisionRef ref,std::size_t row,DataRevisionRef source)
 {

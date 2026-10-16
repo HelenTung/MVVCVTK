@@ -434,6 +434,21 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto reports=view->GetReports(module,refs);
     if(requiresReport&&successful)Require(!reports.isEmpty(),"successful business computation must expose its native report");
     if(reports.isEmpty())return;
+    if(requiresReport) {
+        // 相同正式结果首次回读时，查询选择器不得替换已经冻结的计算条件。
+        // 直接比较两次原生回读，避免相关结果筛选带入其他已缓存文档。
+        const auto original=provider->second(record,{});
+        if(!original.isEmpty()) {
+            auto query=record;query["operationId"]="query-conditions-check";query["parameters"]=QJsonObject{{"result","current"}};
+            const auto queried=provider->second(query,{});
+            Require(queried.size()==original.size(),"query selectors changed the frozen business report population");
+            for(const auto& doc:original) {
+                const auto same=std::find_if(queried.cbegin(),queried.cend(),[&](const auto& candidate){return candidate.id==doc.id;});
+                Require(same!=queried.cend() && same->conditions==doc.conditions,"query selectors changed frozen business report conditions");
+            }
+            std::cout<<"PASS: frozen native report conditions module="<<module.toStdString()<<" operation="<<record["operationId"].toString().toStdString()<<std::endl;
+        }
+    }
     auto* panel=window.GetModule(module);Require(panel!=nullptr,"business report module exists");
     const auto actions=panel->GetActions();window.GetWorkflow().onNavigate(module,actions.contains(action)?action:actions.value(0),{});
     QCoreApplication::processEvents();
@@ -473,9 +488,6 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             const auto measurement=doc.conditions["计算参数"].toObject(),evaluation=doc.conditions["评价参数"].toObject();
             Require(measurement.contains("maxDistance") && measurement.contains("sampleSpacing") && measurement.contains("materialThreshold")
                 && measurement["source"]==doc.source && evaluation.contains("histogramBins"),"wall report conditions are not the frozen measurement/evaluation archive");
-            auto query=record;query["action"]="Result";query["operationId"]="query-conditions-check";query["parameters"]=QJsonObject{{"result","current"}};
-            const auto queried=provider->second(query,{});
-            Require(!queried.isEmpty() && queried.first().conditions==doc.conditions,"wall query parameters changed frozen business conditions");
             std::cout<<"PASS: real wall frozen archive conditions action="<<action.toStdString()<<" operation="<<record["operationId"].toString().toStdString()<<std::endl;
         }
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");

@@ -29,7 +29,8 @@ foreach(spec IN ITEMS "CROP;OrthogonalCrop;Crop" "GAP;GapAnalysis;Gap" "PART;Par
             target_sources(qt_feature_test_support PRIVATE Modules/PartInput.cpp Modules/PartEditTest.cpp)
         elseif(key STREQUAL "ALIGNMENT")
             target_sources(qt_feature_test_support PRIVATE Modules/AlignmentInput.cpp Modules/AlignmentInspection.cpp
-                Support/InspectionReport.cpp Support/InspectionReport.h)
+                Support/InspectionReport.cpp Support/InspectionReport.h
+                Support/AlignmentReportParameters.cpp Support/AlignmentReportParameters.h)
         elseif(key STREQUAL "WALL")
             target_sources(qt_feature_test_support PRIVATE Support/WallParameters.cpp Support/WallParameters.h)
         elseif(key STREQUAL "SURFACE")
