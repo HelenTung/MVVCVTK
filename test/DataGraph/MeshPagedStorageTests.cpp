@@ -31,6 +31,10 @@ bool GetMeshPagedStorageTests()
             const auto large=values.Finish();const auto chunk=large.GetChunk(0,SIZE_MAX);
             require(chunk.error==MeshReadError::None && chunk.values.size()*sizeof(double)<=imageChunkLimit
                 && !chunk.isComplete && chunk.nextOffset==chunk.values.size(),"large read exceeded the SPI block bound");
+            const auto crossing=large.GetChunk(8191,3);
+            require(crossing.error==MeshReadError::None && crossing.values.size()==3 && crossing.nextOffset==8194
+                && crossing.values[0]==8191*.25 && crossing.values[1]==8192*.25 && crossing.values[2]==8193*.25,
+                "short frozen read crossing a mapped page changed values or continuation");
             for(std::size_t i=0;i<large.size();i+=8191)require(large[i]==double(i)*.25,"page eviction changed stored geometry");
             const auto sparse=[&] {
                 for(std::size_t i=0;i<12000;++i)for(const auto base:{std::size_t(0),std::size_t(900000),std::size_t(1900000)}) {
@@ -44,7 +48,7 @@ bool GetMeshPagedStorageTests()
             };
             auto first=std::async(std::launch::async,sparse),second=std::async(std::launch::async,sparse);
             require(first.get()&&second.get(),"distant concurrent point reads changed cached values or block boundaries");
-            // 超过短缓存窗口并轮换整个映射页集合，验证冻结后的淘汰和共享字段仍保持原值。
+            // 轮换整个映射页集合，验证冻结后的淘汰和共享字段仍保持原值。
             const auto converted=ConvertMeshArray<double>(large,3,[](double value,std::size_t component){return value+double(component);});
             const auto windows=[&](bool reverse) {
                 const auto pages=large.size()/8192;
@@ -63,7 +67,7 @@ bool GetMeshPagedStorageTests()
             auto forward=std::async(std::launch::async,[&]{return windows(false);});
             auto backward=std::async(std::launch::async,[&]{return windows(true);});
             require(forward.get()&&backward.get(),"frozen mapped-page eviction changed shared converted field values");
-            const auto bound=8*1024*1024+8*65536;
+            const auto bound=8*1024*1024;
             require(large.GetResidentBytes()>0 && large.GetResidentBytes()<=bound
                 && converted.GetResidentBytes()==large.GetResidentBytes(),"frozen snapshot did not report its bounded shared storage residency");}
         {PagedMap<std::array<std::uint64_t,2>,std::uint64_t,PagedArrayHash<std::uint64_t,2>> lookup;
