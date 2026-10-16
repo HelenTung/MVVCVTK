@@ -1,4 +1,6 @@
 #include "SurfaceHistogramEstimator.h"
+#include "SurfaceHistogramWindow.h"
+#include "SurfaceCpuSampling.h"
 #include "Host/SurfaceDeterminationHostTypes.h"
 
 #include <algorithm>
@@ -38,8 +40,15 @@ std::size_t GetIndex(const SurfaceHistogramInput& input, const std::int64_t x,
 
 SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHistogramInput& input,
     const std::function<bool()>& cancelled,
-    std::optional<SurfaceIsoEstimate>& estimate, std::string& message)
+    std::optional<SurfaceIsoEstimate>& estimate, std::string& message, SurfaceHistogramStats* statistics)
 {
+    const auto started=std::chrono::steady_clock::now();
+    SurfaceHistogramStats stats;
+    stats.workingBytes=GetWorkingBytes();
+    struct StatsGuard final {
+        SurfaceHistogramStats& value; SurfaceHistogramStats* output;
+        ~StatsGuard() { if (output) *output=value; }
+    } statsGuard{stats,statistics};
     estimate.reset();
     message.clear();
     if (!input.values || !input.readScalar) return SurfaceFailureReason::InvalidSource;
@@ -110,25 +119,68 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
     const double scale = static_cast<double>(histogramBinCount-1)/(maximum-minimum);
     const auto fineWidth = (maximum-minimum)/static_cast<double>(fineBinCount-1);
     const auto fineScale = static_cast<double>(fineBinCount-1)/(maximum-minimum);
-    for (std::size_t index=0; index<count; ++index) {
-        if ((index & 65535U)==0 && cancelled && cancelled()) {
-            message = "Surface histogram estimation was cancelled.";
-            return SurfaceFailureReason::Cancelled;
+    const auto rangeFinished=std::chrono::steady_clock::now();
+    stats.rangeMs=std::chrono::duration<double,std::milli>(rangeFinished-started).count();
+    const auto limit=input.allowParallel ? static_cast<unsigned>(std::min<std::size_t>(
+        SurfaceCpu::GetCpuSamplingPlan().threadLimit,std::max<std::size_t>(1,count/8192))) : 1U;
+    std::atomic<bool> wasCancelled{false};
+    std::mutex mergeMutex;
+    const auto scan=[&](std::size_t begin, std::size_t end, auto& coarseCounts, auto& fineCounts,
+                        std::uint64_t& localValid, std::uint64_t& localExcluded) {
+        for (std::size_t index=begin; index<end; ++index) {
+            if ((index & 65535U)==0 && (wasCancelled.load(std::memory_order_relaxed) || (cancelled && cancelled()))) {
+                wasCancelled.store(true,std::memory_order_relaxed);
+                return;
+            }
+            if (input.validity && input.validity[index]==0) continue;
+            const auto value = input.readScalar(input.values,index);
+            if (!std::isfinite(value) || value<minimum || value>maximum) {
+                ++localExcluded;
+                continue;
+            }
+            ++localValid;
+            const auto coarse = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*scale),
+                0LL,static_cast<long long>(histogramBinCount-1)));
+            const auto fine = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*fineScale),
+                0LL,static_cast<long long>(fineBinCount-1)));
+            ++coarseCounts[coarse];
+            ++fineCounts[fine];
         }
-        if (input.validity && input.validity[index]==0) continue;
-        const auto value = input.readScalar(input.values,index);
-        if (!std::isfinite(value) || value<minimum || value>maximum) {
-            ++excludedCount;
-            continue;
+    };
+    const auto serial=[&] {
+        histogram.fill(0); std::fill(fineHistogram.begin(),fineHistogram.end(),0);
+        validCount=excludedCount=0;
+        scan(0,count,histogram,fineHistogram,validCount,excludedCount);
+        stats.workers=1;
+    };
+    if (limit==1) serial();
+    else {
+        // 预先记录私有桶的规划峰值；失败/取消仍交回工作区估算，不将其当硬上限。
+        stats.workingBytes=GetWorkingBytes(1+limit);
+        try {
+            stats.workers=SurfaceCpu::RunPointSampling(count,limit,cancelled,[&](std::size_t begin,std::size_t end) {
+                std::array<std::uint64_t,histogramBinCount> localCoarse{};
+                std::vector<std::uint64_t> localFine(fineBinCount);
+                std::uint64_t localValid=0,localExcluded=0;
+                scan(begin,end,localCoarse,localFine,localValid,localExcluded);
+                std::lock_guard<std::mutex> lock(mergeMutex);
+                validCount+=localValid; excludedCount+=localExcluded;
+                for (std::size_t i=0;i<histogramBinCount;++i) histogram[i]+=localCoarse[i];
+                for (std::size_t i=0;i<fineBinCount;++i) fineHistogram[i]+=localFine[i];
+            });
+        } catch (const std::bad_alloc&) {
+            // 只回退加速工作区，所有已启动 worker 已由共享调度器 join；完整重算，不降采样。
+            serial();
+        } catch (const SurfaceCpu::SurfaceCancelled&) {
+            wasCancelled.store(true,std::memory_order_relaxed);
         }
-        ++validCount;
-        const auto coarse = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*scale),
-            0LL,static_cast<long long>(histogramBinCount-1)));
-        const auto fine = static_cast<std::size_t>(std::clamp(std::llround((value-minimum)*fineScale),
-            0LL,static_cast<long long>(fineBinCount-1)));
-        ++histogram[coarse];
-        ++fineHistogram[fine];
     }
+    if (wasCancelled.load(std::memory_order_relaxed)) {
+        message="Surface histogram estimation was cancelled.";
+        return SurfaceFailureReason::Cancelled;
+    }
+    const auto countFinished=std::chrono::steady_clock::now();
+    stats.countMs=std::chrono::duration<double,std::milli>(countFinished-rangeFinished).count();
 
     std::array<double, histogramBinCount> smooth{};
     for (std::size_t index = 0; index < histogramBinCount; ++index)
@@ -229,10 +281,13 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
             0.0,static_cast<double>(fineBinCount-1)));
         double height = 0;
         auto selectedIndex = first;
+        std::optional<SurfaceHistogramWindow> window;
+        if (SurfaceHistogramWindow::IsExact(validCount,fineRadius)) window.emplace(fineHistogram,fineRadius,first);
         for (auto i=first; i<=last; ++i) {
             if ((i&63U)==0 && cancelled && cancelled()) {refinementCancelled=true;return std::nullopt;}
-            const auto value = GetSmoothCount(fineHistogram,i,fineRadius,false);
+            const auto value = window ? window->GetValue() : GetSmoothCount(fineHistogram,i,fineRadius,false);
             if (value>height) { height=value; selectedIndex=i; }
+            if (window && i<last) window->Advance();
         }
         return height>0 ? std::optional<double>{minimum+static_cast<double>(selectedIndex)*fineWidth} : std::nullopt;
     };
@@ -260,5 +315,6 @@ SurfaceFailureReason SurfaceHistogramEstimator::BuildEstimate(const SurfaceHisto
     estimate->histogramEdges.back()=maximum;
     for(std::size_t i=1;i<histogramBinCount;++i) estimate->histogramEdges[i]=minimum+(static_cast<double>(i)-0.5)*binWidth;
     estimate->histogramSampleSteps = {1,1,1};
+    stats.peakMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-countFinished).count();
     return SurfaceFailureReason::None;
 }

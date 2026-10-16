@@ -45,10 +45,12 @@ int GetSurfaceHistogramAuditResult(const int argc, char* argv[])
     MemMappedFile mapping;
     if (!mapping.Load(argv[2]) || mapping.GetSize() != count * scalarBytes) return 2;
     input.values = mapping.GetData();
+    input.allowParallel = true;
+    SurfaceHistogramStats stats;
     std::optional<SurfaceIsoEstimate> estimate;
     std::string message;
     const auto started = std::chrono::steady_clock::now();
-    const auto failure = SurfaceHistogramEstimator::BuildEstimate(input, [] { return false; }, estimate, message);
+    const auto failure = SurfaceHistogramEstimator::BuildEstimate(input, [] { return false; }, estimate, message, &stats);
     const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-started).count();
     if (failure != SurfaceFailureReason::None || !estimate) {
         std::cerr << "threshold-rejected reason=" << static_cast<unsigned>(failure) << " " << message << '\n';
@@ -64,6 +66,8 @@ int GetSurfaceHistogramAuditResult(const int argc, char* argv[])
               << " material=" << estimate->materialValue << " samples=" << estimate->sampleCount
               << " excluded=" << estimate->excludedSampleCount << " stepX=" << estimate->histogramSampleSteps[0]
               << " stepY=" << estimate->histogramSampleSteps[1] << " stepZ=" << estimate->histogramSampleSteps[2]
-              << " workingBytes=" << SurfaceHistogramEstimator::GetWorkingBytes() << " elapsedMs=" << elapsed << '\n';
+              << " workingBytes=" << stats.workingBytes << " elapsedMs=" << elapsed
+              << " rangeMs=" << stats.rangeMs << " countMs=" << stats.countMs << " peakMs=" << stats.peakMs
+              << " workers=" << stats.workers << '\n';
     return 0;
 }
