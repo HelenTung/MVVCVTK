@@ -445,6 +445,7 @@ ModulePanel* CreateSurfaceTest(TestContext context, std::shared_ptr<SurfaceDeter
         }
         return true;
     };
+    panel->onSessionClosing=[listedSurface,measurement] {listedSurface->reset();measurement->selection.reset();};
     return panel;
 }
 }

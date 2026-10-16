@@ -2299,9 +2299,20 @@ void StartSelfTest(TestWindow& window)
         return true;
     }), "optional part display work and its real frames finish before the idle observation window");
     CheckIdle(window);
+    auto* closingReports=dynamic_cast<ResultReport*>(window.findChild<QWidget*>("resultReport"));
+    Check(closingReports!=nullptr,"session report view is available before closing");
+    auto nativeRows=std::make_shared<int>(1);const std::weak_ptr<int> reportOwner=nativeRows;
+    ReportDocument closingReport;closingReport.id="session-closing-native-rows";closingReport.title="关闭生命周期";
+    closingReport.columns={{"value",{},{},false}};
+    closingReport.table=std::make_shared<ReportTable>(1,[nativeRows](ReportRowId){return QStringList{QString::number(*nativeRows)};});
+    nativeRows.reset();closingReports->AddReport(std::move(closingReport));
+    Check(closingReports->SelectReport("session-closing-native-rows"),"native report is selected before session closing");
+    Check(!reportOwner.expired(),"visible native report retains its fixed row owner before closing");
     // 关闭时保留页面和接收对象，Session 完成/取消尚未交付的业务回调。
     const auto pendingLoad = Send(window, "Data", "Load", load);
     Check(Wait([&] { return window.StopSession(); }), "owner Stop completes with operation in flight");
+    Check(reportOwner.expired(),"session closing releases native report rows while the report widget remains alive");
+    Check(!closingReports->GetReportIds().contains("session-closing-native-rows"),"closing removes the native document while late terminal records remain available");
     Check(window.GetRecords().GetRecord(pendingLoad)["completeCount"].toInt() == 1, "Stop delivers late completion once while receiver lives");
 }
 QJsonValue GetResolved(const QJsonValue& value, const QJsonObject& results)
