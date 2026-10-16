@@ -1,4 +1,5 @@
 #include "FeatureSupport/WorkLimit.h"
+#include "../../../common/FeatureResultScopes.h"
 #include "Host/PartSegmentationHostFeature.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -395,7 +396,7 @@ private:
     VtkImageGridSnapshot m_requestSource;
     DataBinding m_requestResultBinding;
     DataBinding m_resultBinding;
-    std::vector<DataLifetimeRetirement> m_resultScopes;
+    FeatureInternal::ResultScopes m_resultScopes;
     VtkLabelMapSnapshot m_activeLabels;
     VtkImageGridSnapshot m_activeSource;
     // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
@@ -1820,21 +1821,8 @@ bool PartSegmentationHostFeature::Impl::SetCatalogCommit(
         collection, provenance });
     transaction.bindings.push_back({ std::string(partResultBinding),
         expected.revision, true, expected.target, resultRef });
-    auto scopes = m_resultScopes;
-    if (GetDataEntityIdValid(source->data->lifetimeScope)) {
-        const auto policy = source->data->lifetimePolicy;
-        if (policy == DataLifetimePolicy::OwnerRetirement && scopes.size() >= 1024) return false;
-        const auto scope = m_data->CreateDataEntityId();
-        DataLifetimeRetirement retirement{scope, DataLifetimeStatus::Published, {}, true};
-        retirement.expectedRevisions.reserve(transaction.outputs.size());
-        for (auto& draft : transaction.outputs) {
-            draft.lifetimeScope = scope;
-            draft.lifetimePolicy = policy;
-            retirement.expectedRevisions.push_back({draft.entityId, draft.expectedGeneration + 1});
-        }
-        if (resource.lease) transaction.outputs.front().preparedResources.push_back(std::move(resource));
-        if (policy == DataLifetimePolicy::OwnerRetirement) scopes.push_back(std::move(retirement));
-    }
+    if (GetDataEntityIdValid(source->data->lifetimeScope) && resource.lease)
+        transaction.outputs.front().preparedResources.push_back(std::move(resource));
     // DataGraph observer 可同步重入；查询保留整组旧投影，修改和 Detach 均拒绝。
     struct PublishingGuard final {
         explicit PublishingGuard(std::atomic<bool>& value) : flag(value), previous(value.exchange(true, std::memory_order_acq_rel)) {}
@@ -1844,9 +1832,8 @@ bool PartSegmentationHostFeature::Impl::SetCatalogCommit(
     } guard(m_isPublishing);
     auto batch = m_data->StartDataChanges();
     if (!batch) return false;
-    const auto committed = m_data->SetDataCommit(std::move(transaction));
+    const auto committed = m_resultScopes.Commit(*m_data, std::move(transaction), source->data);
     if (committed.status != DataCommitStatus::Succeeded) return false;
-    m_resultScopes.swap(scopes);
     m_resultBinding = committed.bindings.back();
     if (publishedLabels) {
         for (const auto& output : committed.published) {
@@ -2296,6 +2283,13 @@ bool PartSegmentationHostFeature::Impl::SetDisplay(const std::uint64_t requestId
 
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
+    // 清理产生的数据图通知也可重入；完整清理结束前拒绝修改和 Detach。
+    struct ClearingGuard final {
+        explicit ClearingGuard(std::atomic<bool>& value) : flag(value), previous(value.exchange(true, std::memory_order_acq_rel)) {}
+        ~ClearingGuard() { flag.store(previous, std::memory_order_release); }
+        std::atomic<bool>& flag;
+        bool previous;
+    } guard(m_isPublishing);
     if (m_service) m_service->StopSurface();
     m_surfaceRequestId = 0; m_pendingSurfacePartIds.clear();
     const auto current = GetState();
@@ -2321,27 +2315,13 @@ bool PartSegmentationHostFeature::Impl::ClearResult()
     PartSegmentationState state;
     state.isOverlayVisible = GetState().isOverlayVisible;
     SetPublishedState(std::move(state), {});
+    if (m_data) m_resultScopes.Collect(*m_data);
     return isDisplayRemoved;
 }
 
 bool PartSegmentationHostFeature::Impl::ClearResultScopes()
 {
-    if (!m_data) return m_resultScopes.empty();
-    DataTransaction transaction;
-    for (const auto& scope : m_resultScopes) {
-        const auto state = m_data->GetDataLifetime(scope.scopeId);
-        if (state.status == DataLifetimeStatus::Published) transaction.retireScopes.push_back(scope);
-        else if (state.status != DataLifetimeStatus::Releasing && state.status != DataLifetimeStatus::Released) return false;
-    }
-    // All owned revisions retire together: undo/catalog edges are internal to this transaction.
-    if (!transaction.retireScopes.empty()
-        && m_data->SetDataCommit(std::move(transaction)).status != DataCommitStatus::Succeeded) return false;
-    for (auto scope = m_resultScopes.begin(); scope != m_resultScopes.end();) {
-        if (m_data->SetDataRelease(scope->scopeId).status == DataLifetimeStatus::Released)
-            scope = m_resultScopes.erase(scope);
-        else ++scope;
-    }
-    return m_resultScopes.empty();
+    return m_data ? m_resultScopes.Clear(*m_data) : m_resultScopes.GetScopeCount() == 0;
 }
 
 void PartSegmentationHostFeature::Impl::SetBindingStale()
