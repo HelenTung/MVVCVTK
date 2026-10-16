@@ -416,6 +416,8 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto provider=window.GetWorkflow().readReports.find(module);
     if(provider==window.GetWorkflow().readReports.end()){Require(!requiresReport||!successful,"successful business module has a registered native report source");return;}
     if(!successful)return; // 导出、候选等终态不等于新增一份已发布业务报告。
+    // 选择与编号分页仅返回局部元数据；正式快照读取才作为表面报告预览入口。
+    if(module=="Surface" && !requiresReport && (!hasPublishedResult("generation") || !summary.contains("canonicalParameters")))return;
     QCoreApplication::processEvents();
     const auto input=window.GetSession()->GetImageDescriptor();const auto graph=window.GetWorkflow().getPublishedGraph();
     auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");

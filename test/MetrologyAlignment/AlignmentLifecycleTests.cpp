@@ -1,5 +1,6 @@
 // 测试用途：验证计量对齐的生命周期、输入当前性、显示、重入、故障恢复与工作通知。
 #include "../TestDataPort.h"
+#include "../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include "Host/MetrologyAlignmentHostFeature.h"
 #include "AlignmentData.h"
 #include "AlignmentInspectionData.h"
@@ -11,13 +12,16 @@
 #include "AlignmentSceneDisplay.h"
 #include "AlignmentPrealignTestSupport.h"
 #include "Render/Contracts/OverlayService.h"
+#include <vtkImageData.h>
 #include <vtkPolyData.h>
+#include <vtkSmartPointer.h>
 #include <vtkPropCollection.h>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <iostream>
 #include <cstdlib>
+#include <new>
 #include <stdexcept>
 #include <sstream>
 #include <cstring>
@@ -34,11 +38,29 @@ void Check(bool value, const char *message) {
 class FaultDataPort final : public TestDataPort {
   public:
     bool rejectsCommit = false, throwsAfterCommit = false;
+    bool rejectsRetirement = false, throwsBeforeCommit = false;
+    enum class ReadFault { None, Throws, Omits };
+    ReadFault readFault = ReadFault::None;
+    std::optional<DataRevisionRef> faultReadRef;
+    mutable std::size_t faultReadCalls = 0;
+    std::size_t commitCalls = 0, retirementInUseCalls = 0;
+    DataSnapshot GetData(const DataGraphSnapshot& graph, const DataRevisionRef& ref) const override {
+        if (faultReadRef && ref == *faultReadRef) {
+            ++faultReadCalls;
+            if (readFault == ReadFault::Throws) throw std::runtime_error("derived read fault");
+            if (readFault == ReadFault::Omits) return {};
+        }
+        return TestDataPort::GetData(graph, ref);
+    }
     std::function<void()> onCommit;
     DataCommitResult SetDataCommit(DataTransaction tx) override {
-        if (rejectsCommit)
+        ++commitCalls;
+        if (rejectsCommit || (rejectsRetirement && !tx.retireScopes.empty()))
             return {};
+        if (throwsBeforeCommit) throw std::bad_alloc();
+        const bool isRetirement = !tx.retireScopes.empty();
         auto r = TestDataPort::SetDataCommit(std::move(tx));
+        if (isRetirement && r.failureReason == DataCommitFailure::ResultInUse) ++retirementInUseCalls;
         if (onCommit)
             onCommit();
         if (throwsAfterCommit)
@@ -127,7 +149,7 @@ struct Fixture final {
     AlignmentRecipe recipe;
     DataRevisionRef recipeRef;
     std::shared_ptr<const SurfaceMeshPayload> mesh;
-    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false,std::size_t sourceDepth=0) {
+    Fixture(std::shared_ptr<Views> views = {}, std::shared_ptr<FeatureHostControl> host = {}, bool hasSectionMesh=false,std::size_t sourceDepth=0, bool isSourceScoped=false) {
         input.source = {data->CreateDataEntityId(), 1};
         input.mesh = {data->CreateDataEntityId(), 1};
         input.scopeData = {data->CreateDataEntityId(), 1};
@@ -157,6 +179,10 @@ struct Fixture final {
         DataTransaction tx;
         for (const auto ref : {input.source, input.scopeData, nominal})
             tx.outputs.push_back({ref.entityId, 0, DataTypes::recordTable, {}, table, {}});
+        if (isSourceScoped) {
+            tx.outputs.front().lifetimeScope = data->CreateDataEntityId();
+            tx.outputs.front().lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
+        }
         auto source=input.source;
         for(std::size_t i=0;i<sourceDepth;++i){const DataRevisionRef next{data->CreateDataEntityId(),1};
             tx.outputs.push_back({next.entityId,0,DataTypes::recordTable,{{"parent",source}},table,{}});source=next;}
@@ -241,6 +267,421 @@ struct Fixture final {
         Check(feature->DetachHost(), "detach idempotent");
     }
 };
+// d0d0660b 引入的旧累计门槛为 1024；首个越界请求和真实存活账本均须覆盖。
+constexpr std::size_t ownerScopeSubmissions = 1024 + 1;
+
+struct ScopePublication final {
+    DataCommitStatus status = DataCommitStatus::Rejected;
+    DataRevisionRef ref;
+    DataEntityId scope;
+};
+struct ScopeFixture final {
+    FaultDataPort data;
+    FeatureInternal::ResultScopes scopes;
+    DataRevisionRef source{data.CreateDataEntityId(), 1};
+    ScopeFixture() {
+        DataTransaction tx;
+        DataRevisionDraft draft{source.entityId, 0, DataTypes::recordTable, {}, Payload(), {}};
+        draft.lifetimeScope = data.CreateDataEntityId();
+        tx.outputs.push_back(std::move(draft));
+        Check(data.SetDataCommit(std::move(tx)).status == DataCommitStatus::Succeeded, "scope fixture source publishes");
+    }
+    static std::shared_ptr<const IDataPayload> Payload() {
+        return std::make_shared<const RecordTablePayload>(DataTypes::recordTable, "scope-test",
+            std::vector<RecordColumn>{{"value", std::vector<double>{1}}});
+    }
+    DataTransaction Binding(const std::string& name, std::optional<DataRevisionRef> target) {
+        const auto old = data.GetDataBinding(data.GetDataGraph(), name);
+        DataTransaction tx;
+        tx.bindings.push_back({name, old ? old->revision : 0, true, old ? old->target : std::nullopt, target});
+        return tx;
+    }
+    ScopePublication Publish(const std::string& binding = "scope.active", const std::string& operation = "calculate",
+                             std::optional<DataRevisionRef> dependency = {}, bool isHistorical = false,
+                             DataPreparedResource resource = {}) {
+        ScopePublication publication;
+        publication.ref = {data.CreateDataEntityId(), 1};
+        auto tx = binding.empty() ? DataTransaction{} : Binding(binding, publication.ref);
+        if (isHistorical) {
+            tx.policy = DataPublishPolicy::AllowHistoricalResult;
+            DataExpectation expected;
+            expected.kind = DataExpectationKind::Binding;
+            expected.use = DataExpectationUse::Activation;
+            expected.binding = "scope.missing-activation";
+            expected.expectedBindingRevision = 1;
+            tx.expectations.push_back(std::move(expected));
+        }
+        std::vector<DataInputRef> inputs{{"source", source}};
+        if (dependency) inputs.push_back({"dependency", *dependency});
+        tx.outputs.push_back({publication.ref.entityId, 0, DataTypes::recordTable, std::move(inputs), Payload(),
+            DataProvenance{"scope-test", operation, "1", "{}"}});
+        if (resource.lease) tx.outputs.back().preparedResources.push_back(std::move(resource));
+        const auto committed = scopes.Commit(data, std::move(tx));
+        publication.status = committed.status;
+        if (const auto node = data.GetData(data.GetDataGraph(), publication.ref)) publication.scope = node->lifetimeScope;
+        return publication;
+    }
+};
+
+void ResultScopeLifecycle() {
+    {
+        ScopeFixture f;
+        const DataRevisionRef primary{f.data.CreateDataEntityId(), 1};
+        DataTransaction input;
+        input.outputs.push_back({primary.entityId, 0, DataTypes::recordTable, {}, ScopeFixture::Payload(), {}});
+        Check(f.data.SetDataCommit(std::move(input)).status == DataCommitStatus::Succeeded, "unscoped primary input publishes");
+        const auto policySource = f.data.GetData(f.data.GetDataGraph(), primary);
+        const DataRevisionRef output{f.data.CreateDataEntityId(), 1};
+        DataTransaction tx;
+        tx.outputs.push_back({output.entityId, 0, DataTypes::recordTable,
+            {{"primary", primary}, {"other-input", f.source}}, ScopeFixture::Payload(), {}});
+        const auto result = f.scopes.Commit(f.data, std::move(tx), policySource);
+        const auto node = f.data.GetData(f.data.GetDataGraph(), output);
+        Check(result.status == DataCommitStatus::Succeeded && node && !GetDataEntityIdValid(node->lifetimeScope)
+              && f.scopes.GetScopeCount() == 0,
+              "explicit policy source preserves Part primary-input inheritance without adopting another input owner");
+    }
+    {
+        ScopeFixture f;
+        DataEntityId previous;
+        for (std::size_t submission = 0; submission < ownerScopeSubmissions; ++submission) {
+            // ArtifactReduction 同样没有输出绑定；同类成功结果本身就是替换信号。
+            const auto result = f.Publish("");
+            Check(result.status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1,
+                  "unbound replacement retains exactly the current owner scope beyond the former limit");
+            if (GetDataEntityIdValid(previous))
+                Check(f.data.GetDataLifetime(previous).status == DataLifetimeStatus::Released,
+                      "superseded unbound output releases its actual lifecycle before its ledger entry disappears");
+            previous = result.scope;
+        }
+        Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0, "unbound scope ledger clears completely");
+    }
+    {
+        ScopeFixture f;
+        for (std::size_t submission = 0; submission < ownerScopeSubmissions; ++submission)
+            Check(f.Publish("scope.live." + std::to_string(submission)).status == DataCommitStatus::Succeeded,
+                  "genuinely live bound results have no fixed scope-count admission limit");
+        Check(f.scopes.GetScopeCount() == ownerScopeSubmissions, "live scope ownership is retained rather than discarded to cap the ledger");
+        Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0, "all live scopes retire together when their producer clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        std::shared_ptr<const DataResourceLease> reader;
+        {
+            const auto node = f.data.GetData(f.data.GetDataGraph(), first.ref);
+            reader = node->lifetime.lock()->StartResourceUse(first.ref, "scope-reader");
+        }
+        const auto second = f.Publish();
+        Check(reader && second.status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "Reader lease blocks retirement without rejecting the replacement publication");
+        reader.reset();
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released,
+              "ended Reader lease permits retirement and ledger collection on the next commit");
+        Check(f.scopes.Clear(f.data), "reader scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        auto held = f.data.GetData(f.data.GetDataGraph(), first.ref);
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Releasing,
+              "retired payload snapshot keeps the producer ledger until actual release");
+        held.reset();
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released,
+              "ended payload owner releases the pending scope and shrinks the ledger");
+        Check(f.scopes.Clear(f.data), "payload owner scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        Check(f.data.SetDataCommit(f.Binding("scope.keep", first.ref)).status == DataCommitStatus::Succeeded,
+              "external keep binding publishes");
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "another consumer binding protects the old result after replacement");
+        Check(f.data.SetDataCommit(f.Binding("scope.keep", {})).status == DataCommitStatus::Succeeded, "external keep binding clears");
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released,
+              "released external keep allows old scope collection");
+        Check(f.scopes.Clear(f.data), "external binding scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const auto dependent = f.Publish("scope.dependent", "dependent", first.ref);
+        const auto other = f.Publish("scope.other", "other-dependent", first.ref);
+        Check(f.Publish().status == DataCommitStatus::Succeeded
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "live downstream results protect the superseded input scope");
+        Check(f.scopes.Commit(f.data, f.Binding("scope.dependent", {})).status == DataCommitStatus::Succeeded
+              && f.scopes.GetScopeCount() == 3
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published
+              && f.data.GetDataLifetime(dependent.scope).status == DataLifetimeStatus::Released,
+              "ending one descendant preserves the other descendant and its ancestor");
+        Check(f.scopes.Commit(f.data, f.Binding("scope.other", {})).status == DataCommitStatus::Succeeded
+              && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released
+              && f.data.GetDataLifetime(other.scope).status == DataLifetimeStatus::Released,
+              "ending the last descendant permits collection on the next commit");
+        Check(f.scopes.Clear(f.data), "dependent scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const DataRevisionRef first{f.data.CreateDataEntityId(), 1}, second{f.data.CreateDataEntityId(), 1};
+        auto tx = f.Binding("scope.active", second);
+        tx.outputs.push_back({first.entityId, 0, DataTypes::recordTable, {{"source", f.source}},
+            ScopeFixture::Payload(), DataProvenance{"scope-test", "calculate", "1", "{}"}});
+        tx.outputs.push_back({second.entityId, 0, DataTypes::recordTable, {{"internal", first}},
+            ScopeFixture::Payload(), DataProvenance{"scope-test", "calculate", "1", "{}"}});
+        Check(f.scopes.Commit(f.data, std::move(tx)).status == DataCommitStatus::Succeeded,
+              "same-scope dependent outputs publish together");
+        const auto scope = f.data.GetData(f.data.GetDataGraph(), first)->lifetimeScope;
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(scope).status == DataLifetimeStatus::Released,
+              "an internal derived edge does not prevent its complete owner scope retiring");
+        Check(f.scopes.Clear(f.data), "internal edge scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const DataRevisionRef external{f.data.CreateDataEntityId(), 1};
+        DataTransaction tx;
+        tx.outputs.push_back({external.entityId, 0, DataTypes::recordTable, {{"source", first.ref}}, ScopeFixture::Payload(), {}});
+        Check(f.data.SetDataCommit(std::move(tx)).status == DataCommitStatus::Succeeded,
+              "unscoped external descendant publishes outside the producer ledger");
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "an unscoped readable descendant also protects the old scope");
+        const auto before = f.data.GetDataGraph().commitId;
+        const auto active = f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active");
+        Check(!f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataGraph().commitId == before
+              && f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active")->target == active->target
+              && f.data.GetData(f.data.GetDataGraph(), external),
+              "grouped Clear preserves bindings and ownership while an external descendant remains live");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const auto child = f.Publish("scope.child", "dependent", first.ref);
+        Check(f.Publish().status == DataCommitStatus::Succeeded, "ancestor replacement publishes before child retirement");
+        auto held = f.data.GetData(f.data.GetDataGraph(), child.ref);
+        auto tx = f.Binding("scope.child", {});
+        tx.retireScopes.push_back({child.scope, DataLifetimeStatus::Published, {child.ref}, true});
+        Check(f.data.SetDataCommit(std::move(tx)).status == DataCommitStatus::Succeeded
+              && f.data.GetDataLifetime(child.scope).status == DataLifetimeStatus::Releasing,
+              "retired descendant awaits its held snapshot");
+        const auto hasHistoricalEdge = [&] {
+            const auto graph = f.data.GetDataGraph();
+            const auto edges = graph.view->GetDerivedData(first.ref);
+            return std::find(edges.begin(), edges.end(), child.ref) != edges.end();
+        };
+        Check(hasHistoricalEdge() && !f.data.GetData(f.data.GetDataGraph(), child.ref),
+              "reverse index retains the edge while the Releasing child is no longer readable");
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released
+              && f.data.GetDataLifetime(child.scope).status == DataLifetimeStatus::Releasing,
+              "a historical edge to a Releasing descendant does not keep its ancestor Published");
+        held.reset();
+        f.scopes.Collect(f.data);
+        Check(hasHistoricalEdge() && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(child.scope).status == DataLifetimeStatus::Released,
+              "the Released descendant is collected despite the historical reverse edge");
+        Check(f.scopes.Clear(f.data), "historical reverse edge scenario clears");
+    }
+    {
+        ScopeFixture f;
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(2, 2, 2);
+        image->AllocateScalars(VTK_FLOAT, 1);
+        auto resource = VtkPreparedDataView::BuildResourceUse(image, nullptr);
+        const auto first = f.Publish("scope.active", "calculate", {}, false, resource);
+        Check(resource.lease && first.status == DataCommitStatus::Succeeded
+              && f.Publish().status == DataCommitStatus::Succeeded
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Releasing,
+              "prepared render resource delays release after successful retirement");
+        resource.lease.reset();
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Releasing,
+              "the actual prepared VTK object retains its resource lease independently");
+        image = nullptr;
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released,
+              "ending the prepared resource permits release and ledger collection");
+        Check(f.scopes.Clear(f.data), "prepared resource scenario clears");
+    }
+    for (const auto fault : {FaultDataPort::ReadFault::Throws, FaultDataPort::ReadFault::Omits}) {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const auto child = f.Publish("scope.child", "dependent", first.ref);
+        f.data.faultReadRef = child.ref;
+        f.data.readFault = fault;
+        const auto rejectedBefore = f.data.retirementInUseCalls;
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.data.faultReadCalls > 0
+              && f.scopes.GetScopeCount() == 3
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "derived query fault preserves the successful publication and protected owner ledger");
+        if (fault == FaultDataPort::ReadFault::Omits)
+            Check(f.data.retirementInUseCalls > rejectedBefore,
+                  "a query false negative still reaches the atomic transaction which rejects unsafe retirement");
+        f.data.readFault = FaultDataPort::ReadFault::None;
+        const auto queriedBefore = f.data.faultReadCalls;
+        f.scopes.Collect(f.data);
+        Check(f.data.faultReadCalls > queriedBefore
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "the next collection re-queries the descendant without a cached exception or blocker");
+        Check(f.scopes.Commit(f.data, f.Binding("scope.child", {})).status == DataCommitStatus::Succeeded
+              && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released
+              && f.data.GetDataLifetime(child.scope).status == DataLifetimeStatus::Released,
+              "ending the real descendant permits collection after the query fault is removed");
+        Check(f.scopes.Clear(f.data), "query fault scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const auto before = f.data.GetDataGraph().commitId;
+        f.data.rejectsCommit = true;
+        Check(f.Publish().status == DataCommitStatus::Rejected && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataGraph().commitId == before
+              && f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active")->target == first.ref
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "rejected publication preserves graph, active binding, and original owner ledger");
+        f.data.rejectsCommit = false;
+        f.data.throwsBeforeCommit = true;
+        bool threw = false;
+        try { (void)f.Publish(); } catch (const std::bad_alloc&) { threw = true; }
+        f.data.throwsBeforeCommit = false;
+        Check(threw && f.scopes.GetScopeCount() == 1 && f.data.GetDataGraph().commitId == before,
+              "prepublication allocation failure leaves the old graph and ledger intact");
+        f.data.rejectsRetirement = true;
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "cleanup transaction rejection retains retry ownership and does not undo successful publication");
+        f.data.rejectsRetirement = false;
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released,
+              "cleanup retry collects previously blocked scopes");
+        Check(f.scopes.Clear(f.data), "failure scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        const auto historical = f.Publish("scope.active", "calculate", {}, true);
+        Check(historical.status == DataCommitStatus::SucceededHistorical && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active")->target == first.ref
+              && f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Published,
+              "historical publication retains ownership without replacing the active scope or adopting an unapplied binding");
+        Check(f.scopes.Commit(f.data, f.Binding("scope.unrelated", {})).status == DataCommitStatus::Succeeded
+              && f.scopes.GetScopeCount() == 2
+              && f.data.GetDataLifetime(historical.scope).status == DataLifetimeStatus::Published,
+              "unrelated binding commit preserves the never-activated historical result");
+        Check(f.Publish().status == DataCommitStatus::Succeeded && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataLifetime(historical.scope).status == DataLifetimeStatus::Released,
+              "the next current result replaces and collects its historical family member");
+        Check(f.scopes.Clear(f.data), "historical scenario clears");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        f.data.throwsAfterCommit = true;
+        bool threw = false;
+        try { (void)f.scopes.Commit(f.data, f.Binding("scope.alias", first.ref)); }
+        catch (const std::runtime_error&) { threw = true; }
+        f.data.throwsAfterCommit = false;
+        Check(threw && f.scopes.GetScopeCount() == 1
+              && f.data.GetDataBinding(f.data.GetDataGraph(), "scope.alias")->target == first.ref,
+              "binding-only transaction remains committed after a port wrapper exception");
+        Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0
+              && !f.data.GetDataBinding(f.data.GetDataGraph(), "scope.alias")->target,
+              "postcommit binding ownership is adopted so producer Clear can remove its alias");
+    }
+    {
+        ScopeFixture f;
+        const auto first = f.Publish();
+        f.data.throwsAfterCommit = true;
+        bool threw = false;
+        try { (void)f.Publish(); } catch (const std::runtime_error&) { threw = true; }
+        f.data.throwsAfterCommit = false;
+        const auto active = f.data.GetDataBinding(f.data.GetDataGraph(), "scope.active");
+        auto node = active && active->target ? f.data.GetData(f.data.GetDataGraph(), *active->target) : DataSnapshot{};
+        const auto publishedScope = node ? node->lifetimeScope : DataEntityId{};
+        Check(threw && node && active->target != first.ref && f.scopes.GetScopeCount() == 2,
+              "postpublication port exception still adopts the committed scope ownership");
+        // 解除本测试持有的 payload 后，生产者必须能完整退役两次发布。
+        Check(f.scopes.Clear(f.data) == false && f.scopes.GetScopeCount() == 1,
+              "postcommit scope remains recorded while its actual payload is held");
+        Check(f.data.GetDataLifetime(first.scope).status == DataLifetimeStatus::Released
+              && f.data.GetDataLifetime(publishedScope).status == DataLifetimeStatus::Releasing,
+              "postcommit exception does not lose retirement ownership");
+        node.reset();
+        Check(f.scopes.Clear(f.data) && f.scopes.GetScopeCount() == 0,
+              "postcommit owner ledger empties after the held payload ends");
+    }
+}
+
+// 相同临时输入的公开 Start 请求没有次数限制；1025 是被审计门槛的首个越界请求。
+void OwnerScopedRepeatedAlignment() {
+    Fixture f({}, {}, false, 0, true);
+    const auto source = f.data->GetData(f.data->GetDataGraph(), f.input.source);
+    const auto recipe = f.data->GetData(f.data->GetDataGraph(), f.recipeRef);
+    Check(source && GetDataEntityIdValid(source->lifetimeScope)
+              && source->lifetimePolicy == DataLifetimePolicy::OwnerRetirement,
+          "repeated alignment uses the same owner-retired source revision");
+    Check(recipe && !GetDataEntityIdValid(recipe->lifetimeScope),
+          "fixture recipe does not consume a scoped result submission");
+    std::size_t succeeded = 0, firstFailure = 0;
+    std::vector<DataEntityId> scopes;
+    for (std::size_t submission = 1; submission <= ownerScopeSubmissions; ++submission) {
+        const auto before = f.feature->GetState().activeResult;
+        const auto commitsBefore = f.data->commitCalls;
+        const auto result = f.Solve();
+        const bool published = result.status == AlignmentStatus::FullyDetermined
+            && GetDataRevisionRefValid(result.result) && result.isActivated;
+        if (published) {
+            ++succeeded;
+            const auto node = f.data->GetData(f.data->GetDataGraph(), result.result);
+            Check(node && node->lifetimePolicy == DataLifetimePolicy::OwnerRetirement
+                      && GetDataEntityIdValid(node->lifetimeScope),
+                  "published alignment result retains its temporary-input lifetime");
+            if (node) scopes.push_back(node->lifetimeScope);
+            if (scopes.size() > 1)
+                Check(f.data->GetDataLifetime(scopes[scopes.size() - 2]).status != DataLifetimeStatus::Published,
+                      "replaced public alignment result begins retirement before another request");
+        } else {
+            if (!firstFailure) firstFailure = submission;
+            std::cout << "OWNER_SCOPE_FAILURE submission=" << submission
+                      << " status=" << static_cast<int>(result.status)
+                      << " data_commit_calls=" << f.data->commitCalls - commitsBefore
+                      << " old_active_preserved=" << (f.feature->GetState().activeResult == before)
+                      << '\n';
+        }
+        Check(published, "each accepted alignment including submission 1025 must publish");
+    }
+    std::cout << "OWNER_SCOPE_SUMMARY attempted=1025 succeeded=" << succeeded
+              << " first_failure=" << firstFailure << '\n';
+    Check(succeeded == 1025 && firstFailure == 0,
+          "temporary source must not impose an undocumented cumulative request limit");
+    Check(f.feature->DetachHost(), "detach clears scoped alignment publications");
+    for (const auto& scope : scopes)
+        Check(f.data->GetDataLifetime(scope).status == DataLifetimeStatus::Released,
+              "every replaced public alignment scope releases after detach");
+    HostFeatureContext context; context.data = f.data;
+    Check(f.feature->AttachHost(context), "same feature can reattach after scope cleanup");
+    const auto recovered = f.Solve();
+    Check(recovered.status == AlignmentStatus::FullyDetermined && GetDataRevisionRefValid(recovered.result),
+          "same input publishes again after explicit detach cleanup");
+    std::cout << "OWNER_SCOPE_RECOVERY after_detach="
+              << (recovered.status == AlignmentStatus::FullyDetermined) << '\n';
+}
+
 void DeepSourceGraph() {
     Fixture f({}, {},false,1100);
     const auto result=f.Solve();
@@ -1140,7 +1581,15 @@ void AutomaticReferenceLifecycle() {
 
 }
 } // namespace
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--result-scope-lifecycle") == 0) {
+        ResultScopeLifecycle();
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--owner-scope-limit") == 0) {
+        OwnerScopedRepeatedAlignment();
+        return failures ? 1 : 0;
+    }
     const auto run = [](const char *name, auto test) { std::cerr << "CASE " << name << '\n'; test(); };
     run("InspectionLifecycle", [] { InspectionLifecycle(); });
     run("ReportLifecycle", ReportLifecycle);

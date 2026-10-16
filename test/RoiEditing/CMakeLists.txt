@@ -23,3 +23,22 @@ target_link_libraries(mvvcvtk_roi_header_probe PRIVATE MVVCVTK::RoiEditing)
 SetTargetDefaults(mvvcvtk_roi_header_probe)
 set_target_properties(mvvcvtk_roi_header_probe PROPERTIES
     PROJECT_LABEL RoiEditingHeaderProbe FOLDER "MVVCVTK/test/Automation/HeaderProbes")
+
+foreach(_roi_wait_case IN ITEMS cancel-operation-wait detach-operation-wait cancel-display-wait detach-display-wait)
+    add_test(NAME "RoiEditing.${_roi_wait_case}" COMMAND mvvcvtk_roi_editing_tests "${_roi_wait_case}")
+    SetTestRuntime("RoiEditing.${_roi_wait_case}" mvvcvtk_roi_editing_tests)
+    # 与现有 WorkerCancellation/Display 使用相同的进程保护期限。
+    set_tests_properties("RoiEditing.${_roi_wait_case}" PROPERTIES TIMEOUT 120)
+endforeach()
+unset(_roi_wait_case)
+
+add_test(NAME RoiEditing.HostDetachRetry COMMAND mvvcvtk_roi_editing_tests host-detach-retry)
+SetTestRuntime(RoiEditing.HostDetachRetry mvvcvtk_roi_editing_tests)
+add_test(NAME RoiEditing.NotificationWait COMMAND mvvcvtk_roi_editing_tests detach-notification-wait)
+SetTestRuntime(RoiEditing.NotificationWait mvvcvtk_roi_editing_tests)
+set_tests_properties(RoiEditing.HostDetachRetry RoiEditing.NotificationWait PROPERTIES TIMEOUT 120)
+if(MVVCVTK_ROI_REAL_SAMPLE)
+    add_test(NAME RoiEditing.RealCt COMMAND mvvcvtk_roi_editing_tests real-ct "${MVVCVTK_ROI_REAL_SAMPLE}")
+    SetTestRuntime(RoiEditing.RealCt mvvcvtk_roi_editing_tests)
+    set_tests_properties(RoiEditing.RealCt PROPERTIES TIMEOUT 120 LABELS "RealData")
+endif()

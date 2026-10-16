@@ -50,6 +50,7 @@ public:
     static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
     static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
     static void Generate(ResultReport& view){view.ContinueGeneration();}
+    static void Compare(ResultReport& view){view.CompareSelected();}
     static ReportRows Rows(const ResultReport& view){return view.m_rows;}
     static void SetRows(ResultReport& view,ReportRows rows){view.m_rows=std::move(rows);}
 };
@@ -211,6 +212,45 @@ void CheckReopenedGeneration() {
     Require(ReportTaskTestAccess::HasTask(view)&&attempts==1,"reopening launched another native worker before cancellation completed");
     release->set_value();Wait([&]{return !view.GetReportIds().contains(document.id);});
     Require(attempts==2&&!view.property("reportTaskError").toString().size(),"reopening lost the pending native report queue");
+}
+void CheckComparisonGenerationAdmission() {
+    for(int outcome=0;outcome<3;++outcome) {
+        ResultReport view;auto baseline=Document("mapping-baseline"),current=Document("mapping-current");
+        const auto native=Document("mapping-pending-native");int preparations=0,launches=0;
+        view.AddReport(baseline);Require(view.SelectReport(baseline.id),"comparison baseline fixture selection failed");
+        view.findChild<QPushButton*>("setReportBaseline")->click();view.AddReport(current);
+        Require(view.SelectReport(current.id)&&view.GetSelectedReport().id!=baseline.id,"comparison current fixture selection failed");view.show();
+        view.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
+            ++preparations;return [native](const ReportCheckpoint& check){check();return QVector<ReportDocument>{native};};
+        };
+        if(outcome==2)ReportTaskTestAccess::BeforeStart(view,[&]{if(++launches==1)throw std::runtime_error("injected comparison startup failure");});
+        const auto before=view.GetReportIds();bool mappingShown=false,generatedDuringMapping=false;
+        QTimer::singleShot(0,&view,[&]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            mappingShown=dialog&&dialog->windowTitle()=="核对比较指标、单位与匹配依据";
+            if(!mappingShown){if(dialog)dialog->reject();return;}
+            view.QueueReport({{"operationId","mapping-native"},{"module","Surface"},{"result",QJsonObject{{"generation",native.result}}}});
+            // 在映射窗口的嵌套事件循环内主动触发生成，避免依赖计时器和线程调度顺序。
+            ReportTaskTestAccess::Generate(view);generatedDuringMapping=preparations!=0;
+            if(outcome==1)dialog->reject();else dialog->accept();
+        });
+        QString failure;try{ReportTaskTestAccess::Compare(view);}catch(const std::exception& error){failure=QString::fromUtf8(error.what());}
+        Require(mappingShown,"comparison mapping dialog was not opened");
+        Require(!generatedDuringMapping,"native report generation stole comparison admission during mapping dialog");
+        if(outcome==0) {
+            Require(failure.isEmpty()&&ReportTaskTestAccess::HasTask(view)&&preparations==0,"accepted comparison lost its reserved task admission");
+            Wait([&]{return !view.GetReportIds().contains(native.id)||view.property("reportTaskBusy").toBool();});
+            Require(view.GetReportIds().size()==before.size()+2,"comparison or deferred native report was lost after mapping acceptance");
+        } else {
+            Require((outcome==1?failure.isEmpty():failure=="injected comparison startup failure")&&!ReportTaskTestAccess::HasTask(view)
+                &&view.GetReportIds()==before,"rejected or failed comparison published a task or partial report");
+            Wait([&]{return !view.GetReportIds().contains(native.id)||view.property("reportTaskBusy").toBool();});
+            Require(view.GetReportIds().size()==before.size()+1,"rejected or failed comparison lost its deferred native report");
+        }
+        Require(preparations==1&&view.property("reportTaskError").toString().isEmpty(),"deferred native generation did not recover exactly once");
+        view.hide();
+    }
+    std::cout<<"PASS: comparison mapping reserves admission and restores native generation after acceptance, rejection and startup failure"<<std::endl;
 }
 void CheckNonblockingRowLifecycle() {
     struct Gate final {
@@ -570,7 +610,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif

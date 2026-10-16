@@ -48,6 +48,14 @@
 #include <mutex>
 #include <limits>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace {
 struct RegionProduct final {
     std::shared_ptr<std::vector<vtkSmartPointer<vtkPolyData>>> blocks=std::make_shared<std::vector<vtkSmartPointer<vtkPolyData>>>();
@@ -243,7 +251,7 @@ public:
         if (m_displayFuture.valid()) m_displayFuture.wait();
         if (m_worker.joinable()) m_worker.join();
         if (ClearDraft()) {
-            StopDisplay();
+            (void)StopWork();
             ClearCommitted();
         }
     }
@@ -448,7 +456,7 @@ public:
     }
     void StartPendingOperation()
     {
-        if (m_future.valid() || m_displayFuture.valid() || !m_pending) return;
+        if (m_isDetaching || m_future.valid() || m_displayFuture.valid() || !m_pending) return;
         const auto graph=m_data->GetDataGraph();const auto data=m_data;auto request=std::move(*m_pending);m_pending.reset();
         std::vector<DataRevisionRef> refs{request.source};const auto addRead=[&](const RoiReadSnapshot& read){if(read){const auto deps=read->GetDependencies();refs.insert(refs.end(),deps.begin(),deps.end());}};
         if(request.input)addRead(m_data->GetRoiPreview(graph,*request.input).roi);
@@ -463,9 +471,11 @@ public:
         request.getCancelled=[cancel,original]{return cancel->load() || (original && original());};m_runningSerial=m_serial;
         std::packaged_task<RoiOperationResult()> task([data,graph,readers,request=std::move(request)]{return data->GetRoiOperation(graph,request);});
         m_future=task.get_future();const std::weak_ptr<FeatureHostControl> host=m_host;
+        m_workerFinishing=std::make_shared<std::atomic<bool>>(false);const auto finishing=m_workerFinishing;
         try {
-            m_worker=std::thread([task=std::move(task),host]() mutable {
+            m_worker=std::thread([task=std::move(task),host,finishing]() mutable {
                 task();
+                finishing->store(true);
                 NotifyOwner(host);
             });
         }
@@ -473,9 +483,9 @@ public:
     }
     void PollOperation()
     {
-        if (m_future.valid() && m_future.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        if (m_future.valid() && PollWorker()) {
             RoiOperationResult candidate;try {candidate=m_future.get();} catch (...) {candidate.error=RoiError::CommitFailed;}
-            if(m_worker.joinable())m_worker.join();
+            if(m_worker.joinable())m_worker.join();m_workerFinishing.reset();
             if (m_runningSerial==m_serial) {
                 m_state.isComputing=false;m_state.operation=std::move(candidate);SetMetadata(m_request.metadata);m_state.error=m_state.operation.error;
                 if (m_state.operation.error==RoiError::None) {
@@ -538,7 +548,7 @@ public:
     }
     void StartDisplay()
     {
-        if(m_future.valid() || m_pending || m_displayFuture.valid() || m_displayQueue.empty())return;
+        if(m_isDetaching || m_future.valid() || m_pending || m_displayFuture.valid() || m_displayQueue.empty())return;
         m_displayRunning=std::move(m_displayQueue.front());m_displayQueue.erase(m_displayQueue.begin());
         m_displayCancel=std::make_shared<std::atomic<bool>>(false);const auto cancel=m_displayCancel;const std::weak_ptr<FeatureHostControl> host=m_host;
         const auto work=*m_displayRunning;
@@ -571,9 +581,11 @@ public:
             }catch(RoiError error){return DisplayResult{error,{}};}catch(const std::bad_alloc&){return DisplayResult{RoiError::TooLarge,{}};}catch(...){return DisplayResult{RoiError::Unavailable,{}};}
         });
         m_displayFuture=task.get_future();
+        m_workerFinishing=std::make_shared<std::atomic<bool>>(false);const auto finishing=m_workerFinishing;
         try {
-            m_worker=std::thread([task=std::move(task),host]() mutable {
+            m_worker=std::thread([task=std::move(task),host,finishing]() mutable {
                 task();
+                finishing->store(true);
                 NotifyOwner(host);
             });
         }
@@ -604,13 +616,13 @@ public:
             else m_displayProduct->slices[batch.viewId]={batch.plane,std::move(batch.mesh)};
             changed=true;
         }
-        bool finished=false;
+        const bool workerReady=PollWorker();bool finished=false;
         {std::lock_guard<std::mutex> lock(m_displayChannel->mutex);more=!m_displayChannel->batches.empty();
             // 与生产者入队互斥地检查 EOF，避免检查空队列后又入队最后一批。
-            finished=!more && m_displayFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready;}
+            finished=!more && workerReady;}
         DisplayResult result;
         if(finished){try{result=m_displayFuture.get();}catch(...){result.error=RoiError::Unavailable;}
-            if(m_worker.joinable())m_worker.join();
+            if(m_worker.joinable())m_worker.join();m_workerFinishing.reset();
             if(current()){
                 m_displayProduct->isComplete=result.error==RoiError::None;m_displayProduct->has3D=result.has3D;m_displayProduct->isEmpty=result.isEmpty;
                 if(result.error!=RoiError::None && !m_displayProduct->has3D)m_displayProduct->blocks->clear();
@@ -682,20 +694,33 @@ public:
         if(m_state.hasDraft && m_draftMesh && std::any_of(m_bindings.begin(),m_bindings.end(),[](const auto& binding){return binding.overlay->GetSliceDirty();}))QueueDisplay(m_state.preview,{},m_draftMesh);
         for(const auto& item:m_shown)if(item.second.read && item.second.mesh && item.second.displayError==RoiError::None && std::any_of(item.second.bindings.begin(),item.second.bindings.end(),[](const auto& binding){return binding.overlay->GetSliceDirty();}))QueueDisplay(item.second.read,item.first,item.second.mesh);
     }
-    void StopDisplay()
+    bool PollWorker()
     {
+        // future 就绪不包含完成通知/捕获资源的收尾；其零时等待本身也可能等待内部锁。
+        // Windows 线程句柄的零等待只观察实际退出，确认后 get/join 不再等待任何业务工作。
+        const bool ready=!m_worker.joinable() || WaitForSingleObject(m_worker.native_handle(),0)==WAIT_OBJECT_0;
+        // 最后一次通知可能先于线程退出被消费；只在退出收尾阶段补排 tick，计算期间不轮询。
+        if(!ready && m_workerFinishing && m_workerFinishing->load())NotifyOwner(m_host);
+        return ready;
+    }
+    bool StopWork()
+    {
+        if(m_cancel)m_cancel->store(true);
         CancelDisplay();
-        if(m_displayFuture.valid()){m_displayFuture.wait();try{(void)m_displayFuture.get();}catch(...){}}
-        if(m_worker.joinable())m_worker.join();m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();
+        if(!PollWorker())return false;
+        if(m_future.valid())try{(void)m_future.get();}catch(...){}
+        if(m_displayFuture.valid())try{(void)m_displayFuture.get();}catch(...){}
+        if(m_worker.joinable())m_worker.join();m_workerFinishing.reset();
+        m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();
+        return true;
     }
     bool ClearDraft()
     {
         if (m_owner!=std::thread::id{} && m_owner!=std::this_thread::get_id()) return false;
         CancelDrawing(false);m_drawing.reset();
         ++m_serial;if (m_cancel) m_cancel->store(true);
-        if (m_future.valid()) {m_future.wait();try {(void)m_future.get();} catch (...) {}}
         CancelDisplay();
-        if(!m_displayFuture.valid()){if(m_worker.joinable())m_worker.join();m_displayRunning.reset();m_displayChannel.reset();m_displayProduct.reset();}
+        // 先失效逻辑草稿；在途结果及读取租约留到 tick 或 Detach 重试确认线程退出后回收。
         m_displayQueue.erase(std::remove_if(m_displayQueue.begin(),m_displayQueue.end(),[](const auto& w){return !w.ref;}),m_displayQueue.end());
         m_pending.reset();m_operation.reset();m_operationApplied=false;m_saveSerial.reset();m_state.operation={};m_state.isComputing=false;m_state.isSaving=false;
         if (m_widget) {
@@ -1056,6 +1081,7 @@ public:
     std::shared_ptr<RegionProduct> m_displayProduct;
     std::future<RoiOperationResult> m_future;
     std::thread m_worker;
+    std::shared_ptr<std::atomic<bool>> m_workerFinishing;
     // 挂载上下文是临时参数；端口必须保留到异步任务停止，保证完成通知可达。
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<std::atomic<bool>> m_cancel;
@@ -1069,6 +1095,7 @@ public:
     bool m_isDragCancelled=false;
     bool m_nativeInputActive=false;
     bool m_isPublishing=false;
+    bool m_isDetaching=false;
 };
 RoiEditingHostFeature::RoiEditingHostFeature(RoiEditingConfig config):m_impl(std::make_unique<Impl>(std::move(config))) {}
 RoiEditingHostFeature::~RoiEditingHostFeature() noexcept = default;
@@ -1157,18 +1184,24 @@ bool RoiEditingHostFeature::DetachHost()
 {
     auto& state=*m_impl;
     if (!state.m_state.isAttached) return true;
-    if (state.GetAccessError()!=RoiError::None || !state.ClearDraft()) return false;
-    state.StopDisplay();
+    if (state.GetAccessError()!=RoiError::None) return false;
+    state.m_isDetaching=true;
+    if(!state.ClearDraft())return false;
+    state.m_displayQueue.clear();
+    // false 表示仍挂载且停止接纳请求；保留端口供后续 tick/Detach/Stop 重试。
+    if(!state.StopWork())return false;
     if(state.m_host && !state.m_host->DetachInput(GetFeatureId()))return false;
     state.m_host.reset();
     state.ClearCommitted();
-    state.m_data.reset(); state.m_views.reset(); state.m_state.isAttached=false; return true;
+    state.m_data.reset(); state.m_views.reset(); state.m_state.isAttached=false;state.m_isDetaching=false; return true;
 }
 bool RoiEditingHostFeature::OnHostTick()
 {
     auto& state=*m_impl;
     if (state.GetAccessError()!=RoiError::None) return false;
+    if(state.m_isDetaching)return state.StopWork();
     if(!state.GetDraftCurrent()){state.m_state.error=RoiError::SourceMismatch;if(!state.ClearDraft())return false;}
+    state.PollOperation();
     state.SetCommittedCurrent();state.PollDisplay();state.QueueSliceUpdates();state.StartDisplay();
     if (!state.m_state.hasDraft) return true;
     const auto stamp=state.m_reference->GetRenderInputStamp();
@@ -1183,7 +1216,6 @@ bool RoiEditingHostFeature::OnHostTick()
         state.m_state.error=RoiError::SourceMismatch; return state.ClearDraft();
     }
     const auto matrix=state.m_reference->GetModelToWorld();
-    state.PollOperation();if (!state.m_state.hasDraft) return true;
     // 固定形状不每帧置脏；展示矩阵变化才重新投影。
     if (!matrix || *matrix!=state.m_displayMatrix || state.m_state.displayError==RoiError::Unavailable) {
         try{(void)state.SetProjection();}catch(...){state.m_state.displayError=RoiError::Unavailable;state.m_state.displayStatus=RoiDisplayStatus::Failed;}
@@ -1194,6 +1226,7 @@ RoiResult RoiEditingHostFeature::SendRequest(const RoiEditingRequest& request)
 {
     auto& state=*m_impl; RoiResult result; result.error=state.GetAccessError();
     if (result.error!=RoiError::None) return result;
+    if(state.m_isDetaching){result.error=RoiError::Unavailable;return result;}
     if ((request.action==RoiEditingAction::Begin && !request.draft)
         || (request.draft && request.action!=RoiEditingAction::Begin && request.action!=RoiEditingAction::SetDraft && request.action!=RoiEditingAction::Commit && request.action!=RoiEditingAction::SetMetadata)
         || (request.action==RoiEditingAction::SetDraft && !request.primitive)
