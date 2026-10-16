@@ -4,6 +4,7 @@
 #include "ThicknessGrayField.h"
 #include "ThicknessProfile.h"
 #include "ThicknessDisplaySampling.h"
+#include "MeshPayloadBuilder.h"
 #ifdef MVVCVTK_HAS_WALL_CUDA
 #include "ThicknessCudaPath.h"
 #endif
@@ -332,15 +333,17 @@ class Kernel final
 
     ThicknessPoint Vertex(std::uint64_t id) const
     {
-        const auto& values=m_mesh.GetPointValues();
-        const ThicknessPoint v{values[id*3],values[id*3+1],values[id*3+2]};
+        ThicknessPoint v{};
+        MeshPayloadBuilder::CopyValues(m_mesh.GetPointValues(),static_cast<std::size_t>(id)*3,3,v.data());
         return Sub({v[0], v[1], v[2]}, m_geometry.origin);
     }
     ThicknessPoint Interpolate(std::uint64_t triangle, const ThicknessPoint &bary) const
     {
         ThicknessPoint p{};
+        std::array<std::uint64_t,3> vertices{};
+        MeshPayloadBuilder::CopyValues(m_mesh.GetTriangleIndices(),static_cast<std::size_t>(triangle)*3,3,vertices.data());
         for (std::size_t k = 0; k < 3; ++k)
-            p = Add(p, Scale(Vertex(m_mesh.GetTriangleIndices()[triangle * 3 + k]), bary[k]));
+            p = Add(p, Scale(Vertex(vertices[k]), bary[k]));
         return p;
     }
     ThicknessPoint Index(const ThicknessPoint &p) const
@@ -435,10 +438,16 @@ class Kernel final
             [](const auto& values) { using Value=typename std::decay_t<decltype(*values)>::value_type;
                 return std::is_signed_v<Value>; }, m_work.labels->GetValues());
     }
-    template<class Emit> void VisitEvaluation(std::size_t triangle,const Emit& emit)
+    template<class Emit> void VisitEvaluation(std::size_t triangle,const Emit& emit,
+        const ThicknessDisplaySampling::Corners* corners=nullptr)
     {
         ThicknessDisplaySampling::Corners original{};
-        for (unsigned k=0;k<3;++k) original[k]=Vertex(m_mesh.GetTriangleIndices()[triangle*3+k]);
+        if(corners)original=*corners;
+        else {
+            std::array<std::uint64_t,3> vertices{};
+            MeshPayloadBuilder::CopyValues(m_mesh.GetTriangleIndices(),triangle*3,3,vertices.data());
+            for(unsigned k=0;k<3;++k)original[k]=Vertex(vertices[k]);
+        }
         if (!m_work.evaluationRoi) {
             ThicknessDisplaySampling::Visit(original,m_params.sampleSpacing,[&]{CheckWork(m_work);},emit);
             return;
@@ -480,29 +489,41 @@ class Kernel final
     {
         const auto pc=m_mesh.GetPointValues().size()/3, tc=m_mesh.GetTriangleIndices().size()/3;
         const auto& limits=m_work.archive.limits;
+        if(tc>SIZE_MAX/sizeof(double) || tc>WorkLimit(limits.maxWorkingBytes)/sizeof(double))
+            throw Failure{ThicknessStatus::BudgetExceeded,"Sampling geometry exceeds working budget."};
+        const auto areaBytes=tc*sizeof(double);
+        // 块工作区只在采样预处理时存活；显式预算下使用面积数组以外的剩余空间。
+        const auto batchRecords=((WorkLimit(limits.maxWorkingBytes)-areaBytes)/sizeof(ThicknessPoint)).GetBound(4096);
+        if(!batchRecords)throw Failure{ThicknessStatus::BudgetExceeded,"Sampling block exceeds working budget."};
         auto minimum=Vertex(0), maximum=minimum;
-        for (std::size_t i=0;i<pc;++i) {
-            if ((i&255U)==0) CheckWork(m_work);
-            const auto p=Vertex(i);
-            if (!Finite(p)) throw Failure{ThicknessStatus::InvalidInput,"Coordinate overflow."};
-            for (unsigned a=0;a<3;++a) {minimum[a]=std::min(minimum[a],p[a]);maximum[a]=std::max(maximum[a],p[a]);}
+        for(std::size_t first=0;first<pc;) {
+            CheckWork(m_work);const auto block=m_mesh.GetPointValues().GetChunk(first*3,3*std::min(batchRecords,pc-first));
+            if(block.error!=MeshReadError::None || block.values.empty())throw Failure{ThicknessStatus::InvalidInput,"Coordinate block read failed."};
+            for(std::size_t local=0;local<block.values.size()/3;++local) {
+                if(!(local&255U))CheckWork(m_work);
+                const auto p=Sub({block.values[local*3],block.values[local*3+1],block.values[local*3+2]},m_geometry.origin);
+                if(!Finite(p))throw Failure{ThicknessStatus::InvalidInput,"Coordinate overflow."};
+                for(unsigned a=0;a<3;++a){minimum[a]=std::min(minimum[a],p[a]);maximum[a]=std::max(maximum[a],p[a]);}
+            }
+            first+=block.values.size()/3;
         }
         m_epsilon=std::max(64*std::numeric_limits<double>::epsilon()*std::max(Length(Sub(maximum,minimum)),1.),m_minSpacing*1e-8);
         for (double origin:m_geometry.origin) m_epsilon=std::max(m_epsilon,8*std::numeric_limits<double>::epsilon()*std::abs(origin));
         if (!std::isfinite(m_epsilon) || m_epsilon>=.01*m_minSpacing)
             throw Failure{ThicknessStatus::InvalidInput,"Coordinate precision cannot resolve the input spacing."};
-        if (tc>WorkLimit(limits.maxWorkingBytes)/sizeof(double))
-            throw Failure{ThicknessStatus::BudgetExceeded,"Sampling geometry exceeds working budget."};
         m_areas.reserve(tc);
         double maxEdge=0;
         const auto perSample=sizeof(ThicknessSample)+640U;
-        const auto areaBytes=tc*sizeof(double);
         const auto sampleBudget=WorkLimit(limits.maxSamples).GetBound(
             ((WorkLimit(limits.maxWorkingBytes)-areaBytes)/perSample).GetBound(std::numeric_limits<std::size_t>::max()));
-        for (std::size_t i=0;i<tc;++i) {
+        for(std::size_t first=0;first<tc;) {
+          CheckWork(m_work);const auto block=m_mesh.GetTriangleIndices().GetChunk(first*3,3*std::min(batchRecords,tc-first));
+          if(block.error!=MeshReadError::None || block.values.empty())throw Failure{ThicknessStatus::InvalidInput,"Topology block read failed."};
+          for(std::size_t local=0;local<block.values.size()/3;++local) {
+            const auto i=first+local;
             if ((i&255U)==0) CheckWork(m_work);
-            std::array<ThicknessPoint,3> p{};
-            for (unsigned k=0;k<3;++k) p[k]=Vertex(m_mesh.GetTriangleIndices()[i*3+k]);
+            ThicknessDisplaySampling::Corners p{};
+            for (unsigned k=0;k<3;++k) p[k]=Vertex(block.values[local*3+k]);
             const double area=.5*Length(Cross(Sub(p[1],p[0]),Sub(p[2],p[0])));
             if (!std::isfinite(area)) throw Failure{ThicknessStatus::InvalidInput,"Triangle area overflow."};
             // 退化的种子面没有正面积来源；不使其他局部来源整体失败。
@@ -512,7 +533,9 @@ class Kernel final
                 [&](const auto&) {
                     if (m_sampleCount==sampleBudget) throw Failure{ThicknessStatus::BudgetExceeded,"Local display sampling exceeds working budget."};
                     ++m_sampleCount;
-                });
+                },&p);
+          }
+          first+=block.values.size()/3;
         }
         const double divisions=std::ceil(maxEdge/m_params.sampleSpacing);
         if (!std::isfinite(divisions) || divisions>=std::numeric_limits<unsigned>::max())
@@ -918,14 +941,17 @@ ThicknessPoint GetSampleCorner(const SurfaceMeshPayload &mesh, const ThicknessSa
                                std::size_t corner)
 {
     // 先减局部参考再加回，避免大原点重心和的放大误差。
-    const auto first = mesh.GetTriangleIndices().at(sample.sourceTriangle * 3);
+    if(sample.sourceTriangle>=mesh.GetTriangleIndices().size()/3)throw std::out_of_range("Sample triangle is outside the mesh.");
+    std::array<std::uint64_t,3> vertices{};
+    MeshPayloadBuilder::CopyValues(mesh.GetTriangleIndices(),static_cast<std::size_t>(sample.sourceTriangle)*3,3,vertices.data());
     const auto& values=mesh.GetPointValues();
-    const ThicknessPoint origin{values[first*3],values[first*3+1],values[first*3+2]};
+    ThicknessPoint origin{};
+    MeshPayloadBuilder::CopyValues(values,static_cast<std::size_t>(vertices[0])*3,3,origin.data());
     ThicknessPoint point{origin[0], origin[1], origin[2]};
     for (std::size_t k = 0; k < 3; ++k)
     {
-        const auto id = mesh.GetTriangleIndices().at(sample.sourceTriangle * 3 + k);
-        const ThicknessPoint vertex{values[id*3],values[id*3+1],values[id*3+2]};
+        ThicknessPoint vertex{};
+        MeshPayloadBuilder::CopyValues(values,static_cast<std::size_t>(vertices[k])*3,3,vertex.data());
         for (std::size_t a = 0; a < 3; ++a)
             point[a] += (vertex[a] - origin[a]) * sample.barycentricCorners.at(corner)[k];
     }

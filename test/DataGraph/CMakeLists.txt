@@ -25,6 +25,14 @@ add_test(NAME DataGraph.ResultRetention COMMAND mvvcvtk_data_graph_tests retenti
 add_test(NAME DataGraph.MeshBlocks COMMAND mvvcvtk_data_graph_tests mesh-blocks)
 add_test(NAME DataGraph.ResultArrays COMMAND mvvcvtk_data_graph_tests arrays)
 
+# 手动性能对照入口：不加入正确性回归，也不写死机器相关耗时门槛。
+add_executable(mvvcvtk_mesh_storage_benchmark EXCLUDE_FROM_ALL MeshStorageBenchmark.cpp)
+target_include_directories(mvvcvtk_mesh_storage_benchmark PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/include" "${PROJECT_SOURCE_DIR}/MVVCVTK/src/Data/Support")
+SetTargetDefaults(mvvcvtk_mesh_storage_benchmark)
+set_target_properties(mvvcvtk_mesh_storage_benchmark PROPERTIES
+    FOLDER "MVVCVTK/test/Automation/DataGraph")
+
 add_executable(mvvcvtk_spatial_mesh_tests SpatialMeshTests.cpp)
 target_link_libraries(mvvcvtk_spatial_mesh_tests PRIVATE MVVCVTKInternal::FeatureSupport
     VTK::CommonCore VTK::CommonDataModel)

@@ -10,9 +10,7 @@
 #ifdef far
 #undef far
 #endif
-#include <list>
-#include <unordered_map>
-#include <atomic>
+#include <Psapi.h>
 #include <cstring>
 #include <initializer_list>
 
@@ -49,25 +47,11 @@ public:
         if(!m_data){CloseHandle(m_mapping);m_mapping=nullptr;throw std::runtime_error("Mesh storage view failed.");}
         m_capacity=capacity;
     }
-    void Touch(std::size_t byte)const {
-        const auto block=byte/pageBytes;
-        if(m_last.load(std::memory_order_relaxed)==block)return;
-        const std::lock_guard<std::mutex> lock(m_mutex);
-        auto found=m_recent.find(block);
-        if(found!=m_recent.end())m_order.splice(m_order.begin(),m_order,found->second);
-        else {
-            m_order.push_front(block);
-            try {m_recent.emplace(block,m_order.begin());}
-            catch(...) {m_order.pop_front();throw;}
-        }
-        m_last.store(block,std::memory_order_relaxed);
-        if(m_order.size()>residentPages){const auto old=m_order.back();m_order.pop_back();m_recent.erase(old);Trim(old*pageBytes,std::min(pageBytes,m_capacity-old*pageBytes));}
-    }
+    // 算法阶段边界才刷盘和回收工作集。读写热循环交给系统按需换页，
+    // 不按元素维护 LRU，也不在仍有随机访问时反复驱逐脏页。
     void Release()const {
-        const std::lock_guard<std::mutex> lock(m_mutex);
         if(m_data && !m_frozen && !FlushViewOfFile(m_data,m_capacity))throw std::runtime_error("Mesh storage flush failed.");
         if(m_data)VirtualUnlock(m_data,m_capacity);
-        m_order.clear();m_recent.clear();m_last.store(SIZE_MAX,std::memory_order_relaxed);
     }
     // 写入者必须先结束全部算法任务。冻结后旧的私有写指针也不能修改已发布数据。
     void Freeze() {
@@ -80,39 +64,37 @@ public:
         if(offset>m_capacity || bytes>m_capacity-offset)throw std::out_of_range("Mesh storage read is outside the file.");
         if(!bytes)return;
         if(!CopyBytes(static_cast<const unsigned char*>(m_data)+offset,destination,bytes))throw std::runtime_error("Mesh storage read failed.");
-        VirtualUnlock(static_cast<unsigned char*>(m_data)+offset,bytes);
     }
-    void CopyWindow(std::size_t offset,std::size_t bytes,void* destination)const {
-        if(offset>m_capacity || bytes>m_capacity-offset)throw std::out_of_range("Mesh storage read is outside the file.");
-        if(!bytes)return;
-        for(auto byte=offset;byte<offset+bytes;byte=(byte/pageBytes+1)*pageBytes)Touch(byte);
-        if(!CopyBytes(static_cast<const unsigned char*>(m_data)+offset,destination,bytes))throw std::runtime_error("Mesh storage read failed.");
+    std::size_t GetResidentBytes()const noexcept {
+        if(!m_data)return 0;
+        SYSTEM_INFO system{};GetSystemInfo(&system);
+        const auto pageBytes=static_cast<std::size_t>(system.dwPageSize);
+        if(!pageBytes)return m_capacity;
+        // 只在诊断/阶段统计时查询实际映射驻留；缓存目标不能冒充真实驻留上限。
+        // 固定栈缓冲避免在 noexcept 统计路径分配；查询失败时保守报告映射容量。
+        std::array<PSAPI_WORKING_SET_EX_INFORMATION,256> pages{};
+        std::size_t resident=0;
+        for(std::size_t offset=0;offset<m_capacity;) {
+            const auto count=std::min(pages.size(),1+(m_capacity-offset-1)/pageBytes);
+            for(std::size_t i=0;i<count;++i){pages[i]={};pages[i].VirtualAddress=static_cast<unsigned char*>(m_data)+offset+i*pageBytes;}
+            if(!K32QueryWorkingSetEx(GetCurrentProcess(),pages.data(),static_cast<DWORD>(count*sizeof(pages[0]))))return m_capacity;
+            for(std::size_t i=0;i<count;++i)if(pages[i].VirtualAttributes.Valid)resident+=std::min(pageBytes,m_capacity-offset-i*pageBytes);
+            offset+=count*pageBytes;
+        }
+        return resident;
     }
-    std::size_t GetResidentBound()const noexcept{return std::min(m_capacity,residentPages*pageBytes);}
 private:
     static bool CopyBytes(const void* source,void* target,std::size_t bytes)noexcept {
         __try{std::memcpy(target,source,bytes);return true;}
         __except(EXCEPTION_EXECUTE_HANDLER){return false;}
     }
-    void Trim(std::size_t offset,std::size_t bytes)const {
-        if(!bytes)return;
-        auto* address=static_cast<unsigned char*>(m_data)+offset;
-        if(!m_frozen && !FlushViewOfFile(address,bytes))throw std::runtime_error("Mesh storage page flush failed.");
-        // 未锁定文件页的 ERROR_NOT_LOCKED 是预期结果；只移出本文件的工作集，不清空进程工作集。
-        VirtualUnlock(address,bytes);
-    }
     void CloseMap()noexcept {
         if(m_data){UnmapViewOfFile(m_data);m_data=nullptr;}
         if(m_mapping){CloseHandle(m_mapping);m_mapping=nullptr;}
-        m_capacity=0;m_order.clear();m_recent.clear();m_last.store(SIZE_MAX,std::memory_order_relaxed);
+        m_capacity=0;
     }
-    static constexpr std::size_t pageBytes=65536,residentPages=128;
     HANDLE m_file=INVALID_HANDLE_VALUE,m_mapping=nullptr;
     void* m_data=nullptr;std::size_t m_capacity=0;bool m_frozen=false;
-    mutable std::mutex m_mutex;
-    mutable std::list<std::size_t> m_order;
-    mutable std::unordered_map<std::size_t,std::list<std::size_t>::iterator> m_recent;
-    mutable std::atomic<std::size_t> m_last{SIZE_MAX};
 };
 
 template<class Value> class Source final : public MeshValueSource<Value> {
@@ -122,20 +104,14 @@ public:
     }
     std::size_t GetCount()const noexcept override{return m_count;}
     const std::shared_ptr<const File>& GetFile()const noexcept{return m_file;}
-    std::size_t GetResidentBytes()const noexcept override{return m_file->GetResidentBound();}
+    std::size_t GetResidentBytes()const noexcept override{return m_file->GetResidentBytes();}
     void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
         if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh block is outside the array.");
-        if(!count)return;
-        if(count>cacheValues){m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;}
-        // 冻结映射已不可变；短读取复用有界映射页，只复制请求值，避免随机单值读取放大为整窗复制。
-        try {m_file->CopyWindow(offset*sizeof(Value),count*sizeof(Value),target);}
-        catch(const std::bad_alloc&) {
-            // 页缓存记账是加速选项；目标缓冲已存在时，仍可直接完成读取。
-            m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);
-        }
+        // 快照持有冻结映射；每次只复制请求范围，不维护共享窗口或驱逐其他读者的页。
+        // 保留 File::Copy 的结构化异常转换，由 GetChunk 继续报告读取失败与取消。
+        m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);
     }
 private:
-    static constexpr std::size_t cacheValues=std::max<std::size_t>(1,65536/sizeof(Value));
     std::shared_ptr<const File> m_file;std::size_t m_count=0;
 };
 }
@@ -163,7 +139,7 @@ public:
     bool operator==(const PagedArray& other)const{return size()==other.size() && std::equal(begin(),end(),other.begin());}
     bool operator!=(const PagedArray& other)const{return !(*this==other);}
     std::size_t capacity()const noexcept{return m_file?m_file->GetCapacity()/sizeof(Value):m_small.capacity();}
-    std::size_t GetResidentBytes()const noexcept{return m_file?m_file->GetResidentBound():m_small.capacity()*sizeof(Value);}
+    std::size_t GetResidentBytes()const noexcept{return m_file?m_file->GetResidentBytes():m_small.capacity()*sizeof(Value);}
     void reserve(std::size_t count){
         if(count>max_size())throw std::length_error("Mesh array size overflows.");
         if(!m_file && count<=smallCount){
@@ -173,29 +149,29 @@ public:
         if(!m_file){
             auto file=std::make_shared<MeshStorage::File>();file->Reserve(count*sizeof(Value));
             auto* destination=static_cast<Value*>(file->GetData());
-            for(std::size_t i=0;i<m_size;++i){file->Touch(i*sizeof(Value));::new(destination+i)Value(m_small[i]);}
+            for(std::size_t i=0;i<m_size;++i){::new(destination+i)Value(m_small[i]);}
             m_file=std::move(file);std::vector<Value>().swap(m_small);
         }else if(count>capacity()){
             m_file->Reserve(count*sizeof(Value));
             // C++17 中重新建立映射对象的生命周期；逐个值保留原对象表示，不建立全量副本。
             auto* destination=data();
-            for(std::size_t i=0;i<m_size;++i){m_file->Touch(i*sizeof(Value));Value saved{};std::memcpy(&saved,destination+i,sizeof(Value));::new(destination+i)Value(saved);}
+            for(std::size_t i=0;i<m_size;++i){Value saved{};std::memcpy(&saved,destination+i,sizeof(Value));::new(destination+i)Value(saved);}
         }
     }
     void resize(std::size_t count,const Value& value=Value{}){
         const Value saved=value;
         if(count>m_size)reserve(count);
         if(!m_file){m_small.resize(count,saved);m_size=count;return;}
-        const auto old=m_size;m_size=count;for(auto i=old;i<count;++i){m_file->Touch(i*sizeof(Value));::new(data()+i)Value(saved);}
+        const auto old=m_size;m_size=count;for(auto i=old;i<count;++i){::new(data()+i)Value(saved);}
     }
-    void ResizeUninitialized(std::size_t count){reserve(count);if(!m_file)m_small.resize(count);else for(auto i=m_size;i<count;++i){m_file->Touch(i*sizeof(Value));::new(data()+i)Value;}m_size=count;}
+    void ResizeUninitialized(std::size_t count){reserve(count);if(!m_file)m_small.resize(count);else for(auto i=m_size;i<count;++i){::new(data()+i)Value;}m_size=count;}
     std::size_t max_size()const noexcept{return std::size_t(INT64_MAX)/sizeof(Value);}
     void shrink_to_fit()const{ReleasePages();}
     void clear()noexcept{m_size=0;m_small.clear();}
-    void push_back(const Value& value){if(m_size==SIZE_MAX)throw std::length_error("Mesh array count overflows.");const Value saved=value;reserve(m_size+1);if(!m_file)m_small.push_back(saved);else {m_file->Touch(m_size*sizeof(Value));::new(data()+m_size)Value(saved);}++m_size;}
+    void push_back(const Value& value){if(m_size==SIZE_MAX)throw std::length_error("Mesh array count overflows.");const Value saved=value;reserve(m_size+1);if(!m_file)m_small.push_back(saved);else {::new(data()+m_size)Value(saved);}++m_size;}
     template<class... Args> Value& emplace_back(Args&&... args){push_back(Value{std::forward<Args>(args)...});return back();}
-    Value& operator[](std::size_t index){if(m_file)m_file->Touch(index*sizeof(Value));return data()[index];}
-    const Value& operator[](std::size_t index)const{if(m_file)m_file->Touch(index*sizeof(Value));return data()[index];}
+    Value& operator[](std::size_t index){return data()[index];}
+    const Value& operator[](std::size_t index)const{return data()[index];}
     Value& at(std::size_t index){if(index>=m_size)throw std::out_of_range("Mesh array index is invalid.");return (*this)[index];}
     const Value& at(std::size_t index)const{if(index>=m_size)throw std::out_of_range("Mesh array index is invalid.");return (*this)[index];}
     Value& front(){return (*this)[0];}const Value& front()const{return (*this)[0];}
@@ -204,11 +180,11 @@ public:
     const Value* data()const noexcept{return m_file?static_cast<const Value*>(m_file->GetData()):m_small.data();}
     void swap(PagedArray& other)noexcept{m_file.swap(other.m_file);m_small.swap(other.m_small);std::swap(m_size,other.m_size);}
     void ReleasePages()const{if(m_file)m_file->Release();}
-    // 随机短记录不预取整页缓存；调用方提供有界工作区，文件读取保留 I/O 错误转换。
+    // 只复制请求范围；调用方提供有界工作区，文件读取保留 I/O 错误转换。
     void CopyValues(std::size_t offset,std::size_t count,Value* target)const {
         if(offset>m_size || count>m_size-offset)throw std::out_of_range("Paged value range is invalid.");
         if(!count)return;
-        if(m_file)m_file->CopyWindow(offset*sizeof(Value),count*sizeof(Value),target);
+        if(m_file)m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);
         else std::copy_n(m_small.begin()+offset,count,target);
     }
     MeshReadArray<Value> GetReadSnapshot()const {
@@ -253,7 +229,7 @@ public:
     void assign(std::size_t count,const Value& value){clear();resize(count,value);}
     template<class Input> iterator insert(iterator at,Input first,Input last){if(at!=end())throw std::logic_error("Mesh block appends must be ordered.");const auto start=m_size;for(;first!=last;++first)push_back(*first);return {this,start};}
 private:
-    // 小组件也使用同一容器；最多 64 KiB 的本地缓冲避免为每个小对象建立临时文件。
+    // 64 KiB 只决定小对象是否建文件；逐元素访问不再触发刷盘，保留该值避免大量组件累积堆副本。
     static constexpr std::size_t smallCount=std::max<std::size_t>(1,65536/sizeof(Value));
     std::shared_ptr<MeshStorage::File> m_file;std::vector<Value> m_small;std::size_t m_size=0;
 };
@@ -277,7 +253,7 @@ template<class Value,std::size_t Count> struct PagedArrayHash final {
     }
 };
 
-// 私有查找表的槽也写入文件；只保存固定的页窗口，不为全部边/点建立内存 map。
+// 私有查找表的槽也可写入文件；由系统按需换页，不为全部边/点额外建立堆内 map。
 template<class Key,class Value,class Hash=std::hash<Key>> class PagedMap final {
     struct Slot final {Key key{};Value value{};bool occupied=false;};
 public:
@@ -358,6 +334,12 @@ class MeshPayloadBuilder final {
     private:std::shared_ptr<const DataArray<Value>> m_source;
     };
 public:
+    // 仓内消费者把一个坐标/拓扑记录读到自有固定工作区；不暴露映射指针或扩张 SPI。
+    template<class Value> static void CopyValues(const MeshReadArray<Value>& source,
+        std::size_t offset,std::size_t count,Value* target) {
+        if(offset>source.size() || count>source.size()-offset)throw std::out_of_range("Mesh working range is invalid.");
+        if(count)source.m_source->ReadValues(offset,count,target);
+    }
     static std::shared_ptr<const SurfaceMeshPayload> Build(
         std::shared_ptr<const DataArray<double>> points,std::shared_ptr<const DataArray<std::uint64_t>> faces,
         std::vector<MeshAttribute> pointData={},std::string frame="RAS",std::vector<MeshAttribute> cellData={},
