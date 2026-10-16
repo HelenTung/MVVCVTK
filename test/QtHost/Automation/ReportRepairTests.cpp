@@ -10,12 +10,15 @@
 #include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QClipboard>
+#include <QDir>
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
@@ -32,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <atomic>
 #include <limits>
 #include <iostream>
 #include <stdexcept>
@@ -45,6 +49,8 @@ public:
     static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
     static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
     static void Generate(ResultReport& view){view.ContinueGeneration();}
+    static ReportRows Rows(const ResultReport& view){return view.m_rows;}
+    static void SetRows(ResultReport& view,ReportRows rows){view.m_rows=std::move(rows);}
 };
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
@@ -386,6 +392,115 @@ void CheckDiskIndexPages() {
     for(ReportRowId row=0;row<2053;++row){Require(mapped[row]==0,"disk-backed state initialization missed a block");mapped[row]=row*1000000123LL;}
     for(ReportRowId row=2052;row>=0;--row)Require(mapped[row]==row*1000000123LL,"disk-backed state changed a 64-bit record");
 }
+// 单个测试使用独立临时目录，直接破坏真实工作文件，不增加生产故障注入接口。
+class IndexFaultFiles final {
+public:
+    QTemporaryDir directory;
+    QByteArray previous=qgetenv("TMP");bool hadPrevious=qEnvironmentVariableIsSet("TMP");
+    IndexFaultFiles(){Require(directory.isValid(),"index fault directory unavailable");qputenv("TMP",directory.path().toLocal8Bit());Require(QDir::tempPath()==directory.path(),"temporary directory override was not applied");}
+    ~IndexFaultFiles(){if(hadPrevious)qputenv("TMP",previous);else qunsetenv("TMP");}
+    QString GetIndexPath() const {
+        const auto names=QDir(directory.path()).entryList(QDir::Files);
+        Require(names.size()==1,"expected the sole retained report index in the isolated directory");return directory.filePath(names.first());
+    }
+};
+void CheckIndexReadRecovery() {
+    IndexFaultFiles files;ReportIndex index;
+    for(ReportRowId i=0;i<6149;++i)index.Append(10000+i);
+    index.PrepareRead();const auto read=index.CreateReader();
+    Require(index.Read(0)==10000 && read(0)==10000,"index fault fixture did not cache its old page");
+    QFile disk(files.GetIndexPath());Require(disk.open(QIODevice::ReadWrite),"index fault file cannot be opened");const auto saved=disk.readAll();
+    Require(disk.resize(1024*sizeof(ReportRowId))&&disk.flush(),"index fault truncation failed");
+    for(const auto& access:std::vector<std::function<ReportRowId(ReportRowId)>>{[&](ReportRowId row){return index.Read(row);},read}){
+        // 越过 QFile 的预读缓冲；连续重试同一失败页，中间不切回旧页以免掩盖缓存污染。
+        for(int attempt=0;attempt<2;++attempt){bool failed=false;try{access(4096);}catch(const std::runtime_error&){failed=true;}
+            Require(failed,"failed page retry exposed old data under the new page identity");}
+        Require(access(0)==10000,"index read failure corrupted its previously committed page");
+    }
+    Require(disk.seek(0)&&disk.write(saved)==saved.size()&&disk.flush(),"index fault restoration failed");
+    Require(index.Read(4096)==14096 && read(4096)==14096 && index.Read(6148)==16148 && read(6148)==16148,"repaired index did not retry the correct page and tail");
+}
+void CheckPageReadFailures() {
+    QTemporaryDir directory;std::atomic<ReportRowId> failRow{-1};std::atomic<int> reads{0};ResultReport view;
+    auto doc=Document("page-io","体积",0);doc.module="Gap";
+    doc.table=std::make_shared<ReportTable>(2053,[&](ReportRowId row){++reads;if(row==failRow.load())throw std::runtime_error("正文短读");return QStringList{QString("point-%1").arg(row),QString::number(row+1)};});
+    ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};
+    view.AddReport(doc);auto* table=view.findChild<QTableView*>("reportTable");
+    Require(reads<=400 && table->model()->rowCount()==200,"opening a page scanned the complete report");
+    auto* search=view.findChild<QLineEdit*>("reportSearch");search->setText("point-");Wait([&]{return view.property("reportRowsBusy").toBool();});
+    Require(view.property("reportRowsError").toString().isEmpty()&&view.GetFilteredCount()==2053,"filtered IO fixture failed");
+    // 小索引可驻留小段，大索引由文件后备；页面边界通过同一只读接口验证失败隔离。
+    // 真实 ReportIndex 文件的连续短读与恢复已由 CheckIndexReadRecovery 独立覆盖。
+    class FaultingRows final : public MeshValueSource<ReportRowId> {
+    public:
+        ReportRows original;std::atomic<bool> fail{true};
+        std::size_t GetCount()const noexcept override{return original.size();}
+        std::size_t GetResidentBytes()const noexcept override{return original.GetResidentBytes();}
+        void ReadValues(std::size_t offset,std::size_t count,ReportRowId* target)const override {
+            if(fail.load() && offset+count>1024)throw std::runtime_error("索引短读");
+            for(std::size_t i=0;i<count;++i)target[i]=original[offset+i];
+        }
+    };
+    auto index=std::make_shared<FaultingRows>();index->original=ReportTaskTestAccess::Rows(view);ReportTaskTestAccess::SetRows(view,ReportRows(index));
+    view.findChild<QPushButton*>("reportLast")->click();
+    Require(table->model()->rowCount()==0&&!view.property("reportRowsError").toString().isEmpty(),"failed page showed stale or partial data");
+    for(const auto* action:{"copyReportCsv","locateReportRow","exportFilteredReport"})Require(!view.findChild<QPushButton*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
+    bool rejected=false;try{view.ExportReportFile(directory.filePath("invalid.csv"),true);}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected&&!QFile::exists(directory.filePath("invalid.csv"))&&located==-1&&view.GetSelectedReport().table==doc.table,"page failure changed formal report or allowed filtered export");
+    index->fail=false;
+    view.findChild<QPushButton*>("reportFirst")->click();view.findChild<QPushButton*>("reportLast")->click();
+    Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->data(table->model()->index(52,0)).toString()=="point-2052","repaired filtered index did not recover exact original rows");
+    view.findChild<QPushButton*>("reportFirst")->click();failRow=250;const auto before=reads.load();view.findChild<QPushButton*>("reportNext")->click();
+    Require(table->model()->rowCount()==0&&reads-before<=200&&view.property("reportRowsError").toString()=="正文短读","body failure escaped the page boundary or scanned beyond the current page");
+    failRow=-1;view.findChild<QPushButton*>("reportFirst")->click();view.findChild<QPushButton*>("reportNext")->click();
+    Require(table->model()->data(table->model()->index(0,0)).toString()=="point-200","body read retry mixed page identities");
+    table->selectionModel()->select(table->model()->index(0,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(1,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+    QApplication::clipboard()->setText("previous clipboard");failRow=201;view.findChild<QPushButton*>("copyReportCsv")->click();
+    Require(QApplication::clipboard()->text()=="previous clipboard"&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"copy failure published partial clipboard content or left a usable stale page");
+    failRow=-1;view.SelectReport(doc.id);Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->rowCount()==200,"reselecting a recovered report did not restore its page");
+}
+void CheckSlowScanCancellation() {
+    ResultReport view;auto doc=Document("slow-scan","体积",0);auto lease=std::make_shared<int>(1);std::weak_ptr<int> retained=lease;
+    struct Gate final {
+        std::promise<void> resume;std::shared_future<void> release=resume.get_future().share();
+        std::atomic<bool> entered{false},opened{false};std::atomic<int> starts{0};
+        void Open(){if(!opened.exchange(true))resume.set_value();}
+        ~Gate(){Open();}
+    };
+    const auto gate=std::make_shared<Gate>();
+    struct ReleaseGate {std::shared_ptr<Gate> value;~ReleaseGate(){value->Open();}} releaseGate{gate};
+    auto* owner=QThread::currentThread();
+    doc.table=std::make_shared<ReportTable>(500,[gate,held=lease,owner](ReportRowId row){
+        if(QThread::currentThread()!=owner&&row==0){++gate->starts;if(!gate->opened){gate->entered=true;gate->release.wait();}}
+        return QStringList{QString("point-%1").arg(row),QString::number(row)};
+    });lease.reset();view.AddReport(doc);auto* search=view.findChild<QLineEdit*>("reportSearch");search->setText("point-");
+    Wait([&]{return !gate->entered.load();});
+    std::promise<void> returned;auto completed=returned.get_future();
+    // 看门狗只避免错误实现在测试里死等；判据是 UI 操作先返回，再由测试释放慢读。
+    auto watchdog=std::async(std::launch::async,[&]{const bool responsive=completed.wait_for(std::chrono::seconds(5))==std::future_status::ready;gate->Open();return responsive;});
+    view.findChild<QPushButton*>("cancelReportRows")->click();
+    Require(!view.property("reportRowsBusy").toBool()&&!view.findChild<QPushButton*>("copyReportCsv")->isEnabled(),"cancelled scan still exposes partial results");
+    search->setText("point-1");search->setText("point-2");search->setText("point-499");
+    Require(gate->starts==1,"query replacement started an additional worker while the old scan was blocked");
+    returned.set_value();Require(watchdog.get(),"ordinary cancellation or query replacement waited for the blocked reader");
+    Wait([&]{return view.property("reportRowsBusy").toBool();});
+    Require(view.property("reportRowsError").toString().isEmpty()&&view.GetFilteredCount()==1&&view.CreateFilteredReader()(0)==499&&gate->starts==2,"coalesced latest query was lost or superseded by cancelled rows");
+    const auto closingGate=std::make_shared<Gate>();ReleaseGate closingRelease{closingGate};
+    auto closing=Document("retiring-scan","体积",0);auto held=std::make_shared<int>(1);std::weak_ptr<int> retiring=held;
+    closing.table=std::make_shared<ReportTable>(500,[closingGate,held,owner](ReportRowId row){
+        if(QThread::currentThread()!=owner&&row==0){closingGate->entered=true;closingGate->release.wait();}
+        return QStringList{QString("point-%1").arg(row),QString::number(row)};
+    });held.reset();view.AddReport(closing);view.SelectReport(closing.id);search->setText("point-");Wait([&]{return !closingGate->entered.load();});
+    view.SelectReport(doc.id);view.RemoveReport(closing.id);closing.table.reset();
+    Require(!retiring.expired()&&view.GetSelectedReport().id==doc.id&&view.GetFilteredCount()==500,"removal released a running reader or invalidated the newer selection");
+    closingGate->Open();Wait([&]{return !retiring.expired();});
+    Require(view.GetSelectedReport().id==doc.id&&view.findChild<QTableView*>("reportTable")->model()->rowCount()==200,"retired scan completion replaced or cleared the newer page");
+    search->setText("point-");view.CancelTasks(true);
+    Require(!view.property("reportRowsBusy").toBool(),"final task shutdown left a pending scan");
+    view.RemoveReport(doc.id);doc.table.reset();
+    Require(retained.expired(),"completed cancelled scan retained its immutable source owner");
+}
 #if defined(MANUAL_ALIGNMENT)
 void CheckInspectionPreparation() {
     ResultReport view;std::weak_ptr<const InspectionPlan> planLease;std::weak_ptr<const InspectionReport> reportLease;
@@ -421,7 +536,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
 #if defined(MANUAL_ALIGNMENT)
     CheckInspectionPreparation();
 #endif

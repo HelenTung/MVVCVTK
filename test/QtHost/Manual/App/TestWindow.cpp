@@ -552,7 +552,7 @@ TestWindow::~TestWindow()
 {
     // 正常路径只在 Stop 成功后进入析构；页面先于运行记录/工作流成员销毁。
     m_isClosing = true;
-    m_report->CancelTasks();m_report->onReadReports={};m_report->getSources={};
+    m_report->CancelTasks(true);m_report->onReadReports={};m_report->getSources={};
     const QSignalBlocker pagesBlocker(m_pages), workspaceBlocker(m_workspaceTabs), featureBlocker(m_featureTabs);
     for (auto* module : m_modules) delete module;
     m_modules.clear();
@@ -635,7 +635,7 @@ bool TestWindow::StopSession()
 {
     if (!m_isClosing) AppendLog("正在关闭测试会话，停止计算并释放视图资源。");
     m_isClosing = true; m_openVolume->setEnabled(false); m_stop->setEnabled(false); m_workflow.Stop(); m_pump.Stop();
-    m_report->CancelTasks();
+    m_report->CancelTasks(true);
     // 原生报告和分页目录持有正式结果，须先释放才能退休其 OwnerRetirement 作用域。
     for(const auto& id:m_report->GetReportIds())m_report->RemoveReport(id);
     for(auto* module:m_modules) {
