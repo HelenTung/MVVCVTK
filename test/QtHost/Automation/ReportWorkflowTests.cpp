@@ -105,6 +105,23 @@ void CheckReadTaskCoordinator() {
     panel.StartReadTask(failId,"Observed",[](const ReadTaskContext&)->QJsonObject{throw std::runtime_error("read IO failure");});wait();
     Require(records.GetRecord(failId)["status"]=="Failed","read failure reported as success");
 }
+void CheckSurfaceReportTarget() {
+    TestSession runtime;TestWorkflow workflow;TestRecordWriter records;
+    const QString mesh="11111111111111111111111111111111:1",first="22222222222222222222222222222222:1",second="33333333333333333333333333333333:1";
+    QSet<QString> available{mesh,first,second};QString opened;
+    workflow.readReports["Surface"]=[](const auto&,const auto&){return QVector<ReportDocument>{};};
+    workflow.getReportAvailable=[&](const auto& module,const auto& ref){return module=="Surface" && available.contains(ref);};
+    workflow.onShowBusinessReport=[&](const auto&,const auto& ref){opened=ref;};
+    ModulePanel panel({runtime,workflow,records},"Surface");
+    auto* button=panel.findChild<QPushButton*>("viewBusinessReport");Require(button!=nullptr,"surface report button exists");
+    const auto complete=[&](const QString& generation){const auto id=records.StartRecord("Surface","ReadObjects",{},{});panel.SetComplete(id,"Observed",{{"mesh",mesh},{"generation",generation}});};
+    complete(second);button->click();
+    Require(opened==second && button->property("reportResult")==second,"shared mesh surface report button targets the exact new generation");
+    complete(first);button->click();
+    Require(opened==first && button->property("reportResult")==first,"shared mesh surface report button can return to an old generation");
+    available.remove(first);complete(first);
+    Require(button->isHidden() && button->property("reportResult").toString().isEmpty(),"unavailable exact surface report must not fall back to another generation on the shared mesh");
+}
 void CheckReportGenerationSelection() {
     ResultReport view;const QString result="11111111111111111111111111111111:1";
     ReportDocument first;first.id="generation-first";first.result=result;first.module="Surface";first.category="本次会话结果";first.columns={{"value",{},{},true}};
@@ -378,7 +395,7 @@ void CheckReportWorkflow()
     WaitTasks(compareView);
     Require(compareView.GetSelectedReport().category=="对比结果" && compareView.GetSelectedReport().table->Read(0)[4]=="3","actual report UI creates and selects comparison without input data");
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
-    view.hide();CheckMixedSortAndCancellation();CheckExternalReportRuns();CheckReportRepairs();CheckReadTaskCoordinator();CheckReportGenerationSelection();
+    view.hide();CheckMixedSortAndCancellation();CheckExternalReportRuns();CheckReportRepairs();CheckReadTaskCoordinator();CheckSurfaceReportTarget();CheckReportGenerationSelection();
 #if defined(MANUAL_SURFACE)
     CheckSurfaceReads();
 #endif
@@ -408,6 +425,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","generation","qualityReport","correctedVolume","result"}) {
         const auto ref=summary[key].toString();if(!ref.isEmpty()&&!ref.endsWith(":0"))refs.insert(ref);
     }
+    if(module=="Surface" && hasPublishedResult("generation"))refs={summary["generation"].toString()};
     // 通过实际入口请求按需生成，等待 owner 分块任务完成后复用冻结报告。
     if(requiresReport && !refs.isEmpty()) {
         std::cout<<"REPORT: preparing native "<<module.toStdString()<<std::endl;
@@ -456,6 +474,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     QCoreApplication::processEvents();
     auto* open=panel->findChild<QPushButton*>("viewBusinessReport");auto* dialog=window.findChild<QDialog*>("operationReports");
     Require(open&&dialog&&open->isVisible()&&open->isEnabled(),"native report has a visible enabled user entry");
+    if(module=="Surface")Require(open->property("reportResult").toString()==summary["generation"].toString(),"surface business report button targets the exact generation instead of its shared mesh");
     for(auto* parent=open->parentWidget();parent;parent=parent->parentWidget())if(auto* scroll=qobject_cast<QScrollArea*>(parent)) {
         scroll->ensureWidgetVisible(open);QCoreApplication::processEvents();
         Require(scroll->viewport()->rect().intersects(QRect(open->mapTo(scroll->viewport(),QPoint()),open->size())),"business report entry lies inside its visible scroll viewport");
@@ -496,6 +515,20 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         if(doc.module=="Gap") {
             const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
             Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
+        }
+        if(doc.module=="Surface") {
+            // 原生表面条件采用版本化文本；不能把解析失败的空 JSON 对象当成冻结条件。
+            const auto native=summary["canonicalParameters"].toString();
+            Require(native.startsWith("surface-parameters 3 ") && doc.conditions["计算参数"].isString()
+                && doc.conditions["计算参数"].toString()==native,"surface report preserves the complete native canonical parameter text");
+            if(doc.id.startsWith("surface:"))Require(doc.conditions["正式计算条件"].isString()
+                && doc.conditions["正式计算条件"].toString()==native,"surface object report preserves the exact formal native conditions");
+            const auto inputs=summary["inputs"].toArray();
+            Require(!inputs.isEmpty() && doc.conditions["输入修订"].isArray() && doc.conditions["输入修订"].toArray()==inputs,
+                "surface report preserves every frozen native input role and revision");
+            Require(std::any_of(inputs.cbegin(),inputs.cend(),[&](const auto& value){const auto input=value.toObject();return input["role"]=="source-volume" && input["revision"]==doc.source;}),
+                "surface report source matches its frozen native source-volume input");
+            std::cout<<"PASS: real surface frozen native parameter text operation="<<record["operationId"].toString().toStdString()<<std::endl;
         }
         if(doc.id.startsWith("surface:") && summary.contains("objectCount")) {
             Require(doc.table->GetCount()==GetReportCount(summary["objectCount"]),"surface report covers all native objects");

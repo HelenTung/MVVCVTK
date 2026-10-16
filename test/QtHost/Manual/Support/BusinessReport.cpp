@@ -163,13 +163,16 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<SurfaceDeterminat
                 object.volumeValidity==SurfaceMetricValidity::Valid&&object.volumeModelUnit3?Number(*object.volumeModelUnit3):QString(),
                 QString::number(static_cast<int>(object.areaValidity)),QString::number(static_cast<int>(object.volumeValidity)),object.isClosed?"true":"false",object.isManifold?"true":"false"};
         });
-        const auto parameters=QJsonDocument::fromJson(QByteArray::fromStdString(snapshot->canonicalParameters)).object();
+        const auto parameters=QString::fromStdString(snapshot->canonicalParameters);
         doc.conditions["计算参数"]=parameters;doc.conditions["正式计算条件"]=parameters;
+        QJsonArray inputs;
+        for(const auto& input:snapshot->inputs)inputs.append(QJsonObject{{"role",QString::fromStdString(input.role)},{"revision",GetRefText(input.source)}});
+        doc.conditions["输入修订"]=inputs;
         doc.conditions["对象总数"]=QString::number(doc.table->GetCount());
         reports.append(std::move(doc));
         if(snapshot->isoEstimate) {
             auto params=Document(record,"surface-parameters",generation,GetRefText(snapshot->sourceRevision),"表面 BG / M / ISO");params.result=GetRefText(snapshot->meshRevision);
-            params.relatedResults.append(generation);params.conditions["计算参数"]=parameters;
+            params.relatedResults.append(generation);params.conditions["计算参数"]=parameters;params.conditions["输入修订"]=inputs;
             params.columns={{"parameter",{},{},false},{"value","表面灰度参数","1",true}};params.identityColumn=0;params.identityStable=true;params.table=std::make_shared<ReportTable>();
             const auto& estimate=*snapshot->isoEstimate;
             params.table->Append({"ISO",Number(estimate.isoValue)});

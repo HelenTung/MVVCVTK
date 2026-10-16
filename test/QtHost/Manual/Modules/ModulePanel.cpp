@@ -907,10 +907,10 @@ void ModulePanel::SetComplete(std::uint64_t id, const QString& status, QJsonObje
     if(m_context.workflow.getReportAvailable && m_context.workflow.readReports.count(m_name)
         && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed","Published"}.contains(status)) {
         const auto action=m_context.records.GetRecord(id)["action"].toString();
-        const auto preferred=m_name=="Artifact"?QString("qualityReport"):m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action.startsWith("Inspect")?QString("inspection"):QString();
+        const auto preferred=m_name=="Surface"?QString("generation"):m_name=="Artifact"?QString("qualityReport"):m_name=="Alignment" && action=="EvaluateSurface"?QString("deviation"):m_name=="Alignment" && action.startsWith("Inspect")?QString("inspection"):QString();
         if(!preferred.isEmpty() && m_context.workflow.getReportAvailable(m_name,result[preferred].toString())) {
             m_viewReport->setProperty("reportResult",result[preferred].toString());m_viewReport->show();
-        } else
+        } else if(m_name!="Surface" || result["generation"].toString().isEmpty())
         for(const auto* key:{"inspection","deviation","voxelVolume","resultSet","mesh","generation","qualityReport","result"}) {
             const auto ref=result[key].toString();if(!ref.isEmpty() && !ref.endsWith(":0") && m_context.workflow.getReportAvailable(m_name,ref)){m_viewReport->setProperty("reportResult",ref);m_viewReport->show();break;}
         }
