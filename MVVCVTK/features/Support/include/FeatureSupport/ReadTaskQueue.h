@@ -12,6 +12,7 @@ namespace FeatureInternal {
 class ReadTaskQueue final {
 public:
     using Cancel=std::function<bool()>;
+    // 任务自行提交成功、失败或取消终态；worker 的异常隔离不负责调用方状态。
     using Task=std::function<void(const Cancel&)>;
     struct Job final {Task task;std::shared_ptr<std::atomic<bool>> cancelled;};
     std::mutex mutex;
@@ -20,13 +21,21 @@ public:
     std::shared_ptr<std::atomic<bool>> Submit(Task task)
     {
         auto token=std::make_shared<std::atomic<bool>>(false);
-        std::function<void()> notify;
         {const std::lock_guard<std::mutex> lock(mutex);
             if(m_stopping||m_pending.size()+(m_active?1:0)>=8)return {};
-            notify=onPending;
             m_pending.push_back({std::move(task),token});
         }
-        ready.notify_one();try{if(notify)notify();}catch(...){}return token;
+        ready.notify_one();
+        return token;
+    }
+    // Submit 返回后先提交调用方状态、释放调用方锁，再通知可能同步重入的宿主。
+    void SendPending() noexcept
+    {
+        try {
+            std::function<void()> notify;
+            {const std::lock_guard<std::mutex> lock(mutex);notify=onPending;}
+            if(notify)notify();
+        }catch(...){}
     }
     bool GetIsStopping() {const std::lock_guard<std::mutex> lock(mutex);return m_stopping;}
     // 以下方法由拥有 mutex 的 worker/接管点调用。

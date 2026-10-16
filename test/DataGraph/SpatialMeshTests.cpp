@@ -125,6 +125,17 @@ int main(int argc,char** argv)
             &&colored.mesh->GetCellData()->GetScalars()->GetComponent(0,0)==17&&cache->GetCounters().batchesRead==1,"recolor shares points and cells without rereading source geometry");
         cache->SetDecoration([](auto&,const auto&,const auto&){throw std::runtime_error("injected display failure");});
         Require(cache->Get(key).isPending&&Drain(queue)&&!cache->Get(key).error.empty()&&weak.lock()->GetValid(),"display read failure preserves the formal result");
+        cache->Clear();
+        const auto errorRevision=cache->GetRevision();
+        Require(cache->Get(key).isPending,"throwing cancellation read was not admitted");
+        std::optional<FeatureInternal::ReadTaskQueue::Job> failedJob;
+        {const std::lock_guard<std::mutex> lock(queue->mutex);failedJob=queue->TakeLocked();}
+        Require(bool(failedJob),"throwing cancellation job missing");
+        failedJob->task([]()->bool{throw std::runtime_error("injected cancellation failure");});
+        {const std::lock_guard<std::mutex> lock(queue->mutex);queue->FinishLocked();}
+        const auto failedRead=cache->Get(key);
+        Require(!failedRead.isPending&&!failedRead.mesh&&failedRead.error=="injected cancellation failure"
+            &&cache->GetRevision()==errorRevision+1,"unexpected task exception must publish one error terminal state");
         cache->SetDecoration({});cache->Get(key);
         {const std::lock_guard<std::mutex> lock(queue->mutex);queue->CancelLocked();}
         Require(cache->Get(key).isPending&&Drain(queue)&&cache->Get(key).mesh,"abandoned queued read can be requested again");
@@ -167,6 +178,11 @@ int main(int argc,char** argv)
         Require(empty->GetBatchCount()==0&&empty->Find(Box(-1,1),8).batches.empty(),"empty formal mesh is a complete empty display");
         const auto compact=std::make_shared<const SurfaceMeshPayload>(DataArray<double>{0,0,0,1,0,0,0,1,0,0,0,1},
             DataArray<std::uint64_t>{0,1,2,0,2,3,0,3,1,1,3,2,2,1,0,3,2,0});
+        for(const auto invalidPage:{std::size_t{0},Source::facesPerBatch+1,std::numeric_limits<std::size_t>::max()}) {
+            bool rejected=false;
+            try{Source::Build(compact,{},invalidPage);}catch(const std::invalid_argument&){rejected=true;}
+            Require(rejected,"display batch size must obey the existing bounded 32-bit topology contract");
+        }
         for(const std::size_t page:{1,2,3,64,16384}) {
             const auto split=Source::Build(compact,{},page);std::array<bool,6> seen{};
             const auto all=split->Find({},64);Require(all.isComplete,"all display page sizes keep the complete formal face set");

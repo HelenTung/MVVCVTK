@@ -33,6 +33,8 @@ public:
     using Planes=std::array<std::array<double,4>,6>;
     using Cancel=std::function<bool()>;
     static constexpr std::size_t facesPerBatch=SpatialFaceOrder::pageFaces;
+    static_assert(facesPerBatch<=static_cast<std::size_t>(std::numeric_limits<int>::max())/3,
+        "Display batch topology must fit 32-bit offsets and connectivity.");
     inline static constexpr const char* faceIds="mvvcvtk.formal.face";
     inline static constexpr const char* pointIds="mvvcvtk.formal.point";
     struct Query final {
