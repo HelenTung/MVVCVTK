@@ -217,7 +217,9 @@ void CheckComparisonGenerationAdmission() {
     for(int outcome=0;outcome<3;++outcome) {
         ResultReport view;auto baseline=Document("mapping-baseline"),current=Document("mapping-current");
         const auto native=Document("mapping-pending-native");int preparations=0,launches=0;
-        view.AddReport(baseline);view.findChild<QPushButton*>("setReportBaseline")->click();view.AddReport(current);view.show();
+        view.AddReport(baseline);Require(view.SelectReport(baseline.id),"comparison baseline fixture selection failed");
+        view.findChild<QPushButton*>("setReportBaseline")->click();view.AddReport(current);
+        Require(view.SelectReport(current.id)&&view.GetSelectedReport().id!=baseline.id,"comparison current fixture selection failed");view.show();
         view.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
             ++preparations;return [native](const ReportCheckpoint& check){check();return QVector<ReportDocument>{native};};
         };
@@ -233,7 +235,8 @@ void CheckComparisonGenerationAdmission() {
             if(outcome==1)dialog->reject();else dialog->accept();
         });
         QString failure;try{ReportTaskTestAccess::Compare(view);}catch(const std::exception& error){failure=QString::fromUtf8(error.what());}
-        Require(mappingShown&&!generatedDuringMapping,"native report generation stole comparison admission during mapping dialog");
+        Require(mappingShown,"comparison mapping dialog was not opened");
+        Require(!generatedDuringMapping,"native report generation stole comparison admission during mapping dialog");
         if(outcome==0) {
             Require(failure.isEmpty()&&ReportTaskTestAccess::HasTask(view)&&preparations==0,"accepted comparison lost its reserved task admission");
             Wait([&]{return !view.GetReportIds().contains(native.id)||view.property("reportTaskBusy").toBool();});
