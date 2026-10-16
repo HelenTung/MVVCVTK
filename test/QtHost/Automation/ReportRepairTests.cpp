@@ -23,6 +23,9 @@
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QThread>
+#include <condition_variable>
+#include <mutex>
 #include <QTreeWidget>
 #include <cmath>
 #include <algorithm>
@@ -34,6 +37,15 @@
 #include <stdexcept>
 
 namespace Manual {
+class ReportTaskTestAccess final {
+public:
+    static void BeforeStart(ResultReport& view,std::function<void()> hook){view.m_beforeWorkerStart=std::move(hook);}
+    static void Start(ResultReport& view,std::function<ReportDocument(const ReportCheckpoint&)> work){view.StartTask(std::move(work));}
+    static bool HasTask(const ResultReport& view){return bool(view.m_task);}
+    static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
+    static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
+    static void Generate(ResultReport& view){view.ContinueGeneration();}
+};
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class F> void Wait(F pending) {
@@ -153,6 +165,86 @@ void CheckSpatialEvidence() {
     auto far=Read("point_label,x_mm,y_mm,z_mm,thickness_mm\nfar,1e20,0,0,3\nnear,0,0,0,4\n");
     o.distanceTolerance=1e-9;const auto fallback=CompareReports(far,far,o);
     Require(fallback.conditions["有效配对数"]==2 && fallback.table->GetCount()==2 && fallback.table->Read(0)[8]=="0", "spatial acceleration range rejected valid finite coordinates instead of completing a full scan");
+}
+void CheckWorkerStartupAndRecovery() {
+    auto document=Document("launch-input");QTemporaryDir directory;const auto path=directory.filePath("input.csv");ExportReport(path,document);
+    ResultReport view;auto queued=Document("queued-after-launch-failure");
+    view.onReadReports=[queued](const QJsonObject&,const QSet<QString>&){return QVector<ReportDocument>{queued};};
+    view.QueueReport({{"operationId","queued-launch"},{"module","Surface"},{"result",QJsonObject{{"generation","queued-generation"}}}});view.show();
+    int starts=0;ReportTaskTestAccess::BeforeStart(view,[&]{if(++starts==1)throw std::runtime_error("injected worker startup failure");});
+    bool rejected=false;try{view.ImportReport(path);}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected&&!ReportTaskTestAccess::HasTask(view)&&!view.property("reportTaskBusy").toBool(),"failed worker startup retained a task placeholder");
+    Wait([&]{return !view.GetReportIds().contains(queued.id);});
+    view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.property("reportTaskError").toString().isEmpty()&&view.GetSelectedReport().table->GetCount()==2,"worker startup failure prevented retry or paused native generation permanently");
+    auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();auto entered=std::make_shared<std::atomic<bool>>(false);
+    struct ReleaseOnExit final {std::shared_ptr<std::promise<void>> promise;~ReleaseOnExit(){try{promise->set_value();}catch(...){}}} cleanup{release};
+    ReportTaskTestAccess::Start(view,[entered,ready](const ReportCheckpoint&)->ReportDocument{entered->store(true);if(ready.wait_for(std::chrono::seconds(30))!=std::future_status::ready)throw std::runtime_error("IO fixture release guard");throw std::runtime_error("injected IO failure");});
+    Wait([&]{return !entered->load();});view.CancelTasks();release->set_value();Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.property("reportTaskError").toString()=="injected IO failure","cancellation hid a real worker failure");
+    view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});Require(view.property("reportTaskError").toString().isEmpty(),"worker failure prevented a subsequent request");
+
+}
+void CheckReopenedGeneration() {
+    ResultReport view;const auto document=Document("reopened-native");int attempts=0;
+    auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();
+    auto entered=std::make_shared<std::atomic<bool>>(false);
+    struct ReleaseOnExit final {std::shared_ptr<std::promise<void>> promise;~ReleaseOnExit(){try{promise->set_value();}catch(...){}}} cleanup{release};
+    view.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
+        const bool first=++attempts==1;
+        return [first,ready,entered,document](const ReportCheckpoint& check) {
+            if(first){entered->store(true);if(ready.wait_for(std::chrono::seconds(30))!=std::future_status::ready)throw std::runtime_error("reopen fixture release guard");}
+            check();return QVector<ReportDocument>{document};
+        };
+    };
+    view.QueueReport({{"operationId","reopen-native"},{"module","Surface"},{"result",QJsonObject{{"generation","reopen-generation"}}}});view.show();
+    Wait([&]{return !entered->load();});view.close();view.show();
+    // 确定重开后的生成轮询先于旧 worker 完成，不依靠线程调度碰运气。
+    ReportTaskTestAccess::Generate(view);
+    Require(ReportTaskTestAccess::HasTask(view)&&attempts==1,"reopening launched another native worker before cancellation completed");
+    release->set_value();Wait([&]{return !view.GetReportIds().contains(document.id);});
+    Require(attempts==2&&!view.property("reportTaskError").toString().size(),"reopening lost the pending native report queue");
+}
+void CheckNonblockingRowLifecycle() {
+    struct Gate final {
+        std::mutex mutex;std::condition_variable changed;bool released=false;
+        std::atomic<bool> enabled{true},entered{false},exited{false},guarded{false};
+        void Hold(){if(!enabled.exchange(false))return;entered=true;std::unique_lock<std::mutex> lock(mutex);
+            // 只用于测试死锁时释放 fixture；正确性断言检查回调返回时 worker 尚未退出，不比较耗时。
+            if(!changed.wait_for(lock,std::chrono::seconds(30),[&]{return released;}))guarded=true;exited=true;}
+        void Release(){{std::lock_guard<std::mutex> lock(mutex);released=true;}changed.notify_all();}
+        void Reset(){std::lock_guard<std::mutex> lock(mutex);released=false;entered=false;exited=false;guarded=false;enabled=true;}
+    };
+    auto gate=std::make_shared<Gate>();auto destroyed=std::make_shared<std::atomic<bool>>(false);auto view=std::make_unique<ResultReport>();
+    QObject::connect(view.get(),&QObject::destroyed,[destroyed]{destroyed->store(true);});
+    struct ReleaseOnExit final {std::shared_ptr<Gate> gate;~ReleaseOnExit(){gate->Release();}} release{gate};
+    auto doc=Document("row-lifecycle","表面对象体积",0);auto* owner=QThread::currentThread();
+    doc.table=std::make_shared<ReportTable>(5000,[gate,owner,destroyed](ReportRowId row){if(QThread::currentThread()!=owner){gate->Hold();Require(!destroyed->load(),"report reader callback outlived the destroyed window");}return QStringList{QString::number(row),"1"};});
+    view->AddReport(doc);view->show();auto* search=view->findChild<QLineEdit*>("reportSearch");
+    int launches=0;ReportTaskTestAccess::BeforeStart(*view,[&]{if(++launches==1)throw std::runtime_error("injected row startup failure");});
+    search->setText("123");Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(!view->property("reportRowsError").toString().isEmpty()&&!ReportTaskTestAccess::HasScan(*view)&&!ReportTaskTestAccess::HasPendingScan(*view),"failed scan startup retained a placeholder");
+    search->setText("234");Wait([&]{return !gate->entered.load();});
+    search->setText("345");search->setText("456");search->setText("4999");
+    Require(!gate->exited.load()&&!gate->guarded.load()&&launches==2&&ReportTaskTestAccess::HasPendingScan(*view),"changing filters waited for the old worker or launched intermediate requests");
+    gate->Release();Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(launches==3&&view->GetFilteredCount()==1&&view->CreateFilteredReader()(0)==4999,"only the latest pending scan must be launched/published");
+    gate->Reset();search->setText("__cancel_blocked_worker__");Wait([&]{return !gate->entered.load();});
+    view->findChild<QPushButton*>("cancelReportRows")->click();
+    Require(!gate->exited.load()&&!gate->guarded.load()&&!view->property("reportRowsBusy").toBool()&&view->GetFilteredCount()==0,
+        "cancel callback waited for its running worker or exposed partial rows");
+    gate->Release();Wait([&]{return ReportTaskTestAccess::HasScan(*view);});
+    gate->Reset();search->setText("__close_blocked_worker__");Wait([&]{return !gate->entered.load();});
+    view->close();Require(!gate->exited.load()&&!gate->guarded.load(),"closing report UI synchronously waited for its row worker");
+    bool rejected=false;try{view->ImportReport("unused.csv");}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected,"closed report window admitted a new worker");
+    view->show();search->setText("4999");Require(!gate->exited.load()&&ReportTaskTestAccess::HasPendingScan(*view),"reopening waited for the canceled worker");
+    gate->Release();Wait([&]{return view->property("reportRowsBusy").toBool();});
+    Require(view->GetFilteredCount()==1&&view->CreateFilteredReader()(0)==4999,"old canceled result overwrote the reopened request");
+    gate->Reset();search->setText("__destroy_blocked_worker__");Wait([&]{return !gate->entered.load();});view->close();
+    // 删除时才等待收尾，随后处理已排队事件，检查没有窗口存活期之外的回调。
+    auto completion=std::async(std::launch::async,[gate]{gate->Release();});view.reset();completion.get();
+    Require(gate->exited.load()&&!gate->guarded.load(),"report dependencies were released before the worker exited");QCoreApplication::processEvents();
 }
 void CheckGenerationAndTasks() {
     ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
@@ -329,7 +421,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();
 #if defined(MANUAL_ALIGNMENT)
     CheckInspectionPreparation();
 #endif

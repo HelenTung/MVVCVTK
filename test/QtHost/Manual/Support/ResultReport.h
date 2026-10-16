@@ -55,7 +55,11 @@ public:
 protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
 private:
+    friend class ReportTaskTestAccess;
+    std::function<void()> m_beforeWorkerStart;
+    void CancelRows();
     void Refresh();
     void SelectCurrent();
     void RefreshRows();
@@ -84,6 +88,8 @@ private:
     QTimer *m_buildTimer = nullptr, *m_taskTimer = nullptr;
     class Task;
     std::unique_ptr<Task> m_task;
+    std::uint64_t m_taskRequest=0,m_rowsRequest=0;
+    bool m_acceptingRequests=true;
     QLabel* m_taskStatus = nullptr;
     QPushButton* m_cancelTask = nullptr;
     QComboBox* m_failedReport = nullptr;
@@ -101,7 +107,7 @@ private:
     QPushButton* m_locate = nullptr;
     ReportRows m_rows;
     class RowScan;
-    std::unique_ptr<RowScan> m_rowScan;
+    std::unique_ptr<RowScan> m_rowScan,m_pendingRowScan;
     QTimer* m_scanTimer = nullptr;
     QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
     bool m_allRows = false;
