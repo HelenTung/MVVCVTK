@@ -8,19 +8,20 @@ namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 std::shared_ptr<const RecordTablePayload> Table(std::size_t count=2) {
     ResultArrayScope tableStorage(0);
-    DataArray<std::int64_t> ids,voxels;DataArray<std::uint64_t> order,firstPoint,points,firstTriangle,triangles,partial,whole;
+    DataArray<std::int64_t> ids,voxels;DataArray<std::uint64_t> order,firstPoint,points,firstTriangle,triangles,partial,whole,boundaryStatus;
     DataArray<double> volume;DataArray<std::uint8_t> valid;DataArray<std::array<std::int64_t,6>> boxes;
     for(std::size_t i=0;i<count;++i) {
         ids.push_back(static_cast<std::int64_t>((count-i)*2+1));order.push_back(count-i-1);voxels.push_back(1);
         firstPoint.push_back(count==2?i*3:0);points.push_back(count==2?3:0);
         firstTriangle.push_back(count==2?i:0);triangles.push_back(count==2?1:0);
-        partial.push_back(i==0);whole.push_back(i!=0);volume.push_back(1);valid.push_back(1);boxes.push_back({0,1,0,1,0,1});
+        partial.push_back(i==0);whole.push_back(i!=0);boundaryStatus.push_back(i==0?1:0);volume.push_back(1);valid.push_back(1);boxes.push_back({0,1,0,1,0,1});
     }
     auto table=std::make_shared<const RecordTablePayload>(DataTypes::recordTable,"gap-analysis.void-regions",
         std::vector<RecordColumn>{{"void-id",std::move(ids)},{"object-row-by-id",std::move(order)},
             {"voxel-count",std::move(voxels)},{"mesh-first-point",std::move(firstPoint)},
             {"mesh-point-count",std::move(points)},{"mesh-first-triangle",std::move(firstTriangle)},
             {"mesh-triangle-count",std::move(triangles)},{"mesh-range-valid",std::move(valid)},
+            {"boundary-status",std::move(boundaryStatus)},
             {"volume-mm3",volume},{"parent-volume-mm3",volume},{"intersection-volume-mm3",std::move(volume)},
             {"roi-partial",std::move(partial)},{"whole-object-geometry",std::move(whole)},{"voxel-bbox",std::move(boxes)},
             {"equivalent-diameter-mm",DataArray<double>(count,1)}});
@@ -42,9 +43,11 @@ int main() {
         Require(reader&&!storage.expired(),"reader did not retain immutable backing after producer exit");
         const auto page=reader->GetObjects(0,1);
         Require(page.error==GapReadError::None&&page.result==result&&page.total==2&&page.next==1
-            &&page.objects[0].id==5&&page.objects[0].isRoiPartial,"object paging changed formal table order, ROI flags or revision");
+            &&page.objects[0].id==5&&page.objects[0].isRoiPartial
+            &&page.objects[0].boundaryStatus==GapBoundaryStatus::BoundaryUncertain,"object paging changed formal table order, ROI/boundary flags or revision");
         const auto found=reader->GetObjectById(3);
         Require(found.error==GapReadError::None&&found.object&&found.object->firstPoint==3
+            &&found.object->boundaryStatus==GapBoundaryStatus::Interior
             &&found.object->boundsModel==std::array<double,6>{99,103,198.5,204.5,298,306},"ID lookup or physical bounds ignored stored ranges/grid");
         Require(reader->GetObjectById(0).error==GapReadError::NotFound&&reader->GetObjectById(4).error==GapReadError::NotFound,"background or absent ID was accepted");
         const auto geometry=reader->GetGeometry(3,1,0,1);

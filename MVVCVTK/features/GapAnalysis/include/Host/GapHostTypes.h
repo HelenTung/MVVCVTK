@@ -3,6 +3,7 @@
 #include "Data/DataGraphTypes.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <array>
 #include <map>
 #include <optional>
@@ -13,6 +14,7 @@
 #include <string_view>
 
 enum class GapReadError { None, Unavailable, InvalidRequest, NotFound, Cancelled, Failed };
+enum class GapBoundaryStatus : std::uint8_t { Interior, BoundaryUncertain };
 struct GapObjectRecord final {
     std::int32_t id = 0;
     std::uint64_t voxelCount = 0;
@@ -21,10 +23,13 @@ struct GapObjectRecord final {
     bool isRoiPartial = false, hasWholeObjectGeometry = false;
     std::array<double,6> boundsModel{};
     std::uint64_t firstPoint = 0, pointCount = 0, firstTriangle = 0, triangleCount = 0;
+    // 目录仍包含边界不确定对象；此状态用于调用方区分，不代表正式孔隙。
+    GapBoundaryStatus boundaryStatus = GapBoundaryStatus::Interior;
 };
 struct GapResultDescriptor final {
     DataRevisionRef result, source;
     std::string coordinateFrame;
+    // 包含所有可见对象（含边界不确定对象）；正式 voidCount 单独排除后者。
     std::uint64_t objectCount = 0, pointCount = 0, triangleCount = 0;
 };
 struct GapObjectPage final {
@@ -56,6 +61,7 @@ public:
     virtual const GapResultDescriptor& GetMetadata() const noexcept = 0;
     // 目录读者保留同一修订的摘要及索引，不保活网格；其几何读取返回 Unavailable。
     virtual std::shared_ptr<const GapResultReader> CreateObjectReader() const = 0;
+    // 按目录返回所有可见对象，包含 BoundaryUncertain；记录状态用于区分正式孔隙。
     virtual GapObjectPage GetObjects(std::uint64_t offset,std::size_t count,
         const std::function<bool()>& getCancelled = {}) const = 0;
     virtual GapObjectReadResult GetObjectById(std::int32_t id) const = 0;
@@ -117,6 +123,9 @@ struct GapStatistics final {
     bool isPorosityAvailable = true;
     std::size_t evaluationVoxelCount = 0, actualSupportVoxelCount = 0;
     std::optional<DataRevisionRef> evaluationRoi, detectionRoi;
+    // 正式孔数、体素数、体积和孔隙率均排除边界不确定区域；以下字段单独统计这些区域。
+    std::size_t voidCount = 0, boundaryUncertainCount = 0, boundaryUncertainVoxelCount = 0;
+    double boundaryUncertainVolumeMM3 = 0.0;
 };
 enum class GapRoiPolicy : std::uint8_t { InsideOnly, WholeIfIntersects };
 

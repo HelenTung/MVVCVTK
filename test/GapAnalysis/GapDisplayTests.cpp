@@ -1,6 +1,7 @@
 // 测试用途：验证孔隙结果显示、视图切换、退出清理、失败重试和回调边界。
 #include "GapDisplayTests.h"
 #include "../TestDataPort.h"
+#include "Host/GapHostFeature.h"
 
 #include "Services/GapAnalysisService.h"
 #include "Render/GapDisplayData.h"
@@ -30,6 +31,9 @@
 #include <cstddef>
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <thread>
@@ -157,10 +161,12 @@ VtkImageGridSnapshot BuildGraphInput(
     return data->SetPrimaryImage(image, validityMask);
 }
 
-bool CommitDisplayResult(GapAnalysisService& service)
+bool CommitDisplayResult(GapAnalysisService& service,
+    std::shared_ptr<const GapDisplayData>* completedDisplay = nullptr)
 {
     GapAnalysisResult candidate;
     if (!service.GetCompletedResult(candidate)) return false;
+    if (completedDisplay) *completedDisplay = candidate.display;
     auto labels = candidate.payloads ? candidate.payloads->labels : nullptr;
     auto mesh = candidate.payloads ? candidate.payloads->mesh : nullptr;
     if (!candidate.payloads) {
@@ -186,7 +192,8 @@ bool CommitDisplayResult(GapAnalysisService& service)
 bool StartDisplay(
     GapAnalysisService& service,
     GapViewRequest request,
-    vtkImageData* image)
+    vtkImageData* image,
+    std::shared_ptr<const GapDisplayData>* completedDisplay = nullptr)
 {
     bool isCompleted = false;
     bool isSucceeded = false;
@@ -207,7 +214,7 @@ bool StartDisplay(
     }
     service.OnDisplayTick(image);
     if (service.GetAnalysisState() == GapAnalysisState::Succeeded) {
-        (void)CommitDisplayResult(service);
+        (void)CommitDisplayResult(service, completedDisplay);
     }
     return service.GetAnalysisState() == GapAnalysisState::Succeeded
         && isCompleted && isSucceeded;
@@ -932,78 +939,455 @@ int GapDisplaySuite::GetFailCount() const
         "ClearView should release worker and callback slots for a new view.");
     callbackService.ClearView();
 
-    // G1限定审计：记录5种域情形；验证兼容桥与显式填充输入一致。
-    // 相同结果只证明转换/统计投影一致，不证明DefX将NoData当作真实分析域。
-    for (int scenario = 0; scenario < 5; ++scenario) {
-        auto source = vtkSmartPointer<vtkImageData>::New();
-        source->SetDimensions(7, 7, 7);
-        source->AllocateScalars(VTK_FLOAT, 1);
-        auto* scalar = static_cast<float*>(source->GetScalarPointer());
-        std::fill_n(scalar, 343, 100.0f);
-        const auto index = [](int x, int y, int z) { return x + 7*(y + 7*z); };
-        if (scenario < 3) {
-            for (int z = 2; z <= 4; ++z)
-                for (int y = 2; y <= 4; ++y)
-                    for (int x = 2; x <= 4; ++x) scalar[index(x,y,z)] = 0;
-        }
-        if (scenario == 1) for (int z = 0; z < 3; ++z) scalar[index(3,3,z)] = 0;
-        if (scenario == 4) { scalar[index(2,3,3)] = 0; scalar[index(4,3,3)] = 0; }
-        auto mask = GetMask(source);
-        auto* validity = static_cast<unsigned char*>(mask->GetScalarPointer());
-        if (scenario == 2 || scenario == 4) {
-            for (int z = 0; z < 7; ++z)
-                for (int y = 0; y < 7; ++y)
-                    for (int x = 4; x < 7; ++x) validity[index(x,y,z)] = 0;
-        }
-        if (scenario == 3) for (int z = 0; z < 7; ++z)
-            for (int y = 0; y < 7; ++y) validity[index(0,y,z)] = 0;
-        const std::vector<float> before(scalar, scalar+343);
-        const std::vector<unsigned char> maskBefore(validity, validity+343);
-        float minimum = 100;
-        for (int i = 0; i < 343; ++i) if (validity[i]) minimum = std::min(minimum, scalar[i]);
-        auto filled = vtkSmartPointer<vtkImageData>::New();
-        filled->DeepCopy(source);
-        auto* values = static_cast<float*>(filled->GetScalarPointer());
-        for (int i = 0; i < 343; ++i) if (!validity[i]) values[i] = minimum;
-        source->Modified(); mask->Modified(); filled->Modified();
-        GapAnalysisService masked, explicitFill;
-        GapViewRequest left;
-        left.inputImage = source;
-        left.validityMask = mask;
-        left.surface = surfaceConfig;
-        left.voidParams = voidParams;
-        left.meshTargets = {std::make_shared<OverlayStub>()};
-        left.sliceTargets = {{Orientation::Top_down, std::make_shared<OverlayStub>()}};
-        GapViewRequest right;
-        right.inputImage = filled;
-        right.surface = surfaceConfig;
-        right.voidParams = voidParams;
-        right.meshTargets = {std::make_shared<OverlayStub>()};
-        right.sliceTargets = {{Orientation::Top_down, std::make_shared<OverlayStub>()}};
-        const bool started = StartDisplay(masked, std::move(left), source)
-            && StartDisplay(explicitFill, std::move(right), filled);
-        expect(started, "Validity compatibility scenarios must execute real DefX");
-        if (started) {
-            const auto a = masked.BuildLabelImage(), b = explicitFill.BuildLabelImage();
-            const auto av = a ? static_cast<const int*>(a->GetScalarPointer()) : nullptr;
-            const auto bv = b ? static_cast<const int*>(b->GetScalarPointer()) : nullptr;
-            const auto sa = masked.GetStatistics(), sb = explicitFill.GetStatistics();
-            expect(av && bv && a->GetNumberOfPoints() == 343 && b->GetNumberOfPoints() == 343
-                && std::equal(av,av+343,bv)
-                && sa.objectVoxelCount == sb.objectVoxelCount && sa.voidVoxelCount == sb.voidVoxelCount
-                && sa.objectVolumeMM3 == sb.objectVolumeMM3 && sa.voidVolumeMM3 == sb.voidVolumeMM3
-                && sa.porosityRatio == sb.porosityRatio,
-                "Mask compatibility must preserve complete supplier labels/header without independent label filtering");
-            std::size_t outside = 0;
-            if (av) for (int i = 0; i < 343; ++i) if (!validity[i] && av[i] != 0) ++outside;
-            std::cout << "GAP_DOMAIN_COMPAT scenario=" << scenario << " void_voxels=" << sa.voidVoxelCount
-                << " outside_labeled_voxels=" << outside << " metrology_verified=0\n";
-        }
-        expect(std::equal(before.begin(),before.end(),scalar)
-            && std::equal(maskBefore.begin(),maskBefore.end(),validity),
-            "Gap validity conversion does not mutate source scalar or mask");
-        masked.ClearView();
-        explicitFill.ClearView();
-    }
+    // 掩膜结果已采用边界不确定契约；原有“等同最小值填充”的循环不再是正确预期。
+    // 以独立整数几何覆盖有效域、边界、统计和显示，All 与路径回归共同执行。
+    failureCount += GetGapMaskGeometryFailCount();
     return failureCount;
+}
+
+// 真值来自整数立方体与显式有效域；不调用另一条检测路径生成预期。
+int GetGapMaskGeometryFailCount()
+{
+    int failures = 0;
+    const auto expect = [&](bool value, const char* message) {
+        if (!value) { ++failures; std::cerr << "FAILED: " << message << '\n'; }
+    };
+    constexpr int side = 11, voxelCount = side * side * side;
+    const auto index = [](int x, int y, int z) { return x + side * (y + side * z); };
+    struct Scenario final {
+        std::size_t formal = 0;
+        std::size_t boundary = 0;
+        bool useRatio = false;
+        bool filter = false;
+    };
+    constexpr std::array<Scenario, 14> scenarios{{
+        {27, 0}, {27, 0}, {0, 36}, {0, 0}, {0, 27}, {0, 18}, {0, 0},
+        {0, 0}, {27, 0, true}, {27, 0}, {27, 0}, {0, 27}, {0, 0, false, true}, {0, 27}
+    }};
+    for (std::size_t scenario = 0; scenario < scenarios.size(); ++scenario) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(side, side, side);
+        image->SetSpacing(1, 1, 1); // 合成解析几何，体素体积为 1 mm^3。
+        image->AllocateScalars(VTK_FLOAT, 1);
+        auto* values = static_cast<float*>(image->GetScalarPointer());
+        std::fill_n(values, voxelCount, 100.0f);
+        auto mask = GetMask(image);
+        auto* validity = static_cast<unsigned char*>(mask->GetScalarPointer());
+        std::vector<unsigned char> expectedDisplay(voxelCount, 0);
+        const auto hole = [&](int firstX, int lastX, int firstY = 4, int lastY = 6,
+                              int firstZ = 4, int lastZ = 6) {
+            for (int z = firstZ; z <= lastZ; ++z) for (int y = firstY; y <= lastY; ++y)
+                for (int x = firstX; x <= lastX; ++x) {
+                    expectedDisplay[index(x,y,z)] = 1;
+                    values[index(x,y,z)] = 0;
+                }
+        };
+        // 几何预期按显式体素集合推导：基础块为 3x3x3；相邻无效面只保留未遮挡的有效体素。
+        if (scenario == 0 || scenario == 1 || scenario == 4 || scenario == 5
+            || scenario == 8 || scenario == 9 || scenario == 10 || scenario == 11 || scenario == 12 || scenario == 13)
+            hole(2, 4);
+        // 场景1中孔与无效块之间仍有x=5、6两层材料，不发生面接触。
+        if (scenario == 1 || scenario == 3 || scenario == 7 || scenario == 8 || scenario == 12) {
+            for (int z = 4; z <= 6; ++z) for (int y = 4; y <= 6; ++y)
+                for (int x = 7; x <= 8; ++x) {
+                    validity[index(x,y,z)] = 0;
+                    if (scenario == 7) values[index(x,y,z)] = 1000000.0f;
+                    if (scenario == 8) values[index(x,y,z)] = -1000000.0f;
+                }
+        }
+        if (scenario == 2) {
+            hole(2, 3); hole(7, 8); // 两个 2x3x3 孔共 36 体素；三体素无效隔带令两块均属边界不确定。
+            for (int z = 4; z <= 6; ++z) for (int y = 4; y <= 6; ++y)
+                for (int x = 4; x <= 6; ++x) validity[index(x,y,z)] = 0;
+        }
+        // 场景3的有效域只有材料，无效块附近没有空气。
+        if (scenario == 4) {
+            // 27 孔经空气通道连到体积外部；将通道内侧 x=1 置无效后，孔整体边界不确定。
+            for (int x = 0; x <= 1; ++x) values[index(x,5,5)] = 0;
+            validity[index(1,5,5)] = 0;
+        }
+        if (scenario == 5) {
+            // 无效面覆盖 x=4 的九个孔体素，剩余 18 个显示体素都邻接不确定域。
+            for (int z = 4; z <= 6; ++z) for (int y = 4; y <= 6; ++y)
+                validity[index(4,y,z)] = 0;
+        }
+        if (scenario == 6 || scenario == 7) {
+            // 全部有效域为背景空气；远处无效体素不应生成正式孔或边界对象。
+            std::fill_n(values, voxelCount, 0.0f);
+            for (int z = 4; z <= 6; ++z) for (int y = 4; y <= 6; ++y)
+                for (int x = 7; x <= 8; ++x) {
+                    validity[index(x,y,z)] = 0;
+                    if (scenario == 7) values[index(x,y,z)] = 1000000.0f;
+                }
+        }
+        // 场景8有效域范围为0..100；无效域的-1,000,000不得改变相对比例0.5对应的阈值。
+        if (scenario == 9) {
+            // 无效 (5,7,7) 与孔只角接触；六邻接下孔仍是正式内部对象。
+            validity[index(5,7,7)] = 0;
+        }
+        if (scenario == 10) {
+            // 无效 (5,7,5) 与孔只棱接触；六邻接下孔仍是正式内部对象。
+            validity[index(5,7,5)] = 0;
+        }
+        if (scenario == 11 || scenario == 13) {
+            // 无效 (5,5,5) 与孔面接触；整个 3x3x3 连通孔成为边界不确定。
+            validity[index(5,5,5)] = 0;
+        }
+        if (scenario == 12) {
+            // 原始 27 体素孔低于 30 mm^3 筛选值；显示及正式/边界统计都应被筛除。
+            std::fill(expectedDisplay.begin(), expectedDisplay.end(), 0);
+        }
+        if (scenario == 5) {
+            std::fill(expectedDisplay.begin(), expectedDisplay.end(), 0);
+            for (int z = 4; z <= 6; ++z) for (int y = 4; y <= 6; ++y)
+                for (int x = 2; x <= 3; ++x) expectedDisplay[index(x,y,z)] = 1;
+        }
+        const std::vector<float> original(values, values + voxelCount);
+        const std::vector<unsigned char> originalMask(validity, validity + voxelCount);
+        image->Modified(); mask->Modified();
+        GapAnalysisService service;
+        GapViewRequest request;
+        request.graphInput = BuildGraphInput(image, scenario == 0 ? nullptr : mask);
+        if(scenario==13) {
+            // 全域 ROI 包含全部27个边界孔体素；评价不能把边界片段升级成完整孔几何。
+            RoiPrimitive all;all.shape=RoiShape::HalfSpace;all.origin={-1,0,0};all.normal={1,0,0};
+            const auto roi=RoiEvaluator::GetPreview(request.graphInput->graph,
+                {request.graphInput->data->self,{{RoiNodeKind::Primitive,all}}});
+            expect(roi.error==RoiError::None && roi.roi,"whole-domain ROI resolves for uncertain pore");
+            request.evaluationRoi=roi.roi;request.roiPolicy=GapRoiPolicy::InsideOnly;
+        }
+        request.surface.isoMode = scenarios[scenario].useRatio ? GapIsoMode::DataRangeRatio : GapIsoMode::AbsoluteValue;
+        request.surface.dataRangeRatio = 0.5;
+        request.surface.absoluteIsoValue = 50;
+        request.surface.backgroundMean = 0;
+        request.surface.materialMean = 100;
+        request.voidParams.isFilterEnabled = scenarios[scenario].filter;
+        request.voidParams.minVolumeMM3 = scenarios[scenario].filter ? 30 : 0;
+        request.meshTargets = {std::make_shared<OverlayStub>()};
+        std::shared_ptr<const GapDisplayData> completedDisplay;
+        const bool started = StartDisplay(service, std::move(request), image, &completedDisplay);
+        expect(started, "independent mask geometry must complete through real DefX");
+        if (started) {
+            const auto labels = service.BuildLabelImage();
+            const auto* actual = labels ? static_cast<const int*>(labels->GetScalarPointer()) : nullptr;
+            expect(actual && labels->GetNumberOfPoints() == voxelCount, "mask geometry labels have expected shape");
+            if (actual && labels->GetNumberOfPoints() == voxelCount) {
+                std::size_t invalid = 0, missed = 0, extra = 0;
+                for (int i = 0; i < voxelCount; ++i) {
+                    invalid += scenario != 0 && !validity[i] && actual[i] != 0;
+                    missed += expectedDisplay[i] && actual[i] == 0;
+                    extra += !expectedDisplay[i] && actual[i] != 0;
+                }
+                const auto expectedVoxels = std::count(expectedDisplay.begin(), expectedDisplay.end(), 1);
+                const auto stats = service.GetStatistics();
+                const auto regions = service.GetVoidRegions();
+                std::size_t formalRegionVoxels = 0, boundaryRegionVoxels = 0;
+                bool regionStatesValid = true, boundaryGeometryValid = true;
+                for (const auto& region : regions) {
+                    if (region.boundaryStatus == GapBoundaryStatus::BoundaryUncertain) {
+                        boundaryRegionVoxels += static_cast<std::size_t>(region.voxelCount);
+                        boundaryGeometryValid &= !region.hasWholeObjectGeometry;
+                    } else if (region.boundaryStatus == GapBoundaryStatus::Interior) {
+                        formalRegionVoxels += static_cast<std::size_t>(region.voxelCount);
+                    } else regionStatesValid = false;
+                }
+                const Scenario expected = scenarios[scenario];
+                std::cout << "GAP_MASK_GEOMETRY scenario=" << scenario
+                          << " expected_display=" << expectedVoxels << " formal=" << stats.voidVoxelCount
+                          << " boundary=" << stats.boundaryUncertainVoxelCount << " invalid=" << invalid
+                          << " missed=" << missed << " extra=" << extra << " regions=" << regions.size() << '\n';
+                expect(invalid == 0, "invalid domain must contain no pore labels");
+                expect(missed == 0 && extra == 0, "labels must match the independently defined display geometry");
+                expect(stats.voidCount == (expected.formal ? 1u : 0u)
+                           && stats.voidVoxelCount == expected.formal
+                           && std::abs(stats.voidVolumeMM3 - expected.formal) <= 1e-6,
+                       "formal count, voxels and volume match independent geometry");
+                expect(stats.boundaryUncertainCount == (expected.boundary ? (scenario == 2 ? 2u : 1u) : 0u)
+                           && stats.boundaryUncertainVoxelCount == expected.boundary
+                           && std::abs(stats.boundaryUncertainVolumeMM3 - expected.boundary) <= 1e-6,
+                       "boundary count, voxels and volume match independent geometry");
+                expect(formalRegionVoxels == expected.formal && boundaryRegionVoxels == expected.boundary
+                           && regionStatesValid && boundaryGeometryValid,
+                       "visible objects retain boundary state and omit whole geometry for uncertain regions");
+                expect(regions.size() == (expected.formal ? 1u : 0u) + (expected.boundary ? (scenario == 2 ? 2u : 1u) : 0u),
+                       "all independently expected visible pore objects are retained");
+                if (scenario == 2) expect(actual[index(2,5,5)] != 0 && actual[index(7,5,5)] != 0
+                    && actual[index(2,5,5)] != actual[index(7,5,5)], "two valid pore components must remain distinct");
+                expect(completedDisplay && completedDisplay->labels,
+                       "completed display candidate retains its label lookup table");
+                if (completedDisplay && completedDisplay->labels) {
+                    GapDisplayParams recolor;
+                    recolor.mode = GapColorMode::Constant;
+                    recolor.constantColor = {0.25, 0.75, 0.125};
+                    expect(service.SetDisplay(recolor), "color mode change accepts boundary-containing result");
+                    const auto recolored = GapDisplayData::CreateColors(*completedDisplay, recolor);
+                    for (const auto& region : regions) {
+                        const auto checkAmber = [&](const std::shared_ptr<const GapDisplayData>& display) {
+                            const auto* rgba = display && display->labels
+                                ? display->labels->MapValue(region.id) : nullptr;
+                            return rgba && rgba[0] == 255 && rgba[1] == 166 && rgba[2] == 0 && rgba[3] == 255;
+                        };
+                        if (region.boundaryStatus == GapBoundaryStatus::BoundaryUncertain) {
+                            expect(checkAmber(completedDisplay) && checkAmber(recolored),
+                                   "boundary labels retain fixed amber RGBA after display color changes");
+                        } else {
+                            const auto* rgba = recolored && recolored->labels
+                                ? recolored->labels->MapValue(region.id) : nullptr;
+                            expect(rgba && rgba[0] == 64 && rgba[1] == 191 && rgba[2] == 32 && rgba[3] == 255,
+                                   "formal regions continue using the selected color ramp");
+                        }
+                    }
+                }
+            }
+        }
+        expect(std::equal(original.begin(), original.end(), values)
+                   && std::equal(originalMask.begin(), originalMask.end(), validity),
+               "mask geometry analysis leaves source scalar and validity data unchanged");
+        service.ClearView();
+    }
+    return failures;
+}
+
+namespace {
+class GapRealViews final : public FeatureViewDirectory {
+public:
+    std::shared_ptr<OverlayStub> overlay = std::make_shared<OverlayStub>();
+    std::vector<HostFeatureView> GetViews(const HostViewTargets&) const override
+    { return {{"gap-real", HostRenderViewRole::Primary3D}}; }
+    std::shared_ptr<FeatureViewService> GetFeaturePort(const std::string&) const override { return {}; }
+    std::shared_ptr<OverlayService> GetOverlayPort(const std::string&) const override { return overlay; }
+    std::optional<HostInputView> GetInputView(const HostViewTarget&) const override { return {}; }
+};
+class GapRealControl final : public FeatureHostControl {
+public:
+    bool AttachInput(HostInputBinding) override { return true; }
+    bool DetachInput(std::string_view) override { return true; }
+    bool SetActiveViews(const std::vector<std::string>&) override { return true; }
+    bool SetViewStatus(const std::vector<std::string>&, const std::string&) override { return true; }
+    bool SendSceneDelta(FeatureSceneDelta) override { return true; }
+    bool SendOwnerComplete(std::function<void()> complete) override {
+        pending.push_back(std::move(complete));
+        return true;
+    }
+    void Drain() {
+        auto ready = std::move(pending);
+        pending.clear();
+        for (auto& complete : ready) complete();
+    }
+private:
+    std::vector<std::function<void()>> pending;
+};
+}
+
+// 输入规格来自 integration-20261011/host/consumer-real-input.json；只验证真实小样本公共请求链。
+int GetGapRealSmallFailCount(const char* rawPath, const char* referencePath, bool writeReference)
+{
+    int failures = 0;
+    const auto expect = [&](bool value, const char* message) {
+        if (!value) { ++failures; std::cerr << "FAILED: " << message << '\n'; }
+        return value;
+    };
+    constexpr int side = 32, count = side * side * side;
+    std::vector<float> original(count);
+    std::ifstream input(std::filesystem::u8path(rawPath), std::ios::binary);
+    if (!expect(bool(input.read(reinterpret_cast<char*>(original.data()), count * sizeof(float)))
+                    && input.peek() == std::char_traits<char>::eof(), "real ROI must be exactly 32^3 float32 values")) return failures;
+    for (int masked = 0; masked < 2; ++masked) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(side, side, side);
+        image->SetSpacing(.1537, .1537, .1537);
+        image->SetOrigin(74.3908, 74.3908, 74.3908);
+        image->AllocateScalars(VTK_FLOAT, 1);
+        auto* scalars = static_cast<float*>(image->GetScalarPointer());
+        std::copy(original.begin(), original.end(), scalars);
+        auto mask = GetMask(image);
+        auto* validity = static_cast<unsigned char*>(mask->GetScalarPointer());
+        if (masked) for (int z=0;z<side;++z) for (int y=0;y<side;++y)
+            for (int x=24;x<side;++x) validity[x+side*(y+side*z)]=0;
+        image->Modified(); mask->Modified();
+        auto data = std::make_shared<TestDataPort>();
+        const auto source = data->SetPrimaryImage(image, masked ? mask.GetPointer() : nullptr);
+        if (!expect(bool(source), "real ROI graph publication succeeds")) continue;
+        GapHostConfig config;
+        config.inputViews.viewIds = {"gap-real"};
+        config.defaultStart.targetViews = config.inputViews;
+        config.defaultStart.surface.isoMode = GapIsoMode::AbsoluteValue;
+        config.defaultStart.surface.absoluteIsoValue = .172;
+        config.defaultStart.surface.backgroundMean = -1.617f;
+        config.defaultStart.surface.materialMean = .453f;
+        config.keys.switchOverlay.keyCode = 'j';
+        config.keys.exit.keySym = "Escape";
+        auto feature = std::make_shared<GapHostFeature>(config);
+        HostFeatureContext context;
+        context.data = data;
+        context.views = std::make_shared<GapRealViews>();
+        auto control = std::make_shared<GapRealControl>();
+        context.host = control;
+        if (!expect(feature->AttachHost(context), "real ROI feature attaches through existing SPI")) continue;
+        GapHostRequest request; request.action=GapHostAction::Start; request.start=config.defaultStart;
+        GapHostResult completed;
+        int callbacks = 0;
+        const bool accepted = feature->SendRequest(std::move(request), [&](GapHostResult result) {
+            completed=std::move(result); ++callbacks;
+        }).status == GapAdmissionStatus::Accepted;
+        expect(accepted, "real ROI public Gap Start is accepted");
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+        while (accepted && callbacks==0 && std::chrono::steady_clock::now()<deadline) {
+            feature->OnHostTick();
+            control->Drain();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        // 这是测试进程保护，避免超时后异步回调访问已离开的测试栈。
+        if (accepted && callbacks==0) { expect(false,"real ROI completion timed out"); std::abort(); }
+        const bool succeeded=callbacks==1
+            && (completed.status==GapResultStatus::Succeeded || completed.status==GapResultStatus::SucceededWithDisplayFailure);
+        expect(succeeded, "real ROI public Gap Start completes exactly once");
+        if (succeeded) {
+            const auto graph=data->GetDataGraph();
+            const auto node=data->GetData(graph,completed.labelMap);
+            const auto labels=node?std::dynamic_pointer_cast<const LabelMap3DPayload>(node->payload):nullptr;
+            const auto reader=feature->GetResultReader(completed.resultSet);
+            expect(completed.sourceRevision==source->data->self && labels && labels->GetValueCount()==count
+                && reader && reader->GetMetadata().source==source->data->self,
+                "real ROI result identity, label shape and reader source agree");
+            if (labels) {
+                std::size_t labeled=0,outside=0;
+                std::visit([&](const auto& values) {
+                    if (!values) return;
+                    for(std::size_t i=0;i<values->size();++i) {
+                        labeled+=(*values)[i]!=0;
+                        outside+=masked && !validity[i] && (*values)[i]!=0;
+                    }
+                },labels->GetValues());
+                std::uint64_t formalObjects=0,boundaryObjects=0,formalObjectVoxels=0,boundaryObjectVoxels=0;
+                bool objectsReadable=bool(reader);
+                if(reader) {
+                    std::uint64_t offset=0;
+                    do {
+                        const auto page=reader->GetObjects(offset,4096);
+                        if(page.error!=GapReadError::None || page.next<=offset && page.total>offset) {
+                            objectsReadable=false;break;
+                        }
+                        for(const auto& object:page.objects) {
+                            if(object.boundaryStatus==GapBoundaryStatus::BoundaryUncertain) {
+                                ++boundaryObjects;boundaryObjectVoxels+=object.voxelCount;
+                            } else {
+                                ++formalObjects;formalObjectVoxels+=object.voxelCount;
+                            }
+                        }
+                        offset=page.next;
+                        if(offset>=page.total)break;
+                    } while(objectsReadable);
+                }
+                std::cout << "GAP_REAL_SMALL masked=" << masked << " labeled=" << labeled
+                    << " formal_voxels=" << completed.statistics.voidVoxelCount
+                    << " boundary_voxels=" << completed.statistics.boundaryUncertainVoxelCount
+                    << " formal_objects=" << formalObjects << " boundary_objects=" << boundaryObjects
+                    << " outside=" << outside << '\n';
+
+                if (!masked && referencePath && *referencePath) {
+                    std::vector<std::int32_t> current;
+                    std::visit([&](const auto& values) {
+                        if(values)for(const auto value:*values)current.push_back(static_cast<std::int32_t>(value));
+                    },labels->GetValues());
+                    const auto bytes=static_cast<std::streamsize>(current.size()*sizeof(std::int32_t));
+                    if (writeReference) {
+                        std::ofstream saved(std::filesystem::u8path(referencePath),std::ios::binary);
+                        expect(bool(saved.write(reinterpret_cast<const char*>(current.data()),bytes)),"save pre-fix real unmasked labels");
+                    } else {
+                        std::vector<std::int32_t> expected(current.size());
+                        std::ifstream saved(std::filesystem::u8path(referencePath),std::ios::binary);
+                        expect(bool(saved.read(reinterpret_cast<char*>(expected.data()),bytes))
+                            && saved.peek()==std::char_traits<char>::eof() && expected==current,
+                            "real unmasked labels equal the pre-fix reference at every voxel");
+                    }
+                }
+                expect(labeled==completed.statistics.voidVoxelCount+completed.statistics.boundaryUncertainVoxelCount,
+                    "real ROI label count agrees with formal and boundary statistics");
+                expect(objectsReadable && formalObjects==completed.statistics.voidCount
+                    && boundaryObjects==completed.statistics.boundaryUncertainCount
+                    && formalObjectVoxels==completed.statistics.voidVoxelCount
+                    && boundaryObjectVoxels==completed.statistics.boundaryUncertainVoxelCount,
+                    "real ROI object pages preserve formal and boundary object counts and voxels");
+                expect(outside==0,"real ROI masked domain contains no formal pore labels");
+                const auto& grid=labels->GetGeometry();
+                expect(grid.spacing==std::array<double,3>{.1537,.1537,.1537}
+                    && grid.origin==std::array<double,3>{74.3908,74.3908,74.3908},
+                    "real ROI labels preserve measured spacing and source origin");
+            }
+        }
+        expect(std::equal(original.begin(),original.end(),scalars),"real ROI scalar input remains unchanged");
+        if (succeeded) {
+            GapHostRequest exit; exit.action = GapHostAction::Exit;
+            int exitCallbacks = 0;
+            const bool exitAccepted = feature->SendRequest(std::move(exit), [&](GapHostResult result) {
+                ++exitCallbacks;
+                expect(result.status == GapResultStatus::Succeeded, "real ROI Exit completes successfully");
+            }).status == GapAdmissionStatus::Accepted;
+            expect(exitAccepted, "real ROI public Exit is accepted");
+            const auto exitDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+            while (exitAccepted && exitCallbacks==0 && std::chrono::steady_clock::now()<exitDeadline) {
+                feature->OnHostTick(); control->Drain();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (exitAccepted && exitCallbacks==0) { expect(false,"real ROI Exit timed out"); std::abort(); }
+            expect(exitCallbacks==1 && !feature->GetState().isViewActive, "real ROI Exit clears the view exactly once");
+        }
+        expect(feature->DetachHost(),"real ROI feature detaches after completion");
+    }
+    return failures;
+}
+
+
+// 运行时探针：两个 2^3 空气块分别只有面、棱、角接触；几何不依赖检测输出。
+int GetGapConnectivityFailCount(const char* referencePath, bool writeReference)
+{
+    int failures = 0;
+    std::vector<int> reference;
+    for (int contact = 0; contact < 3; ++contact) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(11,11,11); image->SetSpacing(1,1,1);
+        image->AllocateScalars(VTK_FLOAT,1);
+        auto* values=static_cast<float*>(image->GetScalarPointer());
+        std::fill_n(values,1331,100.f);
+        const auto block=[&](int bx,int by,int bz) {
+            for(int z=bz;z<bz+2;++z)for(int y=by;y<by+2;++y)for(int x=bx;x<bx+2;++x)
+                values[x+11*(y+11*z)]=0;
+        };
+        block(3,3,3); block(5,contact>=1?5:3,contact>=2?5:3);
+        image->Modified();
+        GapAnalysisService service; GapViewRequest request;
+        request.graphInput=BuildGraphInput(image);
+        request.surface.isoMode=GapIsoMode::AbsoluteValue;
+        request.surface.absoluteIsoValue=50;request.surface.backgroundMean=0;request.surface.materialMean=100;
+        request.meshTargets={std::make_shared<OverlayStub>()};
+        if(!StartDisplay(service,std::move(request),image)){++failures;continue;}
+        auto labels=service.BuildLabelImage();
+        const auto* data=labels?static_cast<const int*>(labels->GetScalarPointer()):nullptr;
+        const auto regions=service.GetVoidRegions(); const auto stats=service.GetStatistics();
+        std::cout << "GAP_CONNECTIVITY contact=" << contact << " regions=" << regions.size()
+            << " voxels=" << stats.voidVoxelCount << " volume_mm3=" << stats.voidVolumeMM3 << '\n';
+        const std::size_t expectedRegions = contact == 0 ? 1 : 2;
+        if(!data || stats.voidVoxelCount!=16 || regions.size()!=expectedRegions){++failures;}else reference.insert(reference.end(),data,data+1331);
+        reference.push_back(static_cast<int>(regions.size()));
+        reference.push_back(static_cast<int>(stats.voidVoxelCount));
+        reference.push_back(static_cast<int>(stats.objectVoxelCount));
+        for(const auto& region:regions) {
+            reference.push_back(region.id); reference.push_back(static_cast<int>(region.voxelCount));
+        }
+        service.ClearView();
+    }
+    if(referencePath && *referencePath) {
+        const auto bytes=static_cast<std::streamsize>(reference.size()*sizeof(int));
+        if(writeReference) {
+            std::ofstream output(std::filesystem::u8path(referencePath),std::ios::binary);
+            if(!output.write(reinterpret_cast<const char*>(reference.data()),bytes))++failures;
+        }else {
+            std::ifstream input(std::filesystem::u8path(referencePath),std::ios::binary);
+            std::vector<int> expected(reference.size());
+            if(!input.read(reinterpret_cast<char*>(expected.data()),bytes)
+                || input.peek()!=std::char_traits<char>::eof() || expected!=reference)++failures;
+        }
+    }
+    return failures;
 }

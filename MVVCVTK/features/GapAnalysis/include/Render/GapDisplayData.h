@@ -32,6 +32,7 @@ struct GapDisplayData final {
     std::string resultLabel;
     // 稀疏 ID 与其正式体积只供重新着色，切换不重新提取网格或修改标签。
     std::shared_ptr<const GapRegionVolumes> regionVolumes;
+    std::shared_ptr<const DataArray<std::int32_t>> boundaryRegions;
     std::array<double, 2> resultRange{0, 0};
     std::array<double,2> mappingRange{0,0};
     GapDisplayParams params;
@@ -87,6 +88,7 @@ struct GapDisplayData final {
         result->volumes = AnalysisColorStyle::BuildRamp(result->mappingRange,ramp);
         auto labels=vtkSmartPointer<GapLabelLookupTable>::New();
         labels->SetRegions(source.regionVolumes,result->mappingRange,ramp);
+        labels->SetBoundaryRegions(source.boundaryRegions);
         result->labels=labels;
         return result;
     }
@@ -109,29 +111,37 @@ struct GapDisplayData final {
             std::numeric_limits<double>::lowest()};
         ResultArrayScope directoryStorage;
         auto directory=std::make_shared<GapRegionVolumes>();
+        auto boundaryRegions=std::make_shared<DataArray<std::int32_t>>();
         directory->reserve(regions.size());
+        boundaryRegions->reserve(regions.size());
         for (const auto& region : regions) {
             if(isStopping.load())return {};
             if (region.id <= 0
                 || !std::isfinite(region.volumeMM3) || region.volumeMM3 < 0) return {};
             if(region.voxelCount<=0)continue;
             directory->emplace_back(region.id,region.volumeMM3);
-            range[0] = std::min(range[0], double(region.volumeMM3));
-            range[1] = std::max(range[1], double(region.volumeMM3));
+            if(region.boundaryStatus==GapBoundaryStatus::BoundaryUncertain)boundaryRegions->push_back(region.id);
+            else {
+                range[0] = std::min(range[0], double(region.volumeMM3));
+                range[1] = std::max(range[1], double(region.volumeMM3));
+            }
         }
         try {
             std::sort(directory->begin(),directory->end(),[&](const auto& a,const auto& b){
                 if(isStopping.load())throw std::runtime_error("Gap display directory cancelled.");return a.first<b.first;});
         }catch(const std::runtime_error&){if(isStopping.load())return {};throw;}
         if(std::adjacent_find(directory->begin(),directory->end(),[](const auto& a,const auto& b){return a.first==b.first;})!=directory->end())return {};
-        directoryStorage.Finish();
         result->regionVolumes=std::move(directory);
+        std::sort(boundaryRegions->begin(),boundaryRegions->end());
+        directoryStorage.Finish();
+        result->boundaryRegions=std::move(boundaryRegions);
         result->hasRegions = !result->regionVolumes->empty();
-        if (!result->hasRegions) range = {0, 0};
+        if (!result->hasRegions || range[0]==std::numeric_limits<double>::max()) range = {0, 0};
         result->resultRange=range;result->mappingRange=range;
         result->volumes = AnalysisColorStyle::BuildRamp(range, GetColorRamp(result->params));
         auto labels=vtkSmartPointer<GapLabelLookupTable>::New();
         labels->SetRegions(result->regionVolumes,range,GetColorRamp(result->params),result->volumes);
+        labels->SetBoundaryRegions(result->boundaryRegions);
         result->labels=labels;
         auto geometry=preparedMesh?vtkSmartPointer<vtkPolyData>(preparedMesh):GapSurfaceBuilder::Build(image,regions,isStopping,evaluationRoi,parentRegions);
         if(!geometry)return fail("Gap surface construction failed or was cancelled.");
