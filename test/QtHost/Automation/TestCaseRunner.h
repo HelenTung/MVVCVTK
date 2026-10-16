@@ -4,4 +4,5 @@
 namespace Manual {
 class TestWindow;
 int StartTestCase(TestWindow& window, const QString& path, const QString& recordPath, bool selfTest);
+int StartCaptureConsistencyTest(TestWindow& window,const QString& output,const QString& recordPath);
 }

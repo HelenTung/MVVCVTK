@@ -18,6 +18,11 @@ vtk_module_autoinit(TARGETS qt_feature_tests MODULES ${MVVCVTK_QT_VTK_TARGETS})
 add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
     --background --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
+add_test(NAME QtFeature.CaptureConsistency COMMAND qt_feature_tests --background --capture-consistency-only
+    --capture-output "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>"
+    --record "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>-record.json")
+SetTestRuntime(QtFeature.CaptureConsistency qt_feature_tests)
+set_tests_properties(QtFeature.CaptureConsistency PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "capture")
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
 set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 0 LABELS "Reports;preview")

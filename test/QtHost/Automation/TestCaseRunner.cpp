@@ -44,6 +44,8 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTemporaryDir>
+#include <QImage>
+#include <QSet>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
@@ -66,6 +68,8 @@
 #include <cstring>
 #include <limits>
 #include <set>
+#include <utility>
+#include <vector>
 #include <cmath>
 #include <vtkCommand.h>
 #include <vtkRenderer.h>
@@ -119,15 +123,71 @@ void Check(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
     std::cout << "PASS: " << message << std::endl;
 }
-void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonObject& step,
-    std::uint64_t operationId)
+QJsonObject GetCaptureScene(const HostSceneViewState& scene)
 {
+    QJsonArray inputs, displays, features;
+    for (const auto& input : scene.inputs)
+        inputs.append(QJsonObject{{"role",QString::fromStdString(input.role)},{"source",GetRefText(input.source)}});
+    for (const auto& display : scene.displays)
+        displays.append(QJsonObject{{"view",QString::fromStdString(display.viewId)},
+            {"feature",QString::fromStdString(display.featureId)},{"localId",QString::fromStdString(display.localId)},
+            {"data",GetRefText(display.data)},
+            {"operation",QJsonObject{{"feature",QString::fromStdString(display.operation.featureId)},
+                {"attachmentId",QString::number(display.operation.attachmentId)},
+                {"requestId",QString::number(display.operation.requestId)}}}});
+    for (const auto& feature : scene.activeFeatureIds) features.append(QString::fromStdString(feature));
+    QJsonObject result{{"view",QString::fromStdString(scene.id)},{"role",int(scene.role)},
+        {"isAvailable",scene.isAvailable},{"presentationRevision",QString::number(scene.presentationRevision)},
+        {"sceneEpoch",QString::number(scene.sceneEpoch)},{"renderedEpoch",QString::number(scene.renderedEpoch)},
+        {"graphCommitId",QString::number(scene.graphCommitId)},
+        {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()},
+        {"bindingRevision",QString::number(scene.presentation ? scene.presentation->bindingRevision : 0)},
+        {"inputs",inputs},{"displays",displays},{"activeFeatureIds",features}};
+    if (scene.camera) {
+        const auto& camera=*scene.camera;
+        result["camera"]=QJsonObject{{"position",GetValues(camera.position)},{"focalPoint",GetValues(camera.focalPoint)},
+            {"viewUp",GetValues(camera.viewUp)},{"clippingRange",GetValues(camera.clippingRange)},
+            {"parallelScale",camera.parallelScale},{"viewAngle",camera.viewAngle},{"isParallel",camera.isParallel}};
+    }
+    return result;
+}
+std::optional<QJsonObject> GetBusinessCaptureState(TestWindow& window)
+{
+    const auto session=window.GetSession();
+    const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
+    const auto state=session?session->GetStateSnapshot():std::optional<HostStateSnapshot>{};
+    if(!input||!state||state->sessionGeneration==0||state->scenes.size()!=4||state->scenes.front().sceneEpoch==0
+        ||!window.GetWorkflow().getRenderPending||GetId(window.GetDiagnostics()["pendingUpdateFailures"])!=0)return {};
+    QJsonArray scenes,viewports;
+    QSet<QString> sceneIds,widgetIds;
+    for(const auto& scene:state->scenes) {
+        const auto current=session->GetRenderViewState({scene.id});
+        if(!scene.isAvailable||!scene.presentation||!scene.camera||!current
+            ||scene.presentation->dataRevision!=input->dataRevision||scene.presentation->bindingRevision!=input->bindingRevision
+            ||current->dataRevision!=input->dataRevision||current->bindingRevision!=input->bindingRevision
+            ||scene.sceneEpoch!=state->scenes.front().sceneEpoch||scene.renderedEpoch==0||scene.renderedEpoch>scene.sceneEpoch
+            ||window.GetWorkflow().getRenderPending(scene.id))return {};
+        scenes.append(GetCaptureScene(scene));sceneIds.insert(QString::fromStdString(scene.id));
+    }
+    for(auto* widget:window.findChildren<QVTKOpenGLNativeWidget*>())if(widget->isVisible()) {
+        const auto id=widget->objectName()=="primary3D"?QString("primary-3d"):widget->objectName();
+        widgetIds.insert(id);const auto rect=widget->geometry();
+        viewports.append(QJsonObject{{"widget",widget->objectName()},{"view",id},
+            {"geometry",QJsonArray{rect.x(),rect.y(),rect.width(),rect.height()}},{"devicePixelRatio",widget->devicePixelRatioF()}});
+    }
+    if(sceneIds.size()!=4||widgetIds!=sceneIds||viewports.size()!=4)return {};
+    return QJsonObject{{"sessionGeneration",QString::number(state->sessionGeneration)},
+        {"graphCommitId",QString::number(state->graphCommitId)},
+        {"expectedDataRevision",GetRefText(input->dataRevision)},{"expectedBindingRevision",QString::number(input->bindingRevision)},
+        {"scenes",scenes},{"viewports",viewports},{"windowSize",QJsonArray{window.width(),window.height()}}};
+}
+void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonObject& step,
+    std::uint64_t operationId, const std::function<void(int)>& beforeFrame = {})
+{
+    const QFileInfo destination(folder);
+    Check(!destination.exists(),"business capture never overwrites a completed group");
+    Check(QDir().mkpath(destination.absolutePath()),"business capture parent directory is available");
     Check(Wait([&] {
-        const auto session = window.GetSession();
-        const auto input = session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{};
-        const auto scenes = session ? session->GetSceneViewStates() : std::vector<HostSceneViewState>{};
-        if (!input || scenes.size() != 4 || scenes.front().sceneEpoch == 0
-            || !window.GetWorkflow().getRenderPending || GetId(window.GetDiagnostics()["pendingUpdateFailures"]) != 0) return false;
         if (step["waitForRoiDisplay"].toBool()) {
             auto* roi = window.GetModule("Roi"); roi->Observe();
             const auto state = roi->GetObservedState();
@@ -135,38 +195,40 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
             Check(state["displayStatus"].toInt()!=3 && state["displayError"].toInt()==0
                 && state["displayFailures"].toArray().isEmpty(),"business ROI display succeeds before capture");
         }
-        return std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
-            return scene.isAvailable && scene.presentation && scene.presentation->dataRevision == input->dataRevision
-                && scene.presentation->bindingRevision == input->bindingRevision
-                && scene.sceneEpoch == scenes.front().sceneEpoch && scene.renderedEpoch > 0
-                && scene.renderedEpoch <= scene.sceneEpoch && !window.GetWorkflow().getRenderPending(scene.id);
-        });
-    },step["timeoutMs"].toInt(0)), "business capture waits for committed 2D/3D scenes and actual renders");
-    Check(QDir().mkpath(folder), "business capture directory is available");
-    QCoreApplication::processEvents();
-    const auto capturedInput = window.GetSession()->GetImageDescriptor();
-    Check(capturedInput.has_value(), "business capture has an exact selected input and binding");
-    QJsonArray files, scenes;
-    for (auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) if (widget->isVisible()) {
-        const auto frame = widget->grabFramebuffer();
-        Check(!frame.isNull() && frame.size() == widget->size() * widget->devicePixelRatioF(),
-            "business capture reads the actual visible framebuffer");
-        const auto name = widget->objectName() + ".png";
-        Check(frame.save(QDir(folder).filePath(name)), "business 2D/3D framebuffer saved");
-        files.append(QJsonObject{{"view",widget->objectName()},{"file",name},{"width",frame.width()},{"height",frame.height()}});
-    }
-    Check(files.size() == 4, "business capture contains one 3D and three 2D views");
-    Check(window.grab().save(QDir(folder).filePath("window.png")), "business window context saved");
-    for (const auto& scene : window.GetSession()->GetSceneViewStates())
-        scenes.append(QJsonObject{{"view",QString::fromStdString(scene.id)}, {"sceneEpoch",QString::number(scene.sceneEpoch)},
-            {"renderedEpoch",QString::number(scene.renderedEpoch)},
-            {"source",scene.presentation ? GetRefText(scene.presentation->dataRevision) : QString()},
-            {"bindingRevision",QString::number(scene.presentation ? scene.presentation->bindingRevision : 0)}});
-    ExportJson(QDir(folder).filePath("capture.json"),{{"operationId",QString::number(operationId)},
-        {"label",step["stageLabel"]},{"module",step["module"]},{"action",step["action"]},
-        {"expectedDataRevision",GetRefText(capturedInput->dataRevision)},
-        {"expectedBindingRevision",QString::number(capturedInput->bindingRevision)},
-        {"views",files},{"scenes",scenes}});
+        const auto before=GetBusinessCaptureState(window);
+        if(!before)return false;
+        // 先保存在内存；grab/重入可改变相机、绑定或 Feature 投影，不能只信截图前的等待。
+        std::vector<std::pair<QString,QImage>> images;QJsonArray files;
+        for(auto* widget:window.findChildren<QVTKOpenGLNativeWidget*>())if(widget->isVisible()) {
+            if(beforeFrame)beforeFrame(static_cast<int>(images.size())); // 仅直接守卫传入，业务调用为空。
+            auto frame=widget->grabFramebuffer();
+            Check(!frame.isNull()&&frame.size()==widget->size()*widget->devicePixelRatioF(),
+                "business capture reads the actual visible framebuffer");
+            const auto name=widget->objectName()+".png";
+            files.append(QJsonObject{{"view",widget->objectName()},{"file",name},{"width",frame.width()},{"height",frame.height()}});
+            images.emplace_back(name,std::move(frame));
+        }
+        Check(images.size()==4,"business capture contains one 3D and three 2D views");
+        const auto context=window.grab();Check(!context.isNull(),"business window context is captured in memory");
+        const auto after=GetBusinessCaptureState(window);
+        if(!after||*before!=*after)return false; // 整组丢弃，等待现有公共状态稳定后重拍。
+
+        // 同目录暂存保证最终 rename 在同一文件系统；任何保存失败都不发布半组图片或完成记录。
+        QTemporaryDir staging(QDir(destination.absolutePath()).filePath("."+destination.fileName()+"-XXXXXX"));
+        Check(staging.isValid(),"business capture staging directory is available");
+        for(const auto& image:images)
+            Check(image.second.save(QDir(staging.path()).filePath(image.first)),"business framebuffer saved to staging");
+        Check(context.save(QDir(staging.path()).filePath("window.png")),"business window context saved to staging");
+        auto metadata=*before;metadata["operationId"]=QString::number(operationId);metadata["label"]=step["stageLabel"];
+        metadata["module"]=step["module"];metadata["action"]=step["action"];metadata["views"]=files;
+        ExportJson(QDir(staging.path()).filePath("capture.json"),metadata);
+        const auto ready=GetBusinessCaptureState(window);
+        if(!ready||*before!=*ready)return false;
+        Check(!QFileInfo::exists(destination.absoluteFilePath())&&QDir().rename(staging.path(),destination.absoluteFilePath()),
+            "business capture publishes one stable complete group");
+        staging.setAutoRemove(false);
+        return true;
+    },step["timeoutMs"].toInt(0)),"business capture verifies public scene, data and binding before and after all images");
 }
 std::uint64_t Send(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {})
 {
@@ -3200,6 +3262,90 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         records["shutdown"] = QJsonObject{{"isStopped", stopped}, {"elapsedMs", QString::number(stopClock.elapsed())}, {"attempts", stopAttempts}};
         ExportJson(recordPath, records); } }
     catch (const std::exception& error) { std::cerr << error.what() << std::endl; result = 1; }
+    return result;
+}
+int StartCaptureConsistencyTest(TestWindow& window,const QString& output,const QString& recordPath)
+{
+    int result=0;QJsonArray checks;
+    constexpr int timeoutMs=30000; // 合成守卫的失效探测期限，不改变真实业务等待语义。
+    try {
+        Check(Wait([&]{return window.GetIsReady()||!window.GetFailure().isEmpty();},timeoutMs)&&window.GetIsReady(),
+            "capture guard window initializes");
+        Check(!output.isEmpty()&&!QFileInfo::exists(output)&&QDir().mkpath(output),"capture guard uses a fresh output directory");
+        const auto load=[&](bool second) {
+            std::array<float,64> values{};
+            for(int z=0;z<4;++z)for(int y=0;y<4;++y)for(int x=0;x<4;++x)
+                values[x+4*(y+4*z)]=(second?(x<2&&z<3):(x>=1&&x<=2&&y>=1&&y<=2&&z>=1&&z<=2))?1000.f:0.f;
+            const auto path=QDir(output).filePath(second?"input-b.raw":"input-a.raw");QFile file(path);
+            Check(file.open(QIODevice::WriteOnly|QIODevice::NewOnly)
+                &&file.write(reinterpret_cast<const char*>(values.data()),sizeof(values))==qint64(sizeof(values)),"capture guard writes its independent 4 cubed fixture");
+            file.close();
+            GetComplete(window,Send(window,"Data","Load",{{"filePath",path},{"dimensions",QJsonArray{4,4,4}},
+                {"spacingLPS",QJsonArray{1.,1.,1.}},{"originLPS",QJsonArray{0.,0.,0.}},
+                {"directionLPS",QJsonArray{1.,0.,0.,0.,1.,0.,0.,0.,1.}},
+                {"datasetId",second?"capture-b":"capture-a"},{"sourceDigest",""},{"evidenceKind","synthetic-capture-guard"}}),"Succeeded",timeoutMs);
+            return window.GetSession()->GetImageDescriptor()->dataRevision;
+        };
+        const auto first=load(false),second=load(true);
+        const auto original=window.GetSession()->GetStateSnapshot()->scenes.front();
+        auto changedScene=original;changedScene.camera->position[0]+=.5;
+        Check(changedScene.presentationRevision==original.presentationRevision&&GetCaptureScene(changedScene)!=GetCaptureScene(original),
+            "camera-only changes invalidate a capture even with unchanged presentation revision");
+        changedScene=original;++changedScene.renderedEpoch;
+        Check(GetCaptureScene(changedScene)!=GetCaptureScene(original),"draw epoch changes invalidate a capture group");
+        changedScene=original;changedScene.inputs.push_back({"capture-guard",first});
+        Check(GetCaptureScene(changedScene)!=GetCaptureScene(original),"exact scene input changes invalidate a capture group");
+        changedScene=original;changedScene.displays.push_back({original.id,"capture-guard","overlay",first,{"capture-guard",1,1}});
+        Check(GetCaptureScene(changedScene)!=GetCaptureScene(original),"feature overlay changes invalidate a capture with unchanged presentation revision");
+        const auto select=[&](DataRevisionRef revision) {
+            GetComplete(window,Send(window,"Data","Select",{{"revision",GetRefText(revision)},{"expectedBindingRevision","current"}}),"Succeeded",timeoutMs);
+            Check(Wait([&]{return GetBusinessCaptureState(window).has_value();},timeoutMs),"capture guard selection reaches the real four rendered views");
+        };
+        for(const bool bindingOnly:{true,false}) {
+            select(first);
+            const auto before=*window.GetSession()->GetImageDescriptor();
+            bool changed=false;std::array<int,4> grabs{};
+            const auto folder=QDir(output).filePath(bindingOnly?"binding-switch":"data-switch");
+            SaveBusinessCapture(window,folder,{{"stageLabel",bindingOnly?"same-data-new-binding":"new-data-binding"},{"timeoutMs",timeoutMs}},0,[&](int index) {
+                ++grabs.at(index);
+                if(index==1&&!changed){changed=true;select(second);if(bindingOnly)select(first);}
+            });
+            const auto after=*window.GetSession()->GetImageDescriptor();const auto capture=LoadJson(QDir(folder).filePath("capture.json"));
+            checks.append(QJsonObject{{"kind",bindingOnly?"same-data-new-binding":"new-data-binding"},{"capture",folder},
+                {"frameGrabs",GetValues(grabs)},{"beforeBindingRevision",QString::number(before.bindingRevision)},
+                {"afterBindingRevision",QString::number(after.bindingRevision)}});
+            Check(changed&&after.dataRevision==(bindingOnly?first:second)&&after.bindingRevision!=before.bindingRevision,
+                "capture guard changes the real public input binding between the first and second image");
+            Check(std::all_of(grabs.begin(),grabs.end(),[](int count){return count>=2;}),"unstable four-image group is discarded and all images are retaken");
+            Check(capture["expectedDataRevision"]==GetRefText(after.dataRevision)
+                &&capture["expectedBindingRevision"]==QString::number(after.bindingRevision),"published capture uses the successful group input and binding");
+            const auto current=GetBusinessCaptureState(window);
+            Check(current&&capture["scenes"]==current->value("scenes")&&capture["sessionGeneration"]==current->value("sessionGeneration"),
+                "published metadata is the same verified public scene snapshot as the images");
+            for(const auto file:capture["views"].toArray()) {
+                const auto row=file.toObject();const QImage saved(QDir(folder).filePath(row["file"].toString()));
+                auto* widget=window.findChild<QVTKOpenGLNativeWidget*>(row["view"].toString());
+                Check(widget&&!saved.isNull()
+                    &&saved.convertToFormat(QImage::Format_RGBA8888)==widget->grabFramebuffer().convertToFormat(QImage::Format_RGBA8888),
+                    "every saved view equals its stable actual framebuffer");
+            }
+            bool rejected=false;try{SaveBusinessCapture(window,folder,{{"timeoutMs",timeoutMs}},0);}catch(...){rejected=true;}
+            Check(rejected&&LoadJson(QDir(folder).filePath("capture.json"))==capture,"capture refuses to overwrite an existing completed group");
+        }
+        const auto blocked=QDir(output).filePath("blocked");QFile file(blocked);
+        Check(file.open(QIODevice::WriteOnly|QIODevice::NewOnly)&&file.write("x",1)==1,"capture guard creates a real output failure");file.close();
+        bool rejected=false;try{SaveBusinessCapture(window,blocked+"/capture",{{"timeoutMs",timeoutMs}},0);}catch(...){rejected=true;}
+        Check(rejected&&!QFileInfo::exists(blocked+"/capture/capture.json"),"failed save leaves no completed capture group");
+    }catch(const std::exception& error){std::cerr<<"FAIL: capture consistency "<<error.what()<<std::endl;result=1;}
+    const auto business=window.GetDiagnostics();QElapsedTimer clock;clock.start();int attempts=0;
+    const bool stopped=Wait([&]{++attempts;return window.StopSession();},timeoutMs);
+    if(!stopped){std::cerr<<"FAIL: capture guard Stop remains pending"<<std::endl;result=1;}
+    try {
+        auto record=window.GetRecords().GetRecords();record["captureChecks"]=checks;record["businessDiagnostics"]=business;
+        record["hostDiagnostics"]=window.GetDiagnostics();record["resources"]=window.GetWorkflow().resources.GetJson();
+        record["shutdown"]=QJsonObject{{"isStopped",stopped},{"elapsedMs",QString::number(clock.elapsed())},{"attempts",attempts}};
+        if(!recordPath.isEmpty())ExportJson(recordPath,record);
+    }catch(const std::exception& error){std::cerr<<error.what()<<std::endl;result=1;}
     return result;
 }
 }
