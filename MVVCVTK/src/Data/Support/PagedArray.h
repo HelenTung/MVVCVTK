@@ -80,7 +80,6 @@ public:
         if(offset>m_capacity || bytes>m_capacity-offset)throw std::out_of_range("Mesh storage read is outside the file.");
         if(!bytes)return;
         if(!CopyBytes(static_cast<const unsigned char*>(m_data)+offset,destination,bytes))throw std::runtime_error("Mesh storage read failed.");
-        VirtualUnlock(static_cast<unsigned char*>(m_data)+offset,bytes);
     }
     void CopyWindow(std::size_t offset,std::size_t bytes,void* destination)const {
         if(offset>m_capacity || bytes>m_capacity-offset)throw std::out_of_range("Mesh storage read is outside the file.");
@@ -122,47 +121,15 @@ public:
     }
     std::size_t GetCount()const noexcept override{return m_count;}
     const std::shared_ptr<const File>& GetFile()const noexcept{return m_file;}
-    std::size_t GetResidentBytes()const noexcept override{
-        return m_file->GetResidentBound()+std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);
-    }
+    std::size_t GetResidentBytes()const noexcept override{return m_file->GetResidentBound();}
     void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
         if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh block is outside the array.");
-        if(!count)return;
-        const std::lock_guard<std::mutex> lock(m_mutex);
-        if(count>cacheValues){m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;}
-        while(count) {
-            const auto start=offset/cacheValues*cacheValues;
-            auto index=cacheWindows;
-            for(std::size_t i=0;i<cacheWindows;++i)if(m_cache[i].start==start){index=i;break;}
-            if(index==cacheWindows) {
-                index=m_next++%cacheWindows;
-                auto& window=m_cache[index];window.start=SIZE_MAX;
-                try {window.values.resize(std::min(cacheValues,m_count-start));}
-                catch(const std::bad_alloc&) {
-                    // 缓存是加速选项；目标缓冲已存在时，不因额外窗口分配失败拒绝读取。
-                    m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;
-                }
-                // 短读取复用已有的有界映射页；立即移出工作集会让 BVH 随机访问反复缺页。
-                try {m_file->CopyWindow(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());}
-                catch(const std::bad_alloc&) {
-                    // 映射页缓存的记账分配同样可选；已有目标缓冲仍能直接读取。
-                    m_file->Copy(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
-                }
-                window.start=start;
-            }
-            const auto& window=m_cache[index];
-            const auto read=std::min(count,window.values.size()-(offset-start));
-            std::copy_n(window.values.begin()+(offset-start),read,target);
-            offset+=read;count-=read;target+=read;
-        }
+        // 快照持有冻结映射；每次只复制请求范围，不维护共享窗口或驱逐其他读者的页。
+        // 保留 File::Copy 的结构化异常转换，由 GetChunk 继续报告读取失败与取消。
+        m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);
     }
 private:
-    static constexpr std::size_t cacheValues=std::max<std::size_t>(1,65536/sizeof(Value));
-    // 对齐的多个窗口保留三角形的远端顶点，避免单窗口在顶点之间反复读放大。
-    static constexpr std::size_t cacheWindows=8;
-    struct Window final {std::size_t start=SIZE_MAX;std::vector<Value> values;};
     std::shared_ptr<const File> m_file;std::size_t m_count=0;
-    mutable std::mutex m_mutex;mutable std::size_t m_next=0;mutable std::array<Window,cacheWindows> m_cache;
 };
 }
 
