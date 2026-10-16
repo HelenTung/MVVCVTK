@@ -70,6 +70,8 @@ def evidence(steps,name,valid=None):
 def write(name,steps):
     if args.case and name not in args.case: return
     folder=ROOT/name;folder.mkdir(parents=True,exist_ok=True)
+    # 最后一次采用或分析完成后，仍需等四视图提交并清空待更新状态，再取诊断和停止。
+    steps[-1]['checkSceneConsistency']=True
     for n,s in enumerate(steps):
         if s.get('generateKnownTransformReference'): continue
         s.setdefault('stateAudit',str(folder/f'{n:03d}-{s["module"]}-{s["action"]}.json').replace('\\','/'))

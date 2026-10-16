@@ -31,6 +31,10 @@ bool GetMeshPagedStorageTests()
             const auto large=values.Finish();const auto chunk=large.GetChunk(0,SIZE_MAX);
             require(chunk.error==MeshReadError::None && chunk.values.size()*sizeof(double)<=imageChunkLimit
                 && !chunk.isComplete && chunk.nextOffset==chunk.values.size(),"large read exceeded the SPI block bound");
+            const auto crossing=large.GetChunk(8191,3);
+            require(crossing.error==MeshReadError::None && crossing.values.size()==3 && crossing.nextOffset==8194
+                && crossing.values[0]==8191*.25 && crossing.values[1]==8192*.25 && crossing.values[2]==8193*.25,
+                "short frozen read crossing a mapped page changed values or continuation");
             for(std::size_t i=0;i<large.size();i+=8191)require(large[i]==double(i)*.25,"page eviction changed stored geometry");
             const auto sparse=[&] {
                 for(std::size_t i=0;i<12000;++i)for(const auto base:{std::size_t(0),std::size_t(900000),std::size_t(1900000)}) {
@@ -44,7 +48,7 @@ bool GetMeshPagedStorageTests()
             };
             auto first=std::async(std::launch::async,sparse),second=std::async(std::launch::async,sparse);
             require(first.get()&&second.get(),"distant concurrent point reads changed cached values or block boundaries");
-            // 跨整个映射交错读取，验证无共享窗口的并发读取和转换字段仍保持原值。
+            // 跨整个冻结映射交错读取，验证跨页边界和共享转换字段保持原值。
             const auto converted=ConvertMeshArray<double>(large,3,[](double value,std::size_t component){return value+double(component);});
             const auto windows=[&](bool reverse) {
                 const auto pages=large.size()/8192;
