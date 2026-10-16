@@ -21,6 +21,17 @@ SetTestRuntime(QtFeature.Automation qt_feature_tests)
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
 set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 0 LABELS "Reports;preview")
+if(TARGET MVVCVTK::GapAnalysis AND TARGET MVVCVTK::OrthogonalCrop)
+    set(_gap_report_args --background --gap-boundary-reports-only
+        --gap-report-output "${CMAKE_CURRENT_BINARY_DIR}/gap-boundary-reports-$<CONFIG>")
+    if(MVVCVTK_GAP_REAL_SMALL_INPUT)
+        list(APPEND _gap_report_args --gap-report-real-input "${MVVCVTK_GAP_REAL_SMALL_INPUT}")
+    endif()
+    add_test(NAME QtFeature.GapBoundaryReports COMMAND qt_feature_tests ${_gap_report_args})
+    SetTestRuntime(QtFeature.GapBoundaryReports qt_feature_tests)
+    set_tests_properties(QtFeature.GapBoundaryReports PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "Reports;Gap")
+    unset(_gap_report_args)
+endif()
 # 数据规模只影响耗时；调用方可显式取消或配置外层期限。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT 0)
 

@@ -86,8 +86,9 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature> f
         auto doc=Document(record,"gap",table,r["source"].toString(),"孔隙明细");if(known.contains(doc.id))return reports;
         const auto native=read(GetRef(table),0,1,std::nullopt);
         doc.conditions["计算参数"]=native["canonicalParameters"];doc.conditions["输入修订"]=native["inputs"];
-        doc.conditions["汇总"]=QJsonObject{{"对象体积 mm3",r["objectVolumeMM3"]},{"孔隙体积 mm3",r["voidVolumeMM3"]},{"孔隙率",r["porosityRatio"]}};
-        doc.result=r["resultSet"].toString();doc.description="一行一个父缺陷/ROI 相交记录；ROI 片段不是新封闭孔隙。";
+        doc.conditions["汇总"]=QJsonObject{{"对象体积 mm3",r["objectVolumeMM3"]},{"孔隙体积 mm3",r["voidVolumeMM3"]},{"孔隙率",r["porosityRatio"]},
+            {"正式孔数",r["voidCount"]},{"边界不确定对象数",r["boundaryUncertainCount"]},{"边界不确定可见体积 mm3",r["boundaryUncertainVolumeMM3"]}};
+        doc.result=r["resultSet"].toString();doc.description="每行保留一个可见对象。BoundaryUncertain 表示边界不确定，保留可见体积；完整父缺陷体积、正式统计体积和正式等效直径留空，不计入正式孔数、体积或分布。ROI 内相交体积按原结果保留。";
         const auto fullReader=feature->GetResultReader(GetRef(r["resultSet"]));
         if(!fullReader)throw std::runtime_error("孔隙正式对象目录不可读");
         const auto reader=fullReader->CreateObjectReader();
@@ -95,14 +96,17 @@ void AttachReportSource(TestWorkflow& workflow,std::shared_ptr<GapHostFeature> f
         doc.relatedResults.append(table);
         doc.columns={{"void_id",{},{},false},{"parent_volume_mm3","完整父缺陷体积","mm3",true},
             {"intersection_volume_mm3","ROI 内相交体积","mm3",true},{"gap_statistics_volume_mm3","本次统计体积","mm3",true},
-            {"equivalent_diameter_mm","本次统计等效直径","mm",true},{"roi_partial",{},{},false},{"whole_object_geometry",{},{},false}};
+            {"equivalent_diameter_mm","本次统计等效直径","mm",true},{"roi_partial",{},{},false},{"whole_object_geometry",{},{},false},
+            {"visible_volume_mm3","可见对象体积","mm3",true},{"boundary_status",{},{},false}};
         doc.identityColumn=0;
         doc.table=std::make_shared<ReportTable>(reader->GetMetadata().objectCount,[reader](ReportRowId row){
             const auto page=reader->GetObjects(row,1);
             if(page.error!=GapReadError::None||page.objects.size()!=1)throw std::runtime_error("孔隙报告对象行不可读");
-            const auto& object=page.objects[0];
-            return QStringList{QString::number(object.id),Number(object.parentVolumeMM3),Number(object.intersectionVolumeMM3),
-                Number(object.volumeMM3),Number(object.equivalentDiameterMM),object.isRoiPartial?"1":"0",object.hasWholeObjectGeometry?"1":"0"};
+            const auto& object=page.objects[0];const bool interior=object.boundaryStatus==GapBoundaryStatus::Interior;
+            // 边界对象只有可见片段量值；空单元格表示不适用于正式统计，不能伪装成实测零。
+            return QStringList{QString::number(object.id),interior?Number(object.parentVolumeMM3):QString(),Number(object.intersectionVolumeMM3),
+                interior?Number(object.volumeMM3):QString(),interior?Number(object.equivalentDiameterMM):QString(),
+                object.isRoiPartial?"1":"0",object.hasWholeObjectGeometry?"1":"0",Number(object.volumeMM3),interior?"Interior":"BoundaryUncertain"};
         });
         reports.append(std::move(doc));return reports;
     };
