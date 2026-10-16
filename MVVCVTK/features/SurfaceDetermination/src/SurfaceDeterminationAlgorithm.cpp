@@ -2,6 +2,8 @@
 #include "SurfaceDeterminationAlgorithm.h"
 #include "SurfaceContracts.h"
 #include "SurfaceSeedBuilder.h"
+#include "SurfaceHistogramEstimator.h"
+#include "SurfaceCpuSampling.h"
 #include "SurfaceEdgeTopology.h"
 #include "SurfaceCudaCompute.h"
 #include "SurfaceGpuFinalizer.h"
@@ -52,170 +54,21 @@ namespace {
 using Point3 = std::array<double, 3>;
 
 constexpr std::uint32_t algorithmRevision = surfaceAlgorithmRevision;
-constexpr std::size_t histogramBinCount = 512;
 constexpr double geometryEpsilon = 1.0e-12;
 constexpr double qualityRatioThreshold = 0.5;
 
 using Triangle = SurfaceSeedTriangle;
-struct SurfaceCancelled final
-{
-};
+using SurfaceCpu::SurfaceCancelled;
 void CheckCancellation(std::size_t &count, const SurfaceCancelCheck &cancelled)
 {
     if ((count++ & 1023U) == 0 && cancelled && cancelled())
         throw SurfaceCancelled{};
 }
 
-struct CpuSamplingPlan final {
-    unsigned physicalCores = 0;
-    unsigned logicalThreads = 0;
-    unsigned threadLimit = 1;
-};
-
-CpuSamplingPlan GetCpuSamplingPlan()
-{
-    CpuSamplingPlan plan;
-    GROUP_AFFINITY affinity{};
-    if (!GetThreadGroupAffinity(GetCurrentThread(), &affinity) || !affinity.Mask)
-        return plan;
-    // 只在调用线程的可用组内保守规划，不扩展进程/线程亲和性。
-    USHORT groupCount = 1, group = 0;
-    DWORD_PTR processMask = 0, systemMask = 0;
-    if (GetProcessGroupAffinity(GetCurrentProcess(), &groupCount, &group) && groupCount == 1 &&
-        group == affinity.Group && GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask))
-        affinity.Mask &= processMask;
-    DWORD bytes = 0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
-    if (!bytes || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-        return plan;
-    try {
-        DataArray<std::uint64_t> storage((std::size_t(bytes) + 7) / 8);
-        auto *data = reinterpret_cast<unsigned char *>(storage.data());
-        if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
-                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(data), &bytes))
-            return plan;
-        std::size_t offset = 0;
-        while (offset < bytes) {
-            constexpr auto header = offsetof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Processor);
-            constexpr auto masks = header + offsetof(PROCESSOR_RELATIONSHIP, GroupMask);
-            if (bytes - offset < masks) return CpuSamplingPlan{};
-            const auto *info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(data + offset);
-            if (info->Size < masks || info->Size > bytes - offset ||
-                info->Processor.GroupCount > (info->Size - masks) / sizeof(GROUP_AFFINITY))
-                return CpuSamplingPlan{};
-            KAFFINITY allowed = 0;
-            for (unsigned g = 0; g < info->Processor.GroupCount; ++g) {
-                const auto &mask = info->Processor.GroupMask[g];
-                if (mask.Group == affinity.Group) allowed |= mask.Mask & affinity.Mask;
-            }
-            if (allowed) {
-                ++plan.physicalCores;
-                while (allowed) { allowed &= allowed - 1; ++plan.logicalThreads; }
-            }
-            offset += info->Size;
-        }
-    } catch (const std::bad_alloc &) {
-        return CpuSamplingPlan{};
-    }
-    // 保留至少一半物理核心和逻辑线程；查询失败或只有一个核心时不新增线程。
-    plan.threadLimit = std::max(1U, std::min(plan.physicalCores / 2, plan.logicalThreads / 2));
-    char setting[8]{};
-    // 新线程使用默认浮点控制；调用方采用其他舍入/非规格化处理时保留原串行计算。
-    if (!MVVCVTK_SURFACE_CPU_PARALLEL || std::fegetround() != FE_TONEAREST ||
-        (_mm_getcsr() & 0xffc0U) != 0x1f80U ||
-        (GetEnvironmentVariableA("MVVCVTK_SURFACE_CPU_PARALLEL", setting, sizeof(setting)) == 1 && setting[0] == '0'))
-        plan.threadLimit = 1;
-    return plan;
-}
-
-struct CpuSamplingQuota final {
-    std::mutex mutex;
-    std::condition_variable changed;
-    unsigned activeThreads = 0;
-};
-
-class CpuSamplingLease final {
-public:
-    CpuSamplingLease(unsigned requested, unsigned limit, const SurfaceCancelCheck &cancelled)
-    {
-        std::unique_lock<std::mutex> lock(m_quota.mutex);
-        while (m_quota.activeThreads >= limit) {
-            if (cancelled && cancelled()) throw SurfaceCancelled{};
-            m_quota.changed.wait_for(lock, std::chrono::milliseconds(10));
-        }
-        m_threads = std::min(requested, limit - m_quota.activeThreads);
-        m_quota.activeThreads += m_threads;
-    }
-    ~CpuSamplingLease()
-    {
-        {
-            std::lock_guard<std::mutex> lock(m_quota.mutex);
-            m_quota.activeThreads -= m_threads;
-        }
-        m_quota.changed.notify_all();
-    }
-    unsigned GetThreadCount() const noexcept { return m_threads; }
-    CpuSamplingLease(const CpuSamplingLease &) = delete;
-    CpuSamplingLease &operator=(const CpuSamplingLease &) = delete;
-private:
-    static CpuSamplingQuota &GetQuota()
-    {
-        static CpuSamplingQuota quota;
-        return quota;
-    }
-    // 仅协调 Surface 点采样，多个请求不各自取满同一核心预算。
-    CpuSamplingQuota &m_quota = GetQuota();
-    unsigned m_threads = 0;
-};
-
-template <class RangeCallback>
-unsigned RunPointSampling(const std::size_t pointCount, const unsigned threadLimit,
-                          const SurfaceCancelCheck &cancelled, const RangeCallback &sample)
-{
-    // 每个线程至少负责 8192 个点，避免小组件反复创建线程。
-    constexpr std::size_t minimumPointsPerThread = 8192;
-    const auto requested = unsigned(std::min<std::size_t>(threadLimit,
-                                                        std::max<std::size_t>(1, pointCount / minimumPointsPerThread)));
-    CpuSamplingLease lease(requested, threadLimit, cancelled);
-    const auto count = lease.GetThreadCount();
-    if (count == 1) {
-        sample(0, pointCount);
-        return 1;
-    }
-    // 单组 KAFFINITY 的位数只限定存储容量，不固定实际并发数。
-    constexpr auto groupCapacity = sizeof(KAFFINITY) * CHAR_BIT / 2;
-    std::array<std::thread, groupCapacity - 1> workers;
-    std::array<std::exception_ptr, groupCapacity> failures{};
-    const auto run = [&](unsigned worker) noexcept {
-        try {
-            const auto width = pointCount / count, extra = pointCount % count;
-            const auto begin = worker * width + std::min<std::size_t>(worker, extra);
-            sample(begin, begin + width + (worker < extra ? 1 : 0));
-        } catch (...) {
-            failures[worker] = std::current_exception();
-        }
-    };
-    unsigned started = 1;
-    for (; started < count; ++started) {
-        try {
-            workers[started - 1] = std::thread(run, started);
-        } catch (const std::system_error &) {
-            break;
-        } catch (const std::bad_alloc &) {
-            break;
-        }
-    }
-    run(0);
-    // 创建资源不足时，由调用线程完成未派出的区间；已派出的区间仍只写一次。
-    for (unsigned worker = started; worker < count; ++worker)
-        run(worker);
-    for (unsigned worker = 1; worker < started; ++worker)
-        workers[worker - 1].join();
-    for (const auto &failure : failures)
-        if (failure) std::rethrow_exception(failure);
-    return started;
-}
-
+using SurfaceCpu::CpuSamplingPlan;
+using SurfaceCpu::CpuSamplingLease;
+using SurfaceCpu::GetCpuSamplingPlan;
+using SurfaceCpu::RunPointSampling;
 
 // 新 worker 的默认栈来自当前宿主 PE，不把固定线程栈大小当作所有调用方的事实。
 std::optional<std::size_t> GetComponentWorkerStackReserve() {
@@ -357,6 +210,7 @@ struct VolumeView final {
 
 struct ResolvedParams final
 {
+    std::size_t histogramWorkingBytes = 0;
     SurfaceComponentSelection componentSelection = SurfaceComponentSelection::Largest;
     SurfaceDeterminationMethod method = SurfaceDeterminationMethod::GlobalAutomatic;
     double initialIsoValue = 0.0;
@@ -906,226 +760,6 @@ bool GetGradient(const VolumeView &volume, const Point3 &modelPoint, Point3 &gra
     return GetGradientAtIndex(volume, GetContinuousIndex(volume.geometry, modelPoint), gradientModel, magnitude);
 }
 
-bool GetVoxelUsed(
-    const VolumeView& volume,
-    const ResolvedParams& params,
-    const int x,
-    const int y,
-    const int z,
-    const std::size_t tupleIndex)
-{
-    if (volume.validity && volume.validity[tupleIndex] == 0) return false;
-    (void)params;(void)x;(void)y;(void)z;
-    // ROI 是评价选区；材料估计与剖面支撑保持原有效域。
-    return true;
-}
-
-SurfaceFailureReason GetMaterialRange(
-    const VolumeView& volume,
-    const ResolvedParams& params,
-    const SurfaceCancelCheck& getCancelled,
-    double& isoValue,
-    std::string& message,
-    std::optional<SurfaceIsoEstimate>& estimate)
-{
-    double minimum = std::numeric_limits<double>::max(), maximum = std::numeric_limits<double>::lowest();
-    std::uint64_t validCount = 0, excludedCount = 0;
-    const auto &extent = volume.geometry.extent;
-    std::array<std::int64_t, 3> sampleSteps{};
-    for (unsigned a = 0; a < 3; ++a)
-    {
-        sampleSteps[a] = (static_cast<std::int64_t>(volume.geometry.dimensions[a]) + 127) / 128;
-    }
-    // 范围和直方图使用同一采样集合。独立的 16^3 预采样会避开薄壁材料，
-    // 随后把真正的材料峰作为越界值丢弃，并把背景附近的次峰误认作材料。
-    // 只保留每侧 17 个极值，以固定空间排除最多 16 个孤立极端样本。
-    constexpr std::size_t tailCapacity = 17;
-    std::array<double, tailCapacity> lowest{}, highest{};
-    lowest.fill(std::numeric_limits<double>::max());
-    highest.fill(std::numeric_limits<double>::lowest());
-    for (std::int64_t z = extent[4] + sampleSteps[2] / 2; z <= extent[5]; z += sampleSteps[2])
-        for (std::int64_t y = extent[2] + sampleSteps[1] / 2; y <= extent[3]; y += sampleSteps[1])
-        {
-            if (GetCancelled(getCancelled))
-                return SurfaceFailureReason::Cancelled;
-            for (std::int64_t x = extent[0] + sampleSteps[0] / 2; x <= extent[1]; x += sampleSteps[0])
-            {
-                const auto id = GetTupleIndex(volume.geometry, static_cast<int>(x), static_cast<int>(y),
-                                              static_cast<int>(z));
-                const auto value = volume.scalars.GetValue(id);
-                if (GetVoxelUsed(volume, params, static_cast<int>(x), static_cast<int>(y),
-                                 static_cast<int>(z), id) &&
-                    std::isfinite(value)) {
-                    ++validCount;
-                    if (value < lowest.back()) {
-                        const auto at = std::lower_bound(lowest.begin(), lowest.end(), value);
-                        std::move_backward(at, lowest.end()-1, lowest.end()); *at = value;
-                    }
-                    if (value > highest.back()) {
-                        const auto at = std::lower_bound(highest.begin(), highest.end(), value, std::greater<double>{});
-                        std::move_backward(at, highest.end()-1, highest.end()); *at = value;
-                    }
-                }
-            }
-        }
-    if (validCount >= 64)
-    {
-        const auto trim = std::min<std::uint64_t>(tailCapacity-1, validCount / 1000);
-        minimum = lowest[trim];
-        maximum = highest[trim];
-    }
-    if (validCount < 64 || !std::isfinite(minimum)
-        || !std::isfinite(maximum) || !std::isfinite(maximum - minimum)
-        || maximum - minimum <= geometryEpsilon
-            * std::max({ 1.0, std::abs(minimum), std::abs(maximum) })) {
-        message = "Surface material range estimation requires a non-degenerate bimodal histogram.";
-        return SurfaceFailureReason::ThresholdUnreliable;
-    }
-
-    validCount = 0;
-    std::array<std::uint64_t, histogramBinCount> histogram{};
-    const double scale = static_cast<double>(histogramBinCount - 1)
-        / (maximum - minimum);
-    for (std::int64_t zValue = extent[4] + sampleSteps[2] / 2;
-        zValue <= static_cast<std::int64_t>(extent[5]); zValue += sampleSteps[2]) {
-        const int z = static_cast<int>(zValue);
-        if (GetCancelled(getCancelled)) {
-            message = "Surface threshold estimation was cancelled.";
-            return SurfaceFailureReason::Cancelled;
-        }
-        for (std::int64_t yValue = extent[2] + sampleSteps[1] / 2;
-            yValue <= static_cast<std::int64_t>(extent[3]); yValue += sampleSteps[1]) {
-            const int y = static_cast<int>(yValue);
-            for (std::int64_t xValue = extent[0] + sampleSteps[0] / 2;
-                xValue <= static_cast<std::int64_t>(extent[1]); xValue += sampleSteps[0]) {
-                const int x = static_cast<int>(xValue);
-                const std::size_t tupleIndex = GetTupleIndex(
-                    volume.geometry, x, y, z);
-                if (!GetVoxelUsed(
-                        volume, params, x, y, z, tupleIndex)) {
-                    continue;
-                }
-                const double value = volume.scalars.GetValue(tupleIndex);
-                if (!std::isfinite(value) || value < minimum || value > maximum)
-                {
-                    ++excludedCount;
-                    continue;
-                }
-                ++validCount;
-                const auto bin = static_cast<std::size_t>(std::clamp(
-                    std::llround((value - minimum) * scale),
-                    0LL,
-                    static_cast<long long>(histogramBinCount - 1)));
-                ++histogram[bin];
-            }
-        }
-    }
-
-    std::array<double, histogramBinCount> smooth{};
-    for (std::size_t index = 0; index < histogramBinCount; ++index) {
-        double sum = 0.0;
-        double weight = 0.0;
-        const std::size_t begin = index > 2 ? index - 2 : 0;
-        const std::size_t end = std::min(
-            histogramBinCount - 1, index + 2);
-        for (std::size_t sample = begin; sample <= end; ++sample) {
-            const double localWeight = sample == index ? 3.0
-                : (sample + 1 == index || sample == index + 1 ? 2.0 : 1.0);
-            sum += localWeight * static_cast<double>(histogram[sample]);
-            weight += localWeight;
-        }
-        smooth[index] = sum / weight;
-    }
-
-    struct Peak final {
-        std::size_t index = 0;
-        double height = 0.0;
-    };
-    std::vector<Peak> peaks;
-    peaks.reserve(histogramBinCount);
-    for (std::size_t index = 0; index < histogramBinCount; ++index) {
-        const double left = index == 0 ? -1.0 : smooth[index - 1];
-        const double right = index + 1 == histogramBinCount
-            ? -1.0 : smooth[index + 1];
-        if (smooth[index] >= left && smooth[index] >= right
-            && smooth[index] > 0.0) {
-            peaks.push_back({ index, smooth[index] });
-        }
-    }
-    std::sort(peaks.begin(), peaks.end(), [](const Peak& left, const Peak& right) {
-        if (left.height != right.height) return left.height > right.height;
-        return left.index < right.index;
-    });
-
-    std::optional<std::pair<Peak, Peak>> selected;
-    const std::size_t minimumSeparation = histogramBinCount / 10;
-    const double minimumPeakHeight = std::max(
-        2.0, static_cast<double>(validCount) * 1.0e-5);
-    if (!peaks.empty()) {
-        // 按谷分群；近背景起伏和同一材料上的小尖峰合并，
-        // 非空气材料按原始直方图积分样本数比较，而不是按峰高或离背景的距离比较。
-        std::vector<Peak> groups;
-        for (const auto& peak : peaks) {
-            if (peak.height < minimumPeakHeight) continue;
-            const bool separated = std::all_of(groups.begin(), groups.end(), [&](const Peak& group) {
-                const auto low = std::min(peak.index, group.index), high = std::max(peak.index, group.index);
-                if (high-low < minimumSeparation) return false;
-                const auto valley = *std::min_element(smooth.begin()+low, smooth.begin()+high+1);
-                return valley <= 0.7 * std::min(peak.height, group.height);
-            });
-            if (separated) groups.push_back(peak);
-        }
-        std::sort(groups.begin(), groups.end(), [](const Peak& a, const Peak& b) { return a.index < b.index; });
-        DataArray<std::uint64_t> counts;
-        for (std::size_t i = 0; i < groups.size(); ++i) {
-            const auto left = i == 0 ? std::ptrdiff_t{0}
-                : std::min_element(smooth.begin()+groups[i-1].index, smooth.begin()+groups[i].index+1)-smooth.begin();
-            const auto right = i+1 < groups.size()
-                ? std::min_element(smooth.begin()+groups[i].index, smooth.begin()+groups[i+1].index+1)-smooth.begin()
-                : static_cast<std::ptrdiff_t>(histogramBinCount);
-            counts.push_back(std::accumulate(histogram.begin()+left, histogram.begin()+right, std::uint64_t{0}));
-        }
-        if (!counts.empty()) {
-            // 背景取有显著峰高与样本支持的最低灰度群；最高峰可能属于材料。
-            // 低值小伪影不能顶替空气。范围需包含足够背景，才能识别这对灰度群。
-            const auto maximumCount = *std::max_element(counts.begin(), counts.end());
-            std::size_t background = 0;
-            while (background < groups.size()
-                && (groups[background].height < 0.01*peaks.front().height || counts[background] < 0.05*maximumCount)) ++background;
-            std::uint64_t largestCount = 0;
-            for (std::size_t i = background+1; i < groups.size(); ++i) {
-                if (counts[i] > largestCount) { largestCount = counts[i]; selected = std::make_pair(groups[background], groups[i]); }
-            }
-        }
-    }
-    if (!selected) {
-        message = "Surface material range estimation could not identify two reliable peaks.";
-        return SurfaceFailureReason::ThresholdUnreliable;
-    }
-
-    const double binWidth = (maximum - minimum)
-        / static_cast<double>(histogramBinCount - 1);
-    const double background = minimum
-        + static_cast<double>(selected->first.index) * binWidth;
-    const double material = minimum
-        + static_cast<double>(selected->second.index) * binWidth;
-    isoValue = 0.5 * (background + material);
-    if (!std::isfinite(isoValue) || material <= background) {
-        message = "Surface material range estimation produced an invalid threshold.";
-        return SurfaceFailureReason::ThresholdUnreliable;
-    }
-    estimate = SurfaceIsoEstimate{
-        isoValue,      background,
-        material,      validCount,
-        excludedCount, double(selected->second.index - selected->first.index) / (histogramBinCount - 1)};
-    estimate->histogramCounts=histogram;
-    estimate->histogramEdges.front()=minimum;
-    estimate->histogramEdges.back()=maximum;
-    for(std::size_t i=1;i<histogramBinCount;++i) estimate->histogramEdges[i]=minimum+(static_cast<double>(i)-0.5)*binWidth;
-    for(std::size_t axis=0;axis<3;++axis) estimate->histogramSampleSteps[axis]=static_cast<int>(sampleSteps[axis]);
-    return SurfaceFailureReason::None;
-}
-
 void AddFingerprint(
     std::uint64_t& fingerprint,
     const std::uint64_t value)
@@ -1195,8 +829,13 @@ SurfaceFailureReason ResolveParams(
         }
         else
         {
-            const auto status = GetMaterialRange(volume, params, getCancelled, params.initialIsoValue,
-                                                message, params.isoEstimate);
+            // ROI 是评价选区；直方图只按正式输入的原始标量及有效域统计。
+            const SurfaceHistogramInput histogram{volume.geometry.dimensions, volume.scalars.values,
+                volume.scalars.read, volume.validity, true};
+            SurfaceHistogramStats histogramStats;
+            const auto status = SurfaceHistogramEstimator::BuildEstimate(
+                histogram, getCancelled, params.isoEstimate, message, &histogramStats);
+            params.histogramWorkingBytes = histogramStats.workingBytes;
             if (status != SurfaceFailureReason::None)
                 return status;
         }
@@ -1900,10 +1539,13 @@ SurfaceAlgorithmResult BuildSurfaceImpl(const VtkImageGridSnapshot &source,
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
     result.requiredBytes = 64 * 1024;
+    if (!inputParams.initialIsoValue && !inputParams.materialRange)
+        result.requiredBytes = SurfaceHistogramEstimator::GetWorkingBytes();
     SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 0.05);
     ResolvedParams params;
     params.roi = inputs.roi;
     reason = ResolveParams(volume, inputParams, getCancelled, params, result.message);
+    result.requiredBytes = std::max(result.requiredBytes, params.histogramWorkingBytes);
     if (reason != SurfaceFailureReason::None)
         return fail(reason, result.message);
     result.resolvedParams = inputParams;
