@@ -625,7 +625,12 @@ bool TestWindow::StopSession()
     if (!m_isClosing) AppendLog("正在关闭测试会话，停止计算并释放视图资源。");
     m_isClosing = true; m_openVolume->setEnabled(false); m_stop->setEnabled(false); m_workflow.Stop(); m_pump.Stop();
     m_report->CancelTasks();
-    for(auto* module:m_modules)module->GetStatisticsWidget()->Cancel();
+    // 原生报告和分页目录持有正式结果，须先释放才能退休其 OwnerRetirement 作用域。
+    for(const auto& id:m_report->GetReportIds())m_report->RemoveReport(id);
+    for(auto* module:m_modules) {
+        module->CancelReadTasks();module->GetStatisticsWidget()->Cancel();
+        if(module->onSessionClosing)module->onSessionClosing();
+    }
     const auto session = m_runtime.GetSession();
     const auto current = GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{});
     if (!m_runtime.Stop()) { ShowMessage("正在结束当前任务，请稍候再关闭。"); return false; }

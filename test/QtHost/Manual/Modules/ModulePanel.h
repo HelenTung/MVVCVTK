@@ -101,6 +101,8 @@ public:
     std::function<bool()> onStatistics;
     std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;
+    // 关闭会话时释放分页快照；页面和业务完成回调仍保留到 Host 停止完成。
+    std::function<void()> onSessionClosing;
     QString stopDescription;
     std::function<void(const QString&)> onMessage;
     std::function<QString(const QString&, const QJsonObject&)> validateAction;

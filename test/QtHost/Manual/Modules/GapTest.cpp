@@ -272,6 +272,7 @@ ModulePanel* CreateGapTest(TestContext context, std::shared_ptr<GapHostFeature> 
         summary["isCurrent"] = input && input->dataRevision == state.sourceRevision && state.analysisState == GapAnalysisState::Succeeded;
         panel->SetState(summary);
     };
+    panel->onSessionClosing=[listedReader] {listedReader->reset();};
     return panel;
 }
 }
