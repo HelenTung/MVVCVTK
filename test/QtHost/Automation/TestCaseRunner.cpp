@@ -211,7 +211,10 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
     const QFileInfo destination(folder);
     Check(!destination.exists(),"business capture never overwrites a completed group");
     Check(QDir().mkpath(destination.absolutePath()),"business capture parent directory is available");
+    // Wait在事件循环返回后还会重查谓词；已发布的整组不能被当成下一次拍摄。
+    bool isPublished=false;
     Check(Wait([&] {
+        if(isPublished)return true;
         const auto before=GetBusinessCaptureState(window,step);
         if(!before)return false;
         // 先保存在内存；grab/重入可改变相机、绑定或 Feature 投影，不能只信截图前的等待。
@@ -243,6 +246,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
         if(!ready||*before!=*ready)return false;
         Check(!QFileInfo::exists(destination.absoluteFilePath())&&QDir().rename(staging.path(),destination.absoluteFilePath()),
             "business capture publishes one stable complete group");
+        isPublished=true;
         staging.setAutoRemove(false);
         return true;
     },step["timeoutMs"].toInt(0)),"business capture verifies public scene, data and binding before and after all images");
