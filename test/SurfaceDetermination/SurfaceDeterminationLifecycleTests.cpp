@@ -154,6 +154,16 @@ public:
         return true;
     }
 
+    std::optional<HostSemanticTarget> GetDisplayTarget(
+        const std::string& view, const std::string& localId) const override
+    {
+        // 该单元端口在 SendSceneDelta 中同步采用描述；真实帧时序由交错测试覆盖。
+        for (const auto& display : lastDelta.displays)
+            if (display.viewId == view && display.localId == localId)
+                return HostSemanticTarget{display, {}, 1, 0};
+        return {};
+    }
+
     bool SendOwnerComplete(std::function<void()> complete) override
     {
         if (!complete) return false;
@@ -1062,7 +1072,15 @@ void TestHeadlessObjectClearAndReentry(Checks& checks)
     checks.Get(feature.SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted && host.views->overlay->overlays.empty()
         && host.host->lastDelta.hasDisplayUpdate && host.host->lastDelta.displays.empty() && host.host->activeViews.empty(),"headless selection clear retires the scene role and view ownership");
     int detached=0;checks.Get(feature.SendRequest(request,[&](auto result){if(result.status==SurfaceResultStatus::Cancelled)++detached;}).status==SurfaceAdmissionStatus::Accepted
-        && feature.DetachHost() && detached==1,"detach cancels a pending selection exactly once");
+        && [&] {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (feature.DetachHost()) return true;
+                (void)feature.OnHostTick();
+                std::this_thread::yield();
+            }
+            return false;
+        }() && detached==1, "detach retries until the cancelled selection worker has stopped and completes exactly once");
 }
 
 void TestPurposeChannelsAndAdmission(Checks& checks)

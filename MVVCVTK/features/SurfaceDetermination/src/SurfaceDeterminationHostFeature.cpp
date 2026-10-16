@@ -21,6 +21,8 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -44,6 +47,8 @@ namespace {
 
 constexpr std::string_view featureId = "surface-determination";
 constexpr std::size_t completionBatchLimit = 8;
+// 一个正在使用的候选和一个协作取消中的旧任务；积压时拒绝新增准备任务。
+constexpr std::size_t objectJobLimit = 2;
 
 bool GetTargetsUsed(const HostViewTargets& targets)
 {
@@ -157,12 +162,24 @@ private:
         VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
         SurfaceDeterminationCallback callback;
-        std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
+        std::shared_ptr<const FeatureInternal::InputReads> readers;
+        std::shared_ptr<std::atomic<bool>> active = std::make_shared<std::atomic<bool>>(true);
         std::future<std::shared_ptr<const FeatureInternal::SpatialMeshSource>> future;
-        ~ObjectJob(){cancelled->store(true);if(future.valid())future.wait();}
+        std::thread worker;
+        std::atomic<bool> isFinishing{false};
+        SurfaceDeterminationResult result;
+        std::function<bool()> getApplied;
+        bool isPrepared = false;
+        // 正常路径只在线程实际退出后回收；取消仅转移所有权。
+        ~ObjectJob() {
+            // 调用方未完成 Detach 就销毁 Feature 时的最后防线，与原 future 析构的等待等价。
+            if (worker.joinable()) { active->store(false); worker.join(); }
+        }
     };
     bool ClearObjectSelection();
     void ContinueObjectSelection();
+    void ReapObjectJobs();
+    bool PollObjectJob(ObjectJob& job);
     struct RequestEntry final {
         VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
@@ -257,6 +274,9 @@ private:
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings,m_objectBindings;
     std::unique_ptr<ObjectJob> m_objectJob;
+    std::vector<std::unique_ptr<ObjectJob>> m_retiredObjectJobs;
+    std::shared_ptr<const FeatureInternal::InputReads> m_objectReaders;
+    std::shared_ptr<std::atomic<bool>> m_objectActive;
     std::shared_ptr<const SurfaceGenerationSnapshot> m_objectGeneration;
     VtkImageGridSnapshot m_objectSource;
     FeatureOperationState m_objectOperation;
@@ -296,6 +316,7 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
                     && generation->objects && GetDataRevisionRefValid(generation->sourceRevision);
             } }))) return false;
     try {
+        m_retiredObjectJobs.reserve(objectJobLimit);
         m_service = std::make_unique<SurfaceDeterminationService>(
             [weakHost = std::weak_ptr<FeatureHostControl>(context.host)] {
                 if (const auto host = weakHost.lock())
@@ -348,9 +369,13 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     // 停止已开始后保持 closing；失败只保留挂载身份供重试解绑，读队列不再接纳工作。
+    const bool objectCleared = ClearObjectSelection();
+    ReapObjectJobs();
     const bool stopped=m_service->Stop(deadline);
+    ReapObjectJobs();
     const bool inputStopped=SetObjectPicking(false);
-    if (!stopped || !inputStopped || !ClearResult()) {
+    // 仍在途时保留端口、读取租约和挂载身份，调用方可继续 tick 或重试 Detach。
+    if (!stopped || !inputStopped || !objectCleared || !m_retiredObjectJobs.empty() || !ClearResult()) {
         m_isDetaching = false;
         return false;
     }
@@ -383,9 +408,11 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
 
 bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
 {
-    if (!m_isAttached || m_isDetaching || m_isClosing || !GetIsOwnerThread() || !m_service || !m_data) {
+    if (!m_isAttached || m_isDetaching || !GetIsOwnerThread() || !m_service || !m_data) {
         return false;
     }
+    ReapObjectJobs();
+    if (m_isClosing) return false;
     if (m_isStaleCleanupPending && RemoveDisplay()) {
         m_isStaleCleanupPending = false;
     }
@@ -402,8 +429,9 @@ bool SurfaceDeterminationHostFeature::Impl::OnHostTick()
         SetSourceStale();
     }
     SetBindingProjection();
+    if (!m_isAttached || m_isClosing || m_isDetaching || !m_service || !m_data) return false;
     ContinueObjectSelection();
-    if(!m_isAttached || !m_service)return false;
+    if(!m_isAttached || m_isClosing || m_isDetaching || !m_service)return false;
     for (auto& item : m_requests) {
         RequestEntry& request = item.second;
         if (!request.isSourceChanged && !GetRequestInputsSame(request))
@@ -461,6 +489,14 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         return admission;
     }
     SetBindingProjection();
+    if (!m_isAttached || !m_service || !m_data || !m_host) {
+        admission.status = SurfaceAdmissionStatus::Unavailable;
+        return admission;
+    }
+    if (m_isDetaching || m_isClosing) {
+        admission.status = SurfaceAdmissionStatus::Stopping;
+        return admission;
+    }
 
     if(const auto* select=std::get_if<SurfaceObjectSelectionRequest>(&request)) {
         const auto displayed=GetDisplayGeneration();
@@ -482,29 +518,52 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         const auto generation=m_store.GetGeneration(select->generation);
         if(!generation || !generation->objects || *select->objectIndex>=generation->objects->size())return admission;
         const auto object=(*generation->objects)[*select->objectIndex];if(object.objectIndex!=*select->objectIndex)return admission;
-        const auto source=m_data->GetImageGrid(m_data->GetDataGraph(),generation->sourceRevision);
+        const auto graph = m_data->GetDataGraph();
+        const auto source=m_data->GetImageGrid(graph,generation->sourceRevision);
         const auto primary=m_data->GetPrimaryImage();
         if(!primary || !primary->data || primary->data->self!=generation->sourceRevision || !source || !GetSourceSame(source)){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
         auto targets=select->targetViews;if(!GetTargetsUsed(targets))targets.viewRoles={HostRenderViewRole::Primary3D};
         auto views=GetTargetViews(targets);if(views.empty())return admission;
+        ReapObjectJobs();
+        const auto running = m_retiredObjectJobs.size() + (m_objectJob && !PollObjectJob(*m_objectJob) ? 1U : 0U);
+        if (running >= objectJobLimit) { admission.status = SurfaceAdmissionStatus::Busy; return admission; }
+        auto readers = FeatureInternal::StartInputReads(graph,
+            std::vector<DataRevisionRef>{generation->sourceRevision, generation->dataRevision, generation->meshRevision},
+            "surface-object-reader");
+        if (!readers) { admission.status = SurfaceAdmissionStatus::Unavailable; return admission; }
         const auto intention=m_objectIntent+1;
         if(!ClearObjectSelection())return admission;
         // 清除旧高亮的回调可能解绑；重新核对，不能在重入后使用失效的 Host。
-        if(m_objectIntent!=intention || !m_isAttached || m_isDetaching || !m_host)return admission;
+        if(m_objectIntent!=intention || !m_isAttached || m_isDetaching || m_isClosing || !m_host || !GetSourceSame(source))return admission;
         auto job=std::make_unique<ObjectJob>();job->id=GetNextRequestId();job->generation=generation;
         job->object=object;job->source=source;job->views=std::move(views);job->callback=std::move(onComplete);
-        const auto cancelled=job->cancelled;
-        try {job->future=std::async(std::launch::async,[generation,object,cancelled,weakHost=std::weak_ptr<FeatureHostControl>(m_host)]{
-            struct Notify { std::weak_ptr<FeatureHostControl> host; ~Notify(){if(auto live=host.lock())(void)live->SendWorkAvailable();} } notify{weakHost};
-            const auto stopped=[cancelled]{return cancelled->load();};
-            const auto mesh=BuildSurfaceObjectMesh(*generation,object,stopped);
-            return mesh?FeatureInternal::SpatialMeshSource::Build(mesh,stopped):nullptr;
-        });}catch(...){admission.status=SurfaceAdmissionStatus::Unavailable;return admission;}
-        admission={SurfaceAdmissionStatus::Accepted,job->id};
-        m_objectOperation={};m_objectOperation.operation={std::string(featureId),m_host->GetAttachmentId(),job->id};
-        m_objectOperation.status=FeatureRunStatus::Running;m_objectOperation.stateRevision=1;
-        m_objectOperation.inputs={{"source-volume",generation->sourceRevision},{"generation",generation->dataRevision},{"mesh",generation->meshRevision}};
-        m_objectJob=std::move(job);(void)m_host->SendWorkAvailable();return admission;
+        job->readers = std::make_shared<const FeatureInternal::InputReads>(std::move(*readers));
+        const auto active = job->active;
+        FeatureOperationState operation;
+        try {
+            // 全部可能分配的状态先准备好；线程启动后只做无失败的 owner 接管。
+            operation.operation = {std::string(featureId), m_host->GetAttachmentId(), job->id};
+            operation.status = FeatureRunStatus::Running; operation.stateRevision = 1;
+            operation.inputs = {{"source-volume", generation->sourceRevision}, {"generation", generation->dataRevision}, {"mesh", generation->meshRevision}};
+            std::packaged_task<std::shared_ptr<const FeatureInternal::SpatialMeshSource>()> task([generation, object, active] {
+                const auto stopped = [active] { return !active->load(); };
+                const auto mesh = BuildSurfaceObjectMesh(*generation, object, stopped);
+                return mesh ? FeatureInternal::SpatialMeshSource::Build(mesh, stopped) : nullptr;
+            });
+            job->future = task.get_future();
+            job->worker = std::thread([task = std::move(task), running = job.get(),
+                host = std::weak_ptr<FeatureHostControl>(m_host)]() mutable {
+                try { task(); } catch (...) {} // 计算异常由 packaged_task 保存，退出前仍完成收尾通知。
+                running->isFinishing.store(true, std::memory_order_release);
+                try { if (const auto owner = host.lock()) (void)owner->SendWorkAvailable(); } catch (...) {}
+            });
+        }
+        catch (...) { admission.status = SurfaceAdmissionStatus::Unavailable; return admission; }
+        admission = {SurfaceAdmissionStatus::Accepted, job->id};
+        m_objectOperation = std::move(operation);
+        m_objectJob = std::move(job);
+        try { (void)m_host->SendWorkAvailable(); } catch (...) {}
+        return admission;
     }
     if (const auto* start = std::get_if<SurfaceStartRequest>(&request)) {
         auto params = start->start.value_or(m_config.defaultStart);
@@ -1057,13 +1116,44 @@ void SurfaceDeterminationHostFeature::Impl::RemoveBindings(
     bindings.clear();
 }
 
+bool SurfaceDeterminationHostFeature::Impl::PollObjectJob(ObjectJob& job)
+{
+    if (!job.worker.joinable()) return true;
+    // future 的零时等待仍会取得内部锁，ready 也不包含通知和捕获资源的销毁。
+    // 句柄只由本 owner 持有；零超时确认线程退出后，join/get 不再等待任何业务工作。
+    if (WaitForSingleObject(job.worker.native_handle(), 0) != WAIT_OBJECT_0) {
+        // 唯一终末通知可能先于退出被消费；仅在收尾阶段补排，计算期间不轮询。
+        if (job.isFinishing.load(std::memory_order_acquire) && m_host)
+            try { (void)m_host->SendWorkAvailable(); } catch (...) {}
+        return false;
+    }
+    job.worker.join();
+    return true;
+}
+
+void SurfaceDeterminationHostFeature::Impl::ReapObjectJobs()
+{
+    // 集合最多 objectJobLimit 项；只消费已退出线程，VTK 快照和候选均在 owner 上释放。
+    for (auto item = m_retiredObjectJobs.begin(); item != m_retiredObjectJobs.end();) {
+        if (!PollObjectJob(**item)) {
+            ++item;
+            continue;
+        }
+        try { if ((*item)->future.valid()) (void)(*item)->future.get(); } catch (...) {}
+        item = m_retiredObjectJobs.erase(item);
+    }
+}
+
 bool SurfaceDeterminationHostFeature::Impl::ClearObjectSelection()
 {
     ++m_objectIntent;
-    auto job=std::move(m_objectJob);if(job)job->cancelled->store(true);
+    auto job=std::move(m_objectJob);
+    if (job) job->active->store(false);
+    if (m_objectActive) m_objectActive->store(false);
     const auto source=m_objectSource;std::vector<std::string> retiredViews;
     for(const auto& binding:m_objectBindings)retiredViews.push_back(binding.viewId);
     RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();
+    m_objectReaders.reset();m_objectActive.reset();
     m_objectOperation.status=FeatureRunStatus::Cancelled;++m_objectOperation.stateRevision;
     bool updated=SendDisplayDelta();
     if(m_bindings.empty() && source && source->data && !retiredViews.empty() && m_host) {
@@ -1077,37 +1167,95 @@ bool SurfaceDeterminationHostFeature::Impl::ClearObjectSelection()
         auto result=BuildResult(job->id,SurfaceResultStatus::Cancelled,SurfaceFailureReason::Cancelled,job->generation->sourceRevision,
             job->generation->resultRevision,0,0,"Surface object highlight was cancelled.");
         result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
-        SendComplete(std::move(job->callback),std::move(result));
+        auto callback = std::move(job->callback);
+        m_retiredObjectJobs.push_back(std::move(job));
+        ReapObjectJobs();
+        // 先保存取消任务，再派发用户回调；回调可以同步查询、请求、清除或重试解绑。
+        SendComplete(std::move(callback),std::move(result));
     }
     return updated;
 }
 void SurfaceDeterminationHostFeature::Impl::ContinueObjectSelection()
 {
-    const auto primary=m_data->GetPrimaryImage();
-    const auto same=[&](const VtkImageGridSnapshot& source){return primary && primary->data && source && source->data && primary->data->self==source->data->self && GetSourceSame(source);};
-    if(m_objectSource && !same(m_objectSource)){(void)ClearObjectSelection();return;}
-    if(!m_objectJob)return;
-    if(!same(m_objectJob->source)){(void)ClearObjectSelection();return;}
-    if(m_objectJob->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
-    auto job=std::move(m_objectJob);
-    auto result=BuildResult(job->id,SurfaceResultStatus::Failed,SurfaceFailureReason::DisplayFailed,job->generation->sourceRevision,
-        job->generation->resultRevision,job->object.pointCount,1,"Surface object highlight preparation failed.");
-    result.dataRevision=job->generation->dataRevision;result.meshRevision=job->generation->meshRevision;
+    const auto primary = m_data->GetPrimaryImage();
+    const auto same = [&](const VtkImageGridSnapshot& source) {
+        return primary && primary->data && source && source->data
+            && primary->data->self == source->data->self && GetSourceSame(source);
+    };
+    if (m_objectSource && !same(m_objectSource)) { (void)ClearObjectSelection(); return; }
+    if (!m_objectJob) return;
+    if (!same(m_objectJob->source)) { (void)ClearObjectSelection(); return; }
+    if (m_objectJob->isPrepared) {
+        // HostDriven 可以延后绘制；没有展示确认时仍是候选，等待重试或显式取消。
+        if (!m_objectJob->getApplied()) return;
+        auto job = std::move(m_objectJob);
+        m_objectOperation.status = FeatureRunStatus::Succeeded;
+        m_objectOperation.progress = 1.0;
+        ++m_objectOperation.stateRevision;
+        job->readers.reset(); job->source.reset(); job->generation.reset(); job->getApplied = {};
+        // 就在确认的 owner tick 完成，避免排队后新帧使已确认的展示身份失效。
+        // 内部状态已提交；用户异常不改变成功，回调后不再沿用旧成员状态。
+        try { if (job->callback) job->callback(std::move(job->result)); } catch (...) {}
+        return;
+    }
+    if (!PollObjectJob(*m_objectJob)) return;
+    auto job = std::move(m_objectJob);
+    auto result = BuildResult(job->id, SurfaceResultStatus::Failed, SurfaceFailureReason::DisplayFailed,
+        job->generation->sourceRevision, job->generation->resultRevision, job->object.pointCount, 1,
+        "Surface object highlight preparation failed.");
+    result.dataRevision = job->generation->dataRevision;
+    result.meshRevision = job->generation->meshRevision;
     try {
-        const auto source=job->future.get();
-        const auto display=source?std::make_shared<FeatureInternal::SpatialMeshCache>(source,m_service->GetReadQueue(),128):nullptr;
-        if(display && BuildBindings(display,job->views,job->source,m_objectBindings,true)) {
-            m_objectGeneration=job->generation;m_objectSource=job->source;
-            m_objectOperation.status=FeatureRunStatus::Succeeded;m_objectOperation.progress=1;++m_objectOperation.stateRevision;
-            auto active=GetViewIds(job->views);for(const auto& binding:m_bindings)active.push_back(binding.viewId);
-            std::sort(active.begin(),active.end());active.erase(std::unique(active.begin(),active.end()),active.end());
-            if(m_host->SetActiveViews(active) && SendDisplayDelta()) {
-                result.status=SurfaceResultStatus::Succeeded;result.failureReason=SurfaceFailureReason::None;result.message="Surface object range highlighted without re-extraction.";
+        const auto source = job->future.get();
+        const auto display = source
+            ? std::make_shared<FeatureInternal::SpatialMeshCache>(source, m_service->GetReadQueue(), 128) : nullptr;
+        if (display && BuildBindings(display, job->views, job->source, m_objectBindings, true)) {
+            m_objectGeneration = job->generation;
+            m_objectSource = job->source;
+            m_objectReaders = job->readers;
+            m_objectActive = job->active;
+            m_objectOperation.status = FeatureRunStatus::Preparing;
+            ++m_objectOperation.stateRevision;
+            auto active = GetViewIds(job->views);
+            for (const auto& binding : m_bindings) active.push_back(binding.viewId);
+            std::sort(active.begin(), active.end());
+            active.erase(std::unique(active.begin(), active.end()), active.end());
+            if (m_host->SetActiveViews(active) && SendDisplayDelta()) {
+                result.status = SurfaceResultStatus::Succeeded;
+                result.failureReason = SurfaceFailureReason::None;
+                result.message = "Surface object range highlighted without re-extraction.";
             }
         }
-    }catch(const std::exception& error){result.message=error.what();}
-    if(result.status!=SurfaceResultStatus::Succeeded){RemoveBindings(m_objectBindings);m_objectGeneration.reset();m_objectSource.reset();m_objectOperation.status=FeatureRunStatus::Failed;++m_objectOperation.stateRevision;(void)SendDisplayDelta();}
-    SendComplete(std::move(job->callback),std::move(result));
+    }
+    catch (const std::exception& error) { result.message = error.what(); }
+    if (result.status != SurfaceResultStatus::Succeeded) {
+        RemoveBindings(m_objectBindings);
+        m_objectGeneration.reset(); m_objectSource.reset(); m_objectReaders.reset(); m_objectActive.reset();
+        job->readers.reset();
+        m_objectOperation.status = FeatureRunStatus::Failed;
+        ++m_objectOperation.stateRevision;
+        (void)SendDisplayDelta();
+        SendComplete(std::move(job->callback), std::move(result));
+        return;
+    }
+    // admission 拒绝不回调；已接纳高亮恰好完成一次，成功在确认展示的 owner tick 内同步回调。
+    // 失败/取消走 owner 完成端口，端口允许在 SendRequest 返回前同步派发。
+    // 成功表示各 View 的 Host 展示查询确认精确 mesh/operation（正式 Host 同时要求已绘制）。
+    // 用户回调可查询、再请求、取消、Detach/Stop；回调异常均被隔离，不回滚已提交状态。
+    job->getApplied = [host = std::weak_ptr<FeatureHostControl>(m_host), views = GetViewIds(job->views),
+        mesh = job->generation->meshRevision, operation = m_objectOperation.operation] {
+        const auto live = host.lock();
+        if (!live) return false;
+        for (const auto& view : views) {
+            const auto target = live->GetDisplayTarget(view, "surface-object");
+            if (!target || target->display.data != mesh || !(target->display.operation == operation)) return false;
+        }
+        return !views.empty();
+    };
+    job->result = std::move(result);
+    job->isPrepared = true;
+    m_objectJob = std::move(job);
+    (void)m_host->SendWorkAvailable();
 }
 bool SurfaceDeterminationHostFeature::Impl::RemoveDisplay()
 {
@@ -1388,15 +1536,19 @@ bool SurfaceDeterminationHostFeature::Impl::SetDisplayProjection()
 
 void SurfaceDeterminationHostFeature::Impl::SetBindingProjection()
 {
-    if (!m_isAttached || m_isDetaching || !m_data) return;
+    if (!m_isAttached || m_isDetaching || m_isClosing || !m_data) return;
     try {
-        const auto graph = m_data->GetDataGraph();
         const auto binding = GetResultBinding();
         if (binding.revision != m_resultBinding.revision
             || binding.target != m_resultBinding.target) {
             // 外部重新激活（包括 ABA）是新的业务意图；退休旧展示但不写图。
             m_resultBinding = binding;
             if (!RemoveDisplay()) m_isStaleCleanupPending = true;
+            // 取消高亮的完成端口可能同步回调并解绑或再次改变绑定；先重新核验再投影。
+            if (!m_isAttached || m_isClosing || m_isDetaching || !m_data || !m_host) return;
+            const auto currentBinding = GetResultBinding();
+            if (currentBinding.revision != binding.revision || currentBinding.target != binding.target) return;
+            const auto graph = m_data->GetDataGraph();
             const auto snapshot = binding.target ? m_data->GetData(graph, *binding.target) : DataSnapshot{};
             const auto* payload = snapshot
                 ? dynamic_cast<const SurfaceGenerationPayload*>(snapshot->payload.get()) : nullptr;
