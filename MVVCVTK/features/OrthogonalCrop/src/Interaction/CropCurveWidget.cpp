@@ -9,6 +9,7 @@
 #include <vtkActor.h>
 #include <vtkAlgorithm.h>
 #include <vtkCallbackCommand.h>
+#include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkCellArray.h>
 #include <vtkPoints.h>
@@ -29,8 +30,10 @@
 #include <array>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace {
 using P=CropVectorDouble3Array;
@@ -182,23 +185,24 @@ public:
         if(operation.geometryType==CropShape::Cylinder){
             cylinderVisual.UpdateView();
             // 轴向正视时不让端点与中心争夺同一命中区域；旋转柄仍可用于转出正视。
-            if(active<0&&!hover){
-                const auto direction=cylinderVisual.GetRadiusHandleDirection(radial);
+            if(active<0){
+                const auto direction=hover?radial:cylinderVisual.GetRadiusHandleDirection(radial);
                 if(direction!=radial){
                     radial=direction;
                     auto radius=Transform(modelToWorld,Add(operation.centerInInputModel,radial,operation.radius));
                     auto rotation=Transform(modelToWorld,RotationLever());
                     handles[1].representation->SetWorldPosition(radius.data());handles[4].representation->SetWorldPosition(rotation.data());
                 }
-                UpdateRotationHandle();
                 std::vector<P> display;
-                for(int i:{0,1,4,2,3}){
+                for(int i:{0,1,2,3}){
                     P world{};handles[i].representation->GetWorldPosition(world.data());
                     renderer->SetWorldPoint(world[0],world[1],world[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
-                    const bool separate=i<2||i==4||std::all_of(display.begin(),display.end(),[&](const P& p){return std::hypot(d[0]-p[0],d[1]-p[1])>=16;});
+                    const bool separate=i<2||std::all_of(display.begin(),display.end(),[&](const P& p){return std::hypot(d[0]-p[0],d[1]-p[1])>=16;});
                     handles[i].representation->SetVisibility(separate);handles[i].widget->SetProcessEvents(separate);
                     if(separate)display.push_back({d[0],d[1],d[2]});
                 }
+                const bool rotationAvailable=UpdateRotationHandle();
+                handles[4].representation->SetVisibility(rotationAvailable);handles[4].widget->SetProcessEvents(rotationAvailable);
             }
             return;
         }
@@ -208,47 +212,83 @@ public:
             handles[1].representation->SetWorldPosition(world.data());
         }
     }
-    void UpdateRotationHandle() {
-        const auto* origin=renderer->GetOrigin();const auto* size=renderer->GetSize();std::array<P,4> occupied{};
-        for(int i=0;i<4;++i){P p{};handles[i].representation->GetWorldPosition(p.data());renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();std::copy_n(renderer->GetDisplayPoint(),3,occupied[i].data());}
-        const auto quality=[&](const P& direction,double length){
-            const auto p=Transform(modelToWorld,Add(operation.centerInInputModel,direction,length));
-            renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();const auto* d=renderer->GetDisplayPoint();
-            if(!std::isfinite(d[0])||!std::isfinite(d[1])||!std::isfinite(d[2])||d[2]<0||d[2]>1)return -1.;
-            double score=std::min({d[0]-origin[0],origin[0]+size[0]-d[0],d[1]-origin[1],origin[1]+size[1]-d[1]});if(score<8)return -1.;
-            for(const auto& other:occupied)if(other[2]>=0&&other[2]<=1){const double distance=std::hypot(d[0]-other[0],d[1]-other[1]);if(distance<16)return -1.;score=std::min(score,distance);}
-            return score+.001*(1-d[2]);
+    std::array<double,4> GetHandleEnvelope() const {
+        // VTK 9.4.2 的 NearbyEvent 将实际拾取限制在中心两侧 10 个显示像素内，
+        // CellPicker 的 0.01 容差仍受此前置范围约束；另覆盖 10 像素高亮光标的完整投影。
+        std::array<double,4> half{10.5,10.5,0,0};double handleSize=10,lineWidth=0;
+        for(const auto& h:handles){handleSize=std::max(handleSize,h.representation->GetHandleSize());lineWidth=std::max({lineWidth,double(h.representation->GetProperty()->GetLineWidth()),double(h.representation->GetSelectedProperty()->GetLineWidth())});}
+        const auto* focal=renderer->GetActiveCamera()->GetFocalPoint();
+        renderer->SetWorldPoint(focal[0],focal[1],focal[2],1);renderer->WorldToDisplay();
+        P center{};std::copy_n(renderer->GetDisplayPoint(),3,center.data());P corners[2];
+        for(int i=0;i<2;++i){const double sign=i?1:-1;renderer->SetDisplayPoint(center[0]+sign*handleSize/2,center[1]+sign*handleSize/2,center[2]);renderer->DisplayToWorld();const auto* p=renderer->GetWorldPoint();for(int j=0;j<3;++j)corners[i][j]=p[j]/p[3];}
+        // 与 SizeHandlesInPixels 相同的世界半径；在平行和透视相机下屏幕包络均不依赖深度。
+        const auto diagonal=Add(corners[1],corners[0],-1);const double radius=std::hypot(diagonal[0],diagonal[1],diagonal[2])/2;
+        auto* projection=renderer->GetActiveCamera()->GetCompositeProjectionTransformMatrix(renderer->GetTiledAspectRatio(),0,1);
+        const double world[4]{focal[0],focal[1],focal[2],1};double clip[4];projection->MultiplyPoint(world,clip);
+        if(!(clip[3]>0)||!std::isfinite(radius))return {std::numeric_limits<double>::infinity(),std::numeric_limits<double>::infinity(),0,0};
+        // 半径随透视 w 同比变化。两裁剪平面的支持半径也转成 w 的系数，保留完整光标深度。
+        for(int axis=0;axis<3;++axis){half[2]+=radius/clip[3]*std::abs(projection->GetElement(2,axis));half[3]+=radius/clip[3]*std::abs(projection->GetElement(3,axis)-projection->GetElement(2,axis));}
+        for(int i=0;i<8;++i){renderer->SetWorldPoint(focal[0]+(i&1?radius:-radius),focal[1]+(i&2?radius:-radius),focal[2]+(i&4?radius:-radius),1);renderer->WorldToDisplay();const auto* p=renderer->GetDisplayPoint();
+            for(int axis=0;axis<2;++axis){if(!std::isfinite(p[axis]))return {std::numeric_limits<double>::infinity(),std::numeric_limits<double>::infinity(),0,0};half[axis]=std::max(half[axis],std::abs(p[axis]-center[axis])+lineWidth/2+.5);}}
+        return half;
+    }
+    bool UpdateRotationHandle() {
+        const auto* origin=renderer->GetOrigin();const auto* size=renderer->GetSize();const auto half=GetHandleEnvelope();
+        if(size[0]<=2*half[0]||size[1]<=2*half[1])return false;
+        std::vector<P> occupied;
+        for(int i=0;i<4;++i)if(GetHandleAvailable(handles[i])){P p{};handles[i].representation->GetWorldPosition(p.data());renderer->SetWorldPoint(p[0],p[1],p[2],1);renderer->WorldToDisplay();std::copy_n(renderer->GetDisplayPoint(),3,p.data());if(p[2]>=0&&p[2]<=1)occupied.push_back(p);}
+        vtkNew<vtkMatrix4x4> clip;vtkMatrix4x4::Multiply4x4(renderer->GetActiveCamera()->GetCompositeProjectionTransformMatrix(renderer->GetTiledAspectRatio(),0,1),modelToWorld,clip);
+        const auto& center=operation.centerInInputModel;const double base[4]{center[0],center[1],center[2],1};double c[4];clip->MultiplyPoint(base,c);
+        if(!std::all_of(c,c+4,[](double x){return std::isfinite(x);}))return false;
+        using Interval=std::array<double,2>;
+        const auto intersect=[](Interval& range,double a,double b){
+            if(b>0)range[0]=std::max(range[0],-a/b);else if(b<0)range[1]=std::min(range[1],-a/b);else if(a<0)return false;
+            return range[0]<=range[1];
         };
-        const double preferred=1.5*std::max(operation.radius,operation.height/2);
-        if(quality(rotationOffset,rotationLength>0?rotationLength:preferred)>=0)return;
-        const auto tangent=Cross(operation.axisInInputModel,radial);double best=-1,chosenLength=preferred;P chosen=rotationOffset;
-        std::array<P,65> directions{};directions[0]=rotationOffset;int index=1;
-        for(int sign:{-1,1})for(int i=0;i<32;++i){const double angle=6.283185307179586*i/32;const auto& a=operation.axisInInputModel;
-            const auto direction=Unit(Add(Add(P{sign*a[0],sign*a[1],sign*a[2]},radial,std::cos(angle)),tangent,std::sin(angle)));
-            directions[index++]=direction;const double score=quality(direction,preferred);if(score>best){best=score;chosen=direction;}}
-        if(best<0&&size[0]>18&&size[1]>18) {
-            // 仅缩短显示杠杆：解析求每条候选射线在带边距视锥内的长度区间。
-            // 保留方向的轴向分量，轴向视角下拖动仍能把圆柱转出正视。
-            vtkNew<vtkMatrix4x4> clip;vtkMatrix4x4::Multiply4x4(renderer->GetActiveCamera()->GetCompositeProjectionTransformMatrix(renderer->GetTiledAspectRatio(),0,1),modelToWorld,clip);
-            const auto& center=operation.centerInInputModel;const double base[4]{center[0],center[1],center[2],1};double c[4];clip->MultiplyPoint(base,c);
-            for(const auto& direction:directions) {
-                const double vector[4]{direction[0],direction[1],direction[2],0};double d[4];clip->MultiplyPoint(vector,d);
-                if(!std::all_of(c,c+4,[](double x){return std::isfinite(x);})||!std::all_of(d,d+4,[](double x){return std::isfinite(x);}))continue;
-                double low=0,high=preferred;
-                for(int plane=0;plane<6&&low<=high;++plane) {
-                    const int axis=plane/2;const double sign=plane%2?-1:1;
-                    const double inset=axis<2?1-18.0/size[axis]:1;
-                    const double a=(plane==4?0:inset*c[3])+sign*c[axis],b=(plane==4?0:inset*d[3])+sign*d[axis];
-                    if(b>0)low=std::max(low,-a/b);else if(b<0)high=std::min(high,-a/b);else if(a<0){high=-1;break;}
-                }
-                if(!(high>0)||low>high)continue;
-                for(double fraction:{.25,.5,.75}) {
-                    const double length=low+(high-low)*fraction;if(!(length>0)||!std::isfinite(length))continue;
-                    const double score=quality(direction,length);if(score>best){best=score;chosen=direction;chosenLength=length;}
-                }
+        const double wanted=rotationLength>0?rotationLength:1.5*std::max(operation.radius,operation.height/2);
+        const auto chooseLength=[&](const P& direction,double& chosen){
+            const double vector[4]{direction[0],direction[1],direction[2],0};double d[4];clip->MultiplyPoint(vector,d);
+            if(!std::all_of(d,d+4,[](double x){return std::isfinite(x);}))return false;
+            Interval visible{0,std::numeric_limits<double>::infinity()};
+            // 1. 在相机前方求带完整手柄边距的视锥区间，不以实体默认长度作为上限。
+            if(!intersect(visible,c[3],d[3]))return false;
+            for(int axis=0;axis<3;++axis){const double inset=axis<2?1-2*half[axis]/size[axis]:1-half[3];
+                const double lower=axis<2?inset:-half[2];
+                if(!intersect(visible,lower*c[3]+c[axis],lower*d[3]+d[axis])
+                    ||!intersect(visible,inset*c[3]-c[axis],inset*d[3]-d[axis]))return false;}
+            std::vector<Interval> available{visible};
+            // 2. u(L)、v(L) 是一次式之比；冲突矩形四条边直接给出要剔除的长度区间。
+            for(const auto& other:occupied){Interval blocked=visible;bool overlaps=true;
+                for(int axis=0;axis<2&&overlaps;++axis){const double margin=2*half[axis]+2; // 两份包络及操作间隙，均为最终显示像素。
+                    const double low=2*(other[axis]-margin-origin[axis])/size[axis]-1,high=2*(other[axis]+margin-origin[axis])/size[axis]-1;
+                    overlaps=intersect(blocked,c[axis]-low*c[3],d[axis]-low*d[3])&&intersect(blocked,high*c[3]-c[axis],high*d[3]-d[axis]);}
+                if(!overlaps)continue;
+                std::vector<Interval> remaining;
+                for(const auto& range:available){
+                    if(blocked[1]<range[0]||blocked[0]>range[1])remaining.push_back(range);
+                    else {if(blocked[0]>range[0])remaining.push_back({range[0],std::nextafter(blocked[0],-std::numeric_limits<double>::infinity())});if(blocked[1]<range[1])remaining.push_back({std::nextafter(blocked[1],std::numeric_limits<double>::infinity()),range[1]});}}
+                available=std::move(remaining);
             }
+            // 3. 选离现有长度最近的可用点；当前位置合法时精确保留，避免松手和重绘跳动。
+            double distance=std::numeric_limits<double>::infinity();
+            for(const auto& range:available){const double length=std::clamp(wanted,range[0],range[1]);
+                if(length>0&&std::isfinite(length)&&c[3]+length*d[3]>0&&std::abs(length-wanted)<distance){distance=std::abs(length-wanted);chosen=length;}}
+            return std::isfinite(distance);
+        };
+        P chosen=rotationOffset;double chosenLength=0;
+        if(!chooseLength(rotationOffset,chosenLength)){
+            const auto tangent=Cross(operation.axisInInputModel,radial);double best=std::numeric_limits<double>::infinity();
+            for(int sign:{-1,1})for(int i=0;i<32;++i){const double angle=6.283185307179586*i/32;const auto& a=operation.axisInInputModel;
+                const auto direction=Unit(Add(Add(P{sign*a[0],sign*a[1],sign*a[2]},radial,std::cos(angle)),tangent,std::sin(angle)));double length;
+                if(!chooseLength(direction,length))continue;
+                const auto delta=Add(Add(P{},direction,length),rotationOffset,-wanted);const double distance=Dot(delta,delta);
+                if(distance<best){best=distance;chosen=direction;chosenLength=length;}}
+            if(!std::isfinite(best))return false;
         }
-        if(best<0)return;rotationOffset=chosen;rotationLength=chosenLength;auto p=Transform(modelToWorld,RotationLever());handles[4].representation->SetWorldPosition(p.data());
+        rotationOffset=chosen;rotationLength=chosenLength;auto p=Transform(modelToWorld,RotationLever());handles[4].representation->SetWorldPosition(p.data());return true;
+    }
+    bool GetHandleAvailable(const Handle& handle) const {
+        return handle.widget->GetEnabled()&&handle.widget->GetProcessEvents()&&handle.representation->GetVisibility();
     }
     void ApplySphereStyle() {
         const auto state=active>=0?visualState:(hover?CropSphereVisual::State::Hover:CropSphereVisual::State::Idle);
@@ -285,7 +325,7 @@ public:
         const auto* position=interactor->GetEventPosition();int nextHandle=-1;bool nextHover=false;
         if(allowed&&event!=vtkCommand::LeaveEvent&&renderer->IsInViewport(position[0],position[1])) {
             SyncView();
-            for(int i=0;i<(operation.geometryType==CropShape::Sphere?2:5);++i)if(handles[i].representation->GetVisibility()&&handles[i].representation->ComputeInteractionState(position[0],position[1])!=vtkHandleRepresentation::Outside){nextHandle=i;break;}
+            for(int i=0;i<(operation.geometryType==CropShape::Sphere?2:5);++i)if(GetHandleAvailable(handles[i])&&handles[i].representation->ComputeInteractionState(position[0],position[1])!=vtkHandleRepresentation::Outside){nextHandle=i;break;}
             nextHover=nextHandle>=0||(operation.geometryType==CropShape::Sphere&&sphereVisual.GetNearOutline(position[0],position[1]));
         }
         if(nextHover==hover&&nextHandle==hovered)return;
@@ -373,9 +413,10 @@ void CropCurveWidget::SetContextGate(std::function<bool()> gate){m_impl->gate=st
 
 bool CropCurveWidget::GetInputAccepted(int x,int y) const {
     if(!m_impl->enabled)return false;
-    for(const auto& h:m_impl->handles)if(h.widget->GetEnabled()&&h.representation->GetVisibility()&&h.representation->ComputeInteractionState(x,y)!=vtkHandleRepresentation::Outside)return true;
+    m_impl->SyncView();
+    for(const auto& h:m_impl->handles)if(m_impl->GetHandleAvailable(h)&&h.representation->ComputeInteractionState(x,y)!=vtkHandleRepresentation::Outside)return true;
     return false;
 }
 void CropCurveWidget::SetInputBindings(const std::vector<EffectiveBinding>& values){for(auto& h:m_impl->handles)FeatureSupport::SetWidgetBindings(h.widget,values,{{"crop.widget.select.drag",vtkWidgetEvent::Select}});}
-void CropCurveWidget::StartGesture(){m_impl->inputGeometry=m_impl->operation;m_impl->inputRadial=m_impl->radial;m_impl->inputRotation=m_impl->rotationOffset;m_impl->inputRotationLength=m_impl->rotationLength;}
+void CropCurveWidget::StartGesture(){m_impl->SyncView();m_impl->inputGeometry=m_impl->operation;m_impl->inputRadial=m_impl->radial;m_impl->inputRotation=m_impl->rotationOffset;m_impl->inputRotationLength=m_impl->rotationLength;}
 void CropCurveWidget::CancelGesture(){m_impl->operation=m_impl->inputGeometry;m_impl->radial=m_impl->inputRadial;m_impl->rotationOffset=m_impl->inputRotation;m_impl->rotationLength=m_impl->inputRotationLength;m_impl->active=-1;m_impl->hover=false;m_impl->hovered=-1;m_impl->Sync();m_impl->SyncView();for(auto& h:m_impl->handles)static_cast<FeatureSupport::RoutedHandleWidget*>(h.widget.GetPointer())->StopGesture();}
