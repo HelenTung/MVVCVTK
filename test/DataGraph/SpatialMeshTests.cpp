@@ -43,6 +43,8 @@ void CheckPagedMeshCache()
         Require(cache->Get({batch}).isPending&&Drain(queue),"file-backed display page was not consumed");
         const auto ready=cache->Get({batch});
         Require(ready.mesh&&!ready.isPending&&ready.error.empty(),"file-backed display page did not complete");
+        Require(ready.mesh->GetNumberOfCells()==static_cast<vtkIdType>(batch==0?Source::facesPerBatch:1),
+            "file-backed display page seam changed the full-page or tail count");
         auto* faceIds=vtkIdTypeArray::SafeDownCast(ready.mesh->GetCellData()->GetArray(Source::faceIds));
         auto* pointIds=vtkIdTypeArray::SafeDownCast(ready.mesh->GetPointData()->GetArray(Source::pointIds));
         Require(faceIds&&pointIds,"file-backed display lost formal identities");
