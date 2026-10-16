@@ -54,8 +54,13 @@ public:
         if(m_last.load(std::memory_order_relaxed)==block)return;
         const std::lock_guard<std::mutex> lock(m_mutex);
         auto found=m_recent.find(block);
-        if(found!=m_recent.end())m_order.erase(found->second);
-        m_order.push_front(block);m_recent[block]=m_order.begin();m_last.store(block,std::memory_order_relaxed);
+        if(found!=m_recent.end())m_order.splice(m_order.begin(),m_order,found->second);
+        else {
+            m_order.push_front(block);
+            try {m_recent.emplace(block,m_order.begin());}
+            catch(...) {m_order.pop_front();throw;}
+        }
+        m_last.store(block,std::memory_order_relaxed);
         if(m_order.size()>residentPages){const auto old=m_order.back();m_order.pop_back();m_recent.erase(old);Trim(old*pageBytes,std::min(pageBytes,m_capacity-old*pageBytes));}
     }
     void Release()const {
@@ -117,7 +122,9 @@ public:
     }
     std::size_t GetCount()const noexcept override{return m_count;}
     const std::shared_ptr<const File>& GetFile()const noexcept{return m_file;}
-    std::size_t GetResidentBytes()const noexcept override{return std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);}
+    std::size_t GetResidentBytes()const noexcept override{
+        return m_file->GetResidentBound()+std::min(m_count,cacheValues*cacheWindows)*sizeof(Value);
+    }
     void ReadValues(std::size_t offset,std::size_t count,Value* target)const override {
         if(offset>m_count || count>m_count-offset)throw std::out_of_range("Mesh block is outside the array.");
         if(!count)return;
@@ -135,7 +142,12 @@ public:
                     // 缓存是加速选项；目标缓冲已存在时，不因额外窗口分配失败拒绝读取。
                     m_file->Copy(offset*sizeof(Value),count*sizeof(Value),target);return;
                 }
-                m_file->Copy(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
+                // 短读取复用已有的有界映射页；立即移出工作集会让 BVH 随机访问反复缺页。
+                try {m_file->CopyWindow(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());}
+                catch(const std::bad_alloc&) {
+                    // 映射页缓存的记账分配同样可选；已有目标缓冲仍能直接读取。
+                    m_file->Copy(start*sizeof(Value),window.values.size()*sizeof(Value),window.values.data());
+                }
                 window.start=start;
             }
             const auto& window=m_cache[index];

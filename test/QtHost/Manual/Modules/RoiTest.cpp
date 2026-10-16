@@ -171,9 +171,12 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         // 新建工具没有已有几何；按源范围初始化，不能把单位矩阵当成 2 mm 盒。
         node.primitive=GetRoiPrimitive(values,*source);
         draft.definition.nodes.push_back(node);
+        const auto reference=panel->GetSession()->GetRenderViewState({"primary-3d"});
         RoiEditingRequest request;request.action=RoiEditingAction::Begin;request.draft=std::move(draft);const auto result=feature->SendRequest(request);
         if(result.error==RoiError::None)remember(node.primitive,RoiMetadataParameters(p));
-        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)}});
+        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)},
+            {"requestedSource",GetRefText(source->dataRevision)},{"referenceSource",reference?GetRefText(reference->dataRevision):QString()},
+            {"referenceBindingRevision",reference?QString::number(reference->bindingRevision):QString()}});
     },TestPolicy::Interaction,true);
     panel->AttachAction("SetDraft",parameters,[panel,feature,remember](auto id,const auto& p) {
         const auto state=feature->GetState();const auto source=panel->GetSession()->GetImageDescriptor();
@@ -225,11 +228,14 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         const auto roi=panel->GetSession()->GetRoiDescriptor(*ref);
         RoiRequest draft;draft.action=RoiAction::SetGeometry;draft.definition=roi->definition;
         draft.metadata=roi->metadata;draft.expectedRoi=roi->revision;
+        const auto reference=panel->GetSession()->GetRenderViewState({"primary-3d"});
         RoiEditingRequest request;request.action=RoiEditingAction::Begin;request.draft=std::move(draft);
         const auto result=feature->SendRequest(request);
         if(result.error==RoiError::None)remember(roi->definition.nodes.front().primitive,
             {{"name",QString::fromStdString(roi->metadata.name)},{"group",QString::fromStdString(roi->metadata.group)},{"description",QString::fromStdString(roi->metadata.description)}});
-        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)}});
+        panel->SetComplete(id,result.error==RoiError::None?"Succeeded":"Failed",{{"error",int(result.error)},
+            {"requestedSource",GetRefText(input->dataRevision)},{"referenceSource",reference?GetRefText(reference->dataRevision):QString()},
+            {"referenceBindingRevision",reference?QString::number(reference->bindingRevision):QString()}});
     },TestPolicy::Interaction,true);
     panel->AttachAction("SetMetadata",{{"roi",""},{"name","区域"},{"group",""},{"description",""},{"isArchived",false}},[panel](auto id,const auto& p) {
         const auto roi=panel->GetSession()->GetRoiDescriptor(GetRef(p["roi"]));
@@ -317,7 +323,7 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         panel->SetComplete(id,"ParametersCopied",{{"roi",GetRefText(*roi)}});
     },TestPolicy::Read);
 #endif
-    panel->onObserve=[panel,feature,appliedMetadata,observedPrimitive,appliedToolParameters,pendingSave,pendingOperation,finishSave] {
+    panel->onObserve=[panel,feature,appliedMetadata,observedPrimitive,appliedToolParameters,pendingSave,pendingOperation,finishSave,operationActions] {
         const auto state=feature->GetState();
         if(*pendingOperation && !state.isComputing){const auto id=**pendingOperation;pendingOperation->reset();panel->SetComplete(id,state.error==RoiError::None?"PreviewReady":"Failed",{{"error",int(state.error)},{"outputCount",int(state.operation.rois.size())}});}
         if(*pendingSave && !state.isComputing && !state.isSaving){const auto id=**pendingSave;pendingSave->reset();const bool saved=!state.hasDraft && state.error==RoiError::None;
@@ -325,6 +331,16 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
         // 控件形状草稿决定字段可用性；候选运算暂时没有原工具时也保留原表单。
         if(auto* form=panel->GetParameterEditor("SetDraft"))SetRoiFields(*form);
         const auto input=panel->GetSession()->GetImageDescriptor();
+        // 数据选择先提交绑定，参考视图随后消费；与编辑器相同，只等待输入修订一致。
+        const auto reference=panel->GetSession()->GetRenderViewState({"primary-3d"});
+        const bool inputReady=input && reference && reference->dataRevision==input->dataRevision;
+        QJsonObject disabled;
+        if(!inputReady) {
+            const QString reason="参考三维视图正在切换输入，请稍候。";
+            disabled["Begin"]=reason;disabled["Edit"]=reason;
+            // 无草稿的运算会隐式 Begin，同样不能抢在参考视图切换之前进入编辑。
+            if(!state.hasDraft)for(const auto& action:operationActions)disabled[action]=reason;
+        }
         const auto roi=state.committedRoi?panel->GetSession()->GetRoiDescriptor(*state.committedRoi):std::optional<RoiDescriptor>{};
         bool dirty=false;
         if(state.draft && input && state.draft->source==input->dataRevision) {
@@ -345,7 +361,9 @@ ModulePanel* CreateRoiTest(TestContext context,std::shared_ptr<RoiEditingHostFea
             {"group",QString::fromStdString(item.metadata.group)},{"isArchived",item.metadata.isArchived},
             {"description",QString::fromStdString(item.metadata.description)},{"source",GetRefText(item.definition.source)}});
         QJsonArray displayFailures;for(const auto& failure:state.displayFailures)displayFailures.append(QJsonObject{{"roi",GetRefText(failure.first)},{"error",int(failure.second)}});
-        panel->SetState({{"displayFailures",displayFailures},{"regions",regions},{"hasDraft",state.hasDraft},{"isVisible",state.isVisible},{"isDragging",state.isDragging},
+        panel->SetState({{"isInputReady",inputReady},{"disabled",disabled},{"referenceSource",reference?GetRefText(reference->dataRevision):QString()},
+            {"referenceBindingRevision",reference?QString::number(reference->bindingRevision):QString()},
+            {"displayFailures",displayFailures},{"regions",regions},{"hasDraft",state.hasDraft},{"isVisible",state.isVisible},{"isDragging",state.isDragging},
             {"isComputing",state.isComputing},{"isSaving",state.isSaving},{"undoCount",int(state.undoCount)},{"redoCount",int(state.redoCount)},{"displayError",int(state.displayError)},{"displayStatus",int(state.displayStatus)},{"previewAccuracy","复杂区域为源体素边界近似预览"},
             {"source",state.draft?GetRefText(state.draft->source):roi?GetRefText(roi->definition.source):QString()},
             {"isRoiCurrent",input && roi && roi->definition.source==input->dataRevision},
