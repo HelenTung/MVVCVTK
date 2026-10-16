@@ -316,7 +316,8 @@ for round_no in [1,2]:
         operation(steps,'Dilate',ref('local'),'local2',radius=1,radiusUnit='Voxels')
         roi_ref=ref('local2')
     surface(steps,roi_ref,f'surface{round_no}')
-    steps.append(step('Surface','SamplePoints',{'maxPoints':'4096'},status='Observed',save=f'samples{round_no}'))
+    steps.append(step('Surface','SamplePoints',{'maxPoints':'4096'},status='Observed',save=f'samples{round_no}',
+        expectResult={'generation':f'$surface{round_no}.result.generation','mesh':f'$surface{round_no}.result.mesh'}))
     json_path=str(folder/f'reference-{round_no}.json').replace('\\','/')
     stl_path=str(folder/f'nominal-{round_no}.stl').replace('\\','/')
     steps.append(dict(generateKnownTransformReference=True,parameters=dict(outputPath=json_path,

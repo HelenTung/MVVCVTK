@@ -28,10 +28,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -1070,6 +1072,265 @@ int GetEditLifecycleFailCount()
 }
 
 } // namespace
+
+class ScopeFaultDataPort final : public TestDataPort {
+public:
+    bool rejectsPublication = false;
+    std::function<void()> onRetirement;
+    std::function<void(const char*)> onProgress;
+    std::size_t publicationCalls = 0;
+    std::size_t retirementCalls = 0;
+    std::size_t retirementInUse = 0;
+    double publicationMs = 0;
+    double retirementMs = 0;
+    DataCommitResult SetDataCommit(DataTransaction transaction) override {
+        if (rejectsPublication && !transaction.outputs.empty()) return {};
+        const bool isRetirement = !transaction.retireScopes.empty();
+        const bool isPublication = !transaction.outputs.empty();
+        const auto began = std::chrono::steady_clock::now();
+        auto result = TestDataPort::SetDataCommit(std::move(transaction));
+        const auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - began).count();
+        if (isPublication) { ++publicationCalls; publicationMs += elapsed; }
+        if (isRetirement) {
+            ++retirementCalls;
+            retirementMs += elapsed;
+            if (result.failureReason == DataCommitFailure::ResultInUse) ++retirementInUse;
+            if (onRetirement) onRetirement();
+        }
+        if (onProgress) onProgress(isRetirement ? "retirement-validation" : "publication");
+        return result;
+    }
+};
+
+int GetPartScopeLifecycleFailCount()
+{
+    using Clock = std::chrono::steady_clock;
+    int failures = 0;
+    const auto check = [&](bool value, const char* message) {
+        if (!GetCaseResult(value, message)) ++failures;
+    };
+    TestHost test(8);
+    auto data = std::make_shared<ScopeFaultDataPort>();
+    test.data = data;
+    (void)data->SetPrimaryImage(BuildImage(8));
+    DataRevisionRef source;
+    {
+        const auto original = data->GetPrimaryImage();
+        source = {data->CreateDataEntityId(), 1};
+        DataRevisionDraft draft{source.entityId, 0, DataTypes::imageGrid3D, {}, original->data->payload, {}};
+        draft.lifetimeScope = data->CreateDataEntityId();
+        DataTransaction tx;
+        tx.outputs.push_back(std::move(draft));
+        tx.bindings.push_back({std::string(primaryVolumeBinding), original->binding->revision, true,
+            original->binding->target, source});
+        check(data->SetDataCommit(std::move(tx)).status == DataCommitStatus::Succeeded,
+              "Part scope source uses an actual OwnerRetirement volume");
+    }
+    check(test.Attach(), "Part scope fixture attaches");
+    auto hide = GetRequest(PartSegmentationAction::SetVisibility);
+    hide.isVisible = false;
+    check(test.feature->SendRequest(hide).status == PartAdmissionStatus::Accepted,
+          "scope regression disables display preparation");
+
+    // 只长期保留值类型身份；读取用的 graph/node/snapshot 均在 Clear 前离开局部作用域。
+    std::vector<DataEntityId> scopes;
+    DataRevisionRef ancestorLabels, ancestorResult, firstChildLabels;
+    PartSetId partSetId;
+    std::array<PartObjectId, 2> objectIds{};
+    std::size_t requestsStarted = 0, requestsCompleted = 0, protectionTimeouts = 0;
+    double admissionMs = 0, driverMs = 0, ownerTickMs = 0, sleepMs = 0, callbackMs = 0;
+    const auto publicationBase = data->publicationCalls;
+    const auto publicationMsBase = data->publicationMs;
+    const auto retirementBase = data->retirementCalls;
+    const auto retirementMsBase = data->retirementMs;
+    const auto retirementInUseBase = data->retirementInUse;
+    std::ofstream progressLog("PartScopeProgress.log", std::ios::trunc);
+    check(progressLog.good(), "task progress log opens for directly flushed diagnostics");
+    const auto sequenceBegan = Clock::now();
+    auto lastProgress = sequenceBegan;
+    const auto progress = [&](const char* phase, bool force) {
+        const auto now = Clock::now();
+        // 30 秒只控制诊断日志频率，不影响接纳、次数、业务结果或通过判定。
+        if (!force && now - lastProgress < std::chrono::seconds(30)) return;
+        lastProgress = now;
+        std::ostringstream line;
+        line << "PART_SCOPE_PROGRESS phase=" << phase
+            << " requestsStarted=" << requestsStarted << " requestsCompleted=" << requestsCompleted
+            << " retainedScopeIds=" << scopes.size()
+            << " wallMs=" << std::chrono::duration<double, std::milli>(now - sequenceBegan).count()
+            << " admissionMs=" << admissionMs << " driverMs=" << driverMs
+            << " ownerTickMs=" << ownerTickMs << " sleepMs=" << sleepMs
+            << " callbackMs=" << callbackMs << " protectionTimeouts=" << protectionTimeouts
+            << " publicationCalls=" << data->publicationCalls - publicationBase
+            << " publicationCoreMs=" << data->publicationMs - publicationMsBase
+            << " retirementCalls=" << data->retirementCalls - retirementBase
+            << " retirementInUse=" << data->retirementInUse - retirementInUseBase
+            << " retirementCoreMs=" << data->retirementMs - retirementMsBase << '\n';
+        std::cerr << line.str() << std::flush;
+        progressLog << line.str() << std::flush;
+    };
+    data->onProgress = [&](const char* phase) { progress(phase, false); };
+    const auto start = [&]() {
+        struct Completion final {
+            std::optional<PartSegmentationResult> result;
+            int count = 0;
+            double elapsedMs = 0;
+        };
+        auto completed = std::make_shared<Completion>();
+        ++requestsStarted;
+        const auto requested = Clock::now();
+        const auto admission = test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [completed, requested](PartSegmentationResult value) {
+                completed->result = std::move(value);
+                ++completed->count;
+                completed->elapsedMs = std::chrono::duration<double, std::milli>(Clock::now() - requested).count();
+            });
+        admissionMs += std::chrono::duration<double, std::milli>(Clock::now() - requested).count();
+        bool tickSucceeded = true;
+        const auto pumpBegan = Clock::now();
+        // 与 SendTicks 相同的 5 秒测试保护，仅等待完成回调/显示准备，不等待旧作用域退役。
+        const auto deadline = pumpBegan + std::chrono::seconds(5);
+        if (admission.status == PartAdmissionStatus::Accepted) {
+            while ((!completed->result || test.feature->GetState().isDisplayPreparing) && Clock::now() < deadline) {
+                const auto tickBegan = Clock::now();
+                tickSucceeded = test.feature->OnHostTick();
+                ownerTickMs += std::chrono::duration<double, std::milli>(Clock::now() - tickBegan).count();
+                if (!tickSucceeded) break;
+                const auto sleepBegan = Clock::now();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                sleepMs += std::chrono::duration<double, std::milli>(Clock::now() - sleepBegan).count();
+            }
+            if ((!completed->result || test.feature->GetState().isDisplayPreparing) && Clock::now() >= deadline)
+                ++protectionTimeouts;
+        }
+        driverMs += std::chrono::duration<double, std::milli>(Clock::now() - pumpBegan).count();
+        const bool done = admission.status == PartAdmissionStatus::Accepted && tickSucceeded
+            && completed->result && !test.feature->GetState().isDisplayPreparing;
+        if (done) { ++requestsCompleted; callbackMs += completed->elapsedMs; }
+        check(done && completed->count == 1, "accepted scoped Part Start completes exactly once");
+        return completed->result.value_or(PartSegmentationResult{});
+    };
+    const auto hasInput = [](const DataSnapshot& node, const char* role, const DataRevisionRef& expected) {
+        if (!node) return false;
+        return std::count_if(node->inputs.begin(), node->inputs.end(), [&](const auto& input) {
+            return input.role == role;
+        }) == 1 && std::any_of(node->inputs.begin(), node->inputs.end(), [&](const auto& input) {
+            return input.role == role && input.source == expected;
+        });
+    };
+
+    // d0d0660b 的累计门槛为 1024；同一临时输入的第 1025 次必须仍可发布。
+    constexpr std::size_t submissions = 1024 + 1;
+    for (std::size_t submission = 0; submission < submissions; ++submission) {
+        const auto previous = test.feature->GetState();
+        const auto previousScope = scopes.empty() ? DataEntityId{} : scopes.back();
+        const auto result = start();
+        check(result.status == PartResultStatus::Succeeded && result.partCount == 2
+              && GetDataRevisionRefValid(result.resultSet), "every scoped Part Start beyond the former limit publishes two parts");
+        if (result.status == PartResultStatus::Succeeded) {
+            const auto graph = data->GetDataGraph();
+            const auto node = data->GetData(graph, result.resultSet);
+            const auto labels = data->GetData(graph, result.labelMap);
+            const auto binding = data->GetDataBinding(graph, "analysis.parts.active");
+            const auto state = test.feature->GetState();
+            const auto parts = test.feature->GetPartSetSnapshot();
+            check(node && labels && GetDataEntityIdValid(node->lifetimeScope)
+                  && node->lifetimePolicy == DataLifetimePolicy::OwnerRetirement
+                  && labels->lifetimeScope == node->lifetimeScope
+                  && labels->lifetimePolicy == DataLifetimePolicy::OwnerRetirement,
+                  "Part result retains producer retirement ownership");
+            check(node && binding && binding->target == result.resultSet && state.resultSet == result.resultSet
+                  && result.resultSet != previous.resultSet && state.labelMap == result.labelMap
+                  && state.sourceRevision == source && state.status == PartSegmentationStatus::Succeeded
+                  && parts && !parts->isStale && parts->sourceRevision == source,
+                  "each Part publication becomes the readable current binding and valid public snapshot");
+            check(result.resultRevision == previous.resultRevision + 1 && state.resultRevision == result.resultRevision
+                  && result.catalogRevision == previous.catalogRevision + 1
+                  && parts && parts->resultRevision == result.resultRevision && parts->catalogRevision == result.catalogRevision,
+                  "repeated Part Start advances result and catalog revisions exactly once");
+            if (parts && parts->parts.size() == 2) {
+                if (submission == 0) {
+                    partSetId = parts->partSetId;
+                    objectIds = {parts->parts[0].binding.object.objectId, parts->parts[1].binding.object.objectId};
+                }
+                check(partSetId != PartSetId{} && objectIds[0] != PartObjectId{} && objectIds[1] != PartObjectId{}
+                      && parts->partSetId == partSetId && state.partSetId == partSetId
+                      && parts->parts[0].binding.object.objectId == objectIds[0]
+                      && parts->parts[1].binding.object.objectId == objectIds[1],
+                      "the same PartSet and both object identities continue through every Start");
+            } else check(false, "public Part snapshot contains the two independently known components");
+            if (GetDataRevisionRefValid(previous.resultSet)) {
+                check(hasInput(labels, "previous-labels", previous.labelMap)
+                      && hasInput(labels, "previous-result", previous.resultSet),
+                      "new label inputs preserve the exact previous labels and result revisions");
+                check(data->GetData(graph, previous.labelMap) && data->GetData(graph, previous.resultSet)
+                      && data->GetDataLifetime(previousScope).status == DataLifetimeStatus::Published,
+                      "live lineage keeps the previous nodes readable and their scope Published");
+                if (submission == 1) firstChildLabels = result.labelMap;
+            } else {
+                check(labels && std::none_of(labels->inputs.begin(), labels->inputs.end(), [](const auto& input) {
+                    return input.role == "previous-labels" || input.role == "previous-result";
+                }), "first Part Start has no invented previous generation");
+                ancestorLabels = result.labelMap;
+                ancestorResult = result.resultSet;
+            }
+            if (node) scopes.push_back(node->lifetimeScope);
+        }
+        progress("public-start", submission == 0 || (submission + 1) % 128 == 0 || submission + 1 == submissions);
+    }
+    check(scopes.size() == submissions, "all 1025 Part publications succeeded on one temporary input");
+    if (scopes.size() > 1) {
+        const auto before = data->GetDataGraph();
+        const auto bindingBefore = data->GetDataBinding(before, "analysis.parts.active");
+        const auto ancestor = data->GetDataLifetime(scopes.front());
+        DataTransaction retirement;
+        retirement.retireScopes.push_back({scopes.front(), DataLifetimeStatus::Published, ancestor.ownedRevisions, true});
+        const auto rejected = data->SetDataCommit(std::move(retirement));
+        check(rejected.status == DataCommitStatus::Rejected && rejected.failureReason == DataCommitFailure::ResultInUse
+              && std::any_of(rejected.blockers.begin(), rejected.blockers.end(), [&](const auto& blocker) {
+                  return blocker.owner == "DerivedRevision" && blocker.revision == firstChildLabels;
+              }), "retiring a live ancestor is rejected by its actual derived label revision");
+        const auto after = data->GetDataGraph();
+        const auto bindingAfter = data->GetDataBinding(after, "analysis.parts.active");
+        check(after.commitId == before.commitId && bindingBefore && bindingAfter
+              && bindingAfter->revision == bindingBefore->revision && bindingAfter->target == bindingBefore->target
+              && data->GetData(after, ancestorLabels) && data->GetData(after, ancestorResult)
+              && data->GetDataLifetime(scopes.front()).status == DataLifetimeStatus::Published,
+              "ancestor retirement rejection preserves commit, binding, readability, and ownership");
+    }
+    if (!scopes.empty()) {
+        const auto previous = test.feature->GetState();
+        data->rejectsPublication = true;
+        const auto failed = start();
+        data->rejectsPublication = false;
+        check(failed.status == PartResultStatus::Failed && test.feature->GetState().resultSet == previous.resultSet
+              && data->GetDataLifetime(scopes.back()).status == DataLifetimeStatus::Published,
+              "rejected Part publication preserves the previous result, binding, and owner scope");
+        const auto recovered = start();
+        check(recovered.status == PartResultStatus::Succeeded, "Part publishes again after commit rejection");
+        if (const auto node = data->GetData(data->GetDataGraph(), recovered.resultSet)) scopes.push_back(node->lifetimeScope);
+    }
+    std::size_t clearRetirementCallbacks = 0;
+    data->onRetirement = [&] {
+        ++clearRetirementCallbacks;
+        check(test.feature->SendRequest(GetRequest(PartSegmentationAction::Start)).status == PartAdmissionStatus::Busy
+              && !test.feature->DetachHost(), "Part cleanup rejects reentrant mutation and detach until all state is cleared");
+    };
+    std::optional<PartSegmentationResult> cleared;
+    check(test.feature->SendRequest(GetRequest(PartSegmentationAction::Clear),
+              [&](PartSegmentationResult value) { cleared = std::move(value); }).status == PartAdmissionStatus::Accepted
+          && cleared && cleared->status == PartResultStatus::Succeeded, "public Part Clear succeeds after repeated publication");
+    data->onRetirement = {};
+    check(clearRetirementCallbacks != 0, "Part Clear actually exercised retirement reentry");
+    for (const auto& scope : scopes)
+        check(data->GetDataLifetime(scope).status == DataLifetimeStatus::Released,
+              "Part Clear releases every replaced scope after its display and payload owners end");
+    check(test.feature->DetachHost(), "scoped Part lifecycle detaches without retirement debt");
+    progress("complete", true);
+    data->onProgress = {};
+    return failures;
+}
 
 int GetPartLifecycleFailCount()
 {
