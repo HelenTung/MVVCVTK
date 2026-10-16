@@ -91,7 +91,7 @@ private:
     class Task;
     std::unique_ptr<Task> m_task;
     std::uint64_t m_taskRequest=0,m_rowsRequest=0;
-    bool m_acceptingRequests=true;
+    bool m_acceptingRequests=true,m_comparisonMapping=false;
     QLabel* m_taskStatus = nullptr;
     QPushButton* m_cancelTask = nullptr;
     QComboBox* m_failedReport = nullptr;
