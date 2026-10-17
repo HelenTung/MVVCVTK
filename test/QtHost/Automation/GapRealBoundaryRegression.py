@@ -36,9 +36,17 @@ def neighbors(i):
         yield index(a, b, c) if all(0 <= v < SIDE for v in (a, b, c)) else None
 
 
-def fixture(raw):
-    data = raw.read_bytes()
+def read_input(raw):
+    assert raw.stat().st_size == COUNT * 4, '需要指定的真实64³归档样本'
+    # 尺寸检查后文件仍可能变化；无缓冲地最多读预期长度加一，避免错误输入先被整读。
+    with raw.open('rb', buffering=0) as stream:
+        data = stream.read(COUNT * 4 + 1)
     assert len(data) == COUNT * 4 and hashlib.sha256(data).hexdigest() == RAW_SHA256, '需要指定的真实64³归档样本'
+    return data
+
+
+def fixture(raw):
+    data = read_input(raw)
     stored = struct.unpack(f'<{COUNT}f', data)
     # Host 将 LPS 的 X/Y 反排成规范化 RAS，不能直接把 RAW 存储索引当作标签索引。
     values = [stored[index(SIDE - 1 - i % SIDE, SIDE - 1 - i // SIDE % SIDE, i // SIDE ** 2)] for i in range(COUNT)]
@@ -234,7 +242,7 @@ def main():
     if result.returncode:
         return result.returncode
     audit(folder, values, mask)
-    assert hashlib.sha256(raw.read_bytes()).hexdigest() == RAW_SHA256
+    read_input(raw)
     return 0
 
 
