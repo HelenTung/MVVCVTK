@@ -26,7 +26,7 @@ struct GapSurfaceParams {
 
 // ── 空洞区域结果 ──────────────────────────────────────────────────────
 struct VoidRegion {
-    // 以下字段逐项复制私有算法内核的区域输出；Feature 不重新连通、重编号或派生形状量。
+    // 无掩膜时以下字段逐项保留供应商区域输出；掩膜路径由 bridge 有效域派生边界状态，可能重标标签。
     std::int32_t id = 0;
     std::int64_t voxelCount = 0;
     float volumeMM3 = 0.0f;
@@ -60,8 +60,9 @@ struct VoidRegion {
     std::int64_t parentVoxelCount = 0, intersectionVoxelCount = 0;
     double parentVolumeMM3 = 0, intersectionVolumeMM3 = 0;
     bool isRoiPartial = false;
-    // 其余形状量属于完整父缺陷，不将截断片段冒充新的封闭孔隙。
+    // 其余形状量属于完整父缺陷；边界不确定区域必须为 false，非完整对象也用 false 标记。
     bool hasWholeObjectGeometry = true;
+    GapBoundaryStatus boundaryStatus = GapBoundaryStatus::Interior;
 };
 
 class LabelMap3DPayload;
@@ -90,14 +91,14 @@ struct GapAnalysisResult {
     std::string displayError;
     // worker 完成所有首次转换；Host 仍遵守 DataGraph 的防御性 snapshot/校验。
     std::shared_ptr<const GapResultPayloads> payloads;
-    // 私有内核完成筛选后的原始区域集合。
+    // 私有 bridge 的可见区域集合，包含边界不确定对象。
     DataArray<VoidRegion> voids;
-    // 此 VTK_INT 图借用并持有私有内核原始标签 owner；不二值化、重编号或复制第二份整卷。
+    // 此 VTK_INT 图持有私有 bridge 标签 owner；掩膜路径清理无效域并按六邻接重标。
     // 标签体完整继承输入快照的 extent、spacing、origin 与 direction。
     vtkSmartPointer<vtkImageData> labelImage;
     // worker 以各标签的二值边界构建；逐面 gap.region.id 保留正式孔隙归属。
     vtkSmartPointer<vtkPolyData> voidMesh;
-    // 只由私有内核 header/region 投影，禁止扫描 label 后重算算法统计。
+    // 由私有 bridge 结果投影；正式孔统计排除边界不确定对象。
     GapStatistics statistics;
     bool                    isSucceeded = false; // 只表示分析 payload 有效，不代表 display/overlay 已显示。
 };

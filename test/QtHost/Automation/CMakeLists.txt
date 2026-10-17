@@ -3,7 +3,7 @@ add_executable(qt_feature_tests main.cpp TestCaseRunner.cpp BusinessWorkflowTest
     Scenarios/business-primary.json Scenarios/business-crop.json
     Scenarios/business-artifact.json Scenarios/business-measurement.json
     Scenarios/frontend-context-regression.json Scenarios/frontend-analysis-regression.json Scenarios/workbench-v1.json
-    RoiContinuousRegression.py ReportLargeRegression.py)
+    RoiContinuousRegression.py ReportLargeRegression.py GapRealBoundaryRegression.py)
 target_link_libraries(qt_feature_tests PRIVATE qt_feature_test_support)
 target_include_directories(qt_feature_tests PRIVATE "${PROJECT_SOURCE_DIR}/MVVCVTK/src")
 SetQtTargetDefaults(qt_feature_tests)
@@ -18,9 +18,31 @@ vtk_module_autoinit(TARGETS qt_feature_tests MODULES ${MVVCVTK_QT_VTK_TARGETS})
 add_test(NAME QtFeature.Automation COMMAND qt_feature_tests
     --background --record "${CMAKE_CURRENT_BINARY_DIR}/automation-$<CONFIG>-record.json")
 SetTestRuntime(QtFeature.Automation qt_feature_tests)
+add_test(NAME QtFeature.CaptureConsistency COMMAND qt_feature_tests --background --capture-consistency-only
+    --capture-output "${CMAKE_CURRENT_BINARY_DIR}/capture-consistency-$<CONFIG>")
+SetTestRuntime(QtFeature.CaptureConsistency qt_feature_tests)
+set_tests_properties(QtFeature.CaptureConsistency PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "capture")
 add_test(NAME QtFeature.Reports COMMAND qt_feature_tests --background --reports-only)
 SetTestRuntime(QtFeature.Reports qt_feature_tests)
 set_tests_properties(QtFeature.Reports PROPERTIES TIMEOUT 0 LABELS "Reports;preview")
+if(TARGET MVVCVTK::GapAnalysis AND TARGET MVVCVTK::OrthogonalCrop)
+    set(_gap_report_args --background --gap-boundary-reports-only
+        --gap-report-output "${CMAKE_CURRENT_BINARY_DIR}/gap-boundary-reports-$<CONFIG>")
+    if(MVVCVTK_GAP_REAL_SMALL_INPUT)
+        list(APPEND _gap_report_args --gap-report-real-input "${MVVCVTK_GAP_REAL_SMALL_INPUT}")
+    endif()
+    add_test(NAME QtFeature.GapBoundaryReports COMMAND qt_feature_tests ${_gap_report_args})
+    SetTestRuntime(QtFeature.GapBoundaryReports qt_feature_tests)
+    set_tests_properties(QtFeature.GapBoundaryReports PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "Reports;Gap")
+    if(MVVCVTK_ROI_REAL_SAMPLE)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME QtFeature.GapRealBoundary COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/GapRealBoundaryRegression.py"
+            --input "${MVVCVTK_ROI_REAL_SAMPLE}" --output "${CMAKE_CURRENT_BINARY_DIR}/gap-real-boundary-$<CONFIG>"
+            --launcher "${CMAKE_BINARY_DIR}/RunQtFeatureTests-$<CONFIG>.cmd")
+        set_tests_properties(QtFeature.GapRealBoundary PROPERTIES RUN_SERIAL TRUE TIMEOUT 0 LABELS "real-data;Gap;Reports")
+    endif()
+    unset(_gap_report_args)
+endif()
 # 数据规模只影响耗时；调用方可显式取消或配置外层期限。
 set_tests_properties(QtFeature.Automation PROPERTIES TIMEOUT 0)
 

@@ -2,35 +2,222 @@
 
 #include "Host/TrustedDataPort.h"
 #include <algorithm>
+#include <cstddef>
+#include <exception>
+#include <limits>
+#include <optional>
 #include <set>
+#include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace FeatureInternal {
-// 私有生产者账本：普通结果的替换/保留由数据图管理；临时输入的结果由创建者负责退休。
+// 数据图是生命周期真源；账本只保留本生产者尚未释放的退役所有权。
 class ResultScopes final {
+    using ResultKey = std::set<std::tuple<std::string, std::string, DataTypeId>>;
+    using BindingClock = std::pair<std::string, DataBindingRevision>;
     struct Scope final {
         DataLifetimeRetirement retirement;
-        std::set<std::string> bindings;
+        std::set<BindingClock> bindings;
+        ResultKey resultKey;
+        bool hasBoundResult = false;
+        bool isSuperseded = false;
+        bool isPublicationPending = false;
+        bool requiresCurrentInputs = false;
     };
     struct Guard final {
         bool& flag;
-        explicit Guard(bool& value):flag(value){flag=true;}
-        ~Guard(){flag=false;}
+        explicit Guard(bool& value) : flag(value) { flag = true; }
+        ~Guard() { flag = false; }
+    };
+    struct CommitRecovery final {
+        struct Binding final {
+            std::string name;
+            std::optional<DataRevisionRef> target;
+            DataBindingRevision revisionBefore = 0;
+        };
+        ResultKey resultKey;
+        DataEntityId newScope;
+        std::vector<DataRevisionRef> outputs;
+        std::vector<Binding> bindings;
+        bool wereOutputsAbsent = true;
+        bool requiresCurrentInputs = false;
+        CommitRecovery(TrustedDataPort& data, const DataGraphSnapshot& graph, const DataTransaction& transaction,
+                       const ResultKey& key, DataEntityId scope)
+            : resultKey(key), newScope(scope), requiresCurrentInputs(transaction.policy == DataPublishPolicy::RequireCurrentInputs) {
+            for (const auto& draft : transaction.outputs) {
+                const DataRevisionRef ref{draft.entityId, draft.expectedGeneration + 1};
+                outputs.push_back(ref);
+                wereOutputsAbsent = !data.GetData(graph, ref) && wereOutputsAbsent;
+            }
+            for (const auto& update : transaction.bindings) {
+                const auto before = data.GetDataBinding(graph, update.binding);
+                bindings.push_back({update.binding, update.target, before ? before->revision : 0});
+            }
+        }
     };
     std::vector<Scope> m_scopes;
-    bool m_busy=false;
+    std::optional<CommitRecovery> m_commitRecovery;
+    bool m_busy = false;
+
+    static bool GetOwns(const Scope& scope, const DataRevisionRef& ref) {
+        const auto& refs = scope.retirement.expectedRevisions;
+        return std::find(refs.begin(), refs.end(), ref) != refs.end();
+    }
+    // 与数据图的持久结果使用相同的替换身份；不在这里复制依赖或资源判断。
+    static ResultKey GetResultKey(const DataTransaction& transaction) {
+        ResultKey key;
+        for (const auto& draft : transaction.outputs) {
+            if (draft.inputs.empty() || !draft.provenance
+                || draft.provenance->producerId.empty() || draft.provenance->operationId.empty()
+                || draft.provenance->producerId == "org.mvvcvtk.host") return {};
+            key.emplace(draft.provenance->producerId, draft.provenance->operationId, draft.type);
+        }
+        return key;
+    }
+    static bool GetBound(Scope& scope, TrustedDataPort& data, const DataGraphSnapshot& graph) {
+        bool bound = false;
+        for (auto clock = scope.bindings.begin(); clock != scope.bindings.end();) {
+            const auto binding = data.GetDataBinding(graph, clock->first);
+            if (!binding || binding->revision != clock->second) clock = scope.bindings.erase(clock);
+            else {
+                bound = bound || (binding->target && GetOwns(scope, *binding->target));
+                ++clock;
+            }
+        }
+        return bound;
+    }
+    // 仅跳过仍有可读外部后代的候选；实际退役仍由数据图在锁内重新校验。
+    static bool GetHasLiveDerived(const Scope& scope, TrustedDataPort& data, const DataGraphSnapshot& graph) {
+        if (!graph.view) return false;
+        for (const auto& ref : scope.retirement.expectedRevisions)
+            for (const auto& derived : graph.view->GetDerivedData(ref))
+                if (!GetOwns(scope, derived) && data.GetData(graph, derived)) return true;
+        return false;
+    }
+    static void SetSuperseded(std::vector<Scope>& scopes, std::size_t before, const ResultKey& key) noexcept {
+        if (!key.empty())
+            for (std::size_t index = 0; index < before; ++index)
+                if (scopes[index].resultKey == key) scopes[index].isSuperseded = true;
+    }
+    bool ResolvePublications(TrustedDataPort& data) noexcept {
+        for (std::size_t index = 0; index < m_scopes.size();) {
+            auto& scope = m_scopes[index];
+            if (!scope.isPublicationPending) { ++index; continue; }
+            try {
+                const auto state = data.GetDataLifetime(scope.retirement.scopeId);
+                if (state.status == DataLifetimeStatus::Unknown) {
+                    // 只有未确认候选可由 Unknown 排除；它从未成为需要退役的正式 scope。
+                    m_scopes.erase(m_scopes.begin() + index);
+                    continue;
+                }
+                const auto graph = data.GetDataGraph();
+                if (!graph.view) { ++index; continue; }
+                const bool bound = GetBound(scope, data, graph);
+                // RequireCurrentInputs 的正式提交不会是历史发布；允许历史时必须另有绑定证据。
+                // 无法证明激活则只接管所有权，不把 Published 当成替换当前结果的依据。
+                if (scope.requiresCurrentInputs || bound) SetSuperseded(m_scopes, index, scope.resultKey);
+                scope.hasBoundResult = scope.hasBoundResult || bound;
+                scope.isPublicationPending = false;
+            } catch (...) {
+                // 原提交结果尚不可查；保守持有候选，后续 Collect/Clear 再确认。
+            }
+            ++index;
+        }
+        return std::none_of(m_scopes.begin(), m_scopes.end(), [](const Scope& scope) { return scope.isPublicationPending; });
+    }
+    bool ResolveCommit(TrustedDataPort& data) noexcept {
+        if (!ResolvePublications(data)) return false;
+        if (!m_commitRecovery) return true;
+        try {
+            const auto graph = data.GetDataGraph();
+            if (!graph.view) return false;
+            // 纯绑定事务没有新 scope；仍须记录真实绑定历史，不能等到解绑后才观察。
+            for (auto& scope : m_scopes)
+                if (GetBound(scope, data, graph)) scope.hasBoundResult = true;
+            const auto& recovery = *m_commitRecovery;
+            const bool published = !recovery.outputs.empty() && recovery.wereOutputsAbsent
+                && std::all_of(recovery.outputs.begin(), recovery.outputs.end(),
+                    [&](const auto& ref) { return bool(data.GetData(graph, ref)); });
+            if (published && !recovery.resultKey.empty()) {
+                // RequireCurrentInputs 若发布成功必为正式激活；允许历史发布时，只认本次实际绑定递增。
+                // entity head / Published 同样会被历史发布推进，不能用它们替代激活证据。
+                bool activated = recovery.requiresCurrentInputs;
+                if (!activated) for (const auto& expected : recovery.bindings) {
+                    const auto binding = data.GetDataBinding(graph, expected.name);
+                    if (binding && binding->target == expected.target && binding->revision > expected.revisionBefore
+                        && binding->revision - expected.revisionBefore == 1) { activated = true; break; }
+                }
+                if (activated) for (auto& scope : m_scopes)
+                    if (scope.retirement.scopeId != recovery.newScope && scope.resultKey == recovery.resultKey)
+                        scope.isSuperseded = true;
+            }
+            m_commitRecovery.reset();
+            return true;
+        } catch (...) {
+            // 保留提交前准备的精确线索；后续写入须先确认，避免解绑抹掉唯一的绑定证据。
+            return false;
+        }
+    }
+    void CollectReleased(TrustedDataPort& data) noexcept {
+        if (!ResolveCommit(data)) return;
+        // 从新到旧退役，使已替换的派生结果先解除对更早结果的保护。
+        for (auto index = m_scopes.size(); index != 0;) {
+            auto& scope = m_scopes[--index];
+            if (scope.isPublicationPending) continue;
+            try {
+                auto state = data.GetDataLifetime(scope.retirement.scopeId);
+                if (state.status == DataLifetimeStatus::Published) {
+                    const auto graph = data.GetDataGraph();
+                    if (!graph.view) continue; // 无法取得正式图时保留已有绑定时钟，不能按缺失绑定收敛。
+                    if (GetBound(scope, data, graph)) { scope.hasBoundResult = true; continue; }
+                    if (scope.hasBoundResult) scope.isSuperseded = true;
+                    if (scope.isSuperseded) {
+                        if (GetHasLiveDerived(scope, data, graph)) continue;
+                        DataTransaction retirement;
+                        retirement.retireScopes.push_back(scope.retirement);
+                        if (data.SetDataCommit(std::move(retirement)).status != DataCommitStatus::Succeeded)
+                            continue;
+                        state.status = DataLifetimeStatus::Releasing;
+                    }
+                }
+                if (state.status == DataLifetimeStatus::Releasing)
+                    state = data.SetDataRelease(scope.retirement.scopeId);
+                if (state.status == DataLifetimeStatus::Released)
+                    m_scopes.erase(m_scopes.begin() + index);
+            } catch (...) {
+                // 发布已成功；清理分配失败或暂时受阻时保留所有权，后续提交/Clear 重试。
+            }
+        }
+    }
 public:
-    DataCommitResult Commit(TrustedDataPort& data,DataTransaction transaction) {
-        if(m_busy)return {};
-        bool scoped=false, explicitRetirement=false;const auto graph=data.GetDataGraph();
-        for(const auto& draft:transaction.outputs)for(const auto& input:draft.inputs) {
-            const auto source=data.GetData(graph,input.source);
+    std::size_t GetScopeCount() const noexcept { return m_scopes.size(); }
+
+    // 关闭显示或释放私有快照后可再次收敛；暂时受保护的结果继续由创建者持有。
+    void Collect(TrustedDataPort& data) noexcept {
+        if (m_busy || (m_scopes.empty() && !m_commitRecovery)) return;
+        try {
+            Guard guard(m_busy);
+            auto batch = data.StartDataChanges();
+            if (batch) CollectReleased(data);
+        } catch (...) {}
+    }
+
+    DataCommitResult Commit(TrustedDataPort& data, DataTransaction transaction, const DataSnapshot& policySource = {}) {
+        if (m_busy) return {};
+        bool scoped = false, explicitRetirement = false;
+        const auto graph = data.GetDataGraph();
+        const auto readPolicy = [&](const DataSnapshot& source) {
             if (source && GetDataEntityIdValid(source->lifetimeScope)) {
                 scoped = scoped || source->lifetimePolicy == DataLifetimePolicy::OwnerRetirement;
                 explicitRetirement = explicitRetirement || source->lifetimePolicy == DataLifetimePolicy::ExplicitRetirement;
             }
-        }
+        };
+        // Part 的寿命继承由主输入决定；其他调用者沿用全部直接输入的既有规则。
+        if (policySource) readPolicy(policySource);
+        else for (const auto& draft : transaction.outputs) for (const auto& input : draft.inputs)
+            readPolicy(data.GetData(graph, input.source));
         if (!scoped && explicitRetirement && !transaction.outputs.empty()) {
             const auto scope = data.CreateDataEntityId();
             for (auto& draft : transaction.outputs) {
@@ -38,48 +225,89 @@ public:
                 draft.lifetimePolicy = DataLifetimePolicy::ExplicitRetirement;
             }
         }
-        if(!scoped&&m_scopes.empty())return data.SetDataCommit(std::move(transaction));
+        if (!scoped && m_scopes.empty() && !m_commitRecovery) return data.SetDataCommit(std::move(transaction));
         Guard guard(m_busy);
-        auto next=m_scopes;
-        if(scoped) {
-            if(next.size()>=1024)return {};
-            Scope scope;scope.retirement={data.CreateDataEntityId(),DataLifetimeStatus::Published,{},true};
-            for(auto& draft:transaction.outputs) {
-                draft.lifetimeScope=scope.retirement.scopeId;
-                draft.lifetimePolicy=DataLifetimePolicy::OwnerRetirement;
-                scope.retirement.expectedRevisions.push_back({draft.entityId,draft.expectedGeneration+1});
+        if (!ResolveCommit(data)) return {};
+        auto next = m_scopes;
+        const auto resultKey = GetResultKey(transaction);
+        if (scoped) {
+            Scope scope;
+            scope.retirement = {data.CreateDataEntityId(), DataLifetimeStatus::Published, {}, true};
+            scope.resultKey = resultKey;
+            scope.isPublicationPending = true;
+            scope.requiresCurrentInputs = transaction.policy == DataPublishPolicy::RequireCurrentInputs;
+            for (auto& draft : transaction.outputs) {
+                draft.lifetimeScope = scope.retirement.scopeId;
+                draft.lifetimePolicy = DataLifetimePolicy::OwnerRetirement;
+                scope.retirement.expectedRevisions.push_back({draft.entityId, draft.expectedGeneration + 1});
             }
             next.push_back(std::move(scope));
         }
-        for(const auto& binding:transaction.bindings)if(binding.target)
-            for(auto& scope:next)if(std::find(scope.retirement.expectedRevisions.begin(),scope.retirement.expectedRevisions.end(),*binding.target)!=scope.retirement.expectedRevisions.end())
-                scope.bindings.insert(binding.binding);
+        CommitRecovery recovery(data, graph, transaction, resultKey,
+            scoped ? next.back().retirement.scopeId : DataEntityId{});
+        // 先分配本次写入应产生的时钟，同时保留原有时钟；异常前失败不能接管外部同名绑定。
+        // 真实图事务每次应用绑定都递增一次，耗尽时拒绝；后续查询只保留实际匹配的证据。
+        for (const auto& binding : recovery.bindings) if (binding.target
+            && binding.revisionBefore != std::numeric_limits<DataBindingRevision>::max())
+            for (auto& scope : next) if (GetOwns(scope, *binding.target))
+                scope.bindings.emplace(binding.name, binding.revisionBefore + 1);
         // 通知释放前先采用完整账本，避免观察者重入关闭时丢失结果所有权。
-        auto batch=data.StartDataChanges();if(!batch)return {};
-        auto committed=data.SetDataCommit(std::move(transaction));
-        if(committed.status==DataCommitStatus::Succeeded||committed.status==DataCommitStatus::SucceededHistorical)m_scopes.swap(next);
+        auto batch = data.StartDataChanges();
+        if (!batch) return {};
+        // 所有恢复记录都在真实提交前分配，只保存修订/绑定时钟，不复制 payload 或结果缓存。
+        m_commitRecovery.emplace(std::move(recovery));
+        DataCommitResult committed;
+        try {
+            committed = data.SetDataCommit(std::move(transaction));
+        } catch (...) {
+            const auto original = std::current_exception();
+            // swap 不分配；必须先接管，再调用任何可能继续抛出的恢复查询。
+            // 绑定名、修订时钟和自有目标共同确认所有权，未提交的同名别名不会误接管。
+            m_scopes.swap(next);
+            (void)ResolveCommit(data);
+            std::rethrow_exception(original);
+        }
+        m_commitRecovery.reset();
+        if (committed.status == DataCommitStatus::Succeeded || committed.status == DataCommitStatus::SucceededHistorical) {
+            if (scoped) next.back().isPublicationPending = false;
+            if (committed.status == DataCommitStatus::Succeeded) {
+                SetSuperseded(next, next.size() - (scoped ? 1 : 0), resultKey);
+                for (const auto& binding : committed.bindings) if (binding.target)
+                    for (auto& scope : next) if (GetOwns(scope, *binding.target)) scope.hasBoundResult = true;
+            }
+            m_scopes.swap(next);
+            CollectReleased(data);
+        }
         return committed;
     }
     bool Clear(TrustedDataPort& data) {
-        if(m_busy)return false;
-        if(m_scopes.empty())return true;
-        Guard guard(m_busy);auto batch=data.StartDataChanges();if(!batch)return false;
-        DataTransaction transaction;std::set<std::string> names;std::set<DataRevisionRef> refs;
-        const auto graph=data.GetDataGraph();
-        for(const auto& scope:m_scopes) {
-            const auto state=data.GetDataLifetime(scope.retirement.scopeId);
-            if(state.status==DataLifetimeStatus::Published)transaction.retireScopes.push_back(scope.retirement);
-            else if(state.status!=DataLifetimeStatus::Releasing&&state.status!=DataLifetimeStatus::Released)return false;
-            names.insert(scope.bindings.begin(),scope.bindings.end());
-            refs.insert(scope.retirement.expectedRevisions.begin(),scope.retirement.expectedRevisions.end());
+        if (m_busy) return false;
+        if (m_scopes.empty() && !m_commitRecovery) return true;
+        Guard guard(m_busy);
+        auto batch = data.StartDataChanges();
+        if (!batch) return false;
+        if (!ResolveCommit(data)) return false;
+        if (m_scopes.empty()) return true;
+        DataTransaction transaction;
+        std::set<BindingClock> bindings;
+        std::set<DataRevisionRef> refs;
+        const auto graph = data.GetDataGraph();
+        for (const auto& scope : m_scopes) {
+            const auto state = data.GetDataLifetime(scope.retirement.scopeId);
+            if (state.status == DataLifetimeStatus::Published) transaction.retireScopes.push_back(scope.retirement);
+            else if (state.status != DataLifetimeStatus::Releasing && state.status != DataLifetimeStatus::Released) return false;
+            bindings.insert(scope.bindings.begin(), scope.bindings.end());
+            refs.insert(scope.retirement.expectedRevisions.begin(), scope.retirement.expectedRevisions.end());
         }
         // 只解除本生产者写入且仍指向自有结果的绑定，不改变其他消费者的绑定。
-        for(const auto& name:names)if(const auto binding=data.GetDataBinding(graph,name);binding&&binding->target&&refs.count(*binding->target))
-            transaction.bindings.push_back({name,binding->revision,true,binding->target,{}});
-        if((!transaction.retireScopes.empty()||!transaction.bindings.empty())
-            &&data.SetDataCommit(std::move(transaction)).status!=DataCommitStatus::Succeeded)return false;
-        for(auto scope=m_scopes.begin();scope!=m_scopes.end();)
-            if(data.SetDataRelease(scope->retirement.scopeId).status==DataLifetimeStatus::Released)scope=m_scopes.erase(scope);else ++scope;
+        for (const auto& clock : bindings) if (const auto binding = data.GetDataBinding(graph, clock.first);
+            binding && binding->revision == clock.second && binding->target && refs.count(*binding->target))
+            transaction.bindings.push_back({clock.first, binding->revision, true, binding->target, {}});
+        if ((!transaction.retireScopes.empty() || !transaction.bindings.empty())
+            && data.SetDataCommit(std::move(transaction)).status != DataCommitStatus::Succeeded) return false;
+        for (auto scope = m_scopes.begin(); scope != m_scopes.end();)
+            if (data.SetDataRelease(scope->retirement.scopeId).status == DataLifetimeStatus::Released) scope = m_scopes.erase(scope);
+            else ++scope;
         return m_scopes.empty();
     }
 };

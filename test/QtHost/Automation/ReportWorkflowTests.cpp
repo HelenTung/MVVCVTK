@@ -10,6 +10,8 @@
 #include "Support/SurfaceRead.h"
 #endif
 #include <QBuffer>
+#include <QMouseEvent>
+#include <vector>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QTableView>
@@ -456,6 +458,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto reports=view->GetReports(module,refs);
     if(requiresReport&&successful)Require(!reports.isEmpty(),"successful business computation must expose its native report");
     if(reports.isEmpty())return;
+    if(!previewPath.isEmpty())Require(!QFileInfo::exists(previewPath+"-reports.json"),"report preview output prefix must be fresh");
     if(requiresReport) {
         // 相同正式结果首次回读时，查询选择器不得替换已经冻结的计算条件。
         // 直接比较两次原生回读，避免相关结果筛选带入其他已缓存文档。
@@ -491,6 +494,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto capture=[&](const QString& suffix) {
         if(previewPath.isEmpty())return QString();
         const auto path=previewPath+QString("-%1-%2.png").arg(reportIndex).arg(suffix);
+        Require(!QFileInfo::exists(path),"report preview never overwrites an existing screenshot");
         Require(QDir().mkpath(QFileInfo(path).absolutePath()),"report preview output directory exists");
         const auto pixels=dialog->grab();Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
     };
@@ -515,8 +519,57 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         }
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {
-            const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
-            Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
+            const auto tableRef=GetRef(doc.id.mid(4));
+            auto page=window.GetWorkflow().readRecordPage(tableRef,0,256,std::nullopt);
+            const auto total=GetId(page["total"]);
+            Require(static_cast<std::uint64_t>(doc.table->GetCount())==total && page["source"]==doc.source,
+                "gap report covers the exact native table and source independently of UI page size");
+            Require(doc.columns.size()==9 && doc.columns[0].name=="void_id" && doc.columns[3].name=="gap_statistics_volume_mm3"
+                && doc.columns[7].name=="visible_volume_mm3" && doc.columns[8].name=="boundary_status","gap report separates formal and visible native quantities");
+            std::uint64_t offset=0,formal=0,boundary=0,formalVoxels=0,boundaryVoxels=0;
+            while(offset<total) {
+                const auto rows=page["rows"].toArray();const auto next=GetId(page["next"]);
+                Require(next>offset && next<=total && static_cast<std::uint64_t>(rows.size())==next-offset,"gap native catalog pages advance without missing objects");
+                for(const auto value:rows) {
+                    const auto native=value.toObject();
+                    Require(native.contains("boundary-status") && native.contains("voxel-count")
+                        && GetId(native["rowIndex"])==offset,"gap native catalog exposes exact boundary state, voxel count and row identity");
+                    const auto state=GetId(native["boundary-status"]),voxels=GetId(native["voxel-count"]);
+                    Require(state<=1 && voxels>0,"gap native object boundary state and voxel count are valid");
+                    const auto row=doc.table->Read(offset++);double visible=0;
+                    Require(row[0]==native["void-id"].toString() && GetReportNumber(row[7],visible) && visible==native["volume-mm3"].toDouble()
+                        && row[8]==(state?"BoundaryUncertain":"Interior"),"gap report preserves every native object ID, visible volume and boundary status");
+                    const auto nativeIntersection=native.value("intersection-volume-mm3");
+                    Require(doc.columns[2].name=="intersection_volume_mm3" && !nativeIntersection.isUndefined(),
+                        "gap native intersection volume column is present rather than a missing value converted to zero");
+                    if(nativeIntersection.isNull())Require(row[2].isEmpty(),"nonfinite native intersection volume remains an empty report cell");
+                    else {
+                        double intersection=0;
+                        Require(nativeIntersection.isDouble() && std::isfinite(nativeIntersection.toDouble())
+                            && GetReportNumber(row[2],intersection) && intersection==nativeIntersection.toDouble(),
+                            "gap report intersection volume equals its finite native double value");
+                    }
+                    Require(native.contains("roi-partial") && native.contains("whole-object-geometry")
+                        && row[5]==(GetId(native["roi-partial"])?"1":"0") && row[6]==(GetId(native["whole-object-geometry"])?"1":"0"),
+                        "gap report preserves native ROI intersection and complete-geometry qualification separately");
+                    // 按既有一页上限记录小目录原值；大目录仍逐页核对，只输出汇总，避免日志洪泛。
+                    if(total<=256)std::cout<<"GAP_NATIVE_CATALOG_ROW "<<QJsonDocument(QJsonObject{
+                        {"table",GetRefText(tableRef)},{"source",doc.source},{"native",native}}).toJson(QJsonDocument::Compact).constData()<<std::endl;
+                    if(state) {
+                        ++boundary;boundaryVoxels+=voxels;
+                        Require(row[1].isEmpty() && row[3].isEmpty() && row[4].isEmpty(),"native boundary objects keep complete and formal report quantities empty");
+                    } else {
+                        ++formal;formalVoxels+=voxels;double measured=0;
+                        Require(GetReportNumber(row[3],measured) && measured==visible,"native interior objects retain formal report volumes");
+                    }
+                }
+                if(offset<total)page=window.GetWorkflow().readRecordPage(tableRef,offset,256,std::nullopt);
+            }
+            Require(formal==GetId(summary["voidCount"]) && boundary==GetId(summary["boundaryUncertainCount"])
+                && formalVoxels==GetId(summary["voidVoxels"]) && boundaryVoxels==GetId(summary["boundaryUncertainVoxels"]),
+                "gap formal and boundary statistics match the complete independent native catalog");
+            std::cout<<"PASS: Gap native catalog rows="<<total<<" formal="<<formal<<" boundary="<<boundary
+                <<" formalVoxels="<<formalVoxels<<" boundaryVoxels="<<boundaryVoxels<<std::endl;
         }
         if(doc.module=="Surface") {
             // 原生表面条件采用版本化文本；不能把解析失败的空 JSON 对象当成冻结条件。
@@ -599,7 +652,9 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         previews.append(QJsonObject{{"id",doc.id},{"source",doc.source},{"result",doc.result},{"rows",GetReportCountValue(doc.table->GetCount())},
             {"pageOffsets",pages},{"details",details},{"rightColumns",rightColumns},{"conditions",conditionImage},{"opened",true}});++reportIndex;
         if(checkExport) {
-        const auto path=directory.filePath("native.csv");
+        const auto path=previewPath.isEmpty()?directory.filePath("native.csv")
+            :previewPath+QString("-%1-full.csv").arg(reportIndex-1);
+        if(!previewPath.isEmpty())Require(!QFileInfo::exists(path),"full report CSV has its own unused preview path");
         std::cout<<"REPORT: async full export "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         view->ExportReportFile(path);Require(view->property("reportTaskBusy").toBool(),"real report export returns after asynchronous admission");WaitTasks(*view,timeoutMs);
         if(doc.table->GetCount()>200) {
@@ -622,6 +677,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::cout<<"PASS: full content SHA256 "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()
             <<" digest="<<originalHash.toHex().constData()<<std::endl;
         int value=doc.valueColumn;
+        bool comparisonPerformed=false;
         if(value<0)for(int c=0;c<doc.columns.size();++c)if(doc.columns[c].numeric){value=c;break;}
         if(value>=0 && !doc.columns[value].quantity.isEmpty() && !doc.columns[value].unit.startsWith("model")) {
             view->SelectReport(doc.id);view->findChild<QPushButton*>("setReportBaseline")->click();view->SelectReport(copy.id);
@@ -634,6 +690,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
             compare();Require(view->property("reportTaskBusy").toBool(),"real report comparison returns after asynchronous admission");WaitTasks(*view,timeoutMs);
             const auto compared=view->GetSelectedReport();Require(compared.category=="对比结果" && compared.table->GetCount()==2
                 && compared.table->Read(0)[2]==compared.table->Read(1)[2] && compared.table->Read(0)[3]==compared.table->Read(1)[3],"real UI automatic mapping changed full-data valid counts or mean");
+            comparisonPerformed=true;
             view->RemoveReport(compared.id);
         }
         if(checkLarge && doc.table->GetCount()>4096)CheckLargeReportOperations(*view,doc,copy,path,timeoutMs);
@@ -641,12 +698,19 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         std::weak_ptr<ReportTable> importedStorage=copy.table;const auto importedId=copy.id;copy.table.reset();
         view->RemoveReport(importedId);Require(importedStorage.expired() && QFile::exists(path),"real imported report storage was retained or its original CSV deleted");
         view->SelectReport(doc.id);
+        if(!previewPath.isEmpty()) {
+            auto preview=previews[reportIndex-1].toObject();
+            preview["csv"]=path;preview["fullTableSha256"]=QString::fromLatin1(originalHash.toHex());
+            preview["csvReadbackSha256"]=QString::fromLatin1(restoredHash.toHex());preview["csvReadbackMatches"]=true;
+            preview["comparisonPerformed"]=comparisonPerformed;
+            if(comparisonPerformed)preview["comparisonMatches"]=true;
+            previews[reportIndex-1]=preview;
+        }
         std::cout<<"PASS: full real report async export/import/compare and content hash "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
         }
         std::cout<<"PASS: visible native report "<<doc.module.toStdString()<<" rows="<<doc.table->GetCount()<<std::endl;
     }
     dialog->close();QCoreApplication::processEvents();Require(!dialog->isVisible(),"report preview closes without stopping the business session");
-    if(!previewPath.isEmpty())ExportJson(previewPath+"-reports.json",{{"module",module},{"operationId",record["operationId"]},{"reports",previews}});
     if(summary.contains("items") && summary.contains("inspection"))Require(inspectionRows==summary["items"].toArray().size(),"inspection metric tables preserve all independently read items");
     if(requiresReport&&QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined"}.contains(record["status"].toString())
         &&(module=="Surface"||module=="Gap")) {
@@ -692,5 +756,166 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     }
     const auto after=window.GetSession()->GetImageDescriptor();Require((!input && !after) || (input && after && input->dataRevision==after->dataRevision&&input->bindingRevision==after->bindingRevision),"report operations preserve exact input and binding");
     Require(window.GetWorkflow().getPublishedGraph()==graph,"report operations preserve result graph and active bindings");
+    if(!previewPath.isEmpty())ExportJson(previewPath+"-reports.json",{{"module",module},{"operationId",record["operationId"]},{"reports",previews},
+        {"selectedDataRevision",input?GetRefText(input->dataRevision):QString()},
+        {"selectedBindingRevision",QString::number(input?input->bindingRevision:0)}});
+}
+}
+
+
+namespace Manual {
+void CheckGapBoundaryReports(const QString& outputDirectory,const QString& realInput)
+{
+#if defined(MANUAL_GAP) && defined(MANUAL_CROP)
+    Require(!outputDirectory.isEmpty() && QDir().mkpath(outputDirectory),"Gap report output directory is required");
+    int failures=0;
+    const auto expect=[&](bool valid,const char* message){if(!valid){++failures;std::cerr<<"GAP_REPORT_FAIL: "<<message<<std::endl;}};
+    const auto wait=[](const std::function<bool()>& ready,const char* message) {
+        QElapsedTimer timer;timer.start();
+        while(!ready() && timer.elapsed()<60000)QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+        Require(ready(),message);
+    };
+    for(int scenario=0;scenario<(realInput.isEmpty()?2:3);++scenario) {
+        const bool real=scenario==2,mixed=scenario==1;
+        const QString label=real?"real32":mixed?"mixed":"boundary";
+        const auto folder=QDir(outputDirectory).filePath(label);Require(QDir().mkpath(folder),"scenario directory creation failed");
+        QString raw=realInput;
+        if(!real) {
+            raw=QDir(folder).filePath("input-11x11x11.raw");std::vector<float> voxels(1331,100.f);
+            const auto hole=[&](int x0,int x1,int y0,int y1,int z0,int z1){
+                for(int z=z0;z<=z1;++z)for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x)voxels[(10-x)+11*((10-y)+11*z)]=0.f;
+            };
+            // RAW加载按契约反转X/Y；预先反排存储，配合LPS原点(-10,-10,0)得到原点0的单位RAS网格。
+            // 3^3=27体素孔与半径1.25的无效球域在x=4/5处面接触，球不覆盖孔体素。
+            hole(2,4,4,6,4,6);
+            // 两个2^3=8体素确定孔在扫描顺序中夹住边界孔，过滤后正式ID不连续。
+            if(mixed){hole(1,2,1,2,1,2);hole(7,8,7,8,7,8);}
+            QFile file(raw);Require(file.open(QIODevice::WriteOnly),"synthetic raw open failed");
+            const auto bytes=static_cast<qint64>(voxels.size()*sizeof(float));
+            Require(file.write(reinterpret_cast<const char*>(voxels.data()),bytes)==bytes,"synthetic raw write failed");file.close();
+        }
+        TestWindow window;window.setAttribute(Qt::WA_ShowWithoutActivating,true);window.show();
+        wait([&]{return window.GetIsReady() || !window.GetFailure().isEmpty();},"test window session did not initialize");
+        Require(window.GetIsReady(),"test window session initialization failed");
+        const auto send=[&](const QString& module,const QString& action,const QJsonObject& patch,const QString& expected) {
+            auto* panel=window.GetModule(module);Require(panel!=nullptr,"real module is missing");
+            window.GetWorkflow().onNavigate(module,action,{});panel->SetParameterPatch(action,patch);
+            // 复用业务自动化的真实按钮门控；操作完成回调不代表后续视图刷新已收口。
+            wait([&]{panel->Observe();const auto* button=panel->findChild<QPushButton*>("action_"+action);
+                return button && button->isEnabled();},"real business action did not become available after its guards");
+            struct Completion {bool done=false;QString status;};auto completed=std::make_shared<Completion>();
+            const auto id=panel->SendAction(action,panel->GetActionParameters(action),[completed](const QString& status,const QJsonObject&){completed->status=status;completed->done=true;});
+            wait([&]{return completed->done;},"real module operation timed out");
+            const auto record=window.GetRecords().GetRecord(id);
+            if(completed->status!=expected && !(module=="Gap" && expected=="Succeeded" && completed->status=="SucceededWithDisplayFailure"))
+                throw std::runtime_error((module+"."+action+" status="+completed->status+" "+QString::fromUtf8(QJsonDocument(record).toJson(QJsonDocument::Compact))).toStdString());
+            std::cout<<"GAP_REPORT_ACTION module="<<module.toStdString()<<" action="<<action.toStdString()<<" status="<<completed->status.toStdString()<<std::endl;
+            return record;
+        };
+        const int side=real?32:11;const double spacing=real?.1537:1.,origin=real?74.3908:0.;
+        send("Data","Load",{{"filePath",raw},{"datasetId","gap-report-"+label},{"dimensions",QJsonArray{side,side,side}},
+            {"spacingLPS",QJsonArray{spacing,spacing,spacing}},{"originLPS",QJsonArray{-origin-spacing*(side-1),-origin-spacing*(side-1),origin}},
+            {"directionLPS",QJsonArray{1,0,0,0,1,0,0,0,1}},{"evidenceKind",real?"real-roi":"synthetic-geometry"}},"Succeeded");
+        const auto input=window.GetSession()->GetImageDescriptor();Require(input.has_value(),"loaded input descriptor is unavailable");
+        std::cout<<"GAP_REPORT_INPUT scenario="<<label.toStdString()<<" geometry="<<QJsonDocument(GetDescriptor(input)).toJson(QJsonDocument::Compact).constData()<<std::endl;
+        Require(input->dims==std::array<int,3>{side,side,side} && input->origin==std::array<double,3>{origin,origin,origin} && input->direction==std::array<double,9>{1,0,0,0,1,0,0,0,1},"independent input grid must be identity RAS");
+        send("View","Set",{{"viewId","primary-3d"},{"mode","CompositeVolume"}},"Succeeded");
+        auto* crop=window.GetModule("Crop");Require(crop!=nullptr,"real Crop module is missing");
+        const auto framesReady=[&]{crop->Observe();return crop->GetObservedState()["framesReady"].toBool();};
+        if(!real) {
+            window.GetWorkflow().ensureCropViews();wait(framesReady,"input frames not ready for exact crop");
+            send("Crop","Start",{{"shape","Sphere"},{"removalMode","RemoveInside"}},"Succeeded");
+            send("Crop","AppendExact",{{"parentNodeId","Root"},{"shape","Sphere"},{"removalMode","RemoveInside"},
+                {"center",QJsonArray{6,5,5}},{"radius",1.25}},"Succeeded");
+            wait(framesReady,"exact crop frames did not settle");
+            send("Crop","FinishEditing",{},"PreviewConfirmed");
+            wait(framesReady,"crop widget removal did not finish rendering before publication");
+            send("Crop","BuildResult",{},"Published");send("Crop","SelectOutput",{},"Succeeded");
+        }
+        auto record=send("Gap","Start",{{"isoMode","AbsoluteValue"},{"absoluteIsoValue",real?.172:50.},
+            {"backgroundMean",real?-1.617:0.},{"materialMean",real?.453:100.},{"filter",false}},"Succeeded");
+        const auto core=record["result"].toObject();const int formal=mixed?2:0,visible=real?0:mixed?3:1;
+        const double formalVolume=mixed?16.:0.;
+        // 合成场景：边界孔27不进正式统计；混合场景另有两个互不接触的2^3孔，正式2孔/16 mm3。
+        expect(core["voidVolumeMM3"].toDouble(-1)==formalVolume,"core formal volume must be 0/16/0 mm3");
+        expect(core["voidCount"].toString()==QString::number(formal),"core formal count excludes the uncertain fragment");
+        expect(core["boundaryUncertainCount"].toString()==QString::number(real?0:1) && core["boundaryUncertainVolumeMM3"].toDouble(-1)==(real?0.:27.),"core boundary population keeps the real visible fragment volume");
+        expect(GetId(core["voidVoxels"])==static_cast<std::uint64_t>(mixed?16:0),"core formal voxel count follows independent geometry");
+        const auto native=window.GetWorkflow().readRecordPage(GetRef(core["voidTable"]),0,256,std::nullopt);
+        expect(GetId(native["total"])==static_cast<std::uint64_t>(visible),"native visible object population is independent of formal count");
+        QJsonArray formalIds,formalRows;
+        for(int i=0;i<native["rows"].toArray().size();++i) {
+            const auto row=native["rows"].toArray()[i].toObject();
+            if(row["volume-mm3"].toDouble()==8.){formalIds.append(row["void-id"]);formalRows.append(QString::number(i));}
+        }
+        if(mixed)expect(formalIds.size()==2 && GetId(formalIds[1])>GetId(formalIds[0])+1,"mixed source must expose non-contiguous formal object IDs");
+        CheckBusinessReport(window,record,true,{},60000);
+        {
+            auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"actual result report widget is unavailable");
+            const auto documents=view->GetReports("Gap",{core["resultSet"].toString()});Require(documents.size()==1,"actual Gap provider must expose exactly one document");
+            const auto document=documents[0];expect(document.table->GetCount()==visible,"report retains visible uncertain objects");
+            const auto summary=document.conditions["汇总"].toObject();
+            expect(summary["孔隙体积 mm3"].toDouble(-1)==formalVolume && summary["正式孔数"].toString()==QString::number(formal),"actual report summary uses core formal volume and count");
+            expect(summary["边界不确定对象数"].toString()==QString::number(real?0:1) && summary["边界不确定可见体积 mm3"].toDouble(-1)==(real?0.:27.),"actual report summary separates boundary objects from formal statistics");
+            const auto column=[&](const QString& name){for(int i=0;i<document.columns.size();++i)if(document.columns[i].name==name)return i;return -1;};
+            const int statistics=column("gap_statistics_volume_mm3"),shown=column("visible_volume_mm3"),status=column("boundary_status");
+            expect(statistics>=0 && shown>=0 && status>=0,"report has separate formal volume, visible fragment volume and boundary status");
+            Require(view->SelectReport(document.id),"native report selection failed");WaitRows(*view,60000);
+            const auto csv=QDir(folder).filePath("gap-report.csv");view->ExportReportFile(csv);WaitTasks(*view,60000);
+            view->ImportReport(csv);WaitTasks(*view,60000);const auto copy=view->GetSelectedReport();
+            expect(copy.table->GetCount()==visible && copy.table->GetContentHash()==document.table->GetContentHash(),"actual CSV import preserves every native cell");
+            int uncertain=0,included=0;double sum=0;
+            for(ReportRowId i=0;i<copy.table->GetCount();++i) {
+                const auto row=copy.table->Read(i);double volume=0;
+                const auto shownCell=GetReportCell(row,shown>=0?shown:statistics);
+                const bool numeric=GetReportNumber(shownCell,volume);
+                if(numeric && volume==27.) {
+                    ++uncertain;expect(GetReportCell(row,status)=="BoundaryUncertain","CSV explicitly marks boundary uncertainty");
+                    expect(GetReportCell(row,statistics).isEmpty(),"boundary object formal statistics cell must be empty, not 27 or measured zero");
+                    expect(GetReportCell(row,column("parent_volume_mm3")).isEmpty() && GetReportCell(row,column("equivalent_diameter_mm")).isEmpty(),"unknown complete pore quantities remain empty");
+                }else {
+                    ++included;double measured=0;
+                    expect(numeric && volume==8. && GetReportCell(row,status)=="Interior","mixed formal object preserves 8 mm3 and interior status");
+                    expect(GetReportNumber(GetReportCell(row,statistics),measured) && measured==8.,"formal statistics retains each certain pore");sum+=measured;
+                }
+                std::cout<<"GAP_REPORT_CSV scenario="<<label.toStdString()<<" row="<<i<<" cells="<<QJsonDocument(QJsonArray::fromStringList(row)).toJson(QJsonDocument::Compact).constData()<<std::endl;
+            }
+            expect(uncertain==(real?0:1) && included==formal && sum==formalVolume,"CSV population and formal sum follow independently derived geometry");
+        }
+        auto* panel=window.GetModule("Gap");panel->Observe();window.GetWorkflow().onShowStatistics("Gap");
+        Require(panel->onStatistics && panel->onStatistics(),"actual Gap histogram source did not start");
+        auto* statistics=panel->GetStatisticsWidget();
+        wait([&]{const auto status=statistics->GetHistogram()["status"].toString();return status=="Ready"||status=="Empty"||status=="Failed";},"Gap histogram did not reach a terminal state");
+        const auto histogram=statistics->GetHistogram();double samples=0;for(const auto count:histogram["counts"].toArray())samples+=count.toDouble();
+        std::cout<<"GAP_REPORT_HISTOGRAM scenario="<<label.toStdString()<<" data="<<QJsonDocument(histogram).toJson(QJsonDocument::Compact).constData()<<std::endl;
+        expect(histogram["status"]==(formal?"Ready":"Empty") && samples==formal,"actual histogram excludes uncertain objects and does not invent zero samples");
+        if(mixed)expect(histogram["edges"].toArray().last().toDouble()<27.,"formal histogram range excludes the 27 mm3 boundary object");
+        const auto listed=send("Gap","Defects",{},"Observed")["result"].toObject()["page"].toObject()["rows"].toArray();
+        const auto displayedIds=statistics->property("defectIds").toJsonArray(),displayedRows=statistics->property("defectRows").toJsonArray();
+        expect(listed.size()==formal && displayedIds==formalIds && displayedRows==formalRows,"formal list preserves real object IDs and original record row identities after filtering");
+        auto* tree=statistics->findChild<QTreeWidget*>();expect(tree && tree->topLevelItemCount()==formal,"actual list widget contains only formal objects");
+        if(mixed && listed.size()==formal && displayedIds==formalIds && tree && tree->topLevelItemCount()>=2) {
+            statistics->ShowTable();tree->scrollToItem(tree->topLevelItem(1));QCoreApplication::processEvents();
+            const auto point=tree->visualItemRect(tree->topLevelItem(1)).center();
+            QMouseEvent press(QEvent::MouseButtonPress,QPointF(point),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease,QPointF(point),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(tree->viewport(),&press);QApplication::sendEvent(tree->viewport(),&release);
+            QCoreApplication::processEvents();panel->Observe();
+            expect(panel->GetObservedState()["selectedObject"]==formalIds[1],"actual second-row selection highlights the true non-contiguous object ID");
+            send("Gap","LocateDefect",{{"rowIndex",formalRows[1]}},"Succeeded");
+            const auto state=window.GetSession()->GetRenderViewState({"primary-3d"});
+            expect(state && std::all_of(state->cursorWorld.begin(),state->cursorWorld.end(),[](double value){return value>=7. && value<=8.;}),"record location uses the original row identity, not the filtered row index");
+            std::cout<<"GAP_REPORT_IDENTITY expected_id="<<formalIds[1].toString().toStdString()
+                <<" selected_id="<<panel->GetObservedState()["selectedObject"].toString().toStdString()
+                <<" source_row="<<formalRows[1].toString().toStdString()<<std::endl;
+        }
+        std::cout<<"GAP_REPORT_AUDIT scenario="<<label.toStdString()<<" formal_volume="<<core["voidVolumeMM3"].toDouble()
+            <<" visible="<<visible<<" listed="<<listed.size()<<" histogram_samples="<<samples<<" csv="<<QDir(folder).filePath("gap-report.csv").toStdString()<<std::endl;
+        send("Gap","Exit",{},"Exited");wait([&]{return window.StopSession();},"Gap report fixture did not stop cleanly");window.close();
+    }
+    if(failures)throw std::runtime_error("Gap boundary report assertions failed: "+std::to_string(failures));
+#else
+    (void)outputDirectory;(void)realInput;throw std::runtime_error("Gap report fixture requires GapAnalysis and OrthogonalCrop");
+#endif
 }
 }

@@ -49,6 +49,11 @@ set_target_properties(mvvcvtk_alignment_lifecycle_tests PROPERTIES PROJECT_LABEL
 vtk_module_autoinit(TARGETS mvvcvtk_alignment_lifecycle_tests MODULES ${MVVCVTK_VTK_TARGETS})
 add_test(NAME MetrologyAlignment.Lifecycle COMMAND mvvcvtk_alignment_lifecycle_tests)
 SetTestRuntime(MetrologyAlignment.Lifecycle mvvcvtk_alignment_lifecycle_tests)
+add_test(NAME MetrologyAlignment.OwnerScopeLimit COMMAND mvvcvtk_alignment_lifecycle_tests --owner-scope-limit)
+SetTestRuntime(MetrologyAlignment.OwnerScopeLimit mvvcvtk_alignment_lifecycle_tests)
+add_test(NAME MetrologyAlignment.ResultScopeLifecycle COMMAND mvvcvtk_alignment_lifecycle_tests --result-scope-lifecycle)
+SetTestRuntime(MetrologyAlignment.ResultScopeLifecycle mvvcvtk_alignment_lifecycle_tests)
+set_tests_properties(MetrologyAlignment.OwnerScopeLimit PROPERTIES TIMEOUT 300)
 add_executable(mvvcvtk_alignment_reference_tests AlignmentReferenceTests.cpp)
 target_include_directories(mvvcvtk_alignment_reference_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/MetrologyAlignment/src")

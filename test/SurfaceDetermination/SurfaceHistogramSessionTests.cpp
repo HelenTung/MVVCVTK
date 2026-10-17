@@ -105,6 +105,10 @@ int GetSurfaceHistogramSessionResult(const int argc, char* argv[])
     std::optional<HostResult> loaded;
     std::optional<SurfaceDeterminationResult> terminal;
     unsigned completions=0;
+    std::optional<SurfaceDeterminationResult> highlighted;
+    unsigned objectCompletions=0;
+    bool renderHighlights=false;
+    bool highlightCallbackSawRenderedFrame=false;
     VtkAppHostSession session(std::move(config));
     StopGuard stop{session,ownerMutex,ownerTasks,deadline};
     Require(session.BuildSession(),"Real HostSession construction failed");
@@ -113,6 +117,12 @@ int GetSurfaceHistogramSessionResult(const int argc, char* argv[])
         { std::lock_guard<std::mutex> lock(ownerMutex); ready.swap(ownerTasks); }
         for (auto& task:ready) task();
         Require(session.SendUpdates().status!=HostUpdateStatus::Stopped,"Real Host stopped unexpectedly");
+        if (renderHighlights) {
+            HostRenderRequest render; render.viewIds={"surface-histogram-real-0"};
+            const auto rendered=session.SendRender(render);
+            Require(rendered.status==HostRenderStatus::Rendered || rendered.status==HostRenderStatus::Unchanged,
+                "Real highlight frame failed to render");
+        }
     };
     const auto wait=[&](const auto& completed) {
         while (!completed() && std::chrono::steady_clock::now()<deadline) {
@@ -165,7 +175,8 @@ int GetSurfaceHistogramSessionResult(const int argc, char* argv[])
     Require(feature->SendRequest(request,[&](SurfaceDeterminationResult result){terminal=std::move(result);++completions;}).status
         ==SurfaceAdmissionStatus::Accepted,"Real Surface request was not admitted");
     wait([&]{return terminal.has_value();});
-    Require(terminal->status==SurfaceResultStatus::Succeeded && terminal->isPublished,"Real Surface request did not publish a result");
+    Require(terminal->status==SurfaceResultStatus::Succeeded && terminal->isPublished,
+        ("Real Surface request did not publish a result: " + terminal->message).c_str());
     const auto snapshot=feature->GetSurfaceSnapshot();
     Require(snapshot && snapshot->sourceRevision==descriptor->dataRevision && snapshot->isoEstimate
         && snapshot->points && !snapshot->points->empty() && snapshot->triangleIndices && !snapshot->triangleIndices->empty(),
@@ -188,10 +199,36 @@ int GetSurfaceHistogramSessionResult(const int argc, char* argv[])
     for (const auto index:*snapshot->triangleIndices) Require(index<snapshot->points->size(),"Real Surface topology is out of range");
     pump();pump();
     Require(completions==1,"Real Surface completion was repeated");
+    Require(snapshot->objects && !snapshot->objects->empty(),"Real Surface has no selectable objects");
+    SurfaceObjectSelectionRequest selection{snapshot->dataRevision,snapshot->objects->front().objectIndex,
+        false,params.targetViews};
+    renderHighlights=true;
+    const auto selected=feature->SendRequest(selection,[&](SurfaceDeterminationResult result) {
+        const auto scene=session.GetSceneViewState({"surface-histogram-real-0",false,HostRenderViewRole::Auxiliary});
+        highlightCallbackSawRenderedFrame=scene && scene->sceneEpoch!=0 && scene->renderedEpoch>=scene->sceneEpoch
+            && std::any_of(scene->displays.begin(),scene->displays.end(),[&](const auto& display) {
+                return display.localId=="surface-object" && display.data==snapshot->meshRevision
+                    && display.operation.requestId==result.requestId;
+            });
+        highlighted=std::move(result);++objectCompletions;
+    });
+    Require(selected.status==SurfaceAdmissionStatus::Accepted,"Real object highlight was not admitted");
+    wait([&]{return highlighted.has_value();});
+    Require(highlighted->status==SurfaceResultStatus::Succeeded && highlighted->dataRevision==snapshot->dataRevision
+        && highlighted->meshRevision==snapshot->meshRevision && highlightCallbackSawRenderedFrame,
+        "Real highlight success did not match the exact rendered Host frame at callback time");
+    Require(feature->SendRequest(SurfaceObjectSelectionRequest{}).status==SurfaceAdmissionStatus::Accepted,
+        "Real highlight clear was rejected");
+    pump();pump();
+    const auto clearedScene=session.GetSceneViewState({"surface-histogram-real-0",false,HostRenderViewRole::Auxiliary});
+    Require(clearedScene && std::none_of(clearedScene->displays.begin(),clearedScene->displays.end(),
+        [](const auto& display){return display.localId=="surface-object";}) && objectCompletions==1,
+        "Real clear retained the object display or repeated its callback");
     Require(session.DetachFeature(*feature),"Real Surface detach failed");
     Require(session.Stop() && session.GetIsStopped(),"Real HostSession did not stop cleanly");
     std::cout<<std::setprecision(17)<<"real-session PASS samples="<<estimate.sampleCount<<" excluded="<<excluded
         <<" background="<<estimate.backgroundValue<<" material="<<estimate.materialValue<<" iso="<<estimate.isoValue
-        <<" points="<<snapshot->points->size()<<" triangles="<<snapshot->triangleIndices->size()/3<<'\n';
+        <<" points="<<snapshot->points->size()<<" triangles="<<snapshot->triangleIndices->size()/3
+        <<" highlight_rendered="<<highlightCallbackSawRenderedFrame<<" highlight_callbacks="<<objectCompletions<<'\n';
     return 0;
 }

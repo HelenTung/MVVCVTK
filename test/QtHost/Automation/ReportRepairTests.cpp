@@ -497,7 +497,9 @@ void CheckPageReadFailures() {
     Require(table->model()->data(table->model()->index(0,0)).toString()=="point-200","body read retry mixed page identities");
     table->selectionModel()->select(table->model()->index(0,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
     table->selectionModel()->select(table->model()->index(1,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
-    QApplication::clipboard()->setText("previous clipboard");failRow=201;view.findChild<QPushButton*>("copyReportCsv")->click();
+    QApplication::clipboard()->setText("previous clipboard");
+    Require(QApplication::clipboard()->text()=="previous clipboard","fixture/environment: clipboard seed could not be confirmed before the copy failure probe");
+    failRow=201;view.findChild<QPushButton*>("copyReportCsv")->click();
     Require(QApplication::clipboard()->text()=="previous clipboard"&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"copy failure published partial clipboard content or left a usable stale page");
     failRow=-1;view.SelectReport(doc.id);Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->rowCount()==200,"reselecting a recovered report did not restore its page");
 }

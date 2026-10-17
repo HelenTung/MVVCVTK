@@ -84,7 +84,7 @@ QJsonObject ReferenceDataSource::ReadRecordPage(DataRevisionRef ref,std::size_t 
         next=i+1;
         if(volumeRange && (!volumes || (*volumes)[i]<(*volumeRange)[0] || (*volumes)[i]>(*volumeRange)[1]))continue;
         QJsonObject row;
-        for(const auto* name:{"void-id","volume-mm3","equivalent-diameter-mm","seed-voxel","parent-volume-mm3","intersection-volume-mm3","roi-partial","whole-object-geometry","metric","value","unit"})if(const auto* column=Column(*table,name))
+        for(const auto* name:{"void-id","boundary-status","voxel-count","volume-mm3","equivalent-diameter-mm","seed-voxel","parent-volume-mm3","intersection-volume-mm3","roi-partial","whole-object-geometry","metric","value","unit"})if(const auto* column=Column(*table,name))
             row[name]=std::visit([i](const auto& values)->QJsonValue{
                 using Value=typename std::decay_t<decltype(values)>::value_type;
                 if constexpr(std::is_same_v<Value,double>)return std::isfinite(values[i]) ? QJsonValue(values[i]) : QJsonValue();

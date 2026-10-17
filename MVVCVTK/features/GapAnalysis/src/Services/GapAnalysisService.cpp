@@ -251,14 +251,11 @@ private:
     bool BuildInputSnapshot(
         VtkImageGridSnapshot graphInput,
         InputSnapshot& out) const;
-    bool BuildKernelInput(
-        const InputData& input,
-        vtkSmartPointer<vtkImageData>& image,
-        GapInputBuffer& volume) const;
     bool BuildKernelResult(
         const GapInputBuffer& volume,
         const GapParamSnapshot& params,
         vtkImageData* image,
+        vtkImageData* validityMask,
         KernelBatch& result) const;
     static std::int32_t MVVCVTK_GAP_KERNEL_CALL SetKernelResult(
         const GapKernelResultView* result,
@@ -268,7 +265,7 @@ private:
         vtkImageData* inputImage,
         const GapVoidParams& voidParams,
         GapAnalysisResult& result) const;
-    bool SetRoiEvaluation(const GapParamSnapshot& params,GapAnalysisResult& result) const;
+    bool SetRoiEvaluation(const GapParamSnapshot& params,vtkImageData* validityMask,GapAnalysisResult& result) const;
     bool GetRequestValid(
         const GapSurfaceConfig& surface,
         const GapVoidParams& voidParams) const;
@@ -1496,16 +1493,10 @@ void GapAnalysisService::Impl::StartWorker(
         if (params.parent) {result=*params.parent;result.display.reset();result.displayError.clear();result.payloads.reset();hasPayload=true;}
         else {
             KernelBatch batch;
-            vtkSmartPointer<vtkImageData> kernelImage;
-            GapInputBuffer kernelVolume;
-
-            // 1. 掩膜输入只在 worker 内物化为私有连续 float 卷；无掩膜输入继续共享既有快照。
-            const bool hasKernelInput = !m_isStopping.load()
-                && BuildKernelInput(
-                    *inputSnapshot,
-                    kernelImage,
-                    kernelVolume)
-                && !m_isStopping.load();
+            const auto kernelImage=inputSnapshot->image;
+            const auto& kernelVolume=inputSnapshot->volume;
+            // 1. 服务只传递原始只读数据与掩膜；材料填值和有效域派生由私有 bridge 负责。
+            const bool hasKernelInput=!m_isStopping.load() && kernelImage && kernelVolume.GetVoxelReady();
 
             // 2. bridge 在自己的 DLL 内完成唯一一次 DefX 调用；同步 callback
             // 形成原始 label image，并复制小得多的 header/region。
@@ -1516,6 +1507,7 @@ void GapAnalysisService::Impl::StartWorker(
                     kernelVolume,
                     params,
                     kernelImage,
+                    inputSnapshot->validityMask,
                     batch)
                 && !m_isStopping.load();
 
@@ -1532,7 +1524,7 @@ void GapAnalysisService::Impl::StartWorker(
         }
         if (hasPayload) {
             stage = "roi-evaluation";
-            hasPayload=SetRoiEvaluation(params,result) && !m_isStopping.load();
+            hasPayload=SetRoiEvaluation(params,inputSnapshot->validityMask,result) && !m_isStopping.load();
         }
 
         // KernelBatch 在进入全分辨率 mesh 构建前已释放，避免 region 中间量继续叠加峰值。
@@ -2003,85 +1995,6 @@ bool GapAnalysisService::Impl::BuildInputSnapshot(
     }
 }
 
-bool GapAnalysisService::Impl::BuildKernelInput(
-    const InputData& input,
-    vtkSmartPointer<vtkImageData>& image,
-    GapInputBuffer& volume) const
-{
-    image = nullptr;
-    volume = {};
-    if (!input.volume.GetVoxelReady()
-        || !input.image
-        || !GetValidityMaskValid(
-            input.image,
-            input.validityMask)) {
-        return false;
-    }
-    if (!input.validityMask) {
-        image = input.image;
-        volume = input.volume;
-        return true;
-    }
-
-    const auto pointCount = input.image->GetNumberOfPoints();
-    if (pointCount <= 0
-        || static_cast<std::uint64_t>(pointCount)
-            > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-        return false;
-    }
-    const auto voxelCount = static_cast<std::size_t>(pointCount);
-    const auto* source = input.volume.GetVoxelData();
-    const auto* mask = static_cast<const unsigned char*>(
-        input.validityMask->GetScalarPointer());
-    if (!source || !mask) {
-        return false;
-    }
-
-    auto materializedImage = vtkSmartPointer<vtkImageData>::New();
-    materializedImage->CopyStructure(input.image);
-    materializedImage->AllocateScalars(VTK_FLOAT, 1);
-    auto* target = static_cast<float*>(
-        materializedImage->GetScalarPointer());
-    if (!target
-        || materializedImage->GetNumberOfPoints() != pointCount) {
-        return false;
-    }
-
-    // 临时兼容调整：DefX 尚无 validity mask/ROI/NoData 入口，只能在 Gap worker 的
-    // 私有副本中把裁切无效域填成“有效体素最小值”。这不会修改当前裁切基线，但填充值
-    // 仍可能被供应商算法解释为空气/孔隙；后续应改由 DefX 原生有效域契约替代本逻辑。
-    const float fillValue = input.volume.minVal;
-    for (std::size_t index = 0; index < voxelCount; ++index) {
-        if ((index & 0x0FFFu) == 0u
-            && m_isStopping.load()) {
-            return false;
-        }
-        target[index] = mask[index] != 0
-            ? source[index] : fillValue;
-    }
-    materializedImage->Modified();
-
-    GapInputBuffer materializedVolume;
-    materializedVolume.dims = input.volume.dims;
-    materializedVolume.spacing = input.volume.spacing;
-    materializedVolume.origin = input.volume.origin;
-    materializedVolume.minVal = input.volume.minVal;
-    materializedVolume.maxVal = input.volume.maxVal;
-    std::shared_ptr<const void> imageOwner =
-        std::make_shared<vtkSmartPointer<vtkImageData>>(
-            materializedImage);
-    if (!materializedVolume.SetVoxels(
-            std::move(imageOwner),
-            target)) {
-        return false;
-    }
-
-    image = std::move(materializedImage);
-    volume = std::move(materializedVolume);
-    return image && volume.GetVoxelReady();
-}
-
 std::int32_t MVVCVTK_GAP_KERNEL_CALL
 GapAnalysisService::Impl::SetKernelResult(
     const GapKernelResultView* result,
@@ -2165,6 +2078,7 @@ bool GapAnalysisService::Impl::BuildKernelResult(
     const GapInputBuffer& volume,
     const GapParamSnapshot& params,
     vtkImageData* image,
+    vtkImageData* validityMask,
     KernelBatch& result) const
 {
     result = {};
@@ -2223,6 +2137,12 @@ bool GapAnalysisService::Impl::BuildKernelResult(
         sizeof(GapKernelRequest));
     request.voxelData = volume.GetVoxelData();
     request.voxelCount = voxelCount;
+    request.validityMask=validityMask ? static_cast<const std::uint8_t*>(validityMask->GetScalarPointer()):nullptr;
+    request.validityCount=validityMask ? voxelCount:0;
+    request.getCancelled=[](void* context) noexcept -> std::int32_t {
+        return static_cast<const std::atomic<bool>*>(context)->load() ? 1:0;
+    };
+    request.cancelContext=const_cast<std::atomic<bool>*>(&m_isStopping);
     for (int axis = 0; axis < 3; ++axis) {
         if (imageDims[axis] != volume.dims[axis]
             || imageSpacing[axis] != volume.spacing[axis]
@@ -2403,6 +2323,7 @@ bool GapAnalysisService::Impl::BuildResultPayload(
             return false;
         }
         if (source.id <= 0 || source.voxelCount < 0
+            || source.boundaryStatus>1 || source.hasWholeObjectGeometry>1
             || !regionIds.insert(source.id).second) {
             return false;
         }
@@ -2508,6 +2429,8 @@ bool GapAnalysisService::Impl::BuildResultPayload(
             source.projectedSizeZ
         };
         region.defectProbability = source.defectProbability;
+        region.boundaryStatus=static_cast<GapBoundaryStatus>(source.boundaryStatus);
+        region.hasWholeObjectGeometry=source.hasWholeObjectGeometry!=0;
         candidate.voids.push_back(region);
     }
 
@@ -2585,12 +2508,20 @@ bool GapAnalysisService::Impl::BuildResultPayload(
         }
     }
     candidate.statistics.objectVoxelCount = static_cast<std::size_t>(sourceObjectVoxelCount);
-    candidate.statistics.voidVoxelCount = static_cast<std::size_t>(voidVoxelCount);
+    std::size_t formalVoxels=0;
+    for(const auto& region:candidate.voids) {
+        if(region.boundaryStatus==GapBoundaryStatus::BoundaryUncertain) {
+            ++candidate.statistics.boundaryUncertainCount;
+            candidate.statistics.boundaryUncertainVoxelCount+=static_cast<std::size_t>(region.voxelCount);
+            candidate.statistics.boundaryUncertainVolumeMM3+=region.volumeMM3;
+        }else {++candidate.statistics.voidCount;formalVoxels+=static_cast<std::size_t>(region.voxelCount);}
+    }
+    candidate.statistics.voidVoxelCount = formalVoxels;
     candidate.statistics.objectVolumeMM3 = static_cast<double>(batch.header.materialVolumeMM3);
     // 未筛选时保留原始统计；开启时统计与选中区域、标签和后续网格使用同一集合。
     if (voidParams.isFilterEnabled) {
         double selectedVolume = 0;
-        for (const auto& region : candidate.voids) selectedVolume += region.volumeMM3;
+        for (const auto& region : candidate.voids) if(region.boundaryStatus==GapBoundaryStatus::Interior)selectedVolume += region.volumeMM3;
         candidate.statistics.voidVolumeMM3 = selectedVolume;
         candidate.statistics.porosityRatio = candidate.statistics.objectVolumeMM3 > 0
             ? selectedVolume / candidate.statistics.objectVolumeMM3 : 0;
@@ -2602,7 +2533,7 @@ bool GapAnalysisService::Impl::BuildResultPayload(
     return true;
 }
 
-bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,GapAnalysisResult& result) const
+bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,vtkImageData* validityMask,GapAnalysisResult& result) const
 {
     if (!result.labelImage) return false;
     const auto* labels=static_cast<const int*>(result.labelImage->GetScalarPointer());
@@ -2611,7 +2542,8 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
         region.parentVoxelCount=region.voxelCount;region.parentVolumeMM3=region.volumeMM3;
         region.intersectionVoxelCount=region.voxelCount;region.intersectionVolumeMM3=region.volumeMM3;
     }
-    result.statistics.actualSupportVoxelCount=count;
+    const auto* validity=validityMask ? static_cast<const unsigned char*>(validityMask->GetScalarPointer()):nullptr;
+    result.statistics.actualSupportVoxelCount=validity ? static_cast<std::size_t>(std::count_if(validity,validity+count,[](auto value){return value!=0;})):count;
     result.parent=params.parent ? params.parent:std::make_shared<const GapAnalysisResult>(result);
     struct Intersection {std::size_t count=0;std::array<int,6> bounds{INT_MAX,INT_MIN,INT_MAX,INT_MIN,INT_MAX,INT_MIN};};
     std::unordered_map<int,Intersection,std::hash<int>,std::equal_to<int>,DataArrayAllocator<std::pair<const int,Intersection>>> intersections;
@@ -2625,6 +2557,7 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     int dims[3];result.labelImage->GetDimensions(dims);
     for (std::size_t i=0;i<count;++i) {
         if (!(i%4096) && m_isStopping.load()) return false;
+        if(validity && !validity[i])continue;
         const bool selected=belongs(evaluation.query,i);if (selected) ++evaluated;
         if (labels[i]<=0) continue;
         if (belongs(detection.query,i)) detected.insert(labels[i]);
@@ -2637,7 +2570,7 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     }
     double spacing[3];result.labelImage->GetSpacing(spacing);
     const double voxelVolume=spacing[0]*spacing[1]*spacing[2]*std::abs(result.labelImage->GetDirectionMatrix()->Determinant());
-    RegionSet kept;DataArray<VoidRegion> selectedRegions;std::size_t selectedVoxels=0;double selectedVolume=0;
+    RegionSet kept;DataArray<VoidRegion> selectedRegions;std::size_t selectedVoxels=0,formalCount=0,boundaryCount=0,boundaryVoxels=0;double selectedVolume=0,boundaryVolume=0;
     for (auto region:result.voids) {
         if (params.detectionRoi && !detected.count(region.id)) continue;
         const auto found=intersections.find(region.id);if (params.evaluationRoi && found==intersections.end()) continue;
@@ -2645,10 +2578,14 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
         region.intersectionVolumeMM3=region.intersectionVoxelCount*voxelVolume;
         if (params.roiPolicy==GapRoiPolicy::InsideOnly && params.evaluationRoi) {
             region.voxelCount=region.intersectionVoxelCount;region.volumeMM3=static_cast<float>(region.intersectionVolumeMM3);
-            region.bbox=found->second.bounds;region.isRoiPartial=region.voxelCount!=region.parentVoxelCount;region.hasWholeObjectGeometry=!region.isRoiPartial;
+            region.bbox=found->second.bounds;region.isRoiPartial=region.voxelCount!=region.parentVoxelCount;region.hasWholeObjectGeometry=region.hasWholeObjectGeometry && !region.isRoiPartial;
         }
         if (params.voidParams.isFilterEnabled && region.volumeMM3<params.voidParams.minVolumeMM3) continue;
-        kept.insert(region.id);selectedVoxels+=static_cast<std::size_t>(region.voxelCount);selectedVolume+=region.volumeMM3;selectedRegions.push_back(std::move(region));
+        kept.insert(region.id);
+        if(region.boundaryStatus==GapBoundaryStatus::BoundaryUncertain) {
+            ++boundaryCount;boundaryVoxels+=static_cast<std::size_t>(region.voxelCount);boundaryVolume+=region.volumeMM3;
+        }else {++formalCount;selectedVoxels+=static_cast<std::size_t>(region.voxelCount);selectedVolume+=region.volumeMM3;}
+        selectedRegions.push_back(std::move(region));
     }
     const bool partial=std::any_of(selectedRegions.begin(),selectedRegions.end(),[](const auto& r){return r.isRoiPartial;});
     if (partial || selectedRegions.size()!=result.voids.size()) {
@@ -2658,6 +2595,10 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
         image->Modified();result.labelImage=std::move(image);
     }
     result.voids=std::move(selectedRegions);
+    result.statistics.voidCount=formalCount;
+    result.statistics.boundaryUncertainCount=boundaryCount;
+    result.statistics.boundaryUncertainVoxelCount=boundaryVoxels;
+    result.statistics.boundaryUncertainVolumeMM3=boundaryVolume;
     if (params.voidParams.isFilterEnabled || params.evaluationRoi || params.detectionRoi) {
         result.statistics.voidVoxelCount=selectedVoxels;result.statistics.voidVolumeMM3=selectedVolume;
     }
@@ -2665,7 +2606,8 @@ bool GapAnalysisService::Impl::SetRoiEvaluation(const GapParamSnapshot& params,G
     result.statistics.evaluationRoi=params.evaluationRoi ? std::optional<DataRevisionRef>{params.evaluationRoi->GetRevision()}:std::nullopt;
     result.statistics.detectionRoi=params.detectionRoi ? std::optional<DataRevisionRef>{params.detectionRoi->GetRevision()}:std::nullopt;
     // 供应商只提供完整对象量，未提供区域内材料支持；不伪造区域孔隙率。
-    result.statistics.isPorosityAvailable=!params.evaluationRoi && !params.detectionRoi;
+    result.statistics.isPorosityAvailable=!params.evaluationRoi && !params.detectionRoi
+        && (!validityMask || result.statistics.objectVolumeMM3>0);
     if (params.voidParams.isFilterEnabled || params.evaluationRoi || params.detectionRoi)
         result.statistics.porosityRatio=result.statistics.objectVolumeMM3>0 ? selectedVolume/result.statistics.objectVolumeMM3:0;
     return true;
@@ -3060,6 +3002,7 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTa
         "gap-analysis.void-regions",
         std::vector<RecordColumn>{
             { "void-id", std::move(ids) },
+            { "boundary-status",[&]{DataArray<std::uint64_t> v;for(const auto& r:regions)v.push_back(static_cast<std::uint64_t>(r.boundaryStatus));return v;}() },
             { "voxel-count", std::move(voxelCounts) },
             { "volume-mm3", std::move(volumes) },
             { "equivalent-diameter-mm", std::move(equivalentDiameters) },
@@ -3113,6 +3056,10 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateStatis
               std::vector<std::uint64_t>{ statistics.objectVoxelCount } },
             { "void-voxel-count",
               std::vector<std::uint64_t>{ statistics.voidVoxelCount } },
+            { "void-count",std::vector<std::uint64_t>{statistics.voidCount} },
+            { "boundary-uncertain-count",std::vector<std::uint64_t>{statistics.boundaryUncertainCount} },
+            { "boundary-uncertain-voxel-count",std::vector<std::uint64_t>{statistics.boundaryUncertainVoxelCount} },
+            { "boundary-uncertain-volume-mm3",std::vector<double>{statistics.boundaryUncertainVolumeMM3} },
             { "object-volume-mm3",
               std::vector<double>{ statistics.objectVolumeMM3 } },
             { "void-volume-mm3",
