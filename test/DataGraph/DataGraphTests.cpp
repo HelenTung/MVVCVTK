@@ -1,6 +1,7 @@
 // 测试用途：验证数据图节点、载荷、数据修订、写入事务与图关系。
 #include "Data/DataGraphStore.h"
 #include "Data/DataPayloads.h"
+#include "../ControlledTaskGate.h"
 
 #include <atomic>
 #include <cstring>
@@ -685,6 +686,131 @@ bool GetConcurrentCasValid()
         "concurrent binding CAS did not have exactly one winner");
 }
 
+bool GetConcurrentReceiptDispatchValid(const bool holdReceipt)
+{
+    DataGraphStore store;
+    TaskInterleaving::Gate oldObserver, receiptGate;
+    oldObserver.Arm();
+    if (holdReceipt) receiptGate.Arm();
+    struct Receipt final {
+        TaskInterleaving::Gate& gate;
+        std::atomic<bool> finished{ false };
+        int calls = 0;
+        bool valid = true;
+        std::thread::id caller;
+    } receipt{ receiptGate };
+    std::vector<DataCommitId> notices;
+    std::size_t earlyNotices = 0;
+    bool queriedCommitted = true;
+    const auto observer = store.AttachDataChange([&](const DataChangeSet& change) {
+        notices.push_back(change.commitId);
+        if (change.commitId == 1) {
+            oldObserver.Hold();
+        } else {
+            if (!receipt.finished.load()) ++earlyNotices;
+            queriedCommitted = queriedCommitted && store.GetDataGraph().commitId >= change.commitId;
+        }
+    });
+    std::promise<void> firstReturned, secondReturned, laterReturned;
+    auto firstDone = firstReturned.get_future();
+    auto secondDone = secondReturned.get_future();
+    auto laterDone = laterReturned.get_future();
+    DataCommitResult firstResult, secondResult, laterResult;
+    std::exception_ptr firstError, secondError, laterError;
+    // 门闩和接收记录先于线程守卫存在，任何前提失败均先释放门闩再join。
+    struct Threads final {
+        TaskInterleaving::Gate& oldObserver;
+        TaskInterleaving::Gate& receipt;
+        std::thread first, second, later;
+        Threads(TaskInterleaving::Gate& oldGate, TaskInterleaving::Gate& receiptGate)
+            : oldObserver(oldGate), receipt(receiptGate) {}
+        ~Threads() {
+            oldObserver.Release(); receipt.Release();
+            if (first.joinable()) first.join();
+            if (second.joinable()) second.join();
+            if (later.joinable()) later.join();
+        }
+    };
+    const auto transaction = [&] {
+        DataTransaction value;
+        value.outputs.push_back(BuildImageDraft(store.CreateDataEntityId(), 0, 1));
+        return value;
+    };
+    Threads threads(oldObserver, receiptGate);
+    threads.first = std::thread([&] {
+        try { firstResult = store.SetDataCommit(transaction()); }
+        catch (...) { firstError = std::current_exception(); }
+        firstReturned.set_value();
+    });
+    if (!Check(oldObserver.WaitEntered(), "old drainer did not enter the bounded observer gate")) return false;
+    threads.second = std::thread([&] {
+        receipt.caller = std::this_thread::get_id();
+        try {
+            secondResult = store.SetDataCommit(transaction(), &receipt,
+                +[](void* context, const DataCommitResult& actual) noexcept {
+                    auto& value = *static_cast<Receipt*>(context);
+                    ++value.calls;
+                    value.valid = value.valid && actual.commitId == 2
+                        && actual.status == DataCommitStatus::Succeeded
+                        && actual.isActivated && actual.published.size() == 1
+                        && std::this_thread::get_id() == value.caller;
+                    // 仅在私有Store透传回调内注入停顿，构造“回执尚未完成”的窗口；
+                    // 不表示公开FeatureSPI接收器可等待、查询或派发业务。
+                    value.gate.Hold();
+                    value.finished.store(true);
+                });
+        } catch (...) { secondError = std::current_exception(); }
+        secondReturned.set_value();
+    });
+    const bool secondReady = holdReceipt ? receiptGate.WaitEntered()
+        : secondDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready;
+    if (!Check(secondReady, "second commit did not reach its controlled receipt boundary")) return false;
+    // 后续已就绪项不能越过未完成回执项；另一个线程还能提交也验证接收处无state锁。
+    threads.later = std::thread([&] {
+        try { laterResult = store.SetDataCommit(transaction()); }
+        catch (...) { laterError = std::current_exception(); }
+        laterReturned.set_value();
+    });
+    if (!Check(laterDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "a held private receipt blocks a later independent state commit")) return false;
+    const bool receiptStillHeld = !holdReceipt || receiptGate.GetIsHeld();
+    oldObserver.Release();
+    // A的提交返回证明它已走完drain循环；不靠sleep推测它是否尝试取走B/C。
+    if (!Check(firstDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "the old drainer failed to return at the pending receipt boundary")) return false;
+    const auto noticesBeforeReceiptRelease = notices.size() - 1;
+    receiptGate.Release();
+    if (!Check(secondDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "receipt completion failed to resume ordered notification delivery")) return false;
+    threads.first.join(); threads.second.join(); threads.later.join();
+    const auto expectedBeforeRelease = holdReceipt ? std::size_t{ 0 } : std::size_t{ 2 };
+    std::cout << "receipt-dispatch mode=" << (holdReceipt ? "held" : "control")
+        << " before_release=" << noticesBeforeReceiptRelease << " expected=" << expectedBeforeRelease
+        << " early_notices=" << earlyNotices << " expected_early=0"
+        << " receipt_calls=" << receipt.calls << " expected_calls=1"
+        << " receipt_held=" << receiptStillHeld << " query_committed=" << queriedCommitted
+        << " commits=" << firstResult.commitId << ',' << secondResult.commitId << ',' << laterResult.commitId
+        << " notices=";
+    for (const auto id : notices) std::cout << id << ',';
+    std::cout << '\n';
+    const bool passed = Check(!firstError && !secondError && !laterError && receiptStillHeld
+        && firstResult.status == DataCommitStatus::Succeeded && firstResult.commitId == 1
+        && secondResult.status == DataCommitStatus::Succeeded && secondResult.commitId == 2
+        && laterResult.status == DataCommitStatus::Succeeded && laterResult.commitId == 3
+        && receipt.calls == 1 && receipt.valid && receipt.finished.load() && queriedCommitted
+        && noticesBeforeReceiptRelease == expectedBeforeRelease && earlyNotices == 0
+        && notices == std::vector<DataCommitId>{ 1, 2, 3 },
+        "an existing drainer consumed a notification before its receipt completed, or lost the ready wakeup");
+    return store.DetachDataChange(observer) && passed;
+}
+
+bool GetConcurrentReceiptDispatchTests()
+{
+    const bool control = GetConcurrentReceiptDispatchValid(false);
+    const bool held = GetConcurrentReceiptDispatchValid(true);
+    return control && held;
+}
+
 } // namespace
 
 bool GetDataLifetimeTests();
@@ -717,6 +843,7 @@ int main(int argc, char** argv)
         && GetObserverStateValid()
         && GetObserverReleaseValid()
         && GetCommitReceiptValid()
-        && GetConcurrentCasValid();
+        && GetConcurrentCasValid()
+        && GetConcurrentReceiptDispatchTests();
     return isSucceeded ? 0 : 1;
 }
