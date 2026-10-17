@@ -519,8 +519,57 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         }
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {
-            const auto first=window.GetWorkflow().readRecordPage(GetRef(doc.id.mid(4)),0,1,std::nullopt);
-            Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(first["total"]),"gap report covers full native table independently of UI page size");
+            const auto tableRef=GetRef(doc.id.mid(4));
+            auto page=window.GetWorkflow().readRecordPage(tableRef,0,256,std::nullopt);
+            const auto total=GetId(page["total"]);
+            Require(static_cast<std::uint64_t>(doc.table->GetCount())==total && page["source"]==doc.source,
+                "gap report covers the exact native table and source independently of UI page size");
+            Require(doc.columns.size()==9 && doc.columns[0].name=="void_id" && doc.columns[3].name=="gap_statistics_volume_mm3"
+                && doc.columns[7].name=="visible_volume_mm3" && doc.columns[8].name=="boundary_status","gap report separates formal and visible native quantities");
+            std::uint64_t offset=0,formal=0,boundary=0,formalVoxels=0,boundaryVoxels=0;
+            while(offset<total) {
+                const auto rows=page["rows"].toArray();const auto next=GetId(page["next"]);
+                Require(next>offset && next<=total && static_cast<std::uint64_t>(rows.size())==next-offset,"gap native catalog pages advance without missing objects");
+                for(const auto value:rows) {
+                    const auto native=value.toObject();
+                    Require(native.contains("boundary-status") && native.contains("voxel-count")
+                        && GetId(native["rowIndex"])==offset,"gap native catalog exposes exact boundary state, voxel count and row identity");
+                    const auto state=GetId(native["boundary-status"]),voxels=GetId(native["voxel-count"]);
+                    Require(state<=1 && voxels>0,"gap native object boundary state and voxel count are valid");
+                    const auto row=doc.table->Read(offset++);double visible=0;
+                    Require(row[0]==native["void-id"].toString() && GetReportNumber(row[7],visible) && visible==native["volume-mm3"].toDouble()
+                        && row[8]==(state?"BoundaryUncertain":"Interior"),"gap report preserves every native object ID, visible volume and boundary status");
+                    const auto nativeIntersection=native.value("intersection-volume-mm3");
+                    Require(doc.columns[2].name=="intersection_volume_mm3" && !nativeIntersection.isUndefined(),
+                        "gap native intersection volume column is present rather than a missing value converted to zero");
+                    if(nativeIntersection.isNull())Require(row[2].isEmpty(),"nonfinite native intersection volume remains an empty report cell");
+                    else {
+                        double intersection=0;
+                        Require(nativeIntersection.isDouble() && std::isfinite(nativeIntersection.toDouble())
+                            && GetReportNumber(row[2],intersection) && intersection==nativeIntersection.toDouble(),
+                            "gap report intersection volume equals its finite native double value");
+                    }
+                    Require(native.contains("roi-partial") && native.contains("whole-object-geometry")
+                        && row[5]==(GetId(native["roi-partial"])?"1":"0") && row[6]==(GetId(native["whole-object-geometry"])?"1":"0"),
+                        "gap report preserves native ROI intersection and complete-geometry qualification separately");
+                    // 按既有一页上限记录小目录原值；大目录仍逐页核对，只输出汇总，避免日志洪泛。
+                    if(total<=256)std::cout<<"GAP_NATIVE_CATALOG_ROW "<<QJsonDocument(QJsonObject{
+                        {"table",GetRefText(tableRef)},{"source",doc.source},{"native",native}}).toJson(QJsonDocument::Compact).constData()<<std::endl;
+                    if(state) {
+                        ++boundary;boundaryVoxels+=voxels;
+                        Require(row[1].isEmpty() && row[3].isEmpty() && row[4].isEmpty(),"native boundary objects keep complete and formal report quantities empty");
+                    } else {
+                        ++formal;formalVoxels+=voxels;double measured=0;
+                        Require(GetReportNumber(row[3],measured) && measured==visible,"native interior objects retain formal report volumes");
+                    }
+                }
+                if(offset<total)page=window.GetWorkflow().readRecordPage(tableRef,offset,256,std::nullopt);
+            }
+            Require(formal==GetId(summary["voidCount"]) && boundary==GetId(summary["boundaryUncertainCount"])
+                && formalVoxels==GetId(summary["voidVoxels"]) && boundaryVoxels==GetId(summary["boundaryUncertainVoxels"]),
+                "gap formal and boundary statistics match the complete independent native catalog");
+            std::cout<<"PASS: Gap native catalog rows="<<total<<" formal="<<formal<<" boundary="<<boundary
+                <<" formalVoxels="<<formalVoxels<<" boundaryVoxels="<<boundaryVoxels<<std::endl;
         }
         if(doc.module=="Surface") {
             // 原生表面条件采用版本化文本；不能把解析失败的空 JSON 对象当成冻结条件。
