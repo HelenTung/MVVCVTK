@@ -932,9 +932,13 @@ std::shared_ptr<const VtkPreparedDataView> BaseDataManager::SetPreparedDataView(
     return m_impl->m_vtk->SetPreparedDataView(ref, std::move(prepared));
 }
 
-DataCommitResult BaseDataManager::SetDataCommit(DataTransaction transaction)
+DataCommitResult BaseDataManager::SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt)
 {
-    return m_impl->m_graph->SetDataCommit(std::move(transaction));
+    const auto receiveCommitted = receipt
+        ? +[](void* context, const DataCommitResult& committed) noexcept {
+            static_cast<DataCommitReceipt*>(context)->SetDataCommitted(committed);
+        } : nullptr;
+    return m_impl->m_graph->SetDataCommit(std::move(transaction), receipt, receiveCommitted);
 }
 
 DataObserverId BaseDataManager::AttachDataChange(

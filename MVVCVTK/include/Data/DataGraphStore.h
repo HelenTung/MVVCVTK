@@ -33,7 +33,10 @@ public:
 
     DataEntityId CreateDataEntityId();
     bool SetDataType(DataTypeDescriptor descriptor);
-    DataCommitResult SetDataCommit(DataTransaction transaction);
+    // 私有透传：纯值 Store 不包含 SPI/VTK；回执上下文仅借用于本次调用。
+    DataCommitResult SetDataCommit(DataTransaction transaction,
+        void* receiptContext = nullptr,
+        void (*receiveCommitted)(void*, const DataCommitResult&) noexcept = nullptr);
 
     DataObserverId AttachDataChange(DataChangeCallback callback);
     bool DetachDataChange(DataObserverId observerId);

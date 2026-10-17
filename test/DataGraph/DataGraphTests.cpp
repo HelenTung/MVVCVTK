@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -564,6 +565,80 @@ bool GetObserverReleaseValid()
         "observer callback owner was not released outside the registry lock");
 }
 
+bool GetCommitReceiptValid()
+{
+    struct Receipt final {
+        std::size_t calls = 0, published = 0, bindings = 0;
+        DataCommitStatus status = DataCommitStatus::Rejected;
+        DataCommitId commit = 0;
+        DataBindingRevision revision = 0;
+        bool activated = false, onCaller = true;
+        const std::thread::id caller = std::this_thread::get_id();
+    } receipt;
+    const auto receive = +[](void* context, const DataCommitResult& actual) noexcept {
+        auto& value = *static_cast<Receipt*>(context);
+        ++value.calls;
+        value.published = actual.published.size(); value.bindings = actual.bindings.size();
+        value.status = actual.status; value.commit = actual.commitId; value.activated = actual.isActivated;
+        value.revision = actual.bindings.empty() ? 0 : actual.bindings.front().revision;
+        value.onCaller = value.onCaller && std::this_thread::get_id() == value.caller;
+    };
+    bool notifiedAfterReceipt = true, externalApplied = false;
+    std::size_t notices = 0, delayedNotices = 0;
+    DataGraphStore store;
+    const DataRevisionRef first{store.CreateDataEntityId(), 1};
+    const auto observer = store.AttachDataChange([&, first](const DataChangeSet&) {
+        ++notices;
+        notifiedAfterReceipt = notifiedAfterReceipt && receipt.calls == 1 && receipt.commit == 1;
+        if (notices == 1) {
+            DataTransaction external;
+            external.bindings.push_back(BuildBinding("receipt.active", 1, first, first));
+            externalApplied = store.SetDataCommit(std::move(external)).status == DataCommitStatus::Succeeded;
+            throw std::runtime_error("observer after receipt");
+        }
+    });
+    DataTransaction transaction;
+    transaction.outputs.push_back(BuildImageDraft(first.entityId, 0, 1));
+    transaction.bindings.push_back(BuildBinding("receipt.active", 0, first));
+    const auto actual = store.SetDataCommit(std::move(transaction), &receipt, receive);
+    const auto current = store.GetDataBinding(store.GetDataGraph(), "receipt.active");
+    if (!Check(observer && receipt.calls == 1 && receipt.onCaller && receipt.status == DataCommitStatus::Succeeded
+        && receipt.activated && receipt.published == 1 && receipt.bindings == 1 && receipt.revision == 1
+        && actual.commitId == 1 && actual.bindings.front().revision == 1 && externalApplied
+        && current && current->revision == 2 && current->target == first && notices == 2 && notifiedAfterReceipt,
+        "actual receipt was lost, repeated, delayed behind notices, or replaced by a reentrant external result")) return false;
+    if (!store.DetachDataChange(observer)) return false;
+    Receipt rejected;
+    DataTransaction stale;
+    stale.bindings.push_back(BuildBinding("receipt.active", 0, first));
+    if (!Check(store.SetDataCommit(std::move(stale), &rejected, receive).status == DataCommitStatus::Rejected
+        && rejected.calls == 0, "rejected CAS delivered a success receipt")) return false;
+    const DataRevisionRef historical{store.CreateDataEntityId(), 1};
+    DataTransaction history;
+    history.policy = DataPublishPolicy::AllowHistoricalResult;
+    history.outputs.push_back(BuildImageDraft(historical.entityId, 0, 2));
+    history.bindings.push_back(BuildBinding("receipt.active", 0, historical));
+    Receipt historicalReceipt;
+    const auto historicalResult = store.SetDataCommit(std::move(history), &historicalReceipt, receive);
+    if (!Check(historicalResult.status == DataCommitStatus::SucceededHistorical && historicalReceipt.calls == 1
+        && historicalReceipt.status == DataCommitStatus::SucceededHistorical && !historicalReceipt.activated
+        && historicalReceipt.published == 1 && historicalReceipt.bindings == 0 && historicalReceipt.onCaller,
+        "historical publication receipt incorrectly claimed binding activation")) return false;
+    Receipt delayedReceipt;
+    const auto delayedObserver = store.AttachDataChange([&](const DataChangeSet&) { ++delayedNotices; });
+    auto batch = store.StartDataChanges();
+    DataTransaction delayed;
+    delayed.bindings.push_back(BuildBinding("receipt.active", 2, first, first));
+    const auto delayedResult = store.SetDataCommit(std::move(delayed), &delayedReceipt, receive);
+    if (!Check(batch && delayedResult.status == DataCommitStatus::Succeeded && delayedReceipt.calls == 1
+        && delayedReceipt.revision == 3 && delayedNotices == 0,
+        "notification batching delayed the actual synchronous commit receipt")) return false;
+    batch.reset();
+    const bool passed = Check(delayedNotices == 1 && delayedReceipt.calls == 1,
+        "notification release repeated the synchronous receipt");
+    return store.DetachDataChange(delayedObserver) && passed;
+}
+
 bool GetConcurrentCasValid()
 {
     DataGraphStore store;
@@ -577,14 +652,24 @@ bool GetConcurrentCasValid()
     store.SetDataCommit(std::move(setup));
 
     std::atomic<int> winners{ 0 };
-    const auto commit = [&store, &winners, baseRef](const DataEntityId entity) {
+    std::atomic<int> receipts{ 0 }, wrongReceipts{ 0 };
+    const auto commit = [&store, &winners, &receipts, &wrongReceipts, baseRef](const DataEntityId entity) {
         const DataRevisionRef ref{ entity, 1 };
         DataTransaction transaction;
         transaction.outputs.push_back(BuildImageDraft(entity, 0, 2.0f, {
             DataInputRef{ "source", baseRef } }));
         transaction.bindings.push_back(BuildBinding("active", 1, ref, baseRef));
-        if (store.SetDataCommit(std::move(transaction)).status
-            == DataCommitStatus::Succeeded) {
+        struct Receiver final { std::thread::id thread; int calls = 0; bool valid = true; } receiver{std::this_thread::get_id()};
+        const auto result = store.SetDataCommit(std::move(transaction), &receiver,
+            +[](void* context, const DataCommitResult& actual) noexcept {
+                auto& value = *static_cast<Receiver*>(context); ++value.calls;
+                value.valid = value.valid && std::this_thread::get_id() == value.thread
+                    && actual.status == DataCommitStatus::Succeeded && actual.isActivated
+                    && actual.bindings.size() == 1 && actual.bindings.front().revision == 2;
+            });
+        receipts += receiver.calls;
+        if (!receiver.valid || receiver.calls != (result.status == DataCommitStatus::Succeeded ? 1 : 0)) ++wrongReceipts;
+        if (result.status == DataCommitStatus::Succeeded) {
             ++winners;
         }
     };
@@ -595,7 +680,7 @@ bool GetConcurrentCasValid()
     const auto graph = store.GetDataGraph();
     const auto binding = graph.view->GetDataBinding("active");
     return Check(
-        winners.load() == 1 && graph.commitId == 2
+        winners.load() == 1 && receipts.load() == 1 && wrongReceipts.load() == 0 && graph.commitId == 2
             && binding && binding->revision == 2,
         "concurrent binding CAS did not have exactly one winner");
 }
@@ -631,6 +716,7 @@ int main(int argc, char** argv)
         && GetObserverDetachValid()
         && GetObserverStateValid()
         && GetObserverReleaseValid()
+        && GetCommitReceiptValid()
         && GetConcurrentCasValid();
     return isSucceeded ? 0 : 1;
 }

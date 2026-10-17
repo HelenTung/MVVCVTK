@@ -107,7 +107,7 @@ class DataPortStub final : public TestDataPort {
 public:
     explicit DataPortStub(VtkImageGridSnapshot initial) { SetCurrent(std::move(initial)); }
     std::function<void()> beforeSurfaceCommit;
-    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override
     {
         if (beforeSurfaceCommit &&
             std::any_of(transaction.outputs.begin(), transaction.outputs.end(),
@@ -117,7 +117,7 @@ public:
             beforeSurfaceCommit = {};
             before();
         }
-        return TestDataPort::SetDataCommit(std::move(transaction));
+        return TestDataPort::SetDataCommit(std::move(transaction), receipt);
     }
     void SetCurrent(VtkImageGridSnapshot next)
     {

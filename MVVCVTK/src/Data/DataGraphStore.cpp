@@ -657,7 +657,8 @@ bool DataGraphStore::SetDataType(DataTypeDescriptor descriptor)
 }
 
 DataCommitResult DataGraphStore::SetDataCommit(
-    DataTransaction transaction)
+    DataTransaction transaction, void* receiptContext,
+    void (*receiveCommitted)(void*, const DataCommitResult&) noexcept)
 {
     if (transaction.outputs.empty() && transaction.bindings.empty()
         && transaction.retireScopes.empty()) {
@@ -1154,12 +1155,17 @@ DataCommitResult DataGraphStore::SetDataCommit(
         result.isActivated = isActivated;
         scopeLocks.clear();
         stateLock.unlock();
+        // 此处 result 是本次实际事务；尚未释放可重入 owner 或派发通知。
+        // 参数逐层原样传入，不能由相似事件或预测 revision 代替本次回执。
+        if (receiveCommitted) receiveCommitted(receiptContext, result);
         // 最后一个 payload owner 的析构可能重入，必须在全部内部锁外释放。
         retiredOwners.clear();
         m_impl->DrainChanges();
         return result;
     }
     catch (...) {
+        // 已交换后的后处理异常保留原异常，不能反报为未提交。
+        if (result.status != DataCommitStatus::Rejected) throw;
         return GetRejected(
             DataCommitFailure::OutOfMemory,
             "Data graph state allocation failed.");

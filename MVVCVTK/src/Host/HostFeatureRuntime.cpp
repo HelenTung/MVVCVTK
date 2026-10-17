@@ -474,7 +474,7 @@ public:
             return data && data->SetDataType(std::move(descriptor));
         }
 
-        DataCommitResult SetDataCommit(DataTransaction transaction) override
+        DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override
         {
             const auto data = GetWriteData();
             if (!data) {
@@ -484,8 +484,8 @@ public:
             }
             const auto state = m_state.lock();
             return state
-                ? PrimaryDataActivation(*data, *state).SetDataCommit(std::move(transaction))
-                : data->SetDataCommit(std::move(transaction));
+                ? PrimaryDataActivation(*data, *state).SetDataCommit(std::move(transaction), receipt)
+                : data->SetDataCommit(std::move(transaction), receipt);
         }
 
         DataObserverId AttachDataChange(

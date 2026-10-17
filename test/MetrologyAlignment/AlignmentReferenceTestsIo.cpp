@@ -149,9 +149,9 @@ void Loader(const std::filesystem::path &folder) {
 class Port final : public TestDataPort {
   public:
     bool rejects = false, throwsAfterCommit = false;
-    DataCommitResult SetDataCommit(DataTransaction tx) override {
+    DataCommitResult SetDataCommit(DataTransaction tx, DataCommitReceipt* receipt = nullptr) override {
         if (rejects) return {};
-        const auto result = TestDataPort::SetDataCommit(std::move(tx));
+        const auto result = TestDataPort::SetDataCommit(std::move(tx), receipt);
         if (throwsAfterCommit) throw std::runtime_error("observer fault");
         return result;
     }

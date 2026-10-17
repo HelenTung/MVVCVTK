@@ -98,7 +98,7 @@ class DataPort final : public TestDataPort {
 public:
     DataPort(std::shared_ptr<Gate> gate, std::shared_ptr<ObjectNoticeProbe> notices)
         : m_gate(std::move(gate)), m_notices(std::move(notices)) {}
-    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override
     {
         for (auto& output : transaction.outputs) {
             // 真实加载源采用显式退役域；旧单元夹具的无域源不会触发自动结果退役。
@@ -117,7 +117,7 @@ public:
                 m_wrapped = true;
             }
         }
-        return TestDataPort::SetDataCommit(std::move(transaction));
+        return TestDataPort::SetDataCommit(std::move(transaction), receipt);
     }
 private:
     std::shared_ptr<Gate> m_gate;

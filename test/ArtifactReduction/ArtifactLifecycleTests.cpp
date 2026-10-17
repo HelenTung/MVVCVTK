@@ -21,10 +21,10 @@ public:
 class CommitTestPort final : public TestDataPort {
 public:
     bool shouldThrow = false;
-    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override
     {
         if (shouldThrow) throw std::runtime_error("injected commit failure");
-        return TestDataPort::SetDataCommit(std::move(transaction));
+        return TestDataPort::SetDataCommit(std::move(transaction), receipt);
     }
 };
 DataRevisionRef Publish(TestDataPort& port, std::shared_ptr<const IDataPayload> payload,
