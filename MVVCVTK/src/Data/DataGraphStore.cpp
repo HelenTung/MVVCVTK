@@ -400,6 +400,11 @@ public:
         DataChangeCallback callback;
     };
 
+    struct QueuedChange final {
+        DataChangeSet change;
+        bool isReady = false;
+    };
+
     Impl()
     {
         auto initial = std::make_shared<GraphState>();
@@ -448,11 +453,11 @@ public:
             DataChangeSet change;
             {
                 std::lock_guard<std::mutex> lock(m_changeMutex);
-                if (m_changes.empty() || m_batchDepth != 0) {
+                if (m_changes.empty() || !m_changes.front().isReady || m_batchDepth != 0) {
                     m_isDraining = false;
                     return;
                 }
-                change = std::move(m_changes.front());
+                change = std::move(m_changes.front().change);
                 m_changes.pop_front();
             }
 
@@ -502,7 +507,7 @@ public:
     DataObserverId m_nextObserver = 1;
 
     std::mutex m_changeMutex;
-    std::deque<DataChangeSet> m_changes;
+    std::deque<QueuedChange> m_changes;
     bool m_isDraining = false;
     std::size_t m_batchDepth = 0;
     std::thread::id m_batchOwner;
@@ -561,7 +566,7 @@ DataLifetimeState DataGraphStore::SetDataRelease(const DataEntityId& scopeId)
         change.commitId = m_impl->m_state->commitId;
         change.releasedScopes.push_back(scopeId);
         const std::lock_guard<std::mutex> changeLock(m_impl->m_changeMutex);
-        m_impl->m_changes.push_back(std::move(change));
+        m_impl->m_changes.push_back({ std::move(change), true });
         scope->status = result.status = DataLifetimeStatus::Released;
         scope->probes.clear();
         scope->uses.clear();
@@ -657,7 +662,8 @@ bool DataGraphStore::SetDataType(DataTypeDescriptor descriptor)
 }
 
 DataCommitResult DataGraphStore::SetDataCommit(
-    DataTransaction transaction)
+    DataTransaction transaction, void* receiptContext,
+    void (*receiveCommitted)(void*, const DataCommitResult&) noexcept)
 {
     if (transaction.outputs.empty() && transaction.bindings.empty()
         && transaction.retireScopes.empty()) {
@@ -1134,11 +1140,13 @@ DataCommitResult DataGraphStore::SetDataCommit(
         next->commitId = change.commitId;
         result.graph = { next->commitId, next };
 
-        // 通知先在 state lock 内按 CommitId 排队，同时持有 change lock；
-        // state swap 完成前 drain 无法取走该项，回调始终观察到正式新状态。
+        // 在 state lock 内按CommitId预分配队列项；未就绪项也阻挡已有drainer，
+        // 不能仅依靠本调用稍后执行DrainChanges来保证回执先于对应通知。
+        Impl::QueuedChange* queuedChange = nullptr;
         {
             std::lock_guard<std::mutex> changeLock(m_impl->m_changeMutex);
-            m_impl->m_changes.push_back(change);
+            m_impl->m_changes.push_back({ change, false });
+            queuedChange = &m_impl->m_changes.back();
             std::size_t index = 0;
             for (const auto& retirement : retiring) {
                 retirement.second->status = DataLifetimeStatus::Releasing;
@@ -1154,12 +1162,23 @@ DataCommitResult DataGraphStore::SetDataCommit(
         result.isActivated = isActivated;
         scopeLocks.clear();
         stateLock.unlock();
+        // 此处 result 是本次实际事务；尚未释放可重入 owner 或派发通知。
+        // 参数逐层原样传入，不能由相似事件或预测 revision 代替本次回执。
+        if (receiveCommitted) receiveCommitted(receiptContext, result);
+        {
+            std::lock_guard<std::mutex> changeLock(m_impl->m_changeMutex);
+            // deque尾部追加不使引用失效，且未就绪项不会被弹出。
+            // 与drainer共用此锁：它若因未就绪退出，本调用随后会重新唤起派发。
+            queuedChange->isReady = true;
+        }
         // 最后一个 payload owner 的析构可能重入，必须在全部内部锁外释放。
         retiredOwners.clear();
         m_impl->DrainChanges();
         return result;
     }
     catch (...) {
+        // 已交换后的后处理异常保留原异常，不能反报为未提交。
+        if (result.status != DataCommitStatus::Rejected) throw;
         return GetRejected(
             DataCommitFailure::OutOfMemory,
             "Data graph state allocation failed.");

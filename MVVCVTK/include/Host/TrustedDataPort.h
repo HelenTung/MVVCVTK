@@ -134,19 +134,35 @@ public:
         const DataRevisionRef& ref) const = 0;
 };
 
+// 普通同步调用的借用回执；不保存接收器指针，不是异步完成回调。
+class DataCommitReceipt {
+public:
+    virtual ~DataCommitReceipt() noexcept = default;
+    // 正式交换且解锁后、通知/可能抛出的后处理前，成功提交同步交付一次。
+    // SucceededHistorical 只证输出发布；只有 isActivated/实际 bindings 才证绑定应用。
+    // 接收方仅写预分配记录；不得分配、查询、再次请求/提交、取消、Detach/Stop 或派发业务。
+    // committed 引用只在本次方法内有效；任意接收方遵守上述约束不能由 noexcept 静态保证。
+    virtual void SetDataCommitted(const DataCommitResult& committed) noexcept = 0;
+};
+
 class TrustedDataWritePort {
 public:
     virtual ~TrustedDataWritePort() noexcept = default;
 
     virtual std::shared_ptr<const VtkPreparedDataView> SetPreparedDataView(
         const DataRevisionRef&, std::shared_ptr<const VtkPreparedDataView>) { return {}; }
-    // 仅 Host owner thread 可写；轻量同步事务，不持有完成回调。
+    // 仅 Host owner thread 可写；同步事务不保存异步完成回调。
     virtual RoiResult SetRoi(const RoiRequest& request) = 0;
     virtual RoiOperationResult SetRoiOperation(const RoiOperationRequest&) = 0;
     virtual RoiOperationResult SetRoiOperationCommit(const RoiOperationRequest&,RoiOperationResult) = 0;
     virtual DataEntityId CreateDataEntityId() = 0;
     virtual bool SetDataType(DataTypeDescriptor descriptor) = 0;
-    virtual DataCommitResult SetDataCommit(DataTransaction transaction) = 0;
+    // receipt 仅借用于本次调用，须活到返回/异常展开；Rejected 不交付。
+    // 非空时，实际 Succeeded/SucceededHistorical 在所属线程同步交付一次；
+    // 不因通知批次或随后异常延迟/重放，也不把它当作显示就绪或最终清理完成。
+    // 返回值仍是本次实际结果；回执可早于返回执行，后处理抛出不撤销已交付的提交事实。
+    virtual DataCommitResult SetDataCommit(
+        DataTransaction transaction, DataCommitReceipt* receipt = nullptr) = 0;
     virtual DataLifetimeState SetDataRelease(const DataEntityId& scopeId) = 0;
     virtual std::unique_ptr<DataChangeBatch> StartDataChanges() = 0;
     virtual DataObserverId AttachDataChange(DataChangeCallback callback) = 0;

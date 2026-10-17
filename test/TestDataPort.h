@@ -152,9 +152,13 @@ public:
         return m_store.SetDataType(std::move(descriptor));
     }
 
-    DataCommitResult SetDataCommit(DataTransaction transaction) override
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override
     {
-        return m_store.SetDataCommit(std::move(transaction));
+        const auto receiveCommitted = receipt
+            ? +[](void* context, const DataCommitResult& committed) noexcept {
+                static_cast<DataCommitReceipt*>(context)->SetDataCommitted(committed);
+            } : nullptr;
+        return m_store.SetDataCommit(std::move(transaction), receipt, receiveCommitted);
     }
 
     DataObserverId AttachDataChange(DataChangeCallback callback) override

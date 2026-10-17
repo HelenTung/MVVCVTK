@@ -560,7 +560,23 @@ public:
         output={{data->CreateDataEntityId(),1},owned?data->CreateDataEntityId():DataEntityId{}};
         DataTransaction tx;tx.outputs.push_back({output.ref.entityId,0,DataTypes::imageGrid3D,{},bridge.CreateImagePayload(image),{},
             owned?std::optional<DataEntityId>{output.scope}:std::nullopt});
-        const bool published=data->SetDataCommit(std::move(tx)).status==DataCommitStatus::Succeeded;
+        struct Receipt final : DataCommitReceipt {
+            DataRevisionRef expected;
+            const std::thread::id owner = std::this_thread::get_id();
+            unsigned calls = 0;
+            bool valid = true;
+            explicit Receipt(DataRevisionRef ref) : expected(ref) {}
+            void SetDataCommitted(const DataCommitResult& actual) noexcept override {
+                ++calls;
+                valid = valid && std::this_thread::get_id() == owner
+                    && actual.status == DataCommitStatus::Succeeded && actual.isActivated
+                    && actual.published.size() == 1 && actual.published.front()
+                    && actual.published.front()->self == expected && actual.bindings.empty();
+            }
+        } receipt(output.ref);
+        const auto committed = data->SetDataCommit(std::move(tx), &receipt);
+        const bool published=committed.status==DataCommitStatus::Succeeded
+            && receipt.calls==1 && receipt.valid;
         if(published)outputs.push_back(output);return published;
     }
 };

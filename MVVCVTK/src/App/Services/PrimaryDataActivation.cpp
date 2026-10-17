@@ -14,13 +14,13 @@ PrimaryDataActivation::PrimaryDataActivation(
 {
 }
 
-DataCommitResult PrimaryDataActivation::SetDataCommit(DataTransaction transaction)
+DataCommitResult PrimaryDataActivation::SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt)
 {
     const bool hasPrimary = std::any_of(transaction.bindings.begin(),
         transaction.bindings.end(), [](const DataBindingUpdate& update) {
             return update.binding == primaryVolumeBinding;
         });
-    auto result = m_data.SetDataCommit(std::move(transaction));
+    auto result = m_data.SetDataCommit(std::move(transaction), receipt);
     if (hasPrimary && result.isActivated
         && result.status != DataCommitStatus::Rejected) {
         SetReady(std::nullopt, false);

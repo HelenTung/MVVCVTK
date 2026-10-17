@@ -1,11 +1,13 @@
 // 测试用途：验证数据图节点、载荷、数据修订、写入事务与图关系。
 #include "Data/DataGraphStore.h"
 #include "Data/DataPayloads.h"
+#include "../ControlledTaskGate.h"
 
 #include <atomic>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -564,6 +566,80 @@ bool GetObserverReleaseValid()
         "observer callback owner was not released outside the registry lock");
 }
 
+bool GetCommitReceiptValid()
+{
+    struct Receipt final {
+        std::size_t calls = 0, published = 0, bindings = 0;
+        DataCommitStatus status = DataCommitStatus::Rejected;
+        DataCommitId commit = 0;
+        DataBindingRevision revision = 0;
+        bool activated = false, onCaller = true;
+        const std::thread::id caller = std::this_thread::get_id();
+    } receipt;
+    const auto receive = +[](void* context, const DataCommitResult& actual) noexcept {
+        auto& value = *static_cast<Receipt*>(context);
+        ++value.calls;
+        value.published = actual.published.size(); value.bindings = actual.bindings.size();
+        value.status = actual.status; value.commit = actual.commitId; value.activated = actual.isActivated;
+        value.revision = actual.bindings.empty() ? 0 : actual.bindings.front().revision;
+        value.onCaller = value.onCaller && std::this_thread::get_id() == value.caller;
+    };
+    bool notifiedAfterReceipt = true, externalApplied = false;
+    std::size_t notices = 0, delayedNotices = 0;
+    DataGraphStore store;
+    const DataRevisionRef first{store.CreateDataEntityId(), 1};
+    const auto observer = store.AttachDataChange([&, first](const DataChangeSet&) {
+        ++notices;
+        notifiedAfterReceipt = notifiedAfterReceipt && receipt.calls == 1 && receipt.commit == 1;
+        if (notices == 1) {
+            DataTransaction external;
+            external.bindings.push_back(BuildBinding("receipt.active", 1, first, first));
+            externalApplied = store.SetDataCommit(std::move(external)).status == DataCommitStatus::Succeeded;
+            throw std::runtime_error("observer after receipt");
+        }
+    });
+    DataTransaction transaction;
+    transaction.outputs.push_back(BuildImageDraft(first.entityId, 0, 1));
+    transaction.bindings.push_back(BuildBinding("receipt.active", 0, first));
+    const auto actual = store.SetDataCommit(std::move(transaction), &receipt, receive);
+    const auto current = store.GetDataBinding(store.GetDataGraph(), "receipt.active");
+    if (!Check(observer && receipt.calls == 1 && receipt.onCaller && receipt.status == DataCommitStatus::Succeeded
+        && receipt.activated && receipt.published == 1 && receipt.bindings == 1 && receipt.revision == 1
+        && actual.commitId == 1 && actual.bindings.front().revision == 1 && externalApplied
+        && current && current->revision == 2 && current->target == first && notices == 2 && notifiedAfterReceipt,
+        "actual receipt was lost, repeated, delayed behind notices, or replaced by a reentrant external result")) return false;
+    if (!store.DetachDataChange(observer)) return false;
+    Receipt rejected;
+    DataTransaction stale;
+    stale.bindings.push_back(BuildBinding("receipt.active", 0, first));
+    if (!Check(store.SetDataCommit(std::move(stale), &rejected, receive).status == DataCommitStatus::Rejected
+        && rejected.calls == 0, "rejected CAS delivered a success receipt")) return false;
+    const DataRevisionRef historical{store.CreateDataEntityId(), 1};
+    DataTransaction history;
+    history.policy = DataPublishPolicy::AllowHistoricalResult;
+    history.outputs.push_back(BuildImageDraft(historical.entityId, 0, 2));
+    history.bindings.push_back(BuildBinding("receipt.active", 0, historical));
+    Receipt historicalReceipt;
+    const auto historicalResult = store.SetDataCommit(std::move(history), &historicalReceipt, receive);
+    if (!Check(historicalResult.status == DataCommitStatus::SucceededHistorical && historicalReceipt.calls == 1
+        && historicalReceipt.status == DataCommitStatus::SucceededHistorical && !historicalReceipt.activated
+        && historicalReceipt.published == 1 && historicalReceipt.bindings == 0 && historicalReceipt.onCaller,
+        "historical publication receipt incorrectly claimed binding activation")) return false;
+    Receipt delayedReceipt;
+    const auto delayedObserver = store.AttachDataChange([&](const DataChangeSet&) { ++delayedNotices; });
+    auto batch = store.StartDataChanges();
+    DataTransaction delayed;
+    delayed.bindings.push_back(BuildBinding("receipt.active", 2, first, first));
+    const auto delayedResult = store.SetDataCommit(std::move(delayed), &delayedReceipt, receive);
+    if (!Check(batch && delayedResult.status == DataCommitStatus::Succeeded && delayedReceipt.calls == 1
+        && delayedReceipt.revision == 3 && delayedNotices == 0,
+        "notification batching delayed the actual synchronous commit receipt")) return false;
+    batch.reset();
+    const bool passed = Check(delayedNotices == 1 && delayedReceipt.calls == 1,
+        "notification release repeated the synchronous receipt");
+    return store.DetachDataChange(delayedObserver) && passed;
+}
+
 bool GetConcurrentCasValid()
 {
     DataGraphStore store;
@@ -577,14 +653,24 @@ bool GetConcurrentCasValid()
     store.SetDataCommit(std::move(setup));
 
     std::atomic<int> winners{ 0 };
-    const auto commit = [&store, &winners, baseRef](const DataEntityId entity) {
+    std::atomic<int> receipts{ 0 }, wrongReceipts{ 0 };
+    const auto commit = [&store, &winners, &receipts, &wrongReceipts, baseRef](const DataEntityId entity) {
         const DataRevisionRef ref{ entity, 1 };
         DataTransaction transaction;
         transaction.outputs.push_back(BuildImageDraft(entity, 0, 2.0f, {
             DataInputRef{ "source", baseRef } }));
         transaction.bindings.push_back(BuildBinding("active", 1, ref, baseRef));
-        if (store.SetDataCommit(std::move(transaction)).status
-            == DataCommitStatus::Succeeded) {
+        struct Receiver final { std::thread::id thread; int calls = 0; bool valid = true; } receiver{std::this_thread::get_id()};
+        const auto result = store.SetDataCommit(std::move(transaction), &receiver,
+            +[](void* context, const DataCommitResult& actual) noexcept {
+                auto& value = *static_cast<Receiver*>(context); ++value.calls;
+                value.valid = value.valid && std::this_thread::get_id() == value.thread
+                    && actual.status == DataCommitStatus::Succeeded && actual.isActivated
+                    && actual.bindings.size() == 1 && actual.bindings.front().revision == 2;
+            });
+        receipts += receiver.calls;
+        if (!receiver.valid || receiver.calls != (result.status == DataCommitStatus::Succeeded ? 1 : 0)) ++wrongReceipts;
+        if (result.status == DataCommitStatus::Succeeded) {
             ++winners;
         }
     };
@@ -595,9 +681,134 @@ bool GetConcurrentCasValid()
     const auto graph = store.GetDataGraph();
     const auto binding = graph.view->GetDataBinding("active");
     return Check(
-        winners.load() == 1 && graph.commitId == 2
+        winners.load() == 1 && receipts.load() == 1 && wrongReceipts.load() == 0 && graph.commitId == 2
             && binding && binding->revision == 2,
         "concurrent binding CAS did not have exactly one winner");
+}
+
+bool GetConcurrentReceiptDispatchValid(const bool holdReceipt)
+{
+    DataGraphStore store;
+    TaskInterleaving::Gate oldObserver, receiptGate;
+    oldObserver.Arm();
+    if (holdReceipt) receiptGate.Arm();
+    struct Receipt final {
+        TaskInterleaving::Gate& gate;
+        std::atomic<bool> finished{ false };
+        int calls = 0;
+        bool valid = true;
+        std::thread::id caller;
+    } receipt{ receiptGate };
+    std::vector<DataCommitId> notices;
+    std::size_t earlyNotices = 0;
+    bool queriedCommitted = true;
+    const auto observer = store.AttachDataChange([&](const DataChangeSet& change) {
+        notices.push_back(change.commitId);
+        if (change.commitId == 1) {
+            oldObserver.Hold();
+        } else {
+            if (!receipt.finished.load()) ++earlyNotices;
+            queriedCommitted = queriedCommitted && store.GetDataGraph().commitId >= change.commitId;
+        }
+    });
+    std::promise<void> firstReturned, secondReturned, laterReturned;
+    auto firstDone = firstReturned.get_future();
+    auto secondDone = secondReturned.get_future();
+    auto laterDone = laterReturned.get_future();
+    DataCommitResult firstResult, secondResult, laterResult;
+    std::exception_ptr firstError, secondError, laterError;
+    // 门闩和接收记录先于线程守卫存在，任何前提失败均先释放门闩再join。
+    struct Threads final {
+        TaskInterleaving::Gate& oldObserver;
+        TaskInterleaving::Gate& receipt;
+        std::thread first, second, later;
+        Threads(TaskInterleaving::Gate& oldGate, TaskInterleaving::Gate& receiptGate)
+            : oldObserver(oldGate), receipt(receiptGate) {}
+        ~Threads() {
+            oldObserver.Release(); receipt.Release();
+            if (first.joinable()) first.join();
+            if (second.joinable()) second.join();
+            if (later.joinable()) later.join();
+        }
+    };
+    const auto transaction = [&] {
+        DataTransaction value;
+        value.outputs.push_back(BuildImageDraft(store.CreateDataEntityId(), 0, 1));
+        return value;
+    };
+    Threads threads(oldObserver, receiptGate);
+    threads.first = std::thread([&] {
+        try { firstResult = store.SetDataCommit(transaction()); }
+        catch (...) { firstError = std::current_exception(); }
+        firstReturned.set_value();
+    });
+    if (!Check(oldObserver.WaitEntered(), "old drainer did not enter the bounded observer gate")) return false;
+    threads.second = std::thread([&] {
+        receipt.caller = std::this_thread::get_id();
+        try {
+            secondResult = store.SetDataCommit(transaction(), &receipt,
+                +[](void* context, const DataCommitResult& actual) noexcept {
+                    auto& value = *static_cast<Receipt*>(context);
+                    ++value.calls;
+                    value.valid = value.valid && actual.commitId == 2
+                        && actual.status == DataCommitStatus::Succeeded
+                        && actual.isActivated && actual.published.size() == 1
+                        && std::this_thread::get_id() == value.caller;
+                    // 仅在私有Store透传回调内注入停顿，构造“回执尚未完成”的窗口；
+                    // 不表示公开FeatureSPI接收器可等待、查询或派发业务。
+                    value.gate.Hold();
+                    value.finished.store(true);
+                });
+        } catch (...) { secondError = std::current_exception(); }
+        secondReturned.set_value();
+    });
+    const bool secondReady = holdReceipt ? receiptGate.WaitEntered()
+        : secondDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready;
+    if (!Check(secondReady, "second commit did not reach its controlled receipt boundary")) return false;
+    // 后续已就绪项不能越过未完成回执项；另一个线程还能提交也验证接收处无state锁。
+    threads.later = std::thread([&] {
+        try { laterResult = store.SetDataCommit(transaction()); }
+        catch (...) { laterError = std::current_exception(); }
+        laterReturned.set_value();
+    });
+    if (!Check(laterDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "a held private receipt blocks a later independent state commit")) return false;
+    const bool receiptStillHeld = !holdReceipt || receiptGate.GetIsHeld();
+    oldObserver.Release();
+    // A的提交返回证明它已走完drain循环；不靠sleep推测它是否尝试取走B/C。
+    if (!Check(firstDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "the old drainer failed to return at the pending receipt boundary")) return false;
+    const auto noticesBeforeReceiptRelease = notices.size() - 1;
+    receiptGate.Release();
+    if (!Check(secondDone.wait_for(TaskInterleaving::synchronizationTimeout) == std::future_status::ready,
+        "receipt completion failed to resume ordered notification delivery")) return false;
+    threads.first.join(); threads.second.join(); threads.later.join();
+    const auto expectedBeforeRelease = holdReceipt ? std::size_t{ 0 } : std::size_t{ 2 };
+    std::cout << "receipt-dispatch mode=" << (holdReceipt ? "held" : "control")
+        << " before_release=" << noticesBeforeReceiptRelease << " expected=" << expectedBeforeRelease
+        << " early_notices=" << earlyNotices << " expected_early=0"
+        << " receipt_calls=" << receipt.calls << " expected_calls=1"
+        << " receipt_held=" << receiptStillHeld << " query_committed=" << queriedCommitted
+        << " commits=" << firstResult.commitId << ',' << secondResult.commitId << ',' << laterResult.commitId
+        << " notices=";
+    for (const auto id : notices) std::cout << id << ',';
+    std::cout << '\n';
+    const bool passed = Check(!firstError && !secondError && !laterError && receiptStillHeld
+        && firstResult.status == DataCommitStatus::Succeeded && firstResult.commitId == 1
+        && secondResult.status == DataCommitStatus::Succeeded && secondResult.commitId == 2
+        && laterResult.status == DataCommitStatus::Succeeded && laterResult.commitId == 3
+        && receipt.calls == 1 && receipt.valid && receipt.finished.load() && queriedCommitted
+        && noticesBeforeReceiptRelease == expectedBeforeRelease && earlyNotices == 0
+        && notices == std::vector<DataCommitId>{ 1, 2, 3 },
+        "an existing drainer consumed a notification before its receipt completed, or lost the ready wakeup");
+    return store.DetachDataChange(observer) && passed;
+}
+
+bool GetConcurrentReceiptDispatchTests()
+{
+    const bool control = GetConcurrentReceiptDispatchValid(false);
+    const bool held = GetConcurrentReceiptDispatchValid(true);
+    return control && held;
 }
 
 } // namespace
@@ -631,6 +842,8 @@ int main(int argc, char** argv)
         && GetObserverDetachValid()
         && GetObserverStateValid()
         && GetObserverReleaseValid()
-        && GetConcurrentCasValid();
+        && GetCommitReceiptValid()
+        && GetConcurrentCasValid()
+        && GetConcurrentReceiptDispatchTests();
     return isSucceeded ? 0 : 1;
 }

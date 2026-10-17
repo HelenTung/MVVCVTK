@@ -69,7 +69,7 @@ public:
         const DataRevisionRef& ref, std::shared_ptr<const VtkPreparedDataView> prepared) override;
     DataEntityId CreateDataEntityId() override;
     bool SetDataType(DataTypeDescriptor descriptor) override;
-    DataCommitResult SetDataCommit(DataTransaction transaction) override;
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override;
     DataObserverId AttachDataChange(DataChangeCallback callback) override;
     bool DetachDataChange(DataObserverId observerId) override;
 

@@ -10,7 +10,7 @@ class SharedInteractionState;
 class PrimaryDataActivation final {
 public:
     PrimaryDataActivation(AbstractDataManager& data, SharedInteractionState& state);
-    DataCommitResult SetDataCommit(DataTransaction transaction);
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr);
     void SetLoadReady(const std::optional<DataReadyState>& staged);
     static bool GetDataReadyState(const VtkImageGridSnapshot& snapshot,
         const SharedInteractionState* state, DataReadyState& ready);

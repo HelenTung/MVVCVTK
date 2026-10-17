@@ -27,6 +27,22 @@
 #include <cstring>
 #include <thread>
 
+namespace AlignmentReceiptAllocations {
+thread_local bool enabled = false;
+thread_local std::size_t count = 0;
+}
+// 只计数回执接收期间的普通 C++ 分配；不注入 noexcept 内异常，不影响其它线程。
+void* operator new(std::size_t bytes) {
+    if (AlignmentReceiptAllocations::enabled) ++AlignmentReceiptAllocations::count;
+    if (auto* value = std::malloc(bytes ? bytes : 1)) return value;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
+void operator delete(void* value) noexcept { std::free(value); }
+void operator delete(void* value, std::size_t) noexcept { std::free(value); }
+void operator delete[](void* value) noexcept { std::free(value); }
+void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
+
 namespace {
 int failures = 0;
 void Check(bool value, const char *message) {
@@ -47,23 +63,56 @@ class FaultDataPort final : public TestDataPort {
     enum class RecoveryQuery { None, Lifetime, Graph, Binding };
     RecoveryQuery recoveryQuery = RecoveryQuery::None;
     bool recoveryArmed = false;
+    mutable std::size_t recoveryGraphFaults = 0, recoveryBindingFaults = 0;
+    bool rejectsChangeObservation = false;
+    std::size_t activeDataObservers = 0, observedDataChanges = 0;
+    std::function<void()> beforeCommitFault;
+    std::size_t underlyingCommitCalls = 0;
+    std::size_t receiptCalls = 0, receiptAllocations = 0;
+    mutable std::size_t receiptQueries = 0;
+    bool isReceiving = false, receiptOnOwner = true;
+    bool reversesCommitOrder = false;
+    DataRevisionRef receiptFirstOutput;
+    std::optional<DataRevisionRef> receiptFirstTarget;
+    const std::thread::id receiptOwner = std::this_thread::get_id();
     DataEntityId attemptedScope, committedScope;
     std::size_t unknownRetirements = 0;
     DataGraphSnapshot GetDataGraph() const override {
+        if (isReceiving) ++receiptQueries;
         if (omitsGraph) return {};
-        if (recoveryArmed && recoveryQuery == RecoveryQuery::Graph)
+        if (recoveryArmed && recoveryQuery == RecoveryQuery::Graph) {
+            ++recoveryGraphFaults;
             throw std::runtime_error("recovery graph failure");
+        }
         return TestDataPort::GetDataGraph();
     }
     DataLifetimeState GetDataLifetime(const DataEntityId& id) const override {
+        if (isReceiving) ++receiptQueries;
         if (recoveryArmed && recoveryQuery == RecoveryQuery::Lifetime)
             throw std::runtime_error("recovery lifetime failure");
         return TestDataPort::GetDataLifetime(id);
     }
     std::optional<DataBinding> GetDataBinding(const DataGraphSnapshot& graph, std::string_view name) const override {
-        if (recoveryArmed && recoveryQuery == RecoveryQuery::Binding)
+        if (isReceiving) ++receiptQueries;
+        if (recoveryArmed && recoveryQuery == RecoveryQuery::Binding) {
+            ++recoveryBindingFaults;
             throw std::runtime_error("recovery binding failure");
+        }
         return TestDataPort::GetDataBinding(graph, name);
+    }
+    DataObserverId AttachDataChange(DataChangeCallback callback) override {
+        if (!callback || rejectsChangeObservation) return 0;
+        const auto id = TestDataPort::AttachDataChange([this, callback = std::move(callback)](const DataChangeSet& change) {
+            ++observedDataChanges;
+            callback(change);
+        });
+        if (id) ++activeDataObservers;
+        return id;
+    }
+    bool DetachDataChange(DataObserverId id) override {
+        const bool detached = TestDataPort::DetachDataChange(id);
+        if (detached) --activeDataObservers;
+        return detached;
     }
     enum class ReadFault { None, Throws, Omits };
     ReadFault readFault = ReadFault::None;
@@ -71,6 +120,7 @@ class FaultDataPort final : public TestDataPort {
     mutable std::size_t faultReadCalls = 0;
     std::size_t commitCalls = 0, retirementInUseCalls = 0;
     DataSnapshot GetData(const DataGraphSnapshot& graph, const DataRevisionRef& ref) const override {
+        if (isReceiving) ++receiptQueries;
         if (faultReadRef && ref == *faultReadRef) {
             ++faultReadCalls;
             if (readFault == ReadFault::Throws) throw std::runtime_error("derived read fault");
@@ -79,17 +129,45 @@ class FaultDataPort final : public TestDataPort {
         return TestDataPort::GetData(graph, ref);
     }
     std::function<void()> onCommit;
-    DataCommitResult SetDataCommit(DataTransaction tx) override {
+    DataCommitResult SetDataCommit(DataTransaction tx, DataCommitReceipt* receipt = nullptr) override {
         ++commitCalls;
         if (rejectsCommit || (rejectsRetirement && !tx.retireScopes.empty()))
             return {};
         if (!tx.outputs.empty()) attemptedScope = tx.outputs.back().lifetimeScope.value_or(DataEntityId{});
         for (const auto& retirement : tx.retireScopes)
             if (TestDataPort::GetDataLifetime(retirement.scopeId).status == DataLifetimeStatus::Unknown) ++unknownRetirements;
-        if (throwsBeforeCommit) { recoveryArmed = true; throw std::bad_alloc(); }
+        if (throwsBeforeCommit) {
+            if (beforeCommitFault) beforeCommitFault();
+            recoveryArmed = true;
+            throw std::bad_alloc();
+        }
         const bool isRetirement = !tx.retireScopes.empty();
         const bool injectAfter = throwsAfterCommit && (!afterCommitTarget || afterCommitTarget(tx));
-        auto r = TestDataPort::SetDataCommit(std::move(tx));
+        if (reversesCommitOrder) {
+            std::reverse(tx.outputs.begin(), tx.outputs.end());
+            std::reverse(tx.bindings.begin(), tx.bindings.end());
+        }
+        ++underlyingCommitCalls;
+        struct ForwardReceipt final : DataCommitReceipt {
+            FaultDataPort& port;
+            DataCommitReceipt* next;
+            ForwardReceipt(FaultDataPort& owner, DataCommitReceipt* receiver) : port(owner), next(receiver) {}
+            void SetDataCommitted(const DataCommitResult& actual) noexcept override {
+                ++port.receiptCalls;
+                port.receiptFirstOutput = actual.published.empty() ? DataRevisionRef{} : actual.published.front()->self;
+                port.receiptFirstTarget = actual.bindings.empty() ? std::optional<DataRevisionRef>{} : actual.bindings.front().target;
+                port.receiptOnOwner = port.receiptOnOwner && std::this_thread::get_id() == port.receiptOwner;
+                port.isReceiving = true;
+                const auto before = AlignmentReceiptAllocations::count;
+                const bool wasEnabled = AlignmentReceiptAllocations::enabled;
+                AlignmentReceiptAllocations::enabled = true;
+                next->SetDataCommitted(actual);
+                AlignmentReceiptAllocations::enabled = wasEnabled;
+                port.receiptAllocations += AlignmentReceiptAllocations::count - before;
+                port.isReceiving = false;
+            }
+        } forward(*this, receipt);
+        auto r = TestDataPort::SetDataCommit(std::move(tx), receipt ? &forward : nullptr);
         if (!r.published.empty()) committedScope = r.published.back()->lifetimeScope;
         if (isRetirement && r.failureReason == DataCommitFailure::ResultInUse) ++retirementInUseCalls;
         if (onCommit)
@@ -942,6 +1020,75 @@ void ScopeAliasOwnership() {
               "foreign binding history does not supersede the never-activated owner after a failed attempt");
         Check(f.scopes.Clear(f.data), "collect control owner cleanup");
     }
+    for (const bool collect : {false, true})
+        for (const auto query : {FaultDataPort::RecoveryQuery::None, FaultDataPort::RecoveryQuery::Graph,
+                                 FaultDataPort::RecoveryQuery::Binding}) {
+            ScopeFixture f; const auto owned = f.Publish("");
+            const std::string alias = "scope.external.pending";
+            Check(f.data.SetDataCommit(f.Binding(alias, owned.ref)).status == DataCommitStatus::Succeeded,
+                  "pending control starts with a real external alias");
+            const auto before = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+            const auto beforeCommit = f.data.GetDataGraph().commitId;
+            auto transaction = f.Binding(alias, owned.ref);
+            f.data.throwsBeforeCommit = true; f.data.recoveryQuery = query;
+            const auto receiptsBefore = f.data.receiptCalls;
+            bool original = false; std::string message;
+            try { (void)f.scopes.Commit(f.data, std::move(transaction)); }
+            catch (const std::bad_alloc& error) { original = true; message = error.what(); }
+            catch (const std::exception& error) { message = error.what(); }
+            f.data.throwsBeforeCommit = false;
+            const auto unchangedGraph = f.data.TestDataPort::GetDataGraph();
+            const auto unchanged = f.data.TestDataPort::GetDataBinding(unchangedGraph, alias);
+            Check(original && before && unchanged && before->revision == 1
+                  && unchangedGraph.commitId == beforeCommit && unchanged->revision == before->revision
+                  && unchanged->target == before->target && f.data.receiptCalls == receiptsBefore,
+                  "pending fixture proves the original bad_alloc precedes any underlying commit");
+            if (!before || !unchanged) continue;
+            Check(query != FaultDataPort::RecoveryQuery::Graph || f.data.recoveryGraphFaults > 0,
+                  "pending fixture actually hits the delayed graph recovery failure");
+            Check(query != FaultDataPort::RecoveryQuery::Binding || f.data.recoveryBindingFaults > 0,
+                  "pending fixture actually hits the delayed binding recovery failure");
+            DataTransaction outside;
+            outside.bindings.push_back({alias, unchanged->revision, true, unchanged->target, owned.ref});
+            const auto externalCommit = f.data.TestDataPort::SetDataCommit(std::move(outside));
+            const auto external = f.data.TestDataPort::GetDataBinding(f.data.TestDataPort::GetDataGraph(), alias);
+            Check(externalCommit.status == DataCommitStatus::Succeeded && external
+                  && external->revision == 2 && external->target == owned.ref,
+                  "pending fixture's exact predicted r2 is written by the independent external owner");
+            if (externalCommit.status != DataCommitStatus::Succeeded || !external) continue;
+            f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+            if (!collect) {
+                const bool cleared = f.scopes.Clear(f.data);
+                const auto after = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+                const bool kept = after && after->revision == 2 && after->target == owned.ref;
+                std::cout << "SCOPE_ALIAS_PENDING_CLEAR query=" << int(query) << " original_bad_alloc=" << original
+                          << " what=[" << message << "] graph_fault_hits=" << f.data.recoveryGraphFaults
+                          << " binding_fault_hits=" << f.data.recoveryBindingFaults
+                          << " external_revision=" << (external ? external->revision : 0)
+                          << " after_revision=" << (after ? after->revision : 0) << " expected_revision=2"
+                          << " after_target=" << GetScopeAliasRef(after ? after->target : std::optional<DataRevisionRef>{})
+                          << " expected_target=" << GetScopeAliasRef(owned.ref) << " clear=" << cleared
+                          << " expected_clear=0 kept=" << kept << " expected_kept=1" << std::endl;
+                Check(!cleared && kept, "pending recovery never acquires or clears an external successor write");
+                if (after && after->target)
+                    Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+                          "pending alias owner independently unbinds after the Clear observation");
+            } else {
+                f.scopes.Collect(f.data);
+                Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+                      "pending alias owner independently unbinds after recovery Collect");
+                f.scopes.Collect(f.data);
+                const auto status = f.data.GetDataLifetime(owned.scope).status;
+                std::cout << "SCOPE_ALIAS_PENDING_COLLECT query=" << int(query) << " original_bad_alloc=" << original
+                          << " what=[" << message << "] graph_fault_hits=" << f.data.recoveryGraphFaults
+                          << " binding_fault_hits=" << f.data.recoveryBindingFaults << " status=" << int(status)
+                          << " expected_status=" << int(DataLifetimeStatus::Published)
+                          << " ledger=" << f.scopes.GetScopeCount() << " expected_ledger=1" << std::endl;
+                Check(status == DataLifetimeStatus::Published && f.scopes.GetScopeCount() == 1,
+                      "pending recovery never invents activation history from the external successor");
+            }
+            Check(f.scopes.Clear(f.data), "pending alias control owner cleanup");
+        }
     enum class Control { Normal, After, OwnedBefore, ExternalRewrite };
     for (const auto mode : {Control::Normal, Control::After, Control::OwnedBefore, Control::ExternalRewrite}) {
         ScopeFixture f; const std::string alias = "scope.ownership.control";
@@ -976,6 +1123,177 @@ void ScopeAliasOwnership() {
             f.scopes.Collect(f.data);
             Check(f.scopes.Clear(f.data), "later external rewrite cleanup");
         }
+    }
+}
+
+void ScopeAliasReceipts() {
+    const auto allocationCount = AlignmentReceiptAllocations::count;
+    AlignmentReceiptAllocations::enabled = true;
+    auto* calibration = ::operator new(1);
+    AlignmentReceiptAllocations::enabled = false;
+    ::operator delete(calibration);
+    Check(AlignmentReceiptAllocations::count == allocationCount + 1,
+          "receipt allocation monitor detects an explicit ordinary C++ allocation");
+    enum class Mode { Observed, Delayed, Refused, Throwing };
+    for (const auto mode : {Mode::Observed, Mode::Delayed, Mode::Refused, Mode::Throwing}) {
+        ScopeFixture f; const auto owned = f.Publish("");
+        const std::string alias = "scope.receipt.control";
+        auto delayed = mode == Mode::Delayed ? f.data.StartDataChanges() : std::unique_ptr<DataChangeBatch>{};
+        f.data.rejectsChangeObservation = mode == Mode::Refused;
+        const auto receiptsBefore = f.data.receiptCalls;
+        std::size_t notifications = 0;
+        bool receiptPrecedesNotice = true;
+        const auto observer = f.data.AttachDataChange([&](const DataChangeSet&) {
+            ++notifications;
+            receiptPrecedesNotice = receiptPrecedesNotice && f.data.receiptCalls == receiptsBefore + 1;
+            if (mode == Mode::Throwing) throw std::runtime_error("observer after receipt");
+        });
+        f.data.throwsAfterCommit = true; f.data.throwsAfterCommitOnce = true;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::Graph;
+        bool original = false;
+        try { (void)f.scopes.Commit(f.data, f.Binding(alias, owned.ref)); }
+        catch (const std::runtime_error& error) { original = std::strcmp(error.what(), "after commit") == 0; }
+        const auto actual = f.data.TestDataPort::GetDataBinding(f.data.TestDataPort::GetDataGraph(), alias);
+        Check(original && f.data.injectedCommits == 1 && f.data.injectedStatus == DataCommitStatus::Succeeded
+              && f.data.injectedActivation && actual && actual->revision == 1 && actual->target == owned.ref,
+              "receipt control truly commits first activation before the original exception and query failure");
+        Check(f.data.recoveryGraphFaults > 0 && f.data.receiptCalls == receiptsBefore + 1
+              && f.data.receiptAllocations == 0 && f.data.receiptQueries == 0 && f.data.receiptOnOwner,
+              "one real owner-thread receipt records recovery without allocation or data queries");
+        if (mode == Mode::Delayed) Check(notifications == 0,
+              "an outer notification batch does not delay the actual synchronous receipt");
+        delayed.reset();
+        Check(receiptPrecedesNotice && notifications == (observer ? 1u : 0u),
+              "actual receipt precedes every delivered notice, including an observer that throws");
+        if (observer) Check(f.data.DetachDataChange(observer), "receipt fixture releases its own observer");
+        Check(f.data.activeDataObservers == 0, "the helper never requires an observation registration");
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        const bool cleared = f.scopes.Clear(f.data);
+        const auto after = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        std::cout << "SCOPE_RECEIPT mode=" << int(mode) << " original_after_commit=" << original
+                  << " observer_callbacks=" << f.data.observedDataChanges
+                  << " active_observers=" << f.data.activeDataObservers << " clear=" << cleared
+                  << " expected_clear=1 revision=" << (after ? after->revision : 0)
+                  << " target=" << GetScopeAliasRef(after ? after->target : std::optional<DataRevisionRef>{})
+                  << " receipt_delta=" << f.data.receiptCalls - receiptsBefore << " expected_receipts=1"
+                  << " receipt_allocations=" << f.data.receiptAllocations << " receipt_queries=" << f.data.receiptQueries
+                  << " owner_thread=" << f.data.receiptOnOwner << std::endl;
+        Check(cleared && after && !after->target && f.scopes.GetScopeCount() == 0
+              && f.data.GetDataLifetime(owned.scope).status == DataLifetimeStatus::Released,
+              "actual receipt preserves automatic cleanup even without notices or after observer exceptions");
+        Check(f.scopes.Clear(f.data), "receipt control cleanup");
+    }
+    // 原子事务按实体/绑定名字识别；真实回执重排集合不改变其中的提交身份。
+    for (const bool multipleOutputs : {false, true}) {
+        ScopeFixture f; const auto owned = f.Publish("");
+        DataTransaction transaction;
+        DataRevisionRef expectedFirst;
+        if (multipleOutputs) {
+            const DataRevisionRef first{f.data.CreateDataEntityId(), 1}, second{f.data.CreateDataEntityId(), 1};
+            for (const auto ref : {first, second})
+                transaction.outputs.push_back({ref.entityId, 0, DataTypes::recordTable, {{"source", f.source}},
+                    ScopeFixture::Payload(), DataProvenance{"scope-test", "calculate", "1", "{}"}});
+            expectedFirst = second;
+        } else {
+            const auto second = f.Publish("", "other");
+            transaction.bindings.push_back({"scope.receipt.order.first", 0, true, {}, owned.ref});
+            transaction.bindings.push_back({"scope.receipt.order.second", 0, true, {}, second.ref});
+            expectedFirst = second.ref;
+        }
+        const auto receiptsBefore = f.data.receiptCalls;
+        f.data.reversesCommitOrder = true;
+        f.data.throwsAfterCommit = true; f.data.throwsAfterCommitOnce = true;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::Graph;
+        bool original = false;
+        try { (void)f.scopes.Commit(f.data, std::move(transaction)); }
+        catch (const std::runtime_error& error) { original = std::strcmp(error.what(), "after commit") == 0; }
+        f.data.reversesCommitOrder = false;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        Check(original && f.data.injectedCommits == 1 && f.data.injectedStatus == DataCommitStatus::Succeeded
+              && f.data.injectedActivation && f.data.receiptCalls == receiptsBefore + 1
+              && (multipleOutputs ? f.data.receiptFirstOutput == expectedFirst : f.data.receiptFirstTarget == expectedFirst),
+              "reordered receipt fixture proves one actual successful commit, reversed identity order, and original exception");
+        if (multipleOutputs) {
+            f.scopes.Collect(f.data);
+            const auto state = f.data.GetDataLifetime(owned.scope).status;
+            std::cout << "SCOPE_RECEIPT_OUTPUT_ORDER old_status=" << int(state)
+                      << " expected_status=" << int(DataLifetimeStatus::Released)
+                      << " ledger=" << f.scopes.GetScopeCount() << " expected_ledger=1" << std::endl;
+            Check(state == DataLifetimeStatus::Released && f.scopes.GetScopeCount() == 1,
+                  "actual same-family multi-output receipt replaces the prior owner independent of vector order");
+        } else {
+            const bool cleared = f.scopes.Clear(f.data);
+            std::cout << "SCOPE_RECEIPT_BINDING_ORDER clear=" << cleared << " expected_clear=1"
+                      << " ledger=" << f.scopes.GetScopeCount() << " expected_ledger=0" << std::endl;
+            Check(cleared && f.scopes.GetScopeCount() == 0,
+                  "actual multi-binding receipt authorizes only its real owned clocks independent of vector order");
+            if (!cleared) {
+                (void)f.data.SetDataCommit(f.Binding("scope.receipt.order.first", {}));
+                (void)f.data.SetDataCommit(f.Binding("scope.receipt.order.second", {}));
+            }
+        }
+        Check(f.data.receiptAllocations == 0 && f.data.receiptQueries == 0 && f.data.receiptOnOwner,
+              "multi-entry receipt matching performs no allocation/query and stays on the owner");
+        Check(f.scopes.Clear(f.data), "reordered receipt fixture cleanup");
+    }
+    // 同一同步调用内仍可能经端口/准备钩子重入；事件值与抵达时间都不是作者身份。
+    for (const bool collect : {false, true}) {
+        ScopeFixture f; const auto owned = f.Publish("");
+        const std::string alias = "scope.receipt.reentrant";
+        Check(f.data.SetDataCommit(f.Binding(alias, owned.ref)).status == DataCommitStatus::Succeeded,
+              "reentrant receipt control starts with an external alias at r1");
+        const auto before = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        auto attempted = f.Binding(alias, owned.ref);
+        const auto originalStoreCalls = f.data.underlyingCommitCalls;
+        const auto originalReceipts = f.data.receiptCalls;
+        DataCommitResult outside;
+        f.data.beforeCommitFault = [&] {
+            DataTransaction transaction;
+            transaction.bindings.push_back({alias, 1, true, owned.ref, owned.ref});
+            outside = f.data.TestDataPort::SetDataCommit(std::move(transaction));
+        };
+        f.data.throwsBeforeCommit = true;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::Graph;
+        bool original = false;
+        try { (void)f.scopes.Commit(f.data, std::move(attempted)); }
+        catch (const std::bad_alloc&) { original = true; }
+        catch (...) {}
+        f.data.beforeCommitFault = {};
+        f.data.throwsBeforeCommit = false;
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        const auto external = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        const auto attemptedStoreCalls = f.data.underlyingCommitCalls - originalStoreCalls;
+        Check(original && before && before->revision == 1 && outside.status == DataCommitStatus::Succeeded
+              && outside.bindings.size() == 1 && outside.bindings.front().revision == 2
+              && attemptedStoreCalls == 0 && f.data.receiptCalls == originalReceipts && external
+              && external->revision == 2 && external->target == owned.ref,
+              "reentrant fixture proves only the external transaction reached the real store");
+        if (!collect) {
+            const bool cleared = f.scopes.Clear(f.data);
+            const auto after = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+            std::cout << "SCOPE_RECEIPT_REENTRANT_CLEAR original_store_calls_delta="
+                      << attemptedStoreCalls
+                      << " external_returned_revision=" << (outside.bindings.empty() ? 0 : outside.bindings.front().revision)
+                      << " observer_callbacks=" << f.data.observedDataChanges << " clear=" << cleared
+                      << " expected_clear=0 after_revision=" << (after ? after->revision : 0)
+                      << " expected_revision=2 after_target=" << GetScopeAliasRef(after ? after->target : std::optional<DataRevisionRef>{})
+                      << " expected_target=" << GetScopeAliasRef(owned.ref) << std::endl;
+            Check(!cleared && after && after->revision == 2 && after->target == owned.ref,
+                  "an in-call matching event from reentrant external work never authorizes Clear");
+            if (after && after->target) (void)f.data.SetDataCommit(f.Binding(alias, {}));
+        } else {
+            f.scopes.Collect(f.data);
+            Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+                  "reentrant receipt external owner independently unbinds");
+            f.scopes.Collect(f.data);
+            const auto state = f.data.GetDataLifetime(owned.scope).status;
+            std::cout << "SCOPE_RECEIPT_REENTRANT_COLLECT state=" << int(state)
+                      << " expected_state=" << int(DataLifetimeStatus::Published)
+                      << " ledger=" << f.scopes.GetScopeCount() << " expected_ledger=1" << std::endl;
+            Check(state == DataLifetimeStatus::Published && f.scopes.GetScopeCount() == 1,
+                  "an in-call matching event from reentrant external work never proves producer activation history");
+        }
+        Check(f.scopes.Clear(f.data), "reentrant receipt control cleanup");
     }
 }
 
@@ -1938,6 +2256,7 @@ int main(int argc, char** argv) {
         ResultScopeLifecycle();
         ScopeBindingAndUnscopedRecovery();
         ScopeAliasOwnership();
+        ScopeAliasReceipts();
         return failures ? 1 : 0;
     }
     if (argc == 2 && std::strcmp(argv[1], "--owner-scope-limit") == 0) {

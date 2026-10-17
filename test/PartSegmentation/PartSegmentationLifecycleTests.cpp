@@ -1083,12 +1083,12 @@ public:
     std::size_t retirementInUse = 0;
     double publicationMs = 0;
     double retirementMs = 0;
-    DataCommitResult SetDataCommit(DataTransaction transaction) override {
+    DataCommitResult SetDataCommit(DataTransaction transaction, DataCommitReceipt* receipt = nullptr) override {
         if (rejectsPublication && !transaction.outputs.empty()) return {};
         const bool isRetirement = !transaction.retireScopes.empty();
         const bool isPublication = !transaction.outputs.empty();
         const auto began = std::chrono::steady_clock::now();
-        auto result = TestDataPort::SetDataCommit(std::move(transaction));
+        auto result = TestDataPort::SetDataCommit(std::move(transaction), receipt);
         const auto elapsed = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - began).count();
         if (isPublication) { ++publicationCalls; publicationMs += elapsed; }
