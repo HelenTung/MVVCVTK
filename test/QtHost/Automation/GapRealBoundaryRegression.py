@@ -114,6 +114,9 @@ def make_case(raw, folder):
          checkSceneConsistency=True, businessCapture=(folder / 'loaded').as_posix(), stageLabel='real64 loaded four views')
     step('View', 'Set', dict(viewId='primary-3d', mode='CompositeVolume'))
     gap('initial-gap', 4, 7, 0, 0)
+    query = step('Gap', 'Defects', dict(pageOffset='0'), status='Observed',
+                 reportPreview=(folder / 'previews' / 'initial-gap-defects').as_posix())
+    query.pop('deferReportCheck')
     labels('initialLabels')
     center = [ORIGIN[a] + [49, 21, 34][a] * SPACING for a in range(3)]
     excluded = [center[0] + SPACING, center[1], center[2]]
@@ -132,7 +135,9 @@ def make_case(raw, folder):
     # 此真实范围还有一个15体素裁切边缘分量；不能把目标单体素孔当成唯一可见对象。
     gap('boundary-gap', 0, 0, 2, 16)
     labels('boundaryLabels')
-    step('Gap', 'Defects', dict(pageOffset='0'), status='Observed')
+    query = step('Gap', 'Defects', dict(pageOffset='0'), status='Observed',
+                 reportPreview=(folder / 'previews' / 'boundary-gap-defects').as_posix())
+    query.pop('deferReportCheck')
     step('Gap', 'Exit', status='Exited')
     return dict(checkReports=True, checkIdle=True, shutdownTimeoutMs=0, windowSize=[1440, 1000], steps=steps)
 

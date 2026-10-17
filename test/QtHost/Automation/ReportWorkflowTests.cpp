@@ -53,6 +53,156 @@ bool SameRow(const QStringList& a,const QStringList& b){return a.size()==b.size(
 bool SameIndices(const ReportRows& rows,std::initializer_list<int> expected){return std::size_t(rows.size())==expected.size() && std::equal(rows.begin(),rows.end(),expected.begin());}
 ReportDocument Read(QByteArray bytes){QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"测试报告");}
 template<class F> void Reject(F action,const char* message){bool rejected=false;try{action();}catch(const std::exception&){rejected=true;}Require(rejected,message);}
+std::array<std::uint64_t,4> GetGapReportCounts(const QJsonObject& record,const QJsonValue& history,const ReportDocument& document)
+{
+    const auto require=[](bool value,const QString& message){Require(value,message.toUtf8().constData());};
+    const auto readRef=[](const QJsonValue& value,const QString& field) {
+        try{return GetRef(value);}
+        catch(const std::invalid_argument& error){throw std::runtime_error(("Gap report "+field+": "+QString::fromUtf8(error.what())).toStdString());}
+    };
+    const auto readId=[](const QJsonValue& value,const QString& field) {
+        try{return GetId(value);}
+        catch(const std::invalid_argument& error){throw std::runtime_error(("Gap report "+field+": "+QString::fromUtf8(error.what())).toStdString());}
+    };
+    Require(document.module=="Gap" && document.id.startsWith("gap:"),"Gap report requires an exact native gap document");
+    const auto table=readRef(document.id.mid(4),"document.table");
+    const auto resultSet=readRef(document.result,"document.resultSet"),source=readRef(document.source,"document.source");
+    require(readRef(document.identityResult,"document.identityResult")==resultSet,"Gap report document resultSet and reader identity disagree");
+    const auto sameRef=[](const QJsonValue& value,const DataRevisionRef& expected) {
+        try{return GetRef(value)==expected;}catch(const std::invalid_argument&){return false;}
+    };
+    require(std::any_of(document.relatedResults.cbegin(),document.relatedResults.cend(),[&](const auto& value){return sameRef(value,table);}),
+        "Gap report document does not retain its exact native table");
+    Require(record["module"]=="Gap" && record["result"].isObject(),"Gap report action has no result object");
+    Require(history.isArray(),"Gap report completion history is unavailable or is not an array");
+    const auto action=record["action"].toString();const bool direct=action=="Start" || action=="Evaluate";
+    const auto result=record["result"].toObject();
+    if(!direct) {
+        require(readRef(result["resultSet"],"action.resultSet")==resultSet,"Gap report action and frozen document resultSet disagree");
+        if(action=="Defects" || result.contains("table"))require(readRef(result["table"],"action.table")==table,"Gap report action and frozen document table disagree");
+        if(result.contains("source"))require(readRef(result["source"],"action.source")==source,"Gap report action and frozen document source disagree");
+    }
+    // 查询没有 core 统计；只接受同一冻结三元组的成功完成事实，不能借当前 UI 或目录重算期望。
+    auto operations=history.toArray();if(direct)operations.prepend(record);
+    QJsonObject matchedOperations;std::array<std::uint64_t,4> counts{};bool found=false;
+    const std::array<const char*,4> keys{"voidCount","voidVoxels","boundaryUncertainCount","boundaryUncertainVoxels"};
+    const auto completion=[](const QJsonObject& value) {
+        return QJsonObject{{"module",value["module"]},{"action",value["action"]},{"status",value["status"]},
+            {"isTerminal",value["isTerminal"]},{"completeCount",value["completeCount"]},{"result",value["result"]}};
+    };
+    for(int index=0;index<operations.size();++index) {
+        const auto candidate=operations[index].toObject();const auto candidateAction=candidate["action"].toString();
+        const bool successful=candidate["status"]=="Succeeded" || candidate["status"]=="SucceededWithDisplayFailure";
+        const bool original=direct && index==0;
+        if(!original && (candidate["module"]!="Gap" || (candidateAction!="Start" && candidateAction!="Evaluate") || !successful))continue;
+        const auto core=candidate["result"].toObject();
+        if(!original && !sameRef(core["voidTable"],table) && !sameRef(core["resultSet"],resultSet))continue;
+        const auto operation=candidate["operationId"].toString();
+        require(successful && candidate["isTerminal"].isBool() && candidate["isTerminal"].toBool()
+            && candidate["completeCount"].isDouble() && candidate["completeCount"].toDouble()==1.,
+            "Gap report producer "+operation+" must be a successful terminal completion exactly once");
+        require(readRef(core["voidTable"],"producer "+operation+".voidTable")==table
+            && readRef(core["resultSet"],"producer "+operation+".resultSet")==resultSet
+            && readRef(core["source"],"producer "+operation+".source")==source,
+            "Gap report producer "+operation+" conflicts with the frozen table/resultSet/source");
+        const auto id=readId(candidate["operationId"],"producer.operationId");require(id!=0,"Gap report producer operationId must be nonzero");
+        std::array<std::uint64_t,4> parsed;
+        for(std::size_t i=0;i<keys.size();++i)parsed[i]=readId(core.value(keys[i]),"producer "+operation+"."+keys[i]);
+        require(!found || parsed==counts,"Gap report has conflicting statistics for the same table/resultSet/source at operation "+operation);
+        counts=parsed;found=true;
+        const auto key=QString::number(id);const auto value=completion(candidate);
+        require(!matchedOperations.contains(key) || matchedOperations.value(key)==QJsonValue(value),"Gap report has contradictory snapshots for producer operation "+key);
+        matchedOperations.insert(key,value);
+    }
+    // 同一 operation 的另一份矛盾快照即使声称不同结果，也不能作为“无关新结果”漏掉。
+    for(const auto value:operations) {
+        const auto candidate=value.toObject();QString key;
+        try{key=QString::number(GetId(candidate["operationId"]));}catch(const std::invalid_argument&){continue;}
+        if(matchedOperations.contains(key))require(matchedOperations.value(key)==QJsonValue(completion(candidate)),
+            "Gap report has contradictory snapshots for producer operation "+key);
+    }
+    require(found,"Gap report has no successful Start/Evaluate producer for "+document.id+" / "+document.result+" / "+document.source);
+    return counts;
+}
+void CheckGapReportCounts()
+{
+    const QString source="00000000000000000000000000000001:1",otherSource="00000000000000000000000000000006:1";
+    const QString tableA="00000000000000000000000000000002:1",resultA="00000000000000000000000000000003:1";
+    const QString tableB="00000000000000000000000000000004:1",resultB="00000000000000000000000000000005:1";
+    const QJsonObject coreA{{"voidTable",tableA},{"resultSet",resultA},{"source",source},
+        {"voidCount","2"},{"voidVoxels","16"},{"boundaryUncertainCount","1"},{"boundaryUncertainVoxels","27"}};
+    auto coreB=coreA;coreB["voidTable"]=tableB;coreB["resultSet"]=resultB;coreB["voidCount"]="0";coreB["voidVoxels"]="0";
+    const QJsonObject a{{"module","Gap"},{"action","Start"},{"operationId","1"},{"status","Succeeded"},
+        {"isTerminal",true},{"completeCount",1},{"result",coreA}};
+    auto b=a;b["operationId"]="2";b["action"]="Evaluate";b["result"]=coreB;
+    const QJsonObject query{{"module","Gap"},{"action","Defects"},{"operationId","3"},{"status","Observed"},
+        {"isTerminal",true},{"completeCount",1},{"result",QJsonObject{{"table",tableA},{"resultSet",resultA}}}};
+    ReportDocument doc;doc.module="Gap";doc.id="gap:"+tableA;doc.result=doc.identityResult=resultA;doc.source=source;doc.relatedResults=QStringList{tableA};
+    const std::array<std::uint64_t,4> expectedA{2,16,1,27},expectedB{0,0,1,27};
+    Require(GetGapReportCounts(query,QJsonArray{a,b},doc)==expectedA && GetGapReportCounts(query,QJsonArray{b,a},doc)==expectedA,
+        "old Gap report statistics are independent of the current result and history order");
+    auto newQuery=query;newQuery["result"]=QJsonObject{{"table",tableB},{"resultSet",resultB}};
+    auto newDoc=doc;newDoc.id="gap:"+tableB;newDoc.result=newDoc.identityResult=resultB;newDoc.relatedResults=QStringList{tableB};
+    Require(GetGapReportCounts(newQuery,QJsonArray{a,b},newDoc)==expectedB,"new Gap report retains its distinct producer statistics");
+    Require(GetGapReportCounts(b,QJsonArray{a,b},newDoc)==expectedB,"direct Evaluate keeps its own successful statistics");
+    auto repeated=a;repeated["operationId"]="4";repeated["action"]="Evaluate";repeated["status"]="SucceededWithDisplayFailure";
+    Require(GetGapReportCounts(a,QJsonArray{a,a,repeated,b},doc)==expectedA,"identical direct/history copies and consistent producers may agree without double counting");
+    auto maximum=coreA;
+    const QStringList fields{"voidCount","voidVoxels","boundaryUncertainCount","boundaryUncertainVoxels"};
+    for(const auto& field:fields)maximum[field]="18446744073709551615";
+    auto maximumProducer=a;maximumProducer["result"]=maximum;
+    const auto max=std::numeric_limits<std::uint64_t>::max();
+    Require(GetGapReportCounts(query,QJsonArray{maximumProducer},doc)==std::array<std::uint64_t,4>{max,max,max,max},"Gap counts preserve the maximum uint64 decimal string");
+    Reject([&]{GetGapReportCounts(query,QJsonValue(),doc);},"missing Gap history must reject");
+    Reject([&]{GetGapReportCounts(query,QJsonArray{},doc);},"missing exact Gap producer must reject");
+    Reject([&]{GetGapReportCounts(query,QJsonArray{b},doc);},"unrelated new Gap producer must not replace old history");
+    auto badQuery=query;badQuery["result"]=QJsonObject{{"table",tableB},{"resultSet",resultA}};
+    Reject([&]{GetGapReportCounts(badQuery,QJsonArray{a},doc);},"Gap query table mismatch must reject");
+    badQuery["result"]=QJsonObject{{"table",tableA},{"resultSet",resultB}};
+    Reject([&]{GetGapReportCounts(badQuery,QJsonArray{a},doc);},"Gap query resultSet mismatch must reject");
+    badQuery["result"]=QJsonObject{{"resultSet",resultA}};
+    Reject([&]{GetGapReportCounts(badQuery,QJsonArray{a},doc);},"Gap query missing table must reject");
+    badQuery["result"]=QJsonObject{{"table",tableA}};
+    Reject([&]{GetGapReportCounts(badQuery,QJsonArray{a},doc);},"Gap query missing resultSet must reject");
+    auto badDoc=doc;badDoc.source.clear();
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a},badDoc);},"Gap document missing source must reject");
+    badDoc=doc;badDoc.id="gap:not-a-ref";
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a},badDoc);},"Gap document malformed table reference must reject");
+    badDoc=doc;badDoc.identityResult=resultB;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a},badDoc);},"Gap document reader identity mismatch must reject");
+    auto bad=a;bad["status"]="Failed";
+    Reject([&]{GetGapReportCounts(query,QJsonArray{bad},doc);},"failed Gap operation is not a statistics producer");
+    bad["operationId"]="5";
+    Require(GetGapReportCounts(query,QJsonArray{bad,a},doc)==expectedA,"unrelated failed attempts do not replace a successful Gap producer");
+    bad=a;bad["isTerminal"]=false;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"nonterminal matching Gap producer must reject");
+    bad=a;bad["completeCount"]=2;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"duplicate Gap completion must reject even beside a valid copy");
+    auto conflict=coreA;conflict["source"]=otherSource;bad=a;bad["result"]=conflict;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"same Gap table/resultSet cannot claim another source");
+    conflict=coreA;conflict.remove("source");bad["result"]=conflict;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"matching Gap producer missing source must reject");
+    conflict=coreA;conflict["resultSet"]=resultB;bad["result"]=conflict;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"same Gap table cannot claim another resultSet");
+    conflict=coreA;conflict["voidTable"]=tableB;bad["result"]=conflict;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"same Gap resultSet cannot claim another table");
+    bad=b;bad["operationId"]="1";
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"same operation with another result is contradictory rather than unrelated");
+    conflict=coreA;conflict["voidCount"]="3";bad=repeated;bad["result"]=conflict;
+    Reject([&]{GetGapReportCounts(query,QJsonArray{a,bad},doc);},"conflicting counts for the same Gap identity must reject");
+    const std::array<QJsonValue,6> invalidValues{QJsonValue(QJsonValue::Undefined),QJsonValue(QJsonValue::Null),QJsonValue(2),QJsonValue(true),
+        QJsonValue(QString("not-a-u64")),QJsonValue(QString("18446744073709551616"))};
+    for(const auto& field:fields)for(const auto invalid:invalidValues) {
+        auto malformed=coreA;if(invalid.isUndefined())malformed.remove(field);else malformed[field]=invalid;
+        auto producer=repeated;producer["result"]=malformed;
+        Reject([&]{GetGapReportCounts(query,QJsonArray{producer},doc);},"malformed Gap statistics must reject without relying on a conflicting good copy");
+        Reject([&]{GetGapReportCounts(query,QJsonArray{a,producer},doc);},"every malformed Gap statistics field must reject even beside a valid producer");
+        producer["operationId"]="1";producer["action"]="Start";
+        Reject([&]{GetGapReportCounts(producer,QJsonArray{a},doc);},"direct Gap producer must not borrow history to hide a malformed statistics field");
+    }
+    bad=a;bad["result"]=coreB;
+    Reject([&]{GetGapReportCounts(bad,QJsonArray{a},doc);},"direct Gap producer must not borrow history to hide an identity mismatch");
+}
 ReportComparisonOptions Options(){ReportComparisonOptions o;o.baselineColumn=o.currentColumn=1;o.baselineIdentity=o.currentIdentity=0;o.baselineQuantity=o.currentQuantity="厚度";o.baselineUnit=o.currentUnit="mm";o.match=ReportMatch::Identity;o.identitiesConfirmed=true;return o;}
 void WaitRows(ResultReport& view,int timeoutMs=0) {
     QElapsedTimer elapsed;elapsed.start();
@@ -270,6 +420,7 @@ void CheckExternalReportRuns() {
 }
 void CheckReportWorkflow()
 {
+    CheckGapReportCounts();
     Require(GetReportCount(QJsonValue(4294967419.0))==4294967419ULL&&GetReportCount(QJsonValue(QString("18446744073709551615")))==UINT64_MAX,"native report counts preserve wide numeric and uint64 string forms");
     Reject([]{GetReportCount(QJsonValue(9007199254740992.0));},"unsafe JSON numeric count must not be rounded into an ID");
     std::cout<<"Reports: CSV parsing"<<std::endl;
@@ -408,7 +559,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     const auto module=record["module"].toString(),action=record["action"].toString();
     const auto summary=record["result"].toObject();
     const auto hasPublishedResult=[&](const char* key){const auto ref=summary[key].toString();return !ref.isEmpty() && !ref.endsWith(":0");};
-    const bool requiresReport=(module=="Wall" && (action=="Start" || action=="Result")) || (module=="Gap" && (action=="Start" || action=="Evaluate"))
+    const bool requiresReport=(module=="Wall" && (action=="Start" || action=="Result")) || (module=="Gap" && (action=="Start" || action=="Evaluate" || action=="Defects"))
         || (module=="Surface" && (action=="GlobalAutomatic" || action=="Determine")) || (module=="Artifact" && action=="Commit")
         || (module=="Alignment" && QStringList{"InspectGeometry","InspectSection","InspectPair","EvaluateSurface","EvaluateVoxelVolume"}.contains(action))
         || (module=="Alignment" && ((action=="DeviationResult" && hasPublishedResult("deviation"))
@@ -420,6 +571,8 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     if(!successful)return; // 导出、候选等终态不等于新增一份已发布业务报告。
     // 选择与编号分页仅返回局部元数据；正式快照读取才作为表面报告预览入口。
     if(module=="Surface" && !requiresReport && (!hasPublishedResult("generation") || !summary.contains("canonicalParameters")))return;
+    // 先冻结完成记录值；后续报告事件可以重入，但不能改变本次统计来源。
+    const auto gapHistory=module=="Gap"?window.GetRecords().GetRecords().value("records"):QJsonValue();
     QCoreApplication::processEvents();
     const auto input=window.GetSession()->GetImageDescriptor();const auto graph=window.GetWorkflow().getPublishedGraph();
     auto* view=window.findChild<ResultReport*>("resultReport");Require(view!=nullptr,"shared report window exists");
@@ -519,6 +672,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         }
         if(doc.module=="Wall" && summary.contains("sampleCount"))Require(static_cast<std::uint64_t>(doc.table->GetCount())==GetId(summary["sampleCount"]),"wall report count equals independent native statistics");
         if(doc.module=="Gap") {
+            const auto expected=GetGapReportCounts(record,gapHistory,doc);
             const auto tableRef=GetRef(doc.id.mid(4));
             auto page=window.GetWorkflow().readRecordPage(tableRef,0,256,std::nullopt);
             const auto total=GetId(page["total"]);
@@ -565,8 +719,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
                 }
                 if(offset<total)page=window.GetWorkflow().readRecordPage(tableRef,offset,256,std::nullopt);
             }
-            Require(formal==GetId(summary["voidCount"]) && boundary==GetId(summary["boundaryUncertainCount"])
-                && formalVoxels==GetId(summary["voidVoxels"]) && boundaryVoxels==GetId(summary["boundaryUncertainVoxels"]),
+            Require(formal==expected[0] && boundary==expected[2] && formalVoxels==expected[1] && boundaryVoxels==expected[3],
                 "gap formal and boundary statistics match the complete independent native catalog");
             std::cout<<"PASS: Gap native catalog rows="<<total<<" formal="<<formal<<" boundary="<<boundary
                 <<" formalVoxels="<<formalVoxels<<" boundaryVoxels="<<boundaryVoxels<<std::endl;
@@ -890,7 +1043,9 @@ void CheckGapBoundaryReports(const QString& outputDirectory,const QString& realI
         std::cout<<"GAP_REPORT_HISTOGRAM scenario="<<label.toStdString()<<" data="<<QJsonDocument(histogram).toJson(QJsonDocument::Compact).constData()<<std::endl;
         expect(histogram["status"]==(formal?"Ready":"Empty") && samples==formal,"actual histogram excludes uncertain objects and does not invent zero samples");
         if(mixed)expect(histogram["edges"].toArray().last().toDouble()<27.,"formal histogram range excludes the 27 mm3 boundary object");
-        const auto listed=send("Gap","Defects",{},"Observed")["result"].toObject()["page"].toObject()["rows"].toArray();
+        const auto listedRecord=send("Gap","Defects",{},"Observed");
+        CheckBusinessReport(window,listedRecord,true,{},60000);
+        const auto listed=listedRecord["result"].toObject()["page"].toObject()["rows"].toArray();
         const auto displayedIds=statistics->property("defectIds").toJsonArray(),displayedRows=statistics->property("defectRows").toJsonArray();
         expect(listed.size()==formal && displayedIds==formalIds && displayedRows==formalRows,"formal list preserves real object IDs and original record row identities after filtering");
         auto* tree=statistics->findChild<QTreeWidget*>();expect(tree && tree->topLevelItemCount()==formal,"actual list widget contains only formal objects");
@@ -911,6 +1066,30 @@ void CheckGapBoundaryReports(const QString& outputDirectory,const QString& realI
         }
         std::cout<<"GAP_REPORT_AUDIT scenario="<<label.toStdString()<<" formal_volume="<<core["voidVolumeMM3"].toDouble()
             <<" visible="<<visible<<" listed="<<listed.size()<<" histogram_samples="<<samples<<" csv="<<QDir(folder).filePath("gap-report.csv").toStdString()<<std::endl;
+        if(mixed) {
+            // A 的两份8 mm3确定孔被9 mm3筛选排除；27 mm3边界对象仍可见，不能据新B改写旧A摘要。
+            Require(GetId(core["voidCount"])==2 && GetId(core["voidVoxels"])==16
+                && GetId(core["boundaryUncertainCount"])==1 && GetId(core["boundaryUncertainVoxels"])==27,
+                "unfiltered A has independently expected formal 2/16 and boundary 1/27");
+            auto parameters=record["parameters"].toObject();parameters["filter"]=true;parameters["minVolumeMM3"]=9.;
+            const auto newer=send("Gap","Start",parameters,"Succeeded"),newCore=newer["result"].toObject();
+            Require(GetId(newCore["voidCount"])==0 && GetId(newCore["voidVoxels"])==0
+                && GetId(newCore["boundaryUncertainCount"])==1 && GetId(newCore["boundaryUncertainVoxels"])==27,
+                "filtered B has independently expected formal 0/0 and boundary 1/27");
+            Require(newCore["source"]==core["source"] && newCore["voidTable"]!=core["voidTable"] && newCore["resultSet"]!=core["resultSet"],
+                "new Gap computation publishes distinct table/resultSet on the same source");
+            // 后续页沿用A的既有列表读者；在此之前不能用B首页覆盖该固定修订。
+            const auto historical=send("Gap","Defects",{{"pageOffset","1"}},"Observed");
+            const auto oldPage=historical["result"].toObject();
+            Require(oldPage["table"]==core["voidTable"] && oldPage["resultSet"]==core["resultSet"],"historical Defects page keeps A table/resultSet");
+            panel->Observe();const auto current=panel->GetObservedState();
+            Require(current["resultSet"]==newCore["resultSet"] && current["voidTable"]==newCore["voidTable"]
+                && GetId(current["voidCount"])==0 && GetId(current["voidVoxels"])==0,"historical query does not replace current B");
+            CheckBusinessReport(window,historical,true,{},60000);
+            const auto refreshed=send("Gap","Defects",{{"pageOffset","0"}},"Observed")["result"].toObject();
+            Require(refreshed["table"]==newCore["voidTable"] && refreshed["resultSet"]==newCore["resultSet"],"explicit first page returns to B before its direct report check");
+            CheckBusinessReport(window,newer,true,{},60000);
+        }
         send("Gap","Exit",{},"Exited");wait([&]{return window.StopSession();},"Gap report fixture did not stop cleanly");window.close();
     }
     if(failures)throw std::runtime_error("Gap boundary report assertions failed: "+std::to_string(failures));
