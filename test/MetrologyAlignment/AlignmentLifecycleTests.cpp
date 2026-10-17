@@ -43,13 +43,14 @@ class FaultDataPort final : public TestDataPort {
     std::size_t injectedCommits = 0;
     DataCommitStatus injectedStatus = DataCommitStatus::Rejected;
     bool injectedActivation = false;
-    bool rejectsRetirement = false, throwsBeforeCommit = false;
+    bool rejectsRetirement = false, throwsBeforeCommit = false, omitsGraph = false;
     enum class RecoveryQuery { None, Lifetime, Graph, Binding };
     RecoveryQuery recoveryQuery = RecoveryQuery::None;
     bool recoveryArmed = false;
     DataEntityId attemptedScope, committedScope;
     std::size_t unknownRetirements = 0;
     DataGraphSnapshot GetDataGraph() const override {
+        if (omitsGraph) return {};
         if (recoveryArmed && recoveryQuery == RecoveryQuery::Graph)
             throw std::runtime_error("recovery graph failure");
         return TestDataPort::GetDataGraph();
@@ -738,7 +739,6 @@ void ResultScopeLifecycle() {
     }
 }
 
-// 相同临时输入的公开 Start 请求没有次数限制；1025 是被审计门槛的首个越界请求。
 void ScopeBindingAndUnscopedRecovery() {
     for (const auto query : {FaultDataPort::RecoveryQuery::None, FaultDataPort::RecoveryQuery::Graph,
                              FaultDataPort::RecoveryQuery::Binding}) {
@@ -853,6 +853,133 @@ void ScopeBindingAndUnscopedRecovery() {
     }
 }
 
+std::string GetScopeAliasRef(const std::optional<DataRevisionRef>& ref) {
+    if (!ref) return "null";
+    std::string text;
+    constexpr char digits[] = "0123456789abcdef";
+    for (const auto byte : ref->entityId.bytes) { text += digits[byte >> 4]; text += digits[byte & 15]; }
+    return text + ":" + std::to_string(ref->generation);
+}
+
+// 真实端口提交与绑定时钟是独立预期；不将通用 helper 夹具冒称实际 Feature 入口。
+void ScopeAliasOwnership() {
+    {
+        ScopeFixture f; const auto owned = f.Publish("scope.graph-retry");
+        f.data.omitsGraph = true;
+        f.scopes.Collect(f.data);
+        f.data.omitsGraph = false;
+        const auto binding = f.data.GetDataBinding(f.data.GetDataGraph(), "scope.graph-retry");
+        Check(binding && binding->revision == 1 && binding->target == owned.ref,
+              "unavailable graph fixture leaves the real producer binding unchanged");
+        const bool cleared = f.scopes.Clear(f.data);
+        std::cout << "SCOPE_ALIAS_EMPTY_GRAPH clear=" << cleared << " expected_clear=1 ledger="
+                  << f.scopes.GetScopeCount() << " expected_ledger=0" << std::endl;
+        Check(cleared && f.scopes.GetScopeCount() == 0
+              && f.data.GetDataLifetime(owned.scope).status == DataLifetimeStatus::Released,
+              "unavailable graph preserves known ownership evidence for a later successful Clear");
+    }
+    for (const auto query : {FaultDataPort::RecoveryQuery::None, FaultDataPort::RecoveryQuery::Graph,
+                             FaultDataPort::RecoveryQuery::Binding}) {
+        ScopeFixture f; const auto owned = f.Publish("");
+        const std::string alias = "scope.external.alias";
+        Check(f.data.SetDataCommit(f.Binding(alias, owned.ref)).status == DataCommitStatus::Succeeded,
+              "external consumer creates its own alias through the real port");
+        const auto before = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        const auto graphBefore = f.data.GetDataGraph().commitId;
+        const auto callsBefore = f.data.commitCalls;
+        auto transaction = f.Binding(alias, owned.ref);
+        f.data.throwsBeforeCommit = true; f.data.recoveryQuery = query;
+        bool original = false; std::string message;
+        try { (void)f.scopes.Commit(f.data, std::move(transaction)); }
+        catch (const std::bad_alloc& error) { original = true; message = error.what(); }
+        catch (const std::exception& error) { message = error.what(); }
+        f.data.throwsBeforeCommit = false;
+        const auto graph = f.data.TestDataPort::GetDataGraph();
+        const auto unchanged = f.data.TestDataPort::GetDataBinding(graph, alias);
+        Check(original && f.data.recoveryArmed && f.data.commitCalls == callsBefore + 1
+              && graph.commitId == graphBefore && before && unchanged && before->revision == 1
+              && unchanged->revision == before->revision && unchanged->target == before->target,
+              "alias fixture preserves the original precommit bad_alloc and proves no underlying commit");
+        f.data.recoveryQuery = FaultDataPort::RecoveryQuery::None;
+        const bool cleared = f.scopes.Clear(f.data);
+        const auto after = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        const bool kept = after && after->revision == 1 && after->target == owned.ref;
+        std::cout << "SCOPE_ALIAS_CLEAR query=" << int(query) << " original_bad_alloc=" << original
+                  << " what=[" << message << "] before_revision=" << (before ? before->revision : 0)
+                  << " after_revision=" << (after ? after->revision : 0) << " expected_revision=1"
+                  << " after_target=" << GetScopeAliasRef(after ? after->target : std::optional<DataRevisionRef>{})
+                  << " expected_target=" << GetScopeAliasRef(owned.ref)
+                  << " clear=" << cleared << " expected_clear=0 kept=" << kept << " expected_kept=1" << std::endl;
+        Check(kept && !cleared, "failed producer binding cannot acquire or clear an external alias");
+        if (after && after->target) Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+                                         "external alias owner performs its own unbind");
+        f.scopes.Collect(f.data);
+        Check(f.scopes.GetScopeCount() == 1 && f.data.GetDataLifetime(owned.scope).status == DataLifetimeStatus::Published,
+              "failed alias adoption cannot create activation history for a never-activated owner");
+        Check(f.scopes.Clear(f.data), "owner can clear after the real external alias is released");
+    }
+    for (const bool fault : {false, true}) {
+        ScopeFixture f; const auto owned = f.Publish("");
+        const std::string alias = "scope.external.collect";
+        Check(f.data.SetDataCommit(f.Binding(alias, owned.ref)).status == DataCommitStatus::Succeeded,
+              "collect control externally binds a never-activated result");
+        bool original = false; std::string message;
+        if (fault) {
+            f.data.throwsBeforeCommit = true;
+            try { (void)f.scopes.Commit(f.data, f.Binding(alias, owned.ref)); }
+            catch (const std::bad_alloc& error) { original = true; message = error.what(); }
+            f.data.throwsBeforeCommit = false;
+            Check(original, "collect control preserves the precommit exception");
+        }
+        Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+              "collect control externally unbinds without producer Clear");
+        f.scopes.Collect(f.data);
+        const auto status = f.data.GetDataLifetime(owned.scope).status;
+        std::cout << "SCOPE_ALIAS_COLLECT fault=" << fault << " original_bad_alloc=" << original
+                  << " what=[" << message << "] status=" << int(status) << " expected_status=" << int(DataLifetimeStatus::Published)
+                  << " ledger=" << f.scopes.GetScopeCount() << " expected_ledger=1" << std::endl;
+        Check(status == DataLifetimeStatus::Published && f.scopes.GetScopeCount() == 1,
+              "foreign binding history does not supersede the never-activated owner after a failed attempt");
+        Check(f.scopes.Clear(f.data), "collect control owner cleanup");
+    }
+    enum class Control { Normal, After, OwnedBefore, ExternalRewrite };
+    for (const auto mode : {Control::Normal, Control::After, Control::OwnedBefore, Control::ExternalRewrite}) {
+        ScopeFixture f; const std::string alias = "scope.ownership.control";
+        const bool wasOwned = mode == Control::OwnedBefore || mode == Control::ExternalRewrite;
+        const auto owned = f.Publish(wasOwned ? alias : "");
+        if (!wasOwned || mode == Control::ExternalRewrite)
+            Check(f.data.SetDataCommit(f.Binding(alias, owned.ref)).status == DataCommitStatus::Succeeded,
+                  "ownership control has a real external alias write");
+        if (mode != Control::ExternalRewrite) {
+            auto transaction = f.Binding(alias, owned.ref);
+            f.data.throwsBeforeCommit = mode == Control::OwnedBefore;
+            f.data.throwsAfterCommit = mode == Control::After; f.data.throwsAfterCommitOnce = true;
+            bool original = false; DataCommitResult result;
+            try { result = f.scopes.Commit(f.data, std::move(transaction)); }
+            catch (const std::bad_alloc&) { original = mode == Control::OwnedBefore; }
+            catch (const std::runtime_error& error) { original = mode == Control::After && std::strcmp(error.what(), "after commit") == 0; }
+            f.data.throwsBeforeCommit = false; f.data.throwsAfterCommit = false;
+            Check(mode == Control::Normal ? result.status == DataCommitStatus::Succeeded : original,
+                  "ownership control observes true success or the original phase-specific exception");
+        }
+        const bool cleared = f.scopes.Clear(f.data);
+        const auto after = f.data.GetDataBinding(f.data.GetDataGraph(), alias);
+        const bool shouldClear = mode != Control::ExternalRewrite;
+        std::cout << "SCOPE_ALIAS_CONTROL mode=" << int(mode) << " clear=" << cleared << " expected_clear=" << shouldClear
+                  << " revision=" << (after ? after->revision : 0)
+                  << " target=" << GetScopeAliasRef(after ? after->target : std::optional<DataRevisionRef>{}) << std::endl;
+        Check(cleared == shouldClear && after && (shouldClear ? !after->target : after->target == owned.ref),
+              "real producer writes clean up once, prior ownership survives failure, and later external writes remain external");
+        if (!shouldClear) {
+            Check(f.data.SetDataCommit(f.Binding(alias, {})).status == DataCommitStatus::Succeeded,
+                  "later external owner releases its binding");
+            f.scopes.Collect(f.data);
+            Check(f.scopes.Clear(f.data), "later external rewrite cleanup");
+        }
+    }
+}
+
+// 相同临时输入的公开 Start 请求没有次数限制；1025 是被审计门槛的首个越界请求。
 void OwnerScopedRepeatedAlignment() {
     Fixture f({}, {}, false, 0, true);
     const auto source = f.data->GetData(f.data->GetDataGraph(), f.input.source);
@@ -1810,6 +1937,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--result-scope-lifecycle") == 0) {
         ResultScopeLifecycle();
         ScopeBindingAndUnscopedRecovery();
+        ScopeAliasOwnership();
         return failures ? 1 : 0;
     }
     if (argc == 2 && std::strcmp(argv[1], "--owner-scope-limit") == 0) {
