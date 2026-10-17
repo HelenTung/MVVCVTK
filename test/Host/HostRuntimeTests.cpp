@@ -166,6 +166,135 @@ bool GetFailedFrameWakeValid()
     return f.frames.GetSceneStates()[0].sceneEpoch == 2
         && !f.views[0].GetRenderNeeded() && !f.views[1].GetRenderNeeded();
 }
+bool GetInputTransitionBarrierValid(const bool changesData)
+{
+    const auto check = [](bool condition, const char* reason) {
+        if (!condition) std::cerr << "Input transition barrier: " << reason << '\n';
+        return condition;
+    };
+    auto data = std::make_shared<RawVolumeDataManager>();
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "input-transition-barrier";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://input-transition-barrier";
+    const auto layout = VolumeLayout::Create({2,2,2}, {1.0f,1.0f,1.0f}, {},
+        std::array<double,9>{1,0,0,0,1,0,0,0,1}, metadata);
+    const auto buffer = layout ? VolumeBuffer::Create({0,1,2,3,4,5,6,7}, *layout)
+        : std::optional<VolumeBuffer>{};
+    VtkImageGridSnapshot original;
+    if (!buffer || !data->SetFromBuffer(*buffer)
+        || !data->SetLoadCommit(data->GetLoadStage(), original) || !original) return false;
+
+    FrameFixture f;
+    f.frames.SetDriveMode(HostDriveMode::HostDriven);
+    f.frames.SetDataRead(data);
+    const auto setInput = [&](const int index, const DataRevisionRef& input,
+                              const DataBindingRevision binding) {
+        auto view = std::dynamic_pointer_cast<ViewProbe>(f.views[index].app.view);
+        view->state.dataRevision = input;
+        view->state.bindingRevision = binding;
+    };
+    for (int index = 0; index < 2; ++index) {
+        f.views[index].config.synchronizationGroup = "primary";
+        setInput(index, original->data->self, original->binding->revision);
+    }
+    std::vector<HostFrameIntent> appliedIntents;
+    HostFrameCoordinator::Callbacks callbacks;
+    callbacks.collectUpdates = [&] { return f.frames.CollectFrameUpdates(); };
+    callbacks.sendFeatureTicks = [] {};
+    callbacks.setIntents = [&](const auto& intents) {
+        appliedIntents = intents;
+        return f.frames.SetFrameIntents(intents);
+    };
+    callbacks.applyFeatureUpdates = [&] { return f.frames.ApplyFrameUpdates(); };
+    callbacks.buildStage = [&](auto epoch) { return f.frames.BuildFrameStage(epoch); };
+    callbacks.setCommit = [&](auto epoch) { f.frames.SetFrameCommit(epoch); };
+    callbacks.sendRender = [&](auto epoch) { return f.frames.SendFrameRender(epoch); };
+    callbacks.getRenderPending = [&] { return f.frames.GetFrameRenderPending(); };
+    callbacks.sendCompletions = [] {};
+    callbacks.clearStage = [&] { f.frames.ClearFrameStage(); };
+    HostFrameCoordinator coordinator(17, std::move(callbacks));
+    if (coordinator.SendUpdates() != HostFrameCoordinator::FlushStatus::Completed
+        || coordinator.GetCommittedEpoch() != 1) return false;
+    const auto previous = f.frames.GetSceneStates();
+    if (previous.size() != 2 || !previous[0].presentation || !previous[1].presentation) return false;
+
+    // 图绑定已经成功，显示候选完成顺序仍可不同；场景必须保留完整旧帧。
+    const DataRevisionRef target = changesData
+        ? DataRevisionRef{data->CreateDataEntityId(), 1} : original->data->self;
+    DataTransaction transaction;
+    if (changesData) transaction.outputs.push_back({target.entityId, 0,
+        original->data->type, {}, original->data->payload, {}});
+    transaction.bindings.push_back({std::string(primaryVolumeBinding),
+        original->binding->revision, true, original->data->self, target});
+    if (data->SetDataCommit(std::move(transaction)).status != DataCommitStatus::Succeeded) return false;
+    const auto primary = data->GetPrimaryImage();
+    if (!primary || primary->data->self != target) return false;
+    const auto binding = primary->binding->revision;
+    setInput(1, target, binding);
+    (void)f.updates[1]->SetRenderNeeded();
+    FeatureSceneDelta delta;
+    delta.viewIds = {"0", "1"};
+    delta.requestId = 77;
+    if (!coordinator.Enqueue("transition-test", delta)) return false;
+    int completions = 0;
+    bool completed = false;
+    if (!coordinator.SendDisplayComplete([&]() -> std::optional<bool> {
+        const auto scenes = f.frames.GetSceneStates();
+        if (scenes.size() != 2) return false;
+        for (const auto& scene : scenes) {
+            if (!scene.presentation || scene.presentation->dataRevision != target
+                || scene.presentation->bindingRevision != binding) return std::nullopt;
+        }
+        return true;
+    }, [&](bool succeeded) { ++completions; completed = succeeded; })) return false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+                "mixed input must fail before scene commit")) return false;
+        const auto scenes = f.frames.GetSceneStates();
+        if (!check(coordinator.GetCommittedEpoch() == 1 && completions == 0
+            && scenes.size() == 2
+            && f.views[0].pendingRenderEpoch == 1 && f.views[1].pendingRenderEpoch == 1
+            && f.views[0].GetRenderNeeded() && f.views[1].GetRenderNeeded()
+            && appliedIntents.size() == 1 && appliedIntents[0].delta.requestId == 77,
+            "failure lost dirty, pending render, intent or completion boundary")) return false;
+        for (const auto& scene : scenes) {
+            if (!check(scene.sceneEpoch == 1 && scene.presentation
+                && scene.presentation->dataRevision == original->data->self
+                && scene.presentation->bindingRevision == original->binding->revision,
+                "failed stage exposed a partial scene")) return false;
+        }
+        const auto render = f.frames.SendFrameRender({{"0", "1"}, .001}, [] { return true; });
+        if (!check(render.status == HostRenderStatus::Deferred
+            && f.contexts[0]->renderCount == 0 && f.contexts[1]->renderCount == 0,
+            "mixed state reached a draw")) return false;
+    }
+    if (!check(f.updates[0]->notifications == 0 && f.updates[1]->notifications == 1,
+        "rollback generated work without a new event")) return false;
+
+    // 用明确的新完成事件推进另一 View，不靠 sleep 或持续置脏促成恢复。
+    setInput(0, target, binding);
+    (void)f.updates[0]->SetRenderNeeded();
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
+        && coordinator.GetCommittedEpoch() == 2 && completions == 1 && completed
+        && f.frames.GetSceneStates().size() == 2
+        && !f.views[0].GetRenderNeeded() && !f.views[1].GetRenderNeeded(),
+        "new work did not commit the complete group exactly once")) return false;
+    for (const auto& scene : f.frames.GetSceneStates()) {
+        if (!check(scene.sceneEpoch == 2 && scene.presentation
+            && scene.presentation->dataRevision == target
+            && scene.presentation->bindingRevision == binding,
+            "recovered scene has the wrong input")) return false;
+    }
+    return check(f.frames.SendFrameRender(2)
+        && !f.frames.GetFrameRenderPending()
+        && f.contexts[0]->renderCount == 1 && f.contexts[1]->renderCount == 1
+        && coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
+        && coordinator.GetCommittedEpoch() == 2 && completions == 1
+        && previous[0].presentation->dataRevision == original->data->self
+        && previous[0].presentation->bindingRevision == original->binding->revision,
+        "recovery changed the old snapshot or repeated commit/completion");
+}
 bool GetRenderRetryValid()
 {
     FrameFixture f;
@@ -333,6 +462,8 @@ int main(int argc, char** argv)
     check(GetRulerCopyValid(), "draw publishes ruler without copying full presentation state");
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");
     check(GetFailedFrameWakeValid(), "failed frame retains changes without self-waking and resumes on new work");
+    check(GetInputTransitionBarrierValid(false), "binding transition rejects partial frames and recovers on new work");
+    check(GetInputTransitionBarrierValid(true), "data transition rejects partial frames and recovers on new work");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
     check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");
