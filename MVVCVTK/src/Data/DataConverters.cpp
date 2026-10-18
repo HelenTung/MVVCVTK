@@ -1,4 +1,5 @@
 #include "DataConverters.h"
+#include "App/Services/AppPorts.h"
 #include "Platform/Path.h"
 #include <vtkImageAccumulate.h>
 #include <vtkDoubleArray.h>
@@ -14,6 +15,173 @@
 #include <cmath>
 #include <limits>
 #include <vector>
+#include "Data/DataPayloads.h"
+#include "Support/ImagePeakEstimator.h"
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+
+namespace {
+struct AutoIsoState final {
+    std::atomic<bool> isCancelled{false};
+    mutable std::mutex mutex;
+    std::optional<AutoIsoResult> result;
+};
+template<class Scalar> double ReadPeakScalar(const void* values, const std::size_t index)
+{
+    Scalar value;
+    std::memcpy(&value, static_cast<const std::uint8_t*>(values) + index * sizeof(Scalar), sizeof(Scalar));
+    return static_cast<double>(value);
+}
+double (*GetPeakReader(const ImageValueType type))(const void*, std::size_t)
+{
+    switch (type) {
+    case ImageValueType::Int8: return ReadPeakScalar<std::int8_t>;
+    case ImageValueType::UInt8: return ReadPeakScalar<std::uint8_t>;
+    case ImageValueType::Int16: return ReadPeakScalar<std::int16_t>;
+    case ImageValueType::UInt16: return ReadPeakScalar<std::uint16_t>;
+    case ImageValueType::Int32: return ReadPeakScalar<std::int32_t>;
+    case ImageValueType::UInt32: return ReadPeakScalar<std::uint32_t>;
+    case ImageValueType::Int64: return ReadPeakScalar<std::int64_t>;
+    case ImageValueType::UInt64: return ReadPeakScalar<std::uint64_t>;
+    case ImageValueType::Float32: return ReadPeakScalar<float>;
+    case ImageValueType::Float64: return ReadPeakScalar<double>;
+    default: return nullptr;
+    }
+}
+}
+
+class AutoIsoTask::Impl final {
+public:
+    explicit Impl(std::shared_ptr<AutoIsoState> value) : state(std::move(value)) {}
+    std::shared_ptr<AutoIsoState> state;
+};
+AutoIsoTask::AutoIsoTask(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
+AutoIsoTask::~AutoIsoTask() { m_impl->state->isCancelled.store(true, std::memory_order_release); }
+std::optional<AutoIsoResult> AutoIsoTask::GetResult() const
+{
+    const std::lock_guard<std::mutex> lock(m_impl->state->mutex);
+    return m_impl->state->result;
+}
+
+class HistogramConverter::PeakCache final {
+public:
+    struct Entry final {
+        DataRevisionRef revision;
+        // 键引用真正的冻结缓冲；重新包装 payload 不重扫，地址重用不误命中。
+        std::weak_ptr<const ImageScalarStorage> values;
+        std::weak_ptr<const std::vector<std::uint8_t>> validity;
+        std::array<int, 3> dimensions;
+        std::array<int, 6> extent;
+        ImageValueType valueType;
+        std::size_t components;
+        std::shared_ptr<AutoIsoState> state;
+        std::weak_ptr<AutoIsoTask> request;
+    };
+    std::vector<Entry> entries;
+    std::uint64_t builds = 0;
+};
+
+TaskAdmissionResult HistogramConverter::StartAutoIso(const DataRevisionRef& revision,
+    std::shared_ptr<const ImageGrid3DPayload> source,
+    const std::function<TaskAdmissionResult(RenderLaneWork)>& onStart,
+    std::shared_ptr<AutoIsoTask>& task)
+{
+    if (!source || !onStart) return TaskAdmissionResult::InvalidRequest;
+    const std::lock_guard<std::mutex> lock(m_peakMutex);
+    try {
+        if (!m_peakCache) m_peakCache = std::make_shared<PeakCache>();
+        auto& entries = m_peakCache->entries;
+        for (auto entry = entries.begin(); entry != entries.end();) {
+            if (entry->values.expired()) { entry = entries.erase(entry); continue; }
+            const auto& values = source->GetValues();
+            const auto& validity = source->GetValidityMask();
+            if (entry->revision == revision && entry->values.lock().get() == values.get()
+                && !entry->values.owner_before(values) && !values.owner_before(entry->values)
+                && entry->validity.lock().get() == validity.get()
+                && !entry->validity.owner_before(validity) && !validity.owner_before(entry->validity)
+                && entry->dimensions == source->GetGeometry().dimensions
+                && entry->extent == source->GetGeometry().extent
+                && entry->valueType == source->GetValueType()
+                && entry->components == source->GetComponentCount()) {
+                if (auto request = entry->request.lock()) {
+                    task = std::move(request);
+                    return TaskAdmissionResult::Accepted;
+                }
+                const std::lock_guard<std::mutex> resultLock(entry->state->mutex);
+                if (entry->state->result && !entry->state->result->isCancelled) {
+                    task = std::shared_ptr<AutoIsoTask>(new AutoIsoTask(std::make_unique<AutoIsoTask::Impl>(entry->state)));
+                    entry->request = task;
+                    return TaskAdmissionResult::Accepted;
+                }
+                entry = entries.erase(entry);
+                continue;
+            }
+            ++entry;
+        }
+        // 只限制统计缓存，不限制源数据规模或业务发布。活动请求由候选自身保活。
+        constexpr std::size_t peakCacheLimit = 8;
+        if (entries.size() == peakCacheLimit) entries.erase(entries.begin());
+        auto state = std::make_shared<AutoIsoState>();
+        auto request = std::shared_ptr<AutoIsoTask>(new AutoIsoTask(std::make_unique<AutoIsoTask::Impl>(state)));
+        entries.reserve(peakCacheLimit);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+        RenderLaneWork work([source, state, deadline](TaskStopToken stop) {
+            AutoIsoResult result;
+            const auto stopping = [&] { return stop.GetIsStopped() || state->isCancelled.load(std::memory_order_acquire); };
+            const auto expired = [&] { return std::chrono::steady_clock::now() >= deadline; };
+            const auto cancelled = [&] { return stopping() || expired(); };
+            try {
+                std::optional<ImagePeakEstimate> estimate;
+                ImagePeakInput input;
+                input.dimensions = source->GetGeometry().dimensions;
+                if (source->GetComponentCount() == 1 && source->GetValues()) {
+                    input.values = source->GetValues()->data();
+                    input.readScalar = GetPeakReader(source->GetValueType());
+                    input.validity = source->GetValidityMask() ? source->GetValidityMask()->data() : nullptr;
+                }
+                const auto failure = ImagePeakEstimator::BuildEstimate(input, cancelled, estimate, result.message);
+                result.isCancelled = stopping();
+                if (!result.isCancelled && failure == ImagePeakFailure::None && estimate)
+                    result.isoValue = estimate->isoValue;
+            } catch (const std::exception& error) {
+                result.message = error.what();
+                result.isCancelled = stopping();
+            } catch (...) {
+                result.message = "Image peak estimation failed.";
+                result.isCancelled = stopping();
+            }
+            if (expired()) {
+                result.isoValue.reset();
+                result.message = "Automatic peak estimation reached its deadline.";
+            }
+            if (!result.isCancelled && !result.isoValue)
+                std::cerr << "[AutoIso] 自动峰值不可用，沿用范围中点: " << result.message << '\n';
+            {
+                const std::lock_guard<std::mutex> resultLock(state->mutex);
+                state->result = std::move(result);
+            }
+            return true;
+        });
+        const auto admission = onStart(std::move(work));
+        if (admission != TaskAdmissionResult::Accepted) return admission;
+        entries.push_back({revision, source->GetValues(), source->GetValidityMask(),
+            source->GetGeometry().dimensions, source->GetGeometry().extent,
+            source->GetValueType(), source->GetComponentCount(), state, request});
+        ++m_peakCache->builds;
+        task = std::move(request);
+        return TaskAdmissionResult::Accepted;
+    } catch (...) {
+        return TaskAdmissionResult::Unavailable;
+    }
+}
+
+std::uint64_t HistogramConverter::GetPeakBuildCount() const
+{
+    const std::lock_guard<std::mutex> lock(m_peakMutex);
+    return m_peakCache ? m_peakCache->builds : 0;
+}
 
 bool HistogramConverter::SetBinCount(int binCount)
 {

@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <thread>
 
+int GetAutoDisplayDefaultsFailCount();
+
 namespace {
 class ViewProbe final : public AppViewPort {
 public:
@@ -452,6 +454,7 @@ int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "transition") return GetDataTransitionTests() ? 0 : 1;
     if (argc == 2 && std::string(argv[1]) == "resources") return GetResourceLifetimeTests() ? 0 : 1;
+    if (argc == 2 && std::string(argv[1]) == "defaults") return GetAutoDisplayDefaultsFailCount() == 0 ? 0 : 1;
     int failures = 0;
     const auto check = [&](bool value, const char* name) {
         std::cout << (value ? "[PASS] " : "[FAIL] ") << name << '\n';
@@ -469,5 +472,6 @@ int main(int argc, char** argv)
     check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");
     check(GetPendingRollbackValid(), "stage rollback preserves inherited pending renders");
     check(GetActivationValid(), "primary activation cursor and publication ownership");
+    check(GetAutoDisplayDefaultsFailCount() == 0, "automatic display defaults and asynchronous fallback lifecycle");
     return failures;
 }

@@ -246,6 +246,14 @@ private:
         DataStageStatus status = DataStageStatus::Idle;
     };
 
+    struct AutoDisplayDefaults final {
+        VtkRenderInputSnapshot snapshot;
+        std::shared_ptr<AutoIsoTask> task;
+        std::optional<double> isoValue;
+        bool hasResult = false;
+        bool needsApply = true;
+    };
+
     class ObserverGate final : public IStateEventSink {
     public:
         explicit ObserverGate(AppRuntime* owner)
@@ -317,6 +325,9 @@ private:
         bool& isReplaced);
     VtkRenderInputSnapshot GetPrimaryRenderInput() const;
     DataStageStatus BuildPipeline();
+    void StartAutoDisplayDefaults() noexcept;
+    void SendAutoDisplayDefaults();
+    std::optional<double> GetAutoDisplayIso(const VtkRenderInputSnapshot&) const;
     bool GetStageCurrent(const DataStage& stage) const;
     static bool GetSameInput(
         const VtkRenderInputSnapshot& left,
@@ -434,6 +445,9 @@ private:
         std::uint64_t,
         LoadCommitFailure)> m_setLoadCancelled;
     std::optional<DataStage> m_dataStage;
+    // 独立于数据事务：只有正式提交后的输入才能启动，结果仅更新展示默认值。
+    std::optional<AutoDisplayDefaults> m_autoDisplayDefaults;
+    std::atomic<bool> m_hasAutoWindowReset{false};
     // 显示请求代数独立于 LoadCommitCoordinator 的事务号；模式 ABA 也会失效。
     mutable std::mutex m_transitionMutex;
     std::uint64_t m_transitionRevision = 0;
