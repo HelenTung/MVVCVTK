@@ -1137,7 +1137,13 @@ bool AppRuntime::ResetWindowLevel()
         if (const auto iso = GetAutoDisplayIso(m_renderSnapshot))
             windowLevel->windowCenter = *iso;
     }
-    if (!windowLevel || !m_viewState->ResetWindowLevel(*windowLevel)) return false;
+    if (!windowLevel) return false;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState->ResetWindowLevel(*windowLevel)) return false;
+        if (m_hasViewUpdate) m_suppliedAutoWindowUpdate = false;
+        else m_hasSuppliedAutoWindow = false;
+    }
     m_hasAutoWindowReset = true;
     SetDirty();
     return true;
@@ -1146,16 +1152,17 @@ bool AppRuntime::ResetWindowLevel()
 bool AppRuntime::ResetWindowLevel(
     const WindowLevelParams& windowLevel)
 {
-    const bool accepted = m_viewState
-        && std::isfinite(windowLevel.windowWidth)
-        && windowLevel.windowWidth > 0.0
-        && std::isfinite(windowLevel.windowCenter)
-        && m_viewState->ResetWindowLevel(windowLevel);
-    if (accepted) {
-        m_hasAutoWindowReset = true;
-        SetDirty();
+    if (!m_viewState || !std::isfinite(windowLevel.windowWidth)
+        || windowLevel.windowWidth <= 0.0 || !std::isfinite(windowLevel.windowCenter)) return false;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState->ResetWindowLevel(windowLevel)) return false;
+        // Auto 加具体值（含快照恢复）是已确定的本次请求，不能被后台默认重写。
+        if (m_hasViewUpdate) m_suppliedAutoWindowUpdate = true;
+        else m_hasSuppliedAutoWindow = true;
     }
-    return accepted;
+    SetDirty();
+    return true;
 }
 
 WindowLevelMode AppRuntime::GetWindowLevelMode() const
@@ -2155,16 +2162,28 @@ bool AppRuntime::GetOwnedLoad(LoadEventKind loadEventKind) const
 
 bool AppRuntime::StartViewUpdate()
 {
-    return m_viewState && m_viewState->StartUpdate();
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (!m_viewState || !m_viewState->StartUpdate()) return false;
+    m_hasViewUpdate = true;
+    m_suppliedAutoWindowUpdate.reset();
+    return true;
 }
 
 bool AppRuntime::SetViewUpdateCommit(
     const bool isCommitted,
     UpdateFlags& pendingFlags)
 {
-    return m_viewState
-        && m_viewState->SetUpdateCommit(
-            isCommitted, pendingFlags);
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState || !m_viewState->SetUpdateCommit(isCommitted, pendingFlags)) return false;
+        if (isCommitted && m_suppliedAutoWindowUpdate.has_value())
+            m_hasSuppliedAutoWindow = *m_suppliedAutoWindowUpdate;
+        m_suppliedAutoWindowUpdate.reset();
+        m_hasViewUpdate = false;
+    }
+    // 事务期间到达的默认保留原门铃，关闭后在完整 owner 更新恢复，锁外通知。
+    if (m_hasAutoWindowReset.load()) SetDirty();
+    return true;
 }
 
 void AppRuntime::SendViewUpdateFlags(
@@ -2468,21 +2487,22 @@ void AppRuntime::SendAutoDisplayDefaults()
     }
     // 其他数据事务仍可使用原候选参数；迟到默认不使它失效或重启。
     if (m_dataStage || !m_autoDisplayDefaults->needsApply) return;
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (m_hasViewUpdate) {
+        m_hasAutoWindowReset = true;
+        return;
+    }
     m_autoDisplayDefaults->needsApply = false;
     const auto iso = m_autoDisplayDefaults->isoValue;
     if (!iso) return; // 失败有意保留提交时的范围中点；worker 已记录诊断。
-    {
-        const std::lock_guard<std::mutex> lock(m_transitionMutex);
-        if (!m_hasExplicitIso && m_isoSource == snapshot->data->self
-            && (m_currentMode == VizMode::IsoSurface || m_currentMode == VizMode::CompositeIsoSurface))
-            m_viewState->SetIsoValue(*iso);
-    }
+    if (!m_hasExplicitIso && m_isoSource == snapshot->data->self
+        && (m_currentMode == VizMode::IsoSurface || m_currentMode == VizMode::CompositeIsoSurface))
+        m_viewState->SetIsoValue(*iso);
     if (!m_isAccepting.load() || !GetSameInput(snapshot, m_renderSnapshot)) return;
-    const auto* payload = dynamic_cast<const ImageGrid3DPayload*>(snapshot->data->payload.get());
-    auto windowLevel = payload ? GetAutoWindowLevel(payload->GetScalarRange()) : std::nullopt;
-    if (windowLevel) {
-        windowLevel->windowCenter = *iso;
-        (void)m_viewState->SetAutoWindowLevel(*windowLevel);
+    if (!m_hasSuppliedAutoWindow) {
+        auto windowLevel = m_viewState->GetWindowLevel();
+        windowLevel.windowCenter = *iso;
+        (void)m_viewState->SetAutoWindowLevel(windowLevel);
     }
 }
 
@@ -2965,8 +2985,11 @@ void AppRuntime::SetDataStageComplete(
             == WindowLevelMode::Auto) {
         // 候选阶段不改展示真源；只有数据已不可逆发布后才提交自动值。
         // 若期间出现显式设置/拖拽，SetAutoWindowLevel 会保留新的 Manual 意图。
-        (void)m_viewState->SetAutoWindowLevel(
-            m_dataStage->autoWindowLevel);
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (m_viewState->SetAutoWindowLevel(m_dataStage->autoWindowLevel)) {
+            // 正常数据提交仍执行 c722 的 Auto 重置；旧的带参请求不跨该重置固化。
+            m_hasSuppliedAutoWindow = false;
+        }
     }
     if (m_dataStage->hasDefaultTransfer && m_viewState) {
         // 自动值只在 Auto 意图仍有效时写回；加载期间到达的显式 TF

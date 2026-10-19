@@ -453,6 +453,9 @@ private:
     std::uint64_t m_transitionRevision = 0;
     bool m_hasVisualConfig = false;
     bool m_hasExplicitIso = false; // m_transitionMutex 保护阈值来源和默认值版本。
+    bool m_hasSuppliedAutoWindow = false; // 同一锁保护带参 Auto 的确定值，避免迟到默认覆盖。
+    bool m_hasViewUpdate = false;
+    std::optional<bool> m_suppliedAutoWindowUpdate; // 随既有 ViewUpdate 提交，拒绝时不发布意图。
     DataRevisionRef m_isoSource;
     std::atomic<bool> m_hasTransitionFailure{false};
     std::optional<PendingLoadCommit> m_pendingLoadCommit;

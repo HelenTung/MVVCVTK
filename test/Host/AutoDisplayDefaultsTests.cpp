@@ -669,6 +669,156 @@ void TestExplicitAndInFlightOverride(int& failures)
         "manual window edit after data commit remains authoritative without rebuilding strategy", failures);
 }
 
+void TestSuppliedAutoWindowAndSourceReset(int& failures)
+{
+    for (const bool fromWorker : {false, true}) {
+        auto data = std::make_shared<TestData>();
+        Check(SetBimodalSource(*data), "supplied Auto source publication", failures);
+        RuntimeFixture fixture(data, std::make_shared<HistogramConverter>());
+        const auto source = data->GetPrimaryImage();
+        Check(fixture.BeginCandidate(source, 901) && fixture.CommitCandidate(source, 901),
+            "supplied Auto input commits while peak worker remains held", failures);
+        AppViewUpdate update;
+        update.windowLevelMode = WindowLevelMode::Auto;
+        update.windowLevel = WindowLevelParams{77.0, 66.0};
+        bool accepted = false;
+        if (fromWorker) {
+            std::thread sender([&] { accepted = fixture.ports.app.view->SendViewUpdate(update); });
+            sender.join();
+        } else accepted = fixture.ports.app.view->SendViewUpdate(update);
+        const auto before = fixture.ports.app.view->GetViewState();
+        Check(accepted && before.windowLevelMode == WindowLevelMode::Auto
+            && before.windowLevel.windowWidth == 77.0 && before.windowLevel.windowCenter == 66.0,
+            "Auto plus a concrete window accepts both supplied values", failures);
+        fixture.gate->Release();
+        Check(fixture.WaitForPresentation(source->data->self),
+            "supplied Auto case consumes the completed peak result", failures);
+        const auto after = fixture.ports.app.view->GetViewState();
+        std::cout << "Auto supplied (" << (fromWorker ? "non-owner" : "owner")
+            << "): accepted=" << before.windowLevel.windowWidth << ',' << before.windowLevel.windowCenter
+            << " completed=" << after.windowLevel.windowWidth << ',' << after.windowLevel.windowCenter << '\n';
+        Check(after.windowLevelMode == WindowLevelMode::Auto
+            && after.windowLevel.windowWidth == 77.0 && after.windowLevel.windowCenter == 66.0
+            && after.isoThreshold == 500.0,
+            "late peaks preserve supplied Auto width and center while automatic ISO still updates", failures);
+
+        if (!fromWorker) {
+            Check(SetShiftedBimodalSource(*data), "supplied Auto later source publication", failures);
+            const auto next = data->GetPrimaryImage();
+            Check(fixture.BeginCandidate(next, 902) && fixture.CommitCandidate(next, 902)
+                && fixture.WaitForValues(next->data->self, 600.0, 1900.0, 600.0)
+                && fixture.ports.app.view->GetViewState().windowLevelMode == WindowLevelMode::Auto,
+                "normal new-source Auto reset retains c722 behavior rather than making a supplied value permanent", failures);
+        } else {
+            fixture.state->SetScalarRange(100.0, 177.0);
+            AppViewUpdate pureAuto;
+            pureAuto.windowLevelMode = WindowLevelMode::Auto;
+            Check(fixture.ports.app.view->SendViewUpdate(pureAuto)
+                && fixture.WaitForValues(source->data->self, 500.0, 77.0, 500.0),
+                "a later pure Auto request resumes cached center defaults without replacing its chosen width", failures);
+        }
+        Check(fixture.window->renderCount == 0, "supplied Auto regression never calls Render", failures);
+    }
+}
+
+void TestAutoWindowSnapshotRestore(int& failures)
+{
+    auto data = std::make_shared<TestData>();
+    Check(SetBimodalSource(*data), "Auto snapshot source publication", failures);
+    RuntimeFixture fixture(data, std::make_shared<HistogramConverter>());
+    const auto source = data->GetPrimaryImage();
+    Check(fixture.BeginCandidate(source, 903) && fixture.CommitCandidate(source, 903),
+        "Auto snapshot input commits while peak worker remains held", failures);
+    AppViewUpdate supplied;
+    supplied.windowLevelMode = WindowLevelMode::Auto;
+    supplied.windowLevel = WindowLevelParams{91.0, 73.0};
+    Check(fixture.ports.app.view->SendViewUpdate(supplied), "saved Auto values are accepted", failures);
+    const auto saved = fixture.ports.app.view->GetViewState();
+    AppViewUpdate pureAuto;
+    pureAuto.windowLevelMode = WindowLevelMode::Auto;
+    Check(fixture.ports.app.view->SendViewUpdate(pureAuto), "pure Auto changes the values before restoration", failures);
+    const auto changed = fixture.ports.app.view->GetViewState();
+    Check(fixture.ports.app.view->SetViewState(saved, changed.revision),
+        "actual saved Auto snapshot restores through SetViewState", failures);
+    const auto restored = fixture.ports.app.view->GetViewState();
+    Check(restored.windowLevelMode == WindowLevelMode::Auto
+        && restored.windowLevel.windowWidth == 91.0 && restored.windowLevel.windowCenter == 73.0,
+        "Auto snapshot values are visible before releasing the worker", failures);
+    fixture.gate->Release();
+    Check(fixture.WaitForPresentation(source->data->self), "Auto snapshot drains the peak completion", failures);
+    const auto after = fixture.ports.app.view->GetViewState();
+    std::cout << "Auto snapshot: restored=" << restored.windowLevel.windowWidth << ','
+        << restored.windowLevel.windowCenter << " completed=" << after.windowLevel.windowWidth << ','
+        << after.windowLevel.windowCenter << '\n';
+    Check(after.windowLevelMode == WindowLevelMode::Auto
+        && after.windowLevel.windowWidth == 91.0 && after.windowLevel.windowCenter == 73.0
+        && after.dataRevision == saved.dataRevision,
+        "late peak completion preserves both window values restored from an Auto snapshot", failures);
+    Check(fixture.window->renderCount == 0, "Auto snapshot regression never calls Render", failures);
+}
+
+void TestPureAutoPreservesWindowWidth(int& failures)
+{
+    auto data = std::make_shared<TestData>();
+    Check(SetBimodalSource(*data), "pure Auto width source publication", failures);
+    RuntimeFixture fixture(data, std::make_shared<HistogramConverter>());
+    const auto source = data->GetPrimaryImage();
+    Check(fixture.BeginCandidate(source, 904) && fixture.CommitCandidate(source, 904),
+        "pure Auto width input commits while peak worker remains held", failures);
+    // c722 的无参 Auto 从共享范围选择窗宽；迟到选峰不得改回 payload 的全范围窗宽。
+    fixture.state->SetScalarRange(100.0, 177.0);
+    AppViewUpdate pureAuto;
+    pureAuto.windowLevelMode = WindowLevelMode::Auto;
+    Check(fixture.ports.app.view->SendViewUpdate(pureAuto), "pure Auto without concrete values is accepted", failures);
+    const auto before = fixture.ports.app.view->GetViewState();
+    Check(before.windowLevelMode == WindowLevelMode::Auto
+        && before.windowLevel.windowWidth == 77.0 && before.windowLevel.windowCenter == 138.5,
+        "pure Auto uses the unchanged c722 range policy before peak completion", failures);
+    fixture.gate->Release();
+    Check(fixture.WaitForPresentation(source->data->self), "pure Auto width drains the peak completion", failures);
+    const auto after = fixture.ports.app.view->GetViewState();
+    std::cout << "Pure Auto: accepted=" << before.windowLevel.windowWidth << ',' << before.windowLevel.windowCenter
+        << " completed=" << after.windowLevel.windowWidth << ',' << after.windowLevel.windowCenter << '\n';
+    Check(after.windowLevelMode == WindowLevelMode::Auto
+        && after.windowLevel.windowWidth == 77.0 && after.windowLevel.windowCenter == 500.0,
+        "late pure Auto peak changes only the center and retains the accepted width", failures);
+    Check(fixture.window->renderCount == 0, "pure Auto width regression never calls Render", failures);
+}
+
+void TestRejectedAutoWindowPreservesIntent(int& failures)
+{
+    auto data = std::make_shared<TestData>();
+    Check(SetBimodalSource(*data), "rejected Auto source publication", failures);
+    RuntimeFixture fixture(data, std::make_shared<HistogramConverter>());
+    const auto source = data->GetPrimaryImage();
+    Check(fixture.BeginCandidate(source, 905) && fixture.CommitCandidate(source, 905),
+        "rejected Auto input commits while peak worker remains held", failures);
+    const auto before = fixture.ports.app.view->GetViewState();
+    AppViewUpdate rejected;
+    rejected.windowLevelMode = WindowLevelMode::Auto;
+    rejected.windowLevel = WindowLevelParams{77.0, 66.0};
+    VolumeTransferFunction outsideRange;
+    outsideRange.colorNodes = {{2000.0, 0.0, 0.0, 0.0}, {3000.0, 1.0, 1.0, 1.0}};
+    outsideRange.opacityNodes = {{2000.0, 0.0}, {3000.0, 1.0}};
+    rejected.volumeTransferFunction = outsideRange;
+    Check(!fixture.ports.app.view->SendViewUpdate(rejected),
+        "compound update rejects a transfer function that does not overlap the data range", failures);
+    const auto rolledBack = fixture.ports.app.view->GetViewState();
+    Check(rolledBack.windowLevelMode == before.windowLevelMode
+        && rolledBack.windowLevel.windowWidth == before.windowLevel.windowWidth
+        && rolledBack.windowLevel.windowCenter == before.windowLevel.windowCenter,
+        "rejected compound update restores the previous window values", failures);
+    fixture.gate->Release();
+    Check(fixture.WaitForPresentation(source->data->self), "rejected Auto case drains peak completion", failures);
+    const auto after = fixture.ports.app.view->GetViewState();
+    std::cout << "Rejected Auto: completed=" << after.windowLevel.windowWidth << ','
+        << after.windowLevel.windowCenter << '\n';
+    Check(after.windowLevelMode == WindowLevelMode::Auto
+        && after.windowLevel.windowWidth == 1900.0 && after.windowLevel.windowCenter == 500.0,
+        "rejected supplied values do not replace the previous pure Auto intent", failures);
+    Check(fixture.window->renderCount == 0, "rejected Auto regression never calls Render", failures);
+}
+
 void TestCancellationAndStop(int& failures)
 {
     auto changingData = std::make_shared<TestData>();
@@ -825,6 +975,10 @@ int GetAutoDisplayDefaultsFailCount()
     TestBimodalDefaultAndCache(failures);
     TestPeakFallbacks(failures);
     TestExplicitAndInFlightOverride(failures);
+    TestSuppliedAutoWindowAndSourceReset(failures);
+    TestAutoWindowSnapshotRestore(failures);
+    TestPureAutoPreservesWindowWidth(failures);
+    TestRejectedAutoWindowPreservesIntent(failures);
     TestCancellationAndStop(failures);
     TestPreparationOwnership(failures);
     return failures;
