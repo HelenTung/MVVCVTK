@@ -61,18 +61,18 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
 {
     setAcceptDrops(true);
     m_statistics=new BusinessStatistics(this);m_statistics->hide();
-    auto* layout = new QVBoxLayout(this); layout->setContentsMargins(10,10,10,10); layout->setSpacing(8);
+    auto* layout = new QVBoxLayout(this); layout->setContentsMargins(12,12,12,12); layout->setSpacing(8);
     auto* heading = new QHBoxLayout;
     auto* title = new QLabel(GetDisplayName(), this); title->setObjectName("moduleTitle"); title->setWordWrap(true); heading->addWidget(title,1);
-    m_help = new QToolButton(this); m_help->setText("模块说明"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
+    m_help = new QToolButton(this); m_help->setText("使用说明"); m_help->setToolTip("展开当前模块的用途与使用说明。"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
     m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
     connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());});
     m_businessStage = new QLabel(this); m_businessStage->setObjectName("businessStage"); m_businessStage->setWordWrap(true); layout->addWidget(m_businessStage);
-    m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true); layout->addWidget(m_businessSource);
-    m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();layout->addWidget(m_businessDisplay);
-    m_businessNext = new QLabel(this); m_businessNext->setObjectName("businessNext"); m_businessNext->setWordWrap(true); layout->addWidget(m_businessNext);
+    m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true);
+    m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();
+    m_businessNext = new QLabel(this); m_businessNext->setObjectName("businessNext"); m_businessNext->setWordWrap(true);
     auto* commandFooter=new QWidget(this);commandFooter->setObjectName("businessCommandFooter");
-    auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,0,0,0);footerLayout->setSpacing(6);
+    auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,10,0,0);footerLayout->setSpacing(6);
     m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
     m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
     m_viewReport=new QPushButton("查看结果明细",commandFooter);m_viewReport->setObjectName("viewBusinessReport");m_viewReport->hide();footerLayout->addWidget(m_viewReport);
@@ -170,9 +170,14 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_parameterScroll = new QScrollArea(this); m_parameterScroll->setObjectName("operationScroll");
     m_parameterScroll->setWidgetResizable(true); m_parameterScroll->setFrameShape(QFrame::NoFrame);
     m_parameterScroll->setMinimumHeight(40);
-    auto* operations = new QWidget(m_parameterScroll); m_actionLayout = new QVBoxLayout(operations);
+    auto* operations = new QWidget(m_parameterScroll); operations->setObjectName("operationFields"); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
+    // 输入与引导随参数滚动；阶段和主操作固定可见，缩窗时仍能编辑和提交。
+    auto* businessContext = new QWidget(operations); businessContext->setObjectName("businessContext");
+    auto* contextLayout = new QVBoxLayout(businessContext); contextLayout->setContentsMargins(8,8,8,8); contextLayout->setSpacing(6);
+    contextLayout->addWidget(m_businessSource); contextLayout->addWidget(m_businessNext); contextLayout->addWidget(m_businessDisplay);
+    m_actionLayout->addWidget(businessContext);
     m_actionLayout->addWidget(m_operationTitle);m_actionLayout->addWidget(m_operationDescription);
     m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
     m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");

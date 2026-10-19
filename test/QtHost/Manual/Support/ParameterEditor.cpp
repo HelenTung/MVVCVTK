@@ -430,7 +430,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
                         page->setVisible(isExpanded); toggle->setArrowType(isExpanded ? Qt::DownArrow : Qt::RightArrow);
                     });
                     m_groupPages[group] = page; m_groupSections[group] = section;
-                    auto* grid = new QGridLayout(page); grid->setContentsMargins(2,0,2,2); grid->setVerticalSpacing(10);
+                    auto* grid = new QGridLayout(page); grid->setContentsMargins(8,2,8,8); grid->setVerticalSpacing(12);
                     grids[group] = grid;
                 } else page = m_groupPages.at(group);
             }
@@ -558,13 +558,13 @@ void ParameterEditor::AddRow(const QJsonValue& value)
     auto* row = new QWidget(m_body); auto* layout = new QHBoxLayout(row); layout->setContentsMargins(0,0,0,0);
     auto* editor = new ParameterEditor(m_module, m_action, m_key, value, m_itemTemplate, row, true, "第 " + QString::number(m_rows.size()+1) + " 组");
     editor->onEdited = [this] { NotifyEdited(); };
-    auto* remove = new QPushButton("删除", row); remove->setObjectName("removeRow"); remove->setFixedWidth(55);
+    auto* remove = new QPushButton("删除", row); remove->setObjectName("removeRow"); remove->setAccessibleName(m_title + "：删除此行");
     auto* commands = new QVBoxLayout; commands->setSpacing(4); commands->addWidget(remove);
     layout->addWidget(editor, 1); layout->addLayout(commands); commands->setAlignment(Qt::AlignTop);
     m_rowLayout->addWidget(row); m_rows.emplace_back(row, editor);
     if(m_key=="segments")for(const int direction:{-1,1}) {
         auto* move=new QPushButton(direction<0 ? "上移" : "下移",row);
-        move->setObjectName(direction<0 ? "moveUp" : "moveDown"); move->setFixedWidth(55); commands->addWidget(move);
+        move->setObjectName(direction<0 ? "moveUp" : "moveDown"); move->setAccessibleName(m_title + (direction<0 ? "：上移此行" : "：下移此行")); commands->addWidget(move);
         connect(move,&QPushButton::clicked,this,[this,row,direction] {
             const auto found=std::find_if(m_rows.begin(),m_rows.end(),[row](const auto& item){return item.first==row;});
             if(found==m_rows.end())return;

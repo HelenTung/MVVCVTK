@@ -41,7 +41,7 @@ namespace Manual {
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
     m_workflow.resources = GetTestResources(budgetMiB);
-    setWindowTitle("MVVCVTK 检测工作台 V1");
+    setWindowTitle("MVVCVTK · 检测工作台");
     setAcceptDrops(true);
     setFont(QFont("Microsoft YaHei UI", 9));
     setStyleSheet(GetWorkbenchStyle());
@@ -56,7 +56,9 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     this->layout()->setSizeConstraint(QLayout::SetNoConstraint);
     layout->setContentsMargins(12,10,12,10); layout->setSpacing(8);
     auto* toolbarFrame = new QWidget(root); toolbarFrame->setObjectName("workbenchToolbar");
-    auto* toolbar = new QHBoxLayout(toolbarFrame); toolbar->setContentsMargins(12,10,12,10);
+    auto* toolbar = new QHBoxLayout(toolbarFrame); toolbar->setContentsMargins(12,8,12,8); toolbar->setSpacing(8);
+    auto* workbenchTitle = new QLabel("检测工作台", toolbarFrame); workbenchTitle->setObjectName("workbenchTitle");
+    auto titleFont = font(); titleFont.setPointSizeF(titleFont.pointSizeF() * 1.25); titleFont.setWeight(QFont::DemiBold); workbenchTitle->setFont(titleFont);
     m_openVolume = new QPushButton("打开体数据…", root); m_openVolume->setObjectName("openVolume");
     m_openVolume->setProperty("primaryCommand", true);
     m_openVolume->setShortcut(QKeySequence::Open); m_openVolume->setEnabled(false);
@@ -70,8 +72,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     performance->setObjectName("performanceCapture");
     m_sourceButton=new QPushButton("查看来源",toolbarFrame);m_sourceButton->setObjectName("showInputSources");m_sourceButton->setEnabled(false);
     m_originalInput=new QPushButton("返回原始输入",toolbarFrame);m_originalInput->setObjectName("useOriginalInput");m_originalInput->setEnabled(false);
-    toolbar->addWidget(m_openVolume);toolbar->addWidget(m_sourceButton);toolbar->addStretch(); toolbar->addWidget(m_stop); toolbar->addWidget(showReport); toolbar->addWidget(tools); layout->addWidget(toolbarFrame);
-    toolbar->insertWidget(2,m_originalInput);
+    toolbar->addWidget(workbenchTitle); toolbar->addSpacing(12); toolbar->addWidget(m_openVolume); toolbar->addWidget(m_stop);
+    toolbar->addStretch(); toolbar->addWidget(showReport); toolbar->addWidget(tools); layout->addWidget(toolbarFrame);
     connect(m_originalInput,&QPushButton::clicked,this,[this]{if(!m_originalRevision.isEmpty())if(auto* page=GetModule("Data"))page->SendAction("UseData",{{"graphRevision",m_originalRevision}});});
     connect(m_sourceButton,&QPushButton::clicked,this,[this] {
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
@@ -94,16 +96,20 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_featureTabs->setExpanding(false); m_featureTabs->setUsesScrollButtons(true); m_featureTabs->setDrawBase(false);
     navigationLayout->addWidget(m_featureTabs); layout->addWidget(navigation);
     auto* inputStrip=new QWidget(root);inputStrip->setObjectName("workbenchInput");
-    auto* inputLayout=new QVBoxLayout(inputStrip);inputLayout->setContentsMargins(8,4,8,4);inputLayout->setSpacing(2);
-    m_inputIdentity=new QLabel("当前输入 · 尚未加载体数据",inputStrip);m_inputIdentity->setObjectName("currentInputIdentity");m_inputIdentity->setWordWrap(true);inputLayout->addWidget(m_inputIdentity);
-    m_inputGeometry=new QLabel(inputStrip);m_inputGeometry->setObjectName("currentInputGeometry");m_inputGeometry->setWordWrap(true);inputLayout->addWidget(m_inputGeometry);layout->addWidget(inputStrip);
+    auto* inputLayout=new QHBoxLayout(inputStrip);inputLayout->setContentsMargins(10,6,10,6);inputLayout->setSpacing(12);
+    auto* inputText = new QVBoxLayout; inputText->setSpacing(3);
+    m_inputIdentity=new QLabel("当前输入 · 尚未加载体数据",inputStrip);m_inputIdentity->setObjectName("currentInputIdentity");m_inputIdentity->setWordWrap(true);m_inputIdentity->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);inputText->addWidget(m_inputIdentity);
+    m_inputGeometry=new QLabel(inputStrip);m_inputGeometry->setObjectName("currentInputGeometry");m_inputGeometry->setWordWrap(true);m_inputGeometry->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);inputText->addWidget(m_inputGeometry);
+    inputLayout->addLayout(inputText,1);
+    auto* inputActions = new QHBoxLayout; inputActions->setSpacing(6); inputActions->addWidget(m_sourceButton); inputActions->addWidget(m_originalInput);
+    inputLayout->addLayout(inputActions); layout->addWidget(inputStrip);
     m_measurements = new QLabel(root); m_measurements->setObjectName("businessMeasurements");
     m_measurements->setWordWrap(true); m_measurements->setMinimumWidth(0);
     m_measurements->setToolTip("内存为当前测试进程的 OS 实测值，峰值从进程启动累计。加载为请求到终态；首次绘制和逐帧耗时到 Host/VTK Render 返回，不包含 GPU 完成或屏幕呈现。分项不可相加。");
 
-    auto* split = new QSplitter(root); split->setChildrenCollapsible(false); layout->addWidget(split, 1);
+    auto* split = new QSplitter(root); split->setObjectName("workbenchSplit"); split->setChildrenCollapsible(false); split->setHandleWidth(8); layout->addWidget(split, 1);
     auto* objectColumn = new QWidget(split); objectColumn->setObjectName("objectColumn");
-    auto* objectToggle=new QToolButton(toolbarFrame);objectToggle->setObjectName("toggleObjectColumn");objectToggle->setText("收起对象栏");objectToggle->setCheckable(true);objectToggle->setChecked(true);toolbar->insertWidget(2,objectToggle);
+    auto* objectToggle=new QToolButton(inputStrip);objectToggle->setObjectName("toggleObjectColumn");objectToggle->setText("收起对象栏");objectToggle->setCheckable(true);objectToggle->setChecked(true);inputActions->addWidget(objectToggle);
     auto objectSizes=std::make_shared<QList<int>>();
     connect(objectToggle,&QToolButton::toggled,this,[split,objectColumn,objectToggle,objectSizes](bool shown){if(!shown)*objectSizes=split->sizes();objectColumn->setVisible(shown);if(shown && !objectSizes->isEmpty())split->setSizes(*objectSizes);objectToggle->setText(shown?"收起对象栏":"展开对象栏");});
     auto* objectLayout = new QVBoxLayout(objectColumn); objectLayout->setContentsMargins(8,8,8,8);
@@ -128,7 +134,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         } else {page->SetParameterPatch(action,values);m_pages->setCurrentWidget(page);}
     };
     m_browsers = new QStackedWidget(root); m_browsers->setObjectName("browserStack");
-    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(320);
+    m_pages = new QStackedWidget(root); m_pages->setMinimumWidth(360);
     m_pages->setObjectName("parameterPages");
     connect(m_workspaceTabs, &QTabBar::currentChanged, this, &TestWindow::SetWorkspace);
     connect(m_featureTabs, &QTabBar::currentChanged, this, [this](int index) {
@@ -137,11 +143,12 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         if (page) m_pages->setCurrentWidget(page);
     });
     connect(m_pages, &QStackedWidget::currentChanged, this, [this] { SyncNavigation(); });
-    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(480); auto* viewLayout = new QVBoxLayout(m_viewArea);
+    m_viewArea = new QWidget(split); m_viewArea->setMinimumWidth(420); auto* viewLayout = new QVBoxLayout(m_viewArea);
     viewLayout->setContentsMargins(0, 0, 0, 0);
     auto* viewHeading = new QHBoxLayout;
     auto* viewTitle = new QLabel("视图", m_viewArea); viewTitle->setObjectName("columnTitle"); viewHeading->addWidget(viewTitle); viewHeading->addStretch();
     auto* viewLayoutChoice = new QComboBox(m_viewArea); viewLayoutChoice->setObjectName("viewLayout");
+    viewLayoutChoice->setAccessibleName("视图布局"); viewLayoutChoice->setToolTip("选择三维与切片、四视图或仅三维；分隔栏可拖动调整宽度。");
     viewLayoutChoice->addItem("三维与切片", "Inspection");viewLayoutChoice->addItem("四视图", "FourViews"); viewLayoutChoice->addItem("仅三维", "ThreeDOnly"); viewLayoutChoice->setMinimumWidth(96);
     viewHeading->addWidget(viewLayoutChoice); viewLayout->addLayout(viewHeading);
     auto* statisticsToggle=new QToolButton(m_viewArea);m_showStatistics=statisticsToggle;statisticsToggle->setObjectName("showBusinessStatistics");statisticsToggle->setText("统计与结果");statisticsToggle->setCheckable(true);viewHeading->addWidget(statisticsToggle);
@@ -174,11 +181,11 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     primaryLayout->setContentsMargins(0,0,0,0); primaryLayout->setSpacing(6);
     auto* primaryHeader = new QWidget(primaryFrame); primaryHeader->setObjectName("viewHeader"); primaryHeader->setFixedHeight(headerHeight);
     auto* viewToolbar = new QHBoxLayout(primaryHeader); viewToolbar->setContentsMargins(0,0,0,0);
-    viewToolbar->addWidget(new QLabel("3D 视窗", m_viewArea)); viewToolbar->addStretch();
+    viewToolbar->addWidget(new QLabel("三维", m_viewArea)); viewToolbar->addStretch();
     m_renderMode = new QComboBox(m_viewArea); m_renderMode->setObjectName("renderMode");
     m_renderMode->addItem("等值面", "CompositeIsoSurface"); m_renderMode->addItem("体渲染", "CompositeVolume");
     m_renderMode->setEnabled(false); viewToolbar->addWidget(m_renderMode);
-    auto* fit = new QPushButton("适配视图", m_viewArea); fit->setObjectName("fitView"); fit->setEnabled(false); viewToolbar->addWidget(fit);
+    auto* fit = new QPushButton("适配", m_viewArea); fit->setObjectName("fitView"); fit->setToolTip("将当前三维内容适配到视窗。"); fit->setEnabled(false); viewToolbar->addWidget(fit);
     primaryLayout->addWidget(primaryHeader);
     viewGrid->addWidget(primaryFrame, 0, 0);
     auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
@@ -202,7 +209,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         m_views.push_back({sliceIds[index], slice, sliceWindow, frame});
     }
     split->addWidget(m_pages); split->setStretchFactor(0, 0); split->setStretchFactor(1, 1); split->setStretchFactor(2, 0);
-    split->setSizes({230, 890, 420});
+    split->setSizes({240, 840, 440});
     if(height()<900)viewLayoutChoice->setCurrentIndex(viewLayoutChoice->findData("FourViews"));
     else SetViewLayout("Inspection");
     connect(m_renderMode, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
