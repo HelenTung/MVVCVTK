@@ -736,7 +736,7 @@ void ModulePanel::RefreshWorkflow()
 
         const auto group = GetActionGroup(name);
         if(m_taskTabs->count() && group!=m_taskGroup && group!="数据与导出" && group!="确认与退出")continue;
-        if (!menus.contains(group)) menus[group] = m_operationMenu->addMenu(group);
+        if (!menus.contains(group)) { menus[group] = m_operationMenu->addMenu(group); menus[group]->setToolTipsVisible(true); }
         const bool parameter = m_commandRows.count(name) != 0;
         auto* entry = menus[group]->addAction(GetActionText(m_name,name),this,[this,name,parameter]{
             QMetaObject::invokeMethod(this,[this,name,parameter]{
