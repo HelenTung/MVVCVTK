@@ -40,7 +40,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
 private:
     void AppendLog(const QString& message);
-    void ShowMessage(const QString& message);
+    void ShowMessage(const QString& message, const char* tone = "neutral");
     void UpdateMeasurements();
     void QueueObserve();
     void SetWorkspace(int index);
@@ -85,6 +85,7 @@ private:
     std::optional<double> m_objectOpacity;
     QLabel* m_measurements = nullptr;
     QLabel* m_latestMessage = nullptr;
+    QLabel* m_operationState = nullptr;
     QPlainTextEdit* m_log = nullptr;
     ResultReport* m_report = nullptr;
     bool m_observeQueued = false;

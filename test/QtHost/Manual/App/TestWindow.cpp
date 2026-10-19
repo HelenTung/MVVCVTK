@@ -35,6 +35,7 @@
 #include <QDialog>
 #include <QScreen>
 #include <QMouseEvent>
+#include <QStyle>
 #include <algorithm>
 #include <climits>
 namespace Manual {
@@ -43,7 +44,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_workflow.resources = GetTestResources(budgetMiB);
     setWindowTitle("MVVCVTK · 检测工作台");
     setAcceptDrops(true);
-    setFont(QFont("Microsoft YaHei UI", 9));
+    auto bodyFont = QApplication::font(); bodyFont.setFamily("Microsoft YaHei UI");
+    bodyFont.setPointSizeF(std::max(12.0, bodyFont.pointSizeF())); setFont(bodyFont);
     setStyleSheet(GetWorkbenchStyle());
     // 默认尺寸按屏幕工作区确定；用户可调整，业务切换不自动改变外窗。
     const auto screen=QApplication::primaryScreen();
@@ -59,6 +61,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* toolbar = new QHBoxLayout(toolbarFrame); toolbar->setContentsMargins(12,8,12,8); toolbar->setSpacing(8);
     auto* workbenchTitle = new QLabel("检测工作台", toolbarFrame); workbenchTitle->setObjectName("workbenchTitle");
     auto titleFont = font(); titleFont.setPointSizeF(titleFont.pointSizeF() * 1.25); titleFont.setWeight(QFont::DemiBold); workbenchTitle->setFont(titleFont);
+    m_operationState = new QLabel("初始化中", toolbarFrame); m_operationState->setObjectName("operationState");
+    m_operationState->setAccessibleName("会话状态"); m_operationState->setToolTip("显示会话是否正在处理请求；操作是否成功以底部消息及正式结果为准。");
     m_openVolume = new QPushButton("打开体数据…", root); m_openVolume->setObjectName("openVolume");
     m_openVolume->setProperty("primaryCommand", true);
     m_openVolume->setShortcut(QKeySequence::Open); m_openVolume->setEnabled(false);
@@ -73,7 +77,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_sourceButton=new QPushButton("查看来源",toolbarFrame);m_sourceButton->setObjectName("showInputSources");m_sourceButton->setEnabled(false);
     m_originalInput=new QPushButton("返回原始输入",toolbarFrame);m_originalInput->setObjectName("useOriginalInput");m_originalInput->setEnabled(false);
     toolbar->addWidget(workbenchTitle); toolbar->addSpacing(12); toolbar->addWidget(m_openVolume); toolbar->addWidget(m_stop);
-    toolbar->addStretch(); toolbar->addWidget(showReport); toolbar->addWidget(tools); layout->addWidget(toolbarFrame);
+    toolbar->addStretch(); toolbar->addWidget(m_operationState); toolbar->addSpacing(8); toolbar->addWidget(showReport); toolbar->addWidget(tools); layout->addWidget(toolbarFrame);
     connect(m_originalInput,&QPushButton::clicked,this,[this]{if(!m_originalRevision.isEmpty())if(auto* page=GetModule("Data"))page->SendAction("UseData",{{"graphRevision",m_originalRevision}});});
     connect(m_sourceButton,&QPushButton::clicked,this,[this] {
         const auto session=GetSession();const auto input=session?session->GetImageDescriptor():std::optional<ImageDescriptor>{};
@@ -176,7 +180,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     for (int i = 0; i < 2; ++i) { viewGrid->setRowStretch(i, 1); viewGrid->setColumnStretch(i, 1); }
     viewLayout->addLayout(viewGrid, 1);
     viewLayout->addWidget(m_resultTabs,1);m_resultTabs->hide();
-    constexpr int headerHeight = 36;
+    const int headerHeight = std::max(40, fontMetrics().height()+18);
     auto* primaryFrame = new QWidget(m_viewArea); auto* primaryLayout = new QVBoxLayout(primaryFrame);
     primaryLayout->setContentsMargins(0,0,0,0); primaryLayout->setSpacing(6);
     auto* primaryHeader = new QWidget(primaryFrame); primaryHeader->setObjectName("viewHeader"); primaryHeader->setFixedHeight(headerHeight);
@@ -229,6 +233,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* logToggle = new QToolButton(diagnosticBar); logToggle->setObjectName("toggleDiagnostics"); logToggle->setText("诊断"); logToggle->setCheckable(true);
     logToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); logToggle->setArrowType(Qt::RightArrow);
     m_latestMessage = new QLabel(diagnosticBar); m_latestMessage->setObjectName("latestMessage");
+    m_latestMessage->setTextFormat(Qt::PlainText); m_latestMessage->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
     m_latestMessage->setMinimumWidth(0); m_latestMessage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto* messages=new QWidget(diagnosticBar);auto* messageLayout=new QVBoxLayout(messages);messageLayout->setContentsMargins(0,0,0,0);messageLayout->setSpacing(2);
     m_latestMessage->setWordWrap(true);messageLayout->addWidget(m_latestMessage);
@@ -282,7 +287,10 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_log->setPlaceholderText("业务步骤、提交、进度、结果与输入切换的完整流程将在这里显示。");
     m_records.onChanged = [this](const QJsonObject& record) {
         AppendLog(GetFlowText(record));
-        ShowMessage(GetFlowText(record,false));
+        const auto status = record["status"].toString();
+        const auto tone = status=="Failed" || status=="Rejected" || status=="InvalidInput" ? "error"
+            : status=="Cancelled" || status=="SucceededWithDisplayFailure" ? "warning" : !record["isTerminal"].toBool() ? "busy" : "neutral";
+        ShowMessage(GetFlowText(record,false),tone);
         m_report->SetRecord(record);
         if(record["isTerminal"].toBool() && QStringList{"Succeeded","SucceededWithDisplayFailure","FullyDetermined","Observed","Published"}.contains(record["status"].toString())) {
             const auto found=m_workflow.readReports.find(record["module"].toString());
@@ -352,6 +360,10 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         try { auto records = m_records.GetRecords(); records["resources"] = m_workflow.resources.GetJson(); records["hostDiagnostics"] = GetDiagnostics(); ExportJson(path, records); AppendLog("测试记录已导出：" + path); }
         catch (const std::exception& e) { AppendLog("导出失败：" + QString::fromUtf8(e.what())); }
     });
+    QWidget::setTabOrder(m_openVolume,m_stop); QWidget::setTabOrder(m_stop,showReport);
+    QWidget::setTabOrder(showReport,tools); QWidget::setTabOrder(tools,m_workspaceTabs);
+    QWidget::setTabOrder(m_workspaceTabs,m_featureTabs); QWidget::setTabOrder(m_featureTabs,m_sourceButton);
+    QWidget::setTabOrder(m_sourceButton,m_originalInput); QWidget::setTabOrder(m_originalInput,objectToggle);
     QMetaObject::invokeMethod(this, [this] { BuildSession(); }, Qt::QueuedConnection);
     UpdateMeasurements();
 }
@@ -391,7 +403,7 @@ void TestWindow::SyncNavigation()
     m_browsers->setCurrentWidget(page->GetBrowser());
     m_statisticsPages->setCurrentWidget(page->GetStatisticsWidget());
     for(auto* module:m_modules)if(module!=page)module->GetStatisticsWidget()->Cancel();
-    const bool statistics=m_statisticsPreferences.value(page->GetName(),GetSession()->GetImageDescriptor().has_value() && page->GetName()!="Rotation" && !page->GetActions().isEmpty());
+    const bool statistics=m_statisticsPreferences.value(page->GetName(),height()>=900 && GetSession()->GetImageDescriptor().has_value() && page->GetName()!="Rotation" && !page->GetActions().isEmpty());
     {const QSignalBlocker blocker(m_showStatistics);m_showStatistics->setChecked(statistics);}m_resultTabs->setVisible(statistics);
     if(!statistics)page->GetStatisticsWidget()->Cancel();
     if(page->GetName()=="Crop" && m_workflow.ensureCropViews)m_workflow.ensureCropViews();
@@ -426,6 +438,9 @@ void TestWindow::UpdateStopCommand()
     const auto id = m_workflow.GetBusyOperation();
     const auto* module = id ? GetModule(m_records.GetRecord(id)["module"].toString()) : nullptr;
     const bool available = m_isReady && !m_isClosing && module && module->onStop && !m_records.GetRecord(id)["isTerminal"].toBool();
+    const auto state = m_isClosing ? QString("正在结束会话") : !m_isReady ? QString("初始化中")
+        : module && !m_records.GetRecord(id)["isTerminal"].toBool() ? QString("处理中 · ")+module->GetDisplayName() : QString("等待操作");
+    if(m_operationState->text()!=state)m_operationState->setText(state);
     m_stop->setEnabled(available);
     m_stop->setText(module && module->GetName()=="Crop" ? "返回源并结束裁剪" : "停止计算");
     m_stop->setToolTip(available ? module->stopDescription.isEmpty()?QString("请求停止当前计算；消息栏将报告实际结果。"):module->stopDescription : id ? "当前计算没有独立取消入口，请等待完成。" : "当前没有正在执行的计算。");
@@ -551,9 +566,13 @@ void TestWindow::AppendLog(const QString& message)
     const auto text = QLocale::c().toString(QDateTime::currentDateTime(), "[HH:mm:ss.zzz] ") + message;
     m_log->appendPlainText(text);
 }
-void TestWindow::ShowMessage(const QString& message)
+void TestWindow::ShowMessage(const QString& message, const char* tone)
 {
     m_latestMessage->setText("消息 · "+message.simplified());m_latestMessage->setToolTip(message);
+    if(m_latestMessage->property("feedbackTone").toString()!=tone) {
+        m_latestMessage->setProperty("feedbackTone",tone);
+        m_latestMessage->style()->unpolish(m_latestMessage); m_latestMessage->style()->polish(m_latestMessage);
+    }
 }
 TestWindow::~TestWindow()
 {

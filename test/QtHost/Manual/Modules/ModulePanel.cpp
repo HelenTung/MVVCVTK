@@ -66,7 +66,12 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* title = new QLabel(GetDisplayName(), this); title->setObjectName("moduleTitle"); title->setWordWrap(true); heading->addWidget(title,1);
     m_help = new QToolButton(this); m_help->setText("使用说明"); m_help->setToolTip("展开当前模块的用途与使用说明。"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
     m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
-    connect(m_help,&QToolButton::toggled,this,[this](bool visible){m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());});
+    connect(m_help,&QToolButton::toggled,this,[this](bool visible){
+        m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());
+        if(m_name=="Roi" && (m_parameterAction=="Begin" || m_parameterAction=="SetDraft")) {
+            m_operationTitle->setVisible(visible); m_operationDescription->setVisible(visible);
+        }
+    });
     m_businessStage = new QLabel(this); m_businessStage->setObjectName("businessStage"); m_businessStage->setWordWrap(true); layout->addWidget(m_businessStage);
     m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true);
     m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();
@@ -715,7 +720,9 @@ void ModulePanel::RefreshWorkflow()
         const auto params=GetActionParameters("Difference");
         m_operationDescription->setText("结果：输入 A − 输入 B。A 为本次编辑草稿或明确所选 ROI；B 为下方操作数，提交后输出目标固定。\n输出："+params["outputMode"].toString());
     }
-    m_operationTitle->setVisible(!m_parameterAction.isEmpty()); m_operationDescription->setVisible(!m_parameterAction.isEmpty());
+    // 区域编辑的名称已在标签页中显示；专门运算的定义和前置条件仍保持可见。
+    const bool compactRoi=m_name=="Roi" && (m_parameterAction=="Begin" || m_parameterAction=="SetDraft") && !m_help->isChecked();
+    m_operationTitle->setVisible(!m_parameterAction.isEmpty() && !compactRoi); m_operationDescription->setVisible(!m_parameterAction.isEmpty() && !compactRoi);
     // QMenu::clear 不负责销毁子菜单；刷新前显式回收原分类容器。
     const auto oldMenus = m_operationMenu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
     m_operationMenu->clear(); qDeleteAll(oldMenus);

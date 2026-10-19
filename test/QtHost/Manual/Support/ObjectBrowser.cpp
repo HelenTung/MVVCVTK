@@ -17,13 +17,15 @@ ObjectBrowser::ObjectBrowser(QWidget* parent) : QWidget(parent)
     setObjectName("sharedObjectBrowser");
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(0,0,0,0);
     m_search = new QLineEdit(this); m_search->setObjectName("objectSearch");
-    m_search->setPlaceholderText("搜索数据、范围和结果"); m_search->setClearButtonEnabled(true); layout->addWidget(m_search);
+    m_search->setPlaceholderText("搜索名称或修订"); m_search->setAccessibleName("搜索对象"); m_search->setClearButtonEnabled(true); layout->addWidget(m_search);
     m_tree = new QTreeWidget(this); m_tree->setObjectName("workbenchObjects");
     m_tree->setHeaderLabels({"对象", "状态"}); m_tree->setUniformRowHeights(true);
+    m_tree->setAlternatingRowColors(true); m_tree->setIndentation(14); m_tree->setAccessibleName("对象与结果目录");
     m_tree->header()->setSectionResizeMode(0,QHeaderView::Stretch);
-    m_tree->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents); layout->addWidget(m_tree,1);
+    m_tree->header()->setSectionResizeMode(1,QHeaderView::Interactive); m_tree->header()->resizeSection(1,90); layout->addWidget(m_tree,1);
     m_summary = new QLabel("单击只选中；显隐和采用通过独立操作。",this);
     m_summary->setObjectName("selectedObjectSummary"); m_summary->setWordWrap(true); layout->addWidget(m_summary);
+    m_summary->setTextFormat(Qt::PlainText); m_summary->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
     m_use = new QPushButton("设为工作输入",this); m_use->setObjectName("useSelectedObject"); m_use->setEnabled(false); layout->addWidget(m_use);
     auto* visibility=new QHBoxLayout;m_show=new QPushButton("显示",this);m_hide=new QPushButton("隐藏",this);
     m_show->setObjectName("showSelectedObject");m_hide->setObjectName("hideSelectedObject");visibility->addWidget(m_show);visibility->addWidget(m_hide);layout->addLayout(visibility);m_show->setEnabled(false);m_hide->setEnabled(false);
@@ -129,6 +131,7 @@ void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& region
             if(item->data(0,Qt::UserRole).toJsonObject()!=node) {
                 item->setData(0,Qt::UserRole,node); item->setText(0,node["title"].toString()); item->setText(1,node["status"].toString());
                 item->setToolTip(0,node["title"].toString()+"\n修订："+node["ref"].toString());
+                item->setToolTip(1,node["status"].toString());
             }
             reconcile(item,node["children"].toArray()); if(node["id"]==selected)m_tree->setCurrentItem(item);
         }

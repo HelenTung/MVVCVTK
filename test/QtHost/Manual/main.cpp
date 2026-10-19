@@ -9,6 +9,8 @@
 
 int main(int argc, char* argv[])
 {
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     auto format = QVTKOpenGLNativeWidget::defaultFormat(); format.setSamples(0); format.setAlphaBufferSize(8);
     QSurfaceFormat::setDefaultFormat(format);
     QApplication app(argc, argv);

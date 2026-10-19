@@ -73,6 +73,8 @@ int main(int argc, char* argv[])
         std::cerr<<"Background Qt tests require Windows desktop isolation."<<std::endl;return 2;
 #endif
     }else if(!childDesktop.empty()){std::cerr<<"Background child requires desktop isolation."<<std::endl;return 2;}
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     auto format = QVTKOpenGLNativeWidget::defaultFormat(); format.setSamples(0); format.setAlphaBufferSize(8);
     QSurfaceFormat::setDefaultFormat(format);
     QApplication app(argc, argv);

@@ -164,13 +164,22 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
         while(auto* item=m_nextLayout->takeAt(0)){ delete item->widget(); delete item; }
         for(int index=0;index<actions.size();++index) {
             const auto action=actions[index];
-            const auto text=action.startsWith("Open") && !m_entries.count(action) ? "进入"+GetModuleText(action.mid(4)) : GetActionText(m_name,action);
+            const auto actionTitle=action.startsWith("Open") && !m_entries.count(action) ? "进入"+GetModuleText(action.mid(4)) : GetActionText(m_name,action);
+            auto text=actionTitle;
+            if(m_name=="Roi") {
+                if(action=="SetDraft")text="更新草稿";
+                else if(action=="Cancel")text="取消草稿";
+                else if(action=="Visibility")text="显示设置";
+                else if(action=="SetMetadata")text="区域信息";
+            }
             auto* button=new QPushButton(text,m_nextActions); button->setObjectName("next_"+action);
+            button->setAccessibleName(actionTitle);
             connect(button,&QPushButton::clicked,this,[this,action] {
                 if(m_forms.count(action) && m_forms.at(action)->GetHasInputs()) SelectAction(action);
                 else SendBusinessAction(action);
             });
-            m_nextLayout->addWidget(button,index/2,index%2);
+            const int columns=m_name=="Roi" ? 3 : 2;
+            m_nextLayout->addWidget(button,index/columns,index%columns);
         }
         m_nextActionIds=actions;
     }
@@ -181,7 +190,7 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
         const bool busy=m_context.workflow.GetBusyOperation() && m_entries.count(action)
             && m_entries.at(action).policy!=TestPolicy::Stop && m_entries.at(action).policy!=TestPolicy::Read && m_entries.at(action).policy!=TestPolicy::View;
         button->setEnabled(!m_context.workflow.GetIsClosing() && (parameter || (requirement.isEmpty() && !busy)));
-        button->setToolTip(requirement);
+        button->setToolTip(requirement.isEmpty()?button->accessibleName():requirement);
     }
     m_nextActions->setVisible(!actions.isEmpty());
 }
