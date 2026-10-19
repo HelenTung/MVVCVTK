@@ -408,3 +408,5 @@ gap/
 
 # Downloaded official and third-party dependency payloads
 /deps/
+
+/tools/vg-stl-export-kit/
