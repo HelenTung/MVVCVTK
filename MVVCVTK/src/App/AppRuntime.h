@@ -246,6 +246,14 @@ private:
         DataStageStatus status = DataStageStatus::Idle;
     };
 
+    struct AutoDisplayDefaults final {
+        VtkRenderInputSnapshot snapshot;
+        std::shared_ptr<AutoIsoTask> task;
+        std::optional<double> isoValue;
+        bool hasResult = false;
+        bool needsApply = true;
+    };
+
     class ObserverGate final : public IStateEventSink {
     public:
         explicit ObserverGate(AppRuntime* owner)
@@ -317,6 +325,9 @@ private:
         bool& isReplaced);
     VtkRenderInputSnapshot GetPrimaryRenderInput() const;
     DataStageStatus BuildPipeline();
+    void StartAutoDisplayDefaults() noexcept;
+    void SendAutoDisplayDefaults();
+    std::optional<double> GetAutoDisplayIso(const VtkRenderInputSnapshot&) const;
     bool GetStageCurrent(const DataStage& stage) const;
     static bool GetSameInput(
         const VtkRenderInputSnapshot& left,
@@ -434,11 +445,17 @@ private:
         std::uint64_t,
         LoadCommitFailure)> m_setLoadCancelled;
     std::optional<DataStage> m_dataStage;
+    // 独立于数据事务：只有正式提交后的输入才能启动，结果仅更新展示默认值。
+    std::optional<AutoDisplayDefaults> m_autoDisplayDefaults;
+    std::atomic<bool> m_hasAutoWindowReset{false};
     // 显示请求代数独立于 LoadCommitCoordinator 的事务号；模式 ABA 也会失效。
     mutable std::mutex m_transitionMutex;
     std::uint64_t m_transitionRevision = 0;
     bool m_hasVisualConfig = false;
     bool m_hasExplicitIso = false; // m_transitionMutex 保护阈值来源和默认值版本。
+    bool m_hasSuppliedAutoWindow = false; // 同一锁保护带参 Auto 的确定值，避免迟到默认覆盖。
+    bool m_hasViewUpdate = false;
+    std::optional<bool> m_suppliedAutoWindowUpdate; // 随既有 ViewUpdate 提交，拒绝时不发布意图。
     DataRevisionRef m_isoSource;
     std::atomic<bool> m_hasTransitionFailure{false};
     std::optional<PendingLoadCommit> m_pendingLoadCommit;

@@ -2,6 +2,9 @@ add_executable(
     mvvcvtk_surface_determination_tests
     SurfaceDeterminationAlgorithmTests.cpp
     SurfaceDeterminationHistogramTests.cpp
+    SurfaceHistogramReference.cpp
+    SurfaceHistogramReference.h
+    SharedHistogramTests.cpp
     SurfaceHistogramAudit.cpp
     SurfaceHistogramSessionTests.cpp
     SurfaceDeterminationOptimizationTests.cpp
@@ -55,6 +58,8 @@ target_link_libraries(
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
 )
+target_compile_definitions(mvvcvtk_surface_determination_tests PRIVATE
+    MVVCVTK_SURFACE_CPU_PARALLEL=$<BOOL:${MVVCVTK_SURFACE_CPU_PARALLEL}>)
 SetTargetDefaults(mvvcvtk_surface_determination_tests)
 vtk_module_autoinit(
     TARGETS mvvcvtk_surface_determination_tests
@@ -72,6 +77,10 @@ foreach(_mvvcvtk_surface_suite IN ITEMS algorithm histogram geometry lifecycle d
     )
 endforeach()
 unset(_mvvcvtk_surface_suite)
+
+add_test(NAME SurfaceDetermination.shared-histogram
+    COMMAND mvvcvtk_surface_determination_tests shared-histogram)
+SetTestRuntime(SurfaceDetermination.shared-histogram mvvcvtk_surface_determination_tests)
 
 # 复用现有测试工程承载真实灰度采样审计；说明检查不计为真实数据业务验收。
 add_test(NAME SurfaceDetermination.histogram-audit-schema

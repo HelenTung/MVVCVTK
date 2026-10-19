@@ -84,6 +84,7 @@ AppRuntime::~AppRuntime()
 bool AppRuntime::SetDataTaskStopping()
 {
     m_isAccepting = false;
+    m_autoDisplayDefaults.reset();
     if (m_pendingLoadCommit) {
         PendingLoadCommit pending = std::move(*m_pendingLoadCommit);
         m_pendingLoadCommit.reset();
@@ -1128,20 +1129,40 @@ void AppRuntime::SetWindowLevel(double ww, double wc)
 bool AppRuntime::ResetWindowLevel()
 {
     if (!m_sharedState || !m_viewState) return false;
-    const auto windowLevel = GetAutoWindowLevel(
+    auto windowLevel = GetAutoWindowLevel(
         m_sharedState->GetScalarRange());
-    return windowLevel
-        && m_viewState->ResetWindowLevel(*windowLevel);
+    // Data.Select 可已更新共享范围，而当前 View 仍显示旧输入；不能拼接两源参数。
+    if (GetIsOwnerThread() && windowLevel && m_renderSnapshot && m_renderSnapshot->data
+        && m_sharedState->GetDataRevision() == m_renderSnapshot->data->self) {
+        if (const auto iso = GetAutoDisplayIso(m_renderSnapshot))
+            windowLevel->windowCenter = *iso;
+    }
+    if (!windowLevel) return false;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState->ResetWindowLevel(*windowLevel)) return false;
+        if (m_hasViewUpdate) m_suppliedAutoWindowUpdate = false;
+        else m_hasSuppliedAutoWindow = false;
+    }
+    m_hasAutoWindowReset = true;
+    SetDirty();
+    return true;
 }
 
 bool AppRuntime::ResetWindowLevel(
     const WindowLevelParams& windowLevel)
 {
-    return m_viewState
-        && std::isfinite(windowLevel.windowWidth)
-        && windowLevel.windowWidth > 0.0
-        && std::isfinite(windowLevel.windowCenter)
-        && m_viewState->ResetWindowLevel(windowLevel);
+    if (!m_viewState || !std::isfinite(windowLevel.windowWidth)
+        || windowLevel.windowWidth <= 0.0 || !std::isfinite(windowLevel.windowCenter)) return false;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState->ResetWindowLevel(windowLevel)) return false;
+        // Auto 加具体值（含快照恢复）是已确定的本次请求，不能被后台默认重写。
+        if (m_hasViewUpdate) m_suppliedAutoWindowUpdate = true;
+        else m_hasSuppliedAutoWindow = true;
+    }
+    SetDirty();
+    return true;
 }
 
 WindowLevelMode AppRuntime::GetWindowLevelMode() const
@@ -1821,7 +1842,11 @@ bool AppRuntime::SendUpdates()
     // 3. 发起 View 每个 tick 只推进一次跨 View load transaction。
     SendLoadCommit();
 
+    // 默认结果只由完整 owner 更新领取，不能进入 frame freeze 的 pending-only 路径。
+    SendAutoDisplayDefaults();
     const bool isPendingSet = SendPendingUpdates();
+    // 普通刷新可刚刚正式提交新输入；只接纳后台统计，不在本轮回读或等待结果。
+    StartAutoDisplayDefaults();
     return areRenderTasksSent && isProductCommitted
         && isProductStateSet && isPendingSet;
 }
@@ -2137,16 +2162,28 @@ bool AppRuntime::GetOwnedLoad(LoadEventKind loadEventKind) const
 
 bool AppRuntime::StartViewUpdate()
 {
-    return m_viewState && m_viewState->StartUpdate();
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (!m_viewState || !m_viewState->StartUpdate()) return false;
+    m_hasViewUpdate = true;
+    m_suppliedAutoWindowUpdate.reset();
+    return true;
 }
 
 bool AppRuntime::SetViewUpdateCommit(
     const bool isCommitted,
     UpdateFlags& pendingFlags)
 {
-    return m_viewState
-        && m_viewState->SetUpdateCommit(
-            isCommitted, pendingFlags);
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (!m_viewState || !m_viewState->SetUpdateCommit(isCommitted, pendingFlags)) return false;
+        if (isCommitted && m_suppliedAutoWindowUpdate.has_value())
+            m_hasSuppliedAutoWindow = *m_suppliedAutoWindowUpdate;
+        m_suppliedAutoWindowUpdate.reset();
+        m_hasViewUpdate = false;
+    }
+    // 事务期间到达的默认保留原门铃，关闭后在完整 owner 更新恢复，锁外通知。
+    if (m_hasAutoWindowReset.load()) SetDirty();
+    return true;
 }
 
 void AppRuntime::SendViewUpdateFlags(
@@ -2171,6 +2208,7 @@ bool AppRuntime::ClearRenderInput(const DataEntityId& entity) noexcept
     try {
         ClearStrategies();
         m_renderSnapshot.reset();
+        m_autoDisplayDefaults.reset();
         m_hasDataRefreshNeed = false;
         m_hasTransitionFailure = false;
         m_pendingFlags = 0;
@@ -2396,6 +2434,78 @@ DataStageStatus AppRuntime::BuildPipeline()
     return DataStageStatus::Ready;
 }
 
+std::optional<double> AppRuntime::GetAutoDisplayIso(const VtkRenderInputSnapshot& snapshot) const
+{
+    return m_autoDisplayDefaults && m_autoDisplayDefaults->hasResult
+        && GetSameInput(m_autoDisplayDefaults->snapshot, snapshot)
+        ? m_autoDisplayDefaults->isoValue : std::nullopt;
+}
+
+void AppRuntime::StartAutoDisplayDefaults() noexcept
+{
+    if (!m_isAccepting.load() || !m_autoDisplayDefaults
+        || m_autoDisplayDefaults->hasResult || m_autoDisplayDefaults->task) return;
+    try {
+        auto& defaults = *m_autoDisplayDefaults;
+        const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(defaults.snapshot->data->payload);
+        const auto admission = m_histogram->StartAutoIso(defaults.snapshot->data->self, payload,
+            [this](RenderLaneWork work) {
+                // 复用通用后台 lane；统计绝不占用 load/render 的 worker 或提交槽。
+                return m_taskExecutor->SendTask(std::move(work), LoadEventKind::None);
+            }, defaults.task);
+        if (admission == TaskAdmissionResult::Accepted || admission == TaskAdmissionResult::QueueFull) return;
+        defaults.hasResult = true;
+        defaults.needsApply = false;
+        if (admission != TaskAdmissionResult::Stopping)
+            std::cerr << "[AutoIso] 自动峰值不可用，沿用范围中点: statistics task unavailable\n";
+    } catch (...) {
+        m_autoDisplayDefaults->hasResult = true;
+        m_autoDisplayDefaults->needsApply = false;
+        std::cerr << "[AutoIso] 自动峰值不可用，沿用范围中点: statistics task unavailable\n";
+    }
+}
+
+void AppRuntime::SendAutoDisplayDefaults()
+{
+    if (!m_isAccepting.load() || !m_autoDisplayDefaults) return;
+    if (m_hasAutoWindowReset.exchange(false)) m_autoDisplayDefaults->needsApply = true;
+    const auto snapshot = m_autoDisplayDefaults->snapshot;
+    const auto sharedSource = m_sharedState->GetDataRevision();
+    if (!GetSameInput(snapshot, m_renderSnapshot)
+        || (GetDataRevisionRefValid(sharedSource) && sharedSource != snapshot->data->self)) {
+        m_autoDisplayDefaults.reset();
+        return;
+    }
+    StartAutoDisplayDefaults();
+    if (!m_autoDisplayDefaults->hasResult) {
+        if (!m_autoDisplayDefaults->task) return;
+        const auto result = m_autoDisplayDefaults->task->GetResult();
+        if (!result) return;
+        m_autoDisplayDefaults->hasResult = true;
+        if (!result->isCancelled) m_autoDisplayDefaults->isoValue = result->isoValue;
+        m_autoDisplayDefaults->task.reset();
+    }
+    // 其他数据事务仍可使用原候选参数；迟到默认不使它失效或重启。
+    if (m_dataStage || !m_autoDisplayDefaults->needsApply) return;
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (m_hasViewUpdate) {
+        m_hasAutoWindowReset = true;
+        return;
+    }
+    m_autoDisplayDefaults->needsApply = false;
+    const auto iso = m_autoDisplayDefaults->isoValue;
+    if (!iso) return; // 失败有意保留提交时的范围中点；worker 已记录诊断。
+    if (!m_hasExplicitIso && m_isoSource == snapshot->data->self
+        && (m_currentMode == VizMode::IsoSurface || m_currentMode == VizMode::CompositeIsoSurface))
+        m_viewState->SetIsoValue(*iso);
+    if (!m_isAccepting.load() || !GetSameInput(snapshot, m_renderSnapshot)) return;
+    if (!m_hasSuppliedAutoWindow) {
+        auto windowLevel = m_viewState->GetWindowLevel();
+        windowLevel.windowCenter = *iso;
+        (void)m_viewState->SetAutoWindowLevel(windowLevel);
+    }
+}
+
 DataStageStatus AppRuntime::StartDataStage(
     const VtkRenderInputSnapshot& snapshot,
     const std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effectChange)
@@ -2460,9 +2570,9 @@ DataStageStatus AppRuntime::StartDataStage(
             const auto high = stage.readyState.scalarRange[1];
             if (!std::isfinite(low) || !std::isfinite(high) || low > high)
                 return DataStageStatus::Failed;
-            // 首次 producer 直接使用原始灰度中值；候选准备不改正式展示状态。
+            // 统计尚未完成时保持原同步默认；后台结果不进入数据准备关键路径。
             stage.previousIso = stage.nextParams.isoValue;
-            stage.nextParams.isoValue = low * 0.5 + high * 0.5;
+            stage.nextParams.isoValue = GetAutoDisplayIso(snapshot).value_or(low * 0.5 + high * 0.5);
             stage.hasDefaultIso = true;
         }
     }
@@ -2492,6 +2602,7 @@ DataStageStatus AppRuntime::StartDataStage(
         stage.readyState.scalarRange);
     if (!autoWindowLevel) return DataStageStatus::Failed;
     stage.autoWindowLevel = *autoWindowLevel;
+    if (const auto iso = GetAutoDisplayIso(snapshot)) stage.autoWindowLevel.windowCenter = *iso;
     if (m_viewState->GetWindowLevelMode()
         == WindowLevelMode::Auto) {
         stage.nextParams.windowLevel = stage.autoWindowLevel;
@@ -2874,8 +2985,11 @@ void AppRuntime::SetDataStageComplete(
             == WindowLevelMode::Auto) {
         // 候选阶段不改展示真源；只有数据已不可逆发布后才提交自动值。
         // 若期间出现显式设置/拖拽，SetAutoWindowLevel 会保留新的 Manual 意图。
-        (void)m_viewState->SetAutoWindowLevel(
-            m_dataStage->autoWindowLevel);
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (m_viewState->SetAutoWindowLevel(m_dataStage->autoWindowLevel)) {
+            // 正常数据提交仍执行 c722 的 Auto 重置；旧的带参请求不跨该重置固化。
+            m_hasSuppliedAutoWindow = false;
+        }
     }
     if (m_dataStage->hasDefaultTransfer && m_viewState) {
         // 自动值只在 Auto 意图仍有效时写回；加载期间到达的显式 TF
@@ -2883,7 +2997,15 @@ void AppRuntime::SetDataStageComplete(
         (void)m_viewState->SetAutoTransfer(
             m_dataStage->nextParams.volumeTransferFunction);
     }
+    const auto committed = m_dataStage->nextSnapshot;
     m_dataStage.reset();
+    if (!committed->image || !m_isAccepting.load()) {
+        m_autoDisplayDefaults.reset();
+        return;
+    }
+    if (!m_autoDisplayDefaults || !GetSameInput(m_autoDisplayDefaults->snapshot, committed))
+        m_autoDisplayDefaults = AutoDisplayDefaults{committed};
+    m_autoDisplayDefaults->needsApply = true;
 }
 
 std::optional<VolumeTransferFunction>

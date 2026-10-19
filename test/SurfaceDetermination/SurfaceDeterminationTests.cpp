@@ -9,6 +9,8 @@
 #include <string>
 #include <string_view>
 
+int GetSharedHistogramFailCount();
+
 namespace {
 
 int GetSuiteFailCount(const std::string_view suite)
@@ -38,6 +40,8 @@ int GetSuiteFailCount(const std::string_view suite)
 
 int main(int argc, char* argv[])
 {
+    if (argc == 2 && std::string_view(argv[1]) == "shared-histogram")
+        return GetSharedHistogramFailCount();
     if (argc == 2 && std::string_view(argv[1]) == "--histogram-audit-schema") {
         std::cout << "SurfaceDeterminationTests --histogram-samples float32-raw nx ny nz histogram.csv\n"
                      "SurfaceDeterminationTests --histogram-raw raw uint16|float32 nx ny nz histogram.csv\n"

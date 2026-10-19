@@ -432,6 +432,8 @@ set(MVVCVTK_HOST_SOURCES
     include/App/Tasks/AppDataExportTaskService.h
     include/App/Tasks/AppDataLoadTaskService.h
     include/Data/DataConverters.h
+    src/Data/Support/ImagePeakEstimator.h
+    src/Data/Support/ImageHistogramWindow.h
     include/Data/DataGraphStore.h
     include/Data/DataManager.h
     include/Data/DataService.h

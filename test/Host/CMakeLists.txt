@@ -32,7 +32,7 @@ add_test(
 )
 SetTestRuntime(Host.FrameCoordinator mvvcvtk_host_frame_tests)
 
-add_executable(mvvcvtk_host_runtime_tests HostRuntimeTests.cpp DataTransitionTests.cpp ResourceLifetimeTests.cpp)
+add_executable(mvvcvtk_host_runtime_tests HostRuntimeTests.cpp DataTransitionTests.cpp ResourceLifetimeTests.cpp AutoDisplayDefaultsTests.cpp)
 target_link_libraries(mvvcvtk_host_runtime_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_host_runtime_tests)
@@ -46,6 +46,9 @@ SetTestRuntime(Host.DataTransition mvvcvtk_host_runtime_tests)
 
 add_test(NAME Host.ResourceLifetime COMMAND mvvcvtk_host_runtime_tests resources)
 SetTestRuntime(Host.ResourceLifetime mvvcvtk_host_runtime_tests)
+
+add_test(NAME Host.AutoDisplayDefaults COMMAND mvvcvtk_host_runtime_tests defaults)
+SetTestRuntime(Host.AutoDisplayDefaults mvvcvtk_host_runtime_tests)
 
 # 显式真实数据审计；仅依赖 Host，不随 Part Feature 开关消失，不安装。
 add_executable(host_load_audit HostLoadAudit.cpp)
