@@ -50,6 +50,7 @@
 #include <optional>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -802,6 +803,138 @@ bool GetCropCloseRetryValid(bool published,int consumerKind=0)
     return false;
 }
 
+bool GetEmptyBuildStopRetryValid()
+{
+    bool loaded = false, loadOk = false;
+    VtkAppHostSession session(GetCropSessionConfig());
+    auto feature = std::make_shared<CropHostFeature>();
+    auto probe = std::make_shared<ContextProbeFeature>();
+    if (!session.BuildSession() || !session.AttachFeature(feature) || !session.AttachFeature(probe)) return false;
+    const auto* primary = session.GetPrimaryEndpoint();
+    const auto* timer = session.GetRenderViewEndpoint("crop-timer");
+    if (!primary || !timer) return false;
+    primary->renderWindow->SetOffScreenRendering(1);
+    primary->renderWindow->SetSize(160, 160);
+    timer->renderWindow->SetOffScreenRendering(1);
+    timer->renderWindow->SetSize(160, 160);
+    HostTimerConfig timerConfig;
+    timerConfig.isTimerEnabled = true;
+    timerConfig.targetView = {"crop-timer", false, HostRenderViewRole::Auxiliary};
+    if (!session.AttachTimer(timerConfig) || !session.Start()) return false;
+    // 沿用 QtHostCropRealTests.cpp::Fixture::Stop 的 30 秒进程保护，不作为性能门限。
+    const auto retryTimeout = std::chrono::seconds(30);
+    const auto wait = [&](const std::function<bool()>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + retryTimeout;
+        while (!done()) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            SendTicks(*timer, 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    };
+    if (!SendReload(session, loaded, loadOk) || !wait([&] { return loaded; }) || !loadOk) return false;
+    const auto root = probe->m_data->GetPrimaryImage();
+    if (!root || !root->image || !feature->SendRequest(GetTargetRequest(CropHostAction::Start, GetCropTarget()))) return false;
+    const auto history = feature->GetHistory();
+    double bounds[6] = {};
+    root->image->GetBounds(bounds);
+    CropEditRequest append;
+    append.documentId = history.documentId;
+    append.requestId = CropHostFeature::CreateRequestId();
+    append.expectedRevision = history.stateRevision;
+    append.kind = CropEditKind::Append;
+    append.nodeId = history.rootNodeId;
+    append.operation.geometryType = CropShape::Box;
+    append.operation.removalMode = CropRemovalMode::KeepInside;
+    append.operation.boxToInputModelMatrix = {};
+    append.operation.boxToInputModelMatrix[15] = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        const auto span = bounds[axis * 2 + 1] - bounds[axis * 2];
+        append.operation.boxToInputModelMatrix[axis * 4 + axis] = span / 4.0;
+        append.operation.boxToInputModelMatrix[axis * 4 + 3] = bounds[axis * 2 + 1] + span;
+    }
+    const auto edited = feature->SendRequest(append);
+    if (!edited || !wait([&] {
+        const auto outcome = feature->GetOutcome(history.documentId, append.requestId);
+        return outcome && outcome->status != CropEditStatus::Queued;
+    })) return false;
+    const auto outcome = feature->GetOutcome(history.documentId, append.requestId);
+    if (!outcome || outcome->status != CropEditStatus::Succeeded
+        || !feature->SendRequest(GetCropRequest(CropHostAction::Exit))) return false;
+    const auto preview = feature->GetState();
+    const auto previewHistory = feature->GetHistory();
+    const auto input = session.GetImageDescriptor();
+    const auto graph = probe->m_data->GetDataGraph();
+    if (!input || input->dataRevision != root->data->self || preview.isActive
+        || preview.history.appliedHead != edited.nodeId || edited.nodeId == history.rootNodeId
+        || preview.views.empty() || !previewHistory.results.empty()) return false;
+    struct Completion {
+        CropBuildResult result;
+        int count = 0;
+        bool isOwnerThread = true;
+    };
+    const auto completed = std::make_shared<Completion>();
+    const auto ownerThread = std::this_thread::get_id();
+    CropBuildRequest build;
+    build.documentId = history.documentId;
+    build.nodeId = edited.nodeId;
+    build.requestId = CropHostFeature::CreateRequestId();
+    build.expectedRevision = preview.history.stateRevision;
+    if (!feature->SendRequest(build, [completed, ownerThread](auto result) {
+        completed->result = std::move(result);
+        ++completed->count;
+        completed->isOwnerThread &= std::this_thread::get_id() == ownerThread;
+    }) || !wait([&] { return completed->count != 0; })) return false;
+    const auto& failed = completed->result;
+    const auto preserved = feature->GetState();
+    const auto preservedHistory = feature->GetHistory();
+    const auto current = session.GetImageDescriptor();
+    const auto terminal = feature->GetBuildOutcome(build.documentId, build.requestId);
+    bool isPreserved = completed->count == 1 && completed->isOwnerThread
+        && !failed.isSucceeded && failed.failureReason == CropFailure::EmptyResult
+        && failed.documentId == build.documentId && failed.requestId == build.requestId
+        && failed.nodeId == build.nodeId && failed.sourceRevision == root->data->self
+        && GetDataEntityIdValid(failed.scopeId) && !GetDataRevisionRefValid(failed.outputRevision)
+        && !GetDataRevisionRefValid(failed.recipeRevision) && failed.commitId == 0
+        && terminal && terminal->status == CropEditStatus::Failed
+        && terminal->result.failureReason == CropFailure::EmptyResult
+        && current && current->dataRevision == input->dataRevision && current->bindingRevision == input->bindingRevision
+        && probe->m_data->GetDataGraph().commitId == graph.commitId
+        && preservedHistory.documentId == history.documentId
+        && preservedHistory.sourceRevision == previewHistory.sourceRevision
+        && preserved.history.appliedHead == preview.history.appliedHead
+        && preservedHistory.results.empty() && preserved.views.size() == preview.views.size();
+    for (std::size_t index = 0; index < preview.views.size() && isPreserved; ++index) {
+        isPreserved = preserved.views[index].viewId == preview.views[index].viewId
+            && preserved.views[index].appliedHead == preview.views[index].appliedHead;
+    }
+    const bool emptyResultValid = GetCaseResult(isPreserved,
+        "EmptyResult completes once on owner thread and preserves Root binding, preview and graph without publishing a scope");
+    // 探针只用于读取状态；先分离，避免它的清理进展使同一次 Stop 额外推进 Crop。
+    if (!session.DetachFeature(*probe)) return false;
+    // 从这里开始只重试 Stop；不泵普通 tick，也不插入业务恢复来推进关闭事务。
+    const auto deadline = std::chrono::steady_clock::now() + retryTimeout;
+    bool stopped = false;
+    do {
+        stopped = session.Stop();
+        if (stopped) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+    const bool converged = stopped && std::chrono::steady_clock::now() <= deadline
+        && session.GetIsStopped() && feature->GetDocuments().empty();
+    if (!converged) {
+        std::cerr << "EmptyResult Stop exceeded the absolute 30 second deadline; documents="
+            << feature->GetDocuments().size() << '\n';
+        // 先固定失败，再单独 Detach 收尾；收尾成功不能覆盖 Stop 活锁断言。
+        const auto cleanupDeadline = std::chrono::steady_clock::now() + retryTimeout;
+        while (!session.DetachFeature(*feature) && std::chrono::steady_clock::now() < cleanupDeadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        (void)session.Stop();
+    }
+    return emptyResultValid && converged && completed->count == 1 && completed->isOwnerThread
+        && completed->result.failureReason == CropFailure::EmptyResult;
+}
+
 bool GetMeshRootLifecycle()
 {
     VtkAppHostSession session(GetCropSessionConfig());auto feature=std::make_shared<CropHostFeature>();
@@ -1203,6 +1336,14 @@ int GetCropArchiveFailCount() {
 
 int GetCropLifecycleFailCount()
 {
+    char* emptyStopFlag = nullptr;
+    std::size_t emptyStopFlagSize = 0;
+    const bool onlyEmptyStop = _dupenv_s(&emptyStopFlag, &emptyStopFlagSize, "MVVCVTK_CROP_EMPTY_STOP_ONLY") == 0
+        && emptyStopFlag && emptyStopFlag[0] == '1' && emptyStopFlag[1] == '\0';
+    std::free(emptyStopFlag);
+    if (onlyEmptyStop)
+        return GetCaseResult(GetEmptyBuildStopRetryValid(),
+            "EmptyResult followed only by Session Stop retries closes every document before the absolute deadline") ? 0 : 1;
     VtkAppHostSession session(GetCropSessionConfig());
     auto feature=std::make_shared<CropHostFeature>();
     auto probe=std::make_shared<ContextProbeFeature>();
@@ -1355,6 +1496,7 @@ int GetCropLifecycleFailCount()
         &&feature->GetHistory().documentId==0&&session.DetachFeature(*feature)&&session.DetachFeature(*probe)&&session.Stop();
     if(!GetCaseResult(closedOk,"CloseDocument destroys history only after release and remains detachable"))return 1;
     int failures=0;
+    failures+=GetCaseResult(GetEmptyBuildStopRetryValid(),"EmptyResult followed only by Session Stop retries closes every document before the absolute deadline")?0:1;
     failures+=GetCaseResult(GetMultiDocumentLifecycle(),"Multi-document Create/Activate preserves independent roots, results, replays and release ownership")?0:1;
     failures+=GetCaseResult(GetMultiDocumentLifecycle(true),"Dependent document Roots close before their producer scopes and render inputs")?0:1;
     failures+=GetCaseResult(GetMeshRootLifecycle(),"Mesh Root uses real dual-view preview, repeated publication and allocation-aware Return/Close")?0:1;

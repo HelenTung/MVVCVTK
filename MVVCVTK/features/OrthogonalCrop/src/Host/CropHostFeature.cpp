@@ -1483,7 +1483,17 @@ bool CropHostFeature::Impl::Document::StartSourcePreview(bool isDocument,bool is
         });
     const bool closesDocument=isDocument
         && m_documentCommands.at(m_pendingDocumentRequest).request.action==CropDocumentAction::CloseDocument;
-    const bool offline=isDocument&&(!m_isEditingDocument||(closesDocument&&!ownsPrimary));
+    // Stop 已归还视图镜像时，重建 Root 视图事务会在下次 Stop 被取消。
+    // 必须确认文档原绑定的每个目标端口仍有效且输入已清空；未知状态不算归还。
+    const bool closesClearedViews=closesDocument && m_allowInputRestore
+        && binding.target==std::optional<DataRevisionRef>{source.data->self}
+        && m_views && !m_activeViewIds.empty()
+        && std::all_of(m_activeViewIds.begin(),m_activeViewIds.end(),[this](const auto& viewId) {
+            const auto port=m_views->GetFeaturePort(viewId);
+            const auto stamp=port?port->GetRenderInputStamp():std::optional<RenderInputStamp>{};
+            return stamp && !GetDataRevisionRefValid(stamp->dataRevision);
+        });
+    const bool offline=isDocument&&(!m_isEditingDocument||(closesDocument&&!ownsPrimary)||closesClearedViews);
     // During Feature/Session shutdown an already closed consumer document may
     // leave this producer's result as the primary input. Restore its Root through
     // the real view transaction; a still-live consumer Root Reader blocks it.
