@@ -100,7 +100,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     navigation->addWidget(new QLabel("任务参数", this),1);
     m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setElideMode(Qt::ElideNone); m_parameterTabs->setDrawBase(false);
     m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("选择操作");
-    m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_moreOperations->setMenu(m_operationMenu);
+    m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_operationMenu->setToolTipsVisible(true); m_moreOperations->setMenu(m_operationMenu);
     navigation->addWidget(m_moreOperations); layout->addLayout(navigation);
     m_taskTabs=new QTabBar(this);m_taskTabs->setObjectName("businessTaskTabs");m_taskTabs->setExpanding(false);m_taskTabs->setUsesScrollButtons(true);
     const QStringList taskGroups=m_name=="Roi"?QStringList{"创建","编辑","运算","管理"}:m_name=="Alignment"?QStringList{"对齐","几何拟合","表面偏差","尺寸/形位","报告"}:QStringList{};
@@ -695,6 +695,11 @@ void ModulePanel::RefreshWorkflow()
             reason = "当前任务未完成，请等待或取消。";
         if (!allowed.contains(name) && reason.isEmpty()) reason = "请在左侧选择适用对象，或先完成所需步骤。";
         if (closing) reason = "测试会话正在关闭。";
+        // 控件投影已有历史计数；不改变请求入口和 Feature 的拒绝规则。
+        if(reason.isEmpty() && m_name=="Roi") {
+            if(name=="Undo" && state["undoCount"].toInt()==0) reason="先应用当前选择或运算，形成历史后再撤销。";
+            else if(name=="Redo" && state["redoCount"].toInt()==0) reason="当前没有可重做的历史；先撤销一次已应用的选择或运算。";
+        }
         if (m_requirements.count(name)) {
             m_requirements.at(name)->setText(reason); m_requirements.at(name)->setVisible(!reason.isEmpty());
         }

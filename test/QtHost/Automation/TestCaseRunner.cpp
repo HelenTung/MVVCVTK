@@ -2694,6 +2694,11 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
     const auto checkObserved=[&](const QJsonObject& step) {
         auto* panel=window.GetModule(GetText(step,"module"));
         const auto expected=GetResolved(step["expectState"],results).toObject();QJsonObject actual;
+        if(step.contains("expectActionEnabled") && !step["expectActionEnabled"].isObject())
+            throw std::invalid_argument("expectActionEnabled 必须是动作名到布尔值的对象");
+        const auto expectedActions=step["expectActionEnabled"].toObject();
+        for(auto it=expectedActions.begin();it!=expectedActions.end();++it)
+            Check(it.value().isBool() && panel->findChild<QPushButton*>("action_"+it.key()),"scripted availability names an actual command and a boolean");
         const auto observedValue=[&](const QString& key){
             QJsonValue value=actual;for(const auto& part:key.split('.'))value=value.toObject().value(part);return value;
         };
@@ -2701,10 +2706,16 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const bool settled=Wait([&] {
             panel->Observe();actual=panel->GetObservedState();
             for(auto it=expected.begin();it!=expected.end();++it)if(observedValue(it.key())!=it.value())return false;
+            for(auto it=expectedActions.begin();it!=expectedActions.end();++it) {
+                const auto* button=panel->findChild<QPushButton*>("action_"+it.key());
+                if(!button || button->isEnabled()!=it.value().toBool())return false;
+            }
             return true;
         },getWaitMilliseconds(step));
         if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
         for(auto it=expected.begin();it!=expected.end();++it)Check(observedValue(it.key())==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
+        for(auto it=expectedActions.begin();it!=expectedActions.end();++it)
+            Check(panel->findChild<QPushButton*>("action_"+it.key())->isEnabled()==it.value().toBool(),("actual command availability matches "+it.key()).toStdString().c_str());
         if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
     };
     for (const auto value : script["steps"].toArray()) {
